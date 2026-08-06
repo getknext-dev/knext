@@ -52,12 +52,14 @@ import {
   discoverDocSources,
   discoverInstallUrl,
   extractContainerImages,
+  fetchInstallBundle,
   findAllInstallUrls,
   findEnvCredentialLeaks,
   findFileCredentialLeaks,
   findRequestCredentialLeaks,
   findUrlDriftFindings,
   parseImageRef,
+  runAnonymousInstallCheck,
   splitYamlDocuments,
   verifyAnonymousPull,
   verifyBundle,
@@ -230,6 +232,27 @@ describe('extractContainerImages — every workload image, not the one we sought
     }
   });
 
+  it('extracts an image carrying a trailing YAML comment', () => {
+    // Legal YAML, and emitted by kustomize/kubebuilder. The old `(\S+)\s*$`
+    // anchor silently dropped it — with two images and a comment on one, the
+    // commented image was never pulled and NOTHING reported the undercount.
+    const doc = [
+      'apiVersion: apps/v1',
+      'kind: Deployment',
+      'spec:',
+      '  containers:',
+      `  - image: ghcr.io/o/r:v1@${DIGEST} # pinned by release job`,
+    ].join('\n');
+    expect(extractContainerImages(doc).map((i) => i.image)).toEqual([`ghcr.io/o/r:v1@${DIGEST}`]);
+  });
+
+  it('does not truncate a reference containing a `#` with no preceding space', () => {
+    // `a#b` is part of the scalar in YAML; only ` #` starts a comment. Stripping
+    // on a bare `#` would corrupt the reference rather than drop it.
+    const doc = ['kind: Pod', 'spec:', '  containers:', '  - image: reg.io/a#b:v1'].join('\n');
+    expect(extractContainerImages(doc).map((i) => i.image)).toEqual(['reg.io/a#b:v1']);
+  });
+
   it('parses the REAL published bundle shape', () => {
     // A fixture that drifts from reality proves nothing, so the shape asserted
     // here is the one `operator-latest/install.yaml` actually ships: many docs,
@@ -254,6 +277,80 @@ describe('verifyBundle — a bundle that is not an install bundle is a finding',
     expect(findings.map((f) => f.reason)).toContain('not-a-bundle');
   });
 
+  it('reports an image in a kind the extractor does NOT scan, rather than skipping it', async () => {
+    // `WORKLOAD_KINDS` is an enumeration, so it will always be behind reality —
+    // a Knative `Service` is the obvious near-term gap. The trade is acceptable
+    // only if an unrecognised kind carrying an image is a FINDING; a silent skip
+    // is the same family of undercount as the trailing-comment bug.
+    const body = [
+      'apiVersion: apiextensions.k8s.io/v1',
+      'kind: CustomResourceDefinition',
+      'metadata:',
+      '  name: x',
+      '---',
+      'apiVersion: serving.knative.dev/v1',
+      'kind: Service',
+      'spec:',
+      '  containers:',
+      `  - image: ghcr.io/o/r:v1@${DIGEST}`,
+    ].join('\n');
+    const { findings } = await verifyBundle(body, { api: async () => ({}) });
+    expect(findings.map((f) => f.reason)).toContain('unscanned-kind-image');
+  });
+
+  it('does not report the CRD schema `image:` property as an unscanned kind', async () => {
+    // The false positive that would make the rule above unusable: the real
+    // bundle's CRD declares a PROPERTY named `image` with no value.
+    const body = [
+      'apiVersion: apiextensions.k8s.io/v1',
+      'kind: CustomResourceDefinition',
+      'spec:',
+      '  properties:',
+      '    image:',
+      '      description: The bundled Next.js image',
+      '      type: string',
+      '---',
+      'apiVersion: apps/v1',
+      'kind: Deployment',
+      'spec:',
+      '  containers:',
+      `  - image: ghcr.io/o/r:v1@${DIGEST}`,
+    ].join('\n');
+    const { findings } = await verifyBundle(body, {
+      api: async () => ({ stage: 'manifest', status: 200, digest: DIGEST }),
+    });
+    expect(findings).toEqual([]);
+  });
+
+  it('VERIFIES every image, not just the first — a bad second image is reported', async () => {
+    // `extractContainerImages` returning both images is not the same claim as
+    // `verifyBundle` pulling both. The mutation prover found the gap: slicing
+    // the consumer to one image left the whole spec green, so the second image
+    // could have gone unpulled with nothing to say so.
+    const body = [
+      'apiVersion: apiextensions.k8s.io/v1',
+      'kind: CustomResourceDefinition',
+      'metadata:',
+      '  name: x',
+      '---',
+      'apiVersion: apps/v1',
+      'kind: Deployment',
+      'spec:',
+      '  containers:',
+      `  - image: ghcr.io/o/first:v1@${DIGEST}`,
+      `  - image: ghcr.io/o/second:v1@${DIGEST}`,
+    ].join('\n');
+    const { images, findings } = await verifyBundle(body, {
+      api: async ({ repository }: { repository: string }) =>
+        repository.endsWith('second')
+          ? { stage: 'token', status: 401 }
+          : { stage: 'manifest', status: 200, digest: DIGEST },
+    });
+    expect(images).toHaveLength(2);
+    expect(findings.map((f) => f.reason)).toEqual(['anonymous-token-denied']);
+    expect(findings[0].repository).toBe('o/second');
+  });
+
   it('reports a bundle missing the CRD it is supposed to install', async () => {
     const body = [
       'apiVersion: apps/v1',
@@ -266,6 +363,125 @@ describe('verifyBundle — a bundle that is not an install bundle is a finding',
       api: async () => ({ status: 200, digest: DIGEST }),
     });
     expect(findings.map((f) => f.reason)).toContain('no-crd');
+  });
+});
+
+// ── 2b. the DOWNLOAD half — the door F1 found open ───────────────────────────
+
+describe('fetchInstallBundle — a 200 is not automatically a success', () => {
+  const ok =
+    (body: string, status = 200) =>
+    async () => ({
+      status,
+      text: async () => body,
+    });
+
+  it('returns the body and no finding for a real 200', async () => {
+    const result = await fetchInstallBundle('https://x/install.yaml', {
+      fetchImpl: ok('kind: Deployment\n'),
+    });
+    expect(result.findings).toEqual([]);
+    expect(result.body).toBe('kind: Deployment\n');
+  });
+
+  it('a ZERO-LENGTH 200 is a finding, not a success', async () => {
+    // The #586 shape exactly: a release job that uploads a 0-byte
+    // `dist/install.yaml`, or a CDN empty-200. It downloads "fine" and installs
+    // nothing.
+    const result = await fetchInstallBundle('https://x/install.yaml', {
+      fetchImpl: ok(''),
+    });
+    expect(result.findings.map((f) => f.reason)).toContain('empty-bundle');
+  });
+
+  it('reports a non-200', async () => {
+    const result = await fetchInstallBundle('https://x/install.yaml', {
+      fetchImpl: ok('Not Found', 404),
+    });
+    expect(result.findings.map((f) => f.reason)).toContain('install-url-not-200');
+  });
+
+  it('a thrown fetch is a finding and yields a NULL body, never an empty string', async () => {
+    // `null` vs `''` is the whole bug: with `''` as the sentinel for "threw",
+    // a zero-length 200 became indistinguishable from unreachable — and the
+    // caller skipped bundle verification for both.
+    const result = await fetchInstallBundle('https://x/install.yaml', {
+      fetchImpl: async () => {
+        throw new Error('getaddrinfo ENOTFOUND github.com');
+      },
+    });
+    expect(result.findings.map((f) => f.reason)).toContain('install-url-unreachable');
+    expect(result.body).toBeNull();
+  });
+});
+
+describe('runAnonymousInstallCheck — the download half is actually verified', () => {
+  const clean = { env: {}, home: '/nowhere', exists: () => false };
+
+  it('a zero-length 200 ALSO runs bundle verification — no vacuous green', async () => {
+    // The regression guard for F1. `empty-bundle` alone would still pass under
+    // the old `if (body !== '')` sentinel, because that finding comes from the
+    // fetch half. `not-a-bundle` can ONLY appear if `verifyBundle` ran, so
+    // asserting both is what makes the skipped-verification bug visible.
+    const { findings } = await runAnonymousInstallCheck(REPO_ROOT, {
+      ...clean,
+      fetchImpl: async () => ({ status: 200, text: async () => '' }),
+      http: async () => {
+        throw new Error('the registry must not be reached — there are no images');
+      },
+    });
+    const reasons = findings.map((f) => f.reason);
+    expect(reasons).toContain('empty-bundle');
+    expect(reasons).toContain('not-a-bundle');
+  });
+
+  it('an all-whitespace 200 is caught the same way', async () => {
+    const { findings } = await runAnonymousInstallCheck(REPO_ROOT, {
+      ...clean,
+      fetchImpl: async () => ({ status: 200, text: async () => '   \n\n  \n' }),
+      http: async () => {
+        throw new Error('unreachable');
+      },
+    });
+    expect(findings.map((f) => f.reason)).toContain('not-a-bundle');
+  });
+
+  it('an unreachable fetch reports exactly one download finding and no bundle noise', async () => {
+    const { findings } = await runAnonymousInstallCheck(REPO_ROOT, {
+      ...clean,
+      fetchImpl: async () => {
+        throw new Error('ECONNRESET');
+      },
+      http: async () => {
+        throw new Error('unreachable');
+      },
+    });
+    const reasons = findings.map((f) => f.reason);
+    expect(reasons).toContain('install-url-unreachable');
+    // A null body means there is nothing to say about the bundle; inventing a
+    // `not-a-bundle` on top would be a second finding for one cause.
+    expect(reasons).not.toContain('not-a-bundle');
+  });
+
+  it('a healthy bundle with a pullable image yields no findings at all', async () => {
+    const body = [
+      'apiVersion: apiextensions.k8s.io/v1',
+      'kind: CustomResourceDefinition',
+      'metadata:',
+      '  name: nextapps.apps.kn-next.dev',
+      '---',
+      'apiVersion: apps/v1',
+      'kind: Deployment',
+      'spec:',
+      '  containers:',
+      `  - image: ghcr.io/o/r:v1@${DIGEST}`,
+    ].join('\n');
+    const { findings } = await runAnonymousInstallCheck(REPO_ROOT, {
+      ...clean,
+      fetchImpl: async () => ({ status: 200, text: async () => body }),
+      api: async () => ({ stage: 'manifest', status: 200, digest: DIGEST }),
+    });
+    expect(findings, JSON.stringify(findings)).toEqual([]);
   });
 });
 
@@ -624,6 +840,104 @@ describe('anonymous-install-nightly.yml — the runner must have no credential',
     expect(auditAnonymousWorkflowJob(mutated).findings.join(' ')).toMatch(
       /allowlist|not permitted/i,
     );
+  });
+
+  // ── F2: a credential does not have to be inside the job block ──────────────
+
+  it('flags a workflow-level `env:` carrying a secret, BEFORE `jobs:`', () => {
+    // The audit used to start at `jobs:`, so everything above it was invisible.
+    // A workflow-level `env:` is inherited by every job — it is the most likely
+    // place an inherited credential actually comes from.
+    const mutated = read(WORKFLOW).replace(
+      'permissions: {}\n',
+      'permissions: {}\nenv:\n  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n',
+    );
+    expect(mutated).not.toBe(read(WORKFLOW));
+    expect(auditAnonymousWorkflowJob(mutated).findings.join(' ')).toMatch(/env|secret/i);
+  });
+
+  it('flags a workflow-level `env:` placed AFTER the `jobs:` block', () => {
+    // YAML mappings are unordered, so "before `jobs:`" is not where a preamble
+    // scan can stop. Trailing top-level keys are equally in scope.
+    const mutated = `${read(WORKFLOW)}\nenv:\n  GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}\n`;
+    expect(auditAnonymousWorkflowJob(mutated).findings.join(' ')).toMatch(/env|secret/i);
+  });
+
+  it('flags a workflow-level `defaults:` block', () => {
+    const mutated = read(WORKFLOW).replace(
+      'permissions: {}\n',
+      'permissions: {}\ndefaults:\n  run:\n    shell: bash -e {0}\n',
+    );
+    expect(auditAnonymousWorkflowJob(mutated).findings.join(' ')).toMatch(/defaults/i);
+  });
+
+  it('flags a job-level `container:` (its `credentials:` are a registry login)', () => {
+    const mutated = read(WORKFLOW).replace(
+      '    permissions: {}',
+      '    permissions: {}\n    container:\n      image: ghcr.io/o/r:v1\n      credentials:\n        username: x\n        password: y',
+    );
+    expect(mutated).not.toBe(read(WORKFLOW));
+    expect(auditAnonymousWorkflowJob(mutated).findings.join(' ')).toMatch(/container/i);
+  });
+
+  it('does NOT flag the alert job, which legitimately holds a token', () => {
+    // Scope discipline: the alert job performs no fetch and needs `issues: write`
+    // plus `${{ github.token }}`. If auditing "outside the job" swept it in, the
+    // guard would be permanently red and would get deleted.
+    expect(auditAnonymousWorkflowJob(read(WORKFLOW)).findings).toEqual([]);
+  });
+
+  // ── F3: the checkout credential ────────────────────────────────────────────
+
+  it('requires `persist-credentials: false` on checkout', () => {
+    // The default writes `AUTHORIZATION: basic <token>` into the workspace
+    // `.git/config`, keyed on the github.com PREFIX — so every github.com request
+    // made from the workspace carries the runner's token. Invisible to
+    // findFileCredentialLeaks (it is not one of the auth stores) and to the
+    // expression allowlist (nothing is interpolated).
+    const mutated = read(WORKFLOW).replace('          persist-credentials: false\n', '');
+    expect(mutated).not.toBe(read(WORKFLOW));
+    expect(auditAnonymousWorkflowJob(mutated).findings.join(' ')).toMatch(/persist-credentials/i);
+  });
+
+  it.each([
+    ['token'],
+    ['ssh-key'],
+    ['fetch-depth'],
+    ['submodules'],
+  ])('flags the `with:` input %s, which no denylist enumerated', (key) => {
+    // `token` alone is NOT a sufficient assertion — the prover proved it:
+    // rewriting the allowlist as `if (key === 'token')` kept the spec green.
+    // The forbidden set has to be "everything not permitted", so the keys that
+    // demonstrate it are the ones nobody would have thought to ban.
+    const mutated = read(WORKFLOW).replace(
+      '          persist-credentials: false',
+      `          persist-credentials: false\n          ${key}: x`,
+    );
+    expect(mutated).not.toBe(read(WORKFLOW));
+    expect(auditAnonymousWorkflowJob(mutated).findings.join(' ')).toMatch(/with|allowlist/i);
+  });
+
+  it('flags `persist-credentials: true` as loudly as its absence', () => {
+    // Anchored on the 10-space `with:` input, NOT the bare string: the workflow's
+    // own comment quotes `persist-credentials: false` verbatim, and an unanchored
+    // replace rewrites the COMMENT while leaving the real input untouched — a
+    // mutation that proves nothing.
+    const mutated = read(WORKFLOW).replace(
+      '          persist-credentials: false',
+      '          persist-credentials: true',
+    );
+    expect(mutated).not.toBe(read(WORKFLOW));
+    expect(auditAnonymousWorkflowJob(mutated).findings.join(' ')).toMatch(/persist-credentials/i);
+  });
+
+  it('a COMMENT quoting the required input does not satisfy the guard', () => {
+    // The defect this nearly shipped with: the audit read the raw text, so the
+    // workflow's explanatory comment — which quotes `persist-credentials: false`
+    // — kept the guard green after the real input was deleted.
+    const mutated = read(WORKFLOW).replace('          persist-credentials: false\n', '');
+    expect(mutated).toContain('persist-credentials: false'); // still in the comment
+    expect(auditAnonymousWorkflowJob(mutated).findings.join(' ')).toMatch(/persist-credentials/i);
   });
 
   it('flags a `gh auth login` in a run step', () => {

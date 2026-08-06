@@ -86,8 +86,11 @@ const MUTATIONS = [
   [
     SCRIPT,
     'only the FIRST image is checked, so a second one is never pulled',
-    '  return found;',
-    '  return found.slice(0, 1);',
+    // Anchored on the CONSUMER, not on `return found;` inside the extractor:
+    // `findUnscannedKindImages` ends with the same line, and the harness refuses
+    // an anchor that occurs twice rather than silently mutating the wrong one.
+    '  const images = extractContainerImages(body);',
+    '  const images = extractContainerImages(body).slice(0, 1);',
   ],
   [
     SCRIPT,
@@ -118,6 +121,71 @@ const MUTATIONS = [
     'a body that is not a bundle at all (a 404 page) passes',
     '  if (kinds.length === 0) {',
     '  if (false) {',
+  ],
+  // ── the download half (F1). Every one of these defends behaviour that used to
+  //    live inside the `c8 ignore`d CLI, where no mutation could reach it — which
+  //    is exactly why the empty-200 bug was there and nothing else was.
+  [
+    SCRIPT,
+    'F1 THE BUG: a zero-length 200 skips bundle verification entirely',
+    '  let images = [];\n  if (download.body !== null) {',
+    "  let images = [];\n  if (download.body !== null && download.body !== '') {",
+  ],
+  [
+    SCRIPT,
+    'a zero-length 200 stops being a finding of its own',
+    '  } else if (body.length === 0) {',
+    '  } else if (false) {',
+  ],
+  // ── the workflow audit's scope (F2/F3) ───────────────────────────────────
+  [
+    SCRIPT,
+    'F2: the workflow-level key scan is disarmed (a top-level `env:` goes unseen)',
+    '    if (!key || !FORBIDDEN_TOP_LEVEL_KEYS.includes(key)) continue;',
+    '    if (true) continue;',
+  ],
+  [
+    SCRIPT,
+    'a job-level `container:`/`services:` registry login goes unseen',
+    "    if (new RegExp(`^ {4}${key}:`, 'm').test(block)) {",
+    '    if (false) {',
+  ],
+  [
+    SCRIPT,
+    'F3: `persist-credentials: false` stops being required on checkout',
+    "  if (block.includes('actions/checkout') && !/persist-credentials:\\s*false/.test(block)) {",
+    '  if (false) {',
+  ],
+  [
+    SCRIPT,
+    'the `with:` allowlist becomes a denylist of one literal',
+    '    if (!ALLOWED_JOB_WITH_KEYS.has(key)) {',
+    "    if (key === 'token') {",
+  ],
+  [
+    SCRIPT,
+    'the audit reads raw text, so a COMMENT can satisfy the required-input guard',
+    "  const lines = blankYamlComments(workflowText).split('\\n');",
+    "  const lines = workflowText.split('\\n');",
+  ],
+  // ── the extractor's undercounts (F4) ─────────────────────────────────────
+  [
+    SCRIPT,
+    'F4: an image with a trailing YAML comment is silently dropped',
+    "  const withoutComment = line.replace(/\\s+#.*$/, '');",
+    '  const withoutComment = line;',
+  ],
+  [
+    SCRIPT,
+    'an image in an unscanned kind is silently skipped instead of reported',
+    '  for (const unscanned of findUnscannedKindImages(body)) {',
+    '  for (const unscanned of []) {',
+  ],
+  [
+    WORKFLOW,
+    'the workflow drops `persist-credentials: false` and keeps the runner token',
+    '          persist-credentials: false',
+    '          persist-credentials: true',
   ],
   [
     OTHER_DOC,

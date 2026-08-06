@@ -65,11 +65,21 @@
  * of it. That is why the bundle is scanned rather than parsed with `yaml`.
  *
  * Usage: node scripts/verify-anonymous-install.mjs [--root <repo-root>] [--scrub]
- * Exits 1 on any finding. `--scrub` removes credential-shaped variables from the
- * process environment BEFORE anything else runs, and reports every name it
- * removed; it exists so a developer's own shell does not make a local run
- * permanently red. CI does NOT pass it — the workflow's run command is pinned by
- * an allowlist precisely so `--scrub` cannot be used to disarm the check there.
+ * Exits 1 on any finding.
+ *
+ * `--scrub` removes credential-shaped variables from the process ENVIRONMENT
+ * before anything else runs, and reports every name it removed.
+ *
+ * It does NOT — and cannot — remove the on-disk auth stores. A developer logged
+ * in to ghcr or `gh` still gets `auth-store-present` findings and still exits 1,
+ * measured, on a real `HOME`. That is correct rather than a shortcoming: the
+ * check cannot honestly claim to have run anonymously on a machine holding those
+ * credentials, and a flag that silenced the finding would be manufacturing the
+ * green this whole gate exists to refuse. So `--scrub` narrows local noise; it
+ * does not make a logged-in machine pass.
+ *
+ * CI does NOT pass it — the workflow's run command is pinned by an allowlist
+ * precisely so `--scrub` cannot be used to disarm the check there.
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
@@ -186,11 +196,14 @@ export function discoverDocSources(repoRoot) {
  * docs page carries a URL the check then walks; on its own that is exactly the
  * defect shape this repo keeps shipping — proving the sanctioned site HAS the
  * thing without proving nothing unsanctioned does. The URL is currently repeated
- * ten times across seven files (the docs site, `docs/QUICKSTART.md`,
- * `docs/COMPATIBILITY.md`, the operator READMEs, two runbooks), and a reader who
- * lands on any of them follows THAT one. If one is updated and the others are
- * not, the check would keep walking the one healthy copy and report green while
- * most readers hit a 404.
+ * ten times across seven files — `apps/docs/content/docs/install.mdx`,
+ * `docs/QUICKSTART.md` (twice), `docs/COMPATIBILITY.md`, `docs/RELEASING.md`,
+ * `docs/runbooks/upgrade.md`, `packages/kn-next-operator/README.md` (twice) and
+ * `packages/kn-next-operator/docs/RUNBOOK-first-publish.md` (twice) — and a
+ * reader who lands on any of them follows THAT one. If one is updated and the
+ * others are not, the check would keep walking the one healthy copy and report
+ * green while most readers hit a 404. The count is not asserted anywhere on
+ * purpose: the walk is derived, so a new file is covered without an edit here.
  *
  * @returns {{ url: string, file: string, line: number }[]}
  */
@@ -297,20 +310,62 @@ function documentKind(docText) {
  *
  * @returns {{ image: string, line: number, kind: string }[]}
  */
+function imageOnLine(line) {
+  // Strip a trailing YAML comment FIRST. `# pinned by release job` after a
+  // reference is legal YAML and kustomize/kubebuilder emit it; the original
+  // `(\S+)\s*$` anchor silently dropped the whole entry, so with two images and
+  // a comment on one the commented image was never pulled and nothing reported
+  // the undercount.
+  //
+  // The `\s+` before `#` is required, not cosmetic: only a SPACE-preceded `#`
+  // opens a comment in YAML, so `reg.io/a#b:v1` is one scalar. Stripping on a
+  // bare `#` would corrupt the reference instead of dropping it — a worse bug
+  // than the one being fixed.
+  const withoutComment = line.replace(/\s+#.*$/, '');
+  const match = withoutComment.match(/^\s*(?:-\s+)?image:\s*(\S+)\s*$/);
+  if (!match) return undefined;
+  const value = match[1].replace(/^["']|["']$/g, '');
+  // A block scalar or an anchor is not a reference; neither is a bare word with
+  // no registry, repository separator, tag or digest.
+  if (/^[|>&*]/.test(value)) return undefined;
+  if (!/[:/@]/.test(value)) return undefined;
+  return value;
+}
+
 export function extractContainerImages(bundleText) {
   const found = [];
   for (const doc of splitYamlDocumentsWithOffsets(bundleText)) {
     const kind = documentKind(doc.text);
     if (!kind || !WORKLOAD_KINDS.has(kind)) continue;
     for (const [index, line] of doc.text.split('\n').entries()) {
-      const match = line.match(/^\s*(?:-\s+)?image:\s*(\S+)\s*$/);
-      if (!match) continue;
-      const value = match[1].replace(/^["']|["']$/g, '');
-      // A block scalar or an anchor is not a reference; neither is a bare word
-      // with no registry, repository separator, tag or digest.
-      if (/^[|>&*]/.test(value)) continue;
-      if (!/[:/@]/.test(value)) continue;
-      found.push({ image: value, line: doc.startLine + index, kind });
+      const image = imageOnLine(line);
+      if (image) found.push({ image, line: doc.startLine + index, kind });
+    }
+  }
+  return found;
+}
+
+/**
+ * Images sitting in a document kind `extractContainerImages` does NOT scan.
+ *
+ * `WORKLOAD_KINDS` is an enumeration, so it is permanently one step behind
+ * reality — a Knative `Service` is the obvious near-term gap, and this repo
+ * deploys Knative Services for a living. Enumerating is still the right call
+ * (selecting by kind is what excludes the CRD's `image` schema property), but
+ * "prefer scanning to enumerating" applies: the trade is only acceptable if an
+ * unrecognised kind carrying an image is a FINDING rather than a silent skip.
+ *
+ * No false positive on the real bundle's CRD: its `image` is a schema PROPERTY
+ * with no value, and `imageOnLine` requires a reference-shaped one.
+ */
+export function findUnscannedKindImages(bundleText) {
+  const found = [];
+  for (const doc of splitYamlDocumentsWithOffsets(bundleText)) {
+    const kind = documentKind(doc.text);
+    if (!kind || WORKLOAD_KINDS.has(kind)) continue;
+    for (const [index, line] of doc.text.split('\n').entries()) {
+      const image = imageOnLine(line);
+      if (image) found.push({ image, line: doc.startLine + index, kind });
     }
   }
   return found;
@@ -548,6 +603,18 @@ export async function verifyBundle(body, options = {}) {
     });
   }
 
+  for (const unscanned of findUnscannedKindImages(body)) {
+    findings.push({
+      reason: 'unscanned-kind-image',
+      ref: unscanned.image,
+      line: unscanned.line,
+      detail:
+        `a \`${unscanned.kind}\` document carries a container image, and that kind is not in ` +
+        'WORKLOAD_KINDS — so nothing verified it is anonymously pullable. Add the kind to ' +
+        'WORKLOAD_KINDS rather than leaving the image unchecked.',
+    });
+  }
+
   const images = extractContainerImages(body);
   if (images.length === 0) {
     findings.push({
@@ -711,25 +778,102 @@ export const ALLOWED_JOB_RUN_COMMANDS = new Set(['node scripts/verify-anonymous-
 export const ALLOWED_JOB_EXPRESSIONS = new Set([]);
 
 /**
- * Audit the job that performs the anonymous fetch.
+ * The only `with:` keys the anonymous job's steps may set.
+ *
+ * `persist-credentials` is on it because it must be set to `false`, not because
+ * it is optional — see the required-key rule below. Everything else, notably
+ * `token:`, is refused: handing checkout a token is the simplest way to put a
+ * credential in the workspace.
+ */
+export const ALLOWED_JOB_WITH_KEYS = new Set(['persist-credentials']);
+
+/**
+ * Workflow-level keys that leak into every job, and so may not appear at all.
+ *
+ * `env:` is the important one: a workflow-level `env:` is inherited by every
+ * job, which makes it the most likely place an inherited credential actually
+ * comes from — and it is *outside* the job block, where the original audit could
+ * not see it. `defaults:` can rewrite how every `run:` is executed.
+ */
+export const FORBIDDEN_TOP_LEVEL_KEYS = ['env', 'defaults'];
+
+/**
+ * Job-level keys that introduce a registry login by construction.
+ *
+ * `container:` and `services:` both take a `credentials:` mapping — a registry
+ * username/password for pulling the image the job runs in. A job that has one is
+ * not anonymous, whatever its steps do.
+ */
+export const FORBIDDEN_JOB_KEYS = ['container', 'services'];
+
+/**
+ * Audit the job that performs the anonymous fetch, AND the workflow scope
+ * around it.
  *
  * The job is FOUND by the script it runs, not named by a constant: if the check
  * is moved to another job the audit follows it, and if two jobs run it the
  * ambiguity is a finding rather than a silently-audited first match. `jobId`
  * being empty is itself the non-vacuity signal the guard test asserts on.
  *
- * The alert job is deliberately out of scope — it legitimately holds
- * `issues: write` and a `GH_TOKEN`, and it performs no fetch. Moving the fetch
- * into it would move the audit with it, so the exemption cannot be abused.
+ * SCOPE, and why it is wider than the job block. The first version started at
+ * `jobs:` and stopped at the next column-0 key, so everything outside the job
+ * was invisible — and a workflow-level `env:` carrying `${{ secrets.GITHUB_TOKEN }}`
+ * scored zero findings whether it was written before or after `jobs:`. That made
+ * the "the empty expression allowlist catches `secrets.X` and `github.token`
+ * without naming either" claim true only *inside* the job block, which is not
+ * where an inherited credential comes from. Top-level keys are now audited too,
+ * and because YAML mappings are unordered the scan cannot stop at `jobs:` — it
+ * takes every column-0 key wherever it sits in the file.
+ *
+ * The ALERT job stays out of scope. It legitimately holds `issues: write` and
+ * `${{ github.token }}`, and it performs no fetch — sweeping it in would leave
+ * the guard permanently red, which is how a guard gets deleted. The exemption
+ * cannot be abused: the audit locates the job by the script it runs, so moving
+ * the fetch into the alert job moves the audit with it.
  *
  * @returns {{ jobId: string, findings: string[] }}
  */
+/**
+ * Blank out YAML comments, preserving line count and indentation.
+ *
+ * Not optional. Caught while writing this: the required-input check below was
+ * satisfied by the workflow's own explanatory COMMENT, which quotes
+ * `persist-credentials: false` verbatim — so deleting the real `with:` input
+ * left the guard GREEN. That is the #680 failure again (a raw scan satisfied by
+ * an occurrence in a comment or a string), and a guard a comment can satisfy is
+ * decoration.
+ *
+ * Only a SPACE-preceded `#` opens a comment in YAML, matching `imageOnLine`.
+ */
+function blankYamlComments(text) {
+  return text
+    .split('\n')
+    .map((line) => (/^\s*#/.test(line) ? '' : line.replace(/\s+#.*$/, '')))
+    .join('\n');
+}
+
 export function auditAnonymousWorkflowJob(workflowText) {
   const findings = [];
-  const lines = workflowText.split('\n');
+  const lines = blankYamlComments(workflowText).split('\n');
 
   const jobsAt = lines.findIndex((line) => /^jobs:\s*$/.test(line));
   if (jobsAt === -1) return { jobId: '', findings: ['no `jobs:` block in the workflow'] };
+
+  // ── workflow scope: every column-0 key, wherever it appears ───────────────
+  for (const [index, line] of lines.entries()) {
+    const key = line.match(/^([\w.-]+):/)?.[1];
+    if (!key || !FORBIDDEN_TOP_LEVEL_KEYS.includes(key)) continue;
+    // Collect the block so the finding can quote what was actually set.
+    const block = [];
+    for (const next of lines.slice(index + 1)) {
+      if (/^\S/.test(next) && next.trim() !== '') break;
+      block.push(next);
+    }
+    findings.push(
+      `the workflow declares a top-level \`${key}:\` block, which every job inherits — the ` +
+        `anonymous check must inherit nothing:${block.length > 0 ? `\n${block.join('\n')}` : ''}`,
+    );
+  }
 
   /** Job id -> its block text, split on the 2-space-indented keys under `jobs:`. */
   const blocks = new Map();
@@ -752,7 +896,11 @@ export function auditAnonymousWorkflowJob(workflowText) {
   if (owners.length !== 1) {
     return {
       jobId: '',
+      // The workflow-scope findings above are kept, not discarded: "the job could
+      // not be located" and "the workflow leaks an env var" are both true, and
+      // dropping one because the other fired hides half the report.
       findings: [
+        ...findings,
         `expected exactly 1 job running verify-anonymous-install.mjs, found ${owners.length}`,
       ],
     };
@@ -770,6 +918,16 @@ export function auditAnonymousWorkflowJob(workflowText) {
     );
   }
 
+  // 1b. container/services — a `credentials:` mapping is a registry login.
+  for (const key of FORBIDDEN_JOB_KEYS) {
+    if (new RegExp(`^ {4}${key}:`, 'm').test(block)) {
+      findings.push(
+        `job \`${jobId}\` declares \`${key}:\`, which takes a \`credentials:\` registry ` +
+          'username/password — a job that has one is not anonymous whatever its steps do',
+      );
+    }
+  }
+
   // 2. actions — allowlist.
   for (const match of block.matchAll(/^\s*(?:-\s+)?uses:\s*(\S+)/gm)) {
     const action = match[1].split('@')[0];
@@ -779,6 +937,41 @@ export function auditAnonymousWorkflowJob(workflowText) {
           `(${[...ALLOWED_JOB_ACTIONS].join(', ')})`,
       );
     }
+  }
+
+  // 2b. `with:` inputs — allowlist, plus the one input that is REQUIRED.
+  //
+  // `actions/checkout` defaults to `persist-credentials: true`, which writes
+  // `AUTHORIZATION: basic <token>` into the workspace `.git/config` keyed on the
+  // github.com PREFIX — so every github.com request made from the workspace
+  // carries the runner's token. Harmless for a `fetch`-only implementation, but
+  // the credential half of this check exists precisely so a future
+  // implementation that DOES shell out cannot inherit one quietly, and this is
+  // exactly the credential it would inherit: invisible to
+  // `findFileCredentialLeaks` (`.git/config` is not one of the auth stores) and
+  // invisible to the expression allowlist (nothing is interpolated).
+  // `action-pin-resolution-nightly.yml` and `mutation-prover-nightly.yml` both
+  // set it false already; this makes it enforced rather than remembered.
+  for (const match of block.matchAll(/^\s+([\w.-]+):\s*(.*)$/gm)) {
+    // Only lines inside a `with:` mapping — 10-space indent under a step's
+    // `with:` in this file's layout. Matched structurally rather than by name so
+    // a new input is caught, not just the ones already thought of.
+    if (!/^ {10}[\w.-]+:/.test(match[0])) continue;
+    const key = match[1];
+    if (!ALLOWED_JOB_WITH_KEYS.has(key)) {
+      findings.push(
+        `job \`${jobId}\` passes the step input \`${key}\`, which is not on the \`with:\` ` +
+          `allowlist (${[...ALLOWED_JOB_WITH_KEYS].join(', ')}) — a token handed to an action ` +
+          'is a credential the check must not hold',
+      );
+    }
+  }
+  if (block.includes('actions/checkout') && !/persist-credentials:\s*false/.test(block)) {
+    findings.push(
+      `job \`${jobId}\` checks out without \`persist-credentials: false\` — the default leaves ` +
+        'the runner token in the workspace `.git/config`, where every github.com request from ' +
+        'the workspace picks it up',
+    );
   }
 
   // 3. run commands — allowlist. A block scalar (`run: |`) is not on it.
@@ -814,6 +1007,141 @@ export function auditAnonymousWorkflowJob(workflowText) {
   }
 
   return { jobId, findings };
+}
+
+// ── the download, and the whole check ────────────────────────────────────────
+
+/**
+ * Download the documented bundle. Returns `{ body, status, findings }`.
+ *
+ * `body` is `null` — never `''` — when the fetch THREW. That distinction is the
+ * entire point of this function existing separately, and getting it wrong was a
+ * real bug in this file: an empty string was the sentinel for "unreachable", so
+ * a **zero-length 200** was indistinguishable from a thrown fetch, and the
+ * caller's `if (body !== '')` skipped bundle verification for both. A 0-byte
+ * `install.yaml` therefore produced ZERO findings and exit 0 — a vacuous green on
+ * precisely the "release nobody can install" case this gate exists to catch, and
+ * a second door around the `not-a-bundle` / `no-crd` / `no-images` checks.
+ *
+ * It survived because the download half lived inside the `c8 ignore`d CLI and no
+ * spec or mutation touched it. Everything else here is defended by a mutation;
+ * this half was not, which is why it had the bug.
+ *
+ * A zero-length 200 is now its own finding as well as failing `verifyBundle`:
+ * the two answer different triage questions ("the asset is empty" vs "the body
+ * is not a bundle"), and on this path more information is better than less.
+ */
+/**
+ * The narrow slice of `fetch` this check actually uses.
+ *
+ * Declared rather than inferred from the `= fetch` default. Inferring gives the
+ * full `typeof fetch`, which forces every test double to fabricate the fourteen
+ * `Response` members the check never touches — and a double that elaborate stops
+ * being readable as a statement of what the code depends on. Two fields is the
+ * real contract.
+ *
+ * @typedef {(url: string, init?: object) => Promise<{ status: number, text: () => Promise<string> }>} BundleFetch
+ */
+
+/**
+ * @param {string} url
+ * @param {{ fetchImpl?: BundleFetch }} [options]
+ */
+export async function fetchInstallBundle(url, { fetchImpl = fetch } = {}) {
+  const findings = [];
+  let response;
+  let body;
+  try {
+    response = await fetchImpl(url, {
+      headers: { accept: '*/*', 'user-agent': USER_AGENT },
+      redirect: 'follow',
+    });
+    body = await response.text();
+  } catch (error) {
+    return {
+      body: null,
+      status: 0,
+      findings: [
+        {
+          reason: 'install-url-unreachable',
+          ref: url,
+          message: error instanceof Error ? error.message : String(error),
+          detail: 'unreachable is a FAILURE, never a pass',
+        },
+      ],
+    };
+  }
+
+  if (response.status !== 200) {
+    findings.push({
+      reason: 'install-url-not-200',
+      ref: url,
+      status: response.status,
+      detail: 'the URL the docs publish does not serve the bundle to an anonymous client',
+    });
+  } else if (body.length === 0) {
+    findings.push({
+      reason: 'empty-bundle',
+      ref: url,
+      status: 200,
+      detail:
+        'the documented URL returned 200 with a ZERO-LENGTH body — a release job that uploaded ' +
+        'an empty asset, or a CDN empty-200. It downloads cleanly and installs nothing.',
+    });
+  }
+  return { body, status: response.status, findings };
+}
+
+/**
+ * The whole check, as one testable function.
+ *
+ * Extracted out of `main()` deliberately. `main()` is `c8 ignore`d and no spec
+ * could reach it, which is exactly where the empty-200 bug lived: the orchestration
+ * — *which* findings get collected, and *whether* the bundle half runs at all —
+ * is behaviour, and unreachable behaviour is unmutatable behaviour.
+ *
+ * Every collaborator is injectable so the spec stays offline and so a developer's
+ * real `HOME` cannot change the verdict under test.
+ */
+export async function runAnonymousInstallCheck(root, options = {}) {
+  const {
+    fetchImpl,
+    http,
+    api,
+    env = process.env,
+    home = homedir(),
+    exists = existsSync,
+  } = options;
+
+  const findings = [];
+
+  // The context, checked BEFORE the network work: a run that inherited a
+  // credential has already failed, whatever the registry says next.
+  findings.push(...findEnvCredentialLeaks(env));
+  findings.push(...findFileCredentialLeaks({ env, home, exists }));
+
+  const documented = discoverInstallUrl(root);
+  const allUrls = findAllInstallUrls(root);
+  findings.push(...findUrlDriftFindings(documented.url, allUrls));
+
+  const recorder = createRecordingHttp(http);
+  const download = await fetchInstallBundle(documented.url, { fetchImpl });
+  findings.push(...download.findings);
+
+  // `!== null`, NOT `!== ''`. An empty body is a body: it has to reach
+  // `verifyBundle` so `not-a-bundle` can fire. Only a THROWN fetch yields null,
+  // and there is genuinely nothing to say about a bundle that never arrived —
+  // adding `not-a-bundle` on top of `install-url-unreachable` would be two
+  // findings for one cause.
+  let images = [];
+  if (download.body !== null) {
+    const bundle = await verifyBundle(download.body, { http: recorder.http, api });
+    images = bundle.images;
+    findings.push(...bundle.findings);
+  }
+
+  findings.push(...findRequestCredentialLeaks(recorder.requests));
+  return { documented, allUrls, download, images, findings, requests: recorder.requests };
 }
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
@@ -857,65 +1185,27 @@ async function main(argv) {
     );
   }
 
-  const findings = [];
-
-  // The context, checked BEFORE the network work: a run that inherited a
-  // credential has already failed, whatever the registry says next.
-  findings.push(...findEnvCredentialLeaks(process.env));
-  findings.push(...findFileCredentialLeaks({ env: process.env }));
-
-  let documented;
+  let result;
   try {
-    documented = discoverInstallUrl(root);
+    result = await runAnonymousInstallCheck(root);
   } catch (error) {
+    // Only `discoverInstallUrl` throws here, and it does so exactly when there
+    // is no documented path left to walk. That is fatal, not a finding.
     console.error(`FATAL: ${error.message}`);
     return 1;
   }
+  const { documented, allUrls, download, images, findings, requests } = result;
+
   console.log(`documented install URL (from ${documented.file}:${documented.line}):`);
   console.log(`  ${documented.url}`);
-
-  // The other half: every OTHER published copy must name the same URL, or a
-  // reader who lands on one of them follows a URL nothing checked.
-  const allUrls = findAllInstallUrls(root);
   console.log(`  ${allUrls.length} published copy/copies across the tree\n`);
-  findings.push(...findUrlDriftFindings(documented.url, allUrls));
 
-  const { http, requests } = createRecordingHttp();
-  let body;
-  try {
-    const response = await fetch(documented.url, {
-      headers: { accept: '*/*', 'user-agent': USER_AGENT },
-      redirect: 'follow',
-    });
-    if (response.status !== 200) {
-      findings.push({
-        reason: 'install-url-not-200',
-        ref: documented.url,
-        status: response.status,
-        detail: 'the URL the docs publish does not serve the bundle to an anonymous client',
-      });
-    }
-    body = await response.text();
-  } catch (error) {
-    findings.push({
-      reason: 'install-url-unreachable',
-      ref: documented.url,
-      message: error instanceof Error ? error.message : String(error),
-      detail: 'unreachable is a FAILURE, never a pass',
-    });
-    body = '';
-  }
-
-  if (body !== '') {
-    const bundle = await verifyBundle(body, { http });
-    console.log(`bundle: ${body.length} bytes, ${bundle.images.length} workload image(s)`);
-    for (const image of bundle.images) {
+  if (download.body !== null) {
+    console.log(`bundle: ${download.body.length} bytes, ${images.length} workload image(s)`);
+    for (const image of images) {
       console.log(`  install.yaml:${image.line}  [${image.kind}]  ${image.image}`);
     }
-    findings.push(...bundle.findings);
   }
-
-  findings.push(...findRequestCredentialLeaks(requests));
   console.log(`\n${requests.length} registry request(s) made, all unauthenticated by construction`);
 
   if (findings.length === 0) {

@@ -35,7 +35,7 @@ name: Anonymous install path (nightly)
 #
 # THE `release` TRIGGER IS THE POINT, not an extra. Publishing is the moment the
 # answer can change — a fresh tag, a fresh image, a package whose visibility
-# defaults to private. Waiting until 05:11 the next morning to learn that the
+# defaults to private. Waiting until 06:11 the next morning to learn that the
 # release nobody can install is a whole day of a broken front door.
 #
 # AN UNREACHABLE REGISTRY OR RELEASE IS A FAILURE, NEVER A PASS — the ruling this
@@ -51,9 +51,9 @@ name: Anonymous install path (nightly)
 # caught on the day it lands.
 
 on:
-  # 05:11 UTC — offset from the action-pin (05:11 is taken; this is 06:11) and
-  # image-pin (05:41) nightlies so the supply-chain signals do not queue behind
-  # each other and a red one is attributable at a glance.
+  # 06:11 UTC — offset from the action-pin (05:11) and image-pin (05:41)
+  # nightlies so the three supply-chain signals do not queue behind each other
+  # and a red one is attributable at a glance.
   schedule:
     - cron: '11 6 * * *'
   # Publishing is when the answer changes. See the header.
@@ -70,8 +70,16 @@ jobs:
     timeout-minutes: 10
     permissions: {}
     steps:
+      # `persist-credentials: false` is REQUIRED, not tidiness. The default
+      # writes `AUTHORIZATION: basic <token>` into the workspace `.git/config`
+      # keyed on the github.com PREFIX, so every github.com request made from the
+      # workspace carries the runner's token — including the release-asset
+      # download this job exists to make ANONYMOUSLY. `auditAnonymousWorkflowJob`
+      # enforces it; the sibling nightlies set it for the same measured reason.
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # No setup-node and no install step: the script is dependency-free ESM on
       # the runner's built-in Node, so a check auditing the supply chain cannot
