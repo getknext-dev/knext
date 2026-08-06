@@ -31,6 +31,18 @@
  * nothing.
  *
  * Usage:  node scripts/mutation-prove-ledger-completeness.mjs
+ *
+ * ── OPERATIONAL NOTE FOR ANYONE MUTATING BY HAND ─────────────────────────────
+ * Run the TARGETED spec, never the whole suite, while a mutation is live.
+ * `tests/mutation-residue-scan.test.ts` scans every tracked file for the
+ * harness's residue marker — which a live mutation, by design, carries. A
+ * whole-suite run therefore reports that spec as failing no matter what the
+ * mutation did, and a mutation that reds for the wrong reason proves exactly
+ * as much as one that stays green for the wrong reason: nothing. This prover is
+ * immune because it runs `<spec> -t <name>`; a manual check must do the same, or
+ * exclude `tests/mutation-residue-scan.test.ts` from the run (vitest's
+ * `--exclude` flag, with a glob ending in that filename — not written out here
+ * because the glob contains a comment terminator).
  */
 
 import { dirname, resolve } from 'node:path';
@@ -214,6 +226,22 @@ const MUTATIONS = [
     anchor:
       "    ? readJsonObject(fingerprintFile, fingerprintFile.split('/').pop() ?? fingerprintFile)",
     replacement: "    ? { value: JSON.parse(readFileSync(fingerprintFile, 'utf8')), error: null }",
+  },
+  {
+    // Round 4's survivor, and the fourth instance of the same shape — this one
+    // reaching into a NEIGHBOURING job. Row 19 below disarms the `if:` CLAUSE;
+    // this disarms the `needs:` MEMBERSHIP that makes the clause resolvable at
+    // all. Unlisted means absent from the `needs` context, so every comparison
+    // is silently false and `RED_SHARD_DETAIL` resolves empty — and since
+    // `shard-ledger` exits 0 on an ordinary red night, it is the ONLY red job
+    // on the damaged-fingerprint / damaged-summary / zero-test-floor /
+    // cancelled-ledger paths. No alert would be filed on any of them.
+    label: 'the alert stops LISTING shard-ledger in `needs:` (the clause becomes unresolvable)',
+    file: WORKFLOW,
+    spec: WORKFLOW_SPEC,
+    test: 'every `needs.<job>` reference is BACKED by',
+    anchor: '    needs: [build-next, deploy-tests, shard-ledger]',
+    replacement: '    needs: [build-next, deploy-tests]',
   },
   {
     label: 'the red alert stops covering CANCELLED (silence becomes success again)',

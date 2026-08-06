@@ -1547,11 +1547,17 @@ jobs:
       # was NOT: for a present-but-malformed file `existsSync` is true and
       # `JSON.parse` threw first, so that branch was reachable only when the
       # file was ABSENT, and a truncated fingerprint killed the script before
-      # the ledger was written. Both causes are now handled by
-      # scripts/compat-run-ledger.mjs's shared guarded reader, reported with
-      # DIFFERENT messages (unreadable vs not recorded), and neither can stop
-      # the ledger being written. A comment describing protection that does not
-      # exist is worse than no comment — this one is now true.
+      # the ledger was written.
+      #
+      # SCOPE OF THE FIX, stated precisely (round 4 nit): the guarantee is
+      # INSIDE scripts/compat-run-ledger.mjs. Once that script runs, neither an
+      # absent nor a damaged fingerprint can stop the ledger being written, and
+      # the two are reported differently — a damaged one adds an "UNREADABLE"
+      # error ON TOP OF the "no fingerprint recorded" floor, so both messages
+      # appear and the cause is unambiguous. It says nothing about THIS step: if
+      # this download fails (build-next uploaded no fingerprint artifact at all)
+      # the job stops here, the ledger step never runs, and nothing is written.
+      # That is the pre-existing, deliberate behaviour described above.
       - name: Download the compat-window fingerprint
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:

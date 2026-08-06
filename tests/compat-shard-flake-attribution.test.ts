@@ -543,6 +543,74 @@ function auditLedgerJob(): string[] {
   return problems;
 }
 
+/**
+ * Every `needs.<job>` reference in the workflow, and every one that is not
+ * backed by membership in that job's `needs:`.
+ *
+ * JOB-AGNOSTIC on purpose. The guards above are organised around one job id, so
+ * every claim about a NEIGHBOURING job fell back to a bare text match with no
+ * presence discipline — which is exactly how the `nightly-red-alert` ->
+ * `shard-ledger` edge went unguarded. This sweeps all jobs and every string in
+ * them (`if:`, `env:`, `with:`, `run:`, `outputs:` alike, via a structural
+ * walk), so the next cross-job reference is covered without anyone adding an
+ * assertion for it.
+ *
+ * `needs.<job>.outputs.<key>` is checked to the same depth: the producing job
+ * must DECLARE that output, or the consumer quotes an empty string.
+ */
+function auditCrossJobReferences(): {
+  references: Array<{ from: string; to: string }>;
+  problems: string[];
+} {
+  const problems: string[] = [];
+  const references: Array<{ from: string; to: string }> = [];
+  const jobs = (DOC.jobs ?? {}) as Record<string, WorkflowJob & Job>;
+
+  for (const [jobId, jobDef] of Object.entries(jobs)) {
+    // Structural walk rather than a slice of the file: `needs.x` in a step's
+    // `env:` is the same defect as in the job's `if:`, and a text slice would
+    // have to know where every one of them can appear.
+    const text = JSON.stringify(jobDef);
+    const declared = new Set<string>(
+      typeof jobDef.needs === 'string'
+        ? [jobDef.needs]
+        : Array.isArray(jobDef.needs)
+          ? (jobDef.needs as unknown[]).map(String)
+          : [],
+    );
+
+    for (const m of text.matchAll(/needs\.([A-Za-z0-9_-]+)\./g)) {
+      const to = m[1] as string;
+      if (!references.some((r) => r.from === jobId && r.to === to)) {
+        references.push({ from: jobId, to });
+      }
+      if (!(to in jobs)) {
+        problems.push(
+          `job \`${jobId}\` references \`needs.${to}\`, which is not a job in this workflow — the expression is silently always false`,
+        );
+        continue;
+      }
+      if (!declared.has(to)) {
+        problems.push(
+          `job \`${jobId}\` references \`needs.${to}\` but does NOT list it in \`needs:\` — an unlisted job is absent from the needs context, so every comparison against it evaluates false and any \`outputs\` reference resolves to an empty string. Nothing errors; the wiring just stops working`,
+        );
+      }
+    }
+
+    for (const m of text.matchAll(/needs\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)/g)) {
+      const [, to, key] = m as unknown as [string, string, string];
+      const producer = jobs[to];
+      if (producer && !(key in ((producer.outputs ?? {}) as Record<string, unknown>))) {
+        problems.push(
+          `job \`${jobId}\` reads \`needs.${to}.outputs.${key}\`, but job \`${to}\` declares no such output — the consumer quotes an empty string`,
+        );
+      }
+    }
+  }
+
+  return { references, problems };
+}
+
 /** The declared shard total, as the workflow states it — parsed, never assumed. */
 function declaredShardTotal(): number {
   const raw = DOC.env?.COMPAT_SHARD_TOTAL;
@@ -713,6 +781,45 @@ describe('#695 — the ledger reconciles against the declared shard total', () =
     // exactly as the step-level key does. The job-level form is already
     // rejected by LEDGER_JOB_KEYS; this is the same boundary one level up.
     expect(Object.keys(DOC)).not.toContain('defaults');
+  });
+
+  it('every `needs.<job>` reference is BACKED by that job being in `needs:` — all jobs, derived', () => {
+    // ────────────────────────────────────────────────────────────────────────
+    // Round 4's survivor, and the fourth instance of one shape: the VALUE of
+    // `nightly-red-alert`'s `if:` was asserted, and never that `shard-ledger`
+    // is IN its `needs:`. An unlisted job is absent from the `needs` context, so
+    // every `needs.shard-ledger.*` comparison silently evaluates false and
+    // `RED_SHARD_DETAIL` resolves to an empty string. Dropping it from the list
+    // left the whole file green; there is no actionlint gate here to catch it.
+    //
+    // That is not a nit. `shard-ledger` exits 0 on an ORDINARY red night (a
+    // failing shard is red in `deploy-tests`, not here), so it is the ONLY red
+    // job on exactly the paths rounds 2-3 made reachable: a damaged fingerprint
+    // with sixteen green shards, a damaged summary, the zero-test floor, and the
+    // cancelled-ledger case. On each of those `build-next` and `deploy-tests`
+    // are `success` — so with the reference unbacked, NO alert issue is filed at
+    // all.
+    //
+    // THE STRUCTURAL FIX, not just this instance: `auditLedgerJob()` is scoped
+    // to one job id, so anything asserted about a NEIGHBOURING job fell back to
+    // a bare text match and inherited none of the presence discipline. This
+    // audit is job-agnostic and DERIVED — it sweeps every job in the workflow,
+    // so a cross-job reference added next month is covered tonight.
+    // ────────────────────────────────────────────────────────────────────────
+    const { references, problems } = auditCrossJobReferences();
+
+    // Non-vacuity, twice over: a regex that matched nothing would make this
+    // pass over an empty set, and a workflow refactor that moved the alert's
+    // wiring elsewhere would too.
+    expect(references.length, 'the needs.<job> scan matched nothing').toBeGreaterThan(2);
+    expect(references).toEqual(
+      expect.arrayContaining([
+        { from: 'nightly-red-alert', to: 'shard-ledger' },
+        { from: 'nightly-red-alert', to: 'deploy-tests' },
+      ]),
+    );
+
+    expect(problems, problems.join('\n')).toEqual([]);
   });
 
   it('the red alert fires when the ledger or the shards are CANCELLED, not only failed', () => {
