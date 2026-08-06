@@ -120,6 +120,17 @@ export interface GateTeethAudit {
   teeth: Record<ToothId, string[]>;
   /** Findings about the script's exit status reaching the step at all. */
   exitReachesStep: string[];
+  /**
+   * Findings about code OUTSIDE the audited branches deciding the verdict.
+   *
+   * Every other field in this audit judges a branch in isolation, which is
+   * precisely the assumption three measured disarms broke: a shell `exit 0` in
+   * the prelude, a `process.exit(0)` before the branches, and an enclosing
+   * `if (s.runtime === "node") { … }` around them. Each left all seven other
+   * assertions green, `branchesFound` still reporting three teeth located, and
+   * the real step exiting 0 on a red bun-lane summary.
+   */
+  escapeHatches: string[];
   /** Which teeth were actually LOCATED — non-vacuity evidence. */
   branchesFound: ToothId[];
   /** Shell `if` blocks walked, and JS `if` statements parsed. */
@@ -168,7 +179,13 @@ export function failOnRedGateScript(workflowPath: string): { run: string | null;
 interface ShellIfBlock {
   condition: string;
   body: string;
+  /** Inclusive line indices the block spans, used to locate exits OUTSIDE it. */
+  startLine: number;
+  endLine: number;
 }
+
+/** `if …; then …; fi` all on one line. */
+const ONE_LINE_IF = /^\s*if\b(?<cond>.*?);\s*then\b(?<body>.*?);?\s*fi\s*;?\s*$/;
 
 /**
  * Every `if` block in a POSIX-ish shell script, with the body of its THEN arm.
@@ -179,9 +196,18 @@ interface ShellIfBlock {
  * `exit 1` in the ELSE arm fires on the opposite condition, and counting it
  * would let "the summary is present" be the thing that fails the job.
  *
- * Honest scope: this is a line walker, not a shell parser. It is enough for the
- * gate's four-line prelude, and it is applied only to that prelude — never to
- * the embedded JavaScript, which gets a real AST.
+ * The ONE-LINE form is handled explicitly, and that is not cosmetic. Without it
+ * the walker opened a block at `if …; then exit 0; fi` and never found a
+ * closing `fi` on its own line, so it swallowed every following block —
+ * including the missing-summary branch, which then read as GONE. Measured: an
+ * injected one-line escape hatch reddened tooth 1 for a PARSE ARTIFACT rather
+ * than for the hatch, and a red for the wrong reason proves exactly as much as
+ * a green for the wrong reason.
+ *
+ * Honest scope: this is a line walker, not a shell parser (see #702 for the
+ * quoting half of the same limitation). It is enough for the gate's short
+ * prelude, and it is applied only to that prelude — never to the embedded
+ * JavaScript, which gets a real AST.
  */
 export function shellIfBlocks(script: string): ShellIfBlock[] {
   const lines = script.split('\n');
@@ -189,6 +215,18 @@ export function shellIfBlocks(script: string): ShellIfBlock[] {
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i] as string;
     if (!/^\s*if\b/.test(line)) continue;
+
+    const inline = ONE_LINE_IF.exec(line);
+    if (inline?.groups) {
+      blocks.push({
+        condition: (inline.groups.cond ?? '').trim(),
+        body: (inline.groups.body ?? '').trim(),
+        startLine: i,
+        endLine: i,
+      });
+      continue;
+    }
+
     const condition = line
       .replace(/^\s*if\b/, '')
       .replace(/;\s*then\s*$/, '')
@@ -207,7 +245,7 @@ export function shellIfBlocks(script: string): ShellIfBlock[] {
       if (depth === 1 && /^\s*(else|elif)\b/.test(inner)) inThenArm = false;
       if (inThenArm) body.push(inner);
     }
-    blocks.push({ condition, body: body.join('\n') });
+    blocks.push({ condition, body: body.join('\n'), startLine: i, endLine: j });
     i = j;
   }
   return blocks;
@@ -224,8 +262,16 @@ export function shellIfBlocks(script: string): ShellIfBlock[] {
  *
  * Both are adversarial camouflage rather than a plausible disarm — nobody
  * weakens a gate by wrapping its exit in a false conditional — so the cost of
- * modelling them is not paid. What IS checked properly on both halves is the
- * polarity of the branch that owns the tooth.
+ * modelling them is not paid.
+ *
+ * THAT DISMISSAL APPLIES ONLY INSIDE THE BRANCH, and saying so is the point:
+ * an earlier version of this note stopped at "camouflage, not a plausible
+ * disarm" and left a reader believing the axis was covered. A guard placed
+ * OUTSIDE the branch is entirely plausible — `if [ "$KNEXT_RUNTIME" = bun ];
+ * then exit 0; fi` in the prelude is how somebody would naturally write "skip
+ * this on the other lane" — and it disarms all three teeth while every
+ * per-branch check stays green. That axis is covered separately, by
+ * `escapeHatches` below.
  */
 function shellFailingExit(body: string): { found: boolean; zero: boolean } {
   let found = false;
@@ -259,7 +305,7 @@ export function embeddedNodeProgram(script: string): string | null {
 }
 
 /** Every `IfStatement` in a parsed program, at any depth. */
-function jsIfStatements(program: string): ts.IfStatement[] {
+function jsIfStatements(program: string): { sourceFile: ts.SourceFile; ifs: ts.IfStatement[] } {
   const sf = ts.createSourceFile(
     'gate.js',
     program,
@@ -273,6 +319,25 @@ function jsIfStatements(program: string): ts.IfStatement[] {
     ts.forEachChild(node, walk);
   };
   walk(sf);
+  return { sourceFile: sf, ifs: found };
+}
+
+/** Every `process.exit(…)` call in a program, wherever it sits. */
+function allExitCalls(node: ts.Node): ts.CallExpression[] {
+  const found: ts.CallExpression[] = [];
+  const walk = (n: ts.Node) => {
+    if (
+      ts.isCallExpression(n) &&
+      ts.isPropertyAccessExpression(n.expression) &&
+      ts.isIdentifier(n.expression.expression) &&
+      n.expression.expression.text === 'process' &&
+      n.expression.name.text === 'exit'
+    ) {
+      found.push(n);
+    }
+    ts.forEachChild(n, walk);
+  };
+  walk(node);
   return found;
 }
 
@@ -608,8 +673,11 @@ export function shardSummary(overrides: Fixture = {}, meta: ShardMeta = NODE_LAN
  * case has to drop both — dropping only `truncated` would be a shape the
  * pipeline never produces.
  */
-export function untruncatableSummary(meta: ShardMeta = NODE_LANE): Fixture {
-  const { expectedTotal: _e, truncated: _t, ...rest } = shardSummary({}, meta);
+export function untruncatableSummary(
+  meta: ShardMeta = NODE_LANE,
+  overrides: Fixture = {},
+): Fixture {
+  const { expectedTotal: _e, truncated: _t, ...rest } = shardSummary(overrides, meta);
   return rest;
 }
 
@@ -740,6 +808,12 @@ function polarityProblems(cond: ts.Expression, cases: PolarityCase[]): string[] 
  * of modelling them is not paid here — but the limit is written down rather
  * than left for someone to discover. The POLARITY of the branch that OWNS the
  * tooth is checked properly, above; it is only nested dead code that is not.
+ *
+ * AND THE LIMIT IS ABOUT THE INSIDE OF THE BRANCH ONLY. Code BEFORE the branch
+ * (`if (s.runtime !== "node") process.exit(0);`) or AROUND it (both branches
+ * wrapped in an enclosing `if`) decides the verdict without this function ever
+ * seeing it — measured green across every per-branch assertion. `escapeHatches`
+ * covers that axis; do not read this paragraph as covering it.
  */
 function directFailingExit(node: ts.Node): { found: boolean; zero: boolean } {
   /** Every `process.exit(…)` status found, `null` where it is absent. */
@@ -789,12 +863,28 @@ export function auditFailOnRedGateTeeth(workflowPath: string): GateTeethAudit {
   };
   const branchesFound: ToothId[] = [];
   const exitReachesStep: string[] = [];
+  const escapeHatches: string[] = [];
+  /** The `if` statement that OWNS each JS tooth, kept for the escape-hatch sweep. */
+  const jsOwners = new Map<ToothId, ts.IfStatement>();
 
   const { run, problem } = failOnRedGateScript(workflowPath);
   if (run === null) {
     for (const id of TOOTH_IDS) teeth[id].push(`${TOOTH_LABEL[id]}: ${problem}`);
     exitReachesStep.push(problem);
-    return { teeth, exitReachesStep, branchesFound, shellIfBlocks: 0, jsIfStatements: 0 };
+    // `escapeHatches` is deliberately NOT populated here. "There is no step" is
+    // not a hatch OUTSIDE the branches — it is the absence of the whole gate,
+    // which every tooth and the non-vacuity check already report. Adding it
+    // would make the escape-hatch assertion red for a defect it does not own,
+    // and this PR exists because one assertion standing in for another hides
+    // what actually broke.
+    return {
+      teeth,
+      exitReachesStep,
+      escapeHatches,
+      branchesFound,
+      shellIfBlocks: 0,
+      jsIfStatements: 0,
+    };
   }
 
   // ── the script's exit status must actually reach the step ─────────────────
@@ -887,6 +977,29 @@ export function auditFailOnRedGateTeeth(workflowPath: string): GateTeethAudit {
     }
   }
 
+  // ── ESCAPE HATCH (shell half) — an exit OUTSIDE the missing-summary branch ─
+  // Placed here, BEFORE the embedded-program lookup, for the same reason the
+  // swallow scan was moved up in round 3: a claim about the SHELL must not
+  // depend on the JS program being locatable. With it below the bail-out, a
+  // gate whose program had moved out of `node -e` reported no shell hatch at
+  // all.
+  //
+  // Reference-frame rule: with the missing-summary branch gone or ambiguous its
+  // own `exit 1` would read as the hatch, and tooth 1 already reds for that —
+  // one red standing in for another is what this PR exists to prevent.
+  const missingBlock = missing.length === 1 ? (missing[0] as ShellIfBlock) : undefined;
+  if (missingBlock) {
+    const shellLines = (nodeStart === -1 ? run : run.slice(0, nodeStart)).split('\n');
+    for (const [i, line] of shellLines.entries()) {
+      if (/^\s*#/.test(line)) continue;
+      if (!/\bexit\s+\d+/.test(line)) continue;
+      if (i >= missingBlock.startLine && i <= missingBlock.endLine) continue;
+      escapeHatches.push(
+        `a shell \`exit\` at prelude line ${i + 1} (\`${line.trim()}\`) sits OUTSIDE the missing-summary branch — the prelude runs BEFORE the program, so an early exit there disarms all three teeth at once, the shell one included. Measured: a two-line runtime check in the prelude makes the step exit 0 on a red Bun-lane shard`,
+      );
+    }
+  }
+
   // ── teeth 2 and 3: the branches inside the embedded node program ──────────
   const program = embeddedNodeProgram(run);
   if (program === null) {
@@ -896,13 +1009,14 @@ export function auditFailOnRedGateTeeth(workflowPath: string): GateTeethAudit {
     return {
       teeth,
       exitReachesStep,
+      escapeHatches,
       branchesFound,
       shellIfBlocks: blocks.length,
       jsIfStatements: 0,
     };
   }
 
-  const ifs = jsIfStatements(program);
+  const { sourceFile, ifs } = jsIfStatements(program);
 
   /** One JS tooth: locate its branch by the property it READS, then judge it. */
   const auditJsTooth = (
@@ -925,6 +1039,7 @@ export function auditFailOnRedGateTeeth(workflowPath: string): GateTeethAudit {
     }
     const owner = owners[0] as ts.IfStatement;
     branchesFound.push(id);
+    jsOwners.set(id, owner);
     for (const p of polarityCheck(owner.expression)) teeth[id].push(`${TOOTH_LABEL[id]} ${p}`);
     const exit = directFailingExit(owner.thenStatement);
     if (!exit.found) {
@@ -977,6 +1092,19 @@ export function auditFailOnRedGateTeeth(workflowPath: string): GateTeethAudit {
         why: 'not one of the selected tests produced a result',
       },
       {
+        // The state `e2e-summary.mjs:200-211` documents as reachable and warns
+        // "fails OPEN silently" on a harness-ref rename — and `NEXTJS_REF` is
+        // bumped routinely, the same premise the metadata variants rest on.
+        // Tooth 3 already models it (`untruncatableSummary`); tooth 2 did not,
+        // against this file's own rule that an axis worth guarding on one tooth
+        // is worth guarding on all of them. Two-point invariance cannot see
+        // `s.expectedTotal !== undefined &&` — both variants HAVE the key — so
+        // it takes a probe that does not.
+        summary: (m) => untruncatableSummary(m, { failed: 8 }),
+        fires: true,
+        why: 'eight real failures on a shard whose runner log carried no `total:` header, so it has no expectedTotal at all',
+      },
+      {
         summary: (m) => shardSummary({}, m),
         fires: false,
         why: 'a genuinely clean shard',
@@ -1004,9 +1132,53 @@ export function auditFailOnRedGateTeeth(workflowPath: string): GateTeethAudit {
     ]),
   );
 
+  // ── ESCAPE HATCHES: code OUTSIDE the audited branches ─────────────────────
+  // Everything above judges a branch in ISOLATION. Three disarms broke that
+  // assumption and were measured against the REAL step with a real red
+  // bun-lane summary (8 failures): each made it exit 0 where the baseline
+  // exits 1, printed no `::error::` line, and left the whole `tests/` suite
+  // byte-identical to baseline. This is run 28552585087 through a third door,
+  // and `if (s.runtime !== "node") process.exit(0);` is arguably a MORE natural
+  // way to write "skip the gate on the other lane" than the conjunct that is
+  // already caught.
+  // BOTH reference frames must exist first. These checks are defined relative
+  // to the audited branches — "outside" is meaningless without them — so when a
+  // branch is MISSING the check is skipped rather than run against a partial
+  // frame. Measured why: with tooth 2's branch renamed away, its own
+  // `process.exit(1)` became "an exit outside every owner" and this list
+  // reported it, so the escape-hatch assertion reddened for a defect tooth 2/3
+  // already owns. That is one red standing in for another, which is the exact
+  // thing #700 exists to prevent — and it is a cascade, not a finding. The
+  // missing branch still reds its own assertion, so nothing passes silently.
+  const ownerList = [...jsOwners.values()];
+  const insideAnOwner = (n: ts.Node) =>
+    ownerList.some(
+      (o) => n.getStart() >= o.thenStatement.getStart() && n.getEnd() <= o.thenStatement.getEnd(),
+    );
+
+  // (a) No exit in the program outside the two owning THEN arms.
+  if (jsOwners.size === 2) {
+    for (const call of allExitCalls(sourceFile)) {
+      if (insideAnOwner(call)) continue;
+      const { line } = sourceFile.getLineAndCharacterOfPosition(call.getStart());
+      escapeHatches.push(
+        `\`${call.getText()}\` at program line ${line + 1} is OUTSIDE both audited branches — it decides the verdict before either tooth is reached, and every per-branch check stays green while it does. Measured: \`if (s.runtime !== "node") process.exit(0);\` above the branches makes the step exit 0 on a red Bun-lane shard`,
+      );
+    }
+  }
+
+  // (b) Both owning `if`s must be TOP-LEVEL statements of the program.
+  for (const [id, owner] of jsOwners) {
+    if ((sourceFile.statements as readonly ts.Statement[]).includes(owner)) continue;
+    escapeHatches.push(
+      `${TOOTH_LABEL[id]} is NOT a top-level statement of the gate program — something encloses it, so an outer condition decides whether it runs at all. Measured: wrapping both result branches in \`if (s.runtime === "node") { … }\` fails the entire Bun lane open with every per-branch check green`,
+    );
+  }
+
   return {
     teeth,
     exitReachesStep,
+    escapeHatches,
     branchesFound,
     shellIfBlocks: blocks.length,
     jsIfStatements: ifs.length,

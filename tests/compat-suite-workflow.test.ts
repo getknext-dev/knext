@@ -2390,6 +2390,26 @@ describe('compat-suite fail-on-red gate — revocation teeth (test-e2e-deploy.ym
     expect(shape(shardSummary({}, bunMeta)), 'bun-lane probe').toEqual(shape(emitted.bun ?? {}));
   });
 
+  it('#700 no ESCAPE HATCH outside the audited branches can decide the verdict', () => {
+    // Every other #700 assertion judges a branch in ISOLATION, and three disarms
+    // broke that assumption — measured against the REAL step with a real red
+    // Bun-lane summary (8 failures, expectedTotal 45):
+    //
+    //   shell, in the prelude:  if [ "$KNEXT_RUNTIME" = "bun" ]; then exit 0; fi
+    //   JS, before the branch:  if (s.runtime !== "node") process.exit(0);
+    //   JS, around the branches: if (s.runtime === "node") { … }
+    //
+    //   baseline               exit=1, one red-shard ::error:: line
+    //   each of the three      exit=0, NO ::error:: line
+    //
+    // Under every one of them the whole `tests/` suite stayed byte-identical to
+    // baseline, `branchesFound` still reported all three teeth located, and
+    // `exitReachesStep` was empty. This is run 28552585087 through a third door,
+    // and the JS early-exit is arguably a MORE natural way to write "skip the
+    // gate on the other lane" than the conjunct that was already caught.
+    expect(teeth.escapeHatches, teeth.escapeHatches.join('\n')).toEqual([]);
+  });
+
   it('#700 the polarity probes cover BOTH runtime lanes', () => {
     // The step guards the node nightly and the Bun weekly through one
     // `deploy-tests` job (`KNEXT_RUNTIME`), so a probe set that only ever
@@ -2400,7 +2420,15 @@ describe('compat-suite fail-on-red gate — revocation teeth (test-e2e-deploy.ym
     expect(METADATA_VARIANTS.map((m) => m.runtime).sort()).toEqual(['bun', 'node']);
     // Every field must actually DIFFER across the variants, or the invariance
     // check is silently blind to the ones that do not.
-    for (const key of ['shard', 'ref', 'runtime', 'excluded', 'expectedTotal'] as const) {
+    // DERIVED, not enumerated. A hardcoded list is complete today and silently
+    // incomplete the day the emitter gains a metadata field: `shape()` would
+    // force it into `shardSummary`, and if both lanes happened to carry the same
+    // value the invariance property would be blind to it with nothing red.
+    const metadataFields = [...new Set(METADATA_VARIANTS.flatMap((m) => Object.keys(m)))].filter(
+      (k) => k !== 'runtimeVersion',
+    ) as Array<keyof (typeof METADATA_VARIANTS)[number]>;
+    expect(metadataFields.length, 'no metadata fields discovered').toBeGreaterThan(4);
+    for (const key of metadataFields) {
       expect(
         new Set(METADATA_VARIANTS.map((m) => m[key])).size,
         `\`${key}\` is identical across variants — invariance cannot be judged on it`,
