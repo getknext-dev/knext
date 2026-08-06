@@ -47,8 +47,12 @@ describe('the ci.yml blocking-gate mutation proof is runnable', () => {
   it('is non-vacuous: it covers every converted gate', () => {
     // Without this, emptying GATES would make the `it.each` blocks below pass
     // by iterating nothing — the same vacuity the prover itself guards against.
-    expect(GATES.length).toBeGreaterThanOrEqual(5);
+    expect(GATES.length).toBeGreaterThanOrEqual(6);
     expect(GATE_TEST_NAME.length).toBeGreaterThan(20);
+    // Every gate carries a name to select by — a gate whose `testName` fell
+    // through as undefined would make `vitest -t undefined` match nothing and
+    // exit 0, i.e. the silent no-op this file exists to prevent.
+    for (const gate of GATES) expect(gate.testName.length).toBeGreaterThan(20);
   });
 
   it('the test runner it launches actually starts, on a PATH it did not inherit', () => {
@@ -83,7 +87,7 @@ describe('the ci.yml blocking-gate mutation proof is runnable', () => {
     expect(`${res.stdout ?? ''}`).toMatch(/vitest\//);
   });
 
-  it.each(GATES)('$spec declares the assertion the proof selects by name', ({ spec }) => {
+  it.each(GATES)('$spec declares the assertion the proof selects by name', ({ spec, testName }) => {
     // `vitest -t <no match>` exits 0, so a rename would silently make the proof
     // a no-op. Asserted against the spec's DECLARED titles — code only, so a
     // rename reds here even when the old title survives in a comment or a string
@@ -92,9 +96,29 @@ describe('the ci.yml blocking-gate mutation proof is runnable', () => {
     const path = resolve(REPO_ROOT, spec);
     expect(existsSync(path), `${spec} is missing`).toBe(true);
     const titles = declaredTestTitles(readFileSync(path, 'utf8'));
+    // Per-gate since #677: the paths-scoped image-pin gate declares a name that
+    // says what it actually proves, so a single shared constant would either
+    // miss it or make the proof select on a false claim.
     expect(
-      titles.some((title) => title.includes(GATE_TEST_NAME)),
-      `${spec} declares no test whose name contains ${JSON.stringify(GATE_TEST_NAME)} — found: ${JSON.stringify(titles)}`,
+      titles.some((title) => title.includes(testName)),
+      `${spec} declares no test whose name contains ${JSON.stringify(testName)} — found: ${JSON.stringify(titles)}`,
     ).toBe(true);
+  });
+
+  it('every gate names a workflow that exists, and its job anchor occurs exactly once', () => {
+    // The prover mutates by the anchor `  <jobId>:\n`, which the harness refuses
+    // unless it occurs EXACTLY once. A gate pointed at the wrong workflow (or a
+    // renamed job) would take the proof offline at run time; this says so at PR
+    // time, which is the whole reason this file exists.
+    for (const gate of GATES) {
+      const wf = resolve(REPO_ROOT, gate.workflow);
+      expect(existsSync(wf), `${gate.workflow} is missing`).toBe(true);
+      const anchor = `  ${gate.jobId}:\n`;
+      const text = readFileSync(wf, 'utf8');
+      expect(
+        text.split(anchor).length - 1,
+        `\`${gate.jobId}\` must appear exactly once as a job key in ${gate.workflow}`,
+      ).toBe(1);
+    }
   });
 });

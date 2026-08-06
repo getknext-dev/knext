@@ -29,6 +29,7 @@ import {
   resolveTagDigest,
   verifyImagePin,
 } from '../scripts/verify-image-pins.mjs';
+import { auditBlockingGate } from './helpers/blocking-gate';
 
 const ROOT = resolve(import.meta.dirname, '..');
 
@@ -293,6 +294,44 @@ describe('the check is actually wired to run', () => {
     ).toEqual([]);
   });
 
+  it('every glob in the `paths:` filter has a DECIDED role — nothing inherited (#677)', () => {
+    // The other direction, and the half #677 asked for: the assertion above says
+    // the filter covers the walk; this says every glob IN it was decided on.
+    //
+    // Enumerated rather than scanned, deliberately, and the reason is a
+    // MEASUREMENT. The scanning form — "every glob must match a file the walk
+    // yields" — was written first and reported `benchmarks/**/*.yml` as dead
+    // scope. It is not: `discoverBenchmarkSources` accepts `/\.(ya?ml|sh)$/`
+    // (verify-image-pins.mjs:121), so a `.yml` benchmark WOULD be scanned; the
+    // repo simply has none today. A check that cannot tell "future scope the
+    // walk already accepts" from "scope the gate does not have" would have made
+    // deleting a correct glob the way back to green.
+    //
+    // THE DECISION, stated so a future edit re-takes it instead of inheriting
+    // it. Four globs mirror the checker's own walk (Go under the operator;
+    // `.yaml`/`.yml`/`.sh` under `benchmarks/`) — the walk defines what the gate
+    // protects, and the assertion above proves the mirror holds. Two are
+    // SELF-REFERENTIAL and match nothing the walk yields, on purpose: a diff to
+    // the checker must re-run the checker, and a diff to this workflow must run
+    // under the new trigger. Weakening either is otherwise done in a PR that
+    // never runs the thing it weakens.
+    //
+    // What this filter does NOT cover, recorded rather than left to be
+    // discovered: an image pinned anywhere else in the tree (an app manifest, a
+    // Dockerfile, another workflow). That is not a hole in the TRIGGER — the
+    // checker does not walk those either, so widening the filter alone would
+    // change nothing. It is a scope question for `discoverSources`, and the two
+    // move together by the assertion above.
+    expect(pr?.paths).toEqual([
+      'packages/kn-next-operator/**/*.go',
+      'benchmarks/**/*.yaml',
+      'benchmarks/**/*.yml',
+      'benchmarks/**/*.sh',
+      'scripts/verify-image-pins.mjs',
+      '.github/workflows/image-pin-resolution-nightly.yml',
+    ]);
+  });
+
   it('the coverage check can actually fail — the trigger match discriminates', () => {
     // Mutation-proof in-test, so the assertion above is not decoration: the
     // matcher must be able to answer BOTH ways, or `uncovered` is empty for the
@@ -318,22 +357,62 @@ describe('the check is actually wired to run', () => {
     expect(workflow).toMatch(/github\.event_name == 'schedule'/);
   });
 
-  it('nothing lets a finding pass: no continue-on-error, no `|| true`', () => {
-    // Both halves — the invocation must be present AND unable to be green while
-    // the script exits non-zero. A guard wired with `|| true` is decoration.
-    //
-    // TODO(#677): this line is the evadable TEXT form #661 eliminated elsewhere.
-    // It stays green under `continue-on-error: ${{ true }}`, a quoted `"if"` /
-    // `'if'` key, a `needs:` on a skippable job, and a zero-expansion
-    // `strategy:`. #672 exempted it from the parsed audit on the recorded
-    // grounds that this workflow is "scheduled, not `pull_request`" — MEASURED
-    // FALSE: it carries `pull_request:` under a `paths:` filter
-    // (`.github/workflows/image-pin-resolution-nightly.yml:55-56`), so this is a
-    // live instance on a PR-triggered workflow, not a latent one. The exemption
-    // survives only because a paths-scoped run is not the UNCONDITIONAL gate
-    // `auditBlockingGate` certifies; converting it is #677's job.
-    expect(workflow).not.toMatch(/continue-on-error:\s*true/);
+  it('nothing lets a finding pass: the checker is not wired with `|| true`', () => {
+    // The shell half, which is a property of the `run:` TEXT and has no parsed
+    // equivalent: `node …verify-image-pins.mjs || true` exits 0 whatever the
+    // script found. The YAML half — can this job be skipped, unfailed, or
+    // conditioned off — moved to the assertion below, because asking it as text
+    // is the #661 defect: `not.toMatch(/continue-on-error:\s*true/)` was
+    // MEASURED green under all five disarms on this very workflow.
+    expect(workflow).toMatch(/node scripts\/verify-image-pins\.mjs/);
     expect(workflow).not.toMatch(/verify-image-pins\.mjs[^\n]*\|\|/);
+  });
+
+  it('runs on every PR that can introduce a pin and its failure fails the run (#677)', () => {
+    // The parsed audit, replacing the evadable text form (#661/#677). Measured
+    // before converting, via the byte-snapshot harness: the text guard stayed
+    // GREEN under ALL FIVE disarms — `"if": false`, `'if': false`,
+    // `continue-on-error: ${{ true }}`, a `needs:` on a skippable job, and a
+    // zero-expansion `strategy:`. It was a live #661 instance, not a latent one,
+    // because this workflow DOES run on pull requests.
+    //
+    // `allowPathsFilter` is the one deliberate relaxation, and it is not a
+    // weakening dressed up as a mode: this gate is `paths:`-scoped ON PURPOSE
+    // (an unscoped one would put anonymous, IP-rate-limited Docker Hub
+    // resolution in front of every merge, and a flaky gate trains people to
+    // bypass it). The exemption covers `paths` and nothing else — a
+    // `branches:`, `types:`, `paths-ignore:` or unknown filter still reds, as
+    // does an EMPTY `paths:` list — and the filter's CONTENTS are asserted
+    // separately, above: every file `discoverSources()` walks must be matched by
+    // one of these globs, so a scope the gate protects cannot fall outside the
+    // trigger that fires it.
+    const audit = auditBlockingGate({
+      workflowPath: resolve(ROOT, '.github/workflows/image-pin-resolution-nightly.yml'),
+      jobId: 'resolve-image-pins',
+      gateCommand: /node scripts\/verify-image-pins\.mjs/,
+      allowPathsFilter: true,
+    });
+    // Non-vacuity: an audit that parsed nothing must not pass by having no
+    // problem to report, and the job must really be the one running the checker.
+    expect(audit.jobsSeen, 'the audit parsed no jobs at all').toBeGreaterThanOrEqual(2);
+    expect(audit.gateStepsSeen, 'the audited job must run verify-image-pins.mjs').toBe(1);
+    // The gate must not hang off another job — `nightly-red-alert` is gated to
+    // the schedule, so a `needs:` on it would skip the gate on every PR.
+    expect(audit.needsClosure).toEqual(['resolve-image-pins']);
+    // The exemption is real and narrow: it is exercised (there IS a paths
+    // filter, so the option is not vacuous) and it is the ONLY thing it excuses.
+    expect(audit.pullRequestPaths.length).toBeGreaterThan(0);
+    expect(
+      auditBlockingGate({
+        workflowPath: resolve(ROOT, '.github/workflows/image-pin-resolution-nightly.yml'),
+        jobId: 'resolve-image-pins',
+        gateCommand: /node scripts\/verify-image-pins\.mjs/,
+      }).problems,
+      'without the opt-in, the ONLY complaint must be the paths filter — anything else means the option is hiding a second defect',
+    ).toEqual([
+      'the `pull_request` trigger carries a `paths` filter, so a PR can be merged without this gate ever running',
+    ]);
+    expect(audit.problems, audit.problems.join('\n')).toEqual([]);
   });
 });
 
