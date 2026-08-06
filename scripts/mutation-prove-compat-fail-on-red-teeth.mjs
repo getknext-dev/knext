@@ -686,6 +686,27 @@ const MUTATIONS = [
   },
   // ── the TABLE's own guard is not decoration either ────────────────────────
   {
+    // THE OPPOSITE DIRECTION, and the one that was missing. The two rows below
+    // prove the guard reds when the class is WIDENED. Narrowing it left a hatch
+    // shape orphaned and silently unused — measured fully green while a `case`
+    // arm disarmed the real step (exit 0, zero `::error::` lines).
+    //
+    // And narrowing is not contrived: it is literally the previous commit.
+    // `9dafb64` shipped `[;&|(]`, a class missing `)`, `{` and `}`. The guard
+    // was written to stop that regression and detected only its opposite — a
+    // check covering the direction we came FROM rather than the one we are
+    // going, which is the FOURTH instance of that shape in this PR.
+    label: 'a command-position token is REMOVED, orphaning the hatch shape that exercised it',
+    file: POSITION_MODULE,
+    anchor:
+      "export const COMMAND_POSITION_CHARS = Object.freeze([';', '&', '|', '(', ')', '{', '}']);",
+    replacement:
+      "export const COMMAND_POSITION_CHARS = Object.freeze([';', '&', '|', '(', '{', '}']);",
+    options: { commentPrefix: '//' },
+    reds: T.coverage,
+    green: [T.missing, T.failed, T.truncated, T.reaches, T.vacuity, T.shape, T.lanes, T.escape],
+  },
+  {
     // Widening the match without a hatch to exercise it is exactly how the last
     // three escape regressions happened; the coverage guard is what turns that
     // from silent into red.

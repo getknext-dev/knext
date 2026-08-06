@@ -2457,6 +2457,29 @@ describe('compat-suite fail-on-red gate — revocation teeth (test-e2e-deploy.ym
       ).toBe(false);
       expect(tokens, `\`${token}\` is exempted but is not a token at all`).toContain(token);
     }
+
+    // ── SHAPES -> TOKENS: the direction the first version of this guard missed.
+    //
+    // Everything above walks tokens -> shapes, so it reds when the class is
+    // WIDENED without a hatch. `HATCH_SHAPES` is a hand-written literal, not a
+    // derivation of the class, so NARROWING it left a shape orphaned and
+    // silently unused — measured fully green, while a `case` arm disarmed the
+    // real step (exit 0, zero `::error::` lines).
+    //
+    // And narrowing is not a contrived edit: it is literally the previous
+    // commit. `9dafb64` shipped `[;&|(]`, a class missing `)`, `{` and `}`.
+    // This guard was written to prevent that regression and only detected its
+    // opposite — a check covering the direction we came FROM rather than the
+    // direction we are going, which is the FOURTH instance of that shape in
+    // this PR. "Cannot drift" only held for additions until this loop existed.
+    for (const shape of HATCH_SHAPES) {
+      // `^` is line start, not a member of the character class.
+      if (shape.token === '^') continue;
+      expect(
+        tokens,
+        `hatch shape "${shape.label}" exercises \`${shape.token}\`, which is no longer a command-position token — either the class was narrowed (and the scan now misses that shape's whole family) or the shape is dead. Neither is silent.`,
+      ).toContain(shape.token);
+    }
   });
 
   it('#700 the polarity probes cover BOTH runtime lanes', () => {
