@@ -9,6 +9,15 @@ separate feedback-loop effort)?
 See §5. Confidence: **high** for the per-lane numbers and the bun-lane classification, **medium-high**
 for the single node-lane red.
 
+> **Window extended 2026-08-06 — read §7 before quoting §3's determinism claim or §5's
+> "only the bun lane is red".** The original analysis closed on a window ending **2026-08-01**; two
+> further scheduled reds have landed since (08-02 bun, 08-03 node). The **central conclusion is
+> unchanged and in fact strengthened** — there is still no evidence of a knext *node runtime* defect
+> producing intermittent compat reds — but two supporting statements no longer hold as written:
+> the bun lane's reds are **no longer byte-identical across runs**, and the node lane is **no longer
+> literally never red**. §7 records what changed and what it does and does not overturn. Sections 1–5
+> are left as they were written, correct for the window they examined.
+
 ---
 
 ## 1. Method and window
@@ -21,7 +30,8 @@ Evidence is the **actual run history**, not a reading of the harness.
   — **node** daily (`17 3 * * *`), **bun** weekly Sunday (`17 5 * * 0`). 16 shards, `fail-fast: false`.
 - Window examined: **2026-07-02 → 2026-08-01** (last 60 runs listed; 35 of them `schedule`).
   `workflow_dispatch` runs are excluded from the rates below — they are debugging dispatches on
-  feature branches, not the gate.
+  feature branches, not the gate. **§7 extends this window to 2026-08-05**; every number in §§2–5
+  is scoped to the original 07-02 → 08-01 window and is not restated there.
 - **Lane attribution is measured, not inferred from cron timing.** Every
   `compat-suite-summary-<n>-16.json` artifact carries a `"runtime"` key; I downloaded the 16 summaries
   for runs 30193384289, 29678368535 and 29984259723 and read it directly
@@ -211,3 +221,115 @@ real, deterministic runtime gap that is simply on a different lane and already o
 artifacts each from runs 30193384289 / 29678368535 / 29984259723; `gh run view --log-failed` on runs
 30193384289, 29984259723, 29182334221, 28571240186; `docs/compat-matrix.md` rows 49–50;
 `test/deploy-tests-manifest.knext.json` `$knextQuarantines`; `.github/workflows/test-e2e-deploy.yml`.*
+
+---
+
+## 7. Window extension to 2026-08-05 — two new reds, and what they overturn
+
+**Why this section exists rather than an edit above.** §§1–5 were correct for the window they
+examined and are left intact; this section states what the four days after that window changed. The
+original finding is not deleted — it is dated.
+
+### The two new scheduled reds, measured
+
+Both were verified with `gh run view` and by reading the `compat-run-ledger` artifact's `lane` key,
+which is the same measured attribution discipline §1 used (the per-shard artifacts have since been
+renamed from `compat-suite-summary-<n>-16` to `compat-suite-summary-<n>`; the `"runtime"` key inside
+is unchanged).
+
+| run | date | lane (measured) | shards red | totals |
+|---|---|---|---|---|
+| `30738274907` | 2026-08-02 | **bun** (`lane: "bun"`, `runtimeVersion: 1.3.14`) | **6, 8, and 16** | 774 passed / 4 failed, all 16 shards recorded |
+| `30790778590` | 2026-08-03 | **node** (`lane: "node"`) | **16** | 730 passed / 0 failed across the **15** shards recorded |
+
+Interleaving, for completeness: 08-01, 08-02 06:12 UTC, 08-04 and 08-05 were all scheduled **node**
+runs, all green, all 16 shards, 778 passed / 0 failed (ledgers read directly). The 08-02 bun run is
+the second scheduled run that day — the weekly Sunday cron, not a second node run.
+
+### What the 08-02 bun run overturns: the determinism claim, not the classification
+
+§3 says the bun reds are "identical across runs, to the test count" and §6 rates that **high
+confidence**. That no longer holds:
+
+- A **third shard** went red. Shards 6 (`failed=1`) and 8 (`failed=2`) still carry their usual
+  counts, but **shard 16** failed on `test/e2e/edge-compiler-can-import-blob-assets/index.test.ts`
+  (`allows to fetch a remote URL`, `…with a path and basename`, both 60 000 ms timeouts).
+- That file is **not new to the project, but it is new to a stable-Bun scheduled run**.
+  `docs/compat-matrix.md:50` records it as a red seen **only** on Bun canary 1.4.0 (run 28622051531)
+  and dismisses it as "pre-release noise". This run's ledger reports `runtimeVersion: 1.3.14` — the
+  stable lane. **The "canary-only / pre-release noise" characterisation is therefore falsified**, and
+  that matrix cell should be revisited by whoever owns the bun-lane row.
+- Shard 8's failure also changed **kind**: §3 recorded
+  `parallel-routes-root-param-dynamic-child` as a **4 ms assertion** diff; on 08-02 the same file
+  fails as a **60 000 ms timeout** across its whole case list.
+
+**What it does not overturn:** the mechanism classification. All three files fail with the two
+already-documented bun signatures — the edge-sandbox outbound `fetch()` hang and the instrumented
+not-found `invariant` class. The bun lane remains **out of scope for #588**, tracked by **#410**,
+and the matrix row remains honestly ❌. What is now wrong is calling the lane *stable in shape*: the
+shard set moves, so a future bun red on a shard not in {6, 8} is not automatically a new defect.
+
+### What the 08-03 node run overturns: the wording, not the conclusion
+
+§5 concludes "the node lane is stable and only the bun lane is red". Literally, that is now false —
+a scheduled node run went red. **Substantively it survives, because this red never executed a test.**
+
+Job `Deploy tests (shard 16/16)` (id `91614133100`) failed at **step 3, "Unpack workspace tarball"**,
+before the harness, the adapter, or a single test ran. Its only check-run annotation is:
+
+> `The hosted runner lost communication with the server. Anything in your workflow that terminates
+> the runner process, starves it for CPU/Memory, or blocks its network access can cause this error.`
+
+Steps 4 onward never started (`conclusion: null`), and the job's log blob has already expired
+(`BlobNotFound`) — the annotation and the step states are the surviving evidence. The other 15
+shards were green: 730 passed / 0 failed.
+
+So this is neither a knext runtime defect **nor** a test flake. It is **runner infrastructure loss** —
+a third category §4's table did not have, and the one §6 asked for ("a node-lane red whose cause is
+*not* the segment-cache/prefetch family"). It answers that question in the least alarming way
+available: the node lane has no second *runtime* failure mode; it has a CI-provider failure mode,
+which every workflow on GitHub-hosted runners has.
+
+**Corrected verdict, replacing §5's sentence for the extended window:** *the node lane shows no
+runtime-caused flakiness; over 07-05 → 08-05 its only test-executing red remains the single
+07-23 upstream segment-cache timeout, and its one other red never ran a test. Only the bun lane is
+red for runtime reasons — and its reds are deterministic in mechanism but no longer in shape.*
+
+### Consequence for the v1.0 streak — the one that actually costs something
+
+§5 item 4 says the 14-consecutive-green gate is "reachable by waiting". That still looks right, but
+**a runner-loss red resets the streak exactly as a real red does**, and nothing in the gate
+distinguishes them. As of 08-05 the node streak is **2** (08-04, 08-05), not the 9 §2 recorded — it
+was broken on 08-03 by an event with no knext content whatsoever. Whoever owns the gate policy
+should decide, explicitly, whether an infrastructure loss that executed zero tests may be excluded
+from the streak; deciding it silently, after seeing which way it falls, is the failure mode to avoid.
+
+### The 08-03 ledger recorded a clean sheet — already owned elsewhere, do not fix here
+
+The 08-03 `compat-run-ledger` artifact contains **15 shard entries, not 16**. Shard 16/16 died before
+its "Upload summary artifact" step, so no summary existed to collect, and the ledger **omitted the
+shard rather than recording it as missing** — the artifact reads as `730 passed / 0 failed`, a clean
+sheet, for a night the gate went red. Anyone reading the ledger alone would conclude the run was
+green.
+
+This is exactly **issue #695** ("compat-run-ledger records a clean sheet for a red night: a shard with
+no summary artifact is omitted, not counted missing"), which is **open and owned by another
+workstream**. It is recorded here as corroborating evidence, with a live instance to test any fix
+against; **it is deliberately not fixed in this document's change.** Until it is fixed, treat a
+ledger's shard count — not just its totals — as part of reading a run.
+
+### Confidence on this section
+
+- **High** on both lanes' attribution and on the 08-03 root cause: `lane` read from the ledger
+  artifacts, and a runner-loss annotation is a statement by the CI provider, not an inference.
+- **High** that `edge-compiler-can-import-blob-assets` red on stable Bun 1.3.14 — read from the
+  ledger's per-shard `runtimeVersion`, not from the lane's default.
+- **Not established:** whether the 08-02 bun shard-16 red is persistent or a one-off. One weekly run
+  is one data point; the next bun weekly decides whether the matrix's "canary-only" note needs a
+  rewrite or merely a caveat.
+
+*Evidence for this section: `gh run view 30738274907`, `gh run view 30790778590`;
+`compat-run-ledger` artifacts from runs 30738274907, 30790778590, 30735484416, 30882760738,
+30979973943; `compat-suite-summary-{5,7,15}` from 30738274907;
+`gh api repos/getknext-dev/knext/actions/jobs/91614133100` (steps) and its check-run annotations;
+`gh issue view 695`.*
