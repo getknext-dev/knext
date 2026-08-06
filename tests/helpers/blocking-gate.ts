@@ -691,8 +691,19 @@ export function auditJobCanNotSkip(
  * `**` crosses `/` (and may match zero directories); `*` and `?` do not. Lifted
  * here from `tests/operator-image-pin-resolution.test.ts` (#690) so the audit and
  * that spec's walk-coverage assertion share ONE translation — two of them could
- * only diverge, and the spec's `it('the glob translation itself is right')` is
- * now coverage for the audit too.
+ * only diverge.
+ *
+ * Do NOT read that spec's `it('the glob translation itself is right')` as coverage
+ * for the audit: measured, breaking the bare-`**` branch leaves that spec 26/26
+ * GREEN: it exercises the `**`-followed-by-slash form, `*` and `.`-escaping, and
+ * never a bare `**` or a `?`. Those two branches are covered by the audit
+ * fixtures in `tests/blocking-gate-helper.test.ts`, and that is where to add more.
+ *
+ * KNOWN GAP, now load-bearing in a REFUSAL path: character classes are not
+ * translated — `[abc]` is escaped to a literal — so a real glob such as
+ * `scripts/verify-image-[p]ins.mjs` is reported as matching no tracked file.
+ * Pre-existing in the lifted implementation; the vacuity check gave it a new
+ * blast radius. Widen the translation before writing a pin that needs one.
  */
 export function globToRegExp(glob: string): RegExp {
   const body = glob

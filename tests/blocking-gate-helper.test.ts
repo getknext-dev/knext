@@ -1013,6 +1013,14 @@ describe('#690 every `allowPathsFilter` caller pins the filter CONTENTS', () => 
     );
 
     // Identifiers bound to a literal string array, for `toEqual(TRIGGER_PATHS)`.
+    //
+    // SAME-FILE ONLY, and that is a KNOWN FALSE POSITIVE, not an oversight: a pin
+    // whose list is IMPORTED from another module reds here, even though sharing
+    // `TRIGGER_PATHS` between the workflow spec and the gate spec is the natural
+    // refactor. Resolving imports would mean parsing the module graph from a
+    // regex scan. The cost is real — a false red is exactly the pressure that
+    // makes editing the guard the way back to green — so if someone hits it,
+    // widen this by resolving the import, do NOT relax the pin form.
     const literalArrayConsts = new Set(
       [
         ...code.matchAll(

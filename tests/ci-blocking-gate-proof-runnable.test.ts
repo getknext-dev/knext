@@ -168,6 +168,16 @@ const STATUS_FUNCTION = /\b(?:always|success|failure|cancelled)\s*\(\s*\)/;
  * them (`1 == 1`, `'a' != 'b'`, a bare function call, anything unrecognised)
  * FAILS rather than passing, because a check that waves through what it does not
  * understand is how the next spelling gets in.
+ *
+ * WHAT THIS DOES NOT CATCH, stated because the omission is the interesting half:
+ * it tests that a context is MENTIONED, not that the expression is genuinely
+ * falsifiable. A deliberately-written tautology over a real context still passes
+ * — measured: `github.repository != ''` and `${{ github.event_name !=
+ * 'nonexistent' }}` are both accepted. That is far narrower than the two-literal
+ * blocklist this replaced (which `always()` walked straight through), and it
+ * requires someone to write a tautology into `ci.yml` on purpose rather than to
+ * reach for the canonical always-run idiom by habit. Deciding falsifiability in
+ * general means evaluating GitHub expressions, which is not worth building here.
  */
 const FALSIFIABLE_CONTEXT = /\b(?:github|needs|inputs|env|vars|matrix|steps|job|runner|secrets)\./;
 
