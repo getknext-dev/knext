@@ -60,7 +60,8 @@ This is opt-in, per app, and off by default, because it is a real trade and not 
   once can crowd out your own application pods.
 
 A good rule: turn it on for the handful of apps whose cold-start latency users actually feel, not
-across the board.
+across the board. [Warm floors by workload class](/docs/warm-floors) works through which apps those
+are, and when prewarming is the right answer versus keeping a pod warm.
 
 ## Checking that it worked
 

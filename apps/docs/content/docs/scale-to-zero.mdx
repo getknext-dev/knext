@@ -26,6 +26,10 @@ forwards once a pod is ready.
 `spec.scaling.minScale: 0` enables scale-to-zero; raise it to keep a warm floor for
 latency-critical services. The operator translates this to KPA annotations on the Knative Service.
 
+**Which value is right depends on the workload, not on the app.** For a decision guide — when to
+stay at zero, when to schedule a floor over a known peak, and when a permanent replica is the only
+honest answer — see [Warm floors by workload class](/docs/warm-floors).
+
 ```yaml
 spec:
   scaling:

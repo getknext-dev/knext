@@ -284,8 +284,19 @@ type ScalingSpec struct {
 	// a predictable traffic spike (a known daily peak, a scheduled campaign) does
 	// NOT pay a cold start on the first request. This is OWNER-AUTHORED
 	// scheduling, NOT learned prediction — the learned/heuristic controller
-	// (same-hour-last-week RPS percentile), the DB-compute lockstep pre-warm, and
-	// the per-tenant warm-budget cap are DEFERRED follow-ups (see ADR-0030).
+	// (same-hour-last-week RPS percentile, #387) and the per-tenant warm-budget
+	// cap (#389) are DEFERRED follow-ups (see ADR-0030).
+	//
+	// WARM THE DATABASE TOO (shipped — ADR-0030 addendum "DB-compute lockstep
+	// pre-warm"): these windows warm PODS only. If the app's Postgres compute also
+	// scales to zero, the first request still pays the database wake unless you
+	// declare the SAME windows on that app's AppDatabase
+	// (apps.scale-zero-pg.dev) under `spec.warmSchedule` — identical cron/timezone
+	// shape, deliberately with NO `replicas` (a warm database is binary: exactly
+	// one compute held awake). Each operator evaluates the windows itself, so the
+	// pod floor and the database hold flip at the same boundaries. The database
+	// hold never gates serving: if it cannot be established the app falls back to
+	// the ordinary cold wake.
 	//
 	// MECHANISM (ADR-0030): the OPERATOR is the single writer of the ksvc
 	// min-scale annotation. On every reconcile it evaluates these windows against

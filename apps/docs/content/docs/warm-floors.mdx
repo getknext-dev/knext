@@ -1,0 +1,215 @@
+---
+title: Warm floors by workload class
+description: Which apps should keep pods warm, which should stay at zero, and what the measurements actually support — a decision guide for minScale, scheduled warm windows and image prewarming.
+---
+
+Scale-to-zero is the default because most apps do not need to be running most of the time. But
+"most apps" is not "your app", and the three knobs that buy you a warm start —
+`minScale`, `warmSchedule` and `imagePrewarm` — each cost something real and different.
+
+This page is a decision guide. It starts from **what your workload looks like**, not from the
+knobs, and it is explicit about which recommendations rest on measurements and which do not.
+
+## First, know what a cold start is made of
+
+A cold start is four things happening in sequence, and the knobs attack different ones:
+
+| Part | What it is | Which knob helps |
+|---|---|---|
+| **Scheduling** | Kubernetes finds a node and admits the pod | none — this is the floor you cannot buy down |
+| **Image pull** | the node fetches your image, if it does not already have it | [`imagePrewarm`](/docs/image-caching) |
+| **Server boot** | the Node or Bun process starts and compiles your JavaScript | [bytecode caching](/docs/bytecode) (on by default) |
+| **First request** | your page renders for the first time in that process | none directly |
+
+Only `minScale` and `warmSchedule` remove the cold start itself — everything else makes it
+shorter. That distinction is the whole decision.
+
+## What the measurements support
+
+These come from project benchmarks on a small two-node managed cluster. Treat them as **shape and
+order of magnitude**, not as numbers your cluster will reproduce.
+
+**A burst waking a cold app behaves better than people expect.** Firing 50 concurrent requests at
+an app sitting at zero, repeated over eight rounds: every request was served in all eight rounds,
+and **within** each round the spread was tiny — the 99th-percentile response landed roughly
+180 ms above that round's median. The platform's activator holds the whole burst and releases it
+once three to four pods are ready, so the burst finishes together rather than leaving stragglers.
+What varied was the **round**: round-level p99 ranged from about **5.1 s to 7.1 s**. A single cold
+request against the same app measured around **4 s** at the median, so the burst cost roughly one
+to three extra seconds over a single cold wake — bounded, not runaway.
+
+**The number to size against is the tail, not the median.** On the same cluster, cold starts fall
+into two well-separated groups: a fast one of roughly 1.7–2.8 s and a slow one of roughly
+10–11 s, with nothing in between. The slow group appeared on **two different build targets of two
+different applications**, so it is not a property of your runtime or your code. Its cause was not
+identified, and its **frequency moves between sittings** — one measurement session saw the slow
+mode in 7 of 10 samples, another saw it in 0 of 10 the following day. So the honest statement is:
+an occasional wake on a cluster like this can take several times the typical one, and you cannot
+predict which request gets it.
+
+**A missing image is a large, avoidable slice of that.** Waking a 370 MB image from a
+same-region registry, a cold start that had to pull took about **2.3 s longer at the median** than
+the same cold start with the image already on the node, and about **10.7 s longer** comparing the
+slowest run of each. That is the part `imagePrewarm` removes.
+
+<Callout type="warn">
+**What is not measured.** There is no published before/after comparison of a warm floor turned on
+versus off — no measured figure for "how much latency `minScale: 1` buys you" or what a warm pod
+costs per hour on your cluster. The reasoning below is *structural* (a running pod does not cold
+start) rather than measured, and it is labelled that way where it matters. If you need the number
+for your own capacity planning, measure it on your own cluster.
+</Callout>
+
+## The workload classes
+
+### 1. Latency-sensitive with a predictable peak
+
+*A storefront with a morning rush. An internal tool used during business hours. A service behind a
+scheduled batch job.*
+
+**Stay at zero, and schedule the floor.** `warmSchedule` holds a pod floor only during windows you
+declare, so you pay for warm capacity when the traffic is actually coming and scale to zero the
+rest of the time. This is the class where the trade is clearly worth it.
+
+```ts title="kn-next.config.ts"
+scaling: {
+  minScale: 0,
+  warmSchedule: [
+    { start: '45 8 * * 1-5', end: '0 18 * * 1-5', replicas: 2, timezone: 'Europe/Berlin' },
+  ],
+  imagePrewarm: true,
+}
+```
+
+`start` and `end` are five-field cron expressions evaluated in `timezone` (defaults to UTC), and
+`replicas` is the floor held during the window — at least 1. Outside every window the floor is
+whatever `minScale` says, so scale-to-zero is preserved.
+
+**Open the window before the peak, not at it.** The floor flips at the boundary and pods still
+need to schedule and boot, so a window that opens at the same minute as the rush lets the first
+arrivals pay the cold start anyway. Fifteen minutes of lead time costs one window-edge of warm
+pods and removes that risk.
+
+**Declare the same windows on the database too, or you have warmed half the path.** A warm pod
+floor does nothing for a database that is itself asleep — the first in-window query still pays a
+database wake. If your app is backed by a scale-to-zero Postgres managed by `scale-zero-pg`, that
+app's `AppDatabase` resource (`apps.scale-zero-pg.dev`) takes its own `spec.warmSchedule` with the
+**identical** cron and timezone shape. Declare the same windows on both, and the pod floor and the
+database wake flip together.
+
+The one difference is `replicas`: the database schedule has no such field, because a warm database
+is binary — exactly one compute is held awake for the window.
+
+```yaml
+# on the AppDatabase, alongside the app's own warmSchedule above
+spec:
+  warmSchedule:
+    - start: '45 8 * * 1-5'
+      end: '0 18 * * 1-5'
+      timezone: 'Europe/Berlin'
+```
+
+This is a cluster-operator action on a separate resource, not an app setting, so it may not be
+yours to make — but it is the half that is easy to forget. Two things worth knowing: the windows
+are declared **twice and reconciled nowhere**, so if the two drift apart nothing will tell you; and
+the database hold is best-effort and **never gates serving** — if it cannot be established, the app
+falls back to an ordinary cold wake rather than failing. See [Databases](/docs/databases) for the
+always-on alternative when your traffic has no predictable peak to schedule around.
+
+### 2. Latency-sensitive with unpredictable traffic
+
+*A public entry point. A webhook receiver with a delivery timeout. Anything a human waits on with
+no pattern to its arrival.*
+
+**Keep a real floor: `minScale: 1` or higher.** Nothing else removes the cold start, and by the
+measurements above the wake you cannot predict is the one that can take ten seconds. A schedule
+does not help a workload with no schedule.
+
+```ts title="kn-next.config.ts"
+scaling: { minScale: 1, maxScale: 20 }
+```
+
+This is the most expensive option on the page — it is a full replica of your app running
+permanently — and it is the correct one when a slow first request is a user-visible failure rather
+than a slow page. Set it deliberately, per app, not as a cluster-wide habit.
+
+<Callout type="info">
+**One warm pod protects the first request, not the tenth.** `minScale: 1` means the first arrival
+is served immediately; a burst beyond one pod's concurrency still waits for pods two and three to
+start. If your unpredictable traffic arrives in bursts rather than as a trickle, read the
+burst-response knobs on [Scale to zero](/docs/scale-to-zero#tuning-burst-response) as well — and
+note the burst measurement above: the burst itself was bounded and error-free, so this is about
+shaving seconds, not about avoiding failure.
+</Callout>
+
+### 3. Bursty, but a slow first request is acceptable
+
+*Marketing pages. Documentation. Content that gets linked and then gets traffic.*
+
+**Stay at zero and prewarm the image.** The burst measurement is the argument: 50 simultaneous
+requests to a cold app were all served, within a tight band, in five to seven seconds. That is a
+slow first page, not an outage. Prewarming removes the largest avoidable slice of it without
+running any of your app.
+
+```ts title="kn-next.config.ts"
+scaling: { minScale: 0, maxScale: 20, imagePrewarm: true }
+```
+
+Prewarming is not free either — it puts a copy of your image and one tiny pod on **every**
+schedulable node, which counts against each node's pod limit. Turn it on for the handful of apps
+whose cold start users actually feel. [Cold starts & image caching](/docs/image-caching) has the
+full cost breakdown.
+
+### 4. Cost-optimised — the default, and where most apps belong
+
+*Admin panels. Internal dashboards. Preview environments. Anything with a handful of users who
+know they are early.*
+
+**Zero, nothing else on.** This is the configuration scale-to-zero exists for, and adding warm
+capacity to an app in this class is spending money to improve a number nobody is measuring.
+
+```ts title="kn-next.config.ts"
+scaling: { minScale: 0, maxScale: 5 }
+```
+
+Preview environments belong here specifically: they are numerous, short-lived, and idle most of
+their life, which is the worst possible profile for a warm floor.
+
+### 5. Rare but latency-critical — the honest hard case
+
+*An emergency runbook page. A failover endpoint. A regulator-facing form used twice a year.*
+
+This class has **no cheap answer**, and it is worth saying so plainly rather than implying the
+knobs cover it. The traffic is too rare to justify a permanent floor and too unpredictable to
+schedule, but a cold start is exactly what you cannot afford when it finally arrives.
+
+The options, in order of what they actually cost:
+
+1. **`minScale: 1` and accept the cost.** A pod running all year for an endpoint used twice is
+   wasteful, and it is still the only configuration that guarantees the answer is fast.
+2. **`imagePrewarm: true` at zero.** Cheaper, and removes the image-pull slice — but scheduling and
+   boot remain, and the slow-mode tail above is not eliminated. Choose this when "a few seconds" is
+   survivable and "possibly ten" is not catastrophic.
+3. **A synthetic keep-alive request on a schedule.** Traffic keeps the app up, so a periodic probe
+   is effectively a floor you pay for in requests. knext does not generate this for you, and it is
+   worth naming the downside: it is a warm floor with no declaration anywhere in your config, so
+   the next person to read your app cannot tell it exists.
+
+If none of those fit, the honest engineering answer is usually to move the critical path off a
+scale-to-zero service entirely rather than to tune one into behaving like an always-on one.
+
+## Choosing quickly
+
+| If your traffic is… | and a slow first request is… | then |
+|---|---|---|
+| predictable | costly | `minScale: 0` + `warmSchedule` over the peak |
+| unpredictable | costly | `minScale: 1` (or higher) |
+| bursty | tolerable | `minScale: 0` + `imagePrewarm` |
+| light or internal | tolerable | `minScale: 0`, nothing else |
+| rare | costly | no cheap answer — see class 5 above |
+
+<Callout type="warn">
+**Size the floor against the tail, not the average.** Every figure on this page came from one small
+cluster and varied between sessions on that same cluster. Use them to decide *which class your app
+is in* — that decision is robust. Do not use them as the latency budget you promise anyone.
+</Callout>
