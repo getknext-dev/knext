@@ -79,13 +79,13 @@ const IGNORE_SERVER = resolve(__dirname, '__fixtures__/ignore-sigterm-standalone
 //     spec reads it back (waitForListeningPort) instead of assuming it.
 //   - METRICS_PORT=0 → the supervisor's Prometheus sidecar takes an OS-assigned
 //     port too. Nothing here scrapes it, so it needs no readback; it only must not
-//     collide (the drain e2e, which DOES scrape, reserves one via freePort()).
+//     collide (the drain e2e, which DOES scrape, reserves one via freePorts()).
 // Note the supervisor's child-readiness TCP probe (waitForChildServing) reads $PORT
 // and so cannot connect to "0" — its deferred init lands via its own deadline
 // instead. That is acceptable HERE and only here: nothing in this file asserts on
 // that path (no scrape, no metrics assertion), and this file's subject is the hard
 // cap. The drain e2e is where the metrics sidecar AND the probe path are proven —
-// it therefore reserves a REAL $PORT (freePort()) rather than using 0, and asserts
+// it therefore reserves a REAL $PORT (freePorts(2)) rather than using 0, and asserts
 // deferred init is reached with reason `child-serving`. Do not copy the `PORT=0`
 // below into a spec that cares about supervisor readiness.
 const EPHEMERAL = '0';

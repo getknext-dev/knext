@@ -13,7 +13,12 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { freePort, waitForListeningPort } from './e2e-support/child-ports';
+import {
+  freePort,
+  freePorts,
+  reserveHeldPorts,
+  waitForListeningPort,
+} from './e2e-support/child-ports';
 
 let child: ReturnType<typeof spawn> | undefined;
 
@@ -136,5 +141,64 @@ describe('freePort (#678)', () => {
     } finally {
       await release();
     }
+  }, 20_000);
+});
+
+describe('reserveHeldPorts / freePorts — multi-port reservation cannot collide with itself', () => {
+  // WHY THIS EXISTS: two SEQUENTIAL freePort() calls can return the SAME port.
+  // Nothing forbids an ephemeral allocator from repeating once the first socket
+  // is closed, and the drain e2e needs TWO ports in one spawn ($PORT and
+  // $METRICS_PORT) — a repeat there means PORT === METRICS_PORT and one bind dies
+  // with EADDRINUSE, which is the exact flake class #678 exists to remove.
+  //
+  // The fix is to hold every socket open until ALL of them are allocated, because
+  // the OS guarantees bind(0) is never assigned a port already in LISTEN state.
+  // `reserveHeldPorts` is that hold, exposed so this property can be ASSERTED
+  // rather than asserted-about: an implementation that closed each socket before
+  // opening the next would leave the earlier ports bindable and red the first case
+  // below. A "the N ports differ" assertion alone would NOT — it passes by luck
+  // under exactly the broken implementation it is supposed to catch.
+
+  /** Try to bind `port` on loopback; resolve true if it was free. */
+  function canBind(port: number): Promise<boolean> {
+    return new Promise((res) => {
+      const srv = createServer();
+      srv.on('error', () => res(false));
+      srv.listen(port, '127.0.0.1', () => srv.close(() => res(true)));
+    });
+  }
+
+  it('holds EVERY reserved port simultaneously, then frees them all', async () => {
+    const { ports, release } = await reserveHeldPorts(4);
+    try {
+      expect(ports).toHaveLength(4);
+      // Simultaneity is the whole point: while held, NONE of them may be bindable.
+      // Under a close-then-next implementation the first three would be free here.
+      const bindableWhileHeld = await Promise.all(ports.map(canBind));
+      expect(bindableWhileHeld).toEqual([false, false, false, false]);
+    } finally {
+      await release();
+    }
+    // ...and after release every one of them is usable by the child we spawn.
+    const bindableAfterRelease = await Promise.all(ports.map(canBind));
+    expect(bindableAfterRelease).toEqual([true, true, true, true]);
+  }, 30_000);
+
+  it('freePorts returns N ports that are DISTINCT by construction, not by luck', async () => {
+    // Distinctness here is an OS guarantee, not a probability: freePorts holds all
+    // N sockets in LISTEN at once, and bind(0) never hands back a listening port.
+    const ports = await freePorts(8);
+    expect(ports).toHaveLength(8);
+    expect(new Set(ports).size).toBe(8);
+    for (const p of ports) {
+      expect(p).toBeGreaterThan(0);
+      expect(p).toBeLessThan(65_536);
+    }
+  }, 30_000);
+
+  it('rejects a non-positive count rather than silently reserving nothing', async () => {
+    // A caller that destructures `const [a, b] = await freePorts(n)` with a bad n
+    // would otherwise get `undefined` ports and bind `NaN`.
+    await expect(freePorts(0)).rejects.toThrow(/count/);
   }, 20_000);
 });

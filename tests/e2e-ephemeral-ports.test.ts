@@ -31,6 +31,13 @@
 //      `.listen(\n 3000)`, `env.PORT ?? 3000`. It MISSES an indirected literal
 //      (`const p = 41234; srv.listen(p)`), a stringified one (`listen('41234')`)
 //      and a computed one (`BASE + 234`).
+//   3. THE EXEMPTION'S HONESTY CHECK IS SYNTACTIC TOO. `BINDING_CONSTRUCT` asks
+//      "could this file open a listening socket at all?" by looking for
+//      `.listen(`, `createServer(` or a literal `from 'node:net|http|https'`. An
+//      INDIRECT bind evades it: a helper imported from another module, or a
+//      dynamic `await import('node:net')` (the regex requires the static `from`
+//      syntax). So a whole-file exemption can, in principle, outlive the reason
+//      that justified it — the check narrows the hole, it does not seal it.
 //
 // That is deliberate: this is a guard against the ACCIDENT that already bit us
 // (#676, `EADDRINUSE :::39188` from a hardcoded fixture port), not a barrier
