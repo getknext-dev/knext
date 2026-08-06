@@ -1,7 +1,38 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { auditFailOnRedGateTeeth } from './helpers/fail-on-red-gate.js';
+import { summarize } from '../scripts/e2e-summary.mjs';
+import {
+  auditFailOnRedGateTeeth,
+  shardSummary,
+  untruncatableSummary,
+} from './helpers/fail-on-red-gate.js';
+
+/**
+ * Runner logs in the shape `scripts/e2e-summary.mjs` parses, used ONLY to make
+ * it emit a real summary whose key set the #700 probes are compared against.
+ * De-timestamped slices of the same marker vocabulary the live nightly prints.
+ */
+const GREEN_RUNNER_LOG = `
+total: 2
+test/e2e/app-dir/a/a.test.ts finished on retry 0/2 in 12.0s
+test/e2e/app-dir/b/b.test.ts finished on retry 0/2 in 9.0s
+`;
+const RED_RUNNER_LOG = `
+total: 2
+test/e2e/app-dir/a/a.test.ts finished on retry 0/2 in 12.0s
+❌ test/e2e/app-dir/b/b.test.ts output:
+FAIL Turbopack test/e2e/app-dir/b/b.test.ts (14.0 s)
+    ✕ renders (11 ms)
+end of test/e2e/app-dir/b/b.test.ts output
+test/e2e/app-dir/b/b.test.ts failed to pass within 2 retries
+`;
+/** No `total: N` header — truncation detection is disabled, so BOTH keys drop. */
+const NO_TOTAL_RUNNER_LOG = `
+test/e2e/app-dir/a/a.test.ts finished on retry 0/2 in 12.0s
+test/e2e/app-dir/b/b.test.ts finished on retry 0/2 in 9.0s
+`;
+const SUMMARIZE_META = { ref: 'v16.2.1', shard: '3/16', excluded: 2, runtime: 'node' };
 
 /**
  * GUARD TEST for .github/workflows/test-e2e-deploy.yml (#89 / ADR-0007 A3-2).
@@ -2236,6 +2267,32 @@ describe('compat-suite fail-on-red gate — revocation teeth (test-e2e-deploy.ym
       teeth.jsIfStatements,
       'no `if` statement was parsed out of the node program',
     ).toBeGreaterThan(1);
+  });
+
+  it('#700 the probe summaries have the SAME KEY SET as the real emitter', () => {
+    // The round-4 finding, closed as a STANDING guard rather than as four more
+    // mutation rows. The probes are the oracle every polarity verdict rests on,
+    // so they have to agree with `scripts/e2e-summary.mjs` — and they disagreed
+    // in BOTH directions before this: too few keys (no `shard`/`passed`, so
+    // `s.shard === undefined && …` and `… || s.passed > 0` both walked past),
+    // then two keys the emitter OMITS on a green shard (`failures: []`,
+    // `notRunFiles: []`, which hid a condition that throws `TypeError` on every
+    // green artifact). Comparing key SETS against the real function closes the
+    // class; pinning spellings would only have closed the four I thought of.
+    const green = summarize(GREEN_RUNNER_LOG, SUMMARIZE_META) as Record<string, unknown>;
+    const red = summarize(RED_RUNNER_LOG, SUMMARIZE_META) as Record<string, unknown>;
+    const noTotal = summarize(NO_TOTAL_RUNNER_LOG, SUMMARIZE_META) as Record<string, unknown>;
+
+    // Non-vacuity: the emitter must actually have produced the states claimed,
+    // or three identical key sets would make the comparison meaningless.
+    expect([green.failed, green.notRun, green.truncated]).toEqual([0, 0, false]);
+    expect(red.failed, 'the red fixture must produce a failing shard').toBeGreaterThan(0);
+    expect(noTotal.expectedTotal, 'the no-total fixture must disable truncation').toBeUndefined();
+
+    const keys = (o: object) => Object.keys(o).sort();
+    expect(keys(shardSummary()), 'clean-shard probe').toEqual(keys(green));
+    expect(keys(shardSummary({ failed: 1 })), 'red-shard probe').toEqual(keys(red));
+    expect(keys(untruncatableSummary()), 'no-expectedTotal probe').toEqual(keys(noTotal));
   });
 
   it('#700 tooth 1/3 — a MISSING summary has its OWN failing exit', () => {

@@ -312,10 +312,20 @@ function namesIn(node: ts.Node): Set<string> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** A synthetic shard summary — the `s` a gate condition reads. */
-type Fixture = Record<string, unknown>;
+export type Fixture = Record<string, unknown>;
 
 /** Raised for any construct the evaluator does not model. FAIL CLOSED. */
 class UnsupportedCondition extends Error {}
+
+/**
+ * Raised when the condition would THROW on a real summary of this shape.
+ *
+ * Kept separate from `UnsupportedCondition` because the two say different
+ * things. "I cannot model this" asks a human to teach the evaluator; "this
+ * throws on a green shard" is a live defect — an uncaught throw inside
+ * `node -e` exits non-zero, so the gate goes red on every shard of that shape.
+ */
+class ConditionThrows extends Error {}
 
 /**
  * Evaluate a gate condition against a synthetic summary.
@@ -393,10 +403,14 @@ function evaluateCondition(node: ts.Node, s: Fixture): unknown {
   if (ts.isPropertyAccessExpression(node)) {
     const base = evaluateCondition(node.expression, s);
     if (base === null || base === undefined) {
-      // `?.` short-circuits; a plain `.` on nullish would throw at runtime, and
-      // a gate that throws is red — which is not what this audit is measuring.
       if (node.questionDotToken) return undefined;
-      throw new UnsupportedCondition(`property access on a nullish base: ${node.getText()}`);
+      // NOT an unmodelled construct — a condition that would genuinely THROW on
+      // this summary. Reported as its own class because the consequence is
+      // different and specific: an uncaught throw inside `node -e` exits
+      // non-zero on EVERY shard with that shape, which is a permanently-red
+      // gate, not a missing tooth. `s.notRunFiles.length` on a green shard is
+      // exactly this, and the emitter omits that key on every green shard.
+      throw new ConditionThrows(`\`${node.getText()}\` — the base is absent from this summary`);
     }
     return (base as Fixture)[node.name.text];
   }
@@ -442,10 +456,23 @@ function evaluateCondition(node: ts.Node, s: Fixture): unknown {
  * behind `s.shard ? … : …` was never evaluated, because no fixture gave `shard`
  * a value. A realistic summary reaches both arms.
  *
- * Counts stay INTERNALLY CONSISTENT — `passed + failed + notRun === expectedTotal`
- * — because an impossible summary is its own under-specified oracle.
+ * Counts stay INTERNALLY CONSISTENT — `passed + failed + notRun === expectedTotal`, and the
+ * `failures` / `notRunFiles` arrays are as LONG as the counts they attribute, because
+ * `e2e-summary.mjs` derives both from the same set. An impossible summary is its
+ * own under-specified oracle.
+ *
+ * OMISSION IS PART OF THE SHAPE. `failures` and `notRunFiles` are spread
+ * conditionally by the emitter (`e2e-summary.mjs:267-270`) and are ABSENT, not
+ * empty, on a green shard — the gate itself proves it by reading them as
+ * `s.failures ?? []`. An earlier version of this builder emitted `[]` instead,
+ * and that made the oracle disagree with reality in the OTHER direction:
+ * `if (s.truncated === true || s.notRunFiles.length > 0)` stayed GREEN here while
+ * on a real green artifact it throws `TypeError: Cannot read properties of
+ * undefined` — a non-zero exit on EVERY green shard, i.e. the permanently-red
+ * gate this file claims to guard against. With the keys faithfully omitted, the
+ * evaluator's own nullish-base refusal catches it.
  */
-function shardSummary(overrides: Fixture = {}): Fixture {
+export function shardSummary(overrides: Fixture = {}): Fixture {
   const failed = Number(overrides.failed ?? 0);
   const notRun = Number(overrides.notRun ?? 0);
   const expectedTotal = 45;
@@ -459,12 +486,25 @@ function shardSummary(overrides: Fixture = {}): Fixture {
     excluded: 2,
     expectedTotal,
     truncated: false,
-    // Present only on a red shard, exactly as e2e-summary.mjs writes them.
-    failures:
-      failed > 0
-        ? [{ file: 'test/e2e/app-dir/rsc-basic.test.ts', kind: 'assertion', cases: ['renders'] }]
-        : [],
-    notRunFiles: notRun > 0 ? ['test/e2e/app-dir/actions.test.ts'] : [],
+    // Both keys OMITTED when empty, exactly as e2e-summary.mjs writes them, and
+    // one entry per counted file so the attribution matches the count.
+    ...(failed > 0
+      ? {
+          failures: Array.from({ length: failed }, (_, i) => ({
+            file: `test/e2e/app-dir/red-${i}.test.ts`,
+            kind: 'assertion',
+            cases: ['renders'],
+          })),
+        }
+      : {}),
+    ...(notRun > 0
+      ? {
+          notRunFiles: Array.from(
+            { length: notRun },
+            (_, i) => `test/e2e/app-dir/aborted-${i}.test.ts`,
+          ),
+        }
+      : {}),
     ...overrides,
   };
 }
@@ -477,9 +517,30 @@ function shardSummary(overrides: Fixture = {}): Fixture {
  * case has to drop both — dropping only `truncated` would be a shape the
  * pipeline never produces.
  */
-function untruncatableSummary(): Fixture {
+export function untruncatableSummary(): Fixture {
   const { expectedTotal: _e, truncated: _t, ...rest } = shardSummary();
   return rest;
+}
+
+/**
+ * A summary rendered for a FAILURE MESSAGE — compact, and honest about the
+ * arrays.
+ *
+ * `JSON.stringify` was the first version and it buried the finding: the
+ * all-45-failures probe serialises 45 attribution records, so the sentence
+ * naming the disarmed branch scrolled off the top of a 6 KB blob. A red a human
+ * cannot read is barely better than no red. Arrays collapse to their length,
+ * and an ABSENT key is printed as `absent` rather than omitted — the absence is
+ * frequently the whole point of the case.
+ */
+function describeSummary(s: Fixture): string {
+  const parts = Object.entries(s)
+    .filter(([k]) => k !== 'shard' && k !== 'ref' && k !== 'runtime' && k !== 'excluded')
+    .map(([k, v]) => `${k}: ${Array.isArray(v) ? `[${v.length} entries]` : JSON.stringify(v)}`);
+  for (const k of ['expectedTotal', 'truncated', 'failures', 'notRunFiles']) {
+    if (!(k in s)) parts.push(`${k}: absent`);
+  }
+  return `{ ${parts.join(', ')} }`;
 }
 
 /** One polarity case: the summary, whether the branch must fire, and why. */
@@ -497,6 +558,11 @@ function polarityProblems(cond: ts.Expression, cases: PolarityCase[]): string[] 
     try {
       actual = evaluateCondition(cond, summary);
     } catch (err) {
+      if (err instanceof ConditionThrows) {
+        return [
+          `would THROW on ${describeSummary(summary)} (${why}): ${err.message}. An uncaught throw inside \`node -e\` exits NON-ZERO, so this gate goes red on every shard of that shape — permanently red is the other way to make a gate meaningless. \`e2e-summary.mjs\` omits \`failures\` and \`notRunFiles\` entirely on a green shard, which is why the gate reads them as \`?? []\``,
+        ];
+      }
       if (err instanceof UnsupportedCondition) {
         return [
           `uses a construct this audit does not model (${err.message}), so its POLARITY cannot be judged — teach \`evaluateCondition\` the construct or state here why the branch is still a tooth. Refusing beats guessing: an inverted condition looks identical to a correct one under a syntax check`,
@@ -507,8 +573,8 @@ function polarityProblems(cond: ts.Expression, cases: PolarityCase[]): string[] 
     if (Boolean(actual) !== fires) {
       problems.push(
         fires
-          ? `does NOT fire on ${JSON.stringify(summary)} (${why}) — the branch, its ::error:: lines and its exit are all still there, and none of them run`
-          : `FIRES on ${JSON.stringify(summary)} (${why}) — the polarity is inverted: this gate fails a green shard and passes a red one`,
+          ? `does NOT fire on ${describeSummary(summary)} (${why}) — the branch, its ::error:: lines and its exit are all still there, and none of them run`
+          : `FIRES on ${describeSummary(summary)} (${why}) — the polarity is inverted: this gate fails a green shard and passes a red one`,
       );
     }
   }
@@ -606,8 +672,17 @@ export function auditFailOnRedGateTeeth(workflowPath: string): GateTeethAudit {
   // inline is irrelevant to whether the script swallows an exit.
   //
   // Shell single-quoted spans are blanked first so the embedded JS's own `||`
-  // is not read as a shell operator. A POSIX single-quoted word cannot contain
-  // a `'`, so the spans pair unambiguously — but only if the count is EVEN.
+  // is not read as a shell operator.
+  //
+  // HONEST SCOPE — the parity check below is NECESSARY, not SUFFICIENT. An odd
+  // count means the script is definitely not quoted the way this audit assumes,
+  // and it refuses. An even count does NOT prove the pairing is right: an
+  // apostrophe inside a double-quoted string, or after a `#`, is not a shell
+  // quote, and two stray ones bracketing a `|| true` would blank it. Measured
+  // and confirmed reachable only by contrivance — the live script has exactly
+  // two apostrophes, both `node -e` delimiters — so this is a decay hazard
+  // rather than a live hole. Tracked as #702 rather than papered over; a real
+  // shell lexer is the complete fix.
   const quoteCount = (run.match(/'/g) ?? []).length;
   if (quoteCount % 2 !== 0) {
     exitReachesStep.push(
@@ -744,6 +819,23 @@ export function auditFailOnRedGateTeeth(workflowPath: string): GateTeethAudit {
         summary: shardSummary({ notRun: 3 }),
         fires: true,
         why: 'three phantom not-run files',
+      },
+      // THE TOP OF THE DOMAIN. Raising the probes from {0,1} to {0,1,8} only
+      // raised the ceiling — `&& s.failed < 9`, and `&& s.failed < s.expectedTotal`,
+      // both survived. `expectedTotal` bounds the counts from above, so probing
+      // its top closes the whole upper-bound family at once; there is no further
+      // rung on this axis. The second of those bounds is not academic: against a
+      // real artifact for a shard where every selected test failed it evaluates
+      // false, and the workflow concludes SUCCESS on the worst state a shard has.
+      {
+        summary: shardSummary({ failed: 45 }),
+        fires: true,
+        why: 'every one of the 45 selected tests failed — the worst shard there is',
+      },
+      {
+        summary: shardSummary({ notRun: 45 }),
+        fires: true,
+        why: 'not one of the 45 selected tests produced a result',
       },
       {
         summary: shardSummary(),
