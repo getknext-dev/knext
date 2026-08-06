@@ -89,12 +89,25 @@ function balanced(source, open) {
  * a second, independently written length-preserving blanker — with the identical
  * shebang defect `blankNonCode` was fixed for in #684, plus one of its own:
  * blanking an UNTERMINATED regex to end-of-line ate the `)` of a JSX close tag
- * (`</Button>);`), which unbalanced the enclosing block and lost it. Measured
- * before deleting it, over `tests/` + `scripts/`: the two blankers disagree on
- * comment markers (it kept them; blankNonCode blanks them) and on `${…}` holes (it
- * blanked them; they are code), and NEITHER disagreement moves a single reported
- * finding in the `read` (default) or `sourcey` variants — 80 and 352, unchanged.
- * `broad` goes 1018 -> 1019, the one move being the JSX block above, recovered.
+ * (`</Button>);`), which unbalanced the enclosing block and lost it.
+ *
+ * Measured before deleting it, over THIS reporter's own input — every tracked
+ * `.test`/`.spec` file in the repo, 272 of them, not the `tests/` + `scripts/`
+ * subset the first round measured. The two blankers disagree on four things:
+ * comment MARKERS (it kept them; `blankNonCode` blanks them), `${…}` HOLES (it
+ * blanked them; they are code), the unterminated regex above — and, until it was
+ * fixed, `blankNonCode` building its accumulator with `[...src]`, which iterates
+ * code points against UTF-16 indices and desynced on any astral character. That
+ * fourth one was a REGRESSION, not a trade: six emoji in
+ * `packages/kn-next/src/__tests__/excerpt.test.ts` cost two of that file's nine
+ * `it()` blocks, which `maskLiterals`' `split('')` found. It is fixed at source
+ * rather than accepted, so the claim below holds as stated instead of being
+ * hedged.
+ *
+ * With that fix in, no disagreement moves a single reported finding in the
+ * `read` (default) or `sourcey` variants — 80 and 352, byte-identical finding
+ * sets. `broad` goes 1018 -> 1019, the one move being the JSX block above,
+ * recovered. Nothing is lost; consolidation is a strict improvement.
  */
 export function testBlocks(source, masked = blankNonCode(source)) {
   const blocks = [];

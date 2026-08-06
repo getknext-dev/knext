@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -155,9 +156,15 @@ describe('the half-a-scan reporter shares the one blanker', () => {
     // than discovered. `maskLiterals` kept `//`, `/*` and `*/` and blanked from
     // `i + 2`; `blankNonCode` includes the marker. And `maskLiterals` treated a
     // backtick like a plain quote, blanking template HOLES — real code, whose
-    // parens `testBlocks` needs. Measured over `tests/` + `scripts/`, neither
-    // difference moves a single reported finding in the `read` (default) or
-    // `sourcey` variants.
+    // parens `testBlocks` needs. Measured over the reporter's real input (every
+    // tracked `.test`/`.spec` file, 272 of them — NOT the `tests/` + `scripts/`
+    // subset), neither difference moves a single reported finding in the `read`
+    // (default) or `sourcey` variants: 80 and 352, byte-identical finding sets.
+    //
+    // A FOURTH difference existed and was a regression, not a trade — the
+    // code-point accumulator covered by the offset-contract spec below. It is
+    // fixed rather than accepted, which is what lets the paragraph above stand
+    // as written.
     expect(blankNonCode('a; // note\n')).toBe(`a; ${' '.repeat('// note'.length)}\n`);
     expect(blankNonCode('a; /* note */ b;\n')).toBe(`a; ${' '.repeat('/* note */'.length)} b;\n`);
     // Built rather than written literally: a template hole inside a single-quoted
@@ -165,5 +172,75 @@ describe('the half-a-scan reporter shares the one blanker', () => {
     // the rule is a worse trade than assembling the two characters.
     const hole = `$${'{'} f(1) ${'}'}`;
     expect(blankNonCode(`\`x${hole}y\`;\n`)).toBe(`\` ${hole} \`;\n`);
+  });
+});
+
+/**
+ * The contract itself, asserted over the corpus the consumer actually reads.
+ *
+ * `blankNonCode`'s docstring promises a length- and offset-preserving result:
+ * "every offset in the result still addresses the same character of the
+ * original". Every caller depends on that — `testBlocks` slices the ORIGINAL
+ * source at offsets found in the BLANKED one — and until now nothing asserted
+ * it, which is exactly why a desync could be live and invisible.
+ *
+ * It was live. The accumulator was built with `[...src]`, which iterates CODE
+ * POINTS, while every index driving it (`src.indexOf`, `src.length`, `i`, `j`,
+ * `blank(from, to)`) is a UTF-16 OFFSET. One astral character — an emoji — put
+ * the two out of step for the whole rest of the file: measured on
+ * `packages/kn-next/src/__tests__/excerpt.test.ts` (6 of them), the output came
+ * back 5 characters short with 15 newlines displaced, and `testBlocks` found 7
+ * of its 9 `it()` blocks. The DELETED `maskLiterals` used `split('')` and found
+ * all 9, so consolidation was not a strict improvement until this was fixed.
+ *
+ * Scanning the real corpus is the point rather than an embellishment: the
+ * regression is invisible on any fixture nobody thought to write, and #689's own
+ * argument is that each reuse widens the file set. The reporter's file set is
+ * all 272 tracked `.test`/`.spec` files, not the 98 under `tests/` + `scripts/`
+ * the consolidation was measured over — and the one file that breaks the
+ * contract is outside those 98.
+ */
+describe('blankNonCode preserves length and offsets', () => {
+  /** The reporter's own file predicate — see `scanRepo` in the reporter. */
+  const corpus = () =>
+    execFileSync('git', ['ls-files', '-z'], { cwd: REPO_ROOT, maxBuffer: 64 * 1024 * 1024 })
+      .toString('utf8')
+      .split('\0')
+      .filter((f) => /\.(test|spec)\.(ts|tsx|mts|mjs|js)$/.test(f));
+
+  /** Every UTF-16 offset holding a `\n`. Equal arrays ⇒ line structure survived. */
+  const newlineOffsets = (s: string) => {
+    const out: number[] = [];
+    for (let i = 0; i < s.length; i++) if (s[i] === '\n') out.push(i);
+    return out;
+  };
+
+  it('holds for every file the reporter actually scans', () => {
+    const files = corpus();
+    // A corpus that shrank to nothing would make the loop below vacuous.
+    expect(files.length).toBeGreaterThan(200);
+
+    for (const file of files) {
+      const src = readFileSync(join(REPO_ROOT, file), 'utf8');
+      const out = blankNonCode(src);
+      expect(out.length, `${file}: length changed`).toBe(src.length);
+      expect(newlineOffsets(out), `${file}: newline offsets moved`).toEqual(newlineOffsets(src));
+    }
+  });
+
+  it('holds when the source contains an astral character', () => {
+    // The corpus case above is real, but it depends on one file keeping its
+    // emoji. This fixture is what makes the guard discriminate unconditionally:
+    // a surrogate pair ahead of the code, so a code-point accumulator desyncs
+    // from the UTF-16 offsets for everything after it.
+    const src = ["const label = '😀 hi';", "it('finds this block', () => { f(1); });", ''].join(
+      '\n',
+    );
+    const out = blankNonCode(src);
+
+    expect(out.length).toBe(src.length);
+    expect(newlineOffsets(out)).toEqual(newlineOffsets(src));
+    // The consumer's observable: a desync loses the block outright.
+    expect(testBlocks(src).map((b) => b.body)).toEqual(["'finds this block', () => { f(1); }"]);
   });
 });
