@@ -200,34 +200,47 @@ interface ShellIfBlock {
 const ONE_LINE_IF = /^\s*if\b(?<cond>.*?);\s*then\b(?<body>.*?);?\s*fi\s*;?\s*$/;
 
 /**
- * Blank the CONTENT of shell single-quoted spans, preserving every newline.
+ * Where a shell COMMAND can begin: start of line, or after a separator.
  *
- * The embedded `node -e '…'` program is a single-quoted shell word, so its text
- * is DATA to the shell — and it contains `process.exit(1)` twice. A scan looking
- * for a shell `exit` must not read those, and this is not hypothetical: widening
- * the scan from `exit\s+\d+` to `exit\b` (so a bare `exit` could not hide) made
- * it match `process.exit(1)` the moment the program was no longer inline and the
- * scan fell back to the whole script. Two prover rows caught it.
- *
- * Line numbers are preserved exactly — newlines survive, everything else inside
- * the quotes becomes a space — because the caller maps findings back to prelude
- * line indices computed by `shellIfBlocks`.
+ * This is what tells a shell `exit` from `process.exit(1)` — the latter is
+ * preceded by a `.`, which is not a command position — and it does so without
+ * knowing anything about quoting. That independence is the point: it holds even
+ * where there is no `node -e '` span to blank, which is precisely where a
+ * position-blind `\bexit\b` matched the embedded JS and produced two false reds.
  */
-function blankSingleQuoted(script: string): string {
-  let out = '';
-  let inQuote = false;
-  for (const ch of script) {
-    if (ch === "'") {
-      inQuote = !inQuote;
-      out += ch;
-    } else if (inQuote && ch !== '\n') {
-      out += ' ';
-    } else {
-      out += ch;
-    }
-  }
-  return out;
-}
+const CMD_START = String.raw`(?:^|[;&|(]|\bthen\b|\belse\b|\bdo\b)\s*`;
+
+// HONEST SCOPE: `;` is treated as a separator wherever it appears, including
+// inside a DOUBLE-quoted string — the gate's own `echo "…green; the summarize…"`
+// contains one. That direction is fail-OPEN only for a contrived
+// `echo "…; exit 0…"`, and fail-CLOSED (a spurious finding) never, because a
+// separator followed by `exit` is still required. Double-quote awareness is the
+// same missing capability #702 tracks for the swallow scan; a real lexer closes
+// both. Recorded here rather than left for the next reader to find.
+
+/**
+ * A shell `exit`, ANY argument or none.
+ *
+ * The argument decides the STATUS; it has nothing to do with whether the script
+ * leaves early. Requiring a numeric literal is what made a bare `exit` — one
+ * token from a hatch already proved — and `exit "${RC}"` invisible.
+ */
+const SHELL_EXIT = new RegExp(`${CMD_START}exit\\b`);
+
+/**
+ * A shell `exit <numeric-literal>`, in command position, with its status.
+ *
+ * Same command-position rule as `SHELL_EXIT` so the two halves agree — before
+ * this they disagreed, and collapsing the missing-summary block onto one line
+ * WITH a preceding statement (`if …; then echo "missing"; exit 1; fi`) reddened
+ * tooth 1 because only the anchored `^\s*exit\s+\d+$` form was recognised.
+ *
+ * Deliberately still requires a LITERAL status: a bare `exit` inherits `$?` from
+ * the preceding command, which after the branch's own `echo` is ZERO. Treating
+ * that as a tooth would be wrong, so it is reported as "no exit" — fail-closed,
+ * and honest about which shape is recognised.
+ */
+const SHELL_EXIT_STATUS = new RegExp(`${CMD_START}exit\\s+(\\d+)\\b`, 'gm');
 
 /**
  * Every `if` block in a POSIX-ish shell script, with the body of its THEN arm.
@@ -323,7 +336,7 @@ export function shellIfBlocks(script: string): ShellIfBlock[] {
 function shellFailingExit(body: string): { found: boolean; zero: boolean } {
   let found = false;
   let zero = false;
-  for (const m of body.matchAll(/^\s*exit\s+(\d+)\s*$/gm)) {
+  for (const m of body.matchAll(SHELL_EXIT_STATUS)) {
     found = true;
     if (Number(m[1]) === 0) zero = true;
     else return { found: true, zero: false };
@@ -342,13 +355,51 @@ function shellFailingExit(body: string): { found: boolean; zero: boolean } {
  * delimiter is the very next `'` — that is exact, not a heuristic, and it is
  * what makes it safe to hand the remainder to a real parser.
  */
-export function embeddedNodeProgram(script: string): string | null {
+export function embeddedNodeProgramSpan(script: string): { start: number; end: number } | null {
   const open = script.indexOf("node -e '");
   if (open === -1) return null;
   const start = open + "node -e '".length;
   const close = script.indexOf("'", start);
   if (close === -1) return null;
-  return script.slice(start, close);
+  return { start, end: close };
+}
+
+export function embeddedNodeProgram(script: string): string | null {
+  const span = embeddedNodeProgramSpan(script);
+  return span === null ? null : script.slice(span.start, span.end);
+}
+
+/**
+ * Blank a span BY OFFSET, preserving every newline and every other character.
+ *
+ * This replaces a `blankSingleQuoted` pass that paired quotes across the WHOLE
+ * script, and the difference is the round-8 regression in one line: pairing is
+ * a heuristic that can be wrong, an offset cannot.
+ *
+ * Round 7 bounded the escape scan with `run.slice(0, nodeStart)`. The live
+ * prelude contains ZERO apostrophes, so that bound was *unconditionally* immune
+ * to mispairing. Round 8 removed it in favour of whole-script pairing and
+ * claimed "the bound is no longer load-bearing" — both halves of which were
+ * false: blanking hides the program only when the pairing happens to be right,
+ * and the bound was exactly what made the prelude scan unfalsifiable.
+ *
+ * Measured cost: two ordinary English contractions in comments (`shard's`,
+ * `didn't`) bracketing a lane-skip made the whole hatch invisible — audit
+ * `{escapeHatches: 0}`, step exit 0 on a red Bun-lane shard, and the identical
+ * mutation is CAUGHT by the previous commit. That is deleted coverage, not a
+ * new limitation, and it is NOT #702: that issue bounds the parity limitation on
+ * the *swallow* scan as a decay hazard precisely because the live script has two
+ * apostrophes. Routing the escape scan — the one guard covering the disarm all
+ * three teeth are blind to — through the same untrusted pairing is a different
+ * thing.
+ *
+ * The span comes from `embeddedNodeProgramSpan`, which anchors on the literal
+ * `node -e '` and takes the very next `'`: a POSIX single-quoted word cannot
+ * contain a quote, so that span is exact rather than inferred.
+ */
+function blankSpan(script: string, start: number, end: number): string {
+  const hidden = script.slice(start, end).replace(/[^\n]/g, ' ');
+  return script.slice(0, start) + hidden + script.slice(end);
 }
 
 /** Every `IfStatement` in a parsed program, at any depth. */
@@ -1067,23 +1118,33 @@ export function auditFailOnRedGateTeeth(workflowPath: string): GateTeethAudit {
     missing.length === 1 && teeth['missing-summary'].length === 0
       ? (missing[0] as ShellIfBlock)
       : undefined;
-  // The scan reads the WHOLE script with single-quoted spans blanked, rather
-  // than a prefix slice. Slicing at `node -e '` was doing two jobs at once —
-  // bounding the shell region AND hiding the program — and it silently stopped
-  // doing the second the moment the program was not inline. Blanking does the
-  // second job unconditionally, so the bound is no longer load-bearing.
-  // Odd quote count means the pairing cannot be trusted (#702); `exitReachesStep`
-  // already reports that, so this scan stays quiet rather than guessing.
-  const quotesPair = ((run.match(/'/g) ?? []).length & 1) === 0;
-  if (missingBlock && quotesPair) {
+  // TWO INDEPENDENT REASONS the embedded program cannot be read as shell, and
+  // neither of them is quote pairing:
+  //
+  //   1. the program span is blanked BY OFFSET (`embeddedNodeProgramSpan`),
+  //      which is exact — a pairing pass over the whole script is a heuristic
+  //      that two English contractions in comments were measured to defeat;
+  //   2. `exit` is matched only in COMMAND POSITION. `process.exit(1)` is
+  //      preceded by a `.`, so it is not a shell exit no matter what hid or
+  //      failed to hide it. This is what keeps the scan correct when the program
+  //      is NOT inline — where there is no `node -e '` span to blank at all,
+  //      which is exactly where the earlier whole-script `\bexit\b` matched the
+  //      JS and produced two false reds.
+  //
+  // Belt and braces on purpose: (1) restores round 7's unfalsifiable bound for
+  // the inline case, (2) covers the case (1) cannot see. Neither depends on
+  // prelude quoting, so #702's parity limitation does not reach this scan.
+  const programSpan = embeddedNodeProgramSpan(run);
+  const scanSource =
+    programSpan === null ? run : blankSpan(run, programSpan.start, programSpan.end);
+  if (missingBlock) {
     const thenArm = new Set(missingBlock.thenLines);
-    const shellLines = blankSingleQuoted(run).split('\n');
-    for (const [i, line] of shellLines.entries()) {
+    for (const [i, line] of scanSource.split('\n').entries()) {
       if (/^\s*#/.test(line)) continue;
-      if (!/\bexit\b/.test(line)) continue;
+      if (!SHELL_EXIT.test(line)) continue;
       if (thenArm.has(i)) continue;
       escapeHatches.push(
-        `a shell \`exit\` at prelude line ${i + 1} (\`${line.trim()}\`) sits OUTSIDE the missing-summary branch's THEN arm — the prelude runs BEFORE the program, so an early exit there disarms all three teeth at once, the shell one included. Measured: a two-line runtime check in the prelude, a bare \`exit\`, and an \`elif\` arm on this very block each make the step exit 0 on a red Bun-lane shard`,
+        `a shell \`exit\` at gate-script line ${i + 1} (\`${line.trim()}\`) sits OUTSIDE the missing-summary branch's THEN arm — the prelude runs BEFORE the program, so an early exit there disarms all three teeth at once, the shell one included. Measured: a two-line runtime check in the prelude, a bare \`exit\`, and an \`elif\` arm on this very block each make the step exit 0 on a red Bun-lane shard`,
       );
     }
   }

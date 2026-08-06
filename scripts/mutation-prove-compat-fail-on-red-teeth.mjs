@@ -630,6 +630,29 @@ const MUTATIONS = [
     green: [T.missing, T.failed, T.truncated, T.reaches, T.vacuity, T.shape, T.lanes],
   },
   {
+    // THE ROUND-8 REGRESSION, pinned. Round 8 replaced round 7's prefix slice
+    // with whole-script quote PAIRING, and the live prelude has zero
+    // apostrophes — so the slice had been unfalsifiable and the pairing is not.
+    // Two ordinary English contractions in COMMENTS ("shard's", "didn't")
+    // bracket the hatch, the pairing blanks everything between them, and the
+    // whole hatch disappears: audit `{escapeHatches: 0}`, step exit 0 on a red
+    // Bun-lane shard. Not camouflage — this is what a comment looks like.
+    // The span is now blanked BY OFFSET, which cannot be wrong.
+    label: 'ESCAPE — a hatch hidden between two English contractions (quote-pairing regression)',
+    anchor: SUMMARY_LINE,
+    replacement: `          # the shard's id has a slash in it, which is not a legal filename\n${SUMMARY_LINE}          if [ "$KNEXT_RUNTIME" = "bun" ]; then\n            exit 0\n          fi\n`,
+    also: [
+      {
+        anchor:
+          '            echo "::error::${SUMMARY} is missing — no results is NOT green; the summarize step failed upstream"',
+        replacement:
+          '            echo "::error::${SUMMARY} is missing — the summarize step didn\'t run"',
+      },
+    ],
+    reds: T.escape,
+    green: [T.missing, T.failed, T.truncated, T.reaches, T.vacuity, T.shape, T.lanes],
+  },
+  {
     // Arguably a MORE natural way to write "skip the gate on the other lane"
     // than the dead conjunct the metadata rows already catch.
     label: 'ESCAPE — `process.exit(0)` BEFORE the owning branch',
