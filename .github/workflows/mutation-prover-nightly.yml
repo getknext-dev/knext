@@ -25,13 +25,20 @@ name: Mutation provers (nightly)
 # vitest process per mutation: ~60 spec runs for `mutation-prove-ci-blocking-gates`
 # alone. Putting that on `pull_request` would add many minutes to every PR to
 # re-answer a question whose answer changes only when a guard or a workflow
-# changes. This lane is deliberately `schedule` + `workflow_dispatch` ONLY, and
-# for the same reason it is NOT audited by `tests/helpers/blocking-gate.ts` — that
-# audit certifies a job as an unconditional PR gate, which this is not and must
-# not be described as. What it does carry is the rest of a real gate: no soft-fail
-# escape hatch anywhere in the file (asserted, and the assertion scans the whole
-# file — which is why the flag's name does not appear in this comment), and a
-# pinned-issue alert so a red has an owner.
+# changes. This lane is deliberately `schedule` + `workflow_dispatch` ONLY.
+#
+# ONE HALF of `tests/helpers/blocking-gate.ts` applies here and the other does
+# not, and the first round wrongly took the second's inapplicability as licence to
+# skip both. The TRIGGER half certifies a job as an unconditional PR gate, which
+# this is not and must not be described as. The CAN-NOT-SKIP half
+# (`auditJobCanNotSkip`) applies to any job whose failure must fail its run, and
+# it IS applied to `run-mutation-provers` — because a job-level `if:` makes the
+# job SKIP, a skipped job does not fail the run, AND `needs.<job>.result` is then
+# `'skipped'` rather than `'failure'`, so the alert below would never fire either.
+# Green and unwatched, which is #685's own failure mode inside the lane built to
+# end it. The OTHER soft-fail flag — the per-step one that lets a red step pass —
+# is asserted against separately by a scan of the WHOLE file, which is why its
+# name cannot appear in this comment either.
 #
 # #670 / #640 — A NIGHTLY WITHOUT AN OWNER BECOMES BACKGROUND NOISE, and a
 # permanently-red gate stops being read. The alert job below is the same

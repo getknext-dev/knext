@@ -14,7 +14,20 @@ import { parseProverSummary } from './prover-report.mjs';
 
 /** Every prover file lives here and matches this shape. Glob, never a list. */
 const PROVER_DIR = 'scripts';
-const PROVER_RE = /^mutation-prove-.*\.mjs$/;
+export const PROVER_RE = /^mutation-prove-.*\.mjs$/;
+
+/**
+ * The ONE file allowed to spawn a package manager, by PATH (#693).
+ *
+ * Round 1 exempted any source matching `/function\s+resolveTestRunner\b/`, which
+ * is shape-based: copying the function name into a new file bought that file a
+ * full exemption from the package-manager-spawn rule — the exact
+ * copy-instead-of-share failure this lane exists to stop, defeating the guard
+ * against it. The exemption is now the definition SITE, and
+ * `tests/mutation-prover-lane.test.ts` asserts this path is the only file in the
+ * tree that defines the function, which is what keeps the anchor sound.
+ */
+export const RESOLVER_DEFINITION_FILE = 'scripts/lib/ci-blocking-gate-proof.mjs';
 
 /**
  * Every mutation prover in the tree, as `{ relPath, absPath }`, sorted.
@@ -51,15 +64,30 @@ export function discoverProvers(repoRoot) {
  * @returns {string[]}
  */
 export function codeStringLiterals(source) {
+  return literalSpans(source).map(({ start, end }) => source.slice(start, end));
+}
+
+/**
+ * The `[start, end)` content span of every code-position string literal.
+ *
+ * Extracted from `codeStringLiterals` (#693) because a second consumer needs the
+ * POSITIONS, not the contents: an import-specifier scan has to see
+ * `'node:child_process'`, which the blanked view has emptied. One walk, two
+ * consumers — two walks of the same grammar could only diverge.
+ *
+ * @param {string} source
+ * @returns {Array<{ start: number, end: number }>}
+ */
+function literalSpans(source) {
   const blanked = blankNonCode(source);
-  const found = [];
+  const spans = [];
   let i = 0;
   while (i < blanked.length) {
     const c = blanked[i];
     if (c === "'" || c === '"') {
       const end = blanked.indexOf(c, i + 1);
       if (end === -1) break;
-      found.push(source.slice(i + 1, end));
+      spans.push({ start: i + 1, end });
       i = end + 1;
       continue;
     }
@@ -79,35 +107,172 @@ export function codeStringLiterals(source) {
         if (blanked[j] === '`') break;
       }
       if (j >= blanked.length) break;
-      found.push(source.slice(i + 1, j));
+      spans.push({ start: i + 1, end: j });
       i = j + 1;
       continue;
     }
     i += 1;
   }
-  return found;
-}
-
-/** Does `identifier` appear in CODE position (not only in a comment)? */
-function usesIdentifier(source, identifier) {
-  return new RegExp(`\\b${identifier}\\b`).test(blankNonCode(source));
+  return spans;
 }
 
 /**
- * Is `identifier` CALLED — not merely imported?
+ * The source with COMMENTS removed but string literals INTACT.
  *
- * MEASURED, not anticipated: the first version of this audit asked
- * `usesIdentifier`, and deleting `declareMutations(5);` from a prover left the
- * guard GREEN, because the `import { declareMutations, … }` line still carried
- * the name. A guard that an unused import satisfies is decoration, which is the
- * exact failure this whole file exists to make loud.
+ * `blankNonCode` empties literal contents too, which is right for "is this a
+ * spawn or a comment about one" but wrong for "which module does this import
+ * name": the specifier IS the literal. This view keeps comments unable to
+ * satisfy anything while leaving `from 'node:child_process'` readable.
+ *
+ * @param {string} source
  */
-function callsFunction(source, identifier) {
-  return new RegExp(`\\b${identifier}\\s*\\(`).test(blankNonCode(source));
+function codeWithLiterals(source) {
+  const blanked = blankNonCode(source);
+  const out = [...blanked];
+  for (const { start, end } of literalSpans(source)) {
+    for (let k = start; k < end; k++) out[k] = source[k];
+  }
+  return out.join('');
 }
 
-/** The child-process entry points a prover could start a test runner through. */
+/**
+ * Is `identifier` CALLED — not merely imported, and not merely DECLARED?
+ *
+ * MEASURED, not anticipated: the first version of this audit asked whether the
+ * identifier appeared anywhere in code, and deleting `declareMutations(5);` from
+ * a prover left the guard GREEN, because the `import { declareMutations, … }`
+ * line still carried the name. A guard that an unused import satisfies is
+ * decoration, which is the exact failure this whole file exists to make loud.
+ *
+ * The DECLARATION exclusion is the same defect one level down (#693): a
+ * declaration is a call-shaped occurrence, so `function resolveTestRunner() {}`
+ * satisfied a plain `name\s*\(` scan and a file that merely COPIED the name
+ * passed. Declaration forms are blanked before the scan, so only a real call
+ * counts.
+ */
+function callsFunction(source, identifier) {
+  const code = blankNonCode(source).replace(
+    new RegExp(
+      `(?:async\\s+)?function\\s*\\*?\\s*${identifier}\\s*\\(|(?:const|let|var)\\s+${identifier}\\s*=\\s*(?:async\\s+)?(?:function\\s*\\*?\\s*)?\\(`,
+      'g',
+    ),
+    '',
+  );
+  return new RegExp(`\\b${identifier}\\s*\\(`).test(code);
+}
+
+/**
+ * The child-process entry points a prover could start a test runner through.
+ *
+ * A BACKSTOP for the import scan below, not the rule. Kept because a `require`
+ * or a re-export shape the scan does not parse still lands here, and these five
+ * names are unambiguous — nothing else in this repo is called `spawnSync`.
+ * `exec` is deliberately ABSENT: `regex.exec(...)` appears all over the tree, so
+ * listing it here would fire on `verify-action-pins.mjs` and a dozen others. It
+ * is caught by the import scan instead, precisely.
+ */
 const SPAWNERS = ['spawnSync', 'spawn', 'execFileSync', 'execFile', 'execSync'];
+
+/** `node:child_process` under either specifier, in an import or a require. */
+const CHILD_PROCESS_IMPORT =
+  /(?:import\s+([^;]*?)\s+from\s*|(?:const|let|var)\s+([^;]*?)\s*=\s*require\s*\(\s*)['"]node:child_process['"]/g;
+
+/**
+ * Every local name in this file bound to a `node:child_process` export (#693).
+ *
+ * DERIVED rather than enumerated, because an enumerated list of call sites is
+ * how the second one gets missed — and it was: `exec` was not in `SPAWNERS`, so
+ * `exec('pnpm exec vitest run x')` produced ZERO findings from a scan whose whole
+ * subject is spawning a package manager. Whatever the module is destructured or
+ * aliased into IS a spawner, including an API nobody predicted here.
+ *
+ * Returns `{ direct, namespaces }` — `namespaces` are `import * as cp` /
+ * `require(...)`-whole bindings, whose every member call counts.
+ *
+ * @param {string} source
+ */
+function childProcessBindings(source) {
+  const code = codeWithLiterals(source);
+  const direct = new Set();
+  const namespaces = new Set();
+  for (const match of code.matchAll(CHILD_PROCESS_IMPORT)) {
+    const clause = (match[1] ?? match[2] ?? '').trim();
+    const braced = /\{([\s\S]*)\}/.exec(clause);
+    if (braced) {
+      for (const part of (braced[1] ?? '').split(',')) {
+        // `execSync as sh` binds `sh`; `execSync` binds itself.
+        const local = part
+          .trim()
+          .split(/\s+as\s+|\s*:\s*/)
+          .pop();
+        if (local) direct.add(local.replace(/[^A-Za-z0-9_$]/g, ''));
+      }
+      // A default/namespace binding can sit alongside the braces.
+      const outside = clause.replace(/\{[\s\S]*\}/, '');
+      for (const part of outside.split(',')) {
+        const local = part.trim().replace(/^\*\s+as\s+/, '');
+        if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(local)) namespaces.add(local);
+      }
+      continue;
+    }
+    const local = clause.replace(/^\*\s+as\s+/, '').trim();
+    if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(local)) namespaces.add(local);
+  }
+  direct.delete('');
+  return { direct, namespaces };
+}
+
+/**
+ * The name this source starts a child process through, or `undefined`.
+ *
+ * A DIRECT binding must be called as a bare identifier not preceded by a `.`,
+ * which is what keeps `regex.exec(…)` — everywhere in this repo — from reading
+ * as a spawn while `exec(…)` imported from `node:child_process` does.
+ *
+ * @param {string} source
+ */
+function spawnerCalled(source) {
+  const code = blankNonCode(source);
+  const { direct, namespaces } = childProcessBindings(source);
+  for (const name of [...direct, ...SPAWNERS]) {
+    if (new RegExp(`(?<![.\\w$])${name}\\s*\\(`).test(code)) return name;
+  }
+  for (const ns of namespaces) {
+    const member = new RegExp(`(?<![.\\w$])${ns}\\.([A-Za-z_$][A-Za-z0-9_$]*)\\s*\\(`).exec(code);
+    if (member) return `${ns}.${member[1]}`;
+  }
+  return undefined;
+}
+
+/**
+ * Does this source MUTATE tracked files through the shared harness? (#693)
+ *
+ * `PROVER_RE` is one naming convention shared by the discovery glob AND by the
+ * test's `git ls-files` cross-check, so a prover named `prove-mutation-*.mjs` is
+ * silently not run AND leaves the guard unaffected — a convention cannot audit
+ * itself. This is the independent, BEHAVIOURAL signal: importing the harness's
+ * mutating verbs makes a file a prover whatever it is called. Reading
+ * `MUTATION_MARKER` does not (`scripts/scan-mutation-residue.mjs` does exactly
+ * that and is not a prover).
+ *
+ * @param {string} source
+ */
+export function mutatesViaHarness(source) {
+  const code = codeWithLiterals(source);
+  const imports = code.matchAll(/import\s+([^;]*?)\s+from\s*['"][^'"]*mutation-harness\.mjs['"]/g);
+  for (const match of imports) {
+    const clause = match[1] ?? '';
+    const named = /\{([\s\S]*)\}/.exec(clause);
+    const bindings = (named ? (named[1] ?? '') : clause).split(',').map((s) =>
+      s
+        .trim()
+        .split(/\s+as\s+/)[0]
+        ?.trim(),
+    );
+    if (bindings.some((b) => b === 'mutate' || b === 'withSnapshot')) return true;
+  }
+  return false;
+}
 
 /**
  * A code string literal that names a PACKAGE MANAGER as a command.
@@ -140,10 +305,11 @@ function packageManagerCommand(literals) {
  *      can catch a prover that runs 4 of 13 and exits 0.
  *
  * @param {string} source
+ * @param {string} [relPath] repo-relative path, for the definition-site exemption
  * @returns {string[]}
  */
-export function auditProverSource(source) {
-  const findings = auditRunnerResolution(source);
+export function auditProverSource(source, relPath) {
+  const findings = auditRunnerResolution(source, relPath);
   if (!callsFunction(source, 'declareMutations')) {
     findings.push(
       'does not call declareMutations(n) — without a declared count the lane cannot tell 4-of-13 from 13-of-13',
@@ -166,18 +332,22 @@ export function auditProverSource(source) {
  * `node_modules/.bin/vitest` exists anywhere up the tree.
  *
  * @param {string} source
+ * @param {string} [relPath] repo-relative path; the exemption is PATH-anchored,
+ *   so omitting it exempts nothing — the audit fails closed.
  * @returns {string[]}
  */
-export function auditRunnerResolution(source) {
+export function auditRunnerResolution(source, relPath) {
   const findings = [];
   const pm = packageManagerCommand(codeStringLiterals(source));
-  const spawner = SPAWNERS.find((name) => usesIdentifier(source, name));
+  const spawner = spawnerCalled(source);
   // The ONE legitimate package-manager SPAWN in the tree is the resolver's own
-  // last-resort fallback, so the exemption is the DEFINITION SITE — not "a file
-  // that mentions the resolver", which every fixed prover does. A file that names
-  // a package manager without spawning anything (this module's own allowlist)
-  // is data, not a launch.
-  const definesResolver = /function\s+resolveTestRunner\b/.test(blankNonCode(source));
+  // last-resort fallback, so the exemption is the DEFINITION SITE — and #693
+  // made that literally true. It used to be `/function\s+resolveTestRunner\b/`
+  // against the source, i.e. a SHAPE: copying the function name into a new file
+  // exempted it, which is the copy-instead-of-share failure this guard exists to
+  // catch. It is now the PATH, cross-checked by a test asserting exactly one file
+  // in the tree defines that function.
+  const definesResolver = relPath === RESOLVER_DEFINITION_FILE;
   if (pm !== undefined && spawner !== undefined && !definesResolver) {
     findings.push(
       `spawns the package manager (${JSON.stringify(pm)}) — resolve the runner with resolveTestRunner instead; \`pnpm exec\` resolves nothing in a tree without its own node_modules`,
@@ -187,7 +357,7 @@ export function auditRunnerResolution(source) {
   // it spawns NOTHING and delegates to a shared proof helper that does (which is
   // what `mutation-prove-ci-blocking-gates.mjs` does via `runGateTest`). What is
   // not allowed is spawning a process without going through the resolver.
-  if (spawner !== undefined && !callsFunction(source, 'resolveTestRunner')) {
+  if (spawner !== undefined && !definesResolver && !callsFunction(source, 'resolveTestRunner')) {
     findings.push(
       `calls ${spawner}() without resolveTestRunner — a prover that spawns must resolve its runner through the shared resolver`,
     );

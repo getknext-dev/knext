@@ -600,8 +600,19 @@ function continueOnErrorProblem(container: Job, where: string): string | null {
  * Returns the transitive `needs` closure it walked. That is the SAME walk the
  * caller used to repeat in a second `collect` recursion; two implementations of
  * one rule can only diverge, so there is now one.
+ *
+ * EXPORTED (#693) because `auditBlockingGate`'s two halves have different
+ * audiences. The TRIGGER half certifies a job as an unconditional PR gate, which
+ * a deliberately-scheduled nightly is not and must not be described as. This
+ * half — job-level `if:`, `continue-on-error` at job and step level, an
+ * unrecognised job key, and the same walk over the transitive `needs:` closure —
+ * applies to ANY job whose failure must fail its run, including a nightly's.
+ * `.github/workflows/mutation-prover-nightly.yml` took the first half's
+ * inapplicability as licence to skip both, and a job-level `if:` on its lane job
+ * would have made the lane skip silently AND suppressed its own red alert
+ * (`needs.<job>.result` is then `'skipped'`, never `'failure'`).
  */
-function auditJobCanNotSkip(
+export function auditJobCanNotSkip(
   jobs: Record<string, Job>,
   jobId: string,
   problems: string[],
