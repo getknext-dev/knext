@@ -10,6 +10,7 @@ import { DEFAULT_OUT_FILE } from '../scripts/compat-run-ledger.mjs';
 // away here. The gate exists to keep `tests/` honest (#527).
 import { classifyRuns, renderLedgerTable } from '../scripts/e2e-shard-history.mjs';
 import { summarize } from '../scripts/e2e-summary.mjs';
+import { ADMISSIBLE_IF as SHARED_ADMISSIBLE_IF } from '../scripts/lib/workflow-conditioning-shapes.mjs';
 import { continueOnErrorProblem, type Job } from './helpers/blocking-gate';
 
 const WORKFLOW = readFileSync(join(process.cwd(), '.github/workflows/test-e2e-deploy.yml'), 'utf8');
@@ -434,8 +435,14 @@ function job(id: string): WorkflowJob {
  * expression — `${{ false }}`, `success()`, an event condition — can stop the
  * gate from running, and a step that does not run cannot fail. Allowlist of
  * one, normalised for the `${{ }}` wrapper and whitespace.
+ *
+ * #703 MOVED the pattern to `scripts/lib/workflow-conditioning-shapes.mjs` and
+ * imports it here rather than declaring a second copy. Two implementations of
+ * one allowlist agree right up until one of them is relaxed to land a change,
+ * and the other file's guards then keep passing while this one's meaning has
+ * moved. The re-export keeps every reference below reading the same.
  */
-const ADMISSIBLE_IF = /^(always\(\)|\$\{\{\s*always\(\)\s*\}\})$/;
+const ADMISSIBLE_IF = SHARED_ADMISSIBLE_IF;
 
 /**
  * The ONE command the ledger job may run. Shared by the command allowlist and

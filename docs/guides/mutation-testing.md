@@ -95,7 +95,7 @@ miniature: it plants residue in a file that is *also* legitimately modified, pri
 `git status --porcelain` reporting **the identical thing either way**, and shows the scan going red
 regardless.
 
-Three more standing proofs, each covering a guard whose subject is absent from a clean tree — the
+Four more standing proofs, each covering a guard whose subject is absent from a clean tree — the
 shape most likely to be decoration, because nothing on the happy path ever exercises it:
 
 - `node scripts/mutation-prove-blocking-gate.mjs` — removes each detection from the blocking-gate
@@ -108,6 +108,17 @@ shape most likely to be decoration, because nothing on the happy path ever exerc
   otherwise red for its own reason.
 - `node scripts/mutation-prove-stale-pointer-scan.mjs` — plants an ambiguous bare test-file
   reference, discovering a duplicated basename from `git ls-files` rather than hardcoding one.
+- `node scripts/mutation-prove-compat-step-level-disarms.mjs` — the compat nightly's verdict,
+  attacked from OUTSIDE the script that carries it: `continue-on-error` in every spelling at step
+  and job level, every inadmissible `if:` shape on the fail-on-red step, the canonical narrowing on
+  every other step of the job's reporting tail, and a job-level `if:` on every job of the ledger
+  spine. Worth reading for three table conventions the earlier proofs did not have. `alsoReds`
+  names the assertions that legitimately red **as well**, so an overlap between two guards is
+  asserted rather than hidden in a shortened `green` list. INVARIANCE rows (`reds: null`) mutate to
+  an ADMISSIBLE spelling and require that **nothing** reds — a rejector that rejects everything
+  passes every red-when-disarmed row ever written. And SHRINK rows delete an `if:` or empty a
+  `needs:` list instead of narrowing it: those remove a step or a job from what the audit walks, so
+  the audit passes by *looking at less*, and it is the non-vacuity floor that reds.
 
 ## Checklist
 
