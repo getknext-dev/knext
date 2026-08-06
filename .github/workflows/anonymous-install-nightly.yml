@@ -1,0 +1,153 @@
+name: Anonymous install path (nightly)
+
+# ── #586: can a STRANGER install knext by following our own docs? ─────────────
+# Found by running the documented procedure on a clean cluster: the bundle
+# applied, and every pod sat in ImagePullBackOff because
+# `ghcr.io/getknext-dev/kn-next-operator` is a PRIVATE GHCR package. An anonymous
+# token request for `repository:getknext-dev/kn-next-operator:pull` returns 401.
+#
+# EVERY EXISTING GATE STAYED GREEN, structurally rather than by accident:
+#   - `operator-bundle-e2e.yml` builds the operator image LOCALLY, loads it into
+#     kind, and applies `dist/install.yaml` with the manager image OVERRIDDEN to
+#     that local image. The override is exactly what hides the published image;
+#   - `internal/install/*_test.go` asserts the bundle is digest-pinned and never
+#     `:latest`. A private image is a perfectly valid digest pin;
+#   - `image-pin-resolution-nightly.yml` resolves tag<->digest correspondence,
+#     which a private image satisfies as well as a public one, and its scope is
+#     the operator's own SOURCES rather than the PUBLISHED bundle.
+# Every check verified an artifact we built ourselves, from a context that was
+# already authenticated. Nothing played the part of a stranger.
+#
+# WHAT THIS JOB DOES NOT DO: it does not fix #586. Flipping the GHCR package to
+# public is a GitHub setting only the repository owner can change. This makes the
+# regression DETECTABLE — tonight, and again if the package is ever flipped back.
+#
+# WHY NIGHTLY AND NOT A PR GATE. The answer lives upstream (GitHub releases +
+# GHCR) and legitimately changes, so it must be resolved at RUN time; baking a
+# resolved value into a committed assertion is what made the equivalent
+# action-pin check decay into "edit the guard to get green" (security.md). And
+# coupling every merge to two third-party services would go red for reasons that
+# are not findings — a flaky gate trains people to bypass it, which is the exact
+# failure this issue is about. The PR-time half is
+# `tests/anonymous-install-path.test.ts`, which runs offline against an injected
+# transport and guards the URL's FORM and this workflow's SHAPE. Same division of
+# labour as the action pins: form at PR time, value at run time.
+#
+# THE `release` TRIGGER IS THE POINT, not an extra. Publishing is the moment the
+# answer can change — a fresh tag, a fresh image, a package whose visibility
+# defaults to private. Waiting until 05:11 the next morning to learn that the
+# release nobody can install is a whole day of a broken front door.
+#
+# AN UNREACHABLE REGISTRY OR RELEASE IS A FAILURE, NEVER A PASS — the ruling this
+# repo already made for `scripts/verify-action-pins.mjs`.
+#
+# THE JOB HOLDS NO CREDENTIAL, AND THAT IS ENFORCED RATHER THAN INTENDED. A gate
+# that passes because the runner happened to be logged in is worse than no gate.
+# `permissions: {}` grants nothing, no `secrets.*` or `github.token` is
+# interpolated, no login action runs, and `actions/checkout` is the only action
+# permitted. `auditAnonymousWorkflowJob` (asserted by the spec above) re-derives
+# all of that from this file as an ALLOWLIST over actions, run commands and
+# `${{ }}` expressions — so a login step nobody thought to add to a denylist is
+# caught on the day it lands.
+
+on:
+  # 05:11 UTC — offset from the action-pin (05:11 is taken; this is 06:11) and
+  # image-pin (05:41) nightlies so the supply-chain signals do not queue behind
+  # each other and a red one is attributable at a glance.
+  schedule:
+    - cron: '11 6 * * *'
+  # Publishing is when the answer changes. See the header.
+  release:
+    types: [published]
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  anonymous-install:
+    name: Fetch the documented bundle and pull its images as a stranger
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: {}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # No setup-node and no install step: the script is dependency-free ESM on
+      # the runner's built-in Node, so a check auditing the supply chain cannot
+      # itself become part of it.
+      #
+      # Invoked WITHOUT `--scrub`. That flag exists for a developer whose own
+      # shell would otherwise make a local run permanently red; using it here
+      # would let CI remove the very credentials whose absence is the finding.
+      # The run command is pinned by an allowlist so it cannot be added quietly.
+      - name: Walk the documented install path with no credentials
+        run: node scripts/verify-anonymous-install.mjs
+
+  nightly-red-alert:
+    name: Nightly red alert (pinned issue)
+    needs: [anonymous-install]
+    if: >-
+      always() &&
+      (github.event_name == 'schedule' || github.event_name == 'release') &&
+      needs.anonymous-install.result == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Create or update the "anonymous install path RED" issue (idempotent)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CHECK_RESULT: ${{ needs.anonymous-install.result }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          # The idempotency KEY is this fixed literal title — the lookup and the
+          # create MUST share it, so keep it a constant (never interpolated).
+          title='Documented install path is broken for anonymous users'
+          body="The nightly anonymous-install check FAILED: someone following our published install
+          instructions, with no GitHub or registry credentials, cannot complete them. The job log
+          names the documented URL, the file and line it was read from, every workload image in the
+          downloaded bundle, and the finding against each.
+
+          - Run (full report in the job log): ${RUN_URL}
+          - Check job result: ${CHECK_RESULT}
+          - Triggered by: ${EVENT}
+
+          **Why this is not cosmetic.** This is the front door. A user who cannot get past it never
+          reaches anything else we built, and every other gate stays green while it is broken —
+          they all verify artifacts we built ourselves, from a context that is already
+          authenticated.
+
+          **Triage**
+          - *anonymous-token-denied* — the registry refused to mint an ANONYMOUS pull token. HTTP
+            401 means the package is PRIVATE; 403 means it does not exist. The fix for 401 is a
+            GitHub setting, not a code change: Packages -> the package -> Change visibility ->
+            Public. Only the repository owner can do it.
+          - *install-url-not-200* / *install-url-unreachable* — the URL the docs publish does not
+            serve the bundle. Note that \`/releases/latest/\` resolves to the newest release
+            REPO-WIDE, so an npm release with no assets can steal the pointer (#585).
+          - *not-a-bundle* / *no-crd* / *no-images* — something downloaded, but it is not the
+            install bundle. Check what the release asset actually contains.
+          - *digest-mismatch* — the registry serves different bytes than the bundle pins.
+          - *env-credential* / *auth-store-present* / *unexpected-header* / *unminted-bearer* — the
+            check itself was not anonymous, so its verdict means nothing either way. Treat this as
+            a failure of the gate, not of the install path, and fix the workflow.
+          - *api-error* — unreachable is a failure, never a pass. Re-run to confirm before assuming
+            it was transient.
+
+          Re-run this workflow to confirm green, then close this issue."
+          existing="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 100 \
+            --json number,title \
+            --jq "[.[] | select(.title == \"${title}\")][0].number // empty")"
+          if [ -n "${existing}" ]; then
+            echo "updating existing alert issue #${existing}"
+            gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
+          else
+            echo "creating the alert issue"
+            new_url="$(gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}")"
+            new_num="${new_url##*/}"
+            gh issue pin "${new_num}" --repo "${GITHUB_REPOSITORY}" || echo "::warning::could not pin issue #${new_num} (non-fatal)"
+          fi
