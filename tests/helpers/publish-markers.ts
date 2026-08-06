@@ -108,6 +108,79 @@ export const RUN_MARKERS: Array<{ id: string; re: RegExp }> = [
 /** The one marker id produced structurally rather than by a text match. */
 export const BUILD_PUSH_ACTION_MARKER = 'docker/build-push-action push:';
 
+/** One alternation branch of one marker, as its own regex. */
+export interface MarkerBranch {
+  /** The marker this branch belongs to. */
+  id: string;
+  /** The branch text, or the whole source for a marker with no alternation. */
+  branch: string;
+  /** The marker regex with the alternation narrowed to THIS branch alone. */
+  re: RegExp;
+}
+
+/** A group containing a `|`, with no nesting. Two markers here have one each. */
+const ALTERNATION_GROUP = /\(([^()]*\|[^()]*)\)/g;
+
+/**
+ * Split a marker into its alternation branches, so coverage can be asserted
+ * BELOW marker granularity (#679 item 3).
+ *
+ * #675 replaced an unfalsifiable `re.source.length > 0` non-vacuity check with a
+ * per-marker sample, because a typo in a marker matching nothing in this repo
+ * was otherwise invisible. That motivation does not stop at the marker: `crane
+ * (push|copy)` and `gh release (create|upload|edit)` are five commands behind
+ * two ids, and a per-MARKER sample exercises one branch of each. A typo in
+ * `copy` or `edit` would have been just as invisible.
+ *
+ * Narrowing to one branch — rather than merely asserting some sample matches the
+ * whole marker — is what makes a per-branch sample necessary: `crane copy …`
+ * matches `\bcrane (push|copy)\b` and so would satisfy a marker-level check on
+ * its own.
+ *
+ * FAILS CLOSED on a marker with more than one alternation group: the cross
+ * product is not what a caller would mean by "branch", so widening this is a
+ * deliberate edit rather than a silent under-count.
+ *
+ * FAILS CLOSED, TOO, on a `|` OUTSIDE that group (#681 item 2). The round-1
+ * contract covered only the group count, and the shape it left failing OPEN is
+ * the natural way the next marker gets written: `/\bnpm publish\b|\bnpm
+ * dist-tag\b/`. MEASURED on that version — an ungrouped top-level alternation
+ * yielded ONE "branch" equal to the whole source, so a single sample satisfied
+ * the branch-coverage assertion and the other alternative was unexercised,
+ * SILENTLY. An enumerator whose whole purpose is to make unexercised
+ * alternatives visible must not report full coverage of a marker it did not
+ * decompose, so the cross-check is on the `|` rather than on the group count.
+ *
+ * An escaped `\|` (a LITERAL pipe) throws too. No marker uses one, and failing
+ * closed on a shape nobody writes is the cheap direction of that error.
+ */
+export function enumerateMarkerBranches(marker: { id: string; re: RegExp }): MarkerBranch[] {
+  const source = marker.re.source;
+  const groups = [...source.matchAll(ALTERNATION_GROUP)];
+  if (groups.length > 1) {
+    throw new Error(
+      `marker \`${marker.id}\` has ${groups.length} alternation groups; this enumerator handles one — widen it deliberately`,
+    );
+  }
+  const group = groups[0];
+  const at = group ? (group.index as number) : source.length;
+  const before = source.slice(0, at);
+  const after = source.slice(at + (group ? group[0].length : 0));
+  // The `|`s this enumerator DID narrow are the ones inside `group`; any other
+  // is an alternative it would silently drop.
+  if (`${before}${after}`.includes('|')) {
+    throw new Error(
+      `marker \`${marker.id}\` has an alternation outside a single group (${source}); this enumerator would silently under-count its branches — widen it deliberately`,
+    );
+  }
+  if (!group) return [{ id: marker.id, branch: source, re: marker.re }];
+  return (group[1] as string).split('|').map((branch) => ({
+    id: marker.id,
+    branch,
+    re: new RegExp(`${before}(${branch})${after}`),
+  }));
+}
+
 function isStepList(value: unknown): value is Array<Record<string, unknown>> {
   return Array.isArray(value);
 }

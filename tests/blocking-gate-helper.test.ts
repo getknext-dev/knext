@@ -540,6 +540,13 @@ jobs:
     });
 
     it('NEGATIVE CONTROL: `github.head_ref` and `github.ref_name` still scope', () => {
+      // `head_ref` is accepted DELIBERATELY, not by omission, and it is the
+      // weaker of the two: it is a bare branch name, so two pull requests from
+      // different FORKS both on `patch-1` share a group and one can cancel the
+      // other's gate. The decision to accept it anyway — what was measured, and
+      // what would reopen it — is recorded next to `PER_PR_CONTEXTS` in
+      // `tests/helpers/blocking-gate.ts` (#679). Flipping this expectation is a
+      // decision, not a fix.
       for (const key of ['github.head_ref', 'github.ref_name']) {
         const a = audit(
           withWorkflowConcurrency(
@@ -572,6 +579,46 @@ jobs:
       }
     });
 
+    it('rejects an `&&` chain — its value is only the LAST operand (#679)', () => {
+      // The counterpart to the `||` negative control above, and the reason
+      // `bodyIsPerPr` splits on `||` ONLY.
+      //
+      // `a && b` in a GitHub expression evaluates to `b` when `a` is truthy and
+      // to `a` (the falsy value) otherwise — so unlike `||`, "every operand
+      // varies per PR" does NOT imply the RESULT varies per PR, and the operand
+      // that decides the group is the last one. Splitting on `&&` was MEASURED
+      // to flip the first body below from rejected to ACCEPTED, i.e. it would
+      // admit a group whose per-PR-ness had never been established.
+      //
+      // Without this case the `&&` omission looks like an inconsistency next to
+      // the `||` split, and "fixing" it would widen the rule silently. Now it
+      // reds.
+      for (const body of [
+        'github.head_ref && github.ref',
+        'github.event.pull_request.number && github.event.inputs.env',
+      ]) {
+        const a = audit(
+          withWorkflowConcurrency(
+            `concurrency:\n  group: ci-\${{ ${body} }}\n  cancel-in-progress: true\n`,
+          ),
+        );
+        expect(a.problems.join('\n'), body).toMatch(/concurrency/);
+      }
+    });
+
+    it('rejects an `||` chain with an EMPTY operand', () => {
+      // Pins the behaviour an explicit empty-operand guard used to state
+      // redundantly (#679 item 4): an empty operand is in neither admissible
+      // set, so the chain fails on its own terms. Removing that guard changed
+      // no outcome — this keeps the outcome asserted rather than inferred.
+      const a = audit(
+        withWorkflowConcurrency(
+          'concurrency:\n  group: ci-${{ github.ref || }}\n  cancel-in-progress: true\n',
+        ),
+      );
+      expect(a.problems.join('\n')).toMatch(/concurrency/);
+    });
+
     it("NEGATIVE CONTROL: `preview.yml`'s real group is accepted", () => {
       // `.github/workflows/preview.yml:47` already uses this shape. It does not
       // red today only because `preview.yml` carries no audited gate; when one
@@ -602,6 +649,20 @@ jobs:
         );
         expect(a.problems.join('\n'), body).toMatch(/concurrency/);
       }
+    });
+
+    it('accepts a dispatch input in FIRST position — position is not the rule (#679)', () => {
+      // The claim `DISPATCH_INPUT`'s comment used to make ("admissible only as a
+      // LATER operand, never alone") was not what the code does: the rule is a
+      // COUNT over the operand set — every operand admissible, at least one
+      // genuinely per-PR — and a count has no order. This pins the actual
+      // behaviour so the comment and the code cannot drift apart again.
+      const a = audit(
+        withWorkflowConcurrency(
+          'concurrency:\n  group: ci-${{ github.event.inputs.env || github.ref }}\n  cancel-in-progress: true\n',
+        ),
+      );
+      expect(a.problems, a.problems.join('\n')).toEqual([]);
     });
 
     it('rejects an `||` chain containing a non-per-PR operand', () => {
