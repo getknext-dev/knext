@@ -259,7 +259,7 @@ function splitYamlDocumentsWithOffsets(text) {
   const docs = [];
   let current = [];
   let startLine = 1;
-  for (const [index, line] of text.split('\n').entries()) {
+  for (const [index, line] of normaliseNewlines(text).split('\n').entries()) {
     if (/^---\s*$/.test(line)) {
       if (current.join('').trim() !== '') docs.push({ text: current.join('\n'), startLine });
       current = [];
@@ -293,9 +293,71 @@ export const WORKLOAD_KINDS = new Set([
   'ReplicationController',
 ]);
 
-/** The document's top-level `kind:`, or undefined. */
+/**
+ * The spellings a YAML key can legally take, as a regex fragment.
+ *
+ * ONE primitive, used by every rule in this file, because the alternative has
+ * now failed twice. Round 3 asked "does this rule hold at every SITE?" and fixed
+ * four places; it never asked "does it hold at every SPELLING?", so each rule
+ * ended up tolerant of exactly the variants some earlier round had been burned
+ * by — `permissions:`, `env:` and the block-level `uses:` allowlist learned
+ * quotes while `stepUses`, `container:`/`services:` and `kind:` did not. A quoted
+ * `uses:` then defeated the entire per-step credential rule.
+ *
+ * Centralising it means the next rule cannot forget, and the next spelling is
+ * fixed in one place rather than in however many were remembered.
+ *
+ * Covers: bare, "double-quoted", 'single-quoted', and space-before-colon.
+ * Deliberately `[ \t]*` rather than `\s*` before the colon — `\s` spans
+ * newlines, which would let a key match across lines.
+ */
+export function yamlKey(name) {
+  return `["']?${name}["']?[ \\t]*:`;
+}
+
+/**
+ * Strip a trailing YAML comment from a single line.
+ *
+ * Space-preceded `#` only — `reg.io/a#b:v1` is one scalar, and stripping on a
+ * bare `#` would corrupt values rather than tidy them.
+ */
+function withoutTrailingComment(line) {
+  return line.replace(/\s+#.*$/, '');
+}
+
+/** Unwrap a quoted YAML scalar. */
+function unquote(value) {
+  return value.replace(/^["']|["']$/g, '');
+}
+
+/**
+ * Normalise line endings so every rule below can assume `\n`.
+ *
+ * Done ONCE at the entry points rather than per-regex. Under CRLF, `.` does not
+ * match `\r` and `$` will not match before it, which silently blanked every
+ * `with:` entry and made a CORRECT workflow report `persist-credentials` absent.
+ * Crying wolf ends the same way as never firing — the guard gets deleted — so
+ * this belongs with the comment-blanking fix, not in a backlog.
+ */
+function normaliseNewlines(text) {
+  return text.replace(/\r\n?/g, '\n');
+}
+
+/**
+ * The document's top-level `kind:`, or undefined.
+ *
+ * Comment-stripped and quote-tolerant — the SAME anchor shape round 2 fixed in
+ * `imageOnLine`, one scope out, and missed there. It matters more here: both
+ * `extractContainerImages` and `findUnscannedKindImages` skip on `!kind`, so an
+ * unreadable kind is dropped by BOTH — the document is neither scanned nor
+ * reported. Measured on a two-workload bundle, `kind: Deployment # the manager`
+ * meant the operator image #586 is about was never pulled and nothing said so.
+ */
 function documentKind(docText) {
-  return docText.match(/^kind:\s*(\S+)\s*$/m)?.[1];
+  const line = docText.match(new RegExp(`^${yamlKey('kind')}(.*)$`, 'm'))?.[1];
+  if (line === undefined) return undefined;
+  const value = unquote(withoutTrailingComment(line).trim());
+  return value === '' ? undefined : value;
 }
 
 /**
@@ -321,10 +383,11 @@ function imageOnLine(line) {
   // opens a comment in YAML, so `reg.io/a#b:v1` is one scalar. Stripping on a
   // bare `#` would corrupt the reference instead of dropping it — a worse bug
   // than the one being fixed.
-  const withoutComment = line.replace(/\s+#.*$/, '');
-  const match = withoutComment.match(/^\s*(?:-\s+)?image:\s*(\S+)\s*$/);
+  const match = withoutTrailingComment(line).match(
+    new RegExp(`^\\s*(?:-\\s+)?${yamlKey('image')}\\s*(\\S+)\\s*$`),
+  );
   if (!match) return undefined;
-  const value = match[1].replace(/^["']|["']$/g, '');
+  const value = unquote(match[1]);
   // A block scalar or an anchor is not a reference; neither is a bare word with
   // no registry, repository separator, tag or digest.
   if (/^[|>&*]/.test(value)) return undefined;
@@ -848,7 +911,7 @@ export const FORBIDDEN_JOB_KEYS = ['container', 'services'];
  * Only a SPACE-preceded `#` opens a comment in YAML, matching `imageOnLine`.
  */
 function blankYamlComments(text) {
-  return text
+  return normaliseNewlines(text)
     .split('\n')
     .map((line) => (/^\s*#/.test(line) ? '' : line.replace(/\s+#.*$/, '')))
     .join('\n');
@@ -869,7 +932,8 @@ function blankYamlComments(text) {
  */
 export function parseJobSteps(block) {
   const lines = block.split('\n');
-  const stepsAt = lines.findIndex((line) => /^\s*steps\s*:\s*$/.test(line));
+  const stepsRe = new RegExp(`^\\s*${yamlKey('steps')}\\s*$`);
+  const stepsAt = lines.findIndex((line) => stepsRe.test(line));
   if (stepsAt === -1) return [];
 
   const steps = [];
@@ -892,9 +956,29 @@ export function parseJobSteps(block) {
   return steps;
 }
 
-/** The action a step runs, or undefined. */
+/**
+ * The action a step runs.
+ *
+ * Three-valued on purpose:
+ *   - `undefined` — the step declares no `uses` at all (a `run:` step);
+ *   - `null`      — it declares `uses` but the value is not readable inline;
+ *   - a string    — the action reference.
+ *
+ * The `null` case is the fail-closed one, and it has to be per-STEP. The
+ * previous net was `steps.length === 0 && block.includes('uses:')` — per JOB, so
+ * a step whose `uses` was unreadable while its siblings parsed fine produced no
+ * finding at all. That is precisely the per-job-vs-per-step error this round
+ * exists to eliminate, reintroduced inside the net added to prevent it.
+ *
+ * Quote-tolerant via the shared `yamlKey`. Without that, `- "uses": actions/checkout@…`
+ * was recognised as checkout by the block-level allowlist fifteen lines away and
+ * returned `undefined` here, skipping the `persist-credentials` rule entirely.
+ */
 export function stepUses(stepText) {
-  return stepText.match(/^\s*(?:-\s+)?uses\s*:\s*(\S+)/m)?.[1];
+  const match = stepText.match(new RegExp(`^\\s*(?:-\\s+)?${yamlKey('uses')}(.*)$`, 'm'));
+  if (!match) return undefined;
+  const value = unquote(withoutTrailingComment(match[1]).trim());
+  return value === '' ? null : value;
 }
 
 /**
@@ -909,11 +993,12 @@ export function stepUses(stepText) {
  */
 export function parseWithEntries(stepText) {
   const lines = stepText.split('\n');
-  const index = lines.findIndex((line) => /^\s*with\s*:/.test(line));
+  const withRe = new RegExp(`^\\s*${yamlKey('with')}`);
+  const index = lines.findIndex((line) => withRe.test(line));
   if (index === -1) return [];
 
   const line = lines[index];
-  const inline = line.replace(/^\s*with\s*:\s*/, '').trim();
+  const inline = line.replace(withRe, '').trim();
   if (inline !== '') {
     return inline
       .replace(/^\{/, '')
@@ -1021,8 +1106,12 @@ export function auditAnonymousWorkflowJob(workflowText) {
   }
 
   // 1b. container/services — a `credentials:` mapping is a registry login.
+  // NOT pinned to four spaces. Job keys only need more indentation than the
+  // 2-space job id, so 6 and 8 are legal YAML — and this was the one rule still
+  // pinned while the comment above claimed the pin was gone. Nothing caught it
+  // because the only test ever written for it used the 4-space case.
   for (const key of FORBIDDEN_JOB_KEYS) {
-    if (new RegExp(`^ {4}${key}:`, 'm').test(block)) {
+    if (new RegExp(`^\\s+${yamlKey(key)}`, 'm').test(block)) {
       findings.push(
         `job \`${jobId}\` declares \`${key}:\`, which takes a \`credentials:\` registry ` +
           'username/password — a job that has one is not anonymous whatever its steps do',
@@ -1062,9 +1151,9 @@ export function auditAnonymousWorkflowJob(workflowText) {
   // zero findings. Adding a second checkout is the most ordinary edit this
   // workflow will ever receive.
   const steps = parseJobSteps(block);
-  if (steps.length === 0 && block.includes('uses:')) {
-    // Fail closed: if the step parse yields nothing while the job clearly has
-    // steps, every per-step rule below is silently vacuous.
+  if (steps.length === 0 && new RegExp(yamlKey('uses')).test(block)) {
+    // Fail closed at the JOB level: the parse yielded nothing at all while the
+    // job clearly has steps, so every per-step rule below would be vacuous.
     findings.push(
       `job \`${jobId}\` has \`uses:\` steps that could not be parsed as a \`steps:\` sequence — ` +
         'the per-step credential rules would pass vacuously',
@@ -1074,6 +1163,17 @@ export function auditAnonymousWorkflowJob(workflowText) {
     const uses = stepUses(stepText);
     const entries = parseWithEntries(stepText);
     const where = `job \`${jobId}\` step ${index + 1}`;
+
+    // Fail closed at the STEP level. The job-level net above only fires when
+    // NOTHING parsed; a single unreadable step among readable siblings slipped
+    // through it, which is the same per-job-vs-per-step error one scope in.
+    if (uses === null) {
+      findings.push(
+        `${where} declares \`uses\` with a value the parser cannot read inline — refusing to ` +
+          'guess whether it is a checkout, because guessing wrong silently skips the ' +
+          '`persist-credentials` rule',
+      );
+    }
 
     for (const { key } of entries) {
       if (!ALLOWED_JOB_WITH_KEYS.has(key)) {

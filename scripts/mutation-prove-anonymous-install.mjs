@@ -28,14 +28,37 @@
  * restoration is content-addressed and every mutation carries the residue
  * marker that `scripts/scan-mutation-residue.mjs` finds if a run stalls.
  *
+ * TWO RULES FOR ANCHORS, both learned the expensive way:
+ *
+ * 1. AN ANCHOR MADE ONLY OF INDENTATION IS NOT UNIQUE. The harness asserts an
+ *    anchor occurs exactly once, and that assertion is a SUBSTRING count. So
+ *    `'    if (x) {'` (four spaces) matches inside `'      if (x) {'` (six) —
+ *    count 1, no complaint, and the row silently mutates a line it was never
+ *    written for. That is how two rows here became the same mutation after a
+ *    refactor re-indented one site and deleted the other: `declared` was
+ *    inflated by one and nobody could see it from the output, since both rows
+ *    dutifully went red. When a refactor changes indentation, re-anchor on
+ *    something with real text either side of it rather than trusting the count.
+ *
+ * 2. A STALE ANCHOR IS ONLY LOUD WHEN IT MATCHES NOTHING. The refusal at zero
+ *    occurrences is what catches a row whose subject was deleted — it is not a
+ *    general defence against a row that has quietly stopped meaning what it
+ *    says. Rule 1 is the case it does not cover.
+ *
+ * KNOWN TRAP when running the whole suite under mutation: `tests/mutation-
+ * residue-scan.test.ts` scans tracked files for this harness's own marker, so it
+ * fires on every live mutation. Score the spec under test, not the whole suite.
+ *
  * Usage:  node scripts/mutation-prove-anonymous-install.mjs
  */
 
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveTestRunner } from './lib/ci-blocking-gate-proof.mjs';
-import { mutate, restore, snapshot } from './lib/mutation-harness.mjs';
+import { countOccurrences, mutate, restore, snapshot } from './lib/mutation-harness.mjs';
 import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -147,21 +170,27 @@ const MUTATIONS = [
   [
     SCRIPT,
     'a job-level `container:`/`services:` registry login goes unseen',
-    "    if (new RegExp(`^ {4}${key}:`, 'm').test(block)) {",
+    // Re-anchored in round 4: this row pointed at the 4-space-pinned regex that
+    // round 4 replaced. The harness refused it at zero occurrences rather than
+    // scoring nothing — the loud half of the anchor lesson in the header.
+    "    if (new RegExp(`^\\\\s+${yamlKey(key)}`, 'm').test(block)) {",
     '    if (false) {',
   ],
-  // NOTE: the round-2 disarm of the per-JOB `persist-credentials` check is gone,
-  // because the code it anchored on is gone — round 3 replaced it with the
-  // per-STEP rule below, which is what the job-wide form could not express. The
-  // harness refused the stale anchor rather than silently scoring nothing, which
-  // is the only reason this was not left as a mutation that proves a deleted
-  // behaviour.
-  [
-    SCRIPT,
-    'the `with:` allowlist becomes a denylist of one literal',
-    '    if (!ALLOWED_JOB_WITH_KEYS.has(key)) {',
-    "    if (key === 'token') {",
-  ],
+  // NOTE: two round-2 rows are gone, and the two removals failed differently —
+  // which is the whole lesson.
+  //
+  //   - the per-JOB `persist-credentials` disarm anchored on code round 3
+  //     deleted. The harness REFUSED it (0 occurrences), so it could not
+  //     silently score nothing.
+  //   - the job-wide `with:` disarm anchored on `'    if (!ALLOWED_JOB_WITH_KEYS…'`
+  //     — four spaces. Round 3 deleted that site too, but the surviving per-step
+  //     site is the SAME text at six spaces, and the 4-space string is a
+  //     SUBSTRING of it. `indexOf` found it, `countOccurrences` said 1, and the
+  //     row went on reding — against a line it was never written for, producing a
+  //     mutated file byte-identical to the row below. Two rows, one mutation,
+  //     `declared` inflated by one.
+  //
+  // See the header: an anchor made only of indentation is not unique.
   [
     SCRIPT,
     'the audit reads raw text, so a COMMENT can satisfy the required-input guard',
@@ -172,8 +201,12 @@ const MUTATIONS = [
   [
     SCRIPT,
     'F4: an image with a trailing YAML comment is silently dropped',
-    "  const withoutComment = line.replace(/\\s+#.*$/, '');",
-    '  const withoutComment = line;',
+    // Re-anchored in round 4: comment stripping moved into the shared
+    // `withoutTrailingComment` helper. Anchored on `imageOnLine`'s CALL SITE
+    // rather than the helper body, so this row still proves the image rule
+    // specifically and does not overlap the `documentKind` row below.
+    '  const match = withoutTrailingComment(line).match(',
+    '  const match = line.match(',
   ],
   [
     SCRIPT,
@@ -228,6 +261,48 @@ const MUTATIONS = [
     '  if (/^\\s*["\']?env["\']?\\s*:/m.test(block)) {',
     '  if (/^\\s*env:\\s*$/m.test(block)) {',
   ],
+  // ── R4: every rule at every SPELLING, not just every site ─────────────────
+  //
+  // Each row below removes the tolerance for ONE spelling. They are written as
+  // narrowings of the shared `yamlKey` primitive or of its callers, because a
+  // rule that only handles the spelling this repo uses today is the shape that
+  // has now defeated two rounds of review.
+  [
+    SCRIPT,
+    'R4 THE BUG: `stepUses` stops recognising a QUOTED `uses:` key',
+    "  const match = stepText.match(new RegExp(`^\\\\s*(?:-\\\\s+)?${yamlKey('uses')}(.*)$`, 'm'));",
+    '  const match = stepText.match(/^\\s*(?:-\\s+)?uses\\s*:(.*)$/m);',
+  ],
+  [
+    SCRIPT,
+    'the shared key primitive stops tolerating quotes at ALL sites at once',
+    'export function yamlKey(name) {\n  return `["\']?${name}["\']?[ \\\\t]*:`;',
+    'export function yamlKey(name) {\n  return `${name}:`;',
+  ],
+  [
+    SCRIPT,
+    'the per-STEP fail-closed for an unreadable `uses` is removed',
+    '    if (uses === null) {',
+    '    if (false) {',
+  ],
+  [
+    SCRIPT,
+    '`container:`/`services:` goes back to being pinned at a 4-space indent',
+    "    if (new RegExp(`^\\\\s+${yamlKey(key)}`, 'm').test(block)) {",
+    "    if (new RegExp(`^ {4}${key}:`, 'm').test(block)) {",
+  ],
+  [
+    SCRIPT,
+    '`documentKind` stops stripping a trailing comment, dropping the document from BOTH scans',
+    '  const value = unquote(withoutTrailingComment(line).trim());',
+    '  const value = unquote(line.trim());',
+  ],
+  [
+    SCRIPT,
+    'CRLF normalisation is removed, blanking every `with:` entry on a correct workflow',
+    "function normaliseNewlines(text) {\n  return text.replace(/\\r\\n?/g, '\\n');",
+    'function normaliseNewlines(text) {\n  return text;',
+  ],
   [
     OTHER_DOC,
     'a docs copy OUTSIDE the docs site drifts back to the #585 404 URL',
@@ -253,6 +328,54 @@ const MUTATIONS = [
     '      - name: Log in to GHCR\n        uses: docker/login-action@v3\n      - name: Checkout code',
   ],
 ];
+
+/**
+ * PREFLIGHT: no two rows may produce the same mutation.
+ *
+ * The header explains why an indentation-only anchor is not unique; this is that
+ * lesson as a GATE rather than a comment, because the comment would not have
+ * caught it either. Two rows here silently collapsed into one mutation after a
+ * refactor re-indented their shared target — both went red, `declared` was
+ * inflated by one, and nothing in the output could show it. `declared === run`
+ * cannot detect this: the duplicate row runs, it just proves nothing new.
+ *
+ * Computed in memory, before anything touches disk, so a duplicate is reported
+ * without a single file being mutated.
+ */
+function assertDistinctMutations() {
+  const problems = [];
+  const seen = new Map();
+  for (const [file, label, anchor, replacement] of MUTATIONS) {
+    const source = readFileSync(file, 'utf8');
+    const occurrences = countOccurrences(source, anchor);
+    if (occurrences !== 1) {
+      problems.push(`"${label}": anchor occurs ${occurrences} times (expected exactly 1)`);
+      continue;
+    }
+    const mutated = source.replace(anchor, () => replacement);
+    if (mutated === source) {
+      problems.push(`"${label}": substitution changes nothing`);
+      continue;
+    }
+    const fingerprint = `${file} :: ${createHash('sha256').update(mutated).digest('hex')}`;
+    if (seen.has(fingerprint)) {
+      problems.push(
+        `"${label}" produces a mutated file byte-identical to "${seen.get(fingerprint)}" — ` +
+          'two rows, one mutation. Re-anchor on text, not indentation.',
+      );
+      continue;
+    }
+    seen.set(fingerprint, label);
+  }
+  if (problems.length > 0) {
+    console.error('FATAL: mutation table preflight failed\n');
+    for (const problem of problems) console.error(`  - ${problem}`);
+    process.exit(1);
+  }
+  console.log(`Preflight: ${MUTATIONS.length} rows, all anchored once and all distinct.\n`);
+}
+
+assertDistinctMutations();
 
 declareMutations(MUTATIONS.length);
 

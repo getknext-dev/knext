@@ -253,6 +253,68 @@ describe('extractContainerImages — every workload image, not the one we sought
     expect(extractContainerImages(doc).map((i) => i.image)).toEqual(['reg.io/a#b:v1']);
   });
 
+  it.each([
+    ['a trailing comment', 'kind: Deployment # the manager'],
+    ['a quoted value', 'kind: "Deployment"'],
+    ['a single-quoted value', "kind: 'Deployment'"],
+    ['a spaced colon', 'kind : Deployment'],
+    ['a quoted key', '"kind": Deployment'],
+  ])('recognises a workload document whose kind carries %s', (_label, kindLine) => {
+    // The SAME anchor shape round 2 fixed in `imageOnLine`, one scope out.
+    // `documentKind` returning undefined is worse than returning a wrong kind:
+    // BOTH `extractContainerImages` and `findUnscannedKindImages` skip on
+    // `!kind`, so the document is dropped by both — no scan, and no finding
+    // either. Measured end to end, the operator image #586 is about was never
+    // pulled and nothing said so.
+    const doc = [
+      'apiVersion: apps/v1',
+      kindLine,
+      'spec:',
+      '  containers:',
+      `  - image: ghcr.io/o/r:v1@${DIGEST}`,
+    ].join('\n');
+    expect(extractContainerImages(doc).map((i) => i.image)).toEqual([`ghcr.io/o/r:v1@${DIGEST}`]);
+  });
+
+  it('an UNREADABLE kind is reported, never silently dropped by both scans', async () => {
+    // Fail closed on the residue: whatever spelling defeats the parser in future
+    // must land in one bucket or the other, and "neither" is the one outcome
+    // that must be impossible.
+    const body = [
+      'apiVersion: apiextensions.k8s.io/v1',
+      'kind: CustomResourceDefinition',
+      'metadata:',
+      '  name: x',
+      '---',
+      'apiVersion: apps/v1',
+      'kind: [Deployment]',
+      'spec:',
+      '  containers:',
+      `  - image: ghcr.io/o/r:v1@${DIGEST}`,
+    ].join('\n');
+    const { images, findings } = await verifyBundle(body, { api: async () => ({}) });
+    expect(
+      images.length > 0 || findings.some((f) => f.reason === 'unscanned-kind-image'),
+      'an image must be either scanned or reported — never neither',
+    ).toBe(true);
+  });
+
+  it('recognises an image whose KEY is quoted', () => {
+    const doc = ['kind: Pod', 'spec:', '  containers:', `  - "image": ghcr.io/o/r:v1`].join('\n');
+    expect(extractContainerImages(doc).map((i) => i.image)).toEqual(['ghcr.io/o/r:v1']);
+  });
+
+  it('parses a CRLF bundle', () => {
+    const doc = [
+      'apiVersion: apps/v1',
+      'kind: Deployment',
+      'spec:',
+      '  containers:',
+      `  - image: ghcr.io/o/r:v1@${DIGEST}`,
+    ].join('\r\n');
+    expect(extractContainerImages(doc).map((i) => i.image)).toEqual([`ghcr.io/o/r:v1@${DIGEST}`]);
+  });
+
   it('parses the REAL published bundle shape', () => {
     // A fixture that drifts from reality proves nothing, so the shape asserted
     // here is the one `operator-latest/install.yaml` actually ships: many docs,
@@ -1091,6 +1153,123 @@ describe('anonymous-install-nightly.yml — the runner must have no credential',
       '        env: { GH_TOKEN: aLiteralToken }',
     ].join('\n');
     expect(auditAnonymousWorkflowJob(synthetic(steps)).findings.join(' ')).toMatch(/env/i);
+  });
+
+  // ── R4: does each rule hold at every SPELLING, not just every site? ─────────
+
+  it.each([
+    ['"uses"', '      - "uses": actions/checkout@abc'],
+    ["'uses'", "      - 'uses': actions/checkout@abc"],
+    ['uses with a spaced colon', '      - uses : actions/checkout@abc'],
+  ])('flags a SECOND checkout declared with %s and no `with:`', (_label, line) => {
+    // The per-step rule is only as good as its ability to RECOGNISE a checkout.
+    // The block-level action allowlist was already quote-tolerant, so a quoted
+    // `uses:` reads as checkout there while `stepUses` returned undefined and
+    // skipped the `persist-credentials` rule entirely.
+    const mutated = synthetic(`${GOOD_STEPS}\n${line}`);
+    expect(auditAnonymousWorkflowJob(mutated).findings.join(' ')).toMatch(/persist-credentials/i);
+  });
+
+  it('flags a SECOND checkout with a quoted `uses:` AND an explicit `true`', () => {
+    const mutated = synthetic(
+      `${GOOD_STEPS}\n      - "uses": actions/checkout@abc\n        with:\n          persist-credentials: true`,
+    );
+    expect(auditAnonymousWorkflowJob(mutated).findings.join(' ')).toMatch(/persist-credentials/i);
+  });
+
+  it('reads a quoted `with:` mapping rather than treating it as absent', () => {
+    const good = [
+      '      - uses: actions/checkout@abc',
+      '        "with":',
+      '          persist-credentials: false',
+      '      - run: node scripts/verify-anonymous-install.mjs',
+    ].join('\n');
+    expect(auditAnonymousWorkflowJob(synthetic(good)).findings).toEqual([]);
+  });
+
+  it('FAILS CLOSED per STEP when a step declares `uses` the parser cannot read', () => {
+    // The safety net was `steps.length === 0 && block.includes('uses:')` — per
+    // JOB. A step whose `uses` is unreadable while its siblings parse fine
+    // produced no finding at all: the per-job-vs-per-step error this whole round
+    // exists to eliminate, reintroduced inside the net meant to prevent it.
+    const steps = [
+      '      - uses:',
+      '          actions/checkout@abc',
+      '      - run: node scripts/verify-anonymous-install.mjs',
+    ].join('\n');
+    const audit = auditAnonymousWorkflowJob(synthetic(steps));
+    expect(audit.findings.join(' ')).toMatch(/cannot read|unreadable/i);
+    expect(audit.findings.join(' ')).toMatch(/step\s+1/i);
+  });
+
+  it.each([[4], [6], [8]])('flags a job-level `container:` at a %s-space indent', (indent) => {
+    // Job keys only need MORE indentation than the 2-space job id, so 6 and 8
+    // are legal YAML. This was the one rule still pinned to four spaces — while
+    // the comment fifteen lines above claimed the pin was gone.
+    const pad = ' '.repeat(indent);
+    const workflow = [
+      'name: x',
+      'on:',
+      '  workflow_dispatch: {}',
+      'permissions: {}',
+      'jobs:',
+      '  anonymous-install:',
+      `${pad}runs-on: ubuntu-latest`,
+      `${pad}permissions: {}`,
+      `${pad}container:`,
+      `${pad}  image: ghcr.io/o/r:v1`,
+      `${pad}  credentials:`,
+      `${pad}    username: x`,
+      `${pad}steps:`,
+      `${pad}  - run: node scripts/verify-anonymous-install.mjs`,
+      '',
+    ].join('\n');
+    expect(auditAnonymousWorkflowJob(workflow).findings.join(' ')).toMatch(/container/i);
+  });
+
+  it('flags a quoted job-level `"services":`', () => {
+    const workflow = read(WORKFLOW).replace(
+      '    permissions: {}',
+      '    permissions: {}\n    "services":\n      db:\n        image: postgres:16',
+    );
+    expect(workflow).not.toBe(read(WORKFLOW));
+    expect(auditAnonymousWorkflowJob(workflow).findings.join(' ')).toMatch(/services/i);
+  });
+
+  it('parses a CRLF workflow without crying wolf on a correct one', () => {
+    // The entry regex carried no `m` flag, so `$` would not match before `\r`
+    // and EVERY `with:` entry dropped — reporting `persist-credentials` absent
+    // on a workflow that sets it. Cry-wolf is the same end state as never
+    // firing: the guard gets deleted either way.
+    const crlf = synthetic(GOOD_STEPS).replace(/\n/g, '\r\n');
+    expect(auditAnonymousWorkflowJob(crlf).findings).toEqual([]);
+  });
+
+  it('still flags a bad CRLF workflow — normalisation must not swallow findings', () => {
+    const crlf = synthetic(`${GOOD_STEPS}\n      - uses: actions/checkout@abc`).replace(
+      /\n/g,
+      '\r\n',
+    );
+    expect(auditAnonymousWorkflowJob(crlf).findings.join(' ')).toMatch(/persist-credentials/i);
+  });
+
+  it('recognises a quoted `"steps":` key', () => {
+    const workflow = [
+      'name: x',
+      'on:',
+      '  workflow_dispatch: {}',
+      'permissions: {}',
+      'jobs:',
+      '  anonymous-install:',
+      '    runs-on: ubuntu-latest',
+      '    permissions: {}',
+      '    "steps":',
+      '      - uses: actions/checkout@abc',
+      '      - run: node scripts/verify-anonymous-install.mjs',
+      '',
+    ].join('\n');
+    // The checkout sets no `with:`, so a parser that found the steps reports it.
+    expect(auditAnonymousWorkflowJob(workflow).findings.join(' ')).toMatch(/persist-credentials/i);
   });
 
   it('flags a `gh auth login` in a run step', () => {
