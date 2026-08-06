@@ -213,7 +213,20 @@ export function shellIfBlocks(script: string): ShellIfBlock[] {
   return blocks;
 }
 
-/** A non-zero `exit <n>` at the top level of a shell block, or null. */
+/**
+ * A non-zero `exit <n>` somewhere in a shell block's THEN arm.
+ *
+ * HONEST SCOPE, and the SAME limit the JS half carries (see
+ * `directFailingExit`): this is not reachability analysis. An `exit 1` nested
+ * inside `if false; then … fi` within the branch still counts. Stated on BOTH
+ * halves rather than one, because a limit documented on only one of two
+ * symmetric checks reads as a claim that the other does not have it.
+ *
+ * Both are adversarial camouflage rather than a plausible disarm — nobody
+ * weakens a gate by wrapping its exit in a false conditional — so the cost of
+ * modelling them is not paid. What IS checked properly on both halves is the
+ * polarity of the branch that owns the tooth.
+ */
 function shellFailingExit(body: string): { found: boolean; zero: boolean } {
   let found = false;
   let zero = false;
@@ -403,6 +416,72 @@ function evaluateCondition(node: ts.Node, s: Fixture): unknown {
   throw new UnsupportedCondition(`${ts.SyntaxKind[node.kind]}: ${node.getText()}`);
 }
 
+/**
+ * A REAL shard summary, field-for-field as `scripts/e2e-summary.mjs` emits it.
+ *
+ * WHY THE FULL SHAPE, AND NOT JUST THE THREE COUNTS THE GATE READS. A probe
+ * carrying only `{failed, notRun, truncated}` is not a summary the pipeline can
+ * ever produce, and a condition is only as well-judged as the data it is judged
+ * on. Measured against the three-field version of these fixtures, all four of
+ * these disarms passed with every assertion green:
+ *
+ *   if (s.shard === undefined && ( … ))   never fires — `shard` was absent from
+ *   if (s.ref === undefined && … )        the probe, so the guard read `true`;
+ *   if ( … || s.passed > 0)               fires always — `passed` was absent, so
+ *   if (s.truncated === true || s.passed > 0)   the added disjunct read
+ *                                         `undefined > 0`, i.e. false.
+ *
+ * The first pair is the exact inverse of the dead-conjunct row the proof DOES
+ * carry (`s.neverSet === "zzz" && …`, correctly caught), and the inverse is the
+ * one that worked — because the gap was in the fixture, not in the workflow.
+ * The second pair is the "permanently red is the other way to make it
+ * meaningless" class this file guards on tooth 3, reached through a field the
+ * fixture did not have.
+ *
+ * It also closes the `==`/`!=` refusal's one hole: an unmodelled operator hidden
+ * behind `s.shard ? … : …` was never evaluated, because no fixture gave `shard`
+ * a value. A realistic summary reaches both arms.
+ *
+ * Counts stay INTERNALLY CONSISTENT — `passed + failed + notRun === expectedTotal`
+ * — because an impossible summary is its own under-specified oracle.
+ */
+function shardSummary(overrides: Fixture = {}): Fixture {
+  const failed = Number(overrides.failed ?? 0);
+  const notRun = Number(overrides.notRun ?? 0);
+  const expectedTotal = 45;
+  return {
+    shard: '3/16',
+    ref: 'v16.2.1',
+    runtime: 'node',
+    passed: expectedTotal - failed - notRun,
+    failed,
+    notRun,
+    excluded: 2,
+    expectedTotal,
+    truncated: false,
+    // Present only on a red shard, exactly as e2e-summary.mjs writes them.
+    failures:
+      failed > 0
+        ? [{ file: 'test/e2e/app-dir/rsc-basic.test.ts', kind: 'assertion', cases: ['renders'] }]
+        : [],
+    notRunFiles: notRun > 0 ? ['test/e2e/app-dir/actions.test.ts'] : [],
+    ...overrides,
+  };
+}
+
+/**
+ * A summary from a shard whose runner log carried no `total: N` header.
+ *
+ * `expectedTotal` and `truncated` are emitted as a PAIR or not at all
+ * (`e2e-summary.mjs` spreads them from one conditional), so the absent-flag
+ * case has to drop both — dropping only `truncated` would be a shape the
+ * pipeline never produces.
+ */
+function untruncatableSummary(): Fixture {
+  const { expectedTotal: _e, truncated: _t, ...rest } = shardSummary();
+  return rest;
+}
+
 /** One polarity case: the summary, whether the branch must fire, and why. */
 interface PolarityCase {
   summary: Fixture;
@@ -520,18 +599,32 @@ export function auditFailOnRedGateTeeth(workflowPath: string): GateTeethAudit {
   // while its own claim was false. Nothing that judges the SCRIPT may depend on
   // the embedded program being locatable.
   const nodeStart = run.indexOf("node -e '");
-  if (nodeStart !== -1) {
-    const tail = run.slice(nodeStart).replace(/'[\s\S]*'/, "'…'");
-    if (/\|\|/.test(tail)) {
+  // The swallow scan covers the WHOLE script, not the tail after `node -e '`.
+  // Anchoring it there left the same vacuous shape one hole over: move the
+  // program out of `node -e` AND append `|| true`, and there was no anchor to
+  // slice from, so the finding list came back empty. Whether the program is
+  // inline is irrelevant to whether the script swallows an exit.
+  //
+  // Shell single-quoted spans are blanked first so the embedded JS's own `||`
+  // is not read as a shell operator. A POSIX single-quoted word cannot contain
+  // a `'`, so the spans pair unambiguously — but only if the count is EVEN.
+  const quoteCount = (run.match(/'/g) ?? []).length;
+  if (quoteCount % 2 !== 0) {
+    exitReachesStep.push(
+      "the gate script's single quotes do not pair, so a shell `||` cannot be told from one inside the embedded program — this audit refuses to guess rather than report a swallow it is not sure about",
+    );
+  } else {
+    const shell = run.replace(/'[^']*'/g, "''");
+    if (/\|\|/.test(shell)) {
       exitReachesStep.push(
-        "the `node -e` invocation is followed by `||` — its non-zero exit is swallowed exactly the way the shard run step's is (`|| true`), and all three teeth become decoration",
+        "the gate script contains a shell `||` — a non-zero exit is swallowed exactly the way the shard run step's is (`|| true`), and all three teeth become decoration",
       );
     }
     // `||` is stripped first: it is reported above with its own message, and a
     // naive `|` search would report the SAME defect twice under two names.
-    if (/\|/.test(tail.replace(/\|\|/g, ''))) {
+    if (/\|/.test(shell.replace(/\|\|/g, ''))) {
       exitReachesStep.push(
-        'the `node -e` invocation is piped — a pipeline reports the LAST command’s status, not the gate’s',
+        'the gate script contains a pipeline — a pipeline reports the LAST command’s status, not the gate’s',
       );
     }
   }
@@ -626,26 +719,36 @@ export function auditFailOnRedGateTeeth(workflowPath: string): GateTeethAudit {
     }
   };
 
-  // A shard with ONE real failure and a clean one must be told apart, and so
-  // must a shard with one phantom not-run file. Three cases rather than one:
-  // the second is what makes `||` → `&&` a finding, and the third is what makes
-  // an inversion or a `> 999` threshold one.
+  // FOUR red cases, and the counts go past 1. A probe set of {0, 1} accepts
+  // anything correct at 1 and wrong at 2 or more — `=== 1` and an upper bound
+  // `&& s.failed < 2` both passed a {0,1} probe set, and `=== 1` IS run
+  // 28552585087's shape: eight real failures, exit 0, workflow SUCCESS.
   auditJsTooth('failed-or-not-run', ['failed'], (cond) =>
     polarityProblems(cond, [
       {
-        summary: { failed: 1, notRun: 0, truncated: false },
+        summary: shardSummary({ failed: 1 }),
         fires: true,
-        why: 'one REAL test failure — run 28552585087 in miniature',
+        why: 'one REAL test failure',
       },
       {
-        summary: { failed: 0, notRun: 1, truncated: false },
+        summary: shardSummary({ failed: 8 }),
+        fires: true,
+        why: "EIGHT real test failures — run 28552585087's actual shape",
+      },
+      {
+        summary: shardSummary({ notRun: 1 }),
         fires: true,
         why: 'one phantom not-run file (a jest infra abort, not a test result)',
       },
       {
-        summary: { failed: 0, notRun: 0, truncated: false },
+        summary: shardSummary({ notRun: 3 }),
+        fires: true,
+        why: 'three phantom not-run files',
+      },
+      {
+        summary: shardSummary(),
         fires: false,
-        why: 'a genuinely clean shard',
+        why: 'a genuinely clean 45-of-45 shard',
       },
     ]),
   );
@@ -653,19 +756,19 @@ export function auditFailOnRedGateTeeth(workflowPath: string): GateTeethAudit {
   auditJsTooth('truncated', ['truncated'], (cond) =>
     polarityProblems(cond, [
       {
-        summary: { failed: 0, notRun: 0, truncated: true },
+        summary: shardSummary({ truncated: true, passed: 20 }),
         fires: true,
-        why: 'a shard killed mid-run: partial results',
+        why: 'a shard killed mid-run: 20 of 45 selected tests reported',
       },
       {
-        summary: { failed: 0, notRun: 0, truncated: false },
+        summary: shardSummary(),
         fires: false,
         why: 'a complete result set',
       },
       {
-        summary: { failed: 0, notRun: 0 },
+        summary: untruncatableSummary(),
         fires: false,
-        why: 'a summary that carries no truncated flag at all — firing here makes the gate permanently red, which is the other way to make it meaningless',
+        why: 'a summary with no expectedTotal, so no truncated flag at all — firing here makes the gate permanently red, which is the other way to make it meaningless',
       },
     ]),
   );

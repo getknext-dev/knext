@@ -2212,6 +2212,14 @@ describe('compat-suite fail-on-red gate — revocation teeth (test-e2e-deploy.ym
   // green — and the first of those inverts the gate outright, failing green
   // shards and passing red ones. The conditions are now EVALUATED against
   // synthetic summaries instead of pattern-matched.
+  //
+  // Round 3 went one level down again: an evaluation is only as good as what it
+  // is evaluated ON, so the FIXTURES became the contract. Probing three fields
+  // at 0 and 1 accepted `=== 1` — which is run 28552585087's own shape, eight
+  // failures — an upper bound `< 2`, and (because a real summary carries
+  // `shard`, `ref`, `passed`, `excluded`, `expectedTotal`) both a branch that
+  // can never fire and one that fires always. The probes are now complete,
+  // internally-consistent summaries of the shape scripts/e2e-summary.mjs emits.
   // ───────────────────────────────────────────────────────────────────────────
   const teeth = auditFailOnRedGateTeeth(WORKFLOW_PATH);
 

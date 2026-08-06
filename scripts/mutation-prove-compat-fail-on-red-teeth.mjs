@@ -40,6 +40,18 @@
  * `||` → `&&` that reproduces run 28552585087 verbatim. Sibling coverage: if an
  * axis is worth guarding on one tooth it is worth guarding on all of them.
  *
+ * The FIXTURE rows exist for the round after that, and the lesson is one level
+ * down again: replacing an under-specified ORACLE (a syntax match) with a better
+ * one (evaluation) still leaves you with an oracle, and the probe summaries then
+ * ARE the contract. Probing only `{failed, notRun, truncated}` at 0 and 1
+ * accepted `=== 1` (run 28552585087's own shape), an upper bound `< 2`, and —
+ * because a real summary carries `shard`, `ref`, `passed`, `excluded`,
+ * `expectedTotal` and the gate's own `console.log` prints five of them — both
+ * `s.shard === undefined && ( … )` (never fires) and `… || s.passed > 0`
+ * (permanently red). Same axis, reached through data the fixtures did not model.
+ * The fixtures are now full, internally-consistent summaries, and these rows
+ * pin that they stay so.
+ *
  * Mutations land through the byte-snapshot harness, so restoration is
  * content-addressed and sha256-verified, and every mutation carries the residue
  * marker. Rows landing INSIDE the embedded `node -e '…'` program pass
@@ -226,6 +238,64 @@ const MUTATIONS = [
     reds: T.failed,
     green: [T.missing, T.truncated, T.reaches, T.vacuity],
   },
+  // ── FIXTURE REALISM: the round-3 findings ─────────────────────────────────
+  // Every row below was measured GREEN against a probe set of
+  // {failed, notRun, truncated} at 0 and 1. They are not new axes — they are
+  // the SAME polarity axis, reached through data the fixtures did not model.
+  // The lesson is one level down from round 2: replacing an under-specified
+  // ORACLE with a better one still leaves you with an oracle, and the fixtures
+  // then ARE the contract.
+  {
+    // Correct at 1, wrong at 8. This IS run 28552585087: eight real failures,
+    // step exits 0, workflow SUCCESS, night counted toward the 14-night window.
+    label: 'tooth 2 THRESHOLD — `> 0` becomes `=== 1` (correct at one failure, dead at eight)',
+    anchor: FAILED_COND,
+    replacement: '            if ((s.failed ?? 0) === 1 || (s.notRun ?? 0) === 1) {',
+    options: JS,
+    reds: T.failed,
+    green: [T.missing, T.truncated, T.reaches, T.vacuity],
+  },
+  {
+    label: 'tooth 2 THRESHOLD — an UPPER bound `&& (s.failed ?? 0) < 2` caps what can go red',
+    anchor: FAILED_COND,
+    replacement:
+      '            if (((s.failed ?? 0) > 0 || (s.notRun ?? 0) > 0) && (s.failed ?? 0) < 2) {',
+    options: JS,
+    reds: T.failed,
+    green: [T.missing, T.truncated, T.reaches, T.vacuity],
+  },
+  {
+    // The exact INVERSE of the `s.neverSet === "zzz"` row above — and the
+    // inverse is the one that worked, because the gap was in the fixture.
+    label: 'tooth 2 FIXTURE — `s.shard === undefined &&` (true only for a summary nobody emits)',
+    anchor: FAILED_COND,
+    replacement:
+      '            if (s.shard === undefined && ((s.failed ?? 0) > 0 || (s.notRun ?? 0) > 0)) {',
+    options: JS,
+    reds: T.failed,
+    green: [T.missing, T.truncated, T.reaches, T.vacuity],
+  },
+  {
+    label: 'tooth 2 FIXTURE — `|| s.passed > 0` makes the gate PERMANENTLY red',
+    anchor: FAILED_COND,
+    replacement: '            if ((s.failed ?? 0) > 0 || (s.notRun ?? 0) > 0 || s.passed > 0) {',
+    options: JS,
+    reds: T.failed,
+    green: [T.missing, T.truncated, T.reaches, T.vacuity],
+  },
+  {
+    // The `==`/`!=` refusal is only a guarantee in an EVALUATED position. Hidden
+    // behind a ternary whose test no fixture gave a value, the arm was never
+    // reached. Closed by the fixture fix rather than by a new rule — which is
+    // the point: one realistic summary shuts three doors.
+    label: 'tooth 2 REFUSAL — an unmodelled `==` hidden in a ternary arm',
+    anchor: FAILED_COND,
+    replacement:
+      '            if (s.shard ? (s.failed ?? 0) == 999 : ((s.failed ?? 0) > 0 || (s.notRun ?? 0) > 0)) {',
+    options: JS,
+    reds: T.failed,
+    green: [T.missing, T.truncated, T.reaches, T.vacuity],
+  },
   // ── tooth 3: a TRUNCATED summary ──────────────────────────────────────────
   {
     label: 'tooth 3 PRESENCE — the truncated branch loses its `process.exit(1)`',
@@ -267,6 +337,22 @@ const MUTATIONS = [
     reds: T.truncated,
     green: [T.missing, T.failed, T.reaches, T.vacuity],
   },
+  {
+    label: 'tooth 3 FIXTURE — `s.ref === undefined &&` (true only for a summary nobody emits)',
+    anchor: TRUNC_COND,
+    replacement: '            if (s.ref === undefined && s.truncated === true) {',
+    options: JS,
+    reds: T.truncated,
+    green: [T.missing, T.failed, T.reaches, T.vacuity],
+  },
+  {
+    label: 'tooth 3 FIXTURE — `|| s.passed > 0` makes the gate PERMANENTLY red',
+    anchor: TRUNC_COND,
+    replacement: '            if (s.truncated === true || s.passed > 0) {',
+    options: JS,
+    reds: T.truncated,
+    green: [T.missing, T.failed, T.reaches, T.vacuity],
+  },
   // ── the exit status must reach the step at all ────────────────────────────
   // Three teeth are worth nothing if the command carrying them is neutered.
   {
@@ -303,6 +389,31 @@ const MUTATIONS = [
     // Teeth 2 and 3 SHOULD red — their program is genuinely unreachable now.
     // Only tooth 1, which lives in the shell prelude, is unaffected.
     green: [T.missing],
+  },
+  {
+    // The SECOND vacuous-pass shape, one hole over from the row above. The
+    // swallow checks used to slice the script from `node -e '`; move the
+    // program out AND append `|| true` and there was no anchor to slice from,
+    // so the finding list came back empty again. Fixing one instance of a shape
+    // and not scanning for the rest is how the sibling always gets missed.
+    label: 'the program is no longer inline **and** the invocation is `|| true`d',
+    anchor: NODE_CLOSE,
+    replacement: '          \' "${SUMMARY}" || true',
+    also: [
+      {
+        anchor: NODE_OPEN,
+        replacement: "          node gate.mjs '\n            const s = require",
+      },
+    ],
+    reds: T.reaches,
+    green: [T.missing],
+  },
+  {
+    label: 'the gate is put in a PIPELINE — the pipeline reports tee’s status, not the gate’s',
+    anchor: NODE_CLOSE,
+    replacement: '          \' "${SUMMARY}" | tee /dev/null',
+    reds: T.reaches,
+    green: [T.missing, T.failed, T.truncated, T.vacuity],
   },
   // ── the non-vacuity guard is not decoration either ────────────────────────
   {
