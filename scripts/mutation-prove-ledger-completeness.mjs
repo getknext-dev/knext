@@ -62,12 +62,29 @@ const MUTATIONS = [
     replacement: 'if (expected !== null && missingShards.length > 999) {',
   },
   {
-    label: 'the expected total is INFERRED from the artifacts that arrived',
+    // NOTE the honest scope: with COMPAT_SHARD_TOTAL merely UNSET, production
+    // is double-covered — the sibling denominator check catches it too. What
+    // this disarms is the fail-closed REFUSAL to infer, which is the property
+    // the spec pins; it is not the only thing standing between the workflow and
+    // a wrong count.
+    label: 'the declared total falls back to the count that arrived',
     file: LEDGER_SCRIPT,
     spec: COMPLETENESS_SPEC,
     test: 'fails closed when the declared total is',
     anchor: '  const expected = parseShardTotal(shardTotal);',
     replacement: '  const expected = parseShardTotal(shardTotal) ?? observed.length;',
+  },
+  {
+    label: 'a damaged artifact kills the process before the ledger is written',
+    file: LEDGER_SCRIPT,
+    spec: COMPLETENESS_SPEC,
+    test: 'still produces a ledger, and still reds',
+    // Disarms the per-file guard by making the catch RETHROW — i.e. restores
+    // the unguarded `JSON.parse` mapped over the directory, which is exactly
+    // what died before the ledger was written.
+    anchor:
+      '        return { shard: null, readError: `${f}: ${err instanceof Error ? err.message : err}` };',
+    replacement: '        throw err;',
   },
   {
     label: 'the ledger is written only when the run is clean',
@@ -90,6 +107,69 @@ const MUTATIONS = [
     test: 'the deploy-tests matrix IS the declared total',
     anchor: "  COMPAT_SHARD_TOTAL: '16'",
     replacement: "  COMPAT_SHARD_TOTAL: '15'",
+  },
+  // ── Finding 1: the step's COMMAND is not the only thing that matters ───────
+  // Each of these left the whole suite green before the `auditLedgerJob`
+  // allowlist landed, while `shard-ledger` concluded SUCCESS on a red night.
+  // Five spellings on purpose: the finding IS that one spelling is not a rule.
+  // The file-wide `continue-on-error:\s*true` text guard catches only the last
+  // of them, and this repo had already written the expression form down as that
+  // regex's known evasion.
+  ...[
+    ['step `if: ${{ false }}` — the step never runs, so no ledger is written', 'if: ${{ false }}'],
+    ['step `continue-on-error: ${{ true }}` (expression)', 'continue-on-error: ${{ true }}'],
+    ["step `continue-on-error: 'true'` (quoted scalar)", "continue-on-error: 'true'"],
+    ['step `continue-on-error: true` (bare literal)', 'continue-on-error: true'],
+  ].map(([label, line]) => ({
+    label,
+    file: WORKFLOW,
+    spec: WORKFLOW_SPEC,
+    test: 'the ledger job cannot be skipped or made unfailable',
+    anchor: '        id: ledger\n',
+    replacement: `        id: ledger\n        ${line}\n`,
+  })),
+  {
+    label: 'job-level `continue-on-error: ${{ true }}` — one level up from the step',
+    file: WORKFLOW,
+    spec: WORKFLOW_SPEC,
+    test: 'the ledger job cannot be skipped or made unfailable',
+    // Deliberately NOT prefixed with a newline: the harness prepends its
+    // residue marker using the replacement's leading whitespace, so an anchor
+    // that starts at a line boundary would splice that marker onto the END of
+    // the previous line and corrupt the YAML — the guard would then go red on a
+    // parse error rather than on the disarm, proving nothing.
+    // (The marker literal is deliberately not written out here: the residue
+    // scan refuses any tracked file containing it, and an allowlist entry for
+    // this file would be exactly the silent exemption that guard must not have.)
+    anchor: '    timeout-minutes: 10\n    outputs:',
+    replacement: '    timeout-minutes: 10\n    continue-on-error: ${{ true }}\n    outputs:',
+  },
+  // ── Finding 3: the evidence can be written somewhere nobody uploads ────────
+  {
+    label: 'the audited step is relocated with `working-directory: /tmp`',
+    file: WORKFLOW,
+    spec: WORKFLOW_SPEC,
+    test: 'the audited step cannot be redirected away from the evidence path',
+    anchor: '        id: ledger\n',
+    replacement: '        id: ledger\n        working-directory: /tmp\n',
+  },
+  {
+    label: 'the evidence path is redirected with `OUT_FILE` in the step env',
+    file: WORKFLOW,
+    spec: WORKFLOW_SPEC,
+    test: 'the audited step cannot be redirected away from the evidence path',
+    anchor: '          EVENT_NAME: ${{ github.event_name }}\n',
+    replacement:
+      '          EVENT_NAME: ${{ github.event_name }}\n          OUT_FILE: /tmp/l.json\n',
+  },
+  {
+    label: 'the red alert stops covering CANCELLED (silence becomes success again)',
+    file: WORKFLOW,
+    spec: WORKFLOW_SPEC,
+    test: 'the red alert fires when the ledger or the shards are CANCELLED',
+    anchor:
+      "       needs.shard-ledger.result == 'failure' || needs.shard-ledger.result == 'cancelled' ||\n       needs.deploy-tests.result == 'cancelled')",
+    replacement: "       needs.shard-ledger.result == 'failure')",
   },
   {
     label: 'the ledger computation is re-inlined in the workflow',

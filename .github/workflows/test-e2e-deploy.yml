@@ -1598,11 +1598,19 @@ jobs:
     # it to the nightly schedule.
     # #545: shard-ledger is a needs BOTH for its `red_detail` output AND because
     # its per-shard test-count floor is itself a red condition worth alerting on.
+    # #695 — `cancelled` is alerted on, not only `failure`. A job-level timeout
+    # or a runner loss CANCELS a job, and `result == 'cancelled'` is not
+    # `'failure'`, so the night went silent: no red job, no alert, and (before
+    # this PR) a ledger that recorded a clean sheet. The ledger now fails on the
+    # missing shard, which fires this alert for the shard-cancellation class for
+    # the first time — but the ledger job itself, and the shard matrix, can also
+    # be cancelled, and silence must never be indistinguishable from success.
     if: >-
       always() &&
       github.event_name == 'schedule' &&
       (needs.build-next.result == 'failure' || needs.deploy-tests.result == 'failure' ||
-       needs.shard-ledger.result == 'failure')
+       needs.shard-ledger.result == 'failure' || needs.shard-ledger.result == 'cancelled' ||
+       needs.deploy-tests.result == 'cancelled')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

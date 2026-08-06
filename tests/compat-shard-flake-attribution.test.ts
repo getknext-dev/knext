@@ -10,6 +10,7 @@ import { DEFAULT_OUT_FILE } from '../scripts/compat-run-ledger.mjs';
 // away here. The gate exists to keep `tests/` honest (#527).
 import { classifyRuns, renderLedgerTable } from '../scripts/e2e-shard-history.mjs';
 import { summarize } from '../scripts/e2e-summary.mjs';
+import { continueOnErrorProblem, type Job } from './helpers/blocking-gate';
 
 const WORKFLOW = readFileSync(join(process.cwd(), '.github/workflows/test-e2e-deploy.yml'), 'utf8');
 
@@ -328,10 +329,12 @@ interface WorkflowStep {
   name?: string;
   uses?: string;
   run?: string;
-  if?: string;
+  if?: unknown;
+  env?: Record<string, unknown>;
   with?: Record<string, unknown>;
 }
 interface WorkflowJob {
+  if?: unknown;
   steps?: WorkflowStep[];
   strategy?: { matrix?: { shard?: unknown } };
 }
@@ -346,6 +349,132 @@ function job(id: string): WorkflowJob {
   const found = DOC.jobs?.[id];
   if (!found) throw new Error(`workflow job "${id}" not found`);
   return found;
+}
+
+/**
+ * The ONE `if:` expression any part of the ledger job may carry.
+ *
+ * `always()` is load-bearing at job level (the ledger must be built when
+ * `deploy-tests` fails) and on the upload step (an INCOMPLETE ledger is the
+ * evidence, so it must be uploaded on the failing path). Every other
+ * expression — `${{ false }}`, `success()`, an event condition — can stop the
+ * gate from running, and a step that does not run cannot fail. Allowlist of
+ * one, normalised for the `${{ }}` wrapper and whitespace.
+ */
+const ADMISSIBLE_IF = /^(always\(\)|\$\{\{\s*always\(\)\s*\}\})$/;
+
+/**
+ * The ONE command the ledger job may run. Shared by the command allowlist and
+ * by `ledgerStep()`, so "the audited step" and "the step the allowlist checks"
+ * cannot drift into being two different steps.
+ */
+const LEDGER_RUN_ALLOWLIST = [/^node knext\/scripts\/compat-run-ledger\.mjs$/];
+
+/** Job keys the ledger job may carry. Anything else is reported, not ignored. */
+const LEDGER_JOB_KEYS = new Set([
+  'name',
+  'needs',
+  'if',
+  'runs-on',
+  'timeout-minutes',
+  'outputs',
+  'steps',
+]);
+
+/**
+ * Step keys the AUDITED step may carry.
+ *
+ * `env` is allowed but its contents are allowlisted below; `working-directory`
+ * is deliberately absent — it relocates the ledger file the `if: always()`
+ * upload is pointed at, without changing the `run:` string the command
+ * allowlist matches.
+ */
+const LEDGER_STEP_KEYS = new Set(['name', 'id', 'env', 'run']);
+
+/**
+ * Env keys the audited step may carry.
+ *
+ * `OUT_FILE`, `SUMMARY_DIR` and `FINGERPRINT_FILE` are read by
+ * scripts/compat-run-ledger.mjs and each one redirects the evidence or its
+ * inputs; they are excluded by being absent, not by being named, so a fourth
+ * such knob added to the script is reported here too.
+ */
+const LEDGER_STEP_ENV_KEYS = new Set(['RUN_ID', 'RUN_ATTEMPT', 'EVENT_NAME']);
+
+/** The audited step: the one whose `run:` is the sanctioned ledger command. */
+function ledgerStep(): WorkflowStep {
+  const step = (job('shard-ledger').steps ?? []).find((s) =>
+    LEDGER_RUN_ALLOWLIST.some((rx) => rx.test(String(s.run ?? '').trim())),
+  );
+  if (!step) throw new Error('no step in shard-ledger runs the sanctioned ledger command');
+  return step;
+}
+
+/**
+ * Everything that could make `shard-ledger` conclude success on a red night
+ * WITHOUT touching the `run:` string — collected as findings rather than
+ * asserted one at a time, so the message names every problem at once.
+ */
+function auditLedgerJob(): string[] {
+  const problems: string[] = [];
+  const jobId = 'shard-ledger';
+  const j = job(jobId) as unknown as Job;
+
+  const jobIf = j.if;
+  if (jobIf !== undefined && !ADMISSIBLE_IF.test(String(jobIf).trim())) {
+    problems.push(
+      `job \`${jobId}\` carries if: ${JSON.stringify(jobIf)} — only \`always()\` is admissible; anything else can condition the gate off, and a skipped job does not fail the run`,
+    );
+  }
+  const jobCoe = continueOnErrorProblem(j, `job \`${jobId}\``);
+  if (jobCoe) problems.push(jobCoe);
+
+  for (const key of Object.keys(j)) {
+    if (!LEDGER_JOB_KEYS.has(key)) {
+      problems.push(
+        `job \`${jobId}\` carries the unrecognised job-level key \`${key}\` — this audit fails closed: either it cannot neutralise the gate (add it to LEDGER_JOB_KEYS with a reason) or it can`,
+      );
+    }
+  }
+
+  const steps = j.steps;
+  if (!Array.isArray(steps) || steps.length === 0) {
+    problems.push(`job \`${jobId}\` has no steps — it cannot be running anything`);
+    return problems;
+  }
+
+  // Scanned over EVERY step, not just the audited one: a `continue-on-error` on
+  // the download step swallows the fingerprint floor just as effectively.
+  steps.forEach((raw, i) => {
+    const step = raw as WorkflowStep & Job;
+    const label = `job \`${jobId}\` step ${step.name ? `\`${step.name}\`` : `#${i + 1}`}`;
+    if (step.if !== undefined && !ADMISSIBLE_IF.test(String(step.if).trim())) {
+      problems.push(
+        `${label} carries if: ${JSON.stringify(step.if)} — only \`always()\` is admissible; a skipped step writes no ledger, and \`if-no-files-found\` defaults to \`warn\`, so the upload stays green over nothing`,
+      );
+    }
+    const coe = continueOnErrorProblem(step, label);
+    if (coe) problems.push(coe);
+  });
+
+  // The audited step additionally may not be relocated (Finding 3).
+  const audited = ledgerStep() as WorkflowStep & Job;
+  for (const key of Object.keys(audited)) {
+    if (!LEDGER_STEP_KEYS.has(key)) {
+      problems.push(
+        `the audited ledger step carries the unrecognised key \`${key}\` — fails closed: it may relocate or neutralise the evidence (add it to LEDGER_STEP_KEYS with a reason)`,
+      );
+    }
+  }
+  for (const key of Object.keys((audited.env ?? {}) as Record<string, unknown>)) {
+    if (!LEDGER_STEP_ENV_KEYS.has(key)) {
+      problems.push(
+        `the audited ledger step sets env \`${key}\` — fails closed: scripts/compat-run-ledger.mjs reads OUT_FILE/SUMMARY_DIR/FINGERPRINT_FILE, each of which points the evidence somewhere the upload does not look (add it to LEDGER_STEP_ENV_KEYS with a reason)`,
+      );
+    }
+  }
+
+  return problems;
 }
 
 /** The declared shard total, as the workflow states it — parsed, never assumed. */
@@ -378,12 +507,12 @@ describe('#695 — the ledger reconciles against the declared shard total', () =
   });
 
   it('the ledger job runs the audited script — and NOTHING else (allowlist)', () => {
+    const allowed = LEDGER_RUN_ALLOWLIST;
     // The allowlist is the point. Banning one spelling of an inline
     // implementation ("no heredoc") leaves every other spelling working; this
     // permits one exact command and fails everything else, including a
     // re-inlined `node <<EOF`, a `|| true`, or a second computation appended
     // after the sanctioned one.
-    const allowed = [/^node knext\/scripts\/compat-run-ledger\.mjs$/];
     const runs = (job('shard-ledger').steps ?? [])
       .map((s) => s.run)
       .filter((r): r is string => typeof r === 'string');
@@ -416,6 +545,62 @@ describe('#695 — the ledger reconciles against the declared shard total', () =
     // an incomplete ledger is the evidence, so losing it on red is the same
     // hole in a different place.
     expect(upload?.if).toBe('always()');
+  });
+
+  it('the ledger job cannot be skipped or made unfailable', () => {
+    // ────────────────────────────────────────────────────────────────────────
+    // The allowlist above guards what the step RUNS. It says nothing about
+    // whether the step runs at all, or whether its failure can fail the job —
+    // and four one-line edits left the whole suite green while `shard-ledger`
+    // concluded SUCCESS on a red night:
+    //
+    //   if: ${{ false }}                 (step)  → step skipped, no ledger
+    //                                              written, `if: always()`
+    //                                              upload finds no file
+    //                                              (if-no-files-found: warn),
+    //                                              job GREEN
+    //   continue-on-error: ${{ true }}   (step)  → failure cannot fail the job
+    //   continue-on-error: 'true'        (step)  → same, quoted scalar
+    //   continue-on-error: ${{ true }}   (job)   → same, one level up
+    //
+    // Only the bare literal `continue-on-error: true` was caught, by the
+    // file-wide text guard above — and this repo had ALREADY written the
+    // expression form down as that regex's known evasion
+    // (tests/ci-concurrency-group.test.ts, tests/bun-exec-alpine-image-ci.test.ts).
+    // Banning spellings is what fails; asking "is it literally `false`?" is
+    // what holds, which is why `continueOnErrorProblem` is imported rather than
+    // re-implemented here.
+    //
+    // Everything below is an ALLOWLIST that fails closed: an unrecognised key
+    // is a finding, so a neutralising key nobody thought of is reported rather
+    // than ignored. Adding one is a deliberate act with a reason attached.
+    // ────────────────────────────────────────────────────────────────────────
+    const problems = auditLedgerJob();
+    expect(problems, problems.join('\n')).toEqual([]);
+  });
+
+  it('the audited step cannot be redirected away from the evidence path', () => {
+    // Finding 3: the `run:` string is what the allowlist matches, so
+    // `working-directory: /tmp` on the step, or `OUT_FILE: /tmp/ledger.json` in
+    // its `env:`, both leave the ledger somewhere the `if: always()` upload
+    // never looks — guards green, evidence gone. The step's key set and its env
+    // key set are therefore allowlisted too (asserted by `auditLedgerJob`,
+    // exercised here against the two concrete redirections).
+    const step = ledgerStep();
+    expect(Object.keys(step)).not.toContain('working-directory');
+    expect(Object.keys(step.env ?? {})).not.toContain('OUT_FILE');
+    expect(auditLedgerJob()).toEqual([]);
+  });
+
+  it('the red alert fires when the ledger or the shards are CANCELLED, not only failed', () => {
+    // The residual this PR shrank rather than closed: a job-level timeout or a
+    // runner loss makes `result == 'cancelled'`, which `== 'failure'` misses —
+    // so total silence was still reachable one level up from the ledger. Same
+    // principle as the ledger itself: silence and success must not look alike.
+    const alert = DOC.jobs?.['nightly-red-alert'];
+    const condition = String(alert?.if ?? '');
+    expect(condition).toMatch(/needs\.shard-ledger\.result\s*==\s*'cancelled'/);
+    expect(condition).toMatch(/needs\.deploy-tests\.result\s*==\s*'cancelled'/);
   });
 
   it('nothing else in the workflow writes the ledger file', () => {
