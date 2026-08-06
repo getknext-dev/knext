@@ -28,18 +28,28 @@
  * reddens on everything would satisfy direction 1 for all nine rows and prove
  * nothing new about independence.
  *
- * PRESENCE **AND** VALUE. Each tooth is disarmed twice over: once by DELETING
- * its exit (presence) and once by making the exit or its condition inert —
- * `process.exit(0)`, `failed > 999`, `truncated === false` (value). A guard
- * that only checked presence would stay green on every one of the second kind.
+ * PRESENCE, VALUE **AND POLARITY**. Each tooth is disarmed several ways: by
+ * DELETING its exit (presence), by making the exit or threshold inert —
+ * `process.exit(0)`, `failed > 999` (value) — and by making the branch fire on
+ * the WRONG case: `!( … )`, `||` swapped for `&&`, a dead conjunct (polarity).
+ *
+ * The polarity rows exist because the first version of this proof did not have
+ * them on the JS teeth. It covered "the exit is moved into the ELSE arm" for
+ * tooth 1 and nothing equivalent for teeth 2 and 3, and all four polarity edits
+ * above were measured GREEN across every assertion — including a ONE-CHARACTER
+ * `||` → `&&` that reproduces run 28552585087 verbatim. Sibling coverage: if an
+ * axis is worth guarding on one tooth it is worth guarding on all of them.
  *
  * Mutations land through the byte-snapshot harness, so restoration is
  * content-addressed and sha256-verified, and every mutation carries the residue
  * marker. Rows landing INSIDE the embedded `node -e '…'` program pass
- * `commentPrefix: '//'`: the file is YAML, so the harness would otherwise stamp
- * a `#` comment into the middle of a JavaScript program, and the guard would
- * then red on a PARSE ERROR rather than on the disarm — which proves exactly as
- * much as staying green for the wrong reason. Never `perl`.
+ * `commentPrefix: '//'`, because the file is YAML and the harness would
+ * otherwise stamp a `#` comment into the middle of a JavaScript program.
+ * MEASURED, so the reason is stated correctly: that does NOT make the guard red
+ * on a parse error — `ts.createSourceFile` is error-tolerant and the row still
+ * reds with the right message. What it does is leave the workflow carrying a
+ * program that could not RUN, so the mutation disarms strictly more than the row
+ * claims and a reader cannot tell which half produced the red. Never `perl`.
  *
  * Usage:  node scripts/mutation-prove-compat-fail-on-red-teeth.mjs
  *
@@ -91,6 +101,8 @@ const TRUNC_COND = '            if (s.truncated === true) {';
 const NODE_CLOSE = '          \' "${SUMMARY}"';
 const SET_E = '          set -euo pipefail\n          SAFE_SHARD=';
 const STEP_NAME = '      - name: Fail shard on red results (revocation teeth)\n';
+const MISSING_COND = '          if [ ! -f "${SUMMARY}" ]; then';
+const NODE_OPEN = "          node -e '\n            const s = require";
 
 /**
  * Every mutation this prover scores.
@@ -100,7 +112,11 @@ const STEP_NAME = '      - name: Fail shard on red results (revocation teeth)\n'
  * derived as "everything else", because the derivation would silently absorb a
  * sixth assertion added later and claim an independence nobody proved.
  *
- * @type {Array<{label:string, anchor:string, replacement:string, options?:object, reds:string, green:string[]}>}
+ * `also` carries the SECOND edit of the one row that needs two — a disarm that
+ * only bites in combination cannot be expressed as a single substitution, and
+ * inventing a fake single anchor for it would prove a different thing.
+ *
+ * @type {Array<{label:string, anchor:string, replacement:string, options?:object, also?:Array<{anchor:string,replacement:string,options?:object}>, reds:string, green:string[]}>}
  */
 const MUTATIONS = [
   // ── tooth 1: a MISSING summary ────────────────────────────────────────────
@@ -133,6 +149,16 @@ const MUTATIONS = [
     ),
     reds: T.missing,
     green: [T.failed, T.truncated, T.reaches, T.vacuity],
+  },
+  {
+    // POLARITY on the shell tooth. The `exit 1` is untouched; the TEST is. The
+    // gate now fails every shard whose summary is present and passes every
+    // shard that reported nothing — the precise inversion of the tooth.
+    label: 'tooth 1 POLARITY — the file test is inverted (`! -f` becomes `-f`)',
+    anchor: MISSING_COND,
+    replacement: '          if [ -f "${SUMMARY}" ]; then',
+    reds: T.missing,
+    green: [T.failed, T.truncated, T.reaches],
   },
   // ── tooth 2: failed > 0 / notRun > 0 — the measured defect ────────────────
   {
@@ -170,6 +196,36 @@ const MUTATIONS = [
     reds: T.failed,
     green: [T.missing, T.truncated, T.reaches],
   },
+  {
+    // The exact inversion: the gate now fails every CLEAN shard and passes
+    // every red one. Nothing syntactic distinguishes it — the `failed > 0`
+    // comparison is still right there.
+    label: 'tooth 2 POLARITY — the whole condition is negated with `!( … )`',
+    anchor: FAILED_COND,
+    replacement: '            if (!((s.failed ?? 0) > 0 || (s.notRun ?? 0) > 0)) {',
+    options: JS,
+    reds: T.failed,
+    green: [T.missing, T.truncated, T.reaches, T.vacuity],
+  },
+  {
+    // ONE CHARACTER. `failed=8, notRun=0` — run 28552585087's shape exactly —
+    // then evaluates false and the step exits 0.
+    label: 'tooth 2 POLARITY — `||` becomes `&&` (only a shard red BOTH ways fails)',
+    anchor: FAILED_COND,
+    replacement: '            if ((s.failed ?? 0) > 0 && (s.notRun ?? 0) > 0) {',
+    options: JS,
+    reds: T.failed,
+    green: [T.missing, T.truncated, T.reaches, T.vacuity],
+  },
+  {
+    label: 'tooth 2 POLARITY — a dead conjunct on a field no summary carries',
+    anchor: FAILED_COND,
+    replacement:
+      '            if (s.neverSet === "zzz" && ((s.failed ?? 0) > 0 || (s.notRun ?? 0) > 0)) {',
+    options: JS,
+    reds: T.failed,
+    green: [T.missing, T.truncated, T.reaches, T.vacuity],
+  },
   // ── tooth 3: a TRUNCATED summary ──────────────────────────────────────────
   {
     label: 'tooth 3 PRESENCE — the truncated branch loses its `process.exit(1)`',
@@ -195,6 +251,22 @@ const MUTATIONS = [
     reds: T.truncated,
     green: [T.missing, T.failed, T.reaches, T.vacuity],
   },
+  {
+    label: 'tooth 3 POLARITY — the truncated test is negated with `!( … )`',
+    anchor: TRUNC_COND,
+    replacement: '            if (!(s.truncated === true)) {',
+    options: JS,
+    reds: T.truncated,
+    green: [T.missing, T.failed, T.reaches, T.vacuity],
+  },
+  {
+    label: 'tooth 3 POLARITY — a dead conjunct on a field no summary carries',
+    anchor: TRUNC_COND,
+    replacement: '            if (s.neverSet === "zzz" && s.truncated === true) {',
+    options: JS,
+    reds: T.truncated,
+    green: [T.missing, T.failed, T.reaches, T.vacuity],
+  },
   // ── the exit status must reach the step at all ────────────────────────────
   // Three teeth are worth nothing if the command carrying them is neutered.
   {
@@ -211,6 +283,27 @@ const MUTATIONS = [
     reds: T.reaches,
     green: [T.missing, T.failed, T.truncated, T.vacuity],
   },
+  {
+    // The COMBINATION is the point, and it is why this row needs two edits.
+    // The "reaches" checks used to sit AFTER the `program === null` bail-out,
+    // so a gate whose program had moved out of `node -e` AND had errexit turned
+    // off produced an EMPTY finding list: the assertion titled "the exit status
+    // reaches the step" was green while its own claim was false. Either edit
+    // alone is caught; only together did they hide.
+    label: 'errexit is OFF **and** the program is no longer inline (the vacuous-pass case)',
+    anchor: SET_E,
+    replacement: '          set +e\n          SAFE_SHARD=',
+    also: [
+      {
+        anchor: NODE_OPEN,
+        replacement: "          node gate.mjs '\n            const s = require",
+      },
+    ],
+    reds: T.reaches,
+    // Teeth 2 and 3 SHOULD red — their program is genuinely unreachable now.
+    // Only tooth 1, which lives in the shell prelude, is unaffected.
+    green: [T.missing],
+  },
   // ── the non-vacuity guard is not decoration either ────────────────────────
   {
     // A total disarm: with the step renamed, the audit locates nothing. Scored
@@ -226,6 +319,14 @@ const MUTATIONS = [
   },
 ];
 
+/** Every edit a row applies, in order. Most rows have exactly one. */
+function editsOf(row) {
+  return [
+    { anchor: row.anchor, replacement: row.replacement, options: row.options ?? {} },
+    ...(row.also ?? []).map((e) => ({ ...e, options: e.options ?? {} })),
+  ];
+}
+
 /**
  * PREFLIGHT: every anchor occurs exactly once, and no two rows produce the same
  * mutated file.
@@ -240,13 +341,23 @@ function preflight() {
   const problems = [];
   const seen = new Map();
   const source = readFileSync(WORKFLOW, 'utf8');
-  for (const { label, anchor, replacement } of MUTATIONS) {
-    const n = countOccurrences(source, anchor);
-    if (n !== 1) {
-      problems.push(`"${label}": anchor occurs ${n} times (expected exactly 1)`);
-      continue;
+  for (const row of MUTATIONS) {
+    const { label } = row;
+    let mutated = source;
+    let bad = false;
+    // Every edit, in order — a multi-edit row's later anchors are checked
+    // against the text its earlier edits produced, which is what the harness
+    // will see at run time.
+    for (const { anchor, replacement } of editsOf(row)) {
+      const n = countOccurrences(mutated, anchor);
+      if (n !== 1) {
+        problems.push(`"${label}": anchor occurs ${n} times (expected exactly 1)`);
+        bad = true;
+        break;
+      }
+      mutated = mutated.replace(anchor, () => replacement);
     }
-    const mutated = source.replace(anchor, () => replacement);
+    if (bad) continue;
     if (mutated === source) {
       problems.push(`"${label}": substitution changes nothing`);
       continue;
@@ -299,12 +410,15 @@ console.log(`baseline: ${Object.keys(T).length} targeted assertion(s) green\n`);
 let pass = 0;
 let fail = 0;
 
-for (const { label, anchor, replacement, options, reds, green } of MUTATIONS) {
+for (const row of MUTATIONS) {
+  const { label, reds, green } = row;
   console.log(`── disarming: ${label}`);
   const snap = snapshot(WORKFLOW);
   let verdict = 'ok';
   try {
-    mutate(snap, anchor, replacement, options ?? {});
+    for (const { anchor, replacement, options } of editsOf(row)) {
+      mutate(snap, anchor, replacement, options);
+    }
 
     const red = scored(reds, 'under mutation');
     if (red === null) {

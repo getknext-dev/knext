@@ -37,11 +37,20 @@
  * judged on its own. Deleting one tooth reds exactly one assertion, and the
  * message names that branch.
  *
- * PRESENCE **AND** VALUE, per tooth. An `exit` that is present but zero is not a
- * tooth, and a condition that is present but can never fire (`failed > 999`,
- * `truncated === false`) is not a tooth either. Both halves are checked, because
- * "the value was checked and the presence was not" (or the reverse) is the
- * defect ladder this repo keeps climbing.
+ * PRESENCE, VALUE **AND POLARITY**, per tooth. An `exit` that is present but
+ * zero is not a tooth; a condition that is present but can never fire
+ * (`failed > 999`) is not a tooth; and a condition that fires on the WRONG case
+ * (`!( … )`, `||` swapped for `&&`, a dead conjunct) is worse than no tooth,
+ * because the gate then fails green shards and passes red ones.
+ *
+ * The first version of this file checked only the first two, and it checked the
+ * second SYNTACTICALLY — "does a `failed > 0` comparison appear anywhere in this
+ * condition" — which four one-line edits walked straight past with all five
+ * assertions green. Polarity is therefore decided by EVALUATING the parsed
+ * condition against synthetic summaries: it must fire on the red case and stay
+ * quiet on the green one. That is the difference between asking what a
+ * condition CONTAINS and asking what it DOES, and only the second question has
+ * an answer that a new spelling cannot dodge.
  */
 
 import { readFileSync } from 'node:fs';
@@ -67,6 +76,18 @@ const TOOTH_LABEL: Record<ToothId, string> = {
   'failed-or-not-run': 'the `failed > 0 || notRun > 0` branch',
   truncated: 'the TRUNCATED-SUMMARY branch (`s.truncated === true`)',
 };
+
+/**
+ * Stated on every "no exit" finding, because the finding is narrower than it
+ * sounds and saying "the step exits 0" would be untrue for some shapes.
+ *
+ * `process.exitCode = 1` and a bare `throw` both DO fail the step; this audit
+ * simply does not recognise them, and reports the branch rather than guessing.
+ * That is fail-closed — a false red that a human resolves in one line — but the
+ * message has to say which it is.
+ */
+const RECOGNISED_EXIT =
+  'Only a literal `process.exit(<non-zero>)` counts here — `process.exitCode = 1` and `throw` do fail the step but are not recognised, so say so rather than relying on them.';
 
 /**
  * What it COSTS when a given tooth is missing — the concrete night, not a
@@ -253,44 +274,183 @@ function namesIn(node: ts.Node): Set<string> {
   return names;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// POLARITY — does the branch FIRE on the case it is supposed to fire on?
+//
+// This replaces a sub-tree existence search that asked "does a `failed > 0`
+// comparison appear anywhere in this condition". It never asked whether the
+// branch fires, and four one-line edits walked straight past it with all five
+// assertions green — measured on the real workflow:
+//
+//   `if (!( … ))`                          the gate fails a GREEN shard and
+//                                          passes a RED one — the exact
+//                                          inversion of the tooth this file
+//                                          exists for;
+//   `||` → `&&`                            one character, and it reproduces run
+//                                          28552585087 verbatim (8 real
+//                                          failures, notRun=0 → exit 0);
+//   `s.neverSet === "zzz" && ( … )`        a dead conjunct;
+//   `if (!(s.truncated === true))`         the same, on tooth 3.
+//
+// So the condition is EVALUATED against synthetic summaries instead: it must be
+// true on the red case and false on the green one. Semantic rather than
+// syntactic, which is what keeps the next spelling out — none of the four above
+// needed a new rule, they all fall out of the same two evaluations.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** A synthetic shard summary — the `s` a gate condition reads. */
+type Fixture = Record<string, unknown>;
+
+/** Raised for any construct the evaluator does not model. FAIL CLOSED. */
+class UnsupportedCondition extends Error {}
+
 /**
- * Does `node` contain a binary expression reading `name` and compared to
- * `literal` with `operator`?
+ * Evaluate a gate condition against a synthetic summary.
  *
- * This is the VALUE half of each JS tooth: `(s.failed ?? 0) > 999` and
- * `s.truncated === false` both keep the branch and its exit, and both are dead.
+ * A deliberately SMALL expression language — property access on `s`, literals,
+ * `!`, the comparison operators, `&&`/`||`/`??`, and a ternary. Anything else
+ * (a call, an element access, a bare identifier that is not `s`) raises, and
+ * the caller turns that into a finding.
+ *
+ * Refusing is the point. A gate rewritten as `Number(s.failed) > 0` is probably
+ * fine, but this audit cannot SAY so, and the alternative to refusing is
+ * `new Function(...)` on text pulled out of a workflow file — evaluating
+ * arbitrary code from a file whose whole purpose here is to be adversarially
+ * mutated. A finding that says "teach me this construct" is the cheap outcome;
+ * a silent pass is the expensive one.
  */
-function comparesTo(
-  node: ts.Node,
-  name: string,
-  operator: ts.SyntaxKind,
-  isRight: (n: ts.Node) => boolean,
-): boolean {
-  let hit = false;
-  const walk = (n: ts.Node) => {
-    if (hit) return;
-    if (ts.isBinaryExpression(n) && n.operatorToken.kind === operator) {
-      if (namesIn(n.left).has(name) && isRight(n.right)) {
-        hit = true;
-        return;
-      }
+function evaluateCondition(node: ts.Node, s: Fixture): unknown {
+  if (ts.isParenthesizedExpression(node)) return evaluateCondition(node.expression, s);
+
+  if (ts.isPrefixUnaryExpression(node)) {
+    const operand = evaluateCondition(node.operand, s);
+    if (node.operator === ts.SyntaxKind.ExclamationToken) return !operand;
+    if (node.operator === ts.SyntaxKind.MinusToken) return -Number(operand);
+    throw new UnsupportedCondition(`unary operator ${ts.SyntaxKind[node.operator]}`);
+  }
+
+  if (ts.isBinaryExpression(node)) {
+    const kind = node.operatorToken.kind;
+    // Short-circuiting operators evaluate the right side lazily, exactly as the
+    // real gate would — otherwise a `&&` guard could not protect its right arm.
+    if (kind === ts.SyntaxKind.AmpersandAmpersandToken) {
+      const left = evaluateCondition(node.left, s);
+      return left ? evaluateCondition(node.right, s) : left;
     }
-    ts.forEachChild(n, walk);
-  };
-  walk(node);
-  return hit;
+    if (kind === ts.SyntaxKind.BarBarToken) {
+      const left = evaluateCondition(node.left, s);
+      return left ? left : evaluateCondition(node.right, s);
+    }
+    if (kind === ts.SyntaxKind.QuestionQuestionToken) {
+      const left = evaluateCondition(node.left, s);
+      return left === null || left === undefined ? evaluateCondition(node.right, s) : left;
+    }
+    const l = evaluateCondition(node.left, s);
+    const r = evaluateCondition(node.right, s);
+    switch (kind) {
+      case ts.SyntaxKind.GreaterThanToken:
+        return (l as number) > (r as number);
+      case ts.SyntaxKind.GreaterThanEqualsToken:
+        return (l as number) >= (r as number);
+      case ts.SyntaxKind.LessThanToken:
+        return (l as number) < (r as number);
+      case ts.SyntaxKind.LessThanEqualsToken:
+        return (l as number) <= (r as number);
+      case ts.SyntaxKind.EqualsEqualsEqualsToken:
+        return l === r;
+      case ts.SyntaxKind.ExclamationEqualsEqualsToken:
+        return l !== r;
+      // `==` / `!=` are deliberately NOT modelled. Faithfully evaluating them
+      // would mean writing loose equality here, which this repo's lint bans
+      // outright — and the alternative, approximating them with `===`, would
+      // make this evaluator disagree with the gate it is judging. Refusing is
+      // the honest third option: a gate rewritten with `==` gets a finding that
+      // says so, and a human decides.
+      default:
+        throw new UnsupportedCondition(`binary operator ${ts.SyntaxKind[kind]}`);
+    }
+  }
+
+  if (ts.isConditionalExpression(node)) {
+    return evaluateCondition(node.condition, s)
+      ? evaluateCondition(node.whenTrue, s)
+      : evaluateCondition(node.whenFalse, s);
+  }
+
+  if (ts.isPropertyAccessExpression(node)) {
+    const base = evaluateCondition(node.expression, s);
+    if (base === null || base === undefined) {
+      // `?.` short-circuits; a plain `.` on nullish would throw at runtime, and
+      // a gate that throws is red — which is not what this audit is measuring.
+      if (node.questionDotToken) return undefined;
+      throw new UnsupportedCondition(`property access on a nullish base: ${node.getText()}`);
+    }
+    return (base as Fixture)[node.name.text];
+  }
+
+  if (ts.isIdentifier(node)) {
+    if (node.text === 's') return s;
+    if (node.text === 'undefined') return undefined;
+    throw new UnsupportedCondition(`identifier \`${node.text}\` (only \`s\` is modelled)`);
+  }
+
+  if (ts.isNumericLiteral(node)) return Number(node.text);
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
+  if (node.kind === ts.SyntaxKind.TrueKeyword) return true;
+  if (node.kind === ts.SyntaxKind.FalseKeyword) return false;
+  if (node.kind === ts.SyntaxKind.NullKeyword) return null;
+
+  throw new UnsupportedCondition(`${ts.SyntaxKind[node.kind]}: ${node.getText()}`);
 }
 
-const isZeroLiteral = (n: ts.Node) => ts.isNumericLiteral(n) && Number(n.text) === 0;
-const isTrueKeyword = (n: ts.Node) => n.kind === ts.SyntaxKind.TrueKeyword;
+/** One polarity case: the summary, whether the branch must fire, and why. */
+interface PolarityCase {
+  summary: Fixture;
+  fires: boolean;
+  why: string;
+}
+
+/** Every polarity case a condition fails, as problem fragments. */
+function polarityProblems(cond: ts.Expression, cases: PolarityCase[]): string[] {
+  const problems: string[] = [];
+  for (const { summary, fires, why } of cases) {
+    let actual: unknown;
+    try {
+      actual = evaluateCondition(cond, summary);
+    } catch (err) {
+      if (err instanceof UnsupportedCondition) {
+        return [
+          `uses a construct this audit does not model (${err.message}), so its POLARITY cannot be judged — teach \`evaluateCondition\` the construct or state here why the branch is still a tooth. Refusing beats guessing: an inverted condition looks identical to a correct one under a syntax check`,
+        ];
+      }
+      throw err;
+    }
+    if (Boolean(actual) !== fires) {
+      problems.push(
+        fires
+          ? `does NOT fire on ${JSON.stringify(summary)} (${why}) — the branch, its ::error:: lines and its exit are all still there, and none of them run`
+          : `FIRES on ${JSON.stringify(summary)} (${why}) — the polarity is inverted: this gate fails a green shard and passes a red one`,
+      );
+    }
+  }
+  return problems;
+}
 
 /**
- * A `process.exit(<non-zero>)` reachable from `node` WITHOUT crossing a
- * function boundary.
+ * A `process.exit(<non-zero>)` under `node` that is not inside a nested
+ * function.
  *
- * The function-boundary rule is the point: `if (…) { const f = () => process.exit(1); }`
+ * The function-boundary rule earns its keep: `if (…) { const f = () => process.exit(1); }`
  * declares an exit that never runs, and a plain sub-tree search would call that
  * a tooth.
+ *
+ * HONEST SCOPE — this is NOT reachability analysis. `if (0) { process.exit(1) }`
+ * inside the branch still counts, as does an exit under a nested `if` that can
+ * never be true. Those are adversarial camouflage rather than a plausible
+ * disarm (nobody weakens a gate by wrapping its exit in `if (0)`), so the cost
+ * of modelling them is not paid here — but the limit is written down rather
+ * than left for someone to discover. The POLARITY of the branch that OWNS the
+ * tooth is checked properly, above; it is only nested dead code that is not.
  */
 function directFailingExit(node: ts.Node): { found: boolean; zero: boolean } {
   /** Every `process.exit(…)` status found, `null` where it is absent. */
@@ -348,12 +508,49 @@ export function auditFailOnRedGateTeeth(workflowPath: string): GateTeethAudit {
     return { teeth, exitReachesStep, branchesFound, shellIfBlocks: 0, jsIfStatements: 0 };
   }
 
+  // ── the script's exit status must actually reach the step ─────────────────
+  // Three teeth that all `exit 1` are worth nothing if the command carrying
+  // them is `|| true`'d, piped, or run with `set +e`. That is precisely how the
+  // shard RUN step lost its exit, one step above this one.
+  //
+  // FIRST, before any early return. This block used to sit at the end, past the
+  // `program === null` bail-out, so a gate whose program had been moved to
+  // `node scripts/gate.mjs` AND had errexit turned off produced an EMPTY finding
+  // list — the assertion titled "the exit status reaches the step" was green
+  // while its own claim was false. Nothing that judges the SCRIPT may depend on
+  // the embedded program being locatable.
+  const nodeStart = run.indexOf("node -e '");
+  if (nodeStart !== -1) {
+    const tail = run.slice(nodeStart).replace(/'[\s\S]*'/, "'…'");
+    if (/\|\|/.test(tail)) {
+      exitReachesStep.push(
+        "the `node -e` invocation is followed by `||` — its non-zero exit is swallowed exactly the way the shard run step's is (`|| true`), and all three teeth become decoration",
+      );
+    }
+    // `||` is stripped first: it is reported above with its own message, and a
+    // naive `|` search would report the SAME defect twice under two names.
+    if (/\|/.test(tail.replace(/\|\|/g, ''))) {
+      exitReachesStep.push(
+        'the `node -e` invocation is piped — a pipeline reports the LAST command’s status, not the gate’s',
+      );
+    }
+  }
+  if (/set\s+\+e/.test(run)) {
+    exitReachesStep.push(
+      '`set +e` appears in the gate script — with errexit off, a failing command no longer aborts the step',
+    );
+  }
+  if (!/set\s+-([a-z]*e|o\s+errexit)/.test(run)) {
+    exitReachesStep.push(
+      'the gate script never sets `-e` — a failing command mid-script would not abort it',
+    );
+  }
+
   // ── tooth 1: the shell branch on a missing summary ────────────────────────
   // Only the SHELL prelude is walked as shell. The embedded JS also contains
   // lines beginning `if (`, and feeding those to a shell walker would invent
   // blocks that never close — a parser pointed at the wrong language is how a
   // structural check quietly becomes as unreliable as the regex it replaced.
-  const nodeStart = run.indexOf("node -e '");
   const blocks = shellIfBlocks(nodeStart === -1 ? run : run.slice(0, nodeStart));
   const missing = blocks.filter((b) => /!\s+-f\b/.test(b.condition) && /SUMMARY/.test(b.condition));
   if (missing.length === 0) {
@@ -369,7 +566,7 @@ export function auditFailOnRedGateTeeth(workflowPath: string): GateTeethAudit {
     const exit = shellFailingExit((missing[0] as ShellIfBlock).body);
     if (!exit.found) {
       teeth['missing-summary'].push(
-        `${TOOTH_LABEL['missing-summary']} has NO \`exit\` — it prints an ::error:: line and the step exits 0. ${COST['missing-summary']}`,
+        `${TOOTH_LABEL['missing-summary']} has NO \`exit\` of its own. Only a literal non-zero \`exit <n>\` counts here — say so if this branch fails the step some other way. ${COST['missing-summary']}`,
       );
     } else if (exit.zero) {
       teeth['missing-summary'].push(
@@ -399,7 +596,7 @@ export function auditFailOnRedGateTeeth(workflowPath: string): GateTeethAudit {
   const auditJsTooth = (
     id: Exclude<ToothId, 'missing-summary'>,
     reads: string[],
-    valueCheck: (cond: ts.Node) => string | null,
+    polarityCheck: (cond: ts.Expression) => string[],
   ) => {
     const owners = ifs.filter((s) => reads.every((r) => namesIn(s.expression).has(r)));
     if (owners.length === 0) {
@@ -416,12 +613,11 @@ export function auditFailOnRedGateTeeth(workflowPath: string): GateTeethAudit {
     }
     const owner = owners[0] as ts.IfStatement;
     branchesFound.push(id);
-    const valueProblem = valueCheck(owner.expression);
-    if (valueProblem) teeth[id].push(`${TOOTH_LABEL[id]} ${valueProblem}`);
+    for (const p of polarityCheck(owner.expression)) teeth[id].push(`${TOOTH_LABEL[id]} ${p}`);
     const exit = directFailingExit(owner.thenStatement);
     if (!exit.found) {
       teeth[id].push(
-        `${TOOTH_LABEL[id]} has NO \`process.exit(…)\` of its own — it prints its ::error:: lines and the step exits 0. ${COST[id]}`,
+        `${TOOTH_LABEL[id]} has NO \`process.exit(…)\` of its own. ${RECOGNISED_EXIT} ${COST[id]}`,
       );
     } else if (exit.zero) {
       teeth[id].push(
@@ -430,53 +626,49 @@ export function auditFailOnRedGateTeeth(workflowPath: string): GateTeethAudit {
     }
   };
 
-  auditJsTooth('failed-or-not-run', ['failed'], (cond) => {
-    const problems: string[] = [];
-    for (const name of ['failed', 'notRun']) {
-      if (!comparesTo(cond, name, ts.SyntaxKind.GreaterThanToken, isZeroLiteral)) {
-        problems.push(`does not compare \`${name}\` against 0`);
-      }
-    }
-    return problems.length > 0
-      ? `${problems.join(' and ')} — a threshold that cannot fire is a branch, not a tooth`
-      : null;
-  });
-
-  auditJsTooth('truncated', ['truncated'], (cond) =>
-    comparesTo(cond, 'truncated', ts.SyntaxKind.EqualsEqualsEqualsToken, isTrueKeyword)
-      ? null
-      : 'does not test `truncated === true` — a partial result set would read as green',
+  // A shard with ONE real failure and a clean one must be told apart, and so
+  // must a shard with one phantom not-run file. Three cases rather than one:
+  // the second is what makes `||` → `&&` a finding, and the third is what makes
+  // an inversion or a `> 999` threshold one.
+  auditJsTooth('failed-or-not-run', ['failed'], (cond) =>
+    polarityProblems(cond, [
+      {
+        summary: { failed: 1, notRun: 0, truncated: false },
+        fires: true,
+        why: 'one REAL test failure — run 28552585087 in miniature',
+      },
+      {
+        summary: { failed: 0, notRun: 1, truncated: false },
+        fires: true,
+        why: 'one phantom not-run file (a jest infra abort, not a test result)',
+      },
+      {
+        summary: { failed: 0, notRun: 0, truncated: false },
+        fires: false,
+        why: 'a genuinely clean shard',
+      },
+    ]),
   );
 
-  // ── the script's exit status must actually reach the step ─────────────────
-  // Three teeth that all `exit 1` are worth nothing if the command carrying
-  // them is `|| true`'d, piped, or run with `set +e`. That is precisely how the
-  // shard RUN step lost its exit, one step above this one.
-  if (nodeStart !== -1) {
-    const tail = run.slice(nodeStart).replace(/'[\s\S]*'/, "'…'");
-    if (/\|\|/.test(tail)) {
-      exitReachesStep.push(
-        "the `node -e` invocation is followed by `||` — its non-zero exit is swallowed exactly the way the shard run step's is (`|| true`), and all three teeth become decoration",
-      );
-    }
-    // `||` is stripped first: it is reported above with its own message, and a
-    // naive `|` search would report the SAME defect twice under two names.
-    if (/\|/.test(tail.replace(/\|\|/g, ''))) {
-      exitReachesStep.push(
-        'the `node -e` invocation is piped — a pipeline reports the LAST command’s status, not the gate’s',
-      );
-    }
-  }
-  if (/set\s+\+e/.test(run)) {
-    exitReachesStep.push(
-      '`set +e` appears in the gate script — with errexit off, a failing command no longer aborts the step',
-    );
-  }
-  if (!/set\s+-[a-z]*e/.test(run)) {
-    exitReachesStep.push(
-      'the gate script never sets `-e` — a failing command mid-script would not abort it',
-    );
-  }
+  auditJsTooth('truncated', ['truncated'], (cond) =>
+    polarityProblems(cond, [
+      {
+        summary: { failed: 0, notRun: 0, truncated: true },
+        fires: true,
+        why: 'a shard killed mid-run: partial results',
+      },
+      {
+        summary: { failed: 0, notRun: 0, truncated: false },
+        fires: false,
+        why: 'a complete result set',
+      },
+      {
+        summary: { failed: 0, notRun: 0 },
+        fires: false,
+        why: 'a summary that carries no truncated flag at all — firing here makes the gate permanently red, which is the other way to make it meaningless',
+      },
+    ]),
+  );
 
   return {
     teeth,

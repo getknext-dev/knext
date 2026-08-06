@@ -2203,6 +2203,15 @@ describe('compat-suite fail-on-red gate — revocation teeth (test-e2e-deploy.ym
   // exactly one of these and the message names that branch. Proved in both
   // directions by scripts/mutation-prove-compat-fail-on-red-teeth.mjs: each
   // disarm reds its own assertion AND leaves the other two green.
+  //
+  // Each tooth is judged on PRESENCE, VALUE and POLARITY. Polarity was the
+  // round-2 finding and it is the one worth naming here: this file's first
+  // version asked whether a `failed > 0` comparison APPEARED in the condition,
+  // never whether the branch FIRES on `failed > 0`. `!( … )`, a one-character
+  // `||` → `&&`, and a dead conjunct all walked past it with every assertion
+  // green — and the first of those inverts the gate outright, failing green
+  // shards and passing red ones. The conditions are now EVALUATED against
+  // synthetic summaries instead of pattern-matched.
   // ───────────────────────────────────────────────────────────────────────────
   const teeth = auditFailOnRedGateTeeth(WORKFLOW_PATH);
 
