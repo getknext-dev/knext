@@ -274,34 +274,108 @@ describe('#545 AC3 — a re-run cannot erase the signal (workflow contract)', ()
     // so the flake rate was unauditable after the fact by construction.
     // Scoped to the LEDGER artifacts only — the intermediate workspace tarball
     // is deliberately retention-days: 1 (a multi-GB blob, not evidence).
-    const ledgerUploads = [
-      ...WORKFLOW.matchAll(
-        /name:\s*(compat-suite-summary[^\n]*|compat-run-ledger[^\n]*)\n(?:(?!\s*-\s|\s*name:)[^\n]*\n)*?\s*retention-days:\s*(\d+)/g,
-      ),
-    ];
-    expect(ledgerUploads.length).toBeGreaterThanOrEqual(2);
-    for (const m of ledgerUploads) expect(Number(m[2])).toBeGreaterThanOrEqual(90);
+    //
+    // STRUCTURAL since round 5: the regex version matched YAML text, so it
+    // depended on key spelling and block layout. This walks the parsed doc.
+    const uploads: Array<{ job: string; name: string; retention: unknown }> = [];
+    for (const [jobId, jobDef] of Object.entries((DOC.jobs ?? {}) as Record<string, WorkflowJob>)) {
+      for (const step of jobDef.steps ?? []) {
+        const name = String(step.with?.name ?? '');
+        if (!name.startsWith('compat-suite-summary') && !name.startsWith('compat-run-ledger')) {
+          continue;
+        }
+        uploads.push({ job: jobId, name, retention: step.with?.['retention-days'] });
+      }
+    }
+    expect(uploads.length, 'no ledger artifact uploads found').toBeGreaterThanOrEqual(2);
+    for (const u of uploads) {
+      expect(
+        Number(u.retention),
+        `${u.job} uploads \`${u.name}\` with retention-days ${JSON.stringify(u.retention)}`,
+      ).toBeGreaterThanOrEqual(90);
+    }
   });
 
   it('the nightly red alert carries the failing shard IDs and test names in its body', () => {
     // BOTH halves, or the guard is decoration: renaming only the env wiring left
     // the `${RED_SHARD_DETAIL}` body reference behind and a single-token match
     // stayed green (caught by the mutation proof).
-    expect(WORKFLOW).toMatch(
-      /RED_SHARD_DETAIL:\s*\$\{\{\s*needs\.shard-ledger\.outputs\.red_detail\s*\}\}/,
+    //
+    // STRUCTURAL since round 5 — this is a claim about a job OTHER than
+    // shard-ledger, which is the class that has now produced two findings, so
+    // it gets the same treatment: the env binding is read from the parsed step,
+    // and the body reference from that same step's `run:`.
+    const alert = (DOC.jobs ?? {})['nightly-red-alert'];
+    const step = (alert?.steps ?? []).find((s) => (s.env ?? {}).RED_SHARD_DETAIL !== undefined);
+    expect(step, 'no step in nightly-red-alert binds RED_SHARD_DETAIL').toBeTruthy();
+    expect(String(step?.env?.RED_SHARD_DETAIL)).toMatch(
+      /\$\{\{\s*needs\.shard-ledger\.outputs\.red_detail\s*\}\}/,
     );
-    expect(WORKFLOW).toMatch(/\$\{RED_SHARD_DETAIL\}/);
+    expect(String(step?.run ?? ''), 'the bound value is never used in the issue body').toMatch(
+      /\$\{RED_SHARD_DETAIL\}/,
+    );
   });
 
   it('an aggregate ledger job records every shard outcome for the run', () => {
-    expect(WORKFLOW).toMatch(/^ {2}shard-ledger:$/m);
+    expect(Object.keys(DOC.jobs ?? {})).toContain('shard-ledger');
   });
 
   it('the shard step has NO retry/continue-on-error escape hatch (a retry is not a fix)', () => {
     // #545: "The tempting shortcut is a blanket retry on failed shards, which
     // would make the gate permanently green and permanently meaningless."
+    //
+    // ROUND 5 — this assertion used to BE the guard, and it was evadable:
+    // `${{ true }}` and `'true'` both walked past it, at step AND job level, on
+    // `deploy-tests`. The structural sweep below is the guard now; the two text
+    // matches stay only as a cheap redundant net.
+    expect(auditNoSwallowedFailures().problems).toEqual([]);
     expect(WORKFLOW).not.toMatch(/continue-on-error:\s*true/);
-    expect(WORKFLOW).not.toMatch(/nick-fields\/retry/);
+  });
+
+  it('NO job or step anywhere can swallow its failure — every spelling, every job', () => {
+    // ────────────────────────────────────────────────────────────────────────
+    // The round-2 argument, applied one job short. This file already wrote down
+    // that "banning spellings is what fails; asking 'is it literally false?' is
+    // what holds" — and then ran `continueOnErrorProblem` only inside
+    // `auditLedgerJob()`, which hard-codes `jobId = 'shard-ledger'`. So the
+    // guard titled "the shard step…" kept the regex, and three spellings
+    // survived on `deploy-tests`.
+    //
+    // WHY THAT WAS THE WORST OF THE FIVE FINDINGS, measured: the shard run step
+    // swallows its own exit (`|| true`), so "Fail shard on red results" is the
+    // ONLY thing that fails `deploy-tests` on `failed>0`. And `shard-ledger` is
+    // no backstop — it has no `failed>0` floor BY DESIGN (the per-shard gate
+    // owns that), so sixteen present summaries with one carrying `failed: 3`
+    // gives `errors: []`, `complete: true`, exit 0. Disarm that one step and a
+    // night with real test failures concludes SUCCESS, files no alert, and
+    // counts toward the v1.0 14-night window.
+    //
+    // Scope is now the WHOLE workflow, so the next job added inherits it.
+    // ────────────────────────────────────────────────────────────────────────
+    const { problems, jobsChecked, stepsChecked } = auditNoSwallowedFailures();
+    // Non-vacuity: an audit that walked nothing would pass over an empty set.
+    expect(jobsChecked).toBeGreaterThan(3);
+    expect(stepsChecked).toBeGreaterThan(20);
+    expect(problems, problems.join('\n')).toEqual([]);
+  });
+
+  it('every action used is on an ALLOWLIST — a retry action cannot be introduced', () => {
+    // `expect(WORKFLOW).not.toMatch(/nick-fields\/retry/)` enumerated ONE action
+    // name. A SHA-pinned alternative (`Wandalen/wretry.action@<40-hex>`) walks
+    // straight past it — the same enumerated-blocklist mistake as the
+    // `continue-on-error` regex, in a different costume. An allowlist inverts
+    // it: any action not named here is a finding, whatever it is called.
+    const { used, problems } = auditActionAllowlist();
+    expect(used.length, 'no `uses:` found — the scan matched nothing').toBeGreaterThan(4);
+    expect(problems, problems.join('\n')).toEqual([]);
+  });
+
+  it('the fail-on-red gate exists and cannot be conditioned off', () => {
+    // The step that turns a red RESULT into a red JOB. Same presence +
+    // admissible-`if:` discipline the ledger job got in round 3, applied to the
+    // job that actually owns the `failed>0` verdict.
+    const problems = auditFailOnRedGate();
+    expect(problems, problems.join('\n')).toEqual([]);
   });
 });
 
@@ -540,6 +614,109 @@ function auditLedgerJob(): string[] {
     }
   }
 
+  return problems;
+}
+
+/**
+ * Actions this workflow may use, by `owner/repo` (the SHA pin is a separate
+ * concern, owned by tests/compat-window-fingerprint.test.ts).
+ *
+ * An ALLOWLIST, because the thing being kept out — a retry wrapper — has an
+ * unbounded number of names. `nick-fields/retry` was the only one ever banned;
+ * `Wandalen/wretry.action` (or any fork of either) was never mentioned. Adding
+ * an entry here is a deliberate act, and a retry action would have to be added
+ * by name, in a diff, with a reason.
+ */
+const ALLOWED_ACTIONS = new Set([
+  'actions/cache',
+  'actions/checkout',
+  'actions/download-artifact',
+  'actions/setup-node',
+  'actions/upload-artifact',
+  'oven-sh/setup-bun',
+  'pnpm/action-setup',
+]);
+
+/** Every `uses:` in the workflow, and any that is not on the allowlist. */
+function auditActionAllowlist(): { used: string[]; problems: string[] } {
+  const problems: string[] = [];
+  const used: string[] = [];
+  for (const [jobId, jobDef] of Object.entries((DOC.jobs ?? {}) as Record<string, WorkflowJob>)) {
+    for (const step of jobDef.steps ?? []) {
+      if (typeof step.uses !== 'string') continue;
+      const action = step.uses.split('@')[0] as string;
+      if (!used.includes(action)) used.push(action);
+      if (!ALLOWED_ACTIONS.has(action)) {
+        problems.push(
+          `job \`${jobId}\` uses \`${action}\`, which is not on ALLOWED_ACTIONS — a retry wrapper has unbounded names, so this is an allowlist: add it here with a reason, or do not use it`,
+        );
+      }
+    }
+  }
+  return { used, problems };
+}
+
+/**
+ * `continue-on-error`, judged over EVERY job and EVERY step in the workflow.
+ *
+ * Deliberately not scoped to a job id. `auditLedgerJob()` is, and that is
+ * exactly how three spellings survived on `deploy-tests` — the guard that
+ * covered them was a text regex, because the structural check had been pointed
+ * at one job. Scope is the workflow, so a job added next month inherits it.
+ */
+function auditNoSwallowedFailures(): {
+  problems: string[];
+  jobsChecked: number;
+  stepsChecked: number;
+} {
+  const problems: string[] = [];
+  let jobsChecked = 0;
+  let stepsChecked = 0;
+  for (const [jobId, raw] of Object.entries((DOC.jobs ?? {}) as Record<string, WorkflowJob>)) {
+    jobsChecked += 1;
+    const jobDef = raw as unknown as Job;
+    const jobCoe = continueOnErrorProblem(jobDef, `job \`${jobId}\``);
+    if (jobCoe) problems.push(jobCoe);
+    for (const [i, step] of (raw.steps ?? []).entries()) {
+      stepsChecked += 1;
+      const label = `job \`${jobId}\` step ${step.name ? `\`${step.name}\`` : `#${i + 1}`}`;
+      const coe = continueOnErrorProblem(step as unknown as Job, label);
+      if (coe) problems.push(coe);
+    }
+  }
+  return { problems, jobsChecked, stepsChecked };
+}
+
+/** The `deploy-tests` step that converts a red RESULT into a red JOB. */
+const FAIL_ON_RED_STEP = 'Fail shard on red results (revocation teeth)';
+
+/**
+ * The fail-on-red gate must EXIST and must not be conditioned off.
+ *
+ * It carries `if: always()` deliberately — it has to run after a shard step
+ * that was killed or timed out — so the same allowlist-of-one applies here as
+ * on the ledger job: `always()` is admissible, `${{ false }}` and everything
+ * else is not.
+ */
+function auditFailOnRedGate(): string[] {
+  const problems: string[] = [];
+  const jobDef = (DOC.jobs ?? {})['deploy-tests'];
+  if (!jobDef) return ['job `deploy-tests` is not defined in this workflow'];
+  const step = (jobDef.steps ?? []).find((s) => s.name === FAIL_ON_RED_STEP);
+  if (!step) {
+    return [
+      `job \`deploy-tests\` has no \`${FAIL_ON_RED_STEP}\` step — the shard run step swallows its own exit (\`|| true\`), so without this step NOTHING fails the job on failed>0, and scripts/compat-run-ledger.mjs has no failed>0 floor by design`,
+    ];
+  }
+  if (step.if === undefined) {
+    problems.push(
+      `the \`${FAIL_ON_RED_STEP}\` step carries no \`if:\` — it must run after a shard step that was killed or timed out, which is what \`always()\` is for`,
+    );
+  } else if (!ADMISSIBLE_IF.test(String(step.if).trim())) {
+    problems.push(
+      `the \`${FAIL_ON_RED_STEP}\` step carries if: ${JSON.stringify(step.if)} — only \`always()\` is admissible; a skipped gate cannot fail the job, and a red night would conclude success`,
+    );
+  }
   return problems;
 }
 

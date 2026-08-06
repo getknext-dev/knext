@@ -318,6 +318,21 @@ export function buildLedger({
   };
 
   // ── The pre-existing floors (#545), unchanged in meaning ───────────────────
+  //
+  // NOTE WHAT IS DELIBERATELY *NOT* A FLOOR HERE: `failed > 0`. A shard that ran
+  // and failed tests is a RESULT, and the per-shard "Fail shard on red results"
+  // gate in `deploy-tests` owns that verdict — this job's floors are about
+  // evidence being missing or unusable, not about tests failing. So a run with
+  // sixteen present summaries, one of them carrying `failed: 3`, legitimately
+  // yields `errors: []` and exit 0 here.
+  //
+  // That is correct, and it is also why the fail-on-red gate has NO backstop:
+  // the shard run step swallows its own exit (`|| true`), so if that one step is
+  // ever skipped or made unfailable, nothing else in the workflow turns a red
+  // RESULT into a red RUN — not this script, and not the alert, whose condition
+  // would see three successes. `tests/compat-shard-flake-attribution.test.ts`
+  // guards that step's presence and its `if:` for exactly this reason; do not
+  // "simplify" either without reading that guard first.
   if (seen === 0) {
     errors.push('no shard summaries at all — the run produced no ledger; that is NOT green');
   }

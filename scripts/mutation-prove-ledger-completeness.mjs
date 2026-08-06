@@ -59,6 +59,16 @@ const COMPLETENESS_SPEC = 'tests/compat-run-ledger-completeness.test.ts';
 const WORKFLOW_SPEC = 'tests/compat-shard-flake-attribution.test.ts';
 
 /**
+ * The `deploy-tests` step that turns a red RESULT into a red JOB, and the job
+ * header itself. Both are round-5 anchors: the shard run step swallows its own
+ * exit (`|| true`), so this one step is the only thing that fails the job on
+ * `failed > 0`, and scripts/compat-run-ledger.mjs deliberately has no such floor.
+ */
+const FAIL_ON_RED_ANCHOR =
+  '      - name: Fail shard on red results (revocation teeth)\n        if: always()\n';
+const DEPLOY_TESTS_ANCHOR = '  deploy-tests:\n    name: Deploy tests (shard ${{ matrix.shard }})\n';
+
+/**
  * Every mutation this prover scores. The declaration is DERIVED from the list,
  * so a sixth entry cannot drift from the count the lane compares against (#685).
  *
@@ -251,6 +261,75 @@ const MUTATIONS = [
     anchor:
       "       needs.shard-ledger.result == 'failure' || needs.shard-ledger.result == 'cancelled' ||\n       needs.deploy-tests.result == 'cancelled')",
     replacement: "       needs.shard-ledger.result == 'failure')",
+  },
+  // ── Round 5: the same argument, applied one job to the LEFT ────────────────
+  // `auditLedgerJob()` hard-codes `shard-ledger`, so `continueOnErrorProblem` —
+  // imported specifically to kill this spelling class — never reached
+  // `deploy-tests`, where the guard was still the evadable regex. All three
+  // spellings were measured GREEN before the workflow-wide sweep landed.
+  ...[
+    [
+      'step `continue-on-error: ${{ true }}` on the fail-on-red gate',
+      'continue-on-error: ${{ true }}',
+    ],
+    ["step `continue-on-error: 'true'` on the fail-on-red gate", "continue-on-error: 'true'"],
+  ].map(([label, line]) => ({
+    label,
+    file: WORKFLOW,
+    spec: WORKFLOW_SPEC,
+    test: 'NO job or step anywhere can swallow its failure',
+    anchor: FAIL_ON_RED_ANCHOR,
+    replacement: `${FAIL_ON_RED_ANCHOR}        ${line}\n`,
+  })),
+  {
+    label: 'JOB-level `continue-on-error: ${{ true }}` on deploy-tests',
+    file: WORKFLOW,
+    spec: WORKFLOW_SPEC,
+    test: 'NO job or step anywhere can swallow its failure',
+    anchor: DEPLOY_TESTS_ANCHOR,
+    replacement: `${DEPLOY_TESTS_ANCHOR}    continue-on-error: \${{ true }}\n`,
+  },
+  {
+    // The enumerated blocklist `not.toMatch(/nick-fields\/retry/)` never
+    // mentioned this action, and a SHA pin makes it look like every other line
+    // in the file.
+    label: 'a SHA-pinned RETRY action is introduced under a name nobody banned',
+    file: WORKFLOW,
+    spec: WORKFLOW_SPEC,
+    test: 'every action used is on an ALLOWLIST',
+    anchor: FAIL_ON_RED_ANCHOR,
+    replacement: `${FAIL_ON_RED_ANCHOR}        uses: Wandalen/wretry.action@0123456789abcdef0123456789abcdef01234567 # v3.8.0\n`,
+  },
+  {
+    label: 'the fail-on-red gate is conditioned off with `if: ${{ false }}`',
+    file: WORKFLOW,
+    spec: WORKFLOW_SPEC,
+    test: 'the fail-on-red gate exists and cannot be conditioned off',
+    anchor: '      - name: Fail shard on red results (revocation teeth)\n        if: always()',
+    replacement:
+      '      - name: Fail shard on red results (revocation teeth)\n        if: ${{ false }}',
+  },
+  {
+    label: 'the shard summary retention drops below the 14-night window it attests to',
+    file: WORKFLOW,
+    spec: WORKFLOW_SPEC,
+    test: 'the shard summary artifact outlives a 14-night window',
+    // Anchored on the comment line immediately above the value, so the value is
+    // REPLACED rather than a duplicate key added — a duplicate `retention-days`
+    // would make the YAML parse ambiguous and the guard would then red on the
+    // parse, not on the retention.
+    anchor:
+      '          # files; 90 days covers the window plus triage.\n          retention-days: 90',
+    replacement:
+      '          # files; 90 days covers the window plus triage.\n          retention-days: 14',
+  },
+  {
+    label: 'the alert stops binding RED_SHARD_DETAIL (the issue names no failing test)',
+    file: WORKFLOW,
+    spec: WORKFLOW_SPEC,
+    test: 'the nightly red alert carries the failing shard IDs',
+    anchor: '          RED_SHARD_DETAIL: ${{ needs.shard-ledger.outputs.red_detail }}',
+    replacement: '          RED_SHARD_DETAIL_TYPO: ${{ needs.shard-ledger.outputs.red_detail }}',
   },
   {
     label: 'the ledger computation is re-inlined in the workflow',
