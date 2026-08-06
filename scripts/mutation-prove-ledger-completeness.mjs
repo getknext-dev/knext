@@ -1,0 +1,160 @@
+#!/usr/bin/env node
+/**
+ * Standing mutation proof for the compat-ledger reconciliation (#695).
+ *
+ * WHAT IS BEING PROVED, AND WHY IT NEEDS PROVING
+ * ----------------------------------------------
+ * The guards added in #695 assert that a shard which reports nothing appears in
+ * the ledger as MISSING and fails the job. On a healthy tree that path never
+ * fires — every night either has all sixteen summaries or is red for some other
+ * reason — so the guards are exactly the kind that can be written, merged, and
+ * be decoration. Run 30790778590 is the reminder of what that costs: the
+ * previous ledger reconciled against nothing, dropped the one failing shard, and
+ * recorded a clean sheet for a red night that can no longer be reconstructed
+ * because the job log has expired.
+ *
+ * Each mutation below DISARMS one half of the fix and requires the corresponding
+ * guard to go RED:
+ *
+ *   1. the missing-shard reconciliation stops firing  → the completeness spec;
+ *   2. the expected total is INFERRED from the artifacts that arrived (the
+ *      original defect, restated in one line)          → the fail-closed spec;
+ *   3. the ledger is written only when the run is clean → the evidence-survives
+ *                                                          spec;
+ *   4. the workflow's declared total drifts from the matrix → the cross-check;
+ *   5. the ledger computation is re-inlined in the workflow → the run allowlist.
+ *
+ * Mutations land through the byte-snapshot harness, so restoration is
+ * content-addressed and sha256-verified, and every mutation carries the residue
+ * marker (`scripts/scan-mutation-residue.mjs` finds one that survives a stall).
+ * Never `perl`: a silently-failed substitution yields a green run that proves
+ * nothing.
+ *
+ * Usage:  node scripts/mutation-prove-ledger-completeness.mjs
+ */
+
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { runGateTest } from './lib/ci-blocking-gate-proof.mjs';
+import { mutate, restore, snapshot } from './lib/mutation-harness.mjs';
+import { declareMutations, recordMutation } from './lib/prover-report.mjs';
+
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const LEDGER_SCRIPT = resolve(REPO_ROOT, 'scripts/compat-run-ledger.mjs');
+const WORKFLOW = resolve(REPO_ROOT, '.github/workflows/test-e2e-deploy.yml');
+
+const COMPLETENESS_SPEC = 'tests/compat-run-ledger-completeness.test.ts';
+const WORKFLOW_SPEC = 'tests/compat-shard-flake-attribution.test.ts';
+
+/**
+ * Every mutation this prover scores. The declaration is DERIVED from the list,
+ * so a sixth entry cannot drift from the count the lane compares against (#685).
+ *
+ * @type {Array<{label:string, file:string, spec:string, test:string, anchor:string, replacement:string}>}
+ */
+const MUTATIONS = [
+  {
+    label: 'the missing-shard reconciliation stops firing',
+    file: LEDGER_SCRIPT,
+    spec: COMPLETENESS_SPEC,
+    test: 'reproduces run 30790778590',
+    anchor: 'if (expected !== null && missingShards.length > 0) {',
+    replacement: 'if (expected !== null && missingShards.length > 999) {',
+  },
+  {
+    label: 'the expected total is INFERRED from the artifacts that arrived',
+    file: LEDGER_SCRIPT,
+    spec: COMPLETENESS_SPEC,
+    test: 'fails closed when the declared total is',
+    anchor: '  const expected = parseShardTotal(shardTotal);',
+    replacement: '  const expected = parseShardTotal(shardTotal) ?? observed.length;',
+  },
+  {
+    label: 'the ledger is written only when the run is clean',
+    file: LEDGER_SCRIPT,
+    spec: COMPLETENESS_SPEC,
+    test: 'still leaves the ledger on disk',
+    // `\\n` on purpose: the anchor must match the two characters `\` and `n`
+    // that appear in the source template literal, not a real newline. The
+    // harness refuses an anchor that does not occur exactly once, which is how
+    // the first version of this entry was caught rather than silently proving
+    // nothing.
+    anchor: '  writeFileSync(outFile, `${JSON.stringify(ledger, null, 2)}\\n`);',
+    replacement:
+      '  if (errors.length === 0) writeFileSync(outFile, `${JSON.stringify(ledger, null, 2)}\\n`);',
+  },
+  {
+    label: "the workflow's declared total drifts from the matrix",
+    file: WORKFLOW,
+    spec: WORKFLOW_SPEC,
+    test: 'the deploy-tests matrix IS the declared total',
+    anchor: "  COMPAT_SHARD_TOTAL: '16'",
+    replacement: "  COMPAT_SHARD_TOTAL: '15'",
+  },
+  {
+    label: 'the ledger computation is re-inlined in the workflow',
+    file: WORKFLOW,
+    spec: WORKFLOW_SPEC,
+    test: 'the ledger job runs the audited script',
+    anchor: '        run: node knext/scripts/compat-run-ledger.mjs',
+    replacement: [
+      '        run: |',
+      "          node -e \"require('node:fs').writeFileSync('compat-run-ledger.json', '{}')\"",
+    ].join('\n'),
+  },
+];
+
+declareMutations(MUTATIONS.length);
+
+let pass = 0;
+let fail = 0;
+
+/** A baseline the whole proof rests on: every targeted guard is GREEN first. */
+for (const { spec, test, label } of MUTATIONS) {
+  const base = runGateTest(REPO_ROOT, spec, test);
+  if (base.ran === 0) {
+    console.error(
+      `FATAL: no test matching ${JSON.stringify(test)} ran in ${spec} ` +
+        `(launched=${base.launched}, collected=${base.collected}, noTestFiles=${base.noTestFiles}) ` +
+        `— the proof for "${label}" would be vacuous`,
+    );
+    process.exit(1);
+  }
+  if (!base.ok) {
+    console.error(`FATAL: ${spec} -t ${JSON.stringify(test)} is RED before any mutation`);
+    process.exit(1);
+  }
+}
+console.log(`baseline: ${MUTATIONS.length} targeted guard(s) green\n`);
+
+for (const { label, file, spec, test, anchor, replacement } of MUTATIONS) {
+  console.log(`── disarming: ${label}`);
+  const snap = snapshot(file);
+  try {
+    mutate(snap, anchor, replacement);
+    const run = runGateTest(REPO_ROOT, spec, test);
+    if (run.ran === 0) {
+      console.error(`   FATAL: the guard did not run under mutation (${spec} -t ${test})`);
+      restore(snap);
+      process.exit(1);
+    }
+    if (run.ok) {
+      console.log('   x DECORATION: the guard stayed GREEN with its subject disarmed');
+      fail += 1;
+    } else {
+      console.log(`   ok went RED as required (${run.ran} test(s) ran)`);
+      pass += 1;
+    }
+    recordMutation();
+  } finally {
+    restore(snap);
+  }
+  const after = runGateTest(REPO_ROOT, spec, test);
+  if (!after.ok || after.ran === 0) {
+    console.error(`   FATAL: ${spec} did not go green again after restore`);
+    process.exit(1);
+  }
+}
+
+console.log(`\n${pass} disarm(s) went red, ${fail} stayed green`);
+if (fail > 0) process.exit(1);

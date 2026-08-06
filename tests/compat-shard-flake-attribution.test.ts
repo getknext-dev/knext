@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
+import { DEFAULT_OUT_FILE } from '../scripts/compat-run-ledger.mjs';
 // Both scripts are untyped `.mjs`, but the root typecheck gate runs with
 // `allowJs`, so tsc infers their real shapes from JSDoc. That is why these
 // imports need no `@ts-expect-error` — and why `failures[]`/`notRunFiles[]`
@@ -299,5 +301,133 @@ describe('#545 AC3 — a re-run cannot erase the signal (workflow contract)', ()
     // would make the gate permanently green and permanently meaningless."
     expect(WORKFLOW).not.toMatch(/continue-on-error:\s*true/);
     expect(WORKFLOW).not.toMatch(/nick-fields\/retry/);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #695 — the ledger must reconcile against the MATRIX, not against whatever
+// artifacts arrived.
+//
+// Run 30790778590 (node lane, 2026-08-03) concluded FAILURE on shard 16/16; that
+// job stopped executing steps, so its `if: always()` upload tail never ran and
+// `compat-suite-summary-15` never existed. The ledger was assembled from the
+// fifteen artifacts that did arrive and recorded a 15-row, all-green night — and
+// the ledger job concluded SUCCESS. The job log has since expired, so the only
+// surviving evidence of that red night claims it was clean.
+//
+// The behavioural half of the fix (a missing shard is an ERROR, and a
+// no-error ledger is necessarily complete) is pinned in
+// tests/compat-run-ledger-completeness.test.ts, against the real module. THIS
+// half pins the wiring: the workflow declares the shard total once, the matrix
+// agrees with it, and the ledger job may run NOTHING but the audited script —
+// stated as an allowlist, so re-inlining the computation in any shape fails
+// rather than only the one spelling somebody thought to ban.
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface WorkflowStep {
+  name?: string;
+  uses?: string;
+  run?: string;
+  if?: string;
+  with?: Record<string, unknown>;
+}
+interface WorkflowJob {
+  steps?: WorkflowStep[];
+  strategy?: { matrix?: { shard?: unknown } };
+}
+interface WorkflowDoc {
+  env?: Record<string, unknown>;
+  jobs?: Record<string, WorkflowJob>;
+}
+
+const DOC = parse(WORKFLOW) as WorkflowDoc;
+
+function job(id: string): WorkflowJob {
+  const found = DOC.jobs?.[id];
+  if (!found) throw new Error(`workflow job "${id}" not found`);
+  return found;
+}
+
+/** The declared shard total, as the workflow states it — parsed, never assumed. */
+function declaredShardTotal(): number {
+  const raw = DOC.env?.COMPAT_SHARD_TOTAL;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new Error(`workflow env COMPAT_SHARD_TOTAL is not a positive integer: ${String(raw)}`);
+  }
+  return n;
+}
+
+describe('#695 — the ledger reconciles against the declared shard total', () => {
+  it('the workflow declares COMPAT_SHARD_TOTAL exactly once, at workflow level', () => {
+    expect(() => declaredShardTotal()).not.toThrow();
+    // Exactly once: two declarations are two facts, and the ledger would read
+    // whichever won. Counted over the raw text so a job-level or step-level
+    // re-declaration is caught, not just a second top-level key.
+    const occurrences = WORKFLOW.match(/^\s*COMPAT_SHARD_TOTAL:/gm) ?? [];
+    expect(occurrences).toHaveLength(1);
+  });
+
+  it('the deploy-tests matrix IS the declared total — derived, never eyeballed', () => {
+    const total = declaredShardTotal();
+    const matrix = job('deploy-tests').strategy?.matrix?.shard;
+    expect(Array.isArray(matrix)).toBe(true);
+    // Derived from the declared total rather than written out: an enumerated
+    // expectation is how the sixteenth entry gets missed.
+    expect(matrix).toEqual(Array.from({ length: total }, (_, i) => `${i + 1}/${total}`));
+  });
+
+  it('the ledger job runs the audited script — and NOTHING else (allowlist)', () => {
+    // The allowlist is the point. Banning one spelling of an inline
+    // implementation ("no heredoc") leaves every other spelling working; this
+    // permits one exact command and fails everything else, including a
+    // re-inlined `node <<EOF`, a `|| true`, or a second computation appended
+    // after the sanctioned one.
+    const allowed = [/^node knext\/scripts\/compat-run-ledger\.mjs$/];
+    const runs = (job('shard-ledger').steps ?? [])
+      .map((s) => s.run)
+      .filter((r): r is string => typeof r === 'string');
+
+    // Non-vacuity: a job with no `run:` steps would satisfy any allowlist.
+    expect(runs.length).toBeGreaterThan(0);
+    for (const run of runs) {
+      const command = run.trim();
+      expect(
+        allowed.some((rx) => rx.test(command)),
+        `unsanctioned command in the shard-ledger job:\n${command}`,
+      ).toBe(true);
+    }
+  });
+
+  it('the ledger job checks the repo out, so the script it runs exists', () => {
+    const steps = job('shard-ledger').steps ?? [];
+    const checkout = steps.find((s) => String(s.uses ?? '').startsWith('actions/checkout@'));
+    expect(checkout, 'the shard-ledger job never checks out knext').toBeTruthy();
+    expect(checkout?.with?.path).toBe('knext');
+  });
+
+  it('the uploaded artifact is the file the script writes (one fact, not two)', () => {
+    const upload = (job('shard-ledger').steps ?? []).find(
+      (s) => String(s.uses ?? '').startsWith('actions/upload-artifact@') && s.with?.name,
+    );
+    expect(upload?.with?.name).toBe('compat-run-ledger');
+    expect(upload?.with?.path).toBe(DEFAULT_OUT_FILE);
+    // The ledger must be uploaded even when the reconciliation FAILS the job —
+    // an incomplete ledger is the evidence, so losing it on red is the same
+    // hole in a different place.
+    expect(upload?.if).toBe('always()');
+  });
+
+  it('nothing else in the workflow writes the ledger file', () => {
+    // The other half of the allowlist: a second writer anywhere in the file
+    // would produce a ledger that never met the reconciliation. Every mention
+    // of the artifact filename must be a comment or the upload path.
+    const offenders = WORKFLOW.split('\n').filter(
+      (line) =>
+        line.includes(`${DEFAULT_OUT_FILE}`) &&
+        !/^\s*#/.test(line) &&
+        !new RegExp(`^\\s*path:\\s*${DEFAULT_OUT_FILE}\\s*$`).test(line),
+    );
+    expect(offenders, `unsanctioned writer(s) of ${DEFAULT_OUT_FILE}`).toEqual([]);
   });
 });
