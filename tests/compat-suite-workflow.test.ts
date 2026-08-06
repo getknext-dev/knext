@@ -3,6 +3,12 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { summarize } from '../scripts/e2e-summary.mjs';
 import {
+  COMMAND_POSITION_CHARS,
+  COMMAND_POSITION_KEYWORDS,
+  HATCH_SHAPES,
+  UNEXERCISED_TOKENS,
+} from '../scripts/lib/shell-command-position.mjs';
+import {
   auditFailOnRedGateTeeth,
   METADATA_VARIANTS,
   shardSummary,
@@ -2408,6 +2414,49 @@ describe('compat-suite fail-on-red gate — revocation teeth (test-e2e-deploy.ym
     // and the JS early-exit is arguably a MORE natural way to write "skip the
     // gate on the other lane" than the conjunct that was already caught.
     expect(teeth.escapeHatches, teeth.escapeHatches.join('\n')).toEqual([]);
+  });
+
+  it('#700 every COMMAND-POSITION token has a hatch shape that exercises it', () => {
+    // The round-9 finding, closed as a guard rather than as three more rows.
+    //
+    // The escape scan regressed three rounds running, and the 53-row table was
+    // green through all of it — because every escape row spelled a variation of
+    // ONE syntactic family. The head commit's class listed `(` but not `)` or
+    // `{`, so `case … bun) exit 0 ;;`, `&& { exit 0; }` and `skip() { exit 0; }`
+    // were all invisible, all three having been CAUGHT by both predecessors.
+    // The tell that it was accidental rather than scoped: `&& { echo skip;
+    // exit 0; }` WAS caught, because the `;` supplied the position.
+    //
+    // `.claude/rules/workflow.md` — prefer scanning to enumerating; an
+    // enumerated list is how the second one gets missed. Usually that names call
+    // sites. Here it names the mutation table, which was the thing supposed to
+    // be catching this. So: every token the regex recognises must be exercised
+    // by a hatch shape, or carry a written reason why no hatch can exist.
+    const exercised = new Set(HATCH_SHAPES.map((h: { token: string }) => h.token));
+    const tokens = [...COMMAND_POSITION_CHARS, ...COMMAND_POSITION_KEYWORDS];
+
+    // Non-vacuity first: an empty token list or an empty shape list would make
+    // every claim below pass over nothing.
+    expect(tokens.length, 'no command-position tokens declared').toBeGreaterThan(6);
+    expect(HATCH_SHAPES.length, 'no hatch shapes declared').toBeGreaterThan(6);
+    expect(exercised.has('^'), 'line start must be exercised').toBe(true);
+
+    const unjustified = tokens.filter(
+      (t: string) => !exercised.has(t) && !(t in UNEXERCISED_TOKENS),
+    );
+    expect(
+      unjustified,
+      `command-position token(s) ${unjustified.map((t: string) => `\`${t}\``).join(', ')} widen the match with nothing exercising them. Add a hatch shape, or an entry in UNEXERCISED_TOKENS saying why no valid shell can put a command there — silently widening is how three rounds of this axis regressed`,
+    ).toEqual([]);
+
+    // And the reverse: an exemption for a token that IS exercised is stale.
+    for (const token of Object.keys(UNEXERCISED_TOKENS)) {
+      expect(
+        exercised.has(token),
+        `\`${token}\` is listed in UNEXERCISED_TOKENS but a hatch shape exercises it — delete the stale exemption`,
+      ).toBe(false);
+      expect(tokens, `\`${token}\` is exempted but is not a token at all`).toContain(token);
+    }
   });
 
   it('#700 the polarity probes cover BOTH runtime lanes', () => {

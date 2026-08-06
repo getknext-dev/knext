@@ -56,6 +56,7 @@
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { parse } from 'yaml';
+import { commandPositionPrefix } from '../../scripts/lib/shell-command-position.mjs';
 
 /** The `deploy-tests` step that converts a red RESULT into a red JOB. */
 export const FAIL_ON_RED_STEP = 'Fail shard on red results (revocation teeth)';
@@ -207,16 +208,29 @@ const ONE_LINE_IF = /^\s*if\b(?<cond>.*?);\s*then\b(?<body>.*?);?\s*fi\s*;?\s*$/
  * knowing anything about quoting. That independence is the point: it holds even
  * where there is no `node -e '` span to blank, which is precisely where a
  * position-blind `\bexit\b` matched the embedded JS and produced two false reds.
+ *
+ * DERIVED, not written here. The token list lives in
+ * `scripts/lib/shell-command-position.mjs` alongside the hatch shapes that
+ * exercise it, because the previous hand-written class listed `(` but not `)`
+ * or `{` — so a `case` arm, a brace group and a function body were all
+ * invisible, all three having been caught by BOTH predecessors. A 53-row
+ * mutation table ran green through it, because every escape row enumerated a
+ * spelling from one syntactic family. Tokens and shapes now share a module and
+ * a coverage guard.
  */
-const CMD_START = String.raw`(?:^|[;&|(]|\bthen\b|\belse\b|\bdo\b)\s*`;
+const CMD_START = commandPositionPrefix();
 
-// HONEST SCOPE: `;` is treated as a separator wherever it appears, including
-// inside a DOUBLE-quoted string — the gate's own `echo "…green; the summarize…"`
-// contains one. That direction is fail-OPEN only for a contrived
-// `echo "…; exit 0…"`, and fail-CLOSED (a spurious finding) never, because a
-// separator followed by `exit` is still required. Double-quote awareness is the
-// same missing capability #702 tracks for the swallow scan; a real lexer closes
-// both. Recorded here rather than left for the next reader to find.
+// HONEST SCOPE — and the direction was stated BACKWARDS here until round 9.
+// `;` is treated as a separator wherever it appears, including inside a
+// DOUBLE-quoted string; the gate's own `echo "…green; the summarize…"` contains
+// one. Widening what counts as a separator can only ever produce MORE matches,
+// never fewer, so the only reachable error is a SPURIOUS FINDING — fail-closed
+// in this file's vocabulary. Measured: `echo "on bun we bail; exit 0 would be
+// wrong"` yields one escape finding while the gate still works. The earlier note
+// claimed the opposite ("fail-OPEN … and fail-CLOSED never"), which is exactly
+// the sentence a maintainer would use to decide whether an escape red is real.
+// Double-quote awareness is the same missing capability #702 tracks for the
+// swallow scan; a real lexer closes both.
 
 /**
  * A shell `exit`, ANY argument or none.
@@ -997,43 +1011,38 @@ export function auditFailOnRedGateTeeth(workflowPath: string): GateTeethAudit {
   // while its own claim was false. Nothing that judges the SCRIPT may depend on
   // the embedded program being locatable.
   const nodeStart = run.indexOf("node -e '");
-  // The swallow scan covers the WHOLE script, not the tail after `node -e '`.
-  // Anchoring it there left the same vacuous shape one hole over: move the
-  // program out of `node -e` AND append `|| true`, and there was no anchor to
-  // slice from, so the finding list came back empty. Whether the program is
-  // inline is irrelevant to whether the script swallows an exit.
+  // The `||` / `|` half is judged on the GATE COMMAND, not on the whole script.
   //
-  // Shell single-quoted spans are blanked first so the embedded JS's own `||`
-  // is not read as a shell operator.
+  // It used to scan everything, and that was over-broad in a way no enumerated
+  // row could reach: `[ "$KNEXT_RUNTIME" != "bun" ] || exit 0` in the PRELUDE is
+  // an escape hatch, not a swallowed exit, and the whole-script scan reported it
+  // as both. One assertion standing in for another — surfaced only once the
+  // escape rows were DERIVED from the command-position tokens, because no
+  // hand-written row had ever put a `||` in the prelude. The derivation earning
+  // its keep on the first run is the argument for it.
   //
-  // HONEST SCOPE — the parity check below is NECESSARY, not SUFFICIENT. An odd
-  // count means the script is definitely not quoted the way this audit assumes,
-  // and it refuses. An even count does NOT prove the pairing is right: an
-  // apostrophe inside a double-quoted string, or after a `#`, is not a shell
-  // quote, and two stray ones bracketing a `|| true` would blank it. Measured
-  // and confirmed reachable only by contrivance — the live script has exactly
-  // two apostrophes, both `node -e` delimiters — so this is a decay hazard
-  // rather than a live hole. Tracked as #702 rather than papered over; a real
-  // shell lexer is the complete fix.
-  const quoteCount = (run.match(/'/g) ?? []).length;
-  if (quoteCount % 2 !== 0) {
+  // Round 3's actual finding is preserved: a claim about the SHELL must not
+  // depend on the program being locatable. So when the program is NOT inline
+  // there is no gate command to localise and the whole script is scanned —
+  // fail-closed, and the errexit checks below are whole-script unconditionally.
+  //
+  // Blanking is BY OFFSET and length-preserving, which is what makes slicing at
+  // `nodeStart` index-safe, and it drops this scan's dependence on quote
+  // pairing entirely (#702's concern was exactly that dependence here).
+  const swallowSpan = embeddedNodeProgramSpan(run);
+  const shell = swallowSpan === null ? run : blankSpan(run, swallowSpan.start, swallowSpan.end);
+  const swallowSource = nodeStart === -1 ? shell : shell.slice(nodeStart);
+  if (/\|\|/.test(swallowSource)) {
     exitReachesStep.push(
-      "the gate script's single quotes do not pair, so a shell `||` cannot be told from one inside the embedded program — this audit refuses to guess rather than report a swallow it is not sure about",
+      "the gate command is followed by a shell `||` — its non-zero exit is swallowed exactly the way the shard run step's is (`|| true`), and all three teeth become decoration",
     );
-  } else {
-    const shell = run.replace(/'[^']*'/g, "''");
-    if (/\|\|/.test(shell)) {
-      exitReachesStep.push(
-        "the gate script contains a shell `||` — a non-zero exit is swallowed exactly the way the shard run step's is (`|| true`), and all three teeth become decoration",
-      );
-    }
-    // `||` is stripped first: it is reported above with its own message, and a
-    // naive `|` search would report the SAME defect twice under two names.
-    if (/\|/.test(shell.replace(/\|\|/g, ''))) {
-      exitReachesStep.push(
-        'the gate script contains a pipeline — a pipeline reports the LAST command’s status, not the gate’s',
-      );
-    }
+  }
+  // `||` is stripped first: it is reported above with its own message, and a
+  // naive `|` search would report the SAME defect twice under two names.
+  if (/\|/.test(swallowSource.replace(/\|\|/g, ''))) {
+    exitReachesStep.push(
+      'the gate command is in a pipeline — a pipeline reports the LAST command’s status, not the gate’s',
+    );
   }
   if (/set\s+\+e/.test(run)) {
     exitReachesStep.push(
