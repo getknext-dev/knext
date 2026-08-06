@@ -168,10 +168,31 @@ schedule, writing through the same single min-scale writer.
    the same-hour-last-week RPS percentile (per-app, from the metrics already
    scraped). No ML until measured seasonality justifies it. This ADDS a control
    loop that mutates the NextApp schedule and would need its own ADR.
-2. **DB-compute lockstep pre-warm (#388)** — warm the app's scale-to-zero
+2. ~~**DB-compute lockstep pre-warm (#388)** — warm the app's scale-to-zero
    Postgres compute (existing warm-tier, #25) in lockstep with the scheduled
    window, so the prediction removes the DB half of the cold tax, not just the
-   pod half. **SHIPPED 2026-07-18 — see the addendum below.**
+   pod half.~~ **SUPERSEDED by the 2026-07-18 addendum below (#388) — this is no
+   longer deferred, it SHIPPED.** Kept struck-through rather than deleted so the
+   original deferral decision stays legible. As-built (verified 2026-08-06):
+   `AppDatabase` carries `spec.warmSchedule` with the same
+   `WarmWindow{start,end,timezone}` shape as this ADR's
+   `spec.scaling.warmSchedule` (`packages/scale-zero-pg/gateway/internal/appdb/types.go`
+   — deliberately no `replicas`), implemented as a held authenticated idle
+   connection through the apps-gateway (`.../appdb/warmhold.go`,
+   `.../appdb/warm_schedule.go`; tests `warmhold_test.go`,
+   `warmhold_reconcile_test.go`), surfaced as the `WarmHold` status condition
+   (`.../appdb/types.go`, `CondWarmHold`) and the `appdb_warm_hold_active{app=…}`
+   gauge on the appdb operator's `:9092/metrics`
+   (`packages/scale-zero-pg/gateway/cmd/appdb-operator/main.go`), and documented
+   at `packages/scale-zero-pg/docs/appdatabase-api.md` §3b.
+   **Operational caveat the addendum's "lockstep" wording can hide** ("lockstep" is
+   the source's own word, `reconcile.go:156`, and is faithful to the *evaluation*
+   semantics): the coordination seam is **shared owner declaration**, so the owner
+   must author the same windows **twice** — once on the `NextApp`, once on the
+   `AppDatabase` — and **nothing reconciles a divergence.** Each operator reads only
+   its own resource, so a schedule edited on one side and not the other silently
+   warms half the path, with no condition, event or metric reporting the mismatch.
+   A cross-resource consistency check would be new work, not a bug fix.
 3. **Per-tenant warm-budget cap (#389)** — an analog to the ADR-0008 wake budget
    so over-provisioning (a mispredicted or over-broad schedule) cannot erode the
    scale-to-zero cost win. Mispredict failure modes (cold storm on under-warm /
@@ -251,7 +272,11 @@ to open a minute ahead of the expected peak. The acceptance-criteria measurement
 tracked in `docs/BENCHMARKS.md`.
 
 **Still deferred:** #387 (learned controller) and #389 (per-tenant warm-budget
-cap) — unchanged, above.
+cap) — unchanged, above. Deferred-item-2 is the only one the addendum closes.
+Re-confirmed against the tree 2026-08-06: no `warmBudget` symbol exists in
+`packages/kn-next-operator/api/v1alpha1/nextapp_types.go` or
+`packages/kn-next/src/config.ts`, and no learned/heuristic schedule-writing
+control loop exists anywhere in the repo.
 
 ## Consequences
 
