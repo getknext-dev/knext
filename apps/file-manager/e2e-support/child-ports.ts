@@ -164,8 +164,21 @@ export async function reserveHeldPorts(count: number): Promise<HeldPorts> {
  * irreducible for a port someone else must bind. Where a readback channel exists
  * (`LISTENING:<port>`) prefer binding 0, which has no window at all.
  *
- * Same shape as `examples/bun-exec/test/alpine-image.docker-e2e.test.ts`'s
- * `freePort()`, which reserves host ports for `docker --publish` for this reason.
+ * SCOPE OF THE FIX (#686): the sequential-`freePort()` collision was removed from
+ * THIS lane in #683, and from the container e2e's host-port reservation in #686
+ * (`examples/bun-exec/test/e2e-support/ports.ts` — a deliberate copy of this
+ * module, because `examples/*` is not a pnpm workspace member and the example
+ * must stay self-contained). It is not "gone repo-wide" by assertion of either
+ * PR: what keeps it gone is the scan in `tests/e2e-ephemeral-ports.test.ts`,
+ * which now covers `e2e-support/` and reds on any scanned file that reserves
+ * ports one call at a time — within that scan's stated limits, which include
+ * that it matches the literal `freePort()` SHAPE rather than the concept.
+ *
+ * The scan does NOT keep the two copies behaviourally identical: it reads syntax
+ * and asserts exactly two properties. Equivalence is held by each copy carrying
+ * the same cases — `child-ports.test.ts` here, `examples/bun-exec/test/ports.test.ts`
+ * there, including the partial-failure (EMFILE) cleanup the scan cannot see.
+ * Adding behaviour to one copy means adding its case to both.
  */
 export async function freePorts(count: number): Promise<number[]> {
   const { ports, release } = await reserveHeldPorts(count);

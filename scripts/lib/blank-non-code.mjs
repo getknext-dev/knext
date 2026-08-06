@@ -3,7 +3,10 @@
  *
  * Lifted verbatim out of `tests/compat-matrix.test.ts` (#680) so the second
  * caller — `declaredTestTitles` in `./ci-blocking-gate-proof.mjs` — reuses it
- * instead of becoming the third hand-rolled tokenizer in the tree. It lives in
+ * instead of becoming the third hand-rolled tokenizer in the tree, and joined by
+ * a third, `../scan-half-scan-candidates.mjs`, when #689 deleted the ONE other
+ * blanker that did get hand-rolled (`maskLiterals` — same shebang defect, plus
+ * an unterminated-regex bug of its own). It lives in
  * `scripts/lib/*.mjs` rather than a `.ts` test helper because one of its callers
  * is a plain `node` script, not a vitest module.
  *
@@ -85,7 +88,19 @@ function regexAllowedAfter(src, out, i) {
  * @returns {string}
  */
 export function blankNonCode(src) {
-  const out = [...src];
+  // `split('')` splits on UTF-16 CODE UNITS, and that is load-bearing: every
+  // index driving this function — `src.indexOf`, `src.length`, `i`, `j`, and
+  // `blank(from, to)` — is a UTF-16 offset, so the accumulator has to be indexed
+  // the same way. `[...src]` iterates CODE POINTS, which desyncs `out` from
+  // `src` at the first astral character and breaks the length/offset contract
+  // above for the whole rest of the file. Measured, not theoretical: six emoji
+  // in `packages/kn-next/src/__tests__/excerpt.test.ts` returned a result five
+  // characters short with fifteen newlines displaced, and the half-a-scan
+  // reporter lost two of that file's nine `it()` blocks. A surrogate pair is
+  // split across two entries here and both halves are non-`\n`, so a blanked
+  // astral character becomes two spaces — length-preserving by construction,
+  // which is the property the callers slice on.
+  const out = src.split('');
   const blank = (/** @type {number} */ from, /** @type {number} */ to) => {
     for (let k = Math.max(from, 0); k < Math.min(to, src.length); k++) {
       if (out[k] !== '\n') out[k] = ' ';

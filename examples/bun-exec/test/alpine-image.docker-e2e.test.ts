@@ -30,9 +30,9 @@
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { createServer } from 'node:net';
 import { resolve } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { freePorts } from './e2e-support/ports';
 
 const EXAMPLE_DIR = resolve(__dirname, '..');
 const TOKEN = 'alpine-e2e-token';
@@ -130,18 +130,6 @@ function run(cmd: string, args: string[], opts: { timeout?: number } = {}) {
   });
 }
 
-/** An OS-assigned free port, so concurrent runs cannot collide. */
-async function freePort(): Promise<number> {
-  return await new Promise((res, rej) => {
-    const srv = createServer();
-    srv.on('error', rej);
-    srv.listen(0, '127.0.0.1', () => {
-      const port = (srv.address() as { port: number }).port;
-      srv.close(() => res(port));
-    });
-  });
-}
-
 let appPort = 0;
 let metricsPort = 0;
 
@@ -200,8 +188,14 @@ beforeAll(async () => {
   //    prior run's leftovers; with a per-run-unique name it could never match
   //    anything and was dead code. The age-bounded label sweep above is what
   //    actually reaps them.
-  appPort = await freePort();
-  metricsPort = await freePort();
+  //    BOTH host ports come from ONE `freePorts(2)` call (#686). Two sequential
+  //    single-port reservations closed each socket before allocating the next,
+  //    so the OS could return the SAME port for both `--publish` flags and
+  //    `docker run` would fail — the exact collision class #683 removed from the
+  //    drain e2e, still alive here. Holding both sockets in LISTEN until both
+  //    numbers are known makes a repeat impossible, not merely improbable
+  //    (`test/ports.test.ts` asserts the hold directly).
+  [appPort, metricsPort] = await freePorts(2);
   const started = run(
     'docker',
     [

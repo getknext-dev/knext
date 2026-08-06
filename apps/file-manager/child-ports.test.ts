@@ -11,7 +11,7 @@
 // have their own case, and both assert the REASON is in the message.
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   freePort,
@@ -19,6 +19,43 @@ import {
   reserveHeldPorts,
   waitForListeningPort,
 } from './e2e-support/child-ports';
+
+/**
+ * Fault injection for the PARTIAL-FAILURE case below. A reservation that dies
+ * part-way (EMFILE) must close the sockets it already took; that path cannot be
+ * reached by asking the OS nicely, so the Nth `listen()` is made to fail.
+ *
+ * Inert unless `failAfter >= 0`, so every other case in this file — including
+ * the spawn-based ones — runs against the real `node:net`.
+ */
+const netFault = vi.hoisted(() => ({ failAfter: -1, created: 0, opened: [] as number[] }));
+
+vi.mock('node:net', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:net')>();
+  return {
+    ...actual,
+    default: actual,
+    createServer: ((...args: Parameters<typeof actual.createServer>) => {
+      const srv = actual.createServer(...args);
+      srv.on('listening', () => {
+        const addr = srv.address();
+        if (addr !== null && typeof addr === 'object') netFault.opened.push(addr.port);
+      });
+      if (netFault.failAfter >= 0 && netFault.created++ >= netFault.failAfter) {
+        srv.listen = ((..._ignored: unknown[]) => {
+          setImmediate(() =>
+            srv.emit(
+              'error',
+              Object.assign(new Error('EMFILE: too many open files'), { code: 'EMFILE' }),
+            ),
+          );
+          return srv;
+        }) as typeof srv.listen;
+      }
+      return srv;
+    }) as typeof actual.createServer,
+  };
+});
 
 let child: ReturnType<typeof spawn> | undefined;
 
@@ -194,6 +231,38 @@ describe('reserveHeldPorts / freePorts — multi-port reservation cannot collide
       expect(p).toBeGreaterThan(0);
       expect(p).toBeLessThan(65_536);
     }
+  }, 30_000);
+
+  it('closes the sockets it already took when a later reservation fails', async () => {
+    // The partial-failure path. Holding every socket open is the whole design, so
+    // a mid-batch throw is the ONE way this can leak descriptors — and a leaked
+    // socket stays in LISTEN for the life of the vitest worker, silently burning
+    // ports for every later spec in the same process.
+    //
+    // Kept in lockstep with `examples/bun-exec/test/ports.test.ts`, which asserts
+    // the same property against that module's deliberate copy. The repo-level
+    // scan cannot do this for us: it reads syntax, not behaviour.
+    netFault.opened = [];
+    netFault.created = 0;
+    netFault.failAfter = 3; // the 4th listen() fails
+    let takenBeforeFailure: number[];
+    try {
+      await expect(reserveHeldPorts(6)).rejects.toThrow(/EMFILE/);
+      takenBeforeFailure = [...netFault.opened];
+    } finally {
+      netFault.failAfter = -1; // real node:net again, for the checks below
+    }
+
+    // The batch really was PARTIAL. Without this the loop below can be vacuous.
+    expect(takenBeforeFailure).toHaveLength(3);
+
+    // ...and every socket taken before the failure was closed on the way out.
+    const bindableAfterFailure = await Promise.all(takenBeforeFailure.map(canBind));
+    expect(bindableAfterFailure, 'a port leaked after a partial failure').toEqual([
+      true,
+      true,
+      true,
+    ]);
   }, 30_000);
 
   it('rejects a non-positive count rather than silently reserving nothing', async () => {

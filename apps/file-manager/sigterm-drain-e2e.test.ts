@@ -419,7 +419,7 @@ describe('SIGTERM drain e2e (SHIPPED bundle): knext runtime entry drains in-flig
       child = await spawnShippedRuntime({});
       await waitForListeningPort(child, { label: 'runtime entry' });
 
-      // metricsPort was RESERVED for this spawn (freePort), so it is known without
+      // metricsPort was RESERVED for this spawn (freePorts(2)), so it is known without
       // parsing a log — but it is still OS-assigned, never a literal.
       const res = await fetch(`http://127.0.0.1:${metricsPort}/metrics`);
       expect(res.status).toBe(200);
