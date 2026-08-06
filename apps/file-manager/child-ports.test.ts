@@ -74,27 +74,67 @@ describe('waitForListeningPort (#678)', () => {
     ).rejects.toThrow(/mute server never reported LISTENING/);
   }, 20_000);
 
-  it('never resolves a fallback port when discovery fails', async () => {
+  it('never resolves a fallback port from stdout that is not a LISTENING line', async () => {
     // A discovery helper that quietly returned a default (3000, say) would make the
     // e2e probe SOMEONE ELSE'S server and pass for the wrong reason.
-    child = spawnNode(`process.stdout.write('no port here\\n');setTimeout(()=>{},500)`);
-    await expect(waitForListeningPort(child, { timeoutMs: 750 })).rejects.toThrow();
+    //
+    // The child must stay alive PAST the timeout: if it exits first this rejects
+    // via the early-exit branch (already covered above) and proves nothing about
+    // stdout parsing. So it keeps the loop alive well beyond timeoutMs, and the
+    // matcher pins the TIMEOUT branch specifically — `.rejects.toThrow()` with no
+    // matcher cannot tell the two rejection reasons apart.
+    child = spawnNode(
+      `process.stdout.write('no port here\\n');` +
+        `process.stdout.write('listening on 3000, LISTENING soon\\n');` +
+        `setTimeout(()=>process.exit(0),30000)`,
+    );
+    await expect(
+      waitForListeningPort(child, { timeoutMs: 750, label: 'chatty server' }),
+    ).rejects.toThrow(/chatty server never reported LISTENING/);
+    expect(child.exitCode).toBeNull(); // still alive → it was the timeout, not an exit
   }, 20_000);
 });
 
 describe('freePort (#678)', () => {
-  it('returns a bindable OS-assigned port, and a different one each call', async () => {
-    const a = await freePort();
-    const b = await freePort();
-    expect(a).toBeGreaterThan(0);
-    expect(b).toBeGreaterThan(0);
-    expect(a).not.toBe(b); // an ephemeral allocation, not a constant
-
-    // It is genuinely free right now: binding it succeeds.
-    await new Promise<void>((res, rej) => {
+  /** Bind `port` on loopback and resolve a closer — the caller controls the hold. */
+  function hold(port: number): Promise<() => Promise<void>> {
+    return new Promise((res, rej) => {
       const srv = createServer();
       srv.on('error', rej);
-      srv.listen(a, '127.0.0.1', () => srv.close(() => res()));
+      srv.listen(port, '127.0.0.1', () =>
+        res(() => new Promise<void>((done) => srv.close(() => done()))),
+      );
     });
+  }
+
+  it('returns a port that is genuinely free right now', async () => {
+    const port = await freePort();
+    expect(port).toBeGreaterThan(0);
+    expect(port).toBeLessThan(65_536);
+
+    // The property that matters to callers: it can actually be bound. `hold`
+    // rejects on EADDRINUSE/EACCES, so this fails rather than hangs.
+    const release = await hold(port);
+    await release();
+  }, 20_000);
+
+  it('never hands out a port that is already bound', async () => {
+    // The "is it a constant, or a real allocation?" question — asked in the one
+    // form the OS actually guarantees.
+    //
+    // NOT asserted: that two sequential calls differ. Nothing specifies that an
+    // ephemeral allocator cannot repeat once the first socket is closed (it is
+    // merely unlikely), and a de-flaking change must not smuggle in a new
+    // nondeterministic assertion. Holding the first port makes the difference a
+    // guarantee: bind(0) is never assigned a port in LISTEN state.
+    const held = await freePort();
+    const release = await hold(held);
+    try {
+      const next = await freePort();
+      expect(next).toBeGreaterThan(0);
+      expect(next).not.toBe(held); // deterministic: `held` is occupied
+    } finally {
+      await release();
+    }
   }, 20_000);
 });

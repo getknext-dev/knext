@@ -11,12 +11,31 @@
 // A flaky REQUIRED gate is one people learn to re-run reflexively, and a gate that
 // is re-run reflexively stops being read. So this is a scan, not a one-file fix:
 // it walks every tracked fixture/harness/e2e spec and fails on any literal port in
-// a BINDING context. A new e2e is covered the moment it is named, rather than
-// depending on someone remembering this rule.
+// a BINDING context.
 //
 // The rule: a bind port is either `0` (the OS assigns it, and the process reports
 // the port it actually got) or an OS-assigned port reserved at runtime
 // (`freePort()`), never a literal.
+//
+// ── WHAT THIS SCAN ACTUALLY COVERS (it is a lint, not a proof) ───────────────
+// Stated precisely, because "a new e2e is covered the moment it is named"
+// overstates it in two directions:
+//
+//   1. FILE SELECTION IS NAMING-KEYED. `scannedFiles()` matches `__fixtures__/`,
+//      `*e2e*.test.ts`, `*harness*` (plus one explicit path). A spec or fixture
+//      that binds a port under some OTHER name is not scanned at all. So the
+//      claim is narrower: a new e2e is covered once it is named to MATCH THOSE
+//      PATTERNS.
+//   2. LITERAL DETECTION IS SYNTACTIC. `BIND_PORT` catches the shapes we have
+//      actually seen — `PORT = 3000`, `.listen(3000`, `port: 3000`, a multiline
+//      `.listen(\n 3000)`, `env.PORT ?? 3000`. It MISSES an indirected literal
+//      (`const p = 41234; srv.listen(p)`), a stringified one (`listen('41234')`)
+//      and a computed one (`BASE + 234`).
+//
+// That is deliberate: this is a guard against the ACCIDENT that already bit us
+// (#676, `EADDRINUSE :::39188` from a hardcoded fixture port), not a barrier
+// against someone determined to route around it. Extend the patterns when a real
+// case escapes; do not read a green run as "no fixed port can exist anywhere".
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -84,6 +103,13 @@ const BIND_PORT =
  */
 const ENV_PORT_FALLBACK = /env\.[A-Za-z_]*PORT[A-Za-z_]*\s*(?:\?\?|\|\|)\s*(\d{1,5})\b/g;
 
+/**
+ * Evidence that a file BINDS something, used to keep a whole-file exemption
+ * honest (see the exemption case below). Not a bind-port matcher — it asks the
+ * coarser question "could this file open a listening socket at all?".
+ */
+const BINDING_CONSTRUCT = /\.listen\(|createServer\(|from\s+['"]node:(?:net|http|https)['"]/;
+
 /** A file we own end-to-end (fixture or harness), not a spec. */
 function isFixtureOrHarness(file: string): boolean {
   return /__fixtures__\//.test(file) || /harness/.test(file);
@@ -117,9 +143,7 @@ describe('#678 e2e ports are OS-assigned, never hardcoded', () => {
     expect(files).toContain('examples/bun-exec/test/drain-harness.mjs');
   });
 
-  it.each(
-    scannedFiles().filter((f) => !new Set(EXEMPT.map((e) => e.file)).has(f)),
-  )('%s binds no hardcoded port', (file) => {
+  it.each(files.filter((f) => !exemptFiles.has(f)))('%s binds no hardcoded port', (file) => {
     const src = readFileSync(resolve(REPO_ROOT, file), 'utf8');
     const literals = bindPortLiterals(src, file).filter((p) => p !== 0);
     expect(
@@ -135,6 +159,19 @@ describe('#678 e2e ports are OS-assigned, never hardcoded', () => {
     // file loses its literal (or the file goes away), delete the entry.
     const src = readFileSync(resolve(REPO_ROOT, file), 'utf8');
     expect(bindPortLiterals(src, file).filter((p) => p !== 0).length).toBeGreaterThan(0);
-    expect(exemptFiles.has(file)).toBe(true);
+
+    // ...AND the exemption's stated REASON still holds. Exempting a whole FILE
+    // is the hole: `port-ownership` is exempt because its literals are synthetic
+    // `ss -ltnp` OUTPUT, but nothing stopped it later gaining a REAL bind and
+    // inheriting the exemption by construction. So assert the property the
+    // reason claims — the file binds nothing — instead of trusting the name.
+    // A `.listen(`/`createServer(`/socket import appearing here reds this case
+    // and forces the entry to be re-justified or narrowed.
+    expect(
+      BINDING_CONSTRUCT.test(stripComments(src)),
+      `${file} is exempt because "${EXEMPT.find((e) => e.file === file)?.reason}", but it now ` +
+        `contains a real binding construct. The file-wide exemption no longer holds — narrow it ` +
+        `or remove it.`,
+    ).toBe(false);
   });
 });

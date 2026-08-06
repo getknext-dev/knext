@@ -75,17 +75,33 @@ const SLOW_SERVER = resolve(__dirname, '__fixtures__/slow-standalone-server.mjs'
 // re-run, and #673 turned CI on for stacked PRs so concurrent jobs are now more
 // common, not less.
 //
-// Two mechanisms, because the two ports differ in one respect only — whether the
-// process that binds echoes the port back:
-//   - The app port has a readback channel: PORT=0, the fixture binds what the OS
-//     gives it and prints `LISTENING:<port>`, and the spec reads that. No window
-//     in which anything could take the port between choosing and binding.
-//   - The supervisor's METRICS_PORT does not: it is bound by the runtime entry
-//     itself and echoed only into a pino log whose FORMAT differs between
-//     production (JSON) and dev (pino-pretty), which is too brittle to parse. So
-//     it gets an OS-assigned reservation via freePort() — the same approach the
-//     alpine docker e2e already uses for its `--publish` host ports.
-const EPHEMERAL = '0';
+// BOTH ports are reserved with freePort(). An earlier revision of this file used
+// `PORT=0` for the app port, on the reasoning that a readback channel
+// (`LISTENING:<port>`) closes the reserve→bind window that freePort() leaves open.
+// That is true, and it was still the wrong trade, for a reason that has nothing to
+// do with flakiness:
+//
+//   `PORT=0` IS NOT A CONFIGURATION PRODUCTION EVER RUNS. The runtime entry's own
+//   default is 3000 (`packages/kn-next/src/adapters/env.ts`), and Knative injects
+//   the container port. More concretely, the supervisor probes its child at
+//   `Number(process.env.PORT ?? 3000)` (`node-server.ts`, deferred supervisor
+//   init). With PORT=0 that probe connects to port 0, which can NEVER succeed — so
+//   deferred init reached `ensureStarted` via the 60s DEADLINE instead of via
+//   `child-serving`, and this spec silently stopped covering the probe path. That
+//   path — real $PORT → real child → `child-serving` — is covered NOWHERE else:
+//   `waitForChildServing` is unit-tested with an INJECTED probe and `probeTcp`
+//   against a bare socket, but never wired to a real child, and `node-server.ts`
+//   is the repo's 0%-coverage residual (`vitest.config.ts`).
+//
+// So: reserve a real port, pass it as $PORT, and let the readback prove the
+// reservation was honoured (`expect(port).toBe(appPort)`) rather than merely
+// prove the port is positive. The reserve→bind window costs nothing new — the
+// spawn already depends on freePort() for METRICS_PORT.
+//
+// METRICS_PORT keeps its reservation for the original reason: it has no readback
+// channel at all. It is bound by the runtime entry itself and echoed only into a
+// pino log whose FORMAT differs between production (JSON) and dev (pino-pretty),
+// which is too brittle to parse.
 
 // The CMD specifier the container boots — the EXACT string from the Dockerfile.
 const RUNTIME_IMPORT = "import('@getknext/core/internal/node-server')";
@@ -129,6 +145,13 @@ let child: ReturnType<typeof spawn> | undefined;
 // Reserved per-case (see afterEach/spawn) so a re-spawn never reuses a port the
 // previous, still-dying supervisor holds.
 let metricsPort = 0;
+// The app port handed to the runtime entry as $PORT. Reserved (not 0) so the
+// supervisor's child-readiness probe — which reads $PORT — can actually connect.
+let appPort = 0;
+// Everything the supervisor wrote to stdout, INCLUDING the child's (the entry
+// spawns it with stdio:'inherit'). Kept for the whole life of the child so the
+// spec can assert on logs that arrive AFTER the LISTENING line.
+let childStdout = '';
 
 function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   // The runtime entry is plain Node; clear any harness NODE_OPTIONS preload so
@@ -218,12 +241,17 @@ afterEach(async () => {
 async function spawnShippedRuntime(
   extraEnv: Record<string, string>,
 ): Promise<ReturnType<typeof spawn>> {
-  // Reserved fresh per spawn: the metrics port has no readback channel (#678).
+  // Reserved fresh per spawn (#678) so a re-spawn never reuses a port the
+  // previous, still-dying supervisor holds.
   metricsPort = await freePort();
-  return spawn('node', ['-e', RUNTIME_IMPORT], {
+  appPort = await freePort();
+  childStdout = '';
+  const proc = spawn('node', ['-e', RUNTIME_IMPORT], {
     cwd: runnerRoot,
     env: childEnv({
-      PORT: EPHEMERAL, // OS-assigned; the fixture reports what it got (#678)
+      // A REAL port, not 0: the supervisor probes its child at $PORT, and port 0
+      // can never be connected to. See the header note.
+      PORT: String(appPort),
       METRICS_PORT: String(metricsPort),
       STANDALONE_SERVER_PATH: SLOW_SERVER,
       STORAGE_BUCKET: '', // disable image-cache sync side effects
@@ -236,6 +264,29 @@ async function spawnShippedRuntime(
     detached: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  // Attached in the same tick as spawn(), before any data can arrive.
+  proc.stdout?.on('data', (d: Buffer) => {
+    childStdout += d.toString();
+  });
+  return proc;
+}
+
+/**
+ * Wait for `re` to appear in the supervisor's stdout, or FAIL with what was
+ * actually captured. Polls rather than parsing a stream so it works whether pino
+ * emitted JSON (production) or pino-pretty (dev) — the assertion is on the
+ * substring, never on the log's shape.
+ */
+async function waitForStdout(re: RegExp, timeoutMs: number, what: string): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (re.test(childStdout)) return;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error(
+    `${what}: never saw ${re} in the runtime entry's stdout within ${timeoutMs}ms.\n` +
+      `stdout:\n${childStdout}`,
+  );
 }
 
 describe('SIGTERM drain e2e (SHIPPED bundle): knext runtime entry drains in-flight requests', () => {
@@ -249,8 +300,40 @@ describe('SIGTERM drain e2e (SHIPPED bundle): knext runtime entry drains in-flig
       // early exit here and FAIL (not skip) this test.
       child = await spawnShippedRuntime({});
       const port = await waitForListeningPort(child, { label: 'runtime entry' });
-      expect(port).toBeGreaterThan(0);
+      // The port the child ACTUALLY bound is the port we reserved and passed as
+      // $PORT. `toBeGreaterThan(0)` would pass on any port at all — including one
+      // the supervisor could never have told the child about.
+      expect(port).toBe(appPort);
       expect(child.exitCode).toBeNull(); // still running → resolved & booted
+      child.kill('SIGTERM');
+    },
+    60_000,
+  );
+
+  it.skipIf(skipReason !== null)(
+    'supervisor reaches deferred init via the child-readiness PROBE, not the deadline',
+    async () => {
+      // The wiring this spec is the only coverage of: the runtime entry reads the
+      // REAL $PORT, TCP-probes its own child there, and starts deferred supervisor
+      // init with reason `child-serving` (node-server.ts). `waitForChildServing`
+      // is unit-tested only with an injected probe, so nothing else joins the
+      // three real parts up.
+      //
+      // Asserting the REASON is what makes this a probe test rather than a "did
+      // init happen" test: `ensureStarted` is idempotent and logs only the FIRST
+      // caller's reason, and there are three other callers — the 60s deadline
+      // (`child-deadline`), a metrics scrape (`scrape`) and a probe crash
+      // (`probe-error`). All three would leave init "complete" while the probe
+      // path was dead. Under the pre-#678-fix `PORT=0` this case fails with
+      // `child-deadline`: port 0 is unconnectable, so the probe could never win.
+      child = await spawnShippedRuntime({});
+      await waitForListeningPort(child, { label: 'runtime entry' });
+
+      // Nothing here scrapes :METRICS_PORT, so `scrape` cannot pre-empt the probe.
+      // Well under the 60s deadline: the probe polls every 250ms.
+      await waitForStdout(/child-serving/, 20_000, 'child-readiness probe');
+      expect(childStdout).not.toMatch(/child-deadline|probe-error/);
+
       child.kill('SIGTERM');
     },
     60_000,

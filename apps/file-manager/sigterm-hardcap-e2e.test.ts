@@ -82,8 +82,12 @@ const IGNORE_SERVER = resolve(__dirname, '__fixtures__/ignore-sigterm-standalone
 //     collide (the drain e2e, which DOES scrape, reserves one via freePort()).
 // Note the supervisor's child-readiness TCP probe (waitForChildServing) reads $PORT
 // and so cannot connect to "0" — its deferred init lands via its own deadline
-// instead. Nothing in this file asserts on that path (no scrape, no metrics
-// assertion); the drain e2e is where the metrics sidecar is proven.
+// instead. That is acceptable HERE and only here: nothing in this file asserts on
+// that path (no scrape, no metrics assertion), and this file's subject is the hard
+// cap. The drain e2e is where the metrics sidecar AND the probe path are proven —
+// it therefore reserves a REAL $PORT (freePort()) rather than using 0, and asserts
+// deferred init is reached with reason `child-serving`. Do not copy the `PORT=0`
+// below into a spec that cares about supervisor readiness.
 const EPHEMERAL = '0';
 const GRACE_MS = 3000; // SHORT hard cap so the e2e is fast (default is 25s)
 
