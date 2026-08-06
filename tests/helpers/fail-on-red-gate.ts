@@ -415,6 +415,29 @@ function evaluateCondition(node: ts.Node, s: Fixture): unknown {
     return (base as Fixture)[node.name.text];
   }
 
+  // `s.notRunFiles[0]` throws on a green shard exactly as `s.notRunFiles.length`
+  // does. Modelled for the same reason, and reported as the same class — the
+  // distinction the class name draws is about the CONSEQUENCE, so it has to
+  // cover every access form that produces it, not the one form first written.
+  if (ts.isElementAccessExpression(node)) {
+    const base = evaluateCondition(node.expression, s);
+    if (base === null || base === undefined) {
+      if (node.questionDotToken) return undefined;
+      throw new ConditionThrows(`\`${node.getText()}\` — the base is absent from this summary`);
+    }
+    const key = evaluateCondition(node.argumentExpression, s);
+    return (base as Record<string, unknown>)[String(key)];
+  }
+
+  // A CALL is not modelled — but `s.failures.some(…)` throws on a green shard
+  // before the call is ever reached, and reporting that as "teach me this
+  // construct" would send a reader to the wrong place. So the CALLEE is
+  // evaluated first: if resolving it throws, that is the real finding.
+  if (ts.isCallExpression(node)) {
+    evaluateCondition(node.expression, s);
+    throw new UnsupportedCondition(`call expression: ${node.getText()}`);
+  }
+
   if (ts.isIdentifier(node)) {
     if (node.text === 's') return s;
     if (node.text === 'undefined') return undefined;
@@ -429,6 +452,73 @@ function evaluateCondition(node: ts.Node, s: Fixture): unknown {
 
   throw new UnsupportedCondition(`${ts.SyntaxKind[node.kind]}: ${node.getText()}`);
 }
+
+/**
+ * The per-run METADATA a shard summary carries alongside its counts.
+ *
+ * Split out because it is the half a gate verdict must be INDEPENDENT of, and
+ * pinning it to one value is what let an entire disarm class hide: the probes
+ * varied only `failed`/`notRun`/`truncated`/`passed`, so a dead conjunct keyed
+ * on the CONSTANT — `s.ref === "v16.2.1" && …` rather than
+ * `s.neverSet === "zzz" && …` — evaluated true in every probe and survived. The
+ * mirror image of the spelling that was already proved.
+ */
+export interface ShardMeta {
+  shard: string;
+  ref: string;
+  runtime: string;
+  excluded: number;
+  expectedTotal: number;
+  runtimeVersion?: string;
+}
+
+/**
+ * The node nightly: 16 shards of the pinned ref, `runtimeVersion` ABSENT.
+ * `e2e-summary.mjs` omits that key on the node lane deliberately, to keep the
+ * artifact byte-stable for the matrix publisher.
+ */
+const NODE_LANE: ShardMeta = {
+  shard: '3/16',
+  ref: 'v16.2.1',
+  runtime: 'node',
+  excluded: 2,
+  expectedTotal: 45,
+};
+
+/**
+ * The Bun weekly: a different shard of a different ref on the other runtime,
+ * with `runtimeVersion` PRESENT — and a different `expectedTotal`.
+ *
+ * Every field differs from the node lane on purpose; that is what makes the
+ * invariance check below bite. Two of these are live disarms rather than
+ * hypotheticals: `NEXTJS_REF` is bumped routinely (so `s.ref === "v16.2.1" &&`
+ * kills the gate at the next bump, silently), and the SAME `deploy-tests` job
+ * runs the Bun lane via `KNEXT_RUNTIME` (so `s.runtime === "node" &&` disarms an
+ * entire lane in one line).
+ *
+ * `expectedTotal` is deliberately NOT 44-or-45. Today's matrix gives ~45 per
+ * shard, and probing only values near it is exactly how `< 46` survived. A
+ * plausible different matrix (half the shards, twice the tests each) is the
+ * probe that makes a constant ceiling fall out of the invariance property
+ * instead of needing its own enumerated rule.
+ */
+const BUN_LANE: ShardMeta = {
+  shard: '11/8',
+  ref: 'v16.3.0-canary.7',
+  runtime: 'bun',
+  excluded: 0,
+  expectedTotal: 90,
+  runtimeVersion: '1.3.14',
+};
+
+/**
+ * The metadata assignments EVERY polarity verdict must be identical across.
+ *
+ * This is the property, stated once, rather than a row per field: "the branch's
+ * verdict depends on the counts and nothing else". Five metadata disarms and the
+ * whole constant-ceiling family fall out of it without anyone enumerating them.
+ */
+export const METADATA_VARIANTS: readonly ShardMeta[] = [NODE_LANE, BUN_LANE];
 
 /**
  * A REAL shard summary, field-for-field as `scripts/e2e-summary.mjs` emits it.
@@ -472,18 +562,19 @@ function evaluateCondition(node: ts.Node, s: Fixture): unknown {
  * gate this file claims to guard against. With the keys faithfully omitted, the
  * evaluator's own nullish-base refusal catches it.
  */
-export function shardSummary(overrides: Fixture = {}): Fixture {
+export function shardSummary(overrides: Fixture = {}, meta: ShardMeta = NODE_LANE): Fixture {
   const failed = Number(overrides.failed ?? 0);
   const notRun = Number(overrides.notRun ?? 0);
-  const expectedTotal = 45;
+  const expectedTotal = meta.expectedTotal;
   return {
-    shard: '3/16',
-    ref: 'v16.2.1',
-    runtime: 'node',
+    shard: meta.shard,
+    ref: meta.ref,
+    runtime: meta.runtime,
+    ...(meta.runtimeVersion === undefined ? {} : { runtimeVersion: meta.runtimeVersion }),
     passed: expectedTotal - failed - notRun,
     failed,
     notRun,
-    excluded: 2,
+    excluded: meta.excluded,
     expectedTotal,
     truncated: false,
     // Both keys OMITTED when empty, exactly as e2e-summary.mjs writes them, and
@@ -517,8 +608,8 @@ export function shardSummary(overrides: Fixture = {}): Fixture {
  * case has to drop both — dropping only `truncated` would be a shape the
  * pipeline never produces.
  */
-export function untruncatableSummary(): Fixture {
-  const { expectedTotal: _e, truncated: _t, ...rest } = shardSummary();
+export function untruncatableSummary(meta: ShardMeta = NODE_LANE): Fixture {
+  const { expectedTotal: _e, truncated: _t, ...rest } = shardSummary({}, meta);
   return rest;
 }
 
@@ -532,49 +623,102 @@ export function untruncatableSummary(): Fixture {
  * cannot read is barely better than no red. Arrays collapse to their length,
  * and an ABSENT key is printed as `absent` rather than omitted — the absence is
  * frequently the whole point of the case.
+ *
+ * NOTHING IS FILTERED OUT. An earlier version hid `shard`/`ref`/`runtime`/
+ * `excluded` for brevity, which was survivable only while those fields were
+ * constants. They vary now — they are the subject of the invariance check — so
+ * hiding them would print two "different" summaries that look identical and
+ * make every metadata red undiagnosable. That is the same unreadable-message
+ * defect in a new costume.
  */
 function describeSummary(s: Fixture): string {
-  const parts = Object.entries(s)
-    .filter(([k]) => k !== 'shard' && k !== 'ref' && k !== 'runtime' && k !== 'excluded')
-    .map(([k, v]) => `${k}: ${Array.isArray(v) ? `[${v.length} entries]` : JSON.stringify(v)}`);
-  for (const k of ['expectedTotal', 'truncated', 'failures', 'notRunFiles']) {
+  const parts = Object.entries(s).map(
+    ([k, v]) => `${k}: ${Array.isArray(v) ? `[${v.length} entries]` : JSON.stringify(v)}`,
+  );
+  for (const k of ['runtimeVersion', 'expectedTotal', 'truncated', 'failures', 'notRunFiles']) {
     if (!(k in s)) parts.push(`${k}: absent`);
   }
   return `{ ${parts.join(', ')} }`;
 }
 
-/** One polarity case: the summary, whether the branch must fire, and why. */
+/**
+ * One polarity case.
+ *
+ * `summary` is a BUILDER, not a value, because every case is evaluated once per
+ * metadata variant and some of them are defined relative to the metadata — "the
+ * shard where every selected test failed" is `failed: meta.expectedTotal`, not
+ * `failed: 45`. Baking today's 45 in is what made a `< 46` ceiling invisible.
+ */
 interface PolarityCase {
-  summary: Fixture;
+  summary: (meta: ShardMeta) => Fixture;
   fires: boolean;
   why: string;
 }
 
-/** Every polarity case a condition fails, as problem fragments. */
+/**
+ * Every polarity case a condition fails, as problem fragments.
+ *
+ * TWO properties per case, and the second is the round-5 addition:
+ *
+ *   1. the branch fires exactly when the COUNTS say the shard is red, and
+ *   2. its verdict is IDENTICAL across metadata variants — the shard id, the
+ *      Next.js ref, the runtime lane, the excluded count and the expected total
+ *      must not change whether a shard goes red.
+ *
+ * Property 2 is what closes the dead-conjunct class keyed on a real value
+ * (`s.ref === "v16.2.1" && …`) rather than on `undefined`, and it closes it as a
+ * PROPERTY rather than as one row per field. It also takes the constant-ceiling
+ * family with it: a `< 46` bound fires on a 45-test shard and not on a 90-test
+ * one, so it breaks invariance even though both probes are "all tests failed".
+ */
 function polarityProblems(cond: ts.Expression, cases: PolarityCase[]): string[] {
   const problems: string[] = [];
-  for (const { summary, fires, why } of cases) {
-    let actual: unknown;
-    try {
-      actual = evaluateCondition(cond, summary);
-    } catch (err) {
-      if (err instanceof ConditionThrows) {
-        return [
-          `would THROW on ${describeSummary(summary)} (${why}): ${err.message}. An uncaught throw inside \`node -e\` exits NON-ZERO, so this gate goes red on every shard of that shape — permanently red is the other way to make a gate meaningless. \`e2e-summary.mjs\` omits \`failures\` and \`notRunFiles\` entirely on a green shard, which is why the gate reads them as \`?? []\``,
-        ];
+  for (const { summary: build, fires, why } of cases) {
+    /** The verdict under each metadata variant, or a fatal finding. */
+    const verdicts: Array<{ meta: ShardMeta; summary: Fixture; value: boolean }> = [];
+
+    for (const meta of METADATA_VARIANTS) {
+      const summary = build(meta);
+      let actual: unknown;
+      try {
+        actual = evaluateCondition(cond, summary);
+      } catch (err) {
+        if (err instanceof ConditionThrows) {
+          return [
+            `would THROW on ${describeSummary(summary)} (${why}): ${err.message}. An uncaught throw inside \`node -e\` exits NON-ZERO, so this gate goes red on every shard of that shape — permanently red is the other way to make a gate meaningless. \`e2e-summary.mjs\` omits \`failures\` and \`notRunFiles\` entirely on a green shard, which is why the gate reads them as \`?? []\``,
+          ];
+        }
+        if (err instanceof UnsupportedCondition) {
+          return [
+            `uses a construct this audit does not model (${err.message}), so its POLARITY cannot be judged — teach \`evaluateCondition\` the construct or state here why the branch is still a tooth. Refusing beats guessing: an inverted condition looks identical to a correct one under a syntax check`,
+          ];
+        }
+        throw err;
       }
-      if (err instanceof UnsupportedCondition) {
-        return [
-          `uses a construct this audit does not model (${err.message}), so its POLARITY cannot be judged — teach \`evaluateCondition\` the construct or state here why the branch is still a tooth. Refusing beats guessing: an inverted condition looks identical to a correct one under a syntax check`,
-        ];
-      }
-      throw err;
+      verdicts.push({ meta, summary, value: Boolean(actual) });
     }
-    if (Boolean(actual) !== fires) {
+
+    // Property 2 FIRST: "the verdict moved with the metadata" is a sharper and
+    // more actionable finding than "it did not fire on variant B", and reporting
+    // the weaker one would send a reader looking at the counts.
+    const first = verdicts[0] as (typeof verdicts)[number];
+    const divergent = verdicts.find((v) => v.value !== first.value);
+    if (divergent) {
+      const differing = (Object.keys(first.meta) as Array<keyof ShardMeta>)
+        .filter((k) => first.meta[k] !== divergent.meta[k])
+        .map((k) => `\`${k}\``)
+        .join(', ');
+      problems.push(
+        `has a verdict that DEPENDS ON METADATA (${why}): it ${first.value ? 'fires' : 'does not fire'} on ${describeSummary(first.summary)} but ${divergent.value ? 'fires' : 'does not fire'} on ${describeSummary(divergent.summary)} — same counts, different ${differing}. Only the counts may decide whether a shard is red: \`NEXTJS_REF\` is bumped routinely, the same \`deploy-tests\` job runs the Bun weekly lane, and \`expectedTotal\` differs per shard, so a condition keyed on any of them fails OPEN on an ordinary change`,
+      );
+      continue;
+    }
+
+    if (first.value !== fires) {
       problems.push(
         fires
-          ? `does NOT fire on ${describeSummary(summary)} (${why}) — the branch, its ::error:: lines and its exit are all still there, and none of them run`
-          : `FIRES on ${describeSummary(summary)} (${why}) — the polarity is inverted: this gate fails a green shard and passes a red one`,
+          ? `does NOT fire on ${describeSummary(first.summary)} (${why}) — the branch, its ::error:: lines and its exit are all still there, and none of them run`
+          : `FIRES on ${describeSummary(first.summary)} (${why}) — the polarity is inverted: this gate fails a green shard and passes a red one`,
       );
     }
   }
@@ -794,53 +938,48 @@ export function auditFailOnRedGateTeeth(workflowPath: string): GateTeethAudit {
     }
   };
 
-  // FOUR red cases, and the counts go past 1. A probe set of {0, 1} accepts
-  // anything correct at 1 and wrong at 2 or more — `=== 1` and an upper bound
-  // `&& s.failed < 2` both passed a {0,1} probe set, and `=== 1` IS run
-  // 28552585087's shape: eight real failures, exit 0, workflow SUCCESS.
+  // The counts go past 1, and the top-of-domain cases are expressed RELATIVE to
+  // `expectedTotal` so they move with the metadata variant. A probe set of {0,1}
+  // accepted `=== 1` and `&& s.failed < 2`; extending it to 8 only moved the
+  // ceiling to `< 9`. Anchoring the top case to `meta.expectedTotal` is what
+  // lets the invariance property in `polarityProblems` take the whole
+  // constant-ceiling family, rather than this list growing a rung at a time.
   auditJsTooth('failed-or-not-run', ['failed'], (cond) =>
     polarityProblems(cond, [
       {
-        summary: shardSummary({ failed: 1 }),
+        summary: (m) => shardSummary({ failed: 1 }, m),
         fires: true,
         why: 'one REAL test failure',
       },
       {
-        summary: shardSummary({ failed: 8 }),
+        summary: (m) => shardSummary({ failed: 8 }, m),
         fires: true,
         why: "EIGHT real test failures — run 28552585087's actual shape",
       },
       {
-        summary: shardSummary({ notRun: 1 }),
+        summary: (m) => shardSummary({ notRun: 1 }, m),
         fires: true,
         why: 'one phantom not-run file (a jest infra abort, not a test result)',
       },
       {
-        summary: shardSummary({ notRun: 3 }),
+        summary: (m) => shardSummary({ notRun: 3 }, m),
         fires: true,
         why: 'three phantom not-run files',
       },
-      // THE TOP OF THE DOMAIN. Raising the probes from {0,1} to {0,1,8} only
-      // raised the ceiling — `&& s.failed < 9`, and `&& s.failed < s.expectedTotal`,
-      // both survived. `expectedTotal` bounds the counts from above, so probing
-      // its top closes the whole upper-bound family at once; there is no further
-      // rung on this axis. The second of those bounds is not academic: against a
-      // real artifact for a shard where every selected test failed it evaluates
-      // false, and the workflow concludes SUCCESS on the worst state a shard has.
       {
-        summary: shardSummary({ failed: 45 }),
+        summary: (m) => shardSummary({ failed: m.expectedTotal }, m),
         fires: true,
-        why: 'every one of the 45 selected tests failed — the worst shard there is',
+        why: 'every one of the selected tests failed — the worst shard there is',
       },
       {
-        summary: shardSummary({ notRun: 45 }),
+        summary: (m) => shardSummary({ notRun: m.expectedTotal }, m),
         fires: true,
-        why: 'not one of the 45 selected tests produced a result',
+        why: 'not one of the selected tests produced a result',
       },
       {
-        summary: shardSummary(),
+        summary: (m) => shardSummary({}, m),
         fires: false,
-        why: 'a genuinely clean 45-of-45 shard',
+        why: 'a genuinely clean shard',
       },
     ]),
   );
@@ -848,17 +987,17 @@ export function auditFailOnRedGateTeeth(workflowPath: string): GateTeethAudit {
   auditJsTooth('truncated', ['truncated'], (cond) =>
     polarityProblems(cond, [
       {
-        summary: shardSummary({ truncated: true, passed: 20 }),
+        summary: (m) => shardSummary({ truncated: true, passed: 20 }, m),
         fires: true,
-        why: 'a shard killed mid-run: 20 of 45 selected tests reported',
+        why: 'a shard killed mid-run: 20 of the selected tests reported',
       },
       {
-        summary: shardSummary(),
+        summary: (m) => shardSummary({}, m),
         fires: false,
         why: 'a complete result set',
       },
       {
-        summary: untruncatableSummary(),
+        summary: (m) => untruncatableSummary(m),
         fires: false,
         why: 'a summary with no expectedTotal, so no truncated flag at all — firing here makes the gate permanently red, which is the other way to make it meaningless',
       },

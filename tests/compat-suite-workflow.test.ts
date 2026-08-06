@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { summarize } from '../scripts/e2e-summary.mjs';
 import {
   auditFailOnRedGateTeeth,
+  METADATA_VARIANTS,
   shardSummary,
   untruncatableSummary,
 } from './helpers/fail-on-red-gate.js';
@@ -27,12 +28,40 @@ FAIL Turbopack test/e2e/app-dir/b/b.test.ts (14.0 s)
 end of test/e2e/app-dir/b/b.test.ts output
 test/e2e/app-dir/b/b.test.ts failed to pass within 2 retries
 `;
+/**
+ * A PHANTOM abort: run-tests.js says the file failed, but its output group
+ * carries jest's `No tests found` — so `e2e-summary.mjs` counts it as `notRun`,
+ * not `failed`, and emits `notRunFiles`. Without this log the emitter's fourth
+ * conditional spread was never exercised, and `notRunFiles` — which four of the
+ * polarity probes produce — was never validated against reality at all.
+ */
+const NOT_RUN_RUNNER_LOG = `
+total: 2
+test/e2e/app-dir/a/a.test.ts finished on retry 0/2 in 12.0s
+❌ test/e2e/app-dir/b/b.test.ts output:
+No tests found, exiting with code 1
+end of test/e2e/app-dir/b/b.test.ts output
+test/e2e/app-dir/b/b.test.ts failed to pass within 2 retries
+`;
 /** No `total: N` header — truncation detection is disabled, so BOTH keys drop. */
 const NO_TOTAL_RUNNER_LOG = `
 test/e2e/app-dir/a/a.test.ts finished on retry 0/2 in 12.0s
 test/e2e/app-dir/b/b.test.ts finished on retry 0/2 in 9.0s
 `;
 const SUMMARIZE_META = { ref: 'v16.2.1', shard: '3/16', excluded: 2, runtime: 'node' };
+/**
+ * The BUN lane's meta. `runtimeVersion` is the emitter's fifth conditional
+ * spread and the node lane omits it deliberately, so without a bun probe every
+ * verdict this file produced was a node-lane verdict — for a step that guards
+ * both lanes. That is precisely why `s.runtime === "node" && …` was invisible.
+ */
+const BUN_SUMMARIZE_META = {
+  ref: 'v16.3.0-canary.7',
+  shard: '11/8',
+  excluded: 0,
+  runtime: 'bun',
+  runtimeVersion: '1.3.14',
+};
 
 /**
  * GUARD TEST for .github/workflows/test-e2e-deploy.yml (#89 / ADR-0007 A3-2).
@@ -2251,6 +2280,17 @@ describe('compat-suite fail-on-red gate — revocation teeth (test-e2e-deploy.ym
   // `shard`, `ref`, `passed`, `excluded`, `expectedTotal`) both a branch that
   // can never fire and one that fires always. The probes are now complete,
   // internally-consistent summaries of the shape scripts/e2e-summary.mjs emits.
+  //
+  // Round 4 closed the count CEILING; round 5 closed the last constant. Every
+  // field other than the counts was still pinned to one value, so the same dead
+  // conjunct keyed on the CONSTANT instead of on `undefined` —
+  // `s.ref === "v16.2.1" && …`, `s.runtime === "node" && …` — survived, and two
+  // of those fail open on routine changes: the pinned Next.js ref is bumped
+  // every cycle, and the same `deploy-tests` job runs the Bun weekly lane. The
+  // fix is a PROPERTY, not more values: every case is evaluated under two
+  // metadata assignments and the verdict must be IDENTICAL. That takes the
+  // constant-ceiling family with it, since a `< 46` bound fires on a 45-test
+  // shard and not on a 90-test one.
   // ───────────────────────────────────────────────────────────────────────────
   const teeth = auditFailOnRedGateTeeth(WORKFLOW_PATH);
 
@@ -2279,20 +2319,95 @@ describe('compat-suite fail-on-red gate — revocation teeth (test-e2e-deploy.ym
     // `notRunFiles: []`, which hid a condition that throws `TypeError` on every
     // green artifact). Comparing key SETS against the real function closes the
     // class; pinning spellings would only have closed the four I thought of.
-    const green = summarize(GREEN_RUNNER_LOG, SUMMARIZE_META) as Record<string, unknown>;
-    const red = summarize(RED_RUNNER_LOG, SUMMARIZE_META) as Record<string, unknown>;
-    const noTotal = summarize(NO_TOTAL_RUNNER_LOG, SUMMARIZE_META) as Record<string, unknown>;
+    //
+    // FIVE shapes, not three. The emitter has four INDEPENDENT conditional
+    // spreads (`runtimeVersion`, `expectedTotal`+`truncated`, `failures`,
+    // `notRunFiles`), and the first version of this guard reached three of the
+    // reachable combinations — leaving `notRunFiles` unvalidated even though
+    // four polarity probes produce it, and `runtimeVersion` with no probe at
+    // all. The second gap is the load-bearing one: with no bun probe, every
+    // verdict this file produced was a NODE-LANE verdict for a step that guards
+    // both lanes, which is exactly why `s.runtime === "node" && …` was
+    // invisible.
+    const emitted = {
+      green: summarize(GREEN_RUNNER_LOG, SUMMARIZE_META),
+      red: summarize(RED_RUNNER_LOG, SUMMARIZE_META),
+      notRun: summarize(NOT_RUN_RUNNER_LOG, SUMMARIZE_META),
+      noTotal: summarize(NO_TOTAL_RUNNER_LOG, SUMMARIZE_META),
+      bun: summarize(GREEN_RUNNER_LOG, BUN_SUMMARIZE_META),
+    } as unknown as Record<string, Record<string, unknown>>;
 
-    // Non-vacuity: the emitter must actually have produced the states claimed,
-    // or three identical key sets would make the comparison meaningless.
-    expect([green.failed, green.notRun, green.truncated]).toEqual([0, 0, false]);
-    expect(red.failed, 'the red fixture must produce a failing shard').toBeGreaterThan(0);
-    expect(noTotal.expectedTotal, 'the no-total fixture must disable truncation').toBeUndefined();
+    // Non-vacuity: the emitter must actually have produced the five distinct
+    // states claimed, or identical key sets would make the comparison
+    // meaningless. Each assertion names the spread it is proving reachable.
+    const g = emitted.green as Record<string, unknown>;
+    expect([g.failed, g.notRun, g.truncated], 'green probe').toEqual([0, 0, false]);
+    expect(emitted.red?.failed, 'the red log must produce `failures`').toBe(1);
+    expect(emitted.notRun?.notRun, 'the phantom log must produce `notRunFiles`').toBe(1);
+    expect(emitted.notRun?.failed, 'a phantom abort is NOT a failure').toBe(0);
+    expect(emitted.noTotal?.expectedTotal, 'the no-total log must drop truncation').toBeUndefined();
+    expect(emitted.bun?.runtimeVersion, 'the bun meta must produce `runtimeVersion`').toBe(
+      '1.3.14',
+    );
+    expect(
+      new Set(
+        Object.keys(emitted).map((k) =>
+          Object.keys(emitted[k] ?? {})
+            .sort()
+            .join('|'),
+        ),
+      ).size,
+      'the five logs must produce five DISTINCT key sets, or this guard proves less than it claims',
+    ).toBe(5);
 
-    const keys = (o: object) => Object.keys(o).sort();
-    expect(keys(shardSummary()), 'clean-shard probe').toEqual(keys(green));
-    expect(keys(shardSummary({ failed: 1 })), 'red-shard probe').toEqual(keys(red));
-    expect(keys(untruncatableSummary()), 'no-expectedTotal probe').toEqual(keys(noTotal));
+    // Key set AND value shape. `Object.keys` alone accepts `expectedTotal: '45'`
+    // or `notRunFiles` as an array of objects — a probe that type-diverges from
+    // the emitter is the same class of lie as one that key-diverges.
+    const shape = (o: Record<string, unknown>) =>
+      Object.keys(o)
+        .sort()
+        .map((k) => {
+          const v = o[k];
+          return `${k}:${Array.isArray(v) ? `${typeof v[0]}[]` : typeof v}`;
+        });
+
+    const bunMeta = {
+      shard: '11/8',
+      ref: 'v16.3.0-canary.7',
+      runtime: 'bun',
+      excluded: 0,
+      expectedTotal: 45,
+      runtimeVersion: '1.3.14',
+    };
+    expect(shape(shardSummary()), 'clean-shard probe').toEqual(shape(emitted.green ?? {}));
+    expect(shape(shardSummary({ failed: 1 })), 'red-shard probe').toEqual(shape(emitted.red ?? {}));
+    expect(shape(shardSummary({ notRun: 1 })), 'phantom-abort probe').toEqual(
+      shape(emitted.notRun ?? {}),
+    );
+    expect(shape(untruncatableSummary()), 'no-expectedTotal probe').toEqual(
+      shape(emitted.noTotal ?? {}),
+    );
+    expect(shape(shardSummary({}, bunMeta)), 'bun-lane probe').toEqual(shape(emitted.bun ?? {}));
+  });
+
+  it('#700 the polarity probes cover BOTH runtime lanes', () => {
+    // The step guards the node nightly and the Bun weekly through one
+    // `deploy-tests` job (`KNEXT_RUNTIME`), so a probe set that only ever
+    // describes one lane cannot notice a condition keyed on the other. Asserted
+    // on the exported variants rather than inside the audit, so it stays true
+    // for anyone who adds a case.
+    expect(METADATA_VARIANTS.length, 'a single variant cannot prove invariance').toBeGreaterThan(1);
+    expect(METADATA_VARIANTS.map((m) => m.runtime).sort()).toEqual(['bun', 'node']);
+    // Every field must actually DIFFER across the variants, or the invariance
+    // check is silently blind to the ones that do not.
+    for (const key of ['shard', 'ref', 'runtime', 'excluded', 'expectedTotal'] as const) {
+      expect(
+        new Set(METADATA_VARIANTS.map((m) => m[key])).size,
+        `\`${key}\` is identical across variants — invariance cannot be judged on it`,
+      ).toBe(METADATA_VARIANTS.length);
+    }
+    // `runtimeVersion` differs by PRESENCE, which is the emitter's own contract.
+    expect(METADATA_VARIANTS.filter((m) => m.runtimeVersion === undefined).length).toBe(1);
   });
 
   it('#700 tooth 1/3 — a MISSING summary has its OWN failing exit', () => {

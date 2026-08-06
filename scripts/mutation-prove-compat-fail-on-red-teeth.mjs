@@ -57,9 +57,21 @@
  * any upper bound above 8 — `&& s.failed < 9` survived, and so did
  * `&& s.failed < s.expectedTotal`, which passes a shard where EVERY selected
  * test failed. The counts are bounded above by `expectedTotal`, so the fixtures
- * probe its top (`failed: 45`, `notRun: 45`) and no further rung exists.
+ * probe its top (`failed: meta.expectedTotal`).
  * The last row is the same lesson from the other side: a fixture that invents a
  * key the emitter OMITS hides a condition that throws on every green shard.
+ *
+ * BE PRECISE ABOUT WHAT THAT CLOSES. An earlier version of this note claimed
+ * probing the top "terminates the axis — no further rung exists", and that was
+ * wrong: `&& s.failed < 46` survived it, because nothing tied the hardcoded 45
+ * to anything. A finite probe set cannot close an infinite family by
+ * enumeration. What closes it is the METADATA-INVARIANCE property added in the
+ * round after: every case is evaluated under two metadata assignments with
+ * DIFFERENT `expectedTotal`s and the verdict must be identical, so any constant
+ * bound between them fires on one and not the other. Formally, what terminates
+ * is the monotone constant-bound sub-family up to the largest probe, plus
+ * everything keyed on metadata; a bound above every probe still survives, and
+ * that is stated rather than papered over.
  *
  * Mutations land through the byte-snapshot harness, so restoration is
  * content-addressed and sha256-verified, and every mutation carries the residue
@@ -104,6 +116,10 @@ const T = {
   reaches: '#700 the gate script',
   // Not a tooth — the guard on the ORACLE the three teeth are judged with.
   shape: '#700 the probe summaries',
+  // Also not a tooth — the guard that keeps the ORACLE describing both
+  // runtime lanes. Without it a single-variant probe set would satisfy the
+  // invariance check vacuously.
+  lanes: '#700 the polarity probes cover BOTH runtime lanes',
 };
 
 /** `//` for rows landing inside the embedded JS; `#` (the default) elsewhere. */
@@ -156,14 +172,14 @@ const MUTATIONS = [
       .filter((l) => l.trim() !== 'exit 1')
       .join('\n'),
     reds: T.missing,
-    green: [T.failed, T.truncated, T.reaches, T.vacuity, T.shape],
+    green: [T.failed, T.truncated, T.reaches, T.vacuity, T.shape, T.lanes],
   },
   {
     label: 'tooth 1 VALUE — the missing-summary branch exits ZERO',
     anchor: MISSING_BRANCH,
     replacement: MISSING_BRANCH.replace('exit 1', 'exit 0'),
     reds: T.missing,
-    green: [T.failed, T.truncated, T.reaches, T.vacuity, T.shape],
+    green: [T.failed, T.truncated, T.reaches, T.vacuity, T.shape, T.lanes],
   },
   {
     // The exit is still THERE, and the block still contains the string
@@ -177,7 +193,7 @@ const MUTATIONS = [
       '          else\n            exit 1\n',
     ),
     reds: T.missing,
-    green: [T.failed, T.truncated, T.reaches, T.vacuity, T.shape],
+    green: [T.failed, T.truncated, T.reaches, T.vacuity, T.shape, T.lanes],
   },
   {
     // POLARITY on the shell tooth. The `exit 1` is untouched; the TEST is. The
@@ -187,7 +203,7 @@ const MUTATIONS = [
     anchor: MISSING_COND,
     replacement: '          if [ -f "${SUMMARY}" ]; then',
     reds: T.missing,
-    green: [T.failed, T.truncated, T.reaches, T.shape],
+    green: [T.failed, T.truncated, T.reaches, T.shape, T.lanes],
   },
   // ── tooth 2: failed > 0 / notRun > 0 — the measured defect ────────────────
   {
@@ -199,7 +215,7 @@ const MUTATIONS = [
     replacement: '            }\n            // #171 follow-up',
     options: JS,
     reds: T.failed,
-    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape],
+    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape, T.lanes],
   },
   {
     label: 'tooth 2 VALUE — the `failed > 0` branch exits ZERO',
@@ -207,7 +223,7 @@ const MUTATIONS = [
     replacement: '              process.exit(0);\n            }\n            // #171 follow-up',
     options: JS,
     reds: T.failed,
-    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape],
+    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape, T.lanes],
   },
   {
     label: 'tooth 2 VALUE — the threshold is raised to one that can never fire',
@@ -215,7 +231,7 @@ const MUTATIONS = [
     replacement: '            if ((s.failed ?? 0) > 999 || (s.notRun ?? 0) > 0) {',
     options: JS,
     reds: T.failed,
-    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape],
+    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape, T.lanes],
   },
   {
     label: 'tooth 2 PRESENCE — the branch reads a field the summary does not carry',
@@ -223,7 +239,7 @@ const MUTATIONS = [
     replacement: '            if ((s.failedTypo ?? 0) > 0 || (s.notRun ?? 0) > 0) {',
     options: JS,
     reds: T.failed,
-    green: [T.missing, T.truncated, T.reaches, T.shape],
+    green: [T.missing, T.truncated, T.reaches, T.shape, T.lanes],
   },
   {
     // The exact inversion: the gate now fails every CLEAN shard and passes
@@ -234,7 +250,7 @@ const MUTATIONS = [
     replacement: '            if (!((s.failed ?? 0) > 0 || (s.notRun ?? 0) > 0)) {',
     options: JS,
     reds: T.failed,
-    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape],
+    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape, T.lanes],
   },
   {
     // ONE CHARACTER. `failed=8, notRun=0` — run 28552585087's shape exactly —
@@ -244,7 +260,7 @@ const MUTATIONS = [
     replacement: '            if ((s.failed ?? 0) > 0 && (s.notRun ?? 0) > 0) {',
     options: JS,
     reds: T.failed,
-    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape],
+    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape, T.lanes],
   },
   {
     label: 'tooth 2 POLARITY — a dead conjunct on a field no summary carries',
@@ -253,7 +269,7 @@ const MUTATIONS = [
       '            if (s.neverSet === "zzz" && ((s.failed ?? 0) > 0 || (s.notRun ?? 0) > 0)) {',
     options: JS,
     reds: T.failed,
-    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape],
+    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape, T.lanes],
   },
   // ── FIXTURE REALISM: the round-3 findings ─────────────────────────────────
   // Every row below was measured GREEN against a probe set of
@@ -270,7 +286,7 @@ const MUTATIONS = [
     replacement: '            if ((s.failed ?? 0) === 1 || (s.notRun ?? 0) === 1) {',
     options: JS,
     reds: T.failed,
-    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape],
+    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape, T.lanes],
   },
   {
     label: 'tooth 2 THRESHOLD — an UPPER bound `&& (s.failed ?? 0) < 2` caps what can go red',
@@ -279,7 +295,7 @@ const MUTATIONS = [
       '            if (((s.failed ?? 0) > 0 || (s.notRun ?? 0) > 0) && (s.failed ?? 0) < 2) {',
     options: JS,
     reds: T.failed,
-    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape],
+    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape, T.lanes],
   },
   {
     // The exact INVERSE of the `s.neverSet === "zzz"` row above — and the
@@ -290,7 +306,7 @@ const MUTATIONS = [
       '            if (s.shard === undefined && ((s.failed ?? 0) > 0 || (s.notRun ?? 0) > 0)) {',
     options: JS,
     reds: T.failed,
-    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape],
+    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape, T.lanes],
   },
   {
     label: 'tooth 2 FIXTURE — `|| s.passed > 0` makes the gate PERMANENTLY red',
@@ -298,12 +314,13 @@ const MUTATIONS = [
     replacement: '            if ((s.failed ?? 0) > 0 || (s.notRun ?? 0) > 0 || s.passed > 0) {',
     options: JS,
     reds: T.failed,
-    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape],
+    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape, T.lanes],
   },
   // ── The probe CEILING: round 3 raised it, it did not remove it ────────────
   // Probing failed ∈ {0,1,8} accepts any upper bound above 8. `expectedTotal`
   // bounds the counts from above, so the fixtures now probe its TOP — and that
-  // terminates the family rather than moving it up one rung again.
+  // closes the family via the metadata-invariance property rather than moving it
+  // up one rung again — see the header for what that does and does not cover.
   {
     // NOT academic. Against a real e2e-summary.mjs artifact for a shard where
     // every selected test failed (`passed:0, failed:N, expectedTotal:N`) this
@@ -315,7 +332,7 @@ const MUTATIONS = [
       '            if (((s.failed ?? 0) > 0 && (s.failed ?? 0) < (s.expectedTotal ?? 0)) || (s.notRun ?? 0) > 0) {',
     options: JS,
     reds: T.failed,
-    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape],
+    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape, T.lanes],
   },
   {
     // Above the round-3 probe of 8, and this repo's own history records a
@@ -326,7 +343,7 @@ const MUTATIONS = [
       '            if (((s.failed ?? 0) > 0 || (s.notRun ?? 0) > 0) && (s.failed ?? 0) < 9) {',
     options: JS,
     reds: T.failed,
-    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape],
+    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape, T.lanes],
   },
   {
     label: 'tooth 2 CEILING — the same bound on the OTHER count (`notRun < 4`)',
@@ -335,7 +352,50 @@ const MUTATIONS = [
       '            if ((s.failed ?? 0) > 0 || ((s.notRun ?? 0) > 0 && (s.notRun ?? 0) < 4)) {',
     options: JS,
     reds: T.failed,
-    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape],
+    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape, T.lanes],
+  },
+  // ── METADATA-KEYED dead conjuncts: the mirror of the `undefined` spelling ──
+  // The rows above key a dead conjunct on a field no summary carries. These key
+  // it on the CONSTANT VALUE the probes happened to use — and every one of them
+  // survived the round-4 fixtures, because only the counts varied. Two fail OPEN
+  // on ordinary maintenance: `NEXTJS_REF` is bumped every cycle, and the same
+  // `deploy-tests` job runs the Bun weekly lane through `KNEXT_RUNTIME`.
+  ...[
+    ['the Next.js REF — the gate dies silently at the next ref bump', 's.ref === "v16.2.1"'],
+    ['the SHARD id — only shard 3 of 16 can ever go red', 's.shard === "3/16"'],
+    ['the RUNTIME lane — one line disarms the entire Bun weekly', 's.runtime === "node"'],
+    ['the EXCLUDED count — a per-shard value', 's.excluded === 2'],
+    ['the EXPECTED TOTAL — 44 or 45 depending on the shard', 's.expectedTotal === 45'],
+  ].map(([label, guard]) => ({
+    label: `tooth 2 METADATA — dead conjunct keyed on ${label}`,
+    anchor: FAILED_COND,
+    replacement: `            if (${guard} && ((s.failed ?? 0) > 0 || (s.notRun ?? 0) > 0)) {`,
+    options: JS,
+    reds: T.failed,
+    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape, T.lanes],
+  })),
+  {
+    // The permanently-red half of the same class, keyed on metadata: every shard
+    // whose selection is 44 rather than 45 goes red for no reason.
+    label: 'tooth 2 METADATA — `|| s.expectedTotal !== 45` reds every 44-test shard',
+    anchor: FAILED_COND,
+    replacement:
+      '            if ((s.failed ?? 0) > 0 || (s.notRun ?? 0) > 0 || s.expectedTotal !== 45) {',
+    options: JS,
+    reds: T.failed,
+    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape, T.lanes],
+  },
+  {
+    // The ceiling that survived "probe the top of the domain". It is closed by
+    // INVARIANCE, not by a bigger probe: it fires on a 45-test shard where every
+    // test failed and not on a 90-test one, so the verdict moves with metadata.
+    label: 'tooth 2 CEILING — `< 46`, above the round-4 probe (closed by invariance, not by size)',
+    anchor: FAILED_COND,
+    replacement:
+      '            if (((s.failed ?? 0) > 0 || (s.notRun ?? 0) > 0) && (s.failed ?? 0) < 46) {',
+    options: JS,
+    reds: T.failed,
+    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape, T.lanes],
   },
   {
     // The `==`/`!=` refusal is only a guarantee in an EVALUATED position. Hidden
@@ -348,7 +408,7 @@ const MUTATIONS = [
       '            if (s.shard ? (s.failed ?? 0) == 999 : ((s.failed ?? 0) > 0 || (s.notRun ?? 0) > 0)) {',
     options: JS,
     reds: T.failed,
-    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape],
+    green: [T.missing, T.truncated, T.reaches, T.vacuity, T.shape, T.lanes],
   },
   // ── tooth 3: a TRUNCATED summary ──────────────────────────────────────────
   {
@@ -357,7 +417,7 @@ const MUTATIONS = [
     replacement: '            }\n          \' "${SUMMARY}"',
     options: JS,
     reds: T.truncated,
-    green: [T.missing, T.failed, T.reaches, T.vacuity, T.shape],
+    green: [T.missing, T.failed, T.reaches, T.vacuity, T.shape, T.lanes],
   },
   {
     label: 'tooth 3 VALUE — the truncated branch exits ZERO',
@@ -365,7 +425,7 @@ const MUTATIONS = [
     replacement: '              process.exit(0);\n            }\n          \' "${SUMMARY}"',
     options: JS,
     reds: T.truncated,
-    green: [T.missing, T.failed, T.reaches, T.vacuity, T.shape],
+    green: [T.missing, T.failed, T.reaches, T.vacuity, T.shape, T.lanes],
   },
   {
     label: 'tooth 3 VALUE — the truncated test is inverted to one that never fires',
@@ -373,7 +433,7 @@ const MUTATIONS = [
     replacement: '            if (s.truncated === false) {',
     options: JS,
     reds: T.truncated,
-    green: [T.missing, T.failed, T.reaches, T.vacuity, T.shape],
+    green: [T.missing, T.failed, T.reaches, T.vacuity, T.shape, T.lanes],
   },
   {
     label: 'tooth 3 POLARITY — the truncated test is negated with `!( … )`',
@@ -381,7 +441,7 @@ const MUTATIONS = [
     replacement: '            if (!(s.truncated === true)) {',
     options: JS,
     reds: T.truncated,
-    green: [T.missing, T.failed, T.reaches, T.vacuity, T.shape],
+    green: [T.missing, T.failed, T.reaches, T.vacuity, T.shape, T.lanes],
   },
   {
     label: 'tooth 3 POLARITY — a dead conjunct on a field no summary carries',
@@ -389,7 +449,7 @@ const MUTATIONS = [
     replacement: '            if (s.neverSet === "zzz" && s.truncated === true) {',
     options: JS,
     reds: T.truncated,
-    green: [T.missing, T.failed, T.reaches, T.vacuity, T.shape],
+    green: [T.missing, T.failed, T.reaches, T.vacuity, T.shape, T.lanes],
   },
   {
     label: 'tooth 3 FIXTURE — `s.ref === undefined &&` (true only for a summary nobody emits)',
@@ -397,7 +457,7 @@ const MUTATIONS = [
     replacement: '            if (s.ref === undefined && s.truncated === true) {',
     options: JS,
     reds: T.truncated,
-    green: [T.missing, T.failed, T.reaches, T.vacuity, T.shape],
+    green: [T.missing, T.failed, T.reaches, T.vacuity, T.shape, T.lanes],
   },
   {
     label: 'tooth 3 FIXTURE — `|| s.passed > 0` makes the gate PERMANENTLY red',
@@ -405,7 +465,7 @@ const MUTATIONS = [
     replacement: '            if (s.truncated === true || s.passed > 0) {',
     options: JS,
     reds: T.truncated,
-    green: [T.missing, T.failed, T.reaches, T.vacuity, T.shape],
+    green: [T.missing, T.failed, T.reaches, T.vacuity, T.shape, T.lanes],
   },
   {
     // The oracle disagreeing with reality in the OTHER direction. An earlier
@@ -420,7 +480,28 @@ const MUTATIONS = [
     replacement: '            if (s.truncated === true || s.notRunFiles.length > 0) {',
     options: JS,
     reds: T.truncated,
-    green: [T.missing, T.failed, T.reaches, T.vacuity, T.shape],
+    green: [T.missing, T.failed, T.reaches, T.vacuity, T.shape, T.lanes],
+  },
+  {
+    // The same throw through ELEMENT access rather than property access. It
+    // always reddened; what it used to red WITH was "teach me this construct",
+    // which sends a reader to the evaluator instead of to the permanently-red
+    // gate. The class is about the consequence, so it has to cover every access
+    // form that produces it.
+    label: 'tooth 3 FIXTURE — `|| s.notRunFiles[0] === "x"` throws through ELEMENT access',
+    anchor: TRUNC_COND,
+    replacement: '            if (s.truncated === true || s.notRunFiles[0] === "x") {',
+    options: JS,
+    reds: T.truncated,
+    green: [T.missing, T.failed, T.reaches, T.vacuity, T.shape, T.lanes],
+  },
+  {
+    label: 'tooth 3 METADATA — dead conjunct keyed on the Next.js ref',
+    anchor: TRUNC_COND,
+    replacement: '            if (s.ref === "v16.2.1" && s.truncated === true) {',
+    options: JS,
+    reds: T.truncated,
+    green: [T.missing, T.failed, T.reaches, T.vacuity, T.shape, T.lanes],
   },
   // ── the exit status must reach the step at all ────────────────────────────
   // Three teeth are worth nothing if the command carrying them is neutered.
@@ -429,14 +510,14 @@ const MUTATIONS = [
     anchor: NODE_CLOSE,
     replacement: '          \' "${SUMMARY}" || true',
     reds: T.reaches,
-    green: [T.missing, T.failed, T.truncated, T.vacuity, T.shape],
+    green: [T.missing, T.failed, T.truncated, T.vacuity, T.shape, T.lanes],
   },
   {
     label: 'errexit is turned OFF for the whole gate script',
     anchor: SET_E,
     replacement: '          set +e\n          SAFE_SHARD=',
     reds: T.reaches,
-    green: [T.missing, T.failed, T.truncated, T.vacuity, T.shape],
+    green: [T.missing, T.failed, T.truncated, T.vacuity, T.shape, T.lanes],
   },
   {
     // The COMBINATION is the point, and it is why this row needs two edits.
@@ -457,7 +538,7 @@ const MUTATIONS = [
     reds: T.reaches,
     // Teeth 2 and 3 SHOULD red — their program is genuinely unreachable now.
     // Only tooth 1, which lives in the shell prelude, is unaffected.
-    green: [T.missing, T.shape],
+    green: [T.missing, T.shape, T.lanes],
   },
   {
     // The SECOND vacuous-pass shape, one hole over from the row above. The
@@ -475,14 +556,14 @@ const MUTATIONS = [
       },
     ],
     reds: T.reaches,
-    green: [T.missing, T.shape],
+    green: [T.missing, T.shape, T.lanes],
   },
   {
     label: 'the gate is put in a PIPELINE — the pipeline reports tee’s status, not the gate’s',
     anchor: NODE_CLOSE,
     replacement: '          \' "${SUMMARY}" | tee /dev/null',
     reds: T.reaches,
-    green: [T.missing, T.failed, T.truncated, T.vacuity, T.shape],
+    green: [T.missing, T.failed, T.truncated, T.vacuity, T.shape, T.lanes],
   },
   // ── the ORACLE guard is not decoration either ─────────────────────────────
   {
@@ -498,7 +579,32 @@ const MUTATIONS = [
     replacement:
       '    notRunFiles: [],\n    ...(notRun > 0\n      ? {\n          notRunFiles: Array.from(',
     reds: T.shape,
-    green: [T.missing, T.failed, T.truncated, T.reaches, T.vacuity],
+    green: [T.missing, T.failed, T.truncated, T.reaches, T.vacuity, T.lanes],
+  },
+  {
+    // Collapse the probe set to ONE metadata variant. Invariance then holds
+    // vacuously — nothing to differ against — so every metadata row above would
+    // silently stop proving anything while all five per-tooth assertions stayed
+    // green. The lanes guard is the only thing that notices, which is exactly
+    // why it exists as an assertion rather than as a comment.
+    label: 'the probe set collapses to ONE metadata variant (invariance holds vacuously)',
+    file: HELPER,
+    anchor: 'export const METADATA_VARIANTS: readonly ShardMeta[] = [NODE_LANE, BUN_LANE];',
+    replacement: 'export const METADATA_VARIANTS: readonly ShardMeta[] = [NODE_LANE];',
+    reds: T.lanes,
+    green: [T.missing, T.failed, T.truncated, T.reaches, T.vacuity, T.shape],
+  },
+  {
+    // The emitter's FIFTH conditional spread. Drop it from the builder and the
+    // bun probe no longer describes what the bun lane actually emits — the same
+    // oracle-vs-reality divergence as `notRunFiles`, one key over.
+    label: 'the probe builder stops emitting `runtimeVersion` on the bun lane',
+    file: HELPER,
+    anchor:
+      '    ...(meta.runtimeVersion === undefined ? {} : { runtimeVersion: meta.runtimeVersion }),',
+    replacement: '    ...{},',
+    reds: T.shape,
+    green: [T.missing, T.failed, T.truncated, T.reaches, T.vacuity, T.lanes],
   },
   // ── the non-vacuity guard is not decoration either ────────────────────────
   {
@@ -511,7 +617,7 @@ const MUTATIONS = [
     anchor: STEP_NAME,
     replacement: '      - name: Fail shard on red results\n',
     reds: T.vacuity,
-    green: [T.shape],
+    green: [T.shape, T.lanes],
   },
 ];
 
