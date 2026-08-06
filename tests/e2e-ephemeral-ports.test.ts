@@ -48,6 +48,20 @@
 //      dynamic `await import('node:net')` (the regex requires the static `from`
 //      syntax). So a whole-file exemption can, in principle, outlive the reason
 //      that justified it — the check narrows the hole, it does not seal it.
+//   4. THE SEQUENTIAL-RESERVATION RULE IS A SHAPE-MATCHER, NOT A RULE (#686).
+//      "No scanned file may reserve ports one `freePort()` at a time" is how the
+//      failure message reads; what `SINGLE_PORT_RESERVATION` actually matches is
+//      the LITERAL zero-argument call `freePort()`, counted per file. Measured
+//      against the regex, every one of these reserves N ports sequentially and
+//      still passes: a loop (`for (…) ports.push(await freePort())`) counts 1;
+//      a rename (`getFreePort()`) counts 0; any argument (`freePort(1)`) counts
+//      0; and a local helper that calls it twice makes the CALLER count 0. Nor
+//      is the count cross-file — two modules calling it once each are both fine.
+//      So a green run means "no file repeats the exact shape that bit us twice"
+//      (#683's drain e2e, #686's docker e2e), NOT "sequential reservation is
+//      gone repo-wide". Same posture as limits 1-3: it stops the accident, not
+//      the author who routes around it. Widen the pattern when a real case
+//      escapes.
 //
 // That is deliberate: this is a guard against the ACCIDENT that already bit us
 // (#676, `EADDRINUSE :::39188` from a hardcoded fixture port), not a barrier
@@ -134,7 +148,11 @@ const ENV_PORT_FALLBACK = /env\.[A-Za-z_]*PORT[A-Za-z_]*\s*(?:\?\?|\|\|)\s*(\d{1
  */
 const BINDING_CONSTRUCT = /\.listen\(|createServer\(|from\s+['"]node:(?:net|http|https)['"]/;
 
-/** A file we own end-to-end (fixture or harness), not a spec. */
+/**
+ * A file we own end-to-end — a fixture, a harness, or an `e2e-support/` port
+ * allocator — as opposed to a spec. These get the extra `ENV_PORT_FALLBACK`
+ * check, so widening this predicate is strictly STRICTER, never a hole.
+ */
 function isFixtureOrHarness(file: string): boolean {
   return /__fixtures__\//.test(file) || /harness/.test(file) || /(^|\/)e2e-support\//.test(file);
 }
@@ -240,6 +258,16 @@ describe('#678 e2e ports are OS-assigned, never hardcoded', () => {
     // ...and does not fire on the fix, nor on prose about it.
     expect(sequentialReservationCount('const [a, b] = await freePorts(2);')).toBe(0);
     expect(sequentialReservationCount('// two freePort() calls used to live here\n')).toBe(0);
+    // ...and the DECLARATION exclusion is a real branch, not decoration. Without
+    // it the module that DEFINES the single-port helper and calls it once reads
+    // as two reservations and reds for no reason — but every other assertion in
+    // this case passes with the exclusion deleted, so this is the only one that
+    // holds it up. It must count 1 (the call), never 2 (call + declaration).
+    expect(
+      sequentialReservationCount(
+        'export async function freePort() { return 1; }\nconst p = await freePort();',
+      ),
+    ).toBe(1);
   });
 
   it.each(EXEMPT)('exemption for $file is still real', ({ file }) => {

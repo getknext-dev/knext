@@ -22,9 +22,16 @@
  * `../../../apps/...` path would resolve under vitest while making the example —
  * whose whole job is to be a self-contained recipe someone copies out — silently
  * dependent on an app it does not ship with. The duplication is ~25 lines and is
- * deliberate. Both copies are kept honest by the same repo-level scan
- * (`tests/e2e-ephemeral-ports.test.ts`), which now covers `e2e-support/` and
- * fails on a file that reserves ports one call at a time.
+ * deliberate.
+ *
+ * WHAT KEEPS THE COPIES HONEST — and what does not. The repo-level scan
+ * (`tests/e2e-ephemeral-ports.test.ts`) covers `e2e-support/` and reds on a file
+ * that reserves ports one `freePort()` at a time, but it reads SYNTAX: it asserts
+ * exactly those two properties and cannot tell whether the two copies still
+ * BEHAVE the same. Behavioural equivalence is held by each copy having the same
+ * cases — `ports.test.ts` here, `apps/file-manager/child-ports.test.ts` there,
+ * including the partial-failure (EMFILE) cleanup path, which the scan is blind
+ * to. Adding behaviour to one copy means adding its case to both.
  *
  * HONEST LIMIT (same as the file-manager copy): this closes the reservation's
  * collision with ITSELF, not with the rest of the machine. Between `release()`
