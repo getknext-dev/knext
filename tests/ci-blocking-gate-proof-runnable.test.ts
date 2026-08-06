@@ -2,12 +2,17 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
+import { blankNonCode } from '../scripts/lib/blank-non-code.mjs';
 import {
   declaredTestTitles,
+  disarmReplacement,
   GATE_TEST_NAME,
   GATES,
+  jobAnchor,
   resolveTestRunner,
 } from '../scripts/lib/ci-blocking-gate-proof.mjs';
+import { auditJobCanNotSkip } from './helpers/blocking-gate.js';
 
 /**
  * The standing proof must be RUNNABLE (#672 round 5).
@@ -120,5 +125,207 @@ describe('the ci.yml blocking-gate mutation proof is runnable', () => {
         `\`${gate.jobId}\` must appear exactly once as a job key in ${gate.workflow}`,
       ).toBe(1);
     }
+  });
+});
+
+/**
+ * The `needs:` disarm must red the guard FOR THE RIGHT REASON (#690).
+ *
+ * `needsDisarm` is free text per gate — correctly, since the shared form would
+ * be a CYCLE on `image-pin-resolution-nightly.yml`, whose only other job
+ * `needs:` the gate. Nothing checked the text, and the failure that hides behind
+ * that is specific: `needs: no-such-job` makes the audit report *"job `no-such-job`
+ * is not defined in this workflow"*, the guard goes RED, and the prover scores it
+ * as PROVED. It proved the audit rejects an INVALID workflow — not that it
+ * detects a disarm. Same for a `needs:` on a job that can never skip, and for a
+ * cycle, which is not a valid workflow at all.
+ *
+ * So the disarm is applied here exactly as the prover applies it — through the
+ * shared `disarmReplacement` — and the result is parsed and audited. A mutation
+ * that does not disarm its subject proves nothing, and this is the assertion
+ * that says so at PR time instead of leaving it to be believed.
+ */
+type NeedsDisarm = { define?: string; inject: string };
+type DisarmableGate = { jobId: string; workflow: string; needsDisarm: NeedsDisarm };
+
+/** Everything wrong with a gate's `needs:` disarm. Empty means it really disarms. */
+function auditNeedsDisarm(workflowText: string, gate: DisarmableGate): string[] {
+  const problems: string[] = [];
+  const anchor = jobAnchor(gate.jobId);
+  const occurrences = workflowText.split(anchor).length - 1;
+  if (occurrences !== 1) {
+    // The harness refuses this too, but refusing at run time means the prover
+    // dies mid-board; saying it here means the PR does.
+    problems.push(`the job anchor for \`${gate.jobId}\` occurs ${occurrences} times, not once`);
+    return problems;
+  }
+  const mutated = workflowText.replace(anchor, () =>
+    disarmReplacement(gate.jobId, gate.needsDisarm),
+  );
+
+  let doc: unknown;
+  try {
+    doc = parse(mutated);
+  } catch (err) {
+    // A disarm whose `define:` is malformed YAML reds every guard it touches,
+    // for a reason that has nothing to do with the gate.
+    problems.push(`the disarmed workflow does not parse: ${(err as Error).message}`);
+    return problems;
+  }
+  const jobs = (doc as { jobs?: Record<string, Record<string, unknown>> } | null)?.jobs;
+  if (!jobs || typeof jobs !== 'object') {
+    problems.push('the disarmed workflow has no `jobs:` mapping');
+    return problems;
+  }
+
+  const needs = jobs[gate.jobId]?.needs;
+  const targets = typeof needs === 'string' ? [needs] : Array.isArray(needs) ? needs : [];
+  if (targets.length === 0) {
+    problems.push(
+      `the disarm injected no \`needs:\` onto \`${gate.jobId}\` — whatever it reds, it is not this`,
+    );
+    return problems;
+  }
+
+  for (const target of targets) {
+    if (typeof target !== 'string') {
+      problems.push(`\`needs:\` on \`${gate.jobId}\` has a non-string entry`);
+      continue;
+    }
+    if (target === gate.jobId) {
+      problems.push(
+        `\`needs: ${target}\` points the gate at ITSELF — that is a cycle, not a disarm`,
+      );
+      continue;
+    }
+    const job = jobs[target];
+    if (job === undefined || job === null || typeof job !== 'object') {
+      problems.push(
+        `\`needs: ${target}\` names a job that does NOT exist in ${gate.workflow} (define it, or point at one that does) — the guard would red on "is not defined in this workflow", which proves the audit rejects an invalid workflow, not that it detects a disarm`,
+      );
+      continue;
+    }
+    if (!('if' in job)) {
+      problems.push(
+        `\`needs: ${target}\` names a job with no \`if:\` — a job that always runs cannot skip, so nothing about the gate changes`,
+      );
+    } else if (/^(?:true|\$\{\{\s*true\s*\}\})$/.test(String(job.if).trim())) {
+      problems.push(
+        `\`needs: ${target}\` names a job whose \`if:\` is constantly true (${JSON.stringify(job.if)}) — that is not a skip condition`,
+      );
+    }
+    // The cycle half, walked with the SAME closure walk the audit uses. A target
+    // that `needs:` the gate back is not a workflow GitHub will run.
+    const closure = auditJobCanNotSkip(jobs, target, []);
+    if (closure.includes(gate.jobId)) {
+      problems.push(
+        `\`needs: ${target}\` is a CYCLE — \`${target}\` needs \`${gate.jobId}\` back (closure: ${closure.join(' -> ')})`,
+      );
+    }
+  }
+  return problems;
+}
+
+describe('#690 every `needs:` disarm names a job that exists and can skip', () => {
+  it.each(GATES)('$jobId — its `needs:` disarm really disarms', (gate) => {
+    const text = readFileSync(resolve(REPO_ROOT, gate.workflow), 'utf8');
+    const problems = auditNeedsDisarm(text, gate as unknown as DisarmableGate);
+    expect(problems, problems.join('\n')).toEqual([]);
+  });
+
+  /**
+   * The other half. Every assertion above is "the real disarms are fine", which
+   * a check that can only answer yes would also satisfy — the exact blindness
+   * `blocking-gate-helper.test.ts` exists to close for the audit engine. So each
+   * way a disarm can red for the wrong reason gets a synthetic workflow proving
+   * the check SAYS SO. Fixtures are written whole; nothing here depends on a
+   * substitution having succeeded.
+   */
+  const FIXTURE = [
+    'name: fixture',
+    'on:',
+    '  pull_request:',
+    'jobs:',
+    '  the-gate:',
+    '    runs-on: ubuntu-latest',
+    '    steps:',
+    '      - run: run-the-gate',
+    '  can-skip:',
+    "    if: github.event_name == 'pull_request'",
+    '    runs-on: ubuntu-latest',
+    '    steps:',
+    '      - run: true',
+    '  always-runs:',
+    '    runs-on: ubuntu-latest',
+    '    steps:',
+    '      - run: true',
+    '  needs-the-gate:',
+    "    if: github.event_name == 'schedule'",
+    '    needs: [the-gate]',
+    '    runs-on: ubuntu-latest',
+    '    steps:',
+    '      - run: true',
+    '',
+  ].join('\n');
+
+  const auditInject = (inject: string, define?: string) =>
+    auditNeedsDisarm(FIXTURE, {
+      jobId: 'the-gate',
+      workflow: 'fixture.yml',
+      needsDisarm: { define, inject },
+    }).join('\n');
+
+  it('NEGATIVE CONTROL: a real skippable target has no finding', () => {
+    expect(auditInject('    needs: can-skip')).toBe('');
+  });
+
+  it('THE CASE THAT MATTERS: a NONEXISTENT job is a finding', () => {
+    expect(auditInject('    needs: no-such-job')).toMatch(/does NOT exist/);
+  });
+
+  it('a target that can never skip is a finding', () => {
+    expect(auditInject('    needs: always-runs')).toMatch(/no `if:`/);
+  });
+
+  it('a target whose `if:` is constantly true is a finding', () => {
+    expect(auditInject('    needs: always-runs', '  always-true:\n    if: true\n')).toMatch(
+      /no `if:`/,
+    );
+    expect(auditInject('    needs: always-true', '  always-true:\n    if: true\n')).toMatch(
+      /constantly true/,
+    );
+  });
+
+  it('a CYCLE is a finding — an invalid workflow reds for its own reason', () => {
+    expect(auditInject('    needs: needs-the-gate')).toMatch(/CYCLE/);
+  });
+
+  it('pointing the gate at ITSELF is a finding', () => {
+    expect(auditInject('    needs: the-gate')).toMatch(/ITSELF/);
+  });
+
+  it('an injection that is not a `needs:` at all is a finding', () => {
+    expect(auditInject('    "if": false')).toMatch(/injected no `needs:`/);
+  });
+
+  it('a `define:` that is malformed YAML is a finding, never a pass', () => {
+    expect(auditInject('    needs: broken', '  broken:\n   if: [unclosed\n')).toMatch(
+      /does not parse/,
+    );
+  });
+
+  it('the PROVER builds its mutation with the shared `disarmReplacement`', () => {
+    // The audit above inspects `disarmReplacement`'s output. That is only the
+    // mutation being proved while the prover uses the same builder — a second,
+    // look-alike implementation in the script would let the two agree with
+    // themselves while diverging from each other. Read from a CODE-ONLY view, so
+    // the identifier surviving in a comment does not satisfy it.
+    const source = blankNonCode(
+      readFileSync(resolve(REPO_ROOT, 'scripts/mutation-prove-ci-blocking-gates.mjs'), 'utf8'),
+    );
+    expect(source).toMatch(/\bdisarmReplacement\s*\(/);
+    // And nothing rebuilds it inline: the old `${disarm.define ?? ''}` form is
+    // what this replaced, so its return would be a silent fork.
+    expect(source).not.toMatch(/disarm\.define/);
   });
 });

@@ -69,6 +69,29 @@ describe('the unconverted-guard triage checks itself', () => {
     ).toBeGreaterThanOrEqual(2);
   });
 
+  it('the `paths-scoped-pull-request` category is EMPTY — the option replaced it (#690)', () => {
+    // Was a comment three lines up ("the floors moved with #677 …") and a
+    // sentence in `blocking-gate.ts`'s header: "a paths-scoped trigger is no
+    // longer sufficient grounds for an exemption: convert with the option
+    // instead". By this repo's own standard a documented expectation decays, and
+    // an empty category with prose saying "do not use this" is exactly the shape
+    // someone re-populates without noticing — `TriageCategory` still offers it,
+    // `TRIGGER_CATEGORIES` still admits it, and the per-entry assertion below
+    // would happily CONFIRM a new one as correctly classified. That is the
+    // failure this converts into a gate: a paths-scoped guard now has an audit
+    // path (`allowPathsFilter`), so filing it as exempt is a regression, not a
+    // triage.
+    //
+    // Deliberately an equality, not a floor: every OTHER count in this file is a
+    // floor because an entry LEAVING is progress. Here the direction is
+    // inverted — an entry ARRIVING is the regression — so the only honest bound
+    // is zero.
+    expect(
+      UNCONVERTED_GUARD_TRIAGE.filter((e) => e.category === 'paths-scoped-pull-request'),
+      'a paths-scoped guard has an audit path (`allowPathsFilter`) — convert it instead of exempting it',
+    ).toEqual([]);
+  });
+
   it.each(UNCONVERTED_GUARD_TRIAGE)('$test — the guard and its workflow exist', (entry) => {
     // A triage entry naming a file that was renamed or deleted is an exemption
     // for something that is no longer there.

@@ -213,6 +213,26 @@ describe('the check is actually wired to run', () => {
   const pr = (triggers as { pull_request?: { paths?: string[] } })?.pull_request;
 
   /**
+   * The `paths:` filter this gate is allowed to be scoped to, pinned EXACTLY.
+   *
+   * Hoisted out of the assertion that used to hold it inline (#690) so the same
+   * list is asserted twice against two independent readings of the workflow: the
+   * parse below, and `auditBlockingGate`'s own `pullRequestPaths`. The audit's
+   * `allowPathsFilter` opt-in rejects a `paths:` list only by LENGTH — `['']`,
+   * `['   ']` and `['no/such/dir/**']` all satisfy it — so the option's honesty
+   * rests entirely on the CALLER pinning the contents, which is the obligation
+   * `tests/blocking-gate-helper.test.ts` now scans every caller for.
+   */
+  const TRIGGER_PATHS = [
+    'packages/kn-next-operator/**/*.go',
+    'benchmarks/**/*.yaml',
+    'benchmarks/**/*.yml',
+    'benchmarks/**/*.sh',
+    'scripts/verify-image-pins.mjs',
+    '.github/workflows/image-pin-resolution-nightly.yml',
+  ];
+
+  /**
    * A GitHub `paths:` glob as a RegExp over repo-relative POSIX paths.
    * `**` crosses `/` (and may match zero directories); `*` and `?` do not.
    */
@@ -322,14 +342,7 @@ describe('the check is actually wired to run', () => {
     // checker does not walk those either, so widening the filter alone would
     // change nothing. It is a scope question for `discoverSources`, and the two
     // move together by the assertion above.
-    expect(pr?.paths).toEqual([
-      'packages/kn-next-operator/**/*.go',
-      'benchmarks/**/*.yaml',
-      'benchmarks/**/*.yml',
-      'benchmarks/**/*.sh',
-      'scripts/verify-image-pins.mjs',
-      '.github/workflows/image-pin-resolution-nightly.yml',
-    ]);
+    expect(pr?.paths).toEqual(TRIGGER_PATHS);
   });
 
   it('the coverage check can actually fail — the trigger match discriminates', () => {
@@ -401,7 +414,14 @@ describe('the check is actually wired to run', () => {
     expect(audit.needsClosure).toEqual(['resolve-image-pins']);
     // The exemption is real and narrow: it is exercised (there IS a paths
     // filter, so the option is not vacuous) and it is the ONLY thing it excuses.
-    expect(audit.pullRequestPaths.length).toBeGreaterThan(0);
+    //
+    // Pinned by CONTENTS, not by length (#690). `length > 0` was satisfied by
+    // `paths: ['']`, `['   ']` and `['no/such/dir/**']` — every one of which is a
+    // filter that matches nothing, i.e. the disarm `allowPathsFilter` exists to
+    // refuse. The audit cannot check this half (only the caller knows the gate's
+    // subject), so the caller does, against the same list the walk-coverage
+    // assertion above proves covers everything `discoverSources()` reaches.
+    expect(audit.pullRequestPaths).toEqual(TRIGGER_PATHS);
     expect(
       auditBlockingGate({
         workflowPath: resolve(ROOT, '.github/workflows/image-pin-resolution-nightly.yml'),

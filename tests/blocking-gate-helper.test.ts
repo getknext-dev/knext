@@ -1,8 +1,10 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { auditBlockingGate } from './helpers/blocking-gate';
+import { blankNonCode } from '../scripts/lib/blank-non-code.mjs';
+import { auditBlockingGate, type BlockingGateOptions } from './helpers/blocking-gate';
 
 /**
  * Regression coverage for the AUDIT ENGINE itself (#661 round 2).
@@ -34,8 +36,18 @@ function audit(yaml: string) {
   return auditWith(yaml, {});
 }
 
-/** The same, with the audit's options — used by the `allowPathsFilter` block. */
-function auditWith(yaml: string, options: { allowPathsFilter?: boolean }) {
+/**
+ * The same, with the audit's options — used by the `allowPathsFilter` block.
+ *
+ * Typed from the REAL options interface rather than re-declaring the option
+ * inline (#690): a second `allowPathsFilter?: boolean` declaration is a copied
+ * option surface, and the caller scan at the bottom of this file asserts there is
+ * exactly one. Reusing the type is also the only version that cannot drift.
+ */
+function auditWith(
+  yaml: string,
+  options: Omit<BlockingGateOptions, 'workflowPath' | 'jobId' | 'gateCommand'>,
+) {
   const path = join(TMP, `wf-${seq++}.yml`);
   writeFileSync(path, yaml);
   return auditBlockingGate({
@@ -806,5 +818,189 @@ jobs:
       );
       expect(a.gateStepsSeen).toBe(0);
     });
+  });
+});
+
+/**
+ * `allowPathsFilter`'s other half is the CALLER'S — so scan for every caller (#690).
+ *
+ * The audit rejects `paths:` null, `[]` and a scalar. That is a LENGTH check, so
+ * `paths: ['']`, `paths: ['   ']` and `paths: ['no/such/dir/**']` all pass it —
+ * each of them a filter that matches nothing, which is precisely the disarm the
+ * option promises not to introduce. Nothing in `blocking-gate.ts` can close that:
+ * only the caller knows what its gate protects. The helper says so and hands back
+ * `pullRequestPaths` for the caller to assert on.
+ *
+ * That obligation was DOCUMENTED and unenforced. One caller honoured it; nothing
+ * scanned for a second, and a second inherits the obligation silently — an
+ * exemption knob on the repo's central gate audit, where fail-closed is most
+ * load-bearing, whose honesty depends on a convention nobody checks.
+ *
+ * SCANNED, never enumerated: an enumerated list of call sites is how the second
+ * one gets missed. The caller set is discovered from `git ls-files`, so a caller
+ * added next month is covered without anyone remembering this file exists.
+ *
+ * HONEST ABOUT ITS GRAIN: the check is per-FILE, not per-call-site. Statically
+ * pairing an `auditBlockingGate({ allowPathsFilter: true })` call with the
+ * assertion that pins ITS result is not tractable here, and a check that guessed
+ * would be edited rather than obeyed. A file that opts in and pins nothing is the
+ * failure this catches; a file that opts in twice and pins once is not, and that
+ * is stated rather than dressed up.
+ */
+describe('#690 every `allowPathsFilter` caller pins the filter CONTENTS', () => {
+  const REPO_ROOT = resolve(import.meta.dirname, '..');
+
+  /** The ONE file that declares the option, exempt because it defines it. */
+  const OPTION_DEFINITION_FILE = 'tests/helpers/blocking-gate.ts';
+
+  /** `allowPathsFilter?: boolean` — the declaration, not a use of it. */
+  const DECLARES_OPTION = /\ballowPathsFilter\s*\?\s*:/;
+
+  /**
+   * Any code mention at all. Deliberately NOT `allowPathsFilter:\s*true`: a
+   * caller can pass `allowPathsFilter: flag`, spread it in from an object, or
+   * build the options elsewhere, and a pattern that only saw the literal form
+   * would wave all three through. Fail closed on the identifier.
+   */
+  const MENTIONS_OPTION = /\ballowPathsFilter\b/;
+
+  /**
+   * A CONTENTS assertion on what the audit returned.
+   *
+   * `toEqual`/`toStrictEqual` only. `expect(a.pullRequestPaths.length)
+   * .toBeGreaterThan(0)` is the exact form this issue exists to reject — it is
+   * satisfied by `['']` — so a length assertion must NOT read as compliance.
+   */
+  const PINS_CONTENTS =
+    /expect\(\s*[^;]*?\bpullRequestPaths\b[^;]*?\)\s*\.\s*(?:toEqual|toStrictEqual)\s*\(/;
+
+  type SourceFile = { path: string; source: string };
+
+  /** Classify a corpus. Code-only: a mention in a comment or a string is not one. */
+  function auditAllowPathsCallers(files: SourceFile[]) {
+    const definers: string[] = [];
+    const callers: string[] = [];
+    const findings: string[] = [];
+    for (const { path, source } of files) {
+      const code = blankNonCode(source);
+      if (DECLARES_OPTION.test(code)) definers.push(path);
+      if (path === OPTION_DEFINITION_FILE || !MENTIONS_OPTION.test(code)) continue;
+      callers.push(path);
+      if (!PINS_CONTENTS.test(code)) {
+        findings.push(
+          `${path} passes \`allowPathsFilter\` but never asserts the CONTENTS of \`pullRequestPaths\` (expect(...pullRequestPaths).toEqual(...)) — the audit rejects an empty \`paths:\` list by LENGTH only, so \`['']\` and \`['no/such/dir/**']\` pass it and this gate would never run`,
+        );
+      }
+    }
+    return { definers, callers, findings };
+  }
+
+  const trackedSources = (): SourceFile[] =>
+    execFileSync('git', ['ls-files', '-z', '*.ts', '*.tsx', '*.mts', '*.mjs', '*.js'], {
+      cwd: REPO_ROOT,
+      maxBuffer: 32 * 1024 * 1024,
+    })
+      .toString('utf8')
+      .split('\0')
+      .filter(Boolean)
+      .map((path) => ({ path, source: readFileSync(resolve(REPO_ROOT, path), 'utf8') }));
+
+  it('the corpus is real and every caller in it pins the contents', () => {
+    const files = trackedSources();
+    // Non-vacuity, twice: an empty corpus, or a corpus with no caller in it,
+    // would make the findings assertion pass by having nothing to check.
+    expect(files.length, 'git ls-files returned nothing — the scan is vacuous').toBeGreaterThan(20);
+    const { callers, findings } = auditAllowPathsCallers(files);
+    expect(
+      callers,
+      'no caller found — either the option is gone or the scan is broken',
+    ).not.toEqual([]);
+    expect(findings, findings.join('\n')).toEqual([]);
+  });
+
+  it('exactly ONE tracked file declares the option, and it is the exempt one', () => {
+    // The exemption above is path-anchored, and it is only sound while the
+    // declaration is unique: a second declaration is a copied option surface,
+    // and the copy would inherit the exemption for free.
+    const { definers } = auditAllowPathsCallers(trackedSources());
+    expect(definers, `allowPathsFilter is declared in: ${definers.join(', ')}`).toEqual([
+      OPTION_DEFINITION_FILE,
+    ]);
+  });
+
+  it('THE CASE THAT MATTERS: a new caller that pins nothing IS a finding', () => {
+    const { findings } = auditAllowPathsCallers([
+      {
+        path: 'tests/a-second-caller.test.ts',
+        source: 'auditBlockingGate({ workflowPath: w, jobId: "g", allowPathsFilter: true });',
+      },
+    ]);
+    expect(findings.join(' ')).toMatch(/a-second-caller/);
+  });
+
+  it('a LENGTH assertion is NOT compliance — it is the defect', () => {
+    const { findings } = auditAllowPathsCallers([
+      {
+        path: 'tests/length-only.test.ts',
+        source: [
+          'const a = auditBlockingGate({ allowPathsFilter: true });',
+          'expect(a.pullRequestPaths.length).toBeGreaterThan(0);',
+        ].join('\n'),
+      },
+    ]);
+    expect(findings.join(' ')).toMatch(/length-only/);
+  });
+
+  it('NEGATIVE CONTROL: a caller that pins the contents is clean', () => {
+    const { callers, findings } = auditAllowPathsCallers([
+      {
+        path: 'tests/good-caller.test.ts',
+        source: [
+          'const a = auditBlockingGate({ allowPathsFilter: true });',
+          "expect(a.pullRequestPaths).toEqual(['src/**']);",
+        ].join('\n'),
+      },
+    ]);
+    expect(callers).toEqual(['tests/good-caller.test.ts']);
+    expect(findings).toEqual([]);
+  });
+
+  it('a multi-line `expect(...)` still counts — the pin is not required on one line', () => {
+    const { findings } = auditAllowPathsCallers([
+      {
+        path: 'tests/multiline.test.ts',
+        source: [
+          'const a = auditBlockingGate({ allowPathsFilter: true });',
+          'expect(',
+          '  a.pullRequestPaths,',
+          "  'the filter must cover what the gate protects',",
+          ').toEqual(PINNED);',
+        ].join('\n'),
+      },
+    ]);
+    expect(findings).toEqual([]);
+  });
+
+  it('a pin that survives only in a COMMENT does not satisfy it', () => {
+    const { findings } = auditAllowPathsCallers([
+      {
+        path: 'tests/commented-out.test.ts',
+        source: [
+          'const a = auditBlockingGate({ allowPathsFilter: true });',
+          "// expect(a.pullRequestPaths).toEqual(['src/**']);",
+        ].join('\n'),
+      },
+    ]);
+    expect(findings.join(' ')).toMatch(/commented-out/);
+  });
+
+  it('a file that merely MENTIONS the option in prose is not a caller', () => {
+    // The counter-half of the blanking: `docs`-style prose and header comments
+    // discuss this option all over the repo, and claiming them would make the
+    // finding list noise — which is how a scan trains people to ignore it.
+    const { callers } = auditAllowPathsCallers([
+      { path: 'tests/prose.test.ts', source: '// the audit takes allowPathsFilter; see #677\n' },
+    ]);
+    expect(callers).toEqual([]);
   });
 });
