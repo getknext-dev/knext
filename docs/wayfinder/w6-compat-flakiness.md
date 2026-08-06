@@ -259,11 +259,32 @@ confidence**. That no longer holds:
   and dismisses it as "pre-release noise". This run's ledger reports `runtimeVersion: 1.3.14` — the
   stable lane. **The "canary-only / pre-release noise" characterisation is therefore falsified**, and
   that matrix cell should be revisited by whoever owns the bun-lane row.
-- Shard 8's failure also changed **kind**: §3 recorded
-  `parallel-routes-root-param-dynamic-child` as a **4 ms assertion** diff; on 08-02 the same file
-  fails as a **60 000 ms timeout** across its whole case list.
+- **Both** of the long-standing shards also changed **mechanism**, and in *opposite* directions:
+  - Shard 8: §3 recorded `parallel-routes-root-param-dynamic-child` as a **4 ms assertion** diff;
+    on 08-02 it fails as a **60 000 ms timeout** across its whole case list. A timeout appeared.
+  - Shard 6: §3's table records `app-static` failing **twice over** — a 60 000 ms timeout pair (the
+    POST-method cases, i.e. the edge-sandbox fetch-hang mechanism) *and* a 9–59 ms assertion set. On
+    08-02 the shard-6 summary carries **only** `kind: "assertion"` with the three `dynamicParams`
+    cases. A timeout **disappeared**.
 
-**What it does not overturn:** the mechanism classification. All three files fail with the two
+**The full failed-file set on 08-02 is four files, not three** — worth stating because shard 8
+carries two of them and a per-shard count hides that:
+
+| shard | file | kind |
+|---|---|---|
+| 6 | `app-dir/app-static` | assertion (3 cases) |
+| 8 | `app-dir/parallel-routes-root-param-dynamic-child` | timeout (7 cases) |
+| 8 | `middleware-fetches-with-any-http-method` | timeout (2 cases) |
+| 16 | `edge-compiler-can-import-blob-assets` | timeout (2 cases) |
+
+**Methods differ, so do not read the mechanism shifts as proven either way.** §3's per-case detail
+came from `gh run view --log-failed` on run 30193384289, which predates the ledger artifact and has
+none (`0` ledger artifacts on that run). §7's comes from the structured `compat-run-ledger` and
+per-shard summary JSON. Two extractions of different fidelity are not a controlled comparison: a
+case absent from one may be absent from the *run* or merely from the *extraction*. What is solid is
+the shard set and the per-shard counts, which both sources agree on the meaning of.
+
+**What it does not overturn:** the mechanism classification. All four files fail with the two
 already-documented bun signatures — the edge-sandbox outbound `fetch()` hang and the instrumented
 not-found `invariant` class. The bun lane remains **out of scope for #588**, tracked by **#410**,
 and the matrix row remains honestly ❌. What is now wrong is calling the lane *stable in shape*: the
@@ -295,14 +316,30 @@ runtime-caused flakiness; over 07-05 → 08-05 its only test-executing red remai
 07-23 upstream segment-cache timeout, and its one other red never ran a test. Only the bun lane is
 red for runtime reasons — and its reds are deterministic in mechanism but no longer in shape.*
 
-### Consequence for the v1.0 streak — the one that actually costs something
+### Consequence for the v1.0 window — smaller than it first looks, because the window is not open
 
-§5 item 4 says the 14-consecutive-green gate is "reachable by waiting". That still looks right, but
-**a runner-loss red resets the streak exactly as a real red does**, and nothing in the gate
-distinguishes them. As of 08-05 the node streak is **2** (08-04, 08-05), not the 9 §2 recorded — it
-was broken on 08-03 by an event with no knext content whatsoever. Whoever owns the gate policy
-should decide, explicitly, whether an infrastructure loss that executed zero tests may be excluded
-from the streak; deciding it silently, after seeing which way it falls, is the failure mode to avoid.
+§5 item 4 says the 14-consecutive-green gate is "reachable by waiting". **Read the gate's own
+record before quantifying that**, which neither §5 nor an earlier draft of this section did:
+`docs/compat/window-node-lane.md` says of itself "This file is the record", and it currently reads
+**"NOT YET OPEN"**, **nights recorded 0 / 14**, with no start ref and no start fingerprint. The
+clock starts on the first scheduled node run after the harness-fingerprint script landed.
+
+So **nothing had accrued for 08-03 to reset.** The run-history streaks in §2 and above (9 green,
+then 2) are arithmetic over the run list; they are **not** the gate's count, and the two must not
+be conflated. There was no streak of 9 and there is no streak of 2 in the sense that matters to
+v1.0 — there is a window that has not started.
+
+Two things are still worth flagging, stated at their real size:
+
+- **The rules do not distinguish a runner loss from a real red.** Rule 1 restarts the count on any
+  fingerprint change and rule 2 requires every shard `failed:0`/`notRun:0`; a job that died before
+  running a test satisfies neither cleanly. Whoever polices the window should decide **before** it
+  opens whether an infrastructure loss that executed zero tests counts as a failed night —
+  deciding it afterwards, having seen which way it falls, is the failure mode to avoid.
+- **The automated half never registered 08-03 as red at all.** The `Per-shard ledger (flake
+  attribution)` job on run `30790778590` concluded **`success`**. So the run is red at the workflow
+  level (the shard job failed) while the ledger-producing job that feeds the record is green — see
+  the next subsection, which is the same defect seen from the other end.
 
 ### The 08-03 ledger recorded a clean sheet — already owned elsewhere, do not fix here
 
@@ -318,6 +355,16 @@ workstream**. It is recorded here as corroborating evidence, with a live instanc
 against; **it is deliberately not fixed in this document's change.** Until it is fixed, treat a
 ledger's shard count — not just its totals — as part of reading a run.
 
+**Connect this to the window rules, because it is the same hole.** `window-node-lane.md`'s rule 2
+is *"Every shard `failed:0` and `notRun:0`"* — a rule stated over the shards the ledger **contains**.
+An omitted shard is not `failed:1`; it is absent, so it satisfies rule 2 vacuously. That is the
+precise mechanism by which 08-03 could have been recorded as a qualifying night: 15 shards, all
+`failed:0`/`notRun:0`, rule 2 met, one shard's failure invisible. The window not yet being open is
+the only reason this cost nothing this time. **#695 is therefore not merely a reporting nuisance —
+it is a soundness hole in the v1.0 gate**, and it should be fixed before the window opens rather
+than during it. Rule 2 needs a shard-**count** assertion (16 present) alongside its per-shard
+assertion; that belongs to #695's fix, not here.
+
 ### Confidence on this section
 
 - **High** on both lanes' attribution and on the 08-03 root cause: `lane` read from the ledger
@@ -327,9 +374,14 @@ ledger's shard count — not just its totals — as part of reading a run.
 - **Not established:** whether the 08-02 bun shard-16 red is persistent or a one-off. One weekly run
   is one data point; the next bun weekly decides whether the matrix's "canary-only" note needs a
   rewrite or merely a caveat.
+- **Not established:** the two mechanism *shifts* on shards 6 and 8. The 08-02 and §3 figures come
+  from different extraction methods (structured ledger vs `--log-failed`), so a case present in one
+  and absent in the other may reflect the extraction rather than the run. The shard set and the
+  per-shard counts are solid; the per-case mechanism deltas are indicative only.
 
 *Evidence for this section: `gh run view 30738274907`, `gh run view 30790778590`;
 `compat-run-ledger` artifacts from runs 30738274907, 30790778590, 30735484416, 30882760738,
 30979973943; `compat-suite-summary-{5,7,15}` from 30738274907;
 `gh api repos/getknext-dev/knext/actions/jobs/91614133100` (steps) and its check-run annotations;
-`gh issue view 695`.*
+the `Per-shard ledger (flake attribution)` job conclusion on run 30790778590;
+`docs/compat/window-node-lane.md` (status + rules); `gh issue view 695`.*

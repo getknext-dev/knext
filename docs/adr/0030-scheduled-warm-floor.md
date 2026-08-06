@@ -185,6 +185,14 @@ schedule, writing through the same single min-scale writer.
    gauge on the appdb operator's `:9092/metrics`
    (`packages/scale-zero-pg/gateway/cmd/appdb-operator/main.go`), and documented
    at `packages/scale-zero-pg/docs/appdatabase-api.md` §3b.
+   **Operational caveat the addendum's "lockstep" wording can hide** ("lockstep" is
+   the source's own word, `reconcile.go:156`, and is faithful to the *evaluation*
+   semantics): the coordination seam is **shared owner declaration**, so the owner
+   must author the same windows **twice** — once on the `NextApp`, once on the
+   `AppDatabase` — and **nothing reconciles a divergence.** Each operator reads only
+   its own resource, so a schedule edited on one side and not the other silently
+   warms half the path, with no condition, event or metric reporting the mismatch.
+   A cross-resource consistency check would be new work, not a bug fix.
 3. **Per-tenant warm-budget cap (#389)** — an analog to the ADR-0008 wake budget
    so over-provisioning (a mispredicted or over-broad schedule) cannot erode the
    scale-to-zero cost win. Mispredict failure modes (cold storm on under-warm /

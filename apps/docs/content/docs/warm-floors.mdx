@@ -90,10 +90,31 @@ need to schedule and boot, so a window that opens at the same minute as the rush
 arrivals pay the cold start anyway. Fifteen minutes of lead time costs one window-edge of warm
 pods and removes that risk.
 
-**A warm pod floor does not warm your database.** If a scale-to-zero database sits behind the app,
-the first in-window query still pays a database wake and you have warmed only half the path. knext
-binds a database rather than managing one, so warming that half is a setting on your database, not
-on your app — see the warm-tier guidance in [Databases](/docs/databases).
+**Declare the same windows on the database too, or you have warmed half the path.** A warm pod
+floor does nothing for a database that is itself asleep — the first in-window query still pays a
+database wake. If your app is backed by a scale-to-zero Postgres managed by `scale-zero-pg`, that
+app's `AppDatabase` resource (`apps.scale-zero-pg.dev`) takes its own `spec.warmSchedule` with the
+**identical** cron and timezone shape. Declare the same windows on both, and the pod floor and the
+database wake flip together.
+
+The one difference is `replicas`: the database schedule has no such field, because a warm database
+is binary — exactly one compute is held awake for the window.
+
+```yaml
+# on the AppDatabase, alongside the app's own warmSchedule above
+spec:
+  warmSchedule:
+    - start: '45 8 * * 1-5'
+      end: '0 18 * * 1-5'
+      timezone: 'Europe/Berlin'
+```
+
+This is a cluster-operator action on a separate resource, not an app setting, so it may not be
+yours to make — but it is the half that is easy to forget. Two things worth knowing: the windows
+are declared **twice and reconciled nowhere**, so if the two drift apart nothing will tell you; and
+the database hold is best-effort and **never gates serving** — if it cannot be established, the app
+falls back to an ordinary cold wake rather than failing. See [Databases](/docs/databases) for the
+always-on alternative when your traffic has no predictable peak to schedule around.
 
 ### 2. Latency-sensitive with unpredictable traffic
 
