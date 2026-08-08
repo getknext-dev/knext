@@ -1,0 +1,362 @@
+{
+  "$comment": [
+    "MACHINE-READABLE EXIT CRITERIA for ADR-0042 (vinext + bun --compile --bytecode as the default runtime).",
+    "",
+    "Why this file exists: ADR-0042's phases were prose, so 'has Phase 1 passed?' was a judgement call",
+    "re-derived by whoever asked. Every criterion below is a PREDICATE over a MEASURED value.",
+    "`measured: null` means nobody has run it \u2014 which is a distinct state from measured-and-failing,",
+    "and conflating those two is how a phase advances on optimism.",
+    "",
+    "RULE: a value may be written here only with a `source` that names a run ID or a repo path.",
+    "`scripts/verify-phase-gates.mjs` fails on a measured value with no source, so a number cannot",
+    "enter this file by assertion."
+  ],
+  "adr": "0042",
+  "title": "vinext + bun --compile --bytecode as the default runtime",
+  "status": "Accepted 2026-08-04 (founder). Delivery phased; the default flip lands at Phase 5.",
+  "current_phase": 0,
+  "admissibility": {
+    "$comment": [
+      "ADR-0036's five re-open conditions plus ADR-0042's sixth. A benchmark run that fails ANY of",
+      "these is inadmissible as evidence for a phase gate \u2014 not 'weaker evidence', inadmissible.",
+      "Run 24 is the worked example: it showed a 4.5x win and was withdrawn, because arms were",
+      "sequential and the signal turned out to be mode mixture rather than the build target."
+    ],
+    "conditions": [
+      {
+        "id": "A1",
+        "text": "same application on both arms, asserted by image digest, not inspection"
+      },
+      {
+        "id": "A2",
+        "text": "the requested endpoint recorded in the run's own write-up"
+      },
+      {
+        "id": "A3",
+        "text": "arms interleaved, ABBA within pair"
+      },
+      {
+        "id": "A4",
+        "text": "build-flag provenance tied to the deployed digest (a build label, not forensics)"
+      },
+      {
+        "id": "A5",
+        "text": "results reported per sitting and stratified by mode, never pooled"
+      },
+      {
+        "id": "A6",
+        "text": "the vinext arm's binary is SHOWN to contain the application, or the run is labelled shell-only",
+        "added_by": "ADR-0042",
+        "why": "Consequence 11 \u2014 beta.4 serves from binary + dist/ + node_modules/, and the application is not in the binary. A separation result on an artifact whose bytecode coverage is uncharacterised can neither confirm nor refute the objective."
+      }
+    ]
+  },
+  "phases": [
+    {
+      "phase": 0,
+      "name": "bridge proof",
+      "status": "DONE_WITH_REOPENED_RESIDUAL",
+      "done_on": "2026-08-04",
+      "criteria": [
+        {
+          "id": "P0-1",
+          "text": "NO-GO trigger did not fire",
+          "kind": "boolean",
+          "target": true,
+          "measured": true,
+          "source": "docs/adr/0042-vinext-bun-bytecode-as-the-default-runtime.md#phased-plan"
+        },
+        {
+          "id": "P0-2",
+          "text": "self-containment reproduced on CURRENT vinext (beta.4 + Vite 8), not the ^0.0.19 pin",
+          "kind": "boolean",
+          "target": true,
+          "measured": false,
+          "source": "#658",
+          "note": "Answered in the negative in the sense that matters: beta.4 serves from binary + dist/ + node_modules/ and the application is NOT in the binary. An earlier draft claimed beta.4 IS self-contained; that was wrong and is corrected, not softened."
+        },
+        {
+          "id": "P0-3",
+          "text": "clean-directory self-containment RE-VERIFIED under the container rule",
+          "kind": "boolean",
+          "target": true,
+          "measured": null,
+          "source": null,
+          "note": "This is the result that closed ADR-0036's NO-GO trigger and therefore carries the whole ADR. #658 reasons it is PROBABLY safe because Phase 0 used a bespoke entry. Probably is not verification."
+        }
+      ]
+    },
+    {
+      "phase": "3d",
+      "name": "artifact provenance",
+      "status": "NOT_STARTED",
+      "gates": [1],
+      "why_gates_phase_1": "Phase 1's exit is distribution separation. On an artifact whose bytecode coverage is uncharacterised, a win would be attributed to bytecode that mostly is not there and a loss blamed on a shape nobody intends to ship.",
+      "criteria": [
+        {
+          "id": "P3d-1",
+          "text": "--bytecode verified by binary extraction on the cross-compiled musl target",
+          "kind": "boolean",
+          "target": true,
+          "measured": null,
+          "source": null,
+          "method": "ADR-0036 Run 26's method \u2014 extract from the deployed digest, fingerprint against version-matched controls",
+          "note": "Largest hole in #658. Hours of work."
+        },
+        {
+          "id": "P3d-2",
+          "text": "bytecode coverage on the cold first request",
+          "kind": "ratio",
+          "unit": "fraction of modules served from the binary vs disk",
+          "target": null,
+          "target_note": "No threshold set \u2014 this measurement EXISTS to convert 'the app isn't bytecode' from qualitative to a number, and to answer whether shell-only bytecode is most of the win or none of it. A threshold before the first measurement would be invented, not derived.",
+          "measured": null,
+          "source": null
+        },
+        {
+          "id": "P3d-3",
+          "text": "confirm from a knext-owned entry that the STANDALONE shape also fails to embed the app",
+          "kind": "boolean",
+          "target": true,
+          "measured": null,
+          "source": null,
+          "note": "Source says it must (Consequence 11); proving it is ~20 minutes."
+        }
+      ]
+    },
+    {
+      "phase": 1,
+      "name": "measure the axis",
+      "status": "BLOCKED_ON_3d",
+      "reversible": true,
+      "arms": ["node+turbopack (control)", "bun+vinext-compiled"],
+      "preconditions": [
+        {
+          "id": "P1-pre-1",
+          "text": "ADR-0037 image prewarm in place",
+          "kind": "boolean",
+          "target": true,
+          "measured": true,
+          "source": "#471, docs/benchmarks/image-prewarm-oke.md:149",
+          "evidence": {
+            "median_delta_removed_ms": 2293,
+            "image_size_mb": 370,
+            "registry": "same-region",
+            "warm_baseline_median_ms": {
+              "prewarm": 410,
+              "no_prewarm": 392
+            },
+            "note": "Warm baselines indistinguishable between arms, which is what makes the cold delta attributable to the pull."
+          }
+        },
+        {
+          "id": "P1-pre-2",
+          "text": "the ~10.5 s slow-mode tail is controlled; while it fires, no end-to-end number from that cluster is admissible",
+          "kind": "boolean",
+          "target": true,
+          "measured": null,
+          "source": null,
+          "note": "Run 25 measured the same service, digest and probe one day later and saw the slow mode ZERO times \u2014 so the base rate MOVES BETWEEN SITTINGS. A single clean sitting therefore does not establish control."
+        }
+      ],
+      "criteria": [
+        {
+          "id": "P1-1",
+          "text": "a run satisfying all six admissibility conditions",
+          "kind": "checklist",
+          "target": ["A1", "A2", "A3", "A4", "A5", "A6"],
+          "measured": null,
+          "source": null
+        },
+        {
+          "id": "P1-2",
+          "text": "distribution separation \u2014 NOT a median difference with overlapping ranges",
+          "kind": "boolean",
+          "target": true,
+          "measured": false,
+          "source": "ADR-0036 Run 26 (2026-07-26)",
+          "evidence": {
+            "arms_interleaved": true,
+            "complete_pairs": 12,
+            "node_p50_s": 2.52,
+            "bun_exec_p50_s": 2.3,
+            "paired_median_delta_s": 0.07,
+            "sign_split": "7/5",
+            "ranges": "overlapping end to end",
+            "verdict": "NO SEPARATION"
+          },
+          "superseded_evidence": {
+            "run": "Run 24 (2026-07-26)",
+            "claimed": {
+              "node_p50_s": 10.47,
+              "bun_exec_p50_s": 2.29
+            },
+            "status": "WITHDRAWN",
+            "why": "arms were sequential; the apparent 4.5x win was an artifact of WHEN each arm ran, not what it was. Its provisional ~470 ms fast-mode advantage did not reproduce \u2014 the sign reversed. Kept here rather than deleted, because the retracted number is the reason condition A3 exists."
+          }
+        }
+      ]
+    },
+    {
+      "phase": 2,
+      "name": "stand up the compat bar BEFORE any user-visible claim",
+      "status": "NOT_STARTED",
+      "reversible": true,
+      "concurrent_with": [1],
+      "criteria": [
+        {
+          "id": "P2-1",
+          "text": "KNEXT_BUILD=vinext lane is red-on-fail",
+          "kind": "boolean",
+          "target": true,
+          "measured": null,
+          "source": null
+        },
+        {
+          "id": "P2-2",
+          "text": "a first recorded result from that lane",
+          "kind": "boolean",
+          "target": true,
+          "measured": null,
+          "source": null
+        },
+        {
+          "id": "P2-3",
+          "text": "exclusion set where every entry carries observed run IDs, mechanism and upstream provenance, PINNED PER RUN",
+          "kind": "boolean",
+          "target": true,
+          "measured": null,
+          "source": null,
+          "note": "Never a read-time-applied classification like vinext's own."
+        },
+        {
+          "id": "P2-4",
+          "text": "per-PR compat-smoke covers the vinext BUILD axis",
+          "kind": "boolean",
+          "target": true,
+          "measured": false,
+          "source": "apps/file-manager/scripts/compat-smoke.mjs:48",
+          "note": "compat-smoke resolves its server as .next/standalone/.../server.js, so it is bound to Next standalone and does not cover vinext at all. It runs a Node+Bun matrix \u2014 the RUNTIME axis \u2014 which must not be mistaken for coverage of the BUILD flip. Both lanes boot the same standalone server.js.",
+          "blast_radius": {
+            "checks_defined": 11,
+            "checks_cited_as_evidence": 10,
+            "compat_matrix_rows_backed": 10,
+            "compat_matrix_rows_total_green": 12,
+            "consequence": "Under a vinext default there is no standalone/server.js, so at Phase 5 those ten rows keep their green while losing red-on-fail backing ON THE DEFAULT PATH \u2014 the 'capability behind a check that skips rather than fails' hole workflow.md names as trigger-class."
+          }
+        }
+      ]
+    },
+    {
+      "phase": 3,
+      "name": "resolve the capability blockers",
+      "status": "PARTIAL",
+      "criteria": [
+        {
+          "id": "P3-1",
+          "text": "image optimisation works on the compiled default path \u2014 LOCAL sources",
+          "kind": "boolean",
+          "target": true,
+          "measured": true,
+          "source": "#660, verified through --compile --bytecode in a container",
+          "evidence": {
+            "avif_bytes": 1463,
+            "passthrough_bytes": 181277,
+            "ratio": "124x",
+            "mechanism": "vinext's PUBLIC handleImageOptimization export + the bespoke knext entry Consequence 4 already mandates",
+            "note": "An earlier draft claimed an ADR-0006 app has 'no in-band fallback' on the default runtime. That was WRONG \u2014 an inference from an absence."
+          }
+        },
+        {
+          "id": "P3-2",
+          "text": "image optimisation works for REMOTE sources",
+          "kind": "boolean",
+          "target": true,
+          "measured": false,
+          "source": "parseImageParams",
+          "note": "Rejects every non-root-relative URL unconditionally and the export has no remotePatterns support, so that Next capability 400s BY CONSTRUCTION. Belongs in the exclusion set."
+        },
+        {
+          "id": "P3-3",
+          "text": "image cache exists on the default path",
+          "kind": "boolean",
+          "target": true,
+          "measured": false,
+          "source": "ADR-0042 status block",
+          "note": "No caching today. Two consequences, and the second is the blocking one: ~40x repeat regression AND an unauthenticated CPU-exhaustion surface.",
+          "blocks_ship": true
+        },
+        {
+          "id": "P3-4",
+          "text": "proxy rate limit",
+          "kind": "boolean",
+          "target": true,
+          "measured": false,
+          "source": "grep over packages/kn-next/src/adapters/ \u2014 no rateLimit/rate_limit symbol",
+          "blocks_ship": true,
+          "note": "Measured by absence: no rate-limit symbol exists in the adapter sources. Recorded as a grep rather than left unsourced, because the validator refuses an unsourced measurement and it was right to \u2014 the first draft of this entry asserted `false` from the ADR listing it as a prerequisite, which is inference, not measurement."
+        },
+        {
+          "id": "P3-5",
+          "text": "decode timeout",
+          "kind": "boolean",
+          "target": true,
+          "measured": false,
+          "source": "grep over packages/kn-next/src/adapters/image*.ts \u2014 no decodeTimeout/AbortSignal.timeout",
+          "blocks_ship": true,
+          "note": "Measured by absence, same method and same caveat as P3-4."
+        },
+        {
+          "id": "P3-6",
+          "text": "codec selected",
+          "kind": "value",
+          "target": "@jsquash/* WASM",
+          "measured": "@jsquash/* WASM",
+          "source": "ADR-0042 Escalation 1",
+          "note": "sharp cannot be used \u2014 structural, not a preference."
+        }
+      ]
+    },
+    {
+      "phase": 5,
+      "name": "the default flip",
+      "status": "NOT_STARTED",
+      "reversible": false,
+      "criteria": [
+        {
+          "id": "P5-1",
+          "text": "all of phases 0, 1, 2, 3 pass their own criteria",
+          "kind": "derived",
+          "target": true,
+          "measured": null
+        },
+        {
+          "id": "P5-2",
+          "text": "hard-rule amendments landed (human decision \u2014 .claude/rules/ is not an agent's to edit)",
+          "kind": "checklist",
+          "target": [
+            ".claude/rules/architecture.md \u00a74 \u2014 'official adapter API is the DEFAULT and only all-apps-verified path'",
+            ".claude/rules/architecture.md \u00a74 \u2014 'gate every feature on the official Next.js compatibility suite'",
+            "CLAUDE.md \u00a73 and \u00a710 \u2014 same default-path claim",
+            "CLAUDE.md \u00a72 \u2014 verified-adapter status as north-star credibility lever, which Consequence 8 concedes is FORFEITED on the default path",
+            "CLAUDE.md \u00a79 \u2014 records image optimization as RESOLVED; true of the node path, not of the default path after Phase 5"
+          ],
+          "measured": null,
+          "actor": "user"
+        },
+        {
+          "id": "P5-3",
+          "text": "founder escalations answered",
+          "kind": "checklist",
+          "target": [
+            "Escalation 2' \u2014 does the flip stand if the app is not bytecode-compiled?",
+            "Escalation 7 \u2014 is patching vinext internals permitted? (upstream contribution is priced separately from a downstream fork)",
+            "Escalation 3' \u2014 upstream contribution vs downstream fork"
+          ],
+          "measured": null,
+          "actor": "user"
+        }
+      ]
+    }
+  ]
+}
