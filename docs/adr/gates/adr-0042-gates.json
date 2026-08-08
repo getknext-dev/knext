@@ -80,9 +80,9 @@
           "text": "clean-directory self-containment RE-VERIFIED under the container rule",
           "kind": "boolean",
           "target": true,
-          "measured": null,
-          "source": null,
-          "note": "This is the result that closed ADR-0036's NO-GO trigger and therefore carries the whole ADR. #658 reasons it is PROBABLY safe because Phase 0 used a bespoke entry. Probably is not verification."
+          "measured": true,
+          "source": "measured 2026-08-08, examples/bun-exec on vinext 1.0.0-beta.4 / bun 1.3.5; alpine:3.22 container, strace -ff -e trace=file, as-shipped image (binary + .output/public only)",
+          "note": "RE-VERIFIED under the container rule on beta.4: the as-shipped image copies ONLY the binary and .output/public \u2014 no dist/, no node_modules/ \u2014 and serves HTTP 200 with a real SSR render. Previously UNMEASURED and load-bearing for the whole ADR."
         }
       ]
     },
@@ -90,7 +90,9 @@
       "phase": "3d",
       "name": "artifact provenance",
       "status": "NOT_STARTED",
-      "gates": [1],
+      "gates": [
+        1
+      ],
       "why_gates_phase_1": "Phase 1's exit is distribution separation. On an artifact whose bytecode coverage is uncharacterised, a win would be attributed to bytecode that mostly is not there and a loss blamed on a shape nobody intends to ship.",
       "criteria": [
         {
@@ -110,8 +112,21 @@
           "unit": "fraction of modules served from the binary vs disk",
           "target": null,
           "target_note": "No threshold set \u2014 this measurement EXISTS to convert 'the app isn't bytecode' from qualitative to a number, and to answer whether shell-only bytecode is most of the win or none of it. A threshold before the first measurement would be invented, not derived.",
-          "measured": null,
-          "source": null
+          "measured": 1.0,
+          "source": "measured 2026-08-08, examples/bun-exec on vinext 1.0.0-beta.4 / bun 1.3.5; alpine:3.22 container, strace -ff -e trace=file, as-shipped image (binary + .output/public only)",
+          "evidence": {
+            "shape": ".output/server/index.mjs compile path (nitro), NOT dist/standalone",
+            "modules_bundled_into_binary": 34,
+            "server_modules_read_from_disk_on_cold_first_request": 0,
+            "coverage_from_binary": "34/34 = 100%",
+            "http_status": 200,
+            "ssr_verified": "body contains real Next HTML with modulepreload, not an error page",
+            "non_vacuity_control": "the tracer DOES see app file IO \u2014 /app/.output/public/_next/static/chunks/index-D73AVhRX.js appears when that asset is explicitly requested, and /app/server appears. A first attempt reported 0 with NO control and captured only 19 openat lines; that zero was a tracing gap, not an absence, and was discarded.",
+            "only_disk_js_read": "the browser chunk explicitly requested \u2014 not a server module",
+            "bytecode_size_delta_bytes": 6055969,
+            "bytecode_size_delta_pct": 6.5
+          },
+          "note": "CONTRADICTS the premise recorded in Consequence 11 / #658 FOR THIS BUILD SHAPE. The app IS in the binary on the .output/server compile path: zero server modules load from disk. #658 measured the dist/standalone shape, which build.sh does not use. Both shapes exist on beta.4, so the two results are compatible and the ADR text is under-specified rather than wrong."
         },
         {
           "id": "P3d-3",
@@ -129,7 +144,10 @@
       "name": "measure the axis",
       "status": "BLOCKED_ON_3d",
       "reversible": true,
-      "arms": ["node+turbopack (control)", "bun+vinext-compiled"],
+      "arms": [
+        "node+turbopack (control)",
+        "bun+vinext-compiled"
+      ],
       "preconditions": [
         {
           "id": "P1-pre-1",
@@ -164,7 +182,14 @@
           "id": "P1-1",
           "text": "a run satisfying all six admissibility conditions",
           "kind": "checklist",
-          "target": ["A1", "A2", "A3", "A4", "A5", "A6"],
+          "target": [
+            "A1",
+            "A2",
+            "A3",
+            "A4",
+            "A5",
+            "A6"
+          ],
           "measured": null,
           "source": null
         },
@@ -202,7 +227,9 @@
       "name": "stand up the compat bar BEFORE any user-visible claim",
       "status": "NOT_STARTED",
       "reversible": true,
-      "concurrent_with": [1],
+      "concurrent_with": [
+        1
+      ],
       "criteria": [
         {
           "id": "P2-1",
