@@ -90,9 +90,7 @@
       "phase": "3d",
       "name": "artifact provenance",
       "status": "NOT_STARTED",
-      "gates": [
-        1
-      ],
+      "gates": [1],
       "why_gates_phase_1": "Phase 1's exit is distribution separation. On an artifact whose bytecode coverage is uncharacterised, a win would be attributed to bytecode that mostly is not there and a loss blamed on a shape nobody intends to ship.",
       "criteria": [
         {
@@ -131,10 +129,7 @@
       "name": "measure the axis",
       "status": "BLOCKED_ON_3d",
       "reversible": true,
-      "arms": [
-        "node+turbopack (control)",
-        "bun+vinext-compiled"
-      ],
+      "arms": ["node+turbopack (control)", "bun+vinext-compiled"],
       "preconditions": [
         {
           "id": "P1-pre-1",
@@ -169,14 +164,7 @@
           "id": "P1-1",
           "text": "a run satisfying all six admissibility conditions",
           "kind": "checklist",
-          "target": [
-            "A1",
-            "A2",
-            "A3",
-            "A4",
-            "A5",
-            "A6"
-          ],
+          "target": ["A1", "A2", "A3", "A4", "A5", "A6"],
           "measured": null,
           "source": null
         },
@@ -214,9 +202,7 @@
       "name": "stand up the compat bar BEFORE any user-visible claim",
       "status": "NOT_STARTED",
       "reversible": true,
-      "concurrent_with": [
-        1
-      ],
+      "concurrent_with": [1],
       "criteria": [
         {
           "id": "P2-1",
