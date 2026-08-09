@@ -1596,11 +1596,26 @@ APP_IMAGE_REF=""; APP_IMAGE_DIGEST=""; APP_ID=""; BUILD_COMMAND=""
 PEER_IMAGE_REF=""; PEER_IMAGE_DIGEST=""; PEER_APP_ID=""
 SELF_KSVC_READ_DONE=0; SELF_KSVC_JSON=""; SELF_KSVC_RC=1; SELF_KSVC_ATTEMPTS=0
 
-# pin_ref <image-ref> <digest> -> repo@digest (a tag is not an identity)
+# pin_ref <image-ref> <digest-or-pinned-ref> -> repo@digest (a tag is not an identity)
+#
+# The second argument is normalised to a BARE digest first, because Knative's
+# `.status.containerStatuses[0].imageDigest` — the field `resolve_image` reads —
+# is a FULLY-QUALIFIED ref (`repo@sha256:…`), not the bare `sha256:…` the name
+# suggests. Without this, every caller built `repo@repo@sha256:…` and the
+# registry lookup failed before it was ever issued.
+#
+# MEASURED, 2026-08-09, and it had disabled the admissibility gate it serves:
+# `--peer` + `--app-id-label` aborted with `arms-same-app=UNPROVEN … jq: parse
+# error` for BOTH arms of the live p1b A/B. The abort was correct — nothing was
+# mutated, nothing measured — but it fires for every image, so the same-app
+# proof could never PASS. A gate that always refuses looks identical to a gate
+# that works right up until the moment two arms genuinely agree, which is the
+# case it exists to certify.
 pin_ref() {
-  local base="${1%%@*}"
+  local base="${1%%@*}" digest="$2"
   case "${base##*/}" in *:*) base="${base%:*}" ;; esac
-  printf '%s@%s' "$base" "$2"
+  digest="${digest##*@}"
+  printf '%s@%s' "$base" "$digest"
 }
 
 # resolve_image <service> <namespace>
@@ -1652,6 +1667,30 @@ resolve_image() {
   return 0
 }
 
+# rl_timeout <cmd…> — bound ONE image-label resolver call.
+#
+# Every kubectl call here already runs under `api_retry` with a per-call cap, and
+# the image-label resolver had none. MEASURED 2026-08-09: `crane config` against
+# an OCIR ref this host cannot authenticate to does not fail — it HANGS. Exit 124
+# after a 45 s external timeout, zero bytes. Unbounded, it hung the whole run at
+# image resolution: six lines of header and then nothing, for minutes, with no
+# error and no way to tell a slow registry from a dead one.
+#
+# A benchmark harness that HANGS is worse than one that aborts. An abort costs a
+# re-run; a hang costs the sitting, and this harness records sittings precisely
+# because results may not be pooled across them.
+#
+# `timeout(1)` is not on every host (BSD/macOS without coreutils), so its absence
+# degrades to an unbounded call rather than failing the run — the same posture
+# the api-retry block takes, and it says so at startup.
+RL_TIMEOUT_S="${RL_TIMEOUT_S:-20}"
+rl_timeout() {
+  if command -v timeout >/dev/null 2>&1; then timeout "$RL_TIMEOUT_S" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$RL_TIMEOUT_S" "$@"
+  else "$@"
+  fi
+}
+
 # resolve_image_label <ref> <digest> <label-key>
 # Sets RL_VALUE on success; RL_ERR and non-zero otherwise. "Could not look it up"
 # and "the label is absent" are DIFFERENT facts and are reported differently: an
@@ -1661,12 +1700,16 @@ resolve_image_label() {
   RL_VALUE=""; RL_ERR=""
   pinned=$(pin_ref "$1" "$2")
   if [ -n "$IMAGE_LABEL_RESOLVER" ]; then
-    out=$("$IMAGE_LABEL_RESOLVER" "$pinned" "$3" 2>&1); rc=$?
+    out=$(rl_timeout "$IMAGE_LABEL_RESOLVER" "$pinned" "$3" 2>&1); rc=$?
   elif command -v crane >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
-    out=$(crane config "$pinned" 2>&1 | jq -r --arg k "$3" '.config.Labels[$k] // ""' 2>&1); rc=$?
+    out=$(rl_timeout crane config "$pinned" 2>&1 | jq -r --arg k "$3" '.config.Labels[$k] // ""' 2>&1); rc=${PIPESTATUS[0]}
   else
     RL_ERR="no image-label resolver available — install 'crane' (+jq) or set IMAGE_LABEL_RESOLVER to a command taking '<image-ref> <label-key>'"
     return 2
+  fi
+  if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+    RL_ERR="image-label lookup TIMED OUT after ${RL_TIMEOUT_S}s for ${pinned} (label '${3}') — the registry is unreachable or unauthenticated from this host. Timed out, NOT refused: an unauthenticated OCIR ref hangs rather than 401ing. Authenticate (\`crane auth login\`) or set IMAGE_LABEL_RESOLVER, then re-run"
+    return 1
   fi
   if [ "$rc" -ne 0 ]; then
     RL_ERR="image-label lookup failed for ${pinned} (label '${3}'): ${out:-<no output>}"; return 1
