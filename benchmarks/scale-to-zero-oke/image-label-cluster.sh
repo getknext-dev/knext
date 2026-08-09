@@ -9,10 +9,24 @@
 # WHY THIS EXISTS. run.sh enforces ADR-0036 condition A1 ("same application on
 # both arms") by comparing an image label across the two arms, and it aborts the
 # whole A/B when it cannot read one — correctly, because an unreadable label must
-# never be mistaken for an agreeing one. Measured 2026-08-09: OCIR is unreachable
-# from this workstation. Not unauthenticated — UNREACHABLE: `crane config` hangs
-# to a 45 s external timeout with zero bytes, and `docker manifest inspect` hangs
-# on the same ref, which rules out crane and credentials as the cause.
+# never be mistaken for an agreeing one.
+#
+# WHY THE HOST CANNOT DO IT — and the first diagnosis here was WRONG, so it is
+# corrected rather than quietly reworded. This header originally read "OCIR is
+# unreachable from this workstation", inferred from `crane config` and
+# `docker manifest inspect` both hanging. That inference was from an absence and
+# it was false. Measured directly afterwards:
+#
+#   TCP 443 to me-abudhabi-1.ocir.io      connect OK in 701 ms
+#   GET https://…/v2/                     HTTP 401 in 639 ms, valid
+#                                         www-authenticate Bearer challenge
+#   docker-credential-osxkeychain get     HANGS — exit 124 at a 15 s bound
+#
+# The registry is fully reachable and answering. `credsStore: osxkeychain` with
+# no `auths` entry for the host means every client — crane, docker, anything —
+# asks the macOS keychain helper, which blocks on an interactive prompt this
+# session cannot answer. That is the hang, and it is a HOST credential-agent
+# problem, not a network one.
 #
 # The cluster does not have that problem: it pulls those exact images. So the
 # lookup runs there, as a short-lived Job, using the SAME pull secret the

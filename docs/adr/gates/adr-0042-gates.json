@@ -246,7 +246,14 @@
           ],
           "measured": null,
           "source": "attempted 2026-08-09 against context-ckmva7v7zvq",
-          "note": "ATTEMPTED AND BLOCKED \u2014 not unattempted. The harness enforces A1 via --peer/--app-id-label and correctly ABORTED (FATAL, INADMISSIBLE, nothing mutated, no pending-restore written). Two harness defects were found and fixed in the attempt: (1) a DOUBLED image ref, because Knative's imageDigest is a fully-qualified ref not a bare digest, which meant the A1 gate could never pass for ANY image; (2) no timeout on the label resolver, so an unreachable registry HUNG the run instead of aborting it. REMAINING BLOCKER, environmental and not fixable from here: OCIR is UNREACHABLE from this host \u2014 `docker manifest inspect` hangs on the same ref, so it is network reachability, not crane and not credentials. A1 needs either network access to OCIR or a cluster-side IMAGE_LABEL_RESOLVER."
+          "note": "ATTEMPTED, BLOCKED, and the blockers are now precisely located rather than guessed. Three, in increasing order of who can fix them: (1) the deployed images carry no provenance labels at all, so they are inadmissible regardless of tooling; (2) pushing a relabelled rebuild needs an interactive keychain unlock on this host; (3) the CONTROL arm has no committed build recipe, so even a successful push would leave A1 unassertable for one of the two arms. (3) is the one worth fixing first \u2014 it is a repo gap, not an environment one.",
+          "attempt": {
+            "resolver_built": "benchmarks/scale-to-zero-oke/image-label-cluster.sh \u2014 cluster-side, uses the same ocir-secret the workload pulls with. WORKS: read the image config in-cluster and correctly reported label absence.",
+            "blocker_1_deployed_images_are_unstamped": "the deployed p1b-bunexec image has NO LABELS AT ALL (empty .config.Labels, dumped in-cluster). A1 and A4 both depend on labels these images do not carry, so no resolver can make them admissible.",
+            "blocker_2_push_path": "docker-credential-osxkeychain HANGS (exit 124 at a 15s bound) for me-abudhabi-1.ocir.io. The registry itself is fine \u2014 TCP 443 connects in 701ms and GET /v2/ returns HTTP 401 with a valid Bearer challenge in 639ms. Host credential-agent problem, needs an interactive unlock.",
+            "blocker_3_node_arm_has_no_recipe": "the CONTROL arm (p1b-node) has no committed build recipe anywhere in the repo \u2014 only examples/bun-exec/build.sh exists. A1 asks that sameness be ASSERTED, not inspected; that assertion cannot be reconstructed for an arm whose build is not in the tree.",
+            "rebuilt_locally": "the bun-exec arm WAS rebuilt with all four provenance labels (dev.knext.app.id=bun-exec-9943c605d3d0c4d0, build.command, build.target, build.bun-version), linux/amd64 matching the cluster nodes, and the labels verified on the local image. Only the push is blocked."
+          }
         },
         {
           "id": "P1-2",
