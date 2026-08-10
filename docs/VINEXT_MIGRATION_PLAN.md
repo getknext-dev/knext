@@ -1,8 +1,23 @@
 # HISTORICAL / SUPERSEDED — Migration Plan: OpenNext & Turbopack ➡️ Vinext
 
-> **This document is SUPERSEDED.** The Vinext migration was an intermediate step that
-> has been retired. knext now runs on the **official Next.js Deployment Adapter API**
-> (`experimental.adapterPath`, `NextAdapter`) with `output:'standalone'`. See:
+> **This document is SUPERSEDED — but read the next paragraph before concluding
+> that vinext is dead.** The plan below is retired: knext today runs on the
+> **official Next.js Deployment Adapter API** (`adapterPath`, `NextAdapter`) with
+> `output:'standalone'`, and that is still the shipped default.
+>
+> **What "retired" no longer means (corrected 2026-08-11).** This banner used to
+> say the vinext migration "has been retired" full stop, which is now misleading
+> in the opposite direction: **ADR-0042 (accepted 2026-08-04)** makes
+> `vinext + bun --compile --bytecode` the *intended default runtime*, amending
+> ADR-0036's earlier "rejected for 1.0" verdict. The flip lands at ADR-0042's
+> Phase 5 and is gated on that phase's exit criteria, so nothing has moved yet —
+> but a reader arriving here should not take this file as evidence that the
+> direction is closed. What is retired is THIS PLAN, not the technology.
+>
+> Measured gate status: `docs/adr/gates/adr-0042-gates.json`
+> (`node scripts/verify-phase-gates.mjs`).
+>
+> See also:
 > - `docs/ARCHITECTURE.md` — current architecture
 > - `docs/adr/` — ADR-0001 (operator), ADR-0002/0003/0004 (gRPC layer)
 > - `apps/file-manager/next-adapter.ts` — reference NextAdapter implementation

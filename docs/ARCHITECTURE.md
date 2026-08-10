@@ -426,6 +426,21 @@ the *build* toolchain from the *runtime* into an independent choice, with the ha
 invariant that a `bun` runtime always pairs with a `vinext` build (enforced by a
 CEL rule); `bun + turbopack` is rejected.
 
+> **Amended by ADR-0042 (accepted 2026-08-04).** The matrix below is ADR-0036's
+> and is kept because it is what the CEL invariant still encodes, but two of its
+> claims have moved:
+>
+> - **`node + vinext` is no longer a valid cell.** ADR-0042 reduces the matrix
+>   from three admissible cells to two by excluding it.
+> - **`bun + vinext-compiled` is no longer merely a roadmap option.** It is the
+>   accepted *default* direction, though the flip itself lands at ADR-0042's
+>   Phase 5 and is gated on that phase's exit criteria — so `node` is still the
+>   shipped default today.
+>
+> Measured status of those gates is machine-readable in
+> `docs/adr/gates/adr-0042-gates.json`; `node scripts/verify-phase-gates.mjs`
+> prints it.
+
 ```mermaid
 flowchart TB
     subgraph shipped["Shipped today · spec.runtime selects the process"]
