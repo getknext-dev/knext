@@ -42,7 +42,12 @@ if printf '%s' "$norm" | grep -qE '\bgit\b[^|;&]*\bpush\b'; then
   # A force flag has to sit in the same segment as the push to affect it, so
   # narrowing loses no coverage. Verified when changing this: `git push --force
   # origin main` still blocks on both this rule and the main/master rule below.
-  push_seg=$(printf '%s' "$norm" | tr ';|&' '\n\n\n' | grep -E '\bgit\b.*\bpush\b')
+  # Split the ORIGINAL command, not `norm`: `norm` has already flattened
+  # newlines to spaces, so splitting it would merge a command on one line with
+  # the command on the next — which is the same false positive one level out.
+  # Caught by this rule firing on a PR body that contained `pgrep -f docker` and
+  # `git push …` on consecutive lines.
+  push_seg=$(printf '%s' "$cmd" | tr ';|&\n' '\n\n\n\n' | grep -E '\bgit\b.*\bpush\b')
   if printf '%s' "$push_seg" | grep -qE -- '--force|--force-with-lease|--mirror|--all|(^|[[:space:]])-[A-Za-z]*f[A-Za-z]*([[:space:]]|$)'; then
     deny "force/mirror/--all push is forbidden. Push a single feature branch and open a PR."
   fi

@@ -55,6 +55,12 @@ run "docker run ${D}${D}rm"                  "docker run ${D}${D}rm img /p.sh"  
 run "push + pgrep ${D}f elsewhere"           "git push origin chore/x | tail ${D}1; pgrep ${D}f docker"     allow
 run "push + grep ${D}f elsewhere"            "git push origin feature/x && grep ${D}f pat file"             allow
 run "plain feature-branch push"              "git push origin chore/adr-0042"                               allow
+# `norm` flattens newlines to spaces, so splitting IT merged a command on one
+# line with the command on the next. The segment split must use the original.
+run "push + ${D}f on a PRECEDING line"       "$(printf 'pgrep %sf docker\ngit push origin chore/x' "$D")"    allow
+run "push + ${D}f on a FOLLOWING line"       "$(printf 'git push origin chore/x\ngrep %sf pat file' "$D")"   allow
+# ...and the real thing must still block when it spans lines.
+run "multiline push ${D}${D}force"           "$(printf 'echo hi\ngit push %s%sforce origin x' "$D" "$D")"    BLOCK
 
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL PASS"; else echo "SOME FAILED"; fi
