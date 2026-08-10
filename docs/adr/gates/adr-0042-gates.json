@@ -244,9 +244,16 @@
             "A5",
             "A6"
           ],
-          "measured": null,
-          "source": "attempted 2026-08-09 against context-ckmva7v7zvq",
-          "note": "ATTEMPTED, BLOCKED, and the blockers are now precisely located rather than guessed. Three, in increasing order of who can fix them: (1) the deployed images carry no provenance labels at all, so they are inadmissible regardless of tooling; (2) pushing a relabelled rebuild needs an interactive keychain unlock on this host; (3) the CONTROL arm has no committed build recipe, so even a successful push would leave A1 unassertable for one of the two arms. (3) is the one worth fixing first \u2014 it is a repo gap, not an environment one.",
+          "measured": [
+            "A1",
+            "A2",
+            "A3",
+            "A4",
+            "A5",
+            "A6"
+          ],
+          "source": "sitting s-20260811-abba, 2026-08-10/11, context-ckmva7v7zvq, 24 interleaved cold samples",
+          "note": "SATISFIED. A1 proven by label equality (app-159989384ca3275f on both arms, images differing by build target); A2/A4 recorded by the harness from the deployed digests; A3 by abba.sh (A B B A blocks, one cold sample per invocation); A5 single sitting, stratified below; A6 measured at P3d-2 (34/34 modules embedded).",
           "attempt": {
             "resolver_built": "benchmarks/scale-to-zero-oke/image-label-cluster.sh \u2014 cluster-side, uses the same ocir-secret the workload pulls with. WORKS: read the image config in-cluster and correctly reported label absence.",
             "blocker_1_deployed_images_are_unstamped": "the deployed p1b-bunexec image has NO LABELS AT ALL (empty .config.Labels, dumped in-cluster). A1 and A4 both depend on labels these images do not carry, so no resolver can make them admissible.",
@@ -261,16 +268,39 @@
           "kind": "boolean",
           "target": true,
           "measured": false,
-          "source": "ADR-0036 Run 26 (2026-07-26)",
+          "source": "sitting s-20260811-abba, 24 interleaved cold samples (12/arm), OKE context-ckmva7v7zvq",
           "evidence": {
-            "arms_interleaved": true,
-            "complete_pairs": 12,
-            "node_p50_s": 2.52,
-            "bun_exec_p50_s": 2.3,
-            "paired_median_delta_s": 0.07,
-            "sign_split": "7/5",
-            "ranges": "overlapping end to end",
-            "verdict": "NO SEPARATION"
+            "pooled_p50_s": {
+              "bun": 2.86,
+              "node": 6.98,
+              "delta": -4.12
+            },
+            "pooled_reading": "looks like a 4.12 s win for bun \u2014 and it is NOT one",
+            "stratified_fast_mode_p50_s": {
+              "bun": 2.65,
+              "node": 2.55,
+              "delta": 0.09
+            },
+            "stratified_reading": "in fast mode the arms are indistinguishable, with bun marginally SLOWER",
+            "slow_mode_incidence": {
+              "bun": "4/12 (33%)",
+              "node": "6/12 (50%)",
+              "threshold_s": 8.0
+            },
+            "paired_median_delta_s": 0.22,
+            "sign_split": "bun faster 5/12",
+            "ranges_s": {
+              "bun": [
+                1.98,
+                11.38
+              ],
+              "node": [
+                2.08,
+                11.57
+              ]
+            },
+            "distribution_separation": false,
+            "conclusion": "The entire pooled delta is MODE MIXTURE, not build target. The bimodal ~10-11 s slow mode fired 33% for bun and 50% for node; pooling those makes bun look 4 s faster while fast-mode medians differ by 90 ms in node's favour. This is Run 24's defect reproduced exactly \u2014 which is why A5 requires stratification, and why the pooled figure must not be quoted."
           },
           "superseded_evidence": {
             "run": "Run 24 (2026-07-26)",
@@ -280,7 +310,8 @@
             },
             "status": "WITHDRAWN",
             "why": "arms were sequential; the apparent 4.5x win was an artifact of WHEN each arm ran, not what it was. Its provisional ~470 ms fast-mode advantage did not reproduce \u2014 the sign reversed. Kept here rather than deleted, because the retracted number is the reason condition A3 exists."
-          }
+          },
+          "note": "PHASE 1 EXIT NOT MET, on an ADMISSIBLE run \u2014 all six conditions satisfied. The local 5.12x separation (P1-2-local) does NOT reproduce on the cluster: it measured SERVER BOOT, where the build target dominates, while OKE cold start is dominated by the bimodal slow mode, image pull and scheduling, in which the boot advantage is invisible. The slow-mode incidence difference (4/12 vs 6/12) is not significant at n=12 and must not be read as an effect."
         },
         {
           "id": "P1-2-local",
