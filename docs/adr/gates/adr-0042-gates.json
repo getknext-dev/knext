@@ -281,6 +281,40 @@
             "status": "WITHDRAWN",
             "why": "arms were sequential; the apparent 4.5x win was an artifact of WHEN each arm ran, not what it was. Its provisional ~470 ms fast-mode advantage did not reproduce \u2014 the sign reversed. Kept here rather than deleted, because the retracted number is the reason condition A3 exists."
           }
+        },
+        {
+          "id": "P1-2-local",
+          "text": "LOCAL proxy for P1-2: does the build-target axis show distribution separation at all?",
+          "kind": "boolean",
+          "target": true,
+          "measured": true,
+          "source": "measured 2026-08-10, examples/bun-exec, both arms native linux/arm64, alpine containers on local Docker; ABBA interleaved, 12 blocks -> 24 paired comparisons; timed INSIDE the container from process spawn to first HTTP 200",
+          "evidence": {
+            "bun_vinext_compiled_ms": {
+              "min": 47,
+              "p25": 53,
+              "p50": 58,
+              "p75": 63,
+              "max": 116,
+              "sd": 13
+            },
+            "node_turbopack_ms": {
+              "min": 280,
+              "p25": 294,
+              "p50": 299,
+              "p75": 308,
+              "max": 360,
+              "sd": 16
+            },
+            "paired_median_delta_ms": -241,
+            "sign_split": "24 faster / 0 slower",
+            "distribution_separation": true,
+            "separation_proof": "bun max 116 < node min 280 \u2014 the ranges do not touch, which is the shape ADR-0036 asks for and which Run 26 (7/5 split, ranges overlapping end to end) did not have",
+            "median_speedup": "5.12x",
+            "same_app": "app-159989384ca3275f on BOTH arms, from the shared app-id.sh",
+            "same_arch": "both native arm64 \u2014 a first attempt compared arm64 bun against EMULATED amd64 node and read 208ms vs 1182ms; that comparison was discarded, not reported"
+          },
+          "note": "NOT Phase 1 clearance and must not be read as it. Phase 1 requires the CLUSTER and all six admissibility conditions; this is local Docker, so A2/A4/A5 are not established and the venue is wrong. What it does establish is that the axis HAS a separable signal \u2014 which Run 26 could not show and which was the open question. SCALE IT HONESTLY for platform cold start: 241 ms saved against an OKE image pull that alone costs a measured 2293 ms median (#471), plus scheduling and Knative activation. Real, and roughly a tenth of the cold-start budget \u2014 not the dominant term."
         }
       ]
     },
