@@ -12,17 +12,41 @@ norm=$(printf '%s' "$cmd" | tr '\n' ' ')
 deny() { echo "BLOCKED (block-dangerous-bash): $1" >&2; exit 2; }
 
 # rm -rf / rm -fr (any order of r and f flags)
-if printf '%s' "$norm" | grep -qE '\brm\b[^|;&]*-[A-Za-z]*r[A-Za-z]*f|\brm\b[^|;&]*-[A-Za-z]*f[A-Za-z]*r'; then
+#
+# `rm` must be a COMMAND WORD — start of line, or after whitespace or a shell
+# separator — and NOT preceded by a dash. `\brm\b` treated `--rm` as the rm
+# command, because `-` is a word boundary, so every `docker run --rm --platform …`
+# was blocked: `--rm` supplied the command and `--platform` satisfied the
+# `-…f…r` alternative (p-l-a-t-F-o-R-m). Measured on
+# `docker run --rm --platform linux/arm64 …`; podman and nerdctl take the same
+# flag, and the workaround (reorder the flags) is undiscoverable from the message.
+#
+# Verified when changing this: `rm -rf /some/dir` and `…; rm -rf …` still block.
+# A guard that cries wolf gets worked around, which is worse than one that is
+# narrower and trusted.
+if printf '%s' "$norm" | grep -qE '(^|[;&|(]|[[:space:]])rm[[:space:]][^|;&]*-[A-Za-z]*r[A-Za-z]*f|(^|[;&|(]|[[:space:]])rm[[:space:]][^|;&]*-[A-Za-z]*f[A-Za-z]*r'; then
   deny "destructive 'rm -rf'. Remove specific paths deliberately, or run it yourself."
 fi
 # git push: feature-branch pushes are ALLOWED so agents can open PRs autonomously.
 # Still forbidden: force/mirror/--all (history rewrite / review bypass) and direct
 # pushes to main/master (PRs only). See .claude/rules/security.md.
 if printf '%s' "$norm" | grep -qE '\bgit\b[^|;&]*\bpush\b'; then
-  if printf '%s' "$norm" | grep -qE -- '--force|--force-with-lease|--mirror|--all|(^|[[:space:]])-[A-Za-z]*f[A-Za-z]*([[:space:]]|$)'; then
+  # SCAN ONLY THE SEGMENT CONTAINING THE PUSH, not the whole command line.
+  # Scanning the whole line meant any `-f` belonging to ANOTHER command in a
+  # compound line read as a force push. Measured: `git push origin x | tail -1;
+  # pgrep -f "…"` was blocked as a force push, and so is a plain
+  # `git push origin x && grep -f pattern file`. `-f` is one of the most common
+  # flags there is, so the rule fired on ordinary work and taught the reader to
+  # regard the message as noise — which is how a real force push gets waved past.
+  #
+  # A force flag has to sit in the same segment as the push to affect it, so
+  # narrowing loses no coverage. Verified when changing this: `git push --force
+  # origin main` still blocks on both this rule and the main/master rule below.
+  push_seg=$(printf '%s' "$norm" | tr ';|&' '\n\n\n' | grep -E '\bgit\b.*\bpush\b')
+  if printf '%s' "$push_seg" | grep -qE -- '--force|--force-with-lease|--mirror|--all|(^|[[:space:]])-[A-Za-z]*f[A-Za-z]*([[:space:]]|$)'; then
     deny "force/mirror/--all push is forbidden. Push a single feature branch and open a PR."
   fi
-  if printf '%s' "$norm" | grep -qE -- '(^|[[:space:]:])(main|master)([[:space:]]|$)'; then
+  if printf '%s' "$push_seg" | grep -qE -- '(^|[[:space:]:])(main|master)([[:space:]]|$)'; then
     deny "direct push to main/master is forbidden — push a feature branch and open a PR instead."
   fi
   # otherwise: feature-branch push allowed (needed to open PRs).
