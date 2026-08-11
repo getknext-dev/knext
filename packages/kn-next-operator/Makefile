@@ -66,6 +66,27 @@ fmt: ## Run go fmt against code.
 vet: ## Run go vet against code.
 	go vet ./...
 
+# Every build-tagged e2e suite, compile-checked.
+#
+# WHY THIS EXISTS. `go vet ./...` and `go build ./...` ignore build-tagged files
+# entirely, so a tagged suite can stop COMPILING without a single check going red.
+# That happened: deleting one spec took a helper and a const with it that two other
+# specs in the same tag still referenced, and the break reached `main` because every
+# gate we run is untagged. A build failure is worse than a test failure — the nightly
+# lane dies at compile time, so the invariants it owns stop running rather than
+# reporting.
+#
+# Keep this list in sync with the //go:build tags under test/e2e/. A tag that is not
+# listed here is a tag nothing compiles.
+E2E_BUILD_TAGS ?= e2e e2e_scale e2e_gc e2e_cli e2e_bundle e2e_rollback e2e_webhook_down
+
+.PHONY: vet-tags
+vet-tags: ## Compile-check EVERY build-tagged e2e suite (untagged vet cannot see them).
+	@set -e; for tag in $(E2E_BUILD_TAGS); do \
+		echo "==> go vet -tags $$tag ./test/..."; \
+		go vet -tags "$$tag" ./test/... ; \
+	done
+
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
