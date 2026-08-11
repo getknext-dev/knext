@@ -85,7 +85,6 @@ describe("validateConfig — CRD-mirroring branches", () => {
         ).toThrow(/must be a positive quantity/);
     });
 
-
     it("rejects a negative minScale", () => {
         expect(() =>
             validateConfig(cfg({ scaling: { minScale: -1 } })),

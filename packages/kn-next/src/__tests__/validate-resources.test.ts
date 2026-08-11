@@ -75,4 +75,3 @@ describe("validateConfig — resource quantities (#435)", () => {
         ).toThrow(/memoryRequest/);
     });
 });
-

@@ -27,7 +27,6 @@ export interface PreviewInput {
     branch: string;
 }
 
-
 /**
  * Builds a NextApp CR object from a KnativeNextConfig and a resolved image ref.
  * The image MUST be digest-pinned (the operator enforces this at reconcile time).

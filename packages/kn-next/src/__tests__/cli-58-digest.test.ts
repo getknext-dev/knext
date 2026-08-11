@@ -357,7 +357,6 @@ describe("CR image field — digest-pinned ref (CLI-58 E2E invariant)", () => {
         ).toBe(0);
     });
 
-
     it("a bare tag-only ref (no @sha256:) is rejected by validateCRImageRef", () => {
         // This is what deploy used to emit — the operator rejects it
         const bareTag = "registry.example.com/my-app:1234567890";
