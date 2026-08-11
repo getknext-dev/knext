@@ -93,7 +93,7 @@ flowchart LR
 ## Features
 
 - ✅ **Official Next.js Adapter API** – `next build` standalone, no fork, runs on Node 20+ and Bun
-- ✅ **V8 Bytecode Caching** – `NODE_COMPILE_CACHE` on a shared volume, opt-in (Vercel-Fluid-style). The PVC is `ReadWriteOnce`: pods scheduled onto a second node cannot attach it and stay `Pending`, so enable it on narrow, cold-start-sensitive apps — not wide-bursting ones (#432)
+- ✅ **V8 Bytecode Caching** – the compile cache is populated at build time and baked into the image (Vercel-Fluid-style), so it is present from the very first cold pod on a stock cluster. Nothing to enable, no volume, no storage class, and no limit on how wide the app scales
 - ✅ **Fluid Compute** – Scale-to-zero, high concurrency, auto-scaling
 - ✅ **Distributed Caching** – Redis-backed caching with automatic tag invalidation
 - 🟡 **Portable by design** – GKE/kind-verified; portable to EKS/AKS/OKE or any Kubernetes by design (2nd-cloud verification tracked in [#46](https://github.com/getknext-dev/knext/issues/46)). See [Multi-Cloud Portability](docs/operator/multi-cloud-portability.md)
@@ -113,7 +113,7 @@ flowchart LR
 ## Performance Benchmarks
 
 > Benchmarks measured on Knative Serving with scale-to-zero (`minScale: 0`) on GKE.
-> Cold start speed is achieved through **Knative resource caching** and **V8 bytecode caching** (`NODE_COMPILE_CACHE` on a shared volume).
+> Cold start speed is achieved through **Knative resource caching** and **V8 bytecode caching** (a compile cache baked into the image at build time).
 
 ### Cold Start Performance (Scale from Zero)
 
@@ -154,7 +154,7 @@ seq 1 100000 | xargs -n1 -P100 -I {} curl -s -o /dev/null -w "%{time_total}\n" \
 The Dockerfile uses a **2-stage build** producing a lean distroless Node image:
 
 1. **Build Stage** – `node:22` + `pnpm` runs `next build` (`output: 'standalone'`) → self-contained `server.js`
-2. **Runtime Stage** – `gcr.io/distroless/nodejs22` runs the standalone server with `NODE_COMPILE_CACHE` pointed at a shared volume
+2. **Runtime Stage** – `gcr.io/distroless/nodejs22` runs the standalone server with `NODE_COMPILE_CACHE` pointed at the cache baked into the image
 
 The cache is **populated at build time** and baked into the image, so every pod — including the very first cold start — deserializes precompiled bytecode instead of re-parsing and JIT-compiling. This is the same approach Vercel Fluid uses. It needs no volume, no PVC, and no cluster feature flags.
 
@@ -162,7 +162,7 @@ The cache is **populated at build time** and baked into the image, so every pod 
 **Running on Bun?** Two mechanisms combine when your app is deployed with `runtime: bun`:
 
 1. **Build-time bytecode (biggest win):** `kn-next build` precompiles every server-side JavaScript file in the standalone output to Bun (JSC) bytecode — file by file, so the module graph is untouched. On a minimal Next 16.2 app this cut server startup by **~47%** (287ms → 152ms median). It is safe by construction: a bytecode file that is stale, corrupted, or built by a different Bun version is silently ignored and the source runs instead. Trade-offs to know: the build takes longer (about 12 seconds for a ~970-file tree, paid on every `runtime: bun` build), the image grows (the standalone tree roughly 2.5×), and the resulting build only runs under Bun — booting it with Node exits immediately with a clear `FATAL` message telling you to use Bun or rebuild, and switching back to the Node runtime requires rebuilding. Set `KNEXT_BUN_BYTECODE=0` to opt out.
-2. **Runtime transpiler cache:** the same cache volume used for `NODE_COMPILE_CACHE` also holds Bun's transpiler cache (`BUN_RUNTIME_TRANSPILER_CACHE_PATH=/cache/bytecode/bun-transpiler`). Bun persists the *transpiled source* of large modules (roughly 50 KB and up) so a scaled-from-zero pod skips re-transpiling them — about 20% faster alone, and it picks up whatever the build-time pass didn't cover. Fail-open: if the cache directory is missing or unwritable, Bun simply serves without it. Set `BUN_RUNTIME_TRANSPILER_CACHE_PATH=0` to opt out.
+2. **Runtime transpiler cache:** Bun's transpiler cache is derived from the image-baked `NODE_COMPILE_CACHE` path. Bun persists the *transpiled source* of large modules (roughly 50 KB and up) so a pod skips re-transpiling them — about 20% faster alone, and it picks up whatever the build-time pass didn't cover. **Per-pod only:** it no longer survives scale-to-zero, because the persistent volume that used to carry it across cold starts has been removed. Fail-open: if the cache directory is missing or unwritable, Bun simply serves without it. Set `BUN_RUNTIME_TRANSPILER_CACHE_PATH=0` to opt out.
 
 ---
 
