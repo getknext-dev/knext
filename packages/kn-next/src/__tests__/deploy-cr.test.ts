@@ -90,33 +90,20 @@ describe("renderNextAppCR", () => {
         expect(cr.spec.scaling.minScale).toBe(0);
     });
 
-    it("CR carries bytecode cache fields when cache.provider=redis", () => {
-        const configWithBytecode: KnativeNextConfig = {
-            ...baseConfig,
-            cache: {
-                provider: "redis",
-                url: "redis://redis:6379",
-                keyPrefix: "my-app",
-            },
+    // The CR must carry NO code-cache fields. The V8 compile cache is baked into
+    // the image at build time (ADR-0035), and the CRD no longer defines
+    // enableBytecodeCache/bytecodeCacheSize — so emitting either would be REJECTED
+    // by the apiserver under `--validate=strict`, which every kn-next apply passes.
+    // Asserted with a redis provider precisely because redis used to imply the
+    // bytecode cache on: the data cache must still be emitted, and only that.
+    it("CR carries the data cache but NO bytecode fields when cache.provider=redis", () => {
+        const crYaml = renderNextAppCR(baseConfig, "img@sha256:abc", "default");
+        const cr = YAML.parse(crYaml) as {
+            spec: { cache?: Record<string, unknown> };
         };
-        const yaml = renderNextAppCR(
-            configWithBytecode,
-            "img@sha256:abc",
-            "default",
-        );
-        const cr = YAML.parse(yaml) as {
-            spec: {
-                cache: {
-                    enableBytecodeCache: boolean;
-                    url: string;
-                    keyPrefix: string;
-                };
-            };
-        };
-        // The CLI enables bytecode cache by default when Redis is configured.
-        expect(cr.spec.cache.enableBytecodeCache).toBe(true);
-        expect(cr.spec.cache.url).toBe("redis://redis:6379");
-        expect(cr.spec.cache.keyPrefix).toBe("my-app");
+        expect(cr.spec.cache?.provider).toBe("redis");
+        expect(cr.spec.cache).not.toHaveProperty("enableBytecodeCache");
+        expect(cr.spec.cache).not.toHaveProperty("bytecodeCacheSize");
     });
 
     it("CR namespace matches the provided namespace", () => {
@@ -252,10 +239,10 @@ describe("resolveDigest", () => {
             spec: { scaling: { minScale: number } };
         };
         expect(crScaling.spec.scaling.minScale).toBe(0);
-        // Invariants: bytecode cache preserved
+        // Invariant: no code-cache fields leak into the CR (ADR-0035)
         const crCache = YAML.parse(crYaml) as {
-            spec: { cache: { enableBytecodeCache: boolean } };
+            spec: { cache?: Record<string, unknown> };
         };
-        expect(crCache.spec.cache.enableBytecodeCache).toBe(true);
+        expect(crCache.spec.cache).not.toHaveProperty("enableBytecodeCache");
     });
 });

@@ -28,7 +28,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
@@ -385,227 +384,48 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 		})
 	})
 
-	Context("Bytecode-cache PVC", func() {
-		It("is NOT created when EnableBytecodeCache is false", func() {
-			nn := reconcileOnce("pvc-off", appsv1alpha1.NextAppSpec{
-				Image: validImage,
-				Cache: &appsv1alpha1.CacheSpec{EnableBytecodeCache: false},
+	// The PVC-backed bytecode cache was REMOVED: the V8 compile cache is baked into
+	// the image at build time (ADR-0035), so there is nothing to persist across cold
+	// starts and nothing for the operator to mount. What used to be four "it mounts
+	// the PVC" specs is now one NEGATIVE invariant, because that is what has to hold.
+	//
+	// This block is the guard on the removal. Reintroducing the PVC, the mount, or
+	// either code-cache env var turns it red — which is the point: a removal with no
+	// test holding it in place is an invitation to add it back by accident. The
+	// `spec.cache` block below still carries a data-cache Provider, so this also
+	// proves the two concerns really are decoupled (ADR-0034) rather than the env
+	// vars merely being absent because the whole cache block is.
+	Context("no code cache is provisioned or wired (ADR-0035)", func() {
+		It("creates no PVC, mounts no volume, and sets neither code-cache env var", func() {
+			nn := reconcileOnce("no-bytecode-cache", appsv1alpha1.NextAppSpec{
+				Image:   validImage,
+				Runtime: "bun", // the runtime that used to get the extra Bun variable
+				Cache: &appsv1alpha1.CacheSpec{
+					Provider: "redis",
+					URL:      "redis://cache:6379",
+				},
 			})
 
+			By("creating no bytecode-cache PVC")
 			pvc := &corev1.PersistentVolumeClaim{}
 			pvcName := types.NamespacedName{Name: nn.Name + "-bytecode-cache", Namespace: namespace}
-			err := k8sClient.Get(ctx, pvcName, pvc)
-			Expect(errors.IsNotFound(err)).To(BeTrue(),
-				"PVC must not exist when bytecode caching is disabled")
+			Expect(errors.IsNotFound(k8sClient.Get(ctx, pvcName, pvc))).To(BeTrue(),
+				"the PVC-backed bytecode cache is removed; no PVC may be created")
 
-			By("not mounting a bytecode-cache volume into the ksvc")
 			ksvc := &servingv1.Service{}
 			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+
+			By("mounting no volumes into the app container")
 			Expect(ksvc.Spec.Template.Spec.Volumes).To(BeEmpty())
 			Expect(ksvc.Spec.Template.Spec.Containers[0].VolumeMounts).To(BeEmpty())
-		})
 
-		It("IS created with the configured size and mounted when EnableBytecodeCache is true", func() {
-			nn := reconcileOnce("pvc-on", appsv1alpha1.NextAppSpec{
-				Image: validImage,
-				Cache: &appsv1alpha1.CacheSpec{
-					// Provider must be set for the cache env block (incl.
-					// NODE_COMPILE_CACHE) to be emitted — see nextapp_controller.go.
-					Provider:            "redis",
-					URL:                 "redis://cache:6379",
-					EnableBytecodeCache: true,
-					BytecodeCacheSize:   "1Gi",
-				},
-			})
-
-			pvc := &corev1.PersistentVolumeClaim{}
-			pvcName := types.NamespacedName{Name: nn.Name + "-bytecode-cache", Namespace: namespace}
-			Expect(k8sClient.Get(ctx, pvcName, pvc)).To(Succeed())
-
-			By("sizing the PVC to Spec.Cache.BytecodeCacheSize")
-			Expect(pvc.Spec.Resources.Requests.Storage()).NotTo(BeNil())
-			Expect(pvc.Spec.Resources.Requests.Storage().Equal(resource.MustParse("1Gi"))).To(BeTrue())
-			Expect(pvc.Spec.AccessModes).To(ContainElement(corev1.ReadWriteOnce))
-
-			By("being owner-referenced by the NextApp")
-			Expect(ownedBy(pvc.OwnerReferences, nn.Name)).To(BeTrue())
-
-			By("mounting the PVC into the ksvc at /cache/bytecode")
-			ksvc := &servingv1.Service{}
-			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
-			vols := ksvc.Spec.Template.Spec.Volumes
-			Expect(vols).To(HaveLen(1))
-			Expect(vols[0].Name).To(Equal("bytecode-cache"))
-			Expect(vols[0].PersistentVolumeClaim).NotTo(BeNil())
-			Expect(vols[0].PersistentVolumeClaim.ClaimName).To(Equal(nn.Name + "-bytecode-cache"))
-
-			mounts := ksvc.Spec.Template.Spec.Containers[0].VolumeMounts
-			Expect(mounts).To(HaveLen(1))
-			Expect(mounts[0].Name).To(Equal("bytecode-cache"))
-			Expect(mounts[0].MountPath).To(Equal("/cache/bytecode"))
-
-			By("setting NODE_COMPILE_CACHE so the runtime uses the mounted cache")
-			Expect(envValue(ksvc.Spec.Template.Spec.Containers[0].Env, "NODE_COMPILE_CACHE")).
-				To(Equal("/cache/bytecode/latest"))
-		})
-
-		It("defaults the PVC size to 512Mi when BytecodeCacheSize is unset", func() {
-			nn := reconcileOnce("pvc-default-size", appsv1alpha1.NextAppSpec{
-				Image: validImage,
-				Cache: &appsv1alpha1.CacheSpec{EnableBytecodeCache: true},
-			})
-
-			pvc := &corev1.PersistentVolumeClaim{}
-			pvcName := types.NamespacedName{Name: nn.Name + "-bytecode-cache", Namespace: namespace}
-			Expect(k8sClient.Get(ctx, pvcName, pvc)).To(Succeed())
-			Expect(pvc.Spec.Resources.Requests.Storage().Equal(resource.MustParse("512Mi"))).To(BeTrue())
-		})
-
-		// This used to be a CHARACTERIZATION test pinning a known bug: the
-		// volume + mount gated on EnableBytecodeCache alone, but the
-		// NODE_COMPILE_CACHE env var was nested under the cache *Provider*
-		// block, so bytecode caching with no Provider mounted a PVC that
-		// nothing ever wrote to. Its own comment flagged the cleanup as
-		// pending — #431 is that cleanup, so the expectation is now the FIXED
-		// behavior (env asserted in the "#431" context below).
-		It("mounts the PVC and wires NODE_COMPILE_CACHE when no cache Provider is set", func() {
-			nn := reconcileOnce("pvc-no-provider", appsv1alpha1.NextAppSpec{
-				Image: validImage,
-				Cache: &appsv1alpha1.CacheSpec{EnableBytecodeCache: true},
-			})
-
-			ksvc := &servingv1.Service{}
-			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
-
-			By("mounting the bytecode-cache volume")
-			Expect(ksvc.Spec.Template.Spec.Volumes).To(HaveLen(1))
-			Expect(ksvc.Spec.Template.Spec.Containers[0].VolumeMounts).To(HaveLen(1))
-
-			By("pointing the compile cache at the volume it just mounted")
-			Expect(envValue(ksvc.Spec.Template.Spec.Containers[0].Env, "NODE_COMPILE_CACHE")).
-				To(Equal("/cache/bytecode/latest"))
-		})
-	})
-
-	// Bun analog of NODE_COMPILE_CACHE (measured on next@16.2.4 standalone,
-	// Bun 1.3.5: warm transpiler cache = -56ms / ~20% off time-to-first-response;
-	// `bun build --bytecode` hard-fails on the standalone server, so the runtime
-	// transpiler cache env var is the mechanism). Wired exactly like
-	// NODE_COMPILE_CACHE — same Provider+EnableBytecodeCache gate, same PVC —
-	// plus the runtime=bun gate: the var is meaningless under Node.
-	Context("Bun transpiler cache (runtime=bun)", func() {
-		It("sets BUN_RUNTIME_TRANSPILER_CACHE_PATH on the mounted PVC when runtime is bun", func() {
-			nn := reconcileOnce("bun-tc-on", appsv1alpha1.NextAppSpec{
-				Image:   validImage,
-				Runtime: "bun",
-				Cache: &appsv1alpha1.CacheSpec{
-					Provider:            "redis",
-					URL:                 "redis://cache:6379",
-					EnableBytecodeCache: true,
-				},
-			})
-
-			ksvc := &servingv1.Service{}
-			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+			By("injecting neither NODE_COMPILE_CACHE nor BUN_RUNTIME_TRANSPILER_CACHE_PATH")
 			env := ksvc.Spec.Template.Spec.Containers[0].Env
+			Expect(envValue(env, "NODE_COMPILE_CACHE")).To(BeEmpty(),
+				"an operator-injected NODE_COMPILE_CACHE would BYPASS the image-baked layer")
+			Expect(envValue(env, "BUN_RUNTIME_TRANSPILER_CACHE_PATH")).To(BeEmpty())
 
-			By("pointing Bun's runtime transpiler cache into the bytecode-cache PVC")
-			Expect(envValue(env, "BUN_RUNTIME_TRANSPILER_CACHE_PATH")).
-				To(Equal("/cache/bytecode/bun-transpiler"))
-
-			By("keeping NODE_COMPILE_CACHE unchanged (inert under Bun, needed if rebooted under Node)")
-			Expect(envValue(env, "NODE_COMPILE_CACHE")).
-				To(Equal("/cache/bytecode/latest"))
-		})
-
-		It("does NOT set BUN_RUNTIME_TRANSPILER_CACHE_PATH when runtime is node/unset (Node env byte-identical)", func() {
-			nn := reconcileOnce("bun-tc-node", appsv1alpha1.NextAppSpec{
-				Image: validImage,
-				Cache: &appsv1alpha1.CacheSpec{
-					Provider:            "redis",
-					URL:                 "redis://cache:6379",
-					EnableBytecodeCache: true,
-				},
-			})
-
-			ksvc := &servingv1.Service{}
-			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
-			Expect(envValue(ksvc.Spec.Template.Spec.Containers[0].Env, "BUN_RUNTIME_TRANSPILER_CACHE_PATH")).
-				To(BeEmpty())
-		})
-
-		It("does NOT set BUN_RUNTIME_TRANSPILER_CACHE_PATH without EnableBytecodeCache (no PVC to write to)", func() {
-			nn := reconcileOnce("bun-tc-nocache", appsv1alpha1.NextAppSpec{
-				Image:   validImage,
-				Runtime: "bun",
-				Cache: &appsv1alpha1.CacheSpec{
-					Provider: "redis",
-					URL:      "redis://cache:6379",
-				},
-			})
-
-			ksvc := &servingv1.Service{}
-			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
-			Expect(envValue(ksvc.Spec.Template.Spec.Containers[0].Env, "BUN_RUNTIME_TRANSPILER_CACHE_PATH")).
-				To(BeEmpty())
-		})
-	})
-
-	// #431 — the bytecode cache is a V8 compile cache governing SERVER BOOT
-	// SPEED; the cache Provider is about ISR/DATA caching. They are orthogonal,
-	// but the env wiring used to be nested inside `Provider != ""`, so an app
-	// with no data-cache provider got the PVC provisioned and MOUNTED while
-	// NODE_COMPILE_CACHE stayed unset — 512Mi bought nothing. The PVC (line
-	// ~627) and the volumeMount already gate on EnableBytecodeCache alone; the
-	// env must match them.
-	Context("bytecode-cache env is independent of the data-cache provider (#431)", func() {
-		It("sets NODE_COMPILE_CACHE with EnableBytecodeCache and NO provider", func() {
-			nn := reconcileOnce("bc-no-provider", appsv1alpha1.NextAppSpec{
-				Image: validImage,
-				Cache: &appsv1alpha1.CacheSpec{EnableBytecodeCache: true},
-			})
-
-			ksvc := &servingv1.Service{}
-			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
-			env := ksvc.Spec.Template.Spec.Containers[0].Env
-
-			By("wiring the compile cache into the PVC that is already mounted")
-			Expect(envValue(env, "NODE_COMPILE_CACHE")).
-				To(Equal("/cache/bytecode/latest"))
-
-			By("NOT inventing a data-cache provider the user did not configure")
-			Expect(envValue(env, "CACHE_PROVIDER")).To(BeEmpty())
-			Expect(envValue(env, "REDIS_URL")).To(BeEmpty())
-		})
-
-		It("sets BUN_RUNTIME_TRANSPILER_CACHE_PATH with no provider when runtime is bun", func() {
-			nn := reconcileOnce("bc-no-provider-bun", appsv1alpha1.NextAppSpec{
-				Image:   validImage,
-				Runtime: "bun",
-				Cache:   &appsv1alpha1.CacheSpec{EnableBytecodeCache: true},
-			})
-
-			ksvc := &servingv1.Service{}
-			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
-			Expect(envValue(ksvc.Spec.Template.Spec.Containers[0].Env, "BUN_RUNTIME_TRANSPILER_CACHE_PATH")).
-				To(Equal("/cache/bytecode/bun-transpiler"))
-		})
-
-		It("still omits NODE_COMPILE_CACHE when a provider is set but the bytecode cache is off", func() {
-			nn := reconcileOnce("bc-provider-off", appsv1alpha1.NextAppSpec{
-				Image: validImage,
-				Cache: &appsv1alpha1.CacheSpec{
-					Provider: "redis",
-					URL:      "redis://cache:6379",
-				},
-			})
-
-			ksvc := &servingv1.Service{}
-			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
-			env := ksvc.Spec.Template.Spec.Containers[0].Env
-			Expect(envValue(env, "NODE_COMPILE_CACHE")).To(BeEmpty())
-			By("leaving the data-cache env byte-identical")
-			Expect(envValue(env, "CACHE_PROVIDER")).To(Equal("redis"))
+			By("still wiring the DATA cache, which is a separate concern (ADR-0034)")
 			Expect(envValue(env, "REDIS_URL")).To(Equal("redis://cache:6379"))
 		})
 	})

@@ -92,12 +92,6 @@ Prerequisite checklist:
 
 - A **default StorageClass** exists (`kubectl get storageclass` shows one marked
   `(default)`), or the recipe's PVCs explicitly set `storageClassName`.
-- For the **bytecode-cache PVC** (`spec.enableBytecodeCache`) — **deprecated (ADR-0035,
-  action item 4)** in favour of the image-baked V8 compile cache, which needs no PVC and
-  no cluster feature flags — the Knative PVC feature
-  flags must be enabled — the bundle ships these in `config-features`
-  (`packages/kn-next-operator/config/knative/config-features.yaml`); they are
-  networking-layer-independent. A writable RWO volume is sufficient for single-replica;
   RWX (Filestore / EFS / Azure Files) is only needed for shared multi-replica cache.
 
 knext builds **no** storage-class machinery and does **not** scale Postgres to zero (see

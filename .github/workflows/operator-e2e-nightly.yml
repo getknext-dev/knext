@@ -1,29 +1,25 @@
 name: Operator E2E (nightly / dispatch)
 
 # Layer 2 of the scale-to-zero suite (build tag `e2e_scale`) — the REAL invariants
-# on a live kind + Knative cluster. `make test-e2e-scale` runs ALL e2e_scale
-# specs, so this one job now covers BOTH:
-#   - A2-2 (#38): bytecode cache SURVIVES a scale-to-zero cycle
-#     (test/e2e/scale_to_zero_cache_test.go)
+# on a live kind + Knative cluster. `make test-e2e-scale` runs ALL e2e_scale specs:
 #   - A2-3 (#39): a minScale:0 app idles to 0 replicas then a request through the
 #     Knative activator wakes a pod and returns 200
 #     (test/e2e/scale_from_zero_test.go)
 # The operator is deployed once for the whole suite (test/e2e/scale_suite_test.go).
 #
+# The A2-2 (#38) spec that asserted the bytecode cache SURVIVED a scale-to-zero
+# cycle is GONE, along with the PVC it measured: the V8 compile cache is baked into
+# the image at build time (ADR-0035), so it is present in every pod and has no
+# cross-cold-start persistence to verify. That also retires the #59 dependency this
+# header used to carry (the lane's assertions were expected to FAIL until the
+# operator wired a PVC that no longer exists).
+#
 # Deliberately NOT in ci.yml: it needs a persistent kind cluster with Knative
-# Serving (scale-to-zero) + (for #38) an RWO PVC bound across a scale cycle, and
-# the timing sits within PR-CI noise. The per-PR gates that prove the mechanisms
-# are deterministic: the vitest test apps/file-manager/bytecode-cache-reuse.test.ts
-# (#38) and the envtest min-scale:0/max-scale:1 assertion in
-# internal/controller/reconcile_output_test.go (#39).
+# Serving (scale-to-zero), and the timing sits within PR-CI noise. The per-PR gate
+# that proves the mechanism deterministically is the envtest min-scale:0/max-scale:1
+# assertion in internal/controller/reconcile_output_test.go (#39).
 #
 # Triggers: nightly schedule + manual workflow_dispatch only.
-#
-# NOTE (#59 dependency): the spec's load-bearing assertions (warm_start==1 and a
-# stable PVC file count after cold start) only hold once the operator wires
-# `cache.enableBytecodeCache: true` into a PVC mounted at NODE_COMPILE_CACHE.
-# Until #59 lands, this workflow will run but the scale-to-zero cache assertions
-# are expected to fail — that is why it is nightly/dispatch and gates nothing.
 
 on:
   schedule:
@@ -141,7 +137,7 @@ jobs:
           echo "image=$img" >> "$GITHUB_OUTPUT"
 
   scale-to-zero-cache:
-    name: scale-to-zero suite — cache (#38) + activation (#39) (e2e_scale)
+    name: scale-to-zero suite — activation (#39) (e2e_scale)
     runs-on: ubuntu-latest
     # A missing image is NOT a flake, so it is decided in scale-image-preflight
     # (no continue-on-error) before this job starts.
@@ -170,8 +166,8 @@ jobs:
 
       - name: Install Knative Serving (scale-to-zero)
         # The config-autoscaler patch below (scale-to-zero-pod-retention-period:0s,
-        # short stable-window) is what makes BOTH the #38 cache spec and the #39
-        # activation spec observe a true cold start in this single job — scale
+        # short stable-window) is what makes the #39 activation spec observe a true
+        # cold start in this single job — scale
         # timing is cluster config, not the NextApp CR.
         run: |
           set -euo pipefail
@@ -193,7 +189,7 @@ jobs:
 
       # SCALE_TEST_IMAGE MUST be a real, pullable, digest-pinned file-manager image
       # that serves /api/health (the #39 activation spec asserts an HTTP 200 from a
-      # woken pod; #38 scrapes /api/metrics). It is resolved — and its absence
+      # woken pod). It is resolved — and its absence
       # FAILED, never skipped — in the scale-image-preflight job above (#659), so
       # by the time this job runs the value has passed a `@sha256:<64 hex>` shape
       # check and is not the all-zeros placeholder, and this step cannot be
@@ -204,7 +200,7 @@ jobs:
       # where `continue-on-error: true` swallows it. The preflight cannot close
       # that — only a publish job that sets vars.SCALE_TEST_IMAGE from an image it
       # just pushed can (#670).
-      - name: Run scale-to-zero e2e suite (cache #38 + activation #39)
+      - name: Run scale-to-zero e2e suite (activation #39)
         working-directory: packages/kn-next-operator
         env:
           KIND_CLUSTER: kn-next-operator-test-e2e

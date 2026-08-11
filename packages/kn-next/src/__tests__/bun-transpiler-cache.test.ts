@@ -19,7 +19,8 @@
  * the runtime cache env var is the mechanism knext ships.
  *
  * Wiring mirrors NODE_COMPILE_CACHE exactly:
- *   - the operator injects BUN_RUNTIME_TRANSPILER_CACHE_PATH when
+ *   - the path is DERIVED at runtime from NODE_COMPILE_CACHE (the operator
+ *     no longer injects either variable; ADR-0035 bakes the cache into the image)
  *     spec.runtime == "bun" (same bytecode-cache PVC, /cache/bytecode/bun-transpiler);
  *   - buildChildEnv inherits it via spread, and — when the runtime entry
  *     itself runs under Bun with only NODE_COMPILE_CACHE present (older

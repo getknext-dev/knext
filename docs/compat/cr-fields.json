@@ -12,8 +12,6 @@
     "spec",
     "spec.buildId",
     "spec.cache",
-    "spec.cache.bytecodeCacheSize",
-    "spec.cache.enableBytecodeCache",
     "spec.cache.keyPrefix",
     "spec.cache.provider",
     "spec.cache.url",
@@ -75,5 +73,5 @@
     "spec.storage.region"
   ],
   "notInBundledCRD": [],
-  "fieldCount": 69
+  "fieldCount": 67
 }

@@ -36,11 +36,10 @@ apply status**. The phases, in source order:
 |---|---|---|
 | 0 | **Database binding** (ADR-0019) | Injects `DATABASE_URL` / `DATABASE_URL_RO` into the in-memory env map |
 | 1 | **ServiceAccount** | The app's identity |
-| 2 | **Bytecode-cache PVC** | Only when `spec.cache.enableBytecodeCache` — see §6.2 |
-| 3 | **Image prewarm DaemonSet** | Only when `spec.scaling.imagePrewarm` — see §6.1 |
-| 4 | **Knative Service** | The app itself, plus traffic split |
-| 5 | **KafkaSource** | ISR revalidation — currently deferred, see §6.4 |
-| 6 | **Status** | URL, conditions, traffic, scale state |
+| 2 | **Image prewarm DaemonSet** | Only when `spec.scaling.imagePrewarm` — see §6.1 |
+| 3 | **Knative Service** | The app itself, plus traffic split |
+| 4 | **KafkaSource** | ISR revalidation — currently deferred, see §6.4 |
+| 5 | **Status** | URL, conditions, traffic, scale state |
 
 Before any of it, `validation.ValidateNextAppSpec` runs. Invalid spec never reaches a
 child object.
@@ -50,7 +49,6 @@ child object.
 ```go
 For(&NextApp{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
   Owns(&servingv1.Service{}).
-  Owns(&corev1.PersistentVolumeClaim{}).
   Owns(&corev1.ServiceAccount{}).
   Owns(&networkingv1.NetworkPolicy{}).
   Owns(&appsv1.DaemonSet{}).
@@ -112,8 +110,8 @@ What it enforces includes:
   image (implicitly `:latest`). This is the operator-side half of the digest-pinning rule.
 - **Cron syntax** for warm-schedule windows.
 - **Bounded quantities** — `ParseQuantityBounded` exists because `MustParse` on unvalidated CR
-  input would panic the entire controller (#431). Sizes are validated upstream and never
-  parsed unguarded in the reconcile path.
+  input would panic the entire controller (#431), and because `resource.ParseQuantity` does
+  not *return* on some user-typable values (#635). It guards `spec.resources`.
 - **Database/env collisions** — a bound `DATABASE_URL` colliding with an explicit `envMap`
   entry is surfaced rather than silently resolved.
 - **Create vs update rules** are separate functions (`…SpecCreate` / `…SpecUpdate`), so
@@ -123,7 +121,7 @@ What it enforces includes:
 
 ## 5. Lifecycle and deletion
 
-In-cluster children (ksvc, ServiceAccount, PVC, NetworkPolicy, DaemonSet) are removed by
+In-cluster children (ksvc, ServiceAccount, NetworkPolicy, DaemonSet) are removed by
 **ownerRef garbage collection** and need no finalizer.
 
 The finalizer exists for exactly one thing: **state that lives outside the cluster** and
@@ -158,29 +156,31 @@ busybox) copies that static binary into a shared `emptyDir`, and the main contai
 **app image** with `command` pointed at the copied binary. The app image is pulled and held
 against containerd GC without ever executing the app or depending on its binaries.
 
-### 6.2 Bytecode cache PVC — **deprecated, still functional, and runtime-dependent**
+### 6.2 No code cache is provisioned — it is baked into the image
 
-`spec.cache.enableBytecodeCache` provisions a PVC (default **512Mi**) for the runtime code
-cache. It is **deprecated** (ADR-0035, #457) in favour of the compile cache **baked into the
-image at build time**, which is now the default cold-start mechanism. The path still works
-exactly as before; the operator only surfaces a migration signal. A runtime shadow-warning
-(#450) fires when an operator-injected `NODE_COMPILE_CACHE` would bypass the baked layer.
+The operator provisions **no** storage and injects **no** code-cache environment
+variables. The V8 compile cache is baked into the application image at build time
+(ADR-0035), so there is nothing to persist across cold starts.
 
-**What the PVC actually buys depends on the runtime, and the flag alone does not know that.**
-The operator sets `NODE_COMPILE_CACHE=/cache/bytecode/latest` unconditionally when the flag is
-on, and adds `BUN_RUNTIME_TRANSPILER_CACHE_PATH` (a sibling dir on the same PVC, so the two
-runtimes' artifacts cannot collide) only when `spec.runtime == "bun"`:
+The PVC-backed path (`spec.cache.enableBytecodeCache` / `bytecodeCacheSize`, a
+`{app}-bytecode-cache` PVC mounted at `/cache/bytecode`, plus `NODE_COMPILE_CACHE`
+and `BUN_RUNTIME_TRANSPILER_CACHE_PATH`) was deprecated under ADR-0017 and has now
+been **removed**, along with the Knative `podspec-persistent-volume-{claim,write}`
+feature flags that existed solely to permit its writable mount. The operator no
+longer requests `persistentvolumeclaims` RBAC at all.
 
-| target | `NODE_COMPILE_CACHE` | `BUN_RUNTIME_TRANSPILER_CACHE_PATH` | Does the PVC earn its keep? |
-|---|---|---|---|
-| `runtime: node` | active | not set | **Yes** — this is the V8 compile cache |
-| `runtime: bun` (Next standalone server under Bun) | **inert** | set | **Yes** — Bun has no runtime *bytecode* cache (`bun build --bytecode` hard-fails on the standalone server), but its *transpiler* cache persists transpiled modules ≳50KB. Measured ≈ **−20%** time-to-first-response on next@16.2.4 / Bun 1.3.5; an unwritable dir is fail-open |
-| **compiled `bun-exec`** (`bun build --compile --bytecode`, ADR-0036/0042) | **inert** | **inert** | **No** — bytecode is embedded in the executable at build time and nothing transpiles at runtime, so both variables point at a cache nothing writes |
+Two consequences worth knowing:
 
-The third row is the one to watch. There is **no live defect today**, because the compiled
-target is not reachable through the CRD: `spec.runtime` is `+kubebuilder:validation:Enum=bun;node`,
-there is no `spec.build` field, and the bun-exec benchmark arms are raw Knative Services rather
-than `NextApp`s. See §11.
+- An operator-injected `NODE_COMPILE_CACHE` would **bypass** the baked layer — which
+  is exactly what the runtime shadow-warning existed to detect. Removing the injection
+  removes the thing being warned about. Do not reintroduce it.
+- **`runtime: bun` loses cross-cold-start persistence** of Bun's transpiler cache
+  (measured ≈ −20% time-to-first-response on next@16.2.4 / Bun 1.3.5).
+  `deriveBunTranspilerCachePath` still derives a path from the image-baked
+  `NODE_COMPILE_CACHE`, so the mechanism works **per-pod**; it just no longer survives
+  scale-to-zero, because surviving it is what the PVC was for.
+
+`spec.cache` now configures the **data cache only** (`provider` / `url` / `keyPrefix`).
 
 ### 6.3 Network policy — **default-on**
 
@@ -246,7 +246,8 @@ expressions**, syntax-validated at admission. `spec.scaling.poolMax` bounds data
   enter the CR, the image, or a URL.
 - **RBAC is enumerated, not wildcard.** The operator holds only what it reconciles: Knative
   Services (full), Knative **Revisions read-only**, `caching.internal.knative.dev` Images,
-  KafkaSources, ServiceAccounts, PVCs, NetworkPolicies, DaemonSets, Secrets, and Events.
+  KafkaSources, ServiceAccounts, NetworkPolicies, DaemonSets, Secrets, and Events —
+  notably **no** `persistentvolumeclaims` verbs since the PVC was removed.
 - **NetworkPolicy default-on** (§6.3).
 - **Deletion is app-scoped by construction** (§5).
 
@@ -308,19 +309,3 @@ Stated so nobody re-proposes them:
   **Upgrade order is therefore load-bearing: operator/CRD first, then CLI** (#548).
 - **API is still `v1alpha1`.**
 - **`config/manager/manager.yaml` uses `controller:latest`** (§7).
-- **`enableBytecodeCache` will become meaningless for the compiled `bun-exec` target, and
-  nothing currently stops it.** The flag gates the PVC, the volume mount and the env vars on
-  *itself alone* — it never consults the build target. That is correct today only because the
-  compiled target has no CRD representation (§6.2). **ADR-0042 Phase 4 ships `build: vinext`
-  as a deployable opt-in**, and at that moment `enableBytecodeCache: true` on a compiled image
-  provisions and mounts a 512Mi PVC that nothing ever writes to, while both cache env vars
-  point into it inertly.
-
-  This is precisely the defect class #431 already fixed once: the env block used to be nested
-  under the data-cache `Provider` branch, so an app with no provider "got the PVC provisioned
-  AND mounted while `NODE_COMPILE_CACHE` stayed unset — 512Mi of storage buying nothing." The
-  same sentence will be true again for a different reason unless Phase 4 either **rejects**
-  `enableBytecodeCache` with `build: vinext` at admission (`ValidateNextAppSpec`, where the
-  ADR already plans a spec precondition) or **skips** the PVC/mount/env for that target and
-  says so in an event. Rejecting is preferable: silently ignoring a storage request is how the
-  512Mi came back the first time.

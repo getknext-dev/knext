@@ -44,7 +44,6 @@ function configWithBytecodeCacheSize(value: string): KnativeNextConfig {
         // (a dormant typo must not become a reconcile failure the moment
         // someone flips the flag), so `true` here keeps the fixture the shape
         // the product actually accepts.
-        bytecodeCache: { enabled: true, size: value },
     } satisfies KnativeNextConfig;
 }
 
@@ -77,15 +76,6 @@ describe("quantity exponent bound (#635)", () => {
         expect(() => validateConfig(configWithCpuRequest(value))).toThrowError(
             /quantity/i,
         );
-    });
-
-    it.each([
-        ...pathological,
-        ...beyondBound,
-    ])("rejects bytecodeCache.size %j through the same shared check", (value) => {
-        expect(() =>
-            validateConfig(configWithBytecodeCacheSize(value)),
-        ).toThrowError(/quantity/i);
     });
 
     it("rejects a quantity string longer than any real quantity", () => {

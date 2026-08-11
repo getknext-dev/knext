@@ -22,7 +22,7 @@ limitations under the License.
 //
 // WHAT THIS PROVES (distinct from #38):
 //
-//	#38 proves the bytecode cache SURVIVES a scale-to-zero cycle. #39 proves the
+//	#39 proves the
 //	autoscaler ACTIVATION path: a NextApp with minScale:0 idles down to 0
 //	replicas, and a single request through the Knative activator wakes a pod and
 //	returns 200. That is the scale-to-zero regression A2-3 asks for: "assert
@@ -40,7 +40,7 @@ limitations under the License.
 //
 // DELIBERATELY DECOUPLED FROM #59:
 //
-//	This spec deploys a MINIMAL NextApp — no bytecode cache, no PVC, no
+//	This spec deploys a MINIMAL NextApp — no PVC, no
 //	observability sidecar. The activation path does not depend on the PVC wiring
 //	(#59); it only needs a ksvc that can scale to zero and serve /api/health. It
 //	uses its OWN namespace + app name so it never collides with #38's spec, and

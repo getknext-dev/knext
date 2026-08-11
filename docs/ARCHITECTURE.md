@@ -176,7 +176,6 @@ in ad-hoc `Reconcile` branches.
 flowchart TB
     cr["NextApp CR (spec)"] --> op["kn-next operator · Reconcile"]
     op --> sa["ServiceAccount"]
-    op -->|"cache.enableBytecodeCache"| pvc[("Bytecode-cache PVC")]
     op --> kimg["Knative Image<br/>(pre-pull hint)"]
     op --> ksvc["Knative Service (ksvc)<br/>runtime: node | bun"]
     op -->|"security.networkPolicy (default-on)"| np["NetworkPolicy<br/>internal-only"]
@@ -510,29 +509,16 @@ End-to-end cold start on our OKE benchmarks is **scheduling-dominated (~4s media
 1. **Persistent code caching** — Node: `NODE_COMPILE_CACHE` (V8 code cache on a shared volume); Bun: per-file JSC bytecode baked at build time (-47% measured) plus the runtime transpiler cache. Parse/compile work from earlier pods is reused instead of redone.
 2. **Knative Resource Caching** — Knative pre-caches container images and maintains warm network paths, reducing image pull time to near-zero on subsequent cold starts.
 
-### Cache volume configuration
+### V8 compile cache (baked into the image)
 
-> **Deprecated (ADR-0035, action item 4).** The PVC-backed bytecode cache below
-> (`bytecodeCache` / `spec.cache.enableBytecodeCache`) is deprecated in favour of
-> the V8 compile cache **baked into the image at build time** — the default
-> cold-start mechanism, which needs no volume and works on stock Knative. The
-> config field still works but is scheduled for removal per the v1alpha1
-> stability policy (ADR-0017); the operator emits a `DeprecatedBytecodeCachePVC`
-> Warning event when it is set.
+The V8 compile cache is **baked into the application image at build time**
+(ADR-0035). It is present in every pod from the first cold start and needs no
+config field, no PVC, and no cluster feature flag.
 
-For the standard Node.js runtime, `NODE_COMPILE_CACHE` uses a shared volume:
-
-```typescript
-const config: KnativeNextConfig = {
-  name: 'my-app',
-  bytecodeCache: {
-    enabled: true,
-    storageSize: '512Mi',
-  },
-};
-```
-
-This provisions a `ReadWriteMany` PVC so subsequent pods skip V8 JIT compilation.
+The former opt-in — `bytecodeCache` in `kn-next.config.ts` and
+`spec.cache.enableBytecodeCache` on the CR, backed by a PVC — has been **removed**.
+An operator-injected `NODE_COMPILE_CACHE` would bypass the baked layer, so the
+operator injects none.
 
 **Requirements:** Node.js 24+ and ReadWriteMany PVC support (NFS, GCS Filestore, EFS).
 

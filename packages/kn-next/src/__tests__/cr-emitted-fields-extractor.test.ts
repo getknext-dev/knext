@@ -56,7 +56,6 @@ describe("emitted-field extractor — derived by scanning cr-builder.ts", () => 
         for (const p of [
             "spec.resources.cpuRequest",
             "spec.storage.provider",
-            "spec.cache.enableBytecodeCache",
             "spec.observability.rum.sampleRate",
             "spec.preview.prId",
             "spec.buildId",

@@ -90,8 +90,9 @@ written — but the npm ecosystem's default range for a `0.x` dependency (`^0.3.
 
   The mechanism, stated at the level it actually exists: ADR-0017 commits to the **release notes**
   and nothing more. The one shipped precedent — `spec.cache.enableBytecodeCache`, superseded by the
-  image-baked compile cache — also emits a **Warning Event** on the resource
-  (`DeprecatedBytecodeCachePVC`, `nextapp_controller.go:726`). There is **no** deprecation status
+  image-baked compile cache — was deprecated with a **Warning Event** on the resource and has
+  since been **removed** from the CRD, so the full deprecate-then-delete cycle now has one
+  worked example. There is **no** deprecation status
   condition, and do not write one into a policy: a new condition has to go through
   `computeStatusVerdict` per `.claude/rules/architecture.md`, so promising one here would commit
   someone to unplanned work.

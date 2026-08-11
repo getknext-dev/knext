@@ -272,7 +272,6 @@ func (r *NextAppReconciler) emitEvent(obj runtime.Object, eventType, reason, mes
 // surface a GC'd revision as PinnedRevisionNotFound (ADR-0014). Never written.
 // +kubebuilder:rbac:groups=serving.knative.dev,resources=revisions,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=caching.internal.knative.dev,resources=images,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
@@ -327,7 +326,7 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	// The finalizer pauses Kubernetes deletion until the operator clears the
 	// app's EXTERNAL state (object-store prefix + Redis keyspace) — state that
 	// has no ownerRef and would otherwise leak across deploy/delete cycles.
-	// In-cluster children (ksvc/SA/PVC) keep using ownerRef GC.
+	// In-cluster children (ksvc/SA) keep using ownerRef GC.
 	if deleting, err := r.reconcileFinalizers(ctx, &nextApp); err != nil || deleting {
 		// Nothing more to reconcile for a deleting object.
 		return ctrl.Result{}, err
@@ -410,15 +409,7 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		return ctrl.Result{}, err
 	}
 
-	// 2. Create/Update PVC if Bytecode Caching is enabled
-	if err := r.reconcileBytecodeCachePVC(ctx, &nextApp); err != nil {
-		logger.Error(err, "Failed to reconcile PVC")
-		r.emitEvent(&nextApp, corev1.EventTypeWarning, ReasonReconcileFailed,
-			fmt.Sprintf("Failed to reconcile bytecode-cache PVC: %s", err.Error()))
-		return ctrl.Result{}, err
-	}
-
-	// 3. Create/Update Image Cache (pre-pull for faster cold starts)
+	// 2. Create/Update Image Cache (pre-pull for faster cold starts)
 	imageCache := &unstructured.Unstructured{}
 	imageCache.SetAPIVersion("caching.internal.knative.dev/v1alpha1")
 	imageCache.SetKind("Image")
@@ -441,7 +432,7 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		logger.Info("Could not reconcile Image cache (CRD may not be installed)", "error", err.Error())
 	}
 
-	// 4. Create/Update Knative Service
+	// 3. Create/Update Knative Service
 	ksvc := &servingv1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      nextApp.Name,
@@ -505,7 +496,7 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		}
 	}
 
-	// 5. Create/Update KafkaSource for ISR revalidation.
+	// 4. Create/Update KafkaSource for ISR revalidation.
 	//
 	// CURRENTLY UNREACHABLE, DELIBERATELY (#475). revalidationDeferred is true for
 	// EVERY `queue: kafka` app — it ignores spec.revalidation.provisionKafkaSource,
@@ -544,7 +535,7 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	// reconcile here; the RequeueAfter to the next window boundary is set below,
 	// after the status verdict, so it never masks the ksvc-not-ready requeue.
 
-	// 6. Update Status: URL + conditions + observed traffic split (#92)
+	// 5. Update Status: URL + conditions + observed traffic split (#92)
 	if ksvc.Status.URL != nil {
 		nextApp.Status.URL = ksvc.Status.URL.String()
 	}
@@ -703,65 +694,6 @@ func (r *NextAppReconciler) reconcileFinalizers(ctx context.Context, nextApp *ap
 	return true, nil
 }
 
-// reconcileBytecodeCachePVC creates/updates the bytecode-cache PVC when
-// spec.cache.enableBytecodeCache is set (no-op otherwise). Moved VERBATIM out
-// of Reconcile (#254 companion move).
-func (r *NextAppReconciler) reconcileBytecodeCachePVC(ctx context.Context, nextApp *appsv1alpha1.NextApp) error {
-	if nextApp.Spec.Cache == nil || !nextApp.Spec.Cache.EnableBytecodeCache {
-		return nil
-	}
-	// #457 (ADR-0035 action item 4): the opt-in PVC-backed bytecode cache is
-	// DEPRECATED in favour of the V8 compile cache baked into the image at build
-	// time (the default cold-start mechanism). The path still works exactly as
-	// before — we only surface a migration signal. See the runtime shadow-warning
-	// (#450) that fires when an operator-injected NODE_COMPILE_CACHE bypasses the
-	// baked layer.
-	const deprecationMsg = "spec.cache.enableBytecodeCache (the PVC-backed bytecode cache) is DEPRECATED " +
-		"in favour of the image-baked V8 compile cache (ADR-0035), which is the default cold-start " +
-		"mechanism and requires no volume. This field still works but will be removed in a future " +
-		"release per the v1alpha1 stability policy (ADR-0017); the runtime already warns (#450) when an " +
-		"operator-injected NODE_COMPILE_CACHE bypasses the baked layer. Migrate off spec.cache.enableBytecodeCache."
-	logf.FromContext(ctx).Info("WARNING: "+deprecationMsg,
-		"nextapp", nextApp.Name, "namespace", nextApp.Namespace)
-	r.emitEvent(nextApp, corev1.EventTypeWarning, "DeprecatedBytecodeCachePVC", deprecationMsg)
-
-	size := nextApp.Spec.Cache.BytecodeCacheSize
-	if size == "" {
-		size = "512Mi"
-	}
-	// #431: never MustParse unvalidated CR input inside the reconciler — a
-	// malformed quantity would panic the whole controller. Validation
-	// (validateBytecodeCacheSize) rejects bad sizes upstream; this
-	// error-returning parse is the defense-in-depth for stored CRs that
-	// predate that check.
-	// #635: and it is the BOUNDED parse, because resource.ParseQuantity itself
-	// does not return on some user-typable values — an error-returning call is
-	// no defense if the call never comes back.
-	quantity, err := validation.ParseQuantityBounded(size)
-	if err != nil {
-		return fmt.Errorf(
-			"spec.cache.bytecodeCacheSize %q is not a valid Kubernetes quantity: %w", size, err,
-		)
-	}
-	pvc := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      nextApp.Name + "-bytecode-cache",
-			Namespace: nextApp.Namespace,
-		},
-	}
-	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, pvc, func() error {
-		if pvc.Spec.AccessModes == nil {
-			pvc.Spec.AccessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}
-		}
-		if pvc.Spec.Resources.Requests == nil {
-			pvc.Spec.Resources.Requests = corev1.ResourceList{}
-		}
-		pvc.Spec.Resources.Requests[corev1.ResourceStorage] = quantity
-		return ctrl.SetControllerReference(nextApp, pvc, r.Scheme)
-	})
-	return err
-}
-
 // applyStatusVerdict is the impure half of the compute→apply split (#254): it
 // emits the verdict's (already transition-filtered) events, applies the
 // condition removals then sets IN ORDER (append order is part of the #98
@@ -902,22 +834,13 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 
 	envVars, envFrom := r.buildKsvcEnv(nextApp)
 
+	// No volumes are mounted into the app container. The PVC-backed bytecode cache
+	// that used to live here is gone — the V8 compile cache is baked into the image
+	// at build time (ADR-0035), so there is nothing to persist across cold starts.
+	// Kept as declared-empty rather than deleted so a future volume has an obvious
+	// seam, and so the ksvc build reads the same on both paths.
 	var volumes []corev1.Volume
 	var volumeMounts []corev1.VolumeMount
-	if nextApp.Spec.Cache != nil && nextApp.Spec.Cache.EnableBytecodeCache {
-		volumes = append(volumes, corev1.Volume{
-			Name: "bytecode-cache",
-			VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: nextApp.Name + "-bytecode-cache",
-				},
-			},
-		})
-		volumeMounts = append(volumeMounts, corev1.VolumeMount{
-			Name:      "bytecode-cache",
-			MountPath: "/cache/bytecode",
-		})
-	}
 
 	// ContainerConcurrency default (#377, ADR-0028). Lowered from 100 → 20: a
 	// pod absorbing 100 concurrent requests before Knative added a 2nd replica
@@ -1125,29 +1048,16 @@ func (r *NextAppReconciler) buildKsvcEnv(nextApp *appsv1alpha1.NextApp) ([]corev
 			envVars = append(envVars, corev1.EnvVar{Name: "REDIS_KEY_PREFIX", Value: nextApp.Spec.Cache.KeyPrefix})
 		}
 	}
-	// #431 — the bytecode cache is a V8 compile cache governing server BOOT
-	// SPEED; the data-cache Provider governs ISR/data caching. Orthogonal
-	// concerns that merely share the CRD's spec.cache block. This env block
-	// used to be NESTED inside the `Provider != ""` branch above, so an app
-	// with no data-cache provider got the PVC provisioned AND mounted (both
-	// gate on EnableBytecodeCache alone) while NODE_COMPILE_CACHE stayed
-	// unset — 512Mi of storage buying nothing. Gate it exactly the way the
-	// PVC and the volumeMount already do.
-	if nextApp.Spec.Cache != nil && nextApp.Spec.Cache.EnableBytecodeCache {
-		envVars = append(envVars, corev1.EnvVar{Name: "NODE_COMPILE_CACHE", Value: "/cache/bytecode/latest"})
-		// Bun analog of NODE_COMPILE_CACHE: Bun has no runtime bytecode
-		// cache (`bun build --bytecode` hard-fails on the Next standalone
-		// server), but its runtime transpiler cache persists transpiled
-		// modules ≥ ~50KB across cold starts. Measured on next@16.2.4
-		// standalone (Bun 1.3.5): warm cache ≈ -20% time-to-first-response;
-		// unwritable dir is fail-open. Same PVC as NODE_COMPILE_CACHE
-		// (mounted at /cache/bytecode), sibling dir so the two runtimes'
-		// artifacts never collide. Only meaningful under runtime=bun —
-		// NODE_COMPILE_CACHE stays set regardless (inert under Bun).
-		if nextApp.Spec.Runtime == "bun" {
-			envVars = append(envVars, corev1.EnvVar{Name: "BUN_RUNTIME_TRANSPILER_CACHE_PATH", Value: "/cache/bytecode/bun-transpiler"})
-		}
-	}
+	// The operator injects NO code-cache env vars. NODE_COMPILE_CACHE and
+	// BUN_RUNTIME_TRANSPILER_CACHE_PATH used to be set here alongside a PVC; both
+	// are gone with it (ADR-0035). The V8 compile cache is baked into the image at
+	// build time, and an operator-injected NODE_COMPILE_CACHE would BYPASS that
+	// baked layer — which is what the runtime shadow-warning (#450) existed to
+	// detect. Removing the injection removes the thing being warned about.
+	//
+	// Do not reintroduce either variable here. A compiled bun-exec image
+	// (`bun build --compile --bytecode`) embeds its bytecode and transpiles nothing
+	// at runtime, so both would be inert while still costing a volume.
 	if nextApp.Spec.Revalidation != nil && nextApp.Spec.Revalidation.Queue != "" {
 		envVars = append(envVars, corev1.EnvVar{Name: "KAFKA_BROKER_URL", Value: nextApp.Spec.Revalidation.KafkaBrokerUrl})
 		envVars = append(envVars, corev1.EnvVar{Name: "KAFKA_REVALIDATION_TOPIC", Value: fmt.Sprintf("%s-revalidation", nextApp.Name)})
@@ -1542,10 +1452,9 @@ func (r *NextAppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// also means annotation-only / label-only edits to the NextApp do not
 		// reconcile (generation is bumped only on spec changes). That is the
 		// accepted trade-off. We do NOT filter the Owns(...) watches: drift in an
-		// owned child (ksvc/SA/PVC/NetworkPolicy) must still trigger a reconcile.
+		// owned child (ksvc/SA/NetworkPolicy) must still trigger a reconcile.
 		For(&appsv1alpha1.NextApp{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&servingv1.Service{}).
-		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&networkingv1.NetworkPolicy{}).
 		Owns(&appsv1.DaemonSet{}).

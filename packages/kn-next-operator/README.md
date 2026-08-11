@@ -43,15 +43,6 @@ kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/do
 >   makes net-kourier silently skip every KIngress (#208). If routes stall unprogrammed
 >   for >2 minutes, the operator reports `Ready=False` / `IngressNotProgrammed` on the
 >   NextApp with the fix in the message.
-> - **PVC feature flags** (prerequisite for `spec.enableBytecodeCache`): the bundle
->   ships a `config-features` ConfigMap (`namespace: knative-serving`) enabling
->   `kubernetes.podspec-persistent-volume-claim` and
->   `kubernetes.podspec-persistent-volume-write` (both default-off). The bytecode-cache
->   ksvc mounts a **writable** PVC; without both flags Knative's admission webhook
->   denies the ksvc and reconcile fails — see ADR-0010. Unlike the ingress-class, these
->   flags are networking-layer-independent (safe under net-istio and kourier). A
->   `StorageClass`/provisioner is still required to bind the PVC (kind ships
->   `local-path`).
 
 ### Verify the signature (optional)
 
