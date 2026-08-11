@@ -55,40 +55,22 @@ overridden from `spec.scaling`; `containerConcurrency` defaults to
 > `containerConcurrency` scales to **more** pods sooner, which raises DB
 > connection pressure — see the connection-wall guard below.
 
-### `spec.cache` (`CacheSpec`, the cold-start-relevant fields)
+### `spec.cache` (`CacheSpec`)
 
-| Field | JSON tag | Effect |
-|-------|----------|--------|
-| `EnableBytecodeCache` | `enableBytecodeCache` | Provisions a `{app}-bytecode-cache` PVC and sets `NODE_COMPILE_CACHE` |
-| `BytecodeCacheSize` | `bytecodeCacheSize` | PVC storage request; defaults to `512Mi` when unset |
+`spec.cache` configures the **data cache only** (`provider` / `url` / `keyPrefix`) —
+ISR and Next.js data caching. It carries no cold-start knobs.
 
-When `spec.cache.enableBytecodeCache` is true the operator creates a
-`PersistentVolumeClaim` named `{app}-bytecode-cache`
-(`nextapp_controller.go:241-243`), sized from `spec.cache.bytecodeCacheSize` and
-**defaulting to `512Mi`** when unset (`nextapp_controller.go:237-239`; asserted by
-`reconcile_output_test.go:285` *"defaults the PVC size to 512Mi when
-BytecodeCacheSize is unset"*). The PVC is mounted at `/cache/bytecode`
-(`nextapp_controller.go:431-432`).
-
-`NODE_COMPILE_CACHE` (pointing at `/cache/bytecode/latest`) is emitted from
-`enableBytecodeCache` **alone** — it is independent of `spec.cache.provider`.
-The bytecode cache governs **server boot speed**; the cache `provider` governs
-**ISR/data caching**. They are orthogonal concerns that merely share the
-`spec.cache` block, so a zone with no data-cache provider (or a non-Redis one)
-still gets a working compile cache.
-
-> **Changed:** `NODE_COMPILE_CACHE` used to be nested inside the
-> `spec.cache.provider != ""` branch, so enabling the bytecode cache without a
-> provider mounted a PVC that nothing ever wrote to. Fixed — no config change is
-> needed for setups that already set a provider.
-
-**Cost — read before enabling.** The PVC is `ReadWriteOnce`. A `ReadWriteOnce`
-volume attaches to **one node at a time**, so pods that scale out onto a second
-node cannot attach it and stay `Pending`. On a cluster with **no default
-StorageClass** the PVC never binds and the pod never starts at all. This is why
-the cache is **opt-in** rather than on by default: prefer it for
-cold-start-sensitive zones with modest fan-out, and verify a default
-StorageClass exists first.
+> **Removed:** `enableBytecodeCache` / `bytecodeCacheSize` and the
+> `{app}-bytecode-cache` PVC no longer exist. The V8 compile cache is **baked into the
+> image at build time** (ADR-0035) — the default cold-start mechanism, which needs no
+> volume, mount, or cluster feature flag and applies from the very first pod. The
+> operator injects no `NODE_COMPILE_CACHE`, because doing so would *bypass* the baked
+> layer.
+>
+> The removed PVC was `ReadWriteOnce`, which attaches to one node at a time: pods
+> scaling onto a second node could not attach it and stayed `Pending`, and on a cluster
+> with no default StorageClass it never bound at all. The baked cache has neither
+> limitation.
 
 ## What a cold start costs, and what mitigates it
 
@@ -102,48 +84,24 @@ A request that wakes a scaled-to-zero zone pays, roughly in order:
 4. **Database connection-pool re-establishment** — *mitigated by a transaction-mode
    pooler in front of Postgres.*
 
-### V8 bytecode cache (`spec.cache.enableBytecodeCache`)
-
-> **Deprecated (ADR-0035, action item 4).** The PVC-backed bytecode cache
-> (`enableBytecodeCache` / `bytecodeCacheSize`) is deprecated in favour of the V8
-> compile cache **baked into the image at build time** — the default cold-start
-> mechanism, which needs no volume, mount, or cluster feature flag and applies
-> from the first pod. This field still works but is scheduled for removal per the
-> v1alpha1 stability policy (ADR-0017); the operator emits a
-> `DeprecatedBytecodeCachePVC` Warning event when it is set. Prefer the baked
-> default.
+### V8 compile cache (baked into the image — nothing to configure)
 
 Node's `NODE_COMPILE_CACHE` persists compiled V8 bytecode to disk, so a fresh
 process skips re-parsing and re-compiling the application's JavaScript. knext
-persists this cache on a PVC (so it survives pod churn / scale-from-zero rather
-than being rebuilt on every cold start). Enable it on any zone whose cold start
-matters:
+**bakes that cache into the image at build time** (ADR-0035), so it is present in
+every pod from the very first cold start and needs no `spec` field, no PVC, and no
+cluster feature flag.
 
-```yaml
-spec:
-  cache:
-    enableBytecodeCache: true
-    bytecodeCacheSize: 1Gi     # optional; defaults to 512Mi
-```
+There is nothing to enable, and nothing to size. The previous opt-in — a
+`ReadWriteOnce` PVC plus `bytecodeCache` in `kn-next.config.ts` — has been
+**removed**. Leaving either in place now breaks a deploy rather than being ignored:
+`kn-next` applies the CR with strict validation, and the fields no longer exist in
+the CRD.
 
-No `provider` is required — add one only if you also want Redis-backed ISR/data
-caching. From `kn-next.config.ts` this is a top-level block, deliberately
-separate from `cache`:
-
-```ts
-export default {
-  // ...
-  bytecodeCache: { enabled: true, size: "1Gi" },  // boot speed
-  cache: { provider: "redis", url: "..." },       // ISR/data caching (independent)
-};
-```
-
-> **Back-compat (CLI only).** When `bytecodeCache` is **omitted**, `cr-builder.ts` falls back to the
-> legacy inference `cache.provider === "redis" ⇒ enableBytecodeCache: true`, so CRs generated from
-> existing configs are byte-identical. "Opt-in" is therefore exact at the **CRD** level
-> (`enableBytecodeCache` defaults to false) and *inherited* at the config level by Redis users who
-> never set `bytecodeCache`. Set `bytecodeCache: { enabled: false }` to opt a Redis app out
-> explicitly — that wins over the inference.
+**One caveat for `runtime: bun`.** Bun's runtime *transpiler* cache is still derived
+from the baked `NODE_COMPILE_CACHE` path, so it works **per-pod** — but it no longer
+survives scale-to-zero. Persisting across cold starts is exactly what the removed PVC
+provided (measured ≈ −20% time-to-first-response on next@16.2.4 / Bun 1.3.5).
 
 This removes the JS recompile cost. It does **not** remove framework boot or the
 database pool re-establish — those are addressed below.
@@ -263,8 +221,6 @@ spec:
     containerConcurrency: 200 # fewer, busier instances
   cache:
     provider: redis
-    enableBytecodeCache: true
-    bytecodeCacheSize: 1Gi
 ```
 
 - `minScale: 1` keeps a warm instance with an established DB pool.
@@ -287,7 +243,6 @@ spec:
     # containerConcurrency omitted => operator default 20 (ADR-0028)
   cache:
     provider: redis
-    enableBytecodeCache: true  # keep the cold start short when traffic returns
 ```
 
 - `minScale: 0` lets the zone scale to zero between traffic bursts.
@@ -316,7 +271,6 @@ spec:
     poolMax: 5               # per-pod DB pool max => 10 × 5 = 50 ≤ 80 (app budget holds)
   cache:
     provider: redis
-    enableBytecodeCache: true  # keep each scale-up cheap
 ```
 
 Tuning guidance for the three knobs:
@@ -610,7 +564,7 @@ record.
 | Cold start on critical path | `spec.scaling.minScale: 1` (keep warm) |
 | Cold start only during known peaks | `spec.scaling.warmSchedule` (operator-owned scheduled min-scale floor, ADR-0030; no KEDA/CronJobs) + the SAME windows on the AppDatabase `spec.warmSchedule` for the DB half (#388) |
 | Cost on idle read zones | `spec.scaling.minScale: 0` (scale to zero) |
-| JS recompile on cold start | `spec.cache.enableBytecodeCache: true` (no `provider` needed) |
+| JS recompile on cold start | nothing to configure — the V8 compile cache is baked into the image |
 | DB pool re-establish | warm zone (`minScale: 1`) and/or transaction-mode pooler; during declared windows, AppDatabase `spec.warmSchedule` holds the compute warm (#388) |
 | Connection storm | low `maxScale` + declare `poolMax` (operator enforces `maxScale × poolMax ≤ 80`, ADR-0028); a pooler caps it further |
 | Reactive scale-out under burst | lower `containerConcurrency` (default now `20`, ADR-0028; W1/#376 refines) |

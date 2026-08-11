@@ -186,23 +186,6 @@ export function validateConfig(config: KnativeNextConfig): void {
     //                   so "512K" is invalid (it would be rejected by the
     //                   operator's parser) while "500k" is valid.
     //   decimalExponent e|E followed by a signed integer, e.g. "1e3"
-    if (config.bytecodeCache?.size !== undefined) {
-        const q = checkQuantity(config.bytecodeCache.size);
-        if (!q.parseable) {
-            errors.push(
-                `'bytecodeCache.size' ("${config.bytecodeCache.size}") is not a valid Kubernetes quantity ` +
-                    `(e.g. "512Mi", "1Gi"). Omit it to use the operator default of 512Mi.`,
-            );
-        } else if (!q.positive) {
-            // #435 / #433 alignment: the operator rejects a non-positive size
-            // (Sign() <= 0), so "0" / "0Gi" must fail HERE too — otherwise the
-            // CLI would accept a size the operator later rejects as a CR.
-            errors.push(
-                `'bytecodeCache.size' ("${config.bytecodeCache.size}") must be a positive quantity. ` +
-                    `Omit it to use the operator default of 512Mi.`,
-            );
-        }
-    }
 
     // Queue (ISR-revalidation) validation. Only the ADR-0016 kafka path and
     // 'none' are valid; anything else is an unknown provider.

@@ -119,17 +119,21 @@ spec:
   cache:
     provider: "redis"
     url: "redis://redis.default.svc.cluster.local:6379"
-    enableBytecodeCache: true   # Provisions a shared PVC for the runtime code cache
-    bytecodeCacheSize: "1Gi"    # Size of the requested PVC
 ```
 
-> **Deprecated (ADR-0035, action item 4):** `enableBytecodeCache` / `bytecodeCacheSize` (the PVC-backed bytecode cache) are **deprecated** in favour of the V8 compile cache **baked into the image at build time**, which is the default cold-start mechanism and needs no volume, mount, or cluster feature flag. The field still works but is scheduled for removal in a future release per the v1alpha1 stability policy (ADR-0017). When set, the operator emits a `DeprecatedBytecodeCachePVC` Warning event; the runtime also shadow-warns when an operator-injected `NODE_COMPILE_CACHE` bypasses the baked layer. Migrate off it.
-
-`enableBytecodeCache` covers **both** runtimes from one field: Node's `NODE_COMPILE_CACHE` (always) and Bun's runtime transpiler cache (added when `runtime: bun`), on the same PVC. Cache growth is bounded only by `bytecodeCacheSize` — there is no eviction — and both runtimes fail open (serving is unaffected) if the volume fills up or is unwritable.
-
-The two halves of this block are **independent**: `provider`/`url`/`keyPrefix` configure ISR/data caching, while `enableBytecodeCache`/`bytecodeCacheSize` configure the V8 compile cache that governs **boot speed**. Either may be set without the other — `enableBytecodeCache: true` with no `provider` is valid and wires `NODE_COMPILE_CACHE` as expected.
-
-Bytecode caching is **opt-in**, not default-on: the PVC is `ReadWriteOnce`, so pods scaling onto a second node cannot attach it, and on a cluster with no default StorageClass it never binds. See [scaling & cold start](./scaling-cold-start.md) for the full trade-off.
+> **Removed:** `enableBytecodeCache` and `bytecodeCacheSize` no longer exist. The
+> PVC-backed bytecode cache was superseded by the V8 compile cache **baked into the
+> image at build time** (ADR-0035) — the default cold-start mechanism, which needs no
+> volume, mount, or cluster feature flag. They were deprecated first under the
+> v1alpha1 stability policy (ADR-0017) and are now deleted from the CRD.
+>
+> A CR that still sets either field is **rejected** by the apiserver when applied with
+> `--validate=strict` (which every `kn-next` apply passes) and silently **pruned**
+> otherwise — notably by GitOps controllers, which do not assert strict validation. So
+> remove the fields rather than relying on them being ignored.
+>
+> `spec.cache` now configures the **data cache only**: `provider` / `url` / `keyPrefix`
+> for ISR and Next.js data caching.
 
 ### `revalidation` (Optional)
 Configures Asynchronous ISR Regenerations.

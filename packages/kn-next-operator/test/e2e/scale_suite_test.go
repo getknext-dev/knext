@@ -20,7 +20,6 @@ limitations under the License.
 // Shared bootstrap for the `e2e_scale` suite, which contains MULTIPLE Ordered
 // Describes that each need the operator running:
 //
-//   - scale_to_zero_cache_test.go     — A2-2 / #38 (bytecode cache survival)
 //   - scale_from_zero_test.go         — A2-3 / #39 (scale-to-zero then activate)
 //
 // Both specs must NOT each `make deploy` the controller-manager — a second

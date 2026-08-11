@@ -70,11 +70,9 @@ func TestNextAppSpec_FieldMap(t *testing.T) {
 				Endpoint: "https://s3.example.com",
 			},
 			Cache: &CacheSpec{
-				Provider:            "redis",
-				URL:                 "redis://redis:6379",
-				KeyPrefix:           "myapp",
-				EnableBytecodeCache: true,
-				BytecodeCacheSize:   "512Mi",
+				Provider:  "redis",
+				URL:       "redis://redis:6379",
+				KeyPrefix: "myapp",
 			},
 			HealthCheckPath: "/api/health",
 			Secrets: &SecretsSpec{

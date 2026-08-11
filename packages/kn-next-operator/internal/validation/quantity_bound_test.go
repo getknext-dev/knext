@@ -141,34 +141,6 @@ func TestPathologicalExponentIsRejectedPromptlyOnEveryResourceField(t *testing.T
 	}
 }
 
-// TestPathologicalExponentIsRejectedPromptlyOnBytecodeCacheSize covers the
-// OTHER user-supplied quantity in the spec — the PVC size — through the same
-// shared validator.
-func TestPathologicalExponentIsRejectedPromptlyOnBytecodeCacheSize(t *testing.T) {
-	for _, value := range pathologicalQuantities {
-		spec := &appsv1alpha1.NextAppSpec{
-			Image: "registry.example.com/app@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
-			Cache: &appsv1alpha1.CacheSpec{BytecodeCacheSize: value},
-		}
-		returned, err, elapsed := validateWithin(t, spec, quantityValidationBudget)
-		if !returned {
-			t.Errorf("spec.cache.bytecodeCacheSize=%q: ValidateNextAppSpec did NOT return within %v",
-				value, quantityValidationBudget)
-			continue
-		}
-		if err == nil {
-			t.Errorf("spec.cache.bytecodeCacheSize=%q: accepted, but the absurd-exponent class must be rejected", value)
-		}
-		if elapsed > quantityValidationBudget {
-			t.Errorf("spec.cache.bytecodeCacheSize=%q: rejected but took %v (budget %v)", value, elapsed, quantityValidationBudget)
-		}
-	}
-}
-
-// TestOversizedQuantityStringIsRejectedPromptly covers the second cost axis the
-// exponent bound does not touch: a mantissa long enough that big-int parsing
-// alone is slow. MEASURED: a 1,000,000-digit mantissa parses in ~1.2 s, which
-// on its own breaches the budget above with no absurd exponent in sight.
 func TestOversizedQuantityStringIsRejectedPromptly(t *testing.T) {
 	huge := strings.Repeat("9", 1_000_000)
 	for _, value := range []string{huge, huge + "Mi"} {

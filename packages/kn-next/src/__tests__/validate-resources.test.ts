@@ -75,27 +75,3 @@ describe("validateConfig — resource quantities (#435)", () => {
         ).toThrow(/memoryRequest/);
     });
 });
-
-describe("validateConfig — bytecodeCache.size floor (#435 / #433 alignment)", () => {
-    it("rejects a zero bytecodeCache.size the operator would reject", () => {
-        expect(() =>
-            validateConfig({
-                name: "app",
-                registry: "registry",
-                storage: { provider: "gcs", bucket: "bucket" },
-                bytecodeCache: { size: "0" },
-            } as KnativeNextConfig),
-        ).toThrow(/bytecodeCache\.size/);
-    });
-
-    it("rejects a zero-valued bytecodeCache.size with a unit", () => {
-        expect(() =>
-            validateConfig({
-                name: "app",
-                registry: "registry",
-                storage: { provider: "gcs", bucket: "bucket" },
-                bytecodeCache: { size: "0Gi" },
-            } as KnativeNextConfig),
-        ).toThrow(/bytecodeCache\.size/);
-    });
-});

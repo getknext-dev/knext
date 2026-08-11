@@ -70,7 +70,6 @@ func TestAdmissionRejectsAbsurdExponentPromptly(t *testing.T) {
 		}{
 			{"cpuRequest", appsv1alpha1.NextAppSpec{Image: digestImage, Resources: &appsv1alpha1.ResourcesSpec{CPURequest: value}}},
 			{"memoryLimit", appsv1alpha1.NextAppSpec{Image: digestImage, Resources: &appsv1alpha1.ResourcesSpec{MemoryLimit: value}}},
-			{"bytecodeCacheSize", appsv1alpha1.NextAppSpec{Image: digestImage, Cache: &appsv1alpha1.CacheSpec{BytecodeCacheSize: value}}},
 		} {
 			app := newNextApp(tc.spec)
 

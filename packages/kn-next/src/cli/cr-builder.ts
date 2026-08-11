@@ -6,7 +6,7 @@
  * CR-rendering logic to the exec layer.
  *
  * ADR-0001: the CLI's job is build → push → apply the NextApp CR.
- * The operator reconciles everything else (ksvc, SA, PVC, KafkaSource).
+ * The operator reconciles everything else (ksvc, SA, KafkaSource).
  */
 
 import YAML from "yaml";
@@ -28,48 +28,13 @@ export interface PreviewInput {
 }
 
 /**
- * #457 — the legacy `redis ⇒ on` bytecode-cache inference is DEPRECATED.
- *
- * When `config.bytecodeCache` is unset and `config.cache.provider === "redis"`,
- * `enableBytecodeCache` is flipped ON implicitly (back-compat, ADR-0034
- * decision 3). That implicit inference — and the operator PVC path it feeds —
- * is superseded by the image-baked V8 compile cache (ADR-0035, the default
- * cold-start mechanism). We warn ONCE per process, to STDERR (stdout may be the
- * CR YAML), so users move to setting `bytecodeCache.enabled` explicitly. The
- * computed CR is unchanged — this is a signal, not a behaviour change.
- */
-let legacyBytecodeInferenceWarned = false;
-
-/** Test-only: reset the one-time warning latch. */
-export function __resetLegacyBytecodeInferenceWarning(): void {
-    legacyBytecodeInferenceWarned = false;
-}
-
-function warnLegacyBytecodeInference(): void {
-    if (legacyBytecodeInferenceWarned) {
-        return;
-    }
-    legacyBytecodeInferenceWarned = true;
-    // Write to stderr (fd 2) — NEVER stdout, which may carry the CR YAML.
-    process.stderr.write(
-        "[kn-next] DEPRECATION: bytecode caching was enabled implicitly because " +
-            'cache.provider is "redis". This legacy redis⇒on inference is deprecated ' +
-            "and will be removed in a future release. Set `bytecodeCache.enabled` " +
-            "explicitly instead. The V8 compile cache is now baked into the image by " +
-            "default, so the opt-in PVC-backed cache is no longer recommended.\n",
-    );
-}
-
-/**
  * Builds a NextApp CR object from a KnativeNextConfig and a resolved image ref.
  * The image MUST be digest-pinned (the operator enforces this at reconcile time).
  *
  * Invariants preserved (A1-cli discipline):
  * - scale-to-zero: scaling.minScale defaults to 0
- * - bytecode cache (#431): cache.enableBytecodeCache follows config.bytecodeCache,
- *   INDEPENDENTLY of the data-cache provider; falls back to the legacy
- *   redis⇒on inference when unset (back-compat)
- * - NODE_COMPILE_CACHE wiring: operator reads cache.enableBytecodeCache
+ * - no code-cache fields: the V8 compile cache is baked into the image at
+ *   build time (ADR-0035), so the CR carries no PVC/bytecode surface at all
  */
 export function buildNextAppCRObject(
     config: KnativeNextConfig,
@@ -152,33 +117,16 @@ export function buildNextAppCRObject(
           }
         : undefined;
 
-    // Cache spec. TWO ORTHOGONAL CONCERNS share the CRD's `spec.cache` block
-    // (#431): the DATA cache (provider/url/keyPrefix → ISR + data caching) and
-    // the BYTECODE cache (enableBytecodeCache/bytecodeCacheSize → a V8 compile
-    // cache on a PVC that governs server BOOT SPEED). They used to be coupled
-    // — `enableBytecodeCache` was derived from `provider === "redis"`, and
-    // `spec.cache` was emitted only when a `cache` block existed — so an app on
-    // GCS with no Redis silently paid a fully-uncached ~2s Node boot on every
-    // cold start (measured on OKE). They are now decided independently.
+    // Cache spec — the DATA cache only (provider/url/keyPrefix → ISR + data
+    // caching). The BYTECODE cache that used to share this block is GONE: the V8
+    // compile cache is baked into the image at build time (ADR-0035), so there is
+    // no PVC, no `enableBytecodeCache`, and no `bytecodeCacheSize`.
     //
-    // Default is OFF (opt-in): the PVC is ReadWriteOnce, so defaulting on would
-    // strand burst pods on a second node, and it never binds on a cluster with
-    // no default StorageClass. Neither may break a deployment that works today.
-    // BACK-COMPAT: with `bytecodeCache` unset we fall back to the legacy
-    // redis⇒on inference, so existing CRs are byte-identical.
-    // #457: detect the legacy inference path — bytecodeCache unset AND the
-    // redis provider flips it on — and warn (once, to stderr) without changing
-    // the computed value.
-    const usingLegacyRedisInference =
-        config.bytecodeCache?.enabled === undefined &&
-        config.cache?.provider === "redis";
-    if (usingLegacyRedisInference) {
-        warnLegacyBytecodeInference();
-    }
-    const enableBytecodeCache =
-        config.bytecodeCache?.enabled ?? config.cache?.provider === "redis";
-
-    const dataCache = config.cache
+    // The CRD no longer defines either field, so emitting one would now be an
+    // ERROR, not dead weight: every kn-next apply passes `--validate=strict`
+    // (#547), and the apiserver rejects unknown fields under it. That is why this
+    // had to be removed in lockstep with the operator rather than left to rot.
+    const cache = config.cache
         ? {
               provider: config.cache.provider,
               url: config.cache.provider === "redis" ? config.cache.url : "",
@@ -187,23 +135,6 @@ export function buildNextAppCRObject(
                   : {}),
           }
         : undefined;
-
-    // Emit spec.cache when EITHER concern needs it — notably when bytecode
-    // caching is requested with no data-cache provider at all. In that case we
-    // emit ONLY the bytecode fields: an empty `provider` would make the
-    // operator export CACHE_PROVIDER="" / REDIS_URL="".
-    const cache =
-        dataCache || enableBytecodeCache
-            ? {
-                  ...(dataCache ?? {}),
-                  enableBytecodeCache,
-                  // Size is mapped only when authored ⇒ omitted ⇒ the
-                  // operator's own 512Mi default applies, exactly as before.
-                  ...(enableBytecodeCache && config.bytecodeCache?.size
-                      ? { bytecodeCacheSize: config.bytecodeCache.size }
-                      : {}),
-              }
-            : undefined;
 
     // Database binding spec (#417, ADR-0019) — maps config.database ->
     // spec.database ONLY when config.database.secretRef is set, mirroring

@@ -68,15 +68,16 @@ BUN_BUILD_CMD=(bun build --compile --minify --bytecode --target="$TARGET"
 # APP identity — what the two arms of an A/B must agree on. Two build TARGETS of
 # one app share this; two different apps do not, which is the Run 25/26 defect
 # (`p1b-node` and `p1b-bunexec` served different applications and nothing
-# noticed). Content-addressed over the app sources, so it does not depend on git
-# state or on anyone remembering to bump it.
-app_id() {
-  local sum
-  sum=$( { find app -type f -print0 2>/dev/null | sort -z | xargs -0 shasum -a 256 2>/dev/null
-           shasum -a 256 package.json vite.config.ts runtime-contract.mjs knext-bun-entry.mjs 2>/dev/null
-         } | shasum -a 256 | cut -c1-16 )
-  printf 'bun-exec-%s' "${sum:-unknown}"
-}
+# noticed).
+#
+# DELEGATED to `app-id.sh` (2026-08-09), because the version that lived here
+# could never satisfy the condition it was written for. It emitted
+# `bun-exec-<sum>` and folded `vite.config.ts`, `runtime-contract.mjs` and
+# `knext-bun-entry.mjs` into the hash — so a node arm over the IDENTICAL
+# application would differ both on the prefix and on files it does not have.
+# `--app-id-label` compares label values across arms; encoding the target into
+# that value makes the gate unpassable by construction.
+app_id() { "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/app-id.sh"; }
 
 # One `key=value` per line, UNESCAPED. The build command contains spaces, so
 # `docker build $(./build.sh --print-labels)` would mangle it however it were
