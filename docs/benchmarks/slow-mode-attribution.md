@@ -1,165 +1,136 @@
-# The bimodal cold-start slow mode: attributed to one node, and to the readiness gate
+# The bimodal cold-start slow mode: nine one-second probe timeouts
 
-**Status:** measured 2026-08-11. Supersedes the standing "the ~10–11 s slow mode is
-unattributable because the pods were gone before their placement could be inspected"
-note (Run 24). It is now attributed, to a defensible depth, with the limits stated below.
+**Status:** measured 2026-08-11, by controlled placement. Supersedes the standing
+"unattributable because the pods were gone before their placement could be inspected"
+note (Run 24).
 
-## The shape that started this
+**It also corrects an earlier revision of this document**, which concluded the slow mode
+was node-local to `10.0.1.78`. **That conclusion was wrong** — see
+[The node hypothesis, and why it died](#the-node-hypothesis-and-why-it-died). It is
+recorded rather than deleted because the observational evidence for it looked strong
+(0/41 vs 5/12), and the way it failed is the useful part.
 
-Sorting the 24 interleaved ABBA samples from the 2026-08-10 sitting shows two tight
-clusters and **nothing between them**:
+## What the slow mode is
 
-| band | n | range | spread |
-|---|---|---|---|
-| fast | 14 | 1.98–3.80 s | 1.82 s |
-| slow | 10 | 10.16–11.57 s | 1.41 s |
+**Exactly nine consecutive one-second readiness-probe timeouts against the queue-proxy
+sidecar**, after which the pod goes Ready normally.
 
-The largest interior gap is **6.36 s**; the second largest is **0.49 s**. A resource
-contention story produces a continuum, so this shape argued for a discrete event —
-a timeout, a fixed backoff, or a missed poll.
+With 16 cold starts under controlled placement, the split is perfectly clean:
 
-## What it is
-
-**The slow mode is node-local to `10.0.1.78`, and the whole excess sits after the
-container has started, inside the readiness gate.**
-
-Pod time-to-Ready, pooled over both collector runs (53 pods, including transient
-pods no benchmark request ever touched):
-
-| node | n | min | p50 | max | ≥10 s |
-|---|---|---|---|---|---|
-| `10.0.1.253` | 41 | 1 s | 2 s | 3 s | **0** |
-| `10.0.1.78` | 12 | 2 s | 3 s | 11 s | **5** |
-
-Those 10–11 s values coincide with the observed slow band. Decomposing the five slow
-pods against the five fast ones on the same node:
-
-```
-SLOW (10.0.1.78)   Scheduled=0s  Pulled=1-2s  Created=1-2s  Started=1-2s  Ready=10-11s
-FAST (10.0.1.78)   Scheduled=0s  Pulled=1-2s  Created=1-2s  Started=1-2s  Ready=2-3s
-```
-
-The container is running by 2 s in **both** cases. The entire 8–9 s difference is
-spent waiting for readiness, and the event text says why:
-
-- **slow pods:** `Readiness probe failed: Get "http://10.244.0.N:8012/": context
-  deadline exceeded (Client.Timeout exceeded while awaiting headers)` — 2, 6, 9, 9
-  and 9 occurrences.
-- **fast pods:** `HTTP probe failed with statuscode: 503` only.
-
-Port 8012 is the Knative **queue-proxy**. A 503 means queue-proxy is answering and
-the app is not up yet — normal, and it clears in 1–2 s. A *timeout* means queue-proxy
-itself does not answer at all. With `periodSeconds: 1` and `timeoutSeconds: 1`,
-roughly nine consecutive one-second timeouts reproduce the missing 8–9 s, and
-`10.244.0.0/25` is `10.0.1.78`'s pod CIDR, which is what ties the timing to the node.
-
-## What it is not
-
-Each of these was a live hypothesis and each is dead. They are recorded so nobody
-re-derives them.
-
-| hypothesis | refuted by |
-|---|---|
-| readiness-probe backoff | `periodSeconds: 1` — a missed probe costs 1 s, not ~7 |
-| image pull | the target digest is resident on **both** nodes |
-| idle gap / page-cache eviction | slow gaps 145–198 s vs fast 148–199 s — no separation |
-| revision accumulation | a run with 148 revisions present (the most ever) went 12/12 fast |
-| per-invocation structure / fresh revision | 6 separate single-sample invocations, the exact structure that produced slow samples the night before, went 6/6 fast |
-| node CPU saturation | both nodes 84% of allocatable requested, 4% actually used |
-| pod CIDR overlap | distinct — `10.244.1.0/25` vs `10.244.0.0/25` |
-
-Memory is the one node-level number that is high on both (81–84%), and `10.0.1.78`
-additionally hosts the activator, both Kourier gateways and both CoreDNS pods.
-Neither observation is load-bearing for the conclusion above.
-
-## Why `10.0.1.78`? — what was ruled out, and where it stops
-
-Follow-up investigation (`node-pressure-probe.sh`, read-only, one self-reaping Job per
-node). The headline is counter-intuitive and worth stating plainly: **the stall happens
-on the *healthier*, *quieter* node.**
-
-| | `10.0.1.253` | `10.0.1.78` |
+| | Unhealthy events before `Killing` | listen→Ready gap |
 |---|---|---|
-| loadavg (1 min) | 1.38 | **0.02** |
-| `allocstall_normal` (direct-reclaim stalls) | 150 | **2** |
-| `pgmajfault` | 60,841 | **18,172** |
-| MemAvailable | 2.45 GB | **2.95 GB** |
-| iowait (jiffies since boot) | 1,769,671 | **446,563** |
-| steal (jiffies since boot) | 2,203,067 | **891,105** |
+| **slow pods** (5) | `Unhealthy × 9` — `Get "http://<podIP>:8012/": context deadline exceeded` | 8.6–9.3 s |
+| **fast pods** (11) | none (only benign 503s during teardown) | −0.4 to 1.2 s |
 
-`.78` is lower on every pressure indicator, so **CPU starvation, memory pressure, IO
-stall and hypervisor steal are all refuted** — they would have to be worse on `.78`,
-and each is several-fold better. Additionally ruled out:
+Nine probes × `timeoutSeconds: 1` accounts for the entire gap. The count is **9 every
+time**, on both nodes — a fixed mechanism, not variable work, which is what the
+suspiciously clean 6.36 s band in the original 24-sample distribution was pointing at.
 
-- **General container startup on the node.** Five paired runs of an identical busybox
-  pod: `.253` 1,1,1,2,2 s; `.78` 1,1,1,2,4 s. `.78` is not slow at starting containers —
-  the effect is specific to the Knative pod shape (queue-proxy + user container).
-- **Concurrent-start contention.** `.253` had 18 pods start in bursts of 3+ with **zero**
-  slow; `.78` pods starting *alone* were slow 3 of 5. Inverted from what the hypothesis
-  predicts.
-- **A transient cluster event.** The slow pods do not cluster in time — they alternate
-  with fast ones across 13 minutes.
-- **Node configuration drift.** Identical OS (Oracle Linux 8.10), kernel
-  (5.15.0-320 UEK), runtime (CRI-O 1.33.10), kubelet (v1.33.10), capacity and taints.
-- **Flannel/CNI errors.** The flannel daemon on `.78` has logged nothing since node
-  boot on 2026-06-01.
+Port 8012 is the Knative **queue-proxy**. The distinction that matters:
 
-Two measurements that were **attempted and are not evidence**, recorded so they are not
+- **503** — queue-proxy answers, reporting the app not yet ready. Normal, clears in ~1 s.
+- **timeout** — queue-proxy accepts the connection but never responds, so the kubelet's
+  1 s deadline expires.
+
+## Where the time is *not* spent
+
+Both containers are up early, and **identically so in fast and slow pods**:
+
+| | user-container `LISTENING` | queue-proxy `main:8012` bound |
+|---|---|---|
+| fast pods | 1.37–2.26 s | 1.55–2.49 s |
+| slow pods | 1.02–2.21 s | 1.19–2.41 s |
+
+The slow pods start listening *earlier* on average. So the delay is not image pull, not
+container start, not app boot, and not the build target. It is entirely in the readiness
+path, after everything is already listening.
+
+It is also **not the health handler doing dependency work** —
+`examples/bun-exec/app/api/health/route.ts` is a static `Response.json`, with no PG or
+Redis dial by ADR-0026.
+
+## The node hypothesis, and why it died
+
+Observationally the effect looked perfectly node-local: across 53 pods,
+`10.0.1.253` was 0/41 slow and `10.0.1.78` was 5/12. Six mechanisms were ruled out
+against that hypothesis, and those refutations still stand on their own evidence:
+
+- **node health** — `.78` is the *quieter* node on every indicator (loadavg 0.02 vs 1.38,
+  direct-reclaim stalls 2 vs 150, `pgmajfault` 18k vs 61k, iowait 447k vs 1.77M jiffies,
+  steal 891k vs 2.20M), so CPU/memory/IO/steal starvation cannot explain it;
+- **general container startup** — five paired runs of an identical busybox pod:
+  `.253` 1,1,1,2,2 s vs `.78` 1,1,1,2,4 s;
+- **concurrent-start contention** — `.253` had 18 pods start in bursts of 3+ with zero
+  slow, while `.78` pods starting *alone* were slow 3 of 5;
+- **a transient event** — slow pods alternate with fast ones across 13 minutes;
+- **config drift** — identical OS, kernel, CRI-O, kubelet, capacity, taints;
+- **CNI errors** — flannel on `.78` has logged nothing since node boot.
+
+**The controlled test refutes it anyway.** Two throwaway Knative Services pinned with
+`nodeSelector`, one per node, cloned from `p1b-bunexec`'s exact pod shape, 16 samples
+ABBA-interleaved:
+
+| arm | samples (s) | slow |
+|---|---|---|
+| `nodepin-78` | 2, 2, 2, 2, 2, 10, 11, 2 | 2/8 |
+| `nodepin-253` | 3, 11, 3, 10, 2, 1, 2, 10 | 3/8 |
+
+The slow mode fires on **both** nodes at comparable rates. The observational asymmetry
+was a **sampling confound**: every *measured* cold start happened to be scheduled to
+`.253`, and the `.78` pods in that dataset were a small, differently-composed population
+of transient revision-activation pods. n=12 on one arm produced a 0-vs-5 split that
+looked decisive and was not.
+
+The lesson is the one this repo keeps relearning: a clean-looking split in observational
+data is a hypothesis, not a finding, until placement is controlled.
+
+## What is still unknown
+
+Why queue-proxy accepts the TCP connection but fails to respond for ~9 s in roughly a
+third of cold starts. The rate is consistent across datasets (5/16 pinned, 10/24 in the
+earlier ABBA sitting), so it is reproducible, but the trigger is not identified.
+
+Two measurements that were attempted and are **not** evidence, recorded so they are not
 mistaken for negative results:
 
-- **PSI** (`/proc/pressure/*`) is `UNREADABLE` — not compiled in on these nodes. The
-  single best metric for separating CPU stall from IO/memory stall is unavailable here.
-- **conntrack counts read 0 on both nodes**, because the probe pod reads its own network
-  namespace, not the host's. This says nothing about host conntrack pressure; reading
-  that requires `hostNetwork: true`.
+- **PSI** (`/proc/pressure/*`) is `UNREADABLE` — not compiled into this kernel.
+- **conntrack reads 0 on both nodes**, because the probe pod sees its own network
+  namespace, not the host's.
 
-There is also no historical data to fall back on: this cluster's Prometheus scrapes
-kube-state-metrics only — **no cAdvisor and no node-exporter** — so CPU-throttling and
-node-memory series do not exist anywhere.
-
-**Where it stops.** What remains is why the queue-proxy/user-container pod shape
-specifically stalls on `.78` while an ordinary container does not. Separating that
-requires *controlled placement* — a throwaway Knative Service pinned to each node with a
-`nodeSelector`, cold-started repeatedly with queue-proxy logs captured. That has not been
-run, because a ksvc has no TTL and cluster deletes are human-gated here, so it would
-leave an object behind that the harness cannot reap. It needs a human to authorise and
-to clean up afterwards.
-
-## Limits of this result — read before quoting it
-
-- **No measured sample landed on `10.0.1.78`.** All 18 samples on 2026-08-11 were
-  scheduled to `10.0.1.253`; `.78` only ever hosted transient revision-activation
-  pods. The node↔slow-mode link therefore rests on **pod time-to-Ready**, not on a
-  sampled request. The 10–11 s agreement with the slow band is strong, and it is
-  still an inference.
-- **The layer below the probe timeout is not established.** Why queue-proxy on `.78`
-  fails to answer for ~9 s — CNI/flannel programming latency, memory reclaim, or
-  something else — is not determined by this data. Do not assert one.
-- **One cluster, two nodes, two sittings.** A distribution from one node and one day
-  can be literally honest and still describe an artifact of that node.
+There is no historical fallback: this cluster's Prometheus scrapes kube-state-metrics
+only — no cAdvisor, no node-exporter — so CPU-throttling and node-memory series do not
+exist anywhere.
 
 ## Consequences
 
-1. **A pooled cold-start number across these two nodes is a mixture, not a
-   measurement.** This is the same defect that withdrew Run 24 and that ADR-0036
-   condition A5 exists to prevent, one level lower: A5 stratifies by *mode*, and
-   mode is at least partly *node*. Cold-start results should stratify by node, and
-   the harness records placement well enough to do it.
-2. **The build target is not where the cold-start work is.** The Phase 1 A/B already
-   showed the arms indistinguishable in fast mode (2.65 s vs 2.55 s); the entire
-   apparent 4.12 s pooled win was mode mixture. The slow mode is worth ~6.4 s and
-   belongs to the platform, not to the runtime.
-3. `10.0.1.78` is anomalous and worth investigating on its own terms, independently
-   of any benchmark.
+1. **The slow mode is a platform/Knative-layer effect, not a runtime or build-target
+   effect.** Phase 1 already showed the two build targets indistinguishable in fast mode
+   (2.65 s vs 2.55 s); the entire apparent 4.12 s pooled win was mode mixture. Roughly a
+   third of cold starts pay a fixed ~9 s, and that is where cold-start work belongs.
+2. **Cold-start numbers must be reported stratified by mode**, since the mode's base rate
+   drifts between sittings — pooling manufactures differences that are not there.
+3. `readinessProbe.timeoutSeconds: 1` converts a slow queue-proxy response into nine
+   whole seconds of waiting. Whether raising it or `periodSeconds` shortens the tail is
+   a cheap, obvious next experiment — and it is a mitigation, not a fix, until the ~9 s
+   itself is explained.
 
 ## Reproducing
 
+Attribution over an existing service (read-only; the collector must start **first**,
+because Knative reaps the pod on scale-to-zero and placement becomes unrecoverable):
+
 ```
-./cold-attribution-collector.sh <ksvc> <context> <namespace> out.jsonl &   # BEFORE the run
+./cold-attribution-collector.sh <ksvc> <context> <namespace> out.jsonl &
 ./run.sh --service <ksvc> --phases cold --cold-samples N --sitting <id>
 kill -TERM %1
 node cold-attribution-report.mjs out.jsonl <results-file>
 ```
 
-The collector must start first: Knative reaps the pod on scale-to-zero and placement
-becomes unrecoverable afterwards. It is read-only against the cluster.
+Node comparison: `./node-pressure-probe.sh` — one self-reaping Job per node, read-only
+against `/proc`, no delete issued. It runs on **both** nodes always: a reading from a
+suspect node alone cannot distinguish an anomaly from the cluster's normal.
+
+Controlled placement requires `kubernetes.podspec-nodeselector: enabled` in the
+`knative-serving/config-features` ConfigMap — Knative's webhook rejects `nodeSelector`
+outright without it. The flag is permissive only and changes no running workload; it was
+enabled for this experiment and reverted afterwards.
