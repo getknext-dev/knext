@@ -44,6 +44,30 @@ run "push ${D}f short flag"     "git push ${D}f origin feature/x"               
 run "filter-branch"             "git filter-branch ${D}${D}all"                              BLOCK
 run "reset ${D}${D}hard"        "git reset ${D}${D}hard HEAD~1"                              BLOCK
 
+# Four false negatives a code review found in a SAFETY CONTROL. Each one exited 0
+# (allowed) on the shipped hook. A false negative here is far worse than the false
+# positives the ALLOW block below records: those annoy, these let the forbidden
+# operation through silently.
+#
+# 1. A backslash continuation is ONE command to the shell, but segment-splitting on
+#    `\n` tore it in two, so the force flag landed in a segment with no `push` in it.
+#    This is the shape the existing "multiline push --force" case does NOT cover:
+#    there, --force is on the SAME line as the push.
+run "push, continuation ${D}${D}force" "$(printf 'git push %s\n  %s%sforce origin main' '\' "$D" "$D")"  BLOCK
+# 2. A leading `+` on a refspec force-updates the remote branch exactly like
+#    --force, and carries no flag for the force rule to match. The FEATURE-branch
+#    case is the one that isolates this rule: `+main` is caught by the main/master
+#    rule too, so it cannot tell you whether the force rule works. Mutation proof
+#    found exactly that — deleting the `+` clause left the suite green until this
+#    case existed. Force-pushing ANY branch is forbidden, not just main.
+run "refspec force origin +main"       "git push origin +main"                                          BLOCK
+run "refspec force on a feature branch" "git push origin +feature/x"                                    BLOCK
+# 3. A fully-qualified refspec still reaches main; the rule accepted only a space or
+#    `:` before the branch name, so a `/` hid it.
+run "push HEAD:refs/heads/main"        "git push origin HEAD:refs/heads/main"                           BLOCK
+# 4. The rm flags do not have to share a token: `rm -r -f` is `rm -rf`.
+run "rm ${D}r ${D}f split flags"       "rm ${D}r ${D}f /some/dir"                                       BLOCK
+
 echo
 echo "== MUST ALLOW (each one was a real false positive) =="
 # `\brm\b` matched inside `--rm` because `-` is a word boundary, and `--platform`
@@ -61,6 +85,13 @@ run "push + ${D}f on a PRECEDING line"       "$(printf 'pgrep %sf docker\ngit pu
 run "push + ${D}f on a FOLLOWING line"       "$(printf 'git push origin chore/x\ngrep %sf pat file' "$D")"   allow
 # ...and the real thing must still block when it spans lines.
 run "multiline push ${D}${D}force"           "$(printf 'echo hi\ngit push %s%sforce origin x' "$D" "$D")"    BLOCK
+# The widened rules must not start crying wolf. `rm -f` and `rm -r` alone are ordinary;
+# only BOTH together are the destructive form. `maintenance` must not match `main`, and
+# a branch path containing the word is not a push TO main.
+run "rm ${D}f alone"                         "rm ${D}f /tmp/one-file"                                       allow
+run "rm ${D}r alone"                         "rm ${D}r /tmp/one-dir"                                        allow
+run "branch named maintenance"               "git push origin maintenance"                                  allow
+run "branch path containing main"            "git push origin fix/main-menu-typo"                           allow
 
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL PASS"; else echo "SOME FAILED"; fi
