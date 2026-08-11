@@ -129,5 +129,5 @@ kubectl get ksvc acme -o jsonpath='{.status.url}'
 
 A cold request reprovisions a pod; the compile cache baked into your image shortens that cold start
 by reusing pre-compiled V8 bytecode — no configuration needed. (The older opt-in
-`spec.cache.enableBytecodeCache` volume is deprecated.) See [Bytecode caching](/docs/bytecode) and
+volume-backed cache has been removed.) See [Bytecode caching](/docs/bytecode) and
 [Scale to zero](/docs/scale-to-zero).
