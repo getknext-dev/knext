@@ -85,7 +85,7 @@ jobs:
           node-version: '24'
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
 
       # The provers RESOLVE `node_modules/.bin/vitest` by walking up from the repo
       # root, so the install is what makes them runnable at all — the very failure
