@@ -56,6 +56,7 @@
       "phase": 0,
       "name": "bridge proof",
       "status": "DONE_WITH_REOPENED_RESIDUAL",
+      "status_note": "Qualified DONE: the migration landed, but P0-2 is measured FALSE and stays open \u2014 vinext beta.4 is not self-contained (it serves from binary + dist/ + node_modules/, with the application NOT in the binary), so the self-containment claim the phase was closed on does not hold on the current toolchain. Recorded rather than reclassified: the phase is genuinely done except for this residual, and forcing it to read DONE or NOT_STARTED would misstate it in one direction or the other.",
       "done_on": "2026-08-04",
       "criteria": [
         {
