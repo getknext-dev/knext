@@ -158,13 +158,29 @@ busybox) copies that static binary into a shared `emptyDir`, and the main contai
 **app image** with `command` pointed at the copied binary. The app image is pulled and held
 against containerd GC without ever executing the app or depending on its binaries.
 
-### 6.2 Bytecode cache PVC — **deprecated, still functional**
+### 6.2 Bytecode cache PVC — **deprecated, still functional, and runtime-dependent**
 
-`spec.cache.enableBytecodeCache` provisions a PVC for the V8 compile cache. It is
-**deprecated** (ADR-0035, #457) in favour of the compile cache **baked into the image at build
-time**, which is now the default cold-start mechanism. The path still works exactly as before;
-the operator only surfaces a migration signal. A runtime shadow-warning (#450) fires when an
-operator-injected `NODE_COMPILE_CACHE` would bypass the baked layer.
+`spec.cache.enableBytecodeCache` provisions a PVC (default **512Mi**) for the runtime code
+cache. It is **deprecated** (ADR-0035, #457) in favour of the compile cache **baked into the
+image at build time**, which is now the default cold-start mechanism. The path still works
+exactly as before; the operator only surfaces a migration signal. A runtime shadow-warning
+(#450) fires when an operator-injected `NODE_COMPILE_CACHE` would bypass the baked layer.
+
+**What the PVC actually buys depends on the runtime, and the flag alone does not know that.**
+The operator sets `NODE_COMPILE_CACHE=/cache/bytecode/latest` unconditionally when the flag is
+on, and adds `BUN_RUNTIME_TRANSPILER_CACHE_PATH` (a sibling dir on the same PVC, so the two
+runtimes' artifacts cannot collide) only when `spec.runtime == "bun"`:
+
+| target | `NODE_COMPILE_CACHE` | `BUN_RUNTIME_TRANSPILER_CACHE_PATH` | Does the PVC earn its keep? |
+|---|---|---|---|
+| `runtime: node` | active | not set | **Yes** — this is the V8 compile cache |
+| `runtime: bun` (Next standalone server under Bun) | **inert** | set | **Yes** — Bun has no runtime *bytecode* cache (`bun build --bytecode` hard-fails on the standalone server), but its *transpiler* cache persists transpiled modules ≳50KB. Measured ≈ **−20%** time-to-first-response on next@16.2.4 / Bun 1.3.5; an unwritable dir is fail-open |
+| **compiled `bun-exec`** (`bun build --compile --bytecode`, ADR-0036/0042) | **inert** | **inert** | **No** — bytecode is embedded in the executable at build time and nothing transpiles at runtime, so both variables point at a cache nothing writes |
+
+The third row is the one to watch. There is **no live defect today**, because the compiled
+target is not reachable through the CRD: `spec.runtime` is `+kubebuilder:validation:Enum=bun;node`,
+there is no `spec.build` field, and the bun-exec benchmark arms are raw Knative Services rather
+than `NextApp`s. See §11.
 
 ### 6.3 Network policy — **default-on**
 
@@ -292,3 +308,19 @@ Stated so nobody re-proposes them:
   **Upgrade order is therefore load-bearing: operator/CRD first, then CLI** (#548).
 - **API is still `v1alpha1`.**
 - **`config/manager/manager.yaml` uses `controller:latest`** (§7).
+- **`enableBytecodeCache` will become meaningless for the compiled `bun-exec` target, and
+  nothing currently stops it.** The flag gates the PVC, the volume mount and the env vars on
+  *itself alone* — it never consults the build target. That is correct today only because the
+  compiled target has no CRD representation (§6.2). **ADR-0042 Phase 4 ships `build: vinext`
+  as a deployable opt-in**, and at that moment `enableBytecodeCache: true` on a compiled image
+  provisions and mounts a 512Mi PVC that nothing ever writes to, while both cache env vars
+  point into it inertly.
+
+  This is precisely the defect class #431 already fixed once: the env block used to be nested
+  under the data-cache `Provider` branch, so an app with no provider "got the PVC provisioned
+  AND mounted while `NODE_COMPILE_CACHE` stayed unset — 512Mi of storage buying nothing." The
+  same sentence will be true again for a different reason unless Phase 4 either **rejects**
+  `enableBytecodeCache` with `build: vinext` at admission (`ValidateNextAppSpec`, where the
+  ADR already plans a spec precondition) or **skips** the PVC/mount/env for that target and
+  says so in an event. Rejecting is preferable: silently ignoring a storage request is how the
+  512Mi came back the first time.
