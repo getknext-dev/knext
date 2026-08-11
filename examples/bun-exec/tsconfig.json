@@ -4,11 +4,7 @@
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "jsx": "react-jsx",
-    "lib": [
-      "ES2023",
-      "DOM",
-      "DOM.Iterable"
-    ],
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "allowJs": true,
     "strict": true,
     "skipLibCheck": true,
@@ -23,15 +19,6 @@
       }
     ]
   },
-  "include": [
-    "app",
-    "*.mjs",
-    "*.ts",
-    "test",
-    ".next/types/**/*.ts",
-    ".next/dev/types/**/*.ts"
-  ],
-  "exclude": [
-    "node_modules"
-  ]
+  "include": ["app", "*.mjs", "*.ts", "test", ".next/types/**/*.ts", ".next/dev/types/**/*.ts"],
+  "exclude": ["node_modules"]
 }

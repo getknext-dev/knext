@@ -90,9 +90,7 @@
       "phase": "3d",
       "name": "artifact provenance",
       "status": "NOT_STARTED",
-      "gates": [
-        1
-      ],
+      "gates": [1],
       "why_gates_phase_1": "Phase 1's exit is distribution separation. On an artifact whose bytecode coverage is uncharacterised, a win would be attributed to bytecode that mostly is not there and a loss blamed on a shape nobody intends to ship.",
       "criteria": [
         {
@@ -198,10 +196,7 @@
       "name": "measure the axis",
       "status": "BLOCKED_ON_3d",
       "reversible": true,
-      "arms": [
-        "node+turbopack (control)",
-        "bun+vinext-compiled"
-      ],
+      "arms": ["node+turbopack (control)", "bun+vinext-compiled"],
       "preconditions": [
         {
           "id": "P1-pre-1",
@@ -236,22 +231,8 @@
           "id": "P1-1",
           "text": "a run satisfying all six admissibility conditions",
           "kind": "checklist",
-          "target": [
-            "A1",
-            "A2",
-            "A3",
-            "A4",
-            "A5",
-            "A6"
-          ],
-          "measured": [
-            "A1",
-            "A2",
-            "A3",
-            "A4",
-            "A5",
-            "A6"
-          ],
+          "target": ["A1", "A2", "A3", "A4", "A5", "A6"],
+          "measured": ["A1", "A2", "A3", "A4", "A5", "A6"],
           "source": "sitting s-20260811-abba, 2026-08-10/11, context-ckmva7v7zvq, 24 interleaved cold samples",
           "note": "SATISFIED. A1 proven by label equality (app-159989384ca3275f on both arms, images differing by build target); A2/A4 recorded by the harness from the deployed digests; A3 by abba.sh (A B B A blocks, one cold sample per invocation); A5 single sitting, stratified below; A6 measured at P3d-2 (34/34 modules embedded).",
           "attempt": {
@@ -290,14 +271,8 @@
             "paired_median_delta_s": 0.22,
             "sign_split": "bun faster 5/12",
             "ranges_s": {
-              "bun": [
-                1.98,
-                11.38
-              ],
-              "node": [
-                2.08,
-                11.57
-              ]
+              "bun": [1.98, 11.38],
+              "node": [2.08, 11.57]
             },
             "distribution_separation": false,
             "conclusion": "The entire pooled delta is MODE MIXTURE, not build target. The bimodal ~10-11 s slow mode fired 33% for bun and 50% for node; pooling those makes bun look 4 s faster while fast-mode medians differ by 90 ms in node's favour. This is Run 24's defect reproduced exactly \u2014 which is why A5 requires stratification, and why the pooled figure must not be quoted."
@@ -354,9 +329,7 @@
       "name": "stand up the compat bar BEFORE any user-visible claim",
       "status": "NOT_STARTED",
       "reversible": true,
-      "concurrent_with": [
-        1
-      ],
+      "concurrent_with": [1],
       "criteria": [
         {
           "id": "P2-1",
