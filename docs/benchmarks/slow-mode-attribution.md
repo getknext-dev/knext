@@ -72,6 +72,59 @@ Memory is the one node-level number that is high on both (81–84%), and `10.0.1
 additionally hosts the activator, both Kourier gateways and both CoreDNS pods.
 Neither observation is load-bearing for the conclusion above.
 
+## Why `10.0.1.78`? — what was ruled out, and where it stops
+
+Follow-up investigation (`node-pressure-probe.sh`, read-only, one self-reaping Job per
+node). The headline is counter-intuitive and worth stating plainly: **the stall happens
+on the *healthier*, *quieter* node.**
+
+| | `10.0.1.253` | `10.0.1.78` |
+|---|---|---|
+| loadavg (1 min) | 1.38 | **0.02** |
+| `allocstall_normal` (direct-reclaim stalls) | 150 | **2** |
+| `pgmajfault` | 60,841 | **18,172** |
+| MemAvailable | 2.45 GB | **2.95 GB** |
+| iowait (jiffies since boot) | 1,769,671 | **446,563** |
+| steal (jiffies since boot) | 2,203,067 | **891,105** |
+
+`.78` is lower on every pressure indicator, so **CPU starvation, memory pressure, IO
+stall and hypervisor steal are all refuted** — they would have to be worse on `.78`,
+and each is several-fold better. Additionally ruled out:
+
+- **General container startup on the node.** Five paired runs of an identical busybox
+  pod: `.253` 1,1,1,2,2 s; `.78` 1,1,1,2,4 s. `.78` is not slow at starting containers —
+  the effect is specific to the Knative pod shape (queue-proxy + user container).
+- **Concurrent-start contention.** `.253` had 18 pods start in bursts of 3+ with **zero**
+  slow; `.78` pods starting *alone* were slow 3 of 5. Inverted from what the hypothesis
+  predicts.
+- **A transient cluster event.** The slow pods do not cluster in time — they alternate
+  with fast ones across 13 minutes.
+- **Node configuration drift.** Identical OS (Oracle Linux 8.10), kernel
+  (5.15.0-320 UEK), runtime (CRI-O 1.33.10), kubelet (v1.33.10), capacity and taints.
+- **Flannel/CNI errors.** The flannel daemon on `.78` has logged nothing since node
+  boot on 2026-06-01.
+
+Two measurements that were **attempted and are not evidence**, recorded so they are not
+mistaken for negative results:
+
+- **PSI** (`/proc/pressure/*`) is `UNREADABLE` — not compiled in on these nodes. The
+  single best metric for separating CPU stall from IO/memory stall is unavailable here.
+- **conntrack counts read 0 on both nodes**, because the probe pod reads its own network
+  namespace, not the host's. This says nothing about host conntrack pressure; reading
+  that requires `hostNetwork: true`.
+
+There is also no historical data to fall back on: this cluster's Prometheus scrapes
+kube-state-metrics only — **no cAdvisor and no node-exporter** — so CPU-throttling and
+node-memory series do not exist anywhere.
+
+**Where it stops.** What remains is why the queue-proxy/user-container pod shape
+specifically stalls on `.78` while an ordinary container does not. Separating that
+requires *controlled placement* — a throwaway Knative Service pinned to each node with a
+`nodeSelector`, cold-started repeatedly with queue-proxy logs captured. That has not been
+run, because a ksvc has no TTL and cluster deletes are human-gated here, so it would
+leave an object behind that the harness cannot reap. It needs a human to authorise and
+to clean up afterwards.
+
 ## Limits of this result — read before quoting it
 
 - **No measured sample landed on `10.0.1.78`.** All 18 samples on 2026-08-11 were
