@@ -1,0 +1,70 @@
+name: Escalation triggers
+
+# Enforce the MECHANICALLY DETECTABLE escalation triggers from
+# `.claude/rules/workflow.md`.
+#
+# WHY. The sprint model moved the architect + system-designer gates from per-PR to
+# per-sprint and pulls them back only on five triggers. The rules file says plainly
+# that three are detectable and that leaving them to self-reporting is the failure
+# mode to watch — "rather than relying on someone to self-report against their own
+# interest" — and then never implemented it. On 2026-08-11 a breaking CRD + CLI
+# change merged with no design gate and no per-PR review; the retroactive review
+# found two HIGH defects, one in a safety control. Nothing flagged it because
+# nothing was looking.
+#
+# WHAT THIS IS NOT. It does not judge the change and it cannot approve one. It
+# asserts that a trigger-class change was ACKNOWLEDGED — that the gate the rules
+# require was summoned. Two of the five triggers (a discovered fact that invalidates
+# the sprint plan; a hard-rule contradiction touching no tracked path) remain
+# judgement and unenforced, by the rules' own admission. Three of five, not five.
+#
+# ESCAPE HATCH, DELIBERATELY: the `design-gate:cleared` label. It is auditable (it
+# shows in the PR timeline with who added it and when) and it is cheap, because a
+# gate that is expensive to satisfy gets routed around instead of obeyed. The point
+# is that skipping the gate must be a DECISION someone takes and signs, not the
+# default that happens when nobody looks.
+#
+# FALSE-POSITIVE RATE, MEASURED not assumed: 15% of the last 40 first-parent
+# commits, and every one of those is defensible on inspection (including the change
+# this check exists because of). See tests/escalation-triggers.test.ts, whose
+# "stays quiet on ordinary work" block is what defends that number.
+
+on:
+  pull_request:
+    branches: ['**']
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  escalation-triggers:
+    name: Escalation triggers acknowledged
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout (full history — the check diffs against the merge base)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      # No `${{ }}` inside the script body: the PR's labels are attacker-influenced
+      # text (anyone who can label can set them), so they arrive via env and are read
+      # as data. Interpolating them into the shell would be an injection.
+      - name: Check for unacknowledged escalation triggers
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -euo pipefail
+          node scripts/check-escalation-triggers.mjs \
+            --base "$BASE_SHA" \
+            --head "$HEAD_SHA" \
+            --labels "$PR_LABELS"
