@@ -20,8 +20,6 @@ export const EMITTED_CR_FIELD_PATHS: readonly string[] = [
     "spec",
     "spec.buildId",
     "spec.cache",
-    "spec.cache.bytecodeCacheSize",
-    "spec.cache.enableBytecodeCache",
     "spec.cache.keyPrefix",
     "spec.cache.provider",
     "spec.cache.url",

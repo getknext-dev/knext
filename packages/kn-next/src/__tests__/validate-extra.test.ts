@@ -85,16 +85,6 @@ describe("validateConfig — CRD-mirroring branches", () => {
         ).toThrow(/must be a positive quantity/);
     });
 
-    it("rejects a non-positive bytecodeCache size", () => {
-        expect(() =>
-            validateConfig(
-                cfg({
-                    bytecodeCache: { size: "0Gi" },
-                } as Partial<KnativeNextConfig>),
-            ),
-        ).toThrow(/must be a positive quantity/);
-    });
-
     it("rejects a negative minScale", () => {
         expect(() =>
             validateConfig(cfg({ scaling: { minScale: -1 } })),
@@ -188,7 +178,6 @@ describe("validateConfig — CRD-mirroring branches", () => {
             validateConfig(
                 cfg({
                     scaling: { cpuRequest: "250m", memoryLimit: "512Mi" },
-                    bytecodeCache: { size: "512Mi" },
                 } as Partial<KnativeNextConfig>),
             ),
         ).not.toThrow();

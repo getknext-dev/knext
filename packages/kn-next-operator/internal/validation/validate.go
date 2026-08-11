@@ -314,13 +314,6 @@ func ValidateNextAppSpec(spec *appsv1alpha1.NextAppSpec) error {
 			)
 		}
 	}
-	// Bytecode cache (#431): the PVC size is free text the reconciler turns
-	// into a Kubernetes quantity. Validate it HERE so a malformed value fails
-	// as a status condition / admission rejection instead of panicking the
-	// reconciler at the PVC sizing site.
-	if err := validateBytecodeCacheSize(spec); err != nil {
-		return err
-	}
 	// Resource requests/limits (#435): the four spec.resources fields are
 	// user-supplied free text the reconciler turns into Kubernetes quantities
 	// for the Knative container. Validate them HERE so a malformed value fails
@@ -419,39 +412,6 @@ func validateDatabase(spec *appsv1alpha1.NextAppSpec) error {
 		}
 	}
 
-	return nil
-}
-
-// validateBytecodeCacheSize rejects a spec.cache.bytecodeCacheSize that is not
-// a valid, positive Kubernetes quantity (#431). This field is user-supplied
-// free text that the reconciler turns into the bytecode-cache PVC's storage
-// request; before this check the reconcile site parsed it with
-// resource.MustParse, so a typo like "512K" (uppercase K is not a Kubernetes
-// suffix — decimal kilo is lowercase `k`) PANICKED the reconciler. Validating
-// here means the failure surfaces as an admission rejection / status
-// condition instead. The size is checked even when EnableBytecodeCache is
-// false, so a dormant typo cannot turn into a reconcile failure the moment
-// the cache is switched on.
-func validateBytecodeCacheSize(spec *appsv1alpha1.NextAppSpec) error {
-	if spec.Cache == nil || spec.Cache.BytecodeCacheSize == "" {
-		return nil // unset → reconciler default of 512Mi
-	}
-	size := spec.Cache.BytecodeCacheSize
-	// #635: bounded parse — resource.ParseQuantity does not return on some
-	// user-typable values (see internal/validation/quantity.go).
-	q, err := ParseQuantityBounded(size)
-	if err != nil {
-		return fmt.Errorf(
-			"spec.cache.bytecodeCacheSize %q is not a valid Kubernetes quantity (e.g. \"512Mi\", \"1Gi\"): %v",
-			size, err,
-		)
-	}
-	if q.Sign() <= 0 {
-		return fmt.Errorf(
-			"spec.cache.bytecodeCacheSize %q must be a positive quantity (the bytecode-cache PVC cannot be sized <= 0)",
-			size,
-		)
-	}
 	return nil
 }
 

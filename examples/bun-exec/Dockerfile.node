@@ -1,0 +1,47 @@
+# The CONTROL arm image for the ADR-0042 Phase 1 A/B: the same application as
+# `Dockerfile` (the bun arm), built by Next with turbopack and served on node.
+#
+# Built by `build-node.sh`. Pass its labels so the deployed digest carries its
+# own build provenance (S8 / #551) — an unstamped image declares nothing, and
+# `run.sh` will refuse to measure an A/B whose arms cannot prove they are the
+# same application:
+#
+#   LABELS=(); while IFS= read -r l; do LABELS+=(--label "$l"); done \
+#     < <(./build-node.sh --print-labels)
+#   docker build "${LABELS[@]}" -f Dockerfile.node -t <ref> .
+#
+# Digest-pinned per security.md ("pin images by digest; reject :latest") and
+# enforced by scripts/check-base-images-pinned.sh, which scans every Dockerfile*
+# in the tree — so this file was covered the moment it existed. The tag lives in
+# a full-line comment because Docker rejects a trailing comment on a FROM line.
+# node:22-alpine
+FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
+
+WORKDIR /app
+
+# COPY THE STANDALONE TREE WHOLE, and move WORKDIR to the app inside it, rather
+# than flattening the app to the root and copying `node_modules` alongside.
+# Flattening fails: Next's monorepo standalone output puts hoisted deps at
+# `.next/standalone/node_modules` AND leaves a `node_modules` inside the app
+# directory, so the second COPY lands on top of the first — "cannot replace to
+# directory … with file". Preserving the layout Next emitted is also the only
+# shape `server.js` resolves against.
+COPY .next/standalone ./
+COPY .next/static ./examples/bun-exec/.next/static
+
+# `build-node.sh` asserts this path exists and fails loudly if it moves, so the
+# recipe and the image cannot silently disagree about where the artifact is.
+WORKDIR /app/examples/bun-exec
+
+# Parity with the bun arm, which the A/B depends on: same port, same non-root
+# posture, no `next start` wrapper on either side. A difference here would be
+# measured as a difference in the build target, which is the one thing this
+# comparison must not confuse.
+ENV NODE_ENV=production
+ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
+EXPOSE 3000
+
+USER node
+
+CMD ["node", "server.js"]

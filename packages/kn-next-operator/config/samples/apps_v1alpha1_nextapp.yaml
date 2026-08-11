@@ -24,7 +24,6 @@ spec:
   # precompilation (default runtime is node):
   # runtime: "bun"
   # Optional cold-start optimizations:
-  #   cache.enableBytecodeCache: true  # V8 compile cache on a shared PVC
   #                                    # (RWO — keep fan-out on one node, see docs)
   #   scaling.imagePrewarm: true       # pin the image on every node (ADR-0037)
   # Secrets are injected from Kubernetes Secrets, never inlined here:

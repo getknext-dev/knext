@@ -63,39 +63,7 @@ The operator runs a validating webhook, which needs a serving certificate.
 [cert-manager](https://cert-manager.io) must be installed in the cluster before you apply the
 bundle — the bundle includes the operator's `Issuer`/`Certificate` for the webhook.
 
-## 4 · StorageClass + Knative PVC feature flags
-
-<Callout type="warn">
-**Deprecated — you can skip this section.** The opt-in bytecode-cache PVC is deprecated. The compile
-cache is now baked into your image by default, so you no longer need to enable it, and you no longer
-need the StorageClass or Knative PVC feature flags below just for bytecode caching.
-</Callout>
-
-The bytecode-cache PVC (enabled per app via `spec.enableBytecodeCache`) mounts a **writable**
-PersistentVolumeClaim so the runtime can persist its `NODE_COMPILE_CACHE` across cold starts. Knative
-Serving gates PVC-referencing PodSpecs behind two feature flags that are **default-off**:
-
-```yaml title="config-features (shipped in the bundle)"
-data:
-  kubernetes.podspec-persistent-volume-claim: enabled
-  kubernetes.podspec-persistent-volume-write: enabled
-```
-
-The bundle ships a `config-features` ConfigMap enabling both. Without **both**, Knative's admission
-webhook denies the bytecode-cache ksvc and reconcile fails with no ksvc created. Apply with
-`--server-side` so it merges into the `config-features` Serving already owns. As with the
-`config-network` ConfigMap above, if `--server-side` reports a **field-ownership conflict** (e.g. a
-GitOps tool already manages this ConfigMap), add `--force-conflicts` to take over just the keys the
-bundle sets.
-
-<Callout type="info">
-Unlike the ingress-class (which is Kourier-specific), these flags are **networking-layer
-independent** — safe under both Kourier and net-istio. A `StorageClass` / volume provisioner is a
-**separate** prerequisite: the PVC needs something to bind to. (`kind` ships the `local-path`
-provisioner; production clusters supply their own.)
-</Callout>
-
-## 5 · Install the operator
+## 4 · Install the operator
 
 The operator image and the `install.yaml` bundle are built and published automatically for each
 release. Every build generates an SBOM, is Trivy-scanned **before** it is pushed (HIGH/CRITICAL
@@ -153,7 +121,7 @@ and net-istio; the Kourier `ingress-class` from step 2 is correct for the Kourie
 **not** be applied to an istio-only dev cluster.
 </Callout>
 
-## 6 · Verify with a NextApp
+## 5 · Verify with a NextApp
 
 With the operator running, deploy a `NextApp` resource and confirm the operator reconciles it into a
 reachable Knative Service. Follow [Getting started](/docs/getting-started) to build and apply your

@@ -396,8 +396,22 @@ assert_contains "${TI}/labels.txt" "dev.knext.build.command=bun build --compile 
   "the label carries the real --compile --minify --bytecode command"
 assert_contains "${TI}/labels.txt" "dev.knext.build.target=bun-linux-x64-musl" \
   "the label carries the compile target"
-assert_contains "${TI}/labels.txt" "dev.knext.app.id=bun-exec-" \
+# The app id must be TARGET-INDEPENDENT, so both halves are asserted.
+#
+# This assertion used to expect the prefix `bun-exec-`, and that expectation was
+# the defect: an id that names its own build target can never match the node
+# arm's id, so ADR-0036 condition A1 ("same app on both arms") was unsatisfiable
+# by construction — the A/B it gates could not have been admissible whatever the
+# arms actually contained. `app-id.sh` now derives the id from `app/` +
+# `package.json` alone, and both arms call it.
+#
+# Asserting only "an id is declared" would stay green if the target crept back
+# into it, which is exactly the regression that matters here — hence the second
+# assertion.
+assert_contains "${TI}/labels.txt" "dev.knext.app.id=app-" \
   "the image declares an app id — the only thing that can make a build-target A/B admissible"
+assert_not_contains "${TI}/labels.txt" "dev.knext.app.id=bun-exec-" \
+  "the app id does NOT name its build target — a target-prefixed id makes A1 unsatisfiable"
 
 echo
 echo "[B-2] the stamped command is the command that RUNS — one array, no second copy"

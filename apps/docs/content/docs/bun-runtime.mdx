@@ -83,7 +83,7 @@ back to Node requires a **rebuild**. Images built for Node run under either runt
 
 Independently of the build-time bytecode pass, Bun caches its transpilation work at runtime. knext
 points `BUN_RUNTIME_TRANSPILER_CACHE_PATH` at the same persistent volume that backs the deprecated
-volume-backed [bytecode caching](/docs/bytecode) (`spec.cache.enableBytecodeCache` — deprecated; the
+[bytecode caching](/docs/bytecode) (baked into your image; the
 compile cache is now baked into the image by default), so the cache survives pod
 death and pays off across cold starts — worth roughly 20% alone, and composing with the bytecode
 pass to 145 ms warm in the measurement above.
