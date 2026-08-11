@@ -17,8 +17,7 @@ installed (those are cloud-agnostic):
 
 <Callout type="info">
 **Prerequisite: [the common install page](/docs/install).** It covers Knative Serving + Kourier
-(networking), cert-manager, the knext operator, and the PVC feature flags that back the
-bytecode-cache mount. This guide only covers the EKS-specific pieces: cluster, the EBS CSI driver,
+(networking), cert-manager, and the knext operator. This guide only covers the EKS-specific pieces: cluster, the EBS CSI driver,
 storage, cache, and registry.
 </Callout>
 
@@ -43,8 +42,9 @@ Kourier, cert-manager, and the operator.
 
 ## 2. Install the EBS CSI driver
 
-The bytecode-cache PVC (see the install page's PVC feature flags) needs a StorageClass backed by a
-real volume provisioner. On EKS that's the **EBS CSI driver**, exposing `gp3` / `gp2`:
+knext itself needs no persistent volume — its compile cache is baked into the image. But any
+stateful component you run alongside it (Postgres, Redis) needs a StorageClass backed by a real
+volume provisioner. On EKS that's the **EBS CSI driver**, exposing `gp3` / `gp2`:
 
 ```bash
 eksctl create addon --name aws-ebs-csi-driver --cluster knext --force
@@ -63,7 +63,7 @@ parameters:
   type: gp3
 ```
 
-Point the bytecode-cache PVC at this StorageClass per the install page.
+Point any stateful component's PVC at this StorageClass.
 
 ## 3. Storage: S3
 

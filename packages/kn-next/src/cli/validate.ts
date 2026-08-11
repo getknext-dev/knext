@@ -116,8 +116,38 @@ function checkQuantity(value: string): {
  * Validates a KnativeNextConfig at load time.
  * Throws ConfigValidationError with clear messages on invalid config.
  */
+/**
+ * Config keys that have been REMOVED, mapped to the migration message.
+ *
+ * A removed key is not the same as an unknown one. `bytecodeCache` was a real,
+ * documented setting; after the PVC-backed bytecode cache was deleted, nothing read
+ * it any more — so a config still carrying it validated clean, emitted a CR without
+ * it, and deployed successfully while SILENTLY DROPPING a setting the author believed
+ * was in force. The docs said that combination would fail the deploy. It did not.
+ *
+ * Silently ignoring a user's storage request is precisely how the removed 512Mi PVC
+ * came back the first time, so a removed key is rejected loudly and told where to go.
+ * Unknown keys generally are NOT rejected here — only ones we deliberately deleted,
+ * because those are the ones a user has a reasonable belief about.
+ */
+const REMOVED_CONFIG_KEYS: Record<string, string> = {
+    bytecodeCache:
+        "'bytecodeCache' has been removed. The V8 compile cache is now baked into your " +
+        "image at build time, so there is nothing to enable, size, or mount — delete the " +
+        "'bytecodeCache' block from your config. (Removing it does not disable bytecode " +
+        "caching: the cache in your image is always active.)",
+};
+
 export function validateConfig(config: KnativeNextConfig): void {
     const errors: string[] = [];
+
+    // Removed keys first: if the author is working from a stale config, say so before
+    // burying it under unrelated complaints about the rest of the file.
+    for (const [key, message] of Object.entries(REMOVED_CONFIG_KEYS)) {
+        if ((config as unknown as Record<string, unknown>)[key] !== undefined) {
+            errors.push(message);
+        }
+    }
 
     // Required fields
     if (!config.name || typeof config.name !== "string") {
