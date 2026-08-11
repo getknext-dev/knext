@@ -118,8 +118,16 @@ build-time cache does not:
 - Where it did work, the volume attaches to **one node at a time**, so a pod scheduled onto a second
   node sat **Pending** instead of serving traffic — capping how wide the app could scale.
 
-Leaving the old fields in place will make your deploy **fail**: knext applies your `NextApp` with
-strict validation, and the fields no longer exist. Remove them:
+Leaving the old settings in place makes your deploy **fail**, in two different places
+depending on where they are:
+
+- **In `kn-next.config.ts`** — `kn-next` rejects a `bytecodeCache` block up front, and tells you what
+  replaced it. It is refused rather than ignored on purpose: a setting that is quietly dropped looks
+  exactly like a setting that is working.
+- **In a `NextApp` you apply by hand** — the fields no longer exist on the resource, and `kn-next`
+  applies with strict validation, so the cluster rejects the unknown field.
+
+Remove them:
 
 ```ts
 export default {

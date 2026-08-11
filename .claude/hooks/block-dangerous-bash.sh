@@ -9,6 +9,24 @@ cmd=$(printf '%s' "$input" | jq -r '.tool_input.command // ""' 2>/dev/null || ec
 [ -z "$cmd" ] && exit 0
 
 norm=$(printf '%s' "$cmd" | tr '\n' ' ')
+
+# `joined` resolves BACKSLASH-NEWLINE continuations the way the shell itself does,
+# WITHOUT flattening ordinary newlines. Everything that splits the command into
+# segments must use this, never the raw `$cmd`.
+#
+# Why: segment-splitting on `\n` (added to stop a flag on an adjacent LINE reading as
+# a flag on the push) also split a single command written across lines. So
+#
+#     git push \
+#       --force origin main
+#
+# put `git push` in one segment and `--force origin main` in the next, and the force
+# and main/master rules — which only look at the segment containing the push — saw
+# neither. The shell joins those two lines into ONE command; the guard has to as well
+# or it is reasoning about a command that was never run. Measured: this exact payload
+# exited 0 (allowed) while the pre-segmentation version of this hook blocked it.
+joined=$(printf '%s' "$cmd" | sed -e :a -e '/\\$/N; s/\\\n[[:space:]]*/ /; ta')
+
 deny() { echo "BLOCKED (block-dangerous-bash): $1" >&2; exit 2; }
 
 # rm -rf / rm -fr (any order of r and f flags)
@@ -24,6 +42,19 @@ deny() { echo "BLOCKED (block-dangerous-bash): $1" >&2; exit 2; }
 # Verified when changing this: `rm -rf /some/dir` and `…; rm -rf …` still block.
 # A guard that cries wolf gets worked around, which is worse than one that is
 # narrower and trusted.
+#
+# The flags do NOT have to share a token. `rm -r -f dir` is the same command as
+# `rm -rf dir`, and the single-token patterns below missed it entirely (measured:
+# exit 0). So the segment containing the `rm` is tested for a recursive flag and a
+# force flag INDEPENDENTLY — both must be present, which keeps `rm -f file` and
+# `rm -r dir` allowed exactly as before.
+rm_seg=$(printf '%s' "$joined" | tr ';|&\n' '\n\n\n\n' \
+  | grep -E '(^|[;&|(]|[[:space:]])rm[[:space:]]' | grep -vE '(^|[[:space:]])--?[A-Za-z-]*rm([[:space:]]|=|$)')
+if [ -n "$rm_seg" ] \
+  && printf '%s' "$rm_seg" | grep -qE '(^|[[:space:]])(-[A-Za-z]*r[A-Za-z]*|--recursive)([[:space:]]|$)' \
+  && printf '%s' "$rm_seg" | grep -qE '(^|[[:space:]])(-[A-Za-z]*f[A-Za-z]*|--force)([[:space:]]|$)'; then
+  deny "destructive 'rm -rf'. Remove specific paths deliberately, or run it yourself."
+fi
 if printf '%s' "$norm" | grep -qE '(^|[;&|(]|[[:space:]])rm[[:space:]][^|;&]*-[A-Za-z]*r[A-Za-z]*f|(^|[;&|(]|[[:space:]])rm[[:space:]][^|;&]*-[A-Za-z]*f[A-Za-z]*r'; then
   deny "destructive 'rm -rf'. Remove specific paths deliberately, or run it yourself."
 fi
@@ -47,11 +78,20 @@ if printf '%s' "$norm" | grep -qE '\bgit\b[^|;&]*\bpush\b'; then
   # the command on the next — which is the same false positive one level out.
   # Caught by this rule firing on a PR body that contained `pgrep -f docker` and
   # `git push …` on consecutive lines.
-  push_seg=$(printf '%s' "$cmd" | tr ';|&\n' '\n\n\n\n' | grep -E '\bgit\b.*\bpush\b')
-  if printf '%s' "$push_seg" | grep -qE -- '--force|--force-with-lease|--mirror|--all|(^|[[:space:]])-[A-Za-z]*f[A-Za-z]*([[:space:]]|$)'; then
+  # Split `joined`, not `$cmd`: see the note on `joined` above — a backslash
+  # continuation is ONE command, and splitting the raw text tore it in half.
+  push_seg=$(printf '%s' "$joined" | tr ';|&\n' '\n\n\n\n' | grep -E '\bgit\b.*\bpush\b')
+  # A leading `+` on a refspec IS a force push (`git push origin +main` rewrites the
+  # remote branch exactly like `--force` does) and carried no flag for the rule above
+  # to find.
+  if printf '%s' "$push_seg" | grep -qE -- '--force|--force-with-lease|--mirror|--all|(^|[[:space:]])-[A-Za-z]*f[A-Za-z]*([[:space:]]|$)|(^|[[:space:]])\+[A-Za-z0-9._/-]'; then
     deny "force/mirror/--all push is forbidden. Push a single feature branch and open a PR."
   fi
-  if printf '%s' "$push_seg" | grep -qE -- '(^|[[:space:]:])(main|master)([[:space:]]|$)'; then
+  # `/` and `+` join the allowed prefixes so a fully-qualified or force refspec still
+  # names the branch: `HEAD:refs/heads/main` and `+main` both reached the remote's
+  # main branch while this rule, which only accepted a space or `:` before the name,
+  # saw nothing.
+  if printf '%s' "$push_seg" | grep -qE -- '(^|[[:space:]:/+])(main|master)([[:space:]]|$)'; then
     deny "direct push to main/master is forbidden — push a feature branch and open a PR instead."
   fi
   # otherwise: feature-branch push allowed (needed to open PRs).
