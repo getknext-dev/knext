@@ -1,6 +1,8 @@
 # Knative Next.js Operator (`kn-next-operator`)
 
-The `kn-next-operator` is a Kubernetes Operator built with Kubebuilder that serves as the control plane for the `kn-next` ecosystem. It transforms standard Kubernetes clusters into a seamless, "Vercel-equivalent" Platform-as-a-Service (PaaS) for Next.js applications deployed with the official Next.js Adapter (`output:'standalone'`) on Knative.
+The `kn-next-operator` is a Kubernetes Operator built with Kubebuilder that serves as the control plane for the `kn-next` ecosystem. It reconciles a single `NextApp` custom resource into the Knative and Kubernetes objects needed to run a Next.js application — built with the official Next.js Adapter (`output:'standalone'`) — as a scale-to-zero service on Knative.
+
+knext is a **narrow Next.js-on-Knative deployment adapter, not a general-purpose PaaS**. It matches Vercel's *compute* layer (scale-to-zero, comparable to Fluid Compute); it is not a Vercel-equivalent platform, and it does not aim to be one. See [Architecture & Features §10](./ARCHITECTURE.md#10-what-the-operator-deliberately-does-not-do) for the scope boundary.
 
 ## Architecture & Responsibilities
 
@@ -12,6 +14,7 @@ Cluster administrators or CI/CD pipelines apply a single Custom Resource named `
 
 Detailed documentation for each of the core subsystems managed by the Operator is available below:
 
+- **[Architecture & Features](./ARCHITECTURE.md)**: Start here. The control loop and its watch semantics, the pure status-verdict engine, admission validation, the deletion finalizer's blast-radius limits, every feature (image prewarm, network policy, database binding, traffic/scaling), the security posture, and what the operator deliberately does *not* do.
 - **[The NextApp CRD (`NextApp`)](./crd-nextapp.md)**: The OpenAPI specification and schema definition for deploying Next.js apps.
 - **[The Reconciler](./reconciler.md)**: The core Go-based controller loop that manages Knative Services, PVCs, and ServiceAccounts.
 - **[GitOps Preview Environments](./gitops-preview.md)**: Dynamic scale-to-zero capabilities and namespace isolation for Pull Request lifecycles.
