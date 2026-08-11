@@ -357,20 +357,6 @@ describe("CR image field — digest-pinned ref (CLI-58 E2E invariant)", () => {
         ).toBe(0);
     });
 
-    it("CR preserves enableBytecodeCache=true (redis) with digest-pinned image", async () => {
-        const readFileFn = vi.fn().mockReturnValue(FAKE_METADATA_JSON);
-        const pinnedRef = await resolveDigest(
-            "registry.example.com/my-app:ts",
-            vi.fn(),
-            "/tmp/meta.json",
-            readFileFn,
-        );
-        const cr = buildNextAppCRObject(baseConfig, pinnedRef, "default");
-        expect(
-            (cr.spec as { cache: { enableBytecodeCache: boolean } }).cache
-                .enableBytecodeCache,
-        ).toBe(true);
-    });
 
     it("a bare tag-only ref (no @sha256:) is rejected by validateCRImageRef", () => {
         // This is what deploy used to emit — the operator rejects it

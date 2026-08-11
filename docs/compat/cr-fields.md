@@ -31,8 +31,6 @@ Every field the CLI can emit is defined by the bundled CRD.
 | `spec` | yes |
 | `spec.buildId` | yes |
 | `spec.cache` | yes |
-| `spec.cache.bytecodeCacheSize` | yes |
-| `spec.cache.enableBytecodeCache` | yes |
 | `spec.cache.keyPrefix` | yes |
 | `spec.cache.provider` | yes |
 | `spec.cache.url` | yes |

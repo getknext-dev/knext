@@ -450,31 +450,24 @@ type StorageSpec struct {
 	Endpoint string `json:"endpoint,omitempty"`
 }
 
+// CacheSpec configures the DATA cache (ISR / Next.js data caching) only.
+//
+// REMOVED: enableBytecodeCache / bytecodeCacheSize. The PVC-backed bytecode cache
+// is gone, superseded by the V8 compile cache baked into the application image at
+// build time (ADR-0035) — the default cold-start mechanism, which needs no volume,
+// mount, or cluster feature flag. The fields were deprecated first (ADR-0017
+// stability policy) and are now deleted: the operator no longer provisions a PVC,
+// mounts /cache/bytecode, or injects NODE_COMPILE_CACHE /
+// BUN_RUNTIME_TRANSPILER_CACHE_PATH.
+//
+// A stale CR still carrying either field is REJECTED by the apiserver when applied
+// with `--validate=strict` (which every kn-next apply passes, #547) and silently
+// PRUNED otherwise — notably by GitOps controllers, which do not assert strict
+// validation. Neither field can be rejected in ValidateNextAppSpec: once it is off
+// the struct its value never reaches Go code at all.
 type CacheSpec struct {
 	Provider string `json:"provider,omitempty"`
 	URL      string `json:"url,omitempty"`
-	// Deprecated: the PVC-backed bytecode cache is superseded by the V8 compile
-	// cache baked into the application image at build time (ADR-0035), which is
-	// the default cold-start mechanism and needs no volume, mount, or cluster
-	// feature flag. This field still works but will be removed in a future
-	// release per the v1alpha1 stability policy (ADR-0017); migrate off it.
-	//
-	// EnableBytecodeCache provisions a PVC mounted at /cache/bytecode and wires
-	// the runtime code cache for the selected runtime: NODE_COMPILE_CACHE
-	// (/cache/bytecode/latest) always, plus BUN_RUNTIME_TRANSPILER_CACHE_PATH
-	// (/cache/bytecode/bun-transpiler) when spec.runtime is "bun" — one field
-	// covers BOTH caches. Growth is bounded only by BytecodeCacheSize (no
-	// eviction); both runtimes fail open when the volume is full or unwritable.
-	// +optional
-	EnableBytecodeCache bool `json:"enableBytecodeCache,omitempty"`
-	// Deprecated: sizes the deprecated PVC-backed bytecode cache; superseded by
-	// the image-baked V8 compile cache (ADR-0035) and removed with
-	// EnableBytecodeCache in a future release per the v1alpha1 stability policy
-	// (ADR-0017).
-	//
-	// BytecodeCacheSize sizes the bytecode-cache PVC (default 512Mi).
-	// +optional
-	BytecodeCacheSize string `json:"bytecodeCacheSize,omitempty"`
 	// KeyPrefix is prepended to every cache key — maps from KnativeNextConfig.cache.keyPrefix
 	// +optional
 	KeyPrefix string `json:"keyPrefix,omitempty"`
