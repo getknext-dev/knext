@@ -26,8 +26,9 @@ az aks create \
 az aks get-credentials --resource-group <rg> --name <cluster-name>
 ```
 
-For the bytecode-cache PVC, knext needs a `StorageClass` that provisions writable volumes. AKS
-ships the Azure Disk CSI driver as the `managed-csi` StorageClass:
+knext itself needs no persistent volume — its compile cache is baked into the image. Stateful
+components you run alongside it (Postgres, Redis) need a `StorageClass` that provisions writable
+volumes. AKS ships the Azure Disk CSI driver as the `managed-csi` StorageClass:
 
 ```sh
 kubectl get storageclass managed-csi

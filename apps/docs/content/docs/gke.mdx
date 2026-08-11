@@ -11,8 +11,7 @@ knext operator. Those are cloud-agnostic and live on the common install page —
 
 <Callout type="info">
 **Prerequisite: [the common install page](/docs/install).** It covers Knative Serving + Kourier
-(networking), cert-manager, the knext operator, and the PVC feature flags that back the
-bytecode-cache mount. This guide only covers the GKE-specific pieces: cluster, storage, cache, and
+(networking), cert-manager, and the knext operator. This guide only covers the GKE-specific pieces: cluster, storage, cache, and
 registry.
 </Callout>
 
@@ -38,7 +37,7 @@ gcloud container clusters create knext \
 gcloud container clusters get-credentials knext --region=us-central1
 ```
 
-GKE ships a default `standard-rwo` StorageClass, so the bytecode-cache PVC from the install page
+GKE ships a default `standard-rwo` StorageClass, so stateful add-ons you run alongside knext (Postgres, Redis)
 binds with no extra setup.
 
 After the cluster is up, follow [the common install page](/docs/install) to install Knative,

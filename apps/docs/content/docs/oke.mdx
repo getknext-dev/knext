@@ -22,8 +22,9 @@ oci ce cluster create-kubeconfig \
   --token-version 2.0.0
 ```
 
-For the bytecode-cache PVC, knext needs a `StorageClass` that provisions writable volumes. On OKE
-the OCI Block Volume provisioner ships as the `oci-bv` StorageClass:
+knext itself needs no persistent volume — its compile cache is baked into the image. Stateful
+components you run alongside it (Postgres, Redis) need a `StorageClass` that provisions writable
+volumes. On OKE the OCI Block Volume provisioner ships as the `oci-bv` StorageClass:
 
 ```sh
 kubectl get storageclass oci-bv

@@ -81,6 +81,13 @@ jobs:
       - name: Guard — no mutation residue in tracked files (#645)
         run: pnpm run lint:mutation-residue
 
+      # ADR phase gates (#709): the validator that keeps a phase from advancing on a
+      # number nobody measured. It shipped running in NO job and with NO test, so two
+      # of the four rules its own docblock advertised were unenforced and nothing
+      # noticed. A gate that runs nowhere is documentation.
+      - name: Guard — ADR phase gates are internally consistent
+        run: pnpm run verify:phase-gates
+
       # @getknext/core ships only dist/ and its exports resolve to ./dist/* (#114).
       # The publish-surface test asserts every exports subpath exists in dist, so
       # core MUST be built before vitest runs. @getknext/lib must be built first —

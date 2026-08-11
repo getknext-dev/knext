@@ -39,7 +39,8 @@ with the Next.js adapter requirements before rolling out. See
 - **cert-manager** is required (the operator bundle includes its webhook `Issuer`/`Certificate`).
   Install it via the cert-manager Operator for Red Hat OpenShift, or upstream cert-manager.
 - A **StorageClass** from your on-prem CSI (for example OpenShift Data Foundation / Ceph) is needed
-  for the bytecode-cache PVC.
+  for any stateful component you run alongside knext (Postgres, Redis). knext itself needs no
+  persistent volume.
 
 Then install the operator bundle per [Operator & the NextApp CRD](/docs/operator).
 

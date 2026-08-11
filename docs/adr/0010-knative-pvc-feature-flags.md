@@ -1,11 +1,31 @@
 # ADR-0010: Operator-managed Knative PVC feature flags via a declarative bundle ConfigMap
 
-- Status: Accepted
+- Status: **Superseded** (2026-08-11) — the decision's entire subject was removed with the
+  PVC-backed bytecode cache. See the supersession note below.
 - Date: 2026-06-22
 - Deciders: knext architect
 - Related: ADR-0001 (operator = single source of truth), ADR-0009 (Kourier ingress-class — same
   bundle pattern), issue #59 (PVC feature flags for the bytecode-cache ksvc),
   `docs/MATURITY_PLAN.md` (Tier-A correctness)
+
+## Supersession note (2026-08-11)
+
+**This ADR no longer describes the system.** Its decision — have the operator install bundle ship a
+`config-features` ConfigMap enabling `kubernetes.podspec-persistent-volume-claim` and
+`...-write` — existed for exactly one consumer: the bytecode-cache ksvc's writable PVC mount.
+
+That PVC has been **removed** (ADR-0035 made the image-baked V8 compile cache the default, and the
+opt-in PVC path was deprecated and then deleted). With no PVC-referencing PodSpec left, the flags
+gate nothing, so `config/knative/config-features.yaml`, its namespace re-pin transformer, and the
+install guard asserting the bundle ships them were all deleted with it.
+
+The ADR text is left **unedited below**, per the repo's convention that an ADR is a record of a
+decision as it was made rather than a description of the current system. What changed is the
+subject, not the reasoning: given a writable PVC, everything below is still correct — there is
+simply no longer a writable PVC.
+
+**A StorageClass is still a real prerequisite** for stateful components run alongside knext
+(Postgres, Redis). It is no longer a prerequisite for knext itself.
 
 ## Context
 

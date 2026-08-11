@@ -33,13 +33,12 @@
   Now codified declaratively: the operator install bundle ships a `config-network` ConfigMap
   setting `ingress-class: kourier.ingress.networking.knative.dev` (issue #45, ADR-0009),
   replacing the manual `kubectl patch`.
-- **Bytecode-cache PVC feature flags** — the bytecode-cache ksvc mounts a writable PVC, which
-  Knative Serving gates behind two default-off `config-features` flags
-  (`kubernetes.podspec-persistent-volume-claim` + `...-write`); without them the admission webhook
-  denies the ksvc. Previously a manual cluster step; now **bundle-owned**: the operator install
-  bundle ships a `config-features` ConfigMap enabling both flags (issue #59, ADR-0010). These flags
-  are networking-layer-independent (safe under net-istio and kourier); a StorageClass/provisioner
-  is still a separate prerequisite (kind ships `local-path`).
+- **Bytecode-cache PVC feature flags** — **REMOVED (2026-08-11).** The bundle used to ship a
+  `config-features` ConfigMap enabling `kubernetes.podspec-persistent-volume-claim` +
+  `...-write` so the bytecode-cache ksvc could mount a writable PVC (issue #59, ADR-0010).
+  That PVC is gone — the V8 compile cache is baked into the image at build time (ADR-0035) —
+  so the flags gated nothing and were deleted with it. ADR-0010 is superseded. A StorageClass
+  remains a prerequisite for stateful components run alongside knext, not for knext itself.
 
 ## Phases (sequential; each gated by exit criteria)
 
