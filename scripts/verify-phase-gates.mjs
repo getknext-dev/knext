@@ -17,9 +17,20 @@
  *      distinction is the whole point: conflating unmeasured with
  *      measured-and-passing is how a phase advances on optimism.
  *   3. A phase may only be claimed DONE when every criterion is measured AND
- *      meets its target. `current_phase` is checked against that.
+ *      meets its target. A QUALIFIED done-status (`DONE_WITH_…`) is allowed —
+ *      phase 0 is genuinely done-except-for-a-reopened-residual, and forcing it
+ *      to lie in either direction would be worse — but it must carry a
+ *      `status_note` naming what is outstanding. Otherwise the qualifier is a
+ *      free pass obtainable by renaming the status, which is what it was:
+ *      the strict check tested `status === 'DONE'`, so `DONE_WITH_REOPENED_RESIDUAL`
+ *      skipped it entirely and the rule was inert against the shipped file.
+ *   3b. `current_phase` must not name a phase whose own preconditions are unmet —
+ *      "ran ahead of the evidence". This used to check only that `current_phase`
+ *      was a DECLARED phase, so it could be set to a blocked phase and still pass.
  *   4. A criterion whose `target` is null must say why in `target_note` —
  *      otherwise "no threshold" reads as "any result passes".
+ *   5. An array target is compared ELEMENT-WISE. Comparing by length alone let a
+ *      checklist of entirely wrong items satisfy its target.
  *
  * Exit 1 on any violation. Read-only; it never edits the gate file.
  *
@@ -47,8 +58,12 @@ function meetsTarget(c) {
   if (!isMeasured(c)) return false;
   if (c.kind === 'derived') return false;
   if (c.target === null || c.target === undefined) return true; // no threshold; see rule 4
-  if (Array.isArray(c.target))
-    return Array.isArray(c.measured) && c.measured.length === c.target.length;
+  // Element-wise, not length-only: a checklist of entirely wrong items used to
+  // satisfy its target as long as it had the right number of entries.
+  if (Array.isArray(c.target)) {
+    if (!Array.isArray(c.measured) || c.measured.length !== c.target.length) return false;
+    return c.target.every((t, i) => c.measured[i] === t);
+  }
   return c.measured === c.target;
 }
 
@@ -88,14 +103,38 @@ function verify(gate, problems) {
           `${label} phase ${phase.phase}: status DONE but ${unmet.length} criterion/criteria not met: ${unmet.map((c) => c.id).join(', ')}`,
         );
       }
+      // A QUALIFIED done-status must justify itself. Without this, the strict
+      // check above is escapable by renaming the status — which is exactly the
+      // state this file shipped in.
+      if (!strictlyDone && unmet.length > 0 && !phase.status_note) {
+        problems.push(
+          `${label} phase ${phase.phase}: status ${phase.status} leaves ${unmet.length} criterion/criteria unmet (${unmet.map((c) => c.id).join(', ')}) and has no status_note explaining the qualification`,
+        );
+      }
+      // ...and a qualified status with NOTHING outstanding is just DONE. Say so,
+      // rather than carrying a caveat the evidence no longer supports.
+      if (!strictlyDone && unmet.length === 0) {
+        problems.push(
+          `${label} phase ${phase.phase}: status ${phase.status} but every criterion is met — use DONE`,
+        );
+      }
     }
   }
 
-  // Rule 3 — current_phase must not have run ahead of the evidence.
+  // Rule 3b — current_phase must not have run ahead of the evidence.
   const byId = new Map(gate.phases.map((p) => [String(p.phase), p]));
   const current = byId.get(String(gate.current_phase));
   if (!current) {
     problems.push(`${label}: current_phase ${gate.current_phase} is not a declared phase`);
+  } else {
+    // Naming a declared phase was the ONLY thing checked here, so current_phase
+    // could be set to a phase whose own preconditions were unmet and still pass.
+    const unmetPre = (current.preconditions ?? []).filter((c) => !meetsTarget(c));
+    if (unmetPre.length > 0) {
+      problems.push(
+        `${label}: current_phase ${gate.current_phase} has ${unmetPre.length} unmet precondition(s): ${unmetPre.map((c) => c.id).join(', ')}`,
+      );
+    }
   }
 }
 
@@ -118,12 +157,24 @@ function render(gate) {
   return rows;
 }
 
-const files = readdirSync(GATE_DIR).filter((f) => f.endsWith('.json'));
+// `--file <path>` points the validator at ONE gate file instead of the whole
+// directory. It exists so the rules can be tested against deliberately-broken
+// fixtures without writing them into the repo's real gate file — a rule with no
+// failing case is indistinguishable from a rule that is not enforced, which is
+// the state two of these were in.
+const fileArgIdx = process.argv.indexOf('--file');
+const files =
+  fileArgIdx !== -1 && process.argv[fileArgIdx + 1]
+    ? [process.argv[fileArgIdx + 1]]
+    : readdirSync(GATE_DIR)
+        .filter((f) => f.endsWith('.json'))
+        .map((f) => join(GATE_DIR, f));
+
 const problems = [];
 const all = [];
 
 for (const f of files) {
-  const gate = JSON.parse(readFileSync(join(GATE_DIR, f), 'utf8'));
+  const gate = JSON.parse(readFileSync(f, 'utf8'));
   verify(gate, problems);
   all.push({ gate, rows: render(gate) });
 }

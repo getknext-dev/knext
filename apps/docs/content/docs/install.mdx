@@ -21,9 +21,8 @@ The per-cloud guides — [GKE](/docs/gke), [EKS](/docs/eks), [AKS](/docs/aks), [
 | 1 | Kubernetes 1.27+ and `kubectl` | The cluster and client. |
 | 2 | Knative Serving + Kourier | Scale-to-zero serving and the ingress knext targets. |
 | 3 | cert-manager | Backs the operator's webhook certificate. |
-| 4 | A StorageClass + the Knative PVC feature flags | Required for the bytecode-cache PVC. |
-| 5 | The knext operator bundle | The control plane itself. |
-| 6 | A `NextApp` smoke test | Confirms the install works end to end. |
+| 4 | The knext operator bundle | The control plane itself. |
+| 5 | A `NextApp` smoke test | Confirms the install works end to end. |
 
 ## 1 · Kubernetes cluster and kubectl
 
@@ -116,9 +115,8 @@ gating readiness on the webhook means `Available` implies admission works, and t
 above is sufficient before your first apply.
 
 <Callout type="info">
-The bundle is **Kourier-targeted**. The PVC feature flags from step 4 are correct under both Kourier
-and net-istio; the Kourier `ingress-class` from step 2 is correct for the Kourier path and must
-**not** be applied to an istio-only dev cluster.
+The bundle is **Kourier-targeted**. The Kourier `ingress-class` from step 2 is correct for the
+Kourier path and must **not** be applied to an istio-only dev cluster.
 </Callout>
 
 ## 5 · Verify with a NextApp

@@ -363,7 +363,7 @@ volumes:
 
 ## Cold Start Optimization & Bytecode/Transpiler Caching
 
-Knative scale-to-zero services incur a cold start cost each time a pod is created. The framework reduces the parse/compile share of that cost with a **persistent code cache on a shared volume**, per runtime:
+Knative scale-to-zero services incur a cold start cost each time a pod is created. The framework reduces the parse/compile share of that cost with a **code cache baked into the image at build time**, per runtime:
 
 - **Node (default):** `NODE_COMPILE_CACHE` — the first pod writes the V8 code cache to the mounted volume; later cold-started pods deserialize it instead of re-parsing/JIT-compiling (the mechanism behind Vercel Fluid).
 - **Bun (`runtime: bun`), build time:** `kn-next build` precompiles each server-side .js file in the standalone tree **individually** to JSC bytecode (`bun build <file> --bytecode --external '*'` — the require graph stays untouched); Bun's runtime consumes the companion `.jsc` on `require()`. Measured on a real `next@16.2.4` standalone build: **-47% startup** (287ms → 152ms median, N=12). Hash-validated — a stale, corrupt, or version-mismatched `.jsc` silently falls back to source. Trade-off: the tree grows ~2.5x (37MB → 95MB) and the output is **Bun-only** (it does not load under Node), so the pass is gated on `runtime: "bun"`.
@@ -381,7 +381,7 @@ flowchart LR
 
     subgraph Stage2["Stage 2: Run"]
         B --> C["distroless nodejs<br/>standalone server.js"]
-        C --> D["code cache on<br/>shared volume"]
+        C --> D["code cache baked<br/>into the image"]
     end
 
     style Stage1 fill:#3b82f6,color:#fff
@@ -506,7 +506,7 @@ seq 1 100000 | xargs -n1 -P100 -I {} curl -s -o /dev/null -w "%{time_total}\n" \
 
 End-to-end cold start on our OKE benchmarks is **scheduling-dominated (~4s median on a 2-node cluster)** and environment-dependent — pod scheduling plus Next.js's own standalone boot are the bulk, and both are largely outside knext's control. What knext optimizes is the compile/parse cost *within* that boot; two factors reduce it:
 
-1. **Persistent code caching** — Node: `NODE_COMPILE_CACHE` (V8 code cache on a shared volume); Bun: per-file JSC bytecode baked at build time (-47% measured) plus the runtime transpiler cache. Parse/compile work from earlier pods is reused instead of redone.
+1. **Build-time code caching** — Node: a V8 compile cache populated during the image build and read via `NODE_COMPILE_CACHE`; Bun: per-file JSC bytecode baked at build time (-47% measured) plus the runtime transpiler cache. Parse/compile work is done once at build time instead of on every cold start.
 2. **Knative Resource Caching** — Knative pre-caches container images and maintains warm network paths, reducing image pull time to near-zero on subsequent cold starts.
 
 ### V8 compile cache (baked into the image)
@@ -520,7 +520,7 @@ The former opt-in — `bytecodeCache` in `kn-next.config.ts` and
 An operator-injected `NODE_COMPILE_CACHE` would bypass the baked layer, so the
 operator injects none.
 
-**Requirements:** Node.js 24+ and ReadWriteMany PVC support (NFS, GCS Filestore, EFS).
+**Requirements:** Node.js 24+. No storage class, volume, or cluster storage configuration — the cache ships inside the image. (This previously required ReadWriteMany PVC support; that PVC has been removed.)
 
 ## CLI Reference
 

@@ -81,6 +81,13 @@ jobs:
       - name: Guard — no mutation residue in tracked files (#645)
         run: pnpm run lint:mutation-residue
 
+      # ADR phase gates (#709): the validator that keeps a phase from advancing on a
+      # number nobody measured. It shipped running in NO job and with NO test, so two
+      # of the four rules its own docblock advertised were unenforced and nothing
+      # noticed. A gate that runs nowhere is documentation.
+      - name: Guard — ADR phase gates are internally consistent
+        run: pnpm run verify:phase-gates
+
       # @getknext/core ships only dist/ and its exports resolve to ./dist/* (#114).
       # The publish-surface test asserts every exports subpath exists in dist, so
       # core MUST be built before vitest runs. @getknext/lib must be built first —
@@ -580,6 +587,19 @@ jobs:
       - name: Build install bundle (so immunity tests run, not skip)
         working-directory: packages/kn-next-operator
         run: make build-installer
+      # A build-tagged suite is INVISIBLE to `go vet ./...` and `go build ./...`, so it
+      # can stop compiling with every PR gate green. That is not hypothetical: deleting
+      # one spec took a helper + const with it that two other specs in the same tag
+      # still used, and it reached `main`. The nightly lane then dies at BUILD time, so
+      # the invariants it owns (scale-from-zero #39, image-prewarm #471) stop running
+      # instead of reporting — strictly worse than a failing test.
+      #
+      # Runs BEFORE the envtest suite: it is seconds long and needs no cluster, so a
+      # broken tag should fail fast rather than after envtest boots.
+      - name: Compile-check every build-tagged e2e suite
+        working-directory: packages/kn-next-operator
+        run: make vet-tags
+
       - name: Run operator Go test suite (envtest)
         working-directory: packages/kn-next-operator
         env:

@@ -94,9 +94,17 @@ cluster feature flag.
 
 There is nothing to enable, and nothing to size. The previous opt-in — a
 `ReadWriteOnce` PVC plus `bytecodeCache` in `kn-next.config.ts` — has been
-**removed**. Leaving either in place now breaks a deploy rather than being ignored:
-`kn-next` applies the CR with strict validation, and the fields no longer exist in
-the CRD.
+**removed**, and leaving either in place fails the deploy rather than being ignored:
+
+- `bytecodeCache` in `kn-next.config.ts` is **rejected by `validateConfig`** with a
+  message naming the replacement.
+- `spec.cache.enableBytecodeCache` / `bytecodeCacheSize` on a hand-written CR are
+  rejected by the **apiserver** — the fields are gone from the CRD and `kn-next`
+  applies with `--validate=strict`.
+
+Both refuse rather than ignore deliberately. A silently-dropped setting is
+indistinguishable from a working one, and that is how the 512 Mi PVC survived as long
+as it did.
 
 **One caveat for `runtime: bun`.** Bun's runtime *transpiler* cache is still derived
 from the baked `NODE_COMPILE_CACHE` path, so it works **per-pod** — but it no longer
