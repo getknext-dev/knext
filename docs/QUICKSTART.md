@@ -64,9 +64,8 @@ GitHub release asset. Install it with one apply:
 kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-latest/install.yaml
 ```
 
-Use `--server-side` so the bundle's `config-network` and `config-features`
-ConfigMaps merge into the ones Knative Serving already owns instead of
-replacing them.
+Use `--server-side` so the bundle's `config-network` ConfigMap merges into the
+one Knative Serving already owns instead of replacing it.
 
 Check the operator is running:
 
