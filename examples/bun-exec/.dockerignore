@@ -24,6 +24,16 @@ dist/
 test/
 app/
 *.md
+
+# TWO ARMS SHARE THIS BUILD CONTEXT, and they need different things from it.
+# `Dockerfile` (bun) ships a self-contained binary plus `.output/public`, so
+# `.next/` above is dead weight to it. `Dockerfile.node` — the CONTROL arm — is
+# the opposite: the standalone server IS `.next/`. Re-included narrowly rather
+# than by dropping the `.next/` line, so the bun arm's context stays as small as
+# it was. Negations must come AFTER the exclusion; docker applies the last
+# matching pattern.
+!.next/standalone
+!.next/static
 *.ts
 *.mjs
 *.log
