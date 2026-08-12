@@ -97,6 +97,31 @@ clear_pending() { # belt-and-braces at block boundaries and on the way out
 
 LOG="${LOG:-/tmp/abba-$SITTING.log}"
 : >"$LOG"
+
+# ── one run at a time, enforced rather than assumed ───────────────────────────
+#
+# System-design review: the pending-restore file is keyed only on
+# context+namespace+service, so two concurrent abba.sh runs against the same service
+# cross-apply each other's restores. Clearing per SAMPLE rather than per block (the fix
+# above) makes that worse, not better — and every integrity bucket would still sum, so
+# both datasets would be silently corrupted while the run reported itself clean.
+#
+# `workflow.md` already says cluster work is a queue of one ("Two benchmark runs against
+# the same cluster silently invalidate each other"), but that was documented expectation,
+# and this file's whole subject is what documented expectation is worth. mkdir is atomic
+# on every filesystem this runs on, so it is the lock.
+LOCK="results/.abba.lock"
+mkdir "$LOCK" 2>/dev/null || {
+  echo "REFUSING TO START: another abba.sh run holds $LOCK." >&2
+  echo "  Cluster work is a queue of one — concurrent runs cross-apply each other's" >&2
+  echo "  pending restores and silently corrupt BOTH datasets." >&2
+  echo "  If no run is active, remove it:  rmdir $PWD/$LOCK" >&2
+  exit 2
+}
+# Release on every exit path, including Ctrl-C: a stale lock that blocks the next run is
+# a much cheaper failure than two runs proceeding together, but it is still a failure.
+trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT INT TERM
+
 echo "sitting=$SITTING blocks=$BLOCKS arms=$A/$B log=$LOG"
 
 for i in $(seq 1 "$BLOCKS"); do

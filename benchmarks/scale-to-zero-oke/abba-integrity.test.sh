@@ -60,6 +60,28 @@ STUB
   : > "$dir/image-label-cluster.sh"; chmod +x "$dir/image-label-cluster.sh"
 }
 
+echo "== the stub still models the REAL run.sh's contract =="
+# System-design review: the stub encodes run.sh's stdout marker and its refusal rule, but
+# nothing asserted the stub matches the real script. Drift would leave this suite green
+# while the real harness reported total loss. Drift fails LOUD rather than silent (every
+# sample would land in `no-path`), but a green test alongside a broken harness is still
+# the worst diagnostic outcome, so the contract is pinned here.
+real="$HERE/run.sh"
+if [ -f "$real" ]; then
+  n=$(grep -c '=== DONE (results: ' "$real")
+  [ "$n" -eq 1 ] && ok "run.sh emits the '=== DONE (results: …) ===' marker abba.sh parses (x$n)" \
+                 || nope "run.sh has $n occurrences of the DONE marker — abba.sh's capture assumes exactly 1"
+  grep -q 'REFUSING TO START' "$real" \
+    && ok "run.sh still refuses on an outstanding pending restore (the cascade the fix prevents)" \
+    || nope "run.sh no longer emits 'REFUSING TO START' — the refusal rule the stub models is gone"
+  grep -q 'restore-pending' "$real" \
+    && ok "run.sh still accepts --restore-pending" \
+    || nope "run.sh no longer accepts --restore-pending — the per-sample fix cannot work"
+else
+  nope "real run.sh not found next to the test — cannot verify the stub's contract"
+fi
+
+echo
 echo "== a CLEAN run must be silent and exit 0 =="
 d=$(mktemp -d); scaffold "$d" clean
 out=$(cd "$d" && LOG="$d/log" ./abba.sh 3 testsit 2>&1); rc=$?
@@ -160,6 +182,25 @@ out4=$(cd "$d4" && LOG="$d4/log" ./abba.sh 1 testsit4 2>&1); rc4=$?
 if [ "$rc4" -eq 1 ]; then ok "exit 1 when no results path is reported"; else nope "exit $rc4 — silent sample loss not caught"; fi
 if echo "$out4" | grep -q 'NO RESULTS FILE'; then ok "names the no-path samples"; else nope "did not report NO RESULTS FILE"; fi
 if echo "$out4" | grep -q 'ACCOUNTING BROKEN'; then nope "accounting broke — buckets must still sum"; else ok "buckets still sum to attempts"; fi
+
+echo
+echo "== concurrent runs are refused (cluster work is a queue of one) =="
+# Two abba.sh runs against the same service cross-apply each other's pending restores and
+# silently corrupt BOTH datasets while every integrity bucket still sums. Adding a lock
+# without testing it would be adding the exact class of thing this suite exists to catch.
+d5=$(mktemp -d); scaffold "$d5" clean
+mkdir -p "$d5/results/.abba.lock"                     # simulate a run already holding it
+out5=$(cd "$d5" && LOG="$d5/log" ./abba.sh 1 sit5 2>&1); rc5=$?
+if [ "$rc5" -eq 2 ]; then ok "second run refuses while the lock is held (exit 2)"; else
+  nope "exit $rc5 — a concurrent run was allowed to start"; fi
+if echo "$out5" | grep -q 'queue of one'; then ok "explains why, and how to clear a stale lock"; else
+  nope "refusal message does not explain the hazard"; fi
+rmdir "$d5/results/.abba.lock" 2>/dev/null
+# ...and the lock must not leak: a completed run leaves nothing behind for the next one.
+d6=$(mktemp -d); scaffold "$d6" clean
+(cd "$d6" && LOG="$d6/log" ./abba.sh 1 sit6 >/dev/null 2>&1)
+if [ -d "$d6/results/.abba.lock" ]; then nope "lock leaked after a clean run — blocks the next one"; else
+  ok "lock released on exit"; fi
 
 echo
 echo "== argument validation =="
