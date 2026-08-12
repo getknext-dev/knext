@@ -6,6 +6,16 @@
 # THIS IS A SAFETY CONTROL. A false negative here is a security failure, not a bug:
 # `security.md` calls force/mirror/--all push, direct push to main/master, history
 # rewrite, `rm -rf` and `kubectl delete` "never acceptable" on the agent's behalf.
+#
+# ACCEPTED COST, ratified by architect sign-off — do not "fix" these by narrowing:
+#     grep -rn 'rm -rf' .claude/hooks
+#     echo 'rm -rf is gated' >> notes.md
+#     git log --grep='rm -rf'
+# all BLOCK here and pass on an unguarded shell. They are the price of the stripped view
+# (`sseg`), which is what catches `rm -r"f" x`. The asymmetry is decisive: a false
+# positive is recoverable — rerun it, or run it yourself — while a false negative on
+# force-push-to-main is not. Deleting `sseg` to make these pass reopens intra-token
+# quoting, so this paragraph exists to stop a later round trading it away by accident.
 # It has been wrong subtly FOUR times — #712 introduced a continuation bypass while
 # fixing false positives; #717's fix for THAT introduced a worse one; #725 round 1
 # fixed nine and opened the `=` glob and wrapper-narrowing holes; #725 round 2 fixed
@@ -234,9 +244,13 @@ git_subcommand() {
 # plausible work: `V=$(cat v) && git commit -m 'docs: why <gated verb> is gated'` blocked
 # on the substitution in a DIFFERENT command. Fail-safe, but cry-wolf is the mechanism
 # workflow.md blames for the direct-push-to-main incident, so the granularity matters.
+# `[[:space:]]`, not a literal space: bash 5.3 accepts a TAB or a NEWLINE after `${` too,
+# and both execute — `v=${<TAB>printf x; }` runs. Round 5 wrote the space and the pipe and
+# missed the other two, which is the same both-halves asymmetry the shared classes exist
+# to prevent, in the one construct that has no shared class.
 has_subst=0
 case "$joined" in
-  *'${ '* | *'${|'*) has_subst=1 ;;
+  *'${'[[:space:]]* | *'${|'*) has_subst=1 ;;
 esac
 
 # The per-segment substitution `case` below was DELETED in round 6 and is BACK in round

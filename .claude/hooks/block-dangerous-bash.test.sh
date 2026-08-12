@@ -23,8 +23,12 @@ command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 2; }
 D='-'
 fails=0
 
+BLOCK_PAYLOADS=()
+COLLECT=1
+
 run() {
   local label="$1" cmd="$2" want="$3" out rc got mark
+  if [ "$want" = "BLOCK" ] && [ "$COLLECT" = 1 ]; then BLOCK_PAYLOADS+=("$cmd"); fi
   out=$(printf '%s' "{\"tool_input\":{\"command\":$(printf '%s' "$cmd" | jq -Rs .)}}" | bash "$HOOK" 2>&1)
   rc=$?
   got="allow"; [ "$rc" -eq 2 ] && got="BLOCK"
@@ -302,6 +306,49 @@ run "commit then real force push"            "git commit ${D}m 'subject line' &&
 # cosmetic.
 run "substitution in a preceding command"    "V=\$(cat v) && git commit ${D}m 'docs: why kubectl delete is gated'" allow
 run "apostrophe msg, no following command"   "git commit ${D}m \"don't ever push ${D}${D}force to main\""          allow
+
+echo
+echo "== DIFFERENTIAL PROPERTY: nothing a commit message contains may disarm a rule =="
+# GENERATED, not enumerated — and that distinction is the whole point.
+#
+# Round 5's `in_msg` regression got past 112 hand-written cases, a full mutation proof,
+# a CI job and four review gates. The suite ALREADY contained
+# `git commit -m 'subject' && git push --force origin main` — balanced quotes, passed —
+# while the apostrophe variant opened silently, because no row happened to carry one.
+# `workflow.md` names this exactly: "Prefer scanning to enumerating. An enumerated list
+# of call sites is how the second one gets missed; make an unparseable construct FAIL
+# rather than pass." Another hand-written row is the wrong instrument; the seventh round
+# of them would not have been better.
+#
+# So: take EVERY must-block payload above and re-run it behind a literal commit message
+# carrying an unbalanced quote. The message is inert text — it cannot change what the
+# following command does — so every one of them must still block. This one loop covers
+# the entire class, including variants nobody thought to write down, and it goes red on
+# the exact commit that introduced the regression.
+# Each prefix is a BALANCED commit message that merely CONTAINS the other quote
+# character — that is the whole trick, and getting it wrong is instructive: a first
+# attempt used `git commit -m "don"t"`, which genuinely leaves a quote open, so the shell
+# would not have executed the payload either and the hook was right to skip it. A
+# property assertion has to be a claim the shell actually agrees with.
+COLLECT=0
+PROPS=("${BLOCK_PAYLOADS[@]}")
+props_failed=0
+prefixes=(
+  "git commit ${D}m \"don't\" &&"
+  "git commit ${D}m 'say \"hi\"' &&"
+  "git commit ${D}m \"a \\\"b\\\"\" &&"
+)
+for prefix in "${prefixes[@]}"; do
+  for p in "${PROPS[@]}"; do
+    printf '%s' "{\"tool_input\":{\"command\":$(printf '%s %s' "$prefix" "$p" | jq -Rs .)}}" |
+      bash "$HOOK" >/dev/null 2>&1
+    [ $? -eq 2 ] || { props_failed=$((props_failed + 1)); fails=1
+                      printf 'FAIL  disarmed by [%.28s]: %.44s\n' "$prefix" "$p"; }
+  done
+done
+printf '%s  %-46s %s payloads x %s messages\n' \
+  "$([ "$props_failed" -eq 0 ] && echo 'ok  ' || echo 'FAIL')" \
+  "differential: quotes in a commit message" "${#PROPS[@]}" "${#prefixes[@]}"
 
 echo
 echo "== MUST FAIL CLOSED (a control that cannot run must not report success) =="
