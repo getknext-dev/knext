@@ -48,34 +48,22 @@ norm=${joined//$nl/ }          # whole-command view, for rules that are not posi
 # split_segments <text> — one shell command per line, split on separators.
 split_segments() { printf '%s' "$1" | tr ';|&\n' '\n\n\n\n'; }
 
-# strip_prefix <segment> — drop leading VAR=val, `sudo`, `env`, `command`, `exec`,
-# `time`, `nohup` so the COMMAND WORD can be identified. Without this, `sudo rm -rf`
-# and `env FOO=1 git push --force` look like they are running `sudo` and `env`.
-strip_prefix() {
-  local s="$1" prev=""
-  while [ "$s" != "$prev" ]; do
-    prev="$s"
-    s="${s#"${s%%[![:space:]]*}"}"                       # ltrim
-    case "$s" in
-      [A-Za-z_][A-Za-z0-9_]*=*) s="${s#* }" ;;           # VAR=val
-      sudo\ *|env\ *|command\ *|exec\ *|time\ *|nohup\ *) s="${s#* }" ;;
-    esac
-  done
-  printf '%s' "$s"
-}
-
-# cmd_word <segment> — the executable being run, basename-ed, with a leading backslash
-# or path stripped. `/bin/rm`, `\rm` and `rm` must all read as `rm`; that they did not
-# was a live bypass.
-cmd_word() {
-  local w
-  w=$(strip_prefix "$1")
-  w=${w%%[[:space:]]*}
-  w=${w#\\}                                               # \rm  -> rm
-  w=${w##*/}                                              # /bin/rm -> rm
-  printf '%s' "$w"
-}
-
+# NOTE — a `strip_prefix`/`cmd_word` pair lived here and was REMOVED, not fixed.
+#
+# The idea was to identify each segment's real command word so the rules could apply
+# only to genuine `rm` / `git push` invocations. It failed twice over:
+#
+#   * Its VAR=val glob `[A-Za-z_][A-Za-z0-9_]*=*` used `*` as a WILDCARD, so it matched
+#     any segment containing an `=` anywhere and then ate the real command word. A path,
+#     a comment, `-o x=y`, or `git -c a=b push --force origin main` all silently
+#     disabled BOTH rules. One stray `=` opened the whole guard.
+#   * Even correct, requiring the command word to BE `rm`/`git` narrowed the control:
+#     `xargs rm -rf`, `find … -exec rm -rf`, `bash -c '…'`, `$( … )`, `( … )`,
+#     `if …; then git push …; fi` all escaped, and the suite stayed green because every
+#     case in it was a bare invocation.
+#
+# Both defects pointed the same way: for this control, cleverness about WHICH command is
+# running is a liability. Match the text broadly and exclude specific proven-safe cases.
 # ── rm -rf ───────────────────────────────────────────────────────────────────
 #
 # Both a RECURSIVE flag and a FORCE flag must be present; either alone is ordinary
@@ -86,9 +74,37 @@ cmd_word() {
 # The old single-token patterns `-[A-Za-z]*r[A-Za-z]*f` also matched the STRING
 # `--force` (f-o-r), so `rm --force onefile` — the long form of a case this guard
 # explicitly allows — was blocked, while `rm -Rf` sailed through.
+#
+# MATCH BROADLY, EXCLUDE NARROWLY. An earlier draft of this rewrite required the
+# segment's COMMAND WORD to be exactly `rm`, which read as precision and was a
+# regression: `xargs rm -rf`, `find … -exec rm -rf`, `bash -c 'rm -rf …'`,
+# `( rm -rf … )`, `for x in 1; do rm -rf …; done` all stopped being blocked, and the
+# suite stayed green because every case in it was a bare invocation. For a control whose
+# failure mode is "the forbidden thing happened", a false positive costs an argument and
+# a false negative costs the repository — so the default is to match, and exclusions are
+# specific and justified.
+#
+# The command-word class excludes a preceding `-`, which is what keeps `docker run --rm`
+# out; it allows `\rm` and any path-qualified form, which were live bypasses.
+rm_cmd_re='(^|[;&|(){}!]|[[:space:]])(\\)?([^[:space:]]*/)?rm([[:space:]]|$)'
+
+# git_subcommand <segment> — the first non-flag word after `git`, or empty. Used ONLY to
+# recognise `git commit`, whose -m text routinely quotes the very strings these rules
+# match. `git commit` neither deletes files nor pushes, so excluding it costs no
+# coverage — and blocking on message text is what workflow.md records as the cause of a
+# docs file reaching main, because the human re-ran only the tail of a blocked command.
+git_subcommand() {
+  printf '%s' "$1" | awk '
+    { for (i = 1; i < NF; i++) if ($i == "git") {
+        for (j = i + 1; j <= NF; j++) {
+          if ($j ~ /^-/) { if ($j == "-C" || $j == "-c" || $j == "--git-dir" || $j == "--work-tree") j++; continue }
+          print $j; exit } } }'
+}
+
 while IFS= read -r seg; do
   [ -z "$seg" ] && continue
-  [ "$(cmd_word "$seg")" = "rm" ] || continue
+  printf '%s' "$seg" | grep -qE "$rm_cmd_re" || continue
+  [ "$(git_subcommand "$seg")" = "commit" ] && continue
   has_r=0; has_f=0
   printf '%s' "$seg" | grep -qE '(^|[[:space:]])(--recursive|--dir|-[A-Za-z]*[Rr][A-Za-z]*)([[:space:]]|=|$)' && has_r=1
   printf '%s' "$seg" | grep -qE '(^|[[:space:]])(--force|-[A-Za-z]*f[A-Za-z]*)([[:space:]]|=|$)' && has_f=1
@@ -110,20 +126,27 @@ EOF
 # grants this explicitly). Still forbidden: force/mirror/--all, and any push that
 # targets main/master.
 #
-# The rules apply ONLY to a segment whose command really is `git … push`. Matching
-# `git` and `push` anywhere in the text blocked `git commit -m 'do not push --force to
-# main'` — and workflow.md records that a hook firing on MESSAGE TEXT is exactly what
-# led to a docs file being pushed straight to main, because the human re-ran only the
-# tail of a blocked command.
+# The rules apply to any segment mentioning BOTH `git` and `push`, with ONE exclusion:
+# a `git commit` segment, whose -m text routinely quotes the very words matched here.
+# workflow.md records that a hook firing on MESSAGE TEXT is what led to a docs file
+# being pushed straight to main — the human re-ran only the tail of a blocked command.
+# `git commit` cannot push, so the exclusion costs no coverage.
+#
+# Same discipline as the rm rule: match any segment that mentions BOTH `git` and `push`,
+# then exclude one specific, provably-safe case rather than demanding the command word
+# be `git`. Requiring that lost `bash -c '…'`, `$(…)`, `( … )`, `if …; then git push`
+# and friends — a silent narrowing of a safety control.
+#
+# THE ONE EXCLUSION: a `git commit` segment. Its `-m` text routinely quotes the very
+# words these rules match, and workflow.md records that a hook firing on MESSAGE TEXT is
+# what led to a docs file reaching main — the human re-ran only the tail of the blocked
+# command. `git commit` cannot itself push, so skipping it costs no coverage.
 while IFS= read -r seg; do
   [ -z "$seg" ] && continue
-  [ "$(cmd_word "$seg")" = "git" ] || continue
+  printf '%s' "$seg" | grep -qE '\bgit\b' || continue
+  printf '%s' "$seg" | grep -qE '\bpush\b' || continue
   # the git SUBCOMMAND: first non-flag word after `git` (skips -C dir, -c k=v, …)
-  sub=$(printf '%s' "$(strip_prefix "$seg")" | awk '
-    { for (i = 2; i <= NF; i++) {
-        if ($i ~ /^-/) { if ($i == "-C" || $i == "-c" || $i == "--git-dir" || $i == "--work-tree") i++; continue }
-        print $i; exit } }')
-  [ "$sub" = "push" ] || continue
+  [ "$(git_subcommand "$seg")" = "commit" ] && continue
 
   if printf '%s' "$seg" | grep -qE -- '(^|[[:space:]])(--force|--force-with-lease|--mirror|--all)([[:space:]]|=|$)|(^|[[:space:]])-[A-Za-z]*f[A-Za-z]*([[:space:]]|$)|(^|[[:space:]])\+[A-Za-z0-9._/-]'; then
     deny "force/mirror/--all push is forbidden. Push a single feature branch and open a PR."
