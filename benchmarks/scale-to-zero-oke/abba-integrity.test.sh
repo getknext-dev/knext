@@ -83,6 +83,67 @@ claimed=$(echo "$out2" | sed -n 's/.*\*\*\* LOST \([0-9]*\) of.*/\1/p')
 if [ "${named:-0}" = "${claimed:-x}" ]; then ok "named files ($named) match the claimed loss ($claimed)"; else
   nope "claimed LOST $claimed but named $named files — undiagnosable"; fi
 
+echo "== the per-sample restore actually PREVENTS the cascade (not just detects it) =="
+# Spec review's finding: every other case here proves DETECTION, while the PR title
+# claims a FIX. This is the prevention case, and it is written as a differential — the
+# only way to show prevention is to show the cascade happening WITHOUT it.
+#
+# The stub models run.sh's real refusal rule: a completed sample leaves a pending-restore
+# marker, and any later sample refuses while that marker exists. `--restore-pending`
+# clears it. So with per-sample clearing every sample runs; without it, sample 1 wedges
+# the rest of the block.
+scaffold_cascade() { # scaffold_cascade <dir>
+  local dir="$1"; mkdir -p "$dir/results"
+  cp "$HERE/abba.sh" "$dir/abba.sh"
+  : > "$dir/image-label-cluster.sh"; chmod +x "$dir/image-label-cluster.sh"
+  cat > "$dir/run.sh" <<'STUB'
+#!/usr/bin/env bash
+set -uo pipefail
+svc=""; restore=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --service) svc="$2"; shift 2 ;;
+    --restore-pending) restore=1; shift ;;
+    *) shift ;;
+  esac
+done
+d="$(cd "$(dirname "$0")" && pwd)"
+marker="$d/.pending-$svc"
+out="$d/results/${svc}-$(date -u +%Y%m%dT%H%M%S)$RANDOM.txt"
+: > "$out"
+if [ "$restore" = "1" ]; then
+  rm -f "$marker"; echo "no pending restore for '$svc' — nothing to do." >> "$out"
+elif [ -f "$marker" ]; then
+  echo "*** REFUSING TO START: an unfinished restore is outstanding ***" >> "$out"
+else
+  echo "http_req_duration...: avg=2.5s" >> "$out"; touch "$marker"   # a real sample leaves one
+fi
+echo "=== DONE (results: $out) ==="
+STUB
+  chmod +x "$dir/run.sh"
+}
+
+dP=$(mktemp -d); scaffold_cascade "$dP"
+outP=$(cd "$dP" && LOG="$dP/log" ./abba.sh 2 sitP 2>&1); rcP=$?
+if [ "$rcP" -eq 0 ]; then ok "with per-sample restore: every sample runs (exit 0)"; else
+  nope "cascade NOT prevented: exit $rcP — $(echo "$outP" | grep -m1 'LOST')"; fi
+
+# Differential: strip the per-sample restore and the same stub must now cascade.
+dN=$(mktemp -d); scaffold_cascade "$dN"
+python3 - "$dN/abba.sh" <<'PY'
+import sys
+p=sys.argv[1]; s=open(p).read()
+a='  ./run.sh --context "$CTX" --namespace "$NS" --service "$1" --restore-pending >/dev/null 2>&1\n'
+assert s.count(a)==1, f"anchor occurs {s.count(a)}x — refusing a no-op mutation"
+open(p,'w').write(s.replace(a,'',1))
+PY
+outN=$(cd "$dN" && LOG="$dN/log" ./abba.sh 2 sitN 2>&1); rcN=$?
+if [ "$rcN" -ne 0 ] && echo "$outN" | grep -q 'REFUSED'; then
+  ok "without it: the cascade reappears (exit $rcN, refusals reported)"
+else
+  nope "removing the per-sample restore changed nothing — the fix is not load-bearing"
+fi
+
 echo
 echo "== a sample whose run.sh reports NO results path is also a loss =="
 # The guard reads each sample's own reported path. A run.sh that dies before printing

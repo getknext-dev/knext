@@ -21,11 +21,18 @@
 # failed sample otherwise wedges every LATER sample in the same block.
 #
 # This comment used to claim "between runs" while the code cleared once per block,
-# and the gap cost real data: in the 2026-08-12 probe-timeout crossover, four
-# samples died with "REFUSING TO START: an unfinished restore is outstanding",
-# leaving cells of n≈4 that could not measure a 0–42% effect. The mismatch was
-# invisible because a refused sample still writes a results file — it just contains
-# no reps — so the loss only shows up if someone counts.
+# and the gap cost real data: in the 2026-08-12 probe-timeout crossover, TWO samples
+# died with "REFUSING TO START: an unfinished restore is outstanding", leaving cells
+# of n≈4 that could not measure a 0–42% effect. The mismatch was invisible because a
+# refused sample still writes a results file — it just contains no reps — so the loss
+# only shows up if someone counts.
+#
+# (An earlier draft of this comment said FOUR. That was the first loss-detector's own
+# over-count — it read a `--restore-pending` call that successfully APPLIED a restore
+# as a lost sample. The number was corrected in review and is two:
+# `grep -l 'REFUSING TO START' results/*.txt` over that window returns exactly
+# p1b-bunexec-20260812T001407Z and …T001955Z. Recorded because a wrong measurement
+# inside the artifact outlives the review thread that caught it.)
 #
 # Hence the integrity report at the end: a run that loses samples now SAYS so.
 set -uo pipefail
