@@ -209,8 +209,16 @@ application behind it is already serving in tens of milliseconds.
 That is a much narrower target than when this started, and it is squarely platform-side:
 queue-proxy's own probe path, CNI/veth programming, or sandbox setup.
 
-**Do not raise `timeoutSeconds` as a cold-start mitigation.** It does not shorten the
-tail; it only changes 9 probes into 3. Both benchmark services were returned to
+**Do not raise `timeoutSeconds` as a cold-start mitigation *for this slow mode*.** It
+does not shorten the tail; it only changes 9 probes into 3.
+
+> Scope, because the flat imperative could be misread as universal. This refutes the
+> deadline as a fix for the **~9 s queue-proxy slow mode**, and it rests on Result 1:
+> this app answers its first request in ~36 ms, so one second is not a binding
+> constraint on it. An app whose OWN first request genuinely exceeds a second — a
+> heavier framework, a cold-JIT runtime, a health check that dials a dependency — is a
+> different case entirely, and would legitimately need a larger deadline. Nothing here
+> measures that case. Both benchmark services were returned to
 `timeoutSeconds: 1` after the run, verified, and **no default was changed anywhere** —
 there is nothing here to ship.
 
