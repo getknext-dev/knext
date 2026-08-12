@@ -16,7 +16,7 @@
 calls "never acceptable on the agent's behalf": force/mirror/`--all` push, direct push to
 `main`/`master`, history rewrite, recursive-force removal, cluster deletes, infra teardown.
 
-It has shipped a bypass **five times**, and the same argument was re-litigated each time:
+It has shipped a bypass **six times**, and the same argument was re-litigated each time:
 
 | Round | The "improvement" | What it cost |
 |---|---|---|
@@ -25,6 +25,7 @@ It has shipped a bypass **five times**, and the same argument was re-litigated e
 | #725 r1–2 | Identify each segment's real command word so rules apply only to genuine invocations | One `=` anywhere disabled both rules; `xargs`, `find -exec`, `bash -c`, `$( )`, subshells, `if/then`, `for/do` all escaped |
 | #725 r5–10 | Exempt `git commit` so message text stops crying wolf | Command substitution, an env-var prefix, a trailing `# git commit`, a global flag stealing its argument, and two quote-tracking fail-opens |
 | #725 r11 | Treat `#` as starting a comment, so a comment can no longer disarm the exemption | The word-start test accepted only whitespace, but bash ends a word on `)` too — `(… git commit -m "x")#c\` + newline reopened **all eight** gated verbs |
+| #725 r12 | Widen the word-terminator class so `)#` can no longer disarm it | Comment detection was now correct, but the segment that CLOSED a carried message was discarded unscanned — so the guard never ran on it, and a heredoc body could establish the exemption outright |
 
 Every one looked correct on inspection. The recurring shape is not carelessness — it is that
 **narrowing feels like precision**, and in a control whose failure mode is "the forbidden thing
@@ -77,6 +78,15 @@ text as the cause of a docs file reaching `main`. Some clauses exist *only* to p
 positive and are therefore invisible to every must-block case; they need a must-allow case or they
 cannot be proved at all.
 
+**8. A guard may not DISCARD text it has not scanned.** Skipping is an exclusion wearing
+different clothes, and it is the one that produced the most bypasses here. Three separate defects
+were the same act: a heredoc body was allowed to establish an exemption; a segment that closed a
+carried quote was `continue`d with its tail unread; a comment was assumed to run to the end of a
+line that had been folded in from the next one. In each case the guard decided some text was inert
+and stopped looking. If a guard sets text aside, it must be able to state *why the shell cannot
+execute it* — the same proof obligation as Decision 2, applied to skipping rather than exempting.
+The safe form is to narrow what may be *skipped*, never to widen it.
+
 ### The worked example: why one obvious false positive was NOT fixed
 
 Decision 2 states the proof obligation abstractly. This is the case that shows what it costs
@@ -91,17 +101,25 @@ ends), so teach the *rules* to ignore comment text too.
 Under Decision 3 that is inadmissible, because it narrows what gets **checked** rather than what
 gets **excluded**. It was deferred on that ground alone, before there was any evidence for it.
 
-Rounds 10 and 11 then supplied the evidence:
+Rounds 10, 11 and 12 then supplied the evidence:
 
 - **Round 10** — the hook's notion of "this is a comment" was wrong in a way that let a comment
   swallow a folded-in continuation line: `git commit -m "subject" # note\` + newline + a gated
   verb executed, and was allowed.
 - **Round 11** — the corrected notion was *still* wrong, because bash ends a word on `)` as well
   as whitespace: `(… git commit -m "x")#c\` + newline reopened all eight gated verbs.
+- **Round 12** — with comment detection itself finally right, the same payload was *still*
+  allowed for a different reason: the segment that closed a carried message was discarded
+  unscanned, so the comment guard never ran on it.
 
 Had comment-stripping been granted when it was proposed, each of those defects would have been a
 **silent hole in every rule** rather than a hole in one exemption — the rules would have skipped
 text the hook wrongly believed was inert. The exemption is bounded; the rules are not.
+
+Note what round 12 does to the claim this section could have made. It would have been natural to
+write, after round 11, that the comment class was closed; that sentence would have been false
+within a day. This ADR therefore records the class as **open and load-bearing**, not as solved —
+the honest status, and the one that keeps the proof obligation in force.
 
 The rule this yields, and the reason it is stated as an obligation rather than a preference:
 **a guard may only act on a fact about the shell that it has demonstrated it can determine
@@ -112,7 +130,7 @@ is admissible when there is a real tokeniser whose comment handling is itself te
 
 | Option | Fewer bypasses? | Cost | Verdict |
 |---|---|---|---|
-| Status quo — fix each bypass as found | No; four rounds say otherwise | Low per round, unbounded in total | **Rejected** |
+| Status quo — fix each bypass as found | No; six rounds say otherwise | Low per round, unbounded in total | **Rejected** |
 | Narrow the guard so it only inspects "real" invocations | No — this *is* the recurring bug | Low | **Rejected**; it is what #725 r1 did |
 | Match broadly + prove every exclusion + generated property | Yes for the classes seen | Accepts false positives; needs a property harness | **Accepted** |
 | Replace text matching with a real shell tokeniser | Structurally, yes | ~250 lines, 1–2 days, a new runtime dependency | **Deferred** — see below |
@@ -123,7 +141,7 @@ is admissible when there is a real tokeniser whose comment handling is itself te
   human reruns the command, or runs it themselves. A false negative on force-push-to-`main` is not.
   The accepted costs are listed in the hook header so a later round cannot trade them away by
   accident.
-- **Guards get slower and longer.** The suite grew from 27 assertions on `main` to over 1,100. That is the
+- **Guards get slower and longer.** The suite grew from 27 assertions on `main` to 1,726. That is the
   price of the property, and it is why it belongs in CI rather than in someone's memory.
 - **CI must run the guard on every platform contributors use.** One bypass was live on macOS and
   absent on Linux, so a Linux-only gate would have gone green while the control was open on every
@@ -133,7 +151,7 @@ is admissible when there is a real tokeniser whose comment handling is itself te
 
 ## Known limitation — the case for a tokeniser
 
-Rounds 7–11 produced five defects that were all the same thing: `#` starts a comment after any
+Rounds 7–12 produced six defects that were all the same thing: `#` starts a comment after any
 word terminator (not just whitespace), `$'…'`
 escapes, a backslash is not a continuation *inside* a comment, and quote state is not parity. Each is
 plain shell grammar. The hook resolves continuations, then splits, then scans quotes — three stages
