@@ -203,6 +203,28 @@ run "git filter-repo"                        "git filter-repo ${D}${D}path x"   
 # and nothing asserted it.
 run "CRLF continuation ${D}${D}force"        "$(printf 'git push \\\r\n  %s%sforce origin main' "$D" "$D")" BLOCK
 
+# ROUND 7. The multi-line-message fix of round 5 introduced the only FAIL-OPEN path the
+# hook has had: it counted PARITY of one quote character and ignored the other's
+# context, so an apostrophe inside a double-quoted message opened the tracking and every
+# following segment was skipped. The shell disagrees — "don't" is closed, so these are
+# real commands. Data-dependent (two apostrophes -> even -> blocked), no obfuscation
+# needed, and this repo's own messages contain apostrophes.
+#
+# These also assert the direction nothing else covers: that the tracking FAILS TO
+# ENGAGE. Every other message case asserts it engages, so a mutation forcing it always
+# on would have stayed green.
+run "apostrophe in dq msg, then push"        "git commit ${D}m \"don't\" && git push ${D}${D}force origin main" BLOCK
+run "apostrophe in dq msg, then rm"          "git commit ${D}m \"it's fine\" ; rm ${D}rf /tmp/x"                BLOCK
+run "apostrophe in dq msg, then delete"      "git commit ${D}m \"won't\" && kubectl delete ns default"          BLOCK
+run "dq inside sq msg, then push"            "git commit ${D}m 'say \"hi' && git push ${D}${D}force origin main" BLOCK
+run "escaped dq inside dq msg, then push"    "git commit ${D}m \"a \\\"b\" && git push ${D}${D}force origin main" BLOCK
+# Multi-word rules must separate on WHITESPACE, not a literal space. Each of these was
+# ALLOWED while its single-space form blocked — the branch rule got the shared-class fix
+# and the teardown rule did not.
+run "terraform<TAB>destroy"                  "$(printf 'terraform\tdestroy')"                 BLOCK
+run "kind  delete cluster (2 spaces)"        "kind  delete cluster ${D}${D}name x"            BLOCK
+run "oci ce cluster  delete (2 spaces)"      "oci ce cluster  delete ${D}${D}cluster-id x"    BLOCK
+
 echo
 echo "== MUST ALLOW (each one was a real false positive) =="
 # `\brm\b` matched inside `--rm` because `-` is a word boundary, and `--platform`
@@ -273,6 +295,13 @@ run "commit message containing a semicolon"  "git commit ${D}m 'fix the thing; a
 run "multi-line msg with push ${D}${D}force" "$(printf "git commit %sm 'subject\n\nnever push %s%sforce to main'" "$D" "$D" "$D")"  allow
 # ...and the tracking must not swallow a REAL command after the message closes.
 run "commit then real force push"            "git commit ${D}m 'subject line' && git push ${D}${D}force origin main" BLOCK
+# has_subst is whole-command for ONLY the markers that cannot survive splitting. Testing
+# every marker whole-command was over-broad in a way that lands on plausible work: a
+# substitution in a DIFFERENT command blocked the commit. Cry-wolf is the mechanism
+# workflow.md blames for the direct-push-to-main incident, so the granularity is not
+# cosmetic.
+run "substitution in a preceding command"    "V=\$(cat v) && git commit ${D}m 'docs: why kubectl delete is gated'" allow
+run "apostrophe msg, no following command"   "git commit ${D}m \"don't ever push ${D}${D}force to main\""          allow
 
 echo
 echo "== MUST FAIL CLOSED (a control that cannot run must not report success) =="
@@ -349,6 +378,26 @@ exit 1')" "git push ${D}${D}force origin main" BLOCK "word boundaries"
 run_env "grep whose \\b matches anything" \
   "$(shim_path always '#!/bin/sh
 exit 0')" "git push ${D}${D}force origin main" BLOCK "word boundaries"
+
+# awk is the asymmetric one. A broken grep fails CLOSED — rules stop matching, nothing
+# gets exempted. A broken awk fails OPEN: git_subcommand returns garbage, and if that
+# garbage is "commit" the exemption fires on everything. Presence alone cannot see it,
+# so awk is probed on known input like grep is.
+awk_shim_path() {
+  local name="$1" body="$2" d t p
+  d="$PRUNE_ROOT/awkshim-$name"
+  mkdir -p "$d"
+  for t in jq tr grep sed cat mktemp; do p=$(command -v "$t" 2>/dev/null) && ln -sf "$p" "$d/$t"; done
+  printf '%s\n' "$body" > "$d/awk"
+  chmod +x "$d/awk"
+  printf '%s' "$d"
+}
+run_env "awk that always says 'commit'" \
+  "$(awk_shim_path commit '#!/bin/sh
+echo commit')" "git push ${D}${D}force origin main" BLOCK "subcommands"
+run_env "awk that outputs nothing" \
+  "$(awk_shim_path empty '#!/bin/sh
+exit 0')" "git push ${D}${D}force origin main" BLOCK "subcommands"
 
 # A payload the hook cannot parse is an ERROR, not consent. The matcher is `Bash` only
 # (.claude/settings.json), so there is no legitimate invocation without

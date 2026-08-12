@@ -115,6 +115,7 @@ lead="(^|[;&|(){}!\`]|[[:space:]\"$sq\\])"
 # "defined once and shared" while that rule still hand-rolled its own, which is a false
 # assurance about precisely the defect class the sharing was meant to remove.
 blead="(^|[;&|(){}!<]|[[:space:]\"$sq\\:/+])"
+ws="[[:space:]]+"          # multi-word rules separate on WHITESPACE, never a literal space
 
 rm_cmd_re="${lead}(\\\\)?([^[:space:]]*/)?rm(${delim}|\$)"
 
@@ -224,19 +225,42 @@ git_subcommand() {
 # Consequence, deliberately accepted: a command containing substitution ANYWHERE gets no
 # exemption anywhere, so `git commit -m "$(date)"` is vetted on its message text. That is
 # the safe direction — the contents of a substitution are not knowable here.
+# Only the markers that CANNOT SURVIVE SPLITTING are tested whole-command. `${ ` and
+# `${|` are the pair at issue: `|` is a separator, so `${| cmd; }` is torn apart and no
+# per-segment test can see it. Everything else (`$(`, a backtick, `<(`, `>(`) stays
+# intact inside its own segment and is tested there.
+#
+# Round 5 tested ALL of them whole-command, which was over-broad in a way that lands on
+# plausible work: `V=$(cat v) && git commit -m 'docs: why <gated verb> is gated'` blocked
+# on the substitution in a DIFFERENT command. Fail-safe, but cry-wolf is the mechanism
+# workflow.md blames for the direct-push-to-main incident, so the granularity matters.
 has_subst=0
 case "$joined" in
-  *'$('* | *'`'* | *'<('* | *'>('* | *'${ '* | *'${|'*) has_subst=1 ;;
+  *'${ '* | *'${|'*) has_subst=1 ;;
 esac
 
-# The per-segment copy of the substitution `case` that used to sit here was DELETED, not
-# kept "for defence in depth". Mutation-proving showed it green: segments are produced
-# from `$joined` by `tr`, which substitutes separators and preserves every other
-# character, so a substitution marker in any segment is necessarily in `$joined` too.
-# The global check strictly subsumes it. A clause no test can distinguish is decoration,
-# and decoration in a safety control is worse than absence — it reads as coverage.
+# The per-segment substitution `case` below was DELETED in round 6 and is BACK in round
+# 7 — for a different reason, which is worth stating rather than letting it look like a
+# revert. Round 6 deleted it as decoration, correctly: when `has_subst` tested every
+# marker whole-command it strictly subsumed the per-segment copy, and mutation-proving
+# showed the copy green. Round 7 narrowed `has_subst` to only the split-surviving
+# markers to cut a false-positive cliff, which un-subsumes the rest — so the per-segment
+# test is now the ONLY thing catching `$(`, a backtick, `<(` and `>(`, and it is
+# mutation-proved red. Same lines, opposite status, because the code around them moved.
+# `awk` is checked for PRESENCE above, but presence is not enough for the one tool that
+# decides the EXEMPTION. A broken `grep` fails closed — rules stop matching, nothing is
+# exempted. A broken `awk` fails OPEN: git_subcommand returns garbage, and if that
+# garbage is "commit" the exemption fires on everything. So it is probed on known input,
+# in both directions, exactly as `grep -E \b` is.
+[ "$(git_subcommand 'git commit -m x')" = "commit" ] &&
+  [ "$(git_subcommand 'git push origin x')" = "push" ] ||
+  deny "awk is not resolving git subcommands correctly — the commit exemption cannot be trusted. Refusing to vet this command."
+
 is_literal_commit() {
   [ "$has_subst" = 1 ] && return 1
+  case "$1" in
+    *'$('* | *'`'* | *'<('* | *'>('*) return 1 ;;
+  esac
   local head=${1#"${1%%[![:space:]]*}"}     # drop leading whitespace
   head=${head#\(}; head=${head#\{}
   head=${head#"${head%%[![:space:]]*}"}
@@ -277,22 +301,54 @@ seg_matches() {   # <regex> — raw view OR stripped view
   printf '%s' "$seg" | grep -qE -- "$1" && return 0
   printf '%s' "$sseg" | grep -qE -- "$1"
 }
-odd_quotes() {    # <text> <quote-char> — true when the text leaves that quote open
-  local only=${1//[^$2]/}
-  [ $(( ${#only} % 2 )) -eq 1 ]
+# quote_state <text> <initial-state> -> none | sq | dq
+#
+# A left-to-right scanner, NOT a parity count. Round 5 counted occurrences of one quote
+# character and ignored the other's context, which made the hook FAIL OPEN on ordinary
+# typing — an apostrophe inside a double-quoted message opened the tracking and every
+# following segment was skipped:
+#
+#     git commit -m "don't" && git push --force origin main   -> ALLOWED
+#     git commit -m "it's fine" ; rm -rf /tmp/x               -> ALLOWED
+#
+# The shell does not agree: `"don't"` is closed, so those are real commands. It was
+# data-dependent (two apostrophes -> even -> blocked), needed no obfuscation, and this
+# repo's own commit messages contain apostrophes. It was the only fail-open path left in
+# the hook, and it was introduced by the fix for multi-line messages.
+#
+# Rules the scanner encodes: inside single quotes NOTHING escapes and only `'` closes;
+# elsewhere a backslash consumes the next character; `"` and `'` open their own state
+# only when not already inside the other. The state is always determined, so there is no
+# "undetermined" branch that could silently skip.
+quote_state() {
+  printf '%s' "$1" | awk -v st="${2:-none}" '
+    {
+      n = length($0)
+      for (i = 1; i <= n; i++) {
+        c = substr($0, i, 1)
+        if (st == "sq") { if (c == "'"'"'") st = "none" }
+        else if (st == "dq") {
+          if (c == "\\") i++
+          else if (c == "\"") st = "none"
+        } else {
+          if (c == "\\") i++
+          else if (c == "'"'"'") st = "sq"
+          else if (c == "\"") st = "dq"
+        }
+      }
+    }
+    END { print st }'
 }
 
-in_msg=""
+in_msg="none"
 while IFS= read -r seg; do
-  if [ -n "$in_msg" ]; then
-    odd_quotes "$seg" "$in_msg" && in_msg=""
+  if [ "$in_msg" != "none" ]; then
+    in_msg=$(quote_state "$seg" "$in_msg")
     continue
   fi
   [ -z "$seg" ] && continue
   if is_literal_commit "$seg"; then
-    if odd_quotes "$seg" "$sq"; then in_msg=$sq
-    elif odd_quotes "$seg" '"'; then in_msg='"'
-    fi
+    in_msg=$(quote_state "$seg" none)
     continue
   fi
   sseg=${seg//\"/}; sseg=${sseg//$sq/}; sseg=${sseg//\\/}
@@ -350,7 +406,12 @@ while IFS= read -r seg; do
     deny "'kubectl delete' is human-gated — the operator is the single source of truth (ADR-0001). Express deletes via the CR, or run it yourself."
   fi
   # ── cluster / infra teardown ───────────────────────────────────────────────
-  if seg_matches '\boci ce cluster delete\b|\boci ce node-pool delete\b|\bterraform destroy\b|\bkind delete cluster\b'; then
+  # `${ws}` not a literal space: this rule hand-rolled its separator, so `terraform<TAB>
+  # destroy`, `oci ce cluster<2 spaces>delete` and `kind  delete cluster` were all
+  # ALLOWED while their single-space forms blocked. Finding 3 of the round-3 review was
+  # "no rule may hand-roll a delimiter class"; it was applied to the branch rule and not
+  # to this one — the same half-applied-fix shape, one rule later.
+  if seg_matches "\\boci ce cluster${ws}delete\\b|\\boci ce node-pool${ws}delete\\b|\\bterraform${ws}destroy\\b|\\bkind${ws}delete${ws}cluster\\b"; then
     deny "cluster/infra teardown is human-gated. Run it yourself if intended."
   fi
 done <<EOF
