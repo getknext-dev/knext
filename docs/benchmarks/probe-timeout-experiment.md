@@ -1,8 +1,9 @@
 # Is the ~9 s cold-start slow mode caused by the probe timeout itself?
 
-**Status:** experiment running 2026-08-12. **The prediction below was written before the
-data landed** — that is the point of writing it down, so a result cannot be
-retro-fitted to whichever mechanism it happens to resemble.
+**Status:** complete, 2026-08-12. **Outcome: the hypothesis is REFUTED** — raising the
+probe timeout does not shorten the cold-start tail. **The prediction below was written
+before the data landed** and is left unedited, so a result cannot be retro-fitted to
+whichever mechanism it happens to resemble.
 
 ## What is already established
 
@@ -72,8 +73,12 @@ else again.
   `/spec/template/spec/containers/0/readinessProbe/timeoutSeconds` left every other
   container key byte-identical, which matters because a merge-patch on a ksvc container
   silently drops env/resources/probes while the revision still goes Ready
-- 12 cold samples, one sitting, collector attached for per-pod events and timings
-- compared against the timeout=1 baseline: 24 ABBA samples + 16 pinned samples
+- **first pass:** 12 cold samples, one sitting, collector attached for per-pod events
+  and timings, compared against the timeout=1 baseline (24 ABBA + 16 pinned samples)
+- **then a crossover**, because the first pass could not separate the timeout from the
+  image: phase 1 `bunexec@t=3` vs `node@t=1` interleaved, phase 2 with the assignments
+  swapped. See Result 2. The counts below are the crossover's; the first pass's own
+  0/16 is reported there as the non-evidence it turned out to be.
 
 ## What this is not
 
@@ -111,14 +116,30 @@ Phase 2 swapped the assignments, and the slow mode appeared **in the `timeout=3`
 
 | | phase 1 | phase 2 (swapped) |
 |---|---|---|
-| `p1b-bunexec` | t=3 → 0/3 slow | t=1 → 0/2 slow |
+| `p1b-bunexec` | t=3 → 0/3 slow | t=1 → 0/3 slow |
 | `p1b-node` | t=1 → 0/4 slow | **t=3 → 2/6 slow — 10.55 s, 11.59 s** |
+
+> Cell counts are sensitive to where the phase boundary is drawn: the swap took ~40 s,
+> and a sample landing inside that window can be attributed either side. Counted from
+> the swap timestamps (phase 1 ends 23:55:13, phase 2 begins 23:55:53) the totals are
+> 16 samples, 7 at t=1 and 9 at t=3. An earlier pass of this analysis used looser
+> boundaries and reported 15; every sample in the disputed window was FAST, so no cell's
+> slow count and no verdict moves either way. The load-bearing cell — `node` at t=3 with
+> 10.55 s and 11.59 s — is unambiguous.
 
 Two things settle it, and neither depends on the base rate:
 
 **The duration is invariant.** At `timeout=1` the slow band was 10.16–11.57 s. At
 `timeout=3` it is 10.55–11.59 s. Raising the deadline threefold moved the tail by
 nothing. A livelock caused by the deadline could not survive tripling the deadline.
+
+> **Read that comparison with its asymmetry in view.** The `timeout=1` band is
+> **historical** — the 2026-08-10 sitting — because the crossover's own `timeout=1` arm
+> produced **zero** slow samples to compare against. So this is "t=3 slow samples land
+> inside the previously-measured t=1 band", not "two arms measured side by side". What
+> makes the inference hold anyway is that the prediction was about **magnitude**, not
+> rate: the pre-registered livelock cell required Ready at ~2–3 s, and 10.55 s / 11.59 s
+> falsify that on their own, whatever the base rate was doing.
 
 **The event count tracks the timeout while the wall-clock does not.** Timeout-class
 `Unhealthy` events appear at **count 9** on pods from the `timeout=1` era and at
@@ -133,12 +154,20 @@ re-shapes how the nine seconds is divided.*
 
 ### The pre-registered rule fired "tracks the IMAGE" — and I do not endorse it
 
-Pooled by image: bunexec 0/5, node 2/10. Pooled by timeout: t=1 0/6, t=3 2/9. The rule
+Pooled by image: bunexec 0/6, node 2/10. Pooled by timeout: t=1 0/7, t=3 2/9. The rule
 I wrote in advance reads that as image-tracking, and it is **underpowered**: two slow
 samples total, against a base rate that swings 0–42%, cannot distinguish an image effect
 from chance. I am reporting the rule's output because I committed to it, and rejecting
 its conclusion because the evidence does not reach it. What the same data *does* support
 is the refutation above, which rests on duration rather than on counting rare events.
+
+**And the wider record refutes image-tracking outright**, which I should have cited
+rather than resting on "underpowered". On 2026-08-10 `p1b-bunexec` — the arm that shows
+0 slow in the crossover — produced **four** slow samples of its own: 10.66 s, 10.45 s,
+10.33 s, 11.38 s
+(`grep -h http_req_duration results/p1b-bunexec-20260810*.txt`). The slow mode plainly
+occurs on both images. The crossover's 0/6 for bunexec is a small-sample artifact, not a
+property of the image, and this was in the results directory the whole time.
 
 ## Aside — the control's failure to reproduce, and what it costs
 
