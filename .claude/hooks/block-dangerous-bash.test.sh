@@ -68,6 +68,35 @@ run "push HEAD:refs/heads/main"        "git push origin HEAD:refs/heads/main"   
 # 4. The rm flags do not have to share a token: `rm -r -f` is `rm -rf`.
 run "rm ${D}r ${D}f split flags"       "rm ${D}r ${D}f /some/dir"                                       BLOCK
 
+# Nine more false negatives, found by an adversarial code review of #717 — the PR that
+# was itself fixing four of them. Every payload below was ALLOWED by the shipped hook.
+# The worst were introduced BY the previous two fixes, which is why this block exists
+# rather than a note in the header: this file is the only thing that has ever caught a
+# regression here.
+#
+# 1-3. A trailing backslash disabled EVERY segment rule. BSD/macOS sed discards the
+#      pattern space on `N` at EOF, so normalisation emitted the empty string. GNU sed
+#      does not — the bypass was live on macOS and absent on Linux CI, so a test added
+#      on CI would have gone green while the hook was open where it actually ran.
+run "trailing ${D}${D}force + backslash EOF" "git push ${D}${D}force origin main \\"          BLOCK
+run "trailing main + backslash EOF"          "git push origin main \\"                        BLOCK
+run "trailing rm ${D}r ${D}f + backslash"    "rm ${D}r ${D}f /tmp/x \\"                        BLOCK
+# 4-5. Quoting a branch is ordinary, not obfuscation; the rule required whitespace on
+#      both sides of the name.
+run "quoted branch name"                     "git push origin \"main\""                       BLOCK
+run "single-quoted branch name"              "git push origin 'main'"                         BLOCK
+# 6-7. -R is the POSIX/BSD synonym for -r; both patterns were lowercase-only.
+run "rm ${D}Rf uppercase"                    "rm ${D}Rf /tmp/x"                               BLOCK
+run "rm ${D}fR uppercase"                    "rm ${D}fR /tmp/x"                               BLOCK
+# 8-9. The command-word class omitted / and \, so a path or escaped invocation slipped.
+run "/bin/rm ${D}rf"                         "/bin/rm ${D}rf /tmp/x"                          BLOCK
+run "backslash-escaped rm"                   "\\rm ${D}rf /tmp/x"                             BLOCK
+# Rules that had NO case at all — deleting any of them left the whole suite green.
+run "push ${D}${D}all"                       "git push ${D}${D}all origin"                    BLOCK
+run "kubectl delete"                         "kubectl delete pod foo"                         BLOCK
+run "terraform destroy"                      "terraform destroy"                              BLOCK
+run "kind delete cluster"                    "kind delete cluster ${D}${D}name x"             BLOCK
+
 echo
 echo "== MUST ALLOW (each one was a real false positive) =="
 # `\brm\b` matched inside `--rm` because `-` is a word boundary, and `--platform`
@@ -92,6 +121,13 @@ run "rm ${D}f alone"                         "rm ${D}f /tmp/one-file"           
 run "rm ${D}r alone"                         "rm ${D}r /tmp/one-dir"                                        allow
 run "branch named maintenance"               "git push origin maintenance"                                  allow
 run "branch path containing main"            "git push origin fix/main-menu-typo"                           allow
+# Three false POSITIVES the same review found. The commit-message ones matter most:
+# workflow.md records that a hook firing on MESSAGE TEXT is what led to a docs file
+# being pushed straight to main, because the human re-ran only the tail of a blocked
+# command. A guard that fires on ordinary work is how a real force push gets waved past.
+run "rm ${D}${D}force on one file"           "rm ${D}${D}force /tmp/onefile.txt"                            allow
+run "commit message quoting the words"       "git commit ${D}m 'do not push ${D}${D}force to main'"         allow
+run "commit message mentioning rm ${D}rf"    "git commit ${D}m 'removed the rm ${D}rf call'"                allow
 
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL PASS"; else echo "SOME FAILED"; fi
