@@ -122,6 +122,25 @@ run "sudo rm ${D}rf"                         "sudo rm ${D}rf /tmp/x"            
 run "terraform destroy"                      "terraform destroy"                              BLOCK
 run "kind delete cluster"                    "kind delete cluster ${D}${D}name x"             BLOCK
 
+# A THIRD round. Both sign-off gates independently defeated the round-2 hook, and
+# both landed on the same place: the `git commit` exemption. It was justified in the
+# comments as "git commit cannot delete or push, so the exemption costs no coverage."
+# That is measured false — a commit segment runs anything through command
+# substitution, which is the exact wrapper class the command-word helper had just been
+# deleted for, handed back for one command word. All three were ALLOWED.
+run "commit -m with \$( ) push"              "git commit ${D}m \"\$(git push ${D}${D}force origin main)\"" BLOCK
+run "commit -m with \$( ) rm ${D}rf"         "git commit ${D}m \"\$(rm ${D}rf /tmp/x)\""      BLOCK
+run "commit -m with backtick push"           "git commit ${D}m \"\`git push ${D}${D}force origin main\`\"" BLOCK
+run "commit -m with process substitution"    "git commit ${D}m x < <(git push origin main)"   BLOCK
+# Round 2 fixed quotes-as-delimiters on the BRANCH rule and backslash-as-delimiter on
+# the rm COMMAND WORD, and left the opposite side of each open. Both were ALLOWED.
+# This is the "guards must assert both halves" class, in its asymmetric form: the fix
+# was correct and applied to exactly one of the two places that needed it.
+run "push origin backslash-main"             "git push origin \\main"                         BLOCK
+run "rm with double-quoted flags"            "rm \"${D}rf\" /tmp/x"                           BLOCK
+run "rm with single-quoted flags"            "rm '${D}rf' /tmp/x"                             BLOCK
+run "quoted rm command word"                 "\"rm\" ${D}rf /tmp/x"                           BLOCK
+
 echo
 echo "== MUST ALLOW (each one was a real false positive) =="
 # `\brm\b` matched inside `--rm` because `-` is a word boundary, and `--platform`
@@ -153,6 +172,90 @@ run "branch path containing main"            "git push origin fix/main-menu-typo
 run "rm ${D}${D}force on one file"           "rm ${D}${D}force /tmp/onefile.txt"                            allow
 run "commit message quoting the words"       "git commit ${D}m 'do not push ${D}${D}force to main'"         allow
 run "commit message mentioning rm ${D}rf"    "git commit ${D}m 'removed the rm ${D}rf call'"                allow
+# The message-text exemption used to cover only the rm and push rules. The last three
+# rules matched the whole flattened command with no exemption at all, so writing a
+# commit message ABOUT them was blocked — the same cry-wolf case, displaced rather
+# than removed. workflow.md records where that leads: the human re-ran the tail of a
+# blocked command and put a docs file on main.
+run "commit msg naming kubectl delete"       "git commit ${D}m 'docs: why kubectl delete is gated'"         allow
+run "commit msg naming terraform destroy"    "git commit ${D}m 'note that terraform destroy is gated'"      allow
+run "commit msg naming reset ${D}${D}hard"   "git commit ${D}m 'explain why reset ${D}${D}hard is gated'"   allow
+# Parameter expansion stays exempt: it substitutes TEXT into the message, it cannot
+# execute anything. Only command/process substitution disqualifies the exemption.
+run "commit msg with \${var} expansion"      "git commit ${D}m \"\${MSG} about push ${D}${D}force to main\"" allow
+
+echo
+echo "== MUST FAIL CLOSED (a control that cannot run must not report success) =="
+# Every rule above is text processing, so a missing tool does not degrade the check —
+# it DELETES it. Measured on the previous revision: no jq -> exit 0 with no stderr at
+# all; no grep -> exit 0 with all eleven rules dead; no tr -> exit 0 with the segment
+# rules dead. The 58 cases above ALL assume a healthy environment, so deleting jq left
+# the suite green and the hook wide open. security.md already states the principle for
+# the action-pin checker: a checker that goes green when it cannot do its job is worse
+# than none.
+PRUNE_ROOT=$(mktemp -d)
+BASH_ABS=$(command -v bash)
+trap 'rm -rf "$PRUNE_ROOT"' EXIT
+
+# pruned_path <tool-to-hide> — a PATH containing every tool the hook needs EXCEPT one.
+pruned_path() {
+  local drop="$1" d p t
+  d="$PRUNE_ROOT/no-$drop"
+  mkdir -p "$d"
+  for t in jq tr awk grep sed cat mktemp; do
+    [ "$t" = "$drop" ] && continue
+    p=$(command -v "$t" 2>/dev/null) && ln -sf "$p" "$d/$t"
+  done
+  printf '%s' "$d"
+}
+
+run_env() {
+  local label="$1" path="$2" cmd="$3" want="$4" out rc got mark
+  # BASH_ABS, not `bash`: the pruned PATH is used to resolve the interpreter too, so a
+  # bare `bash` here exits 127 — which this harness would have scored as "allow", i.e.
+  # the fail-closed cases would have passed for entirely the wrong reason.
+  out=$(printf '%s' "{\"tool_input\":{\"command\":$(printf '%s' "$cmd" | jq -Rs .)}}" |
+        PATH="$path" "$BASH_ABS" "$HOOK" 2>&1)
+  rc=$?
+  got="allow"; [ "$rc" -eq 2 ] && got="BLOCK"
+  mark="ok  "; [ "$got" != "$want" ] && { mark="FAIL"; fails=1; }
+  printf '%s  %-46s want=%-5s got=%-5s\n' "$mark" "$label" "$want" "$got"
+}
+
+for tool in jq tr awk grep; do
+  run_env "missing $tool" "$(pruned_path "$tool")" "git push ${D}${D}force origin main" BLOCK
+done
+
+# A payload the hook cannot parse is an ERROR, not consent. The matcher is `Bash` only
+# (.claude/settings.json), so there is no legitimate invocation without
+# .tool_input.command — treating a missing field as "nothing to check" turns an
+# upstream schema change into a permanent, silent, undetectable bypass.
+# The 4th argument asserts the MESSAGE, not just the verdict, and it is load-bearing
+# rather than cosmetic. Both bad-payload clauses deny, so exit code alone cannot tell
+# them apart — mutation-proving showed the "unparseable" clause could be deleted
+# entirely with the suite still green, i.e. decoration by this repo's own standard.
+# Distinguishing the two messages is what makes each clause provable, and it is also
+# the difference between an operator learning "your payload is malformed" and
+# "the field is missing" when this fires for real.
+run_raw() {
+  local label="$1" payload="$2" want="$3" msg="${4:-}" out rc got mark
+  out=$(printf '%s' "$payload" | bash "$HOOK" 2>&1)
+  rc=$?
+  got="allow"; [ "$rc" -eq 2 ] && got="BLOCK"
+  mark="ok  "; [ "$got" != "$want" ] && { mark="FAIL"; fails=1; }
+  if [ -n "$msg" ] && [ "$mark" = "ok  " ]; then
+    case "$out" in
+      *"$msg"*) ;;
+      *) mark="FAIL"; fails=1; got="wrongmsg" ;;
+    esac
+  fi
+  printf '%s  %-46s want=%-5s got=%-5s\n' "$mark" "$label" "$want" "$got"
+}
+run_raw "malformed JSON payload"        "{not json"                              BLOCK "unparseable"
+run_raw "payload with no command field" '{"tool_input":{"file_path":"/tmp/x"}}'  BLOCK "carried no"
+# Empty stdin is not a parse error — jq exits 0 with no output on empty input — so it
+# lands on the missing-field clause. Asserted as measured, not as assumed.
+run_raw "empty payload"                 ""                                       BLOCK "carried no"
 
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL PASS"; else echo "SOME FAILED"; fi

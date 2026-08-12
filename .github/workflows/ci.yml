@@ -526,6 +526,52 @@ jobs:
           # state of the other six.
           exit "$failed"
 
+  safety-hook-guard:
+    name: Agent safety-control hook (block-dangerous-bash)
+    runs-on: ubuntu-latest
+    # `.claude/hooks/block-dangerous-bash.sh` is the ONLY enforcement of the
+    # operations `.claude/rules/security.md` calls never acceptable on an agent's
+    # behalf: force/mirror/--all push, direct push to main/master, history rewrite,
+    # recursive-force removal, cluster deletes, infra teardown.
+    #
+    # Its test suite is, by its own history, the only thing that has ever caught a
+    # regression in it — and until now it ran only when a human remembered to type it.
+    # That is exactly the shape security.md warns about: a documented expectation
+    # degrades, and its efficacy is unobservable until it has already failed. Four
+    # separate rounds shipped a bypass that looked correct on inspection.
+    #
+    # Linux matters specifically. One of those bypasses was a BSD/GNU `sed` split:
+    # `N` at EOF discards the pattern space on macOS and prints on GNU, so the hook
+    # was open where contributors run it and closed where CI would have checked. This
+    # job is the GNU half of that pair; the suite runs on macOS for whoever edits it.
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Run the safety-control suite
+        run: |
+          set -euo pipefail
+          bash .claude/hooks/block-dangerous-bash.test.sh
+      - name: Prove the suite is not decoration
+        run: |
+          set -euo pipefail
+          # A guard that stays green when its subject is removed is decoration
+          # (.claude/rules/workflow.md). Rather than assert a case count — which
+          # drifts, and which gets edited to green — neuter the hook and require the
+          # suite to NOTICE. The anchor must occur exactly once or this aborts: a
+          # silently-failed substitution yields a green run that proves nothing.
+          hook=.claude/hooks/block-dangerous-bash.sh
+          n=$(grep -c '^deny() {' "$hook")
+          test "$n" -eq 1 || { echo "::error::deny() anchor occurs ${n}x, expected 1"; exit 1; }
+          cp "$hook" /tmp/hook.orig
+          trap 'cp /tmp/hook.orig "$hook"' EXIT
+          sed -i 's|^deny() { echo|deny() { return 0; echo|' "$hook"
+          grep -q '^deny() { return 0;' "$hook" || { echo "::error::mutation did not land"; exit 1; }
+          if bash .claude/hooks/block-dangerous-bash.test.sh >/dev/null 2>&1; then
+            echo "::error::the suite passed with every deny() neutered — it proves nothing"
+            exit 1
+          fi
+          echo "OK: neutering deny() reddens the suite"
+
   operator-codegen-check:
     name: Operator codegen is up-to-date (make generate + make manifests)
     runs-on: ubuntu-latest
