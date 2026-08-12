@@ -489,21 +489,56 @@ msg_tail() {
 in_msg="none"
 data_state="none"
 in_hd=0
-hd_delim=""
+hd_queue=""      # FIFO of "dash<TAB>delimiter", one per open heredoc
+tab=$'\t'
 while IFS= read -r seg; do
   seg_start_state=$data_state
   data_state=$(quote_state "$seg" "$data_state")
 
   if [ "$in_hd" = 1 ]; then
-    trimmed=${seg#"${seg%%[![:space:]]*}"}
-    [ "$trimmed" = "$hd_delim" ] && { in_hd=0; hd_delim=""; }
+    hd_front=${hd_queue%%"$nl"*}
+    hd_dash=${hd_front%%"$tab"*}
+    hd_delim=${hd_front#*"$tab"}
+    # `<<` allows NO leading whitespace on the terminator; `<<-` strips TABS ONLY.
+    # Stripping all whitespace for both — the round-12 spelling — ended the heredoc a
+    # line early, so the body's tail was treated as commands and could exempt.
+    if [ "$hd_dash" = 1 ]; then hd_cand=${seg#"${seg%%[!"$tab"]*}"}; else hd_cand=$seg; fi
+    if [ "$hd_cand" = "$hd_delim" ]; then
+      hd_queue=${hd_queue#*"$nl"}
+      [ -z "$hd_queue" ] && in_hd=0
+    fi
   else
-    hd_delim=$(printf '%s' "$seg" | awk '
-      match($0, /<<-?[ \t]*["'"'"']?[A-Za-z_][A-Za-z0-9_]*/) {
-        s = substr($0, RSTART, RLENGTH)
-        sub(/^<<-?[ \t]*["'"'"']?/, "", s)
-        print s; exit }')
-    [ -n "$hd_delim" ] && in_hd=1
+    hd_found=$(printf '%s' "$seg" | awk -v tab="$tab" '
+      {
+        s = $0; n = 0
+        while (match(s, /<<-?[ \t]*(\\?[A-Za-z_][A-Za-z0-9_]*|"[^"]*"|'"'"'[^'"'"']*'"'"')/)) {
+          if (substr(s, RSTART, 3) == "<<<") { s = substr(s, RSTART + 3); continue }
+          tok = substr(s, RSTART, RLENGTH)
+          s = substr(s, RSTART + RLENGTH)
+          dash = (substr(tok, 3, 1) == "-") ? 1 : 0
+          d = tok
+          sub(/^<<-?[ \t]*/, "", d)
+          sub(/^\\/, "", d)
+          gsub(/^["'"'"']|["'"'"']$/, "", d)
+          print dash tab d
+          n++
+        }
+        # FAIL CLOSED on a `<<` we could not parse. Unrecognised must mean "stay in
+        # data", never "leave data" — `cat <<\EOF` was unparsed, so the tracker never
+        # engaged at all and the body could establish the exemption. An unmatchable
+        # delimiter keeps us inside the heredoc for the rest of the command, which only
+        # ever withdraws exemptions.
+        rest = $0; extra = 0
+        while (match(rest, /<</)) {
+          if (substr(rest, RSTART, 3) != "<<<") extra++
+          rest = substr(rest, RSTART + ((substr(rest, RSTART, 3) == "<<<") ? 3 : 2))
+        }
+        for (i = n; i < extra; i++) print "0" tab "\001UNPARSEABLE-HEREDOC\001"
+      }')
+    if [ -n "$hd_found" ]; then
+      hd_queue="$hd_found$nl"
+      in_hd=1
+    fi
   fi
 
   if [ "$in_msg" != "none" ]; then

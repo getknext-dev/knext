@@ -551,6 +551,63 @@ printf '%s  %-46s %s shapes, %s live, %s asserted\n' \
   "oracle-gated cross product" "$oracle_shapes" "$oracle_live" "$oracle_asserted"
 
 echo
+echo "== HEREDOC SPELLING GRID (oracle-gated) =="
+# The oracle-gated product above covers the data-context CONSTRUCT but only one SPELLING
+# of it. A reviewer's grid over delimiter spellings found 18 live bypasses in a tracker
+# whose four hand-written shapes all passed — the same enumerate-versus-generate lesson,
+# one level down: it is not enough to generate over joins if the construct itself has
+# spellings you enumerated.
+#
+# THE DECOY IS THE POINT, and getting it wrong is instructive. An indented line that the
+# HOOK accepts as the terminator but BASH does not ends the heredoc early in the hook's
+# model only — so it starts reading heredoc BODY as commands, the `git commit …` line
+# grants the exemption, and everything after is skipped. A first version of this grid put
+# the indented line in the terminator position instead; bash then swallows the whole
+# command, the oracle skips every row, and the grid proves nothing while looking green.
+HD_ORACLE=$(mktemp -d)
+for t in git kubectl terraform; do printf '#!/bin/sh\nexit 0\n' > "$HD_ORACLE/$t"; chmod +x "$HD_ORACLE/$t"; done
+TAB=$'\t'
+hd_shapes=(
+  "cat <<EOF${TAB}EOF"
+  "cat <<-EOF${TAB}${TAB}EOF"
+  "cat <<\\EOF${TAB}EOF"
+  "cat <<'EOF'${TAB}EOF"
+  "cat <<\"EOF\"${TAB}EOF"
+  "cat <<A <<EOF${TAB}A"
+)
+hd_decoys=( "" "  EOF" "${TAB}EOF" "   EOF" )
+hd_verbs=(
+  "git push ${D}${D}force origin main"
+  "git push origin main"
+  "rm ${D}rf /tmp/x"
+  "kubectl delete ns prod"
+)
+hd_live=0; hd_asserted=0; hd_holes=0
+for shp in "${hd_shapes[@]}"; do
+  hd_op=${shp%%"$TAB"*}; hd_term=${shp#*"$TAB"}
+  for dc in "${hd_decoys[@]}"; do
+    hd_body="git commit ${D}m \"fix"
+    [ -n "$dc" ] && hd_body="$dc"$'\n'"$hd_body"
+    got=$(cd "$HD_ORACLE" && PATH="$HD_ORACLE:/usr/bin:/bin" \
+          bash -c "$hd_op"$'\n'"$hd_body"$'\n'"$hd_term"$'\n'"printf ORACLE_EXEC" 2>/dev/null)
+    case "$got" in *ORACLE_EXEC*) ;; *) continue ;; esac
+    hd_live=$((hd_live + 1))
+    for v in "${hd_verbs[@]}"; do
+      hd_asserted=$((hd_asserted + 1))
+      printf '%s' "{\"tool_input\":{\"command\":$(printf '%s' "$hd_op"$'\n'"$hd_body"$'\n'"$hd_term"$'\n'"$v" | jq -Rs .)}}" |
+        bash "$HOOK" >/dev/null 2>&1
+      [ $? -eq 2 ] || { hd_holes=$((hd_holes + 1)); fails=1
+                        printf 'FAIL  heredoc spelling: opener=%q decoy=%q\n' "$hd_op" "$dc"; }
+    done
+  done
+done
+python3 -c "import shutil; shutil.rmtree('$HD_ORACLE', ignore_errors=True)" 2>/dev/null ||
+  find "$HD_ORACLE" -type f -delete 2>/dev/null
+printf '%s  %-46s %s live shapes, %s asserted\n' \
+  "$([ "$hd_holes" -eq 0 ] && echo 'ok  ' || echo 'FAIL')" \
+  "heredoc spelling grid" "$hd_live" "$hd_asserted"
+
+echo
 echo "== MUST FAIL CLOSED (a control that cannot run must not report success) =="
 # Every rule above is text processing, so a missing tool does not degrade the check —
 # it DELETES it. Measured on the previous revision: no jq -> exit 0 with no stderr at
