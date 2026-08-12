@@ -16,7 +16,7 @@
 calls "never acceptable on the agent's behalf": force/mirror/`--all` push, direct push to
 `main`/`master`, history rewrite, recursive-force removal, cluster deletes, infra teardown.
 
-It has shipped a bypass **four times**, and the same argument was re-litigated each time:
+It has shipped a bypass **five times**, and the same argument was re-litigated each time:
 
 | Round | The "improvement" | What it cost |
 |---|---|---|
@@ -24,6 +24,7 @@ It has shipped a bypass **four times**, and the same argument was re-litigated e
 | #717 | Fix that continuation bypass | A worse one — and, on BSD `sed` only, an empty normalisation that disabled every segment rule |
 | #725 r1–2 | Identify each segment's real command word so rules apply only to genuine invocations | One `=` anywhere disabled both rules; `xargs`, `find -exec`, `bash -c`, `$( )`, subshells, `if/then`, `for/do` all escaped |
 | #725 r5–10 | Exempt `git commit` so message text stops crying wolf | Command substitution, an env-var prefix, a trailing `# git commit`, a global flag stealing its argument, and two quote-tracking fail-opens |
+| #725 r11 | Treat `#` as starting a comment, so a comment can no longer disarm the exemption | The word-start test accepted only whitespace, but bash ends a word on `)` too — `(… git commit -m "x")#c\` + newline reopened **all eight** gated verbs |
 
 Every one looked correct on inspection. The recurring shape is not carelessness — it is that
 **narrowing feels like precision**, and in a control whose failure mode is "the forbidden thing
@@ -76,6 +77,37 @@ text as the cause of a docs file reaching `main`. Some clauses exist *only* to p
 positive and are therefore invisible to every must-block case; they need a must-allow case or they
 cannot be proved at all.
 
+### The worked example: why one obvious false positive was NOT fixed
+
+Decision 2 states the proof obligation abstractly. This is the case that shows what it costs
+to honour it, and it is the strongest evidence in the series because the fix that *looked*
+obvious was retroactively proven to be a bypass.
+
+`git push origin feature/x # rebased onto main` is **blocked**, and the comment is inert, so
+this is a false positive. It is pre-existing — `main` behaves identically — and the fix looks
+trivial: the hook already knows `#` starts a comment (it must, to track where a commit message
+ends), so teach the *rules* to ignore comment text too.
+
+Under Decision 3 that is inadmissible, because it narrows what gets **checked** rather than what
+gets **excluded**. It was deferred on that ground alone, before there was any evidence for it.
+
+Rounds 10 and 11 then supplied the evidence:
+
+- **Round 10** — the hook's notion of "this is a comment" was wrong in a way that let a comment
+  swallow a folded-in continuation line: `git commit -m "subject" # note\` + newline + a gated
+  verb executed, and was allowed.
+- **Round 11** — the corrected notion was *still* wrong, because bash ends a word on `)` as well
+  as whitespace: `(… git commit -m "x")#c\` + newline reopened all eight gated verbs.
+
+Had comment-stripping been granted when it was proposed, each of those defects would have been a
+**silent hole in every rule** rather than a hole in one exemption — the rules would have skipped
+text the hook wrongly believed was inert. The exemption is bounded; the rules are not.
+
+The rule this yields, and the reason it is stated as an obligation rather than a preference:
+**a guard may only act on a fact about the shell that it has demonstrated it can determine
+correctly.** Comment detection was wrong twice in two rounds. Granting it authority over *matching*
+is admissible when there is a real tokeniser whose comment handling is itself tested — not before.
+
 ## Options considered
 
 | Option | Fewer bypasses? | Cost | Verdict |
@@ -91,7 +123,7 @@ cannot be proved at all.
   human reruns the command, or runs it themselves. A false negative on force-push-to-`main` is not.
   The accepted costs are listed in the hook header so a later round cannot trade them away by
   accident.
-- **Guards get slower and longer.** The suite grew from 43 assertions to over 1,100. That is the
+- **Guards get slower and longer.** The suite grew from 27 assertions on `main` to over 1,100. That is the
   price of the property, and it is why it belongs in CI rather than in someone's memory.
 - **CI must run the guard on every platform contributors use.** One bypass was live on macOS and
   absent on Linux, so a Linux-only gate would have gone green while the control was open on every
@@ -101,11 +133,17 @@ cannot be proved at all.
 
 ## Known limitation — the case for a tokeniser
 
-Rounds 7–10 produced four defects that were all the same thing: `#` starts a comment, `$'…'`
-escapes, a backslash is not a continuation *inside* a comment, quote state is not parity. Each is
+Rounds 7–11 produced five defects that were all the same thing: `#` starts a comment after any
+word terminator (not just whitespace), `$'…'`
+escapes, a backslash is not a continuation *inside* a comment, and quote state is not parity. Each is
 plain shell grammar. The hook resolves continuations, then splits, then scans quotes — three stages
 — while the shell resolves all of it in **one** tokenising pass. Every one of those defects lives in
 the gap between those stages, so they will keep arriving one construct at a time.
+
+Round 11 is the prediction landing inside the same PR that made it: round 10 fixed comment handling,
+and round 11 was a comment-handling defect one construct over, found by a reviewer rather than by the
+fix's own tests. That is the strongest available evidence that the remaining cost here is per-round
+rather than one-off.
 
 The system-designer gate costed the replacement: a single tokeniser pass emitting `(segment, words)`
 with comments, quotes, continuations and here-docs resolved together; the rules unchanged; the
