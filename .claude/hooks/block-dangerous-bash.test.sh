@@ -296,6 +296,18 @@ run "heredoc body, then teardown"            "$(printf 'cat <<EOF\ngit commit %s
 run "heredoc <<- dash form"                  "$(printf 'cat <<-EOF\n\tgit commit %sm "fix\n\tEOF\ngit push origin main' "$D")"                  BLOCK
 # Same class without a heredoc: an open single-quoted block is data too.
 run "quoted data block, then force push"     "$(printf "echo 'note:\ngit commit %sm \"fix\n'\ngit push %s%sforce origin main" "$D" "$D" "$D")"  BLOCK
+# Two clauses the in-repo mutation harness reported GREEN on its first run. They were
+# not decoration — both are load-bearing, and both shapes were live fail-opens before
+# round 13 (verified against that commit). They simply had no case reaching them, which
+# is the distinction between "delete it" and "test it": deleting either reopens a hole.
+#
+#   1. An opener the delimiter parser cannot read must keep us INSIDE data. `<<$'EOF'`
+#      parses as nothing, so without the fail-closed counter the tracker never engages
+#      and the body grants the exemption.
+#   2. Stacked heredocs need a delimiter QUEUE. With a single slot, the first terminator
+#      ends heredoc mode early and the SECOND body is read as commands.
+run "unparseable heredoc opener"             "$(printf 'cat <<$%sEOF%s\ngit commit %sm "fix\nEOF\ngit push %s%sforce origin main' "'" "'" "$D" "$D" "$D")" BLOCK
+run "stacked heredocs need a queue"          "$(printf 'cat <<A <<EOF\nx\nA\ngit commit %sm "fix\nEOF\ngit push %s%sforce origin main' "$D" "$D" "$D")"    BLOCK
 
 # The architect gate reached the same class from the other side: the segment that CLOSES
 # a carried message was `continue`d, discarding its tail unscanned. Its payload uses a
