@@ -28,10 +28,12 @@
 # `sseg` to make them pass reopens intra-token quoting, so this paragraph exists to stop
 # a later round trading it away by accident.
 #
-# It has been wrong subtly FOUR times — #712 introduced a continuation bypass while
+# It has been wrong subtly FIVE times — #712 introduced a continuation bypass while
 # fixing false positives; #717's fix for THAT introduced a worse one; #725 round 1
 # fixed nine and opened the `=` glob and wrapper-narrowing holes; #725 round 2 fixed
-# those and still let command substitution through the `git commit` exemption.
+# those and still let command substitution through the `git commit` exemption; #725
+# round 10 taught the hook that `#` starts a comment and round 11 found that its notion
+# of where a word starts was still wrong, reopening all eight gated verbs via `)#`.
 # Every one of them looked correct on inspection. Change nothing here without running
 # `.claude/hooks/block-dangerous-bash.test.sh` — which CI now runs, so a regression
 # no longer waits on someone remembering to type it.
