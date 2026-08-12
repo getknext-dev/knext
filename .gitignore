@@ -127,3 +127,9 @@ benchmarks/**/results/
 # GOCACHE directory in the repo root (992MB seen); it is regenerable build
 # output and must never be committed.
 go-build*/
+
+# Python bytecode caches. The repo is TS + Go, but `.claude/hooks/mutation-proof.py`
+# is imported by other tooling, and CPython drops a `__pycache__/` next to any module
+# it imports. Regenerable, machine-specific, and never useful in a diff.
+__pycache__/
+*.py[cod]
