@@ -37,6 +37,17 @@ for _t in jq tr awk grep; do
     deny "hook dependency '$_t' is missing — refusing to vet this command. Install it, or run the command yourself."
 done
 
+# PRESENT IS NOT ENOUGH — the tool must actually do the thing. `\b` is a GNU extension,
+# not POSIX ERE. Four rule families (git/push, the cluster-delete rule, history rewrite,
+# teardown) are built on it, so a `grep` that ignores `\b` would kill them SILENTLY
+# while sailing through the check above, because the binary exists. Measured working on
+# GNU grep and on macOS BSD grep 2.6; busybox is the case this catches. Both directions
+# are asserted, since a `\b` that matches everything is as broken as one that matches
+# nothing.
+printf 'a git b' | grep -qE '\bgit\b' 2>/dev/null &&
+  ! printf 'agitb' | grep -qE '\bgit\b' 2>/dev/null ||
+  deny "this 'grep -E' does not support \\b word boundaries — four rules would silently not match. Refusing to vet this command."
+
 # An unparseable payload is an ERROR, not consent. The matcher is `Bash` only
 # (`.claude/settings.json`), so there is no legitimate invocation without
 # `.tool_input.command`; treating a missing field as "nothing to check" turned an
@@ -93,6 +104,11 @@ split_segments() { printf '%s' "$1" | tr ';|&\n' '\n\n\n\n'; }
 sq=\'
 delim="[[:space:]\"$sq()<>]"
 lead="(^|[;&|(){}!]|[[:space:]\"$sq\\])"
+# The branch rule additionally honours `:` `/` `+` `<` before the name. Defined HERE
+# with the others rather than inline at the use site: round 3 claimed the classes were
+# "defined once and shared" while that rule still hand-rolled its own, which is a false
+# assurance about precisely the defect class the sharing was meant to remove.
+blead="(^|[;&|(){}!<]|[[:space:]\"$sq\\:/+])"
 
 rm_cmd_re="${lead}(\\\\)?([^[:space:]]*/)?rm(${delim}|\$)"
 
@@ -171,9 +187,56 @@ git_subcommand() {
 # the segment contains no command substitution and no process substitution. Parameter
 # expansion (`${x}`) is deliberately still exempt — it substitutes text into the
 # message, it does not execute it.
+# Round 5 added the two conditions below, each proven by a sign-off gate running the
+# payload rather than reading the code:
+#
+#   * `${ cmd; }` and `${| cmd; }` are bash 5.3 VALUE SUBSTITUTION — they execute,
+#     and they contain neither `$(` nor a backtick. This machine runs bash 5.3.
+#   * The segment's first word must be `git`. `git_subcommand` scans for a `git` token
+#     ANYWHERE, so everything to its left was invisible, and two literal words at the
+#     END of a segment disabled all five rule families:
+#         rm -rf /tmp/x # git commit          -> ALLOWED
+#         kubectl delete pod foo # git commit -> ALLOWED
+#     An environment-variable prefix reached it the same way, and that one EXECUTES:
+#         GIT_EDITOR='<cmd>' git commit       -> ALLOWED, and git runs <cmd> via sh -c
+#     confirmed in a scratch repo. So a `NAME=value` prefix does NOT earn the exemption,
+#     even though it is ordinary shell — the safe direction, since the whole point is
+#     that a LITERAL commit cannot execute anything.
+#
+# This is NOT the deleted `cmd_word` helper coming back, and the distinction is the
+# whole lesson of rounds 1-2: that helper narrowed what gets CHECKED, which loses
+# coverage silently. This narrows what gets EXEMPTED, which can only add blocks. Do not
+# "simplify" it away in a later round.
+#
+# `has_subst` is computed on the WHOLE command, BEFORE splitting, and that ordering is
+# load-bearing rather than incidental. split_segments cuts on `|`, which is part of the
+# `${| cmd; }` marker itself — so a per-segment test never sees it, the first fragment
+# (`git commit -m "${`) looks like a literal commit, and the quote-tracking below then
+# swallowed the executed command as message text. Caught by the test, not by reading:
+# adding the `${|` case to the per-segment check alone left the payload ALLOWED.
+#
+# Consequence, deliberately accepted: a command containing substitution ANYWHERE gets no
+# exemption anywhere, so `git commit -m "$(date)"` is vetted on its message text. That is
+# the safe direction — the contents of a substitution are not knowable here.
+has_subst=0
+case "$joined" in
+  *'$('* | *'`'* | *'<('* | *'>('* | *'${ '* | *'${|'*) has_subst=1 ;;
+esac
+
+# The per-segment copy of the substitution `case` that used to sit here was DELETED, not
+# kept "for defence in depth". Mutation-proving showed it green: segments are produced
+# from `$joined` by `tr`, which substitutes separators and preserves every other
+# character, so a substitution marker in any segment is necessarily in `$joined` too.
+# The global check strictly subsumes it. A clause no test can distinguish is decoration,
+# and decoration in a safety control is worse than absence — it reads as coverage.
 is_literal_commit() {
-  case "$1" in
-    *'$('* | *'`'* | *'<('* | *'>('*) return 1 ;;
+  [ "$has_subst" = 1 ] && return 1
+  local head=${1#"${1%%[![:space:]]*}"}     # drop leading whitespace
+  head=${head#\(}; head=${head#\{}
+  head=${head#"${head%%[![:space:]]*}"}
+  case "$head" in
+    git | git[[:space:]]*) ;;
+    *) return 1 ;;
   esac
   [ "$(git_subcommand "$1")" = "commit" ]
 }
@@ -186,9 +249,47 @@ is_literal_commit() {
 # — the exact cry-wolf case the exemption exists to prevent, displaced rather than
 # removed. Segments already contain no `;`, `|` or `&` (split_segments), so a
 # segment-scoped match is no weaker than the old `[^|;&]*` whole-command form.
+#
+# TWO views of each segment. Quoting is a delimiter at token EDGES *and inside* a
+# token — `ma"in"`, `-r"f"`, `p"us"h` and `ma\in` are the same words to the shell as
+# their bare forms, and all of them were ALLOWED while the edge cases blocked. That is
+# the round-3 argument ("quotes are delimiters, not obfuscation") applied to only half
+# the places it holds. Every rule now runs against the raw segment AND a copy with
+# quotes and backslashes removed, via one shared helper, so the two views cannot drift
+# apart rule by rule.
+#
+# The EXEMPTION deliberately keeps using the raw segment only: stripping quotes from
+# `git commit -m 'push --force to main'` would turn the message into bare words and
+# block it, which is the false positive the exemption exists to prevent.
+#
+# `in_msg` carries an unterminated quote across segments. split_segments cuts on `;`,
+# `|`, `&` and newline, which a commit MESSAGE routinely contains — this repo's own
+# messages are multi-line and discuss these very verbs — so without this a message body
+# line reads as a fresh command. The shell agrees with the tracking rather than the
+# splitting: while a quote is open, following text is message content, not a command.
+seg_matches() {   # <regex> — raw view OR stripped view
+  printf '%s' "$seg" | grep -qE -- "$1" && return 0
+  printf '%s' "$sseg" | grep -qE -- "$1"
+}
+odd_quotes() {    # <text> <quote-char> — true when the text leaves that quote open
+  local only=${1//[^$2]/}
+  [ $(( ${#only} % 2 )) -eq 1 ]
+}
+
+in_msg=""
 while IFS= read -r seg; do
+  if [ -n "$in_msg" ]; then
+    odd_quotes "$seg" "$in_msg" && in_msg=""
+    continue
+  fi
   [ -z "$seg" ] && continue
-  is_literal_commit "$seg" && continue
+  if is_literal_commit "$seg"; then
+    if odd_quotes "$seg" "$sq"; then in_msg=$sq
+    elif odd_quotes "$seg" '"'; then in_msg='"'
+    fi
+    continue
+  fi
+  sseg=${seg//\"/}; sseg=${sseg//$sq/}; sseg=${sseg//\\/}
 
   # ── rm -rf ─────────────────────────────────────────────────────────────────
   #
@@ -204,15 +305,15 @@ while IFS= read -r seg; do
   # MATCH BROADLY, EXCLUDE NARROWLY. The command-word class excludes a preceding `-`,
   # which is what keeps `docker run --rm` out; it allows `\rm`, quoted and
   # path-qualified forms, which were live bypasses.
-  if printf '%s' "$seg" | grep -qE "$rm_cmd_re"; then
+  if seg_matches "$rm_cmd_re"; then
     has_r=0; has_f=0
-    printf '%s' "$seg" | grep -qE "${lead}(--recursive|--dir|-[A-Za-z]*[Rr][A-Za-z]*)(${delim}|=|\$)" && has_r=1
-    printf '%s' "$seg" | grep -qE "${lead}(--force|-[A-Za-z]*f[A-Za-z]*)(${delim}|=|\$)" && has_f=1
+    seg_matches "${lead}(--recursive|--dir|-[A-Za-z]*[Rr][A-Za-z]*)(${delim}|=|\$)" && has_r=1
+    seg_matches "${lead}(--force|-[A-Za-z]*f[A-Za-z]*)(${delim}|=|\$)" && has_f=1
     # `--force` also matches the short-flag alternative above (f-o-r-c-e contains r and
     # f), so recursion is only credited when a SHORT flag carries r, or --recursive/--dir
     # is present explicitly.
-    printf '%s' "$seg" | grep -qE "${lead}--force(${delim}|=|\$)" &&
-      ! printf '%s' "$seg" | grep -qE "${lead}(--recursive|--dir|-[A-Za-z]*[Rr])" && has_r=0
+    seg_matches "${lead}--force(${delim}|=|\$)" &&
+      ! seg_matches "${lead}(--recursive|--dir|-[A-Za-z]*[Rr])" && has_r=0
     if [ "$has_r" = 1 ] && [ "$has_f" = 1 ]; then
       deny "destructive 'rm -rf'. Remove specific paths deliberately, or run it yourself."
     fi
@@ -223,27 +324,27 @@ while IFS= read -r seg; do
   # Feature-branch pushes are ALLOWED so agents can open PRs autonomously
   # (security.md grants this explicitly). Still forbidden: force/mirror/--all, and
   # any push that targets main/master.
-  if printf '%s' "$seg" | grep -qE '\bgit\b' && printf '%s' "$seg" | grep -qE '\bpush\b'; then
-    if printf '%s' "$seg" | grep -qE -- "${lead}(--force|--force-with-lease|--mirror|--all)(${delim}|=|\$)|${lead}-[A-Za-z]*f[A-Za-z]*(${delim}|\$)|${lead}\\+[A-Za-z0-9._/-]"; then
+  if seg_matches '\bgit\b' && seg_matches '\bpush\b'; then
+    if seg_matches "${lead}(--force|--force-with-lease|--mirror|--all)(${delim}|=|\$)|${lead}-[A-Za-z]*f[A-Za-z]*(${delim}|\$)|${lead}\\+[A-Za-z0-9._/-]"; then
       deny "force/mirror/--all push is forbidden. Push a single feature branch and open a PR."
     fi
     # Quotes and a leading backslash count as delimiters: `git push origin "main"` and
     # `git push origin \main` reach main exactly as the bare form does.
-    if printf '%s' "$seg" | grep -qE -- "(^|[[:space:]:/+\"$sq\\(<])(main|master)(${delim}|\$)"; then
+    if seg_matches "${blead}(main|master)(${delim}|\$)"; then
       deny "direct push to main/master is forbidden — push a feature branch and open a PR instead."
     fi
   fi
 
   # ── history rewrite / hard reset ───────────────────────────────────────────
-  if printf '%s' "$seg" | grep -qE '\bgit\b.*\b(filter-branch|filter-repo)\b|\bgit\b.*reset[[:space:]]+--hard'; then
+  if seg_matches '\bgit\b.*\b(filter-branch|filter-repo)\b|\bgit\b.*reset[[:space:]]+--hard'; then
     deny "history rewrite / hard reset is human-gated."
   fi
   # ── kubectl delete — the operator owns cluster state (ADR-0001) ────────────
-  if printf '%s' "$seg" | grep -qE '\bkubectl\b.*\bdelete\b'; then
+  if seg_matches '\bkubectl\b.*\bdelete\b'; then
     deny "'kubectl delete' is human-gated — the operator is the single source of truth (ADR-0001). Express deletes via the CR, or run it yourself."
   fi
   # ── cluster / infra teardown ───────────────────────────────────────────────
-  if printf '%s' "$seg" | grep -qE '\boci ce cluster delete\b|\boci ce node-pool delete\b|\bterraform destroy\b|\bkind delete cluster\b'; then
+  if seg_matches '\boci ce cluster delete\b|\boci ce node-pool delete\b|\bterraform destroy\b|\bkind delete cluster\b'; then
     deny "cluster/infra teardown is human-gated. Run it yourself if intended."
   fi
 done <<EOF

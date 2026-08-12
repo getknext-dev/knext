@@ -157,6 +157,33 @@ run "oci ce cluster delete"                  "oci ce cluster delete ${D}${D}clus
 run "oci ce node-pool delete"                "oci ce node-pool delete ${D}${D}node-pool-id x" BLOCK
 run "push ${D}${D}force-with-lease"          "git push ${D}${D}force-with-lease origin feature/x" BLOCK
 
+# ROUND 5. Both sign-off gates BLOCKed round 3 and converged on the exemption again,
+# from two new directions. git_subcommand scanned for a `git` token ANYWHERE in the
+# segment, so everything to its left was invisible and two literal words on the END
+# disabled all five rule families. Every one of these was ALLOWED.
+run "rm ${D}rf then '# git commit'"          "rm ${D}rf /tmp/x # git commit"                  BLOCK
+run "kubectl delete then '# git commit'"     "kubectl delete pod foo # git commit"            BLOCK
+run "terraform destroy '# git commit'"       "terraform destroy # git commit"                 BLOCK
+run "rm ${D}rf trailing git commit words"    "rm ${D}rf /tmp/x git commit"                    BLOCK
+# An env-var prefix reached the exemption the same way — and this one EXECUTES: git runs
+# GIT_EDITOR through sh -c, confirmed in a scratch repo by the architect gate.
+run "GIT_EDITOR= push prefix"                "GIT_EDITOR='git push ${D}${D}force origin main' git commit" BLOCK
+run "GIT_EDITOR= cluster-delete prefix"      "GIT_EDITOR='kubectl delete ns prod' git commit" BLOCK
+run "GIT_SEQUENCE_EDITOR= rm prefix"         "GIT_SEQUENCE_EDITOR='rm ${D}rf /tmp/x' git commit" BLOCK
+# bash 5.3 value substitution executes and contains neither \$( nor a backtick.
+run "\${ cmd; } value substitution"          "git commit ${D}m \"\${ git push ${D}${D}force origin main; }\"" BLOCK
+run "\${| cmd; } value substitution"         "git commit ${D}m \"\${| rm ${D}rf /tmp/x; }\"" BLOCK
+# Quoting is a delimiter INSIDE a token too — these are the same words to the shell as
+# their bare forms. Round 3 argued exactly this and then applied it only at token edges.
+run "push origin ma\"in\""                   "git push origin ma\"in\""                       BLOCK
+run "push origin \"ma\"in"                   "git push origin \"ma\"in"                       BLOCK
+run "push origin ma\\in"                     "git push origin ma\\in"                         BLOCK
+run "rm ${D}r\"f\" split by quote"           "rm ${D}r\"f\" /tmp/x"                           BLOCK
+run "rm ${D}\"rf\" quoted flags"             "rm ${D}\"rf\" /tmp/x"                           BLOCK
+run "r\"m\" ${D}rf quoted command word"      "r\"m\" ${D}rf /tmp/x"                           BLOCK
+run "git p\"us\"h ${D}${D}force"             "git p\"us\"h ${D}${D}force origin feature/x"    BLOCK
+run "push ${D}${D}for\"ce\""                 "git push ${D}${D}for\"ce\" origin feature/x"    BLOCK
+
 echo
 echo "== MUST ALLOW (each one was a real false positive) =="
 # `\brm\b` matched inside `--rm` because `-` is a word boundary, and `--platform`
@@ -216,6 +243,17 @@ run "git ${D}${D}namespace ns commit"        "git ${D}${D}namespace ns commit ${
 run "git ${D}${D}exec-path p commit"         "git ${D}${D}exec-path /usr/lib/git-core commit ${D}m 'push to main'"   allow
 run "git ${D}${D}super-prefix p commit"      "git ${D}${D}super-prefix sub/ commit ${D}m 'push to main'"             allow
 run "git ${D}${D}config-env k=V commit"      "git ${D}${D}config-env user.name=V commit ${D}m 'the rm ${D}rf call'"  allow
+# A commit MESSAGE routinely contains the characters split_segments cuts on — this
+# repo's own messages are multi-line and discuss these very verbs — so without carrying
+# an unterminated quote across segments, a message BODY line reads as a fresh command.
+# The architect gate flagged this as cry-wolf that would fire immediately. The shell
+# agrees with the tracking rather than the splitting: while a quote is open, what
+# follows is message content.
+run "multi-line commit message"              "$(printf "git commit %sm 'subject line\n\nbody: why kubectl delete is gated'" "$D")" allow
+run "commit message containing a semicolon"  "git commit ${D}m 'fix the thing; also note terraform destroy'"        allow
+run "multi-line msg with push ${D}${D}force" "$(printf "git commit %sm 'subject\n\nnever push %s%sforce to main'" "$D" "$D" "$D")"  allow
+# ...and the tracking must not swallow a REAL command after the message closes.
+run "commit then real force push"            "git commit ${D}m 'subject line' && git push ${D}${D}force origin main" BLOCK
 
 echo
 echo "== MUST FAIL CLOSED (a control that cannot run must not report success) =="
@@ -242,8 +280,13 @@ pruned_path() {
   printf '%s' "$d"
 }
 
+# The 5th argument asserts the MESSAGE, for the same reason run_raw does and because
+# leaving it off here was an asymmetry the system-designer gate caught: with the
+# dependency loop deleted, `missing jq` STILL exits 2 — via the missing-field clause,
+# since jq's absence yields an empty command — and scored "ok". Only tr/awk/grep carried
+# that mutation. Asserting the message is what makes the dependency loop provable.
 run_env() {
-  local label="$1" path="$2" cmd="$3" want="$4" out rc got mark
+  local label="$1" path="$2" cmd="$3" want="$4" msg="${5:-}" out rc got mark
   # BASH_ABS, not `bash`: the pruned PATH is used to resolve the interpreter too, so a
   # bare `bash` here exits 127 — which this harness would have scored as "allow", i.e.
   # the fail-closed cases would have passed for entirely the wrong reason.
@@ -252,12 +295,41 @@ run_env() {
   rc=$?
   got="allow"; [ "$rc" -eq 2 ] && got="BLOCK"
   mark="ok  "; [ "$got" != "$want" ] && { mark="FAIL"; fails=1; }
+  if [ -n "$msg" ] && [ "$mark" = "ok  " ]; then
+    case "$out" in
+      *"$msg"*) ;;
+      *) mark="FAIL"; fails=1; got="wrongmsg" ;;
+    esac
+  fi
   printf '%s  %-46s want=%-5s got=%-5s\n' "$mark" "$label" "$want" "$got"
 }
 
 for tool in jq tr awk grep; do
-  run_env "missing $tool" "$(pruned_path "$tool")" "git push ${D}${D}force origin main" BLOCK
+  run_env "missing $tool" "$(pruned_path "$tool")" "git push ${D}${D}force origin main" BLOCK "hook dependency"
 done
+
+# PRESENT IS NOT ENOUGH. `\b` is a GNU extension, not POSIX ERE, and four rule families
+# are built on it — so a grep that exists but ignores `\b` kills them SILENTLY while the
+# dependency loop above passes, because the binary is there. The two shims cover both
+# directions of the probe: a `\b` that matches nothing and a `\b` that matches
+# everything are equally broken, and only the second shim can prove the probe's
+# negative half. Asserting the message is what distinguishes this from the dependency
+# loop, which would otherwise take the credit.
+shim_path() {
+  local name="$1" body="$2" d t p
+  d="$PRUNE_ROOT/shim-$name"
+  mkdir -p "$d"
+  for t in jq tr awk sed cat mktemp; do p=$(command -v "$t" 2>/dev/null) && ln -sf "$p" "$d/$t"; done
+  printf '%s\n' "$body" > "$d/grep"
+  chmod +x "$d/grep"
+  printf '%s' "$d"
+}
+run_env "grep whose \\b never matches" \
+  "$(shim_path never '#!/bin/sh
+exit 1')" "git push ${D}${D}force origin main" BLOCK "word boundaries"
+run_env "grep whose \\b matches anything" \
+  "$(shim_path always '#!/bin/sh
+exit 0')" "git push ${D}${D}force origin main" BLOCK "word boundaries"
 
 # A payload the hook cannot parse is an ERROR, not consent. The matcher is `Bash` only
 # (.claude/settings.json), so there is no legitimate invocation without
