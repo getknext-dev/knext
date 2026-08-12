@@ -432,14 +432,89 @@ quote_state() {
     END { print st }'
 }
 
+# A SEGMENT INSIDE DATA MAY NOT ESTABLISH THE EXEMPTION. Round 12, and the same
+# stage-ordering defect one layer up: `in_msg` only ever updated on segments it had
+# already exempted, so a line that merely LOOKS like an unterminated `git commit -m "…`
+# switched off every rule for the rest of the command — even when the shell treats that
+# line as inert data. Shell-verified, all six gated verbs, `main` blocks all three:
+#
+#     cat <<EOF                 cat <<'EOF'              echo 'note:
+#     git commit -m "fix        git commit -m "fix       git commit -m "fix
+#     EOF                       EOF                      '
+#     <gated verb>              <gated verb>             <gated verb>
+#
+# Two trackers, both BLOCK-ONLY by construction — they can withdraw an exemption and can
+# never grant one, so the accepted false-positive profile is unchanged:
+#
+#   `data_state` — cumulative quote state over EVERY segment, not just exempt ones. A
+#     segment may only establish the exemption when the shell is not already inside a
+#     quoted region at that point.
+#   `in_hd`      — a heredoc body is data by definition. Note the rules STILL RUN on
+#     heredoc bodies: skipping them would be a second exemption, and an exemption is
+#     exactly what keeps going wrong here. This only denies them the power to exempt.
+#
+# `in_msg` is deliberately left as-is — it skips segments, so widening what opens it
+# would be a fail-open lever. Skipping stays tied to a commit this hook actually exempted.
+# msg_tail <segment> <open-state> — the text AFTER the open quote closes, or empty if it
+# never closes in this segment.
+#
+# Round 12b, found by the oracle's new continuation dimension the moment it existed. When
+# an exempt commit message closed PART-WAY through a segment, the loop skipped the whole
+# segment — but the remainder is real command text, and the shell runs it:
+#
+#     ( git commit -m "l1
+#     l2" )#c\
+#     git push --force origin main          -> ALLOWED, and the shell executes the push
+#
+# (`\` at the end of a comment is not a continuation, so line 3 is a command; the hook's
+# fold makes it look like comment text, which is the same stage-ordering defect again.)
+#
+# Checking the tail is BLOCK-ONLY — it can only add matches, never remove one — which is
+# why it is the right shape of fix here even though the root cause is the fold.
+msg_tail() {
+  printf '%s' "$1" | awk -v st="$2" '
+    {
+      n = length($0); cut = 0
+      for (i = 1; i <= n; i++) {
+        c = substr($0, i, 1)
+        if (st == "sq")       { if (c == "'"'"'") { cut = i; break } }
+        else if (st == "esq") { if (c == "\\") i++; else if (c == "'"'"'") { cut = i; break } }
+        else if (st == "dq")  { if (c == "\\") i++; else if (c == "\"") { cut = i; break } }
+        else break
+      }
+      if (cut > 0 && cut < n) print substr($0, cut + 1)
+    }'
+}
+
 in_msg="none"
+data_state="none"
+in_hd=0
+hd_delim=""
 while IFS= read -r seg; do
+  seg_start_state=$data_state
+  data_state=$(quote_state "$seg" "$data_state")
+
+  if [ "$in_hd" = 1 ]; then
+    trimmed=${seg#"${seg%%[![:space:]]*}"}
+    [ "$trimmed" = "$hd_delim" ] && { in_hd=0; hd_delim=""; }
+  else
+    hd_delim=$(printf '%s' "$seg" | awk '
+      match($0, /<<-?[ \t]*["'"'"']?[A-Za-z_][A-Za-z0-9_]*/) {
+        s = substr($0, RSTART, RLENGTH)
+        sub(/^<<-?[ \t]*["'"'"']?/, "", s)
+        print s; exit }')
+    [ -n "$hd_delim" ] && in_hd=1
+  fi
+
   if [ "$in_msg" != "none" ]; then
+    tail_after_msg=$(msg_tail "$seg" "$in_msg")
     in_msg=$(quote_state "$seg" "$in_msg")
-    continue
+    [ "$in_msg" != "none" ] && continue     # message still open: the whole segment is text
+    [ -z "$tail_after_msg" ] && continue    # message closed exactly at the segment end
+    seg=$tail_after_msg                     # the remainder is a real command — vet it
   fi
   [ -z "$seg" ] && continue
-  if is_literal_commit "$seg"; then
+  if [ "$seg_start_state" = "none" ] && [ "$in_hd" = 0 ] && is_literal_commit "$seg"; then
     in_msg=$(quote_state "$seg" none)
     continue
   fi
