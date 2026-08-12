@@ -114,11 +114,39 @@ rm_cmd_re="${lead}(\\\\)?([^[:space:]]*/)?rm(${delim}|\$)"
 # running is a liability. Match the text broadly and exclude specific proven-safe cases.
 
 # git_subcommand <segment> — the first non-flag word after `git`, or empty.
+#
+# It exists ONLY to recognise `git commit`, and it decides whether the one exemption
+# applies — so an error here is a bypass, not a mis-parse. It had one: the arg-skip
+# list covered `-C -c --git-dir --work-tree` and nothing else, so a global flag that
+# takes a SEPARATE argument let its argument read as the subcommand:
+#
+#     git --namespace commit push --force origin main   -> ALLOWED
+#     git --exec-path commit push --force origin main   -> ALLOWED
+#
+# `commit` there is the VALUE of `--namespace`; the real subcommand is `push`. The
+# exemption fired on a genuine force push to main.
+#
+# So the flag tables are explicit and the function FAILS CLOSED: an unrecognised flag
+# means the subcommand cannot be determined, and an undetermined subcommand must not
+# earn the exemption. Adding a global flag to git upstream therefore costs a false
+# positive on commit-message text — never a bypass. `--opt=value` is self-contained
+# and consumes no following word.
 git_subcommand() {
   printf '%s' "$1" | awk '
+    BEGIN {
+      split("-C -c --git-dir --work-tree --namespace --super-prefix --config-env --exec-path", a, " ")
+      for (k in a) takes_arg[a[k]] = 1
+      split("-p -P -v -h --paginate --no-pager --bare --no-replace-objects --literal-pathspecs --glob-pathspecs --noglob-pathspecs --icase-pathspecs --no-optional-locks --version --help", b, " ")
+      for (k in b) no_arg[b[k]] = 1
+    }
     { for (i = 1; i < NF; i++) if ($i == "git") {
         for (j = i + 1; j <= NF; j++) {
-          if ($j ~ /^-/) { if ($j == "-C" || $j == "-c" || $j == "--git-dir" || $j == "--work-tree") j++; continue }
+          if ($j ~ /^-/) {
+            if ($j ~ /=/)          { continue }
+            if (takes_arg[$j])     { j++; continue }
+            if (no_arg[$j])        { continue }
+            exit                    # unknown flag: undetermined, so no exemption
+          }
           print $j; exit } } }'
 }
 

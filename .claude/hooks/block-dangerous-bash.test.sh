@@ -140,6 +140,22 @@ run "push origin backslash-main"             "git push origin \\main"           
 run "rm with double-quoted flags"            "rm \"${D}rf\" /tmp/x"                           BLOCK
 run "rm with single-quoted flags"            "rm '${D}rf' /tmp/x"                             BLOCK
 run "quoted rm command word"                 "\"rm\" ${D}rf /tmp/x"                           BLOCK
+# git_subcommand decides whether the ONE exemption applies, so a mis-parse there is a
+# bypass rather than a cosmetic error. Its arg-skip list covered ${D}C/${D}c/git-dir/
+# work-tree and nothing else, so a global flag taking a SEPARATE argument let that
+# argument read as the subcommand: `commit` below is the VALUE of ${D}${D}namespace and
+# the real subcommand is push. Both were ALLOWED — a genuine force push to main.
+run "git ${D}${D}namespace commit push"      "git ${D}${D}namespace commit push ${D}${D}force origin main"  BLOCK
+run "git ${D}${D}exec-path commit push"      "git ${D}${D}exec-path commit push ${D}${D}force origin main"  BLOCK
+# Fail closed on a flag the table does not know: the subcommand is undetermined, and an
+# undetermined subcommand must not earn the exemption. A new upstream git global flag
+# therefore costs a false positive on message text — never a bypass.
+run "unknown git global flag"                "git ${D}${D}not-a-real-flag commit ${D}m 'push ${D}${D}force to main'" BLOCK
+# Spec review found these two rules had NO isolating case — deleting either left the
+# suite green, which is decoration by this repo's standard.
+run "oci ce cluster delete"                  "oci ce cluster delete ${D}${D}cluster-id x"     BLOCK
+run "oci ce node-pool delete"                "oci ce node-pool delete ${D}${D}node-pool-id x" BLOCK
+run "push ${D}${D}force-with-lease"          "git push ${D}${D}force-with-lease origin feature/x" BLOCK
 
 echo
 echo "== MUST ALLOW (each one was a real false positive) =="
@@ -183,6 +199,23 @@ run "commit msg naming reset ${D}${D}hard"   "git commit ${D}m 'explain why rese
 # Parameter expansion stays exempt: it substitutes TEXT into the message, it cannot
 # execute anything. Only command/process substitution disqualifies the exemption.
 run "commit msg with \${var} expansion"      "git commit ${D}m \"\${MSG} about push ${D}${D}force to main\"" allow
+# The flag tables must not cost the exemption for ORDINARY global flags. These are the
+# other half of the fail-closed change above: tightening git_subcommand is only correct
+# if it still resolves the flags people actually use.
+run "git ${D}c k=v commit (arg-taking)"      "git ${D}c user.name=x commit ${D}m 'push ${D}${D}force to main'" allow
+run "git ${D}C dir commit (arg-taking)"      "git ${D}C /repo commit ${D}m 'the rm ${D}rf call'"             allow
+run "git ${D}${D}no-pager commit (no-arg)"   "git ${D}${D}no-pager commit ${D}m 'push to main'"              allow
+run "git ${D}${D}git-dir=x commit (=form)"   "git ${D}${D}git-dir=/r/.git commit ${D}m 'push to main'"        allow
+# One case per arg-taking flag that the fail-closed default would otherwise mask.
+# Mutation-proving caught this: shrinking the arg-taking table left the suite GREEN,
+# because a removed flag falls through to "unknown" and still BLOCKS — so the
+# must-block half cannot see the table at all. Its entire job is preventing a false
+# positive, which only a must-ALLOW case can prove. Same both-halves lesson, arrived at
+# from the opposite side.
+run "git ${D}${D}namespace ns commit"        "git ${D}${D}namespace ns commit ${D}m 'push ${D}${D}force to main'"    allow
+run "git ${D}${D}exec-path p commit"         "git ${D}${D}exec-path /usr/lib/git-core commit ${D}m 'push to main'"   allow
+run "git ${D}${D}super-prefix p commit"      "git ${D}${D}super-prefix sub/ commit ${D}m 'push to main'"             allow
+run "git ${D}${D}config-env k=V commit"      "git ${D}${D}config-env user.name=V commit ${D}m 'the rm ${D}rf call'"  allow
 
 echo
 echo "== MUST FAIL CLOSED (a control that cannot run must not report success) =="
