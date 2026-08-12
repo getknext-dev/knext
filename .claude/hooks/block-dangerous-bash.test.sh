@@ -333,10 +333,28 @@ echo "== DIFFERENTIAL PROPERTY: nothing a commit message contains may disarm a r
 COLLECT=0
 PROPS=("${BLOCK_PAYLOADS[@]}")
 props_failed=0
+#
+# The MESSAGE SHAPE is generated too, not just the payload. Round 8 generated over
+# payloads and left three hand-written prefixes, all quote-based and all `&&`-joined —
+# and the very next defect lived on the un-generated axis: `#` starts a comment, so an
+# apostrophe in a trailing comment opened the state and skipped everything after it.
+# Adding two prefixes disarmed 178 of 182 generated cases. Generating one axis and
+# enumerating the other just relocates the blind spot, so both vary here: quoting style
+# AND joining construct (`&&`, `;`, newline, comment-then-newline).
 prefixes=(
   "git commit ${D}m \"don't\" &&"
   "git commit ${D}m 'say \"hi\"' &&"
   "git commit ${D}m \"a \\\"b\\\"\" &&"
+  "git commit ${D}m \"don't\" ;"
+  "git commit ${D}m \$'it\\'s' &&"
+  # $'\n' concatenation, NOT $(printf …\n): command substitution strips trailing
+  # newlines, which silently turned these into single-line payloads where the comment
+  # swallowed the whole command — the shell would not have run them either, so the
+  # assertion was wrong rather than the hook. Second time a property assertion had to be
+  # checked against what the shell actually does before trusting its failures.
+  "git commit ${D}m \"fix\" # don't forget to rebase"$'\n'
+  "git commit ${D}m \"subject\" # note: rm ${D}rf is gated"$'\n'
+  "git commit ${D}m \"don't\""$'\n'
 )
 for prefix in "${prefixes[@]}"; do
   for p in "${PROPS[@]}"; do

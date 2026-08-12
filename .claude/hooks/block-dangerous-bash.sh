@@ -11,11 +11,23 @@
 #     grep -rn 'rm -rf' .claude/hooks
 #     echo 'rm -rf is gated' >> notes.md
 #     git log --grep='rm -rf'
-# all BLOCK here and pass on an unguarded shell. They are the price of the stripped view
-# (`sseg`), which is what catches `rm -r"f" x`. The asymmetry is decisive: a false
-# positive is recoverable — rerun it, or run it yourself — while a false negative on
-# force-push-to-main is not. Deleting `sseg` to make these pass reopens intra-token
-# quoting, so this paragraph exists to stop a later round trading it away by accident.
+#     git push origin feature/x # rebased onto main     (pre-existing, same on main)
+# all BLOCK here and pass on an unguarded shell.
+#
+# The last one is worth its own sentence, because the fix looks obvious and is not.
+# `quote_state` knows `#` starts a comment, but that knowledge is used ONLY to track
+# where a commit message ends — the RULES still match comment text. Teaching them to
+# strip comments would make the rules match LESS, and in this file every change that
+# made a rule match less has opened a bypass. It is pre-existing behaviour, identical on
+# main, so it is not a regression this PR introduced; leave it to a change that can be
+# reviewed on its own.
+#
+# The first three are the price of the stripped view (`sseg`), which is what catches
+# `rm -r"f" x`. The asymmetry is decisive: a false positive is recoverable — rerun it,
+# or run it yourself — while a false negative on force-push-to-main is not. Deleting
+# `sseg` to make them pass reopens intra-token quoting, so this paragraph exists to stop
+# a later round trading it away by accident.
+#
 # It has been wrong subtly FOUR times — #712 introduced a continuation bypass while
 # fixing false positives; #717's fix for THAT introduced a worse one; #725 round 1
 # fixed nine and opened the `=` glob and wrapper-narrowing holes; #725 round 2 fixed
@@ -334,6 +346,19 @@ seg_matches() {   # <regex> — raw view OR stripped view
 # elsewhere a backslash consumes the next character; `"` and `'` open their own state
 # only when not already inside the other. The state is always determined, so there is no
 # "undetermined" branch that could silently skip.
+#
+# Two more shell facts, added in round 9 after the first version shipped with the same
+# bug arriving through different doors — which is the argument for a real lexer, since
+# each of these is grammar the scanner has to be taught one construct at a time:
+#
+#   * `#` at the start of a word BEGINS A COMMENT, so its contents are inert. Without
+#     this, an apostrophe in a trailing comment opened the state and skipped every
+#     following segment — no obfuscation, ordinary English:
+#         git commit -m "fix" # don't forget to rebase
+#         git push origin main                          -> ALLOWED
+#   * `$'…'` is ANSI-C quoting, where a backslash DOES escape (unlike a plain `'…'`),
+#     so `$'it\'s'` is closed. Same mechanism, needs deliberate typing rather than
+#     ordinary prose, but it is the same class and costs one state to fix.
 quote_state() {
   printf '%s' "$1" | awk -v st="${2:-none}" '
     {
@@ -341,11 +366,17 @@ quote_state() {
       for (i = 1; i <= n; i++) {
         c = substr($0, i, 1)
         if (st == "sq") { if (c == "'"'"'") st = "none" }
+        else if (st == "esq") {
+          if (c == "\\") i++
+          else if (c == "'"'"'") st = "none"
+        }
         else if (st == "dq") {
           if (c == "\\") i++
           else if (c == "\"") st = "none"
         } else {
+          if (c == "#" && (i == 1 || substr($0, i - 1, 1) ~ /[[:space:]]/)) break
           if (c == "\\") i++
+          else if (c == "$" && substr($0, i + 1, 1) == "'"'"'") { st = "esq"; i++ }
           else if (c == "'"'"'") st = "sq"
           else if (c == "\"") st = "dq"
         }
@@ -420,12 +451,14 @@ while IFS= read -r seg; do
     deny "'kubectl delete' is human-gated — the operator is the single source of truth (ADR-0001). Express deletes via the CR, or run it yourself."
   fi
   # ── cluster / infra teardown ───────────────────────────────────────────────
-  # `${ws}` not a literal space: this rule hand-rolled its separator, so `terraform<TAB>
-  # destroy`, `oci ce cluster<2 spaces>delete` and `kind  delete cluster` were all
-  # ALLOWED while their single-space forms blocked. Finding 3 of the round-3 review was
-  # "no rule may hand-roll a delimiter class"; it was applied to the branch rule and not
-  # to this one — the same half-applied-fix shape, one rule later.
-  if seg_matches "\\boci ce cluster${ws}delete\\b|\\boci ce node-pool${ws}delete\\b|\\bterraform${ws}destroy\\b|\\bkind${ws}delete${ws}cluster\\b"; then
+  # `${ws}` between EVERY word, not a literal space. Round 3's finding was "no rule may
+  # hand-roll a delimiter"; it was applied to the branch rule and not here, so
+  # `terraform<TAB>destroy` and `kind  delete cluster` were ALLOWED. Round 7 then fixed
+  # only the LAST separator in each alternative, leaving the literal spaces inside
+  # `oci ce cluster` — so `oci  ce cluster delete` and `oci ce<TAB>cluster delete` were
+  # still allowed while the comment claimed the fix was complete. Third instance of the
+  # same half-applied shape, which is why every gap between words now uses ${ws}.
+  if seg_matches "\\boci${ws}ce${ws}cluster${ws}delete\\b|\\boci${ws}ce${ws}node-pool${ws}delete\\b|\\bterraform${ws}destroy\\b|\\bkind${ws}delete${ws}cluster\\b"; then
     deny "cluster/infra teardown is human-gated. Run it yourself if intended."
   fi
 done <<EOF
