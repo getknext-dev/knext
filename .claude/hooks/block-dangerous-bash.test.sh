@@ -257,6 +257,23 @@ run "comment + backslash, then filter-branch" "$(printf 'git commit %sm "subject
 # correction — so this asserts the path instead.
 run "msg closes, then comment, then push"    "$(printf "git commit %sm 'line1\nline2' # note '\ngit push %s%sforce origin main" "$D" "$D" "$D")" BLOCK
 
+# ROUND 11, and the same class one door over. Bash starts a comment after ANY word
+# terminator, not only whitespace — round 10's word-start test was `i==1 || prev is
+# space`. `;`, `|` and `&` already land at i==1 because split_segments cut there, so `)`
+# is the live one, and it reopened ALL EIGHT gated verbs as a regression against main:
+#
+#     (cd packages/lib && git commit -m "chore: bump")#TODO rebase\
+#     <any gated verb>                                     -> ALLOWED  (main: BLOCK)
+#
+# The terminator must be ADJACENT to the `#` — a reviewer's first cross product missed
+# this because its join strings carried a leading space, which is exactly the point.
+run "subshell close then comment, push main" "$(printf '(cd p && git commit %sm "chore: bump")#TODO rebase\\\ngit push origin main' "$D")"                    BLOCK
+run "subshell close then comment, force"     "$(printf '(cd p && git commit %sm "chore: bump")#TODO rebase\\\ngit push %s%sforce origin x' "$D" "$D" "$D")"   BLOCK
+run "subshell close then comment, rm ${D}rf" "$(printf '( true; git commit %sm "a")#c\\\nrm %srf /tmp/x' "$D" "$D")"                                          BLOCK
+run "subshell close then comment, delete"    "$(printf '( true; git commit %sm "a")#c\\\nkubectl delete ns prod' "$D")"                                       BLOCK
+run "subshell close then comment, teardown"  "$(printf '( true; git commit %sm "a")#c\\\nterraform destroy' "$D")"                                            BLOCK
+run "subshell close then comment, reset"     "$(printf '( true; git commit %sm "a")#c\\\ngit reset %s%shard HEAD~5' "$D" "$D" "$D")"                          BLOCK
+
 echo
 echo "== MUST ALLOW (each one was a real false positive) =="
 # `\brm\b` matched inside `--rm` because `-` is a word boundary, and `--platform`
@@ -340,6 +357,11 @@ run "apostrophe msg, no following command"   "git commit ${D}m \"don't ever push
 run "hash inside a dq message"               "git commit ${D}m \"fix # 3 — never push to main\""                   allow
 run "hash inside a sq message"               "git commit ${D}m 'closes #42, mentions rm ${D}rf'"                    allow
 run "hash mid-token is not a comment"        "git commit ${D}m 'ref abc#def about main'"                            allow
+# Widening the word-terminator class must not start refusing the exemption for ordinary
+# messages. A `(` inside a quoted message is not a word terminator in shell terms, and
+# conventional-commit scopes put one in almost every message this repo writes.
+run "conventional-commit scope in message"   "git commit ${D}m \"fix(hooks): never push ${D}${D}force to main\""    allow
+run "parens and hash inside a message"       "git commit ${D}m 'fix(scope): closes #42, no rm ${D}rf'"              allow
 
 echo
 echo "== DIFFERENTIAL PROPERTY: nothing a commit message contains may disarm a rule =="
@@ -407,6 +429,68 @@ done
 printf '%s  %-46s %s payloads x %s messages\n' \
   "$([ "$props_failed" -eq 0 ] && echo 'ok  ' || echo 'FAIL')" \
   "differential: quotes in a commit message" "${#PROPS[@]}" "${#prefixes[@]}"
+
+echo
+echo "== ORACLE-GATED CROSS PRODUCT (the shell decides which shapes must block) =="
+# The differential above still hand-picks its (quoting, join) pairs, and rounds 10 and 11
+# both landed in a pair nobody picked. This is the cross product, with the missing
+# dimension made explicit: the WORD TERMINATOR immediately before the join. `)#` was
+# round 11's bug, and a reviewer's own first cross product missed it because every join
+# string carried a leading space — adjacency is the whole point.
+#
+# The oracle is what makes a product usable. Two earlier property attempts produced false
+# failures because they asserted on shapes the shell does not actually execute (an
+# unterminated quote, a comment swallowing its own line). So: ask a real shell, and assert
+# only where line 2 genuinely ran.
+#
+# SAFE BY CONSTRUCTION, and this is the reason it can exist at all. The shell is only ever
+# handed an INERT payload — `printf`. The gated verbs are fed to the HOOK and never to
+# bash, so nothing here can execute a destructive command. A naive oracle that ran the
+# suite's real payloads would delete things; that hazard is why this is scoped this way
+# rather than by being careful.
+ORACLE_DIR=$(mktemp -d)
+printf '#!/bin/sh\nexit 0\n' > "$ORACLE_DIR/git"
+chmod +x "$ORACLE_DIR/git"
+
+oracle_prefixes=(
+  "git commit ${D}m \"m\""
+  "git commit ${D}m \"m\" "
+  "$(printf 'git commit %sm "m"\t' "$D")"
+  "(cd . && git commit ${D}m \"m\")"
+  "{ git commit ${D}m \"m\"; }"
+  "git commit ${D}m 'm'"
+  "git commit ${D}m \$'m'"
+)
+oracle_joins=( " && " " ; " " | " " & " $'\n' "#c"$'\n' "#c\\"$'\n' "#don't\\"$'\n' "\\"$'\n' )
+oracle_gated=(
+  "git push ${D}${D}force origin main"
+  "git push origin main"
+  "rm ${D}rf /tmp/oracle-never-run"
+  "kubectl delete ns prod"
+  "terraform destroy"
+  "git reset ${D}${D}hard HEAD~5"
+)
+
+oracle_shapes=0; oracle_live=0; oracle_asserted=0; oracle_failed=0
+for pfx in "${oracle_prefixes[@]}"; do
+  for jn in "${oracle_joins[@]}"; do
+    oracle_shapes=$((oracle_shapes + 1))
+    got=$(cd "$ORACLE_DIR" && PATH="$ORACLE_DIR:/usr/bin:/bin" bash -c "${pfx}${jn}printf ORACLE_EXEC" 2>/dev/null)
+    case "$got" in *ORACLE_EXEC*) ;; *) continue ;; esac   # shell does not run it: allowing is correct
+    oracle_live=$((oracle_live + 1))
+    for g in "${oracle_gated[@]}"; do
+      oracle_asserted=$((oracle_asserted + 1))
+      printf '%s' "{\"tool_input\":{\"command\":$(printf '%s%s%s' "$pfx" "$jn" "$g" | jq -Rs .)}}" |
+        bash "$HOOK" >/dev/null 2>&1
+      [ $? -eq 2 ] || { oracle_failed=$((oracle_failed + 1)); fails=1
+                        printf 'FAIL  shell RUNS it, hook allows: [%.30s] join=%q\n' "$pfx" "$jn"; }
+    done
+  done
+done
+rm -rf "$ORACLE_DIR"
+printf '%s  %-46s %s shapes, %s live, %s asserted\n' \
+  "$([ "$oracle_failed" -eq 0 ] && echo 'ok  ' || echo 'FAIL')" \
+  "oracle-gated cross product" "$oracle_shapes" "$oracle_live" "$oracle_asserted"
 
 echo
 echo "== MUST FAIL CLOSED (a control that cannot run must not report success) =="

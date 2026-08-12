@@ -297,7 +297,7 @@ has_comment() {
         else if (st == "esq") { if (c == "\\") i++; else if (c == "'"'"'") st = "none" }
         else if (st == "dq") { if (c == "\\") i++; else if (c == "\"") st = "none" }
         else {
-          if (c == "#" && (i == 1 || substr($0, i - 1, 1) ~ /[[:space:]]/)) { found = 1; break }
+          if (c == "#" && (i == 1 || substr($0, i - 1, 1) ~ /[[:space:]();&|]/)) { found = 1; break }
           if (c == "\\") i++
           else if (c == "$" && substr($0, i + 1, 1) == "'"'"'") { st = "esq"; i++ }
           else if (c == "'"'"'") st = "sq"
@@ -419,7 +419,7 @@ quote_state() {
           if (c == "\\") i++
           else if (c == "\"") st = "none"
         } else {
-          if (c == "#" && (i == 1 || substr($0, i - 1, 1) ~ /[[:space:]]/)) break
+          if (c == "#" && (i == 1 || substr($0, i - 1, 1) ~ /[[:space:]();&|]/)) break
           if (c == "\\") i++
           else if (c == "$" && substr($0, i + 1, 1) == "'"'"'") { st = "esq"; i++ }
           else if (c == "'"'"'") st = "sq"
