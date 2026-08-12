@@ -103,7 +103,13 @@ split_segments() { printf '%s' "$1" | tr ';|&\n' '\n\n\n\n'; }
 # Found by adding the process-substitution case, not by reading the regex.
 sq=\'
 delim="[[:space:]\"$sq()<>]"
-lead="(^|[;&|(){}!]|[[:space:]\"$sq\\])"
+# The backtick belongs here for the same reason `(` does — it OPENS a command. Without
+# it the rm rule died inside backtick substitution while its `$( )` twin blocked:
+# `echo `rm -rf x`` was allowed, `echo $(rm -rf x)` was not. The file contradicted
+# itself, since is_literal_commit already treated a backtick as substitution-significant.
+# Exactly the both-halves asymmetry the shared classes exist to prevent, surviving
+# because the `$( )` case was added and its twin was not.
+lead="(^|[;&|(){}!\`]|[[:space:]\"$sq\\])"
 # The branch rule additionally honours `:` `/` `+` `<` before the name. Defined HERE
 # with the others rather than inline at the use site: round 3 claimed the classes were
 # "defined once and shared" while that rule still hand-rolled its own, which is a false

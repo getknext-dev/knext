@@ -183,6 +183,25 @@ run "rm ${D}\"rf\" quoted flags"             "rm ${D}\"rf\" /tmp/x"             
 run "r\"m\" ${D}rf quoted command word"      "r\"m\" ${D}rf /tmp/x"                           BLOCK
 run "git p\"us\"h ${D}${D}force"             "git p\"us\"h ${D}${D}force origin feature/x"    BLOCK
 run "push ${D}${D}for\"ce\""                 "git push ${D}${D}for\"ce\" origin feature/x"    BLOCK
+# A backtick opens a command exactly as \$( does, and the rm rule died inside one while
+# its \$( ) twin blocked. The file contradicted itself: is_literal_commit already
+# treated a backtick as substitution-significant.
+run "rm ${D}rf inside backticks"             "echo \`rm ${D}rf /tmp/x\`"                      BLOCK
+run "assignment from backtick rm"            "x=\`rm ${D}rf /tmp/x\`"                         BLOCK
+# Five clauses the spec review proved were DECORATION: deleting each left the suite
+# ALL PASS while a real payload flipped BLOCK -> allow. Three of them name operations
+# `security.md` lists verbatim. Round 4's "all 22 mutation-proved red" was true per RULE
+# and false per CLAUSE — the same masking shape as the unparseable-payload clause, which
+# is why granularity matters when claiming a mutation proof.
+run "rm ${D}${D}recursive ${D}${D}force"     "rm ${D}${D}recursive ${D}${D}force /tmp/x"      BLOCK
+run "rm ${D}${D}dir ${D}${D}force"           "rm ${D}${D}dir ${D}${D}force /tmp/x"            BLOCK
+run "rm ${D}R ${D}${D}force"                 "rm ${D}R ${D}${D}force /tmp/x"                  BLOCK
+run "git filter-repo"                        "git filter-repo ${D}${D}path x"                 BLOCK
+# CRLF is the SAME continuation-bypass family as #712/#717 and §2.2: with the \\r strip
+# removed, `\\` is followed by CR rather than LF, nothing joins, and the force flag lands
+# in a segment with no push in it. The hook's own comment called the strip load-bearing
+# and nothing asserted it.
+run "CRLF continuation ${D}${D}force"        "$(printf 'git push \\\r\n  %s%sforce origin main' "$D" "$D")" BLOCK
 
 echo
 echo "== MUST ALLOW (each one was a real false positive) =="
