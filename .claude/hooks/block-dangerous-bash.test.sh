@@ -94,6 +94,31 @@ run "backslash-escaped rm"                   "\\rm ${D}rf /tmp/x"               
 # Rules that had NO case at all — deleting any of them left the whole suite green.
 run "push ${D}${D}all"                       "git push ${D}${D}all origin"                    BLOCK
 run "kubectl delete"                         "kubectl delete pod foo"                         BLOCK
+
+# A SECOND review round found that the fix for the nine above had itself narrowed the
+# control. Requiring each segment's COMMAND WORD to be `rm`/`git` read as precision and
+# let every wrapper through; and the helper that identified it used a glob where `*` was
+# a wildcard, so ONE `=` anywhere in a segment disabled BOTH rules. All fifteen below
+# were blocked before that rewrite and allowed after it — a pure regression, invisible
+# because every existing case was a bare invocation.
+#
+# They are here so the same trade cannot be made again quietly: a false positive costs
+# an argument, a false negative costs the repository.
+run "rm ${D}rf with = in a path"             "rm ${D}rf /tmp/a=b"                             BLOCK
+run "rm ${D}rf with trailing comment"        "rm ${D}rf /tmp/x # k=v"                         BLOCK
+run "push ${D}${D}force with push-option"    "git push ${D}${D}force origin main ${D}${D}push-option=x" BLOCK
+run "push main with ${D}o x=y"               "git push origin main ${D}o x=y"                 BLOCK
+run "git ${D}c a=b push ${D}${D}force main"  "git ${D}c a=b push ${D}${D}force origin main"   BLOCK
+run "xargs rm ${D}rf"                        "echo /tmp/x | xargs rm ${D}rf /tmp/x"           BLOCK
+run "find ${D}exec rm ${D}rf"                "find . ${D}name x ${D}exec rm ${D}rf {} \\;"    BLOCK
+run "command substitution push"              "echo \$(git push ${D}${D}force origin main)"    BLOCK
+run "bash ${D}c push ${D}${D}force main"     "bash ${D}c 'git push ${D}${D}force origin main'" BLOCK
+run "subshell push to main"                  "( git push origin main )"                       BLOCK
+run "brace group push ${D}${D}force"         "{ git push ${D}${D}force origin main; }"        BLOCK
+run "if/then push to main"                   "if true; then git push origin main; fi"         BLOCK
+run "for/do rm ${D}rf"                       "for x in 1; do rm ${D}rf /tmp/x; done"          BLOCK
+run "negated push ${D}${D}force"             "! git push ${D}${D}force origin main"           BLOCK
+run "sudo rm ${D}rf"                         "sudo rm ${D}rf /tmp/x"                          BLOCK
 run "terraform destroy"                      "terraform destroy"                              BLOCK
 run "kind delete cluster"                    "kind delete cluster ${D}${D}name x"             BLOCK
 
