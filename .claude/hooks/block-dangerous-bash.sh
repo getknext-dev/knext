@@ -282,11 +282,56 @@ esac
   [ "$(git_subcommand 'git push origin x')" = "push" ] ||
   deny "awk is not resolving git subcommands correctly — the commit exemption cannot be trusted. Refusing to vet this command."
 
+# has_comment <segment> — an UNQUOTED word-start `#`, i.e. a real comment.
+#
+# Quote-aware on purpose: `git commit -m "fix # 3"` has no comment, and refusing the
+# exemption there would block an ordinary message.
+has_comment() {
+  printf '%s' "$1" | awk '
+    BEGIN { st = "none"; found = 0 }
+    {
+      n = length($0)
+      for (i = 1; i <= n; i++) {
+        c = substr($0, i, 1)
+        if (st == "sq") { if (c == "'"'"'") st = "none" }
+        else if (st == "esq") { if (c == "\\") i++; else if (c == "'"'"'") st = "none" }
+        else if (st == "dq") { if (c == "\\") i++; else if (c == "\"") st = "none" }
+        else {
+          if (c == "#" && (i == 1 || substr($0, i - 1, 1) ~ /[[:space:]]/)) { found = 1; break }
+          if (c == "\\") i++
+          else if (c == "$" && substr($0, i + 1, 1) == "'"'"'") { st = "esq"; i++ }
+          else if (c == "'"'"'") st = "sq"
+          else if (c == "\"") st = "dq"
+        }
+      }
+    }
+    END { exit (found ? 0 : 1) }'
+}
+
 is_literal_commit() {
   [ "$has_subst" = 1 ] && return 1
   case "$1" in
     *'$('* | *'`'* | *'<('* | *'>('*) return 1 ;;
   esac
+  # A COMMENT ANYWHERE IN THE SEGMENT REFUSES THE EXEMPTION. This closes a regression
+  # against main that needed no obfuscation and no unbalanced quote:
+  #
+  #     git commit -m "subject" # note\
+  #     git push --force origin main            -> ALLOWED (main: BLOCK)
+  #
+  # A backslash is NOT a continuation inside a comment — the shell ends the comment at
+  # the newline and runs line 2 (measured in bash and sh). But `joined` resolves
+  # continuations BEFORE splitting, so line 2 got folded into the comment, the whole
+  # thing became one segment whose first word is `git` and subcommand `commit`, and all
+  # five rule families were skipped.
+  #
+  # The root cause is STAGE ORDERING, not a missing construct: this hook does
+  # join -> split -> scan, while the shell resolves comments, quotes and continuations in
+  # ONE tokenising pass. Rounds 7, 8, 9 and this one are all consequences of that split,
+  # which is the concrete argument for replacing the pipeline with a real tokeniser.
+  # Until then, refusing the exemption is the safe direction: it can only add blocks, and
+  # comment text is already matched by the rules (a documented accepted cost above).
+  has_comment "$1" && return 1
   local head=${1#"${1%%[![:space:]]*}"}     # drop leading whitespace
   head=${head#\(}; head=${head#\{}
   head=${head#"${head%%[![:space:]]*}"}

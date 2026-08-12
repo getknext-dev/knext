@@ -228,6 +228,34 @@ run "escaped dq inside dq msg, then push"    "git commit ${D}m \"a \\\"b\" && gi
 run "terraform<TAB>destroy"                  "$(printf 'terraform\tdestroy')"                 BLOCK
 run "kind  delete cluster (2 spaces)"        "kind  delete cluster ${D}${D}name x"            BLOCK
 run "oci ce cluster  delete (2 spaces)"      "oci ce cluster  delete ${D}${D}cluster-id x"    BLOCK
+# ${ws} between EVERY word, not just the last gap. Architect sign-off BLOCKed on exactly
+# this: the round-9 fix worked, but reverting it to the round-7 form left the suite
+# ALL PASS, because the rows above only vary the LAST separator. A working, untested fix
+# lets the next round re-half-apply it identically and stay green — which is how this
+# same shape has now recurred three times in this file.
+run "oci  ce cluster delete (inner gap)"     "oci  ce cluster delete ${D}${D}cluster-id x"    BLOCK
+run "oci ce<TAB>cluster delete"              "$(printf 'oci ce\tcluster delete %s%scluster-id x' "$D" "$D")" BLOCK
+run "oci  ce  node-pool  delete"             "oci  ce  node-pool  delete ${D}${D}node-pool-id x" BLOCK
+
+# ROUND 10. A REGRESSION AGAINST MAIN, needing no obfuscation and no unbalanced quote:
+# a backslash is not a continuation inside a comment, so the shell ends the comment at
+# the newline and runs line 2 — but `joined` resolves continuations BEFORE splitting, so
+# line 2 was folded into the comment, the whole thing became one segment whose first
+# word was `git commit`, and all five rule families were skipped.
+run "comment + backslash, then force push"   "$(printf 'git commit %sm "subject" # note\\\ngit push %s%sforce origin main' "$D" "$D" "$D")" BLOCK
+run "comment + backslash, then push main"    "$(printf 'git commit %sm "subject" # note\\\ngit push origin main' "$D")"                      BLOCK
+run "comment + backslash, then rm ${D}rf"    "$(printf 'git commit %sm "subject" # note\\\nrm %srf /tmp/x' "$D" "$D")"                       BLOCK
+run "comment + backslash, then delete"       "$(printf 'git commit %sm "subject" # note\\\nkubectl delete ns prod' "$D")"                    BLOCK
+run "comment + backslash, then filter-branch" "$(printf 'git commit %sm "subject" # note\\\ngit filter-branch %s%sall' "$D" "$D" "$D")"      BLOCK
+# `has_comment` refuses the exemption for a comment-bearing segment, which made
+# quote_state's own `#` handling look like decoration — mutation-proving showed it green.
+# It is NOT dead: has_comment only guards the segment that ENTERS the exemption, while
+# quote_state also runs on CONTINUATION segments, where a multi-line message CLOSES
+# mid-segment and a comment follows it. Without the `#` break the trailing apostrophe
+# below reopens the state and the third line is skipped. Deleting a clause because no
+# test reaches it, when the reachable path simply had no case, would have been the wrong
+# correction — so this asserts the path instead.
+run "msg closes, then comment, then push"    "$(printf "git commit %sm 'line1\nline2' # note '\ngit push %s%sforce origin main" "$D" "$D" "$D")" BLOCK
 
 echo
 echo "== MUST ALLOW (each one was a real false positive) =="
@@ -306,6 +334,12 @@ run "commit then real force push"            "git commit ${D}m 'subject line' &&
 # cosmetic.
 run "substitution in a preceding command"    "V=\$(cat v) && git commit ${D}m 'docs: why kubectl delete is gated'" allow
 run "apostrophe msg, no following command"   "git commit ${D}m \"don't ever push ${D}${D}force to main\""          allow
+# `has_comment` is quote-aware, and this is the half that proves it. A `#` inside the
+# message is not a comment, so the exemption must survive — refusing it here would block
+# an ordinary commit and is exactly the cry-wolf the exemption exists to prevent.
+run "hash inside a dq message"               "git commit ${D}m \"fix # 3 — never push to main\""                   allow
+run "hash inside a sq message"               "git commit ${D}m 'closes #42, mentions rm ${D}rf'"                    allow
+run "hash mid-token is not a comment"        "git commit ${D}m 'ref abc#def about main'"                            allow
 
 echo
 echo "== DIFFERENTIAL PROPERTY: nothing a commit message contains may disarm a rule =="
@@ -355,6 +389,12 @@ prefixes=(
   "git commit ${D}m \"fix\" # don't forget to rebase"$'\n'
   "git commit ${D}m \"subject\" # note: rm ${D}rf is gated"$'\n'
   "git commit ${D}m \"don't\""$'\n'
+  # The join axis, which the previous eight prefixes left as hand-picked combos rather
+  # than a real cross product — and the next defect sat in a missing combo. A backslash
+  # is NOT a continuation inside a comment, so the shell runs the next line, but the
+  # hook's join-before-split folded it into the comment and exempted everything.
+  "git commit ${D}m \"subject\" # note\\"$'\n'
+  "git commit ${D}m 'subject' # don't\\"$'\n'
 )
 for prefix in "${prefixes[@]}"; do
   for p in "${PROPS[@]}"; do

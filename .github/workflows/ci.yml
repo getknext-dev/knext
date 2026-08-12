@@ -527,8 +527,12 @@ jobs:
           exit "$failed"
 
   safety-hook-guard:
-    name: Agent safety-control hook (block-dangerous-bash)
-    runs-on: ubuntu-latest
+    name: Agent safety-control hook (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     # `.claude/hooks/block-dangerous-bash.sh` is the ONLY enforcement of the
     # operations `.claude/rules/security.md` calls never acceptable on an agent's
     # behalf: force/mirror/--all push, direct push to main/master, history rewrite,
@@ -540,10 +544,13 @@ jobs:
     # degrades, and its efficacy is unobservable until it has already failed. Four
     # separate rounds shipped a bypass that looked correct on inspection.
     #
-    # Linux matters specifically. One of those bypasses was a BSD/GNU `sed` split:
-    # `N` at EOF discards the pattern space on macOS and prints on GNU, so the hook
-    # was open where contributors run it and closed where CI would have checked. This
-    # job is the GNU half of that pair; the suite runs on macOS for whoever edits it.
+    # BOTH PLATFORMS, and that is the point rather than thoroughness for its own sake.
+    # One of those bypasses was a BSD/GNU `sed` split: `N` at EOF discards the pattern
+    # space on macOS and prints on GNU, so the hook was open where contributors run it
+    # and closed where CI would have looked. A Linux-only gate cannot see that class at
+    # all — it would have gone green while the control was open on every developer
+    # machine. `grep -E \b` (four rule families) and `awk` behaviour differ the same way.
+    # fail-fast is off so a divergence shows which platform, not just that one failed.
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -560,12 +567,17 @@ jobs:
           # suite to NOTICE. The anchor must occur exactly once or this aborts: a
           # silently-failed substitution yields a green run that proves nothing.
           hook=.claude/hooks/block-dangerous-bash.sh
-          n=$(grep -c '^deny() {' "$hook")
-          test "$n" -eq 1 || { echo "::error::deny() anchor occurs ${n}x, expected 1"; exit 1; }
           cp "$hook" /tmp/hook.orig
           trap 'cp /tmp/hook.orig "$hook"' EXIT
-          sed -i 's|^deny() { echo|deny() { return 0; echo|' "$hook"
-          grep -q '^deny() { return 0;' "$hook" || { echo "::error::mutation did not land"; exit 1; }
+          # python3, not `sed -i`: that spelling is GNU-only and fails on the macOS half
+          # of this matrix, which would have made the platform pair pointless. The script
+          # asserts the anchor occurs exactly once and aborts otherwise — a silently
+          # failed substitution yields a green run that proves nothing, which is why
+          # `.claude/rules/workflow.md` bans doing this with perl.
+          # One line deliberately: a heredoc body inside a YAML block scalar keeps its
+          # indentation, which python rejects.
+          python3 -c "p='$hook'; s=open(p).read(); a='deny() { echo'; n=s.count(a); assert n==1, f'anchor occurs {n}x, expected 1'; o=s.replace(a,'deny() { return 0; echo',1); assert o!=s, 'substitution produced no change'; open(p,'w').write(o)"
+          grep -q 'deny() { return 0;' "$hook" || { echo "::error::mutation did not land"; exit 1; }
           if bash .claude/hooks/block-dangerous-bash.test.sh >/dev/null 2>&1; then
             echo "::error::the suite passed with every deny() neutered — it proves nothing"
             exit 1
