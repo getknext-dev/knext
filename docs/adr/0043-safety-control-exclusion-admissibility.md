@@ -16,7 +16,7 @@
 calls "never acceptable on the agent's behalf": force/mirror/`--all` push, direct push to
 `main`/`master`, history rewrite, recursive-force removal, cluster deletes, infra teardown.
 
-It has shipped a bypass **six times**, and the same argument was re-litigated each time:
+It has shipped a bypass **seven times**, and the same argument was re-litigated each time:
 
 | Round | The "improvement" | What it cost |
 |---|---|---|
@@ -26,6 +26,7 @@ It has shipped a bypass **six times**, and the same argument was re-litigated ea
 | #725 r5–10 | Exempt `git commit` so message text stops crying wolf | Command substitution, an env-var prefix, a trailing `# git commit`, a global flag stealing its argument, and two quote-tracking fail-opens |
 | #725 r11 | Treat `#` as starting a comment, so a comment can no longer disarm the exemption | The word-start test accepted only whitespace, but bash ends a word on `)` too — `(… git commit -m "x")#c\` + newline reopened **all eight** gated verbs |
 | #725 r12 | Widen the word-terminator class so `)#` can no longer disarm it | Comment detection was now correct, but the segment that CLOSED a carried message was discarded unscanned — so the guard never ran on it, and a heredoc body could establish the exemption outright |
+| #725 r13 | Stop a segment inside DATA from establishing the exemption | The heredoc tracker was withdraw-only but not FAIL-CLOSED, and spelled for one delimiter: an indented decoy, `<<-` with spaces, `<<\EOF`, and stacked `<<A <<B` each reopened every gated verb |
 
 Every one looked correct on inspection. The recurring shape is not carelessness — it is that
 **narrowing feels like precision**, and in a control whose failure mode is "the forbidden thing
@@ -87,6 +88,40 @@ and stopped looking. If a guard sets text aside, it must be able to state *why t
 execute it* — the same proof obligation as Decision 2, applied to skipping rather than exempting.
 The safe form is to narrow what may be *skipped*, never to widen it.
 
+**8a. THE TEXT OF THIS DOCUMENT WAS AHEAD OF THE CODE, and that is recorded rather than
+quietly benefited from.** Decision 8 and the round-12 row below were first written in the
+past tense — "a heredoc body *was* allowed to establish an exemption" — while the class
+was still open for `cat <<\EOF`. Architect sign-off caught it. Round 13 then closed it,
+so the past tense became true by the **code catching up**, not by the sentence being
+corrected. Left unremarked, this document would read as if it had been right all along,
+which is precisely the overstatement it exists to prohibit.
+
+**9. AN EVIDENCE HARNESS MAY NEVER MUTATE THE ARTIFACT UNDER TEST IN THE SHARED WORKING
+TREE, and its restore must be verified against version control — never against a snapshot
+it took itself.**
+
+This is the most expensive lesson here, because it compromised the control rather than
+merely mismeasuring it. The mutation harness proving every claim in this ADR mutated the
+live in-repo hook and restored it in `finally` plus SIGTERM/SIGINT/SIGHUP handlers.
+SIGKILL is uncatchable. A reaped run left the working tree with the awk fail-closed
+capability probe — **Decision 4's own subject** — disarmed for roughly twenty minutes,
+while that same hook was gating the shell that reaped it.
+
+Then it hid. The next run took the poisoned file as its baseline snapshot and printed
+`restored byte-identical=True residue=False`, because both self-checks were unsound: the
+comparison was against a snapshot that may already have been poisoned, and the residue
+scan looked only for sentinel strings most clause mutations never contain. Decoration, by
+Decision 6's own standard, applied to the thing that certifies the others.
+
+The remedy is structural, not procedural: **copy the artifact and mutate the copy.** No
+signal, timeout or crash can damage a file the process never opens for writing. Adding
+another signal handler would only have narrowed the window. Restoration is asserted
+against `git show HEAD:<path>`, and a run refuses to start at all when the working tree
+already differs from HEAD, rather than measuring a tree of unknown provenance.
+
+The general form, which is the part to carry forward: **a harness that certifies a
+control is itself a control, and every rule above applies to it.**
+
 ### The worked example: why one obvious false positive was NOT fixed
 
 Decision 2 states the proof obligation abstractly. This is the case that shows what it costs
@@ -130,7 +165,7 @@ is admissible when there is a real tokeniser whose comment handling is itself te
 
 | Option | Fewer bypasses? | Cost | Verdict |
 |---|---|---|---|
-| Status quo — fix each bypass as found | No; six rounds say otherwise | Low per round, unbounded in total | **Rejected** |
+| Status quo — fix each bypass as found | No; seven rounds say otherwise | Low per round, unbounded in total | **Rejected** |
 | Narrow the guard so it only inspects "real" invocations | No — this *is* the recurring bug | Low | **Rejected**; it is what #725 r1 did |
 | Match broadly + prove every exclusion + generated property | Yes for the classes seen | Accepts false positives; needs a property harness | **Accepted** |
 | Replace text matching with a real shell tokeniser | Structurally, yes | ~250 lines, 1–2 days, a new runtime dependency | **Deferred** — see below |
@@ -141,7 +176,7 @@ is admissible when there is a real tokeniser whose comment handling is itself te
   human reruns the command, or runs it themselves. A false negative on force-push-to-`main` is not.
   The accepted costs are listed in the hook header so a later round cannot trade them away by
   accident.
-- **Guards get slower and longer.** The suite grew from 27 assertions on `main` to 1,726. That is the
+- **Guards get slower and longer.** The suite grew from 27 assertions on `main` to 1,820. That is the
   price of the property, and it is why it belongs in CI rather than in someone's memory.
 - **CI must run the guard on every platform contributors use.** One bypass was live on macOS and
   absent on Linux, so a Linux-only gate would have gone green while the control was open on every
@@ -151,7 +186,7 @@ is admissible when there is a real tokeniser whose comment handling is itself te
 
 ## Known limitation — the case for a tokeniser
 
-Rounds 7–12 produced six defects that were all the same thing: `#` starts a comment after any
+Rounds 7–13 produced seven defects that were all the same thing: `#` starts a comment after any
 word terminator (not just whitespace), `$'…'`
 escapes, a backslash is not a continuation *inside* a comment, and quote state is not parity. Each is
 plain shell grammar. The hook resolves continuations, then splits, then scans quotes — three stages
@@ -177,6 +212,9 @@ deny. Note the hazard before building it: a naive harness would *execute* payloa
 
 1. **(Done, PR #725)** Rebuild `block-dangerous-bash.sh` on the rules above; ship the generated
    property and the clause-granular mutation proof; run the suite in CI on Linux and macOS.
+   Decision 9 was learned the hard way inside that PR and is applied there:
+   `.claude/hooks/mutation-proof.py` sweeps a temp copy and verifies the repo file against
+   `HEAD`, proved by SIGKILLing a live sweep and confirming the tree is byte-identical.
 2. **(Human)** Add `.claude/hooks/` to the mechanically-detected escalation-trigger paths in
    `.claude/rules/workflow.md`. Ten rounds edited the sole enforcement of `security.md` and fired no
    trigger. This is deliberately **not** an agent edit: an agent that can edit the list of paths
