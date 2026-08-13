@@ -26,22 +26,37 @@ the run reports ABORT for that clause and exits non-zero. `workflow.md` bans doi
 with `perl` for the same reason: a silently-failed substitution yields a green run that
 proves nothing.
 
-RESTORE IS SIGNAL-SAFE. An earlier harness restored only in `finally`, and a tool timeout
-sent SIGTERM — which Python does not unwind — leaving a real mutation applied to the LIVE
-hook (the git flag table silently truncated). It hid because the file was legitimately
-modified at the time, so `git status` showing "M" looked expected.
+IT NEVER TOUCHES THE IN-REPO HOOK. The sweep copies the hook and its suite to a temp
+directory and mutates the copy.
+
+That is not tidiness — it is the fix for a defect this harness shipped with. The first
+version mutated the live file and restored it in `finally` plus SIGTERM/SIGINT/SIGHUP
+handlers. SIGKILL is uncatchable, and a reaped run left the working tree carrying
+`true ||` in place of the awk fail-closed capability probe — ADR-0043 Decision 4's own
+subject — DISARMED for about twenty minutes, while that same hook was gating the shell.
+A later run then took the poisoned file as its baseline snapshot and reported
+`restored byte-identical=True residue=False`, because both self-checks were unsound: the
+comparison was against a snapshot that may already have been poisoned, and the residue
+scan grepped only for sentinel strings that most clause mutations do not contain.
+
+An evidence harness is a guard, and `workflow.md`'s rule applies to it: a guard that
+cannot detect its own subject's removal is decoration. Copying removes the failure mode
+instead of narrowing it — no signal, timeout or crash can damage a file the process never
+opens for writing — and the one integrity claim printed at the end is checked against
+`git show HEAD:…`, never against a snapshot this script took itself.
 """
 import argparse
 import shutil
-import signal
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
-HOOK = ROOT / "block-dangerous-bash.sh"
-TEST = ROOT / "block-dangerous-bash.test.sh"
-BAK = Path("/tmp/block-dangerous-bash.mutation-proof.bak")
+HOOKS_DIR = Path(__file__).resolve().parent
+ROOT = HOOKS_DIR.parent.parent
+HOOK_REL = ".claude/hooks/block-dangerous-bash.sh"
+HOOK = HOOKS_DIR / "block-dangerous-bash.sh"
+TEST = HOOKS_DIR / "block-dangerous-bash.test.sh"
 
 # (label, anchor-that-must-occur-exactly-once, replacement)
 MUTATIONS = [
@@ -167,11 +182,6 @@ MUTATIONS = [
 ]
 
 
-def failing() -> int:
-    out = subprocess.run(["bash", str(TEST)], capture_output=True, text=True).stdout
-    return sum(1 for line in out.splitlines() if line.startswith("FAIL"))
-
-
 def check_anchors() -> int:
     src = HOOK.read_text()
     bad = 0
@@ -184,6 +194,22 @@ def check_anchors() -> int:
     return 1 if bad else 0
 
 
+def repo_hook_matches_head() -> bool:
+    """Is the in-repo hook byte-identical to what version control holds?
+
+    Compared against `git show HEAD:…`, NOT against a snapshot this script took.
+    A self-taken snapshot is worthless as an integrity check the moment the file
+    was already poisoned when the run started — which is exactly what happened.
+    """
+    committed = subprocess.run(
+        ["git", "-C", str(ROOT), "show", f"HEAD:{HOOK_REL}"],
+        capture_output=True,
+    )
+    if committed.returncode != 0:
+        return True  # not committed yet (e.g. first landing); nothing to compare against
+    return committed.stdout == HOOK.read_bytes()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true",
@@ -192,44 +218,69 @@ def main() -> int:
     if args.check:
         return check_anchors()
 
-    shutil.copy(HOOK, BAK)
+    # THE SWEEP RUNS ON A COPY. IT NEVER TOUCHES THE IN-REPO HOOK.
+    #
+    # The previous version mutated the live file and restored it in `finally` plus a
+    # SIGTERM/SIGINT/SIGHUP handler. That is not enough, and the gap is not theoretical:
+    # SIGKILL is uncatchable, and a reaped run left the working tree carrying `true ||`
+    # in place of the awk fail-closed capability probe — ADR-0043 Decision 4's own
+    # subject — DISARMED for roughly twenty minutes, while that same hook was gating the
+    # shell. A later run then took the poisoned file as its baseline snapshot and
+    # cheerfully reported `restored byte-identical=True residue=False`.
+    #
+    # Both of those self-checks were unsound. `byte-identical` compared against a
+    # snapshot that may already have been poisoned, and `residue` grepped only for
+    # sentinel strings that most clause mutations do not contain. A guard that cannot
+    # detect its own subject's removal is decoration — `workflow.md` says so about
+    # guards, and an evidence harness is a guard.
+    #
+    # Copying removes the failure mode rather than narrowing it: no signal, no timeout
+    # and no crash can damage a file the process never opens for writing. The suite
+    # locates the hook relative to its own directory, so a copied PAIR runs unchanged.
+    if not repo_hook_matches_head():
+        print("ABORT: the in-repo hook already differs from HEAD — refusing to measure a "
+              "tree of unknown provenance. Inspect `git diff` first.")
+        return 2
 
-    def restore_and_exit(signum, _frame):
-        shutil.copy(BAK, HOOK)
-        print(f"\nSIGNAL {signum} — hook restored before exit", flush=True)
-        sys.exit(3)
+    workdir = Path(tempfile.mkdtemp(prefix="mutation-proof-"))
+    hook = workdir / HOOK.name
+    test = workdir / TEST.name
+    shutil.copy(HOOK, hook)
+    shutil.copy(TEST, test)
 
-    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-        signal.signal(sig, restore_and_exit)
+    def failing_copy() -> int:
+        out = subprocess.run(["bash", str(test)], capture_output=True, text=True).stdout
+        return sum(1 for line in out.splitlines() if line.startswith("FAIL"))
 
+    pristine = hook.read_text()
     rc = 0
     try:
-        base = failing()
-        print(f"baseline failing: {base}", flush=True)
+        base = failing_copy()
+        print(f"baseline failing: {base}  (sweeping a copy in {workdir})", flush=True)
         if base:
             print("ABORT: baseline is not green — fix the suite before proving it")
             return 2
         for label, needle, repl in MUTATIONS:
-            src = HOOK.read_text()
-            n = src.count(needle)
+            n = pristine.count(needle)
             if n != 1:
                 print(f"  ABORT  {label:44s} anchor occurs {n}x, expected 1", flush=True)
                 rc = 1
                 continue
-            HOOK.write_text(src.replace(needle, repl, 1))
-            f = failing()
+            hook.write_text(pristine.replace(needle, repl, 1))
+            f = failing_copy()
             if f:
                 print(f"  {label:44s} failing={f:<4} RED (real)", flush=True)
             else:
                 print(f"  {label:44s} failing=0    *** GREEN — DECORATION ***", flush=True)
                 rc = 1
-            shutil.copy(BAK, HOOK)
+            hook.write_text(pristine)
     finally:
-        shutil.copy(BAK, HOOK)
-        body = HOOK.read_text()
-        residue = any(m in body for m in ("__never", "__nr__", "__nd__", "__nf__", "__nfr__"))
-        print(f"restored byte-identical={body == BAK.read_text()}  residue={residue}  "
-              f"final failing={failing()}", flush=True)
+        shutil.rmtree(workdir, ignore_errors=True)
+        # The only integrity claim worth printing: the REPO copy is what HEAD says it is.
+        intact = repo_hook_matches_head()
+        print(f"in-repo hook matches HEAD: {intact}", flush=True)
+        if not intact:
+            rc = 1
     return rc
 
 
