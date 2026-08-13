@@ -370,6 +370,11 @@ describe('file-manager image CVE remediation (#199)', () => {
       [/^form-data/, /2\.5\.([6-9]|\d{2,})/, 'CVE-2026-12143 fixed in 2.5.6'],
       [/^lodash/, /4\.(1[8-9]|[2-9]\d)\./, 'CVE-2026-4800 fixed in 4.18.0'],
       [/^protobufjs/, /7\.([6-9]|\d{2,})\./, 'CVE-2026-41242/44289…/48712 fixed in 7.6.1'],
+      // #: Supply Chain was RED 6/6 on main. nanoid arrives ONLY via postcss
+      // (^3.3.11), so the existing postcss floor does NOT subsume it — every
+      // postcss 8.5.x resolves nanoid to the newest 3.3.x, which was the
+      // vulnerable one. Pinned on the 3.x line because postcss requires ^3.
+      [/^nanoid/, /3\.3\.(1[7-9]|[2-9]\d)/, 'CVE-2026-67213 (DoS, infinite loop) fixed in 3.3.17'],
     ];
     for (const [selectorRe, minVersionRe, why] of required) {
       const entry = Object.entries(overrides).find(([k]) => selectorRe.test(k));
@@ -391,6 +396,7 @@ describe('file-manager image CVE remediation (#199)', () => {
       'form-data@2.5.5:',
       'lodash@4.17.23:',
       'protobufjs@7.5.4:',
+      'nanoid@3.3.16:',
     ];
     for (const needle of banned) {
       expect(
