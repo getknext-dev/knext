@@ -254,6 +254,7 @@ def main() -> int:
 
     pristine = hook.read_text()
     rc = 0
+    done = 0
     try:
         base = failing_copy()
         print(f"baseline failing: {base}  (sweeping a copy in {workdir})", flush=True)
@@ -266,6 +267,17 @@ def main() -> int:
                 print(f"  ABORT  {label:44s} anchor occurs {n}x, expected 1", flush=True)
                 rc = 1
                 continue
+            # SELF-HEAL, because a vanished workdir must not end the sweep silently.
+            # A real run died here with FileNotFoundError at clause 5 of 47 — something
+            # removed the temp directory mid-sweep — and left a log that READ like a
+            # partial success: five REDs, the integrity line, and a traceback below the
+            # fold. A sweep that stops early must never be mistakable for one that
+            # finished, which is why the completion count below is mandatory output.
+            if not hook.exists() or not test.exists():
+                workdir.mkdir(parents=True, exist_ok=True)
+                shutil.copy(HOOK, hook)
+                shutil.copy(TEST, test)
+                print(f"  NOTE   workdir vanished — recreated before {label}", flush=True)
             hook.write_text(pristine.replace(needle, repl, 1))
             f = failing_copy()
             if f:
@@ -274,8 +286,20 @@ def main() -> int:
                 print(f"  {label:44s} failing=0    *** GREEN — DECORATION ***", flush=True)
                 rc = 1
             hook.write_text(pristine)
+            done += 1
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+        # Two claims, both mandatory. An INCOMPLETE sweep is a failure, not a partial
+        # pass: quoting "N clauses proved" from a run that covered five of them is the
+        # unreproducible-evidence problem this whole script exists to end.
+        total = len(MUTATIONS)
+        complete = done == total
+        if not complete:
+            print(f"INCOMPLETE: {done} of {total} clauses swept — this run proves NOTHING "
+                  f"about the {total - done} it did not reach", flush=True)
+            rc = 1
+        else:
+            print(f"swept {done} of {total} clauses", flush=True)
         # The only integrity claim worth printing: the REPO copy is what HEAD says it is.
         intact = repo_hook_matches_head()
         print(f"in-repo hook matches HEAD: {intact}", flush=True)
