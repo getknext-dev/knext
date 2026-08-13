@@ -566,9 +566,13 @@ jobs:
           # drifts, and which gets edited to green — neuter the hook and require the
           # suite to NOTICE. The anchor must occur exactly once or this aborts: a
           # silently-failed substitution yields a green run that proves nothing.
-          hook=.claude/hooks/block-dangerous-bash.sh
-          cp "$hook" /tmp/hook.orig
-          trap 'cp /tmp/hook.orig "$hook"' EXIT
+          # MUTATE A COPY, never the in-tree hook. Safe here only because a runner
+          # is ephemeral is not a reason to keep doing it: ADR-0043 Decision 9 says an
+          # evidence harness may not mutate the artifact under test in the shared tree,
+          # and this step is an evidence harness. Three lines to obey it.
+          work=$(mktemp -d)
+          cp .claude/hooks/block-dangerous-bash.sh .claude/hooks/block-dangerous-bash.test.sh "$work"/
+          hook="$work/block-dangerous-bash.sh"
           # python3, not `sed -i`: that spelling is GNU-only and fails on the macOS half
           # of this matrix, which would have made the platform pair pointless. The script
           # asserts the anchor occurs exactly once and aborts otherwise — a silently
@@ -578,11 +582,14 @@ jobs:
           # indentation, which python rejects.
           python3 -c "p='$hook'; s=open(p).read(); a='deny() { echo'; n=s.count(a); assert n==1, f'anchor occurs {n}x, expected 1'; o=s.replace(a,'deny() { return 0; echo',1); assert o!=s, 'substitution produced no change'; open(p,'w').write(o)"
           grep -q 'deny() { return 0;' "$hook" || { echo "::error::mutation did not land"; exit 1; }
-          if bash .claude/hooks/block-dangerous-bash.test.sh >/dev/null 2>&1; then
+          if bash "$work/block-dangerous-bash.test.sh" >/dev/null 2>&1; then
             echo "::error::the suite passed with every deny() neutered — it proves nothing"
             exit 1
           fi
-          echo "OK: neutering deny() reddens the suite"
+          # The in-tree hook must be untouched by this step, asserted not assumed.
+          git diff --quiet -- .claude/hooks/block-dangerous-bash.sh ||
+            { echo "::error::this step modified the in-tree hook"; exit 1; }
+          echo "OK: neutering deny() reddens the suite, and the in-tree hook is untouched"
 
   operator-codegen-check:
     name: Operator codegen is up-to-date (make generate + make manifests)

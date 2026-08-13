@@ -206,7 +206,19 @@ def repo_hook_matches_head() -> bool:
         capture_output=True,
     )
     if committed.returncode != 0:
-        return True  # not committed yet (e.g. first landing); nothing to compare against
+        # FAIL CLOSED. This branch used to `return True` — "not committed yet, nothing
+        # to compare against" — which made the integrity check go green precisely when
+        # it could not do its job. Architect sign-off caught it: with `.git` absent the
+        # run proceeded on a modified hook and printed `matches HEAD: True` vacuously.
+        #
+        # That is Decision 4 verbatim, quoted from `security.md`: a checker that goes
+        # green when it cannot reach its source of truth is worse than none. It is also
+        # the single defect class this harness was rewritten to eliminate, reintroduced
+        # in the very function doing the eliminating.
+        raise RuntimeError(
+            f"cannot read HEAD:{HOOK_REL} from git ({committed.stderr.decode(errors='replace').strip()}) "
+            "— refusing to certify integrity against a source of truth that is unavailable"
+        )
     return committed.stdout == HOOK.read_bytes()
 
 
@@ -237,7 +249,12 @@ def main() -> int:
     # Copying removes the failure mode rather than narrowing it: no signal, no timeout
     # and no crash can damage a file the process never opens for writing. The suite
     # locates the hook relative to its own directory, so a copied PAIR runs unchanged.
-    if not repo_hook_matches_head():
+    try:
+        provenance_ok = repo_hook_matches_head()
+    except RuntimeError as exc:
+        print(f"ABORT: {exc}")
+        return 2
+    if not provenance_ok:
         print("ABORT: the in-repo hook already differs from HEAD — refusing to measure a "
               "tree of unknown provenance. Inspect `git diff` first.")
         return 2
@@ -301,8 +318,13 @@ def main() -> int:
         else:
             print(f"swept {done} of {total} clauses", flush=True)
         # The only integrity claim worth printing: the REPO copy is what HEAD says it is.
-        intact = repo_hook_matches_head()
-        print(f"in-repo hook matches HEAD: {intact}", flush=True)
+        # An UNANSWERABLE check is a failure here too — never a silent pass.
+        try:
+            intact = repo_hook_matches_head()
+            print(f"in-repo hook matches HEAD: {intact}", flush=True)
+        except RuntimeError as exc:
+            print(f"in-repo hook integrity UNVERIFIABLE: {exc}", flush=True)
+            intact = False
         if not intact:
             rc = 1
     return rc

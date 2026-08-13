@@ -586,6 +586,13 @@ hd_shapes=(
   "cat <<'EOF'${TAB}EOF"
   "cat <<\"EOF\"${TAB}EOF"
   "cat <<A <<EOF${TAB}A"
+  # Architect sign-off measured 3 of 12 openers leaking at ed01a82, not 2 — and the
+  # third, `<< \EOF` (a SPACE before the backslash), is a spelling neither of us had
+  # written down. Both of these block today only because the unparseable-heredoc clause
+  # fails closed, which is the design working; but Decision 5 says generate where you
+  # would otherwise enumerate, and an opener set is exactly an enumeration.
+  "cat <<-\\EOF${TAB}${TAB}EOF"
+  "cat << \\EOF${TAB}EOF"
 )
 hd_decoys=( "" "  EOF" "${TAB}EOF" "   EOF" )
 hd_verbs=(

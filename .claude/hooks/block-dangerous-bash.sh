@@ -33,7 +33,9 @@
 # fixed nine and opened the `=` glob and wrapper-narrowing holes; #725 round 2 fixed
 # those and still let command substitution through the `git commit` exemption; #725
 # round 10 taught the hook that `#` starts a comment and round 11 found that its notion
-# of where a word starts was still wrong, reopening all eight gated verbs via `)#`.
+# of where a word starts was still wrong, reopening every gated verb the probe
+# covered via `)#` — six verb families, measured; an earlier note said "all eight",
+# a figure architect sign-off could not reconstruct and neither could I.
 # Every one of them looked correct on inspection. Change nothing here without running
 # `.claude/hooks/block-dangerous-bash.test.sh` — which CI now runs, so a regression
 # no longer waits on someone remembering to type it.
