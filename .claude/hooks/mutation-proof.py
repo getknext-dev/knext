@@ -40,7 +40,9 @@ comparison was against a snapshot that may already have been poisoned, and the r
 scan grepped only for sentinel strings that most clause mutations do not contain.
 
 RELATIONSHIP TO `scripts/scan-mutation-residue.mjs`. That scan catches residue by looking
-for the repo's `KNEXT-MUTATION` marker in tracked files, and it works — planting the marker
+for the repo's mutation marker (assembled from parts in
+`scripts/lib/mutation-harness.mjs`, so naming it here would make this file a hit) in
+tracked files, and it works — planting the marker
 makes it exit 1. It would NOT have caught this harness's poisoning, because these
 replacements (`true ||`, `for _t in ; do`) carry no marker. That is acceptable only
 because of the design above: this script cannot leave residue in a tracked file, since it
