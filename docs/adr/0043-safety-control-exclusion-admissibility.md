@@ -119,8 +119,25 @@ another signal handler would only have narrowed the window. Restoration is asser
 against `git show HEAD:<path>`, and a run refuses to start at all when the working tree
 already differs from HEAD, rather than measuring a tree of unknown provenance.
 
+**And "every rule above" includes Decision 4, which this sentence had to learn the hard
+way.** The integrity check asserting the restore returned *true* when `git show` failed —
+"not committed yet, nothing to compare against" — so with `.git` unreachable a run
+proceeded on a modified artifact and printed `matches HEAD: True` vacuously. A checker
+that goes green when it cannot reach its source of truth is worse than none; that is
+Decision 4 verbatim, reintroduced inside the function written to enforce Decision 9. The
+version-control comparison must therefore **fail closed** — an unanswerable integrity
+question is a failure, never a silent pass.
+
 The general form, which is the part to carry forward: **a harness that certifies a
-control is itself a control, and every rule above applies to it.**
+control is itself a control, and every rule above applies to it — including the ones it
+was written to enforce.**
+
+**A sweep must also name the commit it measured.** A harness that copies its subject at
+start produces a result for the tree it copied, not the tree the reader is looking at.
+Here a clean "47 of 47" and a `matches HEAD: True` were both true about *different* trees,
+because the artifact was edited while the sweep ran. Neither line was wrong and the pair
+was misleading, which is the same overstatement-by-omission this ADR exists to prohibit.
+A count is evidence only when it names what it counted.
 
 ### The worked example: why one obvious false positive was NOT fixed
 
@@ -214,7 +231,9 @@ deny. Note the hazard before building it: a naive harness would *execute* payloa
    property and the clause-granular mutation proof; run the suite in CI on Linux and macOS.
    Decision 9 was learned the hard way inside that PR and is applied there:
    `.claude/hooks/mutation-proof.py` sweeps a temp copy and verifies the repo file against
-   `HEAD`, proved by SIGKILLing a live sweep and confirming the tree is byte-identical.
+   `HEAD`, proved by SIGKILLing a live sweep and confirming the tree is byte-identical. The
+   `ci.yml` decoration-proof step mutates a copy too, and asserts `git diff --quiet` on the
+   in-tree hook afterwards rather than relying on the runner being ephemeral.
 2. **(Human)** Add `.claude/hooks/` to the mechanically-detected escalation-trigger paths in
    `.claude/rules/workflow.md`. Ten rounds edited the sole enforcement of `security.md` and fired no
    trigger. This is deliberately **not** an agent edit: an agent that can edit the list of paths
