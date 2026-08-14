@@ -259,6 +259,19 @@ def main() -> int:
               "tree of unknown provenance. Inspect `git diff` first.")
         return 2
 
+    # ATTRIBUTE THE NUMBER TO A COMMIT. A sweep copies the artifact at START, so a
+    # tree edited while it runs produces a result for the tree it copied — not the one
+    # the reader is looking at. That is not hypothetical: a clean 47/47 was produced
+    # here for a tree that had moved on by the time the run finished, and the final
+    # integrity line (computed against the NEW HEAD) was true while saying nothing about
+    # the copy actually swept. "47 of 47" is only evidence if it names what it measured.
+    head = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"],
+                          capture_output=True, text=True)
+    head_sha = head.stdout.strip() if head.returncode == 0 else "unknown"
+    dirty = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain", "--", HOOK_REL,
+                            ".claude/hooks/block-dangerous-bash.test.sh"],
+                           capture_output=True, text=True).stdout.strip()
+
     workdir = Path(tempfile.mkdtemp(prefix="mutation-proof-"))
     hook = workdir / HOOK.name
     test = workdir / TEST.name
@@ -274,7 +287,10 @@ def main() -> int:
     done = 0
     try:
         base = failing_copy()
-        print(f"baseline failing: {base}  (sweeping a copy in {workdir})", flush=True)
+        print(f"baseline failing: {base}  (copy of {head_sha} in {workdir})", flush=True)
+        if dirty:
+            print(f"NOTE: hook/suite are MODIFIED vs {head_sha} — this sweep measures the "
+                  f"working tree, not the commit", flush=True)
         if base:
             print("ABORT: baseline is not green — fix the suite before proving it")
             return 2
@@ -316,7 +332,8 @@ def main() -> int:
                   f"about the {total - done} it did not reach", flush=True)
             rc = 1
         else:
-            print(f"swept {done} of {total} clauses", flush=True)
+            print(f"swept {done} of {total} clauses of {head_sha}"
+                  f"{' (working tree, modified)' if dirty else ''}", flush=True)
         # The only integrity claim worth printing: the REPO copy is what HEAD says it is.
         # An UNANSWERABLE check is a failure here too — never a silent pass.
         try:
