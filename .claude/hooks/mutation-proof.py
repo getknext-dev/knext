@@ -39,6 +39,15 @@ A later run then took the poisoned file as its baseline snapshot and reported
 comparison was against a snapshot that may already have been poisoned, and the residue
 scan grepped only for sentinel strings that most clause mutations do not contain.
 
+RELATIONSHIP TO `scripts/scan-mutation-residue.mjs`. That scan catches residue by looking
+for the repo's `KNEXT-MUTATION` marker in tracked files, and it works — planting the marker
+makes it exit 1. It would NOT have caught this harness's poisoning, because these
+replacements (`true ||`, `for _t in ; do`) carry no marker. That is acceptable only
+because of the design above: this script cannot leave residue in a tracked file, since it
+never writes to one. Anything that DOES mutate in-tree must embed the marker from
+`scripts/lib/mutation-harness.mjs` so the scan covers it — a convention is only as good
+as its adoption, and this harness opts out by being incapable of the failure instead.
+
 An evidence harness is a guard, and `workflow.md`'s rule applies to it: a guard that
 cannot detect its own subject's removal is decoration. Copying removes the failure mode
 instead of narrowing it — no signal, timeout or crash can damage a file the process never
