@@ -410,7 +410,10 @@ Two operational rules:
 - **Rotation is deliberate, never silent** (same contract as every Secret in
   `gen-secrets.sh`): `kubectl -n scale-zero-pg delete secret compute-jwt-trust`,
   re-run `sh deploy/gen-secrets.sh`, then restart the computes so they mount
-  the new JWK.
+  the new JWK. The 0↔1 tiers self-heal on their next wake; the tiers that do
+  NOT scale to zero need an explicit
+  `kubectl -n scale-zero-pg rollout restart deploy/compute-warm deploy/compute-ro`
+  (plus any per-app `compute-<app>` currently awake).
 
 History note: this Secret replaced a JWK that was committed to the repo — with
 its private half also in git history, which in a public repo means anyone could
