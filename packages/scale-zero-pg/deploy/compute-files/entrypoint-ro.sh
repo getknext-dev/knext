@@ -27,6 +27,15 @@ IDS=/tmp/config.ids.json
 DST=/tmp/config.json
 CLOUD_ADMIN_MD5="${CLOUD_ADMIN_MD5:-b093c0d3b281ba6da1eacc608620abd8}"
 
+# compute_ctl JWT trust anchor — see entrypoint.sh for the full rationale:
+# placeholders in the template, per-cluster key from the compute-jwt-trust
+# Secret, random throwaway anchor when absent (fail-safe).
+if [ -z "${JWT_JWK_X:-}" ]; then
+  JWT_JWK_X="$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n')"
+  echo "compute_ctl jwks: no compute-jwt-trust Secret; using a random throwaway trust anchor"
+fi
+JWT_JWK_KID="${JWT_JWK_KID:-throwaway}"
+
 # pg_hba harden shared with the primary + warm entrypoints (issue #164). See
 # lib-harden.sh: harden_pg_hba inserts the #112 cloud_admin loopback-only reject and
 # rewrites the pg_hba catch-all md5 -> scram-sha-256 (#117). On a per-app RO compute
@@ -42,7 +51,9 @@ CLOUD_ADMIN_MD5="${CLOUD_ADMIN_MD5:-b093c0d3b281ba6da1eacc608620abd8}"
 
 echo "Rendering RO compute spec (tenant=${TENANT_ID} timeline=${TIMELINE_ID} mode=${RO_MODE})"
 sed -e "s|TENANT_ID|${TENANT_ID}|g" -e "s|TIMELINE_ID|${TIMELINE_ID}|g" \
-    -e "s|CLOUD_ADMIN_MD5_PLACEHOLDER|${CLOUD_ADMIN_MD5}|g" "$SRC" > "$IDS"
+    -e "s|CLOUD_ADMIN_MD5_PLACEHOLDER|${CLOUD_ADMIN_MD5}|g" \
+    -e "s|JWT_JWK_KID_PLACEHOLDER|${JWT_JWK_KID}|g" \
+    -e "s|JWT_JWK_X_PLACEHOLDER|${JWT_JWK_X}|g" "$SRC" > "$IDS"
 
 case "$RO_MODE" in
   Replica)
