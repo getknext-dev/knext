@@ -51,6 +51,23 @@ else
   CLOUD_ADMIN_MD5="${CLOUD_ADMIN_MD5:-$PUBLIC_CLOUD_ADMIN_MD5}"
 fi
 
+# compute_ctl JWT trust anchor. The jwks in the spec template carries
+# PLACEHOLDERS, never key material: the previous committed JWK's PRIVATE half
+# was itself committed early in this repo's history (later deleted — but the
+# repo is public, so history is publication), which let anyone mint valid
+# compute_ctl control-API tokens. Rotation made the class unrepresentable:
+# gen-secrets.sh generates the keypair PER CLUSTER into the compute-jwt-trust
+# Secret (private half never leaves it), the compute manifests mount the
+# public JWK fields as env, and this substitution puts them in the spec.
+# Absent the Secret (bare local run): same fail-safe shape as the per-app
+# random md5 above — a random anchor NOBODY holds, so the control API is
+# locked rather than trusting a value anyone can read on GitHub.
+if [ -z "${JWT_JWK_X:-}" ]; then
+  JWT_JWK_X="$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n')"
+  echo "compute_ctl jwks: no compute-jwt-trust Secret; using a random throwaway trust anchor"
+fi
+JWT_JWK_KID="${JWT_JWK_KID:-throwaway}"
+
 # harden_pg_hba (issues #112 + #117): factored into the SHARED lib-harden.sh so
 # the primary / RO / warm entrypoints cannot drift (issue #164). It inserts the
 # cloud_admin loopback-only reject (#112) + rewrites the pg_hba network catch-all
@@ -60,7 +77,9 @@ fi
 
 echo "Rendering compute spec (tenant=${TENANT_ID} timeline=${TIMELINE_ID})"
 sed -e "s|TENANT_ID|${TENANT_ID}|g" -e "s|TIMELINE_ID|${TIMELINE_ID}|g" \
-    -e "s|CLOUD_ADMIN_MD5_PLACEHOLDER|${CLOUD_ADMIN_MD5}|g" "$SRC" > "$DST"
+    -e "s|CLOUD_ADMIN_MD5_PLACEHOLDER|${CLOUD_ADMIN_MD5}|g" \
+    -e "s|JWT_JWK_KID_PLACEHOLDER|${JWT_JWK_KID}|g" \
+    -e "s|JWT_JWK_X_PLACEHOLDER|${JWT_JWK_X}|g" "$SRC" > "$DST"
 
 # Per-app connection cap (issue #89, tenant quotas). When PG_MAX_CONNECTIONS is set
 # (per-app computes get it from compute-config-<app>), override ONLY the
