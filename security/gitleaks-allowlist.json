@@ -1,0 +1,14 @@
+{
+  "$comment": "Disposition-classed allowlist for scripts/secret-scan.mjs (mirrors npm-audit-allowlist.json). Classes: 'rotated-historical' = the secret is in unrewritable git history but PROVEN dead \u2014 permanent, requires rotationEvidence; 'false-positive' = not a secret \u2014 requires a dated expiry so the ruling gets re-examined. The wrapper REJECTS any entry outside this schema.",
+  "entries": [
+    {
+      "fingerprint": "0df3a310bbe99c95591033a58c5a3eb0382a7d3c:local/compute_wrapper/private-key.pem:private-key:1",
+      "rule": "private-key",
+      "path": "local/compute_wrapper/private-key.pem",
+      "class": "rotated-historical",
+      "justification": "Ed25519 private key committed with the local Neon compose experiment (2026-07-02); its public half was the live compute_ctl trust anchor until rotation. History is never rewritten, so the finding is permanent.",
+      "rotationEvidence": "Rotated on the live OKE cluster 2026-08-15 (verified: compute-jwt-trust Secret created via gen-secrets.sh, rotated ConfigMap applied, 0 occurrences of the leaked key in the live ConfigMap, wake drill 0->1->0->1 passed twice). Tracked in PR #730 (open, all four gates passed: code+spec APPROVE, architect+system-designer SIGN-OFF), which lands the repo-side rotation and the tests/compute-jwt-trust-guard.test.ts guard banning all four encodings. Merge order: #730 before or with this gate.",
+      "added": "2026-08-15"
+    }
+  ]
+}
