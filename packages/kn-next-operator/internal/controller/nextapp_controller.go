@@ -1340,13 +1340,39 @@ func (r *NextAppReconciler) reconcileNetworkPolicy(ctx context.Context, nextApp 
 				},
 				From: []networkingv1.NetworkPolicyPeer{
 					// Knative serving system (activator handles scale-from-zero) and the
-					// Kourier ingress gateway namespace.
+					// Kourier ingress gateway namespace. These are the ONLY peers that
+					// may reach the serving ports.
 					inNamespaceLabels("knative-serving", "kourier-system"),
-					// Same namespace: an empty PodSelector matches all pods in the
-					// policy's own namespace (NamespaceSelector nil => same namespace).
-					{
-						PodSelector: &metav1.LabelSelector{},
-					},
+				},
+			},
+			// SECOND RULE — the same-namespace peer, SCOPED (ADR-0044).
+			//
+			// It used to sit in the rule above with an empty PodSelector, which
+			// meant every co-resident pod could reach the SERVING ports. That is
+			// the SCS contract leak ADR-0044 names: co-resident zones calling each
+			// other's app pods synchronously, when the zone contract permits only
+			// the browser and async events. Legitimate in-cluster calls to a knext
+			// app address its ksvc URL and are routed by Kourier, so they arrive
+			// from `kourier-system` above — the same-namespace peer is NOT needed
+			// for app traffic at all.
+			//
+			// What it IS needed for is metric scraping by a Prometheus running
+			// beside the app. So the peer survives, narrowed to the metrics ports.
+			//
+			// Scoped by PORT rather than by pod LABEL deliberately: the operator
+			// cannot know a user's monitoring pod labels, and guessing them would
+			// break scraping for every cluster whose Prometheus is labelled
+			// differently. Port-scoping achieves the same isolation with no
+			// assumption about the user's deployment.
+			{
+				Ports: []networkingv1.NetworkPolicyPort{
+					{Port: ptr.To(intstr.FromInt32(queueProxyMetricsPort))},
+					{Port: ptr.To(intstr.FromInt32(appMetricsPort))},
+				},
+				From: []networkingv1.NetworkPolicyPeer{
+					// An empty PodSelector matches all pods in the policy's own
+					// namespace (NamespaceSelector nil => same namespace).
+					{PodSelector: &metav1.LabelSelector{}},
 				},
 			},
 		}

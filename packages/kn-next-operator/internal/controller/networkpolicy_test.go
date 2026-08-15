@@ -75,8 +75,14 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 		Expect(np.Spec.PolicyTypes).To(ContainElement(networkingv1.PolicyTypeIngress))
 
 		By("restricting ingress to in-cluster sources (knative-serving + gateway + same namespace)")
-		Expect(np.Spec.Ingress).To(HaveLen(1))
-		froms := np.Spec.Ingress[0].From
+		// TWO rules since ADR-0044: [0] serving ports from knative-serving/kourier,
+		// [1] metrics ports from the same namespace. The union of their peers is
+		// what this original assertion checks.
+		Expect(np.Spec.Ingress).To(HaveLen(2))
+		var froms []networkingv1.NetworkPolicyPeer
+		for _, rule := range np.Spec.Ingress {
+			froms = append(froms, rule.From...)
+		}
 		Expect(froms).NotTo(BeEmpty())
 
 		var nsLabels []string
@@ -126,7 +132,7 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 
 		np := &networkingv1.NetworkPolicy{}
 		Expect(k8sClient.Get(ctx, policyName(nn.Name), np)).To(Succeed())
-		Expect(np.Spec.Ingress).To(HaveLen(1))
+		Expect(np.Spec.Ingress).To(HaveLen(2))
 
 		ports := np.Spec.Ingress[0].Ports
 		Expect(ports).NotTo(BeEmpty(), "no Ports means ALL ports — the ADR-0044 bypass")
@@ -144,6 +150,54 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 		Expect(got).NotTo(ContainElement(int32(3000)))
 		By("and nothing else — an allowlist that grows silently is how the next bypass lands")
 		Expect(got).To(HaveLen(4))
+	})
+
+	It("scopes the same-namespace peer to METRICS ports — closing the SCS synchronous-call leak (ADR-0044)", func() {
+		// The other half of ADR-0044's Option E, and the half the first cut of
+		// this change silently dropped: the same-namespace peer used to sit in
+		// the serving rule with an empty PodSelector, so every co-resident pod
+		// could reach 8012/8013 — co-resident zones calling each other's app pods
+		// synchronously, which the SCS contract permits only via the browser or
+		// async events. Legitimate in-cluster calls address the ksvc URL and
+		// arrive via kourier-system, so the same-namespace peer is needed ONLY
+		// for metric scraping.
+		nn := reconcileApp("np-scoped-peer", nil)
+
+		np := &networkingv1.NetworkPolicy{}
+		Expect(k8sClient.Get(ctx, policyName(nn.Name), np)).To(Succeed())
+		Expect(np.Spec.Ingress).To(HaveLen(2))
+
+		// Classify each rule by whether its peers include the same-namespace one
+		// (NamespaceSelector nil + non-nil PodSelector).
+		portsOf := func(rule networkingv1.NetworkPolicyIngressRule) []int32 {
+			var out []int32
+			for _, p := range rule.Ports {
+				Expect(p.Port).NotTo(BeNil())
+				out = append(out, p.Port.IntVal)
+			}
+			return out
+		}
+		sameNsRules, systemRules := 0, 0
+		for _, rule := range np.Spec.Ingress {
+			hasSameNs := false
+			for _, peer := range rule.From {
+				if peer.NamespaceSelector == nil && peer.PodSelector != nil {
+					hasSameNs = true
+				}
+			}
+			if hasSameNs {
+				sameNsRules++
+				By("the same-namespace rule admits metrics ports ONLY")
+				Expect(portsOf(rule)).To(ConsistOf(int32(9090), int32(9091)),
+					"a same-namespace peer that can reach a serving port is the SCS contract leak")
+			} else {
+				systemRules++
+				By("the system rule carries the serving ports")
+				Expect(portsOf(rule)).To(ContainElements(int32(8012), int32(8013)))
+			}
+		}
+		Expect(sameNsRules).To(Equal(1), "expected exactly one same-namespace rule")
+		Expect(systemRules).To(Equal(1), "expected exactly one knative-serving/kourier rule")
 	})
 
 	It("creates the NetworkPolicy when Security.NetworkPolicy is explicitly true", func() {
