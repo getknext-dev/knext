@@ -1,7 +1,9 @@
 # ADR-0044: Ingress hardening — rate limiting, payload caps, malformed-request handling
 
-- Status: Proposed (v2 — rewritten after a double design-gate BLOCK; both verdicts in
-  `knext-plan-out/{arch,sysdes}-gate-adr44.md`)
+- Status: **Accepted** (2026-08-16, on merge of the Option E implementation). v2 — rewritten
+  after a double design-gate BLOCK; both verdicts in
+  `knext-plan-out/{arch,sysdes}-gate-adr44.md`. Option E shipped in PR #734 with both
+  sign-off gates cleared; Options D (docs) and C (deferred, dated clock) stand as written.
 - Date: 2026-08-15
 - Deciders: architect gate, system-designer gate, maintainer
 - Context: security sprint 2026-08-15, task S3 (trigger-class by construction)
