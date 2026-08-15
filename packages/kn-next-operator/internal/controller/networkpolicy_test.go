@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -74,8 +75,14 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 		Expect(np.Spec.PolicyTypes).To(ContainElement(networkingv1.PolicyTypeIngress))
 
 		By("restricting ingress to in-cluster sources (knative-serving + gateway + same namespace)")
-		Expect(np.Spec.Ingress).To(HaveLen(1))
-		froms := np.Spec.Ingress[0].From
+		// TWO rules since ADR-0044: [0] serving ports from knative-serving/kourier,
+		// [1] metrics ports from the same namespace. The union of their peers is
+		// what this original assertion checks.
+		Expect(np.Spec.Ingress).To(HaveLen(2))
+		var froms []networkingv1.NetworkPolicyPeer
+		for _, rule := range np.Spec.Ingress {
+			froms = append(froms, rule.From...)
+		}
 		Expect(froms).NotTo(BeEmpty())
 
 		var nsLabels []string
@@ -106,6 +113,99 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 		Expect(np.OwnerReferences).To(HaveLen(1))
 		Expect(np.OwnerReferences[0].Kind).To(Equal("NextApp"))
 		Expect(np.OwnerReferences[0].Name).To(Equal(nn.Name))
+	})
+
+	It("restricts ingress PORTS so co-resident pods cannot bypass the queue-proxy (ADR-0044)", func() {
+		// The rule used to carry NO Ports, which admits every port — so any
+		// same-namespace pod could dial the app container's :3000 directly,
+		// skipping queue-proxy and its containerConcurrency bound entirely
+		// (the architect gate proved this in ADR-0044 round 1). The allowlist:
+		//   8012/8013  queue-proxy serving (http1/h2c) — the ONLY way to the app
+		//   9090       queue-proxy's own metrics
+		//   9091       the app's metrics sidecar (prometheus.io/port stamps 9091,
+		//              nextapp_controller.go:820 — a queue-proxy-only rule would
+		//              kill scraping; both halves asserted here)
+		// :3000 (the user port) is deliberately ABSENT: queue-proxy reaches it
+		// over pod-local loopback (127.0.0.1:USER_PORT), which no NetworkPolicy
+		// touches, so excluding it breaks nothing legitimate.
+		nn := reconcileApp("np-ports", nil)
+
+		np := &networkingv1.NetworkPolicy{}
+		Expect(k8sClient.Get(ctx, policyName(nn.Name), np)).To(Succeed())
+		Expect(np.Spec.Ingress).To(HaveLen(2))
+
+		ports := np.Spec.Ingress[0].Ports
+		Expect(ports).NotTo(BeEmpty(), "no Ports means ALL ports — the ADR-0044 bypass")
+		var got []int32
+		for _, p := range ports {
+			Expect(p.Port).NotTo(BeNil())
+			Expect(p.Port.Type).To(Equal(intstr.Int), "named ports would silently not match")
+			// EndPort turns an entry into a RANGE: {Port: 8012, EndPort: 65535}
+			// satisfies every other assertion here while reopening all high ports.
+			Expect(p.EndPort).To(BeNil(), "a port RANGE reopens what the allowlist closes")
+			got = append(got, p.Port.IntVal)
+		}
+		By("admitting the queue-proxy serving ports — the only sanctioned path to the app")
+		// 8112 (BackendHTTPSPort) is appended to EVERY knative revision pod
+		// unconditionally (v0.48 queue.go) and the activator dials it under
+		// system-internal-tls. Omitting it is an OUTAGE, not a hardening — code
+		// review caught its absence here.
+		Expect(got).To(ContainElements(int32(8012), int32(8013), int32(8112)))
+		By("still admitting BOTH metrics ports — a queue-proxy-only rule kills scraping")
+		Expect(got).To(ContainElements(int32(9090), int32(9091)))
+		By("refusing the app's user port — the direct-dial bypass this exists to close")
+		Expect(got).NotTo(ContainElement(int32(3000)))
+		By("and nothing else — an allowlist that grows silently is how the next bypass lands")
+		Expect(got).To(HaveLen(5))
+	})
+
+	It("scopes the same-namespace peer to METRICS ports — closing the SCS synchronous-call leak (ADR-0044)", func() {
+		// The other half of ADR-0044's Option E, and the half the first cut of
+		// this change silently dropped: the same-namespace peer used to sit in
+		// the serving rule with an empty PodSelector, so every co-resident pod
+		// could reach 8012/8013 — co-resident zones calling each other's app pods
+		// synchronously, which the SCS contract permits only via the browser or
+		// async events. Legitimate in-cluster calls address the ksvc URL and
+		// arrive via kourier-system, so the same-namespace peer is needed ONLY
+		// for metric scraping.
+		nn := reconcileApp("np-scoped-peer", nil)
+
+		np := &networkingv1.NetworkPolicy{}
+		Expect(k8sClient.Get(ctx, policyName(nn.Name), np)).To(Succeed())
+		Expect(np.Spec.Ingress).To(HaveLen(2))
+
+		// Classify each rule by whether its peers include the same-namespace one
+		// (NamespaceSelector nil + non-nil PodSelector).
+		portsOf := func(rule networkingv1.NetworkPolicyIngressRule) []int32 {
+			var out []int32
+			for _, p := range rule.Ports {
+				Expect(p.Port).NotTo(BeNil())
+				Expect(p.EndPort).To(BeNil(), "a port RANGE reopens what the allowlist closes")
+				out = append(out, p.Port.IntVal)
+			}
+			return out
+		}
+		sameNsRules, systemRules := 0, 0
+		for _, rule := range np.Spec.Ingress {
+			hasSameNs := false
+			for _, peer := range rule.From {
+				if peer.NamespaceSelector == nil && peer.PodSelector != nil {
+					hasSameNs = true
+				}
+			}
+			if hasSameNs {
+				sameNsRules++
+				By("the same-namespace rule admits metrics ports ONLY")
+				Expect(portsOf(rule)).To(ConsistOf(int32(9090), int32(9091)),
+					"a same-namespace peer that can reach a serving port is the SCS contract leak")
+			} else {
+				systemRules++
+				By("the system rule carries the serving ports")
+				Expect(portsOf(rule)).To(ContainElements(int32(8012), int32(8013), int32(8112)))
+			}
+		}
+		Expect(sameNsRules).To(Equal(1), "expected exactly one same-namespace rule")
+		Expect(systemRules).To(Equal(1), "expected exactly one knative-serving/kourier rule")
 	})
 
 	It("creates the NetworkPolicy when Security.NetworkPolicy is explicitly true", func() {

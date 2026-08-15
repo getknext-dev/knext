@@ -1,0 +1,55 @@
+# ADR-0044 Option E — prove the NetworkPolicy actually REFUSES, on a CNI that
+# can enforce it.
+#
+# The envtest guard in the operator suite asserts the policy OBJECT (which ports
+# we wrote). It cannot assert enforcement: envtest is an apiserver + etcd with no
+# CNI, no pods, no dataplane. And the clusters this project runs on day to day
+# (OKE GA, OrbStack) use flannel, which ships no NetworkPolicy controller — so
+# the object is declarative-only there and a refusal test would fail while the
+# operator is perfectly correct.
+#
+# So enforcement gets its own job, on kind with the default CNI disabled and
+# Calico installed. It runs on PRs that touch the policy or the drill, and
+# nightly so CNI/Calico drift surfaces without waiting for a relevant PR.
+name: NetworkPolicy enforcement (kind + Calico)
+
+on:
+  pull_request:
+    branches: ['**']
+    paths:
+      - 'packages/kn-next-operator/internal/controller/nextapp_controller.go'
+      - 'packages/kn-next-operator/internal/controller/networkpolicy_test.go'
+      - 'packages/kn-next-operator/test/networkpolicy-enforcement-drill.sh'
+      - '.github/workflows/networkpolicy-enforcement.yml'
+  schedule:
+    - cron: '41 4 * * *'
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  enforcement-drill:
+    name: NetworkPolicy is enforced (direct-dial refused, metrics survive)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The drill renders the policy from the operator's own code
+      # (cmd/policygen), so Go is required — a hand-copied YAML would drift.
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/kn-next-operator/go.mod
+          cache-dependency-path: packages/kn-next-operator/go.sum
+
+      - name: Install kind
+        uses: helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70863de3 # v1.12.0
+        with:
+          install_only: true
+
+      - name: Run the enforcement drill
+        run: bash packages/kn-next-operator/test/networkpolicy-enforcement-drill.sh

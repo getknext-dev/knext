@@ -1,7 +1,9 @@
 # ADR-0044: Ingress hardening — rate limiting, payload caps, malformed-request handling
 
-- Status: Proposed (v2 — rewritten after a double design-gate BLOCK; both verdicts in
-  `knext-plan-out/{arch,sysdes}-gate-adr44.md`)
+- Status: **Accepted** (2026-08-16, on merge of the Option E implementation). v2 — rewritten
+  after a double design-gate BLOCK; both verdicts in
+  `knext-plan-out/{arch,sysdes}-gate-adr44.md`. Option E shipped in PR #734 with both
+  sign-off gates cleared; Options D (docs) and C (deferred, dated clock) stand as written.
 - Date: 2026-08-15
 - Deciders: architect gate, system-designer gate, maintainer
 - Context: security sprint 2026-08-15, task S3 (trigger-class by construction)
@@ -51,8 +53,18 @@ operator's defaults (cc=20, maxScale=10, memory limit **1Gi**, `nextapp_controll
 - Server Action bodies: Next caps them at **1 MB by default** (`serverActions.bodySizeLimit`).
   This covers *only* Server Actions — **not route handlers**, which are the open surface.
 - Malformed HTTP on the external path (three parsers); Node's 16 KB header cap on both.
-- Knative's per-revision `timeoutSeconds` exists as a free, currently-unused bound on slow
-  requests (evaluated in Option E's row below).
+- Knative's per-revision `timeoutSeconds` exists as a bound on slow requests.
+  **Evaluated during S4-op (2026-08-16), as this ADR required, and the finding is: it is
+  already wired and already applied.** `spec.timeoutSeconds` flows into
+  `ksvc.Spec.Template.Spec.TimeoutSeconds` with a default of **300s**
+  (`nextapp_controller.go`), so every knext app already caps how long a single request may
+  occupy a concurrency slot — including a slow-body request, on **both** ingress paths, since
+  the setting is enforced by the queue-proxy inside the pod. **No change is made here**, for
+  two reasons: 300s matches the platform default users expect from the framework, and lowering
+  it globally would silently break long-running streaming responses. Operators who want a
+  tighter slow-request bound set `spec.timeoutSeconds` per app — that is the documented knob,
+  and it is a per-app decision, not a platform-wide one. Recorded rather than actioned so the
+  ADR's action item is closed by evidence instead of left ambiguous.
 
 ### A structural fact that constrains every option
 

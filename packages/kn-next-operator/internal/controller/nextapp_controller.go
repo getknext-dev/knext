@@ -53,6 +53,7 @@ import (
 	"knative.dev/pkg/apis"
 	"knative.dev/serving/pkg/apis/serving"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
+	knativenetworking "knative.dev/serving/pkg/networking"
 )
 
 // Condition type constants used across the reconciler.
@@ -1237,6 +1238,160 @@ func networkPolicyEnabled(nextApp *appsv1alpha1.NextApp) bool {
 	return *nextApp.Spec.Security.NetworkPolicy
 }
 
+// The ingress port allowlist (ADR-0044), derived from KNATIVE'S OWN EXPORTED
+// CONSTANTS rather than hand-enumerated literals.
+//
+// The architect gate required this after the hand-written list missed
+// BackendHTTPSPort (8112) — a miss that, on a policy-enforcing CNI with
+// system-internal-tls on, is an outage rather than a weaker policy. Importing
+// the constants means a knative upgrade that renumbers or adds a port shows up
+// as a compile-time change here instead of a silent production hole.
+//
+// Deliberately NOT included: QueueAdminPort (8022), which v0.48 no longer puts
+// on the pod, and the app's own user port, which queue-proxy reaches over
+// pod-local loopback where no NetworkPolicy applies.
+var (
+	queueProxyHTTPPort  = int32(knativenetworking.BackendHTTPPort)
+	queueProxyH2CPort   = int32(knativenetworking.BackendHTTP2Port)
+	queueProxyHTTPSPort = int32(knativenetworking.BackendHTTPSPort)
+	// queueProxyMetricsPort is knative's AutoscalingQueueMetricsPort; the app's
+	// metrics sidecar uses UserQueueMetricsPort (9091) by default.
+	queueProxyMetricsPort = int32(knativenetworking.AutoscalingQueueMetricsPort)
+	appMetricsPort        = int32(knativenetworking.UserQueueMetricsPort)
+)
+
+// desiredIngressRules is the ingress half of the app NetworkPolicy, as a PURE
+// function of nothing — the rules are identical for every app (only the
+// podSelector varies), so they can be rendered outside a reconcile.
+//
+// EXTRACTED so the enforcement drill applies the OPERATOR's rules rather than a
+// hand-copy. Spec review caught that the drill's inline YAML could drift from
+// the operator silently, which would leave the drill passing while the shipped
+// policy changed. cmd/policygen renders these into a full policy the drill
+// applies, so operator drift now reddens the drill.
+func desiredIngressRules() []networkingv1.NetworkPolicyIngressRule {
+	return []networkingv1.NetworkPolicyIngressRule{
+		{
+			// PORT ALLOWLIST (ADR-0044). Without it the rule admits EVERY port,
+			// so any same-namespace pod dials the app container's user port
+			// directly — skipping queue-proxy and, with it, the
+			// containerConcurrency bound and the Go HTTP parser. That is the
+			// in-cluster bypass ADR-0044 measured; restricting ports is the only
+			// control that closes it without touching the runtime.
+			//
+			// The user port is deliberately ABSENT: queue-proxy reaches it over
+			// pod-local loopback (127.0.0.1:USER_PORT), which no NetworkPolicy
+			// governs, so excluding it costs nothing legitimate.
+			//
+			// 8112 is NOT optional either, and its absence is an OUTAGE, not a
+			// hardening: knative v0.48's queue.go appends queueHTTPSPort to
+			// EVERY revision pod unconditionally
+			// (`ports = append(ports, servingPort, queueHTTPSPort)`), the SKS
+			// targets it, and the activator dials it when system-internal-tls is
+			// on. Omitting it makes every app unreachable on a policy-enforcing
+			// CNI with internal TLS enabled.
+			//
+			// 9091 is NOT optional: the operator stamps prometheus.io/port=9091,
+			// so omitting it would kill metric scraping by a Prometheus running
+			// BESIDE the app (the same-namespace rule below is what serves that
+			// scrape — a scraper in a third namespace is already excluded by the
+			// From peers, so that is the only scraping this policy can support).
+			// CAVEAT: the runtime lets an app override its metrics port via
+			// METRICS_PORT; this allowlist is fixed at the default 9091, so an
+			// app that moves its metrics port loses scraping until the policy is
+			// disabled. Recorded rather than solved — wiring it through the CRD
+			// is a public-API change, which is a separate, gated decision.
+			// Both halves are asserted in networkpolicy_test.go.
+			//
+			// CNI CAVEAT: flannel (OKE GA, OrbStack) ships no NetworkPolicy
+			// controller, so there this object is declarative-only and enforces
+			// nothing. Enforcement needs a policy-capable CNI (Calico/Cilium).
+			Ports: []networkingv1.NetworkPolicyPort{
+				{Port: ptr.To(intstr.FromInt32(queueProxyHTTPPort))},
+				{Port: ptr.To(intstr.FromInt32(queueProxyH2CPort))},
+				{Port: ptr.To(intstr.FromInt32(queueProxyHTTPSPort))},
+				{Port: ptr.To(intstr.FromInt32(queueProxyMetricsPort))},
+				{Port: ptr.To(intstr.FromInt32(appMetricsPort))},
+			},
+			From: []networkingv1.NetworkPolicyPeer{
+				// Knative serving system (activator handles scale-from-zero) and the
+				// Kourier ingress gateway namespace. These are the ONLY peers that
+				// may reach the serving ports.
+				inNamespaceLabelsPeer("knative-serving", "kourier-system"),
+			},
+		},
+		// SECOND RULE — the same-namespace peer, SCOPED (ADR-0044).
+		//
+		// It used to sit in the rule above with an empty PodSelector, which
+		// meant every co-resident pod could reach the SERVING ports. That is
+		// the SCS contract leak ADR-0044 names: co-resident zones calling each
+		// other's app pods synchronously, when the zone contract permits only
+		// the browser and async events. Legitimate in-cluster calls to a knext
+		// app address its ksvc URL and are routed by Kourier, so they arrive
+		// from `kourier-system` above — the same-namespace peer is NOT needed
+		// for app traffic at all.
+		//
+		// What it IS needed for is metric scraping by a Prometheus running
+		// beside the app. So the peer survives, narrowed to the metrics ports.
+		//
+		// Scoped by PORT rather than by pod LABEL deliberately: the operator
+		// cannot know a user's monitoring pod labels, and guessing them would
+		// break scraping for every cluster whose Prometheus is labelled
+		// differently. Port-scoping achieves the same isolation with no
+		// assumption about the user's deployment.
+		{
+			Ports: []networkingv1.NetworkPolicyPort{
+				{Port: ptr.To(intstr.FromInt32(queueProxyMetricsPort))},
+				{Port: ptr.To(intstr.FromInt32(appMetricsPort))},
+			},
+			From: []networkingv1.NetworkPolicyPeer{
+				// An empty PodSelector matches all pods in the policy's own
+				// namespace (NamespaceSelector nil => same namespace).
+				{PodSelector: &metav1.LabelSelector{}},
+			},
+		},
+	}
+}
+
+// inNamespaceLabelsPeer matches namespaces by their well-known
+// `kubernetes.io/metadata.name` label.
+func inNamespaceLabelsPeer(names ...string) networkingv1.NetworkPolicyPeer {
+	return networkingv1.NetworkPolicyPeer{
+		NamespaceSelector: &metav1.LabelSelector{
+			MatchExpressions: []metav1.LabelSelectorRequirement{
+				{
+					Key:      "kubernetes.io/metadata.name",
+					Operator: metav1.LabelSelectorOpIn,
+					Values:   names,
+				},
+			},
+		},
+	}
+}
+
+// DesiredNetworkPolicy renders the complete policy the operator reconciles for
+// an app. Exported for cmd/policygen (the enforcement drill's source of truth).
+func DesiredNetworkPolicy(appName, namespace string) *networkingv1.NetworkPolicy {
+	return &networkingv1.NetworkPolicy{
+		TypeMeta: metav1.TypeMeta{APIVersion: "networking.k8s.io/v1", Kind: "NetworkPolicy"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      appName + "-allow-ingress",
+			Namespace: namespace,
+			Labels: map[string]string{
+				"app":          appName,
+				"generated-by": "kn-next-operator",
+			},
+		},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{
+				MatchLabels: map[string]string{"serving.knative.dev/service": appName},
+			},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+			Ingress:     desiredIngressRules(),
+		},
+	}
+}
+
 // reconcileNetworkPolicy emits a Kubernetes NetworkPolicy that restricts ingress
 // to the app's pods to in-cluster sources only: the Knative serving system
 // (`knative-serving`), the Kourier gateway (`kourier-system`), and the app's own
@@ -1269,49 +1424,20 @@ func (r *NextAppReconciler) reconcileNetworkPolicy(ctx context.Context, nextApp 
 		return nil
 	}
 
-	inNamespaceLabels := func(names ...string) networkingv1.NetworkPolicyPeer {
-		return networkingv1.NetworkPolicyPeer{
-			NamespaceSelector: &metav1.LabelSelector{
-				MatchExpressions: []metav1.LabelSelectorRequirement{
-					{
-						Key:      "kubernetes.io/metadata.name",
-						Operator: metav1.LabelSelectorOpIn,
-						Values:   names,
-					},
-				},
-			},
-		}
-	}
-
+	// The reconciler and cmd/policygen build from ONE definition. The rules were
+	// unified first; the system-designer gate pointed out that podSelector and
+	// labels were still built independently, so the drill could have proved
+	// enforcement for a selector the reconciler no longer wrote. Both halves now
+	// come from DesiredNetworkPolicy.
+	desired := DesiredNetworkPolicy(nextApp.Name, nextApp.Namespace)
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, np, func() error {
 		if np.Labels == nil {
 			np.Labels = make(map[string]string)
 		}
-		np.Labels["app"] = nextApp.Name
-		np.Labels["generated-by"] = "kn-next-operator"
-
-		// Target the app's Knative serving pods. Knative stamps every revision pod
-		// with `serving.knative.dev/service=<ksvc name>`, which equals the NextApp name.
-		np.Spec.PodSelector = metav1.LabelSelector{
-			MatchLabels: map[string]string{
-				"serving.knative.dev/service": nextApp.Name,
-			},
+		for k, v := range desired.Labels {
+			np.Labels[k] = v
 		}
-		np.Spec.PolicyTypes = []networkingv1.PolicyType{networkingv1.PolicyTypeIngress}
-		np.Spec.Ingress = []networkingv1.NetworkPolicyIngressRule{
-			{
-				From: []networkingv1.NetworkPolicyPeer{
-					// Knative serving system (activator handles scale-from-zero) and the
-					// Kourier ingress gateway namespace.
-					inNamespaceLabels("knative-serving", "kourier-system"),
-					// Same namespace: an empty PodSelector matches all pods in the
-					// policy's own namespace (NamespaceSelector nil => same namespace).
-					{
-						PodSelector: &metav1.LabelSelector{},
-					},
-				},
-			},
-		}
+		np.Spec = desired.Spec
 		return ctrl.SetControllerReference(nextApp, np, r.Scheme)
 	})
 	return err
