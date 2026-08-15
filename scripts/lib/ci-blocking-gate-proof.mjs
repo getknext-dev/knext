@@ -68,6 +68,7 @@ const CI_SKIPPABLE_JOB = 'docs-drift-reminder';
  *     mutation proves nothing. It therefore injects its own skippable job.
  */
 export const GATES = [
+  { jobId: 'secret-scan', spec: 'tests/secret-scan-gate.test.ts' },
   { jobId: 'compile-cache-bun-probe', spec: 'tests/compile-cache-health-bun-ci.test.ts' },
   { jobId: 'typecheck-root', spec: 'tests/root-typecheck-gate.test.ts' },
   { jobId: 'lint-and-test', spec: 'tests/mutation-residue-scan.test.ts' },
