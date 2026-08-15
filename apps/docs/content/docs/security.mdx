@@ -46,10 +46,24 @@ Auth is one factor; **network isolation** is the second. knext reconciles a defa
   (garbage-collected on delete).
 - **Targets:** the app's serving pods (selected by `serving.knative.dev/service: <app>`).
 - **Allows ingress from:** the `knative-serving` and `kourier-system` namespaces (so
-  scale-from-zero traffic keeps flowing) plus same-namespace pods. Everything else — arbitrary
-  cross-namespace and external pod-direct traffic — is denied.
+  scale-from-zero traffic keeps flowing) on the serving and metrics ports, plus same-namespace
+  pods on the **metrics ports only**. Everything else — arbitrary cross-namespace and external
+  pod-direct traffic — is denied.
+- **Ports are restricted, and your app's own port is not among them.** The policy admits the
+  Knative queue-proxy ports (`8012`/`8013`), the queue-proxy metrics port (`9090`) and knext's
+  app-metrics port (`9091`). Your app's container port is deliberately **excluded**: the
+  queue-proxy reaches it over pod-local loopback, which no `NetworkPolicy` governs. The effect
+  is that a pod sharing your namespace can no longer dial your app container directly and
+  bypass the queue-proxy — and with it your concurrency limit.
 - **Toggle:** `spec.security.networkPolicy` (`*bool`). `nil` (unset) or `true` reconciles the
   policy (**default-on**); `false` skips it and deletes any existing one on the next reconcile.
+
+<Callout type="warn">
+**If a pod in your namespace calls your app directly on its container port, that call will stop
+working.** This is the point of the restriction, not a side effect — but if you rely on it, either
+call the app through its service URL (routed via the gateway, which is allowed) or set
+`spec.security.networkPolicy: false` to opt out entirely.
+</Callout>
 
 <Callout type="warn">
 **Honest scope: L3/L4, not L7.** A `NetworkPolicy` filters by source pod/namespace at the network
