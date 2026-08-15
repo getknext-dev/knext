@@ -1237,6 +1237,19 @@ func networkPolicyEnabled(nextApp *appsv1alpha1.NextApp) bool {
 	return *nextApp.Spec.Security.NetworkPolicy
 }
 
+// The ingress port allowlist (ADR-0044). Knative's queue-proxy serves the pod's
+// traffic on 8012 (http1) / 8013 (h2c) and exposes its own metrics on 9090; the
+// knext runtime's metrics sidecar listens on 9091 (stamped as
+// prometheus.io/port). The app's own user port is intentionally not listed —
+// queue-proxy reaches it over pod-local loopback, which NetworkPolicy does not
+// govern, so admitting it would only enable the direct-dial bypass.
+const (
+	queueProxyHTTPPort    int32 = 8012
+	queueProxyH2CPort     int32 = 8013
+	queueProxyMetricsPort int32 = 9090
+	appMetricsPort        int32 = 9091
+)
+
 // reconcileNetworkPolicy emits a Kubernetes NetworkPolicy that restricts ingress
 // to the app's pods to in-cluster sources only: the Knative serving system
 // (`knative-serving`), the Kourier gateway (`kourier-system`), and the app's own
@@ -1300,6 +1313,31 @@ func (r *NextAppReconciler) reconcileNetworkPolicy(ctx context.Context, nextApp 
 		np.Spec.PolicyTypes = []networkingv1.PolicyType{networkingv1.PolicyTypeIngress}
 		np.Spec.Ingress = []networkingv1.NetworkPolicyIngressRule{
 			{
+				// PORT ALLOWLIST (ADR-0044). Without it the rule admits EVERY port,
+				// so any same-namespace pod dials the app container's user port
+				// directly — skipping queue-proxy and, with it, the
+				// containerConcurrency bound and the Go HTTP parser. That is the
+				// in-cluster bypass ADR-0044 measured; restricting ports is the only
+				// control that closes it without touching the runtime.
+				//
+				// The user port is deliberately ABSENT: queue-proxy reaches it over
+				// pod-local loopback (127.0.0.1:USER_PORT), which no NetworkPolicy
+				// governs, so excluding it costs nothing legitimate.
+				//
+				// 9091 is NOT optional: the operator stamps prometheus.io/port=9091,
+				// so a queue-proxy-only allowlist would silently kill metric scraping
+				// from a monitoring namespace. Both halves are asserted in
+				// networkpolicy_test.go.
+				//
+				// CNI CAVEAT: flannel (OKE GA, OrbStack) ships no NetworkPolicy
+				// controller, so there this object is declarative-only and enforces
+				// nothing. Enforcement needs a policy-capable CNI (Calico/Cilium).
+				Ports: []networkingv1.NetworkPolicyPort{
+					{Port: ptr.To(intstr.FromInt32(queueProxyHTTPPort))},
+					{Port: ptr.To(intstr.FromInt32(queueProxyH2CPort))},
+					{Port: ptr.To(intstr.FromInt32(queueProxyMetricsPort))},
+					{Port: ptr.To(intstr.FromInt32(appMetricsPort))},
+				},
 				From: []networkingv1.NetworkPolicyPeer{
 					// Knative serving system (activator handles scale-from-zero) and the
 					// Kourier ingress gateway namespace.
