@@ -378,6 +378,48 @@ configured endpoint (external OCI OS with no MinIO, or the MinIO baseline), prov
 pages offload and are read back after a full pageserver cache wipe, and prints the
 offload + read-back timings. Numbers: [BENCHMARKS.md](BENCHMARKS.md).
 
+## compute_ctl control-API trust anchor (`compute-jwt-trust`)
+
+`compute_ctl`'s external HTTP API verifies bearer JWTs against the JWKS in its
+spec. That public key is **per cluster**: the committed spec carries
+`JWT_JWK_KID_PLACEHOLDER` / `JWT_JWK_X_PLACEHOLDER`, and `deploy/gen-secrets.sh`
+generates an Ed25519 keypair into the `compute-jwt-trust` Secret —
+`jwt-signing.pem` (the private key; it never leaves the Secret) plus
+`JWT_JWK_KID` / `JWT_JWK_X` (the public JWK fields the **base** compute
+manifests — `deploy/20/25/26` — mount as env and the entrypoints substitute
+into the spec at boot).
+
+Operator-rendered **per-app** computes (`compute-<app>`) and the warmstandby
+variant do **not** mount the Secret: they always take the locked fallback
+below, which is correct — nothing calls their control API in normal operation.
+Wiring the Secret into the appdb-operator's rendering is a follow-up, not a
+gap in the lock.
+
+Nothing in the platform signs with the private key during normal operation —
+the anchor exists to keep the control API **locked to the Secret holder**. To
+call the API deliberately (break-glass), extract `jwt-signing.pem` from the
+Secret and mint an `EdDSA` JWT with `kid` set to the Secret's `JWT_JWK_KID`.
+
+Two operational rules:
+
+- **A compute booted without the Secret is locked, not open.** The entrypoints
+  fall back to a random throwaway public key nobody holds, so the control API
+  rejects everything. If `kubectl logs` shows
+  `using a random throwaway trust anchor`, run `sh deploy/gen-secrets.sh` and
+  restart the compute.
+- **Rotation is deliberate, never silent** (same contract as every Secret in
+  `gen-secrets.sh`): `kubectl -n scale-zero-pg delete secret compute-jwt-trust`,
+  re-run `sh deploy/gen-secrets.sh`, then restart the computes so they mount
+  the new JWK. The 0↔1 tiers self-heal on their next wake; the tiers that do
+  NOT scale to zero need an explicit
+  `kubectl -n scale-zero-pg rollout restart deploy/compute-warm deploy/compute-ro`
+  (plus any per-app `compute-<app>` currently awake).
+
+History note: this Secret replaced a JWK that was committed to the repo — with
+its private half also in git history, which in a public repo means anyone could
+mint control-API tokens. If you deployed a plane from a checkout older than
+this section, rotate: the old anchor's private key is public.
+
 ## Durability model (what you can lose, and when)
 
 - A **committed write is durable once 2/3 safekeepers ack** its WAL. Losing any one
