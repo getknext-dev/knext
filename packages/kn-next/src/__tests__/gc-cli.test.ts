@@ -449,7 +449,9 @@ describe("runAssetGC", () => {
                 return "shop-00099"; // the unprogrammable pin that froze the status
             // Knative's revision GC has since reaped shop-00003.
             if (argv.includes("shop-00003"))
-                throw new Error('revisions.serving.knative.dev "shop-00003" not found');
+                throw new Error(
+                    'revisions.serving.knative.dev "shop-00003" not found',
+                );
             return "bid-old";
         };
         const prune = vi.fn();
