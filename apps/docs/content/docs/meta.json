@@ -26,6 +26,7 @@
     "multi-cloud",
     "observability",
     "security",
+    "hardening",
     "---Compatibility---",
     "compat-suite",
     "compat-matrix",
