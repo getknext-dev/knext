@@ -1244,8 +1244,11 @@ func networkPolicyEnabled(nextApp *appsv1alpha1.NextApp) bool {
 // queue-proxy reaches it over pod-local loopback, which NetworkPolicy does not
 // govern, so admitting it would only enable the direct-dial bypass.
 const (
-	queueProxyHTTPPort    int32 = 8012
-	queueProxyH2CPort     int32 = 8013
+	queueProxyHTTPPort  int32 = 8012
+	queueProxyH2CPort   int32 = 8013
+	queueProxyHTTPSPort int32 = 8112
+	// queueProxyMetricsPort is knative's AutoscalingQueueMetricsPort; the app's
+	// metrics sidecar uses UserQueueMetricsPort (9091) by default.
 	queueProxyMetricsPort int32 = 9090
 	appMetricsPort        int32 = 9091
 )
@@ -1324,10 +1327,25 @@ func (r *NextAppReconciler) reconcileNetworkPolicy(ctx context.Context, nextApp 
 				// pod-local loopback (127.0.0.1:USER_PORT), which no NetworkPolicy
 				// governs, so excluding it costs nothing legitimate.
 				//
+				// 8112 is NOT optional either, and its absence is an OUTAGE, not a
+				// hardening: knative v0.48's queue.go appends queueHTTPSPort to
+				// EVERY revision pod unconditionally
+				// (`ports = append(ports, servingPort, queueHTTPSPort)`), the SKS
+				// targets it, and the activator dials it when system-internal-tls is
+				// on. Omitting it makes every app unreachable on a policy-enforcing
+				// CNI with internal TLS enabled.
+				//
 				// 9091 is NOT optional: the operator stamps prometheus.io/port=9091,
-				// so a queue-proxy-only allowlist would silently kill metric scraping
-				// from a monitoring namespace. Both halves are asserted in
-				// networkpolicy_test.go.
+				// so omitting it would kill metric scraping by a Prometheus running
+				// BESIDE the app (the same-namespace rule below is what serves that
+				// scrape — a scraper in a third namespace is already excluded by the
+				// From peers, so that is the only scraping this policy can support).
+				// CAVEAT: the runtime lets an app override its metrics port via
+				// METRICS_PORT; this allowlist is fixed at the default 9091, so an
+				// app that moves its metrics port loses scraping until the policy is
+				// disabled. Recorded rather than solved — wiring it through the CRD
+				// is a public-API change, which is a separate, gated decision.
+				// Both halves are asserted in networkpolicy_test.go.
 				//
 				// CNI CAVEAT: flannel (OKE GA, OrbStack) ships no NetworkPolicy
 				// controller, so there this object is declarative-only and enforces
@@ -1335,6 +1353,7 @@ func (r *NextAppReconciler) reconcileNetworkPolicy(ctx context.Context, nextApp 
 				Ports: []networkingv1.NetworkPolicyPort{
 					{Port: ptr.To(intstr.FromInt32(queueProxyHTTPPort))},
 					{Port: ptr.To(intstr.FromInt32(queueProxyH2CPort))},
+					{Port: ptr.To(intstr.FromInt32(queueProxyHTTPSPort))},
 					{Port: ptr.To(intstr.FromInt32(queueProxyMetricsPort))},
 					{Port: ptr.To(intstr.FromInt32(appMetricsPort))},
 				},

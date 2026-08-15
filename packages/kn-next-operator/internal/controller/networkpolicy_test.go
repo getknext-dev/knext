@@ -140,16 +140,23 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 		for _, p := range ports {
 			Expect(p.Port).NotTo(BeNil())
 			Expect(p.Port.Type).To(Equal(intstr.Int), "named ports would silently not match")
+			// EndPort turns an entry into a RANGE: {Port: 8012, EndPort: 65535}
+			// satisfies every other assertion here while reopening all high ports.
+			Expect(p.EndPort).To(BeNil(), "a port RANGE reopens what the allowlist closes")
 			got = append(got, p.Port.IntVal)
 		}
 		By("admitting the queue-proxy serving ports — the only sanctioned path to the app")
-		Expect(got).To(ContainElements(int32(8012), int32(8013)))
+		// 8112 (BackendHTTPSPort) is appended to EVERY knative revision pod
+		// unconditionally (v0.48 queue.go) and the activator dials it under
+		// system-internal-tls. Omitting it is an OUTAGE, not a hardening — code
+		// review caught its absence here.
+		Expect(got).To(ContainElements(int32(8012), int32(8013), int32(8112)))
 		By("still admitting BOTH metrics ports — a queue-proxy-only rule kills scraping")
 		Expect(got).To(ContainElements(int32(9090), int32(9091)))
 		By("refusing the app's user port — the direct-dial bypass this exists to close")
 		Expect(got).NotTo(ContainElement(int32(3000)))
 		By("and nothing else — an allowlist that grows silently is how the next bypass lands")
-		Expect(got).To(HaveLen(4))
+		Expect(got).To(HaveLen(5))
 	})
 
 	It("scopes the same-namespace peer to METRICS ports — closing the SCS synchronous-call leak (ADR-0044)", func() {
@@ -173,6 +180,7 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 			var out []int32
 			for _, p := range rule.Ports {
 				Expect(p.Port).NotTo(BeNil())
+				Expect(p.EndPort).To(BeNil(), "a port RANGE reopens what the allowlist closes")
 				out = append(out, p.Port.IntVal)
 			}
 			return out
@@ -193,7 +201,7 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 			} else {
 				systemRules++
 				By("the system rule carries the serving ports")
-				Expect(portsOf(rule)).To(ContainElements(int32(8012), int32(8013)))
+				Expect(portsOf(rule)).To(ContainElements(int32(8012), int32(8013), int32(8112)))
 			}
 		}
 		Expect(sameNsRules).To(Equal(1), "expected exactly one same-namespace rule")
