@@ -25,6 +25,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { auditBlockingGate } from './helpers/blocking-gate';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 const ci = readFileSync(resolve(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8');
@@ -49,16 +50,36 @@ function jobBlock(yaml: string, jobKey: string): string {
 describe('secret-scan job in ci.yml — present and unable to fail open', () => {
   const job = jobBlock(ci, 'secret-scan');
 
-  it('has no continue-on-error and no ref-conditional if', () => {
-    // The design-review finding this encodes: the repo's own house idiom
-    // (`continue-on-error` gated on ref, ci.yml uses it elsewhere) would make
-    // this gate advisory on pull_request — the one event it exists for.
-    expect(job, 'continue-on-error makes the gate advisory').not.toMatch(/continue-on-error/);
-    expect(job, 'a ref-conditional if: skips the gate somewhere').not.toMatch(/^\s+if:/m);
+  it('runs unconditionally on a PR and its failure fails the run', () => {
+    // PARSED, not text-matched. The first version of this assertion was two
+    // regexes over the job's lines — and code review MEASURED three
+    // single-edit, valid-YAML disarms passing it green (`"if": false`, a
+    // `needs:` on a skippable job, a zero-expansion `strategy.matrix`): the
+    // exact #661/#667 defect class the repo already unwound once. The audit
+    // asks the semantic question of the parsed workflow, walks `needs`
+    // transitively, and FAILS CLOSED on any job-level key it does not
+    // recognise, so the next disarm form nobody enumerated reddens instead of
+    // passing. The house `continue-on-error: ${{ ref != main }}` idiom — the
+    // sprint design-review's named hazard — is one of the forms it rejects.
+    const audit = auditBlockingGate({
+      workflowPath: resolve(REPO_ROOT, '.github', 'workflows', 'ci.yml'),
+      jobId: 'secret-scan',
+      gateCommand: /secret-scan\.mjs/,
+    });
+    // Non-vacuity: an audit that parsed nothing must not pass by finding no
+    // problem, and the job must really be the one running the wrapper.
+    expect(audit.jobsSeen, 'the audit parsed no jobs at all').toBeGreaterThan(5);
+    expect(
+      audit.gateStepsSeen,
+      'the secret-scan job must be the one invoking scripts/secret-scan.mjs',
+    ).toBe(1);
   });
 
-  it('checks out FULL history — a shallow clone reintroduces the diff-only bypass class', () => {
+  it('checks out FULL history without persisted credentials', () => {
+    // Shallow clone reintroduces the diff-only bypass class; a persisted
+    // GITHUB_TOKEN hands a downloaded third-party binary a credential.
     expect(job).toMatch(/fetch-depth:\s*0/);
+    expect(job).toMatch(/persist-credentials:\s*false/);
   });
 
   it('runs the wrapper via node with nothing swallowing the exit code', () => {

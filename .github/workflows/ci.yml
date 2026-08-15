@@ -69,6 +69,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          # This job downloads and executes a third-party binary over full
+          # history; it must not do so with a GITHUB_TOKEN sitting in
+          # .git/config (same posture as the nightly twin).
+          persist-credentials: false
 
       - name: Install pinned gitleaks (checksum-verified)
         run: |

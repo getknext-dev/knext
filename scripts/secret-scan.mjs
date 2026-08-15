@@ -19,7 +19,7 @@
  * script prints only rule + path + commit + fingerprint, never match content.
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -162,6 +162,19 @@ function main() {
 }
 
 // Import-safe: the unit tests import the pure functions without running a scan.
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Symlink-proof and FAIL-TOWARD-SCANNING: a naive path comparison silently
+// no-ops (exit 0!) when invoked through a symlink or bin shim — a fail-open
+// shape for a security gate. Both sides are realpath'd; if that comparison
+// itself cannot be made, we scan rather than skip.
+let invokedDirectly = false;
+if (process.argv[1]) {
+  try {
+    invokedDirectly =
+      realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    invokedDirectly = true;
+  }
+}
+if (invokedDirectly) {
   main();
 }
