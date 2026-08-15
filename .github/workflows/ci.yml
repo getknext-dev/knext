@@ -52,6 +52,12 @@ jobs:
   # and force-pushes that rewrite the PR base out of a diff window. Runs the
   # pinned gitleaks BINARY, not gitleaks-action (org licensing + an unpinned
   # code path). Guarded by tests/secret-scan-gate.test.ts.
+  #
+  # Pin-resolution scope, recorded here so it survives the PR body: this pin
+  # is deliberately OUTSIDE verify-action-pins.mjs — that nightly resolves
+  # SHA<->tag drift for `uses:` action refs, whereas this is a sha256 over the
+  # release tarball itself (stronger: content-addressed, no ref to drift).
+  # Version bumps are deliberate edits to this file + secret-scan-nightly.yml.
   secret-scan:
     name: Secret scan (full history)
     runs-on: ubuntu-latest

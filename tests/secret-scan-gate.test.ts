@@ -200,6 +200,13 @@ describe('wrapper script — fails closed', () => {
     expect(script).toMatch(/--redact/);
   });
 
+  it('a detection instructs ROTATION, never history cleanup', () => {
+    // A pushed secret is leaked regardless of any later commit removing it;
+    // a message steering people to rewrite history teaches the wrong reflex.
+    expect(script).toMatch(/ROTATE the credential first/);
+    expect(script).not.toMatch(/rewrite history|filter-branch|filter-repo/i);
+  });
+
   it('rejects malformed allowlist entries instead of honoring them', () => {
     expect(script).toMatch(/malformed|invalid.*allowlist|allowlist.*invalid/i);
   });
