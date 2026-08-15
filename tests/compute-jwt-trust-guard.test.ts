@@ -62,7 +62,10 @@ const revokedRawB64url = Buffer.from(revokedHex, 'hex')
   .replace(/=+$/, '');
 // The exact string that was committed: base64 of the hex string + trailing \n.
 const revokedCommittedForm = Buffer.from(`${revokedHex}\n`).toString('base64');
-const REVOKED_ENCODINGS = [revokedHex, revokedRawB64url, revokedCommittedForm];
+// Standard base64 (with +/ and padding) of the raw bytes — spec review found
+// this fourth encoding unbanned.
+const revokedRawB64std = Buffer.from(revokedHex, 'hex').toString('base64');
+const REVOKED_ENCODINGS = [revokedHex, revokedRawB64url, revokedCommittedForm, revokedRawB64std];
 
 const SELF = 'tests/compute-jwt-trust-guard.test.ts';
 // Assembled so this guard cannot trip on its own source.
@@ -244,16 +247,32 @@ describe('compute JWT trust anchor — the sanctioned mechanism exists', () => {
     }
   });
 
-  it('the base compute manifests mount the JWK envs from the Secret', () => {
-    for (const rel of [
-      'packages/scale-zero-pg/deploy/20-compute.yaml',
-      'packages/scale-zero-pg/deploy/25-compute-warm.yaml',
-      'packages/scale-zero-pg/deploy/26-compute-ro.yaml',
-    ]) {
+  it('every manifest that mounts CLOUD_ADMIN_MD5 also mounts the JWK envs', () => {
+    // Discovered, not enumerated: the first version listed 20/25/26 and spec
+    // review found deploy/compute-app.template.yaml (the break-glass per-app
+    // renderer, which also stamps compute-tmpl) silently unrotated. Any
+    // manifest that mounts CLOUD_ADMIN_MD5 from a Secret is a compute pod spec
+    // and owes the JWK mounts too.
+    const mountSites = trackedFiles.filter((rel) => {
+      if (!/\.ya?ml$/.test(rel)) return false;
       const text = readTracked(rel);
-      expect(text, `${rel} missing`).toBeTruthy();
+      return text !== null && text.includes('CLOUD_ADMIN_MD5') && text.includes('secretKeyRef');
+    });
+    expect(
+      mountSites,
+      'expected at least the three base manifests and the per-app template',
+    ).toEqual(
+      expect.arrayContaining([
+        'packages/scale-zero-pg/deploy/20-compute.yaml',
+        'packages/scale-zero-pg/deploy/25-compute-warm.yaml',
+        'packages/scale-zero-pg/deploy/26-compute-ro.yaml',
+        'packages/scale-zero-pg/deploy/compute-app.template.yaml',
+      ]),
+    );
+    for (const rel of mountSites) {
+      const text = readTracked(rel) as string;
       expect(text, `${rel} does not mount JWT_JWK_X from compute-jwt-trust`).toMatch(
-        /JWT_JWK_X[\s\S]{0,200}compute-jwt-trust|compute-jwt-trust[\s\S]{0,200}JWT_JWK_X/,
+        /JWT_JWK_X[\s\S]{0,220}compute-jwt-trust|compute-jwt-trust[\s\S]{0,220}JWT_JWK_X/,
       );
     }
   });
