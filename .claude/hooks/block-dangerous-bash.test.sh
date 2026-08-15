@@ -25,10 +25,19 @@ fails=0
 
 BLOCK_PAYLOADS=()
 COLLECT=1
+NL=$'\n'
 
 run() {
   local label="$1" cmd="$2" want="$3" out rc got mark
-  if [ "$want" = "BLOCK" ] && [ "$COLLECT" = 1 ]; then BLOCK_PAYLOADS+=("$cmd"); fi
+  # Single-line must-block payloads only. The differential has NO oracle — it asserts
+  # BLOCK unconditionally — so a payload that is itself a multi-line construct (a heredoc,
+  # an open quoted block, a comment-continuation) can combine with a prefix into a shape
+  # the shell does not execute, and then the assertion is wrong rather than the hook.
+  # That has now bitten twice, both times costing a round to diagnose. Multi-line shapes
+  # are covered by the oracle-gated cross product below, which asks a real shell first.
+  case "$cmd" in *"$NL"*) ;; *)
+    if [ "$want" = "BLOCK" ] && [ "$COLLECT" = 1 ]; then BLOCK_PAYLOADS+=("$cmd"); fi ;;
+  esac
   out=$(printf '%s' "{\"tool_input\":{\"command\":$(printf '%s' "$cmd" | jq -Rs .)}}" | bash "$HOOK" 2>&1)
   rc=$?
   got="allow"; [ "$rc" -eq 2 ] && got="BLOCK"
@@ -257,6 +266,63 @@ run "comment + backslash, then filter-branch" "$(printf 'git commit %sm "subject
 # correction — so this asserts the path instead.
 run "msg closes, then comment, then push"    "$(printf "git commit %sm 'line1\nline2' # note '\ngit push %s%sforce origin main" "$D" "$D" "$D")" BLOCK
 
+# ROUND 11, and the same class one door over. Bash starts a comment after ANY word
+# terminator, not only whitespace — round 10's word-start test was `i==1 || prev is
+# space`. `;`, `|` and `&` already land at i==1 because split_segments cut there, so `)`
+# is the live one, and it reopened ALL EIGHT gated verbs as a regression against main:
+#
+#     (cd packages/lib && git commit -m "chore: bump")#TODO rebase\
+#     <any gated verb>                                     -> ALLOWED  (main: BLOCK)
+#
+# The terminator must be ADJACENT to the `#` — a reviewer's first cross product missed
+# this because its join strings carried a leading space, which is exactly the point.
+run "subshell close then comment, push main" "$(printf '(cd p && git commit %sm "chore: bump")#TODO rebase\\\ngit push origin main' "$D")"                    BLOCK
+run "subshell close then comment, force"     "$(printf '(cd p && git commit %sm "chore: bump")#TODO rebase\\\ngit push %s%sforce origin x' "$D" "$D" "$D")"   BLOCK
+run "subshell close then comment, rm ${D}rf" "$(printf '( true; git commit %sm "a")#c\\\nrm %srf /tmp/x' "$D" "$D")"                                          BLOCK
+run "subshell close then comment, delete"    "$(printf '( true; git commit %sm "a")#c\\\nkubectl delete ns prod' "$D")"                                       BLOCK
+run "subshell close then comment, teardown"  "$(printf '( true; git commit %sm "a")#c\\\nterraform destroy' "$D")"                                            BLOCK
+run "subshell close then comment, reset"     "$(printf '( true; git commit %sm "a")#c\\\ngit reset %s%shard HEAD~5' "$D" "$D" "$D")"                          BLOCK
+
+# ROUND 12. A segment inside DATA could establish the exemption. `in_msg` only ever
+# updated on segments it had already exempted, so a line that merely LOOKS like an
+# unterminated `git commit -m "…` switched off every rule for the rest of the command —
+# even where the shell treats that line as inert. Not a comment bug: the same
+# stage-ordering defect one layer up. All shell-verified as executing; main blocks them.
+run "heredoc body, then force push"          "$(printf 'cat <<EOF\ngit commit %sm "fix\nEOF\ngit push %s%sforce origin main' "$D" "$D" "$D")"  BLOCK
+run "quoted heredoc body, then push main"    "$(printf "cat <<'EOF'\ngit commit %sm \"fix\nEOF\ngit push origin main" "$D")"                    BLOCK
+run "heredoc body, then rm ${D}rf"           "$(printf 'cat <<EOF\ngit commit %sm "fix\nEOF\nrm %srf /tmp/x' "$D" "$D")"                        BLOCK
+run "heredoc body, then cluster delete"      "$(printf 'cat <<EOF\ngit commit %sm "fix\nEOF\nkubectl delete ns prod' "$D")"                     BLOCK
+run "heredoc body, then teardown"            "$(printf 'cat <<EOF\ngit commit %sm "fix\nEOF\nterraform destroy' "$D")"                          BLOCK
+run "heredoc <<- dash form"                  "$(printf 'cat <<-EOF\n\tgit commit %sm "fix\n\tEOF\ngit push origin main' "$D")"                  BLOCK
+# Same class without a heredoc: an open single-quoted block is data too.
+run "quoted data block, then force push"     "$(printf "echo 'note:\ngit commit %sm \"fix\n'\ngit push %s%sforce origin main" "$D" "$D" "$D")"  BLOCK
+# Two clauses the in-repo mutation harness reported GREEN on its first run. They were
+# not decoration — both are load-bearing, and both shapes were live fail-opens before
+# round 13 (verified against that commit). They simply had no case reaching them, which
+# is the distinction between "delete it" and "test it": deleting either reopens a hole.
+#
+#   1. An opener the delimiter parser cannot read must keep us INSIDE data. `<<$'EOF'`
+#      parses as nothing, so without the fail-closed counter the tracker never engages
+#      and the body grants the exemption.
+#   2. Stacked heredocs need a delimiter QUEUE. With a single slot, the first terminator
+#      ends heredoc mode early and the SECOND body is read as commands.
+run "unparseable heredoc opener"             "$(printf 'cat <<$%sEOF%s\ngit commit %sm "fix\nEOF\ngit push %s%sforce origin main' "'" "'" "$D" "$D" "$D")" BLOCK
+run "stacked heredocs need a queue"          "$(printf 'cat <<A <<EOF\nx\nA\ngit commit %sm "fix\nEOF\ngit push %s%sforce origin main' "$D" "$D" "$D")"    BLOCK
+
+# The architect gate reached the same class from the other side: the segment that CLOSES
+# a carried message was `continue`d, discarding its tail unscanned. Its payload uses a
+# multi-line message — this repo's own commit convention — so it needed no obfuscation
+# at all. `msg_tail` vets the tail; these pin the exact shapes it measured.
+run "multi-line msg, comment tail, force"    "$(printf 'git commit %sm "subject\nbody" # note\\\ngit push %s%sforce origin main' "$D" "$D" "$D")" BLOCK
+run "multi-line msg, comment tail, main"     "$(printf 'git commit %sm "subject\nbody" # note\\\ngit push origin main' "$D")"                     BLOCK
+run "multi-line msg, comment tail, rm"       "$(printf 'git commit %sm "subject\nbody" # note\\\nrm %srf /tmp/x' "$D" "$D")"                       BLOCK
+run "multi-line msg, comment tail, delete"   "$(printf 'git commit %sm "subject\nbody" # note\\\nkubectl delete ns prod' "$D")"                    BLOCK
+run "multi-line msg, comment tail, reset"    "$(printf 'git commit %sm "subject\nbody" # note\\\ngit reset %s%shard HEAD~5' "$D" "$D" "$D")"       BLOCK
+run "multi-line msg, comment tail, teardown" "$(printf 'git commit %sm "subject\nbody" # note\\\nterraform destroy' "$D")"                         BLOCK
+# The same discarded tail carrying a substitution rather than a comment.
+run "multi-line msg, substitution tail"      "$(printf 'git commit %sm "subject\nbody" \$(git push %s%sforce origin main)' "$D" "$D" "$D")"        BLOCK
+run "multi-line msg, process-sub tail"       "$(printf 'git commit %sm "subject\nbody" < <(git push origin main)' "$D")"                           BLOCK
+
 echo
 echo "== MUST ALLOW (each one was a real false positive) =="
 # `\brm\b` matched inside `--rm` because `-` is a word boundary, and `--platform`
@@ -340,6 +406,11 @@ run "apostrophe msg, no following command"   "git commit ${D}m \"don't ever push
 run "hash inside a dq message"               "git commit ${D}m \"fix # 3 — never push to main\""                   allow
 run "hash inside a sq message"               "git commit ${D}m 'closes #42, mentions rm ${D}rf'"                    allow
 run "hash mid-token is not a comment"        "git commit ${D}m 'ref abc#def about main'"                            allow
+# Widening the word-terminator class must not start refusing the exemption for ordinary
+# messages. A `(` inside a quoted message is not a word terminator in shell terms, and
+# conventional-commit scopes put one in almost every message this repo writes.
+run "conventional-commit scope in message"   "git commit ${D}m \"fix(hooks): never push ${D}${D}force to main\""    allow
+run "parens and hash inside a message"       "git commit ${D}m 'fix(scope): closes #42, no rm ${D}rf'"              allow
 
 echo
 echo "== DIFFERENTIAL PROPERTY: nothing a commit message contains may disarm a rule =="
@@ -407,6 +478,153 @@ done
 printf '%s  %-46s %s payloads x %s messages\n' \
   "$([ "$props_failed" -eq 0 ] && echo 'ok  ' || echo 'FAIL')" \
   "differential: quotes in a commit message" "${#PROPS[@]}" "${#prefixes[@]}"
+
+echo
+echo "== ORACLE-GATED CROSS PRODUCT (the shell decides which shapes must block) =="
+# The differential above still hand-picks its (quoting, join) pairs, and rounds 10 and 11
+# both landed in a pair nobody picked. This is the cross product, with the missing
+# dimension made explicit: the WORD TERMINATOR immediately before the join. `)#` was
+# round 11's bug, and a reviewer's own first cross product missed it because every join
+# string carried a leading space — adjacency is the whole point.
+#
+# The oracle is what makes a product usable. Two earlier property attempts produced false
+# failures because they asserted on shapes the shell does not actually execute (an
+# unterminated quote, a comment swallowing its own line). So: ask a real shell, and assert
+# only where line 2 genuinely ran.
+#
+# SAFE BY CONSTRUCTION, and this is the reason it can exist at all. The shell is only ever
+# handed an INERT payload — `printf`. The gated verbs are fed to the HOOK and never to
+# bash, so nothing here can execute a destructive command. A naive oracle that ran the
+# suite's real payloads would delete things; that hazard is why this is scoped this way
+# rather than by being careful.
+ORACLE_DIR=$(mktemp -d)
+printf '#!/bin/sh\nexit 0\n' > "$ORACLE_DIR/git"
+chmod +x "$ORACLE_DIR/git"
+
+oracle_prefixes=(
+  "git commit ${D}m \"m\""
+  "git commit ${D}m \"m\" "
+  "$(printf 'git commit %sm "m"\t' "$D")"
+  "(cd . && git commit ${D}m \"m\")"
+  "{ git commit ${D}m \"m\"; }"
+  "git commit ${D}m 'm'"
+  "git commit ${D}m \$'m'"
+  # MULTI-SEGMENT prefixes. Every prefix above is one segment, so the CONTINUATION path
+  # — a message that closes on a later segment — was unexercised, and the reviewer
+  # demonstrated the gap precisely: reverting `quote_state` alone left the whole suite
+  # ALL PASS while this shape flipped BLOCK to allow.
+  "git commit ${D}m 'l1"$'\n'"l2'"
+  "( git commit ${D}m \"l1"$'\n'"l2\" )"
+  "( git commit ${D}m \"l1"$'\n'"l2\" )#don't"
+  # DATA CONTEXT. A heredoc body and an open quoted block are inert to the shell, and a
+  # segment inside them must not be able to establish the exemption. Note the oracle
+  # sorts these out by itself: joins that break the heredoc delimiter simply do not
+  # execute, so they are skipped rather than wrongly asserted.
+  "cat <<EOF"$'\n'"git commit ${D}m \"fix"$'\n'"EOF"
+  "cat <<'EOF'"$'\n'"git commit ${D}m \"fix"$'\n'"EOF"
+  "echo 'note:"$'\n'"git commit ${D}m \"fix"$'\n'"'"
+  # CARRIED-QUOTE prefixes — a shape where `in_msg` is ALREADY OPEN when the join lands.
+  # The architect gate diagnosed the absence of exactly this as the reason 282 oracle
+  # assertions went green over a live hole: liveness was being decided only for shapes
+  # that start from a clean state.
+  "git commit ${D}m \"subject"$'\n'"body\" # note"
+  "git commit ${D}m \"subject"$'\n'"body\""
+  "git commit ${D}m 'subject"$'\n'"body' #c"
+)
+oracle_joins=( " && " " ; " " | " " & " $'\n' "#c"$'\n' "#c\\"$'\n' "#don't\\"$'\n' "\\"$'\n' )
+oracle_gated=(
+  "git push ${D}${D}force origin main"
+  "git push origin main"
+  "rm ${D}rf /tmp/oracle-never-run"
+  "kubectl delete ns prod"
+  "terraform destroy"
+  "git reset ${D}${D}hard HEAD~5"
+)
+
+oracle_shapes=0; oracle_live=0; oracle_asserted=0; oracle_failed=0
+for pfx in "${oracle_prefixes[@]}"; do
+  for jn in "${oracle_joins[@]}"; do
+    oracle_shapes=$((oracle_shapes + 1))
+    got=$(cd "$ORACLE_DIR" && PATH="$ORACLE_DIR:/usr/bin:/bin" bash -c "${pfx}${jn}printf ORACLE_EXEC" 2>/dev/null)
+    case "$got" in *ORACLE_EXEC*) ;; *) continue ;; esac   # shell does not run it: allowing is correct
+    oracle_live=$((oracle_live + 1))
+    for g in "${oracle_gated[@]}"; do
+      oracle_asserted=$((oracle_asserted + 1))
+      printf '%s' "{\"tool_input\":{\"command\":$(printf '%s%s%s' "$pfx" "$jn" "$g" | jq -Rs .)}}" |
+        bash "$HOOK" >/dev/null 2>&1
+      [ $? -eq 2 ] || { oracle_failed=$((oracle_failed + 1)); fails=1
+                        printf 'FAIL  shell RUNS it, hook allows: [%.30s] join=%q\n' "$pfx" "$jn"; }
+    done
+  done
+done
+rm -rf "$ORACLE_DIR"
+printf '%s  %-46s %s shapes, %s live, %s asserted\n' \
+  "$([ "$oracle_failed" -eq 0 ] && echo 'ok  ' || echo 'FAIL')" \
+  "oracle-gated cross product" "$oracle_shapes" "$oracle_live" "$oracle_asserted"
+
+echo
+echo "== HEREDOC SPELLING GRID (oracle-gated) =="
+# The oracle-gated product above covers the data-context CONSTRUCT but only one SPELLING
+# of it. A reviewer's grid over delimiter spellings found 18 live bypasses in a tracker
+# whose four hand-written shapes all passed — the same enumerate-versus-generate lesson,
+# one level down: it is not enough to generate over joins if the construct itself has
+# spellings you enumerated.
+#
+# THE DECOY IS THE POINT, and getting it wrong is instructive. An indented line that the
+# HOOK accepts as the terminator but BASH does not ends the heredoc early in the hook's
+# model only — so it starts reading heredoc BODY as commands, the `git commit …` line
+# grants the exemption, and everything after is skipped. A first version of this grid put
+# the indented line in the terminator position instead; bash then swallows the whole
+# command, the oracle skips every row, and the grid proves nothing while looking green.
+HD_ORACLE=$(mktemp -d)
+for t in git kubectl terraform; do printf '#!/bin/sh\nexit 0\n' > "$HD_ORACLE/$t"; chmod +x "$HD_ORACLE/$t"; done
+TAB=$'\t'
+hd_shapes=(
+  "cat <<EOF${TAB}EOF"
+  "cat <<-EOF${TAB}${TAB}EOF"
+  "cat <<\\EOF${TAB}EOF"
+  "cat <<'EOF'${TAB}EOF"
+  "cat <<\"EOF\"${TAB}EOF"
+  "cat <<A <<EOF${TAB}A"
+  # Architect sign-off measured 3 of 12 openers leaking at ed01a82, not 2 — and the
+  # third, `<< \EOF` (a SPACE before the backslash), is a spelling neither of us had
+  # written down. Both of these block today only because the unparseable-heredoc clause
+  # fails closed, which is the design working; but Decision 5 says generate where you
+  # would otherwise enumerate, and an opener set is exactly an enumeration.
+  "cat <<-\\EOF${TAB}${TAB}EOF"
+  "cat << \\EOF${TAB}EOF"
+)
+hd_decoys=( "" "  EOF" "${TAB}EOF" "   EOF" )
+hd_verbs=(
+  "git push ${D}${D}force origin main"
+  "git push origin main"
+  "rm ${D}rf /tmp/x"
+  "kubectl delete ns prod"
+)
+hd_live=0; hd_asserted=0; hd_holes=0
+for shp in "${hd_shapes[@]}"; do
+  hd_op=${shp%%"$TAB"*}; hd_term=${shp#*"$TAB"}
+  for dc in "${hd_decoys[@]}"; do
+    hd_body="git commit ${D}m \"fix"
+    [ -n "$dc" ] && hd_body="$dc"$'\n'"$hd_body"
+    got=$(cd "$HD_ORACLE" && PATH="$HD_ORACLE:/usr/bin:/bin" \
+          bash -c "$hd_op"$'\n'"$hd_body"$'\n'"$hd_term"$'\n'"printf ORACLE_EXEC" 2>/dev/null)
+    case "$got" in *ORACLE_EXEC*) ;; *) continue ;; esac
+    hd_live=$((hd_live + 1))
+    for v in "${hd_verbs[@]}"; do
+      hd_asserted=$((hd_asserted + 1))
+      printf '%s' "{\"tool_input\":{\"command\":$(printf '%s' "$hd_op"$'\n'"$hd_body"$'\n'"$hd_term"$'\n'"$v" | jq -Rs .)}}" |
+        bash "$HOOK" >/dev/null 2>&1
+      [ $? -eq 2 ] || { hd_holes=$((hd_holes + 1)); fails=1
+                        printf 'FAIL  heredoc spelling: opener=%q decoy=%q\n' "$hd_op" "$dc"; }
+    done
+  done
+done
+python3 -c "import shutil; shutil.rmtree('$HD_ORACLE', ignore_errors=True)" 2>/dev/null ||
+  find "$HD_ORACLE" -type f -delete 2>/dev/null
+printf '%s  %-46s %s live shapes, %s asserted\n' \
+  "$([ "$hd_holes" -eq 0 ] && echo 'ok  ' || echo 'FAIL')" \
+  "heredoc spelling grid" "$hd_live" "$hd_asserted"
 
 echo
 echo "== MUST FAIL CLOSED (a control that cannot run must not report success) =="
