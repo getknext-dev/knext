@@ -73,6 +73,15 @@ spec:
             - name: CLOUD_ADMIN_MD5
               valueFrom:
                 secretKeyRef: { name: pg-base-admin, key: CLOUD_ADMIN_MD5 }
+            # compute_ctl JWT trust anchor (public JWK fields; the private half
+            # never leaves the compute-jwt-trust Secret). Optional: absent, the
+            # entrypoint locks the control API with a random throwaway anchor.
+            - name: JWT_JWK_KID
+              valueFrom:
+                secretKeyRef: { name: compute-jwt-trust, key: JWT_JWK_KID, optional: true }
+            - name: JWT_JWK_X
+              valueFrom:
+                secretKeyRef: { name: compute-jwt-trust, key: JWT_JWK_X, optional: true }
           ports:
             - { name: pg, containerPort: 55433 }
             - { name: compute-http, containerPort: 3080 }
