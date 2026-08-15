@@ -73,6 +73,12 @@ describe('secret-scan job in ci.yml — present and unable to fail open', () => 
       audit.gateStepsSeen,
       'the secret-scan job must be the one invoking scripts/secret-scan.mjs',
     ).toBe(1);
+    // The VERDICT — the half the first version of this assertion forgot (#639
+    // to the letter: it asserted the audit ran, never what it found, and the
+    // systematic disarm prover measured all five disarms staying green). An
+    // empty needs closure beyond itself is "no needs:", by walk not regex.
+    expect(audit.needsClosure, 'the `needs` closure the audit walked').toEqual(['secret-scan']);
+    expect(audit.problems, audit.problems.join('\n')).toEqual([]);
   });
 
   it('checks out FULL history without persisted credentials', () => {
