@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -106,6 +107,43 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 		Expect(np.OwnerReferences).To(HaveLen(1))
 		Expect(np.OwnerReferences[0].Kind).To(Equal("NextApp"))
 		Expect(np.OwnerReferences[0].Name).To(Equal(nn.Name))
+	})
+
+	It("restricts ingress PORTS so co-resident pods cannot bypass the queue-proxy (ADR-0044)", func() {
+		// The rule used to carry NO Ports, which admits every port — so any
+		// same-namespace pod could dial the app container's :3000 directly,
+		// skipping queue-proxy and its containerConcurrency bound entirely
+		// (the architect gate proved this in ADR-0044 round 1). The allowlist:
+		//   8012/8013  queue-proxy serving (http1/h2c) — the ONLY way to the app
+		//   9090       queue-proxy's own metrics
+		//   9091       the app's metrics sidecar (prometheus.io/port stamps 9091,
+		//              nextapp_controller.go:820 — a queue-proxy-only rule would
+		//              kill scraping; both halves asserted here)
+		// :3000 (the user port) is deliberately ABSENT: queue-proxy reaches it
+		// over pod-local loopback (127.0.0.1:USER_PORT), which no NetworkPolicy
+		// touches, so excluding it breaks nothing legitimate.
+		nn := reconcileApp("np-ports", nil)
+
+		np := &networkingv1.NetworkPolicy{}
+		Expect(k8sClient.Get(ctx, policyName(nn.Name), np)).To(Succeed())
+		Expect(np.Spec.Ingress).To(HaveLen(1))
+
+		ports := np.Spec.Ingress[0].Ports
+		Expect(ports).NotTo(BeEmpty(), "no Ports means ALL ports — the ADR-0044 bypass")
+		var got []int32
+		for _, p := range ports {
+			Expect(p.Port).NotTo(BeNil())
+			Expect(p.Port.Type).To(Equal(intstr.Int), "named ports would silently not match")
+			got = append(got, p.Port.IntVal)
+		}
+		By("admitting the queue-proxy serving ports — the only sanctioned path to the app")
+		Expect(got).To(ContainElements(int32(8012), int32(8013)))
+		By("still admitting BOTH metrics ports — a queue-proxy-only rule kills scraping")
+		Expect(got).To(ContainElements(int32(9090), int32(9091)))
+		By("refusing the app's user port — the direct-dial bypass this exists to close")
+		Expect(got).NotTo(ContainElement(int32(3000)))
+		By("and nothing else — an allowlist that grows silently is how the next bypass lands")
+		Expect(got).To(HaveLen(4))
 	})
 
 	It("creates the NetworkPolicy when Security.NetworkPolicy is explicitly true", func() {
