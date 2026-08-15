@@ -65,38 +65,21 @@ kubectl -n "$NS" wait --for=condition=Ready pod/app pod/caller --timeout=180s
 APP_IP=$(kubectl -n "$NS" get pod app -o jsonpath='{.status.podIP}')
 [ -n "$APP_IP" ] || fail "no app pod IP"
 
-# Reproduces the operator's policy shape (buildDesiredNetworkPolicy): rule [0]
-# serving+metrics from the system namespaces, rule [1] metrics-only from the
-# same namespace. The user port appears in NEITHER — that is the whole point.
-log "applying the operator-shaped NetworkPolicy"
-kubectl -n "$NS" apply -f - <<YAML
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: drill-app-allow-ingress
-spec:
-  podSelector:
-    matchLabels:
-      serving.knative.dev/service: drill-app
-  policyTypes: [Ingress]
-  ingress:
-    - ports:
-        - port: 8012
-        - port: 8013
-        - port: 9090
-        - port: $METRICS_PORT
-      from:
-        - namespaceSelector:
-            matchExpressions:
-              - key: kubernetes.io/metadata.name
-                operator: In
-                values: [knative-serving, kourier-system]
-    - ports:
-        - port: 9090
-        - port: $METRICS_PORT
-      from:
-        - podSelector: {}
-YAML
+# THE POLICY COMES FROM THE OPERATOR, NOT FROM THIS FILE.
+#
+# An earlier cut of this drill inlined the YAML, and spec review caught that a
+# hand-copy drifts silently: the drill would keep passing against a policy the
+# operator no longer produces. `cmd/policygen` renders
+# `controller.DesiredNetworkPolicy` — the exact object the reconciler applies —
+# so any change to the real rules changes what is proved here.
+log "rendering the operator's own policy via cmd/policygen"
+POLICY=$(cd "$(dirname "$0")/.." && go run ./cmd/policygen -app drill-app -namespace "$NS")
+echo "$POLICY"
+# Fail closed if the rendered policy does not actually exclude the user port —
+# otherwise steps 1-3 could "pass" against a policy that never closed anything.
+echo "$POLICY" | grep -q "port: $APP_PORT" && fail "the operator's policy ADMITS the user port; this drill cannot prove a refusal"
+echo "$POLICY" | grep -q "port: $METRICS_PORT" || fail "the operator's policy does not admit the metrics port; step 2 would be vacuous"
+echo "$POLICY" | kubectl apply -f -
 sleep 5
 
 dial() { # $1=port $2=timeout -> prints "open" or "refused"

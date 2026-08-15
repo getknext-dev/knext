@@ -38,6 +38,14 @@ jobs:
         with:
           persist-credentials: false
 
+      # The drill renders the policy from the operator's own code
+      # (cmd/policygen), so Go is required — a hand-copied YAML would drift.
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/kn-next-operator/go.mod
+          cache-dependency-path: packages/kn-next-operator/go.sum
+
       - name: Install kind
         uses: helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70863de3 # v1.12.0
         with:
