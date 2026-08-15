@@ -53,6 +53,7 @@ import (
 	"knative.dev/pkg/apis"
 	"knative.dev/serving/pkg/apis/serving"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
+	knativenetworking "knative.dev/serving/pkg/networking"
 )
 
 // Condition type constants used across the reconciler.
@@ -1237,20 +1238,26 @@ func networkPolicyEnabled(nextApp *appsv1alpha1.NextApp) bool {
 	return *nextApp.Spec.Security.NetworkPolicy
 }
 
-// The ingress port allowlist (ADR-0044). Knative's queue-proxy serves the pod's
-// traffic on 8012 (http1) / 8013 (h2c) and exposes its own metrics on 9090; the
-// knext runtime's metrics sidecar listens on 9091 (stamped as
-// prometheus.io/port). The app's own user port is intentionally not listed —
-// queue-proxy reaches it over pod-local loopback, which NetworkPolicy does not
-// govern, so admitting it would only enable the direct-dial bypass.
-const (
-	queueProxyHTTPPort  int32 = 8012
-	queueProxyH2CPort   int32 = 8013
-	queueProxyHTTPSPort int32 = 8112
+// The ingress port allowlist (ADR-0044), derived from KNATIVE'S OWN EXPORTED
+// CONSTANTS rather than hand-enumerated literals.
+//
+// The architect gate required this after the hand-written list missed
+// BackendHTTPSPort (8112) — a miss that, on a policy-enforcing CNI with
+// system-internal-tls on, is an outage rather than a weaker policy. Importing
+// the constants means a knative upgrade that renumbers or adds a port shows up
+// as a compile-time change here instead of a silent production hole.
+//
+// Deliberately NOT included: QueueAdminPort (8022), which v0.48 no longer puts
+// on the pod, and the app's own user port, which queue-proxy reaches over
+// pod-local loopback where no NetworkPolicy applies.
+var (
+	queueProxyHTTPPort  = int32(knativenetworking.BackendHTTPPort)
+	queueProxyH2CPort   = int32(knativenetworking.BackendHTTP2Port)
+	queueProxyHTTPSPort = int32(knativenetworking.BackendHTTPSPort)
 	// queueProxyMetricsPort is knative's AutoscalingQueueMetricsPort; the app's
 	// metrics sidecar uses UserQueueMetricsPort (9091) by default.
-	queueProxyMetricsPort int32 = 9090
-	appMetricsPort        int32 = 9091
+	queueProxyMetricsPort = int32(knativenetworking.AutoscalingQueueMetricsPort)
+	appMetricsPort        = int32(knativenetworking.UserQueueMetricsPort)
 )
 
 // desiredIngressRules is the ingress half of the app NetworkPolicy, as a PURE
