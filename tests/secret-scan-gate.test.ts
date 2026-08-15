@@ -129,6 +129,67 @@ describe('allowlist — scoped, justified, and incapable of quiet rot', () => {
   });
 });
 
+describe('wrapper semantics — driven through the exported pure functions', () => {
+  const finding = (over = {}) => ({
+    Fingerprint: 'c0ffee:path/f.txt:rule-x:1',
+    RuleID: 'rule-x',
+    File: 'path/f.txt',
+    Commit: 'c0ffee',
+    ...over,
+  });
+  const entry = (over = {}) => ({
+    fingerprint: 'c0ffee:path/f.txt:rule-x:1',
+    rule: 'rule-x',
+    path: 'path/f.txt',
+    class: 'false-positive',
+    justification: 'test fixture',
+    added: '2026-08-15',
+    expires: '2099-01-01',
+    ...over,
+  });
+
+  it('an expired false-positive resurfaces the finding', async () => {
+    const { filterFindings } = await import('../scripts/secret-scan.mjs');
+    const live = filterFindings([finding()], [entry()], new Date('2026-08-15'));
+    expect(live.unsuppressed).toHaveLength(0);
+    const expired = filterFindings([finding()], [entry()], new Date('2099-01-02'));
+    expect(expired.unsuppressed).toHaveLength(1);
+    expect(expired.unsuppressed[0].expiredAllowlist).toBe('2099-01-01');
+  });
+
+  it('a fingerprint match with a DIFFERENT rule or path suppresses nothing', async () => {
+    const { filterFindings } = await import('../scripts/secret-scan.mjs');
+    for (const bad of [{ RuleID: 'rule-y' }, { File: 'other/g.txt' }]) {
+      const r = filterFindings([finding(bad)], [entry()], new Date('2026-08-15'));
+      expect(r.unsuppressed, `should not suppress with ${JSON.stringify(bad)}`).toHaveLength(1);
+    }
+  });
+
+  it('validateAllowlist throws on every malformed shape rather than honoring it', async () => {
+    const { validateAllowlist } = await import('../scripts/secret-scan.mjs');
+    const wrap = (e: Record<string, unknown>) => ({ entries: [e] });
+    expect(() => validateAllowlist(wrap(entry({ justification: undefined })))).toThrow();
+    expect(() => validateAllowlist(wrap(entry({ class: 'accepted' })))).toThrow();
+    expect(() =>
+      validateAllowlist(wrap(entry({ class: 'rotated-historical', expires: undefined }))),
+    ).toThrow(/rotationEvidence/);
+    expect(() =>
+      validateAllowlist(
+        wrap(
+          entry({
+            class: 'rotated-historical',
+            rotationEvidence: 'PR #x',
+            // an expiring rotated-historical schedules a false alarm
+          }),
+        ),
+      ),
+    ).toThrow(/must not expire/);
+    expect(() => validateAllowlist(wrap(entry({ expires: 'soonish' })))).toThrow(/dated expiry/);
+    // the real committed allowlist passes
+    expect(() => validateAllowlist(allowlist)).not.toThrow();
+  });
+});
+
 describe('wrapper script — fails closed', () => {
   it('treats a missing/unrunnable gitleaks as failure, never a pass', () => {
     // The action-pin checker's own principle: unreachable is a FAILURE.

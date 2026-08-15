@@ -43,6 +43,41 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Full-history secret scan (security sprint S1). DELIBERATELY carries no
+  # continue-on-error and no ref-conditional if: — the house idiom
+  # `continue-on-error: ${{ github.ref != 'refs/heads/main' }}` used elsewhere
+  # in this file would make this gate advisory on pull_request, the one event
+  # it exists for. Full history (fetch-depth: 0) rather than diff scanning
+  # kills the whole bypass class: base-branch secrets the diff never re-reads,
+  # and force-pushes that rewrite the PR base out of a diff window. Runs the
+  # pinned gitleaks BINARY, not gitleaks-action (org licensing + an unpinned
+  # code path). Guarded by tests/secret-scan-gate.test.ts.
+  secret-scan:
+    name: Secret scan (full history)
+    runs-on: ubuntu-latest
+    env:
+      GITLEAKS_VERSION: '8.30.1'
+      GITLEAKS_SHA256: '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb'
+    steps:
+      - name: Checkout code (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned gitleaks (checksum-verified)
+        run: |
+          set -eu
+          curl -fsSL -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
+          rm gitleaks gitleaks.tar.gz
+          gitleaks version
+
+      - name: Scan full history against the disposition-classed allowlist
+        run: node scripts/secret-scan.mjs
+
   lint-and-test:
     name: Lint & Test
     runs-on: ubuntu-latest
