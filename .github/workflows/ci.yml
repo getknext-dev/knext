@@ -571,6 +571,71 @@ jobs:
           # state of the other six.
           exit "$failed"
 
+  safety-hook-guard:
+    name: Agent safety-control hook (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    # `.claude/hooks/block-dangerous-bash.sh` is the ONLY enforcement of the
+    # operations `.claude/rules/security.md` calls never acceptable on an agent's
+    # behalf: force/mirror/--all push, direct push to main/master, history rewrite,
+    # recursive-force removal, cluster deletes, infra teardown.
+    #
+    # Its test suite is, by its own history, the only thing that has ever caught a
+    # regression in it — and until now it ran only when a human remembered to type it.
+    # That is exactly the shape security.md warns about: a documented expectation
+    # degrades, and its efficacy is unobservable until it has already failed. Four
+    # separate rounds shipped a bypass that looked correct on inspection.
+    #
+    # BOTH PLATFORMS, and that is the point rather than thoroughness for its own sake.
+    # One of those bypasses was a BSD/GNU `sed` split: `N` at EOF discards the pattern
+    # space on macOS and prints on GNU, so the hook was open where contributors run it
+    # and closed where CI would have looked. A Linux-only gate cannot see that class at
+    # all — it would have gone green while the control was open on every developer
+    # machine. `grep -E \b` (four rule families) and `awk` behaviour differ the same way.
+    # fail-fast is off so a divergence shows which platform, not just that one failed.
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Run the safety-control suite
+        run: |
+          set -euo pipefail
+          bash .claude/hooks/block-dangerous-bash.test.sh
+      - name: Prove the suite is not decoration
+        run: |
+          set -euo pipefail
+          # A guard that stays green when its subject is removed is decoration
+          # (.claude/rules/workflow.md). Rather than assert a case count — which
+          # drifts, and which gets edited to green — neuter the hook and require the
+          # suite to NOTICE. The anchor must occur exactly once or this aborts: a
+          # silently-failed substitution yields a green run that proves nothing.
+          # MUTATE A COPY, never the in-tree hook. Safe here only because a runner
+          # is ephemeral is not a reason to keep doing it: ADR-0043 Decision 9 says an
+          # evidence harness may not mutate the artifact under test in the shared tree,
+          # and this step is an evidence harness. Three lines to obey it.
+          work=$(mktemp -d)
+          cp .claude/hooks/block-dangerous-bash.sh .claude/hooks/block-dangerous-bash.test.sh "$work"/
+          hook="$work/block-dangerous-bash.sh"
+          # python3, not `sed -i`: that spelling is GNU-only and fails on the macOS half
+          # of this matrix, which would have made the platform pair pointless. The script
+          # asserts the anchor occurs exactly once and aborts otherwise — a silently
+          # failed substitution yields a green run that proves nothing, which is why
+          # `.claude/rules/workflow.md` bans doing this with perl.
+          # One line deliberately: a heredoc body inside a YAML block scalar keeps its
+          # indentation, which python rejects.
+          python3 -c "p='$hook'; s=open(p).read(); a='deny() { echo'; n=s.count(a); assert n==1, f'anchor occurs {n}x, expected 1'; o=s.replace(a,'deny() { return 0; echo',1); assert o!=s, 'substitution produced no change'; open(p,'w').write(o)"
+          grep -q 'deny() { return 0;' "$hook" || { echo "::error::mutation did not land"; exit 1; }
+          if bash "$work/block-dangerous-bash.test.sh" >/dev/null 2>&1; then
+            echo "::error::the suite passed with every deny() neutered — it proves nothing"
+            exit 1
+          fi
+          # The in-tree hook must be untouched by this step, asserted not assumed.
+          git diff --quiet -- .claude/hooks/block-dangerous-bash.sh ||
+            { echo "::error::this step modified the in-tree hook"; exit 1; }
+          echo "OK: neutering deny() reddens the suite, and the in-tree hook is untouched"
+
   operator-codegen-check:
     name: Operator codegen is up-to-date (make generate + make manifests)
     runs-on: ubuntu-latest
