@@ -165,10 +165,10 @@
                         "verify"
                     ],
                     "alg": "EdDSA",
-                    "kid": "ZGIxMzAzOGY0YWQwODk2ODU1MTk1NzMxMDFkYmUyOWU2NzZkOWNjNjMyMGRkZGJjOWY0MjdjYWVmNzE1MjUyOAo=",
+                    "kid": "JWT_JWK_KID_PLACEHOLDER",
                     "kty": "OKP",
                     "crv": "Ed25519",
-                    "x": "MGQ4ZDFhOTdmNTM0NmUwMDc3ZmJkN2Q0MWE0ZmI3M2NhNWE3YjFjOTNkM2IyYzRkZTQzOGM3MjBkZTk3N2E5ZAo="
+                    "x": "JWT_JWK_X_PLACEHOLDER"
                 }
             ]
         }

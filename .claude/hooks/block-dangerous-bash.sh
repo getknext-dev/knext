@@ -2,110 +2,626 @@
 # PreToolUse / Bash — block irreversible or destructive commands for the agent.
 # Exit 2 blocks the tool call and feeds the message back to Claude. Exit 0 = allow.
 # The human can still run any of these in their own terminal; this only gates Claude.
+#
+# THIS IS A SAFETY CONTROL. A false negative here is a security failure, not a bug:
+# `security.md` calls force/mirror/--all push, direct push to main/master, history
+# rewrite, `rm -rf` and `kubectl delete` "never acceptable" on the agent's behalf.
+#
+# ACCEPTED COST, ratified by architect sign-off — do not "fix" these by narrowing:
+#     grep -rn 'rm -rf' .claude/hooks
+#     echo 'rm -rf is gated' >> notes.md
+#     git log --grep='rm -rf'
+#     git push origin feature/x # rebased onto main     (pre-existing, same on main)
+# all BLOCK here and pass on an unguarded shell.
+#
+# The last one is worth its own sentence, because the fix looks obvious and is not.
+# `quote_state` knows `#` starts a comment, but that knowledge is used ONLY to track
+# where a commit message ends — the RULES still match comment text. Teaching them to
+# strip comments would make the rules match LESS, and in this file every change that
+# made a rule match less has opened a bypass. It is pre-existing behaviour, identical on
+# main, so it is not a regression this PR introduced; leave it to a change that can be
+# reviewed on its own.
+#
+# The first three are the price of the stripped view (`sseg`), which is what catches
+# `rm -r"f" x`. The asymmetry is decisive: a false positive is recoverable — rerun it,
+# or run it yourself — while a false negative on force-push-to-main is not. Deleting
+# `sseg` to make them pass reopens intra-token quoting, so this paragraph exists to stop
+# a later round trading it away by accident.
+#
+# It has been wrong subtly FIVE times — #712 introduced a continuation bypass while
+# fixing false positives; #717's fix for THAT introduced a worse one; #725 round 1
+# fixed nine and opened the `=` glob and wrapper-narrowing holes; #725 round 2 fixed
+# those and still let command substitution through the `git commit` exemption; #725
+# round 10 taught the hook that `#` starts a comment and round 11 found that its notion
+# of where a word starts was still wrong, reopening every gated verb the probe
+# covered via `)#` — six verb families, measured; an earlier note said "all eight",
+# a figure architect sign-off could not reconstruct and neither could I.
+# Every one of them looked correct on inspection. Change nothing here without running
+# `.claude/hooks/block-dangerous-bash.test.sh` — which CI now runs, so a regression
+# no longer waits on someone remembering to type it.
 set -uo pipefail
-
-input=$(cat)
-cmd=$(printf '%s' "$input" | jq -r '.tool_input.command // ""' 2>/dev/null || echo "")
-[ -z "$cmd" ] && exit 0
-
-norm=$(printf '%s' "$cmd" | tr '\n' ' ')
-
-# `joined` resolves BACKSLASH-NEWLINE continuations the way the shell itself does,
-# WITHOUT flattening ordinary newlines. Everything that splits the command into
-# segments must use this, never the raw `$cmd`.
-#
-# Why: segment-splitting on `\n` (added to stop a flag on an adjacent LINE reading as
-# a flag on the push) also split a single command written across lines. So
-#
-#     git push \
-#       --force origin main
-#
-# put `git push` in one segment and `--force origin main` in the next, and the force
-# and main/master rules — which only look at the segment containing the push — saw
-# neither. The shell joins those two lines into ONE command; the guard has to as well
-# or it is reasoning about a command that was never run. Measured: this exact payload
-# exited 0 (allowed) while the pre-segmentation version of this hook blocked it.
-joined=$(printf '%s' "$cmd" | sed -e :a -e '/\\$/N; s/\\\n[[:space:]]*/ /; ta')
 
 deny() { echo "BLOCKED (block-dangerous-bash): $1" >&2; exit 2; }
 
-# rm -rf / rm -fr (any order of r and f flags)
+input=$(cat)
+
+# ── fail CLOSED, never open ──────────────────────────────────────────────────
 #
-# `rm` must be a COMMAND WORD — start of line, or after whitespace or a shell
-# separator — and NOT preceded by a dash. `\brm\b` treated `--rm` as the rm
-# command, because `-` is a word boundary, so every `docker run --rm --platform …`
-# was blocked: `--rm` supplied the command and `--platform` satisfied the
-# `-…f…r` alternative (p-l-a-t-F-o-R-m). Measured on
-# `docker run --rm --platform linux/arm64 …`; podman and nerdctl take the same
-# flag, and the workaround (reorder the flags) is undiscoverable from the message.
+# Everything below is text processing, so a missing tool does not degrade the
+# check — it DELETES it. Measured on the previous revision by pruning PATH one
+# tool at a time against `git push --force origin main`: no `jq` → exit 0 with no
+# stderr at all; no `grep` → exit 0 with all eleven rules dead; no `tr` → exit 0
+# with the segment rules dead. The hook announced nothing in any case.
 #
-# Verified when changing this: `rm -rf /some/dir` and `…; rm -rf …` still block.
-# A guard that cries wolf gets worked around, which is worse than one that is
-# narrower and trusted.
+# `security.md` already states the principle for the action-pin checker — "an
+# unreachable API is a failure, never a pass: a checker that goes green when it
+# cannot reach upstream is worse than none." Same rule, applied to this control's
+# own dependencies. A contributor without `jq` was running a 100% decorative hook
+# that reported success.
+for _t in jq tr awk grep; do
+  command -v "$_t" >/dev/null 2>&1 ||
+    deny "hook dependency '$_t' is missing — refusing to vet this command. Install it, or run the command yourself."
+done
+
+# PRESENT IS NOT ENOUGH — the tool must actually do the thing. `\b` is a GNU extension,
+# not POSIX ERE. Four rule families (git/push, the cluster-delete rule, history rewrite,
+# teardown) are built on it, so a `grep` that ignores `\b` would kill them SILENTLY
+# while sailing through the check above, because the binary exists. Measured working on
+# GNU grep and on macOS BSD grep 2.6; busybox is the case this catches. Both directions
+# are asserted, since a `\b` that matches everything is as broken as one that matches
+# nothing.
+printf 'a git b' | grep -qE '\bgit\b' 2>/dev/null &&
+  ! printf 'agitb' | grep -qE '\bgit\b' 2>/dev/null ||
+  deny "this 'grep -E' does not support \\b word boundaries — four rules would silently not match. Refusing to vet this command."
+
+# An unparseable payload is an ERROR, not consent. The matcher is `Bash` only
+# (`.claude/settings.json`), so there is no legitimate invocation without
+# `.tool_input.command`; treating a missing field as "nothing to check" turned an
+# upstream schema change into a permanent, silent, undetectable bypass.
+cmd=$(printf '%s' "$input" | jq -r '.tool_input.command // ""') ||
+  deny "unparseable PreToolUse payload — refusing to vet this command."
+[ -z "$cmd" ] &&
+  deny "PreToolUse payload carried no .tool_input.command — refusing to vet this command."
+
+# ── normalisation ────────────────────────────────────────────────────────────
 #
-# The flags do NOT have to share a token. `rm -r -f dir` is the same command as
-# `rm -rf dir`, and the single-token patterns below missed it entirely (measured:
-# exit 0). So the segment containing the `rm` is tested for a recursive flag and a
-# force flag INDEPENDENTLY — both must be present, which keeps `rm -f file` and
-# `rm -r dir` allowed exactly as before.
-rm_seg=$(printf '%s' "$joined" | tr ';|&\n' '\n\n\n\n' \
-  | grep -E '(^|[;&|(]|[[:space:]])rm[[:space:]]' | grep -vE '(^|[[:space:]])--?[A-Za-z-]*rm([[:space:]]|=|$)')
-if [ -n "$rm_seg" ] \
-  && printf '%s' "$rm_seg" | grep -qE '(^|[[:space:]])(-[A-Za-z]*r[A-Za-z]*|--recursive)([[:space:]]|$)' \
-  && printf '%s' "$rm_seg" | grep -qE '(^|[[:space:]])(-[A-Za-z]*f[A-Za-z]*|--force)([[:space:]]|$)'; then
-  deny "destructive 'rm -rf'. Remove specific paths deliberately, or run it yourself."
-fi
-if printf '%s' "$norm" | grep -qE '(^|[;&|(]|[[:space:]])rm[[:space:]][^|;&]*-[A-Za-z]*r[A-Za-z]*f|(^|[;&|(]|[[:space:]])rm[[:space:]][^|;&]*-[A-Za-z]*f[A-Za-z]*r'; then
-  deny "destructive 'rm -rf'. Remove specific paths deliberately, or run it yourself."
-fi
-# git push: feature-branch pushes are ALLOWED so agents can open PRs autonomously.
-# Still forbidden: force/mirror/--all (history rewrite / review bypass) and direct
-# pushes to main/master (PRs only). See .claude/rules/security.md.
-if printf '%s' "$norm" | grep -qE '\bgit\b[^|;&]*\bpush\b'; then
-  # SCAN ONLY THE SEGMENT CONTAINING THE PUSH, not the whole command line.
-  # Scanning the whole line meant any `-f` belonging to ANOTHER command in a
-  # compound line read as a force push. Measured: `git push origin x | tail -1;
-  # pgrep -f "…"` was blocked as a force push, and so is a plain
-  # `git push origin x && grep -f pattern file`. `-f` is one of the most common
-  # flags there is, so the rule fired on ordinary work and taught the reader to
-  # regard the message as noise — which is how a real force push gets waved past.
+# `joined` resolves BACKSLASH-NEWLINE continuations the way the shell does, WITHOUT
+# flattening ordinary newlines (which would let a flag on an adjacent line read as a
+# flag on the push — the #712 false positive).
+#
+# It is pure bash parameter expansion, deliberately. The previous implementation used
+#   sed -e :a -e '/\\$/N; s/\\\n[[:space:]]*/ /; ta'
+# and a command ENDING in a backslash made it emit NOTHING: BSD/macOS sed executes `N`
+# at EOF and discards the pattern space, so `joined` became the empty string and every
+# segment-based rule below silently passed. `git push --force origin main \` was
+# ALLOWED. Worse, GNU sed *prints* on `N` at EOF, so the bypass existed on macOS and not
+# on Linux CI — a test would have gone green while the hook was open where it ran.
+# Parameter expansion has no such platform split. (Reproduced during review:
+# `printf 'x\\\n' | sed -e :a -e '/\\$/N; …'` emits nothing on BSD sed.)
+#
+# The continuation pattern is written LITERALLY as \\$nl — a DOUBLED backslash. In bash
+# pattern context a single backslash ESCAPES the next character, so the obvious
+# `bs='\'; ${cmd//${bs}${nl}/ }` matches a BARE newline and silently flattens every
+# multi-line command into one line. That reintroduced the #712 false positive (a `-f`
+# on an adjacent LINE reading as a flag on the push) while reading as if it did the
+# opposite — caught only because a false-positive case in the probe suite went red.
+cr=$'\r'
+nl=$'\n'
+cmd=${cmd//$cr/}                 # CRLF input must not change matching
+joined=${cmd//\\$nl/ }           # a real continuation joins; a trailing \ at EOF stays
+
+# split_segments <text> — one shell command per line, split on separators.
+split_segments() { printf '%s' "$1" | tr ';|&\n' '\n\n\n\n'; }
+
+# ── shared delimiter classes ─────────────────────────────────────────────────
+#
+# Quotes and a leading backslash are DELIMITERS, not obfuscation: `rm "-rf" x`,
+# `git push origin 'main'` and `git push origin \main` all do exactly what their
+# bare forms do. Round 2 fixed this for ONE rule each — quotes on the branch rule,
+# backslash on the rm command word — and left the other side of both open
+# (`git push origin \main` and `rm "-rf" x` were both ALLOWED). That asymmetry is
+# this repo's most common defect class, so the classes are defined ONCE here and
+# every rule below uses them; a future rule cannot get half of it.
+#
+# The trailing class carries the shell's own metacharacters as well as quotes: a
+# branch name at the end of a substitution is followed by `)`, not by whitespace, so
+# `git commit -m x < <(git push origin main)` reached `main)` and matched nothing.
+# Found by adding the process-substitution case, not by reading the regex.
+sq=\'
+delim="[[:space:]\"$sq()<>]"
+# The backtick belongs here for the same reason `(` does — it OPENS a command. Without
+# it the rm rule died inside backtick substitution while its `$( )` twin blocked:
+# `echo `rm -rf x`` was allowed, `echo $(rm -rf x)` was not. The file contradicted
+# itself, since is_literal_commit already treated a backtick as substitution-significant.
+# Exactly the both-halves asymmetry the shared classes exist to prevent, surviving
+# because the `$( )` case was added and its twin was not.
+lead="(^|[;&|(){}!\`]|[[:space:]\"$sq\\])"
+# The branch rule additionally honours `:` `/` `+` `<` before the name. Defined HERE
+# with the others rather than inline at the use site: round 3 claimed the classes were
+# "defined once and shared" while that rule still hand-rolled its own, which is a false
+# assurance about precisely the defect class the sharing was meant to remove.
+blead="(^|[;&|(){}!<]|[[:space:]\"$sq\\:/+])"
+ws="[[:space:]]+"          # multi-word rules separate on WHITESPACE, never a literal space
+
+rm_cmd_re="${lead}(\\\\)?([^[:space:]]*/)?rm(${delim}|\$)"
+
+# NOTE — a `strip_prefix`/`cmd_word` pair lived here and was REMOVED, not fixed.
+#
+# The idea was to identify each segment's real command word so the rules could apply
+# only to genuine `rm` / `git push` invocations. It failed twice over:
+#
+#   * Its VAR=val glob `[A-Za-z_][A-Za-z0-9_]*=*` used `*` as a WILDCARD, so it matched
+#     any segment containing an `=` anywhere and then ate the real command word. A path,
+#     a comment, `-o x=y`, or `git -c a=b push --force origin main` all silently
+#     disabled BOTH rules. One stray `=` opened the whole guard.
+#   * Even correct, requiring the command word to BE `rm`/`git` narrowed the control:
+#     `xargs rm -rf`, `find … -exec rm -rf`, `bash -c '…'`, `$( … )`, `( … )`,
+#     `if …; then git push …; fi` all escaped, and the suite stayed green because every
+#     case in it was a bare invocation.
+#
+# Both defects pointed the same way: for this control, cleverness about WHICH command is
+# running is a liability. Match the text broadly and exclude specific proven-safe cases.
+
+# git_subcommand <segment> — the first non-flag word after `git`, or empty.
+#
+# It exists ONLY to recognise `git commit`, and it decides whether the one exemption
+# applies — so an error here is a bypass, not a mis-parse. It had one: the arg-skip
+# list covered `-C -c --git-dir --work-tree` and nothing else, so a global flag that
+# takes a SEPARATE argument let its argument read as the subcommand:
+#
+#     git --namespace commit push --force origin main   -> ALLOWED
+#     git --exec-path commit push --force origin main   -> ALLOWED
+#
+# `commit` there is the VALUE of `--namespace`; the real subcommand is `push`. The
+# exemption fired on a genuine force push to main.
+#
+# So the flag tables are explicit and the function FAILS CLOSED: an unrecognised flag
+# means the subcommand cannot be determined, and an undetermined subcommand must not
+# earn the exemption. Adding a global flag to git upstream therefore costs a false
+# positive on commit-message text — never a bypass. `--opt=value` is self-contained
+# and consumes no following word.
+git_subcommand() {
+  printf '%s' "$1" | awk '
+    BEGIN {
+      split("-C -c --git-dir --work-tree --namespace --super-prefix --config-env --exec-path", a, " ")
+      for (k in a) takes_arg[a[k]] = 1
+      split("-p -P -v -h --paginate --no-pager --bare --no-replace-objects --literal-pathspecs --glob-pathspecs --noglob-pathspecs --icase-pathspecs --no-optional-locks --version --help", b, " ")
+      for (k in b) no_arg[b[k]] = 1
+    }
+    { for (i = 1; i < NF; i++) if ($i == "git") {
+        for (j = i + 1; j <= NF; j++) {
+          if ($j ~ /^-/) {
+            if ($j ~ /=/)          { continue }
+            if (takes_arg[$j])     { j++; continue }
+            if (no_arg[$j])        { continue }
+            exit                    # unknown flag: undetermined, so no exemption
+          }
+          print $j; exit } } }'
+}
+
+# is_literal_commit <segment> — the ONE exemption, and the reason it is safe.
+#
+# `git commit -m …` routinely quotes the very strings every rule below matches, and
+# `workflow.md` records that a hook firing on MESSAGE TEXT is what put a docs file on
+# `main`: the human re-ran only the tail of the blocked command. So the exemption has
+# to exist.
+#
+# Its previous justification — "`git commit` cannot delete or push, so the exemption
+# costs no coverage" — was MEASURED FALSE by both sign-off gates. A commit segment can
+# run anything through command substitution, and all three of these were ALLOWED:
+#     git commit -m "$(git push --force origin main)"
+#     git commit -m "$(rm -rf ~/scratch)"
+#     git commit -m "`git push --force origin main`"
+# That is precisely the wrapper class the command-word helper was deleted for, handed
+# back for one command word.
+#
+# The honest justification is narrower, and it is what this function enforces: a
+# LITERAL commit message cannot execute anything. So the exemption applies only when
+# the segment contains no command substitution and no process substitution. Parameter
+# expansion (`${x}`) is deliberately still exempt — it substitutes text into the
+# message, it does not execute it.
+# Round 5 added the two conditions below, each proven by a sign-off gate running the
+# payload rather than reading the code:
+#
+#   * `${ cmd; }` and `${| cmd; }` are bash 5.3 VALUE SUBSTITUTION — they execute,
+#     and they contain neither `$(` nor a backtick. This machine runs bash 5.3.
+#   * The segment's first word must be `git`. `git_subcommand` scans for a `git` token
+#     ANYWHERE, so everything to its left was invisible, and two literal words at the
+#     END of a segment disabled all five rule families:
+#         rm -rf /tmp/x # git commit          -> ALLOWED
+#         kubectl delete pod foo # git commit -> ALLOWED
+#     An environment-variable prefix reached it the same way, and that one EXECUTES:
+#         GIT_EDITOR='<cmd>' git commit       -> ALLOWED, and git runs <cmd> via sh -c
+#     confirmed in a scratch repo. So a `NAME=value` prefix does NOT earn the exemption,
+#     even though it is ordinary shell — the safe direction, since the whole point is
+#     that a LITERAL commit cannot execute anything.
+#
+# This is NOT the deleted `cmd_word` helper coming back, and the distinction is the
+# whole lesson of rounds 1-2: that helper narrowed what gets CHECKED, which loses
+# coverage silently. This narrows what gets EXEMPTED, which can only add blocks. Do not
+# "simplify" it away in a later round.
+#
+# `has_subst` is computed on the WHOLE command, BEFORE splitting, and that ordering is
+# load-bearing rather than incidental. split_segments cuts on `|`, which is part of the
+# `${| cmd; }` marker itself — so a per-segment test never sees it, the first fragment
+# (`git commit -m "${`) looks like a literal commit, and the quote-tracking below then
+# swallowed the executed command as message text. Caught by the test, not by reading:
+# adding the `${|` case to the per-segment check alone left the payload ALLOWED.
+#
+# Consequence, deliberately accepted: a command containing substitution ANYWHERE gets no
+# exemption anywhere, so `git commit -m "$(date)"` is vetted on its message text. That is
+# the safe direction — the contents of a substitution are not knowable here.
+# Only the markers that CANNOT SURVIVE SPLITTING are tested whole-command. `${ ` and
+# `${|` are the pair at issue: `|` is a separator, so `${| cmd; }` is torn apart and no
+# per-segment test can see it. Everything else (`$(`, a backtick, `<(`, `>(`) stays
+# intact inside its own segment and is tested there.
+#
+# Round 5 tested ALL of them whole-command, which was over-broad in a way that lands on
+# plausible work: `V=$(cat v) && git commit -m 'docs: why <gated verb> is gated'` blocked
+# on the substitution in a DIFFERENT command. Fail-safe, but cry-wolf is the mechanism
+# workflow.md blames for the direct-push-to-main incident, so the granularity matters.
+# `[[:space:]]`, not a literal space: bash 5.3 accepts a TAB or a NEWLINE after `${` too,
+# and both execute — `v=${<TAB>printf x; }` runs. Round 5 wrote the space and the pipe and
+# missed the other two, which is the same both-halves asymmetry the shared classes exist
+# to prevent, in the one construct that has no shared class.
+has_subst=0
+case "$joined" in
+  *'${'[[:space:]]* | *'${|'*) has_subst=1 ;;
+esac
+
+# The per-segment substitution `case` below was DELETED in round 6 and is BACK in round
+# 7 — for a different reason, which is worth stating rather than letting it look like a
+# revert. Round 6 deleted it as decoration, correctly: when `has_subst` tested every
+# marker whole-command it strictly subsumed the per-segment copy, and mutation-proving
+# showed the copy green. Round 7 narrowed `has_subst` to only the split-surviving
+# markers to cut a false-positive cliff, which un-subsumes the rest — so the per-segment
+# test is now the ONLY thing catching `$(`, a backtick, `<(` and `>(`, and it is
+# mutation-proved red. Same lines, opposite status, because the code around them moved.
+# `awk` is checked for PRESENCE above, but presence is not enough for the one tool that
+# decides the EXEMPTION. A broken `grep` fails closed — rules stop matching, nothing is
+# exempted. A broken `awk` fails OPEN: git_subcommand returns garbage, and if that
+# garbage is "commit" the exemption fires on everything. So it is probed on known input,
+# in both directions, exactly as `grep -E \b` is.
+[ "$(git_subcommand 'git commit -m x')" = "commit" ] &&
+  [ "$(git_subcommand 'git push origin x')" = "push" ] ||
+  deny "awk is not resolving git subcommands correctly — the commit exemption cannot be trusted. Refusing to vet this command."
+
+# has_comment <segment> — an UNQUOTED word-start `#`, i.e. a real comment.
+#
+# Quote-aware on purpose: `git commit -m "fix # 3"` has no comment, and refusing the
+# exemption there would block an ordinary message.
+has_comment() {
+  printf '%s' "$1" | awk '
+    BEGIN { st = "none"; found = 0 }
+    {
+      n = length($0)
+      for (i = 1; i <= n; i++) {
+        c = substr($0, i, 1)
+        if (st == "sq") { if (c == "'"'"'") st = "none" }
+        else if (st == "esq") { if (c == "\\") i++; else if (c == "'"'"'") st = "none" }
+        else if (st == "dq") { if (c == "\\") i++; else if (c == "\"") st = "none" }
+        else {
+          if (c == "#" && (i == 1 || substr($0, i - 1, 1) ~ /[[:space:]();&|]/)) { found = 1; break }
+          if (c == "\\") i++
+          else if (c == "$" && substr($0, i + 1, 1) == "'"'"'") { st = "esq"; i++ }
+          else if (c == "'"'"'") st = "sq"
+          else if (c == "\"") st = "dq"
+        }
+      }
+    }
+    END { exit (found ? 0 : 1) }'
+}
+
+is_literal_commit() {
+  [ "$has_subst" = 1 ] && return 1
+  case "$1" in
+    *'$('* | *'`'* | *'<('* | *'>('*) return 1 ;;
+  esac
+  # A COMMENT ANYWHERE IN THE SEGMENT REFUSES THE EXEMPTION. This closes a regression
+  # against main that needed no obfuscation and no unbalanced quote:
   #
-  # A force flag has to sit in the same segment as the push to affect it, so
-  # narrowing loses no coverage. Verified when changing this: `git push --force
-  # origin main` still blocks on both this rule and the main/master rule below.
-  # Split the ORIGINAL command, not `norm`: `norm` has already flattened
-  # newlines to spaces, so splitting it would merge a command on one line with
-  # the command on the next — which is the same false positive one level out.
-  # Caught by this rule firing on a PR body that contained `pgrep -f docker` and
-  # `git push …` on consecutive lines.
-  # Split `joined`, not `$cmd`: see the note on `joined` above — a backslash
-  # continuation is ONE command, and splitting the raw text tore it in half.
-  push_seg=$(printf '%s' "$joined" | tr ';|&\n' '\n\n\n\n' | grep -E '\bgit\b.*\bpush\b')
-  # A leading `+` on a refspec IS a force push (`git push origin +main` rewrites the
-  # remote branch exactly like `--force` does) and carried no flag for the rule above
-  # to find.
-  if printf '%s' "$push_seg" | grep -qE -- '--force|--force-with-lease|--mirror|--all|(^|[[:space:]])-[A-Za-z]*f[A-Za-z]*([[:space:]]|$)|(^|[[:space:]])\+[A-Za-z0-9._/-]'; then
-    deny "force/mirror/--all push is forbidden. Push a single feature branch and open a PR."
+  #     git commit -m "subject" # note\
+  #     git push --force origin main            -> ALLOWED (main: BLOCK)
+  #
+  # A backslash is NOT a continuation inside a comment — the shell ends the comment at
+  # the newline and runs line 2 (measured in bash and sh). But `joined` resolves
+  # continuations BEFORE splitting, so line 2 got folded into the comment, the whole
+  # thing became one segment whose first word is `git` and subcommand `commit`, and all
+  # five rule families were skipped.
+  #
+  # The root cause is STAGE ORDERING, not a missing construct: this hook does
+  # join -> split -> scan, while the shell resolves comments, quotes and continuations in
+  # ONE tokenising pass. Rounds 7, 8, 9 and this one are all consequences of that split,
+  # which is the concrete argument for replacing the pipeline with a real tokeniser.
+  # Until then, refusing the exemption is the safe direction: it can only add blocks, and
+  # comment text is already matched by the rules (a documented accepted cost above).
+  has_comment "$1" && return 1
+  local head=${1#"${1%%[![:space:]]*}"}     # drop leading whitespace
+  head=${head#\(}; head=${head#\{}
+  head=${head#"${head%%[![:space:]]*}"}
+  case "$head" in
+    git | git[[:space:]]*) ;;
+    *) return 1 ;;
+  esac
+  [ "$(git_subcommand "$1")" = "commit" ]
+}
+
+# ── the rules, one pass over the segments ────────────────────────────────────
+#
+# All five families run in ONE loop so the commit-message exemption reaches all of
+# them. Previously the last three matched the whole flattened command with no
+# exemption at all, so `git commit -m 'docs: why kubectl delete is gated'` was BLOCKED
+# — the exact cry-wolf case the exemption exists to prevent, displaced rather than
+# removed. Segments already contain no `;`, `|` or `&` (split_segments), so a
+# segment-scoped match is no weaker than the old `[^|;&]*` whole-command form.
+#
+# TWO views of each segment. Quoting is a delimiter at token EDGES *and inside* a
+# token — `ma"in"`, `-r"f"`, `p"us"h` and `ma\in` are the same words to the shell as
+# their bare forms, and all of them were ALLOWED while the edge cases blocked. That is
+# the round-3 argument ("quotes are delimiters, not obfuscation") applied to only half
+# the places it holds. Every rule now runs against the raw segment AND a copy with
+# quotes and backslashes removed, via one shared helper, so the two views cannot drift
+# apart rule by rule.
+#
+# The EXEMPTION deliberately keeps using the raw segment only: stripping quotes from
+# `git commit -m 'push --force to main'` would turn the message into bare words and
+# block it, which is the false positive the exemption exists to prevent.
+#
+# `in_msg` carries an unterminated quote across segments. split_segments cuts on `;`,
+# `|`, `&` and newline, which a commit MESSAGE routinely contains — this repo's own
+# messages are multi-line and discuss these very verbs — so without this a message body
+# line reads as a fresh command. The shell agrees with the tracking rather than the
+# splitting: while a quote is open, following text is message content, not a command.
+seg_matches() {   # <regex> — raw view OR stripped view
+  printf '%s' "$seg" | grep -qE -- "$1" && return 0
+  printf '%s' "$sseg" | grep -qE -- "$1"
+}
+# quote_state <text> <initial-state> -> none | sq | dq
+#
+# A left-to-right scanner, NOT a parity count. Round 5 counted occurrences of one quote
+# character and ignored the other's context, which made the hook FAIL OPEN on ordinary
+# typing — an apostrophe inside a double-quoted message opened the tracking and every
+# following segment was skipped:
+#
+#     git commit -m "don't" && git push --force origin main   -> ALLOWED
+#     git commit -m "it's fine" ; rm -rf /tmp/x               -> ALLOWED
+#
+# The shell does not agree: `"don't"` is closed, so those are real commands. It was
+# data-dependent (two apostrophes -> even -> blocked), needed no obfuscation, and this
+# repo's own commit messages contain apostrophes. It was the only fail-open path left in
+# the hook, and it was introduced by the fix for multi-line messages.
+#
+# Rules the scanner encodes: inside single quotes NOTHING escapes and only `'` closes;
+# elsewhere a backslash consumes the next character; `"` and `'` open their own state
+# only when not already inside the other. The state is always determined, so there is no
+# "undetermined" branch that could silently skip.
+#
+# Two more shell facts, added in round 9 after the first version shipped with the same
+# bug arriving through different doors — which is the argument for a real lexer, since
+# each of these is grammar the scanner has to be taught one construct at a time:
+#
+#   * `#` at the start of a word BEGINS A COMMENT, so its contents are inert. Without
+#     this, an apostrophe in a trailing comment opened the state and skipped every
+#     following segment — no obfuscation, ordinary English:
+#         git commit -m "fix" # don't forget to rebase
+#         git push origin main                          -> ALLOWED
+#   * `$'…'` is ANSI-C quoting, where a backslash DOES escape (unlike a plain `'…'`),
+#     so `$'it\'s'` is closed. Same mechanism, needs deliberate typing rather than
+#     ordinary prose, but it is the same class and costs one state to fix.
+quote_state() {
+  printf '%s' "$1" | awk -v st="${2:-none}" '
+    {
+      n = length($0)
+      for (i = 1; i <= n; i++) {
+        c = substr($0, i, 1)
+        if (st == "sq") { if (c == "'"'"'") st = "none" }
+        else if (st == "esq") {
+          if (c == "\\") i++
+          else if (c == "'"'"'") st = "none"
+        }
+        else if (st == "dq") {
+          if (c == "\\") i++
+          else if (c == "\"") st = "none"
+        } else {
+          if (c == "#" && (i == 1 || substr($0, i - 1, 1) ~ /[[:space:]();&|]/)) break
+          if (c == "\\") i++
+          else if (c == "$" && substr($0, i + 1, 1) == "'"'"'") { st = "esq"; i++ }
+          else if (c == "'"'"'") st = "sq"
+          else if (c == "\"") st = "dq"
+        }
+      }
+    }
+    END { print st }'
+}
+
+# A SEGMENT INSIDE DATA MAY NOT ESTABLISH THE EXEMPTION. Round 12, and the same
+# stage-ordering defect one layer up: `in_msg` only ever updated on segments it had
+# already exempted, so a line that merely LOOKS like an unterminated `git commit -m "…`
+# switched off every rule for the rest of the command — even when the shell treats that
+# line as inert data. Shell-verified, all six gated verbs, `main` blocks all three:
+#
+#     cat <<EOF                 cat <<'EOF'              echo 'note:
+#     git commit -m "fix        git commit -m "fix       git commit -m "fix
+#     EOF                       EOF                      '
+#     <gated verb>              <gated verb>             <gated verb>
+#
+# Two trackers, both BLOCK-ONLY by construction — they can withdraw an exemption and can
+# never grant one, so the accepted false-positive profile is unchanged:
+#
+#   `data_state` — cumulative quote state over EVERY segment, not just exempt ones. A
+#     segment may only establish the exemption when the shell is not already inside a
+#     quoted region at that point.
+#   `in_hd`      — a heredoc body is data by definition. Note the rules STILL RUN on
+#     heredoc bodies: skipping them would be a second exemption, and an exemption is
+#     exactly what keeps going wrong here. This only denies them the power to exempt.
+#
+# `in_msg` is deliberately left as-is — it skips segments, so widening what opens it
+# would be a fail-open lever. Skipping stays tied to a commit this hook actually exempted.
+# msg_tail <segment> <open-state> — the text AFTER the open quote closes, or empty if it
+# never closes in this segment.
+#
+# Round 12b, found by the oracle's new continuation dimension the moment it existed. When
+# an exempt commit message closed PART-WAY through a segment, the loop skipped the whole
+# segment — but the remainder is real command text, and the shell runs it:
+#
+#     ( git commit -m "l1
+#     l2" )#c\
+#     git push --force origin main          -> ALLOWED, and the shell executes the push
+#
+# (`\` at the end of a comment is not a continuation, so line 3 is a command; the hook's
+# fold makes it look like comment text, which is the same stage-ordering defect again.)
+#
+# Checking the tail is BLOCK-ONLY — it can only add matches, never remove one — which is
+# why it is the right shape of fix here even though the root cause is the fold.
+msg_tail() {
+  printf '%s' "$1" | awk -v st="$2" '
+    {
+      n = length($0); cut = 0
+      for (i = 1; i <= n; i++) {
+        c = substr($0, i, 1)
+        if (st == "sq")       { if (c == "'"'"'") { cut = i; break } }
+        else if (st == "esq") { if (c == "\\") i++; else if (c == "'"'"'") { cut = i; break } }
+        else if (st == "dq")  { if (c == "\\") i++; else if (c == "\"") { cut = i; break } }
+        else break
+      }
+      if (cut > 0 && cut < n) print substr($0, cut + 1)
+    }'
+}
+
+in_msg="none"
+data_state="none"
+in_hd=0
+hd_queue=""      # FIFO of "dash<TAB>delimiter", one per open heredoc
+tab=$'\t'
+while IFS= read -r seg; do
+  seg_start_state=$data_state
+  data_state=$(quote_state "$seg" "$data_state")
+
+  if [ "$in_hd" = 1 ]; then
+    hd_front=${hd_queue%%"$nl"*}
+    hd_dash=${hd_front%%"$tab"*}
+    hd_delim=${hd_front#*"$tab"}
+    # `<<` allows NO leading whitespace on the terminator; `<<-` strips TABS ONLY.
+    # Stripping all whitespace for both — the round-12 spelling — ended the heredoc a
+    # line early, so the body's tail was treated as commands and could exempt.
+    if [ "$hd_dash" = 1 ]; then hd_cand=${seg#"${seg%%[!"$tab"]*}"}; else hd_cand=$seg; fi
+    if [ "$hd_cand" = "$hd_delim" ]; then
+      hd_queue=${hd_queue#*"$nl"}
+      [ -z "$hd_queue" ] && in_hd=0
+    fi
+  else
+    hd_found=$(printf '%s' "$seg" | awk -v tab="$tab" '
+      {
+        s = $0; n = 0
+        while (match(s, /<<-?[ \t]*(\\?[A-Za-z_][A-Za-z0-9_]*|"[^"]*"|'"'"'[^'"'"']*'"'"')/)) {
+          if (substr(s, RSTART, 3) == "<<<") { s = substr(s, RSTART + 3); continue }
+          tok = substr(s, RSTART, RLENGTH)
+          s = substr(s, RSTART + RLENGTH)
+          dash = (substr(tok, 3, 1) == "-") ? 1 : 0
+          d = tok
+          sub(/^<<-?[ \t]*/, "", d)
+          sub(/^\\/, "", d)
+          gsub(/^["'"'"']|["'"'"']$/, "", d)
+          print dash tab d
+          n++
+        }
+        # FAIL CLOSED on a `<<` we could not parse. Unrecognised must mean "stay in
+        # data", never "leave data" — `cat <<\EOF` was unparsed, so the tracker never
+        # engaged at all and the body could establish the exemption. An unmatchable
+        # delimiter keeps us inside the heredoc for the rest of the command, which only
+        # ever withdraws exemptions.
+        rest = $0; extra = 0
+        while (match(rest, /<</)) {
+          if (substr(rest, RSTART, 3) != "<<<") extra++
+          rest = substr(rest, RSTART + ((substr(rest, RSTART, 3) == "<<<") ? 3 : 2))
+        }
+        for (i = n; i < extra; i++) print "0" tab "\001UNPARSEABLE-HEREDOC\001"
+      }')
+    if [ -n "$hd_found" ]; then
+      hd_queue="$hd_found$nl"
+      in_hd=1
+    fi
   fi
-  # `/` and `+` join the allowed prefixes so a fully-qualified or force refspec still
-  # names the branch: `HEAD:refs/heads/main` and `+main` both reached the remote's
-  # main branch while this rule, which only accepted a space or `:` before the name,
-  # saw nothing.
-  if printf '%s' "$push_seg" | grep -qE -- '(^|[[:space:]:/+])(main|master)([[:space:]]|$)'; then
-    deny "direct push to main/master is forbidden — push a feature branch and open a PR instead."
+
+  if [ "$in_msg" != "none" ]; then
+    tail_after_msg=$(msg_tail "$seg" "$in_msg")
+    in_msg=$(quote_state "$seg" "$in_msg")
+    [ "$in_msg" != "none" ] && continue     # message still open: the whole segment is text
+    [ -z "$tail_after_msg" ] && continue    # message closed exactly at the segment end
+    seg=$tail_after_msg                     # the remainder is a real command — vet it
   fi
-  # otherwise: feature-branch push allowed (needed to open PRs).
-fi
-# history rewrite / hard reset
-if printf '%s' "$norm" | grep -qE '\bgit\b[^|;&]*\b(filter-branch|filter-repo)\b|\bgit\b[^|;&]*reset[[:space:]]+--hard'; then
-  deny "history rewrite / hard reset is human-gated."
-fi
-# kubectl delete against clusters — operator owns cluster state (ADR-0001)
-if printf '%s' "$norm" | grep -qE '\bkubectl\b[^|;&]*\bdelete\b'; then
-  deny "'kubectl delete' is human-gated — the operator is the single source of truth (ADR-0001). Express deletes via the CR, or run it yourself."
-fi
-# cluster / infra teardown
-if printf '%s' "$norm" | grep -qE '\boci ce cluster delete\b|\boci ce node-pool delete\b|\bterraform destroy\b|\bkind delete cluster\b'; then
-  deny "cluster/infra teardown is human-gated. Run it yourself if intended."
-fi
+  [ -z "$seg" ] && continue
+  if [ "$seg_start_state" = "none" ] && [ "$in_hd" = 0 ] && is_literal_commit "$seg"; then
+    in_msg=$(quote_state "$seg" none)
+    continue
+  fi
+  sseg=${seg//\"/}; sseg=${sseg//$sq/}; sseg=${sseg//\\/}
+
+  # ── rm -rf ─────────────────────────────────────────────────────────────────
+  #
+  # Both a RECURSIVE flag and a FORCE flag must be present; either alone is ordinary
+  # work (`rm -f file`, `rm -r dir`) and blocking it teaches the reader to route
+  # around the guard. They need not share a token (`rm -r -f` is `rm -rf`), and `-R`
+  # is the POSIX/BSD synonym for `-r`.
+  #
+  # The old single-token patterns `-[A-Za-z]*r[A-Za-z]*f` also matched the STRING
+  # `--force` (f-o-r), so `rm --force onefile` — the long form of a case this guard
+  # explicitly allows — was blocked, while `rm -Rf` sailed through.
+  #
+  # MATCH BROADLY, EXCLUDE NARROWLY. The command-word class excludes a preceding `-`,
+  # which is what keeps `docker run --rm` out; it allows `\rm`, quoted and
+  # path-qualified forms, which were live bypasses.
+  if seg_matches "$rm_cmd_re"; then
+    has_r=0; has_f=0
+    seg_matches "${lead}(--recursive|--dir|-[A-Za-z]*[Rr][A-Za-z]*)(${delim}|=|\$)" && has_r=1
+    seg_matches "${lead}(--force|-[A-Za-z]*f[A-Za-z]*)(${delim}|=|\$)" && has_f=1
+    # `--force` also matches the short-flag alternative above (f-o-r-c-e contains r and
+    # f), so recursion is only credited when a SHORT flag carries r, or --recursive/--dir
+    # is present explicitly.
+    seg_matches "${lead}--force(${delim}|=|\$)" &&
+      ! seg_matches "${lead}(--recursive|--dir|-[A-Za-z]*[Rr])" && has_r=0
+    if [ "$has_r" = 1 ] && [ "$has_f" = 1 ]; then
+      deny "destructive 'rm -rf'. Remove specific paths deliberately, or run it yourself."
+    fi
+  fi
+
+  # ── git push ───────────────────────────────────────────────────────────────
+  #
+  # Feature-branch pushes are ALLOWED so agents can open PRs autonomously
+  # (security.md grants this explicitly). Still forbidden: force/mirror/--all, and
+  # any push that targets main/master.
+  if seg_matches '\bgit\b' && seg_matches '\bpush\b'; then
+    if seg_matches "${lead}(--force|--force-with-lease|--mirror|--all)(${delim}|=|\$)|${lead}-[A-Za-z]*f[A-Za-z]*(${delim}|\$)|${lead}\\+[A-Za-z0-9._/-]"; then
+      deny "force/mirror/--all push is forbidden. Push a single feature branch and open a PR."
+    fi
+    # Quotes and a leading backslash count as delimiters: `git push origin "main"` and
+    # `git push origin \main` reach main exactly as the bare form does.
+    if seg_matches "${blead}(main|master)(${delim}|\$)"; then
+      deny "direct push to main/master is forbidden — push a feature branch and open a PR instead."
+    fi
+  fi
+
+  # ── history rewrite / hard reset ───────────────────────────────────────────
+  if seg_matches '\bgit\b.*\b(filter-branch|filter-repo)\b|\bgit\b.*reset[[:space:]]+--hard'; then
+    deny "history rewrite / hard reset is human-gated."
+  fi
+  # ── kubectl delete — the operator owns cluster state (ADR-0001) ────────────
+  if seg_matches '\bkubectl\b.*\bdelete\b'; then
+    deny "'kubectl delete' is human-gated — the operator is the single source of truth (ADR-0001). Express deletes via the CR, or run it yourself."
+  fi
+  # ── cluster / infra teardown ───────────────────────────────────────────────
+  # `${ws}` between EVERY word, not a literal space. Round 3's finding was "no rule may
+  # hand-roll a delimiter"; it was applied to the branch rule and not here, so
+  # `terraform<TAB>destroy` and `kind  delete cluster` were ALLOWED. Round 7 then fixed
+  # only the LAST separator in each alternative, leaving the literal spaces inside
+  # `oci ce cluster` — so `oci  ce cluster delete` and `oci ce<TAB>cluster delete` were
+  # still allowed while the comment claimed the fix was complete. Third instance of the
+  # same half-applied shape, which is why every gap between words now uses ${ws}.
+  if seg_matches "\\boci${ws}ce${ws}cluster${ws}delete\\b|\\boci${ws}ce${ws}node-pool${ws}delete\\b|\\bterraform${ws}destroy\\b|\\bkind${ws}delete${ws}cluster\\b"; then
+    deny "cluster/infra teardown is human-gated. Run it yourself if intended."
+  fi
+done <<EOF
+$(split_segments "$joined")
+EOF
+
 exit 0

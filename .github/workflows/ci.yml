@@ -43,6 +43,51 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Full-history secret scan (security sprint S1). DELIBERATELY carries no
+  # continue-on-error and no ref-conditional if: — the house idiom
+  # `continue-on-error: ${{ github.ref != 'refs/heads/main' }}` used elsewhere
+  # in this file would make this gate advisory on pull_request, the one event
+  # it exists for. Full history (fetch-depth: 0) rather than diff scanning
+  # kills the whole bypass class: base-branch secrets the diff never re-reads,
+  # and force-pushes that rewrite the PR base out of a diff window. Runs the
+  # pinned gitleaks BINARY, not gitleaks-action (org licensing + an unpinned
+  # code path). Guarded by tests/secret-scan-gate.test.ts.
+  #
+  # Pin-resolution scope, recorded here so it survives the PR body: this pin
+  # is deliberately OUTSIDE verify-action-pins.mjs — that nightly resolves
+  # SHA<->tag drift for `uses:` action refs, whereas this is a sha256 over the
+  # release tarball itself (stronger: content-addressed, no ref to drift).
+  # Version bumps are deliberate edits to this file + secret-scan-nightly.yml.
+  secret-scan:
+    name: Secret scan (full history)
+    runs-on: ubuntu-latest
+    env:
+      GITLEAKS_VERSION: '8.30.1'
+      GITLEAKS_SHA256: '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb'
+    steps:
+      - name: Checkout code (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          # This job downloads and executes a third-party binary over full
+          # history; it must not do so with a GITHUB_TOKEN sitting in
+          # .git/config (same posture as the nightly twin).
+          persist-credentials: false
+
+      - name: Install pinned gitleaks (checksum-verified)
+        run: |
+          set -eu
+          curl -fsSL -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
+          rm gitleaks gitleaks.tar.gz
+          gitleaks version
+
+      - name: Scan full history against the disposition-classed allowlist
+        run: node scripts/secret-scan.mjs
+
   lint-and-test:
     name: Lint & Test
     runs-on: ubuntu-latest
@@ -525,6 +570,71 @@ jobs:
           # Run every suite before failing, so one red suite does not hide the
           # state of the other six.
           exit "$failed"
+
+  safety-hook-guard:
+    name: Agent safety-control hook (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    # `.claude/hooks/block-dangerous-bash.sh` is the ONLY enforcement of the
+    # operations `.claude/rules/security.md` calls never acceptable on an agent's
+    # behalf: force/mirror/--all push, direct push to main/master, history rewrite,
+    # recursive-force removal, cluster deletes, infra teardown.
+    #
+    # Its test suite is, by its own history, the only thing that has ever caught a
+    # regression in it — and until now it ran only when a human remembered to type it.
+    # That is exactly the shape security.md warns about: a documented expectation
+    # degrades, and its efficacy is unobservable until it has already failed. Four
+    # separate rounds shipped a bypass that looked correct on inspection.
+    #
+    # BOTH PLATFORMS, and that is the point rather than thoroughness for its own sake.
+    # One of those bypasses was a BSD/GNU `sed` split: `N` at EOF discards the pattern
+    # space on macOS and prints on GNU, so the hook was open where contributors run it
+    # and closed where CI would have looked. A Linux-only gate cannot see that class at
+    # all — it would have gone green while the control was open on every developer
+    # machine. `grep -E \b` (four rule families) and `awk` behaviour differ the same way.
+    # fail-fast is off so a divergence shows which platform, not just that one failed.
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Run the safety-control suite
+        run: |
+          set -euo pipefail
+          bash .claude/hooks/block-dangerous-bash.test.sh
+      - name: Prove the suite is not decoration
+        run: |
+          set -euo pipefail
+          # A guard that stays green when its subject is removed is decoration
+          # (.claude/rules/workflow.md). Rather than assert a case count — which
+          # drifts, and which gets edited to green — neuter the hook and require the
+          # suite to NOTICE. The anchor must occur exactly once or this aborts: a
+          # silently-failed substitution yields a green run that proves nothing.
+          # MUTATE A COPY, never the in-tree hook. Safe here only because a runner
+          # is ephemeral is not a reason to keep doing it: ADR-0043 Decision 9 says an
+          # evidence harness may not mutate the artifact under test in the shared tree,
+          # and this step is an evidence harness. Three lines to obey it.
+          work=$(mktemp -d)
+          cp .claude/hooks/block-dangerous-bash.sh .claude/hooks/block-dangerous-bash.test.sh "$work"/
+          hook="$work/block-dangerous-bash.sh"
+          # python3, not `sed -i`: that spelling is GNU-only and fails on the macOS half
+          # of this matrix, which would have made the platform pair pointless. The script
+          # asserts the anchor occurs exactly once and aborts otherwise — a silently
+          # failed substitution yields a green run that proves nothing, which is why
+          # `.claude/rules/workflow.md` bans doing this with perl.
+          # One line deliberately: a heredoc body inside a YAML block scalar keeps its
+          # indentation, which python rejects.
+          python3 -c "p='$hook'; s=open(p).read(); a='deny() { echo'; n=s.count(a); assert n==1, f'anchor occurs {n}x, expected 1'; o=s.replace(a,'deny() { return 0; echo',1); assert o!=s, 'substitution produced no change'; open(p,'w').write(o)"
+          grep -q 'deny() { return 0;' "$hook" || { echo "::error::mutation did not land"; exit 1; }
+          if bash "$work/block-dangerous-bash.test.sh" >/dev/null 2>&1; then
+            echo "::error::the suite passed with every deny() neutered — it proves nothing"
+            exit 1
+          fi
+          # The in-tree hook must be untouched by this step, asserted not assumed.
+          git diff --quiet -- .claude/hooks/block-dangerous-bash.sh ||
+            { echo "::error::this step modified the in-tree hook"; exit 1; }
+          echo "OK: neutering deny() reddens the suite, and the in-tree hook is untouched"
 
   operator-codegen-check:
     name: Operator codegen is up-to-date (make generate + make manifests)

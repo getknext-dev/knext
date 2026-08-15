@@ -423,6 +423,56 @@ describe("runAssetGC", () => {
         expect(calls.some((argv) => argv.includes("revision"))).toBe(false);
     });
 
+    // The end state a system-designer review flagged as uncovered while analysing why
+    // the asset-GC nightly had been red for 31 runs: `status.currentTraffic` can be
+    // STALE — Knative retains the last successfully programmed split when a pinned
+    // revision cannot program (serving v0.48.0 `route.go` only assigns Status.Traffic
+    // on the success path) — and Knative's own revision GC will eventually delete those
+    // now-unreferenced revisions. The status then names revisions that 404.
+    //
+    // What happens next is safe but worth pinning: the label read THROWS, resolution
+    // fails safe, and the asset GC skips. Not once — on EVERY run, for as long as the
+    // stale status stands. That is over-keep (correct), but it means asset growth is
+    // unbounded for ALL builds, not just the stale ones, and the only thing separating
+    // "transient blip" from "GC has not run for a month" is the operator noticing the
+    // same token every night.
+    //
+    // The token is what a runbook alerts on, so it is asserted rather than assumed.
+    it("STALE status naming a DELETED revision ⇒ NO prune, [unresolvable-live-build-id] — every run, not once", () => {
+        const calls: string[][] = [];
+        const exec = (argv: readonly string[]): string => {
+            calls.push([...argv]);
+            if (argv.some((a) => a.includes(".status.currentTraffic")))
+                // the stale split: two revisions Knative programmed before the bad pin
+                return trafficJson(["shop-00002", "shop-00003"]);
+            if (argv.some((a) => a.includes(".spec.traffic.revisionName")))
+                return "shop-00099"; // the unprogrammable pin that froze the status
+            // Knative's revision GC has since reaped shop-00003.
+            if (argv.includes("shop-00003"))
+                throw new Error(
+                    'revisions.serving.knative.dev "shop-00003" not found',
+                );
+            return "bid-old";
+        };
+        const prune = vi.fn();
+
+        const first = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
+        expect(first.pruned).toBe(false);
+        expect(first.skipReason).toBe("unresolvable-live-build-id");
+        expect(prune).not.toHaveBeenCalled();
+
+        // Idempotently stuck: nothing about a second run changes the outcome, which is
+        // the property that makes this a storage-growth problem rather than a blip.
+        const second = runAssetGC(makeConfig(), "prod", "bid-e", exec, prune);
+        expect(second.pruned).toBe(false);
+        expect(second.skipReason).toBe("unresolvable-live-build-id");
+        expect(prune).not.toHaveBeenCalled();
+
+        // And it really did try to resolve the deleted revision — otherwise this
+        // passes for the wrong reason (e.g. an earlier fail-safe short-circuiting).
+        expect(calls.some((argv) => argv.includes("shop-00003"))).toBe(true);
+    });
+
     it("TOKEN PRECEDENCE (#274 gate): pin probe throws AND the live label would be unresolvable ⇒ [pinned-not-resolvable], never [unresolvable-live-build-id]", () => {
         // Both fail-safes are armed at once: the spec-pin probe throws AND the
         // live revision's build-id label read would come back empty. The

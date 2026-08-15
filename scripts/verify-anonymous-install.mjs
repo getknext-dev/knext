@@ -1319,6 +1319,41 @@ export function auditAnonymousWorkflowJob(workflowText) {
  * is not a bundle"), and on this path more information is better than less.
  */
 /**
+ * Flatten an Error's `cause` chain into one line.
+ *
+ * WHY THIS EXISTS. `fetch` rejects with `TypeError: fetch failed` and puts the
+ * actual reason — `ENOTFOUND`, `ECONNREFUSED`, `UNABLE_TO_VERIFY_LEAF_SIGNATURE`,
+ * a timeout — in `error.cause`, sometimes nested a second level. Reporting only
+ * `error.message` therefore produced the literal string "fetch failed" and nothing
+ * else, which is what this nightly emitted for five consecutive red runs on `main`
+ * while the documented URL returned 200 from a developer machine. The gate was
+ * working exactly as designed and was undiagnosable, so nobody could act on it.
+ *
+ * `unreachable is a FAILURE, never a pass` is the right ruling and is unchanged.
+ * This only makes the failure say WHY, which is the difference between a red gate
+ * that gets fixed and a red gate that gets ignored.
+ *
+ * The chain is walked with a `seen` set because `cause` can be self-referential,
+ * and a check that hangs is a check that gets deleted.
+ *
+ * @param {unknown} error
+ * @returns {string}
+ */
+export function describeFetchFailure(error) {
+  if (!(error instanceof Error)) return String(error);
+  const parts = [error.message];
+  const seen = new Set([error]);
+  let cause = error.cause;
+  while (cause instanceof Error && !seen.has(cause)) {
+    seen.add(cause);
+    const code = /** @type {{ code?: string }} */ (cause).code;
+    parts.push(code ? `${code}: ${cause.message}` : cause.message);
+    cause = cause.cause;
+  }
+  return parts.join(' <- ');
+}
+
+/**
  * The narrow slice of `fetch` this check actually uses.
  *
  * Declared rather than inferred from the `= fetch` default. Inferring gives the
@@ -1352,7 +1387,7 @@ export async function fetchInstallBundle(url, { fetchImpl = fetch } = {}) {
         {
           reason: 'install-url-unreachable',
           ref: url,
-          message: error instanceof Error ? error.message : String(error),
+          message: describeFetchFailure(error),
           detail: 'unreachable is a FAILURE, never a pass',
         },
       ],
