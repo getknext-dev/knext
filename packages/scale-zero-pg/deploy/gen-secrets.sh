@@ -278,6 +278,46 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# compute-jwt-trust — the compute_ctl control-API trust anchor (per cluster)
+# ---------------------------------------------------------------------------
+# compute_ctl's external HTTP API verifies bearer JWTs against the jwks in its
+# spec. That JWK used to be COMMITTED — and its private half was itself in git
+# history (this repo is public, so deletion is not revocation), letting anyone
+# mint valid control-API tokens. Now the spec template carries placeholders and
+# the real keypair is generated HERE, per cluster:
+#   jwt-signing.pem -> the Ed25519 PRIVATE key (break-glass signing; never
+#                      leaves this Secret, never in git)
+#   JWT_JWK_KID     -> key id the compute manifests mount as env
+#   JWT_JWK_X       -> base64url raw public key (RFC 8037), mounted as env
+# Nothing in the platform signs with the private key today — the anchor exists
+# to keep the control API LOCKED to the Secret holder. No-silent-rotation: if
+# the Secret exists, leave it (rotating re-keys the door deliberately: delete
+# + re-run + restart computes).
+CJNAME=compute-jwt-trust
+if $K get secret "$CJNAME" >/dev/null 2>&1; then
+  echo "ok - Secret $CJNAME already exists; leaving untouched (no silent rotation)"
+else
+  command -v openssl >/dev/null || fail "need openssl to generate the $CJNAME Ed25519 keypair"
+  CJTMP=$(mktemp -d) || fail "mktemp failed"
+  # shellcheck disable=SC2064 -- expand CJTMP now, deliberately
+  trap "rm -rf '$CJTMP'" EXIT
+  openssl genpkey -algorithm ed25519 -out "$CJTMP/jwt-signing.pem" 2>/dev/null \
+    || fail "openssl genpkey ed25519 failed (needs openssl >= 1.1.1)"
+  # Raw 32-byte public key = the last 32 bytes of the 44-byte SPKI DER.
+  CJ_X=$(openssl pkey -in "$CJTMP/jwt-signing.pem" -pubout -outform DER 2>/dev/null \
+    | tail -c 32 | base64 | tr '+/' '-_' | tr -d '=\n')
+  [ ${#CJ_X} -eq 43 ] || fail "derived JWK x is not 43 base64url chars (got ${#CJ_X}) — refusing to store a malformed anchor"
+  CJ_KID=$(od -An -tx1 -N8 /dev/urandom | tr -d ' \n')
+  $K create secret generic "$CJNAME" \
+    --from-file=jwt-signing.pem="$CJTMP/jwt-signing.pem" \
+    --from-literal=JWT_JWK_KID="$CJ_KID" \
+    --from-literal=JWT_JWK_X="$CJ_X" >/dev/null \
+    || fail "could not create Secret $CJNAME"
+  rm -rf "$CJTMP"; trap - EXIT
+  echo "ok - created Secret $CJNAME (per-cluster Ed25519 trust anchor; private key hidden)"
+fi
+
+# ---------------------------------------------------------------------------
 # backup-s3-target — OFF-CLUSTER backup destination (OCI Object Storage)
 # ---------------------------------------------------------------------------
 # The daily backup CronJob (deploy/62-backup.yaml) mirrors the `neon` bucket to

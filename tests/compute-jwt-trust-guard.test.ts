@@ -112,39 +112,49 @@ describe('compute JWT trust anchor — the revoked key is gone', () => {
 });
 
 describe('compute JWT trust anchor — the sanctioned mechanism exists', () => {
-  it('the committed jwks is a template: placeholders, no literal key material', () => {
-    expect(computeFiles).toContain('JWT_JWK_KID_PLACEHOLDER');
-    expect(computeFiles).toContain('JWT_JWK_X_PLACEHOLDER');
-    // The other half: inside compute_ctl_config, "x" and "kid" may ONLY carry
-    // the placeholder — any other value is committed key material.
-    const jwksBlock = computeFiles.slice(computeFiles.indexOf('"compute_ctl_config"'));
-    const literalValues = [...jwksBlock.matchAll(/"(?:x|kid)":\s*"([^"]+)"/g)]
-      .map((m) => m[1])
-      .filter((v) => !v.includes('PLACEHOLDER'));
-    expect(
-      literalValues,
-      'compute_ctl_config carries a literal "x"/"kid" — key material belongs in the ' +
-        'per-cluster Secret, never in git',
-    ).toEqual([]);
+  it('BOTH homes of config.json are templates: placeholders, no literal key material', () => {
+    // config.json lives twice: inline in 54-compute-files.yaml AND as
+    // deploy/compute-files/config.json (the --from-file source). The audit's
+    // first pass fixed only the inline copy — the file copy still carried the
+    // revoked JWK. Same dual-home drift shape as the loadsoak SLOs, so both
+    // copies are asserted here.
+    const fileCopy = readTracked('packages/scale-zero-pg/deploy/compute-files/config.json');
+    expect(fileCopy, 'the --from-file config.json copy is missing').toBeTruthy();
+    for (const [label, text] of [
+      ['54-compute-files.yaml (inline)', computeFiles],
+      ['compute-files/config.json (file)', fileCopy as string],
+    ] as const) {
+      expect(text, `${label} lacks the kid placeholder`).toContain('JWT_JWK_KID_PLACEHOLDER');
+      expect(text, `${label} lacks the x placeholder`).toContain('JWT_JWK_X_PLACEHOLDER');
+      // The other half: inside compute_ctl_config, "x" and "kid" may ONLY carry
+      // the placeholder — any other value is committed key material.
+      const jwksBlock = text.slice(text.indexOf('"compute_ctl_config"'));
+      const literalValues = [...jwksBlock.matchAll(/"(?:x|kid)":\s*"([^"]+)"/g)]
+        .map((m) => m[1])
+        .filter((v) => !v.includes('PLACEHOLDER'));
+      expect(
+        literalValues,
+        `${label} carries a literal "x"/"kid" — key material belongs in the ` +
+          'per-cluster Secret, never in git',
+      ).toEqual([]);
+    }
   });
 
   it('every entrypoint that substitutes the md5 placeholder also substitutes the JWK', () => {
     // Scan, not enumerate: count sed lines touching CLOUD_ADMIN_MD5_PLACEHOLDER;
     // each must also rewrite both JWK placeholders. A new entrypoint added later
     // is covered without anyone remembering this test.
-    const sedLines = computeFiles
-      .split('\n')
-      .filter((l) => l.includes('CLOUD_ADMIN_MD5_PLACEHOLDER') && /\bsed\b|-e /.test(l));
-    expect(sedLines.length, 'expected the template substitution sites').toBeGreaterThanOrEqual(3);
-    const covered = computeFiles
-      .split('\n')
-      .filter((l) => l.includes('JWT_JWK_X_PLACEHOLDER') && l.includes('JWT_JWK_KID_PLACEHOLDER'))
-      .filter((l) => /\bsed\b|-e /.test(l));
-    expect(
-      covered.length,
-      'an entrypoint substitutes the md5 placeholder but not the JWK placeholders — ' +
-        'that compute boots with a LITERAL placeholder as its trust anchor',
-    ).toBeGreaterThanOrEqual(sedLines.length);
+    const subLines = (needle: string) =>
+      computeFiles.split('\n').filter((l) => l.includes(needle) && /-e\s+"s\|/.test(l)).length;
+    const md5Sites = subLines('CLOUD_ADMIN_MD5_PLACEHOLDER');
+    expect(md5Sites, 'expected the template substitution sites').toBeGreaterThanOrEqual(3);
+    for (const ph of ['JWT_JWK_X_PLACEHOLDER', 'JWT_JWK_KID_PLACEHOLDER']) {
+      expect(
+        subLines(ph),
+        `an entrypoint substitutes the md5 placeholder but not ${ph} — ` +
+          'that compute boots with a LITERAL placeholder as its trust anchor',
+      ).toBeGreaterThanOrEqual(md5Sites);
+    }
   });
 
   it('the entrypoints fail safe: absent env, the anchor becomes a random key nobody holds', () => {
@@ -159,6 +169,33 @@ describe('compute JWT trust anchor — the sanctioned mechanism exists', () => {
     // No-silent-rotation, same contract as every other Secret in this script.
     const section = genSecrets.slice(genSecrets.indexOf('compute-jwt-trust'));
     expect(section).toMatch(/already exists; leaving untouched/);
+  });
+
+  it('54-compute-files.yaml is a faithful regeneration of its deploy/compute-files/ sources', () => {
+    // The yaml is GENERATED (its own header documents the kubectl command).
+    // The rotation's first pass edited the generated copy and missed a source —
+    // this asserts every source file appears verbatim (4-space indented) in the
+    // generated ConfigMap, so an un-regenerated edit on either side goes red.
+    for (const name of [
+      'config.json',
+      'entrypoint.sh',
+      'entrypoint-ro.sh',
+      'entrypoint-warm.sh',
+      'lib-harden.sh',
+    ]) {
+      const body = readTracked(`packages/scale-zero-pg/deploy/compute-files/${name}`);
+      expect(body, `source ${name} missing`).toBeTruthy();
+      const indented = (body as string)
+        .replace(/\n$/, '')
+        .split('\n')
+        .map((l) => (l.length ? `    ${l}` : l))
+        .join('\n');
+      expect(
+        computeFiles.includes(indented),
+        `54-compute-files.yaml is stale for ${name} — edit deploy/compute-files/ and ` +
+          'regenerate (the kubectl command in the yaml header), never hand-edit the yaml',
+      ).toBe(true);
+    }
   });
 
   it('the base compute manifests mount the JWK envs from the Secret', () => {

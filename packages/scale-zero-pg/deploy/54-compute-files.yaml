@@ -184,10 +184,10 @@ data:
                             "verify"
                         ],
                         "alg": "EdDSA",
-                        "kid": "ZGIxMzAzOGY0YWQwODk2ODU1MTk1NzMxMDFkYmUyOWU2NzZkOWNjNjMyMGRkZGJjOWY0MjdjYWVmNzE1MjUyOAo=",
+                        "kid": "JWT_JWK_KID_PLACEHOLDER",
                         "kty": "OKP",
                         "crv": "Ed25519",
-                        "x": "MGQ4ZDFhOTdmNTM0NmUwMDc3ZmJkN2Q0MWE0ZmI3M2NhNWE3YjFjOTNkM2IyYzRkZTQzOGM3MjBkZTk3N2E5ZAo="
+                        "x": "JWT_JWK_X_PLACEHOLDER"
                     }
                 ]
             }
@@ -223,6 +223,15 @@ data:
     DST=/tmp/config.json
     CLOUD_ADMIN_MD5="${CLOUD_ADMIN_MD5:-b093c0d3b281ba6da1eacc608620abd8}"
 
+    # compute_ctl JWT trust anchor — see entrypoint.sh for the full rationale:
+    # placeholders in the template, per-cluster key from the compute-jwt-trust
+    # Secret, random throwaway anchor when absent (fail-safe).
+    if [ -z "${JWT_JWK_X:-}" ]; then
+      JWT_JWK_X="$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')"
+      echo "compute_ctl jwks: no compute-jwt-trust Secret; using a random throwaway trust anchor"
+    fi
+    JWT_JWK_KID="${JWT_JWK_KID:-throwaway}"
+
     # pg_hba harden shared with the primary + warm entrypoints (issue #164). See
     # lib-harden.sh: harden_pg_hba inserts the #112 cloud_admin loopback-only reject and
     # rewrites the pg_hba catch-all md5 -> scram-sha-256 (#117). On a per-app RO compute
@@ -238,7 +247,9 @@ data:
 
     echo "Rendering RO compute spec (tenant=${TENANT_ID} timeline=${TIMELINE_ID} mode=${RO_MODE})"
     sed -e "s|TENANT_ID|${TENANT_ID}|g" -e "s|TIMELINE_ID|${TIMELINE_ID}|g" \
-        -e "s|CLOUD_ADMIN_MD5_PLACEHOLDER|${CLOUD_ADMIN_MD5}|g" "$SRC" > "$IDS"
+        -e "s|CLOUD_ADMIN_MD5_PLACEHOLDER|${CLOUD_ADMIN_MD5}|g" \
+        -e "s|JWT_JWK_KID_PLACEHOLDER|${JWT_JWK_KID}|g" \
+        -e "s|JWT_JWK_X_PLACEHOLDER|${JWT_JWK_X}|g" "$SRC" > "$IDS"
 
     case "$RO_MODE" in
       Replica)
@@ -299,6 +310,15 @@ data:
     DST=/tmp/config.json
     CLOUD_ADMIN_MD5="${CLOUD_ADMIN_MD5:-b093c0d3b281ba6da1eacc608620abd8}"
 
+    # compute_ctl JWT trust anchor — see entrypoint.sh for the full rationale:
+    # placeholders in the template, per-cluster key from the compute-jwt-trust
+    # Secret, random throwaway anchor when absent (fail-safe).
+    if [ -z "${JWT_JWK_X:-}" ]; then
+      JWT_JWK_X="$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')"
+      echo "compute_ctl jwks: no compute-jwt-trust Secret; using a random throwaway trust anchor"
+    fi
+    JWT_JWK_KID="${JWT_JWK_KID:-throwaway}"
+
     # pg_hba harden shared with the primary + RO entrypoints (issue #164). See
     # lib-harden.sh: harden_pg_hba inserts the #112 cloud_admin loopback-only reject and
     # rewrites the pg_hba catch-all md5 -> scram-sha-256 (#117). Gated on APP_ROLE (below):
@@ -311,7 +331,9 @@ data:
 
     echo "Rendering compute spec (tenant=${TENANT_ID} timeline=${TIMELINE_ID})"
     sed -e "s|TENANT_ID|${TENANT_ID}|g" -e "s|TIMELINE_ID|${TIMELINE_ID}|g" \
-        -e "s|CLOUD_ADMIN_MD5_PLACEHOLDER|${CLOUD_ADMIN_MD5}|g" "$SRC" > "$DST"
+        -e "s|CLOUD_ADMIN_MD5_PLACEHOLDER|${CLOUD_ADMIN_MD5}|g" \
+        -e "s|JWT_JWK_KID_PLACEHOLDER|${JWT_JWK_KID}|g" \
+        -e "s|JWT_JWK_X_PLACEHOLDER|${JWT_JWK_X}|g" "$SRC" > "$DST"
 
     GATE_HOST="${WARM_GATE_ADDR%:*}"
     GATE_PORT="${WARM_GATE_ADDR##*:}"
@@ -377,12 +399,13 @@ data:
     # On the PRIMARY single-DB compute (no APP_ROLE) cloud_admin IS the documented
     # credential clients present THROUGH the primary gateway over TCP. In a PRODUCT
     # deployment the base compute manifest (deploy/20) injects CLOUD_ADMIN_MD5 from the
-    # STRONG pg-base-admin Secret (deploy/gen-secrets.sh, matching the DATABASE_URL Secret
-    # plaintext), so the public default cloud_admin:cloud_admin is rejected over TCP even
-    # on the base tier (issue #168). The dev-default fallback below only applies to a BARE
-    # local run with no pg-base-admin Secret — a pure single-tenant path defended by
-    # NetworkPolicy + operator posture (docs/operations.md "Network isolation caveat" +
-    # "Base-tier cloud_admin").
+    # STRONG pg-base-admin Secret (minted by deploy/gen-secrets.sh, matching the strong
+    # plaintext in the DATABASE_URL Secret), so the public default cloud_admin:cloud_admin
+    # is rejected over TCP even on the base tier (issue #168 — a base tier co-resident with
+    # the multi-tenant plane must never ship the literal default). The dev-default fallback
+    # below only applies to a BARE local run with no pg-base-admin Secret (a pure single-
+    # tenant path, defended by NetworkPolicy + operator posture, docs/operations.md
+    # "Network isolation caveat" + "Base-tier cloud_admin").
     if [ -n "${APP_ROLE:-}" ]; then
       if [ -z "${CLOUD_ADMIN_MD5:-}" ] || [ "${CLOUD_ADMIN_MD5}" = "$PUBLIC_CLOUD_ADMIN_MD5" ]; then
         CLOUD_ADMIN_MD5="$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
@@ -391,6 +414,23 @@ data:
     else
       CLOUD_ADMIN_MD5="${CLOUD_ADMIN_MD5:-$PUBLIC_CLOUD_ADMIN_MD5}"
     fi
+
+    # compute_ctl JWT trust anchor. The jwks in the spec template carries
+    # PLACEHOLDERS, never key material: the previous committed JWK's PRIVATE half
+    # was itself committed early in this repo's history (later deleted — but the
+    # repo is public, so history is publication), which let anyone mint valid
+    # compute_ctl control-API tokens. Rotation made the class unrepresentable:
+    # gen-secrets.sh generates the keypair PER CLUSTER into the compute-jwt-trust
+    # Secret (private half never leaves it), the compute manifests mount the
+    # public JWK fields as env, and this substitution puts them in the spec.
+    # Absent the Secret (bare local run): same fail-safe shape as the per-app
+    # random md5 above — a random anchor NOBODY holds, so the control API is
+    # locked rather than trusting a value anyone can read on GitHub.
+    if [ -z "${JWT_JWK_X:-}" ]; then
+      JWT_JWK_X="$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')"
+      echo "compute_ctl jwks: no compute-jwt-trust Secret; using a random throwaway trust anchor"
+    fi
+    JWT_JWK_KID="${JWT_JWK_KID:-throwaway}"
 
     # harden_pg_hba (issues #112 + #117): factored into the SHARED lib-harden.sh so
     # the primary / RO / warm entrypoints cannot drift (issue #164). It inserts the
@@ -401,7 +441,9 @@ data:
 
     echo "Rendering compute spec (tenant=${TENANT_ID} timeline=${TIMELINE_ID})"
     sed -e "s|TENANT_ID|${TENANT_ID}|g" -e "s|TIMELINE_ID|${TIMELINE_ID}|g" \
-        -e "s|CLOUD_ADMIN_MD5_PLACEHOLDER|${CLOUD_ADMIN_MD5}|g" "$SRC" > "$DST"
+        -e "s|CLOUD_ADMIN_MD5_PLACEHOLDER|${CLOUD_ADMIN_MD5}|g" \
+        -e "s|JWT_JWK_KID_PLACEHOLDER|${JWT_JWK_KID}|g" \
+        -e "s|JWT_JWK_X_PLACEHOLDER|${JWT_JWK_X}|g" "$SRC" > "$DST"
 
     # Per-app connection cap (issue #89, tenant quotas). When PG_MAX_CONNECTIONS is set
     # (per-app computes get it from compute-config-<app>), override ONLY the
