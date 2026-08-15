@@ -9,7 +9,8 @@ Previously the policy allowed any admitted source to reach **any port** on your 
 practice that meant a pod sharing your namespace could dial your app container directly, bypassing
 the Knative queue-proxy — and with it your app's concurrency limit and one layer of HTTP parsing.
 
-The policy now admits the queue-proxy ports (`8012`/`8013`) and the metrics ports (`9090`, `9091`)
+The policy now admits the queue-proxy ports (`8012`/`8013`, and `8112` for Knative's internal
+TLS path) and the metrics ports (`9090`, `9091`)
 from `knative-serving`/`kourier-system`, and the **metrics ports only** from same-namespace pods.
 Your app's container port is deliberately excluded — the queue-proxy reaches it over pod-local
 loopback, which no NetworkPolicy governs.

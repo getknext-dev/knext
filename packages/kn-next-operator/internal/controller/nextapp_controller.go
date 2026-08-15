@@ -1424,22 +1424,20 @@ func (r *NextAppReconciler) reconcileNetworkPolicy(ctx context.Context, nextApp 
 		return nil
 	}
 
+	// The reconciler and cmd/policygen build from ONE definition. The rules were
+	// unified first; the system-designer gate pointed out that podSelector and
+	// labels were still built independently, so the drill could have proved
+	// enforcement for a selector the reconciler no longer wrote. Both halves now
+	// come from DesiredNetworkPolicy.
+	desired := DesiredNetworkPolicy(nextApp.Name, nextApp.Namespace)
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, np, func() error {
 		if np.Labels == nil {
 			np.Labels = make(map[string]string)
 		}
-		np.Labels["app"] = nextApp.Name
-		np.Labels["generated-by"] = "kn-next-operator"
-
-		// Target the app's Knative serving pods. Knative stamps every revision pod
-		// with `serving.knative.dev/service=<ksvc name>`, which equals the NextApp name.
-		np.Spec.PodSelector = metav1.LabelSelector{
-			MatchLabels: map[string]string{
-				"serving.knative.dev/service": nextApp.Name,
-			},
+		for k, v := range desired.Labels {
+			np.Labels[k] = v
 		}
-		np.Spec.PolicyTypes = []networkingv1.PolicyType{networkingv1.PolicyTypeIngress}
-		np.Spec.Ingress = desiredIngressRules()
+		np.Spec = desired.Spec
 		return ctrl.SetControllerReference(nextApp, np, r.Scheme)
 	})
 	return err
