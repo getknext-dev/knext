@@ -525,6 +525,57 @@ describe('fetchInstallBundle — a 200 is not automatically a success', () => {
     expect(result.findings.map((f) => f.reason)).toContain('install-url-unreachable');
     expect(result.body).toBeNull();
   });
+
+  // `fetch` rejects with `TypeError: fetch failed` and puts the actual reason in
+  // `cause`. Reporting only `message` is why this nightly emitted the literal string
+  // "fetch failed" for five consecutive red runs on `main` while the documented URL
+  // returned 200 from a developer machine: the gate was correct and undiagnosable, and
+  // an undiagnosable red gate is one that gets ignored rather than fixed.
+  it('surfaces the cause chain, not just "fetch failed"', async () => {
+    const inner = Object.assign(new Error('getaddrinfo ENOTFOUND objects.githubusercontent.com'), {
+      code: 'ENOTFOUND',
+    });
+    const result = await fetchInstallBundle('https://x/install.yaml', {
+      fetchImpl: async () => {
+        throw Object.assign(new TypeError('fetch failed'), { cause: inner });
+      },
+    });
+    const finding = result.findings.find((f) => f.reason === 'install-url-unreachable') as
+      | { message?: string }
+      | undefined;
+    expect(finding?.message).toContain('fetch failed');
+    expect(finding?.message).toContain('ENOTFOUND');
+    expect(finding?.message).toContain('objects.githubusercontent.com');
+  });
+
+  it('walks a nested cause chain to the root', async () => {
+    const root = Object.assign(new Error('unable to verify the first certificate'), {
+      code: 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+    });
+    const mid = Object.assign(new Error('socket error'), { cause: root });
+    const result = await fetchInstallBundle('https://x/install.yaml', {
+      fetchImpl: async () => {
+        throw Object.assign(new TypeError('fetch failed'), { cause: mid });
+      },
+    });
+    const finding = result.findings.find((f) => f.reason === 'install-url-unreachable') as
+      | { message?: string }
+      | undefined;
+    expect(finding?.message).toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+  });
+
+  // A self-referential cause is not hypothetical — wrapper libraries produce them —
+  // and a check that hangs is a check that gets deleted.
+  it('terminates on a self-referential cause', async () => {
+    const loop: Error & { cause?: unknown } = new Error('loop');
+    loop.cause = loop;
+    const result = await fetchInstallBundle('https://x/install.yaml', {
+      fetchImpl: async () => {
+        throw loop;
+      },
+    });
+    expect(result.findings.map((f) => f.reason)).toContain('install-url-unreachable');
+  });
 });
 
 describe('runAnonymousInstallCheck — the download half is actually verified', () => {
