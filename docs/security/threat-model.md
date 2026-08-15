@@ -117,6 +117,36 @@ skipping verification.
 
 ---
 
+## 6. Request ingress to an app pod (ADR-0044)
+
+Two paths reach a knext app, and they are bounded differently. **External**: LoadBalancer → Kourier
+(Envoy) → activator/queue-proxy → app container — three HTTP parsers, `containerConcurrency`
+enforced. **In-cluster**: a co-resident pod dialling the app pod directly. Until ADR-0044 the second
+path was **unbounded** — the default NetworkPolicy carried no port restriction and an empty
+same-namespace `PodSelector`, so a neighbour pod reached the app container's port directly, skipping
+queue-proxy and with it the concurrency bound and the Go parser.
+
+ADR-0044 Option E closed the *path*: the policy now admits only the queue-proxy ports
+(8012/8013/8112) and metrics ports (9090/9091) from `knative-serving`/`kourier-system`, and metrics
+ports only from the same namespace. **It does not cap bytes** — that is Option C, deferred on a
+dated clock with a hard expiry at Tier-A exit or v1.0.
+
+| STRIDE | Threat | Mitigation | Residual / action |
+|---|---|---|---|
+| **D**oS (vertical) | One request whose body a route handler buffers (`await req.json()`) exhausts the pod's memory. | `serverActions.bodySizeLimit` caps **Server Actions** at 1 MB; `spec.timeoutSeconds` (default 300s) bounds how long one request holds a slot. | **OPEN.** Route handlers have **no** body cap. With operator defaults (cc=20, memory 1Gi) one oversized body OOMKills one pod and takes up to **19 co-resident in-flight requests** with it. Scale-out does not help — the attack is vertical, not economic. Closed by ADR-0044 Option C. |
+| **D**oS (drain bypass) | Repeated OOM degrades availability beyond the individual request. | — | **OPEN, and worse than it looks.** OOMKill is **SIGKILL**: it bypasses the SIGTERM path entirely, so in-flight drain, Next `after()`, and `registerDbPoolDrain` are all skipped. Leaked connections then eat the ADR-0028 `maxScale × poolMax ≤ 80` budget while the restarted pod opens a fresh pool, and each restart pays a full cold start. **No test exercises this path** — the drain gate only covers SIGTERM, so the connection-leak consequence is currently unobservable. |
+| **D**oS (rate) | A client floods the app; KPA scales out and bills the tenant. | Bounded by `maxScale` (default 10) × pod memory — a worked ceiling, not an absence. | **OPEN.** No per-client rate limiting anywhere. Mitigate with a front proxy (see the user-facing recipe); note that proxy rate-limit counters are **per replica** unless the proxy shares state. |
+| **E**levation / lateral | A co-resident pod (including another zone) reaches the app container directly, bypassing queue-proxy — and, per `scs-zones.md`, calls another zone synchronously when the contract permits only the browser and async events. | ADR-0044 Option E: port allowlist + same-namespace peer scoped to metrics only. Proved by the kind+Calico enforcement drill (direct dial refused, metrics survive, and the refusal disappears when the policy is deleted). | **CNI-conditional.** flannel — which OKE GA and OrbStack run — ships **no NetworkPolicy controller**, so on those clusters the object is declarative-only and enforces nothing. Enforcement requires Calico/Cilium. |
+| **S**poof / **T**amper | Malformed HTTP reaches app code. | Three real parsers on the external path (Envoy, Go `net/http`, Node `llhttp`); Node's 16 KB header cap on both paths. | On the in-cluster path only `llhttp` stands in front of app code. |
+
+**Decision (dated exception, opened 2026-08-15).** knext does **not** yet ship in-process payload or
+rate protection. Options D+E close what can be closed without touching the runtime; the byte-cap
+remainder is a **bounded, dated exception** in the shape of ADR-0015 — re-reviewed at every sprint
+close, with a hard expiry at **Tier-A exit or v1.0**, whichever comes first. This is recorded as an
+exception, not as compliance with `security.md`'s reverse-proxy requirement.
+
+---
+
 ## Out of scope (and why)
 - **Global edge / WAF / DDoS at the CDN layer** — architectural edge knext does not own
   (CLAUDE.md §8); upstream-gated.

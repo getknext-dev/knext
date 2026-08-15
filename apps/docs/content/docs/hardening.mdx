@@ -1,0 +1,119 @@
+---
+title: Request hardening
+description: Rate limiting, payload-size caps, and malformed-request handling for a knext app — what the platform gives you, what it does not, and the recipe for the rest.
+---
+
+knext bounds *how many* requests hit your app. It does **not** yet bound *how large* a single
+request body can be. This page is precise about which is which, because the difference decides
+whether you need to do anything.
+
+<Callout type="warn">
+**There is no global request-body limit.** Next.js caps **Server Action** payloads at 1 MB by
+default — that setting does **not** cover App Router route handlers. A `POST` to a route handler
+that does `await req.json()` will buffer whatever it is sent. Capping that is your app's job today;
+see [Cap request bodies in app code](#cap-request-bodies-in-app-code).
+</Callout>
+
+## What the platform already bounds
+
+- **Concurrency per pod** — `spec.containerConcurrency` (default 20) is enforced by the Knative
+  queue-proxy *inside* the pod, so it applies to every request that reaches your app.
+- **Request duration** — `spec.timeoutSeconds` (default 300s) caps how long one request may occupy
+  a concurrency slot. Lower it per app if you have no long-running streaming responses.
+- **Scale ceiling** — `spec.scaling.maxScale` (default 10) bounds how far a flood can scale you out,
+  which is what turns an overload into a bounded cost rather than an unbounded one.
+- **Direct-dial isolation** — the default `NetworkPolicy` admits only the queue-proxy and metrics
+  ports, so a pod sharing your namespace cannot bypass the queue-proxy by dialling your container
+  port. See [Security → Network isolation](/docs/security#network-isolation). **This is enforced
+  only if your CNI supports NetworkPolicy** (Calico, Cilium); on flannel the policy is inert.
+- **Malformed HTTP** — external traffic passes three independent HTTP parsers before your code.
+
+## What it does not bound
+
+| Gap | What it means in practice |
+|---|---|
+| **Request body size** to route handlers | One oversized body that your handler buffers can exhaust the pod's memory. Scaling out does not help — the pressure is on a single pod. |
+| **Request rate per client** | Nothing limits how fast one client can call you. A flood scales you out to `maxScale` and stops there. |
+| **Slow clients in aggregate** | Bounded per pod by concurrency and by `timeoutSeconds`, but not globally. |
+
+## The recipe
+
+### 1. Put a proxy in front — for external traffic
+
+Terminate external traffic at a proxy that enforces rate limits and payload caps before they reach
+the cluster: your cloud load balancer's policies, or an nginx/Envoy ingress layer.
+
+<Callout type="warn">
+**A front proxy binds external traffic only.** It does nothing about a pod inside your cluster
+calling your app — that is what the NetworkPolicy above is for. Three more caveats worth knowing
+before you rely on one:
+
+- **Rate-limit counters are per replica.** Three proxy replicas with "100 req/min" allow 300 unless
+  the proxy shares state (Redis-backed limiter or equivalent).
+- **Chunked bodies have no `Content-Length`.** Enforcing a size cap on them requires the proxy to
+  buffer — which moves the memory pressure to the proxy rather than removing it.
+- **Cloud LB payload policies vary.** Verify your provider actually offers one; several do not.
+</Callout>
+
+### 2. Cap request bodies in app code
+
+Until knext ships an in-process cap, this is the control that actually protects a route handler.
+Check the length **as you read**, rather than trusting the header — `Content-Length` is absent on
+chunked requests and is attacker-controlled in any case:
+
+```ts
+// app/api/upload/route.ts
+const MAX_BYTES = 1_000_000;
+
+export async function POST(req: Request) {
+  if (!req.body) return new Response('empty body', { status: 400 });
+
+  let total = 0;
+  const chunks: Uint8Array[] = [];
+  // Count bytes as they arrive and bail early — never buffer first and check after.
+  for await (const chunk of req.body as unknown as AsyncIterable<Uint8Array>) {
+    total += chunk.byteLength;
+    if (total > MAX_BYTES) {
+      return new Response('payload too large', { status: 413 });
+    }
+    chunks.push(chunk);
+  }
+
+  const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  return Response.json({ ok: true, size: total, keys: Object.keys(body).length });
+}
+```
+
+### 3. Set the Server Action limit deliberately
+
+The 1 MB default applies to Server Actions only. Set it explicitly so the value is a decision rather
+than an inheritance:
+
+```ts
+// next.config.ts
+export default {
+  experimental: {
+    serverActions: { bodySizeLimit: '1mb' },
+  },
+};
+```
+
+### 4. Tighten the per-app knobs
+
+```yaml
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+spec:
+  timeoutSeconds: 30        # no long-running streams? drop it from 300
+  containerConcurrency: 20  # requests in flight per pod
+  scaling:
+    maxScale: 10            # the ceiling a flood can reach
+```
+
+## Why knext does not ship a proxy
+
+Putting a proxy sidecar next to every app would add a container to the cold-start path, which is the
+one thing a scale-to-zero platform cannot spend freely. The alternative — an in-process cap owned by
+knext — is the planned fix, and it is deferred only until the runtime that owns the port is settled.
+Until then this page is the honest position: the platform bounds concurrency, duration and scale;
+you bound bytes.
