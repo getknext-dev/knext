@@ -16,8 +16,8 @@ see [Cap request bodies in app code](#cap-request-bodies-in-app-code).
 
 ## What the platform already bounds
 
-- **Concurrency per pod** — `spec.containerConcurrency` (default 20) is enforced by the Knative
-  queue-proxy *inside* the pod, so it applies to every request that reaches your app.
+- **Concurrency per pod** — `spec.scaling.containerConcurrency` (default 20) is enforced by the
+  Knative queue-proxy *inside* the pod, so it applies to every request that reaches your app.
 - **Request duration** — `spec.timeoutSeconds` (default 300s) caps how long one request may occupy
   a concurrency slot. Lower it per app if you have no long-running streaming responses.
 - **Scale ceiling** — `spec.scaling.maxScale` (default 10) bounds how far a flood can scale you out,
@@ -104,10 +104,10 @@ export default {
 apiVersion: apps.kn-next.dev/v1alpha1
 kind: NextApp
 spec:
-  timeoutSeconds: 30        # no long-running streams? drop it from 300
-  containerConcurrency: 20  # requests in flight per pod
+  timeoutSeconds: 30            # no long-running streams? drop it from 300
   scaling:
-    maxScale: 10            # the ceiling a flood can reach
+    containerConcurrency: 20    # requests in flight per pod
+    maxScale: 10                # the ceiling a flood can reach
 ```
 
 ## Why knext does not ship a proxy
