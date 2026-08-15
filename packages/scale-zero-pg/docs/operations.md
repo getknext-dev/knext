@@ -385,8 +385,15 @@ spec. That public key is **per cluster**: the committed spec carries
 `JWT_JWK_KID_PLACEHOLDER` / `JWT_JWK_X_PLACEHOLDER`, and `deploy/gen-secrets.sh`
 generates an Ed25519 keypair into the `compute-jwt-trust` Secret —
 `jwt-signing.pem` (the private key; it never leaves the Secret) plus
-`JWT_JWK_KID` / `JWT_JWK_X` (the public JWK fields the compute manifests mount
-as env and the entrypoints substitute into the spec at boot).
+`JWT_JWK_KID` / `JWT_JWK_X` (the public JWK fields the **base** compute
+manifests — `deploy/20/25/26` — mount as env and the entrypoints substitute
+into the spec at boot).
+
+Operator-rendered **per-app** computes (`compute-<app>`) and the warmstandby
+variant do **not** mount the Secret: they always take the locked fallback
+below, which is correct — nothing calls their control API in normal operation.
+Wiring the Secret into the appdb-operator's rendering is a follow-up, not a
+gap in the lock.
 
 Nothing in the platform signs with the private key during normal operation —
 the anchor exists to keep the control API **locked to the Secret holder**. To

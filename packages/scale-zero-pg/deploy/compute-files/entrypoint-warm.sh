@@ -26,7 +26,7 @@ CLOUD_ADMIN_MD5="${CLOUD_ADMIN_MD5:-b093c0d3b281ba6da1eacc608620abd8}"
 # placeholders in the template, per-cluster key from the compute-jwt-trust
 # Secret, random throwaway anchor when absent (fail-safe).
 if [ -z "${JWT_JWK_X:-}" ]; then
-  JWT_JWK_X="$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')"
+  JWT_JWK_X="$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n')"
   echo "compute_ctl jwks: no compute-jwt-trust Secret; using a random throwaway trust anchor"
 fi
 JWT_JWK_KID="${JWT_JWK_KID:-throwaway}"

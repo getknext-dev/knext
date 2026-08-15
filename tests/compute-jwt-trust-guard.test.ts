@@ -140,27 +140,73 @@ describe('compute JWT trust anchor — the sanctioned mechanism exists', () => {
     }
   });
 
-  it('every entrypoint that substitutes the md5 placeholder also substitutes the JWK', () => {
-    // Scan, not enumerate: count sed lines touching CLOUD_ADMIN_MD5_PLACEHOLDER;
-    // each must also rewrite both JWK placeholders. A new entrypoint added later
-    // is covered without anyone remembering this test.
-    const subLines = (needle: string) =>
-      computeFiles.split('\n').filter((l) => l.includes(needle) && /-e\s+"s\|/.test(l)).length;
-    const md5Sites = subLines('CLOUD_ADMIN_MD5_PLACEHOLDER');
-    expect(md5Sites, 'expected the template substitution sites').toBeGreaterThanOrEqual(3);
-    for (const ph of ['JWT_JWK_X_PLACEHOLDER', 'JWT_JWK_KID_PLACEHOLDER']) {
-      expect(
-        subLines(ph),
-        `an entrypoint substitutes the md5 placeholder but not ${ph} — ` +
-          'that compute boots with a LITERAL placeholder as its trust anchor',
-      ).toBeGreaterThanOrEqual(md5Sites);
+  // Scan, not enumerate — and REALLY scan: the first version of this test read
+  // only 54-compute-files.yaml, and review found a FOURTH rendering path
+  // (warmstandby/10-compute-warm-files.yaml) consuming the same template with
+  // no JWK substitution, rendering a literal placeholder into the spec. So the
+  // render-site list is DISCOVERED from the tracked tree: any file with a sed
+  // line substituting CLOUD_ADMIN_MD5_PLACEHOLDER is a renderer and owes the
+  // same contract. A fifth path added later is covered automatically.
+  const renderers = trackedFiles
+    .map((rel) => ({ rel, text: readTracked(rel) }))
+    .filter(
+      (f): f is { rel: string; text: string } =>
+        f.text !== null &&
+        f.rel !== SELF &&
+        f.text
+          .split('\n')
+          .some((l) => l.includes('CLOUD_ADMIN_MD5_PLACEHOLDER') && /-e\s+"s\|/.test(l)),
+    );
+
+  it('every discovered renderer of the template also substitutes the JWK', () => {
+    expect(
+      renderers.map((r) => r.rel),
+      'expected at least the generated yaml and the warmstandby variant',
+    ).toEqual(
+      expect.arrayContaining([
+        'packages/scale-zero-pg/deploy/54-compute-files.yaml',
+        'packages/scale-zero-pg/warmstandby/10-compute-warm-files.yaml',
+      ]),
+    );
+    for (const { rel, text } of renderers) {
+      const subLines = (needle: string) =>
+        text.split('\n').filter((l) => l.includes(needle) && /-e\s+"s\|/.test(l)).length;
+      const md5Sites = subLines('CLOUD_ADMIN_MD5_PLACEHOLDER');
+      for (const ph of ['JWT_JWK_X_PLACEHOLDER', 'JWT_JWK_KID_PLACEHOLDER']) {
+        expect(
+          subLines(ph),
+          `${rel} renders the template but does not substitute ${ph} — ` +
+            'that compute boots with a LITERAL placeholder as its trust anchor',
+        ).toBeGreaterThanOrEqual(md5Sites);
+      }
     }
   });
 
-  it('the entrypoints fail safe: absent env, the anchor becomes a random key nobody holds', () => {
-    // Same pattern as the per-app random md5: missing Secret must lock the
-    // door, never leave the placeholder or fall back to a committed value.
-    expect(computeFiles).toMatch(/JWT_JWK_X[^\n]*urandom|urandom[^\n]*JWT_JWK_X/);
+  it('every discovered renderer fails safe with a WELL-FORMED random anchor', () => {
+    // Absent the Secret the anchor must be a random key nobody holds — and it
+    // must be VALID base64url of 32 bytes. The first version emitted 64 hex
+    // chars (48 bytes decoded): not a well-formed Ed25519 x, and since
+    // operator-rendered per-app computes always take this branch, a compute_ctl
+    // that validates the JWKS at parse would crash-loop the fleet.
+    const WELL_FORMED = /head -c 32 \/dev\/urandom \| base64 \| tr '\+\/' '-_' \| tr -d '=\\n'/;
+    for (const { rel, text } of renderers) {
+      const md5Sites = text
+        .split('\n')
+        .filter((l) => l.includes('CLOUD_ADMIN_MD5_PLACEHOLDER') && /-e\s+"s\|/.test(l)).length;
+      const fallbacks = text
+        .split('\n')
+        .filter((l) => l.includes('JWT_JWK_X=') && WELL_FORMED.test(l)).length;
+      expect(
+        fallbacks,
+        `${rel}: every rendering entrypoint needs the well-formed base64url fallback ` +
+          '(one per render site); a missing or malformed one either leaves the ' +
+          'placeholder or feeds compute_ctl an invalid JWK',
+      ).toBeGreaterThanOrEqual(md5Sites);
+      expect(
+        /JWT_JWK_X="\$\(od /.test(text),
+        `${rel} still carries the malformed od-hex fallback`,
+      ).toBe(false);
+    }
   });
 
   it('gen-secrets.sh generates the per-cluster keypair into a Secret', () => {

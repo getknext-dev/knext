@@ -63,7 +63,7 @@ fi
 # random md5 above — a random anchor NOBODY holds, so the control API is
 # locked rather than trusting a value anyone can read on GitHub.
 if [ -z "${JWT_JWK_X:-}" ]; then
-  JWT_JWK_X="$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')"
+  JWT_JWK_X="$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n')"
   echo "compute_ctl jwks: no compute-jwt-trust Secret; using a random throwaway trust anchor"
 fi
 JWT_JWK_KID="${JWT_JWK_KID:-throwaway}"
