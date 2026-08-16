@@ -199,9 +199,13 @@ your own.
       close, which is why an action item that says "file a ticket" needs the ticket number written
       back into it). Option C design brief per Decision 4 (RuntimeContract-as-code prerequisite).
 - [ ] **BLOCKED on #742 — and this is the exception's load-bearing defect.** The stated hard expiry
-      is "Tier-A exit or v1.0". **"Tier-A exit" is defined nowhere**: `docs/ROADMAP.md` (cited by
-      `CLAUDE.md` §6) does not exist, `docs/MATURITY_PLAN.md` uses Phases 0–6 with no Tier A, and
-      `docs/V1_ROADMAP.md` contains no such string. An expiry anchored to an undefined event cannot
+      is "Tier-A exit or v1.0". **Tier A has contents but no exit criteria**, which is the precise
+      form of the problem: `CLAUDE.md` §6 *does* enumerate what Tier A contains (image
+      optimization, graceful shutdown, control-plane consolidation, compat-suite gate) and then
+      says "see `ROADMAP.md` for detail **+ exit criteria**" — and `docs/ROADMAP.md`
+      **does not exist**. `docs/MATURITY_PLAN.md` uses Phases 0–6 with no Tier A;
+      `docs/V1_ROADMAP.md` contains no such string. So the doc points at exit criteria in a file
+      that was never written. An expiry anchored to an undefined event cannot
       fire, so as written this exception renews forever — the architect gate's verdict was that it
       "is a way to ship without the control". Re-anchor once #742 defines the term, and replace this
       prose re-review with a mechanical one.
