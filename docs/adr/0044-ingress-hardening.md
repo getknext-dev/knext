@@ -143,6 +143,32 @@ runtime; the remainder is a **bounded, dated exception** (this ADR, 2026-08-15, 
 each sprint close) with its blast radius quantified above — the same shape as ADR-0015's
 bounded ingest exception.
 
+## Amendment 1 (2026-08-16): a third ingress rule for cross-namespace scraping
+
+**Status of this amendment: proposed with the change, gates re-summoned on reviewer escalation.**
+
+Option E as accepted specified two ingress rules — serving+metrics from the system namespaces, and
+metrics-only from the same namespace. Implementing it surfaced a gap **both design gates predicted
+in their sign-off**: the operator ships its own `PodMonitor` with `namespaceSelector: any`, so its
+scrape of `:9091` is cross-namespace and was denied on every policy-enforcing CNI. Filed as #735,
+fixed by a **third rule** admitting namespaces labelled `knext.dev/metrics-scrape=true` on the
+**app metrics port only** (`9091` — narrower than the same-namespace rule, since the PodMonitor
+targets nothing else).
+
+**Why this is recorded here rather than left in the PR.** The change widens the peer set of a
+default-on security policy cluster-wide and alters the policy shape this ADR fixed. The
+implementing team judged it in-scope because it adds no CRD field and therefore trips no
+mechanically-detected trigger; **the spec reviewer escalated, correctly** — avoiding the
+public-API trigger does not clear the security-invariant trigger or the ADR-amendment trigger, and
+`workflow.md` gives reviewers exactly that escalation power. The un-automated half of the trigger
+list is the half that needed a human judgement, and it got one.
+
+**What the amendment does NOT claim.** Rule 3 is namespace RBAC, not a per-app privilege boundary:
+the label sits on a cluster-scoped Namespace, so the grantor is whoever holds `update namespaces`;
+once labelled, every pod in that namespace can scrape `9091` on every knext app; and there is no
+`PodSelector` because the operator cannot know a user's Prometheus labels. Recorded as a residual in
+`docs/security/threat-model.md` §6 rather than presented as isolation.
+
 ## Consequences
 
 - S4 becomes two tasks: **S4-op** (Option E operator change, full pipeline: TDD, kind, OKE)
