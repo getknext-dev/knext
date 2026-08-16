@@ -199,8 +199,9 @@ func TestRenderRODeploymentCarriesTheWritersSecretEnv(t *testing.T) {
 	if missing := difference(writerSecrets, reader); len(missing) > 0 {
 		t.Errorf("the per-app read replica does not mount secret env its writer does: %v\n"+
 			"both are per-app computes on the same entrypoint family; a reader booting "+
-			"without these gets a throwaway control-API anchor and an unstable cloud_admin "+
-			"md5 while its writer does not.", missing)
+			"without these gets a throwaway control-API anchor, and — before the #112 "+
+			"gating was added to entrypoint-ro.sh — the PUBLIC skeleton-key md5 rather "+
+			"than a random one.", missing)
 	}
 }
 

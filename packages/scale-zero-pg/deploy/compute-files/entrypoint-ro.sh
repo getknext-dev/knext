@@ -25,7 +25,30 @@ RO_MODE="${RO_MODE:-Replica}"
 SRC=/compute-files/config.json
 IDS=/tmp/config.ids.json
 DST=/tmp/config.json
-CLOUD_ADMIN_MD5="${CLOUD_ADMIN_MD5:-b093c0d3b281ba6da1eacc608620abd8}"
+# The publicly-documented dev md5 = md5("cloud_admin"||"cloud_admin"). Issue
+# #112 calls it a SKELETON KEY that "must never reach a compute that holds
+# tenant data" — and until now this entrypoint fell back to it UNCONDITIONALLY,
+# while the primary entrypoint has gated that fallback on APP_ROLE since #112.
+# A per-app READ REPLICA holds the same tenant data as its writer, so the
+# asymmetry was a real hole, not a stylistic difference. Found by spec review
+# while checking a "fail-safe is unchanged" claim that was true of the writer
+# and false here.
+PUBLIC_CLOUD_ADMIN_MD5=b093c0d3b281ba6da1eacc608620abd8
+if [ -n "${APP_ROLE:-}" ]; then
+  # PER-APP replica: hard-disable the public default exactly as the primary
+  # does. An unset (or public) value becomes a strong random, unguessable md5;
+  # combined with the pg_hba loopback reject below, a co-tenant pod can neither
+  # guess it nor be admitted as cloud_admin.
+  if [ -z "${CLOUD_ADMIN_MD5:-}" ] || [ "${CLOUD_ADMIN_MD5}" = "$PUBLIC_CLOUD_ADMIN_MD5" ]; then
+    CLOUD_ADMIN_MD5="$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
+    echo "issue #112: per-app RO compute cloud_admin uses a strong random md5 (public default disabled)"
+  fi
+else
+  # BASE single-DB RO tier (deploy/26): cloud_admin IS the documented
+  # DATABASE_URL_RO credential over TCP, and deploy/26 injects the STRONG md5
+  # from pg-base-admin (#168). The dev default remains only for a BARE local run.
+  CLOUD_ADMIN_MD5="${CLOUD_ADMIN_MD5:-$PUBLIC_CLOUD_ADMIN_MD5}"
+fi
 
 # compute_ctl JWT trust anchor — see entrypoint.sh for the full rationale:
 # placeholders in the template, per-cluster key from the compute-jwt-trust
