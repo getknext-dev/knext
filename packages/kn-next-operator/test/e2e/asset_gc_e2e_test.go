@@ -1125,21 +1125,28 @@ var _ = Describe("asset retention GC against a live cluster (ADR-0011)", Ordered
 			Expect(gcSeedObject(gcStaticPrefix(gcBidLagReap) + f)).To(Succeed())
 		}
 
-		// FULL RESTORE is guaranteed by DeferCleanup regardless of where the leg
-		// fails: re-pin to the resolvable rev2, restore minScale:1,
-		// and wait for the operator to reconcile a non-empty currentTraffic — so
-		// the leg leaves the app exactly as re-runnable as it found it.
-		DeferCleanup(func() {
-			By("DeferCleanup: restoring the app (re-pin to the resolvable rev2, minScale:1) and waiting for reconcile to resume")
-			Eventually(func(g Gomega) {
-				g.Expect(utils.ApplyManifest(
-					gcMainAppPinnedManifest("rev2", gcBidPinned, rev2Name, 1))).To(Succeed())
-			}, 2*time.Minute, 10*time.Second).Should(Succeed())
-			Eventually(func(g Gomega) {
-				g.Expect(gcCurrentTrafficRaw(g)).NotTo(BeEmpty(),
-					"reconcile did not resume: status.currentTraffic never repopulated after restore")
-			}, gcAssertTimeout, gcAssertPoll).Should(Succeed())
-		})
+		// NO DeferCleanup RESTORE HERE — deliberately, and this replaced a guard
+		// that only silenced the symptom.
+		//
+		// A restore used to be registered here, on the reasoning that the leg should
+		// "leave the app exactly as re-runnable as it found it". It could never work.
+		// Code review measured the ordering across two nightly runs (31939953543 and
+		// 31862964561) and found the container's own AfterAll — which deletes the
+		// dedicated namespace (:712) and the rendered bundle (:725) — runs BEFORE this
+		// cleanup in every run, including the one where the It PASSED. So the restore
+		// always fired into a namespace that no longer existed and a CRD that was no
+		// longer served, failing for two minutes with "the server could not find the
+		// requested resource (post nextapps.apps.kn-next.dev)" and redding a leg whose
+		// assertions had all passed.
+		//
+		// My first fix guarded it with a CRD-presence check. That was worse than
+		// useless: the check would return false EVERY time, forever, leaving dead code
+		// wearing the appearance of a safety net. Re-runnability is provided by the
+		// AfterAll teardown (the whole namespace goes), not by restoring an app that is
+		// about to be deleted — so the cleanup is removed rather than silenced.
+		//
+		// The leg still restores INLINE below (the "RESTORE:" step), because that
+		// restore is an ASSERTION — it proves reconcile resumes — not housekeeping.
 
 		By("scaling the app to zero: patching minScale:0 while pinning the unprogrammable revision " + lagPinnedRevision)
 		// One apply does both: pin to an unprogrammable revision (empties
