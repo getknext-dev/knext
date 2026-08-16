@@ -70,7 +70,7 @@
   wrong citation that survived several rewrites. Cite the code, not the number.)* Upgrade order is therefore
   load-bearing: **operator/CRD first, then CLI** (#548).
 - Enforce **`:latest` rejection / digest pinning everywhere.** (Verified: the operator already
-  rejects `:latest` in `nextapp_controller.go:66`; the kubebuilder manager image in
+  rejects `:latest` in `nextapp_controller.go:66`.
   **(RESOLVED — re-verified 2026-08-16.)** The "`config/manager/manager.yaml:66` is still
   `controller:latest`" note is **stale**: that file carries `image: controller` at line 78, with no
   tag at all, and the release bundle is regenerated with the real pushed digest.
