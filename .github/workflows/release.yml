@@ -151,16 +151,41 @@ jobs:
       # Opens/updates the "Version Packages" PR, OR publishes when there are
       # already-versioned packages to release AND the publish gate is enabled.
       - name: Create Release PR or Publish
-        uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1.9.0
+        uses: changesets/action@198f833dd7d863100ea6e28967bc9a9fdefadb0a # v2.1.0
         with:
-          version: pnpm run changeset:version
-          publish: ${{ steps.gate.outputs.publish }}
-          commit: 'chore: version packages'
-          title: 'chore: version packages'
+          # v2 RENAMED EVERY INPUT THIS STEP PASSES. Migrated together with the
+          # bump, deliberately: GitHub Actions does NOT error on unknown `with:`
+          # keys, it ignores them — so taking the bump alone would leave this step
+          # GREEN while running with every input defaulted (no version script, no
+          # publish script, wrong commit message). And it would surface only at
+          # release time, since the publish job runs on a push to main with a
+          # version PR merged, which no PR's CI can exercise.
+          #   version              -> version-script
+          #   publish              -> publish-script
+          #   commit               -> commit-message
+          #   title                -> pr-title
+          #   createGithubReleases -> create-github-releases
+          version-script: pnpm run changeset:version
+          publish-script: ${{ steps.gate.outputs.publish }}
+          commit-message: 'chore: version packages'
+          pr-title: 'chore: version packages'
           # On publish, create one GitHub Release per published package, tagged
           # `@getknext/<pkg>@x.y.z`. The hand-made `v0.1.0` release predates this and
           # uses a different tag format, so there is no tag collision.
-          createGithubReleases: true
+          create-github-releases: true
+          # v2 requires the token as an INPUT. Its release notes are explicit that
+          # "the GITHUB_TOKEN environment variable and credentials configured by
+          # actions/checkout ... are not substitutes for this input" — so the env
+          # var below is no longer sufficient on its own for the push.
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          # v2 pushes release commits/tags via the GitHub API by default (the old
+          # `commit-mode` input became the boolean `push-with-git-cli`). Taking the
+          # new default deliberately rather than pinning the old behaviour: the API
+          # path needs no git credential in the checkout, which is strictly better
+          # for a step that already holds an npm publish token.
         env:
+          # Still exported: `changeset publish` and the gate script read it, and
+          # NODE_AUTH_TOKEN is how npm authenticates. The github-token INPUT above
+          # is what v2 uses for pushing; this is not redundant with it.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
