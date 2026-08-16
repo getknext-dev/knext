@@ -174,6 +174,15 @@ log "2e. REVOCATION: unlabelling the namespace must deny the scrape again"
 # the label until the connection is torn down. This step dials fresh each time —
 # `kubectl exec curl` opens a NEW connection — so it proves revocation for NEW
 # connections, which is the guarantee we document, not for in-flight ones.
+#
+# WHY THIS ONE RETRIES A *DENY*, WHEN 2b/2d DELIBERATELY DO NOT. Retrying a deny
+# normally masks a leak: "refused eventually" is not the property, and a policy
+# that admits for three seconds has already lost. The exception here is narrow
+# and deliberate — DE-programming is asynchronous exactly as programming is, so
+# the alternative is a fixed sleep, which is the flake this drill already
+# removed once. A policy that never revokes still FAILS: the loop is bounded at
+# ~30s and then fails. Recorded so this does not read as precedent for softening
+# 2b or 2d, which must hold immediately and forever.
 kubectl label namespace np-drill-mon knext.dev/metrics-scrape- >/dev/null 2>&1 || true
 R=open
 for _ in 1 2 3 4 5 6 7 8 9 10; do

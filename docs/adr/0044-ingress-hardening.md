@@ -145,7 +145,7 @@ bounded ingest exception.
 
 ## Amendment 1 (2026-08-16): a third ingress rule for cross-namespace scraping
 
-**Status of this amendment: proposed with the change, gates re-summoned on reviewer escalation.**
+**Status of this amendment: ACCEPTED** (2026-08-16). Summoned by a spec-reviewer escalation rather than a mechanical trigger; both design gates BLOCKed once and then signed off — the architect on a false mitigation repeated in five places, the system designer on a residual that was wrong in both directions and on revocation never being tested.
 
 Option E as accepted specified two ingress rules — serving+metrics from the system namespaces, and
 metrics-only from the same namespace. Implementing it surfaced a gap **both design gates predicted
