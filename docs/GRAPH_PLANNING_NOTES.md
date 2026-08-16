@@ -111,3 +111,34 @@ eight parallel extraction subagents. The affordable split is
   code structure current;
 - **per sprint** — full semantic rebuild, matching the cadence at which the design gates
   already meet.
+
+## `built_at_commit` can diverge from `main` while the graph is perfectly current
+
+`workflow.md` says to check `graph.json`'s `built_at_commit` against `main` before trusting a
+traversal, and to treat a divergence as "re-run the AST pass". That rule has a false-positive case
+worth knowing, because acting on it wastes a rebuild and — worse — invites distrust of a graph that
+is actually current.
+
+**The case:** this repo squash-merges. A graph built on a feature branch records the *branch tip*
+SHA; the squash-merge then creates a **different** commit on `main` with **identical tree content**.
+`built_at_commit` therefore differs from `main`'s HEAD while the graph describes exactly the tree
+`main` has.
+
+Observed 2026-08-16 at sprint close: `built_at_commit` = `e707732`, `main` HEAD = `7c2c045`, and
+
+```
+git rev-parse e707732^{tree}   -> f94f3c50e3e67a5dfe262a266b4bc118cade804f
+git rev-parse HEAD^{tree}      -> f94f3c50e3e67a5dfe262a266b4bc118cade804f
+```
+
+`graphify update` itself agreed, reporting "No code-graph topology changes detected" and leaving the
+outputs untouched.
+
+**Compare TREES, not commit SHAs:**
+
+```
+[ "$(git rev-parse "$(node -p "require('./graphify-out/graph.json').built_at_commit")^{tree}")" \
+  = "$(git rev-parse HEAD^{tree})" ] && echo "graph is current" || echo "graph is stale — re-run"
+```
+
+A SHA mismatch with matching trees means current. A tree mismatch means genuinely stale.
