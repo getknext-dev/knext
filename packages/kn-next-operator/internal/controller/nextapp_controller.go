@@ -1350,6 +1350,20 @@ func desiredIngressRules() []networkingv1.NetworkPolicyIngressRule {
 				{PodSelector: &metav1.LabelSelector{}},
 			},
 		},
+		// THIRD RULE — cross-namespace metric scraping, opt-in by label (#735).
+		// Metrics ports ONLY: a monitoring namespace scrapes, it does not serve,
+		// so it must never reach the queue-proxy serving ports.
+		{
+			Ports: []networkingv1.NetworkPolicyPort{
+				{Port: ptr.To(intstr.FromInt32(queueProxyMetricsPort))},
+				{Port: ptr.To(intstr.FromInt32(appMetricsPort))},
+			},
+			From: []networkingv1.NetworkPolicyPeer{
+				{NamespaceSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{metricsScrapeNamespaceLabel: "true"},
+				}},
+			},
+		},
 	}
 }
 
@@ -1391,6 +1405,26 @@ func DesiredNetworkPolicy(appName, namespace string) *networkingv1.NetworkPolicy
 		},
 	}
 }
+
+// metricsScrapeNamespaceLabel opts a namespace into scraping app metrics ACROSS
+// namespaces (#735).
+//
+// The operator ships its own PodMonitor (config/prometheus/app-podmonitor.yaml)
+// in the `system` namespace with `namespaceSelector: any`, so its scrape of
+// :9091 is cross-namespace — and the policy admitted no third namespace, which
+// meant the operator's OWN metrics path was denied on any policy-enforcing CNI.
+// Both design gates surfaced this while reviewing ADR-0044; it stayed invisible
+// because flannel (OKE GA, OrbStack) enforces no NetworkPolicy at all.
+//
+// Opt-in BY LABEL rather than by a hardcoded namespace: the operator cannot know
+// where a user runs Prometheus. A cluster that labels nothing keeps exactly the
+// previous posture, so this widens no one's policy by default.
+//
+// Deliberately NOT a CRD field: growing `spec.security.networkPolicy` from *bool
+// into a struct is a public-API change, which ADR-0017 (v1alpha1, no conversion
+// webhook) and the #548 upgrade-order rule make gated design work. A namespace
+// label needs neither.
+const metricsScrapeNamespaceLabel = "knext.dev/metrics-scrape"
 
 // reconcileNetworkPolicy emits a Kubernetes NetworkPolicy that restricts ingress
 // to the app's pods to in-cluster sources only: the Knative serving system
