@@ -389,6 +389,15 @@ spec:
 // is non-empty (unlike gcCurrentTraffic). Returns the trimmed raw jsonpath so a
 // caller can poll for the LAGGING-EMPTY window (v3-P5) — an empty string is a
 // valid, expected observation there, not a failure.
+// gcNextAppCRDPresent reports whether the NextApp CRD is still served. Cleanup
+// steps use it to distinguish "the restore failed" from "there is no longer an
+// API to restore into" — the second is a teardown-ordering fact, not a defect in
+// the thing under test, and treating it as failure reds a green leg.
+func gcNextAppCRDPresent() bool {
+	out, err := utils.Kubectl("get", "crd", "nextapps.apps.kn-next.dev", "-o", "name")
+	return err == nil && strings.Contains(out, "nextapps.apps.kn-next.dev")
+}
+
 func gcCurrentTrafficRaw(g Gomega) string {
 	out, err := utils.Kubectl("get", "nextapp", gcAppName, "-n", gcAppNamespace,
 		"-o", "jsonpath={.status.currentTraffic}")
@@ -1130,6 +1139,22 @@ var _ = Describe("asset retention GC against a live cluster (ADR-0011)", Ordered
 		// and wait for the operator to reconcile a non-empty currentTraffic — so
 		// the leg leaves the app exactly as re-runnable as it found it.
 		DeferCleanup(func() {
+			// If the NextApp CRD is already gone, there is nothing to restore and
+			// nothing that could observe a restore. Re-applying then fails for two
+			// minutes with "the server could not find the requested resource
+			// (post nextapps.apps.kn-next.dev)" and reds a leg whose assertions all
+			// passed.
+			//
+			// This is not hypothetical and it is not new: the same DeferCleanup
+			// failed in the 2026-08-15 nightly too. It was invisible because the
+			// leg's own premise timed out first, so everyone read the premise
+			// failure and stopped. Fixing the premise (the leg now asserts the
+			// stale-status contract knative actually provides) is what exposed it —
+			// a second defect hiding behind the first.
+			if !gcNextAppCRDPresent() {
+				By("DeferCleanup: NextApp CRD already removed (suite teardown ran first) — nothing to restore")
+				return
+			}
 			By("DeferCleanup: restoring the app (re-pin to the resolvable rev2, minScale:1) and waiting for reconcile to resume")
 			Eventually(func(g Gomega) {
 				g.Expect(utils.ApplyManifest(
