@@ -75,10 +75,11 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 		Expect(np.Spec.PolicyTypes).To(ContainElement(networkingv1.PolicyTypeIngress))
 
 		By("restricting ingress to in-cluster sources (knative-serving + gateway + same namespace)")
-		// TWO rules since ADR-0044: [0] serving ports from knative-serving/kourier,
-		// [1] metrics ports from the same namespace. The union of their peers is
-		// what this original assertion checks.
-		Expect(np.Spec.Ingress).To(HaveLen(2))
+		// THREE rules: [0] serving+metrics from knative-serving/kourier (ADR-0044),
+		// [1] metrics only from the same namespace (ADR-0044), [2] metrics only from
+		// a namespace LABELLED for scraping (#735). The union of their peers is what
+		// this original assertion checks.
+		Expect(np.Spec.Ingress).To(HaveLen(3))
 		var froms []networkingv1.NetworkPolicyPeer
 		for _, rule := range np.Spec.Ingress {
 			froms = append(froms, rule.From...)
@@ -132,7 +133,7 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 
 		np := &networkingv1.NetworkPolicy{}
 		Expect(k8sClient.Get(ctx, policyName(nn.Name), np)).To(Succeed())
-		Expect(np.Spec.Ingress).To(HaveLen(2))
+		Expect(np.Spec.Ingress).To(HaveLen(3))
 
 		ports := np.Spec.Ingress[0].Ports
 		Expect(ports).NotTo(BeEmpty(), "no Ports means ALL ports — the ADR-0044 bypass")
@@ -172,7 +173,7 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 
 		np := &networkingv1.NetworkPolicy{}
 		Expect(k8sClient.Get(ctx, policyName(nn.Name), np)).To(Succeed())
-		Expect(np.Spec.Ingress).To(HaveLen(2))
+		Expect(np.Spec.Ingress).To(HaveLen(3))
 
 		// Classify each rule by whether its peers include the same-namespace one
 		// (NamespaceSelector nil + non-nil PodSelector).
@@ -187,11 +188,21 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 		}
 		sameNsRules, systemRules := 0, 0
 		for _, rule := range np.Spec.Ingress {
-			hasSameNs := false
+			hasSameNs, hasScrapeLabel := false, false
 			for _, peer := range rule.From {
 				if peer.NamespaceSelector == nil && peer.PodSelector != nil {
 					hasSameNs = true
 				}
+				if peer.NamespaceSelector != nil {
+					if _, ok := peer.NamespaceSelector.MatchLabels[metricsScrapeNamespaceLabel]; ok {
+						hasScrapeLabel = true
+					}
+				}
+			}
+			// The #735 scrape rule has its own dedicated spec above; classify it out
+			// here rather than letting it masquerade as the system rule.
+			if hasScrapeLabel {
+				continue
 			}
 			if hasSameNs {
 				sameNsRules++
@@ -206,6 +217,62 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 		}
 		Expect(sameNsRules).To(Equal(1), "expected exactly one same-namespace rule")
 		Expect(systemRules).To(Equal(1), "expected exactly one knative-serving/kourier rule")
+	})
+
+	It("admits a LABELLED monitoring namespace on the metrics ports only (#735)", func() {
+		// The operator ships its own PodMonitor (config/prometheus/app-podmonitor.yaml)
+		// in the `system` namespace with `namespaceSelector: any`, scraping :9091
+		// across every namespace. The policy admitted no third namespace, so on a
+		// policy-enforcing CNI the operator's OWN scrape path was denied — found by
+		// both design gates while reviewing ADR-0044's Option E, and invisible until
+		// then because flannel (OKE GA, OrbStack) enforces nothing.
+		//
+		// Opt-in by LABEL rather than by a hardcoded namespace name: the operator
+		// cannot know where a user runs Prometheus, and guessing would either miss
+		// most clusters or silently widen the policy for everyone. A cluster that
+		// labels no namespace keeps exactly the previous posture.
+		nn := reconcileApp("np-scrape", nil)
+
+		np := &networkingv1.NetworkPolicy{}
+		Expect(k8sClient.Get(ctx, policyName(nn.Name), np)).To(Succeed())
+
+		var scrapeRule *networkingv1.NetworkPolicyIngressRule
+		for i := range np.Spec.Ingress {
+			for _, peer := range np.Spec.Ingress[i].From {
+				if peer.NamespaceSelector == nil {
+					continue
+				}
+				if _, ok := peer.NamespaceSelector.MatchLabels[metricsScrapeNamespaceLabel]; ok {
+					scrapeRule = &np.Spec.Ingress[i]
+				}
+			}
+		}
+		Expect(scrapeRule).NotTo(BeNil(),
+			"no ingress rule admits a namespace labelled %s — the operator's own PodMonitor scrape stays denied",
+			metricsScrapeNamespaceLabel)
+
+		By("the scrape rule admits METRICS ports only — never the serving ports")
+		var ports []int32
+		for _, p := range scrapeRule.Ports {
+			Expect(p.Port).NotTo(BeNil())
+			Expect(p.EndPort).To(BeNil(), "a port RANGE reopens what the allowlist closes")
+			ports = append(ports, p.Port.IntVal)
+		}
+		// 9091 ONLY, narrower than the same-namespace rule: the shipped PodMonitor
+		// targets 9091, so admitting queue-proxy's 9090 across namespaces would be
+		// breadth without a requirement (code review). Both halves: the port that
+		// IS needed is present, and nothing else is.
+		Expect(ports).To(ConsistOf(int32(9091)),
+			"a monitoring namespace gets the APP metrics port only — never the serving ports, and not queue-proxy's 9090")
+
+		By("the selector matches the label EXPLICITLY: an empty selector would admit every namespace")
+		for _, peer := range scrapeRule.From {
+			if peer.NamespaceSelector == nil {
+				continue
+			}
+			Expect(peer.NamespaceSelector.MatchLabels).To(HaveKeyWithValue(metricsScrapeNamespaceLabel, "true"),
+				"an empty or wildcard selector here would admit EVERY namespace, turning a scoped grant into a blanket one")
+		}
 	})
 
 	It("creates the NetworkPolicy when Security.NetworkPolicy is explicitly true", func() {

@@ -19,6 +19,12 @@
 #      (the ADR-0044 bypass, closed);
 #   2. a same-namespace pod dialling the app pod's METRICS port SUCCEEDS
 #      (scraping survives — the architect gate's named residual);
+#   2e. REVOCATION: unlabelling denies again on a NEW connection (established
+#      flows can survive in conntrack — stated, not glossed);
+#   2b-2d. cross-namespace scraping (#735) in BOTH directions: an UNLABELLED
+#      namespace is refused, the same namespace LABELLED is admitted on the
+#      metrics port, and it is STILL refused on the user port. Asserting only
+#      the admit half would pass on a policy that admits everyone;
 #   3. mutation: with the policy DELETED, (1) succeeds — proving the refusal
 #      is the policy's doing and not something else in the cluster.
 #
@@ -79,6 +85,7 @@ echo "$POLICY"
 # otherwise steps 1-3 could "pass" against a policy that never closed anything.
 echo "$POLICY" | grep -q "port: $APP_PORT" && fail "the operator's policy ADMITS the user port; this drill cannot prove a refusal"
 echo "$POLICY" | grep -q "port: $METRICS_PORT" || fail "the operator's policy does not admit the metrics port; step 2 would be vacuous"
+echo "$POLICY" | grep -q "knext.dev/metrics-scrape" || fail "the operator's policy carries no cross-namespace scrape rule; steps 2b-2d would be vacuous"
 echo "$POLICY" | kubectl apply -f -
 sleep 5
 
@@ -99,6 +106,92 @@ log "2. same-namespace pod -> app METRICS port (must be OPEN — scraping must s
 R=$(dial "$METRICS_PORT" 8)
 echo "   metrics port: $R"
 [ "$R" = open ] || fail "metrics scraping is BROKEN by the policy"
+
+# CROSS-NAMESPACE scraping (#735). The issue's acceptance criteria demanded this
+# case explicitly, because the existing assertions proved only the SAME-namespace
+# half — they would have stayed green forever while the operator's own shipped
+# PodMonitor scrape was refused. Both halves are checked: an UNLABELLED namespace
+# is denied, and the same namespace LABELLED is admitted. Testing only the second
+# would pass just as well on a policy that admits everyone.
+log "2b. cross-namespace scrape: UNLABELLED namespace must be REFUSED"
+kubectl create namespace np-drill-mon >/dev/null
+kubectl -n np-drill-mon run scraper --image=curlimages/curl --command -- sleep 3600 >/dev/null
+kubectl -n np-drill-mon wait --for=condition=Ready pod/scraper --timeout=120s >/dev/null
+
+xdial() { # $1=port -> open|refused, dialled from the OTHER namespace
+  if kubectl -n np-drill-mon exec scraper -- curl -s -o /dev/null -m 8 "http://$APP_IP:$1/" 2>/dev/null; then
+    echo open
+  else
+    echo refused
+  fi
+}
+# Prove the scraper can reach SOMETHING first, so a "refused" below means the
+# policy denied it rather than the pod being unable to dial at all — code review
+# named this as a way 2b could pass spuriously.
+#
+# HTTPS + -k, not http: the kubernetes service listens on 443 ONLY, so an http
+# dial fails on essentially every cluster. The first version of this check did
+# exactly that and, being advisory-only, printed its note and moved on — a
+# vacuity check that was itself vacuous. It is a hard FAIL now: if the scraper
+# cannot dial anything, 2b's "refused" proves nothing and the drill should say so
+# rather than bank a meaningless pass.
+kubectl -n np-drill-mon exec scraper -- curl -sk -o /dev/null -m 8 "https://kubernetes.default.svc/" 2>/dev/null \
+  || fail "the scraper pod cannot reach the apiserver either, so a 'refused' in 2b would not be attributable to the policy"
+R=$(xdial "$METRICS_PORT")
+echo "   metrics port from an unlabelled namespace: $R"
+[ "$R" = refused ] || fail "an UNLABELLED namespace can already scrape — the label grants nothing, so the next assertion would prove nothing"
+
+log "2c. cross-namespace scrape: LABELLED namespace must be ADMITTED on metrics"
+kubectl label namespace np-drill-mon knext.dev/metrics-scrape=true --overwrite >/dev/null
+# RETRY rather than a fixed sleep. Calico programs a namespace-label change
+# asynchronously, so a fixed wait makes this a FALSE-FAIL flake: the drill would
+# report "the rule is not effective" for a rule that simply had not propagated.
+# Only the ADMIT direction is retried — the refuse direction (2b/2d) must hold
+# immediately and forever, so retrying there would mask a real leak.
+R=refused
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  R=$(xdial "$METRICS_PORT")
+  [ "$R" = open ] && break
+  sleep 3
+done
+echo "   metrics port from a labelled namespace: $R"
+[ "$R" = open ] || fail "the labelled namespace still cannot scrape after ~30s — the #735 rule is not effective"
+
+log "2d. the labelled namespace must STILL be refused on the app's user port"
+R=$(xdial "$APP_PORT")
+echo "   user port from a labelled namespace: $R"
+[ "$R" = refused ] || fail "a monitoring namespace reached the USER port — it scrapes, it must not serve"
+
+log "2e. REVOCATION: unlabelling the namespace must deny the scrape again"
+# The system-designer gate named revocation as the untested failure mode: every
+# assertion so far proves the GRANT works, none proved it can be TAKEN BACK. A
+# grant that cannot be revoked is a different security property from the one
+# documented.
+#
+# CONNTRACK CAVEAT, stated because it bounds what this proves: Calico (like most
+# CNIs) evaluates policy on connection ESTABLISHMENT and keeps established flows
+# in conntrack. A long-lived keep-alive scrape can therefore survive removal of
+# the label until the connection is torn down. This step dials fresh each time —
+# `kubectl exec curl` opens a NEW connection — so it proves revocation for NEW
+# connections, which is the guarantee we document, not for in-flight ones.
+#
+# WHY THIS ONE RETRIES A *DENY*, WHEN 2b/2d DELIBERATELY DO NOT. Retrying a deny
+# normally masks a leak: "refused eventually" is not the property, and a policy
+# that admits for three seconds has already lost. The exception here is narrow
+# and deliberate — DE-programming is asynchronous exactly as programming is, so
+# the alternative is a fixed sleep, which is the flake this drill already
+# removed once. A policy that never revokes still FAILS: the loop is bounded at
+# ~30s and then fails. Recorded so this does not read as precedent for softening
+# 2b or 2d, which must hold immediately and forever.
+kubectl label namespace np-drill-mon knext.dev/metrics-scrape- >/dev/null 2>&1 || true
+R=open
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  R=$(xdial "$METRICS_PORT")
+  [ "$R" = refused ] && break
+  sleep 3
+done
+echo "   metrics port after unlabelling: $R"
+[ "$R" = refused ] || fail "the scrape survived REVOCATION on a fresh connection — the grant cannot be taken back, which is not the documented property"
 
 log "3. MUTATION: delete the policy — the user port must become reachable again"
 kubectl -n "$NS" delete networkpolicy drill-app-allow-ingress

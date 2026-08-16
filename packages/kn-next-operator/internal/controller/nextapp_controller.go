@@ -1350,6 +1350,41 @@ func desiredIngressRules() []networkingv1.NetworkPolicyIngressRule {
 				{PodSelector: &metav1.LabelSelector{}},
 			},
 		},
+		// THIRD RULE — cross-namespace metric scraping, label-gated (#735).
+		//
+		// The APP metrics port ONLY — deliberately narrower than the
+		// same-namespace rule above. #735's motivation is the operator's shipped
+		// PodMonitor, which targets 9091 and nothing else
+		// (config/prometheus/app-podmonitor.yaml), so admitting queue-proxy's
+		// autoscaling metrics (9090) across namespaces would be allowlist breadth
+		// with no driving requirement. Code review caught that; "match broadly,
+		// exclude narrowly" cuts the other way for a grant.
+		//
+		// HONEST SCOPE — this is namespace RBAC, not a per-app privilege
+		// boundary. The label sits on a CLUSTER-SCOPED Namespace object, so the
+		// grantor is whoever holds `update namespaces` (normally cluster-admin,
+		// but any platform with self-service namespace creation lets a tenant
+		// create-and-label its own). Once labelled, EVERY pod in that namespace —
+		// not merely Prometheus — can scrape :9091 on EVERY knext app in the
+		// cluster, and an individual NextApp owner has no per-app opt-out short
+		// of disabling their whole policy. There is no PodSelector here precisely
+		// because the operator cannot know a user's Prometheus labels.
+		//
+		// And a second policy CANNOT narrow this: NetworkPolicies are additive, so
+		// they union allow-rules rather than intersecting them. The only narrowing
+		// lever is spec.security.networkPolicy:false plus a bring-your-own policy.
+		// An earlier comment here claimed otherwise — a false mitigation in a
+		// security control, which the architect gate blocked on.
+		{
+			Ports: []networkingv1.NetworkPolicyPort{
+				{Port: ptr.To(intstr.FromInt32(appMetricsPort))},
+			},
+			From: []networkingv1.NetworkPolicyPeer{
+				{NamespaceSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{metricsScrapeNamespaceLabel: "true"},
+				}},
+			},
+		},
 	}
 }
 
@@ -1391,6 +1426,26 @@ func DesiredNetworkPolicy(appName, namespace string) *networkingv1.NetworkPolicy
 		},
 	}
 }
+
+// metricsScrapeNamespaceLabel opts a namespace into scraping app metrics ACROSS
+// namespaces (#735).
+//
+// The operator ships its own PodMonitor (config/prometheus/app-podmonitor.yaml)
+// in the `system` namespace with `namespaceSelector: any`, so its scrape of
+// :9091 is cross-namespace — and the policy admitted no third namespace, which
+// meant the operator's OWN metrics path was denied on any policy-enforcing CNI.
+// Both design gates surfaced this while reviewing ADR-0044; it stayed invisible
+// because flannel (OKE GA, OrbStack) enforces no NetworkPolicy at all.
+//
+// Opt-in BY LABEL rather than by a hardcoded namespace: the operator cannot know
+// where a user runs Prometheus. A cluster that labels nothing keeps exactly the
+// previous posture, so this widens no one's policy by default.
+//
+// Deliberately NOT a CRD field: growing `spec.security.networkPolicy` from *bool
+// into a struct is a public-API change, which ADR-0017 (v1alpha1, no conversion
+// webhook) and the #548 upgrade-order rule make gated design work. A namespace
+// label needs neither.
+const metricsScrapeNamespaceLabel = "knext.dev/metrics-scrape"
 
 // reconcileNetworkPolicy emits a Kubernetes NetworkPolicy that restricts ingress
 // to the app's pods to in-cluster sources only: the Knative serving system
