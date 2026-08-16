@@ -258,8 +258,12 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 			Expect(p.EndPort).To(BeNil(), "a port RANGE reopens what the allowlist closes")
 			ports = append(ports, p.Port.IntVal)
 		}
-		Expect(ports).To(ConsistOf(int32(9090), int32(9091)),
-			"a monitoring namespace must never reach 8012/8013/8112 — it scrapes, it does not serve")
+		// 9091 ONLY, narrower than the same-namespace rule: the shipped PodMonitor
+		// targets 9091, so admitting queue-proxy's 9090 across namespaces would be
+		// breadth without a requirement (code review). Both halves: the port that
+		// IS needed is present, and nothing else is.
+		Expect(ports).To(ConsistOf(int32(9091)),
+			"a monitoring namespace gets the APP metrics port only — never the serving ports, and not queue-proxy's 9090")
 
 		By("the label is opt-in: a namespace without it matches nothing")
 		for _, peer := range scrapeRule.From {

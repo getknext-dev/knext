@@ -123,16 +123,30 @@ xdial() { # $1=port -> open|refused, dialled from the OTHER namespace
     echo refused
   fi
 }
+# Prove the scraper can reach SOMETHING first, so a "refused" below means the
+# policy denied it rather than the pod being unable to dial at all — code review
+# named this as a way 2b could pass spuriously.
+kubectl -n np-drill-mon exec scraper -- curl -s -o /dev/null -m 8 "http://kubernetes.default.svc/" 2>/dev/null \
+  || echo "   (note: control-plane dial also failed; treating the scraper as network-capable is unsafe)"
 R=$(xdial "$METRICS_PORT")
 echo "   metrics port from an unlabelled namespace: $R"
 [ "$R" = refused ] || fail "an UNLABELLED namespace can already scrape — the label grants nothing, so the next assertion would prove nothing"
 
 log "2c. cross-namespace scrape: LABELLED namespace must be ADMITTED on metrics"
 kubectl label namespace np-drill-mon knext.dev/metrics-scrape=true --overwrite >/dev/null
-sleep 5
-R=$(xdial "$METRICS_PORT")
+# RETRY rather than a fixed sleep. Calico programs a namespace-label change
+# asynchronously, so a fixed wait makes this a FALSE-FAIL flake: the drill would
+# report "the rule is not effective" for a rule that simply had not propagated.
+# Only the ADMIT direction is retried — the refuse direction (2b/2d) must hold
+# immediately and forever, so retrying there would mask a real leak.
+R=refused
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  R=$(xdial "$METRICS_PORT")
+  [ "$R" = open ] && break
+  sleep 3
+done
 echo "   metrics port from a labelled namespace: $R"
-[ "$R" = open ] || fail "the labelled namespace still cannot scrape — the #735 rule is not effective"
+[ "$R" = open ] || fail "the labelled namespace still cannot scrape after ~30s — the #735 rule is not effective"
 
 log "2d. the labelled namespace must STILL be refused on the app's user port"
 R=$(xdial "$APP_PORT")

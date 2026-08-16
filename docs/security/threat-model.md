@@ -144,8 +144,18 @@ dated clock with a hard expiry at Tier-A exit or v1.0.
 `PodMonitor` with `namespaceSelector: any` — so on a policy-enforcing CNI the operator's own scrape
 was denied, and the tests asserted *same-namespace* scraping and would have stayed green forever.
 Closed by a third ingress rule admitting namespaces labelled `knext.dev/metrics-scrape=true` on the
-**metrics ports only**. Opt-in by construction: a cluster that labels nothing keeps the prior
-posture, and a monitoring namespace never reaches the serving ports.
+**app metrics port only** (`9091` — deliberately narrower than the same-namespace rule, since the
+shipped PodMonitor targets nothing else). A cluster that labels nothing keeps the prior posture
+exactly, and a labelled namespace never reaches the serving ports.
+
+**Residual, stated rather than implied:** this is **namespace RBAC, not a per-app privilege
+boundary**. The label sits on a cluster-scoped Namespace, so the grantor is whoever holds
+`update namespaces` — on a platform with self-service namespaces, a tenant can grant itself. Once
+labelled, *every* pod in that namespace (not just Prometheus) can scrape `9091` on *every* knext app,
+which in a shared cluster is cross-tenant metric disclosure: route labels and request volume via
+`knext_http_requests_total`. There is no `PodSelector` because the operator cannot know a user's
+Prometheus labels. Operators needing workload-level identity must add their own policy alongside;
+`spec.security.networkPolicy: false` is the only per-app lever, and it disables everything.
 
 **Decision (dated exception, opened 2026-08-15).** knext does **not** yet ship in-process payload or
 rate protection. Options D+E close what can be closed without touching the runtime; the byte-cap

@@ -1350,12 +1350,28 @@ func desiredIngressRules() []networkingv1.NetworkPolicyIngressRule {
 				{PodSelector: &metav1.LabelSelector{}},
 			},
 		},
-		// THIRD RULE — cross-namespace metric scraping, opt-in by label (#735).
-		// Metrics ports ONLY: a monitoring namespace scrapes, it does not serve,
-		// so it must never reach the queue-proxy serving ports.
+		// THIRD RULE — cross-namespace metric scraping, label-gated (#735).
+		//
+		// The APP metrics port ONLY — deliberately narrower than the
+		// same-namespace rule above. #735's motivation is the operator's shipped
+		// PodMonitor, which targets 9091 and nothing else
+		// (config/prometheus/app-podmonitor.yaml), so admitting queue-proxy's
+		// autoscaling metrics (9090) across namespaces would be allowlist breadth
+		// with no driving requirement. Code review caught that; "match broadly,
+		// exclude narrowly" cuts the other way for a grant.
+		//
+		// HONEST SCOPE — this is namespace RBAC, not a per-app privilege
+		// boundary. The label sits on a CLUSTER-SCOPED Namespace object, so the
+		// grantor is whoever holds `update namespaces` (normally cluster-admin,
+		// but any platform with self-service namespace creation lets a tenant
+		// create-and-label its own). Once labelled, EVERY pod in that namespace —
+		// not merely Prometheus — can scrape :9091 on EVERY knext app in the
+		// cluster, and an individual NextApp owner has no per-app opt-out short
+		// of disabling their whole policy. There is no PodSelector here precisely
+		// because the operator cannot know a user's Prometheus labels; operators
+		// who need tighter identity should add their own policy alongside.
 		{
 			Ports: []networkingv1.NetworkPolicyPort{
-				{Port: ptr.To(intstr.FromInt32(queueProxyMetricsPort))},
 				{Port: ptr.To(intstr.FromInt32(appMetricsPort))},
 			},
 			From: []networkingv1.NetworkPolicyPeer{
