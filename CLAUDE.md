@@ -61,11 +61,21 @@
   that flag value does not exist). **Still open:** GitOps controllers (Argo CD, Flux) do not assert
   strict validation, a `kubectl` shim on PATH can append `--validate=ignore` and win (pflag takes the
   last occurrence), and `doctor` checks only that the CRD *exists*, not that its schema covers what
-  the CLI emits — the schema-diff preflight (#314) is the complete fix. Upgrade order is therefore
+  the CLI emits. **(RESOLVED 2026-08-16, sprint close.)** That last clause is **stale**:
+  `packages/kn-next/src/cli/schema/` ships the preflight — `doctor.ts:558,568` reads the live CRD's
+  known fields (`readKnownCRDFields`) and diffs what the CLI emits (`unknownEmittedFields`), and
+  `deploy.ts:287` calls `preflightCRSchema`, which server-side dry-runs the apply
+  (`--dry-run=server --validate=strict`) before the cluster is touched. Do not re-file it as open.
+  *(The old text cited "#314" for this; #314 is the **npm publish/semver** issue and always was — a
+  wrong citation that survived several rewrites. Cite the code, not the number.)* Upgrade order is therefore
   load-bearing: **operator/CRD first, then CLI** (#548).
 - Enforce **`:latest` rejection / digest pinning everywhere.** (Verified: the operator already
   rejects `:latest` in `nextapp_controller.go:66`; the kubebuilder manager image in
-  `config/manager/manager.yaml:66` is still `controller:latest` — fix that placeholder.)
+  **(RESOLVED — re-verified 2026-08-16.)** The "`config/manager/manager.yaml:66` is still
+  `controller:latest`" note is **stale**: that file carries `image: controller` at line 78, with no
+  tag at all, and the release bundle is regenerated with the real pushed digest.
+  `.claude/rules/security.md` still carries the stale version of this line — flagged for the
+  maintainer, since `.claude/rules/` is not an agent's to edit.)
 
 ## 5. Backend / gRPC business-logic layer (opt-in module)
 - Run business logic as **separate, language-agnostic services**; **Next.js stays the HTTP
@@ -136,8 +146,12 @@ defer bucket 1.
 - **(RESOLVED)** Image optimization is **implemented** per ADR-0006
   (`packages/kn-next/src/adapters/image-cache-sync.ts` + tests) — the earlier "missing / biggest
   functional gap" note is stale; don't re-propose it as a work item.
-  **But implemented ≠ gated:** its `compat-smoke` check skips rather than fails, as do three sibling
-  capability rows. `docs/compat-matrix.md` is the single source of truth for which rows are actually
+  **(RESOLVED 2026-08-16 — the "implemented ≠ gated" note is now stale.)** The old text said its
+  `compat-smoke` check "skips rather than fails, as do three sibling capability rows". The runner
+  has **no skip-on-fail mechanism at all**: check (g)'s two `skip()` paths are gone, the
+  `compat-smoke` job carries no `continue-on-error`, and `tests/compat-smoke-capability-checks.test.ts`
+  SCANS the runner so reintroducing a `skip()` reds CI.
+  `docs/compat-matrix.md` is the single source of truth for which rows are actually
   backed by a red-on-fail check — read it there rather than duplicating the detail here, and see
   `docs/V1_ROADMAP.md` §3, which makes converting them a v1.0 blocker.
 - **(RESOLVED 2026-06-20)** `packages/kn-next/src/adapters/node-server.ts` is **Nitro-free** — it
