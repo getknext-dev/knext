@@ -76,7 +76,9 @@ is **not** a hand-applied or CLI-generated manifest).
   **Honest scope of rule 3.** It is namespace RBAC, not a per-app privilege boundary: the label is on
   a cluster-scoped Namespace, so the grantor is whoever holds `update namespaces`, and once labelled
   *every* pod in that namespace — not only Prometheus — can scrape `9091` on *every* knext app. There
-  is no `PodSelector` because the operator cannot know a user's Prometheus labels. See
+  is no `PodSelector` because the operator cannot know a user's Prometheus labels. **A second
+  NetworkPolicy cannot narrow this** — policies are additive, so they union allow-rules; the only
+  narrowing lever is `spec.security.networkPolicy: false` plus a bring-your-own policy. See
   `threat-model.md` §6 for the residual.
 
 - **Spec flag (default-on, toggleable):** `spec.security.networkPolicy` (`*bool`).

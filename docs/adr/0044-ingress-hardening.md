@@ -169,6 +169,12 @@ once labelled, every pod in that namespace can scrape `9091` on every knext app;
 `PodSelector` because the operator cannot know a user's Prometheus labels. Recorded as a residual in
 `docs/security/threat-model.md` §6 rather than presented as isolation.
 
+An earlier draft of this amendment said operators needing tighter identity "should add their own
+policy alongside". That is **false**, and the architect gate blocked on it: NetworkPolicies are
+**additive**, so a second policy unions its allow-rules with knext's and cannot narrow this grant.
+The only narrowing lever is `spec.security.networkPolicy: false` — disable knext's policy and bring
+your own.
+
 ## Consequences
 
 - S4 becomes two tasks: **S4-op** (Option E operator change, full pipeline: TDD, kind, OKE)

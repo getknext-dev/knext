@@ -77,8 +77,13 @@ Auth is one factor; **network isolation** is the second. knext reconciles a defa
   because knext cannot know how your Prometheus pods are labelled.
 - An individual app owner has no per-app opt-out short of `spec.security.networkPolicy: false`.
 
-If you need tighter identity than "any pod in a trusted namespace", add your own `NetworkPolicy`
-alongside knext's — they combine additively. Labelling nothing keeps the previous behaviour exactly.
+If you need tighter identity than "any pod in a trusted namespace", **adding your own
+`NetworkPolicy` will not help**: Kubernetes policies are *additive*, so a second policy unions its
+allow-rules with knext's rather than narrowing them. The only way to tighten this is to turn knext's
+policy off (`spec.security.networkPolicy: false`) and write your own that expresses exactly the
+access you want.
+
+Labelling no namespace keeps the previous behaviour exactly.
 </Callout>
 - **Toggle:** `spec.security.networkPolicy` (`*bool`). `nil` (unset) or `true` reconciles the
   policy (**default-on**); `false` skips it and deletes any existing one on the next reconcile.

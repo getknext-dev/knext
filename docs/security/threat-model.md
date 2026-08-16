@@ -154,8 +154,10 @@ boundary**. The label sits on a cluster-scoped Namespace, so the grantor is whoe
 labelled, *every* pod in that namespace (not just Prometheus) can scrape `9091` on *every* knext app,
 which in a shared cluster is cross-tenant metric disclosure: route labels and request volume via
 `knext_http_requests_total`. There is no `PodSelector` because the operator cannot know a user's
-Prometheus labels. Operators needing workload-level identity must add their own policy alongside;
-`spec.security.networkPolicy: false` is the only per-app lever, and it disables everything.
+Prometheus labels. Operators needing workload-level identity **cannot** fix this by adding a policy alongside:
+NetworkPolicies are additive, so a second policy unions its allow-rules with knext's rather than
+narrowing them. The only lever is `spec.security.networkPolicy: false` — which disables knext's
+policy entirely — followed by a bring-your-own policy that expresses the tighter grant.
 
 **Decision (dated exception, opened 2026-08-15).** knext does **not** yet ship in-process payload or
 rate protection. Options D+E close what can be closed without touching the runtime; the byte-cap

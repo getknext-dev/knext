@@ -1368,8 +1368,13 @@ func desiredIngressRules() []networkingv1.NetworkPolicyIngressRule {
 		// not merely Prometheus — can scrape :9091 on EVERY knext app in the
 		// cluster, and an individual NextApp owner has no per-app opt-out short
 		// of disabling their whole policy. There is no PodSelector here precisely
-		// because the operator cannot know a user's Prometheus labels; operators
-		// who need tighter identity should add their own policy alongside.
+		// because the operator cannot know a user's Prometheus labels.
+		//
+		// And a second policy CANNOT narrow this: NetworkPolicies are additive, so
+		// they union allow-rules rather than intersecting them. The only narrowing
+		// lever is spec.security.networkPolicy:false plus a bring-your-own policy.
+		// An earlier comment here claimed otherwise — a false mitigation in a
+		// security control, which the architect gate blocked on.
 		{
 			Ports: []networkingv1.NetworkPolicyPort{
 				{Port: ptr.To(intstr.FromInt32(appMetricsPort))},
