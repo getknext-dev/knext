@@ -139,6 +139,14 @@ dated clock with a hard expiry at Tier-A exit or v1.0.
 | **E**levation / lateral | A co-resident pod (including another zone) reaches the app container directly, bypassing queue-proxy — and, per `scs-zones.md`, calls another zone synchronously when the contract permits only the browser and async events. | ADR-0044 Option E: port allowlist + same-namespace peer scoped to metrics only. Proved by the kind+Calico enforcement drill (direct dial refused, metrics survive, and the refusal disappears when the policy is deleted). | **CNI-conditional.** flannel — which OKE GA and OrbStack run — ships **no NetworkPolicy controller**, so on those clusters the object is declarative-only and enforces nothing. Enforcement requires Calico/Cilium. |
 | **S**poof / **T**amper | Malformed HTTP reaches app code. | Three real parsers on the external path (Envoy, Go `net/http`, Node `llhttp`); Node's 16 KB header cap on both paths. | On the in-cluster path only `llhttp` stands in front of app code. |
 
+**Cross-namespace metric scraping (#735).** The default policy admits only
+`knative-serving`, `kourier-system` and the app's own namespace, while the operator ships a
+`PodMonitor` with `namespaceSelector: any` — so on a policy-enforcing CNI the operator's own scrape
+was denied, and the tests asserted *same-namespace* scraping and would have stayed green forever.
+Closed by a third ingress rule admitting namespaces labelled `knext.dev/metrics-scrape=true` on the
+**metrics ports only**. Opt-in by construction: a cluster that labels nothing keeps the prior
+posture, and a monitoring namespace never reaches the serving ports.
+
 **Decision (dated exception, opened 2026-08-15).** knext does **not** yet ship in-process payload or
 rate protection. Options D+E close what can be closed without touching the runtime; the byte-cap
 remainder is a **bounded, dated exception** in the shape of ADR-0015 — re-reviewed at every sprint
