@@ -84,6 +84,9 @@ policy off (`spec.security.networkPolicy: false`) and write your own that expres
 access you want.
 
 Labelling no namespace keeps the previous behaviour exactly.
+
+Removing the label denies new scrapes, but a connection already established may survive until it is
+closed — Kubernetes CNIs evaluate policy when a connection is opened, not on every packet.
 </Callout>
 - **Toggle:** `spec.security.networkPolicy` (`*bool`). `nil` (unset) or `true` reconciles the
   policy (**default-on**); `false` skips it and deletes any existing one on the next reconcile.

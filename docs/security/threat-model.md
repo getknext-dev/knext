@@ -152,12 +152,36 @@ exactly, and a labelled namespace never reaches the serving ports.
 boundary**. The label sits on a cluster-scoped Namespace, so the grantor is whoever holds
 `update namespaces` — on a platform with self-service namespaces, a tenant can grant itself. Once
 labelled, *every* pod in that namespace (not just Prometheus) can scrape `9091` on *every* knext app,
-which in a shared cluster is cross-tenant metric disclosure: route labels and request volume via
-`knext_http_requests_total`. There is no `PodSelector` because the operator cannot know a user's
+which in a shared cluster is cross-tenant metric disclosure. **What is actually exposed, enumerated
+from the exporter rather than assumed** (`adapters/metrics.ts`):
+
+- **No route, path, query or payload labels.** `knext_http_requests_total` /
+  `knext_http_request_duration` carry `app`, `method` and `status_class` only — `statusClass()`
+  deliberately buckets codes, so individual status codes do not leak either. An earlier version of
+  this section claimed route labels leak; that was wrong, and overstating a risk erodes the document
+  as surely as understating one.
+- **Request volume and error ratio per app**, by method and status class.
+- **Cold-start and DB-wake timing** (`knext_coldstart_*`, `knext_db_wake_*`, the latter labelled by
+  `role`) and **deep-health state** (`knext_deep_health_state`, labelled by `dependency`) — i.e.
+  another tenant's dependency health.
+- **Node/process metadata**, because `collectDefaultMetrics` registers on the *same* registry served
+  on `:9091`: `nodejs_version_info` is a runtime fingerprint, and `process_start_time_seconds`
+  reveals restart and scale-to-zero timing, from which per-app traffic patterns can be inferred.
+
+`:9091` serves `GET /metrics` and nothing else — no pprof, health or debug endpoints — so the
+exposure is bounded to the above. There is no `PodSelector` because the operator cannot know a user's
 Prometheus labels. Operators needing workload-level identity **cannot** fix this by adding a policy alongside:
 NetworkPolicies are additive, so a second policy unions its allow-rules with knext's rather than
 narrowing them. The only lever is `spec.security.networkPolicy: false` — which disables knext's
 policy entirely — followed by a bring-your-own policy that expresses the tighter grant.
+
+**Two operability gaps, named rather than discovered later.** A *mistyped* label value fails
+silently — scraping is simply denied, with nothing telling the operator why — and an app owner has
+no signal that their app *is* being scraped from another namespace: no status condition, no event,
+no metric. Both are observability gaps rather than isolation gaps, but they mean the grant's state
+is invisible from both sides. **Revocation** works for new connections (asserted by the enforcement
+drill's step 2e); established keep-alive connections can survive unlabelling until torn down,
+because CNIs evaluate policy at connection setup and keep flows in conntrack.
 
 **Decision (dated exception, opened 2026-08-15).** knext does **not** yet ship in-process payload or
 rate protection. Options D+E close what can be closed without touching the runtime; the byte-cap

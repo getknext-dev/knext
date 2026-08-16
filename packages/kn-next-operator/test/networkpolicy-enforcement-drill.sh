@@ -19,6 +19,8 @@
 #      (the ADR-0044 bypass, closed);
 #   2. a same-namespace pod dialling the app pod's METRICS port SUCCEEDS
 #      (scraping survives — the architect gate's named residual);
+#   2e. REVOCATION: unlabelling denies again on a NEW connection (established
+#      flows can survive in conntrack — stated, not glossed);
 #   2b-2d. cross-namespace scraping (#735) in BOTH directions: an UNLABELLED
 #      namespace is refused, the same namespace LABELLED is admitted on the
 #      metrics port, and it is STILL refused on the user port. Asserting only
@@ -159,6 +161,28 @@ log "2d. the labelled namespace must STILL be refused on the app's user port"
 R=$(xdial "$APP_PORT")
 echo "   user port from a labelled namespace: $R"
 [ "$R" = refused ] || fail "a monitoring namespace reached the USER port — it scrapes, it must not serve"
+
+log "2e. REVOCATION: unlabelling the namespace must deny the scrape again"
+# The system-designer gate named revocation as the untested failure mode: every
+# assertion so far proves the GRANT works, none proved it can be TAKEN BACK. A
+# grant that cannot be revoked is a different security property from the one
+# documented.
+#
+# CONNTRACK CAVEAT, stated because it bounds what this proves: Calico (like most
+# CNIs) evaluates policy on connection ESTABLISHMENT and keeps established flows
+# in conntrack. A long-lived keep-alive scrape can therefore survive removal of
+# the label until the connection is torn down. This step dials fresh each time —
+# `kubectl exec curl` opens a NEW connection — so it proves revocation for NEW
+# connections, which is the guarantee we document, not for in-flight ones.
+kubectl label namespace np-drill-mon knext.dev/metrics-scrape- >/dev/null 2>&1 || true
+R=open
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  R=$(xdial "$METRICS_PORT")
+  [ "$R" = refused ] && break
+  sleep 3
+done
+echo "   metrics port after unlabelling: $R"
+[ "$R" = refused ] || fail "the scrape survived REVOCATION on a fresh connection — the grant cannot be taken back, which is not the documented property"
 
 log "3. MUTATION: delete the policy — the user port must become reachable again"
 kubectl -n "$NS" delete networkpolicy drill-app-allow-ingress
