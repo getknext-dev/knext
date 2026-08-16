@@ -214,8 +214,43 @@ func TestParityGuardBlindSpotsStayEmpty(t *testing.T) {
 	c := DefaultRenderConfig("scale-zero-pg")
 	spec := ComputeSpec{App: "parity", TenantID: "t", TimelineID: "l"}
 	roSpec := ROComputeSpec{App: spec.App, TenantID: spec.TenantID, TimelineID: spec.TimelineID}
-	writerICs := c.RenderDeployment(spec).Spec.Template.Spec.InitContainers
-	readerICs := c.RenderRODeployment(roSpec).Spec.Template.Spec.InitContainers
+	writer := c.RenderDeployment(spec)
+	reader := c.RenderRODeployment(roSpec)
+
+	// envFrom: asserted, not merely documented. Code review left this as the one
+	// residual nit and it is cheap to close — a guard that names a blind spot
+	// without asserting it is the same "documented expectation degrades" shape
+	// this repo keeps re-learning. Both renderers must pull the SAME ConfigMaps,
+	// or a per-app compute silently loses (or gains) its whole config surface.
+	envFromNames := func(cs []corev1.Container) []string {
+		var out []string
+		for _, ct := range cs {
+			for _, ef := range ct.EnvFrom {
+				if ef.ConfigMapRef != nil {
+					out = append(out, "cm/"+ef.ConfigMapRef.Name)
+				}
+				if ef.SecretRef != nil {
+					out = append(out, "secret/"+ef.SecretRef.Name)
+				}
+			}
+		}
+		sort.Strings(out)
+		return out
+	}
+	wf := envFromNames(writer.Spec.Template.Spec.Containers)
+	rf := envFromNames(reader.Spec.Template.Spec.Containers)
+	if len(wf) == 0 {
+		t.Fatal("the writer pulls no envFrom at all — the assertion would be vacuous")
+	}
+	if diff := difference(wf, rf); len(diff) > 0 {
+		t.Errorf("the reader does not pull envFrom the writer does: %v", diff)
+	}
+	if diff := difference(rf, wf); len(diff) > 0 {
+		t.Errorf("the reader pulls envFrom the writer does not: %v", diff)
+	}
+
+	writerICs := writer.Spec.Template.Spec.InitContainers
+	readerICs := reader.Spec.Template.Spec.InitContainers
 	for name, ics := range map[string][]corev1.Container{"writer": writerICs, "reader": readerICs} {
 		for _, ic := range ics {
 			if len(ic.Env) > 0 {
