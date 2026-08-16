@@ -126,8 +126,15 @@ xdial() { # $1=port -> open|refused, dialled from the OTHER namespace
 # Prove the scraper can reach SOMETHING first, so a "refused" below means the
 # policy denied it rather than the pod being unable to dial at all — code review
 # named this as a way 2b could pass spuriously.
-kubectl -n np-drill-mon exec scraper -- curl -s -o /dev/null -m 8 "http://kubernetes.default.svc/" 2>/dev/null \
-  || echo "   (note: control-plane dial also failed; treating the scraper as network-capable is unsafe)"
+#
+# HTTPS + -k, not http: the kubernetes service listens on 443 ONLY, so an http
+# dial fails on essentially every cluster. The first version of this check did
+# exactly that and, being advisory-only, printed its note and moved on — a
+# vacuity check that was itself vacuous. It is a hard FAIL now: if the scraper
+# cannot dial anything, 2b's "refused" proves nothing and the drill should say so
+# rather than bank a meaningless pass.
+kubectl -n np-drill-mon exec scraper -- curl -sk -o /dev/null -m 8 "https://kubernetes.default.svc/" 2>/dev/null \
+  || fail "the scraper pod cannot reach the apiserver either, so a 'refused' in 2b would not be attributable to the policy"
 R=$(xdial "$METRICS_PORT")
 echo "   metrics port from an unlabelled namespace: $R"
 [ "$R" = refused ] || fail "an UNLABELLED namespace can already scrape — the label grants nothing, so the next assertion would prove nothing"

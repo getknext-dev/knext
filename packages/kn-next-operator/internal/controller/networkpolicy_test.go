@@ -265,13 +265,13 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 		Expect(ports).To(ConsistOf(int32(9091)),
 			"a monitoring namespace gets the APP metrics port only — never the serving ports, and not queue-proxy's 9090")
 
-		By("the label is opt-in: a namespace without it matches nothing")
+		By("the selector matches the label EXPLICITLY: an empty selector would admit every namespace")
 		for _, peer := range scrapeRule.From {
 			if peer.NamespaceSelector == nil {
 				continue
 			}
 			Expect(peer.NamespaceSelector.MatchLabels).To(HaveKeyWithValue(metricsScrapeNamespaceLabel, "true"),
-				"an empty or wildcard selector here would admit EVERY namespace, which is the opposite of opt-in")
+				"an empty or wildcard selector here would admit EVERY namespace, turning a scoped grant into a blanket one")
 		}
 	})
 
