@@ -61,11 +61,21 @@
   that flag value does not exist). **Still open:** GitOps controllers (Argo CD, Flux) do not assert
   strict validation, a `kubectl` shim on PATH can append `--validate=ignore` and win (pflag takes the
   last occurrence), and `doctor` checks only that the CRD *exists*, not that its schema covers what
-  the CLI emits — the schema-diff preflight (#314) is the complete fix. Upgrade order is therefore
+  the CLI emits. **(RESOLVED 2026-08-16, sprint close.)** That last clause is **stale**:
+  `packages/kn-next/src/cli/schema/` ships the preflight — `doctor.ts:558,568` reads the live CRD's
+  known fields (`readKnownCRDFields`) and diffs what the CLI emits (`unknownEmittedFields`), and
+  `deploy.ts:287` calls `preflightCRSchema`, which server-side dry-runs the apply
+  (`--dry-run=server --validate=strict`) before the cluster is touched. Do not re-file it as open.
+  *(The old text cited "#314" for this; #314 is the **npm publish/semver** issue and always was — a
+  wrong citation that survived several rewrites. Cite the code, not the number.)* Upgrade order is therefore
   load-bearing: **operator/CRD first, then CLI** (#548).
 - Enforce **`:latest` rejection / digest pinning everywhere.** (Verified: the operator already
-  rejects `:latest` in `nextapp_controller.go:66`; the kubebuilder manager image in
-  `config/manager/manager.yaml:66` is still `controller:latest` — fix that placeholder.)
+  rejects `:latest` in `nextapp_controller.go:66`.
+  **(RESOLVED — re-verified 2026-08-16.)** The "`config/manager/manager.yaml:66` is still
+  `controller:latest`" note is **stale**: that file carries `image: controller` at line 78, with no
+  tag at all, and the release bundle is regenerated with the real pushed digest.
+  `.claude/rules/security.md` still carries the stale version of this line — flagged for the
+  maintainer, since `.claude/rules/` is not an agent's to edit.)
 
 ## 5. Backend / gRPC business-logic layer (opt-in module)
 - Run business logic as **separate, language-agnostic services**; **Next.js stays the HTTP
@@ -92,6 +102,25 @@ docs site on knext**). gRPC layer = **design-now / build-later, after correctnes
   the audit lives in `docs/security/mutating-endpoints.md` (E4-2). Defense-in-depth: the operator now
   reconciles a default-on internal-only `NetworkPolicy` from the `NextApp` CR (`spec.security.networkPolicy`, #90).
   Never reintroduce an open mutating route.
+- **Security sprint 2026-08-16 — what shipped, so it is not re-proposed.**
+  - **Secret scanning in CI** (`secret-scan` job + nightly): gitleaks over **full history** on every
+    PR and push, fail-closed (no `continue-on-error`, no ref-conditional `if:`), with a
+    disposition-classed allowlist (`security/gitleaks-allowlist.json`).
+  - **The one secret history held was rotated** — an Ed25519 key whose public half was the live
+    `compute_ctl` trust anchor. Key material is out of git entirely; `gen-secrets.sh` generates it
+    per cluster; absent the Secret, computes lock rather than open.
+  - **ADR-0044 ingress hardening (Accepted, Amendment 1 Accepted).** The default NetworkPolicy is
+    now **port-restricted** — a co-resident pod can no longer bypass the queue-proxy by dialling the
+    app's container port — the same-namespace peer is scoped to metrics, and cross-namespace
+    scraping is a label-gated grant on `9091`. Enforcement is proved by a kind+Calico drill, not by
+    an envtest object assertion.
+  - **Still open and deliberately so:** the in-process byte cap (ADR-0044 Option C) is deferred on a
+    **dated exception with a hard expiry at Tier-A exit or v1.0**. Rate limiting and payload caps are
+    documented recipes today (`apps/docs .../hardening.mdx`), not platform features — do not claim
+    otherwise.
+  - **Enforcement is CNI-conditional.** flannel — which OKE GA and OrbStack both run — ships no
+    NetworkPolicy controller, so on those clusters the policy is declarative only. Any claim that
+    knext "isolates" app pods must carry that caveat.
 - **Service-to-service mTLS/authz** gateway↔backends; no implicit trust.
 - **Secrets in K8s Secrets only** — never in config files, images, or URLs.
 - **Supply chain:** SBOM per image, Trivy/Grype (fail on high severity), cosign signing,
@@ -117,8 +146,12 @@ defer bucket 1.
 - **(RESOLVED)** Image optimization is **implemented** per ADR-0006
   (`packages/kn-next/src/adapters/image-cache-sync.ts` + tests) — the earlier "missing / biggest
   functional gap" note is stale; don't re-propose it as a work item.
-  **But implemented ≠ gated:** its `compat-smoke` check skips rather than fails, as do three sibling
-  capability rows. `docs/compat-matrix.md` is the single source of truth for which rows are actually
+  **(RESOLVED 2026-08-16 — the "implemented ≠ gated" note is now stale.)** The old text said its
+  `compat-smoke` check "skips rather than fails, as do three sibling capability rows". The runner
+  has **no skip-on-fail mechanism at all**: check (g)'s two `skip()` paths are gone, the
+  `compat-smoke` job carries no `continue-on-error`, and `tests/compat-smoke-capability-checks.test.ts`
+  SCANS the runner so reintroducing a `skip()` reds CI.
+  `docs/compat-matrix.md` is the single source of truth for which rows are actually
   backed by a red-on-fail check — read it there rather than duplicating the detail here, and see
   `docs/V1_ROADMAP.md` §3, which makes converting them a v1.0 blocker.
 - **(RESOLVED 2026-06-20)** `packages/kn-next/src/adapters/node-server.ts` is **Nitro-free** — it
