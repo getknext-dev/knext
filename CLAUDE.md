@@ -92,6 +92,25 @@ docs site on knext**). gRPC layer = **design-now / build-later, after correctnes
   the audit lives in `docs/security/mutating-endpoints.md` (E4-2). Defense-in-depth: the operator now
   reconciles a default-on internal-only `NetworkPolicy` from the `NextApp` CR (`spec.security.networkPolicy`, #90).
   Never reintroduce an open mutating route.
+- **Security sprint 2026-08-16 — what shipped, so it is not re-proposed.**
+  - **Secret scanning in CI** (`secret-scan` job + nightly): gitleaks over **full history** on every
+    PR and push, fail-closed (no `continue-on-error`, no ref-conditional `if:`), with a
+    disposition-classed allowlist (`security/gitleaks-allowlist.json`).
+  - **The one secret history held was rotated** — an Ed25519 key whose public half was the live
+    `compute_ctl` trust anchor. Key material is out of git entirely; `gen-secrets.sh` generates it
+    per cluster; absent the Secret, computes lock rather than open.
+  - **ADR-0044 ingress hardening (Accepted, Amendment 1 Accepted).** The default NetworkPolicy is
+    now **port-restricted** — a co-resident pod can no longer bypass the queue-proxy by dialling the
+    app's container port — the same-namespace peer is scoped to metrics, and cross-namespace
+    scraping is a label-gated grant on `9091`. Enforcement is proved by a kind+Calico drill, not by
+    an envtest object assertion.
+  - **Still open and deliberately so:** the in-process byte cap (ADR-0044 Option C) is deferred on a
+    **dated exception with a hard expiry at Tier-A exit or v1.0**. Rate limiting and payload caps are
+    documented recipes today (`apps/docs .../hardening.mdx`), not platform features — do not claim
+    otherwise.
+  - **Enforcement is CNI-conditional.** flannel — which OKE GA and OrbStack both run — ships no
+    NetworkPolicy controller, so on those clusters the policy is declarative only. Any claim that
+    knext "isolates" app pods must carry that caveat.
 - **Service-to-service mTLS/authz** gateway↔backends; no implicit trust.
 - **Secrets in K8s Secrets only** — never in config files, images, or URLs.
 - **Supply chain:** SBOM per image, Trivy/Grype (fail on high severity), cosign signing,
