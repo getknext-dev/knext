@@ -185,7 +185,7 @@ your own.
 
 ## Action items
 
-- [ ] S4-op: NetworkPolicy `Ports` + scoped same-namespace peer + `timeoutSeconds`
+- [x] **DONE (#734, #739).** S4-op: NetworkPolicy `Ports` + scoped same-namespace peer + `timeoutSeconds`
       evaluation (operator; contract test proves the direct-dial refusal). Architect-gate
       residuals bound into the task: the `Ports` restriction **must still admit :9091**
       (the operator stamps `prometheus.io/port=9091`, `nextapp_controller.go:820` — a
@@ -193,7 +193,19 @@ your own.
       refused AND metrics-port scrapable); tightening a default-on policy is a **behavior
       break** for existing in-namespace callers, so it ships with a
       `spec.security.networkPolicy` escape hatch and a release note.
-- [ ] S4-docs: hardening recipe (external-only framing, no-global-cap warning, per-replica
+- [x] **DONE (#736).** S4-docs: hardening recipe (external-only framing, no-global-cap warning, per-replica
       rate-limit caveat) + threat-model.md residual entry incl. the untested OOM/SIGKILL path.
-- [ ] Ticket: Option C design brief per Decision 4 (RuntimeContract-as-code prerequisite).
-- [ ] Sprint-close standing item: re-review the dated exception until Option C lands.
+- [x] **DONE — filed as #743** (it had NOT been filed; the architect gate caught that at sprint
+      close, which is why an action item that says "file a ticket" needs the ticket number written
+      back into it). Option C design brief per Decision 4 (RuntimeContract-as-code prerequisite).
+- [ ] **BLOCKED on #742 — and this is the exception's load-bearing defect.** The stated hard expiry
+      is "Tier-A exit or v1.0". **Tier A has contents but no exit criteria**, which is the precise
+      form of the problem: `CLAUDE.md` §6 *does* enumerate what Tier A contains (image
+      optimization, graceful shutdown, control-plane consolidation, compat-suite gate) and then
+      says "see `ROADMAP.md` for detail **+ exit criteria**" — and `docs/ROADMAP.md`
+      **does not exist**. `docs/MATURITY_PLAN.md` uses Phases 0–6 with no Tier A;
+      `docs/V1_ROADMAP.md` contains no such string. So the doc points at exit criteria in a file
+      that was never written. An expiry anchored to an undefined event cannot
+      fire, so as written this exception renews forever — the architect gate's verdict was that it
+      "is a way to ship without the control". Re-anchor once #742 defines the term, and replace this
+      prose re-review with a mechanical one.
