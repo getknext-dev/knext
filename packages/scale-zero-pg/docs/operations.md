@@ -389,11 +389,17 @@ generates an Ed25519 keypair into the `compute-jwt-trust` Secret —
 manifests — `deploy/20/25/26` — mount as env and the entrypoints substitute
 into the spec at boot).
 
-Operator-rendered **per-app** computes (`compute-<app>`) and the warmstandby
-variant do **not** mount the Secret: they always take the locked fallback
-below, which is correct — nothing calls their control API in normal operation.
-Wiring the Secret into the appdb-operator's rendering is a follow-up, not a
-gap in the lock.
+Operator-rendered **per-app** computes (`compute-<app>` and its read replicas)
+**do** mount the Secret — the appdb-operator's renderer wires
+`JWT_JWK_KID`/`JWT_JWK_X` (and `CLOUD_ADMIN_MD5`) exactly as the break-glass
+template does, so a per-app compute uses the cluster's real trust anchor rather
+than a throwaway one. The **warmstandby** variant still does not, and takes the
+locked fallback below.
+
+A per-app compute that boots with the Secret absent is still locked, not open:
+the control API gets a random anchor nobody holds, and `cloud_admin` gets a
+strong random md5 (the #112 gating, which the read-replica entrypoint now
+applies as the primary always has).
 
 Nothing in the platform signs with the private key during normal operation —
 the anchor exists to keep the control API **locked to the Secret holder**. To
