@@ -134,6 +134,33 @@ echo "timeline ready"`
 								LocalObjectReference: corev1.LocalObjectReference{Name: "app-db-" + s.App},
 								Key:                  "APP_ROLE_VERIFIER", Optional: &optional,
 							}},
+						}, {
+							// issue #112: the cluster-known strong cloud_admin md5. Optional —
+							// absent, the entrypoint mints a strong RANDOM md5 per boot, so the
+							// public default never reaches a per-app compute either way. Mounting
+							// it makes cloud_admin's md5 STABLE across boots (break-glass loopback
+							// access), which is what the template already did.
+							Name: "CLOUD_ADMIN_MD5",
+							ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+								LocalObjectReference: corev1.LocalObjectReference{Name: "pg-cloud-admin"},
+								Key:                  "CLOUD_ADMIN_MD5", Optional: &optional,
+							}},
+						}, {
+							// ADR-0044 trust-anchor rotation: the compute_ctl control-API JWK
+							// (public halves only; the private key never leaves the Secret).
+							// Optional — absent, the entrypoint locks the control API with a
+							// random throwaway anchor nobody holds.
+							Name: "JWT_JWK_KID",
+							ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+								LocalObjectReference: corev1.LocalObjectReference{Name: "compute-jwt-trust"},
+								Key:                  "JWT_JWK_KID", Optional: &optional,
+							}},
+						}, {
+							Name: "JWT_JWK_X",
+							ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+								LocalObjectReference: corev1.LocalObjectReference{Name: "compute-jwt-trust"},
+								Key:                  "JWT_JWK_X", Optional: &optional,
+							}},
 						}},
 						Ports: []corev1.ContainerPort{
 							{Name: "pg", ContainerPort: 55433},
