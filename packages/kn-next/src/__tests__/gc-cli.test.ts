@@ -400,7 +400,8 @@ describe("runAssetGC", () => {
             if (argv.some((a) => a.includes(".spec.traffic.revisionName")))
                 return "shop-00099";
             // Live (stale) revisions resolve; the never-created pin does not.
-            if (argv.includes("shop-00002") || argv.includes("shop-00003")) return "bid-old";
+            if (argv.includes("shop-00002") || argv.includes("shop-00003"))
+                return "bid-old";
             return "";
         };
         const prune = vi.fn();
