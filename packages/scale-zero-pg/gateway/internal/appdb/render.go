@@ -134,6 +134,33 @@ echo "timeline ready"`
 								LocalObjectReference: corev1.LocalObjectReference{Name: "app-db-" + s.App},
 								Key:                  "APP_ROLE_VERIFIER", Optional: &optional,
 							}},
+						}, {
+							// issue #112: the cluster-known strong cloud_admin md5. Optional —
+							// absent, the entrypoint mints a strong RANDOM md5 per boot, so the
+							// public default never reaches a per-app compute either way. Mounting
+							// it makes cloud_admin's md5 STABLE across boots (break-glass loopback
+							// access), which is what the template already did.
+							Name: "CLOUD_ADMIN_MD5",
+							ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+								LocalObjectReference: corev1.LocalObjectReference{Name: "pg-cloud-admin"},
+								Key:                  "CLOUD_ADMIN_MD5", Optional: &optional,
+							}},
+						}, {
+							// ADR-0044 trust-anchor rotation: the compute_ctl control-API JWK
+							// (public halves only; the private key never leaves the Secret).
+							// Optional — absent, the entrypoint locks the control API with a
+							// random throwaway anchor nobody holds.
+							Name: "JWT_JWK_KID",
+							ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+								LocalObjectReference: corev1.LocalObjectReference{Name: "compute-jwt-trust"},
+								Key:                  "JWT_JWK_KID", Optional: &optional,
+							}},
+						}, {
+							Name: "JWT_JWK_X",
+							ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+								LocalObjectReference: corev1.LocalObjectReference{Name: "compute-jwt-trust"},
+								Key:                  "JWT_JWK_X", Optional: &optional,
+							}},
 						}},
 						Ports: []corev1.ContainerPort{
 							{Name: "pg", ContainerPort: 55433},
@@ -208,6 +235,7 @@ func (c RenderConfig) RenderROService(s ROComputeSpec) *corev1.Service {
 // — the isolation guarantee. Replicas 0 at rest: the apps-gateway RO lane scales it
 // 0<->N on read connections (a per-app HPA, if rendered, grows N under load).
 func (c RenderConfig) RenderRODeployment(s ROComputeSpec) *appsv1.Deployment {
+	optional := true
 	replicas := int32(0) // gateway RO lane scales 0<->N; HPA grows N under load
 	histLimit := int32(2)
 	grace := int64(10)
@@ -267,7 +295,43 @@ echo "resolved tip LSN = ${LSN:-<none>}"`
 						ImagePullPolicy: corev1.PullIfNotPresent,
 						Command:         []string{"/bin/sh", "/compute-files/entrypoint-ro.sh"},
 						EnvFrom:         cmRef,
-						Env:             []corev1.EnvVar{{Name: "RO_MODE", Value: "Replica"}},
+						// Same security env as the per-app WRITER (RenderDeployment): both are
+						// per-app computes on the same entrypoint family, so a read replica
+						// booting with a throwaway control-API anchor while its writer uses
+						// the cluster's real one is drift, not a design. Code review found
+						// this identical gap here right after it was closed on the writer —
+						// the template parity guard structurally cannot see it, because there
+						// is no per-app RO template; an explicit writer-to-reader assertion
+						// covers it instead.
+						//
+						// CLOUD_ADMIN_MD5 comes from pg-cloud-admin (the PER-APP secret), not
+						// pg-base-admin: deploy/26-compute-ro.yaml is the BASE tier and
+						// legitimately uses the base credential. Same env name, different
+						// tier, different Secret.
+						Env: []corev1.EnvVar{
+							{Name: "RO_MODE", Value: "Replica"},
+							{
+								Name: "CLOUD_ADMIN_MD5",
+								ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+									LocalObjectReference: corev1.LocalObjectReference{Name: "pg-cloud-admin"},
+									Key:                  "CLOUD_ADMIN_MD5", Optional: &optional,
+								}},
+							},
+							{
+								Name: "JWT_JWK_KID",
+								ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+									LocalObjectReference: corev1.LocalObjectReference{Name: "compute-jwt-trust"},
+									Key:                  "JWT_JWK_KID", Optional: &optional,
+								}},
+							},
+							{
+								Name: "JWT_JWK_X",
+								ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+									LocalObjectReference: corev1.LocalObjectReference{Name: "compute-jwt-trust"},
+									Key:                  "JWT_JWK_X", Optional: &optional,
+								}},
+							},
+						},
 						Ports: []corev1.ContainerPort{
 							{Name: "pg", ContainerPort: 55433},
 							{Name: "compute-http", ContainerPort: 3080},
