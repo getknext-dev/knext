@@ -379,6 +379,42 @@ describe("runAssetGC", () => {
         expect(prune).not.toHaveBeenCalled();
     });
 
+    // Mirrors the operator e2e leg `stale status (v3-P5)` EXACTLY, and exists
+    // because that leg spent 10 consecutive nightly runs asserting a state that
+    // cannot occur. It waited for `status.currentTraffic` to go EMPTY under an
+    // unprogrammable pin; knative v0.48 never empties it (route.go assigns
+    // Status.Traffic only on the success path, so a route that once programmed
+    // keeps its last split), and `mapTrafficStatus` mirrors that verbatim.
+    //
+    // The real state is a STALE MULTI-TARGET split plus a pin that is outside it
+    // and cannot be resolved — and the fail-safe for that is
+    // `pinned-not-resolvable`. This test pins that correspondence so the e2e's
+    // expectation is validated by something runnable without a cluster.
+    it("FAIL-SAFE: a STALE multi-target split + a never-created pin ⇒ NO prune, [pinned-not-resolvable] (the operator e2e's real state)", () => {
+        const exec = (argv: readonly string[]): string => {
+            // The stale split knative retains: the last successfully programmed
+            // 60/40, neither target being the pin.
+            if (argv.some((a) => a.includes(".status.currentTraffic")))
+                return trafficJson(["shop-00002", "shop-00003"]);
+            // The spec pin still stands, naming a revision that was NEVER created.
+            if (argv.some((a) => a.includes(".spec.traffic.revisionName")))
+                return "shop-00099";
+            // Live (stale) revisions resolve; the never-created pin does not.
+            if (argv.includes("shop-00002") || argv.includes("shop-00003"))
+                return "bid-old";
+            return "";
+        };
+        const prune = vi.fn();
+
+        const res = runAssetGC(makeConfig(), "prod", "bid-new", exec, prune);
+
+        expect(res.pruned).toBe(false);
+        expect(res.skipReason).toBe("pinned-not-resolvable");
+        expect(res.skipReason).not.toBe("pinned-with-empty-status");
+        expect(res.pinnedRevision).toBe("shop-00099");
+        expect(prune).not.toHaveBeenCalled();
+    });
+
     it("FAIL-SAFE: a THROWING pin label read ⇒ NO prune, [pinned-not-resolvable] (over-keep, no throw)", () => {
         const exec = (argv: readonly string[]): string => {
             if (argv.some((a) => a.includes(".status.currentTraffic")))
