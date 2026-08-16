@@ -1097,7 +1097,7 @@ var _ = Describe("asset retention GC against a live cluster (ADR-0011)", Ordered
 	// ambient PROD app is never scaled out from under its owner. This mirrors the
 	// P2 kind-only guard rationale (a cluster-mutating suite must never touch an
 	// ambient context) applied at leg granularity.
-	It("lagging status (v3-P5): a scaled-to-zero app pinned while status.currentTraffic LAGS empty ⇒ gc SKIPS [pinned-with-empty-status], ZERO deletions; restore ⇒ reconcile resumes ⇒ normal GC reaps only the unpinned out-of-window build", func() {
+	It("stale status (v3-P5): a scaled-to-zero app pinned to an unprogrammable revision keeps its STALE split ⇒ gc SKIPS [pinned-not-resolvable], ZERO deletions; restore ⇒ reconcile resumes ⇒ normal GC reaps only the unpinned out-of-window build", func() {
 		if existing != "" {
 			Skip("lagging-status leg is self-contained-kind ONLY (it scales the app to zero — a mutation beyond this suite's namespace-confined, cluster-read-only contract); refusing to scale an app on a possibly shared existing cluster (KNEXT_E2E_KUBE_CONTEXT=" + existing + ")")
 		}
@@ -1156,15 +1156,32 @@ var _ = Describe("asset retention GC against a live cluster (ADR-0011)", Ordered
 		Expect(utils.WaitForScaleToZero(gcAppNamespace, gcAppName)).To(Succeed(),
 			"app never scaled to zero — the lagging-while-scaled-to-zero premise cannot hold")
 
-		By("waiting until the operator has reconciled status.currentTraffic to LAGGING-EMPTY while the spec pin stands (the P4a fail-safe premise)")
-		// This is the operator's OBSERVED truth: the unprogrammable pin leaves
-		// ksvc.Status.Traffic empty, so mapTrafficStatus writes an empty
-		// currentTraffic — deterministically, for as long as the pin cannot
-		// resolve. We poll (bounded) because reconcile is asynchronous; an empty
-		// observation here is the EXPECTED window, not a failure.
+		By("asserting status.currentTraffic RETAINS its last programmed split (Knative never empties it) while the spec pin stands")
+		// CORRECTED PREMISE (this leg failed 10/10 nightly runs on the old one).
+		//
+		// The old assertion waited for currentTraffic to go EMPTY and timed out
+		// after 480s every night, reporting "premise unmet ... Expected
+		// [{60,00002},{40,00003}] to be empty". That premise is false BY
+		// CONSTRUCTION, not by configuration: in knative serving v0.48
+		// `pkg/reconciler/route/route.go` assigns Status.Traffic only on the
+		// success path — an unresolvable target hits MarkBadTrafficTarget and
+		// returns EARLY, before Status.Traffic is touched. So a route that once
+		// programmed KEEPS its last split; there is no knob that empties it.
+		// `mapTrafficStatus` then mirrors that stale split verbatim (pinned by
+		// the unit contract test in internal/controller/traffic_status_test.go).
+		//
+		// The state under test is therefore STALE-NON-EMPTY + unresolvable pin,
+		// and the CLI already implements exactly that fail-safe — it is the
+		// documented `pinned-not-resolvable` branch (gc.ts: "with a NON-empty
+		// (possibly lagging) status, ... the pin is outside currentTraffic and
+		// its build-id cannot be resolved"). No product change was needed; the
+		// leg was asserting a token for a state that cannot occur.
 		Eventually(func(g Gomega) {
-			g.Expect(gcCurrentTrafficRaw(g)).To(BeEmpty(),
-				"premise unmet: status.currentTraffic must be EMPTY (lagging) while the spec pin cannot program the route")
+			raw := gcCurrentTrafficRaw(g)
+			g.Expect(raw).NotTo(BeEmpty(),
+				"premise unmet: knative retains the last programmed split, so currentTraffic must stay NON-empty under an unprogrammable pin")
+			g.Expect(raw).NotTo(ContainSubstring(lagPinnedRevision),
+				"premise unmet: the unprogrammable pin must NOT appear in currentTraffic — it never programmed")
 		}, gcAssertTimeout, gcAssertPoll).Should(Succeed())
 
 		By("confirming the spec pin still STANDS (empty status + a live pin is exactly the fail-safe premise)")
@@ -1183,9 +1200,11 @@ var _ = Describe("asset retention GC against a live cluster (ADR-0011)", Ordered
 		Expect(res.ExitCode).To(Equal(0),
 			"gc must exit 0 on the fail-safe skip\nstdout:\n%s\nstderr:\n%s", res.Stdout, res.Stderr)
 		Expect(res.Stdout).To(ContainSubstring("SKIPPED (fail-safe over-keep)"),
-			"gc must report the fail-safe skip while status lags empty under the pin")
-		Expect(res.Stdout).To(ContainSubstring("pinned-with-empty-status"),
-			"the skip MUST carry the P4a machine-greppable token (empty currentTraffic + pin ⇒ over-keep)")
+			"gc must report the fail-safe skip while an unresolvable pin stands over a stale status")
+		Expect(res.Stdout).To(ContainSubstring("pinned-not-resolvable"),
+			"the skip MUST carry the machine-greppable token for THIS state: a non-empty (stale) currentTraffic plus a pin that is outside it and cannot be resolved ⇒ over-keep")
+		Expect(res.Stdout).NotTo(ContainSubstring("pinned-with-empty-status"),
+			"the empty-status token would mean knative emptied the split — it does not, and asserting that token is what kept this leg red 10/10 nightly runs")
 		Expect(res.Stdout).To(ContainSubstring(lagPinnedRevision),
 			"the skip report must NAME the standing pin")
 
