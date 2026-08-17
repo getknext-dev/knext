@@ -377,6 +377,53 @@ describe('A1 — self-contained on the current vinext/vite pins', () => {
     expect(body).toContain('border-bottom');
   });
 
+  it('SERVES CSS MODULES with server/client class-name agreement', async () => {
+    // A global `import './globals.css'` and a `*.module.css` import are DIFFERENT
+    // pipelines, and the sibling test above only covers the first. Modules are
+    // the harder case and the more common one in real apps: the class name is
+    // hashed at build time, and the styling only works if the hash rendered into
+    // the SSR HTML is the SAME hash present in the emitted stylesheet. A build
+    // that emits a correct stylesheet and renders a stale or unhashed class name
+    // serves two files that never meet — every assertion about either file
+    // individually passes, and the page is unstyled.
+    //
+    // SCANS rather than enumerates: every hashed class the HTML actually uses
+    // must exist in the CSS the page actually links. A module added later is
+    // covered with no edit here.
+    const html = await (await fetch(`http://127.0.0.1:${appPort}/`)).text();
+
+    const hrefs = [
+      ...new Set(
+        [...html.matchAll(/<link[^>]+href="(\/_next\/static\/css\/[^"]+\.css)"/g)].map((m) => m[1]),
+      ),
+    ];
+    expect(hrefs.length, 'the page linked no stylesheets at all').toBeGreaterThan(0);
+
+    let served = '';
+    for (const href of hrefs) {
+      const res = await fetch(`http://127.0.0.1:${appPort}${href}`);
+      expect(res.status, `linked stylesheet ${href} is not served`).toBe(200);
+      served += await res.text();
+    }
+
+    // Vite/vinext hashes module classes to `_name_hash_line`.
+    const used = [...html.matchAll(/class="([^"]+)"/g)]
+      .flatMap((m) => m[1].split(/\s+/))
+      .filter((c) => /^_[A-Za-z0-9]+_[A-Za-z0-9]+_\d+$/.test(c));
+    expect(
+      used.length,
+      'no hashed CSS-module class reached the SSR HTML — the *.module.css import produced nothing',
+    ).toBeGreaterThan(0);
+
+    for (const cls of used) {
+      expect(
+        served.includes(`.${cls}`),
+        `the HTML renders class "${cls}" but no stylesheet the page links defines it — ` +
+          'the module hash in the markup and the hash in the CSS disagree, so the element is unstyled',
+      ).toBe(true);
+    }
+  });
+
   it('serves a dynamic page and binds its param', async () => {
     const res = await fetch(`http://127.0.0.1:${appPort}/item/42`);
     expect(res.status).toBe(200);

@@ -1,0 +1,14 @@
+/* CSS MODULES — the most common CSS feature beyond a global stylesheet, and a
+   different pipeline from `import './globals.css'`: the class name must be
+   hashed at build time and the SAME hash must appear in the SSR HTML. A global
+   stylesheet working proves nothing about this. */
+.card {
+  padding: 1rem;
+  border: 2px dashed var(--knext-accent, #10b981);
+  border-radius: 8px;
+}
+
+.badge {
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
