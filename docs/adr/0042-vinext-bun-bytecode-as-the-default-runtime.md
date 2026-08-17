@@ -296,8 +296,15 @@ From #606, sourced to vinext's own repo and registry data:
       n=5 across separate runs. That is WITHDRAWN** — at n=40 the medians move and the magnitude does
       not survive a confidence interval. The withdrawal does not weaken the discharge, because the
       discharge never depended on it; it does mean nobody may cite a 70 ms cold start from this record.
-    **Not evidence, recorded so it is not reused:** `strings | grep -c 'bytecode\|CodeBlock'` returns
-    231 vs 227 — Bun's embedded runtime carries JSC symbols either way, so it does not discriminate.
+    **Prior art, which the 2026-08-17 run duplicated:** this was already measured on **2026-08-08/09**
+    and recorded in `docs/adr/gates/adr-0042-gates.json` — module coverage **34/34 = 100%** from the
+    binary by `strace`, payload characterisation showing the bytecode payload is 30.1% printable /
+    33.3% nulls against a 100%-printable control, and an ABBA-paired **~33% cold-boot improvement
+    (30 faster / 0 slower)**. The 2026-08-17 figures are an **independent replication on the x64 ship
+    target plus closure of that record's own stated caveat** (extraction from the deployed digest), not
+    a first measurement. **Not evidence, recorded so it is not reused:** `strings | grep -c` over the
+    *whole* binary returns 231 vs 227 — Bun's embedded runtime carries JSC symbols either way. That is
+    a bad instrument, **not** a fault in the prescribed method, which isolates the payload first.
     **The comparison to ADR-0035 is NOT settled by this**, and the sentence below must not be read as
     withdrawn: node's baked cache is measured at 393 ms / 12.4% *on OKE end-to-end*, while 70 ms is a
     *local in-container runtime-boot* figure. Those are different quantities on different hardware.
@@ -407,36 +414,62 @@ beta.4 serves from binary + `dist/` + `node_modules/`, and **the application is 
   this whole ADR; #658 reasons it is *probably* safe because Phase 0 used a bespoke entry, and
   probably is not verification.
 
-**Phase 3(d) — artifact provenance. DONE (2026-08-17) — it no longer gates Phase 1.** Record:
+**Phase 3(d) — artifact provenance. QUALIFIED DONE — it no longer gates Phase 1.** Machine-readable
+record: `docs/adr/gates/adr-0042-gates.json` (phase `3d`). Prose record for the 2026-08-17 additions:
 `docs/benchmarks/bun-exec-bytecode-coverage.md`.
-- **(1) verify `--bytecode` on the cross-compiled musl target, extracted from the deployed digest**
-  — **done, on the target and by the extraction item 1 named**, with one substitution inside it. The
-  *fingerprinting* half of the prescribed method is **withdrawn as unsound**: `strings` marker
-  fingerprinting does **not** discriminate (231 vs 227 hits; Bun's embedded runtime carries JSC
-  symbols either way), so anyone re-running it as written gets a null result and must not read that as
-  absence. What replaces it is a **size delta** against a no-bytecode control and an empty-entry
-  runtime floor. The *extraction* half was performed as written: `/app/server` pulled from the running
-  `p1b-bunexec@sha256:16c4b79…` digest is **byte-identical (103,712,388 B)** to the local
-  `bun-linux-x64-musl` build, and on that shipped target the bytecode delta is **6,056,134 B on
-  707,627 B of source** — the arm64 result reproduced on the deployed architecture, with an identical
-  source payload. The digest's own labels state the flags (`dev.knext.build.command`), which is the
-  one-line provenance lookup S8/#551 built this for.
-  **Bonus, and it closes the Run 25/26 withdrawal reason:** both deployed A/B arms carry
-  `dev.knext.app.id = app-159989384ca3275f` while their build labels differ as intended, so the arms
-  agree on the application and differ only on the build. Phase 1 is still un-run; its admissibility
-  precondition is no longer the blocker.
-- **(2) bytecode coverage as a number** — done, and the honest answer is **partly**. The
-  coverage question is answered by the **size** delta (+6,055,966 B on 707,627 B of embedded source,
-  which §1 proves contains the app). The *where-the-time-goes* refinement is **direction-supported and
-  magnitude-unestablished**: n=40, boot→`LISTENING` **19 ms, CI [10, 29], p = 5.7e-6** (established),
-  within-run app term 70.5 vs 111 ms, p = 0.033 but **CI crosses zero**. An n=5 first draft claiming
-  "79 of 99 ms is app-module evaluation" is **withdrawn**. Expressed as *where the time goes* rather
-  than as a module-count fraction — a module census
-  was not obtainable, since embedded modules produce no filesystem opens to count and
-  `/$bunfs/root/` yields a single entry (the binary itself).
-- **(3) the standalone/nitro shape** — done, and it answers **in the opposite direction** to the
-  item's expectation ("source says it must fail; proving it is ~20 minutes"). The nitro shape
-  **does** embed the app. See the scope correction on Consequence 11.
+
+> **Read the gate file, not this paragraph, for what is measured.** On 2026-08-17 this phase was
+> re-run from scratch by someone (me) who read the ADR prose — which said 3(d) was "NEW, and it gates
+> Phase 1" — and did **not** read the gate file, where three of its four criteria had carried measured
+> values since **2026-08-08/09**. The phase's `status` field said `NOT_STARTED` while its criteria said
+> otherwise, so both readings were defensible and the prose won. That status is corrected, and this
+> note stays because the gate file exists precisely to stop the ADR's prose being the source of truth.
+
+- **(1) `--bytecode` verified by binary extraction on the cross-compiled musl target — MEASURED
+  2026-08-08/09, caveat CLOSED 2026-08-17.** The method works and is **not** withdrawn: isolate the
+  payload after the ~92 MB Bun runtime prefix the two arms share, then characterise it — the control
+  payload is **100% printable, 0% nulls** (minified JS), the bytecode payload is **9.46× larger, 30.1%
+  printable, 33.3% nulls** (a binary blob), and source survives in both, so `--bytecode` *adds*
+  bytecode rather than replacing source. **An earlier draft of this bullet called the prescribed
+  method "withdrawn as unsound". That was wrong and is retracted** — what failed was a bad instrument
+  (`strings -a | grep -c` over the *whole binary*, 231 vs 227 hits, because Bun's own runtime carries
+  JSC symbols), not the method, which isolates the payload first. Do not repeat the `strings` version.
+  The **2026-08-17 addition** is closing the caveat the gate file itself named — "extracted from a
+  LOCALLY BUILT image … closing that link needs a published image": `/app/server` pulled with `crane`
+  from the **deployed** `p1b-bunexec@sha256:16c4b79…` digest is **byte-identical (103,712,388 B)** to
+  the local `bun-linux-x64-musl` build, and on that **ship target** (the prior run was arm64) the
+  bytecode delta is **6,056,134 B on 707,627 B of source** — the arm64 figure reproduced within 168
+  bytes, on a different architecture, by a different instrument.
+- **(2) bytecode coverage as a number — MEASURED 2026-08-08: `34/34 = 100%` from the binary**, by
+  `strace -ff -e trace=file` on the as-shipped image, with an explicit **non-vacuity control** (the
+  tracer *does* see app file IO when a static asset is requested) and a first attempt reporting 0
+  discarded as a tracing gap. **A module census WAS obtainable; an earlier draft of this bullet said it
+  was not, and that is retracted.** The 2026-08-17 addition is an independent replication by size
+  subtraction (+6,056,134 B on x64 vs +6,055,969 B on arm64) plus a functional complement: a
+  `FROM scratch` image holding only three `.so` files, the binary and `.output/public` — with no
+  `_ssr/`, `_chunks/` or `_libs/` anywhere — serves dynamic SSR, an API route and the page's own
+  static chunk.
+- **(2b) is bytecode most of the win, or none of it? — MEASURED 2026-08-09: ~33%**, ABBA interleaved,
+  15 blocks → 30 paired comparisons, **30 faster / 0 slower**, paired median delta **−29 ms**. It
+  honestly records `distribution_separation: false` (ranges overlap on outliers), so it does **not**
+  clear ADR-0036's literal bar. **This is the primary timing figure and it is a better design than the
+  2026-08-17 one**, which was unpaired (n=40, Mann-Whitney + bootstrap CI) and should be read only as
+  an independent replication: it agrees on direction and on the shell effect (19 ms to `LISTENING`,
+  95% CI [10, 29], p = 5.7e-6) and finds the *application-side magnitude* CI crosses zero. An n=5
+  draft of that run claiming "79 of 99 ms is app-module evaluation" is **withdrawn**.
+- **(3) confirm the STANDALONE shape also fails to embed the app — STILL UNMEASURED, and the reason is
+  itself a finding.** On this config beta.4 emits **no standalone server at all** (`dist/` holds only
+  `dist/server/BUILD_ID`), so #658 measured a shape `build.sh` does not build. Answering (3) needs a
+  config that emits `dist/standalone`, which `examples/bun-exec` is not. **An earlier draft claimed
+  this item was "done, in the opposite direction". It is not done** — what *is* established is the
+  **mechanism** for the nitro shape (literal vs computed specifier, see Consequence 11), which belongs
+  to item 2, not item 3.
+
+**Why the phase no longer gates Phase 1 despite (3) being open:** 3(d) exists so that a separation
+result is never attributed to bytecode that mostly is not there. Coverage is characterised at 100%,
+so that purpose is met. (3) is left open rather than reinterpreted, because reading it as answered
+would carry the old generalisation forward.
+
 **The sixth admissibility condition is SATISFIED** for this artifact: the binary is shown to contain
 the application, so a Phase 1 run on it is not labelled shell-only.
 
@@ -894,9 +927,13 @@ first, then CLI**.
   gate read it, and the premise did not survive.** No founder answer is needed because the question
   ("does the flip stand if the application is not bytecode-compiled?") describes a state the artifact
   is not in. Figure recorded as A12 requires, so a later reader sees what it was decided against:
-  **+6,055,966 B bytecode payload on 707,627 B of embedded source** (the load-bearing figure), plus
-  n=40 timing: boot→`LISTENING` shift **19 ms, 95% CI [10, 29], p = 5.7e-6**; the application-side
-  magnitude is **direction-supported, CI crosses zero** (`docs/benchmarks/bun-exec-bytecode-coverage.md`). **No longer blocks
+  module coverage **34/34 = 100% from the binary** (strace, 2026-08-08) and a **+6.06 MB bytecode
+  payload on 707,627 B of embedded source**, reproduced on the x64 ship target from the deployed
+  digest (2026-08-17). Timing, for context rather than for the discharge: ABBA-paired **~33% cold-boot
+  improvement, 30 faster / 0 slower** (2026-08-09), with an unpaired replication finding the shell
+  effect at **19 ms, 95% CI [10, 29]** and the application-side magnitude CI crossing zero.
+  See `docs/adr/gates/adr-0042-gates.json` phase `3d`; prose in
+  `docs/benchmarks/bun-exec-bytecode-coverage.md`. **No longer blocks
   Phase 5.** A11 still does.
   *(Original item follows.)*
   Get a founder answer to **Escalation 2′** once Phase 3(d) reports — *does the flip stand if

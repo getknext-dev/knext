@@ -4,19 +4,48 @@
 **Toolchain:** bun 1.3.5, `vinext@1.0.0-beta.4`, `nitro@3.0.260610-beta`, vite 8.
 **Artifact:** `examples/bun-exec`, built by `./build.sh linux-arm64` — the shipped recipe, unmodified.
 
-This record closes ADR-0042 **Phase 3(d)** items 1–3 and supplies the evidence for
-**Escalation 2′ / A12** ("does the flip stand if the application is not bytecode-compiled?").
+## Read this first — most of Phase 3(d) was ALREADY measured
+
+**This is a replication and an extension, not a first measurement.** Phase 3(d) was measured on
+**2026-08-08/09** and recorded in `docs/adr/gates/adr-0042-gates.json` (phase `3d`), by a better
+method than the one used here:
+
+| Criterion | Measured then | By |
+|---|---|---|
+| P3d-1 `--bytecode` verified | **true** | payload isolated after the shared ~92 MB runtime prefix, then characterised: control 100% printable / 0% nulls, bytecode 9.46× larger / 30.1% printable / 33.3% nulls |
+| P3d-2 coverage on cold first request | **34/34 = 100% from the binary** | `strace -ff -e trace=file` on the as-shipped image, **with a non-vacuity control** |
+| P3d-2b is bytecode most of the win? | **~33% of cold boot** | ABBA interleaved, 15 blocks → **30 paired comparisons, 30 faster / 0 slower**, paired median −29 ms |
+| P3d-3 standalone shape | **still unmeasured** | beta.4 emits no `dist/standalone` on this config — #658 measured a shape `build.sh` does not build |
+
+It was re-run on 2026-08-17 because the ADR **prose** said 3(d) was "NEW, and it gates Phase 1" and
+the phase's `status` field read `NOT_STARTED`, while its criteria carried measured values. The prose
+was read and the gate file was not. The status is now corrected; this section stays as the reason it
+was wrong to trust the prose.
+
+**What 2026-08-17 actually adds**, and it is narrower than this document's first draft claimed:
+
+1. **Closes P3d-1's own stated caveat** — "extracted from a LOCALLY BUILT image … closing that link
+   needs a published image." Now done against the **registry-pulled deployed digest**, on the **x64
+   ship target** rather than arm64.
+2. **Independent replication by a different instrument** (size subtraction, no `strace`): +6,056,134 B
+   on x64 vs +6,055,969 B on arm64 — agreement within 168 bytes.
+3. **The embedding mechanism**, which explains why the two shapes disagree (literal vs computed
+   dynamic-import specifier) — the gate file recorded the *contradiction*, not the *cause*.
+4. **The image floor**, attributed: 92 MB of the image is the Bun runtime.
+5. **The A/B's same-app precondition**, read from both deployed digests.
+6. **Guards** — nothing asserted the build flags before.
+
 It does **not** close Phase 1 — see *What this is not* at the bottom.
 
 ## Headline
 
-| Question | Answer | Evidence |
+| Question | Answer | Strongest evidence (and when) |
 |---|---|---|
-| Is the application embedded in the binary? | **Yes** | container e2e, `.output/server` absent from the image, dynamic SSR 200 |
-| Is the application bytecode-compiled (not just the shell)? | **Yes** | **+6,055,966 B of bytecode on 707,627 B of embedded source** — deterministic byte counts, not statistics |
-| Does bytecode speed up boot? | **Yes, 19 ms to listening** (95% CI 10–29, p=5.7e-6) | n=40 per arm, in-container |
-| By how much on the application side? | **Direction yes, magnitude NOT established** (median 111→70.5 ms, p=0.033, but CI crosses zero) | n=40; see the correction below |
-| Can the image be ~5 MB? | **No — floor is 92 MB** | an *empty* `--compile` binary is 92,025,917 B |
+| Is the application embedded in the binary? | **Yes** | **34/34 modules from the binary, 0 from disk** — `strace`, 2026-08-08. Corroborated 2026-08-17 by a container e2e and a `FROM scratch` image with no `_ssr/`/`_chunks/` present at all |
+| Is the application bytecode-compiled (not just the shell)? | **Yes** | payload characterisation 2026-08-08 (9.46×, 30.1% printable, 33.3% nulls vs a 100%-printable control); size delta **+6.06 MB on 707,627 B of source**, reproduced 2026-08-17 on the x64 ship target from the **deployed digest** |
+| Is bytecode most of the win, or none of it? | **~33% of cold boot** | ABBA-paired, **30 faster / 0 slower**, paired median −29 ms — 2026-08-09. *Does not* clear ADR-0036's separation bar (ranges overlap) |
+| Does the 2026-08-17 replication agree? | **On direction, yes** | shell effect 19 ms to listening (95% CI 10–29, p=5.7e-6); application-side **magnitude CI crosses zero** — unpaired n=40, a weaker design than the ABBA run |
+| Can the image be ~5 MB? | **No — floor is 92 MB** | an *empty* `--compile` binary is 92,025,917 B (89% of the image) |
 
 ## 1. The application IS in the binary
 
@@ -61,6 +90,9 @@ So Consequence 11 was scoped to the wrong artifact, not wrong — corrected in t
 deleted, because the `prod-server` result is still true of `prod-server`.
 
 ## 2. The bytecode covers the APPLICATION, not just the shell
+
+**Already established on 2026-08-08** by payload characterisation and a 34/34 module census; what
+follows is an independent size-based replication, and the x64/deployed-digest extension.
 
 Three builds of the same `.output/server/index.mjs`, differing only in flags
 (`--target=bun-linux-arm64-musl`):
@@ -157,11 +189,19 @@ interval and not as a point.
 
 Raw within-run samples are in the reproduction section below.
 
-### What is NOT evidence, recorded so it is not reused
+### A bad instrument, and the good one that already existed
 
 `strings -a <binary> | grep -c 'bytecode\|CodeBlock\|UnlinkedProgramCodeBlock'` gives **231** for the
-bytecode build and **227** for the no-bytecode build. It does not discriminate — Bun's own embedded
-runtime carries JSC symbols either way. The claim rests on the two deltas above, not on this grep.
+bytecode build and **227** for the no-bytecode build — it does not discriminate, because Bun's own
+embedded runtime carries JSC symbols either way.
+
+**That is a fault in the instrument, not in ADR-0042's prescribed method, and an earlier draft of this
+document wrongly declared the method "withdrawn as unsound".** The prescribed method works, and had
+already been run: **isolate the payload after the ~92 MB runtime prefix the two arms share**, then
+characterise it — control 100% printable with zero nulls (minified JS), bytecode payload 9.46× larger,
+30.1% printable, 33.3% nulls (a binary blob), with source surviving in both, so `--bytecode` *adds*
+bytecode rather than replacing source. Grep the whole binary and you learn nothing; isolate the
+payload first and it is unambiguous.
 
 ## 3. Image floor — the "5 MB alpine" premise, quantified
 

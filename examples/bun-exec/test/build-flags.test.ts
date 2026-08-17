@@ -103,9 +103,28 @@ describe('bun-exec build flags (ADR-0042 A12)', () => {
   it('records the target and bun version alongside, so a figure can be re-attributed', () => {
     const labels = printLabels();
     expect(labels.get('dev.knext.build.target')).toBe('bun-linux-x64-musl');
-    expect(labels.get('dev.knext.build.bun-version'), 'bun version not stamped').toMatch(
-      /^\d+\.\d+\.\d+/,
-    );
     expect(labels.get('dev.knext.app.id'), 'app id not stamped').toMatch(/\S/);
+
+    // The invariant is that the version is stamped TRUTHFULLY, not that bun is
+    // installed. `--print-labels` deliberately works without bun (it is a pure
+    // read of BUN_BUILD_CMD), and the ROOT vitest run collects this file in a
+    // job that has no bun on PATH -- an earlier draft asserted /^\d+\./ here and
+    // reddened that job for an environment fact, not a defect.
+    //
+    // Both outcomes are still asserted, because the failure that would matter is
+    // the label going MISSING or going blank: that is how a recorded figure
+    // loses the toolchain it was measured against.
+    const version = labels.get('dev.knext.build.bun-version');
+    expect(
+      version,
+      'the bun-version label is absent entirely — a figure recorded against this ' +
+        'build could no longer be attributed to a toolchain',
+    ).toBeDefined();
+    expect(
+      version,
+      `bun-version is \`${version}\`; want a semver when bun is on PATH, or the explicit sentinel ` +
+        '`unknown` when it is not. A blank or invented value is the failure — silence about the ' +
+        'toolchain is worse than an honest "unknown".',
+    ).toMatch(/^(\d+\.\d+\.\d+|unknown$)/);
   });
 });
