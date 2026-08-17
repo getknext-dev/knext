@@ -83,11 +83,19 @@ describe('bun-exec build flags (ADR-0042 A12)', () => {
       .join('\n');
     for (const flag of REQUIRED_FLAGS) {
       const occurrences = code.split(flag).length - 1;
+      // The two failure directions mean opposite things, and a message naming
+      // only one misdiagnoses the other. Found BY the mutation proof: removing
+      // the flag drops the count to 0, and this assertion then reported that as
+      // "a second occurrence".
+      const why =
+        occurrences === 0
+          ? "the flag is GONE from the script's code entirely — see the sibling assertion, " +
+            'which reads the label the build actually stamps.'
+          : 'the stamped label and the executed command are no longer one array, so the ' +
+            'provenance label can report flags the build does not use.';
       expect(
         occurrences,
-        `\`${flag}\` occurs ${occurrences}× in build.sh's code (want exactly 1). ` +
-          'A second occurrence means the stamped label and the executed command are no ' +
-          'longer one array, so the provenance label can report flags the build does not use.',
+        `\`${flag}\` occurs ${occurrences}× in build.sh's code (want exactly 1): ${why}`,
       ).toBe(1);
     }
   });
