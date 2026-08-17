@@ -121,11 +121,17 @@ it is fully explained, which makes the agreement a real cross-check rather than 
 The prior floor is the **shared prefix** between the two real binaries (92,017,848 B). Mine is a
 compiled **empty-entry** binary (92,025,917 B) — which still contains the scaffolding bun emits for a
 module, so it is **8,069 B larger**. That offset explains the 8,070 and 8,073 gaps, and because it is
-present in both of my terms it **cancels in the difference** — which is why two independent
-instruments, on two different runs, agree to **3 bytes** on the number the argument actually rests on.
+present in both of my terms it **cancels in the difference**.
+
+**Do not read the 3-byte agreement as two instruments cross-validating — it is not, and an earlier
+revision of this document oversold it exactly that way.** Both routes reduce arithmetically to
+`size(bytecode) − size(control)` over the same two builds, so the 3 B is **build nondeterminism**
+between the 08-08 binaries and the 08-17 rebuilds, not instrument agreement. It validates `wc -c`
+twice. **The genuinely informative cross-check is the 168 B agreement between arm64 and x64** — two
+architectures, two separate build runs.
 
 Practical consequence: quote the **delta**, not the payload. The payload figure depends on which floor
-you subtract; the delta does not.
+you subtract; the delta does not — `98,789,510 − 92,733,544 = 6,055,966` needs no floor at all.
 
 ### The same result on the SHIPPED x64 target, extracted from the DEPLOYED digest
 
@@ -373,19 +379,15 @@ echo 'export{}' > /tmp/empty.mjs && bun build --compile --minify --bytecode \
   --target=bun-linux-arm64-musl /tmp/empty.mjs --outfile /tmp/empty   # the runtime floor
 ```
 
-Timing script (run as the container's entrypoint, `sh -s <`), polling with busybox `nc` so the
-measurement needs nothing added to the image:
+Timing (the two-event probe that produced the two-column raw data above):
 
-```sh
-read A _ < /proc/uptime
-/app/server > /tmp/l 2>&1 & P=$!
-while :; do
-  case "$(printf 'GET /item/42 HTTP/1.0\r\nHost: x\r\n\r\n' | nc 127.0.0.1 3000 | head -1)" in
-    *200*) read B _ < /proc/uptime
-           awk -v a="$A" -v b="$B" 'BEGIN{printf "%d\n",(b-a)*1000}'; kill -9 $P; exit 0;;
-  esac
-done
+```bash
+docker run --rm -i --entrypoint sh <image> -s < examples/bun-exec/test/e2e-support/boot-timing.sh
 ```
+
+It is a **committed script**, not a snippet reproduced here. An earlier revision of this document
+inlined a **one-column** variant that could not have produced its own two-column data — caught by the
+system-designer gate, and the reason the probe now lives in the tree where it can be run and diffed.
 
 `/proc/uptime` is not namespaced, so it is a usable monotonic clock inside the container at 10 ms
 resolution; busybox `date` has no `%N`, which is why it is not used.

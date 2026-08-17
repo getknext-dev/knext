@@ -491,8 +491,11 @@ would carry the old generalisation forward.
 **The sixth admissibility condition is SATISFIED** for this artifact: the binary is shown to contain
 the application, so a Phase 1 run on it is not labelled shell-only.
 
-*(Original item text, retained because its item-1 method is now known-unsound and item 3's premise
-is refuted — both worth seeing as written.)* Phase 1's exit is "distribution
+*(Original item text, retained for the record. Note what was actually wrong with it: item 1's
+prescribed **method** is sound and had already succeeded — a 2026-08-17 draft called it "unsound"
+and that is retracted; what failed was one bad instrument. Item 3 is **not** refuted and remains
+unmeasured. This parenthetical previously restated both retracted claims verbatim, which is how a
+fix ships its own inverse.)* Phase 1's exit is "distribution
 separation", and a separation result on an artifact whose bytecode coverage is uncharacterised can
 **neither confirm nor refute the stated objective** — a win would be attributed to bytecode that mostly
 is not there, a loss blamed on a shape nobody intends to ship. This is a precondition, the same shape
