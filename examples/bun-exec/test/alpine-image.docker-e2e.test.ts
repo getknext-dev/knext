@@ -355,25 +355,56 @@ describe('A1 — self-contained on the current vinext/vite pins', () => {
     // browser to load is what makes this a styling check rather than a
     // file-exists check.
     const html = await (await fetch(`http://127.0.0.1:${appPort}/`)).text();
-    const href = html.match(/<link[^>]+href="(\/_next\/static\/css\/[^"]+\.css)"/)?.[1];
-    expect(
-      href,
-      'the SSR page referenced no stylesheet — the CSS import did not reach the HTML',
-    ).toBeTruthy();
 
-    const css = await fetch(`http://127.0.0.1:${appPort}${href}`);
-    expect(css.status, `the page's own stylesheet ${href} is not served`).toBe(200);
-    expect(css.headers.get('content-type') ?? '').toMatch(/text\/css/);
+    // `rel` MUST contain the `stylesheet` token, and matching only on href is
+    // NOT sufficient — a review demonstrated the hole. `<link rel="preload"
+    // as="style" …>` or a `media="print"` stylesheet downloads the file, 200s as
+    // text/css, contains every asserted declaration, and applies NONE of it: the
+    // page renders unstyled and every assertion below still passes. That is
+    // precisely the #657 class this test cites as its reason to exist.
+    //
+    // Not hypothetical in this stack: vinext ships `fixPreloadAs` (React Fizz
+    // emits `rel="preload" as="stylesheet"` for CSS) and
+    // `rewriteInlineCssStylesheetLinks`, which DELETES `rel="stylesheet"` link
+    // tags and substitutes inline `<style>`. Live code, one attribute away.
+    const stylesheetHrefs = [...html.matchAll(/<link\b([^>]*)>/g)]
+      .map((m) => m[1])
+      .filter((attrs) => /\brel\s*=\s*"([^"]*\s)?stylesheet(\s[^"]*)?"/.test(attrs))
+      // A print-only stylesheet is downloaded and not applied to the screen.
+      .filter((attrs) => !/\bmedia\s*=\s*"print"/.test(attrs))
+      .map((attrs) => /\bhref\s*=\s*"(\/_next\/static\/css\/[^"]+\.css)"/.exec(attrs)?.[1])
+      .filter((h): h is string => Boolean(h));
 
-    // NON-VACUITY, and it is the point of this test: a 200 carrying an empty or
-    // wrong body satisfies every assertion above. Assert a declaration that
-    // exists only in `app/globals.css`, so an empty 200 — or a stale stylesheet
-    // from a different build — fails.
-    const body = await css.text();
     expect(
-      body,
-      'the stylesheet is served but does not contain the rule the app defines',
-    ).toContain('--knext-accent');
+      stylesheetHrefs.length,
+      'the SSR page linked no APPLIED stylesheet (rel="stylesheet", not media="print"). ' +
+        'A preload or print-only link downloads the CSS and styles nothing.',
+    ).toBeGreaterThan(0);
+
+    // Scan EVERY applied stylesheet, not just the first. `.match()` took only
+    // the first `<link>`, which made the assertion order-dependent: once
+    // page.module.css also linked, a reordering would have graded the wrong file.
+    let body = '';
+    for (const href of stylesheetHrefs) {
+      const css = await fetch(`http://127.0.0.1:${appPort}${href}`);
+      expect(css.status, `the page's own stylesheet ${href} is not served`).toBe(200);
+      expect(css.headers.get('content-type') ?? '').toMatch(/text\/css/);
+      body += await css.text();
+    }
+
+    // NON-VACUITY: a 200 carrying an empty body satisfies everything above.
+    // Assert on what `globals.css` ALONE owns. `--knext-accent` is no longer
+    // that — `page.module.css` references it via `var(--knext-accent, …)`, so
+    // the token appears in both files and the discriminating power had silently
+    // collapsed to `border-bottom`. The custom-property DEFINITION (`--x:`, with
+    // the colon) and the attribute selector exist only in globals.css; the
+    // minifier strips the quotes, hence the tolerant selector match.
+    expect(body, 'no stylesheet defines the custom property globals.css declares').toMatch(
+      /--knext-accent\s*:/,
+    );
+    expect(body, "globals.css's own rule is missing from every served stylesheet").toMatch(
+      /\[data-testid=['"]?hello['"]?\]/,
+    );
     expect(body).toContain('border-bottom');
   });
 
@@ -392,12 +423,20 @@ describe('A1 — self-contained on the current vinext/vite pins', () => {
     // covered with no edit here.
     const html = await (await fetch(`http://127.0.0.1:${appPort}/`)).text();
 
+    // Same `rel="stylesheet"` requirement as the sibling test, and for the same
+    // reason: a preload or print-only link serves the bytes and applies none of
+    // them, which would make this whole check pass on an unstyled page.
     const hrefs = [
       ...new Set(
-        [...html.matchAll(/<link[^>]+href="(\/_next\/static\/css\/[^"]+\.css)"/g)].map((m) => m[1]),
+        [...html.matchAll(/<link\b([^>]*)>/g)]
+          .map((m) => m[1])
+          .filter((a) => /\brel\s*=\s*"([^"]*\s)?stylesheet(\s[^"]*)?"/.test(a))
+          .filter((a) => !/\bmedia\s*=\s*"print"/.test(a))
+          .map((a) => /\bhref\s*=\s*"(\/_next\/static\/css\/[^"]+\.css)"/.exec(a)?.[1])
+          .filter((h): h is string => Boolean(h)),
       ),
     ];
-    expect(hrefs.length, 'the page linked no stylesheets at all').toBeGreaterThan(0);
+    expect(hrefs.length, 'the page linked no APPLIED stylesheets at all').toBeGreaterThan(0);
 
     let served = '';
     for (const href of hrefs) {
@@ -406,10 +445,28 @@ describe('A1 — self-contained on the current vinext/vite pins', () => {
       served += await res.text();
     }
 
-    // Vite/vinext hashes module classes to `_name_hash_line`.
-    const used = [...html.matchAll(/class="([^"]+)"/g)]
-      .flatMap((m) => m[1].split(/\s+/))
-      .filter((c) => /^_[A-Za-z0-9]+_[A-Za-z0-9]+_\d+$/.test(c));
+    // Vite's generator is `_${name}_${hash}_${line}` and NAME KEEPS ITS OWN
+    // PUNCTUATION — `.card-title` becomes `_card-title_1i5jp_5` and `.my_class`
+    // becomes `_my_class_1i5jp_5`. An earlier `^_[A-Za-z0-9]+_[A-Za-z0-9]+_\d+$`
+    // matched neither, so a module using only kebab-case class names would have
+    // been dropped from `used` SILENTLY and this test would have gone green with
+    // zero coverage while claiming "a module added later is covered with no edit
+    // here". Caught in review.
+    const MODULE_CLASS = /^_[\w-]+_[a-z0-9]{5,}_\d+$/;
+    const classes = [...html.matchAll(/class="([^"]+)"/g)].flatMap((m) => m[1].split(/\s+/));
+    const used = classes.filter((c) => MODULE_CLASS.test(c));
+
+    // Silent-drop detector: anything that LOOKS module-generated but the pattern
+    // rejects is reported rather than ignored, so a future change to vite's
+    // generator surfaces as a failure here instead of as silent zero coverage.
+    const suspicious = classes.filter((c) => c.startsWith('_') && !MODULE_CLASS.test(c));
+    expect(
+      suspicious,
+      "these classes look CSS-module-generated but this test's pattern does not recognise them, " +
+        'so they would be skipped without ever being checked — update MODULE_CLASS rather than ' +
+        'letting coverage silently drop to zero',
+    ).toEqual([]);
+
     expect(
       used.length,
       'no hashed CSS-module class reached the SSR HTML — the *.module.css import produced nothing',
