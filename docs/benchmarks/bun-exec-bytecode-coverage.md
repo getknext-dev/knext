@@ -263,9 +263,18 @@ payload first and it is unambiguous.
 `scratch` image. The application contributes ~6.8 MB and the static assets 396 KB. No base-image
 choice can reach 5 MB; the only lever that would is not using `--compile`, which is the feature.
 
-`scratch` is viable and was **proved serving** (§1). It saves 8 MB on-disk / 3.8 MB per pull (8.2%)
-and costs the in-container shell, so `docker exec ls` / `ldd` assertions in the e2e must be rewritten
-against layer contents. Recorded as a measured option, **not adopted here** — see the follow-up issue.
+`scratch` is viable and was **proved serving** (§1). It saves 8 MB on-disk / 3.8 MB per pull (8.2%).
+
+**It is REJECTED, not deferred**, and the decisive reason is not the one an earlier draft of this
+paragraph gave. Alpine's package DB is the **only CVE-mappable surface in the image** — the
+application and the Bun runtime are a single opaque ~100 MB blob to Trivy and Grype either way — so
+removing it makes the HIGH/CRITICAL scan gate pass *because there is nothing left to scan*. That is a
+security-gate regression bought with an 8.2% pull saving, and it is the same "guard stays green when
+its subject is removed" pattern this repo keeps finding. Two further costs: the three `.so` files
+become hand-copied and unversioned with no patch path for a musl/libstdc++ CVE, and the e2e's
+**behavioural** `ldd` assertion degrades to a manifest check.
+
+Re-open only if the scan gate is first re-established against the pre-compile closure.
 
 The three libraries are exactly `ldd` output, so the list is derived, not guessed:
 `/lib/ld-musl-aarch64.so.1` (also answers `libc.musl-aarch64.so.1`), `/usr/lib/libstdc++.so.6`,

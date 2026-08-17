@@ -142,8 +142,20 @@ ADR-0036 named the `vinext → bun --compile` bridge as the **NO-GO trigger**. I
   measured together). The only lever that would reach 5 MB is dropping `--compile`, which is the
   feature. **The pull cost is the gzipped figure, not the on-disk one** — 42–46 MB, and it is the term
   a Knative cold start actually pays; do not quote 109 MB as a cold-start input.
-  `scratch` is proved serving (SSR/dynamic/API/asset) but costs the in-container shell that the e2e's
-  `docker exec ldd`/`ls` assertions use, so it is recorded as a measured option and not adopted here.
+  **`FROM scratch` is REJECTED, not deferred** — proved serving (SSR/dynamic/API/asset), and rejected
+  anyway for three reasons, the first of which is decisive and was missing from an earlier draft of
+  this bullet:
+  1. **It makes the image-scan gate vacuously green.** Alpine's package DB is the *only* CVE-mappable
+     surface in this image — the application and the Bun runtime are one opaque ~100 MB blob to Trivy
+     and Grype either way (Consequence 6). Strip the package set and the HIGH/CRITICAL gate passes
+     because there is nothing left to scan, which is this repo's own "a guard that stays green when
+     its subject is removed is decoration" — a `security.md` regression bought with an 8.2% pull saving.
+  2. The three `.so` files move from `apk`-managed and digest-pinned to **hand-copied and
+     unversioned**, with no patch path for a musl or libstdc++ CVE.
+  3. It costs the in-container shell that `alpine-image.docker-e2e.test.ts` uses to assert those
+     libraries **behaviourally**; rewriting that against layer contents downgrades it to a manifest
+     assertion.
+  Re-open only if the scan gate is first re-established against the pre-compile closure.
 - **Container cold start p50 241.9 ms** (n=12, arm64, range 220–279); the binary's own boot p50 26.7 ms.
 - **Not an A/B.** One machine, one app, no node arm, no interleaving. It must not be cited as one. The
   ~10.5 s tail did not reproduce locally, consistent with it being cluster-level.
@@ -592,6 +604,22 @@ mirrored in the CLI. **Exit:** `build: vinext` deployable opt-in; one CRD, one o
 parameterised over both images.
 **Irreversibility:** a shipped `v1alpha1` field cannot be removed (ADR-0017 §2.1), only deprecated and
 ignored. First step that cannot be fully unwound.
+
+> **How A12 / Escalation 2′ left this list, recorded so the exit and Consequence 12 cannot drift apart
+> again (architect gate, 2026-08-17).** It was **discharged by measurement, not by a founder answer**:
+> Phase 3(d) reported, a gate read the report, and 2′'s premise did not survive it. That is the
+> mechanism A12 was created to force, so this is A12 working rather than A12 being bypassed. **A
+> discharged gate is not a cleared phase** — Phase 1 separation is still `measured: false`, and A11
+> still blocks. The prose-over-data asymmetry that made 3(d) get re-run from scratch started as
+> exactly this kind of undocumented state change, which is why it is written here and in
+> `docs/adr/gates/adr-0042-gates.json` rather than only in a commit message.
+>
+> **Known gap, unguarded (system-designer gate, 2026-08-17):** nothing asserts that the entry named in
+> `build.sh` still has the **literal-specifier shape** the whole embedding result rests on. A vinext or
+> nitro upgrade that reverts `.output/server/index.mjs` to a computed `import()` — the beta.4
+> `prod-server.js` shape — would leave every required token present, the provenance label truthful,
+> and the alpine e2e green, while **silently un-embedding the application**. The `strace` census that
+> would catch it is a one-off measurement, not a gate.
 
 **Phase 5 — the default flip. (Irreversible in practice.)** Exit: ~~a founder answer to Escalation 2′
 (A12) — does the flip stand if the application is not bytecode-compiled?~~ — **PREMISE REFUTED
