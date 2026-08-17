@@ -5,6 +5,7 @@
 // Also exercises CSS MODULES on this build target (see page.module.css): a
 // global `import './globals.css'` and a `*.module.css` import are different
 // pipelines, and only the former had ever been tested here.
+import Counter from './counter';
 import styles from './page.module.css';
 
 export default function Home() {
@@ -13,6 +14,7 @@ export default function Home() {
       <h1 data-testid="hello">knext bun-exec sample</h1>
       <div className={styles.card} data-testid="css-module-card">
         <span className={styles.badge}>bun-exec</span>
+        <Counter />
       </div>
       <p>
         This page is served by a <code>bun --compile --bytecode</code> single executable built from

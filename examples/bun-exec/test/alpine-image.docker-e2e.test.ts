@@ -354,6 +354,23 @@ describe('A1 — self-contained on the current vinext/vite pins', () => {
     // content-hashed, and asserting on the URL the page actually asks the
     // browser to load is what makes this a styling check rather than a
     // file-exists check.
+    // BOTH routes, not just `/`. The PR body claimed the dynamic route links the
+    // stylesheet too, and nothing asserted it — a one-off measurement inside a
+    // change whose whole point is that measurements become gates (spec review).
+    // A layout-level stylesheet reaching `/` but not a dynamic route is a real
+    // shape: they render through different paths.
+    for (const route of ['/', '/item/42']) {
+      const routeHtml = await (await fetch(`http://127.0.0.1:${appPort}${route}`)).text();
+      const linked = [...routeHtml.matchAll(/<link\b([^>]*)>/g)]
+        .map((m) => m[1])
+        .filter((a) => /\brel\s*=\s*"([^"]*\s)?stylesheet(\s[^"]*)?"/.test(a))
+        .filter((a) => !/\bmedia\s*=\s*"print"/.test(a));
+      expect(
+        linked.length,
+        `route ${route} links no APPLIED stylesheet — it renders unstyled`,
+      ).toBeGreaterThan(0);
+    }
+
     const html = await (await fetch(`http://127.0.0.1:${appPort}/`)).text();
 
     // `rel` MUST contain the `stylesheet` token, and matching only on href is
@@ -479,6 +496,45 @@ describe('A1 — self-contained on the current vinext/vite pins', () => {
           'the module hash in the markup and the hash in the CSS disagree, so the element is unstyled',
       ).toBe(true);
     }
+
+    // THE CLIENT HALF. Everything above is SSR-markup ↔ stylesheet agreement. A
+    // build whose CLIENT graph hashed module classes differently would still
+    // pass all of it: the page renders correctly from SSR and then breaks at
+    // hydration, when React replaces the server's class with the client's. Spec
+    // review caught the original wording claiming "server/client agreement"
+    // while the example had no `'use client'` component at all, so nothing was
+    // ever hydrated and the client hashes were never read.
+    //
+    // MEASURED where the hash actually travels, rather than where it was assumed
+    // to: it is NOT in the client JS chunks (checked — 3 scripts, ~375 KB,
+    // neither hash present). Under RSC a client component's props arrive in the
+    // serialized payload embedded in the document, as `"className":"<hash>"`.
+    // Asserting on the JS bundle would have been a guard built on the wrong model.
+    const clientEl = /<[^>]+data-testid="client-badge"[^>]*>/.exec(html)?.[0];
+    expect(
+      clientEl,
+      "the 'use client' component did not render — the client half of this test is vacuous without it",
+    ).toBeTruthy();
+
+    const clientCls = /class="([^"]+)"/
+      .exec(clientEl as string)?.[1]
+      .split(/\s+/)
+      .find((c) => MODULE_CLASS.test(c));
+    expect(
+      clientCls,
+      'the client component rendered without a hashed CSS-module class, so it proves nothing about ' +
+        'the client graph',
+    ).toBeTruthy();
+
+    // The serialized payload must carry the SAME hash the markup rendered, or
+    // hydration replaces a styled element with an unstyled one.
+    expect(
+      html.includes(`\\"className\\":\\"${clientCls}\\"`) ||
+        html.includes(`"className":"${clientCls}"`),
+      `the client component renders class "${clientCls}" but that hash does not appear in the ` +
+        'serialized hydration payload — the client graph will hydrate a different class name and ' +
+        'the element loses its styling after hydration',
+    ).toBe(true);
   });
 
   it('serves a dynamic page and binds its param', async () => {
