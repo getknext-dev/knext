@@ -409,13 +409,22 @@ beta.4 serves from binary + `dist/` + `node_modules/`, and **the application is 
 
 **Phase 3(d) — artifact provenance. DONE (2026-08-17) — it no longer gates Phase 1.** Record:
 `docs/benchmarks/bun-exec-bytecode-coverage.md`.
-- **(1) verify `--bytecode`** — done, but **by a different method than item 1 prescribed, and the
-  prescribed method is withdrawn as unsound.** Extraction/fingerprinting via `strings` does **not**
-  discriminate (231 vs 227 marker hits; Bun's embedded runtime carries JSC symbols either way).
-  Substituted: a **size delta** against a no-bytecode control and an empty-entry runtime floor
-  (+6,055,966 B on 707,627 B of source), plus a **timing delta** that localises the win to
-  app-module evaluation. Anyone re-running item 1 as written will get a null result and should not
-  read that as absence.
+- **(1) verify `--bytecode` on the cross-compiled musl target, extracted from the deployed digest**
+  — **done, on the target and by the extraction item 1 named**, with one substitution inside it. The
+  *fingerprinting* half of the prescribed method is **withdrawn as unsound**: `strings` marker
+  fingerprinting does **not** discriminate (231 vs 227 hits; Bun's embedded runtime carries JSC
+  symbols either way), so anyone re-running it as written gets a null result and must not read that as
+  absence. What replaces it is a **size delta** against a no-bytecode control and an empty-entry
+  runtime floor. The *extraction* half was performed as written: `/app/server` pulled from the running
+  `p1b-bunexec@sha256:16c4b79…` digest is **byte-identical (103,712,388 B)** to the local
+  `bun-linux-x64-musl` build, and on that shipped target the bytecode delta is **6,056,134 B on
+  707,627 B of source** — the arm64 result reproduced on the deployed architecture, with an identical
+  source payload. The digest's own labels state the flags (`dev.knext.build.command`), which is the
+  one-line provenance lookup S8/#551 built this for.
+  **Bonus, and it closes the Run 25/26 withdrawal reason:** both deployed A/B arms carry
+  `dev.knext.app.id = app-159989384ca3275f` while their build labels differ as intended, so the arms
+  agree on the application and differ only on the build. Phase 1 is still un-run; its admissibility
+  precondition is no longer the blocker.
 - **(2) bytecode coverage as a number** — done, and the honest answer is **partly**. The
   coverage question is answered by the **size** delta (+6,055,966 B on 707,627 B of embedded source,
   which §1 proves contains the app). The *where-the-time-goes* refinement is **direction-supported and

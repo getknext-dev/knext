@@ -75,6 +75,47 @@ Three builds of the same `.output/server/index.mjs`, differing only in flags
 **`--bytecode` adds 6,055,966 B on 707,627 B of embedded source — 8.6×.** Shell-only bytecode on a
 3-line entry could not produce a 6 MB delta; this is bytecode across the embedded module graph.
 
+### The same result on the SHIPPED x64 target, extracted from the DEPLOYED digest
+
+The table above is `arm64-musl`, built locally. Phase 3(d) item 1 asked specifically for the
+**cross-compiled musl target, extracted from the deployed digest** — so that was done too, and it is
+the artifact currently serving on OKE (`ksvc/p1b-bunexec`, `default`):
+
+| `bun-linux-x64-musl` build | Binary bytes | Payload over the floor |
+|---|---|---|
+| empty entry — runtime floor | 96,948,627 | — |
+| `--compile --minify` (no bytecode) | 97,656,254 | 707,627 B |
+| `--compile --minify --bytecode` | **103,712,388** | 6,763,761 B |
+
+**Bytecode delta 6,056,134 B on the identical 707,627 B of source** — the same result on a different
+architecture, and the source payload is byte-for-byte identical across the two targets.
+
+Extracted from the running digest
+(`p1b-bunexec@sha256:16c4b79fd7d4dc30143eec2ae34db82ba1fe9b9fe088ed76b252de48ea4c1e14`):
+
+```
+crane export <digest> - | tar -xO app/server | wc -c   ->  103712388
+```
+
+**Byte-identical to the local build**, so these measurements describe the artifact that is actually
+deployed, not a local rebuild of it. The digest's own OCI labels state the flags, which is the
+one-line provenance lookup `build.sh`'s header was written to enable:
+
+```
+dev.knext.build.command = bun build --compile --minify --bytecode --target=bun-linux-x64-musl \
+                          .output/server/index.mjs --outfile knext-bun-exec-linux-x64
+dev.knext.build.target  = bun-linux-x64-musl
+dev.knext.app.id        = app-159989384ca3275f
+```
+
+**And the A/B's admissibility precondition is satisfied on the deployed arms.** ADR-0042 records the
+Run 25/26 defect — `p1b-node` and `p1b-bunexec` served *different applications and nothing noticed*.
+Read from the two deployed digests, not from source: **both carry
+`dev.knext.app.id = app-159989384ca3275f`**, while their build labels differ as they should
+(`npx next build --turbopack`, next 16.3.0 / node v24.14.0 vs the bun command above). The arms agree
+on the application and differ only on the build. That does **not** make Phase 1 done — no timing run
+was taken here — but it removes the reason the previous attempt was withdrawn.
+
 ### Timing — and a correction to this document's own first draft
 
 **The size delta above is what refutes A12's premise. The timing below supports it and does not carry
