@@ -501,7 +501,7 @@
           "target": [
             "Escalation 2' \u2014 DISCHARGED 2026-08-17, no founder answer required: the premise is refuted by measurement (the application IS embedded and IS bytecode-compiled). Retained in this checklist as a struck item so the list stays comparable with the ADR's history; it is NOT outstanding.",
             "Escalation 6 / A11 \u2014 what corpus delta is acceptable at the Phase 5 flip? OPEN, and now the ONLY founder gate left after 2' was discharged 2026-08-17. Added to this file 2026-08-17: it had existed solely in ADR prose, which is exactly the prose-over-data asymmetry that caused phase 3d to be re-run from scratch.",
-  "Escalation 7 \u2014 is patching vinext internals permitted? (upstream contribution is priced separately from a downstream fork)",
+            "Escalation 7 \u2014 is patching vinext internals permitted? (upstream contribution is priced separately from a downstream fork)",
             "Escalation 3' \u2014 upstream contribution vs downstream fork"
           ],
           "measured": null,
