@@ -13,8 +13,9 @@ It does **not** close Phase 1 — see *What this is not* at the bottom.
 | Question | Answer | Evidence |
 |---|---|---|
 | Is the application embedded in the binary? | **Yes** | container e2e, `.output/server` absent from the image, dynamic SSR 200 |
-| Is the application bytecode-compiled (not just the shell)? | **Yes** | +6.06 MB payload, and the boot win lands in app-module evaluation |
-| Cold time-to-first-dynamic-SSR | **70 ms** (vs 169 ms without `--bytecode`) | in-container, 5 samples each |
+| Is the application bytecode-compiled (not just the shell)? | **Yes** | **+6,055,966 B of bytecode on 707,627 B of embedded source** — deterministic byte counts, not statistics |
+| Does bytecode speed up boot? | **Yes, 19 ms to listening** (95% CI 10–29, p=5.7e-6) | n=40 per arm, in-container |
+| By how much on the application side? | **Direction yes, magnitude NOT established** (median 111→70.5 ms, p=0.033, but CI crosses zero) | n=40; see the correction below |
 | Can the image be ~5 MB? | **No — floor is 92 MB** | an *empty* `--compile` binary is 92,025,917 B |
 
 ## 1. The application IS in the binary
@@ -74,20 +75,46 @@ Three builds of the same `.output/server/index.mjs`, differing only in flags
 **`--bytecode` adds 6,055,966 B on 707,627 B of embedded source — 8.6×.** Shell-only bytecode on a
 3-line entry could not produce a 6 MB delta; this is bytecode across the embedded module graph.
 
-The timing separates shell from application, which is the part that answers A12. Both measured
-in-container from `/proc/uptime` before `exec` to the observed event, 5 samples, median:
+### Timing — and a correction to this document's own first draft
 
-| | boot → `LISTENING` | boot → first **dynamic-SSR** 200 |
-|---|---|---|
-| `--bytecode` (shipped) | **39 ms** | **70 ms** |
-| no bytecode | 59 ms | 169 ms |
-| delta | 20 ms | **99 ms** |
+**The size delta above is what refutes A12's premise. The timing below supports it and does not carry
+it**, which is the opposite of how this document read when first written. Recording why, because the
+mistake is instructive: the first draft ran **n=5 per arm** and reported "70 ms vs 169 ms, of which
+79 ms is app-module evaluation". At **n=40** the medians move (129.5 ms, not 70 ms) and the
+app-evaluation magnitude does not survive a confidence interval. **The n=5 attribution is withdrawn.**
+It was also computed across *separate* runs of the two events; the n=40 design records both
+timestamps **within one process lifetime**, so the app term is a real within-run subtraction.
 
-The SSR renderer is loaded by the lazy `import()` above — i.e. **on first request, not at boot**.
-Only 20 ms of the 99 ms saving is available before `LISTENING`; the remaining **79 ms is app-module
-evaluation**. Bytecode that covered only the shell could not move that number.
+n=40 per arm, in-container, `/proc/uptime` before `exec`, both events per run. Mann-Whitney U
+(two-sided, rank test — the distributions have heavy right tails, so no t-test), plus a
+Hodges-Lehmann shift and a 20,000-resample bootstrap CI on the **median difference**:
 
-Raw samples (ms): bytecode `70 70 70 139 180`; no bytecode `100 139 169 180 329`.
+| Metric | `--bytecode` median | no-bytecode median | HL shift | bootstrap 95% CI | p |
+|---|---|---|---|---|---|
+| boot → `LISTENING` (shell) | **39 ms** | 50 ms | **19 ms** | **[10, 29]** | **5.7e-6** |
+| boot → first dynamic-SSR 200 | 129.5 ms | 169.5 ms | 40 ms | [−11, 100] | 0.023 |
+| SSR − `LISTENING`, within-run (app) | 70.5 ms | 111 ms | 30 ms | [−11, 70.5] | 0.033 |
+
+**What is established:** bytecode reduces time-to-listening by **19 ms (CI 10–29 ms, p = 5.7e-6)**.
+That interval excludes zero and the effect is not in doubt.
+
+**What is NOT established:** the *magnitude* of the application-side saving. The rank test separates
+the two distributions (p = 0.033) and the direction is consistent (median 111 → 70.5 ms), but the
+bootstrap CI on the median difference **includes zero** — heavy right tails from container-start noise
+dominate. So: direction supported, magnitude not pinned down. Anyone needing the magnitude must
+control the noise (pinned CPUs, pre-pulled image, a warm-up discard, n in the hundreds), not just add
+samples.
+
+A useful property of the design, stated because it cuts the safe way: the bytecode binary is **6 MB
+larger**, so it has more to read and map at start. That biases the comparison **against** bytecode,
+which means these are conservative figures rather than flattering ones.
+
+The poll loop's own latency and the 10 ms `/proc/uptime` quantisation are **common-mode** — identical
+in both arms — so they inflate both columns equally and cannot manufacture a between-arm difference.
+They do set a floor on resolution, which is why the 19 ms shell result (CI 10–29) is reported as an
+interval and not as a point.
+
+Raw within-run samples are in the reproduction section below.
 
 ### What is NOT evidence, recorded so it is not reused
 
@@ -118,13 +145,15 @@ The three libraries are exactly `ldd` output, so the list is derived, not guesse
 ## What this is not
 
 - **Not an A/B against the node path, and not a Phase 1 result.** No `node+turbopack` arm was run
-  here; the 169 ms column is the *same* vinext artifact minus one flag, which is what isolates
+  here; the no-bytecode column is the *same* vinext artifact minus one flag, which is what isolates
   bytecode and nothing else. ADR-0036's five re-open conditions are not claimed.
 - **Not an OKE number.** This is a local ARM VM with a warm page cache and no image pull. The most
-  recent OKE data has cold start **scheduling-bound on a 2-node cluster, not boot-bound**, so a 70 ms
-  runtime boot does not predict an end-to-end cold start there — and a 42–46 MB pull is a cost this
+  recent OKE data has cold start **scheduling-bound on a 2-node cluster, not boot-bound**, so a
+  sub-200 ms runtime boot does not predict an end-to-end cold start there — and a 42–46 MB pull is a cost this
   measurement does not include. The honest reading: the *runtime-boot component* collapses from the
-  ~1957 ms Next-standalone floor that motivated ADR-0036 to ~70 ms; whether that is visible
+  ~1957 ms Next-standalone floor that motivated ADR-0036 to a 39 ms listen / 129.5 ms
+  first-SSR median on this artifact — a figure measured on a different machine, in a different
+  container, on a 5-route app, and therefore NOT a like-for-like replacement for the 1957 ms; whether that is visible
   end-to-end on Knative is a separate measurement that must happen on OKE.
 - **Not a compat result.** Five routes on one sample app. Phase 2's `KNEXT_BUILD=vinext` lane and the
   `compat-smoke` build-axis parameterisation remain unbuilt, and no ✅ row in
@@ -132,6 +161,104 @@ The three libraries are exactly `ldd` output, so the list is derived, not guesse
 - **Not a generalisation to large apps.** The embedding mechanism (nitro literal-specifier chunks)
   should hold at any size, but it was verified on a 5-route app; bytecode size grows with the module
   graph and 6 MB is this app's figure, not a constant.
+
+## Raw within-run samples (n=40 per arm)
+
+Each line is one container lifetime: `boot->LISTENING_ms boot->SSR200_ms`.
+
+<details><summary>`--compile --minify --bytecode`</summary>
+
+```
+340 410
+40 300
+50 150
+39 99
+110 230
+39 79
+30 70
+30 79
+39 400
+30 70
+39 79
+19 90
+29 199
+19 69
+50 350
+19 769
+39 150
+19 59
+39 99
+20 140
+50 120
+29 79
+19 59
+39 69
+39 70
+30 309
+29 79
+30 140
+50 139
+39 79
+49 109
+70 199
+49 89
+30 450
+59 349
+90 1150
+49 139
+29 79
+30 289
+59 2050
+```
+
+</details>
+
+<details><summary>`--compile --minify` (no bytecode)</summary>
+
+```
+1080 2030
+50 329
+59 239
+39 150
+39 99
+49 169
+49 119
+49 320
+59 170
+50 130
+39 119
+59 130
+59 250
+59 159
+59 210
+59 269
+49 109
+50 150
+70 179
+59 480
+39 250
+250 879
+2819 3039
+90 519
+130 260
+59 480
+59 130
+79 159
+49 210
+50 140
+50 119
+49 119
+49 109
+49 170
+49 119
+39 89
+50 180
+49 129
+60 180
+50 110
+```
+
+</details>
 
 ## Reproducing
 

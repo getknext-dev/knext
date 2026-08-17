@@ -67,7 +67,7 @@ describe('bun-exec build flags (ADR-0042 A12)', () => {
         command,
         `ADR-0042's A12 discharge is measured on \`${flag}\`; build.sh no longer passes it. ` +
           'Either restore the flag, or re-open A12 and re-run ' +
-          'docs/benchmarks/bun-exec-bytecode-coverage.md — the recorded 70 ms / +6.06 MB ' +
+          'docs/benchmarks/bun-exec-bytecode-coverage.md — the recorded +6.06 MB payload and 19 ms ' +
           'figures do not describe this build any more.',
       ).toContain(flag);
     }

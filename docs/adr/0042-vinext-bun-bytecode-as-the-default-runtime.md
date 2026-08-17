@@ -281,13 +281,21 @@ From #606, sourced to vinext's own repo and registry data:
     measurement rather than by founder fiat, and therefore stops being a founder escalation. Evidence
     (`docs/benchmarks/bun-exec-bytecode-coverage.md`), two independent deltas on the same
     `.output/server/index.mjs`:
-    - **Size.** `--bytecode` adds **6,055,966 B** on **707,627 B** of embedded source (8.6×), over an
-      empty-entry runtime floor of 92,025,917 B. A 3-line shell cannot produce a 6 MB delta.
-    - **Timing, which separates shell from application.** In-container, 5 samples, median: boot →
-      `LISTENING` **39 ms** with bytecode vs 59 ms without (Δ20 ms); boot → first **dynamic-SSR 200**
-      **70 ms** vs **169 ms** (Δ99 ms). The SSR renderer arrives via the lazy `import()` — **on first
-      request, not at boot** — so only 20 ms of the saving is reachable before `LISTENING` and the
-      remaining **79 ms is app-module evaluation**. Shell-only bytecode could not move that number.
+    - **Size — this is the delta that carries the refutation, and it is deterministic byte counts, not
+      statistics.** `--bytecode` adds **6,055,966 B** on **707,627 B** of embedded source (8.6×), over
+      an empty-entry runtime floor of 92,025,917 B. A 3-line shell cannot produce a 6 MB delta, and
+      §1's container proof establishes that the app is *inside* that embedded source. Together those
+      two facts are the refutation; nothing statistical is needed for it.
+    - **Timing — supports it, does not carry it.** n=40 per arm, in-container, both events recorded
+      **within one process lifetime**, Mann-Whitney U with a bootstrap CI on the median difference:
+      boot → `LISTENING` **39 ms vs 50 ms**, HL shift **19 ms, 95% CI [10, 29], p = 5.7e-6** —
+      established. Boot → first dynamic-SSR 200 **129.5 ms vs 169.5 ms** (p = 0.023) and the within-run
+      app term **70.5 ms vs 111 ms** (p = 0.033), but **both magnitude CIs include zero**, so the
+      application-side saving is **direction-supported and magnitude-unestablished**.
+      **A first draft of this consequence claimed "79 ms of the 99 ms is app-module evaluation" from
+      n=5 across separate runs. That is WITHDRAWN** — at n=40 the medians move and the magnitude does
+      not survive a confidence interval. The withdrawal does not weaken the discharge, because the
+      discharge never depended on it; it does mean nobody may cite a 70 ms cold start from this record.
     **Not evidence, recorded so it is not reused:** `strings | grep -c 'bytecode\|CodeBlock'` returns
     231 vs 227 — Bun's embedded runtime carries JSC symbols either way, so it does not discriminate.
     **The comparison to ADR-0035 is NOT settled by this**, and the sentence below must not be read as
@@ -408,9 +416,13 @@ beta.4 serves from binary + `dist/` + `node_modules/`, and **the application is 
   (+6,055,966 B on 707,627 B of source), plus a **timing delta** that localises the win to
   app-module evaluation. Anyone re-running item 1 as written will get a null result and should not
   read that as absence.
-- **(2) bytecode coverage as a number** — done: boot→SSR **70 ms vs 169 ms**; of the 99 ms, **79 ms
-  is after `LISTENING`**, i.e. in the application, not the shell. This is the number the item asked
-  for, expressed as *where the time goes* rather than as a module-count fraction — a module census
+- **(2) bytecode coverage as a number** — done, and the honest answer is **partly**. The
+  coverage question is answered by the **size** delta (+6,055,966 B on 707,627 B of embedded source,
+  which §1 proves contains the app). The *where-the-time-goes* refinement is **direction-supported and
+  magnitude-unestablished**: n=40, boot→`LISTENING` **19 ms, CI [10, 29], p = 5.7e-6** (established),
+  within-run app term 70.5 vs 111 ms, p = 0.033 but **CI crosses zero**. An n=5 first draft claiming
+  "79 of 99 ms is app-module evaluation" is **withdrawn**. Expressed as *where the time goes* rather
+  than as a module-count fraction — a module census
   was not obtainable, since embedded modules produce no filesystem opens to count and
   `/$bunfs/root/` yields a single entry (the binary itself).
 - **(3) the standalone/nitro shape** — done, and it answers **in the opposite direction** to the
@@ -686,11 +698,13 @@ first, then CLI**.
    **2′. — PREMISE REFUTED (2026-08-17, measured). NO LONGER A FOUNDER ESCALATION.** Phase 3(d) was
    inserted precisely so this question would be *put on a number rather than on today's evidence*, and
    the number came back against the premise: the application **is** embedded and **is**
-   bytecode-compiled, with 79 of the 99 ms saving landing after `LISTENING`, i.e. in app-module
-   evaluation (Consequence 12, `docs/benchmarks/bun-exec-bytecode-coverage.md`). There is no longer a
+   bytecode-compiled — established by a **deterministic size delta** (+6,055,966 B of bytecode on
+   707,627 B of embedded source that §1 proves contains the app), not by a timing attribution
+   (Consequence 12, `docs/benchmarks/bun-exec-bytecode-coverage.md`). There is no longer a
    contradiction between the founder's sentence and the measurement, so there is nothing for the
    founder to adjudicate. **What this does NOT do:** it does not establish that the bun path is
-   *faster* than node's baked cache — 70 ms is local in-container runtime boot, 393 ms/12.4% is OKE
+   *faster* than node's baked cache — this is a local in-container runtime-boot shift of 19 ms with a
+   median-to-first-SSR of 129.5 ms, while ADR-0035's 393 ms/12.4% is OKE
    end-to-end; that comparison is Phase 1 and is still owed. Answering 2′ removes a *blocker*, not the
    *measurement*.
    *(Original escalation text follows, kept because the phasing and A12 reference it.)*
@@ -871,8 +885,9 @@ first, then CLI**.
   gate read it, and the premise did not survive.** No founder answer is needed because the question
   ("does the flip stand if the application is not bytecode-compiled?") describes a state the artifact
   is not in. Figure recorded as A12 requires, so a later reader sees what it was decided against:
-  **+6,055,966 B bytecode payload on 707,627 B of source; boot→dynamic-SSR 70 ms vs 169 ms, 79 of the
-  99 ms after `LISTENING`** (`docs/benchmarks/bun-exec-bytecode-coverage.md`). **No longer blocks
+  **+6,055,966 B bytecode payload on 707,627 B of embedded source** (the load-bearing figure), plus
+  n=40 timing: boot→`LISTENING` shift **19 ms, 95% CI [10, 29], p = 5.7e-6**; the application-side
+  magnitude is **direction-supported, CI crosses zero** (`docs/benchmarks/bun-exec-bytecode-coverage.md`). **No longer blocks
   Phase 5.** A11 still does.
   *(Original item follows.)*
   Get a founder answer to **Escalation 2′** once Phase 3(d) reports — *does the flip stand if
