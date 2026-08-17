@@ -133,8 +133,9 @@ ADR-0036 named the `vinext → bun --compile` bridge as the **NO-GO trigger**. I
   SSR, route handler, dynamic routes, correct 404, auth-gated `POST /api/cache/invalidate` (401 without
   token / 200 with), and `:9091/metrics`.
 - **Image 109,060,359 B (109 MB)** — ADR-0036's 90–110 MB range **confirmed**; binary 100,544,401 B.
-  **ATTRIBUTED 2026-08-17:** an *empty* `--compile --bytecode` binary is **92,025,917 B**, so the Bun
-  runtime is ~89% of the image and the application ~6.8 MB. This is the quantitative death of the
+  **ATTRIBUTED 2026-08-17:** an *empty* `--compile --minify --bytecode` binary is **92,025,917 B**,
+  so the Bun runtime is **84.4% of this 109,060,359 B image** and the application ~6.8 MB. (89% is the
+  ratio against the smaller `FROM scratch` image, 92,025,917/103 MB — do not attach it to this bullet.) This is the quantitative death of the
   "~5 MB alpine" premise ADR-0036 §35 recorded and §75 already called wrong: **no base-image choice
   can approach it** — `FROM scratch` + the three `ldd` libraries reaches 103 MB on-disk /
   **42,491,491 B gzipped**, versus the shipped alpine shape's 111 MB / 46,279,692 B (arm64,
@@ -464,7 +465,9 @@ record: `docs/adr/gates/adr-0042-gates.json` (phase `3d`). Prose record for the 
   the local `bun-linux-x64-musl` build, and on that **ship target** (the prior run was arm64) the
   bytecode delta is **6,056,134 B on 707,627 B of source** — the arm64 figure reproduced within 165
   bytes, on a different architecture, by a different instrument.
-- **(2) bytecode coverage as a number — MEASURED 2026-08-08: `34/34 = 100%` from the binary**, by
+- **(2) EMBEDDING coverage as a number — MEASURED 2026-08-08: `34/34 = 100%` of server modules
+  loaded from the binary** (the criterion was originally worded *"bytecode coverage"*, which
+  mislabels what `strace` measures — the per-module bytecode question is **not** answered by it), by
   `strace -ff -e trace=file` on the as-shipped image, with an explicit **non-vacuity control** (the
   tracer *does* see app file IO when a static asset is requested) and a first attempt reporting 0
   discarded as a tracing gap. **A module census WAS obtainable; an earlier draft of this bullet said it
@@ -490,8 +493,13 @@ record: `docs/adr/gates/adr-0042-gates.json` (phase `3d`). Prose record for the 
   to item 2, not item 3.
 
 **Why the phase no longer gates Phase 1 despite (3) being open:** 3(d) exists so that a separation
-result is never attributed to bytecode that mostly is not there. Coverage is characterised at 100%,
-so that purpose is met. (3) is left open rather than reinterpreted, because reading it as answered
+result is never attributed to bytecode that mostly is not there. **EMBEDDING** coverage is
+characterised at **34/34 = 100% of server modules loaded from the binary** — a `strace` census, not a
+per-module bytecode census — and the bytecode payload is **+6,055,966 B over 707,627 B of total
+embedded source** in aggregate. Together those make "mostly not there" quantitatively implausible,
+which is the purpose 3(d) was written to serve. **They do not establish that every module is
+bytecode**, and this sentence is the one that releases the gate, so it states the weaker true claim
+rather than the stronger convenient one. (3) is left open rather than reinterpreted, because reading it as answered
 would carry the old generalisation forward.
 
 **The sixth admissibility condition is SATISFIED** for this artifact: the binary is shown to contain
@@ -796,7 +804,7 @@ first, then CLI**.
    generation acceptable? For a scale-to-zero product this may matter more than images.)*
 3′. **REFRAMED (2026-08-05), then PARTLY UNWOUND the same day (#660).** The reframing said two
    capability gaps had converged on one remedy — a fork. **That is now halved: images need no fork**
-   (Escalation 1, refuted — vinext publicly exports the optimiser). **SUPERSEDED 2026-08-17: the
+   (Escalation 1, refuted — vinext publicly exports the optimiser). **MOTIVE REMOVED 2026-08-17, ITEM STILL OPEN: the
    remaining half is refuted too — the shipped shape embeds the application with no fork (Consequence
    14). Read the clause below as historical.** ~~Only SSR application-embedding
    (Consequence 11) still points at a fork or upstream PR.** The question survives at reduced weight:

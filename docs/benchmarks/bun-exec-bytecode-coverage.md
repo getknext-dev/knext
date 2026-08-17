@@ -47,7 +47,7 @@ It does **not** close Phase 1 — see *What this is not* at the bottom.
 | Is the application bytecode-compiled (not just the shell)? | **Yes — but see the per-module caveat in §2** | payload characterisation 2026-08-08 (9.46×, 30.1% printable, 33.3% nulls vs a 100%-printable control); size delta **+6.06 MB on 707,627 B of source**, reproduced 2026-08-17 on the x64 ship target from the **deployed digest** |
 | Is bytecode most of the win, or none of it? | **~33% of cold boot** | ABBA-paired, **30 faster / 0 slower**, paired median −29 ms — 2026-08-09. *Does not* clear ADR-0036's separation bar (ranges overlap) |
 | Does the 2026-08-17 replication agree? | **On direction, yes** | shell effect 19 ms to listening (95% CI 10–29, p=5.7e-6); application-side **magnitude CI crosses zero** — unpaired n=40, a weaker design than the ABBA run |
-| Can the image be ~5 MB? | **No — floor is 92 MB** | an *empty* `--compile` binary is 92,025,917 B (89% of the image) |
+| Can the image be ~5 MB? | **No — floor is 92 MB** | an *empty* `--compile --minify --bytecode` binary is 92,025,917 B — 84.4% of the shipped 109 MB image, 89% of the `FROM scratch` one |
 
 ## 1. The application IS in the binary
 
