@@ -90,9 +90,11 @@
     {
       "phase": "3d",
       "name": "artifact provenance",
-      "status": "NOT_STARTED",
-      "gates": [1],
-      "why_gates_phase_1": "Phase 1's exit is distribution separation. On an artifact whose bytecode coverage is uncharacterised, a win would be attributed to bytecode that mostly is not there and a loss blamed on a shape nobody intends to ship.",
+      "status": "DONE_WITH_P3D3_NOT_PRODUCIBLE_HERE",
+      "status_note": "P3d-1, P3d-2 and P3d-2b are measured; P3d-3 is NOT, and cannot be measured in this repo for the recorded reason that beta.4 emits no dist/standalone on this config \u2014 #658 measured a shape build.sh does not build. The phase existed to stop Phase 1 running on an artifact whose bytecode coverage is uncharacterised; EMBEDDING coverage is characterised at 34/34 = 100% of server modules loaded from the binary (this is an EMBEDDING census, not a per-module BYTECODE census \u2014 see P3d-2's residual), so that purpose is MET and 3(d) no longer gates Phase 1. Left qualified rather than DONE because P3d-3 is genuinely unanswered, and reading it as answered would carry the old generalisation forward. Status corrected 2026-08-17: it read NOT_STARTED while three of its four criteria carried measured values, which is how a reader of this file concluded the whole phase was outstanding and re-ran it.",
+      "gates": [],
+      "gates_note": "DISCHARGED 2026-08-17. This phase gated phase 1 until its coverage question was answered; EMBEDDING coverage is characterised at 34/34 = 100% of server modules loaded from the binary (this is an EMBEDDING census, not a per-module BYTECODE census \u2014 see P3d-2's residual), so the gate is released. Expressed HERE, in the data, and not only in the ADR prose \u2014 the whole reason this phase was re-run from scratch is that a reader trusted the prose over this file.",
+      "why_it_gated_phase_1": "Phase 1's exit is distribution separation. On an artifact whose bytecode coverage is uncharacterised, a win would be attributed to bytecode that mostly is not there and a loss blamed on a shape nobody intends to ship.",
       "criteria": [
         {
           "id": "P3d-1",
@@ -102,7 +104,7 @@
           "measured": true,
           "source": "measured 2026-08-08/09, examples/bun-exec, vinext 1.0.0-beta.4 / bun 1.3.5, target bun-linux-arm64-musl",
           "method": "ADR-0036 Run 26's method \u2014 extract from the deployed digest, fingerprint against version-matched controls",
-          "note": "CAVEAT, stated rather than glossed: extracted from a LOCALLY BUILT image, not a registry-pulled digest. The method is the one the ADR specifies and the control is version-matched; the provenance chain is one link shorter than \"the deployed digest\". Closing that link needs a published image.",
+          "note": "CAVEAT, stated rather than glossed: extracted from a LOCALLY BUILT image, not a registry-pulled digest. The method is the one the ADR specifies and the control is version-matched; the provenance chain is one link shorter than \"the deployed digest\". CAVEAT CLOSED 2026-08-17: re-done against the REGISTRY-PULLED deployed digest (p1b-bunexec@sha256:16c4b79fd7d4dc30143eec2ae34db82ba1fe9b9fe088ed76b252de48ea4c1e14, the ksvc actually serving on OKE) and on the x64 SHIP target rather than arm64. The provenance chain is now the full length the ADR specifies.",
           "evidence": {
             "method": "extract the binary from the built image, fingerprint against a version-matched control built from the SAME input and target differing only in --bytecode",
             "image_extracted_sha256_16": "18902cc1e5b9ab0a",
@@ -117,12 +119,29 @@
             "payload_bytecode_nulls_pct": 33.3,
             "payload_control_printable_pct": 100.0,
             "payload_control_nulls_pct": 0.0,
+            "deployed_digest_check_2026_08_17": {
+              "digest": "me-abudhabi-1.ocir.io/axfqznklsd2t/p1b-bunexec@sha256:16c4b79fd7d4dc30143eec2ae34db82ba1fe9b9fe088ed76b252de48ea4c1e14",
+              "method": "crane export <digest> | tar -xO app/server | wc -c, compared byte-count-wise against the local bun-linux-x64-musl build",
+              "deployed_binary_bytes": 103712388,
+              "local_x64_build_bytes": 103712388,
+              "byte_identical": true,
+              "target": "bun-linux-x64-musl (the SHIP target; the 2026-08-08/09 run was arm64)",
+              "x64_runtime_floor_bytes": 96948627,
+              "x64_control_nobytecode_bytes": 97656254,
+              "x64_source_payload_bytes": 707627,
+              "x64_bytecode_delta_bytes": 6056134,
+              "oci_label_build_command": "bun build --compile --minify --bytecode --target=bun-linux-x64-musl .output/server/index.mjs --outfile knext-bun-exec-linux-x64",
+              "oci_label_app_id": "app-159989384ca3275f",
+              "peer_arm_app_id": "app-159989384ca3275f",
+              "peer_arm_build_command": "npx next build --turbopack",
+              "reading": "The deployed binary is byte-identical to the local build, so these figures describe what is actually serving rather than a rebuild of it. The x64 bytecode delta (6,056,134 B) reproduces the 2026-08-08 arm64 result (6,055,969 B) within 165 bytes, on a different architecture AND a different instrument (the arm64-vs-x64 figure within the 2026-08-17 run alone is 168 B; arm64 2026-08-17 vs 2026-08-08 is 3 B \u2014 three distinct comparisons) (size subtraction against an empty-entry floor, no strace). Separately: both deployed A/B arms carry the SAME dev.knext.app.id while their build labels differ as intended, which is the Run 25/26 same-app precondition shown closed on the deployed digests rather than on source."
+            },
             "reading": "both arms share an identical 92,017,848-byte Bun runtime prefix; only the appended payload differs. The control payload is 100% printable with zero nulls \u2014 minified JS source. The bytecode payload is 9.46x larger, 30.1% printable, one third nulls \u2014 a binary blob. Source survives in BOTH (the string LISTENING appears in each), so --bytecode ADDS bytecode rather than replacing source."
           }
         },
         {
           "id": "P3d-2",
-          "text": "bytecode coverage on the cold first request",
+          "text": "EMBEDDING coverage on the cold first request (how many server modules load from the binary vs from disk). NOTE: the criterion was originally worded \"bytecode coverage\", which mislabels what strace measures \u2014 see residual_2026_08_17. The per-module BYTECODE question is NOT answered by this criterion.",
           "kind": "ratio",
           "unit": "fraction of modules served from the binary vs disk",
           "target": null,
@@ -139,8 +158,10 @@
             "non_vacuity_control": "the tracer DOES see app file IO \u2014 /app/.output/public/_next/static/chunks/index-D73AVhRX.js appears when that asset is explicitly requested, and /app/server appears. A first attempt reported 0 with NO control and captured only 19 openat lines; that zero was a tracing gap, not an absence, and was discarded.",
             "only_disk_js_read": "the browser chunk explicitly requested \u2014 not a server module",
             "bytecode_size_delta_bytes": 6055969,
-            "bytecode_size_delta_pct": 6.5
+            "bytecode_size_delta_pct": 6.5,
+            "independent_replication_2026_08_17": "Re-derived on x64 by size subtraction against an empty-entry runtime floor (no strace, different instrument, different architecture): 6,056,134 B vs this run's 6,055,969 B \u2014 165 B apart (168 B is arm64-vs-x64 within the 2026-08-17 run; 3 B is arm64 across the two runs). Functional complement: an as-shipped image AND a FROM scratch image (three .so files, the binary, .output/public, and no _ssr/_chunks/_libs anywhere) each serve dynamic SSR /item/42 -> 200, an API route, and the page's own /_next/static chunk. Consistent with modules_bundled_into_binary=34 and server_modules_read_from_disk=0."
           },
+          "residual_2026_08_17": "The 8.6x payload growth is an AGGREGATE, not a per-module claim, and it must not be read as one. --bytecode rejects modules using top-level await, which is a known mechanism for SILENT per-module fallback to source. Nothing here decomposes coverage per module, so 'every module is bytecode' is NOT established \u2014 only that the bytecode payload spans far more than the 3-line entry shell. The A12 discharge does not depend on the stronger reading: A12's question was conditioned on the application not being IN the binary, which is flatly false (34/34, and a FROM scratch container serving dynamic SSR with no chunks present).",
           "note": "CONTRADICTS the premise recorded in Consequence 11 / #658 FOR THIS BUILD SHAPE. The app IS in the binary on the .output/server compile path: zero server modules load from disk. #658 measured the dist/standalone shape, which build.sh does not use. Both shapes exist on beta.4, so the two results are compatible and the ADR text is under-specified rather than wrong."
         },
         {
@@ -150,7 +171,7 @@
           "target": true,
           "measured": null,
           "source": "measured 2026-08-08/09, examples/bun-exec, vinext 1.0.0-beta.4 / bun 1.3.5, target bun-linux-arm64-musl",
-          "note": "STILL UNMEASURED, and the reason is a finding: on this config beta.4 emits NO standalone server at all. `dist/` contains only `dist/server/BUILD_ID` \u2014 4 KB, no server.js. So the standalone shape cannot be confirmed to fail-to-embed here, because it is not produced here. #658 measured a shape this app does not build. Answering P3d-3 requires the config that emits dist/standalone, which is not examples/bun-exec."
+          "note": "STILL UNMEASURED, and the reason is a finding: on this config beta.4 emits NO standalone server at all. `dist/` contains only `dist/server/BUILD_ID` \u2014 4 KB, no server.js. So the standalone shape cannot be confirmed to fail-to-embed here, because it is not produced here. #658 measured a shape this app does not build. Answering P3d-3 requires the config that emits dist/standalone, which is not examples/bun-exec. MECHANISM RECORDED 2026-08-17 (this does NOT measure P3d-3, which stays null): the reason the .output/server shape embeds where prod-server cannot is that nitro pre-bundles the app into _ssr/+_chunks/ and index.mjs reaches it through a LITERAL specifier \u2014 import(\"./_chunks/ssr-renderer.mjs\") \u2014 which bun's bundler follows, whereas prod-server import()s a COMPUTED path, unbundleable by construction. So the two results were never in tension; the ADR prose generalised from one shape to the other."
         },
         {
           "id": "P3d-2b",
@@ -195,7 +216,8 @@
     {
       "phase": 1,
       "name": "measure the axis",
-      "status": "BLOCKED_ON_3d",
+      "status": "UNBLOCKED_3d_DISCHARGED",
+      "status_note": "Was BLOCKED_ON_3d. Released 2026-08-17 when phase 3d's coverage question was answered (34/34 from the binary). This is NOT a claim that phase 1 is ready to run: its own preconditions remain \u2014 P1-pre-2 is unmeasured, and the node CONTROL arm still has no committed build recipe in the repo. Unblocked is not the same as admissible.",
       "reversible": true,
       "arms": ["node+turbopack (control)", "bun+vinext-compiled"],
       "preconditions": [
@@ -477,7 +499,8 @@
           "text": "founder escalations answered",
           "kind": "checklist",
           "target": [
-            "Escalation 2' \u2014 does the flip stand if the app is not bytecode-compiled?",
+            "Escalation 2' \u2014 DISCHARGED 2026-08-17, no founder answer required: the premise is refuted by measurement (the application IS embedded and IS bytecode-compiled). Retained in this checklist as a struck item so the list stays comparable with the ADR's history; it is NOT outstanding.",
+            "Escalation 6 / A11 \u2014 what corpus delta is acceptable at the Phase 5 flip? OPEN, and now the ONLY founder gate left after 2' was discharged 2026-08-17. Added to this file 2026-08-17: it had existed solely in ADR prose, which is exactly the prose-over-data asymmetry that caused phase 3d to be re-run from scratch.",
             "Escalation 7 \u2014 is patching vinext internals permitted? (upstream contribution is priced separately from a downstream fork)",
             "Escalation 3' \u2014 upstream contribution vs downstream fork"
           ],

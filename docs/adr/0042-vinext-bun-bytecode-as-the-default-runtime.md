@@ -133,6 +133,29 @@ ADR-0036 named the `vinext → bun --compile` bridge as the **NO-GO trigger**. I
   SSR, route handler, dynamic routes, correct 404, auth-gated `POST /api/cache/invalidate` (401 without
   token / 200 with), and `:9091/metrics`.
 - **Image 109,060,359 B (109 MB)** — ADR-0036's 90–110 MB range **confirmed**; binary 100,544,401 B.
+  **ATTRIBUTED 2026-08-17:** an *empty* `--compile --minify --bytecode` binary is **92,025,917 B**,
+  so the Bun runtime is **84.4% of this 109,060,359 B image** and the application ~6.8 MB. (89% is the
+  ratio against the smaller `FROM scratch` image, 92,025,917/103 MB — do not attach it to this bullet.) This is the quantitative death of the
+  "~5 MB alpine" premise ADR-0036 §35 recorded and §75 already called wrong: **no base-image choice
+  can approach it** — `FROM scratch` + the three `ldd` libraries reaches 103 MB on-disk /
+  **42,491,491 B gzipped**, versus the shipped alpine shape's 111 MB / 46,279,692 B (arm64,
+  measured together). The only lever that would reach 5 MB is dropping `--compile`, which is the
+  feature. **The pull cost is the gzipped figure, not the on-disk one** — 42–46 MB, and it is the term
+  a Knative cold start actually pays; do not quote 109 MB as a cold-start input.
+  **`FROM scratch` is REJECTED, not deferred** — proved serving (SSR/dynamic/API/asset), and rejected
+  anyway for three reasons, the first of which is decisive and was missing from an earlier draft of
+  this bullet:
+  1. **It makes the image-scan gate vacuously green.** Alpine's package DB is the *only* CVE-mappable
+     surface in this image — the application and the Bun runtime are one opaque ~100 MB blob to Trivy
+     and Grype either way (Consequence 6). Strip the package set and the HIGH/CRITICAL gate passes
+     because there is nothing left to scan, which is this repo's own "a guard that stays green when
+     its subject is removed is decoration" — a `security.md` regression bought with an 8.2% pull saving.
+  2. The three `.so` files move from `apk`-managed and digest-pinned to **hand-copied and
+     unversioned**, with no patch path for a musl or libstdc++ CVE.
+  3. It costs the in-container shell that `alpine-image.docker-e2e.test.ts` uses to assert those
+     libraries **behaviourally**; rewriting that against layer contents downgrades it to a manifest
+     assertion.
+  Re-open only if the scan gate is first re-established against the pre-compile closure.
 - **Container cold start p50 241.9 ms** (n=12, arm64, range 220–279); the binary's own boot p50 26.7 ms.
 - **Not an A/B.** One machine, one app, no node arm, no interleaving. It must not be cited as one. The
   ~10.5 s tail did not reproduce locally, consistent with it being cluster-level.
@@ -236,7 +259,22 @@ From #606, sourced to vinext's own repo and registry data:
 9. **The image needs `apk add libstdc++ libgcc`** — the musl targets are not statically linked.
 10. **Nothing is removed by this decision.** `examples/bun-exec` stays, the node path stays until
     Phase 6 decides its fate, ADR-0035's baked compile cache stays.
-11. **On `vinext@1.0.0-beta.4` the APPLICATION IS NOT IN THE BINARY.** Measured (#658), and the
+11. **SCOPE-CORRECTED (2026-08-17, measured — `docs/benchmarks/bun-exec-bytecode-coverage.md`). On
+    the entry knext actually ships, the application IS in the binary.** The finding below is true of
+    beta.4's **`prod-server.js`** entry and is retained verbatim for that entry; it was generalised to
+    "the standalone shape must therefore also fail", and that generalisation is now refuted by
+    measurement. `build.sh` compiles nitro's `.output/server/index.mjs`, where the app is reached
+    through a **literal** specifier — `import('./_chunks/ssr-renderer.mjs')` — which bun's bundler
+    follows and embeds. The mechanism is **nitro's**, not vinext's: nitro pre-bundles the app into
+    `_ssr/`+`_chunks/` and references them literally, so the "dynamic import of a *computed* path"
+    property that makes `prod-server` unbundleable simply does not apply. Proof is a container run of
+    an image containing **only** the binary and `.output/public` — no `_ssr/`, `_chunks/` or `_libs/`
+    anywhere — serving dynamic SSR (`/item/42` → 200 with rendered body), an API route, and the page's
+    own static chunk; reproduced on `FROM scratch`. Verified on a 5-route app; the mechanism should
+    hold at any size but the ADR should not claim more than was run.
+    **What is still NOT claimed:** that this closes Phase 1, Phase 2, or any compat row.
+    *(Original finding, still true of `prod-server`, follows.)*
+    **On `vinext@1.0.0-beta.4`'s `prod-server` entry the APPLICATION IS NOT IN THE BINARY.** Measured (#658), and the
     mechanism is read from source rather than inferred: `prod-server.js:634-657` derives
     `rscEntryPath = <outDir>/server/index.js` and `import()`s it at runtime
     (`importServerEntryModule`, `:120-122`). **A dynamic import of a computed path is unbundleable by
@@ -250,7 +288,49 @@ From #606, sourced to vinext's own repo and registry data:
     independent workarounds failed. Remedy: **a vinext fork or upstream PR**.
     *Earned claim only:* the application is not in the binary. Whether the **shell** is
     bytecode-compiled was **not** verified by extraction — see Phase 3(d).
-12. **The flip may REDUCE the precompiled fraction of the boot path — the inverse of the stated
+12. **RESOLVED (2026-08-17, measured). The premise is refuted: the bytecode DOES cover the
+    application, so the flip does not reduce the precompiled fraction.** This was **Escalation 2′ /
+    A12**, the ADR's own "single most decision-relevant fact on the table"; it is answered by
+    measurement rather than by founder fiat, and therefore stops being a founder escalation. Evidence
+    (`docs/benchmarks/bun-exec-bytecode-coverage.md`), two independent deltas on the same
+    `.output/server/index.mjs`:
+    - **Size — this is the delta that carries the refutation, and it is deterministic byte counts, not
+      statistics.** `--bytecode` adds **6,055,966 B** on **707,627 B** of embedded source (8.6×), over
+      an empty-entry runtime floor of 92,025,917 B. A 3-line shell cannot produce a 6 MB delta, and
+      §1's container proof establishes that the app is *inside* that embedded source.
+      **Aggregate, not per-module:** `--bytecode` rejects top-level `await` and falls back to source
+      **silently**, and nothing decomposes the payload per module — so "every module is bytecode" is
+      **not** established here. The discharge does not need it (A12 was conditioned on the app not
+      being in the binary, which is refuted outright). Together those
+      two facts are the refutation; nothing statistical is needed for it.
+    - **Timing — supports it, does not carry it.** n=40 per arm, in-container, both events recorded
+      **within one process lifetime**, Mann-Whitney U with a bootstrap CI on the median difference:
+      boot → `LISTENING` **39 ms vs 50 ms**, HL shift **19 ms, 95% CI [10, 29], p = 5.7e-6** —
+      established. Boot → first dynamic-SSR 200 **129.5 ms vs 169.5 ms** (p = 0.023) and the within-run
+      app term **70.5 ms vs 111 ms** (p = 0.033), but **both magnitude CIs include zero**, so the
+      application-side saving is **direction-supported and magnitude-unestablished**.
+      **A first draft of this consequence claimed "79 ms of the 99 ms is app-module evaluation" from
+      n=5 across separate runs. That is WITHDRAWN** — at n=40 the medians move and the magnitude does
+      not survive a confidence interval. The withdrawal does not weaken the discharge, because the
+      discharge never depended on it; it does mean nobody may cite a 70 ms cold start from this record.
+    **Prior art, which the 2026-08-17 run duplicated:** this was already measured on **2026-08-08/09**
+    and recorded in `docs/adr/gates/adr-0042-gates.json` — module coverage **34/34 = 100%** from the
+    binary by `strace`, payload characterisation showing the bytecode payload is 30.1% printable /
+    33.3% nulls against a 100%-printable control, and an ABBA-paired **~33% cold-boot improvement
+    (30 faster / 0 slower)**. The 2026-08-17 figures are an **independent replication on the x64 ship
+    target plus closure of that record's own stated caveat** (extraction from the deployed digest), not
+    a first measurement. **Not evidence, recorded so it is not reused:** `strings | grep -c` over the
+    *whole* binary returns 231 vs 227 — Bun's embedded runtime carries JSC symbols either way. That is
+    a bad instrument, **not** a fault in the prescribed method, which isolates the payload first.
+    **The comparison to ADR-0035 is NOT settled by this**, and the sentence below must not be read as
+    withdrawn: node's baked cache is measured at 393 ms / 12.4% *on OKE end-to-end*, while this
+    record's figures are *local in-container runtime-boot* ones — a **19 ms** shift to listening on a
+    **129.5 ms** median to first dynamic SSR. Those are different quantities on different hardware.
+    (An earlier revision wrote "70 ms" here, eleven lines after declaring that number withdrawn.)
+    What is settled is only the qualitative claim that blocked Phase 5 — both paths precompile the
+    application. Which is faster end-to-end is Phase 1, still owed.
+    *(Original consequence, premise now refuted, follows.)*
+    **The flip may REDUCE the precompiled fraction of the boot path — the inverse of the stated
     motive.** The incumbent node path already ships **app-covering** compiled-code caching:
     `scripts/warm-compile-cache.sh` bakes 1106 V8 entries covering the *grandchild* standalone
     `server.js` — the application — measured at **393 ms / 12.4% with complete distribution
@@ -258,7 +338,16 @@ From #606, sourced to vinext's own repo and registry data:
     the application **interpreted from disk**, with no equivalent app-covering mechanism identified or
     measured on the bun path. This is the single most decision-relevant fact on the table and it
     contradicts the founder's own sentence; it is escalated as **Escalation 2′**, not resolved here.
-13. **The SSR-embedding blocker is a Vite 8 regression, not a vinext design property — mechanism
+13. **SCOPE-CORRECTED 2026-08-17 — this describes the `dist/standalone` / `prod-server` entry, NOT
+    the shape knext ships.** The finding below is retained for that entry. It must not be read as a
+    statement about the nitro `.output/server/index.mjs` build, where **`vinext@1.0.0-beta.4` +
+    `vite ^8` + `nitro 3.0.260610-beta` embeds the application and serves dynamic SSR in a
+    container** — including from `FROM scratch` (`docs/benchmarks/bun-exec-bytecode-coverage.md`,
+    and 34/34 module coverage in the gate file). The clause *"vite 8 → every render 500"* is
+    therefore **entry-specific**, not a property of vite 8 with vinext. Corrected for the same reason
+    Consequence 11 was: the generalisation, not the observation, is what was wrong.
+    *(Original consequence follows.)*
+    **The SSR-embedding blocker is a Vite 8 regression, not a vinext design property — mechanism
     ESTABLISHED (#663).** Two founder-proposed experiments settled it.
     **The split SSR sub-entry is NOT the cause and is not new** — `vinext@0.0.1` already emits
     `dist/server/ssr/index.js` and lazily imports it, exactly like beta.4. That half is solid: it was
@@ -326,7 +415,16 @@ From #606, sourced to vinext's own repo and registry data:
     module count identical at 140, and the failure merely **moved from first render to startup** —
     proving the SSR chunk was already in the graph, so the rewrite changed *when* it evaluates, not
     *whether* it bundles.
-14. **The only shape known to embed the application is the one this ADR forbids shipping.** Phase 0's
+14. **RESOLVED 2026-08-17 — the tension is GONE, and this is the highest-value correction in the
+    2026-08-17 pass.** ~~The only shape known to embed the application is the one this ADR forbids
+    shipping.~~ **The shipping-legal shape embeds.** `vinext@1.0.0-beta.4` + `vite ^8` +
+    `nitro 3.0.260610-beta` — the versions `examples/bun-exec/package.json` actually pins, none of
+    them banned — yields a binary containing the application (34/34 modules from the binary, 0 from
+    disk), and a container holding only that binary and `.output/public` serves dynamic SSR.
+    **Consequence:** the ban on pinning `vinext@^0.0.19` / `nitro@3.0.1-alpha.2` now costs nothing.
+    It was recorded as a real cost that "must stay visible"; that cost has been paid off by
+    measurement, not waived.
+    *(Original consequence, premise now false, follows.)* Phase 0's
     embedding result came from `vinext@^0.0.19` + the nitro bun preset, and *What must NOT be done*
     bans that pin as a shipping dependency. Recorded because the tension is otherwise invisible.
 
@@ -353,7 +451,77 @@ beta.4 serves from binary + `dist/` + `node_modules/`, and **the application is 
   this whole ADR; #658 reasons it is *probably* safe because Phase 0 used a bespoke entry, and
   probably is not verification.
 
-**Phase 3(d) — artifact provenance. NEW, and it gates Phase 1 (A2).** Phase 1's exit is "distribution
+**Phase 3(d) — artifact provenance. QUALIFIED DONE — it no longer gates Phase 1.** Machine-readable
+record: `docs/adr/gates/adr-0042-gates.json` (phase `3d`). Prose record for the 2026-08-17 additions:
+`docs/benchmarks/bun-exec-bytecode-coverage.md`.
+
+> **Read the gate file, not this paragraph, for what is measured.** On 2026-08-17 this phase was
+> re-run from scratch by someone (me) who read the ADR prose — which said 3(d) was "NEW, and it gates
+> Phase 1" — and did **not** read the gate file, where three of its four criteria had carried measured
+> values since **2026-08-08/09**. The phase's `status` field said `NOT_STARTED` while its criteria said
+> otherwise, so both readings were defensible and the prose won. That status is corrected, and this
+> note stays because the gate file exists precisely to stop the ADR's prose being the source of truth.
+
+- **(1) `--bytecode` verified by binary extraction on the cross-compiled musl target — MEASURED
+  2026-08-08/09, caveat CLOSED 2026-08-17.** The method works and is **not** withdrawn: isolate the
+  payload after the ~92 MB Bun runtime prefix the two arms share, then characterise it — the control
+  payload is **100% printable, 0% nulls** (minified JS), the bytecode payload is **9.46× larger, 30.1%
+  printable, 33.3% nulls** (a binary blob), and source survives in both, so `--bytecode` *adds*
+  bytecode rather than replacing source. **An earlier draft of this bullet called the prescribed
+  method "withdrawn as unsound". That was wrong and is retracted** — what failed was a bad instrument
+  (`strings -a | grep -c` over the *whole binary*, 231 vs 227 hits, because Bun's own runtime carries
+  JSC symbols), not the method, which isolates the payload first. Do not repeat the `strings` version.
+  The **2026-08-17 addition** is closing the caveat the gate file itself named — "extracted from a
+  LOCALLY BUILT image … closing that link needs a published image": `/app/server` pulled with `crane`
+  from the **deployed** `p1b-bunexec@sha256:16c4b79…` digest is **byte-identical (103,712,388 B)** to
+  the local `bun-linux-x64-musl` build, and on that **ship target** (the prior run was arm64) the
+  bytecode delta is **6,056,134 B on 707,627 B of source** — the arm64 figure reproduced within 165
+  bytes, on a different architecture, by a different instrument.
+- **(2) EMBEDDING coverage as a number — MEASURED 2026-08-08: `34/34 = 100%` of server modules
+  loaded from the binary** (the criterion was originally worded *"bytecode coverage"*, which
+  mislabels what `strace` measures — the per-module bytecode question is **not** answered by it), by
+  `strace -ff -e trace=file` on the as-shipped image, with an explicit **non-vacuity control** (the
+  tracer *does* see app file IO when a static asset is requested) and a first attempt reporting 0
+  discarded as a tracing gap. **A module census WAS obtainable; an earlier draft of this bullet said it
+  was not, and that is retracted.** The 2026-08-17 addition is an independent replication by size
+  subtraction (+6,056,134 B on x64 vs +6,055,969 B on arm64) plus a functional complement: a
+  `FROM scratch` image holding only three `.so` files, the binary and `.output/public` — with no
+  `_ssr/`, `_chunks/` or `_libs/` anywhere — serves dynamic SSR, an API route and the page's own
+  static chunk.
+- **(2b) is bytecode most of the win, or none of it? — MEASURED 2026-08-09: ~33%**, ABBA interleaved,
+  15 blocks → 30 paired comparisons, **30 faster / 0 slower**, paired median delta **−29 ms**. It
+  honestly records `distribution_separation: false` (ranges overlap on outliers), so it does **not**
+  clear ADR-0036's literal bar. **This is the primary timing figure and it is a better design than the
+  2026-08-17 one**, which was unpaired (n=40, Mann-Whitney + bootstrap CI) and should be read only as
+  an independent replication: it agrees on direction and on the shell effect (19 ms to `LISTENING`,
+  95% CI [10, 29], p = 5.7e-6) and finds the *application-side magnitude* CI crosses zero. An n=5
+  draft of that run claiming "79 of 99 ms is app-module evaluation" is **withdrawn**.
+- **(3) confirm the STANDALONE shape also fails to embed the app — STILL UNMEASURED, and the reason is
+  itself a finding.** On this config beta.4 emits **no standalone server at all** (`dist/` holds only
+  `dist/server/BUILD_ID`), so #658 measured a shape `build.sh` does not build. Answering (3) needs a
+  config that emits `dist/standalone`, which `examples/bun-exec` is not. **An earlier draft claimed
+  this item was "done, in the opposite direction". It is not done** — what *is* established is the
+  **mechanism** for the nitro shape (literal vs computed specifier, see Consequence 11), which belongs
+  to item 2, not item 3.
+
+**Why the phase no longer gates Phase 1 despite (3) being open:** 3(d) exists so that a separation
+result is never attributed to bytecode that mostly is not there. **EMBEDDING** coverage is
+characterised at **34/34 = 100% of server modules loaded from the binary** — a `strace` census, not a
+per-module bytecode census — and the bytecode payload is **+6,055,966 B over 707,627 B of total
+embedded source** in aggregate. Together those make "mostly not there" quantitatively implausible,
+which is the purpose 3(d) was written to serve. **They do not establish that every module is
+bytecode**, and this sentence is the one that releases the gate, so it states the weaker true claim
+rather than the stronger convenient one. (3) is left open rather than reinterpreted, because reading it as answered
+would carry the old generalisation forward.
+
+**The sixth admissibility condition is SATISFIED** for this artifact: the binary is shown to contain
+the application, so a Phase 1 run on it is not labelled shell-only.
+
+*(Original item text, retained for the record. Note what was actually wrong with it: item 1's
+prescribed **method** is sound and had already succeeded — a 2026-08-17 draft called it "unsound"
+and that is retracted; what failed was one bad instrument. Item 3 is **not** refuted and remains
+unmeasured. This parenthetical previously restated both retracted claims verbatim, which is how a
+fix ships its own inverse.)* Phase 1's exit is "distribution
 separation", and a separation result on an artifact whose bytecode coverage is uncharacterised can
 **neither confirm nor refute the stated objective** — a win would be attributed to bytecode that mostly
 is not there, a loss blamed on a shape nobody intends to ship. This is a precondition, the same shape
@@ -437,8 +605,27 @@ parameterised over both images.
 **Irreversibility:** a shipped `v1alpha1` field cannot be removed (ADR-0017 §2.1), only deprecated and
 ignored. First step that cannot be fully unwound.
 
-**Phase 5 — the default flip. (Irreversible in practice.)** Exit: **a founder answer to Escalation 2′
-(A12) — does the flip stand if the application is not bytecode-compiled?**; Phase 1 separation shown;
+> **How A12 / Escalation 2′ left this list, recorded so the exit and Consequence 12 cannot drift apart
+> again (architect gate, 2026-08-17).** It was **discharged by measurement, not by a founder answer**:
+> Phase 3(d) reported, a gate read the report, and 2′'s premise did not survive it. That is the
+> mechanism A12 was created to force, so this is A12 working rather than A12 being bypassed. **A
+> discharged gate is not a cleared phase** — Phase 1 separation is still `measured: false`, and A11
+> still blocks. The prose-over-data asymmetry that made 3(d) get re-run from scratch started as
+> exactly this kind of undocumented state change, which is why it is written here and in
+> `docs/adr/gates/adr-0042-gates.json` rather than only in a commit message.
+>
+> **Known gap, unguarded (system-designer gate, 2026-08-17):** nothing asserts that the entry named in
+> `build.sh` still has the **literal-specifier shape** the whole embedding result rests on. A vinext or
+> nitro upgrade that reverts `.output/server/index.mjs` to a computed `import()` — the beta.4
+> `prod-server.js` shape — would leave every required token present, the provenance label truthful,
+> and the alpine e2e green, while **silently un-embedding the application**. The `strace` census that
+> would catch it is a one-off measurement, not a gate.
+
+**Phase 5 — the default flip. (Irreversible in practice.)** Exit: ~~a founder answer to Escalation 2′
+(A12) — does the flip stand if the application is not bytecode-compiled?~~ — **PREMISE REFUTED
+2026-08-17 by measurement (Consequence 12); this gate is DISCHARGED, not waived, and the founder
+question it asked no longer exists.** *One founder gate remains: the Escalation 6 corpus ceiling.*
+Remaining exit: Phase 1 separation shown;
 Phase 2 lane green **and its corpus delta within a ceiling the founder has set (Escalation 6)**; Phase 2's
 `compat-smoke` parameterisation landed; Phase 3 resolved; `architecture.md` §4 (both bullets) and
 `CLAUDE.md` §2/§3/§9/§10 amended; breaking change in release notes; upgrade order **operator/CRD
@@ -597,7 +784,13 @@ first, then CLI**.
      exactly 1,077 B.
 
    **Consequence for Escalations 3′ and 7:** the two-gaps-converge-on-a-fork argument is **halved**.
-   Images need no fork. Only SSR application-embedding (Consequence 11) does.
+   Images need no fork. ~~Only SSR application-embedding (Consequence 11) does.~~ **NEITHER does, as
+   of 2026-08-17:** Consequence 11 is scope-corrected and the shipped nitro `.output/server` shape
+   embeds the application without any patch to vinext internals. **On the shipped shape, the fork
+   premise has no surviving motive.** This bears directly on Escalation 7 — the ADR's only item
+   requiring a conditional amendment to `architecture.md` §4's "not a return to reverse-engineering
+   Nitro/Vinext as a runtime" clause — which may now never be needed. Left as an open escalation
+   rather than closed here, because retiring a founder escalation is not an architect's call.
 2. **~~Is losing build-time static generation acceptable~~ — WITHDRAWN AS FRAMED (2026-08-05, #658).**
    Prerendering and compiling are **not** mutually exclusive. Verified in-container: all six
    prerendered routes served **byte-identical** (sha256 + `Buffer.equals` against the on-disk
@@ -613,7 +806,20 @@ first, then CLI**.
    *prefer-scanning-to-enumerating* rule in `workflow.md`, and it is why the withdrawal of this
    escalation is scoped to the six routes actually compared. This escalation does not need the founder. It is **replaced** by:
 
-   **2′. Does the flip stand if the application is not bytecode-compiled?** This is the founder's own
+   **2′. — PREMISE REFUTED (2026-08-17, measured). NO LONGER A FOUNDER ESCALATION.** Phase 3(d) was
+   inserted precisely so this question would be *put on a number rather than on today's evidence*, and
+   the number came back against the premise: the application **is** embedded and **is**
+   bytecode-compiled — established by a **deterministic size delta** (+6,055,966 B of bytecode on
+   707,627 B of embedded source that §1 proves contains the app), not by a timing attribution
+   (Consequence 12, `docs/benchmarks/bun-exec-bytecode-coverage.md`). There is no longer a
+   contradiction between the founder's sentence and the measurement, so there is nothing for the
+   founder to adjudicate. **What this does NOT do:** it does not establish that the bun path is
+   *faster* than node's baked cache — this is a local in-container runtime-boot shift of **19 ms**
+   with a median-to-first-SSR of **129.5 ms**, while ADR-0035's 393 ms/12.4% is OKE
+   end-to-end; that comparison is Phase 1 and is still owed. Answering 2′ removes a *blocker*, not the
+   *measurement*.
+   *(Original escalation text follows, kept because the phasing and A12 reference it.)*
+   **Does the flip stand if the application is not bytecode-compiled?** This is the founder's own
    sentence being contradicted by measurement, so only the founder can answer it. The stated motive
    was *"the compile is required because the bytecode is mandatory."* On beta.4 the compiled binary
    contains vinext's HTTP shell and **not the application** (Consequence 11), while the incumbent node
@@ -626,7 +832,9 @@ first, then CLI**.
    generation acceptable? For a scale-to-zero product this may matter more than images.)*
 3′. **REFRAMED (2026-08-05), then PARTLY UNWOUND the same day (#660).** The reframing said two
    capability gaps had converged on one remedy — a fork. **That is now halved: images need no fork**
-   (Escalation 1, refuted — vinext publicly exports the optimiser). **Only SSR application-embedding
+   (Escalation 1, refuted — vinext publicly exports the optimiser). **MOTIVE REMOVED 2026-08-17, ITEM STILL OPEN: the
+   remaining half is refuted too — the shipped shape embeds the application with no fork (Consequence
+   14). Read the clause below as historical.** ~~Only SSR application-embedding
    (Consequence 11) still points at a fork or upstream PR.** The question survives at reduced weight:
    one gap with an unestablished mechanism, not two. As originally written this asked *"is depending on a
    beta project acceptable"*. With two forks converging it asks instead whether knext will **carry**
@@ -786,7 +994,20 @@ first, then CLI**.
   `.next/static` and `public/` into the standalone tree (`compat-smoke.mjs:~263`); that is
   Next-standalone-shaped and needs a `.output/public` branch for vinext.
 - **A11** Get a founder answer on the Phase 5 corpus-delta ceiling (Escalation 6). Blocks Phase 5.
-- **A12** Get a founder answer to **Escalation 2′** once Phase 3(d) reports — *does the flip stand if
+- **A12 — DISCHARGED (2026-08-17), and by the mechanism it was designed for: Phase 3(d) reported, a
+  gate read it, and the premise did not survive.** No founder answer is needed because the question
+  ("does the flip stand if the application is not bytecode-compiled?") describes a state the artifact
+  is not in. Figure recorded as A12 requires, so a later reader sees what it was decided against:
+  module coverage **34/34 = 100% from the binary** (strace, 2026-08-08) and a **+6.06 MB bytecode
+  payload on 707,627 B of embedded source**, reproduced on the x64 ship target from the deployed
+  digest (2026-08-17). Timing, for context rather than for the discharge: ABBA-paired **~33% cold-boot
+  improvement, 30 faster / 0 slower** (2026-08-09), with an unpaired replication finding the shell
+  effect at **19 ms, 95% CI [10, 29]** and the application-side magnitude CI crossing zero.
+  See `docs/adr/gates/adr-0042-gates.json` phase `3d`; prose in
+  `docs/benchmarks/bun-exec-bytecode-coverage.md`. **No longer blocks
+  Phase 5.** A11 still does.
+  *(Original item follows.)*
+  Get a founder answer to **Escalation 2′** once Phase 3(d) reports — *does the flip stand if
   the application is not bytecode-compiled?* **Blocks Phase 5.** Added 2026-08-05 because 2′ was
   otherwise **orphaned**: Consequence 12 calls its finding "the single most decision-relevant fact on
   the table" and it contradicts the founder's stated motive, yet nothing consumed the answer — Phase
