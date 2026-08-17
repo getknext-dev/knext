@@ -339,6 +339,44 @@ describe('A1 — self-contained on the current vinext/vite pins', () => {
     expect((await asset.text()).length).toBeGreaterThan(100);
   });
 
+  it('SERVES the stylesheet a `import "./globals.css"` produced', async () => {
+    // Until 2026-08-17 this example had NO stylesheet at all — only inline
+    // `style={{}}` props — so the CSS pipeline on this build target had never
+    // been built, emitted, or served. That is not a cosmetic gap: a `.css`
+    // import is table stakes for any real app, and ADR-0042 proposes making this
+    // target the DEFAULT. "It serves JS assets" does not imply it serves CSS:
+    // the stylesheet is emitted by vinext into `.output/public/_next/static/css/`
+    // and reached through the compiled binary's asset root, which is the exact
+    // path that once 500'd on EVERY asset while `GET /` still returned correct
+    // SSR HTML (#657) — a page that renders and never styles or hydrates.
+    //
+    // Discovered from the page's own <link>, not hardcoded: the filename is
+    // content-hashed, and asserting on the URL the page actually asks the
+    // browser to load is what makes this a styling check rather than a
+    // file-exists check.
+    const html = await (await fetch(`http://127.0.0.1:${appPort}/`)).text();
+    const href = html.match(/<link[^>]+href="(\/_next\/static\/css\/[^"]+\.css)"/)?.[1];
+    expect(
+      href,
+      'the SSR page referenced no stylesheet — the CSS import did not reach the HTML',
+    ).toBeTruthy();
+
+    const css = await fetch(`http://127.0.0.1:${appPort}${href}`);
+    expect(css.status, `the page's own stylesheet ${href} is not served`).toBe(200);
+    expect(css.headers.get('content-type') ?? '').toMatch(/text\/css/);
+
+    // NON-VACUITY, and it is the point of this test: a 200 carrying an empty or
+    // wrong body satisfies every assertion above. Assert a declaration that
+    // exists only in `app/globals.css`, so an empty 200 — or a stale stylesheet
+    // from a different build — fails.
+    const body = await css.text();
+    expect(
+      body,
+      'the stylesheet is served but does not contain the rule the app defines',
+    ).toContain('--knext-accent');
+    expect(body).toContain('border-bottom');
+  });
+
   it('serves a dynamic page and binds its param', async () => {
     const res = await fetch(`http://127.0.0.1:${appPort}/item/42`);
     expect(res.status).toBe(200);
