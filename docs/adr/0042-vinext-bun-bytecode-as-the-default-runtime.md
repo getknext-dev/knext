@@ -319,7 +319,16 @@ From #606, sourced to vinext's own repo and registry data:
     the application **interpreted from disk**, with no equivalent app-covering mechanism identified or
     measured on the bun path. This is the single most decision-relevant fact on the table and it
     contradicts the founder's own sentence; it is escalated as **Escalation 2′**, not resolved here.
-13. **The SSR-embedding blocker is a Vite 8 regression, not a vinext design property — mechanism
+13. **SCOPE-CORRECTED 2026-08-17 — this describes the `dist/standalone` / `prod-server` entry, NOT
+    the shape knext ships.** The finding below is retained for that entry. It must not be read as a
+    statement about the nitro `.output/server/index.mjs` build, where **`vinext@1.0.0-beta.4` +
+    `vite ^8` + `nitro 3.0.260610-beta` embeds the application and serves dynamic SSR in a
+    container** — including from `FROM scratch` (`docs/benchmarks/bun-exec-bytecode-coverage.md`,
+    and 34/34 module coverage in the gate file). The clause *"vite 8 → every render 500"* is
+    therefore **entry-specific**, not a property of vite 8 with vinext. Corrected for the same reason
+    Consequence 11 was: the generalisation, not the observation, is what was wrong.
+    *(Original consequence follows.)*
+    **The SSR-embedding blocker is a Vite 8 regression, not a vinext design property — mechanism
     ESTABLISHED (#663).** Two founder-proposed experiments settled it.
     **The split SSR sub-entry is NOT the cause and is not new** — `vinext@0.0.1` already emits
     `dist/server/ssr/index.js` and lazily imports it, exactly like beta.4. That half is solid: it was
@@ -387,7 +396,16 @@ From #606, sourced to vinext's own repo and registry data:
     module count identical at 140, and the failure merely **moved from first render to startup** —
     proving the SSR chunk was already in the graph, so the rewrite changed *when* it evaluates, not
     *whether* it bundles.
-14. **The only shape known to embed the application is the one this ADR forbids shipping.** Phase 0's
+14. **RESOLVED 2026-08-17 — the tension is GONE, and this is the highest-value correction in the
+    2026-08-17 pass.** ~~The only shape known to embed the application is the one this ADR forbids
+    shipping.~~ **The shipping-legal shape embeds.** `vinext@1.0.0-beta.4` + `vite ^8` +
+    `nitro 3.0.260610-beta` — the versions `examples/bun-exec/package.json` actually pins, none of
+    them banned — yields a binary containing the application (34/34 modules from the binary, 0 from
+    disk), and a container holding only that binary and `.output/public` serves dynamic SSR.
+    **Consequence:** the ban on pinning `vinext@^0.0.19` / `nitro@3.0.1-alpha.2` now costs nothing.
+    It was recorded as a real cost that "must stay visible"; that cost has been paid off by
+    measurement, not waived.
+    *(Original consequence, premise now false, follows.)* Phase 0's
     embedding result came from `vinext@^0.0.19` + the nitro bun preset, and *What must NOT be done*
     bans that pin as a shipping dependency. Recorded because the tension is otherwise invisible.
 
@@ -721,7 +739,13 @@ first, then CLI**.
      exactly 1,077 B.
 
    **Consequence for Escalations 3′ and 7:** the two-gaps-converge-on-a-fork argument is **halved**.
-   Images need no fork. Only SSR application-embedding (Consequence 11) does.
+   Images need no fork. ~~Only SSR application-embedding (Consequence 11) does.~~ **NEITHER does, as
+   of 2026-08-17:** Consequence 11 is scope-corrected and the shipped nitro `.output/server` shape
+   embeds the application without any patch to vinext internals. **On the shipped shape, the fork
+   premise has no surviving motive.** This bears directly on Escalation 7 — the ADR's only item
+   requiring a conditional amendment to `architecture.md` §4's "not a return to reverse-engineering
+   Nitro/Vinext as a runtime" clause — which may now never be needed. Left as an open escalation
+   rather than closed here, because retiring a founder escalation is not an architect's call.
 2. **~~Is losing build-time static generation acceptable~~ — WITHDRAWN AS FRAMED (2026-08-05, #658).**
    Prerendering and compiling are **not** mutually exclusive. Verified in-container: all six
    prerendered routes served **byte-identical** (sha256 + `Buffer.equals` against the on-disk
@@ -763,7 +787,9 @@ first, then CLI**.
    generation acceptable? For a scale-to-zero product this may matter more than images.)*
 3′. **REFRAMED (2026-08-05), then PARTLY UNWOUND the same day (#660).** The reframing said two
    capability gaps had converged on one remedy — a fork. **That is now halved: images need no fork**
-   (Escalation 1, refuted — vinext publicly exports the optimiser). **Only SSR application-embedding
+   (Escalation 1, refuted — vinext publicly exports the optimiser). **SUPERSEDED 2026-08-17: the
+   remaining half is refuted too — the shipped shape embeds the application with no fork (Consequence
+   14). Read the clause below as historical.** ~~Only SSR application-embedding
    (Consequence 11) still points at a fork or upstream PR.** The question survives at reduced weight:
    one gap with an unestablished mechanism, not two. As originally written this asked *"is depending on a
    beta project acceptable"*. With two forks converging it asks instead whether knext will **carry**

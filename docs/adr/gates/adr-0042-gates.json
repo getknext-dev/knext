@@ -92,8 +92,9 @@
       "name": "artifact provenance",
       "status": "DONE_WITH_P3D3_NOT_PRODUCIBLE_HERE",
       "status_note": "P3d-1, P3d-2 and P3d-2b are measured; P3d-3 is NOT, and cannot be measured in this repo for the recorded reason that beta.4 emits no dist/standalone on this config \u2014 #658 measured a shape build.sh does not build. The phase existed to stop Phase 1 running on an artifact whose bytecode coverage is uncharacterised; coverage is characterised at 34/34 = 100% from the binary, so that purpose is MET and 3(d) no longer gates Phase 1. Left qualified rather than DONE because P3d-3 is genuinely unanswered, and reading it as answered would carry the old generalisation forward. Status corrected 2026-08-17: it read NOT_STARTED while three of its four criteria carried measured values, which is how a reader of this file concluded the whole phase was outstanding and re-ran it.",
-      "gates": [1],
-      "why_gates_phase_1": "Phase 1's exit is distribution separation. On an artifact whose bytecode coverage is uncharacterised, a win would be attributed to bytecode that mostly is not there and a loss blamed on a shape nobody intends to ship.",
+      "gates": [],
+      "gates_note": "DISCHARGED 2026-08-17. This phase gated phase 1 until its coverage question was answered; coverage is characterised at 34/34 = 100% from the binary (P3d-2), so the gate is released. Expressed HERE, in the data, and not only in the ADR prose \u2014 the whole reason this phase was re-run from scratch is that a reader trusted the prose over this file.",
+      "why_it_gated_phase_1": "Phase 1's exit is distribution separation. On an artifact whose bytecode coverage is uncharacterised, a win would be attributed to bytecode that mostly is not there and a loss blamed on a shape nobody intends toship.",
       "criteria": [
         {
           "id": "P3d-1",
@@ -160,6 +161,7 @@
             "bytecode_size_delta_pct": 6.5,
             "independent_replication_2026_08_17": "Re-derived on x64 by size subtraction against an empty-entry runtime floor (no strace, different instrument, different architecture): 6,056,134 B vs this run's 6,055,969 B \u2014 agreement within 168 bytes. Functional complement: an as-shipped image AND a FROM scratch image (three .so files, the binary, .output/public, and no _ssr/_chunks/_libs anywhere) each serve dynamic SSR /item/42 -> 200, an API route, and the page's own /_next/static chunk. Consistent with modules_bundled_into_binary=34 and server_modules_read_from_disk=0."
           },
+          "residual_2026_08_17": "The 8.6x payload growth is an AGGREGATE, not a per-module claim, and it must not be read as one. --bytecode rejects modules using top-level await, which is a known mechanism for SILENT per-module fallback to source. Nothing here decomposes coverage per module, so 'every module is bytecode' is NOT established \u2014 only that the bytecode payload spans far more than the 3-line entry shell. The A12 discharge does not depend on the stronger reading: A12's question was conditioned on the application not being IN the binary, which is flatly false (34/34, and a FROM scratch container serving dynamic SSR with no chunks present).",
           "note": "CONTRADICTS the premise recorded in Consequence 11 / #658 FOR THIS BUILD SHAPE. The app IS in the binary on the .output/server compile path: zero server modules load from disk. #658 measured the dist/standalone shape, which build.sh does not use. Both shapes exist on beta.4, so the two results are compatible and the ADR text is under-specified rather than wrong."
         },
         {
@@ -214,7 +216,8 @@
     {
       "phase": 1,
       "name": "measure the axis",
-      "status": "BLOCKED_ON_3d",
+      "status": "UNBLOCKED_3d_DISCHARGED",
+      "status_note": "Was BLOCKED_ON_3d. Released 2026-08-17 when phase 3d's coverage question was answered (34/34 from the binary). This is NOT a claim that phase 1 is ready to run: its own preconditions remain \u2014 P1-pre-2 is unmeasured, and the node CONTROL arm still has no committed build recipe in the repo. Unblocked is not the same as admissible.",
       "reversible": true,
       "arms": ["node+turbopack (control)", "bun+vinext-compiled"],
       "preconditions": [
@@ -496,7 +499,7 @@
           "text": "founder escalations answered",
           "kind": "checklist",
           "target": [
-            "Escalation 2' \u2014 does the flip stand if the app is not bytecode-compiled?",
+            "Escalation 2' \u2014 DISCHARGED 2026-08-17, no founder answer required: the premise is refuted by measurement (the application IS embedded and IS bytecode-compiled). Retained in this checklist as a struck item so the list stays comparable with the ADR's history; it is NOT outstanding.",
             "Escalation 7 \u2014 is patching vinext internals permitted? (upstream contribution is priced separately from a downstream fork)",
             "Escalation 3' \u2014 upstream contribution vs downstream fork"
           ],
