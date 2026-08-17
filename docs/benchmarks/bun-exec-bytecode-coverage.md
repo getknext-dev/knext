@@ -107,6 +107,26 @@ Three builds of the same `.output/server/index.mjs`, differing only in flags
 **`--bytecode` adds 6,055,966 B on 707,627 B of embedded source — 8.6×.** Shell-only bytecode on a
 3-line entry could not produce a 6 MB delta; this is bytecode across the embedded module graph.
 
+#### Reconciled against the 2026-08-08 payload-isolation figures — the two methods cross-validate
+
+The prior run reports the same quantities with a **different floor**, and the ~8 KB gap is not noise;
+it is fully explained, which makes the agreement a real cross-check rather than a coincidence:
+
+| Quantity | 2026-08-08 (payload isolation) | Here (empty-entry subtraction) | Gap |
+|---|---|---|---|
+| control payload | 715,697 B | 707,627 B | 8,070 B |
+| bytecode payload | 6,771,666 B | 6,763,593 B | 8,073 B |
+| **bytecode − control (the load-bearing delta)** | **6,055,969 B** | **6,055,966 B** | **3 B** |
+
+The prior floor is the **shared prefix** between the two real binaries (92,017,848 B). Mine is a
+compiled **empty-entry** binary (92,025,917 B) — which still contains the scaffolding bun emits for a
+module, so it is **8,069 B larger**. That offset explains the 8,070 and 8,073 gaps, and because it is
+present in both of my terms it **cancels in the difference** — which is why two independent
+instruments, on two different runs, agree to **3 bytes** on the number the argument actually rests on.
+
+Practical consequence: quote the **delta**, not the payload. The payload figure depends on which floor
+you subtract; the delta does not.
+
 ### The same result on the SHIPPED x64 target, extracted from the DEPLOYED digest
 
 The table above is `arm64-musl`, built locally. Phase 3(d) item 1 asked specifically for the
