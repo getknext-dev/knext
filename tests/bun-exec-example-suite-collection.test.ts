@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { readdirSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -10,17 +10,11 @@ import { describe, expect, it } from 'vitest';
  * regression is not deleting a test — it is one line of config that quietly
  * stops collecting one, while every job keeps exiting 0.
  *
- * ASKS VITEST WHAT IT COLLECTS rather than parsing config text. A first version
- * regexed the first `exclude:` array it found, and the system-designer gate
- * found three ways past it, all fail-OPEN:
- *   (a) a `coverage: { exclude: [...] }` block added above `test.exclude` — an
- *       ordinary vitest edit — made it validate the wrong array and pass;
- *   (b) a `--exclude` or `--config` flag added to package.json's `test` script
- *       orphaned a guard with the config file untouched;
- *   (c) it only ever looked at the example's config, while the ROOT config is
- *       what collects these files in the `Lint & Test` job.
- * `vitest list` is immune to all three: it is the resolved collection, after
- * every config layer, plugin and CLI flag.
+ * ASKS VITEST WHAT IT COLLECTS rather than parsing config text, and asks it with
+ * the SAME arguments `package.json`'s `test` script uses — so a flag added there
+ * is covered too, not just a config edit. A first version regexed the first
+ * `exclude:` array it found and was fooled by a `coverage: { exclude: [...] }`
+ * block placed above `test.exclude`.
  *
  * SCANS rather than enumerates — every `test/*.test.ts` on disk must be
  * collected, so a new guard is covered the moment it exists with no edit here.
@@ -36,24 +30,43 @@ const EXAMPLE_DIR = resolve(REPO_ROOT, 'examples/bun-exec');
 const LEGITIMATELY_UNCOLLECTED = /\.docker-e2e\.test\.ts$/;
 
 /**
- * Files the ROOT run legitimately does not LIST, with the mechanism that keeps
- * them enforced elsewhere. `vitest list` prints test cases, so a file whose only
- * `describe` is conditionally skipped emits no lines even though the file is
- * collected — which is indistinguishable from being excluded unless it is
- * modelled, as here.
+ * `vitest list` over the whole repo takes ~30 s warm; vitest's 5 s default turned
+ * the root check into a timeout rather than a verdict. Budgeted well above that
+ * because a CI runner does it cold alongside ~20 parallel suites, and a timeout
+ * there would read as a defect rather than as an environment fact.
  *
- * Membership is not a free pass: each entry must name a CI job AND the
- * fail-closed switch that stops the skip being silent there.
+ * Named rather than inlined as a literal with a trailing comment: biome's
+ * formatter twice reordered such a comment into a single mangled line, and the
+ * second time it was the only error-level diagnostic in the repo — i.e. it broke
+ * `Lint & Test` before any test ran.
  */
-const ROOT_UNLISTED = new Map([
-  [
-    'sigterm-hardcap-e2e.test.ts',
-    'describe.skipIf(!bunAvailable), and the root Lint & Test job has no bun on PATH. Enforced by ' +
-      'the dedicated `bun-exec-hardcap` job, which sets KNEXT_REQUIRE_BUN=1 — that converts "bun ' +
-      'is missing" from a silent skip into a thrown error, and tests/bun-exec-hardcap-ci.test.ts ' +
-      'asserts that env var is present on that job.',
-  ],
-]);
+const ROOT_LIST_TIMEOUT_MS = 600_000;
+
+/**
+ * The args `examples/bun-exec`'s own `test` script passes, read from
+ * `package.json` rather than hardcoded. Hardcoding `['--config',
+ * 'vitest.config.ts']` left a hole: adding `--exclude` to that script orphaned a
+ * guard with the config file untouched, while this test stayed green and claimed
+ * immunity to exactly that.
+ */
+function exampleTestScriptArgs(): string[] {
+  const pkg = JSON.parse(readFileSync(resolve(EXAMPLE_DIR, 'package.json'), 'utf8')) as {
+    scripts?: Record<string, string>;
+  };
+  const script = pkg.scripts?.test;
+  expect(
+    script,
+    'examples/bun-exec has no `test` script — this guard cannot evaluate its subject',
+  ).toBeTruthy();
+  const parts = (script as string).trim().split(/\s+/);
+  expect(
+    parts[0],
+    `the example's \`test\` script is \`${script}\`, which does not start with vitest; this guard ` +
+      'reproduces that command and no longer knows how to.',
+  ).toBe('vitest');
+  // `vitest run …` -> `vitest list …`; keep every remaining flag verbatim.
+  return parts.slice(1).filter((p) => p !== 'run');
+}
 
 function collectedFiles(cwd: string, args: string[]): string {
   const res = spawnSync('npx', ['vitest', 'list', ...args], {
@@ -77,44 +90,59 @@ function expectedGuardFiles(): string[] {
     .sort();
 }
 
+/**
+ * Match the repo-relative PATH, never the bare basename.
+ *
+ * `toContain('ports.test.ts')` passed on `apps/file-manager/child-ports.test.ts`
+ * and `tests/e2e-ephemeral-ports.test.ts`, so the root assertion was fail-open
+ * for two of the files it claimed to protect. `vitest list` prints paths, so
+ * matching the path costs nothing and closes it.
+ */
+function assertCollected(listed: string, relPath: string, why: string) {
+  expect(listed.includes(relPath), why).toBe(true);
+}
+
 describe("examples/bun-exec's guards are actually collected", () => {
-  it("the example's own `bun run test` config collects every non-docker test file", () => {
-    const listed = collectedFiles(EXAMPLE_DIR, ['--config', 'vitest.config.ts']);
+  it("the example's own `bun run test` command collects every non-docker test file", () => {
+    const listed = collectedFiles(EXAMPLE_DIR, exampleTestScriptArgs());
     const expectedFiles = expectedGuardFiles();
     expect(
       expectedFiles.length,
       'no test files found to check — the scan found nothing',
     ).toBeGreaterThan(0);
     for (const file of expectedFiles) {
-      expect(
+      assertCollected(
         listed,
-        `\`${file}\` exists in examples/bun-exec/test/ but the example's vitest config does not ` +
-          'collect it. `bun run test` will still exit 0 and the CI job guard will still pass, so ' +
-          'nothing notices it stopped running. If it must not run there, give it its own CI job ' +
-          'and the `.docker-e2e.test.ts` suffix — that is the one sanctioned way out.',
-      ).toContain(file);
+        `test/${file}`,
+        `\`${file}\` exists in examples/bun-exec/test/ but \`bun run test\` does not collect it. ` +
+          'That command will still exit 0 and the CI job guard will still pass, so nothing notices ' +
+          'it stopped running. If it must not run there, give it its own CI job and the ' +
+          '`.docker-e2e.test.ts` suffix — that is the one sanctioned way out.',
+      );
     }
   });
 
-  it('the ROOT config collects them too — that is the job that actually runs in `Lint & Test`', () => {
-    const listed = collectedFiles(REPO_ROOT, []);
-    for (const file of expectedGuardFiles()) {
-      const reason = ROOT_UNLISTED.get(file);
-      if (reason) {
-        // Not a free pass: the file must still be collected SOMEWHERE with a
-        // fail-closed mechanism, which the reason names and a sibling test asserts.
-        expect(reason, `${file} is allow-listed with an empty reason`).toMatch(/\S/);
-        continue;
-      }
+  it(
+    'the ROOT config collects them too — that is the job that actually runs in `Lint & Test`',
+    () => {
+      const listed = collectedFiles(REPO_ROOT, []);
+      const expectedFiles = expectedGuardFiles();
+      // Non-vacuity, asserted here too and not only in the sibling: an empty
+      // list would make this loop a silent pass.
       expect(
-        listed,
-        `\`${file}\` is not collected by the ROOT vitest config. The root run is what ` +
-          '`Lint & Test` executes, so a guard missing here is unenforced on every PR even while ' +
-          "the example's own config still collects it. If that is intentional, add it to " +
-          'ROOT_UNLISTED with the CI job that runs it and the fail-closed switch that stops it ' +
-          'skipping silently there.',
-      ).toContain(file);
-    }
-  }, // into a timeout rather than a verdict. // `vitest list` over the whole repo takes ~30 s; the 5 s default turned this
-  180_000);
+        expectedFiles.length,
+        'no test files found to check — the scan found nothing',
+      ).toBeGreaterThan(0);
+      for (const file of expectedFiles) {
+        assertCollected(
+          listed,
+          `examples/bun-exec/test/${file}`,
+          `\`${file}\` is not collected by the ROOT vitest config. The root run is what ` +
+            '`Lint & Test` executes, so a guard missing here is unenforced on every PR even while ' +
+            "the example's own config still collects it.",
+        );
+      }
+    },
+    ROOT_LIST_TIMEOUT_MS,
+  );
 });

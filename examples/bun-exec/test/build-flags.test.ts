@@ -94,9 +94,26 @@ describe('bun-exec build command (ADR-0042 A12)', () => {
     //     whole-file occurrences was the first version and it was wrong: the
     //     progress `echo` on step 2/3 legitimately names the entry path, so the
     //     entry could never be added to this assertion.
+    //     The slice must be PAREN-BALANCED. Taking the first `)` truncated the
+    //     literal at any `$( … )` inside it, and everything after the truncation
+    //     became invisible: a duplicate `--bytecode` or a second entry path
+    //     appended after `--outfile "$(printf %s "$OUT")"` left all four counts
+    //     at 1 and the guard green.
     const open = code.indexOf('BUN_BUILD_CMD=(');
-    const close = code.indexOf(')', open);
-    expect(close, 'BUN_BUILD_CMD=( is never closed').toBeGreaterThan(open);
+    const bodyStart = open + 'BUN_BUILD_CMD=('.length;
+    let depth = 1;
+    let close = -1;
+    for (let i = bodyStart; i < code.length; i++) {
+      if (code[i] === '(') depth++;
+      else if (code[i] === ')') {
+        depth--;
+        if (depth === 0) {
+          close = i;
+          break;
+        }
+      }
+    }
+    expect(close, 'BUN_BUILD_CMD=( is never closed by a balanced `)`').toBeGreaterThan(open);
     const arrayLiteral = code.slice(open, close);
     for (const token of REQUIRED_TOKENS) {
       const n = arrayLiteral.split(token).length - 1;
@@ -119,6 +136,29 @@ describe('bun-exec build command (ADR-0042 A12)', () => {
       'a second, hand-written `bun build --compile …` exists outside BUN_BUILD_CMD. The label is ' +
         'stamped from the array, so a stray copy is free to drift from what is executed — which is ' +
         "precisely the failure build.sh's header says it built the single-array design to prevent.",
+    ).toEqual([]);
+
+    // (d) nothing may MUTATE the array between the point `--print-labels` exits
+    //     and the point the command runs. Everything above reads the array via
+    //     the label, and `print_labels` exits early — so an `unset
+    //     'BUN_BUILD_CMD[4]'` placed after that exit changes what executes while
+    //     leaving every assertion above green. The title claim "builds and stamps
+    //     from ONE array" was true only because nothing does that today, and
+    //     nothing said so.
+    const exitIdx = code.indexOf('if [ "$PRINT_LABELS" = "1" ]');
+    expect(
+      exitIdx,
+      'build.sh no longer has the --print-labels early exit this guard reasons about',
+    ).toBeGreaterThan(-1);
+    const afterLabelExit = code.slice(exitIdx);
+    const mutations = afterLabelExit
+      .split('\n')
+      .filter((l) => /\bunset\b.*BUN_BUILD_CMD|BUN_BUILD_CMD\+?=|BUN_BUILD_CMD\[[^\]]*\]=/.test(l));
+    expect(
+      mutations,
+      'BUN_BUILD_CMD is modified AFTER `--print-labels` has already exited, so the stamped label ' +
+        'describes a command that is not the one executed. The provenance label would be truthful ' +
+        'about an array that no longer exists by the time the build runs.',
     ).toEqual([]);
   });
 

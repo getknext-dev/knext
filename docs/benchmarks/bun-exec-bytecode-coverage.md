@@ -28,7 +28,9 @@ was wrong to trust the prose.
    needs a published image." Now done against the **registry-pulled deployed digest**, on the **x64
    ship target** rather than arm64.
 2. **Independent replication by a different instrument** (size subtraction, no `strace`): +6,056,134 B
-   on x64 vs +6,055,969 B on arm64 — agreement within 168 bytes.
+   on x64 vs +6,055,969 B on the 2026-08-08 arm64 run — **165 B** apart. (168 B is the
+   arm64-vs-x64 figure *within* the 2026-08-17 run; 3 B is arm64 2026-08-17 vs 2026-08-08. Three
+   different comparisons, three numbers — an earlier revision printed 168 for all of them.)
 3. **The embedding mechanism**, which explains why the two shapes disagree (literal vs computed
    dynamic-import specifier) — the gate file recorded the *contradiction*, not the *cause*.
 4. **The image floor**, attributed: 92 MB of the image is the Bun runtime.
@@ -42,7 +44,7 @@ It does **not** close Phase 1 — see *What this is not* at the bottom.
 | Question | Answer | Strongest evidence (and when) |
 |---|---|---|
 | Is the application embedded in the binary? | **Yes** | **34/34 modules from the binary, 0 from disk** — `strace`, 2026-08-08. Corroborated 2026-08-17 by a container e2e and a `FROM scratch` image with no `_ssr/`/`_chunks/` present at all |
-| Is the application bytecode-compiled (not just the shell)? | **Yes** | payload characterisation 2026-08-08 (9.46×, 30.1% printable, 33.3% nulls vs a 100%-printable control); size delta **+6.06 MB on 707,627 B of source**, reproduced 2026-08-17 on the x64 ship target from the **deployed digest** |
+| Is the application bytecode-compiled (not just the shell)? | **Yes — but see the per-module caveat in §2** | payload characterisation 2026-08-08 (9.46×, 30.1% printable, 33.3% nulls vs a 100%-printable control); size delta **+6.06 MB on 707,627 B of source**, reproduced 2026-08-17 on the x64 ship target from the **deployed digest** |
 | Is bytecode most of the win, or none of it? | **~33% of cold boot** | ABBA-paired, **30 faster / 0 slower**, paired median −29 ms — 2026-08-09. *Does not* clear ADR-0036's separation bar (ranges overlap) |
 | Does the 2026-08-17 replication agree? | **On direction, yes** | shell effect 19 ms to listening (95% CI 10–29, p=5.7e-6); application-side **magnitude CI crosses zero** — unpaired n=40, a weaker design than the ABBA run |
 | Can the image be ~5 MB? | **No — floor is 92 MB** | an *empty* `--compile` binary is 92,025,917 B (89% of the image) |
@@ -107,6 +109,16 @@ Three builds of the same `.output/server/index.mjs`, differing only in flags
 **`--bytecode` adds 6,055,966 B on 707,627 B of embedded source — 8.6×.** Shell-only bytecode on a
 3-line entry could not produce a 6 MB delta; this is bytecode across the embedded module graph.
 
+**Read that as an aggregate, not as "every module is bytecode" — it does not establish the stronger
+claim.** `--bytecode` rejects modules that use **top-level `await`**, and its documented behaviour
+there is to fall back to source **silently**. Nothing here decomposes the payload per module, so some
+modules could be shipping as source inside an otherwise-bytecode binary and these figures would look
+identical. What *is* established is that the bytecode spans far more than the entry shell.
+
+The A12 discharge does not rest on the stronger reading: A12's question was conditioned on the
+application not being **in the binary**, and that is refuted outright by the 34/34 census and by a
+container serving dynamic SSR with no chunks present.
+
 #### Reconciled against the 2026-08-08 payload-isolation figures — the two methods cross-validate
 
 The prior run reports the same quantities with a **different floor**, and the ~8 KB gap is not noise;
@@ -127,8 +139,18 @@ present in both of my terms it **cancels in the difference**.
 revision of this document oversold it exactly that way.** Both routes reduce arithmetically to
 `size(bytecode) − size(control)` over the same two builds, so the 3 B is **build nondeterminism**
 between the 08-08 binaries and the 08-17 rebuilds, not instrument agreement. It validates `wc -c`
-twice. **The genuinely informative cross-check is the 168 B agreement between arm64 and x64** — two
-architectures, two separate build runs.
+twice. **The genuinely informative cross-check is the 168 B agreement between arm64 and x64 within
+the 2026-08-17 run** — two architectures, two separate builds, one instrument.
+
+The three figures are distinct and an earlier revision of this document printed **168 for all of
+them**, which is the wrong defect to ship in a record whose thesis is that the arithmetic is the
+point:
+
+| Comparison | Difference | What varies |
+|---|---|---|
+| arm64 2026-08-17 vs arm64 2026-08-08 | **3 B** | build nondeterminism only |
+| x64 vs arm64, both 2026-08-17 | **168 B** | architecture |
+| x64 2026-08-17 vs arm64 2026-08-08 | **165 B** | architecture *and* run/date |
 
 Practical consequence: quote the **delta**, not the payload. The payload figure depends on which floor
 you subtract; the delta does not — `98,789,510 − 92,733,544 = 6,055,966` needs no floor at all.
@@ -382,12 +404,20 @@ echo 'export{}' > /tmp/empty.mjs && bun build --compile --minify --bytecode \
 Timing (the two-event probe that produced the two-column raw data above):
 
 ```bash
+# one lifetime
 docker run --rm -i --entrypoint sh <image> -s < examples/bun-exec/test/e2e-support/boot-timing.sh
+# the full dataset below (40 fresh containers per arm)
+examples/bun-exec/test/e2e-support/boot-timing-run.sh <image> 40
 ```
 
-It is a **committed script**, not a snippet reproduced here. An earlier revision of this document
-inlined a **one-column** variant that could not have produced its own two-column data — caught by the
-system-designer gate, and the reason the probe now lives in the tree where it can be run and diffed.
+**Both halves are committed scripts**, and neither was at first. An earlier revision inlined a
+**one-column** probe that could not have produced this document's two-column data (system-designer
+gate); the revision after that committed the probe but left the 40-lifetime **driver** in a shell
+history, so "committed script" was true per-container and not true of the dataset (code review).
+
+The driver **reports lost samples and exits non-zero** rather than dropping them: silently discarding
+a `TIMEOUT` would bias the surviving distribution toward fast starts — the direction that flatters the
+measurement. The tables below were produced with zero lost samples.
 
 `/proc/uptime` is not namespaced, so it is a usable monotonic clock inside the container at 10 ms
 resolution; busybox `date` has no `%N`, which is why it is not used.

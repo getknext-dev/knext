@@ -284,7 +284,11 @@ From #606, sourced to vinext's own repo and registry data:
     - **Size — this is the delta that carries the refutation, and it is deterministic byte counts, not
       statistics.** `--bytecode` adds **6,055,966 B** on **707,627 B** of embedded source (8.6×), over
       an empty-entry runtime floor of 92,025,917 B. A 3-line shell cannot produce a 6 MB delta, and
-      §1's container proof establishes that the app is *inside* that embedded source. Together those
+      §1's container proof establishes that the app is *inside* that embedded source.
+      **Aggregate, not per-module:** `--bytecode` rejects top-level `await` and falls back to source
+      **silently**, and nothing decomposes the payload per module — so "every module is bytecode" is
+      **not** established here. The discharge does not need it (A12 was conditioned on the app not
+      being in the binary, which is refuted outright). Together those
       two facts are the refutation; nothing statistical is needed for it.
     - **Timing — supports it, does not carry it.** n=40 per arm, in-container, both events recorded
       **within one process lifetime**, Mann-Whitney U with a bootstrap CI on the median difference:
@@ -306,8 +310,10 @@ From #606, sourced to vinext's own repo and registry data:
     *whole* binary returns 231 vs 227 — Bun's embedded runtime carries JSC symbols either way. That is
     a bad instrument, **not** a fault in the prescribed method, which isolates the payload first.
     **The comparison to ADR-0035 is NOT settled by this**, and the sentence below must not be read as
-    withdrawn: node's baked cache is measured at 393 ms / 12.4% *on OKE end-to-end*, while 70 ms is a
-    *local in-container runtime-boot* figure. Those are different quantities on different hardware.
+    withdrawn: node's baked cache is measured at 393 ms / 12.4% *on OKE end-to-end*, while this
+    record's figures are *local in-container runtime-boot* ones — a **19 ms** shift to listening on a
+    **129.5 ms** median to first dynamic SSR. Those are different quantities on different hardware.
+    (An earlier revision wrote "70 ms" here, eleven lines after declaring that number withdrawn.)
     What is settled is only the qualitative claim that blocked Phase 5 — both paths precompile the
     application. Which is faster end-to-end is Phase 1, still owed.
     *(Original consequence, premise now refuted, follows.)*
@@ -456,7 +462,7 @@ record: `docs/adr/gates/adr-0042-gates.json` (phase `3d`). Prose record for the 
   LOCALLY BUILT image … closing that link needs a published image": `/app/server` pulled with `crane`
   from the **deployed** `p1b-bunexec@sha256:16c4b79…` digest is **byte-identical (103,712,388 B)** to
   the local `bun-linux-x64-musl` build, and on that **ship target** (the prior run was arm64) the
-  bytecode delta is **6,056,134 B on 707,627 B of source** — the arm64 figure reproduced within 168
+  bytecode delta is **6,056,134 B on 707,627 B of source** — the arm64 figure reproduced within 165
   bytes, on a different architecture, by a different instrument.
 - **(2) bytecode coverage as a number — MEASURED 2026-08-08: `34/34 = 100%` from the binary**, by
   `strace -ff -e trace=file` on the as-shipped image, with an explicit **non-vacuity control** (the
@@ -772,8 +778,8 @@ first, then CLI**.
    (Consequence 12, `docs/benchmarks/bun-exec-bytecode-coverage.md`). There is no longer a
    contradiction between the founder's sentence and the measurement, so there is nothing for the
    founder to adjudicate. **What this does NOT do:** it does not establish that the bun path is
-   *faster* than node's baked cache — this is a local in-container runtime-boot shift of 19 ms with a
-   median-to-first-SSR of 129.5 ms, while ADR-0035's 393 ms/12.4% is OKE
+   *faster* than node's baked cache — this is a local in-container runtime-boot shift of **19 ms**
+   with a median-to-first-SSR of **129.5 ms**, while ADR-0035's 393 ms/12.4% is OKE
    end-to-end; that comparison is Phase 1 and is still owed. Answering 2′ removes a *blocker*, not the
    *measurement*.
    *(Original escalation text follows, kept because the phasing and A12 reference it.)*
