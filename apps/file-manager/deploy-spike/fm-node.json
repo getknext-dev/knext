@@ -1,0 +1,89 @@
+{
+ "apiVersion": "serving.knative.dev/v1",
+ "kind": "Service",
+ "metadata": {
+  "name": "fm-node",
+  "namespace": "default",
+  "labels": {
+   "dev.knext.purpose": "same-source-node-arm"
+  }
+ },
+ "spec": {
+  "template": {
+   "metadata": {
+    "annotations": {
+     "autoscaling.knative.dev/max-scale": "2",
+     "autoscaling.knative.dev/min-scale": "0"
+    }
+   },
+   "spec": {
+    "imagePullSecrets": [
+     {
+      "name": "ocir-secret"
+     }
+    ],
+    "containers": [
+     {
+      "image": "me-abudhabi-1.ocir.io/axfqznklsd2t/file-manager@sha256:dc63715b5a753c00cb70bc6c8326c24c5ea89594c8b5f1311844bf7f672b59b2",
+      "ports": [
+       {
+        "containerPort": 8080
+       }
+      ],
+      "env": [
+       {
+        "name": "HOSTNAME",
+        "value": "0.0.0.0"
+       },
+       {
+        "name": "NODE_ENV",
+        "value": "production"
+       },
+       {
+        "name": "GCS_BUCKET_NAME",
+        "value": "knative-next-assets-banna"
+       },
+       {
+        "name": "GCS_BUCKET_KEY_PREFIX",
+        "value": "file-manager/"
+       },
+       {
+        "name": "REDIS_URL",
+        "value": "redis://redis.default.svc.cluster.local:6379"
+       },
+       {
+        "name": "REDIS_KEY_PREFIX",
+        "value": "file-manager/"
+       },
+       {
+        "name": "DATABASE_URL",
+        "valueFrom": {
+         "secretKeyRef": {
+          "key": "DATABASE_URL",
+          "name": "filemanager-scalezeropg"
+         }
+        }
+       },
+       {
+        "name": "KN_APP_NAME",
+        "value": "file-manager"
+       },
+       {
+        "name": "OTEL_TRACING_ENABLED",
+        "value": "true"
+       },
+       {
+        "name": "OTEL_TRACES_SAMPLER_ARG",
+        "value": "1"
+       },
+       {
+        "name": "KNEXT_DB_POOL_MAX",
+        "value": "8"
+       }
+      ]
+     }
+    ]
+   }
+  }
+ }
+}

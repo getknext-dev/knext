@@ -46,8 +46,12 @@ cache-handler.js
 manifests/
 .output
 
-# vinext-spike compiled single executables (~90-125 MB, arch-specific)
-fm-*
+# vinext-spike compiled single executables (~90-125 MB, arch-specific).
+# ROOT-ANCHORED (/fm-*), deliberately: the unanchored `fm-*` pattern applied to
+# every descendant and silently swallowed deploy-spike/fm-node.json and
+# fm-vinext.json — the commit that claimed "deploy-spike/ carries the live
+# manifests" carried one of three, and nothing said so.
+/fm-*
 # vinext build caches
 .vinext/
 .output/
