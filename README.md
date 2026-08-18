@@ -466,8 +466,12 @@ flowchart TB
         R2["tag:{tagName} → Set of keys"]
         R3["Fast O(1) tag-based invalidation"]
     end
-    
-    
+
+    %% The two tiers are independent stores, so there is no data flow to draw
+    %% between them. This invisible link exists only to fix their rank order:
+    %% with no edge at all, `flowchart TB` has nothing to rank on and packs the
+    %% subgraphs side by side in reverse declaration order.
+    Storage ~~~ Redis
 
     style Storage fill:#4f46e5,color:#fff
     style Redis fill:#dc2626,color:#fff
