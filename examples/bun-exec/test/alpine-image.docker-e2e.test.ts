@@ -339,6 +339,204 @@ describe('A1 — self-contained on the current vinext/vite pins', () => {
     expect((await asset.text()).length).toBeGreaterThan(100);
   });
 
+  it('SERVES the stylesheet a `import "./globals.css"` produced', async () => {
+    // Until 2026-08-17 this example had NO stylesheet at all — only inline
+    // `style={{}}` props — so the CSS pipeline on this build target had never
+    // been built, emitted, or served. That is not a cosmetic gap: a `.css`
+    // import is table stakes for any real app, and ADR-0042 proposes making this
+    // target the DEFAULT. "It serves JS assets" does not imply it serves CSS:
+    // the stylesheet is emitted by vinext into `.output/public/_next/static/css/`
+    // and reached through the compiled binary's asset root, which is the exact
+    // path that once 500'd on EVERY asset while `GET /` still returned correct
+    // SSR HTML (#657) — a page that renders and never styles or hydrates.
+    //
+    // Discovered from the page's own <link>, not hardcoded: the filename is
+    // content-hashed, and asserting on the URL the page actually asks the
+    // browser to load is what makes this a styling check rather than a
+    // file-exists check.
+    // BOTH routes, not just `/`. The PR body claimed the dynamic route links the
+    // stylesheet too, and nothing asserted it — a one-off measurement inside a
+    // change whose whole point is that measurements become gates (spec review).
+    // A layout-level stylesheet reaching `/` but not a dynamic route is a real
+    // shape: they render through different paths.
+    for (const route of ['/', '/item/42']) {
+      const routeHtml = await (await fetch(`http://127.0.0.1:${appPort}${route}`)).text();
+      const linked = [...routeHtml.matchAll(/<link\b([^>]*)>/g)]
+        .map((m) => m[1])
+        .filter((a) => /\brel\s*=\s*"([^"]*\s)?stylesheet(\s[^"]*)?"/.test(a))
+        .filter((a) => !/\bmedia\s*=\s*"print"/.test(a));
+      expect(
+        linked.length,
+        `route ${route} links no APPLIED stylesheet — it renders unstyled`,
+      ).toBeGreaterThan(0);
+    }
+
+    const html = await (await fetch(`http://127.0.0.1:${appPort}/`)).text();
+
+    // `rel` MUST contain the `stylesheet` token, and matching only on href is
+    // NOT sufficient — a review demonstrated the hole. `<link rel="preload"
+    // as="style" …>` or a `media="print"` stylesheet downloads the file, 200s as
+    // text/css, contains every asserted declaration, and applies NONE of it: the
+    // page renders unstyled and every assertion below still passes. That is
+    // precisely the #657 class this test cites as its reason to exist.
+    //
+    // Not hypothetical in this stack: vinext ships `fixPreloadAs` (React Fizz
+    // emits `rel="preload" as="stylesheet"` for CSS) and
+    // `rewriteInlineCssStylesheetLinks`, which DELETES `rel="stylesheet"` link
+    // tags and substitutes inline `<style>`. Live code, one attribute away.
+    const stylesheetHrefs = [...html.matchAll(/<link\b([^>]*)>/g)]
+      .map((m) => m[1])
+      .filter((attrs) => /\brel\s*=\s*"([^"]*\s)?stylesheet(\s[^"]*)?"/.test(attrs))
+      // A print-only stylesheet is downloaded and not applied to the screen.
+      .filter((attrs) => !/\bmedia\s*=\s*"print"/.test(attrs))
+      .map((attrs) => /\bhref\s*=\s*"(\/_next\/static\/css\/[^"]+\.css)"/.exec(attrs)?.[1])
+      .filter((h): h is string => Boolean(h));
+
+    expect(
+      stylesheetHrefs.length,
+      'the SSR page linked no APPLIED stylesheet (rel="stylesheet", not media="print"). ' +
+        'A preload or print-only link downloads the CSS and styles nothing.',
+    ).toBeGreaterThan(0);
+
+    // Scan EVERY applied stylesheet, not just the first. `.match()` took only
+    // the first `<link>`, which made the assertion order-dependent: once
+    // page.module.css also linked, a reordering would have graded the wrong file.
+    let body = '';
+    for (const href of stylesheetHrefs) {
+      const css = await fetch(`http://127.0.0.1:${appPort}${href}`);
+      expect(css.status, `the page's own stylesheet ${href} is not served`).toBe(200);
+      expect(css.headers.get('content-type') ?? '').toMatch(/text\/css/);
+      body += await css.text();
+    }
+
+    // NON-VACUITY: a 200 carrying an empty body satisfies everything above.
+    // Assert on what `globals.css` ALONE owns. `--knext-accent` is no longer
+    // that — `page.module.css` references it via `var(--knext-accent, …)`, so
+    // the token appears in both files and the discriminating power had silently
+    // collapsed to `border-bottom`. The custom-property DEFINITION (`--x:`, with
+    // the colon) and the attribute selector exist only in globals.css; the
+    // minifier strips the quotes, hence the tolerant selector match.
+    expect(body, 'no stylesheet defines the custom property globals.css declares').toMatch(
+      /--knext-accent\s*:/,
+    );
+    expect(body, "globals.css's own rule is missing from every served stylesheet").toMatch(
+      /\[data-testid=['"]?hello['"]?\]/,
+    );
+    expect(body).toContain('border-bottom');
+  });
+
+  it('SERVES CSS MODULES with server/client class-name agreement', async () => {
+    // A global `import './globals.css'` and a `*.module.css` import are DIFFERENT
+    // pipelines, and the sibling test above only covers the first. Modules are
+    // the harder case and the more common one in real apps: the class name is
+    // hashed at build time, and the styling only works if the hash rendered into
+    // the SSR HTML is the SAME hash present in the emitted stylesheet. A build
+    // that emits a correct stylesheet and renders a stale or unhashed class name
+    // serves two files that never meet — every assertion about either file
+    // individually passes, and the page is unstyled.
+    //
+    // SCANS rather than enumerates: every hashed class the HTML actually uses
+    // must exist in the CSS the page actually links. A module added later is
+    // covered with no edit here.
+    const html = await (await fetch(`http://127.0.0.1:${appPort}/`)).text();
+
+    // Same `rel="stylesheet"` requirement as the sibling test, and for the same
+    // reason: a preload or print-only link serves the bytes and applies none of
+    // them, which would make this whole check pass on an unstyled page.
+    const hrefs = [
+      ...new Set(
+        [...html.matchAll(/<link\b([^>]*)>/g)]
+          .map((m) => m[1])
+          .filter((a) => /\brel\s*=\s*"([^"]*\s)?stylesheet(\s[^"]*)?"/.test(a))
+          .filter((a) => !/\bmedia\s*=\s*"print"/.test(a))
+          .map((a) => /\bhref\s*=\s*"(\/_next\/static\/css\/[^"]+\.css)"/.exec(a)?.[1])
+          .filter((h): h is string => Boolean(h)),
+      ),
+    ];
+    expect(hrefs.length, 'the page linked no APPLIED stylesheets at all').toBeGreaterThan(0);
+
+    let served = '';
+    for (const href of hrefs) {
+      const res = await fetch(`http://127.0.0.1:${appPort}${href}`);
+      expect(res.status, `linked stylesheet ${href} is not served`).toBe(200);
+      served += await res.text();
+    }
+
+    // Vite's generator is `_${name}_${hash}_${line}` and NAME KEEPS ITS OWN
+    // PUNCTUATION — `.card-title` becomes `_card-title_1i5jp_5` and `.my_class`
+    // becomes `_my_class_1i5jp_5`. An earlier `^_[A-Za-z0-9]+_[A-Za-z0-9]+_\d+$`
+    // matched neither, so a module using only kebab-case class names would have
+    // been dropped from `used` SILENTLY and this test would have gone green with
+    // zero coverage while claiming "a module added later is covered with no edit
+    // here". Caught in review.
+    const MODULE_CLASS = /^_[\w-]+_[a-z0-9]{5,}_\d+$/;
+    const classes = [...html.matchAll(/class="([^"]+)"/g)].flatMap((m) => m[1].split(/\s+/));
+    const used = classes.filter((c) => MODULE_CLASS.test(c));
+
+    // Silent-drop detector: anything that LOOKS module-generated but the pattern
+    // rejects is reported rather than ignored, so a future change to vite's
+    // generator surfaces as a failure here instead of as silent zero coverage.
+    const suspicious = classes.filter((c) => c.startsWith('_') && !MODULE_CLASS.test(c));
+    expect(
+      suspicious,
+      "these classes look CSS-module-generated but this test's pattern does not recognise them, " +
+        'so they would be skipped without ever being checked — update MODULE_CLASS rather than ' +
+        'letting coverage silently drop to zero',
+    ).toEqual([]);
+
+    expect(
+      used.length,
+      'no hashed CSS-module class reached the SSR HTML — the *.module.css import produced nothing',
+    ).toBeGreaterThan(0);
+
+    for (const cls of used) {
+      expect(
+        served.includes(`.${cls}`),
+        `the HTML renders class "${cls}" but no stylesheet the page links defines it — ` +
+          'the module hash in the markup and the hash in the CSS disagree, so the element is unstyled',
+      ).toBe(true);
+    }
+
+    // THE CLIENT HALF. Everything above is SSR-markup ↔ stylesheet agreement. A
+    // build whose CLIENT graph hashed module classes differently would still
+    // pass all of it: the page renders correctly from SSR and then breaks at
+    // hydration, when React replaces the server's class with the client's. Spec
+    // review caught the original wording claiming "server/client agreement"
+    // while the example had no `'use client'` component at all, so nothing was
+    // ever hydrated and the client hashes were never read.
+    //
+    // MEASURED where the hash actually travels, rather than where it was assumed
+    // to: it is NOT in the client JS chunks (checked — 3 scripts, ~375 KB,
+    // neither hash present). Under RSC a client component's props arrive in the
+    // serialized payload embedded in the document, as `"className":"<hash>"`.
+    // Asserting on the JS bundle would have been a guard built on the wrong model.
+    const clientEl = /<[^>]+data-testid="client-badge"[^>]*>/.exec(html)?.[0];
+    expect(
+      clientEl,
+      "the 'use client' component did not render — the client half of this test is vacuous without it",
+    ).toBeTruthy();
+
+    const clientCls = /class="([^"]+)"/
+      .exec(clientEl as string)?.[1]
+      .split(/\s+/)
+      .find((c) => MODULE_CLASS.test(c));
+    expect(
+      clientCls,
+      'the client component rendered without a hashed CSS-module class, so it proves nothing about ' +
+        'the client graph',
+    ).toBeTruthy();
+
+    // The serialized payload must carry the SAME hash the markup rendered, or
+    // hydration replaces a styled element with an unstyled one.
+    expect(
+      html.includes(`\\"className\\":\\"${clientCls}\\"`) ||
+        html.includes(`"className":"${clientCls}"`),
+      `the client component renders class "${clientCls}" but that hash does not appear in the ` +
+        'serialized hydration payload — the client graph will hydrate a different class name and ' +
+        'the element loses its styling after hydration',
+    ).toBe(true);
+  });
+
   it('serves a dynamic page and binds its param', async () => {
     const res = await fetch(`http://127.0.0.1:${appPort}/item/42`);
     expect(res.status).toBe(200);

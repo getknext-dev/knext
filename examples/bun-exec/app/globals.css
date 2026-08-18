@@ -1,0 +1,22 @@
+/* Exercises the CSS pipeline on the vinext + bun-exec target.
+   Before this file the example had NO stylesheet at all — only inline style
+   props — so `import './globals.css'` had never been built or served on this
+   build target. A CSS import is table stakes for any real app, so "make
+   bun-exec the default" cannot be evaluated without it. */
+:root {
+  --knext-accent: #10b981;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, sans-serif;
+}
+
+/* Distinctive, greppable rule: the container test asserts THIS declaration is
+   present in the served stylesheet, not merely that some file returned 200.
+   A 200 carrying an empty or wrong file is the failure that a status-only
+   assertion misses. */
+[data-testid='hello'] {
+  color: var(--knext-accent);
+  border-bottom: 3px solid var(--knext-accent);
+}
