@@ -384,7 +384,10 @@ func TestValidateNextAppSpec(t *testing.T) {
 			errHas:  "scaleDownDelay",
 		},
 		{
-			name: "scaleDownDelay bare number rejected — no unit is not a duration (#762)",
+			// "300" is rejected for a MISSING UNIT, not for being a number:
+			// time.ParseDuration("0") is a documented stdlib special case and
+			// is accepted (see the agreement table, which pins that).
+			name: "scaleDownDelay 300 rejected — a non-zero number needs a unit (#762)",
 			spec: &appsv1alpha1.NextAppSpec{
 				Image:   digestImage,
 				Scaling: &appsv1alpha1.ScalingSpec{ScaleDownDelay: "300"},

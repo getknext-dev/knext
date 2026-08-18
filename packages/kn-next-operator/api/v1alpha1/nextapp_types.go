@@ -420,10 +420,17 @@ type ScalingSpec struct {
 	//
 	// Representation: a Go duration string with metav1.Duration semantics
 	// (e.g. "0s", "30s", "5m", "1h") — the same grammar the annotation itself
-	// takes, passed through verbatim. Parsed and range-checked ONCE, at
-	// admission and reconcile, through the shared
-	// validation.ValidateNextAppSpec branch (ADR-0040); never parsed at the
-	// stamping site.
+	// takes, passed through verbatim. Checked ONCE, at admission and
+	// reconcile, through the shared validation.ValidateNextAppSpec branch
+	// (ADR-0040); never parsed at the stamping site.
+	//
+	// The accepted set is not restated here, because a restatement is a
+	// second source of truth that drifts: validation DELEGATES to
+	// knative.dev/serving's own annotation validator, so whatever the
+	// vendored Knative accepts for this annotation is exactly what knext
+	// accepts. Today that means a non-negative duration, no longer than
+	// Knative's window maximum, expressed with at most SECOND precision —
+	// "42.5s" is a valid Go duration and is NOT a valid value here.
 	//
 	// Unset ("") => the annotation is NOT stamped and the Knative cluster
 	// default applies unmanaged, exactly as before this field existed
@@ -442,10 +449,11 @@ type ScalingSpec struct {
 	// real and belongs to the user who opted in: one pod, plus its
 	// connections, for the window after every burst.
 	//
-	// Cluster-feature caveat: the accepted range is the INSTALLED Knative's,
-	// not this operator's. The webhook validates the value against the
-	// documented 0s–1h range; an older or differently-configured cluster can
-	// still clamp or ignore it. The webhook validates the range, the cluster
+	// Cluster-feature caveat: validation runs against the Knative version
+	// this operator was BUILT with, while the annotation is honoured by the
+	// Knative INSTALLED on the cluster, and those are not the same thing. An
+	// older or differently-configured cluster can still clamp or ignore a
+	// value admission accepted. The webhook validates the value, the cluster
 	// decides the behaviour — `kn-next doctor` reports the installed Knative
 	// version, and the ~52 ms warm-hit promise holds only on a cluster that
 	// honours the annotation.

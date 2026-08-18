@@ -103,6 +103,41 @@ var _ = Describe("spec.scaling.scaleDownDelay (#762, ADR-0045)", func() {
 		}), "an unset scaleDownDelay must leave the revision template exactly as it was before the field existed")
 	})
 
+	It("UN-stamps the annotation when an update removes the field (#762)", func() {
+		// Correct by construction — buildDesiredKsvc assigns the annotation map
+		// wholesale rather than merging into the live one — but "correct by
+		// construction" is exactly the claim that stops being true after an
+		// innocent refactor to a merge. Removing the field must remove the
+		// annotation, or a user who deletes the line keeps paying for a pod.
+		nn, err := storeAndReconcile("sdd-update-removes", appsv1alpha1.NextAppSpec{
+			Image:   validImage,
+			Scaling: &appsv1alpha1.ScalingSpec{MinScale: 0, MaxScale: 10, ScaleDownDelay: "5m"},
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		ksvc := &servingv1.Service{}
+		Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+		Expect(ksvc.Spec.Template.Annotations).To(
+			HaveKeyWithValue("autoscaling.knative.dev/scale-down-delay", "5m"),
+			"precondition: the annotation is stamped before the update")
+
+		By("updating the NextApp to remove spec.scaling.scaleDownDelay")
+		cur := &appsv1alpha1.NextApp{}
+		Expect(k8sClient.Get(ctx, nn, cur)).To(Succeed())
+		cur.Spec.Scaling.ScaleDownDelay = ""
+		Expect(k8sClient.Update(ctx, cur)).To(Succeed())
+
+		reconciler := &NextAppReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+		Expect(ksvc.Spec.Template.Annotations).NotTo(HaveKey("autoscaling.knative.dev/scale-down-delay"),
+			"removing the field must un-stamp the annotation, restoring the Knative cluster default")
+		Expect(ksvc.Spec.Template.Annotations).To(HaveKeyWithValue("autoscaling.knative.dev/max-scale", "10"),
+			"and must not disturb the sibling annotations")
+	})
+
 	It("is REJECTED by the reconciler too, not only the webhook, when out of range (#762, ADR-0040 shared branch)", func() {
 		// No validating webhook is installed in this suite, so this is exactly
 		// the stored-CR case: the value is a plain string in the CRD schema and
@@ -136,14 +171,19 @@ var _ = Describe("spec.scaling.scaleDownDelay (#762, ADR-0045)", func() {
 // swallowed error; the stamping site must pass the validated string through
 // verbatim.
 //
-// Literal-argument calls are allowed and are what proves the scanner recognises
-// real duration-parse call expressions rather than finding nothing.
+// The scan resolves the IMPORT, not the identifier text: `gotime "time"` +
+// `gotime.ParseDuration(...)`, and a dot-import of "time" calling a bare
+// `ParseDuration(...)`, both compile and both are caught. Matching the literal
+// name `time` was the first version of this guard and it was mutation-proved
+// GREEN against the aliased form — i.e. decoration.
+//
+// The exemption is the validator PACKAGE DIRECTORY, matched on path segments,
+// so a future `internal/validationutil` is not silently exempt by prefix.
 func TestEveryDurationParseOfCRInputLivesInTheValidator(t *testing.T) {
 	root := filepath.Join("..", "..")
-	validatorDir := filepath.Join("internal", "validation")
 
 	var offenders []string
-	recognisedCalls, filesScanned := 0, 0
+	filesScanned := 0
 
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -165,31 +205,12 @@ func TestEveryDurationParseOfCRInputLivesInTheValidator(t *testing.T) {
 			return perr
 		}
 		filesScanned++
-		inValidator := strings.Contains(path, validatorDir)
-		ast.Inspect(file, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok {
-				return true
-			}
-			pkg, ok := sel.X.(*ast.Ident)
-			if !ok || pkg.Name != "time" {
-				return true
-			}
-			if sel.Sel.Name != "ParseDuration" {
-				return true
-			}
-			recognisedCalls++
-			if inValidator {
-				return true
-			}
-			offenders = append(offenders, fmt.Sprintf("%s:%d time.ParseDuration",
-				filepath.ToSlash(path), fset.Position(call.Pos()).Line))
-			return true
-		})
+		if inValidatorPackage(path) {
+			return nil
+		}
+		for _, hit := range durationParseHits(fset, file) {
+			offenders = append(offenders, filepath.ToSlash(path)+":"+hit)
+		}
 		return nil
 	})
 	if err != nil {
@@ -198,12 +219,159 @@ func TestEveryDurationParseOfCRInputLivesInTheValidator(t *testing.T) {
 	if filesScanned == 0 {
 		t.Fatal("scanned no Go files; the scan itself is broken, not passing")
 	}
-	if recognisedCalls == 0 {
-		t.Fatal("scan found no time.ParseDuration call at all — the CR duration field is not " +
-			"being parsed anywhere, so this scan's silence proves nothing")
-	}
 	if len(offenders) > 0 {
 		t.Errorf("these parse a duration outside internal/validation, where a parse error cannot "+
-			"become a rejection (ADR-0045: no MustParse/parse at the use site): %v", offenders)
+			"become a rejection (ADR-0045: no parse/MustParse at the use site): %v", offenders)
 	}
+}
+
+// TestDurationParseScannerRecognisesEveryCallForm is the scanner's SELF-PROOF.
+//
+// The obvious self-proof — "assert the scan found at least one real call" —
+// is not available and must not be faked: knext delegates to Knative's own
+// validator, so the operator's tracked sources contain NO duration parse at
+// all, and an assertion that one exists would red on correct code. Instead the
+// scanner is proved against fixtures covering every call form that compiles,
+// including the two the first version of this guard missed.
+func TestDurationParseScannerRecognisesEveryCallForm(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want int
+	}{
+		{
+			name: "plain import",
+			src:  "package p\nimport \"time\"\nfunc f(s string) { _, _ = time.ParseDuration(s) }\n",
+			want: 1,
+		},
+		{
+			name: "aliased import — compiles, and the identifier-matching guard missed it",
+			src:  "package p\nimport gotime \"time\"\nfunc f(s string) { _, _ = gotime.ParseDuration(s) }\n",
+			want: 1,
+		},
+		{
+			name: "dot import — bare call, also missed by identifier matching",
+			src:  "package p\nimport . \"time\"\nfunc f(s string) { _, _ = ParseDuration(s) }\n",
+			want: 1,
+		},
+		{
+			name: "a DIFFERENT package's ParseDuration is not a time parse",
+			src:  "package p\nimport \"other/time\"\nfunc f(s string) { _ = time.ParseDuration(s) }\n",
+			want: 0,
+		},
+		{
+			name: "an unrelated method named ParseDuration on a local value",
+			src:  "package p\ntype T struct{}\nfunc (T) ParseDuration(string) {}\nfunc f(v T, s string) { v.ParseDuration(s) }\n",
+			want: 0,
+		},
+		{
+			name: "no parse at all — the shipped stamping site's shape",
+			src:  "package p\nfunc f(m map[string]string, v string) { m[\"k\"] = v }\n",
+			want: 0,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fset := token.NewFileSet()
+			file, err := parser.ParseFile(fset, "fixture.go", tc.src, 0)
+			if err != nil {
+				t.Fatalf("fixture does not parse: %v", err)
+			}
+			hits := durationParseHits(fset, file)
+			if len(hits) != tc.want {
+				t.Fatalf("scanner found %d hits (%v), want %d — the scanner cannot see this call form, "+
+					"so its silence over the real tree proves nothing", len(hits), hits, tc.want)
+			}
+		})
+	}
+}
+
+// TestValidatorExemptionIsPackageScoped pins the exemption to the validator
+// package DIRECTORY. A substring match ("internal/validation") would silently
+// exempt a future internal/validationutil, which is how an exemption quietly
+// grows into a hole.
+func TestValidatorExemptionIsPackageScoped(t *testing.T) {
+	exempt := []string{
+		"../../internal/validation/validate.go",
+		"/abs/repo/internal/validation/quantity.go",
+	}
+	notExempt := []string{
+		"../../internal/validationutil/helper.go",
+		"../../internal/controller/nextapp_controller.go",
+		"../../internal/validation_helpers/x.go",
+		"../../internal/webhook/v1alpha1/nextapp_webhook.go",
+	}
+	for _, p := range exempt {
+		if !inValidatorPackage(p) {
+			t.Errorf("%s must be exempt (it IS the validator package)", p)
+		}
+	}
+	for _, p := range notExempt {
+		if inValidatorPackage(p) {
+			t.Errorf("%s must NOT be exempt — the exemption is the validator package, not a prefix", p)
+		}
+	}
+}
+
+// inValidatorPackage reports whether path lives in internal/validation, matched
+// on whole path SEGMENTS.
+func inValidatorPackage(path string) bool {
+	dir := filepath.ToSlash(filepath.Dir(path))
+	segs := strings.Split(dir, "/")
+	for i := 0; i+1 < len(segs); i++ {
+		if segs[i] == "internal" && segs[i+1] == "validation" {
+			return true
+		}
+	}
+	return false
+}
+
+// durationParseHits returns "<line> <form>" for every call to time.ParseDuration
+// in file, resolving the local name of the "time" import rather than matching
+// the identifier text — so `gotime "time"` and a dot-import are both caught,
+// and another package that happens to be named `time` is not.
+func durationParseHits(fset *token.FileSet, file *ast.File) []string {
+	timeNames := map[string]bool{}
+	timeDotImported := false
+	for _, imp := range file.Imports {
+		if imp.Path == nil || imp.Path.Value != `"time"` {
+			continue
+		}
+		switch {
+		case imp.Name == nil:
+			timeNames["time"] = true
+		case imp.Name.Name == ".":
+			timeDotImported = true
+		case imp.Name.Name == "_":
+			// A blank import cannot be called through.
+		default:
+			timeNames[imp.Name.Name] = true
+		}
+	}
+
+	var hits []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		switch fun := call.Fun.(type) {
+		case *ast.SelectorExpr:
+			pkg, ok := fun.X.(*ast.Ident)
+			if !ok || !timeNames[pkg.Name] || fun.Sel.Name != "ParseDuration" {
+				return true
+			}
+			hits = append(hits, fmt.Sprintf("%d %s.ParseDuration (import \"time\")",
+				fset.Position(call.Pos()).Line, pkg.Name))
+		case *ast.Ident:
+			if !timeDotImported || fun.Name != "ParseDuration" {
+				return true
+			}
+			hits = append(hits, fmt.Sprintf("%d ParseDuration (dot-imported \"time\")",
+				fset.Position(call.Pos()).Line))
+		}
+		return true
+	})
+	return hits
 }
