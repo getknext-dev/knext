@@ -102,3 +102,33 @@ product's bursty target users, and it is a one-annotation change.
 zero on THIS cluster: not reachable — the remaining budget is ~2 s of Knative wake/schedule/start on
 oversubscribed 2-vCPU nodes plus contention-inflated boot. The next real levers are node sizing and
 Knative-version work, both platform decisions, not code.
+
+## Addendum 3 — multi-path warm + the override root cause (2026-08-19)
+
+**True cold start is now 1.88 s** — the first sub-2 s from a confirmed zero. `KNEXT_WARM_PATH`
+accepts a comma-separated list warmed **sequentially**; deployed as `/,/api/health/deep`, so startup
+now pre-renders the page, pre-fills the page cache, AND establishes the DB pool
+(`WARMED:/ ms=714` → `WARMED:/api/health/deep ms=92` on OKE). Harness sample with confirmed
+scale-to-zero ("scaled to 0 after 72s"): **1.88 s** (n=1 — the other two samples hit the
+`scale-down-delay` window and are reported as what they are: **warm hits at 51.6/54.3 ms**, the
+harness itself printing "scale-to-zero did NOT happen within the window").
+
+**Root cause of the day-long vite whack-a-mole found and fixed:** the workspace root's Trivy
+CVE-floor override block pinned `vite: ">=7.3.5 <8"`, silently re-resolving every vite in the
+workspace to 7.3.6 on each install — which is why vinext (needs v8's `parseSync`) kept breaking and
+why `package.json` appeared to "revert". Widened to `">=7.3.5 <9"`: the CVE floor is the security
+content and is kept; the `<8` cap predates vite 8. The owning guard
+(`tests/supply-chain-workflow.test.ts`, 16 tests) stays green.
+
+## The cold-start scoreboard for this spike
+
+| state | first-byte |
+|---|---|
+| day start (lazy entry, PG cold, no delay) | 5550 ms |
+| warm entry + PG warm | 2350 ms |
+| + warm=`/` | ~2140 ms |
+| + multi-warm `/,/api/health/deep` | **1880 ms (true zero)** |
+| within the 5 min `scale-down-delay` window | **~52 ms** |
+
+Remaining floor from true zero: ~1.6–1.9 s of Knative wake/schedule/start on saturated 2-vCPU nodes
+(98%/83% of allocatable already requested) — node sizing and Knative-layer work, not code.

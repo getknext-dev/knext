@@ -205,16 +205,29 @@ console.log(`LISTENING:${appServer.port} METRICS:${metricsServer.port}`);
 // the warm route touches an srvx-only field and throws, the module graph has
 // already evaluated by then, which is the entire point. Hence the try/catch —
 // a warmup failure must never take down a healthy listener.
-const WARM_PATH = process.env.KNEXT_WARM_PATH ?? '/api/health';
+// Comma-separated: each path warms a different subsystem. `/` warms the module
+// graph AND the page-render path and pre-fills the page cache; adding e.g.
+// `/api/health/deep` also establishes the DB pool, so the first user's query
+// skips the connection handshake. Paths warm SEQUENTIALLY — one in-flight warm
+// at a time on a contended cold CPU — but the first fires immediately.
+const WARM_PATHS = (process.env.KNEXT_WARM_PATH ?? '/api/health')
+  .split(',')
+  .map((p) => p.trim())
+  .filter(Boolean);
 if (process.env.KNEXT_EAGER_WARM !== '0') {
-  const warmT0 = Date.now();
-  nitro.fetch(new Request(`http://127.0.0.1:${appServer.port}${WARM_PATH}`)).then(
-    (res) => console.log(`WARMED:${WARM_PATH} status=${res.status} ms=${Date.now() - warmT0}`),
-    (err) =>
-      console.log(
-        `WARMED:${WARM_PATH} status=error ms=${Date.now() - warmT0} (${err?.message ?? err})`,
-      ),
-  );
+  (async () => {
+    for (const path of WARM_PATHS) {
+      const warmT0 = Date.now();
+      try {
+        const res = await nitro.fetch(new Request(`http://127.0.0.1:${appServer.port}${path}`));
+        console.log(`WARMED:${path} status=${res.status} ms=${Date.now() - warmT0}`);
+      } catch (err) {
+        console.log(
+          `WARMED:${path} status=error ms=${Date.now() - warmT0} (${err?.message ?? err})`,
+        );
+      }
+    }
+  })();
 }
 
 // ── (3) SIGTERM / SIGINT graceful drain ─────────────────────────────────────
