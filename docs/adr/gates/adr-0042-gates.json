@@ -285,8 +285,8 @@
             "distribution_separation": false,
             "stratified_fast_mode": {
               "note": "ADR-0036 D6/D7 forbid a bare median across a mode mixture. Both arms went bimodal late in the sitting, so the split at 8s is mandatory, not a convenience.",
-              "bunexec": {"n": 8, "median_ms": 2815, "range_ms": [1820, 3400]},
-              "node": {"n": 10, "median_ms": 2405, "range_ms": [2040, 3170]},
+              "bunexec": { "n": 8, "median_ms": 2815, "range_ms": [1820, 3400] },
+              "node": { "n": 10, "median_ms": 2405, "range_ms": [2040, 3170] },
               "difference_ms": 410,
               "mann_whitney": "p=0.477"
             },
