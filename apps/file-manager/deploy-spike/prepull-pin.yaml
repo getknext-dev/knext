@@ -1,0 +1,71 @@
+# TEST-CLUSTER ONLY (ADR-0037's mechanism, hand-rolled because the knext
+# operator is not deployed on this cluster): one sleeping pod per node per
+# image pins the digest in containerd so no A/B sample ever pays a first pull,
+# and kubelet image-GC cannot evict it mid-sitting.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: prepull-fm-vinext
+  namespace: default
+  labels: { dev.knext.purpose: ab-prepull-pin }
+spec:
+  selector: { matchLabels: { app: prepull-fm-vinext } }
+  template:
+    metadata: { labels: { app: prepull-fm-vinext } }
+    spec:
+      imagePullSecrets: [{ name: ocir-secret }]
+      containers:
+        - name: pin
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/file-manager@sha256:08443c7a9a05d71520c38f5ea6631a8184b78c7a111f1e644a79392efc845662
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              # Fault the app binary (and its libs) into the NODE page cache, not
+              # just onto its disk. Measured 2026-08-18: with a warm page cache the
+              # 125 MB binary boots to LISTEN in ~39 ms; on OKE it takes ~450 ms —
+              # the difference is cold disk read. overlayfs shares the layer file,
+              # so pages faulted here are the SAME pages a cold-started app pod
+              # maps. Re-read every 5 min because page cache is evictable under
+              # memory pressure, and an evicted prewarm silently stops prewarming.
+              while true; do
+                cat /app/server > /dev/null 2>&1 || true
+                cat /app/.output/server/node_modules/*/package.json > /dev/null 2>&1 || true
+                sleep 300
+              done
+          resources:
+            requests: { cpu: 1m, memory: 8Mi }
+            limits: { memory: 32Mi }
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: prepull-fm-node
+  namespace: default
+  labels: { dev.knext.purpose: ab-prepull-pin }
+spec:
+  selector: { matchLabels: { app: prepull-fm-node } }
+  template:
+    metadata: { labels: { app: prepull-fm-node } }
+    spec:
+      imagePullSecrets: [{ name: ocir-secret }]
+      containers:
+        - name: pin
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/file-manager@sha256:b7b7abc59e645112f006d00828e64879f1a149af84cdc6c691a983f638e1db81
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              # Fault the app binary (and its libs) into the NODE page cache, not
+              # just onto its disk. Measured 2026-08-18: with a warm page cache the
+              # 125 MB binary boots to LISTEN in ~39 ms; on OKE it takes ~450 ms —
+              # the difference is cold disk read. overlayfs shares the layer file,
+              # so pages faulted here are the SAME pages a cold-started app pod
+              # maps. Re-read every 5 min because page cache is evictable under
+              # memory pressure, and an evicted prewarm silently stops prewarming.
+              while true; do
+                cat /app/server > /dev/null 2>&1 || true
+                cat /app/.output/server/node_modules/*/package.json > /dev/null 2>&1 || true
+                sleep 300
+              done
+          resources:
+            requests: { cpu: 1m, memory: 8Mi }
+            limits: { memory: 32Mi }
