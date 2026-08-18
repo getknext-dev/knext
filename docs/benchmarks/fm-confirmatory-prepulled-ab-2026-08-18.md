@@ -126,6 +126,11 @@ content and is kept; the `<8` cap predates vite 8. The owning guard
 
 ## The cold-start scoreboard for this spike
 
+> **Framing note (architect gate):** the rows below are **separate sittings** — the table shows the
+> trajectory of the configuration, not a pooled dataset. D5 forbids pooling across sittings and
+> D6/D7 forbid a bare median over the bimodal vinext arm; each row's own record carries its
+> stratification and caveats. Do not quote "5550 → 2230" as one measurement.
+
 | state | first-byte |
 |---|---|
 | day start (lazy entry, PG cold, no delay) | 5550 ms |
