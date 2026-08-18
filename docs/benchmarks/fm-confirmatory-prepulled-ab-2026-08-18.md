@@ -70,3 +70,12 @@ page-cache MISS into a HIT; untested on-cluster).
 fm-vinext: 2530 5350 3100 2080 5510 5680 7530 2240 2300 2740 2140 2410
 fm-node:   4300 3670 3890 3590 3760 4410 3450 3600 3710 3580 3700 3640
 ```
+
+## Addendum — warm path `/` (same day, sitting `fm-warmroot-…`)
+
+`KNEXT_WARM_PATH=/` (renders the page and pre-fills the Redis page cache at startup, so the first
+user's request is a HIT): 3 cold samples → **2160, 2130, 5860 ms**. The two clean samples sit at the
+fast end of the confirmatory fast mode (2080–3100); the third is the platform-transition stall again,
+which this change was never going to touch. n=2 clean samples is not a claim — recorded as *likely
+helpful, kept deployed* (it is also strictly more representative: the warm now exercises the same
+path a user hits first). Cross-sitting pooling deliberately not done (D5).
