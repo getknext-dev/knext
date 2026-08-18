@@ -22,12 +22,15 @@ limitations under the License.
 package validation
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
 	"github.com/robfig/cron/v3"
 	"k8s.io/apimachinery/pkg/api/resource"
 	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
+	"knative.dev/serving/pkg/apis/autoscaling"
+	"knative.dev/serving/pkg/autoscaler/config/autoscalerconfig"
 
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 )
@@ -148,6 +151,9 @@ func ValidateImageRef(image string) error {
 //   - TargetBurstCapacity, when set, is -1 or >= 0 (ADR-0032, #411).
 //   - PanicWindowPercentage, when set, is in [1,100]; PanicThresholdPercentage,
 //     when set, is >= 110 (ADR-0033, #413).
+//   - ScaleDownDelay, when set, is a value Knative's OWN annotation validator
+//     accepts for autoscaling.knative.dev/scale-down-delay — delegated, not
+//     restated, so it cannot drift from the vendored Knative (ADR-0045, #762).
 //   - Storage.Provider / Cache.Provider / Revalidation.Queue, when set, are
 //     recognized enum values.
 //
@@ -244,6 +250,47 @@ func ValidateNextAppSpec(spec *appsv1alpha1.NextAppSpec) error {
 				"spec.scaling.panicThresholdPercentage must be >= 110 (a percentage of the steady-state target; Knative requires > 100), got %d",
 				*s.PanicThresholdPercentage,
 			)
+		}
+
+		// scaleDownDelay (#762, ADR-0045): how long the last pod stays
+		// routable after traffic stops. This is the ONLY place the value is
+		// checked — the stamping site passes it through verbatim, so a
+		// malformed value can never reach a parse that has no way to reject
+		// it. Unset ("") skips the check entirely — no annotation is stamped
+		// (back-compat, see buildDesiredKsvc).
+		//
+		// The rule is DELEGATED to Knative's own annotation validator rather
+		// than restated here, because a restatement is a second source of
+		// truth that drifts: the first version of this branch checked "parses"
+		// and "0 <= d <= 1h" and MISSED Knative's third clause (at most SECOND
+		// precision), so "42.5s" passed knext admission, got stamped, and was
+		// then rejected by Knative's own ksvc webhook — leaving the NextApp in
+		// a permanent reconcile-error loop pointing at an annotation the user
+		// never wrote. Delegation makes knext's verdict equal Knative's by
+		// construction, and pins the bound to autoscaling.WindowMax instead of
+		// a hand-copied constant.
+		//
+		// The map deliberately carries ONLY this key: every other check inside
+		// ValidateAnnotations is keyed off an annotation that is absent here,
+		// so an empty autoscaler Config is sufficient and no unrelated cluster
+		// policy leaks into this field's verdict.
+		//
+		// No CRD marker mirrors this check. CEL COULD express it (the repo
+		// uses XValidation elsewhere and CEL has duration()), so the reason is
+		// NOT expressiveness — it is that any marker would be a second copy of
+		// Knative's rule, free to drift from the vendored validator exactly as
+		// the hand-rolled version above did.
+		if s.ScaleDownDelay != "" {
+			anns := map[string]string{
+				autoscaling.ScaleDownDelayAnnotationKey: s.ScaleDownDelay,
+			}
+			if fe := autoscaling.ValidateAnnotations(context.Background(), &autoscalerconfig.Config{}, anns); fe != nil {
+				return fmt.Errorf(
+					"spec.scaling.scaleDownDelay %q is not a value Knative accepts for %s "+
+						"(a duration from 0s to %s, at most second precision — validated against knative.dev/serving's own annotation validator, not a copy of its rules): %w",
+					s.ScaleDownDelay, autoscaling.ScaleDownDelayAnnotationKey, autoscaling.WindowMax, fe,
+				)
+			}
 		}
 
 		// Scheduled warm-floor windows (ADR-0030, W5/#380). Each window declares a

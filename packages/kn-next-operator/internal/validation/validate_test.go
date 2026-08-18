@@ -340,6 +340,90 @@ func TestValidateNextAppSpec(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			// scaleDownDelay (#762, ADR-0045): a Go duration string, range
+			// 0s–1h (the Knative-accepted range). Boundaries must be accepted,
+			// not just interior values.
+			name: "scaleDownDelay 0s accepted (#762)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{ScaleDownDelay: "0s"},
+			},
+			wantErr: false,
+		},
+		{
+			name: "scaleDownDelay 30s accepted (#762)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{ScaleDownDelay: "30s"},
+			},
+			wantErr: false,
+		},
+		{
+			name: "scaleDownDelay 5m accepted (#762)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{ScaleDownDelay: "5m"},
+			},
+			wantErr: false,
+		},
+		{
+			name: "scaleDownDelay 1h accepted (#762)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{ScaleDownDelay: "1h"},
+			},
+			wantErr: false,
+		},
+		{
+			name: "scaleDownDelay non-duration garbage rejected (#762)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{ScaleDownDelay: "5 minutes"},
+			},
+			wantErr: true,
+			errHas:  "scaleDownDelay",
+		},
+		{
+			// "300" is rejected for a MISSING UNIT, not for being a number:
+			// time.ParseDuration("0") is a documented stdlib special case and
+			// is accepted (see the agreement table, which pins that).
+			name: "scaleDownDelay 300 rejected — a non-zero number needs a unit (#762)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{ScaleDownDelay: "300"},
+			},
+			wantErr: true,
+			errHas:  "scaleDownDelay",
+		},
+		{
+			// The error must NAME the Knative bound, so an operator can fix it
+			// from the message without reading the ADR.
+			name: "scaleDownDelay above the 1h Knative bound rejected, naming the bound (#762)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{ScaleDownDelay: "2h"},
+			},
+			wantErr: true,
+			errHas:  "1h",
+		},
+		{
+			name: "scaleDownDelay negative rejected, naming the 0s bound (#762)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{ScaleDownDelay: "-1s"},
+			},
+			wantErr: true,
+			errHas:  "0s",
+		},
+		{
+			name: "scaleDownDelay unset accepted (#762 back-compat)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{MaxScale: 10},
+			},
+			wantErr: false,
+		},
+		{
 			name: "unknown storage provider rejected",
 			spec: &appsv1alpha1.NextAppSpec{
 				Image:   digestImage,

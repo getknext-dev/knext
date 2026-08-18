@@ -342,6 +342,43 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 				HaveKeyWithValue("autoscaling.knative.dev/panic-threshold-percentage", "150"))
 		})
 
+		It("stamps autoscaling.knative.dev/scale-down-delay when spec.scaling.scaleDownDelay is set (#762, ADR-0045)", func() {
+			// The delay keeps the last pod ROUTABLE for the window after
+			// traffic stops: inside it a request is a warm hit (~52 ms) and no
+			// scale-down transition exists to stall in (the 5–7 s worst case).
+			nn := reconcileOnce("ksvc-sdd-set", appsv1alpha1.NextAppSpec{
+				Image: validImage,
+				Scaling: &appsv1alpha1.ScalingSpec{
+					MinScale:             0,
+					MaxScale:             7,
+					ContainerConcurrency: 20,
+					ScaleDownDelay:       "5m",
+				},
+			})
+
+			ksvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+
+			annotations := ksvc.Spec.Template.Annotations
+			Expect(annotations).To(HaveKeyWithValue("autoscaling.knative.dev/scale-down-delay", "5m"))
+			By("coexisting with the existing min/max-scale annotations")
+			Expect(annotations).To(HaveKeyWithValue("autoscaling.knative.dev/min-scale", "0"))
+			Expect(annotations).To(HaveKeyWithValue("autoscaling.knative.dev/max-scale", "7"))
+		})
+
+		It("does NOT stamp scale-down-delay when spec.scaling.scaleDownDelay is unset (#762 back-compat)", func() {
+			nn := reconcileOnce("ksvc-sdd-unset", appsv1alpha1.NextAppSpec{
+				Image:   validImage,
+				Scaling: &appsv1alpha1.ScalingSpec{MinScale: 0, MaxScale: 10},
+			})
+
+			ksvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+
+			Expect(ksvc.Spec.Template.Annotations).NotTo(HaveKey("autoscaling.knative.dev/scale-down-delay"),
+				"no scale-down-delay annotation when the field is unset — the Knative cluster default applies unmanaged (back-compat)")
+		})
+
 		It("stamps the build-id label onto the revision (pod) template when Spec.BuildID is set (#93)", func() {
 			nn := reconcileOnce("ksvc-buildid", appsv1alpha1.NextAppSpec{
 				Image:   validImage,

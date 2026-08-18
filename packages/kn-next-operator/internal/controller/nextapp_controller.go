@@ -815,6 +815,23 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 		annotations["autoscaling.knative.dev/panic-threshold-percentage"] = fmt.Sprintf("%d", *nextApp.Spec.Scaling.PanicThresholdPercentage)
 	}
 
+	// ScaleDownDelay (#762, ADR-0045): how long the last pod stays ROUTABLE
+	// after traffic stops, so a request arriving shortly afterwards is a warm
+	// hit instead of either a cold start or — the worst observed mode — a
+	// stall in the scale-down transition. Only stamped when EXPLICITLY set —
+	// "" leaves the annotation absent so the Knative cluster default applies
+	// unmanaged, exactly as before this field existed (byte-identical
+	// back-compat). The value is passed through VERBATIM: it was parsed and
+	// range-checked once in validation.ValidateNextAppSpec (ADR-0040), and
+	// re-parsing CR input here is exactly the MustParse-at-the-use-site
+	// pattern #435/#455 removed. Written into the SAME annotations map as
+	// min-scale/max-scale/targetBurstCapacity/the panic pair, and untouched by
+	// the preview-env override below (that override rewrites only
+	// max-scale/min-scale/retention-period, so a stamped delay survives it).
+	if nextApp.Spec.Scaling != nil && nextApp.Spec.Scaling.ScaleDownDelay != "" {
+		annotations["autoscaling.knative.dev/scale-down-delay"] = nextApp.Spec.Scaling.ScaleDownDelay
+	}
+
 	// Observability annotations — aligned with CLI
 	if nextApp.Spec.Observability != nil && nextApp.Spec.Observability.Enabled {
 		annotations["prometheus.io/scrape"] = "true"

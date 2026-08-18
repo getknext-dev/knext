@@ -373,6 +373,62 @@ spec:
                       ADR-0028).
                     format: int32
                     type: integer
+                  scaleDownDelay:
+                    description: |-
+                      ScaleDownDelay tunes the Knative
+                      `autoscaling.knative.dev/scale-down-delay` annotation (#762, ADR-0045):
+                      how long the last pod stays ROUTABLE after traffic stops. The other
+                      scaling knobs address a spike that has already arrived —
+                      TargetBurstCapacity buffers it, the panic pair reacts faster to it,
+                      warmSchedule pre-warms KNOWN windows — but none of them help the
+                      request that arrives shortly after the previous one, while the app is
+                      scaling down. Measured on the file-manager spike (ADR-0045): a request
+                      landing on a still-routable pod is ~52 ms, a true cold start is
+                      2.1–2.7 s, and a request landing DURING the scale-down transition
+                      stalls 5.3–7.5 s in the routing layer — the worst user-visible mode
+                      observed. Inside the delay window there is no transition to stall in;
+                      after it, scale-to-zero proceeds exactly as before.
+
+                      Representation: a Go duration string with metav1.Duration semantics
+                      (e.g. "0s", "30s", "5m", "1h") — the same grammar the annotation itself
+                      takes, passed through verbatim. Checked ONCE, at admission and
+                      reconcile, through the shared validation.ValidateNextAppSpec branch
+                      (ADR-0040); never parsed at the stamping site.
+
+                      The accepted set is not restated here, because a restatement is a
+                      second source of truth that drifts: validation DELEGATES to
+                      knative.dev/serving's own annotation validator, so whatever the
+                      vendored Knative accepts for this annotation is exactly what knext
+                      accepts. Today that means a non-negative duration, no longer than
+                      Knative's window maximum, expressed with at most SECOND precision —
+                      "42.5s" is a valid Go duration and is NOT a valid value here.
+
+                      Unset ("") => the annotation is NOT stamped and the Knative cluster
+                      default applies unmanaged, exactly as before this field existed
+                      (byte-identical back-compat). There is no product default: `kn-next
+                      create` scaffolds a value into the user's own config instead
+                      (ADR-0045, ADR-0041 precedent), so no stored NextApp changes behaviour
+                      on upgrade.
+
+                      Connection-wall interlock (ADR-0028/ADR-0029): holding the last pod
+                      routable also holds ITS DB pool connections open past the point they
+                      would have been released at scale-to-zero. This does not raise the PEAK
+                      `maxScale × poolMax` fan-out the connection wall caps — that invariant
+                      is enforced at admission independently of this field — but it does
+                      raise IDLE connection occupancy against the shared budget, exactly as
+                      TargetBurstCapacity's godoc states for its own effect. The idle cost is
+                      real and belongs to the user who opted in: one pod, plus its
+                      connections, for the window after every burst.
+
+                      Cluster-feature caveat: validation runs against the Knative version
+                      this operator was BUILT with, while the annotation is honoured by the
+                      Knative INSTALLED on the cluster, and those are not the same thing. An
+                      older or differently-configured cluster can still clamp or ignore a
+                      value admission accepted. The webhook validates the value, the cluster
+                      decides the behaviour — `kn-next doctor` reports the installed Knative
+                      version, and the ~52 ms warm-hit promise holds only on a cluster that
+                      honours the annotation.
+                    type: string
                   targetBurstCapacity:
                     description: |-
                       TargetBurstCapacity tunes the Knative
