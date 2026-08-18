@@ -105,7 +105,11 @@ Knative-version work, both platform decisions, not code.
 
 ## Addendum 3 — multi-path warm + the override root cause (2026-08-19)
 
-**True cold start is now 1.88 s** — the first sub-2 s from a confirmed zero. `KNEXT_WARM_PATH`
+**True cold start with multi-warm: median 2.28 s (n=5, all confirmed-zero) — CORRECTED from an
+n=1 first read of 1.88 s.** Samples: 2660 2280 1740 2490 2020 — min **1.74 s**, no slow-mode sample
+in five. Versus single-warm's fast-mode median (2355 ms) the median gain is marginal (~75 ms, within
+noise); what multi-warm demonstrably buys is the DB pool established pre-traffic and the fastest
+observed true cold yet. `KNEXT_WARM_PATH`
 accepts a comma-separated list warmed **sequentially**; deployed as `/,/api/health/deep`, so startup
 now pre-renders the page, pre-fills the page cache, AND establishes the DB pool
 (`WARMED:/ ms=714` → `WARMED:/api/health/deep ms=92` on OKE). Harness sample with confirmed
@@ -127,7 +131,7 @@ content and is kept; the `<8` cap predates vite 8. The owning guard
 | day start (lazy entry, PG cold, no delay) | 5550 ms |
 | warm entry + PG warm | 2350 ms |
 | + warm=`/` | ~2140 ms |
-| + multi-warm `/,/api/health/deep` | **1880 ms (true zero)** |
+| + multi-warm `/,/api/health/deep` | **2280 ms median, 1740 ms min (n=5, confirmed zero)** |
 | within the 5 min `scale-down-delay` window | **~52 ms** |
 
 Remaining floor from true zero: ~1.6–1.9 s of Knative wake/schedule/start on saturated 2-vCPU nodes
