@@ -24,6 +24,7 @@ package validation
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/robfig/cron/v3"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -148,6 +149,8 @@ func ValidateImageRef(image string) error {
 //   - TargetBurstCapacity, when set, is -1 or >= 0 (ADR-0032, #411).
 //   - PanicWindowPercentage, when set, is in [1,100]; PanicThresholdPercentage,
 //     when set, is >= 110 (ADR-0033, #413).
+//   - ScaleDownDelay, when set, parses as a duration and is in [0s,1h] — the
+//     range Knative accepts for the annotation (ADR-0045, #762).
 //   - Storage.Provider / Cache.Provider / Revalidation.Queue, when set, are
 //     recognized enum values.
 //
@@ -244,6 +247,30 @@ func ValidateNextAppSpec(spec *appsv1alpha1.NextAppSpec) error {
 				"spec.scaling.panicThresholdPercentage must be >= 110 (a percentage of the steady-state target; Knative requires > 100), got %d",
 				*s.PanicThresholdPercentage,
 			)
+		}
+
+		// scaleDownDelay (#762, ADR-0045): how long the last pod stays
+		// routable after traffic stops. This is the ONLY place the value is
+		// parsed — the stamping site passes the validated string through
+		// verbatim, so a malformed value can never reach a parse that has no
+		// way to reject it. Unset ("") skips the check entirely — no
+		// annotation is stamped (back-compat, see buildDesiredKsvc). The
+		// bounds are the INSTALLED Knative's documented range, named in the
+		// error so it can be fixed from `kubectl describe` alone.
+		if s.ScaleDownDelay != "" {
+			d, err := time.ParseDuration(s.ScaleDownDelay)
+			if err != nil {
+				return fmt.Errorf(
+					"spec.scaling.scaleDownDelay %q is not a valid duration string (use a Go duration such as 0s, 30s, 5m or 1h): %w",
+					s.ScaleDownDelay, err,
+				)
+			}
+			if d < 0 || d > time.Hour {
+				return fmt.Errorf(
+					"spec.scaling.scaleDownDelay (%s) must be between 0s and 1h — the range Knative accepts for autoscaling.knative.dev/scale-down-delay (ADR-0045)",
+					s.ScaleDownDelay,
+				)
+			}
 		}
 
 		// Scheduled warm-floor windows (ADR-0030, W5/#380). Each window declares a

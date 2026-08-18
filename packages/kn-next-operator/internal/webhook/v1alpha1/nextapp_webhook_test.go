@@ -74,6 +74,49 @@ func TestValidateCreate(t *testing.T) {
 	}
 }
 
+// TestAdmissionRejectsBadScaleDownDelay is the WEBHOOK half of the ADR-0040
+// shared-branch claim for spec.scaling.scaleDownDelay (#762, ADR-0045): the
+// reconcile half lives in
+// internal/controller/scale_down_delay_test.go. Both legs go through the SAME
+// validation.ValidateNextAppSpec branch — there is deliberately no second
+// validation site to keep in step.
+func TestAdmissionRejectsBadScaleDownDelay(t *testing.T) {
+	v := &NextAppCustomValidator{}
+	ctx := context.Background()
+
+	tests := []struct {
+		name    string
+		delay   string
+		wantErr bool
+		errHas  string
+	}{
+		{name: "0s accepted (#762)", delay: "0s"},
+		{name: "30s accepted (#762)", delay: "30s"},
+		{name: "5m accepted (#762)", delay: "5m"},
+		{name: "1h accepted (#762)", delay: "1h"},
+		{name: "unset accepted (#762 back-compat)", delay: ""},
+		{name: "non-duration garbage rejected (#762)", delay: "5 minutes", wantErr: true, errHas: "scaleDownDelay"},
+		{name: "above the Knative 1h bound rejected (#762)", delay: "2h", wantErr: true, errHas: "1h"},
+		{name: "negative rejected (#762)", delay: "-1s", wantErr: true, errHas: "0s"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			obj := newNextApp(appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{ScaleDownDelay: tc.delay},
+			})
+			_, err := v.ValidateCreate(ctx, obj)
+			if tc.wantErr != (err != nil) {
+				t.Fatalf("ValidateCreate(scaleDownDelay=%q) err=%v, wantErr=%v", tc.delay, err, tc.wantErr)
+			}
+			if tc.errHas != "" && !strings.Contains(err.Error(), tc.errHas) {
+				t.Fatalf("ValidateCreate(scaleDownDelay=%q) err=%v, want it to name %q", tc.delay, err, tc.errHas)
+			}
+		})
+	}
+}
+
 func TestValidateUpdate(t *testing.T) {
 	v := &NextAppCustomValidator{}
 	ctx := context.Background()

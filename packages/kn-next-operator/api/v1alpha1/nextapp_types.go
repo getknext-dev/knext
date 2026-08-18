@@ -403,6 +403,54 @@ type ScalingSpec struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=110
 	PanicThresholdPercentage *int32 `json:"panicThresholdPercentage,omitempty"`
+
+	// ScaleDownDelay tunes the Knative
+	// `autoscaling.knative.dev/scale-down-delay` annotation (#762, ADR-0045):
+	// how long the last pod stays ROUTABLE after traffic stops. The other
+	// scaling knobs address a spike that has already arrived —
+	// TargetBurstCapacity buffers it, the panic pair reacts faster to it,
+	// warmSchedule pre-warms KNOWN windows — but none of them help the
+	// request that arrives shortly after the previous one, while the app is
+	// scaling down. Measured on the file-manager spike (ADR-0045): a request
+	// landing on a still-routable pod is ~52 ms, a true cold start is
+	// 2.1–2.7 s, and a request landing DURING the scale-down transition
+	// stalls 5.3–7.5 s in the routing layer — the worst user-visible mode
+	// observed. Inside the delay window there is no transition to stall in;
+	// after it, scale-to-zero proceeds exactly as before.
+	//
+	// Representation: a Go duration string with metav1.Duration semantics
+	// (e.g. "0s", "30s", "5m", "1h") — the same grammar the annotation itself
+	// takes, passed through verbatim. Parsed and range-checked ONCE, at
+	// admission and reconcile, through the shared
+	// validation.ValidateNextAppSpec branch (ADR-0040); never parsed at the
+	// stamping site.
+	//
+	// Unset ("") => the annotation is NOT stamped and the Knative cluster
+	// default applies unmanaged, exactly as before this field existed
+	// (byte-identical back-compat). There is no product default: `kn-next
+	// create` scaffolds a value into the user's own config instead
+	// (ADR-0045, ADR-0041 precedent), so no stored NextApp changes behaviour
+	// on upgrade.
+	//
+	// Connection-wall interlock (ADR-0028/ADR-0029): holding the last pod
+	// routable also holds ITS DB pool connections open past the point they
+	// would have been released at scale-to-zero. This does not raise the PEAK
+	// `maxScale × poolMax` fan-out the connection wall caps — that invariant
+	// is enforced at admission independently of this field — but it does
+	// raise IDLE connection occupancy against the shared budget, exactly as
+	// TargetBurstCapacity's godoc states for its own effect. The idle cost is
+	// real and belongs to the user who opted in: one pod, plus its
+	// connections, for the window after every burst.
+	//
+	// Cluster-feature caveat: the accepted range is the INSTALLED Knative's,
+	// not this operator's. The webhook validates the value against the
+	// documented 0s–1h range; an older or differently-configured cluster can
+	// still clamp or ignore it. The webhook validates the range, the cluster
+	// decides the behaviour — `kn-next doctor` reports the installed Knative
+	// version, and the ~52 ms warm-hit promise holds only on a cluster that
+	// honours the annotation.
+	// +optional
+	ScaleDownDelay string `json:"scaleDownDelay,omitempty"`
 }
 
 // WarmWindow is one scheduled warm-floor window (ADR-0030, W5/#380). Start/End
