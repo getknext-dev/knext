@@ -79,3 +79,26 @@ fast end of the confirmatory fast mode (2080–3100); the third is the platform-
 which this change was never going to touch. n=2 clean samples is not a claim — recorded as *likely
 helpful, kept deployed* (it is also strictly more representative: the warm now exercises the same
 path a user hits first). Cross-sitting pooling deliberately not done (D5).
+
+## Addendum 2 — the platform-side iteration (2026-08-19)
+
+**CPU request: falsified as a lever ON THIS CLUSTER, and the finding is bigger than the lever.** The
+container had `resources: {}`; granting it a real request was the obvious fix for the CPU-bound
+430 ms evaluation. It cannot schedule: the two nodes are at **98% and 83% of allocatable CPU
+requested** (limits 432%/388%) with only 1830m allocatable each — a 1-CPU request left the revision
+unschedulable/starved and was reverted. Consequence: the ~430 ms evaluation and part of the
+~700 ms start→LISTEN are **contention on undersized shared test nodes**, not app properties — the
+same evaluation takes ~110 ms on a laptop core. On production-sized nodes this term shrinks toward
+that. The cluster, not the runtime, is the current floor.
+
+**`autoscaling.knative.dev/scale-down-delay: 5m` — applied and PROVED.** Pods stay routable 5 min
+after last traffic: measured 3.5 min idle → pod still up → **646 ms** response (vs 2.1–2.7 s cold).
+This (a) gives every request within 5 min of the previous one a warm hit with **no cold start at
+all**, and (b) removes the scale-down transition window — the attributed slow mode — for that entire
+traffic class, while still reaching zero afterwards. This is the right default posture for the
+product's bursty target users, and it is a one-annotation change.
+
+**Where sub-second stands.** For traffic within the delay window: **achieved (~0.6 s)**. From a true
+zero on THIS cluster: not reachable — the remaining budget is ~2 s of Knative wake/schedule/start on
+oversubscribed 2-vCPU nodes plus contention-inflated boot. The next real levers are node sizing and
+Knative-version work, both platform decisions, not code.
