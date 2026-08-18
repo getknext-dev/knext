@@ -1,0 +1,37 @@
+# TEST-CLUSTER ONLY: holds one connection through pggw so compute-filemanager
+# never idles past GW_IDLE_MS (60s) — excludes PG wake from cold-start
+# measurement without changing the gateway's own scale-to-zero behavior.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pg-keepwarm-filemanager
+  namespace: default
+  labels:
+    dev.knext.purpose: coldstart-measurement-keepwarm
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: pg-keepwarm-filemanager }
+  template:
+    metadata:
+      labels: { app: pg-keepwarm-filemanager }
+    spec:
+      containers:
+        - name: pinger
+          image: postgres:17-alpine
+          command: ["sh","-c"]
+          args:
+            - |
+              while true; do
+                psql "$DATABASE_URL" -c 'select 1' >/dev/null 2>&1 && echo "ping ok $(date)" || echo "ping FAIL $(date)"
+                sleep 25
+              done
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: filemanager-scalezeropg
+                  key: DATABASE_URL
+          resources:
+            requests: { cpu: 5m, memory: 16Mi }
+            limits: { memory: 64Mi }

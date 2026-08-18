@@ -45,3 +45,9 @@ runner.js
 cache-handler.js
 manifests/
 .output
+
+# vinext-spike compiled single executables (~90-125 MB, arch-specific)
+fm-*
+# vinext build caches
+.vinext/
+.output/

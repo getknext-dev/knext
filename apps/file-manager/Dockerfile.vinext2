@@ -1,0 +1,12 @@
+FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+RUN apk add --no-cache libstdc++ libgcc
+WORKDIR /app
+COPY fm-linux-arm64 /app/server
+COPY .output/public /app/.output/public
+# The externalised CJS deps nitro left behind. If the binary needs these, it is
+# NOT self-contained and ADR-0042 A1 does not hold for a real app.
+COPY .output/server/node_modules /app/.output/server/node_modules
+USER 65532:65532
+ENV PORT=3000
+EXPOSE 3000
+CMD ["/app/server"]
