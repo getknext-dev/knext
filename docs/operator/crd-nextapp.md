@@ -47,6 +47,7 @@ spec:
     targetBurstCapacity: -1   # Optional burst buffer (ADR-0032, #411); -1 = always keep the activator in path
     panicWindowPercentage: 10    # Optional KPA panic-window tuning (ADR-0033, #413); 1-100
     panicThresholdPercentage: 200 # Optional KPA panic-threshold tuning (ADR-0033, #413); >= 110
+    scaleDownDelay: "5m"      # Optional: keep the last pod routable this long after traffic stops (ADR-0045, #762); second precision
 ```
 
 > The `containerConcurrency` default was lowered from `100` to `20` in ADR-0028
@@ -102,6 +103,31 @@ spec:
 > **KPA-class caveat:** ignored under the HPA autoscaler class; knext defaults every ksvc to KPA.
 > See [`scaling-cold-start.md`](./scaling-cold-start.md#kpa-panic-window--panic-threshold-specscalingpanicwindowpercentage--panicthresholdpercentage-adr-0033--413)
 > and [ADR-0033](../adr/0033-panic-window-threshold.md).
+
+> `scaleDownDelay` (ADR-0045, #762) keeps the **last pod routable** for a window after traffic
+> stops, so a request arriving shortly after the previous one is a **warm hit** rather than either a
+> cold start or — the worst mode measured — a stall in the scale-down transition itself. Measured on
+> the file-manager spike: ~52 ms inside the window, 2.1–2.7 s for a true cold start, and 5.3–7.5 s
+> for a request that lands mid-transition. After the window, scale-to-zero proceeds exactly as
+> before; this is a *delay*, not a floor — unlike `minScale` or `warmSchedule`, it never keeps a pod
+> alive on a schedule.
+> **Unset (default) = the annotation is not stamped** and the Knative cluster default applies
+> unmanaged (byte-identical back-compat), so upgrading the operator changes nothing about an
+> existing `NextApp`. There is deliberately **no product default**: `kn-next create` scaffolds
+> `scaleDownDelay: '5m'` into your own generated config (ADR-0045), where it is visible and removed
+> by deleting a line.
+> **Idle cost:** the held pod is a real pod. It also holds **its DB pool connections** open past the
+> point scale-to-zero would have released them — this does not raise the peak `maxScale × poolMax ≤ 80`
+> fan-out (ADR-0028/ADR-0029), but it does raise **idle** connection occupancy against the same
+> budget. On saturated nodes that capacity matters, which is why the choice is yours and not the
+> operator's.
+> **Format:** a Go duration string with **at most second precision** — `0s`, `30s`, `5m`, `1h` are
+> valid; `42.5s` is a valid Go duration but is **rejected**, because Knative itself rejects it.
+> Validation delegates to Knative's own annotation validator rather than restating its rules, so
+> what knext accepts is what the Knative it was built against accepts. The **installed** cluster is
+> a separate question: an older Knative may clamp or ignore a value admission accepted — `kn-next
+> doctor` reports the installed Knative version.
+> See [ADR-0045](../adr/0045-scale-down-delay.md).
 
 ### `storage` (Optional)
 Binds the Next.js Server Actions (e.g., `<input type="file" />`) to a cloud storage provider.
