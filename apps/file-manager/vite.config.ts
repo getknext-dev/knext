@@ -27,5 +27,27 @@ export default defineConfig({
   // under vite the bare `@import "tailwindcss"` reaches postcss-import first,
   // which tries to resolve it as a FILE and dies with ENOENT. Adaptation #1 that
   // a real migration would have to make.
-  plugins: [tailwindcss(), vinext(), nitro({ preset: 'bun', entry: './knext-bun-entry.mjs' })],
+  plugins: [
+    tailwindcss(),
+    vinext(),
+    nitro({
+      preset: 'bun',
+      entry: './knext-bun-entry.mjs',
+    }),
+  ],
+
+  // COLD-START: inline the server deps into the bundle instead of externalising
+  // them to .output/server/node_modules. Externalised CJS is interpreted from
+  // disk on every cold start, OUTSIDE the bytecode `bun --compile` bakes —
+  // measured ~430 ms of app-graph evaluation on OKE's contended vCPUs. In
+  // nitro-on-vite mode the externalisation decision is VITE's SSR resolver, not
+  // nitro's rollup externals (a nitro `externals.inline` here was a no-op,
+  // measured: 38 packages before and after). All 38 externalised packages are
+  // pure JS (pg without pg-native, ioredis, the pino tree), so `noExternal:
+  // true` is safe for THIS app; an app with native deps must list packages
+  // explicitly instead.
+  environments: {
+    rsc: { resolve: { noExternal: true } },
+    ssr: { resolve: { noExternal: true } },
+  },
 });

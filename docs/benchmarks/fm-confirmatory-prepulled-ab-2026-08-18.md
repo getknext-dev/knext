@@ -136,3 +136,26 @@ content and is kept; the `<8` cap predates vite 8. The owning guard
 
 Remaining floor from true zero: ~1.6–1.9 s of Knative wake/schedule/start on saturated 2-vCPU nodes
 (98%/83% of allocatable already requested) — node sizing and Knative-layer work, not code.
+
+## Addendum 4 — full inlining: the self-containment reversal (2026-08-19)
+
+`environments: { rsc: { resolve: { noExternal: true } }, ssr: { … } }` in the vite config inlines
+all 38 previously-externalised server packages into the bundle: **`.output/server/node_modules` is
+now empty and the image is genuinely binary + `.output/public` only.** (Two prior attempts were
+measured no-ops and are recorded as such: nitro's `externals.inline` and top-level `ssr.noExternal`
+— in nitro-on-vite mode the decision belongs to the *environments'* resolvers.)
+
+**What it did NOT do:** speed up evaluation measurably. Cluster `WARMED:/` 557 ms vs 544–714 ms
+pre-inline; five confirmed-zero cold samples median **~2.23 s** vs multi-warm's 2.28 s — noise. The
+warm cost is render + Redis work, not module interpretation. Recorded as the third falsified
+speed-up hypothesis of this arc.
+
+**What it DID do, and why it ships anyway:**
+1. **Reverses this spike's own "A1 does not generalise" finding.** The real app IS now
+   self-contained on the vinext target — the earlier caveat ("27 externalised CJS packages must
+   ship beside the binary") is closed by configuration, not by hope.
+2. **Deletes the missing-external failure class.** vinext beta.6's dropped-pino-tree regression
+   500'd every route because a runtime `require` missed; with nothing externalised there is no
+   runtime module resolution to miss.
+3. The bundle went 265 → 125 modules and the sampling sitting's 14.9 s first-pull sample is a
+   reminder the prepull pins track digests: they pin what they are told, not what is deployed.

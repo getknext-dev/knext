@@ -3,7 +3,6 @@ RUN apk add --no-cache libstdc++ libgcc
 WORKDIR /app
 COPY fm-knext-x64 /app/server
 COPY .output/public /app/.output/public
-COPY .output/server/node_modules /app/.output/server/node_modules
 USER 65532:65532
 ENV PORT=3000 METRICS_PORT=9091
 EXPOSE 3000 9091
