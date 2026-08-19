@@ -66,17 +66,29 @@ kubectl -n scale-zero-pg exec deploy/appdb-operator -- \
 
 ## 2. Negative half — a failed hold degrades, never gates serving
 
-Make the hold fail **without breaking serving** — point the operator at an
-unreachable `APPDB_GATEWAY_HOST` (scratch namespace, or a temporary env edit on the
-operator Deployment). Do NOT scale the apps gateway to 0 for this half: `psql`
-reaches the app *through* that gateway, so killing it fails the hold and serving
-together and the degrade-not-fail assertion below becomes unfalsifiable. Assert:
+Make the hold fail **without breaking serving**. Two constraints shape the method:
+
+- Do NOT scale the apps gateway to 0: `psql` reaches the app *through* that gateway,
+  so killing it fails the hold and serving together and the degrade-not-fail
+  assertion below becomes unfalsifiable.
+- Do NOT reach for `APPDB_GATEWAY_HOST` on the operator for an **existing** app: the
+  hold dials the DSN stored in the app's Secret (`app-db-<app>` `DATABASE_URL`),
+  which is minted **once** — the env var only shapes DSNs for newly minted apps, so
+  an env edit is inert here and reads as "the degradation path is broken" when it is
+  the method that is broken.
+
+The method that works: **patch the drill app's own `DATABASE_URL` to an unreachable
+host** (rewrite the host portion only; the operator never rewrites that key), then
+**restart the operator** — a live hold is healthy TCP and is not redialled, but an
+operator restart drops all holds (crash-only) and the redial uses the patched DSN.
+Serving stays independently assertable with the Secret's separate `PGUSER`/`PGPASSWORD`
+keys against the real gateway host. Assert:
 
 - `WarmHold` goes `False/HoldFailed` and a `WarmHoldFailed` Warning event is emitted;
 - `Ready` stays `True` with reason `WarmHoldDegraded` — warmth is lost, serving is not;
 - a fresh `psql` still works via the ordinary cold wake.
 
-Restore the gateway; within one resync tick the hold re-establishes
+Restore the Secret's `DATABASE_URL`; within one resync tick the hold re-establishes
 (`WarmHold` back to `True/TierWarm`, gauge back to `1`) — crash-only, self-healing.
 
 ## 3. Release half — withdrawing warmth releases the hold (the #786-round leak)
