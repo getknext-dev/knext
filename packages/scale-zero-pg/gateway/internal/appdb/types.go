@@ -62,9 +62,14 @@ const (
 	// It NEVER gates serving readiness: a hold failure degrades warming to the
 	// ordinary cold-wake path (the Ready condition then carries reason
 	// WarmHoldDegraded, so a warm tier that is not actually warm never reads as
-	// warm-and-healthy). Emitted only when the CR asks for warmth
-	// (warmHoldRequested), so a cold, schedule-less CR reconciles byte-identically
-	// to before.
+	// warm-and-healthy).
+	//
+	// It is ABSENT while the CR has never asked for warmth (a cold, schedule-less
+	// CR reconciles byte-identically to before), and it is RETRACTED to
+	// False/WarmthNotRequested when warmth is WITHDRAWN by a spec edit (tier:
+	// warm -> cold, or the last warmSchedule window deleted) — the same pass that
+	// releases the hold. So this condition being True is always a true statement
+	// about right now: it never outlives the spec that asked for it.
 	CondWarmHold = "WarmHold"
 )
 

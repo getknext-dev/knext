@@ -153,39 +153,6 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 		return true, fmt.Errorf("teardown ro compute: %w", err)
 	}
 
-	// 4c. DB warm lockstep (knext #388, ADR-0030 addendum; tier:warm added #777).
-	//    Two ways in, ONE actuator: a permanent hold for spec.tier: warm, and a
-	//    windowed hold while any spec.warmSchedule window is active. While any
-	//    spec.warmSchedule window is active, hold ONE authenticated connection
-	//    through the apps-gateway so this app's compute stays at 1 for the whole
-	//    window — the gateway's idle scale-to-zero only arms with ZERO connections,
-	//    so the hold is the warm tier (a replica-pinning CronJob would still be
-	//    parked by the gateway 60s after the last query: two writers, the defect
-	//    ADR-0030 §Context records). The owner declares the SAME windows on the
-	//    knext NextApp (pod floor) — both sides evaluate identical cron semantics
-	//    against cluster clocks, so pod floor and DB hold flip together. This side
-	//    flips within one resync tick of a boundary (APPDB_RESYNC_MS, default 15s)
-	//    — no per-CR RequeueAfter machinery exists in this lean loop, and the tick
-	//    IS the boundary requeue. Outside every window the hold is released and
-	//    the gateway parks the compute on its ordinary idle window. Warming is
-	//    BEST-EFFORT: a hold failure degrades to the normal cold-wake path and
-	//    surfaces loudly (Warning event + WarmHold condition), it NEVER fails
-	//    provisioning. CRs that ask for no warmth at all (cold tier, no
-	//    schedule) skip this entirely — byte-identical back-compat.
-	//
-	//    Holds==nil is an install without the actuator wired. It cannot honour
-	//    the request, so it SAYS so on the condition (#777 honest status) rather
-	//    than leaving a warm-tier CR with no WarmHold condition at all, which
-	//    reads as "warm and fine".
-	if cr.warmHoldRequested() {
-		if d.Holds == nil {
-			d.setCondition(cr, CondWarmHold, "False", "HoldsUnavailable",
-				"warmth was requested but this operator has no warm-hold actuator wired; the compute is not held warm (it still wakes on connect)")
-		} else {
-			d.reconcileWarmHold(ctx, cr, app)
-		}
-	}
-
 	// 5. Ensure the branch exists on the pageserver (durable). Idempotent on tl.
 	exists, err := d.Pageserver.TimelineExists(ctx, d.Tenant, tl)
 	if err != nil {
@@ -220,6 +187,72 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 	if cr.Status.AncestorLSN == "" {
 		if anc, aerr := d.Pageserver.TimelineAncestorLSN(ctx, d.Tenant, tl); aerr == nil && anc != "" {
 			cr.Status.AncestorLSN = anc
+		}
+	}
+
+	// 5c. DB warm lockstep (knext #388, ADR-0030 addendum; tier:warm added #777).
+	//    Two ways in, ONE actuator: a permanent hold for spec.tier: warm, and a
+	//    windowed hold while any spec.warmSchedule window is active. Either way we
+	//    hold ONE authenticated connection through the apps-gateway so this app's
+	//    compute stays at 1 — the gateway's idle scale-to-zero only arms with ZERO
+	//    connections, so the hold is the warm tier (a replica-pinning CronJob would
+	//    still be parked by the gateway 60s after the last query: two writers, the
+	//    defect ADR-0030 §Context records). For the windowed form the owner declares
+	//    the SAME windows on the knext NextApp (pod floor) — both sides evaluate
+	//    identical cron semantics against cluster clocks, so pod floor and DB hold
+	//    flip together. This side flips within one resync tick of a boundary
+	//    (APPDB_RESYNC_MS, default 15s) — no per-CR RequeueAfter machinery exists in
+	//    this lean loop, and the tick IS the boundary requeue. Outside every window
+	//    the hold is released and the gateway parks the compute on its ordinary idle
+	//    window. Warming is BEST-EFFORT: a hold failure degrades to the normal
+	//    cold-wake path and surfaces loudly (Warning event + WarmHold condition), it
+	//    NEVER fails provisioning.
+	//
+	//    ORDERING (review of #786): this runs AFTER the branch (step 5), not before.
+	//    EnsureHold DIALS the app through the gateway, which wakes the compute
+	//    against status.timelineId; on a first-ever warm create that timeline does
+	//    not exist on the pageserver until step 5 runs, so dialling earlier
+	//    guaranteed a first-pass HoldFailed + a WarmHoldFailed Warning + a burnt
+	//    wake-budget token, self-healing only on the next resync. Step 4's own
+	//    invariant is untouched: the compute is still APPLIED at 0 before the
+	//    branch (a Deployment at 0 starts nothing) — only the dial moved.
+	//
+	//    Holds==nil is an install without the actuator wired. It cannot honour
+	//    the request, so it SAYS so on the condition (#777 honest status) rather
+	//    than leaving a warm-tier CR with no WarmHold condition at all, which
+	//    reads as "warm and fine".
+	if cr.warmHoldRequested() {
+		if d.Holds == nil {
+			d.setCondition(cr, CondWarmHold, "False", "HoldsUnavailable",
+				"warmth was requested but this operator has no warm-hold actuator wired; the compute is not held warm (it still wakes on connect)")
+		} else {
+			d.reconcileWarmHold(ctx, cr, app)
+		}
+	} else {
+		// WITHDRAWAL (review of #786). Warmth is not requested — either it never
+		// was, or the owner just edited it away (tier: warm -> cold, or the last
+		// warmSchedule window deleted). Both edits are documented as "reconciled
+		// idempotently", so both MUST undo the mechanism: without this branch a
+		// permanent hold outlived its spec until the operator process restarted,
+		// the compute could never idle to zero again, and the leaked hold kept
+		// counting in appdb_warm_hold_active — blinding the very alert
+		// (ComputePhantomKeepalive) that would have caught it.
+		//
+		// ReleaseHold is unconditional and idempotent (a no-op map delete when
+		// unheld), deliberately NOT gated on the CR's own status: a hold that was
+		// established in a pass whose status write failed would otherwise be
+		// unreleasable. It is invisible on the CR — an ordinary cold CR grows no
+		// condition and fires no event here, which is the back-compat the old
+		// "skip this entirely" gate was protecting.
+		if d.Holds != nil {
+			d.Holds.ReleaseHold(app)
+		}
+		// Retract a condition left over from when warmth WAS requested. Set to
+		// False rather than deleted so the retraction is observable (and carries
+		// a lastTransitionTime); never written onto a CR that never asked.
+		if findCondition(cr, CondWarmHold) != nil {
+			d.setCondition(cr, CondWarmHold, "False", "WarmthNotRequested",
+				"neither spec.tier: warm nor spec.warmSchedule is set; any warm hold has been released and the compute sleeps at zero and wakes on connect")
 		}
 	}
 
@@ -293,11 +326,13 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 	//
 	// Deliberately REMOVED here (#777): the old "warm compute starting" branch,
 	// which set Phase=Provisioning and requeued while no replica was available.
-	// That state could never resolve — the operator writes no replicas
-	// (desiredReplicas is 0) and the gateway parks the compute on idle — so a
-	// warm-tier CR reported Provisioning forever after its first idle window
-	// while serving perfectly well. status.computeReady still reports the live
-	// replica as a diagnostic.
+	// It resolved exactly ONCE — on first-ever create, where ApplyCompute writes
+	// the rendered replica count (it only PRESERVES live replicas on update,
+	// k8s.go) — and became unresolvable after the first gateway park: the
+	// operator writes no replicas of its own (desiredReplicas is 0) and nothing
+	// restored the parked one, so from then on a warm-tier CR reported
+	// Provisioning forever while serving perfectly well. status.computeReady
+	// still reports the live replica as a diagnostic.
 	requeue := false
 	cr.Status.Phase = PhaseReady
 	switch {

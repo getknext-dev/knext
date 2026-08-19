@@ -256,19 +256,27 @@ func TestWarmHold_ReleasedOnDelete(t *testing.T) {
 }
 
 func TestWarmHold_NoScheduleMeansNoHoldAndNoCondition(t *testing.T) {
-	// Back-compat (the ADR-0030 byte-identical promise, mirrored on the DB side):
-	// a CR that omits warmSchedule must reconcile exactly as before — no Holds
-	// calls, no WarmHold condition in status.
+	// Back-compat (the ADR-0030 promise, mirrored on the DB side): a CR that omits
+	// warmSchedule must never DIAL a hold and must grow no WarmHold condition. The
+	// withdrawal branch calls the idempotent ReleaseHold on every non-warm pass
+	// (that is what makes "delete the schedule" actually undo the hold) — a
+	// no-op map delete that must stay invisible on the CR: no condition, no
+	// event, no churn.
 	h, fh := harnessWithHolds(time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC))
 	cr := &AppDatabase{Name: "app1", Namespace: "scale-zero-pg", Generation: 1, Spec: AppDatabaseSpec{AppName: "app1"}}
 
 	mustReconcile(t, h, cr)
+	eventsAfterFirst := len(h.cl.events)
+	mustReconcile(t, h, cr)
 
-	if len(fh.ensured) != 0 || len(fh.released) != 0 {
-		t.Fatalf("Holds calls = ensured %v released %v, want none for a schedule-less CR", fh.ensured, fh.released)
+	if len(fh.ensured) != 0 {
+		t.Fatalf("EnsureHold calls = %v, want none for a schedule-less CR", fh.ensured)
 	}
 	if c := cond(cr, CondWarmHold); c != nil {
 		t.Fatalf("WarmHold condition = %+v, want absent for a schedule-less CR", c)
+	}
+	if len(h.cl.events) != eventsAfterFirst {
+		t.Fatalf("events churned on resync: %d -> %d (%v)", eventsAfterFirst, len(h.cl.events), h.cl.events)
 	}
 }
 
