@@ -111,7 +111,10 @@ spec:
             - name: GW_ROLE_APPLY_SETTLE_MS
               value: "250"
             - name: GW_MAX_CONNS
-              value: "90" # per compute; each app has its own compute so this is per-app
+              value: "90" # PROCESS-WIDE (one semaphore per gateway pod, taken in the accept
+              # loop before any app is known) — NOT per-app/per-compute; ADR-0003
+              # corrects the earlier per-app reading. Permanent tier:warm holds
+              # (#777) each occupy one slot 24/7; exhaustion refuses 53300 to ALL apps.
             # Per-app WAKE budget (issue #116, ADR-0008): a token-bucket on the 0->1
             # wake primitive, keyed per app (compute-<app>). The gateway holds NO
             # tenant credentials (rule 5 / #117), so a syntactically-valid startup can

@@ -39,7 +39,7 @@ spec:
         - { name: Phase, type: string, jsonPath: .status.phase }
         - { name: Secret, type: string, jsonPath: .status.secretName }
         - { name: Timeline, type: string, jsonPath: .status.timelineId }
-        - { name: Ready, type: boolean, jsonPath: .status.computeReady }
+        - { name: Compute, type: boolean, jsonPath: .status.computeReady }
         - { name: Tier, type: string, jsonPath: .spec.tier }
         - { name: Age, type: date, jsonPath: .metadata.creationTimestamp }
       schema:
@@ -61,7 +61,13 @@ spec:
                   maxLength: 63
                 tier:
                   type: string
-                  description: cold = scale-to-zero at rest (replicas 0); warm = keep one replica hot.
+                  description: >-
+                    cold = scale-to-zero at rest, the gateway wakes the compute on connect.
+                    warm = the operator holds one authenticated gateway connection permanently
+                    so the compute never idles to zero (a permanent warm hold, equivalent to a
+                    24/7 warmSchedule window; it takes precedence over warmSchedule). NOT a
+                    replica floor - the operator writes replicas 0 for both tiers; the gateway
+                    is the single writer of replica counts. See docs/appdatabase-api.md section 2a.
                   enum: [cold, warm]
                   default: cold
                 quotas:
@@ -177,7 +183,15 @@ spec:
                     decide the ColdRestorable condition (docs/runbook-dr.md §9d-bis).
                 computeReady:
                   type: boolean
-                  description: true iff the app's compute Deployment has >=1 available replica.
+                  description: >-
+                    DIAGNOSTIC ONLY (#777): true iff the app's compute Deployment has
+                    >=1 available replica right now. It is NOT a readiness gate for
+                    either tier — serving readiness is the Ready condition, because the
+                    wake path is the same for cold and warm (the apps-gateway wakes the
+                    compute 0->1 on connect). A perfectly healthy cold app reads false
+                    at rest; a warm app reads false in the moment between the gateway
+                    parking the compute and the operator's hold re-establishing it.
+                    Printed as the "Compute" column, deliberately not "Ready".
                 message:
                   type: string
                 observedGeneration:

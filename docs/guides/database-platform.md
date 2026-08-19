@@ -132,16 +132,21 @@ connection during cold start. `sslmode=require` (self-signed, cluster-local infr
 look like activity and keep the database awake. Keep your **pool's idle timeout below the
 gateway's idle window** (`GW_IDLE_MS`, default 60 s) and `minIdle`/`min_connections` at `0`, or
 the database never sleeps. `@getknext/lib`'s `getDbPool()` already ships scale-to-zero-sane
-defaults (`DB_POOL_MAX=5`, 10 s idle). Full DSN reference, the cold-start client experience,
-and the tier table are in scale-zero-pg's
-[connecting](https://github.com/getknext-dev/scale-zero-pg/blob/main/docs/connecting.md).
+defaults (`DB_POOL_MAX=5`, 10 s idle). Full DSN reference and the cold-start client
+experience are in scale-zero-pg's
+[connecting](https://github.com/getknext-dev/scale-zero-pg/blob/main/docs/connecting.md);
+the per-app warm tier in the table above is documented in the
+[AppDatabase API](https://github.com/getknext-dev/scale-zero-pg/blob/main/docs/appdatabase-api.md)
+(note: connecting.md's own "choosing a tier" table describes the shared single-database
+plane's warm pool, a different mechanism — don't scale that deployment to warm a per-app
+database).
 
 ## 4. What the database layer provides (v1.0.0)
 
 | Capability | What it gives a knext app |
 |---|---|
 | **Scale-to-zero Postgres** | Idle → 0 compute; first connection wakes it (**~2.5 s** cold). |
-| **Warm tier** (opt-in) | A parked pod for latency-sensitive apps — **~0.4 s** wake, at the cost of 256 MiB reserved 24/7. |
+| **Warm tier** (opt-in) | The database never sleeps for latency-sensitive apps — the platform holds it awake, so there is **no wake at all** on connect, at the cost of the compute's cpu/memory reserved 24/7 and one standing slot of the gateway's shared connection budget. |
 | **Per-app databases** | Branch-per-app: each app gets its **own** scale-to-zero Postgres — a Neon branch on one shared storage plane, provisioned declaratively via an `AppDatabase` CRD + operator. Isolated by both data (separate timeline) and access (per-app credential; the gateway refuses a wrong `(user, database)` pair before waking anything). |
 | **Read replicas** | An optional read-only pool via a second DSN (`DATABASE_URL_RO`, port 55434) — reads scale 0→N→0, eventually consistent with a bounded ~9 s staleness ceiling. |
 | **Backups / DR** | Rehearsed backup→restore (~110 s RTO) and pageserver failover (~7 s RTO); durability is Neon's WAL quorum, not rebuilt. |

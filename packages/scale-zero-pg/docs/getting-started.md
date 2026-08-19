@@ -163,7 +163,7 @@ spec:
   quotas: { cpu: "1000m", mem: "1Gi", maxConnections: 100 }
 EOF
 
-kubectl -n scale-zero-pg get appdatabases      # PHASE Ready, TIMELINE set, READY <bool>
+kubectl -n scale-zero-pg get appdatabases      # PHASE Ready, TIMELINE set, COMPUTE <bool> (diagnostic; not a readiness gate)
 kubectl -n scale-zero-pg get secret app-db-orders -o jsonpath='{.data.DATABASE_URL}' | base64 -d
 # -> postgres://app_orders:<pw>@pggw-apps.scale-zero-pg.svc:55432/orders?sslmode=disable
 ```

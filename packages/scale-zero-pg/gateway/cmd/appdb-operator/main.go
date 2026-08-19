@@ -107,10 +107,10 @@ func main() {
 	render.InitImage = env("APPDB_INIT_IMAGE", render.InitImage)
 
 	cluster := appdb.NewK8sCluster(cs, dyn, namespace, render, reclaimCM, logger)
-	// The scheduled DB warm lockstep (knext #388, ADR-0030 addendum): while any
-	// AppDatabase warmSchedule window is active the reconciler holds one
-	// authenticated connection through the apps-gateway so the compute never goes
-	// idle. The DSN comes from the operator-minted app-db-<app> Secret
+	// The DB warm-hold actuator (knext #388, ADR-0030 addendum; #777): the
+	// reconciler holds one authenticated connection through the apps-gateway so
+	// the compute never goes idle — permanently for spec.tier: warm, or while an
+	// AppDatabase warmSchedule window is active. The DSN comes from the operator-minted app-db-<app> Secret
 	// (DatabaseURL); the dial is a real SCRAM connection (lib/pq) — never a
 	// replica write (the gateway stays the sole scaler).
 	holds := appdb.NewHoldManager(cluster.DatabaseURL, appdb.SQLDialer{ConnectTimeout: warmHoldTimeout}, warmHoldTimeout)
@@ -161,7 +161,7 @@ func main() {
 		sort.Strings(apps)
 		w.Header().Set("content-type", "text/plain")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("# HELP appdb_warm_hold_active 1 while the appdb operator holds this app's compute warm for an active warmSchedule window (knext #388).\n"))
+		_, _ = w.Write([]byte("# HELP appdb_warm_hold_active 1 while the appdb operator holds this app's compute warm - permanently for spec.tier warm (knext #777) or for an active spec.warmSchedule window (knext #388).\n"))
 		_, _ = w.Write([]byte("# TYPE appdb_warm_hold_active gauge\n"))
 		for _, app := range apps {
 			_, _ = fmt.Fprintf(w, "appdb_warm_hold_active{app=%q} 1\n", app)
