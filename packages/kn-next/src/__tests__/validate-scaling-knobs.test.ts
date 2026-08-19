@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ConfigValidationError, validateConfig } from "../cli/validate";
 import type { KnativeNextConfig } from "../config";
@@ -110,6 +112,91 @@ describe("validateConfig — scaling knobs (#415)", () => {
         // CLI must NOT reject it — that invariant is the operator's alone.
         expect(() =>
             validateConfig(baseConfig({ maxScale: 100, poolMax: 20 })),
+        ).not.toThrow();
+    });
+});
+
+/**
+ * ADR-0045 — `scaling.scaleDownDelay` is checked SYNTACTICALLY only.
+ *
+ * The operator's `ValidateNextAppSpec` delegates the range/precision rules to
+ * Knative's own `autoscaling.ValidateAnnotations` precisely so the two cannot
+ * diverge; re-deriving "0s–1h, second precision" here would reintroduce that
+ * divergence one layer up, in a language that never sees the installed
+ * cluster. So: shape only, and the server-side dry-run in `preflightCRSchema`
+ * carries the semantics.
+ */
+describe("validateConfig — scaleDownDelay (ADR-0045)", () => {
+    // The superset guard. The CLI check may only ever be MORE permissive than
+    // the one authority (the operator's Knative-delegated webhook) — a local
+    // rejection of a webhook-acceptable value is the divergence bug this
+    // design exists to prevent. So the accepted corpus is not hand-picked to
+    // match the regex: it is SCANNED out of the operator's own agreement test,
+    // where every literal above the "Not durations at all." marker parses as a
+    // Go duration (including the out-of-range and precision-violating ones —
+    // rejecting those is the webhook's job, not ours). If the Go corpus grows
+    // a shape this check rejects, this test reds; if the Go file moves, the
+    // read fails loudly rather than the guard going silently vacuous.
+    it("accepts EVERY parseable duration in the operator's agreement-test corpus", () => {
+        const goCorpus = readFileSync(
+            join(
+                __dirname,
+                "../../../kn-next-operator/internal/validation/scale_down_delay_agreement_test.go",
+            ),
+            "utf-8",
+        );
+        const block = goCorpus.match(
+            /values := \[\]string\{([\s\S]*?)\n\t\}/,
+        )?.[1];
+        expect(block).toBeTruthy();
+        const parseable = (block as string).split("Not durations at all.")[0];
+        const literals = [...parseable.matchAll(/"([^"]*)"/g)]
+            .map((m) => m[1])
+            // "" is knext's "unset" on both sides (omitempty / skip-check).
+            .filter((v) => v !== "");
+        expect(literals.length).toBeGreaterThanOrEqual(15);
+        for (const value of literals) {
+            expect(() =>
+                validateConfig(baseConfig({ scaleDownDelay: value })),
+            ).not.toThrow();
+        }
+    });
+
+    it("accepts a config with scaleDownDelay unset — and treats '' as unset (operator omitempty parity)", () => {
+        expect(() =>
+            validateConfig(baseConfig({ minScale: 0, maxScale: 10 })),
+        ).not.toThrow();
+        expect(() =>
+            validateConfig(baseConfig({ scaleDownDelay: "" })),
+        ).not.toThrow();
+    });
+
+    it("rejects a value that is not a Go duration", () => {
+        for (const value of ["5min", "banana", "5", "m5", "5 m", "1h30"]) {
+            expect(() =>
+                validateConfig(baseConfig({ scaleDownDelay: value })),
+            ).toThrow(ConfigValidationError);
+            expect(() =>
+                validateConfig(baseConfig({ scaleDownDelay: value })),
+            ).toThrow(/scaleDownDelay/);
+        }
+    });
+
+    it("names the expected format in the error (a bare 'invalid' teaches nothing)", () => {
+        expect(() =>
+            validateConfig(baseConfig({ scaleDownDelay: "5min" })),
+        ).toThrow(/Go duration|e\.g\. "5m"/);
+    });
+
+    it("does NOT range-check — the operator webhook owns Knative's 0s-1h rule", () => {
+        // Out of Knative's accepted range, but syntactically a duration: the CLI
+        // must pass it through so the ONE authority rejects it (with the bound
+        // named), rather than two layers disagreeing about what the bound is.
+        expect(() =>
+            validateConfig(baseConfig({ scaleDownDelay: "24h" })),
+        ).not.toThrow();
+        expect(() =>
+            validateConfig(baseConfig({ scaleDownDelay: "1500ms" })),
         ).not.toThrow();
     });
 });

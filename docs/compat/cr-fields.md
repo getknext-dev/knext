@@ -74,6 +74,7 @@ Every field the CLI can emit is defined by the bundled CRD.
 | `spec.scaling.panicThresholdPercentage` | yes |
 | `spec.scaling.panicWindowPercentage` | yes |
 | `spec.scaling.poolMax` | yes |
+| `spec.scaling.scaleDownDelay` | yes |
 | `spec.scaling.targetBurstCapacity` | yes |
 | `spec.scaling.warmSchedule` | yes |
 | `spec.scaling.warmSchedule.*.end` | yes |

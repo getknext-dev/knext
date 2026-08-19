@@ -55,6 +55,7 @@
     "spec.scaling.panicThresholdPercentage",
     "spec.scaling.panicWindowPercentage",
     "spec.scaling.poolMax",
+    "spec.scaling.scaleDownDelay",
     "spec.scaling.targetBurstCapacity",
     "spec.scaling.warmSchedule",
     "spec.scaling.warmSchedule.*.end",
@@ -73,5 +74,5 @@
     "spec.storage.region"
   ],
   "notInBundledCRD": [],
-  "fieldCount": 67
+  "fieldCount": 68
 }

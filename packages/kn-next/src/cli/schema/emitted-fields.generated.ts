@@ -63,6 +63,7 @@ export const EMITTED_CR_FIELD_PATHS: readonly string[] = [
     "spec.scaling.panicThresholdPercentage",
     "spec.scaling.panicWindowPercentage",
     "spec.scaling.poolMax",
+    "spec.scaling.scaleDownDelay",
     "spec.scaling.targetBurstCapacity",
     "spec.scaling.warmSchedule",
     "spec.scaling.warmSchedule.*.end",
