@@ -1058,6 +1058,50 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 				"panic-threshold must coexist with the preview scaling override, not be dropped by it")
 		})
 
+		// #770: scale-down-delay is DROPPED in preview, not clamped. Previews
+		// predate spec.scaling.scaleDownDelay, so dropping restores their exact
+		// prior behaviour — the Knative cluster default applies unmanaged, the
+		// same posture the field's unset case uses — and the forced 30s
+		// pod-retention already bounds preview idle cost. Both halves are
+		// asserted from ONE spec: the same scaleDownDelay that survives on the
+		// production ksvc must be absent on the preview one, so a fix that
+		// dropped the annotation everywhere would red this too.
+		It("DROPS scale-down-delay under the preview override, while the same spec keeps it in production (#770)", func() {
+			scaling := func() *appsv1alpha1.ScalingSpec {
+				return &appsv1alpha1.ScalingSpec{MaxScale: 10, ScaleDownDelay: "1h"}
+			}
+
+			previewNN := reconcileOnce("preview-sdd", appsv1alpha1.NextAppSpec{
+				Image:   validImage,
+				Scaling: scaling(),
+				Preview: &appsv1alpha1.PreviewSpec{
+					Enabled: true,
+					PRID:    "770",
+					Branch:  "feat/sdd",
+				},
+			})
+			prodNN := reconcileOnce("prod-sdd", appsv1alpha1.NextAppSpec{
+				Image:   validImage,
+				Scaling: scaling(),
+			})
+
+			previewKsvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, previewNN, previewKsvc)).To(Succeed())
+			previewAnnotations := previewKsvc.Spec.Template.Annotations
+			Expect(previewAnnotations).To(HaveKeyWithValue("autoscaling.knative.dev/max-scale", "1"),
+				"preview override still wins on max-scale")
+			Expect(previewAnnotations).To(HaveKeyWithValue("autoscaling.knative.dev/scale-to-zero-pod-retention-period", "30s"),
+				"preview override still forces the short retention window")
+			Expect(previewAnnotations).NotTo(HaveKey("autoscaling.knative.dev/scale-down-delay"),
+				"a preview must NOT keep pods routable for the user's scaleDownDelay — the override drops it so the cluster default applies")
+
+			prodKsvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, prodNN, prodKsvc)).To(Succeed())
+			Expect(prodKsvc.Spec.Template.Annotations).To(
+				HaveKeyWithValue("autoscaling.knative.dev/scale-down-delay", "1h"),
+				"a non-preview NextApp with the SAME spec must still get the user's scaleDownDelay")
+		})
+
 		It("does not apply preview overrides when Preview.Enabled is false", func() {
 			nn := reconcileOnce("preview-disabled", appsv1alpha1.NextAppSpec{
 				Image: validImage,

@@ -825,9 +825,9 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 	// range-checked once in validation.ValidateNextAppSpec (ADR-0040), and
 	// re-parsing CR input here is exactly the MustParse-at-the-use-site
 	// pattern #435/#455 removed. Written into the SAME annotations map as
-	// min-scale/max-scale/targetBurstCapacity/the panic pair, and untouched by
-	// the preview-env override below (that override rewrites only
-	// max-scale/min-scale/retention-period, so a stamped delay survives it).
+	// min-scale/max-scale/targetBurstCapacity/the panic pair. UNLIKE those, it
+	// is DROPPED by the preview-env override below (#770) — read the
+	// disposition list there before assuming a stamped delay survives.
 	if nextApp.Spec.Scaling != nil && nextApp.Spec.Scaling.ScaleDownDelay != "" {
 		annotations["autoscaling.knative.dev/scale-down-delay"] = nextApp.Spec.Scaling.ScaleDownDelay
 	}
@@ -843,11 +843,36 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 		ksvc.Labels["environment"] = "preview"
 		ksvc.Labels["pr-id"] = nextApp.Spec.Preview.PRID
 
-		// Override max-scale to 1 to save cluster resources on previews
+		// A preview is EPHEMERAL (ADR-0013), so this block trades warmth for
+		// cluster cost. The COMPLETE disposition of every autoscaling knob the
+		// code above may have stamped:
+		//
+		//   FORCED   max-scale=1                            (one pod per preview)
+		//   FORCED   min-scale=0                            (never keep one warm)
+		//   FORCED   scale-to-zero-pod-retention-period=30s (short idle window)
+		//   DROPPED  scale-down-delay                       (#770, see below)
+		//   PASSED   target-burst-capacity (#411), panic-window-percentage and
+		//            panic-threshold-percentage (#413) — reaction-shape knobs
+		//            that cost nothing idle, so a preview keeps the user's values.
+		//
+		// scale-down-delay is DROPPED, not clamped: previews predate the field,
+		// so dropping restores their exact prior behaviour — the Knative cluster
+		// default applies unmanaged, the same posture the field's unset case uses
+		// — whereas a min()-style clamp would need duration parsing here (the
+		// MustParse-at-the-use-site pattern #435/#455 removed) and a comparison
+		// table to document, for no measurable preview benefit. The forced 30s
+		// pod-retention already bounds preview idle cost. Production revisions
+		// are untouched: the drop lives inside the preview branch.
+		//
+		// LESSON (#770): scale-down-delay is the SECOND scaling knob to leak
+		// silently through this list — enumeration is exactly how the second one
+		// gets missed. Any NEW ScalingSpec knob that stamps an annotation MUST be
+		// explicitly dispositioned in the list above — forced, dropped, or
+		// deliberately passed through — with an envtest asserting it.
 		annotations["autoscaling.knative.dev/max-scale"] = "1"
 		annotations["autoscaling.knative.dev/min-scale"] = "0"
-		// Set a very short scale-to-zero window
 		annotations["autoscaling.knative.dev/scale-to-zero-pod-retention-period"] = "30s"
+		delete(annotations, "autoscaling.knative.dev/scale-down-delay")
 	}
 
 	envVars, envFrom := r.buildKsvcEnv(nextApp)
