@@ -869,6 +869,13 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 		// gets missed. Any NEW ScalingSpec knob that stamps an annotation MUST be
 		// explicitly dispositioned in the list above — forced, dropped, or
 		// deliberately passed through — with an envtest asserting it.
+		//
+		// GATE (#775): the list above is no longer only prose. The scanning guard
+		// in internal/controller/preview_annotation_disposition_test.go exercises
+		// every ScalingSpec field against buildDesiredKsvc, collects the
+		// autoscaling.knative.dev/* keys it emits, and FAILS on any key with no
+		// entry in its previewDispositions table. Add a knob here and the guard
+		// reds until you record the decision in both places.
 		annotations["autoscaling.knative.dev/max-scale"] = "1"
 		annotations["autoscaling.knative.dev/min-scale"] = "0"
 		annotations["autoscaling.knative.dev/scale-to-zero-pod-retention-period"] = "30s"

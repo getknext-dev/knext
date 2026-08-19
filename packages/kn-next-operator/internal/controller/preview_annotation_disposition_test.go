@@ -87,7 +87,38 @@ type previewFate struct {
 // previewDispositions is the disposition TABLE the guard asserts against — the
 // test-side mirror of the prose list in nextapp_controller.go's preview block.
 // Every `autoscaling.knative.dev/*` key the builder can emit MUST appear here.
-var previewDispositions = map[string]previewFate{}
+var previewDispositions = map[string]previewFate{
+	"autoscaling.knative.dev/max-scale": {
+		kind: dispForced, forced: "1",
+		why: "one pod per preview (ADR-0013): a preview is ephemeral, so it never fans out",
+	},
+	"autoscaling.knative.dev/min-scale": {
+		kind: dispForced, forced: "0",
+		why: "never keep a preview warm — this also overrides an active warmSchedule floor",
+	},
+	"autoscaling.knative.dev/scale-to-zero-pod-retention-period": {
+		kind: dispForced, forced: "30s",
+		why: "short idle window bounds preview cost; production leaves it unmanaged",
+	},
+	"autoscaling.knative.dev/scale-down-delay": {
+		kind: dispDropped,
+		why: "#770/ADR-0045: dropped, not clamped — previews predate the field, so dropping " +
+			"restores their exact prior behaviour (Knative cluster default, unmanaged)",
+	},
+	"autoscaling.knative.dev/target-burst-capacity": {
+		kind: dispPassed,
+		why: "#411/ADR-0032: a reaction-shape knob that costs nothing idle, so a preview keeps " +
+			"the user's value",
+	},
+	"autoscaling.knative.dev/panic-window-percentage": {
+		kind: dispPassed,
+		why:  "#413/ADR-0033: reaction-shape knob, costs nothing idle — preview keeps it",
+	},
+	"autoscaling.knative.dev/panic-threshold-percentage": {
+		kind: dispPassed,
+		why:  "#413/ADR-0033: reaction-shape knob, costs nothing idle — preview keeps it",
+	},
+}
 
 // maximalScalingSpec sets EVERY ScalingSpec field to a non-zero value, so the
 // builder takes every "only stamped when explicitly set" branch. Values are
