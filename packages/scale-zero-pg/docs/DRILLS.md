@@ -83,6 +83,7 @@ a defect against that ticket). Grouped by theme.
 | `_verify-wake.sh` | Base single-DB 0→1→0: connect through the gateway wakes compute, serves rows, idles back to 0. | #61 #168 #171 |
 | `_verify-coldboot.sh` | Per-app cold-boot **role-apply race** never surfaces a transient `28P01` — N cold cycles, valid creds, zero auth failures (the `GW_ROLE_APPLY_SETTLE_MS` gate). | #132 #171 |
 | `_verify-warmtier.sh` | The productized **warm-standby tier** (gated pod) wakes sub-1.5s and the cold path stays green afterward. | #94 #164 #168 #171 |
+| [`docs/drills/tier-warm-drill.md`](drills/tier-warm-drill.md) (**manual**, not yet scripted) | `AppDatabase spec.tier: warm` is a **permanent warm hold** (held gateway connection, never a replica floor): survives the idle window, degrades-not-fails, and withdrawing warmth **releases** the hold. | #777 #778 |
 | `_verify-wake-guard.sh` | Per-app **wake budget** caps unauthenticated wakes (CNI-independent side-channel control); a sustained breach pages past the 3m debounce. | #116 #166 · ADR-0008 |
 | `_verify-ha.sh` | Gateway HA: 2 replicas, no SPOF, no idle split-brain. | #168 #171 |
 

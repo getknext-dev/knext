@@ -148,11 +148,14 @@ data:
           # restarts and never represent current state (devops-r3, live repro
           # value=41 at zero). "Phantom keepalive" truly means: connections
           # never drop to zero, so the idle window can never elapse.
-          # knext #388: DELIBERATE warm holds are NOT phantoms. While an
-          # AppDatabase warmSchedule window is active the appdb operator holds
-          # exactly one connection per warmed app (by design — that IS the DB
-          # warm tier); it publishes appdb_warm_hold_active{app=...} so this
-          # alert subtracts held connections and only pages on UNEXPLAINED ones.
+          # knext #388 / #777: DELIBERATE warm holds are NOT phantoms. The appdb
+          # operator holds exactly one connection per warmed app — PERMANENTLY for
+          # spec.tier: warm (the hold IS the warm tier, #777) and for the duration
+          # of any active spec.warmSchedule window; it publishes
+          # appdb_warm_hold_active{app=...} so this alert subtracts held
+          # connections and only pages on UNEXPLAINED ones. A hold is released the
+          # same pass warmth is withdrawn from the spec, so a stale subtraction
+          # cannot blind this alert.
           # The `or vector(0)` keeps the subtraction total when nothing is held
           # (an absent right-hand series would otherwise silence the alert).
           - alert: ComputePhantomKeepalive
@@ -160,7 +163,7 @@ data:
             labels: { severity: warning }
             annotations:
               summary: "System never idle for 30m — scale-to-zero blocked"
-              description: "Connections held continuously beyond declared warmSchedule warm holds — check for an app pool with no/large idle timeout (see docs/connecting.md sizing rule). During a warm window, appdb_warm_hold_active accounts for the deliberate holds."
+              description: "Connections held continuously beyond declared warm holds (spec.tier: warm, which is a PERMANENT hold, and any active spec.warmSchedule window) — check for an app pool with no/large idle timeout (see docs/connecting.md sizing rule). appdb_warm_hold_active accounts for both deliberate forms."
           # WAKE side-channel / per-app wake-budget breach (issue #116, ADR-0008).
           # The apps-gateway REFUSED one or more 0->1 wakes because a caller force-woke
           # a per-app compute faster than GW_WAKE_BUDGET/GW_WAKE_WINDOW_MS allows. The

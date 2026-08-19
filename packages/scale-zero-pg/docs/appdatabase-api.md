@@ -70,7 +70,7 @@ The operator reconciles `.status`. A driver gates its own work on these fields:
 | `status.conditions[type=Ready]` | `status: "True"` when servable | the canonical readiness gate |
 | `status.conditions[type=Provisioned]` | branch + child objects exist | provisioning progress |
 | `status.conditions[type=ColdRestorable]` | `"True"` once this app is recoverable by a **cold** disaster restore (ancestor WAL durable in object storage; runbook-dr.md §9d-bis) | **do NOT gate readiness on this** — it is disaster-restore coverage, not serving; alert if it stays non-`True` for long |
-| `status.conditions[type=WarmHold]` | **present whenever warmth is requested** — `spec.tier: warm` (§2a) or a non-empty `spec.warmSchedule` (§3b). `"True"`/`TierWarm` while the permanent hold is established, `"True"`/`WindowActive` while a scheduled window holds it; `"False"`/`WindowInactive`, `/HoldFailed`, `/InvalidWarmWindow`, or `/HoldsUnavailable` otherwise | the **only** true statement about whether the DB is warm right now — but **never gate serving on it**; a hold failure degrades to the ordinary cold wake |
+| `status.conditions[type=WarmHold]` | **present and meaningful whenever warmth is requested** — `spec.tier: warm` (§2a) or a non-empty `spec.warmSchedule` (§3b). `"True"`/`TierWarm` while the permanent hold is established, `"True"`/`WindowActive` while a scheduled window holds it; `"False"`/`WindowInactive`, `/HoldFailed`, `/InvalidWarmWindow`, or `/HoldsUnavailable` otherwise. **Absent** while the CR has never asked for warmth, and **retracted to `"False"`/`WarmthNotRequested`** in the same pass that releases the hold when warmth is *withdrawn* by a `spec` edit (`tier: warm` → `cold`, or the last `warmSchedule` window deleted) — so a `"True"` here never outlives the spec that asked for it | the **only** true statement about whether the DB is warm right now — but **never gate serving on it**; a hold failure degrades to the ordinary cold wake |
 | `status.secretName` | the output Secret name (`app-db-<app>`) | **read the Secret to mirror** — do not reconstruct |
 | `status.observedGeneration` | last `spec` generation reconciled | detect stale status after a `spec` edit |
 | `status.timelineId` | the app's Neon timeline id | diagnostics |
@@ -148,6 +148,14 @@ so rather than reporting warm-and-healthy:
 
 Serving is never gated on warmth: a degraded warm tier behaves exactly like a
 cold one, and the operator retries the hold every resync.
+
+**Withdrawing warmth is reconciled like any other edit.** Editing `tier: warm` →
+`cold` (or deleting the last `warmSchedule` window) **releases** the hold within
+one resync tick and retracts `WarmHold` to `False`/`WarmthNotRequested`; the
+compute then parks on the gateway's ordinary idle window and
+`appdb_warm_hold_active{app=...}` drops to `0`. A hold never outlives the spec
+that asked for it — if it did, the app's compute could never sleep again *and*
+the stale subtraction would blind the `ComputePhantomKeepalive` alert.
 
 ---
 
@@ -248,8 +256,10 @@ and retries next resync; the app keeps its ordinary cold-wake path. A window
 that fails to parse (this CRD has **no admission webhook**) is loud, never
 silently skipped: an `InvalidWarmWindow` Warning event + `WarmHold=False/InvalidWarmWindow`.
 Deleting the AppDatabase releases the hold before the compute objects are
-removed. Operator restarts drop holds (TCP dies with the process) and the next
-resync re-establishes them — crash-only, self-healing.
+removed, and so does **withdrawing** warmth from the spec (removing the last
+window, or `tier: warm` → `cold`) — `WarmHold` is then retracted to
+`False`/`WarmthNotRequested`. Operator restarts drop holds (TCP dies with the
+process) and the next resync re-establishes them — crash-only, self-healing.
 
 **Observability.** The `WarmHold` status condition (§2) per app — for scheduled
 windows and for `tier: warm` alike — and the
@@ -334,7 +344,10 @@ proven across a couple of consumers, promotion to `v1beta1` is the natural next 
   idempotently; e.g. toggling `roPool.enabled` adds/removes `DATABASE_URL_RO` with
   no password churn, setting `tier: warm` engages the permanent warm hold on the
   next resync (§2a), and adding a `warmSchedule` engages the warm hold at the next
-  window (§3b).
+  window (§3b). **Withdrawal is symmetric:** `tier: warm` → `cold`, or removing the
+  last `warmSchedule` window, RELEASES the hold on the next resync and retracts
+  `WarmHold` to `False`/`WarmthNotRequested` — the compute goes back to sleeping at
+  zero (§2a).
 - **Delete** → the `apps.scale-zero-pg.dev/deprovision` finalizer runs the safe
   two-sided Neon timeline reclaim (unless `keepTimelineOnDelete`) before the object
   is removed. An external driver deletes the `AppDatabase` from its own teardown

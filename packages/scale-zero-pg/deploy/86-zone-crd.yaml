@@ -61,7 +61,12 @@ spec:
                   properties:
                     tier:
                       type: string
-                      description: cold = scale-to-zero at rest; warm = keep one replica hot.
+                      description: >-
+                        cold = scale-to-zero at rest, the compute wakes on connect;
+                        warm = the operator holds one authenticated gateway connection
+                        permanently so the compute never idles to zero (no DB cold
+                        start). Warm is a held connection, NOT a replica floor — the
+                        gateway stays the single writer of replicas (#777).
                       enum: [cold, warm]
                       default: cold
                     quotas:
