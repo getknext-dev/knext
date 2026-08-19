@@ -1071,11 +1071,14 @@ jobs:
   #
   # WHY IT SCANS THE INSTALLED TREE, NOT THE LOCKFILE. A lockfile is a claim
   # about what should be installed; the tree is what the compiler actually
-  # swallows, including whatever install scripts materialised. MEASURED here:
-  # `trivy fs examples/bun-exec` finds `bun.lock` and 60 packages where the
-  # installed tree holds 408, and the 348 it never looked at included a HIGH
-  # (nanoid 3.3.17 -- since bumped to 3.3.18 by an override in the example's
-  # package.json, which is what this gate is for).
+  # swallows, including whatever install scripts materialised. MEASURED here,
+  # each number stated as what it counts: `trivy fs examples/bun-exec` finds
+  # `bun.lock` and catalogues 60 npm packages, while the same tree yields 210
+  # INSTALLED packages by this repo's walker and 409 npm COMPONENTS under syft
+  # (nested copies and package.json files inside published packages are counted
+  # too; `find -name package.json` returns 527). What trivy never looked at
+  # included a HIGH (nanoid 3.3.17 -- since bumped to 3.3.18 by an override in
+  # the example's package.json, which is what this gate is for).
   #
   # WHY grype HERE AND Trivy ON IMAGES. `trivy sbom` refuses a syft directory
   # SBOM (`unsupported type`: syft sets the root component type to `file`), and
@@ -1087,10 +1090,24 @@ jobs:
   # NO VINEXT IMAGE IS PUBLISHED FROM CI TODAY. The only job that builds a vinext
   # artifact is `bun-exec-alpine-image` below, which now `needs:` this gate -- so
   # the precondition holds the day a publish lane ships, rather than being
-  # remembered then. `tests/precompile-closure-gate-ci.test.ts` SCANS ci.yml for
-  # any job that compiles the binary or builds its image and requires this gate in
-  # its transitive `needs` closure, so a future publish lane that forgets it fails
-  # there rather than shipping an opaque binary past a scan that never ran.
+  # remembered then. `tests/precompile-closure-gate-ci.test.ts` SCANS EVERY
+  # `.github/workflows/*.yml` (not just this file) for any job that compiles the
+  # binary or builds its image -- including via the `bun run build` package-script
+  # alias for `./build.sh` -- and requires a job running the closure audit in its
+  # transitive `needs` closure, so a future publish lane that forgets it fails
+  # there rather than shipping an opaque binary past a scan that never ran. What
+  # that scan does NOT see: a lane that compiles through a reusable workflow, a
+  # composite action or a shell wrapper. Adding one means extending
+  # `tests/helpers/vinext-artifact-scan.ts` in the same PR.
+  #
+  # AND IT GUARDS ORDERING ONLY. ADR-0042 C6's other half -- the closure SBOM
+  # ATTACHED TO THE IMAGE DIGEST AS A COSIGN ATTESTATION -- remains OWED: the day
+  # a vinext publish lane ships, that attestation must ship with it; a `needs:`
+  # edge alone would let an image publish with no SBOM bound to its digest. Today
+  # the SBOM is a per-run Actions artifact, which is evidence, not provenance.
+  # The subject is also exactly one closure: the in-repo `examples/bun-exec`, the
+  # only vinext app there is. A USER app on the vinext target has no equivalent
+  # closure gate yet.
   #
   # THE EMPTINESS GUARD IS THE POINT. A scan of nothing exits 0, and both ways of
   # scanning nothing here are SILENT: `syft scan dir:` with default catalogers

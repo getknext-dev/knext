@@ -93,16 +93,32 @@ i.e. the resolved `node_modules` tree that feeds `vite build`:
 - CI job `vinext-precompile-closure` runs it on every PR, uploads the SBOM as an artifact, and is
   `needs:`-before `bun-exec-alpine-image` — the only job that builds a vinext artifact today. No
   vinext image is published from CI yet; the ordering exists so the precondition holds the day one
-  is, and `tests/precompile-closure-gate-ci.test.ts` *scans* for any job that builds the binary or
-  its image and requires the gate in its `needs` closure.
+  is, and `tests/precompile-closure-gate-ci.test.ts` *scans* **every `.github/workflows/*.yml`** for
+  any job that builds the binary or its image — including one that compiles via the `bun run build`
+  package-script alias for `./build.sh` — and requires a job running the closure audit in its
+  transitive `needs` closure. It does **not** see a lane that compiles through a reusable workflow,
+  a composite action or a shell wrapper; adding one means extending
+  `tests/helpers/vinext-artifact-scan.ts` in the same change.
+
+**What is still owed.** That scan guards **ordering only**. ADR-0042 C6 also requires the closure
+SBOM to be **attached to the image as a cosign attestation** — the day a vinext publish lane ships,
+the SBOM must be attached to the published image digest with cosign, because a `needs:` edge alone
+would let an image publish with no SBOM bound to it. Today the SBOM is a per-run Actions artifact:
+evidence of what was scanned, not provenance attached to an artifact.
+
+**Scope.** The gate covers exactly one closure — the in-repo `examples/bun-exec`, which is the only
+vinext application that exists today. A **user** application built on the vinext target has no
+equivalent closure gate yet.
 
 Two measured facts that shape the design, both of which make a naive setup **silently vacuous**:
 
 - `syft scan dir:node_modules` with **default catalogers** yields **zero** npm components; the
   `+javascript-package-cataloger` selector is load-bearing.
-- `trivy fs` over the example scans `bun.lock` — **60 packages against 408 in the installed tree**,
-  and it missed a HIGH the tree carried. A lockfile is a claim about what should be installed; the
-  installed tree is what the compiler swallows.
+- `trivy fs` over the example scans `bun.lock` and catalogues **60 npm packages**, where the same
+  installed tree holds **210 packages** by the audit's own walker and yields **409 npm components**
+  under syft (it counts nested copies and the `package.json` files inside published packages;
+  `find -name package.json` returns 527). It missed a HIGH the tree carried. A lockfile is a claim
+  about what should be installed; the installed tree is what the compiler swallows.
 
 Hence the emptiness guard (`scripts/lib/precompile-closure.mjs`): floors on both the SBOM component
 count and the on-disk package count (an empty tree has *perfect* coverage), a coverage ratio, and

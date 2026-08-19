@@ -19,11 +19,16 @@
  *   1. `syft scan dir:node_modules` with DEFAULT catalogers emits 18
  *      components, ZERO of them npm (the package.json cataloger is not enabled
  *      for a directory source). A perfectly valid, perfectly empty SBOM.
- *   2. `trivy fs` over `examples/bun-exec` finds `bun.lock` and 60 packages
- *      where the installed tree holds 408 — and misses a HIGH (nanoid 3.3.17)
- *      that the installed tree carries. A lockfile is a claim about what should
- *      be installed; the installed tree is what the compiler actually swallows,
- *      including whatever install scripts materialised.
+ *   2. `trivy fs` over `examples/bun-exec` finds `bun.lock` and catalogues 60
+ *      npm packages. Measured against the same tree: `installedPackages()`
+ *      walks 210 installed packages and syft emits 409 npm components (more
+ *      than 210 because it also catalogues nested copies and the package.json
+ *      files inside published packages — `find … -name package.json` returns
+ *      527). Whichever of the three you compare against, trivy never looked at
+ *      most of the tree, and what it missed included a HIGH (nanoid 3.3.17). A
+ *      lockfile is a claim about what should be installed; the installed tree
+ *      is what the compiler actually swallows, including whatever install
+ *      scripts materialised.
  *
  * Hence: SBOM from the INSTALLED tree, coverage checked against the tree on
  * disk, absolute floors on BOTH sides (an empty closure has trivially perfect
@@ -42,10 +47,17 @@ import { join } from 'node:path';
 export const FAILING_SEVERITIES = new Set(['critical', 'high']);
 
 /**
- * Floors. Deliberately far BELOW the measured reality (408 npm components in
- * the SBOM, ~500 packages on disk) so that a legitimate dependency removal does
- * not redden the gate and make editing this file the routine way to get green —
- * but far ABOVE zero, which is the number every silent-vacuity failure produces.
+ * Floors. Below the measured reality so that a legitimate dependency removal
+ * does not redden the gate and make editing this file the routine way to get
+ * green — but far ABOVE zero, which is the number every silent-vacuity failure
+ * produces. Measured on examples/bun-exec (2026-08-19), stated as what each
+ * number counts:
+ *
+ *   - syft npm COMPONENTS in the SBOM: 409  → MIN_NPM_COMPONENTS has ~4×
+ *     headroom;
+ *   - packages the walker below finds INSTALLED in the tree: 210 →
+ *     MIN_INSTALLED_PACKAGES has ~2× headroom, not more. It is the tighter of
+ *     the two, deliberately: it is the floor that catches an empty tree.
  */
 export const MIN_NPM_COMPONENTS = 100;
 export const MIN_INSTALLED_PACKAGES = 100;
@@ -199,12 +211,25 @@ export function verifyClosureCoverage({
  * than being ignored — an ignored allowlist entry is a gate that silently
  * changed meaning.
  */
+export const ALLOWLIST_ENTRY_KEYS = new Set(['id', 'justification', 'added', 'expires', 'note']);
+
 export function readAllowlist(doc, now = new Date()) {
   const active = new Set();
   const entries = doc?.allow ?? [];
   if (!Array.isArray(entries)) throw new Error('allowlist: `allow` must be an array');
   for (const entry of entries) {
     if (!entry?.id) throw new Error(`allowlist: an entry has no \`id\`: ${JSON.stringify(entry)}`);
+    // Unknown keys THROW rather than being ignored. A typo'd `expiress` is
+    // otherwise accepted as an entry that never expires while READING as one
+    // that does — the expiry is the only thing forcing re-justification, so
+    // silently dropping it is the quietest way to neuter this gate.
+    const unknown = Object.keys(entry).filter((k) => !ALLOWLIST_ENTRY_KEYS.has(k));
+    if (unknown.length > 0) {
+      throw new Error(
+        `allowlist: entry ${entry.id} has unknown key(s) [${unknown.join(', ')}] — allowed keys are ` +
+          `[${[...ALLOWLIST_ENTRY_KEYS].join(', ')}]. A misspelled \`expires\` never expires.`,
+      );
+    }
     if (!entry.justification) {
       throw new Error(`allowlist: entry ${entry.id} has no \`justification\``);
     }

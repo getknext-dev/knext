@@ -15,8 +15,11 @@
  *   1. Walk the INSTALLED closure directory — not the lockfile. A lockfile is a
  *      claim about what should be installed; the tree is what `vite build`
  *      actually reads, including anything install scripts materialised.
- *      MEASURED on examples/bun-exec: `trivy fs` sees `bun.lock` and 60
- *      packages, the tree holds 408, and the 348 it never looked at included a
+ *      MEASURED on examples/bun-exec: `trivy fs` sees `bun.lock` and catalogues
+ *      60 npm packages; the installed tree holds 210 packages by this repo's
+ *      walker and yields 409 npm components under syft (nested copies and the
+ *      package.json files inside published packages are counted too — `find …
+ *      -name package.json` returns 527). What trivy never looked at included a
  *      HIGH (nanoid 3.3.17, since bumped via a `nanoid` override).
  *   2. syft → CycloneDX JSON over that tree, WITH
  *      `--select-catalogers +javascript-package-cataloger`. That flag is

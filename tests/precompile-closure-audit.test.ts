@@ -30,9 +30,10 @@ import {
  *   - `syft scan dir:node_modules` with default catalogers yields **0** npm
  *     components (the package.json cataloger is not on by default for a
  *     directory source) — a perfectly green SBOM of an empty package set;
- *   - `trivy fs` over the example finds `bun.lock` and **60** packages where
- *     the installed tree holds **408**, and misses a HIGH the installed tree
- *     carries (nanoid 3.3.17).
+ *   - `trivy fs` over the example finds `bun.lock` and catalogues **60** npm
+ *     packages, where the same installed tree holds **210** packages by
+ *     `installedPackages()` and yields **409** npm components under syft — and
+ *     it misses a HIGH the installed tree carries (nanoid 3.3.17).
  *
  * Both failure modes are silent. Both are caught below.
  */
@@ -162,10 +163,10 @@ describe('verifyClosureCoverage — a scan of nothing must be RED', () => {
   });
 
   it('REJECTS an SBOM that covers only a fraction of the installed tree (the lockfile shape)', () => {
-    // The measured trivy-fs shape: 60 of 408 packages. Green today, and the
-    // 348 it never looked at include a HIGH.
+    // The measured trivy-fs shape: 60 catalogued packages against a tree of
+    // 210. Green today, and what it never looked at includes a HIGH.
     const installed = new Set<string>();
-    for (let i = 0; i < 408; i++) installed.add(`pkg-${i}`);
+    for (let i = 0; i < 210; i++) installed.add(`pkg-${i}`);
     for (const a of ANCHOR_PACKAGES) installed.add(a);
     const covered: Array<[string, string]> = Array.from({ length: 60 }, (_, i) => [
       `pkg-${i}`,
@@ -245,6 +246,46 @@ describe('readAllowlist — dated + justified, mirroring the npm-audit gate', ()
     expect(() => readAllowlist({ allow: [{ id: 'GHSA-x', justification: 'y' }] }, NOW)).toThrow(
       /added/i,
     );
+  });
+
+  it('THROWS on an UNKNOWN key — a typo’d `expires` is a never-expiring entry', () => {
+    // The silent-weakening case: `expiress` is ignored, so this entry reads as
+    // expiring in 2020 and in fact suppresses forever. An ignored key is a gate
+    // that quietly changed meaning, which is the same failure the malformed-key
+    // throws above exist to prevent.
+    expect(() =>
+      readAllowlist(
+        {
+          allow: [
+            {
+              id: 'GHSA-typo',
+              justification: 'no fix upstream',
+              added: '2026-01-01',
+              expiress: '2020-01-01',
+            },
+          ],
+        },
+        NOW,
+      ),
+    ).toThrow(/expiress/);
+  });
+
+  it('accepts the documented optional `note` key', () => {
+    const active = readAllowlist(
+      {
+        allow: [
+          {
+            id: 'GHSA-noted',
+            justification: 'no fix upstream',
+            added: '2026-08-19',
+            expires: '2026-11-19',
+            note: 'tracked upstream at example/image-size#1',
+          },
+        ],
+      },
+      NOW,
+    );
+    expect(active.has('GHSA-noted')).toBe(true);
   });
 });
 
