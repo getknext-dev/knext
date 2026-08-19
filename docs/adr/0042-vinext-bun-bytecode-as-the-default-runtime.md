@@ -461,8 +461,10 @@ gate parameterises over both images — the both-images shape Phase 4 / A5 *spec
 sigterm gates (today those are still separate per-target jobs; the parameterisation is open work,
 so promotion shares its shape, not a shipped precedent).
 
-**Measured (2026-08-19, A13): the criterion is NOT met — median 190 ms, typical 70–190 ms — so
-warm-on-boot stays target-specific.** The record
+**Measured (2026-08-19, A13): the criterion is NOT met — median 164 ms over eight cycles, the
+five unstalled ones spanning 70–190 ms — so warm-on-boot stays target-specific. The margin is a
+knife-edge (18% on the all-cycles median, n=8, one route), and the invalidated companion run held
+one genuine render at 213 ms on a different route — the record confronts both.** The record
 (`docs/benchmarks/fm-node-postready-lazy-a13-2026-08-19.md`) also attributes the run's heavy tail
 (3/8 cycles at 3.4–15.4 s) to the database connection path, deliberately out of this criterion's
 scope: hiding a DB stall behind an entry warm would mask the signal the DB-warmth knobs exist to
@@ -1047,8 +1049,10 @@ first, then CLI**.
 - **A13 — DISCHARGED (2026-08-19), by measurement, the way the item prescribed.** The node
   standalone entry's post-readiness first-request lazy cost, measured on the item's own
   methodology (post-readiness, first request, warm image verified per cycle from pod events;
-  8 cold cycles against a fully-dynamic route on OKE): **median 190 ms, typical 70–190 ms** —
-  under the 200 ms bar, and a fraction of the vinext entry's measured ~1.2 s, because the node
+  8 cold cycles against a fully-dynamic route on OKE): **median 164 ms; the five unstalled
+  cycles span 70–190 ms (median 131 ms)** — under the 200 ms bar on a stated knife-edge margin,
+  an order of magnitude below the vinext lazy entry's ~1.2 s decomposition attribution
+  (order-of-magnitude, not like-for-like; the record carries the caveat), because the node
   server evaluates its graph at boot (inside its ~2.6 s-to-Ready) rather than on first request.
   **Warm-on-boot stays TARGET-SPECIFIC; no promotion.** Record:
   `docs/benchmarks/fm-node-postready-lazy-a13-2026-08-19.md` — which also pins two things a later
