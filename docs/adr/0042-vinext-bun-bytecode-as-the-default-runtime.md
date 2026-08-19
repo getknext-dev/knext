@@ -447,7 +447,9 @@ bun/vinext entry**, not a contract obligation the node standalone entry must imp
 
 Why target-specific and not contract: the defect it fixes (≈1.2 s of post-readiness lazy module
 evaluation on the first request, measured on the lazy vinext entry, 2026-08-18) was measured **on
-the vinext entry**; the node standalone path's first-request lazy cost has **not been measured**,
+the vinext entry**; the node standalone path's first-request lazy cost *(premise now false — it
+WAS measured on 2026-08-19; see the "Measured" paragraph below; original sentence preserved:)*
+has **not been measured**,
 and its boot economics differ — the baked `NODE_COMPILE_CACHE` layer (ADR-0035) *plausibly absorbs
 part of* that cost, though ADR-0035 measured pre-readiness boot, not post-readiness first-request
 work, so that mitigation is plausible, not verified. Promoting an unmeasured obligation into the
@@ -460,6 +462,16 @@ env-variable surface (`KNEXT_WARM_PATH`/`KNEXT_EAGER_WARM`, same `WARMED:` log l
 gate parameterises over both images — the both-images shape Phase 4 / A5 *specifies* for the
 sigterm gates (today those are still separate per-target jobs; the parameterisation is open work,
 so promotion shares its shape, not a shipped precedent).
+
+**Measured (2026-08-19, A13): the criterion is NOT met — median 164 ms over eight cycles, the
+five unstalled ones spanning 70–190 ms — so warm-on-boot stays target-specific. The margin is a
+knife-edge (18% on the all-cycles median, n=8, one route), and the invalidated companion run held
+one genuine render at 213 ms on a different route — the record confronts both.** The record
+(`docs/benchmarks/fm-node-postready-lazy-a13-2026-08-19.md`) also attributes the run's heavy tail
+(3/8 cycles at 3.4–15.4 s) to the database connection path, deliberately out of this criterion's
+scope: hiding a DB stall behind an entry warm would mask the signal the DB-warmth knobs exist to
+fix. The criterion stays on the books in case a future entry change re-opens it; re-measure before
+citing this number across a Next major or an entry rewrite.
 
 **Related ruling recorded here so it is not relitigated (#765):** the shipped warm default stays
 `/api/health` (inert). Defaulting to `/` was rejected: the warm is a synthetic localhost request —
@@ -1036,7 +1048,25 @@ first, then CLI**.
   `.next/static` and `public/` into the standalone tree (`compat-smoke.mjs:~263`); that is
   Next-standalone-shaped and needs a `.output/public` branch for vinext.
 - **A11** Get a founder answer on the Phase 5 corpus-delta ceiling (Escalation 6). Blocks Phase 5.
-- **A13** (#765 follow-through — the promotion criterion needs an owner or it persists by default)
+- **A13 — DISCHARGED IN PART (2026-08-19): the measurement half, by measurement, the way the item prescribed. The docs half is NOT discharged — re-scoped and tracked on #783 (open).** The node
+  standalone entry's post-readiness first-request lazy cost, measured on the item's own
+  methodology (post-readiness, first request, warm image verified per cycle from pod events;
+  8 cold cycles against a fully-dynamic route on OKE): **median 164 ms; the five unstalled
+  cycles span 70–190 ms (median 131 ms)** — under the 200 ms bar on a stated knife-edge margin,
+  well below the vinext entry's app-graph-evaluation figures (430 ms–1.2 s across sittings,
+  builds and methods — not like-for-like; the record carries the comparability note), because the node
+  server evaluates its graph at boot (inside its ~2.6 s-to-Ready) rather than on first request.
+  **Warm-on-boot stays TARGET-SPECIFIC; no promotion.** Record:
+  `docs/benchmarks/fm-node-postready-lazy-a13-2026-08-19.md` — which also pins two things a later
+  reader needs: (1) 3/8 cycles carried a 3.4–15.4 s first-request tail on the **database
+  connection path** — two exhausted the pool's deliberate 15 s connect timeout and rendered the
+  fallback; the third served the real page slowly (inference, not separately evidenced) — and the
+  record marks these as NOT simple cold-database wakes (the keepwarm trickle was running;
+  attribution open, feeds #779/#781). Owned by the DB-warmth knobs, not by this entry contract —
+  promoting warm-on-boot to hide it would mask the signal those knobs exist to fix; (2) cache-served routes show ~22 ms
+  median post-readiness cost (run-1 table published in the record), so the question only ever
+  concerned uncached renders.
+  *(Original item follows.)*
   Measure the node standalone entry's post-readiness first-request lazy cost, on the same
   methodology as the vinext measurement (post-readiness, first request, warm image). >200 ms ⇒
   warm-on-boot promotes to contract per the Consequences subsection "Warm-on-boot". Natural home:
