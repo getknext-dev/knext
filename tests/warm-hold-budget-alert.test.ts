@@ -135,12 +135,23 @@ describe('warm-hold budget alert — it exists and can fire', () => {
   // wrong by the replica factor (code review #791, issue 1). A wrong number on a page is
   // worse than no page: it is what the responder uses to judge urgency.
   it('frames the threshold PER POD, and names the fleet arithmetic', () => {
-    const text = `${alert?.annotations?.summary ?? ''} ${alert?.annotations?.description ?? ''}`;
+    const summary = alert?.annotations?.summary ?? '';
+    const description = alert?.annotations?.description ?? '';
+    const text = `${summary} ${description}`;
     // 90 is ONE pod's semaphore; pggw-apps runs 2 replicas, and holds load-balance
     // across them, so the fleet budget is replicas x 90 and 45 holds is ~25% of it.
-    expect(text, 'the annotation must say the budget it compares against is per pod').toMatch(
+    //
+    // Asserted on the summary and the description SEPARATELY, not on the concatenation:
+    // a combined match let the description drop "of ONE gateway pod" while the summary
+    // alone kept the guard green (mutation 10 of this round). The description is where
+    // the arithmetic lives, so it is the copy that must carry the qualifier.
+    expect(summary, 'the summary must say the budget it compares against is per pod').toMatch(
       /per pod|single gateway pod/,
     );
+    expect(
+      description,
+      "the description must say the budget it compares against is ONE pod's",
+    ).toMatch(/per pod|single gateway pod|ONE gateway pod/);
     expect(
       text,
       'the annotation must give the fleet arithmetic, not just the per-pod number',
@@ -158,7 +169,18 @@ describe('warm-hold budget alert — it exists and can fire', () => {
     // sends a responder paged during a large scheduled window hunting for holders that
     // the tier column does not list.
     const description = alert?.annotations?.description ?? '';
-    expect(description).toMatch(/warmSchedule/);
+    // Anchored to the {{ $value }} clause, not to the description at large: the review
+    // finding was that $value is attributed ENTIRELY to tier: warm, and a later sentence
+    // saying "check spec.warmSchedule" kept a loose /warmSchedule/ match green while the
+    // attribution stayed wrong (mutation 13 of this round).
+    expect(
+      description,
+      'the clause attributing {{ $value }} must name warmSchedule, not tier: warm alone',
+      // Proximity, not "same sentence": `[^.]*` cannot express it, because `spec.tier`
+      // contains a period. The attribution clause names warmSchedule ~84 chars after the
+      // token; the later "check spec.tier AND spec.warmSchedule" audit line is ~504 away,
+      // so a 200-char window separates the two cleanly.
+    ).toMatch(/\{\{ \$value \}\}[\s\S]{0,200}?warmSchedule/);
   });
 
   it('records the rejected replica-join alternative so it is not re-proposed', () => {
