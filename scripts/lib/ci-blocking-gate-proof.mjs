@@ -73,7 +73,21 @@ export const GATES = [
   { jobId: 'typecheck-root', spec: 'tests/root-typecheck-gate.test.ts' },
   { jobId: 'lint-and-test', spec: 'tests/mutation-residue-scan.test.ts' },
   { jobId: 'bun-exec-hardcap', spec: 'tests/bun-exec-hardcap-ci.test.ts' },
-  { jobId: 'bun-exec-alpine-image', spec: 'tests/bun-exec-alpine-image-ci.test.ts' },
+  {
+    jobId: 'bun-exec-alpine-image',
+    spec: 'tests/bun-exec-alpine-image-ci.test.ts',
+    // This job ALREADY has a `needs:` (#764: no vinext image is built before the
+    // pre-compile-closure scan). Injecting a second one at the job key yields
+    // duplicate YAML keys, which reds every guard for a reason that is not a
+    // disarm — so this disarm REPLACES the real `needs:` line instead, swapping
+    // the un-skippable gate for a skippable job. Same mutation, valid YAML.
+    needsDisarm: {
+      anchor: '    needs: vinext-precompile-closure\n',
+      define: '',
+      inject: `    needs: ${CI_SKIPPABLE_JOB}`,
+    },
+  },
+  { jobId: 'vinext-precompile-closure', spec: 'tests/precompile-closure-gate-ci.test.ts' },
   {
     jobId: 'resolve-image-pins',
     spec: 'tests/operator-image-pin-resolution.test.ts',
@@ -114,7 +128,24 @@ export function jobAnchor(jobId) {
  * from the mutation being proved.
  */
 export function disarmReplacement(jobId, disarm) {
+  // A disarm with its own `anchor` REPLACES that text rather than prepending to
+  // it — the only current case is a gate that already carries a `needs:`, where
+  // preserving the anchor would emit a duplicate YAML key (#764).
+  if (disarm.anchor) return `${disarm.define ?? ''}${disarm.inject}\n`;
   return `${disarm.define ?? ''}${jobAnchor(jobId)}${disarm.inject}\n`;
+}
+
+/**
+ * The text a given disarm is applied at: the job key by default, or the
+ * disarm's own `anchor` when it must edit a line inside the job instead.
+ *
+ * EXPORTED for the same reason `disarmReplacement` is — the prover and
+ * `tests/ci-blocking-gate-proof-runnable.test.ts` must locate the mutation the
+ * same way, or the spec audits a workflow the prover never produces. Both
+ * callers still require the anchor to occur EXACTLY ONCE.
+ */
+export function disarmAnchor(jobId, disarm) {
+  return disarm?.anchor ?? jobAnchor(jobId);
 }
 
 /**

@@ -6,10 +6,10 @@ import { parse } from 'yaml';
 import { blankNonCode } from '../scripts/lib/blank-non-code.mjs';
 import {
   declaredTestTitles,
+  disarmAnchor,
   disarmReplacement,
   GATE_TEST_NAME,
   GATES,
-  jobAnchor,
   resolveTestRunner,
 } from '../scripts/lib/ci-blocking-gate-proof.mjs';
 import { codeWithLiterals } from '../scripts/lib/prover-lane.mjs';
@@ -220,7 +220,7 @@ function skipConditionProblem(job: Record<string, unknown>, target: string): str
 /** Everything wrong with a gate's `needs:` disarm. Empty means it really disarms. */
 function auditNeedsDisarm(workflowText: string, gate: DisarmableGate): string[] {
   const problems: string[] = [];
-  const anchor = jobAnchor(gate.jobId);
+  const anchor = disarmAnchor(gate.jobId, gate.needsDisarm);
   const occurrences = workflowText.split(anchor).length - 1;
   if (occurrences !== 1) {
     // The harness refuses this too, but refusing at run time means the prover
