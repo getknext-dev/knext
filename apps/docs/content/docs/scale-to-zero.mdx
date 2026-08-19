@@ -86,7 +86,9 @@ unaffected until you add the field yourself.
 **Your Knative installation has to honour it.** knext asks the platform to hold the pod; an
 installation that ignores or clamps the request will scale down as it always did, and the accepted
 range is the installed platform's, not knext's. `kn-next doctor` reports the version you are
-running against. The delay also covers the **app only** — a database that sleeps when idle keeps
+running against. **So does the knext operator**: if the operator on your cluster predates this
+setting, `kn-next deploy` stops at its preflight check and names the field — update the operator
+first, then deploy. The delay also covers the **app only** — a database that sleeps when idle keeps
 its own wake time, so the first query after an idle period can still be slow on a warm pod.
 </Callout>
 

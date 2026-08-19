@@ -104,7 +104,9 @@ close to always-on. That is why it lives in *your* config file rather than in th
 <Callout type="info">
 **This one is enforced by your cluster.** knext asks Knative to hold the pod; a Knative
 installation that does not honour that request will simply scale down as it always did. `kn-next
-doctor` reports the version installed on your cluster. Note too that the delay keeps your *app*
+doctor` reports the version installed on your cluster. The knext operator has to know the setting
+too: on a cluster whose operator predates it, `kn-next deploy` stops at its preflight check and
+names the field — update the operator first. Note too that the delay keeps your *app*
 warm — a database that sleeps when idle has its own wake time, and the first query after that can
 still be slow on an otherwise warm pod.
 </Callout>

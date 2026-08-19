@@ -321,8 +321,18 @@ export function validateConfig(config: KnativeNextConfig): void {
         // catches the typo a user can see for themselves ("5min"), and the
         // semantics stay with the one authority, reached by
         // `preflightCRSchema`'s server-side dry-run before any cluster write.
-        if (config.scaling.scaleDownDelay !== undefined) {
-            const GO_DURATION = /^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$/;
+        //
+        // The check may only ever be MORE permissive than Go's ParseDuration —
+        // locally rejecting a value the webhook accepts IS the divergence bug.
+        // Hence the shapes a first draft missed: an optional sign, bare "0"
+        // (Go's zero-duration special case), ".5s" / "1.s" fractions, and the
+        // U+00B5/U+03BC micro-sign pair. The accepted corpus is pinned to the
+        // operator's own agreement test, not to this regex — see
+        // validate-scaling-knobs.test.ts. "" is treated as unset, matching the
+        // CRD field's omitempty.
+        if (config.scaling.scaleDownDelay) {
+            const GO_DURATION =
+                /^[+-]?(0|(([0-9]+(\.[0-9]*)?|\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+)$/;
             if (!GO_DURATION.test(config.scaling.scaleDownDelay)) {
                 errors.push(
                     `'scaling.scaleDownDelay' must be a Go duration string (e.g. "5m", "30s", "1h"), got '${config.scaling.scaleDownDelay}'`,
