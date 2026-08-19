@@ -428,6 +428,35 @@ From #606, sourced to vinext's own repo and registry data:
     embedding result came from `vinext@^0.0.19` + the nitro bun preset, and *What must NOT be done*
     bans that pin as a shipping dependency. Recorded because the tension is otherwise invisible.
 
+### Warm-on-boot: declared TARGET-SPECIFIC, not contract (2026-08-19, #765)
+
+Startup warm-on-boot — `KNEXT_WARM_PATH` (comma-separated, sequential), an eager in-process fetch
+overlapped with the readiness window, `KNEXT_EAGER_WARM=0` as the escape, gated by the alpine e2e's
+`WARMED:` assertion — exists **only in the bun/vinext entry** (`knext-bun-entry.mjs`, merged #771).
+Decision 3 mandates one `RuntimeContract` with two implementations and no undeclared asymmetry, so
+this asymmetry is hereby **declared**: warm-on-boot is a **target-specific behaviour of the
+bun/vinext entry**, not a contract obligation the node standalone entry must implement.
+
+Why target-specific and not contract: the measured defect it fixes (−1.2 s of post-readiness lazy
+module evaluation on the first request) was measured **on the vinext entry**; the node standalone
+path's first-request lazy cost has **not been measured**, and its boot economics differ (the baked
+`NODE_COMPILE_CACHE` layer, ADR-0035, already absorbs the compile share of that cost). Promoting an
+unmeasured obligation into the contract would violate this ADR's own measure-first discipline.
+
+**Promotion criterion, fixed now so the asymmetry cannot silently persist:** if a measurement shows
+the node standalone entry pays a material (>200 ms) post-readiness first-request lazy cost that an
+eager warm removes, warm-on-boot becomes **contract**, `node-server.ts` implements the same
+env-variable surface (`KNEXT_WARM_PATH`/`KNEXT_EAGER_WARM`, same `WARMED:` log line), and the e2e
+gate parameterises over both images — the same both-images shape the sigterm gates already use.
+
+**Related ruling recorded here so it is not relitigated (#765):** the shipped warm default stays
+`/api/health` (inert). Defaulting to `/` was rejected: the warm is a synthetic localhost request —
+no cookies, no auth, no real `Host` — that **writes the shared Redis page cache**; fine for an app
+like file-manager, a shared-cache-poisoning risk as a default for arbitrary apps whose `/` may be
+auth-gated, redirecting, or personalised. `/` stays a documented per-app recommendation via
+`spec.env`, until someone answers the open question: is the synthetic warm render keyed identically
+to the first real anonymous request?
+
 ## Phased plan
 
 Ordered by risk retired per unit of work. Phase 2 runs concurrently with 1. **Phase 3 no longer runs
