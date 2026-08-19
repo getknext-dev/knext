@@ -98,8 +98,10 @@ against containerd GC) — every node. Scale-from-zero then never waits on the p
 
   **Measured (2026-08-18, #767): the unpinned-window cost is 14.9 s, not the ~2 s the cost model
   assumed.** A first request landing on a node that has not pulled the new digest paid **14.9 s**
-  (single sample, `docs/benchmarks/fm-confirmatory-prepulled-ab-2026-08-18.md`) — roughly 7× a
-  pinned cold start on the same cluster. "Acceptable" above still stands, but it is now priced:
+  (single sample, `docs/benchmarks/fm-confirmatory-prepulled-ab-2026-08-18.md`) — ~6.5× that
+  record's pinned median (2.28 s, n=5). This is consistent with the tail caveat in the action items
+  below (the ~2 s estimate "holds at the median and understates the tail") — a 14.9 s single sample
+  is exactly that tail, realized. "Acceptable" above still stands, but it is now priced:
   the window is short *because the operator re-points the pin on every reconcile*
   (`image_prewarm.go` CreateOrUpdate over `app.Spec.Image`, envtest-guarded by "updates the
   DaemonSet's app image when the NextApp digest changes"), and that mechanism is precisely what
