@@ -12,7 +12,7 @@
 
 | # | date | plane state (what changed since the last row) | wake median | first median | warm median | first tail | attribution of the dominant term |
 |---|---|---|---|---|---|---|---|
-| 0 | 2026-08-19 | pre-loop baseline (A13 record, run 2, `/dashboard`, n=8) | 4049 | 699 | 528 | 3/8 cycles 3.4–15.4 s (DB wake + 15 s pool timeout → fallback render) | DB cold wakes riding first requests |
+| 0 | 2026-08-19 | pre-loop baseline (A13 record, run 2, `/dashboard`, n=8) | 4049 | 699 | 539 | 3/8 cycles 3.4–15.4 s (DB wake + 15 s pool timeout → fallback render) | DB cold wakes riding first requests |
 | 1 | 2026-08-20 (`/dashboard`, n=8, per-cycle table below) | keepwarm → hold shape (parks: ~35/h → **0**); merged appdb+knext operators rolled; Prometheus config converged + `WarmHoldBudgetPressure` live; `scaleDownDelay` exercised on the CR path | 4450 | 5252 | 533 | **7/8** cycles 1.7–8.9 s over warm; only cycle 3 (98 ms) is clean | **fresh-pod resolution/connect failures**: DNS is directly evidenced for the PG path (`EAI_AGAIN pggw-apps.scale-zero-pg.svc`); the Redis-side ioredis `connect ETIMEDOUT` is a TCP connect failure whose own cause is unproven. Evidence covers the two ~9 s fallback cycles only; the 1.7–7.4 s cycles (incl. a 7.4 s SUCCESS render) are unattributed. Plane request-saturated (99%/85% CPU allocated) and memory-pressured (89%/81% used) |
 
 ### Row 1 per-cycle data (the loop's memory must be derivable)
@@ -22,7 +22,7 @@
 | 1 | 5183 | 2249 | 535 | 1714 | 14240 |
 | 2 | 4817 | 9091 | 537 | 8555 | **14232** (fallback) |
 | 3 | 4376 | 629 | 531 | 98 | 14240 |
-| 4 | 4400 | 2749 | 538 | 1955 | 14240 |
+| 4 | 4400 | 2749 | 794 | 1955 | 14240 |
 | 5 | 5048 | 8095 | 530 | 7565 | 14240 |
 | 6 | 4156 | 9421 | 525 | 8896 | **14232** (fallback) |
 | 7 | 4500 | 3082 | 527 | 2555 | 14240 |
@@ -47,8 +47,11 @@ app and its revisions landed in between; requests at 99%/85%). Unattributed; car
   not a pin. **Two honesty caveats:** Knative's default is 60 s stable PLUS a ~30 s grace period,
   so t+90 s is *at* the default termination boundary rather than clearly past it; and there was
   **no control arm** (the same drill with the delay absent), so this exercises the knob and shows
-  the expected shape without proving the delay caused the t+90 s hit. The pre-merge kind e2e and
-  the earlier spike measurements carry the causal claim; this drill adds the CR-path wiring proof.
+  the expected shape without proving the delay caused the t+90 s hit. The causal claim lives in ADR-0045
+  (`docs/adr/0045-scale-down-delay.md` — the measured ~52 ms in-window vs 2.28 s true-cold spike
+  record) and the operator's annotation tests
+  (`packages/kn-next-operator/internal/controller/preview_annotation_disposition_test.go` pins the
+  stamping; the #773/#774 PR suites pin the plumbing); this drill adds the CR-path wiring proof.
 - **The new dominant term is fresh-pod resolution/connect failure, with DNS directly evidenced on
   the PG path.** The captured stall pod logs `EAI_AGAIN pggw-apps.scale-zero-pg.svc` (a resolver
   failure) for Postgres; the Redis-side errors are ioredis `connect ETIMEDOUT` — a **TCP** connect
