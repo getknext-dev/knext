@@ -390,3 +390,36 @@ func TestTierWarm_WithdrawalReleasesEvenDuringASustainedPageserverFault(t *testi
 		t.Fatalf("WarmHold condition = %+v, want False/WarmthNotRequested retracted in the same (failing) pass", wh)
 	}
 }
+
+func TestTierWarm_WithdrawalRetractionIsPersistedEvenWhenThePassFails(t *testing.T) {
+	// System-designer BLOCK 1 (#786): the API contract says the retraction lands
+	// "in the same pass that releases the hold". Step 4c retracts IN MEMORY, but
+	// UpdateStatus ran only at step 6 — so through the API (the only thing a
+	// driver can observe) a sustained pageserver fault left WarmHold=True/TierWarm
+	// for the whole outage while nothing was held. The sibling test asserts the
+	// in-memory cr and stays green under that defect; this one asserts what the
+	// fake cluster PERSISTED. Fix shape mirrors reconcileDelete: a best-effort
+	// UpdateStatus on the withdrawal branch, before the risky pageserver steps.
+	h, fh := harnessWithHolds(time.Date(2026, 8, 18, 3, 0, 0, 0, time.UTC))
+	cr := &AppDatabase{
+		Name: "app1", Namespace: "scale-zero-pg", Generation: 1,
+		Spec: AppDatabaseSpec{AppName: "app1", Tier: "warm"},
+	}
+	mustReconcile(t, h, cr)
+	if !fh.held["app1"] {
+		t.Fatal("hold not established while tier: warm")
+	}
+
+	cr.Spec.Tier = "cold"
+	cr.Generation = 2
+	h.ps.failExists = true
+	rq, err := h.d.Reconcile(context.Background(), cr)
+	if err == nil || !rq {
+		t.Fatalf("precondition lost: the pass must still hard-fail at step 5 and requeue (rq=%v err=%v)", rq, err)
+	}
+
+	wh := h.cl.persistedWarmHold
+	if wh == nil || wh.Status != "False" || wh.Reason != "WarmthNotRequested" {
+		t.Fatalf("PERSISTED WarmHold = %+v, want False/WarmthNotRequested — the retraction must reach the API in the failing pass, or a driver sees True/TierWarm for the whole outage", wh)
+	}
+}

@@ -96,10 +96,13 @@ type fakeCluster struct {
 	depAvailable  bool
 	pending       map[string]string
 	statusUpdates int
-	finalizerAdds int
-	finalizerRms  int
-	events        []string
-	eventLog      []eventRecord // full type+reason+message, for tests that must inspect message content (e.g. redaction)
+	// last WarmHold condition seen by an UpdateStatus call — what a driver
+	// reading the API actually observes (nil = absent at last persist)
+	persistedWarmHold *Condition
+	finalizerAdds     int
+	finalizerRms      int
+	events            []string
+	eventLog          []eventRecord // full type+reason+message, for tests that must inspect message content (e.g. redaction)
 }
 
 // eventRecord is a full Cluster.Event() call, captured for tests that need
@@ -198,8 +201,16 @@ func (c *fakeCluster) ClearReclaimPending(_ context.Context, tl string) error {
 	delete(c.pending, tl)
 	return nil
 }
-func (c *fakeCluster) UpdateStatus(_ context.Context, _ *AppDatabase) error {
+func (c *fakeCluster) UpdateStatus(_ context.Context, cr *AppDatabase) error {
 	c.statusUpdates++
+	// Snapshot what the API server would now show for WarmHold — the PERSISTED
+	// condition, as distinct from the in-memory cr a later assertion might read.
+	if wh := findCondition(cr, CondWarmHold); wh != nil {
+		cp := *wh
+		c.persistedWarmHold = &cp
+	} else {
+		c.persistedWarmHold = nil
+	}
 	return nil
 }
 func (c *fakeCluster) AddFinalizer(_ context.Context, cr *AppDatabase) error {
