@@ -118,7 +118,11 @@ spec:
               # PAIRED WITH THE WarmHoldBudgetPressure ALERT (60-prometheus.yaml, knext
               # #787), which pages at HALF this number of standing warm holds. Prometheus
               # cannot read this env, so the value is hand-copied there — CHANGE BOTH.
-              # tests/warm-hold-budget-alert.test.ts reds if they drift apart.
+              # tests/warm-hold-budget-alert.test.ts reds if they drift apart. Note the
+              # alert is deliberately replica-INDEPENDENT: this is ONE pod's semaphore
+              # (fleet budget = replicas x 90), so it trips well before the fleet wall.
+              # Raising replicas below does NOT clear that page — only fewer declared
+              # warm holds, or a deliberate paired change of this knob + the threshold.
             # Per-app WAKE budget (issue #116, ADR-0008): a token-bucket on the 0->1
             # wake primitive, keyed per app (compute-<app>). The gateway holds NO
             # tenant credentials (rule 5 / #117), so a syntactically-valid startup can

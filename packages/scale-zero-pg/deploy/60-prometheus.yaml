@@ -178,10 +178,27 @@ data:
           # 81-apps-gateway.yaml) — Prometheus cannot read a Deployment's env, so the
           # number lives in two files. CHANGE BOTH: that knob's comment names this
           # alert, and tests/warm-hold-budget-alert.test.ts fails the build if they
-          # drift apart. 0.5 is chosen against the demonstrated plane ceiling of 30
-          # apps (ADR-0003 scale-ceiling drill): 45 permanent holds is genuinely
-          # anomalous today, not a busy Tuesday, and it still leaves half the budget
-          # as headroom to act in.
+          # drift apart.
+          #
+          # 90 IS ONE POD'S SEMAPHORE, NOT THE FLEET'S. pggw-apps runs replicas: 2 and
+          # holds dial the ClusterIP Service, so they load-balance across pods: the
+          # fleet budget is replicas x 90 (180 today) and 45 holds is ~22/pod, ~25% of
+          # it. This threshold is therefore a DELIBERATELY CONSERVATIVE, replica-
+          # INDEPENDENT tripwire — it trips at half of a single pod's budget, which on a
+          # multi-replica fleet is well before the real wall. That is the intended
+          # trade: it can page early, and the runbook says so and says how to clear it.
+          # 0.5 is sized against the demonstrated plane ceiling of 30 apps (ADR-0003
+          # scale-ceiling drill): 45 permanent holds is genuinely anomalous today.
+          #
+          # REJECTED — joining kube_deployment_spec_replicas{deployment="pggw-apps"} to
+          # make the expr replica-aware. It reads better and is WORSE: the join needs
+          # scalar(...) over a kube-state-metrics series, and if ksm is down, not
+          # scraped, or its label schema shifts, the scalar is NaN/absent, the
+          # comparison never holds, and the alert becomes SILENTLY UNABLE TO FIRE — the
+          # blindness class #792 documents, on the rule whose whole job is to precede an
+          # outage. A static number cannot go blind. (KubeStateMetricsDown covers ksm
+          # itself, but a self-blinding capacity alert is not a thing to accept and then
+          # cover with a second alert.) Do not re-propose without reading #792.
           #
           # WHAT DOES NOT FIRE IT: ordinary tenant traffic (this counts DECLARED holds
           # only, never live client connections); a warm app's compute restarting (the
@@ -203,8 +220,8 @@ data:
             for: 15m
             labels: { severity: warning, plane: apps }
             annotations:
-              summary: "Warm holds occupy over half the apps-gateway connection budget"
-              description: "{{ $value }} permanent warm holds (AppDatabase spec.tier: warm) stand against the process-wide GW_MAX_CONNS=90 semaphore shared with ALL tenant traffic — exhaustion refuses 53300 to apps that never opted into warmth. Audit which apps genuinely need tier: warm and withdraw the rest; ADR-0003's per-app gateway slot cap is the recorded fast-follow if the pressure is legitimate. See docs/operations.md#warm-hold-budget-pressure-knext-787."
+              summary: "Warm holds occupy over half of a single gateway pod's connection budget"
+              description: "{{ $value }} declared warm holds (AppDatabase spec.tier: warm, plus any active spec.warmSchedule window — both hold a connection) against GW_MAX_CONNS=90, which is the process-wide semaphore of ONE gateway pod, shared with ALL tenant traffic; the fleet budget is replicas x 90 and holds load-balance across pods, so this is a deliberately conservative tripwire, not the wall. Exhaustion refuses 53300 to apps that never opted into warmth. Audit which apps genuinely need warmth (check spec.tier AND spec.warmSchedule) and withdraw the rest — that is the only thing that clears this page; ADR-0003's per-app gateway slot cap is the recorded fast-follow if the warmth is legitimate. Adding replicas raises real capacity but does NOT clear this alert. See docs/operations.md#warm-hold-budget-pressure-knext-787."
           # WAKE side-channel / per-app wake-budget breach (issue #116, ADR-0008).
           # The apps-gateway REFUSED one or more 0->1 wakes because a caller force-woke
           # a per-app compute faster than GW_WAKE_BUDGET/GW_WAKE_WINDOW_MS allows. The
@@ -639,7 +656,7 @@ spec:
         # (prints the value to paste here). _validate.sh contract 27 fails if this drifts
         # from the ConfigMap data; _verify-drift.sh section E independently asserts every
         # shipped rule is LOADED in the live pod (/api/v1/rules).
-        ks-pg.dev/prometheus-config-sha256: "d3c5b7326a774c12c958719bab5acf237f46d5d035645ddab6c00cf3f51a8386"
+        ks-pg.dev/prometheus-config-sha256: "70d0c529c6ac10f51a479e4bf70681cca0986cc560fbfc435ebd5d2ba9496a14"
     spec:
       serviceAccountName: prometheus
       securityContext:

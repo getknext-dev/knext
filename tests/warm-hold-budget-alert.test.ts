@@ -62,6 +62,23 @@ function loadRules(): { groups: Group[]; rules: Rule[] } {
 const { groups, rules } = loadRules();
 const alert = rules.find((r) => r.alert === 'WarmHoldBudgetPressure');
 
+/**
+ * The contiguous `#` comment block immediately above `- alert: WarmHoldBudgetPressure`.
+ *
+ * Scoped deliberately. Asserting rationale against the WHOLE file passes vacuously —
+ * `kube_deployment_spec_replicas` is already used by `ComputeRoPoolStuck` further down,
+ * so a file-wide match for it was green before the rejected-alternative note existed at
+ * all. A guard satisfied by an unrelated rule is decoration.
+ */
+function ruleComment(): string {
+  const lines = promText.split('\n');
+  const at = lines.findIndex((l) => l.trim() === '- alert: WarmHoldBudgetPressure');
+  expect(at, 'the alert rule was not found in 60-prometheus.yaml').toBeGreaterThan(-1);
+  const block: string[] = [];
+  for (let i = at - 1; i >= 0 && lines[i].trim().startsWith('#'); i--) block.unshift(lines[i]);
+  return block.join('\n');
+}
+
 /** The deployed `GW_MAX_CONNS` value on the apps-gateway. */
 function deployedMaxConns(): number {
   const m = gatewayText.match(/- name: GW_MAX_CONNS\s*\n\s*value: "(\d+)"/);
@@ -112,6 +129,52 @@ describe('warm-hold budget alert — it exists and can fire', () => {
     expect(text).toMatch(/tier: warm/);
     expect(text).toMatch(/operations\.md/);
   });
+
+  // The three assertions below guard PROSE, which is unusual — justified because the
+  // annotation is the whole artifact at 3am, and its first version got the arithmetic
+  // wrong by the replica factor (code review #791, issue 1). A wrong number on a page is
+  // worse than no page: it is what the responder uses to judge urgency.
+  it('frames the threshold PER POD, and names the fleet arithmetic', () => {
+    const text = `${alert?.annotations?.summary ?? ''} ${alert?.annotations?.description ?? ''}`;
+    // 90 is ONE pod's semaphore; pggw-apps runs 2 replicas, and holds load-balance
+    // across them, so the fleet budget is replicas x 90 and 45 holds is ~25% of it.
+    expect(text, 'the annotation must say the budget it compares against is per pod').toMatch(
+      /per pod|single gateway pod/,
+    );
+    expect(
+      text,
+      'the annotation must give the fleet arithmetic, not just the per-pod number',
+    ).toMatch(/replicas\s*(x|×|\*)\s*90/);
+    // The exact claim that was wrong on the first round. Asserting its ABSENCE is what
+    // stops it being reinstated by someone tightening the wording.
+    expect(
+      text,
+      "false: 90 is one pod's budget, so 45 holds is not half the apps-gateway's budget",
+    ).not.toMatch(/half (of )?the apps-gateway/i);
+  });
+
+  it('attributes the gauge to DECLARED holds — tier: warm AND warmSchedule windows', () => {
+    // The exporter counts both forms (knext #388). An annotation naming only tier: warm
+    // sends a responder paged during a large scheduled window hunting for holders that
+    // the tier column does not list.
+    const description = alert?.annotations?.description ?? '';
+    expect(description).toMatch(/warmSchedule/);
+  });
+
+  it('records the rejected replica-join alternative so it is not re-proposed', () => {
+    // Making the expr replica-aware means joining kube-state-metrics; scalar() over an
+    // absent ksm series makes the whole alert silently unable to fire — the blindness
+    // class #792 documents. The expr stays static and conservative; the comment must
+    // carry the reasoning, or the "obvious improvement" gets re-suggested every review.
+    const comment = ruleComment();
+    expect(
+      comment,
+      "this rule's own comment must name the rejected kube_deployment_spec_replicas join and why",
+    ).toMatch(/kube_deployment_spec_replicas/);
+    expect(comment, 'and the reason: an absent ksm series would silence the alert').toMatch(
+      /scalar/,
+    );
+  });
 });
 
 describe('warm-hold budget alert — the threshold and GW_MAX_CONNS cannot drift apart', () => {
@@ -127,9 +190,12 @@ describe('warm-hold budget alert — the threshold and GW_MAX_CONNS cannot drift
   });
 
   it('both files document the pairing, so the next editor of either sees the other', () => {
-    expect(promText, 'the prometheus rule must name the file its threshold is copied from').toMatch(
-      /81-apps-gateway\.yaml/,
-    );
+    // Scoped to this rule's comment, not the file: a mention anywhere in a 700-line
+    // manifest would not tell the next editor of THIS threshold where the knob lives.
+    expect(
+      ruleComment(),
+      'the prometheus rule must name the file its threshold is copied from',
+    ).toMatch(/81-apps-gateway\.yaml/);
     expect(gatewayText, 'the GW_MAX_CONNS knob must name the alert derived from it').toMatch(
       /WarmHoldBudgetPressure/,
     );
