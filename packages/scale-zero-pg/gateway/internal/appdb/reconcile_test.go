@@ -21,6 +21,7 @@ type fakePS struct {
 	failLSN       bool
 	failRCLSN     bool
 	failAncestor  bool
+	failExists    bool // pageserver down: TimelineExists errors (step 5 hard-fails)
 }
 
 // newFakePS defaults rcLSN == lsn so a freshly-branched app is cold-restorable
@@ -31,6 +32,9 @@ func newFakePS() *fakePS {
 }
 
 func (f *fakePS) TimelineExists(_ context.Context, _, tl string) (bool, error) {
+	if f.failExists {
+		return false, errors.New("pageserver unreachable")
+	}
 	return f.timelines[tl], nil
 }
 func (f *fakePS) TemplateLastLSN(_ context.Context, _, _ string) (string, error) {

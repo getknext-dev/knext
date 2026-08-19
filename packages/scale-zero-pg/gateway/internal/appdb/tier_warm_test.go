@@ -351,3 +351,42 @@ func (b *branchGatedHolds) EnsureHold(ctx context.Context, app string) error {
 }
 
 func (b *branchGatedHolds) ReleaseHold(app string) { b.inner.ReleaseHold(app) }
+
+func TestTierWarm_WithdrawalReleasesEvenDuringASustainedPageserverFault(t *testing.T) {
+	// Review finding (round 2): "latency, not a leak" was only true for a
+	// TRANSIENT step-5 fault. With the withdrawal release placed after the
+	// pageserver steps, a SUSTAINED outage (TimelineExists erroring every pass)
+	// made every pass return at step 5 — so a hold whose spec had already
+	// withdrawn warmth stayed alive for the whole outage, bounded by pageserver
+	// recovery rather than by a resync tick. The release needs no branch, so it
+	// must run BEFORE step 5; only the ensure half needs the branch to exist.
+	h, fh := harnessWithHolds(time.Date(2026, 8, 18, 3, 0, 0, 0, time.UTC))
+	cr := &AppDatabase{
+		Name: "app1", Namespace: "scale-zero-pg", Generation: 1,
+		Spec: AppDatabaseSpec{AppName: "app1", Tier: "warm"},
+	}
+	mustReconcile(t, h, cr)
+	if !fh.held["app1"] {
+		t.Fatal("hold not established while tier: warm")
+	}
+
+	// The owner withdraws warmth in the same window a pageserver outage starts.
+	cr.Spec.Tier = "cold"
+	cr.Generation = 2
+	h.ps.failExists = true
+	rq, err := h.d.Reconcile(context.Background(), cr)
+	if err == nil || !rq {
+		t.Fatalf("precondition lost: the pass must still hard-fail at step 5 and requeue during the outage (rq=%v err=%v)", rq, err)
+	}
+
+	if fh.held["app1"] {
+		t.Fatal("hold STILL held: a withdrawn hold must be released before the pageserver steps, or a sustained outage keeps the compute awake for its whole duration")
+	}
+	if len(fh.released) == 0 {
+		t.Fatalf("ReleaseHold calls = %v, want app1 released despite the step-5 fault", fh.released)
+	}
+	wh := cond(cr, CondWarmHold)
+	if wh == nil || wh.Status != "False" || wh.Reason != "WarmthNotRequested" {
+		t.Fatalf("WarmHold condition = %+v, want False/WarmthNotRequested retracted in the same (failing) pass", wh)
+	}
+}
