@@ -461,6 +461,14 @@ gate parameterises over both images — the both-images shape Phase 4 / A5 *spec
 sigterm gates (today those are still separate per-target jobs; the parameterisation is open work,
 so promotion shares its shape, not a shipped precedent).
 
+**Measured (2026-08-19, A13): the criterion is NOT met — median 190 ms, typical 70–190 ms — so
+warm-on-boot stays target-specific.** The record
+(`docs/benchmarks/fm-node-postready-lazy-a13-2026-08-19.md`) also attributes the run's heavy tail
+(3/8 cycles at 3.4–15.4 s) to the database connection path, deliberately out of this criterion's
+scope: hiding a DB stall behind an entry warm would mask the signal the DB-warmth knobs exist to
+fix. The criterion stays on the books in case a future entry change re-opens it; re-measure before
+citing this number across a Next major or an entry rewrite.
+
 **Related ruling recorded here so it is not relitigated (#765):** the shipped warm default stays
 `/api/health` (inert). Defaulting to `/` was rejected: the warm is a synthetic localhost request —
 no cookies, no auth, no real `Host` — that **writes the shared Redis page cache**; fine for an app
@@ -1036,14 +1044,29 @@ first, then CLI**.
   `.next/static` and `public/` into the standalone tree (`compat-smoke.mjs:~263`); that is
   Next-standalone-shaped and needs a `.output/public` branch for vinext.
 - **A11** Get a founder answer on the Phase 5 corpus-delta ceiling (Escalation 6). Blocks Phase 5.
-- **A13** (#765 follow-through — the promotion criterion needs an owner or it persists by default)
+- **A13 — DISCHARGED (2026-08-19), by measurement, the way the item prescribed.** The node
+  standalone entry's post-readiness first-request lazy cost, measured on the item's own
+  methodology (post-readiness, first request, warm image verified per cycle from pod events;
+  8 cold cycles against a fully-dynamic route on OKE): **median 190 ms, typical 70–190 ms** —
+  under the 200 ms bar, and a fraction of the vinext entry's measured ~1.2 s, because the node
+  server evaluates its graph at boot (inside its ~2.6 s-to-Ready) rather than on first request.
+  **Warm-on-boot stays TARGET-SPECIFIC; no promotion.** Record:
+  `docs/benchmarks/fm-node-postready-lazy-a13-2026-08-19.md` — which also pins two things a later
+  reader needs: (1) 3/8 cycles carried a 3.4–15.4 s first-request tail that is the **database
+  path** (the pool's deliberate 15 s cold-wake `connectionTimeoutMillis`, then a fallback render),
+  owned by the DB-warmth knobs and #779, not by this entry contract — promoting warm-on-boot to
+  hide it would mask the signal those knobs exist to fix; (2) cache-served routes show ~29 ms
+  median post-readiness cost, so the question only ever concerned uncached renders.
+  *(Original item follows.)*
   Measure the node standalone entry's post-readiness first-request lazy cost, on the same
   methodology as the vinext measurement (post-readiness, first request, warm image). >200 ms ⇒
   warm-on-boot promotes to contract per the Consequences subsection "Warm-on-boot". Natural home:
   the Phase 1 / A2 two-arm sittings, whose control arm boots the node standalone entry anyway —
   record the number even if under threshold, so the criterion is discharged by measurement rather
   than expiring unread. Also owed:
-  user-facing docs for `KNEXT_WARM_PATH`/`KNEXT_EAGER_WARM` (shipped in #771 undocumented).
+  user-facing docs for `KNEXT_WARM_PATH`/`KNEXT_EAGER_WARM` (shipped in #771 undocumented —
+  re-scoped on #783, 2026-08-19: those docs are gated on the compiled target itself becoming
+  user-facing, since no shipped surface reads the env vars; see the issue for the verification).
 - **A12 — DISCHARGED (2026-08-17), and by the mechanism it was designed for: Phase 3(d) reported, a
   gate read it, and the premise did not survive.** No founder answer is needed because the question
   ("does the flip stand if the application is not bytecode-compiled?") describes a state the artifact
