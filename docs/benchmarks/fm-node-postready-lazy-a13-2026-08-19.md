@@ -14,7 +14,8 @@ is NOT the entry's lazy cost — it belongs to the database path.
 
 - `fm-node` on OKE (`context-ckmva7v7zvq`), the same digest-pinned file-manager image as the
   2026-08-18 A/B, min-scale 0, image **already present on the node every cycle** (verified from
-  pod events), PG trickle keepwarm running.
+  pod events), PG trickle keepwarm running — which makes the tail section's DB-connect stalls a
+  standing contradiction; see there.
 - Per cold cycle: wait for 0 pods → wake via `GET /api/health` (Knative queues it until Ready).
   The wake is NOT app-graph-free — the health route evaluates its own slice of the server graph
   (`@getknext/lib/health` + the metrics registry) — but it is **production-faithful**: the operator
@@ -26,8 +27,10 @@ is NOT the entry's lazy cost — it belongs to the database path.
   two more `GET`s as the warm baseline. `lazy = first − min(warm1, warm2)`. 8 cycles per run.
 - Run 1 hit `/` and invalidated itself: cycle 1 was a genuine render (`x-nextjs-cache: MISS`,
   lazy 213 ms) but cycles 2–8 were served `STALE` from the **shared Redis page cache** written by
-  cycle 1 (lazy 3–33 ms — cache-serve latency, not a render). Recorded here because it is itself a
-  finding: for cache-served pages the post-readiness first-request penalty is ~nothing.
+  cycle 1 — cache-serve latency, not a render. Published in full so its statistics are derivable
+  (lazy per cycle: 213, 29, 15, 9, 33, −120, 120, 3 → **median 22 ms**; the −120 is warm-render
+  noise exceeding the first request): for cache-served pages the post-readiness first-request
+  penalty is ~nothing.
 - Run 2 (the A13 instrument) hit `/dashboard` — fully dynamic (`unstable_noStore()`, no
   `x-nextjs-cache` header, three PG queries per render), so every request is a genuine render.
   (`/observability` was tried first and is auth-gated, 401.)
@@ -44,16 +47,19 @@ harness — treat the comparison as order-of-magnitude, not like-for-like.
 
 ## Result (run 2, `/dashboard`, n=8 genuine renders)
 
-| cycle | wake (cold boot) | first | warm best | lazy |
-|---|---|---|---|---|
-| 1 | 4126 | 670 | 539 | 131 |
-| 2 | 4052 | 3961 | 527 | **3434** |
-| 3 | 4196 | 624 | 553 | 70 |
-| 4 | 4029 | 728 | 538 | 190 |
-| 5 | 4046 | 649 | 536 | 113 |
-| 6 | 3896 | 15617 | 555 | **15061** |
-| 7 | 3979 | 663 | 526 | 138 |
-| 8 | 4227 | 15987 | 539 | **15448** |
+| cycle | wake (cold boot) | first | warm best | lazy | first-body bytes |
+|---|---|---|---|---|---|
+| 1 | 4126 | 670 | 539 | 131 | 14240 |
+| 2 | 4052 | 3961 | 527 | **3434** | 14240 |
+| 3 | 4196 | 624 | 553 | 70 | 14240 |
+| 4 | 4029 | 728 | 538 | 190 | 14240 |
+| 5 | 4046 | 649 | 536 | 113 | 14240 |
+| 6 | 3896 | 15617 | 555 | **15061** | **14232** |
+| 7 | 3979 | 663 | 526 | 138 | 14240 |
+| 8 | 4227 | 15987 | 539 | **15448** | **14232** |
+
+(Timings are held as floats and printed rounded, so a row's printed subtraction can be off by
+1 ms; the lazy column is computed pre-rounding.)
 
 Median lazy over all eight cycles: **164 ms**. The five unstalled cycles cluster at
 **70–190 ms** (median 131 ms, max 190 ms). Warm render is stable at ~530–560 ms; cold boot to
@@ -63,12 +69,26 @@ first-health-response ~3.9–4.2 s.
 
 Cycles 2/6/8 are not module evaluation:
 
-- `@getknext/lib`'s pool sets `connectionTimeoutMillis = 15_000` (the deliberate cold-wake
-  tolerance, pinned in `packages/lib/src/__tests__/clients-ro.test.ts:58`). The ~15.0–15.4 s
-  "lazy" values are the first connection attempt exhausting exactly that timeout; the dashboard's
-  `catch` then renders the zero-stats fallback — visible in the record as a **different body size**
-  (14232 vs 14240 bytes) on precisely those cycles. The ~3.4 s cycle is the same path succeeding
-  slowly (a DB wake inside the render).
+- `/dashboard` uses the **writer** pool (`getDbPool()`), whose connect timeout defaults to
+  `DEFAULT_DB_POOL_CONNECT_TIMEOUT_MS = 15_000` (`packages/lib/src/clients.ts:533`, applied at
+  `:549-551`, overridable via `DB_POOL_CONNECT_TIMEOUT_MS`). **Deployed value verified on the
+  running system, not assumed from source:** the fm-node ksvc carries no
+  `DB_POOL_CONNECT_TIMEOUT_MS` env, so the 15 s default is live. Cycles 6/8: the first connection
+  attempt exhausts that timeout, the dashboard's `catch` renders the zero-stats fallback, and the
+  tail arithmetic closes (15617−555 ≈ 15 s + a ~600 ms render; 15987−539 ≈ 15 s + ~990 ms). The
+  smaller body on exactly cycles 6/8 (14232 vs 14240 — see the table) **corroborates** the
+  fallback render; it is not proof on its own (the fallback swaps the recent-files rows for a
+  "no files" row, so an 8-byte delta implies the files table is near-empty, which was not
+  independently checked). Cycle 2 (3434 ms) returned the **success** body size, so it was NOT a
+  fallback; "the same connect path succeeding slowly" is the most likely reading but is
+  **inference, not separately evidenced** — it is equally consistent with the activator/SKS
+  transition stall this cluster has measured before.
+- **The keepwarm contradiction is a finding in its own right:** the PG trickle keepwarm was
+  RUNNING during this sitting, yet 2-3 of 8 first connections stalled — so these are NOT simple
+  cold-database wakes. Whether the trickle's target does not cover this app's connect path, or the
+  stall is in the gateway wake/auth path (wake budget, role-apply settle), is unattributed here;
+  it bears directly on the #779 idle-window decision and #781's replacement of the trickle, and
+  belongs to whoever picks those up.
 - A warm-on-boot request would move this stall off the user's critical path — but that is an
   argument about **database warmth**, already owned by the DB-side knobs
   (`AppDatabase spec.tier: warm` / `spec.warmSchedule`, and the `GW_IDLE_MS` decision, #779),
@@ -90,13 +110,29 @@ Cycles 2/6/8 are not module evaluation:
   order of magnitude under the vinext lazy entry's ~1.2 s attribution (see the comparability
   caveat above) because the node server evaluates its graph at boot (inside its ~2.6 s-to-Ready).
   Warm-on-boot remains **target-specific** (vinext/bun entry only) per ADR-0042's Consequences.
-- Comparables, same app, same cluster: node post-readiness residue ~131 ms typical vs vinext
-  lazy-entry ~1.2 s (2026-08-18 record) and vinext warm-entry `WARMED:… ms=480` overlapped with
-  readiness.
+- Comparables — stated with their admissibility, since the source record calls its own lazy-entry
+  sitting "inadmissible as a runtime A/B, different builds": the vinext **lazy-entry** ~1.2 s is
+  from that different-build, PG-cold, decomposition-attributed sitting; the same-day
+  **warm-entry** sittings put vinext app-graph evaluation at 430–480 ms (`WARMED:` on OKE) and
+  557–714 ms. Node's ~131 ms typical residue also **excludes DB cost by construction** (the DB
+  cycles are attributed to the tail), while the vinext figures do not all. Direction is safe —
+  node's post-readiness residue is the smallest of every figure in this family — but no ratio
+  quoted across these sittings is like-for-like.
 - The run-1 observation stands on its own: a cache-served page's first request on a fresh pod
-  costs ~29 ms median over warm — the shared Redis page cache makes post-readiness cost a
-  non-issue for cached routes.
+  costs ~22 ms median over warm (per-cycle values above) — the shared Redis page cache makes
+  post-readiness cost a non-issue for cached routes.
 
-Harness: 8-cycle wake-then-measure script (health-wake, then first/warm/warm on the measured
-path, pod-event pull evidence per cycle); run from the workstation against the public URL, cluster
-otherwise quiet, one run at a time.
+## Limitations — what this number is and is not
+
+Single sitting, n=8, one app, one route, one day, timed from a workstation over the public URL
+(network jitter rides on every sample; the first−warm subtraction cancels the steady component
+only). `lazy = first − min(warm1, warm2)` is an **upper bound on everything first-request** — lazy
+module evaluation, JIT warm-up, pool creation, Redis connect — not module evaluation isolated. The
+cost scales with app-graph size, so one app cannot settle the entry-contract question in general;
+the ADR's re-measure caveat (Next major, entry rewrite — and, per the knife-edge, any heavier
+page) is load-bearing, not boilerplate.
+
+Harness: `scripts/bench-a13-postready-lazy.py` (committed with this record) — 8-cycle
+wake-then-measure (health-wake, then first/warm/warm on the measured path, pod-event pull
+evidence per cycle); run from the workstation against the public URL, cluster otherwise quiet,
+one run at a time.

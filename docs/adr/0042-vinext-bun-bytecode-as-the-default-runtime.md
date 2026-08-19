@@ -447,7 +447,9 @@ bun/vinext entry**, not a contract obligation the node standalone entry must imp
 
 Why target-specific and not contract: the defect it fixes (≈1.2 s of post-readiness lazy module
 evaluation on the first request, measured on the lazy vinext entry, 2026-08-18) was measured **on
-the vinext entry**; the node standalone path's first-request lazy cost has **not been measured**,
+the vinext entry**; the node standalone path's first-request lazy cost *(premise now false — it
+WAS measured on 2026-08-19; see the "Measured" paragraph below; original sentence preserved:)*
+has **not been measured**,
 and its boot economics differ — the baked `NODE_COMPILE_CACHE` layer (ADR-0035) *plausibly absorbs
 part of* that cost, though ADR-0035 measured pre-readiness boot, not post-readiness first-request
 work, so that mitigation is plausible, not verified. Promoting an unmeasured obligation into the
@@ -1046,21 +1048,22 @@ first, then CLI**.
   `.next/static` and `public/` into the standalone tree (`compat-smoke.mjs:~263`); that is
   Next-standalone-shaped and needs a `.output/public` branch for vinext.
 - **A11** Get a founder answer on the Phase 5 corpus-delta ceiling (Escalation 6). Blocks Phase 5.
-- **A13 — DISCHARGED (2026-08-19), by measurement, the way the item prescribed.** The node
+- **A13 — DISCHARGED IN PART (2026-08-19): the measurement half, by measurement, the way the item prescribed. The docs half is NOT discharged — re-scoped and tracked on #783 (open).** The node
   standalone entry's post-readiness first-request lazy cost, measured on the item's own
   methodology (post-readiness, first request, warm image verified per cycle from pod events;
   8 cold cycles against a fully-dynamic route on OKE): **median 164 ms; the five unstalled
   cycles span 70–190 ms (median 131 ms)** — under the 200 ms bar on a stated knife-edge margin,
-  an order of magnitude below the vinext lazy entry's ~1.2 s decomposition attribution
-  (order-of-magnitude, not like-for-like; the record carries the caveat), because the node
+  well below the vinext entry's app-graph-evaluation figures (430 ms–1.2 s across sittings,
+  builds and methods — not like-for-like; the record carries the comparability note), because the node
   server evaluates its graph at boot (inside its ~2.6 s-to-Ready) rather than on first request.
   **Warm-on-boot stays TARGET-SPECIFIC; no promotion.** Record:
   `docs/benchmarks/fm-node-postready-lazy-a13-2026-08-19.md` — which also pins two things a later
   reader needs: (1) 3/8 cycles carried a 3.4–15.4 s first-request tail that is the **database
   path** (the pool's deliberate 15 s cold-wake `connectionTimeoutMillis`, then a fallback render),
   owned by the DB-warmth knobs and #779, not by this entry contract — promoting warm-on-boot to
-  hide it would mask the signal those knobs exist to fix; (2) cache-served routes show ~29 ms
-  median post-readiness cost, so the question only ever concerned uncached renders.
+  hide it would mask the signal those knobs exist to fix; (2) cache-served routes show ~22 ms
+  median post-readiness cost (run-1 table published in the record), so the question only ever
+  concerned uncached renders.
   *(Original item follows.)*
   Measure the node standalone entry's post-readiness first-request lazy cost, on the same
   methodology as the vinext measurement (post-readiness, first request, warm image). >200 ms ⇒
@@ -1068,9 +1071,7 @@ first, then CLI**.
   the Phase 1 / A2 two-arm sittings, whose control arm boots the node standalone entry anyway —
   record the number even if under threshold, so the criterion is discharged by measurement rather
   than expiring unread. Also owed:
-  user-facing docs for `KNEXT_WARM_PATH`/`KNEXT_EAGER_WARM` (shipped in #771 undocumented —
-  re-scoped on #783, 2026-08-19: those docs are gated on the compiled target itself becoming
-  user-facing, since no shipped surface reads the env vars; see the issue for the verification).
+  user-facing docs for `KNEXT_WARM_PATH`/`KNEXT_EAGER_WARM` (shipped in #771 undocumented).
 - **A12 — DISCHARGED (2026-08-17), and by the mechanism it was designed for: Phase 3(d) reported, a
   gate read it, and the premise did not survive.** No founder answer is needed because the question
   ("does the flip stand if the application is not bytecode-compiled?") describes a state the artifact
