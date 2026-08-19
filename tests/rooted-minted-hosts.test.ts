@@ -78,7 +78,7 @@ const MINTING_ARTIFACTS = [
 const GATEWAY_HOST_IN_POSITION = /(?:@|=|:\s*")(pggw[A-Za-z0-9-]*(?:\.[A-Za-z0-9_${}-]+)*\.?)/g;
 
 /** Every gateway host reference, in host position, in `text`. */
-export function gatewayHostsInText(text: string): string[] {
+function gatewayHostsInText(text: string): string[] {
   return [...text.matchAll(GATEWAY_HOST_IN_POSITION)].map((m) => m[1]);
 }
 
@@ -94,10 +94,8 @@ export function gatewayHostsInText(text: string): string[] {
  * condition while its docstring promises a scan — and `_verify-scale-ceiling.sh:141`
  * already contains that exact bare form, so it was one copy-paste from the mint.
  */
-export function unrootedGatewayHostsInText(text: string): string[] {
-  return gatewayHostsInText(text).filter(
-    (h) => h.includes('.svc') && !h.endsWith('.cluster.local.'),
-  );
+function unrootedGatewayHostsInText(text: string): string[] {
+  return gatewayHostsInText(text).filter((h) => !h.endsWith('.'));
 }
 
 function gatewayHostsIn(relPath: string): string[] {

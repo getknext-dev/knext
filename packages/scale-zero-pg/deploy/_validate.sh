@@ -531,19 +531,36 @@ grep -q 'appdb-operator' ../gateway/Dockerfile || fail "Dockerfile does not buil
 # latter would silently REVERT a rooted DSN on every rotation), so the scan below
 # covers the script's DSNs too.
 #
-# REACHABILITY, stated plainly: this file is NOT wired into the monorepo's root
-# .github/workflows — the packages/scale-zero-pg/.github copy is subtree residue
-# GitHub does not run (knext #797 tracks the structural half). The equivalent contract
-# therefore ALSO lives in the root test infra, which does run in CI:
-# tests/rooted-minted-hosts.test.ts.
+# REACHABILITY — this contract has NEVER executed in a real run. Two separate reasons,
+# both stated rather than implied:
+#   1. This file is not wired into the monorepo's root .github/workflows; the
+#      packages/scale-zero-pg/.github copy is subtree residue GitHub does not run
+#      (knext #797 tracks the structural half).
+#   2. Even run by hand, the script is `set -eu` and exits at :411 ("60 phantom-keepalive
+#      honesty rule was lost") — a STALE ANCHOR, not a lost alert: #777/#791 deliberately
+#      reworked that rule (60-prometheus.yaml:151, "DELIBERATE warm holds are NOT
+#      phantoms"). Deciding what the honesty rule should now assert is an
+#      alerting-semantics call for that rule's owner, so it is reported on #797 rather
+#      than guessed at here. Fixing 88-loadsoak-k6.yaml unblocked this contract by one
+#      hop; :411 still sits in front of it.
+# So the LIVE enforcement is the root test infra, which does run in CI:
+# tests/rooted-minted-hosts.test.ts (minted values) and
+# tests/rooted-cluster-hosts-repo-wide.test.ts (every reference, repo-wide).
 grep -q 'APPDB_GATEWAY_HOST, value: "' 83-appdb-operator.yaml || fail "83-appdb-operator.yaml no longer sets APPDB_GATEWAY_HOST — the rooted-host contract below would silently pass"
 grep 'APPDB_GATEWAY_HOST, value: "' 83-appdb-operator.yaml | grep -qv 'value: "[^"]*\."' &&
   fail "83-appdb-operator.yaml APPDB_GATEWAY_HOST is NOT rooted (no trailing dot) — minted DATABASE_URLs would walk the ndots:5 search path on every fresh pod (a custom DNS zone edits the value but KEEPS the trailing dot)" || true
 # provision-app.sh: both Secret writers (create at mint_credential, rotate-cred) plus
 # the DSN it prints. Presence check first, so deleting the mint cannot vacuously pass.
-grep -q 'pggw-apps\.' provision-app.sh || fail "provision-app.sh no longer references the apps-gateway host — the rooted-host scan below would silently pass"
-grep -n 'pggw-apps\.' provision-app.sh | grep -qv 'pggw-apps\.[^ :"]*\.svc\.cluster\.local\.' &&
-  fail "provision-app.sh mints an UNROOTED apps-gateway host (see the lines above): every app-db-<app> DSN it writes — from 'create' AND from 'rotate-cred', which overwrites a live Secret — must end .svc.cluster.local. or it walks the ndots:5 search path on every fresh pod" || true
+#
+# Anchored on HOST POSITION (`@`) and bare-inclusive — NOT on `pggw-apps\.`. An
+# anchor that requires a dot cannot even see the worst form: the bare single-label
+# `@pggw-apps:55432` is furthest below ndots:5, so it walks all five search suffixes,
+# and `_verify-scale-ceiling.sh:141` already contains exactly that. The test is
+# uniform — a dot must immediately precede the `:port` — so bare, 2-dot and 4-dot
+# forms all fail alike, and no form is audited by a different rule than its siblings.
+grep -q '@pggw-apps' provision-app.sh || fail "provision-app.sh no longer references the apps-gateway host — the rooted-host scan below would silently pass"
+grep -n '@pggw-apps' provision-app.sh | grep -qv '@pggw-apps[^ :"]*\.:' &&
+  fail "provision-app.sh mints an UNROOTED apps-gateway host (see the lines above): every app-db-<app> DSN it writes — from 'create' AND from 'rotate-cred', which overwrites a live Secret — must be rooted (a trailing dot before the :port) or it walks the ndots:5 search path on every fresh pod" || true
 ok "AppDatabase CRD + operator wired (82/83), operator built into the image, does not claim deployments/scale (issue #96); every platform-minted gateway host (operator manifest + provision-app.sh create/rotate) is ROOTED"
 
 # 25. contract (issue #151, ADR-0007 v2-2): the Zone CRD + zone-operator ship together

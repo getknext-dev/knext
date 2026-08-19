@@ -36,8 +36,10 @@
     "@vitest/coverage-v8": "^4.0.18",
     "@vitest/ui": "^4.0.16",
     "happy-dom": "^20.0.11",
+    "ioredis": "^6.0.0",
     "jsdom": "^27.3.0",
     "minio": "^8.0.6",
+    "pg-connection-string": "^2.14.0",
     "tsup": "^8.5.1",
     "turbo": "latest",
     "typescript": "^5.9.3",
@@ -52,9 +54,9 @@
     "@next/env": "^16.1.1"
   },
   "pnpm": {
-    "//overrides": "Trivy HIGH/CRITICAL remediation for the shipped file-manager image (#199; same discipline as the operator fix in #155: bump the deps, don't suppress). Chains: @getknext/lib \u2192 @cerbos/grpc (grpc-js, protobufjs) + minio (fast-xml-parser 4); @getknext/core \u2192 @google-cloud/storage (fast-xml-parser 5, retry-request \u2192 @types/request \u2192 form-data 2). Guarded by tests/supply-chain-workflow.test.ts.",
-    "//overrides-nanoid": "Supply Chain nightly RED 6/6 on main (CVE-2026-67213, HIGH): nanoid 3.3.16 DoS via infinite loop, fixed 3.3.17. It arrives ONLY transitively via postcss, which depends on nanoid ^3.3.11 \u2014 so the existing postcss >=8.5.18 floor does NOT subsume it: every postcss 8.5.x still resolves nanoid to the newest 3.3.x, which was 3.3.16. Pinned at the 3.x line rather than moved to 5.x/6.x because postcss requires ^3, and 3.3.17 is the fixed version Trivy names. Same discipline as the rest of this block: bump the dep, do not suppress the finding.",
-    "//overrides-465": "Docs-closure nightly RED (#465). fast-xml-parser 5 floor raised 5.5.6 \u2192 5.10.1 (GHSA-8r6m-32jq-jx6q). sharp + postcss are BOTH pulled in by `next` itself \u2014 next pins `postcss: 8.4.31` exactly and `sharp: ^0.34.5` optionally, and still does at 16.2.11, so a Next bump would NOT subsume these. sharp \u22650.35.0 = GHSA-f88m-g3jw-g9cj (inherited libvips CVE-2026-33327/33328/35590/35591); apps/file-manager already declares sharp ^0.35.2, so 0.35.x is the version already exercised in-tree. postcss \u22658.5.18 = CVE-2026-45623 + GHSA-r28c-9q8g-f849. Guarded by tests/docs-closure-nightly-workflow.test.ts.",
+    "//overrides": "Trivy HIGH/CRITICAL remediation for the shipped file-manager image (#199; same discipline as the operator fix in #155: bump the deps, don't suppress). Chains: @getknext/lib → @cerbos/grpc (grpc-js, protobufjs) + minio (fast-xml-parser 4); @getknext/core → @google-cloud/storage (fast-xml-parser 5, retry-request → @types/request → form-data 2). Guarded by tests/supply-chain-workflow.test.ts.",
+    "//overrides-nanoid": "Supply Chain nightly RED 6/6 on main (CVE-2026-67213, HIGH): nanoid 3.3.16 DoS via infinite loop, fixed 3.3.17. It arrives ONLY transitively via postcss, which depends on nanoid ^3.3.11 — so the existing postcss >=8.5.18 floor does NOT subsume it: every postcss 8.5.x still resolves nanoid to the newest 3.3.x, which was 3.3.16. Pinned at the 3.x line rather than moved to 5.x/6.x because postcss requires ^3, and 3.3.17 is the fixed version Trivy names. Same discipline as the rest of this block: bump the dep, do not suppress the finding.",
+    "//overrides-465": "Docs-closure nightly RED (#465). fast-xml-parser 5 floor raised 5.5.6 → 5.10.1 (GHSA-8r6m-32jq-jx6q). sharp + postcss are BOTH pulled in by `next` itself — next pins `postcss: 8.4.31` exactly and `sharp: ^0.34.5` optionally, and still does at 16.2.11, so a Next bump would NOT subsume these. sharp ≥0.35.0 = GHSA-f88m-g3jw-g9cj (inherited libvips CVE-2026-33327/33328/35590/35591); apps/file-manager already declares sharp ^0.35.2, so 0.35.x is the version already exercised in-tree. postcss ≥8.5.18 = CVE-2026-45623 + GHSA-r28c-9q8g-f849. Guarded by tests/docs-closure-nightly-workflow.test.ts.",
     "overrides": {
       "@grpc/grpc-js": ">=1.14.4 <2",
       "rollup": ">=4.59.0 <5",

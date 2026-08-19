@@ -11,11 +11,13 @@ import (
 // The rooted (absolute) name every platform-minted DSN must carry.
 const wantGatewayHost = "pggw-apps.scale-zero-pg.svc.cluster.local."
 
-// The minted DSN host MUST be ROOTED, not merely qualified. At the cluster default
-// ndots:5 a 4-dot name ("...svc.cluster.local") is still resolved by walking the
-// whole 3-entry search path first — qualifying without the trailing dot makes each
-// wasted attempt longer while eliminating none of them. Only the trailing dot makes
-// the resolver skip the search path (docs/benchmarks/cold-start-ledger.md, lever 1).
+// The minted DSN host MUST be ROOTED, not merely qualified. Measured on the live
+// plane: ndots:5 with a FIVE-entry search path (the standard three plus two OCI VCN
+// domains), so a 4-dot name ("...svc.cluster.local") is still resolved by walking all
+// five entries first — 5 wasted attempts / 10 queries, two of them leaving the
+// cluster. Qualifying without the trailing dot makes each wasted attempt longer while
+// eliminating none of them. Only the trailing dot makes the resolver skip the search
+// path (docs/benchmarks/cold-start-ledger.md, lever 1).
 func TestDefaultGatewayHostIsRooted(t *testing.T) {
 	if DefaultGatewayHost != wantGatewayHost {
 		t.Fatalf("DefaultGatewayHost = %q, want the rooted %q", DefaultGatewayHost, wantGatewayHost)
