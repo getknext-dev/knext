@@ -132,9 +132,14 @@ connection during cold start. `sslmode=require` (self-signed, cluster-local infr
 look like activity and keep the database awake. Keep your **pool's idle timeout below the
 gateway's idle window** (`GW_IDLE_MS`, default 60 s) and `minIdle`/`min_connections` at `0`, or
 the database never sleeps. `@getknext/lib`'s `getDbPool()` already ships scale-to-zero-sane
-defaults (`DB_POOL_MAX=5`, 10 s idle). Full DSN reference, the cold-start client experience,
-and the tier table are in scale-zero-pg's
-[connecting](https://github.com/getknext-dev/scale-zero-pg/blob/main/docs/connecting.md).
+defaults (`DB_POOL_MAX=5`, 10 s idle). Full DSN reference and the cold-start client
+experience are in scale-zero-pg's
+[connecting](https://github.com/getknext-dev/scale-zero-pg/blob/main/docs/connecting.md);
+the per-app warm tier in the table above is documented in the
+[AppDatabase API](https://github.com/getknext-dev/scale-zero-pg/blob/main/docs/appdatabase-api.md)
+(note: connecting.md's own "choosing a tier" table describes the shared single-database
+plane's warm pool, a different mechanism — don't scale that deployment to warm a per-app
+database).
 
 ## 4. What the database layer provides (v1.0.0)
 

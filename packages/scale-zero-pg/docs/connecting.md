@@ -43,6 +43,12 @@ Set your client's connect timeout ≥ 10s so cold starts never race it.
 
 ## Choosing a tier: cold-zero (default) vs warm
 
+> **Scope: this table is the SINGLE-DB plane's tier** (the shared `compute-warm`
+> warmpool, `GW_COMPUTE_MODE=warmpool`). It is NOT `AppDatabase.spec.tier` — the
+> per-app warm tier is a permanent held connection with no wake at all, documented
+> in [appdatabase-api.md §2a](appdatabase-api.md). Scaling `compute-warm` does not
+> warm a per-app database.
+
 Every database picks one of two tiers. **Nothing in your application changes** —
 same DSN, same driver, same SQL. The only difference is first-connection latency
 after idle, and what it costs while idle.
