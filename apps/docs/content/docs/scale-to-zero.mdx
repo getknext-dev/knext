@@ -89,7 +89,11 @@ range is the installed platform's, not knext's. `kn-next doctor` reports the ver
 running against. **The knext operator has to know the setting too**: if the operator on your
 cluster predates it, `kn-next deploy` stops at its preflight check and names the field — update
 the operator first, then deploy. The delay also covers the **app only** — a database that sleeps when idle keeps
-its own wake time, so the first query after an idle period can still be slow on a warm pod.
+its own wake time, so the first query after an idle period can still be slow on a warm pod. If
+your database runs on a scale-to-zero engine, keep its idle window **at least as long as this
+delay** — otherwise the warm pod answers instantly and then waits for the database to wake anyway.
+That idle window is a platform setting your cluster operator owns, not something configured per
+app.
 </Callout>
 
 ## The cold-start budget

@@ -108,7 +108,10 @@ doctor` reports the version installed on your cluster. The knext operator has to
 too: on a cluster whose operator predates it, `kn-next deploy` stops at its preflight check and
 names the field — update the operator first. Note too that the delay keeps your *app*
 warm — a database that sleeps when idle has its own wake time, and the first query after that can
-still be slow on an otherwise warm pod.
+still be slow on an otherwise warm pod. If your database runs on a scale-to-zero engine, its idle
+window must be **at least as long as this delay**, or the warm pod answers instantly and then
+waits for the database to wake anyway. That idle window is a platform setting your cluster
+operator owns — it is not configured per app.
 </Callout>
 
 ## Check your understanding
