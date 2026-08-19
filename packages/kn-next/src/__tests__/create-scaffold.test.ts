@@ -841,3 +841,86 @@ describe("kn-next create — a generated app is COVERED by the seam-guard CI mat
         expect(discoverSeamAliveApps(root)).toContain("scaffolded");
     });
 });
+
+describe("kn-next create — the scaffolded config keeps the last pod warm (ADR-0045)", () => {
+    /**
+     * ADR-0045 Decision 2: the field itself defaults to UNSET (byte-identical
+     * back-compat for every existing NextApp); the zero-devops posture ships in
+     * the SCAFFOLDER instead, where it lands in the user's own file and is
+     * removed by deleting a line. So this is asserted on the generated app, not
+     * on the CR builder.
+     */
+    it('writes scaleDownDelay: "5m" into the generated kn-next.config.ts', () => {
+        const { appDir } = scaffoldApp("warm-app");
+        const config = readFileSync(join(appDir, "kn-next.config.ts"), "utf8");
+        expect(config).toMatch(/scaleDownDelay:\s*"5m"/);
+    });
+
+    it("puts it inside the scaling block (a stray top-level key is not the field)", () => {
+        const { appDir } = scaffoldApp("warm-scope");
+        const config = readFileSync(join(appDir, "kn-next.config.ts"), "utf8");
+        const scalingBlock = /scaling:\s*\{([\s\S]*?)\n\s*\},/.exec(config);
+        expect(scalingBlock).not.toBeNull();
+        expect(scalingBlock?.[1]).toMatch(/scaleDownDelay:\s*"5m"/);
+    });
+
+    it("states the idle cost and the opt-out in a comment next to it", () => {
+        const { appDir } = scaffoldApp("warm-doc");
+        const config = readFileSync(join(appDir, "kn-next.config.ts"), "utf8");
+        const line = config
+            .split("\n")
+            .findIndex((l) => /scaleDownDelay:/.test(l));
+        expect(line).toBeGreaterThan(0);
+        const comment = config.split("\n").slice(0, line).join("\n");
+        // The cost (an idle pod + its DB connections) and the one-line opt-out
+        // must both be visible where the value is, not only in the docs site.
+        expect(comment).toMatch(/idle/i);
+        expect(comment).toMatch(/delete this line/i);
+    });
+
+    it("the scaffolded value SURVIVES the CLI's own validation (a config that cannot deploy is not a scaffold)", async () => {
+        const { appDir } = scaffoldApp("warm-valid");
+        const config = readFileSync(join(appDir, "kn-next.config.ts"), "utf8");
+        const value = /scaleDownDelay:\s*"([^"]+)"/.exec(config)?.[1];
+        expect(value).toBe("5m");
+        const { validateConfig } = await import("../cli/validate");
+        expect(() =>
+            validateConfig({
+                name: "warm-valid",
+                registry: "registry",
+                storage: {
+                    provider: "gcs",
+                    bucket: "b",
+                    publicUrl: "https://example.com",
+                },
+                scaling: { minScale: 0, maxScale: 10, scaleDownDelay: value },
+            }),
+        ).not.toThrow();
+    });
+
+    it("the scaffolded value FLOWS into the emitted NextApp CR (a config the builder drops is decoration)", async () => {
+        const { appDir } = scaffoldApp("warm-flow");
+        const config = readFileSync(join(appDir, "kn-next.config.ts"), "utf8");
+        const value = /scaleDownDelay:\s*"([^"]+)"/.exec(config)?.[1];
+        const { buildNextAppCRObject } = await import("../cli/cr-builder");
+        const cr = buildNextAppCRObject(
+            {
+                name: "warm-flow",
+                registry: "registry",
+                storage: {
+                    provider: "gcs",
+                    bucket: "b",
+                    publicUrl: "https://example.com",
+                },
+                scaling: { minScale: 0, maxScale: 10, scaleDownDelay: value },
+            },
+            "registry/app@sha256:deadbeef",
+            "ns",
+        );
+        const scaling = (cr.spec as Record<string, unknown>).scaling as Record<
+            string,
+            unknown
+        >;
+        expect(scaling.scaleDownDelay).toBe("5m");
+    });
+});
