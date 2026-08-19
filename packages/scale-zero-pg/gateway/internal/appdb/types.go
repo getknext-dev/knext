@@ -48,17 +48,23 @@ const (
 	// It does NOT gate serving readiness (that is CondReady) — the app is fully usable
 	// while this is still False; this condition is purely about disaster-restore coverage.
 	CondColdRestorable = "ColdRestorable"
-	// CondWarmHold reports the scheduled DB warm lockstep (knext #388, ADR-0030
-	// addendum): while any spec.warmSchedule window is active the operator holds one
-	// authenticated connection through the apps-gateway so the compute never goes
-	// idle (its scale-to-zero sleep only arms with zero connections) — True/WindowActive.
+	// CondWarmHold reports the DB warm lockstep (knext #388, ADR-0030 addendum;
+	// extended to spec.tier: warm in #777). The operator holds one authenticated
+	// connection through the apps-gateway so the compute never goes idle (its
+	// scale-to-zero sleep only arms with zero connections) — permanently for
+	// spec.tier: warm (True/TierWarm) or while a spec.warmSchedule window is
+	// active (True/WindowActive).
 	// It is False/WindowInactive outside every window, False/InvalidWarmWindow when a
 	// window fails to parse (no admission webhook exists on this CRD, so a typo is
-	// surfaced here + via a Warning event rather than silently skipped), and
-	// False/HoldFailed when the hold could not be (re-)established. It NEVER gates
-	// serving readiness: a hold failure degrades warming to the ordinary cold-wake
-	// path. Emitted only when spec.warmSchedule is non-empty, so schedule-less CRs
-	// reconcile byte-identically to before.
+	// surfaced here + via a Warning event rather than silently skipped),
+	// False/HoldFailed when the hold could not be (re-)established, and
+	// False/HoldsUnavailable when this operator has no warm-hold actuator wired.
+	// It NEVER gates serving readiness: a hold failure degrades warming to the
+	// ordinary cold-wake path (the Ready condition then carries reason
+	// WarmHoldDegraded, so a warm tier that is not actually warm never reads as
+	// warm-and-healthy). Emitted only when the CR asks for warmth
+	// (warmHoldRequested), so a cold, schedule-less CR reconciles byte-identically
+	// to before.
 	CondWarmHold = "WarmHold"
 )
 
@@ -223,10 +229,31 @@ func (a *AppDatabase) ownerRef() *metav1.OwnerReference {
 	}
 }
 
-// desiredReplicas is 1 for the warm tier, 0 (scale-to-zero) otherwise.
-func (a *AppDatabase) desiredReplicas() int {
-	if a.Spec.Tier == "warm" {
-		return 1
-	}
-	return 0
+// desiredReplicas is ALWAYS 0 (#777). It used to be 1 for spec.tier: warm, and
+// that was the defect: ApplyCompute deliberately PRESERVES the Deployment's live
+// spec.replicas on update (the apps-gateway is the single writer of per-app
+// replicas), and the gateway parks the compute at 0 once the first connection
+// closes and GW_IDLE_MS elapses. Nothing restored the replica, so the warm tier
+// held for exactly one idle window and then silently degraded to cold forever.
+//
+// Warmth for spec.tier: warm is now a PERMANENT warm hold (warmHoldRequested +
+// reconcileWarmHold) — one authenticated connection through the gateway, which
+// is the only thing that actually keeps a compute awake. The function is kept
+// (rather than inlining a 0) so the single place that decides the operator's
+// replica intent stays named, greppable, and documented: the operator writes 0
+// and never fights the gateway. See #766: no minWarm / replica-floor field.
+func (a *AppDatabase) desiredReplicas() int { return 0 }
+
+// warmHoldRequested reports whether this CR asks the operator to hold its
+// compute warm at all — either permanently (spec.tier: warm) or on a schedule
+// (spec.warmSchedule).
+//
+// PRECEDENCE (lead's call, #777): spec.tier: warm is a PERMANENT hold, active
+// regardless of any declared window. When BOTH are set the permanent hold
+// SUBSUMES the windows: the windows are not evaluated at all, because a hold
+// that is already permanent cannot be made more active by a window (and a
+// window boundary must never drop a warm tier's hold). Documented in
+// docs/appdatabase-api.md §2 + §3b.
+func (a *AppDatabase) warmHoldRequested() bool {
+	return a.Spec.Tier == "warm" || len(a.Spec.WarmSchedule) > 0
 }

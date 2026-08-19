@@ -153,7 +153,9 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 		return true, fmt.Errorf("teardown ro compute: %w", err)
 	}
 
-	// 4c. Scheduled DB warm lockstep (knext #388, ADR-0030 addendum). While any
+	// 4c. DB warm lockstep (knext #388, ADR-0030 addendum; tier:warm added #777).
+	//    Two ways in, ONE actuator: a permanent hold for spec.tier: warm, and a
+	//    windowed hold while any spec.warmSchedule window is active. While any
 	//    spec.warmSchedule window is active, hold ONE authenticated connection
 	//    through the apps-gateway so this app's compute stays at 1 for the whole
 	//    window — the gateway's idle scale-to-zero only arms with ZERO connections,
@@ -168,10 +170,20 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 	//    the gateway parks the compute on its ordinary idle window. Warming is
 	//    BEST-EFFORT: a hold failure degrades to the normal cold-wake path and
 	//    surfaces loudly (Warning event + WarmHold condition), it NEVER fails
-	//    provisioning. Schedule-less CRs skip this entirely (byte-identical
-	//    back-compat); Holds==nil (a schedule-less install) likewise.
-	if len(cr.Spec.WarmSchedule) > 0 && d.Holds != nil {
-		d.reconcileWarmHold(ctx, cr, app)
+	//    provisioning. CRs that ask for no warmth at all (cold tier, no
+	//    schedule) skip this entirely — byte-identical back-compat.
+	//
+	//    Holds==nil is an install without the actuator wired. It cannot honour
+	//    the request, so it SAYS so on the condition (#777 honest status) rather
+	//    than leaving a warm-tier CR with no WarmHold condition at all, which
+	//    reads as "warm and fine".
+	if cr.warmHoldRequested() {
+		if d.Holds == nil {
+			d.setCondition(cr, CondWarmHold, "False", "HoldsUnavailable",
+				"warmth was requested but this operator has no warm-hold actuator wired; the compute is not held warm (it still wakes on connect)")
+		} else {
+			d.reconcileWarmHold(ctx, cr, app)
+		}
 	}
 
 	// 5. Ensure the branch exists on the pageserver (durable). Idempotent on tl.
@@ -271,22 +283,39 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 		roNote = " (roPool enabled; DATABASE_URL_RO live -> compute-ro-" + app + ")"
 	}
 
+	// Serving readiness is the SAME for both tiers, because the wake path is the
+	// same: provisioned == servable, the apps-gateway wakes the compute 0->1 on
+	// connect. What the warm tier adds is that the operator holds a connection so
+	// that wake has already happened — a latency property, never a serving gate
+	// (#777). So a warm tier is Ready either way; whether it is ACTUALLY warm
+	// right now is a true statement carried by CondWarmHold and echoed in the
+	// Ready reason (WarmHeld vs WarmHoldDegraded) and status.message.
+	//
+	// Deliberately REMOVED here (#777): the old "warm compute starting" branch,
+	// which set Phase=Provisioning and requeued while no replica was available.
+	// That state could never resolve — the operator writes no replicas
+	// (desiredReplicas is 0) and the gateway parks the compute on idle — so a
+	// warm-tier CR reported Provisioning forever after its first idle window
+	// while serving perfectly well. status.computeReady still reports the live
+	// replica as a diagnostic.
 	requeue := false
-	if cr.desiredReplicas() == 0 {
+	cr.Status.Phase = PhaseReady
+	switch {
+	case cr.Spec.Tier == "warm" && isConditionTrue(cr, CondWarmHold):
+		cr.Status.Message = "provisioned; compute held warm by the operator's warm hold" + roNote
+		d.setCondition(cr, CondReady, "True", "WarmHeld",
+			"warm tier; one authenticated gateway connection is held, so the compute does not idle to zero")
+	case cr.Spec.Tier == "warm":
+		// Warm was REQUESTED but is not in effect (hold failed, or no actuator).
+		// Say so: never report warm-and-healthy on a tier that is running cold.
+		cr.Status.Message = "provisioned; warm hold NOT in effect — degraded to cold, compute wakes on connect (see the WarmHold condition)" + roNote
+		d.setCondition(cr, CondReady, "True", "WarmHoldDegraded",
+			"warm tier requested but not held warm; serving is unaffected — the compute wakes on connect (see the WarmHold condition)")
+	default:
 		// Cold tier: provisioned == Ready. The compute wakes 0->1 on connect via the
 		// apps-gateway; an available replica at rest is not expected.
-		cr.Status.Phase = PhaseReady
 		cr.Status.Message = "provisioned; compute wakes on connect" + roNote
 		d.setCondition(cr, CondReady, "True", "Provisioned", "cold tier; compute wakes on connect")
-	} else if avail {
-		cr.Status.Phase = PhaseReady
-		cr.Status.Message = "provisioned; warm compute available" + roNote
-		d.setCondition(cr, CondReady, "True", "ComputeAvailable", "warm compute has an available replica")
-	} else {
-		cr.Status.Phase = PhaseProvisioning
-		cr.Status.Message = "warm compute starting" + roNote
-		d.setCondition(cr, CondReady, "False", "ComputeStarting", "waiting for a warm replica")
-		requeue = true
 	}
 	if err := d.Cluster.UpdateStatus(ctx, cr); err != nil {
 		return true, fmt.Errorf("update status: %w", err)
@@ -294,10 +323,22 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 	return requeue || coldRestorableRequeue, nil
 }
 
-// reconcileWarmHold applies the scheduled warm-window decision for one app:
-// ensure the hold while a window is active, release it otherwise, and surface
-// the state on the WarmHold condition (never gating). Called only when the CR
-// declares a warmSchedule and a Holds actuator is wired.
+// reconcileWarmHold applies the warm decision for one app: ensure the hold
+// while warmth is due, release it otherwise, and surface the state on the
+// WarmHold condition (never gating). Called only when the CR requests warmth
+// (warmHoldRequested) and a Holds actuator is wired.
+//
+// TWO ways in, ONE actuator:
+//   - spec.tier: warm — a PERMANENT hold, i.e. a 24/7 warm window (#777). The
+//     tier used to mean "apply the Deployment at replicas 1", which the gateway
+//     undid on the first idle window; a hold is the only thing that keeps a
+//     compute awake, so the tier is now expressed in the mechanism that works.
+//   - spec.warmSchedule — the windowed hold (#388, ADR-0030 addendum).
+//
+// PRECEDENCE: tier wins. When both are set the permanent hold subsumes the
+// windows, which are therefore NOT evaluated at all — no window boundary may
+// drop a warm tier's hold, and an invalid window on a warm-tier CR is inert
+// rather than "warming nothing" (so it raises no InvalidWarmWindow event).
 //
 // Warning events are gated on the CondWarmHold TRANSITION, not fired on every
 // ~15s resync pass while the bad state persists — mirroring the
@@ -306,7 +347,11 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 // unreachable compute). The condition itself is still refreshed every pass
 // (never stale); only the duplicate Event object is suppressed.
 func (d *Deps) reconcileWarmHold(ctx context.Context, cr *AppDatabase, app string) {
-	active, invalid := warmScheduleActive(cr.Spec.WarmSchedule, d.Now().Time)
+	permanent := cr.Spec.Tier == "warm"
+	active, invalid := true, []WarmWindow(nil)
+	if !permanent {
+		active, invalid = warmScheduleActive(cr.Spec.WarmSchedule, d.Now().Time)
+	}
 
 	// Snapshot BEFORE this pass mutates the condition, so the gates below
 	// compare against what was true on the LAST reconcile, not this one.
@@ -345,16 +390,25 @@ func (d *Deps) reconcileWarmHold(ctx context.Context, cr *AppDatabase, app strin
 			// verbatim). Redact BEFORE this text reaches the condition, the
 			// Event, or (via the controller's error log) stdout.
 			safeErr := redactDSN(err.Error())
+			due := "warm window active"
+			if permanent {
+				due = "spec.tier: warm"
+			}
 			d.setCondition(cr, CondWarmHold, "False", "HoldFailed",
-				fmt.Sprintf("warm window active but the hold could not be established (degraded to cold-wake this pass; retried next resync): %s", safeErr))
+				fmt.Sprintf("%s but the hold could not be established (degraded to cold-wake this pass; retried next resync): %s", due, safeErr))
 			if prevReason != "HoldFailed" {
 				d.Cluster.Event(cr, "Warning", "WarmHoldFailed",
-					fmt.Sprintf("could not hold compute-%s warm for the active window (cold wake still works; retrying): %s", app, safeErr))
+					fmt.Sprintf("could not hold compute-%s warm (%s; cold wake still works; retrying): %s", app, due, safeErr))
 			}
 			return
 		}
-		d.setCondition(cr, CondWarmHold, "True", "WindowActive",
-			"a warmSchedule window is active; holding one gateway connection so the compute stays warm (no DB cold start during the window)")
+		if permanent {
+			d.setCondition(cr, CondWarmHold, "True", "TierWarm",
+				"spec.tier: warm — holding one gateway connection permanently so the compute never idles to zero (no DB cold start)")
+		} else {
+			d.setCondition(cr, CondWarmHold, "True", "WindowActive",
+				"a warmSchedule window is active; holding one gateway connection so the compute stays warm (no DB cold start during the window)")
+		}
 	}
 }
 

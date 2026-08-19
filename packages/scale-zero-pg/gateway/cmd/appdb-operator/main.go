@@ -161,7 +161,7 @@ func main() {
 		sort.Strings(apps)
 		w.Header().Set("content-type", "text/plain")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("# HELP appdb_warm_hold_active 1 while the appdb operator holds this app's compute warm for an active warmSchedule window (knext #388).\n"))
+		_, _ = w.Write([]byte("# HELP appdb_warm_hold_active 1 while the appdb operator holds this app's compute warm - permanently for spec.tier warm (knext #777) or for an active spec.warmSchedule window (knext #388).\n"))
 		_, _ = w.Write([]byte("# TYPE appdb_warm_hold_active gauge\n"))
 		for _, app := range apps {
 			_, _ = fmt.Fprintf(w, "appdb_warm_hold_active{app=%q} 1\n", app)

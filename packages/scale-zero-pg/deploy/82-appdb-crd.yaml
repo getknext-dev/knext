@@ -61,7 +61,13 @@ spec:
                   maxLength: 63
                 tier:
                   type: string
-                  description: cold = scale-to-zero at rest (replicas 0); warm = keep one replica hot.
+                  description: >-
+                    cold = scale-to-zero at rest, the gateway wakes the compute on connect.
+                    warm = the operator holds one authenticated gateway connection permanently
+                    so the compute never idles to zero (a permanent warm hold, equivalent to a
+                    24/7 warmSchedule window; it takes precedence over warmSchedule). NOT a
+                    replica floor - the operator writes replicas 0 for both tiers; the gateway
+                    is the single writer of replica counts. See docs/appdatabase-api.md section 2a.
                   enum: [cold, warm]
                   default: cold
                 quotas:
