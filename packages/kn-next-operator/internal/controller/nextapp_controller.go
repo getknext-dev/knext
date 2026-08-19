@@ -854,6 +854,16 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 		//   PASSED   target-burst-capacity (#411), panic-window-percentage and
 		//            panic-threshold-percentage (#413) — reaction-shape knobs
 		//            that cost nothing idle, so a preview keeps the user's values.
+		//   PASSED   containerConcurrency (#377, ADR-0028) — stamped as a ksvc
+		//            TEMPLATE FIELD, not an annotation (see :~985), which is why it
+		//            was missing from this list for so long. It shapes WHEN Knative
+		//            adds a pod, not idle cost, so a preview keeps the user's value.
+		//   PASSED   timeoutSeconds — also a template field. Not an autoscaling knob
+		//            (a per-request duration cap), listed so the field-shaped blind
+		//            spot stays visible rather than being rediscovered. The other two
+		//            RevisionSpec knobs (responseStartTimeoutSeconds,
+		//            idleTimeoutSeconds) are left nil today; the guard REFLECTS over
+		//            RevisionSpec, so rendering either without a disposition reds CI.
 		//
 		// scale-down-delay is DROPPED, not clamped: previews predate the field,
 		// so dropping restores their exact prior behaviour — the Knative cluster
@@ -869,6 +879,17 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 		// gets missed. Any NEW ScalingSpec knob that stamps an annotation MUST be
 		// explicitly dispositioned in the list above — forced, dropped, or
 		// deliberately passed through — with an envtest asserting it.
+		//
+		// GATE (#775): the list above is no longer only prose. The scanning guard
+		// in internal/controller/preview_annotation_disposition_test.go runs
+		// buildDesiredKsvc production-vs-preview over SEVERAL admission-valid
+		// NextApp shapes — maximal-with-warmSchedule, pinned-traffic (mutually
+		// exclusive with the first, #393) and minimal, the last of which is what
+		// reaches a stamp gated on a sub-spec being ABSENT. It requires every leaf
+		// of NextAppSpec to be exercised by some fixture, every fixture to pass
+		// validation.ValidateNextAppSpec, and every rendered knob — annotations by
+		// prefix, RevisionSpec fields by reflection — to carry a disposition. Add a
+		// knob here and the guard reds until you record the decision in both places.
 		annotations["autoscaling.knative.dev/max-scale"] = "1"
 		annotations["autoscaling.knative.dev/min-scale"] = "0"
 		annotations["autoscaling.knative.dev/scale-to-zero-pod-retention-period"] = "30s"
