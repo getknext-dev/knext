@@ -1144,8 +1144,17 @@ jobs:
       - name: Install syft
         uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
 
+      # Unlike download-syft (which exports to PATH itself), download-grype only
+      # exposes the binary location via its `cmd` output — spawning bare `grype`
+      # without the PATH step below is an ENOENT, caught on this gate's first
+      # real CI run. The output is the pinned action's own value, not
+      # user-influenced text, so interpolating it into `run:` is safe.
       - name: Install grype
+        id: grype
         uses: anchore/scan-action/download-grype@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+
+      - name: Put grype on PATH
+        run: dirname "${{ steps.grype.outputs.cmd }}" >> "$GITHUB_PATH"
 
       # SBOM (CycloneDX) over the installed closure -> coverage/emptiness guard
       # -> HIGH/CRITICAL scan of that exact SBOM, minus the dated + justified
