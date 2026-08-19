@@ -196,6 +196,11 @@ describe("buildNextAppCRObject — scaleDownDelay (ADR-0045)", () => {
     it("omits the scaleDownDelay KEY entirely when unset (byte-identical back-compat)", () => {
         const scaling = scalingOf(baseConfig({ minScale: 0, maxScale: 10 }));
         expect(Object.keys(scaling)).not.toContain("scaleDownDelay");
+        // "" is the unset spelling on both sides (validate skips it, the CRD
+        // field is omitempty) — it must not surface as an empty-string key.
+        expect(
+            Object.keys(scalingOf(baseConfig({ scaleDownDelay: "" }))),
+        ).not.toContain("scaleDownDelay");
         expect(Object.keys(scalingOf(baseConfig(undefined)))).not.toContain(
             "scaleDownDelay",
         );

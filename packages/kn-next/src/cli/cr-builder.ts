@@ -89,8 +89,11 @@ export function buildNextAppCRObject(
         // annotation is not stamped and the Knative cluster default applies
         // unmanaged: byte-identical back-compat. Passed through VERBATIM — the
         // operator (webhook + reconciler, delegating to Knative's own
-        // validator) is the single authority on the value's semantics.
-        ...(config.scaling?.scaleDownDelay !== undefined
+        // validator) is the single authority on the value's semantics. Truthy,
+        // not !== undefined: "" is the unset spelling on both sides (validate
+        // skips it, the CRD field is omitempty), so it must not surface as an
+        // empty-string key in the CR.
+        ...(config.scaling?.scaleDownDelay
             ? { scaleDownDelay: config.scaling.scaleDownDelay }
             : {}),
         // ADR-0037 — opt-in node-local image pre-pull. Mapped ONLY when true so
