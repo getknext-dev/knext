@@ -83,6 +83,16 @@ export function buildNextAppCRObject(
                       config.scaling.panicThresholdPercentage,
               }
             : {}),
+        // ADR-0045 — how long the last pod stays routable after traffic stops
+        // (the operator stamps `autoscaling.knative.dev/scale-down-delay`).
+        // Mapped ONLY when set, so unset ⇒ the key is absent from the CR ⇒ the
+        // annotation is not stamped and the Knative cluster default applies
+        // unmanaged: byte-identical back-compat. Passed through VERBATIM — the
+        // operator (webhook + reconciler, delegating to Knative's own
+        // validator) is the single authority on the value's semantics.
+        ...(config.scaling?.scaleDownDelay !== undefined
+            ? { scaleDownDelay: config.scaling.scaleDownDelay }
+            : {}),
         // ADR-0037 — opt-in node-local image pre-pull. Mapped ONLY when true so
         // unset/false ⇒ omitted from the CR (the operator deletes any prior
         // <app>-imgcache DaemonSet); byte-identical back-compat when unused.

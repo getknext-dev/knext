@@ -113,3 +113,58 @@ describe("validateConfig — scaling knobs (#415)", () => {
         ).not.toThrow();
     });
 });
+
+/**
+ * ADR-0045 — `scaling.scaleDownDelay` is checked SYNTACTICALLY only.
+ *
+ * The operator's `ValidateNextAppSpec` delegates the range/precision rules to
+ * Knative's own `autoscaling.ValidateAnnotations` precisely so the two cannot
+ * diverge; re-deriving "0s–1h, second precision" here would reintroduce that
+ * divergence one layer up, in a language that never sees the installed
+ * cluster. So: shape only, and the server-side dry-run in `preflightCRSchema`
+ * carries the semantics.
+ */
+describe("validateConfig — scaleDownDelay (ADR-0045)", () => {
+    it("accepts a well-formed Go duration", () => {
+        for (const value of ["5m", "0s", "1h", "90s", "1h30m", "1500ms"]) {
+            expect(() =>
+                validateConfig(baseConfig({ scaleDownDelay: value })),
+            ).not.toThrow();
+        }
+    });
+
+    it("accepts a config with scaleDownDelay unset", () => {
+        expect(() =>
+            validateConfig(baseConfig({ minScale: 0, maxScale: 10 })),
+        ).not.toThrow();
+    });
+
+    it("rejects a value that is not a Go duration", () => {
+        for (const value of ["5min", "banana", "5", "", "m5"]) {
+            expect(() =>
+                validateConfig(baseConfig({ scaleDownDelay: value })),
+            ).toThrow(ConfigValidationError);
+            expect(() =>
+                validateConfig(baseConfig({ scaleDownDelay: value })),
+            ).toThrow(/scaleDownDelay/);
+        }
+    });
+
+    it("names the expected format in the error (a bare 'invalid' teaches nothing)", () => {
+        expect(() =>
+            validateConfig(baseConfig({ scaleDownDelay: "5min" })),
+        ).toThrow(/Go duration|e\.g\. "5m"/);
+    });
+
+    it("does NOT range-check — the operator webhook owns Knative's 0s-1h rule", () => {
+        // Out of Knative's accepted range, but syntactically a duration: the CLI
+        // must pass it through so the ONE authority rejects it (with the bound
+        // named), rather than two layers disagreeing about what the bound is.
+        expect(() =>
+            validateConfig(baseConfig({ scaleDownDelay: "24h" })),
+        ).not.toThrow();
+        expect(() =>
+            validateConfig(baseConfig({ scaleDownDelay: "1500ms" })),
+        ).not.toThrow();
+    });
+});

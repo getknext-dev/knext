@@ -145,6 +145,29 @@ export interface ScalingConfig {
     // unmanaged.
     panicThresholdPercentage?: number;
 
+    // Knative `autoscaling.knative.dev/scale-down-delay` (ADR-0045): how long
+    // the last pod stays ROUTABLE after traffic stops. A request that lands
+    // inside the window is served by a pod that never went away (~52 ms
+    // measured) instead of paying a true cold start (~2.2 s), and — because no
+    // scale-down transition is in flight — it also cannot hit the 5-7 s
+    // activator/endpoints stall that transition produces. After the window,
+    // scale-to-zero proceeds exactly as before. A Go duration string ("30s",
+    // "5m", "1h"); Knative accepts 0s-1h at second precision. Default
+    // (operator): unset — the annotation is NOT stamped and the Knative
+    // cluster default applies unmanaged.
+    //
+    // COST (ADR-0028/0029, the connection wall): the delay holds pods — and
+    // their idle DATABASE_URL pool connections — alive past the point they
+    // would have released them. It does not raise peak `maxScale × poolMax`,
+    // but it does raise IDLE connection occupancy against the shared budget.
+    //
+    // ENFORCEMENT: the annotation's accepted range is the INSTALLED Knative's,
+    // so a value can still be clamped or ignored by an older cluster
+    // (`kn-next doctor` reports the installed version). The operator's
+    // admission webhook is the authority for range validation — this config
+    // layer only types and shape-checks the value.
+    scaleDownDelay?: string;
+
     // ADR-0037 — opt-in node-local image pre-pull. When true the operator
     // reconciles a `<app>-imgcache` DaemonSet that pulls and PINS the app's
     // digest-pinned image on every schedulable node, so scale-from-zero never
