@@ -20,6 +20,11 @@ const config: KnativeNextConfig = {
     minScale: 0,
     maxScale: 10,
     containerConcurrency: 100,
+    // Keep the last pod routable for 5 minutes after traffic stops: requests in
+    // that window skip the cold start entirely (~50 ms vs seconds). Costs one
+    // idle pod (and its idle DB connections) for the window after every burst —
+    // delete this line to scale to zero immediately.
+    scaleDownDelay: "5m",
   },
 
   // Bring-your-own database binding (optional). knext provisions no database —
