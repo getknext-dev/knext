@@ -457,6 +457,21 @@ type ScalingSpec struct {
 	// decides the behaviour — `kn-next doctor` reports the installed Knative
 	// version, and the ~52 ms warm-hit promise holds only on a cluster that
 	// honours the annotation.
+	//
+	// WARM THE DATABASE TOO (#766 ruling; the on-demand sibling of
+	// warmSchedule's paragraph above): this delay keeps the POD routable; it
+	// does NOT keep a scale-to-zero database compute awake. Inside the window
+	// a DB-touching request can still pay the database wake (measured: 290 ms
+	// with the compute awake vs ~2.3 s waking it). The two windows are
+	// INDEPENDENT BY DESIGN (ADR-0030 addendum shape: declared per resource,
+	// each operator evaluating its own; divergence accepted, never
+	// reconciled). The DB idle window is the scale-zero-pg GATEWAY's
+	// platform-wide setting, not a per-app field — the alignment rule is:
+	// that window must be >= this delay, or the warm pod answers in ~52 ms
+	// and then blocks on a compute the gateway already reaped. For an app
+	// that needs its database held warm, declare it on that app's
+	// AppDatabase (apps.scale-zero-pg.dev) `spec.warmSchedule` — knext's
+	// operator never reads or writes AppDatabase (ADR-0001 boundary).
 	// +optional
 	ScaleDownDelay string `json:"scaleDownDelay,omitempty"`
 }
