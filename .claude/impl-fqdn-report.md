@@ -124,3 +124,126 @@ ndots arithmetic, a pointer to the knext cold-start ledger, and the minted-once 
   independently of this PR.
 - Not run: kind / OKE. Gates not run (this package requires architect + system-designer
   sign-off — lead-owned).
+
+---
+
+# ROUND 2 — both reviews addressed (commits `ca6be8b` red → `11ba6c5` green, pushed)
+
+Tree was verified clean before any work and after every mutation. Spec §G's "something is
+still mutating this worktree" was **me** — round-1's mutation proofs running during their
+review. Everything below ran only on committed-green trees.
+
+## What each item became
+
+| # | item | done |
+|---|---|---|
+| 1 | code#1 provision-app.sh :169 + :609 | **both** writers rooted (+ the DSN it prints); scan guard covers them; proved RED **separately** (mutations 7 and 8) |
+| 2 | spec A gen-secrets.sh, demo manifest/README | rooted; file-manager redis default explicitly **deferred** (see below) |
+| 3 | spec B doc recipes | `database-platform.md:169` + `postgres-binding.md:154-155` fixed |
+| 4 | code#2 ndots arithmetic | corrected to the LIVE story in all 4 artifacts; "(3 dots)" → 2 |
+| 5 | code#5/spec F `_validate.sh` reachability | 88 fixed; real script now runs past it and evaluates my contract |
+| 6 | code#3 ZONE deferral in-tree | comments at `main.go:74` + `87-zone-operator.yaml:118` |
+| 7 | code#4 tense | now "remains to be proven by the lead's OKE verification" + re-mint requirement |
+| 8 | spec C node parsers | `tests/rooted-host-parsers.test.ts` — executed, not path-read |
+| 9 | spec D re-mint-before-measuring | blockquote in `appdatabase-api.md` |
+| 10 | code#6 dot-count assert | dropped, with a comment explaining why a rooted short name is legal |
+
+## The highest-value finding was real and worse than filed
+
+`provision-app.sh:609` (`rotate-cred`) does not just mint unrooted — it **overwrites a live
+`app-db-<app>`**, so an app the operator had minted rooted would silently **revert** to the
+search-walking host on its next credential rotation. Both writers are now rooted and each is
+mutation-proved **independently** (7 = create only, 8 = rotate only), because a single anchor
+count of 2 would not have proven the guard catches either one alone.
+
+## Guard placement — reachability fixed properly
+
+`_validate.sh` is not wired into the monorepo's root `.github/workflows` (the
+`packages/scale-zero-pg/.github` copy is subtree residue GitHub does not run; #797 owns the
+structural half). So the contract now lives in **two** places: `_validate.sh` (extended over
+provision-app.sh, comment states the CI gap) and **`tests/rooted-minted-hosts.test.ts`**, which
+runs in root CI today. The test SCANS rather than enumerates and asserts **both halves** — each
+artifact must contain a gateway host at all, so a rename cannot turn it into a vacuous pass
+(mutation 12 proves that half).
+
+## 88-loadsoak-k6.yaml — the diagnosis was right, and there was a second layer
+
+The parse failure was exactly the unquoted `memory: ${K6_MEM_REQUEST}` inside a `{flow map}`
+(the `${` opens a brace; the cpu values beside it were already quoted). Quoted both.
+
+That exposed a **second** pre-existing problem: even as valid YAML the file cannot be
+server-validated raw, because `"${K6_MEM_REQUEST}"` is not a valid quantity — it is an envsubst
+template. The dry-run loop now renders `${VAR}` placeholders (stand-in `1Mi`, chosen because it
+satisfies the quantity regex **and** still parses as a string, so `container.image` unmarshals)
+and validates the rendered output. 88 is schema-validated for the first time.
+
+Stated limit, in the code: a defect that exists only in the RAW form and disappears after
+substitution is not caught by a rendered check — which is exactly why those values are quoted
+at the source.
+
+## Reachability proof (real script, not a lifted snippet)
+
+`sh _validate.sh` now gets **past 88** and reaches my contract. One unrelated, pre-existing
+failure sits in between; with only that neutralised **in a throwaway copy**, my contract
+**evaluates and PASSES** (66 `ok -` lines). Baseline and post-restore both re-verified.
+
+**NEW PRE-EXISTING DEFECT FOUND — reported, deliberately NOT fixed here.**
+`_validate.sh:413` greps for `min_over_time(sum(pggw_active_connections)`, but
+`60-prometheus.yaml:162` legitimately evolved to
+`min_over_time((sum(pggw_active_connections) - (sum(appdb_warm_hold_active) or vector(0)))[30m:1m])`.
+The **rule survives; the check's pattern went stale** and has been failing invisibly because the
+script always died at 88 first. `60-prometheus.yaml` is unmodified vs `origin/main` — this is not
+mine. I did not fix it: whether to re-pin the old expression or accept the warm-hold subtraction
+is an alerting-semantics call for that contract's owner. Worth its own issue; it will block
+#797 the moment `_validate.sh` is wired into CI.
+
+## Mutation battery — 16/16 RED, exit-code detection
+
+Round-1's harness misreported a genuine RED because it grepped output; this one uses **exit
+codes only**, asserts every anchor occurs exactly N times (aborting otherwise), verifies each
+mutation applied, restores via `git checkout --`, and re-verifies baseline + tree-clean at the
+end. Baseline was green **before** any mutation.
+
+Go/operator (mine + both reviewers'): short default · unrooted 4-dot default · override ignored ·
+`main.go` hardcodes short ignoring the const · override **auto-rooted** instead of verbatim ·
+mint bypasses `d.GatewayHost`.
+Scan guard: provision-app **create** alone · provision-app **rotate-cred** alone · gen-secrets ·
+demo manifest · operator manifest · host removed entirely (vacuity/presence half).
+`_validate.sh` (real script): manifest loses the dot · manifest env removed · provision-app
+unrooted.
+Parsers: expected host loses its root label.
+
+## Verification state
+
+- Go: `go test ./...` green (10 pkgs), `gofmt -l` clean, `go vet` clean.
+- New TS: 9 tests green; `biome check` clean.
+- Full root `vitest`: 22 files fail — **all environmental, none mine**. This worktree has no
+  per-package `node_modules` (`Failed to resolve drizzle-orm/node-postgres`, `Cannot find
+  module .../typescript/bin/tsc`) — precisely the cascade `.claude/rules/workflow.md` documents.
+  Every failing file is in `packages/db`, `packages/kn-next`, `apps/*`, `examples/*`; I touched
+  none of them. CI runs with a real install.
+- Not run: kind / OKE. Architect + system-designer gates: lead-owned.
+
+## Deferral list (explicit, per spec A's "then say so")
+
+Now stated **in-tree** (`tests/rooted-minted-hosts.test.ts` docblock), not just in a report:
+`apps/file-manager/kn-next.config.ts:17` (app-level redis default — same lever on the other
+measured consumer, separate blast radius) · `ZONE_GATEWAY_HOST` (compute-side conninfo) ·
+`internal/wake/*` + `_verify-*.sh` (gateway-internal / drill dial targets) · ADRs (historical).
+
+## Two corrected sentences for the PR body (spec E — please edit in)
+
+1. Replace the TDD claim with:
+   > **TDD, stated precisely.** The round-1 red commit (`804611d`) failed for the *inverted*
+   > contract — it asserted the FQDN-without-dot form that the ndots arithmetic later disproved,
+   > and the green commit reversed it. The **rooted** requirement's red-first evidence is the
+   > round-2 guard commit (`ca6be8b`), which is red on `provision-app.sh` (both writers),
+   > `gen-secrets.sh` and the demo manifest while already passing on the operator manifest.
+
+2. Replace any fleet-wide/measurement claim with:
+   > **Scope and measurability.** Operator-minted `app-db-<app>` Secrets are mint-once, so this
+   > reaches newly-minted apps; `gen-secrets.sh`'s Secret is apply-reconciled and therefore does
+   > reach existing installs on the next run. The benchmarked app is in the *unaffected* set, so a
+   > post-merge cold-start row taken without re-minting it measures the old host and proves
+   > nothing — re-mint first (`provision-app.sh rotate-cred <app>`, which now writes the rooted
+   > host; the hand-made file-manager Secret must be re-applied by hand).

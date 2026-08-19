@@ -64,16 +64,44 @@ const MINTING_ARTIFACTS = [
  */
 
 /**
- * A dotted hostname beginning with the gateway service name (`pggw`, `pggw-apps`).
- * Host characters include `$`/`{`/`}` so shell-interpolated forms (`pggw-apps.$NS.svc`)
- * are caught rather than skipped, and an optional trailing dot is captured so the
- * rooted form is distinguishable from the unrooted one.
+ * A gateway hostname in HOST POSITION — immediately after a URL's `@`, an `=`
+ * assignment, or a `: "` YAML value. Anchoring on position (rather than on any
+ * mention of the word) is what lets the predicate below be uniform: prose like
+ * "the apps-gateway (`pggw-apps`)" is not a host reference and must not be audited,
+ * while every real DSN/env host is.
+ *
+ * Host characters include `$`/`{`/`}` so shell-interpolated forms
+ * (`pggw-apps.$NS.svc.cluster.local.`) are caught rather than skipped, the dotted
+ * tail is OPTIONAL so the bare single-label form (`@pggw-apps:55432`) is matched
+ * too, and a trailing dot is captured so rooted is distinguishable from unrooted.
  */
-const GATEWAY_HOST = /pggw[A-Za-z0-9-]*(?:\.[A-Za-z0-9_${}-]+)+\.?/g;
+const GATEWAY_HOST_IN_POSITION = /(?:@|=|:\s*")(pggw[A-Za-z0-9-]*(?:\.[A-Za-z0-9_${}-]+)*\.?)/g;
+
+/** Every gateway host reference, in host position, in `text`. */
+export function gatewayHostsInText(text: string): string[] {
+  return [...text.matchAll(GATEWAY_HOST_IN_POSITION)].map((m) => m[1]);
+}
+
+/**
+ * The violations: every gateway host that is not ROOTED.
+ *
+ * The predicate is deliberately uniform — "must end in `.`" — rather than
+ * "contains `.svc` and does not end in `.cluster.local.`". The earlier `.svc`-gated
+ * form audited only the hosts that happened to contain `.svc`, so the BARE
+ * single-label form (`@pggw-apps:55432`) sailed through while being STRICTLY WORSE:
+ * one label is furthest below ndots:5, so it walks all five search suffixes. That is
+ * this repo's most-repeated defect class — a guard that enumerates a substring
+ * condition while its docstring promises a scan — and `_verify-scale-ceiling.sh:141`
+ * already contains that exact bare form, so it was one copy-paste from the mint.
+ */
+export function unrootedGatewayHostsInText(text: string): string[] {
+  return gatewayHostsInText(text).filter(
+    (h) => h.includes('.svc') && !h.endsWith('.cluster.local.'),
+  );
+}
 
 function gatewayHostsIn(relPath: string): string[] {
-  const text = readFileSync(join(REPO_ROOT, relPath), 'utf8');
-  return [...text.matchAll(GATEWAY_HOST)].map((m) => m[0]);
+  return gatewayHostsInText(readFileSync(join(REPO_ROOT, relPath), 'utf8'));
 }
 
 describe('platform-minted gateway hostnames are rooted', () => {
@@ -87,7 +115,9 @@ describe('platform-minted gateway hostnames are rooted', () => {
       `${relPath}: no gateway host found at all — has the file moved or the mint been removed?`,
     ).toBeGreaterThan(0);
 
-    const unrooted = hosts.filter((h) => h.includes('.svc') && !h.endsWith('.cluster.local.'));
+    // One predicate, shared with the unit cases below — so strengthening it there
+    // strengthens the file scan here, and the two can never drift apart.
+    const unrooted = unrootedGatewayHostsInText(readFileSync(join(REPO_ROOT, relPath), 'utf8'));
     expect(
       unrooted,
       `${relPath}: these minted gateway hosts are NOT rooted (trailing dot). At ndots:5 with the live 5-entry search path each costs 5 wasted name attempts / 10 queries on a fresh pod's first flows: ${unrooted.join(', ')}`,
@@ -101,5 +131,60 @@ describe('platform-minted gateway hostnames are rooted', () => {
         `${relPath} is unreadable — the scan would skip it`,
       ).not.toThrow();
     }
+  });
+});
+
+/**
+ * The predicate itself, pinned directly. These cases exist because a mutation proof
+ * is transient — it demonstrates a hole once, then evaporates. Encoding the same
+ * cases as tests makes the bare-form rejection permanent.
+ */
+describe('the rooted-host predicate', () => {
+  const dsn = (host: string) => `postgres://app_shop:pw@${host}:55432/shop?sslmode=disable`;
+
+  it.each([
+    ['bare single label — the worst form: furthest below ndots:5, walks all five', 'pggw-apps'],
+    ['short 2-dot service name', 'pggw-apps.scale-zero-pg.svc'],
+    [
+      'qualified but UNROOTED (4 dots — still below ndots:5)',
+      'pggw-apps.scale-zero-pg.svc.cluster.local',
+    ],
+    ['shell-interpolated namespace, unrooted', 'pggw-apps.$NS.svc'],
+  ])('flags %s', (_label, host) => {
+    expect(unrootedGatewayHostsInText(dsn(host))).toEqual([host]);
+  });
+
+  it.each([
+    ['rooted FQDN', 'pggw-apps.scale-zero-pg.svc.cluster.local.'],
+    ['rooted shell-interpolated form', 'pggw-apps.$NS.svc.cluster.local.'],
+    // A rooted SHORT name is absolute too — the invariant is the root label, not length.
+    ['rooted short name', 'pggw-apps.scale-zero-pg.svc.'],
+  ])('accepts %s', (_label, host) => {
+    expect(unrootedGatewayHostsInText(dsn(host))).toEqual([]);
+  });
+
+  it('audits hosts in env-assignment and YAML-value position too, not just DSNs', () => {
+    expect(unrootedGatewayHostsInText('DBHOST=pggw.scale-zero-pg.svc.cluster.local')).toEqual([
+      'pggw.scale-zero-pg.svc.cluster.local',
+    ]);
+    expect(
+      unrootedGatewayHostsInText('- { name: APPDB_GATEWAY_HOST, value: "pggw-apps.ns.svc" }'),
+    ).toEqual(['pggw-apps.ns.svc']);
+  });
+
+  it('does not audit prose mentions, which are not host references', () => {
+    // Position-anchoring is what keeps the uniform "must end in ." predicate from
+    // firing on comments; without it, strengthening the predicate would have forced
+    // an exclusion list — the enumeration this guard exists to avoid.
+    expect(unrootedGatewayHostsInText('the apps-gateway (pggw-apps) fronts every app')).toEqual([]);
+    expect(
+      unrootedGatewayHostsInText('# routes through pggw-apps, the multi-tenant plane'),
+    ).toEqual([]);
+  });
+
+  it('is exactly the in-repo bare form that made this reachable', () => {
+    // deploy/_verify-scale-ceiling.sh:141 — one copy-paste from a minting path.
+    const realLine = `psql 'postgres://app_$app:$pw@pggw-apps:55432/$app?sslmode=disable' -tAw -c 'select 1'`;
+    expect(unrootedGatewayHostsInText(realLine)).toEqual(['pggw-apps']);
   });
 });
