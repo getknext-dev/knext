@@ -491,7 +491,16 @@ grep -q 'appdatabases/finalizers' 83-appdb-operator.yaml || fail "83-appdb-opera
 grep -q '/appdb-operator' 83-appdb-operator.yaml || fail "83-appdb-operator.yaml must override the entrypoint to /appdb-operator"
 grep -q 'deployments/scale' 83-appdb-operator.yaml && fail "appdb-operator must NOT hold deployments/scale — the apps-gateway owns spec.replicas"
 grep -q 'appdb-operator' ../gateway/Dockerfile || fail "Dockerfile does not build the appdb-operator binary into the image"
-ok "AppDatabase CRD + operator wired (82/83), operator built into the image, does not claim deployments/scale (issue #96)"
+# The DEPLOYED gateway host is this manifest's value, not the binary's default — it
+# overrides it. It must be ROOTED (trailing dot): at the cluster default ndots:5 any
+# name below 5 dots is walked through the whole search path first, so BOTH the short
+# "…svc" form and the qualified-but-unrooted "…svc.cluster.local" form waste the same
+# 3 attempts on exactly the fresh-pod flows that hit the conntrack race (knext
+# cold-start ledger). Scan, don't enumerate: ANY unrooted value here fails.
+grep -q 'APPDB_GATEWAY_HOST, value: "' 83-appdb-operator.yaml || fail "83-appdb-operator.yaml no longer sets APPDB_GATEWAY_HOST — the rooted-host contract below would silently pass"
+grep 'APPDB_GATEWAY_HOST, value: "' 83-appdb-operator.yaml | grep -qv 'value: "[^"]*\."' &&
+  fail "83-appdb-operator.yaml APPDB_GATEWAY_HOST is NOT rooted (no trailing dot) — minted DATABASE_URLs would walk the ndots:5 search path on every fresh pod (a custom DNS zone edits the value but KEEPS the trailing dot)" || true
+ok "AppDatabase CRD + operator wired (82/83), operator built into the image, does not claim deployments/scale (issue #96), minted-DSN gateway host is fully qualified"
 
 # 25. contract (issue #151, ADR-0007 v2-2): the Zone CRD + zone-operator ship together
 #     and are STANDARD deploy artifacts, not drill-only. Same "merged ≠ deployed" class
