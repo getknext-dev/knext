@@ -1,7 +1,8 @@
 # ADR-0045: `spec.scaling.scaleDownDelay` — keep the last pod routable after idle
 
-- **Status:** Proposed (2026-08-19). Architect design gate ran **pre-implementation** on the design
-  brief (issues #761–#763 carry the verdicts); this ADR records the accepted shape.
+- **Status:** Accepted (2026-08-19, ADR merged #768, operator field merged #769) · **Amendment 1
+  (preview narrowing, #770) Accepted.** Architect design gate ran **pre-implementation** on the
+  design brief (issues #761–#763 carry the verdicts); this ADR records the accepted shape.
 - **Depends on:** ADR-0001 (operator = sole cluster writer), ADR-0017 (`v1alpha1` additive-only,
   operator-first upgrade order), ADR-0028/0029 (the connection wall), ADR-0040 (CR field validation
   pattern), ADR-0041 (scaffolder precedent).
