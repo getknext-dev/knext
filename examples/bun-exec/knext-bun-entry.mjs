@@ -185,6 +185,51 @@ const metricsServer = Bun.serve({
 // request before the app + :9091 listeners are up.
 console.log(`LISTENING:${appServer.port} METRICS:${metricsServer.port}`);
 
+// ── Eager app-graph warmup ───────────────────────────────────────────────────
+// Nitro reaches the application through ONE lazy `import()` (the `_ssr` chunk),
+// evaluated on the FIRST matched request. Measured on OKE (2026-08-18): that
+// put ~1.2 s of module evaluation AFTER the pod reported Ready — the pod passes
+// its readiness probe on a bound port whose app has not been evaluated, and the
+// first user pays the difference. Node's standalone boots eagerly BEFORE
+// readiness, which is exactly the asymmetry the cold-start A/B surfaced.
+//
+// Fired CONCURRENTLY, not awaited: the port is already bound (srvx binds
+// synchronously above), so this evaluation overlaps the queue-proxy probe
+// interval and activator forwarding latency instead of adding to them. If a
+// real request lands first, both share the same module-evaluation promise —
+// dynamic `import()` of one specifier is evaluated once.
+//
+// In-process via `nitro.fetch` with a synthetic Request — no self-HTTP, no
+// dependence on the listener. The #460-bug-2 caveat (raw `nitro.fetch` misses
+// srvx's request-context augmentation) is tolerable HERE and only here: even if
+// the warm route touches an srvx-only field and throws, the module graph has
+// already evaluated by then, which is the entire point. Hence the try/catch —
+// a warmup failure must never take down a healthy listener.
+// Comma-separated: each path warms a different subsystem. `/` warms the module
+// graph AND the page-render path and pre-fills the page cache; adding e.g.
+// `/api/health/deep` also establishes the DB pool, so the first user's query
+// skips the connection handshake. Paths warm SEQUENTIALLY — one in-flight warm
+// at a time on a contended cold CPU — but the first fires immediately.
+const WARM_PATHS = (process.env.KNEXT_WARM_PATH ?? '/api/health')
+  .split(',')
+  .map((p) => p.trim())
+  .filter(Boolean);
+if (process.env.KNEXT_EAGER_WARM !== '0') {
+  (async () => {
+    for (const path of WARM_PATHS) {
+      const warmT0 = Date.now();
+      try {
+        const res = await nitro.fetch(new Request(`http://127.0.0.1:${appServer.port}${path}`));
+        console.log(`WARMED:${path} status=${res.status} ms=${Date.now() - warmT0}`);
+      } catch (err) {
+        console.log(
+          `WARMED:${path} status=error ms=${Date.now() - warmT0} (${err?.message ?? err})`,
+        );
+      }
+    }
+  })();
+}
+
 // ── (3) SIGTERM / SIGINT graceful drain ─────────────────────────────────────
 const shutdown = createGracefulShutdown({
   appServers: [appServer],

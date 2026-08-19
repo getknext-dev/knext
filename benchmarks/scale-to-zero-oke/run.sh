@@ -488,6 +488,12 @@ API_ABANDONED_COUNT=0
 # separately from ABANDONED because the causes differ — abandoned means
 # "transient, we stopped fighting"; this means "we never got an answer at all".
 API_UNOBSERVED_COUNT=0
+# Scale-down waits that ended with pods PROVABLY still up (last poll returned a
+# non-zero count). Stronger than UNCONFIRMED: the following "cold" sample is a
+# WARM sample, known, not suspected. Found 2026-08-19: two 52 ms "cold" samples
+# flowed into "dataset is complete" while the inline log said scale-to-zero
+# "did NOT happen" — the strongest per-rep statement never reached the verdict.
+SCALEDOWN_DISPROVEN_COUNT=0
 API_ABANDONED_OPS=""
 
 # record_api_abandon <op-label> <why> — a transient failure we stopped fighting.
@@ -987,6 +993,9 @@ cleanup() {
   if [ "$API_UNOBSERVED_COUNT" -gt 0 ]; then
     log "*** RUN DEGRADED — ${API_UNOBSERVED_COUNT} scale-down wait(s) ended WITHOUT OBSERVING THE FINAL POD COUNT (every poll failed, or the window ended on a failed poll). Scale-to-zero is UNCONFIRMED for those reps, not disproven: any 'cold' sample taken after one may have hit a WARM pod and be biased LOW. ***"
   fi
+  if [ "$SCALEDOWN_DISPROVEN_COUNT" -gt 0 ]; then
+    log "*** RUN CONTAMINATED — ${SCALEDOWN_DISPROVEN_COUNT} 'cold' sample(s) were taken with pods PROVABLY STILL UP (the scale-down window ended on an observed non-zero count). Those reps are WARM samples, not cold-start data. This is not suspicion; it is the harness's own strongest per-rep claim, now carried into the verdict. A scale-down-delay annotation on the service produces exactly this. ***"
+  fi
   if [ "$API_RETRY_COUNT" -gt 0 ] || [ "$API_ABANDONED_COUNT" -gt 0 ]; then
     local ops_summary
     ops_summary=$(printf '%s%s' "$API_RETRY_OPS" "$API_ABANDONED_OPS" | grep -v '^$' | sort | uniq -c \
@@ -997,7 +1006,8 @@ cleanup() {
     # authoritative verdict two lines below on a zero-rep or data-losing run —
     # the fifth "reads cleaner than reality" bug in this harness.
     if [ "$REPS_RUN" -gt 0 ] && [ -z "$INCOMPLETE_REPS" ] && [ "$PHASES_COMPLETED" -eq 1 ] \
-       && [ "$API_UNOBSERVED_COUNT" -eq 0 ] && [ "$POD_QUERY_STDERR_MERGED" != "1" ]; then
+       && [ "$API_UNOBSERVED_COUNT" -eq 0 ] && [ "$SCALEDOWN_DISPROVEN_COUNT" -eq 0 ] \
+       && [ "$POD_QUERY_STDERR_MERGED" != "1" ]; then
       log "*** The control plane was flaky during this run. The data is valid (every config was verified applied), but timings may include control-plane stalls — see the 'api-retry:'/'api-abandoned:' lines above. ***"
     else
       log "*** The control plane was flaky during this run. Every config that WAS applied was verified applied, but this run did not produce a complete dataset — see the run-integrity verdict below, and the 'api-retry:' lines above. ***"
@@ -1042,6 +1052,9 @@ cleanup() {
     # designated integrity verdict asserted completeness for a run that
     # collected nothing.
     log "run integrity: no reps ran; no data collected — this file is NOT a dataset"
+  elif [ "$SCALEDOWN_DISPROVEN_COUNT" -gt 0 ]; then
+    # A disproof OUTRANKS unconfirmed: these reps are known-warm, not maybe-warm.
+    log "run integrity: k6 metrics captured for all ${REPS_RUN} rep(s), but ${SCALEDOWN_DISPROVEN_COUNT} sample(s) were taken with pods PROVABLY still up — those reps are WARM data in a cold-start file; dataset is CONTAMINATED"
   elif [ "$API_UNOBSERVED_COUNT" -gt 0 ] || [ "$POD_QUERY_STDERR_MERGED" = "1" ]; then
     # The authoritative verdict must carry the trust dimension too. Round 2 filed
     # the run as UNCONFIRMED in the index and exited 3, while this line -- the one
@@ -1070,6 +1083,7 @@ cleanup() {
     # pod recorded as cold). That is a claim about DATA TRUSTWORTHINESS, so it
     # belongs in the durable verdict and the exit code -- not only in prose that
     # an automated caller never reads.
+    elif [ "$REPS_RUN" -gt 0 ] && [ "$SCALEDOWN_DISPROVEN_COUNT" -gt 0 ]; then run_status="CONTAMINATED"
     elif [ "$REPS_RUN" -gt 0 ] \
          && { [ "$API_UNOBSERVED_COUNT" -gt 0 ] || [ "$POD_QUERY_STDERR_MERGED" = "1" ]; }; then run_status="UNCONFIRMED"
     else run_status="COMPLETE"; fi
@@ -1267,7 +1281,8 @@ wait_zero() {
     # pods were up at the end of the window. Say so -- round 3 removed the only
     # sentence in the harness that stated a disproof, leaving it able to report
     # "unconfirmed" but never "this did not happen".
-    log "  -> still ${last_n} pod(s) after ${t}s — scale-to-zero did NOT happen within the window (continuing anyway)"
+    SCALEDOWN_DISPROVEN_COUNT=$((SCALEDOWN_DISPROVEN_COUNT + 1))
+    log "  -> still ${last_n} pod(s) after ${t}s — scale-to-zero did NOT happen within the window (continuing anyway; this rep's sample is a WARM sample and the verdict will say so)"
   else
     # Belt and braces: a DISPROOF must never be asserted from an unknown count.
     # `observed=1` should guarantee last_n is a number, so this is unreachable
@@ -2011,7 +2026,8 @@ fi
 # distrust, and claiming otherwise makes the code ambiguous for the automated
 # callers it exists for.
 if [ "$REPS_RUN" -gt 0 ] \
-   && { [ "$API_UNOBSERVED_COUNT" -gt 0 ] || [ "$POD_QUERY_STDERR_MERGED" = "1" ]; }; then
+   && { [ "$API_UNOBSERVED_COUNT" -gt 0 ] || [ "$SCALEDOWN_DISPROVEN_COUNT" -gt 0 ] \
+        || [ "$POD_QUERY_STDERR_MERGED" = "1" ]; }; then
   exit 3
 fi
 # Explicit: falling off the end would leak the exit status of the test above (1),
