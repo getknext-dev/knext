@@ -107,7 +107,7 @@ metadata:
   name: myapp-database
   namespace: my-app-ns
 stringData:
-  DATABASE_URL: postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc:55432/postgres?sslmode=require
+  DATABASE_URL: postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc.cluster.local.:55432/postgres?sslmode=require
 ---
 # 2. bind it from the NextApp CR (typed sugar over secrets.envMap)
 apiVersion: apps.kn-next.dev/v1alpha1

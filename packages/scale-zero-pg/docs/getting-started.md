@@ -118,7 +118,7 @@ warm tier — see [connecting](connecting.md#choosing-a-tier-cold-zero-default-v
 From inside the cluster (any pod):
 
 ```
-postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc:55432/postgres?sslmode=disable
+postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc.cluster.local.:55432/postgres?sslmode=disable
 ```
 
 From your laptop: `kubectl -n scale-zero-pg port-forward svc/pggw 55432:55432`, then

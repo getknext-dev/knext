@@ -5,7 +5,7 @@ Your app talks to an ordinary Postgres. It never needs to know the database slee
 ## The DSN
 
 ```
-postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc:55432/<database>?sslmode=require
+postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc.cluster.local.:55432/<database>?sslmode=require
 ```
 
 - **Host is always the gateway** (`pggw`), never the compute. The gateway routes,
@@ -115,9 +115,9 @@ parsing** and nothing is automatic — you decide which queries are reads.
 
 ```
 # writes + read-your-writes  (the primary; unchanged)
-DATABASE_URL    = postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc:55432/<db>?sslmode=require
+DATABASE_URL    = postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc.cluster.local.:55432/<db>?sslmode=require
 # read-only queries          (the pool; port 55434)
-DATABASE_URL_RO = postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc:55434/<db>?sslmode=require
+DATABASE_URL_RO = postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc.cluster.local.:55434/<db>?sslmode=require
 ```
 
 | | `DATABASE_URL` (writer) | `DATABASE_URL_RO` (read pool) |

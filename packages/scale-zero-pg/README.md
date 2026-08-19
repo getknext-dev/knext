@@ -70,7 +70,7 @@ sh deploy/_verify-wake.sh                             # the full 0→1→0 wake 
 Connect like any Postgres (`sslmode=disable`; dev creds `cloud_admin`/`cloud_admin`):
 
 ```
-postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc:55432/postgres?sslmode=disable
+postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc.cluster.local.:55432/postgres?sslmode=disable
 ```
 
 ## knext integration
