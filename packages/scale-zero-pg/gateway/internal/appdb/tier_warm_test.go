@@ -1,6 +1,8 @@
 package appdb
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -62,9 +64,13 @@ func TestTierWarm_StaysWarmPastTheIdleWindowThatUsedToDegradeIt(t *testing.T) {
 	// AC1 at the level the reconciler can prove: the exact sequence that used to
 	// degrade the tier is (first connection closes) + (GW_IDLE_MS elapses), i.e.
 	// the gateway parks the compute and the operator never re-warms it. Modelled
-	// here as: the compute goes UNavailable after the first pass, later reconcile
-	// passes still hold, and the operator still writes no replicas. Under the old
-	// mechanism no EnsureHold ever happened, so the compute stayed at 0.
+	// here by DROPPING the fake's hold between passes (the actuator-level re-dial
+	// of a dead hold is covered by TestHoldManager_DeadHoldIsRedialed): every
+	// later pass must re-establish it, hours later and outside any plausible
+	// business-hours window, while the operator still writes no replicas. Under
+	// the old mechanism no EnsureHold ever happened, so the compute stayed at 0.
+	// (The deployment is unavailable throughout — depAvailable is false on every
+	// pass — which is exactly the state that used to pin the tier in Provisioning.)
 	h, fh := harnessWithHolds(time.Date(2026, 8, 18, 3, 0, 0, 0, time.UTC))
 	cr := &AppDatabase{
 		Name: "app1", Namespace: "scale-zero-pg", Generation: 1,
@@ -83,6 +89,7 @@ func TestTierWarm_StaysWarmPastTheIdleWindowThatUsedToDegradeIt(t *testing.T) {
 		time.Date(2026, 8, 19, 2, 0, 0, 0, time.UTC),
 	} {
 		h.d.Now = func() metav1.Time { return metav1.NewTime(at) }
+		delete(fh.held, "app1") // the gateway parked the compute; only a re-ensure brings it back
 		mustReconcile(t, h, cr)
 		if !fh.held["app1"] {
 			t.Fatalf("hold dropped on pass %d (%s) — the warm tier degraded to cold", i+2, at)
@@ -217,8 +224,11 @@ func TestTierWarm_HoldReleasedOnDelete(t *testing.T) {
 }
 
 func TestTierCold_UnaffectedByTheWarmTierHold(t *testing.T) {
-	// Back-compat: a cold tier (the default) touches no hold and grows no
-	// WarmHold condition.
+	// Back-compat (the cheap path): a cold tier (the default) never DIALS a hold
+	// and grows no WarmHold condition. Withdrawal (below) makes the reconciler
+	// call the idempotent ReleaseHold on every non-warm pass — that is a cheap
+	// in-process map delete, and it must remain INVISIBLE on the CR: no
+	// condition, no event, no churn across repeated passes.
 	h, fh := harnessWithHolds(time.Date(2026, 8, 18, 3, 0, 0, 0, time.UTC))
 	cr := &AppDatabase{
 		Name: "app1", Namespace: "scale-zero-pg", Generation: 1,
@@ -226,15 +236,118 @@ func TestTierCold_UnaffectedByTheWarmTierHold(t *testing.T) {
 	}
 
 	mustReconcile(t, h, cr)
+	condsAfterFirst := len(cr.Status.Conditions)
+	eventsAfterFirst := len(h.cl.events)
+	mustReconcile(t, h, cr) // a second resync tick must change nothing
 
-	if len(fh.ensured) != 0 || len(fh.released) != 0 {
-		t.Fatalf("Holds calls = ensured %v released %v, want none for a cold tier", fh.ensured, fh.released)
+	if len(fh.ensured) != 0 {
+		t.Fatalf("EnsureHold calls = %v, want none for a cold tier", fh.ensured)
 	}
 	if c := cond(cr, CondWarmHold); c != nil {
-		t.Fatalf("WarmHold condition = %+v, want absent for a cold tier", c)
+		t.Fatalf("WarmHold condition = %+v, want absent for a cold tier that never asked for warmth", c)
+	}
+	if hasEvent(h, "WarmHoldFailed") || hasEvent(h, "InvalidWarmWindow") {
+		t.Fatalf("events = %v, want no warm-hold events on an ordinary cold CR", h.cl.events)
+	}
+	if got := len(cr.Status.Conditions); got != condsAfterFirst {
+		t.Fatalf("conditions churned on resync: %d -> %d (%+v)", condsAfterFirst, got, cr.Status.Conditions)
+	}
+	if got := len(h.cl.events); got != eventsAfterFirst {
+		t.Fatalf("events churned on resync: %d -> %d (%v)", eventsAfterFirst, got, h.cl.events)
 	}
 	rd := cond(cr, CondReady)
 	if rd == nil || rd.Status != "True" || rd.Reason != "Provisioned" {
 		t.Fatalf("Ready condition = %+v, want True/Provisioned (cold tier unchanged)", rd)
 	}
 }
+
+func TestTierWarm_FlipToColdReleasesTheHoldAndRetractsTheCondition(t *testing.T) {
+	// Review finding (HIGH): withdrawing warmth by EDITING the spec must undo it.
+	// Before this fix the whole hold path was gated on warmHoldRequested(), so a
+	// warm -> cold edit on a schedule-less CR never reached ReleaseHold: the
+	// permanent hold survived until the operator process restarted, the compute
+	// could never idle to zero again, CondWarmHold stayed True/TierWarm on a COLD
+	// tier, and the leaked hold kept counting in appdb_warm_hold_active — blinding
+	// the ComputePhantomKeepalive alert that would otherwise have caught it.
+	h, fh := harnessWithHolds(time.Date(2026, 8, 18, 3, 0, 0, 0, time.UTC))
+	cr := &AppDatabase{
+		Name: "app1", Namespace: "scale-zero-pg", Generation: 1,
+		Spec: AppDatabaseSpec{AppName: "app1", Tier: "warm"},
+	}
+	mustReconcile(t, h, cr)
+	if !fh.held["app1"] {
+		t.Fatal("hold not established while tier: warm")
+	}
+
+	// The owner edits the CR back to the cold tier (no warmSchedule at all).
+	cr.Spec.Tier = "cold"
+	cr.Generation = 2
+	mustReconcile(t, h, cr)
+
+	if fh.held["app1"] {
+		t.Fatal("hold STILL held after flipping tier: warm -> cold — the compute can never idle to zero again")
+	}
+	if len(fh.released) == 0 {
+		t.Fatalf("ReleaseHold calls = %v, want app1 released when warmth is withdrawn", fh.released)
+	}
+	wh := cond(cr, CondWarmHold)
+	if wh == nil || wh.Status != "False" || wh.Reason != "WarmthNotRequested" {
+		t.Fatalf("WarmHold condition = %+v, want False/WarmthNotRequested (retracted, never stale True/TierWarm)", wh)
+	}
+	rd := cond(cr, CondReady)
+	if rd == nil || rd.Status != "True" || rd.Reason != "Provisioned" {
+		t.Fatalf("Ready condition = %+v, want True/Provisioned — and it is only honest because the hold is gone", rd)
+	}
+}
+
+func TestTierWarm_FirstPassDoesNotFailTheHoldBeforeTheBranchExists(t *testing.T) {
+	// Review finding (MED, ordering): on a first-ever `tier: warm` create the hold
+	// must be dialled AFTER the pageserver branch exists. Dialling first wakes the
+	// compute against a TIMELINE_ID the pageserver does not have yet, so the first
+	// pass predictably yielded False/HoldFailed + a WarmHoldFailed Warning event +
+	// a burnt wake-budget token, self-healing only on the next ~15s resync.
+	h, fh := harnessWithHolds(time.Date(2026, 8, 18, 3, 0, 0, 0, time.UTC))
+	// Model the real failure mode: the hold can only be established once this
+	// app's branch exists on the pageserver.
+	h.d.Holds = &branchGatedHolds{inner: fh, ps: h.ps}
+	cr := &AppDatabase{
+		Name: "app1", Namespace: "scale-zero-pg", Generation: 1,
+		Spec: AppDatabaseSpec{AppName: "app1", Tier: "warm"},
+	}
+
+	mustReconcile(t, h, cr)
+
+	if hasEvent(h, "WarmHoldFailed") {
+		t.Fatalf("events = %v, want no WarmHoldFailed on a first-pass warm create whose branch succeeded in the same pass", h.cl.events)
+	}
+	wh := cond(cr, CondWarmHold)
+	if wh == nil || wh.Status != "True" || wh.Reason != "TierWarm" {
+		t.Fatalf("WarmHold condition = %+v, want True/TierWarm on the first pass", wh)
+	}
+	if !fh.held["app1"] {
+		t.Fatal("hold not established on the first pass")
+	}
+	// The step-4 invariant still holds: the compute is applied at 0 BEFORE the
+	// branch — a Deployment at 0 starts nothing.
+	if h.cl.applied[0].Replicas != 0 {
+		t.Fatalf("first applied replicas = %d, want 0", h.cl.applied[0].Replicas)
+	}
+}
+
+// branchGatedHolds refuses to establish a hold until the app's timeline has been
+// branched on the pageserver — the fake counterpart of a gateway wake against a
+// TIMELINE_ID the pageserver does not know yet.
+type branchGatedHolds struct {
+	inner *fakeHolds
+	ps    *fakePS
+}
+
+func (b *branchGatedHolds) EnsureHold(ctx context.Context, app string) error {
+	if len(b.ps.branchArgs) == 0 {
+		b.inner.ensured = append(b.inner.ensured, app)
+		return errors.New("dial pggw-apps: compute-" + app + " failed to start (no such timeline on the pageserver)")
+	}
+	return b.inner.EnsureHold(ctx, app)
+}
+
+func (b *branchGatedHolds) ReleaseHold(app string) { b.inner.ReleaseHold(app) }

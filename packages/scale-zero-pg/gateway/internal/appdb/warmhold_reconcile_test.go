@@ -142,6 +142,39 @@ func TestWarmHold_FlipsWithTheClock(t *testing.T) {
 	}
 }
 
+func TestWarmHold_RemovingTheLastWindowReleasesTheHold(t *testing.T) {
+	// The pre-existing sibling of the tier warm->cold leak (review finding, HIGH):
+	// deleting spec.warmSchedule entirely makes warmHoldRequested() false, so
+	// before the fix reconcileWarmHold was never reached again and the live hold
+	// survived forever — the compute could not idle to zero and CondWarmHold kept
+	// asserting True/WindowActive with no window left to be active.
+	h, fh := harnessWithHolds(time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC))
+	cr := &AppDatabase{
+		Name: "app1", Namespace: "scale-zero-pg", Generation: 1,
+		Spec: AppDatabaseSpec{
+			AppName:      "app1",
+			WarmSchedule: []WarmWindow{{Start: "0 8 * * *", End: "0 20 * * *", Timezone: "UTC"}},
+		},
+	}
+	mustReconcile(t, h, cr)
+	if !fh.held["app1"] {
+		t.Fatal("hold not established inside the window")
+	}
+
+	// The owner removes the schedule (still inside what used to be the window).
+	cr.Spec.WarmSchedule = nil
+	cr.Generation = 2
+	mustReconcile(t, h, cr)
+
+	if fh.held["app1"] {
+		t.Fatal("hold STILL held after the last warmSchedule window was removed")
+	}
+	c := cond(cr, CondWarmHold)
+	if c == nil || c.Status != "False" || c.Reason != "WarmthNotRequested" {
+		t.Fatalf("WarmHold condition = %+v, want False/WarmthNotRequested", c)
+	}
+}
+
 func TestWarmHold_EnsureFailureDegradesNeverFails(t *testing.T) {
 	h, fh := harnessWithHolds(time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC))
 	fh.failEnsure["app1"] = true
