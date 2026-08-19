@@ -854,6 +854,13 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 		//   PASSED   target-burst-capacity (#411), panic-window-percentage and
 		//            panic-threshold-percentage (#413) — reaction-shape knobs
 		//            that cost nothing idle, so a preview keeps the user's values.
+		//   PASSED   containerConcurrency (#377, ADR-0028) — stamped as a ksvc
+		//            TEMPLATE FIELD, not an annotation (see :~985), which is why it
+		//            was missing from this list for so long. It shapes WHEN Knative
+		//            adds a pod, not idle cost, so a preview keeps the user's value.
+		//   PASSED   timeoutSeconds — also a template field. Not an autoscaling knob
+		//            (a per-request duration cap), listed so the field-shaped blind
+		//            spot stays visible rather than being rediscovered.
 		//
 		// scale-down-delay is DROPPED, not clamped: previews predate the field,
 		// so dropping restores their exact prior behaviour — the Knative cluster
@@ -871,11 +878,19 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 		// deliberately passed through — with an envtest asserting it.
 		//
 		// GATE (#775): the list above is no longer only prose. The scanning guard
-		// in internal/controller/preview_annotation_disposition_test.go exercises
-		// every ScalingSpec field against buildDesiredKsvc, collects the
-		// autoscaling.knative.dev/* keys it emits, and FAILS on any key with no
-		// entry in its previewDispositions table. Add a knob here and the guard
-		// reds until you record the decision in both places.
+		// in internal/controller/preview_annotation_disposition_test.go builds a
+		// NextApp with EVERY ScalingSpec leaf and every NextAppSpec sub-spec
+		// populated, runs buildDesiredKsvc production-vs-preview, and FAILS on any
+		// emitted autoscaling.knative.dev/* key with no entry in its
+		// previewDispositions table; the two template-field knobs above live in its
+		// previewTemplateFieldDispositions table. Add a knob here and the guard reds
+		// until you record the decision in both places.
+		//
+		// What that guard does NOT cover, so nobody over-reads it: the leaf-deep
+		// fixture scan runs over ScalingSpec only — the other sub-specs are checked
+		// for top-level presence, not to their leaves. A knob nested inside, say,
+		// spec.observability.tracing would run the branch but not be forced into the
+		// fixture, so deepen the scan there rather than assuming coverage.
 		annotations["autoscaling.knative.dev/max-scale"] = "1"
 		annotations["autoscaling.knative.dev/min-scale"] = "0"
 		annotations["autoscaling.knative.dev/scale-to-zero-pod-retention-period"] = "30s"

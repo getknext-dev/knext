@@ -192,10 +192,43 @@ func maximalScalingSpec() *appsv1alpha1.ScalingSpec {
 // non-ScalingSpec branch is collected too. (The fixture is deliberately not
 // minimal: minimality is what let the observability branch hide a stamp.)
 func maximalNextAppSpec() appsv1alpha1.NextAppSpec {
+	provisionKafka := true
+	networkPolicy := true
 	return appsv1alpha1.NextAppSpec{
 		Image:   "registry.example.com/app:v1@sha256:abc123",
 		Scaling: maximalScalingSpec(),
-		Preview: &appsv1alpha1.PreviewSpec{Enabled: true, PRID: "42"},
+		Resources: &appsv1alpha1.ResourcesSpec{
+			CPURequest: "100m", MemoryRequest: "256Mi", CPULimit: "1", MemoryLimit: "1Gi",
+		},
+		Storage: &appsv1alpha1.StorageSpec{
+			Provider: "gcs", Bucket: "assets", Region: "us-central1",
+			Endpoint: "https://storage.googleapis.com",
+		},
+		Cache: &appsv1alpha1.CacheSpec{
+			Provider: "redis", URL: "redis://cache:6379", KeyPrefix: "app",
+		},
+		Revalidation: &appsv1alpha1.RevalidationSpec{
+			Queue: "kafka", KafkaBrokerUrl: "kafka:9092", ProvisionKafkaSource: &provisionKafka,
+		},
+		Secrets: &appsv1alpha1.SecretsSpec{
+			EnvFrom: []string{"app-secrets"},
+			EnvMap: map[string]appsv1alpha1.EnvMapEntry{
+				"API_TOKEN": {SecretName: "app-secrets", SecretKey: "api-token"},
+			},
+		},
+		Database: &appsv1alpha1.DatabaseSpec{
+			SecretRef:   &appsv1alpha1.DatabaseSecretRef{Name: "db-app", Key: "uri"},
+			ROSecretRef: &appsv1alpha1.DatabaseSecretRef{Name: "db-app-ro", Key: "uri"},
+		},
+		Env:             map[string]string{"APP_GREETING": "hello"},
+		Observability:   &appsv1alpha1.ObservabilitySpec{Enabled: true},
+		HealthCheckPath: "/api/health",
+		Preview:         &appsv1alpha1.PreviewSpec{Enabled: true, Branch: "feat/x", PRID: "42"},
+		Runtime:         "node",
+		TimeoutSeconds:  111,
+		Security:        &appsv1alpha1.SecuritySpec{NetworkPolicy: &networkPolicy},
+		Traffic:         &appsv1alpha1.TrafficSpec{RevisionName: "app-00001", CanaryPercent: 10},
+		BuildID:         "build-1",
 	}
 }
 
