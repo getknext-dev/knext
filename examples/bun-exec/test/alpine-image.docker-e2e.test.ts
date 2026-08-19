@@ -277,6 +277,22 @@ describe('A9 — the compiled binary runs from a clean alpine image', () => {
     expect(combined, 'the entry never reported both listeners bound').toMatch(
       /LISTENING:\d+ METRICS:\d+/,
     );
+
+    // The eager app-graph warmup MUST have fired. Measured on OKE (2026-08-18,
+    // file-manager): without it, ~1.2 s of module evaluation lands on the FIRST
+    // request, AFTER the pod passed readiness — the pod reports Ready on a
+    // bound port whose application has never been evaluated. The warm entry cut
+    // the real app's cold start 5.55 s → 2.35 s median. Nothing else guards
+    // this: the drain/metrics harnesses MIRROR the entry rather than import it,
+    // so deleting the warm block reds only here. `status=200` is asserted too —
+    // a warm that fires and errors still evaluated the graph, but a warm whose
+    // route 404s (e.g. KNEXT_WARM_PATH pointing at a deleted route) warms a
+    // graph and then lies about it in the log people will read for timings.
+    expect(
+      combined,
+      'the entry never reported the eager warmup (WARMED:<path> status=200) — the app graph is ' +
+        'being evaluated on the first request again, after readiness',
+    ).toMatch(/WARMED:\S+ status=200 ms=\d+/);
   });
 
   it('bakes the C++ runtime libraries into the image', () => {
