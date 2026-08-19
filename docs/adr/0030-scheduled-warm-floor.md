@@ -278,6 +278,19 @@ Re-confirmed against the tree 2026-08-06: no `warmBudget` symbol exists in
 `packages/kn-next/src/config.ts`, and no learned/heuristic schedule-writing
 control loop exists anywhere in the repo.
 
+**The on-demand sibling (2026-08-19, #766 ruling).** This addendum's shape —
+windows declared per resource, each operator evaluating its own, divergence
+accepted — is the CLOCK-triggered half. The TRAFFIC-triggered half
+(ADR-0045's `scaleDownDelay`, whose §Consequences forward-referenced #766)
+got its answer without a second declaration: the DB's on-demand idle window
+is the apps-gateway's platform-wide `GW_IDLE_MS`, not an `AppDatabase`
+field. The architect gate rejected `minWarm` (no writer can honour a
+replica floor without fighting the gateway's single-writer ownership) and
+pre-ruled the shape of a per-app `idleDelay` should a measured case ever
+need one (#779 tracks the fleet-value decision). The alignment rule —
+gateway idle window ≥ the app's `scaleDownDelay` — lives in
+`packages/scale-zero-pg/docs/appdatabase-api.md` §3b.
+
 ## Consequences
 
 - **Positive:** known peaks get a warm floor with zero new control loop, no new
