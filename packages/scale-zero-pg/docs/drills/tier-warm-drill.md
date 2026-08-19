@@ -17,7 +17,7 @@ is a command with an expected value.
   (`kubectl -n scale-zero-pg get deploy appdb-operator -o jsonpath='{.spec.template.spec.containers[0].image}'`
   — confirm the tag/digest before attributing behaviour to code you read; merged ≠ deployed).
 - The shipped operator binary always wires the warm-hold actuator (its dial target is
-  `APPDB_GATEWAY_HOST`, default `pggw-apps.scale-zero-pg.svc`). A
+  `APPDB_GATEWAY_HOST`, default `pggw-apps.scale-zero-pg.svc.cluster.local.` — rooted). A
   `WarmHold=False/HoldsUnavailable` therefore means you are running an operator build
   without the actuator compiled in (an embedder build) — not a missing env var; stop
   and fix the deployment before drilling.

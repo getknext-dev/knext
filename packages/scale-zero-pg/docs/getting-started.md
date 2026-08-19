@@ -165,7 +165,7 @@ EOF
 
 kubectl -n scale-zero-pg get appdatabases      # PHASE Ready, TIMELINE set, COMPUTE <bool> (diagnostic; not a readiness gate)
 kubectl -n scale-zero-pg get secret app-db-orders -o jsonpath='{.data.DATABASE_URL}' | base64 -d
-# -> postgres://app_orders:<pw>@pggw-apps.scale-zero-pg.svc:55432/orders?sslmode=disable
+# -> postgres://app_orders:<pw>@pggw-apps.scale-zero-pg.svc.cluster.local.:55432/orders?sslmode=disable
 ```
 
 `kubectl delete appdatabase orders` runs the finalizer's **safe deprovision** (removes

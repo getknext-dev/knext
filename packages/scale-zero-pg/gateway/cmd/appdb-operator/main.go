@@ -41,9 +41,10 @@ func env(key, def string) string {
 }
 
 // gatewayHostFromEnv resolves the apps-gateway host baked into every minted DSN.
-// Unset -> the fully-qualified appdb.DefaultGatewayHost (no ndots:5 search-path
-// walk on a fresh pod's first resolutions); set -> passed through VERBATIM, so a
-// cluster with a custom DNS zone or gateway Service keeps full control.
+// Unset -> the ROOTED appdb.DefaultGatewayHost (trailing dot: the only form that
+// skips the ndots:5 search-path walk on a fresh pod's first resolutions — a merely
+// qualified 4-dot name still walks it); set -> passed through VERBATIM, so a cluster
+// with a custom DNS zone or gateway Service keeps full control (never auto-rooted).
 func gatewayHostFromEnv() string {
 	return env("APPDB_GATEWAY_HOST", appdb.DefaultGatewayHost)
 }

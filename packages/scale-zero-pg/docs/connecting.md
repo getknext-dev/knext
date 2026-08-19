@@ -261,7 +261,7 @@ apps-gateway (admin is direct-to-compute only). Read the DSN from the Secret:
 
 ```sh
 kubectl -n scale-zero-pg get secret app-db-<app> -o jsonpath='{.data.DATABASE_URL}' | base64 -d
-# postgres://app_<app>:<per-app-password>@pggw-apps.scale-zero-pg.svc:55432/<app>?sslmode=disable
+# postgres://app_<app>:<per-app-password>@pggw-apps.scale-zero-pg.svc.cluster.local.:55432/<app>?sslmode=disable
 ```
 
 **No tenant-existence oracle (issue #92).** Every refusal on the apps-gateway —
@@ -321,7 +321,7 @@ database as the writer, on the gateway **RO port** (`55434`):
 
 ```sh
 kubectl -n scale-zero-pg get secret app-db-<app> -o jsonpath='{.data.DATABASE_URL_RO}' | base64 -d
-# postgres://app_<app>:<per-app-password>@pggw-apps.scale-zero-pg.svc:55434/<app>?sslmode=disable
+# postgres://app_<app>:<per-app-password>@pggw-apps.scale-zero-pg.svc.cluster.local.:55434/<app>?sslmode=disable
 ```
 
 ✅ **The per-app RO serving endpoint is LIVE (issue #127).** `DATABASE_URL_RO` on
