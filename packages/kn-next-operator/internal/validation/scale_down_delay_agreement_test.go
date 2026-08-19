@@ -49,6 +49,11 @@ func TestScaleDownDelayAgreesWithKnative(t *testing.T) {
 		// Second-precision violations — the clause the first implementation
 		// missed. Every one of these parses fine and is inside 0s–1h.
 		"42.5s", "1500ms", "0.5s", "90s500ms", "1ns", "1µs",
+		// Parseable shapes the CLI's syntax mirror once rejected (#773): an
+		// explicit sign, leading/trailing-dot fractions, U+03BC micro. The
+		// CLI's accepted-corpus scan inherits these, so they pin its regex as
+		// a superset of Go's grammar for exactly the shapes it got wrong.
+		"+5m", ".5s", "1.s", "1μs",
 		// Out of range.
 		"2h", "-1s", "61m",
 		// Not durations at all.

@@ -102,4 +102,6 @@ it rather than by accretion (`CLAUDE.md` §1's anti-PaaS-drift line):
       (ADR-0040 three-part shape; envtest for stamp/unset/byte-identical-when-nil).
 - [ ] #763 — scaffolder writes `scaleDownDelay: '5m'`; separate commit; docs-site page states the
       idle cost plainly.
-- [ ] Docs cross-reference to #766 (DB window independence) when that lands.
+- [x] Docs cross-reference to #766 (DB window independence) — landed here (the alignment
+      invariant in both scale-to-zero Callouts, per the #766 gate ruling; the scale-zero-pg half
+      is `appdatabase-api.md` §3b via #780).
