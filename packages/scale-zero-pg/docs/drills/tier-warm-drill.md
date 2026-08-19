@@ -129,6 +129,22 @@ to **other apps' clients**. When drilling a plane that runs N warm apps, record
 the warm-app count — a rise here that tracks warm-app growth is the capacity wall,
 and it will show up on unrelated tenants first.
 
+**You are not the only watcher.** `WarmHoldBudgetPressure` (deploy/60-prometheus.yaml,
+warning) pages *before* that wall: `sum(appdb_warm_hold_active) > 0.5 * 90` — half of a
+**single gateway pod's** `GW_MAX_CONNS` budget standing in declared holds (`tier: warm`
+plus any active `warmSchedule` window) — sustained 15m. Note what that threshold is
+**not**: with `replicas: 2` the fleet budget is `replicas × 90` = 180, so 45 holds is
+~25% of it. The alert is a deliberately conservative, replica-independent tripwire and
+will page early on a larger fleet; that is the trade for an expr that cannot go blind
+(a `kube_deployment_spec_replicas` join would silence itself whenever kube-state-metrics
+is absent — #792). Its threshold is a hand-copied fraction of `GW_MAX_CONNS`, so a drill
+that changes that knob must change the alert too (both files say so;
+`tests/warm-hold-budget-alert.test.ts` reds if they drift). What to do when it fires is
+[operations.md → Warm-hold budget pressure](../operations.md#warm-hold-budget-pressure-knext-787).
+Note the asymmetry with §3: this alert carries **no** `or vector(0)`, because an absent
+gauge means zero warm holds and must not page — only `ComputePhantomKeepalive`, which
+*subtracts* the gauge, needs the fallback.
+
 **Teardown.** Delete the CR (`kubectl -n scale-zero-pg delete appdatabase ${APP}`);
 the deprovision finalizer runs the timeline reclaim. A `1` left on
 `appdb_warm_hold_active` for a deleted or cold app is a leak — report it, do not
@@ -138,6 +154,8 @@ re-run over it.
 
 - [`appdatabase-api.md`](../appdatabase-api.md) §2a (what `warm` actually is), §3b
   (scheduled windows), the `WarmHold` condition contract in §2.
-- [`operations.md`](../operations.md) — the `WarmHoldDegraded` runbook bullet and the
-  `ComputePhantomKeepalive` subtraction.
+- [`operations.md`](../operations.md) — the `WarmHoldDegraded` runbook bullet, the
+  `ComputePhantomKeepalive` subtraction, and the
+  [`WarmHoldBudgetPressure`](../operations.md#warm-hold-budget-pressure-knext-787)
+  fleet-capacity runbook (§4 above).
 - [`DRILLS.md`](../DRILLS.md) — the scripted battery this drill should eventually join.
