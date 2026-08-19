@@ -41,10 +41,10 @@
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  disarmAnchor,
   disarmReplacement,
   explainNothingRan as explainNothingRanIn,
   GATES,
-  jobAnchor,
   runGateTest as runGateTestIn,
 } from './lib/ci-blocking-gate-proof.mjs';
 import { mutate, restore, snapshot } from './lib/mutation-harness.mjs';
@@ -120,7 +120,7 @@ const explainNothingRan = (gate, result) =>
 function prove(gate, disarm) {
   const { jobId, spec } = gate;
   console.log(`── ${spec} :: ${jobId} :: ${disarm.label}`);
-  const anchor = jobAnchor(jobId);
+  const anchor = disarmAnchor(jobId, disarm);
   const snap = snapshot(resolve(REPO_ROOT, gate.workflow));
   try {
     // The anchor is the job KEY, so the injection lands at job level whatever

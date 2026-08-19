@@ -111,7 +111,7 @@ a tenant credential before waking undoes that property.
 Even before this ADR, the damage an attacker can do via the wake primitive is
 bounded by controls that already ship:
 
-- **`GW_MAX_CONNS`** (90 per app on `pggw-apps`, 81-apps-gateway.yaml) — caps
+- **`GW_MAX_CONNS`** (90 **process-wide** per gateway pod on `pggw-apps`, shared across all apps — an earlier revision of this line wrongly said "per app"; ADR-0003 records the correction; 81-apps-gateway.yaml) — caps
   concurrent connections per compute; a connection storm is refused `53300`, not
   turned into unbounded goroutines/wakes.
 - **Tenant CPU/memory quotas** and the per-app compute's own `resources` — a woken

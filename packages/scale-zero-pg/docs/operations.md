@@ -65,7 +65,7 @@ below, and routes via Alertmanager (`61-alertmanager.yaml`) to a receiver.
 |---|---|---|
 | `GatewayWakeFailures` (crit) | `pggw_wake_failures_total` rose in 5m | Cold starts are erroring — check compute events / storage plane reachability. |
 | `GatewayWakeLatencyHigh` (warn) | last wake >5s | Node image-pull or resource pressure — check compute scheduling. |
-| `ComputePhantomKeepalive` (warn) | connections never idle for 30m (state-based), **minus declared warm holds** | An app pool holds connections open — see [connecting](connecting.md#connection-pooling-rules) sizing rule. Blocks scale-to-zero. **Deliberate warm-hold connections (`AppDatabase.spec.warmSchedule`, knext #388) are subtracted via `appdb_warm_hold_active`** — during a declared warm window they are intended warming, not a phantom. If this fires, the held-beyond-schedule connections are the unexplained remainder. |
+| `ComputePhantomKeepalive` (warn) | connections never idle for 30m (state-based), **minus declared warm holds** | An app pool holds connections open — see [connecting](connecting.md#connection-pooling-rules) sizing rule. Blocks scale-to-zero. **Deliberate warm-hold connections (`AppDatabase.spec.tier: warm` — a permanent hold, #777 — and `spec.warmSchedule` windows, knext #388) are subtracted via `appdb_warm_hold_active`** — those are intended warming, not phantoms. If this fires, the connections held beyond the declared warmth are the unexplained remainder. |
 | `BackupJobFailed` (crit) | a Job owned by the **backup** CronJob failed | The daily off-cluster mirror did not complete — check `kubectl -n scale-zero-pg logs job/<backup-job>`; a restore would be stale. |
 | `WalJanitorJobFailed` (crit) | a Job owned by the **wal-janitor** CronJob failed | The WAL trimmer stalled — `/safekeeper` WAL will regrow and slow restores past 60min (#19/#41). Check pageserver reachability at 02:30. |
 | `WalJanitorStale` (crit) | last successful janitor run >26h old | The janitor **silently stopped** producing runs (no Failed Job) — schedule misses / backlog. `/safekeeper` is regrowing; restore RTO is slipping. Check `kubectl -n scale-zero-pg get cronjob wal-janitor` (suspend? schedule?) and the last `wal-janitor-*` Job. (#49) |
@@ -1630,7 +1630,7 @@ spec:
   quotas: { cpu: "1000m", mem: "1Gi", maxConnections: 100 }
   keepTimelineOnDelete: false                  # false = safe two-sided reclaim on delete
 EOF
-kubectl -n scale-zero-pg get appdatabases      # APP PHASE TIMELINE READY TIER AGE
+kubectl -n scale-zero-pg get appdatabases      # APP PHASE TIMELINE COMPUTE TIER AGE
 kubectl -n scale-zero-pg describe appdatabase orders   # status conditions + Events (Branched/…)
 kubectl delete appdatabase orders              # finalizer runs safe deprovision (no orphan)
 ```
@@ -1703,9 +1703,38 @@ kubectl -n scale-zero-pg get cm apps-wal-reclaim-pending -o yaml   # pending SK-
 ```
 
 - **Stuck in `Provisioning`** → check the operator log: template plane not
-  initialized (`provision-app.sh init-plane`), pageserver unreachable, or (warm tier)
-  the compute has no available replica yet. `Failed` phase + `InvalidAppName` message
-  → the `appName` is not an RFC1123 label or is a reserved name (`tmpl/warm/ro`).
+  initialized (`provision-app.sh init-plane`) or pageserver unreachable. `Failed`
+  phase + `InvalidAppName` message → the `appName` is not an RFC1123 label or is a
+  reserved name (`tmpl/warm/ro`). *(A warm tier is never stuck here: since #777 the
+  warm tier is a held connection, not a replica, so readiness never waits on a
+  replica — see the next bullet.)*
+- **`Ready` with reason `WarmHoldDegraded`** → the CR has `spec.tier: warm` but
+  the operator is **not** holding it. (Schedule-only CRs never show this reason:
+  a failed hold on a `spec.warmSchedule` window surfaces on the `WarmHold`
+  condition ONLY — their `Ready` reason stays `Provisioned`.) Serving is unaffected (the compute still wakes on connect);
+  what is lost is the no-cold-start property. Read the `WarmHold` condition for
+  which case it is:
+  `kubectl -n scale-zero-pg get appdatabase orders -o jsonpath='{.status.conditions[?(@.type=="WarmHold")]}' | jq`
+  - `False/HoldFailed` → the operator could not dial/keep the hold. Check the
+    apps-gateway is up and the per-app wake budget is not exhausted
+    (`pggw_system_wake_budget_exceeded_total{system="orders"}`); retried every
+    resync tick (`APPDB_RESYNC_MS`, default 15s).
+  - `False/HoldsUnavailable` → this operator build has no warm-hold actuator wired
+    — warmth cannot be honoured at all. The shipped operator always wires the
+    actuator (dial target `APPDB_GATEWAY_HOST`), so this reason indicates a build
+    without it compiled in, not a missing env var.
+  - `False/InvalidWarmWindow` → every `warmSchedule` window failed to parse; fix the
+    cron/timezone (see the `InvalidWarmWindow` Warning event).
+  - `False/WindowInactive` / `False/WarmthNotRequested` → not degraded at all: no
+    window is active, or warmth was withdrawn from the spec and the hold released.
+  - Cross-check the mechanism: `appdb_warm_hold_active{app="orders"}` is `1` exactly
+    while the hold is established; the series is emitted only while held, so it
+    **disappears** (no `0` sample — the alert's `or vector(0)` covers absence)
+    within one resync tick of
+    warmth being withdrawn (`tier: warm` → `cold`, or the last window removed).
+    A `1` on a CR whose spec asks for no warmth is a leak — report it.
+  - `status.computeReady` is a **diagnostic only** (printed as the `Compute` column);
+    it is not the readiness gate for either tier.
 - **Delete hangs (finalizer)** → a safekeeper is down; the operator is retrying
   reclaim. Confirm the safekeeper StatefulSet is healthy; the CR clears itself once
   reclaim completes. To force-drop the CR and reconcile later:

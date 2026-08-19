@@ -119,7 +119,9 @@ reclaim path deletes the timeline but would strand a slot on the *peer* zone).
   a sleeping publisher for a subscriber** — the raw TCP reconnect hits the Service
   (`publishNotReadyAddresses: true` resolves DNS at 0 replicas) but no controller scales
   the publisher up. In this spike the publisher was woken manually. Production options
-  for ADR-0007: (i) keep the publisher zone warm (min replicas 1) while any subscriber
+  for ADR-0007: (i) keep the publisher zone warm (historical wording: "min replicas 1";
+  as implemented in #777 `tier: warm` is a PERMANENT warm HOLD — one held gateway
+  connection, never a replica floor) while any subscriber
   exists, (ii) route replication through a gateway listener that wakes on connect, or
   (iii) a replication-aware sidecar. **This is a first-class design decision, not a
   detail** — it interacts with the whole scale-to-zero premise of the zone axis.

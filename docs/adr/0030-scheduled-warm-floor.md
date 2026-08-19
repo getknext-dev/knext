@@ -304,3 +304,32 @@ gateway idle window ≥ the app's `scaleDownDelay` — lives in
   pinned-traffic apps). The AC's benchmark (scheduled warm floor vs off, warm
   cost quantified) is owner-gated on an OKE run and tracked in `BENCHMARKS.md` —
   this ADR ships the mechanism.
+
+## Addendum 2026-08-19 — `spec.tier: warm` is a PERMANENT hold on this same actuator (#777)
+
+**Status of this addendum:** Accepted (architect sign-off on PR #786 requested it be
+recorded here rather than living only in code comments and API docs).
+
+Two decisions shipped by #777/#786:
+
+- **(a) `AppDatabase.spec.tier: warm` is actuated as a permanent warm hold** on the
+  2026-07-18 addendum's actuator — one held authenticated gateway connection, 24/7.
+  The tier is a **latency property**: it is never a replica floor (the operator
+  writes `replicas: 0` for both tiers; the apps-gateway stays the single writer —
+  the two-writer defect this ADR's Context records stays closed) and never a
+  serving gate (a failed hold degrades to the ordinary cold wake and surfaces on
+  the `WarmHold` condition and a Warning event; `Ready` carries
+  `WarmHeld`/`WarmHoldDegraded` for the warm tier only).
+- **(b) Precedence: the tier subsumes `warmSchedule`.** When both are set the
+  permanent hold wins and the windows are **not evaluated at all** — no window
+  boundary can drop a warm tier's hold, and a malformed window on a warm-tier CR
+  is inert (no `InvalidWarmWindow` event: it would be warming nothing the tier is
+  not already warming). Use `warmSchedule` *instead of* the tier for
+  declared-hours-only warmth.
+
+Withdrawal is symmetric and reconciled like any other edit: `tier: warm → cold`
+(or deleting the last window) releases the hold and retracts `WarmHold` to
+`False/WarmthNotRequested`, persisted best-effort in the same pass. Cost honesty:
+each warm app permanently occupies one slot of the apps-gateway's **process-wide**
+`GW_MAX_CONNS` — see `packages/scale-zero-pg/docs/appdatabase-api.md` §2a's
+capacity note for the fleet-pressure consequence and ceiling.

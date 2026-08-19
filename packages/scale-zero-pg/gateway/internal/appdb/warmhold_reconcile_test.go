@@ -142,6 +142,39 @@ func TestWarmHold_FlipsWithTheClock(t *testing.T) {
 	}
 }
 
+func TestWarmHold_RemovingTheLastWindowReleasesTheHold(t *testing.T) {
+	// The pre-existing sibling of the tier warm->cold leak (review finding, HIGH):
+	// deleting spec.warmSchedule entirely makes warmHoldRequested() false, so
+	// before the fix reconcileWarmHold was never reached again and the live hold
+	// survived forever — the compute could not idle to zero and CondWarmHold kept
+	// asserting True/WindowActive with no window left to be active.
+	h, fh := harnessWithHolds(time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC))
+	cr := &AppDatabase{
+		Name: "app1", Namespace: "scale-zero-pg", Generation: 1,
+		Spec: AppDatabaseSpec{
+			AppName:      "app1",
+			WarmSchedule: []WarmWindow{{Start: "0 8 * * *", End: "0 20 * * *", Timezone: "UTC"}},
+		},
+	}
+	mustReconcile(t, h, cr)
+	if !fh.held["app1"] {
+		t.Fatal("hold not established inside the window")
+	}
+
+	// The owner removes the schedule (still inside what used to be the window).
+	cr.Spec.WarmSchedule = nil
+	cr.Generation = 2
+	mustReconcile(t, h, cr)
+
+	if fh.held["app1"] {
+		t.Fatal("hold STILL held after the last warmSchedule window was removed")
+	}
+	c := cond(cr, CondWarmHold)
+	if c == nil || c.Status != "False" || c.Reason != "WarmthNotRequested" {
+		t.Fatalf("WarmHold condition = %+v, want False/WarmthNotRequested", c)
+	}
+}
+
 func TestWarmHold_EnsureFailureDegradesNeverFails(t *testing.T) {
 	h, fh := harnessWithHolds(time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC))
 	fh.failEnsure["app1"] = true
@@ -223,19 +256,27 @@ func TestWarmHold_ReleasedOnDelete(t *testing.T) {
 }
 
 func TestWarmHold_NoScheduleMeansNoHoldAndNoCondition(t *testing.T) {
-	// Back-compat (the ADR-0030 byte-identical promise, mirrored on the DB side):
-	// a CR that omits warmSchedule must reconcile exactly as before — no Holds
-	// calls, no WarmHold condition in status.
+	// Back-compat (the ADR-0030 promise, mirrored on the DB side): a CR that omits
+	// warmSchedule must never DIAL a hold and must grow no WarmHold condition. The
+	// withdrawal branch calls the idempotent ReleaseHold on every non-warm pass
+	// (that is what makes "delete the schedule" actually undo the hold) — a
+	// no-op map delete that must stay invisible on the CR: no condition, no
+	// event, no churn.
 	h, fh := harnessWithHolds(time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC))
 	cr := &AppDatabase{Name: "app1", Namespace: "scale-zero-pg", Generation: 1, Spec: AppDatabaseSpec{AppName: "app1"}}
 
 	mustReconcile(t, h, cr)
+	eventsAfterFirst := len(h.cl.events)
+	mustReconcile(t, h, cr)
 
-	if len(fh.ensured) != 0 || len(fh.released) != 0 {
-		t.Fatalf("Holds calls = ensured %v released %v, want none for a schedule-less CR", fh.ensured, fh.released)
+	if len(fh.ensured) != 0 {
+		t.Fatalf("EnsureHold calls = %v, want none for a schedule-less CR", fh.ensured)
 	}
 	if c := cond(cr, CondWarmHold); c != nil {
 		t.Fatalf("WarmHold condition = %+v, want absent for a schedule-less CR", c)
+	}
+	if len(h.cl.events) != eventsAfterFirst {
+		t.Fatalf("events churned on resync: %d -> %d (%v)", eventsAfterFirst, len(h.cl.events), h.cl.events)
 	}
 }
 
@@ -378,22 +419,8 @@ func TestWarmHold_HoldFailedEventRedactsPassword(t *testing.T) {
 	}
 }
 
-func TestWarmHold_TierWarmUnchanged(t *testing.T) {
-	// A static tier:warm AppDatabase with NO schedule still provisions at 1 replica
-	// exactly as before — the schedule machinery must not touch the tier path.
-	h, fh := harnessWithHolds(time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC))
-	h.cl.depAvailable = true
-	cr := &AppDatabase{
-		Name: "app1", Namespace: "scale-zero-pg", Generation: 1,
-		Spec: AppDatabaseSpec{AppName: "app1", Tier: "warm"},
-	}
-
-	mustReconcile(t, h, cr)
-
-	if got := h.cl.applied[len(h.cl.applied)-1].Replicas; got != 1 {
-		t.Fatalf("tier warm applied replicas = %d, want 1 (unchanged)", got)
-	}
-	if len(fh.ensured) != 0 || len(fh.released) != 0 {
-		t.Fatalf("Holds calls = ensured %v released %v, want none for tier warm without a schedule", fh.ensured, fh.released)
-	}
-}
+// The old TestWarmHold_TierWarmUnchanged asserted the OPPOSITE of what ships
+// now: that a schedule-less tier:warm applied 1 replica and took no hold. That
+// was the #777 defect — the replica was preserved-away by ApplyCompute and
+// parked by the gateway on the first idle window. tier:warm now runs on this
+// same actuator as a permanent hold; the contract lives in tier_warm_test.go.

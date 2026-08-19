@@ -82,8 +82,14 @@ describe('bun-exec alpine-image gate is wired into CI (ADR-0042 A1/A9)', () => {
     // what keeps `needs:` audited rather than merely reported: if this job grows
     // a dependency, this list changes and someone has to look at whether the new
     // upstream can skip.
+    // Grew a dependency in #764: no vinext binary/image is built before the
+    // pre-compile-closure SBOM + HIGH/CRITICAL scan has passed (ADR-0042 C6).
+    // The new upstream CANNOT skip — it carries no `if:` and no `paths:` filter
+    // — so `audit.problems` below stays empty; that is the question this list
+    // exists to force someone to ask.
     expect(audit.needsClosure, 'the `needs` closure the audit walked').toEqual([
       'bun-exec-alpine-image',
+      'vinext-precompile-closure',
     ]);
     expect(audit.problems, audit.problems.join('\n')).toEqual([]);
   });

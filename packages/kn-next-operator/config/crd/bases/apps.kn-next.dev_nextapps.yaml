@@ -443,8 +443,12 @@ spec:
                       that window must be >= this delay, or the warm pod answers in ~52 ms
                       and then blocks on a compute the gateway already reaped. For an app
                       that needs its database held warm, declare it on that app's
-                      AppDatabase (apps.scale-zero-pg.dev) `spec.warmSchedule` — knext's
-                      operator never reads or writes AppDatabase (ADR-0001 boundary).
+                      AppDatabase (apps.scale-zero-pg.dev) — `spec.tier: warm` for 24/7, or
+                      `spec.warmSchedule` for declared hours (#777) — knext's operator never
+                      reads or writes AppDatabase (ADR-0001 boundary).
+
+                      Previews ignore this field: the preview override drops the annotation, so
+                      preview pods keep the cluster's default scale-down behaviour.
                     type: string
                   targetBurstCapacity:
                     description: |-
