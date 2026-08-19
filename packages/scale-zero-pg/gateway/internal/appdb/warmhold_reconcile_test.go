@@ -378,22 +378,8 @@ func TestWarmHold_HoldFailedEventRedactsPassword(t *testing.T) {
 	}
 }
 
-func TestWarmHold_TierWarmUnchanged(t *testing.T) {
-	// A static tier:warm AppDatabase with NO schedule still provisions at 1 replica
-	// exactly as before — the schedule machinery must not touch the tier path.
-	h, fh := harnessWithHolds(time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC))
-	h.cl.depAvailable = true
-	cr := &AppDatabase{
-		Name: "app1", Namespace: "scale-zero-pg", Generation: 1,
-		Spec: AppDatabaseSpec{AppName: "app1", Tier: "warm"},
-	}
-
-	mustReconcile(t, h, cr)
-
-	if got := h.cl.applied[len(h.cl.applied)-1].Replicas; got != 1 {
-		t.Fatalf("tier warm applied replicas = %d, want 1 (unchanged)", got)
-	}
-	if len(fh.ensured) != 0 || len(fh.released) != 0 {
-		t.Fatalf("Holds calls = ensured %v released %v, want none for tier warm without a schedule", fh.ensured, fh.released)
-	}
-}
+// The old TestWarmHold_TierWarmUnchanged asserted the OPPOSITE of what ships
+// now: that a schedule-less tier:warm applied 1 replica and took no hold. That
+// was the #777 defect — the replica was preserved-away by ApplyCompute and
+// parked by the gateway on the first idle window. tier:warm now runs on this
+// same actuator as a permanent hold; the contract lives in tier_warm_test.go.

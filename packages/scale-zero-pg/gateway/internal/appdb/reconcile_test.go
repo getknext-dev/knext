@@ -339,22 +339,30 @@ func TestQuotaResolution(t *testing.T) {
 	}
 }
 
-func TestWarmTierRequeuesUntilAvailable(t *testing.T) {
-	h := newHarness()
+// TestWarmTierNeverWaitsOnAReplica replaces the old
+// TestWarmTierRequeuesUntilAvailable (#777). The warm tier no longer means "apply
+// the Deployment at 1": the operator writes no replicas and the gateway parks the
+// compute on idle, so "waiting for a warm replica" was a state that could never
+// resolve — it reported Provisioning forever once the gateway parked the compute.
+// Warmth is now the held connection (see tier_warm_test.go); serving readiness is
+// the same as cold, because the wake path is the same.
+func TestWarmTierNeverWaitsOnAReplica(t *testing.T) {
+	h, _ := harnessWithHolds(time.Unix(1700000000, 0))
 	cr := &AppDatabase{Name: "w", Generation: 1, Spec: AppDatabaseSpec{AppName: "w", Tier: "warm"}}
 
 	h.cl.depAvailable = false
-	if rq := mustReconcile(t, h, cr); !rq {
-		t.Errorf("warm tier with no available replica should requeue")
+	if rq := mustReconcile(t, h, cr); rq {
+		t.Errorf("warm tier must not requeue waiting on a replica the operator never writes")
 	}
-	if cr.Status.Phase != PhaseProvisioning {
-		t.Errorf("phase = %q, want Provisioning", cr.Status.Phase)
+	if cr.Status.Phase != PhaseReady {
+		t.Errorf("phase = %q, want Ready", cr.Status.Phase)
 	}
-	if h.cl.applied[0].Replicas != 1 {
-		t.Errorf("warm tier replicas = %d, want 1", h.cl.applied[0].Replicas)
+	if h.cl.applied[0].Replicas != 0 {
+		t.Errorf("warm tier replicas = %d, want 0 (the gateway owns replicas)", h.cl.applied[0].Replicas)
 	}
 
-	// Replica becomes available -> Ready, no requeue.
+	// An available replica changes nothing about readiness; it is reported as a
+	// diagnostic only.
 	h.cl.depAvailable = true
 	if rq := mustReconcile(t, h, cr); rq {
 		t.Errorf("warm tier available should not requeue")
