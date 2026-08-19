@@ -96,6 +96,19 @@ against containerd GC) — every node. Scale-from-zero then never waits on the p
   digest updates too; there is a brief window where the new digest is pulling on the prewarmer while an
   old-revision cold start could still pay a pull — acceptable, and no worse than status quo.
 
+  **Measured (2026-08-18, #767): the unpinned-window cost is 14.9 s, not the ~2 s the cost model
+  assumed.** A first request landing on a node that has not pulled the new digest paid **14.9 s**
+  (single sample, `docs/benchmarks/fm-confirmatory-prepulled-ab-2026-08-18.md`) — roughly 7× a
+  pinned cold start on the same cluster. "Acceptable" above still stands, but it is now priced:
+  the window is short *because the operator re-points the pin on every reconcile*
+  (`image_prewarm.go` CreateOrUpdate over `app.Spec.Image`, envtest-guarded by "updates the
+  DaemonSet's app image when the NextApp digest changes"), and that mechanism is precisely what
+  bounds the exposure. Corollary, recorded so spike data is not misread as ADR evidence: a
+  **hand-rolled prepull DaemonSet is NOT this ADR's mechanism** — it pins the digests it was told
+  at creation and never follows a redeploy, so after one redeploy it prewarms a dead digest while
+  every cold start pays the full unpinned price. The 14.9 s sample came from exactly that
+  configuration. Do not cite hand-rolled DaemonSets as evidence for or against `imagePrewarm`.
+
 ## Amendment (2026-08-04, #471 item 4): a prewarm failure DEGRADES, it does not FAIL the pass
 
 As first implemented, `reconcileImagePrewarmDaemonSet`'s error was returned out of `Reconcile`,
