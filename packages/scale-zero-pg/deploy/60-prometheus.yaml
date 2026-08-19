@@ -164,6 +164,47 @@ data:
             annotations:
               summary: "System never idle for 30m — scale-to-zero blocked"
               description: "Connections held continuously beyond declared warm holds (spec.tier: warm, which is a PERMANENT hold, and any active spec.warmSchedule window) — check for an app pool with no/large idle timeout (see docs/connecting.md sizing rule). appdb_warm_hold_active accounts for both deliberate forms."
+          # FLEET WARM-HOLD BUDGET (knext #787). The alert above only says the plane
+          # is never idle; this one says the plane is running OUT OF ROOM. Each
+          # spec.tier: warm app holds one apps-gateway connection 24/7, and
+          # GW_MAX_CONNS is PROCESS-WIDE (one semaphore per gateway pod, shared with
+          # all tenant client traffic, ADR-0003) — so warm holds are a standing floor
+          # under a budget everyone else draws from. Exhaustion is refused 53300 to
+          # OTHER apps' clients: the first observable symptom of over-subscription is
+          # an availability incident for tenants who never asked for warmth. This is
+          # the signal BEFORE that wall.
+          #
+          # THE THRESHOLD IS A HAND-COPIED FRACTION OF GW_MAX_CONNS (90, in
+          # 81-apps-gateway.yaml) — Prometheus cannot read a Deployment's env, so the
+          # number lives in two files. CHANGE BOTH: that knob's comment names this
+          # alert, and tests/warm-hold-budget-alert.test.ts fails the build if they
+          # drift apart. 0.5 is chosen against the demonstrated plane ceiling of 30
+          # apps (ADR-0003 scale-ceiling drill): 45 permanent holds is genuinely
+          # anomalous today, not a busy Tuesday, and it still leaves half the budget
+          # as headroom to act in.
+          #
+          # WHAT DOES NOT FIRE IT: ordinary tenant traffic (this counts DECLARED holds
+          # only, never live client connections); a warm app's compute restarting (the
+          # hold is re-declared within a reconcile, far under the 15m `for:`); a plane
+          # with no warm apps at all. That last case is deliberate and is why there is
+          # NO `or vector(0)` here — the operator emits appdb_warm_hold_active ONLY for
+          # held apps, so with none held the series is ABSENT, sum() is empty, and the
+          # rule evaluates to nothing. Empty means zero holds means no pressure; adding
+          # `or vector(0)` would only substitute a 0 that still fails 0 > 45. (The
+          # subtraction in ComputePhantomKeepalive above needs the fallback for the
+          # opposite reason: an absent operand there would void the WHOLE expression.)
+          #
+          # ONE TIER ON PURPOSE: no critical companion. A second threshold would carry
+          # the same 3am action as this one (audit which apps need tier: warm) with no
+          # new decision attached, and the real hard-stop signal already exists —
+          # pggw_rejected_connections_total rising IS the wall, not a prediction of it.
+          - alert: WarmHoldBudgetPressure
+            expr: sum(appdb_warm_hold_active) > 0.5 * 90
+            for: 15m
+            labels: { severity: warning, plane: apps }
+            annotations:
+              summary: "Warm holds occupy over half the apps-gateway connection budget"
+              description: "{{ $value }} permanent warm holds (AppDatabase spec.tier: warm) stand against the process-wide GW_MAX_CONNS=90 semaphore shared with ALL tenant traffic — exhaustion refuses 53300 to apps that never opted into warmth. Audit which apps genuinely need tier: warm and withdraw the rest; ADR-0003's per-app gateway slot cap is the recorded fast-follow if the pressure is legitimate. See docs/operations.md#warm-hold-budget-pressure-knext-787."
           # WAKE side-channel / per-app wake-budget breach (issue #116, ADR-0008).
           # The apps-gateway REFUSED one or more 0->1 wakes because a caller force-woke
           # a per-app compute faster than GW_WAKE_BUDGET/GW_WAKE_WINDOW_MS allows. The
@@ -598,7 +639,7 @@ spec:
         # (prints the value to paste here). _validate.sh contract 27 fails if this drifts
         # from the ConfigMap data; _verify-drift.sh section E independently asserts every
         # shipped rule is LOADED in the live pod (/api/v1/rules).
-        ks-pg.dev/prometheus-config-sha256: "b5092b20ee68881ec9d334eaf4289bca25cea32c7c389f2b2c925ed685f300c2"
+        ks-pg.dev/prometheus-config-sha256: "d3c5b7326a774c12c958719bab5acf237f46d5d035645ddab6c00cf3f51a8386"
     spec:
       serviceAccountName: prometheus
       securityContext:

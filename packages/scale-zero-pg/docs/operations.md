@@ -66,6 +66,7 @@ below, and routes via Alertmanager (`61-alertmanager.yaml`) to a receiver.
 | `GatewayWakeFailures` (crit) | `pggw_wake_failures_total` rose in 5m | Cold starts are erroring — check compute events / storage plane reachability. |
 | `GatewayWakeLatencyHigh` (warn) | last wake >5s | Node image-pull or resource pressure — check compute scheduling. |
 | `ComputePhantomKeepalive` (warn) | connections never idle for 30m (state-based), **minus declared warm holds** | An app pool holds connections open — see [connecting](connecting.md#connection-pooling-rules) sizing rule. Blocks scale-to-zero. **Deliberate warm-hold connections (`AppDatabase.spec.tier: warm` — a permanent hold, #777 — and `spec.warmSchedule` windows, knext #388) are subtracted via `appdb_warm_hold_active`** — those are intended warming, not phantoms. If this fires, the connections held beyond the declared warmth are the unexplained remainder. |
+| `WarmHoldBudgetPressure` (warn) | `sum(appdb_warm_hold_active) > 0.5 * 90` for 15m — permanent `tier: warm` holds occupy over **half** the apps-gateway's process-wide `GW_MAX_CONNS` budget | Capacity, ahead of the wall: warm holds are a standing floor on a semaphore shared with **all** tenant traffic, and exhaustion refuses `53300` to apps that never asked for warmth. **Audit which apps genuinely need `tier: warm`** and withdraw the rest (the slot returns on the same reconcile). If the warmth is legitimate, scale out `pggw-apps` / raise `GW_MAX_CONNS` (must stay under compute `max_connections=100`) and file **ADR-0003's per-app gateway slot cap** — the recorded fast-follow. Threshold is hand-copied from `GW_MAX_CONNS` in `81-apps-gateway.yaml`: **change both.** Full runbook: [Warm-hold budget pressure](#warm-hold-budget-pressure-knext-787). |
 | `BackupJobFailed` (crit) | a Job owned by the **backup** CronJob failed | The daily off-cluster mirror did not complete — check `kubectl -n scale-zero-pg logs job/<backup-job>`; a restore would be stale. |
 | `WalJanitorJobFailed` (crit) | a Job owned by the **wal-janitor** CronJob failed | The WAL trimmer stalled — `/safekeeper` WAL will regrow and slow restores past 60min (#19/#41). Check pageserver reachability at 02:30. |
 | `WalJanitorStale` (crit) | last successful janitor run >26h old | The janitor **silently stopped** producing runs (no Failed Job) — schedule misses / backlog. `/safekeeper` is regrowing; restore RTO is slipping. Check `kubectl -n scale-zero-pg get cronjob wal-janitor` (suspend? schedule?) and the last `wal-janitor-*` Job. (#49) |
@@ -1878,6 +1879,45 @@ ADR-0003 ("Consequences"). Key findings baked into the claim:
   knext client (a connection **pool**) retries and connects; bare `psql` should retry
   (the drill's wake client retries for this reason). Not a data or availability
   defect — a first-connect timing window.
+
+### Warm-hold budget pressure (knext #787)
+
+`AppDatabase.spec.tier: warm` holds **one authenticated apps-gateway connection per
+warm app, permanently** — the hold *is* the warm tier. `GW_MAX_CONNS` (deployed **90**
+on `pggw-apps`) is a **process-wide** semaphore taken in the accept loop before any app
+is known, shared with **all** tenant client traffic (ADR-0003). So N warm apps put a
+standing floor of N slots under everyone's budget, and exhaustion is refused `53300` to
+**other apps' clients** — the first symptom of over-subscription lands on tenants who
+never opted into warmth.
+
+**Alert.** `WarmHoldBudgetPressure` (deploy/60, `plane: apps`,
+`sum(appdb_warm_hold_active) > 0.5 * 90` **for 15m**, warning). The threshold is
+**half `GW_MAX_CONNS`**, hand-copied — Prometheus cannot read the Deployment's env, so
+the pairing is documented in both files and guarded by
+`tests/warm-hold-budget-alert.test.ts`. **If you change `GW_MAX_CONNS`, change the
+alert.** 0.5 is sized against the demonstrated 30-app plane ceiling above: 45 permanent
+holds is anomalous today, and half the budget is left to act in.
+
+With **no** warm apps the gauge is absent entirely (the operator emits it only for held
+apps), `sum()` is empty and the rule never fires — that is correct, not a bug; do not
+"fix" it with `or vector(0)`.
+
+**3am action (WarmHoldBudgetPressure firing):**
+1. List who is holding: `appdb_warm_hold_active` in Prometheus (per-`app` series), or
+   `kubectl -n scale-zero-pg get appdatabase -o custom-columns=NAME:.metadata.name,TIER:.spec.tier`.
+2. **Audit which apps genuinely need `tier: warm`.** Warmth buys away a cold wake; an
+   app with steady traffic never sleeps anyway, and an app nobody is waiting on does
+   not need it. Withdraw it (`spec.tier: standard`) — the hold is released on the same
+   reconcile pass and the slot returns immediately (drill §3).
+3. If the warmth is legitimate at that scale, this is a **capacity** decision, not a
+   misconfiguration: scale out `pggw-apps` replicas (the semaphore is per pod) and/or
+   raise `GW_MAX_CONNS` — but it must stay under the compute's `max_connections=100`,
+   so raising it is bounded and is not the answer past ~90. The recorded fast-follow is
+   **ADR-0003's per-app gateway slot cap**, which stops one tenant's warmth from
+   spending the whole shared budget; file it rather than improvising a cap here.
+4. Cross-check whether the wall is already being hit:
+   `pggw_rejected_connections_total` on `pggw-apps` rising means clients are *already*
+   being refused `53300` — that is an incident, not pressure, and step 2 is urgent.
 
 ### Sustained-load / soak / throughput harness (issue #376, wave #375)
 
