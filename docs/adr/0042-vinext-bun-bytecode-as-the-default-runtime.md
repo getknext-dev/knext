@@ -1033,8 +1033,9 @@ first, then CLI**.
   Measure the node standalone entry's post-readiness first-request lazy cost, on the same
   methodology as the vinext measurement (post-readiness, first request, warm image). >200 ms ⇒
   warm-on-boot promotes to contract per the Consequences subsection "Warm-on-boot". Natural home:
-  the Phase 5 A/B sittings, which boot both targets anyway — record the number even if under
-  threshold, so the criterion is discharged by measurement rather than expiring unread. Also owed:
+  the Phase 1 / A2 two-arm sittings, whose control arm boots the node standalone entry anyway —
+  record the number even if under threshold, so the criterion is discharged by measurement rather
+  than expiring unread. Also owed:
   user-facing docs for `KNEXT_WARM_PATH`/`KNEXT_EAGER_WARM` (shipped in #771 undocumented).
 - **A12 — DISCHARGED (2026-08-17), and by the mechanism it was designed for: Phase 3(d) reported, a
   gate read it, and the premise did not survive.** No founder answer is needed because the question
