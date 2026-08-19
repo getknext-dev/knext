@@ -58,7 +58,12 @@ import (
 //     pointers, slices and maps of structs) must be non-zero in at least ONE
 //     fixture. A new field, however deeply nested, cannot ship without some
 //     fixture exercising the branch it gates. The union is what makes this
-//     compatible with mutually exclusive fields.
+//     compatible with mutually exclusive fields. LIMIT: union-of-leaves is NOT
+//     combination coverage — a stamp gated on a CONJUNCTION that no fixture
+//     shape realises escapes (full coverage is 2^N fixtures). The fixtures are
+//     built to keep that blind spot at admission-forbidden conjunctions only;
+//     if you add a stamp gated on two sub-specs at once, check a fixture
+//     realises that pair.
 //  3. ANNOTATION KEYS — collected from the builder's output, never enumerated:
 //     every `autoscaling.knative.dev/*` key any fixture emits, production or
 //     preview, must have an entry in previewDispositions.
@@ -269,13 +274,17 @@ func maximalWarmScheduleSpec() appsv1alpha1.NextAppSpec {
 // pinnedTrafficSpec is the OTHER side of the #393 exclusivity: a pinned
 // revision, hence no warmSchedule. It is what covers the Traffic leaves.
 func pinnedTrafficSpec() appsv1alpha1.NextAppSpec {
-	return appsv1alpha1.NextAppSpec{
-		Image: guardFixtureImage,
-		Scaling: &appsv1alpha1.ScalingSpec{
-			MinScale: 2, MaxScale: 6, ContainerConcurrency: 42,
-		},
-		Traffic: &appsv1alpha1.TrafficSpec{RevisionName: "app-00001", CanaryPercent: 10},
-	}
+	// Maximal MINUS the #393 exclusion, not a from-scratch sparse shape: built
+	// from the maximal fixture so every conjunction involving Traffic is
+	// exercised (review round 3 proved a Traffic-and-Observability-gated stamp
+	// escaped the sparse version). The residual conjunction blind spot shrinks
+	// to warmSchedule x pinned traffic — which admission forbids anyway.
+	s := maximalWarmScheduleSpec()
+	scaling := *s.Scaling
+	scaling.WarmSchedule = nil // the ONLY #393 exclusion
+	s.Scaling = &scaling
+	s.Traffic = &appsv1alpha1.TrafficSpec{RevisionName: "app-00001", CanaryPercent: 10}
+	return s
 }
 
 // minimalSpec is the ONLY-required-fields shape. It is not decoration: a stamp
