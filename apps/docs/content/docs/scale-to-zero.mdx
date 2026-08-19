@@ -38,7 +38,8 @@ spec:
 ```
 
 Every scaling knob on this page — `minScale`, `maxScale`, `containerConcurrency`, `poolMax`,
-`warmSchedule`, `targetBurstCapacity`, `panicWindowPercentage`, `panicThresholdPercentage` — is
+`warmSchedule`, `scaleDownDelay`, `targetBurstCapacity`, `panicWindowPercentage`,
+`panicThresholdPercentage` — is
 also settable from your `kn-next.config.ts` `scaling:` block, so the app and its autoscaling are
 configured from one file:
 
@@ -53,6 +54,41 @@ const config: KnativeNextConfig = {
   },
 };
 ```
+
+## Keeping the last pod for a while after traffic stops
+
+`scaleDownDelay` keeps the last pod **routable** for a window after the traffic stops, then scales
+to zero as usual:
+
+```yaml
+spec:
+  scaling:
+    minScale: 0
+    maxScale: 10
+    scaleDownDelay: 5m   # a duration: 30s, 5m, 1h
+```
+
+A request inside the window is served by a pod that never went away — measured **under 100 ms**,
+against **seconds** for the same request from zero — and it cannot hit the multi-second stall a
+request can otherwise suffer when it arrives exactly while a pod is being taken out of rotation.
+Outside the window nothing changes: the pod goes, and the next request pays a normal cold start.
+
+The cost is one idle pod for the length of the window after every burst, **including the database
+connections that pod holds open**. If you have sized `maxScale × poolMax` against your database's
+connection budget, this does not raise the peak — but it does keep idle connections occupied for
+longer, so count them.
+
+**New apps are scaffolded with `scaleDownDelay: "5m"`** in their `kn-next.config.ts`. Delete that
+line for immediate scale-to-zero; shorten or lengthen it to move the trade. Existing apps are
+unaffected until you add the field yourself.
+
+<Callout type="warn">
+**Your Knative installation has to honour it.** knext asks the platform to hold the pod; an
+installation that ignores or clamps the request will scale down as it always did, and the accepted
+range is the installed platform's, not knext's. `kn-next doctor` reports the version you are
+running against. The delay also covers the **app only** — a database that sleeps when idle keeps
+its own wake time, so the first query after an idle period can still be slow on a warm pod.
+</Callout>
 
 ## The cold-start budget
 

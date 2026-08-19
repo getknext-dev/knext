@@ -70,6 +70,45 @@ There is a middle setting worth knowing about: keeping a warm floor only during 
 traffic. That is a scheduling question rather than a config flag — see
 [Scale to zero](/docs/scale-to-zero).
 
+## Keep warm after traffic stops
+
+There is a second middle setting, and a new app already has it:
+
+```ts title="kn-next.config.ts"
+scaling: {
+  minScale: 0,
+  maxScale: 10,
+  containerConcurrency: 100,
+  scaleDownDelay: "5m",
+}
+```
+
+`scaleDownDelay` keeps the last pod **routable** for a window after traffic stops, instead of
+letting it go straight after the stable window. Inside that window there is nothing to wake:
+measured responses land **under 100 ms**, against **seconds** for the same request from zero. It
+also removes the worst case entirely — a request that arrives *while* a pod is being taken away can
+otherwise sit in the routing layer for several seconds, and inside the delay window there is no
+such handover in flight.
+
+After the window, the pod goes away and the next request is a normal cold start. Scale-to-zero is
+still on; it just starts counting later.
+
+**The cost, plainly:** one pod stays up for five minutes after every burst — along with the
+database connections that pod is holding. For an app that gets a request every few minutes, that is
+close to always-on. That is why it lives in *your* config file rather than in the platform:
+
+- delete the `scaleDownDelay` line to go back to scaling to zero immediately;
+- shorten it (`"30s"`) if you want the transition smoothed over but not much idle time;
+- lengthen it if bursty traffic matters more to you than an idle pod.
+
+<Callout type="info">
+**This one is enforced by your cluster.** knext asks Knative to hold the pod; a Knative
+installation that does not honour that request will simply scale down as it always did. `kn-next
+doctor` reports the version installed on your cluster. Note too that the delay keeps your *app*
+warm — a database that sleeps when idle has its own wake time, and the first query after that can
+still be slow on an otherwise warm pod.
+</Callout>
+
 ## Check your understanding
 
 - Why did the pod take ~90 seconds to disappear rather than immediately?
