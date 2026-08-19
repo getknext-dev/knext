@@ -1056,6 +1056,102 @@ jobs:
         run: bun run test
 
   # ---------------------------------------------------------------------------
+  # The vinext PRE-COMPILE CLOSURE supply-chain gate (ADR-0042 Consequence 6, #764).
+  #
+  # WHY THIS JOB EXISTS AT ALL: a `bun build --compile --bytecode` binary is
+  # OPAQUE to syft and Trivy. Scan a vinext image and you see Alpine packages and
+  # nothing else -- react, vinext, nitro and the app are all inside one ~120 MB
+  # executable. That is precisely the "makes the image-scan gate vacuously green"
+  # reasoning ADR-0042 used to REJECT `FROM scratch`, reached by another route;
+  # full `resolve.noExternal` inlining completes it by deleting the last
+  # externalised, scannable sliver. C6 therefore binds the vinext path to an SBOM
+  # + HIGH/CRITICAL scan of the PRE-COMPILE CLOSURE -- the resolved node_modules
+  # tree that feeds `vite build` -- and the architect gate ruled that gate a
+  # PRECONDITION for the inlining config shipping beyond the spike branch.
+  #
+  # WHY IT SCANS THE INSTALLED TREE, NOT THE LOCKFILE. A lockfile is a claim
+  # about what should be installed; the tree is what the compiler actually
+  # swallows, including whatever install scripts materialised. MEASURED here:
+  # `trivy fs examples/bun-exec` finds `bun.lock` and 60 packages where the
+  # installed tree holds 408, and the 348 it never looked at included a HIGH
+  # (nanoid 3.3.17 -- since bumped to 3.3.18 by an override in the example's
+  # package.json, which is what this gate is for).
+  #
+  # WHY grype HERE AND Trivy ON IMAGES. `trivy sbom` refuses a syft directory
+  # SBOM (`unsupported type`: syft sets the root component type to `file`), and
+  # normalising the document before the scan would mean the scanner no longer
+  # reads the artifact that was attached. grype consumes it as-is, so the scanned
+  # bytes ARE the attached bytes. security.md says "Trivy/Grype"; the image gates
+  # in supply-chain.yml stay Trivy.
+  #
+  # NO VINEXT IMAGE IS PUBLISHED FROM CI TODAY. The only job that builds a vinext
+  # artifact is `bun-exec-alpine-image` below, which now `needs:` this gate -- so
+  # the precondition holds the day a publish lane ships, rather than being
+  # remembered then. `tests/precompile-closure-gate-ci.test.ts` SCANS ci.yml for
+  # any job that compiles the binary or builds its image and requires this gate in
+  # its transitive `needs` closure, so a future publish lane that forgets it fails
+  # there rather than shipping an opaque binary past a scan that never ran.
+  #
+  # THE EMPTINESS GUARD IS THE POINT. A scan of nothing exits 0, and both ways of
+  # scanning nothing here are SILENT: `syft scan dir:` with default catalogers
+  # emits ZERO npm components (measured), and an unpopulated closure directory has
+  # trivially perfect coverage. `scripts/precompile-closure-audit.mjs` fails on
+  # both -- mutation-proved against an empty directory (exit 1) and against a
+  # default-cataloger SBOM (0 components, guard red).
+  vinext-precompile-closure:
+    name: vinext pre-compile closure SBOM + HIGH/CRITICAL scan (ADR-0042 C6)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: latest
+
+      # examples/bun-exec is OUTSIDE the pnpm workspace (own bun.lock, pins the
+      # vinext/nitro prereleases the workspace must not inherit), so the closure
+      # is materialised with bun, in-directory -- exactly as the two jobs below
+      # do. `--frozen-lockfile` is what makes the scanned tree the tree the
+      # committed lockfile describes.
+      - name: Install the pre-compile closure (the tree that feeds `vite build`)
+        working-directory: examples/bun-exec
+        run: bun install --frozen-lockfile
+
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+
+      - name: Install grype
+        uses: anchore/scan-action/download-grype@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+
+      # SBOM (CycloneDX) over the installed closure -> coverage/emptiness guard
+      # -> HIGH/CRITICAL scan of that exact SBOM, minus the dated + justified
+      # security/precompile-closure-allowlist.json. One script so the three stay
+      # in one order; deleting any of them reddens tests/precompile-closure-*.
+      - name: SBOM + HIGH/CRITICAL scan of the pre-compile closure
+        run: node scripts/precompile-closure-audit.mjs --closure examples/bun-exec
+
+      # Attached per vinext build (C6 criterion 1). `always()` so a FAILING scan
+      # still publishes the evidence of what was scanned -- the artifact is how
+      # a triage decision gets made, and withholding it on failure is backwards.
+      # A step-level `if:` is not a disarm (the job's failure still fails the
+      # run); a step-level `continue-on-error:` would be, and the blocking-gate
+      # audit scans every step for one.
+      - name: Upload pre-compile closure SBOM
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: precompile-closure-sbom-${{ github.sha }}
+          path: sbom/precompile-closure.cdx.json
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
   # The bun-exec alpine-image gate (ADR-0042 A1 + A9).
   #
   # WHY THIS JOB EXISTS AT ALL: two claims about the compiled binary had nothing
@@ -1082,6 +1178,11 @@ jobs:
   bun-exec-alpine-image:
     name: bun-exec runs from a clean alpine (ADR-0042 A9)
     runs-on: ubuntu-latest
+    # ADR-0042 C6 / #764: no vinext binary or image is built in CI before the
+    # pre-compile closure has an SBOM and a clean HIGH/CRITICAL scan. That gate
+    # cannot skip (no `if:`, no `paths:` filter), so needing it does not make
+    # this job skippable -- which is the disarm `auditBlockingGate` checks for.
+    needs: vinext-precompile-closure
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

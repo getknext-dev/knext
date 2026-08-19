@@ -1,0 +1,17 @@
+{
+  "$schema-note": "Dated + justified allowlist for the vinext PRE-COMPILE CLOSURE supply-chain gate (scripts/precompile-closure-audit.mjs, ADR-0042 C6 / #764). Mirrors security/npm-audit-allowlist.json and the Trivy triage discipline: an accepted HIGH/CRITICAL in the closure that feeds `vite build` is suppressed ONLY by an entry here, so the gate can never be silently neutered. Each entry MUST carry: `id` (a GHSA/CVE id), `justification` (why it is accepted — no fix available, not reachable in our usage, etc.), and `added` (ISO date). `expires` (ISO date) is optional; past its expiry the entry stops suppressing and the risk must be re-justified. A malformed entry makes the gate THROW rather than be ignored. Bump the dependency FIRST (as nanoid 3.3.17 -> 3.3.18 was, via an override in examples/bun-exec/package.json); allowlist only when there is no fix.",
+  "allow": [
+    {
+      "id": "GHSA-5p2g-fcmc-qvqq",
+      "justification": "image-size 2.0.2 DoS via a crafted image buffer with zero-valued size fields. NO FIXED VERSION published upstream at the time of acceptance; the package is a transitive build-time dependency of the vinext/next toolchain and the compiled server does not accept attacker-supplied image buffers on the pre-compile path. Re-check at expiry: if a fix exists, bump instead of renewing.",
+      "added": "2026-08-19",
+      "expires": "2026-11-19"
+    },
+    {
+      "id": "GHSA-w3rx-r6r6-pgpr",
+      "justification": "image-size 2.0.2 DoS via a crafted ICNS image buffer. Same package, same posture as GHSA-5p2g-fcmc-qvqq: no fixed version upstream at acceptance, transitive build-time dependency. Re-check at expiry.",
+      "added": "2026-08-19",
+      "expires": "2026-11-19"
+    }
+  ]
+}
