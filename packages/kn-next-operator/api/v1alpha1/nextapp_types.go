@@ -457,6 +457,9 @@ type ScalingSpec struct {
 	// decides the behaviour — `kn-next doctor` reports the installed Knative
 	// version, and the ~52 ms warm-hit promise holds only on a cluster that
 	// honours the annotation.
+	//
+	// Previews ignore this field: the preview override drops the annotation, so
+	// preview pods keep the cluster's default scale-down behaviour.
 	// +optional
 	ScaleDownDelay string `json:"scaleDownDelay,omitempty"`
 }
