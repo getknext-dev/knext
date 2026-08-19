@@ -20,11 +20,11 @@ func TestDefaultGatewayHostIsRooted(t *testing.T) {
 	if DefaultGatewayHost != wantGatewayHost {
 		t.Fatalf("DefaultGatewayHost = %q, want the rooted %q", DefaultGatewayHost, wantGatewayHost)
 	}
+	// The trailing dot IS the invariant. Deliberately NOT asserting a minimum dot
+	// count: a rooted SHORT name ("pggw-apps.scale-zero-pg.svc.") is absolute and
+	// perfectly correct, so a dot-count floor would encode the wrong model.
 	if !strings.HasSuffix(DefaultGatewayHost, ".") {
 		t.Fatalf("DefaultGatewayHost = %q has NO trailing dot — at ndots:5 it still walks the full search path, which is the entire cost this is meant to remove", DefaultGatewayHost)
-	}
-	if strings.Count(DefaultGatewayHost, ".") < 5 {
-		t.Fatalf("DefaultGatewayHost = %q: a name below 5 dots is search-path-walked unless rooted", DefaultGatewayHost)
 	}
 }
 

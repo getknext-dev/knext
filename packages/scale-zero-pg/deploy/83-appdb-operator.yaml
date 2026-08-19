@@ -130,14 +130,15 @@ spec:
             - { name: APPDB_TEMPLATE_TL, value: "a0000000000000000000000000000010" }
             - { name: APPDB_PG_VERSION, value: "17" }
             - { name: APPDB_ROLE_PREFIX, value: "app_" } # lock-step with apps-gateway GW_APP_ROLE_PREFIX
-            # ROOTED on purpose — the TRAILING DOT is load-bearing, not a typo. A pod
-            # resolv.conf carries the cluster default ndots:5 + a 3-entry search path,
-            # so ANY name below 5 dots is walked through all 3 entries first: the short
-            # ".svc" form (3 dots) AND the qualified ".svc.cluster.local" form (4 dots)
-            # both waste 3 attempts (6 queries with A+AAAA) on a fresh pod's very first
-            # flows. Only the rooted form is absolute and skips the walk (see the knext
-            # cold-start ledger). "cluster.local" is the k8s default zone; a cluster
-            # with a custom zone edits this value (kept rooted).
+            # ROOTED on purpose — the TRAILING DOT is load-bearing, not a typo. MEASURED
+            # on this plane (a running pod's /etc/resolv.conf, knext cold-start ledger):
+            # ndots:5 with a FIVE-entry search path — the standard three plus two OCI VCN
+            # domains. ANY name below 5 dots is walked through all 5 entries first: the
+            # short ".svc" form (2 dots) AND the qualified ".svc.cluster.local" form
+            # (4 dots) both waste 5 attempts = 10 queries with A+AAAA, two of which LEAVE
+            # THE CLUSTER for OCI's resolver, on a fresh pod's very first flows. Only the
+            # rooted form is absolute and skips the walk. "cluster.local" is the k8s
+            # default zone; a cluster with a custom zone edits this value (kept rooted).
             - { name: APPDB_GATEWAY_HOST, value: "pggw-apps.scale-zero-pg.svc.cluster.local." }
             - { name: APPDB_GATEWAY_PORT, value: "55432" }
             - { name: APPDB_PAGESERVER_URL, value: "http://pageserver:9898" }

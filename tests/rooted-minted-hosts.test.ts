@@ -42,6 +42,28 @@ const MINTING_ARTIFACTS = [
 ] as const;
 
 /**
+ * DELIBERATELY NOT SCANNED — stated explicitly so the list above reads as a decision
+ * rather than as an exhaustive claim. Each is a real unrooted host; each is out of
+ * scope for a reason, not by oversight:
+ *
+ * - `apps/file-manager/kn-next.config.ts` (redis default, `…default.svc.cluster.local`)
+ *   — APP-level config, not a platform-minted Secret. The ledger measures ioredis
+ *   `connect ETIMEDOUT` as the other half of the fresh-pod tail, so the same lever
+ *   applies, but changing an app's own default is a separate call with a separate
+ *   blast radius. Deferred, not dismissed.
+ * - `gateway/cmd/zone-operator/main.go` + `deploy/87-zone-operator.yaml`
+ *   (`ZONE_GATEWAY_HOST`) — embedded in Postgres subscription/FDW conninfo and
+ *   resolved by the COMPUTE's libpq on a long-lived replication connection, not by a
+ *   fresh app pod. Different consumer, different lever; both sites carry an in-tree
+ *   comment saying so.
+ * - `gateway/internal/wake/*` targets and `deploy/_verify-*.sh` drill scripts —
+ *   gateway-internal dial targets and drill-time psql hosts; never inside an
+ *   app-consumed Secret.
+ * - `docs/adr-*.md` — historical decision records; they describe what was decided
+ *   then, and rewriting them would falsify the record.
+ */
+
+/**
  * A dotted hostname beginning with the gateway service name (`pggw`, `pggw-apps`).
  * Host characters include `$`/`{`/`}` so shell-interpolated forms (`pggw-apps.$NS.svc`)
  * are caught rather than skipped, and an optional trailing dot is captured so the

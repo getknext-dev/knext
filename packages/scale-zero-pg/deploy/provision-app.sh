@@ -166,7 +166,11 @@ mint_credential() {
   local pw verifier dsn
   pw="$(python3 -c 'import os;print(os.urandom(18).hex())')"
   verifier="$(app_scram_verifier "$pw")"
-  dsn="postgres://$role:$pw@pggw-apps.$NS.svc:55432/$app?sslmode=disable"
+  # ROOTED host (trailing dot) — deliberate, do not "clean up". Live plane: ndots:5
+  # with a FIVE-entry search path (3 standard + 2 OCI VCN), so any name below 5 dots
+  # costs 5 wasted attempts / 10 queries (2 leaving the cluster) on a fresh pod's
+  # first flows. Both the short .svc form and .svc.cluster.local are below it.
+  dsn="postgres://$role:$pw@pggw-apps.$NS.svc.cluster.local.:55432/$app?sslmode=disable"
   K create secret generic "app-db-$app" \
     --from-literal=PGUSER="$role" \
     --from-literal=PGPASSWORD="$pw" \
@@ -323,7 +327,7 @@ cmd_create() {
 
   DSN (through the apps-gateway, in-cluster) — from Secret app-db-$app:
     kubectl -n $NS get secret app-db-$app -o jsonpath='{.data.DATABASE_URL}' | base64 -d
-    (postgres://$role:<per-app-password>@pggw-apps.$NS.svc:55432/$app?sslmode=disable)
+    (postgres://$role:<per-app-password>@pggw-apps.$NS.svc.cluster.local.:55432/$app?sslmode=disable)
   The user MUST be "$role" (app_<db>); cloud_admin and other apps' roles are
   refused by the apps-gateway BEFORE any wake. The database name "$app" routes to
   compute-$app, served as the branch's postgres DB (GW_SERVED_DATABASE). Wake on
@@ -606,7 +610,11 @@ cmd_rotate_cred() {
   local pw verifier dsn
   pw="$(python3 -c 'import os;print(os.urandom(18).hex())')"
   verifier="$(app_scram_verifier "$pw")"
-  dsn="postgres://$role:$pw@pggw-apps.$NS.svc:55432/$app?sslmode=disable"
+  # ROOTED host (trailing dot) — deliberate, do not "clean up". Live plane: ndots:5
+  # with a FIVE-entry search path (3 standard + 2 OCI VCN), so any name below 5 dots
+  # costs 5 wasted attempts / 10 queries (2 leaving the cluster) on a fresh pod's
+  # first flows. Both the short .svc form and .svc.cluster.local are below it.
+  dsn="postgres://$role:$pw@pggw-apps.$NS.svc.cluster.local.:55432/$app?sslmode=disable"
   log "rotating credential for '$app' (role $role): new SCRAM verifier -> Secret app-db-$app"
   # In-place update (apply, not delete+create) so the Secret never briefly vanishes.
   K create secret generic "app-db-$app" \

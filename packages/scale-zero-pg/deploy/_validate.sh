@@ -82,6 +82,32 @@ for f in [0-9][0-9]-*.yaml; do
     ok "$f validates (client dry-run; server rejects an immutable field on the live object — #126)"
     continue
   fi
+  # DRILL TEMPLATES (e.g. 88-loadsoak-k6.yaml): the file ships with ${VAR} placeholders
+  # that the drill substitutes (envsubst) before applying, so the RAW file can never
+  # satisfy the apiserver — "${K6_MEM_REQUEST}" is not a valid quantity. Before this
+  # branch existed the loop simply ABORTED here, which is why every contract below
+  # (including the rooted-host one) had never executed in a real run. Render the
+  # placeholders to a syntactically-valid stand-in and validate THAT, so the template's
+  # structure and schema are genuinely checked rather than skipped.
+  #
+  # Known limit, stated rather than implied: a defect that exists only in the RAW form
+  # and disappears once substituted — an unquoted ${...} opening a brace inside a {flow
+  # map}, which is exactly what made this file unparseable — is NOT caught by a rendered
+  # check. That is why those placeholders are now quoted at the source.
+  if grep -q '\${[A-Z0-9_]*}' "$f"; then
+    rendered="$(mktemp)"
+    # Stand-in "1Mi" is deliberate: it satisfies the apiserver's quantity regex
+    # (cpu/memory) AND, unquoted, still parses as a STRING rather than a number, so
+    # fields like container.image do not fail to unmarshal.
+    sed 's/\${[A-Z0-9_]*}/1Mi/g' "$f" > "$rendered"
+    if rerr="$(kubectl apply --dry-run=server -f "$rendered" 2>&1 >/dev/null)"; then
+      rm -f "$rendered"
+      ok "$f validates (server dry-run of the placeholder-rendered template; the drill envsubsts before applying)"
+      continue
+    fi
+    rm -f "$rendered"
+    fail "$f does not validate even with its \${VAR} placeholders rendered: $rerr"
+  fi
   fail "$f does not validate: $err"
 done
 

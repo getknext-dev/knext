@@ -151,8 +151,8 @@ metadata:
   name: shop-db
   namespace: my-app-ns
 stringData:
-  DATABASE_URL: postgres://app_shop:…@pggw-apps.scale-zero-pg.svc:55432/shop?sslmode=disable
-  DATABASE_URL_RO: postgres://app_shop:…@pggw-apps.scale-zero-pg.svc:55434/shop?sslmode=disable
+  DATABASE_URL: postgres://app_shop:…@pggw-apps.scale-zero-pg.svc.cluster.local.:55432/shop?sslmode=disable
+  DATABASE_URL_RO: postgres://app_shop:…@pggw-apps.scale-zero-pg.svc.cluster.local.:55434/shop?sslmode=disable
 ---
 apiVersion: apps.kn-next.dev/v1alpha1
 kind: NextApp

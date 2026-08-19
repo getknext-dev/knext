@@ -93,7 +93,7 @@ ITERS=3 bash demo/_verify.sh
 demo/migrate-to-perapp.sh restore
 ```
 
-After migration the DSN is `postgres://app_pgdemo:<pw>@pggw-apps.scale-zero-pg.svc:55432/pgdemo`
+After migration the DSN is `postgres://app_pgdemo:<pw>@pggw-apps.scale-zero-pg.svc.cluster.local.:55432/pgdemo`
 — note the **apps-gateway** host, the **per-app role** (`app_pgdemo`, not
 `cloud_admin`), and the **database = app name** (`pgdemo`, which routes to
 `compute-pgdemo`). The per-app password is minted at provision time, so it is

@@ -189,18 +189,22 @@ The operator mints one Secret per app, named by `status.secretName`
 | `DATABASE_URL_RO` | **only when `roPool.enabled`** | the writer DSN with the gateway **RO port** (`55434`) |
 
 **Why the gateway host carries a trailing dot.** The minted host is *rooted*
-(`…svc.cluster.local.`), and the dot is deliberate. A pod's `resolv.conf` carries the
-Kubernetes default `ndots:5` plus a 3-entry search path, so the resolver tries the
-search path **first** for any name with fewer than 5 dots — both the short
-`pggw-apps.scale-zero-pg.svc` (3 dots) and the merely-qualified
-`pggw-apps.scale-zero-pg.svc.cluster.local` (4 dots) waste 3 lookup attempts (6
-queries with A+AAAA) before the name is tried as given. Only the rooted form is
-absolute and skips the walk, which matters most on a **freshly scheduled pod's very
-first UDP flows** — the ones that hit the DNS/conntrack race behind the current
-cold-start tail (see the knext cold-start ledger, `docs/benchmarks/cold-start-ledger.md`
-in the knext repo, which lands with knext PR #795).
-`cluster.local` is the Kubernetes default DNS zone; a cluster with a custom zone sets
-`APPDB_GATEWAY_HOST` on the operator, which is used **verbatim** (keep it rooted).
+(`…svc.cluster.local.`), and the dot is deliberate. Measured on the live plane — a
+running pod's `/etc/resolv.conf`, not the textbook default — the cluster runs
+`options ndots:5` with a **five-entry** search path: the standard three
+(`<ns>.svc.cluster.local`, `svc.cluster.local`, `cluster.local`) plus two OCI VCN
+domains (`knext.oraclevcn.com`, `nodes.knext.oraclevcn.com`). The resolver tries that
+search path **first** for any name with fewer than 5 dots, so both the short
+`pggw-apps.scale-zero-pg.svc` (2 dots) and the merely-qualified
+`pggw-apps.scale-zero-pg.svc.cluster.local` (4 dots) waste **5 lookup attempts — 10
+queries with A+AAAA, two of which leave the cluster** for OCI's resolver — before the
+name is tried as given. Only the rooted form is absolute and skips the walk, which
+matters most on a **freshly scheduled pod's very first UDP flows** — the ones that hit
+the DNS/conntrack race behind the current cold-start tail (see the knext cold-start
+ledger, `docs/benchmarks/cold-start-ledger.md` in the knext repo, which lands with knext
+PR #795). `cluster.local` is the Kubernetes default DNS zone; a cluster with a custom
+zone sets `APPDB_GATEWAY_HOST` on the operator, which is used **verbatim** (keep it
+rooted).
 
 **Scope: newly minted apps only.** `app-db-<app>` Secrets are minted **once** and never
 rewritten (the create path is idempotent so a live app's password is never rotated out
@@ -208,6 +212,14 @@ from under it), so this host change reaches apps provisioned **after** the opera
 upgraded. Existing apps keep their old short-host DSN until the Secret is deleted and
 re-minted — deliberately, since re-minting a live app's Secret is a credential event, not
 a DNS tweak.
+
+> **Measuring this change requires re-minting the subject.** Every already-provisioned
+> app — including the hand-made Secret of the benchmark app whose `EAI_AGAIN` motivated
+> this — is in that unaffected set, so a post-merge cold-start measurement taken without
+> re-minting measures the *old* host and will show no change, for a reason that is not a
+> measurement failure. Re-mint the subject first: `provision-app.sh rotate-cred <app>`
+> rewrites `app-db-<app>`'s `DATABASE_URL` in place (it now writes the rooted host), which
+> makes it the sanctioned re-mint tool; a hand-made Secret must be re-applied by hand.
 
 `DATABASE_URL_RO` is derived from `DATABASE_URL` by swapping **only** the gateway
 port (`55432` → `55434`); same role, password, host and database. It is

@@ -166,7 +166,7 @@ spec:
   tier: cold                    # cold = scale-to-zero at rest (default)
 EOF
 kubectl -n scale-zero-pg get secret app-db-orders -o jsonpath='{.data.DATABASE_URL}' | base64 -d
-# -> postgres://app_orders:<pw>@pggw-apps.scale-zero-pg.svc:55432/orders?sslmode=disable
+# -> postgres://app_orders:<pw>@pggw-apps.scale-zero-pg.svc.cluster.local.:55432/orders?sslmode=disable
 ```
 
 Design, evidence and caveats: scale-zero-pg
