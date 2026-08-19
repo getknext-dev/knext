@@ -491,16 +491,34 @@ grep -q 'appdatabases/finalizers' 83-appdb-operator.yaml || fail "83-appdb-opera
 grep -q '/appdb-operator' 83-appdb-operator.yaml || fail "83-appdb-operator.yaml must override the entrypoint to /appdb-operator"
 grep -q 'deployments/scale' 83-appdb-operator.yaml && fail "appdb-operator must NOT hold deployments/scale — the apps-gateway owns spec.replicas"
 grep -q 'appdb-operator' ../gateway/Dockerfile || fail "Dockerfile does not build the appdb-operator binary into the image"
-# The DEPLOYED gateway host is this manifest's value, not the binary's default — it
-# overrides it. It must be ROOTED (trailing dot): at the cluster default ndots:5 any
-# name below 5 dots is walked through the whole search path first, so BOTH the short
-# "…svc" form and the qualified-but-unrooted "…svc.cluster.local" form waste the same
-# 3 attempts on exactly the fresh-pod flows that hit the conntrack race (knext
-# cold-start ledger). Scan, don't enumerate: ANY unrooted value here fails.
+# Every gateway host the PLATFORM mints into an app-consumed Secret must be ROOTED
+# (trailing dot). Measured on the live plane (a running pod's /etc/resolv.conf, knext
+# cold-start ledger): `options ndots:5` with a FIVE-entry search path — the standard
+# three plus two OCI VCN domains. Any name below 5 dots is tried against all five
+# suffixes before the name as given: 5 wasted attempts = 10 wasted queries with
+# A+AAAA, and the two VCN misses leave the cluster for OCI's resolver. That covers
+# BOTH the short "pggw-apps.<ns>.svc" (2 dots) and the merely-qualified
+# "…svc.cluster.local" (4 dots) — only the rooted form skips the walk.
+#
+# SCAN, don't enumerate: the operator manifest is only ONE writer of app-db-<app>.
+# provision-app.sh writes the same Secret from `create` AND from `rotate-cred` (the
+# latter would silently REVERT a rooted DSN on every rotation), so the scan below
+# covers the script's DSNs too.
+#
+# REACHABILITY, stated plainly: this file is NOT wired into the monorepo's root
+# .github/workflows — the packages/scale-zero-pg/.github copy is subtree residue
+# GitHub does not run (knext #797 tracks the structural half). The equivalent contract
+# therefore ALSO lives in the root test infra, which does run in CI:
+# tests/rooted-minted-hosts.test.ts.
 grep -q 'APPDB_GATEWAY_HOST, value: "' 83-appdb-operator.yaml || fail "83-appdb-operator.yaml no longer sets APPDB_GATEWAY_HOST — the rooted-host contract below would silently pass"
 grep 'APPDB_GATEWAY_HOST, value: "' 83-appdb-operator.yaml | grep -qv 'value: "[^"]*\."' &&
   fail "83-appdb-operator.yaml APPDB_GATEWAY_HOST is NOT rooted (no trailing dot) — minted DATABASE_URLs would walk the ndots:5 search path on every fresh pod (a custom DNS zone edits the value but KEEPS the trailing dot)" || true
-ok "AppDatabase CRD + operator wired (82/83), operator built into the image, does not claim deployments/scale (issue #96), minted-DSN gateway host is fully qualified"
+# provision-app.sh: both Secret writers (create at mint_credential, rotate-cred) plus
+# the DSN it prints. Presence check first, so deleting the mint cannot vacuously pass.
+grep -q 'pggw-apps\.' provision-app.sh || fail "provision-app.sh no longer references the apps-gateway host — the rooted-host scan below would silently pass"
+grep -n 'pggw-apps\.' provision-app.sh | grep -qv 'pggw-apps\.[^ :"]*\.svc\.cluster\.local\.' &&
+  fail "provision-app.sh mints an UNROOTED apps-gateway host (see the lines above): every app-db-<app> DSN it writes — from 'create' AND from 'rotate-cred', which overwrites a live Secret — must end .svc.cluster.local. or it walks the ndots:5 search path on every fresh pod" || true
+ok "AppDatabase CRD + operator wired (82/83), operator built into the image, does not claim deployments/scale (issue #96); every platform-minted gateway host (operator manifest + provision-app.sh create/rotate) is ROOTED"
 
 # 25. contract (issue #151, ADR-0007 v2-2): the Zone CRD + zone-operator ship together
 #     and are STANDARD deploy artifacts, not drill-only. Same "merged ≠ deployed" class
