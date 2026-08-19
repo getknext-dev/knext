@@ -791,10 +791,10 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 	// EXPLICITLY set — nil leaves the annotation absent so the Knative
 	// cluster default (200) applies unmanaged, exactly as before this field
 	// existed (byte-identical back-compat). Written into the SAME annotations
-	// map as min-scale/max-scale/containerConcurrency, and is untouched by
-	// the preview-env override below (that override rewrites only
-	// max-scale/min-scale/retention-period, so a stamped TBC always
-	// survives it).
+	// map as min-scale/max-scale/containerConcurrency. Its preview fate is
+	// PASSED THROUGH — recorded in the override's single disposition list
+	// below (#770), the one enumeration of what preview forces, drops, and
+	// passes; do not restate the list here.
 	if nextApp.Spec.Scaling != nil && nextApp.Spec.Scaling.TargetBurstCapacity != nil {
 		annotations["autoscaling.knative.dev/target-burst-capacity"] = fmt.Sprintf("%d", *nextApp.Spec.Scaling.TargetBurstCapacity)
 	}
@@ -805,9 +805,9 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 	// cluster defaults (10% window / 200% threshold) apply unmanaged, exactly
 	// as before this field existed (byte-identical back-compat). Written into
 	// the SAME annotations map as min-scale/max-scale/containerConcurrency/
-	// targetBurstCapacity, and is untouched by the preview-env override below
-	// (that override rewrites only max-scale/min-scale/retention-period, so a
-	// stamped panic annotation always survives it).
+	// targetBurstCapacity. Its preview fate is PASSED THROUGH — recorded in
+	// the override's single disposition list below (#770); do not restate
+	// the list here.
 	if nextApp.Spec.Scaling != nil && nextApp.Spec.Scaling.PanicWindowPercentage != nil {
 		annotations["autoscaling.knative.dev/panic-window-percentage"] = fmt.Sprintf("%d", *nextApp.Spec.Scaling.PanicWindowPercentage)
 	}
