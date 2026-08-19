@@ -70,7 +70,7 @@ The operator reconciles `.status`. A driver gates its own work on these fields:
 | `status.conditions[type=Ready]` | `status: "True"` when servable | the canonical readiness gate |
 | `status.conditions[type=Provisioned]` | branch + child objects exist | provisioning progress |
 | `status.conditions[type=ColdRestorable]` | `"True"` once this app is recoverable by a **cold** disaster restore (ancestor WAL durable in object storage; runbook-dr.md §9d-bis) | **do NOT gate readiness on this** — it is disaster-restore coverage, not serving; alert if it stays non-`True` for long |
-| `status.conditions[type=WarmHold]` | **present and meaningful whenever warmth is requested** — `spec.tier: warm` (§2a) or a non-empty `spec.warmSchedule` (§3b). `"True"`/`TierWarm` while the permanent hold is established, `"True"`/`WindowActive` while a scheduled window holds it; `"False"`/`WindowInactive`, `/HoldFailed`, `/InvalidWarmWindow`, or `/HoldsUnavailable` otherwise. **Absent** while the CR has never asked for warmth, and **retracted to `"False"`/`WarmthNotRequested`** in the same pass that releases the hold when warmth is *withdrawn* by a `spec` edit (`tier: warm` → `cold`, or the last `warmSchedule` window deleted) — so a `"True"` here never outlives the spec that asked for it | the **only** true statement about whether the DB is warm right now — but **never gate serving on it**; a hold failure degrades to the ordinary cold wake |
+| `status.conditions[type=WarmHold]` | **present and meaningful whenever warmth is requested** — `spec.tier: warm` (§2a) or a non-empty `spec.warmSchedule` (§3b). `"True"`/`TierWarm` while the permanent hold is established, `"True"`/`WindowActive` while a scheduled window holds it; `"False"`/`WindowInactive`, `/HoldFailed`, `/InvalidWarmWindow`, or `/HoldsUnavailable` otherwise. **Absent** while the CR has never asked for warmth, and **retracted to `"False"`/`WarmthNotRequested`** when warmth is *withdrawn* by a `spec` edit (`tier: warm` → `cold`, or the last `warmSchedule` window deleted) — the hold is released and the retraction **persisted best-effort in the same pass** (before the pageserver steps, mirroring the delete path), so a `"True"` here does not outlive the spec that asked for it; if that one status write fails the next resync tick (~15 s) retries, and during any such gap the `appdb_warm_hold_active` gauge — which reads the hold manager directly — is the authoritative signal (compare `status.observedGeneration` to `metadata.generation` to detect a stale status) | the **only** true statement about whether the DB is warm right now — but **never gate serving on it**; a hold failure degrades to the ordinary cold wake |
 | `status.secretName` | the output Secret name (`app-db-<app>`) | **read the Secret to mirror** — do not reconstruct |
 | `status.observedGeneration` | last `spec` generation reconciled | detect stale status after a `spec` edit |
 | `status.timelineId` | the app's Neon timeline id | diagnostics |
@@ -115,7 +115,7 @@ not read the pageserver on that pass and will re-check.
 | tier | mechanism | what you get | what it costs |
 |---|---|---|---|
 | `cold` (default) | nothing is held; the compute sits at 0 replicas | the apps-gateway wakes it 0→1 on the first connection; that connection pays the wake | nothing at rest |
-| `warm` | a **permanent warm hold**: the operator keeps ONE authenticated idle postgres connection to the app open through the apps-gateway, forever | the compute never idles to zero, so queries pay **no compute wake and no cold auth** | 1 connection of `GW_MAX_CONNS` (90), one liveness ping per resync (`APPDB_RESYNC_MS`, default 15 s), and the compute's cpu/mem reserved 24/7 |
+| `warm` | a **permanent warm hold**: the operator keeps ONE authenticated idle postgres connection to the app open through the apps-gateway, forever | the compute never idles to zero, so queries pay **no compute wake and no cold auth** | 1 slot of the apps-gateway's **process-wide** `GW_MAX_CONNS` (90 **per gateway pod, shared with ALL tenant traffic** — not a per-app allowance; see the capacity note below §2a), one liveness ping per resync (`APPDB_RESYNC_MS`, default 15 s), and the compute's cpu/mem reserved 24/7 |
 
 **`warm` is a held connection, not a replica floor.** The operator writes
 `replicas: 0` for **both** tiers and never writes a replica count to keep an app
@@ -126,6 +126,20 @@ last connection closes regardless of what `spec.replicas` says. (This is exactly
 how `spec.tier: warm` used to be implemented, and why it silently degraded to
 cold after its first idle window. There is deliberately **no** `minWarm` /
 replica-floor field; adding one would recreate the two-writer defect.)
+
+**Capacity — warm holds spend a fleet-wide budget, not a per-app one.**
+`GW_MAX_CONNS` (90) is one semaphore **per apps-gateway pod**, taken in the
+accept loop before any app is identified and shared with every tenant's client
+traffic (ADR-0003 records this correction explicitly — it is NOT a per-app cap).
+Every `tier: warm` app therefore occupies **one slot permanently**: N warm apps
+put a standing floor of N slots on that budget, and exhaustion is refused as
+`53300 too many connections` to **other apps' clients**, not to the warm apps.
+Practical ceiling: keep concurrently-warm apps well below `GW_MAX_CONNS` minus
+your peak concurrent client connections; at the platform's "tens to low
+hundreds of apps" sizing, making *every* app warm does not fit — warm is an
+opt-in tier for the apps that need it. A per-app gateway slot cap is recorded
+in ADR-0003 as a fast-follow; until it lands, watch
+`pggw_rejected_connections_total` alongside warm-app count (see the drill).
 
 Mechanically, `tier: warm` is the same actuator as a 24/7 `warmSchedule` window —
 see §3b for the full mechanism, cost, and failure semantics.
@@ -246,9 +260,10 @@ window start rides the ordinary wake path (one wake-budget token, the normal
 0→1). At window end the hold is released and the gateway parks the compute on
 its usual idle window.
 
-**Cost while held (the opt-in warm cost):** 1 connection of the compute's
-`GW_MAX_CONNS` (90), one liveness ping per resync, and the compute's reserved
-cpu/mem for the window's duration.
+**Cost while held (the opt-in warm cost):** 1 slot of the apps-gateway's
+**process-wide** `GW_MAX_CONNS` (90 per gateway pod, shared with all tenant
+traffic — see the capacity note in §2a), one liveness ping per resync, and the
+compute's reserved cpu/mem for the window's duration.
 
 **Failure semantics — warming is best-effort.** A hold failure (compute still
 waking, gateway rollout, Secret not yet minted) never fails provisioning: the

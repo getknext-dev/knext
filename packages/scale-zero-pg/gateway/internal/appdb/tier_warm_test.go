@@ -423,3 +423,31 @@ func TestTierWarm_WithdrawalRetractionIsPersistedEvenWhenThePassFails(t *testing
 		t.Fatalf("PERSISTED WarmHold = %+v, want False/WarmthNotRequested — the retraction must reach the API in the failing pass, or a driver sees True/TierWarm for the whole outage", wh)
 	}
 }
+
+func TestTierWarm_NWarmAppsHoldExactlyNDistinctSlots(t *testing.T) {
+	// Pin, green from birth (system-designer review, #786): every warm app holds
+	// exactly ONE gateway connection, permanently — so N warm apps put a
+	// permanent floor of N slots on the apps-gateway's PROCESS-WIDE GW_MAX_CONNS
+	// budget (shared with ALL tenant traffic; exhaustion is refused 53300 to
+	// OTHER apps' clients). This pins the N-holds-for-N-apps arithmetic that the
+	// capacity ceiling documented in appdatabase-api.md §2a rests on; if holds
+	// ever multiply per app (or coalesce), the fleet-pressure math in the docs
+	// goes wrong silently.
+	h, fh := harnessWithHolds(time.Date(2026, 8, 18, 3, 0, 0, 0, time.UTC))
+	apps := []string{"app1", "app2", "app3", "app4", "app5"}
+	for i, app := range apps {
+		cr := &AppDatabase{
+			Name: app, Namespace: "scale-zero-pg", Generation: 1,
+			Spec: AppDatabaseSpec{AppName: app, Tier: "warm"},
+		}
+		mustReconcile(t, h, cr)
+		if got := len(fh.held); got != i+1 {
+			t.Fatalf("after %d warm apps: %d holds, want exactly %d (one per app)", i+1, got, i+1)
+		}
+	}
+	for _, app := range apps {
+		if !fh.held[app] {
+			t.Fatalf("app %s not held — holds must be per-app distinct, not coalesced", app)
+		}
+	}
+}

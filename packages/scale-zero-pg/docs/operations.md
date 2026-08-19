@@ -1708,9 +1708,10 @@ kubectl -n scale-zero-pg get cm apps-wal-reclaim-pending -o yaml   # pending SK-
   reserved name (`tmpl/warm/ro`). *(A warm tier is never stuck here: since #777 the
   warm tier is a held connection, not a replica, so readiness never waits on a
   replica — see the next bullet.)*
-- **`Ready` with reason `WarmHoldDegraded`** → the CR asked for warmth
-  (`spec.tier: warm`, or an active `spec.warmSchedule` window) but the operator is
-  **not** holding it. Serving is unaffected (the compute still wakes on connect);
+- **`Ready` with reason `WarmHoldDegraded`** → the CR has `spec.tier: warm` but
+  the operator is **not** holding it. (Schedule-only CRs never show this reason:
+  a failed hold on a `spec.warmSchedule` window surfaces on the `WarmHold`
+  condition ONLY — their `Ready` reason stays `Provisioned`.) Serving is unaffected (the compute still wakes on connect);
   what is lost is the no-cold-start property. Read the `WarmHold` condition for
   which case it is:
   `kubectl -n scale-zero-pg get appdatabase orders -o jsonpath='{.status.conditions[?(@.type=="WarmHold")]}' | jq`

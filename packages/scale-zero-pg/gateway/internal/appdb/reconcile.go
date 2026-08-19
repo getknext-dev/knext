@@ -183,9 +183,21 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 		// Retract a condition left over from when warmth WAS requested. Set to
 		// False rather than deleted so the retraction is observable (and carries
 		// a lastTransitionTime); never written onto a CR that never asked.
-		if findCondition(cr, CondWarmHold) != nil {
+		if wh := findCondition(cr, CondWarmHold); wh != nil {
+			alreadyRetracted := wh.Status == "False" && wh.Reason == "WarmthNotRequested"
 			d.setCondition(cr, CondWarmHold, "False", "WarmthNotRequested",
 				"neither spec.tier: warm nor spec.warmSchedule is set; any warm hold has been released and the compute sleeps at zero and wakes on connect")
+			if !alreadyRetracted {
+				// Persist the retraction NOW, best-effort (the reconcileDelete
+				// precedent), not only at step 6: a pass that fails in the
+				// pageserver steps otherwise leaves True/TierWarm visible
+				// through the API for the whole outage while nothing is held —
+				// the §2 contract says a True never outlives the spec that
+				// asked for it. Guarded on the transition so a long-withdrawn
+				// CR does not re-write status every resync tick; on an API
+				// error the step-6 write (or the next tick) retries.
+				_ = d.Cluster.UpdateStatus(ctx, cr)
+			}
 		}
 	}
 

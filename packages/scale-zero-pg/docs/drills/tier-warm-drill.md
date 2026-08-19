@@ -119,6 +119,16 @@ kubectl -n scale-zero-pg get deploy compute-${APP} \
   -o jsonpath='{.spec.replicas}'                 # expect: 0
 ```
 
+## 4. Fleet pressure — worth measuring when more than a handful of apps go warm
+
+Warm holds spend the apps-gateway's **process-wide** `GW_MAX_CONNS` budget (90 per
+gateway pod, shared with all tenant client traffic — see `appdatabase-api.md` §2a's
+capacity note). Each warm app is one permanent slot; exhaustion is refused `53300`
+to **other apps' clients**. When drilling a plane that runs N warm apps, record
+`pggw_rejected_connections_total` on the apps-gateway before and after, alongside
+the warm-app count — a rise here that tracks warm-app growth is the capacity wall,
+and it will show up on unrelated tenants first.
+
 **Teardown.** Delete the CR (`kubectl -n scale-zero-pg delete appdatabase ${APP}`);
 the deprovision finalizer runs the timeline reclaim. A `1` left on
 `appdb_warm_hold_active` for a deleted or cold app is a leak — report it, do not
