@@ -96,6 +96,27 @@ against containerd GC) — every node. Scale-from-zero then never waits on the p
   digest updates too; there is a brief window where the new digest is pulling on the prewarmer while an
   old-revision cold start could still pay a pull — acceptable, and no worse than status quo.
 
+  **Measured (2026-08-18, #767): an unpinned first pull cost 14.9 s end-to-end.** A first request
+  landing on a node that had not pulled the new digest paid **14.9 s** — a single sample with no
+  raw file committed; the citation is **Addendum 4** of
+  `docs/benchmarks/fm-confirmatory-prepulled-ab-2026-08-18.md`. Compared like-for-like: that
+  record's pinned cold median is 2.28 s (n=5), and this ADR's own model predicts **~4.2 s** for a
+  cold-image cold start — so the sample is ≈ **+12.7 s of pull where the model assumed ~2 s**, the
+  tail the action items below already warn about ("holds at the median and understates the tail",
+  max-to-max +10.7 s), realized and exceeded. "Acceptable" above still stands, but it is now
+  priced, with a condition: the window stays short only **while the re-pointing mechanism runs** —
+  `image_prewarm.go` CreateOrUpdate over `app.Spec.Image` on every reconcile, envtest-guarded by
+  "updates the DaemonSet's app image when the NextApp digest changes". Per the 2026-08-04
+  amendment below, a *failing* prewarm reconcile degrades rather than fails: the pin silently
+  stays at the old digest with only `ImageCacheReady`/the alert as signal, and in that state the
+  window is unbounded — at this price. Corollary, recorded so spike data is not misread as ADR
+  evidence: a **hand-rolled prepull DaemonSet is NOT this ADR's mechanism** — it pins the digests
+  it was told at creation and never follows a redeploy, so after one redeploy it prewarms a dead
+  digest while every cold start pays the full unpinned price. The 14.9 s sitting ran exactly that
+  configuration (attribution per the #767 gate ruling — the record's own text says only that
+  "prepull pins track digests: they pin what they are told, not what is deployed"). Do not cite
+  hand-rolled DaemonSets as evidence for or against `imagePrewarm`.
+
 ## Amendment (2026-08-04, #471 item 4): a prewarm failure DEGRADES, it does not FAIL the pass
 
 As first implemented, `reconcileImagePrewarmDaemonSet`'s error was returned out of `Reconcile`,
