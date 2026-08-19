@@ -117,7 +117,9 @@ type DatabaseSpec struct {
     Enabled bool `json:"enabled,omitempty"`
 
     // Tier maps 1:1 to AppDatabase.spec.tier. cold = scale-to-zero (default);
-    // warm = one parked replica for ~0.4s wake.
+    // warm = the DB never idles to zero. (Historical wording here was "one parked
+    // replica for ~0.4s wake"; as implemented in #777 warm is a PERMANENT warm
+    // HOLD — one held gateway connection, no wake at all — never a replica floor.)
     // +kubebuilder:validation:Enum=cold;warm
     Tier string `json:"tier,omitempty"`
 

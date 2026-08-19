@@ -1630,7 +1630,7 @@ spec:
   quotas: { cpu: "1000m", mem: "1Gi", maxConnections: 100 }
   keepTimelineOnDelete: false                  # false = safe two-sided reclaim on delete
 EOF
-kubectl -n scale-zero-pg get appdatabases      # APP PHASE TIMELINE READY TIER AGE
+kubectl -n scale-zero-pg get appdatabases      # APP PHASE TIMELINE COMPUTE TIER AGE
 kubectl -n scale-zero-pg describe appdatabase orders   # status conditions + Events (Branched/…)
 kubectl delete appdatabase orders              # finalizer runs safe deprovision (no orphan)
 ```

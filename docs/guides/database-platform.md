@@ -141,7 +141,7 @@ and the tier table are in scale-zero-pg's
 | Capability | What it gives a knext app |
 |---|---|
 | **Scale-to-zero Postgres** | Idle → 0 compute; first connection wakes it (**~2.5 s** cold). |
-| **Warm tier** (opt-in) | A parked pod for latency-sensitive apps — **~0.4 s** wake, at the cost of 256 MiB reserved 24/7. |
+| **Warm tier** (opt-in) | The database never sleeps for latency-sensitive apps — the platform holds it awake, so there is **no wake at all** on connect, at the cost of the compute's cpu/memory reserved 24/7 and one standing slot of the gateway's shared connection budget. |
 | **Per-app databases** | Branch-per-app: each app gets its **own** scale-to-zero Postgres — a Neon branch on one shared storage plane, provisioned declaratively via an `AppDatabase` CRD + operator. Isolated by both data (separate timeline) and access (per-app credential; the gateway refuses a wrong `(user, database)` pair before waking anything). |
 | **Read replicas** | An optional read-only pool via a second DSN (`DATABASE_URL_RO`, port 55434) — reads scale 0→N→0, eventually consistent with a bounded ~9 s staleness ceiling. |
 | **Backups / DR** | Rehearsed backup→restore (~110 s RTO) and pageserver failover (~7 s RTO); durability is Neon's WAL quorum, not rebuilt. |
