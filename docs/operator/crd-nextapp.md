@@ -127,6 +127,10 @@ spec:
 > what knext accepts is what the Knative it was built against accepts. The **installed** cluster is
 > a separate question: an older Knative may clamp or ignore a value admission accepted — `kn-next
 > doctor` reports the installed Knative version.
+> **Previews ignore this field (#770):** a preview deployment is ephemeral, so the preview override
+> drops the annotation along with forcing `max-scale=1` / `min-scale=0` / a 30s retention window —
+> preview pods keep the cluster's default scale-down behaviour, and only non-preview revisions get
+> your `scaleDownDelay`.
 > See [ADR-0045](../adr/0045-scale-down-delay.md).
 
 ### `storage` (Optional)
