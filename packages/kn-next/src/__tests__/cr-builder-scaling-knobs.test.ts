@@ -175,3 +175,42 @@ describe("buildNextAppCRObject — scaling knobs (#415)", () => {
         });
     });
 });
+
+/**
+ * ADR-0045 — `spec.scaling.scaleDownDelay` keeps the last pod ROUTABLE for a
+ * window after traffic stops (Knative
+ * `autoscaling.knative.dev/scale-down-delay`, stamped by the operator).
+ *
+ * BOTH halves are asserted, because only one of them is the back-compat
+ * guarantee: set ⇒ the exact string reaches `spec.scaling`; unset ⇒ the KEY is
+ * absent from the emitted CR (not present-as-undefined), so an existing
+ * deployment's rendered CR is byte-identical to what it was before this field
+ * existed.
+ */
+describe("buildNextAppCRObject — scaleDownDelay (ADR-0045)", () => {
+    it("maps scaleDownDelay into spec.scaling when set, verbatim", () => {
+        const scaling = scalingOf(baseConfig({ scaleDownDelay: "5m" }));
+        expect(scaling.scaleDownDelay).toBe("5m");
+    });
+
+    it("omits the scaleDownDelay KEY entirely when unset (byte-identical back-compat)", () => {
+        const scaling = scalingOf(baseConfig({ minScale: 0, maxScale: 10 }));
+        expect(Object.keys(scaling)).not.toContain("scaleDownDelay");
+        // "" is the unset spelling on both sides (validate skips it, the CRD
+        // field is omitempty) — it must not surface as an empty-string key.
+        expect(
+            Object.keys(scalingOf(baseConfig({ scaleDownDelay: "" }))),
+        ).not.toContain("scaleDownDelay");
+        expect(Object.keys(scalingOf(baseConfig(undefined)))).not.toContain(
+            "scaleDownDelay",
+        );
+    });
+
+    it("does not normalise or re-derive the duration (the operator webhook is the authority)", () => {
+        // `90s` is a legal Go duration Knative accepts; the CLI must not helpfully
+        // rewrite it to `1m30s` — the operator parses what the user wrote.
+        expect(
+            scalingOf(baseConfig({ scaleDownDelay: "90s" })).scaleDownDelay,
+        ).toBe("90s");
+    });
+});

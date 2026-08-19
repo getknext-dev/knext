@@ -310,6 +310,36 @@ export function validateConfig(config: KnativeNextConfig): void {
             errors.push("'scaling.panicThresholdPercentage' must be >= 110");
         }
 
+        // ADR-0045 — scaleDownDelay: SYNTAX ONLY, deliberately.
+        //
+        // The operator validates this field by handing it to Knative's own
+        // `autoscaling.ValidateAnnotations`, precisely so the platform and the
+        // cluster cannot disagree about what "0s-1h at second precision"
+        // means. Re-deriving that range here would reintroduce exactly the
+        // divergence class the Go side removed by delegating — and in a layer
+        // that never sees which Knative is installed. So this check only
+        // catches the typo a user can see for themselves ("5min"), and the
+        // semantics stay with the one authority, reached by
+        // `preflightCRSchema`'s server-side dry-run before any cluster write.
+        //
+        // The check may only ever be MORE permissive than Go's ParseDuration —
+        // locally rejecting a value the webhook accepts IS the divergence bug.
+        // Hence the shapes a first draft missed: an optional sign, bare "0"
+        // (Go's zero-duration special case), ".5s" / "1.s" fractions, and the
+        // U+00B5/U+03BC micro-sign pair. The accepted corpus is pinned to the
+        // operator's own agreement test, not to this regex — see
+        // validate-scaling-knobs.test.ts. "" is treated as unset, matching the
+        // CRD field's omitempty.
+        if (config.scaling.scaleDownDelay) {
+            const GO_DURATION =
+                /^[+-]?(0|(([0-9]+(\.[0-9]*)?|\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+)$/;
+            if (!GO_DURATION.test(config.scaling.scaleDownDelay)) {
+                errors.push(
+                    `'scaling.scaleDownDelay' must be a Go duration string (e.g. "5m", "30s", "1h"), got '${config.scaling.scaleDownDelay}'`,
+                );
+            }
+        }
+
         // #435 — cheap, SINGLE-FIELD checks for the four resource quantities
         // that flow into the CR's spec.resources. The OPERATOR stays the single
         // source of validation truth (internal/validation/validate.go rejects
