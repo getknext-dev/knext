@@ -191,6 +191,11 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 	}
 
 	// 5c. DB warm lockstep (knext #388, ADR-0030 addendum; tier:warm added #777).
+	//    Placed AFTER steps 5/5b so a first-ever warm create never dials a compute
+	//    whose timeline does not exist yet — the trade is that a hard error in
+	//    5/5b returns before both the ensure AND the withdrawal release for that
+	//    pass. That is latency, not a leak: the next resync tick (~15s) runs this
+	//    block, and the delete path releases regardless.
 	//    Two ways in, ONE actuator: a permanent hold for spec.tier: warm, and a
 	//    windowed hold while any spec.warmSchedule window is active. Either way we
 	//    hold ONE authenticated connection through the apps-gateway so this app's

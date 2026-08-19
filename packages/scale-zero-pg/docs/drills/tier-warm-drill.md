@@ -16,8 +16,11 @@ is a command with an expected value.
 - The appdb operator image is built from a post-#777 revision and **deployed**
   (`kubectl -n scale-zero-pg get deploy appdb-operator -o jsonpath='{.spec.template.spec.containers[0].image}'`
   — confirm the tag/digest before attributing behaviour to code you read; merged ≠ deployed).
-- The operator has the warm-hold actuator wired (`GW_APPS_HOST` set); otherwise every
-  assertion below degrades to `WarmHold=False/HoldsUnavailable` by design.
+- The shipped operator binary always wires the warm-hold actuator (its dial target is
+  `APPDB_GATEWAY_HOST`, default `pggw-apps.scale-zero-pg.svc`). A
+  `WarmHold=False/HoldsUnavailable` therefore means you are running an operator build
+  without the actuator compiled in (an embedder build) — not a missing env var; stop
+  and fix the deployment before drilling.
 - Know the plane's idle window: `GW_IDLE_MS` (deployed: 60000) and the operator resync
   tick `APPDB_RESYNC_MS` (default 15000). The wait in step 3 must exceed
   `GW_IDLE_MS + APPDB_RESYNC_MS`.
@@ -64,7 +67,7 @@ kubectl -n scale-zero-pg exec deploy/appdb-operator -- \
 ## 2. Negative half — a failed hold degrades, never gates serving
 
 Make the hold fail (simplest: scale the apps gateway to 0 briefly, or point the
-operator at an unreachable `GW_APPS_HOST` in a scratch namespace). Assert:
+operator at an unreachable `APPDB_GATEWAY_HOST` in a scratch namespace). Assert:
 
 - `WarmHold` goes `False/HoldFailed` and a `WarmHoldFailed` Warning event is emitted;
 - `Ready` stays `True` with reason `WarmHoldDegraded` — warmth is lost, serving is not;
@@ -90,8 +93,11 @@ kubectl -n scale-zero-pg get appdatabase ${APP} -o json \
   | jq '.status.conditions[] | select(.type=="WarmHold") | {status, reason}'
 # expect: False/WarmthNotRequested
 
-# (b) the gauge dropped with it — the alert subtraction cannot be blinded
-#     (same /metrics read as 1(c))               # expect value: 0
+# (b) the gauge dropped with it — the alert subtraction cannot be blinded.
+#     The exporter emits appdb_warm_hold_active ONLY for held apps, so on release
+#     the series is ABSENT (the alert's PromQL carries `or vector(0)` for this).
+#     Same /metrics read as 1(c) — expect: NO appdb_warm_hold_active{app="${APP}"}
+#     line at all. (grep exiting 1 here is the pass; a `1` line is the leak.)
 
 # (c) the compute now parks on the ordinary idle window: wait > GW_IDLE_MS and
 kubectl -n scale-zero-pg get deploy compute-${APP} \

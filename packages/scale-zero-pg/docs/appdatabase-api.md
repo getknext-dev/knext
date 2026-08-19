@@ -153,7 +153,8 @@ cold one, and the operator retries the hold every resync.
 `cold` (or deleting the last `warmSchedule` window) **releases** the hold within
 one resync tick and retracts `WarmHold` to `False`/`WarmthNotRequested`; the
 compute then parks on the gateway's ordinary idle window and
-`appdb_warm_hold_active{app=...}` drops to `0`. A hold never outlives the spec
+the `appdb_warm_hold_active{app=...}` series disappears (it is emitted only while
+held; the alert's PromQL carries `or vector(0)` for absence). A hold never outlives the spec
 that asked for it — if it did, the app's compute could never sleep again *and*
 the stale subtraction would blind the `ComputePhantomKeepalive` alert.
 

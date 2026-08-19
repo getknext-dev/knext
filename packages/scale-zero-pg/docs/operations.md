@@ -1719,13 +1719,17 @@ kubectl -n scale-zero-pg get cm apps-wal-reclaim-pending -o yaml   # pending SK-
     (`pggw_system_wake_budget_exceeded_total{system="orders"}`); retried every
     resync tick (`APPDB_RESYNC_MS`, default 15s).
   - `False/HoldsUnavailable` → this operator build has no warm-hold actuator wired
-    (`GW_APPS_HOST`/hold config missing) — warmth cannot be honoured at all.
+    — warmth cannot be honoured at all. The shipped operator always wires the
+    actuator (dial target `APPDB_GATEWAY_HOST`), so this reason indicates a build
+    without it compiled in, not a missing env var.
   - `False/InvalidWarmWindow` → every `warmSchedule` window failed to parse; fix the
     cron/timezone (see the `InvalidWarmWindow` Warning event).
   - `False/WindowInactive` / `False/WarmthNotRequested` → not degraded at all: no
     window is active, or warmth was withdrawn from the spec and the hold released.
   - Cross-check the mechanism: `appdb_warm_hold_active{app="orders"}` is `1` exactly
-    while the hold is established, and drops to `0` within one resync tick of
+    while the hold is established; the series is emitted only while held, so it
+    **disappears** (no `0` sample — the alert's `or vector(0)` covers absence)
+    within one resync tick of
     warmth being withdrawn (`tier: warm` → `cold`, or the last window removed).
     A `1` on a CR whose spec asks for no warmth is a leak — report it.
   - `status.computeReady` is a **diagnostic only** (printed as the `Compute` column);

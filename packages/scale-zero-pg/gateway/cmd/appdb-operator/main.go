@@ -107,10 +107,10 @@ func main() {
 	render.InitImage = env("APPDB_INIT_IMAGE", render.InitImage)
 
 	cluster := appdb.NewK8sCluster(cs, dyn, namespace, render, reclaimCM, logger)
-	// The scheduled DB warm lockstep (knext #388, ADR-0030 addendum): while any
-	// AppDatabase warmSchedule window is active the reconciler holds one
-	// authenticated connection through the apps-gateway so the compute never goes
-	// idle. The DSN comes from the operator-minted app-db-<app> Secret
+	// The DB warm-hold actuator (knext #388, ADR-0030 addendum; #777): the
+	// reconciler holds one authenticated connection through the apps-gateway so
+	// the compute never goes idle — permanently for spec.tier: warm, or while an
+	// AppDatabase warmSchedule window is active. The DSN comes from the operator-minted app-db-<app> Secret
 	// (DatabaseURL); the dial is a real SCRAM connection (lib/pq) — never a
 	// replica write (the gateway stays the sole scaler).
 	holds := appdb.NewHoldManager(cluster.DatabaseURL, appdb.SQLDialer{ConnectTimeout: warmHoldTimeout}, warmHoldTimeout)
