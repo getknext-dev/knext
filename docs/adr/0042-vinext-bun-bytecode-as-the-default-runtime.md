@@ -447,7 +447,9 @@ unmeasured obligation into the contract would violate this ADR's own measure-fir
 the node standalone entry pays a material (>200 ms) post-readiness first-request lazy cost that an
 eager warm removes, warm-on-boot becomes **contract**, `node-server.ts` implements the same
 env-variable surface (`KNEXT_WARM_PATH`/`KNEXT_EAGER_WARM`, same `WARMED:` log line), and the e2e
-gate parameterises over both images — the same both-images shape the sigterm gates already use.
+gate parameterises over both images — the both-images shape Phase 4 / A5 *specifies* for the
+sigterm gates (today those are still separate per-target jobs; the parameterisation is open work,
+so promotion shares its shape, not a shipped precedent).
 
 **Related ruling recorded here so it is not relitigated (#765):** the shipped warm default stays
 `/api/health` (inert). Defaulting to `/` was rejected: the warm is a synthetic localhost request —
