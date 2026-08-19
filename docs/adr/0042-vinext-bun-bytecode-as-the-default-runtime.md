@@ -205,7 +205,8 @@ From #606, sourced to vinext's own repo and registry data:
    bytecode, which is the point of the change.
 3. **One config surface, one CRD, one operator, one `RuntimeContract`** — unchanged from ADR-0036. If
    the vinext path ever needs its own CRD, operator, or config, **this decision is invalid at that
-   point**.
+   point**. (One declared asymmetry exists: warm-on-boot is target-specific — see the Consequences
+   subsection "Warm-on-boot", #765.)
 4. **The official Next.js compat *corpus* is retained as the gate, run against vinext.** Adopting
    vinext costs the **adapter API**, not the **corpus** — vinext itself drives that corpus, so a
    `KNEXT_BUILD=vinext` lane in knext's own harness keeps red-on-fail falsifiability against *knext's*
@@ -434,6 +435,40 @@ From #606, sourced to vinext's own repo and registry data:
     *(Original consequence, premise now false, follows.)* Phase 0's
     embedding result came from `vinext@^0.0.19` + the nitro bun preset, and *What must NOT be done*
     bans that pin as a shipping dependency. Recorded because the tension is otherwise invisible.
+
+### Warm-on-boot: declared TARGET-SPECIFIC, not contract (2026-08-19, #765)
+
+Startup warm-on-boot — `KNEXT_WARM_PATH` (comma-separated, sequential), an eager in-process fetch
+overlapped with the readiness window, `KNEXT_EAGER_WARM=0` as the escape, gated by the alpine e2e's
+`WARMED:` assertion — exists **only in the bun/vinext entry** (`knext-bun-entry.mjs`, merged #771).
+Decision 3 mandates one `RuntimeContract` with two implementations and no undeclared asymmetry, so
+this asymmetry is hereby **declared**: warm-on-boot is a **target-specific behaviour of the
+bun/vinext entry**, not a contract obligation the node standalone entry must implement.
+
+Why target-specific and not contract: the defect it fixes (≈1.2 s of post-readiness lazy module
+evaluation on the first request, measured on the lazy vinext entry, 2026-08-18) was measured **on
+the vinext entry**; the node standalone path's first-request lazy cost has **not been measured**,
+and its boot economics differ — the baked `NODE_COMPILE_CACHE` layer (ADR-0035) *plausibly absorbs
+part of* that cost, though ADR-0035 measured pre-readiness boot, not post-readiness first-request
+work, so that mitigation is plausible, not verified. Promoting an unmeasured obligation into the
+contract would violate this ADR's own measure-first discipline.
+
+**Promotion criterion, fixed now so the asymmetry cannot silently persist:** if a measurement shows
+the node standalone entry pays a material (>200 ms) post-readiness first-request lazy cost that an
+eager warm removes, warm-on-boot becomes **contract**, `node-server.ts` implements the same
+env-variable surface (`KNEXT_WARM_PATH`/`KNEXT_EAGER_WARM`, same `WARMED:` log line), and the e2e
+gate parameterises over both images — the both-images shape Phase 4 / A5 *specifies* for the
+sigterm gates (today those are still separate per-target jobs; the parameterisation is open work,
+so promotion shares its shape, not a shipped precedent).
+
+**Related ruling recorded here so it is not relitigated (#765):** the shipped warm default stays
+`/api/health` (inert). Defaulting to `/` was rejected: the warm is a synthetic localhost request —
+no cookies, no auth, no real `Host` — that **writes the shared Redis page cache**; fine for an app
+like file-manager, a shared-cache-poisoning risk as a default for arbitrary apps whose `/` may be
+auth-gated, redirecting, or personalised. `/` stays a per-app override via `spec.env` — today an
+**undocumented** one: `KNEXT_WARM_PATH` has no user-facing docs (docs owed; tracked as an issue),
+so calling it a "documented recommendation" would overstate delivery. The open question stands:
+is the synthetic warm render keyed identically to the first real anonymous request?
 
 ## Phased plan
 
@@ -1001,6 +1036,14 @@ first, then CLI**.
   `.next/static` and `public/` into the standalone tree (`compat-smoke.mjs:~263`); that is
   Next-standalone-shaped and needs a `.output/public` branch for vinext.
 - **A11** Get a founder answer on the Phase 5 corpus-delta ceiling (Escalation 6). Blocks Phase 5.
+- **A13** (#765 follow-through — the promotion criterion needs an owner or it persists by default)
+  Measure the node standalone entry's post-readiness first-request lazy cost, on the same
+  methodology as the vinext measurement (post-readiness, first request, warm image). >200 ms ⇒
+  warm-on-boot promotes to contract per the Consequences subsection "Warm-on-boot". Natural home:
+  the Phase 1 / A2 two-arm sittings, whose control arm boots the node standalone entry anyway —
+  record the number even if under threshold, so the criterion is discharged by measurement rather
+  than expiring unread. Also owed:
+  user-facing docs for `KNEXT_WARM_PATH`/`KNEXT_EAGER_WARM` (shipped in #771 undocumented).
 - **A12 — DISCHARGED (2026-08-17), and by the mechanism it was designed for: Phase 3(d) reported, a
   gate read it, and the premise did not survive.** No founder answer is needed because the question
   ("does the flip stand if the application is not bytecode-compiled?") describes a state the artifact
