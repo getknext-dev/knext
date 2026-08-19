@@ -268,6 +268,33 @@
         },
         {
           "id": "P1-2",
+          "rerun_2026_08_17": {
+            "sitting": "abba-20260817T205200Z",
+            "driver": "benchmarks/scale-to-zero-oke/abba.sh 6 (ABBA-interleaved, 6 blocks)",
+            "analysis": "benchmarks/scale-to-zero-oke/abba-analyze.mjs",
+            "record": "docs/benchmarks/vinext-bunexec-oke-ab-2026-08-17.md",
+            "n_bunexec": 11,
+            "n_node": 12,
+            "samples_lost": 1,
+            "lost_reason": "p1b-bunexec-20260817T210500Z aborted INADMISSIBLE \u2014 registry label lookup timed out, so arms-same-app could not be proven. The harness refused to measure rather than produce an unprovable number. Reported, not dropped.",
+            "median_ms_bunexec": 3050,
+            "median_ms_node": 2450,
+            "median_difference_ms": 600,
+            "hodges_lehmann_ms": 550,
+            "mann_whitney": "U=50 z=-0.985 p=0.325",
+            "distribution_separation": false,
+            "stratified_fast_mode": {
+              "note": "ADR-0036 D6/D7 forbid a bare median across a mode mixture. Both arms went bimodal late in the sitting, so the split at 8s is mandatory, not a convenience.",
+              "bunexec": { "n": 8, "median_ms": 2815, "range_ms": [1820, 3400] },
+              "node": { "n": 10, "median_ms": 2405, "range_ms": [2040, 3170] },
+              "difference_ms": 410,
+              "mann_whitney": "p=0.477"
+            },
+            "slow_mode_is_temporal_not_per_arm": "fired at bunexec sample positions 9,10,11 and node positions 10,12 \u2014 the tail of the sitting, on BOTH arms. That is the drifting bimodal slow mode ADR-0036 documents and the reason Run 24 was withdrawn; ABBA interleaving is what stopped it loading onto one arm.",
+            "arms_same_app": "yes on every sample, from dev.knext.app.id=app-159989384ca3275f on both deployed digests \u2014 the condition whose failure withdrew Run 25/26",
+            "reading": "The cold-start motive for the flip is NOT demonstrated on OKE. Both readings (pooled and fast-mode-only) agree on direction and magnitude, and NEITHER is significant. This does NOT invert into a claim that node is faster \u2014 p=0.325/0.477 means no difference was demonstrated either way at n~11/arm with a heavy right tail. It also does NOT contradict the in-container bytecode result (~33%, 30/0 paired), which measured --bytecode on-vs-off WITHIN one arm and is about runtime BOOT; here cold start is scheduling- and pull-bound, and the bunexec image is a 42.9 MB pull that is ~89% embedded Bun runtime. Both can be true at once.",
+            "still_not_a_phase_1_pass": "regardless of outcome: P1-pre-2 (slow-mode tail controlled) is unmeasured and the slow mode visibly fired during this sitting, and the node arm still has no committed build recipe in the repo."
+          },
           "text": "distribution separation \u2014 NOT a median difference with overlapping ranges",
           "kind": "boolean",
           "target": true,
