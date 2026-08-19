@@ -153,6 +153,42 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 		return true, fmt.Errorf("teardown ro compute: %w", err)
 	}
 
+	// 4c. Warm-hold WITHDRAWAL (review of #786; moved BEFORE the pageserver steps
+	//     in round 2). Warmth is not requested — either it never was, or the owner
+	//     just edited it away (tier: warm -> cold, or the last warmSchedule window
+	//     deleted). Both edits are documented as "reconciled idempotently", so both
+	//     MUST undo the mechanism: without this branch a permanent hold outlived
+	//     its spec until the operator process restarted, the compute could never
+	//     idle to zero again, and the leaked hold kept counting in
+	//     appdb_warm_hold_active — blinding the very alert (ComputePhantomKeepalive)
+	//     that would have caught it.
+	//
+	//     Deliberately BEFORE steps 5/5b: the release needs no branch and no
+	//     timeline, so it must not sit behind them. With the release after step 5,
+	//     a SUSTAINED pageserver fault returned every pass early and a withdrawn
+	//     hold stayed alive for the whole outage — bounded by pageserver recovery,
+	//     not by a resync tick. Only the ENSURE half (5c) needs the branch to
+	//     exist before it dials.
+	//
+	//     ReleaseHold is unconditional and idempotent (a no-op map delete when
+	//     unheld), deliberately NOT gated on the CR's own status: a hold that was
+	//     established in a pass whose status write failed would otherwise be
+	//     unreleasable. It is invisible on the CR — an ordinary cold CR grows no
+	//     condition and fires no event here, which is the back-compat the old
+	//     "skip this entirely" gate was protecting.
+	if !cr.warmHoldRequested() {
+		if d.Holds != nil {
+			d.Holds.ReleaseHold(app)
+		}
+		// Retract a condition left over from when warmth WAS requested. Set to
+		// False rather than deleted so the retraction is observable (and carries
+		// a lastTransitionTime); never written onto a CR that never asked.
+		if findCondition(cr, CondWarmHold) != nil {
+			d.setCondition(cr, CondWarmHold, "False", "WarmthNotRequested",
+				"neither spec.tier: warm nor spec.warmSchedule is set; any warm hold has been released and the compute sleeps at zero and wakes on connect")
+		}
+	}
+
 	// 5. Ensure the branch exists on the pageserver (durable). Idempotent on tl.
 	exists, err := d.Pageserver.TimelineExists(ctx, d.Tenant, tl)
 	if err != nil {
@@ -191,11 +227,11 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 	}
 
 	// 5c. DB warm lockstep (knext #388, ADR-0030 addendum; tier:warm added #777).
-	//    Placed AFTER steps 5/5b so a first-ever warm create never dials a compute
-	//    whose timeline does not exist yet — the trade is that a hard error in
-	//    5/5b returns before both the ensure AND the withdrawal release for that
-	//    pass. That is latency, not a leak: the next resync tick (~15s) runs this
-	//    block, and the delete path releases regardless.
+	//    ENSURE half only — the WITHDRAWAL release runs earlier, at step 4c,
+	//    because it needs no branch. This half is placed AFTER steps 5/5b so a
+	//    first-ever warm create never dials a compute whose timeline does not
+	//    exist yet; the trade is ensure-latency only (a hard 5/5b error delays
+	//    the ensure to the next ~15s resync tick), never a withdrawal leak.
 	//    Two ways in, ONE actuator: a permanent hold for spec.tier: warm, and a
 	//    windowed hold while any spec.warmSchedule window is active. Either way we
 	//    hold ONE authenticated connection through the apps-gateway so this app's
@@ -232,32 +268,6 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 				"warmth was requested but this operator has no warm-hold actuator wired; the compute is not held warm (it still wakes on connect)")
 		} else {
 			d.reconcileWarmHold(ctx, cr, app)
-		}
-	} else {
-		// WITHDRAWAL (review of #786). Warmth is not requested — either it never
-		// was, or the owner just edited it away (tier: warm -> cold, or the last
-		// warmSchedule window deleted). Both edits are documented as "reconciled
-		// idempotently", so both MUST undo the mechanism: without this branch a
-		// permanent hold outlived its spec until the operator process restarted,
-		// the compute could never idle to zero again, and the leaked hold kept
-		// counting in appdb_warm_hold_active — blinding the very alert
-		// (ComputePhantomKeepalive) that would have caught it.
-		//
-		// ReleaseHold is unconditional and idempotent (a no-op map delete when
-		// unheld), deliberately NOT gated on the CR's own status: a hold that was
-		// established in a pass whose status write failed would otherwise be
-		// unreleasable. It is invisible on the CR — an ordinary cold CR grows no
-		// condition and fires no event here, which is the back-compat the old
-		// "skip this entirely" gate was protecting.
-		if d.Holds != nil {
-			d.Holds.ReleaseHold(app)
-		}
-		// Retract a condition left over from when warmth WAS requested. Set to
-		// False rather than deleted so the retraction is observable (and carries
-		// a lastTransitionTime); never written onto a CR that never asked.
-		if findCondition(cr, CondWarmHold) != nil {
-			d.setCondition(cr, CondWarmHold, "False", "WarmthNotRequested",
-				"neither spec.tier: warm nor spec.warmSchedule is set; any warm hold has been released and the compute sleeps at zero and wakes on connect")
 		}
 	}
 

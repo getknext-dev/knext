@@ -66,8 +66,11 @@ kubectl -n scale-zero-pg exec deploy/appdb-operator -- \
 
 ## 2. Negative half — a failed hold degrades, never gates serving
 
-Make the hold fail (simplest: scale the apps gateway to 0 briefly, or point the
-operator at an unreachable `APPDB_GATEWAY_HOST` in a scratch namespace). Assert:
+Make the hold fail **without breaking serving** — point the operator at an
+unreachable `APPDB_GATEWAY_HOST` (scratch namespace, or a temporary env edit on the
+operator Deployment). Do NOT scale the apps gateway to 0 for this half: `psql`
+reaches the app *through* that gateway, so killing it fails the hold and serving
+together and the degrade-not-fail assertion below becomes unfalsifiable. Assert:
 
 - `WarmHold` goes `False/HoldFailed` and a `WarmHoldFailed` Warning event is emitted;
 - `Ready` stays `True` with reason `WarmHoldDegraded` — warmth is lost, serving is not;
