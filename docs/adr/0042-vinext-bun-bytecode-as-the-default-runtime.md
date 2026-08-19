@@ -155,7 +155,10 @@ ADR-0036 named the `vinext → bun --compile` bridge as the **NO-GO trigger**. I
   3. It costs the in-container shell that `alpine-image.docker-e2e.test.ts` uses to assert those
      libraries **behaviourally**; rewriting that against layer contents downgrades it to a manifest
      assertion.
-  Re-open only if the scan gate is first re-established against the pre-compile closure.
+  Re-open only if the scan gate is first re-established against the pre-compile closure
+  (built: the `vinext-precompile-closure` CI gate, #764 — SBOM + HIGH/CRITICAL scan of the installed
+  closure, `needs:`-before every job that builds a vinext artifact; the cosign-attestation half of
+  Consequence 6 is still owed).
 - **Container cold start p50 241.9 ms** (n=12, arm64, range 220–279); the binary's own boot p50 26.7 ms.
 - **Not an A/B.** One machine, one app, no node arm, no interleaving. It must not be cited as one. The
   ~10.5 s tail did not reproduce locally, consistent with it being cluster-level.
@@ -250,7 +253,11 @@ From #606, sourced to vinext's own repo and registry data:
 6. **Supply chain: a `bun --compile` binary is opaque to Trivy and syft.** ADR-0036's rule is carried
    forward as **binding**: SBOM generated from the **pre-compile dependency closure**, attached as a
    cosign attestation; HIGH/CRITICAL scan against that closure; cosign signing and digest pinning
-   unchanged.
+   unchanged. *(Built: the `vinext-precompile-closure` CI gate, #764 — CycloneDX SBOM over the
+   installed closure, coverage/emptiness guard, grype HIGH/CRITICAL, `needs:`-before every job that
+   builds a vinext artifact. **The cosign-attestation half is still OWED**: the SBOM is a per-run
+   Actions artifact today, and must be attached to the image digest as an attestation the day a
+   vinext publish lane ships.)*
 7. **Upstream posture inverts.** The official adapter moves *with* Next.js. vinext is a reimplementation
    whose drift becomes **knext's problem**, with no stability promise and hard peers that propagate into
    **users' applications**.

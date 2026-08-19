@@ -74,6 +74,57 @@ knext is the scale-to-zero Next.js adapter for Knative. The assets worth protect
 | **R**epudiate | Can't prove which source built an image. | **cosign SBOM attestation + keyless signature** for both images, plus **buildkit SLSA provenance (`mode=max`) restored for BOTH images**: each build exports an OCI layout (which, unlike the `docker` exporter used briefly after the scan-before-push fix, carries the attestation manifest), Trivy gates that exact layout, and a version+checksum-pinned `crane push` publishes it byte-for-byte; a post-push step **fails the run if the pushed index lacks the attestation manifest or the SLSA provenance predicate** (guarded by both workflow test files). | `mode=max` records build args — safe today (the only arg is the public `SOURCE_DATE_EPOCH`); never add a secret build-arg. |
 | **Reproducibility** | Two builds of the same commit differ, weakening provenance. | **Not yet fully reproducible** — `SOURCE_DATE_EPOCH` (commit time) is now passed to the app build as a best-effort input, but pnpm/npm install ordering and native `sharp` prebuilts still vary. We deliberately do **not** claim reproducible builds. | Enable buildkit `rewrite-timestamp` + a lockfile-pinned, vendored install before claiming it. |
 
+### The vinext build target: an image scan of a compiled binary is vacuous (ADR-0042 C6)
+
+The opt-in vinext target is `bun build --compile --bytecode`: one executable with every JS
+dependency inlined. syft and Trivy can read an image's Alpine package database out of it; they
+cannot read anything out of the binary. So an image scan of a vinext image is green **because
+there is nothing left in the image to scan** — the same vacuity ADR-0042 used to reject
+`FROM scratch`, and full `resolve.noExternal` inlining completes it by deleting the last
+externalised JS.
+
+The mitigation is to scan the surface that still exists — the **pre-compile dependency closure**,
+i.e. the resolved `node_modules` tree that feeds `vite build`:
+
+- `scripts/precompile-closure-audit.mjs` generates a **CycloneDX SBOM (syft)** over the installed
+  tree, verifies that the SBOM actually covers that tree, then runs **grype over that exact SBOM**
+  and fails on **HIGH/CRITICAL** minus the dated + justified
+  `security/precompile-closure-allowlist.json`.
+- CI job `vinext-precompile-closure` runs it on every PR, uploads the SBOM as an artifact, and is
+  `needs:`-before `bun-exec-alpine-image` — the only job that builds a vinext artifact today. No
+  vinext image is published from CI yet; the ordering exists so the precondition holds the day one
+  is, and `tests/precompile-closure-gate-ci.test.ts` *scans* **every `.github/workflows/*.yml`** for
+  any job that builds the binary or its image — including one that compiles via the `bun run build`
+  package-script alias for `./build.sh` — and requires a job running the closure audit in its
+  transitive `needs` closure. It does **not** see a lane that compiles through a reusable workflow,
+  a composite action or a shell wrapper; adding one means extending
+  `tests/helpers/vinext-artifact-scan.ts` in the same change.
+
+**What is still owed.** That scan guards **ordering only**. ADR-0042 C6 also requires the closure
+SBOM to be **attached to the image as a cosign attestation** — the day a vinext publish lane ships,
+the SBOM must be attached to the published image digest with cosign, because a `needs:` edge alone
+would let an image publish with no SBOM bound to it. Today the SBOM is a per-run Actions artifact:
+evidence of what was scanned, not provenance attached to an artifact.
+
+**Scope.** The gate covers exactly one closure — the in-repo `examples/bun-exec`, which is the only
+vinext application that exists today. A **user** application built on the vinext target has no
+equivalent closure gate yet.
+
+Two measured facts that shape the design, both of which make a naive setup **silently vacuous**:
+
+- `syft scan dir:node_modules` with **default catalogers** yields **zero** npm components; the
+  `+javascript-package-cataloger` selector is load-bearing.
+- `trivy fs` over the example scans `bun.lock` and catalogues **60 npm packages**, where the same
+  installed tree holds **210 packages** by the audit's own walker and yields **409 npm components**
+  under syft (it counts nested copies and the `package.json` files inside published packages;
+  `find -name package.json` returns 527). It missed a HIGH the tree carried. A lockfile is a claim
+  about what should be installed; the installed tree is what the compiler swallows.
+
+Hence the emptiness guard (`scripts/lib/precompile-closure.mjs`): floors on both the SBOM component
+count and the on-disk package count (an empty tree has *perfect* coverage), a coverage ratio, and
+named toolchain anchors. Mutation-proved by pointing it at an empty directory (exit 1) and at a
+default-cataloger SBOM (0 components, red).
+
 ### Patching policy — `apk upgrade` on a digest-pinned base (#267)
 
 Runner stages **MAY** run `apk upgrade --no-cache` against a digest-pinned base image
