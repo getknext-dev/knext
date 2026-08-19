@@ -860,7 +860,10 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 		//            adds a pod, not idle cost, so a preview keeps the user's value.
 		//   PASSED   timeoutSeconds — also a template field. Not an autoscaling knob
 		//            (a per-request duration cap), listed so the field-shaped blind
-		//            spot stays visible rather than being rediscovered.
+		//            spot stays visible rather than being rediscovered. The other two
+		//            RevisionSpec knobs (responseStartTimeoutSeconds,
+		//            idleTimeoutSeconds) are left nil today; the guard REFLECTS over
+		//            RevisionSpec, so rendering either without a disposition reds CI.
 		//
 		// scale-down-delay is DROPPED, not clamped: previews predate the field,
 		// so dropping restores their exact prior behaviour — the Knative cluster
@@ -878,19 +881,15 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 		// deliberately passed through — with an envtest asserting it.
 		//
 		// GATE (#775): the list above is no longer only prose. The scanning guard
-		// in internal/controller/preview_annotation_disposition_test.go builds a
-		// NextApp with EVERY ScalingSpec leaf and every NextAppSpec sub-spec
-		// populated, runs buildDesiredKsvc production-vs-preview, and FAILS on any
-		// emitted autoscaling.knative.dev/* key with no entry in its
-		// previewDispositions table; the two template-field knobs above live in its
-		// previewTemplateFieldDispositions table. Add a knob here and the guard reds
-		// until you record the decision in both places.
-		//
-		// What that guard does NOT cover, so nobody over-reads it: the leaf-deep
-		// fixture scan runs over ScalingSpec only — the other sub-specs are checked
-		// for top-level presence, not to their leaves. A knob nested inside, say,
-		// spec.observability.tracing would run the branch but not be forced into the
-		// fixture, so deepen the scan there rather than assuming coverage.
+		// in internal/controller/preview_annotation_disposition_test.go runs
+		// buildDesiredKsvc production-vs-preview over SEVERAL admission-valid
+		// NextApp shapes — maximal-with-warmSchedule, pinned-traffic (mutually
+		// exclusive with the first, #393) and minimal, the last of which is what
+		// reaches a stamp gated on a sub-spec being ABSENT. It requires every leaf
+		// of NextAppSpec to be exercised by some fixture, every fixture to pass
+		// validation.ValidateNextAppSpec, and every rendered knob — annotations by
+		// prefix, RevisionSpec fields by reflection — to carry a disposition. Add a
+		// knob here and the guard reds until you record the decision in both places.
 		annotations["autoscaling.knative.dev/max-scale"] = "1"
 		annotations["autoscaling.knative.dev/min-scale"] = "0"
 		annotations["autoscaling.knative.dev/scale-to-zero-pod-retention-period"] = "30s"

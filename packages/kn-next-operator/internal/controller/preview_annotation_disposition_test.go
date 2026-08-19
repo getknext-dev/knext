@@ -185,10 +185,10 @@ type guardFixture struct {
 // every NextAppSpec leaf (assertFixturesCoverEveryNextAppSpecLeaf); individually
 // each must be admission-valid (assertFixturesAreAdmissible).
 func guardFixtures() []guardFixture {
-	// ROUND-2 SHAPE, deliberately: one all-fields-set fixture. The assertions
-	// below report what is wrong with it.
 	return []guardFixture{
-		{name: "maximal", spec: maximalWarmScheduleSpec()},
+		{name: "maximal-warm-schedule", spec: maximalWarmScheduleSpec()},
+		{name: "pinned-traffic", spec: pinnedTrafficSpec()},
+		{name: "minimal", spec: minimalSpec()},
 	}
 }
 
@@ -250,14 +250,19 @@ func maximalWarmScheduleSpec() appsv1alpha1.NextAppSpec {
 			SecretRef:   &appsv1alpha1.DatabaseSecretRef{Name: "db-app", Key: "uri"},
 			ROSecretRef: &appsv1alpha1.DatabaseSecretRef{Name: "db-app-ro", Key: "uri"},
 		},
-		Env:             map[string]string{"APP_GREETING": "hello"},
-		Observability:   &appsv1alpha1.ObservabilitySpec{Enabled: true},
+		Env: map[string]string{"APP_GREETING": "hello"},
+		Observability: &appsv1alpha1.ObservabilitySpec{
+			Enabled: true,
+			Rum:     &appsv1alpha1.RumSpec{Enabled: true, SampleRate: "0.1"},
+			Tracing: &appsv1alpha1.TracingSpec{
+				Enabled: true, Endpoint: "http://otel-collector:4318", SampleRate: "0.1",
+			},
+		},
 		HealthCheckPath: "/api/health",
 		Runtime:         "node",
 		TimeoutSeconds:  111,
 		Security:        &appsv1alpha1.SecuritySpec{NetworkPolicy: &networkPolicy},
 		BuildID:         "build-1",
-		Traffic:         &appsv1alpha1.TrafficSpec{RevisionName: "app-00001", CanaryPercent: 10},
 	}
 }
 
