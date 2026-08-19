@@ -175,15 +175,18 @@ binary: exactly one compute held awake.
 
 **The on-demand alignment rule (knext #766 ruling) — an invariant, not
 advice.** Scheduled windows are the DB half of knext's *clock-triggered* warm
-floor. knext's *traffic-triggered* half (`NextApp.spec.scaling.scaleDownDelay`,
-scaffolded `5m`) has NO per-app DB counterpart, deliberately: the DB's
+floor. knext's *traffic-triggered* half (`NextApp.spec.scaling.scaleDownDelay`;
+ADR-0045 has `kn-next create` scaffold `5m` — knext#763, in review at this
+writing) has NO per-app DB counterpart, deliberately: the DB's
 on-demand idle window is the apps-gateway's platform-wide `GW_IDLE_MS`, one
 manifest line the cluster operator owns. The invariant: **the gateway's idle
 window must be ≥ the app's `scaleDownDelay`, or the warm-pod window buys
 nothing on the first DB-touching request** — the app answers in ~52 ms and then
-blocks ~2.3 s waking a compute the gateway already reaped (measured: 290 ms
-with the compute awake). The shipped manifest value (60 s) is BELOW knext's
-scaffolded 5 m; whether to raise it fleet-wide is a costed decision tracked on
+blocks ~2.3 s waking a compute the gateway already reaped (290 ms with the
+compute awake — measured on the file-manager spike, knext#766; the ~2.3 s wake
+is `docs/benchmarks/fm-same-source-oke-ab-2026-08-18.md` in the knext repo).
+The shipped manifest value (60 s) is BELOW the 5 m ADR-0045 scaffolds;
+whether to raise it fleet-wide is a costed decision tracked on
 the knext side (getknext-dev/knext#779), not something an app author can fix in
 this CR. An app that needs its database held warm regardless declares a
 `warmSchedule` window — including 24/7 — which is the supported keep-warm knob;

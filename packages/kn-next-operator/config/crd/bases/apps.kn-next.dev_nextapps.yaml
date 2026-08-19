@@ -432,8 +432,10 @@ spec:
                       WARM THE DATABASE TOO (#766 ruling; the on-demand sibling of
                       warmSchedule's paragraph above): this delay keeps the POD routable; it
                       does NOT keep a scale-to-zero database compute awake. Inside the window
-                      a DB-touching request can still pay the database wake (measured: 290 ms
-                      with the compute awake vs ~2.3 s waking it). The two windows are
+                      a DB-touching request can still pay the database wake (measured on the
+                      file-manager spike, #766: 290 ms with the compute awake vs ~2.3 s
+                      waking it — the wake figure is recorded in
+                      docs/benchmarks/fm-same-source-oke-ab-2026-08-18.md). The two windows are
                       INDEPENDENT BY DESIGN (ADR-0030 addendum shape: declared per resource,
                       each operator evaluating its own; divergence accepted, never
                       reconciled). The DB idle window is the scale-zero-pg GATEWAY's
