@@ -35,7 +35,9 @@ which ADR-0001 forbids surviving reconciliation.
    cluster default applies unmanaged, exactly as before this field existed — **byte-identical
    back-compat**, the same invariant the `targetBurstCapacity`/`panicWindow*`/`imagePrewarm` godoc
    states verbatim. Set ⇒ the operator stamps `autoscaling.knative.dev/scale-down-delay` on the
-   revision template. The operator remains the only writer (ADR-0001).
+   revision template — **non-preview revisions only** (amended by #770: the preview override drops
+   the annotation, restoring previews' pre-field behaviour; see Consequences). The operator remains
+   the only writer (ADR-0001).
 2. **No product default.** A `5m` field default was considered and **rejected** (options below).
    The zero-devops posture ships in the **scaffolder** instead: `kn-next create` writes
    `scaleDownDelay: '5m'` into the generated `kn-next.config.ts` — visible in the user's own file,
@@ -91,6 +93,13 @@ it rather than by accretion (`CLAUDE.md` §1's anti-PaaS-drift line):
 - Idle cost is real and visible: one pod (plus its idle DB connections) for the window after every
   burst. On saturated nodes that capacity matters — which is exactly why it must be the user's
   visible choice, not the operator's silent one.
+- **Previews ignore the field (#770).** The preview override forces max-scale=1 / min-scale=0 /
+  30s pod-retention "to save cluster resources on previews"; a stamped delay initially survived
+  that override — the second scaling knob to leak through its enumerated list. The override now
+  DROPS the annotation (drop, not clamp: previews revert to the exact pre-field behaviour, the
+  same unset posture as Decision 1's back-compat case, with no duration parsing at the use site).
+  Envtest-gated and mutation-proved; the override block carries the single disposition list every
+  new ScalingSpec knob must be entered into.
 - A follow-up measured elsewhere (#766): the DB compute has no equivalent knob, so within the
   window the app is warm while scale-zero-pg may still sleep its compute — the first DB-touching
   request after DB idle pays the DB wake even on a warm pod. The two windows are independent by
