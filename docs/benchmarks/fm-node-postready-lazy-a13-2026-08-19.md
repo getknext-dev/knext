@@ -19,7 +19,8 @@ is NOT the entry's lazy cost — it belongs to the database path.
 - Per cold cycle: wait for 0 pods → wake via `GET /api/health` (Knative queues it until Ready).
   The wake is NOT app-graph-free — the health route evaluates its own slice of the server graph
   (`@getknext/lib/health` + the metrics registry) — but it is **production-faithful**: the operator
-  wires the Knative readiness probe to this same path (`readinessProbePath()` → `/api/health`), so
+  wires the Knative readiness probe to this same path by default (`readinessProbePath()` →
+  `/api/health`, absent a `spec.healthCheckPath` override — none is set on fm-node), so
   in production that slice is always evaluated before any user request. The measured lazy cost is
   the incremental residue beyond the health slice — the quantity a real first visitor pays. (An app
   with a fatter health route would measure a smaller residue; re-derive, don't transplant.) →
@@ -93,22 +94,25 @@ Cycles 2/6/8 are not module evaluation:
   argument about **database warmth**, already owned by the DB-side knobs
   (`AppDatabase spec.tier: warm` / `spec.warmSchedule`, and the `GW_IDLE_MS` decision, #779),
   not about the node entry's module graph. Promoting warm-on-boot to hide a DB stall would mask
-  the signal those knobs exist to fix — and 3/8 first visitors silently seeing zero-stats
-  fallback content is a finding about the *app's* swallow-and-render-fallback pattern, not the
-  runtime.
+  the signal those knobs exist to fix — and 2/8 first visitors silently seeing zero-stats
+  fallback content (cycles 6/8; cycle 2 served the real page slowly) is a finding about the
+  *app's* swallow-and-render-fallback pattern, not the runtime.
 
 ## Verdict
 
 - **A13 criterion: NOT met — but on a knife-edge, stated rather than rounded away.** Median
-  164 ms (all eight) / 131 ms (clean cycles) against a 200 ms bar, at n=8, one route, one day.
-  The margin is real on every defensible statistic, but it is 18–35%, not 10×; and the
+  164 ms (all eight) / 131 ms (clean cycles) against a 200 ms bar, at n=8, one route, one day —
+  and the single closest clean sample is 190 ms, a **5%** margin. The margin is real on every
+  tail-robust statistic (mean and p75 are tail-dominated — the all-cycles mean is ~4.3 s — so
+  they answer a different question), but at best it is 18–35% on the medians, not 10×; and the
   invalidated run 1 contains one genuine render (`/`, `x-nextjs-cache: MISS`) at **213 ms — over
   the bar** on a different route's cost profile. That datapoint does not flip the verdict (a
   self-invalidated run, n=1, a route whose first render also writes the shared cache), but a
   criterion discharged this close must carry it visibly: a re-measure on a heavier page could land
-  the other side, and the ADR's re-measure caveat exists for exactly that. The node residue is an
-  order of magnitude under the vinext lazy entry's ~1.2 s attribution (see the comparability
-  caveat above) because the node server evaluates its graph at boot (inside its ~2.6 s-to-Ready).
+  the other side, and the ADR's re-measure caveat exists for exactly that. The node residue is
+  well below the vinext entry's app-graph-evaluation figures (430 ms–1.2 s across sittings; see
+  the comparability caveat above — no cross-sitting ratio is like-for-like) because the node
+  server evaluates its graph at boot (inside its ~2.6 s-to-Ready).
   Warm-on-boot remains **target-specific** (vinext/bun entry only) per ADR-0042's Consequences.
 - Comparables — stated with their admissibility, since the source record calls its own lazy-entry
   sitting "inadmissible as a runtime A/B, different builds": the vinext **lazy-entry** ~1.2 s is
@@ -126,7 +130,12 @@ Cycles 2/6/8 are not module evaluation:
 
 Single sitting, n=8, one app, one route, one day, timed from a workstation over the public URL
 (network jitter rides on every sample; the first−warm subtraction cancels the steady component
-only). `lazy = first − min(warm1, warm2)` is an **upper bound on everything first-request** — lazy
+only). **The instrument's own noise band is visible in run 1** — on a cache-served route where
+true lazy ≈ 0, the same harness produced −120 and +120 ms — which is the same order as run 2's
+signal (131/164 ms). The counterweight is that run 2 was demonstrably quieter (its warm renders
+span 526–555 ms, a 29 ms spread, versus run 1's 510–1545 ms), so run 2's samples carry less of
+that band; but a single sample from this harness should be read as ±100 ms class noise, which is
+exactly why the knife-edge framing and the re-measure caveat are load-bearing. `lazy = first − min(warm1, warm2)` is an **upper bound on everything first-request** — lazy
 module evaluation, JIT warm-up, pool creation, Redis connect — not module evaluation isolated. The
 cost scales with app-graph size, so one app cannot settle the entry-contract question in general;
 the ADR's re-measure caveat (Next major, entry rewrite — and, per the knife-edge, any heavier

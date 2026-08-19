@@ -1058,10 +1058,12 @@ first, then CLI**.
   server evaluates its graph at boot (inside its ~2.6 s-to-Ready) rather than on first request.
   **Warm-on-boot stays TARGET-SPECIFIC; no promotion.** Record:
   `docs/benchmarks/fm-node-postready-lazy-a13-2026-08-19.md` — which also pins two things a later
-  reader needs: (1) 3/8 cycles carried a 3.4–15.4 s first-request tail that is the **database
-  path** (the pool's deliberate 15 s cold-wake `connectionTimeoutMillis`, then a fallback render),
-  owned by the DB-warmth knobs and #779, not by this entry contract — promoting warm-on-boot to
-  hide it would mask the signal those knobs exist to fix; (2) cache-served routes show ~22 ms
+  reader needs: (1) 3/8 cycles carried a 3.4–15.4 s first-request tail on the **database
+  connection path** — two exhausted the pool's deliberate 15 s connect timeout and rendered the
+  fallback; the third served the real page slowly (inference, not separately evidenced) — and the
+  record marks these as NOT simple cold-database wakes (the keepwarm trickle was running;
+  attribution open, feeds #779/#781). Owned by the DB-warmth knobs, not by this entry contract —
+  promoting warm-on-boot to hide it would mask the signal those knobs exist to fix; (2) cache-served routes show ~22 ms
   median post-readiness cost (run-1 table published in the record), so the question only ever
   concerned uncached renders.
   *(Original item follows.)*
