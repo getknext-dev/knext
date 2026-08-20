@@ -59,7 +59,8 @@ func buildProbeTestKsvc(t *testing.T) (*appsv1alpha1.NextApp, *servingv1.Service
 	app := &appsv1alpha1.NextApp{
 		ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: "default"},
 		Spec: appsv1alpha1.NextAppSpec{
-			Image: "registry.example.com/app:v1@sha256:abc123",
+			// full-length digest: Knative's own validation parses the ref.
+			Image: "registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
 		},
 	}
 	ksvc := &servingv1.Service{
