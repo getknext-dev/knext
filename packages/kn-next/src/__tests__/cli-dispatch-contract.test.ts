@@ -119,9 +119,19 @@ describe("usage mistakes are UsageErrors, so they render as messages", () => {
     // strict-flag rejections added in the previous round.
     //
     // SCAN so a future verb cannot reintroduce the shape: no CLI module may
-    // throw a *plain* Error whose message opens with a usage phrase.
-    const USAGE_PHRASES =
-        /throw new Error\(\s*(?:`|")(?:unknown flag|unknown db subcommand|unexpected positional|unexpected argument|unknown subcommand)/;
+    // raise a usage phrase from a *plain* Error.
+    //
+    // The phrase is searched in a WINDOW after `throw new Error(`, not pinned
+    // to the character right after it. Mutation-proved the hard way: the first
+    // version required a quote immediately after the paren, so reverting
+    // cleanup.ts's `throw new UsageError(stray.startsWith("-") ? … : …)` to
+    // `Error` left this guard GREEN — the ternary puts the phrase ~30 chars
+    // later. Only the dist behaviour test caught it, which is precisely the
+    // "guard that stays green when its subject is removed" this repo names as
+    // decoration.
+    const USAGE_PHRASE =
+        /unknown flag|unknown db subcommand|unexpected positional|unexpected argument|unknown subcommand|requires a value/;
+    const THROW_WINDOW = 240;
 
     const cliFiles = readdirSync(join(pkgRoot, "src", "cli")).filter((f) =>
         f.endsWith(".ts"),
@@ -133,14 +143,20 @@ describe("usage mistakes are UsageErrors, so they render as messages", () => {
 
     it.each(cliFiles)("%s throws UsageError for usage mistakes", (file) => {
         const src = readFileSync(join(pkgRoot, "src", "cli", file), "utf8");
-        // Ternaries inside a throw put the phrase after the opening paren, so
-        // normalise whitespace before matching.
-        const flat = src.replace(/\s+/g, " ");
+        const offenders: string[] = [];
+        for (const m of src.matchAll(/throw new Error\(/g)) {
+            const window = src
+                .slice(m.index, m.index + THROW_WINDOW)
+                .replace(/\s+/g, " ");
+            if (USAGE_PHRASE.test(window)) {
+                offenders.push(window.slice(0, 90));
+            }
+        }
         expect(
-            USAGE_PHRASES.test(flat),
+            offenders,
             `${file}: usage mistakes must throw UsageError, not Error — a plain ` +
                 "Error prints a FATAL stack dump for what is only a typo",
-        ).toBe(false);
+        ).toEqual([]);
     });
 });
 
