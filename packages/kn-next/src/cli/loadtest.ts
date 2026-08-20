@@ -24,7 +24,7 @@ import {
 } from "../generators/loadtest-job";
 import { createLogger } from "../utils/logger";
 import { isEntrypoint } from "./exec";
-import { loadConfig } from "./shared";
+import { handleConfigNotFound, loadConfig } from "./shared";
 
 const log = createLogger({ module: "loadtest" });
 
@@ -139,6 +139,11 @@ export async function runLoadTestCli(
             config.observability?.enabled ?? false,
         );
     } catch (e: unknown) {
+        // A missing kn-next.config.ts is an expected state, not a failure to
+        // dump (UX ledger 1b): print the directions instead of the exception.
+        if (handleConfigNotFound(e)) {
+            return 1;
+        }
         // Never bubble out as a silent exit — always leave a stderr breadcrumb.
         hint(
             `failed to start load test: ${e instanceof Error ? e.message : String(e)}`,

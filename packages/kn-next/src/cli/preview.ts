@@ -43,7 +43,7 @@ import {
     assertCRSchemaCompatible,
     preflightImageRef,
 } from "./schema/preflight";
-import { loadConfig } from "./shared";
+import { handleConfigNotFound, loadConfig } from "./shared";
 import { requireBuildContext } from "./tracing-root";
 
 const log = createLogger({ module: "preview" });
@@ -433,6 +433,10 @@ if (isEntrypoint(import.meta.url)) {
     try {
         await preview();
     } catch (err) {
+        // Expected state, not a crash — see the note in deploy.ts's dispatcher.
+        if (handleConfigNotFound(err)) {
+            process.exit(1);
+        }
         log.fatal({ err }, "Preview failed");
         process.exit(1);
     }

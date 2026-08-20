@@ -27,7 +27,7 @@ import { healBunExportTargets } from "../adapters/standalone-bun-exports";
 import { uploadAssets } from "../utils/asset-upload";
 import { createLogger } from "../utils/logger";
 import { isEntrypoint, runQuiet } from "./exec";
-import { loadConfig } from "./shared";
+import { handleConfigNotFound, loadConfig } from "./shared";
 
 const log = createLogger({ module: "build" });
 
@@ -160,6 +160,10 @@ if (isEntrypoint(import.meta.url)) {
             skipNextBuild: process.argv.includes("--skip-next"),
         });
     } catch (err) {
+        // Expected state, not a crash — see the note in deploy.ts's dispatcher.
+        if (handleConfigNotFound(err)) {
+            process.exit(1);
+        }
         log.fatal({ err }, "Build failed");
         process.exit(1);
     }

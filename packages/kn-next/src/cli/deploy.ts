@@ -34,13 +34,14 @@ import {
 } from "./cr-builder";
 import { isEntrypoint, runCapture, runInherit, runQuiet } from "./exec";
 import { runAssetGC } from "./gc";
+import { CLI_HELP } from "./help";
 import { captureKubectl } from "./schema/kubectl-capture";
 import {
     formatPreflightFailure,
     preflightCRSchema,
     preflightImageRef,
 } from "./schema/preflight";
-import { loadConfig } from "./shared";
+import { handleConfigNotFound, loadConfig } from "./shared";
 import { requireBuildContext } from "./tracing-root";
 
 const log = createLogger({ module: "deploy" });
@@ -112,32 +113,7 @@ function parseCliArgs(): DeployOptions {
         // process.stdout.write (async on a pipe, truncated by process.exit).
         // fs.writeSync(1, …) is guaranteed flushed before exit, so `npx kn-next
         // --help | cat` works under plain node (issue #68).
-        writeStdoutSync(
-            `${[
-                "kn-next deploy — build → push → apply NextApp CR",
-                "",
-                "Commands:",
-                "  deploy (default)  build → push → apply the NextApp CR",
-                "  create            scaffold an app with guarded instrumentation (no cluster writes)",
-                "  db bind           bind an existing Postgres Secret to the NextApp CR",
-                "  db migrate        apply pending migrations against the writer, once",
-                "  doctor            cluster-prereq preflight (read-only; --json)",
-                "  status            show the NextApp's honest conditions (read-only; --json, --watch)",
-                "  rollback          pin traffic to a prior Knative Revision (--to, --canary)",
-                "  gc                reap old _next/static/<build-id>/ asset prefixes (skew-protection GC)",
-                "",
-                "Options:",
-                "  -r, --registry  Container registry (overrides config)",
-                "  -b, --bucket    Storage bucket (overrides config)",
-                "  -t, --tag       Image tag (default: timestamp)",
-                "  -n, --namespace Kubernetes namespace (default: default)",
-                "  --skip-build    Skip next build step",
-                "  --skip-upload   Skip asset upload step",
-                "  --dry-run       Print the NextApp CR without applying it",
-                "  -h, --help      Show this help",
-                "  -v, --version   Print the kn-next version",
-            ].join("\n")}\n`,
-        );
+        writeStdoutSync(CLI_HELP);
         process.exit(0);
     }
 
@@ -316,10 +292,15 @@ async function runPrunePreflight(
 export async function deploy() {
     const options = parseCliArgs();
 
+    // Load config with validation FIRST, then announce. Announcing first meant
+    // a user in a directory with no kn-next.config.ts saw "kn-next deploy"
+    // printed after the "there is no config here" guidance (pino's transport is
+    // async, so the banner lands last) — a confusing tail on an otherwise clean
+    // message (UX ledger 1b).
+    const baseConfig = await loadConfig();
+
     log.info({ dryRun: options.dryRun }, "kn-next deploy");
 
-    // Load config with validation
-    const baseConfig = await loadConfig();
     const config = applyOverrides(baseConfig, options);
 
     // #93 skew protection (ADR-0011): pin this deploy's BUILD_ID. We export
@@ -668,6 +649,15 @@ export async function deploy() {
 // dist/cli/preview.js), each with its OWN tsup entry so it is never inlined
 // here. Enforced by cli-node-runtime.test.ts ("self-entry blocks exist ONLY in
 // sanctioned entry modules").
+//
+// `build` and `cleanup` are now BOTH bin-dispatched (below) and directly-
+// runnable entries carrying self-entry blocks. That combination is safe for
+// exactly the reason above: each has its OWN tsup entry, so it emits as its own
+// dist file and cannot be inlined here — pinned by cli-node-runtime.test.ts,
+// which asserts dist/cli/{build,cleanup}.js exist AND that this bin's bundle
+// does not contain their bodies. They are dispatched because README and the
+// docs site tell users to run them, and until now `kn-next cleanup` fell
+// through to the DEPLOY path — a teardown command that deploys (UX ledger 1d).
 if (isEntrypoint(import.meta.url)) {
     const sub = process.argv[2];
     try {
@@ -689,10 +679,31 @@ if (isEntrypoint(import.meta.url)) {
         } else if (sub === "gc") {
             const { gcMain } = await import("./gc");
             process.exit(await gcMain(process.argv.slice(3)));
+        } else if (sub === "build") {
+            const { build } = await import("./build");
+            await build({
+                skipNextBuild: process.argv.includes("--skip-next"),
+            });
+            process.exit(0);
+        } else if (sub === "cleanup") {
+            const { cleanup } = await import("./cleanup");
+            await cleanup();
+            process.exit(0);
         } else {
             await deploy();
         }
     } catch (err) {
+        // "There is no kn-next.config.ts here" is an EXPECTED state — the user
+        // is in the wrong directory, or has not wired the app up yet. Print
+        // directions and leave; a FATAL line with a serialised Error (message,
+        // stack, bundler chunk paths) reads as "the tool is broken" to the
+        // Next.js developer this CLI is for (UX ledger 1b). Note there is no
+        // --json variant to honour here: the only verbs with a machine-readable
+        // mode are `doctor` (loads no config) and `status` (loads it only when
+        // the file exists), so neither can reach this branch.
+        if (handleConfigNotFound(err)) {
+            process.exit(1);
+        }
         const label =
             sub === "create"
                 ? "create failed"
@@ -706,7 +717,11 @@ if (isEntrypoint(import.meta.url)) {
                         ? "rollback failed"
                         : sub === "gc"
                           ? "gc failed"
-                          : "Deployment failed";
+                          : sub === "build"
+                            ? "build failed"
+                            : sub === "cleanup"
+                              ? "cleanup failed"
+                              : "Deployment failed";
         log.fatal({ err }, label);
         process.exit(1);
     }

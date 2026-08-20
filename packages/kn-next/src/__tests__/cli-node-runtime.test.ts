@@ -48,11 +48,12 @@ const distBin = join(pkgRoot, "dist", "cli", "kn-next.js");
 /** Spawn env: neutralize inherited NODE_OPTIONS (preloads) and force no TTY color. */
 const spawnEnv = { ...process.env, NODE_OPTIONS: "", NO_COLOR: "1" };
 
-function run(cmd: string, args: string[]) {
+function run(cmd: string, args: string[], cwd?: string) {
     return spawnSync(cmd, args, {
         encoding: "utf8" as const,
         env: spawnEnv,
         timeout: 30_000,
+        ...(cwd ? { cwd } : {}),
     });
 }
 
@@ -284,6 +285,54 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         // actual Commands-list entry, not a bare "gc" substring.
         expect(r.stdout).toMatch(/^\s+gc\s+/m);
         expect(r.stdout).toContain("reap old _next/static/<build-id>/");
+        // UX ledger 1d: `create` leads (the reader with no app yet), and the
+        // two verbs README advertises are listed because the bin now routes
+        // them. Assert the Commands-list entries, not bare substrings.
+        expect(r.stdout).toMatch(/^Start here:$/m);
+        expect(r.stdout).toMatch(/^ {2}create\s+/m);
+        expect(r.stdout).toMatch(/^ {2}cleanup\s+/m);
+        expect(r.stdout).toMatch(/^ {2}build\s+/m);
+    });
+
+    it.each(["build", "cleanup"])(
+        "`%s` is dispatched, and its body is NOT inlined into the bin (#263)",
+        (verb) => {
+            // build.ts/cleanup.ts carry self-entry blocks AND are now bin-
+            // dispatched. That is safe only while each stays its own dist file:
+            // if tsup ever inlined one into the bin, its `isEntrypoint` block
+            // would fire at module load and hijack every subcommand. Prove the
+            // separation with a discriminator string unique to each module.
+            // Plain-ASCII discriminators on purpose: esbuild escapes non-ASCII
+            // literals (the build banner's emoji ships as an \u escape), so an
+            // emoji anchor would silently match neither file.
+            const discriminator = {
+                build: "Uploading static assets...",
+                cleanup: "Deleting NextApp CR",
+            }[verb] as string;
+            const own = readFileSync(
+                join(pkgRoot, "dist", "cli", `${verb}.js`),
+                "utf8",
+            );
+            expect(own, `${verb}.js must contain its own body`).toContain(
+                discriminator,
+            );
+            expect(
+                readFileSync(distBin, "utf8"),
+                "bin must not inline the dispatched entry",
+            ).not.toContain(discriminator);
+        },
+    );
+
+    it("`node kn-next.js cleanup --help`-less dispatch does not run a deploy", () => {
+        // The footgun this closes: before the dispatch existed, `kn-next
+        // cleanup` fell through to deploy(). Run it in an empty temp dir — the
+        // config is absent, so both paths stop early, but ONLY the deploy path
+        // announces "kn-next deploy".
+        const dir = mkdtempSync(join(tmpdir(), "knext-cleanup-dispatch-"));
+        const r = run(process.execPath, [distBin, "cleanup"], dir);
+        expect(`${r.stdout}${r.stderr}`).not.toContain("kn-next deploy");
+        expect(r.status).toBe(1); // no config here → the guidance path
+        expect(`${r.stdout}${r.stderr}`).toContain("npx @getknext/core create");
     });
 
     it("`node kn-next.js rollback --help` dispatches and exits 0", () => {

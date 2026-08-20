@@ -24,7 +24,7 @@ import type { KnativeNextConfig } from "../config";
 import { createLogger } from "../utils/logger";
 import { isEntrypoint, runQuiet } from "./exec";
 // Single source of truth for config loading — also runs validateConfig.
-import { loadConfig } from "./shared";
+import { handleConfigNotFound, loadConfig } from "./shared";
 
 const log = createLogger({ module: "cleanup" });
 
@@ -48,7 +48,12 @@ export function runCleanup(
     exec(["kubectl", "delete", "nextapp", config.name, "--ignore-not-found"]);
 }
 
-async function cleanup() {
+/**
+ * Tear down the app described by the local kn-next.config.ts. Exported so the
+ * `kn-next cleanup` bin subcommand can dispatch to it (the module also remains
+ * a documented directly-runnable entry — see the self-entry block below).
+ */
+export async function cleanup() {
     log.info("🧹 kn-next cleanup");
 
     log.info("Loading configuration...");
@@ -74,6 +79,10 @@ if (isEntrypoint(import.meta.url)) {
     try {
         await cleanup();
     } catch (err) {
+        // Expected state, not a crash — see the note in deploy.ts's dispatcher.
+        if (handleConfigNotFound(err)) {
+            process.exit(1);
+        }
         log.fatal({ err }, "Cleanup failed");
         process.exit(1);
     }
