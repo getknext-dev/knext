@@ -148,7 +148,7 @@ describe('#802 — cache-events route Redis client', () => {
     const client = instances[0];
     client.status = 'end';
 
-    await route.GET(new Request('http://localhost/api/cache/events'));
+    await route.GET();
 
     expect(client.connectCalls).toBe(1);
   });
@@ -158,7 +158,7 @@ describe('#802 — cache-events route Redis client', () => {
     const client = instances[0];
     client.status = 'ready';
 
-    await route.GET(new Request('http://localhost/api/cache/events'));
+    await route.GET();
 
     expect(client.connectCalls).toBe(0);
   });
@@ -188,7 +188,7 @@ describe('#802 — cache-events route Redis client', () => {
     const client = instances[0];
     vi.spyOn(client, 'lrange').mockRejectedValue(new Error('connection is closed'));
 
-    const res = await route.GET(new Request('http://localhost/api/cache/events'));
+    const res = await route.GET();
 
     expect(res.status).toBe(200);
     const body = (await res.json()) as { events: unknown[] };
