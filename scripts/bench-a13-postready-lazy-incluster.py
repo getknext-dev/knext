@@ -28,6 +28,7 @@ def pods():
 
 
 RETRIES = {"n": 0}
+LAST_CALL = {"issue": None, "done": None}
 
 
 def timed_get(path):
@@ -37,10 +38,11 @@ def timed_get(path):
     # the milliseconds printed are measured in-pod around the HTTP call only.
     code = (
         "import urllib.request,time,json\n"
+        "t_issue=time.time()\n"
         "t0=time.monotonic()\n"
         "r=urllib.request.urlopen('" + URL + path + "', timeout=180)\n"
         "b=r.read()\n"
-        "print(json.dumps([round((time.monotonic()-t0)*1000,1), r.status, r.headers.get('x-nextjs-cache','-'), len(b)]))\n"
+        "print(json.dumps([round((time.monotonic()-t0)*1000,1), r.status, r.headers.get('x-nextjs-cache','-'), len(b), t_issue, time.time()]))\n"
     )
     last = None
     for attempt in range(3):
@@ -49,7 +51,8 @@ def timed_get(path):
             capture_output=True, text=True,
         )
         if p.returncode == 0 and p.stdout.strip():
-            ms, status, cache, blen = json.loads(p.stdout.strip().splitlines()[-1])
+            ms, status, cache, blen, t_issue, t_done = json.loads(p.stdout.strip().splitlines()[-1])
+            LAST_CALL["issue"], LAST_CALL["done"] = t_issue, t_done
             return ms, status, cache, blen
         RETRIES["n"] += 1
         print(json.dumps(dict(retry=path, attempt=attempt + 1, err=(p.stderr or "no output")[:100])), flush=True)
@@ -64,14 +67,15 @@ for i in range(1, N + 1):
     time.sleep(10)  # settle after the last pod is gone
 
     wake_ms, ws, _, _ = timed_get("/api/health")
-    # The exec gap: wall-clock between the wake response and the first measured
-    # GET being issued. Under kubectl-exec this is ~0.5-2s of apiserver/exec
-    # setup in which post-readiness lazy work can complete unmeasured — a
-    # confound in the direction of smaller lazy values. Printed so every row
-    # can bound it instead of asserting it away (review of ledger row 2).
-    gap_t0 = time.monotonic()
+    wake_done_epoch = LAST_CALL["done"]
+    # The exec gap: wall-clock between the WAKE RESPONSE completing in-pod and
+    # the FIRST measured GET being ISSUED in-pod. Both stamps come from the
+    # same pod's clock (time.time() printed by the in-pod snippet), so this is
+    # the actual confound interval — the dead time in which post-readiness
+    # lazy work can complete unmeasured (a confound toward smaller lazy
+    # values; review of ledger row 2, both rounds).
     f_ms, fs, fc, fb = timed_get(MEASURED_PATH)
-    exec_gap_ms = round((time.monotonic() - gap_t0) - (f_ms / 1000.0), 3) * 1000
+    exec_gap_ms = round((LAST_CALL["issue"] - wake_done_epoch) * 1000)
     w1_ms, s1, c1, _ = timed_get(MEASURED_PATH)
     w2_ms, s2, c2, _ = timed_get(MEASURED_PATH)
 
@@ -91,7 +95,7 @@ for i in range(1, N + 1):
     row = dict(
         cycle=i, wake_ms=round(wake_ms), first_ms=round(f_ms),
         warm1_ms=round(w1_ms), warm2_ms=round(w2_ms), lazy_ms=round(f_ms - warm),
-        exec_gap_ms=round(exec_gap_ms),
+        exec_gap_ms=exec_gap_ms,
         wake_status=ws, first_status=fs, first_cache=fc, first_bytes=fb, pull=pull,
     )
     results.append(row)

@@ -27,12 +27,29 @@ def pods():
     return json.loads(out)["items"]
 
 
+RETRIES = {"n": 0}
+
+
 def timed_get(path):
-    t0 = time.monotonic()
-    req = urllib.request.Request(URL + path, headers={"User-Agent": "a13-bench"})
-    with urllib.request.urlopen(req, timeout=180) as r:
-        body = r.read()
-        return (time.monotonic() - t0) * 1000, r.status, r.headers.get("x-nextjs-cache", "-"), len(body)
+    # Workstation-side SYN timeouts (Errno 60, ~75s) happen intermittently on
+    # some network paths. A connect that NEVER completed sent nothing to the
+    # activator, so retrying is still a genuine cold wake; the retry count is
+    # recorded so a row can state it. (This loop was first added mid-sitting in
+    # a scratchpad copy on 2026-08-20 — the discarded sitting in the ledger's
+    # row-2 block ran on that copy; committing it here closes the provenance.)
+    last = None
+    for attempt in range(3):
+        t0 = time.monotonic()
+        req = urllib.request.Request(URL + path, headers={"User-Agent": "a13-bench"})
+        try:
+            with urllib.request.urlopen(req, timeout=180) as r:
+                body = r.read()
+                return (time.monotonic() - t0) * 1000, r.status, r.headers.get("x-nextjs-cache", "-"), len(body)
+        except OSError as e:
+            RETRIES["n"] += 1
+            print(json.dumps(dict(retry=path, attempt=attempt + 1, err=str(e)[:80])), flush=True)
+            last = e
+    raise last
 
 
 for i in range(1, N + 1):
@@ -79,4 +96,5 @@ print(json.dumps(dict(
     median_first_ms=statistics.median(firsts),
     median_warm_ms=statistics.median(warms),
     lazies=lazies,
+    workstation_retries=RETRIES["n"],
 )), flush=True)

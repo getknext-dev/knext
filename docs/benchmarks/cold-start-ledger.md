@@ -58,7 +58,12 @@ One full sitting was **discarded as instrument-invalid**; its numbers are preser
 than in an unfindable side-channel — per-cycle lazies
 `[-81223, -67544, 3768, 4264, 16172, 17991, 91327, 92298]`, "median lazy" 10218 ms, with warm
 renders up to 92 s and 3 SYN-timeout retries — 90 s *warm* renders on requests the same plane
-served in ~530 ms is what "instrument-invalid" means concretely.
+served in ~530 ms is what "instrument-invalid" means concretely. **Provenance:** that sitting ran
+on the WORKSTATION harness with a logged-retry loop that had been added mid-investigation in a
+scratchpad copy (the committed script would have died on the first SYN timeout); the retry loop
+is now committed into `scripts/bench-a13-postready-lazy.py`, so the instrument that produced
+these numbers exists in the repo. Timing was workstation-side, so the WAN framing stands — the
+in-pod row-2 instrument shares only the LB/ingress hop, not the degraded WAN path.
 
 Three consequences, none asserted away:
 
