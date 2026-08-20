@@ -115,6 +115,14 @@ flaky network is never reported as a missing CRD:
 | auth | Credentials failed (expired token, `Unauthorized`). | Re-authenticate and retry. |
 | forbidden | Authenticated but RBAC denied the read. | Ask a cluster admin for `get`/`list` on the resource. |
 
+**No cluster yet?** Doctor says so plainly instead of blaming the network. Before printing the
+network hint it looks at your local kubeconfig: a missing kubeconfig file, a config with no
+`current-context`, or a connection refused on a local-only address (`127.0.0.1`, `localhost`,
+`0.0.0.0` — usually a leftover from a local cluster that is no longer running) is reported as
+*"you don't have a Kubernetes cluster connected yet"*, with a pointer to
+[Getting started](/docs/getting-started). The "check network/VPN and retry" hint is reserved for a
+real, remote cluster that stopped answering.
+
 **Exit code:** `1` on any hard `FAIL` **or** probe `ERROR` (the cluster state could not be
 verified); `WARN`/`SKIP` never fail. A fully unreachable cluster degrades to all-`SKIP` and exits
 `0` — doctor reports what it could verify, it does not guess.

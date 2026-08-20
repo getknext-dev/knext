@@ -44,10 +44,21 @@
  * "not found" cluster-state fact. The classifier is deliberately
  * conservative: only clearly-infrastructural stderr signatures reclassify;
  * anything ambiguous keeps the legacy behavior.
+ *
+ * Finding 1c (docs/ux/ergonomics-ledger.md): when the reachability gate
+ * fails, doctor first consults the LOCAL kubeconfig — pure file reads, no
+ * kubectl, no network — to tell "no cluster configured yet" (absent
+ * kubeconfig / no current-context / refused dial on a local-only address)
+ * apart from a genuine remote flake. The zero-k8s persona has no cluster;
+ * "check network/VPN and retry" sends them in a circle.
  */
 
 import { spawnSync } from "node:child_process";
-import { writeSync } from "node:fs";
+import { existsSync, readFileSync, writeSync } from "node:fs";
+import { homedir } from "node:os";
+import { delimiter, join } from "node:path";
+import { parse as parseYaml } from "yaml";
+import { DOCS_URL } from "./help";
 import { unknownEmittedFields } from "./schema/crd-schema";
 import { EMITTED_CR_FIELD_PATHS } from "./schema/emitted-fields.generated";
 import { readKnownCRDFields } from "./schema/preflight";
@@ -106,6 +117,12 @@ export interface DoctorReport {
 export interface DoctorDeps {
     kubectl: KubectlFn;
     probeImage: ManifestProbeFn;
+    /**
+     * Local kubeconfig inspector (finding 1c) — lets the reachability gate
+     * tell "you don't have a cluster connected yet" apart from a flake.
+     * Defaults to the real file-reading inspector; tests inject fixtures.
+     */
+    inspectKubeconfig?: KubeconfigInspectFn;
 }
 
 /** Production kubectl runner — spawnSync, shell:false, never throws. */
@@ -229,6 +246,98 @@ function infraFailure(r: KubectlResult): InfraFailure | undefined {
               detail: `probe failed (network): ${detailExcerpt}`,
               hint: "cluster connection flaked — check network/VPN and retry",
           };
+}
+
+/** What the LOCAL kubeconfig says, before any network I/O (finding 1c). */
+export type KubeconfigState =
+    | { kind: "absent"; searched: readonly string[] }
+    | { kind: "no-current-context"; path: string }
+    | { kind: "has-current-context" };
+
+export type KubeconfigInspectFn = () => KubeconfigState;
+
+/**
+ * Default kubeconfig inspector: pure local file reads — no kubectl (the
+ * read-only get/version verb contract holds) and no network. Mirrors
+ * kubectl's merge rule for $KUBECONFIG lists: any listed file that sets a
+ * non-empty current-context wins. A config that cannot be parsed NEVER
+ * claims "no cluster" — misdiagnosing a real cluster as absent is worse
+ * than the generic unreachable message, so parse failures report
+ * has-current-context and the caller keeps the legacy path.
+ */
+export function inspectKubeconfig(): KubeconfigState {
+    const env = process.env.KUBECONFIG;
+    const searched = env?.length
+        ? env.split(delimiter).filter((p) => p.length > 0)
+        : [join(homedir(), ".kube", "config")];
+    const existing = searched.filter((p) => existsSync(p));
+    const first = existing[0];
+    if (first === undefined) {
+        return { kind: "absent", searched };
+    }
+    for (const path of existing) {
+        try {
+            const parsed = parseYaml(readFileSync(path, "utf-8")) as
+                | { "current-context"?: unknown }
+                | null
+                | undefined;
+            const ctx = parsed?.["current-context"];
+            if (typeof ctx === "string" && ctx.length > 0) {
+                return { kind: "has-current-context" };
+            }
+        } catch {
+            return { kind: "has-current-context" };
+        }
+    }
+    return { kind: "no-current-context", path: first };
+}
+
+const GETTING_STARTED_URL = `${DOCS_URL}/docs/getting-started`;
+
+/** The persona-plain hint for every no-cluster-configured state (finding 1c). */
+const NO_CLUSTER_HINT = `you don't have a Kubernetes cluster connected yet — kn-next deploys into one; follow ${GETTING_STARTED_URL} to get set up, then re-run doctor`;
+
+/** A refused dial on an address that can only be THIS machine. */
+const LOCAL_APISERVER_RE =
+    /\b((?:127\.0\.0\.1|0\.0\.0\.0|localhost|\[::1\]):\d+)/;
+
+interface NoClusterDiagnosis {
+    detail: string;
+    hint: string;
+}
+
+/**
+ * Finding 1c: distinguish the no-cluster-configured states from a real
+ * reachability flake. Returns undefined when the failure could plausibly be
+ * a genuine remote cluster having a bad day — the caller then keeps the
+ * legacy "connection flaked" hint. Callers must NOT invoke this for
+ * auth/forbidden-classified failures (#230): those imply a configured
+ * cluster and keep their more specific hints.
+ */
+export function diagnoseNoCluster(
+    stderr: string,
+    state: KubeconfigState,
+): NoClusterDiagnosis | undefined {
+    if (state.kind === "absent") {
+        return {
+            detail: `no kubeconfig found (searched: ${state.searched.join(", ")}) — you don't have a Kubernetes cluster connected yet; all cluster checks skipped`,
+            hint: NO_CLUSTER_HINT,
+        };
+    }
+    if (state.kind === "no-current-context") {
+        return {
+            detail: `kubeconfig ${state.path} sets no current-context — you don't have a Kubernetes cluster connected yet; all cluster checks skipped`,
+            hint: NO_CLUSTER_HINT,
+        };
+    }
+    const local = LOCAL_APISERVER_RE.exec(stderr);
+    if (local?.[1] && /refused/i.test(stderr)) {
+        return {
+            detail: `connection refused at ${local[1]} — an address on THIS machine, so this is a leftover local cluster (kind/minikube/OrbStack/k3d) that is not running, not a network problem; all cluster checks skipped`,
+            hint: `your kubeconfig points at a local cluster that is not running — start it again, or follow ${GETTING_STARTED_URL} to connect a different cluster`,
+        };
+    }
+    return undefined;
 }
 
 function safeJson<T>(raw: string): T | undefined {
@@ -434,12 +543,25 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
     if (reachable) {
         push("cluster", "Cluster reachable", "pass", "apiserver responded");
     } else {
+        // #230 keeps precedence: auth/RBAC-classified failures imply a
+        // configured cluster, so they keep their specific hints. Everything
+        // else consults the LOCAL kubeconfig (finding 1c) before falling
+        // back to the flake hint.
+        const cls = classifyKubectlFailure(version.stderr);
+        const noCluster =
+            cls === "auth" || cls === "forbidden"
+                ? undefined
+                : diagnoseNoCluster(
+                      version.stderr,
+                      (deps.inspectKubeconfig ?? inspectKubeconfig)(),
+                  );
         push(
             "cluster",
             "Cluster reachable",
             "warn",
-            `apiserver unreachable (${version.stderr.trim().slice(0, 120) || "no kubectl context?"}) — all cluster checks skipped`,
-            infraFailure(version)?.hint,
+            noCluster?.detail ??
+                `apiserver unreachable (${version.stderr.trim().slice(0, 120) || "no kubectl context?"}) — all cluster checks skipped`,
+            noCluster?.hint ?? infraFailure(version)?.hint,
         );
     }
     const skipAll = !reachable;
@@ -939,6 +1061,9 @@ Knative Serving, and the local kubectl's --validate=strict support. Exit 1 on
 hard FAILs and on probe ERRORs (a check's kubectl
 probe hit a network/TLS/credential/RBAC failure — the cluster state could not
 be verified); WARN/SKIP never fail; a fully unreachable cluster SKIPs (exit 0).
+A missing/empty kubeconfig, or a refused dial on a local-only apiserver
+address, is reported plainly as "no cluster connected yet" (with the
+getting-started guide), never as a network flake.
 
 Options:
   --json      Emit the check results as JSON
