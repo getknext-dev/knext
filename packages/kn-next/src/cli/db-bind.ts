@@ -473,6 +473,11 @@ export async function dbMain(argv: readonly string[]): Promise<void> {
     }
 
     const opts = parseDbBindArgs(rest);
+    // Validate BEFORE announcing (and before touching the config): a missing
+    // `--secret` otherwise printed the "kn-next db bind …" banner above the
+    // error. runDbBind re-validates — this is the cheap early exit, not a
+    // replacement for it.
+    validateDbBindOptions(opts);
 
     // Resolve the app name: positional wins, else the local config's name.
     // The config (when present) also feeds the envMap-collision cross-check

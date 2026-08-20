@@ -178,9 +178,12 @@ export async function rollbackMain(argv: readonly string[]): Promise<number> {
 }
 
 async function rollback(argv: readonly string[]) {
-    log.info("⏪ kn-next rollback");
-
+    // Parse BEFORE announcing: a rejected flag would otherwise print the
+    // banner first and leave the user reading "⏪ kn-next rollback" above their
+    // error — the same ordering fixed on the deploy path (ADR-0046).
     const args = parseRollbackArgs(argv);
+
+    log.info("⏪ kn-next rollback");
 
     // Resolve the app name: positional arg wins, else the config's name.
     // (Canary/flag validation already happened in parseRollbackArgs — strict,
