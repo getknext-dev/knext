@@ -37,7 +37,7 @@ app and its revisions landed in between; requests at 99%/85%). Unattributed; car
 
 | 2 | 2026-08-20 (`/dashboard`, n=8, per-cycle below; **instrument moved in-cluster**) | rooted-FQDN DSN minting (#796) verified pre-merge on OKE: rooted env applied to the operator, the hand-made benchmark Secret re-pointed at the rooted host (the re-mint required by #796's measurability note — the benchmark subject was in the unaffected set) | 4993.5 | 226 | 125 | **2/8** cycles 3.6 / 5.5 s (both SUCCESS bodies, no fallbacks) | the fresh-pod DNS tail collapsed: 6/8 cycles in a 90–122 ms lazy band vs row 1's ONE clean cycle; **median lazy 4719 → 103 ms**. The two residuals are unattributed (candidates: the still-unrooted app-level Redis host, residual UDP races) |
 
-| 3 | 2026-08-20 (`/dashboard`, n=8, in-cluster instrument, per-cycle below) | Redis host rooted (#800) and applied to the running ksvc (new revision) — both DSN paths now skip the search walk; between rows, an attribution sitting (same instrument + stall-triggered pod-log capture) had pinned the residual to ioredis `connect ETIMEDOUT` with a clean PG path | 4917.5 | 239.5 | 125.5 | **1/8** at 2.4 s | the one stall logs `connect ETIMEDOUT` on the **rooted** host — a TCP-phase SYN failure, so the remaining layer is the fresh-pod first-SYN race (conntrack/veth class), which no DNS lever touches. Tail trajectory 7/8 → 2–3/8 → 1/8 is consistent with the levers but at n=8 per sitting is suggestive, not proven |
+| 3 | 2026-08-20 (`/dashboard`, n=8, in-cluster instrument, per-cycle below) | Redis host rooted: #800 rooted the config FALLBACK (inert when env is set); the operative change was the ksvc env patch — **evidenced, not assumed**: the measured revision `fm-node-00093` carries `REDIS_URL=redis://redis.default.svc.cluster.local.:6379` (read back from the Revision object, durable). Appendix B holds the between-rows attribution sitting | 4917.5 | 239.5 | 125.5 | **1/8** at 2.4 s | **TCP-phase on the Redis path, resolver excluded — mechanism NOT discriminated.** Cycle 3's pod logged 4× ioredis `connect ETIMEDOUT` (Appendix C, verbatim; ioredis's message carries no hostname, and a `--tail 60` capture can include boot-phase lines predating the measured GET). The published number and a *completed* connect timeout disagree: the committed budget is 5 s (`REDIS_CONNECT_TIMEOUT_MS` default, no override anywhere in the repo), so a 2394 ms stall is more consistent with a SYN-retransmit-**delayed connect that succeeded** (logs nothing) than with a timeout — meaning the ETIMEDOUT lines may be boot-phase. Candidates, undiscriminated: fresh-pod SYN race (conntrack/veth), Redis-side accept/CPU pressure on a 99%/85%-allocated plane, kube-proxy programming lag. Discriminator for the next stall: conntrack/tcpdump capture (~1-in-8 cycles stalls) |
 
 ### Row 3 per-cycle data
 
@@ -52,21 +52,35 @@ app and its revisions landed in between; requests at 99%/85%). Unattributed; car
 | 7 | 5346 | 248 | 130 | 118 | 3956 | 14240 |
 | 8 | 4562 | 436 | 99 | 337 | 4730 | 14240 |
 
-Median lazy **112 ms** (`statistics.median`), median exec gap **3866 ms** — the gap column's first
-full sitting bounds the row-2 confound with data: ~3.9 s of dead time between wake response and
-first measured GET is the standing instrument property, unchanged cycle-to-cycle (3730–4730), so
-it shifts absolute `lazy` down uniformly rather than explaining any cycle's tail. **Wake-shift
-check:** median 4917.5 vs row 2's 4993.5 — no shift (the bimodal 13 s wake reappeared once,
-cycle 2; still unattributed, still carried). Zero instrument retries; all bodies success-size.
+Median lazy **112 ms**, median exec gap **3866 ms** — every median matches the instrument summary
+verbatim (nothing hand-computed). The gap argument that needs no uniformity assumption: **the
+stall cycle's own gap (3792) sits at the median**, so the gap cannot be what made cycle 3 slow.
+(The spread is 3730–4730, 27% — and the max-gap cycle 8 is also the max non-stall lazy and min
+warm, so uniformity would be an overclaim; measuring the gap here bounds THIS row and offers a
+stationarity assumption about row 2, which never measured it.) **Wake-shift check:** 4917.5 vs
+row 2's 4993.5 — no shift (the bimodal 13 s wake reappeared once, cycle 2; carried, unattributed).
+Zero instrument retries; all bodies success-size.
 
-**What row 3 establishes:** with BOTH platform paths rooted, 7/8 cycles sit at 95–337 ms lazy and
-the sole residual carries a TCP (not resolver) failure signature on the rooted name. The measured
-first-visitor experience across the loop: median lazy 4719 → 103 → 112 ms; multi-second tail
-7/8 → 1/8. The remaining 2.4 s class is attributed (SYN race on a fresh pod's first Redis
-connect); its candidate lever is **eager cache-handler connection at boot** — the app dials Redis
-during startup (inside the 4–5 s boot window, retried before readiness) instead of on the first
-visitor's request, absorbing exactly this race off the critical path. App-level, same shape as
-the vinext entry's warm-on-boot but for connections, not renders.
+**What row 3 establishes, with the instrument correction applied:** the ~3.9 s gap means row-2/3
+sittings cannot register a tail cycle shorter than the gap — so the like-for-like cross-instrument
+comparison counts cycles ABOVE ~3.9 s: row 1 had **4/8**, row 2 **1/8** (its 3591 ms cycle sits
+below the gap), the Appendix-B attribution sitting **2/8**, row 3 **1/8**. The multi-second tail
+shrank and its failure signature changed class (resolver errors + fallback bodies → TCP-phase
+delay, success bodies); at n=8 per sitting the counts fluctuate and the honest claim stays a
+distribution shift consistent with the levers. The medians tell the same story with a wrinkle the
+narrative must not round away: **103 → 112 ms is +8.7%** — #800 moved the tail, not the median,
+which was already at the floor.
+
+**Candidate next lever (candidate, not attribution): eager cache-handler connection at boot** —
+dial Redis at process start, fail-open unchanged, *readiness untouched*: fm readiness deliberately
+does not gate on dependencies (ADR-0026/#338 — gating on a scale-to-zero dependency defeats
+scale-to-zero), so the boot dial races the first visitor rather than being absorbed by readiness;
+it wins that race whenever boot-to-first-visitor exceeds connect time, which the ~4 s exec gap
+suggests is the common case, but it is a mitigation-by-head-start, not a guarantee. **Named
+hazard:** a failed boot dial trips `markUnhealthy` and its 5 s breaker — trading a visible 2.4 s
+stall for a silent 5 s split-cache window; any implementation must dial WITHOUT marking unhealthy
+on a boot-phase failure. The "connections, not renders" shape sidesteps the synthetic-warm
+cache-poisoning class.
 
 ### Row 2 per-cycle data
 
@@ -135,6 +149,27 @@ have varied 3/8 → 7/8 → 2/8 across rows, the honest claim is a distribution 
 with the lever, not a proof the residual is zero. The two 3.6/5.5 s residuals rendered
 successfully (so: a slow dependency, not the 15 s timeout or a resolver hard-fail) and are the
 next attribution target.
+
+### Appendix B — the between-rows attribution sitting (2026-08-20, pre-#800, published)
+
+Same in-cluster instrument, stall-triggered pod-log capture, UNROOTED Redis env (this sitting is
+why #800 exists). Its per-cycle lazies: `[92, 5615, 101, 193, 3376, 95, 6386, 115]` — tail 3/8
+raw, **2/8 above the ~3.9 s gap**. All three stalled cycles' pods logged ioredis
+`connect ETIMEDOUT` + `[CacheHandler] Redis unhealthy, failing open`, zero PG-side `EAI_AGAIN`.
+Also observed and carried: a bimodal wake (4 cycles at ~13.5–14 s vs ~4–5 s, image present every
+cycle) — unattributed.
+
+### Appendix C — row 3 cycle 3's captured lines, verbatim
+
+```
+[ioredis] Unhandled error event: Error: connect ETIMEDOUT   (×4, with stack: Socket._onTimeout)
+```
+
+Capture is `kubectl logs --tail 60` on the cycle's pod AFTER the measured GET — it can include
+boot-phase lines predating the GET, and ioredis's message does not name the host. Given the 5 s
+committed connect budget vs the 2394 ms stall, the parsimonious reading is a retransmit-delayed
+connect that SUCCEEDED during the measured GET, with the logged timeouts belonging to the pod's
+boot phase. The row's mechanism cell carries that ambiguity rather than resolving it by assertion.
 
 ## Iteration 1 — what was proven, in one place
 
