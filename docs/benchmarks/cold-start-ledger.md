@@ -53,7 +53,9 @@ app and its revisions landed in between; requests at 99%/85%). Unattributed; car
 | 8 | 4562 | 436 | 99 | 337 | 4730 | 14240 |
 
 Median lazy **112 ms**, median exec gap **3866 ms** — every median matches the instrument summary
-verbatim (nothing hand-computed). The gap argument that needs no uniformity assumption: **the
+verbatim (nothing hand-computed). Cycle 1's emitted line, quoted because a review brief
+mis-transcribed its lazy as 95: `"first_ms": 221, "warm1_ms": 139, "warm2_ms": 123, "lazy_ms": 98`
+— the table matches the instrument output (221 − 123 = 98). The gap argument that needs no uniformity assumption: **the
 stall cycle's own gap (3792) sits at the median**, so the gap cannot be what made cycle 3 slow.
 (The spread is 3730–4730, 27% — and the max-gap cycle 8 is also the max non-stall lazy and min
 warm, so uniformity would be an overclaim; measuring the gap here bounds THIS row and offers a
@@ -240,9 +242,11 @@ independent of any latency work.
 
 ## Next iteration (chosen from the measurement)
 
-**Fresh-pod DNS — taken in iteration 2 (#796); row 2 above carries the result.** The residual
-2/8 tail and the still-unrooted app-level Redis host are iteration 3 candidates, alongside the
-plane-level levers below (unchanged, still open) and the saturation cleanup (human-gated).
+**Fresh-pod DNS — taken: iteration 2 rooted the platform-minted PG DSNs (#796, row 2) and
+iteration 3 rooted the Redis host everywhere taught and deployed (#800, row 3, cluster-verified
+on revision fm-node-00093).** Iteration 4 opens with DISCRIMINATION of the remaining 1-in-8
+TCP-phase stall (per-dependency timing + conntrack on the next stall — see row 3's mechanism
+cell); the plane-level levers below and the saturation cleanup (human-gated) remain open.
 
 Verified on the plane, not assumed (`/etc/resolv.conf` from a running
 default-namespace pod): `options ndots:5` with a **five-entry** search path — the standard three
@@ -254,7 +258,7 @@ leave the cluster for OCI's resolver on every in-cluster lookup. Note also: the 
 only the rooted form (trailing dot) or an ndots reduction skips it.
 
 Candidate levers, cheapest first:
-1. **TAKEN (iteration 2, #796; row 2 carries the result for minted PG DSNs — the app-level Redis host remains).** Rooted FQDN (trailing dot) in every platform-minted hostname
+1. **TAKEN in full (iterations 2–3, #796 + #800; rows 2–3 carry the results — minted PG DSNs and the Redis host, both cluster-verified).** Rooted FQDN (trailing dot) in every platform-minted hostname
    (`pggw-apps.scale-zero-pg.svc.cluster.local.`) — the appdb operator's DSNs and the docs'
    recipes; skips the search walk entirely, saving 10 queries per lookup on this plane's
    resolv.conf. Client compatibility with the trailing dot must be verified per consumer, not
