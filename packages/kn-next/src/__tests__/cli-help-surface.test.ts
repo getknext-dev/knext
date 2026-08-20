@@ -25,10 +25,19 @@ const deploySrc = readFileSync(
     "utf8",
 );
 
-/** Verbs the bin's dispatcher actually routes (`sub === "…"`). */
+/**
+ * Verbs the bin's dispatcher actually ROUTES — i.e. `(sub === "x") {`, the
+ * branch that runs code.
+ *
+ * The trailing `) {` matters: the catch block below the chain also mentions
+ * every verb, as `sub === "x" ? "x failed" : …`. Matching a bare `sub === "x"`
+ * therefore counted a verb as routable when only its ERROR LABEL survived —
+ * mutation-proved by deleting the `cleanup` dispatch branch, which left this
+ * file green until the pattern was tightened.
+ */
 function dispatchedVerbs(): string[] {
     const verbs = new Set<string>();
-    for (const m of deploySrc.matchAll(/sub === "([a-z][a-z-]*)"/g)) {
+    for (const m of deploySrc.matchAll(/sub === "([a-z][a-z-]*)"\s*\)\s*\{/g)) {
         const v = m[1];
         if (v) {
             verbs.add(v);
