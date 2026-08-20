@@ -289,23 +289,45 @@ kubectl logs <pod> -c user-container | grep '\[slow-dep\]'
 | `[slow-dep] {"dep":"redis-connect","op":"client.connect"…}` | the cache's **TCP handshake** was slow — a connect-phase problem (SYN retransmit, kube-proxy programming, a loaded node) |
 | `[slow-dep] {"dep":"redis-ready","op":"ready-check"…}` | the handshake was fast and the cache's **ready-check** was slow — post-handshake Redis responsiveness, not the network |
 
-Each line carries `durationMs`, `thresholdMs` and, for Postgres, `role` and
-`outcome`. It never carries the target: the dependency **class** is logged, never
-a DSN, host credentials or SQL text.
+Each line carries `durationMs`, `thresholdMs` and, for Postgres, `role`
+(`writer` for `DATABASE_URL`, `reader` for the `DATABASE_URL_RO` gateway — both
+pools are instrumented) and `outcome`. `cold` appears on **writer** lines only:
+it is the writer pool's own wake latch, and the reader has none, so a reader line
+omits the field rather than borrowing the writer's answer. No line carries the
+target: the dependency **class** is logged, never a DSN, host credentials or SQL
+text.
 
-The threshold is an env var on the app, so it can be lowered on a suspect
-deployment without a rebuild:
+The threshold is a plain env var, so it can be lowered on a suspect deployment
+without a rebuild — **through the `NextApp` CR, never the Knative Service**
+(`spec.env`, fields from
+[`api/v1alpha1/nextapp_types.go`](../../packages/kn-next-operator/api/v1alpha1/nextapp_types.go)):
 
-```bash
-kubectl set env ksvc/<app> SLOW_DEP_LOG_MS=100
+```sh
+kubectl patch nextapp <app> -n <ns> --type merge -p \
+  '{"spec":{"env":{"SLOW_DEP_LOG_MS":"100"}}}'
 ```
+
+Do **not** reach for `kubectl set env ksvc/<app>`. The operator is the single
+source of truth for cluster state (ADR-0001): the reconciler reverts an
+out-of-band ksvc edit, so the knob silently disappears mid-incident — and worse,
+a merge patch on a ksvc container **drops env, resources and probes** that were
+not restated in the patch, while the revision still goes `Ready`. That produces a
+mis-configured pod that looks healthy and is then measured, which is the opposite
+of what this section is for.
+
+The patch rolls a new revision, so it applies to pods created **after** it — a
+cold cycle already in flight is not retro-instrumented, and the threshold change
+itself costs a cold start.
 
 Two things this does **not** change: no timeout, budget or fail-open behaviour
 moves, and readiness still never gates on a dependency — a waking database or an
 unreachable cache must not flap a scale-to-zero pod.
 
-**If you see nothing at all**, the stall was not in these three places: look at
-the cold-start terms in §8 above (image pull, bytecode cache, app init).
+**If you see nothing at all**, the stall was not in the app's Postgres pools
+(writer or reader) or its ISR cache connection: look at the cold-start terms in
+§8 above (image pull, bytecode cache, app init). The instrument covers the
+dependencies knext itself wires — an app's own direct clients to some other
+service are not on this seam and are not ruled out by the silence.
 
 **Related noise, now silenced.** A pod whose Redis is unreachable used to print
 repeated `[ioredis] Unhandled error event` stacks from background clients. Those
