@@ -37,6 +37,37 @@ app and its revisions landed in between; requests at 99%/85%). Unattributed; car
 
 | 2 | 2026-08-20 (`/dashboard`, n=8, per-cycle below; **instrument moved in-cluster**) | rooted-FQDN DSN minting (#796) verified pre-merge on OKE: rooted env applied to the operator, the hand-made benchmark Secret re-pointed at the rooted host (the re-mint required by #796's measurability note — the benchmark subject was in the unaffected set) | 4993.5 | 226 | 125 | **2/8** cycles 3.6 / 5.5 s (both SUCCESS bodies, no fallbacks) | the fresh-pod DNS tail collapsed: 6/8 cycles in a 90–122 ms lazy band vs row 1's ONE clean cycle; **median lazy 4719 → 103 ms**. The two residuals are unattributed (candidates: the still-unrooted app-level Redis host, residual UDP races) |
 
+| 3 | 2026-08-20 (`/dashboard`, n=8, in-cluster instrument, per-cycle below) | Redis host rooted (#800) and applied to the running ksvc (new revision) — both DSN paths now skip the search walk; between rows, an attribution sitting (same instrument + stall-triggered pod-log capture) had pinned the residual to ioredis `connect ETIMEDOUT` with a clean PG path | 4917.5 | 239.5 | 125.5 | **1/8** at 2.4 s | the one stall logs `connect ETIMEDOUT` on the **rooted** host — a TCP-phase SYN failure, so the remaining layer is the fresh-pod first-SYN race (conntrack/veth class), which no DNS lever touches. Tail trajectory 7/8 → 2–3/8 → 1/8 is consistent with the levers but at n=8 per sitting is suggestive, not proven |
+
+### Row 3 per-cycle data
+
+| cycle | wake | first | warm best | lazy | exec gap | body |
+|---|---|---|---|---|---|---|
+| 1 | 6426 | 221 | 123 | 98 | 3860 | 14240 |
+| 2 | 12982 | 231 | 126 | 106 | 3730 | 14240 |
+| 3 | 5016 | 2529 | 134 | 2394 | 3792 | 14240 |
+| 4 | 4390 | 230 | 135 | 95 | 4016 | 14240 |
+| 5 | 4819 | 263 | 125 | 138 | 3789 | 14240 |
+| 6 | 4229 | 219 | 124 | 95 | 3872 | 14240 |
+| 7 | 5346 | 248 | 130 | 118 | 3956 | 14240 |
+| 8 | 4562 | 436 | 99 | 337 | 4730 | 14240 |
+
+Median lazy **112 ms** (`statistics.median`), median exec gap **3866 ms** — the gap column's first
+full sitting bounds the row-2 confound with data: ~3.9 s of dead time between wake response and
+first measured GET is the standing instrument property, unchanged cycle-to-cycle (3730–4730), so
+it shifts absolute `lazy` down uniformly rather than explaining any cycle's tail. **Wake-shift
+check:** median 4917.5 vs row 2's 4993.5 — no shift (the bimodal 13 s wake reappeared once,
+cycle 2; still unattributed, still carried). Zero instrument retries; all bodies success-size.
+
+**What row 3 establishes:** with BOTH platform paths rooted, 7/8 cycles sit at 95–337 ms lazy and
+the sole residual carries a TCP (not resolver) failure signature on the rooted name. The measured
+first-visitor experience across the loop: median lazy 4719 → 103 → 112 ms; multi-second tail
+7/8 → 1/8. The remaining 2.4 s class is attributed (SYN race on a fresh pod's first Redis
+connect); its candidate lever is **eager cache-handler connection at boot** — the app dials Redis
+during startup (inside the 4–5 s boot window, retried before readiness) instead of on the first
+visitor's request, absorbing exactly this race off the critical path. App-level, same shape as
+the vinext entry's warm-on-boot but for connections, not renders.
+
 ### Row 2 per-cycle data
 
 | cycle | wake | first | warm best | lazy | body |
