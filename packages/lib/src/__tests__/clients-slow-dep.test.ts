@@ -150,6 +150,47 @@ describe('@getknext/lib/clients — slow PG operations are named on the request 
     delete process.env.DB_WAKE_RETRY_BASE_MS;
   });
 
+  it('instruments the READ-ONLY pool too, tagged `reader`', async () => {
+    // The runbook tells an operator that no `[slow-dep]` line means the stall
+    // was not in the database — a sentence that is only true if EVERY pool an
+    // app can reach is instrumented. file-manager uses the writer, but the
+    // runbook is a general doc, so the RO gateway gets the same seam.
+    process.env.DATABASE_URL_RO = 'postgres://reader:s3cr3t@replica.example.invalid:55434/fm';
+    vi.resetModules();
+    query.mockImplementation(
+      () => new Promise((resolve) => setTimeout(() => resolve({ rows: [] }), 60)),
+    );
+    const mod = await import('../clients');
+
+    const ro = mod.getDbPoolRO();
+    expect(ro).not.toBeNull();
+    await ro?.query('SELECT 1');
+    await settle();
+
+    const found = slowLines(warn);
+    expect(found).toHaveLength(1);
+    const fields = parse(found[0]);
+    expect(fields).toMatchObject({ dep: 'pg', op: 'pool.query', role: 'reader', outcome: 'ok' });
+    // The reader has NO wake latch of its own — `cold` is the writer's
+    // single-flight state, so claiming it here would be a borrowed fact.
+    expect(fields).not.toHaveProperty('cold');
+    expect(found[0]).not.toContain('s3cr3t');
+
+    delete process.env.DATABASE_URL_RO;
+  });
+
+  it('emits NOTHING for a fast read-only query (the other half)', async () => {
+    process.env.DATABASE_URL_RO = 'postgres://reader:p@replica.example.invalid:55434/fm';
+    vi.resetModules();
+    const mod = await import('../clients');
+
+    await mod.getDbPoolRO()?.query('SELECT 1');
+    await settle();
+
+    expect(slowLines(warn)).toHaveLength(0);
+    delete process.env.DATABASE_URL_RO;
+  });
+
   it('never leaks the DSN or its credentials into the line', async () => {
     query.mockImplementation(
       () => new Promise((resolve) => setTimeout(() => resolve({ rows: [] }), 60)),
