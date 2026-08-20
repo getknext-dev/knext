@@ -33,6 +33,40 @@ exceeds row-0's median (4049) and four exceed row-0's max (4227) — a systemati
 shift between sittings. Candidate cause: the plane got more crowded between the rows (the drill
 app and its revisions landed in between; requests at 99%/85%). Unattributed; carried, not hidden.
 
+| 2 | 2026-08-20 (`/dashboard`, n=8, per-cycle below; **instrument moved in-cluster**) | rooted-FQDN DSN minting (#796) verified pre-merge on OKE: rooted env applied to the operator, the hand-made benchmark Secret re-pointed at the rooted host (the re-mint the row-1 caveat required) | 4990 | 226 | 125 | **2/8** cycles 3.6 / 5.5 s (both SUCCESS bodies, no fallbacks) | the fresh-pod DNS tail collapsed: 6/8 cycles in a 90–122 ms lazy band vs row 1's ONE clean cycle; **median lazy 4719 → 103 ms**. The two residuals are unattributed (candidates: the still-unrooted app-level Redis host, residual UDP races) |
+
+### Row 2 per-cycle data
+
+| cycle | wake | first | warm best | lazy | body |
+|---|---|---|---|---|---|
+| 1 | 5348 | 220 | 122 | 98 | 14240 |
+| 2 | 5866 | 228 | 122 | 105 | 14240 |
+| 3 | 4844 | 3725 | 134 | 3591 | 14240 |
+| 4 | 4735 | 224 | 124 | 101 | 14240 |
+| 5 | 5446 | 248 | 127 | 122 | 14240 |
+| 6 | 3818 | 219 | 130 | 90 | 14240 |
+| 7 | 4130 | 221 | 126 | 95 | 14240 |
+| 8 | 5143 | 5589 | 124 | 5465 | 14240 |
+
+**Instrument change, stated:** rows 0–1 timed from the workstation; row 2 times **in-cluster**
+(pod `bench-timer`, `kubectl exec`, milliseconds measured in-pod around the HTTP call —
+`scripts/bench-a13-postready-lazy-incluster.py`). Forced, not chosen: the workstation WAN
+degraded mid-sitting to SYN timeouts and 90 s transfers on a path also serving 372 ms probes —
+one full sitting was **discarded as instrument-invalid** (median "lazy" 10218 ms with 90 s *warm*
+renders; raw lines preserved in the session records). Consequences: absolute `first`/`warm`
+values are NOT comparable across the instrument boundary (rows 0–1 carry ~400 ms of WAN+ingress
+RTT per sample; row 2's warm is 125 ms vs row 1's 533 ms mostly for that reason). **`lazy`
+(first − warm) is the cross-row comparable**, since both terms share whatever path the sitting
+used. Wake stays comparable (dominated by in-cluster scheduling/boot, not RTT).
+
+**What row 2 establishes:** with the PG DSN rooted, the row-1 failure signature
+(`EAI_AGAIN` + fallback bodies + a 7/8 multi-second tail) is gone — 6/8 cycles sit in a
+90–122 ms lazy band, and zero fallback renders. At n=8 per sitting and tail frequencies that
+have varied 3/8 → 7/8 → 2/8 across rows, the honest claim is a distribution shift consistent
+with the lever, not a proof the residual is zero. The two 3.6/5.5 s residuals rendered
+successfully (so: a slow dependency, not the 15 s timeout or a resolver hard-fail) and are the
+next attribution target.
+
 ## Iteration 1 — what was proven, in one place
 
 - **The DB-flap tail is dead**: the 15 s pool-timeout class and the park/wake churn are gone
@@ -73,7 +107,11 @@ app and its revisions landed in between; requests at 99%/85%). Unattributed; car
 
 ## Next iteration (chosen from the measurement)
 
-**Fresh-pod DNS.** Verified on the plane, not assumed (`/etc/resolv.conf` from a running
+**Fresh-pod DNS — taken in iteration 2 (#796); row 2 above carries the result.** The residual
+2/8 tail and the still-unrooted app-level Redis host are iteration 3 candidates, alongside the
+plane-level levers below (unchanged, still open) and the saturation cleanup (human-gated).
+
+Verified on the plane, not assumed (`/etc/resolv.conf` from a running
 default-namespace pod): `options ndots:5` with a **five-entry** search path — the standard three
 plus two OCI VCN domains (`knext.oraclevcn.com`, `nodes.knext.oraclevcn.com`). So a 3-label name
 like `pggw-apps.scale-zero-pg.svc` (2 dots < 5) attempts **all five** search suffixes before the
