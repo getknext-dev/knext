@@ -18,6 +18,14 @@ class FakeRedis {
   readonly options: Record<string, unknown>;
   readonly listeners = new Map<string, ((...a: unknown[]) => void)[]>();
   pingImpl: () => Promise<string> = async () => 'PONG';
+  /**
+   * ioredis's own state machine, in miniature. Without this the fake had NO
+   * `status`, so `ensureDialable`'s re-dial branch was structurally unreachable
+   * in every health test and the recovery contract was unproven on this path —
+   * the coverage hole the review found.
+   */
+  status = 'wait';
+  connectCalls = 0;
 
   constructor(_url: string, options: Record<string, unknown>) {
     this.options = options;
@@ -33,6 +41,12 @@ class FakeRedis {
 
   emit(event: string, ...args: unknown[]) {
     for (const fn of this.listeners.get(event) ?? []) fn(...args);
+  }
+
+  connect() {
+    this.connectCalls += 1;
+    this.status = 'connecting';
+    return Promise.resolve();
   }
 
   ping() {
@@ -104,6 +118,30 @@ describe('#802 — deep-health Redis client is lazy, listened-to and bounded', (
     expect(lines.filter((l) => l.includes('ETIMEDOUT'))).toHaveLength(1);
     expect(lines.join('\n')).not.toContain('hunter2');
     expect(lines.join('\n')).not.toContain('redis://');
+  });
+
+  it('re-dials on the deep-health path when the bounded retry gave up', async () => {
+    // The contract that stops #802's fix from trading a reconnect loop for a
+    // permanently-blind deep-health check: a client stranded in `end` is
+    // re-dialled by the scrape that wants the answer.
+    const { checkDeepHealth } = await import('../health');
+    await checkDeepHealth();
+    expect(instances[0].connectCalls).toBe(0);
+
+    instances[0].status = 'end';
+    await checkDeepHealth();
+
+    expect(instances[0].connectCalls).toBe(1);
+  });
+
+  it('does NOT re-dial a healthy client on the deep-health path (the other half)', async () => {
+    const { checkDeepHealth } = await import('../health');
+    await checkDeepHealth();
+
+    instances[0].status = 'ready';
+    await checkDeepHealth();
+
+    expect(instances[0].connectCalls).toBe(0);
   });
 
   it('still fails OPEN to degraded when the ping fails (behaviour unchanged)', async () => {
