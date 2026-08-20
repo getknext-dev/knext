@@ -5,6 +5,28 @@ Branch `feat/ux-guided-first-contact` (worktree agent-ae7f3716102f30d03). Commit
 
 - `1b64c80` feat(cli): guide instead of crash when there is no config, and make --help honest
 - `cb69312` test(cli): tighten the dispatched-verb scan to the routing branch, not the error label
+- `22c48d4` fix(cli): --help never destroys, unknown verbs never deploy (ADR-0046) — review round 1
+- `1dbce5a` fix(cli): reject stray positionals on deploy; usage typos are messages — review round 2
+- `ddde521` test(cli): widen the usage-throw scan to the ternary form it was blind to
+
+## Review round 2 (see the sections below for round 1)
+
+Files touched: `packages/kn-next/src/cli/{deploy,dispatch,shared,cleanup,build,preview,loadtest,gc,
+db-bind,db-migrate,rollback,status}.ts`, `packages/kn-next/src/__tests__/{cli-dispatch-contract,
+cli-node-runtime,gc-main}.test.ts`, `docs/adr/0046-cli-verb-dispatch-contract.md`,
+`apps/docs/content/docs/cli.mdx`.
+
+- **Stray positionals** — `parseCliArgs` now rejects any positional it did not consume as the verb
+  (`formatStrayPositional`, verb-first wording). The reviewer's three invocations all exit 1 with
+  `unexpected argument: cleanup` and never reach config loading.
+- **Usage errors are messages** — `UsageError` + `handleUsageError` in `cli/shared.ts`; 11 plain
+  `throw new Error` usage sites converted across build, cleanup, gc, db-bind, db-migrate, rollback,
+  status (wider than the two verbs named in review: a scan found the same shape everywhere).
+- **Mutation results:** disabling the positional check → red (dist); reverting a `UsageError` to
+  `Error` → red (dist immediately; the source scan was GREEN at first — the ternary form defeated
+  it, fixed in `ddde521` and re-proved red); removing `handleUsageError` from the dispatcher catch
+  → red (dist).
+- Suite 141 files / 1540 tests green; package + root `tsc` clean; biome clean.
 
 ## Files touched
 
