@@ -462,16 +462,39 @@ const retryWake = (pool: Pool): Pool => {
 // the caller actually waited, single-flight gating and #310 retries included —
 // that is the number the ledger's `lazy` column is made of.
 //
-// Observation only. The observer is attached to the returned promise WITHOUT
-// replacing it, so success/error propagation, timeouts and pool behaviour are
-// bit-for-bit unchanged; the observer's own rejection handler swallows, so it
-// never manufactures an unhandled rejection for a caller who handles the error.
+// The observer is attached to the returned promise WITHOUT replacing it: the
+// caller receives the pool's own promise, so resolution values, rejection
+// reasons, ordering, timeouts and pool behaviour are unchanged, and the
+// observer's own rejection handler swallows rather than re-throwing.
+//
+// ONE deliberate, disclosed behavioural delta — this is NOT "bit-for-bit
+// unchanged", and the earlier version of this comment claiming so was wrong.
+// Attaching `.then(onOk, onErr)` MARKS THE PROMISE HANDLED, which suppresses
+// `unhandledRejection` for a caller that never awaited it. On the warm path
+// (`sf.woken === true`) `singleflightWake` attaches nothing, so before this
+// wrapper an unawaited `pool.query()` rejection reached Node's default handler
+// and, since Node 15, CRASHED THE PROCESS. Measured, not reasoned: 2 unhandled
+// events on the pre-wrapper shape vs 1 on this one.
+//
+// The delta is kept on purpose. A cache-warming or fire-and-forget query whose
+// rejection takes down a pod serving unrelated traffic is not behaviour worth
+// preserving, and the failure is still visible — the rejection is reported here
+// as `outcome:"error"` when it is slow, and any caller that awaits sees it
+// exactly as before. It is recorded rather than left to be rediscovered: an
+// undisclosed safety improvement is still an undisclosed change.
 const timePoolOps = (pool: Pool, role: PoolRole): Pool => {
   const observe = <R>(op: 'pool.query' | 'pool.connect', run: () => R): R => {
     const startedAt = Date.now();
     // `cold` is the discriminator that matters: the FIRST acquisition on a
     // fresh pod is the row-3 reading, a slow warm query is a different story.
-    const cold = !isDbWoken();
+    //
+    // WRITER ONLY, deliberately. `isDbWoken()` reads the writer pool's
+    // single-flight latch (#339); the reader is a separate singleton with no
+    // wake latch of its own, so stamping the writer's state onto a reader line
+    // would be a borrowed fact dressed as a measurement. A reader line simply
+    // omits the field rather than guessing — an absent field is honest, a wrong
+    // one sends the next ledger row down the wrong path.
+    const cold = role === 'writer' ? !isDbWoken() : undefined;
     const result = run();
     if (result != null && typeof (result as { then?: unknown }).then === 'function') {
       const report = (outcome: 'ok' | 'error') => {
@@ -688,8 +711,17 @@ export const getDbPoolRO = (): Pool | null => {
         DEFAULT_DB_POOL_CONNECT_TIMEOUT_MS,
       ),
     });
-    // Wrap the fresh RO pool for db-wake tracing (no-op unless opted in).
+    // Wrap the fresh RO pool for db-wake tracing (no-op unless opted in), then
+    // — outermost — the same slow-dependency timing the writer gets. The RO
+    // pool carries none of the writer's other layers (no activity stamp, no
+    // single-flight, no wake retry: reads are an explicit opt-in and were never
+    // in the 0→1 wake path), but the observer needs none of them; it only needs
+    // `query`/`connect`. Instrumenting it is what makes the runbook's "no
+    // [slow-dep] line ⇒ the stall was not in the database" true for an app that
+    // actually uses the read gateway. Cost: one extra wrapper on a pool that
+    // had one, and a `role:"reader"` line WITHOUT `cold` (see `timePoolOps`).
     instrumentPool(pgPoolRO, 'reader');
+    timePoolOps(pgPoolRO, 'reader');
   }
   return pgPoolRO;
 };
