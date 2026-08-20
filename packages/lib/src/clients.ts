@@ -1,6 +1,7 @@
 import { GRPC as Cerbos } from '@cerbos/grpc';
 import * as Minio from 'minio';
 import { Pool } from 'pg';
+import { logSlowDep } from './slow-dep';
 
 // Singleton instances
 let cerbosClient: Cerbos | null = null;
@@ -449,6 +450,64 @@ const retryWake = (pool: Pool): Pool => {
   return pool;
 };
 
+// ── Slow-dependency timing (cold-start ledger row 3) ─────────────────────────
+// Row 3's ~1-in-8 first-request stall has three compatible readings and the pod
+// emits nothing that separates them. Reading (1) is "PG pool first-connect delay
+// on the fresh pod", and the measured page (`/dashboard`, `unstable_noStore()`)
+// reaches Postgres through exactly this pool — so the timing belongs HERE, at
+// the shared seam, not on a page: every writer-pool consumer is instrumented at
+// once and no app code changes.
+//
+// Applied as the OUTERMOST wrapper, deliberately: it must measure the wall time
+// the caller actually waited, single-flight gating and #310 retries included —
+// that is the number the ledger's `lazy` column is made of.
+//
+// Observation only. The observer is attached to the returned promise WITHOUT
+// replacing it, so success/error propagation, timeouts and pool behaviour are
+// bit-for-bit unchanged; the observer's own rejection handler swallows, so it
+// never manufactures an unhandled rejection for a caller who handles the error.
+const timePoolOps = (pool: Pool, role: PoolRole): Pool => {
+  const observe = <R>(op: 'pool.query' | 'pool.connect', run: () => R): R => {
+    const startedAt = Date.now();
+    // `cold` is the discriminator that matters: the FIRST acquisition on a
+    // fresh pod is the row-3 reading, a slow warm query is a different story.
+    const cold = !isDbWoken();
+    const result = run();
+    if (result != null && typeof (result as { then?: unknown }).then === 'function') {
+      const report = (outcome: 'ok' | 'error') => {
+        logSlowDep('pg', op, Date.now() - startedAt, { role, cold, outcome });
+      };
+      (result as unknown as Promise<unknown>).then(
+        () => report('ok'),
+        () => report('error'),
+      );
+    }
+    return result;
+  };
+
+  try {
+    const originalQuery = pool.query;
+    if (typeof originalQuery === 'function') {
+      pool.query = function timedQuery(this: unknown, ...args: unknown[]) {
+        return observe('pool.query', () =>
+          (originalQuery as (...a: unknown[]) => unknown).apply(this ?? pool, args),
+        );
+      } as Pool['query'];
+    }
+    const originalConnect = pool.connect;
+    if (typeof originalConnect === 'function') {
+      pool.connect = function timedConnect(this: unknown, ...args: unknown[]) {
+        return observe('pool.connect', () =>
+          (originalConnect as (...a: unknown[]) => unknown).apply(this ?? pool, args),
+        );
+      } as Pool['connect'];
+    }
+  } catch {
+    // Fail-open: an instrument must never break the DB path it observes.
+  }
+  return pool;
+};
+
 /**
  * Run the installed instrumentor over a newly-created pool. Best-effort: a
  * misbehaving instrumentor must never break pool creation (fail-open) — the
@@ -566,10 +625,15 @@ export const getDbPool = () => {
     //      and do NOT each retry-storm.
     //   4. db-wake tracing instrumentor (no-op unless an app opted in).
     // So we wrap in reverse: instrument (inner) → retry → single-flight → activity.
+    //
+    // Slow-dep timing wraps LAST (outermost of all), so the duration it reports
+    // is the wall time the caller waited — gating and retries included. It is a
+    // pure observer: see `timePoolOps`.
     instrumentPool(pgPool, 'writer');
     retryWake(pgPool);
     singleflightWake(pgPool);
     trackPoolActivity(pgPool);
+    timePoolOps(pgPool, 'writer');
   }
   return pgPool;
 };
