@@ -66,12 +66,6 @@ type Deferral = { id: string; reason: string; match: (file: string, host: string
  */
 const DEFERRALS: Deferral[] = [
   {
-    id: 'app-level-redis',
-    reason:
-      "an app's OWN Redis default is app-level config, not a platform-minted Secret. The ledger names ioredis connect ETIMEDOUT as the other half of the fresh-pod tail, so the same lever applies — but changing an app's default is a separate call with a separate blast radius (apps/file-manager/kn-next.config.ts and the docs that mirror it).",
-    match: (_f, h) => /redis/i.test(h),
-  },
-  {
     id: 'measurement-records-quote-evidence',
     reason:
       'benchmark/ledger records quote OBSERVED hostnames verbatim — error strings (EAI_AGAIN pggw-apps.scale-zero-pg.svc), resolv.conf walks, and pre-fix DSNs are evidence of what happened, not recipes; rooting a quoted observation would falsify the record.',
