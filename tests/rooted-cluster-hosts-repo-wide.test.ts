@@ -80,8 +80,8 @@ const DEFERRALS: Deferral[] = [
   {
     id: 'documentation-placeholder-hosts',
     reason:
-      "placeholder hostnames in worked examples (acme-*, shop-*, byo-*, my-*) stand for a reader's own service, not a knext-minted one; rooting them would teach the dot as part of the NAME.",
-    match: (_f, h) => /^(acme|shop|byo|my)[-.]/.test(h),
+      "placeholder hostnames in EXPLANATORY PROSE (acme-*, shop-*, byo-*, my-*) stand for a reader's own service. Copy-paste RECIPE lines are NOT covered any more: since the fm-redis rooting, recipes teach the rooted form (the README now does), so an unrooted placeholder in a config/yaml/env recipe is a defect, not a placeholder convention. Narrowed to .md/.mdx prose files only; recipe-bearing config samples and skills must root.",
+    match: (f, h) => /^(acme|shop|byo|my)[-.]/.test(h) && /\.(md|mdx)$/.test(f),
   },
   {
     id: 'drill-scripts',
@@ -119,7 +119,10 @@ const DEFERRALS: Deferral[] = [
     match: (f) =>
       /gateway\/internal\/appdb\/ports\.go$/.test(f) ||
       /packages\/scale-zero-pg\/docs\/appdatabase-api\.md$/.test(f) ||
-      /^\.claude\//.test(f),
+      // .claude agent notes may quote unrooted forms as evidence — but NOT
+      // .claude/skills/: those carry copy-paste templates users deploy from,
+      // so they must root (the knext-deploy CR template was exactly that).
+      (/^\.claude\//.test(f) && !/^\.claude\/skills\//.test(f)),
   },
   {
     id: 'test-fixtures',

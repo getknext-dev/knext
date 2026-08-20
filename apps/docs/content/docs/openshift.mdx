@@ -92,7 +92,7 @@ const config: KnativeNextConfig = {
 
   cache: {
     provider: 'redis',
-    url: process.env.REDIS_URL || 'redis://acme-redis.apps.svc.cluster.local:6379',
+    url: process.env.REDIS_URL || 'redis://acme-redis.apps.svc.cluster.local.:6379',
     keyPrefix: 'acme',
   },
 

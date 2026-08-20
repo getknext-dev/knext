@@ -1,4 +1,5 @@
 import IORedis from 'ioredis';
+import IORedis5 from 'ioredis5';
 import { parse as parsePg } from 'pg-connection-string';
 import { describe, expect, it } from 'vitest';
 
@@ -34,6 +35,20 @@ describe('rooted hostnames survive the node consumers that read minted URLs', ()
   it('ioredis preserves the trailing dot', () => {
     // lazyConnect: parse only — this test must never open a socket.
     const redis = new IORedis(`redis://${ROOTED_REDIS_HOST}:6379`, { lazyConnect: true });
+    try {
+      expect(redis.options.host).toBe(ROOTED_REDIS_HOST);
+      expect(redis.options.port).toBe(6379);
+    } finally {
+      redis.disconnect();
+    }
+  });
+
+  it('ioredis 5.x (the major the cache handler actually ships) preserves the trailing dot', () => {
+    // The runtime consumers (packages/kn-next, packages/lib, apps/file-manager)
+    // are all on ioredis ^5.9.x while the workspace root carries 6.x — pinning
+    // only 6 would prove the property for a major the cache handler never
+    // loads (review of the fm-redis rooting). ioredis5 = npm:ioredis@^5.9.3.
+    const redis = new IORedis5(`redis://${ROOTED_REDIS_HOST}:6379`, { lazyConnect: true });
     try {
       expect(redis.options.host).toBe(ROOTED_REDIS_HOST);
       expect(redis.options.port).toBe(6379);

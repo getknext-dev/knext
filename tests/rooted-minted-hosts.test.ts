@@ -46,11 +46,10 @@ const MINTING_ARTIFACTS = [
  * rather than as an exhaustive claim. Each is a real unrooted host; each is out of
  * scope for a reason, not by oversight:
  *
- * - `apps/file-manager/kn-next.config.ts` (redis default, `…default.svc.cluster.local`)
- *   — APP-level config, not a platform-minted Secret. The ledger measures ioredis
- *   `connect ETIMEDOUT` as the other half of the fresh-pod tail, so the same lever
- *   applies, but changing an app's own default is a separate call with a separate
- *   blast radius. Deferred, not dismissed.
+ * (The fm Redis default — previously listed here as "deferred, not dismissed" — was
+ * rooted in the follow-up that retired the repo-wide scan's app-level-redis deferral,
+ * after the residual hunt measured ioredis `connect ETIMEDOUT` as the remaining
+ * fresh-pod tail. The scan now enforces it like every other site.)
  * - `gateway/cmd/zone-operator/main.go` + `deploy/87-zone-operator.yaml`
  *   (`ZONE_GATEWAY_HOST`) — embedded in Postgres subscription/FDW conninfo and
  *   resolved by the COMPUTE's libpq on a long-lived replication connection, not by a
