@@ -37,7 +37,7 @@ app and its revisions landed in between; requests at 99%/85%). Unattributed; car
 
 | 2 | 2026-08-20 (`/dashboard`, n=8, per-cycle below; **instrument moved in-cluster**) | rooted-FQDN DSN minting (#796) verified pre-merge on OKE: rooted env applied to the operator, the hand-made benchmark Secret re-pointed at the rooted host (the re-mint required by #796's measurability note — the benchmark subject was in the unaffected set) | 4993.5 | 226 | 125 | **2/8** cycles 3.6 / 5.5 s (both SUCCESS bodies, no fallbacks) | the fresh-pod DNS tail collapsed: 6/8 cycles in a 90–122 ms lazy band vs row 1's ONE clean cycle; **median lazy 4719 → 103 ms**. The two residuals are unattributed (candidates: the still-unrooted app-level Redis host, residual UDP races) |
 
-| 3 | 2026-08-20 (`/dashboard`, n=8, in-cluster instrument, per-cycle below) | Redis host rooted: #800 rooted the config FALLBACK (inert when env is set); the operative change was the ksvc env patch — **evidenced, not assumed**: the measured revision `fm-node-00093` carries `REDIS_URL=redis://redis.default.svc.cluster.local.:6379` (read back from the Revision object, durable). Appendix B holds the between-rows attribution sitting | 4917.5 | 239.5 | 125.5 | **1/8** at 2.4 s | **TCP-phase Redis connect trouble in the pod, resolver excluded — mechanism NOT discriminated, and the hard log evidence binds to a SECONDARY client (Appendix C).** The captured ETIMEDOUTs are provably not the cache handler's (it always has an error listener); they show a module-scope client reconnect-looping against the Redis Service. For the measured stall itself, the strongest evidence is an absence: no `failing open` line, so the cache handler's 5 s budget never expired — the 2394 ms reads as its first (lazy) connect being retransmit-delayed and succeeding, concurrent with the secondary client's visible trouble. Candidates for the underlying TCP trouble, undiscriminated: fresh-pod SYN race (conntrack/veth), Redis-side accept/CPU pressure on a 99%/85%-allocated plane, kube-proxy programming lag. Discriminator for the next stall: conntrack/tcpdump capture (~1-in-8 cycles stalls) |
+| 3 | 2026-08-20 (`/dashboard`, n=8, in-cluster instrument, per-cycle below) | Redis host rooted: #800 rooted the config FALLBACK (inert when env is set); the operative change was the ksvc env patch — **evidenced, not assumed**: the measured revision `fm-node-00093` carries `REDIS_URL=redis://redis.default.svc.cluster.local.:6379` (read back from the Revision object, durable). Appendix B holds the between-rows attribution sitting | 4917.5 | 239.5 | 125.5 | **1/8** at 2.4 s | **TCP-phase Redis connect trouble in the pod, resolver excluded — mechanism NOT discriminated, and the hard log evidence binds to a SECONDARY client (Appendix C).** The captured ETIMEDOUTs are provably not the cache handler's (it always has an error listener); they show a module-scope client reconnect-looping against the Redis Service. For the measured stall itself, the strongest evidence is an absence (no `failing open` line ⇒ the cache handler's budget never expired) — which leaves THREE compatible readings, undiscriminated: PG-pool first-connect delay (the measured page's dominant dependency), cache lazy-connect retransmit-delay-then-success, or a slow-but-inside-budget cache ready-check. **The lever consequence is why this matters: eager cache connection at boot does nothing under the PG reading and little under the third — so iteration 4 OPENS with discrimination (per-dependency timing + conntrack capture on the next stall), and the eager-connect lever is taken only if the cache-TCP reading wins.** Candidates for the underlying TCP trouble, undiscriminated: fresh-pod SYN race (conntrack/veth), Redis-side accept/CPU pressure on a 99%/85%-allocated plane, kube-proxy programming lag. Discriminator for the next stall: conntrack/tcpdump capture (~1-in-8 cycles stalls) |
 
 ### Row 3 per-cycle data
 
@@ -71,7 +71,7 @@ distribution shift consistent with the levers. The medians tell the same story w
 narrative must not round away: **103 → 112 ms is +8.7%** — #800 moved the tail, not the median,
 which was already at the floor.
 
-**Candidate next lever (candidate, not attribution): eager cache-handler connection at boot** —
+**Candidate next lever — GATED on discrimination (see the mechanism cell): eager cache-handler connection at boot** —
 dial Redis at process start, fail-open unchanged, *readiness untouched*: fm readiness deliberately
 does not gate on dependencies (ADR-0026/#338 — gating on a scale-to-zero dependency defeats
 scale-to-zero), so the boot dial races the first visitor rather than being absorbed by readiness;
@@ -173,13 +173,25 @@ cache-events route's client: module-eval dial, no listener, 2 s connectTimeout; 
 deep-health client). Four unhandled ETIMEDOUTs at a 2 s budget with default retry ≈ 8–10 s of
 reconnect loop — a background emitter churning across the pod's life, not one stalled request.
 
-**The discriminator is what the capture does NOT contain:** no `[CacheHandler] … failing open`
-line — while every pre-#800 stall in Appendix B logged one. So in cycle 3 the cache handler did
-not fail open, which is positive evidence that the measured 2394 ms was the cache client's own
-FIRST connect (it is `lazyConnect` and `/api/health` never touches it, so its first dial IS the
-measured GET) being retransmit-delayed and **succeeding** — consistent with the 5 s budget never
-expiring. The boot-phase caveat from the previous revision of this appendix was right for the
-wrong client: the cache client has no boot phase at all; the module-scope clients genuinely do.
+Capture command, restored for reproducibility: `kubectl logs <pod> -c user-container --tail 60`,
+filtered to error/timeout/redis-class keywords, taken AFTER the measured GET.
+
+**What the absent line does and does not establish:** no `[CacheHandler] … failing open` line —
+while every pre-#800 stall in Appendix B logged one — establishes ONLY that the cache handler's
+5 s connect budget did not expire in cycle 3. Three readings are compatible with that absence,
+and the measured page's own dominant dependency (three raw `db.query` calls through the PG pool;
+`/dashboard` is `unstable_noStore()`) makes the first one at least as likely as the others:
+
+1. **PG pool first-connect delay** on the fresh pod — the class row 0 attributed multi-second
+   firsts to; nothing published for cycle 3 excludes it (Appendix B's zero-`EAI_AGAIN` excludes
+   only the resolver mode, in a different sitting).
+2. **Cache lazy first connect retransmit-delayed but succeeding** (its first dial IS the measured
+   GET — `lazyConnect`, and `/api/health` never touches it).
+3. **Cache connect handshaking fast with a slow-but-inside-budget ready-check `INFO`** —
+   post-handshake Redis-server responsiveness, not TCP.
+
+The boot-phase caveat from the previous revision was right for the wrong client: the cache client
+has no boot phase; the module-scope clients genuinely do.
 
 **Two knock-ons recorded:** (a) the mechanism cell's "TCP-phase on the Redis path" hard evidence
 binds to the *secondary* client's loop; the cache-path reading rests on the delayed-success
