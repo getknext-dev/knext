@@ -2809,15 +2809,27 @@ describe('compat-suite Bun runtime axis (test-e2e-deploy.yml, #147 item 4)', () 
     return blocks.find((b) => /oven-sh\/setup-bun/.test(b)) ?? '';
   }
 
-  it('declares a `bun-version` workflow_dispatch input (string, default latest)', () => {
+  it('declares a `bun-version` workflow_dispatch input (string, defaulting to the PIN)', () => {
     const input = bunVersionInputBlock();
     expect(
       input,
       'workflow_dispatch must declare a `bun-version` input (the canary-proof knob, #188)',
     ).not.toBe('');
+    // The default follows the steady-state lane. When steady-state was
+    // `latest`, the default was `latest`; since the #754 pin (Bun 1.4.0
+    // shipped mid-day and changed the compile-cache probe shape), steady-state
+    // is the pinned version — and workflow_dispatch MATERIALISES input
+    // defaults, so a floating default would silently hand every manual
+    // re-baseline run an unpinned bun, defeating the pin exactly where
+    // parity claims are gated. Canary/arbitrary specs remain one explicit
+    // input away.
     expect(
-      /default:\s*'?latest'?/.test(input),
-      'the bun-version input must default to latest (a plain dispatch stays the steady-state lane)',
+      /default:\s*'?latest'?|default:\s*'?canary'?/.test(input),
+      'the bun-version input default must be PINNED, never latest/canary — dispatch materialises defaults',
+    ).toBe(false);
+    expect(
+      /default:\s*'?\d+\.\d+\.\d+'?/.test(input),
+      'the bun-version input must default to an explicit x.y.z pin',
     ).toBe(true);
     // Free string, NOT a choice: the whole point is dispatching arbitrary specs
     // (canary, a pinned 1.4.0-canary.N, a future stable) without a workflow edit.
