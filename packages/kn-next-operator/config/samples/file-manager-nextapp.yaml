@@ -14,7 +14,7 @@ spec:
     bucket: "knative-next-assets-banna"
   cache:
     provider: "redis"
-    url: "redis://redis.default.svc.cluster.local:6379"
+    url: "redis://redis.default.svc.cluster.local.:6379"
     # Bytecode (V8 compile) cache — governs BOOT SPEED, independent of `provider`
     # above (which governs ISR/data caching). Opt-in; defaults to false.
     # CAUTION (#432): the backing PVC is ReadWriteOnce, so it attaches to ONE node

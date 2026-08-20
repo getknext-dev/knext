@@ -205,7 +205,7 @@ const config: KnativeNextConfig = {
   // Cache for fast tag-based invalidation
   cache: {
     provider: 'redis',
-    url: 'redis://redis.default.svc.cluster.local:6379',
+    url: 'redis://redis.default.svc.cluster.local.:6379',
     keyPrefix: 'my-app',
   },
   
@@ -598,7 +598,7 @@ const config: KnativeNextConfig = {
   },
   cache: {
     provider: 'redis',
-    url: 'redis://redis.default.svc.cluster.local:6379',
+    url: 'redis://redis.default.svc.cluster.local.:6379',
   },
   registry: 'gcr.io/my-project',
 };
@@ -677,7 +677,7 @@ const config: KnativeNextConfig = {
   },
   cache: {
     provider: 'redis',
-    url: 'redis://redis.cache.svc.cluster.local:6379',
+    url: 'redis://redis.cache.svc.cluster.local.:6379',
   },
   registry: 'registry.internal.local:5000',
   infrastructure: {

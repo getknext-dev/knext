@@ -38,7 +38,7 @@ const config: KnativeNextConfig = {
     },
     cache: {
         provider: 'redis',
-        url: 'redis://redis.default.svc.cluster.local:6379',
+        url: 'redis://redis.default.svc.cluster.local.:6379',
         keyPrefix: 'file-manager',
     },
     registry: 'us-central1-docker.pkg.dev/gsw-mcp/knative-next-repo',

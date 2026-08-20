@@ -14,7 +14,7 @@ const config: KnativeNextConfig = {
   // Cache adapter for data cache & ISR
   cache: {
     provider: 'redis',
-    url: process.env.REDIS_URL || 'redis://file-manager-redis.default.svc.cluster.local:6379',
+    url: process.env.REDIS_URL || 'redis://file-manager-redis.default.svc.cluster.local.:6379',
     keyPrefix: 'file-manager',
   },
 

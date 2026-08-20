@@ -247,3 +247,107 @@ measured consumer, separate blast radius) · `ZONE_GATEWAY_HOST` (compute-side c
    > post-merge cold-start row taken without re-minting it measures the old host and proves
    > nothing — re-mint first (`provision-app.sh rotate-cred <app>`, which now writes the rooted
    > host; the hand-made file-manager Secret must be re-applied by hand).
+
+---
+
+# ROUND 3 — code-review R2 + spec-review R2 (pushed, tip `4d8743e`)
+
+Four commits, red-then-green per guard change:
+`25e9467` red (predicate) → `69bf22e` green → `4089b60` red (repo-wide scan) → `4d8743e` green.
+Tree verified clean before starting and after every mutation.
+
+## R2-1 — the bare form, and a second defect it exposed
+
+The reviewer was right and the hole was slightly bigger than filed. Both scans gated on
+`.svc`, so `@pggw-apps:55432` (one label, furthest below ndots:5, walks all five suffixes)
+evaded them — and `_verify-scale-ceiling.sh:141` already contains that exact form.
+
+Fixed with **one uniform predicate** — `!h.endsWith('.')` — in both scans:
+- the TS extraction is now anchored on **host position** (`@`, `=`, `: "`), which is what
+  lets the predicate be uniform without an exclusion list for prose;
+- `_validate.sh` is anchored on `@pggw-apps` (bare-inclusive, no longer `pggw-apps\.`) and
+  requires a dot immediately before the `:port`.
+
+**The red commit found a second defect nobody reported:** the old predicate also
+**false-positived** on a legitimately rooted *short* name — `pggw-apps.<ns>.svc.` contains
+`.svc` and doesn't end `.cluster.local.`, so a correctly-rooted custom zone would have been
+flagged "NOT rooted", contradicting the operator's own documented custom-zone contract.
+(Spec review §H flagged the same thing independently.) Both directions are now pinned.
+
+I converted the reviewer's mutation into **permanent test cases** rather than leaving it as a
+one-off proof — a mutation demonstrates a hole once, then evaporates.
+
+## Spec §H — the structural fix, not the three lines
+
+The enumerated `MINTING_ARTIFACTS` list was the cause, exactly as diagnosed. New guard:
+**`tests/rooted-cluster-hosts-repo-wide.test.ts`** — `git ls-files` over every tracked text
+file, two patterns (connection-URL authorities + bare gateway cluster-DNS in prose, which is
+the form `demo/README.md:26` used and no URL regex could see), one uniform predicate.
+
+Deferrals are **fail-closed in both directions** (#784 pattern): an unrooted host matching no
+rule fails, **and a rule matching nothing also fails** — so a deferral cannot outlive what it
+excused. Mutation-proved both halves.
+
+**It red on 10 files, not 3** — the three §H named plus seven the enumeration could never see:
+`getting-started.md`, `scale-zero-pg/README.md`, `knext-handoff-prompt.md`,
+`apps/docs/.../scale-to-zero-database.mdx`, and `deploy/{30-knext-secret,10-gateway,81-apps-gateway}.yaml`.
+All rooted.
+
+Deferrals, each with a stated reason: app-level redis (incl. the fm default), gateway-internal
+`compute-*`, doc placeholder hosts, drill/bakeoff scripts, zone-operator conninfo, TLS SANs,
+platform-internal dial targets, rooting-explainer prose, test fixtures, ADRs/benchmarks,
+ops runbook, the guards' own fixtures.
+
+**One deferral is a real follow-up, not a dismissal:** `gen-tls.sh` SANs stop at
+`…svc`, so under `sslmode=verify-full` a rooted host would not match the certificate. That
+mismatch **predates this PR** (it already failed for the 4-dot FQDN) and belongs with the TLS
+owner — recorded in the deferral's own reason text so it cannot be lost.
+
+## Spec §I — my parser test would have failed in CI
+
+Verified the reviewer's claim directly: `ioredis` and `pg-connection-string` were plain
+directories dated **Jun 20** in the *parent* checkout, while pnpm-managed deps are symlinks
+into `.pnpm` dated Aug 19. My round-2 test passed only by resolving stale non-pnpm residue
+outside the worktree; on a clean `pnpm install --frozen-lockfile` it would have thrown a
+module-resolution error — a red that reads as infra, not as the contract it encodes.
+
+Both are now root devDependencies and resolve from this worktree's own `.pnpm` store. Note
+the declared `ioredis` is **6.0.0**, a major bump from the 5.9.2 residue the reviewer measured
+— I re-ran against the real declared version rather than assume: the root label still survives.
+
+Also caught in passing: biome's `noExportsInTest` would have failed CI on the extracted
+helpers. They are module-private now.
+
+## R2-2 / R2-3
+
+- R2-2: the last "3-entry search path" comment (`gatewayhost_test.go:16`) now says five.
+- R2-3: the reachability claim is restated **at the source** (`_validate.sh` comment), not just
+  here: that contract has **never executed in a real run**. Two independent reasons — the file
+  is unwired from root CI (#797), *and* the script exits at `:411` on a stale anchor. Fixing 88
+  unblocked it by one hop; `:411` still sits in front. **Live enforcement is the two root
+  tests.** I did not touch `:411`: #777/#791 deliberately reworked that rule
+  (`60-prometheus.yaml:151`, "DELIBERATE warm holds are NOT phantoms"), so it is a stale anchor,
+  not a lost alert, and deciding what it should now assert is an alerting-semantics call.
+
+## Mutations — 24 RED total, 0 problems
+
+Rounds 1–2 battery re-run: **16/16 still RED**. New round-3 battery: **8/8 RED**:
+bare form on the create writer alone · bare form on the rotate-cred writer alone · bare form
+through the real `_validate.sh` · doc recipe regressing to short host · doc recipe regressing to
+the bare-in-prose form · **a brand-new file introducing an unrooted mint** (the fifth artifact
+nobody has written yet) · a deferral going stale · the deferral list deleted entirely.
+
+Exit-code detection throughout, baseline green first, anchors asserted exactly N times or
+ABORT, restores verified, tree clean after. One case correctly **aborted** rather than
+silently passing (the anchor occurred 3×, not 2× — the help-text DSN also carries it); I fixed
+the count and re-ran rather than loosening the assertion.
+
+## Verification
+
+- Go: `go test ./...` green, `gofmt`/`go vet` clean. `sh -n _validate.sh` clean.
+- The three guards: 22 tests green. `biome check` clean on all three.
+- Full root suite: 286 files, **22 failing — all pre-existing/environmental, none mine**
+  (`Failed to resolve drizzle-orm/node-postgres`, `Cannot find module '@vercel/otel'`), in
+  packages I never touched. Proved my dep change is not the cause: the lockfile diff is
+  **purely additive** (+65/−28, no removals of `drizzle-orm` or `@vercel/otel`).
+- Not run: kind / OKE. Design gates: lead-owned.
