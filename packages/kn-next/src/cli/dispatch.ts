@@ -90,13 +90,51 @@ export function suggestVerb(input: string): string | undefined {
 }
 
 /**
+ * The message for a stray positional on the DEFAULT deploy path.
+ *
+ * `parseArgs` accepted positionals and ignored them, so `kn-next -n prod
+ * cleanup` deployed to prod with the verb silently swallowed — the same
+ * "opposite action" hazard as an unknown first token, reached through the
+ * flags-first door. When the swallowed word IS a verb, the fix the user needs
+ * is word order, so say that first.
+ */
+export function formatStrayPositional(token: string): string {
+    const display =
+        token === "" || /\s/.test(token) ? JSON.stringify(token) : token;
+    const lines = [`unexpected argument: ${display}`, ""];
+    if (KNOWN_VERBS.has(token)) {
+        lines.push(
+            `\`${token}\` is a command, and the command comes first:`,
+            `  kn-next ${token} [options]`,
+        );
+    } else {
+        const suggestion = suggestVerb(token);
+        if (suggestion) {
+            lines.push(
+                `Did you mean the \`${suggestion}\` command? It comes first:`,
+                `  kn-next ${suggestion} [options]`,
+            );
+        } else {
+            lines.push(
+                "kn-next deploy takes no positional arguments — the app it deploys",
+                "comes from kn-next.config.ts in the current directory.",
+            );
+        }
+    }
+    lines.push("", "Run `kn-next --help` to see the available commands.");
+    return `${lines.join("\n")}\n`;
+}
+
+/**
  * The message for an unrecognised command: what was typed, the nearest verb if
  * there is a credible one, and where the full list is. No stack, exit 1.
  */
 export function formatUnknownCommand(input: string): string {
     const suggestion = suggestVerb(input);
+    const display =
+        input === "" || /\s/.test(input) ? JSON.stringify(input) : input;
     return `${[
-        `unknown command: ${input}`,
+        `unknown command: ${display}`,
         ...(suggestion ? ["", `Did you mean: kn-next ${suggestion}?`] : []),
         "",
         "Run `kn-next --help` to see the available commands.",

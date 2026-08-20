@@ -14,12 +14,12 @@
  *      invocation and a flags-only invocation still deploy — that is the
  *      advertised front door and the ADR ratifies it.
  *
- * The verb allowlist is declared ONCE (help.ts `COMMANDS`, which also renders
+ * The verb allowlist is declared ONCE (help.ts `COMMAND_GROUPS`, which also renders
  * the help) and cross-checked here against the dispatcher's actual branches, so
  * the two cannot drift without this file going red.
  */
 
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -108,6 +108,39 @@ describe("every dispatched verb parses its own argv", () => {
         expect(src).toMatch(
             /includes\("--help"\)|help:\s*\{\s*type:\s*"boolean"/,
         );
+    });
+});
+
+describe("usage mistakes are UsageErrors, so they render as messages", () => {
+    // A usage mistake (unknown flag, stray positional, unknown subcommand) is
+    // the user mis-typing, not the tool breaking. Thrown as a plain Error it
+    // lands on `log.fatal({ err })` and prints a serialised Error with a stack
+    // and an absolute dist chunk path — which a reviewer caught on the
+    // strict-flag rejections added in the previous round.
+    //
+    // SCAN so a future verb cannot reintroduce the shape: no CLI module may
+    // throw a *plain* Error whose message opens with a usage phrase.
+    const USAGE_PHRASES =
+        /throw new Error\(\s*(?:`|")(?:unknown flag|unknown db subcommand|unexpected positional|unexpected argument|unknown subcommand)/;
+
+    const cliFiles = readdirSync(join(pkgRoot, "src", "cli")).filter((f) =>
+        f.endsWith(".ts"),
+    );
+
+    it("scans the whole cli directory", () => {
+        expect(cliFiles.length).toBeGreaterThanOrEqual(10);
+    });
+
+    it.each(cliFiles)("%s throws UsageError for usage mistakes", (file) => {
+        const src = readFileSync(join(pkgRoot, "src", "cli", file), "utf8");
+        // Ternaries inside a throw put the phrase after the opening paren, so
+        // normalise whitespace before matching.
+        const flat = src.replace(/\s+/g, " ");
+        expect(
+            USAGE_PHRASES.test(flat),
+            `${file}: usage mistakes must throw UsageError, not Error — a plain ` +
+                "Error prints a FATAL stack dump for what is only a typo",
+        ).toBe(false);
     });
 });
 

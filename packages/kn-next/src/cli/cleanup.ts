@@ -25,7 +25,12 @@ import type { KnativeNextConfig } from "../config";
 import { createLogger } from "../utils/logger";
 import { isEntrypoint, runQuiet } from "./exec";
 // Single source of truth for config loading — also runs validateConfig.
-import { handleConfigNotFound, loadConfig } from "./shared";
+import {
+    handleConfigNotFound,
+    handleUsageError,
+    loadConfig,
+    UsageError,
+} from "./shared";
 
 const log = createLogger({ module: "cleanup" });
 
@@ -104,7 +109,7 @@ export async function cleanupMain(argv: readonly string[]): Promise<number> {
     }
     const stray = argv[0];
     if (stray !== undefined) {
-        throw new Error(
+        throw new UsageError(
             stray.startsWith("-")
                 ? `unknown flag "${stray}" — kn-next cleanup takes no options (see kn-next cleanup --help)`
                 : `unexpected positional ${JSON.stringify(stray)} — the app comes from kn-next.config.ts (see kn-next cleanup --help)`,
@@ -126,6 +131,11 @@ if (isEntrypoint(import.meta.url)) {
     } catch (err) {
         // Expected state, not a crash — see the note in deploy.ts's dispatcher.
         if (handleConfigNotFound(err)) {
+            process.exit(1);
+        }
+        // Same for a usage mistake — a typo renders as a message, not a
+        // serialised Error (see the note in deploy.ts's dispatcher).
+        if (handleUsageError(err)) {
             process.exit(1);
         }
         log.fatal({ err }, "Cleanup failed");

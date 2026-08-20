@@ -27,7 +27,12 @@ import { healBunExportTargets } from "../adapters/standalone-bun-exports";
 import { uploadAssets } from "../utils/asset-upload";
 import { createLogger } from "../utils/logger";
 import { isEntrypoint, runQuiet } from "./exec";
-import { handleConfigNotFound, loadConfig } from "./shared";
+import {
+    handleConfigNotFound,
+    handleUsageError,
+    loadConfig,
+    UsageError,
+} from "./shared";
 
 const log = createLogger({ module: "build" });
 
@@ -180,7 +185,7 @@ export async function buildMain(argv: readonly string[]): Promise<number> {
     }
     for (const a of argv) {
         if (a !== "--skip-next") {
-            throw new Error(
+            throw new UsageError(
                 a.startsWith("-")
                     ? `unknown flag "${a}" (see kn-next build --help)`
                     : `unexpected positional ${JSON.stringify(a)} — build takes no arguments (see kn-next build --help)`,
@@ -204,6 +209,11 @@ if (isEntrypoint(import.meta.url)) {
     } catch (err) {
         // Expected state, not a crash — see the note in deploy.ts's dispatcher.
         if (handleConfigNotFound(err)) {
+            process.exit(1);
+        }
+        // Same for a usage mistake — a typo renders as a message, not a
+        // serialised Error (see the note in deploy.ts's dispatcher).
+        if (handleUsageError(err)) {
             process.exit(1);
         }
         log.fatal({ err }, "Build failed");

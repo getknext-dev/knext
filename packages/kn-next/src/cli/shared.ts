@@ -62,6 +62,58 @@ export class ConfigNotFoundError extends Error {
 }
 
 /**
+ * Discriminator carried by a USAGE mistake — an unknown flag, a stray
+ * positional, an unknown subcommand. Same string-`code` reasoning as
+ * {@link CONFIG_NOT_FOUND_CODE}: bundling makes `instanceof` unreliable.
+ */
+export const USAGE_ERROR_CODE = "ERR_KN_USAGE";
+
+/**
+ * The user mis-typed the command line. That is an expected state, so it must
+ * render as a message — never as `log.fatal({ err })`, which serialises the
+ * Error with its stack and an absolute dist chunk path. A reviewer caught
+ * exactly that on the strict-flag rejections: `kn-next celanup` (a typo) got a
+ * clean one-liner while `kn-next cleanup -v` (also a typo) got a stack dump.
+ *
+ * Every CLI module raises usage mistakes through this class; a scan in
+ * cli-dispatch-contract.test.ts fails the build if one goes back to `Error`.
+ */
+export class UsageError extends Error {
+    readonly code = USAGE_ERROR_CODE;
+
+    constructor(message: string) {
+        super(message);
+        this.name = "UsageError";
+    }
+}
+
+/**
+ * If `err` is a usage mistake, print its message (plus a help pointer when the
+ * message does not already carry one) and report that it was handled.
+ * Anything else is left to the caller's fatal path.
+ */
+export function handleUsageError(
+    err: unknown,
+    write: (text: string) => void = (text) => writeSync(2, text),
+): boolean {
+    if (
+        typeof err !== "object" ||
+        err === null ||
+        (err as { code?: unknown }).code !== USAGE_ERROR_CODE
+    ) {
+        return false;
+    }
+    const message = String((err as { message?: unknown }).message ?? "");
+    // Most of these messages already end in "(see kn-next <verb> --help)"; only
+    // add the generic pointer when the user was given none.
+    const pointer = message.includes("--help")
+        ? ""
+        : "\n\nRun `kn-next --help` to see the available commands.";
+    write(`${message}${pointer}\n`);
+    return true;
+}
+
+/**
  * Render the plain-English guidance for a missing config.
  *
  * This is an EXPECTED state — running the CLI in the wrong directory, or in an

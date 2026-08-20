@@ -25,17 +25,21 @@ kn-next gc             # reap old _next/static/<build-id>/ asset prefixes
 `kn-next --help` lists exactly this set, `create` first.
 
 <Callout type="info">
-**Strict flag parsing.** Every subcommand fails loudly on unknown flags, dangling values, and stray
-positionals — a typo'd `--to` or `--wacth` is a hard error, never a silent fall-through to a
-different (possibly opposite) action. `--help` works on every command and always exits without doing
-any work, including on destructive ones like `cleanup`.
+**Strict parsing, plain errors.** Every command — including the default `deploy` — fails loudly on
+unknown flags, dangling values, and stray positionals: a typo'd `--to` or `--wacth`, or a
+`kn-next --namespace prod cleanup` with the command in the wrong place, is a hard error rather than a
+silent fall-through to a different (possibly opposite) action. Those errors print as a short message
+and exit 1 — no stack traces. `--help` works on every command and always exits without doing any
+work, including on destructive ones like `cleanup`.
 </Callout>
 
 <Callout type="warn">
 **Unknown commands are errors, not deploys.** A first argument that is not one of the commands above
 fails with `unknown command: <x>`, a "did you mean" suggestion, and exit 1 — so `kn-next celanup`
-never ships a deployment. Running the bin with **no** command (`npx @getknext/core`) or with flags
-only (`kn-next --skip-build`) still runs **deploy**, which is the advertised default.
+never ships a deployment. The same applies to a command in the wrong slot: `kn-next -n prod cleanup`
+fails with `unexpected argument: cleanup` and tells you the command comes first, rather than
+deploying to `prod`. Running the bin with **no** command (`npx @getknext/core`) or with flags only
+(`kn-next --skip-build`) still runs **deploy**, which is the advertised default.
 
 `preview` and `loadtest` are **not** bin subcommands; they ship as separate runnable entries inside
 the package (see [Directly runnable entries](#directly-runnable-entries) below).

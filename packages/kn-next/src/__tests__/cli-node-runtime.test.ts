@@ -46,6 +46,10 @@ const srcDir = join(pkgRoot, "src");
 const cliSrcDir = join(srcDir, "cli");
 const distBin = join(pkgRoot, "dist", "cli", "kn-next.js");
 
+/** A stack frame ("\n    at foo (/path/file.js:1:2)") or a bundler chunk path. */
+const STACK_FRAME_RE = /\n\s+at\s/;
+const CHUNK_PATH_RE = /\b[\w./-]+\.(?:js|cjs|mjs):\d+/;
+
 /** Spawn env: neutralize inherited NODE_OPTIONS (preloads) and force no TTY color. */
 const spawnEnv = { ...process.env, NODE_OPTIONS: "", NO_COLOR: "1" };
 
@@ -373,6 +377,69 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         expect(all).toContain("--help");
         // The deploy flow's own banner must be absent — the whole point.
         expect(all).not.toContain("kn-next deploy\n");
+    });
+
+    // --- ADR-0046, second half: a verb in a LATER slot is not swallowed ---
+    //
+    // Round 1 caught the first-slot case (`kn-next celanup`). A reviewer then
+    // proved the flags-first door was still open: `kn-next -n prod cleanup`
+    // deployed to prod with `cleanup` silently swallowed by
+    // `allowPositionals: true` — the same "opposite action" hazard, one flag
+    // further in. These three invocations are the reviewer's, verbatim.
+    it.each([
+        [["deploy", "cleanup"], "cleanup"],
+        [["--namespace", "prod", "cleanup"], "cleanup"],
+        [["--", "cleanup"], "cleanup"],
+    ])("`kn-next %s` refuses rather than deploying", (argv, swallowed) => {
+        const dir = mkdtempSync(join(tmpdir(), "knext-stray-positional-"));
+        const r = run(process.execPath, [distBin, ...argv], dir);
+        expect(r.status, `${argv.join(" ")} must exit 1`).toBe(1);
+        const all = `${r.stdout}${r.stderr}`;
+        expect(all).toContain(`unexpected argument: ${swallowed}`);
+        // Verb-first ordering is the actionable half of the message.
+        expect(all).toContain(`kn-next ${swallowed}`);
+        // It must refuse BEFORE the deploy flow starts — no config was even
+        // read, so the config guidance must not appear either.
+        expect(all).not.toContain("No kn-next.config.ts found");
+        expect(all).not.toContain("kn-next deploy\n");
+        // Same presentation contract as every other expected failure.
+        expect(all).not.toContain("FATAL");
+        expect(all).not.toMatch(STACK_FRAME_RE);
+    });
+
+    it("an explicit `deploy` with no positional still runs the deploy flow", () => {
+        // The rejection must not swallow the legitimate explicit form: in an
+        // empty dir it reaches config loading and prints the guidance.
+        const dir = mkdtempSync(join(tmpdir(), "knext-explicit-deploy-"));
+        const r = run(process.execPath, [distBin, "deploy"], dir);
+        expect(r.status).toBe(1);
+        expect(`${r.stdout}${r.stderr}`).toContain(
+            "No kn-next.config.ts found",
+        );
+    });
+
+    // --- Usage errors are messages, not FATAL dumps ---
+    //
+    // The strict-flag rejections this PR added landed on `log.fatal({ err })`,
+    // which prints a serialised Error with a stack and an absolute dist chunk
+    // path — the exact presentation this PR exists to remove, and which its own
+    // sibling test forbids for the config-not-found path.
+    it.each([
+        [["cleanup", "-v"], 'unknown flag "-v"'],
+        [["cleanup", "myapp"], "unexpected positional"],
+        [["build", "--bogus"], 'unknown flag "--bogus"'],
+        [["db", "frobnicate"], "unknown db subcommand"],
+    ])("`kn-next %s` is a plain message, not a stack dump", (argv, needle) => {
+        const dir = mkdtempSync(join(tmpdir(), "knext-usage-error-"));
+        const r = run(process.execPath, [distBin, ...argv], dir);
+        expect(r.status, `${argv.join(" ")} must exit 1`).toBe(1);
+        const all = `${r.stdout}${r.stderr}`;
+        expect(all).toContain(needle);
+        expect(all).not.toContain("FATAL");
+        expect(all).not.toContain("err:");
+        expect(all).not.toContain('"stack"');
+        expect(all).not.toMatch(STACK_FRAME_RE);
+        expect(all).not.toMatch(CHUNK_PATH_RE);
     });
 
     it("a flags-only invocation still deploys (the advertised front door)", () => {

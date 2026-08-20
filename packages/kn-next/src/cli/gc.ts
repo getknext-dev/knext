@@ -35,7 +35,7 @@ import {
 import { createLogger } from "../utils/logger";
 import { runCapture } from "./exec";
 // Single source of truth for config loading — also runs validateConfig.
-import { loadConfig } from "./shared";
+import { loadConfig, UsageError } from "./shared";
 
 const log = createLogger({ module: "gc" });
 
@@ -383,7 +383,9 @@ export function parseGcArgs(argv: readonly string[]): GcArgs {
     const takeValue = (flag: string, i: number): string => {
         const v = argv[i];
         if (v === undefined || v.startsWith("-")) {
-            throw new Error(`${flag} requires a value (see kn-next gc --help)`);
+            throw new UsageError(
+                `${flag} requires a value (see kn-next gc --help)`,
+            );
         }
         return v;
     };
@@ -396,9 +398,9 @@ export function parseGcArgs(argv: readonly string[]): GcArgs {
         } else if (a === "--dry-run") {
             out.dryRun = true;
         } else if (a.startsWith("-")) {
-            throw new Error(`unknown flag "${a}" (see kn-next gc --help)`);
+            throw new UsageError(`unknown flag "${a}" (see kn-next gc --help)`);
         } else {
-            throw new Error(
+            throw new UsageError(
                 `unexpected positional ${JSON.stringify(a)} — the app comes from kn-next.config.ts (see kn-next gc --help)`,
             );
         }

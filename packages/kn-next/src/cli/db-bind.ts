@@ -36,7 +36,7 @@ import YAML from "yaml";
 import type { KnativeNextConfig } from "../config";
 import { createLogger } from "../utils/logger";
 import { runCapture } from "./exec";
-import { loadConfig } from "./shared";
+import { loadConfig, UsageError } from "./shared";
 
 const log = createLogger({ module: "db-bind" });
 
@@ -77,7 +77,7 @@ export function parseDbBindArgs(argv: readonly string[]): DbBindOptions {
     const need = (flag: string, i: number): string => {
         const v = argv[i];
         if (v === undefined || v.startsWith("-")) {
-            throw new Error(
+            throw new UsageError(
                 `${flag} requires a value (see kn-next db bind --help)`,
             );
         }
@@ -104,11 +104,13 @@ export function parseDbBindArgs(argv: readonly string[]): DbBindOptions {
         } else if (a.startsWith("-")) {
             // Unknown flags fail loudly — a typo like `--secert` must not
             // silently bind with defaults.
-            throw new Error(`unknown flag "${a}" (see kn-next db bind --help)`);
+            throw new UsageError(
+                `unknown flag "${a}" (see kn-next db bind --help)`,
+            );
         } else if (out.app === undefined) {
             out.app = a;
         } else {
-            throw new Error(
+            throw new UsageError(
                 `unexpected positional "${a}" — only one <app> positional is accepted (see kn-next db bind --help)`,
             );
         }
@@ -461,7 +463,7 @@ export async function dbMain(argv: readonly string[]): Promise<void> {
         return;
     }
     if (sub !== "bind") {
-        throw new Error(
+        throw new UsageError(
             `unknown db subcommand "${sub}" — available: bind, migrate (kn-next db --help)`,
         );
     }

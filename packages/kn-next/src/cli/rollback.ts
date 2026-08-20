@@ -24,7 +24,7 @@ import { writeSync } from "node:fs";
 import { createLogger } from "../utils/logger";
 import { runQuiet } from "./exec";
 // Single source of truth for config loading — also runs validateConfig.
-import { loadConfig } from "./shared";
+import { loadConfig, UsageError } from "./shared";
 
 const log = createLogger({ module: "rollback" });
 
@@ -101,7 +101,7 @@ export function parseRollbackArgs(argv: readonly string[]): RollbackArgs {
     const takeValue = (flag: string, i: number): string => {
         const v = argv[i];
         if (v === undefined || v.startsWith("-")) {
-            throw new Error(
+            throw new UsageError(
                 `${flag} requires a value (see kn-next rollback --help)`,
             );
         }
@@ -126,13 +126,13 @@ export function parseRollbackArgs(argv: readonly string[]): RollbackArgs {
         } else if (a === "-n" || a === "--namespace") {
             out.namespace = takeValue(a, ++i);
         } else if (a.startsWith("-")) {
-            throw new Error(
+            throw new UsageError(
                 `unknown flag "${a}" (see kn-next rollback --help)`,
             );
         } else if (out.app === undefined) {
             out.app = a;
         } else {
-            throw new Error(
+            throw new UsageError(
                 `unexpected positional ${JSON.stringify(a)} — only one <app> positional is accepted (see kn-next rollback --help)`,
             );
         }

@@ -32,7 +32,11 @@ import {
     resolveDigest,
     validateCRImageRef,
 } from "./cr-builder";
-import { formatUnknownCommand, resolveInvocation } from "./dispatch";
+import {
+    formatStrayPositional,
+    formatUnknownCommand,
+    resolveInvocation,
+} from "./dispatch";
 import { isEntrypoint, runCapture, runInherit, runQuiet } from "./exec";
 import { runAssetGC } from "./gc";
 import { CLI_HELP } from "./help";
@@ -42,7 +46,7 @@ import {
     preflightCRSchema,
     preflightImageRef,
 } from "./schema/preflight";
-import { handleConfigNotFound, loadConfig } from "./shared";
+import { handleConfigNotFound, handleUsageError, loadConfig } from "./shared";
 import { requireBuildContext } from "./tracing-root";
 
 const log = createLogger({ module: "deploy" });
@@ -85,7 +89,7 @@ function getCliVersion(): string {
 }
 
 function parseCliArgs(): DeployOptions {
-    const { values } = parseArgs({
+    const { values, positionals } = parseArgs({
         options: {
             registry: { type: "string", short: "r" },
             bucket: { type: "string", short: "b" },
@@ -116,6 +120,25 @@ function parseCliArgs(): DeployOptions {
         // --help | cat` works under plain node (issue #68).
         writeStdoutSync(CLI_HELP);
         process.exit(0);
+    }
+
+    // ADR-0046: reject a stray positional on the default deploy path.
+    //
+    // `resolveInvocation` only guards the FIRST token, so before this check
+    // `kn-next deploy cleanup`, `kn-next --namespace prod cleanup` and
+    // `kn-next -- cleanup` all ran a DEPLOY with the verb silently swallowed —
+    // "deploy to prod" when the user typed a teardown. The leading explicit
+    // `deploy` is the one positional this path legitimately sees (the bin's
+    // dispatcher resolved it and fell through to here); everything after it is
+    // a mistake. Help/version are handled above, so `kn-next --help extra`
+    // still prints help rather than this error — deliberate: help is never an
+    // error, and nothing destructive follows it.
+    const stray = (
+        positionals[0] === "deploy" ? positionals.slice(1) : positionals
+    )[0];
+    if (stray !== undefined) {
+        writeSync(2, formatStrayPositional(stray));
+        process.exit(1);
     }
 
     return {
@@ -709,6 +732,14 @@ if (isEntrypoint(import.meta.url)) {
         // mode are `doctor` (loads no config) and `status` (loads it only when
         // the file exists), so neither can reach this branch.
         if (handleConfigNotFound(err)) {
+            process.exit(1);
+        }
+        // A usage mistake (unknown flag, stray positional, unknown db
+        // subcommand) is the user mis-typing — same class as the above, same
+        // presentation. Falling through to log.fatal printed a serialised
+        // Error with a stack frame and an absolute dist chunk path for what is
+        // only a typo, which is the presentation this whole change removes.
+        if (handleUsageError(err)) {
             process.exit(1);
         }
         const label =

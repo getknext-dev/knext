@@ -12,7 +12,13 @@ const runCapture = vi.hoisted(() => vi.fn(() => ""));
 vi.mock("../cli/exec", () => ({ runCapture, isEntrypoint: () => false }));
 
 const loadConfig = vi.hoisted(() => vi.fn());
-vi.mock("../cli/shared", () => ({ loadConfig }));
+// Only loadConfig is faked. UsageError (and the handlers beside it) stay REAL,
+// so the "unknown flag" assertion below still exercises the class the CLI
+// actually throws — a stubbed one would let the presentation contract rot.
+vi.mock("../cli/shared", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("../cli/shared")>()),
+    loadConfig,
+}));
 
 const pruneOldBuilds = vi.hoisted(() =>
     vi.fn(() => ({

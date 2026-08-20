@@ -24,7 +24,7 @@ import {
 } from "../generators/loadtest-job";
 import { createLogger } from "../utils/logger";
 import { isEntrypoint } from "./exec";
-import { handleConfigNotFound, loadConfig } from "./shared";
+import { handleConfigNotFound, handleUsageError, loadConfig } from "./shared";
 
 const log = createLogger({ module: "loadtest" });
 
@@ -142,6 +142,11 @@ export async function runLoadTestCli(
         // A missing kn-next.config.ts is an expected state, not a failure to
         // dump (UX ledger 1b): print the directions instead of the exception.
         if (handleConfigNotFound(e)) {
+            return 1;
+        }
+        // Same for a usage mistake — a typo renders as a message, not a
+        // serialised Error (see the note in deploy.ts's dispatcher).
+        if (handleUsageError(e)) {
             return 1;
         }
         // Never bubble out as a silent exit — always leave a stderr breadcrumb.

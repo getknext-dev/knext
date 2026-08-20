@@ -45,13 +45,27 @@ The **allowlist is derived from the same list that renders `--help`** (`cli/help
 `COMMAND_GROUPS`), never a second enumeration; `cli/dispatch.ts` holds the pure classification and
 suggestion logic, and a test cross-checks that set against the dispatcher's actual branches.
 
-Two corollaries, both from the same review and both part of this decision:
+**The verb slot is not the only door.** A first token is not the only way to name a verb: the
+default deploy path accepted positionals and ignored them, so `kn-next -n prod cleanup` deployed to
+prod with `cleanup` swallowed — the same "opposite action" outcome, one flag further in. So the
+decision covers **any** positional the deploy path did not consume as the verb: it is an error, and
+when the swallowed word is itself a command the message leads with word order (`cleanup` is a
+command, and the command comes first) rather than a generic complaint.
+
+Three corollaries, all from reviews of this change and all part of the decision:
 
 - **Every dispatched verb parses its own argv.** A branch hands `process.argv.slice(3)` to a `*Main`
   that handles `-h/--help` and rejects unknown flags. This is not stylistic: the first
   implementation called `cleanup()` directly, so `kn-next cleanup --help` **deleted the app**.
 - **`--help` is never destructive**, for any verb, and that is asserted end-to-end per verb against
   the built bin rather than argued.
+- **A usage mistake renders as a message, never as a fatal dump.** Unknown flags, stray positionals
+  and unknown subcommands are the user mis-typing, not the tool breaking, so they are raised as a
+  `UsageError` (`cli/shared.ts`) that the entries print and exit 1 on — no serialised `Error`, no
+  stack frame, no absolute dist chunk path. Without this the CLI was internally inconsistent:
+  `kn-next celanup` got a clean one-liner while `kn-next cleanup -v` got a stack dump, for the same
+  class of mistake. A source scan fails the build if any CLI module raises a usage phrase as a plain
+  `Error`.
 
 ## Options considered
 
@@ -69,7 +83,10 @@ Two corollaries, both from the same review and both part of this decision:
   so a stale line here is a shipped defect.
 - **A positional argument to the default deploy is now an error.** `parseArgs` accepted positionals
   and ignored them; a stray word now fails loudly. That is the intended direction (the same
-  strictness the other verbs already promise), and no documented invocation passes one.
+  strictness the other verbs already promise), and no documented invocation passes one. The explicit
+  leading `deploy` is still accepted — it is the verb, not a stray. `--help`/`--version` are handled
+  before the check, so `kn-next --help extra` still prints help: help is never an error, and nothing
+  destructive follows it.
 - **Adding a verb is a two-line change in one place** — a `COMMAND_GROUPS` entry plus a dispatch
   branch — and the tests fail if either half is missing.
 - **The suggestion can be wrong.** Tolerance scales with input length (1 edit for short tokens, 2
@@ -82,6 +99,10 @@ Two corollaries, both from the same review and both part of this decision:
       derived from `COMMAND_GROUPS`.
 - [x] `build`/`cleanup` grow a `*Main` with `--help` and strict flag rejection; the bin and their
       direct entries both route through it.
+- [x] `parseCliArgs` rejects a stray positional on the default deploy path (`formatStrayPositional`).
+- [x] `UsageError` + `handleUsageError` in `cli/shared.ts`; every CLI module's usage throws converted
+      (build, cleanup, gc, db-bind, db-migrate, rollback, status).
 - [x] Guards: dispatcher-scanning contract test, per-verb `--help` exit-0 run against the built bin,
-      unknown-verb and flags-only end-to-end assertions.
+      unknown-verb, flags-only, the three stray-positional invocations, and a no-stack-dump
+      assertion per usage-error shape — all against the built bin.
 - [x] `apps/docs/content/docs/cli.mdx` updated (fall-through note, strict-flag promise).
