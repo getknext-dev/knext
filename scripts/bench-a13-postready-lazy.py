@@ -8,7 +8,7 @@
 # the fresh, ready process then pays the incremental residue; warm renders are
 # the baseline. lazy = first - min(warm1, warm2).
 # Usage: python3 bench-a13-postready-lazy.py [path]   (default /dashboard)
-import statistics, subprocess, sys, time, json, urllib.request
+import statistics, subprocess, sys, time, json, urllib.error, urllib.request
 
 KCTX = ["kubectl", "--context", "context-ckmva7v7zvq"]
 URL = "http://fm-node.default.51.170.86.139.sslip.io"
@@ -45,9 +45,21 @@ def timed_get(path):
             with urllib.request.urlopen(req, timeout=180) as r:
                 body = r.read()
                 return (time.monotonic() - t0) * 1000, r.status, r.headers.get("x-nextjs-cache", "-"), len(body)
+        except urllib.error.HTTPError:
+            raise  # a response arrived: the wake already fired — retrying would measure a warming pod
         except OSError as e:
+            # Retry ONLY the never-connected class (macOS connect ETIMEDOUT,
+            # errno 60, observed as ~75s SYN exhaustion): nothing reached the
+            # activator, so the retry is still a genuine cold wake. A read
+            # timeout / reset / refused AFTER connecting means the request
+            # arrived — those raise, because retrying under-reports wake/first
+            # against an already-warming pod.
+            reason = getattr(e, "reason", e)
+            errno_ = getattr(reason, "errno", None)
+            if errno_ != 60:
+                raise
             RETRIES["n"] += 1
-            print(json.dumps(dict(retry=path, attempt=attempt + 1, err=str(e)[:80])), flush=True)
+            print(json.dumps(dict(retry=path, attempt=attempt + 1, cls="connect-etimedout", err=str(e)[:80])), flush=True)
             last = e
     raise last
 

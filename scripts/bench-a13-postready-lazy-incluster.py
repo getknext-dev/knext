@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 # A13 (ADR-0042): node standalone entry post-readiness first-request lazy cost.
-# A13's terms: post-readiness, first request, warm image. Wake via /api/health
+# A13's terms: post-readiness, first request, warm image.
+# The timing pod (create before running; deleting it afterwards is human-gated):
+#   kubectl run bench-timer --image=python:3.12-alpine --restart=Never \
+#     --overrides='{"spec":{"containers":[{"name":"bench-timer","image":"python:3.12-alpine",
+#     "command":["sleep","86400"],"resources":{"requests":{"cpu":"50m","memory":"64Mi"},
+#     "limits":{"cpu":"200m","memory":"128Mi"}}}]}}' Wake via /api/health
 # (Knative queues it until Ready). The wake is NOT app-graph-free — the health
 # route evaluates its own slice — but it is production-faithful: the operator
 # wires the readiness probe to the same path (absent spec.healthCheckPath), so
@@ -108,8 +113,10 @@ warms = sorted(min(r["warm1_ms"], r["warm2_ms"]) for r in results)
 # even n, and it is exactly how this record's first draft got 190/29 instead
 # of 164/22. The instrument must not reproduce the defect its record corrects.
 wakes = sorted(r["wake_ms"] for r in results)
+gaps = sorted(r["exec_gap_ms"] for r in results)
 print(json.dumps(dict(
     median_wake_ms=statistics.median(wakes),
+    median_exec_gap_ms=statistics.median(gaps),
     median_lazy_ms=statistics.median(lazies),
     median_first_ms=statistics.median(firsts),
     median_warm_ms=statistics.median(warms),

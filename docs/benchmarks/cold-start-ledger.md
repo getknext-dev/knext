@@ -90,8 +90,10 @@ row-2 **4993.5** (+544 raw; by this row's own RTT accounting the adjusted shift 
 since a wake sample rides the same path as any other GET). Unattributed; carried, not hidden.
 Candidate causes: the plane gained the `bench-timer` pod and the drill services on a
 request-saturated two-node cluster; image pulls are EXCLUDED as a cause (the harness's per-cycle
-pull evidence read "already present" on all 8 cycles — the column the header promises, now
-stated). The instrument previously did not emit a wake median (the one hand-computed cell in
+pull evidence read "already present" on all 8 cycles — stated from the run output; the cluster
+events have since expired, so this is no longer independently checkable — a permanent limit of
+this row, and why future rows should publish the column verbatim). Row 2's `workstation_retries`
+was **0** (in-cluster instrument; the counter then counts exec failures). The instrument previously did not emit a wake median (the one hand-computed cell in
 every row, and twice the one with the error); both harness variants now print
 `median_wake_ms`.
 
@@ -157,7 +159,7 @@ leave the cluster for OCI's resolver on every in-cluster lookup. Note also: the 
 only the rooted form (trailing dot) or an ndots reduction skips it.
 
 Candidate levers, cheapest first:
-1. **Rooted FQDN (trailing dot) in every platform-minted hostname**
+1. **TAKEN (iteration 2, #796; row 2 carries the result for minted PG DSNs — the app-level Redis host remains).** Rooted FQDN (trailing dot) in every platform-minted hostname
    (`pggw-apps.scale-zero-pg.svc.cluster.local.`) — the appdb operator's DSNs and the docs'
    recipes; skips the search walk entirely, saving 10 queries per lookup on this plane's
    resolv.conf. Client compatibility with the trailing dot must be verified per consumer, not
