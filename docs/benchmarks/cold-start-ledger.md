@@ -37,7 +37,7 @@ app and its revisions landed in between; requests at 99%/85%). Unattributed; car
 
 | 2 | 2026-08-20 (`/dashboard`, n=8, per-cycle below; **instrument moved in-cluster**) | rooted-FQDN DSN minting (#796) verified pre-merge on OKE: rooted env applied to the operator, the hand-made benchmark Secret re-pointed at the rooted host (the re-mint required by #796's measurability note — the benchmark subject was in the unaffected set) | 4993.5 | 226 | 125 | **2/8** cycles 3.6 / 5.5 s (both SUCCESS bodies, no fallbacks) | the fresh-pod DNS tail collapsed: 6/8 cycles in a 90–122 ms lazy band vs row 1's ONE clean cycle; **median lazy 4719 → 103 ms**. The two residuals are unattributed (candidates: the still-unrooted app-level Redis host, residual UDP races) |
 
-| 3 | 2026-08-20 (`/dashboard`, n=8, in-cluster instrument, per-cycle below) | Redis host rooted: #800 rooted the config FALLBACK (inert when env is set); the operative change was the ksvc env patch — **evidenced, not assumed**: the measured revision `fm-node-00093` carries `REDIS_URL=redis://redis.default.svc.cluster.local.:6379` (read back from the Revision object, durable). Appendix B holds the between-rows attribution sitting | 4917.5 | 239.5 | 125.5 | **1/8** at 2.4 s | **TCP-phase on the Redis path, resolver excluded — mechanism NOT discriminated.** Cycle 3's pod logged 4× ioredis `connect ETIMEDOUT` (Appendix C, verbatim; ioredis's message carries no hostname, and a `--tail 60` capture can include boot-phase lines predating the measured GET). The published number and a *completed* connect timeout disagree: the committed budget is 5 s (`REDIS_CONNECT_TIMEOUT_MS` default, no override anywhere in the repo), so a 2394 ms stall is more consistent with a SYN-retransmit-**delayed connect that succeeded** (logs nothing) than with a timeout — meaning the ETIMEDOUT lines may be boot-phase. Candidates, undiscriminated: fresh-pod SYN race (conntrack/veth), Redis-side accept/CPU pressure on a 99%/85%-allocated plane, kube-proxy programming lag. Discriminator for the next stall: conntrack/tcpdump capture (~1-in-8 cycles stalls) |
+| 3 | 2026-08-20 (`/dashboard`, n=8, in-cluster instrument, per-cycle below) | Redis host rooted: #800 rooted the config FALLBACK (inert when env is set); the operative change was the ksvc env patch — **evidenced, not assumed**: the measured revision `fm-node-00093` carries `REDIS_URL=redis://redis.default.svc.cluster.local.:6379` (read back from the Revision object, durable). Appendix B holds the between-rows attribution sitting | 4917.5 | 239.5 | 125.5 | **1/8** at 2.4 s | **TCP-phase Redis connect trouble in the pod, resolver excluded — mechanism NOT discriminated, and the hard log evidence binds to a SECONDARY client (Appendix C).** The captured ETIMEDOUTs are provably not the cache handler's (it always has an error listener); they show a module-scope client reconnect-looping against the Redis Service. For the measured stall itself, the strongest evidence is an absence: no `failing open` line, so the cache handler's 5 s budget never expired — the 2394 ms reads as its first (lazy) connect being retransmit-delayed and succeeding, concurrent with the secondary client's visible trouble. Candidates for the underlying TCP trouble, undiscriminated: fresh-pod SYN race (conntrack/veth), Redis-side accept/CPU pressure on a 99%/85%-allocated plane, kube-proxy programming lag. Discriminator for the next stall: conntrack/tcpdump capture (~1-in-8 cycles stalls) |
 
 ### Row 3 per-cycle data
 
@@ -159,17 +159,34 @@ raw, **2/8 above the ~3.9 s gap**. All three stalled cycles' pods logged ioredis
 Also observed and carried: a bimodal wake (4 cycles at ~13.5–14 s vs ~4–5 s, image present every
 cycle) — unattributed.
 
-### Appendix C — row 3 cycle 3's captured lines, verbatim
+### Appendix C — row 3 cycle 3's captured lines, verbatim, with client provenance
 
 ```
 [ioredis] Unhandled error event: Error: connect ETIMEDOUT   (×4, with stack: Socket._onTimeout)
 ```
 
-Capture is `kubectl logs --tail 60` on the cycle's pod AFTER the measured GET — it can include
-boot-phase lines predating the GET, and ioredis's message does not name the host. Given the 5 s
-committed connect budget vs the 2394 ms stall, the parsimonious reading is a retransmit-delayed
-connect that SUCCEEDED during the measured GET, with the logged timeouts belonging to the pod's
-boot phase. The row's mechanism cell carries that ambiguity rather than resolving it by assertion.
+**These lines cannot have come from the cache handler** — ioredis prints
+`Unhandled error event` only when a client has NO error listener, and the cache handler attaches
+a permanent one at construction (its failures log as `[CacheHandler] Redis error` /
+`failing open`). The emitters that fit are the app's module-scope secondary clients (the
+cache-events route's client: module-eval dial, no listener, 2 s connectTimeout; similarly the
+deep-health client). Four unhandled ETIMEDOUTs at a 2 s budget with default retry ≈ 8–10 s of
+reconnect loop — a background emitter churning across the pod's life, not one stalled request.
+
+**The discriminator is what the capture does NOT contain:** no `[CacheHandler] … failing open`
+line — while every pre-#800 stall in Appendix B logged one. So in cycle 3 the cache handler did
+not fail open, which is positive evidence that the measured 2394 ms was the cache client's own
+FIRST connect (it is `lazyConnect` and `/api/health` never touches it, so its first dial IS the
+measured GET) being retransmit-delayed and **succeeding** — consistent with the 5 s budget never
+expiring. The boot-phase caveat from the previous revision of this appendix was right for the
+wrong client: the cache client has no boot phase at all; the module-scope clients genuinely do.
+
+**Two knock-ons recorded:** (a) the mechanism cell's "TCP-phase on the Redis path" hard evidence
+binds to the *secondary* client's loop; the cache-path reading rests on the delayed-success
+inference above; (b) the module-scope cache-events client — dialling at module evaluation, no
+error listener, retrying forever against an unreachable target — is itself an app defect
+(unhandled-error log noise + connection churn on every fresh pod), worth its own fix
+independent of any latency work.
 
 ## Iteration 1 — what was proven, in one place
 
