@@ -91,7 +91,11 @@ describe('#802 — deep-health Redis client is lazy, listened-to and bounded', (
     const { checkDeepHealth } = await import('../health');
     await checkDeepHealth();
 
-    const err = Object.assign(new Error('connect ETIMEDOUT'), { code: 'ETIMEDOUT' });
+    // The DSN arrives the way it actually can — inside the error MESSAGE.
+    const err = Object.assign(
+      new Error('connect ETIMEDOUT redis://:hunter2@redis.default.svc.cluster.local.:6379'),
+      { code: 'ETIMEDOUT' },
+    );
     for (let i = 0; i < 4; i++) instances[0].emit('error', err);
 
     const lines = [...error.mock.calls, ...warn.mock.calls].map((c: unknown[]) =>

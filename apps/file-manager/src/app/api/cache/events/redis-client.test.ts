@@ -168,7 +168,13 @@ describe('#802 — cache-events route Redis client', () => {
     vi.resetModules();
     instances.length = 0;
     await import('./route');
-    instances[0].emit('error', new Error('connect ETIMEDOUT'));
+    // The DSN must arrive the way it actually can — inside the error MESSAGE.
+    // An error that never carried one cannot prove the line is stripped, which
+    // is exactly how the first version of this test passed vacuously.
+    instances[0].emit(
+      'error',
+      new Error('connect ETIMEDOUT redis://:hunter2@redis.default.svc.cluster.local.:6379'),
+    );
 
     const logged = (console.error as unknown as ReturnType<typeof vi.fn>).mock.calls
       .map((c: unknown[]) => c.map((a) => String(a)).join(' '))
