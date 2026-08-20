@@ -1,6 +1,10 @@
 import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+
+// Absolute, not CWD-relative — the repo convention (vitest.config.ts explains
+// why: a run from a sub-directory must not resolve a non-existent path).
+const REPO_ROOT = resolve(import.meta.dirname, '..');
 
 /**
  * Every setup-bun step in every workflow must PIN bun (#754).
@@ -17,12 +21,14 @@ import { describe, expect, it } from 'vitest';
  * default must itself be a pin (workflow_dispatch materialises defaults;
  * asserted in compat-suite-workflow.test.ts), the `||` alone is not enough.
  */
-const WF_DIR = '.github/workflows';
+const WF_DIR = join(REPO_ROOT, '.github/workflows');
 const PIN_RE = /^\d+\.\d+\.\d+$/;
 const FALLBACK_RE = /\$\{\{\s*github\.event\.inputs\.bun-version\s*\|\|\s*'(\d+\.\d+\.\d+)'\s*\}\}/;
 
-function setupBunSteps(): Array<{ file: string; line: number; version: string | null }> {
-  const out: Array<{ file: string; line: number; version: string | null }> = [];
+type Step = { file: string; line: number; version: string | null; inputDefault: string | null };
+
+function setupBunSteps(): Step[] {
+  const out: Step[] = [];
   for (const f of readdirSync(WF_DIR)) {
     if (!/\.ya?ml$/.test(f)) continue;
     const lines = readFileSync(join(WF_DIR, f), 'utf8').split('\n');
@@ -41,25 +47,50 @@ function setupBunSteps(): Array<{ file: string; line: number; version: string | 
           break;
         }
       }
-      out.push({ file: f, line: i + 1, version });
+      out.push({ file: f, line: i + 1, version, inputDefault: inputDefaultOf(lines) });
     });
   }
   return out;
 }
 
+// For the `${{ inputs.bun-version || 'pin' }}` form the || fallback is DEAD on
+// workflow_dispatch (GitHub materialises input defaults), so the guard must
+// resolve the input's OWN default in the SAME file — self-contained, no
+// cross-file promise to another test (review round 2, item 1: the other
+// fallback site's default was asserted nowhere).
+function inputDefaultOf(lines: string[]): string | null {
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^\s*bun-version:\s*$/.test(lines[i])) continue;
+    for (let j = i + 1; j < Math.min(i + 8, lines.length); j++) {
+      if (/^\s{0,6}\w[\w-]*:\s*$/.test(lines[j])) break; // next input
+      const m = lines[j].match(/default:\s*(.+?)\s*(#.*)?$/);
+      if (m) return m[1].replace(/^['"]|['"]$/g, '');
+    }
+  }
+  return null;
+}
+
 describe('bun-version pins (#754) — scanned across every workflow', () => {
   const steps = setupBunSteps();
 
-  it('finds setup-bun steps at all (the scan is not vacuous)', () => {
-    expect(steps.length).toBeGreaterThanOrEqual(5);
+  it('finds exactly the known steps per file — a DISAPPEARING step is as loud as an unpinned one', () => {
+    const byFile: Record<string, number> = {};
+    for (const s of steps) byFile[s.file] = (byFile[s.file] ?? 0) + 1;
+    expect(byFile).toEqual({
+      'ci.yml': 5,
+      'test-e2e-deploy.yml': 1,
+      'bun-sandbox-fetch-ab.yml': 1,
+    });
   });
 
   it('every setup-bun step pins bun — no latest/canary, no omitted key', () => {
     const bad = steps.filter((s) => {
       if (s.version === null) return true; // omitted = latest
       if (PIN_RE.test(s.version)) return false;
-      const fb = s.version.match(FALLBACK_RE);
-      return !fb;
+      if (!FALLBACK_RE.test(s.version)) return true;
+      // fallback form: the input's default in the SAME file must be a pin —
+      // dispatch materialises defaults, so the || fallback alone proves nothing
+      return !(s.inputDefault !== null && PIN_RE.test(s.inputDefault));
     });
     expect(
       bad.map((s) => `${s.file}:${s.line} -> ${s.version ?? '(bun-version omitted = latest)'}`),
