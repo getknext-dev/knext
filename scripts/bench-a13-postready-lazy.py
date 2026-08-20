@@ -72,7 +72,9 @@ warms = sorted(min(r["warm1_ms"], r["warm2_ms"]) for r in results)
 # statistics.median, NOT lazies[n//2]: the index form is the upper median on
 # even n, and it is exactly how this record's first draft got 190/29 instead
 # of 164/22. The instrument must not reproduce the defect its record corrects.
+wakes = sorted(r["wake_ms"] for r in results)
 print(json.dumps(dict(
+    median_wake_ms=statistics.median(wakes),
     median_lazy_ms=statistics.median(lazies),
     median_first_ms=statistics.median(firsts),
     median_warm_ms=statistics.median(warms),

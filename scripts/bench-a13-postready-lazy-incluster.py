@@ -64,7 +64,14 @@ for i in range(1, N + 1):
     time.sleep(10)  # settle after the last pod is gone
 
     wake_ms, ws, _, _ = timed_get("/api/health")
+    # The exec gap: wall-clock between the wake response and the first measured
+    # GET being issued. Under kubectl-exec this is ~0.5-2s of apiserver/exec
+    # setup in which post-readiness lazy work can complete unmeasured — a
+    # confound in the direction of smaller lazy values. Printed so every row
+    # can bound it instead of asserting it away (review of ledger row 2).
+    gap_t0 = time.monotonic()
     f_ms, fs, fc, fb = timed_get(MEASURED_PATH)
+    exec_gap_ms = round((time.monotonic() - gap_t0) - (f_ms / 1000.0), 3) * 1000
     w1_ms, s1, c1, _ = timed_get(MEASURED_PATH)
     w2_ms, s2, c2, _ = timed_get(MEASURED_PATH)
 
@@ -84,6 +91,7 @@ for i in range(1, N + 1):
     row = dict(
         cycle=i, wake_ms=round(wake_ms), first_ms=round(f_ms),
         warm1_ms=round(w1_ms), warm2_ms=round(w2_ms), lazy_ms=round(f_ms - warm),
+        exec_gap_ms=round(exec_gap_ms),
         wake_status=ws, first_status=fs, first_cache=fc, first_bytes=fb, pull=pull,
     )
     results.append(row)
@@ -95,7 +103,9 @@ warms = sorted(min(r["warm1_ms"], r["warm2_ms"]) for r in results)
 # statistics.median, NOT lazies[n//2]: the index form is the upper median on
 # even n, and it is exactly how this record's first draft got 190/29 instead
 # of 164/22. The instrument must not reproduce the defect its record corrects.
+wakes = sorted(r["wake_ms"] for r in results)
 print(json.dumps(dict(
+    median_wake_ms=statistics.median(wakes),
     median_lazy_ms=statistics.median(lazies),
     median_first_ms=statistics.median(firsts),
     median_warm_ms=statistics.median(warms),
