@@ -40,6 +40,15 @@ func env(key, def string) string {
 	return def
 }
 
+// gatewayHostFromEnv resolves the apps-gateway host baked into every minted DSN.
+// Unset -> the ROOTED appdb.DefaultGatewayHost (trailing dot: the only form that
+// skips the ndots:5 search-path walk on a fresh pod's first resolutions — a merely
+// qualified 4-dot name still walks it); set -> passed through VERBATIM, so a cluster
+// with a custom DNS zone or gateway Service keeps full control (never auto-rooted).
+func gatewayHostFromEnv() string {
+	return env("APPDB_GATEWAY_HOST", appdb.DefaultGatewayHost)
+}
+
 func envInt(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -66,7 +75,7 @@ func main() {
 	template := env("APPDB_TEMPLATE_TL", "a0000000000000000000000000000010")
 	pgVersion := envInt("APPDB_PG_VERSION", 17)
 	rolePrefix := env("APPDB_ROLE_PREFIX", "app_")
-	gatewayHost := env("APPDB_GATEWAY_HOST", "pggw-apps.scale-zero-pg.svc")
+	gatewayHost := gatewayHostFromEnv()
 	gatewayPort := envInt("APPDB_GATEWAY_PORT", 55432)
 	gatewayROPort := envInt("APPDB_GATEWAY_RO_PORT", 55434) // DATABASE_URL_RO port (docs/connecting.md)
 	pageserverURL := env("APPDB_PAGESERVER_URL", "http://pageserver:9898")

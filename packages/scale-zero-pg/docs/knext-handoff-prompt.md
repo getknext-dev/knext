@@ -31,7 +31,7 @@ spec:
 
 DSN (copy the Secret from `scale-zero-pg` ns or mint per-app):
 ```
-postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc:55432/postgres?sslmode=disable
+postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc.cluster.local.:55432/postgres?sslmode=disable
 ```
 (`sslmode=require` also works — TLS 1.3 at the gateway; dev creds, rotation documented.)
 

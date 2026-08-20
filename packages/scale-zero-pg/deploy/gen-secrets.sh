@@ -171,7 +171,8 @@ fi
 # self-heals a hand-edited/stale copy. In real use, COPY this Secret into the app's
 # namespace (NextApp.spec.secrets.envMap.DATABASE_URL); see deploy/30-knext-secret.yaml.
 DBNAME=myapp-database
-DBHOST=pggw.scale-zero-pg.svc.cluster.local
+# ROOTED (trailing dot): skips the ndots:5 five-entry search walk on fresh pods.
+DBHOST=pggw.scale-zero-pg.svc.cluster.local.
 DB_URL="postgres://cloud_admin:${BA_PASS}@${DBHOST}:55432/postgres?sslmode=disable"
 DB_RO_URL="postgres://cloud_admin:${BA_PASS}@${DBHOST}:55434/postgres?sslmode=disable"
 $K create secret generic "$DBNAME" \

@@ -71,6 +71,13 @@ func main() {
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds|log.LUTC)
 
 	namespace := env("ZONE_NAMESPACE", "scale-zero-pg")
+	// NOT rooted, deliberately — do NOT "fix the inconsistency" with the appdb
+	// operator's rooted APPDB_GATEWAY_HOST. This host is embedded in Postgres
+	// subscription/FDW conninfo (see conninfo() below) and is resolved by the
+	// COMPUTE's libpq on a long-lived replication connection, not by a fresh app pod
+	// on its first flows — a different consumer and a different lever. The rooting
+	// change (knext cold-start ledger, lever 1) targets app-consumed Secrets; applying
+	// it here is a separate, unmeasured change. Deferred on purpose, not overlooked.
 	gatewayHost := env("ZONE_GATEWAY_HOST", "pggw-apps.scale-zero-pg.svc")
 	gatewayPort := envInt("ZONE_GATEWAY_PORT", 55432)
 	replRolePrefix := env("ZONE_REPL_ROLE_PREFIX", "repl_") // lock-step with apps-gateway GW_REPL_ROLE_PREFIX (#140)

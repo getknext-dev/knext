@@ -177,7 +177,7 @@ metadata:
   namespace: scale-zero-pg
   labels: { app: pggw-apps, tier: apps }
 spec:
-  # knext apps connect DATABASE_URL -> pggw-apps.scale-zero-pg.svc:55432 with the
+  # knext apps connect DATABASE_URL -> pggw-apps.scale-zero-pg.svc.cluster.local.:55432 with the
   # per-app database name; the gateway routes by {system}=database.
   selector: { app: pggw-apps }
   ports:

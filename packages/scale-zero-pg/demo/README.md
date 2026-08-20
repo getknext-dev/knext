@@ -23,7 +23,7 @@ pointing at the gateway Service — the entire knext integration contract
 | `app/` | A minimal Next.js app (`output: 'standalone'`). One page: `INSERT` a visit + `SELECT now(), count(*)`. Health at `/api/health` (never touches the DB). |
 | `app/lib/db.js` | pg pool mirroring `@getknext/lib` `getDbPool` — max 5, **idle 10s < gateway's 60s** idle window. |
 | `manifests/00-namespace.yaml` | `knext-demo` namespace (the app's own ns; separate from the DB platform). |
-| `manifests/10-database-secret.yaml` | The `DATABASE_URL` Secret → `pggw.scale-zero-pg.svc:55432`. |
+| `manifests/10-database-secret.yaml` | The `DATABASE_URL` Secret → `pggw.scale-zero-pg.svc.cluster.local.:55432`. |
 | `manifests/20-nextapp.yaml` | The `NextApp` CR. `minScale: 0` (app scales to zero). Injects `DATABASE_URL` via `spec.secrets.envMap`. |
 | `operator/kn-next-operator-install.yaml` | Vendored kn-next operator install bundle (provenance header inside). |
 | `manifests/30-demo-canary.yaml` | Optional synthetic canary (issue #39): a `CronJob` in the `scale-zero-pg` ns that probes the app cold every 15 min; a failed run trips `DemoCanaryFailed`. See operations.md → [demo-canary](../docs/operations.md#demo-canary). |
@@ -93,7 +93,7 @@ ITERS=3 bash demo/_verify.sh
 demo/migrate-to-perapp.sh restore
 ```
 
-After migration the DSN is `postgres://app_pgdemo:<pw>@pggw-apps.scale-zero-pg.svc:55432/pgdemo`
+After migration the DSN is `postgres://app_pgdemo:<pw>@pggw-apps.scale-zero-pg.svc.cluster.local.:55432/pgdemo`
 — note the **apps-gateway** host, the **per-app role** (`app_pgdemo`, not
 `cloud_admin`), and the **database = app name** (`pgdemo`, which routes to
 `compute-pgdemo`). The per-app password is minted at provision time, so it is

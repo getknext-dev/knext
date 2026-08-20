@@ -147,6 +147,46 @@ type WarmHolds interface {
 	ReleaseHold(app string)
 }
 
+// DefaultGatewayHost is the apps-gateway name baked into every platform-minted
+// DSN (DATABASE_URL / DATABASE_URL_RO) when APPDB_GATEWAY_HOST is unset.
+//
+// It is ROOTED — note the TRAILING DOT — and that dot is the whole point, not a
+// typo. Do the ndots arithmetic before "cleaning it up":
+//
+//	MEASURED on the live plane, not from the textbook default (a running pod's
+//	/etc/resolv.conf, knext cold-start ledger): `options ndots:5` with a FIVE-entry
+//	search path — the standard three (<ns>.svc.cluster.local, svc.cluster.local,
+//	cluster.local) PLUS two OCI VCN domains (knext.oraclevcn.com,
+//	nodes.knext.oraclevcn.com).
+//	The resolver tries the search path FIRST for any name with FEWER than 5 dots.
+//	  - "pggw-apps.scale-zero-pg.svc"                (2 dots) -> all 5 search
+//	    suffixes attempted before the name as given: 5 wasted name attempts =
+//	    10 wasted queries with A+AAAA, and the two VCN misses LEAVE THE CLUSTER
+//	    for OCI's resolver on every in-cluster lookup.
+//	  - "pggw-apps.scale-zero-pg.svc.cluster.local"  (4 dots) -> STILL below ndots:5,
+//	    so it STILL walks all 5 search entries; the only thing the longer name buys
+//	    is longer wasted queries. Qualifying without rooting is not a fix.
+//	  - "pggw-apps.scale-zero-pg.svc.cluster.local." (rooted)  -> absolute: the search
+//	    path is SKIPPED entirely, one query pair.
+//
+// Those wasted round-trips land on exactly the first UDP flows a freshly-scheduled
+// pod makes, which is where the EAI_AGAIN conntrack race bites
+// (docs/benchmarks/cold-start-ledger.md, lever 1).
+//
+// Consumer compat for the trailing dot is VERIFIED, not assumed. Go side: lib/pq
+// carries the rooted host through DSN parsing byte-for-byte
+// (TestLibPQPreservesRootedHost). Node side: the app reads DATABASE_URL verbatim into
+// node-postgres/ioredis, and the real parsers are executed against the rooted host in
+// the root test infra (tests/rooted-host-parsers.test.ts) — both preserve the root
+// label, which glibc/musl then treat as absolute. The end-to-end RESOLVER saving
+// remains to be proven by the lead's OKE verification (which must RE-MINT the
+// benchmark app's Secret — see the ledger — since existing Secrets are mint-once).
+//
+// "cluster.local" is the Kubernetes default DNS zone; a cluster configured with a
+// custom zone overrides this via the existing APPDB_GATEWAY_HOST env var, which is
+// passed through verbatim (never rewritten, auto-qualified or auto-rooted).
+const DefaultGatewayHost = "pggw-apps.scale-zero-pg.svc.cluster.local."
+
 // Clock and id/secret generators are injected so tests are deterministic.
 type Deps struct {
 	Pageserver    PageserverOps
@@ -157,7 +197,7 @@ type Deps struct {
 	Template      string    // shared template timeline id (TEMPLATE_TL)
 	PGVersion     int
 	RolePrefix    string // app role prefix, e.g. "app_"
-	GatewayHost   string // apps-gateway service DNS for the DSN, e.g. pggw-apps.scale-zero-pg.svc
+	GatewayHost   string // apps-gateway service DNS for the DSN; see DefaultGatewayHost (fully qualified)
 	GatewayPort   int    // apps-gateway writer port (55432)
 	GatewayROPort int    // apps-gateway read-only pool port (55434) for DATABASE_URL_RO
 	Namespace     string

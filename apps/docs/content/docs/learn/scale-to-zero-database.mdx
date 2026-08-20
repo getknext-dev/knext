@@ -36,7 +36,7 @@ directly:
 
 ```bash title="shell"
 kubectl create secret generic acme-db \
-  --from-literal=DATABASE_URL='postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc:55432/postgres?sslmode=disable'
+  --from-literal=DATABASE_URL='postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc.cluster.local.:55432/postgres?sslmode=disable'
 ```
 
 **Your `kn-next.config.ts` does not change at all.** It still just names the Secret.

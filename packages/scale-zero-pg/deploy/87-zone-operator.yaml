@@ -115,6 +115,11 @@ spec:
             capabilities: { drop: ["ALL"] }
           env:
             - { name: ZONE_NAMESPACE, value: "scale-zero-pg" }
+            # Deliberately NOT rooted, unlike APPDB_GATEWAY_HOST in 83-appdb-operator.yaml:
+            # this value is embedded in Postgres subscription/FDW conninfo and resolved by
+            # the COMPUTE's libpq on a long-lived replication connection, not by a fresh app
+            # pod's first flows. Different consumer, different lever (knext cold-start
+            # ledger lever 1 covers app-consumed Secrets). Deferred on purpose.
             - { name: ZONE_GATEWAY_HOST, value: "pggw-apps.scale-zero-pg.svc" }
             - { name: ZONE_GATEWAY_PORT, value: "55432" }
             # lock-step with the apps-gateway GW_REPL_ROLE_PREFIX (#140).
