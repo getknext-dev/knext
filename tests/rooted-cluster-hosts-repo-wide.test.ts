@@ -78,12 +78,6 @@ const DEFERRALS: Deferral[] = [
     match: (_f, h) => /^compute[-.]/.test(h),
   },
   {
-    id: 'documentation-placeholder-hosts',
-    reason:
-      "placeholder hostnames in EXPLANATORY PROSE (acme-*, shop-*, byo-*, my-*) stand for a reader's own service. Copy-paste RECIPE lines are NOT covered any more: since the fm-redis rooting, recipes teach the rooted form (the README now does), so an unrooted placeholder in a config/yaml/env recipe is a defect, not a placeholder convention. Narrowed to .md/.mdx prose files only; recipe-bearing config samples and skills must root.",
-    match: (f, h) => /^(acme|shop|byo|my)[-.]/.test(h) && /\.(md|mdx)$/.test(f),
-  },
-  {
     id: 'drill-scripts',
     reason:
       'drill and bakeoff scripts dial the gateway from a throwaway psql pod to verify wake behaviour. They are not minting paths, and their DSNs never reach an app Secret.',
