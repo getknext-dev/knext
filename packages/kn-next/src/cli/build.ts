@@ -20,7 +20,7 @@
  * reconciles everything from the NextApp CR emitted by `deploy`.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { precompileBunBytecode } from "../adapters/standalone-bun-bytecode";
 import { healBunExportTargets } from "../adapters/standalone-bun-exports";
@@ -148,17 +148,59 @@ export async function build(options: BuildOptions = {}) {
     );
 }
 
+const BUILD_HELP = `kn-next build — run the build + asset-upload steps, without deploying
+
+Usage:
+  kn-next build [--skip-next]
+
+Runs the project's build script (\`next build\`, output:'standalone'), heals the
+standalone output, and uploads static assets to the configured bucket. It makes
+NO cluster writes — \`kn-next deploy\` is what hands the app to the operator.
+
+Options:
+  --skip-next           Reuse an existing .next/ build instead of running it again
+  -h, --help            Show this help
+`;
+
+/**
+ * argv entry for `kn-next build`.
+ *
+ * Parses its OWN argv — that is the whole point. The first version of the
+ * dispatch branch called `build()` directly, so `--help` (and every other flag)
+ * was ignored and a user asking for help got a full build + asset upload.
+ * Unknown flags are a hard error, matching the promise the docs make for every
+ * subcommand and the behaviour of `gc` / `db bind` / `rollback`.
+ */
+export async function buildMain(argv: readonly string[]): Promise<number> {
+    if (argv.includes("-h") || argv.includes("--help")) {
+        // fs.writeSync(1, …) — guaranteed flushed before exit, unlike the async
+        // pino transport (same contract as the other subcommand helps, #68).
+        writeSync(1, BUILD_HELP);
+        return 0;
+    }
+    for (const a of argv) {
+        if (a !== "--skip-next") {
+            throw new Error(
+                a.startsWith("-")
+                    ? `unknown flag "${a}" (see kn-next build --help)`
+                    : `unexpected positional ${JSON.stringify(a)} — build takes no arguments (see kn-next build --help)`,
+            );
+        }
+    }
+    await build({ skipNextBuild: argv.includes("--skip-next") });
+    return 0;
+}
+
 // Run only when invoked directly as the entry (not when imported, e.g. in tests).
 // SANCTIONED self-entry (#263): this is a DOCUMENTED directly-runnable entry
 // (docs-site cli.mdx "Directly runnable entries") with its own tsup entry, so
 // it is never inlined into the bin. See the hazard note atop deploy.ts's
 // dispatcher before adding self-entry blocks anywhere else.
 // Node-correct replacement for Bun's `import.meta.main`.
+// Routed through buildMain so the direct entry honours --help too.
 if (isEntrypoint(import.meta.url)) {
     try {
-        await build({
-            skipNextBuild: process.argv.includes("--skip-next"),
-        });
+        process.exit(await buildMain(process.argv.slice(2)));
     } catch (err) {
         // Expected state, not a crash — see the note in deploy.ts's dispatcher.
         if (handleConfigNotFound(err)) {

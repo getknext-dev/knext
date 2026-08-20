@@ -25,16 +25,20 @@ kn-next gc             # reap old _next/static/<build-id>/ asset prefixes
 `kn-next --help` lists exactly this set, `create` first.
 
 <Callout type="info">
-**Strict flag parsing.** The subcommands fail loudly on unknown flags, dangling values, and stray
+**Strict flag parsing.** Every subcommand fails loudly on unknown flags, dangling values, and stray
 positionals — a typo'd `--to` or `--wacth` is a hard error, never a silent fall-through to a
-different (possibly opposite) action.
+different (possibly opposite) action. `--help` works on every command and always exits without doing
+any work, including on destructive ones like `cleanup`.
 </Callout>
 
 <Callout type="warn">
-Only the subcommand words above are dispatched — any other first argument runs the default
-**deploy** flow. `preview` and `loadtest` are **not** bin subcommands; they ship as separate
-runnable entries inside the package (see
-[Directly runnable entries](#directly-runnable-entries) below).
+**Unknown commands are errors, not deploys.** A first argument that is not one of the commands above
+fails with `unknown command: <x>`, a "did you mean" suggestion, and exit 1 — so `kn-next celanup`
+never ships a deployment. Running the bin with **no** command (`npx @getknext/core`) or with flags
+only (`kn-next --skip-build`) still runs **deploy**, which is the advertised default.
+
+`preview` and `loadtest` are **not** bin subcommands; they ship as separate runnable entries inside
+the package (see [Directly runnable entries](#directly-runnable-entries) below).
 </Callout>
 
 ## `kn-next deploy` (default)
@@ -63,6 +67,27 @@ command.
 the CLI prints a short note explaining what the file is, points you at `kn-next create` for a new
 app, and exits with status 1 — no stack trace.
 </Callout>
+
+## `kn-next build`
+
+The build half of `deploy`, on its own: runs the project's build script (`next build`,
+`output: 'standalone'`), heals the standalone output, and uploads static assets to the configured
+bucket. It makes **no** cluster writes.
+
+| Flag | Notes |
+|---|---|
+| `--skip-next` | Reuse an existing `.next/` build instead of running it again. |
+| `-h`, `--help` | Show the usage help. |
+
+## `kn-next cleanup`
+
+Tears down the app named in `kn-next.config.ts` by issuing exactly **one** cluster write:
+`kubectl delete nextapp <name> --ignore-not-found`. Owned resources (Knative Service,
+ServiceAccount, PVC) go with it via owner-reference garbage collection, and the operator's finalizer
+clears that app's object-store prefix and Redis keyspace — scoped strictly to that app.
+
+It takes **no options** beyond `-h`/`--help`; a stray flag is an error rather than an ignored
+argument, because the command is destructive.
 
 ## `kn-next doctor`
 

@@ -32,6 +32,7 @@ import {
     resolveDigest,
     validateCRImageRef,
 } from "./cr-builder";
+import { formatUnknownCommand, resolveInvocation } from "./dispatch";
 import { isEntrypoint, runCapture, runInherit, runQuiet } from "./exec";
 import { runAssetGC } from "./gc";
 import { CLI_HELP } from "./help";
@@ -659,7 +660,17 @@ export async function deploy() {
 // docs site tell users to run them, and until now `kn-next cleanup` fell
 // through to the DEPLOY path — a teardown command that deploys (UX ledger 1d).
 if (isEntrypoint(import.meta.url)) {
-    const sub = process.argv[2];
+    // ADR-0046: a bare `kn-next` and a flags-only `kn-next --skip-build` still
+    // deploy (the advertised front door), but an unrecognised FIRST TOKEN is an
+    // error rather than a silent deploy — `kn-next celanup` must not ship a
+    // deployment. The allowlist comes from the same COMMAND_GROUPS list that
+    // renders --help, so there is exactly one verb set.
+    const invocation = resolveInvocation(process.argv[2]);
+    if (invocation.kind === "unknown") {
+        writeSync(2, formatUnknownCommand(invocation.input));
+        process.exit(1);
+    }
+    const sub = invocation.kind === "verb" ? invocation.verb : undefined;
     try {
         if (sub === "create") {
             const { createMain } = await import("./create");
@@ -680,15 +691,11 @@ if (isEntrypoint(import.meta.url)) {
             const { gcMain } = await import("./gc");
             process.exit(await gcMain(process.argv.slice(3)));
         } else if (sub === "build") {
-            const { build } = await import("./build");
-            await build({
-                skipNextBuild: process.argv.includes("--skip-next"),
-            });
-            process.exit(0);
+            const { buildMain } = await import("./build");
+            process.exit(await buildMain(process.argv.slice(3)));
         } else if (sub === "cleanup") {
-            const { cleanup } = await import("./cleanup");
-            await cleanup();
-            process.exit(0);
+            const { cleanupMain } = await import("./cleanup");
+            process.exit(await cleanupMain(process.argv.slice(3)));
         } else {
             await deploy();
         }

@@ -20,6 +20,7 @@
  *   reintroduce the "second cluster writer" violation #33 fixed for deploy.
  */
 
+import { writeSync } from "node:fs";
 import type { KnativeNextConfig } from "../config";
 import { createLogger } from "../utils/logger";
 import { isEntrypoint, runQuiet } from "./exec";
@@ -70,14 +71,58 @@ export async function cleanup() {
     log.info("✨ Cleanup complete!");
 }
 
+const CLEANUP_HELP = `kn-next cleanup — remove the app in this directory from the cluster
+
+Usage:
+  kn-next cleanup
+
+Issues exactly ONE cluster write: \`kubectl delete nextapp <name>\` for the app
+named in kn-next.config.ts. Owned resources (Knative Service, ServiceAccount,
+PVC) go with it via owner-reference garbage collection, and the operator's
+finalizer clears this app's object-store prefix and Redis keyspace.
+
+This is DESTRUCTIVE and takes no options — a stray flag is an error, never an
+ignored argument.
+
+Options:
+  -h, --help            Show this help
+`;
+
+/**
+ * argv entry for `kn-next cleanup`.
+ *
+ * Exists because the first version of the dispatch branch called `cleanup()`
+ * with no argument parsing at all: `kn-next cleanup --help` DELETED the app
+ * instead of printing help (reproduced by a reviewer against a live CR). Any
+ * argument other than the help flags is now a hard error — for a destructive
+ * verb, "ignored the flag and did it anyway" is the worst possible reading.
+ */
+export async function cleanupMain(argv: readonly string[]): Promise<number> {
+    if (argv.includes("-h") || argv.includes("--help")) {
+        writeSync(1, CLEANUP_HELP);
+        return 0;
+    }
+    const stray = argv[0];
+    if (stray !== undefined) {
+        throw new Error(
+            stray.startsWith("-")
+                ? `unknown flag "${stray}" — kn-next cleanup takes no options (see kn-next cleanup --help)`
+                : `unexpected positional ${JSON.stringify(stray)} — the app comes from kn-next.config.ts (see kn-next cleanup --help)`,
+        );
+    }
+    await cleanup();
+    return 0;
+}
+
 // Run only when invoked directly as the entry (not when imported, e.g. in tests).
 // SANCTIONED self-entry (#263): this is a DOCUMENTED directly-runnable entry
 // (docs-site cli.mdx "Directly runnable entries") with its own tsup entry, so
 // it is never inlined into the bin. See the hazard note atop deploy.ts's
 // dispatcher before adding self-entry blocks anywhere else.
+// Routed through cleanupMain so the direct entry honours --help too.
 if (isEntrypoint(import.meta.url)) {
     try {
-        await cleanup();
+        process.exit(await cleanupMain(process.argv.slice(2)));
     } catch (err) {
         // Expected state, not a crash — see the note in deploy.ts's dispatcher.
         if (handleConfigNotFound(err)) {

@@ -38,6 +38,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
+import { KNOWN_VERBS } from "../cli/dispatch";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkgRoot = resolve(__dirname, "..", "..");
@@ -294,34 +295,34 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         expect(r.stdout).toMatch(/^ {2}build\s+/m);
     });
 
-    it.each(["build", "cleanup"])(
-        "`%s` is dispatched, and its body is NOT inlined into the bin (#263)",
-        (verb) => {
-            // build.ts/cleanup.ts carry self-entry blocks AND are now bin-
-            // dispatched. That is safe only while each stays its own dist file:
-            // if tsup ever inlined one into the bin, its `isEntrypoint` block
-            // would fire at module load and hijack every subcommand. Prove the
-            // separation with a discriminator string unique to each module.
-            // Plain-ASCII discriminators on purpose: esbuild escapes non-ASCII
-            // literals (the build banner's emoji ships as an \u escape), so an
-            // emoji anchor would silently match neither file.
-            const discriminator = {
-                build: "Uploading static assets...",
-                cleanup: "Deleting NextApp CR",
-            }[verb] as string;
-            const own = readFileSync(
-                join(pkgRoot, "dist", "cli", `${verb}.js`),
-                "utf8",
-            );
-            expect(own, `${verb}.js must contain its own body`).toContain(
-                discriminator,
-            );
-            expect(
-                readFileSync(distBin, "utf8"),
-                "bin must not inline the dispatched entry",
-            ).not.toContain(discriminator);
-        },
-    );
+    it.each([
+        "build",
+        "cleanup",
+    ])("`%s` is dispatched, and its body is NOT inlined into the bin (#263)", (verb) => {
+        // build.ts/cleanup.ts carry self-entry blocks AND are now bin-
+        // dispatched. That is safe only while each stays its own dist file:
+        // if tsup ever inlined one into the bin, its `isEntrypoint` block
+        // would fire at module load and hijack every subcommand. Prove the
+        // separation with a discriminator string unique to each module.
+        // Plain-ASCII discriminators on purpose: esbuild escapes non-ASCII
+        // literals (the build banner's emoji ships as an \u escape), so an
+        // emoji anchor would silently match neither file.
+        const discriminator = {
+            build: "Uploading static assets...",
+            cleanup: "Deleting NextApp CR",
+        }[verb] as string;
+        const own = readFileSync(
+            join(pkgRoot, "dist", "cli", `${verb}.js`),
+            "utf8",
+        );
+        expect(own, `${verb}.js must contain its own body`).toContain(
+            discriminator,
+        );
+        expect(
+            readFileSync(distBin, "utf8"),
+            "bin must not inline the dispatched entry",
+        ).not.toContain(discriminator);
+    });
 
     it("`node kn-next.js cleanup --help`-less dispatch does not run a deploy", () => {
         // The footgun this closes: before the dispatch existed, `kn-next
@@ -333,6 +334,57 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         expect(`${r.stdout}${r.stderr}`).not.toContain("kn-next deploy");
         expect(r.status).toBe(1); // no config here → the guidance path
         expect(`${r.stdout}${r.stderr}`).toContain("npx @getknext/core create");
+    });
+
+    // --- ADR-0046: --help is never destructive, unknown verbs never deploy ---
+    //
+    // Derived from the shipped verb list, not enumerated here: a new verb
+    // inherits these two assertions automatically.
+    const helpVerbs = [...KNOWN_VERBS].filter((v) => v !== "deploy");
+
+    it.each(
+        helpVerbs,
+    )("`%s --help` exits 0 and performs no work (destructive verbs included)", (verb) => {
+        // A reviewer proved `kn-next cleanup --help` DELETED the app: the
+        // branch called cleanup() with no argument parsing. Run each verb's
+        // help in an EMPTY dir, so anything that actually starts working
+        // would announce itself (or fail on the missing config) rather than
+        // exiting 0 in silence.
+        const dir = mkdtempSync(join(tmpdir(), `knext-help-${verb}-`));
+        const r = run(process.execPath, [distBin, verb, "--help"], dir);
+        expect(r.error).toBeUndefined();
+        expect(r.status, `${verb} --help must exit 0`).toBe(0);
+        expect(r.stdout).toContain(`kn-next ${verb}`);
+        const all = `${r.stdout}${r.stderr}`;
+        // Work markers from the two verbs that do irreversible / expensive
+        // things. Neither may appear on a help run.
+        expect(all).not.toContain("Deleting NextApp CR");
+        expect(all).not.toContain("Uploading static assets");
+        expect(all).not.toContain("kn-next deploy —"); // no fall-through
+    });
+
+    it("an unknown verb is an error with a suggestion, never a silent deploy", () => {
+        const dir = mkdtempSync(join(tmpdir(), "knext-unknown-verb-"));
+        const r = run(process.execPath, [distBin, "celanup", "--dry-run"], dir);
+        expect(r.status).toBe(1);
+        const all = `${r.stdout}${r.stderr}`;
+        expect(all).toContain("unknown command: celanup");
+        expect(all).toContain("kn-next cleanup");
+        expect(all).toContain("--help");
+        // The deploy flow's own banner must be absent — the whole point.
+        expect(all).not.toContain("kn-next deploy\n");
+    });
+
+    it("a flags-only invocation still deploys (the advertised front door)", () => {
+        // `kn-next --skip-build` must NOT be read as an unknown command: a
+        // leading `-` is a flag. Run it where there is no config, so the deploy
+        // path identifies itself by printing the config guidance and exiting 1.
+        const dir = mkdtempSync(join(tmpdir(), "knext-flags-only-"));
+        const r = run(process.execPath, [distBin, "--skip-build"], dir);
+        expect(r.status).toBe(1);
+        const all = `${r.stdout}${r.stderr}`;
+        expect(all).toContain("No kn-next.config.ts found");
+        expect(all).not.toContain("unknown command");
     });
 
     it("`node kn-next.js rollback --help` dispatches and exits 0", () => {

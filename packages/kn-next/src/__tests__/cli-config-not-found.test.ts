@@ -127,10 +127,50 @@ describe("every runnable CLI entry routes config-not-found to the guidance", () 
     });
 
     it.each(entries)("%s calls handleConfigNotFound in its catch", (file) => {
+        // Anchored in CATCH CONTEXT, and on the CALL form — not the bare
+        // identifier. A code review defeated the first version of this guard by
+        // deleting the whole `if (handleConfigNotFound(err)) …` block from
+        // preview.ts's catch and leaving the import: `toContain(
+        // "handleConfigNotFound")` matched the import line and stayed green
+        // (this package's biome only WARNS on an unused import, so nothing else
+        // caught it either). Brace-match each catch body and require the call
+        // inside one of them.
         const src = readFileSync(join(cliSrcDir, file), "utf8");
-        expect(src).toContain("handleConfigNotFound");
+        const bodies = catchBodies(src);
+        expect(bodies.length, `${file} has no catch block`).toBeGreaterThan(0);
+        expect(
+            bodies.some((b) => /handleConfigNotFound\s*\(/.test(b)),
+            `${file}: no catch block calls handleConfigNotFound(…) — an entry ` +
+                "that imports it but never calls it dumps a FATAL instead",
+        ).toBe(true);
     });
 });
+
+/**
+ * Bodies of every `catch (…) { … }` in `src`, brace-matched so a nested block
+ * cannot truncate the body and make the assertion vacuous.
+ */
+function catchBodies(src: string): string[] {
+    const out: string[] = [];
+    for (const m of src.matchAll(/catch\s*\([^)]*\)\s*\{/g)) {
+        if (m.index === undefined) {
+            continue;
+        }
+        let i = m.index + m[0].length;
+        let depth = 1;
+        while (i < src.length && depth > 0) {
+            const ch = src[i];
+            if (ch === "{") {
+                depth++;
+            } else if (ch === "}") {
+                depth--;
+            }
+            i++;
+        }
+        out.push(src.slice(m.index + m[0].length, i - 1));
+    }
+    return out;
+}
 
 describe("end-to-end: the real deploy entry in a directory with no config", () => {
     const bun = process.env.BUN_PATH ?? "bun";
