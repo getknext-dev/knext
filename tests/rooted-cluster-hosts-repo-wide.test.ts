@@ -74,7 +74,7 @@ const DEFERRALS: Deferral[] = [
   {
     id: 'measurement-records-quote-evidence',
     reason:
-      "benchmark/ledger records quote OBSERVED hostnames verbatim — error strings (EAI_AGAIN pggw-apps.scale-zero-pg.svc), resolv.conf walks, and pre-fix DSNs are evidence of what happened, not recipes; rooting a quoted observation would falsify the record.",
+      'benchmark/ledger records quote OBSERVED hostnames verbatim — error strings (EAI_AGAIN pggw-apps.scale-zero-pg.svc), resolv.conf walks, and pre-fix DSNs are evidence of what happened, not recipes; rooting a quoted observation would falsify the record.',
     match: (f) => /^docs\/benchmarks\//.test(f),
   },
   {
