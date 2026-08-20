@@ -37,6 +37,53 @@ app and its revisions landed in between; requests at 99%/85%). Unattributed; car
 
 | 2 | 2026-08-20 (`/dashboard`, n=8, per-cycle below; **instrument moved in-cluster**) | rooted-FQDN DSN minting (#796) verified pre-merge on OKE: rooted env applied to the operator, the hand-made benchmark Secret re-pointed at the rooted host (the re-mint required by #796's measurability note — the benchmark subject was in the unaffected set) | 4993.5 | 226 | 125 | **2/8** cycles 3.6 / 5.5 s (both SUCCESS bodies, no fallbacks) | the fresh-pod DNS tail collapsed: 6/8 cycles in a 90–122 ms lazy band vs row 1's ONE clean cycle; **median lazy 4719 → 103 ms**. The two residuals are unattributed (candidates: the still-unrooted app-level Redis host, residual UDP races) |
 
+| 3 | 2026-08-20 (`/dashboard`, n=8, in-cluster instrument, per-cycle below) | Redis host rooted: #800 rooted the config FALLBACK (inert when env is set); the operative change was the ksvc env patch — **evidenced, not assumed**: the measured revision `fm-node-00093` carries `REDIS_URL=redis://redis.default.svc.cluster.local.:6379` (read back from the Revision object, durable). Appendix B holds the between-rows attribution sitting | 4917.5 | 239.5 | 125.5 | **1/8** at 2.4 s | **TCP-phase Redis connect trouble in the pod, resolver excluded — mechanism NOT discriminated, and the hard log evidence binds to a SECONDARY client (Appendix C).** The captured ETIMEDOUTs are provably not the cache handler's (it always has an error listener); they show a module-scope client reconnect-looping against the Redis Service. For the measured stall itself, the strongest evidence is an absence (no `failing open` line ⇒ the cache handler's budget never expired) — which leaves THREE compatible readings, undiscriminated: PG-pool first-connect delay (the measured page's dominant dependency), cache lazy-connect retransmit-delay-then-success, or a slow-but-inside-budget cache ready-check. **The lever consequence is why this matters: eager cache connection at boot does nothing under the PG reading and little under the third — so iteration 4 OPENS with discrimination (per-dependency timing + conntrack capture on the next stall), and the eager-connect lever is taken only if the cache-TCP reading wins.** Candidates for the underlying TCP trouble, undiscriminated: fresh-pod SYN race (conntrack/veth), Redis-side accept/CPU pressure on a 99%/85%-allocated plane, kube-proxy programming lag. Discriminator for the next stall: conntrack/tcpdump capture (~1-in-8 cycles stalls) |
+
+### Row 3 per-cycle data
+
+| cycle | wake | first | warm best | lazy | exec gap | body |
+|---|---|---|---|---|---|---|
+| 1 | 6426 | 221 | 123 | 98 | 3860 | 14240 |
+| 2 | 12982 | 231 | 126 | 106 | 3730 | 14240 |
+| 3 | 5016 | 2529 | 134 | 2394 | 3792 | 14240 |
+| 4 | 4390 | 230 | 135 | 95 | 4016 | 14240 |
+| 5 | 4819 | 263 | 125 | 138 | 3789 | 14240 |
+| 6 | 4229 | 219 | 124 | 95 | 3872 | 14240 |
+| 7 | 5346 | 248 | 130 | 118 | 3956 | 14240 |
+| 8 | 4562 | 436 | 99 | 337 | 4730 | 14240 |
+
+Median lazy **112 ms**, median exec gap **3866 ms** — every median matches the instrument summary
+verbatim (nothing hand-computed). Cycle 1's emitted line, quoted because a review brief
+mis-transcribed its lazy as 95: `"first_ms": 221, "warm1_ms": 139, "warm2_ms": 123, "lazy_ms": 98`
+— the table matches the instrument output (221 − 123 = 98). The gap argument that needs no uniformity assumption: **the
+stall cycle's own gap (3792) sits at the median**, so the gap cannot be what made cycle 3 slow.
+(The spread is 3730–4730, 27% — and the max-gap cycle 8 is also the max non-stall lazy and min
+warm, so uniformity would be an overclaim; measuring the gap here bounds THIS row and offers a
+stationarity assumption about row 2, which never measured it.) **Wake-shift check:** 4917.5 vs
+row 2's 4993.5 — no shift (the bimodal 13 s wake reappeared once, cycle 2; carried, unattributed).
+Zero instrument retries; all bodies success-size.
+
+**What row 3 establishes, with the instrument correction applied:** the ~3.9 s gap means row-2/3
+sittings cannot register a tail cycle shorter than the gap — so the like-for-like cross-instrument
+comparison counts cycles ABOVE ~3.9 s: row 1 had **4/8**, row 2 **1/8** (its 3591 ms cycle sits
+below the gap), the Appendix-B attribution sitting **2/8**, row 3 **1/8**. The multi-second tail
+shrank and its failure signature changed class (resolver errors + fallback bodies → TCP-phase
+delay, success bodies); at n=8 per sitting the counts fluctuate and the honest claim stays a
+distribution shift consistent with the levers. The medians tell the same story with a wrinkle the
+narrative must not round away: **103 → 112 ms is +8.7%** — #800 moved the tail, not the median,
+which was already at the floor.
+
+**Candidate next lever — GATED on discrimination (see the mechanism cell): eager cache-handler connection at boot** —
+dial Redis at process start, fail-open unchanged, *readiness untouched*: fm readiness deliberately
+does not gate on dependencies (ADR-0026/#338 — gating on a scale-to-zero dependency defeats
+scale-to-zero), so the boot dial races the first visitor rather than being absorbed by readiness;
+it wins that race whenever boot-to-first-visitor exceeds connect time, which the ~4 s exec gap
+suggests is the common case, but it is a mitigation-by-head-start, not a guarantee. **Named
+hazard:** a failed boot dial trips `markUnhealthy` and its 5 s breaker — trading a visible 2.4 s
+stall for a silent 5 s split-cache window; any implementation must dial WITHOUT marking unhealthy
+on a boot-phase failure. The "connections, not renders" shape sidesteps the synthetic-warm
+cache-poisoning class.
+
 ### Row 2 per-cycle data
 
 | cycle | wake | first | warm best | lazy | body |
@@ -105,6 +152,56 @@ with the lever, not a proof the residual is zero. The two 3.6/5.5 s residuals re
 successfully (so: a slow dependency, not the 15 s timeout or a resolver hard-fail) and are the
 next attribution target.
 
+### Appendix B — the between-rows attribution sitting (2026-08-20, pre-#800, published)
+
+Same in-cluster instrument, stall-triggered pod-log capture, UNROOTED Redis env (this sitting is
+why #800 exists). Its per-cycle lazies: `[92, 5615, 101, 193, 3376, 95, 6386, 115]` — tail 3/8
+raw, **2/8 above the ~3.9 s gap**. All three stalled cycles' pods logged ioredis
+`connect ETIMEDOUT` + `[CacheHandler] Redis unhealthy, failing open`, zero PG-side `EAI_AGAIN`.
+Also observed and carried: a bimodal wake (4 cycles at ~13.5–14 s vs ~4–5 s, image present every
+cycle) — unattributed.
+
+### Appendix C — row 3 cycle 3's captured lines, verbatim, with client provenance
+
+```
+[ioredis] Unhandled error event: Error: connect ETIMEDOUT   (×4, with stack: Socket._onTimeout)
+```
+
+**These lines cannot have come from the cache handler** — ioredis prints
+`Unhandled error event` only when a client has NO error listener, and the cache handler attaches
+a permanent one at construction (its failures log as `[CacheHandler] Redis error` /
+`failing open`). The emitters that fit are the app's module-scope secondary clients (the
+cache-events route's client: module-eval dial, no listener, 2 s connectTimeout; similarly the
+deep-health client). Four unhandled ETIMEDOUTs at a 2 s budget with default retry ≈ 8–10 s of
+reconnect loop — a background emitter churning across the pod's life, not one stalled request.
+
+Capture command, restored for reproducibility: `kubectl logs <pod> -c user-container --tail 60`,
+filtered to error/timeout/redis-class keywords, taken AFTER the measured GET.
+
+**What the absent line does and does not establish:** no `[CacheHandler] … failing open` line —
+while every pre-#800 stall in Appendix B logged one — establishes ONLY that the cache handler's
+5 s connect budget did not expire in cycle 3. Three readings are compatible with that absence,
+and the measured page's own dominant dependency (three raw `db.query` calls through the PG pool;
+`/dashboard` is `unstable_noStore()`) makes the first one at least as likely as the others:
+
+1. **PG pool first-connect delay** on the fresh pod — the class row 0 attributed multi-second
+   firsts to; nothing published for cycle 3 excludes it (Appendix B's zero-`EAI_AGAIN` excludes
+   only the resolver mode, in a different sitting).
+2. **Cache lazy first connect retransmit-delayed but succeeding** (its first dial IS the measured
+   GET — `lazyConnect`, and `/api/health` never touches it).
+3. **Cache connect handshaking fast with a slow-but-inside-budget ready-check `INFO`** —
+   post-handshake Redis-server responsiveness, not TCP.
+
+The boot-phase caveat from the previous revision was right for the wrong client: the cache client
+has no boot phase; the module-scope clients genuinely do.
+
+**Two knock-ons recorded:** (a) the mechanism cell's "TCP-phase on the Redis path" hard evidence
+binds to the *secondary* client's loop; the cache-path reading rests on the delayed-success
+inference above; (b) the module-scope cache-events client — dialling at module evaluation, no
+error listener, retrying forever against an unreachable target — is itself an app defect
+(unhandled-error log noise + connection churn on every fresh pod), worth its own fix
+independent of any latency work.
+
 ## Iteration 1 — what was proven, in one place
 
 - **The DB-flap tail is dead**: the 15 s pool-timeout class and the park/wake churn are gone
@@ -145,9 +242,11 @@ next attribution target.
 
 ## Next iteration (chosen from the measurement)
 
-**Fresh-pod DNS — taken in iteration 2 (#796); row 2 above carries the result.** The residual
-2/8 tail and the still-unrooted app-level Redis host are iteration 3 candidates, alongside the
-plane-level levers below (unchanged, still open) and the saturation cleanup (human-gated).
+**Fresh-pod DNS — taken: iteration 2 rooted the platform-minted PG DSNs (#796, row 2) and
+iteration 3 rooted the Redis host everywhere taught and deployed (#800, row 3, cluster-verified
+on revision fm-node-00093).** Iteration 4 opens with DISCRIMINATION of the remaining 1-in-8
+TCP-phase stall (per-dependency timing + conntrack on the next stall — see row 3's mechanism
+cell); the plane-level levers below and the saturation cleanup (human-gated) remain open.
 
 Verified on the plane, not assumed (`/etc/resolv.conf` from a running
 default-namespace pod): `options ndots:5` with a **five-entry** search path — the standard three
@@ -159,7 +258,7 @@ leave the cluster for OCI's resolver on every in-cluster lookup. Note also: the 
 only the rooted form (trailing dot) or an ndots reduction skips it.
 
 Candidate levers, cheapest first:
-1. **TAKEN (iteration 2, #796; row 2 carries the result for minted PG DSNs — the app-level Redis host remains).** Rooted FQDN (trailing dot) in every platform-minted hostname
+1. **TAKEN in full (iterations 2–3, #796 + #800; rows 2–3 carry the results — minted PG DSNs and the Redis host, both cluster-verified).** Rooted FQDN (trailing dot) in every platform-minted hostname
    (`pggw-apps.scale-zero-pg.svc.cluster.local.`) — the appdb operator's DSNs and the docs'
    recipes; skips the search walk entirely, saving 10 queries per lookup on this plane's
    resolv.conf. Client compatibility with the trailing dot must be verified per consumer, not
