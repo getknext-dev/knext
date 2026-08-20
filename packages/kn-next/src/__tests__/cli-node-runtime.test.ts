@@ -420,26 +420,74 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
 
     // --- Usage errors are messages, not FATAL dumps ---
     //
-    // The strict-flag rejections this PR added landed on `log.fatal({ err })`,
-    // which prints a serialised Error with a stack and an absolute dist chunk
-    // path — the exact presentation this PR exists to remove, and which its own
-    // sibling test forbids for the config-not-found path.
+    // The strict-flag rejections landed on `log.fatal({ err })`, which prints a
+    // serialised Error with a stack and an absolute dist chunk path — the exact
+    // presentation this change exists to remove.
+    //
+    // BOTH STREAMS, always: pino writes the FATAL line to STDOUT, so a
+    // stderr-only assertion reads clean while the dump is on screen. That is how
+    // the first sweep looked complete while six verbs still dumped.
+    function assertPlainMessage(
+        r: ReturnType<typeof run>,
+        label: string,
+    ): string {
+        expect(r.status, `${label} must exit 1`).toBe(1);
+        const all = `${r.stdout}${r.stderr}`;
+        expect(all, `${label} must not print a FATAL line`).not.toContain(
+            "FATAL",
+        );
+        expect(all, `${label} must not serialise the Error`).not.toContain(
+            "err:",
+        );
+        expect(all).not.toContain('"stack"');
+        expect(all, `${label} must not print a stack frame`).not.toMatch(
+            STACK_FRAME_RE,
+        );
+        expect(all, `${label} must not print a chunk path`).not.toMatch(
+            CHUNK_PATH_RE,
+        );
+        return all;
+    }
+
+    // DERIVED from the shipped verb list, like the `--help` test above. The
+    // previous version enumerated four invocations covering cleanup/build/db —
+    // and the live bleed was in doctor/status/rollback/preview, i.e. the two
+    // layers had correlated blind spots. An unknown flag is the one usage
+    // mistake EVERY verb must reject, so it is the probe.
+    const BOGUS_FLAG = "--zzz-not-a-real-flag";
     it.each([
-        [["cleanup", "-v"], 'unknown flag "-v"'],
-        [["cleanup", "myapp"], "unexpected positional"],
-        [["build", "--bogus"], 'unknown flag "--bogus"'],
-        [["db", "frobnicate"], "unknown db subcommand"],
+        ...KNOWN_VERBS,
+    ])("`%s` rejects an unknown flag as a plain message", (verb) => {
+        // `deploy` is the default: exercise it through the bare form too,
+        // which is the path parseArgs owns.
+        const argv = verb === "deploy" ? [BOGUS_FLAG] : [verb, BOGUS_FLAG];
+        const dir = mkdtempSync(join(tmpdir(), `knext-badflag-${verb}-`));
+        const all = assertPlainMessage(
+            run(process.execPath, [distBin, ...argv], dir),
+            `kn-next ${argv.join(" ")}`,
+        );
+        // It must actually name the offending flag, not fail for some
+        // unrelated reason (e.g. reaching config loading).
+        expect(all).toContain(BOGUS_FLAG);
+    });
+
+    // The reviewer's six measured dumps, verbatim. These are NOT flag typos —
+    // they are flag-combination and missing-argument mistakes, which no derived
+    // probe reaches, so they stay enumerated on top of the derivation.
+    it.each([
+        [["doctor", "--bogus"], "unknown argument"],
+        [["status", "--json", "--watch"], "--json cannot be combined"],
+        [["status"], "app name required"],
+        [["rollback", "--canary", "500"], "--canary must be an integer"],
+        [["rollback", "--canary", "50"], "--canary requires --to"],
+        [["db", "bind", "myapp"], "--secret <name> is required"],
     ])("`kn-next %s` is a plain message, not a stack dump", (argv, needle) => {
         const dir = mkdtempSync(join(tmpdir(), "knext-usage-error-"));
-        const r = run(process.execPath, [distBin, ...argv], dir);
-        expect(r.status, `${argv.join(" ")} must exit 1`).toBe(1);
-        const all = `${r.stdout}${r.stderr}`;
+        const all = assertPlainMessage(
+            run(process.execPath, [distBin, ...argv], dir),
+            `kn-next ${argv.join(" ")}`,
+        );
         expect(all).toContain(needle);
-        expect(all).not.toContain("FATAL");
-        expect(all).not.toContain("err:");
-        expect(all).not.toContain('"stack"');
-        expect(all).not.toMatch(STACK_FRAME_RE);
-        expect(all).not.toMatch(CHUNK_PATH_RE);
     });
 
     it("a flags-only invocation still deploys (the advertised front door)", () => {

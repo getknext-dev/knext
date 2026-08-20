@@ -51,7 +51,7 @@ import { writeSync } from "node:fs";
 import { unknownEmittedFields } from "./schema/crd-schema";
 import { EMITTED_CR_FIELD_PATHS } from "./schema/emitted-fields.generated";
 import { readKnownCRDFields } from "./schema/preflight";
-import { excerpt } from "./shared";
+import { excerpt, UsageError } from "./shared";
 
 /** The ingress class net-kourier actually registers a reconciler for (#208). */
 export const KOURIER_INGRESS_CLASS = "kourier.ingress.networking.knative.dev";
@@ -920,7 +920,7 @@ export function parseDoctorArgs(argv: readonly string[]): DoctorArgs {
     // the human-table mode a script then fails to parse).
     for (const a of argv) {
         if (a !== "--json" && a !== "-h" && a !== "--help") {
-            throw new Error(
+            throw new UsageError(
                 `unknown argument "${a}" (see kn-next doctor --help)`,
             );
         }

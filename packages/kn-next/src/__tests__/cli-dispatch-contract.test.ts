@@ -118,44 +118,128 @@ describe("usage mistakes are UsageErrors, so they render as messages", () => {
     // and an absolute dist chunk path — which a reviewer caught on the
     // strict-flag rejections added in the previous round.
     //
-    // SCAN so a future verb cannot reintroduce the shape: no CLI module may
-    // raise a usage phrase from a *plain* Error.
-    //
-    // The phrase is searched in a WINDOW after `throw new Error(`, not pinned
-    // to the character right after it. Mutation-proved the hard way: the first
-    // version required a quote immediately after the paren, so reverting
-    // cleanup.ts's `throw new UsageError(stray.startsWith("-") ? … : …)` to
-    // `Error` left this guard GREEN — the ternary puts the phrase ~30 chars
-    // later. Only the dist behaviour test caught it, which is precisely the
-    // "guard that stays green when its subject is removed" this repo names as
-    // decoration.
-    const USAGE_PHRASE =
-        /unknown flag|unknown db subcommand|unexpected positional|unexpected argument|unknown subcommand|requires a value/;
+    // THE DEFAULT IS INVERTED, deliberately. Two earlier versions of this guard
+    // matched an enumerated list of usage PHRASINGS, and both were defeated:
+    //   (A) `doctor.ts` said "unknown argument", not "unknown flag" — missed by
+    //       one word, and it shipped.
+    //   (B) hoisting the message (`const msg = …; throw new Error(msg)`) left
+    //       nothing to match at the throw site at all.
+    // Enumerating wordings is the repo's own named defect class, relocated one
+    // level down. So: EVERY `throw new Error(` under src/cli is a failure unless
+    // its message is on the allowlist below, each entry justified as a genuine
+    // environment/cluster/internal failure rather than a user mistake. An
+    // unparseable construct — a hoisted message, a novel wording, a helper that
+    // builds the string elsewhere — now FAILS rather than passing.
     const THROW_WINDOW = 240;
 
-    const cliFiles = readdirSync(join(pkgRoot, "src", "cli")).filter((f) =>
-        f.endsWith(".ts"),
-    );
+    /**
+     * Message anchors that may be raised as a plain `Error`, per file. Each is
+     * NOT a usage mistake: the user could not have avoided it by typing a
+     * different command line.
+     */
+    const NON_USAGE_ALLOWLIST: Record<string, readonly string[]> = {
+        // Injectable exec boundary. Empty argv is a programming error inside
+        // knext, never something a user types.
+        "exec.ts": [
+            "runCapture: empty argv",
+            "runInherit: empty argv",
+            "runQuiet: empty argv",
+            "runQuietAllowFail: empty argv",
+        ],
+        // Registry/build-tool state: the image ref and the buildx metadata are
+        // produced by docker, not typed by the user.
+        "cr-builder.ts": [
+            "contains invalid characters",
+            "is not digest-pinned",
+            "has no containerimage.digest",
+            "does not start with sha256:",
+            "Could not resolve digest for image",
+        ],
+        // Repo state: the app's next.config / lockfile layout, not argv.
+        "tracing-root.ts": ["Cannot determine the Docker build context"],
+        // Cluster state and kubectl behaviour.
+        "status.ts": [
+            "not found in namespace",
+            "cluster unreachable",
+            "kubectl returned unparseable JSON",
+        ],
+        "db-bind.ts": [
+            "not found in namespace",
+            "operator predates spec.database.secretRef",
+            // Config/CR conflict — the fix is an edit to kn-next.config.ts, not
+            // to the command line.
+            "it is already defined in spec.secrets.envMap",
+            // Internal invariant of an exported builder (unreachable from argv:
+            // the CLI path validates `--secret` first).
+            "buildDbBindPatch: secret is required",
+        ],
+        // Install/repo integrity and template hygiene — not argv.
+        "create.ts": [
+            "could not locate the @getknext/core package root",
+            "knext scaffold templates not found",
+            "unknown template variable",
+            "unsubstituted template placeholder",
+        ],
+        // Cluster/build state: schema preflight, BUILD_ID skew, CR apply.
+        "deploy.ts": [
+            "formatPreflightFailure(outcome",
+            'BUILD_ID "',
+            "describeFailedCRApply()",
+        ],
+        // Derived name validity: composed from the config's app name + PR id.
+        "preview.ts": ["exceeds the 63-char", "is not a valid DNS-1123 label"],
+        "preflight.ts": ["formatPreflightFailure(outcome"],
+        // Build-time source extraction over cr-builder.ts — an internal
+        // invariant of the repo's own tooling.
+        "extract-emitted-fields.ts": [
+            "buildNextAppCRObject not found",
+            "buildNextAppCRObject has no return statement",
+        ],
+    };
 
-    it("scans the whole cli directory", () => {
-        expect(cliFiles.length).toBeGreaterThanOrEqual(10);
+    /** Every .ts under src/cli, including subdirectories (schema/). */
+    function cliSources(dir: string, prefix = ""): string[] {
+        const out: string[] = [];
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+            if (entry.isDirectory()) {
+                out.push(
+                    ...cliSources(
+                        join(dir, entry.name),
+                        `${prefix}${entry.name}/`,
+                    ),
+                );
+            } else if (entry.name.endsWith(".ts")) {
+                out.push(`${prefix}${entry.name}`);
+            }
+        }
+        return out;
+    }
+
+    const cliFiles = cliSources(join(pkgRoot, "src", "cli"));
+
+    it("scans the whole cli tree, subdirectories included", () => {
+        expect(cliFiles.length).toBeGreaterThanOrEqual(15);
+        expect(cliFiles.some((f) => f.startsWith("schema/"))).toBe(true);
     });
 
-    it.each(cliFiles)("%s throws UsageError for usage mistakes", (file) => {
+    it.each(cliFiles)("%s: every plain Error is justified", (file) => {
         const src = readFileSync(join(pkgRoot, "src", "cli", file), "utf8");
+        const allowed =
+            NON_USAGE_ALLOWLIST[file.replace(/^.*\//, "")] ?? ([] as string[]);
         const offenders: string[] = [];
         for (const m of src.matchAll(/throw new Error\(/g)) {
             const window = src
                 .slice(m.index, m.index + THROW_WINDOW)
                 .replace(/\s+/g, " ");
-            if (USAGE_PHRASE.test(window)) {
-                offenders.push(window.slice(0, 90));
+            if (!allowed.some((anchor) => window.includes(anchor))) {
+                offenders.push(window.slice(0, 100));
             }
         }
         expect(
             offenders,
-            `${file}: usage mistakes must throw UsageError, not Error — a plain ` +
-                "Error prints a FATAL stack dump for what is only a typo",
+            `${file}: a plain Error prints a FATAL stack dump. If this is a ` +
+                "user mistake, throw UsageError; if it is an environment/cluster " +
+                "failure, add a justified anchor to NON_USAGE_ALLOWLIST",
         ).toEqual([]);
     });
 });

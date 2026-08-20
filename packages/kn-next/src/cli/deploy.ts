@@ -46,7 +46,12 @@ import {
     preflightCRSchema,
     preflightImageRef,
 } from "./schema/preflight";
-import { handleConfigNotFound, handleUsageError, loadConfig } from "./shared";
+import {
+    handleConfigNotFound,
+    handleUsageError,
+    loadConfig,
+    UsageError,
+} from "./shared";
 import { requireBuildContext } from "./tracing-root";
 
 const log = createLogger({ module: "deploy" });
@@ -89,21 +94,41 @@ function getCliVersion(): string {
 }
 
 function parseCliArgs(): DeployOptions {
-    const { values, positionals } = parseArgs({
-        options: {
-            registry: { type: "string", short: "r" },
-            bucket: { type: "string", short: "b" },
-            tag: { type: "string", short: "t" },
-            namespace: { type: "string", short: "n", default: "default" },
-            "skip-build": { type: "boolean", default: false },
-            "skip-upload": { type: "boolean", default: false },
-            "dry-run": { type: "boolean", default: false },
-            help: { type: "boolean", short: "h", default: false },
-            version: { type: "boolean", short: "v", default: false },
-        },
-        strict: true,
-        allowPositionals: true,
-    });
+    let values: {
+        registry?: string;
+        bucket?: string;
+        tag?: string;
+        namespace?: string;
+        "skip-build"?: boolean;
+        "skip-upload"?: boolean;
+        "dry-run"?: boolean;
+        help?: boolean;
+        version?: boolean;
+    };
+    let positionals: string[];
+    try {
+        ({ values, positionals } = parseArgs({
+            options: {
+                registry: { type: "string", short: "r" },
+                bucket: { type: "string", short: "b" },
+                tag: { type: "string", short: "t" },
+                namespace: { type: "string", short: "n", default: "default" },
+                "skip-build": { type: "boolean", default: false },
+                "skip-upload": { type: "boolean", default: false },
+                "dry-run": { type: "boolean", default: false },
+                help: { type: "boolean", short: "h", default: false },
+                version: { type: "boolean", short: "v", default: false },
+            },
+            strict: true,
+            allowPositionals: true,
+        }));
+    } catch (err) {
+        // Node's own parse failure (`ERR_PARSE_ARGS_UNKNOWN_OPTION`) is still a
+        // user typo — `kn-next --skip-buildd` — so it gets the same message
+        // treatment as ours instead of a serialised Error with a stack.
+        // `create.ts` already did this; the deploy path did not.
+        throw new UsageError(`${(err as Error).message} (see kn-next --help)`);
+    }
 
     if (values.version) {
         // Resolve version from the package manifest without bundling it inline,

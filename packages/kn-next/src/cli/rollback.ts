@@ -118,7 +118,7 @@ export function parseRollbackArgs(argv: readonly string[]): RollbackArgs {
             // (omit the flag for that) and 100 would send everything back to
             // latest-ready, i.e. not a rollback at all.
             if (!Number.isInteger(n) || n < 1 || n > 99) {
-                throw new Error(
+                throw new UsageError(
                     `--canary must be an integer between 1 and 99 (got ${JSON.stringify(raw)})`,
                 );
             }
@@ -138,7 +138,7 @@ export function parseRollbackArgs(argv: readonly string[]): RollbackArgs {
         }
     }
     if (out.canaryPercent !== undefined && out.toRevision === undefined) {
-        throw new Error(
+        throw new UsageError(
             "--canary requires --to <revision> (see kn-next rollback --help)",
         );
     }

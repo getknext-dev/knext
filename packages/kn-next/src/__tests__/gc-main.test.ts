@@ -37,6 +37,7 @@ vi.mock("../utils/asset-upload", async (importOriginal) => {
 });
 
 import { gcMain } from "../cli/gc";
+import { USAGE_ERROR_CODE } from "../cli/shared";
 
 const cfg = {
     name: "my-app",
@@ -80,7 +81,13 @@ describe("gcMain", () => {
         expect((opts as { dryRun: boolean }).dryRun).toBe(true);
     });
 
-    it("propagates a parse error for an unknown flag", async () => {
+    it("propagates a parse error for an unknown flag, tagged as a usage error", async () => {
+        // Assert the CODE, not only the message: a plain Error satisfies
+        // `/unknown flag/` just as well, and it is the code that routes this to
+        // a one-line message instead of a FATAL stack dump (ADR-0046).
         await expect(gcMain(["--bogus"])).rejects.toThrow(/unknown flag/);
+        await expect(gcMain(["--bogus"])).rejects.toMatchObject({
+            code: USAGE_ERROR_CODE,
+        });
     });
 });

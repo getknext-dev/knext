@@ -64,8 +64,16 @@ Three corollaries, all from reviews of this change and all part of the decision:
   `UsageError` (`cli/shared.ts`) that the entries print and exit 1 on — no serialised `Error`, no
   stack frame, no absolute dist chunk path. Without this the CLI was internally inconsistent:
   `kn-next celanup` got a clean one-liner while `kn-next cleanup -v` got a stack dump, for the same
-  class of mistake. A source scan fails the build if any CLI module raises a usage phrase as a plain
-  `Error`.
+  class of mistake.
+
+  **The guard for this inverts the default rather than enumerating wordings.** Two earlier versions
+  matched a list of usage phrasings and both were defeated — once by a message that said "unknown
+  argument" instead of "unknown flag" (which shipped), and once by hoisting the message into a
+  variable so nothing remained at the throw site. So the rule is now: **every `throw new Error(`
+  under `src/cli` fails the build unless its message is on an explicit allowlist**, each entry
+  justified as an environment, cluster, registry or internal-invariant failure — something the user
+  could not have avoided by typing a different command line. A novel wording, a hoisted message, or
+  a new file all fail by default; adding to the allowlist is a deliberate, reviewable act.
 
 ## Options considered
 
@@ -100,9 +108,15 @@ Three corollaries, all from reviews of this change and all part of the decision:
 - [x] `build`/`cleanup` grow a `*Main` with `--help` and strict flag rejection; the bin and their
       direct entries both route through it.
 - [x] `parseCliArgs` rejects a stray positional on the default deploy path (`formatStrayPositional`).
-- [x] `UsageError` + `handleUsageError` in `cli/shared.ts`; every CLI module's usage throws converted
-      (build, cleanup, gc, db-bind, db-migrate, rollback, status).
-- [x] Guards: dispatcher-scanning contract test, per-verb `--help` exit-0 run against the built bin,
-      unknown-verb, flags-only, the three stray-positional invocations, and a no-stack-dump
-      assertion per usage-error shape — all against the built bin.
+- [x] `UsageError` + `handleUsageError` in `cli/shared.ts`, raised by every usage rejection under
+      `src/cli` — build, cleanup, create, doctor, gc, db-bind, db-migrate, preview, rollback, status,
+      and the default deploy path's own `parseArgs` failure. Enforced by the inverted scan above, so
+      this list is a description of the tree rather than a promise about it. The first sweep named
+      four verbs and left six live dumps, which is exactly what an enumerated claim is worth.
+- [x] Guards, all against the BUILT bin: per-verb `--help` exit-0 (derived from `KNOWN_VERBS`),
+      per-verb unknown-flag rejection (also derived — the enumerated version had the same blind
+      spots as the phrase list it was meant to back up), unknown-verb, flags-only, the three
+      stray-positional invocations, and the six measured flag-combination/missing-argument cases.
+      Every no-dump assertion reads **both streams**: pino writes `FATAL` to **stdout**, so a
+      stderr-only check reports clean while the dump is on screen.
 - [x] `apps/docs/content/docs/cli.mdx` updated (fall-through note, strict-flag promise).

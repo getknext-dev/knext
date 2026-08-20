@@ -30,6 +30,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { createLogger } from "../utils/logger";
+import { handleUsageError, UsageError } from "./shared";
 import { findTracingRoot, NO_LOCKFILE_INSTALL } from "./tracing-root";
 
 const log = createLogger({ module: "create" });
@@ -151,7 +152,7 @@ const RFC1123_LABEL = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
  */
 export function assertValidAppName(name: string): void {
     if (name.length === 0 || name.length > 63 || !RFC1123_LABEL.test(name)) {
-        throw new Error(
+        throw new UsageError(
             `invalid app name ${JSON.stringify(name)} — it becomes the NextApp / ` +
                 "Knative Service name, so it must be an RFC1123 label: lowercase " +
                 "alphanumerics and '-', starting and ending alphanumeric, at most " +
@@ -280,7 +281,7 @@ export function writeScaffold(opts: ScaffoldOptions): Map<string, string> {
             existsSync(join(appDir, rel)),
         );
         if (clashes.length > 0) {
-            throw new Error(
+            throw new UsageError(
                 `refusing to overwrite existing file(s): ${clashes.join(", ")} — ` +
                     "re-run with --force to replace them",
             );
@@ -375,6 +376,17 @@ export async function createMain(argv: string[]): Promise<number> {
         );
         return 0;
     } catch (err) {
+        // A user mistake (an app name that is not an RFC1123 label, a scaffold
+        // that would overwrite files) is a message, not a dump: `log.error({
+        // err })` below still serialises the Error with its stack, which is the
+        // presentation ADR-0046 removes.
+        // Written through process.stderr.write, not fs.writeSync(2), to match
+        // this module's other user-facing rejections (the parseArgs catch
+        // above) — createMain RETURNS an exit code rather than exiting here, so
+        // the bin's own exit is what flushes.
+        if (handleUsageError(err, (text) => void process.stderr.write(text))) {
+            return 1;
+        }
         // Write the REASON to stderr directly, not only through the logger:
         // pino's transport is async and its object rendering buries the message
         // the user needs ("invalid app name … must be an RFC1123 label"), which

@@ -97,7 +97,7 @@ export function parseStatusArgs(argv: readonly string[]): StatusOptions {
         // Rejected rather than silently concatenating JSON documents a parser
         // would choke on. If NDJSON streaming is ever wanted, it gets designed
         // deliberately — not implied by a flag combination.
-        throw new Error(
+        throw new UsageError(
             "--json cannot be combined with --watch (a 5s poll would emit concatenated JSON documents); poll `kn-next status --json` from your script instead (see kn-next status --help)",
         );
     }
@@ -469,7 +469,7 @@ export async function statusMain(argv: readonly string[]): Promise<number> {
     }
     const appName = opts.app ?? localConfig?.name;
     if (!appName) {
-        throw new Error(
+        throw new UsageError(
             "app name required: pass it as a positional (kn-next status <app>) or run from a directory with kn-next.config.ts",
         );
     }
