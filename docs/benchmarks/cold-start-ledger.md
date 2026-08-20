@@ -2,13 +2,15 @@
 
 > The standing loop: **measure cold start after each iteration; improve it next iteration.**
 > This file is the loop's memory. Every iteration appends its measurement and names the next
-> lever it chose FROM that measurement. Instrument:
-> `scripts/bench-a13-postready-lazy.py [path]` (8 cold cycles against `fm-node`; per-cycle
-> image-presence evidence; `wake` = full cold start to first health response, `first` = the
-> first page render after readiness, `warm` = the same page on the warm process). Cluster
-> `context-ckmva7v7zvq`; single runner, cluster otherwise quiet; all times ms, from the
-> workstation over the public URL (±100 ms class instrument noise — see the A13 record's
-> Limitations).
+> lever it chose FROM that measurement. Instruments (each row names which it used):
+> `scripts/bench-a13-postready-lazy.py [path]` (rows 0–1: workstation-timed over the public URL,
+> ±100 ms class noise — see the A13 record's Limitations) and
+> `scripts/bench-a13-postready-lazy-incluster.py` (row 2+: in-pod timing via `kubectl exec`,
+> which removes WAN noise and adds the exec-gap consideration stated in row 2). Both: 8 cold
+> cycles against `fm-node`; per-cycle image-presence evidence; `wake` = full cold start to first
+> health response, `first` = the first page render after readiness, `warm` = the same page on
+> the warm process. Cluster `context-ckmva7v7zvq`; single runner, cluster otherwise quiet; all
+> times ms.
 
 | # | date | plane state (what changed since the last row) | wake median | first median | warm median | first tail | attribution of the dominant term |
 |---|---|---|---|---|---|---|---|
@@ -32,6 +34,76 @@
 exceeds row-0's median (4049) and four exceed row-0's max (4227) — a systematic ~+400 ms wake
 shift between sittings. Candidate cause: the plane got more crowded between the rows (the drill
 app and its revisions landed in between; requests at 99%/85%). Unattributed; carried, not hidden.
+
+| 2 | 2026-08-20 (`/dashboard`, n=8, per-cycle below; **instrument moved in-cluster**) | rooted-FQDN DSN minting (#796) verified pre-merge on OKE: rooted env applied to the operator, the hand-made benchmark Secret re-pointed at the rooted host (the re-mint required by #796's measurability note — the benchmark subject was in the unaffected set) | 4993.5 | 226 | 125 | **2/8** cycles 3.6 / 5.5 s (both SUCCESS bodies, no fallbacks) | the fresh-pod DNS tail collapsed: 6/8 cycles in a 90–122 ms lazy band vs row 1's ONE clean cycle; **median lazy 4719 → 103 ms**. The two residuals are unattributed (candidates: the still-unrooted app-level Redis host, residual UDP races) |
+
+### Row 2 per-cycle data
+
+| cycle | wake | first | warm best | lazy | body |
+|---|---|---|---|---|---|
+| 1 | 5348 | 220 | 122 | 98 | 14240 |
+| 2 | 5866 | 228 | 122 | 105 | 14240 |
+| 3 | 4844 | 3725 | 134 | 3591 | 14240 |
+| 4 | 4735 | 224 | 124 | 101 | 14240 |
+| 5 | 5446 | 248 | 127 | 122 | 14240 |
+| 6 | 3818 | 219 | 130 | 90 | 14240 |
+| 7 | 4130 | 221 | 126 | 95 | 14240 |
+| 8 | 5143 | 5589 | 124 | 5465 | 14240 |
+
+**Instrument change, stated:** rows 0–1 timed from the workstation; row 2 times **in-cluster**
+(pod `bench-timer`, `kubectl exec`, milliseconds measured in-pod around the HTTP call —
+`scripts/bench-a13-postready-lazy-incluster.py`). Forced, not chosen: the workstation WAN
+degraded mid-sitting to SYN timeouts and 90 s transfers on a path also serving 372 ms probes.
+One full sitting was **discarded as instrument-invalid**; its numbers are preserved here rather
+than in an unfindable side-channel — per-cycle lazies
+`[-81223, -67544, 3768, 4264, 16172, 17991, 91327, 92298]`, "median lazy" 10218 ms, with warm
+renders up to 92 s and 3 SYN-timeout retries — 90 s *warm* renders on requests the same plane
+served in ~530 ms is what "instrument-invalid" means concretely. **Provenance:** that sitting ran
+on the WORKSTATION harness with a logged-retry loop that had been added mid-investigation in a
+scratchpad copy (the committed script would have died on the first SYN timeout); the retry loop
+is now committed into `scripts/bench-a13-postready-lazy.py`, so the instrument that produced
+these numbers exists in the repo. Timing was workstation-side, so the WAN framing stands — the
+in-pod row-2 instrument shares only the LB/ingress hop, not the degraded WAN path.
+
+Three consequences, none asserted away:
+
+- Absolute `first`/`warm` are NOT comparable across the boundary. The warm drop (533 → 125 ms)
+  is *consistent with* removing WAN+ingress RTT, but that explanation is fitted from the
+  difference it explains — no independent RTT measurement was taken; treat it as plausible, not
+  established.
+- **`lazy` is the least incomparable of the three, not a protected quantity.** Path RTT cancels
+  in expectation because both terms share the path — but the discarded sitting is this row's own
+  proof of the limit: its terms shared a path too, and its "lazy" still carried ~10 s of
+  instrument. A degraded path corrupts lazy; a merely *different* path mostly cancels.
+- **The exec-gap confound points toward the headline and is bounded, not denied.** Moving to
+  `kubectl exec` inserts dead time (apiserver round trip, exec setup, interpreter start) between
+  the wake response and the first measured GET — wall-clock in which post-readiness lazy work
+  can finish unmeasured. It cannot explain row 1's 7–9 s cycles, but it can plausibly account
+  for the low end of row-1's tail (1.7–2.5 s, 3 of 7 tail cycles). The harness now prints the
+  per-cycle exec gap so row 3 bounds it with data; for row 2 it is unmeasured and the headline
+  is therefore stated as *lever effect and instrument change measured together* — what is
+  lever-attributable beyond doubt is the disappearance of the failure SIGNATURE (resolver
+  errors, fallback bodies, the 7–9 s class).
+
+**Wake-shift check, run on this row as row 1 ran it on itself:** row-1 wake median 4450 →
+row-2 **4993.5** (+544 raw; by this row's own RTT accounting the adjusted shift is ~+950 ms,
+since a wake sample rides the same path as any other GET). Unattributed; carried, not hidden.
+Candidate causes: the plane gained the `bench-timer` pod and the drill services on a
+request-saturated two-node cluster; image pulls are EXCLUDED as a cause (the harness's per-cycle
+pull evidence read "already present" on all 8 cycles — stated from the run output; the cluster
+events have since expired, so this is no longer independently checkable — a permanent limit of
+this row, and why future rows should publish the column verbatim). Row 2's `workstation_retries`
+was **0** (in-cluster instrument; the counter then counts exec failures). The instrument previously did not emit a wake median (the one hand-computed cell in
+every row, and twice the one with the error); both harness variants now print
+`median_wake_ms`.
+
+**What row 2 establishes:** with the PG DSN rooted, the row-1 failure signature
+(`EAI_AGAIN` + fallback bodies + a 7/8 multi-second tail) is gone — 6/8 cycles sit in a
+90–122 ms lazy band, and zero fallback renders. At n=8 per sitting and tail frequencies that
+have varied 3/8 → 7/8 → 2/8 across rows, the honest claim is a distribution shift consistent
+with the lever, not a proof the residual is zero. The two 3.6/5.5 s residuals rendered
+successfully (so: a slow dependency, not the 15 s timeout or a resolver hard-fail) and are the
+next attribution target.
 
 ## Iteration 1 — what was proven, in one place
 
@@ -73,7 +145,11 @@ app and its revisions landed in between; requests at 99%/85%). Unattributed; car
 
 ## Next iteration (chosen from the measurement)
 
-**Fresh-pod DNS.** Verified on the plane, not assumed (`/etc/resolv.conf` from a running
+**Fresh-pod DNS — taken in iteration 2 (#796); row 2 above carries the result.** The residual
+2/8 tail and the still-unrooted app-level Redis host are iteration 3 candidates, alongside the
+plane-level levers below (unchanged, still open) and the saturation cleanup (human-gated).
+
+Verified on the plane, not assumed (`/etc/resolv.conf` from a running
 default-namespace pod): `options ndots:5` with a **five-entry** search path — the standard three
 plus two OCI VCN domains (`knext.oraclevcn.com`, `nodes.knext.oraclevcn.com`). So a 3-label name
 like `pggw-apps.scale-zero-pg.svc` (2 dots < 5) attempts **all five** search suffixes before the
@@ -83,7 +159,7 @@ leave the cluster for OCI's resolver on every in-cluster lookup. Note also: the 
 only the rooted form (trailing dot) or an ndots reduction skips it.
 
 Candidate levers, cheapest first:
-1. **Rooted FQDN (trailing dot) in every platform-minted hostname**
+1. **TAKEN (iteration 2, #796; row 2 carries the result for minted PG DSNs — the app-level Redis host remains).** Rooted FQDN (trailing dot) in every platform-minted hostname
    (`pggw-apps.scale-zero-pg.svc.cluster.local.`) — the appdb operator's DSNs and the docs'
    recipes; skips the search walk entirely, saving 10 queries per lookup on this plane's
    resolv.conf. Client compatibility with the trailing dot must be verified per consumer, not
