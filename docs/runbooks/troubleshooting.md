@@ -270,6 +270,51 @@ let the cache re-warm after a deploy, and if warm-start p95 is also slow, it is 
 code regression — **roll back** (§4). Raise `minScale` above 0 only as a
 deliberate always-warm trade-off.
 
+### Which dependency stalled the first request? {#which-dependency-stalled-the-first-request}
+
+A cold start that is slow because a *dependency* was slow looks identical, from
+the outside, whichever dependency it was: the page renders, nothing errors,
+nothing fails open. The app names it instead of leaving it to inference — when a
+dependency operation on a request path takes longer than `SLOW_DEP_LOG_MS`
+(default **500 ms**) it emits exactly one structured line:
+
+```
+kubectl logs <pod> -c user-container | grep '\[slow-dep\]'
+```
+
+| line | reading |
+|---|---|
+| `[slow-dep] {"dep":"pg","op":"pool.query"…,"cold":true}` | the Postgres pool's **first** acquisition on this pod was slow (DB wake / connect). `"cold":false` means the pool was already woken — a different story |
+| `[slow-dep] {"dep":"pg","op":"pool.connect"…}` | as above, for an explicit `connect()` (transaction path) |
+| `[slow-dep] {"dep":"redis-connect","op":"client.connect"…}` | the cache's **TCP handshake** was slow — a connect-phase problem (SYN retransmit, kube-proxy programming, a loaded node) |
+| `[slow-dep] {"dep":"redis-ready","op":"ready-check"…}` | the handshake was fast and the cache's **ready-check** was slow — post-handshake Redis responsiveness, not the network |
+
+Each line carries `durationMs`, `thresholdMs` and, for Postgres, `role` and
+`outcome`. It never carries the target: the dependency **class** is logged, never
+a DSN, host credentials or SQL text.
+
+The threshold is an env var on the app, so it can be lowered on a suspect
+deployment without a rebuild:
+
+```bash
+kubectl set env ksvc/<app> SLOW_DEP_LOG_MS=100
+```
+
+Two things this does **not** change: no timeout, budget or fail-open behaviour
+moves, and readiness still never gates on a dependency — a waking database or an
+unreachable cache must not flap a scale-to-zero pod.
+
+**If you see nothing at all**, the stall was not in these three places: look at
+the cold-start terms in §8 above (image pull, bytecode cache, app init).
+
+**Related noise, now silenced.** A pod whose Redis is unreachable used to print
+repeated `[ioredis] Unhandled error event` stacks from background clients. Those
+clients now log one classed line per error class —
+`[redis:cache-events] connection error (ETIMEDOUT): … — further ETIMEDOUT errors
+suppressed` — and stop retrying after a bounded number of attempts, re-dialling
+only when a request actually needs them. A repeat of the same class is expected
+to be silent; a **new** class still prints.
+
 ## 9 — Database (scale-zero-pg) wake timeout
 
 **Symptom.** The first DB query after the app *and* its database have both been
