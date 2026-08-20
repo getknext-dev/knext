@@ -37,6 +37,7 @@
     "@vitest/ui": "^4.0.16",
     "happy-dom": "^20.0.11",
     "ioredis": "^6.0.0",
+    "ioredis5": "npm:ioredis@^5.9.3",
     "jsdom": "^27.3.0",
     "minio": "^8.0.6",
     "pg-connection-string": "^2.14.0",

@@ -19,7 +19,7 @@ spec:
     bucket: "my-app-assets"
   cache:
     provider: "redis" # the ISR/data cache (Redis is the only implemented provider)
-    url: "redis://redis.default.svc.cluster.local:6379"
+    url: "redis://redis.default.svc.cluster.local.:6379"
   # Optional — run the standalone server under Bun with build-time bytecode
   # precompilation (default runtime is node):
   # runtime: "bun"

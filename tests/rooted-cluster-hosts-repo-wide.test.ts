@@ -66,12 +66,6 @@ type Deferral = { id: string; reason: string; match: (file: string, host: string
  */
 const DEFERRALS: Deferral[] = [
   {
-    id: 'app-level-redis',
-    reason:
-      "an app's OWN Redis default is app-level config, not a platform-minted Secret. The ledger names ioredis connect ETIMEDOUT as the other half of the fresh-pod tail, so the same lever applies — but changing an app's default is a separate call with a separate blast radius (apps/file-manager/kn-next.config.ts and the docs that mirror it).",
-    match: (_f, h) => /redis/i.test(h),
-  },
-  {
     id: 'measurement-records-quote-evidence',
     reason:
       'benchmark/ledger records quote OBSERVED hostnames verbatim — error strings (EAI_AGAIN pggw-apps.scale-zero-pg.svc), resolv.conf walks, and pre-fix DSNs are evidence of what happened, not recipes; rooting a quoted observation would falsify the record.',
@@ -82,12 +76,6 @@ const DEFERRALS: Deferral[] = [
     reason:
       'compute-* hosts are dialled gateway-internally (wake targets, per-app computes), never written into an app-consumed Secret.',
     match: (_f, h) => /^compute[-.]/.test(h),
-  },
-  {
-    id: 'documentation-placeholder-hosts',
-    reason:
-      "placeholder hostnames in worked examples (acme-*, shop-*, byo-*, my-*) stand for a reader's own service, not a knext-minted one; rooting them would teach the dot as part of the NAME.",
-    match: (_f, h) => /^(acme|shop|byo|my)[-.]/.test(h),
   },
   {
     id: 'drill-scripts',
@@ -125,7 +113,10 @@ const DEFERRALS: Deferral[] = [
     match: (f) =>
       /gateway\/internal\/appdb\/ports\.go$/.test(f) ||
       /packages\/scale-zero-pg\/docs\/appdatabase-api\.md$/.test(f) ||
-      /^\.claude\//.test(f),
+      // .claude agent notes may quote unrooted forms as evidence — but NOT
+      // .claude/skills/: those carry copy-paste templates users deploy from,
+      // so they must root (the knext-deploy CR template was exactly that).
+      (/^\.claude\//.test(f) && !/^\.claude\/skills\//.test(f)),
   },
   {
     id: 'test-fixtures',

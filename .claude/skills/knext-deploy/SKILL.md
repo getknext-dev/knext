@@ -76,7 +76,7 @@ spec:
     memoryLimit: "1Gi"
   cache:
     provider: redis                        # redis | memory
-    url: redis://redis.shop.svc:6379
+    url: redis://redis.shop.svc.:6379
     keyPrefix: storefront
     enableBytecodeCache: true              # NODE_COMPILE_CACHE on a PVC → fast cold starts
   secrets:

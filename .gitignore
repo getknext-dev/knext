@@ -133,3 +133,7 @@ go-build*/
 # it imports. Regenerable, machine-specific, and never useful in a diff.
 __pycache__/
 *.py[cod]
+
+# Test-temp scratch dirs (created at repo root by suite runs; never tracked)
+knext-*/
+sandbox-fetch-debug-*/

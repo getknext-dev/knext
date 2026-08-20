@@ -73,7 +73,7 @@ spec:
     bucket: "knext-assets-dashboard"
   cache:
     provider: "redis"
-    url: "redis://redis.default.svc.cluster.local:6379"
+    url: "redis://redis.default.svc.cluster.local.:6379"
 status:
   # set by the operator (read-only):
   url: "http://dashboard.default.svc.cluster.local"

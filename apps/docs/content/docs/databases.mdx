@@ -98,8 +98,8 @@ metadata:
 type: Opaque
 stringData:
   # transaction-mode pooler in front of Postgres, NOT the primary directly
-  DATABASE_URL: "postgresql://app:PASSWORD@acme-pooler.my-apps.svc:6432/acme"
-  DATABASE_URL_RO: "postgresql://app:PASSWORD@acme-reader-pooler.my-apps.svc:6432/acme"
+  DATABASE_URL: "postgresql://app:PASSWORD@acme-pooler.my-apps.svc.:6432/acme"
+  DATABASE_URL_RO: "postgresql://app:PASSWORD@acme-reader-pooler.my-apps.svc.:6432/acme"
 ```
 
 Two settings keep the pooler friendly to a scale-to-zero app that reconnects on every cold start:

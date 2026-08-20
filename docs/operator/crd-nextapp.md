@@ -148,7 +148,7 @@ Configures the Unified Remote Cache (Redis) and V8 Bytecode caching layer.
 spec:
   cache:
     provider: "redis"
-    url: "redis://redis.default.svc.cluster.local:6379"
+    url: "redis://redis.default.svc.cluster.local.:6379"
 ```
 
 > **Removed:** `enableBytecodeCache` and `bytecodeCacheSize` no longer exist. The

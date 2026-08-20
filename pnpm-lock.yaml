@@ -59,6 +59,9 @@ importers:
       ioredis:
         specifier: ^6.0.0
         version: 6.0.0
+      ioredis5:
+        specifier: npm:ioredis@^5.9.3
+        version: ioredis@5.9.3
       jsdom:
         specifier: ^27.3.0
         version: 27.4.0
