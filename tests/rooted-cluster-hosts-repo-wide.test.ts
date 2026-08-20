@@ -72,6 +72,12 @@ const DEFERRALS: Deferral[] = [
     match: (_f, h) => /redis/i.test(h),
   },
   {
+    id: 'measurement-records-quote-evidence',
+    reason:
+      "benchmark/ledger records quote OBSERVED hostnames verbatim — error strings (EAI_AGAIN pggw-apps.scale-zero-pg.svc), resolv.conf walks, and pre-fix DSNs are evidence of what happened, not recipes; rooting a quoted observation would falsify the record.",
+    match: (f) => /^docs\/benchmarks\//.test(f),
+  },
+  {
     id: 'gateway-internal-compute-targets',
     reason:
       'compute-* hosts are dialled gateway-internally (wake targets, per-app computes), never written into an app-consumed Secret.',
