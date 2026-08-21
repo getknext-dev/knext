@@ -62,6 +62,14 @@ export async function build(options: BuildOptions = {}) {
         "Configuration loaded",
     );
 
+    if (!hasStorage(config)) {
+        // ADR-0047 (review F3): the mode's guarantee is relative asset paths —
+        // an ASSET_PREFIX inherited from the shell would bake bucket URLs into
+        // HTML that nothing uploads, so clear it BEFORE `next build` reads it.
+        // (The mode notice itself prints at the upload step below.)
+        delete process.env.ASSET_PREFIX;
+    }
+
     // 2. Run `next build` via the project's build script.
     //    The app's next.config.ts must set output:'standalone'.
     if (!options.skipNextBuild) {

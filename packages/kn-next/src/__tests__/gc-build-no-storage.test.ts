@@ -175,6 +175,25 @@ describe("kn-next build without storage (ADR-0047 conditions 1 + 3)", () => {
         expect(cfgLine).not.toMatch(/undefined/);
     });
 
+    it("clears an inherited ASSET_PREFIX BEFORE `next build` runs (review F3)", async () => {
+        process.env.ASSET_PREFIX = "https://stale-bucket.example.com/app";
+        let prefixDuringBuild: string | undefined = "unset-sentinel";
+        runQuiet.mockImplementation((...args: unknown[]) => {
+            const argv = args[0] as string[];
+            if (argv?.[0] === "npm" && argv?.[2] === "build") {
+                prefixDuringBuild = process.env.ASSET_PREFIX;
+            }
+        });
+        const { build } = await import("../cli/build");
+        await build({});
+
+        // The mode's guarantee is relative asset paths; a stale bucket URL
+        // inherited from the shell must not reach the build.
+        expect(prefixDuringBuild).toBeUndefined();
+        expect(process.env.ASSET_PREFIX).toBeUndefined();
+        delete process.env.ASSET_PREFIX;
+    });
+
     it("with storage configured the upload still runs (regression pin)", async () => {
         loadConfig.mockResolvedValue(storageBackedConfig);
         const { build } = await import("../cli/build");
