@@ -55,7 +55,7 @@ const DOCS_META_PATH = resolve(REPO_ROOT, 'apps/docs/content/docs/meta.json');
  * (below) and compared against this — so adding a fourth publishable package fails
  * here rather than surprising a consumer.
  */
-const RELEASE_SET = ['@getknext/core', '@getknext/db', '@getknext/lib'];
+const RELEASE_SET = ['@getknext/core', '@getknext/db', '@getknext/lib', 'kn-next'];
 
 /** The canonical upgrade-order wording, shared with tests/upgrade-order-docs.test.ts. */
 const ORDER_RULE = 'operator/CRD first, then CLI';
@@ -265,7 +265,7 @@ describe('release set — discovered by scanning the workspace (#314)', () => {
     expect(PACKAGES.map((p) => p.manifest.name)).toContain('@getknext/ui');
   });
 
-  it('exactly the three policy packages are publishable — a fourth fails here', () => {
+  it('exactly the four policy packages are publishable — a fifth fails here', () => {
     const found = publishable.map((p) => p.manifest.name).sort();
     expect(
       found,
