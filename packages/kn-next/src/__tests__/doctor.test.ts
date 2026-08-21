@@ -15,16 +15,19 @@
  * cluster degrades every check to a clear SKIP (never a crash, never exit 1).
  */
 
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir as osTmpdir } from "node:os";
+import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import YAML from "yaml";
 import {
     type CheckResult,
     classifyKubectlFailure,
     formatDoctorTable,
+    inspectKubeconfig,
     KOURIER_INGRESS_CLASS,
+    type KubeconfigInspectFn,
     type KubectlFn,
     type ManifestProbeFn,
     parseDoctorArgs,
@@ -207,7 +210,13 @@ describe("runDoctor — unreachable cluster degrades to SKIP", () => {
             stderr: "The connection to the server 10.0.0.1:6443 was refused - did you specify the right host or port?",
         });
         const probe = vi.fn(okProbe);
-        const report = await runDoctor({ kubectl, probeImage: probe });
+        const report = await runDoctor({
+            kubectl,
+            probeImage: probe,
+            // Pin the kubeconfig state so this test's wording assertions do
+            // not depend on the machine's real ~/.kube/config (finding 1c).
+            inspectKubeconfig: () => ({ kind: "has-current-context" }),
+        });
         const checks = byId(report.checks);
         expect(checks.cluster.status).toBe("warn");
         for (const id of [
@@ -1127,5 +1136,281 @@ describe("probeManifest — bounded registry I/O", () => {
         } finally {
             fetchSpy.mockRestore();
         }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Finding 1c (docs/ux/ergonomics-ledger.md): `doctor` with no working cluster
+// used to answer every gate failure with "cluster connection flaked — check
+// network/VPN and retry" — misdirection for the zero-k8s persona who has NO
+// cluster yet. The gate now consults the LOCAL kubeconfig (pure file reads —
+// no network, no new kubectl verbs, so the read-only verb scan above still
+// holds) and tells that user plainly that no cluster is connected, pointing
+// at the getting-started guide. A genuinely-remote unreachable server keeps
+// the flake hint, and auth/RBAC classifications (#230) keep precedence.
+// ---------------------------------------------------------------------------
+
+const NO_CONFIG_STDERR =
+    "The connection to the server localhost:8080 was refused - did you specify the right host or port?";
+const LOCAL_REFUSED_STDERR =
+    "The connection to the server 127.0.0.1:26443 was refused - did you specify the right host or port?";
+const REMOTE_REFUSED_STDERR =
+    "The connection to the server 203.0.113.7:6443 was refused - did you specify the right host or port?";
+
+const hasCtx: KubeconfigInspectFn = () => ({ kind: "has-current-context" });
+
+/** Gate fails with `stderr`; the local client-version probe still answers. */
+function gateFailKubectl(stderr: string): KubectlFn {
+    return (args) =>
+        args.join(" ") === VERSION_KEY
+            ? { ok: true, stdout: clientVersionJson("v1.30.0"), stderr: "" }
+            : { ok: false, stdout: "", stderr };
+}
+
+describe("runDoctor — finding 1c: no-cluster-configured is not a 'flake'", () => {
+    it("state 1 — no kubeconfig at all: plain 'no cluster connected yet' + getting-started URL, never VPN", async () => {
+        const report = await runDoctor({
+            kubectl: gateFailKubectl(NO_CONFIG_STDERR),
+            probeImage: okProbe,
+            inspectKubeconfig: () => ({
+                kind: "absent",
+                searched: ["/home/dev/.kube/config"],
+            }),
+        });
+        const checks = byId(report.checks);
+        expect(checks.cluster.status).toBe("warn");
+        expect(checks.cluster.detail).toMatch(/no kubeconfig/i);
+        expect(checks.cluster.detail).toMatch(
+            /don't have a Kubernetes cluster connected yet/,
+        );
+        expect(checks.cluster.detail).toContain("/home/dev/.kube/config");
+        expect(checks.cluster.hint).toContain(
+            "https://knext.dev/docs/getting-started",
+        );
+        expect(`${checks.cluster.detail} ${checks.cluster.hint}`).not.toMatch(
+            /VPN|flaked/i,
+        );
+        // The documented degrade contract is unchanged: WARN gate, SKIP
+        // checks, exit 0.
+        for (const id of ["crd", "operator", "knative"]) {
+            expect(checks[id].status, id).toBe("skip");
+        }
+        expect(report.exitCode).toBe(0);
+    });
+
+    it("state 2 — kubeconfig exists but sets no current-context: same plain answer, names the file", async () => {
+        const report = await runDoctor({
+            kubectl: gateFailKubectl(NO_CONFIG_STDERR),
+            probeImage: okProbe,
+            inspectKubeconfig: () => ({
+                kind: "no-current-context",
+                path: "/home/dev/.kube/config",
+            }),
+        });
+        const checks = byId(report.checks);
+        expect(checks.cluster.status).toBe("warn");
+        expect(checks.cluster.detail).toContain("/home/dev/.kube/config");
+        expect(checks.cluster.detail).toMatch(/current-context/);
+        expect(checks.cluster.detail).toMatch(
+            /don't have a Kubernetes cluster connected yet/,
+        );
+        expect(checks.cluster.hint).toContain(
+            "https://knext.dev/docs/getting-started",
+        );
+        expect(`${checks.cluster.detail} ${checks.cluster.hint}`).not.toMatch(
+            /VPN|flaked/i,
+        );
+        expect(report.exitCode).toBe(0);
+    });
+
+    for (const addr of [
+        "127.0.0.1:26443",
+        "localhost:8080",
+        "0.0.0.0:6443",
+        "[::1]:26443",
+    ]) {
+        it(`state 3 — connection refused on the LOCAL address ${addr}: stale local cluster, not a flake`, async () => {
+            const stderr = `The connection to the server ${addr} was refused - did you specify the right host or port?`;
+            const report = await runDoctor({
+                kubectl: gateFailKubectl(stderr),
+                probeImage: okProbe,
+                inspectKubeconfig: hasCtx,
+            });
+            const checks = byId(report.checks);
+            expect(checks.cluster.status).toBe("warn");
+            expect(checks.cluster.detail).toContain(addr);
+            expect(checks.cluster.detail).toMatch(
+                /local cluster .* not running/i,
+            );
+            expect(checks.cluster.hint).toContain(
+                "https://knext.dev/docs/getting-started",
+            );
+            expect(
+                `${checks.cluster.detail} ${checks.cluster.hint}`,
+            ).not.toMatch(/VPN|flaked/i);
+            expect(report.exitCode).toBe(0);
+        });
+    }
+
+    it("remote refused server KEEPS the flake hint and never claims there is no cluster", async () => {
+        const report = await runDoctor({
+            kubectl: gateFailKubectl(REMOTE_REFUSED_STDERR),
+            probeImage: okProbe,
+            inspectKubeconfig: hasCtx,
+        });
+        const checks = byId(report.checks);
+        expect(checks.cluster.status).toBe("warn");
+        expect(checks.cluster.hint).toBe(
+            "cluster connection flaked — check network/VPN and retry",
+        );
+        expect(`${checks.cluster.detail} ${checks.cluster.hint}`).not.toMatch(
+            /don't have a Kubernetes cluster/,
+        );
+        expect(report.exitCode).toBe(0);
+    });
+
+    it("auth-classified gate failures (#230) keep precedence over the kubeconfig diagnosis", async () => {
+        // Contradictory inputs (an exec-credential error implies a configured
+        // context) — the conservative answer is the auth hint, never a
+        // "no cluster" claim built from a racing filesystem read.
+        const report = await runDoctor({
+            kubectl: gateFailKubectl(
+                "Unable to connect to the server: getting credentials: exec: executable oci failed with exit code 1",
+            ),
+            probeImage: okProbe,
+            inspectKubeconfig: () => ({ kind: "absent", searched: [] }),
+        });
+        const checks = byId(report.checks);
+        expect(checks.cluster.hint).toMatch(/re-authenticate/);
+        expect(`${checks.cluster.detail} ${checks.cluster.hint}`).not.toMatch(
+            /getting-started|don't have a Kubernetes cluster/,
+        );
+    });
+
+    it("the DEFAULT inspector is wired in: no injection + a scratch no-cluster env still yields the guidance", async () => {
+        // Every other test injects inspectKubeconfig, so this is the ONLY
+        // assertion on the call-site fallback — replacing the default with a
+        // has-current-context stub (the reviewer's M2 mutation) must go red
+        // here, not stay green.
+        const dir = mkdtempSync(join(osTmpdir(), "knext-doctor-1c-wiring-"));
+        vi.stubEnv("KUBECONFIG", join(dir, "does-not-exist"));
+        try {
+            const report = await runDoctor({
+                kubectl: gateFailKubectl(NO_CONFIG_STDERR),
+                probeImage: okProbe,
+            });
+            const checks = byId(report.checks);
+            expect(checks.cluster.status).toBe("warn");
+            expect(checks.cluster.detail).toMatch(
+                /don't have a Kubernetes cluster connected yet/,
+            );
+            expect(checks.cluster.hint).toContain(
+                "https://knext.dev/docs/getting-started",
+            );
+        } finally {
+            vi.unstubAllEnvs();
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("the three no-cluster states stay pairwise distinguishable in the detail line", async () => {
+        const run = (inspect: KubeconfigInspectFn, stderr: string) =>
+            runDoctor({
+                kubectl: gateFailKubectl(stderr),
+                probeImage: okProbe,
+                inspectKubeconfig: inspect,
+            }).then((r) => byId(r.checks).cluster.detail);
+        const details = await Promise.all([
+            run(() => ({ kind: "absent", searched: ["/x"] }), NO_CONFIG_STDERR),
+            run(
+                () => ({ kind: "no-current-context", path: "/x" }),
+                NO_CONFIG_STDERR,
+            ),
+            run(hasCtx, LOCAL_REFUSED_STDERR),
+        ]);
+        expect(new Set(details).size).toBe(3);
+    });
+});
+
+describe("inspectKubeconfig — the default local kubeconfig inspector", () => {
+    const dirs: string[] = [];
+    const tmp = () => {
+        const d = mkdtempSync(join(osTmpdir(), "knext-doctor-1c-"));
+        dirs.push(d);
+        return d;
+    };
+    afterEach(() => {
+        vi.unstubAllEnvs();
+        for (const d of dirs.splice(0)) {
+            rmSync(d, { recursive: true, force: true });
+        }
+    });
+
+    it("absent: $KUBECONFIG points at nothing that exists", () => {
+        const dir = tmp();
+        const missing = join(dir, "nope");
+        vi.stubEnv("KUBECONFIG", missing);
+        expect(inspectKubeconfig()).toEqual({
+            kind: "absent",
+            searched: [missing],
+        });
+    });
+
+    it("absent: no $KUBECONFIG and no ~/.kube/config (HOME redirected)", () => {
+        const dir = tmp();
+        vi.stubEnv("KUBECONFIG", "");
+        vi.stubEnv("HOME", dir);
+        expect(inspectKubeconfig()).toEqual({
+            kind: "absent",
+            searched: [join(dir, ".kube", "config")],
+        });
+    });
+
+    it("no-current-context: an EMPTY config file (a torn-down local cluster's leftover)", () => {
+        const dir = tmp();
+        const cfg = join(dir, "config");
+        writeFileSync(cfg, "");
+        vi.stubEnv("KUBECONFIG", cfg);
+        expect(inspectKubeconfig()).toEqual({
+            kind: "no-current-context",
+            path: cfg,
+        });
+    });
+
+    it('no-current-context: `current-context: ""`', () => {
+        const dir = tmp();
+        const cfg = join(dir, "config");
+        writeFileSync(cfg, 'apiVersion: v1\ncurrent-context: ""\n');
+        vi.stubEnv("KUBECONFIG", cfg);
+        expect(inspectKubeconfig()).toEqual({
+            kind: "no-current-context",
+            path: cfg,
+        });
+    });
+
+    it("has-current-context when one is set", () => {
+        const dir = tmp();
+        const cfg = join(dir, "config");
+        writeFileSync(cfg, "current-context: prod\n");
+        vi.stubEnv("KUBECONFIG", cfg);
+        expect(inspectKubeconfig()).toEqual({ kind: "has-current-context" });
+    });
+
+    it("$KUBECONFIG list: any file that sets current-context wins (kubectl merge rule)", () => {
+        const dir = tmp();
+        const a = join(dir, "a");
+        const b = join(dir, "b");
+        writeFileSync(a, "");
+        writeFileSync(b, "current-context: prod\n");
+        vi.stubEnv("KUBECONFIG", `${a}${delimiter}${b}`);
+        expect(inspectKubeconfig()).toEqual({ kind: "has-current-context" });
+    });
+
+    it("a corrupt config NEVER claims no-cluster (conservative: keep the generic path)", () => {
+        const dir = tmp();
+        const cfg = join(dir, "config");
+        writeFileSync(cfg, "{{{ not yaml");
+        vi.stubEnv("KUBECONFIG", cfg);
+        expect(inspectKubeconfig()).toEqual({ kind: "has-current-context" });
     });
 });
