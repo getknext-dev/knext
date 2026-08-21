@@ -28,6 +28,18 @@ vi.mock("../cli/shared", async (importOriginal) => ({
 
 const runQuiet = vi.hoisted(() => vi.fn());
 const runCapture = vi.hoisted(() => vi.fn(() => ""));
+const kubectlMock = vi.hoisted(() =>
+    vi.fn(() => ({ ok: false, stdout: "", stderr: "" })),
+);
+vi.mock("../cli/doctor", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("../cli/doctor")>()),
+    // statusMain wires kubectl from ./doctor's kubectlRunner (a REAL spawnSync),
+    // NOT from ../cli/exec's runCapture — mocking only the latter left this
+    // suite spawning real kubectl in CI, where a slow connection-refused dial
+    // grazed the 5s timeout (2 flakes in 4 runs). Hermetic now: no child
+    // processes, deterministic fast failure past the usage stage.
+    kubectlRunner: kubectlMock,
+}));
 vi.mock("../cli/exec", () => ({
     runQuiet,
     runCapture,
@@ -338,8 +350,9 @@ describe("statusMain / parseRollbackArgs / parsePreviewArgs usage rejections", (
 
     it("statusMain takes the app from kn-next.config.ts when the positional is absent", async () => {
         // Proves the loadConfig branch is reached, without a cluster: the
-        // resolved name is what runStatus would query for, and kubectl is
-        // mocked to return nothing, so it fails past the usage stage.
+        // resolved name is what runStatus would query for, and kubectlRunner
+        // (./doctor — the dep statusMain actually wires) is mocked to fail
+        // fast, so it gets past the usage stage without spawning anything.
         const dir = mkdtempSync(join(tmpdir(), "knext-status-config-"));
         writeFileSync(join(dir, "kn-next.config.ts"), "export default {};\n");
         process.chdir(dir);
