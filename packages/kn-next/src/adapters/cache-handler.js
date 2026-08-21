@@ -19,6 +19,11 @@
 // `@getknext/core/adapters/cache-handler` subpath stays default-only, because
 // it exists to be handed to Next's `cacheHandler` option by path, not called.
 import { trackWrite } from './cache-write-registry.js';
+// Slow-dependency discrimination (cold-start ledger row 3). Observation only:
+// it attaches two listeners to the connecting client and names which PHASE was
+// slow (TCP connect vs the ready-check INFO). No timer, no budget, no verdict —
+// see the header of slow-dep-log.js.
+import { instrumentConnectTiming } from './slow-dep-log.js';
 
 // ─── Cache Event Logger ───
 
@@ -204,7 +209,12 @@ function waitForReady(client) {
   return new Promise((resolve) => {
     let settled = false;
 
+    // Times connect and ready SEPARATELY for the whole of this wait; detached
+    // with the rest of the listeners below, so nothing outlives the attempt.
+    const detachTiming = instrumentConnectTiming(client);
+
     const cleanup = () => {
+      detachTiming();
       client.removeListener('ready', onReady);
       client.removeListener('error', onFail);
       client.removeListener('end', onFail);
