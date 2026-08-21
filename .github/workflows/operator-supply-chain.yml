@@ -130,9 +130,18 @@ jobs:
           mkdir operator-oci-sbom
           ln -s "$(pwd)/operator-oci/blobs" operator-oci-sbom/blobs
           cp operator-oci/oci-layout operator-oci-sbom/
+          # Multi-arch: after dropping attestation manifests the index still holds
+          # one image manifest PER PLATFORM, and syft refuses an oci-dir with more
+          # than one ("found 2"). The SBOM view selects the amd64 manifest — the
+          # arm64 binary is cross-compiled from the SAME go.sum module inputs in
+          # the same build, so one SBOM describes both arches' contents; the
+          # Trivy GATE still scans the real multi-arch layout directly.
           jq '{schemaVersion: 2, mediaType: "application/vnd.oci.image.index.v1+json",
-               manifests: [.manifests[] | select(.annotations["vnd.docker.reference.type"] != "attestation-manifest")]}' \
+               manifests: [.manifests[] | select(.annotations["vnd.docker.reference.type"] != "attestation-manifest")
+                                        | select((.platform.architecture // "amd64") == "amd64")]}' \
             "operator-oci/blobs/sha256/${NESTED}" > operator-oci-sbom/index.json
+          test "$(jq '.manifests | length' operator-oci-sbom/index.json)" = "1" || {
+            echo "SBOM view must hold exactly one manifest" >&2; exit 1; }
 
       # output-file is resolved relative to $GITHUB_WORKSPACE (repo root) for a
       # `uses:` step. This is the single canonical SBOM path; upload + attest below
