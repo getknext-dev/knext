@@ -134,3 +134,13 @@ with no cluster access, and inherits every derived dist-bin guard (help exit-0, 
 rejection, no-dump) automatically. The placeholder preflight and the deps-not-installed (exit 127)
 translation both raise through the `UsageError` family, extending the "renders as a message, never
 a FATAL dump" contract from usage mistakes to these two expected config/environment states.
+
+**Consequence:** deploy now refuses `<...>`-shaped values anywhere in the config, **except the
+free-text `env` map** — a documented narrowing of what the CLI will ship relative to what
+`config.ts` accepts, with a stated false-positive trade-off: `env` is arbitrary user data where
+angle brackets are at least as likely real markup (`ALLOWED_TAGS: "<b><i>"`) as a forgotten
+placeholder, and a confidently wrong refusal — or even a confidently wrong warning — on a
+schema-valid value is worse than saying nothing, so `env` hits are skipped entirely rather than
+warn-tiered. The carve-out is exactly the root `env` key (a type-level exemption of the one
+`Record<string,string>` free-text surface), not a return to field enumeration; nested keys that
+happen to be named `env` stay scanned, and dodge tests pin both sides.

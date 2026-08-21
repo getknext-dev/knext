@@ -228,4 +228,19 @@ describe("deploy rejects placeholder config values before any work", () => {
         await deploy();
         expect(renderNextAppCR).toHaveBeenCalled();
     });
+
+    it("dodge (env carve-out): angle-bracket markup in env deploys — no refusal, no escapeless block", async () => {
+        // Architect-gate fix round: env is free-text user data
+        // (Record<string,string>), so a schema-valid value like an HTML
+        // allowlist must never make deploy refusable. The preflight skips the
+        // root env map entirely (skip, not warn — see placeholder-preflight.ts).
+        loadConfig.mockResolvedValue({
+            ...cleanConfig,
+            env: { ALLOWED_TAGS: "<b><i>", TEMPLATE: "Hello <name>!" },
+        });
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const deploy = await importDeploy();
+        await deploy();
+        expect(renderNextAppCR).toHaveBeenCalled();
+    });
 });

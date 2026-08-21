@@ -12,6 +12,9 @@
  * enumerated field list is how the second placeholder field gets missed; the
  * suite's adversarial-dodge cases (an unknown deeply-nested key, an array
  * element) exist to keep this generic.
+ *
+ * ONE type-level carve-out (architect gate, ADR-0046 Amendment 1): the root
+ * `env` map is exempt — see the comment inside {@link findPlaceholders}.
  */
 
 import type { KnativeNextConfig } from "../config";
@@ -20,7 +23,7 @@ import { UsageError } from "./shared";
 
 /** One placeholder hit: where it is, and the value still sitting there. */
 export interface PlaceholderFinding {
-    /** Dot path into the config (`registry`, `storage.bucket`, `env.API_KEY`, `domains[1]`). */
+    /** Dot path into the config (`registry`, `storage.bucket`, `domains[1]`). */
     path: string;
     value: string;
 }
@@ -35,7 +38,8 @@ const PLACEHOLDER_RE = /<[^<>]+>/;
 
 /**
  * Walk the config object generically and collect every string field that
- * still carries a `<...>` placeholder. Absent optional blocks (storage —
+ * still carries a `<...>` placeholder — except the root `env` free-text map
+ * (see the carve-out comment below). Absent optional blocks (storage —
  * ADR-0047's valid image-served mode) simply are not visited: absence is
  * never a finding. Cycle-safe: a self-referencing config terminates.
  */
@@ -66,6 +70,23 @@ export function findPlaceholders(
             return;
         }
         for (const [key, child] of Object.entries(value)) {
+            // Architect-gate carve-out: the ROOT `env` map (config.ts
+            // `env?: Record<string, string>`) is exempt from the scan — SKIPPED,
+            // not warn-tiered. It is the config's one free-text surface: arbitrary
+            // user data where `<...>` is at least as likely to be real markup
+            // (`ALLOWED_TAGS: "<b><i>"`, a template string) as a forgotten
+            // placeholder — the scaffold never puts placeholders in env, so a hit
+            // here has no scaffold provenance. A hard fail would make a
+            // schema-valid config undeployable with no escape, and even a warning
+            // would assert "this is the placeholder from the scaffold" about the
+            // user's own data on every deploy — the gate's principle is that a
+            // confidently wrong hint is worse than none, so the scan says nothing.
+            // Exactly `path === ""` + key `env`: a nested block that happens to be
+            // named env is not the contract's free-text map and stays scanned
+            // (pinned by the dodge tests, so this cannot widen silently).
+            if (path === "" && key === "env") {
+                continue;
+            }
             visit(child, path === "" ? key : `${path}.${key}`);
         }
     };

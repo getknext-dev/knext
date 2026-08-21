@@ -61,7 +61,8 @@ storage](/docs/multi-cloud#starting-without-object-storage).
 **Placeholders fail fast.** Before any build step, deploy refuses config values still carrying a
 `<...>` placeholder from the scaffold (like `ghcr.io/<your-user>`), with a per-field explanation of
 what the value is for and what to put there — so an unfinished config never costs you a
-multi-minute build. Run [`kn-next validate`](#kn-next-validate) to get the same check on its own.
+multi-minute build. Values under `env` are exempt: they are your app's own free-text data, where
+angle brackets can be perfectly legitimate (an HTML allowlist, a template string). Run [`kn-next validate`](#kn-next-validate) to get the same check on its own.
 And if the build script cannot find `next` (dependencies not installed yet), deploy tells you to
 run `npm install` instead of printing a crash.
 
