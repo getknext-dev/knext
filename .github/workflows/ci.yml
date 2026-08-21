@@ -167,6 +167,9 @@ jobs:
       - name: Typecheck @getknext/core (tsc --noEmit, tests in scope)
         run: pnpm --filter @getknext/core typecheck
 
+      - name: Typecheck kn-next (alias shim — node --check, no TS)
+        run: pnpm --filter kn-next typecheck
+
       # @getknext/ui (private component lib) — self-contained, no dist deps; the
       # P6c coverage guard (ci-typecheck-contract.test.ts) requires every TS
       # workspace member be gated or documented-excluded.

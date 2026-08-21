@@ -2,7 +2,7 @@
   "$schema": "https://unpkg.com/@changesets/config@3.0.0/schema.json",
   "changelog": "@changesets/cli/changelog",
   "commit": false,
-  "fixed": [["@getknext/core", "@getknext/lib", "@getknext/db"]],
+  "fixed": [["@getknext/core", "@getknext/lib", "@getknext/db", "kn-next"]],
   "linked": [],
   "access": "public",
   "baseBranch": "main",

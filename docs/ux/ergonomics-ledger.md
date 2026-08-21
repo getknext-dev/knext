@@ -70,3 +70,85 @@ behavioural tests caught what every static guard missed).
 wall (can the persona fill `kn-next.config.ts`? does `create` produce something deployable
 without edits?) → the "get a cluster" journey (the big wall; founder direction: git-integration +
 prepared clouds). User-owned, unblocking 1a permanently: publish the `kn-next` alias package.
+
+---
+
+## Row 3 — 2026-08-21, the config-authoring wall (iteration-4 sitting)
+
+Instrument: the row-2 tarball install (main @ post-#810), `kn-next create my-app` run as the
+persona, scaffold inspected, and the schema's requirements read from the source of truth
+(`packages/kn-next/src/config.ts`, `cli/validate.ts`).
+
+**What works:** `create` scaffolds 13 files, exit 0 — a complete Next.js app with the guarded
+instrumentation pair, Dockerfile, tests, and a genuinely well-commented `kn-next.config.ts`
+(every field explained in plain language, scaleDownDelay trade-off included). The persona gets
+a real app skeleton in one command.
+
+**Findings:**
+
+| # | finding | severity for the persona |
+|---|---|---|
+| 3a | `create`'s parting line — "install deps, then `npm run test:seam` to prove the instrumentation seams survive the standalone build" — is contributor jargon. The persona's actual next steps (`cd my-app && npm install && npm run dev`, then doctor/deploy when ready) are not stated. | Medium — first-contact tone, easy fix |
+| 3b | **The wall, measured at the source: a minimal deploy hard-requires BOTH a container registry (`'registry' is required`) and an object-storage bucket (`'storage' is required`, `config.ts:258` non-optional).** The scaffold's placeholders (`ghcr.io/<your-user>`, `<your-assets-bucket>`) each imply an account, a provisioning step, and CLI auth (docker login, gsutil/aws) the persona has never done. Vercel's hello-world needs neither. | **The #1 wall after "get a cluster"** |
+
+**Lever candidate (GATED — config-schema change = escalation trigger, architect summoned):**
+make `storage` optional for starters — omitted storage ⇒ no asset upload, no assetPrefix, the
+standalone server serves its own `_next/static` from the image (how `next start` works
+everywhere else). Trade-offs to be judged by the gate: no CDN offload (fine for starters,
+documented as the growth path), image a little larger, cold pod serves statics. The registry
+half has no in-pod dodge (an image must live somewhere) — its lever is guidance (`create`
+could ask/derive, `doctor` could verify push access) and belongs to a later iteration.
+
+**Not yet reached (fog):** the actual `npm install && kn-next deploy` run of the scaffold
+against the live cluster (blocked on the wall above being decided); the "get a cluster"
+journey itself.
+
+---
+
+## Row 4 — 2026-08-21, the registry/placeholder half of the wall (iteration-6 sitting)
+
+Instrument: the row-3 scaffold (`my-app`, placeholders untouched — exactly what a persona has
+five minutes in), row-2 tarball install, `validate` and `deploy --dry-run` run as the persona.
+
+| # | finding (evidence verbatim) | severity |
+|---|---|---|
+| 4a | **`kn-next validate` is not dispatched**: `unknown command: validate` (no did-you-mean match). `src/cli/validate.ts` exists; the #810 dispatch contract routes ~10 verbs and validate is not among them — so the persona has NO way to check a config without deploying. | High |
+| 4b | **`deploy` accepts placeholder values silently and heads into the build**: with `registry: "ghcr.io/<your-user>"` and `bucket: "<your-assets-bucket>"` untouched, `--dry-run` logged `assetPrefix: "https://storage.googleapis.com/<your-assets-bucket>/my-app"` — the placeholder interpolated into a URL, no complaint — and proceeded to `next build`. A persona with deps installed burns a full multi-minute build before failing at the image push. Feedback-loop shape: the most expensive possible place to learn the config is unfinished. | **High — iteration-6 lever** |
+| 4c | The `next: command not found` failure (deps not yet installed) renders as FATAL + serialized error object — the #810 friendly-error contract covered USAGE errors; deploy-path environment failures (missing deps, missing next) still dump. "Run npm install first" is the persona answer. | Medium |
+
+**Iteration-6 scope (one PR, no schema change — no design-gate trigger expected):**
+fail-fast placeholder preflight — deploy (and validate, once routed) detects `<...>`-shaped
+values in config fields BEFORE any build step and answers plainly per field ("registry still has
+the placeholder — put your registry here; what a registry is in one sentence; docs link").
+Route `validate` in the dispatch contract (or state why not, in the contract's own terms).
+4c folds in if cheap: the missing-`next` failure becomes a plain write-and-exit message.
+
+**Fog update:** the "get a cluster" journey remains the last unmeasured wall; iteration 5
+(optional storage, in review) removes the bucket placeholder entirely, which shrinks 4b's
+surface to the registry field — the two levers compose.
+
+---
+
+## Row 5 — 2026-08-21, the "get a cluster" wall (the last unmeasured wall)
+
+Instrument: the docs site read as the persona `doctor` now redirects there (iteration 3 made
+doctor say "you don't have a cluster connected yet" + docs pointer — this sitting measures
+whether the destination delivers).
+
+| # | finding | severity |
+|---|---|---|
+| 5a | **No local-cluster on-ramp exists anywhere in the docs.** Zero mentions of kind / k3d / minikube / OrbStack / Docker Desktop across every page (grepped all of `apps/docs/content/docs/`). The persona's cheapest first cluster — a laptop cluster in minutes — is undocumented, despite the project itself dev-testing on kind and OrbStack (the integration gate runs on kind). | **High — iteration-7 lever** |
+| 5b | The quickstart's prerequisite line ("A Kubernetes cluster with **Knative Serving** installed…") is a dead end: no link to ANY of the cluster paths, local or managed. The persona doctor redirects here meets a wall restated, not an on-ramp. | High (same lever) |
+| 5c | Counter-finding, credit where due: the managed-cloud pages (gke/eks/aks/oke/openshift, ~200 lines each) genuinely teach cluster CREATION with real commands (`gcloud container clusters create…`), not just connection — the cloud half of the journey is in good shape once the persona finds it. | — |
+
+**Iteration-7 scope (docs-only, no code, no design-gate trigger): a "Your first cluster" page**
+— local path first (kind or OrbStack + the Knative quickstart + the knext operator install, the
+same steps the repo's own integration gate scripts), then handoff links to the five managed-cloud
+pages — and the quickstart prerequisite line becomes a link to it ("Don't have a cluster? Start
+here"). Sequencing: the getting-started.mdx line edit collides with iteration 5's in-review F2
+edits of the same file — iteration 7 lands AFTER optional-storage merges (same stacking rule as
+iteration 6).
+
+**Fog now empty of walls:** with rows 1–5, every step of `npx … → config → cluster → deploy` has
+been measured. Remaining fog is the founder's git-integration/prepared-clouds vision (a product
+direction, not a sitting) and re-measures as levers land.
