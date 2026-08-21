@@ -1223,7 +1223,12 @@ describe("runDoctor — finding 1c: no-cluster-configured is not a 'flake'", () 
         expect(report.exitCode).toBe(0);
     });
 
-    for (const addr of ["127.0.0.1:26443", "localhost:8080", "0.0.0.0:6443"]) {
+    for (const addr of [
+        "127.0.0.1:26443",
+        "localhost:8080",
+        "0.0.0.0:6443",
+        "[::1]:26443",
+    ]) {
         it(`state 3 — connection refused on the LOCAL address ${addr}: stale local cluster, not a flake`, async () => {
             const stderr = `The connection to the server ${addr} was refused - did you specify the right host or port?`;
             const report = await runDoctor({
@@ -1280,6 +1285,32 @@ describe("runDoctor — finding 1c: no-cluster-configured is not a 'flake'", () 
         expect(`${checks.cluster.detail} ${checks.cluster.hint}`).not.toMatch(
             /getting-started|don't have a Kubernetes cluster/,
         );
+    });
+
+    it("the DEFAULT inspector is wired in: no injection + a scratch no-cluster env still yields the guidance", async () => {
+        // Every other test injects inspectKubeconfig, so this is the ONLY
+        // assertion on the call-site fallback — replacing the default with a
+        // has-current-context stub (the reviewer's M2 mutation) must go red
+        // here, not stay green.
+        const dir = mkdtempSync(join(osTmpdir(), "knext-doctor-1c-wiring-"));
+        vi.stubEnv("KUBECONFIG", join(dir, "does-not-exist"));
+        try {
+            const report = await runDoctor({
+                kubectl: gateFailKubectl(NO_CONFIG_STDERR),
+                probeImage: okProbe,
+            });
+            const checks = byId(report.checks);
+            expect(checks.cluster.status).toBe("warn");
+            expect(checks.cluster.detail).toMatch(
+                /don't have a Kubernetes cluster connected yet/,
+            );
+            expect(checks.cluster.hint).toContain(
+                "https://knext.dev/docs/getting-started",
+            );
+        } finally {
+            vi.unstubAllEnvs();
+            rmSync(dir, { recursive: true, force: true });
+        }
     });
 
     it("the three no-cluster states stay pairwise distinguishable in the detail line", async () => {

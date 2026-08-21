@@ -297,9 +297,13 @@ const GETTING_STARTED_URL = `${DOCS_URL}/docs/getting-started`;
 /** The persona-plain hint for every no-cluster-configured state (finding 1c). */
 const NO_CLUSTER_HINT = `you don't have a Kubernetes cluster connected yet — kn-next deploys into one; follow ${GETTING_STARTED_URL} to get set up, then re-run doctor`;
 
-/** A refused dial on an address that can only be THIS machine. */
+/**
+ * A refused dial on an address that can only be THIS machine. Anchored on
+ * start / whitespace / "/" rather than \b: a word boundary can never precede
+ * "[", which made the [::1] alternative unmatchable (review-ux3 issue 1).
+ */
 const LOCAL_APISERVER_RE =
-    /\b((?:127\.0\.0\.1|0\.0\.0\.0|localhost|\[::1\]):\d+)/;
+    /(?:^|[\s/])((?:127\.0\.0\.1|0\.0\.0\.0|localhost|\[::1\]):\d+)/;
 
 interface NoClusterDiagnosis {
     detail: string;
@@ -333,8 +337,8 @@ export function diagnoseNoCluster(
     const local = LOCAL_APISERVER_RE.exec(stderr);
     if (local?.[1] && /refused/i.test(stderr)) {
         return {
-            detail: `connection refused at ${local[1]} — an address on THIS machine, so this is a leftover local cluster (kind/minikube/OrbStack/k3d) that is not running, not a network problem; all cluster checks skipped`,
-            hint: `your kubeconfig points at a local cluster that is not running — start it again, or follow ${GETTING_STARTED_URL} to connect a different cluster`,
+            detail: `connection refused at ${local[1]} — an address on THIS machine, usually a leftover local cluster (kind/minikube/OrbStack/k3d) that is not running; all cluster checks skipped`,
+            hint: `your kubeconfig points at a local address with nothing listening — restart that local cluster (or the tunnel that used to forward this port), or follow ${GETTING_STARTED_URL} to connect a different cluster`,
         };
     }
     return undefined;
