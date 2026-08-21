@@ -26,7 +26,9 @@ vi.mock("../cli/exec", () => ({
 const uploadAssets = vi.fn<AnyFn>(async () => {});
 const getAssetPrefix = vi.fn<AnyFn>(() => "https://cdn.example.com/_next");
 const reclaimBuildPrefix = vi.fn<AnyFn>();
-vi.mock("../utils/asset-upload", () => ({
+vi.mock("../utils/asset-upload", async (importOriginal) => ({
+    // keep the REAL hasStorage/notice exports (ADR-0047) — stub only the seams
+    ...(await importOriginal<object>()),
     uploadAssets: (...a: unknown[]) => uploadAssets(...a),
     getAssetPrefix: (...a: unknown[]) => getAssetPrefix(...a),
     reclaimBuildPrefix: (...a: unknown[]) => reclaimBuildPrefix(...a),
@@ -148,7 +150,7 @@ describe("deploy() applyOverrides", () => {
 
         const cfg = renderNextAppCR.mock.calls.at(-1)?.[0] as KnativeNextConfig;
         expect(cfg.registry).toBe("reg2.example.com");
-        expect(cfg.storage.bucket).toBe("bucket2");
+        expect(cfg.storage?.bucket).toBe("bucket2");
     });
 
     it("KN_REDIS_URL overrides a redis cache url", async () => {

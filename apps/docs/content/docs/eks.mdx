@@ -67,7 +67,7 @@ Point any stateful component's PVC at this StorageClass.
 
 ## 3. Storage: S3
 
-knext uploads build output (static assets) to an object store keyed by build ID and serves it from
+With object storage configured, knext uploads build output (static assets) to an object store keyed by build ID and serves it from
 `assetPrefix`. On EKS that store is an **S3 bucket**:
 
 ```bash

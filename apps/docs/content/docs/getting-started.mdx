@@ -7,8 +7,11 @@ Take an existing Next.js app from `next build` to a scale-to-zero Knative servic
 **official Next.js Deployment Adapter API** — no fork, no custom runtime.
 
 <Callout type="info">
-**Prerequisites.** A Kubernetes cluster with **Knative Serving** installed, **Next.js 16.x**, a
-container registry, and an object-storage bucket (`gcs`, `s3`, or `minio`).
+**Prerequisites.** A Kubernetes cluster with **Knative Serving** installed, **Next.js 16.x**, and a
+container registry. An object-storage bucket (`gcs`, `s3`, `minio`, or `azure`) is **optional** —
+start without one (your app serves its static files from its own image, like `next start`) and add
+it later for CDN offload. See
+[Starting without object storage](/docs/multi-cloud#starting-without-object-storage).
 </Callout>
 
 ## 0 · Install the packages
@@ -71,8 +74,9 @@ export default config;
 ## 2 · Write the deploy config
 
 knext reads a typed `kn-next.config.ts`. The config type is `KnativeNextConfig`, exported from
-`@getknext/core`. The minimum valid config requires `name`, `registry`, and a `storage` block with
-`provider`, `bucket`, and `publicUrl`.
+`@getknext/core`. The minimum valid config requires just `name` and `registry`. The `storage`
+block is optional: without it, static assets are served from your app's container image — every
+deploy says so explicitly — and you can add the block later for bucket/CDN delivery.
 
 ```ts title="kn-next.config.ts"
 import type { KnativeNextConfig } from '@getknext/core';
@@ -80,6 +84,7 @@ import type { KnativeNextConfig } from '@getknext/core';
 const config: KnativeNextConfig = {
   name: 'acme',
   registry: 'registry.example.com/acme',
+  // Optional — omit to serve static assets from the image (like `next start`):
   storage: {
     provider: 'gcs', // one of: gcs | s3 | minio | azure
     bucket: 'acme-assets',
@@ -94,9 +99,9 @@ export default config;
 ```
 
 <Callout>
-`storage.provider` is validated against `gcs | s3 | minio | azure`. Each shells out to that cloud's
-CLI (`gsutil` / `aws` / `mc` / `az`), which must be installed and authenticated in your build
-environment. See [Multi-cloud deploy](/docs/multi-cloud).
+If you configure `storage`, its `provider` is validated against `gcs | s3 | minio | azure`. Each
+shells out to that cloud's CLI (`gsutil` / `aws` / `mc` / `az`), which must be installed and
+authenticated in your build environment. See [Multi-cloud deploy](/docs/multi-cloud).
 </Callout>
 
 The `scaling` block also carries the full set of autoscaling knobs (`containerConcurrency`,
@@ -143,13 +148,13 @@ default `deploy` flow. Full flag tables are on the [CLI reference](/docs/cli).
 
 | Command | What it does | What it writes |
 |---|---|---|
-| `npx kn-next deploy` | Build → push → apply the digest-pinned `NextApp` CR. The default. | Applies the `NextApp` CR; uploads static assets to your bucket. |
+| `npx kn-next deploy` | Build → push → apply the digest-pinned `NextApp` CR. The default. | Applies the `NextApp` CR; with object storage configured, also uploads static assets to your bucket. |
 | `npx kn-next doctor` | Cluster-prereq preflight: CRD, operator, admission webhook, ingress class, Knative Serving. | Nothing — read-only. |
 | `npx kn-next status` | The operator's honest `Ready` / `Degraded` / `Reconciling` / `DatabaseReady` conditions. | Nothing — read-only. |
 | `npx kn-next rollback` | Pin serving traffic to a prior Knative Revision (or clear the pin). | One merge-patch of `spec.traffic` on the `NextApp` CR. |
 | `npx kn-next db bind` | Bind an existing Postgres Secret as `DATABASE_URL`. | One merge-patch of `spec.database.secretRef` on the `NextApp` CR. |
 | `npx kn-next db migrate` | Apply pending drizzle migrations against the **writer**, once. | Your database only — no cluster write. |
-| `npx kn-next gc` | Reap superseded `_next/static/<build-id>/` prefixes (over-keep, never over-delete). | Deletes old asset prefixes from your bucket; reads the CR only. |
+| `npx kn-next gc` | Reap superseded `_next/static/<build-id>/` prefixes (over-keep, never over-delete). | With object storage configured, deletes old asset prefixes from your bucket (reads the CR only); with none, reports there is nothing to reap. |
 
 ```bash title="shell"
 npx kn-next doctor                                             # before your first deploy

@@ -17,10 +17,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { KnativeNextConfig } from "../config";
 import {
     BUILD_MARKER_FILENAME,
     reclaimBuildPrefix,
+    type StorageBackedConfig,
     stageStandaloneAssets,
 } from "../utils/asset-upload";
 
@@ -98,7 +98,7 @@ describe("stageStandaloneAssets", () => {
 });
 
 describe("reclaimBuildPrefix", () => {
-    const config: KnativeNextConfig = {
+    const config: StorageBackedConfig = {
         name: "my-app",
         registry: "r",
         storage: {

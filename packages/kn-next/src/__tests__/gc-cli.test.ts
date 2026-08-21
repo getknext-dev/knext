@@ -19,9 +19,9 @@ import { describe, expect, it, vi } from "vitest";
  */
 
 import { parseGcArgs, renderGcReport, runAssetGC } from "../cli/gc";
-import type { KnativeNextConfig } from "../config";
+import type { StorageBackedConfig } from "../utils/asset-upload";
 
-function makeConfig(name = "shop"): KnativeNextConfig {
+function makeConfig(name = "shop"): StorageBackedConfig {
     return {
         name,
         registry: "registry.invalid/e2e",
@@ -31,7 +31,7 @@ function makeConfig(name = "shop"): KnativeNextConfig {
             publicUrl: "https://example.test/b",
             assetRetention: 1,
         },
-    } as unknown as KnativeNextConfig;
+    } as unknown as StorageBackedConfig;
 }
 
 /** currentTraffic JSON as the operator writes it (#92). */

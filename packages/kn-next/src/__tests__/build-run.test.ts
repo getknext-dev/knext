@@ -20,7 +20,11 @@ const loadConfig = vi.hoisted(() => vi.fn());
 vi.mock("../cli/shared", () => ({ loadConfig }));
 
 const uploadAssets = vi.hoisted(() => vi.fn(async () => {}));
-vi.mock("../utils/asset-upload", () => ({ uploadAssets }));
+vi.mock("../utils/asset-upload", async (importOriginal) => ({
+    // keep the REAL hasStorage/notice exports (ADR-0047) — stub only the seams
+    ...(await importOriginal<object>()),
+    uploadAssets,
+}));
 
 const healBunExportTargets = vi.hoisted(() =>
     vi.fn(() => ({ copied: [], skipped: [] })),

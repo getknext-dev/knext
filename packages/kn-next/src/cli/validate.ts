@@ -160,10 +160,13 @@ export function validateConfig(config: KnativeNextConfig): void {
         );
     }
 
-    // Storage validation
-    if (!config.storage) {
-        errors.push("'storage' is required");
-    } else {
+    // Storage validation. ABSENCE IS VALID (ADR-0047): omitted storage is the
+    // announced image-served static mode (assets ship in the container image,
+    // `next start` semantics), not a config mistake — deploy/build/doctor
+    // announce the mode loudly (NO_STORAGE_MODE_NOTICE). A PRESENT block is
+    // still fully validated: optional never means unvalidated. This mirror
+    // and loader.ts MUST stay in lock-step (the both-halves defect class).
+    if (config.storage) {
         if (
             !(SUPPORTED_STORAGE_PROVIDERS as readonly string[]).includes(
                 config.storage.provider,

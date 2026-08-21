@@ -6,8 +6,11 @@ description: Old clients keep fetching their own build's chunks across rollouts 
 Version skew happens when more than one revision serves at once — during a rollout, or when a
 [rollback](/docs/rollback) canary splits traffic. A browser that loaded build **A** keeps requesting
 `_next/static/A/...` chunks even after the server rolls forward to build **B**. If A's assets are
-gone, that client breaks. knext keeps old clients working by serving every build's assets from the
-durable object store and only reaping them under a build-id-aware retention rule.
+gone, that client breaks. With object storage configured, knext keeps old clients working by
+serving every build's assets from the durable object store and only reaping them under a
+build-id-aware retention rule. Without a `storage` block the deploy-pinned build id and the
+`?dpl=` client pinning below still apply, but the asset-retention half does not — see
+[Without object storage](#without-object-storage).
 
 ## Stable, deploy-pinned BUILD_ID
 
@@ -74,6 +77,26 @@ window for normal rollouts; live revisions are protected regardless.
 The browser-level proof — a real client on a canaried old build fetching its own chunks — runs as a
 nightly end-to-end test, not on every PR.
 </Callout>
+
+## Without object storage
+
+`storage` is optional. Without it, each revision serves its own build's assets from its container
+image, and this page's guarantees split in two:
+
+- **Navigations stay protected.** The deploy-pinned `BUILD_ID` and `?dpl=` client pinning are
+  independent of storage, so a client on an old build still detects the skew and reloads onto the
+  new one.
+- **In-flight fetches lose their safety net.** Once an old revision is fully retired and scaled
+  away, a chunk request that was already in flight from a client still on that build has no object
+  store to fall back to and can fail. The durable store is exactly what covers that window, and it
+  is the main reason to add a `storage` block as your traffic grows.
+- **Rollback gets safer.** A pinned revision's assets live in its own image, so no retention rule
+  can ever reap them.
+
+Every storage-less deploy announces this mode explicitly, and `kn-next gc` reports there is
+nothing to reap. See [Starting without object
+storage](/docs/multi-cloud#starting-without-object-storage) for the full trade-off and the growth
+path.
 
 ## Related
 

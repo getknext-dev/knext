@@ -63,10 +63,10 @@ describe("loadConfig (loader.ts)", () => {
 
     it("throws when required fields are missing", async () => {
         const rel = writeConfigModule(
-            "export default { name: 'x' };\n", // no storage / registry
+            "export default { name: 'x' };\n", // no registry (storage is optional, ADR-0047)
         );
         await expect(loadConfig(rel)).rejects.toThrow(
-            /'name', 'storage', and 'registry' are required/,
+            /'name' and 'registry' are required/,
         );
     });
 

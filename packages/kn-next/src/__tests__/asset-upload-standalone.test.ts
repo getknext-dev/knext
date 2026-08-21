@@ -35,8 +35,7 @@ vi.mock("../cli/exec", () => ({
 }));
 
 import { runCapture, runQuiet } from "../cli/exec";
-import type { KnativeNextConfig } from "../config";
-import { uploadAssets } from "../utils/asset-upload";
+import { type StorageBackedConfig, uploadAssets } from "../utils/asset-upload";
 
 const runQuietMock = runQuiet as unknown as Mock;
 const runCaptureMock = runCapture as unknown as Mock;
@@ -44,7 +43,7 @@ const runCaptureMock = runCapture as unknown as Mock;
 const APP_NAME = "shop";
 const BUCKET = "my-bucket";
 
-function makeConfig(): KnativeNextConfig {
+function makeConfig(): StorageBackedConfig {
     return {
         name: APP_NAME,
         storage: {
@@ -52,7 +51,7 @@ function makeConfig(): KnativeNextConfig {
             bucket: BUCKET,
             publicUrl: `https://example.test/${BUCKET}`,
         },
-    } as unknown as KnativeNextConfig;
+    } as unknown as StorageBackedConfig;
 }
 
 /** Renders the fake `gsutil ls -r` remote listing for the given keys. */

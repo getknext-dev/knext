@@ -22,10 +22,13 @@ export async function loadConfig(
             );
         }
 
-        // Basic validation (can be expanded with Zod later)
-        if (!config.name || !config.storage || !config.registry) {
+        // Basic validation (can be expanded with Zod later).
+        // ADR-0047: `storage` is deliberately NOT required — absence is the
+        // image-served static mode. Keep in lock-step with cli/validate.ts
+        // (the other validation mirror).
+        if (!config.name || !config.registry) {
             throw new Error(
-                `Invalid configuration: 'name', 'storage', and 'registry' are required.`,
+                `Invalid configuration: 'name' and 'registry' are required.`,
             );
         }
 

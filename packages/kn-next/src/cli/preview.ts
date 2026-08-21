@@ -30,7 +30,11 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import type { KnativeNextConfig } from "../config";
-import { getAssetPrefix } from "../utils/asset-upload";
+import {
+    getAssetPrefix,
+    hasStorage,
+    NO_STORAGE_MODE_NOTICE,
+} from "../utils/asset-upload";
 import { createLogger } from "../utils/logger";
 import {
     renderNextAppCR,
@@ -168,6 +172,16 @@ export async function runPreviewDeploy(
         name: previewName,
         cache: previewCache,
     };
+
+    if (!hasStorage(previewConfig)) {
+        // ADR-0047 condition 1: a preview builds, pushes, and applies a CR —
+        // it IS a deploy, so the image-served static mode is announced here
+        // exactly as in deploy.ts. And the same env hygiene: an ASSET_PREFIX
+        // inherited from the shell would bake bucket URLs into HTML that
+        // nothing uploads — clear it BEFORE buildAndPush runs `next build`.
+        log.info(NO_STORAGE_MODE_NOTICE);
+        delete process.env.ASSET_PREFIX;
+    }
 
     // #314 (T6) PRUNE PREFLIGHT — the FIRST cluster-touching step, and it runs
     // BEFORE the build/push so a CRD that would prune a field costs nothing but
@@ -312,7 +326,7 @@ async function defaultBuildAndPush(
     // `../..`. Filesystem-only, so failing here costs the user nothing.
     const repoRoot = requireBuildContext(process.cwd());
 
-    if (config.storage?.publicUrl) {
+    if (hasStorage(config) && config.storage.publicUrl) {
         process.env.ASSET_PREFIX = getAssetPrefix(config);
     }
 

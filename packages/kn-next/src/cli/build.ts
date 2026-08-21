@@ -24,7 +24,11 @@ import { existsSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { precompileBunBytecode } from "../adapters/standalone-bun-bytecode";
 import { healBunExportTargets } from "../adapters/standalone-bun-exports";
-import { uploadAssets } from "../utils/asset-upload";
+import {
+    hasStorage,
+    NO_STORAGE_MODE_NOTICE,
+    uploadAssets,
+} from "../utils/asset-upload";
 import { createLogger } from "../utils/logger";
 import { isEntrypoint, runQuiet } from "./exec";
 import {
@@ -49,12 +53,22 @@ export async function build(options: BuildOptions = {}) {
     log.info(
         {
             app: config.name,
-            storage: `${config.storage.provider} (${config.storage.bucket})`,
+            storage: config.storage
+                ? `${config.storage.provider} (${config.storage.bucket})`
+                : "none — assets served from the image",
             cache: config.cache?.provider ?? "none",
             runtime: config.runtime ?? "node",
         },
         "Configuration loaded",
     );
+
+    if (!hasStorage(config)) {
+        // ADR-0047 (review F3): the mode's guarantee is relative asset paths —
+        // an ASSET_PREFIX inherited from the shell would bake bucket URLs into
+        // HTML that nothing uploads, so clear it BEFORE `next build` reads it.
+        // (The mode notice itself prints at the upload step below.)
+        delete process.env.ASSET_PREFIX;
+    }
 
     // 2. Run `next build` via the project's build script.
     //    The app's next.config.ts must set output:'standalone'.
@@ -143,10 +157,15 @@ export async function build(options: BuildOptions = {}) {
         );
     }
 
-    // 3. Upload static assets
-    log.info("Uploading static assets...");
-    await uploadAssets(config);
-    log.info("Assets uploaded");
+    // 3. Upload static assets — only when a storage block is configured.
+    if (hasStorage(config)) {
+        log.info("Uploading static assets...");
+        await uploadAssets(config);
+        log.info("Assets uploaded");
+    } else {
+        // ADR-0047 condition 1: an announced no-op, never a silent skip.
+        log.info(NO_STORAGE_MODE_NOTICE);
+    }
 
     log.info(
         "✨ Build complete! Run `kn-next deploy` to push the image and apply the NextApp CR.",

@@ -36,8 +36,12 @@ vi.mock("../cli/exec", () => ({
 }));
 
 import { runCapture, runQuietAllowFail } from "../cli/exec";
-import type { KnativeNextConfig, StorageProvider } from "../config";
-import { pruneOldBuilds, reclaimBuildPrefix } from "../utils/asset-upload";
+import type { StorageProvider } from "../config";
+import {
+    pruneOldBuilds,
+    reclaimBuildPrefix,
+    type StorageBackedConfig,
+} from "../utils/asset-upload";
 
 const runCaptureMock = runCapture as unknown as Mock;
 const runDeleteMock = runQuietAllowFail as unknown as Mock;
@@ -50,7 +54,7 @@ function makeConfig(
     bucket: string,
     name = "shop",
     assetRetention?: number,
-): KnativeNextConfig {
+): StorageBackedConfig {
     return {
         name,
         storage: {
@@ -59,7 +63,7 @@ function makeConfig(
             publicUrl: `https://example.test/${bucket}`,
             assetRetention,
         },
-    } as unknown as KnativeNextConfig;
+    } as unknown as StorageBackedConfig;
 }
 
 /** One first-level "directory" under `<app>/_next/static/` in the fake store. */

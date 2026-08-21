@@ -255,7 +255,14 @@ export interface SecretsConfig {
 // Main Knative-Next config (subset of OpenNext we support)
 export interface KnativeNextConfig {
     name: string;
-    storage: StorageConfig;
+    // Optional (ADR-0047): omitted storage is a first-class deploy mode — static
+    // assets are served from the image (next start semantics): no asset upload,
+    // no assetPrefix, no CDN offload, no cross-deploy asset retention. Absence
+    // is the ONLY spelling of this state; there is deliberately no
+    // provider:"none" sentinel (an old operator would forward it verbatim into
+    // pod env as a silent misconfiguration, while absence is valid on every
+    // CRD version ever shipped).
+    storage?: StorageConfig;
     cache?: CacheConfig;
     queue?: QueueConfig; // For ISR revalidation (Kafka for Knative Eventing)
     registry: string;

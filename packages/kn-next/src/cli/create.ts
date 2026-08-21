@@ -317,6 +317,28 @@ Options:
   -h, --help      Show this help
 `;
 
+/**
+ * The scaffold's parting words (UX ledger row 3a). The persona is a Next.js
+ * developer with zero cluster knowledge, so this speaks their language: the
+ * real next steps in the order they will type them. The seam guard is still
+ * mentioned — last, and in plain words — because it matters before a
+ * production build ships, not on day one.
+ */
+export function partingLine(dir: string): string {
+    const cdPrefix = dir === "." ? "" : `cd ${dir} && `;
+    return (
+        "\nNext steps:\n" +
+        `  ${cdPrefix}npm install\n` +
+        "  npm run dev              # local dev server on http://localhost:3000\n" +
+        "\nWhen you are ready to put it on your cluster:\n" +
+        "  kn-next doctor           # checks your cluster connection and setup\n" +
+        "  kn-next deploy           # builds the image and ships the app\n" +
+        "\nBefore you ship real traffic, run `npm run test:seam` once — it " +
+        "double-checks\nthat the app's built-in tracing still works after a " +
+        "production build.\n"
+    );
+}
+
 export async function createMain(argv: string[]): Promise<number> {
     let values: {
         name?: string;
@@ -369,10 +391,7 @@ export async function createMain(argv: string[]): Promise<number> {
         process.stdout.write(
             `${values["dry-run"] ? "Would create" : "Created"} ${rels.length} file(s) in ${appDir}:\n` +
                 `${rels.map((r) => `  ${r}\n`).join("")}` +
-                (values["dry-run"]
-                    ? ""
-                    : "\nNext: install deps, then `npm run test:seam` to prove the " +
-                      "instrumentation seams survive the standalone build.\n"),
+                (values["dry-run"] ? "" : partingLine(positionals[0] ?? ".")),
         );
         return 0;
     } catch (err) {

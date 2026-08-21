@@ -23,6 +23,8 @@ import { parseArgs } from "node:util";
 import type { KnativeNextConfig } from "../config";
 import {
     getAssetPrefix,
+    hasStorage,
+    NO_STORAGE_MODE_NOTICE,
     reclaimBuildPrefix,
     uploadAssets,
 } from "../utils/asset-upload";
@@ -187,6 +189,17 @@ function applyOverrides(
         overridden.registry = options.registry;
     }
     if (options.bucket) {
+        if (!overridden.storage) {
+            // ADR-0047: absence is a deliberate mode; silently inventing a
+            // partial storage block from a flag would deploy a config the
+            // validator never saw. Say what is happening instead.
+            throw new UsageError(
+                "--bucket overrides storage.bucket, but kn-next.config.ts has " +
+                    "no `storage` block (static assets are served from the " +
+                    "image). Add a full storage block to the config before " +
+                    "overriding its bucket.",
+            );
+        }
         overridden.storage = { ...overridden.storage, bucket: options.bucket };
     }
 
@@ -352,6 +365,17 @@ export async function deploy() {
 
     const config = applyOverrides(baseConfig, options);
 
+    if (!hasStorage(config)) {
+        // ADR-0047 condition 1: announce the image-served static mode at info
+        // on EVERY deploy (dry-run included) — a dropped or mistyped `storage`
+        // block must never look identical to a deliberate choice.
+        log.info(NO_STORAGE_MODE_NOTICE);
+        // An ASSET_PREFIX inherited from the environment would bake bucket
+        // URLs into HTML that nothing uploads to. The mode's guarantee is
+        // relative asset paths, so clear it before `next build` reads it.
+        delete process.env.ASSET_PREFIX;
+    }
+
     // #93 skew protection (ADR-0011): pin this deploy's BUILD_ID. We export
     // NEXT_DEPLOYMENT_ID = the deploy tag BEFORE `next build`. next.config reads it
     // BOTH as `deploymentId` (Next appends `?dpl=<id>` to asset/RSC requests) AND,
@@ -379,12 +403,19 @@ export async function deploy() {
     }
 
     if (!options.skipBuild) {
-        const assetPrefix = getAssetPrefix(config);
-        process.env.ASSET_PREFIX = assetPrefix;
-        log.info(
-            { assetPrefix, buildId },
-            "Running next build (output:standalone)...",
-        );
+        if (hasStorage(config)) {
+            const assetPrefix = getAssetPrefix(config);
+            process.env.ASSET_PREFIX = assetPrefix;
+            log.info(
+                { assetPrefix, buildId },
+                "Running next build (output:standalone)...",
+            );
+        } else {
+            log.info(
+                { buildId },
+                "Running next build (output:standalone; assets served from the image — no assetPrefix)...",
+            );
+        }
         runQuiet(["npm", "run", "build"]);
         log.info(
             "Next.js build complete — standalone output in .next/standalone/",
@@ -442,7 +473,7 @@ export async function deploy() {
         let uploadSucceeded = false;
         let uploadPromise: Promise<void> | undefined;
 
-        if (!options.skipUpload) {
+        if (!options.skipUpload && hasStorage(config)) {
             log.info("Running parallel tasks: asset upload + Docker build");
             uploadPromise = (async () => {
                 await uploadAssets(config);
@@ -515,7 +546,7 @@ export async function deploy() {
             // concurrent deploy's id. (Symmetric leg — upload rejects, push
             // succeeds — leaves an orphaned image TAG: registry GC's authority,
             // OUT OF SCOPE here.)
-            if (!options.skipUpload && uploadPromise) {
+            if (!options.skipUpload && uploadPromise && hasStorage(config)) {
                 try {
                     await uploadPromise;
                 } catch {
@@ -660,7 +691,7 @@ export async function deploy() {
     // standalone `kn-next gc` subcommand so the e2e_gc suite proves THIS exact
     // wiring. Everything against the cluster is READ-ONLY (ADR-0001).
     // Best-effort: a GC failure never fails a deploy that has already shipped.
-    if (!options.skipUpload) {
+    if (!options.skipUpload && hasStorage(config)) {
         try {
             const res = runAssetGC(config, options.namespace, buildId);
             if (!res.pruned) {

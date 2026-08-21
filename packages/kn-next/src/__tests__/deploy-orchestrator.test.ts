@@ -59,7 +59,9 @@ const getAssetPrefix = vi.fn<AnyFn>(() => "https://cdn.example.com/_next");
 // `<app>/_next/static/<BUILD_ID>/` prefix (NOT runAssetGC / pruneOldBuilds).
 const reclaimBuildPrefix = vi.fn<AnyFn>();
 
-vi.mock("../utils/asset-upload", () => ({
+vi.mock("../utils/asset-upload", async (importOriginal) => ({
+    // keep the REAL hasStorage/notice exports (ADR-0047) — stub only the seams
+    ...(await importOriginal<object>()),
     uploadAssets: (...a: unknown[]) => uploadAssets(...a),
     getAssetPrefix: (...a: unknown[]) => getAssetPrefix(...a),
     reclaimBuildPrefix: (...a: unknown[]) => reclaimBuildPrefix(...a),

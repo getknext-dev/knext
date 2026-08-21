@@ -29,8 +29,10 @@ import type { KnativeNextConfig } from "../config";
 import { parseLiveRevisionNames, resolveLiveBuildIds } from "../utils/asset-gc";
 import {
     BUILD_MARKER_FILENAME,
+    hasStorage,
     type PruneSummary,
     pruneOldBuilds,
+    type StorageBackedConfig,
 } from "../utils/asset-upload";
 import { createLogger } from "../utils/logger";
 import { runCapture } from "./exec";
@@ -187,7 +189,7 @@ function readSpecPin(
 }
 
 export function runAssetGC(
-    config: KnativeNextConfig,
+    config: StorageBackedConfig,
     namespace: string,
     newBuildId: string,
     exec: GcExec = runCapture,
@@ -544,6 +546,15 @@ export function renderGcReport(
     );
 }
 
+/**
+ * ADR-0047: the fd-1 report for a gc run against a config with no `storage`
+ * block. Machine-greppable first clause, same discipline as the skip tokens.
+ */
+export const GC_NO_STORAGE_REPORT =
+    "gc: no object storage configured — nothing to reap. Static assets are " +
+    "served from the image, so there is no bucket to prune (this is the " +
+    "announced no-storage mode, not a failure).\n";
+
 /** Entry for \`kn-next gc\`. Returns the process exit code. */
 export async function gcMain(argv: readonly string[]): Promise<number> {
     if (argv.includes("-h") || argv.includes("--help")) {
@@ -556,6 +567,15 @@ export async function gcMain(argv: readonly string[]): Promise<number> {
 
     const args = parseGcArgs(argv);
     const config = await loadConfig();
+
+    // ADR-0047: no storage block ⇒ there is no bucket to prune. An announced
+    // no-op with exit 0 — never a crash, and never a report that implies a
+    // reap happened. Decided BEFORE any cluster read: a gc that cannot delete
+    // anything has no business consulting traffic state.
+    if (!hasStorage(config)) {
+        writeSync(1, GC_NO_STORAGE_REPORT);
+        return 0;
+    }
 
     log.info(
         {

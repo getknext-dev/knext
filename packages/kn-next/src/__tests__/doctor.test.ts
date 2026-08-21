@@ -187,6 +187,7 @@ describe("runDoctor — healthy cluster", () => {
         expect(ids).toEqual([
             "cluster",
             "kubectl-validation",
+            "storage-mode",
             "crd",
             "crd-schema",
             "operator",
@@ -196,6 +197,13 @@ describe("runDoctor — healthy cluster", () => {
             "knative",
         ]);
         for (const c of report.checks) {
+            // storage-mode is LOCAL (ADR-0047): with no kn-next.config.ts in
+            // the test's cwd it reports skip — an informational state, never
+            // a failure, and never a reason for a healthy cluster to exit 1.
+            if (c.id === "storage-mode") {
+                expect(c.status, `${c.id}: ${c.detail}`).toBe("skip");
+                continue;
+            }
             expect(c.status, `${c.id}: ${c.detail}`).toBe("pass");
         }
         expect(report.exitCode).toBe(0);
