@@ -70,3 +70,35 @@ behavioural tests caught what every static guard missed).
 wall (can the persona fill `kn-next.config.ts`? does `create` produce something deployable
 without edits?) → the "get a cluster" journey (the big wall; founder direction: git-integration +
 prepared clouds). User-owned, unblocking 1a permanently: publish the `kn-next` alias package.
+
+---
+
+## Row 3 — 2026-08-21, the config-authoring wall (iteration-4 sitting)
+
+Instrument: the row-2 tarball install (main @ post-#810), `kn-next create my-app` run as the
+persona, scaffold inspected, and the schema's requirements read from the source of truth
+(`packages/kn-next/src/config.ts`, `cli/validate.ts`).
+
+**What works:** `create` scaffolds 13 files, exit 0 — a complete Next.js app with the guarded
+instrumentation pair, Dockerfile, tests, and a genuinely well-commented `kn-next.config.ts`
+(every field explained in plain language, scaleDownDelay trade-off included). The persona gets
+a real app skeleton in one command.
+
+**Findings:**
+
+| # | finding | severity for the persona |
+|---|---|---|
+| 3a | `create`'s parting line — "install deps, then `npm run test:seam` to prove the instrumentation seams survive the standalone build" — is contributor jargon. The persona's actual next steps (`cd my-app && npm install && npm run dev`, then doctor/deploy when ready) are not stated. | Medium — first-contact tone, easy fix |
+| 3b | **The wall, measured at the source: a minimal deploy hard-requires BOTH a container registry (`'registry' is required`) and an object-storage bucket (`'storage' is required`, `config.ts:258` non-optional).** The scaffold's placeholders (`ghcr.io/<your-user>`, `<your-assets-bucket>`) each imply an account, a provisioning step, and CLI auth (docker login, gsutil/aws) the persona has never done. Vercel's hello-world needs neither. | **The #1 wall after "get a cluster"** |
+
+**Lever candidate (GATED — config-schema change = escalation trigger, architect summoned):**
+make `storage` optional for starters — omitted storage ⇒ no asset upload, no assetPrefix, the
+standalone server serves its own `_next/static` from the image (how `next start` works
+everywhere else). Trade-offs to be judged by the gate: no CDN offload (fine for starters,
+documented as the growth path), image a little larger, cold pod serves statics. The registry
+half has no in-pod dodge (an image must live somewhere) — its lever is guidance (`create`
+could ask/derive, `doctor` could verify push access) and belongs to a later iteration.
+
+**Not yet reached (fog):** the actual `npm install && kn-next deploy` run of the scaffold
+against the live cluster (blocked on the wall above being decided); the "get a cluster"
+journey itself.
