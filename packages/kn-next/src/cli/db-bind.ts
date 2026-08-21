@@ -36,7 +36,7 @@ import YAML from "yaml";
 import type { KnativeNextConfig } from "../config";
 import { createLogger } from "../utils/logger";
 import { runCapture } from "./exec";
-import { loadConfig } from "./shared";
+import { loadConfig, UsageError } from "./shared";
 
 const log = createLogger({ module: "db-bind" });
 
@@ -77,7 +77,7 @@ export function parseDbBindArgs(argv: readonly string[]): DbBindOptions {
     const need = (flag: string, i: number): string => {
         const v = argv[i];
         if (v === undefined || v.startsWith("-")) {
-            throw new Error(
+            throw new UsageError(
                 `${flag} requires a value (see kn-next db bind --help)`,
             );
         }
@@ -104,11 +104,13 @@ export function parseDbBindArgs(argv: readonly string[]): DbBindOptions {
         } else if (a.startsWith("-")) {
             // Unknown flags fail loudly — a typo like `--secert` must not
             // silently bind with defaults.
-            throw new Error(`unknown flag "${a}" (see kn-next db bind --help)`);
+            throw new UsageError(
+                `unknown flag "${a}" (see kn-next db bind --help)`,
+            );
         } else if (out.app === undefined) {
             out.app = a;
         } else {
-            throw new Error(
+            throw new UsageError(
                 `unexpected positional "${a}" — only one <app> positional is accepted (see kn-next db bind --help)`,
             );
         }
@@ -118,12 +120,12 @@ export function parseDbBindArgs(argv: readonly string[]): DbBindOptions {
 
 function assertDns1123(flag: string, value: string): void {
     if (value.length > DNS1123_MAX) {
-        throw new Error(
+        throw new UsageError(
             `${flag} '${value.slice(0, 32)}…' is ${value.length} chars — a Secret name is a DNS-1123 subdomain of at most 253 chars (ADR-0019).`,
         );
     }
     if (!DNS1123_SUBDOMAIN_RE.test(value)) {
-        throw new Error(
+        throw new UsageError(
             `${flag} '${value}' is not a valid Secret name (lowercase DNS-1123 subdomain: [a-z0-9-.], must start/end alphanumeric) (ADR-0019).`,
         );
     }
@@ -135,7 +137,7 @@ function assertDns1123(flag: string, value: string): void {
  */
 export function validateDbBindOptions(opts: DbBindOptions): void {
     if (!opts.secret) {
-        throw new Error(
+        throw new UsageError(
             "--secret <name> is required: the Secret carrying the DATABASE_URL DSN (kn-next db bind --secret <name>).",
         );
     }
@@ -144,7 +146,7 @@ export function validateDbBindOptions(opts: DbBindOptions): void {
         assertDns1123("--ro-secret", opts.roSecret);
     }
     if (opts.roKey !== undefined && opts.roSecret === undefined) {
-        throw new Error(
+        throw new UsageError(
             "--ro-key requires --ro-secret (a read-only key without a read-only Secret binds nothing — ADR-0019 rule 6 shape).",
         );
     }
@@ -461,7 +463,7 @@ export async function dbMain(argv: readonly string[]): Promise<void> {
         return;
     }
     if (sub !== "bind") {
-        throw new Error(
+        throw new UsageError(
             `unknown db subcommand "${sub}" — available: bind, migrate (kn-next db --help)`,
         );
     }
@@ -471,6 +473,11 @@ export async function dbMain(argv: readonly string[]): Promise<void> {
     }
 
     const opts = parseDbBindArgs(rest);
+    // Validate BEFORE announcing (and before touching the config): a missing
+    // `--secret` otherwise printed the "kn-next db bind …" banner above the
+    // error. runDbBind re-validates — this is the cheap early exit, not a
+    // replacement for it.
+    validateDbBindOptions(opts);
 
     // Resolve the app name: positional wins, else the local config's name.
     // The config (when present) also feeds the envMap-collision cross-check
@@ -481,7 +488,7 @@ export async function dbMain(argv: readonly string[]): Promise<void> {
     }
     const appName = opts.app ?? localConfig?.name;
     if (!appName) {
-        throw new Error(
+        throw new UsageError(
             "app name required: pass it as a positional (kn-next db bind <app> …) or run from a directory with kn-next.config.ts",
         );
     }

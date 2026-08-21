@@ -30,7 +30,7 @@
 import { existsSync, writeSync } from "node:fs";
 import type { KnativeNextConfig } from "../config";
 import { type KubectlFn, kubectlRunner } from "./doctor";
-import { excerpt, loadConfig } from "./shared";
+import { excerpt, loadConfig, UsageError } from "./shared";
 
 /** --watch poll interval. */
 const WATCH_INTERVAL_MS = 5_000;
@@ -67,7 +67,7 @@ export function parseStatusArgs(argv: readonly string[]): StatusOptions {
     const need = (flag: string, i: number): string => {
         const v = argv[i];
         if (v === undefined || v.startsWith("-")) {
-            throw new Error(
+            throw new UsageError(
                 `${flag} requires a value (see kn-next status --help)`,
             );
         }
@@ -82,11 +82,13 @@ export function parseStatusArgs(argv: readonly string[]): StatusOptions {
         } else if (a === "--watch") {
             out.watch = true;
         } else if (a.startsWith("-")) {
-            throw new Error(`unknown flag "${a}" (see kn-next status --help)`);
+            throw new UsageError(
+                `unknown flag "${a}" (see kn-next status --help)`,
+            );
         } else if (out.app === undefined) {
             out.app = a;
         } else {
-            throw new Error(
+            throw new UsageError(
                 `unexpected positional "${a}" — only one <app> positional is accepted (see kn-next status --help)`,
             );
         }
@@ -95,7 +97,7 @@ export function parseStatusArgs(argv: readonly string[]): StatusOptions {
         // Rejected rather than silently concatenating JSON documents a parser
         // would choke on. If NDJSON streaming is ever wanted, it gets designed
         // deliberately — not implied by a flag combination.
-        throw new Error(
+        throw new UsageError(
             "--json cannot be combined with --watch (a 5s poll would emit concatenated JSON documents); poll `kn-next status --json` from your script instead (see kn-next status --help)",
         );
     }
@@ -467,7 +469,7 @@ export async function statusMain(argv: readonly string[]): Promise<number> {
     }
     const appName = opts.app ?? localConfig?.name;
     if (!appName) {
-        throw new Error(
+        throw new UsageError(
             "app name required: pass it as a positional (kn-next status <app>) or run from a directory with kn-next.config.ts",
         );
     }

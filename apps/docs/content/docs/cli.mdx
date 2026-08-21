@@ -1,6 +1,6 @@
 ---
 title: CLI reference
-description: The kn-next CLI — deploy, doctor, status, rollback, db bind, db migrate, gc.
+description: The kn-next CLI — create, deploy, build, doctor, status, rollback, cleanup, db bind, db migrate, gc.
 ---
 
 The `kn-next` binary ships in **`@getknext/core`** (`npm i @getknext/core`), so it is available as
@@ -10,26 +10,39 @@ the CLI's cluster writes are limited to applying or patching the CR, and its dia
 are strictly read-only.
 
 ```bash
-kn-next [deploy]       # default — build → push → apply the NextApp CR
+kn-next create         # scaffold a new knext-ready app (writes files, no cluster changes)
 kn-next doctor         # cluster-prereq preflight (read-only)
+kn-next [deploy]       # default — build → push → apply the NextApp CR
+kn-next build          # the build + asset-upload steps only, without deploying
 kn-next status         # the NextApp's honest conditions (read-only)
 kn-next rollback       # pin traffic to a prior Knative Revision
+kn-next cleanup        # remove the app from the cluster (deletes its NextApp CR)
 kn-next db bind        # bind an existing Postgres Secret to the CR
 kn-next db migrate     # apply pending migrations against the writer, once
 kn-next gc             # reap old _next/static/<build-id>/ asset prefixes
 ```
 
+`kn-next --help` lists exactly this set, `create` first.
+
 <Callout type="info">
-**Strict flag parsing.** The subcommands fail loudly on unknown flags, dangling values, and stray
-positionals — a typo'd `--to` or `--wacth` is a hard error, never a silent fall-through to a
-different (possibly opposite) action.
+**Strict parsing, plain errors.** Every command — including the default `deploy` — fails loudly on
+unknown flags, dangling values, and stray positionals: a typo'd `--to` or `--wacth`, or a
+`kn-next --namespace prod cleanup` with the command in the wrong place, is a hard error rather than a
+silent fall-through to a different (possibly opposite) action. Those errors print as a short message
+and exit 1 — no stack traces. `--help` works on every command and always exits without doing any
+work, including on destructive ones like `cleanup`.
 </Callout>
 
 <Callout type="warn">
-Only the subcommand words above are dispatched — any other first argument runs the default
-**deploy** flow. `build`, `cleanup`, `preview`, and `loadtest` are **not** bin subcommands; they
-ship as separate runnable entries inside the package (see
-[Directly runnable entries](#directly-runnable-entries) below).
+**Unknown commands are errors, not deploys.** A first argument that is not one of the commands above
+fails with `unknown command: <x>`, a "did you mean" suggestion, and exit 1 — so `kn-next celanup`
+never ships a deployment. The same applies to a command in the wrong slot: `kn-next -n prod cleanup`
+fails with `unexpected argument: cleanup` and tells you the command comes first, rather than
+deploying to `prod`. Running the bin with **no** command (`npx @getknext/core`) or with flags only
+(`kn-next --skip-build`) still runs **deploy**, which is the advertised default.
+
+`preview` and `loadtest` are **not** bin subcommands; they ship as separate runnable entries inside
+the package (see [Directly runnable entries](#directly-runnable-entries) below).
 </Callout>
 
 ## `kn-next deploy` (default)
@@ -52,6 +65,33 @@ GC](#kn-next-gc) — a GC failure never fails a deploy that has already shipped.
 
 Config validation runs automatically when the config loads — there is no separate `validate`
 command.
+
+<Callout type="info">
+**No `kn-next.config.ts` in this directory?** That is treated as an expected state, not an error:
+the CLI prints a short note explaining what the file is, points you at `kn-next create` for a new
+app, and exits with status 1 — no stack trace.
+</Callout>
+
+## `kn-next build`
+
+The build half of `deploy`, on its own: runs the project's build script (`next build`,
+`output: 'standalone'`), heals the standalone output, and uploads static assets to the configured
+bucket. It makes **no** cluster writes.
+
+| Flag | Notes |
+|---|---|
+| `--skip-next` | Reuse an existing `.next/` build instead of running it again. |
+| `-h`, `--help` | Show the usage help. |
+
+## `kn-next cleanup`
+
+Tears down the app named in `kn-next.config.ts` by issuing exactly **one** cluster write:
+`kubectl delete nextapp <name> --ignore-not-found`. Owned resources (Knative Service,
+ServiceAccount, PVC) go with it via owner-reference garbage collection, and the operator's finalizer
+clears that app's object-store prefix and Redis keyspace — scoped strictly to that app.
+
+It takes **no options** beyond `-h`/`--help`; a stray flag is an error rather than an ignored
+argument, because the command is destructive.
 
 ## `kn-next doctor`
 
@@ -208,13 +248,6 @@ prefixes, and the bare `<app>/` prefix is never a prune target. See
 
 Some entries ship in the package as directly runnable scripts rather than bin subcommands:
 
-- **build** (`dist/cli/build.js`) — run `next build` (standalone output) and upload static assets,
-  without deploying.
-- **cleanup** (`dist/cli/cleanup.js`) — tear down a deployed app by issuing exactly one cluster
-  write: `kubectl delete nextapp <name> --ignore-not-found`. Owned resources (Knative Service,
-  ServiceAccount, PVC) are removed by Kubernetes owner-reference garbage collection, and the
-  operator's finalizer clears external state (the app's object-store prefix and Redis keyspace,
-  scoped strictly to that app).
 - **preview** (`dist/cli/preview.js`) — deploy/destroy per-PR ephemeral
   [preview environments](/docs/previews) (`preview deploy --pr <n> --branch <ref>` /
   `preview destroy --pr <n>`).
@@ -222,9 +255,12 @@ Some entries ship in the package as directly runnable scripts rather than bin su
   against a deployed service. An operability tool, not part of the deploy path.
 
 ```bash
-node node_modules/@getknext/core/dist/cli/build.js
-node node_modules/@getknext/core/dist/cli/cleanup.js
+node node_modules/@getknext/core/dist/cli/preview.js deploy --pr 42 --branch my-branch
+node node_modules/@getknext/core/dist/cli/loadtest.js --type smoke
 ```
+
+`build` and `cleanup` also still ship as `dist/cli/build.js` / `dist/cli/cleanup.js`, but prefer
+the `kn-next build` / `kn-next cleanup` subcommands above.
 
 ## Related
 
