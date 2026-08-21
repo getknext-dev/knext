@@ -152,3 +152,20 @@ iteration 6).
 **Fog now empty of walls:** with rows 1–5, every step of `npx … → config → cluster → deploy` has
 been measured. Remaining fog is the founder's git-integration/prepared-clouds vision (a product
 direction, not a sitting) and re-measures as levers land.
+
+---
+
+## Row 6 — 2026-08-21, re-measure after optional storage merged (#825)
+
+Instrument: main post-#825, built fresh + pnpm-packed, clean consumer install, journey re-run.
+
+| step | row 3/4 state | row 6 state |
+|---|---|---|
+| `create` scaffold | storage REQUIRED with `<your-assets-bucket>` placeholders; parting line was contributor jargon | storage **commented out** with plain rationale + docs link; parting line is the persona's real next steps ("builds the image and ships the app"; test:seam explained in plain words, last) |
+| deploy without a bucket | impossible (`'storage' is required`) | proceeds, **announcing the mode honestly**: "static assets will be served from the image (next start semantics): no CDN offload, no cross-deploy asset retention, and the in-flight skew window is unprotected (a browser still holding the previous build can 404 on its chunks…)" + growth-path link; build runs with **no assetPrefix** |
+| walls on `create → deploy` | registry + bucket (2 provisioned services, 2 CLI auths) | **registry only** |
+
+**Still rough, both already in-flight as iteration 6 (stacked, building):** the registry
+placeholder still flows silently past config load (row 4b), and the missing-deps failure
+(`next: command not found`) still renders FATAL (row 4c). Iteration 7 (the first-cluster
+docs on-ramp, row 5's lever) is building in parallel.
