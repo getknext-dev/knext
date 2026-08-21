@@ -34,8 +34,7 @@ vi.mock("../cli/exec", () => ({
 }));
 
 import { runCapture, runQuiet } from "../cli/exec";
-import type { KnativeNextConfig } from "../config";
-import { uploadAssets } from "../utils/asset-upload";
+import { type StorageBackedConfig, uploadAssets } from "../utils/asset-upload";
 
 const runQuietMock = runQuiet as unknown as Mock;
 const runCaptureMock = runCapture as unknown as Mock;
@@ -54,7 +53,7 @@ async function seedSourceFile(root: string, key: string): Promise<void> {
     await fs.writeFile(full, `bytes:${key}`);
 }
 
-function makeConfig(): KnativeNextConfig {
+function makeConfig(): StorageBackedConfig {
     return {
         name: "shop",
         storage: {
@@ -62,7 +61,7 @@ function makeConfig(): KnativeNextConfig {
             bucket: "my-bucket",
             publicUrl: "https://example.test/my-bucket",
         },
-    } as unknown as KnativeNextConfig;
+    } as unknown as StorageBackedConfig;
 }
 
 describe("uploadAssets chaos: object-store loss fails LOUD", () => {

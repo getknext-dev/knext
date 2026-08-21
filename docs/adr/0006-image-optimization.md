@@ -1,6 +1,7 @@
 # ADR-0006: Image optimization for knext
 
-- Status: Accepted
+- Status: Accepted (amended 2026-08-21 by ADR-0047: the pod-local variant cache is now reachable
+  by configuration, and is the starter default — see the amendment at the end of this file)
 - Date: 2026-06-19
 - Deciders: knext architect
 - Related: ROADMAP Tier A (A4), CLAUDE.md §8 (Vercel parity — image optimization is the biggest
@@ -99,3 +100,16 @@ variant cache"; only the *binding* is a sync rather than a hook on this version.
    Next ≥ 16.2.
 3. [done #43] Set `images.formats`, sizes, and a strict `remotePatterns` allowlist in the app config.
 4. Gate on the official compatibility suite image cases (A3).
+
+## Amendment (2026-08-21, ADR-0047): pod-local variant cache is now a reachable configuration — and the starter default
+
+This ADR's options table rejected "pod-local cache only" as the *mechanism for the production data
+plane*, in a world where `storage` was mandatory; it did not rule on a no-storage tier, which did
+not exist. ADR-0047 makes `storage` optional by absence, and a storage-less app lands exactly on
+the pod-local behaviour: `image-cache-sync.ts` is already gated on `STORAGE_BUCKET` and returns a
+null store when unset, so the behaviour is defined and safe — `next/image` still works via the
+in-image `sharp`; optimized variants simply do not survive pod death and are re-created per pod.
+Because `kn-next create` now scaffolds `storage` commented out, this rejected-for-production
+option is the **default for the starter path** — a decision, recorded here rather than left as an
+implementation detail. The rejection stands unchanged for the storage-backed production tier; the
+growth path (add the `storage` block) restores the durable cross-pod variant cache.

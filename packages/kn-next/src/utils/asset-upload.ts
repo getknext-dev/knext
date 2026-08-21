@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { join, relative } from "node:path";
 import { runCapture, runQuiet, runQuietAllowFail } from "../cli/exec";
-import type { KnativeNextConfig } from "../config";
+import type { KnativeNextConfig, StorageConfig } from "../config";
 import { classifyBuilds, DEFAULT_RETAIN } from "./asset-gc";
 import { createLogger } from "./logger";
 
@@ -46,6 +46,47 @@ export function appKeyPrefix(config: KnativeNextConfig): string {
 }
 
 /**
+ * A config whose `storage` block is PRESENT — the shape every function in
+ * this module that talks to a bucket requires. `storage` itself is optional
+ * on {@link KnativeNextConfig} (ADR-0047: absence is the announced
+ * image-served static mode), so narrowing through {@link hasStorage} is what
+ * turns an un-guarded `config.storage` dereference into a COMPILE error
+ * rather than a runtime crash. The type-level scan is the primary guard here
+ * — deliberately not an enumerated call-site list, which is how the second
+ * site gets missed.
+ */
+export type StorageBackedConfig = KnativeNextConfig & {
+    storage: StorageConfig;
+};
+
+/** Type guard: does this config carry a storage block? */
+export function hasStorage(
+    config: KnativeNextConfig,
+): config is StorageBackedConfig {
+    return config.storage !== undefined;
+}
+
+/** The user-facing growth path for the no-storage mode (docs site). */
+export const NO_STORAGE_DOCS_URL =
+    "https://knext.dev/docs/multi-cloud#starting-without-object-storage";
+
+/**
+ * ADR-0047 condition 1: the ANNOUNCED mode. Printed at info by every deploy
+ * and build that runs without a `storage` block, so a dropped or mistyped
+ * block never looks identical to a deliberate choice. Honest about the trade
+ * (ADR-0011): navigations stay skew-protected via ?dpl= (NEXT_DEPLOYMENT_ID
+ * is storage-independent), but a chunk fetch already in flight when the old
+ * revision scales away has no bucket to fall back to.
+ */
+export const NO_STORAGE_MODE_NOTICE =
+    "no object storage configured — static assets will be served from the " +
+    "image (next start semantics): no CDN offload, no cross-deploy asset " +
+    "retention, and the in-flight skew window is unprotected (a browser " +
+    "still holding the previous build can 404 on its chunks once that " +
+    "revision scales away). Add a `storage` block when you need the offload " +
+    `path: ${NO_STORAGE_DOCS_URL}`;
+
+/**
  * Returns the asset prefix URL used as Next.js `assetPrefix` so browsers load
  * static assets (`_next/static/*`) from the user's object storage.
  *
@@ -56,7 +97,7 @@ export function appKeyPrefix(config: KnativeNextConfig): string {
  * `<publicUrl>/<name>/_next/...` → 404. Any trailing slash on `publicUrl` is
  * normalised; Next appends its own `/` before `_next`.
  */
-export function getAssetPrefix(config: KnativeNextConfig): string {
+export function getAssetPrefix(config: StorageBackedConfig): string {
     const base = config.storage.publicUrl.replace(/\/+$/, "");
     return `${base}/${config.name}`;
 }
@@ -178,7 +219,7 @@ function stripPrefix(line: string, prefix: string): string | null {
 
 /** Builds the {@link ProviderOps} for the configured storage provider. */
 function providerOps(
-    config: KnativeNextConfig,
+    config: StorageBackedConfig,
     assetsDir: string,
 ): ProviderOps {
     const { provider, bucket } = config.storage;
@@ -524,7 +565,7 @@ export function stageStandaloneAssets(cwd: string = process.cwd()): string {
     return stagingDir;
 }
 
-export async function uploadAssets(config: KnativeNextConfig): Promise<void> {
+export async function uploadAssets(config: StorageBackedConfig): Promise<void> {
     const assetsDir = stageStandaloneAssets(process.cwd());
 
     log.info(
@@ -607,7 +648,7 @@ interface RemoteStaticListing {
  * {@link RESERVED_STATIC_DIRS} (never prunable candidates, marker or not —
  * reported separately in `reservedExcluded`).
  */
-function listRemoteBuildIds(config: KnativeNextConfig): RemoteStaticListing {
+function listRemoteBuildIds(config: StorageBackedConfig): RemoteStaticListing {
     const { provider, bucket } = config.storage;
     const appPrefix = appKeyPrefix(config); // "<name>/"
     const out = new Map<string, RemoteStaticPrefix>();
@@ -755,7 +796,7 @@ function listRemoteBuildIds(config: KnativeNextConfig): RemoteStaticListing {
 
 /** Issues a best-effort recursive delete of one build-id prefix. */
 function deleteBuildPrefix(
-    config: KnativeNextConfig,
+    config: StorageBackedConfig,
     buildId: string,
     deleteUri: string,
 ): void {
@@ -809,7 +850,7 @@ function deleteBuildPrefix(
  * single known prefix WITHOUT a remote listing (no full-remote-set enumeration).
  */
 function staticBuildDeleteUri(
-    config: KnativeNextConfig,
+    config: StorageBackedConfig,
     buildId: string,
 ): string {
     const { provider, bucket } = config.storage;
@@ -863,7 +904,7 @@ function staticBuildDeleteUri(
  * SEPARATE authority (registry GC), not this asset-store reclaim.
  */
 export function reclaimBuildPrefix(
-    config: KnativeNextConfig,
+    config: StorageBackedConfig,
     buildId: string,
 ): void {
     if (!buildId) return; // never scope to the static root
@@ -934,7 +975,7 @@ export interface PruneSummary {
  * `summary.dryRun` is true.
  */
 export function pruneOldBuilds(
-    config: KnativeNextConfig,
+    config: StorageBackedConfig,
     liveBuildIds: readonly string[],
     newBuildId: string,
     opts: { dryRun?: boolean } = {},

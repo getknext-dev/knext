@@ -30,7 +30,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import type { KnativeNextConfig } from "../config";
-import { getAssetPrefix } from "../utils/asset-upload";
+import { getAssetPrefix, hasStorage } from "../utils/asset-upload";
 import { createLogger } from "../utils/logger";
 import {
     renderNextAppCR,
@@ -312,7 +312,7 @@ async function defaultBuildAndPush(
     // `../..`. Filesystem-only, so failing here costs the user nothing.
     const repoRoot = requireBuildContext(process.cwd());
 
-    if (config.storage?.publicUrl) {
+    if (hasStorage(config) && config.storage.publicUrl) {
         process.env.ASSET_PREFIX = getAssetPrefix(config);
     }
 

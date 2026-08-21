@@ -8,12 +8,20 @@ const config: KnativeNextConfig = {
   // Registry to push the image to (the app name is appended).
   registry: "ghcr.io/<your-user>",
 
-  // Object storage for static assets; publicUrl is where browsers fetch them.
-  storage: {
-    provider: "gcs", // "gcs" | "s3" | "minio" | "azure"
-    bucket: "<your-assets-bucket>",
-    publicUrl: "https://storage.googleapis.com/<your-assets-bucket>",
-  },
+  // Object storage for static assets — OPTIONAL. Without it, your app serves
+  // its own static files from the container image, just like `next start`.
+  // That is the simplest way to run, and the right starting point.
+  //
+  // Add this block later when you want faster static delivery from a
+  // bucket/CDN, and old builds' files kept through a deploy for visitors
+  // still mid-session on them:
+  // https://knext.dev/docs/multi-cloud#starting-without-object-storage
+  //
+  // storage: {
+  //   provider: "gcs", // "gcs" | "s3" | "minio" | "azure"
+  //   bucket: "<your-assets-bucket>",
+  //   publicUrl: "https://storage.googleapis.com/<your-assets-bucket>",
+  // },
 
   // Knative autoscaling. minScale: 0 (the default) keeps scale-to-zero on.
   scaling: {

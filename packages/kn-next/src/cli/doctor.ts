@@ -58,11 +58,13 @@ import { existsSync, readFileSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import { parse as parseYaml } from "yaml";
+import type { KnativeNextConfig } from "../config";
+import { NO_STORAGE_DOCS_URL } from "../utils/asset-upload";
 import { DOCS_URL } from "./help";
 import { unknownEmittedFields } from "./schema/crd-schema";
 import { EMITTED_CR_FIELD_PATHS } from "./schema/emitted-fields.generated";
 import { readKnownCRDFields } from "./schema/preflight";
-import { excerpt, UsageError } from "./shared";
+import { excerpt, loadConfig, UsageError } from "./shared";
 
 /** The ingress class net-kourier actually registers a reconciler for (#208). */
 export const KOURIER_INGRESS_CLASS = "kourier.ingress.networking.knative.dev";
@@ -123,6 +125,27 @@ export interface DoctorDeps {
      * Defaults to the real file-reading inspector; tests inject fixtures.
      */
     inspectKubeconfig?: KubeconfigInspectFn;
+    /**
+     * Loads the kn-next.config.ts in the CURRENT directory, or undefined when
+     * there is none (or it fails to load) — feeds the local static-asset-mode
+     * check (ADR-0047). Defaults to the real cwd loader; tests inject.
+     */
+    loadAppConfig?: () => Promise<KnativeNextConfig | undefined>;
+}
+
+/**
+ * Default loadAppConfig: the real cwd loader. ANY failure — no config in this
+ * directory, a config that does not validate — yields undefined: doctor
+ * diagnoses, it must never crash on the state it is diagnosing.
+ */
+async function loadAppConfigOrUndefined(): Promise<
+    KnativeNextConfig | undefined
+> {
+    try {
+        return await loadConfig();
+    } catch {
+        return undefined;
+    }
 }
 
 /** Production kubectl runner — spawnSync, shell:false, never throws. */
@@ -609,6 +632,39 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
                 "fail",
                 `client ${parsed.display} is older than v${MIN_STRICT_VALIDATION_KUBECTL.major}.${MIN_STRICT_VALIDATION_KUBECTL.minor} — before v1.25 --validate is a BOOLEAN, so \`kn-next deploy\` fails on this client at flag parsing, before it contacts the apiserver. Upgrade kubectl`,
                 `upgrade kubectl to >= v${MIN_STRICT_VALIDATION_KUBECTL.major}.${MIN_STRICT_VALIDATION_KUBECTL.minor}`,
+            );
+        }
+    }
+
+    // (h) static-asset mode (ADR-0047) — LOCAL and read-only, so it runs even
+    // when the cluster is unreachable. Both modes are healthy states, so both
+    // are "pass": the value is that the mode is STATED where the user looks,
+    // never inferred from what happens to be in the config.
+    {
+        const appConfig = await (
+            deps.loadAppConfig ?? loadAppConfigOrUndefined
+        )();
+        if (!appConfig) {
+            push(
+                "storage-mode",
+                "Static asset mode",
+                "skip",
+                "no kn-next.config.ts in this directory — run doctor from the app directory to see how its static assets will be served",
+            );
+        } else if (appConfig.storage) {
+            push(
+                "storage-mode",
+                "Static asset mode",
+                "pass",
+                `object storage configured (${appConfig.storage.provider}: ${appConfig.storage.bucket}) — assets are offloaded to the bucket and retained across deploys`,
+            );
+        } else {
+            push(
+                "storage-mode",
+                "Static asset mode",
+                "pass",
+                "no object storage configured — static assets are served from the image (no CDN offload, no cross-deploy asset retention)",
+                `add a storage block when you need the offload path: ${NO_STORAGE_DOCS_URL}`,
             );
         }
     }

@@ -1,7 +1,9 @@
 # ADR-0011: Build-id-versioned assets, retention GC, and client→build pinning (skew protection)
 
 - Status: Accepted (amended 2026-07-13: marker-object inversion + pin-with-empty-status fail-safe, #264;
-  amended v3-P4b: §TOCTOU — pre-delete re-read narrows the plan/delete window, `traffic-drift-during-plan`)
+  amended v3-P4b: §TOCTOU — pre-delete re-read narrows the plan/delete window, `traffic-drift-during-plan`;
+  amended 2026-08-21 by ADR-0047: the Context §1 premise is now conditional on a `storage` block —
+  see the amendment at the end of this file)
 - Date: 2026-06-22
 - Deciders: knext architect
 - Related: ADR-0001 (operator = single source of truth), ADR-0006 (object-store data plane),
@@ -251,3 +253,23 @@ adds fixed latency to every deploy-tail GC (and to `kn-next gc`) for a case that
 same exposure as the plain re-read, so it trades guaranteed latency for no stronger guarantee. The
 single pre-delete re-read gives most of the narrowing benefit at near-zero latency; a grace window
 can be layered on later if real-world drift is observed, without changing this contract.
+
+## Amendment (2026-08-21, ADR-0047): the durable-store premise is now conditional
+
+This ADR's Context assumes "assets are served from the durable object store, not pod-local disk".
+ADR-0047 makes `storage` optional by absence, so that premise now holds only for storage-backed
+configs. For a storage-less config the result is two-way, and it is NOT "in-pod is safer":
+
+- **Rollback (ADR-0014) gets SAFER.** A pinned old revision serves assets from its own image, so
+  no retention window can reap them; the `retain=N` over-delete failure class disappears.
+- **In-flight skew gets WEAKER.** A browser holding build A's HTML after traffic moved to B, once
+  revision A is scaled to zero and revision-GC'd, requests `_next/static/<A>/…` and 404s on a B
+  pod. The object store is exactly what covered that window.
+- **The `deploymentId` half still works.** Build-id lives in the image; `NEXT_DEPLOYMENT_ID`, the
+  `generateBuildId` forcing, and the `.next/BUILD_ID` deploy guard are storage-independent, so
+  Next still emits `?dpl=` and the skew signal that reloads a navigating client. That covers
+  navigations; it does not cover a chunk load already in flight.
+- **The retention GC is a defined no-op** without a store: `kn-next gc` reports "no object storage
+  configured — nothing to reap" and exits 0.
+
+Everything else in this ADR is unchanged and applies whenever a `storage` block is present.

@@ -4,8 +4,9 @@ description: The object-storage providers knext supports across GKE, EKS, AKS, a
 ---
 
 knext deploys on any Kubernetes cluster with Knative Serving — GKE, EKS, AKS, OKE, or bare-metal.
-Build output (static assets) is uploaded to an object store keyed by build ID, and served from
-`assetPrefix`.
+With object storage configured, build output (static assets) is uploaded to an object store keyed
+by build ID, and served from `assetPrefix`. Object storage is **optional** — see
+[Starting without object storage](#starting-without-object-storage) below.
 
 ## Supported storage providers
 
@@ -40,3 +41,30 @@ storage: {
 
 `publicUrl` is the public/CDN URL assets are served from; knext wires it into `assetPrefix` so the
 browser fetches static chunks from object storage rather than the pod.
+
+## Starting without object storage
+
+You can leave `storage` out of `kn-next.config.ts` entirely. Your app then serves its own static
+files from the container image — exactly how `next start` works — and every deploy prints a notice
+saying it is running in this mode. Nothing else changes: deploys, scale-to-zero, rollback, and
+`next/image` all keep working. It is the right starting point for a new app; `kn-next create`
+scaffolds the storage block commented out for exactly this reason.
+
+What you give up until you add a bucket:
+
+- **CDN offload** — static files are served by your app's pods (and count against their request
+  concurrency) instead of a bucket or CDN.
+- **Asset retention across deploys** — each image carries only its own build's files. Page
+  navigations stay safe (a browser on an old build detects the skew and loads the new one), but a
+  script or style fetch already in flight when the old revision is fully retired has nothing to
+  fall back to. With a bucket, old builds' assets outlive their revisions — see
+  [Skew protection](/docs/skew-protection).
+- **A shared image-optimization cache** — optimized image variants live per pod and are re-created
+  on pod start instead of persisting in the bucket.
+
+Rollback actually gets **simpler** in this mode: a pinned revision serves assets baked into its own
+image, so they can never be cleaned up out from under it.
+
+Add the `storage` block when static delivery speed matters, or when your traffic holds long-lived
+sessions open across deploys — pick a provider from the table above and redeploy. `kn-next doctor`
+reports which mode your app is in.

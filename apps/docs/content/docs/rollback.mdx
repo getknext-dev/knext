@@ -101,9 +101,12 @@ in-progress deploy, reports an honest verdict on the CR: `Ready: False` / `Degra
 clear the pin entirely.
 
 <Callout type="info">
-A pinned or canaried revision still serves **its own** static assets — knext never prunes the
-assets of a revision in the live traffic set. That is what makes a rollback safe for clients that
-already loaded the older build. See [Skew protection](/docs/skew-protection).
+A pinned or canaried revision still serves **its own** static assets. With object storage
+configured, knext never prunes the assets of a revision in the live traffic set; without a
+`storage` block, the assets are baked into the revision's own container image and can never be
+pruned at all. Either way a rollback is safe for clients that already loaded the older build. See
+[Skew protection](/docs/skew-protection) and [Starting without object
+storage](/docs/multi-cloud#starting-without-object-storage).
 </Callout>
 
 ## Related

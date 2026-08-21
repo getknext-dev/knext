@@ -38,7 +38,9 @@ vi.mock("../cli/shared", () => ({
         runtime: "node", // node config on purpose — the heal must run anyway
     })),
 }));
-vi.mock("../utils/asset-upload", () => ({
+vi.mock("../utils/asset-upload", async (importOriginal) => ({
+    // keep the REAL hasStorage/notice exports (ADR-0047) — stub only the seams
+    ...(await importOriginal<object>()),
     uploadAssets: vi.fn(async () => {}),
 }));
 

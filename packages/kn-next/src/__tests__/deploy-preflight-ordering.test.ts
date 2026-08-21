@@ -62,7 +62,9 @@ const uploadAssets = vi.fn<AnyFn>(async () => {
 const getAssetPrefix = vi.fn<AnyFn>(() => "https://cdn.example.com/_next");
 const reclaimBuildPrefix = vi.fn<AnyFn>();
 
-vi.mock("../utils/asset-upload", () => ({
+vi.mock("../utils/asset-upload", async (importOriginal) => ({
+    // keep the REAL hasStorage/notice exports (ADR-0047) — stub only the seams
+    ...(await importOriginal<object>()),
     uploadAssets: (...a: unknown[]) => uploadAssets(...a),
     getAssetPrefix: (...a: unknown[]) => getAssetPrefix(...a),
     reclaimBuildPrefix: (...a: unknown[]) => reclaimBuildPrefix(...a),

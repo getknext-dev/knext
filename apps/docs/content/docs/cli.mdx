@@ -48,14 +48,19 @@ the package (see [Directly runnable entries](#directly-runnable-entries) below).
 ## `kn-next deploy` (default)
 
 Loads and validates `kn-next.config.ts`, runs `next build` (standalone output), uploads static
-assets, builds and pushes the container image, resolves its **digest**, and applies a digest-pinned
-`NextApp` CR. After a successful deploy it also runs a best-effort [asset-retention
-GC](#kn-next-gc) — a GC failure never fails a deploy that has already shipped.
+assets (with object storage configured), builds and pushes the container image, resolves its
+**digest**, and applies a digest-pinned `NextApp` CR. After a successful deploy it also runs a
+best-effort [asset-retention GC](#kn-next-gc) — a GC failure never fails a deploy that has already
+shipped.
+
+With no `storage` block in the config, the upload and GC steps are skipped and the deploy prints a
+notice that static assets are served from the image instead — see [Starting without object
+storage](/docs/multi-cloud#starting-without-object-storage).
 
 | Flag | Notes |
 |---|---|
 | `-r`, `--registry` | Container registry (overrides config; env fallback `KN_REGISTRY`). |
-| `-b`, `--bucket` | Storage bucket (overrides config; env fallback `KN_BUCKET`). |
+| `-b`, `--bucket` | Storage bucket (overrides config; env fallback `KN_BUCKET`). Requires a `storage` block in the config — with none, the flag is a hard error rather than a silently-invented storage setup. |
 | `-t`, `--tag` | Image tag (default: timestamp; env fallback `KN_IMAGE_TAG`). The tag doubles as the Next.js `BUILD_ID` — see [Skew protection](/docs/skew-protection). |
 | `-n`, `--namespace` | Kubernetes namespace (default `default`; env fallback `KN_NAMESPACE`). |
 | `--skip-build` | Skip the `next build` step. |
@@ -75,8 +80,9 @@ app, and exits with status 1 — no stack trace.
 ## `kn-next build`
 
 The build half of `deploy`, on its own: runs the project's build script (`next build`,
-`output: 'standalone'`), heals the standalone output, and uploads static assets to the configured
-bucket. It makes **no** cluster writes.
+`output: 'standalone'`), heals the standalone output, and — with object storage configured —
+uploads static assets to the bucket (with no `storage` block, the upload is skipped with a notice;
+assets ship inside the image). It makes **no** cluster writes.
 
 | Flag | Notes |
 |---|---|
@@ -245,6 +251,9 @@ kn-next gc --dry-run                # print the full reap/keep plan, delete noth
 | `-n`, `--namespace` | Namespace of the `NextApp` (default `default`). |
 | `--dry-run` | Compute and print the full reap/keep plan; issue **zero** deletes. Composes with `--build-id` and `-n`. |
 | `-h`, `--help` | Show the usage help. |
+
+With no `storage` block there is nothing to reap: `kn-next gc` says
+`no object storage configured — nothing to reap` and exits 0.
 
 **Fail-safe: over-keep, never over-delete.** If any live revision cannot be resolved to a
 build-id, the GC skips entirely — the only possible failure mode is keeping assets too long.

@@ -32,10 +32,11 @@ vi.mock("../cli/exec", () => ({
 
 import { runCapture, runQuiet } from "../cli/exec";
 import { SUPPORTED_STORAGE_PROVIDERS } from "../cli/validate";
-import type { KnativeNextConfig, StorageProvider } from "../config";
+import type { StorageProvider } from "../config";
 import {
     appKeyPrefix,
     getAssetPrefix,
+    type StorageBackedConfig,
     uploadAssets,
 } from "../utils/asset-upload";
 
@@ -64,7 +65,7 @@ function makeConfig(
     provider: StorageProvider,
     bucket: string,
     name = APP_NAME,
-): KnativeNextConfig {
+): StorageBackedConfig {
     return {
         name,
         storage: {
@@ -72,7 +73,7 @@ function makeConfig(
             bucket,
             publicUrl: `https://example.test/${bucket}`,
         },
-    } as unknown as KnativeNextConfig;
+    } as unknown as StorageBackedConfig;
 }
 
 /**
