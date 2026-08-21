@@ -10,8 +10,9 @@ guides for when you outgrow it.
 
 <Callout type="info">
 **No Kubernetes knowledge required.** Every step below is one command plus one sentence saying
-what it does. When it's done, `npx kn-next doctor` reports a healthy cluster and you can go
-straight to [Getting started](/docs/getting-started).
+what it does. At the end, `npx kn-next doctor` checks everything you installed and tells you
+exactly where you stand — one step currently has a known gap on our side (see step 5), so expect
+doctor to call that one out.
 </Callout>
 
 ## 0 · Install the tools
@@ -94,6 +95,18 @@ kubectl wait --for=condition=Available -n kn-next-operator-system \
   deployment/kn-next-operator-controller-manager --timeout=120s
 ```
 
+{/* REMOVE the Callout below — and restore the intro Callout's unconditional doctor-green
+    promise — once the two release gaps close: (1) the operator image on ghcr.io is publicly
+    pullable, and (2) a multi-arch (amd64 + arm64) operator image is published. */}
+<Callout type="warn">
+**A known gap on our side, for now.** The operator image is not yet publicly pullable, and it has
+no arm64 build yet — so today this `kubectl wait` times out and the operator pod sits in
+`ImagePullBackOff`. That is our release gap, **not a mistake in your setup**: everything you
+installed in steps 1–4 is fine, and `kn-next doctor` (step 6) will name this exact cause. We're
+closing both gaps; until then the rest of this page still leaves you with a cluster that's ready
+the moment the image is.
+</Callout>
+
 The full install reference — what's in the bundle, signature verification, and troubleshooting —
 is on [Install](/docs/install).
 
@@ -118,7 +131,7 @@ Be honest with yourself about what you just built:
   Desktop / OrbStack or close the lid and your apps and their URLs are gone until it's back.
   Perfect for trying knext and developing against; not a place to serve real users from.
 - **Network isolation is declarative-only here.** knext's default `NetworkPolicy` is enforced
-  only if your CNI supports NetworkPolicy (Calico, Cilium); on kind's default CNI the policy is
+  only if your cluster's network plugin (CNI) supports NetworkPolicy (Calico, Cilium); on kind's default CNI the policy is
   inert. See [Production hardening](/docs/hardening).
 - **Deploys still need a registry.** `kn-next deploy` pushes your app image to a container
   registry the cluster can pull from — the [Getting started](/docs/getting-started) prerequisites
