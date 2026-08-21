@@ -110,9 +110,13 @@ describe('docs content — CLI reference matches the real verb set', () => {
   });
 
   it('does not invent bin subcommands that the dispatcher does not route', () => {
-    // `build`, `cleanup`, `preview` and `loadtest` ship as directly runnable
-    // entries, NOT as bin subcommands.
-    for (const notAVerb of ['kn-next validate', 'kn-next deploy-all', 'kn-next init']) {
+    // `preview` and `loadtest` ship as directly runnable entries, NOT as bin
+    // subcommands. (`build`/`cleanup` became routed verbs with the dispatch
+    // contract, and `validate` joined it with the placeholder-preflight change
+    // — both list and comment here track the dispatcher's truth, and this
+    // enumeration is the guard's known weakness: it names non-verbs, so a verb
+    // GAINING routing must remove its entry in the same PR.)
+    for (const notAVerb of ['kn-next deploy-all', 'kn-next init']) {
       expect(cli).not.toContain(notAVerb);
     }
   });
