@@ -126,3 +126,29 @@ Route `validate` in the dispatch contract (or state why not, in the contract's o
 **Fog update:** the "get a cluster" journey remains the last unmeasured wall; iteration 5
 (optional storage, in review) removes the bucket placeholder entirely, which shrinks 4b's
 surface to the registry field — the two levers compose.
+
+---
+
+## Row 5 — 2026-08-21, the "get a cluster" wall (the last unmeasured wall)
+
+Instrument: the docs site read as the persona `doctor` now redirects there (iteration 3 made
+doctor say "you don't have a cluster connected yet" + docs pointer — this sitting measures
+whether the destination delivers).
+
+| # | finding | severity |
+|---|---|---|
+| 5a | **No local-cluster on-ramp exists anywhere in the docs.** Zero mentions of kind / k3d / minikube / OrbStack / Docker Desktop across every page (grepped all of `apps/docs/content/docs/`). The persona's cheapest first cluster — a laptop cluster in minutes — is undocumented, despite the project itself dev-testing on kind and OrbStack (the integration gate runs on kind). | **High — iteration-7 lever** |
+| 5b | The quickstart's prerequisite line ("A Kubernetes cluster with **Knative Serving** installed…") is a dead end: no link to ANY of the cluster paths, local or managed. The persona doctor redirects here meets a wall restated, not an on-ramp. | High (same lever) |
+| 5c | Counter-finding, credit where due: the managed-cloud pages (gke/eks/aks/oke/openshift, ~200 lines each) genuinely teach cluster CREATION with real commands (`gcloud container clusters create…`), not just connection — the cloud half of the journey is in good shape once the persona finds it. | — |
+
+**Iteration-7 scope (docs-only, no code, no design-gate trigger): a "Your first cluster" page**
+— local path first (kind or OrbStack + the Knative quickstart + the knext operator install, the
+same steps the repo's own integration gate scripts), then handoff links to the five managed-cloud
+pages — and the quickstart prerequisite line becomes a link to it ("Don't have a cluster? Start
+here"). Sequencing: the getting-started.mdx line edit collides with iteration 5's in-review F2
+edits of the same file — iteration 7 lands AFTER optional-storage merges (same stacking rule as
+iteration 6).
+
+**Fog now empty of walls:** with rows 1–5, every step of `npx … → config → cluster → deploy` has
+been measured. Remaining fog is the founder's git-integration/prepared-clouds vision (a product
+direction, not a sitting) and re-measures as levers land.
