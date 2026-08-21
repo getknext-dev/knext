@@ -1,0 +1,24 @@
+{
+  "name": "kn-next",
+  "version": "0.3.0",
+  "description": "Alias package: makes `npx kn-next` work. All functionality lives in @getknext/core — this package only forwards to its CLI.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/getknext-dev/knext.git",
+    "directory": "packages/kn-next-alias"
+  },
+  "bin": {
+    "kn-next": "bin/kn-next.js"
+  },
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "dependencies": {
+    "@getknext/core": "workspace:^"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
