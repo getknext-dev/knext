@@ -45,8 +45,19 @@ try {
 const child = spawn(process.execPath, [binPath, ...process.argv.slice(2)], {
   stdio: 'inherit',
 });
+// Forward signals PARENT→CHILD: without this, a supervisor's SIGTERM (CI
+// timeout, systemd, `timeout 300 npx kn-next deploy`) kills the wrapper and
+// ORPHANS the still-running, cluster-mutating CLI — proven in review. The
+// child-dies-first direction is the exit handler below.
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(sig, () => child.kill(sig));
+}
 child.on('exit', (code, signal) => {
   if (signal) {
+    // Re-raise with DEFAULT disposition: our own forwarding listener must go
+    // first, or it swallows the re-raise and the shim exits 0 — a supervisor
+    // (timeout, systemd, CI) would read a SIGTERM'd deploy as success.
+    process.removeAllListeners(signal);
     process.kill(process.pid, signal);
     return;
   }
