@@ -1012,7 +1012,33 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 				Requests: resourceRequests,
 				Limits:   resourceLimits,
 			},
-			// Probe values aligned with CLI: initialDelay=2, period=3 for readiness
+			// Readiness: HTTP GET on the SHALLOW health path (#338), stamped
+			// KNATIVE-AGGRESSIVE — initialDelaySeconds and periodSeconds are
+			// deliberately OMITTED (both 0).
+			//
+			// Knative treats periodSeconds == 0 as its special aggressive mode:
+			// the queue-proxy retries the readiness probe sub-second instead of
+			// on the kubelet's grid, so a revision goes Ready the moment the app
+			// answers. Setting ANY explicit period opts the revision OUT of that
+			// mode; an initialDelay blinds the probe entirely for its duration.
+			//
+			// Measured on OKE (probe-shape A/B, n=6 per arm, same image/env/data
+			// plane): the previous {initialDelay: 2, period: 3} cost ~1.2s of
+			// MEDIAN cold start (5723ms probed vs 4562ms unprobed). The signature
+			// was grid quantization — the probed arm's container->Ready landed
+			// ONLY on probe-grid values (2000/3000/5000ms), i.e. readiness was
+			// gated by the probe clock, not by the app. The benchmark apps bypass
+			// the operator, so no cold-start ledger row ever saw this tax.
+			//
+			// timeoutSeconds/failureThreshold stay unset because Knative's
+			// revision validation REJECTS them when periodSeconds is zero
+			// (knative.dev/serving/pkg/apis/serving/k8s_validation.go,
+			// validateReadinessProbe: "failureThreshold is disallowed when
+			// periodSeconds is zero", same for timeoutSeconds). successThreshold
+			// is defaulted to 1 by Knative (revision_defaults.go).
+			//
+			// The handler stays httpGet, NOT tcpSocket: a TCP connect would go
+			// Ready on a bound socket, dropping the health-path semantics.
 			ReadinessProbe: &corev1.Probe{
 				ProbeHandler: corev1.ProbeHandler{
 					HTTPGet: &corev1.HTTPGetAction{
@@ -1020,9 +1046,14 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 						Port: intstr.FromInt(3000),
 					},
 				},
-				InitialDelaySeconds: 2,
-				PeriodSeconds:       3,
 			},
+			// Liveness KEEPS an explicit delay + period, unlike readiness above.
+			// Knative has no aggressive mode for liveness (it is enforced by the
+			// kubelet against the user container, and periodSeconds == 0 there
+			// just means "kubelet default"), and sub-second liveness probing
+			// would restart-thrash a slow-booting container. Liveness is a
+			// crash detector, not a cold-start gate: it costs nothing on the
+			// path to Ready, so leave it conservative.
 			LivenessProbe: &corev1.Probe{
 				ProbeHandler: corev1.ProbeHandler{
 					HTTPGet: &corev1.HTTPGetAction{
