@@ -1,0 +1,155 @@
+---
+title: Your first cluster
+description: No Kubernetes cluster yet? Create one on your laptop in minutes with kind, install Knative Serving, and be ready to deploy.
+---
+
+knext deploys your Next.js app to a Kubernetes cluster running **Knative Serving**. If you don't
+have a cluster yet, the fastest way to get one is on your own laptop — free, disposable, and ready
+in a few minutes. This page walks that path end to end, then points you at the managed-cloud
+guides for when you outgrow it.
+
+<Callout type="info">
+**No Kubernetes knowledge required.** Every step below is one command plus one sentence saying
+what it does. At the end, `npx kn-next doctor` checks everything you installed and tells you
+exactly where you stand — one step currently has a known gap on our side (see step 5), so expect
+doctor to call that one out.
+</Callout>
+
+## 0 · Install the tools
+
+You need three things on your machine: a container runtime (Docker Desktop or OrbStack — kind
+runs Kubernetes inside containers), **kind** itself, and **kubectl**, the Kubernetes command-line
+client.
+
+```bash title="shell (macOS — Homebrew)"
+brew install kind kubectl
+```
+
+On Linux or Windows, grab the binaries from the
+[kind install page](https://kind.sigs.k8s.io/docs/user/quick-start/#installation) and the
+[kubectl install page](https://kubernetes.io/docs/tasks/tools/). Make sure Docker Desktop or
+OrbStack is running before you continue.
+
+## 1 · Create the cluster
+
+```bash title="shell"
+kind create cluster --name knext --wait 120s
+```
+
+This starts a single-node Kubernetes cluster in a container and points your `kubectl` at it. The
+`--wait` flag blocks until the node is actually ready, so when the command returns you have a
+working cluster.
+
+## 2 · Install Knative Serving
+
+Knative Serving is what gives your apps scale-to-zero. Install its resource definitions, then its
+core components:
+
+```bash title="shell"
+KNATIVE_VERSION="knative-v1.16.0"
+kubectl apply -f "https://github.com/knative/serving/releases/download/${KNATIVE_VERSION}/serving-crds.yaml"
+kubectl apply -f "https://github.com/knative/serving/releases/download/${KNATIVE_VERSION}/serving-core.yaml"
+```
+
+## 3 · Install the Kourier networking layer
+
+Knative needs a networking layer to route traffic to your apps; knext targets **Kourier**.
+Install it, then tell Knative to use it:
+
+```bash title="shell"
+kubectl apply -f "https://github.com/knative/net-kourier/releases/download/${KNATIVE_VERSION}/kourier.yaml"
+kubectl patch configmap/config-network \
+  --namespace knative-serving \
+  --type merge \
+  --patch '{"data":{"ingress-class":"kourier.ingress.networking.knative.dev"}}'
+```
+
+Then wait for everything to come up (this pulls a few images, so give it a minute):
+
+```bash title="shell"
+kubectl wait --for=condition=Available --timeout=300s \
+  -n knative-serving deployment/controller deployment/webhook deployment/autoscaler
+kubectl wait --for=condition=Available --timeout=300s \
+  -n knative-serving deployment/net-kourier-controller
+```
+
+## 4 · Install cert-manager
+
+The knext control plane runs an admission webhook, which needs a TLS certificate;
+**cert-manager** issues it:
+
+```bash title="shell"
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml
+kubectl wait --for=condition=Available --timeout=300s \
+  -n cert-manager deployment/cert-manager deployment/cert-manager-webhook deployment/cert-manager-cainjector
+```
+
+## 5 · Install the knext operator
+
+The operator is knext's control plane: it watches for `NextApp` resources and turns each one into
+a running, scale-to-zero Knative service. One bundle installs it:
+
+```bash title="shell"
+kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-latest/install.yaml
+kubectl wait --for=condition=Available -n kn-next-operator-system \
+  deployment/kn-next-operator-controller-manager --timeout=120s
+```
+
+{/* REMOVE the Callout below — and restore the intro Callout's unconditional doctor-green
+    promise — once the two release gaps close: (1) the operator image on ghcr.io is publicly
+    pullable, and (2) a multi-arch (amd64 + arm64) operator image is published. */}
+<Callout type="warn">
+**A known gap on our side, for now.** The operator image is not yet publicly pullable, and it has
+no arm64 build yet — so today this `kubectl wait` times out and the operator pod sits in
+`ImagePullBackOff`. That is our release gap, **not a mistake in your setup**: everything you
+installed in steps 1–4 is fine, and `kn-next doctor` (step 6) will name this exact cause. We're
+closing both gaps; until then the rest of this page still leaves you with a cluster that's ready
+the moment the image is.
+</Callout>
+
+The full install reference — what's in the bundle, signature verification, and troubleshooting —
+is on [Install](/docs/install).
+
+## 6 · Verify
+
+From your Next.js project (or any directory with `@getknext/core` installed), run the preflight:
+
+```bash title="shell"
+npx kn-next doctor
+```
+
+`doctor` checks the pieces you just installed — the `NextApp` resource definition, the operator,
+its admission webhook, the ingress class, and Knative Serving — and tells you exactly what's
+missing if anything is. All green? Head to [Getting started](/docs/getting-started) and deploy
+your first app.
+
+## What a laptop cluster is (and isn't) for
+
+Be honest with yourself about what you just built:
+
+- **It sleeps with your laptop.** The cluster runs inside your container runtime — quit Docker
+  Desktop / OrbStack or close the lid and your apps and their URLs are gone until it's back.
+  Perfect for trying knext and developing against; not a place to serve real users from.
+- **Network isolation is declarative-only here.** knext's default `NetworkPolicy` is enforced
+  only if your cluster's network plugin (CNI) supports NetworkPolicy (Calico, Cilium); on kind's default CNI the policy is
+  inert. See [Production hardening](/docs/hardening).
+- **Deploys still need a registry.** `kn-next deploy` pushes your app image to a container
+  registry the cluster can pull from — the [Getting started](/docs/getting-started) prerequisites
+  cover that.
+
+To throw the cluster away and start over:
+
+```bash title="shell"
+kind delete cluster --name knext
+```
+
+## When you outgrow the laptop
+
+The same knext install (steps 2–5) works unchanged on a managed cluster — each guide below covers
+creating the cluster and the provider-specific pieces:
+
+- [Google Kubernetes Engine (GKE)](/docs/gke)
+- [Amazon EKS](/docs/eks)
+- [Azure AKS](/docs/aks)
+- [Oracle Kubernetes Engine (OKE)](/docs/oke) — the reference-validated path
+- [OpenShift](/docs/openshift)
