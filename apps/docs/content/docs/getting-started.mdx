@@ -7,7 +7,8 @@ Take an existing Next.js app from `next build` to a scale-to-zero Knative servic
 **official Next.js Deployment Adapter API** — no fork, no custom runtime.
 
 <Callout type="info">
-**Prerequisites.** A Kubernetes cluster with **Knative Serving** installed, **Next.js 16.x**, and a
+**Prerequisites.** A Kubernetes cluster with **Knative Serving** installed (don't have one?
+[Your first cluster](/docs/first-cluster) gets you a laptop cluster in minutes), **Next.js 16.x**, and a
 container registry. An object-storage bucket (`gcs`, `s3`, `minio`, or `azure`) is **optional** —
 start without one (your app serves its static files from its own image, like `next start`) and add
 it later for CDN offload. See
