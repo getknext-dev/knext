@@ -436,7 +436,46 @@ out entirely, set `spec.security.networkPolicy: false` on the `NextApp` — the
 operator deletes the policy. Do **not** hand-edit the policy; it is
 owner-referenced and reconciled.
 
-## 11 — Apply rejected (admission webhook not ready)
+## 11 — Every cold start of one app is ~1.5s slower than it used to be (activator clusterIP fallback)
+
+**Symptom.** Wakes of a scale-to-zero app got uniformly slower (roughly 1–2s added between the
+pod reporting Ready and the response arriving), with no deploy or config change. Warm requests
+are unaffected. There is no alert for this today — it is found by decomposing wake latency.
+
+**Diagnose.** Check what the activator's throttler logs for the revision on a cold wake:
+
+```bash
+kubectl -n knative-serving logs -l app=activator --since=10m   | grep "Updating Revision Throttler" | grep "<revision>"
+```
+
+- Healthy (pod-direct): `clusterIP = <nil>, trackers = 1, backends = 1`
+- Degraded (fallback): `clusterIP = <ip>:80, trackers = 0, backends = 1`, preceded during the
+  wake by a `connection refused` retry loop against that clusterIP (`…/healthz: dial tcp …`).
+
+**Cause.** The activator's per-revision watcher permanently falls back from probing pod IPs to
+probing the revision's private-Service clusterIP after a streak of pod-probe failures (for
+example a transient CNI/conntrack fault). The fallback never retries pod-direct, so a healed
+network still pays the clusterIP path — which waits on kube-proxy dataplane programming on
+every wake — indefinitely.
+
+**Fix.**
+
+```bash
+kubectl -n knative-serving rollout restart deploy/activator
+```
+
+A fresh activator re-evaluates pod addressability and returns to pod-direct tracking. Measured
+on OKE 2026-08-21: Ready→routable gap 1.64–1.93s before the restart, 0.14–0.86s after, same
+revision and hour. In-flight traffic to running pods is not interrupted (the activator is only
+on the scale-from-zero path at default target-burst-capacity), but wakes racing the restart may
+see one retry.
+
+**Durable state.** An upstream report (the fallback's stickiness and its invisibility) is
+drafted in `docs/upstream/knative-activator-sticky-clusterip-fallback.md`. Until that lands
+there is no metric to alert on — `config-observability` ships no exporter here, and the watcher
+mode is not exported regardless — so this section is the detection story.
+
+## 12 — Apply rejected (admission webhook not ready)
 
 **Symptom.** `kn-next deploy` / `kubectl apply` of a `NextApp` fails with a
 webhook error like `failed calling webhook … connection refused` or
