@@ -102,3 +102,27 @@ could ask/derive, `doctor` could verify push access) and belongs to a later iter
 **Not yet reached (fog):** the actual `npm install && kn-next deploy` run of the scaffold
 against the live cluster (blocked on the wall above being decided); the "get a cluster"
 journey itself.
+
+---
+
+## Row 4 — 2026-08-21, the registry/placeholder half of the wall (iteration-6 sitting)
+
+Instrument: the row-3 scaffold (`my-app`, placeholders untouched — exactly what a persona has
+five minutes in), row-2 tarball install, `validate` and `deploy --dry-run` run as the persona.
+
+| # | finding (evidence verbatim) | severity |
+|---|---|---|
+| 4a | **`kn-next validate` is not dispatched**: `unknown command: validate` (no did-you-mean match). `src/cli/validate.ts` exists; the #810 dispatch contract routes ~10 verbs and validate is not among them — so the persona has NO way to check a config without deploying. | High |
+| 4b | **`deploy` accepts placeholder values silently and heads into the build**: with `registry: "ghcr.io/<your-user>"` and `bucket: "<your-assets-bucket>"` untouched, `--dry-run` logged `assetPrefix: "https://storage.googleapis.com/<your-assets-bucket>/my-app"` — the placeholder interpolated into a URL, no complaint — and proceeded to `next build`. A persona with deps installed burns a full multi-minute build before failing at the image push. Feedback-loop shape: the most expensive possible place to learn the config is unfinished. | **High — iteration-6 lever** |
+| 4c | The `next: command not found` failure (deps not yet installed) renders as FATAL + serialized error object — the #810 friendly-error contract covered USAGE errors; deploy-path environment failures (missing deps, missing next) still dump. "Run npm install first" is the persona answer. | Medium |
+
+**Iteration-6 scope (one PR, no schema change — no design-gate trigger expected):**
+fail-fast placeholder preflight — deploy (and validate, once routed) detects `<...>`-shaped
+values in config fields BEFORE any build step and answers plainly per field ("registry still has
+the placeholder — put your registry here; what a registry is in one sentence; docs link").
+Route `validate` in the dispatch contract (or state why not, in the contract's own terms).
+4c folds in if cheap: the missing-`next` failure becomes a plain write-and-exit message.
+
+**Fog update:** the "get a cluster" journey remains the last unmeasured wall; iteration 5
+(optional storage, in review) removes the bucket placeholder entirely, which shrinks 4b's
+surface to the registry field — the two levers compose.
