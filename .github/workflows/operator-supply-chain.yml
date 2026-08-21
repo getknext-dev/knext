@@ -84,6 +84,10 @@ jobs:
         env:
           OWNER: ${{ github.repository_owner }}
 
+      # QEMU for the arm64 half of the multi-arch build (Go cross-compiles fast;
+      # the emulated stage is only the distroless assembly).
+      - uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
+
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       # Build into a LOCAL OCI-layout directory on every ref — never push here.
@@ -100,7 +104,11 @@ jobs:
         with:
           context: packages/kn-next-operator
           file: packages/kn-next-operator/Dockerfile
-          platforms: linux/amd64
+          # amd64 + arm64 (#iteration-7 finding): the image was amd64-only, so an
+          # Apple-Silicon laptop — the exact persona of the first-cluster docs
+          # page — got "no matching manifest" on a local kind cluster. Trivy
+          # scans and cosign signs the same multi-arch OCI layout below.
+          platforms: linux/amd64,linux/arm64
           tags: ${{ env.IMAGE }}:${{ github.sha }}
           outputs: type=oci,dest=operator-oci,tar=false
           # mode=max records the full build definition + materials. Safe here:
