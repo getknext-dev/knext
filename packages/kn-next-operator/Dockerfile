@@ -7,7 +7,7 @@
 # build-info. A floating minor tag can resolve to an unpatched 1.25.x and leak
 # a fixable Go-stdlib CVE, failing operator-supply-chain.yml's
 # `trivy image --severity HIGH,CRITICAL --exit-code 1` gate on main and blocking
-# the whole bundle publish (refs #117). 1.25.13 is the latest patched 1.25 line
+# the whole bundle publish (refs #117). 1.25.13 is the latest patched 1.25 line (clears the 7 HIGH stdlib CVEs Trivy flagged in 1.25.12: CVE-2026-33818 asn1 DoS, CVE-2026-39821 idna, +5)
 # (fixes CVE-2026-39822, os.Root symlink following, HIGH).
 # Bump this in lockstep with hack/check-trivy-baseimage.bats.sh (MIN_PATCH).
 #
