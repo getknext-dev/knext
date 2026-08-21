@@ -42,7 +42,19 @@ const RESERVED_ENV_NAMES = [
     "K_CONFIGURATION",
 ] as const;
 
+/**
+ * Discriminator carried by a schema-invalid config. Same string-`code`
+ * reasoning as shared.ts's CONFIG_NOT_FOUND_CODE: the CLI ships as a tsup
+ * bundle whose subcommands are dynamic-imported chunks, so two copies of the
+ * class can exist in one process and `instanceof` would silently stop
+ * matching. `kn-next validate` renders this error as its verdict by checking
+ * the code.
+ */
+export const CONFIG_INVALID_CODE = "ERR_KN_CONFIG_INVALID";
+
 export class ConfigValidationError extends Error {
+    readonly code = CONFIG_INVALID_CODE;
+
     constructor(message: string) {
         super(`[kn-next] Config validation failed: ${message}`);
         this.name = "ConfigValidationError";

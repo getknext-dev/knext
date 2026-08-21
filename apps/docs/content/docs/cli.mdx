@@ -1,6 +1,6 @@
 ---
 title: CLI reference
-description: The kn-next CLI — create, deploy, build, doctor, status, rollback, cleanup, db bind, db migrate, gc.
+description: The kn-next CLI — create, validate, deploy, build, doctor, status, rollback, cleanup, db bind, db migrate, gc.
 ---
 
 The `kn-next` binary ships in **`@getknext/core`** (`npm i @getknext/core`), so it is available as
@@ -11,6 +11,7 @@ are strictly read-only.
 
 ```bash
 kn-next create         # scaffold a new knext-ready app (writes files, no cluster changes)
+kn-next validate       # check kn-next.config.ts is filled in and valid (no cluster needed)
 kn-next doctor         # cluster-prereq preflight (read-only)
 kn-next [deploy]       # default — build → push → apply the NextApp CR
 kn-next build          # the build + asset-upload steps only, without deploying
@@ -57,6 +58,13 @@ With no `storage` block in the config, the upload and GC steps are skipped and t
 notice that static assets are served from the image instead — see [Starting without object
 storage](/docs/multi-cloud#starting-without-object-storage).
 
+**Placeholders fail fast.** Before any build step, deploy refuses config values still carrying a
+`<...>` placeholder from the scaffold (like `ghcr.io/<your-user>`), with a per-field explanation of
+what the value is for and what to put there — so an unfinished config never costs you a
+multi-minute build. Run [`kn-next validate`](#kn-next-validate) to get the same check on its own.
+And if the build script cannot find `next` (dependencies not installed yet), deploy tells you to
+run `npm install` instead of printing a crash.
+
 | Flag | Notes |
 |---|---|
 | `-r`, `--registry` | Container registry (overrides config; env fallback `KN_REGISTRY`). |
@@ -98,6 +106,23 @@ clears that app's object-store prefix and Redis keyspace — scoped strictly to 
 
 It takes **no options** beyond `-h`/`--help`; a stray flag is an error rather than an ignored
 argument, because the command is destructive.
+
+## `kn-next validate`
+
+Checks `kn-next.config.ts` **without touching a cluster** — it reads your config file and nothing
+else: no kubectl, no docker, no network. It loads the config, runs every schema check, and flags
+placeholder values (like `ghcr.io/<your-user>`) that still need real ones, explaining per field
+what the value is for and what to put there.
+
+```bash
+kn-next validate          # exit 0 means: ready for kn-next deploy
+```
+
+**Exit code:** `0` when the config is complete and valid; `1` with a plain per-field message
+otherwise. `kn-next deploy` runs the same checks before its first build step, so you never need to
+run `validate` first — it exists so you can iterate on the config without paying for a build.
+
+It takes no options beyond `-h`/`--help`.
 
 ## `kn-next doctor`
 

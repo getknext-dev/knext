@@ -120,3 +120,17 @@ Three corollaries, all from reviews of this change and all part of the decision:
       Every no-dump assertion reads **both streams**: pino writes `FATAL` to **stdout**, so a
       stderr-only check reports clean while the dump is on screen.
 - [x] `apps/docs/content/docs/cli.mdx` updated (fall-through note, strict-flag promise).
+
+## Amendment 1 (2026-08-21): `validate` joins the routed surface
+
+`validate` existed as a library module (`cli/validate.ts`, the load-time schema checks) but was
+never a routed verb — the one command that could have rescued a user from an unfinished config was
+unreachable from the bin (UX ledger row 4). It is now a `COMMAND_GROUPS` entry ("Start here") with
+a dispatch branch, exactly the two-line shape this ADR promises. The verb entry lives in
+`cli/validate-cmd.ts` rather than `validate.ts` because `shared.ts` imports the library half — a
+same-file `validateMain` importing `loadConfig` back from `shared.ts` would form an import cycle.
+It runs config load + schema checks + the placeholder preflight (`cli/placeholder-preflight.ts`)
+with no cluster access, and inherits every derived dist-bin guard (help exit-0, unknown-flag
+rejection, no-dump) automatically. The placeholder preflight and the deps-not-installed (exit 127)
+translation both raise through the `UsageError` family, extending the "renders as a message, never
+a FATAL dump" contract from usage mistakes to these two expected config/environment states.
