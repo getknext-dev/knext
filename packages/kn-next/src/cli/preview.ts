@@ -42,6 +42,7 @@ import {
     validateCRImageRef,
 } from "./cr-builder";
 import { isEntrypoint, runCapture, runInherit, runQuiet } from "./exec";
+import { runProjectBuild } from "./project-build";
 import { captureKubectl } from "./schema/kubectl-capture";
 import {
     assertCRSchemaCompatible,
@@ -334,7 +335,9 @@ async function defaultBuildAndPush(
         { previewName, branch },
         "Building preview (output:standalone)...",
     );
-    runQuiet(["npm", "run", "build"]);
+    // UX ledger row 4 (4c): the seam translates a deps-not-installed failure
+    // (`next: command not found`, exit 127) into plain npm-install guidance.
+    runProjectBuild();
 
     const taggedRef = `${config.registry}/${previewName}:${tag}`;
     const metadataFilePath = join(

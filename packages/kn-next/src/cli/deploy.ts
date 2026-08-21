@@ -39,9 +39,11 @@ import {
     formatUnknownCommand,
     resolveInvocation,
 } from "./dispatch";
-import { isEntrypoint, runCapture, runInherit, runQuiet } from "./exec";
+import { isEntrypoint, runCapture, runInherit } from "./exec";
 import { runAssetGC } from "./gc";
 import { CLI_HELP } from "./help";
+import { assertNoPlaceholders } from "./placeholder-preflight";
+import { runProjectBuild } from "./project-build";
 import { captureKubectl } from "./schema/kubectl-capture";
 import {
     formatPreflightFailure,
@@ -365,6 +367,15 @@ export async function deploy() {
 
     const config = applyOverrides(baseConfig, options);
 
+    // UX ledger row 4 (4b): fail fast on `<...>` placeholder values BEFORE any
+    // build step, upload, or cluster access — the scaffold's `ghcr.io/<your-user>`
+    // used to flow silently into a multi-minute `next build` and die at the
+    // image push. Scanned on the EFFECTIVE config: a --registry override
+    // legitimately rescues a placeholder file, and a placeholder typed AS the
+    // override is still caught. Throws through the UsageError family, so the
+    // dispatcher renders it as a plain message, never a FATAL dump.
+    assertNoPlaceholders(config);
+
     if (!hasStorage(config)) {
         // ADR-0047 condition 1: announce the image-served static mode at info
         // on EVERY deploy (dry-run included) — a dropped or mistyped `storage`
@@ -416,7 +427,9 @@ export async function deploy() {
                 "Running next build (output:standalone; assets served from the image — no assetPrefix)...",
             );
         }
-        runQuiet(["npm", "run", "build"]);
+        // UX ledger row 4 (4c): the seam translates a deps-not-installed failure
+        // (`next: command not found`, exit 127) into plain npm-install guidance.
+        runProjectBuild();
         log.info(
             "Next.js build complete — standalone output in .next/standalone/",
         );
@@ -775,6 +788,13 @@ if (isEntrypoint(import.meta.url)) {
         } else if (sub === "cleanup") {
             const { cleanupMain } = await import("./cleanup");
             process.exit(await cleanupMain(process.argv.slice(3)));
+        } else if (sub === "validate") {
+            // UX ledger row 4 (4a): config load + schema checks + placeholder
+            // preflight, no cluster access. Routed through validate-cmd.ts —
+            // validate.ts stays the load-time validation library (see the module
+            // header there for why the verb entry is a separate file).
+            const { validateMain } = await import("./validate-cmd");
+            process.exit(await validateMain(process.argv.slice(3)));
         } else {
             await deploy();
         }
@@ -815,7 +835,9 @@ if (isEntrypoint(import.meta.url)) {
                             ? "build failed"
                             : sub === "cleanup"
                               ? "cleanup failed"
-                              : "Deployment failed";
+                              : sub === "validate"
+                                ? "validate failed"
+                                : "Deployment failed";
         log.fatal({ err }, label);
         process.exit(1);
     }

@@ -30,7 +30,8 @@ import {
     uploadAssets,
 } from "../utils/asset-upload";
 import { createLogger } from "../utils/logger";
-import { isEntrypoint, runQuiet } from "./exec";
+import { isEntrypoint } from "./exec";
+import { runProjectBuild } from "./project-build";
 import {
     handleConfigNotFound,
     handleUsageError,
@@ -74,7 +75,9 @@ export async function build(options: BuildOptions = {}) {
     //    The app's next.config.ts must set output:'standalone'.
     if (!options.skipNextBuild) {
         log.info("Running next build (output:standalone)...");
-        runQuiet(["npm", "run", "build"]);
+        // UX ledger row 4 (4c): the seam translates a deps-not-installed failure
+        // (`next: command not found`, exit 127) into plain npm-install guidance.
+        runProjectBuild();
         log.info(
             "Next.js build complete — standalone output in .next/standalone/",
         );

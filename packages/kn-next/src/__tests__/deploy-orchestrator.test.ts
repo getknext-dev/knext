@@ -113,6 +113,9 @@ const loadConfig = vi.fn<AnyFn>(async () => baseConfig);
 vi.mock("../cli/shared", () => ({
     loadConfig: (...a: unknown[]) => loadConfig(...a),
     excerpt: (s: string) => s,
+    // placeholder-preflight.ts (imported by deploy.ts) extends UsageError at
+    // module-eval time, so the mock must define it (same as deploy-no-storage).
+    UsageError: class MockUsageError extends Error {},
 }));
 
 // node:fs is mocked so the skew guard's readFileSync(.next/BUILD_ID) is

@@ -53,6 +53,10 @@ export default defineConfig([
       // CLI helpers exported as library subpaths (./cli/validate, ./cli/shared)
       'cli/validate': 'src/cli/validate.ts',
       'cli/shared': 'src/cli/shared.ts',
+      // `kn-next validate` — bin-dispatched only (no self-entry block, #263).
+      // Own entry so the dispatcher's dynamic import resolves to a STABLE
+      // dist path instead of a hash-named split chunk (same as create).
+      'cli/validate-cmd': 'src/cli/validate-cmd.ts',
       // Public config-validation surface (`@getknext/core/validate`): a PURE
       // re-export of validateConfig + ConfigValidationError that a consumer
       // imports into their own build/test process. Own dist file so the public
