@@ -3,6 +3,11 @@ import { NextResponse } from 'next/server';
 import '../../../../cache-init';
 // Reuse the single auth helper from the invalidate route — DELETE here is a
 // mutating endpoint (clears cache events) and must not be open (E4-2, security.md).
+import {
+  attachQuietErrorListener,
+  ensureDialable,
+  quietRedisOptions,
+} from '../../../../lib/redis-quiet';
 import { withRedMetrics } from '../../_metrics/registry';
 import { isAuthorized } from '../invalidate/auth';
 
@@ -30,15 +35,18 @@ const KEY_PREFIX = process.env.REDIS_KEY_PREFIX || 'kn-next';
 let redisClient: Redis | null = null;
 
 if (REDIS_URL) {
-  redisClient = new Redis(REDIS_URL, {
-    maxRetriesPerRequest: 1,
-    connectTimeout: 2000,
-  });
+  // #802: lazy (no dial at module evaluation), listened-to (ioredis prints
+  // `Unhandled error event` only when a client has none), and bounded (the
+  // retry gives up instead of looping for the pod's life). Recovery is on
+  // demand — see `ensureDialable` in getEvents/DELETE.
+  redisClient = new Redis(REDIS_URL, quietRedisOptions());
+  attachQuietErrorListener(redisClient, 'cache-events');
 }
 
 async function getEvents(): Promise<CacheEvent[]> {
   if (redisClient) {
     try {
+      ensureDialable(redisClient);
       const items = await redisClient.lrange(`${KEY_PREFIX}:cache-events`, 0, 50);
       return items.map((i) => JSON.parse(i));
     } catch (e) {
@@ -94,6 +102,7 @@ export const DELETE = withRedMetrics('/api/cache/events', async (request: Reques
   }
   if (redisClient) {
     try {
+      ensureDialable(redisClient);
       await redisClient.del(`${KEY_PREFIX}:cache-events`);
     } catch (e) {
       console.error('[Cache Events] Error deleting from Redis:', e);

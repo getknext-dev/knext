@@ -32,15 +32,26 @@ import {
     resolveDigest,
     validateCRImageRef,
 } from "./cr-builder";
+import {
+    formatStrayPositional,
+    formatUnknownCommand,
+    resolveInvocation,
+} from "./dispatch";
 import { isEntrypoint, runCapture, runInherit, runQuiet } from "./exec";
 import { runAssetGC } from "./gc";
+import { CLI_HELP } from "./help";
 import { captureKubectl } from "./schema/kubectl-capture";
 import {
     formatPreflightFailure,
     preflightCRSchema,
     preflightImageRef,
 } from "./schema/preflight";
-import { loadConfig } from "./shared";
+import {
+    handleConfigNotFound,
+    handleUsageError,
+    loadConfig,
+    UsageError,
+} from "./shared";
 import { requireBuildContext } from "./tracing-root";
 
 const log = createLogger({ module: "deploy" });
@@ -83,21 +94,41 @@ function getCliVersion(): string {
 }
 
 function parseCliArgs(): DeployOptions {
-    const { values } = parseArgs({
-        options: {
-            registry: { type: "string", short: "r" },
-            bucket: { type: "string", short: "b" },
-            tag: { type: "string", short: "t" },
-            namespace: { type: "string", short: "n", default: "default" },
-            "skip-build": { type: "boolean", default: false },
-            "skip-upload": { type: "boolean", default: false },
-            "dry-run": { type: "boolean", default: false },
-            help: { type: "boolean", short: "h", default: false },
-            version: { type: "boolean", short: "v", default: false },
-        },
-        strict: true,
-        allowPositionals: true,
-    });
+    let values: {
+        registry?: string;
+        bucket?: string;
+        tag?: string;
+        namespace?: string;
+        "skip-build"?: boolean;
+        "skip-upload"?: boolean;
+        "dry-run"?: boolean;
+        help?: boolean;
+        version?: boolean;
+    };
+    let positionals: string[];
+    try {
+        ({ values, positionals } = parseArgs({
+            options: {
+                registry: { type: "string", short: "r" },
+                bucket: { type: "string", short: "b" },
+                tag: { type: "string", short: "t" },
+                namespace: { type: "string", short: "n", default: "default" },
+                "skip-build": { type: "boolean", default: false },
+                "skip-upload": { type: "boolean", default: false },
+                "dry-run": { type: "boolean", default: false },
+                help: { type: "boolean", short: "h", default: false },
+                version: { type: "boolean", short: "v", default: false },
+            },
+            strict: true,
+            allowPositionals: true,
+        }));
+    } catch (err) {
+        // Node's own parse failure (`ERR_PARSE_ARGS_UNKNOWN_OPTION`) is still a
+        // user typo — `kn-next --skip-buildd` — so it gets the same message
+        // treatment as ours instead of a serialised Error with a stack.
+        // `create.ts` already did this; the deploy path did not.
+        throw new UsageError(`${(err as Error).message} (see kn-next --help)`);
+    }
 
     if (values.version) {
         // Resolve version from the package manifest without bundling it inline,
@@ -112,33 +143,27 @@ function parseCliArgs(): DeployOptions {
         // process.stdout.write (async on a pipe, truncated by process.exit).
         // fs.writeSync(1, …) is guaranteed flushed before exit, so `npx kn-next
         // --help | cat` works under plain node (issue #68).
-        writeStdoutSync(
-            `${[
-                "kn-next deploy — build → push → apply NextApp CR",
-                "",
-                "Commands:",
-                "  deploy (default)  build → push → apply the NextApp CR",
-                "  create            scaffold an app with guarded instrumentation (no cluster writes)",
-                "  db bind           bind an existing Postgres Secret to the NextApp CR",
-                "  db migrate        apply pending migrations against the writer, once",
-                "  doctor            cluster-prereq preflight (read-only; --json)",
-                "  status            show the NextApp's honest conditions (read-only; --json, --watch)",
-                "  rollback          pin traffic to a prior Knative Revision (--to, --canary)",
-                "  gc                reap old _next/static/<build-id>/ asset prefixes (skew-protection GC)",
-                "",
-                "Options:",
-                "  -r, --registry  Container registry (overrides config)",
-                "  -b, --bucket    Storage bucket (overrides config)",
-                "  -t, --tag       Image tag (default: timestamp)",
-                "  -n, --namespace Kubernetes namespace (default: default)",
-                "  --skip-build    Skip next build step",
-                "  --skip-upload   Skip asset upload step",
-                "  --dry-run       Print the NextApp CR without applying it",
-                "  -h, --help      Show this help",
-                "  -v, --version   Print the kn-next version",
-            ].join("\n")}\n`,
-        );
+        writeStdoutSync(CLI_HELP);
         process.exit(0);
+    }
+
+    // ADR-0046: reject a stray positional on the default deploy path.
+    //
+    // `resolveInvocation` only guards the FIRST token, so before this check
+    // `kn-next deploy cleanup`, `kn-next --namespace prod cleanup` and
+    // `kn-next -- cleanup` all ran a DEPLOY with the verb silently swallowed —
+    // "deploy to prod" when the user typed a teardown. The leading explicit
+    // `deploy` is the one positional this path legitimately sees (the bin's
+    // dispatcher resolved it and fell through to here); everything after it is
+    // a mistake. Help/version are handled above, so `kn-next --help extra`
+    // still prints help rather than this error — deliberate: help is never an
+    // error, and nothing destructive follows it.
+    const stray = (
+        positionals[0] === "deploy" ? positionals.slice(1) : positionals
+    )[0];
+    if (stray !== undefined) {
+        writeSync(2, formatStrayPositional(stray));
+        process.exit(1);
     }
 
     return {
@@ -316,10 +341,15 @@ async function runPrunePreflight(
 export async function deploy() {
     const options = parseCliArgs();
 
+    // Load config with validation FIRST, then announce. Announcing first meant
+    // a user in a directory with no kn-next.config.ts saw "kn-next deploy"
+    // printed after the "there is no config here" guidance (pino's transport is
+    // async, so the banner lands last) — a confusing tail on an otherwise clean
+    // message (UX ledger 1b).
+    const baseConfig = await loadConfig();
+
     log.info({ dryRun: options.dryRun }, "kn-next deploy");
 
-    // Load config with validation
-    const baseConfig = await loadConfig();
     const config = applyOverrides(baseConfig, options);
 
     // #93 skew protection (ADR-0011): pin this deploy's BUILD_ID. We export
@@ -668,8 +698,27 @@ export async function deploy() {
 // dist/cli/preview.js), each with its OWN tsup entry so it is never inlined
 // here. Enforced by cli-node-runtime.test.ts ("self-entry blocks exist ONLY in
 // sanctioned entry modules").
+//
+// `build` and `cleanup` are now BOTH bin-dispatched (below) and directly-
+// runnable entries carrying self-entry blocks. That combination is safe for
+// exactly the reason above: each has its OWN tsup entry, so it emits as its own
+// dist file and cannot be inlined here — pinned by cli-node-runtime.test.ts,
+// which asserts dist/cli/{build,cleanup}.js exist AND that this bin's bundle
+// does not contain their bodies. They are dispatched because README and the
+// docs site tell users to run them, and until now `kn-next cleanup` fell
+// through to the DEPLOY path — a teardown command that deploys (UX ledger 1d).
 if (isEntrypoint(import.meta.url)) {
-    const sub = process.argv[2];
+    // ADR-0046: a bare `kn-next` and a flags-only `kn-next --skip-build` still
+    // deploy (the advertised front door), but an unrecognised FIRST TOKEN is an
+    // error rather than a silent deploy — `kn-next celanup` must not ship a
+    // deployment. The allowlist comes from the same COMMAND_GROUPS list that
+    // renders --help, so there is exactly one verb set.
+    const invocation = resolveInvocation(process.argv[2]);
+    if (invocation.kind === "unknown") {
+        writeSync(2, formatUnknownCommand(invocation.input));
+        process.exit(1);
+    }
+    const sub = invocation.kind === "verb" ? invocation.verb : undefined;
     try {
         if (sub === "create") {
             const { createMain } = await import("./create");
@@ -689,10 +738,35 @@ if (isEntrypoint(import.meta.url)) {
         } else if (sub === "gc") {
             const { gcMain } = await import("./gc");
             process.exit(await gcMain(process.argv.slice(3)));
+        } else if (sub === "build") {
+            const { buildMain } = await import("./build");
+            process.exit(await buildMain(process.argv.slice(3)));
+        } else if (sub === "cleanup") {
+            const { cleanupMain } = await import("./cleanup");
+            process.exit(await cleanupMain(process.argv.slice(3)));
         } else {
             await deploy();
         }
     } catch (err) {
+        // "There is no kn-next.config.ts here" is an EXPECTED state — the user
+        // is in the wrong directory, or has not wired the app up yet. Print
+        // directions and leave; a FATAL line with a serialised Error (message,
+        // stack, bundler chunk paths) reads as "the tool is broken" to the
+        // Next.js developer this CLI is for (UX ledger 1b). Note there is no
+        // --json variant to honour here: the only verbs with a machine-readable
+        // mode are `doctor` (loads no config) and `status` (loads it only when
+        // the file exists), so neither can reach this branch.
+        if (handleConfigNotFound(err)) {
+            process.exit(1);
+        }
+        // A usage mistake (unknown flag, stray positional, unknown db
+        // subcommand) is the user mis-typing — same class as the above, same
+        // presentation. Falling through to log.fatal printed a serialised
+        // Error with a stack frame and an absolute dist chunk path for what is
+        // only a typo, which is the presentation this whole change removes.
+        if (handleUsageError(err)) {
+            process.exit(1);
+        }
         const label =
             sub === "create"
                 ? "create failed"
@@ -706,7 +780,11 @@ if (isEntrypoint(import.meta.url)) {
                         ? "rollback failed"
                         : sub === "gc"
                           ? "gc failed"
-                          : "Deployment failed";
+                          : sub === "build"
+                            ? "build failed"
+                            : sub === "cleanup"
+                              ? "cleanup failed"
+                              : "Deployment failed";
         log.fatal({ err }, label);
         process.exit(1);
     }

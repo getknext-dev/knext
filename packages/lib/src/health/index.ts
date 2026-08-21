@@ -1,6 +1,7 @@
 import RedisClient from 'ioredis';
 import { getDbPool } from '../clients';
 import { logger } from '../logger';
+import { attachQuietErrorListener, ensureDialable, quietRedisOptions } from '../redis/quiet';
 
 export interface HealthStatus {
   status: 'ok' | 'degraded' | 'down' | 'waking';
@@ -88,10 +89,14 @@ let redisCache: RedisClient | null = null;
 function getRedisClient(): RedisClient | null {
   if (redisCache) return redisCache;
   if (!process.env.REDIS_URL) return null;
-  redisCache = new RedisClient(process.env.REDIS_URL, {
-    maxRetriesPerRequest: 1, // Fail fast for health checks
-    connectTimeout: 2000,
-  });
+  // #802: lazy + listened-to + bounded retry. Deep health is on-demand (the
+  // :9091 scrape), so `lazyConnect` costs nothing — the first `ping()` dials —
+  // while the previous shape churned a reconnect loop and printed ioredis's
+  // `Unhandled error event` from module scope on every troubled pod.
+  // `maxRetriesPerRequest: 1` / `connectTimeout: 2000` are unchanged: a health
+  // check still fails fast.
+  redisCache = new RedisClient(process.env.REDIS_URL, quietRedisOptions());
+  attachQuietErrorListener(redisCache, 'deep-health');
   return redisCache;
 }
 
@@ -178,6 +183,9 @@ export async function checkDeepHealth(): Promise<HealthStatus> {
         try {
           const redis = getRedisClient();
           if (redis) {
+            // Re-dial if the bounded retry gave up — the cost is paid by this
+            // scrape, not by a background loop.
+            ensureDialable(redis);
             await redis.ping();
             checks.redis = 'up';
           }

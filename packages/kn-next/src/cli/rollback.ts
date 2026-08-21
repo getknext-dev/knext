@@ -24,7 +24,7 @@ import { writeSync } from "node:fs";
 import { createLogger } from "../utils/logger";
 import { runQuiet } from "./exec";
 // Single source of truth for config loading — also runs validateConfig.
-import { loadConfig } from "./shared";
+import { loadConfig, UsageError } from "./shared";
 
 const log = createLogger({ module: "rollback" });
 
@@ -101,7 +101,7 @@ export function parseRollbackArgs(argv: readonly string[]): RollbackArgs {
     const takeValue = (flag: string, i: number): string => {
         const v = argv[i];
         if (v === undefined || v.startsWith("-")) {
-            throw new Error(
+            throw new UsageError(
                 `${flag} requires a value (see kn-next rollback --help)`,
             );
         }
@@ -118,7 +118,7 @@ export function parseRollbackArgs(argv: readonly string[]): RollbackArgs {
             // (omit the flag for that) and 100 would send everything back to
             // latest-ready, i.e. not a rollback at all.
             if (!Number.isInteger(n) || n < 1 || n > 99) {
-                throw new Error(
+                throw new UsageError(
                     `--canary must be an integer between 1 and 99 (got ${JSON.stringify(raw)})`,
                 );
             }
@@ -126,19 +126,19 @@ export function parseRollbackArgs(argv: readonly string[]): RollbackArgs {
         } else if (a === "-n" || a === "--namespace") {
             out.namespace = takeValue(a, ++i);
         } else if (a.startsWith("-")) {
-            throw new Error(
+            throw new UsageError(
                 `unknown flag "${a}" (see kn-next rollback --help)`,
             );
         } else if (out.app === undefined) {
             out.app = a;
         } else {
-            throw new Error(
+            throw new UsageError(
                 `unexpected positional ${JSON.stringify(a)} — only one <app> positional is accepted (see kn-next rollback --help)`,
             );
         }
     }
     if (out.canaryPercent !== undefined && out.toRevision === undefined) {
-        throw new Error(
+        throw new UsageError(
             "--canary requires --to <revision> (see kn-next rollback --help)",
         );
     }
@@ -178,9 +178,12 @@ export async function rollbackMain(argv: readonly string[]): Promise<number> {
 }
 
 async function rollback(argv: readonly string[]) {
-    log.info("⏪ kn-next rollback");
-
+    // Parse BEFORE announcing: a rejected flag would otherwise print the
+    // banner first and leave the user reading "⏪ kn-next rollback" above their
+    // error — the same ordering fixed on the deploy path (ADR-0046).
     const args = parseRollbackArgs(argv);
+
+    log.info("⏪ kn-next rollback");
 
     // Resolve the app name: positional arg wins, else the config's name.
     // (Canary/flag validation already happened in parseRollbackArgs — strict,

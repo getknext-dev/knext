@@ -21,7 +21,13 @@ vi.mock("node:child_process", async (importOriginal) => {
 });
 
 const loadConfig = vi.hoisted(() => vi.fn());
-vi.mock("../cli/shared", () => ({ loadConfig }));
+// Only loadConfig is faked; handleConfigNotFound stays REAL so this file still
+// exercises the true "is this the expected no-config state?" discrimination
+// (it must answer no for the generic error below, and let the breadcrumb run).
+vi.mock("../cli/shared", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("../cli/shared")>()),
+    loadConfig,
+}));
 
 import { runLoadTestCli } from "../cli/loadtest";
 

@@ -27,6 +27,7 @@
 
 import { writeSync } from "node:fs";
 import { createLogger } from "../utils/logger";
+import { UsageError } from "./shared";
 
 const log = createLogger({ module: "db-migrate" });
 
@@ -56,7 +57,7 @@ export function parseDbMigrateArgs(argv: readonly string[]): DbMigrateOptions {
     const need = (flag: string, i: number): string => {
         const v = argv[i];
         if (v === undefined || v.startsWith("-")) {
-            throw new Error(
+            throw new UsageError(
                 `${flag} requires a value (see kn-next db migrate --help)`,
             );
         }
@@ -70,11 +71,11 @@ export function parseDbMigrateArgs(argv: readonly string[]): DbMigrateOptions {
             out.migrationsFolder = need(a, ++i);
         } else if (a.startsWith("-")) {
             // A typo like `--dsn` must not silently migrate with defaults.
-            throw new Error(
+            throw new UsageError(
                 `unknown flag "${a}" (see kn-next db migrate --help)`,
             );
         } else {
-            throw new Error(
+            throw new UsageError(
                 `unexpected positional "${a}" — kn-next db migrate takes no positionals (see kn-next db migrate --help)`,
             );
         }
