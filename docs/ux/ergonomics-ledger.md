@@ -169,3 +169,29 @@ Instrument: main post-#825, built fresh + pnpm-packed, clean consumer install, j
 placeholder still flows silently past config load (row 4b), and the missing-deps failure
 (`next: command not found`) still renders FATAL (row 4c). Iteration 7 (the first-cluster
 docs on-ramp, row 5's lever) is building in parallel.
+
+---
+
+## Row 7 — 2026-08-21, the capstone: the full journey re-run with every lever landed
+
+Instrument: main @ f026a7b (all of iterations 2–6 merged), built fresh, pnpm-packed, clean
+consumer install, the persona's journey end-to-end.
+
+| journey step | row 1 (loop open, published 0.3.0) | row 7 (main, all levers) |
+|---|---|---|
+| first command | `npx kn-next` → **npm 404** | works via the in-repo `kn-next` alias package (#820; live for real npx users at the next publish) |
+| `--help` | 7 of ~15 verbs, `create` hidden | grouped Start-here surface, `create` first, examples, docs link |
+| no config | FATAL + bundler stack trace | plain guidance + `create` pointer |
+| scaffold | — (undiscoverable) | 13 files; storage commented-out with a plain growth path; persona-speak parting line |
+| config feedback | placeholders interpolated silently into URLs; a full build burned before the push failed; `validate` unrouted | **`kn-next validate` (routed): names each placeholder with a one-sentence explanation and the exact fix hint, "Nothing was built or deployed"; after one edit: "valid — ready for `kn-next deploy`"** |
+| typo'd verb | silently ran a full DEPLOY | "unknown command — did you mean"; `cleanup --help` is help, never a teardown (ADR-0046) |
+| walls before deploy | registry + bucket + cluster (no on-ramp) | registry + cluster, with the first-cluster page (#828) as the cluster on-ramp — every command on it run live during authoring, known release gaps stated in-page |
+| doctor with no cluster | "check network/VPN and retry" | "you don't have a cluster connected yet" + the on-ramp |
+
+**What remains, all outside the CLI's control:** the user-owned npm publish (carries #810–#829
+to real `npx` users, incl. the alias), the ghcr package visibility flip + the multi-arch operator
+image (#827, in CI) that make the first-cluster page's final step succeed, and the founder's
+git-integration/prepared-clouds direction as the next product horizon. The loop's measured claim,
+stated precisely: **on a machine with the packed tarballs, the zero-Kubernetes persona now gets
+from nothing to a validated, deploy-ready app with exactly one infrastructure decision (the
+registry) and immediate plain-language feedback at every misstep.**
