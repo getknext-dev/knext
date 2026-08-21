@@ -270,3 +270,28 @@ Candidate levers, cheapest first:
    constraint, plane-level.
 
 | 4 | 2026-08-21 (wake-decomposition instrument — pod condition timestamps + activator throttler log stamps; per-cycle evidence below) | Between rows: #803 merged the [slow-dep] discrimination instrument (deploy pending an image push); the operator on/off/on A/B **excluded** the knext operator as a cold-start factor (medians 4917/4465/4600 — the off arm landed between the two on arms); the probe-shape A/B on the product path measured the operator's stamped readinessProbe (initialDelay 2 + period 3) at **~1.2s median vs Knative's aggressive default** (5723 vs 4562ms, container→Ready quantized to exact probe-grid values 2000/3000/5000ms on the probed arm only) → fix implemented + reviewed as PR #812 (merge pending one confirmed-flaky TS test unrelated to its Go diff); bytecode caching **verified live in-pod** (PID-1 environ carries NODE_COMPILE_CACHE; 1119 baked V8 entries — a first probe via a fresh exec shell wrongly read "unset" because CMD exports don't reach exec sessions; /proc/1/environ is the truth) | — (wake totals this sitting 3547–5513, other phases dominate the variance) | — | — | n/a — this row measures ONE phase | **The post-Ready term is named and recovered: the activator's per-revision watcher was stuck in its clusterIP-probing fallback.** Pre-restart, 4 consecutive wakes: watcher probes `10.96.174.147:80/healthz` (the revision's private-Service clusterIP), logs a `connection refused` retry loop (with intermittent `context deadline exceeded` — the row-3 SYN-drop signature), and the throttler flips to `backends = 1` only **1.64–1.93s after pod Ready**. `kubectl rollout restart deploy/activator` (single replica, clean roll) reset the watcher: all 3 post-restart wakes track **pod-direct** (`clusterIP = <nil>, trackers = 1`) and the gap collapsed to **0.14–0.86s** — ~1.2s recovered per wake. Mechanism: Knative serving `revision_backends.go` — pod-direct probing that fails repeatedly trips `podsAddressable=false`, which is **sticky for the watcher's lifetime**; the SYN-race era (rows 1–3) plausibly tripped it, and every wake since paid the fallback. **Caveats, stated:** n=4/n=3, Ready has ±1s condition-timestamp granularity (throttler stamps are precise), and the trip-cause is inferred from the log signature, not observed at trip time (retained logs no longer cover it). **Consequences:** (a) the recovery is not durable — the next pod-probe failure streak re-trips it silently; a watchdog (alert on clusterIP-mode probing for a revision whose pods are Ready) or an upstream fix (make the fallback retry pod-direct) is the durable lever; (b) this is an OPERATIONS finding, not a code lever in this repo — candidate upstream issue against knative/serving |
+
+### Row 4 close — the probe lever verified live (2026-08-21, post-#812/#814 roll)
+
+Chain: #812 merged → Trivy blocked the operator publish on 7 HIGH Go-1.25.12 stdlib CVEs → #814
+bumped the builder (digest-pinned, MIN_PATCH lockstep) → published → mirrored ghcr→OCIR **by
+digest via crane** (`fd02c0ce…` identical both sides; no local docker) → operator rolled →
+reconcile poked → the revision's probe verified live: `{"httpGet":{"path":"/api/health","port":3000},
+"successThreshold":1}` — HTTP path kept, every timing field gone (`sdd-drill-00003`).
+
+Closing sitting (same harness/bench pod as the morning baseline, n=6):
+
+| sdd-drill (product path) | morning (operator probe) | close (fixed probe + reset activator) |
+|---|---|---|
+| median total | 5723 | **3142.5** |
+| totals | 3782–6614 | 2544–3187 |
+| container→Ready | 2000–5000 (probe-grid only) | 1000–2000 |
+| post-Ready median | 710.5 | 617.5 |
+
+**−2581ms median (−45%), spread 2832→643ms.** The win exceeds the probe A/B's ~1.2s because the
+two levers COMPOUND: this sitting also rides the activator-watcher reset (row 4's finding), which
+the morning baseline did not. The close also beats the default-probe twin's morning 4562 — same
+reason: the twin measured pre-reset. Attribution honesty: the probe fix's isolated share is the
+morning A/B's ~1.2s; the rest is the pod-direct activator path, whose non-durability (sticky
+fallback) is row 4's open item. Product-path cold start now sits at **~3.1s median**, under the
+benchmark app's own wake for the first time.
