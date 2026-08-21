@@ -36,3 +36,37 @@ experience (can a novice fill `kn-next.config.ts` without knowing what a registr
 long-term direction per the founder is git-integration + prepared clouds), and the first
 `deploy` against a real cluster with missing prereqs. Each becomes a sitting once the front
 door stops 404ing.
+
+---
+
+## Row 2 — 2026-08-21, the same journey re-run after iteration 2 merged (#810)
+
+Instrument: main @ 781376b, all three packages built fresh (`pnpm build`) and `pnpm pack`ed (which
+rewrites `workspace:^` — a bare `npm pack` ships an uninstallable tarball, and `pack` runs NO build,
+so a stale `dist/` ships silently: both hit during this sitting and both are release-pipeline-only
+concerns, but they cost this measurement two false starts, recorded so the next sitting skips them).
+Clean scratch dir, `npm install <tarballs>`, journey re-run verbatim. **Caveat: this measures merged
+main, not the published npm packages — the novice's real `npx` journey stays at 0.3.0's behavior
+until the next publish (user-owned).**
+
+| finding | row-1 state | row-2 state |
+|---|---|---|
+| 1a `npx kn-next` | npm 404, no guidance | **unchanged** (needs the user-owned `kn-next` alias publish; docs incantation unified in #810) |
+| 1b no-config | FATAL + stack + bundler chunk paths | plain-English: what the config is, `create my-app` pointer, docs link — no stack, and the state is guidance, not an error dump |
+| 1c doctor no-cluster | "check network/VPN and retry" misdirection | in review (iteration 3, `feat/ux-doctor-no-cluster`) |
+| 1d help surface | 7 of ~15 verbs, `create` hidden | grouped **Start here / Deploy and operate / Database** surface, `create` first, examples, `Docs: https://knext.dev` footer |
+
+**Found beyond the row-1 findings, fixed en route (review-driven, ADR-0046):** `cleanup`/`build`
+were advertised but undispatched and FELL THROUGH TO DEPLOY (a teardown that deployed); the first
+fix made `cleanup --help` tear the app down (caught round 1); stray positionals rode into deploy
+behind flags (`--namespace prod cleanup` deployed to prod — caught round 2); the usage-error sweep
+claimed complete with six live FATAL dumps (caught round 3, both-streams measurement — pino writes
+FATAL to stdout). Now: typo'd verb → "did you mean", every usage mistake is a plain stderr message,
+and an inverted fail-closed scan guards the contract (two phrase-list guards died decorative under
+mutation before the inverted form held — four decorative guards total in one PR; the dist-bin
+behavioural tests caught what every static guard missed).
+
+**Next lever (iteration 4 candidates, in order):** finish 1c (in review) → the config-authoring
+wall (can the persona fill `kn-next.config.ts`? does `create` produce something deployable
+without edits?) → the "get a cluster" journey (the big wall; founder direction: git-integration +
+prepared clouds). User-owned, unblocking 1a permanently: publish the `kn-next` alias package.
