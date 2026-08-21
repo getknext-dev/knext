@@ -24,7 +24,9 @@
  *   that choice so it cannot rot into an accident.
  *
  *   Everything else under src/cli/ (cr-builder, exec, shared, validate, schema/,
- *   tracing-root) is a library module, not a verb.
+ *   tracing-root) is a library module, not a verb. (`validate` the VERB is
+ *   routed via validate-cmd.ts — validate.ts stays the load-time validation
+ *   library that shared.ts and the public subpath import.)
  */
 
 /**
@@ -69,6 +71,12 @@ export const COMMAND_GROUPS: readonly CliCommandGroup[] = [
                 display: "create",
                 summary:
                     "scaffold a new knext-ready Next.js app (writes files only, no cluster changes)",
+            },
+            {
+                verb: "validate",
+                display: "validate",
+                summary:
+                    "check kn-next.config.ts is filled in and valid (reads only your config file — no cluster needed)",
             },
             {
                 verb: "doctor",
