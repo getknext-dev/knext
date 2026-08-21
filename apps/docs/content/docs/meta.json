@@ -3,6 +3,7 @@
   "pages": [
     "index",
     "getting-started",
+    "first-cluster",
     "learn",
     "install",
     "cli",
