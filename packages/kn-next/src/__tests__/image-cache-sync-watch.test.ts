@@ -99,6 +99,40 @@ describe("image-cache-sync — watch + start", () => {
         expect(() => handle.stop()).not.toThrow();
     });
 
+    it("pushes a variant already on disk before the watcher attaches (pre-attach gap, #805)", async () => {
+        // In production the sync starts via deferred init AFTER the Next child
+        // is already serving (node-server.ts), so a variant can land on disk
+        // before watchAndPushImageCache attaches its watcher — fs.watch may
+        // never fire for it. The post-attach reconcile must push it anyway.
+        // (The deterministic never-fires variant of this gap lives in
+        // image-cache-sync-watch-gap.test.ts with an inert-watch mock; this
+        // test pins the same behavior end-to-end on the real fs.watch.)
+        const store = fakeStore();
+        const variantDir = join(cacheDir, "prekey");
+        await fs.mkdir(variantDir, { recursive: true });
+        await fs.writeFile(join(variantDir, "5.6.e.u.avif"), "EARLY");
+
+        const handle = await watchAndPushImageCache({
+            bucket: "b",
+            cacheDir,
+            store,
+            log: SILENT,
+        });
+        try {
+            const pushed = await waitFor(() =>
+                store.objects.has("image-cache/prekey/5.6.e.u.avif"),
+            );
+            expect(pushed).toBe(true);
+            expect(
+                store.objects
+                    .get("image-cache/prekey/5.6.e.u.avif")
+                    ?.toString(),
+            ).toBe("EARLY");
+        } finally {
+            handle.stop();
+        }
+    });
+
     it("startImageCacheSync (bucket set): restores existing variants then returns a live stop handle", async () => {
         const store = fakeStore({
             "image-cache/warm/9.9.e.u.avif": Buffer.from("WARMED"),
