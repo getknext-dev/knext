@@ -1,0 +1,13 @@
+{
+  // #804 typecheck-gate tsconfig: same strictness as tsconfig.json, but keeps
+  // the generated `.next/` type surface OUT of scope so `tsc --noEmit` is
+  // deterministic on a cold checkout (CI) and on a dev machine that has run
+  // `next dev`/`next build`. next-env.d.ts stays in include — tsc tolerates it
+  // missing (cold) and honours it when generated.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "incremental": false
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", "**/*.mts"],
+  "exclude": ["node_modules", ".next"]
+}
