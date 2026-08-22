@@ -83,12 +83,6 @@ function seedProject() {
     return { projectDir, standaloneDir };
 }
 
-/** knext-bc-* temp dirs currently present (leak detection). */
-function tempDirCount(): number {
-    return readdirSync(tmpdir()).filter((n) => n.startsWith("knext-bc-"))
-        .length;
-}
-
 afterEach(() => {
     vi.restoreAllMocks();
     mockRuntime = "node";
@@ -242,10 +236,22 @@ describe("precompileBunBytecode (module)", () => {
     it.skipIf(!bunAvailable)(
         "cleans up its temp dirs (969-file trees must not litter tmpdir)",
         () => {
-            const { standaloneDir } = seedProject();
-            const before = tempDirCount();
-            precompileBunBytecode({ standaloneDir, bunBin: "bun" });
-            expect(tempDirCount()).toBe(before);
+            const { projectDir, standaloneDir } = seedProject();
+            // A PRIVATE tmp root, not a count of knext-bc-* in the shared OS
+            // tmpdir: parallel vitest workers run this same pass (the
+            // injected-fake-bun suite) and create/remove same-prefix dirs
+            // there concurrently, so a global count races (#835). With an
+            // injected root, anything left behind is provably ours.
+            const tmpRoot = join(projectDir, "bc-scratch");
+            mkdirSync(tmpRoot, { recursive: true });
+            const result = precompileBunBytecode({
+                standaloneDir,
+                bunBin: "bun",
+                tmpRoot,
+            });
+            // the pass genuinely ran through the injected root
+            expect(result.compiled).toBe(1);
+            expect(readdirSync(tmpRoot)).toEqual([]);
         },
     );
 });
