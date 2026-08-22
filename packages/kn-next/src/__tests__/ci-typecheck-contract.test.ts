@@ -41,13 +41,11 @@ const ciYml = readFileSync(
  * Keyed by package `name`.
  */
 const DOCUMENTED_EXCLUSIONS: Record<string, string> = {
-    // Reference/e2e Next.js app. Its next-adapter.test.ts fixtures carry real
-    // type debt against Next's evolving NextAdapter output types (7 TS2345
-    // shape mismatches as of P6c) — a genuine debt signal, not a config gap.
-    // Excluded until the fixtures are re-typed against the current adapter API;
-    // tracked as follow-up. Do NOT suppress the errors to force it green.
-    "file-manager":
-        "reference e2e app; real type debt in next-adapter.test.ts fixtures (TS2345 vs current NextAdapter output types) — re-type fixtures before gating",
+    // file-manager was excluded here until #804: its next-adapter.test.ts
+    // fixtures carried real type debt (TS2345 vs the current NextAdapter ctx
+    // types). The fixtures are re-typed and the app is now COVERED — a
+    // `typecheck` script (tsc --noEmit -p tsconfig.typecheck.json, .next/
+    // generated types out of scope) wired into ci.yml after the lib→core builds.
     // Throwaway cold-start spike: no TypeScript source and no tsconfig.json
     // (only next.config-less scaffolding). Nothing for `tsc --noEmit` to check.
     "spike-bun-bytecode":

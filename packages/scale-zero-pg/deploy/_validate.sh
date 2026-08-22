@@ -2,11 +2,49 @@
 # Validation for deploy/ manifests: server-side dry-run against the current
 # kube context, plus contract checks the YAML must satisfy. Run from repo root
 # or deploy/. Exits non-zero on any failure.
-set -eu
-cd "$(dirname "$0")"
+#
+# NO `set -e` here, deliberately (knext #797): under set -e any failing command
+# aborted the run mid-list, and every contract after the crash point passed BY
+# ABSENCE — the checker-that-cannot-see-red class this script has hit twice
+# (#126 immutable-reject, #797 88-loadsoak parse). Instead fail() RECORDS the
+# failure and returns, the script always reaches the summary at the bottom,
+# reports every failed contract in one run, and exits 1 if any failed. The EXIT
+# trap below is the tripwire: if a future edit reintroduces a mid-run abort
+# (set -e, a stray `exit`, a re-exiting fail()), the trap turns that silent
+# early death into a loud non-zero failure instead of a vacuous pass.
+set -u
+cd "$(dirname "$0")" || { echo "FAIL: cannot cd into deploy/" >&2; exit 1; }
 
-fail() { echo "FAIL: $*" >&2; exit 1; }
-ok() { echo "ok - $*"; }
+FAILURES=0
+FAIL_LIST=""
+OK_MARK=0
+fail() {
+  FAILURES=$((FAILURES + 1))
+  FAIL_LIST="${FAIL_LIST}
+  FAIL: $*"
+  echo "FAIL: $*" >&2
+}
+# ok() closes a contract block: it prints `ok` ONLY if no failure was recorded
+# since the previous block boundary — otherwise a failed contract would still
+# print its trailing ok-line and read as passing.
+ok() {
+  if [ "$FAILURES" -gt "$OK_MARK" ]; then
+    echo "not ok - $* (FAILED — see the FAIL lines above)"
+  else
+    echo "ok - $*"
+  fi
+  OK_MARK=$FAILURES
+}
+# blockdone closes a block that ends on a failure WITHOUT an ok-line (the
+# section-1 per-file continue paths), so the next block's ok() is not blamed
+# for this block's failures.
+blockdone() { OK_MARK=$FAILURES; }
+
+COMPLETED=0
+trap 'if [ "$COMPLETED" -ne 1 ]; then
+  echo "FAIL: _validate.sh exited BEFORE evaluating all contracts (early death — the #797 class); $FAILURES failure(s) had been recorded up to this point" >&2
+  exit 70
+fi' EXIT
 
 # Canonical sha256 of the prometheus-config ConfigMap DATA (prometheus.yml + rules.yml)
 # in 60-prometheus.yaml — the SINGLE SOURCE OF TRUTH for the auto-reload config-hash
@@ -45,18 +83,23 @@ PY
 # Subcommand: print the prometheus config-hash and exit (offline; regenerates the
 # annotation after a rules edit — `./_validate.sh prom-config-hash`).
 if [ "${1:-}" = "prom-config-hash" ]; then
-  prom_config_hash 60-prometheus.yaml; echo; exit 0
+  prom_config_hash 60-prometheus.yaml; rc=$?; echo
+  COMPLETED=1
+  exit "$rc"
 fi
 
-command -v kubectl >/dev/null || fail "kubectl not found"
+HAVE_KUBECTL=1
+command -v kubectl >/dev/null \
+  || { HAVE_KUBECTL=0; fail "kubectl not found — section 1 (server dry-run of every manifest) and the 2c HPA dry-run NOT evaluated"; blockdone; }
 
 # 1. every manifest must dry-run apply cleanly (server-side validation).
 # The namespace is applied for real first: namespaced dry-runs need it to
 # exist, and this cluster is the demo target anyway.
+if [ "$HAVE_KUBECTL" = 1 ]; then
 kubectl apply -f 00-namespace.yaml >/dev/null || fail "namespace apply failed"
 ok "00-namespace.yaml applied"
 for f in [0-9][0-9]-*.yaml; do
-  [ -e "$f" ] || fail "no numbered manifests found in deploy/"
+  [ -e "$f" ] || { fail "no numbered manifests found in deploy/"; blockdone; continue; }
   [ "$f" = 00-namespace.yaml ] && continue
   # Doc-only manifests carry ONLY comments (no k8s objects) — e.g. 30-knext-secret.yaml,
   # whose base DATABASE_URL Secret is now owned by gen-secrets.sh (issue #168). A
@@ -78,7 +121,7 @@ for f in [0-9][0-9]-*.yaml; do
   # the YAML is well-formed.
   if printf '%s' "$err" | grep -qi 'immutable'; then
     kubectl apply --dry-run=client -f "$f" >/dev/null 2>&1 \
-      || fail "$f does not validate (client dry-run after immutable server-side reject): $err"
+      || { fail "$f does not validate (client dry-run after immutable server-side reject): $err"; blockdone; continue; }
     ok "$f validates (client dry-run; server rejects an immutable field on the live object — #126)"
     continue
   fi
@@ -107,9 +150,13 @@ for f in [0-9][0-9]-*.yaml; do
     fi
     rm -f "$rendered"
     fail "$f does not validate even with its \${VAR} placeholders rendered: $rerr"
+    blockdone
+    continue
   fi
   fail "$f does not validate: $err"
+  blockdone
 done
+fi # HAVE_KUBECTL
 
 # 2. contract: compute deployment must start at zero replicas
 grep -q 'replicas: 0' 20-compute.yaml || fail "20-compute.yaml must set replicas: 0"
@@ -130,7 +177,9 @@ HPA=optional/27-compute-ro-hpa.yaml
 [ -f "$HPA" ] || fail "$HPA missing (read-scaling HPA must ship as a real .yaml, not .optional)"
 [ -e 27-compute-ro-hpa.yaml.optional ] && fail "stale 27-compute-ro-hpa.yaml.optional present — GA'd file moved to $HPA"
 [ -e 27-compute-ro-hpa.yaml ] && fail "27-compute-ro-hpa.yaml must live under optional/ (else -f deploy/ auto-applies it)"
-kubectl apply --dry-run=server -f "$HPA" >/dev/null || fail "$HPA does not validate"
+if [ "$HAVE_KUBECTL" = 1 ]; then
+  kubectl apply --dry-run=server -f "$HPA" >/dev/null || fail "$HPA does not validate"
+fi
 grep -q 'name: compute-ro' "$HPA" || fail "$HPA must target the compute-ro deployment"
 grep -q 'minReplicas: 1' "$HPA" || fail "$HPA posture B must set minReplicas: 1"
 ok "read-scaling HPA ships under optional/ (opt-in, valid, targets compute-ro)"
@@ -221,7 +270,8 @@ grep -q 'storage-s3-creds' gen-secrets.sh || fail "gen-secrets.sh must manage th
 grep -q 'Retain' harden-pvs.sh || fail "harden-pvs.sh must set Retain reclaim policy"
 ok "gen-secrets.sh + harden-pvs.sh present"
 
-echo "deploy validation: all checks passed"
+# (#797: the premature "all checks passed" that sat HERE — before 20 more contracts —
+# is gone; the single honest summary lives at the very bottom of the script.)
 
 # 12. contract: compute and storage are a VERSION PAIR (ADR-0002 kill-criterion
 #     #3; the pageserver wire protocol has no cross-version guarantee). A tag
@@ -409,8 +459,14 @@ grep -q 'vector(1)' 60-prometheus.yaml || fail "60 Watchdog must be always-firin
 # issue #48: SELF-GUARD on kube-state-metrics — the sole producer of every rule above.
 grep -q 'alert: KubeStateMetricsDown' 60-prometheus.yaml || fail "60 missing KubeStateMetricsDown (#48) — a dead KSM silently blinds all platform alerts"
 grep -q 'absent(up{job="kube-state-metrics"})' 60-prometheus.yaml || fail "60 KubeStateMetricsDown must also page when KSM was never scraped (absent up series, #48)"
-# the phantom-keepalive honesty rule must survive (state-based, not counter drift)
-grep -q 'min_over_time(sum(pggw_active_connections)' 60-prometheus.yaml || fail "60 phantom-keepalive honesty rule was lost"
+# the phantom-keepalive honesty rule must survive (state-based, not counter drift).
+# Anchor re-pinned for #797: #777/#791 deliberately evolved the rule to subtract the
+# DECLARED warm holds (min_over_time((sum(pggw_active_connections) - (sum(appdb_warm_hold_active)
+# or vector(0)))[30m:1m])) — the rule was fine, THIS check had gone stale and was failing
+# invisibly behind the script's old die-on-first-failure behavior. The invariant kept here is
+# state-based-ness (min_over_time over the connection level) + the subtraction being present;
+# contract 32 below separately asserts the subtraction's `or vector(0)` fallback semantics.
+grep -q 'min_over_time((sum(pggw_active_connections) -' 60-prometheus.yaml || fail "60 phantom-keepalive honesty rule was lost (want state-based min_over_time over sum(pggw_active_connections) minus the declared warm holds)"
 # issue #139: zoned-replication slot alerts — dormant Failed-Job rules joined on the
 # repl-slot-monitor CronJobs (deploy/63) by exact owner_name, same pattern as apps-wal-monitor.
 grep -q 'alert: ReplicationSlotWALGrowth' 60-prometheus.yaml || fail "60 missing ReplicationSlotWALGrowth alert (#139) — a slot nearing the WAL bound would be unmonitored"
@@ -531,19 +587,16 @@ grep -q 'appdb-operator' ../gateway/Dockerfile || fail "Dockerfile does not buil
 # latter would silently REVERT a rooted DSN on every rotation), so the scan below
 # covers the script's DSNs too.
 #
-# REACHABILITY — this contract has NEVER executed in a real run. Two separate reasons,
-# both stated rather than implied:
+# REACHABILITY — this contract had NEVER executed in a real run before #797's fix.
+# Two separate reasons, both stated rather than implied:
 #   1. This file is not wired into the monorepo's root .github/workflows; the
 #      packages/scale-zero-pg/.github copy is subtree residue GitHub does not run
-#      (knext #797 tracks the structural half).
-#   2. Even run by hand, the script is `set -eu` and exits at :411 ("60 phantom-keepalive
-#      honesty rule was lost") — a STALE ANCHOR, not a lost alert: #777/#791 deliberately
-#      reworked that rule (60-prometheus.yaml:151, "DELIBERATE warm holds are NOT
-#      phantoms"). Deciding what the honesty rule should now assert is an
-#      alerting-semantics call for that rule's owner, so it is reported on #797 rather
-#      than guessed at here. Fixing 88-loadsoak-k6.yaml unblocked this contract by one
-#      hop; :411 still sits in front of it.
-# So the LIVE enforcement is the root test infra, which does run in CI:
+#      (knext #797 tracks the wiring).
+#   2. (RESOLVED by #797) The script was `set -eu` with an exiting fail(), so the first
+#      failing check — latterly the stale phantom-keepalive anchor in contract 19 —
+#      killed the run before this point. fail() now aggregates and the script always
+#      evaluates every contract, so an early failure can no longer disable this one.
+# Until (1) lands, the LIVE enforcement is the root test infra, which does run in CI:
 # tests/rooted-minted-hosts.test.ts (minted values) and
 # tests/rooted-cluster-hosts-repo-wide.test.ts (every reference, repo-wide).
 grep -q 'APPDB_GATEWAY_HOST, value: "' 83-appdb-operator.yaml || fail "83-appdb-operator.yaml no longer sets APPDB_GATEWAY_HOST — the rooted-host contract below would silently pass"
@@ -610,7 +663,8 @@ ok "janitor-disarm tripwire wired: JanitorConfigDisarmed pages on CreateContaine
 #     /-/reload — the 2026-07-06 zone-alerts miss (rules can be applied yet never loaded).
 #     Making a stale annotation a HARD failure guarantees the roll is never forgotten.
 #     Regenerate the value with: ./_validate.sh prom-config-hash
-WANT_PROM_HASH=$(prom_config_hash 60-prometheus.yaml)
+WANT_PROM_HASH=$(prom_config_hash 60-prometheus.yaml) \
+  || { WANT_PROM_HASH=""; fail "prom_config_hash could not extract the prometheus-config ConfigMap data from 60-prometheus.yaml (#155)"; }
 GOT_PROM_HASH=$(grep -oE 'ks-pg\.dev/prometheus-config-sha256:[[:space:]]*"?[0-9a-f]{64}' 60-prometheus.yaml | grep -oE '[0-9a-f]{64}' | head -1)
 [ -n "$GOT_PROM_HASH" ] || fail "60-prometheus.yaml pod template lacks the ks-pg.dev/prometheus-config-sha256 auto-reload annotation (#155) — add it under spec.template.metadata.annotations; value = ./_validate.sh prom-config-hash"
 [ "$WANT_PROM_HASH" = "$GOT_PROM_HASH" ] || fail "60-prometheus.yaml config-hash annotation ($GOT_PROM_HASH) != the ConfigMap data hash ($WANT_PROM_HASH) — the rules/config changed but the pod template was not re-hashed, so \`kubectl apply\` would NOT roll prometheus and the new rules would stay DARK. Regenerate: ./_validate.sh prom-config-hash (#155)"
@@ -708,9 +762,16 @@ grep -Eq 'cloud_admin:cloud_admin@' 30-knext-secret.yaml && fail "30-knext-secre
 for m in 20-compute.yaml 25-compute-warm.yaml 26-compute-ro.yaml; do
   grep -q 'CLOUD_ADMIN_MD5' "$m" || fail "$m must inject CLOUD_ADMIN_MD5 from the pg-base-admin Secret (issue #168)"
   grep -q 'pg-base-admin' "$m" || fail "$m must reference the pg-base-admin Secret for the strong base cloud_admin md5 (issue #168)"
-  # the block that mounts pg-base-admin's CLOUD_ADMIN_MD5 must be fail-closed
-  # (no optional:true anywhere in the manifest — base tiers never boot on the default).
-  grep -Eq 'optional:[[:space:]]*true' "$m" && fail "$m must NOT mark the pg-base-admin CLOUD_ADMIN_MD5 secretKeyRef optional:true — base compute must fail closed (issue #168)" || true
+  # the pg-base-admin CLOUD_ADMIN_MD5 secretKeyRef must be fail-closed (no
+  # optional:true — base tiers never boot on the default). Scoped to the
+  # pg-base-admin ref (±3 lines — YAML key order is author-controlled, so optional: may sit above OR below the name; covers flow AND block style), NOT the whole
+  # file: the same manifests also carry the compute-jwt-trust JWK env refs,
+  # which are DELIBERATELY optional:true and fail-SAFE (absent, the entrypoint
+  # locks the control API with a random throwaway anchor). The old whole-file
+  # grep went stale the day those landed and had been failing invisibly behind
+  # the pre-#797 die-on-first-failure behavior.
+  grep -B3 -A3 'pg-base-admin' "$m" | grep -Eq 'optional:[[:space:]]*true' \
+    && fail "$m marks the pg-base-admin CLOUD_ADMIN_MD5 secretKeyRef optional:true — base compute must fail closed (issue #168)" || true
 done
 # (c) gen-secrets.sh must mint pg-base-admin (strong plaintext + its md5) AND own
 #     the base DATABASE_URL[_RO] Secret derived from it.
@@ -735,3 +796,15 @@ grep -q 'job_name: appdb-operator' 60-prometheus.yaml || fail "60-prometheus.yam
 grep -q 'appdb_warm_hold_active' 60-prometheus.yaml || fail "60-prometheus.yaml ComputePhantomKeepalive must subtract appdb_warm_hold_active — a declared warm hold is not a phantom (knext #388)"
 grep -q 'or vector(0)' 60-prometheus.yaml || fail "60-prometheus.yaml phantom-keepalive subtraction must use 'or vector(0)' so the alert is not silenced when nothing is held (knext #388)"
 ok "AppDatabase warmSchedule CRD field shipped; warm = held connection (no deployments/scale); holds scraped + subtracted from phantom-keepalive (knext #388)"
+
+# ---------------------------------------------------------------------------
+# Summary (#797): every contract above has been EVALUATED — nothing exits early.
+# One aggregated report, one CI-faithful exit code: 0 only if every contract
+# passed, 1 if any failed (the EXIT trap catches anything that dies before here).
+COMPLETED=1
+if [ "$FAILURES" -gt 0 ]; then
+  echo "" >&2
+  echo "deploy validation: $FAILURES FAILURE(S):$FAIL_LIST" >&2
+  exit 1
+fi
+echo "deploy validation: all checks passed"
