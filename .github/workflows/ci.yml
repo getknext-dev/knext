@@ -181,6 +181,15 @@ jobs:
       - name: Typecheck db-demo (tsc --noEmit)
         run: pnpm --filter db-demo typecheck
 
+      # apps/file-manager (#804) — reference e2e Next app, previously the
+      # checker-that-never-runs: no typecheck gate anywhere, so real TS errors
+      # shipped invisibly. Dist-dependent on @getknext/lib + @getknext/core
+      # (next-adapter.ts, instrumentation-node.ts), so it runs AFTER the builds
+      # above. tsconfig.typecheck.json keeps generated `.next/` types out of
+      # scope so the check is deterministic on this cold checkout.
+      - name: Typecheck file-manager (tsc --noEmit)
+        run: pnpm --filter file-manager typecheck
+
       - name: Run tests
         run: pnpm exec vitest run --coverage
       
