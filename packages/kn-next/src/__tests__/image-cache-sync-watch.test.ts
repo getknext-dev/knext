@@ -99,40 +99,6 @@ describe("image-cache-sync — watch + start", () => {
         expect(() => handle.stop()).not.toThrow();
     });
 
-    it("pushes a variant already on disk before the watcher attaches (pre-attach gap, #805)", async () => {
-        // In production the sync starts via deferred init AFTER the Next child
-        // is already serving (node-server.ts), so a variant can land on disk
-        // before watchAndPushImageCache attaches its watcher — fs.watch may
-        // never fire for it. The post-attach reconcile must push it anyway.
-        // (The deterministic never-fires variant of this gap lives in
-        // image-cache-sync-watch-gap.test.ts with an inert-watch mock; this
-        // test pins the same behavior end-to-end on the real fs.watch.)
-        const store = fakeStore();
-        const variantDir = join(cacheDir, "prekey");
-        await fs.mkdir(variantDir, { recursive: true });
-        await fs.writeFile(join(variantDir, "5.6.e.u.avif"), "EARLY");
-
-        const handle = await watchAndPushImageCache({
-            bucket: "b",
-            cacheDir,
-            store,
-            log: SILENT,
-        });
-        try {
-            const pushed = await waitFor(() =>
-                store.objects.has("image-cache/prekey/5.6.e.u.avif"),
-            );
-            expect(pushed).toBe(true);
-            expect(
-                store.objects
-                    .get("image-cache/prekey/5.6.e.u.avif")
-                    ?.toString(),
-            ).toBe("EARLY");
-        } finally {
-            handle.stop();
-        }
-    });
-
     it("startImageCacheSync (bucket set): restores existing variants then returns a live stop handle", async () => {
         const store = fakeStore({
             "image-cache/warm/9.9.e.u.avif": Buffer.from("WARMED"),
@@ -149,6 +115,34 @@ describe("image-cache-sync — watch + start", () => {
             const local = join(cacheDir, "warm", "9.9.e.u.avif");
             expect(await fs.readFile(local, "utf8")).toBe("WARMED");
             expect(typeof handle.stop).toBe("function");
+        } finally {
+            handle.stop();
+        }
+    });
+
+    it("startImageCacheSync lists the store exactly once for restore + reconcile combined", async () => {
+        const store = fakeStore({
+            "image-cache/warm/9.9.e.u.avif": Buffer.from("WARMED"),
+        });
+        const list = vi.spyOn(store, "list");
+        const handle = await startImageCacheSync(
+            {
+                STORAGE_BUCKET: "b",
+                IMAGE_CACHE_DIR: cacheDir,
+            } as Partial<NodeJS.ProcessEnv> as NodeJS.ProcessEnv,
+            { store, log: SILENT },
+        );
+        try {
+            // Restore ran (the variant landed on disk), and the watch (with
+            // its reconcile) resolved — yet the store was listed only once:
+            // the listing is threaded through both phases.
+            expect(
+                await fs.readFile(
+                    join(cacheDir, "warm", "9.9.e.u.avif"),
+                    "utf8",
+                ),
+            ).toBe("WARMED");
+            expect(list).toHaveBeenCalledTimes(1);
         } finally {
             handle.stop();
         }

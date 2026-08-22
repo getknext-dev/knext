@@ -20,17 +20,26 @@ import {
     watchAndPushImageCache,
 } from "../adapters/image-cache-sync";
 
+type WatchListener = (event: string, filename: string | null) => void;
+
+/**
+ * Per-test watch behavior, given the impl's listener. Default: inert — the
+ * watcher registers fine but never delivers an event, a deterministic stand-in
+ * for the FSEvents attach dead window. Tests may replace it to script delivery
+ * timing (reset in beforeEach).
+ */
+let watchBehavior: (listener: WatchListener) => void = () => {};
+
 vi.mock("node:fs", async (importOriginal) => {
     const real = await importOriginal<typeof import("node:fs")>();
     return {
         ...real,
-        // Inert watcher: registers fine, never delivers an event — a
-        // deterministic stand-in for the FSEvents attach dead window.
-        watch: () => {
+        watch: (_path: string, _opts: unknown, listener: WatchListener) => {
             const watcher = new EventEmitter() as EventEmitter & {
                 close: () => void;
             };
             watcher.close = () => {};
+            watchBehavior(listener);
             return watcher;
         },
     };
@@ -83,6 +92,7 @@ describe("image-cache-sync — the attach gap, forced (watch never fires)", () =
 
     beforeEach(async () => {
         cacheDir = await fs.mkdtemp(join(tmpdir(), "knext-imggap-"));
+        watchBehavior = () => {};
     });
 
     afterEach(async () => {
@@ -167,6 +177,35 @@ describe("image-cache-sync — the attach gap, forced (watch never fires)", () =
         expect(warn).toHaveBeenCalledWith(
             expect.stringContaining("readiness probe unconfirmed"),
         );
+    });
+
+    it("does not resolve until the watcher has demonstrably delivered an event (readiness ordering)", async () => {
+        // The probe is the half of the #805 fix aimed at the attach race:
+        // watchAndPushImageCache must keep waiting until its own watch
+        // callback has observed an event. Script the mock to deliver the
+        // first event only after a delay; if the impl did not genuinely wait
+        // (e.g. an inert probe loop), it would resolve immediately — before
+        // the scripted delivery — leaving deliveredAt at 0. Ordering
+        // assertion, not a log-line or elapsed-window assertion.
+        const EVENT_DELAY_MS = 250;
+        let deliveredAt = 0;
+        watchBehavior = (listener) => {
+            setTimeout(() => {
+                deliveredAt = Date.now();
+                listener("rename", ".knext-watch-probe/t");
+            }, EVENT_DELAY_MS);
+        };
+        const handle = await watchAndPushImageCache({
+            bucket: "b",
+            cacheDir,
+            store: fakeStore(),
+            log: SILENT,
+            watchReadyTimeoutMs: 4000,
+        });
+        const resolvedAt = Date.now();
+        handle.stop();
+        expect(deliveredAt).toBeGreaterThan(0);
+        expect(resolvedAt).toBeGreaterThanOrEqual(deliveredAt);
     });
 
     it("leaves no probe residue in the cache dir or the store", async () => {

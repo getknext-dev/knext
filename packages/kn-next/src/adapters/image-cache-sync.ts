@@ -77,6 +77,13 @@ export interface ImageCacheSyncOptions {
      * probe-unconfirmed path does not stall them; production uses the default.
      */
     watchReadyTimeoutMs?: number;
+    /**
+     * @internal Pre-fetched store listing under `<prefix>/`.
+     * `startImageCacheSync` fetches it once and threads it into both restore
+     * and the watch reconcile so a cold start pays one list round-trip, not
+     * two. When absent, each phase lists for itself.
+     */
+    preListedKeys?: readonly string[];
 }
 
 /**
@@ -158,7 +165,8 @@ export async function restoreImageCache(
 
     let restored = 0;
     try {
-        const keys = await store.list(opts.bucket, `${prefix}/`);
+        const keys =
+            opts.preListedKeys ?? (await store.list(opts.bucket, `${prefix}/`));
         for (const key of keys) {
             // key = `<prefix>/<cacheKey>/<file>` → local `<cacheDir>/<cacheKey>/<file>`
             const rel = key.slice(prefix.length + 1); // strip `<prefix>/`
@@ -353,7 +361,10 @@ export async function watchAndPushImageCache(
         if (variantKeys.length > 0) {
             let known: ReadonlySet<string>;
             try {
-                known = new Set(await store.list(opts.bucket, `${prefix}/`));
+                known = new Set(
+                    opts.preListedKeys ??
+                        (await store.list(opts.bucket, `${prefix}/`)),
+                );
             } catch (err) {
                 log.warn(
                     `[image-cache-sync] reconcile: store list failed (${String(err)}) — pushing all local variants (uploads are idempotent)`,
@@ -418,9 +429,24 @@ export async function startImageCacheSync(
         bucket,
         prefix: env.IMAGE_CACHE_PREFIX || DEFAULT_PREFIX,
         cacheDir: env.IMAGE_CACHE_DIR || undefined,
-        store: deps.store,
+        store: deps.store ?? (await defaultStore()) ?? undefined,
         log,
     };
+
+    // One store listing shared by restore and the watch reconcile (#805 review
+    // issue 6: a cold start otherwise pays two identical list round-trips on
+    // the path this module exists to optimize). Best-effort: on failure the
+    // listing stays undefined and each phase lists (and warns) for itself.
+    if (opts.store) {
+        try {
+            opts.preListedKeys = await opts.store.list(
+                opts.bucket,
+                `${opts.prefix}/`,
+            );
+        } catch {
+            // restore/reconcile handle their own list errors
+        }
+    }
 
     await restoreImageCache(opts);
     return watchAndPushImageCache(opts);
