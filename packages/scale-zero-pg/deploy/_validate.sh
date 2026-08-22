@@ -764,13 +764,13 @@ for m in 20-compute.yaml 25-compute-warm.yaml 26-compute-ro.yaml; do
   grep -q 'pg-base-admin' "$m" || fail "$m must reference the pg-base-admin Secret for the strong base cloud_admin md5 (issue #168)"
   # the pg-base-admin CLOUD_ADMIN_MD5 secretKeyRef must be fail-closed (no
   # optional:true — base tiers never boot on the default). Scoped to the
-  # pg-base-admin ref (+3 lines, covers flow AND block style), NOT the whole
+  # pg-base-admin ref (±3 lines — YAML key order is author-controlled, so optional: may sit above OR below the name; covers flow AND block style), NOT the whole
   # file: the same manifests also carry the compute-jwt-trust JWK env refs,
   # which are DELIBERATELY optional:true and fail-SAFE (absent, the entrypoint
   # locks the control API with a random throwaway anchor). The old whole-file
   # grep went stale the day those landed and had been failing invisibly behind
   # the pre-#797 die-on-first-failure behavior.
-  grep -A3 'pg-base-admin' "$m" | grep -Eq 'optional:[[:space:]]*true' \
+  grep -B3 -A3 'pg-base-admin' "$m" | grep -Eq 'optional:[[:space:]]*true' \
     && fail "$m marks the pg-base-admin CLOUD_ADMIN_MD5 secretKeyRef optional:true — base compute must fail closed (issue #168)" || true
 done
 # (c) gen-secrets.sh must mint pg-base-admin (strong plaintext + its md5) AND own
