@@ -4,14 +4,21 @@
  * `fs.watch` gives no readiness guarantee (macOS FSEvents attaches its stream
  * asynchronously after watch() returns), and in production the sync starts via
  * deferred init AFTER the Next child is already serving — so variants can land
- * on disk with no watch event ever firing for them. The real-fs test in
- * image-cache-sync-watch.test.ts cannot force that gap deterministically
- * (FSEvents sometimes REPLAYS pre-attach writes), so here `watch` is mocked to
- * an inert watcher that never delivers an event: everything asserted below is
- * pushed by the post-attach reconcile alone, or it is not pushed at all.
+ * on disk with no watch event ever firing for them. The real-fs tests cannot
+ * force that gap deterministically (FSEvents sometimes REPLAYS pre-attach
+ * writes), so these tests inject a scripted watcher via the internal
+ * `watchImpl` option: by default it never delivers an event, so everything
+ * asserted below is pushed by the post-attach reconcile alone — or not at all.
+ *
+ * Injection, not vi.mock("node:fs"): a factory mock of node:fs is
+ * config-dependent — under the ROOT vitest config (which CI's
+ * `vitest run --coverage` and `vitest list` use) `importOriginal` returns an
+ * empty module, so a partial mock cannot be built there at all. This broke CI
+ * on PR #837 while passing under the package-level config locally.
  */
 
 import { EventEmitter } from "node:events";
+import { promises as fs, type watch as fsWatch } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -30,28 +37,20 @@ type WatchListener = (event: string, filename: string | null) => void;
  */
 let watchBehavior: (listener: WatchListener) => void = () => {};
 
-vi.mock("node:fs", async (importOriginal) => {
-    const real = await importOriginal<typeof import("node:fs")>();
-    return {
-        ...real,
-        watch: (_path: string, _opts: unknown, listener: WatchListener) => {
-            const watcher = new EventEmitter() as EventEmitter & {
-                close: () => void;
-            };
-            watcher.close = () => {};
-            watchBehavior(listener);
-            return watcher;
-        },
-    };
-});
-
-// Imported AFTER the mock so `promises` is the real implementation (the mock
-// spreads the real module and only replaces `watch`).
-import { promises as fs } from "node:fs";
+const scriptedWatch = ((
+    _path: unknown,
+    _opts: unknown,
+    listener: WatchListener,
+) => {
+    const watcher = new EventEmitter() as EventEmitter & { close: () => void };
+    watcher.close = () => {};
+    watchBehavior(listener);
+    return watcher;
+}) as unknown as typeof fsWatch;
 
 const SILENT = { info: () => {}, warn: () => {} };
-/** Short probe deadline: the inert watcher can never confirm readiness. */
-const FAST_PROBE = { watchReadyTimeoutMs: 100 };
+/** Scripted watcher + short probe deadline (inert default can never confirm). */
+const GAP_WATCH = { watchImpl: scriptedWatch, watchReadyTimeoutMs: 100 };
 
 function fakeStore(seed: Record<string, Buffer> = {}): ImageVariantStore & {
     objects: Map<string, Buffer>;
@@ -111,7 +110,7 @@ describe("image-cache-sync — the attach gap, forced (watch never fires)", () =
             cacheDir,
             store,
             log: SILENT,
-            ...FAST_PROBE,
+            ...GAP_WATCH,
         });
         try {
             const pushed = await waitFor(() =>
@@ -148,7 +147,7 @@ describe("image-cache-sync — the attach gap, forced (watch never fires)", () =
             cacheDir,
             store,
             log: SILENT,
-            ...FAST_PROBE,
+            ...GAP_WATCH,
         });
         try {
             const pushed = await waitFor(() =>
@@ -171,7 +170,7 @@ describe("image-cache-sync — the attach gap, forced (watch never fires)", () =
             cacheDir,
             store: fakeStore(),
             log: { info: () => {}, warn },
-            ...FAST_PROBE,
+            ...GAP_WATCH,
         });
         handle.stop();
         expect(warn).toHaveBeenCalledWith(
@@ -182,7 +181,7 @@ describe("image-cache-sync — the attach gap, forced (watch never fires)", () =
     it("does not resolve until the watcher has demonstrably delivered an event (readiness ordering)", async () => {
         // The probe is the half of the #805 fix aimed at the attach race:
         // watchAndPushImageCache must keep waiting until its own watch
-        // callback has observed an event. Script the mock to deliver the
+        // callback has observed an event. Script the watcher to deliver the
         // first event only after a delay; if the impl did not genuinely wait
         // (e.g. an inert probe loop), it would resolve immediately — before
         // the scripted delivery — leaving deliveredAt at 0. Ordering
@@ -200,6 +199,7 @@ describe("image-cache-sync — the attach gap, forced (watch never fires)", () =
             cacheDir,
             store: fakeStore(),
             log: SILENT,
+            watchImpl: scriptedWatch,
             watchReadyTimeoutMs: 4000,
         });
         const resolvedAt = Date.now();
@@ -215,7 +215,7 @@ describe("image-cache-sync — the attach gap, forced (watch never fires)", () =
             cacheDir,
             store,
             log: SILENT,
-            ...FAST_PROBE,
+            ...GAP_WATCH,
         });
         handle.stop();
         expect(await fs.readdir(cacheDir)).toEqual([]);

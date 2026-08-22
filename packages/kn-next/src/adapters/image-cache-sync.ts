@@ -84,6 +84,14 @@ export interface ImageCacheSyncOptions {
      * two. When absent, each phase lists for itself.
      */
     preListedKeys?: readonly string[];
+    /**
+     * @internal `fs.watch` implementation, injectable so tests can script
+     * event-delivery timing deterministically (mocking node:fs via vi.mock is
+     * config-dependent: under the root vitest config `importOriginal` returns
+     * an empty module, so a factory mock cannot work there). Defaults to the
+     * real `node:fs` watch.
+     */
+    watchImpl?: typeof import("node:fs").watch;
 }
 
 /**
@@ -313,8 +321,8 @@ export async function watchAndPushImageCache(
     let probeSeen = false;
     let watcher: import("node:fs").FSWatcher;
     try {
-        const { watch } = await import("node:fs");
-        watcher = watch(cacheDir, { recursive: true }, (_event, filename) => {
+        const watchFn = opts.watchImpl ?? (await import("node:fs")).watch;
+        watcher = watchFn(cacheDir, { recursive: true }, (_event, filename) => {
             if (!filename) return;
             // filename is `<cacheKey>/<file>` (or just `<cacheKey>`); take the first segment.
             const cacheKey = String(filename).split(/[/\\]/)[0];
