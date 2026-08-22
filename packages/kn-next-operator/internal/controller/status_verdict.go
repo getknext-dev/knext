@@ -143,6 +143,7 @@ func computeStatusVerdict(
 	db databaseCheckState,
 	rev revisionCheck,
 	ic imageCacheState,
+	np netpolEnforcementState,
 	now time.Time,
 ) statusVerdict {
 	var v statusVerdict
@@ -463,6 +464,72 @@ func computeStatusVerdict(
 		}
 	case prevImageCache != nil:
 		v.removeConditions = append(v.removeConditions, ConditionImageCacheReady)
+	}
+
+	// NetworkPolicyEnforced (#744): the operator reconciles a default-on
+	// NetworkPolicy, but enforcement is the CNI's job — flannel (OKE GA,
+	// OrbStack) ships no policy controller, so there the policy is declarative
+	// only, and until this condition NOTHING said so at runtime. Report the
+	// detection outcome honestly: True only on a detected policy controller,
+	// False when flannel alone is running, Unknown when we cannot tell —
+	// "cannot determine" is a distinct outcome from "enforced", never folded
+	// into it.
+	//
+	// Same churn discipline as every condition here: messages are STATIC for a
+	// given cluster state (evidence is sorted upstream), and the Warning event
+	// fires only on TRANSITION into the unenforced state (#98 no-op guard).
+	// When the policy is disabled the condition is dropped — but only if it was
+	// previously present, so a policy-off app's conditions order stays
+	// byte-identical (the ImageCacheReady precedent).
+	prevNetpol := apimeta.FindStatusCondition(app.Status.Conditions, ConditionNetworkPolicyEnforced)
+	switch {
+	case np.enabled:
+		var cond metav1.Condition
+		switch np.verdict {
+		case netpolEnforcementEnforced:
+			cond = metav1.Condition{
+				Type:               ConditionNetworkPolicyEnforced,
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: app.Generation,
+				Reason:             ReasonPolicyControllerDetected,
+				Message: fmt.Sprintf(
+					"a NetworkPolicy-enforcing agent is running (%s) — the reconciled NetworkPolicy is in force",
+					np.evidence),
+			}
+		case netpolEnforcementLikelyUnenforced:
+			cond = metav1.Condition{
+				Type:               ConditionNetworkPolicyEnforced,
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: app.Generation,
+				Reason:             ReasonNoPolicyController,
+				Message: fmt.Sprintf(
+					"flannel is the cluster CNI (%s) and no NetworkPolicy controller was detected: the "+
+						"reconciled NetworkPolicy is declarative only — it is written but enforces NOTHING on "+
+						"this cluster. Install a policy-capable CNI (Calico/Cilium) to make it effective, or "+
+						"treat network isolation as absent.",
+					np.evidence),
+			}
+			// Loud on entry: a security control believed in force but silently
+			// inert is worse than a known-absent one.
+			if prevNetpol == nil || prevNetpol.Reason != ReasonNoPolicyController {
+				v.events = append(v.events, verdictEvent{
+					corev1.EventTypeWarning, ReasonNoPolicyController, cond.Message,
+				})
+			}
+		default:
+			cond = metav1.Condition{
+				Type:               ConditionNetworkPolicyEnforced,
+				Status:             metav1.ConditionUnknown,
+				ObservedGeneration: app.Generation,
+				Reason:             ReasonEnforcementUnknown,
+				Message: "cannot determine whether the cluster CNI enforces NetworkPolicy (no known CNI " +
+					"DaemonSet signature found, or the DaemonSet read failed) — treat the reconciled " +
+					"NetworkPolicy as unenforced until verified",
+			}
+		}
+		v.conditions = append(v.conditions, cond)
+	case prevNetpol != nil:
+		v.removeConditions = append(v.removeConditions, ConditionNetworkPolicyEnforced)
 	}
 
 	return v

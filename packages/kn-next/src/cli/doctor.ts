@@ -551,6 +551,73 @@ export function supportsStrictValidation(v: {
 }
 
 /** Run every preflight check. Pure orchestration over the injected deps. */
+/**
+ * CNI NetworkPolicy-enforcement classification (#744).
+ *
+ * The operator reconciles a default-on NetworkPolicy, but enforcement is the
+ * CNI's job — flannel (OKE GA, OrbStack) ships no NetworkPolicy controller,
+ * so there the policy is declarative only. There is no Kubernetes API that
+ * answers "is NetworkPolicy enforced", and an active probe would mutate the
+ * cluster (doctor is read-only), so detection is signature-based over the
+ * cluster's DaemonSets and HONEST about its confidence: a known
+ * policy-controller DaemonSet => "enforced"; flannel alone =>
+ * "likely-unenforced"; anything else => "unknown", which callers must treat
+ * as unenforced, never as enforced.
+ *
+ * The operator carries the same signature table
+ * (internal/controller/netpol_enforcement.go) into the NextApp's
+ * NetworkPolicyEnforced status condition — keep the two in sync when adding
+ * a CNI.
+ */
+export type CNIEnforcement = "enforced" | "likely-unenforced" | "unknown";
+
+export interface DaemonSetRef {
+    namespace: string;
+    name: string;
+}
+
+/** DaemonSet names of NetworkPolicy-ENFORCING agents (exact matches). */
+const ENFORCING_AGENT_DS: Readonly<Record<string, string>> = {
+    "calico-node": "Calico",
+    cilium: "Cilium",
+    "kube-router": "kube-router",
+    "weave-net": "Weave Net",
+    "antrea-agent": "Antrea",
+    canal: "Canal (Calico policy)",
+};
+
+/**
+ * Pure classification seam: any enforcing agent wins (canal clusters also run
+ * a flannel DaemonSet); flannel alone is likely-unenforced; nothing
+ * recognized is unknown. Evidence is sorted so the same cluster always yields
+ * the same string.
+ */
+export function classifyCNIEnforcement(daemonSets: readonly DaemonSetRef[]): {
+    verdict: CNIEnforcement;
+    evidence: string;
+} {
+    const enforcing: string[] = [];
+    const flannel: string[] = [];
+    for (const ds of daemonSets) {
+        const cni = ENFORCING_AGENT_DS[ds.name];
+        if (cni) {
+            enforcing.push(`${cni} DaemonSet ${ds.name} (${ds.namespace})`);
+        } else if (ds.name.includes("flannel")) {
+            flannel.push(`flannel DaemonSet ${ds.name} (${ds.namespace})`);
+        }
+    }
+    if (enforcing.length > 0) {
+        return { verdict: "enforced", evidence: enforcing.sort().join("; ") };
+    }
+    if (flannel.length > 0) {
+        return {
+            verdict: "likely-unenforced",
+            evidence: flannel.sort().join("; "),
+        };
+    }
+    return { verdict: "unknown", evidence: "" };
+}
+
 export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
     const checks: CheckResult[] = [];
     const push = (
@@ -1064,6 +1131,84 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
         }
     }
 
+    // (i) CNI NetworkPolicy enforcement (#744). The operator reconciles a
+    // default-on NetworkPolicy for every app, but flannel — which OKE GA and
+    // OrbStack both run — ships no NetworkPolicy controller, so there the
+    // policy is written yet enforces nothing. Detection is read-only
+    // (DaemonSet signatures; doctor never launches probe pods) and fails
+    // honest: "cannot determine" is a distinct outcome from "enforced",
+    // never folded into it.
+    if (skipAll) {
+        push("netpol", "NetworkPolicy enforcement", "skip", SKIP_UNREACHABLE);
+    } else {
+        const ds = deps.kubectl([
+            "kubectl",
+            "get",
+            "daemonsets",
+            "--all-namespaces",
+            "-o",
+            "json",
+        ]);
+        const dsInfra = ds.ok ? undefined : infraFailure(ds);
+        if (!ds.ok && classifyKubectlFailure(ds.stderr) === "forbidden") {
+            // A denied read is "cannot determine", not an infra ERROR: the
+            // check is diagnosis, and the honest fallback — treat as
+            // unenforced — holds with or without the permission.
+            push(
+                "netpol",
+                "NetworkPolicy enforcement",
+                "warn",
+                "cannot determine whether the cluster's CNI enforces NetworkPolicy (listing DaemonSets was denied by RBAC) — treat the operator's NetworkPolicy as UNENFORCED until verified",
+                "grant `list daemonsets` cluster-wide for this diagnosis, or verify your CNI's NetworkPolicy support manually",
+            );
+        } else if (dsInfra) {
+            push(
+                "netpol",
+                "NetworkPolicy enforcement",
+                "error",
+                dsInfra.detail,
+                dsInfra.hint,
+            );
+        } else {
+            const items = ds.ok
+                ? (safeJson<{
+                      items?: {
+                          metadata?: { name?: string; namespace?: string };
+                      }[];
+                  }>(ds.stdout)?.items ?? [])
+                : [];
+            const refs: DaemonSetRef[] = items.map((i) => ({
+                name: i.metadata?.name ?? "",
+                namespace: i.metadata?.namespace ?? "",
+            }));
+            const { verdict, evidence } = classifyCNIEnforcement(refs);
+            if (verdict === "enforced") {
+                push(
+                    "netpol",
+                    "NetworkPolicy enforcement",
+                    "pass",
+                    `a NetworkPolicy-enforcing agent is running (${evidence}) — the operator's default-on NetworkPolicy is enforced on this cluster`,
+                );
+            } else if (verdict === "likely-unenforced") {
+                push(
+                    "netpol",
+                    "NetworkPolicy enforcement",
+                    "warn",
+                    `flannel is the cluster CNI (${evidence}) and no NetworkPolicy controller was detected — the operator still writes its default-on NetworkPolicy, but it is declarative only: it enforces NOTHING on this cluster (OKE GA and OrbStack both run flannel), so treat network isolation as absent`,
+                    "install a policy-capable CNI (Calico or Cilium) to make the NetworkPolicy effective",
+                );
+            } else {
+                push(
+                    "netpol",
+                    "NetworkPolicy enforcement",
+                    "warn",
+                    "cannot determine whether the cluster's CNI enforces NetworkPolicy (no known CNI DaemonSet signature found) — treat the operator's NetworkPolicy as UNENFORCED until verified",
+                    "verify your CNI's NetworkPolicy support manually; a policy written but not enforced provides no isolation",
+                );
+            }
+        }
+    }
+
     // ERRORs exit nonzero like FAILs (#230): an errored probe means the
     // preflight could NOT verify the cluster — reporting green would be a lie.
     const exitCode = checks.some(
@@ -1117,7 +1262,7 @@ const DOCTOR_HELP = `kn-next doctor — cluster-prereq preflight (read-only)
 
 Checks: NextApp CRD, operator readiness, cert-manager webhook, Knative
 ingress-class vs its reconciler (#208), operator-image pullability (#198),
-Knative Serving, and the local kubectl's --validate=strict support. Exit 1 on
+Knative Serving, CNI NetworkPolicy enforcement (whether the cluster can\nenforce the operator's default-on policy — on flannel it cannot), and the\nlocal kubectl's --validate=strict support. Exit 1 on
 hard FAILs and on probe ERRORs (a check's kubectl
 probe hit a network/TLS/credential/RBAC failure — the cluster state could not
 be verified); WARN/SKIP never fail; a fully unreachable cluster SKIPs (exit 0).
