@@ -31,6 +31,14 @@ name: Action pin SHA↔tag resolution (nightly)
 # commits) lives in `scripts/verify-action-pins.mjs` and is unit-tested offline
 # against an injected API double by `tests/action-pin-sha-tag-nightly.test.ts`.
 #
+# #750 — INPUT EXISTENCE, same script, same run: for every pin that passes
+# `with:` keys, the action's metadata is fetched AT THE PINNED SHA and every
+# passed key must be a declared input. GitHub Actions silently IGNORES unknown
+# `with:` keys, so a renamed input on a major bump (changesets/action v1→v2,
+# #747) evaporates with every other guard green — and no PR's CI can catch it
+# when the step only runs on a push to main. Offline logic tests:
+# `tests/action-pin-input-existence.test.ts`.
+#
 # #640 — TWO ROUTES, NEVER A DOWNGRADED VERDICT: `aquasecurity` (the Trivy
 # actions) enables an organisation IP ALLOW LIST that this runner's address is
 # not on, so the API answers 403 and four correct pins were unverifiable — a
@@ -151,6 +159,10 @@ jobs:
             major like \`v1\` is often a BRANCH). Re-pin against a real tag.
           - *API error* — treated as a failure, never a pass. Re-run to confirm before
             assuming it was transient.
+          - *Unknown input* (#750) — the step passes a \`with:\` key the pinned action does
+            not declare; GitHub silently IGNORES it, so that input is OFF at run time.
+            Rename it to its declared successor (the finding lists the declared set) or
+            drop it. Typical cause: a major bump that renamed inputs.
 
           Re-run this workflow to confirm green, then close this issue."
           # Idempotency: exactly-one open alert issue. --limit 100 explicitly
