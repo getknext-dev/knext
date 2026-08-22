@@ -59,3 +59,46 @@
 
 Exit criterion for iteration 1: items 1–4 merged through per-PR review; the close-sweep issues
 closed or re-scoped with evidence; then **re-count everything above** as iteration 2's row.
+
+---
+
+## Iteration 1 — results + re-count (2026-08-22, same commands as iteration 0)
+
+**Closed this iteration (6 by fix or evidence):** #804 (fm typecheck gate — merged #833, gate
+mutation-proved), #797 + #793 (validator aggregates all 38 contracts + fsGroup fix — merged #834;
+review round 1 caught contract 31's one-directional window, fixed ±3 and mutation-proved both
+directions), #754 (bun pinned everywhere + scanning guard — closed w/ evidence), #751 (operator
+on OKE w/ live reconciliation — closed w/ evidence), #790 (keepwarm flap 0-in-90-min under the
+hold shape — closed w/ evidence). **Rescoped: 1** — #792 (staleness fixed byte-for-byte-verified;
+kept open for the drift-DETECTION gap only). **Newly filed: 1** — #835 (cli-build-bun-bytecode
+flake, reproducible 2/3 — found by 1c's adversarial review; likely provenance-neighbor of #805).
+
+**Still in flight from iteration 1:** the #805 branch (fix/image-cache-sync-watch-flake) — review
+round 1 split the claim: the reconcile fixes a PROVEN production cache-sync gap (files landing
+between dir-scan and watcher-attach were silently dropped), but the flake-fix claim was
+unsupported (probe untested; flake not reliably reproducible; #835 the likelier suite-red). Fix
+round added the ordering-asserted handshake test, deleted a proven-decorative test, single-passed
+store.list; round 2 verdict pending. Its PR will NOT claim to close #805.
+
+| metric | iter 0 | iter 1 | Δ |
+|---|---|---|---|
+| Open issues | 53 | **48** | −5 (6 closed, 1 filed) |
+| TODO/FIXME markers | 4 | 4 | 0 |
+| Test skip/todo sites | 33 | 33 | 0 (untouched this iteration) |
+| Biome errors | 0 | 0 | 0 |
+| Known flaky tests | 2 | **2** | #805's named test did not reproduce (116 runs) and is demoted to unconfirmed; #835 promoted as the reproducible one; #545 stands |
+| Standing nightly reds | 2 org-gated | 2 | unchanged (#670/#198 await the visibility flip) |
+
+## Iteration 2 — plan
+
+1. **#835** — the reproducible flake (2/3 full-suite): root-cause with the same (a)/(b) discipline
+   as 1c; top of list because it taxes every CI run and pollutes flake attribution.
+2. **#744** — the inert-NetworkPolicy observability gap: doctor/operator condition when the CNI
+   enforces nothing (a security claim that silently doesn't hold is debt of the worst kind).
+3. **#750** — pin-guard inputs-exist gap (guard-integrity class, small).
+4. Land the in-flight #805-branch PR (production-gap story) once round 2 clears; comment the
+   claim-split on #805 and leave it open pending #835's resolution.
+5. Verify-and-close candidates: #783 (KNEXT_WARM_PATH docs — check if this week's docs waves
+   covered it), #742/#758 (roadmap gaps — may be partially addressed by V1_ROADMAP).
+
+Exit criterion: items 1–4 merged through per-PR review; re-count as iteration 2's row.
