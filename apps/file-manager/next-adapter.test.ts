@@ -16,6 +16,28 @@ import { beforeAll, describe, expect, it, vi } from 'vitest';
 // below. This mirrors apps/file-manager/next-adapter.ts, which avoids the same
 // cross-instance assignment on the re-exported value.
 
+// The onBuildComplete ctx as the adapter itself types it (derived from the module,
+// not from `next` directly, to dodge the cross-instance issue above).
+type AdapterModule = typeof import('./next-adapter.js');
+type OnBuildCompleteCtx = Parameters<NonNullable<AdapterModule['default']['onBuildComplete']>>[0];
+
+// Minimal 16.2-shaped `routing` block so fixtures satisfy the current ctx type
+// (16.2 dropped `routes` and made `routing` required). The legacy-`routes` counting
+// branch in the adapter takes precedence when a fixture also carries `routes`, so
+// the legacy-count assertions below still exercise the branch they always did.
+// `rsc` is a bundle of Next-internal header literal types the adapter never reads;
+// asserting an empty object keeps the fixture free of next-internal imports.
+const emptyRouting: OnBuildCompleteCtx['routing'] = {
+  beforeMiddleware: [],
+  beforeFiles: [],
+  afterFiles: [],
+  dynamicRoutes: [],
+  onMatch: [],
+  fallback: [],
+  shouldNormalizeNextData: false,
+  rsc: {} as OnBuildCompleteCtx['routing']['rsc'],
+};
+
 describe('next-adapter (POC-ADAPTER-P0 spike)', () => {
   it('exports a valid NextAdapter with name, modifyConfig and onBuildComplete', async () => {
     const mod = await import('./next-adapter.js');
@@ -37,7 +59,10 @@ describe('next-adapter (POC-ADAPTER-P0 spike)', () => {
       cacheHandler: 'cache-handler.js',
       cacheMaxMemorySize: 0,
     } as any;
-    const result = await adapter.modifyConfig!(baseConfig, { phase: 'phase-production-build' });
+    const result = await adapter.modifyConfig!(baseConfig, {
+      phase: 'phase-production-build',
+      nextVersion: '16.2.11',
+    });
 
     expect(result.output).toBe('standalone');
     // cacheHandler must still be honoured
@@ -50,7 +75,10 @@ describe('next-adapter (POC-ADAPTER-P0 spike)', () => {
     const adapter = mod.default;
 
     const baseConfig = { output: 'export' } as any;
-    const result = await adapter.modifyConfig!(baseConfig, { phase: 'phase-development-server' });
+    const result = await adapter.modifyConfig!(baseConfig, {
+      phase: 'phase-development-server',
+      nextVersion: '16.2.11',
+    });
 
     // Should return config unchanged (no output override outside build phase)
     expect(result.output).toBe('export');
@@ -69,6 +97,8 @@ describe('next-adapter (POC-ADAPTER-P0 spike)', () => {
       repoRoot: '/tmp',
       nextVersion: '16.0.3',
       config: { output: 'standalone', cacheMaxMemorySize: 0 } as any,
+      routing: emptyRouting,
+      // legacy 16.0.x field — takes precedence in the adapter's counting branch
       routes: {
         headers: [],
         redirects: [],
@@ -112,6 +142,8 @@ describe('next-adapter (POC-ADAPTER-P0 spike)', () => {
       repoRoot: '/tmp',
       nextVersion: '16.0.3',
       config: { output: 'standalone', cacheMaxMemorySize: 0 } as any,
+      routing: emptyRouting,
+      // legacy 16.0.x field — takes precedence in the adapter's counting branch
       routes: {
         headers: [{ source: '/api/*' } as any, { source: '/static/*' } as any],
         redirects: [{ source: '/old', destination: '/new', statusCode: 301 } as any],
@@ -180,6 +212,8 @@ describe('next-adapter upload (POC-ADAPTER-P1-rework)', () => {
     repoRoot: '/tmp',
     nextVersion: '16.0.3',
     config: { output: 'standalone', cacheMaxMemorySize: 0 } as any,
+    routing: emptyRouting,
+    // legacy 16.0.x field — takes precedence in the adapter's counting branch
     routes: {
       headers: [],
       redirects: [],

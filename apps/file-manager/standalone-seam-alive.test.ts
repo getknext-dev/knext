@@ -147,7 +147,9 @@ describe.skipIf(skipReason)('#352/#344 seam survives the standalone bundle', () 
     // Externalizing @getknext/lib would change how it dedups across the
     // instrumentation vs app-server layers and could reintroduce the #352 split
     // (or mask the globalThis fence). Assert it never gets added there.
-    const externals = nextConfigSrc.match(/serverExternalPackages:\s*\[([^\]]*)\]/s)?.[1] ?? '';
+    // no `s` flag: the pattern has no `.`, and `[^\]]` already spans newlines —
+    // and the flag is a TS1501 under this tsconfig's ES2017 target.
+    const externals = nextConfigSrc.match(/serverExternalPackages:\s*\[([^\]]*)\]/)?.[1] ?? '';
     expect(externals).not.toMatch(/@getknext\/lib/);
   });
 
