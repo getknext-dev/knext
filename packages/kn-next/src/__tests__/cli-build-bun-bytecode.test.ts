@@ -252,6 +252,18 @@ describe("precompileBunBytecode (module)", () => {
             // the pass genuinely ran through the injected root
             expect(result.compiled).toBe(1);
             expect(readdirSync(tmpRoot)).toEqual([]);
+            // Both halves: a NONEXISTENT root must disable the pass (the
+            // probe's scratch mkdtemp fails there) — proving scratch dirs
+            // really route through tmpRoot instead of silently falling back
+            // to the shared os.tmpdir(), which would make the residue
+            // assertion above decorative.
+            const missingRoot = precompileBunBytecode({
+                standaloneDir,
+                bunBin: "bun",
+                tmpRoot: join(projectDir, "does-not-exist"),
+            });
+            expect(missingRoot.disabled).toBeTruthy();
+            expect(missingRoot.compiled).toBe(0);
         },
     );
 });
