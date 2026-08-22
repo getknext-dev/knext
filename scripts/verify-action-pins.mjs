@@ -45,6 +45,38 @@
  *    against the commit the TAG dereferences to in the canonical repository, so
  *    a commit pushed to a fork can never match.
  *
+ * INPUT EXISTENCE (#750)
+ * ----------------------
+ * SHA↔tag correspondence proves the pin is the commit it claims — it says
+ * NOTHING about whether the inputs we pass still exist there. GitHub Actions
+ * IGNORES an unknown `with:` key rather than failing, so a renamed input is
+ * silently dropped: Dependabot's #747 bump of `changesets/action` v1→v2 had a
+ * CORRECT pin and would have run the publish step with every input defaulted
+ * (v2 renamed all five keys `release.yml` passes). So, for every pin that
+ * passes `with:` keys, this script ALSO fetches the action's metadata
+ * (`action.yml`/`action.yaml` at the pinned SHA — or the workflow file itself,
+ * for a reusable-workflow `uses:`) and requires every passed key to be a
+ * declared input. Matching is case-insensitive, as the runner's is; `args` and
+ * `entrypoint` are additionally accepted for `runs.using: docker` actions,
+ * because they are step-level keys the runner defines, not inputs.
+ *
+ * SCOPE DECISION, recorded per the issue's acceptance criteria: EVERY pinned
+ * action across every discovered file, not just the publish path. The scan
+ * already covers everything (#528), the metadata fetch is memoised per
+ * `<owner>/<repo>[/<path>]@<sha>` exactly like the tag resolution, and a
+ * renamed input on a build/lint workflow wastes the same debugging night even
+ * when no credential is in scope. `docker://` image refs are excluded — they
+ * have no metadata file, and their only `with:` keys are the runner-defined
+ * `args`/`entrypoint`.
+ *
+ * The same fail-closed rules apply: an unreachable API is a FAILURE, never a
+ * pass, and a 403/451 diverts to the SAME anonymous git route (a shallow fetch
+ * of the pinned commit + `cat-file`, from the canonical repo) — without it the
+ * check would re-create the permanently-red gate #640 closed, because the
+ * `aquasecurity` pins that need the fallback are exactly the ones we pass
+ * `with:` inputs to. Metadata this script cannot READ (an `inputs:` key whose
+ * value defeats the scanner) is likewise a finding, not a skip.
+ *
  * WHAT IT DOES NOT CATCH
  * ----------------------
  * It trusts the version COMMENT as the statement of intent. A pin that
@@ -52,7 +84,11 @@
  * malicious is out of scope — that is what the action allowlist and human
  * review of the Dependabot diff are for. It also cannot distinguish "we pinned
  * the wrong SHA" from "upstream moved the tag"; both are reported, and both
- * warrant a human look at a credentialed path.
+ * warrant a human look at a credentialed path. On inputs, the converse
+ * direction is also out of scope: a NEWLY-REQUIRED input we fail to pass is
+ * not detected (requiredness lives in semantics, not the declaration), and an
+ * input whose MEANING changed under the same name is invisible to any
+ * mechanical check.
  *
  * Annotated tags MUST be dereferenced: `git/ref/tags/<tag>` returns an object
  * of type `tag` whose own sha is the tag object, not the commit. Comparing that
@@ -215,37 +251,207 @@ const VERSION_COMMENT = /^(v\d+\.\d+\.\d+[\w.+-]*)/;
 
 const GITHUB_API_BASE = 'https://api.github.com/';
 
+/** Blank, or a comment-only line — invisible to every block-structure decision. */
+const IGNORABLE_LINE = /^\s*(#.*)?$/;
+
+/**
+ * Split into lines CONSUMING a CRLF's `\r`. `split('\n')` leaves the `\r` on
+ * the line, where it defeats every `$`-anchored regex here (`.` matches no line
+ * terminator, so `(.*)$` cannot reach the end past a `\r`) — measured, not
+ * hypothetical: `actions/checkout` ships its `action.yml` with CRLF endings,
+ * and the first live run read it as declaring NO inputs at all, false-redding
+ * every `with:` key this repo passes to it.
+ */
+const splitLines = (text) => text.split(/\r?\n/);
+
+/**
+ * Read `line` as a YAML mapping key, treating a leading `- ` list marker as two
+ * extra columns of indent (which is where YAML puts the keys that follow it).
+ * Returns { indent, markerIndent, marker, key, rest } or undefined. This is NOT
+ * a YAML parser — it is only ever consulted at a KNOWN indent inside a block
+ * this file has already delimited, which is what keeps `https://…` (a colon on
+ * a content line) from being misread as a key: content lines sit deeper than
+ * the indent being asked about and are never consulted.
+ */
+function readKeyLine(line) {
+  const match = /^(\s*)(- +)?(["']?)([^\s:#"']+)\3\s*:(.*)$/.exec(line);
+  if (!match) return undefined;
+  return {
+    indent: match[1].length + (match[2] ? match[2].length : 0),
+    markerIndent: match[1].length,
+    marker: Boolean(match[2]),
+    key: match[4],
+    rest: match[5] ?? '',
+  };
+}
+
+/** Leading-space count, for block-boundary decisions only. */
+function leadingSpaces(line) {
+  return /^(\s*)/.exec(line)[1].length;
+}
+
+/**
+ * The keys a simple one-line flow mapping (`{a: 1, b: 2}`) passes, or
+ * undefined when the text is not one this scanner can be SURE about. Quoted
+ * values may contain commas, so anything carrying a quote is refused rather
+ * than half-read — refusal surfaces as `with-unreadable`, a failure.
+ */
+function flowMappingKeys(text, line) {
+  const inner = /^\{(.*)\}\s*(#.*)?$/.exec(text.trim());
+  if (!inner) return undefined;
+  const body = inner[1].trim();
+  if (body === '') return [];
+  if (/["']/.test(body)) return undefined;
+  const keys = [];
+  for (const entry of body.split(',')) {
+    const key = /^\s*([^\s:]+)\s*:/.exec(entry);
+    if (!key) return undefined;
+    keys.push({ key: key[1], line });
+  }
+  return keys;
+}
+
+/**
+ * The `with:` keys belonging to the step (or reusable-workflow job) whose
+ * `uses:` sits at `usesIndex`, indent `usesIndent`.
+ *
+ * Structure, not regex-over-the-whole-file: the step is delimited FIRST — up
+ * and down from the `uses:` line to the enclosing list marker (`- ` two
+ * columns left) or the first shallower content line — and only then is a
+ * sibling `with:` key looked for INSIDE it, in either direction, because YAML
+ * mappings are unordered and `with:` before `uses:` is a valid step. Child
+ * keys are read at the FIRST child indent only: a block-scalar input value
+ * (`script: |`) indents its content deeper than the key line, so a
+ * `key:`-shaped line inside one is never misread as a passed input.
+ *
+ * Returns { keys: [{key, line}] } or { unreadable: line } when the `with:`
+ * value has a shape this scanner cannot be sure about (an anchor, say) —
+ * surfaced as a FINDING by the caller, never a silent skip.
+ */
+function withKeysForUses(lines, usesIndex, usesIndent) {
+  const boundary = (line) => {
+    if (IGNORABLE_LINE.test(line)) return false;
+    if (leadingSpaces(line) < usesIndent) {
+      // A list marker two columns left is the NEXT/PREVIOUS step; anything
+      // else shallower has left the step's mapping entirely. Both delimit.
+      return true;
+    }
+    return false;
+  };
+
+  let start = usesIndex;
+  // When the `uses:` line is ITSELF the step's `- ` marker, the step starts
+  // there and nothing above belongs to it — scanning up anyway walks into the
+  // PREVIOUS step and adopts its `with:` block (caught by the offline mutation
+  // proof: every pin in the file suddenly carried the first step's inputs).
+  if (!readKeyLine(lines[usesIndex])?.marker) {
+    for (let index = usesIndex - 1; index >= 0; index -= 1) {
+      if (boundary(lines[index])) {
+        // The marker line itself ('- name: …') carries the step's FIRST key, so
+        // it belongs to the step when its marker sits exactly two columns left.
+        const marker = readKeyLine(lines[index]);
+        if (marker?.marker && marker.markerIndent === usesIndent - 2) start = index;
+        break;
+      }
+      start = index;
+    }
+  }
+  let end = usesIndex;
+  for (let index = usesIndex + 1; index < lines.length; index += 1) {
+    if (boundary(lines[index])) break;
+    end = index;
+  }
+
+  for (let index = start; index <= end; index += 1) {
+    if (index === usesIndex) continue;
+    const key = readKeyLine(lines[index]);
+    if (!key || key.key !== 'with' || key.indent !== usesIndent) continue;
+    const rest = key.rest.replace(/#.*$/, '').trim();
+    if (rest !== '') {
+      const flow = flowMappingKeys(rest, index + 1);
+      if (flow) return { keys: flow };
+      return { unreadable: index + 1 };
+    }
+    // Block form: keys at the first child indent, until the block closes.
+    const keys = [];
+    let childIndent;
+    for (let child = index + 1; child <= end; child += 1) {
+      const line = lines[child];
+      if (IGNORABLE_LINE.test(line)) continue;
+      const indent = leadingSpaces(line);
+      if (childIndent === undefined) {
+        if (indent <= usesIndent) break;
+        childIndent = indent;
+      }
+      if (indent < childIndent) break;
+      if (indent > childIndent) continue; // block-scalar / folded continuation
+      const childKey = readKeyLine(line);
+      if (!childKey || childKey.indent !== childIndent) {
+        // A line AT the key indent that does not read as a key means the
+        // scanner's structural assumption broke — fail closed, never skip.
+        return { unreadable: child + 1 };
+      }
+      keys.push({ key: childKey.key, line: child + 1 });
+    }
+    return { keys };
+  }
+  return { keys: [] };
+}
+
 /**
  * Extract every `uses:` pin from a workflow's text. Malformed entries (no SHA,
  * no version comment) are RETAINED with the offending field left undefined —
  * dropping them here would let an unpinned or uncommented ref pass by never
  * being looked at, which is the opposite of the intent.
+ *
+ * Each pin also carries the `with:` keys its step passes (`withKeys`), the
+ * in-repo subpath for actions living in a subdirectory (`subpath`), and
+ * `withUnreadable` when the step HAS a `with:` whose shape the scanner could
+ * not be sure about — a finding for the caller, never a silent skip (#750).
  */
 export function parsePins(text, file) {
   const pins = [];
-  for (const [index, line] of text.split('\n').entries()) {
+  const lines = splitLines(text);
+  for (const [index, line] of lines.entries()) {
     const match = USES_LINE.exec(line);
     if (!match) continue;
     const [, action, ref, comment] = match;
     if (!action || !ref) continue;
-    const [owner, repo] = action.split('/');
+    const parts = action.split('/');
+    const [owner, repo] = parts;
     const tagMatch = VERSION_COMMENT.exec((comment ?? '').trim());
+    const usesKey = readKeyLine(line);
+    const withResult = usesKey ? withKeysForUses(lines, index, usesKey.indent) : { keys: [] };
     pins.push({
       file,
       line: index + 1,
       action,
       owner,
       repo,
+      subpath: parts.slice(2).join('/'),
       sha: /^[0-9a-f]{40}$/.test(ref) ? ref : undefined,
       ref,
       tag: tagMatch ? tagMatch[1] : undefined,
+      withKeys: withResult.keys ?? [],
+      withUnreadable: withResult.unreadable,
     });
   }
   return pins;
 }
 
-/** Default API transport: authenticated with GITHUB_TOKEN when present. */
-export async function githubApi(path) {
+/**
+ * Default API transport: authenticated with GITHUB_TOKEN when present.
+ *
+ * A THROWN fetch (DNS, TLS, a reset connection — no HTTP status at all) is
+ * retried ONCE, on the same terms as `gitLsRemoteTag`'s measured-flakiness
+ * retry: a second failure still fails, and an HTTP STATUS is an ANSWER and is
+ * never retried — a 404 is a missing tag, a 403 has its own diversion, and
+ * retrying a 5xx would be one more path a future edit could turn into a mask.
+ * Measured on this branch, not hypothetical: one transient `fetch failed` on a
+ * memoised request fanned out into 62 findings across every file pinning that
+ * action, which is exactly the flaky-red a nightly gate cannot afford.
+ */
+export async function githubApi(path, { attempts = 2, sleep = sleepSync } = {}) {
   const headers = {
     accept: 'application/vnd.github+json',
     'user-agent': 'knext-verify-action-pins',
@@ -253,14 +459,23 @@ export async function githubApi(path) {
   };
   const token = process.env.GITHUB_TOKEN;
   if (token) headers.authorization = `Bearer ${token}`;
-  const response = await fetch(`${GITHUB_API_BASE}${path}`, { headers });
-  let body;
-  try {
-    body = await response.json();
-  } catch {
-    body = undefined;
+  for (let attempt = 0; ; attempt += 1) {
+    if (attempt > 0) sleep(2_000);
+    let response;
+    try {
+      response = await fetch(`${GITHUB_API_BASE}${path}`, { headers });
+    } catch (error) {
+      if (attempt + 1 < attempts) continue;
+      throw error;
+    }
+    let body;
+    try {
+      body = await response.json();
+    } catch {
+      body = undefined;
+    }
+    return { status: response.status, body };
   }
-  return { status: response.status, body };
 }
 
 /**
@@ -336,9 +551,13 @@ function anonymousGitDir() {
  * round-1 anonymity test asserted argv against an injected double, which cannot
  * observe ambient config — and ambient config is what decides anonymity. See
  * `tests/action-pin-sha-tag-nightly.test.ts`, "anonymous IN FACT".
+ *
+ * `cwd` defaults to the empty anonymous directory above; `gitCatFile` (#750)
+ * passes its own freshly-initialised temp REPOSITORY instead, which preserves
+ * the same guarantee — a repo that this run just created has no local config,
+ * and every other config scope is closed by the env below either way.
  */
-export function runGit(args) {
-  const cwd = anonymousGitDir();
+export function runGit(args, cwd = anonymousGitDir()) {
   const result = spawnSync('git', args, {
     encoding: 'utf8',
     timeout: 30_000,
@@ -502,6 +721,359 @@ export function gitLsRemoteTag({
     return { kind: 'tag-missing' };
   }
   return failure ?? { kind: 'transport-error', message: 'git ls-remote was never attempted' };
+}
+
+/**
+ * A plain repo-relative file path. Anything else never becomes argv or an API
+ * path: no leading `-` (option injection), no leading `/`, no `..` segment.
+ */
+const SAFE_FILE_PATH = /^[A-Za-z0-9._][A-Za-z0-9._/-]*$/;
+const hasDotDotSegment = (path) => path.split('/').includes('..');
+
+/**
+ * Per-process cache of anonymous shallow fetches, keyed `<owner>/<repo>@<sha>`.
+ * Stores the RESULT either way — a directory holding the commit, or the
+ * failure — so an unreachable upstream stays a failure for every file that
+ * depends on it, never quietly a pass for the second one (the same rule as
+ * every other cache in this script).
+ */
+const fetchedCommitDirs = new Map();
+
+/**
+ * Read one file from `<owner>/<repo>` AT commit `<sha>` over the ANONYMOUS git
+ * protocol (#750) — the content sibling of `gitLsRemoteTag`, reached only when
+ * the GitHub API answered 403/451. `ls-remote` cannot serve file content, so
+ * this shallow-fetches the pinned commit into a fresh temp repository (GitHub's
+ * upload-pack allows fetching a reachable commit by SHA — `actions/checkout`
+ * relies on the same) and reads the blob with `cat-file`. The objects come from
+ * the CANONICAL repository URL, so the fork-network immunity is preserved, and
+ * the request runs under `runGit`'s full anonymity environment — the temp repo
+ * this run just initialised has no local config to leak a credential from.
+ *
+ * A TRANSPORT failure (init/fetch) is distinguished from a MISSING FILE at a
+ * commit that fetched fine: the first means "could not verify" (a failure with
+ * both causes reported), the second is an ANSWER the caller uses to try the
+ * next metadata filename. Same retry discipline as `gitLsRemoteTag`: only a
+ * transport failure is retried, once, because the anonymous git endpoint has
+ * MEASURED intermittent throttling; `file-missing` is an answer and returns
+ * immediately.
+ *
+ * Returns { kind: 'content', text } | { kind: 'file-missing', message }
+ *       | { kind: 'transport-error', message }
+ */
+export function gitCatFile({
+  owner,
+  repo,
+  sha,
+  path,
+  run = runGit,
+  attempts = 2,
+  sleep = sleepSync,
+}) {
+  if (!SAFE_PATH_SEGMENT.test(owner ?? '') || !SAFE_PATH_SEGMENT.test(repo ?? '')) {
+    return {
+      kind: 'transport-error',
+      message: `refusing to fetch from unsafe repo ref: ${owner}/${repo}`,
+    };
+  }
+  if (!/^[0-9a-f]{40}$/.test(sha ?? '')) {
+    return { kind: 'transport-error', message: `refusing to fetch unsafe commit ref: ${sha}` };
+  }
+  if (!SAFE_FILE_PATH.test(path ?? '') || hasDotDotSegment(path)) {
+    return { kind: 'transport-error', message: `refusing to read unsafe path: ${path}` };
+  }
+
+  const cacheKey = `${owner}/${repo}@${sha}`;
+  if (!fetchedCommitDirs.has(cacheKey)) {
+    const url = `https://github.com/${owner}/${repo}`;
+    let outcome = { kind: 'transport-error', message: 'git fetch was never attempted' };
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      if (attempt > 0) sleep(2_000);
+      const dir = mkdtempSync(join(tmpdir(), 'knext-action-metadata-'));
+      const init = run(['init', '--quiet', dir]);
+      if (init.status !== 0) {
+        outcome = {
+          kind: 'transport-error',
+          message: (init.stderr || `git init exited ${init.status}`).trim(),
+        };
+        continue;
+      }
+      const fetch = run(
+        ['-c', 'credential.helper=', 'fetch', '--quiet', '--depth=1', url, sha],
+        dir,
+      );
+      if (fetch.status !== 0) {
+        outcome = {
+          kind: 'transport-error',
+          message: (fetch.stderr || `git fetch exited ${fetch.status}`).trim(),
+        };
+        continue;
+      }
+      outcome = { kind: 'dir', dir };
+      break;
+    }
+    fetchedCommitDirs.set(cacheKey, outcome);
+  }
+
+  const cached = fetchedCommitDirs.get(cacheKey);
+  if (cached.kind !== 'dir') return cached;
+
+  const cat = run(['cat-file', 'blob', `${sha}:${path}`], cached.dir);
+  if (cat.status === 0) return { kind: 'content', text: cat.stdout };
+  return {
+    kind: 'file-missing',
+    message: (cat.stderr || `git cat-file exited ${cat.status}`).trim(),
+  };
+}
+
+/**
+ * The block of child keys under the key at `startIndex` (exclusive), read at
+ * the FIRST child indent only — deeper lines are descriptions, defaults, or
+ * block-scalar content and are skipped; a line AT the child indent that does
+ * not read as a key is a structural surprise and returns undefined so the
+ * caller fails closed rather than under-reporting the declared set.
+ */
+function childKeysOf(lines, startIndex, parentIndent) {
+  const keys = [];
+  let childIndent;
+  for (let index = startIndex + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (IGNORABLE_LINE.test(line)) continue;
+    const indent = leadingSpaces(line);
+    if (childIndent === undefined) {
+      if (indent <= parentIndent) break;
+      childIndent = indent;
+    }
+    if (indent <= parentIndent) break;
+    if (indent > childIndent) continue;
+    const key = readKeyLine(line);
+    if (!key || key.marker || key.indent !== childIndent) return undefined;
+    keys.push(key.key);
+  }
+  return keys;
+}
+
+/**
+ * The inputs an action's metadata file declares, plus whether it is a Docker
+ * container action (whose steps may additionally pass the runner-defined
+ * `args`/`entrypoint` keys). Input names are lowercased because the runner
+ * matches them case-insensitively.
+ *
+ * Returns { inputs: Set<string>, docker: boolean }, or undefined when the file
+ * has an `inputs:` key whose value this scanner cannot be SURE about — the
+ * caller reports that as a finding, because "could not read the declaration"
+ * must never render as "declares nothing" (a phantom red on every passed key)
+ * NOR as a pass. A file with NO `inputs:` key declares nothing, which is an
+ * answer, not a failure.
+ */
+export function parseActionInputs(text) {
+  const lines = splitLines(text);
+  const docker = lines.some((line) =>
+    /^\s*(["']?)using\1\s*:\s*(["']?)docker\2\s*(#.*)?$/.test(line),
+  );
+  for (const [index, line] of lines.entries()) {
+    const key = readKeyLine(line);
+    if (!key || key.marker || key.indent !== 0 || key.key !== 'inputs') continue;
+    const rest = key.rest.replace(/#.*$/, '').trim();
+    if (rest !== '') {
+      if (/^\{\s*\}$/.test(rest)) return { inputs: new Set(), docker };
+      return undefined;
+    }
+    const keys = childKeysOf(lines, index, 0);
+    if (keys === undefined) return undefined;
+    return { inputs: new Set(keys.map((name) => name.toLowerCase())), docker };
+  }
+  return { inputs: new Set(), docker };
+}
+
+/**
+ * The inputs a REUSABLE WORKFLOW declares (`on.workflow_call.inputs`) — the
+ * metadata for a `uses: owner/repo/.github/workflows/x.yml@sha` job. Nothing
+ * in this repo calls one today, but without this branch the checker would
+ * fail-closed-RED on a perfectly correct future call by demanding an
+ * `action.yml` that cannot exist there — a false red on a correct input, the
+ * exact class this file keeps having to correct. Same contract as
+ * `parseActionInputs`: undefined = unreadable, empty set = declares nothing.
+ */
+export function parseWorkflowCallInputs(text) {
+  const lines = splitLines(text);
+  for (const [index, line] of lines.entries()) {
+    const key = readKeyLine(line);
+    if (!key || key.key !== 'workflow_call') continue;
+    const rest = key.rest.replace(/#.*$/, '').trim();
+    if (rest !== '') {
+      if (/^\{\s*\}$/.test(rest)) return { inputs: new Set(), docker: false };
+      return undefined;
+    }
+    for (let child = index + 1; child < lines.length; child += 1) {
+      const childLine = lines[child];
+      if (IGNORABLE_LINE.test(childLine)) continue;
+      if (leadingSpaces(childLine) <= key.indent) break;
+      const childKey = readKeyLine(childLine);
+      if (!childKey || childKey.key !== 'inputs') continue;
+      const keys = childKeysOf(lines, child, childKey.indent);
+      if (keys === undefined) return undefined;
+      return { inputs: new Set(keys.map((name) => name.toLowerCase())), docker: false };
+    }
+    return { inputs: new Set(), docker: false };
+  }
+  return { inputs: new Set(), docker: false };
+}
+
+/**
+ * Fetch and parse the declared-input set for a pinned action at its pinned
+ * SHA. API first (`contents` at `?ref=<sha>` — the commit, so no tag/branch
+ * ambiguity and nothing more to dereference); a 403/451 diverts to the
+ * anonymous git route for the SAME reason and under the SAME rules as the tag
+ * resolver (#640): the `aquasecurity` org IP-allow-lists the API, we pass
+ * `with:` inputs to its actions, and a permanently-red gate is one people
+ * learn to ignore. Any other API failure keeps its verdict — a failure, never
+ * a pass.
+ *
+ * Returns { kind: 'inputs', inputs, docker, path }
+ *       | { kind: 'metadata-missing', tried }         — no metadata file at that commit
+ *       | { kind: 'metadata-unreadable', path }       — fetched, but the declaration defeated the scanner
+ *       | { kind: 'api-error', status, message, gitFallbackMessage? }
+ */
+export async function fetchDeclaredInputs({
+  owner,
+  repo,
+  subpath,
+  sha,
+  api = githubApi,
+  catFile = gitCatFile,
+}) {
+  // A reusable workflow IS its own metadata file; an action's metadata is
+  // action.yml (or .yaml) at the action's directory.
+  const reusable = /\.ya?ml$/.test(subpath ?? '');
+  const candidates = reusable
+    ? [subpath]
+    : ['action.yml', 'action.yaml'].map((name) => (subpath ? `${subpath}/${name}` : name));
+  const parse = reusable ? parseWorkflowCallInputs : parseActionInputs;
+
+  for (const candidate of candidates) {
+    if (!SAFE_FILE_PATH.test(candidate) || hasDotDotSegment(candidate)) {
+      return {
+        kind: 'api-error',
+        status: 0,
+        message: `refusing to fetch unsafe path: ${candidate}`,
+      };
+    }
+  }
+
+  const finish = (text, path) => {
+    const parsed = parse(text);
+    if (parsed === undefined) return { kind: 'metadata-unreadable', path };
+    return { kind: 'inputs', inputs: parsed.inputs, docker: parsed.docker, path };
+  };
+
+  /** The git route, for ALL candidates — once the API has 403'd the org, it has 403'd every path in it. */
+  const viaGit = (status, message) => {
+    for (const candidate of candidates) {
+      const result = catFile({ owner, repo, sha, path: candidate });
+      if (result.kind === 'content') return finish(result.text, candidate);
+      if (result.kind === 'file-missing') continue;
+      // Transport failure: the 403 stands, both causes reported (#640).
+      return { kind: 'api-error', status, message, gitFallbackMessage: result.message };
+    }
+    return { kind: 'metadata-missing', tried: candidates };
+  };
+
+  for (const candidate of candidates) {
+    let response;
+    try {
+      response = await api(`repos/${owner}/${repo}/contents/${candidate}?ref=${sha}`);
+    } catch (error) {
+      response = {
+        status: 0,
+        body: { message: error instanceof Error ? error.message : `${error}` },
+      };
+    }
+    if (response.status === 404) continue;
+    if (GIT_FALLBACK_STATUSES.has(response.status)) {
+      return viaGit(response.status, response.body?.message);
+    }
+    if (response.status !== 200) {
+      return { kind: 'api-error', status: response.status, message: response.body?.message };
+    }
+    if (typeof response.body?.content !== 'string') {
+      return {
+        kind: 'api-error',
+        status: 200,
+        message: `contents API returned no inline content for ${candidate} (encoding: ${response.body?.encoding})`,
+      };
+    }
+    return finish(Buffer.from(response.body.content, 'base64').toString('utf8'), candidate);
+  }
+  return { kind: 'metadata-missing', tried: candidates };
+}
+
+/**
+ * The `with:` keys the runner defines for Docker container actions at STEP
+ * level. They are not declared in `inputs:` yet are legitimate — but ONLY for
+ * `runs.using: docker`; passed to a JS action they are silently ignored, which
+ * is exactly the bug class this check exists for, so they are not allowed
+ * globally.
+ */
+const DOCKER_STEP_WITH_KEYS = new Set(['args', 'entrypoint']);
+
+/**
+ * The input-existence findings for one pin (#750) — empty when everything the
+ * step passes is declared. Orthogonal to `verifyPin`'s SHA↔tag verdict, and
+ * deliberately run IN ADDITION to it: a pin whose tag mismatches still runs
+ * the code at the pinned SHA, so the inputs are diffed against that SHA.
+ *
+ * Skipped only where there is genuinely nothing to check: no `with:` keys
+ * passed, no 40-hex SHA to fetch metadata at (already red as `not-sha-pinned`),
+ * or a `docker://` image ref (no metadata file exists; its `args`/`entrypoint`
+ * are runner-defined).
+ */
+export async function verifyPinInputs(pin, fetchInputs = fetchDeclaredInputs) {
+  if (pin.withUnreadable) {
+    return [{ ...pin, line: pin.withUnreadable, reason: 'with-unreadable' }];
+  }
+  if (!pin.withKeys?.length) return [];
+  if (!pin.sha) return [];
+  if (pin.action.startsWith('docker://')) return [];
+
+  const meta = await fetchInputs({
+    owner: pin.owner,
+    repo: pin.repo,
+    subpath: pin.subpath,
+    sha: pin.sha,
+  });
+  if (meta.kind === 'metadata-missing') {
+    return [{ ...pin, reason: 'action-metadata-missing', tried: meta.tried }];
+  }
+  if (meta.kind === 'metadata-unreadable') {
+    return [{ ...pin, reason: 'action-metadata-unreadable', metadataPath: meta.path }];
+  }
+  if (meta.kind === 'api-error') {
+    return [
+      {
+        ...pin,
+        reason: 'action-metadata-error',
+        status: meta.status,
+        message: meta.message,
+        gitFallbackMessage: meta.gitFallbackMessage,
+      },
+    ];
+  }
+  const findings = [];
+  for (const entry of pin.withKeys) {
+    const name = entry.key.toLowerCase();
+    if (meta.inputs.has(name)) continue;
+    if (meta.docker && DOCKER_STEP_WITH_KEYS.has(name)) continue;
+    findings.push({
+      ...pin,
+      line: entry.line,
+      reason: 'unknown-input',
+      inputKey: entry.key,
+      declaredInputs: [...meta.inputs].sort(),
+      metadataPath: meta.path,
+    });
+  }
+  return findings;
 }
 
 /**
@@ -703,7 +1275,7 @@ export function mentionsUses(text) {
  * The shared core: verify `files` (label → absolute path). Everything else is a
  * thin wrapper choosing WHICH files.
  */
-async function verifyFileSet(files, api, lsRemote = gitLsRemoteTag) {
+async function verifyFileSet(files, api, lsRemote = gitLsRemoteTag, catFile = gitCatFile) {
   // A checker that goes green when it cannot SEE its subject is worse than none
   // (security.md, quoted at the head of this file). An earlier revision guarded
   // the directory reads with `existsSync` and therefore reported
@@ -732,6 +1304,17 @@ async function verifyFileSet(files, api, lsRemote = gitLsRemoteTag) {
     const key = `${owner}/${repo}@${tag}`;
     if (!gitCache.has(key)) gitCache.set(key, lsRemote({ owner, repo, tag }));
     return gitCache.get(key);
+  };
+  const inputsCache = new Map();
+  const memoFetchInputs = ({ owner, repo, subpath, sha }) => {
+    const key = `${owner}/${repo}/${subpath ?? ''}@${sha}`;
+    if (!inputsCache.has(key)) {
+      inputsCache.set(
+        key,
+        fetchDeclaredInputs({ owner, repo, subpath, sha, api: memoApi, catFile }),
+      );
+    }
+    return inputsCache.get(key);
   };
   const findings = [];
   for (const [file, absolute] of files) {
@@ -790,6 +1373,12 @@ async function verifyFileSet(files, api, lsRemote = gitLsRemoteTag) {
     for (const pin of pins) {
       const finding = await verifyPin(pin, { api: memoApi, lsRemote: memoLsRemote });
       if (finding) findings.push(finding);
+      // Input existence (#750), IN ADDITION to the SHA↔tag verdict — neither
+      // masks the other. Memoised per action target: the declared-input set is
+      // a fact about `<owner>/<repo>[/<path>]@<sha>`, not about the file that
+      // pins it, and the cache stores failures on the same terms as every
+      // other cache here.
+      findings.push(...(await verifyPinInputs(pin, memoFetchInputs)));
     }
   }
   return findings;
@@ -799,6 +1388,7 @@ export async function verifyWorkflows({
   dir = resolve(process.cwd(), '.github/workflows'),
   api = githubApi,
   lsRemote = gitLsRemoteTag,
+  catFile = gitCatFile,
   workflows,
 } = {}) {
   const files = workflows ?? discoverWorkflows(dir);
@@ -806,6 +1396,7 @@ export async function verifyWorkflows({
     files.map((file) => [file, resolve(dir, file)]),
     api,
     lsRemote,
+    catFile,
   );
 }
 
@@ -818,11 +1409,13 @@ export async function verifyPins({
   repoRoot = process.cwd(),
   api = githubApi,
   lsRemote = gitLsRemoteTag,
+  catFile = gitCatFile,
 } = {}) {
   return verifyFileSet(
     discoverPinnableFiles(repoRoot).map((file) => [file, resolve(repoRoot, file)]),
     api,
     lsRemote,
+    catFile,
   );
 }
 
@@ -902,6 +1495,61 @@ export function formatFinding(finding) {
             ]
           : []),
       ].join('\n');
+    case 'unknown-input':
+      return [
+        `${head}`,
+        `  passed input : ${finding.inputKey}`,
+        `  declared by  : ${finding.metadataPath} at ${finding.pinnedSha ?? finding.sha} — ${
+          finding.declaredInputs.length > 0
+            ? finding.declaredInputs.join(', ')
+            : '(no inputs at all)'
+        }`,
+        '  GitHub Actions IGNORES an unknown `with:` key rather than failing (#750), so this',
+        '  input silently evaporates at run time and the step runs with its default instead —',
+        '  a renamed input on a major bump is how a security-relevant setting turns itself off.',
+        "  Rename it to a declared input (the bump's changelog will name the successor) or drop it.",
+      ].join('\n');
+    case 'action-metadata-missing':
+      return [
+        `${head}`,
+        `  pinned SHA  : ${finding.sha}`,
+        `  No metadata file (${finding.tried.join(' / ')}) exists at that commit, so the`,
+        '  inputs this step passes cannot be verified — and an action WITHOUT a metadata',
+        '  file is not runnable as an action at all, which is its own red flag.',
+      ].join('\n');
+    case 'action-metadata-unreadable':
+      return [
+        `${head}`,
+        `  Fetched ${finding.metadataPath} at ${finding.sha}, but its input declaration has a`,
+        '  shape this checker cannot read (an anchor or flow mapping, say). Treated as a',
+        '  FAILURE, not a pass — "could not read the declaration" must never become either',
+        '  "declares nothing" or "fine". Teach the scanner the shape, or simplify upstream\'s.',
+      ].join('\n');
+    case 'action-metadata-error':
+      return [
+        `${head}`,
+        `  pinned SHA  : ${finding.sha}`,
+        `  Could not fetch the action's metadata to verify its inputs — ${
+          finding.status === 0
+            ? `the API was unreachable: ${finding.message ?? '(no message)'}`
+            : `GitHub API error ${finding.status}: ${finding.message ?? '(no message)'}`
+        }`,
+        '  Treated as a FAILURE, not a pass — unverified inputs are unverified, not verified.',
+        ...(finding.gitFallbackMessage
+          ? [
+              `  The anonymous git fallback ALSO failed: ${finding.gitFallbackMessage}`,
+              '  Both routes to the metadata are unavailable, so these inputs are UNVERIFIED.',
+            ]
+          : []),
+      ].join('\n');
+    case 'with-unreadable':
+      return [
+        `${head}`,
+        '  This step HAS a `with:` block, but its shape defeated the extractor (an anchor,',
+        '  or a flow mapping with quoting it cannot be sure about). Nothing was verified for',
+        '  this step, so this is a FAILURE — the input-existence check (#750) would otherwise',
+        '  go silently blind exactly where the file got unusual.',
+      ].join('\n');
     case 'docker-ref-unpinned':
       return [
         `${head}`,
@@ -961,7 +1609,7 @@ async function main() {
   const findings = await verifyPins({ repoRoot });
   if (findings.length === 0) {
     console.log(
-      `✔ every pin across ${files.length} workflow/action file(s) resolves to the tag its comment claims`,
+      `✔ every pin across ${files.length} workflow/action file(s) resolves to the tag its comment claims, and every \`with:\` input passed is declared by the pinned action (#750)`,
     );
     return 0;
   }

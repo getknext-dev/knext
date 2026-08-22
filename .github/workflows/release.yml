@@ -153,14 +153,34 @@ jobs:
       - name: Create Release PR or Publish
         uses: changesets/action@198f833dd7d863100ea6e28967bc9a9fdefadb0a # v2.1.0
         with:
-          version: pnpm run changeset:version
-          publish: ${{ steps.gate.outputs.publish }}
-          commit: 'chore: version packages'
-          title: 'chore: version packages'
+          # v2 RENAMED EVERY INPUT THIS STEP PASSES, and #831 took the v1→v2 pin
+          # bump WITHOUT this migration (#749 had it, but was not what merged) —
+          # GitHub Actions does NOT error on unknown `with:` keys, it ignores
+          # them, so the step sat GREEN while set to run with every input
+          # defaulted (no version script, no publish script, wrong commit
+          # message), surfacing only at the next release. Caught by the #750
+          # input-existence check on its first live run; migration mirrors #749.
+          #   version              -> version-script
+          #   publish              -> publish-script
+          #   commit               -> commit-message
+          #   title                -> pr-title
+          #   createGithubReleases -> create-github-releases
+          version-script: pnpm run changeset:version
+          publish-script: ${{ steps.gate.outputs.publish }}
+          commit-message: 'chore: version packages'
+          pr-title: 'chore: version packages'
           # On publish, create one GitHub Release per published package, tagged
           # `@getknext/<pkg>@x.y.z`. The hand-made `v0.1.0` release predates this and
           # uses a different tag format, so there is no tag collision.
-          createGithubReleases: true
+          create-github-releases: true
+          # v2 requires the token as an INPUT. Its release notes are explicit that
+          # "the GITHUB_TOKEN environment variable and credentials configured by
+          # actions/checkout ... are not substitutes for this input" — so the env
+          # var below is no longer sufficient on its own for the push.
+          github-token: ${{ secrets.GITHUB_TOKEN }}
         env:
+          # Still exported: `changeset publish` and the gate script read it, and
+          # NODE_AUTH_TOKEN is how npm authenticates. The github-token INPUT above
+          # is what v2 uses for pushing; this is not redundant with it.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
