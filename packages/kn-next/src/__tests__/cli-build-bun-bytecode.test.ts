@@ -244,19 +244,34 @@ describe("precompileBunBytecode (module)", () => {
             // injected root, anything left behind is provably ours.
             const tmpRoot = join(projectDir, "bc-scratch");
             mkdirSync(tmpRoot, { recursive: true });
-            const result = precompileBunBytecode({
-                standaloneDir,
-                bunBin: "bun",
-                tmpRoot,
-            });
-            // the pass genuinely ran through the injected root
+            // BOTH mkdtemp sites must route through tmpRoot — the capability
+            // probe's AND the per-file scratch one. os.tmpdir() reads TMPDIR
+            // at CALL time, so poisoning it makes any UN-threaded site throw
+            // ENOENT instead of silently working, and the two sites fail
+            // through distinct channels: an un-threaded probe sets
+            // `disabled`, an un-threaded per-file scratch lands in
+            // `skipped`. Asserting both is what makes reverting EITHER site
+            // alone go red (#835 review F1 — a single composite assertion let
+            // the per-file site stay unguarded).
+            const savedTmp = process.env.TMPDIR;
+            process.env.TMPDIR = join(projectDir, "poisoned-no-such-dir");
+            let result: ReturnType<typeof precompileBunBytecode>;
+            try {
+                result = precompileBunBytecode({
+                    standaloneDir,
+                    bunBin: "bun",
+                    tmpRoot,
+                });
+            } finally {
+                if (savedTmp === undefined) delete process.env.TMPDIR;
+                else process.env.TMPDIR = savedTmp;
+            }
+            expect(result.disabled).toBeUndefined(); // probe site threaded
+            expect(result.skipped).toEqual([]); // per-file site threaded
             expect(result.compiled).toBe(1);
+            // nothing left behind in the root we own (catches an rmSync loss)
             expect(readdirSync(tmpRoot)).toEqual([]);
-            // Both halves: a NONEXISTENT root must disable the pass (the
-            // probe's scratch mkdtemp fails there) — proving scratch dirs
-            // really route through tmpRoot instead of silently falling back
-            // to the shared os.tmpdir(), which would make the residue
-            // assertion above decorative.
+            // Fail-open: a NONEXISTENT root disables the pass, never throws.
             const missingRoot = precompileBunBytecode({
                 standaloneDir,
                 bunBin: "bun",
