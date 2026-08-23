@@ -71,6 +71,27 @@ export interface ImageCacheSyncOptions {
     store?: ImageVariantStore;
     /** Logger (defaults to console). `console` and the pino runtime logger both satisfy it. */
     log?: SyncLogger;
+    /**
+     * @internal Deadline for the watch readiness probe (see
+     * {@link watchAndPushImageCache}). Tests inject a short value so the
+     * probe-unconfirmed path does not stall them; production uses the default.
+     */
+    watchReadyTimeoutMs?: number;
+    /**
+     * @internal Pre-fetched store listing under `<prefix>/`.
+     * `startImageCacheSync` fetches it once and threads it into both restore
+     * and the watch reconcile so a cold start pays one list round-trip, not
+     * two. When absent, each phase lists for itself.
+     */
+    preListedKeys?: readonly string[];
+    /**
+     * @internal `fs.watch` implementation, injectable so tests can script
+     * event-delivery timing deterministically (mocking node:fs via vi.mock is
+     * config-dependent: under the root vitest config `importOriginal` returns
+     * an empty module, so a factory mock cannot work there). Defaults to the
+     * real `node:fs` watch.
+     */
+    watchImpl?: typeof import("node:fs").watch;
 }
 
 /**
@@ -152,7 +173,8 @@ export async function restoreImageCache(
 
     let restored = 0;
     try {
-        const keys = await store.list(opts.bucket, `${prefix}/`);
+        const keys =
+            opts.preListedKeys ?? (await store.list(opts.bucket, `${prefix}/`));
         for (const key of keys) {
             // key = `<prefix>/<cacheKey>/<file>` → local `<cacheDir>/<cacheKey>/<file>`
             const rel = key.slice(prefix.length + 1); // strip `<prefix>/`
@@ -226,9 +248,35 @@ export async function pushVariant(
 }
 
 /**
+ * Sentinel directory name for the watch readiness probe. Dot-prefixed so it can
+ * never collide with a real variant cacheKey (Next cacheKeys are hex hashes) and
+ * so the reconcile rescan skips it.
+ */
+const WATCH_PROBE_KEY = ".knext-watch-probe";
+
+/** Default deadline for the watch readiness probe. */
+const WATCH_READY_TIMEOUT_MS = 2000;
+
+/**
  * WATCH the local image cache dir; when Next writes a new variant directory, push it
  * to the store. Returns a stop() handle. Uses `fs.watch` (recursive) — best-effort and
  * debounced so the multi-file write of one variant becomes one upload pass.
+ *
+ * ── The attach race (#805) ───────────────────────────────────────────────────
+ * `fs.watch` gives no readiness guarantee: on macOS the FSEvents stream attaches
+ * asynchronously after `watch()` returns, so events landing in that window can be
+ * silently dropped (and, conversely, writes made just BEFORE attach are sometimes
+ * replayed). In production it is worse than a window: the sync starts via deferred
+ * init AFTER the Next child is already serving (node-server.ts), so variants can
+ * be on disk before the watcher exists at all — no event will ever fire for them.
+ * Two-step fix, order load-bearing:
+ *   1. READINESS PROBE — touch a sentinel entry until its event is observed (or a
+ *      deadline passes), proving the stream is live before this promise resolves.
+ *   2. RECONCILE — one rescan of the local dir, pushing any variant the store
+ *      does not already hold (one `list` call; fully-stored variants are skipped
+ *      so a freshly-restored cache is not re-uploaded wholesale).
+ * Readiness first is what closes the gap: anything written before the rescan's
+ * readdir is caught by the rescan, anything after by the proven-live watcher.
  *
  * Note: `fs.watch({recursive:true})` is supported on Linux (Node ≥ 20) and macOS,
  * which covers the distroless runtime and local dev. If watching is unavailable the
@@ -238,6 +286,7 @@ export async function watchAndPushImageCache(
     opts: ImageCacheSyncOptions,
 ): Promise<{ stop: () => void }> {
     const log = opts.log ?? console;
+    const prefix = opts.prefix ?? DEFAULT_PREFIX;
     const cacheDir = opts.cacheDir ?? defaultCacheDir();
     const store = opts.store ?? (await defaultStore());
     const noop = { stop: () => {} };
@@ -264,22 +313,92 @@ export async function watchAndPushImageCache(
         }
     };
 
+    const enqueue = (cacheKey: string) => {
+        pending.add(cacheKey);
+        if (!timer) timer = setTimeout(flush, FLUSH_MS);
+    };
+
+    let probeSeen = false;
     let watcher: import("node:fs").FSWatcher;
     try {
-        const { watch } = await import("node:fs");
-        watcher = watch(cacheDir, { recursive: true }, (_event, filename) => {
+        const watchFn = opts.watchImpl ?? (await import("node:fs")).watch;
+        watcher = watchFn(cacheDir, { recursive: true }, (_event, filename) => {
             if (!filename) return;
             // filename is `<cacheKey>/<file>` (or just `<cacheKey>`); take the first segment.
             const cacheKey = String(filename).split(/[/\\]/)[0];
             if (!cacheKey) return;
-            pending.add(cacheKey);
-            if (!timer) timer = setTimeout(flush, FLUSH_MS);
+            if (cacheKey === WATCH_PROBE_KEY) {
+                probeSeen = true;
+                return;
+            }
+            enqueue(cacheKey);
         });
     } catch (err) {
         log.warn(
             `[image-cache-sync] watch unavailable (restore-only mode) — ${String(err)}`,
         );
         return noop;
+    }
+
+    // Step 1: readiness probe — retouch the sentinel until its event arrives.
+    const readyTimeoutMs = opts.watchReadyTimeoutMs ?? WATCH_READY_TIMEOUT_MS;
+    const probeDeadline = Date.now() + readyTimeoutMs;
+    const probeDir = join(cacheDir, WATCH_PROBE_KEY);
+    try {
+        while (!probeSeen && Date.now() < probeDeadline) {
+            await fs.mkdir(probeDir, { recursive: true });
+            await fs.writeFile(join(probeDir, "t"), "1");
+            await new Promise((r) => setTimeout(r, 25));
+        }
+    } catch {
+        // best-effort: an unwritable cache dir will surface via push warnings
+    }
+    await fs.rm(probeDir, { recursive: true, force: true }).catch(() => {});
+    if (!probeSeen) {
+        log.warn(
+            `[image-cache-sync] watch readiness probe unconfirmed after ${readyTimeoutMs}ms — events may be dropped around startup`,
+        );
+    }
+
+    // Step 2: reconcile — push whatever is already on disk that the store lacks.
+    try {
+        const entries = await fs.readdir(cacheDir, { withFileTypes: true });
+        const variantKeys = entries
+            .filter((e) => e.isDirectory() && !e.name.startsWith("."))
+            .map((e) => e.name);
+        if (variantKeys.length > 0) {
+            let known: ReadonlySet<string>;
+            try {
+                known = new Set(
+                    opts.preListedKeys ??
+                        (await store.list(opts.bucket, `${prefix}/`)),
+                );
+            } catch (err) {
+                log.warn(
+                    `[image-cache-sync] reconcile: store list failed (${String(err)}) — pushing all local variants (uploads are idempotent)`,
+                );
+                known = new Set();
+            }
+            for (const cacheKey of variantKeys) {
+                let files: string[];
+                try {
+                    files = await fs.readdir(join(cacheDir, cacheKey));
+                } catch {
+                    continue; // variant dir vanished mid-scan
+                }
+                if (
+                    files.some(
+                        (f) => !known.has(objectKey(prefix, cacheKey, f)),
+                    )
+                ) {
+                    enqueue(cacheKey);
+                }
+            }
+        }
+    } catch (err) {
+        log.warn(
+            `[image-cache-sync] reconcile skipped: cannot read ${cacheDir} — ${String(err)}`,
+        );
     }
 
     log.info(
@@ -318,9 +437,24 @@ export async function startImageCacheSync(
         bucket,
         prefix: env.IMAGE_CACHE_PREFIX || DEFAULT_PREFIX,
         cacheDir: env.IMAGE_CACHE_DIR || undefined,
-        store: deps.store,
+        store: deps.store ?? (await defaultStore()) ?? undefined,
         log,
     };
+
+    // One store listing shared by restore and the watch reconcile (#805 review
+    // issue 6: a cold start otherwise pays two identical list round-trips on
+    // the path this module exists to optimize). Best-effort: on failure the
+    // listing stays undefined and each phase lists (and warns) for itself.
+    if (opts.store) {
+        try {
+            opts.preListedKeys = await opts.store.list(
+                opts.bucket,
+                `${opts.prefix}/`,
+            );
+        } catch {
+            // restore/reconcile handle their own list errors
+        }
+    }
 
     await restoreImageCache(opts);
     return watchAndPushImageCache(opts);
