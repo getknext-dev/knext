@@ -49,18 +49,42 @@ describe("isBootTraceEnabled", () => {
 });
 
 describe("createBootTracer (disabled)", () => {
-    it("does not read the clock and does not write", () => {
+    /**
+     * The injected `now`/`write` are NOT sufficient on their own: a disabled
+     * tracer that ignored its options and went straight to the REAL clock and
+     * the REAL stderr would leave them untouched and pass. (Mutation-proved —
+     * that exact mutation survived the first version of this test.) So spy on
+     * the globals a leaking implementation would actually reach.
+     */
+    it("does not read the clock and does not write — not even the real ones", () => {
         const now = vi.fn(() => 0n);
         const write = vi.fn();
-        const tracer = createBootTracer({ enabled: false, now, write });
+        const stderr = vi
+            .spyOn(process.stderr, "write")
+            .mockImplementation(() => true);
+        const hrtime = vi.spyOn(process.hrtime, "bigint");
+        const uptime = vi.spyOn(process, "uptime");
 
-        tracer.mark("entry-eval");
-        tracer.mark("spawn-issued");
+        try {
+            const tracer = createBootTracer({ enabled: false, now, write });
 
-        expect(write).not.toHaveBeenCalled();
-        // Construction may sample the origin once; marking must not sample at all.
-        expect(now).not.toHaveBeenCalled();
-        expect(tracer.enabled).toBe(false);
+            tracer.mark("entry-eval");
+            tracer.mark("spawn-issued", { pid: 1 });
+            expect(tracer.elapsedMs()).toBe(0);
+
+            expect(write).not.toHaveBeenCalled();
+            expect(stderr).not.toHaveBeenCalled();
+            // Construction may sample the origin once when ENABLED; disabled it
+            // must not sample at all, through any route.
+            expect(now).not.toHaveBeenCalled();
+            expect(hrtime).not.toHaveBeenCalled();
+            expect(uptime).not.toHaveBeenCalled();
+            expect(tracer.enabled).toBe(false);
+        } finally {
+            stderr.mockRestore();
+            hrtime.mockRestore();
+            uptime.mockRestore();
+        }
     });
 });
 
