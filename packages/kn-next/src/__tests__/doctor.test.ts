@@ -131,7 +131,10 @@ function healthyStubs(): Record<
             ok: true,
             stdout: JSON.stringify({ spec: {} }),
         },
-        // (i, #744) a policy-capable CNI runs: healthy = enforcement detected.
+        // (i, #744) a policy-capable CNI runs AND is healthy: enforcement
+        // detected. numberReady is not decoration — a calico-node DaemonSet
+        // with zero ready pods enforces nothing, so a fixture claiming a
+        // healthy cluster has to say the agent is actually running.
         "kubectl get daemonsets --all-namespaces -o json": {
             ok: true,
             stdout: JSON.stringify({
@@ -140,6 +143,10 @@ function healthyStubs(): Record<
                         metadata: {
                             name: "calico-node",
                             namespace: "kube-system",
+                        },
+                        status: {
+                            desiredNumberScheduled: 3,
+                            numberReady: 3,
                         },
                     },
                 ],

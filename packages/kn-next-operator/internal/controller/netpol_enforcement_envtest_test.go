@@ -67,6 +67,24 @@ var _ = Describe("NetworkPolicyEnforced condition (#744)", func() {
 		}
 	}
 
+	// markDaemonSetReady sets the status subresource a real DaemonSet
+	// controller would write. envtest runs NO kubelet and NO DaemonSet
+	// controller, so a created DaemonSet keeps status.numberReady = 0
+	// forever — which the readiness check (correctly) reads as "installed but
+	// not running". Specs that mean "this agent is HEALTHY" must therefore say
+	// so explicitly; without this, an enforced-case spec silently tests the
+	// crashed case instead.
+	markDaemonSetReady := func(ds *appsv1.DaemonSet) {
+		fetched := &appsv1.DaemonSet{}
+		ExpectWithOffset(1, k8sClient.Get(ctx,
+			types.NamespacedName{Name: ds.Name, Namespace: ds.Namespace}, fetched)).To(Succeed())
+		fetched.Status.DesiredNumberScheduled = 1
+		fetched.Status.CurrentNumberScheduled = 1
+		fetched.Status.NumberReady = 1
+		fetched.Status.NumberAvailable = 1
+		ExpectWithOffset(1, k8sClient.Status().Update(ctx, fetched)).To(Succeed())
+	}
+
 	getCondition := func(nn types.NamespacedName) *metav1.Condition {
 		fetched := &appsv1alpha1.NextApp{}
 		ExpectWithOffset(1, k8sClient.Get(ctx, nn, fetched)).To(Succeed())
@@ -123,6 +141,9 @@ var _ = Describe("NetworkPolicyEnforced condition (#744)", func() {
 		calico := cniDaemonSet("calico-node")
 		Expect(k8sClient.Create(ctx, calico)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, calico) })
+		// HEALTHY, stated explicitly — a DaemonSet that merely exists is the
+		// crashed case, not the enforced one.
+		markDaemonSetReady(calico)
 
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
@@ -132,6 +153,40 @@ var _ = Describe("NetworkPolicyEnforced condition (#744)", func() {
 		Expect(c.Status).To(Equal(metav1.ConditionTrue))
 		Expect(c.Reason).To(Equal(ReasonPolicyControllerDetected))
 		Expect(c.Message).To(ContainSubstring("calico-node"))
+	})
+
+	// Review Finding 1, through the REAL cluster read. The classifier unit
+	// tests hand `ready` in as a literal, so they can never catch a broken
+	// read of the live DaemonSet status — this spec is the only guard on
+	// `ready: ds.Status.NumberReady > 0` in detectNetworkPolicyEnforcement.
+	// A CrashLoopBackOff calico-node (present, zero ready pods) must report
+	// Unknown, never the round-1 false green.
+	It("reports Unknown when an enforcing agent is installed but has no running pod", func() {
+		crashed := cniDaemonSet("calico-node")
+		Expect(k8sClient.Create(ctx, crashed)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, crashed) })
+		// Status deliberately left zeroed: numberReady = 0 is exactly what a
+		// crashed agent reports.
+
+		nn := types.NamespacedName{Name: "netpol-crashed-agent", Namespace: "default"}
+		app := &appsv1alpha1.NextApp{
+			ObjectMeta: metav1.ObjectMeta{Name: nn.Name, Namespace: nn.Namespace},
+			Spec:       appsv1alpha1.NextAppSpec{Image: image},
+		}
+		Expect(k8sClient.Create(ctx, app)).To(Succeed())
+		defer deleteAndFinalize(ctx, nn)
+
+		_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		c := getCondition(nn)
+		Expect(c).NotTo(BeNil())
+		Expect(c.Status).To(Equal(metav1.ConditionUnknown),
+			"a 0-ready enforcing agent must never claim enforcement")
+		Expect(c.Reason).To(Equal(ReasonEnforcementUnknown))
+		Expect(c.Message).To(ContainSubstring("calico-node"))
+		Expect(c.Message).To(ContainSubstring("not running"))
+		Expect(c.Message).To(ContainSubstring("unenforced"))
 	})
 
 	It("reports nothing when the NetworkPolicy is disabled", func() {

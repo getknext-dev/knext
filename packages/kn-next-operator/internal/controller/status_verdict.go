@@ -487,13 +487,20 @@ func computeStatusVerdict(
 		var cond metav1.Condition
 		switch np.verdict {
 		case netpolEnforcementEnforced:
+			// Honest ceiling (review Finding 2): signature+ready detection
+			// proves an agent is RUNNING, not that policies apply to this
+			// namespace — per-CNI configuration (e.g. Cilium
+			// policyEnforcementMode, Calico exemptions) can still exempt
+			// traffic. "Should be enforced", never "is in force".
 			cond = metav1.Condition{
 				Type:               ConditionNetworkPolicyEnforced,
 				Status:             metav1.ConditionTrue,
 				ObservedGeneration: app.Generation,
 				Reason:             ReasonPolicyControllerDetected,
 				Message: fmt.Sprintf(
-					"a NetworkPolicy-enforcing agent is running (%s) — the reconciled NetworkPolicy is in force",
+					"a NetworkPolicy-enforcing agent is running (%s) — NetworkPolicy objects should be "+
+						"enforced; per-CNI configuration can still exempt traffic, so verify directly if "+
+						"isolation is load-bearing",
 					np.evidence),
 			}
 		case netpolEnforcementLikelyUnenforced:
@@ -517,14 +524,26 @@ func computeStatusVerdict(
 				})
 			}
 		default:
+			// Two Unknown flavors, same reason: with evidence, detection saw
+			// an enforcing agent that is installed but NOT running (review
+			// Finding 1 — a name-only match must never claim enforcement);
+			// without, nothing recognizable was found at all. Both messages
+			// are static per cluster state (#98).
+			message := "cannot determine whether the cluster CNI enforces NetworkPolicy (no known CNI " +
+				"DaemonSet signature found, or the DaemonSet read failed) — treat the reconciled " +
+				"NetworkPolicy as unenforced until verified"
+			if np.evidence != "" {
+				message = fmt.Sprintf(
+					"a NetworkPolicy-enforcing agent is installed but not running (%s) — cannot determine "+
+						"enforcement; treat the reconciled NetworkPolicy as unenforced until the agent is healthy",
+					np.evidence)
+			}
 			cond = metav1.Condition{
 				Type:               ConditionNetworkPolicyEnforced,
 				Status:             metav1.ConditionUnknown,
 				ObservedGeneration: app.Generation,
 				Reason:             ReasonEnforcementUnknown,
-				Message: "cannot determine whether the cluster CNI enforces NetworkPolicy (no known CNI " +
-					"DaemonSet signature found, or the DaemonSet read failed) — treat the reconciled " +
-					"NetworkPolicy as unenforced until verified",
+				Message:            message,
 			}
 		}
 		v.conditions = append(v.conditions, cond)

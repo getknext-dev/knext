@@ -31,18 +31,18 @@ func TestClassifyCNIEnforcement_EnforcingControllers(t *testing.T) {
 		name string
 		ds   dsRef
 	}{
-		{"calico", dsRef{"kube-system", "calico-node"}},
-		{"calico-tigera", dsRef{"calico-system", "calico-node"}},
-		{"cilium", dsRef{"kube-system", "cilium"}},
-		{"kube-router", dsRef{"kube-system", "kube-router"}},
-		{"weave", dsRef{"kube-system", "weave-net"}},
-		{"antrea", dsRef{"kube-system", "antrea-agent"}},
-		{"canal", dsRef{"kube-system", "canal"}},
+		{"calico", dsRef{"kube-system", "calico-node", true}},
+		{"calico-tigera", dsRef{"calico-system", "calico-node", true}},
+		{"cilium", dsRef{"kube-system", "cilium", true}},
+		{"kube-router", dsRef{"kube-system", "kube-router", true}},
+		{"weave", dsRef{"kube-system", "weave-net", true}},
+		{"antrea", dsRef{"kube-system", "antrea-agent", true}},
+		{"canal", dsRef{"kube-system", "canal", true}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			verdict, evidence := classifyCNIEnforcement([]dsRef{
-				{"kube-system", "kube-proxy"}, // noise: never a signal
+				{"kube-system", "kube-proxy", true}, // noise: never a signal
 				tc.ds,
 			})
 			if verdict != netpolEnforcementEnforced {
@@ -58,8 +58,8 @@ func TestClassifyCNIEnforcement_EnforcingControllers(t *testing.T) {
 func TestClassifyCNIEnforcement_FlannelAloneIsLikelyUnenforced(t *testing.T) {
 	for _, name := range []string{"kube-flannel-ds", "kube-flannel-ds-amd64", "flannel"} {
 		verdict, evidence := classifyCNIEnforcement([]dsRef{
-			{"kube-system", "kube-proxy"},
-			{"kube-flannel", name},
+			{"kube-system", "kube-proxy", true},
+			{"kube-flannel", name, true},
 		})
 		if verdict != netpolEnforcementLikelyUnenforced {
 			t.Fatalf("%s: verdict = %v, want likely-unenforced", name, verdict)
@@ -74,8 +74,8 @@ func TestClassifyCNIEnforcement_FlannelAloneIsLikelyUnenforced(t *testing.T) {
 // DaemonSet must not outvote a policy controller.
 func TestClassifyCNIEnforcement_EnforcerWinsOverFlannel(t *testing.T) {
 	verdict, evidence := classifyCNIEnforcement([]dsRef{
-		{"kube-system", "kube-flannel-ds"},
-		{"kube-system", "calico-node"},
+		{"kube-system", "kube-flannel-ds", true},
+		{"kube-system", "calico-node", true},
 	})
 	if verdict != netpolEnforcementEnforced {
 		t.Fatalf("verdict = %v, want enforced (calico present)", verdict)
@@ -85,10 +85,57 @@ func TestClassifyCNIEnforcement_EnforcerWinsOverFlannel(t *testing.T) {
 	}
 }
 
+// Finding 1 (review): a CrashLoopBackOff/0-ready enforcing agent must NEVER
+// classify enforced — "agent installed but not running" is UNKNOWN (treat as
+// unenforced), with evidence naming the dead agent.
+func TestClassifyCNIEnforcement_CrashedAgentIsNeverEnforced(t *testing.T) {
+	verdict, evidence := classifyCNIEnforcement([]dsRef{
+		{"kube-system", "kube-proxy", true},
+		{"kube-system", "calico-node", false}, // present, 0 ready
+	})
+	if verdict != netpolEnforcementUnknown {
+		t.Fatalf("verdict = %v, want unknown for a 0-ready enforcing agent", verdict)
+	}
+	if !strings.Contains(evidence, "calico-node") || !strings.Contains(evidence, "not running") {
+		t.Fatalf("evidence %q must name the dead agent as installed but not running", evidence)
+	}
+}
+
+// A crashed enforcing agent alongside flannel still reports UNKNOWN (the
+// installed-but-dead agent is the stronger, more specific signal than the
+// flannel fallback) — and never enforced.
+func TestClassifyCNIEnforcement_CrashedAgentWithFlannelIsUnknown(t *testing.T) {
+	verdict, _ := classifyCNIEnforcement([]dsRef{
+		{"kube-system", "kube-flannel-ds", true},
+		{"kube-system", "calico-node", false},
+	})
+	if verdict == netpolEnforcementEnforced {
+		t.Fatalf("verdict = enforced for a 0-ready agent — the false-green Finding 1 forbids")
+	}
+	if verdict != netpolEnforcementUnknown {
+		t.Fatalf("verdict = %v, want unknown (installed-but-dead agent outranks the flannel fallback)", verdict)
+	}
+}
+
+// A crashed agent must not mask a HEALTHY one (rolling restart of one CNI
+// while another enforces).
+func TestClassifyCNIEnforcement_ReadyAgentWinsOverCrashedAgent(t *testing.T) {
+	verdict, evidence := classifyCNIEnforcement([]dsRef{
+		{"kube-system", "calico-node", false},
+		{"kube-system", "cilium", true},
+	})
+	if verdict != netpolEnforcementEnforced {
+		t.Fatalf("verdict = %v, want enforced (a ready agent is present)", verdict)
+	}
+	if !strings.Contains(evidence, "cilium") {
+		t.Fatalf("evidence %q must name the ready agent", evidence)
+	}
+}
+
 func TestClassifyCNIEnforcement_NothingRecognizedIsUnknown(t *testing.T) {
 	verdict, evidence := classifyCNIEnforcement([]dsRef{
-		{"kube-system", "kube-proxy"},
-		{"monitoring", "node-exporter"},
+		{"kube-system", "kube-proxy", true},
+		{"monitoring", "node-exporter", true},
 	})
 	if verdict != netpolEnforcementUnknown {
 		t.Fatalf("verdict = %v, want unknown", verdict)
@@ -109,8 +156,8 @@ func TestClassifyCNIEnforcement_EmptyListIsUnknown(t *testing.T) {
 // condition message embeds it, and the #98 no-op status guard DeepEquals
 // status writes, so a shuffled informer list must not churn the message.
 func TestClassifyCNIEnforcement_EvidenceIsOrderIndependent(t *testing.T) {
-	a := []dsRef{{"kube-system", "cilium"}, {"calico-system", "calico-node"}}
-	b := []dsRef{{"calico-system", "calico-node"}, {"kube-system", "cilium"}}
+	a := []dsRef{{"kube-system", "cilium", true}, {"calico-system", "calico-node", true}}
+	b := []dsRef{{"calico-system", "calico-node", true}, {"kube-system", "cilium", true}}
 	_, evA := classifyCNIEnforcement(a)
 	_, evB := classifyCNIEnforcement(b)
 	if evA != evB {

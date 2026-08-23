@@ -560,9 +560,17 @@ export function supportsStrictValidation(v: {
  * answers "is NetworkPolicy enforced", and an active probe would mutate the
  * cluster (doctor is read-only), so detection is signature-based over the
  * cluster's DaemonSets and HONEST about its confidence: a known
- * policy-controller DaemonSet => "enforced"; flannel alone =>
- * "likely-unenforced"; anything else => "unknown", which callers must treat
- * as unenforced, never as enforced.
+ * policy-controller DaemonSet with at least one RUNNING pod => "enforced";
+ * that same DaemonSet with zero ready pods (CrashLoopBackOff, unschedulable)
+ * => "unknown", because a name-only match proves installation, not
+ * enforcement; flannel alone => "likely-unenforced"; anything else =>
+ * "unknown", which callers must treat as unenforced, never as enforced.
+ *
+ * Even "enforced" is a CEILING, not a guarantee: it says an enforcing agent
+ * is running, not that policies apply to this namespace — per-CNI
+ * configuration (Cilium's policyEnforcementMode, Calico exemptions) can still
+ * exempt traffic, and signature detection cannot see that. The wording must
+ * never claim more.
  *
  * The operator carries the same signature table
  * (internal/controller/netpol_enforcement.go) into the NextApp's
@@ -574,6 +582,11 @@ export type CNIEnforcement = "enforced" | "likely-unenforced" | "unknown";
 export interface DaemonSetRef {
     namespace: string;
     name: string;
+    /**
+     * status.numberReady > 0 — at least one agent pod is running. A matched
+     * agent with no running pod is inert, and must never yield "enforced".
+     */
+    ready: boolean;
 }
 
 /** DaemonSet names of NetworkPolicy-ENFORCING agents (exact matches). */
@@ -587,27 +600,39 @@ const ENFORCING_AGENT_DS: Readonly<Record<string, string>> = {
 };
 
 /**
- * Pure classification seam: any enforcing agent wins (canal clusters also run
- * a flannel DaemonSet); flannel alone is likely-unenforced; nothing
- * recognized is unknown. Evidence is sorted so the same cluster always yields
- * the same string.
+ * Pure classification seam: a READY enforcing agent wins (canal clusters also
+ * run a flannel DaemonSet); an enforcing agent installed but NOT running is
+ * unknown, with evidence naming the dead agent — the more specific signal, so
+ * it outranks the flannel fallback; flannel alone is likely-unenforced;
+ * nothing recognized is unknown. Evidence is sorted so the same cluster
+ * always yields the same string.
  */
 export function classifyCNIEnforcement(daemonSets: readonly DaemonSetRef[]): {
     verdict: CNIEnforcement;
     evidence: string;
 } {
     const enforcing: string[] = [];
+    const crashed: string[] = [];
     const flannel: string[] = [];
     for (const ds of daemonSets) {
         const cni = ENFORCING_AGENT_DS[ds.name];
         if (cni) {
-            enforcing.push(`${cni} DaemonSet ${ds.name} (${ds.namespace})`);
+            if (ds.ready) {
+                enforcing.push(`${cni} DaemonSet ${ds.name} (${ds.namespace})`);
+            } else {
+                crashed.push(
+                    `${cni} DaemonSet ${ds.name} (${ds.namespace}, not running)`,
+                );
+            }
         } else if (ds.name.includes("flannel")) {
             flannel.push(`flannel DaemonSet ${ds.name} (${ds.namespace})`);
         }
     }
     if (enforcing.length > 0) {
         return { verdict: "enforced", evidence: enforcing.sort().join("; ") };
+    }
+    if (crashed.length > 0) {
+        return { verdict: "unknown", evidence: crashed.sort().join("; ") };
     }
     if (flannel.length > 0) {
         return {
@@ -1174,12 +1199,19 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
                 ? (safeJson<{
                       items?: {
                           metadata?: { name?: string; namespace?: string };
+                          status?: { numberReady?: number };
                       }[];
                   }>(ds.stdout)?.items ?? [])
                 : [];
+            // numberReady > 0, not "unavailable === 0": PARTIAL readiness
+            // (agent up on 2 of 5 nodes) still counts as running. This verdict
+            // answers "is an enforcing agent alive at all" — what separates a
+            // real control from an inert one — and the PASS wording hedges the
+            // rest. Absent status is 0, i.e. not running: never assume health.
             const refs: DaemonSetRef[] = items.map((i) => ({
                 name: i.metadata?.name ?? "",
                 namespace: i.metadata?.namespace ?? "",
+                ready: (i.status?.numberReady ?? 0) > 0,
             }));
             const { verdict, evidence } = classifyCNIEnforcement(refs);
             if (verdict === "enforced") {
@@ -1187,7 +1219,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
                     "netpol",
                     "NetworkPolicy enforcement",
                     "pass",
-                    `a NetworkPolicy-enforcing agent is running (${evidence}) — the operator's default-on NetworkPolicy is enforced on this cluster`,
+                    `a NetworkPolicy-enforcing agent is running (${evidence}) — the operator's default-on NetworkPolicy objects should be enforced; per-CNI configuration can still exempt traffic, so verify directly if isolation is load-bearing`,
                 );
             } else if (verdict === "likely-unenforced") {
                 push(
@@ -1196,6 +1228,17 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
                     "warn",
                     `flannel is the cluster CNI (${evidence}) and no NetworkPolicy controller was detected — the operator still writes its default-on NetworkPolicy, but it is declarative only: it enforces NOTHING on this cluster (OKE GA and OrbStack both run flannel), so treat network isolation as absent`,
                     "install a policy-capable CNI (Calico or Cilium) to make the NetworkPolicy effective",
+                );
+            } else if (evidence) {
+                // An enforcing agent is installed but has no running pod —
+                // the round-1 false green. Name it: "calico is installed" and
+                // "calico is working" are very different incidents.
+                push(
+                    "netpol",
+                    "NetworkPolicy enforcement",
+                    "warn",
+                    `a NetworkPolicy-enforcing agent is installed but not running (${evidence}) — cannot determine enforcement; treat the operator's NetworkPolicy as UNENFORCED until the agent is healthy`,
+                    "check the agent's pods (kubectl get pods -A -o wide | grep -E 'calico|cilium|antrea|weave|kube-router') — a crashed CNI agent enforces nothing",
                 );
             } else {
                 push(

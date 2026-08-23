@@ -97,10 +97,14 @@ type netpolEnforcementState struct {
 	evidence string
 }
 
-// dsRef is the minimal DaemonSet identity the classifier consumes.
+// dsRef is the minimal DaemonSet identity + health the classifier consumes.
+// ready is status.numberReady > 0: Finding 1 — an enforcing agent that is
+// installed but has NO running pod (CrashLoopBackOff, unschedulable) must
+// never classify "enforced".
 type dsRef struct {
 	namespace string
 	name      string
+	ready     bool
 }
 
 // enforcingAgentDS maps DaemonSet names of NetworkPolicy-ENFORCING agents to
@@ -126,15 +130,23 @@ func flannelDS(name string) bool {
 // classifyCNIEnforcement is the PURE classification seam: given the cluster's
 // DaemonSets, return the enforcement verdict and its evidence string.
 //
-// Precedence: any enforcing agent wins (canal clusters also run a flannel
-// DaemonSet); flannel alone is likely-unenforced; nothing recognized is
+// Precedence: a READY enforcing agent wins (canal clusters also run a flannel
+// DaemonSet); an enforcing agent that is installed but NOT running (0 ready
+// pods — CrashLoopBackOff, unschedulable) is UNKNOWN with evidence naming the
+// dead agent (Finding 1: a name-only match must never claim enforcement, and
+// the dead agent is a stronger, more specific signal than the flannel
+// fallback); flannel alone is likely-unenforced; nothing recognized is
 // unknown — never guessed into either determinate state. Evidence is sorted
 // so the same cluster always yields the same string (#98 message stability).
 func classifyCNIEnforcement(daemonSets []dsRef) (netpolEnforcement, string) {
-	var enforcing, flannel []string
+	var enforcing, crashed, flannel []string
 	for _, ds := range daemonSets {
 		if cni, ok := enforcingAgentDS[ds.name]; ok {
-			enforcing = append(enforcing, fmt.Sprintf("%s DaemonSet %s (%s)", cni, ds.name, ds.namespace))
+			if ds.ready {
+				enforcing = append(enforcing, fmt.Sprintf("%s DaemonSet %s (%s)", cni, ds.name, ds.namespace))
+			} else {
+				crashed = append(crashed, fmt.Sprintf("%s DaemonSet %s (%s, not running)", cni, ds.name, ds.namespace))
+			}
 		} else if flannelDS(ds.name) {
 			flannel = append(flannel, fmt.Sprintf("flannel DaemonSet %s (%s)", ds.name, ds.namespace))
 		}
@@ -143,6 +155,9 @@ func classifyCNIEnforcement(daemonSets []dsRef) (netpolEnforcement, string) {
 	case len(enforcing) > 0:
 		sort.Strings(enforcing)
 		return netpolEnforcementEnforced, strings.Join(enforcing, "; ")
+	case len(crashed) > 0:
+		sort.Strings(crashed)
+		return netpolEnforcementUnknown, strings.Join(crashed, "; ")
 	case len(flannel) > 0:
 		sort.Strings(flannel)
 		return netpolEnforcementLikelyUnenforced, strings.Join(flannel, "; ")
@@ -161,7 +176,19 @@ func (r *NextAppReconciler) detectNetworkPolicyEnforcement(ctx context.Context) 
 	}
 	refs := make([]dsRef, 0, len(list.Items))
 	for _, ds := range list.Items {
-		refs = append(refs, dsRef{namespace: ds.Namespace, name: ds.Name})
+		// NumberReady > 0, not NumberUnavailable == 0, deliberately: PARTIAL
+		// readiness (calico-node up on 2 of 5 nodes) still reports "running".
+		// The stricter test would be more accurate about per-node coverage,
+		// but this verdict answers "is an enforcing agent alive at all" — the
+		// question that separates a real control from an inert one — and the
+		// True message hedges the rest ("verify directly if isolation is
+		// load-bearing"). Tighten this if per-node coverage ever becomes the
+		// claim being made.
+		refs = append(refs, dsRef{
+			namespace: ds.Namespace,
+			name:      ds.Name,
+			ready:     ds.Status.NumberReady > 0,
+		})
 	}
 	return classifyCNIEnforcement(refs)
 }

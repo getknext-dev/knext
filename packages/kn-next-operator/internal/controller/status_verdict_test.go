@@ -876,3 +876,48 @@ func TestVerdictNetpolDisabled_DropsConditionOnlyIfPresent(t *testing.T) {
 		t.Fatalf("disabling the NetworkPolicy must drop the stale enforcement claim; removeConditions=%v", v2.removeConditions)
 	}
 }
+
+// Finding 1 (review): when detection saw an enforcing agent that is installed
+// but NOT running (0 ready pods), the condition is Unknown — never True — and
+// the message names the dead agent so the reader knows why it cannot claim
+// enforcement.
+func TestVerdictNetpolUnknown_CrashedAgentNamesTheDeadAgent(t *testing.T) {
+	now := time.Now()
+	app := verdictApp()
+	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{},
+		netpolEnforcementState{enabled: true, verdict: netpolEnforcementUnknown,
+			evidence: "Calico DaemonSet calico-node (kube-system, not running)"}, now)
+
+	c := findVerdictCondition(t, v, ConditionNetworkPolicyEnforced)
+	if c.Status != metav1.ConditionUnknown || c.Reason != ReasonEnforcementUnknown {
+		t.Fatalf("NetworkPolicyEnforced: got %+v, want Unknown/%s for a crashed agent", c, ReasonEnforcementUnknown)
+	}
+	if !strings.Contains(c.Message, "calico-node") || !strings.Contains(c.Message, "not running") {
+		t.Fatalf("message %q must name the installed-but-not-running agent", c.Message)
+	}
+	if !strings.Contains(c.Message, "unenforced") {
+		t.Fatalf("message %q must tell the reader to treat the policy as unenforced", c.Message)
+	}
+}
+
+// Finding 2 (review): the True message must not overclaim — signature+ready
+// detection proves an agent is RUNNING, not that policies apply to this
+// namespace (per-CNI config can exempt traffic). Pin the hedge.
+func TestVerdictNetpolEnforced_MessageKeepsTheHonestCeiling(t *testing.T) {
+	now := time.Now()
+	app := verdictApp()
+	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{},
+		netpolEnforcementState{enabled: true, verdict: netpolEnforcementEnforced,
+			evidence: "Calico DaemonSet calico-node (kube-system)"}, now)
+
+	c := findVerdictCondition(t, v, ConditionNetworkPolicyEnforced)
+	if !strings.Contains(c.Message, "should be enforced") ||
+		!strings.Contains(c.Message, "per-CNI configuration") {
+		t.Fatalf("message %q must hedge: agent-running supports 'should be enforced', not 'is in force'", c.Message)
+	}
+	if strings.Contains(c.Message, "is in force") {
+		t.Fatalf("message %q still carries the overclaim Finding 2 forbids", c.Message)
+	}
+}
