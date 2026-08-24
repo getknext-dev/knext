@@ -119,7 +119,67 @@ kubectl -n scale-zero-pg get deploy compute-${APP} \
   -o jsonpath='{.spec.replicas}'                 # expect: 0
 ```
 
-## 4. Fleet pressure — worth measuring when more than a handful of apps go warm
+## 4. Rotation half — a warm app's hold across `rotate-cred` (#798)
+
+**What it proves.** The sanctioned sequence for rotating a **warm** app's credential is
+`rotate-cred <app> --bounce`, and the hold re-dials on the rotated DSN afterwards. The
+unit halves are in `gateway/internal/appdb/warmhold_rotation_test.go` (a healthy hold is
+not re-dialled on a Secret change; a dead hold re-reads the Secret and dials the new
+credential; a re-dial the old verifier rejects errors out and drops the app from
+`Held()`), all against fakes — this step is the running-system half.
+
+This step needs the app **still warm**, so run it before §3 — or, if you already ran §3,
+re-apply `tier: warm` and wait one resync tick first. The drill's queue-of-one rule
+applies: nothing else may be driving traffic at the app, or "it stayed warm" is
+confounded by ordinary keep-alive.
+
+```sh
+cd deploy
+
+# (a) baseline: the app is held right now (same /metrics read as 1(c))
+kubectl -n scale-zero-pg exec deploy/appdb-operator -- \
+  sh -c 'exec 3<>/dev/tcp/127.0.0.1/9092; printf "GET /metrics HTTP/1.0\r\n\r\n" >&3; cat <&3' \
+  | grep "appdb_warm_hold_active{app=\"${APP}\"}"
+# expect: ... 1
+
+# (b) rotate WITHOUT --bounce: the live hold is undisturbed, on the OLD credential.
+#     The Secret already carries the new one — the divergence is the point.
+./provision-app.sh rotate-cred ${APP}
+sleep 20   # > APPDB_RESYNC_MS: at least one reconcile pass has seen the new Secret
+kubectl -n scale-zero-pg exec deploy/appdb-operator -- \
+  sh -c 'exec 3<>/dev/tcp/127.0.0.1/9092; printf "GET /metrics HTTP/1.0\r\n\r\n" >&3; cat <&3' \
+  | grep "appdb_warm_hold_active{app=\"${APP}\"}"
+# expect: STILL 1 — a healthy hold is never re-dialled just because the Secret moved
+kubectl -n scale-zero-pg get appdatabase ${APP} -o json \
+  | jq '.status.conditions[] | select(.type=="WarmHold") | {status, reason}'
+# expect: True/TierWarm (unchanged)
+
+# (c) the sanctioned sequence: --bounce lands the new verifier AND kills the hold, so
+#     the next resync re-dials with a matching credential.
+./provision-app.sh rotate-cred ${APP} --bounce
+sleep 20
+kubectl -n scale-zero-pg exec deploy/appdb-operator -- \
+  sh -c 'exec 3<>/dev/tcp/127.0.0.1/9092; printf "GET /metrics HTTP/1.0\r\n\r\n" >&3; cat <&3' \
+  | grep "appdb_warm_hold_active{app=\"${APP}\"}"
+# expect: 1 again (re-established on the rotated DSN)
+kubectl -n scale-zero-pg get deploy compute-${APP} -o jsonpath='{.spec.replicas}'
+# expect: 1 — the app never left the warm set for longer than one resync tick
+```
+
+**A `0`/absent gauge that does not recover in (c)** is the failure this drill exists to
+catch: the re-dial is being rejected. Read the operator log for the app — a `28P01`
+password-authentication rejection means the compute is still enforcing the pre-rotation
+verifier, so the bounce did not land (check `kubectl -n scale-zero-pg rollout status
+deploy/compute-${APP}`); anything else is a genuine hold failure and belongs in the
+`WarmHoldDegraded` runbook.
+
+**Custom-zone planes:** export the same `APPDB_GATEWAY_HOST` the operator runs with
+before invoking `provision-app.sh` by hand. The script honours it with the operator's
+precedence (set → verbatim, unset/empty → the rooted default), which is what stops a
+rotation from rewriting a working DSN to an unresolvable host (#798) — but the script
+reads it from *your* environment, not from the operator Deployment.
+
+## 5. Fleet pressure — worth measuring when more than a handful of apps go warm
 
 Warm holds spend the apps-gateway's **process-wide** `GW_MAX_CONNS` budget (90 per
 gateway pod, shared with all tenant client traffic — see `appdatabase-api.md` §2a's
@@ -157,5 +217,5 @@ re-run over it.
 - [`operations.md`](../operations.md) — the `WarmHoldDegraded` runbook bullet, the
   `ComputePhantomKeepalive` subtraction, and the
   [`WarmHoldBudgetPressure`](../operations.md#warm-hold-budget-pressure-knext-787)
-  fleet-capacity runbook (§4 above).
+  fleet-capacity runbook (§5 above).
 - [`DRILLS.md`](../DRILLS.md) — the scripted battery this drill should eventually join.

@@ -38,7 +38,9 @@
 # owning ConfigMap and drains recorded SK-delete failures — closing the leak the
 # wal-janitor only WARNs on (issues #87/#90).
 #
-# Env: KCTX (kube context, default context-ckmva7v7zvq), NS (default scale-zero-pg).
+# Env: KCTX (kube context, default context-ckmva7v7zvq), NS (default scale-zero-pg),
+# APPDB_GATEWAY_HOST (apps-gateway host in every minted DSN — same override, same
+# precedence as the operator; unset/empty -> the rooted pggw-apps.$NS.svc.cluster.local.).
 #
 # Tenant security (issue #74): each app gets a per-app role app_<app> with a
 # per-app md5 password, minted here into a Secret (app-db-<app>, mirrors the knext
@@ -57,6 +59,25 @@ set -euo pipefail
 KCTX="${KCTX:-context-ckmva7v7zvq}"
 NS="${NS:-scale-zero-pg}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
+
+# The apps-gateway host baked into every DSN this script mints into app-db-<app>.
+#
+# Resolution MUST match the operator's byte-for-byte — gatewayHostFromEnv() in
+# gateway/cmd/appdb-operator/main.go is `env("APPDB_GATEWAY_HOST", DefaultGatewayHost)`,
+# and its env() treats an EMPTY value as unset. `${VAR:-default}` (colon-dash) is that
+# semantic; a bare `${VAR-default}` is NOT — it would mint a host-less DSN from an empty
+# env. Set -> used VERBATIM (never auto-qualified, never auto-rooted), so a cluster with
+# a custom DNS zone or gateway Service keeps full control.
+#
+# Divergence between these two resolutions IS the bug (#798): the operator honoured the
+# override while both writers here hardcoded the default, so a routine `rotate-cred`
+# silently overwrote a working custom-zone DSN with an unresolvable one.
+#
+# The DEFAULT is ROOTED (trailing dot) — deliberate, do not "clean up". Live plane:
+# ndots:5 with a FIVE-entry search path (3 standard + 2 OCI VCN), so any name below 5
+# dots costs 5 wasted attempts / 10 queries (2 leaving the cluster) on a fresh pod's
+# first flows. Both the short .svc form and .svc.cluster.local are below it.
+GW_HOST="${APPDB_GATEWAY_HOST:-pggw-apps.${NS}.svc.cluster.local.}"
 
 APPS_TENANT="${APPS_TENANT:-a0000000000000000000000000000001}"
 TEMPLATE_TL="${TEMPLATE_TL:-a0000000000000000000000000000010}"
@@ -166,11 +187,11 @@ mint_credential() {
   local pw verifier dsn
   pw="$(python3 -c 'import os;print(os.urandom(18).hex())')"
   verifier="$(app_scram_verifier "$pw")"
-  # ROOTED host (trailing dot) — deliberate, do not "clean up". Live plane: ndots:5
-  # with a FIVE-entry search path (3 standard + 2 OCI VCN), so any name below 5 dots
-  # costs 5 wasted attempts / 10 queries (2 leaving the cluster) on a fresh pod's
-  # first flows. Both the short .svc form and .svc.cluster.local are below it.
-  dsn="postgres://$role:$pw@pggw-apps.$NS.svc.cluster.local.:55432/$app?sslmode=disable"
+  # $GW_HOST (top of file): APPDB_GATEWAY_HOST if set, else the rooted default —
+  # the SAME resolution the operator uses. Never inline the host here: the other
+  # writer (cmd_rotate_cred) mints the same Secret, and one-writer-only is how
+  # #798 shipped.
+  dsn="postgres://$role:$pw@$GW_HOST:55432/$app?sslmode=disable"
   K create secret generic "app-db-$app" \
     --from-literal=PGUSER="$role" \
     --from-literal=PGPASSWORD="$pw" \
@@ -327,7 +348,7 @@ cmd_create() {
 
   DSN (through the apps-gateway, in-cluster) — from Secret app-db-$app:
     kubectl -n $NS get secret app-db-$app -o jsonpath='{.data.DATABASE_URL}' | base64 -d
-    (postgres://$role:<per-app-password>@pggw-apps.$NS.svc.cluster.local.:55432/$app?sslmode=disable)
+    (postgres://$role:<per-app-password>@$GW_HOST:55432/$app?sslmode=disable)
   The user MUST be "$role" (app_<db>); cloud_admin and other apps' roles are
   refused by the apps-gateway BEFORE any wake. The database name "$app" routes to
   compute-$app, served as the branch's postgres DB (GW_SERVED_DATABASE). Wake on
@@ -610,11 +631,11 @@ cmd_rotate_cred() {
   local pw verifier dsn
   pw="$(python3 -c 'import os;print(os.urandom(18).hex())')"
   verifier="$(app_scram_verifier "$pw")"
-  # ROOTED host (trailing dot) — deliberate, do not "clean up". Live plane: ndots:5
-  # with a FIVE-entry search path (3 standard + 2 OCI VCN), so any name below 5 dots
-  # costs 5 wasted attempts / 10 queries (2 leaving the cluster) on a fresh pod's
-  # first flows. Both the short .svc form and .svc.cluster.local are below it.
-  dsn="postgres://$role:$pw@pggw-apps.$NS.svc.cluster.local.:55432/$app?sslmode=disable"
+  # $GW_HOST (top of file) — the SAME resolution as mint_credential and as the
+  # operator. THIS is the #798 outage path: this writer overwrites a LIVE Secret, so
+  # a hardcoded host here silently reverts an operator-minted, correctly-overridden
+  # DSN to an unresolvable one on a routine rotation.
+  dsn="postgres://$role:$pw@$GW_HOST:55432/$app?sslmode=disable"
   log "rotating credential for '$app' (role $role): new SCRAM verifier -> Secret app-db-$app"
   # In-place update (apply, not delete+create) so the Secret never briefly vanishes.
   K create secret generic "app-db-$app" \

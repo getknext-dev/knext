@@ -603,18 +603,33 @@ grep -q 'APPDB_GATEWAY_HOST, value: "' 83-appdb-operator.yaml || fail "83-appdb-
 grep 'APPDB_GATEWAY_HOST, value: "' 83-appdb-operator.yaml | grep -qv 'value: "[^"]*\."' &&
   fail "83-appdb-operator.yaml APPDB_GATEWAY_HOST is NOT rooted (no trailing dot) — minted DATABASE_URLs would walk the ndots:5 search path on every fresh pod (a custom DNS zone edits the value but KEEPS the trailing dot)" || true
 # provision-app.sh: both Secret writers (create at mint_credential, rotate-cred) plus
-# the DSN it prints. Presence check first, so deleting the mint cannot vacuously pass.
+# the DSN it prints. Since #798 the host is resolved ONCE, honouring the operator's
+# APPDB_GATEWAY_HOST override with the operator's precedence, so there are two
+# contracts here, not one: the DEFAULT must be rooted, AND no writer may inline a host
+# (a hardcoded host in rotate-cred is what silently reverted an operator-minted,
+# correctly-overridden DSN to an unresolvable one on a routine rotation).
 #
-# Anchored on HOST POSITION (`@`) and bare-inclusive — NOT on `pggw-apps\.`. An
-# anchor that requires a dot cannot even see the worst form: the bare single-label
+# Presence check first, so deleting the resolution cannot vacuously pass. The
+# host-position scan stays bare-inclusive — NOT anchored on `pggw-apps\.`. An anchor
+# that requires a dot cannot even see the worst form: the bare single-label
 # `@pggw-apps:55432` is furthest below ndots:5, so it walks all five search suffixes,
-# and `_verify-scale-ceiling.sh:141` already contains exactly that. The test is
-# uniform — a dot must immediately precede the `:port` — so bare, 2-dot and 4-dot
-# forms all fail alike, and no form is audited by a different rule than its siblings.
-grep -q '@pggw-apps' provision-app.sh || fail "provision-app.sh no longer references the apps-gateway host — the rooted-host scan below would silently pass"
-grep -n '@pggw-apps' provision-app.sh | grep -qv '@pggw-apps[^ :"]*\.:' &&
-  fail "provision-app.sh mints an UNROOTED apps-gateway host (see the lines above): every app-db-<app> DSN it writes — from 'create' AND from 'rotate-cred', which overwrites a live Secret — must be rooted (a trailing dot before the :port) or it walks the ndots:5 search path on every fresh pod" || true
-ok "AppDatabase CRD + operator wired (82/83), operator built into the image, does not claim deployments/scale (issue #96); every platform-minted gateway host (operator manifest + provision-app.sh create/rotate) is ROOTED"
+# and `_verify-scale-ceiling.sh:141` already contains exactly that.
+grep -q 'APPDB_GATEWAY_HOST:-pggw-apps\.' provision-app.sh ||
+  fail "provision-app.sh no longer resolves the apps-gateway host from APPDB_GATEWAY_HOST (\$GW_HOST) — the contracts below would silently pass, and a custom-zone cluster's DSN would be clobbered on every create/rotate (#798)"
+grep 'APPDB_GATEWAY_HOST:-' provision-app.sh | grep -qv 'APPDB_GATEWAY_HOST:-.*\.}"' &&
+  fail "provision-app.sh's APPDB_GATEWAY_HOST DEFAULT is NOT rooted (no trailing dot before the closing brace) — minted DATABASE_URLs would walk the ndots:5 search path on every fresh pod" || true
+grep -n '@pggw' provision-app.sh &&
+  fail "provision-app.sh INLINES a gateway host in a DSN (see the lines above) instead of using \$GW_HOST: that writer ignores APPDB_GATEWAY_HOST, so on a custom-zone cluster 'create'/'rotate-cred' overwrites a working Secret with an unresolvable host (#798)" || true
+[ "$(grep -c '@\$GW_HOST' provision-app.sh)" -ge 2 ] ||
+  fail "provision-app.sh must mint through \$GW_HOST from BOTH Secret writers (create's mint_credential AND rotate-cred) — found fewer than 2 sites, so one writer was fixed and the other left behind (#798, the half-fix class)"
+# gen-secrets.sh: the base DATABASE_URL[_RO] Secret is the other minting writer. Same
+# two contracts. Its host is the BASE gateway (pggw, cloud_admin) and therefore its own
+# knob — the apps-gateway refuses cloud_admin, so it must NOT read APPDB_GATEWAY_HOST.
+grep -q 'DBHOST:-pggw\.' gen-secrets.sh ||
+  fail "gen-secrets.sh no longer resolves the base gateway host from \$DBHOST — re-running it on a custom-zone cluster would reconcile a working base DATABASE_URL to an unresolvable one (#798)"
+grep 'DBHOST:-' gen-secrets.sh | grep -qv 'DBHOST:-.*\.}"' &&
+  fail "gen-secrets.sh's DBHOST DEFAULT is NOT rooted (no trailing dot before the closing brace)" || true
+ok "AppDatabase CRD + operator wired (82/83), operator built into the image, does not claim deployments/scale (issue #96); every platform-minted gateway host (operator manifest, provision-app.sh create/rotate, gen-secrets.sh base DSN) is ROOTED by default and honours its env override"
 
 # 25. contract (issue #151, ADR-0007 v2-2): the Zone CRD + zone-operator ship together
 #     and are STANDARD deploy artifacts, not drill-only. Same "merged ≠ deployed" class
