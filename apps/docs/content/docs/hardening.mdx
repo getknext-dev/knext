@@ -26,6 +26,8 @@ see [Cap request bodies in app code](#cap-request-bodies-in-app-code).
   ports, so a pod sharing your namespace cannot bypass the queue-proxy by dialling your container
   port. See [Security → Network isolation](/docs/security#network-isolation). **This is enforced
   only if your CNI supports NetworkPolicy** (Calico, Cilium); on flannel the policy is inert.
+  `kn-next doctor` and the `NetworkPolicyEnforced` condition on your app both report which case
+  your cluster is in.
 - **Malformed HTTP** — external traffic passes three independent HTTP parsers before your code.
 
 ## What it does not bound

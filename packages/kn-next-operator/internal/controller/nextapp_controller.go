@@ -630,7 +630,19 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		}
 	}
 
-	verdict := computeStatusVerdict(&nextApp, ksvc, db, revCheck, ic, time.Now())
+	// NetworkPolicy-enforcement detection (#744): the operator writes a
+	// default-on NetworkPolicy above, but whether the cluster's CNI ENFORCES
+	// it is a separate fact — flannel (OKE GA, OrbStack) ships no policy
+	// controller, so there the policy is declarative only. Observe the CNI
+	// signatures so the verdict can say so instead of implying enforcement by
+	// silence. Detection is best-effort: a failed DaemonSet list yields
+	// "unknown", never "enforced".
+	np := netpolEnforcementState{enabled: networkPolicyEnabled(&nextApp)}
+	if np.enabled {
+		np.verdict, np.evidence = r.detectNetworkPolicyEnforcement(ctx)
+	}
+
+	verdict := computeStatusVerdict(&nextApp, ksvc, db, revCheck, ic, np, time.Now())
 	if err := r.applyStatusVerdict(ctx, &nextApp, observedStatus, verdict); err != nil {
 		return ctrl.Result{}, err
 	}
