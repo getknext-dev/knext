@@ -86,6 +86,17 @@ gate is red would fail this project's central honesty rule.
        page's caveat with a live re-verification; close #198/#707.
 4. [ ] Agent: set `vars.SCALE_TEST_IMAGE` from the publish lane (#670); confirm the e2e_scale
        nightly greens.
-5. [ ] Agent: compat flake hunt (#545) and the bun-lane weekly red (#710) — the last honesty gate.
+5. [x] Agent: compat flake hunt (#545) and the bun-lane weekly red (#710) — the last honesty gate.
+       **Discharged 2026-08-25** — findings, run IDs and test names in
+       [`compat-honesty-gate.md`](compat-honesty-gate.md). Neither issue blocks the release claim:
+       the node credential lane took **zero** re-runs across all 32 scheduled runs in the window
+       (asserted twice — the ledger's `runAttempt` *and* the API's `run_attempt`), and the bun
+       weekly is deterministically red on three documented upstream-Bun files while its matrix row
+       is already ❌. One real defect was found and fixed on the way: `ci.yml` and `compat-smoke.mjs`
+       both deflected readers to a scheduled workflow named `compat-suite-full`, which does not
+       exist — now guarded by `tests/compat-lane-pointer-resolution.test.ts` (5/5 mutation-proved).
+       **Residual, tracked not blocking:** #545 should be closed against its own criteria and the
+       14-night gate's real obstruction — harness-fingerprint churn — still has no issue of its
+       own; #710 is a permanently-unclearable weekly alert and needs a disposition.
 6. [ ] Agent: ergonomics row 8 — measure the REAL `npx kn-next` journey post-publish.
 7. [ ] Then: announce.

@@ -6,7 +6,12 @@
  * real-HTTP assertions against the standalone `server.js` produced by building
  * apps/file-manager THROUGH the knext adapter (output:'standalone'). See ADR-0007
  * (docs/adr/0007-compat-suite.md, option C, the per-PR `compat-smoke` gate). The official
- * deploy-test harness lives behind A3-2 (`compat-suite-full`), not here.
+ * deploy-test harness lives elsewhere, not here: `.github/workflows/test-e2e-deploy.yml`
+ * ("Compat suite (official Next.js deploy harness)", ADR-0007 A3-2) — the Node credential
+ * lane nightly at 03:17 UTC, the Bun runtime axis weekly on Sunday at 05:17 UTC. Name the
+ * FILE, never a lane nickname: this line used to carry one that resolved to nothing, and a
+ * reader who greps it concludes the lane was deleted. Guarded by
+ * tests/compat-lane-pointer-resolution.test.ts.
  *
  * NO CHECK IN HERE MAY SKIP ON FAILURE (Sprint 1, T4). A capability whose check downgrades a
  * failure to SKIP is indistinguishable from a broken one — that is exactly how four rows of
