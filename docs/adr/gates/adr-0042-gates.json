@@ -9,7 +9,16 @@
     "",
     "RULE: a value may be written here only with a `source` that names a run ID or a repo path.",
     "`scripts/verify-phase-gates.mjs` fails on a measured value with no source, so a number cannot",
-    "enter this file by assertion."
+    "enter this file by assertion.",
+    "",
+    "RULE (#753): every KEY used here must be declared in the validator's key registry as either",
+    "READ (a rule consumes it) or PROSE (it asserts nothing about other data in this file), and a",
+    "key whose name states a relation — `gates`, `blocked_by`, `blocks_ship`, `concurrent_with` —",
+    "may not be declared PROSE. Adding an undeclared key here FAILS the validator. This exists",
+    "because the file could previously state a relation nothing read and so contradict itself and",
+    "stay green: phase 3d read NOT_STARTED while its own criteria carried measured values from",
+    "2026-08-08 to 2026-08-17, and a reader trusted the ADR prose over this file and re-ran a",
+    "measurement phase that was already complete."
   ],
   "adr": "0042",
   "title": "vinext + bun --compile --bytecode as the default runtime",
@@ -377,7 +386,8 @@
     {
       "phase": 2,
       "name": "stand up the compat bar BEFORE any user-visible claim",
-      "status": "NOT_STARTED",
+      "status": "NOT_STARTED_WITH_P2_4_BASELINE_MEASURED",
+      "status_note": "No phase-2 work has begun: P2-1, P2-2 and P2-3 are unmeasured and no vinext compat lane exists. P2-4 is measured `false` because it is a BASELINE observation of what per-PR compat-smoke covers TODAY — it resolves its server as .next/standalone/.../server.js, so it is bound to Next standalone — which is a fact about the current tree, not progress on this phase. Qualified 2026-08-25 by #753's rule 7a, which caught this phase reading NOT_STARTED while carrying a measured, sourced criterion: the same shape phase 3d sat in for nine days.",
       "reversible": true,
       "concurrent_with": [1],
       "criteria": [
