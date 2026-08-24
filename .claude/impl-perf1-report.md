@@ -187,6 +187,13 @@ not the architecture change.
 - **Contract tests green**: `adapter-migration`, `cli-node-runtime` (55 tests),
   `deferred-default-metrics`, `deferred-supervisor-init*`, `lazy-metrics-endpoint`, `shutdown`,
   `node-server-log-after-spawn`.
+- **Full suite** (`pnpm exec vitest run`): **4183 passed, 11 failed across 4 files**. Those 4 files
+  were re-run on a **pristine `origin/main` worktree** and fail there **identically** (same 4 files,
+  same 11 tests) — pre-existing and environmental, not caused by this change:
+  `examples/bun-exec/test/{runtime-contract,sigterm-hardcap-e2e}.test.ts` (`Cannot find module
+  'srvx/bun'`), `tests/mutation-residue-scan.test.ts` (`gpg: signing failed: Timeout` — the test
+  makes commits), `tests/compat-window-fingerprint.test.ts` (pack/tarball state). None of the four
+  references `node-server` or `boot-trace`. Checked rather than assumed.
 
 ---
 
