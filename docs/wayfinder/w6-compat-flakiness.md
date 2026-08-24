@@ -9,6 +9,10 @@ separate feedback-loop effort)?
 See §5. Confidence: **high** for the per-lane numbers and the bun-lane classification, **medium-high**
 for the single node-lane red.
 
+> **Window extended twice. Read §8 first — it is the current state (to 2026-08-24) and it settles
+> the two items §7 left open, overturns §5's quarantine recommendation, and names the real v1.0
+> blocker (fingerprint churn, not flakiness). §7 (to 2026-08-05) remains correct for its window.**
+>
 > **Window extended 2026-08-06 — read §7 before quoting §3's determinism claim or §5's
 > "only the bun lane is red".** The original analysis closed on a window ending **2026-08-01**; two
 > further scheduled reds have landed since (08-02 bun, 08-03 node). The **central conclusion is
@@ -379,9 +383,129 @@ assertion; that belongs to #695's fix, not here.
   and absent in the other may reflect the extraction rather than the run. The shard set and the
   per-shard counts are solid; the per-case mechanism deltas are indicative only.
 
-*Evidence for this section: `gh run view 30738274907`, `gh run view 30790778590`;
+*Evidence for §7: `gh run view 30738274907`, `gh run view 30790778590`;
 `compat-run-ledger` artifacts from runs 30738274907, 30790778590, 30735484416, 30882760738,
 30979973943; `compat-suite-summary-{5,7,15}` from 30738274907;
 `gh api repos/getknext-dev/knext/actions/jobs/91614133100` (steps) and its check-run annotations;
 the `Per-shard ledger (flake attribution)` job conclusion on run 30790778590;
 `docs/compat/window-node-lane.md` (status + rules); `gh issue view 695`.*
+
+---
+
+## 8. Window extension to 2026-08-24 — the two open questions answered, and the real blocker named
+
+**Why this section exists.** §7 closed with two items marked *not established* and one recommendation
+that newer evidence overturns. The 2026-08-24 public-release audit (blocker 3 of
+`docs/release/public-release-readiness.md`) extended the window by nineteen days — nineteen node
+nights and three bun weeklies — using **one** extraction method throughout, the structured
+`compat-run-ledger`. That uniformity is what lets §7's "indicative only" items be settled.
+
+Method: the `compat-run-ledger` artifact of every scheduled run from 2026-07-28 to 2026-08-24
+(31 runs: 27 node nights carrying a fingerprint, 1 pre-fingerprint node night, 4 bun weeklies),
+graded by `scripts/compat-window-audit.mjs` — which exists because this reconstruction had now been
+done by hand twice, and #545 AC 3 asks for exactly that number to stop being folklore.
+
+### 8.1 The node lane: nineteen more nights, zero test failures
+
+| window | scheduled node nights | red | red that executed a test |
+|---|---|---|---|
+| 2026-08-06 → 2026-08-24 (new) | 19 | **0** | **0** |
+| 2026-07-29 → 2026-08-24 (whole fingerprinted window) | 27 | 1 | **0** |
+
+Every one of the 19 new nights recorded `778 passed / 0 failed / 0 notRun` across all 16 shards, on
+`v16.2.0`, at `runAttempt: 1`. **No run in the entire 27-night window was ever re-attempted**, which
+retires the last live form of #545's central worry: on the node lane, no green was bought by a
+re-run, because no re-run happened.
+
+§6 named what would overturn the verdict — "a node-lane red in the next few weeks whose cause is
+*not* the segment-cache/prefetch family". Nineteen nights produced **no node-lane red at all**. The
+verdict stands, and stands harder than when it was written.
+
+### 8.2 Both "not established" items from §7, now settled
+
+**(a) Was the 08-02 bun shard-16 red persistent or a one-off?** *Answered: intermittent, and a
+member of the documented family rather than a new one.* `edge-compiler-can-import-blob-assets` did
+**not** recur on 08-09, 08-16 or 08-23 — one appearance in four stable-Bun weeklies. Its signature
+(two 60 000 ms timeouts on `allows to fetch a remote URL`) is the edge-sandbox outbound-`fetch()`
+mechanism already documented, so this is family wobble, not a fourth mechanism. What it does kill,
+permanently, is the "canary-only / pre-release noise" characterisation in `docs/compat-matrix.md` —
+the run's ledger reads `runtimeVersion: 1.3.14`. That cell has been corrected.
+
+**(b) The mechanism shifts on shards 6 and 8.** *Answered: real, and they alternate.* §7 could not
+tell a genuine shift from an extraction artifact because it compared `--log-failed` output against a
+structured ledger. All four bun weeklies now have structured ledgers, so the comparison is
+controlled:
+
+| file | 08-02 | 08-09 | 08-16 | 08-23 |
+|---|---|---|---|---|
+| `app-dir/app-static` (shard 6) | assertion, 3 cases | timeout, 4 cases | timeout, 5 cases | timeout, 4 cases |
+| `parallel-routes-root-param-dynamic-child` (shard 8) | timeout, 7 cases | assertion, 2 cases | assertion, 2 cases | assertion, 2 cases |
+| `middleware-fetches-with-any-http-method` (shard 8) | timeout, 2 cases | timeout, 2 cases | timeout, 2 cases | timeout, 2 cases |
+
+The two files alternate between the 60 s hang and a millisecond assertion diff; the third never
+does. **Read as one mechanism, not two**: an outbound `fetch()` that sometimes never settles (hang)
+and sometimes settles wrong (assertion) produces exactly this pattern. It is consistent with the
+`bun-edge-fetch` family already in `$knextQuarantines`, and it is not evidence of an unclassified
+defect.
+
+**So §7's "the shard set moves, so a future bun red outside {6, 8} is not automatically a new
+defect" needs its converse said too:** the shard set has *not* moved since. Three consecutive
+weeklies are byte-identical — `775 passed / 3 failed`, shards 6 and 8, the same three files. The bun
+lane is **deterministically red**, and #545's re-run-until-green vector cannot operate on it.
+
+### 8.3 §5's recommendation 2 is overturned — do NOT quarantine `dynamic-on-hover`
+
+§5 item 2 called adding `segment-cache/dynamic-on-hover` to `$knextQuarantines` "the one genuinely
+actionable item", on the strength of its single 2026-07-23 red. **Nineteen further nights say
+otherwise: that file has been green on every node night since, and the node lane has had no red at
+all.** Quarantining a case that has passed 19 consecutive times would remove real coverage to buy
+nothing, and ADR-0007 §c.5's whole direction is to *shrink* the ledger toward zero, not to top it up
+on a month-old data point. It would also cost a night twice over — the manifest is inside the frozen
+harness set, so the edit itself restarts the window under rule 1, and rule 3 counts it as a net new
+entry. **Recommendation withdrawn.** If `dynamic-on-hover` reds again with the family signature, the
+§c.2 bar applies then, on that evidence.
+
+### 8.4 What actually blocks the v1.0 gate — and it is not flakiness
+
+§5 item 4 said the 14-night gate is "reachable by waiting". §7 corrected that to "the window is not
+open". Both are now superseded: **the window opened on 2026-07-29 and it has never exceeded 7 of
+14** — not because a night went red, but because the harness fingerprint moved **9 times in 27
+nights**.
+
+| streak | nights | fingerprint | ended by |
+|---|---|---|---|
+| 07-29 → 08-02 | 5 | `55bd1c3c` | the 08-03 lost shard |
+| 08-04 | 1 | `8d099f93` | fingerprint change |
+| 08-05 → 08-06 | 2 | `c44d5e85` | fingerprint change |
+| 08-07 → 08-11 | 5 | `37edc694` | fingerprint change |
+| **08-12 → 08-18** | **7** | `8698abc6` | fingerprint change |
+| 08-19 / 08-20 / 08-21 / 08-22 | 1 each | four distinct | fingerprint change ×4 |
+| 08-23 → 08-24 | 2 *(open)* | `c188961e` | — |
+
+The frozen set includes the packed `@getknext/*` closure, and this repo merges to `main` most days;
+the 7-night stretch corresponds exactly to the quietest week for shipped `dist/**` bytes. **The v1.0
+compat gate is a scheduling problem — it needs a ~2-week freeze on the packed closure — not a
+defect-fixing one.** That is a design consequence of ADR-0039's freeze scope, and whoever owns the
+v1.0 date should plan the freeze rather than wait for a streak that the merge cadence forbids.
+
+### Confidence on §8
+
+- **High** on the node-lane counts, lane attribution, rerun counts and fingerprints: all read from
+  the `compat-run-ledger` artifacts, and now recomputed by a tested script rather than by eye.
+- **High** on the bun lane's determinism in shard-and-file: three byte-identical consecutive runs.
+- **High** on the mechanism alternation being real: single extraction method across all four runs.
+- **Medium** on the *cause* of that alternation. "One fetch mechanism with two manifestations" is
+  the reading most consistent with the data and with the documented gap, but no repro was run for
+  this section — it is an inference from signatures, not a trace.
+- **Not established:** whether the 08-03 runner-loss class recurs. One instance in 27 nights, and
+  the window rules now grade it as a failed night (short ledger) rather than vacuously passing it.
+
+*Evidence for §8: `compat-run-ledger` artifacts from all 31 scheduled runs 2026-07-28 → 2026-08-24
+(node: 30333571518, 30427197358, 30518209404, 30609544684, 30687194887, 30735484416, 30790778590,
+30882760738, 30979973943, 31076109243, 31149348286, 31239550517, 31294965728, 31356989667,
+31459242158, 31565302791, 31669242641, 31771823777, 31863085065, 31925582335, 31993151936,
+32097443183, 32214131442, 32330221781, 32445502038, 32550380562, 32616853402, 32688792926; bun:
+30738274907, 31297820716, 31929677335, 32621148829); `gh run list --workflow test-e2e-deploy.yml
+--limit 40`; `scripts/compat-window-audit.mjs`; `git log --since=2026-08-01 -- packages/`;
+`test/deploy-tests-manifest.knext.json` `$knextQuarantines`; `gh issue view 545`, `gh issue view
+710`; ADR-0007 §§c–g; ADR-0039.*
