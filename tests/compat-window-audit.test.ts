@@ -194,7 +194,7 @@ describe('compat-window-audit — the v1.0 node-lane window, computed not recall
         night({ runId: '31239550517' }),
         night({ runId: '31300000000', event: 'workflow_dispatch' }),
       ];
-      expect(selectLaneNights(ledgers, 'node').map((l) => l.runId)).toEqual([
+      expect(selectLaneNights(ledgers, 'node').map((l: { runId: string }) => l.runId)).toEqual([
         '31239550517',
         '31294965728',
       ]);
@@ -263,7 +263,7 @@ describe('compat-window-audit — the v1.0 node-lane window, computed not recall
         night({ runId: '40002500', runAttempt: '2', windowFingerprint: 'sha256:aaaa' }),
       ]);
       expect(a.nights).toHaveLength(3);
-      expect(a.nights.filter((n) => !n.eligible)).toHaveLength(1);
+      expect(a.nights.filter((n: { eligible: boolean }) => !n.eligible)).toHaveLength(1);
     });
 
     it('the fingerprint that restarts the count is reported, so the cause is attributable', () => {
