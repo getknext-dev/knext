@@ -2127,6 +2127,73 @@ tighter than the transitions it is trying to observe.
   comparison cleared the bar precisely because it measured a quantity this cluster's scheduling and
   readiness behaviour cannot swamp.
 
+## Run 27 (2026-08-24) — LOCAL in-process PHASE decomposition of the wrapper (#441 / #592 W4)
+
+> **NOT an OKE run.** Apple-silicon dev machine, so absolute numbers are not comparable to the OKE
+> runs above and **cannot** reproduce the 842 ms effect — that effect needs a ~2 s child boot and an
+> oversubscribed `0`-CPU-request node, and this machine has neither (the same limitation Run 20
+> states about itself). What IS portable is the **shape**: which interval owns the wrapper's cost,
+> and how large knext's own pre-spawn work is relative to the process floor.
+
+**Why.** Every prior attribution of the 842 ms was an **ablation** — remove a feature, re-measure,
+see whether the aggregate moved. Seven failed. Run 9 succeeded and named CPU contention, but even it
+could only say *which component*, never *which interval*. #592 asks for the interval breakdown, and
+nothing in the harness could produce one, because every clock was outside the process.
+
+**Method.** `packages/kn-next/bench/boot-phase-trace.mjs`, n=12. The supervisor now emits its own
+phase marks under `KNEXT_BOOT_TRACE=1` (`packages/kn-next/src/adapters/boot-trace.ts`), anchored at
+**process start** via `process.uptime()` rather than at module load — so the first interval, node's
+bootstrap plus the entry's whole module graph, is measured rather than inferred. The harness runs
+the **shipped** `@getknext/core` bundle out of a `pnpm --prod deploy`, spawning the **real
+file-manager standalone build** (`next build`, `output:'standalone'`) as the child. The child-ready
+probe is tightened to 10 ms for measurement (`KNEXT_CHILD_READY_PROBE_MS`); production keeps 250 ms.
+
+**Result — real standalone child, n=12.**
+
+| phase | interval (median) | range | cumulative |
+|---|---|---|---|
+| process start → **entry-eval** | **40.3 ms** | 28.8–61.9 | 40.3 ms |
+| entry-eval → **spawn-issued** (eager wiring) | **3.4 ms** | 2.2–19.9 | 44.6 ms |
+| spawn-issued → **child-listening** (Next's own boot) | **262.4 ms** | 191.2–357.4 | 313.9 ms |
+| child-listening → **supervisor-ready** (deferred init) | **27.2 ms** | 19.2–38.5 | 334.8 ms |
+
+Reference arms, same run: `node -e ""` wall **43.0 ms**; node bootstrap measured *in-process*
+**17.4 ms**; bootstrap + ESM-loader init for a dynamic import of an empty module **19.0 ms**; the
+same standalone child booted with **no supervisor at all** **246.0 ms**.
+
+A second arm with a **fast fixture** child (n=12, isolating the wrapper from Next's boot) agrees on
+every wrapper-side number: entry-eval 37.0 ms, eager wiring 3.9 ms, deferred init 32.1 ms.
+
+**What owns the wrapper's cost.**
+
+| term | local median | is it knext's? |
+|---|---|---|
+| second Node process bootstrap | 19.0 ms | no — the floor of spawning at all |
+| **knext's entry module graph** | **21.4 ms** (entry-eval − esm-import floor) | **yes** |
+| eager pre-spawn wiring (drain hook, signal handlers, path resolution, `existsSync`, `listen` call) | 3.4 ms | yes |
+| child boots slower under the supervisor | ~16 ms (262.4 − 246.0) | yes — this is the contention term |
+| deferred supervisor init | 27.2 ms | yes, but **after** child-ready — off the critical path |
+
+**The two findings that change what #441 should be worked on.**
+
+1. **The pre-spawn constant is now ~25 ms of knext code, and it is not compile-bound.** The
+   supervisor's shipped bundle is 20 KB whose static imports are **node builtins only** — the
+   ~790 ms graph the deferral removed is genuinely gone from the eager path. A direct probe with and
+   without a warm `NODE_COMPILE_CACHE` moved `entry-eval` by **2.0 ms** (40.0 → 38.0, n=10), so the
+   image-baked cache (ADR-0035) is already collecting what there is to collect here; there is no
+   missing-bake gap, and no meaningful compile cost left to remove.
+2. **The only term that SCALES with the child is contention.** With a fast fixture the child boots
+   the same with or without the supervisor (79.6 vs 68.0 ms — within spread). With a real ~250 ms
+   Next boot it stretches ~16 ms. Run 9 measured ~842 ms with a ~2 s boot on an oversubscribed
+   `0`-CPU-request node. Every knext-owned constant is bounded by tens of milliseconds; only this
+   term grows with the child's boot length and the node's CPU pressure.
+
+**What this does NOT establish.** It does not close #441 and does not re-measure the 842 ms — see
+the caveat at the top. It measures the **interior** of the wrapper's boot on a machine where the
+842 ms effect cannot occur. The OKE re-measure Run 20 asked for is still owed, and the instrument
+added here is what would make that run attributable rather than another aggregate.
+
+
 ## Caveat
 
 These are **point-in-time measurements on a specific small (2-node) OKE cluster** with a
