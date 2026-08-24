@@ -64,17 +64,36 @@ const MINTING_ARTIFACTS = [
 
 /**
  * A gateway hostname in HOST POSITION — immediately after a URL's `@`, an `=`
- * assignment, or a `: "` YAML value. Anchoring on position (rather than on any
- * mention of the word) is what lets the predicate below be uniform: prose like
- * "the apps-gateway (`pggw-apps`)" is not a host reference and must not be audited,
- * while every real DSN/env host is.
+ * assignment, a `: "` YAML value, or a shell parameter-expansion DEFAULT (`:-`).
+ * Anchoring on position (rather than on any mention of the word) is what lets the
+ * predicate below be uniform: prose like "the apps-gateway (`pggw-apps`)" is not a
+ * host reference and must not be audited, while every real DSN/env host is.
  *
- * Host characters include `$`/`{`/`}` so shell-interpolated forms
- * (`pggw-apps.$NS.svc.cluster.local.`) are caught rather than skipped, the dotted
- * tail is OPTIONAL so the bare single-label form (`@pggw-apps:55432`) is matched
- * too, and a trailing dot is captured so rooted is distinguishable from unrooted.
+ * The `:-` position is load-bearing, not cosmetic (#798). Both shell writers now
+ * resolve the host ONCE through an env override —
+ * `GW_HOST="${APPDB_GATEWAY_HOST:-pggw-apps.${NS}.svc.cluster.local.}"` — because a
+ * hardcoded host meant `rotate-cred` silently overwrote a correctly-overridden,
+ * operator-minted DSN with an unresolvable one. That moves the literal out of `@`
+ * position and into the default, where without this alternative the file would
+ * contain NO matched host at all and the "must contain at least one" half below
+ * would red on the fix.
+ *
+ * Each dotted label is EITHER a `${VAR}` expansion OR ordinary host characters
+ * (including a bare `$VAR`), so shell-interpolated forms
+ * (`pggw-apps.$NS.svc.cluster.local.`, `pggw-apps.${NS}.svc.cluster.local.`) are
+ * caught rather than skipped. Spelling `${VAR}` as its own alternative — rather than
+ * dropping `{`/`}` into one flat character class — is what keeps the CLOSING brace of
+ * the enclosing expansion out of the host: `…local.}"` would otherwise parse its `.}`
+ * tail as a final label, yielding a host ending in `}` that the rooted predicate then
+ * reports as unrooted. A guard that reds on the correctly-rooted form teaches people
+ * to weaken it.
+ *
+ * The dotted tail is OPTIONAL so the bare single-label form (`@pggw-apps:55432`) is
+ * matched too, and a trailing dot is captured so rooted is distinguishable from
+ * unrooted.
  */
-const GATEWAY_HOST_IN_POSITION = /(?:@|=|:\s*")(pggw[A-Za-z0-9-]*(?:\.[A-Za-z0-9_${}-]+)*\.?)/g;
+const GATEWAY_HOST_IN_POSITION =
+  /(?:@|=|:-|:\s*")(pggw[A-Za-z0-9-]*(?:\.(?:\$\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z0-9_$-]+))*\.?)/g;
 
 /** Every gateway host reference, in host position, in `text`. */
 function gatewayHostsInText(text: string): string[] {
@@ -158,6 +177,31 @@ describe('the rooted-host predicate', () => {
     ['rooted short name', 'pggw-apps.scale-zero-pg.svc.'],
   ])('accepts %s', (_label, host) => {
     expect(unrootedGatewayHostsInText(dsn(host))).toEqual([]);
+  });
+
+  it('audits the shell parameter-expansion DEFAULT position (where both writers now resolve)', () => {
+    // The post-#798 shape: one resolution, honouring APPDB_GATEWAY_HOST with the
+    // operator's precedence, with the literal living in the `:-` default. Rooted
+    // passes; drop the trailing dot and it must still be caught — otherwise moving
+    // the literal into a default would be a way to escape the whole guard.
+    //
+    // The `${…}` here is SHELL, quoted as data — biome's template-literal hint is a
+    // false positive on every line of this case, so it is silenced at the block.
+    // biome-ignore-start lint/suspicious/noTemplateCurlyInString: these are shell parameter expansions under test, not JS templates
+    expect(
+      unrootedGatewayHostsInText(
+        'GW_HOST="${APPDB_GATEWAY_HOST:-pggw-apps.${NS}.svc.cluster.local.}"',
+      ),
+    ).toEqual([]);
+    expect(
+      unrootedGatewayHostsInText(
+        'GW_HOST="${APPDB_GATEWAY_HOST:-pggw-apps.${NS}.svc.cluster.local}"',
+      ),
+    ).toEqual(['pggw-apps.${NS}.svc.cluster.local']);
+    expect(unrootedGatewayHostsInText('DBHOST="${DBHOST:-pggw.${NS}.svc}"')).toEqual([
+      'pggw.${NS}.svc',
+    ]);
+    // biome-ignore-end lint/suspicious/noTemplateCurlyInString: end of the shell-fixture block
   });
 
   it('audits hosts in env-assignment and YAML-value position too, not just DSNs', () => {

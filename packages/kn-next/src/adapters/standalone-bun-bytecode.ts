@@ -76,6 +76,13 @@ export interface BytecodePassOptions {
     standaloneDir: string;
     /** Bun binary; defaults to the running Bun, else `bun` on PATH. */
     bunBin?: string;
+    /**
+     * Root for the pass's scratch build dirs; defaults to os.tmpdir().
+     * The shared OS tmpdir is mutated by every concurrent pass (parallel
+     * test workers included), so a leak check must inject a private root
+     * rather than count a name prefix in the global one (#835).
+     */
+    tmpRoot?: string;
     log?: (message: string) => void;
 }
 
@@ -171,10 +178,10 @@ function buildOne(
  * without non-compile `--bytecode` emission (needs ≥1.1.30) or a missing
  * binary — in which case the whole pass is disabled (fail-open).
  */
-function probe(bunBin: string): string | undefined {
+function probe(bunBin: string, tmpRoot: string): string | undefined {
     let dir: string | undefined;
     try {
-        dir = mkdtempSync(join(tmpdir(), "knext-bc-probe-"));
+        dir = mkdtempSync(join(tmpRoot, "knext-bc-probe-"));
         const src = join(dir, "probe.js");
         writeFileSync(src, "module.exports = 1;\n");
         buildOne(bunBin, src, join(dir, "out"));
@@ -200,6 +207,7 @@ export function precompileBunBytecode(
     const log = options.log ?? (() => {});
     const bunBin =
         options.bunBin ?? (process.versions.bun ? process.execPath : "bun");
+    const tmpRoot = options.tmpRoot ?? tmpdir();
     const result: BytecodePassResult = {
         compiled: 0,
         skipped: [],
@@ -211,7 +219,7 @@ export function precompileBunBytecode(
             result.disabled = `standalone dir not found: ${options.standaloneDir}`;
             return result;
         }
-        const disabledReason = probe(bunBin);
+        const disabledReason = probe(bunBin, tmpRoot);
         if (disabledReason) {
             result.disabled = `bun bytecode emission unavailable (${bunBin}): ${disabledReason}`;
             log(result.disabled);
@@ -227,7 +235,7 @@ export function precompileBunBytecode(
             }
             let outDir: string | undefined;
             try {
-                outDir = mkdtempSync(join(tmpdir(), "knext-bc-"));
+                outDir = mkdtempSync(join(tmpRoot, "knext-bc-"));
                 const built = buildOne(bunBin, file, outDir);
                 // Replace only after BOTH artifacts exist — a failure above
                 // leaves the original byte-identical (fail-open).

@@ -106,6 +106,15 @@ attacker who cannot route to the pod). It is also only enforced if your cluster 
 NetworkPolicy (Calico, Cilium, etc.) — on a non-enforcing CNI the policy is a no-op.
 </Callout>
 
+**knext tells you which case you are in** instead of leaving it silent. The operator reports a
+`NetworkPolicyEnforced` condition on every `NextApp`: `True` when a NetworkPolicy-enforcing agent
+(Calico, Cilium, kube-router, Weave Net, Antrea, Canal) is detected on the cluster, `False` when
+flannel is the CNI — there the policy is **declarative only**: it is written but enforces nothing —
+and `Unknown` when the CNI cannot be identified. Treat `Unknown` as unenforced until you verify it;
+a detector that guessed "enforced" would be worse than none. `kn-next doctor` runs the same
+read-only detection as a preflight check. Note that flannel is what OrbStack and stock OKE clusters
+run — on those, treat network isolation as absent unless you install a policy-capable CNI.
+
 ## Digest pinning
 
 knext rejects mutable image tags everywhere.

@@ -131,6 +131,27 @@ function healthyStubs(): Record<
             ok: true,
             stdout: JSON.stringify({ spec: {} }),
         },
+        // (i, #744) a policy-capable CNI runs AND is healthy: enforcement
+        // detected. numberReady is not decoration — a calico-node DaemonSet
+        // with zero ready pods enforces nothing, so a fixture claiming a
+        // healthy cluster has to say the agent is actually running.
+        "kubectl get daemonsets --all-namespaces -o json": {
+            ok: true,
+            stdout: JSON.stringify({
+                items: [
+                    {
+                        metadata: {
+                            name: "calico-node",
+                            namespace: "kube-system",
+                        },
+                        status: {
+                            desiredNumberScheduled: 3,
+                            numberReady: 3,
+                        },
+                    },
+                ],
+            }),
+        },
         // (a2, #314) schema coverage: serve the REAL bundled CRD schema through
         // the aggregated OpenAPI v3 document, so a healthy cluster is one whose
         // CRD actually defines every field this CLI emits. A stub that merely
@@ -195,6 +216,7 @@ describe("runDoctor — healthy cluster", () => {
             "ingress",
             "image",
             "knative",
+            "netpol",
         ]);
         for (const c of report.checks) {
             // storage-mode is LOCAL (ADR-0047): with no kn-next.config.ts in
@@ -234,6 +256,7 @@ describe("runDoctor — unreachable cluster degrades to SKIP", () => {
             "ingress",
             "image",
             "knative",
+            "netpol",
         ]) {
             expect(checks[id].status, id).toBe("skip");
             expect(checks[id].detail).toMatch(/unreachable/i);

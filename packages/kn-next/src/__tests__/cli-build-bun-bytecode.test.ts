@@ -83,12 +83,6 @@ function seedProject() {
     return { projectDir, standaloneDir };
 }
 
-/** knext-bc-* temp dirs currently present (leak detection). */
-function tempDirCount(): number {
-    return readdirSync(tmpdir()).filter((n) => n.startsWith("knext-bc-"))
-        .length;
-}
-
 afterEach(() => {
     vi.restoreAllMocks();
     mockRuntime = "node";
@@ -242,10 +236,49 @@ describe("precompileBunBytecode (module)", () => {
     it.skipIf(!bunAvailable)(
         "cleans up its temp dirs (969-file trees must not litter tmpdir)",
         () => {
-            const { standaloneDir } = seedProject();
-            const before = tempDirCount();
-            precompileBunBytecode({ standaloneDir, bunBin: "bun" });
-            expect(tempDirCount()).toBe(before);
+            const { projectDir, standaloneDir } = seedProject();
+            // A PRIVATE tmp root, not a count of knext-bc-* in the shared OS
+            // tmpdir: parallel vitest workers run this same pass (the
+            // injected-fake-bun suite) and create/remove same-prefix dirs
+            // there concurrently, so a global count races (#835). With an
+            // injected root, anything left behind is provably ours.
+            const tmpRoot = join(projectDir, "bc-scratch");
+            mkdirSync(tmpRoot, { recursive: true });
+            // BOTH mkdtemp sites must route through tmpRoot — the capability
+            // probe's AND the per-file scratch one. os.tmpdir() reads TMPDIR
+            // at CALL time, so poisoning it makes any UN-threaded site throw
+            // ENOENT instead of silently working, and the two sites fail
+            // through distinct channels: an un-threaded probe sets
+            // `disabled`, an un-threaded per-file scratch lands in
+            // `skipped`. Asserting both is what makes reverting EITHER site
+            // alone go red (#835 review F1 — a single composite assertion let
+            // the per-file site stay unguarded).
+            const savedTmp = process.env.TMPDIR;
+            process.env.TMPDIR = join(projectDir, "poisoned-no-such-dir");
+            let result: ReturnType<typeof precompileBunBytecode>;
+            try {
+                result = precompileBunBytecode({
+                    standaloneDir,
+                    bunBin: "bun",
+                    tmpRoot,
+                });
+            } finally {
+                if (savedTmp === undefined) delete process.env.TMPDIR;
+                else process.env.TMPDIR = savedTmp;
+            }
+            expect(result.disabled).toBeUndefined(); // probe site threaded
+            expect(result.skipped).toEqual([]); // per-file site threaded
+            expect(result.compiled).toBe(1);
+            // nothing left behind in the root we own (catches an rmSync loss)
+            expect(readdirSync(tmpRoot)).toEqual([]);
+            // Fail-open: a NONEXISTENT root disables the pass, never throws.
+            const missingRoot = precompileBunBytecode({
+                standaloneDir,
+                bunBin: "bun",
+                tmpRoot: join(projectDir, "does-not-exist"),
+            });
+            expect(missingRoot.disabled).toBeTruthy();
+            expect(missingRoot.compiled).toBe(0);
         },
     );
 });
