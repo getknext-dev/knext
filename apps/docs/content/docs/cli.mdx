@@ -129,7 +129,10 @@ It takes no options beyond `-h`/`--help`.
 
 A **read-only** preflight that checks the cluster prerequisites: the `NextApp` CRD, operator
 readiness, the cert-manager-backed admission webhook, the Knative `ingress-class` against the
-reconciler that actually serves it, operator-image pullability, and Knative Serving itself.
+reconciler that actually serves it, operator-image pullability, Knative Serving itself, and
+whether your cluster's CNI can **enforce** the default-on `NetworkPolicy` the operator writes —
+on flannel it cannot (the policy is declarative only), and doctor says so plainly rather than
+guessing; "cannot determine" is reported as its own outcome, never as "enforced".
 
 ```bash
 kn-next doctor            # human-readable checklist
