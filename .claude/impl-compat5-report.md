@@ -61,10 +61,11 @@ Over all 32 scheduled runs with retained ledgers (2026-07-28 → 08-24; 28 node,
 - the single node red (`30790778590`) is infrastructure loss: `failed: 0`, shard 16/16 uploaded no
   summary
 
-Recommended: close #545 against its criteria and file the real residual — **harness-fingerprint
-churn** (9 window restarts in 27 nights, longest stable streak 7 of 14), which has **no open issue**
-(searched open issue titles for "fingerprint": none). Closing #545 without filing that would lose
-the only live problem on the ticket.
+Recommended: close #545 against its criteria. The real residual — **harness-fingerprint churn** —
+is now **filed as #850**, measured independently here: 27 fingerprinted nights, 11 distinct
+fingerprints, **10 window restarts**, longest stable streak **7** of the required 14, and **5 of
+the 10 restarts moved the packed `@getknext/*` tarball bytes only**. Closing #545 without that
+would have lost the only live problem on the ticket.
 
 Deliberately **not** conflated with the prior round: that round cleared the *nightly* gate claim;
 this round re-derived it independently rather than agreeing with it, and additionally establishes

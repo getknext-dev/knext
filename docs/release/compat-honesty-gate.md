@@ -163,9 +163,10 @@ its ledger records `failed: 0`, and shard 16/16 uploaded no summary at all.
 the v1.0 gate unreachable — does not survive measurement, and the correction is already on the
 issue from the prior round. The residual is real but is a *different* defect: the 14-night window
 restarts on **harness-fingerprint churn** (9 restarts in 27 nights, longest stable streak 7 of the
-required 14), which no amount of flake-fixing addresses. **There is no open issue for it today** —
-a search of open issue titles for "fingerprint" returns nothing. Filing that is the honest
-successor to #545 and is the thing actually standing between this project and the v1.0 compat gate.
+required 14), which no amount of flake-fixing addresses. It had **no issue of its own** when this was written; **filed as #850**, with the restart causes
+measured (27 fingerprinted nights, 11 distinct fingerprints, 10 restarts, longest streak 7 of 14 —
+and **5 of the 10 restarts moved the packed `@getknext/*` tarball bytes only**). That is the honest
+successor to #545 and the thing actually standing between this project and the v1.0 compat gate.
 
 ---
 

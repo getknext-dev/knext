@@ -95,8 +95,9 @@ gate is red would fail this project's central honesty rule.
        is already ❌. One real defect was found and fixed on the way: `ci.yml` and `compat-smoke.mjs`
        both deflected readers to a scheduled workflow named `compat-suite-full`, which does not
        exist — now guarded by `tests/compat-lane-pointer-resolution.test.ts` (5/5 mutation-proved).
-       **Residual, tracked not blocking:** #545 should be closed against its own criteria and the
-       14-night gate's real obstruction — harness-fingerprint churn — still has no issue of its
-       own; #710 is a permanently-unclearable weekly alert and needs a disposition.
+       **Residual, tracked not blocking:** #545 should be closed against its own criteria; the
+       14-night gate's real obstruction — harness-fingerprint churn, 10 window restarts in 27
+       nights — is now filed as #850; #710 is a permanently-unclearable weekly alert and needs a
+       disposition.
 6. [ ] Agent: ergonomics row 8 — measure the REAL `npx kn-next` journey post-publish.
 7. [ ] Then: announce.

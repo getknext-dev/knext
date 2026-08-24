@@ -1,0 +1,13 @@
+const __vite_ssr_import_0__ = await __vite_ssr_import__("/node_modules/.pnpm/@testing-library+jest-dom@6.9.1/node_modules/@testing-library/jest-dom/dist/index.mjs");
+const __vite_ssr_import_1__ = await __vite_ssr_import__("/node_modules/.pnpm/@testing-library+react@16.3.2_@testing-library+dom@10.4.1_@types+react-dom@19.2.3_@type_7e9e1ec9c00182c88f8ea959729259b1/node_modules/@testing-library/react/dist/index.js", {"importedNames":["cleanup"]});
+const __vite_ssr_import_2__ = await __vite_ssr_import__("/node_modules/.pnpm/vitest@4.0.18_@opentelemetry+api@1.9.0_@types+node@25.3.0_@vitest+ui@4.0.18_happy-dom@2_ea41da3ca296dca85c3b0c4777d72ec6/node_modules/vitest/dist/index.js", {"importedNames":["afterEach"]});
+
+
+
+(0,__vite_ssr_import_2__.afterEach)(() => {
+  (0,__vite_ssr_import_1__.cleanup)();
+});
+//# sourceMappingSource=vite-generated
+//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJtYXBwaW5ncyI6IkFBQUE7QUFDQTtBQUNBOzs7O0dBR0EsaUNBQVUsTUFBTTtBQUNkLG9DQUFRO0FBQ1YsQ0FBQyIsIm5hbWVzIjpbXSwiaWdub3JlTGlzdCI6W10sInNvdXJjZXMiOlsidml0ZXN0LnNldHVwLnRzIl0sInNvdXJjZXNDb250ZW50IjpbImltcG9ydCAnQHRlc3RpbmctbGlicmFyeS9qZXN0LWRvbSc7XG5pbXBvcnQgeyBjbGVhbnVwIH0gZnJvbSAnQHRlc3RpbmctbGlicmFyeS9yZWFjdCc7XG5pbXBvcnQgeyBhZnRlckVhY2ggfSBmcm9tICd2aXRlc3QnO1xuXG4vLyBDbGVhbnVwIGFmdGVyIGVhY2ggdGVzdFxuYWZ0ZXJFYWNoKCgpID0+IHtcbiAgY2xlYW51cCgpO1xufSk7XG4iXSwiZmlsZSI6Ii92aXRlc3Quc2V0dXAudHMifQ==
+
+//# vitestCache=W3siZmlsZSI6IjEiLCJpZCI6IjEiLCJ1cmwiOiIyIiwiaW1wb3J0ZWRVcmxzIjoiMyIsIm1hcHBpbmdzIjpmYWxzZX0sIi9Vc2Vycy9iYW5uYS9hbHBoZXlhL3BvY3Mva25leHQtd3QvY29tcGF0NS92aXRlc3Quc2V0dXAudHMiLCIvdml0ZXN0LnNldHVwLnRzIixbXV0=
