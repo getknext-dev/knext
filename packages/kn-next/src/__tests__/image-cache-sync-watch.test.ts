@@ -120,6 +120,34 @@ describe("image-cache-sync — watch + start", () => {
         }
     });
 
+    it("startImageCacheSync lists the store exactly once for restore + reconcile combined", async () => {
+        const store = fakeStore({
+            "image-cache/warm/9.9.e.u.avif": Buffer.from("WARMED"),
+        });
+        const list = vi.spyOn(store, "list");
+        const handle = await startImageCacheSync(
+            {
+                STORAGE_BUCKET: "b",
+                IMAGE_CACHE_DIR: cacheDir,
+            } as Partial<NodeJS.ProcessEnv> as NodeJS.ProcessEnv,
+            { store, log: SILENT },
+        );
+        try {
+            // Restore ran (the variant landed on disk), and the watch (with
+            // its reconcile) resolved — yet the store was listed only once:
+            // the listing is threaded through both phases.
+            expect(
+                await fs.readFile(
+                    join(cacheDir, "warm", "9.9.e.u.avif"),
+                    "utf8",
+                ),
+            ).toBe("WARMED");
+            expect(list).toHaveBeenCalledTimes(1);
+        } finally {
+            handle.stop();
+        }
+    });
+
     it("honours IMAGE_CACHE_PREFIX when restoring under a custom prefix", async () => {
         const store = fakeStore({
             "custom/k/1.2.e.u.webp": Buffer.from("C"),
