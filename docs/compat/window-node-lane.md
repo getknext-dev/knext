@@ -27,8 +27,26 @@ numbers below are that script's output, not an eyeball over a run list.*
 | window opened | 2026-07-29, run `30427197358`, ref `v16.2.0` |
 | **longest qualifying streak** | **7 / 14** — 2026-08-12 → 2026-08-18, fingerprint `sha256:8698abc6…` |
 | **current qualifying streak** | **2 / 14** — 2026-08-23 → 2026-08-24, fingerprint `sha256:c188961e…` |
-| restarts across 27 nights | **10** — 9 by fingerprint change, 1 by a lost shard |
+| streak restarts | **10** — **8** `fingerprint-changed`, **2** `night-disqualified` (2026-07-28 no recorded fingerprint, 2026-08-03 short ledger), over 28 graded nights |
+| fingerprint moves | **10** across the 27 nights carrying one; **11** distinct fingerprints |
 | nights that were all-green | **26 of 27** (the 27th executed no test — see 2026-08-03 below) |
+
+Restarts and moves are **different counts and both are 10 by coincidence**, so do not equate them.
+Two of the ten moves land on a night that was disqualified for another reason, and the audit books
+those restarts to the rule that actually reset the count — hence 8 `fingerprint-changed`, not 10.
+Both lines above are copied verbatim from the script's own summary block —
+`node scripts/compat-window-audit.mjs --fetch --limit 40`, 2026-08-24:
+
+```
+streak restarts: 10 — 8 fingerprint-changed, 2 night-disqualified  (over 36 graded night(s))
+fingerprint moves: 10 across 27 night(s) carrying one; 11 distinct fingerprint(s)
+```
+
+**36, not 28**, because `--limit 40` reaches back past the window: the 8 extra rows are scheduled
+runs from before 2026-07-28, which predate the `compat-run-ledger` artifact and are therefore
+reported as unresolved `no-ledger` nights rather than omitted. They are outside the window and
+change none of its numbers. Narrow the limit and the denominator narrows with it; the streaks do
+not move.
 
 ### Read this before concluding the suite is flaky
 
@@ -38,13 +56,28 @@ test (a runner disconnect). **Not one night in the window was lost to a test fai
 ever re-attempted (`runAttempt: 1` on all 27), so no green here was bought by a re-run — the
 re-run-until-green failure mode #545 warns about has not occurred on this lane.
 
-**What stops the window is rule 1.** The fingerprint moved **9 times in 27 nights**, because the
-frozen set includes the packed `@getknext/*` closure and this repo merges to `main` most days. Every
-such merge restarts the count at zero however green the lane is. At the 2026-08 merge cadence,
-reaching 14 needs a **~2-week freeze on anything that changes the packed `dist/**` bytes**. The gate
-is therefore a **scheduling** problem, not a defect-fixing one — the opposite of what #545 assumed.
-That is a deliberate consequence of ADR-0039's freeze scope, recorded here at its real size rather
-than left to be rediscovered a third time.
+**What stops the window is rule 1.** The fingerprint moved **10 times across the 27 nights that
+recorded one**, because the frozen set includes both the packed `@getknext/*` closure and the
+harness, and this repo merges to `main` most days. Every such merge restarts the count at zero
+however green the lane is.
+
+**A freeze on `dist/**` alone is not enough, and this is measured rather than assumed.** The ledger
+records the fingerprint's two components separately, so the audit attributes every move:
+
+```
+  moves involving each frozen component: harness 5, packed 8
+  30790778590: harness ONLY — no freeze of the other component(s) prevents this move
+  31149348286: harness ONLY — no freeze of the other component(s) prevents this move
+```
+
+`packed` participated in 8 of the 10 moves — but **two moves were `harness`-only** (2026-08-03 and
+2026-08-07), and a freeze scoped to the packed closure would have prevented neither. At the 2026-08
+merge cadence, reaching 14 needs a **~2-week freeze across the whole frozen set** — the packed
+closure *and* `HARNESS_ROOTS` (`.github/workflows/test-e2e-deploy.yml`, `scripts/e2e-*`,
+`test/deploy-tests-manifest.*.json`). The gate is therefore a **scheduling** problem, not a
+defect-fixing one — the opposite of what #545 assumed. That is a deliberate consequence of
+ADR-0039's freeze scope, recorded here at its real size rather than left to be rediscovered a third
+time.
 
 ## The rules this log enforces
 
@@ -71,8 +104,8 @@ mid-window necessarily moves the harness digest and restarts the count under rul
 is not separately computable from a run ledger, and does not need to be; it stays stated because it
 names the *intent* the fingerprint enforces mechanically.
 
-**Two rules the audit script applies that this list did not state**, both strictly stricter than the
-above, added when the window was first audited end-to-end (2026-08-24):
+**Three rules the audit script applies that this list did not state**, all strictly stricter than
+the above, added when the window was first audited end-to-end (2026-08-24):
 
 - **A short ledger is not a green night.** Rule 2 read over the shards a ledger *contains* is
   satisfied vacuously by an *absent* shard — see 2026-08-03 below, and the note further down that
@@ -81,6 +114,26 @@ above, added when the window was first audited end-to-end (2026-08-24):
 - **A re-attempted run is not a qualifying night**, whatever it concluded. #545's own words: "a
   shard that needed a retry is not the same as a shard that passed, and the matrix should not treat
   them as equal."
+- **A night whose ledger cannot be obtained is disqualified, never absent.** If a scheduled run's
+  `compat-run-ledger` has expired, was never uploaded, or fails to download, the audit records it as
+  an **unresolved night** and prints it — it does not skip the run.
+
+  This is the rule that most directly protects the number in the table above, and it exists because
+  the *absence* of a night is not neutral: the streak-builder joins the nights on either side of a
+  gap, so a run that merely failed to download reports a **longer** streak than reality. That is the
+  one direction that flatters us. The trigger is measured, not hypothetical — `gh run download`
+  failed transiently on run `32621148829` during the review of this very audit, on an artifact that
+  existed and had not expired.
+
+  It is the same rule `scripts/compat-run-ledger.mjs` already applies to *shards* — "the expected
+  shard count is DECLARED … and NEVER inferred from what arrived" — applied one level up to
+  *nights*: the run list is the denominator, not the set of artifacts that happened to download.
+
+  It fails closed, with a consequence worth knowing: the lane of an unresolved night is unknowable
+  (the lane is read from the ledger, which is the thing that could not be fetched), so an unresolved
+  night restarts **every** lane's count. A bun weekly that fails to download will break the node
+  streak. That is the safe direction and it is the one taken — the worst case is a reported streak
+  shorter than the truth.
 
 ## Nights
 
@@ -156,6 +209,12 @@ Stated plainly because the gap is the reason this file is not self-certifying:
   follow-up.
 - **Nothing keeps this table in sync with the audit.** The script computes; a human transcribes.
   A stale table here is not detectable from inside the repo — re-run the audit before quoting it.
+- **Artifact retention bounds how far back the audit can see, and it says so rather than trimming
+  the window silently.** Scheduled runs before 2026-07-28 predate the `compat-run-ledger` artifact
+  entirely, so `--fetch --limit 40` reports each of them as an unresolved `no-ledger` night. Those
+  rows are noise for *this* window — it opened later — but they are the honest form of the limit:
+  the audit is telling you which runs it could not grade. Retention will eventually do the same to
+  nights that *are* in the window, and when it does, the streak will read shorter, not longer.
 - **`main` has no branch protection** (#555). A mid-window merge is therefore *detectable* but not
   *preventable*. That does not make a completed window's claim false — the fingerprint would change
   and the count would restart — but it does mean the window can be restarted an unbounded number of

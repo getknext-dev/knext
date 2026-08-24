@@ -11,6 +11,18 @@
  *   2. RERUN — a re-attempted run is not a qualifying night, whatever it
  *      concluded. This is #545's re-run-until-green vector, closed
  *      mechanically.
+ *   3. DROPPED RUN — a scheduled run whose ledger cannot be downloaded becomes
+ *      an UNRESOLVED night, never a skipped iteration. The trigger is measured,
+ *      not hypothetical: `gh run download 32621148829` failed transiently
+ *      during the 2026-08-24 review of this script, on a live unexpired
+ *      artifact.
+ *   4. MERGED STREAK — an unresolved night is admitted into every lane's
+ *      window, so it BREAKS the streak instead of being filtered out of it.
+ *      This is the half that actually flatters us: a dropped night that
+ *      disappears lets `auditWindow` join the nights either side into one
+ *      longer streak.
+ *   5. UNREADABLE LEDGER — a ledger file that will not parse is a hard failure,
+ *      not a `return null` that a `.filter(Boolean)` then erases.
  *
  * A guard that stays green when the behaviour it protects is removed is
  * decoration. Each mutation below deletes one guard's behaviour and requires
@@ -46,7 +58,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const TARGET = resolve(REPO_ROOT, 'scripts/compat-window-audit.mjs');
 const SPEC = 'tests/compat-window-audit.test.ts';
 
-declareMutations(2);
+declareMutations(5);
 
 const RUNNER = resolveTestRunner(REPO_ROOT);
 
@@ -106,6 +118,35 @@ prove(
   'rerun: stop disqualifying a re-attempted run',
   "if (String(ledger?.runAttempt ?? '1') !== '1') {",
   'if (false) {',
+);
+
+// 3. Restore the exact pre-fix behaviour of `fetchLedgers`: a run whose ledger
+//    download fails is skipped, so the run list stops being the denominator.
+prove(
+  'dropped run: let a failed download skip the run instead of recording it',
+  "      unresolved('artifact-download-failed');\n      continue;",
+  '      continue;',
+);
+
+// 4. Restore the pre-fix `selectLaneNights`: filter unresolved nights out of the
+//    lane, which is what lets `auditWindow` BRIDGE the nights either side of a
+//    dropped one into a single longer streak.
+prove(
+  'merged streak: filter unresolved nights out of the lane, so the streak joins across them',
+  "l?.event === 'schedule' && (l?.lane === lane || isUnresolved(l))",
+  "l?.event === 'schedule' && l?.lane === lane",
+);
+
+// 5. Restore the pre-fix `readDir`: an unparseable ledger becomes a null that a
+//    downstream `.filter` erases, rather than a hard failure.
+// The anchor carries the following line as well: `} catch (err) {` alone occurs
+// twice (the other is `withRetry`'s), and the harness aborts on an ambiguous
+// anchor rather than mutating the wrong one — which is the whole reason a
+// silently-failed substitution cannot certify a decorative guard here.
+prove(
+  'unreadable ledger: swallow the parse error and return a ledger-shaped blank',
+  '      } catch (err) {\n        throw new Error(',
+  '      } catch (err) {\n        return { shards: [] };\n        throw new Error(',
 );
 
 console.log(`\n${pass} caught, ${fail} undetected.`);

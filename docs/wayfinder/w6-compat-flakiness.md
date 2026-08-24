@@ -400,10 +400,16 @@ that newer evidence overturns. The 2026-08-24 public-release audit (blocker 3 of
 nights and three bun weeklies — using **one** extraction method throughout, the structured
 `compat-run-ledger`. That uniformity is what lets §7's "indicative only" items be settled.
 
-Method: the `compat-run-ledger` artifact of every scheduled run from 2026-07-28 to 2026-08-24
-(31 runs: 27 node nights carrying a fingerprint, 1 pre-fingerprint node night, 4 bun weeklies),
-graded by `scripts/compat-window-audit.mjs` — which exists because this reconstruction had now been
-done by hand twice, and #545 AC 3 asks for exactly that number to stop being folklore.
+Method: the `compat-run-ledger` artifact of every scheduled run from 2026-07-28 to 2026-08-24 —
+**32 runs**: 28 node nights (27 carrying a fingerprint, 1 pre-fingerprint) and 4 bun weeklies, which
+is the count the evidence list at the foot of this section enumerates. Graded by
+`scripts/compat-window-audit.mjs` — which exists because this reconstruction had now been done by
+hand twice, and #545 AC 3 asks for exactly that number to stop being folklore.
+
+Every count in this section is that script's printed output. Where an earlier draft did the
+arithmetic by hand it got three numbers wrong, all corrected below; the script now prints the
+restart tally, the fingerprint-move count and the per-component attribution precisely so no reader
+has to re-derive them.
 
 ### 8.1 The node lane: nineteen more nights, zero test failures
 
@@ -449,9 +455,20 @@ and sometimes settles wrong (assertion) produces exactly this pattern. It is con
 defect.
 
 **So §7's "the shard set moves, so a future bun red outside {6, 8} is not automatically a new
-defect" needs its converse said too:** the shard set has *not* moved since. Three consecutive
-weeklies are byte-identical — `775 passed / 3 failed`, shards 6 and 8, the same three files. The bun
-lane is **deterministically red**, and #545's re-run-until-green vector cannot operate on it.
+defect" needs its converse said too:** the shard set has *not* moved since. The last three weeklies
+are identical **in shard and in file** — `775 passed / 3 failed`, `failed=1` on shard 6, `failed=2`
+on shard 8, the same three files, `runAttempt: 1` throughout.
+
+They are **not** identical case-for-case, and the earlier draft of this section wrongly called them
+"byte-identical" while its own table three lines above recorded `timeout, 4 cases` / `5 cases` /
+`4 cases`. Measured from the ledgers: **08-09 and 08-23 are case-for-case identical; 08-16 is not** —
+its `app-dir/app-static` carries a fifth failing case, `should cache correctly handle JSON body`,
+that neither of the others has. Saying "byte-identical" was also inconsistent in a direction: §8.2(a)
+treats *one* appearance in four of `edge-compiler-can-import-blob-assets` as material enough to
+overturn a matrix cell, so a whole extra failing case cannot be waved through as noise.
+
+File-and-shard determinism is what the argument needs and it is solidly established: the bun lane is
+**deterministically red**, and #545's re-run-until-green vector cannot operate on it.
 
 ### 8.3 §5's recommendation 2 is overturned — do NOT quarantine `dynamic-on-hover`
 
@@ -469,8 +486,25 @@ entry. **Recommendation withdrawn.** If `dynamic-on-hover` reds again with the f
 
 §5 item 4 said the 14-night gate is "reachable by waiting". §7 corrected that to "the window is not
 open". Both are now superseded: **the window opened on 2026-07-29 and it has never exceeded 7 of
-14** — not because a night went red, but because the harness fingerprint moved **9 times in 27
-nights**.
+14** — not because a night went red, but because the harness fingerprint moved **10 times across the
+27 nights that recorded one** (11 distinct fingerprints).
+
+Two counts here are easy to conflate and are not the same number, so the script prints both:
+
+```
+streak restarts: 10 — 8 fingerprint-changed, 2 night-disqualified  (over 36 graded night(s))
+fingerprint moves: 10 across 27 night(s) carrying one; 11 distinct fingerprint(s)
+```
+
+(The 36 is `--limit 40`'s denominator, not the window's: it includes 8 pre-2026-07-28 scheduled runs
+that predate the ledger artifact and are reported as unresolved `no-ledger` nights. They are outside
+the window and move none of its numbers.)
+
+Ten moves, ten restarts — but only **8** restarts are *attributed* to a fingerprint change. The
+other 2 are `night-disqualified` (2026-07-28, no recorded fingerprint; 2026-08-03, short ledger),
+and each of those nights happens to carry a fingerprint move as well. The audit books the restart to
+the rule that actually reset the count, which is why "9 by fingerprint change, 1 by a lost shard" —
+the earlier hand arithmetic — matched neither number.
 
 | streak | nights | fingerprint | ended by |
 |---|---|---|---|
@@ -482,17 +516,44 @@ nights**.
 | 08-19 / 08-20 / 08-21 / 08-22 | 1 each | four distinct | fingerprint change ×4 |
 | 08-23 → 08-24 | 2 *(open)* | `c188961e` | — |
 
-The frozen set includes the packed `@getknext/*` closure, and this repo merges to `main` most days;
-the 7-night stretch corresponds exactly to the quietest week for shipped `dist/**` bytes. **The v1.0
-compat gate is a scheduling problem — it needs a ~2-week freeze on the packed closure — not a
-defect-fixing one.** That is a design consequence of ADR-0039's freeze scope, and whoever owns the
-v1.0 date should plan the freeze rather than wait for a streak that the merge cadence forbids.
+**What a freeze would actually have to cover.** ADR-0039's fingerprint has two components,
+`harness` and `packed`, and the ledger records both, so each move can be attributed rather than
+assumed. The audit prints the attribution:
+
+```
+  moves involving each frozen component: harness 5, packed 8
+  30790778590: harness ONLY — no freeze of the other component(s) prevents this move
+  30979973943: packed ONLY  — no freeze of the other component(s) prevents this move
+  31149348286: harness ONLY — no freeze of the other component(s) prevents this move
+  32214131442: packed ONLY  — no freeze of the other component(s) prevents this move
+  32330221781: packed ONLY  — no freeze of the other component(s) prevents this move
+  32550380562: packed ONLY  — no freeze of the other component(s) prevents this move
+  32616853402: packed ONLY  — no freeze of the other component(s) prevents this move
+```
+
+`packed` participated in 8 of the 10 moves and `harness` in 5, and **two moves were `harness`-only
+with `packed` unchanged** — 2026-08-03 (`30790778590`) and 2026-08-07 (`31149348286`). So the
+remedy an earlier draft prescribed, *"a ~2-week freeze on anything that changes the packed
+`dist/**` bytes"*, is **narrower than the measured cause**: it would not have prevented either of
+those two. The freeze has to cover the **whole `HARNESS_ROOTS` set** —
+`.github/workflows/test-e2e-deploy.yml`, `scripts/e2e-*`, `test/deploy-tests-manifest.*.json` — as
+well as the packed closure.
+
+The merge-cadence framing survives that correction and is in fact strengthened by it: the 7-night
+stretch lines up with the quietest week for **both** components, not just for shipped `dist/**`
+bytes. **The v1.0 compat gate is a scheduling problem — it needs a ~2-week freeze across the entire
+frozen set — not a defect-fixing one.** That is a design consequence of ADR-0039's freeze scope, and
+whoever owns the v1.0 date should plan the freeze rather than wait for a streak that the merge
+cadence forbids.
 
 ### Confidence on §8
 
 - **High** on the node-lane counts, lane attribution, rerun counts and fingerprints: all read from
   the `compat-run-ledger` artifacts, and now recomputed by a tested script rather than by eye.
-- **High** on the bun lane's determinism in shard-and-file: three byte-identical consecutive runs.
+- **High** on the bun lane's determinism **in shard and file**: three consecutive runs at `775/3`,
+  shards 6 and 8, the same three files. **Not** case-for-case — 08-16 carries one extra failing case
+  in `app-dir/app-static` (see §8.2), so the determinism claim stops at shard-and-file and is stated
+  no wider.
 - **High** on the mechanism alternation being real: single extraction method across all four runs.
 - **Medium** on the *cause* of that alternation. "One fetch mechanism with two manifestations" is
   the reading most consistent with the data and with the documented gap, but no repro was run for
@@ -500,7 +561,7 @@ v1.0 date should plan the freeze rather than wait for a streak that the merge ca
 - **Not established:** whether the 08-03 runner-loss class recurs. One instance in 27 nights, and
   the window rules now grade it as a failed night (short ledger) rather than vacuously passing it.
 
-*Evidence for §8: `compat-run-ledger` artifacts from all 31 scheduled runs 2026-07-28 → 2026-08-24
+*Evidence for §8: `compat-run-ledger` artifacts from all 32 scheduled runs 2026-07-28 → 2026-08-24
 (node: 30333571518, 30427197358, 30518209404, 30609544684, 30687194887, 30735484416, 30790778590,
 30882760738, 30979973943, 31076109243, 31149348286, 31239550517, 31294965728, 31356989667,
 31459242158, 31565302791, 31669242641, 31771823777, 31863085065, 31925582335, 31993151936,
