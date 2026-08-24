@@ -53,12 +53,12 @@ type Gate = {
  * — the test then proves nothing about N. Every relational case below asserts the
  * message too.
  */
-function runDetail(gate: Gate): { code: number; stderr: string } {
+function runDetail(gate: Gate, args: string[] = []): { code: number; stderr: string } {
   const dir = mkdtempSync(join(tmpdir(), 'gates-'));
   const file = join(dir, 'adr-0042-gates.json');
   writeFileSync(file, JSON.stringify(gate, null, 2));
   try {
-    execFileSync('node', [SCRIPT, '--file', file], { cwd: REPO, stdio: 'pipe' });
+    execFileSync('node', [SCRIPT, '--file', file, ...args], { cwd: REPO, stdio: 'pipe' });
     return { code: 0, stderr: '' };
   } catch (e) {
     const err = e as { status?: number; stderr?: Buffer };
@@ -72,11 +72,24 @@ function runOn(gate: Gate): number {
 }
 
 /** Assert the validator failed, and failed for the stated reason. */
-function expectFailure(gate: Gate, because: RegExp): void {
-  const { code, stderr } = runDetail(gate);
+function expectFailure(gate: Gate, because: RegExp, args: string[] = []): void {
+  const { code, stderr } = runDetail(gate, args);
   expect(code, `expected a non-zero exit; stderr was:\n${stderr}`).not.toBe(0);
   expect(stderr).toMatch(because);
 }
+
+/**
+ * Declare one registry entry for a single run — the seam rules 6b and 6c need.
+ *
+ * Those rules live in `auditRegistry`, whose only other input is the committed
+ * registry, so without this their failing case cannot be constructed and they had
+ * NO test at all: all three halves were deleted independently and the suite stayed
+ * green. A guard whose failing case cannot be built is decoration.
+ */
+const declare = (level: string, key: string, entry: unknown): string[] => [
+  '--declare',
+  `${level}.${key}=${JSON.stringify(entry)}`,
+];
 
 const load = (): Gate => JSON.parse(readFileSync(GATE, 'utf8')) as Gate;
 const phase = (g: Gate, id: string): Phase => {
@@ -226,6 +239,120 @@ describe('#753 — every relation the gate file can state is read by a checker',
     expectFailure(g, /key `depends_on_adr` is not in the key registry/);
   });
 
+  // --- rule 6b: a relation may not be filed as commentary (registry-wide) ---
+
+  it('rule 6b: a relationally-named key declared PROSE fails at startup', () => {
+    expectFailure(
+      load(),
+      /`phase\.gated_by_zzz` is declared PROSE but its name states a relation/,
+      declare('phase', 'gated_by_zzz', { prose: 'who cares' }),
+    );
+  });
+
+  it('rule 6b: it fires on the DECLARATION, with no such key in any gate file', () => {
+    const g = load();
+    expect(g.phases.some((p) => 'requires_zzz' in p)).toBe(false);
+    expectFailure(
+      g,
+      /`criterion\.requires_zzz` is declared PROSE but its name states a relation/,
+      declare('criterion', 'requires_zzz', { prose: 'commentary, honest' }),
+    );
+  });
+
+  // --- rule 6c: the third door. READ must be BOUND, not merely labelled. ---
+
+  it("rule 6c: read('<label>') on a key nothing consumes fails — the third door", () => {
+    // The reviewer's defeat of rule 6, verbatim: a relationally-NAMED key labelled
+    // read('8'), carrying a reference that is unresolved, duplicated AND
+    // self-referential. Rule 8 never saw it, because `phaseRef` was simply omitted.
+    const g = load();
+    phase(g, '5').requires_phase = ['99', '99', '5'];
+    expectFailure(
+      g,
+      /`phase\.requires_phase` is declared READ but nothing in this validator reads it/,
+      declare('phase', 'requires_phase', { by: '8' }),
+    );
+  });
+
+  it('rule 6c: and once the same key is BOUND, its defects are all caught', () => {
+    const g = load();
+    phase(g, '5').requires_phase = ['99', '99', '5'];
+    const bound = declare('phase', 'requires_phase', {
+      by: '8/13',
+      phaseRef: 'ordered',
+      inverse: 'requires_phase',
+    });
+    const { code, stderr } = runDetail(g, bound);
+    expect(code, stderr).not.toBe(0);
+    expect(stderr).toMatch(/requires_phase\[0\] `99` is not a declared phase/);
+    expect(stderr).toMatch(/requires_phase\[1\] `99` is listed twice/);
+    expect(stderr).toMatch(/requires_phase\[2\] refers to itself/);
+    expect(stderr).not.toMatch(/nothing in this validator reads it/);
+  });
+
+  it('rule 6c: a READ naming a rule id that does not exist fails', () => {
+    // `evidence: read('12')` shipped in this very PR against a rule 12 that never
+    // existed, and passed authorship and review because nothing checked the label.
+    // The id here is `42` rather than `12` for a reason worth stating: closing this
+    // required NUMBERING the checks, and rule 12 now exists — so the original
+    // defect's literal is no longer a defect, and reusing it would test nothing.
+    // `criterion.source` is a key that IS bound, so the binding half cannot be
+    // what fires and the rule-id half is proved alone.
+    expectFailure(
+      load(),
+      /`criterion\.source` is declared READ by rule `42`, which is not a rule this validator implements/,
+      declare('criterion', 'source', { by: '42' }),
+    );
+  });
+
+  it('rule 6c: a phaseRef key with no valid ordering fails', () => {
+    expectFailure(
+      load(),
+      /`phase\.gates` declares `phaseRef: true` — it must be ordered or unordered/,
+      declare('phase', 'gates', { by: '8/13', phaseRef: true, inverse: 'blocked_by' }),
+    );
+  });
+
+  it('rule 6c: an inverse that does not point home fails', () => {
+    expectFailure(
+      load(),
+      /`phase\.gates` declares `inverse: "concurrent_with"`, which is not a phaseRef key at this level declaring `gates` back/,
+      declare('phase', 'gates', { by: '8/13', phaseRef: 'ordered', inverse: 'concurrent_with' }),
+    );
+  });
+
+  it('rule 6c: the --declare seam is refused without --file, so it cannot loosen the real gate dir', () => {
+    let code = 0;
+    let stderr = '';
+    try {
+      execFileSync('node', [SCRIPT, '--declare', 'phase.anything={"prose":"x"}'], {
+        cwd: REPO,
+        stdio: 'pipe',
+      });
+    } catch (e) {
+      const err = e as { status?: number; stderr?: Buffer };
+      code = err.status ?? 1;
+      stderr = String(err.stderr ?? '');
+    }
+    expect(code).toBe(2);
+    expect(stderr).toMatch(/--declare is a test seam and requires --file/);
+  });
+
+  // --- rule 6d: a relational name hiding one level down ---
+
+  it('rule 6d: a relational key nested inside a declared key fails', () => {
+    const g = load();
+    (crit(g, 'P3d-1').evidence as Record<string, unknown>).blocked_by_phase = '99';
+    expectFailure(g, /nested key `blocked_by_phase` has a relational name/);
+  });
+
+  it('rule 6d: it reaches arbitrarily deep, not just one level', () => {
+    const g = load();
+    const ev = crit(g, 'P3d-1').evidence as Record<string, Record<string, unknown>>;
+    ev.deployed_digest_check_2026_08_17.gates_the_flip = true;
+    expectFailure(g, /nested key `gates_the_flip` has a relational name/);
+  });
+
   // --- rule 7: the status vocabulary, and what each class implies about measurement ---
 
   it('rule 7: a status outside the declared vocabulary fails', () => {
@@ -347,10 +474,54 @@ describe('#753 — every relation the gate file can state is read by a checker',
     expectFailure(g, /why_it_gated_phase_9 names phase 9, which is not declared/);
   });
 
+  it('rule 8: concurrent_with stated on one side only fails', () => {
+    // Corroboration is table-driven: `concurrent_with` declares itself its own
+    // inverse, so it inherits the same "stated once, denied on the other side"
+    // check `blocked_by` gets, without a branch written for it.
+    const g = load();
+    phase(g, '1').concurrent_with = undefined;
+    expectFailure(g, /concurrent_with \[1\] but phase 1 does not declare `concurrent_with` \[2\]/);
+  });
+
   it('rule 8c: a discharged gate claim with no gates_note fails', () => {
     const g = load();
     phase(g, '3d').gates_note = undefined;
     expectFailure(g, /no longer lists it and there is no `gates_note` recording the discharge/);
+  });
+
+  it('rule 8c: a gates_note about SOME OTHER phase does not discharge the claim', () => {
+    // The discharge check used to be `!gates.includes(target) && !phase.gates_note`,
+    // so ANY note discharged ANY claim — the prose outliving the relation, which is
+    // the exact defect 8c was written to close, one level up.
+    const g = load();
+    phase(g, '3d').why_it_gated_phase_5 = 'it did, allegedly';
+    expectFailure(g, /`gates_note` does not name phase 5 — a note about some other phase/);
+  });
+
+  // --- rule 13: an ordered and an unordered relation over the same pair ---
+
+  it('rule 13: gates and concurrent_with may not name the same phase', () => {
+    const g = load();
+    phase(g, '3').gates = ['5'];
+    phase(g, '3').concurrent_with = ['5'];
+    phase(g, '5').concurrent_with = ['3'];
+    expectFailure(g, /are related by 3\.gates \(which asserts an order\) AND by .*concurrent_with/);
+  });
+
+  it('rule 13: an ordered relation may not run both ways between one pair', () => {
+    const g = load();
+    phase(g, '3').gates = ['5'];
+    phase(g, '5').gates = ['3'];
+    expectFailure(g, /a pair cannot come first in both directions/);
+  });
+
+  // --- rule 12: the phase in flight may not be one the file says is blocked ---
+
+  it('rule 12: current_phase naming a gated phase fails', () => {
+    const g = load();
+    phase(g, '3').gates = ['5'];
+    g.current_phase = '5';
+    expectFailure(g, /current_phase 5 is still gated by phase 3/);
   });
 
   // --- rule 9: the remaining self-contradictions ---
@@ -359,6 +530,31 @@ describe('#753 — every relation the gate file can state is read by a checker',
     const g = load();
     phase(g, '2').done_on = '2026-08-20';
     expectFailure(g, /carries `done_on` 2026-08-20 but its status is/);
+  });
+
+  it('rule 9a: the OTHER half — a strict DONE with no done_on fails', () => {
+    // Guards in this repo have a record of asserting one half; 9a asserted only
+    // that a non-DONE phase carries no date. A qualified DONE_* stays exempt on
+    // purpose: it has not completed, so there is no date to give.
+    const g = load();
+    const p = phase(g, '0');
+    for (const c of p.criteria ?? []) c.measured = c.target;
+    p.status = 'DONE';
+    p.status_note = undefined;
+    p.done_on = undefined;
+    expectFailure(g, /status DONE with no `done_on`/);
+  });
+
+  it('rule 9a: a QUALIFIED done with no done_on is deliberately allowed', () => {
+    const g = load();
+    phase(g, '0').done_on = undefined;
+    expect(runOn(g)).toBe(0);
+  });
+
+  it('rule 9b: evidence on an unmeasured criterion fails', () => {
+    const g = load();
+    crit(g, 'P2-1').evidence = { method: 'none, that is the point' };
+    expectFailure(g, /carries `evidence` but is unmeasured/);
   });
 
   it('rule 9c: an irreversible phase may not be DONE while a blocks_ship criterion is unmet', () => {

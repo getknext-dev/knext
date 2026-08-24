@@ -18,7 +18,19 @@
     "because the file could previously state a relation nothing read and so contradict itself and",
     "stay green: phase 3d read NOT_STARTED while its own criteria carried measured values from",
     "2026-08-08 to 2026-08-17, and a reader trusted the ADR prose over this file and re-ran a",
-    "measurement phase that was already complete."
+    "measurement phase that was already complete.",
+    "",
+    "AMENDED after review: READ was itself an escape. Declaring a new relation READ by any label,",
+    "with no checker behind it, passed — a third door beside 'checker' and 'prose', and this file's",
+    "own `evidence: read('12')` went through it against a rule 12 that did not exist. A READ must",
+    "now name a rule the validator implements AND be reachable from its code. What is NOT claimed:",
+    "the scan is over KEYS at the five structural levels, never over VALUES. A relation asserted in",
+    "an English sentence inside a `$comment` or a `note` is still not caught, and nothing here can",
+    "catch it.",
+    "",
+    "`concurrent_with` is corroborated on both sides, exactly as `blocked_by`/`gates` are: phase 1",
+    "states its concurrency with phase 2 because phase 2 states it with phase 1. Stated once, a",
+    "relation is denied by its absence on the other side."
   ],
   "adr": "0042",
   "title": "vinext + bun --compile --bytecode as the default runtime",
@@ -228,6 +240,7 @@
       "status": "UNBLOCKED_3d_DISCHARGED",
       "status_note": "Was BLOCKED_ON_3d. Released 2026-08-17 when phase 3d's coverage question was answered (34/34 from the binary). This is NOT a claim that phase 1 is ready to run: its own preconditions remain \u2014 P1-pre-2 is unmeasured, and the node CONTROL arm still has no committed build recipe in the repo. Unblocked is not the same as admissible.",
       "reversible": true,
+      "concurrent_with": ["2"],
       "arms": ["node+turbopack (control)", "bun+vinext-compiled"],
       "preconditions": [
         {
