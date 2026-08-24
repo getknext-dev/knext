@@ -523,12 +523,12 @@ assumed. The audit prints the attribution:
 ```
   moves involving each frozen component: harness 5, packed 8
   30790778590: harness ONLY — no freeze of the other component(s) prevents this move
-  30979973943: packed ONLY  — no freeze of the other component(s) prevents this move
+  30979973943: packed ONLY — no freeze of the other component(s) prevents this move
   31149348286: harness ONLY — no freeze of the other component(s) prevents this move
-  32214131442: packed ONLY  — no freeze of the other component(s) prevents this move
-  32330221781: packed ONLY  — no freeze of the other component(s) prevents this move
-  32550380562: packed ONLY  — no freeze of the other component(s) prevents this move
-  32616853402: packed ONLY  — no freeze of the other component(s) prevents this move
+  32214131442: packed ONLY — no freeze of the other component(s) prevents this move
+  32330221781: packed ONLY — no freeze of the other component(s) prevents this move
+  32550380562: packed ONLY — no freeze of the other component(s) prevents this move
+  32616853402: packed ONLY — no freeze of the other component(s) prevents this move
 ```
 
 `packed` participated in 8 of the 10 moves and `harness` in 5, and **two moves were `harness`-only
