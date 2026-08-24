@@ -296,12 +296,16 @@ process.on("SIGINT", () => onSignal("SIGINT"));
 // free — the lightweight listener pulls no heavy module; prom-client +
 // @opentelemetry/api load lazily on the first scrape or on child-ready. So we
 // listen from process start and keep the ~790ms graph off the cold-start path.
-void metricsEndpoint
-    .ensureListening("startup")
-    .then(() => bootTrace.mark("metrics-listening"))
-    .catch((err) => {
+// The call stays on ONE line: a sibling source guard
+// (deferred-default-metrics.test.ts) asserts that
+// `metricsEndpoint.ensureListening(` precedes the spawn, and a formatter-
+// wrapped member chain would break that string and silently disarm it.
+void metricsEndpoint.ensureListening("startup").then(
+    () => bootTrace.mark("metrics-listening"),
+    (err: unknown) => {
         log.warn({ err }, "Metrics endpoint failed to bind :9091");
-    });
+    },
+);
 
 // ═══ Spawn the child — the cold-start critical path ═══════════════════════════
 const nextProc = spawn(process.execPath, [...preloadArgs, serverJs], {
