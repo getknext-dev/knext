@@ -172,7 +172,18 @@ fi
 # namespace (NextApp.spec.secrets.envMap.DATABASE_URL); see deploy/30-knext-secret.yaml.
 DBNAME=myapp-database
 # ROOTED (trailing dot): skips the ndots:5 five-entry search walk on fresh pods.
-DBHOST=pggw.scale-zero-pg.svc.cluster.local.
+#
+# Overridable for a cluster with a custom DNS zone / gateway Service name (#798):
+# hardcoding it meant re-running this script on such a cluster reconciled a working
+# DSN to an unresolvable host. Set -> VERBATIM (never auto-qualified or auto-rooted);
+# unset OR EMPTY -> the rooted default. `:-` (not `-`) is what makes empty behave as
+# unset, matching the operator's env() helper and provision-app.sh's $GW_HOST.
+#
+# This is the BASE gateway (`pggw`, cloud_admin), NOT the apps-gateway (`pggw-apps`)
+# — so it is deliberately its OWN knob and must never read APPDB_GATEWAY_HOST: the
+# apps-gateway REFUSES cloud_admin before any wake (deploy/81-apps-gateway.yaml
+# GW_RESERVED_SYSTEMS / role check), so pointing this DSN there would fail closed.
+DBHOST="${DBHOST:-pggw.${NS}.svc.cluster.local.}"
 DB_URL="postgres://cloud_admin:${BA_PASS}@${DBHOST}:55432/postgres?sslmode=disable"
 DB_RO_URL="postgres://cloud_admin:${BA_PASS}@${DBHOST}:55434/postgres?sslmode=disable"
 $K create secret generic "$DBNAME" \
