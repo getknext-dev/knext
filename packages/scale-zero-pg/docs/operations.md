@@ -2245,6 +2245,26 @@ cd deploy
   the compute with the new md5. If you `--bounce` before rolling consumers, in-flight
   sessions on the old password get a clean reconnect and re-auth once the consumer
   pods carry the new Secret.
+- **A `tier: warm` app: use `--bounce`.** A warm app is kept awake by one long-lived
+  authenticated connection the operator holds. That hold is **not** re-dialled while it
+  is healthy, so a no-bounce rotation leaves it running on the old credential — correct
+  and undisturbed, but it means the app is one connection drop (a gateway rollout, a
+  partition) away from a re-dial that presents the **new** password to a compute still
+  enforcing the **old** verifier. That re-dial is rejected, the app leaves the warm set,
+  and `appdb_warm_hold_active{app=...}` falls until the compute bounces or wakes.
+  `rotate-cred <app> --bounce` closes the window in one step — the new verifier lands on
+  the compute and the hold dies together, so the next resync re-dials with a matching
+  credential. Pinned by `gateway/internal/appdb/warmhold_rotation_test.go`; the live
+  sequence is §4 of [the warm-tier drill](drills/tier-warm-drill.md).
+- **A custom gateway host is preserved.** Both writers of `app-db-<app>` (`create` and
+  `rotate-cred`) resolve the host from `APPDB_GATEWAY_HOST`, with the **same precedence
+  as the operator** — set (non-empty) is used verbatim, unset or empty falls back to the
+  rooted `pggw-apps.$NS.svc.cluster.local.`. So on a cluster with a custom DNS zone or
+  gateway Service name, a rotation no longer rewrites a working DSN to an unresolvable
+  host (#798). Export the same value the operator runs with when you invoke the script
+  by hand. The base-tier equivalent is `DBHOST` for `gen-secrets.sh` — a separate knob
+  on purpose: it targets the **base** gateway (`pggw`, `cloud_admin`), which the
+  apps-gateway refuses before any wake.
 
 <a id="reclaiming-orphaned-apps-tenant-wal-9087"></a>
 ### Reclaiming orphaned apps-tenant WAL (#90/#87)

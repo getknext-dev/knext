@@ -7,6 +7,6 @@
     "build": "cd gateway && go build ./...",
     "build:image": "docker build -t scale-zero-pg/gateway:ci gateway/",
     "lint": "cd gateway && test -z \"$(gofmt -l .)\" && go vet ./...",
-    "test": "cd gateway && go test ./... && cd ../deploy && python3 -m unittest discover -s . -p 'test_skctl.py' && bash test_provision-app.sh"
+    "test": "cd gateway && go test ./... && cd ../deploy && python3 -m unittest discover -s . -p 'test_skctl.py' && bash test_provision-app.sh && bash test_gen-secrets.sh"
   }
 }

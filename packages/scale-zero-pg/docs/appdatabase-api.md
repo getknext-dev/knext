@@ -206,10 +206,22 @@ PR #795). `cluster.local` is the Kubernetes default DNS zone; a cluster with a c
 zone sets `APPDB_GATEWAY_HOST` on the operator, which is used **verbatim** (keep it
 rooted).
 
-**Scope: newly minted apps only.** `app-db-<app>` Secrets are minted **once** and never
-rewritten (the create path is idempotent so a live app's password is never rotated out
-from under it), so this host change reaches apps provisioned **after** the operator is
-upgraded. Existing apps keep their old short-host DSN until the Secret is deleted and
+**The provisioning scripts honour the same override, with the same precedence.** The
+operator is not the only writer of `app-db-<app>`: `provision-app.sh` writes it from
+`create` **and** from `rotate-cred`. Both resolve the host exactly as the operator does —
+set and non-empty → verbatim, unset **or empty** → the rooted default
+`pggw-apps.$NS.svc.cluster.local.` — so on a custom-zone cluster a routine credential
+rotation no longer rewrites a working DSN to an unresolvable host (#798). Export the same
+value the operator runs with when invoking the script by hand; it reads your environment,
+not the operator Deployment. (`gen-secrets.sh`'s base `DATABASE_URL[_RO]` has its own
+`DBHOST` knob — the **base** gateway `pggw`, which serves `cloud_admin`; the apps-gateway
+refuses that role, so the two must never share one variable.)
+
+**Scope: newly minted apps only.** `app-db-<app>` Secrets are minted **once** by the
+create path (which is idempotent, so a live app's password is never rotated out from
+under it) — the one thing that rewrites the key afterwards is a deliberate
+`rotate-cred`, which is also why that path had to learn the override above. So this host
+change reaches apps provisioned **after** the operator is upgraded. Existing apps keep their old short-host DSN until the Secret is deleted and
 re-minted — deliberately, since re-minting a live app's Secret is a credential event, not
 a DNS tweak.
 

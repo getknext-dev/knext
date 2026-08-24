@@ -140,4 +140,89 @@ case "$out" in *invalid\ app\ name*) echo "ok - render rejects an invalid app na
 out="$(render good-app --bogus 2>&1)" && fail "render accepted an unknown flag"
 case "$out" in *unknown\ flag*) echo "ok - render rejects an unknown flag"; pass=$((pass + 1));; *) fail "render: unknown flag not reported: $out";; esac
 
+# --- issue #798: APPDB_GATEWAY_HOST is honoured by BOTH Secret writers ------
+# The operator honours the env override (gateway/cmd/appdb-operator/main.go
+# gatewayHostFromEnv -> env("APPDB_GATEWAY_HOST", appdb.DefaultGatewayHost)); these
+# scripts write the SAME app-db-<app> Secret. When they hardcoded the default, a
+# routine `rotate-cred` on a cluster with a custom gateway Service / DNS zone
+# REWROTE a working, operator-minted DSN to an unresolvable host — a data-plane
+# outage triggered by a routine credential rotation.
+#
+# Both writers are exercised THROUGH THE SCRIPT (not by grepping it): `create`'s
+# mint_credential and `rotate-cred`'s cmd_rotate_cred. A fix to one writer only —
+# this repo's classic half-fix — reds here on the other.
+#
+# minted_host <writer> <app> — echo the host of the DATABASE_URL the writer puts
+# into app-db-<app>. Runs in a SUBSHELL with the cluster calls stubbed, so no
+# kubectl and no state leaks back into this test process.
+minted_host() {
+  local writer="$1" app="$2"
+  (
+    PROVISION_APP_SOURCED=1 . "$PROV"
+    # K stub: `get` decides whether the Secret already exists (mint mints only when
+    # absent; rotate requires it present), `create` captures the write, everything
+    # else (label/apply/get deploy) is an inert success.
+    K() {
+      case "$1 $2" in
+        "get secret") [ "$writer" = rotate ] && return 0 || return 1 ;;
+        "create secret") printf '%s\n' "$*" >&3 ;;
+        *) return 0 ;;
+      esac
+    }
+    case "$writer" in
+      create) mint_credential "$app" >/dev/null ;;
+      rotate) cmd_rotate_cred "$app" >/dev/null 2>&1 ;;
+    esac
+  ) 3>&1 1>/dev/null 2>/dev/null \
+    | tr ' ' '\n' | grep '^--from-literal=DATABASE_URL=' \
+    | sed -e 's|^--from-literal=DATABASE_URL=postgres://[^@]*@||' -e 's|:55432/.*$||'
+}
+
+# (a) no override -> the ROOTED default, namespaced by $NS (the operator's
+#     DefaultGatewayHost shape). Both writers.
+for w in create rotate; do
+  got="$(NS=scale-zero-pg minted_host "$w" good-app)"
+  [ "$got" = "pggw-apps.scale-zero-pg.svc.cluster.local." ] \
+    || fail "$w: default gateway host = '$got', want the rooted 'pggw-apps.scale-zero-pg.svc.cluster.local.'"
+  echo "ok - $w mints the rooted default gateway host when APPDB_GATEWAY_HOST is unset"
+  pass=$((pass + 1))
+done
+
+# (b) the override is honoured VERBATIM by BOTH writers — this is the #798 bug:
+#     rotate-cred clobbering a custom-zone DSN is the outage.
+custom="pggw-apps.scale-zero-pg.svc.k8s-zone.test."
+for w in create rotate; do
+  got="$(NS=scale-zero-pg APPDB_GATEWAY_HOST="$custom" minted_host "$w" good-app)"
+  [ "$got" = "$custom" ] \
+    || fail "$w: APPDB_GATEWAY_HOST='$custom' was NOT honoured (minted '$got'). On a custom-zone cluster this writes an UNRESOLVABLE DSN over a working one (#798)."
+  echo "ok - $w honours APPDB_GATEWAY_HOST verbatim"
+  pass=$((pass + 1))
+done
+
+# (c) verbatim means VERBATIM: an override is never auto-qualified or auto-rooted,
+#     matching the operator's contract (ports.go DefaultGatewayHost docblock). The
+#     fixture deliberately carries no `.svc` so it is not itself a rooting violation.
+got="$(NS=scale-zero-pg APPDB_GATEWAY_HOST='custom-gw.example.test' minted_host create good-app)"
+[ "$got" = "custom-gw.example.test" ] \
+  || fail "create: an unrooted override was rewritten to '$got' — the operator passes it through verbatim; the scripts must not diverge"
+echo "ok - an override is passed through verbatim (never auto-rooted/qualified)"
+pass=$((pass + 1))
+
+# (d) EMPTY behaves as UNSET — exactly the operator's env() helper, which treats ""
+#     as absent. `${VAR:-default}`, not `${VAR-default}`: with the latter an empty
+#     env (a common CI/entrypoint shape) would mint a host-less DSN.
+got="$(NS=scale-zero-pg APPDB_GATEWAY_HOST='' minted_host rotate good-app)"
+[ "$got" = "pggw-apps.scale-zero-pg.svc.cluster.local." ] \
+  || fail "rotate: APPDB_GATEWAY_HOST='' minted '$got' — an empty override must fall back to the default, as the operator's env() does"
+echo "ok - an EMPTY APPDB_GATEWAY_HOST falls back to the default (operator env() parity)"
+pass=$((pass + 1))
+
+# (e) the default follows $NS (the scripts' own namespace knob), so a plane in a
+#     non-default namespace does not mint a cross-namespace host.
+got="$(NS=pg-other minted_host create good-app)"
+[ "$got" = "pggw-apps.pg-other.svc.cluster.local." ] \
+  || fail "create: NS=pg-other minted '$got' — the default host must follow \$NS"
+echo "ok - the default gateway host follows \$NS"
+pass=$((pass + 1))
+
 echo "provision-app.sh validation: $pass cases — PASSED"
