@@ -18,6 +18,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { createLogger } from "../utils/logger";
+import { bootTrace } from "./boot-trace";
 import { warnOnDegradedCompileCache } from "./compile-cache-health";
 import { warnOnCompileCacheShadow } from "./compile-cache-shadow";
 import { registerDbPoolDrain } from "./db-drain";
@@ -33,6 +34,15 @@ import {
 } from "./deferred-supervisor-init";
 import { buildChildEnv } from "./env";
 import { type ChildLike, gracefulShutdown, isShuttingDown } from "./shutdown";
+
+// ── Boot phase trace (#441/#592 — opt-in, off in production) ─────────────────
+// The FIRST statement of the module body, which in ESM means every static import
+// above has already been evaluated: this mark therefore measures node's own
+// bootstrap PLUS this entry's whole module graph — the one interval no other
+// in-process instrument can see the START of (see ./boot-trace, which anchors on
+// process start rather than module load). A no-op unless KNEXT_BOOT_TRACE is
+// set, so the cold-start path pays nothing for it in production.
+bootTrace.mark("entry-eval");
 
 const log = createLogger({ module: "server" });
 // Prometheus metrics port. Defaults to 9091 (no behavior change); overridable via
@@ -286,9 +296,16 @@ process.on("SIGINT", () => onSignal("SIGINT"));
 // free — the lightweight listener pulls no heavy module; prom-client +
 // @opentelemetry/api load lazily on the first scrape or on child-ready. So we
 // listen from process start and keep the ~790ms graph off the cold-start path.
-void metricsEndpoint.ensureListening("startup").catch((err) => {
-    log.warn({ err }, "Metrics endpoint failed to bind :9091");
-});
+// The call stays on ONE line: a sibling source guard
+// (deferred-default-metrics.test.ts) asserts that
+// `metricsEndpoint.ensureListening(` precedes the spawn, and a formatter-
+// wrapped member chain would break that string and silently disarm it.
+void metricsEndpoint.ensureListening("startup").then(
+    () => bootTrace.mark("metrics-listening"),
+    (err: unknown) => {
+        log.warn({ err }, "Metrics endpoint failed to bind :9091");
+    },
+);
 
 // ═══ Spawn the child — the cold-start critical path ═══════════════════════════
 const nextProc = spawn(process.execPath, [...preloadArgs, serverJs], {
@@ -296,6 +313,7 @@ const nextProc = spawn(process.execPath, [...preloadArgs, serverJs], {
     env: buildChildEnv(),
 });
 childRef = nextProc;
+bootTrace.mark("spawn-issued", { pid: nextProc.pid });
 
 // Startup log emitted AFTER spawn (#441): the child is already booting, so the
 // first-emit lazy pino load lands off the cold-start critical path.
@@ -339,7 +357,12 @@ if (isSupervisorInitDeferred()) {
         intervalMs: probeIntervalMs(),
         deadlineMs: readyDeadlineMs(),
     })
-        .then((outcome) => deferredInit.ensureStarted(`child-${outcome}`))
+        .then((outcome) => {
+            bootTrace.mark("child-listening", { outcome });
+            return deferredInit
+                .ensureStarted(`child-${outcome}`)
+                .then(() => bootTrace.mark("supervisor-ready"));
+        })
         .catch((err) => {
             // Never lose the metrics endpoint to a probe bug.
             log.warn({ err }, "Child readiness probe failed; initialising now");
@@ -347,5 +370,7 @@ if (isSupervisorInitDeferred()) {
         });
 } else {
     // Operator opt-out: pre-#441 behaviour (init on the cold-start path).
-    void deferredInit.ensureStarted("deferral-disabled");
+    void deferredInit
+        .ensureStarted("deferral-disabled")
+        .then(() => bootTrace.mark("supervisor-ready"));
 }
