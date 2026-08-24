@@ -7,7 +7,10 @@
 > Companion ledgers: `docs/debt/tech-debt-ledger.md`, `docs/benchmarks/cold-start-ledger.md`,
 > `docs/ux/ergonomics-ledger.md`.
 
-## Verdict: NOT READY — 3 hard blockers, all outside the CLI's code
+## Verdict: NOT READY — 2 hard blockers, both outside anything an agent can do
+
+**Blocker 3 was cleared by measurement on 2026-08-25 (#846).** The two that remain are not
+engineering work at all — they are one org-admin click and one `npm publish`:
 
 A stranger cannot complete the documented path today. Everything the repo controls is in good
 shape; what blocks release is publication and packaging state.
@@ -28,7 +31,28 @@ a publish happens. The install-smoke gate proves the packed tarballs install and
 Node — the artifact is ready; the publish is not done.
 **Action: `npm publish` for the four packages (needs npm auth). Human-only.**
 
-### Blocker 3 — the compat claim's own gates are red or flaky (#710, #545, #670)
+### ~~Blocker 3 — the compat claim's own gates are red or flaky~~ — CLEARED 2026-08-25
+
+**The premise was two-thirds wrong, and the measurement says so.** Diagnosed from the
+`compat-run-ledger` artifact of *every* scheduled run (2026-07-28 → 08-24) and independently
+re-derived by an adversarial reviewer from the raw artifacts:
+
+- **#545's "shard-level flaky" claim is FALSE for the credential lane.** 28 fingerprinted node
+  nights, 26 of 27 at `778/0/0`, `runAttempt: 1` throughout — **zero re-runs, zero nights lost to
+  a test failure**. The gate is not flaky.
+- **#710's bun-lane red is TRUE and honest.** Deterministic Bun ≤1.3.14 gaps reproducing 4/4 runs,
+  already marked ❌ in the matrix. Explicitly **not** quarantined: ADR-0007 §c.2's bar is a *flake*
+  bar, and quarantining a permanent gap launders it into apparent green.
+- **What actually blocks the 14-night v1.0 gate is harness-fingerprint churn** — 9 restarts in 27
+  nights, longest stable streak 7 — because a fingerprint change restarts the window. That is a
+  tractable, named engineering problem, not an unreachable flake bar.
+
+Landed as #846, with five defects found in the supporting machinery by review — the important one
+flattering us: the audit silently dropped runs, and a dropped night **merged two streaks**,
+overstating stability. Fixed and mutation-proved in both directions. #545 and #710 carry the
+corrected findings; #670 remains in the blocker-1 family (it needs a publicly-pullable image).
+
+### ~~Blocker 3 (original text, retained for provenance)~~
 The project's north-star credibility claim is compat-suite-backed parity. Today: the **bun-lane
 weekly is RED** (#710), the suite is **shard-level flaky** (#545 — "the v1.0 gate is unreachable
 until it isn't"), and the **e2e_scale nightly fails closed** for want of a publicly-pullable
