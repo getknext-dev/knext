@@ -1,0 +1,75 @@
+name: Retracted figures still published (nightly)
+
+# ── #545/#710: does a figure this repo RETRACTED still stand on a cited issue? ─
+#
+# WHY THIS EXISTS. Across three adversarial review rounds of PR #848 the same
+# defect reproduced FIVE times: a figure is corrected in one place and the
+# correction never reaches the other copies. Rounds 1 and 2 chased it inside the
+# repo — three copies of one retracted sentence, each found by hand after the
+# last "final" sweep. Round 3 found it had reproduced one hop OUTSIDE the repo,
+# on the GitHub issues the release documents tell readers carry the corrected
+# findings. This gate, run on its first execution, immediately found a fifth
+# instance nobody had looked at.
+#
+# Five instances of one shape is not five mistakes. It is evidence that a
+# per-instance fix is the wrong shape, which is the whole argument for a check.
+#
+# WHY NIGHTLY, NOT A PR GATE. The answer lives on GitHub issues, which change
+# without any commit — a correcting comment posted today makes yesterday's tree
+# pass. So it must be resolved at RUN time. Baking issue text into a committed
+# assertion would rot the moment anyone commented, which is exactly the
+# staleness that got the SHA-value assertion removed from the action-pin guard
+# (`.claude/rules/security.md`). Making it PR-blocking would also couple every
+# merge to a third-party API's availability.
+#
+# DIVISION OF LABOUR, deliberately identical to the action-pin pair:
+#   - `tests/retracted-figures.test.ts` asserts the LOGIC at PR time, offline —
+#     what counts as an offence, what counts as a correction, and that the
+#     ledger is non-vacuous. Mutation-proved by
+#     `scripts/mutation-prove-retracted-figures.mjs` (7 mutations, 6 red + 1
+#     negative control).
+#   - this workflow resolves that logic against the LIVE issues.
+#
+# AN UNREACHABLE API IS A FAILURE, NEVER A PASS. `verify-retracted-figures.mjs`
+# exits non-zero if it cannot read a cited issue. A checker that goes green when
+# it cannot see its subject reports "nothing is wrong" and "I could not look"
+# identically — the same rule, for the same reason, as the action-pin nightly.
+#
+# WHAT IT CANNOT DO, stated rather than discovered later: the ledger
+# (`docs/compat/retracted-figures.json`) is written by whoever makes a
+# retraction. A retraction whose author never adds an entry is not caught, and
+# no scan can catch it, because nothing in the tree marks the old value wrong.
+# What this guarantees is narrower and still worth having: a figure recorded as
+# retracted cannot go on being published uncorrected on a cited issue.
+
+on:
+  # 05:41 UTC — offset from the compat nightly (03:17), the docs closure
+  # nightly (04:23) and the action-pin nightly (05:11), so the signal jobs do
+  # not queue behind each other.
+  schedule:
+    - cron: '41 5 * * *'
+  # Manual re-runs after posting a correction.
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  resolve-retracted-figures:
+    name: Resolve every retracted figure against every cited issue
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No setup-node and no dependencies: the script is dependency-free ESM on
+      # the runner's built-in Node, and `gh` is preinstalled on ubuntu-latest.
+      - name: Verify no retracted figure stands uncorrected (FAIL on any finding)
+        env:
+          # `gh api` needs a token for the rate limit; read-only is enough since
+          # the check only reads issue bodies and comments.
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/verify-retracted-figures.mjs --repo "${{ github.repository }}"

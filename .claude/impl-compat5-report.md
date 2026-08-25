@@ -503,3 +503,173 @@ empty.
   local gpg-signing, a network-dependent fetch, and two bun e2e specs. None is touched by this
   branch's ten changed files. Not charged to this PR, and **not proved pre-existing against the
   merge base** — the review rested on the untouched-file check plus named causes, and so does this.
+
+---
+
+# Fix round 3 — adversarial review @ `2e0c9e3` (`ISSUES_FOUND`, one blocking)
+
+Round 3's headline: **inside the repo the sweep is complete and the reviewer could not defeat it.**
+Every tracked document agrees with every other and with the raw data; the guard caught the cache
+under a third name at a third depth with `git check-ignore` demonstrably not firing; each half reds
+alone with the other physically deleted. The mechanical sweep round 2 added was the right instinct
+and it works.
+
+**What defeats "fully swept" is the boundary.** The sweep covered tracked files. The retracted
+claims also live on the GitHub issues both release documents point readers to — and
+`compat-honesty-gate.md:190` asserts *"the correction is already on the issue from the prior round"*
+while `public-release-readiness.md:64` asserts *"#545 and #710 carry the corrected findings"*. Those
+assertions were false.
+
+## The class has now reproduced far past the point where per-instance fixing is defensible
+
+Tracking the single "asserted twice, independently" sentence:
+
+| # | where it was found | which round |
+|---|---|---|
+| 1 | `docs/release/compat-honesty-gate.md` — retracted | round 1 (B3) |
+| 2 | `docs/release/public-release-readiness.md` — still published | round 2 (R1) |
+| 3 | `.claude/impl-compat5-report.md` — still published, found by my own sweep | round 2 (self-found, called "the THIRD copy") |
+| 4 | **`#545` comment 5402624775 — still published, live** | round 3 (R3-1) |
+
+**Four copies of one sentence, each found only after the previous round declared itself finished.**
+And it is not the only figure with that history: "in all 16 shards" was found as a third copy in
+`compat-honesty-gate.md:157` in round 2 and then found *again*, live on #545, in round 3.
+
+That is the finding. Four rounds of "fix this instance" produced four more instances. **A
+per-instance fix is the wrong shape for a defect that recurs**, and the argument for building a
+check rather than sweeping again is not that sweeping is tiring — it is that sweeping has now
+demonstrably failed four consecutive times, each time while being performed carefully by someone who
+believed they were being thorough.
+
+## What was actually live — 8 figures across 3 issues, not 4 across 2
+
+Round 3 listed four figures on two issues. Re-deriving from the raw ledgers and fetching every
+issue's body and comments found **eight across three**:
+
+| issue | figure still published | corrected to |
+|---|---|---|
+| #545 c5402624775 | "asserted twice, independently" | one counter, two transports; API authoritative |
+| #545 c5402624775 | "28 of 28 ledgered nights at 778/0/0" | `failed:0` 28 of 28; full `778/0/0` **27 of 28** |
+| #545 c5402624775 | "in all 16 shards" | every shard that reported; 08-03 recorded **15** |
+| #545 c5402624775 | "9 restarts in 27 nights" | **10** restarts |
+| #710 c5402620077 | "778/0 on 28 of 28 ledgered nights" | **27 of 28** |
+| #710 c5402620077 | `kind: timeout` at 60000 ms as the discriminator | the structural **complete-but-red** reading |
+| #846 body | "28 fingerprinted node nights, 26 of 27" | **27** fingerprinted; frame mixed 07-28 with 07-29 |
+| #846 body | "9 restarts in 27 nights" | **10** restarts |
+
+The two #710 items were **not in round 3's list.** Corrections posted as comments quoting the wrong
+figure and stating the right one with its derivation — never as silent edits to an existing body,
+including on #846 where the body is mine and editing it would have been permitted:
+
+- #545 → [comment 5411722309](https://github.com/getknext-dev/knext/issues/545#issuecomment-5411722309)
+- #710 → [comment 5411725154](https://github.com/getknext-dev/knext/issues/710#issuecomment-5411725154)
+- #846 → [comment 5411725555](https://github.com/getknext-dev/knext/pull/846#issuecomment-5411725555)
+
+## The reviewer's question, answered in both directions
+
+> *Is a check that FAILS on future divergence tractable here?*
+
+**For the general form — a doc-vs-doc referee — no, and I did not build it.** Round 3 measured it
+properly: precision never crosses ~50% at any subject-overlap threshold, because the corpus
+legitimately states different numbers about vocabulary-adjacent subjects (778 node vs 775 bun; 16
+shards vs 08-03's 15). A gate at that false-positive rate gets edited to green, which `security.md`
+already names as the failure mode where editing the guard becomes the routine way to pass. That
+measurement stands and the conclusion is accepted.
+
+**For the boundary the reviewer called undefendable "by construction" — yes, for the subset that
+actually matters.** The general question ("do two prose sources agree about a number") is
+intractable. The question the defect class actually poses is different and exact: **does a figure
+this repo has already RETRACTED still stand uncorrected on a cited issue?** No similarity threshold,
+no judgement, no fuzzy matching.
+
+| file | role |
+|---|---|
+| `docs/compat/retracted-figures.json` | the ledger — 6 figures, mirroring the `$knextQuarantines` pattern |
+| `scripts/lib/retracted-figures.mjs` | pure decision logic, no I/O |
+| `scripts/verify-retracted-figures.mjs` | resolution against the live issues |
+| `tests/retracted-figures.test.ts` | 18 tests, offline, both halves |
+| `.github/workflows/retracted-figure-resolution-nightly.yml` | the nightly |
+
+Design decisions that matter:
+
+- **Issues are SCANNED out of the citing documents, never enumerated** — `.claude/rules/workflow.md`:
+  "an enumerated list of call sites is how the second one gets missed". The scan found 8 cited
+  issues without anyone listing them.
+- **A source discharges a figure only by quoting it AND stating the corrected value.** Quoting alone
+  is republishing the error; asserting the right value alone does not reach a reader who landed on
+  the comment carrying the wrong one — which is *exactly* how #545 came to have a correct comment 6
+  sitting under an uncorrected comment 5 for a fortnight.
+- **The rule keys off the claim, not a label**, so it cannot be satisfied by pasting a
+  `## Correction` heading onto an empty comment. An earlier version of mine keyed off a heading and
+  was wrong in both directions; the negative-control mutation pins this.
+- **Same PR-time / run-time split as the action-pin pair**, for the reason `security.md` records:
+  logic asserted offline at PR time, resolution never baked into a committed assertion. Issue text
+  changes without any commit, so a committed snapshot would rot on the first comment.
+- **An unreachable API is a FAILURE, never a pass.** A checker that goes green when it cannot see
+  its subject reports "nothing is wrong" and "I could not look" identically.
+
+**The residual is stated in the ledger, not hidden:** the ledger is written by whoever makes a
+retraction, so a retraction whose author never adds an entry is not caught — and no scan can catch
+that, because nothing in the tree marks the old value as wrong. What the gate guarantees is
+narrower and still worth having.
+
+## The gate earned its keep on its first run
+
+Run against the live issues immediately after being written, it failed with three findings:
+
+1. **A fifth instance nobody had looked at** — `28 fingerprinted node nights` in #545 comment
+   **5401289209**. Round 3 examined comment 5402624775; this is a different, earlier comment. My own
+   correction had not covered it either, because I had corrected what the review listed. Now
+   corrected.
+2. **A false positive from my normaliser** — a correcting comment quotes the wrong figure in a `>`
+   blockquote, GitHub wraps the quoted line, and `at exactly\n>    timeoutMs: 60000` survived
+   whitespace collapsing as `at exactly > timeoutms: 60000`. The correcting comment failed to match
+   its own quote. Fixed by stripping blockquote and list markers in `normalize()`, pinned by a unit
+   test and by mutation **M4**.
+3. **A false positive from my correction rule** — #850's body reconciles *"a prior analysis put this
+   at 9 restarts"* with its own 10, in plain prose, wearing no heading. Round 3 explicitly praised
+   that comment as a model. My heading-based rule flagged it. Fixed by keying off the claim instead,
+   pinned by mutation **M3** and a unit test named for the #850 shape.
+
+Two of the three were defects in the check itself, found by running it against reality rather than
+by inspecting it. Both were fixed **in the design** — not by loosening the gate, which would have
+been the easy move and would have produced a gate that passes because it cannot see.
+
+## Mutation proof — independent, 7 mutations
+
+`scripts/mutation-prove-retracted-figures.mjs`:
+
+| mutation | expected | why it matters |
+|---|---|---|
+| M1 ledger emptied | RED | a vacuous ledger passes everything |
+| M2 correction detection widened to "quotes it" | RED | republishing would discharge |
+| M3 correction detection narrowed to a heading | RED | #850's plain-prose reconciliation would be flagged |
+| M4 blockquote stripping removed | RED | the live false negative, re-armed |
+| M5 issue scanning neutered | RED | a gate that inspects nothing |
+| M6 offence reporting suppressed | RED | finds offences, reports none |
+| **NC negative control** — inert edit | **GREEN** | separates a guard from a tripwire |
+
+**STEP 0 requires a red canary AND a green canary.** This is a direct lesson from round 3's own
+disclosure: their first harness passed `--reporter=basic`, which vitest 4 rejects at startup, so
+every invocation exited 1 including the baseline — and a **red-only canary cannot detect that**,
+because a runner broken at startup is red for every input. Requiring the harness to demonstrate it
+can tell red from green is what makes its discrimination observable. Same family as this project's
+recorded incident where vitest ANSI broke a pass/fail grep and certified 14 decorative mutations
+all-green.
+
+M1's marker is embedded in a JSON **key** rather than a comment, because JSON has no comment syntax
+and a `//` marker would have made the ledger unparseable — M1 would then have gone red for a syntax
+error rather than for the vacuity it exists to prove. A mutation that reds for the wrong reason
+proves nothing.
+
+## Discipline log (round 3)
+
+- Every figure re-derived from the raw ledgers again, including the ones rounds 1–2 computed and
+  that were right.
+- Exit codes for every verdict; **no test run was ever piped into `tail`** — each was redirected to
+  its own log file and the exit status read directly. (Round 1 hit exactly that bug: `PIPESTATUS`
+  under zsh returned empty and the exit code was unreadable.)
+- Corrections posted as **comments quoting the wrong figure**, never as silent body edits — including
+  on #846, where the body is mine and editing would have been permitted.
+- The gate's two self-inflicted false positives were fixed in the design, not by relaxing it.
+- No push to `main`, no force-push, no history rewrite.
