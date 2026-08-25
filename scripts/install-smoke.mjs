@@ -176,7 +176,7 @@ try {
   );
   const publishable = publishablePackages(
     readWorkspaceManifests(repoRoot),
-    changesetConfig.ignore ?? [],
+    Array.isArray(changesetConfig.ignore) ? changesetConfig.ignore : [],
   ).map((p) => p.name);
   const packed = [
     [libTarball, libPkgDir],

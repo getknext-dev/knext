@@ -70,7 +70,19 @@ jobs:
     runs-on: ubuntu-latest
     # Each prover spawns a vitest run per mutation and the lane runs them all;
     # generous, but bounded, so a hung prover does not burn a runner all day.
-    timeout-minutes: 60
+    #
+    # Raised from 60 on measurement, not on feel. Three consecutive nightlies ran
+    # 27, 25 and 26 minutes; `mutation-prove-install-smoke-coverage.mjs` adds ~30
+    # on its own, because six of its mutations are graded by a full pack + clean
+    # install. That lands the job around 57 minutes — inside 60 only by luck, and
+    # a nightly that reds on duration trains people to ignore it.
+    #
+    # The bound that SHOULD exist is per-prover rather than per-job: the lane's
+    # spawnSync sets `maxBuffer` and no `timeout`, so one hung prover still eats
+    # whatever this number is before the remaining fifteen run. Left as follow-up
+    # because it changes shared lane semantics for every prover, not just the one
+    # this PR adds.
+    timeout-minutes: 100
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
