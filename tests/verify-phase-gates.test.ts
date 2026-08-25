@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { linkSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -20,7 +20,15 @@ import { describe, expect, it } from 'vitest';
  */
 
 const REPO = join(__dirname, '..');
-const SCRIPT = join(REPO, 'scripts', 'verify-phase-gates.mjs');
+/**
+ * The validator under test. `GATE_VALIDATOR` lets the mutation prover point this
+ * suite at a MUTANT COPY in a temp directory, so proving the guards never writes to
+ * the working tree at all. Round 5 lost a mutation-restore to a command timeout and
+ * the residue — a disabled registry audit — was invisible to `git status`, because
+ * the file was already legitimately modified. A mutant that is never written to the
+ * tree cannot leave residue in it.
+ */
+const SCRIPT = process.env.GATE_VALIDATOR ?? join(REPO, 'scripts', 'verify-phase-gates.mjs');
 const GATE = join(REPO, 'docs', 'adr', 'gates', 'adr-0042-gates.json');
 
 type Phase = {
@@ -357,6 +365,47 @@ describe('#753 — every relation the gate file can state is read by a checker',
     );
   });
 
+  it('rule 6c: an inverse naming a key that does not exist at all fails', () => {
+    // Distinct from "does not point home": there `inverse` resolves and disagrees,
+    // here it resolves to nothing. Without the `!inverse` half the next line reads
+    // a property off undefined.
+    expectFailure(
+      load(),
+      /`phase\.gates` declares `inverse: "no_such_key"`/,
+      declare('phase', 'gates', { by: '8/13', phaseRef: 'ordered', inverse: 'no_such_key' }),
+    );
+  });
+
+  it('rule 1b: an EMPTY derived_from is no provenance at all', () => {
+    const g = load();
+    const c = crit(g, 'P2-1');
+    c.kind = 'derived';
+    c.measured = 4.5;
+    c.source = undefined;
+    c.derived_from = [];
+    expectFailure(g, /with a measured value and no `derived_from`/);
+  });
+
+  it('rule 6c: a malformed --declare spec is refused rather than silently ignored', () => {
+    let code = 0;
+    let stderr = '';
+    const dir = mkdtempSync(join(tmpdir(), 'gates-bad-'));
+    const file = join(dir, 'adr-0042-gates.json');
+    writeFileSync(file, JSON.stringify(load(), null, 2));
+    try {
+      execFileSync('node', [SCRIPT, '--file', file, '--declare', 'not-a-spec'], {
+        cwd: REPO,
+        stdio: 'pipe',
+      });
+    } catch (e) {
+      const err = e as { status?: number; stderr?: Buffer };
+      code = err.status ?? 1;
+      stderr = String(err.stderr ?? '');
+    }
+    expect(code).toBe(2);
+    expect(stderr).toMatch(/expects <level>\.<key>=<json>/);
+  });
+
   it('rule 6c: an inverse that does not point home fails', () => {
     expectFailure(
       load(),
@@ -465,6 +514,73 @@ describe('#753 — every relation the gate file can state is read by a checker',
     expectFailure(g, /nested key `unblocks_phase` has a value that resolves to declared phase ids/);
   });
 
+  it('rule 6e: a phase-keyed map is caught as the DIRECT value of a PROSE key, not only nested', () => {
+    // Round 6: `statesPhaseKeyMap` was called from exactly one place — `scanNested`
+    // — so the map was caught one level down and not at the top. Depth 2 had a test;
+    // depth 1 had never been constructed.
+    const direct = load();
+    (crit(direct, 'P1-1') as Record<string, unknown>).attempt = {
+      5: 'must finish before this one',
+      3: 'and after',
+    };
+    expectFailure(direct, /key `attempt` is declared PROSE but its keys resolve/);
+
+    // ...and at the phase level too, where `arms` is the PROSE key.
+    const onPhase = load();
+    (phase(onPhase, '3') as Record<string, unknown>).arms = { 5: 'before', 2: 'after' };
+    expectFailure(onPhase, /key `arms` is declared PROSE but its keys resolve/);
+  });
+
+  it('rule 6e: ONE ARRAY BRACKET does not blind it — array ELEMENTS are shape-tested', () => {
+    // `scanNested` recursed THROUGH array elements but only ever asked the shape
+    // question of the value of an OBJECT key, so an element that was itself a list
+    // or a map was recursed into and never tested. Live code with no test: deleting
+    // the array recursion outright left the suite green.
+    const cases: Array<[string, unknown, RegExp]> = [
+      ['a list inside a list', [['5', '3']], /resolves to declared phase ids/],
+      [
+        'a list inside an object inside a list',
+        { must_run_after: [['5']] },
+        /resolves to declared/,
+      ],
+      [
+        'a phase-keyed map inside a list',
+        [{ 5: 'this phase must finish first' }],
+        /keys that resolve/,
+      ],
+    ];
+    for (const [what, value, because] of cases) {
+      const g = load();
+      (crit(g, 'P1-1') as Record<string, unknown>).attempt = value;
+      const { code, stderr } = runDetail(g);
+      expect(code, `${what} should fail; stderr:\n${stderr}`).not.toBe(0);
+      expect(stderr, what).toMatch(because);
+    }
+  });
+
+  it('rule 1b: CIRCULAR derived provenance fails at every cycle length, not just self-reference', () => {
+    // Round 5 closed `derived_from: ['P2-1']` on P2-1 — path length 1. Two measured
+    // derived criteria each derived from the other are the same defect one hop out:
+    // rule 1b's own message, "a value whose provenance is itself has none", at
+    // length 2. Phase 3 is PARTIAL, so the fixture is not confounded by rule 7a.
+    const build = (edges: Record<string, string[]>): Gate => {
+      const g = load();
+      for (const [id, from] of Object.entries(edges)) {
+        const c = crit(g, id);
+        c.kind = 'derived';
+        c.measured = 4.5;
+        c.source = undefined;
+        c.derived_from = from;
+      }
+      return g;
+    };
+    expectFailure(build({ 'P3-1': ['P3-2'], 'P3-2': ['P3-1'] }), /circular/i);
+    expectFailure(build({ 'P3-1': ['P3-2'], 'P3-2': ['P3-4'], 'P3-4': ['P3-1'] }), /circular/i);
+    // control: an acyclic derivation still passes
+    const ok = runDetail(build({ 'P3-1': ['P3-3'] }));
+    expect(ok.code, ok.stderr).toBe(0);
+  });
+
   it('rule 6e: a relation keyed BY phase id is caught — the closed world covers nested KEYS too', () => {
     // Round 4: 6e inspected values only, so a map from phase id to prose sailed
     // through — `attempt` is PROSE, `ordering` is not a relational name, and the
@@ -484,6 +600,47 @@ describe('#753 — every relation the gate file can state is read by a checker',
       g,
       /key `unblocks_phase` is declared PROSE but its value resolves to declared phase ids/,
       declare('phase', 'unblocks_phase', { prose: 'commentary' }),
+    );
+  });
+
+  it('rule 6b: EVERY identifier run in a pattern is tested, not only the longest', () => {
+    // Naming a pattern by its longest run let a decorative suffix hide the relation:
+    // `RELATIONAL_NAME` never saw `gates`, while the pattern matched keys like
+    // `gates_5_supplementary_annotation_text`.
+    expectFailure(load(), /is declared PROSE but its name states a relation/, [
+      '--declare-pattern',
+      'phase.^gates_(.+)_supplementary_annotation_text$={"prose":"commentary"}',
+    ]);
+  });
+
+  it('rule 6c: the seam is refused for a HARD LINK — identity is the inode, not the path', () => {
+    // `realpathSync` resolves a SYMLINK, which is a second path to the file. A hard
+    // link is not a path at all — it is the same inode under another name — so the
+    // absolute claim was still one indirection too wide.
+    const dir = mkdtempSync(join(tmpdir(), 'gates-hard-'));
+    const hard = join(dir, 'adr-0042-gates.json');
+    linkSync(GATE, hard);
+    expect(statSync(hard).ino).toBe(statSync(GATE).ino);
+    let code = 0;
+    try {
+      execFileSync('node', [SCRIPT, '--file', hard, '--declare', 'gate.title={"by":"99"}'], {
+        cwd: REPO,
+        stdio: 'pipe',
+      });
+    } catch (e) {
+      code = (e as { status?: number }).status ?? 1;
+    }
+    expect(code).toBe(2);
+  });
+
+  it('rule 6e: a bare number IS a reference at the phase level, where no measurement lives', () => {
+    // The exemption is forced by measurements, and measurements live on criteria.
+    const g = load();
+    (phase(g, '3') as Record<string, unknown>).follows_phase = 5;
+    expectFailure(
+      g,
+      /key `follows_phase` is declared PROSE but its value resolves to declared phase ids/,
+      declare('phase', 'follows_phase', { prose: 'commentary' }),
     );
   });
 
@@ -600,6 +757,28 @@ describe('#753 — every relation the gate file can state is read by a checker',
     const g = load();
     phase(g, '2').gates = [1]; // phase 1 reads UNBLOCKED_3d_DISCHARGED
     expectFailure(g, /status UNBLOCKED_3d_DISCHARGED but phase 2 still declares it in `gates`/);
+  });
+
+  it('rule 7: a NOT_STARTED phase IS a blockable state — gating one is fine', () => {
+    // `blockable: true` on the NOT_STARTED row. Every other fixture that gates a
+    // phase gates a BLOCKED one, so flipping this flag reported nothing new and
+    // nothing stopped reporting — it was a declaration nobody exercised.
+    const g = load();
+    g.phases.push(
+      { phase: 'na', name: 'label na', status: 'NOT_STARTED', gates: ['nb'] },
+      { phase: 'nb', name: 'label nb', status: 'NOT_STARTED' },
+    );
+    const { code, stderr } = runDetail(g);
+    expect(code, stderr).toBe(0);
+  });
+
+  it('rule 7: an UNBLOCKED phase is NOT a blockable state — gating one says so', () => {
+    // `blockable: false` on the UNBLOCKED row, asserted through the gater's own
+    // message rather than through `checkUnblocked`, which reports the same file for
+    // a different reason.
+    const g = load();
+    phase(g, '2').gates = [1];
+    expectFailure(g, /gates phase 1, whose status UNBLOCKED\S* is not a blocked state/);
   });
 
   it('rule 8: a DONE phase may not still declare gates', () => {
@@ -860,17 +1039,18 @@ describe('#753 — every relation the gate file can state is read by a checker',
     expectFailure(g, /phase wb: is gated by phase wa but has already measured WB-pre/);
   });
 
-  it('rule 1b: derived_from may not name the criterion ITSELF', () => {
+  it('rule 1b: derived_from may not name the criterion ITSELF (the cycle walk, length 1)', () => {
     // Circular provenance: a measured number whose entire provenance is itself —
-    // the "number with no provenance" rule 1 forbids, wearing rule 1b's label. Rule 8
-    // already guards exactly this shape for phase refs; rule 1b did not.
+    // the "number with no provenance" rule 1 forbids, wearing rule 1b's label. This
+    // is now reported by the SAME walk that catches length 2 and beyond, so there is
+    // one reporter rather than a special case that could never be the sole one.
     const g = load();
     const c = crit(g, 'P2-1');
     c.kind = 'derived';
     c.measured = 4.5;
     c.source = undefined;
     c.derived_from = ['P2-1'];
-    expectFailure(g, /`derived_from` names itself/);
+    expectFailure(g, /circular/i);
   });
 
   it('rule 1b: derived_from may not name an UNMEASURED criterion', () => {
@@ -1001,6 +1181,223 @@ describe('#753 — every relation the gate file can state is read by a checker',
     ];
     g.current_phase = '3';
     expectFailure(g, /current_phase 3 has 1 unmet precondition\(s\): P3-pre/);
+  });
+
+  // --- the halves round 6's independent harness found live but untested ---
+
+  it('rule 8: a `gates` entry that is not an array fails', () => {
+    const g = load();
+    (phase(g, '3') as Record<string, unknown>).concurrent_with = '5';
+    expectFailure(g, /`concurrent_with` must be an array of phase ids/);
+  });
+
+  it('rule 9d: superseded_evidence must say WHY, not only that it is withdrawn', () => {
+    const g = load();
+    crit(g, 'P1-2').superseded_evidence = { status: 'WITHDRAWN' };
+    expectFailure(g, /`superseded_evidence` must say `why` it no longer stands/);
+  });
+
+  it('rule 7: a strictly DONE phase is not a blockable state — it may not be gated', () => {
+    // `blockable: false` on the DONE row of STATUS_CLASSES. Deleting it was green:
+    // no fixture gated a strictly-DONE phase.
+    const g = load();
+    g.phases.push(
+      { phase: 'ba', name: 'label ba', status: 'NOT_STARTED', gates: ['bb'] },
+      { phase: 'bb', name: 'label bb', status: 'DONE', done_on: '2026-08-20' },
+    );
+    expectFailure(g, /gates phase bb, whose status DONE is not a blocked state/);
+  });
+
+  it('rule 13: reachability is tested in BOTH directions, not just a→b', () => {
+    // `concurrentPairs` keys on a SORTED pair, so which of the two `orderedPath`
+    // calls answers depends on the alphabetical order of the ids. Only the a→b call
+    // had a fixture; deleting the b→a call was green.
+    const g = load();
+    g.phases.push(
+      { phase: 'za', name: 'label za', status: 'BLOCKED_ON_ZB', concurrent_with: ['zb'] },
+      {
+        phase: 'zb',
+        name: 'label zb',
+        status: 'NOT_STARTED',
+        gates: ['za'],
+        concurrent_with: ['za'],
+      },
+    );
+    expectFailure(g, /while the ordered relation makes/);
+  });
+
+  /**
+   * A phase whose ONLY condition is one array-target criterion, claimed strictly
+   * DONE. Rule 3 then reports exactly when `meetsTarget` says the array is unmet,
+   * so each half of rule 5 can be isolated. The shipped rule-5 test differs in
+   * LENGTH, so only the length precheck ever fired and the element-wise comparison
+   * the docblock advertises was as untested as the defect it replaced.
+   */
+  const withArrayTarget = (measured: string[]): Gate => {
+    const g = load();
+    g.phases.push({
+      phase: 'ra',
+      name: 'label ra',
+      status: 'DONE',
+      done_on: '2026-08-20',
+      criteria: [
+        {
+          id: 'RA-1',
+          text: 't',
+          kind: 'checklist',
+          target: ['A1', 'A2'],
+          measured,
+          source: 'test',
+        },
+      ],
+    });
+    return g;
+  };
+
+  it('rule 5: an array target is compared ELEMENT-WISE — same length, wrong ORDER fails', () => {
+    expectFailure(
+      withArrayTarget(['A2', 'A1']),
+      /status DONE but 1 criterion\/criteria not met: RA-1/,
+    );
+  });
+
+  it('rule 5: and the LENGTH precheck is its own half — one item longer fails', () => {
+    expectFailure(
+      withArrayTarget(['A1', 'A2', 'A1']),
+      /status DONE but 1 criterion\/criteria not met: RA-1/,
+    );
+  });
+
+  it('rule 5: the same list in the same order is met — the rule is not "arrays always fail"', () => {
+    const { code, stderr } = runDetail(withArrayTarget(['A1', 'A2']));
+    expect(code, stderr).toBe(0);
+  });
+
+  it('meetsTarget: a `derived` criterion is never "met", so it can hold ship open', () => {
+    // `if (c.kind === 'derived') return false` — deleting it was green because no
+    // fixture put a measured derived criterion on the blocks_ship path.
+    const g = load();
+    const c = crit(g, 'P5-1');
+    c.measured = true;
+    c.blocks_ship = true;
+    c.derived_from = ['P0-1'];
+    const p5 = phase(g, '5');
+    p5.status = 'DONE_WITH_A_QUALIFIER';
+    p5.status_note = 'qualified so rule 3 is satisfied and rule 9c is what fires';
+    expectFailure(g, /is irreversible and DONE\S* while \d+ `blocks_ship`/);
+  });
+
+  /**
+   * A phase whose ONLY condition is the one criterion given, claimed strictly DONE.
+   * Rule 3 then reports exactly when `meetsTarget` says that criterion is unmet, so
+   * each half of `meetsTarget` can be isolated without another rule confounding it.
+   */
+  const soleCriterion = (c: Record<string, unknown>): Gate => {
+    const g = load();
+    g.phases.push({
+      phase: 'rm',
+      name: 'label rm',
+      status: 'DONE',
+      done_on: '2026-08-20',
+      criteria: [c],
+    });
+    return g;
+  };
+  const RM_UNMET = /status DONE but 1 criterion\/criteria not met: RM-1/;
+
+  it('meetsTarget: an UNMEASURED criterion is never met, even with no threshold', () => {
+    // Without this half a null-target criterion returns "met" before anyone asks
+    // whether it was measured — "nobody has run it" would read as "it passed".
+    expectFailure(
+      soleCriterion({
+        id: 'RM-1',
+        text: 't',
+        kind: 'boolean',
+        target: null,
+        target_note: 'no threshold, deliberately',
+        measured: null,
+      }),
+      RM_UNMET,
+    );
+  });
+
+  it('meetsTarget: a `derived` criterion is never met, so it can hold ship open', () => {
+    expectFailure(
+      soleCriterion({
+        id: 'RM-1',
+        text: 't',
+        kind: 'derived',
+        target: true,
+        measured: true,
+        derived_from: ['P0-1'],
+      }),
+      RM_UNMET,
+    );
+  });
+
+  it('meetsTarget: a MEASURED value against a null target IS met — rule 4 owns the absence', () => {
+    // The passing control for the branch above. It also pins the two halves of
+    // `unmet.length > 0` / `!strictlyDone` in `checkDone`: flip either and this
+    // fixture starts reporting.
+    const { code, stderr } = runDetail(
+      soleCriterion({
+        id: 'RM-1',
+        text: 't',
+        kind: 'value',
+        target: null,
+        target_note: 'no threshold, deliberately',
+        measured: 42,
+        source: 'test',
+      }),
+    );
+    expect(code, stderr).toBe(0);
+  });
+
+  it('meetsTarget: an array target requires an ARRAY, not something with a length', () => {
+    // `!Array.isArray(c.measured)` is its own half: an object carrying `length` and
+    // indices passes the length precheck and the element-wise compare, and would be
+    // "met" without it.
+    expectFailure(
+      soleCriterion({
+        id: 'RM-1',
+        text: 't',
+        kind: 'checklist',
+        target: ['A1'],
+        measured: { 0: 'A1', length: 1 },
+        source: 'test',
+      }),
+      RM_UNMET,
+    );
+  });
+
+  it('rule 6: an undeclared key on `admissibility` itself fails', () => {
+    const g = load();
+    (g.admissibility as Record<string, unknown>).depends_on_adr = '0036';
+    expectFailure(g, /key `depends_on_adr` is not in the key registry/);
+  });
+
+  it('rule 6: an undeclared key on an admissibility CONDITION fails', () => {
+    const g = load();
+    const cond = (g.admissibility?.conditions ?? [])[0] as Record<string, unknown>;
+    cond.zzz_undeclared = 'x';
+    expectFailure(g, /key `zzz_undeclared` is not in the key registry/);
+  });
+
+  it('rule 8c: a claim whose relation is STILL stated needs no discharge note', () => {
+    // The early `continue` is a half of its own: without it, a phase that still
+    // gates the phase its note describes would be told to record a discharge that
+    // has not happened.
+    const g = load();
+    const p = phase(g, '3d');
+    p.gates = ['1'];
+    p.status = 'PARTIAL';
+    p.status_note = undefined;
+    p.done_on = undefined;
+    phase(g, '1').status = 'BLOCKED_ON_3D';
+    const { code, stderr } = runDetail(g);
+    expect(stderr).not.toMatch(/recording the discharge/);
+    expect(stderr).not.toMatch(/does not name phase 1/);
+    expect(code, stderr).not.toBe(0); // phase 1 is BLOCKED, which other rules report
   });
 
   it('rule 9c: an irreversible phase may not be DONE while a blocks_ship criterion is unmet', () => {

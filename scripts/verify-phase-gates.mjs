@@ -94,21 +94,35 @@
  *      defect wearing one more layer of nesting, and rule 6 does not see it
  *      because `evidence` itself is declared.
  *   6e. REFERENCE SHAPE, and this is where the guarantee actually lives. A key
- *      declared PROSE — at a structural level or nested anywhere inside one — is a
- *      cross-phase relation, whatever it is called, when EITHER:
+ *      declared PROSE — at a structural level, or nested at any depth inside one,
+ *      through OBJECT keys and ARRAY brackets alike — is a cross-phase relation,
+ *      whatever it is called, when EITHER:
  *        - its VALUE is a non-empty list whose entries all resolve to declared
  *          phase ids (strings or numbers — ids are compared with `String()` here as
  *          they are everywhere else), or a scalar STRING that resolves; or
  *        - it is an OBJECT whose KEYS all resolve to declared phase ids. Round 4
  *          walked through the value-only version with a map FROM phase id TO prose:
- *          `attempt: { ordering: { "5": "must finish before this one" } }`.
+ *          `attempt: { ordering: { "5": "must finish before this one" } }`; round 6
+ *          then walked through the fix, because the key test was reachable only from
+ *          the NESTED scan — depth 2 failed and `attempt: { "5": … }` at depth 1 did
+ *          not. Both tests now run at the structural level too.
+ *      ARRAY ELEMENTS are shape-tested, not merely descended into. `scanNested` used
+ *      to ask the shape question only of an object KEY's value, so `attempt:
+ *      [["5","3"]]` exited 0 while `["5","3"]` failed: one bracket was the whole
+ *      hole. Scalar elements are deliberately exempt — the list they sit in is judged
+ *      as a whole, and testing them one by one would report every legitimate
+ *      `concurrent_with: ["2"]` entry.
  *      Three boundaries, each deliberate and each with its own test:
  *        - an EMPTY list is not a reference ("all zero elements resolve" is vacuous,
  *          and `gates: []` is the shape a discharged gate must take);
- *        - a bare SCALAR NUMBER is not a reference. This file is full of
- *          measurements that stringify to phase ids — `samples_lost: 1`,
- *          `server_modules_read_from_disk_on_cold_first_request: 0` — so a lone
- *          number is read as one. Only a LIST is read as a reference list;
+ *        - a bare SCALAR NUMBER is not a reference AT THE CRITERION LEVEL, and only
+ *          there. That level is full of measurements which stringify to phase ids —
+ *          `samples_lost: 1`, `server_modules_read_from_disk_on_cold_first_request:
+ *          0` — so a lone number on a criterion is read as one. Nothing on a phase,
+ *          a gate or an admissibility condition is a measurement, so at those levels
+ *          a bare number IS a reference and `follows_phase: 5` fails. The exemption
+ *          is scoped to the level that needs it, not applied everywhere for one
+ *          level's reason. A LIST is always read as a reference list;
  *        - a scalar string equal to the phase's OWN id is a LABEL, not a relation:
  *          `{ phase: 'wb', name: 'wb' }` says nothing about another phase. Scalars
  *          only — a list is a reference list whatever it contains.
@@ -242,7 +256,7 @@
  *                        [--declare <level>.<key>=<json>]
  *                        [--declare-pattern <level>.<regex-source>=<json>]
  */
-import { readdirSync, readFileSync, realpathSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -412,10 +426,20 @@ const PHASE_REF_KEYS = () =>
 
 const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-/** The longest literal identifier run in a pattern's regex — its readable name. */
-const patternName = (re) =>
-  (re.source.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []).sort((a, b) => b.length - a.length)[0] ??
-  re.source;
+/** Every literal identifier run in a pattern's regex, longest first. */
+const patternNames = (re) =>
+  (re.source.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []).sort((a, b) => b.length - a.length);
+
+/**
+ * The pattern's readable name — its longest identifier run.
+ *
+ * Rule 6b tests EVERY run, not just this one. Naming a pattern by its longest run
+ * alone let a decorative suffix hide the relation:
+ * `^gates_(.+)_supplementary_annotation_text$` declared PROSE passed, because
+ * `RELATIONAL_NAME` never saw `gates`, while it matched keys like
+ * `gates_5_supplementary_annotation_text`.
+ */
+const patternName = (re) => patternNames(re)[0] ?? re.source;
 
 // ---------------------------------------------------------------------------
 // Rule 6c's binding — RECORDED CONSUMPTION, not a grep.
@@ -500,6 +524,7 @@ function auditRegistry(problems) {
         level,
         key: re.source,
         name: patternName(re),
+        names: patternNames(re),
         entry,
         // A pattern matches many key names, so no single `<level>.<key>` can stand
         // for it — rule 8c drives it from this table via `phaseClaim`, the same
@@ -509,10 +534,12 @@ function auditRegistry(problems) {
     }
   }
 
-  for (const { level, key, name, entry, bound } of entries) {
-    // Rule 6b — a relation may not be filed as commentary.
+  for (const { level, key, name, names, entry, bound } of entries) {
+    // Rule 6b — a relation may not be filed as commentary. EVERY identifier run in
+    // a pattern is tested, not only its longest: naming the pattern by the longest
+    // run let a decorative suffix hide the relation.
     if (entry.prose) {
-      if (RELATIONAL_NAME.test(name)) {
+      if ((names ?? [name]).some((n) => RELATIONAL_NAME.test(n))) {
         problems.push(
           `key registry: \`${level}.${key}\` is declared PROSE but its name states a relation. A relation needs a checker, not a label — that is the whole of #753.`,
         );
@@ -622,13 +649,14 @@ const STRUCTURAL_KEYS = new Set([
  *    `{ phase: 'wb', name: 'wb' }` states nothing about another phase. The exemption
  *    is scalar-only on purpose: a LIST is a reference list whatever it contains.
  */
-const statesPhaseReference = (value, phaseIds, selfId) => {
+const statesPhaseReference = (value, phaseIds, selfId, allowBareNumber) => {
   if (Array.isArray(value)) {
     if (value.length === 0) return false;
     return value.every(
       (v) => (typeof v === 'string' || typeof v === 'number') && phaseIds.has(String(v)),
     );
   }
+  if (typeof value === 'number') return allowBareNumber && phaseIds.has(String(value));
   if (typeof value !== 'string') return false;
   if (selfId !== undefined && value === String(selfId)) return false;
   return phaseIds.has(value);
@@ -657,6 +685,14 @@ const statesPhaseKeyMap = (value, phaseIds) => {
  * that, surviving the removal of either while the other stood.
  */
 function scanKeys(raw, level, at, problems, phaseIds, selfId) {
+  // A bare scalar NUMBER is read as a phase reference everywhere EXCEPT on a
+  // criterion. The exemption exists because measurements live on criteria and many
+  // of them stringify to declared phase ids (`samples_lost: 1`,
+  // `server_modules_read_from_disk_on_cold_first_request: 0`). Nothing on a phase,
+  // a gate or an admissibility condition is a measurement, so scoping the exemption
+  // to the level that needs it closes `phase 3: follows_phase = 5` rather than
+  // leaving it open everywhere for one level's reason.
+  const bareNum = level !== 'criterion';
   const table = KEY_REGISTRY[level] ?? {};
   const patterns = KEY_PATTERNS[level] ?? [];
   for (const key of Object.keys(raw)) {
@@ -670,12 +706,20 @@ function scanKeys(raw, level, at, problems, phaseIds, selfId) {
     // Rule 6e — the in-data half that rule 6b's registry audit CANNOT reach: 6b
     // decides from the name alone, and a name is a choice the author makes. This
     // decides from the value, and it needs the data, so it lives here.
-    if (entry.prose && statesPhaseReference(raw[key], phaseIds, selfId)) {
+    if (entry.prose && statesPhaseReference(raw[key], phaseIds, selfId, bareNum)) {
       problems.push(
         `${at}: key \`${key}\` is declared PROSE but its value resolves to declared phase ids (${JSON.stringify(raw[key])}). That is a cross-phase relation whatever it is named — give it a checker, or rule 6b is escapable by choosing a word its vocabulary does not know.`,
       );
+    } else if (entry.prose && statesPhaseKeyMap(raw[key], phaseIds)) {
+      // The KEY-map test used to be reachable only from `scanNested`, so the same
+      // relation was caught one level down and not at the top: `attempt: { ordering:
+      // { "5": … } }` failed while `attempt: { "5": … }` exited 0.
+      problems.push(
+        `${at}: key \`${key}\` is declared PROSE but its keys resolve to declared phase ids (${Object.keys(raw[key]).join(', ')}) — a relation stated by what it is KEYED BY is still a relation.`,
+      );
     }
-    if (!STRUCTURAL_KEYS.has(key)) scanNested(raw[key], `${at} ${key}`, problems, phaseIds, selfId);
+    if (!STRUCTURAL_KEYS.has(key))
+      scanNested(raw[key], `${at} ${key}`, problems, phaseIds, selfId, bareNum);
   }
 }
 
@@ -692,10 +736,34 @@ function scanKeys(raw, level, at, problems, phaseIds, selfId) {
  * name check misses `unblocks_phase`, and a relational name whose value is prose
  * ("gated_by: the founder") is caught by nothing else.
  */
-function scanNested(value, at, problems, phaseIds, selfId) {
+function reportShape(value, what, at, problems, phaseIds, selfId, bareNum) {
+  if (statesPhaseReference(value, phaseIds, selfId, bareNum)) {
+    problems.push(
+      `${at}: ${what} has a value that resolves to declared phase ids (${JSON.stringify(value)}) — a phase reference buried in a narrative block, which no rule reaches.`,
+    );
+    return;
+  }
+  if (statesPhaseKeyMap(value, phaseIds)) {
+    problems.push(
+      `${at}: ${what} has keys that resolve to declared phase ids (${Object.keys(value).join(', ')}) — a relation stated by what it is KEYED BY is still a relation, and no rule reaches it here.`,
+    );
+  }
+}
+
+function scanNested(value, at, problems, phaseIds, selfId, bareNum) {
   if (Array.isArray(value)) {
     value.forEach((v, i) => {
-      scanNested(v, `${at}[${i}]`, problems, phaseIds, selfId);
+      // An element that is ITSELF a list or a map is a reference the object-key
+      // branch below never sees, because it has no key. One array bracket was the
+      // whole hole — `attempt: [["5","3"]]` exited 0 while `["5","3"]` failed — and
+      // it was live code with no test: deleting the array recursion left the suite
+      // green. Scalar elements are deliberately NOT tested here: the list they sit
+      // in is judged as a whole, and testing them individually would report every
+      // legitimate `concurrent_with: ["2"]` entry.
+      if (v !== null && typeof v === 'object') {
+        reportShape(v, `element [${i}]`, at, problems, phaseIds, selfId, bareNum);
+      }
+      scanNested(v, `${at}[${i}]`, problems, phaseIds, selfId, bareNum);
     });
     return;
   }
@@ -705,16 +773,10 @@ function scanNested(value, at, problems, phaseIds, selfId) {
       problems.push(
         `${at}: nested key \`${key}\` has a relational name. A relation must be stated at a level a checker can reach — buried inside a narrative block, nothing reads it, which is #753 with one more layer of nesting.`,
       );
-    } else if (statesPhaseReference(v, phaseIds, selfId)) {
-      problems.push(
-        `${at}: nested key \`${key}\` has a value that resolves to declared phase ids (${JSON.stringify(v)}) — a phase reference buried in a narrative block, which no rule reaches.`,
-      );
-    } else if (statesPhaseKeyMap(v, phaseIds)) {
-      problems.push(
-        `${at}: nested key \`${key}\` has keys that resolve to declared phase ids (${Object.keys(v).join(', ')}) — a relation stated by what it is KEYED BY is still a relation, and no rule reaches it here.`,
-      );
+    } else {
+      reportShape(v, `nested key \`${key}\``, at, problems, phaseIds, selfId, bareNum);
     }
-    scanNested(v, `${at}.${key}`, problems, phaseIds, selfId);
+    scanNested(v, `${at}.${key}`, problems, phaseIds, selfId, bareNum);
   }
 }
 
@@ -967,6 +1029,11 @@ function verify(gate, problems) {
   // from an intersection of two named fields.
   const concurrentPairs = new Map();
 
+  // Rule 1b — `derived_from` as a DIRECTED GRAPH, walked by the same
+  // `findOrderedCycles` rule 13 uses. A measured `derived` value whose provenance
+  // leads back to itself has no provenance, at any path length.
+  const derivedEdges = new Map();
+
   // Rule 13 — and the ORDERED relation as a DIRECTED GRAPH, not a bag of pairs.
   // Round 2 defeated the pair form: a `gates` cycle of length 3 (xa→xb→xc→xa)
   // exited 0, because the only ordering check was "does this pair point both
@@ -1020,11 +1087,14 @@ function verify(gate, problems) {
           const seenSrc = new Set();
           for (const src of derivedFrom) {
             const s = String(src);
-            if (s === String(c.id)) {
-              problems.push(
-                `${at}: \`derived_from\` names itself — a value whose provenance is itself has none, which is exactly what rule 1 forbids`,
-              );
-            } else if (!measuredCriterionIds.has(s) && criterionIds.has(s)) {
+            // The provenance edge, for the cycle walk after this loop. Self-reference
+            // is its length-1 case and has no branch of its own: round 5 closed
+            // length 1 by hand and left length 2 open, which is the third time the
+            // direct case was mistaken for the guarantee.
+            const from = derivedEdges.get(String(c.id)) ?? new Map();
+            derivedEdges.set(String(c.id), from);
+            if (!from.has(s)) from.set(s, `${c.id}.derived_from`);
+            if (!measuredCriterionIds.has(s) && criterionIds.has(s) && s !== String(c.id)) {
               problems.push(
                 `${at}: \`derived_from\` names \`${s}\`, which is not measured — derived from something nobody has run`,
               );
@@ -1193,14 +1263,14 @@ function verify(gate, problems) {
     // phaseRef key gets the same guarantee by declaring an inverse rather than by
     // someone remembering to copy this block. Duplicating it here would be a
     // branch no mutation could kill — the generic one would keep the suite green.
-    if ((phase.blocked_by ?? []).length > 0) {
-      const own = classOf(phase.status);
-      if (own.length === 1 && !own[0].blockable) {
-        problems.push(
-          `${phaseAt}: declares \`blocked_by\` while its own status ${phase.status} is not a blocked state`,
-        );
-      }
-    }
+    // There is deliberately NO "declares `blocked_by` while not in a blocked state"
+    // branch here. It read the same `blockable` flag as rule 8's gater check, so a
+    // corroborated `blocked_by` on a non-blockable phase was always ALSO reported by
+    // the gater side, and an uncorroborated one always ALSO by corroboration: three
+    // problems in both cases, never one. A branch that can never be the sole
+    // reporter is decoration by this repo's own standard — the same argument that
+    // deleted `edge: 'reverse'` — and it is deleted rather than given a test that
+    // could only ever pass for another rule's reason.
 
     // Rule 8b — a note that annotates a field the phase does not have.
     if (phase.gates_note !== undefined && phase.gates === undefined) {
@@ -1260,6 +1330,13 @@ function verify(gate, problems) {
   for (const cycle of findOrderedCycles(edges)) {
     problems.push(
       `${label}: the ordered relation contains a cycle — ${cycle.map((s) => s.via).join(', ')} assert ${cycle.map((s) => s.from).join(' → ')} → ${cycle[0].from}. Every phase on it must complete before itself, so none of them can start.`,
+    );
+  }
+
+  // Rule 1b — circular provenance, at any length.
+  for (const cycle of findOrderedCycles(derivedEdges)) {
+    problems.push(
+      `${label}: \`derived_from\` is circular — ${cycle.map((step) => step.from).join(' -> ')} -> ${cycle[0].from}. A measured value whose provenance leads back to itself has none, which is exactly what rule 1 forbids.`,
     );
   }
 
@@ -1361,19 +1438,25 @@ const all = [];
 // `realpathSync`, not `resolve`: the comparison is about WHICH FILE, and a path
 // string is not a file. A symlink pointing at the shipped gate file reached it with
 // a loosened registry while the refusal below claimed to be absolute.
-const realOrNull = (f) => {
+// Identity by (device, inode), not by path string and not by realpath. A SYMLINK is
+// a second path to the file and `realpathSync` collapses it; a HARD LINK is not a
+// path at all, it is the same inode under another name, and realpath cannot see
+// that. Round 4 narrowed this from "path string" to "realpath" and the claim was
+// still one indirection too wide.
+const fileIdentity = (f) => {
   try {
-    return realpathSync(f);
+    const st = statSync(f);
+    return `${st.dev}:${st.ino}`;
   } catch {
-    return null;
+    return `path:${resolve(f)}`;
   }
 };
 const gateDirFiles = new Set(
   readdirSync(GATE_DIR)
     .filter((f) => f.endsWith('.json'))
-    .map((f) => realOrNull(join(GATE_DIR, f)) ?? resolve(join(GATE_DIR, f))),
+    .map((f) => fileIdentity(join(GATE_DIR, f))),
 );
-const seamRefused = files.some((f) => gateDirFiles.has(realOrNull(f) ?? resolve(f)));
+const seamRefused = files.some((f) => gateDirFiles.has(fileIdentity(f)));
 
 for (let i = 0; i < process.argv.length; i += 1) {
   const isPattern = process.argv[i] === '--declare-pattern';
