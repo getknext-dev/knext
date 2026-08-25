@@ -54,6 +54,7 @@ import {
   restore,
   snapshot,
 } from './lib/mutation-harness.mjs';
+import { assessCompletion, evaluatePreflight } from './lib/prover-completion.mjs';
 import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -314,17 +315,18 @@ const pathFor = (m) => (m.file === 'ledger' ? LEDGER : CORE);
  * into a report.
  */
 function preflight() {
-  const stale = [];
-  for (const m of PLAN) {
-    const src = readFileSync(pathFor(m), 'utf8');
-    const n = countOccurrences(src, m.anchor);
-    if (n !== 1) stale.push(`  ${m.id}: anchor occurs ${n}x (need exactly 1) in ${m.file}`);
-  }
-  if (stale.length) {
+  const counts = PLAN.map((m) => ({
+    id: m.id,
+    count: countOccurrences(readFileSync(pathFor(m), 'utf8'), m.anchor),
+  }));
+  // The VERDICT is pure and lives in scripts/lib/prover-completion.mjs, so it
+  // can be unit-tested and mutated. This function only gathers and prints.
+  const { ok, stale } = evaluatePreflight(counts);
+  if (!ok) {
     console.error(
       `\nABORT before planting: ${stale.length} of ${PLAN.length} anchors do not resolve.`,
     );
-    for (const s of stale) console.error(s);
+    for (const s of stale) console.error(`  ${s.id}: anchor occurs ${s.count}x (need exactly 1)`);
     console.error(
       '\nNothing was mutated, so the tree is untouched. Repoint the anchors at the current\n' +
         'source. Prefer anchors a formatter will not rewrite — a JSON string literal rather\n' +
@@ -339,8 +341,7 @@ function preflight() {
 console.log("── preflight: do every mutation's anchors still exist?");
 preflight();
 
-let executed = 0;
-let controlRan = false;
+const executedIds = [];
 let died = null;
 let inFlight = null;
 
@@ -351,8 +352,7 @@ try {
     mutate(snapFor(m), m.anchor, m.replacement);
     check(m.id, m.desc, m.expected, runSpec(SPEC));
     recordMutation();
-    executed += 1;
-    if (m.isNegativeControl) controlRan = true;
+    executedIds.push(m.id);
     restore(snapFor(m));
     assertTreeClean(`after ${m.id}`);
     inFlight = null;
@@ -381,19 +381,17 @@ console.log('   ok  core and ledger restored byte-identically; working tree clea
  * mistake for noise after nine `ok` lines. Now the prover says exactly what
  * failed to happen, and says it after the `ok`s rather than before them.
  */
-if (died || executed !== PLAN.length || !controlRan) {
+const completion = assessCompletion({
+  declaredIds: PLAN.map((m) => m.id),
+  executedIds,
+  controlId: PLAN.find((m) => m.isNegativeControl)?.id ?? null,
+  died,
+});
+if (!completion.ok) {
   console.error('\nPROVER DID NOT COMPLETE — this is a FAILURE, not a partial success.');
   console.error(`  declared: ${PLAN.length}`);
-  console.error(`  executed: ${executed}`);
-  if (died) console.error(`  died at:  ${died.id} — ${died.message}`);
-  const missing = PLAN.slice(executed).map((m) => m.id);
-  if (missing.length) console.error(`  never ran: ${missing.join(', ')}`);
-  if (!controlRan) {
-    console.error(
-      '  the NEGATIVE CONTROL never ran, so nothing here shows this prover can\n' +
-        '  distinguish a guard from a tripwire. Reds alone do not establish that.',
-    );
-  }
+  console.error(`  executed: ${executedIds.length}`);
+  for (const reason of completion.reasons) console.error(`  ${reason}`);
   process.exit(1);
 }
 
