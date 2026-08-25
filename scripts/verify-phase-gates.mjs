@@ -93,16 +93,29 @@
  *      caveat about vocabulary). `criterion.evidence.blocked_by_phase` is rule 6's
  *      defect wearing one more layer of nesting, and rule 6 does not see it
  *      because `evidence` itself is declared.
- *   6e. VALUE SHAPE, and this is where the guarantee actually lives. A key
- *      declared PROSE — at a structural level or nested anywhere inside one —
- *      whose value is a string, or a non-empty array of strings, that ALL resolve
- *      to declared phase ids IS a cross-phase relation, whatever it is called.
- *      That catches every synonym without anyone guessing next year's vocabulary.
- *      An empty array is deliberately not a reference: "all zero elements resolve"
- *      is vacuous, and `gates: []` is the shape a discharged gate must take.
+ *   6e. REFERENCE SHAPE, and this is where the guarantee actually lives. A key
+ *      declared PROSE — at a structural level or nested anywhere inside one — is a
+ *      cross-phase relation, whatever it is called, when EITHER:
+ *        - its VALUE is a non-empty list whose entries all resolve to declared
+ *          phase ids (strings or numbers — ids are compared with `String()` here as
+ *          they are everywhere else), or a scalar STRING that resolves; or
+ *        - it is an OBJECT whose KEYS all resolve to declared phase ids. Round 4
+ *          walked through the value-only version with a map FROM phase id TO prose:
+ *          `attempt: { ordering: { "5": "must finish before this one" } }`.
+ *      Three boundaries, each deliberate and each with its own test:
+ *        - an EMPTY list is not a reference ("all zero elements resolve" is vacuous,
+ *          and `gates: []` is the shape a discharged gate must take);
+ *        - a bare SCALAR NUMBER is not a reference. This file is full of
+ *          measurements that stringify to phase ids — `samples_lost: 1`,
+ *          `server_modules_read_from_disk_on_cold_first_request: 0` — so a lone
+ *          number is read as one. Only a LIST is read as a reference list;
+ *        - a scalar string equal to the phase's OWN id is a LABEL, not a relation:
+ *          `{ phase: 'wb', name: 'wb' }` says nothing about another phase. Scalars
+ *          only — a list is a reference list whatever it contains.
  *      Still NOT caught, and not catchable here: a relation asserted in an English
- *      sentence ("phase 5 gates phase 1") inside a `$comment` or a `note`. The
- *      closed world is over keys and reference-shaped values, never over prose.
+ *      SENTENCE ("phase 5 gates phase 1") inside a `$comment` or a `note`. The
+ *      closed world is over keys, nested keys, and reference-shaped values. It is
+ *      never over prose, and no wording in this file should suggest otherwise.
  *   7. STATUS VOCABULARY. Every `phase.status` must match exactly one declared
  *      class, and each class states what it implies about that phase's own
  *      measurements:
@@ -118,8 +131,10 @@
  *      `DONNE`) silently disabled every status rule for that phase.
  *   8. GATING RELATION (#753's rule (b)). Every key declared `phaseRef` must name
  *      declared phases, without self-reference or duplicates. If X gates Y then Y
- *      must be in a blocked state AND must not have measured anything; if X is
- *      DONE* it must not still be gating. CORROBORATION is table-driven, not
+ *      must be in a blocked state AND must not have measured anything — in its
+ *      PRECONDITIONS as well as its criteria, a field this check read past until
+ *      round 4 (`(target.criteria ?? [])`), which left #753's own defect class
+ *      restatable one field over; if X is DONE* it must not still be gating. CORROBORATION is table-driven, not
  *      per-key: an entry declaring `inverse` and `mustCorroborate` requires the
  *      other side to state the same relation back, so `blocked_by: [Y]` needs
  *      `gates: [X]` on Y and `concurrent_with: [Y]` needs `concurrent_with: [X]`
@@ -155,20 +170,35 @@
  *      blocked" was statable and green.
  *   13. RELATION ORDERING. Every `phaseRef` key declares whether it asserts an
  *      ORDERED relation (`gates`, `blocked_by` — one side comes first) or an
- *      UNORDERED one (`concurrent_with` — neither does), and an ordered key also
- *      declares which WAY it points (`edge: forward|reverse`). Two phases may not
- *      stand in both an ordered and an unordered relation, and the ordered
- *      relation, taken as a DIRECTED GRAPH, must be ACYCLIC. The graph is the
- *      point: the first version compared pairs, so `xa gates xb`, `xb gates xc`,
- *      `xc gates xa` — an ordering no phase can ever satisfy — exited 0 while a
- *      2-cycle failed. Cycle length was the enumeration, and length 3 was the
- *      second case. A 2-cycle is now just the shortest walk.
+ *      UNORDERED one (`concurrent_with` — neither does). The ordered relation is a
+ *      DIRECTED GRAPH, and BOTH questions are answered by walking it:
+ *        - it must be ACYCLIC (every phase on a cycle must complete before itself);
+ *        - a pair declared UNORDERED must not be REACHABLE either way in it.
+ *      The graph is the point, and it took two rounds to apply it to both halves.
+ *      Round 2: pairs were compared, so `xa gates xb, xb gates xc, xc gates xa`
+ *      exited 0 while a 2-cycle failed — cycle LENGTH was the enumeration. Round 4:
+ *      the acyclicity half walked but the unordered half was still a pair lookup, so
+ *      `ta gates tb, tb gates tc, ta concurrent_with tc` exited 0 while the direct
+ *      pair failed — PATH LENGTH was the enumeration. Both are now the same walk.
+ *      Orientation comes from WHICH SIDE CORROBORATES: the non-corroborating key
+ *      contributes `phase -> ref`, and its inverse contributes nothing because it
+ *      states the mirror of an edge already present. `auditRegistry` requires
+ *      exactly one side of an ordered pair to corroborate, which is what makes that
+ *      a checked fact rather than a convention. (An `edge: forward|reverse` field
+ *      used to declare orientation. It was DECORATION - `blocked_by` corroborates,
+ *      so its reverse edge could only differ on a file corroboration had already
+ *      reported, and deleting the reverse contribution outright left every test and
+ *      every rebuilt contradiction green. It is gone.)
  *   1b. `kind: "derived"` exempts a criterion from rule 1's source requirement, and
  *      that exemption was a one-keystroke escape from the file's HEADLINE rule:
  *      relabel a criterion `derived` and a measured value with no provenance exits
  *      0 — the same rename shape as rule 3's `DONE_*`, on the rule the file exists
  *      for. A measured `derived` criterion must now carry `derived_from` naming
- *      declared criterion ids, which makes the exemption a checkable relation.
+ *      declared criterion ids, which makes the exemption a checkable relation —
+ *      and, since round 4, one subject to the SAME degeneracy checks rule 8 makes
+ *      for phase references: it may not name ITSELF (provenance that is its own
+ *      subject is no provenance, which is exactly what rule 1 forbids), may not
+ *      name a criterion nobody has MEASURED, and may not list one twice.
  *
  * WHAT IS SCANNED AND WHAT IS ENUMERATED — read this before trusting a claim
  * above, and note what round-2 review established: a loop that genuinely scans can
@@ -179,11 +209,13 @@
  * with a predicate that does not enumerate cases:
  *   6   every key at the five structural levels, against the registry
  *   6c  every READ, against rule ids and against RECORDED CONSUMPTION
- *   6e  every PROSE value, against "does it resolve to declared phase ids"
+ *   6e  every PROSE key, against "does its value or its key set resolve to phase
+ *       ids" — at the structural levels and at any nesting depth
  *   8   every `phaseRef` key; corroboration derived from `entry.inverse`
  *   8c  every key pattern carrying a `phaseClaim`
  *   12  every phase that gates the current one
- *   13  the ordered relation as a directed graph — a cycle walk, not a pair check
+ *   13  the ordered relation as a directed graph — BOTH questions are walks: a
+ *       cycle search, and a reachability test for every unordered pair
  *
  * SCANNED LOOP, ENUMERATED PREDICATE — honest about the hybrid:
  *   6b  ranges over the whole registry, but decides with a ten-word vocabulary.
@@ -197,13 +229,20 @@
  * not come from a name. The scan's job is to make sure no key exists that no rule
  * reaches; it is not, and cannot be, a guarantee that every rule was written.
  *
+ * A LOOP THAT SCANS CAN STILL DECIDE WITH AN ENUMERATED PREDICATE, and that is how
+ * every defeat in rounds 2 and 4 got in: rule 13 ranged over every declared
+ * `phaseRef` key while deciding with a pair lookup, and rule 1b ranged over every
+ * `derived_from` entry while checking only that it resolved. When adding a rule
+ * here, state which column it is in — the middle one is not a failure, but calling
+ * a middle-column rule a scan is.
+ *
  * Exit 1 on any violation. Read-only; it never edits the gate file.
  *
  * Usage:  node scripts/verify-phase-gates.mjs [--json] [--file <path>]
  *                        [--declare <level>.<key>=<json>]
  *                        [--declare-pattern <level>.<regex-source>=<json>]
  */
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -288,9 +327,6 @@ const RULE_IDS = new Set([
 /** The ordering a `phaseRef` key asserts between the two phases. See rule 13. */
 const ORDERINGS = new Set(['ordered', 'unordered']);
 
-/** Which way an ORDERED key points: `gates` forward, `blocked_by` reverse. */
-const EDGE_SENSES = new Set(['forward', 'reverse']);
-
 const KEY_REGISTRY = {
   gate: {
     $comment: prose('file-level commentary'),
@@ -319,13 +355,8 @@ const KEY_REGISTRY = {
     done_on: read('9a'),
     criteria: read('1/3/4/5/7/10/11'),
     preconditions: read('1/3/3b/4/7/8/10/11'),
-    gates: read('8/13', { phaseRef: 'ordered', inverse: 'blocked_by', edge: 'forward' }),
-    blocked_by: read('8/13', {
-      phaseRef: 'ordered',
-      inverse: 'gates',
-      edge: 'reverse',
-      mustCorroborate: true,
-    }),
+    gates: read('8/13', { phaseRef: 'ordered', inverse: 'blocked_by' }),
+    blocked_by: read('8/13', { phaseRef: 'ordered', inverse: 'gates', mustCorroborate: true }),
     concurrent_with: read('8/13', {
       phaseRef: 'unordered',
       inverse: 'concurrent_with',
@@ -536,12 +567,19 @@ function auditRegistry(problems) {
           `key registry: \`${level}.${key}\` declares \`inverse: ${JSON.stringify(entry.inverse)}\`, which is not a phaseRef key at this level declaring \`${key}\` back. Corroboration is table-driven; an inverse that does not point home cannot be checked.`,
         );
       }
-      // An ORDERED key must say which way it points, or rule 13 cannot orient the
-      // edge it contributes and the cycle walk is reading an undirected graph.
-      if (entry.phaseRef === 'ordered' && !EDGE_SENSES.has(entry.edge)) {
-        problems.push(
-          `key registry: \`${level}.${key}\` is \`ordered\` but declares \`edge: ${JSON.stringify(entry.edge)}\` — it must be ${[...EDGE_SENSES].join(' or ')}, naming which phase comes first.`,
-        );
+      // Rule 13 orients the ordered graph by WHICH SIDE CORROBORATES: the
+      // non-corroborating side contributes the forward edge, its inverse
+      // contributes none. That only works if exactly one side corroborates — with
+      // both, no edge is ever contributed and the graph is empty; with neither,
+      // both are, and every valid pair reads as a 2-cycle.
+      if (entry.phaseRef === 'ordered' && entry.inverse !== key && inverse) {
+        if (!!entry.mustCorroborate === !!inverse.mustCorroborate) {
+          problems.push(
+            entry.mustCorroborate
+              ? `key registry: \`${level}.${key}\` and its inverse \`${entry.inverse}\` both declare \`mustCorroborate\` — exactly one side of an ordered pair must, or neither contributes an edge and rule 13's graph is empty.`
+              : `key registry: \`${level}.${key}\` and its inverse \`${entry.inverse}\` — neither declares \`mustCorroborate\` — exactly one side of an ordered pair must, or both contribute an edge and every valid pair reads as a 2-cycle.`,
+          );
+        }
       }
     }
   }
@@ -570,14 +608,44 @@ const STRUCTURAL_KEYS = new Set([
  * to declared phase ids IS a phase reference, under any name anyone invents next
  * year. The vocabulary is kept as a cheap first pass, not as the guarantee.
  *
- * An empty array is deliberately NOT a reference — "all zero elements resolve" is
- * vacuous, and treating it as a relation would fail `gates: []`, the shape a
- * discharged gate is supposed to take.
+ * Three boundaries, each of which is a deliberate decision and not an oversight:
+ *
+ *  - An empty array is NOT a reference. "All zero elements resolve" is vacuous, and
+ *    treating it as a relation would fail `gates: []`, the shape a discharged gate
+ *    is supposed to take.
+ *  - A LIST may hold numbers — ids are compared with `String()` here as they are
+ *    everywhere else, so `[93]` is caught. A bare SCALAR number is NOT a reference,
+ *    and that asymmetry is forced by the data: `samples_lost: 1` and
+ *    `server_modules_read_from_disk_on_cold_first_request: 0` both stringify to
+ *    declared phase ids. This file is full of measurements; a lone number is one.
+ *  - A bare scalar STRING equal to the phase's OWN id is a label, not a relation —
+ *    `{ phase: 'wb', name: 'wb' }` states nothing about another phase. The exemption
+ *    is scalar-only on purpose: a LIST is a reference list whatever it contains.
  */
-const statesPhaseReference = (value, phaseIds) => {
-  const list = Array.isArray(value) ? value : [value];
-  if (list.length === 0) return false;
-  return list.every((v) => typeof v === 'string' && phaseIds.has(v));
+const statesPhaseReference = (value, phaseIds, selfId) => {
+  if (Array.isArray(value)) {
+    if (value.length === 0) return false;
+    return value.every(
+      (v) => (typeof v === 'string' || typeof v === 'number') && phaseIds.has(String(v)),
+    );
+  }
+  if (typeof value !== 'string') return false;
+  if (selfId !== undefined && value === String(selfId)) return false;
+  return phaseIds.has(value);
+};
+
+/**
+ * Rule 6e — and the same question asked of an object's KEYS.
+ *
+ * The closed world was over values only, so a map FROM phase id TO prose sailed
+ * through: `attempt: { ordering: { "5": "must finish before this one" } }`.
+ * `attempt` is PROSE, `ordering` is not a relational name, and the references are
+ * the keys — which nothing inspected.
+ */
+const statesPhaseKeyMap = (value, phaseIds) => {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  return keys.length > 0 && keys.every((k) => phaseIds.has(k));
 };
 
 /**
@@ -588,7 +656,7 @@ const statesPhaseReference = (value, phaseIds) => {
  * redundant, so neither could be mutation-killed — the harness proved precisely
  * that, surviving the removal of either while the other stood.
  */
-function scanKeys(raw, level, at, problems, phaseIds) {
+function scanKeys(raw, level, at, problems, phaseIds, selfId) {
   const table = KEY_REGISTRY[level] ?? {};
   const patterns = KEY_PATTERNS[level] ?? [];
   for (const key of Object.keys(raw)) {
@@ -602,12 +670,12 @@ function scanKeys(raw, level, at, problems, phaseIds) {
     // Rule 6e — the in-data half that rule 6b's registry audit CANNOT reach: 6b
     // decides from the name alone, and a name is a choice the author makes. This
     // decides from the value, and it needs the data, so it lives here.
-    if (entry.prose && statesPhaseReference(raw[key], phaseIds)) {
+    if (entry.prose && statesPhaseReference(raw[key], phaseIds, selfId)) {
       problems.push(
         `${at}: key \`${key}\` is declared PROSE but its value resolves to declared phase ids (${JSON.stringify(raw[key])}). That is a cross-phase relation whatever it is named — give it a checker, or rule 6b is escapable by choosing a word its vocabulary does not know.`,
       );
     }
-    if (!STRUCTURAL_KEYS.has(key)) scanNested(raw[key], `${at} ${key}`, problems, phaseIds);
+    if (!STRUCTURAL_KEYS.has(key)) scanNested(raw[key], `${at} ${key}`, problems, phaseIds, selfId);
   }
 }
 
@@ -624,10 +692,10 @@ function scanKeys(raw, level, at, problems, phaseIds) {
  * name check misses `unblocks_phase`, and a relational name whose value is prose
  * ("gated_by: the founder") is caught by nothing else.
  */
-function scanNested(value, at, problems, phaseIds) {
+function scanNested(value, at, problems, phaseIds, selfId) {
   if (Array.isArray(value)) {
     value.forEach((v, i) => {
-      scanNested(v, `${at}[${i}]`, problems, phaseIds);
+      scanNested(v, `${at}[${i}]`, problems, phaseIds, selfId);
     });
     return;
   }
@@ -637,12 +705,16 @@ function scanNested(value, at, problems, phaseIds) {
       problems.push(
         `${at}: nested key \`${key}\` has a relational name. A relation must be stated at a level a checker can reach — buried inside a narrative block, nothing reads it, which is #753 with one more layer of nesting.`,
       );
-    } else if (statesPhaseReference(v, phaseIds)) {
+    } else if (statesPhaseReference(v, phaseIds, selfId)) {
       problems.push(
         `${at}: nested key \`${key}\` has a value that resolves to declared phase ids (${JSON.stringify(v)}) — a phase reference buried in a narrative block, which no rule reaches.`,
       );
+    } else if (statesPhaseKeyMap(v, phaseIds)) {
+      problems.push(
+        `${at}: nested key \`${key}\` has keys that resolve to declared phase ids (${Object.keys(v).join(', ')}) — a relation stated by what it is KEYED BY is still a relation, and no rule reaches it here.`,
+      );
     }
-    scanNested(v, `${at}.${key}`, problems, phaseIds);
+    scanNested(v, `${at}.${key}`, problems, phaseIds, selfId);
   }
 }
 
@@ -714,6 +786,34 @@ function findOrderedCycles(edges) {
 
   for (const node of edges.keys()) if (!colour.has(node)) walk(node);
   return [...found.values()];
+}
+
+/**
+ * The shortest ordered path `from → … → to`, or null if `to` is not reachable.
+ *
+ * Rule 13 asks the graph TWO questions, and until round 4 it only walked for one of
+ * them. Acyclicity was a walk; ordered-vs-unordered was still a lookup on a sorted
+ * PAIR, so `ta gates tb`, `tb gates tc`, `ta concurrent_with tc` exited 0 while the
+ * direct pair failed. Path length was the enumeration, exactly as cycle length had
+ * been one round earlier.
+ */
+function orderedPath(edges, from, to) {
+  const prev = new Map([[from, null]]);
+  const queue = [from];
+  while (queue.length > 0) {
+    const node = queue.shift();
+    for (const next of (edges.get(node) ?? new Map()).keys()) {
+      if (prev.has(next)) continue;
+      prev.set(next, node);
+      if (next === to) {
+        const path = [to];
+        for (let n = node; n !== null; n = prev.get(n)) path.unshift(n);
+        return path;
+      }
+      queue.push(next);
+    }
+  }
+  return null;
 }
 
 /** Rule 3 — a DONE phase must actually be done. */
@@ -820,9 +920,13 @@ function verify(gate, problems) {
     }
   }
   for (const p of raw.phases ?? []) {
-    scanKeys(p, 'phase', `${label} phase ${p.phase}`, problems, phaseIds);
+    // `selfId` lets rule 6e tell a LABEL from a RELATION: a scalar equal to the
+    // phase's own id (`{ phase: 'wb', name: 'wb' }`) states nothing about another
+    // phase, and flagging it cost the round-4 reviewer a fixture.
+    const selfId = String(p.phase);
+    scanKeys(p, 'phase', `${label} phase ${p.phase}`, problems, phaseIds, selfId);
     for (const c of [...(p.preconditions ?? []), ...(p.criteria ?? [])]) {
-      scanKeys(c, 'criterion', `${label} phase ${p.phase} ${c.id}`, problems, phaseIds);
+      scanKeys(c, 'criterion', `${label} phase ${p.phase} ${c.id}`, problems, phaseIds, selfId);
     }
   }
 
@@ -844,6 +948,11 @@ function verify(gate, problems) {
     if (n > 1) problems.push(`${label}: criterion id \`${k}\` is declared ${n} times`);
   }
   const criterionIds = new Set(seenCrit.keys());
+  const measuredCriterionIds = new Set(
+    (raw.phases ?? []).flatMap((p) =>
+      [...(p.preconditions ?? []), ...(p.criteria ?? [])].filter(isMeasured).map((c) => c.id),
+    ),
+  );
 
   const byId = new Map(gate.phases.map((p) => [String(p.phase), p]));
   const admissible = new Set((gate.admissibility?.conditions ?? []).map((c) => c.id));
@@ -853,10 +962,10 @@ function verify(gate, problems) {
       .map((p) => String(p.phase));
   const ctx = { byId, gatersOf };
 
-  // Rule 13 — every phase pair, filed under the ORDERING its relation asserts.
-  // Collected as the phaseRef loop runs, so the contradiction below is derived
-  // from the registry rather than from an intersection of two named fields.
-  const relationPairs = {};
+  // Rule 13 — every pair some key declares UNORDERED, collected as the phaseRef
+  // loop runs, so the contradiction below is derived from the registry rather than
+  // from an intersection of two named fields.
+  const concurrentPairs = new Map();
 
   // Rule 13 — and the ORDERED relation as a DIRECTED GRAPH, not a bag of pairs.
   // Round 2 defeated the pair form: a `gates` cycle of length 3 (xa→xb→xc→xa)
@@ -902,12 +1011,30 @@ function verify(gate, problems) {
             `${at}: \`kind: "derived"\` with a measured value and no \`derived_from\`. Derived is an exemption from rule 1's source requirement, so it must name the criteria it is computed from, or it is a number with no provenance wearing a label.`,
           );
         } else {
+          // The SAME degeneracy checks rule 8 makes for phase references. Rule 1b
+          // checked resolution and nothing else, so it reproduced the exact hole it
+          // was written to close: `derived_from: ['P2-1']` on P2-1 is a measured
+          // number whose entire provenance is ITSELF — rule 1's "number with no
+          // provenance" wearing rule 1b's label — and a source nobody has run is
+          // provenance that resolves to an absence.
+          const seenSrc = new Set();
           for (const src of derivedFrom) {
-            if (!criterionIds.has(String(src))) {
+            const s = String(src);
+            if (s === String(c.id)) {
               problems.push(
-                `${at}: \`derived_from\` names \`${src}\`, which is not a declared criterion id`,
+                `${at}: \`derived_from\` names itself — a value whose provenance is itself has none, which is exactly what rule 1 forbids`,
+              );
+            } else if (!measuredCriterionIds.has(s) && criterionIds.has(s)) {
+              problems.push(
+                `${at}: \`derived_from\` names \`${s}\`, which is not measured — derived from something nobody has run`,
+              );
+            } else if (!criterionIds.has(s)) {
+              problems.push(
+                `${at}: \`derived_from\` names \`${s}\`, which is not a declared criterion id`,
               );
             }
+            if (seenSrc.has(s)) problems.push(`${at}: \`derived_from\` lists \`${s}\` twice`);
+            seenSrc.add(s);
           }
         }
       }
@@ -1007,22 +1134,32 @@ function verify(gate, problems) {
           }
         }
 
-        // Rule 13 — record the pair under the ordering this key asserts.
-        const pair = [String(phase.phase), r].sort().join(' ↔ ');
-        const byOrdering = relationPairs[entry.phaseRef] ?? new Map();
-        relationPairs[entry.phaseRef] = byOrdering;
-        byOrdering.set(pair, [...(byOrdering.get(pair) ?? []), `${phase.phase}.${key}`]);
+        const self = String(phase.phase);
 
-        // ...and, for an ORDERED key, contribute a DIRECTED edge oriented by the
-        // sense the registry declares. `gates` is forward (this phase comes first);
-        // `blocked_by` is reverse (the referenced phase does). The cycle walk below
-        // subsumes the old both-ways branch — a 2-cycle is just its shortest case.
-        if (entry.phaseRef === 'ordered') {
-          const self = String(phase.phase);
-          const [from, to] = entry.edge === 'reverse' ? [r, self] : [self, r];
-          const outbound = edges.get(from) ?? new Map();
-          edges.set(from, outbound);
-          if (!outbound.has(to)) outbound.set(to, `${phase.phase}.${key}`);
+        // Rule 13 — record an UNORDERED pair. Only unordered: the ordered relation
+        // is consulted as a graph below, not as a bag of pairs.
+        if (entry.phaseRef === 'unordered') {
+          const [a, b] = [self, r].sort();
+          const rec = concurrentPairs.get(`${a} ↔ ${b}`) ?? { a, b, via: [] };
+          rec.via.push(`${phase.phase}.${key}`);
+          concurrentPairs.set(`${a} ↔ ${b}`, rec);
+        }
+
+        // ...and an ORDERED key contributes a DIRECTED edge `phase → ref`: it says
+        // this phase comes first. Its inverse states the mirror of the same fact and
+        // is required to corroborate it, so the corroborating side contributes
+        // NOTHING — the edge is already there, and a second one would point the
+        // other way and read every valid pair as a 2-cycle. `auditRegistry` requires
+        // exactly one side of an ordered pair to corroborate, which is what makes
+        // "the non-corroborating side is the forward one" a checked fact rather than
+        // a convention. (An `edge: forward|reverse` field used to declare this. It
+        // was DECORATION: `blocked_by` corroborates, so its reverse edge could only
+        // ever differ on a file corroboration had already reported, and deleting the
+        // reverse contribution outright left every test and contradiction green.)
+        if (entry.phaseRef === 'ordered' && !entry.mustCorroborate) {
+          const outbound = edges.get(self) ?? new Map();
+          edges.set(self, outbound);
+          if (!outbound.has(r)) outbound.set(r, `${phase.phase}.${key}`);
         }
       });
     }
@@ -1037,7 +1174,7 @@ function verify(gate, problems) {
           `${phaseAt}: gates phase ${ref}, whose status ${target.status} is not a blocked state — a phase cannot be gated and advanced at once`,
         );
       }
-      const ran = (target.criteria ?? []).filter(isMeasured);
+      const ran = conditionsOf(target).filter(isMeasured);
       if (ran.length > 0) {
         problems.push(
           `${label} phase ${ref}: is gated by phase ${phase.phase} but has already measured ${ran.map((c) => c.id).join(', ')} — it ran ahead of its own gate`,
@@ -1103,12 +1240,15 @@ function verify(gate, problems) {
     }
   }
 
-  // Rule 13 — a pair cannot stand in an ORDERED and an UNORDERED relation at once.
-  for (const [pair, ordered] of relationPairs.ordered ?? []) {
-    const unordered = relationPairs.unordered?.get(pair);
-    if (!unordered) continue;
+  // Rule 13 — a pair declared UNORDERED may not be connected by the ordered
+  // relation, in either direction, AT ANY PATH LENGTH. Reachability, not a pair
+  // lookup: "ta comes before tb, tb before tc" says ta comes before tc just as
+  // plainly as a direct edge would, and the file cannot also say they are concurrent.
+  for (const { a, b, via } of concurrentPairs.values()) {
+    const path = orderedPath(edges, a, b) ?? orderedPath(edges, b, a);
+    if (!path) continue;
     problems.push(
-      `${label}: phases ${pair} are related by ${ordered.join(', ')} (which asserts an order) AND by ${unordered.join(', ')} (which asserts none) — one of the two is false`,
+      `${label}: phases ${a} ↔ ${b} are declared concurrent by ${via.join(', ')} while the ordered relation makes ${path[path.length - 1]} reachable from ${path[0]} (${path.join(' → ')}) — one of the two is false`,
     );
   }
 
@@ -1218,12 +1358,22 @@ const all = [];
 // The refusal is scoped to the REAL GATE FILES, not merely to the absence of
 // `--file`. The previous wording claimed the seam "can never loosen rule 6 for the
 // file it exists to protect", and that was false: naming the real path reached it.
+// `realpathSync`, not `resolve`: the comparison is about WHICH FILE, and a path
+// string is not a file. A symlink pointing at the shipped gate file reached it with
+// a loosened registry while the refusal below claimed to be absolute.
+const realOrNull = (f) => {
+  try {
+    return realpathSync(f);
+  } catch {
+    return null;
+  }
+};
 const gateDirFiles = new Set(
   readdirSync(GATE_DIR)
     .filter((f) => f.endsWith('.json'))
-    .map((f) => resolve(join(GATE_DIR, f))),
+    .map((f) => realOrNull(join(GATE_DIR, f)) ?? resolve(join(GATE_DIR, f))),
 );
-const seamRefused = files.some((f) => gateDirFiles.has(resolve(f)));
+const seamRefused = files.some((f) => gateDirFiles.has(realOrNull(f) ?? resolve(f)));
 
 for (let i = 0; i < process.argv.length; i += 1) {
   const isPattern = process.argv[i] === '--declare-pattern';

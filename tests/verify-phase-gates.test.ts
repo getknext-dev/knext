@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -331,16 +331,6 @@ describe('#753 — every relation the gate file can state is read by a checker',
     );
   });
 
-  it('rule 6c: an ORDERED key that does not say which way it points fails', () => {
-    // Without `edge`, rule 13 cannot orient the edge the key contributes, and the
-    // cycle walk would be reading an undirected graph.
-    expectFailure(
-      load(),
-      /`phase\.gates` is `ordered` but declares `edge: undefined` — it must be forward or reverse/,
-      declare('phase', 'gates', { by: '8/13', phaseRef: 'ordered', inverse: 'blocked_by' }),
-    );
-  });
-
   it('rule 6c: binding is scoped to the LEVEL — a key read on criteria does not bind it on phases', () => {
     // `target` is read off every criterion and off no phase. A flat set of property
     // names would call `phase.target` bound; the tracker records `<level>.<key>`.
@@ -399,6 +389,15 @@ describe('#753 — every relation the gate file can state is read by a checker',
       expect(code, `expected refusal for ${args.join(' ')}; stderr:\n${stderr}`).toBe(2);
       expect(stderr).toMatch(/is a test seam and may not be used against a real gate file/);
     }
+
+    // ...and a SYMLINK is the real file too. The refusal was a path-string compare,
+    // so pointing `--file` at a link reached the shipped gate file with a loosened
+    // registry, while the sentence claiming refusal was stated absolutely.
+    const linkDir = mkdtempSync(join(tmpdir(), 'gates-link-'));
+    const link = join(linkDir, 'adr-0042-gates.json');
+    symlinkSync(GATE, link);
+    const viaLink = refuse(['--file', link, '--declare', 'phase.unblocks_phase={"prose":"x"}']);
+    expect(viaLink.code, `expected refusal via symlink; stderr:\n${viaLink.stderr}`).toBe(2);
   });
 
   // --- rule 6b/6c: the key PATTERNS half of the registry audit ---
@@ -464,6 +463,51 @@ describe('#753 — every relation the gate file can state is read by a checker',
     const g = load();
     (crit(g, 'P3d-1').evidence as Record<string, unknown>).unblocks_phase = '5';
     expectFailure(g, /nested key `unblocks_phase` has a value that resolves to declared phase ids/);
+  });
+
+  it('rule 6e: a relation keyed BY phase id is caught — the closed world covers nested KEYS too', () => {
+    // Round 4: 6e inspected values only, so a map from phase id to prose sailed
+    // through — `attempt` is PROSE, `ordering` is not a relational name, and the
+    // references are the object's KEYS.
+    const g = load();
+    (crit(g, 'P1-1') as Record<string, unknown>).attempt = {
+      ordering: { '5': 'must finish before this one', '3': 'and after' },
+    };
+    expectFailure(g, /nested key `ordering` has keys that resolve to declared phase ids/);
+  });
+
+  it('rule 6e: a NUMERIC reference list is caught — ids are compared as strings everywhere else', () => {
+    const g = load();
+    g.phases.push({ phase: 93, name: 'label 93', status: 'NOT_STARTED' } as unknown as Phase);
+    (phase(g, '3') as Record<string, unknown>).unblocks_phase = [93];
+    expectFailure(
+      g,
+      /key `unblocks_phase` is declared PROSE but its value resolves to declared phase ids/,
+      declare('phase', 'unblocks_phase', { prose: 'commentary' }),
+    );
+  });
+
+  it('rule 6e: a bare NUMBER is a measurement, not a reference — the file is full of them', () => {
+    // `samples_lost: 1` and `server_modules_read_from_disk_on_cold_first_request: 0`
+    // both stringify to declared phase ids. Treating a scalar number as a reference
+    // would red the shipped file; only a LIST is read as a reference list.
+    const g = load();
+    (crit(g, 'P3d-1').evidence as Record<string, unknown>).some_count = 1;
+    const { code, stderr } = runDetail(g);
+    expect(code, stderr).toBe(0);
+  });
+
+  it('rule 6e: a phase whose `name` equals its OWN id is not a cross-phase relation', () => {
+    const g = load();
+    g.phases.push({ phase: 'wb', name: 'wb', status: 'NOT_STARTED' } as Phase);
+    const { code, stderr } = runDetail(g);
+    expect(code, stderr).toBe(0);
+  });
+
+  it('rule 6e: but a scalar naming ANOTHER phase still fails', () => {
+    const g = load();
+    g.phases.push({ phase: 'wb', name: '5', status: 'NOT_STARTED' } as Phase);
+    expectFailure(g, /key `name` is declared PROSE but its value resolves to declared phase ids/);
   });
 
   it('rule 6e: an EMPTY array is not a reference — `gates: []` is a discharged gate', () => {
@@ -645,7 +689,9 @@ describe('#753 — every relation the gate file can state is read by a checker',
     phase(g, '3').gates = ['5'];
     phase(g, '3').concurrent_with = ['5'];
     phase(g, '5').concurrent_with = ['3'];
-    expectFailure(g, /are related by 3\.gates \(which asserts an order\) AND by .*concurrent_with/);
+    // The direct pair is now the shortest case of the reachability walk, not a
+    // separate branch — same defect, one rule instead of two.
+    expectFailure(g, /are declared concurrent by .*while the ordered relation makes/);
   });
 
   it('rule 13: the ordered relation must be ACYCLIC at EVERY cycle length', () => {
@@ -667,6 +713,45 @@ describe('#753 — every relation the gate file can state is read by a checker',
       });
       expectFailure(g, /the ordered relation contains a cycle/);
     }
+  });
+
+  it('rule 13: a TRANSITIVE ordered chain contradicting a declared concurrency fails', () => {
+    // Round 4's defeat: the ordered-vs-unordered half was still a PAIR lookup, so a
+    // direct `gates`+`concurrent_with` on the same pair failed while `ta → tb → tc`
+    // with `ta concurrent_with tc` exited 0. Cycle length was round 2's enumeration;
+    // PATH length was this one. The graph was built and then consulted for only one
+    // of the two questions it can answer.
+    const P = (id: string, extra: Partial<Phase> = {}): Phase => ({
+      phase: id,
+      name: `label ${id}`,
+      status: 'NOT_STARTED',
+      ...extra,
+    });
+    for (const hops of [1, 2, 3]) {
+      const g = load();
+      const ids = ['t0', ...Array.from({ length: hops }, (_, i) => `t${i + 1}`)];
+      ids.forEach((id, i) => {
+        g.phases.push(
+          P(id, i < ids.length - 1 ? { gates: [ids[i + 1]] } : { concurrent_with: [ids[0]] }),
+        );
+      });
+      // head is concurrent with the tail it transitively precedes
+      (phase(g, 't0') as Phase).concurrent_with = [ids[ids.length - 1]];
+      expectFailure(g, /while the ordered relation makes/);
+    }
+  });
+
+  it('rule 13: concurrency between phases the ordered relation does NOT connect is fine', () => {
+    // The control for the case above: reachability, not "any concurrency near a gate".
+    const g = load();
+    g.phases.push(
+      { phase: 'ua', name: 'label ua', status: 'NOT_STARTED', gates: ['ub'] },
+      { phase: 'ub', name: 'label ub', status: 'BLOCKED_ON_UA' },
+      { phase: 'uc', name: 'label uc', status: 'NOT_STARTED', concurrent_with: ['ud'] },
+      { phase: 'ud', name: 'label ud', status: 'NOT_STARTED', concurrent_with: ['uc'] },
+    );
+    const { code, stderr } = runDetail(g);
+    expect(code, stderr).toBe(0);
   });
 
   it('rule 13: a cycle closed through `blocked_by` — the INVERSE sense — also fails', () => {
@@ -754,6 +839,71 @@ describe('#753 — every relation the gate file can state is read by a checker',
 
   // --- rule 1b: `derived` is an exemption, not a free pass ---
 
+  it('rule 8: a gated phase that has already measured a PRECONDITION fails', () => {
+    // Round 3 claimed N-a "closed"; two of its three cases were. This one reads
+    // `target.criteria` and so missed the same measurement one field over — the
+    // #753 defect class itself, a phase advancing while the file says it is blocked.
+    // A report that says "closed" is what stops the next reader from checking.
+    const g = load();
+    g.phases.push(
+      { phase: 'wa', name: 'label wa', status: 'NOT_STARTED', gates: ['wb'] },
+      {
+        phase: 'wb',
+        name: 'label wb',
+        status: 'NOT_STARTED_WITH_BASELINE',
+        status_note: 'a baseline precondition was measured',
+        preconditions: [
+          { id: 'WB-pre', text: 't', kind: 'value', measured: 4, target: 4, source: 'repo:x' },
+        ],
+      },
+    );
+    expectFailure(g, /phase wb: is gated by phase wa but has already measured WB-pre/);
+  });
+
+  it('rule 1b: derived_from may not name the criterion ITSELF', () => {
+    // Circular provenance: a measured number whose entire provenance is itself —
+    // the "number with no provenance" rule 1 forbids, wearing rule 1b's label. Rule 8
+    // already guards exactly this shape for phase refs; rule 1b did not.
+    const g = load();
+    const c = crit(g, 'P2-1');
+    c.kind = 'derived';
+    c.measured = 4.5;
+    c.source = undefined;
+    c.derived_from = ['P2-1'];
+    expectFailure(g, /`derived_from` names itself/);
+  });
+
+  it('rule 1b: derived_from may not name an UNMEASURED criterion', () => {
+    const g = load();
+    const c = crit(g, 'P2-1');
+    c.kind = 'derived';
+    c.measured = 4.5;
+    c.source = undefined;
+    c.derived_from = ['P5-1']; // derived from something nobody has run
+    expectFailure(g, /`derived_from` names `P5-1`, which is not measured/);
+  });
+
+  it('rule 1b: derived_from may not list the same source twice', () => {
+    const g = load();
+    const c = crit(g, 'P2-1');
+    c.kind = 'derived';
+    c.measured = 4.5;
+    c.source = undefined;
+    c.derived_from = ['P0-1', 'P0-1'];
+    expectFailure(g, /`derived_from` lists `P0-1` twice/);
+  });
+
+  it('rule 1b: a well-formed derived_from passes — the rule is not "derived always fails"', () => {
+    const g = load();
+    const c = crit(g, 'P2-1');
+    c.kind = 'derived';
+    c.measured = 4.5;
+    c.source = undefined;
+    c.derived_from = ['P0-1', 'P0-3'];
+    const { code, stderr } = runDetail(g);
+    expect(code, stderr).toBe(0);
+  });
+
   it('rule 1b: kind "derived" with a measured value and no derived_from fails', () => {
     // `derived` exempts a criterion from rule 1's source requirement, so relabelling
     // one was a one-keystroke escape from the file's HEADLINE rule: a measured value
@@ -787,6 +937,70 @@ describe('#753 — every relation the gate file can state is read by a checker',
     const g = load();
     crit(g, 'P2-1').evidence = { method: 'none, that is the point' };
     expectFailure(g, /carries `evidence` but is unmeasured/);
+  });
+
+  it('rule 6c: `reversible` stays bound on a file with NO open ship blockers', () => {
+    // The guard is the UNCONDITIONAL read of `p.reversible`. Behind the
+    // `openShipBlockers.length > 0` test it was never reached on a file with none,
+    // so `phase.reversible` would be reported as a READ nothing consumes — the
+    // binding would be a property of the fixture rather than of the code. That guard
+    // shipped with no test, which is the same decoration charge round 3 laid against
+    // the KEY_PATTERNS half, one guard over.
+    const g = load();
+    for (const p of g.phases) {
+      for (const c of [...(p.preconditions ?? []), ...(p.criteria ?? [])]) {
+        (c as Record<string, unknown>).blocks_ship = undefined;
+      }
+    }
+    const { code, stderr } = runDetail(g);
+    expect(code, stderr).toBe(0);
+  });
+
+  it('rule 13: a corroborated `blocked_by` contributes NO second edge', () => {
+    // `blocked_by` is required to be mirrored by `gates`, and that `gates` entry
+    // already states the same edge. If the corroborated side contributed one too it
+    // would point the other way and every valid pair would read as a 2-cycle.
+    const g = load();
+    g.phases.push(
+      { phase: 'va', name: 'label va', status: 'NOT_STARTED', gates: ['vb'] },
+      { phase: 'vb', name: 'label vb', status: 'BLOCKED_ON_VA', blocked_by: ['va'] },
+    );
+    const { code, stderr } = runDetail(g);
+    expect(code, stderr).toBe(0);
+  });
+
+  it('rule 6c: an ordered inverse pair must have EXACTLY ONE corroborating side', () => {
+    // Which side contributes the edge is decided by which side does not corroborate.
+    // If both corroborate, no edge is ever contributed and the graph is empty; if
+    // neither does, both are contributed and every valid pair is a 2-cycle.
+    expectFailure(
+      load(),
+      /`phase\.gates` and its inverse `blocked_by` both declare `mustCorroborate`/,
+      declare('phase', 'gates', {
+        by: '8/13',
+        phaseRef: 'ordered',
+        inverse: 'blocked_by',
+        mustCorroborate: true,
+      }),
+    );
+    expectFailure(
+      load(),
+      /`phase\.blocked_by` and its inverse `gates` — neither declares `mustCorroborate`/,
+      declare('phase', 'blocked_by', { by: '8/13', phaseRef: 'ordered', inverse: 'gates' }),
+    );
+  });
+
+  it('rule 3b: current_phase with an unmet precondition fails, and ONLY rule 3b fires', () => {
+    // Round 4: rule 3b had no test that isolated it. The obvious fixture (phase 1)
+    // is confounded — its P1-pre-2 carries `source: null`, so rule 1 fires on the
+    // same edit and would certify 3b's deletion. Phase 3 is PARTIAL, which tolerates
+    // a measured-but-unmet condition, so 3b is the only rule left standing.
+    const g = load();
+    phase(g, '3').preconditions = [
+      { id: 'P3-pre', text: 't', kind: 'boolean', target: true, measured: false, source: 'test' },
+    ];
+    g.current_phase = '3';
+    expectFailure(g, /current_phase 3 has 1 unmet precondition\(s\): P3-pre/);
   });
 
   it('rule 9c: an irreversible phase may not be DONE while a blocks_ship criterion is unmet', () => {
