@@ -71,11 +71,12 @@ let libDest;
 let dbDest;
 let coreDest;
 let aliasDest;
+let scaffoldRoot;
 
 /** Print a final summary line, clean up temp dirs, and exit with the matching code. */
 function finish(status, message) {
   console.log(`\n[install-smoke] ${status}: ${message}`);
-  for (const dir of [workDir, libDest, dbDest, coreDest, aliasDest]) {
+  for (const dir of [workDir, libDest, dbDest, coreDest, aliasDest, scaffoldRoot]) {
     try {
       if (dir && existsSync(dir)) rmSync(dir, { recursive: true, force: true });
     } catch {
@@ -348,7 +349,25 @@ try {
   // observe that — the source tree has the directory either way — so the
   // packed-and-installed path is the only place this can be proven.
   console.log('[install-smoke] running `node <bin> create` against the installed package ...');
-  const scaffoldDir = join(workDir, 'scaffolded-app');
+  // The scaffold lives OUTSIDE the consumer dir, in its own tree. Review caught the first
+  // version scaffolding into `workDir/scaffolded-app`, which meant the app sat under a
+  // directory that already had every `@getknext/*` package installed — so Node resolved
+  // them from the parent `node_modules` and a template that DROPPED a dependency still
+  // built. A real user's app has no such ancestor, and neither does this one now.
+  //
+  // The root carries a package.json and a lockfile and nothing else. That is deliberate:
+  // it gives `create` a tracing root to compute a NON-EMPTY `standalonePrefix` against, so
+  // the nested-output path stays under test, while leaking no dependency resolution.
+  scaffoldRoot = mkdtempSync(join(tmpdir(), 'knext-scaffold-'));
+  writeFileSync(
+    join(scaffoldRoot, 'package.json'),
+    `${JSON.stringify({ name: 'scaffold-root', private: true, version: '0.0.0' }, null, 2)}\n`,
+  );
+  writeFileSync(
+    join(scaffoldRoot, 'package-lock.json'),
+    `${JSON.stringify({ name: 'scaffold-root', lockfileVersion: 3, requires: true, packages: {} }, null, 2)}\n`,
+  );
+  const scaffoldDir = join(scaffoldRoot, 'scaffolded-app');
   const create = run('node', [binPath, 'create', scaffoldDir, '--name', 'smoke-app'], {
     cwd: workDir,
   });
