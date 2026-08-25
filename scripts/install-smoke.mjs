@@ -269,15 +269,32 @@ try {
   // alias declare that bin name — so npm's winner decides what it proved, and it can
   // be green while the alias shim is broken or absent. Run the alias's OWN shipped file
   // so the thing a stranger types is the thing under test.
-  const aliasBin = join(workDir, 'node_modules', 'kn-next', 'bin', 'kn-next.js');
+  const aliasInstallDir = join(workDir, 'node_modules', 'kn-next');
+  const aliasManifestPath = join(aliasInstallDir, 'package.json');
+  if (!existsSync(aliasManifestPath)) {
+    finish(FAIL, 'the kn-next alias did not install — `npx kn-next` would resolve to nothing');
+  }
+  const aliasBinRel = JSON.parse(readFileSync(aliasManifestPath, 'utf8')).bin?.['kn-next'];
+  if (!aliasBinRel) {
+    finish(
+      FAIL,
+      'the installed kn-next alias declares no `kn-next` bin — the command the docs tell ' +
+        'every new user to type would not exist',
+    );
+  }
+  // Follow the manifest instead of a hardcoded filename. Renaming the shim and updating
+  // `bin` together is legitimate and must stay green; declaring a `bin` the tarball does
+  // not contain is the break — and `pnpm pack` exits 0 on exactly that, so nothing
+  // upstream catches it and every `npx kn-next` dies with ENOENT after a clean install.
+  const aliasBin = join(aliasInstallDir, aliasBinRel);
   if (!existsSync(aliasBin)) {
     finish(
       FAIL,
-      `the kn-next alias shipped no bin at ${aliasBin} — \`npx kn-next\` resolves to nothing ` +
-        '(is `bin/` missing from its `files` allowlist?)',
+      `the kn-next alias declares bin '${aliasBinRel}' but the packed tarball ships no such ` +
+        'file — every `npx kn-next` would fail with ENOENT',
     );
   }
-  console.log('[install-smoke] running the alias shim `node node_modules/kn-next/bin/kn-next.js --help` ...');
+  console.log(`[install-smoke] running the alias shim \`node node_modules/kn-next/${aliasBinRel} --help\` ...`);
   const aliasHelp = run('node', [aliasBin, '--help'], { cwd: workDir });
   const aliasOut = `${aliasHelp.stdout || ''}${aliasHelp.stderr || ''}`;
   if (aliasHelp.status !== 0) {
