@@ -28,6 +28,10 @@ const SHAPE_SPEC = 'tests/install-smoke-coverage-derivation.test.ts';
 const NEWPUB_DIR = join(WT, 'packages', 'newpub');
 const LIB_PKG = join(WT, 'packages', 'lib', 'package.json');
 const LOCKSTEP_SPEC = 'tests/publish-preflight.test.ts';
+const TEMPLATE_DIR = join(WT, 'packages', 'kn-next', 'templates', 'app');
+const NEXT_CONFIG_TPL = join(TEMPLATE_DIR, 'next.config.ts.hbs');
+const APP_PKG_TPL = join(TEMPLATE_DIR, 'package.json.hbs');
+const DOCKERFILE_TPL = join(TEMPLATE_DIR, 'Dockerfile.hbs');
 const STASH = join(tmpdir(), 'knext-alias-shim-stash.js');
 /**
  * The paths this prover touches. The clean assertion is scoped to them, not
@@ -43,6 +47,7 @@ const MUTATED_PATHS = [
   'packages/kn-next-alias',
   'packages/newpub',
   'packages/lib/package.json',
+  'packages/kn-next/templates/app',
 ];
 
 const git = (...a) => execFileSync('git', a, { cwd: WT, encoding: 'utf8' });
@@ -170,6 +175,36 @@ const MUTATIONS = [
         SMOKE,
         '  const entries = packed.map((p) => ({',
         '  const entries = [corePkgDir, libPkgDir, dbPkgDir].map((p) => ({',
+        checkOnly,
+      ),
+    restore: () => git('checkout', '--', '.'),
+  },
+  {
+    id: 'M10',
+    expect: 'red',
+    guard: "the template loses `output: 'standalone'` — a SILENT break, next build still exits 0",
+    apply: (checkOnly) => mutate(NEXT_CONFIG_TPL, '  output: "standalone",\n', '', checkOnly),
+    restore: () => git('checkout', '--', '.'),
+  },
+  {
+    id: 'M11',
+    expect: 'red',
+    guard: 'the scaffolded app cannot install — a dependency the template names does not exist',
+    apply: (checkOnly) =>
+      mutate(APP_PKG_TPL, '"next": "16.2.11"', '"next": "0.0.0-does-not-exist"', checkOnly),
+    restore: () => git('checkout', '--', '.'),
+  },
+  {
+    id: 'M12',
+    expect: 'red',
+    guard:
+      'the generated Dockerfile stops declaring where it expects the server, so the build ' +
+      'cannot be checked against it',
+    apply: (checkOnly) =>
+      mutate(
+        DOCKERFILE_TPL,
+        'WORKDIR /repo/{{ standalonePrefix }}',
+        'WORKDIR /elsewhere',
         checkOnly,
       ),
     restore: () => git('checkout', '--', '.'),
