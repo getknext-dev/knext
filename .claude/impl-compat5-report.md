@@ -860,6 +860,20 @@ flags an unrelated two-window analysis).
 `::prover-summary:: {"declared":11,"run":11}`, **exit 0. 10 red, 1 negative control green, 0
 survived.**
 
+> **CORRECTED IN ROUND 6 — this result was true when measured and STOPPED being true, and this
+> section went on asserting it.** Commit `60bae6d` ran biome over
+> `docs/compat/retracted-figures.json` and collapsed the `patterns` array onto one line, which
+> invalidated M10's anchor. From then on the prover **died at M10 and ran 9 of 11**: M10 and the
+> **negative control never executed**, so the run below could not be reproduced from the tree that
+> shipped it. Nine reds with no control is not a partial success — it is an unproven prover.
+>
+> The table below is retained as the record of the run it describes, **not** as a claim about the
+> current tree. The current tree's result is in the round-6 section: the anchor is repointed, the
+> prover is data-driven with a preflight and a completion guard, and it now runs 11/11 again. The
+> false assertion is treated as part of the defect rather than a stale line, for the same reason
+> round 5 treated its own: a report that claims a completed prover while the prover dies partway is
+> worse than no report.
+
 | # | mutation | expected | **actual** |
 |---|---|---|---|
 | 0a/0b | red canary / green canary | RED / GREEN | **RED / GREEN** |
@@ -912,3 +926,141 @@ touched by this branch.
 - Restores verified byte-identical, `git status --porcelain` checked before any claim of clean.
 - Two defects in this round's own work were found by **running** the guards, not by reading them —
   consistent with every previous round.
+
+---
+
+# Fix round 6 — adversarial review @ `f936754` (`ISSUES_FOUND`, one blocking)
+
+Five of six criteria PASSED, each proven by a run: the residue fix removed the residue **without
+weakening the scanner**; the cross-repo and under-scanned-PR cases were reconstructed by the
+reviewer and found fixed; both false-positived shapes verified in **both** directions; the
+mutations re-derived independently with zero survivors; no regression; and the uncatchable case
+confirmed stated rather than hidden.
+
+One blocking defect remained, and it was the same class as the last one.
+
+## 1. The prover died at M10 — WHY, not just that it did
+
+`scripts/mutation-prove-retracted-figures.mjs` — the prover for this PR's flagship guard — exited 1
+having run **9 of 11** declared mutations. M10 and the **negative control** never executed.
+
+**The cause was not the mutation. It was the anchor's shape.** Commit `60bae6d`
+(*"style(compat): biome-format the retracted-figures registry"*) reformatted the ledger and
+collapsed
+
+```json
+"patterns": [
+  "9 restarts in 27 nights",
+  "churn: 9 restarts"
+],
+```
+
+onto a single line. M10's anchor spanned two lines of that array **at a fixed indent**, so it
+stopped existing. The byte-snapshot harness then refused to plant it — correctly, and exactly as
+designed — and the straight-line script had no handler, so the process died there.
+
+So the prover was broken by a **formatting commit that touched no logic**, and nothing failed until
+someone ran it.
+
+**Why the missing control is the serious half.** Nine reds with no negative control is not 82% of a
+proof. Reds alone cannot establish that a prover distinguishes a guard from a tripwire — something
+that reds at *any* edit reds at *every* edit and would score 9/9. Ruling that out is the control's
+entire job, so the run proved nothing about the prover however many reds it collected.
+
+**Specific fix:** M10 now anchors on the JSON string literal `"9 restarts in 27 nights"` — the one
+thing a formatter will not rewrite. The quotes are load-bearing, not cosmetic: the bare form occurs
+**twice**, since it is also in the `wrong` field, so an unquoted anchor would be ambiguous rather
+than missing.
+
+## 2. The report claimed a completed prover — treated as part of the bug
+
+Section 5 above asserted `{"declared":11,"run":11}`, exit 0. That was true when measured, and
+`60bae6d` made it false. The section now carries an explicit CORRECTED-IN-ROUND-6 retraction saying
+so and pointing at the current result, rather than being quietly edited to match.
+
+This is the third round in which a claim in this report was true at measurement and falsified by a
+later commit. The pattern is worth naming: **claims about a tree go stale when the tree moves**, and
+the only defence that has actually worked here is re-running and branching on the exit code before
+restating anything.
+
+## 3. The general fix — a partial run can no longer read as success
+
+The specific anchor is repointed, but the next early death would have been just as quiet. Four
+structural changes:
+
+- **Mutations are DATA, not straight-line statements.** The plan can be inspected before it runs.
+- **PREFLIGHT resolves every anchor before anything is planted.** A stale anchor is now a report
+  listing *all* stale anchors at once, with the tree untouched — not a crash discovered one
+  mutation at a time.
+- **A COMPLETION GUARD compares executed against declared and asserts the control ran.** A shortfall
+  exits non-zero and says exactly what never happened, printed *after* the `ok` lines where it will
+  be read, rather than as a stack trace a reader can mistake for noise.
+- **`try/finally` restores both snapshots unconditionally.** The straight-line version had no
+  `finally`, so a crash mid-mutation left the mutation on disk.
+
+### The guard against silent partial proofs is itself proven
+
+Implementing that inline would have made it the one thing in this PR nobody could exercise — the
+same untestable-branch problem that hid the under-scanned PR review surfaces. So it is lifted into
+`scripts/lib/prover-completion.mjs` as two pure functions and proved like anything else:
+
+- `tests/prover-completion.test.ts` — **11 tests**, both halves, including the exact M10 shape
+  (9 executed of 11, died at M10, control never ran) asserted to **fail**.
+- `scripts/mutation-prove-prover-completion.mjs` — **8 mutations, 7 red + 1 negative control**.
+
+`assessCompletion` checks the control **independently of the count**, which matters: a plan can be
+complete by count and contain no control at all, and a count check cannot see that. Mutation **C4**
+pins the subtle wrong version — a check weakened to *"was a control declared"*, which would accept
+exactly the M10 run.
+
+The prover applies its own rule to itself: it preflights its own anchors and asserts its own
+completion before reporting success.
+
+### The preflight proved itself on its first run
+
+Running the new completion-prover immediately produced:
+
+```
+ABORT before planting: 1 of 8 anchors do not resolve.
+  C6: anchor occurs 0x (need exactly 1)
+```
+
+**C6 had been anchored on layout that biome had already reflowed** — the identical mistake as M10,
+made again while fixing M10. The difference is the outcome: M10 died mid-run and silently dropped
+the control; C6 was caught **before anything was planted**, with every stale anchor listed and the
+tree untouched. Re-anchored on the predicate `(a) => a.count !== 1`, which a formatter will not
+split.
+
+That is the clearest evidence available that the general fix was the right one. The specific
+mistake recurred within the hour; the structural change turned it from a silent partial proof into
+a one-line report.
+
+## 4. Verification — every claim branched on an exit code
+
+| check | exit |
+|---|---|
+| `scripts/mutation-prove-retracted-figures.mjs` | **0** — `{"declared":11,"run":11}` |
+| `scripts/mutation-prove-prover-completion.mjs` | **0** — `{"declared":8,"run":8}` |
+| `scripts/scan-mutation-residue.mjs` | **0** |
+| `scripts/verify-retracted-figures.mjs` (live API) | **0** |
+| `tests/mutation-prover-lane.test.ts` | **0** |
+| `tests/prover-completion.test.ts` | **0** — 11 tests |
+| `biome check` on all changed files | **0** |
+| `git diff --stat HEAD` | **empty** (byte-identical) |
+| `git status --porcelain`, excluding untracked review files | **0 lines** |
+
+**Declared equals executed on both provers**, which is the specific thing this round was about, and
+it is read from the `::prover-summary::` line rather than assumed from a green exit.
+
+## 5. Discipline log (round 6)
+
+- Every verdict branched on an **exit code**; **no run was piped into `tail`** — each was redirected
+  to its own log file and the status read directly.
+- The M10 death was diagnosed to its **cause** (`60bae6d`'s reformat) rather than patched by
+  re-anchoring and moving on, because the same anchor shape would have broken again — and did,
+  within the hour, at C6.
+- The false report claim was **retracted in place**, not edited to match.
+- Restores verified byte-identical and `git status --porcelain` confirmed clean before any claim of
+  cleanliness; `scan-mutation-residue.mjs` re-run and confirmed **exit 0**.
+- The new guard was mutation-proved **independently**, with its own negative control, because a
+  guard against unproven provers that is itself unproven is the same defect one level up.
