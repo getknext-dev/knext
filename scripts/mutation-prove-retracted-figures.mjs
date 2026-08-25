@@ -38,7 +38,7 @@ import { rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveTestRunner } from './lib/ci-blocking-gate-proof.mjs';
-import { mutate, restore, snapshot } from './lib/mutation-harness.mjs';
+import { MUTATION_MARKER, mutate, restore, snapshot } from './lib/mutation-harness.mjs';
 import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -133,7 +133,14 @@ console.log('\n── planting M1: the ledger emptied');
 // The marker is embedded in a JSON KEY rather than a comment: JSON has no
 // comment syntax, so a `//` marker would make the file unparseable and M1 would
 // go red for a syntax error instead of for the vacuity it is meant to prove.
-mutate(ledgerSnap, '"figures": [', '"figures": [], "KNEXT-MUTATION-original-figures": [');
+//
+// And it is INTERPOLATED from the harness's constant, never written as a
+// literal — for the same reason `mutation-harness.mjs` and
+// `scan-mutation-residue.mjs` both assemble it from parts. A tracked file
+// containing the literal marker IS residue by definition, so an earlier version
+// of this line made `scripts/scan-mutation-residue.mjs` exit 1 against a clean
+// tree. The repo's own guard caught it; this is the fix, not a suppression.
+mutate(ledgerSnap, '"figures": [', `"figures": [], "${MUTATION_MARKER}-original-figures": [`);
 check('M1', 'a ledger with no figures must not pass vacuously', 1, runSpec(SPEC));
 recordMutation();
 restore(ledgerSnap);
