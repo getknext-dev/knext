@@ -29,13 +29,14 @@ range is a subset of `>=2.0.0-0 <3.0.0-0`, **and** separately if the **resolved*
 
 Neither is the intended fix. **Neither touches `@changesets/cli` at all.**
 
-- **#749** ("take the changesets/action v2 bump with its input migration"). Its `release.yml` half is
-  **already on `main`** — landed by the follow-up to #831, not by merging #749. `release.yml:165`
-  says so in its own comment: *"#831 took the v1->v2 pin bump WITHOUT this migration (#749 had it,
-  but was not what merged) … migration mirrors #749."* So #749's release half is a no-op against
-  `main` today. Its **other** half has *not* landed: `helm/kind-action` v1.12.0 → v1.14.0 in
-  `networkpolicy-enforcement.yml`. This PR does not touch that file.
-  **Recommendation (maintainer's call, not taken here): close #749 and re-cut the kind-action bump.**
+- **#749** ("take the changesets/action v2 bump with its input migration"). **Fully superseded on
+  `main` — both halves.** Its `release.yml` half landed via the follow-up to #831, not by merging
+  #749; `release.yml:165` says so in its own comment: *"#831 took the v1->v2 pin bump WITHOUT this
+  migration (#749 had it, but was not what merged) … migration mirrors #749."* Its other half —
+  `helm/kind-action` v1.12.0 → v1.14.0 — is **also** already on `main`
+  (`networkpolicy-enforcement.yml:50` is `helm/kind-action@ef37e7f… # v1.14.0`, the exact pin #749
+  proposes). So #749 is a no-op against `main` in its entirety.
+  **Recommendation (maintainer's call, not taken here): close #749.** Nothing needs re-cutting.
 - **#839** (Dependabot, `changesets/action` 2.1.0 → 2.1.1, currently `CONFLICTING`). Compatible with
   this change and **not** superseded — 2.1.1 is still major 2, so it still requires CLI v3, and after
   this lands the new guard covers it. Its conflict is Dependabot's to rebase.
@@ -296,9 +297,8 @@ produce a correct `changeset-release/main` branch and a PR can be opened from it
   — it versions against a month-old tree — but it is not this task's to delete, and deleting a
   branch someone may be about to use is not reversible. The next successful release run will
   force it forward on its own.
-- **#749 should be closed and its `helm/kind-action` v1.12.0 → v1.14.0 half re-cut.** Not done here:
-  closing someone else's PR is not this task's call, and that file is outside this change's blast
-  radius.
+- **#749 should be closed.** Both of its halves are already on `main` (§2), so it is a no-op. Not
+  done here: closing someone else's PR is not this task's call.
 - **#839 needs a rebase** for its merge conflict (Dependabot's to do). It stays valid.
 - **`pnpm@10.4.1` vs v3's `pnpm >=10.0.0`** is satisfied today with little headroom above the floor.
   Not raised here — a `packageManager` bump changes every job in every workflow and is its own change.
