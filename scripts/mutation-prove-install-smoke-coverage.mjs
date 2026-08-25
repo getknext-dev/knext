@@ -150,7 +150,7 @@ const MUTATIONS = [
         SMOKE,
         '  const publishable = publishablePackages(\n' +
           '    readWorkspaceManifests(repoRoot),\n' +
-          '    changesetConfig.ignore ?? [],\n' +
+          '    Array.isArray(changesetConfig.ignore) ? changesetConfig.ignore : [],\n' +
           '  ).map((p) => p.name);',
         "  const publishable = ['@getknext/core', '@getknext/lib', '@getknext/db', 'kn-next'];",
         checkOnly,
