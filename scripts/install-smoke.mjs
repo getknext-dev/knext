@@ -623,8 +623,9 @@ try {
     finish(
       FAIL,
       `${copyFromLines - parsedCopyLines} \`COPY --from=\` line(s) in the generated ` +
-        'Dockerfile are in a form this check cannot read (a flag, a continuation, extra ' +
-        'arguments) — an unreadable line would be silently exempt, so this refuses instead',
+        'Dockerfile are in a form this check cannot read — a flag, a continuation, extra ' +
+        'arguments, or a `--from=` naming a stage other than `builder`. An unreadable line ' +
+        'would be silently exempt, so this refuses rather than guesses',
     );
   }
   for (const [, line, rawSrc, rawDest] of scaffoldDockerfile.matchAll(
