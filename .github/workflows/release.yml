@@ -1,33 +1,72 @@
 # Release (changesets) — E1-1
 #
-# Gated: no publish occurs until NPM_TOKEN is set as a repo secret (E1-4, user step).
-# Until then this workflow only ever opens/updates the "Version Packages" PR — it never
-# runs `changeset publish`. The publish gate is computed in a plain `run` step (see
-# "Determine publish gate") rather than a `secrets`-in-`with:` expression, which GitHub
-# rejected during workflow evaluation and produced phantom startup-failure runs.
-#
 # Flow:
 #   1. A normal feature PR includes a changeset (.changeset/*.md).
-#   2. On merge to main, changesets/action opens a "Version Packages" PR (version bump + changelog).
-#   3. Merging that PR (a second push to main) runs `changeset publish` IF NPM_TOKEN exists.
+#   2. On merge to main, `version-pr` opens/updates the "Version Packages" PR
+#      (version bump + changelog). NO credential, NO environment, NO approval.
+#   3. Merging that PR is a second push to main. `publish-preflight` then finds a
+#      version in the tree that the registry does not have, and `release` — the
+#      only job that ever holds NPM_TOKEN — publishes it after the `npm-publish`
+#      environment's required reviewer approves.
+#
+# ┌─ WHY THIS IS THREE JOBS AND NOT ONE (the lane starved itself for a month) ───┐
+# │ It used to be one job, and that job declared `environment: npm-publish`.     │
+# │ That environment has a `required_reviewers` rule, so EVERY push to main —    │
+# │ including the ones that only wanted to open a Version PR — parked the run in │
+# │ `waiting` for a human click.                                                 │
+# │                                                                             │
+# │ Run 30207128316 (2026-07-26) parked and was never approved. With a           │
+# │ WORKFLOW-level `concurrency: {group: release-<ref>, cancel-in-progress:      │
+# │ false}` it held that group indefinitely; every later push queued behind it   │
+# │ as `pending`; and GitHub keeps at most ONE pending run per group, so each    │
+# │ new push cancelled the previous one. MEASURED: 99 of the last 100 runs are   │
+# │ `cancelled` with ZERO jobs, each cancelled at the exact second the next push │
+# │ arrived. No Version PR opened after #523, so nothing was published for a     │
+# │ month and `kn-next` stayed a 404.                                            │
+# │                                                                             │
+# │ The environment gate is evaluated when a JOB STARTS, not when a step runs,   │
+# │ so the publish job must be able to decide it has nothing to do WITHOUT       │
+# │ starting. A job-level `if:` is evaluated first — hence the decision lives in │
+# │ `publish-preflight`'s output, and `release` is skipped outright when there   │
+# │ is nothing to publish. A skipped job never requests an approval, so it never │
+# │ parks, so it never holds a group.                                            │
+# │                                                                             │
+# │ Concurrency is now PER JOB, in two different groups. A publish awaiting      │
+# │ approval serialises later publishes (correct — two concurrent `changeset     │
+# │ publish` runs are worse than a queue) and cannot touch the version lane.     │
+# │ Neither group cancels in progress; `tests/ci-concurrency-group.test.ts`      │
+# │ enforces that for every workflow that publishes or signs.                    │
+# │ Guarded by `tests/release-lane-liveness.test.ts`, mutation-proved by         │
+# │ `scripts/mutation-prove-release-lane.mjs`.                                   │
+# └─────────────────────────────────────────────────────────────────────────────┘
 #
 # Publishable packages: @getknext/core (packages/kn-next), @getknext/lib (packages/lib),
-# @getknext/db (packages/db) — core depends on lib AND db, db depends on lib; all
-# three must ship together or consumers 404 on the missing member (#255/#256).
+# @getknext/db (packages/db) and the `kn-next` alias (packages/kn-next-alias) — core
+# depends on lib AND db, db depends on lib; they are a changesets `fixed` group and
+# must ship together or consumers 404 on the missing member (#255/#256).
 # Provenance is enabled via each package's publishConfig.provenance + id-token permission.
 #
 # ┌─ DO NOT SHA-PIN-STRIP: KEEP THESE PINS (#522) ─────────────────────────┐
 # │ Every `uses:` below is pinned to a full 40-char commit SHA, with the human   │
 # │ version in a trailing comment. This is load-bearing, not style: the          │
-# │ `changesets/action` step receives NODE_AUTH_TOKEN = the live npm publish     │
-# │ token (plus GITHUB_TOKEN with contents/pull-requests write). A mutable ref   │
-# │ means whoever can move that ref chooses the code that runs with a publish    │
-# │ credential in scope — and on changesets/action, `v1` is a BRANCH, not even   │
-# │ a tag. Same rule security.md already applies to container images ("pin by    │
-# │ digest; reject :latest"), applied to the CI action supply chain.             │
-# │ Bumps come from Dependabot's github-actions ecosystem (.github/dependabot.yml)│
-# │ so pinning does not become staleness. Guarded by                             │
+# │ `changesets/action` step in the `release` job receives NODE_AUTH_TOKEN = the │
+# │ live npm publish token (plus GITHUB_TOKEN with contents/pull-requests        │
+# │ write). A mutable ref means whoever can move that ref chooses the code that  │
+# │ runs with a publish credential in scope — and on changesets/action, `v1` is  │
+# │ a BRANCH, not even a tag. Same rule security.md already applies to container │
+# │ images ("pin by digest; reject :latest"), applied to the CI action supply    │
+# │ chain. Bumps come from Dependabot's github-actions ecosystem                 │
+# │ (.github/dependabot.yml) so pinning does not become staleness. Guarded by    │
 # │ tests/release-action-pins.test.ts.                                           │
+# │                                                                             │
+# │ A BUMP HERE IS NOT SELF-CONTAINED. `changesets/action`'s major is coupled to │
+# │ the `@changesets/cli` major in the ROOT package.json: action v1 <-> CLI v2,  │
+# │ action v2 <-> CLI v3. The action validates this before it reads a single     │
+# │ input and throws on a mismatch, so the Version-PR job dies and the whole     │
+# │ lane below it never starts. It happened: #831 took the v1->v2 bump against   │
+# │ CLI v2 and the first live run after the deadlock lifted (32850202919) failed │
+# │ on exactly that. Guarded by tests/changesets-cli-action-compat.test.ts,      │
+# │ mutation-proved by mutations 19-22 of the release-lane prover.               │
 # └──────────────────────────────────────────────────────────────────────────────┘
 
 name: Release
@@ -37,9 +76,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
-concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
+# NO workflow-level `concurrency:` — see the block above. A workflow-level group
+# is what let one un-approved run starve every subsequent one. Concurrency is
+# declared per job instead, in two groups that cannot block each other.
 
 permissions:
   contents: write
@@ -51,9 +90,10 @@ jobs:
   # scans the PUBLISHED npm tarballs' PRODUCTION closure (--omit=dev) of
   # @getknext/{core,lib,db}, FAILS on HIGH/CRITICAL (mirrors security.md's Trivy
   # rule), and emits a CycloneDX SBOM per package. It is PUBLISH-BLOCKING: the
-  # `release` job `needs: audit`, so a failed audit stops the publish — never
-  # advisory/after. scripts/audit-published.mjs is the single source of truth for
-  # scope + audit-level; the dated+justified allowlist is security/npm-audit-allowlist.json.
+  # `release` job `needs: audit` (transitively and directly), so a failed audit
+  # stops the publish — never advisory/after. scripts/audit-published.mjs is the
+  # single source of truth for scope + audit-level; the dated+justified allowlist
+  # is security/npm-audit-allowlist.json.
   audit:
     name: npm supply-chain audit + JS SBOM (blocks publish)
     runs-on: ubuntu-latest
@@ -91,24 +131,135 @@ jobs:
           path: sbom/*.cdx.json
           if-no-files-found: error
 
+  # The VERSION lane. Opens/updates the "Version Packages" PR and nothing else.
+  #
+  # It holds NO npm credential and declares NO environment, which is the whole
+  # point: opening a PR is reversible, so it must not sit behind a human click.
+  # This is the job whose month-long starvation was the actual release blocker.
+  version-pr:
+    name: Version PR (no credential, no approval)
+    runs-on: ubuntu-latest
+    needs: audit
+    if: github.repository == 'getknext-dev/knext'
+    concurrency:
+      # Its OWN group: a publish parked on the environment approval lives in
+      # `release-publish-*` and cannot queue anything up behind this one.
+      group: release-version-${{ github.ref }}
+      cancel-in-progress: false
+    outputs:
+      # Underscore, not the action's own kebab key, so nothing downstream has to
+      # dereference a dashed property name in an expression.
+      has_changesets: ${{ steps.changesets.outputs['has-changesets'] }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # NO `publish-script` and NO `NODE_AUTH_TOKEN`: this step is structurally
+      # incapable of publishing, which is what lets it run unapproved.
+      - name: Create or update the Version Packages PR
+        id: changesets
+        uses: changesets/action@198f833dd7d863100ea6e28967bc9a9fdefadb0a # v2.1.0
+        with:
+          # v2 RENAMED EVERY INPUT THIS STEP PASSES, and #831 took the v1→v2 pin
+          # bump WITHOUT this migration (#749 had it, but was not what merged) —
+          # GitHub Actions does NOT error on unknown `with:` keys, it ignores
+          # them, so the step sat GREEN while set to run with every input
+          # defaulted (no version script, no publish script, wrong commit
+          # message), surfacing only at the next release. Caught by the #750
+          # input-existence check on its first live run; migration mirrors #749.
+          #   version              -> version-script
+          #   publish              -> publish-script
+          #   commit               -> commit-message
+          #   title                -> pr-title
+          #   createGithubReleases -> create-github-releases
+          version-script: pnpm run changeset:version
+          commit-message: 'chore: version packages'
+          pr-title: 'chore: version packages'
+          # Releases are created by the publish job, from the published set.
+          create-github-releases: false
+          # v2 requires the token as an INPUT. Its release notes are explicit that
+          # "the GITHUB_TOKEN environment variable and credentials configured by
+          # actions/checkout ... are not substitutes for this input" — so the env
+          # var below is no longer sufficient on its own for the push.
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Decide whether `release` should start AT ALL.
+  #
+  # This exists because the `npm-publish` environment gate fires when the job
+  # STARTS. A publish job that starts on every push and then discovers it has
+  # nothing to do would request an approval on every push, and each un-clicked
+  # request parks a run — which is exactly the failure this workflow was
+  # restructured to remove. So the decision has to be reachable from a job-level
+  # `if:`, and a job-level `if:` can only read another job's outputs.
+  #
+  # No environment, no credential, no pnpm install: it is a registry read.
+  publish-preflight:
+    name: Is anything actually unpublished?
+    runs-on: ubuntu-latest
+    needs: version-pr
+    # A run that just opened/updated a Version PR has nothing to publish yet —
+    # the bump is on the PR branch, not on main.
+    if: github.repository == 'getknext-dev/knext' && needs.version-pr.outputs.has_changesets == 'false'
+    outputs:
+      should_publish: ${{ steps.preflight.outputs['should-publish'] }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      # Fails closed if the registry is unreachable — an unanswerable question is
+      # never answered "nothing to publish".
+      - name: Compare tree versions against the registry
+        id: preflight
+        run: node scripts/publish-preflight.mjs
+
   release:
-    name: Version PR / Publish (gated on NPM_TOKEN)
+    name: Publish to npm (gated on NPM_TOKEN + environment approval)
     runs-on: ubuntu-latest
     # NPM_TOKEN lives as an ENVIRONMENT secret on `npm-publish`, not a repo
     # secret. Environment secrets are only injected into jobs that declare the
     # environment — without this line `secrets.NPM_TOKEN` resolves to the empty
-    # string, the publish gate below reports "not set", and the workflow would
-    # silently only ever open Version PRs. Declaring it also lets the
-    # environment's protection rules (e.g. Required reviewers) gate the publish
-    # itself, which is the point of putting an irreversible action behind an
-    # environment in the first place.
+    # string. Declaring it also lets the environment's protection rules
+    # (`required_reviewers: AhmedElBanna80`, measured 2026-08-25) gate the
+    # publish itself, which is the point of putting an irreversible action behind
+    # an environment in the first place.
     environment: npm-publish
     # Publish-BLOCKING supply-chain gate: never publish tarballs the audit did
-    # not clear (HIGH/CRITICAL fail-closed). This does NOT unblock #53 — publish
-    # still requires the human NPM_TOKEN (see "Determine publish gate" below).
-    needs: audit
+    # not clear (HIGH/CRITICAL fail-closed). `audit` is named directly as well as
+    # reached transitively, so deleting an intermediate job cannot silently drop
+    # it.
+    needs: [audit, version-pr, publish-preflight]
     # Belt-and-suspenders: only ever run on the canonical repo (never forks).
-    if: github.repository == 'getknext-dev/knext'
+    # BOTH halves of the "there is something to publish" question are asserted —
+    # no pending changesets AND a version the registry does not have. Either one
+    # alone lets a routine docs push request a publish approval.
+    if: >-
+      github.repository == 'getknext-dev/knext'
+      && needs.version-pr.outputs.has_changesets == 'false'
+      && needs.publish-preflight.outputs.should_publish == 'true'
+    concurrency:
+      # Its own group, so a publish waiting on the required reviewer serialises
+      # only other publishes. Never cancels: a half-finished `changeset publish`
+      # is worse than a queue.
+      group: release-publish-${{ github.ref }}
+      cancel-in-progress: false
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -132,40 +283,39 @@ jobs:
         run: pnpm --filter @getknext/lib build && pnpm --filter @getknext/db build && pnpm --filter @getknext/core build
 
       # Gate the publish command WITHOUT referencing `secrets` inside the action's
-      # `with:` input (that expression caused GitHub startup-failure runs). When
-      # NPM_TOKEN is unset, `publish` is empty → changesets/action can only open the
-      # Version PR (nothing destructive).
-      - name: Determine publish gate
+      # `with:` input (that expression caused GitHub startup-failure runs).
+      #
+      # PRESENCE IS NOT VALIDITY. The environment secret was set 2026-07-25 and a
+      # token can be present and expired; reporting "NPM_TOKEN present" as if it
+      # meant "publish will work" is the kind of claim this repo does not make.
+      # `npm whoami` answers the real question, and the branch is on its EXIT
+      # CODE — npm's stderr wording has changed between majors and a message
+      # match would rot silently.
+      - name: Determine publish gate (token present AND accepted)
         id: gate
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          if [ -n "${NPM_TOKEN}" ]; then
-            echo "publish=pnpm run release" >> "$GITHUB_OUTPUT"
-            echo "NPM_TOKEN present — publish path enabled."
-          else
-            echo "publish=" >> "$GITHUB_OUTPUT"
-            echo "NPM_TOKEN not set — publish gated off (E1-4, user step). Only the Version PR path will run."
+          set -u
+          if [ -z "${NPM_TOKEN}" ]; then
+            echo "::error::NPM_TOKEN is not set on the npm-publish environment. This job only publishes; there is nothing it can do without it."
+            exit 1
           fi
+          if npm whoami --registry https://registry.npmjs.org/ >/dev/null 2>&1; then
+            echo "NPM_TOKEN is present and the registry accepted it." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error::NPM_TOKEN is PRESENT but the registry REJECTED it (npm whoami exited non-zero). Rotate the npm-publish environment secret; presence is not validity."
+            exit 1
+          fi
+          echo "publish=pnpm run release" >> "$GITHUB_OUTPUT"
 
-      # Opens/updates the "Version Packages" PR, OR publishes when there are
-      # already-versioned packages to release AND the publish gate is enabled.
-      - name: Create Release PR or Publish
+      # No `version-script` here on purpose: this job must never take the version
+      # path. It is reached only when there are no changesets, and it is the one
+      # job holding a publish credential.
+      - name: Publish
         uses: changesets/action@198f833dd7d863100ea6e28967bc9a9fdefadb0a # v2.1.0
         with:
-          # v2 RENAMED EVERY INPUT THIS STEP PASSES, and #831 took the v1→v2 pin
-          # bump WITHOUT this migration (#749 had it, but was not what merged) —
-          # GitHub Actions does NOT error on unknown `with:` keys, it ignores
-          # them, so the step sat GREEN while set to run with every input
-          # defaulted (no version script, no publish script, wrong commit
-          # message), surfacing only at the next release. Caught by the #750
-          # input-existence check on its first live run; migration mirrors #749.
-          #   version              -> version-script
-          #   publish              -> publish-script
-          #   commit               -> commit-message
-          #   title                -> pr-title
-          #   createGithubReleases -> create-github-releases
-          version-script: pnpm run changeset:version
           publish-script: ${{ steps.gate.outputs.publish }}
           commit-message: 'chore: version packages'
           pr-title: 'chore: version packages'
@@ -173,10 +323,6 @@ jobs:
           # `@getknext/<pkg>@x.y.z`. The hand-made `v0.1.0` release predates this and
           # uses a different tag format, so there is no tag collision.
           create-github-releases: true
-          # v2 requires the token as an INPUT. Its release notes are explicit that
-          # "the GITHUB_TOKEN environment variable and credentials configured by
-          # actions/checkout ... are not substitutes for this input" — so the env
-          # var below is no longer sufficient on its own for the push.
           github-token: ${{ secrets.GITHUB_TOKEN }}
         env:
           # Still exported: `changeset publish` and the gate script read it, and

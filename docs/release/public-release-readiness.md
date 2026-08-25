@@ -7,10 +7,12 @@
 > Companion ledgers: `docs/debt/tech-debt-ledger.md`, `docs/benchmarks/cold-start-ledger.md`,
 > `docs/ux/ergonomics-ledger.md`.
 
-## Verdict: NOT READY — 2 hard blockers, both outside anything an agent can do
+## Verdict: NOT READY — 2 hard blockers, both one human click
 
-**Blocker 3 was cleared by measurement on 2026-08-25 (#846).** The two that remain are not
-engineering work at all — they are one org-admin click and one `npm publish`:
+**Blocker 3 was cleared by measurement on 2026-08-25 (#846). Blocker 2's premise was wrong and
+was corrected the same day** — the missing piece was never an `npm login`, it was an un-clicked
+GitHub deployment approval, and the engineering half of it is now fixed. What remains of both
+blockers is **two clicks by the repo owner**, not engineering work:
 
 A stranger cannot complete the documented path today. Everything the repo controls is in good
 shape; what blocks release is publication and packaging state.
@@ -23,13 +25,55 @@ nights** at "Walk the documented install path with no credentials"; the new firs
 ships with an in-page caveat because its operator step cannot succeed.
 **Action: org-admin visibility flip. Human-only. Nothing else can proceed past it.**
 
-### Blocker 2 — nothing is published to npm (#53 lineage, ergonomics rows 1a/7)
-`npm view kn-next` → 404; the `@getknext/*` trio's last publish predates every improvement of the
-last week. So the measured ergonomics wins (guided first contact, honest help, optional storage,
-placeholder preflight, routed `validate`, the `kn-next` alias package) reach **no real user** until
-a publish happens. The install-smoke gate proves the packed tarballs install and run under plain
-Node — the artifact is ready; the publish is not done.
-**Action: `npm publish` for the four packages (needs npm auth). Human-only.**
+### Blocker 2 — nothing is published to npm — **PREMISE CORRECTED 2026-08-25**
+
+The symptom is real: `npm view kn-next` → 404, and the live `@getknext/*` versions
+(`core@0.3.0`, `lib@0.2.0`, `db@0.2.1`) predate every improvement of the last month. So the measured
+ergonomics wins (guided first contact, honest help, optional storage, placeholder preflight, routed
+`validate`, the `kn-next` alias package) reach **no real user**. That much stands.
+
+**The stated cause did not.** This row previously read *"`npm publish` the four packages (needs npm
+auth). Human-only."* Measured:
+
+- **npm auth was never missing.** `NPM_TOKEN` is an **environment** secret on `npm-publish` (set
+  2026-07-25) — not a repo secret, which is why a plain `gh secret list` does not show it. The
+  publish lane has worked before: #523 published `core@0.3.0` on 2026-07-26, #268 before it.
+- **The lane simply never ran again.** Of the last 100 `release.yml` runs, **99 `cancelled`, 1
+  `pending`, zero successes** — and every cancelled run has **zero jobs**, i.e. it was killed in the
+  queue before starting.
+- **Cause:** run `30207128316` (2026-07-26) has its publish job **parked in `waiting`** on the
+  `npm-publish` environment's `required_reviewers` rule. Nobody clicked it. `release.yml` had a
+  *workflow-level* concurrency group, so that one parked run held the group forever; GitHub keeps at
+  most one *pending* run per group, so each new push to `main` cancelled the previous one. No
+  Version PR has opened since #523.
+- The job that parked was also the job that opens the Version PR — an entirely reversible action
+  that should never have waited on a human.
+
+**Fixed in-repo:** `release.yml` is now three jobs. `version-pr` opens the Version PR with no
+environment and no credential; `publish-preflight` decides whether anything is genuinely unpublished
+and exposes it as a job output; `release` — the only job holding the token — stays behind the
+`npm-publish` approval and is *skipped entirely* unless there is something to publish, so it can no
+longer park on a routine commit. Concurrency moved to two per-job groups that cannot block each
+other. Guarded by `tests/release-lane-liveness.test.ts` and mutation-proved.
+
+**What is left, and it is genuinely human — two clicks, in this order:**
+
+1. **Merge the "Version Packages" PR** that the next push to `main` will open. (It does not exist
+   yet; the lane has been unable to open one since 2026-07-26.)
+2. **Approve the `npm-publish` deployment** on the run that follows that merge:
+   <https://github.com/getknext-dev/knext/deployments> — or the "Review deployments" button on the
+   run itself. Only `AhmedElBanna80` can.
+
+**Also human, and a trap worth naming:** the parked run
+<https://github.com/getknext-dev/knext/actions/runs/30207128316> is still `waiting`. **Do not
+approve it.** It would publish from `c0ed9b75` — the tree as it stood on 2026-07-26, a month of work
+behind. Cancel it instead.
+
+**Not established, and not claimed:** whether the token is still *valid*. It is *present* and was
+set 2026-07-25; a token can be present and expired, and answering it requires running a job inside
+the `npm-publish` environment, which is itself behind the approval above. The publish job now runs
+`npm whoami` and fails loudly on a rejected token rather than discovering it mid-publish — so the
+first approved run answers the question either way.
 
 ### ~~Blocker 3 — the compat claim's own gates are red or flaky~~ — CLEARED 2026-08-25
 
@@ -108,7 +152,9 @@ gate is red would fail this project's central honesty rule.
 
 1. [ ] **Human:** flip ghcr package visibility to public → unblocks #198/#707, greens the
        anonymous-install nightly, lets #670's publish job exist, removes the first-cluster caveat.
-2. [ ] **Human:** `npm publish` the four packages → makes every ergonomics win real for users.
+2. [ ] **Human (two clicks, not a publish):** merge the "Version Packages" PR the fixed lane opens,
+       then approve the `npm-publish` deployment on the run that follows. Cancel the stale parked
+       run 30207128316 rather than approving it. → makes every ergonomics win real for users.
 3. [ ] Agent: re-run the anonymous-install path and the first-cluster page end-to-end; remove the
        page's caveat with a live re-verification; close #198/#707.
 4. [ ] Agent: set `vars.SCALE_TEST_IMAGE` from the publish lane (#670); confirm the e2e_scale

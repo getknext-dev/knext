@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { jobBlocks, jobNeeds } from './helpers/release-workflow';
 
 /**
  * GUARD TESTS for action SHA-pinning on the PUBLISH PATH (#522).
@@ -163,25 +164,64 @@ describe('publish-path workflows SHA-pin every third-party action (#522)', () =>
     }
   });
 
-  it('pins the token-receiving changesets/action step specifically', () => {
-    const text = workflowText('release.yml');
+  it('pins EVERY changesets/action step, and only ONE of them holds the token', () => {
+    // Was `toHaveLength(1)`. `release.yml` now runs the action TWICE — once in
+    // the un-credentialed `version-pr` job (opens the Version PR, no approval,
+    // no NPM_TOKEN) and once in the credentialed `release` job. Counting steps
+    // is the wrong invariant; WHICH step holds the publish credential is the
+    // right one, and it is strictly stronger than the old assertion:
+    //
+    //   - every occurrence must still be an immutable SHA (the #522 rule), and
+    //   - exactly one job may pair the action with NODE_AUTH_TOKEN, so a future
+    //     edit that hands the token to the un-approved version lane reds here.
+    //
+    // The old form asserted the token pairing by slicing from the step to EOF,
+    // which with two steps would have been satisfied by the SECOND step's token
+    // while claiming it about the first.
     const changesets = usesRefs('release.yml').filter(
       (entry) => entry.action === 'changesets/action',
     );
-    expect(changesets).toHaveLength(1);
-    const ref = changesets[0]?.ref ?? '';
-    // Structural, not value-based: whatever version Dependabot has moved this to,
-    // the ref must be an immutable SHA. `changesets/action@v1` resolves to
-    // refs/heads/v1 — a BRANCH — so a tag-looking ref here is the worst case in
-    // the repo, not a cosmetic lapse.
-    expect(ref, 'the changesets/action ref must be an immutable 40-hex SHA').toMatch(
-      /^[0-9a-f]{40}$/,
+    expect(
+      changesets.length,
+      'no changesets/action step in release.yml — the release lane has been gutted',
+    ).toBeGreaterThan(0);
+    for (const entry of changesets) {
+      // Structural, not value-based: whatever version Dependabot has moved this
+      // to, the ref must be an immutable SHA. `changesets/action@v1` resolves to
+      // refs/heads/v1 — a BRANCH — so a tag-looking ref here is the worst case
+      // in the repo, not a cosmetic lapse.
+      expect(
+        entry.ref,
+        `${entry.file}:${entry.line} — the changesets/action ref must be an immutable 40-hex SHA`,
+      ).toMatch(/^[0-9a-f]{40}$/);
+    }
+
+    const blocks = jobBlocks();
+    const credentialed = [...blocks.entries()]
+      .filter(
+        ([, body]) =>
+          /uses:\s*changesets\/action@/.test(body) &&
+          body.includes('NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}'),
+      )
+      .map(([id]) => id);
+    // Both halves. Exactly one credentialed step (not zero — the pin would be
+    // guarding nothing; not two — the publish credential would have spread to a
+    // lane that runs without the environment approval).
+    expect(credentialed, 'exactly one job may pair changesets/action with NODE_AUTH_TOKEN').toEqual(
+      ['release'],
     );
-    // The step still receives the publish credential — that is exactly why the
-    // pin is load-bearing, so assert the pairing has not drifted apart.
-    const stepIdx = text.indexOf(`changesets/action@${ref}`);
-    expect(stepIdx).toBeGreaterThan(-1);
-    expect(text.slice(stepIdx)).toContain('NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}');
+
+    const uncredentialed = [...blocks.entries()]
+      .filter(
+        ([, body]) =>
+          /uses:\s*changesets\/action@/.test(body) &&
+          !body.includes('NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}'),
+      )
+      .map(([id]) => id);
+    expect(
+      uncredentialed,
+      'the un-credentialed Version PR lane has disappeared — see tests/release-lane-liveness.test.ts for why it must exist separately',
+    ).toEqual(['version-pr']);
   });
 
   it('explains in each workflow header WHY the pins are load-bearing', () => {
@@ -195,11 +235,20 @@ describe('publish-path workflows SHA-pin every third-party action (#522)', () =>
   });
 
   it('does not change the load-bearing publish gating in release.yml', () => {
-    // Pin-only change: the environment, the publish-blocking `needs: audit`, and
-    // the repo guard must all survive untouched.
+    // The environment, the publish-blocking audit ordering, and the repo guard
+    // must all survive whatever the current pin-or-restructure change is.
+    //
+    // `needs: audit` used to be asserted as a bare `/^\s*needs: audit$/m` over
+    // the whole file. Once the lane split into three jobs that line matched the
+    // VERSION job and said nothing about the publish job — a text match that
+    // moved with the file instead of following its subject. Attribute it to the
+    // job that actually publishes.
     const text = workflowText('release.yml');
     expect(text).toMatch(/^\s*environment: npm-publish$/m);
-    expect(text).toMatch(/^\s*needs: audit$/m);
+    expect(
+      jobNeeds('release'),
+      'the publishing job must be ordered after the supply-chain audit',
+    ).toContain('audit');
     expect(text).toContain("github.repository == 'getknext-dev/knext'");
   });
 

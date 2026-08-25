@@ -31,7 +31,8 @@ knext ships three things that version on **separate** lines. Nothing forces them
 
 | Package set | CRD `apiVersion` | Operator bundle | Notes |
 | --- | --- | --- | --- |
-| `0.3.0` (in tree) | `apps.kn-next.dev/v1alpha1` | `operator-latest` | current `main`; the three are version-locked from this release on |
+| `0.3.1` (in tree) | `apps.kn-next.dev/v1alpha1` | `operator-latest` | current `main`; the first set where all **four** move together — `kn-next`, the `npx` alias, joins the version-locked group |
+| `0.3.0` (in tree) | `apps.kn-next.dev/v1alpha1` | `operator-latest` | the three are version-locked from this release on |
 | `@getknext/core@0.3.0`, `@getknext/lib@0.2.0`, `@getknext/db@0.2.1` (published 2026-07-26) | `apps.kn-next.dev/v1alpha1` | `operator-latest` | the first npm release; the three published at **different** numbers — see "the drift" below |
 
 Every row so far names the same CRD `apiVersion`, which is the point: within `v1alpha1` the schema
