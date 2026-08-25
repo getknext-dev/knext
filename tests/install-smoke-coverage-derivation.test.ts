@@ -55,6 +55,14 @@ describe('install-smoke covers the publishable set', () => {
     expect(src).toMatch(/readWorkspaceManifests\(/);
   });
 
+  it('derives step 5 exports/bin completeness from the same packed set', () => {
+    // Today the derived and hardcoded forms check an identical set — the alias ships no
+    // `exports` map and its only bin is core's — so reverting this is invisible to the
+    // gate. The value is prospective: the next covered package is resolution-checked
+    // only if this stays derived.
+    expect(source()).toMatch(/const entries = packed\.map\(/);
+  });
+
   it('asserts BOTH directions at run time', () => {
     // A publishable package the gate does not pack, and a package the gate packs
     // that is not publishable. One without the other is half a guarantee.

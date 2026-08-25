@@ -200,8 +200,8 @@ try {
   if (unpublished.length > 0) {
     finish(
       FAIL,
-      `this gate packs ${unpublished.map((p) => p.name).join(', ')}, which the changesets ` +
-        '`fixed` group does not publish — the gate and the release set disagree',
+      `this gate packs ${unpublished.map((p) => p.name).join(', ')}, which does not publish ` +
+        '(private, unversioned, or changeset-ignored) — the gate and the release set disagree',
     );
   }
   console.log(`[install-smoke] covering the full publishable set: ${publishable.join(', ')}`);

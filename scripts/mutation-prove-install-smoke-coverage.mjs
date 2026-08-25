@@ -151,6 +151,22 @@ const MUTATIONS = [
     restore: () => git('checkout', '--', '.'),
   },
   {
+    id: 'M9',
+    expect: 'red',
+    graded: 'shape',
+    guard: "step 5's exports/bin completeness reverted to a hardcoded package list",
+    // Round 2 of review found this uncovered by all eight declared mutations, and its
+    // own mutation survived both graders. Graded by the shape spec because the gate
+    // cannot see it: the derived and hardcoded forms check the same set TODAY.
+    apply: () =>
+      mutate(
+        SMOKE,
+        '  const entries = packed.map((p) => ({',
+        '  const entries = [corePkgDir, libPkgDir, dbPkgDir].map((p) => ({',
+      ),
+    restore: () => git('checkout', '--', '.'),
+  },
+  {
     id: 'M7',
     expect: 'red',
     graded: 'shape',
@@ -202,6 +218,14 @@ console.log(`NC(shape) exit=${ncShape}`);
 if (ncShape !== 0) {
   console.error(
     'ABORT: the shape spec is red before any mutation — M6/M7 would grade meaningless.',
+  );
+  process.exit(1);
+}
+const ncLock = runSpec(LOCKSTEP_SPEC);
+console.log(`NC(lockstep) exit=${ncLock}`);
+if (ncLock !== 0) {
+  console.error(
+    'ABORT: the lockstep spec is red before any mutation — M2 would grade meaningless.',
   );
   process.exit(1);
 }
