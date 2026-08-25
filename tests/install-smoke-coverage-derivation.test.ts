@@ -28,7 +28,18 @@ const changesetIgnore = () =>
       ignore?: string[];
     }
   ).ignore ?? [];
-const publishable = () => publishablePackages(readWorkspaceManifests(REPO_ROOT), changesetIgnore());
+/**
+ * The publishable packages WITH their workspace directories.
+ *
+ * `publishablePackages` is a `.filter()`, so it passes `dir` through at runtime, but its
+ * JSDoc param type omits it and TypeScript narrows the return accordingly. Re-joining
+ * against the manifests keeps the shared helper's typing alone.
+ */
+const publishable = () => {
+  const manifests = readWorkspaceManifests(REPO_ROOT);
+  const names = new Set(publishablePackages(manifests, changesetIgnore()).map((p) => p.name));
+  return manifests.filter((m) => names.has(m.name));
+};
 
 /** Every `join(repoRoot, 'packages', 'x')` the gate names, as leaf directory names. */
 function packageDirsNamedInGate(src: string): string[] {
