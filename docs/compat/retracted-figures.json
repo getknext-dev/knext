@@ -1,0 +1,121 @@
+{
+  "$readme": [
+    "Figures this project has published and then RETRACTED, with the corrected value.",
+    "",
+    "WHY: over three review rounds of PR #848 the same defect reproduced four times — a figure",
+    "corrected in one place while other copies kept publishing the old value. Round 3 found it had",
+    "reproduced outside the repo entirely, on the GitHub issues the release documents tell readers",
+    "carry the corrected findings. A per-instance fix is the wrong shape for a defect that recurs;",
+    "this ledger plus scripts/verify-retracted-figures.mjs is the gate.",
+    "",
+    "HOW IT IS CHECKED: the verifier scans the cited documents for issue references (never an",
+    "enumerated list), fetches each issue's body and comments, and FAILS if any retracted figure",
+    "still stands with no correcting comment on that issue. A source that quotes a retracted figure",
+    "AND states its corrected value is a correction, and discharges that figure for the issue.",
+    "",
+    "THE RESIDUAL, STATED RATHER THAN HIDDEN: this ledger is written by whoever makes a retraction.",
+    "A retraction whose author never adds an entry here is not caught, and no scan can catch it,",
+    "because nothing in the tree marks the old value as wrong. That is a real limit of this gate,",
+    "not an oversight. What it does guarantee is that a figure recorded here cannot go on being",
+    "published uncorrected on a cited issue.",
+    "",
+    "PATTERNS are matched after normalisation: markdown emphasis stripped, whitespace collapsed,",
+    "lowercased. Write the claim as prose; do not write a regex. Several surface forms per figure",
+    "are expected, because one claim gets written several ways.",
+    "",
+    "PATTERNS MUST BE SPECIFIC TO THE WRONG CLAIM. '28 of 28' alone is CORRECT ('failed: 0 on 28 of",
+    "28') — only the conjunction with 778/0/0 is wrong. A pattern that matches the true statement",
+    "makes the gate unpassable and it will be deleted rather than fixed.",
+    "",
+    "correctionSignature: the short phrase that must appear ALONGSIDE a quoted retracted",
+    "pattern for a source to count as correcting it. Quoting alone is republishing the",
+    "error; asserting the right value alone does not reach a reader who landed on the",
+    "comment carrying the wrong one. Both halves are required, which is what makes the",
+    "rule impossible to satisfy by relabelling a comment."
+  ],
+  "figures": [
+    {
+      "id": "asserted-twice-independently",
+      "retractedIn": "docs/release/compat-honesty-gate.md (round 1, B3)",
+      "wrong": "The zero-re-runs figure is asserted twice, independently — the ledger's runAttempt and the API's run_attempt.",
+      "correct": "One GitHub counter read two ways. test-e2e-deploy.yml sets RUN_ATTEMPT from github.run_attempt and compat-run-ledger.mjs writes it through, so the ledger reading is not independent and is strictly weaker. The API reading is authoritative: run_attempt is 1 on all 72 scheduled runs, none above 1.",
+      "patterns": ["asserted twice, independently", "figure is asserted twice"],
+      "correctionSignature": "one source, read two ways"
+    },
+    {
+      "id": "full-778-on-28-of-28",
+      "retractedIn": "docs/release/compat-honesty-gate.md (round 1, B2)",
+      "wrong": "778/0/0 on 28 of 28 ledgered nights.",
+      "correct": "failed: 0 is 28 of 28; the full 778/0/0 is 27 of 28. Run 30790778590 (2026-08-03) recorded 15 shards / 730 passed / 0 failed, shard 16/16 absent.",
+      "patterns": [
+        "28 of 28 ledgered nights at 778/0/0",
+        "778/0 on 28 of 28",
+        "778/0/0 on 28 of 28",
+        "778 passed / 0 failed on 28 of 28"
+      ],
+      "correctionSignature": "27 of 28"
+    },
+    {
+      "id": "all-28-nights-in-all-16-shards",
+      "retractedIn": "docs/release/compat-honesty-gate.md:157 (round 2 sweep, the 'third copy')",
+      "wrong": "All 28 node nights recorded failed: 0 in all 16 shards.",
+      "correct": "All 28 nights recorded failed: 0 in every shard that reported — 27 nights across all 16, and 08-03 across the 15 it recorded.",
+      "patterns": [
+        "28 node nights recorded failed: 0 in all 16 shards",
+        "every one of the 28 node nights recorded failed: 0 in all 16 shards"
+      ],
+      "correctionSignature": "every shard that reported"
+    },
+    {
+      "id": "nine-restarts",
+      "retractedIn": "docs/release/compat-honesty-gate.md (round 1, B4)",
+      "wrong": "9 restarts in 27 nights.",
+      "correct": "10 restarts. Re-derived from windowFingerprint over every retained ledger: 27 fingerprinted nights, 11 distinct fingerprints, 10 restarts, longest stable streak 7 (2026-08-12 to 08-18).",
+      "patterns": ["9 restarts in 27 nights", "churn: 9 restarts"],
+      "correctionSignature": "10 restarts"
+    },
+    {
+      "id": "twenty-eight-fingerprinted-nights",
+      "retractedIn": "docs/release/public-release-readiness.md (round 2, R2)",
+      "wrong": "28 fingerprinted node nights.",
+      "correct": "27 fingerprinted, of 28 in-window node nights: the 2026-07-28 ledger (30333571518) carries no windowFingerprint key at all.",
+      "patterns": ["28 fingerprinted node nights"],
+      "correctionSignature": "27 fingerprinted"
+    },
+    {
+      "id": "timeout-60000-discriminator",
+      "retractedIn": "docs/release/compat-honesty-gate.md (round 1, discriminator 3)",
+      "wrong": "kind: timeout at exactly timeoutMs: 60000 is a per-case jest timeout, and that discriminates a hang from runner slowness.",
+      "correct": "The reported kind alternates run to run for the same file, so the constant cannot carry the argument. The structural reading replaces it: every bun red is complete-but-red (expectedTotal met by passed + failed, truncated false, notRun 0, status reported), whereas infrastructure loss is absence — 30790778590 produced no shard-16 entry at all.",
+      "patterns": [
+        "kind: timeout at exactly timeoutms: 60000 is a per-case jest timeout",
+        "at exactly timeoutms: 60000 is a per-case jest timeout"
+      ],
+      "correctionSignature": "complete-but-red"
+    }
+  ],
+  "$negativeCorpus": {
+    "$why": [
+      "Sentences that are TRUE and legitimate, and which no pattern above may match.",
+      "",
+      "The $readme rule says patterns must be specific to the WRONG claim, but nothing enforced it,",
+      "so round-5 review found two entries breaking it: bare \"asserted twice\" flagged \"the flag is",
+      "asserted twice in the reconciler for idempotency\", and bare \"9 restarts\" flagged \"the bun lane",
+      "saw 9 restarts in its own 27 nights\" — the exact node-vs-bun vocabulary adjacency that is the",
+      "documented reason the general fuzzy check was NOT built.",
+      "",
+      "The consequence is the one the ledger warns about: a TRUE statement on a cited issue reds the",
+      "gate with no legitimate remedy, and the cheapest path back to green becomes editing the ledger.",
+      "tests/retracted-figures.test.ts asserts every sentence here stays unmatched, so a future entry",
+      "cannot quietly widen."
+    ],
+    "sentences": [
+      "The flag is asserted twice in the reconciler for idempotency.",
+      "The bun lane saw 9 restarts in its own 27 nights, which is a different lane and a different question.",
+      "failed: 0 on 28 of 28 ledgered nights, which is the correct statement.",
+      "The node lane ran 28 fingerprinted nights across two windows in an unrelated analysis.",
+      "Every shard reported, so all 16 shards recorded failed: 0 on that night.",
+      "A kind: timeout at 30000 ms in an unrelated suite is not this figure."
+    ]
+  }
+}

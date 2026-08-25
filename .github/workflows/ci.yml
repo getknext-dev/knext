@@ -239,7 +239,11 @@ jobs:
     # knext adapter SMOKE suite — NOT the official Next.js compatibility suite (ADR-0007,
     # option C). Builds apps/file-manager through the knext adapter (output:'standalone'),
     # boots the standalone server.js on Node and Bun, and asserts real HTTP behaviors.
-    # The official deploy-test harness is a separate scheduled job (A3-2, compat-suite-full).
+    # The official deploy-test harness is a separate scheduled WORKFLOW, and it is named here
+    # by file because a lane nickname used to stand in its place and resolved to nothing:
+    # .github/workflows/test-e2e-deploy.yml — "Compat suite (official Next.js deploy harness)",
+    # ADR-0007 A3-2. Node credential lane nightly 03:17 UTC; Bun runtime axis weekly Sun 05:17
+    # UTC. Guarded by tests/compat-lane-pointer-resolution.test.ts.
     name: knext adapter smoke (NOT official compat suite)
     runs-on: ubuntu-latest
     timeout-minutes: 12

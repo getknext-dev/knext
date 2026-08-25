@@ -51,8 +51,10 @@ not move.
 ### Read this before concluding the suite is flaky
 
 **The node lane is not what is stopping this gate.** Across the 27 nights of the open window,
-**26 recorded `778 passed / 0 failed / 0 notRun` over all 16 shards**, and the 27th never executed a
-test (a runner disconnect). **Not one night in the window was lost to a test failure.** No run was
+**26 recorded `778 passed / 0 failed / 0 notRun` over all 16 shards**, and the 27th (08-03) lost a
+single **shard** to a runner disconnect — that shard executed no test and recorded no summary,
+while the other 15 banked `730 passed / 0 failed`. **Not one night in the window was lost to a test
+failure.** No run was
 ever re-attempted (`runAttempt: 1` on all 27), so no green here was bought by a re-run — the
 re-run-until-green failure mode #545 warns about has not occurred on this lane.
 

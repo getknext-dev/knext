@@ -81,20 +81,47 @@ first approved run answers the question either way.
 `compat-run-ledger` artifact of *every* scheduled run (2026-07-28 → 08-24) and independently
 re-derived by an adversarial reviewer from the raw artifacts:
 
-- **#545's "shard-level flaky" claim is FALSE for the credential lane.** 28 fingerprinted node
-  nights, 26 of 27 at `778/0/0`, `runAttempt: 1` throughout — **zero re-runs, zero nights lost to
+- **#545's "shard-level flaky" claim is FALSE for the credential lane.** In the window declared
+  above (2026-07-28 → 08-24): **28** in-window node nights, **`failed: 0` on all 28**, at the full
+  `778/0/0` on **27 of 28** — the 28th (`30790778590`, 08-03) lost shard 16/16 to a runner
+  disconnect and recorded 15 shards / 730 passed / 0 failed, which is infrastructure loss, not a
+  test failure. Of those 28 nights **27 are fingerprinted**: the 2026-07-28 ledger carries no
+  `windowFingerprint` key at all. `runAttempt: 1` throughout — **zero re-runs, zero nights lost to
   a test failure**. The gate is not flaky.
+  *(`docs/compat-matrix.md` states the same record in the **07-29**-opened frame, where it reads
+  "26 of the 27 nights". Both framings are correct; they differ only in whether the unfingerprinted
+  07-28 night opens the window. This file uses the 07-28 frame it declares above.)*
 - **#710's bun-lane red is TRUE and honest.** Deterministic Bun ≤1.3.14 gaps reproducing 4/4 runs,
-  already marked ❌ in the matrix. Explicitly **not** quarantined: ADR-0007 §c.2's bar is a *flake*
-  bar, and quarantining a permanent gap launders it into apparent green.
-- **What actually blocks the 14-night v1.0 gate is harness-fingerprint churn** — 9 restarts in 27
-  nights, longest stable streak 7 — because a fingerprint change restarts the window. That is a
+  already marked ❌ in the matrix. Explicitly **not** quarantined — on ADR-0007 §(c)'s *scope*, not
+  its evidence bar: §(c) is the **flake**-quarantine ledger (§c.1 per-case only, file-level
+  confined to §(d)'s one named family, which expires on the upstream-fix ref bump), and a
+  permanent upstream runtime gap is neither flake nor expirable. Quarantining it launders a known
+  gap into apparent green. (§c.2's "one FINAL post-retry failure" is a *floor* against pre-emptive
+  quarantines; a deterministic red clears it trivially, so it is not what excludes this.)
+- **What actually blocks the 14-night v1.0 gate is harness-fingerprint churn** — **10 restarts**
+  across the 27 fingerprinted nights, longest stable streak 7 — because a fingerprint change
+  restarts the window. That is a
   tractable, named engineering problem, not an unreachable flake bar.
 
 Landed as #846, with five defects found in the supporting machinery by review — the important one
 flattering us: the audit silently dropped runs, and a dropped night **merged two streaks**,
 overstating stability. Fixed and mutation-proved in both directions. #545 and #710 carry the
 corrected findings; #670 remains in the blocker-1 family (it needs a publicly-pullable image).
+
+> **How that claim is kept true, and what it does not cover.** "The issues carry the corrected
+> findings" is load-bearing, and it was **false for three review rounds** — corrections landed in
+> this repo while the issues went on publishing the retracted figures. It is now checked rather
+> than asserted: [`docs/compat/retracted-figures.json`](../compat/retracted-figures.json) records
+> every retracted figure with its corrected value, and
+> [`retracted-figure-resolution-nightly.yml`](../../.github/workflows/retracted-figure-resolution-nightly.yml)
+> resolves each one against every issue these documents cite, failing if any still stands
+> uncorrected — and failing, too, if it cannot read them, because a checker that goes green when it
+> cannot see its subject is worse than none.
+>
+> **The limit, stated here rather than only in the ledger:** that check can only test figures
+> someone recorded as retracted. A retraction whose author never adds a ledger entry is not caught,
+> and no scan can catch it, because nothing in the tree marks the old value as wrong. The gate
+> narrows the failure mode; it does not eliminate it.
 
 ### ~~Blocker 3 (original text, retained for provenance)~~
 The project's north-star credibility claim is compat-suite-backed parity. Today: the **bun-lane
@@ -132,6 +159,23 @@ gate is red would fail this project's central honesty rule.
        page's caveat with a live re-verification; close #198/#707.
 4. [ ] Agent: set `vars.SCALE_TEST_IMAGE` from the publish lane (#670); confirm the e2e_scale
        nightly greens.
-5. [ ] Agent: compat flake hunt (#545) and the bun-lane weekly red (#710) — the last honesty gate.
+5. [x] Agent: compat flake hunt (#545) and the bun-lane weekly red (#710) — the last honesty gate.
+       **Discharged 2026-08-25** — findings, run IDs and test names in
+       [`compat-honesty-gate.md`](compat-honesty-gate.md). Neither issue blocks the release claim:
+       the node credential lane took **zero** re-runs across all 32 scheduled runs in the window
+       (from the GitHub API's `run_attempt`, which is authoritative — `1` on all 32, and on all 72
+       scheduled runs of this workflow, with none above 1. The ledger's own `runAttempt` agrees,
+       but is **not** independent corroboration: the workflow sets it from `github.run_attempt`
+       and the ledger script writes it through unchanged, so it is the same counter by a second
+       transport, and strictly weaker — an attempt-1 artifact reports `1` whatever happens
+       afterwards), and the bun
+       weekly is deterministically red on three documented upstream-Bun files while its matrix row
+       is already ❌. One real defect was found and fixed on the way: `ci.yml` and `compat-smoke.mjs`
+       both deflected readers to a scheduled workflow named `compat-suite-full`, which does not
+       exist — now guarded by `tests/compat-lane-pointer-resolution.test.ts` (5/5 mutation-proved).
+       **Residual, tracked not blocking:** #545 should be closed against its own criteria; the
+       14-night gate's real obstruction — harness-fingerprint churn, 10 window restarts in 27
+       nights — is now filed as #850; #710 is a permanently-unclearable weekly alert and needs a
+       disposition.
 6. [ ] Agent: ergonomics row 8 — measure the REAL `npx kn-next` journey post-publish.
 7. [ ] Then: announce.

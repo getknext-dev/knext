@@ -137,3 +137,19 @@ __pycache__/
 # Test-temp scratch dirs (created at repo root by suite runs; never tracked)
 knext-*/
 sandbox-fetch-debug-*/
+
+# Vite/Vitest SSR transform cache. A suite run can drop a randomly-named
+# 21-char (nanoid) directory at the repo root holding a `client/` tree of
+# sha1-named `__vite_ssr_import__` transform output. It is regenerable, it
+# embeds this machine's pnpm store layout, and it mirrors repo script source —
+# so a stale copy can later be read as authoritative (see .claude/rules/workflow.md
+# on stale duplicates being a correctness hazard, not untidiness). Six such
+# files were committed in 8a805bb and removed in this round.
+#
+# The name is random, so this pattern matches the SHAPE — 21 nanoid chars at
+# the root, followed by `client/`. It deliberately does NOT match a legitimate
+# `packages/client/` or any other nested `client/` directory. Because a
+# name-shaped rule can only ever be a best effort, the general net is the
+# content guard in `tests/no-committed-transform-cache.test.ts`, which reds on
+# this output under ANY path or directory name.
+/[A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-]/client/
