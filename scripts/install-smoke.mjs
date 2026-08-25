@@ -464,13 +464,24 @@ try {
   // `standalonePrefix` and bakes it into the generated Dockerfile's `WORKDIR /repo/<prefix>`.
   // So the assertion reads the prefix back out of the artifact the user actually builds with.
   //
-  // What that is worth, stated accurately — the first version of this comment claimed a
+  // What that is worth, stated accurately, and NARROWLY — this comment has now been wrong
+  // twice, so the scope is spelled out rather than implied. The fixture below roots the
+  // scaffold with a LOCKFILE, and for that layout `create` and Next agree, so what this
+  // check proves is the pairing FOR A LOCKFILE-ROOTED APP. It deliberately does not speak
+  // for the `pnpm-workspace.yaml` layout, where they DISAGREE today: Next's
+  // `dist/lib/find-root.js` looks up `pnpm-workspace.yaml` BEFORE any lockfile — its own
+  // comment says so — while `tracing-root.ts` excludes it, so `create` bakes an empty
+  // prefix and every path it emits misses the nested output. That is a real shipping bug,
+  // filed as #857, and this gate reds on it the moment the walk is fixed.
+  //
+  // The first version of this comment claimed a
   // `create` computing the wrong prefix "fails here, and nothing else covers that", and
   // review showed BOTH halves were false: `path.join` silently repaired a prefix missing
   // its trailing slash, and `create-scaffold.test.ts` already covers the prefix itself at
   // PR time. The honest claim is narrower and still worth having: an INCONSISTENCY between
   // the prefix `create` bakes into the Dockerfile and where `next build` actually puts the
-  // server fails here, and that pairing is not checked anywhere else.
+  // server fails here, for the layout the fixture builds, and that pairing is not checked
+  // anywhere else.
   const scaffoldDockerfile = readFileSync(join(scaffoldDir, 'Dockerfile'), 'utf8');
   const workdir = scaffoldDockerfile.match(/^WORKDIR \/repo\/(.*)$/m);
   if (workdir === null) {
