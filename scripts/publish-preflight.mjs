@@ -103,7 +103,7 @@ export function readWorkspaceManifests(root) {
  * that a package moved into `ignore` leaves this gate at the same moment it
  * leaves the publish command's scope.
  *
- * @param {Array<{name: string, version: string, private: boolean}>} manifests
+ * @param {Array<{dir: string, name: string, version: string, private: boolean}>} manifests
  * @param {string[]} ignore
  */
 export function publishablePackages(manifests, ignore) {

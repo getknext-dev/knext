@@ -53,12 +53,14 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { findWorkspaceProtocolDeps } from './lib/workspace-protocol.mjs';
+import { publishablePackages, readWorkspaceManifests } from './publish-preflight.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
 const corePkgDir = join(repoRoot, 'packages', 'kn-next');
 const libPkgDir = join(repoRoot, 'packages', 'lib');
 const dbPkgDir = join(repoRoot, 'packages', 'db');
+const aliasPkgDir = join(repoRoot, 'packages', 'kn-next-alias');
 const probeSrc = join(__dirname, 'install-smoke-probe.mjs');
 
 const PASS = 'PASS';
@@ -68,11 +70,12 @@ let workDir;
 let libDest;
 let dbDest;
 let coreDest;
+let aliasDest;
 
 /** Print a final summary line, clean up temp dirs, and exit with the matching code. */
 function finish(status, message) {
   console.log(`\n[install-smoke] ${status}: ${message}`);
-  for (const dir of [workDir, libDest, dbDest, coreDest]) {
+  for (const dir of [workDir, libDest, dbDest, coreDest, aliasDest]) {
     try {
       if (dir && existsSync(dir)) rmSync(dir, { recursive: true, force: true });
     } catch {
@@ -145,6 +148,63 @@ try {
   const libTarball = pnpmPack(libPkgDir, libDest, '@getknext/lib');
   const dbTarball = pnpmPack(dbPkgDir, dbDest, '@getknext/db');
   const coreTarball = pnpmPack(corePkgDir, coreDest, '@getknext/core');
+  // The alias needs no build step — it ships one forwarding shim and a manifest.
+  aliasDest = mkdtempSync(join(tmpdir(), 'knext-pack-alias-'));
+  const aliasTarball = pnpmPack(aliasPkgDir, aliasDest, 'kn-next (the npx alias)');
+
+  // --- 1a. what this gate covers is DERIVED, not enumerated -----------------
+  // The `kn-next` alias — the package `npx kn-next` installs — was outside this gate
+  // entirely: never packed, never installed, and its `@getknext/core: workspace:^` dep
+  // never checked for the protocol leak that makes an install fail with
+  // EUNSUPPORTEDPROTOCOL. An enumerated list is how the NEXT publishable package gets
+  // missed the same way, so the covered set is derived.
+  //
+  // Derived from the PUBLISHABLE set, not from the changesets `fixed` group. Review of
+  // the first cut caught that distinction, with a reproduction: `fixed` is the
+  // LOCKSTEP-VERSIONING group, and `changeset publish` publishes any non-private
+  // workspace package with a pending bump — so a new publishable package nobody adds to
+  // `fixed` is invisible to both halves of the check, and the gate reports full coverage
+  // while never packing it. Deriving from `publishablePackages` — the same helper
+  // `scripts/publish-preflight.mjs` gates the actual publish with — closes that, and
+  // leaves the `publishable == fixed` cross-check where it belongs, in
+  // `tests/publish-preflight.test.ts`.
+  //
+  // BOTH directions are asserted: a publishable package this gate does not pack fails,
+  // and a package this gate packs that is not publishable fails too.
+  const changesetConfig = JSON.parse(
+    readFileSync(join(repoRoot, '.changeset', 'config.json'), 'utf8'),
+  );
+  const publishable = publishablePackages(
+    readWorkspaceManifests(repoRoot),
+    Array.isArray(changesetConfig.ignore) ? changesetConfig.ignore : [],
+  ).map((p) => p.name);
+  const packed = [
+    [libTarball, libPkgDir],
+    [dbTarball, dbPkgDir],
+    [coreTarball, corePkgDir],
+    [aliasTarball, aliasPkgDir],
+  ].map(([tgz, dir]) => ({
+    tgz,
+    dir,
+    name: JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')).name,
+  }));
+  const uncovered = publishable.filter((name) => !packed.some((p) => p.name === name));
+  if (uncovered.length > 0) {
+    finish(
+      FAIL,
+      `${uncovered.join(', ')} publish(es) to the registry but this gate never packs or ` +
+        'installs it — add it above; it is a consumer path nothing else proves',
+    );
+  }
+  const unpublished = packed.filter((p) => !publishable.includes(p.name));
+  if (unpublished.length > 0) {
+    finish(
+      FAIL,
+      `this gate packs ${unpublished.map((p) => p.name).join(', ')}, which does not publish ` +
+        '(private, unversioned, or changeset-ignored) — the gate and the release set disagree',
+    );
+  }
+  console.log(`[install-smoke] covering the full publishable set: ${publishable.join(', ')}`);
 
   // --- 1b. manifest guard: no workspace:-protocol spec may survive packing ----
   // #147 A3-3 fix round 1 (run 28558576615): the compat suite burned 16 shards
@@ -155,11 +215,7 @@ try {
   // manifest inspection makes a future regression NAME its cause here instead of
   // surfacing as a downstream npm error.
   console.log('[install-smoke] inspecting packed manifests for workspace: protocol leaks ...');
-  for (const [tgz, label] of [
-    [libTarball, '@getknext/lib'],
-    [dbTarball, '@getknext/db'],
-    [coreTarball, '@getknext/core'],
-  ]) {
+  for (const { tgz, name: label } of packed) {
     const manifest = JSON.parse(
       execFileSync('tar', ['-xzOf', tgz, 'package/package.json'], { encoding: 'utf8' }),
     );
@@ -200,7 +256,7 @@ try {
   console.log('[install-smoke] npm install <lib.tgz> <db.tgz> <core.tgz> (plain npm, no bun) ...');
   const install = run(
     'npm',
-    ['install', '--no-audit', '--no-fund', libTarball, dbTarball, coreTarball],
+    ['install', '--no-audit', '--no-fund', libTarball, dbTarball, coreTarball, aliasTarball],
     {
       cwd: workDir,
       stdio: ['ignore', 'inherit', 'inherit'],
@@ -222,6 +278,69 @@ try {
   if (!/kn-next|Usage|Options/i.test(helpOut)) {
     finish(FAIL, "kn-next --help: exit 0 but output lacked 'kn-next'/'Usage'/'Options'");
   }
+
+  // --- 3a-alias. the alias's OWN shim, which step 3a never touches -----------
+  // The check above runs node_modules/.bin/kn-next. Both @getknext/core and the alias
+  // declare that bin name, and the first cut of this comment called the outcome npm's
+  // to decide. Review measured it instead, and it is DETERMINISTIC: `.bin/kn-next`
+  // resolves to `@getknext/core/dist/cli/kn-next.js` in every install shape tried,
+  // including the real `npx` one where the alias is installed alone and core arrives as
+  // its transitive dep. So step 3a never tested the alias at all — the gap was LARGER
+  // than 'might not have', not smaller.
+  //
+  // Two consequences worth stating plainly, because the obvious misreading is
+  // flattering in both directions. There is no coverage LOSS: core still owns the bin
+  // link, so 3a covers core's bin and this step covers the alias's shim — complementary,
+  // not duplicated. And this step does NOT prove that `npx kn-next` executes the shim,
+  // because it does not; it proves the shipped shim is present, intact, and forwards.
+  // Whether the shim should be on the `npx` path at all is a question about the alias
+  // package, not about this gate.
+  const aliasInstallDir = join(workDir, 'node_modules', 'kn-next');
+  const aliasManifestPath = join(aliasInstallDir, 'package.json');
+  if (!existsSync(aliasManifestPath)) {
+    finish(FAIL, 'the kn-next alias did not install — `npx kn-next` would resolve to nothing');
+  }
+  const aliasBinRel = JSON.parse(readFileSync(aliasManifestPath, 'utf8')).bin?.['kn-next'];
+  if (!aliasBinRel) {
+    finish(
+      FAIL,
+      'the installed kn-next alias declares no `kn-next` bin — the command the docs tell ' +
+        'every new user to type would not exist',
+    );
+  }
+  // Follow the manifest instead of a hardcoded filename. Renaming the shim and updating
+  // `bin` together is legitimate and must stay green; declaring a `bin` the tarball does
+  // not contain is the break — and `pnpm pack` exits 0 on exactly that, so nothing
+  // upstream catches it and every `npx kn-next` dies with ENOENT after a clean install.
+  const aliasBin = join(aliasInstallDir, aliasBinRel);
+  if (!existsSync(aliasBin)) {
+    finish(
+      FAIL,
+      `the kn-next alias declares bin '${aliasBinRel}' but the packed tarball ships no such ` +
+        'file — every `npx kn-next` would fail with ENOENT',
+    );
+  }
+  console.log(
+    `[install-smoke] running the alias shim \`node node_modules/kn-next/${aliasBinRel} --help\` ...`,
+  );
+  const aliasHelp = run('node', [aliasBin, '--help'], { cwd: workDir });
+  const aliasOut = `${aliasHelp.stdout || ''}${aliasHelp.stderr || ''}`;
+  if (aliasHelp.status !== 0) {
+    console.error(aliasOut.trim());
+    finish(
+      FAIL,
+      `the kn-next alias bin exited ${aliasHelp.status} (expected 0) — \`npx kn-next\` is broken ` +
+        'for every consumer',
+    );
+  }
+  if (!/kn-next|Usage/i.test(aliasOut)) {
+    finish(
+      FAIL,
+      'the kn-next alias bin exited 0 but printed no CLI help — it is not forwarding to ' +
+        '@getknext/core',
+    );
+  }
+  console.log('[install-smoke] alias shim forwards to the real CLI');
 
   // --- 3a-bis. CLI: `create` scaffolds from the INSTALLED package (#407) -----
   // `kn-next create` reads its templates from <package>/templates, so it works
@@ -309,12 +428,19 @@ try {
   }
 
   // --- 5. exports-completeness: every exports subpath + bin resolves ---------
-  const coreEntry = publishedEntrypoints(corePkgDir);
-  const libEntry = publishedEntrypoints(libPkgDir);
-  const dbEntry = publishedEntrypoints(dbPkgDir);
+  // Derived from the same packed set as step 1a — review caught that the derivation
+  // stopped at packing, so a newly-covered package was installed but its `exports` and
+  // `bin` were never resolution-checked. `publishedEntrypoints` defaults a package with
+  // no `exports` map to its bare name, which the alias does not resolve as (it ships a
+  // bin and nothing importable), so entries without an explicit `exports` contribute
+  // their bins only.
+  const entries = packed.map((p) => ({
+    ...publishedEntrypoints(p.dir),
+    hasExports: JSON.parse(readFileSync(join(p.dir, 'package.json'), 'utf8')).exports !== undefined,
+  }));
   // @getknext/db's subpaths include ./migrate — this proves `@getknext/db/migrate` (the
   // `kn-next db migrate` runner) resolves to real JS in a clean install.
-  const allSubpaths = [...coreEntry.subpaths, ...libEntry.subpaths, ...dbEntry.subpaths];
+  const allSubpaths = entries.filter((e) => e.hasExports).flatMap((e) => e.subpaths);
   console.log(`[install-smoke] resolving ${allSubpaths.length} exports subpaths ...`);
   const resolveCheck = run(
     'node',
@@ -347,7 +473,7 @@ try {
   }
   // bins: kn-next was already proven runnable above; assert any other declared bin
   // at least has a .bin symlink.
-  for (const bin of [...coreEntry.bins, ...libEntry.bins, ...dbEntry.bins]) {
+  for (const bin of entries.flatMap((e) => e.bins)) {
     if (!existsSync(join(workDir, 'node_modules', '.bin', bin))) {
       finish(FAIL, `declared bin '${bin}' is missing from node_modules/.bin`);
     }
@@ -426,7 +552,8 @@ try {
 
   finish(
     PASS,
-    'packed @getknext/core + @getknext/lib + @getknext/db install on plain npm/Node; CLI runs, ' +
+    `packed ${publishable.join(' + ')} install on plain npm/Node; the CLI runs and so does the ` +
+      '`npx kn-next` alias shim, ' +
       'every public app-import subpath resolves to real JS outside the workspace, and ' +
       '@getknext/db imports + migrates without the optional drizzle-kit peer',
   );
