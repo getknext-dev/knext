@@ -74,6 +74,17 @@ function runDetail(gate: Gate, args: string[] = []): { code: number; stderr: str
   }
 }
 
+/** Run the validator and return STDOUT — the printer is code too, and untested. */
+function runStdout(gate: Gate, args: string[] = []): string {
+  const dir = mkdtempSync(join(tmpdir(), 'gates-out-'));
+  const file = join(dir, 'adr-0042-gates.json');
+  writeFileSync(file, JSON.stringify(gate, null, 2));
+  return execFileSync('node', [SCRIPT, '--file', file, ...args], {
+    cwd: REPO,
+    encoding: 'utf8',
+  });
+}
+
 /** Run the validator against a gate file, returning its exit code. */
 function runOn(gate: Gate): number {
   return runDetail(gate).code;
@@ -124,6 +135,61 @@ const crit = (g: Gate, id: string): Record<string, unknown> => {
 describe('verify-phase-gates enforces the rules its docblock claims', () => {
   it('the shipped gate file passes', () => {
     expect(runOn(load())).toBe(0);
+  });
+
+  it('the printer renders one row per criterion, each with a state, plus a summary', () => {
+    // The renderer is code with no test: every mutation to it survived, because the
+    // suite only ever looked at exit codes and at stderr. It cannot report a problem,
+    // but it is what a human reads to decide whether to trust the file.
+    const g = load();
+    const criteria = g.phases.flatMap((p) => [...(p.preconditions ?? []), ...(p.criteria ?? [])]);
+    const out = runStdout(g);
+    const rows = out.split('\n').filter((l) => /\[\s*(ok|FAIL|----)\s*\]/.test(l));
+    expect(rows).toHaveLength(criteria.length);
+    for (const c of criteria) {
+      expect(out, `no row for ${String((c as Record<string, unknown>).id)}`).toContain(
+        String((c as Record<string, unknown>).id),
+      );
+    }
+    const summary = out.match(/(\d+) pass · (\d+) fail · (\d+) unmeasured/);
+    if (!summary) throw new Error(`no summary line in:\n${out}`);
+    expect(Number(summary[1]) + Number(summary[2]) + Number(summary[3])).toBe(criteria.length);
+    expect(out).toContain('current_phase:');
+  });
+
+  it('the printer marks pass, fail and unmeasured distinctly', () => {
+    const g = load();
+    const out = runStdout(g);
+    expect(out).toMatch(/\[\s+ok\s+\]/); // something passes
+    expect(out).toMatch(/\[\s*FAIL\s*\]/); // something fails
+    expect(out).toMatch(/\[\s*----\s*\]/); // something is unmeasured
+  });
+
+  it('--json emits the same rows machine-readably, with the problem list', () => {
+    const g = load();
+    const parsed = JSON.parse(runStdout(g, ['--json'])) as {
+      gates: Array<{ adr: string; rows: Array<{ id: string; state: string }> }>;
+      problems: string[];
+    };
+    const criteria = g.phases.flatMap((p) => [...(p.preconditions ?? []), ...(p.criteria ?? [])]);
+    expect(parsed.gates).toHaveLength(1);
+    expect(parsed.gates[0].adr).toBe('0042');
+    expect(parsed.gates[0].rows).toHaveLength(criteria.length);
+    expect(parsed.problems).toEqual([]);
+  });
+
+  it('--json reports the problems it found, not just the rows', () => {
+    const g = load();
+    phase(g, '2').depends_on = [1]; // an undeclared key
+    let out = '';
+    try {
+      out = runStdout(g, ['--json']);
+    } catch (e) {
+      out = String((e as { stdout?: string }).stdout ?? '');
+    }
+    const parsed = JSON.parse(out) as { problems: string[] };
+    expect(parsed.problems.length).toBeGreaterThan(0);
+    expect(parsed.problems.join('\n')).toMatch(/depends_on/);
   });
 
   it('rule 1: a measured value with no source fails', () => {
@@ -1405,6 +1471,79 @@ describe('#753 — every relation the gate file can state is read by a checker',
     expect(stderr).not.toMatch(/recording the discharge/);
     expect(stderr).not.toMatch(/does not name phase 1/);
     expect(code, stderr).not.toBe(0); // phase 1 is BLOCKED, which other rules report
+  });
+
+  it('meetsTarget: an ABSENT target is "no threshold", exactly as an explicit null is', () => {
+    // `c.target === null || c.target === undefined` — the `undefined` half. Every
+    // shipped criterion carries an explicit target, so omission was uncovered.
+    const { code, stderr } = runDetail(
+      soleCriterion({
+        id: 'RM-1',
+        text: 't',
+        kind: 'value',
+        measured: 42,
+        source: 'test',
+        target_note: 'no threshold, deliberately',
+      }),
+    );
+    expect(code, stderr).toBe(0);
+  });
+
+  it('rule 3: a QUALIFIED done with nothing unmet must say DONE — the other conjunct', () => {
+    // `!strictlyDone` and `unmet.length > 0` in checkDone are separate halves, and the
+    // "use DONE" branch below them is what a strictly-DONE phase can never reach.
+    const g = load();
+    const p = phase(g, '0');
+    for (const c of p.criteria ?? []) c.measured = c.target;
+    expectFailure(g, /status DONE_WITH_REOPENED_RESIDUAL but every criterion is met — use DONE/);
+  });
+
+  it('rule 7: PARTIAL with criteria that are ALL met is DONE — the length conjunct', () => {
+    const g = load();
+    for (const c of phase(g, '3').criteria ?? []) {
+      c.measured = c.target;
+      c.source = 'test';
+    }
+    expectFailure(g, /status PARTIAL but every criterion is met/);
+  });
+
+  it('rule 8: a self-referential entry is reported ONCE, by the self-reference branch', () => {
+    // The `r === String(phase.phase)` operands are early-outs that stop a second
+    // report about the same entry. Assert the count, which is what they control.
+    const g = load();
+    phase(g, '5').gates = [5];
+    const { code, stderr } = runDetail(g);
+    expect(code, stderr).toBe(1);
+    const selfRefs = stderr.split('\n').filter((l) => /refers to itself/.test(l));
+    expect(selfRefs).toHaveLength(1);
+    expect(stderr).not.toMatch(/gates phase 5, whose status/);
+  });
+
+  it('rule 10: the message names the declared conditions when a checklist misses', () => {
+    // `[...admissible].join(', ') || 'none declared'` — the left operand.
+    const g = load();
+    (crit(g, 'P1-1').target as string[])[0] = 'A9';
+    expectFailure(g, /`A9` is not a declared admissibility condition \(A1, A2, A3, A4, A5, A6\)/);
+  });
+
+  it('rule 10: ...and says "none declared" when there are none', () => {
+    const g = load();
+    if (g.admissibility) g.admissibility.conditions = [];
+    expectFailure(g, /is not a declared admissibility condition \(none declared\)/);
+  });
+
+  it('rule 8: gates naming a phase whose status is UNRECOGNISED is not also called unblocked', () => {
+    // `targetClasses.length === 1` — without it, an unclassifiable status would be
+    // read as "not a blocked state" on top of rule 7's report.
+    const g = load();
+    g.phases.push(
+      { phase: 'ca', name: 'label ca', status: 'NOT_STARTED', gates: ['cb'] },
+      { phase: 'cb', name: 'label cb', status: 'NOT_A_STATUS' },
+    );
+    const { code, stderr } = runDetail(g);
+    expect(code, stderr).toBe(1);
+    expect(stderr).toMatch(/matches no declared status class/);
+    expect(stderr).not.toMatch(/gates phase cb, whose status/);
   });
 
   it('rule 9c: an irreversible DONE phase with NO open ship blocker is not reported', () => {
