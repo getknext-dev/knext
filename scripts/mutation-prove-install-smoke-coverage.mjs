@@ -275,6 +275,17 @@ const MUTATIONS = [
     restore: () => git('checkout', '--', '.'),
   },
   {
+    id: 'M16',
+    expect: 'red',
+    guard:
+      "the static COPY's DESTINATION loses the prefix — green across the whole repo before " +
+      'this check, and silent at runtime: the image builds, the container boots, and every ' +
+      '/_next/static/* request 404s',
+    apply: (checkOnly) =>
+      mutate(DOCKERFILE_TPL, './{{ standalonePrefix }}.next/static', './.next/static', checkOnly),
+    restore: () => git('checkout', '--', '.'),
+  },
+  {
     id: 'M7',
     expect: 'red',
     graded: 'shape',

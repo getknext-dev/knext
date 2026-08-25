@@ -470,9 +470,14 @@ try {
   //
   // What that is worth, stated accurately, and NARROWLY — this comment has now been wrong
   // twice, so the scope is spelled out rather than implied. The fixture below roots the
-  // scaffold with a LOCKFILE, and for that layout `create` and Next agree, so what this
-  // check proves is the pairing FOR A LOCKFILE-ROOTED APP. It deliberately does not speak
-  // for the `pnpm-workspace.yaml` layout, where they DISAGREE today: Next's
+  // scaffold with a lockfile and NO `pnpm-workspace.yaml` anywhere above it, so what this
+  // check proves is the pairing FOR AN APP WITH NO `pnpm-workspace.yaml` IN ITS ANCESTRY.
+  // That predicate is the one that is actually true, and it is narrower than it looks:
+  // `findWorkRoot` searches all the way up for `pnpm-workspace.yaml` BEFORE it considers a
+  // lockfile at any level, so an app with its own `package-lock.json` root still diverges
+  // if a workspace file sits anywhere above it. "Lockfile-rooted" — the predicate this
+  // comment used in its previous draft — was a false dichotomy, measured and disproven.
+  // Where they DISAGREE: Next's
   // `dist/lib/find-root.js` looks up `pnpm-workspace.yaml` BEFORE any lockfile — its own
   // comment says so — while `tracing-root.ts` excludes it, so `create` bakes an empty
   // prefix and every path it emits misses the nested output. That is a real shipping bug,
@@ -548,6 +553,38 @@ try {
       FAIL,
       `the generated Dockerfile names no ${standalonePrefix}server.js — its CMD would start ` +
         'a path this build does not produce',
+    );
+  }
+  // Every consumer, derived — not a list. The previous round claimed to read "every
+  // consumer" while reading three of six: the two `COPY --from=builder` lines went unread,
+  // and review measured the silent one. Dropping the prefix from the `static` COPY's
+  // DESTINATION is green across the whole repo, `docker build` succeeds, the container
+  // boots, and every `/_next/static/*` request then 404s because the assets landed beside
+  // the server instead of under it.
+  //
+  // The template ships in the tarball, so the expected count comes from the template's own
+  // interpolations rather than from call sites someone has to keep in step — the decay M6
+  // and M9 exist to stop. A template that legitimately drops a whole COPY moves both counts
+  // together and stays green.
+  const tplDockerfile = readFileSync(
+    join(workDir, 'node_modules', '@getknext', 'core', 'templates', 'app', 'Dockerfile.hbs'),
+    'utf8',
+  );
+  const declaredPrefixUses = (tplDockerfile.match(/\{\{\s*standalonePrefix\s*\}\}/g) ?? []).length;
+  const emittedPrefixUses = scaffoldDockerfile.split(standalonePrefix).length - 1;
+  if (declaredPrefixUses === 0) {
+    finish(
+      FAIL,
+      'the shipped Dockerfile template interpolates standalonePrefix nowhere — either the ' +
+        'template stopped being prefix-aware or this check is reading the wrong file',
+    );
+  }
+  if (emittedPrefixUses !== declaredPrefixUses) {
+    finish(
+      FAIL,
+      `the generated Dockerfile names the prefix ${emittedPrefixUses}x but its template ` +
+        `interpolates it ${declaredPrefixUses}x — a COPY, WORKDIR or CMD dropped it, so the ` +
+        'image would either fail to build or serve every static asset from the wrong path',
     );
   }
   const scaffoldServer = join(scaffoldDir, '.next', 'standalone', `${standalonePrefix}server.js`);
