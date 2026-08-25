@@ -129,7 +129,9 @@ for (const m of MUTATIONS) {
 }
 
 const bad = results.filter((r) => !r.ok);
-console.log(`\ndeclared=${MUTATIONS.length} run=${results.length} passed=${results.length - bad.length}`);
+console.log(
+  `\ndeclared=${MUTATIONS.length} run=${results.length} passed=${results.length - bad.length}`,
+);
 if (results.length !== MUTATIONS.length) {
   console.error('ABORT: a partial run is a FAILURE, not a pass.');
   process.exit(1);

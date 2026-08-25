@@ -294,7 +294,9 @@ try {
         'file — every `npx kn-next` would fail with ENOENT',
     );
   }
-  console.log(`[install-smoke] running the alias shim \`node node_modules/kn-next/${aliasBinRel} --help\` ...`);
+  console.log(
+    `[install-smoke] running the alias shim \`node node_modules/kn-next/${aliasBinRel} --help\` ...`,
+  );
   const aliasHelp = run('node', [aliasBin, '--help'], { cwd: workDir });
   const aliasOut = `${aliasHelp.stdout || ''}${aliasHelp.stderr || ''}`;
   if (aliasHelp.status !== 0) {
