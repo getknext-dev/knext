@@ -137,6 +137,76 @@ describe('verify-phase-gates enforces the rules its docblock claims', () => {
     expect(runOn(load())).toBe(0);
   });
 
+  it('an uncaught throw exits 3, not 1 — a crash is not a report', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gates-bad-json-'));
+    const file = join(dir, 'adr-0042-gates.json');
+    writeFileSync(file, '{ this is not json');
+    let code = 0;
+    try {
+      execFileSync('node', [SCRIPT, '--file', file], { cwd: REPO, stdio: 'pipe' });
+    } catch (e) {
+      code = (e as { status?: number }).status ?? 1;
+    }
+    expect(code).toBe(3);
+  });
+
+  it('the printer names the ADR it is reporting on, and the problem count', () => {
+    const clean = runStdout(load());
+    expect(clean).toMatch(/ADR-0042 — vinext \+ bun/);
+
+    const g = load();
+    phase(g, '2').depends_on = [1];
+    const { code, stderr } = runDetail(g);
+    expect(code, stderr).toBe(1);
+    expect(stderr).toMatch(/Gate-file problems \(1\):/);
+  });
+
+  it('rule 3: a strictly DONE phase is not ALSO told to explain a qualification', () => {
+    // `!strictlyDone` is its own conjunct: without it the strict branch and the
+    // qualified branch both fire on the same phase.
+    const g = load();
+    const p = phase(g, '0');
+    p.status = 'DONE';
+    p.status_note = undefined;
+    const { code, stderr } = runDetail(g);
+    expect(code, stderr).toBe(1);
+    expect(stderr).toMatch(/status DONE but \d+ criterion\/criteria not met/);
+    expect(stderr).not.toMatch(/has no status_note explaining the qualification/);
+  });
+
+  it('rule 3: a qualified DONE with nothing unmet is told to say DONE, and nothing else', () => {
+    const g = load();
+    const p = phase(g, '0');
+    for (const c of p.criteria ?? []) c.measured = c.target;
+    p.status_note = undefined;
+    const { code, stderr } = runDetail(g);
+    expect(code, stderr).toBe(1);
+    expect(stderr).toMatch(/but every criterion is met — use DONE/);
+    expect(stderr).not.toMatch(/leaves 0 criterion/);
+  });
+
+  it('rule 7: a PARTIAL phase with NO criteria is unmeasured, not "every criterion met"', () => {
+    const g = load();
+    g.phases.push({ phase: 'pa', name: 'label pa', status: 'PARTIAL' });
+    const { code, stderr } = runDetail(g);
+    expect(code, stderr).toBe(1);
+    expect(stderr).toMatch(/phase pa: status PARTIAL but no criterion is measured/);
+    expect(stderr).not.toMatch(/phase pa: status PARTIAL but every criterion is met/);
+  });
+
+  it('a gate file with NO admissibility block is reported, not crashed on', () => {
+    const g = load();
+    g.admissibility = undefined;
+    expectFailure(g, /is not a declared admissibility condition \(none declared\)/);
+  });
+
+  it('a null nested inside a narrative block is data, not a crash', () => {
+    const g = load();
+    (crit(g, 'P3d-1').evidence as Record<string, unknown>).some_null = null;
+    const { code, stderr } = runDetail(g);
+    expect(code, stderr).toBe(0);
+  });
+
   it('the printer renders one row per criterion, each with a state, plus a summary', () => {
     // The renderer is code with no test: every mutation to it survived, because the
     // suite only ever looked at exit codes and at stderr. It cannot report a problem,
@@ -232,10 +302,10 @@ describe('verify-phase-gates enforces the rules its docblock claims', () => {
     expect(runOn(g)).not.toBe(0);
   });
 
-  it('rule 3b: current_phase that is not a declared phase fails', () => {
+  it('rule 3b: current_phase that is not a declared phase is REPORTED, not crashed on', () => {
     const g = load();
     g.current_phase = 'no-such-phase';
-    expect(runOn(g)).not.toBe(0);
+    expectFailure(g, /current_phase no-such-phase is not a declared phase/);
   });
 
   it('rule 4: a null target with no target_note fails', () => {
