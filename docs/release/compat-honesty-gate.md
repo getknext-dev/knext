@@ -154,7 +154,7 @@ Measured over the 32 scheduled runs from 2026-07-28 to 2026-08-24 that still hav
 
 | question the issue asks | measured answer |
 |---|---|
-| distinct tests that flake on the node lane | **0** — every one of the 28 node nights recorded `failed: 0` in all 16 shards |
+| distinct tests that flake on the node lane | **0** — every one of the 28 node nights recorded `failed: 0` in every shard that reported: 27 nights across all 16 shards, and 08-03 across the 15 it recorded |
 | runs that went red-then-green on re-run, no code change | **0** |
 | re-runs of this workflow in the window, at all | **0** |
 | node-lane reds in the window | **1**, and it is not a test failure (below) |

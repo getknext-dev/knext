@@ -38,7 +38,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveTestRunner } from './lib/ci-blocking-gate-proof.mjs';
-import { restore, snapshot, mutate } from './lib/mutation-harness.mjs';
+import { mutate, restore, snapshot } from './lib/mutation-harness.mjs';
 import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -109,7 +109,7 @@ function unstageAndDelete(relPath, rootDir) {
   rmSync(join(REPO_ROOT, rootDir ?? relPath), { recursive: true, force: true });
 }
 
-declareMutations(6);
+declareMutations(8);
 
 console.log('── baseline: the unmutated guard is green');
 assertTreeClean('baseline');
@@ -209,6 +209,38 @@ recordMutation();
 restore(giSnap);
 assertTreeClean('after M6');
 
+// M7 and M8 pin the two evasion axes that round-2 review found in the first
+// version of this guard, which skipped any file over 4 MB and any file
+// containing a NUL byte. Both scanned GREEN with the marker present. The guard
+// now scans BYTES in bounded chunks, so both are covered — and these two
+// mutations are what stop that silently regressing into a skip again.
+console.log('── planting M7: the marker inside an OVERSIZED file (the old 4 MB cap)');
+const m7 = 'docs/compat/.oversized-cache-probe.txt';
+addForced(
+  m7,
+  `${'x'.repeat(4.9 * 1024 * 1024)}\nconst ${MARKER}_9__ = await ${MARKER}("/late/in/a/big/file.js");\n`,
+);
+check('M7', 'size is not an exemption — a 4.9 MB file is still scanned', 1, runSpec(GUARD));
+recordMutation();
+unstageAndDelete(m7);
+assertTreeClean('after M7');
+
+console.log('── planting M8: the marker in a file carrying a NUL byte (the old binary skip)');
+const m8 = 'docs/compat/.nul-padded-cache-probe.txt';
+addForced(
+  m8,
+  `${String.fromCharCode(0)}binary-looking padding\nconst ${MARKER}_4__ = await ${MARKER}("/mod.js");\n`,
+);
+check(
+  'M8',
+  '"binary" is not an exemption — a NUL byte no longer hides the marker',
+  1,
+  runSpec(GUARD),
+);
+recordMutation();
+unstageAndDelete(m8);
+assertTreeClean('after M8');
+
 console.log('\n── residue and final state');
 if (existsSync(join(REPO_ROOT, NANOID_DIR))) {
   throw new Error('cache-directory residue survived the proof');
@@ -231,4 +263,4 @@ if (failures.length) {
   for (const f of failures) console.error(`  - ${f}`);
   process.exit(1);
 }
-console.log('\n6 mutation(s) behaved as required (5 red, 1 negative control green), 0 survived.');
+console.log('\n8 mutation(s) behaved as required (7 red, 1 negative control green), 0 survived.');

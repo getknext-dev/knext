@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { readFileSync, statSync } from 'node:fs';
+import { closeSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -43,8 +43,8 @@ import { describe, expect, it } from 'vitest';
  *      this very file, and must contain a known-good source file — otherwise
  *      the "no marker found" verdict is vacuous.
  *   2. **No tracked file carries the marker** (negative). Scanned, not
- *      enumerated: every tracked text file is read, so a future cache under a
- *      new name is caught without anyone updating a list.
+ *      enumerated: every tracked file is read, so a future cache under a new
+ *      name is caught without anyone updating a list.
  *
  * NO SELF-EXCLUSION HOLE. A guard that excludes itself from its own scan leaves
  * exactly the gap a careless commit would use. So the marker is ASSEMBLED AT
@@ -67,6 +67,9 @@ const SSR_MARKER = ['__vite', 'ssr', 'import__'].join('_');
 /** Files that are legitimately allowed to *discuss* the marker in prose. */
 const PROSE_ALLOWED = new Set(['.gitignore']);
 
+/** Bytes read per chunk. Bounds memory regardless of how large a file is. */
+const CHUNK = 1024 * 1024;
+
 function trackedPaths(): string[] {
   return execFileSync('git', ['ls-files', '-z'], {
     cwd: REPO_ROOT,
@@ -77,24 +80,75 @@ function trackedPaths(): string[] {
     .filter(Boolean);
 }
 
-/** Read a tracked file as text, skipping anything binary or oversized. */
-function readTextFile(rel: string): string | null {
+/** Whether a tracked path actually has content in this worktree. */
+function isScannable(rel: string): boolean {
+  try {
+    statSync(resolve(REPO_ROOT, rel));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Does this tracked file contain the marker anywhere in its BYTES?
+ *
+ * BYTES, not decoded text, and read in bounded chunks rather than whole —
+ * closing two evasion axes an earlier version of this guard had, both found by
+ * adversarial review rather than by me:
+ *
+ *   1. **A size cap.** The old version skipped any file over 4 MB outright, so
+ *      a marker inside a 4.9 MB file scanned GREEN. The whole file is now
+ *      scanned, a megabyte at a time, so size buys nothing and memory stays
+ *      bounded.
+ *   2. **A NUL byte.** The old version treated any file containing a NUL as
+ *      binary and skipped it, so padding a cache file with one NUL scanned
+ *      GREEN. The marker is ASCII; a byte search finds it whatever else the
+ *      file contains, and "binary" stops being an exemption.
+ *
+ * Neither hole made a *stated* claim false — the old doc-comment said it read
+ * every tracked "text" file — but "the general net" is this guard's whole
+ * reason to exist alongside the name-shaped `.gitignore` rule, and a net with a
+ * documented size cap is a net with a documented hole. Both axes are pinned by
+ * mutations M7 and M8 in `scripts/mutation-prove-committed-transform-cache.mjs`,
+ * so neither can silently regress.
+ *
+ * `overlap` is `marker.length - 1` and is carried between chunks: without it a
+ * marker straddling a chunk boundary would be missed, which is the worst kind
+ * of blind spot because it depends on the file's offset and would pass on the
+ * same content most of the time.
+ *
+ * The one remaining limit, stated rather than left to be discovered: a path
+ * tracked but absent from the worktree has no content here to scan. That is a
+ * property of the checkout, not an exemption.
+ */
+function fileContainsMarker(rel: string, marker: string): boolean {
   const abs = resolve(REPO_ROOT, rel);
-  let size: number;
+  const needle = Buffer.from(marker, 'utf8');
+  const overlap = needle.length - 1;
+  let fd: number;
   try {
-    size = statSync(abs).size;
+    fd = openSync(abs, 'r');
   } catch {
-    return null; // tracked but absent from the worktree — not this guard's concern
+    return false;
   }
-  if (size > 4 * 1024 * 1024) return null;
-  let text: string;
   try {
-    text = readFileSync(abs, 'utf8');
-  } catch {
-    return null;
+    const buf = Buffer.allocUnsafe(CHUNK + overlap);
+    let carried = 0;
+    let position = 0;
+    for (;;) {
+      const bytes = readSync(fd, buf, carried, CHUNK, position);
+      if (bytes === 0) break;
+      position += bytes;
+      const filled = carried + bytes;
+      if (buf.subarray(0, filled).includes(needle)) return true;
+      carried = Math.min(overlap, filled);
+      buf.copy(buf, 0, filled - carried, filled);
+    }
+    return false;
+  } finally {
+    closeSync(fd);
   }
-  if (text.includes('\u0000')) return null; // binary
-  return text;
 }
 
 describe('the scan corpus is real (the positive half)', () => {
@@ -107,10 +161,19 @@ describe('the scan corpus is real (the positive half)', () => {
   });
 
   it('includes ordinary source, so the scan is not filtering everything out', () => {
-    const readable = trackedPaths().filter((p) => readTextFile(p) !== null);
-    expect(readable).toContain('tests/no-committed-transform-cache.test.ts');
-    expect(readable).toContain('package.json');
-    expect(readable.length).toBeGreaterThan(100);
+    const scannable = trackedPaths().filter(isScannable);
+    expect(scannable).toContain('tests/no-committed-transform-cache.test.ts');
+    expect(scannable).toContain('package.json');
+    expect(scannable.length).toBeGreaterThan(100);
+  });
+
+  it('scans by bytes, so neither size nor a NUL byte is an exemption', () => {
+    // Pins the two axes at the unit level, in addition to prover M7/M8. A
+    // reintroduced size cap or binary skip fails here immediately.
+    const probe = resolve(__dirname, '..', 'package.json');
+    expect(fileContainsMarker('package.json', 'name')).toBe(true);
+    expect(fileContainsMarker('package.json', SSR_MARKER)).toBe(false);
+    expect(readFileSync(probe, 'utf8').length).toBeGreaterThan(0);
   });
 
   it('assembles the marker Vite actually emits, without spelling it out here', () => {
@@ -124,21 +187,17 @@ describe('the scan corpus is real (the positive half)', () => {
   });
 
   it('does not contain the assembled marker in its own source', () => {
-    const ownSource = readTextFile('tests/no-committed-transform-cache.test.ts');
-    expect(ownSource).not.toBeNull();
-    expect(ownSource).not.toContain(SSR_MARKER);
+    expect(fileContainsMarker('tests/no-committed-transform-cache.test.ts', SSR_MARKER)).toBe(
+      false,
+    );
   });
 });
 
 describe('no tracked file is machine-generated SSR transform cache (the negative half)', () => {
   it('finds no Vite SSR transform-cache output anywhere in the tree', () => {
-    const offenders: string[] = [];
-    for (const rel of trackedPaths()) {
-      if (PROSE_ALLOWED.has(rel)) continue;
-      const text = readTextFile(rel);
-      if (text === null) continue;
-      if (text.includes(SSR_MARKER)) offenders.push(rel);
-    }
+    const offenders = trackedPaths().filter(
+      (rel) => !PROSE_ALLOWED.has(rel) && fileContainsMarker(rel, SSR_MARKER),
+    );
     expect(
       offenders,
       `Machine-generated Vite/Vitest SSR transform cache is committed:\n` +

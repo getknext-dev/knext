@@ -37,9 +37,16 @@ Node — the artifact is ready; the publish is not done.
 `compat-run-ledger` artifact of *every* scheduled run (2026-07-28 → 08-24) and independently
 re-derived by an adversarial reviewer from the raw artifacts:
 
-- **#545's "shard-level flaky" claim is FALSE for the credential lane.** 28 fingerprinted node
-  nights, 26 of 27 at `778/0/0`, `runAttempt: 1` throughout — **zero re-runs, zero nights lost to
+- **#545's "shard-level flaky" claim is FALSE for the credential lane.** In the window declared
+  above (2026-07-28 → 08-24): **28** in-window node nights, **`failed: 0` on all 28**, at the full
+  `778/0/0` on **27 of 28** — the 28th (`30790778590`, 08-03) lost shard 16/16 to a runner
+  disconnect and recorded 15 shards / 730 passed / 0 failed, which is infrastructure loss, not a
+  test failure. Of those 28 nights **27 are fingerprinted**: the 2026-07-28 ledger carries no
+  `windowFingerprint` key at all. `runAttempt: 1` throughout — **zero re-runs, zero nights lost to
   a test failure**. The gate is not flaky.
+  *(`docs/compat-matrix.md` states the same record in the **07-29**-opened frame, where it reads
+  "26 of the 27 nights". Both framings are correct; they differ only in whether the unfingerprinted
+  07-28 night opens the window. This file uses the 07-28 frame it declares above.)*
 - **#710's bun-lane red is TRUE and honest.** Deterministic Bun ≤1.3.14 gaps reproducing 4/4 runs,
   already marked ❌ in the matrix. Explicitly **not** quarantined — on ADR-0007 §(c)'s *scope*, not
   its evidence bar: §(c) is the **flake**-quarantine ledger (§c.1 per-case only, file-level
@@ -95,7 +102,12 @@ gate is red would fail this project's central honesty rule.
        **Discharged 2026-08-25** — findings, run IDs and test names in
        [`compat-honesty-gate.md`](compat-honesty-gate.md). Neither issue blocks the release claim:
        the node credential lane took **zero** re-runs across all 32 scheduled runs in the window
-       (asserted twice — the ledger's `runAttempt` *and* the API's `run_attempt`), and the bun
+       (from the GitHub API's `run_attempt`, which is authoritative — `1` on all 32, and on all 72
+       scheduled runs of this workflow, with none above 1. The ledger's own `runAttempt` agrees,
+       but is **not** independent corroboration: the workflow sets it from `github.run_attempt`
+       and the ledger script writes it through unchanged, so it is the same counter by a second
+       transport, and strictly weaker — an attempt-1 artifact reports `1` whatever happens
+       afterwards), and the bun
        weekly is deterministically red on three documented upstream-Bun files while its matrix row
        is already ❌. One real defect was found and fixed on the way: `ci.yml` and `compat-smoke.mjs`
        both deflected readers to a scheduled workflow named `compat-suite-full`, which does not
