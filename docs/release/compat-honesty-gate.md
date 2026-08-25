@@ -222,9 +222,12 @@ successor to #545 and the thing actually standing between this project and the v
 
 **SCANNED** — the `compat-suite-*` identifier check and the deflection check (**75** tracked
 CI/script files — 20 workflows + 55 scripts — plus `docs/compat-matrix.md`, so **76** in the shape
-scan; re-derived from the guard's own `shapeScanFiles()`, and note this is *below* the 86 an
-earlier draft carried, because this round excluded the 11 tracked `scripts/mutation-prove-*.mjs`
-provers: 75 + 11 = 86, the pre-exclusion count); the run history (all **136** runs of workflow
+scan; re-derived by running the guard's own `shapeScanFiles()`, and note this is *below* the 86 an
+earlier draft carried. 86 was the **pre-exclusion** count, taken before this round excluded the
+`scripts/mutation-prove-*.mjs` provers: there were 11 provers at that point and 75 + 11 = 86. The
+corpus now holds 12, this round having added one, and the shape-scan figure is unchanged at 75/76
+*because* provers are excluded — which is the exclusion doing its job, and the reason this count is
+stated as a formula rather than a number to be copied forward); the run history (all **136** runs of workflow
 `300291864` as at 2026-08-25, then all **72** scheduled ones — 135/71 when the measurement was
 first taken, one nightly having landed since); `run_attempt` across every scheduled run; per-shard totals
 across every retained ledger.
