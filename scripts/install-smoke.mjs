@@ -609,7 +609,13 @@ try {
   // the same break M16 catches sail straight through. So count what should parse against
   // what did, and refuse rather than exempt. `workflow.md`: make the unparseable construct
   // FAIL rather than pass.
-  const copyFromLines = [...scaffoldDockerfile.matchAll(/^COPY --from=/gm)].length;
+  // Counted the way DOCKER reads it, not the way this reader's happy path does. The
+  // previous counter demanded column zero, uppercase and a single space, so an indent, a
+  // lowercase keyword or a tab evaded BOTH counters at once — the totals then agreed and
+  // the line was silently exempt again, restoring the exact disarm the refusal was written
+  // to close. All three forms are valid Dockerfile syntax; review confirmed it against
+  // BuildKit's own linter rather than asserting it.
+  const copyFromLines = [...scaffoldDockerfile.matchAll(/^[ \t]*copy[ \t]+--from=/gim)].length;
   const parsedCopyLines = [
     ...scaffoldDockerfile.matchAll(/^(COPY --from=builder\s+(\S+)\s+(\S+))\s*$/gm),
   ].length;
@@ -621,9 +627,13 @@ try {
         'arguments) — an unreadable line would be silently exempt, so this refuses instead',
     );
   }
-  for (const [, line, src, dest] of scaffoldDockerfile.matchAll(
+  for (const [, line, rawSrc, rawDest] of scaffoldDockerfile.matchAll(
     /^(COPY --from=builder\s+(\S+)\s+(\S+))\s*$/gm,
   )) {
+    // Trailing slashes are cosmetic in a COPY path and legitimately vary, so normalise
+    // before comparing rather than letting `/` decide a pass.
+    const src = rawSrc.replace(/\/+$/, '');
+    const dest = rawDest.replace(/\/+$/, '');
     const sourceIsPrefixed = src.includes(`/${standalonePrefix}`);
     // Keyed on the copy BEING the standalone output, not on where it happens to land.
     // The previous draft exempted any prefixed source whose destination was `./`, which is
@@ -631,12 +641,20 @@ try {
     // token away: point the `static` COPY at `./` and it unpacks into the image root, the
     // container boots, and every `/_next/static/*` request 404s.
     const isStandaloneCopy = src.endsWith(`/${standalonePrefix}.next/standalone`);
-    if (sourceIsPrefixed && !isStandaloneCopy && !dest.includes(standalonePrefix)) {
+    // DERIVE the destination from the source rather than asking whether the prefix appears
+    // anywhere in it. `includes` is a substring test, and a destination can carry the prefix
+    // while still putting the file in the wrong place — copying `.next/static` to the prefix
+    // DIRECTORY passes a substring test and lands the assets a level up from where the
+    // server looks for them. A prefixed source must land at the same path under the image
+    // root, and that is a comparison, not a search.
+    const expectedDest = `./${src.replace(/^\/repo\//, '')}`.replace(/\/+$/, '');
+    if (sourceIsPrefixed && !isStandaloneCopy && dest !== expectedDest) {
       finish(
         FAIL,
-        `the generated Dockerfile copies from a prefixed source to an unprefixed ` +
-          `destination: \`${line.trim()}\` — inside the image that file lands beside the ` +
-          'server instead of under it, which builds and boots cleanly and then 404s at runtime',
+        `the generated Dockerfile copies a prefixed source to the wrong destination: ` +
+          `\`${line.trim()}\` should land at \`${expectedDest}\` — inside the image that ` +
+          'file lands somewhere the server does not look, which builds and boots cleanly ' +
+          'and then 404s at runtime',
       );
     }
   }

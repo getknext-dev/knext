@@ -329,6 +329,41 @@ const MUTATIONS = [
     restore: () => git('checkout', '--', '.'),
   },
   {
+    id: 'M20',
+    expect: 'red',
+    guard:
+      'two leading spaces restore the disarm — an indented COPY evaded BOTH counters at once, ' +
+      'so the totals agreed and the line was silently exempt',
+    // Review's A1. `^COPY --from=` demanded column zero, uppercase and a single space; an
+    // indent, a lowercase keyword and a tab are all valid Dockerfile syntax (confirmed
+    // against BuildKit's linter) and all three slipped past the refusal.
+    apply: (checkOnly) =>
+      mutate(
+        DOCKERFILE_TPL,
+        'COPY --from=builder /repo/{{ standalonePrefix }}.next/static ./{{ standalonePrefix }}.next/static',
+        '  COPY --from=builder /repo/{{ standalonePrefix }}.next/static ./.next/static',
+        checkOnly,
+      ),
+    restore: () => git('checkout', '--', '.'),
+  },
+  {
+    id: 'M21',
+    expect: 'red',
+    guard:
+      'the destination CARRIES the prefix and still puts the file in the wrong place — the ' +
+      'substring test passed it, the derived comparison does not',
+    // Review's C1: copying `.next/static` to the prefix DIRECTORY satisfies
+    // `dest.includes(prefix)` while landing the assets a level above where the server looks.
+    apply: (checkOnly) =>
+      mutate(
+        DOCKERFILE_TPL,
+        '/repo/{{ standalonePrefix }}.next/static ./{{ standalonePrefix }}.next/static',
+        '/repo/{{ standalonePrefix }}.next/static ./{{ standalonePrefix }}',
+        checkOnly,
+      ),
+    restore: () => git('checkout', '--', '.'),
+  },
+  {
     id: 'M7',
     expect: 'red',
     graded: 'shape',
