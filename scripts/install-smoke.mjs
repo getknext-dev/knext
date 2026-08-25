@@ -570,6 +570,12 @@ try {
     join(workDir, 'node_modules', '@getknext', 'core', 'templates', 'app', 'Dockerfile.hbs'),
     'utf8',
   );
+  // What this count actually guards, stated narrowly because the first version of it did
+  // not: it compares the SHIPPED TEMPLATE against what `create` RENDERED from it, so it
+  // catches the renderer dropping an interpolation. It cannot catch a change to the
+  // template itself — mutate the template and both sides move together, which is exactly
+  // how M16 survived its first attempt. The template's own consistency is checked
+  // structurally below instead.
   const declaredPrefixUses = (tplDockerfile.match(/\{\{\s*standalonePrefix\s*\}\}/g) ?? []).length;
   const emittedPrefixUses = scaffoldDockerfile.split(standalonePrefix).length - 1;
   if (declaredPrefixUses === 0) {
@@ -586,6 +592,30 @@ try {
         `interpolates it ${declaredPrefixUses}x — a COPY, WORKDIR or CMD dropped it, so the ` +
         'image would either fail to build or serve every static asset from the wrong path',
     );
+  }
+  // Structural rule over the emitted COPYs, derived from each line rather than from a list
+  // of paths someone maintains. A `COPY --from=builder` whose SOURCE is under the app's
+  // prefixed build output must land at a DESTINATION that carries the prefix too —
+  // otherwise the file is copied to the wrong place inside the image. The one documented
+  // exception is the standalone copy itself, which lands at the image root by design.
+  //
+  // This is the check that catches the silent break: the image builds, the container
+  // boots, and every `/_next/static/*` request 404s because the assets landed beside the
+  // server instead of under it. A template that removes a whole COPY line stays green,
+  // because there is then no line to disagree with itself.
+  for (const [, line, src, dest] of scaffoldDockerfile.matchAll(
+    /^(COPY --from=builder\s+(\S+)\s+(\S+))\s*$/gm,
+  )) {
+    const sourceIsPrefixed = src.includes(`/${standalonePrefix}`);
+    const destIsImageRoot = dest === './' || dest === '.';
+    if (sourceIsPrefixed && !destIsImageRoot && !dest.includes(standalonePrefix)) {
+      finish(
+        FAIL,
+        `the generated Dockerfile copies from a prefixed source to an unprefixed ` +
+          `destination: \`${line.trim()}\` — inside the image that file lands beside the ` +
+          'server instead of under it, which builds and boots cleanly and then 404s at runtime',
+      );
+    }
   }
   const scaffoldServer = join(scaffoldDir, '.next', 'standalone', `${standalonePrefix}server.js`);
   if (!existsSync(scaffoldServer)) {
