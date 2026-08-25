@@ -222,7 +222,7 @@ function jobIfDisarm(id, value) {
   const at = SOURCE.indexOf(key);
   if (at === -1) throw new Error(`job key for \`${id}\` not found in the workflow source`);
   const lines = SOURCE.slice(at).split('\n');
-  const ifAt = lines.findIndex((line, i) => i > 0 && /^    if: /.test(line));
+  const ifAt = lines.findIndex((line, i) => i > 0 && /^ {4}if: /.test(line));
   if (ifAt === -1) throw new Error(`job \`${id}\` parses with an \`if:\` but none is on one line`);
   const head = `${lines.slice(0, ifAt + 1).join('\n')}\n`;
   return {

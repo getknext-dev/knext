@@ -33,6 +33,7 @@ const NEXT_CONFIG_TPL = join(TEMPLATE_DIR, 'next.config.ts.hbs');
 const APP_PKG_TPL = join(TEMPLATE_DIR, 'package.json.hbs');
 const DOCKERFILE_TPL = join(TEMPLATE_DIR, 'Dockerfile.hbs');
 const ADAPTER_SRC = join(WT, 'packages', 'kn-next', 'src', 'adapters', 'next-adapter.ts');
+const CREATE_SRC = join(WT, 'packages', 'kn-next', 'src', 'cli', 'create.ts');
 const STASH = join(tmpdir(), 'knext-alias-shim-stash.js');
 /**
  * The paths this prover touches. The clean assertion is scoped to them, not
@@ -50,6 +51,7 @@ const MUTATED_PATHS = [
   'packages/lib/package.json',
   'packages/kn-next/templates/app',
   'packages/kn-next/src/adapters/next-adapter.ts',
+  'packages/kn-next/src/cli/create.ts',
 ];
 
 const git = (...a) => execFileSync('git', a, { cwd: WT, encoding: 'utf8' });
@@ -226,6 +228,35 @@ const MUTATIONS = [
         'WORKDIR /elsewhere',
         checkOnly,
       ),
+    restore: () => git('checkout', '--', '.'),
+  },
+  {
+    id: 'M13',
+    expect: 'red',
+    guard:
+      'create emits a prefix that is not slash-terminated — every consumer CONCATENATES it, ' +
+      'so the Dockerfile COPYs, the CMD and the start script all point at nothing',
+    // Review's RM1: this exact mutation PASSED before, printing
+    // `.next/standalone/scaffolded-appserver.js` — a file that never existed — as its
+    // evidence, because `path.join` normalised the missing separator back in.
+    apply: (checkOnly) =>
+      mutate(
+        CREATE_SRC,
+        '!rel || rel.startsWith("..") ? "" : `${rel.split(sep).join("/")}/`;',
+        '!rel || rel.startsWith("..") ? "" : `${rel.split(sep).join("/")}`;',
+        checkOnly,
+      ),
+    restore: () => git('checkout', '--', '.'),
+  },
+  {
+    id: 'M14',
+    expect: 'red',
+    guard: 'the template stops declaring @getknext/core, which its own generated files import',
+    // Review's RM3: this PASSED before, because the gate force-added every packed package
+    // into `dependencies` and so put back exactly what the mutation removed — the gate was
+    // testing a manifest it had rewritten rather than the one `create` emitted.
+    apply: (checkOnly) =>
+      mutate(APP_PKG_TPL, '    "@getknext/core": "^{{ version }}",\n', '', checkOnly),
     restore: () => git('checkout', '--', '.'),
   },
   {

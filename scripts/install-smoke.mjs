@@ -400,12 +400,15 @@ try {
     );
   }
   // `@getknext/core` depends on `@getknext/db` and `@getknext/lib`, and pnpm rewrote those
-  // specs to versions that are not published yet, so every packed library has to be present
-  // even when the template names only some of them.
-  for (const { name, tgz } of packed) {
-    if (name === 'kn-next') continue;
-    scaffoldPkg.dependencies[name] = `file:${tgz}`;
-  }
+  // specs to versions that are not published yet, so the packed libraries have to be
+  // reachable. Review caught the first attempt doing that by force-adding every packed
+  // package to `dependencies`, which made the gate insensitive to the template DROPPING a
+  // dependency: with `@getknext/core` removed from the template the gate still passed,
+  // because the gate itself had put it back. `overrides` resolves the transitives without
+  // touching the declared set, so what is under test is the manifest `create` emitted.
+  scaffoldPkg.overrides = Object.fromEntries(
+    packed.filter((p) => p.name !== 'kn-next').map((p) => [p.name, `file:${p.tgz}`]),
+  );
   writeFileSync(scaffoldPkgPath, `${JSON.stringify(scaffoldPkg, null, 2)}\n`);
 
   const scaffoldInstall = run('npm', ['install', '--no-audit', '--no-fund'], {
@@ -440,9 +443,15 @@ try {
   // root it infers, so an app scaffolded inside another project emits
   // `.next/standalone/<subdir>/server.js`. `create` already knows this — it resolves a
   // `standalonePrefix` and bakes it into the generated Dockerfile's `WORKDIR /repo/<prefix>`.
-  // So the assertion reads the prefix back out of the artifact the user actually builds
-  // with, which makes this check strictly stronger than a fixed path: a `create` that
-  // computes the WRONG prefix now fails here, and nothing else covers that.
+  // So the assertion reads the prefix back out of the artifact the user actually builds with.
+  //
+  // What that is worth, stated accurately — the first version of this comment claimed a
+  // `create` computing the wrong prefix "fails here, and nothing else covers that", and
+  // review showed BOTH halves were false: `path.join` silently repaired a prefix missing
+  // its trailing slash, and `create-scaffold.test.ts` already covers the prefix itself at
+  // PR time. The honest claim is narrower and still worth having: an INCONSISTENCY between
+  // the prefix `create` bakes into the Dockerfile and where `next build` actually puts the
+  // server fails here, and that pairing is not checked anywhere else.
   const scaffoldDockerfile = readFileSync(join(scaffoldDir, 'Dockerfile'), 'utf8');
   const workdir = scaffoldDockerfile.match(/^WORKDIR \/repo\/(.*)$/m);
   if (workdir === null) {
@@ -453,7 +462,20 @@ try {
     );
   }
   const standalonePrefix = workdir[1];
-  const scaffoldServer = join(scaffoldDir, '.next', 'standalone', standalonePrefix, 'server.js');
+  // The prefix is contractually slash-terminated, or '' when the app IS the tracing root,
+  // and every consumer CONCATENATES it — the Dockerfile's COPYs, its CMD's
+  // STANDALONE_SERVER_PATH, and the app's `start` script. Assert that directly rather than
+  // letting a path lookup decide it: `path.join` normalises a missing separator back in, so
+  // a prefix that breaks all three of those would still resolve here.
+  if (standalonePrefix !== '' && !standalonePrefix.endsWith('/')) {
+    finish(
+      FAIL,
+      `create emitted a non-slash-terminated standalonePrefix '${standalonePrefix}' — the ` +
+        "Dockerfile's COPYs, its CMD and the app's `start` script all concatenate it, so " +
+        'every one of them would point at a path that does not exist',
+    );
+  }
+  const scaffoldServer = join(scaffoldDir, '.next', 'standalone', `${standalonePrefix}server.js`);
   if (!existsSync(scaffoldServer)) {
     finish(
       FAIL,
