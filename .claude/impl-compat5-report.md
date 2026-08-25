@@ -91,8 +91,14 @@ the 10 restarts moved the packed `@getknext/*` tarball bytes only**. Closing #54
 would have lost the only live problem on the ticket.
 
 Deliberately **not** conflated with the prior round: that round cleared the *nightly* gate claim;
-this round re-derived it independently rather than agreeing with it, and additionally establishes
-the zero-re-run figure from a second, independent source.
+this round re-derived it independently rather than agreeing with it.
+
+> **Corrected in fix round 2.** This paragraph used to end *"and additionally establishes the
+> zero-re-run figure from a second, independent source"* — the same retracted B3 claim, surviving in
+> a third place after round 1 struck it from the doc and round 2 struck it from the release record.
+> There is no second source: the ledger's `runAttempt` is `github.run_attempt` written through. It is
+> recorded here rather than silently deleted because three copies of one wrong sentence is the
+> clearest evidence available that the defect class is real.
 
 ---
 
@@ -339,3 +345,161 @@ come back empty (`git grep` exit 1).
 `block-dangerous-bash.sh`. Per `.claude/rules/workflow.md`, a blocked command means **nothing in it
 ran** — including the `mkdir` and `git init` before the offending clause — so the command was
 re-established from a fresh directory rather than having its tail re-run against assumed state.
+
+---
+
+# Fix round 2 — adversarial review @ `3bda41b` (`ISSUES_FOUND`, two blocking)
+
+Round 2's headline: the fix round was substantially real — every corrected figure re-derived
+exactly, and the new guard survived every attack including two I never ran (`H1`/`H2`, each half
+alone with the other deleted) — **but the fix was applied to one document and not the other.**
+
+That is the finding worth generalising. The defect is not "two wrong sentences"; it is a
+**correction landing on one of two copies**. So this round fixed the two reported instances and then
+went looking for the rest of the class, mechanically rather than by eye.
+
+Everything restated below was re-derived from the raw `compat-run-ledger` artifacts again. The
+figures agreed with round 1 — which is exactly when copying them forward would have been
+undetectable, and is the reason they were recomputed.
+
+## R1 — the B3 retraction never reached the release record
+
+`public-release-readiness.md` still published *"asserted twice — the ledger's `runAttempt` **and**
+the API's `run_attempt`"* verbatim: the same two-independent-sources claim round 1 struck from
+`compat-honesty-gate.md`. The review is right that this is the **more serious** of the two
+placements — that file is the release record, the document a reader consults to decide whether the
+claim is safe to publish, and the parenthetical was doing corroboration work the mechanism does not
+support.
+
+It now carries the same retraction: the API's `run_attempt` is authoritative (`1` on all 32
+in-window runs and on all 72 scheduled runs, none above 1); the ledger's `runAttempt` agrees but is
+**not** independent — the workflow sets it from `github.run_attempt` and the ledger script writes it
+through unchanged — and is strictly weaker, since an attempt-1 artifact reports `1` whatever happens
+afterwards.
+
+## R2 — "28 fingerprinted node nights" was wrong three ways
+
+Re-derived: **28** in-window node nights yield **27** fingerprinted, because the 2026-07-28 ledger
+(`30333571518`) has no `windowFingerprint` key at all. The same file already said 27 ten lines
+later, as do `compat-honesty-gate.md` and `docs/wayfinder/w6-compat-flakiness.md`.
+
+The third problem is subtler and is the one worth recording: the sentence **declared one window and
+reported another's numbers.** `26 of 27` is the **07-29**-opened frame; the file declares the
+**07-28** frame two lines above. Both framings are correct — they differ only over whether the
+unfingerprinted 07-28 night opens the window — so the fix states the 07-28 frame's numbers
+(`failed: 0` on all 28, full `778/0/0` on 27 of 28) **and names the other framing explicitly**, so a
+reader comparing the two documents reconciles them instead of finding a contradiction.
+
+## The rest of the class — swept mechanically, two more found
+
+A per-figure cross-document extractor
+(`scratchpad/cross-doc-figures.mjs`) pulled every published instance of each load-bearing figure
+across `public-release-readiness.md`, `compat-honesty-gate.md`, `compat-matrix.md`,
+`w6-compat-flakiness.md` and `window-node-lane.md`, grouped by value, and flagged any figure whose
+value differs across files. Most hits are the probe conflating genuinely different subjects (778
+node vs 775/774 bun vs 788 pre-§d; 16 shards vs 08-03's 15). Two were real, and **neither was
+reported**:
+
+- **`compat-honesty-gate.md:157`** still said all 28 nights recorded `failed: 0` *"in all 16
+  shards"*. 08-03 recorded **15**. This is the same shape as B2, **in the document B2 fixed**, in a
+  table row the B2 edit happened not to touch — the class reproducing itself inside the fix.
+- **The 08-03 run's shape disagreed across four documents.** `compat-matrix.md:49` said the night
+  *"executed **zero** tests"* and `window-node-lane.md:54` said *"the 27th never executed a test"*.
+  The ledger says the run executed **730** tests across the 15 shards it banked, all green. It is
+  the **shard** that executed zero, not the run. Both corrected.
+  `w6-compat-flakiness.md` was already precise — it scopes the phrase to the failed *job* and states
+  the other 15 shards' 730 — and is deliberately **left alone**. Correcting prose that is already
+  right is how a sweep introduces the defect it is hunting.
+
+The two-source wording now appears in exactly two tracked places: the retraction itself, and this
+report describing it. Verified by `git grep`, not by memory.
+
+## N-a — the guard's two evasion axes, closed rather than documented
+
+Review found, by running: a marker inside a **4.9 MB** file scanned GREEN (the guard skipped
+anything over 4 MB), and a marker in a file carrying a **NUL byte** scanned GREEN (treated as
+binary and skipped). No *stated* claim was false — the doc-comment said "text" file — and the
+review's recommendation was one clause recording the axes as known.
+
+**Closed instead.** "The general net" is this guard's whole reason to exist beside the name-shaped
+`.gitignore` rule, and a net with a documented size cap is a net with a documented hole. The guard
+now scans **bytes** in bounded 1 MB chunks, carrying a `marker.length - 1` overlap between chunks:
+size buys nothing, "binary" stops being an exemption, and a marker straddling a chunk boundary
+cannot slip through — that last one being a blind spot I would have introduced by fixing the first
+two carelessly, since it depends on file offset and would pass on the same content most of the time.
+
+**I did not take "hole closed" on trust.** A differential ran the OLD and NEW predicates against
+identical planted files:
+
+| planted file | OLD | NEW | verdict |
+|---|---|---|---|
+| plain text, small (**control**) | detected | detected | same |
+| 4.9 MB, marker at the end | **missed** | detected | **hole closed** |
+| carries a NUL byte | **missed** | detected | **hole closed** |
+| marker straddling the 1 MB boundary | detected | detected | same (proves the overlap carry) |
+| no marker (**negative control**) | clean | clean | same |
+
+The control matters: it must be caught by **both**, or the comparison would be measuring a broken
+new predicate rather than a fixed hole. This independently reproduces the review's N-a table.
+
+The axes are now pinned three ways so they cannot regress into a skip: prover mutations **M7**
+(oversized) and **M8** (NUL), plus a unit-level assertion in the guard's positive half.
+
+## N-b — the reviewer's discarded datapoint
+
+Round 2 disclosed that its scripted probe reported GREEN for a *space*-padded variant while a hand
+reproduction of the same variant went RED, and **discarded the datapoint** rather than publish an
+unreproducible result. That was the right call, and the differential above explains it: a
+space-padded file is under the cap and carries no NUL, so **both** predicates detect it. The
+scripted GREEN was a harness artifact, not a property of the guard. Recording the resolution because
+the reviewer recorded the doubt.
+
+## Mutation proof — now 8, still with the negative control
+
+`scripts/mutation-prove-committed-transform-cache.mjs`, declared 8 / ran 8, exit 0.
+
+| mutation | expected | got |
+|---|---|---|
+| M1 the exact `8a805bb` defect reinstated | RED | RED |
+| M2 same content, unrelated path and depth | RED | RED |
+| M3 nanoid-shaped dir carrying no marker | RED | RED |
+| M4 corpus emptied | RED | RED |
+| M5 marker verbatim in the guard's own source | RED | RED |
+| **M6 negative control** — `.gitignore` rule deleted | **GREEN** | **GREEN** |
+| **M7 (new)** marker inside a 4.9 MB file | RED | RED |
+| **M8 (new)** marker in a file carrying a NUL byte | RED | RED |
+
+STEP 0 still proves the harness sees red first via a failing canary before anything is planted.
+Every verdict branches on the exit code; no output parsed. Anchors asserted exactly once; no
+`perl`; restores byte-identical; tree asserted clean between every mutation; closing residue grep
+empty.
+
+## Verification
+
+- `tests/` — **81 files / 1841 tests, exit 0**.
+- `tests/no-committed-transform-cache.test.ts` — 8 tests, exit 0.
+- `scripts/mutation-prove-committed-transform-cache.mjs` — 8/8, `{"declared":8,"run":8}`, exit 0.
+- `tests/compat-matrix.test.ts` + `tests/compat-lane-ledger.test.ts` — 54 tests, exit 0 (the matrix
+  guard still passes after the `compat-matrix.md` prose correction).
+- Old-vs-new predicate differential — 2 holes closed, 0 unexpected, exit 0.
+- `biome check` on both changed files — exit 0.
+
+## Discipline log (round 2)
+
+- Every figure **re-derived from the raw ledgers**, including the ones round 1 had already computed
+  and that turned out to be right.
+- The class was swept **mechanically**, by extracting and grouping published figures across five
+  documents, because eyeballing is what let R1 and R2 through in the first place.
+- A document that was already correct (`w6-compat-flakiness.md`) was **left alone** deliberately.
+- "Hole closed" was **proved by differential**, not asserted, with a control on both sides.
+- Exit codes for every verdict; no output greps.
+- No push to `main`, no force-push, no history rewrite.
+
+## Still open, and deliberately not fixed here
+
+- **The `blocking-gate-helper.test.ts` 5 s marginal timeout** (recorded above) remains. It belongs
+  to that guard's owner.
+- **Round 2's wider suite run** (`npx vitest run`, 315 files) shows 4 failures outside `tests/`:
+  local gpg-signing, a network-dependent fetch, and two bun e2e specs. None is touched by this
+  branch's ten changed files. Not charged to this PR, and **not proved pre-existing against the
+  merge base** — the review rested on the untouched-file check plus named causes, and so does this.
