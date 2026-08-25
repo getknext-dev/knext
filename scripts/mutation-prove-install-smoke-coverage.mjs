@@ -286,6 +286,49 @@ const MUTATIONS = [
     restore: () => git('checkout', '--', '.'),
   },
   {
+    id: 'M17',
+    expect: 'red',
+    guard:
+      "the public COPY's DESTINATION loses the prefix — same shape as M16, and had no mutation",
+    apply: (checkOnly) =>
+      mutate(DOCKERFILE_TPL, './{{ standalonePrefix }}public', './public', checkOnly),
+    restore: () => git('checkout', '--', '.'),
+  },
+  {
+    id: 'M18',
+    expect: 'red',
+    guard:
+      'the static COPY lands at the image root instead — the same runtime break as M16, one ' +
+      'token away, and the previous exception waved it through',
+    // Review's MXA: the `./` exception was keyed on the DESTINATION, so pointing a prefixed
+    // source at `./` escaped a rule whose comment claimed to exempt only the standalone copy.
+    apply: (checkOnly) =>
+      mutate(
+        DOCKERFILE_TPL,
+        '/repo/{{ standalonePrefix }}.next/static ./{{ standalonePrefix }}.next/static',
+        '/repo/{{ standalonePrefix }}.next/static ./',
+        checkOnly,
+      ),
+    restore: () => git('checkout', '--', '.'),
+  },
+  {
+    id: 'M19',
+    expect: 'red',
+    guard:
+      "a COPY flag disarms the reader — M16's break wearing --chown, which the template is " +
+      'one hardening step away from adding since it already does USER node',
+    // Review's MXC: zero lines matched reads identically to zero violations, so an
+    // unparseable line was a silently exempt line. The gate now refuses rather than exempts.
+    apply: (checkOnly) =>
+      mutate(
+        DOCKERFILE_TPL,
+        'COPY --from=builder /repo/{{ standalonePrefix }}.next/static ./{{ standalonePrefix }}.next/static',
+        'COPY --from=builder --chown=node:node /repo/{{ standalonePrefix }}.next/static ./.next/static',
+        checkOnly,
+      ),
+    restore: () => git('checkout', '--', '.'),
+  },
+  {
     id: 'M7',
     expect: 'red',
     graded: 'shape',

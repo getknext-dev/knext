@@ -603,12 +603,35 @@ try {
   // boots, and every `/_next/static/*` request 404s because the assets landed beside the
   // server instead of under it. A template that removes a whole COPY line stays green,
   // because there is then no line to disagree with itself.
+  // An unparseable line is a SILENTLY EXEMPT line, and zero matched reads exactly like zero
+  // violations. Review measured the disarm: adding `--chown=node:node` to the `static` COPY
+  // — the ordinary next hardening step, since the template already does `USER node` — makes
+  // the same break M16 catches sail straight through. So count what should parse against
+  // what did, and refuse rather than exempt. `workflow.md`: make the unparseable construct
+  // FAIL rather than pass.
+  const copyFromLines = [...scaffoldDockerfile.matchAll(/^COPY --from=/gm)].length;
+  const parsedCopyLines = [
+    ...scaffoldDockerfile.matchAll(/^(COPY --from=builder\s+(\S+)\s+(\S+))\s*$/gm),
+  ].length;
+  if (parsedCopyLines !== copyFromLines) {
+    finish(
+      FAIL,
+      `${copyFromLines - parsedCopyLines} \`COPY --from=\` line(s) in the generated ` +
+        'Dockerfile are in a form this check cannot read (a flag, a continuation, extra ' +
+        'arguments) — an unreadable line would be silently exempt, so this refuses instead',
+    );
+  }
   for (const [, line, src, dest] of scaffoldDockerfile.matchAll(
     /^(COPY --from=builder\s+(\S+)\s+(\S+))\s*$/gm,
   )) {
     const sourceIsPrefixed = src.includes(`/${standalonePrefix}`);
-    const destIsImageRoot = dest === './' || dest === '.';
-    if (sourceIsPrefixed && !destIsImageRoot && !dest.includes(standalonePrefix)) {
+    // Keyed on the copy BEING the standalone output, not on where it happens to land.
+    // The previous draft exempted any prefixed source whose destination was `./`, which is
+    // not what the comment claimed and let the very break this rule exists for escape one
+    // token away: point the `static` COPY at `./` and it unpacks into the image root, the
+    // container boots, and every `/_next/static/*` request 404s.
+    const isStandaloneCopy = src.endsWith(`/${standalonePrefix}.next/standalone`);
+    if (sourceIsPrefixed && !isStandaloneCopy && !dest.includes(standalonePrefix)) {
       finish(
         FAIL,
         `the generated Dockerfile copies from a prefixed source to an unprefixed ` +
