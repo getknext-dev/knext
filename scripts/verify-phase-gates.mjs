@@ -260,6 +260,25 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+/**
+ * A CRASH IS NOT A REPORT, and this validator says so in its exit code.
+ *
+ * Exit 0 = the file is consistent. Exit 1 = problems were REPORTED. Exit 2 = the
+ * test seam was misused. Exit 3 = this validator threw.
+ *
+ * Without the last one an uncaught throw collapses onto 1 and becomes
+ * indistinguishable from a report, which is what forced six mutation sites to be
+ * excused as "removing this guard turns a report into a crash, and an exit-code
+ * prover cannot tell them apart". That reasoning was wrong: the validator already
+ * speaks a distinct-exit-code vocabulary, and nothing was mapping a throw into it.
+ * Three lines here mean the prover keeps branching on exit codes ONLY and those six
+ * guards become provable.
+ */
+process.on('uncaughtException', (error) => {
+  console.error(error);
+  process.exit(3);
+});
+
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const GATE_DIR = join(REPO_ROOT, 'docs/adr/gates');
 

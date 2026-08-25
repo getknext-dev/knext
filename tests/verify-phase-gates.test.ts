@@ -79,10 +79,17 @@ function runOn(gate: Gate): number {
   return runDetail(gate).code;
 }
 
-/** Assert the validator failed, and failed for the stated reason. */
+/**
+ * Assert the validator REPORTED a problem, and reported the stated one.
+ *
+ * Exit 1 exactly, never merely non-zero. The validator exits 3 on an uncaught
+ * throw, so a mutation that turns a guard into a crash no longer satisfies a test
+ * that was asserting "something went wrong" — the difference between a report and a
+ * crash is now visible to any harness that reads only exit codes.
+ */
 function expectFailure(gate: Gate, because: RegExp, args: string[] = []): void {
   const { code, stderr } = runDetail(gate, args);
-  expect(code, `expected a non-zero exit; stderr was:\n${stderr}`).not.toBe(0);
+  expect(code, `expected exit 1 (a REPORTED problem); stderr was:\n${stderr}`).toBe(1);
   expect(stderr).toMatch(because);
 }
 
@@ -1398,6 +1405,37 @@ describe('#753 — every relation the gate file can state is read by a checker',
     expect(stderr).not.toMatch(/recording the discharge/);
     expect(stderr).not.toMatch(/does not name phase 1/);
     expect(code, stderr).not.toBe(0); // phase 1 is BLOCKED, which other rules report
+  });
+
+  it('rule 9c: an irreversible DONE phase with NO open ship blocker is not reported', () => {
+    // The other half of rule 9c's condition, and it was EXCLUDED from the prover on
+    // a reason that was false on the data: "phase 5 is the only irreversible phase
+    // and its P5-1 is derived, so the state is not constructible". Phase 5 has no
+    // `blocks_ship` criteria at all — the three open blockers are P3-3/4/5 on phase
+    // 3, plain booleans a fixture closes with one assignment, and any phase can be
+    // marked irreversible. The state is two lines away.
+    const g = load();
+    for (const p of g.phases) {
+      for (const c of [...(p.preconditions ?? []), ...(p.criteria ?? [])]) {
+        if ((c as Record<string, unknown>).blocks_ship === true) c.measured = c.target;
+      }
+    }
+    phase(g, '0').reversible = false; // phase 0's status already startsWith('DONE')
+    const { code, stderr } = runDetail(g);
+    expect(code, stderr).toBe(0);
+  });
+
+  it('rule 4: an ABSENT target is a null target — JSON expresses `undefined` by omission', () => {
+    // The `c.target === undefined` half was excused as "JSON cannot express
+    // undefined". An absent KEY expresses it trivially; the exclusion only held
+    // because all 25 shipped criteria carry an explicit `target`.
+    const g = load();
+    const c = crit(g, 'P2-1');
+    c.target = undefined; // serialises as an absent key
+    c.target_note = undefined;
+    c.measured = true;
+    c.source = 'test';
+    expectFailure(g, /target is null with no `target_note`/);
   });
 
   it('rule 9c: an irreversible phase may not be DONE while a blocks_ship criterion is unmet', () => {
