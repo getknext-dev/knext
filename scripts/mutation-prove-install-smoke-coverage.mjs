@@ -32,6 +32,7 @@ const TEMPLATE_DIR = join(WT, 'packages', 'kn-next', 'templates', 'app');
 const NEXT_CONFIG_TPL = join(TEMPLATE_DIR, 'next.config.ts.hbs');
 const APP_PKG_TPL = join(TEMPLATE_DIR, 'package.json.hbs');
 const DOCKERFILE_TPL = join(TEMPLATE_DIR, 'Dockerfile.hbs');
+const ADAPTER_SRC = join(WT, 'packages', 'kn-next', 'src', 'adapters', 'next-adapter.ts');
 const STASH = join(tmpdir(), 'knext-alias-shim-stash.js');
 /**
  * The paths this prover touches. The clean assertion is scoped to them, not
@@ -48,6 +49,7 @@ const MUTATED_PATHS = [
   'packages/newpub',
   'packages/lib/package.json',
   'packages/kn-next/templates/app',
+  'packages/kn-next/src/adapters/next-adapter.ts',
 ];
 
 const git = (...a) => execFileSync('git', a, { cwd: WT, encoding: 'utf8' });
@@ -182,8 +184,25 @@ const MUTATIONS = [
   {
     id: 'M10',
     expect: 'red',
-    guard: "the template loses `output: 'standalone'` — a SILENT break, next build still exits 0",
-    apply: (checkOnly) => mutate(NEXT_CONFIG_TPL, '  output: "standalone",\n', '', checkOnly),
+    guard:
+      'the standalone guarantee is gone entirely — a SILENT break, next build still exits 0 ' +
+      'and the container has nothing to run',
+    // Round 1 of this mutation removed ONLY the template's `output: "standalone"` and
+    // SURVIVED. That was an invalid mutation, not a decorative guard: the guarantee is held
+    // in two independent places, and the adapter forces it on production builds
+    // (`next-adapter.ts`, whose own comment says "already set in next.config.ts but we
+    // ensure it"). Removing one copy leaves the guarantee intact, which is defense in depth
+    // working and exactly what the assertion SHOULD stay green for. Removing both is the
+    // break the assertion exists to catch.
+    apply: (checkOnly) => {
+      mutate(NEXT_CONFIG_TPL, '  output: "standalone",\n', '', checkOnly);
+      mutate(
+        ADAPTER_SRC,
+        '...(isProductionBuild ? { output: "standalone" as const } : {}),',
+        '',
+        checkOnly,
+      );
+    },
     restore: () => git('checkout', '--', '.'),
   },
   {
