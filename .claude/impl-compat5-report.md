@@ -748,3 +748,167 @@ That same lock is also why `tests/mutation-residue-scan.test.ts` fails locally: 
 `git commit`, which inherits the global `commit.gpgsign=true` (18 `signing failed` lines in the
 suite log). That is a local-environment failure, not a regression, and it is the same class round 3
 recorded.
+
+---
+
+# Fix round 5 — adversarial review @ `f200aa0` (`ISSUES_FOUND`, one blocking)
+
+Round 5's headline: the gate's core held where it was attacked hardest. The **critical** axis —
+an unreachable API must FAIL — survived all eight blindness shapes the reviewer constructed,
+including the two that matter most (`gh` exiting **0** with empty stdout, and `gh` exiting 0
+returning `{}`), because a subprocess that *succeeds while returning nothing* is how a checker goes
+green without seeing its subject. The 11→7-mutation result also re-derived independently against a
+**different** mutation set (8 mutations + 2 controls, none copied), with per-subject re-runs.
+
+What did not hold was the edges — which is where this defect class has landed every single time.
+
+## 1. BLOCKING — the residue was in the report, and the report said otherwise
+
+`scripts/scan-mutation-residue.mjs` exited **1** on the committed tree. The residue was
+`.claude/impl-compat5-report.md:718`: the prose written to describe removing the literal marker
+from the prover **quoted the scanner's output verbatim, marker and all**.
+
+So the fix moved the literal one hop — into the document explaining the fix. That is the **sixth**
+reproduction of this PR's own defect class, and the first where the *correction itself* was the
+carrier.
+
+**The false assertion is treated as part of the defect, not a typo.** The same commit's report
+asserted `scan-mutation-residue.mjs` exit **0**. That was true when measured and the commit
+carrying it is what falsified it — precisely `workflow.md`'s *"re-read your own claims against the
+current tree before merging, not just your diff."* The paragraph now carries an explicit
+CORRECTED-IN-ROUND-5 retraction rather than a silent edit, because a report that asserts a clean
+scan while the scanner reds is worse than no report.
+
+Scanner re-run, **branched on its exit code**: now **0**.
+
+### It then happened a seventh time, inside the fix
+
+The commit that fixed the report introduced residue in the *prover*: M10's replacement string wrote
+`"<marker> widened"` as a literal and stripped it with `.replace()` at run time, so the tracked file
+contained the marker twice. Scanner exit 1 again.
+
+Two consecutive commits where the fix for this defect class became its next instance. **The lesson
+is not "be more careful"** — that has now failed seven times. It is that the literal must never be
+*typeable* in a tracked file, so every site interpolates the harness's `MUTATION_MARKER` and none
+spells it out. Recorded rather than quietly amended, because the recurrence is the finding.
+
+## 2. Criterion 3 — both structural holes closed
+
+**4a — cross-repo citations were resolved against the WRONG repository.** `citedIssues` captured
+only the *number* from a `github.com/OWNER/REPO/issues/N` URL and discarded owner and repo, so the
+resolver fetched that number from the **default** repo: a confident verdict about an unrelated
+same-repo issue while the real target went unscanned. That is worse than not supporting cross-repo
+citations at all. It now returns `{owner, repo, number}`, understands the `owner/repo#N` shorthand
+that the bare-`#` lookbehind had excluded, and each citation is fetched from the repo it **names**.
+
+**4b — a cited PULL REQUEST was silently under-scanned.** #846 — the PR this work posted a
+correction on — carries review bodies and inline review comments that `issues/N/comments` never
+returns. Both are now read. The decision about *which* surfaces count moved into the pure core as
+`assembleSources()`, because in the resolver it was I/O-bound and therefore untestable, and an
+untestable branch is exactly what rots unnoticed. Five tests cover it, including a figure that
+appears **only** in a review body.
+
+**Also closed, from the same criterion:** `normalize()` now strips inline HTML tags, decodes
+`&nbsp;`, removes zero-width characters and folds via NFKC. GitHub *renders* HTML in issue bodies,
+so `churn was <b>9</b> restarts` reads identically to the plain form on screen while evading a text
+match — a **carelessness** path, not only an adversarial one.
+
+**Stated limits, not closed:** a figure spelled out in words ("nine restarts") and a
+hyphenated line-break still evade. Both are contrived rather than careless, and closing them means
+fuzzy matching, which is the thing round 3 measured at ~50% precision and correctly refused to
+build. A *silent body edit* of an original comment is also undetectable — the failure message
+forbids it but cannot enforce it.
+
+## 3. Criterion 4 — the over-broad patterns, fixed in the design
+
+Two ledger patterns broke the ledger's **own** stated rule (*"patterns must be specific to the WRONG
+claim"*): bare `"asserted twice"` flags *"the flag is asserted twice in the reconciler for
+idempotency"*, and bare `"9 restarts"` flags *"the bun lane saw 9 restarts in its own 27 nights"* —
+the exact node-vs-bun vocabulary adjacency that is the documented reason the general fuzzy check was
+**not** built.
+
+Both tightened. And the rule is now **enforced rather than documented**: `$negativeCorpus` holds
+legitimate sentences that no pattern may match, asserted by a test. It earned its keep immediately —
+**it caught a third over-broad pattern nobody had reported** (`"28 fingerprinted nights"`, which
+flags an unrelated two-window analysis).
+
+**Tightening a pattern can blind a gate, so that was checked in three directions, not assumed:**
+
+| half | result |
+|---|---|
+| A — all **9** original offending sentences still match | **caught, 9/9** |
+| B — all **6** legitimate sentences stay unflagged | **clean, 6/6** |
+| C — all **3** correction comments still discharge | **discharge, 9/9 figure-pairs** |
+
+## 4. The remaining findings
+
+- **The nightly had no red alert.** For a check whose entire subject is a defect class that survived
+  three rounds *because nobody was looking*, a red visible only in the Actions tab is the
+  predictable end state. It now carries the same idempotent pinned-issue job its sibling has.
+- **`--paginate` silently rewrote comment text.** `out.replace(/\]\s*\[/g, ',')` is a textual edit
+  over the whole payload *including inside JSON strings*: `see refs [a] [b] and note 9 restarts`
+  parsed as `see refs [a,b] and note 9 restarts` — still valid JSON, quietly altered, able to break
+  a pattern match (false green) or a correction's quote (false red). Replaced with `--slurp`.
+- **Token scope.** `issues: read` is now declared explicitly rather than relied on implicitly.
+- **The residual is now stated where the reader looks.** `public-release-readiness.md`'s
+  load-bearing *"#545 and #710 carry the corrected findings"* sentence — which was **false for three
+  rounds** — now points at the ledger and the nightly, and states the limit: the gate can only test
+  figures someone recorded as retracted.
+
+## 5. Mutation proof — 11 mutations, actual result
+
+`::prover-summary:: {"declared":11,"run":11}`, **exit 0. 10 red, 1 negative control green, 0
+survived.**
+
+| # | mutation | expected | **actual** |
+|---|---|---|---|
+| 0a/0b | red canary / green canary | RED / GREEN | **RED / GREEN** |
+| M1 | ledger emptied | RED | **RED** |
+| M2 | correction widened — quoting alone discharges | RED | **RED** |
+| M3 | correction narrowed to a heading | RED | **RED** |
+| M4 | blockquote stripping removed | RED | **RED** |
+| M5 | issue scanning neutered | RED | **RED** |
+| M6 | offence reporting suppressed | RED | **RED** |
+| **M7** | cross-repo citation loses owner/repo | RED | **RED** |
+| **M8** | cited PR loses its review surfaces | RED | **RED** |
+| **M9** | HTML-tag stripping removed | RED | **RED** |
+| **M10** | ledger pattern widened to the over-broad form | RED | **RED** |
+| NC | **negative control** — inert edit | GREEN | **GREEN** |
+
+### The harness refused a false result mid-run, and that is worth recording
+
+The first attempt aborted at M5: `anchor occurs 0 times (expected exactly 1)`. Rewriting
+`citedIssues` for the cross-repo fix had invalidated **two** anchors — M5's and the negative
+control's. Without the exactly-once contract, M5 would have planted nothing and reported RED, and NC
+would have planted nothing and reported GREEN: **two false results in one run**, both looking
+exactly like success. The harness refused instead. That is the contract this repo adopted after a
+silently-failed `perl` substitution certified a green that proved nothing.
+
+## 6. Verification
+
+- `scripts/scan-mutation-residue.mjs` — **exit 0** (branched on exit code, not output).
+- `scripts/mutation-prove-retracted-figures.mjs` — **exit 0**, `{"declared":11,"run":11}`.
+- `tests/retracted-figures.test.ts` — **32 passed**, exit 0.
+- `node scripts/verify-retracted-figures.mjs` against the live API — **exit 0**, 8 cited issues, 0
+  uncorrected.
+- `tsc --noEmit -p tsconfig.typecheck.json` — exit 0. `biome check` — exit 0.
+- `git diff --stat HEAD` **empty**; `git status --porcelain` shows only the untracked review files.
+
+**`tests/` is 1870 passed / 7 failed across 2 files, and both are the GPG lock**, not a regression:
+`tests/mutation-residue-scan.test.ts` and `tests/compat-window-fingerprint.test.ts` both run
+`git commit` in fixtures, which inherits the global `commit.gpgsign=true` (18 `signing failed` lines
+in the suite log). Isolated and cause-named rather than waved through as pre-existing. Neither is
+touched by this branch.
+
+## 7. Discipline log (round 5)
+
+- Every verdict branched on an **exit code**; no test output was grepped for pass/fail, and **no run
+  was piped into `tail`** — each was redirected to its own log file and the status read directly.
+- Pattern tightening was verified in **three directions** (still-catches / stays-clean /
+  still-discharges) before being claimed, because narrowing a pattern is indistinguishable from
+  blinding the gate if only one direction is checked.
+- The PR-surface decision was **moved into the pure core** specifically so it could be mutated; an
+  I/O-bound branch that cannot be tested is a branch that rots.
+- Restores verified byte-identical, `git status --porcelain` checked before any claim of clean.
+- Two defects in this round's own work were found by **running** the guards, not by reading them —
+  consistent with every previous round.
