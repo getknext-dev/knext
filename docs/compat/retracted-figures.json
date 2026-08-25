@@ -39,10 +39,7 @@
       "retractedIn": "docs/release/compat-honesty-gate.md (round 1, B3)",
       "wrong": "The zero-re-runs figure is asserted twice, independently — the ledger's runAttempt and the API's run_attempt.",
       "correct": "One GitHub counter read two ways. test-e2e-deploy.yml sets RUN_ATTEMPT from github.run_attempt and compat-run-ledger.mjs writes it through, so the ledger reading is not independent and is strictly weaker. The API reading is authoritative: run_attempt is 1 on all 72 scheduled runs, none above 1.",
-      "patterns": [
-        "asserted twice, independently",
-        "figure is asserted twice"
-      ],
+      "patterns": ["asserted twice, independently", "figure is asserted twice"],
       "correctionSignature": "one source, read two ways"
     },
     {
@@ -74,10 +71,7 @@
       "retractedIn": "docs/release/compat-honesty-gate.md (round 1, B4)",
       "wrong": "9 restarts in 27 nights.",
       "correct": "10 restarts. Re-derived from windowFingerprint over every retained ledger: 27 fingerprinted nights, 11 distinct fingerprints, 10 restarts, longest stable streak 7 (2026-08-12 to 08-18).",
-      "patterns": [
-        "9 restarts in 27 nights",
-        "churn: 9 restarts"
-      ],
+      "patterns": ["9 restarts in 27 nights", "churn: 9 restarts"],
       "correctionSignature": "10 restarts"
     },
     {
@@ -85,9 +79,7 @@
       "retractedIn": "docs/release/public-release-readiness.md (round 2, R2)",
       "wrong": "28 fingerprinted node nights.",
       "correct": "27 fingerprinted, of 28 in-window node nights: the 2026-07-28 ledger (30333571518) carries no windowFingerprint key at all.",
-      "patterns": [
-        "28 fingerprinted node nights"
-      ],
+      "patterns": ["28 fingerprinted node nights"],
       "correctionSignature": "27 fingerprinted"
     },
     {
