@@ -306,7 +306,16 @@ come back empty (`git grep` exit 1).
 
 ## Verification
 
-- `tests/` — **81 files / 1839 tests, exit 0**.
+- `tests/` — **81 files / 1840 tests, exit 0**.
+  - **Disclosed, not buried:** one earlier full-suite run had
+    `tests/blocking-gate-helper.test.ts > "exactly ONE tracked file declares the option"` fail on a
+    **5000 ms timeout** — not an assertion. Isolated per the "identify before merge" rule rather
+    than waved through as pre-existing: the file is green in isolation (86 tests, ~4.2 s of test
+    time against a 5 s per-test cap, so it sits close to the cap by construction) and the full suite
+    is green on re-run. This round adds 2 tracked files to a scan of ~1500, i.e. ~0.1 %, which does
+    not plausibly account for it; the cause is parallel load, the same class the local-noise note
+    above records for `tests/mutation-residue-scan.test.ts`. **The marginal timeout is real and is
+    not fixed here** — it will fail again under load, and it belongs to whoever owns that guard.
 - `tests/no-committed-transform-cache.test.ts` — 7 tests, exit 0.
 - `scripts/mutation-prove-committed-transform-cache.mjs` — 6/6, `{"declared":6,"run":6}`, exit 0.
 - `scripts/mutation-prove-compat-lane-pointer.mjs` (the PR's existing prover) — re-run, **5/5 red**,
