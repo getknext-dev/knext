@@ -673,3 +673,75 @@ proves nothing.
   on #846, where the body is mine and editing would have been permitted.
 - The gate's two self-inflicted false positives were fixed in the design, not by relaxing it.
 - No push to `main`, no force-push, no history rewrite.
+
+---
+
+## Mutation proof of the boundary gate — the actual result
+
+Run after the commit landed and the tree was clean. **`::prover-summary:: {"declared":7,"run":7}`,
+exit 0. All 7 behaved as required; 0 survived.** No mutation was skipped, and none was expected-away.
+
+| # | mutation | expected | **actual** |
+|---|---|---|---|
+| 0a | red canary | RED | **RED** (exit 1) |
+| 0b | green canary | GREEN | **GREEN** (exit 0) |
+| B0 | unmutated gate | GREEN | **GREEN** |
+| M1 | ledger emptied | RED | **RED** |
+| M2 | correction detection widened — quoting alone discharges | RED | **RED** |
+| M3 | correction detection narrowed to a heading | RED | **RED** |
+| M4 | blockquote stripping removed | RED | **RED** |
+| M5 | issue scanning neutered | RED | **RED** |
+| M6 | offence reporting suppressed | RED | **RED** |
+| NC | **negative control** — inert edit | GREEN | **GREEN** |
+
+Each mutation reds on **its own subject**: M1 fails the ledger-is-real tests, M2 the
+"quoting alone is republishing" test, M3 the #850 plain-prose reconciliation test, M4 the
+blockquote-normalisation test, M5 the cited-issue scan tests, M6 the offence-reporting tests. A
+mutation that red the suite for an unrelated reason would prove nothing, so this was checked rather
+than assumed.
+
+**STEP 0 discriminates.** The red canary exits 1 *and* the green canary exits 0 — the pair, not just
+the red, because a runner broken at startup is red for every input and a red-only canary reports
+PASS in that world. That is round 3's own disclosed near-miss, adopted here.
+
+Post-proof state, verified independently of the prover's own assertions: `git diff --stat HEAD`
+**empty** (core and ledger byte-identical), `git status --porcelain` shows only the two untracked
+review files, `scripts/scan-mutation-residue.mjs` exit **0**, `tests/mutation-prover-lane.test.ts`
+**52 passed**, exit 0.
+
+### A defect I introduced, caught by the repo's own guard
+
+The first proof run passed 7/7 — and then the residue scan failed against a **clean tree**:
+
+```
+Mutation residue in 1 tracked file(s):
+  scripts/mutation-prove-retracted-figures.mjs:136  ... "KNEXT-MUTATION-original-figures": [
+```
+
+Not a false positive. M1 embeds the residue marker in a JSON **key** (JSON has no comment syntax, so
+a `//` marker would make the ledger unparseable and M1 would red for a syntax error rather than for
+the vacuity it exists to prove) — and I wrote that key as a **literal**. A tracked file containing
+the literal marker *is* residue by definition, which is exactly why `mutation-harness.mjs` and
+`scan-mutation-residue.mjs` both assemble the marker from parts rather than spelling it out.
+
+Fixed by interpolating the harness's exported `MUTATION_MARKER`. **Not** by adding an allowlist
+entry, which was the easy move and would have put a permanent hole in the residue scan — the same
+"silent exemption" trap the transform-cache guard is built to avoid.
+
+Worth recording for two reasons. First, the guard that caught it is one this project built after
+nearly shipping the inverse of a fix twice, and it earned its keep again here. Second, it is the
+same shape as the two false positives the boundary gate found in itself: **three of the defects in
+this round's new machinery were found by running it, none by reading it.**
+
+### Note on the commit
+
+These commits are **unsigned** (`git -c commit.gpgsign=false`). The signing key's pinentry cannot
+prompt from a non-interactive shell, so `commit.gpgsign=true` blocked four attempts with
+`gpg: signing failed: Operation cancelled`. The founder committed the staged tree unsigned and
+directed the same for the rest. Recorded because the branch's earlier commits *are* signed, so the
+break in the middle is deliberate and explainable rather than an anomaly.
+
+That same lock is also why `tests/mutation-residue-scan.test.ts` fails locally: its fixtures run
+`git commit`, which inherits the global `commit.gpgsign=true` (18 `signing failed` lines in the
+suite log). That is a local-environment failure, not a regression, and it is the same class round 3
+recorded.
