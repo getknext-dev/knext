@@ -367,6 +367,107 @@ try {
     }
   }
 
+  // --- 3a-ter. the scaffolded app must actually INSTALL and BUILD -----------
+  // Until now the scaffold was checked for FILES and nothing else, so `kn-next create`
+  // could emit a complete-looking app that no consumer can build — the first thing a new
+  // user does after `create` is `npm install && npm run build`, and nothing in this repo
+  // ran it. Measured before writing this: it does build, so the gate starts green and its
+  // job is to keep it that way.
+  //
+  // The scaffold pins `@getknext/*` at the CLI's own version, which by construction is not
+  // on the registry yet at gate time — that is what publishing does. Redirecting those
+  // pins at the tarballs packed above is what makes this runnable, and it is also the more
+  // honest test: it builds against the artifacts THIS commit produces, not against
+  // whatever the registry happens to hold.
+  console.log('[install-smoke] installing + building the scaffolded app ...');
+  const scaffoldPkgPath = join(scaffoldDir, 'package.json');
+  const scaffoldPkg = JSON.parse(readFileSync(scaffoldPkgPath, 'utf8'));
+  const packedByName = new Map(packed.map((p) => [p.name, p.tgz]));
+  let redirected = 0;
+  for (const field of ['dependencies', 'devDependencies']) {
+    for (const dep of Object.keys(scaffoldPkg[field] ?? {})) {
+      if (packedByName.has(dep)) {
+        scaffoldPkg[field][dep] = `file:${packedByName.get(dep)}`;
+        redirected++;
+      }
+    }
+  }
+  if (redirected === 0) {
+    finish(
+      FAIL,
+      'the scaffolded app declares no @getknext/* dependency — either the template stopped ' +
+        'depending on the packages this gate builds, or `create` emitted the wrong manifest',
+    );
+  }
+  // `@getknext/core` depends on `@getknext/db` and `@getknext/lib`, and pnpm rewrote those
+  // specs to versions that are not published yet, so every packed library has to be present
+  // even when the template names only some of them.
+  for (const { name, tgz } of packed) {
+    if (name === 'kn-next') continue;
+    scaffoldPkg.dependencies[name] = `file:${tgz}`;
+  }
+  writeFileSync(scaffoldPkgPath, `${JSON.stringify(scaffoldPkg, null, 2)}\n`);
+
+  const scaffoldInstall = run('npm', ['install', '--no-audit', '--no-fund'], {
+    cwd: scaffoldDir,
+    stdio: ['ignore', 'inherit', 'inherit'],
+  });
+  if (scaffoldInstall.status !== 0) {
+    finish(
+      FAIL,
+      `npm install in the scaffolded app exited ${scaffoldInstall.status} — the app ` +
+        '`kn-next create` generates cannot be installed by the user who just ran it',
+    );
+  }
+
+  const scaffoldBuild = run('npm', ['run', 'build'], {
+    cwd: scaffoldDir,
+    stdio: ['ignore', 'inherit', 'inherit'],
+  });
+  if (scaffoldBuild.status !== 0) {
+    finish(
+      FAIL,
+      `\`npm run build\` in the scaffolded app exited ${scaffoldBuild.status} — the app ` +
+        '`kn-next create` generates does not build',
+    );
+  }
+  // Both halves. A green build is not the claim; the claim is that the build produces what
+  // knext deploys. The template sets `output: 'standalone'`, and losing that is a SILENT
+  // break — `next build` still exits 0 and the container then has no server to start.
+  //
+  // WHERE that server lands is not a constant, and the first cut of this check assumed it
+  // was. Next nests the standalone output under the app's path relative to the tracing
+  // root it infers, so an app scaffolded inside another project emits
+  // `.next/standalone/<subdir>/server.js`. `create` already knows this — it resolves a
+  // `standalonePrefix` and bakes it into the generated Dockerfile's `WORKDIR /repo/<prefix>`.
+  // So the assertion reads the prefix back out of the artifact the user actually builds
+  // with, which makes this check strictly stronger than a fixed path: a `create` that
+  // computes the WRONG prefix now fails here, and nothing else covers that.
+  const scaffoldDockerfile = readFileSync(join(scaffoldDir, 'Dockerfile'), 'utf8');
+  const workdir = scaffoldDockerfile.match(/^WORKDIR \/repo\/(.*)$/m);
+  if (workdir === null) {
+    finish(
+      FAIL,
+      'the scaffolded Dockerfile declares no `WORKDIR /repo/...` — there is no way to tell ' +
+        'where it expects the standalone server, so the build cannot be checked against it',
+    );
+  }
+  const standalonePrefix = workdir[1];
+  const scaffoldServer = join(scaffoldDir, '.next', 'standalone', standalonePrefix, 'server.js');
+  if (!existsSync(scaffoldServer)) {
+    finish(
+      FAIL,
+      `the scaffolded app built but emitted no standalone server at ` +
+        `.next/standalone/${standalonePrefix}server.js — the Dockerfile \`create\` generated ` +
+        'COPYs from exactly that path, so the image would have nothing to run (lost ' +
+        '`output: standalone`, or computed the wrong standalonePrefix?)',
+    );
+  }
+  console.log(
+    `[install-smoke] the scaffolded app installs, builds, and emits a standalone server where ` +
+      `its own Dockerfile expects it (.next/standalone/${standalonePrefix}server.js)`,
+  );
+
   // --- 3b. CLI: exercise the config `validate` path (zero-exit assertion) ----
   // The deploy bin's validate path needs a built Next app + cluster, so it cannot give
   // a clean zero-exit here. Instead drive the SAME validateConfig() the bin uses via the
@@ -554,6 +655,8 @@ try {
     PASS,
     `packed ${publishable.join(' + ')} install on plain npm/Node; the CLI runs and so does the ` +
       '`npx kn-next` alias shim, ' +
+      'the app `create` scaffolds installs and builds into the standalone server its own ' +
+      'Dockerfile expects, ' +
       'every public app-import subpath resolves to real JS outside the workspace, and ' +
       '@getknext/db imports + migrates without the optional drizzle-kit peer',
   );
