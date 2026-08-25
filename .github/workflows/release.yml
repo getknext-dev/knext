@@ -58,6 +58,15 @@
 # │ chain. Bumps come from Dependabot's github-actions ecosystem                 │
 # │ (.github/dependabot.yml) so pinning does not become staleness. Guarded by    │
 # │ tests/release-action-pins.test.ts.                                           │
+# │                                                                             │
+# │ A BUMP HERE IS NOT SELF-CONTAINED. `changesets/action`'s major is coupled to │
+# │ the `@changesets/cli` major in the ROOT package.json: action v1 <-> CLI v2,  │
+# │ action v2 <-> CLI v3. The action validates this before it reads a single     │
+# │ input and throws on a mismatch, so the Version-PR job dies and the whole     │
+# │ lane below it never starts. It happened: #831 took the v1->v2 bump against   │
+# │ CLI v2 and the first live run after the deadlock lifted (32850202919) failed │
+# │ on exactly that. Guarded by tests/changesets-cli-action-compat.test.ts,      │
+# │ mutation-proved by mutations 19-22 of the release-lane prover.               │
 # └──────────────────────────────────────────────────────────────────────────────┘
 
 name: Release

@@ -25,25 +25,29 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveTestRunner } from './lib/ci-blocking-gate-proof.mjs';
-import { mutate, restore, snapshot } from './lib/mutation-harness.mjs';
+import { MUTATION_MARKER, mutate, restore, snapshot } from './lib/mutation-harness.mjs';
 import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const WORKFLOW = resolve(REPO_ROOT, '.github/workflows/release.yml');
 const PREFLIGHT = resolve(REPO_ROOT, 'scripts/publish-preflight.mjs');
+const MANIFEST = resolve(REPO_ROOT, 'package.json');
+const LOCKFILE = resolve(REPO_ROOT, 'pnpm-lock.yaml');
 const LIVENESS_SPEC = 'tests/release-lane-liveness.test.ts';
 const PREFLIGHT_SPEC = 'tests/publish-preflight.test.ts';
 const PINS_SPEC = 'tests/release-action-pins.test.ts';
+const COMPAT_SPEC = 'tests/changesets-cli-action-compat.test.ts';
 
 /**
  * The mutations below are inline `prove()` calls rather than a list, so this is
  * a literal. The lane compares declared against run in BOTH directions, so an
  * extra `prove()` that does not bump this reddens rather than passing quietly.
  */
-declareMutations(18);
+declareMutations(22);
 
 let pass = 0;
 let fail = 0;
@@ -87,7 +91,66 @@ function prove(label, file, spec, anchor, replacement) {
   }
 }
 
-for (const spec of [LIVENESS_SPEC, PREFLIGHT_SPEC, PINS_SPEC]) {
+/**
+ * Anchors for mutations 19-22 are DERIVED from the current file contents rather
+ * than typed as literals.
+ *
+ * Every one of them addresses a value Dependabot moves — the action's pinned SHA
+ * and version comment, the `@changesets/cli` caret range, the lockfile's
+ * resolution of it. A hardcoded anchor would FATAL on the next correct bump, and
+ * "the prover is broken again, edit the anchor" is how a prover decays into
+ * something people route around. Deriving them means the proof follows its
+ * subject.
+ *
+ * Not-found is a FAILURE, never a skip: if the shape these read is gone, the
+ * mutations below would silently stop proving anything.
+ */
+function derive(label, text, pattern) {
+  const match = pattern.exec(text);
+  if (match === null) {
+    console.error(`FATAL: could not derive the anchor for ${label} — ${pattern}`);
+    process.exit(1);
+  }
+  return match;
+}
+
+const MANIFEST_TEXT = readFileSync(MANIFEST, 'utf8');
+const LOCK_TEXT = readFileSync(LOCKFILE, 'utf8');
+const WORKFLOW_TEXT = readFileSync(WORKFLOW, 'utf8');
+
+/** e.g. `"@changesets/cli": "^3.0.1"` -> range `^3.0.1`, major `3`. */
+const CLI_DECL = derive(
+  'the @changesets/cli declaration',
+  MANIFEST_TEXT,
+  /"@changesets\/cli": "\^(\d+)\.(\d+)\.(\d+)"/,
+);
+const CLI_MAJOR = Number(CLI_DECL[1]);
+/** A DIFFERENT major, whichever way the tree currently points. */
+const WRONG_CLI_MAJOR = CLI_MAJOR === 2 ? 3 : 2;
+
+/** The version-pr job's pin line — `id: changesets` makes it uniquely addressable. */
+const VERSION_PIN = derive(
+  "the version-pr job's changesets/action pin",
+  WORKFLOW_TEXT,
+  /( {8}id: changesets\n {8}uses: changesets\/action@[0-9a-f]{40} # v)(\d+)(\.\d+\.\d+)/,
+);
+const PIN_MAJOR = Number(VERSION_PIN[2]);
+const WRONG_PIN_MAJOR = PIN_MAJOR === 1 ? 2 : 1;
+
+/**
+ * The ROOT importer's resolution. Anchored on the package name AND the
+ * `specifier:` key — `specifier:` appears only under `importers:`, and the name
+ * alone recurs in `packages:`/`snapshots:`. The trailing peer suffix
+ * (`(@types/node@…)`) is deliberately left out of the capture so the anchor is a
+ * substring that survives a peer-resolution change.
+ */
+const LOCK_ENTRY = derive(
+  "the lockfile's root-importer resolution of @changesets/cli",
+  LOCK_TEXT,
+  /( {6}'@changesets\/cli':\n {8}specifier: \^\d+\.\d+\.\d+\n {8}version: )(\d+)(\.\d+\.\d+)/,
+);
+
+for (const spec of [LIVENESS_SPEC, PREFLIGHT_SPEC, PINS_SPEC, COMPAT_SPEC]) {
   console.log(`Baseline: ${spec} must be GREEN before anything is mutated.`);
   if (!vitest(spec)) {
     console.error(`FATAL: ${spec} is not green to begin with`);
@@ -302,6 +365,77 @@ prove(
   LIVENESS_SPEC,
   '    needs: version-pr\n',
   '    # needs edge removed\n',
+);
+
+// ── The action-major / CLI-major contract ────────────────────────────────────
+//
+// Mutations 19-22 were added with `tests/changesets-cli-action-compat.test.ts`,
+// after the FIRST live release run in a month (32850202919, 2026-08-25) failed
+// its Version-PR job on:
+//
+//   "This version of the Changesets action is designed to work with Changesets
+//    CLI v3. Changesets CLI v2 is not supported…"
+//
+// The action had been bumped v1 -> v2 while `package.json` still said
+// `"@changesets/cli": "^2.31.0"`. Every guard in this file stayed GREEN, because
+// the mismatch is a relation BETWEEN the workflow and the root manifest and is
+// only reachable on a push to `main`. Each mutation below restores one half of
+// that mismatch, and each is graded against the compat spec ALONE.
+
+// 19. THE DEFECT, restored: the CLI major goes back to the one the pinned action
+//     refuses. This is literally what main shipped on 2026-08-25.
+//
+//     `.json` has no comment syntax, so the harness cannot mark the mutation for
+//     us — the replacement carries the marker itself, as a JSON-legal `//` key.
+//     The marker is interpolated, never typed: `scan-mutation-residue.mjs`
+//     refuses any TRACKED file containing the literal, and this file is tracked.
+prove(
+  `the @changesets/cli major goes back to ${WRONG_CLI_MAJOR}`,
+  MANIFEST,
+  COMPAT_SPEC,
+  `"@changesets/cli": "^${CLI_MAJOR}`,
+  `"//${MUTATION_MARKER}": "mutation in progress", "@changesets/cli": "^${WRONG_CLI_MAJOR}`,
+);
+
+// 20. The other end of the same contract: the ACTION major moves and the CLI
+//     does not. Mutating the manifest proves the guard reads the manifest;
+//     mutating the workflow proves it is a DRIFT check between two files rather
+//     than a literal asserted against itself. Only the version-pr pin moves, so
+//     this also grades the "one and the same major in every job" half — the two
+//     steps read the same repository, so they cannot legitimately disagree.
+prove(
+  `the version-pr job's changesets/action pin claims v${WRONG_PIN_MAJOR}`,
+  WORKFLOW,
+  COMPAT_SPEC,
+  `${VERSION_PIN[1]}${PIN_MAJOR}${VERSION_PIN[3]}`,
+  `${VERSION_PIN[1]}${WRONG_PIN_MAJOR}${VERSION_PIN[3]}`,
+);
+
+// 21. MANIFEST BUMPED, LOCKFILE NOT. `validateChangesetsCliVersion` reads the
+//     declared range AND `require.resolve`s the installed package, and CI runs
+//     `pnpm install --frozen-lockfile` — so the lockfile, not the manifest,
+//     decides what is on disk. A manifest-only assertion would call this green
+//     and the live run would still fail with the identical error.
+prove(
+  'the lockfile still resolves the old @changesets/cli major',
+  LOCKFILE,
+  COMPAT_SPEC,
+  `${LOCK_ENTRY[1]}${LOCK_ENTRY[2]}${LOCK_ENTRY[3]}`,
+  `${LOCK_ENTRY[1]}${WRONG_CLI_MAJOR}${LOCK_ENTRY[3]}`,
+);
+
+// 22. The renamed-input class (#750) folded into the same spec, because it is
+//     the same bump. `validateChangesetsCliVersion` runs BEFORE
+//     `throwOnRenamedInputs`, so while the CLI major is wrong the input check
+//     can never fire — fix one and the lane is still broken, with a different
+//     error. GitHub Actions ignores unknown `with:` keys rather than failing, so
+//     nothing else would ever say so.
+prove(
+  'the v1 input name `version` comes back under a v2 action',
+  WORKFLOW,
+  COMPAT_SPEC,
+  '          version-script: pnpm run changeset:version\n',
+  '          version: pnpm run changeset:version\n',
 );
 
 console.log(`\n${pass} mutation(s) went red as required, ${fail} stayed green.`);
