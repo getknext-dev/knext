@@ -26,6 +26,8 @@ const ALIAS_PKG = join(ALIAS_DIR, 'package.json');
 const ALIAS_BIN = join(ALIAS_DIR, 'bin', 'kn-next.js');
 const SHAPE_SPEC = 'tests/install-smoke-coverage-derivation.test.ts';
 const NEWPUB_DIR = join(WT, 'packages', 'newpub');
+const LIB_PKG = join(WT, 'packages', 'lib', 'package.json');
+const LOCKSTEP_SPEC = 'tests/publish-preflight.test.ts';
 const STASH = join(tmpdir(), 'knext-alias-shim-stash.js');
 /**
  * The paths this prover touches. The clean assertion is scoped to them, not
@@ -40,6 +42,7 @@ const MUTATED_PATHS = [
   '.changeset/config.json',
   'packages/kn-next-alias',
   'packages/newpub',
+  'packages/lib/package.json',
 ];
 
 const git = (...a) => execFileSync('git', a, { cwd: WT, encoding: 'utf8' });
@@ -74,8 +77,28 @@ const MUTATIONS = [
   {
     id: 'M2',
     expect: 'red',
-    guard: 'derived coverage — a packed package the release set does not publish',
+    graded: 'lockstep',
+    guard:
+      'the lockstep group loses a member — graded by the spec that OWNS that invariant, ' +
+      'because this gate deliberately no longer reads `fixed`',
+    // Round 2 of this prover caught its own obsolescence: while coverage derived from
+    // `fixed`, this mutation reddened the gate. Now that coverage derives from the
+    // PUBLISHABLE set (review finding B1), mutating `fixed` correctly cannot affect the
+    // gate — it exited 0. That is the fix working, not a hole, but dropping a member
+    // from `fixed` still ships a broken set, so the mutation moves to the guard that
+    // owns it rather than being deleted.
     apply: () => mutate(CHANGESET, ', "kn-next"]]', ']]'),
+    restore: () => git('checkout', '--', '.'),
+  },
+  {
+    id: 'M8',
+    expect: 'red',
+    guard: 'the OTHER direction — a package this gate packs that no longer publishes',
+    // M1 proves a publishable package left unpacked fails. This proves the converse,
+    // which nothing else covered once M2 stopped applying: mark a packed package
+    // private and it leaves the publishable set while still being packed.
+    apply: () =>
+      mutate(LIB_PKG, '"name": "@getknext/lib",', '"name": "@getknext/lib",\n  "private": true,'),
     restore: () => git('checkout', '--', '.'),
   },
   {
@@ -161,9 +184,9 @@ const runSmoke = () =>
  * publishable today and silently misses the next one. `SHAPE_SPEC` asserts the
  * derivation still exists, so mutations of that shape are graded here.
  */
-const runShapeSpec = () => {
+const runSpec = (spec) => {
   const runner = resolveTestRunner(WT);
-  return spawnSync(runner.command, [...runner.args, 'run', SHAPE_SPEC], {
+  return spawnSync(runner.command, [...runner.args, 'run', spec], {
     cwd: WT,
     encoding: 'utf8',
     timeout: 10 * 60 * 1000,
@@ -174,7 +197,7 @@ declareMutations(MUTATIONS.length);
 
 clean('before the negative control');
 console.log('=== negative control: unmutated tree must EXIT 0 (both graders) ===');
-const ncShape = runShapeSpec();
+const ncShape = runSpec(SHAPE_SPEC);
 console.log(`NC(shape) exit=${ncShape}`);
 if (ncShape !== 0) {
   console.error(
@@ -197,7 +220,12 @@ for (const m of MUTATIONS) {
     console.error(`ABORT: ${m.id} changed nothing — it would grade for free.`);
     process.exit(1);
   }
-  const status = m.graded === 'shape' ? runShapeSpec() : runSmoke();
+  const status =
+    m.graded === 'shape'
+      ? runSpec(SHAPE_SPEC)
+      : m.graded === 'lockstep'
+        ? runSpec(LOCKSTEP_SPEC)
+        : runSmoke();
   recordMutation();
   m.restore();
   clean(`after ${m.id}`);
