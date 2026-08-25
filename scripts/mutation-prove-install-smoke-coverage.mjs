@@ -260,6 +260,21 @@ const MUTATIONS = [
     restore: () => git('checkout', '--', '.'),
   },
   {
+    id: 'M15',
+    expect: 'red',
+    guard:
+      "the template's `start` script loses the prefix — review measured this surviving the " +
+      "ENTIRE repo, because nothing anywhere asserted the scaffolded app's start script",
+    apply: (checkOnly) =>
+      mutate(
+        APP_PKG_TPL,
+        'node .next/standalone/{{ standalonePrefix }}server.js',
+        'node .next/standalone/server.js',
+        checkOnly,
+      ),
+    restore: () => git('checkout', '--', '.'),
+  },
+  {
     id: 'M7',
     expect: 'red',
     graded: 'shape',

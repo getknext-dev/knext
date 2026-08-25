@@ -401,6 +401,7 @@ try {
   console.log('[install-smoke] installing + building the scaffolded app ...');
   const scaffoldPkgPath = join(scaffoldDir, 'package.json');
   const scaffoldPkg = JSON.parse(readFileSync(scaffoldPkgPath, 'utf8'));
+  const scaffoldStart = scaffoldPkg.scripts?.start;
   const packedByName = new Map(packed.map((p) => [p.name, p.tgz]));
   let redirected = 0;
   for (const field of ['dependencies', 'devDependencies']) {
@@ -425,8 +426,11 @@ try {
   // dependency: with `@getknext/core` removed from the template the gate still passed,
   // because the gate itself had put it back. `overrides` resolves the transitives without
   // touching the declared set, so what is under test is the manifest `create` emitted.
+  // The alias is excluded by DERIVING its name from its own manifest. Hardcoding 'kn-next'
+  // here would be the exact decay M6 and M9 exist to stop, in the file they guard.
+  const aliasName = JSON.parse(readFileSync(join(aliasPkgDir, 'package.json'), 'utf8')).name;
   scaffoldPkg.overrides = Object.fromEntries(
-    packed.filter((p) => p.name !== 'kn-next').map((p) => [p.name, `file:${p.tgz}`]),
+    packed.filter((p) => p.name !== aliasName).map((p) => [p.name, `file:${p.tgz}`]),
   );
   writeFileSync(scaffoldPkgPath, `${JSON.stringify(scaffoldPkg, null, 2)}\n`);
 
@@ -483,7 +487,18 @@ try {
   // server fails here, for the layout the fixture builds, and that pairing is not checked
   // anywhere else.
   const scaffoldDockerfile = readFileSync(join(scaffoldDir, 'Dockerfile'), 'utf8');
-  const workdir = scaffoldDockerfile.match(/^WORKDIR \/repo\/(.*)$/m);
+  // `matchAll` + require-exactly-one, not `.match()`. Taking the first is safe only while
+  // the builder stage's bare `WORKDIR /repo` happens not to match; requiring one makes a
+  // second one an error instead of a silent choice between them.
+  const workdirs = [...scaffoldDockerfile.matchAll(/^WORKDIR \/repo\/(.*)$/gm)];
+  if (workdirs.length > 1) {
+    finish(
+      FAIL,
+      `the scaffolded Dockerfile declares ${workdirs.length} \`WORKDIR /repo/...\` lines — ` +
+        'which one names the standalone output is then a guess, so this check refuses to make it',
+    );
+  }
+  const workdir = workdirs[0] ?? null;
   if (workdir === null) {
     finish(
       FAIL,
@@ -503,6 +518,36 @@ try {
       `create emitted a non-slash-terminated standalonePrefix '${standalonePrefix}' — the ` +
         "Dockerfile's COPYs, its CMD and the app's `start` script all concatenate it, so " +
         'every one of them would point at a path that does not exist',
+    );
+  }
+  // N6: M13's entire value depends on the fixture producing a NESTED prefix. If it is ever
+  // empty the slash-termination check cannot fire and M13 passes while testing nothing —
+  // the silent degradation this whole gate exists to prevent. It is safe today, but that
+  // is a property of the environment, so assert it rather than inherit it.
+  if (standalonePrefix === '') {
+    finish(
+      FAIL,
+      'the scaffold fixture stopped producing a nested layout — the nested-output pairing ' +
+        'is no longer under test, so a green here would mean nothing',
+    );
+  }
+  // N2: the prefix has FOUR consumers and reading one of them proves one of them. Review
+  // measured the gap: dropping `{{ standalonePrefix }}` from the template's `start` script
+  // survives the entire repo — nothing anywhere asserts the scaffolded app's start script.
+  const expectedServerPath = `.next/standalone/${standalonePrefix}server.js`;
+  const startScript = scaffoldStart ?? '';
+  if (!startScript.includes(expectedServerPath)) {
+    finish(
+      FAIL,
+      `the scaffolded app's \`start\` script does not point at ${expectedServerPath} — it ` +
+        `runs \`${startScript}\`, so \`npm start\` would miss the server this very build emits`,
+    );
+  }
+  if (!scaffoldDockerfile.includes(`${standalonePrefix}server.js`)) {
+    finish(
+      FAIL,
+      `the generated Dockerfile names no ${standalonePrefix}server.js — its CMD would start ` +
+        'a path this build does not produce',
     );
   }
   const scaffoldServer = join(scaffoldDir, '.next', 'standalone', `${standalonePrefix}server.js`);
