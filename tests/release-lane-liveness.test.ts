@@ -168,6 +168,79 @@ describe('release.yml: the version lane runs unapproved and cannot publish', () 
   });
 });
 
+/**
+ * Every `steps.<id>.outputs.<key>` reference in the file, discovered rather than
+ * enumerated, as `<job>.<output> = steps.<step>.outputs[<key>]`.
+ *
+ * SCANNED, not listed: an enumerated list of references is how the second one
+ * gets missed, and this lane already has two. Both bracket and dot forms are
+ * matched, so renaming `['has-changesets']` to `.hasChangesets` cannot escape by
+ * changing syntax rather than the key.
+ */
+const STEP_OUTPUT_REF =
+  /steps\.([A-Za-z0-9_-]+)\.outputs(?:\.([A-Za-z0-9_-]+)|\[\s*'([^']+)'\s*\]|\[\s*"([^"]+)"\s*\])/g;
+
+function stepOutputWiring(): string[] {
+  const found: string[] = [];
+  for (const [jobId, job] of Object.entries(jobs())) {
+    const outputs = (job.outputs ?? {}) as Record<string, unknown>;
+    for (const [name, expression] of Object.entries(outputs)) {
+      for (const m of String(expression).matchAll(STEP_OUTPUT_REF)) {
+        found.push(`${jobId}.${name} = steps.${m[1]}.outputs[${m[2] ?? m[3] ?? m[4]}]`);
+      }
+    }
+  }
+  return found.sort();
+}
+
+describe('release.yml: job outputs read the keys their producers actually emit', () => {
+  /**
+   * THE FAILURE MODE, and why it needs its own guard.
+   *
+   * An unknown `steps.*.outputs.*` reference does not error — GitHub resolves it
+   * to `''`. So a one-token edit to either line below makes `has_changesets`
+   * (or `should_publish`) empty, every downstream `== 'false'` / `== 'true'`
+   * false, `publish-preflight` and `release` both skipped, and the lane dead
+   * again with every gate green and no signal anywhere. That is the month-long
+   * outage this file is named for, arriving by a different door.
+   *
+   * It is the OUTPUT-side twin of the failure the workflow's own header records:
+   * #831 took the changesets/action v1->v2 pin bump without the input migration,
+   * and Actions ignored the unknown `with:` keys rather than erroring.
+   * `tests/action-pin-input-existence.test.ts` (#750) was built for that class,
+   * but it validates `with:` INPUTS only — outputs were uncovered, and
+   * Dependabot will move this pin again.
+   */
+  it('wires exactly the two step outputs the lane depends on, by their real names', () => {
+    expect(
+      stepOutputWiring(),
+      "a job output in release.yml no longer reads the key its producer emits. GitHub resolves an unknown `steps.*.outputs.*` to '' rather than failing, so the whole lane goes silently dead: `has_changesets` empty means `publish-preflight` is skipped, and `should_publish` empty means `release` is skipped. If you added a new step output, add it here too — this list is the registry.",
+    ).toEqual([
+      // `has-changesets` occurs exactly once in the repository — the line this
+      // asserts. Kebab-case is changesets/action's own declared output name at
+      // the pinned SHA 198f833dd7d863100ea6e28967bc9a9fdefadb0a (v2.1.0); the
+      // v1 spelling was `hasChangesets`, so a pin bump back or forward across
+      // that boundary lands here.
+      'publish-preflight.should_publish = steps.preflight.outputs[should-publish]',
+      'version-pr.has_changesets = steps.changesets.outputs[has-changesets]',
+    ]);
+  });
+
+  it('the preflight key matches what scripts/publish-preflight.mjs actually emits', () => {
+    // The half that is a real drift guard rather than a literal: this producer
+    // is ours, so the assertion above can be checked against its source instead
+    // of trusted. The changesets key has no local source of truth — the nightly
+    // `verify-action-pins` resolution is where that would eventually live.
+    const source = readFileSync(resolve(REPO_ROOT, 'scripts/publish-preflight.mjs'), 'utf8');
+    const emitted = [...source.matchAll(/\bemit\(\s*'([^']+)'/g)].map((m) => m[1]);
+    expect(emitted, 'scripts/publish-preflight.mjs emits no outputs at all').not.toHaveLength(0);
+    expect(
+      emitted,
+      '`publish-preflight.outputs.should_publish` reads a key the script never writes — the job output would be the empty string and `release` would be skipped on every push',
+    ).toContain('should-publish');
+  });
+});
+
 describe('release.yml: the publish job decides BEFORE it starts', () => {
   it('the publish decision is an output of an earlier, ungated job', () => {
     const preflight = jobs()[PREFLIGHT_JOB];
@@ -185,6 +258,25 @@ describe('release.yml: the publish job decides BEFORE it starts', () => {
       jobJson(PREFLIGHT_JOB).includes('node scripts/publish-preflight.mjs'),
       `\`${PREFLIGHT_JOB}\` must run scripts/publish-preflight.mjs`,
     ).toBe(true);
+  });
+
+  it('the preflight itself runs on the push that CAN publish, not the one that cannot', () => {
+    // The polarity, asserted where it lives. `release`'s own `if:` is checked in
+    // both halves below, but that is downstream of a value `publish-preflight`
+    // only produces if it RUNS. Flip this one token to `'true'` and preflight
+    // fires only on pushes that still have pending changesets — never on the
+    // push that merges the Version PR, which is the only push that can publish.
+    // `should_publish` is then '', `release`'s `if:` is false, and nothing ever
+    // ships: the same silent death, the same green board.
+    const condition = String(jobs()[PREFLIGHT_JOB]?.if ?? '').replace(/\s+/g, ' ');
+    expect(condition, `\`${PREFLIGHT_JOB}\` has no \`if:\` at all`).not.toBe('');
+    expect(
+      condition,
+      `\`${PREFLIGHT_JOB}\` does not run on the no-pending-changesets push. Its gate must be \`has_changesets == 'false'\`; any other polarity means the decision is never computed on the only push that can publish, and \`${PUBLISH_JOB}\` is skipped forever.`,
+    ).toContain("needs.version-pr.outputs.has_changesets == 'false'");
+    // The other half: it must still depend on the job whose output it reads, or
+    // the condition above is evaluated against a value that is never set.
+    expect(jobNeeds(PREFLIGHT_JOB)).toContain(VERSION_JOB);
   });
 
   it('the publish job is gated on BOTH halves of "there is something to publish"', () => {

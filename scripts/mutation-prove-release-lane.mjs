@@ -43,7 +43,7 @@ const PINS_SPEC = 'tests/release-action-pins.test.ts';
  * a literal. The lane compares declared against run in BOTH directions, so an
  * extra `prove()` that does not bump this reddens rather than passing quietly.
  */
-declareMutations(13);
+declareMutations(18);
 
 let pass = 0;
 let fail = 0;
@@ -236,6 +236,72 @@ prove(
   PREFLIGHT_SPEC,
   "  return manifests.filter((m) => !m.private && !ignored.has(m.name) && m.version !== '');",
   "  return manifests.filter((m) => m.version !== '');",
+);
+
+// ── The wiring between the jobs ──────────────────────────────────────────────
+//
+// Mutations 14-18 were added in round two. Review of #849 found that all five
+// defects below left `release-lane-liveness`, `release-action-pins`,
+// `publish-preflight` and `ci-concurrency-group` ALL GREEN — each is a one-token
+// edit that re-creates the month-long outage with no signal anywhere. They are
+// the OUTPUT-side twin of the `with:`-input class that #750 covers: GitHub
+// resolves an unknown `steps.*.outputs.*` to `''` rather than failing, and `''`
+// satisfies neither `== 'false'` nor `== 'true'`, so the lane just stops.
+
+// 14. The version job reads changesets/action's V1 output name. `has_changesets`
+//     is then '', `publish-preflight` is skipped, `release` is skipped.
+//     Dependabot moves this pin, and #831 already took a v1->v2 bump without the
+//     matching key migration once.
+prove(
+  'the version job reads the v1 output name `hasChangesets`',
+  WORKFLOW,
+  LIVENESS_SPEC,
+  "      has_changesets: ${{ steps.changesets.outputs['has-changesets'] }}\n",
+  "      has_changesets: ${{ steps.changesets.outputs['hasChangesets'] }}\n",
+);
+
+// 15. Same defect one job down: the preflight's own output key. `should_publish`
+//     is then '', and `release`'s `if:` is false on every push forever.
+prove(
+  'the preflight job reads an output key its script never emits',
+  WORKFLOW,
+  LIVENESS_SPEC,
+  "      should_publish: ${{ steps.preflight.outputs['should-publish'] }}\n",
+  "      should_publish: ${{ steps.preflight.outputs['shouldPublish'] }}\n",
+);
+
+// 16. The other end of that same wire. Mutating the WORKFLOW proves the guard
+//     reads the workflow; mutating the SCRIPT proves it is a drift check between
+//     two files rather than a literal asserted against itself.
+prove(
+  'the preflight script renames the key it emits',
+  PREFLIGHT,
+  LIVENESS_SPEC,
+  "  emit('should-publish', shouldPublish ? 'true' : 'false');\n",
+  "  emit('shouldPublish', shouldPublish ? 'true' : 'false');\n",
+);
+
+// 17. THE POLARITY FLIP. One token. Preflight then runs only on pushes that
+//     still HAVE pending changesets — never on the push that merges the Version
+//     PR, which is the only push that can publish. Nothing ever ships, and the
+//     board stays green because a skipped job reports nothing.
+prove(
+  "the preflight's own gate polarity is flipped to 'true'",
+  WORKFLOW,
+  LIVENESS_SPEC,
+  "    if: github.repository == 'getknext-dev/knext' && needs.version-pr.outputs.has_changesets == 'false'\n",
+  "    if: github.repository == 'getknext-dev/knext' && needs.version-pr.outputs.has_changesets == 'true'\n",
+);
+
+// 18. The other half of 17: the condition is asserted, so the EDGE it reads must
+//     be asserted too. Without `needs: version-pr` the `if:` above evaluates
+//     against a value that is never set — the same '' , the same silent skip.
+prove(
+  'the preflight drops the `needs` edge whose output its `if:` reads',
+  WORKFLOW,
+  LIVENESS_SPEC,
+  '    needs: version-pr\n',
+  '    # needs edge removed\n',
 );
 
 console.log(`\n${pass} mutation(s) went red as required, ${fail} stayed green.`);
