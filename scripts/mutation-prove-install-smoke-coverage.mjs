@@ -70,7 +70,7 @@ const MUTATIONS = [
   {
     id: 'M1',
     expect: 'red',
-    guard: 'derived coverage — a `fixed` member this gate does not pack',
+    guard: 'derived coverage — a PUBLISHABLE package this gate does not pack',
     apply: () => mutate(SMOKE, '    [aliasTarball, aliasPkgDir],\n', ''),
     restore: () => git('checkout', '--', '.'),
   },
