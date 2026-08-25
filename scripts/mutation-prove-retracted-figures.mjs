@@ -233,13 +233,16 @@ assertTreeClean('after M9');
 console.log('── planting M10: a ledger pattern widened back to the over-broad form');
 // Restores the exact over-broad pattern round-5 review found: bare "9 restarts"
 // flags the bun lane's own true sentence. The negative corpus must catch it.
+// INTERPOLATED, never written as a literal — the JSON marker-key rule from M1
+// applies here too. Writing `"<marker> widened"` inline is what made the residue
+// scan red on the previous commit, which is the SEVENTH reproduction of this
+// PR's own defect class and the second inside a fix for it. The lesson is not
+// "be careful": it is that the literal must never be typeable in a tracked file,
+// so every site interpolates the harness constant.
 mutate(
   ledgerSnap,
   '        "9 restarts in 27 nights",\n        "churn: 9 restarts"',
-  '        "9 restarts",\n        "churn: 9 restarts",\n        "KNEXT-MUTATION widened"'.replace(
-    'KNEXT-MUTATION',
-    MUTATION_MARKER,
-  ),
+  `        "9 restarts",\n        "churn: 9 restarts",\n        "${MUTATION_MARKER} widened"`,
 );
 check('M10', 'an over-broad pattern that flags a TRUE sentence must go red', 1, runSpec(SPEC));
 recordMutation();
