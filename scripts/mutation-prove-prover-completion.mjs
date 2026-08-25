@@ -133,8 +133,13 @@ const PLAN = [
     title: 'preflight accepts a missing anchor',
     desc: 'a stale anchor must be caught before anything is planted',
     expected: 1,
-    anchor: '  const stale = anchorCounts.filter((a) => a.count !== 1)',
-    replacement: '  const stale = anchorCounts.filter((a) => a.count > 1)',
+    // Anchored on the PREDICATE, not on the statement's layout. The first
+    // version spanned the whole `const stale = anchorCounts.filter(...)` line,
+    // and biome had already reflowed that chain across three lines — so the
+    // anchor did not resolve. Exactly the M10 failure, caught this time by the
+    // preflight before anything was planted, which is what the preflight is for.
+    anchor: '(a) => a.count !== 1',
+    replacement: '(a) => a.count > 1',
   },
   {
     id: 'C7',
