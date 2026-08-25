@@ -41,10 +41,15 @@ re-derived by an adversarial reviewer from the raw artifacts:
   nights, 26 of 27 at `778/0/0`, `runAttempt: 1` throughout — **zero re-runs, zero nights lost to
   a test failure**. The gate is not flaky.
 - **#710's bun-lane red is TRUE and honest.** Deterministic Bun ≤1.3.14 gaps reproducing 4/4 runs,
-  already marked ❌ in the matrix. Explicitly **not** quarantined: ADR-0007 §c.2's bar is a *flake*
-  bar, and quarantining a permanent gap launders it into apparent green.
-- **What actually blocks the 14-night v1.0 gate is harness-fingerprint churn** — 9 restarts in 27
-  nights, longest stable streak 7 — because a fingerprint change restarts the window. That is a
+  already marked ❌ in the matrix. Explicitly **not** quarantined — on ADR-0007 §(c)'s *scope*, not
+  its evidence bar: §(c) is the **flake**-quarantine ledger (§c.1 per-case only, file-level
+  confined to §(d)'s one named family, which expires on the upstream-fix ref bump), and a
+  permanent upstream runtime gap is neither flake nor expirable. Quarantining it launders a known
+  gap into apparent green. (§c.2's "one FINAL post-retry failure" is a *floor* against pre-emptive
+  quarantines; a deterministic red clears it trivially, so it is not what excludes this.)
+- **What actually blocks the 14-night v1.0 gate is harness-fingerprint churn** — **10 restarts**
+  across the 27 fingerprinted nights, longest stable streak 7 — because a fingerprint change
+  restarts the window. That is a
   tractable, named engineering problem, not an unreachable flake bar.
 
 Landed as #846, with five defects found in the supporting machinery by review — the important one

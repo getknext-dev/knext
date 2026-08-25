@@ -37,11 +37,19 @@ Four bun weeklies retain a `compat-run-ledger`: `30738274907` (08-02, 774/4, sha
 `app-dir/parallel-routes-root-param-dynamic-child`, `middleware-fetches-with-any-http-method`, plus
 `edge-compiler-can-import-blob-assets` on 08-02 only. Named cases are in the findings doc.
 
-Discriminators: deterministic across 4/4 ledgered and 6/6 job-level runs; node lane 778/0 on 28 of
-28 ledgered nights on identical infra; `kind: timeout` at exactly 60000 ms is a per-*case* hang and
-runner loss has the opposite signature on file (`30790778590` lost a shard and reported *no*
-summary and *zero* failures); the mechanism is already root-caused upstream in
+Discriminators: deterministic across 4/4 ledgered and 6/6 job-level runs; node lane `failed: 0` on
+28 of 28 ledgered nights on identical infra, at the full 778/0/0 on 27 of 28; the bun reds are
+**complete-but-red** (`expectedTotal` met by `passed + failed`, `truncated: false`, `notRun: 0`,
+`status: "reported"`) whereas runner loss is **absence** — `30790778590` produced no shard-16 entry
+at all and *zero* failures; the mechanism is already root-caused upstream in
 `docs/compat/upstream-bun-sandbox-fetch-bug.md` and persists on Bun 1.4.0-canary.
+
+> **Corrected in the fix round (see below).** This paragraph previously read "`kind: timeout` at
+> exactly 60000 ms is a per-*case* hang". That form does not hold: the reported `kind` alternates
+> run to run for the same file, so the timeout constant cannot carry the argument. The shipped doc
+> already retracted it; this report had kept the retracted form, which is why it is replaced above
+> rather than annotated in place. The structural discriminator is stronger and survives the
+> alternation.
 
 **Not a release blocker** — the published claim is the Node row, which excludes Bun in terms, and
 the Bun row is already ❌. Not quarantining is correct: ADR-0007 §c.2's bar is a *flake* bar.
@@ -53,11 +61,16 @@ escalation, not a drive-by edit.
 
 Over all 32 scheduled runs with retained ledgers (2026-07-28 → 08-24; 28 node, 4 bun):
 
-- distinct node-lane tests that flake: **0** (all 28 nights `failed: 0` in all 16 shards)
+- distinct node-lane tests that flake: **0** (all 28 nights `failed: 0` in every shard that
+  reported; 27 nights reported all 16 shards at 778/0/0, and 08-03 reported 15 at 730/0/0)
 - runs that went red-then-green on re-run with no code change: **0**
-- re-runs of this workflow in the window at all: **0** — asserted **twice, independently**: the
-  ledger's own `runAttempt` is 1 on all 32, *and* the API's `run_attempt` is 1 on all 32 with zero
-  runs above 1
+- re-runs of this workflow in the window at all: **0** — from **one source read two ways**, not two
+  independent ones: the API's `run_attempt` is 1 on all 32 (and on all 72 scheduled runs ever, zero
+  above 1), and the ledger's `runAttempt` is 1 on all 32 — but the workflow sets
+  `RUN_ATTEMPT: ${{ github.run_attempt }}` and the ledger script writes it straight through, so it
+  is the same counter by a second transport, and strictly weaker (an attempt-1 artifact says `1`
+  regardless of what happens later). The API reading is authoritative; the ledger corroborates at
+  write time
 - the single node red (`30790778590`) is infrastructure loss: `failed: 0`, shard 16/16 uploaded no
   summary
 
@@ -94,10 +107,12 @@ the hole that leaves is stated rather than hidden.
 
 ## SCANNED vs ENUMERATED
 
-**SCANNED** — the `compat-suite-*` identifier check and the deflection check (86 tracked
-CI/script files plus `docs/compat-matrix.md`); all 135 runs of workflow `300291864`, filtered to
-the 71 scheduled ones; `run_attempt` over every scheduled run in the window; per-shard totals over
-every retained ledger.
+**SCANNED** — the `compat-suite-*` identifier check and the deflection check (**75** tracked
+CI/script files — 20 workflows + 55 scripts — plus `docs/compat-matrix.md` = **76** in the shape
+scan; the 86 this line previously carried was the pre-exclusion count, taken before this round
+excluded the 11 tracked `scripts/mutation-prove-*.mjs` provers — 75 + 11 = 86); all **136** runs of
+workflow `300291864` as at 2026-08-25, filtered to the **72** scheduled ones (135/71 at first
+measurement); `run_attempt` over every scheduled run; per-shard totals over every retained ledger.
 
 **ENUMERATED** — the six bun-lane runs pulled for job-level attribution (`32621148829`,
 `31929677335`, `31297820716`, `30738274907`, `30193384289`, `29678368535`), chosen as the Sunday
@@ -106,7 +121,7 @@ at shard level over 6.
 
 ## Could not be established
 
-1. **Anything before 2026-07-28.** 39 of the 71 scheduled runs have no retained
+1. **Anything before 2026-07-28.** 39 of the 72 scheduled runs have no retained
    `compat-run-ledger` — expired or predating it. Readable at job level at best; unfalsifiable in
    either direction on failing-test detail. Same retention limit the 2026-08-04 comment on #545 hit.
 2. **Whether the bun red clears on Bun stable ≥ 1.4.** Canary evidence says *partially*, the lane
