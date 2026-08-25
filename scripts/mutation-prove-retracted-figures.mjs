@@ -189,7 +189,11 @@ restore(coreSnap);
 assertTreeClean('after M4');
 
 console.log('── planting M5: issue scanning neutered — the gate would inspect nothing');
-mutate(coreSnap, '  return [...found].sort((a, b) => a - b);', '  return [];');
+mutate(
+  coreSnap,
+  '    if (!byKey.has(key)) byKey.set(key, { owner: owner ?? null, repo: repo ?? null, number });',
+  '    if (false) byKey.set(key, { owner: owner ?? null, repo: repo ?? null, number });',
+);
 check('M5', 'a scan that finds no cited issues must go red', 1, runSpec(SPEC));
 recordMutation();
 restore(coreSnap);
@@ -262,7 +266,7 @@ console.log('── planting NC (NEGATIVE control): an inert edit to the same fi
 // `mutate()` appends its residue marker as a trailing comment, which is exactly
 // the inert change wanted here: the same file is edited, the same harness path
 // runs, and nothing the gate depends on moves.
-mutate(coreSnap, '  const found = new Set();', '  const found = new Set();');
+mutate(coreSnap, '  const byKey = new Map();', '  const byKey = new Map();');
 check('NC', 'an inert edit must leave the gate GREEN', 0, runSpec(SPEC));
 recordMutation();
 restore(coreSnap);
