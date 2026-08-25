@@ -56,13 +56,14 @@ function clean(when) {
 }
 
 /** Exactly-once anchored substitution. A miss ABORTS — a silent no-op would grade green. */
-function mutate(file, anchor, replacement) {
+function mutate(file, anchor, replacement, checkOnly = false) {
   const s = readFileSync(file, 'utf8');
   const n = s.split(anchor).length - 1;
   if (n !== 1) {
     console.error(`ABORT: anchor occurs ${n}x in ${file} (expected 1)`);
     process.exit(1);
   }
+  if (checkOnly) return;
   writeFileSync(file, s.replace(anchor, replacement));
 }
 
@@ -71,7 +72,7 @@ const MUTATIONS = [
     id: 'M1',
     expect: 'red',
     guard: 'derived coverage — a PUBLISHABLE package this gate does not pack',
-    apply: () => mutate(SMOKE, '    [aliasTarball, aliasPkgDir],\n', ''),
+    apply: (checkOnly) => mutate(SMOKE, '    [aliasTarball, aliasPkgDir],\n', '', checkOnly),
     restore: () => git('checkout', '--', '.'),
   },
   {
@@ -87,7 +88,7 @@ const MUTATIONS = [
     // gate — it exited 0. That is the fix working, not a hole, but dropping a member
     // from `fixed` still ships a broken set, so the mutation moves to the guard that
     // owns it rather than being deleted.
-    apply: () => mutate(CHANGESET, ', "kn-next"]]', ']]'),
+    apply: (checkOnly) => mutate(CHANGESET, ', "kn-next"]]', ']]', checkOnly),
     restore: () => git('checkout', '--', '.'),
   },
   {
@@ -97,8 +98,13 @@ const MUTATIONS = [
     // M1 proves a publishable package left unpacked fails. This proves the converse,
     // which nothing else covered once M2 stopped applying: mark a packed package
     // private and it leaves the publishable set while still being packed.
-    apply: () =>
-      mutate(LIB_PKG, '"name": "@getknext/lib",', '"name": "@getknext/lib",\n  "private": true,'),
+    apply: (checkOnly) =>
+      mutate(
+        LIB_PKG,
+        '"name": "@getknext/lib",',
+        '"name": "@getknext/lib",\n  "private": true,',
+        checkOnly,
+      ),
     restore: () => git('checkout', '--', '.'),
   },
   {
@@ -139,7 +145,7 @@ const MUTATIONS = [
     expect: 'red',
     graded: 'shape',
     guard: 'the derivation replaced by a hardcoded list that names every package publishable TODAY',
-    apply: () =>
+    apply: (checkOnly) =>
       mutate(
         SMOKE,
         '  const publishable = publishablePackages(\n' +
@@ -147,6 +153,7 @@ const MUTATIONS = [
           '    changesetConfig.ignore ?? [],\n' +
           '  ).map((p) => p.name);',
         "  const publishable = ['@getknext/core', '@getknext/lib', '@getknext/db', 'kn-next'];",
+        checkOnly,
       ),
     restore: () => git('checkout', '--', '.'),
   },
@@ -158,11 +165,12 @@ const MUTATIONS = [
     // Round 2 of review found this uncovered by all eight declared mutations, and its
     // own mutation survived both graders. Graded by the shape spec because the gate
     // cannot see it: the derived and hardcoded forms check the same set TODAY.
-    apply: () =>
+    apply: (checkOnly) =>
       mutate(
         SMOKE,
         '  const entries = packed.map((p) => ({',
         '  const entries = [corePkgDir, libPkgDir, dbPkgDir].map((p) => ({',
+        checkOnly,
       ),
     restore: () => git('checkout', '--', '.'),
   },
@@ -208,6 +216,19 @@ const runSpec = (spec) => {
     timeout: 10 * 60 * 1000,
   }).status;
 };
+
+// Preflight every anchored mutation BEFORE the first expensive run. An anchor
+// invalidated by an unrelated edit used to surface as an abort seven mutations and
+// twenty-five minutes in — which is how it surfaced on this very branch, when a
+// hardening of `changesetConfig.ignore` moved the text M6 anchors on. It is still an
+// ABORT and never a skip: a mutation whose anchor no longer matches proves nothing,
+// and a prover that quietly carried on would report a clean sweep it did not run.
+console.log('=== preflight: every anchored mutation must still match its subject ===');
+const anchoredCount = MUTATIONS.filter((m) => m.apply.length > 0).length;
+for (const m of MUTATIONS) {
+  if (m.apply.length > 0) m.apply(true);
+}
+console.log(`preflight ok: ${anchoredCount} anchored mutation(s) still match`);
 
 declareMutations(MUTATIONS.length);
 
