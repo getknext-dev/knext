@@ -66,29 +66,115 @@
  * Found by running this check against the real issues, not by inspection.
  */
 export function normalize(text) {
-  return String(text ?? '')
-    .replace(/^[ \t]*(?:>[ \t]*)+/gm, '') // blockquote markers, possibly nested
-    .replace(/^[ \t]*(?:[-*+]|\d+\.)[ \t]+/gm, '') // list markers
-    .replace(/[*_`~]/g, '')
-    .replace(/\s+/g, ' ')
-    .toLowerCase()
-    .trim();
+  return (
+    String(text ?? '')
+      .replace(/^[ \t]*(?:>[ \t]*)+/gm, '') // blockquote markers, possibly nested
+      .replace(/^[ \t]*(?:[-*+]|\d+\.)[ \t]+/gm, '') // list markers
+      // HTML tags and entities. GitHub RENDERS HTML in issue bodies, so
+      // `churn was <b>9</b> restarts` and `9&nbsp;restarts` read identically to
+      // the plain form on screen while evading a text match. That makes this a
+      // CARELESSNESS path, not only an adversarial one — anyone pasting
+      // HTML-formatted content republishes the figure invisibly.
+      .replace(/<[^>\n]{0,200}>/g, '')
+      .replace(/&nbsp;|&#160;|&#xa0;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      // Zero-width characters are not in JS `\s`, so they survive whitespace
+      // collapsing and split a pattern invisibly.
+      .replace(/[​-‍﻿]/g, '')
+      // Compatibility fold: NFKC maps fullwidth digits (９ → 9) and other
+      // presentation forms onto their plain equivalents. Non-breaking spaces
+      // become ordinary ones here too, before whitespace collapsing.
+      .normalize('NFKC')
+      .replace(/[*_`~]/g, '')
+      .replace(/\s+/g, ' ')
+      .toLowerCase()
+      .trim()
+  );
 }
 
 /**
- * Every issue number cited by a document — SCANNED, never enumerated.
+ * Every issue cited by a document — SCANNED, never enumerated.
  *
- * Matches both `#123` and full GitHub issue/PR URLs, so a document that links
- * rather than hash-references is still covered.
+ * Returns `{owner, repo, number}`, with `owner`/`repo` **null** meaning "the
+ * default repository". Carrying the owner and repo is not decoration: an
+ * earlier version captured only the NUMBER out of a
+ * `github.com/OWNER/REPO/issues/N` URL and threw the rest away, so the resolver
+ * fetched `repos/<default>/issues/N` — checking an **unrelated same-repo issue**
+ * that happens to share a number, while the real target was never scanned. That
+ * is worse than not supporting cross-repo citations at all, because it reports
+ * a confident verdict about the wrong subject.
+ *
+ * Three citation forms, because all three appear in practice:
+ *   - `#123`                     → default repo
+ *   - `owner/repo#123`           → that repo (the standard GitHub shorthand,
+ *                                  which the bare `#` lookbehind excluded)
+ *   - `github.com/owner/repo/issues/123` (or `/pull/123`) → that repo
  */
 export function citedIssues(docText) {
-  const found = new Set();
   const text = String(docText ?? '');
-  for (const m of text.matchAll(/(?<![\w/])#(\d{1,6})\b/g)) found.add(Number(m[1]));
-  for (const m of text.matchAll(/github\.com\/[\w.-]+\/[\w.-]+\/(?:issues|pull)\/(\d{1,6})/g)) {
-    found.add(Number(m[1]));
+  const byKey = new Map();
+  const add = (owner, repo, number) => {
+    const key = `${owner ?? ''}/${repo ?? ''}#${number}`;
+    if (!byKey.has(key)) byKey.set(key, { owner: owner ?? null, repo: repo ?? null, number });
+  };
+
+  // Full URLs first: most specific, and they must not be re-matched as bare
+  // `#N` later (they contain no `#`, so that is automatic, but order documents
+  // the intent).
+  for (const m of text.matchAll(/github\.com\/([\w.-]+)\/([\w.-]+)\/(?:issues|pull)\/(\d{1,6})/g)) {
+    add(m[1], m[2], Number(m[3]));
   }
-  return [...found].sort((a, b) => a - b);
+  // `owner/repo#N` shorthand.
+  for (const m of text.matchAll(/(?<![\w/.-])([\w.-]+)\/([\w.-]+)#(\d{1,6})\b/g)) {
+    add(m[1], m[2], Number(m[3]));
+  }
+  // Bare `#N`, default repo. The lookbehind keeps it off `owner/repo#N` (handled
+  // above) and off colour literals like `#fff`.
+  for (const m of text.matchAll(/(?<![\w/.-])#(\d{1,6})\b/g)) add(null, null, Number(m[1]));
+
+  return [...byKey.values()].sort(
+    (a, b) =>
+      String(a.owner ?? '').localeCompare(String(b.owner ?? '')) ||
+      String(a.repo ?? '').localeCompare(String(b.repo ?? '')) ||
+      a.number - b.number,
+  );
+}
+
+/**
+ * Assemble every scannable source for one citation from already-fetched payloads.
+ *
+ * Pure on purpose. The fetching lives in `verify-retracted-figures.mjs`, but the
+ * DECISION about which surfaces count belongs here, where it can be unit-tested
+ * offline and mutated. An earlier version assembled sources inline in the
+ * resolver, which made the pull-request branch untestable — and untestable
+ * branches are exactly what rots without anyone noticing.
+ *
+ * A cited PULL REQUEST carries two surfaces `issues/N/comments` does not: review
+ * bodies and inline review comments. #846 — the PR this work posted a correction
+ * on — is that shape, so a retracted figure in a review body on a cited PR would
+ * have gone unseen, and nothing said so.
+ *
+ * @param {string} label human-readable citation label, e.g. `#846`
+ * @param {{body?: string, pull_request?: unknown}} issue
+ * @param {Array<{id: number|string, body?: string}>} comments
+ * @param {Array<{id: number|string, body?: string}>} [reviews]
+ * @param {Array<{id: number|string, body?: string}>} [reviewComments]
+ */
+export function assembleSources(label, issue, comments, reviews = [], reviewComments = []) {
+  const sources = [
+    { ref: `${label} body`, body: issue?.body ?? '' },
+    ...comments.map((c) => ({ ref: `${label} comment ${c.id}`, body: c.body ?? '' })),
+  ];
+  if (issue?.pull_request) {
+    sources.push(
+      ...reviews.map((r) => ({ ref: `${label} review ${r.id}`, body: r.body ?? '' })),
+      ...reviewComments.map((c) => ({
+        ref: `${label} review comment ${c.id}`,
+        body: c.body ?? '',
+      })),
+    );
+  }
+  return sources;
 }
 
 /**

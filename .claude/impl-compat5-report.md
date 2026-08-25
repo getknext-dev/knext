@@ -706,17 +706,20 @@ PASS in that world. That is round 3's own disclosed near-miss, adopted here.
 
 Post-proof state, verified independently of the prover's own assertions: `git diff --stat HEAD`
 **empty** (core and ledger byte-identical), `git status --porcelain` shows only the two untracked
-review files, `scripts/scan-mutation-residue.mjs` exit **0**, `tests/mutation-prover-lane.test.ts`
-**52 passed**, exit 0.
+review files, `tests/mutation-prover-lane.test.ts` **52 passed**, exit 0.
+
+> **CORRECTED IN ROUND 5 — this paragraph asserted `scripts/scan-mutation-residue.mjs` exit 0, and
+> the commit carrying that sentence made it FALSE.** The scan was exit 0 when measured; the prose
+> written to describe the fix then quoted the scanner's output *verbatim, marker and all*, and that
+> quote is itself residue. So the tree the claim shipped on reds. See the round-5 section for the
+> fix and for why the false assertion is treated as part of the defect rather than a typo.
 
 ### A defect I introduced, caught by the repo's own guard
 
-The first proof run passed 7/7 — and then the residue scan failed against a **clean tree**:
-
-```
-Mutation residue in 1 tracked file(s):
-  scripts/mutation-prove-retracted-figures.mjs:136  ... "KNEXT-MUTATION-original-figures": [
-```
+The first proof run passed 7/7 — and then the residue scan failed against a **clean tree**. The
+scanner named one tracked file and one line: `scripts/mutation-prove-retracted-figures.mjs:136`, the
+JSON key planted by mutation M1. *(The offending line is deliberately **not** quoted here. Quoting
+it verbatim is what turned this very paragraph into residue in round 5 — see below.)*
 
 Not a false positive. M1 embeds the residue marker in a JSON **key** (JSON has no comment syntax, so
 a `//` marker would make the ledger unparseable and M1 would red for a syntax error rather than for

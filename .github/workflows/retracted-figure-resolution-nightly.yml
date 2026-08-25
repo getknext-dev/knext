@@ -53,6 +53,12 @@ on:
 
 permissions:
   contents: read
+  # The resolver reads issue bodies and comments. The repo is public, so
+  # `contents: read` alone would probably suffice — but "probably" is not a
+  # scope declaration, and if it were wrong the failure would be a permanently
+  # red nightly (404 → unreachable → exit 1), which is the shape people learn to
+  # ignore. Declared explicitly rather than relied on implicitly.
+  issues: read
 
 jobs:
   resolve-retracted-figures:
@@ -73,3 +79,79 @@ jobs:
           # the check only reads issue bodies and comments.
           GH_TOKEN: ${{ github.token }}
         run: node scripts/verify-retracted-figures.mjs --repo "${{ github.repository }}"
+
+  # ── Idempotent pinned alert (same pattern as action-pin-resolution-nightly) ──
+  # A silent nightly is the same as no check. This gate's entire subject is a
+  # defect class that survived three review rounds BECAUSE NOBODY WAS LOOKING, so
+  # a red run visible only in the Actions tab is the predictable end state —
+  # `workflow.md`'s own "efficacy is unobservable until it has already failed".
+  # On a failed SCHEDULED run, create-or-update ONE pinned issue; an already-open
+  # alert gets a COMMENT per red night rather than a duplicate issue.
+  nightly-red-alert:
+    name: Nightly red alert (pinned issue)
+    needs: [resolve-retracted-figures]
+    # always() so this is not skipped when the check fails; the needs-result
+    # check fires it ONLY on failure; the event check scopes it to the schedule
+    # so a dispatch experiment never files or updates the pinned issue.
+    if: >-
+      always() &&
+      github.event_name == 'schedule' &&
+      needs.resolve-retracted-figures.result == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Create or update the "retracted figure still published" issue (idempotent)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CHECK_RESULT: ${{ needs.resolve-retracted-figures.result }}
+        run: |
+          set -euo pipefail
+          # The idempotency KEY is this fixed literal title — the lookup and the
+          # create MUST share it, so keep it a constant (never interpolated).
+          title='Retracted figure still published on a cited issue'
+          body="The nightly retracted-figure check FAILED. Either a figure recorded in
+          \`docs/compat/retracted-figures.json\` still stands uncorrected on an issue the release
+          documents cite, or one of those issues could not be read.
+
+          **Read the job log first** — it names, per finding: the figure id, the exact source
+          (issue body / comment / PR review), the surface form that matched, and the corrected
+          value.
+
+          - Run: ${RUN_URL}
+          - Check job result: ${CHECK_RESULT}
+
+          **Why this is not a formatting nit.** Two release documents tell readers those issues
+          carry the corrected findings. When they do not, the documents are asserting something
+          false about published evidence — which is the whole defect this gate exists to close,
+          and which reproduced six times across three review rounds before it was gated.
+
+          **Triage**
+          - *Figure still published* — post a correcting COMMENT on that issue quoting the wrong
+            figure and stating the right one. Do NOT silently edit the original body, and do NOT
+            delete or widen the ledger entry: a source discharges a figure only by quoting it AND
+            stating the corrected value.
+          - *Unreachable / 404* — treated as a FAILURE, never a pass. A checker that goes green
+            when it cannot see its subject reports \"nothing is wrong\" and \"I could not look\"
+            identically. Re-run to confirm before assuming it was transient.
+          - *A cited issue is locked* — the remedy (post a comment) is unavailable; unlock it, or
+            remove the citation from the document that makes it load-bearing.
+
+          Re-run this workflow to confirm green, then close this issue."
+          # Idempotency: exactly-one open alert issue. --limit 100 explicitly
+          # (gh defaults to 30) so the pinned alert cannot fall off the first
+          # page and make every red night file a NEW issue.
+          existing="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 100 \
+            --json number,title \
+            --jq "[.[] | select(.title == \"${title}\")][0].number // empty")"
+          if [ -n "${existing}" ]; then
+            echo "updating existing alert issue #${existing}"
+            gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
+          else
+            echo "creating the alert issue"
+            new_url="$(gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}")"
+            new_num="${new_url##*/}"
+            gh issue pin "${new_num}" --repo "${GITHUB_REPOSITORY}" || echo "::warning::could not pin issue #${new_num} (non-fatal)"
+          fi

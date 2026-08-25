@@ -24,7 +24,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { citedIssues, findUncorrected } from './lib/retracted-figures.mjs';
+import { assembleSources, citedIssues, findUncorrected } from './lib/retracted-figures.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const LEDGER = 'docs/compat/retracted-figures.json';
@@ -48,15 +48,60 @@ function repoSlug() {
   return process.env.GITHUB_REPOSITORY ?? 'getknext-dev/knext';
 }
 
-/** Fetch JSON from the GitHub API. Throws — never returns a falsy "nothing". */
+/**
+ * Fetch JSON from the GitHub API. Throws — never returns a falsy "nothing".
+ *
+ * `--slurp` rather than raw `--paginate`. An earlier version stitched
+ * concatenated pages with `out.replace(/\]\s*\[/g, ',')`, which is a **textual**
+ * edit over the whole payload including the inside of JSON string values: an
+ * issue body reading `see refs [a] [b] and note 9 restarts` was silently parsed
+ * as `see refs [a,b] and note 9 restarts`. Still valid JSON, quietly altered —
+ * which can break a pattern match (false green) or a correction's quote (false
+ * red). `--slurp` returns a real array of pages, so nothing is rewritten.
+ */
 function api(path) {
-  const out = execFileSync('gh', ['api', path, '--paginate'], {
+  const out = execFileSync('gh', ['api', path, '--paginate', '--slurp'], {
     encoding: 'utf8',
     maxBuffer: 128 * 1024 * 1024,
   });
-  // `--paginate` concatenates pages as separate JSON arrays; stitch them.
-  const chunks = out.replace(/\]\s*\[/g, ',').trim();
-  return JSON.parse(chunks);
+  const pages = JSON.parse(out);
+  if (!Array.isArray(pages)) throw new Error(`unexpected --slurp payload for ${path}`);
+  // A single-object endpoint slurps to `[obj]`; a list endpoint to `[[...], …]`.
+  return pages.every((p) => Array.isArray(p)) ? pages.flat() : pages[0];
+}
+
+/**
+ * Read every comment surface of one citation.
+ *
+ * A cited **pull request** carries two surfaces `issues/N/comments` does not:
+ * review bodies (`pulls/N/reviews`) and inline review comments
+ * (`pulls/N/comments`). #846 — the PR this very work posted a correction on — is
+ * exactly that shape, so a retracted figure in a review body on a cited PR would
+ * have gone unseen. Both are now read; `issue.pull_request` is what distinguishes
+ * a PR from an issue in the REST payload.
+ */
+function readSources(slug, ref) {
+  const n = ref.number;
+  const label = ref.owner ? `${ref.owner}/${ref.repo}#${n}` : `#${n}`;
+  const issue = api(`repos/${slug}/issues/${n}`);
+  const comments = api(`repos/${slug}/issues/${n}/comments`);
+  if (!issue || typeof issue !== 'object' || !Array.isArray(comments)) {
+    // A subprocess that SUCCEEDS while returning nothing usable is how a checker
+    // goes green without seeing its subject. Classed as unreadable, not empty.
+    throw new Error('API returned an unusable payload (no issue object or no comment array)');
+  }
+  let reviews = [];
+  let reviewComments = [];
+  if (issue.pull_request) {
+    reviews = api(`repos/${slug}/pulls/${n}/reviews`);
+    reviewComments = api(`repos/${slug}/pulls/${n}/comments`);
+    if (!Array.isArray(reviews) || !Array.isArray(reviewComments)) {
+      throw new Error('API returned an unusable payload for the PR review surfaces');
+    }
+  }
+  // WHICH surfaces count is a decision, and it lives in the pure core so it can
+  // be unit-tested and mutated offline. This function only fetches.
+  return assembleSources(label, issue, comments, reviews, reviewComments);
 }
 
 function main() {
@@ -67,41 +112,48 @@ function main() {
     process.exit(1);
   }
 
-  const issues = new Set();
+  const byKey = new Map();
   for (const doc of CITING_DOCS) {
     const text = readFileSync(join(REPO_ROOT, doc), 'utf8');
-    for (const n of citedIssues(text)) issues.add(n);
+    for (const ref of citedIssues(text)) {
+      byKey.set(`${ref.owner ?? ''}/${ref.repo ?? ''}#${ref.number}`, ref);
+    }
   }
-  if (issues.size === 0) {
+  const refs = [...byKey.values()];
+  if (refs.length === 0) {
     console.error('FAIL: no cited issues found in the citing documents — the scan is vacuous.');
     process.exit(1);
   }
 
   console.log(`Ledger: ${ledger.length} retracted figure(s).`);
-  console.log(`Cited issues discovered by scan: ${[...issues].sort((a, b) => a - b).join(', ')}`);
+  console.log(
+    `Cited issues discovered by scan: ${refs
+      .map((r) => (r.owner ? `${r.owner}/${r.repo}#${r.number}` : `#${r.number}`))
+      .join(', ')}`,
+  );
 
   const offences = [];
   const unreachable = [];
-  for (const n of [...issues].sort((a, b) => a - b)) {
-    let issue;
-    let comments;
+  for (const ref of refs) {
+    // Each citation is resolved against the repository it NAMES, not against the
+    // default one. Discarding the owner/repo meant a cross-repo citation was
+    // checked against an unrelated same-repo issue that happened to share a
+    // number — a confident verdict about the wrong subject.
+    const targetSlug = ref.owner ? `${ref.owner}/${ref.repo}` : slug;
+    const label = ref.owner ? `${ref.owner}/${ref.repo}#${ref.number}` : `#${ref.number}`;
+    let sources;
     try {
-      issue = api(`repos/${slug}/issues/${n}`);
-      comments = api(`repos/${slug}/issues/${n}/comments`);
+      sources = readSources(targetSlug, ref);
     } catch (err) {
       // Not a pass. A 404 on a number that is not really an issue is still a
       // thing we could not read, and it is reported as such rather than skipped.
-      unreachable.push(`#${n}: ${String(err.message ?? err).split('\n')[0]}`);
+      unreachable.push(`${label}: ${String(err.message ?? err).split('\n')[0]}`);
       continue;
     }
-    const sources = [
-      { ref: `#${n} body`, body: issue.body ?? '' },
-      ...comments.map((c) => ({ ref: `#${n} comment ${c.id}`, body: c.body ?? '' })),
-    ];
     const found = findUncorrected(sources, ledger);
     offences.push(...found);
     console.log(
-      `  #${n}: ${sources.length} source(s), ${found.length} uncorrected retracted figure(s)`,
+      `  ${label}: ${sources.length} source(s), ${found.length} uncorrected retracted figure(s)`,
     );
   }
 

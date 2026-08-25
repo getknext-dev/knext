@@ -5,7 +5,7 @@
  *
  * WHAT IS BEING PROVED, AND WHY IT NEEDS PROVING
  * ----------------------------------------------
- * This gate exists because the same defect reproduced five times across three
+ * This gate exists because the same defect reproduced SIX times across three
  * review rounds: a figure corrected in one place while another copy went on
  * publishing the old value. A gate against a recurring defect that turns out to
  * be decoration is worse than none — it converts an open problem into a
@@ -19,8 +19,17 @@
  *   M4  blockquote stripping removed  — the live false negative, re-armed
  *   M5  issue scanning neutered       — a gate that inspects no issues
  *   M6  offence reporting suppressed  — finds offences, reports none
- *   NC  NEGATIVE CONTROL: a comment cosmetically relabelled `## Correction`
- *       must NOT discharge anything, because the rule keys off the claim.
+ *
+ * M7–M10 pin the round-5 fixes. Each closed a hole review found by RUNNING the
+ * gate rather than reading it, so each needs a mutation or it can silently
+ * reopen:
+ *   M7  cross-repo citation loses its owner/repo — resolves the WRONG repo
+ *   M8  a cited PR loses its review surfaces     — under-scanned, silently
+ *   M9  HTML-tag stripping removed               — `<b>9</b> restarts` evades
+ *   M10 a ledger pattern widened                 — flags a TRUE sentence
+ *
+ *   NC  NEGATIVE CONTROL: an inert edit must leave the gate GREEN. A prover
+ *       with no negative control cannot tell a guard from a tripwire.
  *
  * DISCIPLINE (`.claude/rules/workflow.md`)
  *   - Every verdict branches on the runner's EXIT CODE; output is never parsed,
@@ -94,7 +103,7 @@ function writeCanary(path, shouldPass) {
   );
 }
 
-declareMutations(7);
+declareMutations(11);
 
 console.log('── baseline: the unmutated gate is green');
 assertTreeClean('baseline');
@@ -193,6 +202,50 @@ recordMutation();
 restore(coreSnap);
 assertTreeClean('after M6');
 
+// ── M7–M10: the round-5 fixes. Each closed a hole review found by RUNNING the
+// gate, so each needs a mutation or it can silently reopen.
+
+console.log('── planting M7: cross-repo citations lose their owner/repo again');
+mutate(
+  coreSnap,
+  '    add(m[1], m[2], Number(m[3]));\n  }\n  // `owner/repo#N` shorthand.',
+  '    add(null, null, Number(m[3]));\n  }\n  // `owner/repo#N` shorthand.',
+);
+check('M7', 'discarding owner/repo checks the WRONG repository', 1, runSpec(SPEC));
+recordMutation();
+restore(coreSnap);
+assertTreeClean('after M7');
+
+console.log('── planting M8: a cited PR loses its review surfaces');
+mutate(coreSnap, '  if (issue?.pull_request) {', '  if (false && issue?.pull_request) {');
+check('M8', 'a figure in a PR review body must still be seen', 1, runSpec(SPEC));
+recordMutation();
+restore(coreSnap);
+assertTreeClean('after M8');
+
+console.log('── planting M9: HTML-tag stripping removed from the normaliser');
+mutate(coreSnap, "      .replace(/<[^>\\n]{0,200}>/g, '')", '');
+check('M9', 'inline HTML must not hide a retracted figure', 1, runSpec(SPEC));
+recordMutation();
+restore(coreSnap);
+assertTreeClean('after M9');
+
+console.log('── planting M10: a ledger pattern widened back to the over-broad form');
+// Restores the exact over-broad pattern round-5 review found: bare "9 restarts"
+// flags the bun lane's own true sentence. The negative corpus must catch it.
+mutate(
+  ledgerSnap,
+  '        "9 restarts in 27 nights",\n        "churn: 9 restarts"',
+  '        "9 restarts",\n        "churn: 9 restarts",\n        "KNEXT-MUTATION widened"'.replace(
+    'KNEXT-MUTATION',
+    MUTATION_MARKER,
+  ),
+);
+check('M10', 'an over-broad pattern that flags a TRUE sentence must go red', 1, runSpec(SPEC));
+recordMutation();
+restore(ledgerSnap);
+assertTreeClean('after M10');
+
 /**
  * NC — NEGATIVE CONTROL, and the one that matters most for this gate.
  *
@@ -223,4 +276,4 @@ if (failures.length) {
   for (const f of failures) console.error(`  - ${f}`);
   process.exit(1);
 }
-console.log('\n7 mutation(s) behaved as required (6 red, 1 negative control green), 0 survived.');
+console.log('\n11 mutation(s) behaved as required (10 red, 1 negative control green), 0 survived.');

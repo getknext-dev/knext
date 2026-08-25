@@ -64,6 +64,21 @@ flattering us: the audit silently dropped runs, and a dropped night **merged two
 overstating stability. Fixed and mutation-proved in both directions. #545 and #710 carry the
 corrected findings; #670 remains in the blocker-1 family (it needs a publicly-pullable image).
 
+> **How that claim is kept true, and what it does not cover.** "The issues carry the corrected
+> findings" is load-bearing, and it was **false for three review rounds** — corrections landed in
+> this repo while the issues went on publishing the retracted figures. It is now checked rather
+> than asserted: [`docs/compat/retracted-figures.json`](../compat/retracted-figures.json) records
+> every retracted figure with its corrected value, and
+> [`retracted-figure-resolution-nightly.yml`](../../.github/workflows/retracted-figure-resolution-nightly.yml)
+> resolves each one against every issue these documents cite, failing if any still stands
+> uncorrected — and failing, too, if it cannot read them, because a checker that goes green when it
+> cannot see its subject is worse than none.
+>
+> **The limit, stated here rather than only in the ledger:** that check can only test figures
+> someone recorded as retracted. A retraction whose author never adds a ledger entry is not caught,
+> and no scan can catch it, because nothing in the tree marks the old value as wrong. The gate
+> narrows the failure mode; it does not eliminate it.
+
 ### ~~Blocker 3 (original text, retained for provenance)~~
 The project's north-star credibility claim is compat-suite-backed parity. Today: the **bun-lane
 weekly is RED** (#710), the suite is **shard-level flaky** (#545 — "the v1.0 gate is unreachable
