@@ -1421,7 +1421,11 @@ function render(gate) {
               .filter(([, v]) => typeof v !== 'object')
               .map(([k, v]) => `${k}=${v}`)
               .join(' ')
-          : JSON.stringify(c.measured);
+          : // `JSON.stringify(undefined)` is the VALUE `undefined`, not a string, and an
+            // absent `measured` key is how a criterion says "nobody has run it" by
+            // omission. Slicing that threw — the printer crashed on data every other
+            // rule handles.
+            String(JSON.stringify(c.measured));
       rows.push({ phase: String(phase.phase), id: c.id, state, value: value.slice(0, 96) });
     }
   }

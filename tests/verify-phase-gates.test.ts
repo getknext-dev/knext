@@ -1425,6 +1425,18 @@ describe('#753 — every relation the gate file can state is read by a checker',
     expect(code, stderr).toBe(0);
   });
 
+  it('rule 2: an ABSENT `measured` key is unmeasured, exactly as an explicit null is', () => {
+    // `isMeasured` tests both `!== null` and `!== undefined`, and the second half was
+    // uncovered: every shipped criterion carries an explicit `measured`. An absent key
+    // is the same state by omission — and if it read as MEASURED, rule 1 would demand
+    // a source for a number that is not there.
+    const g = load();
+    const p = phase(g, '5');
+    p.criteria = [{ id: 'P5-x', text: 't', kind: 'boolean', target: true }];
+    const { code, stderr } = runDetail(g);
+    expect(code, stderr).toBe(0);
+  });
+
   it('rule 4: an ABSENT target is a null target — JSON expresses `undefined` by omission', () => {
     // The `c.target === undefined` half was excused as "JSON cannot express
     // undefined". An absent KEY expresses it trivially; the exclusion only held
