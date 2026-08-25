@@ -269,9 +269,27 @@ describe('#753 — every relation the gate file can state is read by a checker',
     phase(g, '5').requires_phase = ['99', '99', '5'];
     expectFailure(
       g,
-      /`phase\.requires_phase` is declared READ but nothing in this validator reads it/,
+      /`phase\.requires_phase` is declared READ but no rule read it off the gate file/,
       declare('phase', 'requires_phase', { by: '8' }),
     );
+  });
+
+  it('rule 6c: binding is RECORDED CONSUMPTION — the validator’s own locals do not count', () => {
+    // Round 2 defeated the previous textual binding with fifteen names that appear
+    // as a property access somewhere in this file with nothing reading them off the
+    // gate file: `phase[relation]` / `phase[note]` are rule 8c's LOCAL VARIABLES
+    // holding 'gates' and 'gates_note', and `entry.inverse` / `entry.by` are reads
+    // on REGISTRY entries. `relation` and `inverse` are also the names an author
+    // would actually reach for, and neither trips RELATIONAL_NAME.
+    for (const name of ['relation', 'inverse', 'note', 'by', 'entry', 'key', 'level', 'pair']) {
+      const g = load();
+      (phase(g, '3') as Record<string, unknown>)[name] = ['5'];
+      expectFailure(
+        g,
+        new RegExp(`\`phase\\.${name}\` is declared READ but no rule read it off the gate file`),
+        declare('phase', name, { by: '8' }),
+      );
+    }
   });
 
   it('rule 6c: and once the same key is BOUND, its defects are all caught', () => {
@@ -313,6 +331,42 @@ describe('#753 — every relation the gate file can state is read by a checker',
     );
   });
 
+  it('rule 6c: an ORDERED key that does not say which way it points fails', () => {
+    // Without `edge`, rule 13 cannot orient the edge the key contributes, and the
+    // cycle walk would be reading an undirected graph.
+    expectFailure(
+      load(),
+      /`phase\.gates` is `ordered` but declares `edge: undefined` — it must be forward or reverse/,
+      declare('phase', 'gates', { by: '8/13', phaseRef: 'ordered', inverse: 'blocked_by' }),
+    );
+  });
+
+  it('rule 6c: binding is scoped to the LEVEL — a key read on criteria does not bind it on phases', () => {
+    // `target` is read off every criterion and off no phase. A flat set of property
+    // names would call `phase.target` bound; the tracker records `<level>.<key>`.
+    const g = load();
+    (phase(g, '3') as Record<string, unknown>).target = true;
+    expectFailure(
+      g,
+      /`phase\.target` is declared READ but no rule read it off the gate file/,
+      declare('phase', 'target', { by: '5' }),
+    );
+  });
+
+  it('rule 6c: the SCAN does not bind — reading a key to check it is declared is not consuming it', () => {
+    // `phase.relation` is PRESENT in the data here, so rule 6's scan reads it. If
+    // the scan ran on tracked data, that read alone would bind every key in the
+    // registry the moment it appeared in any gate file — the exact coincidence
+    // recorded consumption exists to stop being a binding.
+    const g = load();
+    (phase(g, '3') as Record<string, unknown>).relation = ['5'];
+    expectFailure(
+      g,
+      /`phase\.relation` is declared READ but no rule read it off the gate file/,
+      declare('phase', 'relation', { by: '8' }),
+    );
+  });
+
   it('rule 6c: an inverse that does not point home fails', () => {
     expectFailure(
       load(),
@@ -321,21 +375,107 @@ describe('#753 — every relation the gate file can state is read by a checker',
     );
   });
 
-  it('rule 6c: the --declare seam is refused without --file, so it cannot loosen the real gate dir', () => {
-    let code = 0;
-    let stderr = '';
-    try {
-      execFileSync('node', [SCRIPT, '--declare', 'phase.anything={"prose":"x"}'], {
-        cwd: REPO,
-        stdio: 'pipe',
-      });
-    } catch (e) {
-      const err = e as { status?: number; stderr?: Buffer };
-      code = err.status ?? 1;
-      stderr = String(err.stderr ?? '');
+  it('rule 6c: the --declare seam is refused against the REAL gate files', () => {
+    // Both ways in. The refusal used to be scoped to the ABSENCE of `--file`, so
+    // naming the real path reached it anyway — the docblock claimed the seam could
+    // "never loosen rule 6 for the file it exists to protect", and that was false.
+    const refuse = (args: string[]): { code: number; stderr: string } => {
+      try {
+        execFileSync('node', [SCRIPT, ...args], { cwd: REPO, stdio: 'pipe' });
+        return { code: 0, stderr: '' };
+      } catch (e) {
+        const err = e as { status?: number; stderr?: Buffer };
+        return { code: err.status ?? 1, stderr: String(err.stderr ?? '') };
+      }
+    };
+
+    for (const args of [
+      ['--declare', 'phase.anything={"prose":"x"}'], // directory mode
+      ['--file', GATE, '--declare', 'phase.anything={"prose":"x"}'], // named explicitly
+      ['--declare', 'phase.anything={"prose":"x"}', '--file', GATE], // seam before --file
+      ['--declare-pattern', 'phase.^zz_(.+)$={"prose":"x"}'],
+    ]) {
+      const { code, stderr } = refuse(args);
+      expect(code, `expected refusal for ${args.join(' ')}; stderr:\n${stderr}`).toBe(2);
+      expect(stderr).toMatch(/is a test seam and may not be used against a real gate file/);
     }
-    expect(code).toBe(2);
-    expect(stderr).toMatch(/--declare is a test seam and requires --file/);
+  });
+
+  // --- rule 6b/6c: the key PATTERNS half of the registry audit ---
+
+  it('rule 6b: a key PATTERN declared PROSE with a relational name fails', () => {
+    // Round 2: this half was LIVE code with no constructible failing case, because
+    // `--declare` writes only KEY_REGISTRY. Deleting the loop that feeds it left
+    // the suite green — decoration by this repo's own standard, one half over.
+    expectFailure(load(), /`phase\.\^gated_zz_\(\.\+\)\$` is declared PROSE/, [
+      '--declare-pattern',
+      'phase.^gated_zz_(.+)$={"prose":"who cares"}',
+    ]);
+  });
+
+  it('rule 6c: a key PATTERN whose phaseClaim names a relation that is not a phaseRef key fails', () => {
+    expectFailure(load(), /declares `phaseClaim\.relation: "nope"`, which is not a phaseRef key/, [
+      '--declare-pattern',
+      'phase.^why_zz_phase_(.+)$={"by":"8c","phaseClaim":{"relation":"nope","note":"nope_note"}}',
+    ]);
+  });
+
+  it('rule 6c: a key PATTERN whose phaseClaim names an undeclared note field fails', () => {
+    expectFailure(load(), /declares `phaseClaim\.note: "nope_note"`, which is not a declared key/, [
+      '--declare-pattern',
+      'phase.^why_zz_phase_(.+)$={"by":"8c","phaseClaim":{"relation":"gates","note":"nope_note"}}',
+    ]);
+  });
+
+  // --- rule 6e: PROSE decided by VALUE SHAPE, not by a ten-word vocabulary ---
+
+  it('rule 6e: a PROSE key whose value resolves to phase ids fails, whatever it is named', () => {
+    // Thirteen synonyms walked straight through RELATIONAL_NAME in round 2.
+    // `unblocks` is not exotic: the shipped file uses UNBLOCKED_3d_DISCHARGED as a
+    // status, and `(^|_)blocked` cannot match the `blocked` inside `unblocked`.
+    for (const name of [
+      'unblocks',
+      'unblocks_phase',
+      'follows_phase',
+      'precedes_phase',
+      'waits_for_phase',
+      'prerequisite_phase',
+      'needs_phase',
+      'enabled_by_phase',
+      'downstream_of_phase',
+      'must_complete_before_phase',
+      'invalidated_by_phase',
+      'triggers_phase',
+      'parent_phase',
+    ]) {
+      const g = load();
+      (phase(g, '3') as Record<string, unknown>)[name] = ['5'];
+      expectFailure(
+        g,
+        new RegExp(
+          `key \`${name}\` is declared PROSE but its value resolves to declared phase ids`,
+        ),
+        declare('phase', name, { prose: 'just commentary' }),
+      );
+    }
+  });
+
+  it('rule 6e: it reaches nested values too, where 6d’s vocabulary does not', () => {
+    const g = load();
+    (crit(g, 'P3d-1').evidence as Record<string, unknown>).unblocks_phase = '5';
+    expectFailure(g, /nested key `unblocks_phase` has a value that resolves to declared phase ids/);
+  });
+
+  it('rule 6e: an EMPTY array is not a reference — `gates: []` is a discharged gate', () => {
+    // "All zero elements resolve" is vacuous, and failing it would red the shape a
+    // discharged gate is required to take. Phase 3d ships `gates: []` today.
+    const g = load();
+    (phase(g, '3') as Record<string, unknown>).parent_phase = [];
+    const { code, stderr } = runDetail(
+      g,
+      declare('phase', 'parent_phase', { prose: 'commentary' }),
+    );
+    expect(code, stderr).toBe(0);
   });
 
   // --- rule 6d: a relational name hiding one level down ---
@@ -508,11 +648,50 @@ describe('#753 — every relation the gate file can state is read by a checker',
     expectFailure(g, /are related by 3\.gates \(which asserts an order\) AND by .*concurrent_with/);
   });
 
-  it('rule 13: an ordered relation may not run both ways between one pair', () => {
+  it('rule 13: the ordered relation must be ACYCLIC at EVERY cycle length', () => {
+    // Round 2's defeat: the check compared PAIRS, so length 2 failed and 3, 4 and 5
+    // all exited 0 — an ordering no phase on the cycle can ever satisfy. By this
+    // file's own argument, an enumerated list of cases is how the second one gets
+    // missed, and cycle length was the enumeration.
+    const blocked = (id: string, gates: string[]): Phase => ({
+      phase: id,
+      name: `s${id}`,
+      status: 'BLOCKED',
+      gates,
+    });
+    for (const n of [2, 3, 4, 5, 8]) {
+      const g = load();
+      const ids = Array.from({ length: n }, (_, i) => `x${i}`);
+      ids.forEach((id, i) => {
+        g.phases.push(blocked(id, [ids[(i + 1) % n]]));
+      });
+      expectFailure(g, /the ordered relation contains a cycle/);
+    }
+  });
+
+  it('rule 13: a cycle closed through `blocked_by` — the INVERSE sense — also fails', () => {
+    // The edge's direction comes from the registry's `edge: forward|reverse`, so a
+    // cycle that mixes the two senses is the same walk, not a second case.
     const g = load();
-    phase(g, '3').gates = ['5'];
-    phase(g, '5').gates = ['3'];
-    expectFailure(g, /a pair cannot come first in both directions/);
+    g.phases.push(
+      { phase: 'xa', name: 'sxa', status: 'BLOCKED', gates: ['xb'], blocked_by: ['xc'] },
+      { phase: 'xb', name: 'sxb', status: 'BLOCKED', gates: ['xc'] },
+      { phase: 'xc', name: 'sxc', status: 'BLOCKED', gates: ['xa'] },
+    );
+    expectFailure(g, /the ordered relation contains a cycle/);
+  });
+
+  it('rule 13: an acyclic ordered chain is fine — the walk is not just "any gates edge"', () => {
+    const g = load();
+    // `xa` is NOT_STARTED rather than BLOCKED because rule 7 requires a BLOCKED
+    // phase to have a gater, and nothing gates the head of the chain.
+    g.phases.push(
+      { phase: 'xa', name: 'sxa', status: 'NOT_STARTED', gates: ['xb'] },
+      { phase: 'xb', name: 'sxb', status: 'BLOCKED_ON_XA', gates: ['xc'] },
+      { phase: 'xc', name: 'sxc', status: 'BLOCKED_ON_XB' },
+    );
+    const { code, stderr } = runDetail(g);
+    expect(code, stderr).toBe(0);
   });
 
   // --- rule 12: the phase in flight may not be one the file says is blocked ---
@@ -548,6 +727,59 @@ describe('#753 — every relation the gate file can state is read by a checker',
   it('rule 9a: a QUALIFIED done with no done_on is deliberately allowed', () => {
     const g = load();
     phase(g, '0').done_on = undefined;
+    expect(runOn(g)).toBe(0);
+  });
+
+  // --- preconditions are inside the status rules, not one field over ---
+
+  it('rules 3/7a: a PRECONDITION counts, so the rules are not restatable one field over', () => {
+    // The status rules read `phase.criteria` alone, which made a strictly DONE
+    // phase whose only PRECONDITION was unmet exit 0 — the file saying the phase
+    // completed and that its own entry condition failed.
+    const done = load();
+    const p1 = phase(done, '1');
+    p1.status = 'DONE';
+    p1.status_note = undefined;
+    p1.done_on = '2026-08-20';
+    for (const c of p1.criteria ?? []) c.measured = c.target;
+    expectFailure(done, /status DONE but \d+ criterion\/criteria not met: P1-pre-2/);
+
+    // ...and the phase-3d shape, one field over.
+    const notStarted = load();
+    phase(notStarted, '5').preconditions = [
+      { id: 'X-pre', text: 't', kind: 'boolean', target: true, measured: true, source: 'test' },
+    ];
+    expectFailure(notStarted, /status NOT_STARTED but \d+ criteria\/criterion already measured/);
+  });
+
+  // --- rule 1b: `derived` is an exemption, not a free pass ---
+
+  it('rule 1b: kind "derived" with a measured value and no derived_from fails', () => {
+    // `derived` exempts a criterion from rule 1's source requirement, so relabelling
+    // one was a one-keystroke escape from the file's HEADLINE rule: a measured value
+    // with no provenance, exit 0.
+    const g = load();
+    const c = crit(g, 'P2-1');
+    c.kind = 'derived';
+    c.measured = 4.5;
+    c.source = undefined;
+    expectFailure(g, /`kind: "derived"` with a measured value and no `derived_from`/);
+  });
+
+  it('rule 1b: derived_from must name declared criterion ids', () => {
+    const g = load();
+    const c = crit(g, 'P2-1');
+    c.kind = 'derived';
+    c.measured = 4.5;
+    c.source = undefined;
+    c.derived_from = ['P9-9'];
+    expectFailure(g, /`derived_from` names `P9-9`, which is not a declared criterion id/);
+  });
+
+  it('rule 1b: an UNMEASURED derived criterion stays exempt — P5-1 ships that way', () => {
+    const g = load();
+    expect(crit(g, 'P5-1').kind).toBe('derived');
+    expect(crit(g, 'P5-1').measured).toBe(null);
     expect(runOn(g)).toBe(0);
   });
 

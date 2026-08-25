@@ -1,6 +1,4 @@
 #!/usr/bin/env node
-// <<< NOT-A-CONSUMER — documentation. Rule 6c binds a declared key to code that
-// actually reads it, so naming a key in a comment must not count as reading it.
 /**
  * Verify ADR phase gates are data, not prose.
  *
@@ -61,36 +59,50 @@
  *      SCOPE, stated rather than overclaimed: this scan is over the five levels
  *      above, NOT over values nested inside a declared key. The contents of
  *      `evidence` / `attempt` / `blast_radius` / `superseded_evidence` are
- *      narrative payload and are not registered key-by-key; rule 6d is the only
- *      thing that reaches into them, and it checks NAMES, not declarations.
+ *      narrative payload and are not registered key-by-key; rules 6d and 6e are
+ *      the only things that reach into them, and they check a NAME and a VALUE
+ *      SHAPE, not declarations.
  *   6b. A key whose NAME is relational (`gates`, `blocked_by`, `blocks_ship`,
  *      `superseded_*`, `concurrent_*`, `depends_*`, `requires_*`) may NOT be
  *      declared PROSE. Otherwise rule 6 is escapable by classifying the new
  *      relation as commentary — the same rename-the-status escape rule 3 had.
  *      Audited over the WHOLE registry — the literal table AND the key patterns —
- *      at startup, so it fails for everyone the moment the declaration is written,
- *      not only when a matching key appears in some gate file.
+ *      so it fails for everyone the moment the declaration is written, not only
+ *      when a matching key appears in some gate file. This is a TEN-WORD
+ *      VOCABULARY and it is NOT the guarantee: review walked through it with
+ *      thirteen synonyms (`unblocks_phase`, `follows_phase`, `waits_for_phase`, …),
+ *      none of which it matches. Rule 6e is the guarantee; 6b is the cheap pass.
  *   6c. A READ declaration must be BOUND, not merely labelled. `read(by)` must
- *      name rule ids that this validator actually implements (`RULE_IDS`), and
- *      the key must be reachable from code: either `phaseRef` (consumed
- *      generically by rules 8/13) or its name must appear as a PROPERTY ACCESS
- *      outside the declaration and documentation regions — for a key pattern, its
- *      regex source must appear there verbatim. Without this, rule 6's guarantee
- *      was FALSE: a third door stood open next to "checker" and "prose" — label
- *      the new relation `read('anything')`, write no checker, and it sailed
- *      through. That door was not hypothetical; this file itself shipped
- *      `evidence: read('12')` when there was no rule 12, and the label passed
- *      authorship and review. What 6c proves is EXISTENCE of a consumer, not
- *      WHICH rule consumes it: `read('9b')` is checked to name a real rule and
- *      the key is checked to be read somewhere, but the two are not tied to each
- *      other. It states exactly that much and no more.
- *   6d. No key NESTED inside a declared key may have a relational NAME. A
- *      relation belongs at a structural level where a checker can reach it;
- *      `criterion.evidence.blocked_by_phase` is the same defect wearing one more
- *      layer of nesting, and rule 6 does not see it because `evidence` itself is
- *      declared. This is a NAME check only — a relation stated in the VALUE of a
- *      prose key (a `$comment` sentence, a `note`) is still not caught, and that
- *      limit is real: the closed world is over keys, never over English.
+ *      name rule ids this validator implements (`RULE_IDS`), and the key must
+ *      actually be READ OFF THE GATE FILE during the run — recorded through the
+ *      tracking Proxy in `track()` — or carry a generic-consumption marker
+ *      (`phaseRef`, `phaseClaim`) whose table-driven loop is its consumer.
+ *      Without this, rule 6's guarantee was FALSE: a third door stood open next
+ *      to "checker" and "prose" — label the new relation `read('anything')`,
+ *      write no checker, and it sailed through. That door was not hypothetical;
+ *      this file shipped `evidence: read('12')` against a rule 12 that did not
+ *      exist. A first attempt at closing it grepped this file's own source for a
+ *      property access, and review defeated THAT too: fifteen names passed as
+ *      bound with nothing reading them, because the source contains
+ *      `phase[relation]`, `phase[note]` (local variables) and `entry.inverse`
+ *      (a read on the registry, not on gate data). Recorded consumption cannot be
+ *      satisfied that way. What 6c still does NOT prove: WHICH rule consumes the
+ *      key. `read('9b')` is checked to name a real rule and the key is checked to
+ *      be read by something; the two are never tied to each other.
+ *   6d. No key NESTED inside a declared key may have a relational NAME (see 6b's
+ *      caveat about vocabulary). `criterion.evidence.blocked_by_phase` is rule 6's
+ *      defect wearing one more layer of nesting, and rule 6 does not see it
+ *      because `evidence` itself is declared.
+ *   6e. VALUE SHAPE, and this is where the guarantee actually lives. A key
+ *      declared PROSE — at a structural level or nested anywhere inside one —
+ *      whose value is a string, or a non-empty array of strings, that ALL resolve
+ *      to declared phase ids IS a cross-phase relation, whatever it is called.
+ *      That catches every synonym without anyone guessing next year's vocabulary.
+ *      An empty array is deliberately not a reference: "all zero elements resolve"
+ *      is vacuous, and `gates: []` is the shape a discharged gate must take.
+ *      Still NOT caught, and not catchable here: a relation asserted in an English
+ *      sentence ("phase 5 gates phase 1") inside a `$comment` or a `note`. The
+ *      closed world is over keys and reference-shaped values, never over prose.
  *   7. STATUS VOCABULARY. Every `phase.status` must match exactly one declared
  *      class, and each class states what it implies about that phase's own
  *      measurements:
@@ -143,30 +155,54 @@
  *      blocked" was statable and green.
  *   13. RELATION ORDERING. Every `phaseRef` key declares whether it asserts an
  *      ORDERED relation (`gates`, `blocked_by` — one side comes first) or an
- *      UNORDERED one (`concurrent_with` — neither does). Two phases may not stand
- *      in both at once, and an ordered relation may not run both ways between the
- *      same pair. This is derived from the table rather than written as an
- *      intersection of two named fields: a new phaseRef key must pick an ordering,
- *      and its conflicts with every existing key are then checked without anyone
- *      enumerating the pair.
+ *      UNORDERED one (`concurrent_with` — neither does), and an ordered key also
+ *      declares which WAY it points (`edge: forward|reverse`). Two phases may not
+ *      stand in both an ordered and an unordered relation, and the ordered
+ *      relation, taken as a DIRECTED GRAPH, must be ACYCLIC. The graph is the
+ *      point: the first version compared pairs, so `xa gates xb`, `xb gates xc`,
+ *      `xc gates xa` — an ordering no phase can ever satisfy — exited 0 while a
+ *      2-cycle failed. Cycle length was the enumeration, and length 3 was the
+ *      second case. A 2-cycle is now just the shortest walk.
+ *   1b. `kind: "derived"` exempts a criterion from rule 1's source requirement, and
+ *      that exemption was a one-keystroke escape from the file's HEADLINE rule:
+ *      relabel a criterion `derived` and a measured value with no provenance exits
+ *      0 — the same rename shape as rule 3's `DONE_*`, on the rule the file exists
+ *      for. A measured `derived` criterion must now carry `derived_from` naming
+ *      declared criterion ids, which makes the exemption a checkable relation.
  *
  * WHAT IS SCANNED AND WHAT IS ENUMERATED — read this before trusting a claim
- * above. Rules 6/6b/6c/6d, 8, 12 and 13 are SCANS: they range over the registry
- * or over every declared phaseRef key, so a field nobody anticipated is still
- * covered. Rules 1–5, 7, 8b, 8c, 9a, 9b, 9c, 9d, 10 and 11 are ENUMERATED — they
- * name a specific key (`done_on`, `blocks_ship`, `superseded_evidence`, …) and
- * check it. They cannot be generalised, because their content is the SEMANTICS of
- * that particular key, and semantics do not come from a name. The scan's job is to
- * make sure no key exists that no rule reaches; it is not, and cannot be, a
- * guarantee that every rule was written.
+ * above, and note what round-2 review established: a loop that genuinely scans can
+ * still DECIDE with an enumerated predicate, and three findings walked through
+ * exactly that gap. So the split is stated per RULE and per PREDICATE.
+ *
+ * SCANS, ranging over the registry or over every declared key of a kind, deciding
+ * with a predicate that does not enumerate cases:
+ *   6   every key at the five structural levels, against the registry
+ *   6c  every READ, against rule ids and against RECORDED CONSUMPTION
+ *   6e  every PROSE value, against "does it resolve to declared phase ids"
+ *   8   every `phaseRef` key; corroboration derived from `entry.inverse`
+ *   8c  every key pattern carrying a `phaseClaim`
+ *   12  every phase that gates the current one
+ *   13  the ordered relation as a directed graph — a cycle walk, not a pair check
+ *
+ * SCANNED LOOP, ENUMERATED PREDICATE — honest about the hybrid:
+ *   6b  ranges over the whole registry, but decides with a ten-word vocabulary.
+ *       It is a cheap first pass; rule 6e is what makes the guarantee.
+ *   6d  same vocabulary, applied to nested keys. Same caveat; 6e backs it up.
+ *
+ * ENUMERATED — they name one key and check it: 1, 1b, 2, 3, 3b, 3c, 4, 5, 7, 7a,
+ * 8b, 9a, 9b, 9c, 9d, 10, 11. This is not fixable by more scanning: their content
+ * is the SEMANTICS of one particular key — what `blocks_ship` means for an
+ * irreversible phase, what `superseded_evidence` must contain — and semantics do
+ * not come from a name. The scan's job is to make sure no key exists that no rule
+ * reaches; it is not, and cannot be, a guarantee that every rule was written.
  *
  * Exit 1 on any violation. Read-only; it never edits the gate file.
  *
  * Usage:  node scripts/verify-phase-gates.mjs [--json] [--file <path>]
- *                                             [--declare <level>.<key>=<json>]
+ *                        [--declare <level>.<key>=<json>]
+ *                        [--declare-pattern <level>.<regex-source>=<json>]
  */
-// NOT-A-CONSUMER >>>
-
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -222,6 +258,7 @@ const RELATIONAL_NAME =
 const RULE_IDS = new Set([
   'identity',
   '1',
+  '1b',
   '2',
   '3',
   '3b',
@@ -232,6 +269,7 @@ const RULE_IDS = new Set([
   '6b',
   '6c',
   '6d',
+  '6e',
   '7',
   '7a',
   '8',
@@ -250,10 +288,9 @@ const RULE_IDS = new Set([
 /** The ordering a `phaseRef` key asserts between the two phases. See rule 13. */
 const ORDERINGS = new Set(['ordered', 'unordered']);
 
-// <<< NOT-A-CONSUMER — key DECLARATIONS. Writing a key name here is DECLARING it,
-// not READING it, so this region is excluded from rule 6c's consumer search. That
-// exclusion is the whole mechanism: without it, every key would "prove" it had a
-// consumer by appearing in its own declaration.
+/** Which way an ORDERED key points: `gates` forward, `blocked_by` reverse. */
+const EDGE_SENSES = new Set(['forward', 'reverse']);
+
 const KEY_REGISTRY = {
   gate: {
     $comment: prose('file-level commentary'),
@@ -281,9 +318,14 @@ const KEY_REGISTRY = {
     status_note: read('3/7'),
     done_on: read('9a'),
     criteria: read('1/3/4/5/7/10/11'),
-    preconditions: read('1/3b/4/10/11'),
-    gates: read('8/13', { phaseRef: 'ordered', inverse: 'blocked_by' }),
-    blocked_by: read('8/13', { phaseRef: 'ordered', inverse: 'gates', mustCorroborate: true }),
+    preconditions: read('1/3/3b/4/7/8/10/11'),
+    gates: read('8/13', { phaseRef: 'ordered', inverse: 'blocked_by', edge: 'forward' }),
+    blocked_by: read('8/13', {
+      phaseRef: 'ordered',
+      inverse: 'gates',
+      edge: 'reverse',
+      mustCorroborate: true,
+    }),
     concurrent_with: read('8/13', {
       phaseRef: 'unordered',
       inverse: 'concurrent_with',
@@ -296,7 +338,8 @@ const KEY_REGISTRY = {
   criterion: {
     id: read('10/11'),
     text: prose('the criterion itself'),
-    kind: read('1/4/5'),
+    kind: read('1/1b/4/5'),
+    derived_from: read('1b'),
     target: read('5/10'),
     measured: read('1/2/5/7/10'),
     source: read('1'),
@@ -332,55 +375,92 @@ const KEY_PATTERNS = {
     { re: /^rerun(_\d{4}_\d{2}_\d{2})?$/, entry: prose('a dated record of a re-run') },
   ],
 };
-// NOT-A-CONSUMER >>>
 
 const PHASE_REF_KEYS = () =>
   Object.entries(KEY_REGISTRY.phase).filter(([, v]) => v.phaseRef !== undefined);
 
-/**
- * This validator's own source, minus the regions that DECLARE or DESCRIBE keys
- * rather than read them. Rule 6c searches what is left. Excluding the declaration
- * and documentation regions is the entire mechanism — a key that "proves" it has a
- * consumer by appearing in its own declaration proves nothing at all.
- */
-const CONSUMER_SOURCE = readFileSync(fileURLToPath(import.meta.url), 'utf8').replace(
-  /\/\/ <<< NOT-A-CONSUMER[\s\S]*?\/\/ NOT-A-CONSUMER >>>/g,
-  '',
-);
-
 const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-/**
- * Is a declared key actually reachable from code?
- *
- * A PROPERTY ACCESS (`phase.gates_note`, `c.blocks_ship`) counts; a mention inside
- * a message template does not, which is why the pattern anchors on `.`/`[`. This
- * proves a consumer EXISTS. It does not prove WHICH rule consumes it — that tie is
- * not checked and the docblock says so rather than implying more.
- */
-const isAccessedInCode = (key) =>
-  new RegExp(`[.\\[]\\s*['"]?${escapeRe(key)}\\b`).test(CONSUMER_SOURCE);
 
 /** The longest literal identifier run in a pattern's regex — its readable name. */
 const patternName = (re) =>
   (re.source.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []).sort((a, b) => b.length - a.length)[0] ??
   re.source;
 
+// ---------------------------------------------------------------------------
+// Rule 6c's binding — RECORDED CONSUMPTION, not a grep.
+//
+// The previous round bound a declared key by searching this file's own source for
+// a property access on that name. That was a textual coincidence, not a binding,
+// and review defeated it: fifteen names passed as "bound" with nothing reading
+// them, because the source contains `phase[relation]` and `phase[note]` (rule 8c's
+// LOCAL VARIABLES, holding 'gates' and 'gates_note') and `entry.inverse` /
+// `entry.by` (accesses on REGISTRY entries, not on gate-file data). `relation` and
+// `inverse` are the names an author would actually reach for, and neither trips
+// `RELATIONAL_NAME` — so round 1's third door was narrowed, not closed.
+//
+// The gate file is now handed to the rules through a Proxy that records every
+// property read AT ITS LEVEL. Only reads on gate-file data can land in the set, so
+// a local variable, a registry field or a message template cannot bind anything.
+// The scan (`scanKeys`/`scanNested`) and the printer (`render`) deliberately work
+// on the RAW object via `unwrap`, because reading a key in order to check that it
+// is declared, or in order to print it, is not consuming it.
+// ---------------------------------------------------------------------------
+
+/** `<level>.<key>` for every key some rule actually read off the gate file. */
+const CONSUMED = new Set();
+
+/** Which child level a key's value belongs to. Anything else is payload. */
+const LEVEL_EDGES = {
+  gate: { phases: 'phase', admissibility: 'admissibility' },
+  admissibility: { conditions: 'condition' },
+  phase: { criteria: 'criterion', preconditions: 'criterion' },
+};
+
+const RAW = Symbol('raw');
+const unwrap = (v) => (v !== null && typeof v === 'object' && v[RAW] ? v[RAW] : v);
+
 /**
- * Rules 6b + 6c — the registry audited against ITSELF and against this file's own
- * code, at startup, so a bad declaration fails for everyone the moment it is
- * written rather than when some gate file happens to use it.
+ * Wrap gate-file data so reads are recorded.
  *
- * Every declared entry — the literal table AND the key patterns — passes through
- * here. That matters: auditing only the table left the patterns reachable solely
- * by an in-data check, which could never fire on anything the table half had not
- * already reported, i.e. it was unkillable by construction.
+ * Arrays are wrapped but record nothing: their keys are indices and method names,
+ * and recording `map`/`length` would hand a free binding to any key named that.
+ * A read of an ABSENT key still records — `phase.blocked_by` is consumed by rule 8
+ * whether or not this particular file states it, and requiring the shipped data to
+ * exercise a key would make the binding depend on the fixture rather than the code.
+ */
+function track(value, level) {
+  if (value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) {
+    return new Proxy(value, {
+      get: (t, p, r) => (p === RAW ? t : track(Reflect.get(t, p, r), level)),
+    });
+  }
+  return new Proxy(value, {
+    get(t, p, r) {
+      if (p === RAW) return t;
+      if (typeof p !== 'string') return Reflect.get(t, p, r);
+      if (level) CONSUMED.add(`${level}.${p}`);
+      return track(Reflect.get(t, p, r), LEVEL_EDGES[level]?.[p] ?? null);
+    },
+  });
+}
+
+/**
+ * Rules 6b + 6c — the registry audited against ITSELF and against what the rules
+ * actually READ, so a bad declaration fails for everyone rather than only when some
+ * gate file happens to use the key.
+ *
+ * Runs AFTER the gate files are verified, because rule 6c's binding is now recorded
+ * consumption rather than a grep, and there is nothing to check until the rules have
+ * run. Every declared entry — the literal table AND the key patterns — passes through
+ * here: auditing only the table left the pattern half live but unreachable by any
+ * test, which is the same decoration charge one half over.
  */
 function auditRegistry(problems) {
   const entries = [];
   for (const [level, table] of Object.entries(KEY_REGISTRY)) {
     for (const [key, entry] of Object.entries(table)) {
-      entries.push({ level, key, name: key, entry, bound: () => isAccessedInCode(key) });
+      entries.push({ level, key, name: key, entry, bound: () => CONSUMED.has(`${level}.${key}`) });
     }
   }
   for (const [level, patterns] of Object.entries(KEY_PATTERNS)) {
@@ -390,9 +470,10 @@ function auditRegistry(problems) {
         key: re.source,
         name: patternName(re),
         entry,
-        // A pattern has no property access to find — rule 8c drives it from this
-        // table via `phaseClaim`, the same generic consumption `phaseRef` gets.
-        bound: () => CONSUMER_SOURCE.includes(re.source),
+        // A pattern matches many key names, so no single `<level>.<key>` can stand
+        // for it — rule 8c drives it from this table via `phaseClaim`, the same
+        // generic consumption `phaseRef` gets, and that marker is its binding.
+        bound: () => false,
       });
     }
   }
@@ -418,11 +499,11 @@ function auditRegistry(problems) {
     }
     // `phaseRef` and `phaseClaim` ARE the binding: rules 8/13 and 8c range over
     // every entry carrying one, so the consumer is the table-driven loop itself.
-    // Every other READ must be found in code by name.
+    // Every other READ must have been READ OFF THE GATE FILE during this run.
     const generic = entry.phaseRef !== undefined || entry.phaseClaim !== undefined;
     if (!generic && !bound()) {
       problems.push(
-        `key registry: \`${level}.${key}\` is declared READ but nothing in this validator reads it. READ is not a label — it is a claim that code consumes the key, and an unbound READ is the third door beside "checker" and "prose": name the relation, write no checker, pass.`,
+        `key registry: \`${level}.${key}\` is declared READ but no rule read it off the gate file. READ is not a label — it is a claim that code consumes the key, and an unbound READ is the third door beside "checker" and "prose": name the relation, write no checker, pass.`,
       );
     }
 
@@ -455,6 +536,13 @@ function auditRegistry(problems) {
           `key registry: \`${level}.${key}\` declares \`inverse: ${JSON.stringify(entry.inverse)}\`, which is not a phaseRef key at this level declaring \`${key}\` back. Corroboration is table-driven; an inverse that does not point home cannot be checked.`,
         );
       }
+      // An ORDERED key must say which way it points, or rule 13 cannot orient the
+      // edge it contributes and the cycle walk is reading an undirected graph.
+      if (entry.phaseRef === 'ordered' && !EDGE_SENSES.has(entry.edge)) {
+        problems.push(
+          `key registry: \`${level}.${key}\` is \`ordered\` but declares \`edge: ${JSON.stringify(entry.edge)}\` — it must be ${[...EDGE_SENSES].join(' or ')}, naming which phase comes first.`,
+        );
+      }
     }
   }
 }
@@ -468,11 +556,42 @@ const STRUCTURAL_KEYS = new Set([
   'preconditions',
 ]);
 
-/** Rule 6 — every key present must be declared. */
-function scanKeys(obj, level, at, problems) {
+/**
+ * Rule 6e — does this VALUE state a cross-phase relation, whatever it is called?
+ *
+ * `RELATIONAL_NAME` is a ten-word vocabulary, and review walked straight through
+ * it: `unblocks_phase`, `follows_phase`, `precedes_phase`, `waits_for_phase`,
+ * `prerequisite_phase`, `needs_phase`, `triggers_phase` — thirteen of thirteen
+ * synonyms declared PROSE with a value naming a real phase, all exit 0. `unblocks`
+ * is not exotic; the shipped file uses `UNBLOCKED_3d_DISCHARGED` as a status, and
+ * `(^|_)blocked` cannot match the `blocked` inside `unblocked`.
+ *
+ * So the guarantee is moved off the name and onto the SHAPE: a value that resolves
+ * to declared phase ids IS a phase reference, under any name anyone invents next
+ * year. The vocabulary is kept as a cheap first pass, not as the guarantee.
+ *
+ * An empty array is deliberately NOT a reference — "all zero elements resolve" is
+ * vacuous, and treating it as a relation would fail `gates: []`, the shape a
+ * discharged gate is supposed to take.
+ */
+const statesPhaseReference = (value, phaseIds) => {
+  const list = Array.isArray(value) ? value : [value];
+  if (list.length === 0) return false;
+  return list.every((v) => typeof v === 'string' && phaseIds.has(v));
+};
+
+/**
+ * Rule 6 — every key present must be declared.
+ *
+ * `raw` MUST be untracked gate data. There is exactly ONE unwrap point, in
+ * `verify`, and it is deliberately not repeated here: two of them would each be
+ * redundant, so neither could be mutation-killed — the harness proved precisely
+ * that, surviving the removal of either while the other stood.
+ */
+function scanKeys(raw, level, at, problems, phaseIds) {
   const table = KEY_REGISTRY[level] ?? {};
   const patterns = KEY_PATTERNS[level] ?? [];
-  for (const key of Object.keys(obj)) {
+  for (const key of Object.keys(raw)) {
     const entry = table[key] ?? patterns.find((p) => p.re.test(key))?.entry;
     if (!entry) {
       problems.push(
@@ -480,28 +599,35 @@ function scanKeys(obj, level, at, problems) {
       );
       continue;
     }
-    // There is deliberately NO in-data repeat of rule 6b here. A key declared
-    // PROSE with a relational name is reported by `auditRegistry` unconditionally,
-    // so an in-data copy could only fire on something already reported — green
-    // when deleted, and therefore decoration by this repo's own standard.
-    if (!STRUCTURAL_KEYS.has(key)) scanNested(obj[key], `${at} ${key}`, problems);
+    // Rule 6e — the in-data half that rule 6b's registry audit CANNOT reach: 6b
+    // decides from the name alone, and a name is a choice the author makes. This
+    // decides from the value, and it needs the data, so it lives here.
+    if (entry.prose && statesPhaseReference(raw[key], phaseIds)) {
+      problems.push(
+        `${at}: key \`${key}\` is declared PROSE but its value resolves to declared phase ids (${JSON.stringify(raw[key])}). That is a cross-phase relation whatever it is named — give it a checker, or rule 6b is escapable by choosing a word its vocabulary does not know.`,
+      );
+    }
+    if (!STRUCTURAL_KEYS.has(key)) scanNested(raw[key], `${at} ${key}`, problems, phaseIds);
   }
 }
 
 /**
- * Rule 6d — a relational NAME nested inside a declared key.
+ * Rules 6d + 6e — a relation nested inside a declared key.
  *
  * Rule 6 is a closed world over the five structural levels only; the inside of
  * `evidence` / `attempt` / `blast_radius` is narrative and is not registered
  * key-by-key. That left `criterion.evidence.blocked_by_phase = '99'` passing —
  * the same defect one layer down. This does not close the closed world over
- * nested keys (it does not require them to be declared); it forbids the one thing
- * that must not hide there, which is a stated relation.
+ * nested keys (it does not require them to be declared); it forbids the two things
+ * that must not hide there: a relational NAME (6d) and a value that resolves to
+ * declared phase ids (6e). Both, because either alone was walked through — 6d's
+ * name check misses `unblocks_phase`, and a relational name whose value is prose
+ * ("gated_by: the founder") is caught by nothing else.
  */
-function scanNested(value, at, problems) {
+function scanNested(value, at, problems, phaseIds) {
   if (Array.isArray(value)) {
     value.forEach((v, i) => {
-      scanNested(v, `${at}[${i}]`, problems);
+      scanNested(v, `${at}[${i}]`, problems, phaseIds);
     });
     return;
   }
@@ -511,8 +637,12 @@ function scanNested(value, at, problems) {
       problems.push(
         `${at}: nested key \`${key}\` has a relational name. A relation must be stated at a level a checker can reach — buried inside a narrative block, nothing reads it, which is #753 with one more layer of nesting.`,
       );
+    } else if (statesPhaseReference(v, phaseIds)) {
+      problems.push(
+        `${at}: nested key \`${key}\` has a value that resolves to declared phase ids (${JSON.stringify(v)}) — a phase reference buried in a narrative block, which no rule reaches.`,
+      );
     }
-    scanNested(v, `${at}.${key}`, problems);
+    scanNested(v, `${at}.${key}`, problems, phaseIds);
   }
 }
 
@@ -543,9 +673,52 @@ const STATUS_CLASSES = [
 const classOf = (status) =>
   typeof status === 'string' ? STATUS_CLASSES.filter((c) => c.match(status)) : [];
 
+/**
+ * Every condition a phase must satisfy — its PRECONDITIONS as well as its criteria.
+ *
+ * The status rules used to read `phase.criteria` alone, which made rules 3, 7a and
+ * 8 restatable one field over: a strictly DONE phase whose only PRECONDITION was
+ * measured false against a target of true exited 0, and so did `NOT_STARTED` with a
+ * measured precondition — the phase-3d shape that caused the duplicated work, in a
+ * field the rule could not see.
+ */
+const conditionsOf = (phase) => [...(phase.preconditions ?? []), ...(phase.criteria ?? [])];
+
+/**
+ * Every distinct cycle in the ordered-relation graph, as a list of `{from, via}`
+ * steps. Iterative DFS with a grey/black colouring; a grey hit is a back edge, and
+ * the cycle is the path from that node onward. Cycles are keyed by their sorted
+ * node set so one cycle is reported once, not once per entry point.
+ */
+function findOrderedCycles(edges) {
+  const found = new Map();
+  const colour = new Map(); // node -> 'grey' | 'black'
+  const path = [];
+
+  const walk = (node) => {
+    colour.set(node, 'grey');
+    for (const [next, via] of edges.get(node) ?? []) {
+      path.push({ from: node, via });
+      if (colour.get(next) === 'grey') {
+        const start = path.findIndex((s) => s.from === next);
+        const cycle = path.slice(start);
+        const key = [...new Set(cycle.map((s) => s.from))].sort().join('|');
+        if (!found.has(key)) found.set(key, cycle);
+      } else if (!colour.has(next)) {
+        walk(next);
+      }
+      path.pop();
+    }
+    colour.set(node, 'black');
+  };
+
+  for (const node of edges.keys()) if (!colour.has(node)) walk(node);
+  return [...found.values()];
+}
+
 /** Rule 3 — a DONE phase must actually be done. */
 function checkDone(phase, at, problems) {
-  const unmet = (phase.criteria ?? []).filter((c) => !meetsTarget(c));
+  const unmet = conditionsOf(phase).filter((c) => !meetsTarget(c));
   const strictlyDone = phase.status === 'DONE';
   if (unmet.length > 0 && strictlyDone) {
     problems.push(
@@ -574,7 +747,7 @@ function checkDone(phase, at, problems) {
  * a note AND an actual measurement to qualify.
  */
 function checkNotStarted(phase, at, problems) {
-  const measured = (phase.criteria ?? []).filter(isMeasured);
+  const measured = conditionsOf(phase).filter(isMeasured);
   const strict = phase.status === 'NOT_STARTED';
   if (strict && measured.length > 0) {
     problems.push(
@@ -595,7 +768,7 @@ function checkNotStarted(phase, at, problems) {
 
 /** Rule 7 — PARTIAL means partly: something measured, something still unmet. */
 function checkPartial(phase, at, problems) {
-  const criteria = phase.criteria ?? [];
+  const criteria = conditionsOf(phase);
   if (criteria.filter(isMeasured).length === 0) {
     problems.push(`${at}: status PARTIAL but no criterion is measured — that is NOT_STARTED`);
   }
@@ -632,18 +805,24 @@ function checkUnblocked(phase, at, problems, ctx) {
 function verify(gate, problems) {
   const label = `ADR-${gate.adr}`;
 
-  // Rule 6 — the scan, before anything reads a value.
-  scanKeys(gate, 'gate', label, problems);
-  if (gate.admissibility && typeof gate.admissibility === 'object') {
-    scanKeys(gate.admissibility, 'admissibility', `${label} admissibility`, problems);
-    for (const cond of gate.admissibility.conditions ?? []) {
-      scanKeys(cond, 'condition', `${label} admissibility ${cond.id}`, problems);
+  // Rule 6 runs on the RAW file, deliberately. Reading a key in order to check that
+  // it is DECLARED is not consuming it, and if the scan's reads counted, every key
+  // in the registry would bind itself the moment it appeared in any gate file —
+  // which is the coincidence rule 6c exists to stop being a binding.
+  const raw = unwrap(gate);
+  const phaseIds = new Set((raw.phases ?? []).map((p) => String(p.phase)));
+
+  scanKeys(raw, 'gate', label, problems, phaseIds);
+  if (raw.admissibility && typeof raw.admissibility === 'object') {
+    scanKeys(raw.admissibility, 'admissibility', `${label} admissibility`, problems, phaseIds);
+    for (const cond of raw.admissibility.conditions ?? []) {
+      scanKeys(cond, 'condition', `${label} admissibility ${cond.id}`, problems, phaseIds);
     }
   }
-  for (const phase of gate.phases) {
-    scanKeys(phase, 'phase', `${label} phase ${phase.phase}`, problems);
-    for (const c of [...(phase.preconditions ?? []), ...(phase.criteria ?? [])]) {
-      scanKeys(c, 'criterion', `${label} phase ${phase.phase} ${c.id}`, problems);
+  for (const p of raw.phases ?? []) {
+    scanKeys(p, 'phase', `${label} phase ${p.phase}`, problems, phaseIds);
+    for (const c of [...(p.preconditions ?? []), ...(p.criteria ?? [])]) {
+      scanKeys(c, 'criterion', `${label} phase ${p.phase} ${c.id}`, problems, phaseIds);
     }
   }
 
@@ -664,6 +843,7 @@ function verify(gate, problems) {
   for (const [k, n] of seenCrit) {
     if (n > 1) problems.push(`${label}: criterion id \`${k}\` is declared ${n} times`);
   }
+  const criterionIds = new Set(seenCrit.keys());
 
   const byId = new Map(gate.phases.map((p) => [String(p.phase), p]));
   const admissible = new Set((gate.admissibility?.conditions ?? []).map((c) => c.id));
@@ -677,6 +857,12 @@ function verify(gate, problems) {
   // Collected as the phaseRef loop runs, so the contradiction below is derived
   // from the registry rather than from an intersection of two named fields.
   const relationPairs = {};
+
+  // Rule 13 — and the ORDERED relation as a DIRECTED GRAPH, not a bag of pairs.
+  // Round 2 defeated the pair form: a `gates` cycle of length 3 (xa→xb→xc→xa)
+  // exited 0, because the only ordering check was "does this pair point both
+  // ways". Cycle length was the enumeration, and length 3 was the second case.
+  const edges = new Map();
 
   for (const phase of gate.phases) {
     const phaseAt = `${label} phase ${phase.phase}`;
@@ -698,9 +884,32 @@ function verify(gate, problems) {
         );
       }
 
-      // Evidence blocks are only meaningful attached to a measured criterion.
+      // Rule 9b — evidence blocks are only meaningful on a measured criterion.
       if (c.evidence && !isMeasured(c)) {
         problems.push(`${at}: carries \`evidence\` but is unmeasured — evidence for what?`);
+      }
+
+      // Rule 1b — `derived` is exempt from rule 1's source requirement, and that
+      // exemption was a one-keystroke escape from the file's HEADLINE rule: relabel
+      // a criterion `kind: "derived"` and a measured value with no provenance exits
+      // 0. The same rename shape as rule 3's `DONE_*`, on the rule the file exists
+      // for. A derived value must now say what it is derived FROM, and those must
+      // be declared criteria — which turns the exemption into a checkable relation.
+      const derivedFrom = c.derived_from;
+      if (c.kind === 'derived' && isMeasured(c)) {
+        if (!Array.isArray(derivedFrom) || derivedFrom.length === 0) {
+          problems.push(
+            `${at}: \`kind: "derived"\` with a measured value and no \`derived_from\`. Derived is an exemption from rule 1's source requirement, so it must name the criteria it is computed from, or it is a number with no provenance wearing a label.`,
+          );
+        } else {
+          for (const src of derivedFrom) {
+            if (!criterionIds.has(String(src))) {
+              problems.push(
+                `${at}: \`derived_from\` names \`${src}\`, which is not a declared criterion id`,
+              );
+            }
+          }
+        }
       }
 
       // Rule 9d — a withdrawn claim must say it is withdrawn, say why, and have
@@ -803,14 +1012,17 @@ function verify(gate, problems) {
         const byOrdering = relationPairs[entry.phaseRef] ?? new Map();
         relationPairs[entry.phaseRef] = byOrdering;
         byOrdering.set(pair, [...(byOrdering.get(pair) ?? []), `${phase.phase}.${key}`]);
-        // ...and an ORDERED relation may not run both ways between one pair.
-        if (
-          entry.phaseRef === 'ordered' &&
-          (other[key] ?? []).map(String).includes(String(phase.phase))
-        ) {
-          problems.push(
-            `${phaseAt}: ${key} [${r}] while phase ${r} also declares \`${key}\` [${phase.phase}] — \`${key}\` asserts an order, and a pair cannot come first in both directions`,
-          );
+
+        // ...and, for an ORDERED key, contribute a DIRECTED edge oriented by the
+        // sense the registry declares. `gates` is forward (this phase comes first);
+        // `blocked_by` is reverse (the referenced phase does). The cycle walk below
+        // subsumes the old both-ways branch — a 2-cycle is just its shortest case.
+        if (entry.phaseRef === 'ordered') {
+          const self = String(phase.phase);
+          const [from, to] = entry.edge === 'reverse' ? [r, self] : [self, r];
+          const outbound = edges.get(from) ?? new Map();
+          edges.set(from, outbound);
+          if (!outbound.has(to)) outbound.set(to, `${phase.phase}.${key}`);
         }
       });
     }
@@ -900,19 +1112,33 @@ function verify(gate, problems) {
     );
   }
 
+  // Rule 13 — and the ordered relation must be ACYCLIC. Every phase on a cycle
+  // must complete before itself, so none of them can ever start. This walks the
+  // graph rather than inspecting pairs: length 2 was the only case the previous
+  // round caught, and by this file's own argument — an enumerated list of cases is
+  // how the second one gets missed — cycle length was the enumeration.
+  for (const cycle of findOrderedCycles(edges)) {
+    problems.push(
+      `${label}: the ordered relation contains a cycle — ${cycle.map((s) => s.via).join(', ')} assert ${cycle.map((s) => s.from).join(' → ')} → ${cycle[0].from}. Every phase on it must complete before itself, so none of them can start.`,
+    );
+  }
+
   // Rule 9c — while a ship blocker is open, the irreversible phase is not done.
   const openShipBlockers = gate.phases.flatMap((p) =>
     [...(p.preconditions ?? []), ...(p.criteria ?? [])]
       .filter((c) => c.blocks_ship === true && !meetsTarget(c))
       .map((c) => c.id),
   );
-  if (openShipBlockers.length > 0) {
-    for (const p of gate.phases) {
-      if (p.reversible === false && String(p.status).startsWith('DONE')) {
-        problems.push(
-          `${label} phase ${p.phase}: is irreversible and ${p.status} while ${openShipBlockers.length} \`blocks_ship\` criterion/criteria are unmet (${openShipBlockers.join(', ')})`,
-        );
-      }
+  // `reversible` is read for EVERY phase, not only when a blocker is open. Rule 6c
+  // binds a declared key to the rules having actually read it, so a read hidden
+  // behind a condition the fixture happens not to meet would make the binding a
+  // property of the data rather than of the code.
+  for (const p of gate.phases) {
+    const irreversible = p.reversible === false;
+    if (openShipBlockers.length > 0 && irreversible && String(p.status).startsWith('DONE')) {
+      problems.push(
+        `${label} phase ${p.phase}: is irreversible and ${p.status} while ${openShipBlockers.length} \`blocks_ship\` criterion/criteria are unmet (${openShipBlockers.join(', ')})`,
+      );
     }
   }
 
@@ -947,8 +1173,6 @@ function verify(gate, problems) {
   }
 }
 
-// <<< NOT-A-CONSUMER — presentation. `render` prints keys; printing a key is not
-// checking it, so touching one here must not satisfy rule 6c's binding.
 /** One line per criterion: status, id, and the measurement or its absence. */
 function render(gate) {
   const rows = [];
@@ -967,7 +1191,6 @@ function render(gate) {
   }
   return rows;
 }
-// NOT-A-CONSUMER >>>
 
 // `--file <path>` points the validator at ONE gate file instead of the whole
 // directory. It exists so the rules can be tested against deliberately-broken
@@ -985,36 +1208,60 @@ const files =
 const problems = [];
 const all = [];
 
-// `--declare <level>.<key>=<json>` injects ONE registry entry for this process.
-// Rules 6b and 6c live in `auditRegistry`, so without a seam their only reachable
-// input is the committed registry — and a guard whose failing case cannot be
-// constructed is a guard with no test. It is REFUSED without `--file`: a seam that
-// could add declarations to a run over the real gate directory would loosen rule 6
-// for the file it exists to protect.
+// `--declare <level>.<key>=<json>` and `--declare-pattern <level>.<regex>=<json>`
+// inject ONE registry entry for this process. Rules 6b and 6c live in
+// `auditRegistry`, so without a seam their only reachable input is the committed
+// registry — and a guard whose failing case cannot be constructed is a guard with
+// no test. The pattern form exists because the table form could not reach the
+// KEY_PATTERNS half of the audit, which left live code that no test could red.
+//
+// The refusal is scoped to the REAL GATE FILES, not merely to the absence of
+// `--file`. The previous wording claimed the seam "can never loosen rule 6 for the
+// file it exists to protect", and that was false: naming the real path reached it.
+const gateDirFiles = new Set(
+  readdirSync(GATE_DIR)
+    .filter((f) => f.endsWith('.json'))
+    .map((f) => resolve(join(GATE_DIR, f))),
+);
+const seamRefused = files.some((f) => gateDirFiles.has(resolve(f)));
+
 for (let i = 0; i < process.argv.length; i += 1) {
-  if (process.argv[i] !== '--declare') continue;
-  if (fileArgIdx === -1) {
-    console.error('--declare is a test seam and requires --file; refusing to alter the registry.');
+  const isPattern = process.argv[i] === '--declare-pattern';
+  if (!isPattern && process.argv[i] !== '--declare') continue;
+  if (seamRefused) {
+    console.error(
+      `${process.argv[i]} is a test seam and may not be used against a real gate file in ${GATE_DIR}; refusing to alter the registry.`,
+    );
     process.exit(2);
   }
   const spec = process.argv[i + 1] ?? '';
   const m = /^([A-Za-z_]+)\.([^=]+)=(.*)$/s.exec(spec);
   if (!m) {
-    console.error(`--declare expects <level>.<key>=<json>, got \`${spec}\``);
+    console.error(`${process.argv[i]} expects <level>.<key>=<json>, got \`${spec}\``);
     process.exit(2);
   }
-  const level = KEY_REGISTRY[m[1]] ?? {};
-  KEY_REGISTRY[m[1]] = level;
-  level[m[2]] = JSON.parse(m[3]);
+  if (isPattern) {
+    const list = KEY_PATTERNS[m[1]] ?? [];
+    KEY_PATTERNS[m[1]] = list;
+    list.push({ re: new RegExp(m[2]), entry: JSON.parse(m[3]) });
+  } else {
+    const level = KEY_REGISTRY[m[1]] ?? {};
+    KEY_REGISTRY[m[1]] = level;
+    level[m[2]] = JSON.parse(m[3]);
+  }
 }
-
-auditRegistry(problems);
 
 for (const f of files) {
   const gate = JSON.parse(readFileSync(f, 'utf8'));
-  verify(gate, problems);
+  // The rules see a TRACKED copy so rule 6c can bind on what they actually read;
+  // the printer sees the raw object, because printing a key is not consuming it.
+  verify(track(gate, 'gate'), problems);
   all.push({ gate, rows: render(gate) });
 }
+
+// AFTER the gate files: rule 6c's binding is recorded consumption, so there is
+// nothing to audit until the rules have run.
+auditRegistry(problems);
 
 if (process.argv.includes('--json')) {
   console.log(
