@@ -9,28 +9,34 @@
 > [`docs/RELEASE_POLICY.md`](RELEASE_POLICY.md), and the version-by-version compatibility table is
 > [`docs/COMPATIBILITY.md`](COMPATIBILITY.md).
 >
-> Two paths exist: (a) the **canonical npmjs path** (`@getknext/*`, Changesets → `release.yml`,
-> blocked on a human `NPM_TOKEN`) documented first, and (b) an **interim GitHub Packages channel**
-> (`@getknext-dev/*`, `release-ghp.yml`) for use until npmjs goes live — see
+> Two paths exist: (a) the **canonical npmjs path** (`@getknext/*`, Changesets → `release.yml`)
+> documented first, and (b) an **interim GitHub Packages channel**
+> (`@getknext-dev/*`, `release-ghp.yml`) — see
 > [Interim channel — GitHub Packages](#interim-channel--github-packages-getknext-dev).
+>
+> **Auth is configured.** This file used to say the npmjs path was "blocked on a human `NPM_TOKEN`".
+> It is not, and was not since 2026-07-25 — see [The gate](#the-gate-two-lanes-one-approval) for
+> where the token actually lives and what genuinely needs a human.
 
 ## What publishes
 
 Publishing is driven by [Changesets](https://github.com/changesets/changesets) and the
-`.github/workflows/release.yml` workflow. Only three packages are published to the public npm
-registry:
+`.github/workflows/release.yml` workflow. Four packages are published to the public npm registry:
 
-| Package       | Path               | Public? | Provenance |
-| ------------- | ------------------ | ------- | ---------- |
-| `@getknext/core` | `packages/kn-next` | yes     | yes        |
-| `@getknext/lib`  | `packages/lib`     | yes     | yes        |
-| `@getknext/db`   | `packages/db`      | yes     | yes        |
+| Package          | Path                      | Public? | Provenance |
+| ---------------- | ------------------------- | ------- | ---------- |
+| `@getknext/core` | `packages/kn-next`        | yes     | yes        |
+| `@getknext/lib`  | `packages/lib`            | yes     | yes        |
+| `@getknext/db`   | `packages/db`             | yes     | yes        |
+| `kn-next`        | `packages/kn-next-alias`  | yes     | yes        |
 
 `@getknext/core` depends on **both** `@getknext/lib` and `@getknext/db` (and `@getknext/db` depends on
-`@getknext/lib`), so the three must always ship as a set — publishing core without db is exactly
-the #255/#256 incident (every consumer install 404s on the missing member).
+`@getknext/lib`), so they must always ship as a set — publishing core without db is exactly
+the #255/#256 incident (every consumer install 404s on the missing member). `kn-next` is the alias
+package that makes the bare `npx kn-next` resolve; it forwards to `@getknext/core`'s CLI and joined
+the `fixed` group in #820, so all four now move to the same version together.
 
-All three carry `"publishConfig": { "access": "public", "provenance": true }`, so `changeset publish`
+All four carry `"publishConfig": { "access": "public", "provenance": true }`, so `changeset publish`
 publishes them publicly and CI attaches a signed provenance attestation (via the workflow's
 `id-token: write` permission).
 
@@ -41,18 +47,32 @@ publishes them publicly and CI attaches a signed provenance attestation (via the
 - `apps/*` — private application code, not libraries.
 - The Go operator (`packages/kn-next-operator`) — released as a container image, not via npm.
 
-## The gate (safe by default)
+## The gate (two lanes, one approval)
 
-`release.yml` runs on every push to `main` and on manual `workflow_dispatch`. It computes a
-publish gate in the "Determine publish gate" step:
+`release.yml` runs on every push to `main` and on manual `workflow_dispatch`, as **three jobs**:
 
-- **If `NPM_TOKEN` is set** as a repo secret → the `publish` input is `pnpm run release`
-  (`changeset publish`), so CI can publish.
-- **If `NPM_TOKEN` is unset** → the `publish` input is empty. `changesets/action` can then only
-  open/update the "Version Packages" PR. It will NEVER run `changeset publish`.
+| job | environment | credential | what it does |
+| --- | --- | --- | --- |
+| `audit` | — | — | npm supply-chain audit + SBOM. Publish-blocking. |
+| `version-pr` | **none** | **none** | opens/updates the "Version Packages" PR. Passes no `publish-script`, so it *cannot* publish. |
+| `publish-preflight` | none | none | runs `scripts/publish-preflight.mjs` — is any version in the tree absent from the registry? |
+| `release` | `npm-publish` | `NODE_AUTH_TOKEN` | the only job that publishes. **Skipped** unless there are no pending changesets *and* something is genuinely unpublished. |
 
-So until a maintainer configures auth (Path A or Path B below), the Release workflow is a no-op
-for publishing — it is safe by default and cannot accidentally publish.
+`NPM_TOKEN` is an **environment secret on `npm-publish`** — not a repo secret, which is why a plain
+`gh secret list` does not show it. That environment carries a **required-reviewer** rule, so the
+publish itself waits for a human click. That is deliberate: publishing to a public registry is
+irreversible.
+
+**Opening a Version PR does not wait for anything.** It used to: `version-pr` and `release` were one
+job that declared the environment, so every push to `main` asked for an approval — including pushes
+that only wanted to open a PR. One un-clicked approval on 2026-07-26 (run `30207128316`) then parked
+in `waiting`, held the workflow-level concurrency group, and every subsequent run was cancelled in
+the queue — 99 of 100, each with zero jobs. Nothing published for a month. The split, the per-job
+concurrency groups, and the job-level `if:` on `release` exist to make that impossible; see
+`tests/release-lane-liveness.test.ts`.
+
+The gate also runs `npm whoami` before publishing and fails loudly if the token is present but
+rejected. Presence is not validity.
 
 ## First publish — DONE (2026-07-26)
 
@@ -91,13 +111,16 @@ publisher at until the packages existed. **Now that they exist, Path B is the mi
 
 1. On npmjs.com, create a **Granular Access / Automation token** scoped to the `@getknext` packages
    with **read + write** permission.
-2. In the GitHub repo: **Settings → Secrets and variables → Actions → New repository secret**,
-   name it exactly `NPM_TOKEN`, paste the token.
+2. In the GitHub repo: **Settings → Environments → `npm-publish` → Environment secrets → Add**,
+   name it exactly `NPM_TOKEN`, paste the token. **The environment, not the repo** — the `release`
+   job declares `environment: npm-publish`, and only that environment's secrets reach it. Putting it
+   in repo secrets instead would leave `secrets.NPM_TOKEN` empty and the gate would fail with
+   "NPM_TOKEN is not set on the npm-publish environment".
 3. Trigger a release: either push any commit to `main`, OR run the **Release** workflow manually
    (**Actions → Release → Run workflow**, i.e. `workflow_dispatch`).
-4. With `NPM_TOKEN` present and no pending changesets, `changesets/action` runs `changeset
-   publish`, publishing every package whose tree version is not already on the registry, with
-   provenance.
+4. With no pending changesets and something genuinely unpublished, `release` starts, waits for the
+   environment approval, verifies the token with `npm whoami`, then runs `changeset publish` —
+   publishing every package whose tree version is not already on the registry, with provenance.
 
 #### Path B — OIDC Trusted Publishing (migrate to this AFTER the first publish)
 
@@ -106,7 +129,9 @@ Once the packages exist on npm, you can drop the long-lived `NPM_TOKEN` secret:
 1. On npmjs.com, open each package's settings and configure its **Trusted Publisher** = this repo
    (`getknext-dev/knext`) + the `release.yml` workflow.
 2. The workflow already grants `id-token: write`, so CI can then publish with **no stored token**.
-3. Remove the `NPM_TOKEN` repo secret after confirming an OIDC publish succeeds.
+3. Remove the `NPM_TOKEN` environment secret after confirming an OIDC publish succeeds — and note
+   that the gate step fails closed on an absent token, so remove it only once OIDC is proven, and
+   drop the gate's presence check in the same change.
 
 ### Step 3 — Verify
 
@@ -114,19 +139,26 @@ Once the packages exist on npm, you can drop the long-lived `NPM_TOKEN` secret:
 npm view @getknext/core version   # → the version just released
 npm view @getknext/lib version    # → the same version (they are a `fixed` group)
 npm view @getknext/db version     # → the same version
-npx @getknext/core --help         # from a clean directory (the published bin is kn-next)
+npm view kn-next version          # → the same version (the alias joined the group in #820)
+npx kn-next --help                # from a clean directory
 ```
 
-All three must report the same number. If one is missing or behind, the set is partial and every
+Or, from a checkout, ask the same question the release lane asks:
+
+```sh
+node scripts/publish-preflight.mjs   # prints a per-package table; exits 1 if the registry is unreachable
+```
+
+All four must report the same number. If one is missing or behind, the set is partial and every
 consumer install 404s or resolves the wrong pair — publish the stragglers before doing anything
 else.
 
-> Note on invocation: the **npm package** is `@getknext/core`; its **bin** is `kn-next`. There is no
-> package literally named `kn-next` on npm, so the published-package invocation is
-> `npx @getknext/core <subcommand>` (npx resolves the package and runs its single `kn-next` bin).
-> `npx kn-next` only works once a package by that exact name exists — it does not.
+> Note on invocation: the **npm package** carrying the code is `@getknext/core` and its **bin** is
+> `kn-next`. `npx kn-next` works via the `kn-next` alias package (`packages/kn-next-alias`), which
+> exists only to forward to that bin. Until the alias has been published at least once,
+> `npx kn-next` 404s and the published-package invocation is `npx @getknext/core <subcommand>`.
 
-Also confirm both packages show a provenance / "Published via GitHub Actions" badge on npmjs.com.
+Also confirm each package shows a provenance / "Published via GitHub Actions" badge on npmjs.com.
 
 ## Subsequent releases
 
@@ -134,12 +166,20 @@ The normal flow after the first publish:
 
 1. A feature PR includes a changeset: run `pnpm changeset`, describe the change, commit the
    generated `.changeset/*.md`.
-2. Merging that PR to `main` makes `changesets/action` open (or update) a **"Version Packages"**
-   PR that applies the version bumps and updates changelogs.
-3. Merging the **"Version Packages"** PR (a second push to `main`) runs `changeset publish` and
-   publishes the bumped versions. The workflow also creates one **GitHub Release** per published
-   package (`createGithubReleases: true`), tagged `@getknext/<pkg>@x.y.z` — the hand-made `v0.1.0`
-   release used a different tag format, so the formats never collide.
+2. Merging that PR to `main` makes `version-pr` open (or update) a **"Version Packages"** PR that
+   applies the version bumps and updates changelogs. **No approval is involved.**
+3. Merging the **"Version Packages"** PR is a second push to `main`. `version-pr` now reports no
+   changesets, `publish-preflight` finds versions the registry does not have, and `release` starts —
+   at which point GitHub requests the `npm-publish` **deployment approval**.
+4. **A maintainer approves it** ("Review deployments" on the run, or
+   <https://github.com/getknext-dev/knext/deployments>). `changeset publish` then runs, and the
+   workflow creates one **GitHub Release** per published package (`create-github-releases: true`),
+   tagged `@getknext/<pkg>@x.y.z` — the hand-made `v0.1.0` release used a different tag format, so
+   the formats never collide.
+
+Step 4 is the only human step in the loop, and it is the correct one: it is the point at which
+something irreversible happens. If a run is sitting in `waiting`, **check its head SHA before
+approving** — approving a stale parked run publishes the tree as it stood when that run started.
 
 ## Upgrade order
 
@@ -201,8 +241,8 @@ The decision and its measured basis are recorded in
 
 ## Interim channel — GitHub Packages (`@getknext-dev/*`)
 
-Until the npmjs path above is unblocked (it needs a human `NPM_TOKEN`, issue #53), the maintainer
-directive is to ship an **interim** release channel on **GitHub Packages**
+Introduced while the npmjs path was believed to be blocked on auth (issue #53), the maintainer
+directive was to ship an **interim** release channel on **GitHub Packages**
 (`npm.pkg.github.com`). This is a stopgap — **`@getknext/*` on npmjs remains the canonical future
 home**; the GHP names are temporary.
 
@@ -309,6 +349,18 @@ to migrate.
   ```
 
   Prefer the CI publish path; it is always cut from a clean checkout.
-- **Workflow ran but nothing published.** Check the "Determine publish gate" step log. If it says
-  "NPM_TOKEN not set", the gate is off — set the secret (Path A) or configure a trusted publisher
-  (Path B).
+- **Workflow ran but nothing published.** Work down the three jobs, in order:
+  1. **`release` was skipped.** Read `publish-preflight`'s step summary — it prints a per-package
+     table. Either there are still pending changesets (merge the Version PR first) or every version
+     in the tree is already on the registry (there is genuinely nothing to publish).
+  2. **`release` is sitting in `waiting`.** It is asking for the `npm-publish` environment approval.
+     Click "Review deployments" on the run — and check its head SHA first; approving a stale parked
+     run publishes that old tree.
+  3. **The gate step failed.** "NPM_TOKEN is not set" → the secret is missing from the **environment**
+     (not the repo — see Path A step 2). "present but REJECTED" → the token exists but npm refused
+     it; rotate it, or configure a trusted publisher (Path B).
+- **Every run shows `cancelled` with zero jobs.** Something is parked in the concurrency queue.
+  `gh api "repos/getknext-dev/knext/actions/workflows/release.yml/runs?status=waiting"` names it.
+  Cancel the parked run — do not approve it — and check that nothing has reintroduced a
+  **workflow-level** `concurrency:` block, which is what made a single parked run starve the whole
+  lane for a month in 2026-08.
