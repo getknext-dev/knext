@@ -7,12 +7,30 @@
 > Companion ledgers: `docs/debt/tech-debt-ledger.md`, `docs/benchmarks/cold-start-ledger.md`,
 > `docs/ux/ergonomics-ledger.md`.
 
-## Verdict: NOT READY — 2 hard blockers, both one human click
+## Verdict: NOT READY — 2 hard blockers, both maintainer-only credentials work
 
-**Blocker 3 was cleared by measurement on 2026-08-25 (#846). Blocker 2's premise was wrong and
-was corrected the same day** — the missing piece was never an `npm login`, it was an un-clicked
-GitHub deployment approval, and the engineering half of it is now fixed. What remains of both
-blockers is **two clicks by the repo owner**, not engineering work:
+**Every engineering step is done and proven. What is left is two things only the repo owner can do:
+rotate a dead npm token, and flip a package to public.** Neither is code.
+
+The path here is worth stating, because each defect was invisible until the one in front of it was
+fixed, and the audit was wrong about the cause twice:
+
+1. **Blocker 3 was cleared by measurement** (#846) — the compat gate was never the flaky thing.
+2. **Blocker 2's stated cause was wrong.** It was never a missing `npm login`. `release.yml` had a
+   *workflow-level* concurrency group held by one run parked on an approval since 2026-07-26, which
+   cancelled 99 of the last 100 runs in the queue with zero jobs (#849).
+3. Behind that, `changesets/action@v2.1.0` required Changesets CLI v3 while the repo pinned v2, so
+   the Version-PR job died on a compatibility check (#851).
+4. Behind that, `can_approve_pull_request_reviews` is `false` at repo **and** org level, so the
+   action can never open a Version PR here — #852 was opened by hand, as #523 and #268 were.
+5. With all of that fixed, #852 merged, the deployment was approved, the publish job ran — **and the
+   npm token turned out to be dead** (#853). Presence was never validity, and the gate added in
+   #849 said so out loud instead of failing obscurely.
+
+So the correction to make is to the shape of the claim, not just its content: *"the engineering is
+done"* has been true-sounding at four separate points in this document's history and wrong each
+time. It is stated again here only because the publish path has now been executed end to end and
+stopped on a credential, which is a different kind of evidence than a passing test.
 
 A stranger cannot complete the documented path today. Everything the repo controls is in good
 shape; what blocks release is publication and packaging state.
@@ -56,24 +74,40 @@ and exposes it as a job output; `release` — the only job holding the token —
 longer park on a routine commit. Concurrency moved to two per-job groups that cannot block each
 other. Guarded by `tests/release-lane-liveness.test.ts` and mutation-proved.
 
-**What is left, and it is genuinely human — two clicks, in this order:**
+**Both of those clicks have now been done, and the answer arrived — 2026-08-25.**
 
-1. **Merge the "Version Packages" PR** that the next push to `main` will open. (It does not exist
-   yet; the lane has been unable to open one since 2026-07-26.)
-2. **Approve the `npm-publish` deployment** on the run that follows that merge:
-   <https://github.com/getknext-dev/knext/deployments> — or the "Review deployments" button on the
-   run itself. Only `AhmedElBanna80` can.
+1. **Two further defects surfaced first**, each invisible until the one before it was fixed.
+   `changesets/action@v2.1.0` requires Changesets CLI v3 while the repo pinned `^2.31.0`, so the
+   Version-PR job died on a compatibility check (#851). Behind that,
+   `can_approve_pull_request_reviews` is **`false` at repo *and* organisation level**, so the action
+   can never open a Version PR here at all — run `30179506243` failed identically on 2026-07-25
+   under the old action, and **#523 and #268 were both opened by hand**. #852 was therefore opened by
+   hand too, from the `changeset-release/main` branch the action still pushes correctly.
+2. **#852 merged**, versioning `@getknext/core`, `@getknext/lib`, `@getknext/db` and `kn-next` to
+   **0.3.1** as one changesets `fixed` group.
+3. **The `npm-publish` deployment was approved** (deployment `6084837765`), and the publish job ran.
 
-**Also human, and a trap worth naming:** the parked run
-<https://github.com/getknext-dev/knext/actions/runs/30207128316> is still `waiting`. **Do not
-approve it.** It would publish from `c0ed9b75` — the tree as it stood on 2026-07-26, a month of work
-behind. Cancel it instead.
+**The token is dead.** That was the one thing this row refused to claim either way, and the run
+answered it:
 
-**Not established, and not claimed:** whether the token is still *valid*. It is *present* and was
-set 2026-07-25; a token can be present and expired, and answering it requires running a job inside
-the `npm-publish` environment, which is itself behind the approval above. The publish job now runs
-`npm whoami` and fails loudly on a rejected token rather than discovering it mid-publish — so the
-first approved run answers the question either way.
+> `NPM_TOKEN is PRESENT but the registry REJECTED it (npm whoami exited non-zero). Rotate the
+> npm-publish environment secret; presence is not validity.`
+
+That is the `npm whoami` gate above doing exactly its job — before it existed, this would have died
+opaquely inside `changeset publish` and looked like a fifth mystery. Tracked as **#853**.
+
+**What is left is one action, and it is genuinely human:** rotate the `NPM_TOKEN` secret **on the
+`npm-publish` environment** — not the repo secret list. Mint a fresh automation token with publish
+rights to `@getknext/*` and `kn-next`, replace the secret, and re-run `release.yml`; all four
+publish together. Minting a token needs an interactive login with 2FA, so no agent can do it.
+
+**The trap is gone:** the parked run `30207128316` has been cancelled. It would have published from
+`c0ed9b75`, the tree as it stood on 2026-07-26.
+
+**Worth fixing eventually, not blocking:** turning on *"Allow GitHub Actions to create and approve
+pull requests"* at org and repo level would let the lane open its own Version PR instead of the
+by-hand step above. Left alone deliberately — widening an organisation-wide Actions permission is
+the maintainer's call, and the by-hand path works.
 
 ### ~~Blocker 3 — the compat claim's own gates are red or flaky~~ — CLEARED 2026-08-25
 
@@ -152,9 +186,12 @@ gate is red would fail this project's central honesty rule.
 
 1. [ ] **Human:** flip ghcr package visibility to public → unblocks #198/#707, greens the
        anonymous-install nightly, lets #670's publish job exist, removes the first-cluster caveat.
-2. [ ] **Human (two clicks, not a publish):** merge the "Version Packages" PR the fixed lane opens,
-       then approve the `npm-publish` deployment on the run that follows. Cancel the stale parked
-       run 30207128316 rather than approving it. → makes every ergonomics win real for users.
+2. [ ] **Human (one credential rotation):** the Version PR (#852) is merged, the `npm-publish`
+       deployment was approved, and the publish job ran — it failed because the token is dead
+       (#853). Rotate `NPM_TOKEN` **on the `npm-publish` environment**, not the repo secret list,
+       then re-run `release.yml`; all four packages publish together as one `fixed` group.
+       Minting the token needs an interactive login with 2FA. → makes every ergonomics win real
+       for users. *(The stale parked run 30207128316 has been cancelled; nothing to do there.)*
 3. [ ] Agent: re-run the anonymous-install path and the first-cluster page end-to-end; remove the
        page's caveat with a live re-verification; close #198/#707.
 4. [ ] Agent: set `vars.SCALE_TEST_IMAGE` from the publish lane (#670); confirm the e2e_scale
