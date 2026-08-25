@@ -53,6 +53,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { findWorkspaceProtocolDeps } from './lib/workspace-protocol.mjs';
+import { publishablePackages, readWorkspaceManifests } from './publish-preflight.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
@@ -152,17 +153,31 @@ try {
   const aliasTarball = pnpmPack(aliasPkgDir, aliasDest, 'kn-next (the npx alias)');
 
   // --- 1a. what this gate covers is DERIVED, not enumerated -----------------
-  // `npx kn-next` — the command every doc hands a stranger — resolves to the ALIAS
-  // package, and the alias was outside this gate entirely: it was never packed, never
-  // installed, and its `@getknext/core: workspace:^` dep was never checked for the
-  // protocol leak that makes an install fail with EUNSUPPORTEDPROTOCOL. An enumerated
-  // list is how the next publishable package gets missed the same way, so the covered
-  // set is read from the changesets `fixed` group — the thing that actually decides
-  // what publishes together — and BOTH directions are asserted: a `fixed` member this
-  // gate does not pack fails, and a package this gate packs that `fixed` does not
-  // publish fails too.
-  const fixedGroup =
-    JSON.parse(readFileSync(join(repoRoot, '.changeset', 'config.json'), 'utf8')).fixed?.[0] ?? [];
+  // The `kn-next` alias — the package `npx kn-next` installs — was outside this gate
+  // entirely: never packed, never installed, and its `@getknext/core: workspace:^` dep
+  // never checked for the protocol leak that makes an install fail with
+  // EUNSUPPORTEDPROTOCOL. An enumerated list is how the NEXT publishable package gets
+  // missed the same way, so the covered set is derived.
+  //
+  // Derived from the PUBLISHABLE set, not from the changesets `fixed` group. Review of
+  // the first cut caught that distinction, with a reproduction: `fixed` is the
+  // LOCKSTEP-VERSIONING group, and `changeset publish` publishes any non-private
+  // workspace package with a pending bump — so a new publishable package nobody adds to
+  // `fixed` is invisible to both halves of the check, and the gate reports full coverage
+  // while never packing it. Deriving from `publishablePackages` — the same helper
+  // `scripts/publish-preflight.mjs` gates the actual publish with — closes that, and
+  // leaves the `publishable == fixed` cross-check where it belongs, in
+  // `tests/publish-preflight.test.ts`.
+  //
+  // BOTH directions are asserted: a publishable package this gate does not pack fails,
+  // and a package this gate packs that is not publishable fails too.
+  const changesetConfig = JSON.parse(
+    readFileSync(join(repoRoot, '.changeset', 'config.json'), 'utf8'),
+  );
+  const publishable = publishablePackages(
+    readWorkspaceManifests(repoRoot),
+    changesetConfig.ignore ?? [],
+  ).map((p) => p.name);
   const packed = [
     [libTarball, libPkgDir],
     [dbTarball, dbPkgDir],
@@ -173,15 +188,15 @@ try {
     dir,
     name: JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')).name,
   }));
-  const uncovered = fixedGroup.filter((name) => !packed.some((p) => p.name === name));
+  const uncovered = publishable.filter((name) => !packed.some((p) => p.name === name));
   if (uncovered.length > 0) {
     finish(
       FAIL,
-      `${uncovered.join(', ')} publish(es) with the release set but this gate never packs or ` +
-        'installs it — the consumer path nothing else proves',
+      `${uncovered.join(', ')} publish(es) to the registry but this gate never packs or ` +
+        'installs it — add it above; it is a consumer path nothing else proves',
     );
   }
-  const unpublished = packed.filter((p) => !fixedGroup.includes(p.name));
+  const unpublished = packed.filter((p) => !publishable.includes(p.name));
   if (unpublished.length > 0) {
     finish(
       FAIL,
@@ -189,7 +204,7 @@ try {
         '`fixed` group does not publish — the gate and the release set disagree',
     );
   }
-  console.log(`[install-smoke] covering the full published set: ${fixedGroup.join(', ')}`);
+  console.log(`[install-smoke] covering the full publishable set: ${publishable.join(', ')}`);
 
   // --- 1b. manifest guard: no workspace:-protocol spec may survive packing ----
   // #147 A3-3 fix round 1 (run 28558576615): the compat suite burned 16 shards
@@ -264,11 +279,22 @@ try {
     finish(FAIL, "kn-next --help: exit 0 but output lacked 'kn-next'/'Usage'/'Options'");
   }
 
-  // --- 3a-alias. `npx kn-next` runs THROUGH THE ALIAS, not through core ------
-  // The check above runs node_modules/.bin/kn-next, and both @getknext/core and the
-  // alias declare that bin name — so npm's winner decides what it proved, and it can
-  // be green while the alias shim is broken or absent. Run the alias's OWN shipped file
-  // so the thing a stranger types is the thing under test.
+  // --- 3a-alias. the alias's OWN shim, which step 3a never touches -----------
+  // The check above runs node_modules/.bin/kn-next. Both @getknext/core and the alias
+  // declare that bin name, and the first cut of this comment called the outcome npm's
+  // to decide. Review measured it instead, and it is DETERMINISTIC: `.bin/kn-next`
+  // resolves to `@getknext/core/dist/cli/kn-next.js` in every install shape tried,
+  // including the real `npx` one where the alias is installed alone and core arrives as
+  // its transitive dep. So step 3a never tested the alias at all — the gap was LARGER
+  // than 'might not have', not smaller.
+  //
+  // Two consequences worth stating plainly, because the obvious misreading is
+  // flattering in both directions. There is no coverage LOSS: core still owns the bin
+  // link, so 3a covers core's bin and this step covers the alias's shim — complementary,
+  // not duplicated. And this step does NOT prove that `npx kn-next` executes the shim,
+  // because it does not; it proves the shipped shim is present, intact, and forwards.
+  // Whether the shim should be on the `npx` path at all is a question about the alias
+  // package, not about this gate.
   const aliasInstallDir = join(workDir, 'node_modules', 'kn-next');
   const aliasManifestPath = join(aliasInstallDir, 'package.json');
   if (!existsSync(aliasManifestPath)) {
@@ -402,12 +428,19 @@ try {
   }
 
   // --- 5. exports-completeness: every exports subpath + bin resolves ---------
-  const coreEntry = publishedEntrypoints(corePkgDir);
-  const libEntry = publishedEntrypoints(libPkgDir);
-  const dbEntry = publishedEntrypoints(dbPkgDir);
+  // Derived from the same packed set as step 1a — review caught that the derivation
+  // stopped at packing, so a newly-covered package was installed but its `exports` and
+  // `bin` were never resolution-checked. `publishedEntrypoints` defaults a package with
+  // no `exports` map to its bare name, which the alias does not resolve as (it ships a
+  // bin and nothing importable), so entries without an explicit `exports` contribute
+  // their bins only.
+  const entries = packed.map((p) => ({
+    ...publishedEntrypoints(p.dir),
+    hasExports: JSON.parse(readFileSync(join(p.dir, 'package.json'), 'utf8')).exports !== undefined,
+  }));
   // @getknext/db's subpaths include ./migrate — this proves `@getknext/db/migrate` (the
   // `kn-next db migrate` runner) resolves to real JS in a clean install.
-  const allSubpaths = [...coreEntry.subpaths, ...libEntry.subpaths, ...dbEntry.subpaths];
+  const allSubpaths = entries.filter((e) => e.hasExports).flatMap((e) => e.subpaths);
   console.log(`[install-smoke] resolving ${allSubpaths.length} exports subpaths ...`);
   const resolveCheck = run(
     'node',
@@ -440,7 +473,7 @@ try {
   }
   // bins: kn-next was already proven runnable above; assert any other declared bin
   // at least has a .bin symlink.
-  for (const bin of [...coreEntry.bins, ...libEntry.bins, ...dbEntry.bins]) {
+  for (const bin of entries.flatMap((e) => e.bins)) {
     if (!existsSync(join(workDir, 'node_modules', '.bin', bin))) {
       finish(FAIL, `declared bin '${bin}' is missing from node_modules/.bin`);
     }
@@ -519,7 +552,7 @@ try {
 
   finish(
     PASS,
-    `packed ${fixedGroup.join(' + ')} install on plain npm/Node; the CLI runs and so does the ` +
+    `packed ${publishable.join(' + ')} install on plain npm/Node; the CLI runs and so does the ` +
       '`npx kn-next` alias shim, ' +
       'every public app-import subpath resolves to real JS outside the workspace, and ' +
       '@getknext/db imports + migrates without the optional drizzle-kit peer',

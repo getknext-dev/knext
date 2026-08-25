@@ -11,10 +11,12 @@
  * Run only against a COMMITTED tree — restores are `git checkout -- .`.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolveTestRunner } from './lib/ci-blocking-gate-proof.mjs';
+import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
 const WT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SMOKE = join(WT, 'scripts', 'install-smoke.mjs');
@@ -22,12 +24,28 @@ const CHANGESET = join(WT, '.changeset', 'config.json');
 const ALIAS_DIR = join(WT, 'packages', 'kn-next-alias');
 const ALIAS_PKG = join(ALIAS_DIR, 'package.json');
 const ALIAS_BIN = join(ALIAS_DIR, 'bin', 'kn-next.js');
+const SHAPE_SPEC = 'tests/install-smoke-coverage-derivation.test.ts';
+const NEWPUB_DIR = join(WT, 'packages', 'newpub');
 const STASH = join(tmpdir(), 'knext-alias-shim-stash.js');
+/**
+ * The paths this prover touches. The clean assertion is scoped to them, not
+ * repo-wide: a repo-wide check aborts on any unrelated untracked file (a review
+ * note, a stray build artifact), which fails closed but leaves the prover
+ * unrunnable in a working checkout and reds the nightly lane for a non-finding.
+ * Scoping keeps residue INSIDE the mutated paths caught, which is the residue
+ * that could actually grade a later mutation against a dirty tree.
+ */
+const MUTATED_PATHS = [
+  'scripts/install-smoke.mjs',
+  '.changeset/config.json',
+  'packages/kn-next-alias',
+  'packages/newpub',
+];
 
 const git = (...a) => execFileSync('git', a, { cwd: WT, encoding: 'utf8' });
 
 function clean(when) {
-  const st = git('status', '--porcelain').trim();
+  const st = git('status', '--porcelain', '--', ...MUTATED_PATHS).trim();
   if (st !== '') {
     console.error(`ABORT: tree not clean ${when}:\n${st}`);
     process.exit(1);
@@ -93,6 +111,41 @@ const MUTATIONS = [
       git('checkout', '--', '.');
     },
   },
+  {
+    id: 'M6',
+    expect: 'red',
+    graded: 'shape',
+    guard: 'the derivation replaced by a hardcoded list that names every package publishable TODAY',
+    apply: () =>
+      mutate(
+        SMOKE,
+        '  const publishable = publishablePackages(\n' +
+          '    readWorkspaceManifests(repoRoot),\n' +
+          '    changesetConfig.ignore ?? [],\n' +
+          '  ).map((p) => p.name);',
+        "  const publishable = ['@getknext/core', '@getknext/lib', '@getknext/db', 'kn-next'];",
+      ),
+    restore: () => git('checkout', '--', '.'),
+  },
+  {
+    id: 'M7',
+    expect: 'red',
+    graded: 'shape',
+    guard:
+      'a NEW publishable package that nobody adds to the gate (the review finding, reproduced)',
+    apply: () => {
+      mkdirSync(NEWPUB_DIR, { recursive: true });
+      writeFileSync(
+        join(NEWPUB_DIR, 'package.json'),
+        `${JSON.stringify({ name: '@getknext/newpub', version: '0.3.1', main: 'index.js' }, null, 2)}\n`,
+      );
+      writeFileSync(join(NEWPUB_DIR, 'index.js'), 'module.exports = {};\n');
+    },
+    restore: () => {
+      if (existsSync(NEWPUB_DIR)) rmSync(NEWPUB_DIR, { recursive: true, force: true });
+      git('checkout', '--', '.');
+    },
+  },
 ];
 
 const runSmoke = () =>
@@ -102,8 +155,33 @@ const runSmoke = () =>
     timeout: 15 * 60 * 1000,
   }).status;
 
+/**
+ * The PR-time half. The gate proves coverage is correct TODAY; it cannot catch a
+ * derivation swapped for a hardcoded list that happens to name every package
+ * publishable today and silently misses the next one. `SHAPE_SPEC` asserts the
+ * derivation still exists, so mutations of that shape are graded here.
+ */
+const runShapeSpec = () => {
+  const runner = resolveTestRunner(WT);
+  return spawnSync(runner.command, [...runner.args, 'run', SHAPE_SPEC], {
+    cwd: WT,
+    encoding: 'utf8',
+    timeout: 10 * 60 * 1000,
+  }).status;
+};
+
+declareMutations(MUTATIONS.length);
+
 clean('before the negative control');
-console.log('=== negative control: unmutated tree must EXIT 0 ===');
+console.log('=== negative control: unmutated tree must EXIT 0 (both graders) ===');
+const ncShape = runShapeSpec();
+console.log(`NC(shape) exit=${ncShape}`);
+if (ncShape !== 0) {
+  console.error(
+    'ABORT: the shape spec is red before any mutation — M6/M7 would grade meaningless.',
+  );
+  process.exit(1);
+}
 const nc = runSmoke();
 console.log(`NC exit=${nc}`);
 if (nc !== 0) {
@@ -115,17 +193,20 @@ const results = [];
 for (const m of MUTATIONS) {
   clean(`before ${m.id}`);
   m.apply();
-  if (git('status', '--porcelain').trim() === '') {
+  if (git('status', '--porcelain', '--', ...MUTATED_PATHS).trim() === '') {
     console.error(`ABORT: ${m.id} changed nothing — it would grade for free.`);
     process.exit(1);
   }
-  const status = runSmoke();
+  const status = m.graded === 'shape' ? runShapeSpec() : runSmoke();
+  recordMutation();
   m.restore();
   clean(`after ${m.id}`);
   const ok = m.expect === 'red' ? status !== 0 : status === 0;
   results.push({ ...m, status, ok });
   const verdict = ok ? (m.expect === 'red' ? 'KILLED' : 'TOLERATED') : '*** FAILED ***';
-  console.log(`${m.id} expect=${m.expect} exit=${status} ${verdict} — ${m.guard}`);
+  console.log(
+    `${m.id} expect=${m.expect} graded=${m.graded ?? 'gate'} exit=${status} ${verdict} — ${m.guard}`,
+  );
 }
 
 const bad = results.filter((r) => !r.ok);
