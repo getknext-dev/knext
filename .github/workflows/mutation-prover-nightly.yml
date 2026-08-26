@@ -72,10 +72,14 @@ jobs:
     # generous, but bounded, so a hung prover does not burn a runner all day.
     #
     # Raised from 60 on measurement, not on feel. Three consecutive nightlies ran
-    # 27, 25 and 26 minutes; `mutation-prove-install-smoke-coverage.mjs` adds ~30
-    # on its own, because six of its mutations are graded by a full pack + clean
-    # install. That lands the job around 57 minutes — inside 60 only by luck, and
-    # a nightly that reds on duration trains people to ignore it.
+    # 27, 25 and 26 minutes, and `mutation-prove-install-smoke-coverage.mjs` adds
+    # roughly half an hour on its own because most of its mutations are graded by a
+    # full pack + clean install. That lands the job near 57 minutes — inside 60 only
+    # by luck, and a nightly that reds on duration trains people to ignore it.
+    #
+    # Deliberately NOT restated as a mutation count: an earlier draft of this comment
+    # said "six of its mutations", which was true when written and was fifteen by the
+    # time anyone read it. A number that drifts silently is worse than a range.
     #
     # The bound that SHOULD exist is per-prover rather than per-job: the lane's
     # spawnSync sets `maxBuffer` and no `timeout`, so one hung prover still eats

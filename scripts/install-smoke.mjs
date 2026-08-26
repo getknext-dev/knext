@@ -71,11 +71,12 @@ let libDest;
 let dbDest;
 let coreDest;
 let aliasDest;
+let scaffoldRoot;
 
 /** Print a final summary line, clean up temp dirs, and exit with the matching code. */
 function finish(status, message) {
   console.log(`\n[install-smoke] ${status}: ${message}`);
-  for (const dir of [workDir, libDest, dbDest, coreDest, aliasDest]) {
+  for (const dir of [workDir, libDest, dbDest, coreDest, aliasDest, scaffoldRoot]) {
     try {
       if (dir && existsSync(dir)) rmSync(dir, { recursive: true, force: true });
     } catch {
@@ -348,7 +349,25 @@ try {
   // observe that — the source tree has the directory either way — so the
   // packed-and-installed path is the only place this can be proven.
   console.log('[install-smoke] running `node <bin> create` against the installed package ...');
-  const scaffoldDir = join(workDir, 'scaffolded-app');
+  // The scaffold lives OUTSIDE the consumer dir, in its own tree. Review caught the first
+  // version scaffolding into `workDir/scaffolded-app`, which meant the app sat under a
+  // directory that already had every `@getknext/*` package installed — so Node resolved
+  // them from the parent `node_modules` and a template that DROPPED a dependency still
+  // built. A real user's app has no such ancestor, and neither does this one now.
+  //
+  // The root carries a package.json and a lockfile and nothing else. That is deliberate:
+  // it gives `create` a tracing root to compute a NON-EMPTY `standalonePrefix` against, so
+  // the nested-output path stays under test, while leaking no dependency resolution.
+  scaffoldRoot = mkdtempSync(join(tmpdir(), 'knext-scaffold-'));
+  writeFileSync(
+    join(scaffoldRoot, 'package.json'),
+    `${JSON.stringify({ name: 'scaffold-root', private: true, version: '0.0.0' }, null, 2)}\n`,
+  );
+  writeFileSync(
+    join(scaffoldRoot, 'package-lock.json'),
+    `${JSON.stringify({ name: 'scaffold-root', lockfileVersion: 3, requires: true, packages: {} }, null, 2)}\n`,
+  );
+  const scaffoldDir = join(scaffoldRoot, 'scaffolded-app');
   const create = run('node', [binPath, 'create', scaffoldDir, '--name', 'smoke-app'], {
     cwd: workDir,
   });
@@ -366,6 +385,299 @@ try {
       finish(FAIL, `kn-next create did not emit ${rel} — templates missing from the tarball?`);
     }
   }
+
+  // --- 3a-ter. the scaffolded app must actually INSTALL and BUILD -----------
+  // Until now the scaffold was checked for FILES and nothing else, so `kn-next create`
+  // could emit a complete-looking app that no consumer can build — the first thing a new
+  // user does after `create` is `npm install && npm run build`, and nothing in this repo
+  // ran it. Measured before writing this: it does build, so the gate starts green and its
+  // job is to keep it that way.
+  //
+  // The scaffold pins `@getknext/*` at the CLI's own version, which by construction is not
+  // on the registry yet at gate time — that is what publishing does. Redirecting those
+  // pins at the tarballs packed above is what makes this runnable, and it is also the more
+  // honest test: it builds against the artifacts THIS commit produces, not against
+  // whatever the registry happens to hold.
+  console.log('[install-smoke] installing + building the scaffolded app ...');
+  const scaffoldPkgPath = join(scaffoldDir, 'package.json');
+  const scaffoldPkg = JSON.parse(readFileSync(scaffoldPkgPath, 'utf8'));
+  const scaffoldStart = scaffoldPkg.scripts?.start;
+  const packedByName = new Map(packed.map((p) => [p.name, p.tgz]));
+  let redirected = 0;
+  for (const field of ['dependencies', 'devDependencies']) {
+    for (const dep of Object.keys(scaffoldPkg[field] ?? {})) {
+      if (packedByName.has(dep)) {
+        scaffoldPkg[field][dep] = `file:${packedByName.get(dep)}`;
+        redirected++;
+      }
+    }
+  }
+  if (redirected === 0) {
+    finish(
+      FAIL,
+      'the scaffolded app declares no @getknext/* dependency — either the template stopped ' +
+        'depending on the packages this gate builds, or `create` emitted the wrong manifest',
+    );
+  }
+  // `@getknext/core` depends on `@getknext/db` and `@getknext/lib`, and pnpm rewrote those
+  // specs to versions that are not published yet, so the packed libraries have to be
+  // reachable. Review caught the first attempt doing that by force-adding every packed
+  // package to `dependencies`, which made the gate insensitive to the template DROPPING a
+  // dependency: with `@getknext/core` removed from the template the gate still passed,
+  // because the gate itself had put it back. `overrides` resolves the transitives without
+  // touching the declared set, so what is under test is the manifest `create` emitted.
+  // The alias is excluded by DERIVING its name from its own manifest. Hardcoding 'kn-next'
+  // here would be the exact decay M6 and M9 exist to stop, in the file they guard.
+  const aliasName = JSON.parse(readFileSync(join(aliasPkgDir, 'package.json'), 'utf8')).name;
+  scaffoldPkg.overrides = Object.fromEntries(
+    packed.filter((p) => p.name !== aliasName).map((p) => [p.name, `file:${p.tgz}`]),
+  );
+  writeFileSync(scaffoldPkgPath, `${JSON.stringify(scaffoldPkg, null, 2)}\n`);
+
+  const scaffoldInstall = run('npm', ['install', '--no-audit', '--no-fund'], {
+    cwd: scaffoldDir,
+    stdio: ['ignore', 'inherit', 'inherit'],
+  });
+  if (scaffoldInstall.status !== 0) {
+    finish(
+      FAIL,
+      `npm install in the scaffolded app exited ${scaffoldInstall.status} — the app ` +
+        '`kn-next create` generates cannot be installed by the user who just ran it',
+    );
+  }
+
+  const scaffoldBuild = run('npm', ['run', 'build'], {
+    cwd: scaffoldDir,
+    stdio: ['ignore', 'inherit', 'inherit'],
+  });
+  if (scaffoldBuild.status !== 0) {
+    finish(
+      FAIL,
+      `\`npm run build\` in the scaffolded app exited ${scaffoldBuild.status} — the app ` +
+        '`kn-next create` generates does not build',
+    );
+  }
+  // Both halves. A green build is not the claim; the claim is that the build produces what
+  // knext deploys. The template sets `output: 'standalone'`, and losing that is a SILENT
+  // break — `next build` still exits 0 and the container then has no server to start.
+  //
+  // WHERE that server lands is not a constant, and the first cut of this check assumed it
+  // was. Next nests the standalone output under the app's path relative to the tracing
+  // root it infers, so an app scaffolded inside another project emits
+  // `.next/standalone/<subdir>/server.js`. `create` already knows this — it resolves a
+  // `standalonePrefix` and bakes it into the generated Dockerfile's `WORKDIR /repo/<prefix>`.
+  // So the assertion reads the prefix back out of the artifact the user actually builds with.
+  //
+  // What that is worth, stated accurately, and NARROWLY — this comment has now been wrong
+  // twice, so the scope is spelled out rather than implied. The fixture below roots the
+  // scaffold with a lockfile and NO `pnpm-workspace.yaml` anywhere above it, so what this
+  // check proves is the pairing FOR AN APP WITH NO `pnpm-workspace.yaml` IN ITS ANCESTRY.
+  // That predicate is the one that is actually true, and it is narrower than it looks:
+  // `findWorkRoot` searches all the way up for `pnpm-workspace.yaml` BEFORE it considers a
+  // lockfile at any level, so an app with its own `package-lock.json` root still diverges
+  // if a workspace file sits anywhere above it. "Lockfile-rooted" — the predicate this
+  // comment used in its previous draft — was a false dichotomy, measured and disproven.
+  // Where they DISAGREE: Next's
+  // `dist/lib/find-root.js` looks up `pnpm-workspace.yaml` BEFORE any lockfile — its own
+  // comment says so — while `tracing-root.ts` excludes it, so `create` bakes an empty
+  // prefix and every path it emits misses the nested output. That is a real shipping bug,
+  // filed as #857, and this gate reds on it the moment the walk is fixed.
+  //
+  // The first version of this comment claimed a
+  // `create` computing the wrong prefix "fails here, and nothing else covers that", and
+  // review showed BOTH halves were false: `path.join` silently repaired a prefix missing
+  // its trailing slash, and `create-scaffold.test.ts` already covers the prefix itself at
+  // PR time. The honest claim is narrower and still worth having: an INCONSISTENCY between
+  // the prefix `create` bakes into the Dockerfile and where `next build` actually puts the
+  // server fails here, for the layout the fixture builds, and that pairing is not checked
+  // anywhere else.
+  const scaffoldDockerfile = readFileSync(join(scaffoldDir, 'Dockerfile'), 'utf8');
+  // `matchAll` + require-exactly-one, not `.match()`. Taking the first is safe only while
+  // the builder stage's bare `WORKDIR /repo` happens not to match; requiring one makes a
+  // second one an error instead of a silent choice between them.
+  const workdirs = [...scaffoldDockerfile.matchAll(/^WORKDIR \/repo\/(.*)$/gm)];
+  if (workdirs.length > 1) {
+    finish(
+      FAIL,
+      `the scaffolded Dockerfile declares ${workdirs.length} \`WORKDIR /repo/...\` lines — ` +
+        'which one names the standalone output is then a guess, so this check refuses to make it',
+    );
+  }
+  const workdir = workdirs[0] ?? null;
+  if (workdir === null) {
+    finish(
+      FAIL,
+      'the scaffolded Dockerfile declares no `WORKDIR /repo/...` — there is no way to tell ' +
+        'where it expects the standalone server, so the build cannot be checked against it',
+    );
+  }
+  const standalonePrefix = workdir[1];
+  // The prefix is contractually slash-terminated, or '' when the app IS the tracing root,
+  // and every consumer CONCATENATES it — the Dockerfile's COPYs, its CMD's
+  // STANDALONE_SERVER_PATH, and the app's `start` script. Assert that directly rather than
+  // letting a path lookup decide it: `path.join` normalises a missing separator back in, so
+  // a prefix that breaks all three of those would still resolve here.
+  if (standalonePrefix !== '' && !standalonePrefix.endsWith('/')) {
+    finish(
+      FAIL,
+      `create emitted a non-slash-terminated standalonePrefix '${standalonePrefix}' — the ` +
+        "Dockerfile's COPYs, its CMD and the app's `start` script all concatenate it, so " +
+        'every one of them would point at a path that does not exist',
+    );
+  }
+  // N6: M13's entire value depends on the fixture producing a NESTED prefix. If it is ever
+  // empty the slash-termination check cannot fire and M13 passes while testing nothing —
+  // the silent degradation this whole gate exists to prevent. It is safe today, but that
+  // is a property of the environment, so assert it rather than inherit it.
+  if (standalonePrefix === '') {
+    finish(
+      FAIL,
+      'the scaffold fixture stopped producing a nested layout — the nested-output pairing ' +
+        'is no longer under test, so a green here would mean nothing',
+    );
+  }
+  // N2: the prefix has FOUR consumers and reading one of them proves one of them. Review
+  // measured the gap: dropping `{{ standalonePrefix }}` from the template's `start` script
+  // survives the entire repo — nothing anywhere asserts the scaffolded app's start script.
+  const expectedServerPath = `.next/standalone/${standalonePrefix}server.js`;
+  const startScript = scaffoldStart ?? '';
+  if (!startScript.includes(expectedServerPath)) {
+    finish(
+      FAIL,
+      `the scaffolded app's \`start\` script does not point at ${expectedServerPath} — it ` +
+        `runs \`${startScript}\`, so \`npm start\` would miss the server this very build emits`,
+    );
+  }
+  if (!scaffoldDockerfile.includes(`${standalonePrefix}server.js`)) {
+    finish(
+      FAIL,
+      `the generated Dockerfile names no ${standalonePrefix}server.js — its CMD would start ` +
+        'a path this build does not produce',
+    );
+  }
+  // Every consumer, derived — not a list. The previous round claimed to read "every
+  // consumer" while reading three of six: the two `COPY --from=builder` lines went unread,
+  // and review measured the silent one. Dropping the prefix from the `static` COPY's
+  // DESTINATION is green across the whole repo, `docker build` succeeds, the container
+  // boots, and every `/_next/static/*` request then 404s because the assets landed beside
+  // the server instead of under it.
+  //
+  // The template ships in the tarball, so the expected count comes from the template's own
+  // interpolations rather than from call sites someone has to keep in step — the decay M6
+  // and M9 exist to stop. A template that legitimately drops a whole COPY moves both counts
+  // together and stays green.
+  const tplDockerfile = readFileSync(
+    join(workDir, 'node_modules', '@getknext', 'core', 'templates', 'app', 'Dockerfile.hbs'),
+    'utf8',
+  );
+  // What this count actually guards, stated narrowly because the first version of it did
+  // not: it compares the SHIPPED TEMPLATE against what `create` RENDERED from it, so it
+  // catches the renderer dropping an interpolation. It cannot catch a change to the
+  // template itself — mutate the template and both sides move together, which is exactly
+  // how M16 survived its first attempt. The template's own consistency is checked
+  // structurally below instead.
+  const declaredPrefixUses = (tplDockerfile.match(/\{\{\s*standalonePrefix\s*\}\}/g) ?? []).length;
+  const emittedPrefixUses = scaffoldDockerfile.split(standalonePrefix).length - 1;
+  if (declaredPrefixUses === 0) {
+    finish(
+      FAIL,
+      'the shipped Dockerfile template interpolates standalonePrefix nowhere — either the ' +
+        'template stopped being prefix-aware or this check is reading the wrong file',
+    );
+  }
+  if (emittedPrefixUses !== declaredPrefixUses) {
+    finish(
+      FAIL,
+      `the generated Dockerfile names the prefix ${emittedPrefixUses}x but its template ` +
+        `interpolates it ${declaredPrefixUses}x — a COPY, WORKDIR or CMD dropped it, so the ` +
+        'image would either fail to build or serve every static asset from the wrong path',
+    );
+  }
+  // Structural rule over the emitted COPYs, derived from each line rather than from a list
+  // of paths someone maintains. A `COPY --from=builder` whose SOURCE is under the app's
+  // prefixed build output must land at a DESTINATION that carries the prefix too —
+  // otherwise the file is copied to the wrong place inside the image. The one documented
+  // exception is the standalone copy itself, which lands at the image root by design.
+  //
+  // This is the check that catches the silent break: the image builds, the container
+  // boots, and every `/_next/static/*` request 404s because the assets landed beside the
+  // server instead of under it. A template that removes a whole COPY line stays green,
+  // because there is then no line to disagree with itself.
+  // An unparseable line is a SILENTLY EXEMPT line, and zero matched reads exactly like zero
+  // violations. Review measured the disarm: adding `--chown=node:node` to the `static` COPY
+  // — the ordinary next hardening step, since the template already does `USER node` — makes
+  // the same break M16 catches sail straight through. So count what should parse against
+  // what did, and refuse rather than exempt. `workflow.md`: make the unparseable construct
+  // FAIL rather than pass.
+  // Counted the way DOCKER reads it, not the way this reader's happy path does. The
+  // previous counter demanded column zero, uppercase and a single space, so an indent, a
+  // lowercase keyword or a tab evaded BOTH counters at once — the totals then agreed and
+  // the line was silently exempt again, restoring the exact disarm the refusal was written
+  // to close. All three forms are valid Dockerfile syntax; review confirmed it against
+  // BuildKit's own linter rather than asserting it.
+  const copyFromLines = [...scaffoldDockerfile.matchAll(/^[ \t]*copy[ \t]+--from=/gim)].length;
+  const parsedCopyLines = [
+    ...scaffoldDockerfile.matchAll(/^(COPY --from=builder\s+(\S+)\s+(\S+))\s*$/gm),
+  ].length;
+  if (parsedCopyLines !== copyFromLines) {
+    finish(
+      FAIL,
+      `${copyFromLines - parsedCopyLines} \`COPY --from=\` line(s) in the generated ` +
+        'Dockerfile are in a form this check cannot read — a flag, a continuation, extra ' +
+        'arguments, or a `--from=` naming a stage other than `builder`. An unreadable line ' +
+        'would be silently exempt, so this refuses rather than guesses',
+    );
+  }
+  for (const [, line, rawSrc, rawDest] of scaffoldDockerfile.matchAll(
+    /^(COPY --from=builder\s+(\S+)\s+(\S+))\s*$/gm,
+  )) {
+    // Trailing slashes are cosmetic in a COPY path and legitimately vary, so normalise
+    // before comparing rather than letting `/` decide a pass.
+    const src = rawSrc.replace(/\/+$/, '');
+    const dest = rawDest.replace(/\/+$/, '');
+    const sourceIsPrefixed = src.includes(`/${standalonePrefix}`);
+    // Keyed on the copy BEING the standalone output, not on where it happens to land.
+    // The previous draft exempted any prefixed source whose destination was `./`, which is
+    // not what the comment claimed and let the very break this rule exists for escape one
+    // token away: point the `static` COPY at `./` and it unpacks into the image root, the
+    // container boots, and every `/_next/static/*` request 404s.
+    const isStandaloneCopy = src.endsWith(`/${standalonePrefix}.next/standalone`);
+    // DERIVE the destination from the source rather than asking whether the prefix appears
+    // anywhere in it. `includes` is a substring test, and a destination can carry the prefix
+    // while still putting the file in the wrong place — copying `.next/static` to the prefix
+    // DIRECTORY passes a substring test and lands the assets a level up from where the
+    // server looks for them. A prefixed source must land at the same path under the image
+    // root, and that is a comparison, not a search.
+    const expectedDest = `./${src.replace(/^\/repo\//, '')}`.replace(/\/+$/, '');
+    // The standalone copy is not EXEMPT — it has a DIFFERENT expected destination: the
+    // image root, by design. Exempting it left the one COPY that actually places server.js
+    // unchecked by this rule and by anything else in the repo, which is the inverse of the
+    // break M18 covers. `dest` is already trailing-slash-normalised, so `./` and `.` agree.
+    const wantedDest = isStandaloneCopy ? '.' : expectedDest;
+    if (sourceIsPrefixed && dest !== wantedDest) {
+      finish(
+        FAIL,
+        `the generated Dockerfile copies a prefixed source to the wrong destination: ` +
+          `\`${line.trim()}\` should land at \`${wantedDest}\` — inside the image that ` +
+          'file lands somewhere the server does not look, which builds and boots cleanly ' +
+          'and then 404s at runtime',
+      );
+    }
+  }
+  const scaffoldServer = join(scaffoldDir, '.next', 'standalone', `${standalonePrefix}server.js`);
+  if (!existsSync(scaffoldServer)) {
+    finish(
+      FAIL,
+      `the scaffolded app built but emitted no standalone server at ` +
+        `.next/standalone/${standalonePrefix}server.js — the Dockerfile \`create\` generated ` +
+        'COPYs from exactly that path, so the image would have nothing to run (lost ' +
+        '`output: standalone`, or computed the wrong standalonePrefix?)',
+    );
+  }
+  console.log(
+    `[install-smoke] the scaffolded app installs, builds, and emits a standalone server where ` +
+      `its own Dockerfile expects it (.next/standalone/${standalonePrefix}server.js)`,
+  );
 
   // --- 3b. CLI: exercise the config `validate` path (zero-exit assertion) ----
   // The deploy bin's validate path needs a built Next app + cluster, so it cannot give
@@ -554,6 +866,8 @@ try {
     PASS,
     `packed ${publishable.join(' + ')} install on plain npm/Node; the CLI runs and so does the ` +
       '`npx kn-next` alias shim, ' +
+      'the app `create` scaffolds installs and builds into the standalone server its own ' +
+      'Dockerfile expects, ' +
       'every public app-import subpath resolves to real JS outside the workspace, and ' +
       '@getknext/db imports + migrates without the optional drizzle-kit peer',
   );

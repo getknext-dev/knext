@@ -28,6 +28,12 @@ const SHAPE_SPEC = 'tests/install-smoke-coverage-derivation.test.ts';
 const NEWPUB_DIR = join(WT, 'packages', 'newpub');
 const LIB_PKG = join(WT, 'packages', 'lib', 'package.json');
 const LOCKSTEP_SPEC = 'tests/publish-preflight.test.ts';
+const TEMPLATE_DIR = join(WT, 'packages', 'kn-next', 'templates', 'app');
+const NEXT_CONFIG_TPL = join(TEMPLATE_DIR, 'next.config.ts.hbs');
+const APP_PKG_TPL = join(TEMPLATE_DIR, 'package.json.hbs');
+const DOCKERFILE_TPL = join(TEMPLATE_DIR, 'Dockerfile.hbs');
+const ADAPTER_SRC = join(WT, 'packages', 'kn-next', 'src', 'adapters', 'next-adapter.ts');
+const CREATE_SRC = join(WT, 'packages', 'kn-next', 'src', 'cli', 'create.ts');
 const STASH = join(tmpdir(), 'knext-alias-shim-stash.js');
 /**
  * The paths this prover touches. The clean assertion is scoped to them, not
@@ -43,6 +49,9 @@ const MUTATED_PATHS = [
   'packages/kn-next-alias',
   'packages/newpub',
   'packages/lib/package.json',
+  'packages/kn-next/templates/app',
+  'packages/kn-next/src/adapters/next-adapter.ts',
+  'packages/kn-next/src/cli/create.ts',
 ];
 
 const git = (...a) => execFileSync('git', a, { cwd: WT, encoding: 'utf8' });
@@ -170,6 +179,204 @@ const MUTATIONS = [
         SMOKE,
         '  const entries = packed.map((p) => ({',
         '  const entries = [corePkgDir, libPkgDir, dbPkgDir].map((p) => ({',
+        checkOnly,
+      ),
+    restore: () => git('checkout', '--', '.'),
+  },
+  {
+    id: 'M10',
+    expect: 'red',
+    guard:
+      'the standalone guarantee is gone entirely — a SILENT break, next build still exits 0 ' +
+      'and the container has nothing to run',
+    // Round 1 of this mutation removed ONLY the template's `output: "standalone"` and
+    // SURVIVED. That was an invalid mutation, not a decorative guard: the guarantee is held
+    // in two independent places, and the adapter forces it on production builds
+    // (`next-adapter.ts`, whose own comment says "already set in next.config.ts but we
+    // ensure it"). Removing one copy leaves the guarantee intact, which is defense in depth
+    // working and exactly what the assertion SHOULD stay green for. Removing both is the
+    // break the assertion exists to catch.
+    apply: (checkOnly) => {
+      mutate(NEXT_CONFIG_TPL, '  output: "standalone",\n', '', checkOnly);
+      mutate(
+        ADAPTER_SRC,
+        '...(isProductionBuild ? { output: "standalone" as const } : {}),',
+        '',
+        checkOnly,
+      );
+    },
+    restore: () => git('checkout', '--', '.'),
+  },
+  {
+    id: 'M11',
+    expect: 'red',
+    guard: 'the scaffolded app cannot install — a dependency the template names does not exist',
+    apply: (checkOnly) =>
+      mutate(APP_PKG_TPL, '"next": "16.2.11"', '"next": "0.0.0-does-not-exist"', checkOnly),
+    restore: () => git('checkout', '--', '.'),
+  },
+  {
+    id: 'M12',
+    expect: 'red',
+    guard:
+      'the generated Dockerfile stops declaring where it expects the server, so the build ' +
+      'cannot be checked against it',
+    apply: (checkOnly) =>
+      mutate(
+        DOCKERFILE_TPL,
+        'WORKDIR /repo/{{ standalonePrefix }}',
+        'WORKDIR /elsewhere',
+        checkOnly,
+      ),
+    restore: () => git('checkout', '--', '.'),
+  },
+  {
+    id: 'M13',
+    expect: 'red',
+    guard:
+      'create emits a prefix that is not slash-terminated — every consumer CONCATENATES it, ' +
+      'so the Dockerfile COPYs, the CMD and the start script all point at nothing',
+    // Review's RM1: this exact mutation PASSED before, printing
+    // `.next/standalone/scaffolded-appserver.js` — a file that never existed — as its
+    // evidence, because `path.join` normalised the missing separator back in.
+    apply: (checkOnly) =>
+      mutate(
+        CREATE_SRC,
+        '!rel || rel.startsWith("..") ? "" : `${rel.split(sep).join("/")}/`;',
+        '!rel || rel.startsWith("..") ? "" : `${rel.split(sep).join("/")}`;',
+        checkOnly,
+      ),
+    restore: () => git('checkout', '--', '.'),
+  },
+  {
+    id: 'M14',
+    expect: 'red',
+    guard: 'the template stops declaring @getknext/core, which its own generated files import',
+    // Review's RM3: this PASSED before, because the gate force-added every packed package
+    // into `dependencies` and so put back exactly what the mutation removed — the gate was
+    // testing a manifest it had rewritten rather than the one `create` emitted.
+    apply: (checkOnly) =>
+      mutate(APP_PKG_TPL, '    "@getknext/core": "^{{ version }}",\n', '', checkOnly),
+    restore: () => git('checkout', '--', '.'),
+  },
+  {
+    id: 'M15',
+    expect: 'red',
+    guard:
+      "the template's `start` script loses the prefix — review measured this surviving the " +
+      "ENTIRE repo, because nothing anywhere asserted the scaffolded app's start script",
+    apply: (checkOnly) =>
+      mutate(
+        APP_PKG_TPL,
+        'node .next/standalone/{{ standalonePrefix }}server.js',
+        'node .next/standalone/server.js',
+        checkOnly,
+      ),
+    restore: () => git('checkout', '--', '.'),
+  },
+  {
+    id: 'M16',
+    expect: 'red',
+    guard:
+      "the static COPY's DESTINATION loses the prefix — green across the whole repo before " +
+      'this check, and silent at runtime: the image builds, the container boots, and every ' +
+      '/_next/static/* request 404s',
+    apply: (checkOnly) =>
+      mutate(DOCKERFILE_TPL, './{{ standalonePrefix }}.next/static', './.next/static', checkOnly),
+    restore: () => git('checkout', '--', '.'),
+  },
+  {
+    id: 'M17',
+    expect: 'red',
+    guard:
+      "the public COPY's DESTINATION loses the prefix — same shape as M16, and had no mutation",
+    apply: (checkOnly) =>
+      mutate(DOCKERFILE_TPL, './{{ standalonePrefix }}public', './public', checkOnly),
+    restore: () => git('checkout', '--', '.'),
+  },
+  {
+    id: 'M18',
+    expect: 'red',
+    guard:
+      'the static COPY lands at the image root instead — the same runtime break as M16, one ' +
+      'token away, and the previous exception waved it through',
+    // Review's MXA: the `./` exception was keyed on the DESTINATION, so pointing a prefixed
+    // source at `./` escaped a rule whose comment claimed to exempt only the standalone copy.
+    apply: (checkOnly) =>
+      mutate(
+        DOCKERFILE_TPL,
+        '/repo/{{ standalonePrefix }}.next/static ./{{ standalonePrefix }}.next/static',
+        '/repo/{{ standalonePrefix }}.next/static ./',
+        checkOnly,
+      ),
+    restore: () => git('checkout', '--', '.'),
+  },
+  {
+    id: 'M19',
+    expect: 'red',
+    guard:
+      "a COPY flag disarms the reader — M16's break wearing --chown, which the template is " +
+      'one hardening step away from adding since it already does USER node',
+    // Review's MXC: zero lines matched reads identically to zero violations, so an
+    // unparseable line was a silently exempt line. The gate now refuses rather than exempts.
+    apply: (checkOnly) =>
+      mutate(
+        DOCKERFILE_TPL,
+        'COPY --from=builder /repo/{{ standalonePrefix }}.next/static ./{{ standalonePrefix }}.next/static',
+        'COPY --from=builder --chown=node:node /repo/{{ standalonePrefix }}.next/static ./.next/static',
+        checkOnly,
+      ),
+    restore: () => git('checkout', '--', '.'),
+  },
+  {
+    id: 'M20',
+    expect: 'red',
+    guard:
+      'two leading spaces restore the disarm — an indented COPY evaded BOTH counters at once, ' +
+      'so the totals agreed and the line was silently exempt',
+    // Review's A1. `^COPY --from=` demanded column zero, uppercase and a single space; an
+    // indent, a lowercase keyword and a tab are all valid Dockerfile syntax (confirmed
+    // against BuildKit's linter) and all three slipped past the refusal.
+    apply: (checkOnly) =>
+      mutate(
+        DOCKERFILE_TPL,
+        'COPY --from=builder /repo/{{ standalonePrefix }}.next/static ./{{ standalonePrefix }}.next/static',
+        '  COPY --from=builder /repo/{{ standalonePrefix }}.next/static ./.next/static',
+        checkOnly,
+      ),
+    restore: () => git('checkout', '--', '.'),
+  },
+  {
+    id: 'M21',
+    expect: 'red',
+    guard:
+      'the destination CARRIES the prefix and still puts the file in the wrong place — the ' +
+      'substring test passed it, the derived comparison does not',
+    // Review's C1: copying `.next/static` to the prefix DIRECTORY satisfies
+    // `dest.includes(prefix)` while landing the assets a level above where the server looks.
+    apply: (checkOnly) =>
+      mutate(
+        DOCKERFILE_TPL,
+        '/repo/{{ standalonePrefix }}.next/static ./{{ standalonePrefix }}.next/static',
+        '/repo/{{ standalonePrefix }}.next/static ./{{ standalonePrefix }}',
+        checkOnly,
+      ),
+    restore: () => git('checkout', '--', '.'),
+  },
+  {
+    id: 'M22',
+    expect: 'red',
+    guard:
+      'the standalone COPY gains a prefixed destination — the one COPY that places server.js, ' +
+      'and the previous rule EXEMPTED it outright so nothing in the repo checked it',
+    // Review's D1, and the inverse of M18. Louder than the silent class (this crash-loops
+    // rather than 404ing), but it lived in code this diff introduced and the fix DELETES an
+    // exemption rather than adding a rule.
+    apply: (checkOnly) =>
+      mutate(
+        DOCKERFILE_TPL,
+        '/repo/{{ standalonePrefix }}.next/standalone ./',
+        '/repo/{{ standalonePrefix }}.next/standalone ./{{ standalonePrefix }}.next/standalone',
         checkOnly,
       ),
     restore: () => git('checkout', '--', '.'),
