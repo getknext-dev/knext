@@ -649,11 +649,16 @@ try {
     // server looks for them. A prefixed source must land at the same path under the image
     // root, and that is a comparison, not a search.
     const expectedDest = `./${src.replace(/^\/repo\//, '')}`.replace(/\/+$/, '');
-    if (sourceIsPrefixed && !isStandaloneCopy && dest !== expectedDest) {
+    // The standalone copy is not EXEMPT — it has a DIFFERENT expected destination: the
+    // image root, by design. Exempting it left the one COPY that actually places server.js
+    // unchecked by this rule and by anything else in the repo, which is the inverse of the
+    // break M18 covers. `dest` is already trailing-slash-normalised, so `./` and `.` agree.
+    const wantedDest = isStandaloneCopy ? '.' : expectedDest;
+    if (sourceIsPrefixed && dest !== wantedDest) {
       finish(
         FAIL,
         `the generated Dockerfile copies a prefixed source to the wrong destination: ` +
-          `\`${line.trim()}\` should land at \`${expectedDest}\` — inside the image that ` +
+          `\`${line.trim()}\` should land at \`${wantedDest}\` — inside the image that ` +
           'file lands somewhere the server does not look, which builds and boots cleanly ' +
           'and then 404s at runtime',
       );

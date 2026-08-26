@@ -364,6 +364,24 @@ const MUTATIONS = [
     restore: () => git('checkout', '--', '.'),
   },
   {
+    id: 'M22',
+    expect: 'red',
+    guard:
+      'the standalone COPY gains a prefixed destination — the one COPY that places server.js, ' +
+      'and the previous rule EXEMPTED it outright so nothing in the repo checked it',
+    // Review's D1, and the inverse of M18. Louder than the silent class (this crash-loops
+    // rather than 404ing), but it lived in code this diff introduced and the fix DELETES an
+    // exemption rather than adding a rule.
+    apply: (checkOnly) =>
+      mutate(
+        DOCKERFILE_TPL,
+        '/repo/{{ standalonePrefix }}.next/standalone ./',
+        '/repo/{{ standalonePrefix }}.next/standalone ./{{ standalonePrefix }}.next/standalone',
+        checkOnly,
+      ),
+    restore: () => git('checkout', '--', '.'),
+  },
+  {
     id: 'M7',
     expect: 'red',
     graded: 'shape',
