@@ -31,7 +31,11 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { createLogger } from "../utils/logger";
 import { handleUsageError, UsageError } from "./shared";
-import { findTracingRoot, NO_LOCKFILE_INSTALL } from "./tracing-root";
+import {
+    configuredTracingRoot,
+    findTracingRoot,
+    NO_LOCKFILE_INSTALL,
+} from "./tracing-root";
 
 const log = createLogger({ module: "create" });
 
@@ -111,13 +115,31 @@ export interface Layout {
 /** Resolve the layout facts every emitted path depends on, once. */
 export function resolveLayout(appDir: string): Layout {
     const app = resolve(appDir);
-    // Same walk `deploy`/`preview` use for the docker build context (#644).
-    // `create` tolerates the no-lockfile case that `requireBuildContext`
-    // rejects: an app is scaffolded BEFORE anything is installed, and with no
-    // lockfile anywhere Next traces from the app directory itself — which is
-    // exactly what the null root falls back to here.
-    const { root: found, installCmd } = findTracingRoot(app);
-    const root = found ?? app;
+    // Same PRECEDENCE `deploy`/`preview` use, not just the same walk (#861).
+    // `requireBuildContext` consults `configuredTracingRoot` first; this function
+    // used to skip straight to the walk, so pinning `outputFileTracingRoot` moved
+    // the deploy build context while leaving the Dockerfile `create` had already
+    // baked computed against the walked root — the prefix, both COPY sources, the
+    // WORKDIR and the CMD all pointing at something the build never wrote. That is
+    // #857's symptom by another route, and reachable by following knext's own advice,
+    // since pinning the root is what `warnDuplicatedLockFiles` recommends for an
+    // ambiguous chain.
+    //
+    // `create` still tolerates the no-marker case that `requireBuildContext` rejects:
+    // an app is scaffolded BEFORE anything is installed, and with nothing anywhere
+    // Next traces from the app directory itself — which is what the null root falls
+    // back to here.
+    const configured = configuredTracingRoot(app);
+    const walked = findTracingRoot(app);
+    const root = configured?.root ?? walked.root ?? app;
+    // The install command belongs to the root the Dockerfile installs in. When the
+    // user pins a root, the walk's command describes a different directory, so ask
+    // the walk again FROM the pinned root rather than carrying an answer about
+    // somewhere else.
+    const installCmd =
+        configured === null
+            ? walked.installCmd
+            : findTracingRoot(configured.root).installCmd;
     const rel = relative(root, app);
     const standalonePrefix =
         !rel || rel.startsWith("..") ? "" : `${rel.split(sep).join("/")}/`;

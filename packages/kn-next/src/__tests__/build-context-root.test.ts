@@ -30,7 +30,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { resolveLayout } from "../cli/create";
+import { resolveLayout, standalonePrefixFor } from "../cli/create";
 import { findTracingRoot, requireBuildContext } from "../cli/tracing-root";
 
 /** A throwaway repo: `dirs` created, `files` written relative to its root. */
@@ -561,5 +561,52 @@ describe("#857 — a pnpm-lock.yaml below the root does not make the install fro
         expect(found.root).toBe(root);
         expect(found.installCmd).toContain("pnpm install");
         expect(found.installCmd).not.toContain("--frozen-lockfile");
+    });
+});
+
+/**
+ * #861 — `create` and `deploy` must resolve the same root for the same tree.
+ *
+ * `requireBuildContext` (deploy/preview) checks `configuredTracingRoot` first;
+ * `resolveLayout` (create) called `findTracingRoot` only. So pinning
+ * `outputFileTracingRoot` moved the deploy build context while leaving the Dockerfile
+ * `create` had already baked untouched — the standalone prefix, both COPY sources, the
+ * WORKDIR and the CMD all still computed against the walked root.
+ *
+ * That is #857's symptom reached by a different route: paths pointing at something the
+ * build never wrote. Pinning the root is also the documented escape hatch for an
+ * ambiguous marker chain (`warnDuplicatedLockFiles` recommends it), so the two commands
+ * disagreeing is reachable by following knext's own advice.
+ */
+describe("#861 — a pinned tracing root governs create's prefix too", () => {
+    it("computes standalonePrefix against the pinned root, not the walked one", () => {
+        const root = repo({
+            "package-lock.json": "{}",
+            "proj/apps/a/package.json": "{}",
+        });
+        const app = join(root, "proj", "apps", "a");
+        writeFileSync(
+            join(app, "next.config.ts"),
+            `export default { outputFileTracingRoot: ${JSON.stringify(join(root, "proj"))} };\n`,
+        );
+        // Walked root is `root` (the package-lock.json), which would give "proj/apps/a/".
+        // The user pinned `root/proj`, so the app sits at "apps/a/" beneath it.
+        expect(standalonePrefixFor(app)).toBe("apps/a/");
+    });
+
+    it("agrees with requireBuildContext about the root once pinned", () => {
+        const root = repo({
+            "package-lock.json": "{}",
+            "proj/apps/a/package.json": "{}",
+        });
+        const app = join(root, "proj", "apps", "a");
+        const pinned = join(root, "proj");
+        writeFileSync(
+            join(app, "next.config.ts"),
+            `export default { outputFileTracingRoot: ${JSON.stringify(pinned)} };\n`,
+        );
+        expect(resolveLayout(app).root).toBe(
+            requireBuildContext(app, () => {}),
+        );
     });
 });
