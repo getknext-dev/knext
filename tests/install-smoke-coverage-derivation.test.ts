@@ -85,6 +85,16 @@ describe('install-smoke covers the publishable set', () => {
     }
   });
 
+  it('derives the Dockerfile prefix count from the template, not a literal', () => {
+    // The run-time check compares the shipped template's interpolations against the
+    // rendered Dockerfile. Swapping that derivation for a hardcoded number would stay green
+    // today and go blind the moment the template gains or loses a COPY — the same decay the
+    // publishable-set checks above exist to stop, one file over.
+    const src = source();
+    expect(src).toMatch(/tplDockerfile\.match\(/);
+    expect(src).toMatch(/emittedPrefixUses !== declaredPrefixUses/);
+  });
+
   it('resolves the alias bin through the installed manifest, not a hardcoded filename', () => {
     // Renaming the shim and its `bin` mapping together is legitimate; a hardcoded
     // path would fail the release for it.
