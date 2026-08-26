@@ -7,10 +7,18 @@
 > Companion ledgers: `docs/debt/tech-debt-ledger.md`, `docs/benchmarks/cold-start-ledger.md`,
 > `docs/ux/ergonomics-ledger.md`.
 
-## Verdict: NOT READY — 2 hard blockers, both maintainer-only credentials work
+## Verdict: NOT READY — 2 maintainer-only blockers, and 1 product defect
 
-**Every engineering step is done and proven. What is left is two things only the repo owner can do:
-rotate a dead npm token, and flip a package to public.** Neither is code.
+**Two things only the repo owner can do — rotate a dead npm token, and flip a package to public —
+plus one shipping bug found after the previous draft was written.**
+
+> **The line that used to sit here said "every engineering step is done and proven."** It was
+> written before anyone walked the new user's path end to end, and walking it found
+> [#857](https://github.com/getknext-dev/knext/issues/857): an app with a `pnpm-workspace.yaml`
+> anywhere in its ancestry gets a Dockerfile, a `CMD` and an `npm start` that all point at a file
+> that does not exist, with `next build` exiting 0 the whole way. This file's own history is the
+> argument for deleting that sentence rather than qualifying it — some version of
+> "the engineering is done" has appeared here at five separate points and been wrong every time.
 
 The path here is worth stating, because each defect was invisible until the one in front of it was
 fixed, and the audit was wrong about the cause twice:
@@ -109,7 +117,39 @@ pull requests"* at org and repo level would let the lane open its own Version PR
 by-hand step above. Left alone deliberately — widening an organisation-wide Actions permission is
 the maintainer's call, and the by-hand path works.
 
-### ~~Blocker 3 — the compat claim's own gates are red or flaky~~ — CLEARED 2026-08-25
+### Blocker 3 — `create` bakes paths the build does not produce, in a pnpm workspace (#857)
+
+Found by rehearsing the stranger's journey rather than by a gate, which is why it survived this
+long. Next's `dist/lib/find-root.js` looks up `pnpm-workspace.yaml` **before any lockfile, at any
+level** — its own comment says so — while `packages/kn-next/src/cli/tracing-root.ts` excludes it,
+on the stated grounds that "Next does not consult it", which is false for the pinned next
+16.2.11. `create-scaffold.test.ts` then locks the divergence in with a **green** spec.
+
+The predicate is **ancestry, not root**: an app whose own marker is a `package-lock.json` still
+diverges if a workspace file sits above it, which is invisible from the app directory. knext's own
+repo is a pnpm workspace, so this is a common layout.
+
+**Consequence:** both `COPY --from=builder` lines, the `WORKDIR`, the `CMD`'s
+`STANDALONE_SERVER_PATH` and the app's `npm start` all reference a path the build never wrote.
+The image builds, the container starts, and there is nothing to run.
+
+**Action: in-repo, agent-doable.** Add `pnpm-workspace.yaml` to the head of `LOCKFILES`, invert
+the spec that pins the old behaviour, and confirm the scaffold-build gate reds on that tree.
+
+### What walking the journey established, beyond the defect
+
+Measured, not assumed, and recorded so it is not re-derived:
+
+- `kn-next create` exits 0 and its "next steps" guidance is genuinely good;
+- the scaffold pins `@getknext/*` from the **CLI's own runtime version**, so there is no
+  hardcoded-version drift to worry about;
+- the scaffolded app's `npm install` fails today **only** with
+  `ETARGET @getknext/core@^0.3.1` — that is blocker 2 showing through, not a defect, and it
+  resolves the moment publishing does;
+- **the scaffold builds clean** against locally packed tarballs — `next build` exits 0 and emits
+  a standalone server. Nothing gated that before; the gate now exists.
+
+### ~~Old blocker 3 — the compat claim's own gates are red or flaky~~ — CLEARED 2026-08-25
 
 **The premise was two-thirds wrong, and the measurement says so.** Diagnosed from the
 `compat-run-ledger` artifact of *every* scheduled run (2026-07-28 → 08-24) and independently
@@ -215,4 +255,7 @@ gate is red would fail this project's central honesty rule.
        nights — is now filed as #850; #710 is a permanently-unclearable weekly alert and needs a
        disposition.
 6. [ ] Agent: ergonomics row 8 — measure the REAL `npx kn-next` journey post-publish.
-7. [ ] Then: announce.
+7. [ ] Agent: fix #857 — `create` bakes a standalone prefix Next does not use whenever a
+       `pnpm-workspace.yaml` sits anywhere in the app's ancestry. Not gated on either human
+       step, and the only item here that is a product defect rather than a publishing state.
+8. [ ] Then: announce.
