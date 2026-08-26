@@ -928,3 +928,57 @@ describe("kn-next create — the scaffolded config keeps the last pod warm (ADR-
         expect(scaling.scaleDownDelay).toBe("5m");
     });
 });
+
+/**
+ * #864 — a higher-precedence config shadows the one `create` writes.
+ *
+ * `create` emits `next.config.ts`. Next's own precedence is `.js` → `.mjs` → `.ts` →
+ * `.mts` → `.cjs` → `.cts`, first match wins, and `tracing-root.ts` already records that
+ * the order is load-bearing. So on an app that uses `next.config.js`, `--force` leaves
+ * BOTH files and Next reads the one knext did not write — the one with no
+ * `output: "standalone"` and no `adapterPath`.
+ *
+ * Measured before this guard existed: `create --force` exited 0, reported success, and
+ * the winning config carried 0 of knext's required settings while the emitted `.ts`
+ * carried 4 that Next never reads. The build then emits no standalone server at all,
+ * which is where #857 landed — an image with nothing to run, reached with a green
+ * scaffold and no diagnostic.
+ *
+ * `--force` is REQUIRED for any pre-existing app (a bare `create` refuses on
+ * `package.json`), so this is the default path for "add knext to an app I already have".
+ * A warning would not do: this repo's record is that a message standing in for a
+ * guarantee is how the guarantee is lost.
+ */
+describe("#864 — create refuses when an existing config would shadow the one it writes", () => {
+    it("refuses under --force, naming the shadowing file", () => {
+        const appDir = join(root, "existing");
+        mkdirSync(appDir, { recursive: true });
+        writeFileSync(join(appDir, "package.json"), "{}\n");
+        writeFileSync(
+            join(appDir, "next.config.js"),
+            "module.exports = { reactStrictMode: true };\n",
+        );
+        expect(() =>
+            writeScaffold({ appDir, name: "existing", force: true }),
+        ).toThrow(/next\.config\.js/);
+    });
+
+    it("does not refuse for a LOWER-precedence config, which the emitted one wins over", () => {
+        const appDir = join(root, "lower");
+        mkdirSync(appDir, { recursive: true });
+        writeFileSync(join(appDir, "package.json"), "{}\n");
+        writeFileSync(
+            join(appDir, "next.config.cjs"),
+            "module.exports = {};\n",
+        );
+        expect(() =>
+            writeScaffold({ appDir, name: "lower", force: true }),
+        ).not.toThrow();
+    });
+
+    it("still scaffolds a clean app with no config at all", () => {
+        const appDir = join(root, "clean864");
+        mkdirSync(appDir, { recursive: true });
+        expect(() => writeScaffold({ appDir, name: "clean864" })).not.toThrow();
+    });
+});

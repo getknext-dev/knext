@@ -209,6 +209,31 @@ const CONFIG_FILES = [
     "next.config.cts",
 ];
 
+/**
+ * The config file Next would read INSTEAD of `emitted`, or null if `emitted` wins.
+ *
+ * `create` writes `next.config.ts`, and Next takes the FIRST of `CONFIG_FILES` that
+ * exists — so an app that already uses `next.config.js` ends up holding both, with
+ * Next reading the one knext did not write: no `output: "standalone"`, no
+ * `adapterPath`, and therefore no standalone server for the generated Dockerfile to
+ * copy (#864).
+ *
+ * The precedence is answered here rather than exported, because a caller that
+ * re-implements the order is a second copy of a fact this module already calls
+ * load-bearing.
+ */
+export function shadowingConfigFor(
+    appDir: string,
+    emitted: string,
+): string | null {
+    const app = resolve(appDir);
+    for (const candidate of CONFIG_FILES) {
+        if (candidate === emitted) return null;
+        if (existsSync(join(app, candidate))) return candidate;
+    }
+    return null;
+}
+
 /** Strip comments so a commented-out setting is not read as configuration. */
 function stripComments(source: string): string {
     return source
