@@ -30,7 +30,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { createLogger } from "../utils/logger";
 
 /**
@@ -105,44 +105,87 @@ export interface TracingRoot {
  * means for them — it is a normal state for `create` (the app is scaffolded
  * before anything is installed) and an unanswerable question for `deploy`.
  */
-export function findTracingRoot(appDir: string): TracingRoot {
-    let dir = resolve(appDir);
-    let root: string | null = null;
-    let installCmd = NO_LOCKFILE_INSTALL;
-    const lockFiles: string[] = [];
-
-    // A pnpm workspace ANYWHERE above the app roots the trace, and it outranks every
-    // lockfile at every level — Next resolves the workspace file across the whole
-    // ancestry before it looks at a single lockfile. So the walk asks that question
-    // first, over the same ancestry, rather than per-directory: a `package-lock.json`
-    // beside the app does NOT beat a `pnpm-workspace.yaml` three levels up, which is
-    // precisely the case with the widest blast radius, because the workspace file is
-    // invisible from the app directory (#857).
-    for (let probe = dir; ; ) {
-        if (existsSync(join(probe, PNPM_WORKSPACE_FILE))) {
-            root = probe;
-            installCmd = existsSync(join(probe, "pnpm-lock.yaml"))
-                ? "corepack enable && pnpm install --frozen-lockfile"
-                : "corepack enable && pnpm install";
-            lockFiles.push(join(probe, PNPM_WORKSPACE_FILE));
-        }
-        const parent = dirname(probe);
-        if (parent === probe) break;
-        probe = parent;
-    }
-    if (root !== null) return { root, installCmd, lockFiles };
-
+/**
+ * `findUp` over a list of file names, first match per level, in ARRAY ORDER.
+ * Mirrors the `find-up` call Next makes; the per-level ordering matters, because
+ * a directory holding two markers must resolve to the same one Next picks.
+ */
+function findUpFile(startDir: string, names: readonly string[]): string | null {
+    let dir = resolve(startDir);
     for (;;) {
-        const hit = LOCKFILES.find((l) => existsSync(join(dir, l.file)));
-        if (hit) {
-            root = dir;
-            installCmd = hit.install;
-            lockFiles.push(join(dir, hit.file));
+        for (const name of names) {
+            const candidate = join(dir, name);
+            if (existsSync(candidate)) return candidate;
         }
         const parent = dirname(dir);
-        if (parent === dir) break;
+        if (parent === dir) return null;
         dir = parent;
     }
+}
+
+/**
+ * Next's `findWorkRoot`, ported literally rather than reordered.
+ *
+ * The workspace file is searched over the WHOLE ancestry before any lockfile is
+ * considered — but finding one does NOT end the walk. That distinction cost this
+ * function a design-gate BLOCK: an earlier draft returned as soon as it found the
+ * outermost workspace file, which silently dropped any lockfile ABOVE it and made
+ * `root` wrong for a case the previous lockfile-only walk got RIGHT. A stray
+ * `package-lock.json` in `$HOME` or at `/` in a CI image is ordinary, so that is
+ * not a corner.
+ */
+function findWorkRoot(cwd: string): string | null {
+    return (
+        findUpFile(cwd, [PNPM_WORKSPACE_FILE]) ??
+        findUpFile(
+            cwd,
+            LOCKFILES.map((l) => l.file),
+        )
+    );
+}
+
+export function findTracingRoot(appDir: string): TracingRoot {
+    const first = findWorkRoot(resolve(appDir));
+    if (first === null) {
+        return { root: null, installCmd: NO_LOCKFILE_INSTALL, lockFiles: [] };
+    }
+
+    // Next's outward loop, verbatim: restart the search from above each hit and
+    // stop only when nothing of EITHER kind remains. Workspace-preference decides
+    // which marker is recorded at each hop; it does not end the walk.
+    const lockFiles: string[] = [first];
+    for (;;) {
+        const currentDir = dirname(lockFiles[lockFiles.length - 1] as string);
+        const parentDir = dirname(currentDir);
+        if (parentDir === currentDir) break;
+        const next = findWorkRoot(parentDir);
+        if (next === null) break;
+        lockFiles.push(next);
+    }
+
+    const root = dirname(lockFiles[lockFiles.length - 1] as string);
+
+    // Root and package MANAGER are two questions, and conflating them is what
+    // produced the early return above. The root stays faithful to Next; the manager
+    // comes from the workspace file in the chain when there is one, because `npm ci`
+    // cannot install a pnpm workspace even when the outermost marker is an npm
+    // lockfile. When the chain holds more than one marker `warnDuplicatedLockFiles`
+    // fires, which is the user's signal that the inferred root is a guess.
+    const workspaceFile = lockFiles.find(
+        (f) => basename(f) === PNPM_WORKSPACE_FILE,
+    );
+    let installCmd: string;
+    if (workspaceFile !== undefined) {
+        installCmd = existsSync(join(dirname(workspaceFile), "pnpm-lock.yaml"))
+            ? "corepack enable && pnpm install --frozen-lockfile"
+            : "corepack enable && pnpm install";
+    } else {
+        const rootMarker = basename(lockFiles[lockFiles.length - 1] as string);
+        installCmd =
+            LOCKFILES.find((l) => l.file === rootMarker)?.install ??
+            NO_LOCKFILE_INSTALL;
+    }
+
     return { root, installCmd, lockFiles };
 }
 

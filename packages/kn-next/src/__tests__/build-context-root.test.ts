@@ -458,3 +458,48 @@ describe("#857 — pnpm-workspace.yaml roots the trace, and it wins over lockfil
         expect(findTracingRoot(join(root, "apps", "web")).root).toBe(root);
     });
 });
+
+/**
+ * #857, design-gate round 2 — finding a workspace file must not END the walk.
+ *
+ * The first port searched the whole ancestry for `pnpm-workspace.yaml` and returned as
+ * soon as it found one. Next does not do that: `findWorkRoot` prefers the workspace file
+ * *at each hop*, but `findRootDirAndLockFiles` keeps walking outward until nothing of
+ * EITHER kind remains. A lockfile strictly above the outermost workspace file therefore
+ * roots the trace — and the early return dropped it, turning a case the old lockfile-only
+ * walk got RIGHT into a wrong answer.
+ *
+ * These two cases are the ones that distinguish the implementations. The four above do
+ * not: they pass under both, which is why CI stayed green while the port was wrong.
+ *
+ * A stray `package-lock.json` in `$HOME`, or at `/` inside a CI image, is ordinary —
+ * `warnDuplicatedLockFiles`' own docstring is written about exactly that.
+ */
+describe("#857 — a marker ABOVE the outermost workspace file still roots the trace", () => {
+    it("keeps walking past a pnpm workspace to an npm lockfile above it", () => {
+        const root = repo({
+            "package-lock.json": "{}",
+            "proj/pnpm-workspace.yaml": "packages:\n  - apps/*\n",
+            "proj/apps/a/package.json": "{}",
+        });
+        const app = join(root, "proj", "apps", "a");
+        expect(findTracingRoot(app).root).toBe(root);
+    });
+
+    it("still installs with pnpm when the chain holds a workspace file", () => {
+        // Root and manager are two questions: the root is the npm lockfile's directory,
+        // but `npm ci` cannot install the pnpm workspace beneath it.
+        const root = repo({
+            "yarn.lock": "",
+            "proj/pnpm-workspace.yaml": "packages:\n  - apps/*\n",
+            "proj/pnpm-lock.yaml": "",
+            "proj/apps/a/package.json": "{}",
+        });
+        const found = findTracingRoot(join(root, "proj", "apps", "a"));
+        expect(found.root).toBe(root);
+        expect(found.installCmd).toContain("pnpm");
+        // More than one marker in the chain — the ambiguity warning is the user's only
+        // signal that the inferred root is a guess, and it must survive.
+        expect(found.lockFiles.length).toBeGreaterThan(1);
+    });
+});
