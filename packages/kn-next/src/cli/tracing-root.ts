@@ -36,11 +36,15 @@ import { createLogger } from "../utils/logger";
 /**
  * EXACTLY the lockfiles next 16.2's `findRootDirAndLockFiles` considers.
  *
- * `pnpm-workspace.yaml` is deliberately NOT here even though it looks like a
- * workspace-root marker: Next does not consult it, so treating it as one made
- * us emit `apps/a/` where Next produces a FLAT `.next/standalone/`. Diverging
- * from Next here does not "fix" anything; it just moves the error somewhere
- * quieter.
+ * `pnpm-workspace.yaml` is NOT in this list because it is not a lockfile — it is
+ * handled FIRST, by `findWorkRoot` below, which is where Next handles it too.
+ *
+ * An earlier version of this comment said `pnpm-workspace.yaml` was deliberately
+ * excluded because "Next does not consult it". That was false for the pinned
+ * next 16.2.11 and cost users a working image (#857): `dist/lib/find-root.js`'s
+ * `findWorkRoot` searches up for `pnpm-workspace.yaml` BEFORE any lockfile, and
+ * its own comment gives the reason — lockfiles "can be included in the
+ * application directory by accident".
  *
  * Each entry also names the package manager, because the generated Dockerfile
  * must install with the manager whose lockfile it found (`npm ci` cannot
@@ -65,6 +69,17 @@ export const LOCKFILES: ReadonlyArray<{ file: string; install: string }> = [
 
 /** No lockfile anywhere: nothing to be frozen against. */
 export const NO_LOCKFILE_INSTALL = "npm install --no-audit --no-fund";
+
+/**
+ * The workspace marker Next checks BEFORE any lockfile (#857).
+ *
+ * A pnpm workspace normally carries a `pnpm-lock.yaml` at the same root, and then
+ * the frozen install is right. When it does not — a workspace that has never been
+ * installed — `--frozen-lockfile` would fail on a lockfile that is not there, so
+ * the unfrozen form is emitted instead. Either way the manager must be pnpm:
+ * `npm ci` cannot consume a pnpm workspace.
+ */
+const PNPM_WORKSPACE_FILE = "pnpm-workspace.yaml";
 
 export interface TracingRoot {
     /** The outermost lockfile-bearing ancestor of `appDir`, or null. */
@@ -95,6 +110,28 @@ export function findTracingRoot(appDir: string): TracingRoot {
     let root: string | null = null;
     let installCmd = NO_LOCKFILE_INSTALL;
     const lockFiles: string[] = [];
+
+    // A pnpm workspace ANYWHERE above the app roots the trace, and it outranks every
+    // lockfile at every level — Next resolves the workspace file across the whole
+    // ancestry before it looks at a single lockfile. So the walk asks that question
+    // first, over the same ancestry, rather than per-directory: a `package-lock.json`
+    // beside the app does NOT beat a `pnpm-workspace.yaml` three levels up, which is
+    // precisely the case with the widest blast radius, because the workspace file is
+    // invisible from the app directory (#857).
+    for (let probe = dir; ; ) {
+        if (existsSync(join(probe, PNPM_WORKSPACE_FILE))) {
+            root = probe;
+            installCmd = existsSync(join(probe, "pnpm-lock.yaml"))
+                ? "corepack enable && pnpm install --frozen-lockfile"
+                : "corepack enable && pnpm install";
+            lockFiles.push(join(probe, PNPM_WORKSPACE_FILE));
+        }
+        const parent = dirname(probe);
+        if (parent === probe) break;
+        probe = parent;
+    }
+    if (root !== null) return { root, installCmd, lockFiles };
+
     for (;;) {
         const hit = LOCKFILES.find((l) => existsSync(join(dir, l.file)));
         if (hit) {

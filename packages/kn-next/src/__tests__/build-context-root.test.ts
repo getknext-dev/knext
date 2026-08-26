@@ -398,3 +398,63 @@ describe("#644 — no call site keeps its own root rule", () => {
         ).toEqual([]);
     });
 });
+
+/**
+ * #857 — `pnpm-workspace.yaml` is a tracing-root marker, and Next checks it FIRST.
+ *
+ * knext's walk considered only the five lockfiles, on the stated grounds that
+ * "Next does not consult it". That is false for the pinned next 16.2.11:
+ * `dist/lib/find-root.js`'s `findWorkRoot` does `findUp.sync('pnpm-workspace.yaml')`
+ * BEFORE any lockfile search, and its own comment says why — lockfiles "can be
+ * included in the application directory by accident".
+ *
+ * The consequence is not cosmetic. `create` bakes `standalonePrefix` into the
+ * Dockerfile's two COPY sources, its WORKDIR, the CMD's STANDALONE_SERVER_PATH and
+ * the app's `start` script. Compute it against a different root than Next uses and
+ * every one of those points at a path the build never wrote — while `next build`
+ * exits 0.
+ */
+describe("#857 — pnpm-workspace.yaml roots the trace, and it wins over lockfiles", () => {
+    it("treats a pnpm-workspace.yaml ancestor as the root", () => {
+        const root = repo({
+            "pnpm-workspace.yaml": "packages:\n  - apps/*\n",
+            "apps/web/package.json": "{}",
+        });
+        const app = join(root, "apps", "web");
+        expect(findTracingRoot(app).root).toBe(root);
+    });
+
+    it("prefers an OUTER pnpm-workspace.yaml over a nearer lockfile, as Next does", () => {
+        // The class with the larger blast radius: the app's own marker is a
+        // package-lock.json, so it looks lockfile-rooted by every local measure,
+        // and the workspace file above it is invisible from the app directory.
+        const root = repo({
+            "pnpm-workspace.yaml": "packages:\n  - proj/*\n",
+            "proj/package-lock.json": "{}",
+            "proj/app/package.json": "{}",
+        });
+        const app = join(root, "proj", "app");
+        expect(findTracingRoot(app).root).toBe(root);
+    });
+
+    it("installs with pnpm when the root is a pnpm workspace", () => {
+        // The generated Dockerfile must install with the manager whose root it
+        // found; `npm ci` cannot consume a pnpm workspace.
+        const root = repo({
+            "pnpm-workspace.yaml": "packages:\n  - apps/*\n",
+            "pnpm-lock.yaml": "",
+            "apps/web/package.json": "{}",
+        });
+        expect(findTracingRoot(join(root, "apps", "web")).installCmd).toContain(
+            "pnpm",
+        );
+    });
+
+    it("still prefers a lockfile when no pnpm-workspace.yaml exists anywhere", () => {
+        const root = repo({
+            "package-lock.json": "{}",
+            "apps/web/package.json": "{}",
+        });
+        expect(findTracingRoot(join(root, "apps", "web")).root).toBe(root);
+    });
+});
