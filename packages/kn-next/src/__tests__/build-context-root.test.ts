@@ -563,3 +563,41 @@ describe("#857 — a pnpm-lock.yaml below the root does not make the install fro
         expect(found.installCmd).not.toContain("--frozen-lockfile");
     });
 });
+
+/**
+ * #860 — `create` bakes the Dockerfile, so `create` must surface the ambiguity warning.
+ *
+ * `requireBuildContext` (deploy/preview) calls `warnDuplicatedLockFiles`; `resolveLayout`
+ * (create) called `findTracingRoot` directly and threw the `lockFiles` list away. So an
+ * ambiguous marker chain surfaced at `docker build` rather than at scaffold time, when it
+ * is cheap to fix by pinning `outputFileTracingRoot`.
+ *
+ * The stakes are not merely ergonomic, and `warnDuplicatedLockFiles`' own docstring says
+ * why: knext hands the inferred directory to `docker buildx build` and the scaffolded
+ * Dockerfile does `COPY . .`, so a stray `~/package-lock.json` does not just mis-trace a
+ * build — it bakes `~/.ssh` and `~/.aws` into a PUSHED image. `create` is the command that
+ * writes that Dockerfile, and it was the one command saying nothing.
+ */
+describe("#860 — create warns when the marker chain is ambiguous", () => {
+    it("warns, naming the chosen root, when more than one marker is found", () => {
+        const root = repo({
+            "package-lock.json": "{}",
+            "apps/web/package-lock.json": "{}",
+            "apps/web/package.json": "{}",
+        });
+        const warnings: string[] = [];
+        resolveLayout(join(root, "apps", "web"), (m) => warnings.push(m));
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toContain("outputFileTracingRoot");
+    });
+
+    it("stays silent for an unambiguous single-marker tree", () => {
+        const root = repo({
+            "package-lock.json": "{}",
+            "apps/web/package.json": "{}",
+        });
+        const warnings: string[] = [];
+        resolveLayout(join(root, "apps", "web"), (m) => warnings.push(m));
+        expect(warnings).toEqual([]);
+    });
+});

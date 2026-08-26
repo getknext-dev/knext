@@ -35,6 +35,7 @@ import {
     findTracingRoot,
     NO_LOCKFILE_INSTALL,
     shadowingConfigFor,
+    warnDuplicatedLockFiles,
 } from "./tracing-root";
 
 const log = createLogger({ module: "create" });
@@ -113,15 +114,33 @@ export interface Layout {
 }
 
 /** Resolve the layout facts every emitted path depends on, once. */
-export function resolveLayout(appDir: string): Layout {
+export function resolveLayout(
+    appDir: string,
+    warn: (message: string) => void = (m) => log.warn(m),
+): Layout {
     const app = resolve(appDir);
     // Same walk `deploy`/`preview` use for the docker build context (#644).
     // `create` tolerates the no-lockfile case that `requireBuildContext`
     // rejects: an app is scaffolded BEFORE anything is installed, and with no
     // lockfile anywhere Next traces from the app directory itself — which is
     // exactly what the null root falls back to here.
-    const { root: found, installCmd } = findTracingRoot(app);
+    const { root: found, installCmd, lockFiles } = findTracingRoot(app);
     const root = found ?? app;
+    // `create` is the command that BAKES the Dockerfile, so it is the command that owes
+    // the user this warning — `requireBuildContext` raised it for `deploy`/`preview`
+    // while `create` threw the list away, which meant an ambiguous chain surfaced at
+    // `docker build` rather than at scaffold time, when pinning `outputFileTracingRoot`
+    // is cheap (#860).
+    //
+    // Not merely ergonomic: `warnDuplicatedLockFiles`' own docstring records that knext
+    // hands the inferred directory to `docker buildx build` and the scaffolded Dockerfile
+    // does `COPY . .`, so a stray `~/package-lock.json` bakes `~/.ssh` and `~/.aws` into a
+    // PUSHED image. The command that writes that Dockerfile was the one saying nothing.
+    // No `found !== null` guard: mutation-proving showed it cannot fail. With no marker
+    // anywhere, `findTracingRoot` returns an EMPTY `lockFiles`, and the warning already
+    // returns early at `length <= 1`. A condition that cannot change the outcome reads as
+    // though the call were unsafe without it, which is worse than no condition.
+    warnDuplicatedLockFiles(lockFiles, root, warn);
     const rel = relative(root, app);
     const standalonePrefix =
         !rel || rel.startsWith("..") ? "" : `${rel.split(sep).join("/")}/`;
