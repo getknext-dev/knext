@@ -982,3 +982,48 @@ describe("#864 — create refuses when an existing config would shadow the one i
         expect(() => writeScaffold({ appDir, name: "clean864" })).not.toThrow();
     });
 });
+
+/**
+ * #864 follow-ups from the design gate.
+ *
+ * A — nothing asserted that `--dry-run` refuses too. The check deliberately precedes the
+ * dry-run return, because a dry run should report what would happen; without a test,
+ * someone later "fixes" the ordering by moving the check after that return and the dry
+ * run starts reporting a success the real run would refuse.
+ *
+ * B — `CONFIG_FILES` cited `next/dist/shared/lib/constants` while disagreeing with it.
+ * Executed against the pinned next 16.2.11: the real list is four entries, and the two
+ * extra ones this repo carried (`.cjs`, `.cts`) are not consulted by Next at all.
+ */
+describe("#864 follow-ups — dry-run refuses, and the precedence list matches upstream", () => {
+    it("refuses under --dry-run as well, since a dry run reports what would happen", () => {
+        const appDir = join(root, "dryrun864");
+        mkdirSync(appDir, { recursive: true });
+        writeFileSync(join(appDir, "package.json"), "{}\n");
+        writeFileSync(join(appDir, "next.config.js"), "module.exports = {};\n");
+        expect(() =>
+            writeScaffold({
+                appDir,
+                name: "dryrun864",
+                force: true,
+                dryRun: true,
+            }),
+        ).toThrow(/next\.config\.js/);
+    });
+
+    it("does not treat next.config.cjs as a config Next reads", () => {
+        // It is not in the real CONFIG_FILES. Carrying it made the list disagree with the
+        // constant it cites; the emitted .ts wins regardless, so this asserts the reason
+        // rather than only the outcome.
+        const appDir = join(root, "cjs864");
+        mkdirSync(appDir, { recursive: true });
+        writeFileSync(join(appDir, "package.json"), "{}\n");
+        writeFileSync(
+            join(appDir, "next.config.cjs"),
+            "module.exports = {};\n",
+        );
+        expect(() =>
+            writeScaffold({ appDir, name: "cjs864", force: true }),
+        ).not.toThrow();
+    });
+});

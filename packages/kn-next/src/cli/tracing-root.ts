@@ -200,13 +200,17 @@ export function findTracingRoot(appDir: string): TracingRoot {
  * (`CONFIG_FILES` in `next/dist/shared/lib/constants.js`) — the FIRST that
  * exists wins, so the order is load-bearing, not decorative.
  */
+// Verified by EXECUTING the pinned constant, not by reading it:
+//   require("next/dist/shared/lib/constants").CONFIG_FILES
+//     => ["next.config.js","next.config.mjs","next.config.ts","next.config.mts"]
+// An earlier version of this list added "next.config.cjs" and "next.config.cts", which
+// Next does not consult at all — the comment above cited the upstream constant while the
+// list disagreed with it, which is the failure this file elsewhere calls out.
 const CONFIG_FILES = [
     "next.config.js",
     "next.config.mjs",
     "next.config.ts",
     "next.config.mts",
-    "next.config.cjs",
-    "next.config.cts",
 ];
 
 /**
