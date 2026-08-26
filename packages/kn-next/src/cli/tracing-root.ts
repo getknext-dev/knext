@@ -176,7 +176,13 @@ export function findTracingRoot(appDir: string): TracingRoot {
     );
     let installCmd: string;
     if (workspaceFile !== undefined) {
-        installCmd = existsSync(join(dirname(workspaceFile), "pnpm-lock.yaml"))
+        // Frozen-ness is decided at ROOT, not at the workspace file that selected pnpm.
+        // The generated Dockerfile installs at the context root (`WORKDIR /repo`), so a
+        // `--frozen-lockfile` there needs a lockfile THERE. Probing the innermost workspace
+        // directory instead could emit the frozen form against a root that has no lockfile —
+        // which fails the build — or the unfrozen form when root has one, losing
+        // reproducibility for no reason.
+        installCmd = existsSync(join(root, "pnpm-lock.yaml"))
             ? "corepack enable && pnpm install --frozen-lockfile"
             : "corepack enable && pnpm install";
     } else {

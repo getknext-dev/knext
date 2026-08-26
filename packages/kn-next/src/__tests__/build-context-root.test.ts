@@ -503,3 +503,38 @@ describe("#857 — a marker ABOVE the outermost workspace file still roots the t
         expect(found.lockFiles.length).toBeGreaterThan(1);
     });
 });
+
+/**
+ * #857, design-gate residual (a) — frozen-ness belongs to the ROOT.
+ *
+ * The generated Dockerfile installs at the context root (`WORKDIR /repo`), so
+ * `--frozen-lockfile` there needs a lockfile there. Judging it at the innermost
+ * workspace file could emit the frozen form against a root that has none — which fails
+ * the build outright — or the unfrozen form when the root does have one, giving up
+ * reproducibility for nothing.
+ */
+describe("#857 — frozen-ness is judged at the root the install actually runs in", () => {
+    it("is frozen when the ROOT holds pnpm-lock.yaml, even if an inner workspace does not", () => {
+        const root = repo({
+            "pnpm-workspace.yaml": "packages:\n  - sub/*\n",
+            "pnpm-lock.yaml": "",
+            "sub/pnpm-workspace.yaml": "packages:\n  - apps/*\n",
+            "sub/apps/a/package.json": "{}",
+        });
+        expect(
+            findTracingRoot(join(root, "sub", "apps", "a")).installCmd,
+        ).toContain("--frozen-lockfile");
+    });
+
+    it("is NOT frozen when only an inner workspace holds the lockfile", () => {
+        const root = repo({
+            "pnpm-workspace.yaml": "packages:\n  - sub/*\n",
+            "sub/pnpm-workspace.yaml": "packages:\n  - apps/*\n",
+            "sub/pnpm-lock.yaml": "",
+            "sub/apps/a/package.json": "{}",
+        });
+        const found = findTracingRoot(join(root, "sub", "apps", "a"));
+        expect(found.installCmd).toContain("pnpm install");
+        expect(found.installCmd).not.toContain("--frozen-lockfile");
+    });
+});
