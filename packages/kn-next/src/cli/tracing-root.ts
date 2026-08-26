@@ -377,7 +377,7 @@ export function configuredTracingRoot(appDir: string): ConfiguredRoot | null {
  * stray `~/package-lock.json` therefore does not merely mis-trace a build, it
  * bakes `~/.ssh` and `~/.aws` into a PUSHED image.
  */
-function warnDuplicatedLockFiles(
+export function warnDuplicatedLockFiles(
     lockFiles: string[],
     root: string,
     warn: (message: string) => void,
