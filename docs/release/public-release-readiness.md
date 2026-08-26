@@ -9,8 +9,7 @@
 
 ## Verdict: NOT READY — 1 maintainer-only blocker class
 
-**Two things only the repo owner can do — rotate a dead npm token, and flip a package to public —
-plus one shipping bug found after the previous draft was written.**
+**Two things only the repo owner can do — rotate a dead npm token, and flip a package to public.**
 
 > **The line that used to sit here said "every engineering step is done and proven."** It was
 > written before anyone walked the new user's path end to end, and walking it found

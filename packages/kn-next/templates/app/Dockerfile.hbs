@@ -28,7 +28,7 @@ COPY . .
 # If the command below is `pnpm install` WITHOUT `--frozen-lockfile`, the CONTEXT
 # ROOT above holds no `pnpm-lock.yaml`, so the install cannot be frozen and this
 # image is not reproducible — it resolves fresh versions on every build. Commit a
-# `pnpm-lock.yaml` AT THAT ROOT, or pin the root with `outputFileTracingRoot`, to
+# `pnpm-lock.yaml` AT THAT ROOT and re-run `kn-next create` (or edit this line) to
 # get the frozen form. A lockfile further down the tree does not apply: the install
 # runs here, not there.
 RUN {{ installCmd }}
