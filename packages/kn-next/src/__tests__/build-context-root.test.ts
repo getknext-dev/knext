@@ -398,3 +398,168 @@ describe("#644 — no call site keeps its own root rule", () => {
         ).toEqual([]);
     });
 });
+
+/**
+ * #857 — `pnpm-workspace.yaml` is a tracing-root marker, and Next checks it FIRST.
+ *
+ * knext's walk considered only the five lockfiles, on the stated grounds that
+ * "Next does not consult it". That is false for the pinned next 16.2.11:
+ * `dist/lib/find-root.js`'s `findWorkRoot` does `findUp.sync('pnpm-workspace.yaml')`
+ * BEFORE any lockfile search, and its own comment says why — lockfiles "can be
+ * included in the application directory by accident".
+ *
+ * The consequence is not cosmetic. `create` bakes `standalonePrefix` into the
+ * Dockerfile's two COPY sources, its WORKDIR, the CMD's STANDALONE_SERVER_PATH and
+ * the app's `start` script. Compute it against a different root than Next uses and
+ * every one of those points at a path the build never wrote — while `next build`
+ * exits 0.
+ */
+describe("#857 — pnpm-workspace.yaml roots the trace, and it wins over lockfiles", () => {
+    it("treats a pnpm-workspace.yaml ancestor as the root", () => {
+        const root = repo({
+            "pnpm-workspace.yaml": "packages:\n  - apps/*\n",
+            "apps/web/package.json": "{}",
+        });
+        const app = join(root, "apps", "web");
+        expect(findTracingRoot(app).root).toBe(root);
+    });
+
+    it("prefers an OUTER pnpm-workspace.yaml over a nearer lockfile, as Next does", () => {
+        // The class with the larger blast radius: the app's own marker is a
+        // package-lock.json, so it looks lockfile-rooted by every local measure,
+        // and the workspace file above it is invisible from the app directory.
+        const root = repo({
+            "pnpm-workspace.yaml": "packages:\n  - proj/*\n",
+            "proj/package-lock.json": "{}",
+            "proj/app/package.json": "{}",
+        });
+        const app = join(root, "proj", "app");
+        expect(findTracingRoot(app).root).toBe(root);
+    });
+
+    it("installs with pnpm when the root is a pnpm workspace", () => {
+        // The generated Dockerfile must install with the manager whose root it
+        // found; `npm ci` cannot consume a pnpm workspace.
+        const root = repo({
+            "pnpm-workspace.yaml": "packages:\n  - apps/*\n",
+            "pnpm-lock.yaml": "",
+            "apps/web/package.json": "{}",
+        });
+        expect(findTracingRoot(join(root, "apps", "web")).installCmd).toContain(
+            "pnpm",
+        );
+    });
+
+    it("still prefers a lockfile when no pnpm-workspace.yaml exists anywhere", () => {
+        const root = repo({
+            "package-lock.json": "{}",
+            "apps/web/package.json": "{}",
+        });
+        expect(findTracingRoot(join(root, "apps", "web")).root).toBe(root);
+    });
+});
+
+/**
+ * #857, design-gate round 2 — finding a workspace file must not END the walk.
+ *
+ * The first port searched the whole ancestry for `pnpm-workspace.yaml` and returned as
+ * soon as it found one. Next does not do that: `findWorkRoot` prefers the workspace file
+ * *at each hop*, but `findRootDirAndLockFiles` keeps walking outward until nothing of
+ * EITHER kind remains. A lockfile strictly above the outermost workspace file therefore
+ * roots the trace — and the early return dropped it, turning a case the old lockfile-only
+ * walk got RIGHT into a wrong answer.
+ *
+ * These two cases are the ones that distinguish the implementations. The four above do
+ * not: they pass under both, which is why CI stayed green while the port was wrong.
+ *
+ * A stray `package-lock.json` in `$HOME`, or at `/` inside a CI image, is ordinary —
+ * `warnDuplicatedLockFiles`' own docstring is written about exactly that.
+ */
+describe("#857 — a marker ABOVE the outermost workspace file still roots the trace", () => {
+    it("keeps walking past a pnpm workspace to an npm lockfile above it", () => {
+        const root = repo({
+            "package-lock.json": "{}",
+            "proj/pnpm-workspace.yaml": "packages:\n  - apps/*\n",
+            "proj/apps/a/package.json": "{}",
+        });
+        const app = join(root, "proj", "apps", "a");
+        expect(findTracingRoot(app).root).toBe(root);
+    });
+
+    it("still installs with pnpm when the chain holds a workspace file", () => {
+        // Root and manager are two questions: the root is the npm lockfile's directory,
+        // but `npm ci` cannot install the pnpm workspace beneath it.
+        const root = repo({
+            "yarn.lock": "",
+            "proj/pnpm-workspace.yaml": "packages:\n  - apps/*\n",
+            "proj/pnpm-lock.yaml": "",
+            "proj/apps/a/package.json": "{}",
+        });
+        const found = findTracingRoot(join(root, "proj", "apps", "a"));
+        expect(found.root).toBe(root);
+        expect(found.installCmd).toContain("pnpm");
+        // More than one marker in the chain — the ambiguity warning is the user's only
+        // signal that the inferred root is a guess, and it must survive.
+        expect(found.lockFiles.length).toBeGreaterThan(1);
+    });
+});
+
+/**
+ * #857, design-gate residual (a) — frozen-ness belongs to the ROOT.
+ *
+ * The generated Dockerfile installs at the context root (`WORKDIR /repo`), so
+ * `--frozen-lockfile` there needs a lockfile there. Judging it at the innermost
+ * workspace file could emit the frozen form against a root that has none — which fails
+ * the build outright — or the unfrozen form when the root does have one, giving up
+ * reproducibility for nothing.
+ */
+describe("#857 — frozen-ness is judged at the root the install actually runs in", () => {
+    it("is frozen when the ROOT holds pnpm-lock.yaml, even if an inner workspace does not", () => {
+        const root = repo({
+            "pnpm-workspace.yaml": "packages:\n  - sub/*\n",
+            "pnpm-lock.yaml": "",
+            "sub/pnpm-workspace.yaml": "packages:\n  - apps/*\n",
+            "sub/apps/a/package.json": "{}",
+        });
+        expect(
+            findTracingRoot(join(root, "sub", "apps", "a")).installCmd,
+        ).toContain("--frozen-lockfile");
+    });
+
+    it("is NOT frozen when only an inner workspace holds the lockfile", () => {
+        const root = repo({
+            "pnpm-workspace.yaml": "packages:\n  - sub/*\n",
+            "sub/pnpm-workspace.yaml": "packages:\n  - apps/*\n",
+            "sub/pnpm-lock.yaml": "",
+            "sub/apps/a/package.json": "{}",
+        });
+        const found = findTracingRoot(join(root, "sub", "apps", "a"));
+        expect(found.installCmd).toContain("pnpm install");
+        expect(found.installCmd).not.toContain("--frozen-lockfile");
+    });
+});
+
+/**
+ * #857, code-review B2 — the case the other 31 specs miss.
+ *
+ * "still installs with pnpm when the chain holds a workspace file" asserts only that the
+ * command contains `pnpm`, which both the frozen and unfrozen forms satisfy. Nothing
+ * pinned frozen-ness for a MIXED chain, and that is exactly where the generated
+ * Dockerfile's explanation was wrong: the root is an npm-lockfile root, a
+ * `pnpm-lock.yaml` IS committed one level down, and the install still cannot be frozen
+ * because it runs at the root.
+ */
+describe("#857 — a pnpm-lock.yaml below the root does not make the install frozen", () => {
+    it("is NOT frozen when the chain's pnpm-lock.yaml sits below an npm-lockfile root", () => {
+        const root = repo({
+            "package-lock.json": "{}",
+            "proj/pnpm-workspace.yaml": "packages:\n  - apps/*\n",
+            "proj/pnpm-lock.yaml": "",
+            "proj/apps/a/package.json": "{}",
+        });
+        const found = findTracingRoot(join(root, "proj", "apps", "a"));
+        expect(found.root).toBe(root);
+        expect(found.installCmd).toContain("pnpm install");
+        expect(found.installCmd).not.toContain("--frozen-lockfile");
+    });
+});

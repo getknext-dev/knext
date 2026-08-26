@@ -275,17 +275,21 @@ describe("kn-next create — graduated per-app guards ship with the app (#344/#4
         expect(standalonePrefixFor(root)).toBe("");
     });
 
-    it("considers ONLY the lockfiles Next considers — pnpm-workspace.yaml is NOT one", () => {
-        // next 16.2.11's findRootDirAndLockFiles looks for
-        // pnpm-lock.yaml / package-lock.json / yarn.lock / bun.lock / bun.lockb.
-        // Treating `pnpm-workspace.yaml` as a root marker made us emit
-        // `apps/a/` where Next produces a FLAT `.next/standalone/` — the seam
-        // guard would then point at a directory that never exists and SKIP,
-        // which is the green-by-skip this whole command argues against.
+    it("treats pnpm-workspace.yaml as a root marker, because Next checks it FIRST", () => {
+        // This spec used to assert the opposite, and the reason it gave was wrong:
+        // it said next 16.2.11 considers only the five lockfiles. It does not.
+        // `dist/lib/find-root.js`'s `findWorkRoot` searches up for
+        // `pnpm-workspace.yaml` BEFORE any lockfile — its own comment explains why,
+        // since lockfiles "can be included in the application directory by accident".
+        //
+        // Asserting the divergence kept it GREEN while every path `create` baked
+        // pointed at a file the build never wrote: both COPY sources, the WORKDIR,
+        // the CMD's STANDALONE_SERVER_PATH and `npm start`. The image built, the
+        // container started, and there was nothing to run (#857).
         writeFileSync(join(root, "pnpm-workspace.yaml"), "packages:\n  - a\n");
         const app = join(root, "apps", "a");
         mkdirSync(app, { recursive: true });
-        expect(standalonePrefixFor(app)).toBe("");
+        expect(standalonePrefixFor(app)).toBe("apps/a/");
     });
 });
 

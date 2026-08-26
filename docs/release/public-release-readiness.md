@@ -7,10 +7,9 @@
 > Companion ledgers: `docs/debt/tech-debt-ledger.md`, `docs/benchmarks/cold-start-ledger.md`,
 > `docs/ux/ergonomics-ledger.md`.
 
-## Verdict: NOT READY — 2 maintainer-only blockers, and 1 product defect
+## Verdict: NOT READY — 1 maintainer-only blocker class
 
-**Two things only the repo owner can do — rotate a dead npm token, and flip a package to public —
-plus one shipping bug found after the previous draft was written.**
+**Two things only the repo owner can do — rotate a dead npm token, and flip a package to public.**
 
 > **The line that used to sit here said "every engineering step is done and proven."** It was
 > written before anyone walked the new user's path end to end, and walking it found
@@ -133,8 +132,15 @@ repo is a pnpm workspace, so this is a common layout.
 `STANDALONE_SERVER_PATH` and the app's `npm start` all reference a path the build never wrote.
 The image builds, the container starts, and there is nothing to run.
 
-**Action: in-repo, agent-doable.** Add `pnpm-workspace.yaml` to the head of `LOCKFILES`, invert
-the spec that pins the old behaviour, and confirm the scaffold-build gate reds on that tree.
+**Done in #859** — and *not* the way this line originally prescribed. It said to add
+`pnpm-workspace.yaml` to the head of `LOCKFILES`, which is a **per-level** rule; Next searches
+the **whole ancestry** for the workspace file before considering any lockfile, and finding one
+does not end the walk. Both design gates blocked that shape, and a differential run of the
+prescription against the real `find-root.js` diverged on 96 of 400 generated trees. The fix
+shipped is a literal port of `findWorkRoot` plus Next's outward loop.
+
+Recorded at this length because the line was an **instruction**: a future agent following it
+would have implemented a regression with a document telling them it was the fix.
 
 ### What walking the journey established, beyond the defect
 
@@ -255,7 +261,7 @@ gate is red would fail this project's central honesty rule.
        nights — is now filed as #850; #710 is a permanently-unclearable weekly alert and needs a
        disposition.
 6. [ ] Agent: ergonomics row 8 — measure the REAL `npx kn-next` journey post-publish.
-7. [ ] Agent: fix #857 — `create` bakes a standalone prefix Next does not use whenever a
+7. [x] Agent: fix #857 (#859) — `create` bakes a standalone prefix Next does not use whenever a
        `pnpm-workspace.yaml` sits anywhere in the app's ancestry. Not gated on either human
        step, and the only item here that is a product defect rather than a publishing state.
 8. [ ] Then: announce.
