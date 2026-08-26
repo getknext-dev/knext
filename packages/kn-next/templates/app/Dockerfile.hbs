@@ -25,10 +25,12 @@ COPY . .
 # matches the marker `kn-next create` actually found at that root, which is a
 # lockfile or a `pnpm-workspace.yaml`.
 #
-# If the command below is `pnpm install` WITHOUT `--frozen-lockfile`, the root is
-# a pnpm workspace with no committed `pnpm-lock.yaml`. That install resolves fresh
-# versions on every build, so this image is not reproducible — commit the lockfile
-# and re-run `kn-next create` (or edit this line) to get the frozen form.
+# If the command below is `pnpm install` WITHOUT `--frozen-lockfile`, the CONTEXT
+# ROOT above holds no `pnpm-lock.yaml`, so the install cannot be frozen and this
+# image is not reproducible — it resolves fresh versions on every build. Commit a
+# `pnpm-lock.yaml` AT THAT ROOT, or pin the root with `outputFileTracingRoot`, to
+# get the frozen form. A lockfile further down the tree does not apply: the install
+# runs here, not there.
 RUN {{ installCmd }}
 # …but BUILD in the app directory. In a workspace those are different places.
 WORKDIR /repo/{{ standalonePrefix }}

@@ -538,3 +538,28 @@ describe("#857 — frozen-ness is judged at the root the install actually runs i
         expect(found.installCmd).not.toContain("--frozen-lockfile");
     });
 });
+
+/**
+ * #857, code-review B2 — the case the other 31 specs miss.
+ *
+ * "still installs with pnpm when the chain holds a workspace file" asserts only that the
+ * command contains `pnpm`, which both the frozen and unfrozen forms satisfy. Nothing
+ * pinned frozen-ness for a MIXED chain, and that is exactly where the generated
+ * Dockerfile's explanation was wrong: the root is an npm-lockfile root, a
+ * `pnpm-lock.yaml` IS committed one level down, and the install still cannot be frozen
+ * because it runs at the root.
+ */
+describe("#857 — a pnpm-lock.yaml below the root does not make the install frozen", () => {
+    it("is NOT frozen when the chain's pnpm-lock.yaml sits below an npm-lockfile root", () => {
+        const root = repo({
+            "package-lock.json": "{}",
+            "proj/pnpm-workspace.yaml": "packages:\n  - apps/*\n",
+            "proj/pnpm-lock.yaml": "",
+            "proj/apps/a/package.json": "{}",
+        });
+        const found = findTracingRoot(join(root, "proj", "apps", "a"));
+        expect(found.root).toBe(root);
+        expect(found.installCmd).toContain("pnpm install");
+        expect(found.installCmd).not.toContain("--frozen-lockfile");
+    });
+});
