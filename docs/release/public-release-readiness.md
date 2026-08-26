@@ -116,7 +116,7 @@ pull requests"* at org and repo level would let the lane open its own Version PR
 by-hand step above. Left alone deliberately — widening an organisation-wide Actions permission is
 the maintainer's call, and the by-hand path works.
 
-### Blocker 3 — `create` bakes paths the build does not produce, in a pnpm workspace (#857)
+### ~~Blocker 3 — `create` bakes paths the build does not produce, in a pnpm workspace (#857)~~ — RESOLVED in #859
 
 Found by rehearsing the stranger's journey rather than by a gate, which is why it survived this
 long. Next's `dist/lib/find-root.js` looks up `pnpm-workspace.yaml` **before any lockfile, at any
@@ -211,6 +211,25 @@ image (#670 — same family as blocker 1). A public release that cites compat pa
 gate is red would fail this project's central honesty rule.
 **Action: in-repo work is possible here (flake hunt), but #670 clears with blocker 1.**
 
+## Known gaps that are NOT release blockers
+
+Recorded because closing #857 could otherwise read as "everything found is now fixed", and a
+reader of this file is entitled to know what was found and deliberately left.
+
+- **#860 — `create` bypasses the duplicate-root-marker warning.** `deploy`/`preview` route
+  through `requireBuildContext`, which warns when the marker chain is ambiguous; `create` calls
+  `findTracingRoot` directly and does not. So an ambiguous tree surfaces at `docker build`
+  rather than at scaffold time, when it is cheap to fix. Not a blocker: the inferred root is
+  still Next's root, so the image is correct — the user just loses the early warning.
+- **#861 — `create` ignores `configuredTracingRoot` while `deploy` honours it.** Pinning
+  `outputFileTracingRoot` therefore moves the deploy context while leaving the Dockerfile
+  `create` already baked untouched, which reproduces #857's symptom by a different route.
+  Measured repro in the issue. Not a blocker: it requires the user to pin the root, which
+  nothing currently tells them to do — the one place that did was removed in #859.
+
+Both are pre-existing, both were found by the gates and reviews on #859, and both were split
+out rather than folded into a PR that was already three review rounds deep.
+
 ## Green — verified, not assumed
 
 - **CI on main is green** across the per-PR gates and the nightlies except the two org-gated lanes
@@ -227,6 +246,12 @@ gate is red would fail this project's central honesty rule.
   five managed-cloud pages, runbook incl. the activator-fallback signature. No internal refs.
 - **Measured performance**: product-path cold start 5723 → 3142 ms median (−45%) this week; the
   ledger carries per-row evidence and caveats.
+- **The new user's path is now gated end to end** (#855, #856): the `kn-next` alias — the package
+  `npx kn-next` actually resolves to — is packed, installed and leak-checked with the rest; and
+  the app `create` scaffolds is installed, built, and checked to emit a standalone server at the
+  path its own generated Dockerfile names. Both gates were mutation-proved (22 declared, 22
+  graded as expected), and both were written because rehearsing that path by hand found real
+  defects nothing else covered.
 
 ## Release checklist (in dependency order)
 
