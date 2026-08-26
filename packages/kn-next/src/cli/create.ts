@@ -31,7 +31,11 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { createLogger } from "../utils/logger";
 import { handleUsageError, UsageError } from "./shared";
-import { findTracingRoot, NO_LOCKFILE_INSTALL } from "./tracing-root";
+import {
+    findTracingRoot,
+    NO_LOCKFILE_INSTALL,
+    shadowingConfigFor,
+} from "./tracing-root";
 
 const log = createLogger({ module: "create" });
 
@@ -275,6 +279,26 @@ export function writeScaffold(opts: ScaffoldOptions): Map<string, string> {
         version: opts.version ?? cliVersion(),
         templates: opts.templates,
     });
+
+    // Checked even under --force, because --force is REQUIRED for any pre-existing app
+    // (a bare `create` refuses on `package.json`), which makes this the default path for
+    // "add knext to an app I already have". Refusing rather than warning: the failure it
+    // prevents is silent — green scaffold, exit 0, and a build that emits no standalone
+    // server because Next read a config knext never wrote (#864).
+    for (const rel of files.keys()) {
+        if (!rel.startsWith("next.config.")) continue;
+        const shadow = shadowingConfigFor(appDir, rel);
+        if (shadow !== null) {
+            throw new UsageError(
+                `${shadow} already exists and Next reads it INSTEAD of the ${rel} this ` +
+                    `command writes, so knext's required settings would never take effect ` +
+                    `— the build would emit no standalone server and the generated ` +
+                    `Dockerfile would have nothing to copy.\n` +
+                    `Remove or rename ${shadow} (migrating any settings you need into ` +
+                    `${rel}), then re-run.`,
+            );
+        }
+    }
 
     if (!opts.force) {
         const clashes = [...files.keys()].filter((rel) =>
