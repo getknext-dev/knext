@@ -30,17 +30,21 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { createLogger } from "../utils/logger";
 
 /**
  * EXACTLY the lockfiles next 16.2's `findRootDirAndLockFiles` considers.
  *
- * `pnpm-workspace.yaml` is deliberately NOT here even though it looks like a
- * workspace-root marker: Next does not consult it, so treating it as one made
- * us emit `apps/a/` where Next produces a FLAT `.next/standalone/`. Diverging
- * from Next here does not "fix" anything; it just moves the error somewhere
- * quieter.
+ * `pnpm-workspace.yaml` is NOT in this list because it is not a lockfile — it is
+ * handled FIRST, by `findWorkRoot` below, which is where Next handles it too.
+ *
+ * An earlier version of this comment said `pnpm-workspace.yaml` was deliberately
+ * excluded because "Next does not consult it". That was false for the pinned
+ * next 16.2.11 and cost users a working image (#857): `dist/lib/find-root.js`'s
+ * `findWorkRoot` searches up for `pnpm-workspace.yaml` BEFORE any lockfile, and
+ * its own comment gives the reason — lockfiles "can be included in the
+ * application directory by accident".
  *
  * Each entry also names the package manager, because the generated Dockerfile
  * must install with the manager whose lockfile it found (`npm ci` cannot
@@ -66,6 +70,17 @@ export const LOCKFILES: ReadonlyArray<{ file: string; install: string }> = [
 /** No lockfile anywhere: nothing to be frozen against. */
 export const NO_LOCKFILE_INSTALL = "npm install --no-audit --no-fund";
 
+/**
+ * The workspace marker Next checks BEFORE any lockfile (#857).
+ *
+ * A pnpm workspace normally carries a `pnpm-lock.yaml` at the same root, and then
+ * the frozen install is right. When it does not — a workspace that has never been
+ * installed — `--frozen-lockfile` would fail on a lockfile that is not there, so
+ * the unfrozen form is emitted instead. Either way the manager must be pnpm:
+ * `npm ci` cannot consume a pnpm workspace.
+ */
+const PNPM_WORKSPACE_FILE = "pnpm-workspace.yaml";
+
 export interface TracingRoot {
     /** The outermost lockfile-bearing ancestor of `appDir`, or null. */
     root: string | null;
@@ -90,22 +105,93 @@ export interface TracingRoot {
  * means for them — it is a normal state for `create` (the app is scaffolded
  * before anything is installed) and an unanswerable question for `deploy`.
  */
-export function findTracingRoot(appDir: string): TracingRoot {
-    let dir = resolve(appDir);
-    let root: string | null = null;
-    let installCmd = NO_LOCKFILE_INSTALL;
-    const lockFiles: string[] = [];
+/**
+ * `findUp` over a list of file names, first match per level, in ARRAY ORDER.
+ * Mirrors the `find-up` call Next makes; the per-level ordering matters, because
+ * a directory holding two markers must resolve to the same one Next picks.
+ */
+function findUpFile(startDir: string, names: readonly string[]): string | null {
+    let dir = resolve(startDir);
     for (;;) {
-        const hit = LOCKFILES.find((l) => existsSync(join(dir, l.file)));
-        if (hit) {
-            root = dir;
-            installCmd = hit.install;
-            lockFiles.push(join(dir, hit.file));
+        for (const name of names) {
+            const candidate = join(dir, name);
+            if (existsSync(candidate)) return candidate;
         }
         const parent = dirname(dir);
-        if (parent === dir) break;
+        if (parent === dir) return null;
         dir = parent;
     }
+}
+
+/**
+ * Next's `findWorkRoot`, ported literally rather than reordered.
+ *
+ * The workspace file is searched over the WHOLE ancestry before any lockfile is
+ * considered — but finding one does NOT end the walk. That distinction cost this
+ * function a design-gate BLOCK: an earlier draft returned as soon as it found the
+ * outermost workspace file, which silently dropped any lockfile ABOVE it and made
+ * `root` wrong for a case the previous lockfile-only walk got RIGHT. A stray
+ * `package-lock.json` in `$HOME` or at `/` in a CI image is ordinary, so that is
+ * not a corner.
+ */
+function findWorkRoot(cwd: string): string | null {
+    return (
+        findUpFile(cwd, [PNPM_WORKSPACE_FILE]) ??
+        findUpFile(
+            cwd,
+            LOCKFILES.map((l) => l.file),
+        )
+    );
+}
+
+export function findTracingRoot(appDir: string): TracingRoot {
+    const first = findWorkRoot(resolve(appDir));
+    if (first === null) {
+        return { root: null, installCmd: NO_LOCKFILE_INSTALL, lockFiles: [] };
+    }
+
+    // Next's outward loop, verbatim: restart the search from above each hit and
+    // stop only when nothing of EITHER kind remains. Workspace-preference decides
+    // which marker is recorded at each hop; it does not end the walk.
+    const lockFiles: string[] = [first];
+    for (;;) {
+        const currentDir = dirname(lockFiles[lockFiles.length - 1] as string);
+        const parentDir = dirname(currentDir);
+        if (parentDir === currentDir) break;
+        const next = findWorkRoot(parentDir);
+        if (next === null) break;
+        lockFiles.push(next);
+    }
+
+    const root = dirname(lockFiles[lockFiles.length - 1] as string);
+
+    // Root and package MANAGER are two questions, and conflating them is what
+    // produced the early return above. The root stays faithful to Next; the manager
+    // comes from the workspace file in the chain when there is one, because `npm ci`
+    // cannot install a pnpm workspace even when the outermost marker is an npm
+    // lockfile. When the chain holds more than one marker `warnDuplicatedLockFiles`
+    // fires, which is the user's signal that the inferred root is a guess.
+    const workspaceFile = lockFiles.find(
+        (f) => basename(f) === PNPM_WORKSPACE_FILE,
+    );
+    let installCmd: string;
+    if (workspaceFile !== undefined) {
+        // Frozen-ness is decided at ROOT, not at the workspace file that selected pnpm.
+        // The generated Dockerfile installs at the context root (`WORKDIR /repo`), so a
+        // `--frozen-lockfile` there needs a lockfile THERE. Probing the innermost workspace
+        // directory instead could emit the frozen form against a root that has no lockfile —
+        // which fails the build — or the unfrozen form when root has one, losing
+        // reproducibility for no reason.
+        installCmd = existsSync(join(root, "pnpm-lock.yaml"))
+            ? "corepack enable && pnpm install --frozen-lockfile"
+            : "corepack enable && pnpm install";
+    } else {
+        const rootMarker = basename(lockFiles[lockFiles.length - 1] as string);
+        installCmd =
+            LOCKFILES.find((l) => l.file === rootMarker)?.install ??
+            NO_LOCKFILE_INSTALL;
+    }
+
     return { root, installCmd, lockFiles };
 }
 
@@ -114,14 +200,43 @@ export function findTracingRoot(appDir: string): TracingRoot {
  * (`CONFIG_FILES` in `next/dist/shared/lib/constants.js`) — the FIRST that
  * exists wins, so the order is load-bearing, not decorative.
  */
-const CONFIG_FILES = [
+// Verified by EXECUTING the pinned constant, not by reading it:
+//   require("next/dist/shared/lib/constants").CONFIG_FILES
+//     => ["next.config.js","next.config.mjs","next.config.ts","next.config.mts"]
+// An earlier version of this list added "next.config.cjs" and "next.config.cts", which
+// Next does not consult at all — the comment above cited the upstream constant while the
+// list disagreed with it, which is the failure this file elsewhere calls out.
+export const CONFIG_FILES = [
     "next.config.js",
     "next.config.mjs",
     "next.config.ts",
     "next.config.mts",
-    "next.config.cjs",
-    "next.config.cts",
 ];
+
+/**
+ * The config file Next would read INSTEAD of `emitted`, or null if `emitted` wins.
+ *
+ * `create` writes `next.config.ts`, and Next takes the FIRST of `CONFIG_FILES` that
+ * exists — so an app that already uses `next.config.js` ends up holding both, with
+ * Next reading the one knext did not write: no `output: "standalone"`, no
+ * `adapterPath`, and therefore no standalone server for the generated Dockerfile to
+ * copy (#864).
+ *
+ * The precedence is answered here rather than exported, because a caller that
+ * re-implements the order is a second copy of a fact this module already calls
+ * load-bearing.
+ */
+export function shadowingConfigFor(
+    appDir: string,
+    emitted: string,
+): string | null {
+    const app = resolve(appDir);
+    for (const candidate of CONFIG_FILES) {
+        if (candidate === emitted) return null;
+        if (existsSync(join(app, candidate))) return candidate;
+    }
+    return null;
+}
 
 /** Strip comments so a commented-out setting is not read as configuration. */
 function stripComments(source: string): string {
@@ -273,7 +388,8 @@ function warnDuplicatedLockFiles(
         .map((f) => `\n   * ${f}`)
         .join("");
     warn(
-        "Multiple lockfiles detected — knext inferred your project root, but it " +
+        "Multiple root markers detected (lockfiles and/or a pnpm-workspace.yaml) — knext " +
+            "inferred your project root, but it " +
             `may not be correct. Using ${root} as the Docker build context, from ` +
             `${lockFiles[lockFiles.length - 1]}.\n` +
             "Everything under that directory is sent to `docker build` and, with " +
@@ -312,7 +428,8 @@ export function requireBuildContext(
         throw new Error(
             `Cannot determine the Docker build context: no lockfile found in ${resolve(appDir)} ` +
                 "or any parent directory.\n" +
-                `Next.js infers its file-tracing root the same way (${LOCKFILES.map((l) => l.file).join(", ")}), ` +
+                "Next.js infers its file-tracing root the same way — a `pnpm-workspace.yaml` anywhere " +
+                `above the app, else the nearest of ${LOCKFILES.map((l) => l.file).join(", ")} — ` +
                 "so without one the build context and the standalone output cannot be made to agree.\n" +
                 "Run your package manager's install in the project root to create a lockfile, and commit it.",
         );

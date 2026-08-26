@@ -42,6 +42,7 @@ import {
     standalonePrefixFor,
     writeScaffold,
 } from "../cli/create";
+import { CONFIG_FILES } from "../cli/tracing-root";
 
 /**
  * The #408 seam-alive scanner, loaded through a runtime path (the same shape
@@ -275,17 +276,21 @@ describe("kn-next create — graduated per-app guards ship with the app (#344/#4
         expect(standalonePrefixFor(root)).toBe("");
     });
 
-    it("considers ONLY the lockfiles Next considers — pnpm-workspace.yaml is NOT one", () => {
-        // next 16.2.11's findRootDirAndLockFiles looks for
-        // pnpm-lock.yaml / package-lock.json / yarn.lock / bun.lock / bun.lockb.
-        // Treating `pnpm-workspace.yaml` as a root marker made us emit
-        // `apps/a/` where Next produces a FLAT `.next/standalone/` — the seam
-        // guard would then point at a directory that never exists and SKIP,
-        // which is the green-by-skip this whole command argues against.
+    it("treats pnpm-workspace.yaml as a root marker, because Next checks it FIRST", () => {
+        // This spec used to assert the opposite, and the reason it gave was wrong:
+        // it said next 16.2.11 considers only the five lockfiles. It does not.
+        // `dist/lib/find-root.js`'s `findWorkRoot` searches up for
+        // `pnpm-workspace.yaml` BEFORE any lockfile — its own comment explains why,
+        // since lockfiles "can be included in the application directory by accident".
+        //
+        // Asserting the divergence kept it GREEN while every path `create` baked
+        // pointed at a file the build never wrote: both COPY sources, the WORKDIR,
+        // the CMD's STANDALONE_SERVER_PATH and `npm start`. The image built, the
+        // container started, and there was nothing to run (#857).
         writeFileSync(join(root, "pnpm-workspace.yaml"), "packages:\n  - a\n");
         const app = join(root, "apps", "a");
         mkdirSync(app, { recursive: true });
-        expect(standalonePrefixFor(app)).toBe("");
+        expect(standalonePrefixFor(app)).toBe("apps/a/");
     });
 });
 
@@ -922,5 +927,129 @@ describe("kn-next create — the scaffolded config keeps the last pod warm (ADR-
             unknown
         >;
         expect(scaling.scaleDownDelay).toBe("5m");
+    });
+});
+
+/**
+ * #864 — a higher-precedence config shadows the one `create` writes.
+ *
+ * `create` emits `next.config.ts`. Next's own precedence is `.js` → `.mjs` → `.ts` →
+ * `.mts`, first match wins, and `tracing-root.ts` already records that the order is
+ * load-bearing. So on an app that uses `next.config.js`, `--force` leaves
+ * BOTH files and Next reads the one knext did not write — the one with no
+ * `output: "standalone"` and no `adapterPath`.
+ *
+ * Measured before this guard existed: `create --force` exited 0, reported success, and
+ * the winning config carried 0 of knext's required settings while the emitted `.ts`
+ * carried 4 that Next never reads. The build then emits no standalone server at all,
+ * which is where #857 landed — an image with nothing to run, reached with a green
+ * scaffold and no diagnostic.
+ *
+ * `--force` is REQUIRED for any pre-existing app (a bare `create` refuses on
+ * `package.json`), so this is the default path for "add knext to an app I already have".
+ * A warning would not do: this repo's record is that a message standing in for a
+ * guarantee is how the guarantee is lost.
+ */
+describe("#864 — create refuses when an existing config would shadow the one it writes", () => {
+    it("refuses under --force, naming the shadowing file", () => {
+        const appDir = join(root, "existing");
+        mkdirSync(appDir, { recursive: true });
+        writeFileSync(join(appDir, "package.json"), "{}\n");
+        writeFileSync(
+            join(appDir, "next.config.js"),
+            "module.exports = { reactStrictMode: true };\n",
+        );
+        expect(() =>
+            writeScaffold({ appDir, name: "existing", force: true }),
+        ).toThrow(/next\.config\.js/);
+    });
+
+    it("does not refuse for a LOWER-precedence config, which the emitted one wins over", () => {
+        const appDir = join(root, "lower");
+        mkdirSync(appDir, { recursive: true });
+        writeFileSync(join(appDir, "package.json"), "{}\n");
+        writeFileSync(
+            join(appDir, "next.config.cjs"),
+            "module.exports = {};\n",
+        );
+        expect(() =>
+            writeScaffold({ appDir, name: "lower", force: true }),
+        ).not.toThrow();
+    });
+
+    it("still scaffolds a clean app with no config at all", () => {
+        const appDir = join(root, "clean864");
+        mkdirSync(appDir, { recursive: true });
+        expect(() => writeScaffold({ appDir, name: "clean864" })).not.toThrow();
+    });
+});
+
+/**
+ * #864 follow-ups from the design gate.
+ *
+ * A — nothing asserted that `--dry-run` refuses too. The check deliberately precedes the
+ * dry-run return, because a dry run should report what would happen; without a test,
+ * someone later "fixes" the ordering by moving the check after that return and the dry
+ * run starts reporting a success the real run would refuse.
+ *
+ * B — `CONFIG_FILES` cited `next/dist/shared/lib/constants` while disagreeing with it.
+ * Executed against the pinned next 16.2.11: the real list is four entries, and the two
+ * extra ones this repo carried (`.cjs`, `.cts`) are not consulted by Next at all.
+ */
+describe("#864 follow-ups — dry-run refuses, and the precedence list matches upstream", () => {
+    it("refuses under --dry-run as well, since a dry run reports what would happen", () => {
+        const appDir = join(root, "dryrun864");
+        mkdirSync(appDir, { recursive: true });
+        writeFileSync(join(appDir, "package.json"), "{}\n");
+        writeFileSync(join(appDir, "next.config.js"), "module.exports = {};\n");
+        expect(() =>
+            writeScaffold({
+                appDir,
+                name: "dryrun864",
+                force: true,
+                dryRun: true,
+            }),
+        ).toThrow(/next\.config\.js/);
+    });
+
+    it("pins CONFIG_FILES against the constant it cites, executed not read", () => {
+        // The previous version of this test asserted that a `.cjs` on disk does not
+        // refuse — an outcome that is INVARIANT under the bug, because `create` only ever
+        // emits `next.config.ts` and the scan early-returns at index 2 without reaching
+        // `.cjs`. Review mutation-proved it: re-adding `.cjs`/`.cts` left the suite green.
+        // It claimed to pin "the reason rather than only the outcome" and pinned neither.
+        //
+        // This asserts the claim directly: our list IS the upstream constant.
+        const upstream = require("next/dist/shared/lib/constants").CONFIG_FILES;
+        expect(CONFIG_FILES).toEqual(upstream);
+    });
+
+    it("does not refuse for next.config.mts, which the emitted next.config.ts outranks", () => {
+        // The only genuine lower-precedence case, and it was untested. It is what makes
+        // this a PRECEDENCE check rather than "any next.config.* refuses": deleting the
+        // `candidate === emitted` early return leaves every other case green.
+        const appDir = join(root, "mts864");
+        mkdirSync(appDir, { recursive: true });
+        writeFileSync(join(appDir, "package.json"), "{}\n");
+        writeFileSync(join(appDir, "next.config.mts"), "export default {};\n");
+        expect(() =>
+            writeScaffold({ appDir, name: "mts864", force: true }),
+        ).not.toThrow();
+    });
+
+    it("allows a next.config.cjs, which Next does not consult at all", () => {
+        // It is not in the real CONFIG_FILES. Carrying it made the list disagree with the
+        // constant it cites; the emitted .ts wins regardless, so this asserts the reason
+        // rather than only the outcome.
+        const appDir = join(root, "cjs864");
+        mkdirSync(appDir, { recursive: true });
+        writeFileSync(join(appDir, "package.json"), "{}\n");
+        writeFileSync(
+            join(appDir, "next.config.cjs"),
+            "module.exports = {};\n",
+        );
+        expect(() =>
+            writeScaffold({ appDir, name: "cjs864", force: true }),
+        ).not.toThrow();
     });
 });

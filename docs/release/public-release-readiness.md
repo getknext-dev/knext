@@ -7,10 +7,9 @@
 > Companion ledgers: `docs/debt/tech-debt-ledger.md`, `docs/benchmarks/cold-start-ledger.md`,
 > `docs/ux/ergonomics-ledger.md`.
 
-## Verdict: NOT READY — 2 maintainer-only blockers, and 1 product defect
+## Verdict: NOT READY — 1 maintainer-only blocker class
 
-**Two things only the repo owner can do — rotate a dead npm token, and flip a package to public —
-plus one shipping bug found after the previous draft was written.**
+**Two things only the repo owner can do — rotate a dead npm token, and flip a package to public.**
 
 > **The line that used to sit here said "every engineering step is done and proven."** It was
 > written before anyone walked the new user's path end to end, and walking it found
@@ -117,7 +116,7 @@ pull requests"* at org and repo level would let the lane open its own Version PR
 by-hand step above. Left alone deliberately — widening an organisation-wide Actions permission is
 the maintainer's call, and the by-hand path works.
 
-### Blocker 3 — `create` bakes paths the build does not produce, in a pnpm workspace (#857)
+### ~~Blocker 3 — `create` bakes paths the build does not produce, in a pnpm workspace (#857)~~ — RESOLVED in #859
 
 Found by rehearsing the stranger's journey rather than by a gate, which is why it survived this
 long. Next's `dist/lib/find-root.js` looks up `pnpm-workspace.yaml` **before any lockfile, at any
@@ -133,8 +132,15 @@ repo is a pnpm workspace, so this is a common layout.
 `STANDALONE_SERVER_PATH` and the app's `npm start` all reference a path the build never wrote.
 The image builds, the container starts, and there is nothing to run.
 
-**Action: in-repo, agent-doable.** Add `pnpm-workspace.yaml` to the head of `LOCKFILES`, invert
-the spec that pins the old behaviour, and confirm the scaffold-build gate reds on that tree.
+**Done in #859** — and *not* the way this line originally prescribed. It said to add
+`pnpm-workspace.yaml` to the head of `LOCKFILES`, which is a **per-level** rule; Next searches
+the **whole ancestry** for the workspace file before considering any lockfile, and finding one
+does not end the walk. Both design gates blocked that shape, and a differential run of the
+prescription against the real `find-root.js` diverged on 96 of 400 generated trees. The fix
+shipped is a literal port of `findWorkRoot` plus Next's outward loop.
+
+Recorded at this length because the line was an **instruction**: a future agent following it
+would have implemented a regression with a document telling them it was the fix.
 
 ### What walking the journey established, beyond the defect
 
@@ -205,6 +211,25 @@ image (#670 — same family as blocker 1). A public release that cites compat pa
 gate is red would fail this project's central honesty rule.
 **Action: in-repo work is possible here (flake hunt), but #670 clears with blocker 1.**
 
+## Known gaps that are NOT release blockers
+
+Recorded because closing #857 could otherwise read as "everything found is now fixed", and a
+reader of this file is entitled to know what was found and deliberately left.
+
+- **#860 — `create` bypasses the duplicate-root-marker warning.** `deploy`/`preview` route
+  through `requireBuildContext`, which warns when the marker chain is ambiguous; `create` calls
+  `findTracingRoot` directly and does not. So an ambiguous tree surfaces at `docker build`
+  rather than at scaffold time, when it is cheap to fix. Not a blocker: the inferred root is
+  still Next's root, so the image is correct — the user just loses the early warning.
+- **#861 — `create` ignores `configuredTracingRoot` while `deploy` honours it.** Pinning
+  `outputFileTracingRoot` therefore moves the deploy context while leaving the Dockerfile
+  `create` already baked untouched, which reproduces #857's symptom by a different route.
+  Measured repro in the issue. Not a blocker: it requires the user to pin the root, which
+  nothing currently tells them to do — the one place that did was removed in #859.
+
+Both are pre-existing, both were found by the gates and reviews on #859, and both were split
+out rather than folded into a PR that was already three review rounds deep.
+
 ## Green — verified, not assumed
 
 - **CI on main is green** across the per-PR gates and the nightlies except the two org-gated lanes
@@ -221,6 +246,12 @@ gate is red would fail this project's central honesty rule.
   five managed-cloud pages, runbook incl. the activator-fallback signature. No internal refs.
 - **Measured performance**: product-path cold start 5723 → 3142 ms median (−45%) this week; the
   ledger carries per-row evidence and caveats.
+- **The new user's path is now gated end to end** (#855, #856): the `kn-next` alias — the package
+  `npx kn-next` actually resolves to — is packed, installed and leak-checked with the rest; and
+  the app `create` scaffolds is installed, built, and checked to emit a standalone server at the
+  path its own generated Dockerfile names. Both gates were mutation-proved (22 declared, 22
+  graded as expected), and both were written because rehearsing that path by hand found real
+  defects nothing else covered.
 
 ## Release checklist (in dependency order)
 
@@ -255,7 +286,7 @@ gate is red would fail this project's central honesty rule.
        nights — is now filed as #850; #710 is a permanently-unclearable weekly alert and needs a
        disposition.
 6. [ ] Agent: ergonomics row 8 — measure the REAL `npx kn-next` journey post-publish.
-7. [ ] Agent: fix #857 — `create` bakes a standalone prefix Next does not use whenever a
+7. [x] Agent: fix #857 (#859) — `create` bakes a standalone prefix Next does not use whenever a
        `pnpm-workspace.yaml` sits anywhere in the app's ancestry. Not gated on either human
        step, and the only item here that is a product defect rather than a publishing state.
 8. [ ] Then: announce.
