@@ -353,7 +353,8 @@ function warnDuplicatedLockFiles(
         .map((f) => `\n   * ${f}`)
         .join("");
     warn(
-        "Multiple lockfiles detected — knext inferred your project root, but it " +
+        "Multiple root markers detected (lockfiles and/or a pnpm-workspace.yaml) — knext " +
+            "inferred your project root, but it " +
             `may not be correct. Using ${root} as the Docker build context, from ` +
             `${lockFiles[lockFiles.length - 1]}.\n` +
             "Everything under that directory is sent to `docker build` and, with " +
@@ -392,7 +393,8 @@ export function requireBuildContext(
         throw new Error(
             `Cannot determine the Docker build context: no lockfile found in ${resolve(appDir)} ` +
                 "or any parent directory.\n" +
-                `Next.js infers its file-tracing root the same way (${LOCKFILES.map((l) => l.file).join(", ")}), ` +
+                "Next.js infers its file-tracing root the same way — a `pnpm-workspace.yaml` anywhere " +
+                `above the app, else the nearest of ${LOCKFILES.map((l) => l.file).join(", ")} — ` +
                 "so without one the build context and the standalone output cannot be made to agree.\n" +
                 "Run your package manager's install in the project root to create a lockfile, and commit it.",
         );
