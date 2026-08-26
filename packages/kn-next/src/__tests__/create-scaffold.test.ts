@@ -42,6 +42,7 @@ import {
     standalonePrefixFor,
     writeScaffold,
 } from "../cli/create";
+import { CONFIG_FILES } from "../cli/tracing-root";
 
 /**
  * The #408 seam-alive scanner, loaded through a runtime path (the same shape
@@ -933,8 +934,8 @@ describe("kn-next create — the scaffolded config keeps the last pod warm (ADR-
  * #864 — a higher-precedence config shadows the one `create` writes.
  *
  * `create` emits `next.config.ts`. Next's own precedence is `.js` → `.mjs` → `.ts` →
- * `.mts` → `.cjs` → `.cts`, first match wins, and `tracing-root.ts` already records that
- * the order is load-bearing. So on an app that uses `next.config.js`, `--force` leaves
+ * `.mts`, first match wins, and `tracing-root.ts` already records that the order is
+ * load-bearing. So on an app that uses `next.config.js`, `--force` leaves
  * BOTH files and Next reads the one knext did not write — the one with no
  * `output: "standalone"` and no `adapterPath`.
  *
@@ -1011,7 +1012,32 @@ describe("#864 follow-ups — dry-run refuses, and the precedence list matches u
         ).toThrow(/next\.config\.js/);
     });
 
-    it("does not treat next.config.cjs as a config Next reads", () => {
+    it("pins CONFIG_FILES against the constant it cites, executed not read", () => {
+        // The previous version of this test asserted that a `.cjs` on disk does not
+        // refuse — an outcome that is INVARIANT under the bug, because `create` only ever
+        // emits `next.config.ts` and the scan early-returns at index 2 without reaching
+        // `.cjs`. Review mutation-proved it: re-adding `.cjs`/`.cts` left the suite green.
+        // It claimed to pin "the reason rather than only the outcome" and pinned neither.
+        //
+        // This asserts the claim directly: our list IS the upstream constant.
+        const upstream = require("next/dist/shared/lib/constants").CONFIG_FILES;
+        expect(CONFIG_FILES).toEqual(upstream);
+    });
+
+    it("does not refuse for next.config.mts, which the emitted next.config.ts outranks", () => {
+        // The only genuine lower-precedence case, and it was untested. It is what makes
+        // this a PRECEDENCE check rather than "any next.config.* refuses": deleting the
+        // `candidate === emitted` early return leaves every other case green.
+        const appDir = join(root, "mts864");
+        mkdirSync(appDir, { recursive: true });
+        writeFileSync(join(appDir, "package.json"), "{}\n");
+        writeFileSync(join(appDir, "next.config.mts"), "export default {};\n");
+        expect(() =>
+            writeScaffold({ appDir, name: "mts864", force: true }),
+        ).not.toThrow();
+    });
+
+    it("allows a next.config.cjs, which Next does not consult at all", () => {
         // It is not in the real CONFIG_FILES. Carrying it made the list disagree with the
         // constant it cites; the emitted .ts wins regardless, so this asserts the reason
         // rather than only the outcome.

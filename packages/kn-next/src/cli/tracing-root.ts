@@ -206,7 +206,7 @@ export function findTracingRoot(appDir: string): TracingRoot {
 // An earlier version of this list added "next.config.cjs" and "next.config.cts", which
 // Next does not consult at all — the comment above cited the upstream constant while the
 // list disagreed with it, which is the failure this file elsewhere calls out.
-const CONFIG_FILES = [
+export const CONFIG_FILES = [
     "next.config.js",
     "next.config.mjs",
     "next.config.ts",
