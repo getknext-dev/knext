@@ -219,6 +219,28 @@ image (#670 — same family as blocker 1). A public release that cites compat pa
 gate is red would fail this project's central honesty rule.
 **Action: in-repo work is possible here (flake hunt), but #670 clears with blocker 1.**
 
+## Community-health files are missing from `main` (found 2026-08-28)
+
+`main` carries **none** of the four files a public repository is expected to have:
+
+| file | in `main`? | where the only copy is |
+| --- | --- | --- |
+| `SECURITY.md` | no | uncommitted in the `knext-wt/community` worktree |
+| `CODE_OF_CONDUCT.md` | no | same |
+| `.github/CODEOWNERS` | no | same |
+| `.github/PULL_REQUEST_TEMPLATE.md` + `ISSUE_TEMPLATE/` | no | same |
+
+The `docs/community-health` branch **is** merged into `main`, which is what makes this
+easy to miss: the branch landed without ever committing these files, so a branch-level
+check reports done while the tree has nothing.
+
+`SECURITY.md` matters most — it is where a reporter looks first, and it pairs with
+enabling private vulnerability reporting (already on the human task list).
+
+**Not fixed here, deliberately.** The files are another branch's uncommitted work; moving
+them into an unrelated branch would take that work out from under whoever wrote it. The
+worktree must NOT be pruned until they are committed — pruning it destroys the only copy.
+
 ## Known gaps that are NOT release blockers
 
 Recorded because closing #857 could otherwise read as "everything found is now fixed", and a
