@@ -1,6 +1,7 @@
 import { GRPC as Cerbos } from '@cerbos/grpc';
 import * as Minio from 'minio';
 import { Pool } from 'pg';
+import { bunSqlAvailable, createBunSqlPool } from './db/bun-sql-pool';
 import { logSlowDep } from './slow-dep';
 
 // Singleton instances
@@ -614,9 +615,37 @@ const resolveDbPoolMax = (
 // per zone (DB_POOL_CONNECT_TIMEOUT_MS).
 const DEFAULT_DB_POOL_CONNECT_TIMEOUT_MS = 15_000;
 
+/**
+ * Build the writer pool's driver.
+ *
+ * Bun ships a native Postgres client, and the app targets Bun (ADR-0048), so
+ * prefer it there: it is native, it needs no `pg` in the bundle, and it is the
+ * one thing the compiled single executable can actually load — the same reason
+ * the deep-health Redis client prefers `Bun.RedisClient`.
+ *
+ * On Node this MUST stay `pg`. `@getknext/lib` is published, and
+ * `install-smoke.yml` proves it runs with no bun on PATH at all.
+ *
+ * Either way the result goes through the same five wrapper layers below, so the
+ * wake single-flight and activity tracking are identical on both paths. That is
+ * the entire reason the Bun driver is a pg-shaped facade rather than a second
+ * implementation (see `db/bun-sql-pool.ts`).
+ */
+const createWriterDriver = (config: {
+  connectionString: string | undefined;
+  max: number;
+  idleTimeoutMillis: number;
+  connectionTimeoutMillis: number;
+}): Pool => {
+  if (bunSqlAvailable()) {
+    return createBunSqlPool(config) as unknown as Pool;
+  }
+  return new Pool(config);
+};
+
 export const getDbPool = () => {
   if (!pgPool) {
-    pgPool = new Pool({
+    pgPool = createWriterDriver({
       connectionString: process.env.DATABASE_URL,
       // #378: cap the pool at the operator-declared KNEXT_DB_POOL_MAX (min wins).
       max: resolveDbPoolMax(
