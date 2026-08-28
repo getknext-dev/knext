@@ -333,7 +333,44 @@ by an unfixable upstream defect. That was wrong — nine attempts all used rollu
 which nitro-on-rolldown does not read; it keys off `output.codeSplitting`. The one-line fix now sits
 in `apps/file-manager/vite.config.ts`. Full chain in `docs/benchmarks/EXPERIMENTS.md` E9–E10.
 
+## Image optimization vs the single executable — needs a founder decision (2026-08-28)
+
+**This is the one open question that changes what ships.** It is not a bug to fix; it is
+a trade to choose, and it belongs to the founder because ADR-0048 was founder-directed.
+
+`/_next/image` optimization **works** on the vinext target and is covered by 16 tests.
+It **cannot** work inside the compiled single executable that ADR-0048 names as the only
+target — no external native module is reachable from inside a `bun build --compile`
+binary. Four independent routes were tried and measured (EXPERIMENTS.md E13); this is a
+property of Bun and of vinext's Cloudflare-only image path, not a knext defect.
+
+Why it matters: `CLAUDE.md` records image optimization as the project's biggest
+functional gap until ADR-0006 closed it. Shipping the single executable as-is reopens it.
+
+**Measured, n=5, same app, same route:**
+
+| target | cold start (median) | image optimization |
+| --- | --- | --- |
+| node + standalone (today) | 2670 ms | yes |
+| vinext, uncompiled, under bun | 879 ms | **yes** |
+| vinext single executable | 469 ms | **no** |
+
+Keeping image optimization costs **~410 ms** of cold start, and the uncompiled vinext
+path is **still 3x faster than what it replaces**.
+
+**Recommendation: ship the uncompiled vinext output under bun.** It keeps every
+capability the project already claims and banks the large majority of the win. The full
+options table and reasoning are in ADR-0048, Amendment 2 — decide there, not here.
+
+Until this is decided, two follow-on items stay blocked, because both depend on which
+artifact ships: promoting `apps/file-manager/Dockerfile.vinext` over the node Dockerfile,
+and deleting `scripts/warm-compile-cache.sh` with its harnesses.
+
 ## Human pending tasks (nothing below can be done by an agent)
+
+0. **Decide ADR-0048 Amendment 2 — image optimization vs the single executable.** This
+   one gates the Dockerfile promotion and the compile-cache removal, so it comes before
+   the rest. Recommendation and priced options are in the section directly above.
 
 Ordered by what unblocks the most.
 
