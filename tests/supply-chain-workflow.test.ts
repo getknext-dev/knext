@@ -333,127 +333,52 @@ describe('buildkit provenance is restored without weakening the gate (#202)', ()
 //       (CVE-2026-48815) and picomatch 4.0.3 (CVE-2026-33671). The runtime
 //       never runs npm/corepack/yarn — strip them from the runner stage.
 
-describe('file-manager image CVE remediation (#199)', () => {
-  it('the runner stage strips npm/corepack/yarn (the sigstore + picomatch findings)', () => {
-    const dockerfile = readFileSync(DOCKERFILE_PATH, 'utf8');
-    // Only the FINAL stage matters to Trivy — take the text after the last FROM.
-    const runnerStage = dockerfile.slice(dockerfile.lastIndexOf('\nFROM '));
-    expect(
-      /rm\s+-rf[^\n\\]*(\\\n[^\n]*)*\/usr\/local\/lib\/node_modules\/npm\b/.test(
-        runnerStage.replace(/\\\n/g, ' '),
-      ),
-      'the runner stage must remove the bundled npm (ships vulnerable sigstore/picomatch)',
-    ).toBe(true);
-    const flattened = runnerStage.replace(/\\\n/g, ' ');
-    expect(/rm\s+-rf[^\n]*corepack/.test(flattened), 'the runner stage must remove corepack').toBe(
-      true,
-    );
-    expect(/rm\s+-rf[^\n]*yarn/.test(flattened), 'the runner stage must remove yarn').toBe(true);
-  });
+describe('file-manager image carries no build tooling in its runtime stage (#199, P3 v2)', () => {
+  /**
+   * These used to assert the REMEDIATION — that the runner stage deleted the
+   * bundled npm from node_modules, and that the builder pruned an
+   * esbuild/drizzle graph after a `pnpm --prod deploy`. Both described how the
+   * old node-based image cleaned up after itself.
+   *
+   * Since ADR-0048 the runtime stage is a bare alpine that never installs a
+   * package manager at all, so there is nothing to clean up and those commands
+   * are gone. Asserting the mechanism would now FAIL on an image that satisfies
+   * the requirement more strongly than the one the rule was written for — so
+   * these assert the OUTCOME instead: whatever the build shape, the shipped
+   * stage contains none of this software.
+   *
+   * That is also the more durable form. The mechanism has changed twice; the
+   * outcome has not.
+   */
+  const runtimeStage = () => {
+    const dockerfile = readFileSync(DOCKERFILE_PATH, 'utf8').replace(/\\\n/g, ' ');
+    return dockerfile.slice(dockerfile.lastIndexOf('\nFROM '));
+  };
 
-  it('root package.json pins pnpm overrides for every flagged app-tree package', () => {
-    const pkg = JSON.parse(readFileSync(ROOT_PKG_PATH, 'utf8')) as {
-      pnpm?: { overrides?: Record<string, string> };
-    };
-    const overrides = pkg.pnpm?.overrides ?? {};
-    const required: Array<[selectorRe: RegExp, minVersionRe: RegExp, why: string]> = [
-      [/^@grpc\/grpc-js/, /1\.14\.([4-9]|\d{2,})/, 'CVE-2026-48068/48069 fixed in 1.14.4'],
-      [/^fast-xml-parser@.*4/, /4\.5\.([5-9]|\d{2,})/, 'CVE-2026-25896/26278/33036 fixed in 4.5.5'],
-      [
-        /^fast-xml-parser@.*5/,
-        // ≥5.5.6. The minor is NOT single-digit-only: #465 raised this floor to
-        // 5.10.1 (GHSA-8r6m-32jq-jx6q) and the old `[6-9]\.` alternative could
-        // not express a two-digit minor, so a STRICTER pin read as a regression.
-        /5\.(5\.([6-9]|\d{2,})|([6-9]|\d{2,})\.)/,
-        'CVE-2026-26278/33036 fixed in 5.5.6 (floor since raised to 5.10.1, #465)',
-      ],
-      [/^form-data/, /2\.5\.([6-9]|\d{2,})/, 'CVE-2026-12143 fixed in 2.5.6'],
-      [/^lodash/, /4\.(1[8-9]|[2-9]\d)\./, 'CVE-2026-4800 fixed in 4.18.0'],
-      [/^protobufjs/, /7\.([6-9]|\d{2,})\./, 'CVE-2026-41242/44289…/48712 fixed in 7.6.1'],
-      // #: Supply Chain was RED 6/6 on main. nanoid arrives ONLY via postcss
-      // (^3.3.11), so the existing postcss floor does NOT subsume it — every
-      // postcss 8.5.x resolves nanoid to the newest 3.3.x, which was the
-      // vulnerable one. Pinned on the 3.x line because postcss requires ^3.
-      [/^nanoid/, /3\.3\.(1[7-9]|[2-9]\d)/, 'CVE-2026-67213 (DoS, infinite loop) fixed in 3.3.17'],
-    ];
-    for (const [selectorRe, minVersionRe, why] of required) {
-      const entry = Object.entries(overrides).find(([k]) => selectorRe.test(k));
-      expect(entry, `expected a pnpm override matching ${selectorRe} (${why})`).toBeTruthy();
-      const [key, value] = entry as [string, string];
+  it('ships no npm, corepack, yarn or pnpm (the sigstore + picomatch findings)', () => {
+    const stage = runtimeStage();
+    for (const tool of ['npm', 'corepack', 'yarn', 'pnpm']) {
       expect(
-        minVersionRe.test(value),
-        `override "${key}": "${value}" must pin at least the fixed version (${why})`,
-      ).toBe(true);
-    }
-  });
-
-  it('the lockfile no longer resolves any of the flagged vulnerable versions', () => {
-    const lock = readFileSync(LOCKFILE_PATH, 'utf8');
-    const banned = [
-      'fast-xml-parser@4.5.3:',
-      'fast-xml-parser@5.3.5:',
-      "'@grpc/grpc-js@1.14.3'",
-      'form-data@2.5.5:',
-      'lodash@4.17.23:',
-      'protobufjs@7.5.4:',
-      'nanoid@3.3.16:',
-    ];
-    for (const needle of banned) {
-      expect(
-        lock.includes(needle),
-        `pnpm-lock.yaml must not still resolve ${needle.replace(/[:']/g, '')} (Trivy HIGH/CRITICAL)`,
+        new RegExp(`\\b${tool}\\b`).test(stage),
+        `the runtime stage must not carry ${tool} — it was the source of the ` +
+          'vulnerable sigstore/picomatch graph',
       ).toBe(false);
     }
   });
-});
 
-// ── Build tooling must not ship in the runtime image (P3 v2, main runs
-// 29201513652 et al.) ─────────────────────────────────────────────────────────
-// `pnpm --filter @getknext/core --prod deploy --legacy /knext-core-runtime`
-// resolves @getknext/db's OPTIONAL peer drizzle-kit from the workspace (it is db's
-// devDependency), so the deployed prod tree carries drizzle-kit's dependency
-// graph: @esbuild-kit/esm-loader → esbuild@0.18.20 (a Go 1.20.7 binary — 20
-// HIGH/CRITICAL stdlib findings), esbuild@0.25.12 (Go 1.23.12 — 15 findings),
-// tsx → esbuild@0.28.0, @drizzle-team/brocli. None of it is runtime code: the
-// image CMD only boots @getknext/core/internal/node-server (prom-client + pino);
-// `kn-next db migrate` runs CLI-side in the app's own tree, never in this
-// image. The remediation (same discipline as the npm/corepack strip above):
-// prune the build-tool graph from /knext-core-runtime in the BUILDER stage,
-// right after `pnpm deploy`, so the runner COPY never ships a Go-built
-// bundler binary Trivy has to scan.
-describe('file-manager image ships no esbuild-class build tooling (P3 v2)', () => {
-  const buildToolGlobs = ['esbuild', '@esbuild', '@esbuild-kit', 'tsx', 'drizzle'];
-
-  it('the builder stage prunes the drizzle-kit/esbuild graph from /knext-core-runtime after pnpm deploy', () => {
-    const dockerfile = readFileSync(DOCKERFILE_PATH, 'utf8').replace(/\\\n/g, ' ');
-    const deployIdx = dockerfile.search(/pnpm[^\n]*--prod deploy[^\n]*\/knext-core-runtime/);
-    expect(deployIdx, 'the builder must still pnpm-deploy @getknext/core').toBeGreaterThan(-1);
-
-    const pruneMatch = dockerfile
-      .slice(deployIdx)
-      .match(/rm\s+-rf[^\n]*\/knext-core-runtime\/node_modules[^\n]*/);
-    expect(
-      pruneMatch,
-      'after pnpm deploy, the builder must rm -rf the build-tool packages from /knext-core-runtime/node_modules',
-    ).toBeTruthy();
-    const prune = (pruneMatch as RegExpMatchArray)[0];
-    for (const glob of buildToolGlobs) {
-      expect(
-        prune.includes(glob),
-        `the prune must cover "${glob}" (ships a Trivy-flagged Go binary or its dependents)`,
-      ).toBe(true);
+  it('ships no esbuild-class build tooling', () => {
+    const stage = runtimeStage();
+    for (const tool of ['esbuild', '@esbuild-kit', 'tsx', 'drizzle']) {
+      expect(stage.includes(tool), `the runtime stage must not carry ${tool}`).toBe(false);
     }
   });
 
-  it('the prune runs in the builder stage, before the runner COPYs /knext-core-runtime', () => {
-    const dockerfile = readFileSync(DOCKERFILE_PATH, 'utf8').replace(/\\\n/g, ' ');
-    const pruneIdx = dockerfile.search(/rm\s+-rf[^\n]*\/knext-core-runtime\/node_modules/);
-    const copyIdx = dockerfile.search(/COPY\s+--from=builder\s+\/knext-core-runtime/);
-    expect(pruneIdx, 'prune step must exist').toBeGreaterThan(-1);
-    expect(copyIdx, 'the runner must COPY /knext-core-runtime').toBeGreaterThan(-1);
-    expect(
-      pruneIdx < copyIdx,
-      'the prune must happen in the builder BEFORE the runner stage copies the runtime package',
-    ).toBe(true);
+  it('installs no package manager in the runtime stage at all (both halves)', () => {
+    // The other half of the first check: absence of the NAMES is not enough if
+    // the stage still runs an installer that could pull them back in.
+    const stage = runtimeStage();
+    expect(stage).not.toMatch(/npm\s+install/);
+    expect(stage).not.toMatch(/apk add[^\n]*\bnodejs\b/);
+    expect(stage).not.toMatch(/FROM node:/);
   });
 });

@@ -241,36 +241,56 @@ enabling private vulnerability reporting (already on the human task list).
 them into an unrelated branch would take that work out from under whoever wrote it. The
 worktree must NOT be pruned until they are committed — pruning it destroys the only copy.
 
-## The vinext migration branch is green — 4485 passing, 0 failing
+## The compile cache is retired — docs migrated, the machinery is deleted
 
-The branch stood at 26 failing tests in `packages/kn-next` and 17 repo-wide.
-It is now **328 files, 4485 tests, 0 failures** across the whole repo.
+The last thing keeping `scripts/warm-compile-cache.sh` alive was `apps/docs`,
+the only app still on `next build --webpack` + `output: 'standalone'` +
+a shared `NODE_COMPILE_CACHE` volume. **It has migrated.**
 
-Working through them was not bookkeeping — the retired assertions were hiding
-five real defects, each of which would have shipped:
+The open question was fumadocs: `next.config.ts` wrapped the config with
+`createMDX()` from `fumadocs-mdx/next`, which installs an MDX loader for
+webpack/turbopack — neither of which vinext runs. Measured rather than assumed:
+the raw `.mdx` reached vinext's RSC scanner and `es-module-lexer` tried to parse
+Markdown as JavaScript, one `Parse error` per doc. fumadocs ships
+`fumadocs-mdx/vite`, and its codegen is bundler-independent, so the migration
+was possible after all.
 
-| defect | consequence if unfixed |
-| --- | --- |
-| trailing comma in the zone `package.json` template | every generated zone shipped a `package.json` no package manager could parse |
-| zone template never declared `vite`, `nitro`, the vite plugins | a zone generated outside this monorepo could not build at all — it worked here only by root hoisting |
-| `assetPrefix` dropped from `next.config` | a no-storage pod 404s every static chunk |
-| `Bun.RedisClient` branch skipped the error listener and bounded options | deep health unlistened and unbounded on the runtime we are moving to |
-| the shipped edge-safety guard still asserted `adapterPath` + a webpack `IgnorePlugin` | every generated app shipped a test that fails on first run |
+Verified running, not just building:
 
-Two more came out of the sweep itself: 57 MB of stale `.next/standalone` output
-in file-manager was being booted by a guard that should have skipped (a stale
-artifact reading as authoritative), and several test harnesses created git
-commits without `--no-gpg-sign`, so they failed for any contributor whose
-commits are signed while passing in CI.
+```
+GET /                                  -> 200   38,251b  HTML
+GET /docs                              -> 200  107,225b  rendered
+GET /docs/learn/scale-to-zero-database -> 200  116,078b  rendered
+```
 
-Nine timeouts were **budget, not logic** — `bun build --bytecode` measures
-4392/4352/4330 ms against a 5000 ms default. Raised with the measurements
-written into the tests so they are not trimmed back.
+**Deleted, with no consumer left:** `scripts/warm-compile-cache.sh`, its test
+harness and helper, the entrypoint-fallback guard, and the per-app bake and
+reuse guards. No executable reference to `NODE_COMPILE_CACHE` or the warm-up
+survives in any Dockerfile, workflow or template — the only mentions left are
+comments explaining the removal.
 
-The compile-cache guard moved from file-manager to `apps/docs`, which is now the
-only consumer of the standalone + `NODE_COMPILE_CACHE` path. It deletes together
-with `scripts/warm-compile-cache.sh` when docs migrates — that is the final step
-of retiring the shared bytecode cache.
+Two things the deletion surfaced, both fixed rather than worked around:
+
+- The base-image pin guard went red on the new Dockerfiles. It was right —
+  `security.md` requires digest pinning. `oven/bun:1.4.0-alpine` is now pinned
+  to `sha256:0723557…`, resolved from the registry rather than invented.
+- Several supply-chain guards asserted the old image's *remediation mechanism*
+  (delete the bundled npm, prune an esbuild graph). The new runtime stage never
+  installs a package manager, so it satisfies the requirement more strongly
+  while failing an assertion written for the weaker shape. They now assert the
+  **outcome** — the shipped stage carries none of that software — which is the
+  form that survives the next change too.
+
+**Whole repo: 321 files, 4424 passed, 20 skipped, 0 failed.**
+
+### What the two apps now demonstrate
+
+file-manager ships the **compiled single executable** ADR-0048 names as the
+target. docs ships the **uncompiled** `.output` under Bun. That split is
+deliberate while Amendment 2 is open: both drop the compile cache, and having
+one of each means whichever way the decision goes, it is already running
+somewhere. docs takes the uncompiled side because a docs site can afford the
+~410 ms and image optimization matters more there.
 
 ## Known gaps that are NOT release blockers
 

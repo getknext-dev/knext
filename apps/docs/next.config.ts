@@ -1,41 +1,35 @@
-import path from 'node:path';
 import { createMDX } from 'fumadocs-mdx/next';
 import type { NextConfig } from 'next';
 
 /**
  * knext-docs build config.
  *
- * Build-target switch: the site is BUILT to run on knext (the dogfood target),
- * but it must also build as a plain Next.js app on a managed host (e.g. Vercel)
- * while the self-host cluster + the @getknext/core npm publish (#53) are pending.
+ * The site builds with **vinext** (see `vite.config.ts`), which reads this file
+ * for app-level Next options but runs neither webpack nor turbopack.
  *
- *   KNEXT_ADAPTER=1 → standalone output + the official knext adapter (self-host)
- *   unset (default, incl. Vercel) → a vanilla Next.js build the platform handles
+ * Three things were removed with the migration off `next build --webpack`, and
+ * they are named here so nobody re-adds them expecting an effect:
  *
- * No `cacheHandler` — the docs site is fully static/SSG (no Redis / ISR needs).
+ *   - `output: 'standalone'` — there is no standalone server any more. The
+ *     build emits a Nitro `.output` and `NODE_COMPILE_CACHE` goes with it: the
+ *     shared bytecode-cache volume this site was the last consumer of is gone.
+ *   - `experimental.adapterPath` — the official Deployment Adapter hooks are a
+ *     webpack/turbopack mechanism. vinext never calls them, so pointing at an
+ *     adapter here would silently do nothing.
+ *   - the `KNEXT_ADAPTER=1` build-target switch — it existed to choose between
+ *     a self-host standalone build and a vanilla managed-host build. There is
+ *     one build now, so the branch had nothing left to select.
+ *
+ * `createMDX()` stays. It is fumadocs' own config wrapper; the MDX *loader* for
+ * this bundler comes from `fumadocs-mdx/vite` in `vite.config.ts`.
  */
-const useKnextAdapter = process.env.KNEXT_ADAPTER === '1';
-
-// Self-host-only additions. `experimental.adapterPath` is the official-adapter hook
-// in the knext-target Next (16.0.x); the docs build pins a newer patched Next (for
-// the Vercel CVE gate) whose published types drop that key, so this dead-on-Vercel
-// branch is cast. When actually dogfooding on knext, align the Next version with the
-// adapter API.
-const knextAdapterConfig = {
-  // Asset prefix is injected by `kn-next deploy` from kn-next.config.ts.
-  assetPrefix: process.env.ASSET_PREFIX || '',
-  output: 'standalone',
-  experimental: {
-    adapterPath: path.resolve(import.meta.dirname, 'next-adapter.ts'),
-  },
-} as unknown as NextConfig;
-
 const nextConfig: NextConfig = {
+  // Asset prefix is injected by `kn-next deploy` from kn-next.config.ts. Without
+  // it a no-storage deployment 404s every static chunk.
+  assetPrefix: process.env.ASSET_PREFIX || '',
   // #93 skew protection (ADR-0011): pin every client to the build it loaded.
-  // Harmless on a managed host (env unset → undefined / Next's default build id).
   deploymentId: process.env.NEXT_DEPLOYMENT_ID || undefined,
   generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID || null,
-  ...(useKnextAdapter ? knextAdapterConfig : {}),
 };
 
 const withMDX = createMDX();

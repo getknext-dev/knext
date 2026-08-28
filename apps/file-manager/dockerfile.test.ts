@@ -17,7 +17,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-const DF = readFileSync(join(import.meta.dirname, 'Dockerfile.vinext'), 'utf8');
+const DF = readFileSync(join(import.meta.dirname, 'Dockerfile'), 'utf8');
 const lineOf = (needle: string): number => DF.split('\n').findIndex((l) => l.includes(needle));
 
 describe('#ADR-0048 file-manager vinext image — build order', () => {
@@ -77,6 +77,18 @@ describe('#ADR-0048 file-manager vinext image — what it must NOT carry', () =>
 
   it('ships no standalone tree', () => {
     expect(runtimeStage).not.toMatch(/\.next\/standalone/);
+  });
+
+  it('never bare-execs a foreign server — the knext entry owns SIGTERM drain and metrics', () => {
+    // Carried over from the retired dockerfile-runtime-entrypoint guard. Its
+    // assertions named the node/standalone entry, which is gone, but the
+    // INVARIANT is not: whatever the build target, the container process must
+    // be knext's own entry. Bare-execing the framework's server skips the drain
+    // handler and the :9091 metrics listener, and the pod looks healthy right
+    // up until a scale-down drops in-flight requests.
+    expect(runtimeStage).not.toMatch(/exec\s+node\s/);
+    expect(runtimeStage).not.toMatch(/server\.js/);
+    expect(runtimeStage).not.toMatch(/next\s+start/);
   });
 
   it('runs the binary directly, as a non-root single process', () => {
