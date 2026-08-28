@@ -47,6 +47,13 @@ vi.mock("../cli/shared", () => ({
         storage: { provider: "gcs", bucket: "test-bucket" },
         cache: undefined,
         runtime: mockRuntime,
+        // Explicit, because the DEFAULT build is vinext since ADR-0048 and the
+        // bytecode pass only applies to a `next-standalone` artifact. Relying
+        // on the default here would make every assertion below vacuous — the
+        // pass would be skipped for the right reason and the tests would read
+        // as if the feature were broken. turbopack is retired but still
+        // described, and `apps/docs` is still on it, so this path is alive.
+        build: "turbopack",
     })),
 }));
 vi.mock("../utils/asset-upload", async (importOriginal) => ({
@@ -89,7 +96,23 @@ afterEach(() => {
     delete process.env.KNEXT_BUN_BYTECODE;
 });
 
-describe("precompileBunBytecode (module)", () => {
+/**
+ * These shell out to a REAL `bun build --bytecode`, which is slow in a way the
+ * 5s default does not accommodate. Measured on this machine, three consecutive
+ * runs over a single trivial module: 4392 / 4352 / 4330 ms. That is steady
+ * state, not cold start — so a test doing one build sits right on the default
+ * limit and a test doing two cannot pass at all.
+ *
+ * The failure mode is misleading, which is why the number is written down: the
+ * tests reported `Test timed out in 5000ms`, which reads as a hang or a
+ * deadlock in the pass rather than "the toolchain is simply slower than the
+ * budget". Do not lower this back without re-measuring.
+ */
+const BYTECODE_BUILD_TIMEOUT_MS = 30_000;
+
+describe("precompileBunBytecode (module)", {
+    timeout: BYTECODE_BUILD_TIMEOUT_MS,
+}, () => {
     it("never throws and reports disabled when the bun binary is missing", () => {
         const { standaloneDir } = seedProject();
         const result = precompileBunBytecode({
@@ -283,7 +306,12 @@ describe("precompileBunBytecode (module)", () => {
     );
 });
 
-describe("kn-next build — bytecode pass gating (runtime knob)", () => {
+// Same budget, same reason: the gating tests that DO run the pass drive a real
+// `bun build --bytecode` through `build()`. The ones that assert it is skipped
+// finish instantly, but the block shares one timeout.
+describe("kn-next build — bytecode pass gating (runtime knob)", {
+    timeout: BYTECODE_BUILD_TIMEOUT_MS,
+}, () => {
     it("does NOT run the pass for runtime=node (transformed files cannot load under Node)", async () => {
         const { projectDir, standaloneDir } = seedProject();
         mockRuntime = "node";

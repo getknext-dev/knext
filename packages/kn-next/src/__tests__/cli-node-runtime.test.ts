@@ -608,17 +608,37 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
                 /create failed/,
             );
             expect(r.status).toBe(0);
+            // The vinext shape (ADR-0048). `next-adapter.ts` and
+            // `standalone-seam-alive.test.ts` are deliberately NOT here: the
+            // official adapter hooks are a webpack/turbopack mechanism that
+            // vinext never calls, and the seam guard existed to catch webpack
+            // layering duplicating `@getknext/lib` module state — there are no
+            // webpack layers on this path.
             for (const rel of [
                 "src/instrumentation.ts",
                 "src/instrumentation-node.ts",
-                "next-adapter.ts",
+                "vite.config.ts",
+                "knext-bun-entry.mjs",
+                "runtime-contract.mjs",
                 "instrumentation-edge-safe.test.ts",
-                "standalone-seam-alive.test.ts",
             ]) {
                 expect(
                     existsSync(join(dir, rel)),
                     `${rel} not scaffolded`,
                 ).toBe(true);
+            }
+
+            // Both halves: the vinext files are present AND the retired ones
+            // are gone. Asserting only presence would pass on a scaffold that
+            // still shipped a dead adapter file for every new app.
+            for (const rel of [
+                "next-adapter.ts",
+                "standalone-seam-alive.test.ts",
+            ]) {
+                expect(
+                    existsSync(join(dir, rel)),
+                    `${rel} is retired and must not be scaffolded`,
+                ).toBe(false);
             }
         } finally {
             rmSync(dir, { recursive: true, force: true });

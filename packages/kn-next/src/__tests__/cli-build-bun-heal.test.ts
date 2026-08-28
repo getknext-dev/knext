@@ -36,6 +36,12 @@ vi.mock("../cli/shared", () => ({
         storage: { provider: "gcs", bucket: "test-bucket" },
         cache: undefined,
         runtime: "node", // node config on purpose — the heal must run anyway
+        // Explicit since ADR-0048: the heal walks a `.next/standalone` tree, so
+        // it applies to that artifact SHAPE only. The default build is vinext,
+        // which emits a nitro output and correctly skips the heal — relying on
+        // the default here would assert the heal "does not run" while claiming
+        // to test that it does.
+        build: "turbopack",
     })),
 }));
 vi.mock("../utils/asset-upload", async (importOriginal) => ({

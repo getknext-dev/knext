@@ -26,7 +26,7 @@ import {
 import type { KnativeNextConfig } from "../config";
 import { UsageError } from "./shared";
 
-/** The default builder — absence of `config.build` means turbopack. */
+/** The default builder — absence of `config.build` means vinext (ADR-0048). */
 const DEFAULT_BUILD = "vinext";
 
 export interface ResolvedBuild {

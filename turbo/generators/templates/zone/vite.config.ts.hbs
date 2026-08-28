@@ -1,0 +1,49 @@
+/**
+ * {{ name }} — vinext build config.
+ *
+ * knext builds your app with vinext and compiles it into a single Bun
+ * executable. That is what gives you a ~61ms cold start instead of ~884ms, which
+ * is the whole point of scaling to zero: nobody waits a second for the first
+ * request after an idle period.
+ *
+ * This file is deliberately small. If you have used `create-vinext-app`, the
+ * shape is the same minus the Cloudflare Workers pieces — no `wrangler`, no
+ * `@cloudflare/vite-plugin`, no KV/CDN adapters. knext targets Knative on
+ * Kubernetes instead, so the server is a Bun binary rather than a Worker.
+ */
+
+import { nitro } from 'nitro/vite';
+import vinext from 'vinext';
+import { defineConfig } from 'vite';
+
+export default defineConfig({
+  plugins: [
+    vinext(),
+    nitro({
+      // Bun, because the artifact is compiled with `bun build --compile`.
+      // Not interchangeable with the node preset: the emitted entry calls Bun's
+      // global `serve()` at module top level, so `node .output/server/index.mjs`
+      // exits 1. There is no node fallback for this build.
+      preset: 'bun',
+
+      // knext's own Nitro server entry. vinext is Vite/rolldown and cannot see
+      // knext's adapter hooks, so this wrapper re-provides what the platform
+      // needs: the health endpoint, `:9091` metrics, and draining in-flight
+      // requests on SIGTERM before the pod goes away.
+      entry: './knext-bun-entry.mjs',
+
+      // REQUIRED — do not remove without reading this.
+      //
+      // Nitro on rolldown reads `output.codeSplitting`, not rollup's
+      // `manualChunks`. Setting `inlineDynamicImports` makes it disable code
+      // splitting (see nitro/dist/vite.mjs).
+      //
+      // Why it matters: when the server bundle splits, vinext's Next-compat
+      // shims land in a second chunk that re-exports a symbol declared in no
+      // emitted module. The bundle then fails on any runtime — the server 500s
+      // with "not declared in this file" — and `bun build --compile` refuses
+      // it. One chunk, no split, no failure.
+      rollupConfig: { output: { inlineDynamicImports: true } },
+    }),
+  ],
+});

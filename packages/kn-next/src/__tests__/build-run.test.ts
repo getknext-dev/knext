@@ -47,9 +47,25 @@ import { build } from "../cli/build";
 let dir: string;
 const savedCwd = process.cwd();
 
+/**
+ * `build: "turbopack"` is explicit here, and it is not incidental.
+ *
+ * The bun-exports heal and the bytecode pass walk a `.next/standalone` tree, so
+ * they only run for an artifact of that SHAPE. Since ADR-0048 the default build
+ * is vinext, whose artifact is a nitro output — meaning a config that omits
+ * `build` correctly skips both passes, and these tests would be asserting the
+ * old world if they relied on the default.
+ *
+ * turbopack is retired (`available: false`) but still described, because
+ * `apps/docs` has not migrated yet. These tests therefore cover machinery that
+ * is alive but scheduled for deletion: when the last standalone consumer moves,
+ * the passes and this file go together. `skips both passes on the default
+ * (vinext) build` below is the guard for the other half.
+ */
 const cfg = (over: Record<string, unknown> = {}) => ({
     name: "my-app",
     registry: "reg",
+    build: "turbopack",
     storage: { provider: "gcs", bucket: "b" },
     ...over,
 });
@@ -97,6 +113,27 @@ describe("build()", () => {
 
         expect(healBunExportTargets).toHaveBeenCalledTimes(1);
         expect(precompileBunBytecode).toHaveBeenCalledTimes(1);
+        expect(uploadAssets).toHaveBeenCalledTimes(1);
+    });
+
+    it("skips BOTH standalone passes on the default (vinext) build, even with a standalone dir present", async () => {
+        // The other half of the `build: "turbopack"` pin above. Without this,
+        // every test here could keep passing while the default build silently
+        // ran standalone-shaped steps against a nitro artifact — walking a
+        // `.next/standalone` tree that vinext never produces.
+        //
+        // The directory is created ON PURPOSE: the gate must key on the
+        // artifact SHAPE, not on whether a stale standalone tree happens to be
+        // lying around from an earlier build. That is the failure this asserts.
+        loadConfig.mockResolvedValue(cfg({ runtime: "bun", build: undefined }));
+        mkdirSync(join(dir, ".next", "standalone"), { recursive: true });
+
+        await build({ skipNextBuild: true });
+
+        expect(healBunExportTargets).not.toHaveBeenCalled();
+        expect(precompileBunBytecode).not.toHaveBeenCalled();
+        // The build itself still completes — skipping the passes must not
+        // skip the deploy-relevant work.
         expect(uploadAssets).toHaveBeenCalledTimes(1);
     });
 

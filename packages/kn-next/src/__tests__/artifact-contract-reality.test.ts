@@ -111,17 +111,15 @@ describe("#B3 availability is an honest claim about the CORE cli", () => {
         // resolve, verify and post-process a nitro artifact perfectly well; the
         // thing that still cannot work is the image.
         //
-        // The scaffolded Dockerfile COPYs `.next/standalone` and WORKDIRs into
-        // the standalone prefix, so a vinext deploy would produce an image
-        // whose entry does not exist. Availability is an end-to-end claim —
-        // build AND image AND runtime entry — so the guard is anchored on the
-        // narrowest thing still missing rather than on a path literal that
-        // happens to mention the word.
+        // The scaffolded Dockerfile used to COPY `.next/standalone` and WORKDIR
+        // into the standalone prefix, which is what made `available` a lie: a
+        // vinext deploy produced an image whose entry did not exist. That is no
+        // longer the shape — vinext is the only build target, so there is one
+        // `Dockerfile.hbs` and it ships the nitro output. The guard stays
+        // anchored on the ARTIFACT the image must carry rather than on a path
+        // literal, so it still fails if the template regresses to standalone.
         const dockerfile = readFileSync(
-            join(
-                REPO_ROOT,
-                "packages/kn-next/templates/app/Dockerfile.vinext.hbs",
-            ),
+            join(REPO_ROOT, "packages/kn-next/templates/app/Dockerfile.hbs"),
             "utf8",
         );
 

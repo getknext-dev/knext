@@ -11,13 +11,19 @@ vi.mock('../clients', () => ({
 // --- Redis mock -------------------------------------------------------------
 // The health module lazily `new RedisClient(url, opts)` then `.ping()`s it.
 const redisPing = vi.fn<() => Promise<unknown>>();
-vi.mock('ioredis', () => ({
-  default: class {
-    ping() {
-      return redisPing();
-    }
-  },
-}));
+class FakeRedis {
+  ping() {
+    return redisPing();
+  }
+}
+// Mock the SEAM, not the package. ioredis is resolved through a computed
+// specifier so it stays out of the bundle graph (redis-ctor.ts), and
+// `vi.mock('ioredis')` resolves by module id — it cannot intercept that. When
+// the loader was inline this mock silently stopped applying and the tests
+// dialled a real Redis, surfacing as `MaxRetriesPerRequestError` rather than
+// anything naming the cause.
+vi.mock('../health/redis-ctor', () => ({ loadRedisCtor: () => FakeRedis }));
+vi.mock('ioredis', () => ({ default: FakeRedis }));
 
 // Silence the logger.
 vi.mock('../logger', () => ({

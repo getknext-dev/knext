@@ -22,7 +22,16 @@ import type { NextConfig } from "next";
  * Bytecode: nothing to configure. `bun build --compile --bytecode` bakes V8
  * bytecode into the binary itself, so there is no `NODE_COMPILE_CACHE`, no
  * cache directory to mount, and no warm-up step. It ships inside the artifact.
+ *
+ * What DOES still belong here is `assetPrefix`. vinext reads the Next config
+ * for app-level options, and this one is knext's own wiring: when object
+ * storage is configured, `ASSET_PREFIX` points static assets at the bucket or
+ * CDN; when it is not, the empty-string fallback keeps the emitted HTML on
+ * relative `/_next/static/...` paths so the app serves its own assets. Deleting
+ * it does not fail the build — it silently breaks the no-storage mode.
  */
-const nextConfig: NextConfig = {};
+const nextConfig: NextConfig = {
+    assetPrefix: process.env.ASSET_PREFIX || "",
+};
 
 export default nextConfig;

@@ -191,8 +191,18 @@ describe("kn-next create — next.config is minimal under vinext (ADR-0048)", ()
         expect(code).not.toMatch(/output:\s*['"]standalone['"]/);
         expect(code).not.toMatch(/adapterPath\s*:/);
         expect(code).not.toMatch(/serverExternalPackages/);
-        // And the config really is the empty object, not merely missing those.
-        expect(code).toMatch(/NextConfig\s*=\s*\{\s*\}/);
+        // And what IS there is there on purpose. `assetPrefix` is knext's own
+        // wiring, not turbopack residue: with object storage configured it
+        // points assets at the bucket or CDN, and the empty-string fallback is
+        // what keeps a no-storage pod emitting relative `/_next/static/...`
+        // paths instead of 404ing every chunk (optional-storage.test.ts owns
+        // that behaviour).
+        //
+        // An earlier version of this test asserted `NextConfig = {}` — that the
+        // config was EMPTY rather than free of the retired keys. It passed
+        // while quietly requiring the assetPrefix regression to stay in place.
+        // "Minimal" is a claim about what was removed, not a byte count.
+        expect(code).toMatch(/assetPrefix:\s*process\.env\.ASSET_PREFIX/);
     });
 
     it("still exports a NextConfig, so app-level options have a home", () => {
@@ -225,9 +235,9 @@ describe("kn-next create — graduated per-app guards ship with the app (#344/#4
         // and emits no standalone tree, so the file would assert against a path
         // no build produces — a guard that can only pass is decoration.
         const { appDir } = scaffoldApp();
-        expect(
-            existsSync(join(appDir, "standalone-seam-alive.test.ts")),
-        ).toBe(false);
+        expect(existsSync(join(appDir, "standalone-seam-alive.test.ts"))).toBe(
+            false,
+        );
     });
 
     it("keeps the seams globalThis-anchored, which is what that guard protected", () => {
@@ -668,9 +678,9 @@ describe("kn-next create — the seam-guard CI matrix no longer applies (ADR-004
         const { appDir } = scaffoldApp("scaffolded");
 
         expect(existsSync(appDir)).toBe(true);
-        expect(
-            existsSync(join(appDir, "standalone-seam-alive.test.ts")),
-        ).toBe(false);
+        expect(existsSync(join(appDir, "standalone-seam-alive.test.ts"))).toBe(
+            false,
+        );
     });
 });
 

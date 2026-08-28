@@ -309,23 +309,32 @@ describe("kn-next create scaffolds the no-storage default (condition 6)", () => 
 });
 
 describe("the image serves its own statics (condition 4 build-time halves)", () => {
-    it("the generated Dockerfile COPYs .next/static into the runner image", () => {
-        // THE mutation target: delete the `.next/static` COPY line from
+    it("the generated Dockerfile COPYs the served asset root into the runner image", () => {
+        // THE mutation target: delete the `.output/public` COPY line from
         // templates/app/Dockerfile.hbs and this expectation goes red — a
         // no-storage pod would boot and 404 every chunk.
+        //
+        // The path changed with ADR-0048, the requirement did not. Under vinext
+        // the nitro build emits ONE served root, `.output/public`, holding both
+        // the hashed `_next` chunks and the app's own `public/` files. Two
+        // COPY lines collapsed into one because the artifact merged them, not
+        // because a guard was relaxed.
         const { appDir } = scaffoldApp("static-copy");
         const dockerfile = readFileSync(join(appDir, "Dockerfile"), "utf8");
         expect(dockerfile).toMatch(
-            /COPY --from=builder \/repo\/[^\s]*\.next\/static \.\/[^\s]*\.next\/static/,
+            /COPY\s+[^\n]*\.output\/public\s+\S*\.output\/public/,
         );
     });
 
-    it("…and the public/ directory", () => {
+    it("…and does NOT still reference the retired standalone asset paths", () => {
+        // The other half. Without it, a template that COPYs `.output/public`
+        // AND drags along a dead `.next/static` line would pass — which is how
+        // a migration leaves rubble that reads as intentional. `.next/standalone`
+        // is checked too: it is the directory this build never produces.
         const { appDir } = scaffoldApp("public-copy");
         const dockerfile = readFileSync(join(appDir, "Dockerfile"), "utf8");
-        expect(dockerfile).toMatch(
-            /COPY --from=builder \/repo\/[^\s]*public \.\/[^\s]*public/,
-        );
+        expect(dockerfile).not.toMatch(/\.next\/static/);
+        expect(dockerfile).not.toMatch(/\.next\/standalone/);
     });
 
     it("the generated next.config gates assetPrefix on ASSET_PREFIX — unset env ⇒ no prefix in emitted HTML", () => {

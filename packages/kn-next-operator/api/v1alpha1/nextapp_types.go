@@ -114,6 +114,49 @@ type NextAppSpec struct {
 	// +kubebuilder:validation:Enum=bun;node
 	Runtime string `json:"runtime,omitempty"`
 
+	// Build selects the build system that produced the image.
+	// Valid value: "turbopack" (also the default when absent). See the enum note
+	// below for why "vinext" is NOT admitted here yet even though the CLI type
+	// knows the name.
+	// Maps from KnativeNextConfig.build.
+	//
+	// INDEPENDENT of Runtime. The two axes are connected by the artifact SHAPE a
+	// builder emits and a runtime must accept — never by a rule pairing the two
+	// names. Any value of Build is admissible with any value of Runtime; a
+	// builder/runtime pairing that cannot work is rejected by the CLI against
+	// the artifact contract, before a CR is ever emitted.
+	//
+	// Deliberately NOT a CEL cross-field rule. ADR-0036 specified a fail-closed
+	// `bun => vinext` admission rule; it was never implemented, and the shipped
+	// meaning of Runtime "bun" is "run the Next standalone server under Bun",
+	// which that rule would have rejected. Encoding compatibility here would
+	// pin a policy into every cluster's CRD, where changing it later needs a
+	// CRD roll rather than a CLI release.
+	//
+	// Additive and optional at v1alpha1 (ADR-0017): absence means "turbopack",
+	// so every CR ever written keeps its exact meaning, and an operator that
+	// predates this field ignores it rather than misreading it.
+	//
+	// The enum admits ONLY "turbopack" today, and that is deliberate. A CRD enum
+	// is not documentation — it is the cluster-side contract, and it is the whole
+	// statement, because nothing else here rejects a value: the webhook validates
+	// only the ADR-0019 DATABASE_URL rule, internal/validation carries no Build
+	// case, and the controller's only shape-aware branch hardcodes the standalone
+	// shape (`bun run server.js`). Publishing "vinext" would let a GitOps controller
+	// — which CLAUDE.md §4 records does NOT assert strict validation — store a CR
+	// the operator then reconciles into a spawn command for an artifact whose
+	// entry is `.output/server/index.mjs` and whose execution is in-process. No
+	// condition, no event, no refusal.
+	//
+	// The CLI's "known but unavailable" distinction is coherent in TypeScript and
+	// incoherent on the wire. Widen this enum in the same change that teaches the
+	// operator the shape — never before. Order matters: removing a value from a
+	// SHIPPED enum rejects CRs already stored against it, so publishing early is
+	// expensive to undo.
+	// +optional
+	// +kubebuilder:validation:Enum=turbopack
+	Build string `json:"build,omitempty"`
+
 	// TimeoutSeconds is the maximum number of seconds a request can take before
 	// the Knative Service times it out.  Defaults to 300 (5 min) when unset.
 	// Maps from the knative-manifest hardcoded timeoutSeconds=300.

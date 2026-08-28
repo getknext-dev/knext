@@ -265,9 +265,14 @@ func maximalWarmScheduleSpec() appsv1alpha1.NextAppSpec {
 		},
 		HealthCheckPath: "/api/health",
 		Runtime:         "node",
-		TimeoutSeconds:  111,
-		Security:        &appsv1alpha1.SecuritySpec{NetworkPolicy: &networkPolicy},
-		BuildID:         "build-1",
+		// Build is INDEPENDENT of Runtime (B2): set here alongside Runtime
+		// "node" precisely so the fixture exercises a pairing the old
+		// `bun => vinext` invariant would have forbidden, and which the shipped
+		// code has always allowed.
+		Build:          "turbopack",
+		TimeoutSeconds: 111,
+		Security:       &appsv1alpha1.SecuritySpec{NetworkPolicy: &networkPolicy},
+		BuildID:        "build-1",
 	}
 }
 

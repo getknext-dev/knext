@@ -125,7 +125,12 @@ function healthyCacheDir(): string {
 const bun = bunOnPath();
 const bunRequired = process.env.KNEXT_REQUIRE_BUN === "1";
 
-describe("#309 the compile-cache diagnostic under REAL bun", () => {
+/**
+ * Shells out to a REAL bun. Same story as the CLI e2e above: green alone, timed
+ * out at 5s inside the full run. The budget, not the diagnostic, was the
+ * failure.
+ */
+describe("#309 the compile-cache diagnostic under REAL bun", { timeout: 30_000 }, () => {
     it("has bun available whenever KNEXT_REQUIRE_BUN=1 (a missing bun FAILS)", () => {
         if (!bunRequired) {
             // Not the gate — the gate is the CI job that sets the flag.
