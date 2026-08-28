@@ -22,7 +22,7 @@ class FakeRedis {
 // the loader was inline this mock silently stopped applying and the tests
 // dialled a real Redis, surfacing as `MaxRetriesPerRequestError` rather than
 // anything naming the cause.
-vi.mock('../health/redis-ctor', () => ({ loadRedisCtor: () => FakeRedis }));
+vi.mock('../redis/ioredis-ctor', () => ({ loadRedisCtor: () => FakeRedis }));
 vi.mock('ioredis', () => ({ default: FakeRedis }));
 
 // Silence the logger.

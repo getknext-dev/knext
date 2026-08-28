@@ -61,6 +61,17 @@ class FakeRedis {
   }
 }
 
+// Mock the SEAM, not the package. The route no longer constructs ioredis
+// itself — it asks `@getknext/lib`'s selector, which prefers Bun's native
+// client and falls back to ioredis through a computed specifier that no
+// module-id mock can intercept. `ioredis-ctor` is that seam.
+//
+// The FakeRedis below still stands in for the constructed client, so every
+// #802 assertion (lazy, listened-to, bounded, on-demand re-dial) is unchanged —
+// only the route from the test to the constructor moved.
+vi.mock('../../../../../../../packages/lib/src/redis/ioredis-ctor', () => ({
+  loadRedisCtor: () => FakeRedis,
+}));
 vi.mock('ioredis', () => ({ default: FakeRedis }));
 // The route pulls in the cache handler through `cache-init`; neither is the
 // subject here, and importing it would dial for real.

@@ -1,12 +1,12 @@
 import type RedisClient from 'ioredis';
 import { getDbPool } from '../clients';
 import { logger } from '../logger';
-import { attachQuietErrorListener, ensureDialable, quietRedisOptions } from '../redis/quiet';
+import { createRedisClient } from '../redis/client';
+import { ensureDialable } from '../redis/quiet';
 // ioredis is resolved at RUNTIME through this module, never statically
 // imported — see redis-ctor.ts for why, and for why it is a separate module
 // rather than an inline require (the inline version was unmockable and made
 // these tests dial a real Redis).
-import { loadRedisCtor } from './redis-ctor';
 
 export interface HealthStatus {
   status: 'ok' | 'degraded' | 'down' | 'waking';
@@ -100,24 +100,12 @@ function getRedisClient(): RedisClient | null {
   // `Unhandled error event` from module scope on every troubled pod.
   // `maxRetriesPerRequest: 1` / `connectTimeout: 2000` are unchanged: a health
   // check still fails fast.
-  // Bun ships a native Redis client. Prefer it when present: it is what the
-  // compiled single-executable target can actually load, and it is native, so
-  // it adds no JavaScript to a cold start.
-  const bun = (globalThis as { Bun?: { RedisClient?: new (url: string) => unknown } }).Bun;
-  if (typeof bun?.RedisClient === 'function') {
-    redisCache = new bun.RedisClient(process.env.REDIS_URL) as unknown as RedisClient;
-    // The #802 invariants are NOT ioredis-specific, so they are not skipped
-    // here. An earlier version returned the Bun client straight from this
-    // branch, which quietly dropped both: the client went unlistened (the
-    // `Unhandled error event` this issue exists to stop) and unbounded (a
-    // health check that hangs instead of failing fast). Whichever client is in
-    // use, deep health must stay listened-to and bounded.
-    attachQuietErrorListener(redisCache, 'deep-health');
-    return redisCache;
-  }
-  const Redis = loadRedisCtor();
-  redisCache = new Redis(process.env.REDIS_URL, quietRedisOptions());
-  attachQuietErrorListener(redisCache, 'deep-health');
+  // Which client, on what terms, is `redis/client.ts`'s decision — not this
+  // module's. It used to be duplicated here, and the copies drifted: this one
+  // constructed the Bun client with NO options at all, silently dropping the
+  // bounded connect timeout and the capped retry budget that #802 exists to
+  // enforce. One selector, one set of terms.
+  redisCache = createRedisClient(process.env.REDIS_URL, 'deep-health') as unknown as RedisClient;
   return redisCache;
 }
 

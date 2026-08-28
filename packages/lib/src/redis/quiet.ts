@@ -32,7 +32,15 @@ const BACKOFF_CAP_MS = 2000;
 /** The subset of ioredis this module touches — keeps `lib` free of its types. */
 export interface QuietRedisClient {
   status?: string;
-  on(event: string, listener: (...args: unknown[]) => void): unknown;
+  /**
+   * ioredis is an EventEmitter and has this. Bun's native client does NOT —
+   * it has no `.on` at all — so this is optional, and every caller has to
+   * branch. Declaring it required was how the Bun path silently ended up with
+   * no error listener attached.
+   */
+  on?(event: string, listener: (...args: unknown[]) => void): unknown;
+  /** Bun's spelling: a settable handler rather than an event subscription. */
+  onclose?: unknown;
   connect(): Promise<unknown>;
 }
 
@@ -77,22 +85,41 @@ const errorClass = (err: unknown): string => {
  */
 export function attachQuietErrorListener(client: QuietRedisClient, tag: string): void {
   const seen = new Set<string>();
+
+  const report = (err: unknown): void => {
+    const cls = errorClass(err);
+    if (seen.has(cls)) return;
+    seen.add(cls);
+    const message = sanitize(String((err as { message?: unknown })?.message ?? ''));
+    console.error(
+      `[redis:${tag}] connection error (${cls}): ${message} — further ${cls} errors suppressed`,
+    );
+  };
+
   try {
-    client.on('error', (...args: unknown[]) => {
-      const err = args[0];
-      const cls = errorClass(err);
-      if (seen.has(cls)) return;
-      seen.add(cls);
-      const message = sanitize(String((err as { message?: unknown })?.message ?? ''));
-      console.error(
-        `[redis:${tag}] connection error (${cls}): ${message} — further ${cls} errors suppressed`,
-      );
-    });
+    // ioredis is an EventEmitter.
+    if (typeof client.on === 'function') {
+      client.on('error', (...args: unknown[]) => report(args[0]));
+      return;
+    }
+
+    // Bun's native client is NOT an EventEmitter — it has no `.on` at all, and
+    // exposes settable `onclose`/`onconnect` properties instead. This branch is
+    // not a nicety: without it the whole function fell into the catch below and
+    // attached NOTHING on Bun, so the #802 log-quieting was silently absent on
+    // exactly the runtime the platform is moving to. Nothing failed; the noise
+    // simply came back, which is the hardest kind of regression to notice.
+    const bunShaped = client as { onclose?: unknown };
+    if ('onclose' in client) {
+      bunShaped.onclose = (err: unknown) => report(err);
+      return;
+    }
   } catch {
-    // Fail-open: a client object that cannot take a listener (a partial stub,
-    // an exotic wrapper) must not take the health check or the route down with
-    // it — quieting the logs is never worth a dependency path.
+    // Fall through to the fail-open below.
   }
+  // Fail-open: a client that can take neither shape (a partial stub in a test,
+  // some future wrapper) must not take the health check or the route down with
+  // it — quieting the logs is never worth a dependency path.
 }
 
 /**

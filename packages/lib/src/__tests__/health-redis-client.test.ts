@@ -58,7 +58,7 @@ class FakeRedis {
 // and cannot intercept the computed-specifier `require` that keeps ioredis out
 // of the bundle graph — when the loader was inline, this mock silently stopped
 // applying and these tests dialled a real Redis.
-vi.mock('../health/redis-ctor', () => ({ loadRedisCtor: () => FakeRedis }));
+vi.mock('../redis/ioredis-ctor', () => ({ loadRedisCtor: () => FakeRedis }));
 vi.mock('ioredis', () => ({ default: FakeRedis }));
 vi.mock('pg', () => ({
   Pool: class {
