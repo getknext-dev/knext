@@ -241,6 +241,32 @@ enabling private vulnerability reporting (already on the human task list).
 them into an unrelated branch would take that work out from under whoever wrote it. The
 worktree must NOT be pruned until they are committed — pruning it destroys the only copy.
 
+## The vinext migration branch is not green — 26 tests encode the retired contract
+
+`agent/vinext-image-optimization` stands at **1835 passing, 26 failing across 9 files**.
+Stated plainly rather than rounded off: the branch is **not mergeable as it stands**.
+
+Every failure is in a file the migration touched, and they fail for one reason — they
+assert the **node + standalone + `NODE_COMPILE_CACHE` bytecode contract** that this
+direction removes:
+
+- `cli-build-bun-bytecode.test.ts`, `build-run.test.ts`, `cli-build-bun-heal.test.ts` —
+  the standalone bytecode pass and the bun-exports heal, neither of which exists on the
+  vinext path (bytecode is baked into the artifact instead).
+- `compile-cache-health-bun.test.ts` — the shared compile-cache volume diagnostic.
+- `optional-storage.test.ts`, `artifact-contract-reality.test.ts`,
+  `cli-node-runtime.test.ts`, `cli-config-not-found.test.ts` — generated-Dockerfile and
+  scaffold expectations that changed shape.
+
+**They are not being rewritten yet, on purpose.** What they *should* assert depends on
+which artifact ships, and that is the open ADR-0048 Amendment 2 decision above. Rewriting
+them now would encode a premise that may be about to change — the same mistake as writing
+a claim before the measurement that tests it. The decision comes first, then one pass
+fixes all 26 against whatever was chosen.
+
+What IS green and independent of that decision: the image-optimization work itself
+(16 tests, mutation-proved), and the other 1835.
+
 ## Known gaps that are NOT release blockers
 
 Recorded because closing #857 could otherwise read as "everything found is now fixed", and a
