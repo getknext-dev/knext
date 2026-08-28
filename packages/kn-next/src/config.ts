@@ -267,6 +267,27 @@ export interface KnativeNextConfig {
     queue?: QueueConfig; // For ISR revalidation (Kafka for Knative Eventing)
     registry: string;
     runtime?: "bun" | "node"; // Runtime to execute the Next.js standalone server.js: 'bun' or 'node' (default)
+    /**
+     * Which build system produces the app (Track B2 of the build/runtime
+     * separation; see `src/adapters/artifact-contract.ts`).
+     *
+     * - `turbopack` (**default**) — Next's own `next build`, emitting
+     *   `.next/standalone`. The only all-apps-verified path, and what every
+     *   existing deployment uses.
+     * - `vinext` — the Vite/rolldown Next reimplementation, emitting a nitro
+     *   `.output`. **Not usable yet**: vinext is not a dependency of this repo,
+     *   so selecting it is rejected by the validator rather than silently
+     *   producing a broken image.
+     *
+     * Additive and optional at `v1alpha1` (ADR-0017): absence means `turbopack`,
+     * so every CR ever written keeps its exact meaning and an older operator
+     * that does not know the field behaves identically.
+     *
+     * `build` and `runtime` are INDEPENDENT. `runtime` does not select a build,
+     * and `build` does not select a runtime — what connects them is the artifact
+     * shape the builder emits and the runtime must accept.
+     */
+    build?: "turbopack" | "vinext";
     infrastructure?: InfrastructureConfig; // Deploy PostgreSQL, Redis, MinIO as Knative services
     scaling?: ScalingConfig; // Knative autoscaling options
     // #417 — bring-your-own database binding (ADR-0019/ADR-0025): binds an

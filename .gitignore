@@ -153,3 +153,9 @@ sandbox-fetch-debug-*/
 # content guard in `tests/no-committed-transform-cache.test.ts`, which reds on
 # this output under ANY path or directory name.
 /[A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-]/client/
+
+# vinext build cache and compiled single-executables (ADR-0048). The binary is
+# ~60MB and is a build OUTPUT — `bun build --compile` regenerates it from
+# .output. Staging it once wedged `git add` with a SIGKILL.
+.vinext/
+knext-exec*

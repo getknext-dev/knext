@@ -30,6 +30,7 @@ import {
     uploadAssets,
 } from "../utils/asset-upload";
 import { createLogger } from "../utils/logger";
+import { resolveBuildArtifact, standaloneStepsApply } from "./build-artifact";
 import { isEntrypoint } from "./exec";
 import { runProjectBuild } from "./project-build";
 import {
@@ -74,13 +75,14 @@ export async function build(options: BuildOptions = {}) {
     // 2. Run `next build` via the project's build script.
     //    The app's next.config.ts must set output:'standalone'.
     if (!options.skipNextBuild) {
-        log.info("Running next build (output:standalone)...");
+        log.info(
+            { builder: config.build ?? "turbopack" },
+            "Running the project build...",
+        );
         // UX ledger row 4 (4c): the seam translates a deps-not-installed failure
         // (`next: command not found`, exit 127) into plain npm-install guidance.
         runProjectBuild();
-        log.info(
-            "Next.js build complete — standalone output in .next/standalone/",
-        );
+        log.info("Project build complete");
     }
 
     // 2b. Heal Bun-condition export targets in the standalone output (#188).
@@ -99,8 +101,34 @@ export async function build(options: BuildOptions = {}) {
     //     the bytecode pass is the one build step that deliberately ENDS
     //     flippability (bun→node then needs a rebuild), which is why 2c is
     //     opt-in via config.runtime and guards the entry loudly.
+    // Which artifact should this app have produced? Asked of the contract, not
+    // assumed — see build-artifact.ts. `kn-next build` runs the app's OWN
+    // `npm run build`, so a vinext-configured app already builds with vinext;
+    // what knext needs to know is where to look afterwards and which post-build
+    // steps still mean anything.
+    const { builder, artifact } = resolveBuildArtifact(config, process.cwd());
+    const artifactPath = join(artifact.root, artifact.entry);
+    if (!options.skipNextBuild && !existsSync(artifactPath)) {
+        // Loud, and BEFORE the upload/image steps. #857 is the precedent: a
+        // build that exits 0 while emitting a server nothing can find is
+        // discovered at `docker run` on a cluster otherwise.
+        log.warn(
+            { builder: builder.id, expected: artifactPath },
+            `The ${builder.id} build finished but '${artifact.entry}' is not there — the image would start a server that does not exist.`,
+        );
+    }
+
     const standaloneDir = join(process.cwd(), ".next", "standalone");
-    if (existsSync(standaloneDir)) {
+    // Keyed on the artifact SHAPE, not on the directory existing. The old
+    // `existsSync` check warned "is output:'standalone' set?" for ANY build
+    // without that tree — advice that names a Next.js option a vinext user
+    // does not have and cannot act on.
+    if (!standaloneStepsApply(artifact)) {
+        log.info(
+            { builder: builder.id, shape: artifact.shape },
+            "Skipping the standalone-tree post-build steps — they do not apply to this artifact shape",
+        );
+    } else if (existsSync(standaloneDir)) {
         const healed = healBunExportTargets({
             projectDir: process.cwd(),
             standaloneDir,
@@ -136,6 +164,11 @@ export async function build(options: BuildOptions = {}) {
     if (
         (config.runtime ?? "node") === "bun" &&
         process.env.KNEXT_BUN_BYTECODE !== "0" &&
+        // Shape-gated as well as runtime-gated: the pass rewrites files in a
+        // `.next/standalone` tree. `runtime: bun` is legal with any builder, so
+        // without this it would silently no-op on a nitro artifact via the
+        // existsSync below and look like it had run.
+        standaloneStepsApply(artifact) &&
         existsSync(standaloneDir)
     ) {
         const pass = precompileBunBytecode({

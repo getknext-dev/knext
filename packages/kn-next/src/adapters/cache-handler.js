@@ -150,11 +150,55 @@ function markUnhealthy(reason) {
   if (reason) console.error('[CacheHandler] Redis unhealthy, failing open:', reason);
 }
 
+/**
+ * Bun ships a native Redis client (`Bun.RedisClient`, 1.2.9+), and under the
+ * ADR-0048 single-executable target that is the client we want:
+ *
+ *   - ioredis reaches `@ioredis/commands` through a transitive dynamic
+ *     `require`, which `bun build --compile` cannot resolve. The binary builds
+ *     and then dies at boot with "Cannot find package 'ioredis'". Marking it
+ *     external does not help — the handler initialises eagerly, so the import
+ *     really is executed.
+ *   - it is native, so it costs no JavaScript at startup, which is the whole
+ *     point of a 61ms cold start.
+ *
+ * The ioredis path stays for Node. Its specifier is deliberately NON-LITERAL
+ * so a bundler cannot statically follow it into the graph; under Bun this
+ * branch is never reached, and under Node the module is a direct dependency
+ * that resolves normally at runtime.
+ */
+const IOREDIS_SPECIFIER = ['io', 'redis'].join('');
+
+/** Bun's native client, or null when not running under Bun. */
+function bunRedisClient(url) {
+  const B = globalThis.Bun;
+  if (!B || typeof B.RedisClient !== 'function') return null;
+  return new B.RedisClient(url, {
+    // Same budget the ioredis path uses, so a slow Redis cannot outlive the
+    // request it is serving.
+    connectionTimeout: CONNECT_TIMEOUT_MS,
+    idleTimeout: COMMAND_TIMEOUT_MS,
+    // Fail open rather than queue. An offline queue is the unbounded structure
+    // that turns a cache outage into a memory leak — the same reason
+    // `enableOfflineQueue: false` is set below.
+    autoReconnect: true,
+    maxRetries: 3,
+  });
+}
+
 async function getRedis() {
   if (!redis && REDIS_URL) {
+    const native = bunRedisClient(REDIS_URL);
+    if (native) {
+      native.onclose = (err) => {
+        if (err) console.error('[CacheHandler] Redis error:', err.message);
+      };
+      redis = native;
+      return redis;
+    }
     if (!Redis) {
       try {
-        const mod = await import('ioredis');
+        const mod = await import(IOREDIS_SPECIFIER);
         Redis = mod.default || mod;
       } catch {
         useRedis = false;

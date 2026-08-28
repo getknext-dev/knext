@@ -1,0 +1,89 @@
+# syntax=docker/dockerfile:1
+#
+# file-manager — vinext single-executable image (ADR-0048).
+#
+# Replaces the multi-stage node/standalone image. What that one needed and this
+# one does not: pnpm in the runtime layer, a `node_modules` deploy, a separate
+# `sharp` runtime stage, and the baked V8 compile cache
+# (`scripts/warm-compile-cache.sh`). None of it survives, because the server is
+# one binary.
+#
+# MEASURED on this app, same source, same route, n=6:
+#
+#   node + standalone      cold 2670ms   p95 2780   127 req/s
+#   vinext single-exec      cold  753ms   p95  777  1092 req/s
+#                          3.5x faster    8.6x throughput
+#
+# Bytecode is NOT passed. `bun build --bytecode` emits CommonJS, and the
+# vinext/nitro generated bundle uses `import.meta`, which is a syntax error
+# there — the binary builds with a warning and then dies at boot. That is an
+# upstream limitation, not a knext one, and the numbers above are without it.
+# Add `--bytecode` the day it works; nothing else here changes.
+# See docs/benchmarks/EXPERIMENTS.md E11-E12.
+
+# ---------------------------------------------------------------------------
+# Builder — needs the whole workspace, because the app depends on the local
+# @getknext/* packages and they are consumed as BUILT dist, not source.
+# ---------------------------------------------------------------------------
+FROM oven/bun:1.4.0-alpine AS builder
+
+# Node is still required in the BUILD stage: the workspace packages compile with
+# tsc/tsup, and pnpm drives the install. It does not reach the runtime image.
+RUN apk add --no-cache nodejs npm libstdc++ libgcc
+RUN npm install -g pnpm@10.4.1
+
+WORKDIR /repo
+COPY . .
+
+RUN pnpm install --frozen-lockfile
+
+# Order matters: file-manager imports @getknext/lib's dist. Building the app
+# before the library compiles the OLD library — a mistake that cost real time
+# here, because the app builds fine and the bug only appears at runtime.
+RUN pnpm --filter "@getknext/lib" build
+RUN pnpm --filter "@getknext/db" build
+RUN pnpm --filter "@getknext/core" build
+
+WORKDIR /repo/apps/file-manager
+
+# vinext -> nitro bun-preset .output/server/index.mjs
+RUN ./node_modules/.bin/vite build
+
+# Fail loudly here rather than shipping an image whose CMD points at nothing.
+# This is the #857 shape: a build that exits 0 while emitting no server.
+RUN test -f .output/server/index.mjs \
+    || (echo "vite build produced no .output/server/index.mjs" && exit 1)
+
+# The compile target must match the RUNTIME image's libc. alpine is musl; a
+# glibc binary exits here with no useful message.
+ARG BUN_TARGET=bun-linux-arm64-musl
+RUN bun build --compile --minify --target=${BUN_TARGET} \
+      .output/server/index.mjs --outfile /repo/knext-exec
+
+# ---------------------------------------------------------------------------
+# Runtime — the binary, its public assets, and the two libraries Bun links.
+# No node, no npm, no package manager, no bytecode cache to mount.
+# ---------------------------------------------------------------------------
+FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+
+RUN apk add --no-cache libstdc++ libgcc
+
+WORKDIR /app
+
+# NEVER name this after a runtime (`bun`, `node`, `deno`): knext's asset-root
+# resolver classifies a compiled binary by basename, and those names make it
+# read the build tree's assets instead of the image's.
+COPY --from=builder /repo/knext-exec /app/server
+COPY --from=builder /repo/apps/file-manager/.output/public /app/.output/public
+
+USER 65532:65532
+
+ENV PORT=3000 \
+    HOSTNAME=0.0.0.0 \
+    NODE_ENV=production
+
+EXPOSE 3000
+
+# One process. No supervisor, no `sh -c`, nothing to spawn — which is also why
+# draining on SIGTERM is the entry's own job rather than a parent's.
+CMD ["/app/server"]

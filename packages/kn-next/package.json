@@ -85,6 +85,10 @@
       "types": "./dist/cli/shared.d.ts",
       "import": "./dist/cli/shared.js",
       "default": "./dist/cli/shared.js"
+    },
+    "./internal/vinext-image-optimizer": {
+      "types": "./dist/adapters/vinext-image-optimizer.d.ts",
+      "import": "./dist/adapters/vinext-image-optimizer.js"
     }
   },
   "knext": {

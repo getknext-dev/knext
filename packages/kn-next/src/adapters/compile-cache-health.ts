@@ -128,18 +128,66 @@ function defaultCompileCacheProbe(): (() => string | undefined) | undefined {
 }
 
 /**
+ * The Bun release that implements `NODE_COMPILE_CACHE` for real (#807).
+ * Below this, the probe is a stub; at or above it, the probe answers.
+ */
+const BUN_COMPILE_CACHE_MAJOR = 1;
+const BUN_COMPILE_CACHE_MINOR = 4;
+
+/**
+ * `major.minor` of a Bun version string, or `undefined` if it cannot be read.
+ *
+ * Leading digits only, so a prerelease (`1.4.0-canary.20260820`) reads as 1.4 —
+ * canaries of a release that implements the cache do implement it. A version
+ * with no minor (`1`) is NOT guessed at; see the caller for why.
+ */
+function bunMajorMinor(
+    version: string,
+): { major: number; minor: number } | undefined {
+    const m = /^(\d+)\.(\d+)/.exec(version);
+    if (!m) return undefined;
+    return { major: Number(m[1]), minor: Number(m[2]) };
+}
+
+/**
  * Does THIS runtime implement `NODE_COMPILE_CACHE`?
  *
- * Bun does not: it ships the `module.getCompileCacheDir` export as a stub that
- * always returns `undefined`. Anything Bun-like is therefore "cannot tell",
- * which is the safe direction — a missed diagnostic, never a false alarm. If a
- * future Bun implements the cache for real, this stays silent rather than
- * warning wrongly, and can be narrowed by version then.
+ * Node: yes. Bun: **only from 1.4** (#807). Before 1.4 it shipped
+ * `module.getCompileCacheDir` as a stub returning `undefined` unconditionally,
+ * so a verdict there would tell every Bun pod its healthy volume "was refused"
+ * — the #309 false alarm.
+ *
+ * Both shapes are MEASURED, against real binaries, because only having both
+ * makes it safe to enable:
+ *
+ * | | healthy writable dir | refused (`/dev/null`) |
+ * |---|---|---|
+ * | bun 1.3.5 | `undefined` | `undefined` |
+ * | **bun 1.4.0** | **a path** | **`undefined`** |
+ * | node 24 | a path | `undefined` |
+ *
+ * Bun 1.4 is Node's shape exactly, so both `active` and `degraded` are earned
+ * there. Checking only the healthy case would have enabled a diagnostic unable
+ * to tell "refused" from "not implemented", silencing real volume faults on
+ * every 1.4 pod — the #309 defect inverted.
+ *
+ * The comparison is NUMERIC. `"1.10.0" < "1.4.0"` lexically, so a string
+ * compare would classify a newer Bun as old and keep the diagnostic off
+ * permanently.
+ *
+ * An unparseable version resolves to **false** — the silent direction. Never
+ * guess upward: a missed diagnostic beats a false alarm, the same asymmetry the
+ * original Bun check was built on.
  */
 export function runtimeHonoursCompileCache(
     versions: { bun?: string } = process.versions as { bun?: string },
 ): boolean {
-    return versions.bun === undefined;
+    if (versions.bun === undefined) return true;
+    const v = bunMajorMinor(versions.bun);
+    if (!v) return false;
+    if (v.major !== BUN_COMPILE_CACHE_MAJOR)
+        return v.major > BUN_COMPILE_CACHE_MAJOR;
+    return v.minor >= BUN_COMPILE_CACHE_MINOR;
 }
 
 /**

@@ -68,6 +68,8 @@ export default defineConfig([
       loader: 'src/loader.ts',
       'adapters/next-adapter': 'src/adapters/next-adapter.ts',
       'adapters/node-server': 'src/adapters/node-server.ts',
+      'adapters/vinext-image-optimizer':
+        'src/adapters/vinext-image-optimizer.ts',
       // #188 round 3 — own dist entry so e2e-deploy.sh can import the heal
       // POST-build (onBuildComplete fires before .next/standalone exists).
       'adapters/standalone-bun-exports': 'src/adapters/standalone-bun-exports.ts',
@@ -109,6 +111,8 @@ export default defineConfig([
         loader: 'src/loader.ts',
         'adapters/next-adapter': 'src/adapters/next-adapter.ts',
         'adapters/node-server': 'src/adapters/node-server.ts',
+      'adapters/vinext-image-optimizer':
+        'src/adapters/vinext-image-optimizer.ts',
         'adapters/standalone-bun-exports': 'src/adapters/standalone-bun-exports.ts',
         'adapters/otel-config': 'src/adapters/otel-config.ts',
         'adapters/tracing': 'src/adapters/tracing.ts',

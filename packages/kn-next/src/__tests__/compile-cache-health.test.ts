@@ -119,7 +119,7 @@ describe("evaluateCompileCacheStatus (pure)", () => {
 });
 
 describe("runtimeHonoursCompileCache", () => {
-    it("is false under Bun and true under Node", () => {
+    it("is false under Bun ≤1.3 and true under Node", () => {
         expect(runtimeHonoursCompileCache({ bun: "1.3.5" })).toBe(false);
         expect(runtimeHonoursCompileCache({})).toBe(true);
     });
@@ -129,6 +129,60 @@ describe("runtimeHonoursCompileCache", () => {
         expect(runtimeHonoursCompileCache()).toBe(
             process.versions.bun === undefined,
         );
+    });
+
+    /**
+     * #807 — Bun 1.4.0 (2026-08-20) implements `NODE_COMPILE_CACHE` for real.
+     *
+     * MEASURED against a real bun 1.4.0, not inferred from the changelog. Both
+     * directions, because only having both makes the diagnostic safe to enable:
+     *
+     *   healthy writable dir  → returns a PATH   (…/v1.4.0-aarch64-34cbb9a40-501)
+     *   refused dir (/dev/null) → returns undefined
+     *
+     * That is Node's shape exactly. Had only the healthy case been checked, we
+     * would have enabled a diagnostic that could not distinguish "refused" from
+     * "not implemented" and every 1.4 pod with a bad volume would have gone
+     * silent — the #309 false-alarm inverted.
+     *
+     * The ≤1.3 half must keep returning false: bun 1.3.5 returns undefined for a
+     * HEALTHY dir (measured), so a verdict there would warn about a good volume.
+     */
+    it("is true under Bun ≥1.4, which implements the cache for real", () => {
+        expect(runtimeHonoursCompileCache({ bun: "1.4.0" })).toBe(true);
+        expect(runtimeHonoursCompileCache({ bun: "1.4.7" })).toBe(true);
+        expect(runtimeHonoursCompileCache({ bun: "2.0.0" })).toBe(true);
+    });
+
+    it("stays false for every Bun below 1.4", () => {
+        for (const v of ["1.0.0", "1.3.5", "1.3.14", "0.8.1"]) {
+            expect(
+                runtimeHonoursCompileCache({ bun: v }),
+                `bun ${v} returns undefined for a healthy dir; a verdict would be a false alarm`,
+            ).toBe(false);
+        }
+    });
+
+    it("compares numerically, not lexically", () => {
+        // "1.10.0" < "1.4.0" as strings. A string compare would call the newer
+        // runtime old and silently keep the diagnostic off forever.
+        expect(runtimeHonoursCompileCache({ bun: "1.10.0" })).toBe(true);
+        // And the mirror: "1.4" must not be beaten by a longer ≤1.3 string.
+        expect(runtimeHonoursCompileCache({ bun: "1.3.100" })).toBe(false);
+    });
+
+    it("treats an unparseable version as ≤1.3 — the silent direction", () => {
+        // Never guess upward: a missed diagnostic beats a false alarm, which is
+        // the same asymmetry the original Bun check was built on.
+        for (const v of ["", "next", "1", "x.y.z"]) {
+            expect(runtimeHonoursCompileCache({ bun: v })).toBe(false);
+        }
+    });
+
+    it("accepts a canary/prerelease 1.4 as 1.4", () => {
+        expect(
+            runtimeHonoursCompileCache({ bun: "1.4.0-canary.20260820" }),
+        ).toBe(true);
     });
 });
 

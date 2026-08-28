@@ -7,9 +7,17 @@
 > Companion ledgers: `docs/debt/tech-debt-ledger.md`, `docs/benchmarks/cold-start-ledger.md`,
 > `docs/ux/ergonomics-ledger.md`.
 
-## Verdict: NOT READY — 1 maintainer-only blocker class
+## Verdict: NOT READY — 2 blocker classes, one of them new
 
-**Two things only the repo owner can do — rotate a dead npm token, and flip a package to public.**
+**Maintainer-only (unchanged): rotate a dead npm token, flip a package to public.**
+**New (2026-08-27): ADR-0048 makes the vinext single executable the ONLY supported target, and the
+release surface has not caught up with that decision.** See "ADR-0048 status" below.
+
+> **Everything in this file is uncommitted.** `git commit` has been failing all session with
+> `gpg: signing failed: Operation cancelled` — the passphrase cache expired and pinentry-mac opens
+> on a tty nobody is watching. `commit.gpgsign=true` is global in `~/.gitconfig`. **Nothing merges
+> until that is unlocked**, so every item below is blocked on it before it is blocked on anything
+> else.
 
 > **The line that used to sit here said "every engineering step is done and proven."** It was
 > written before anyone walked the new user's path end to end, and walking it found
@@ -252,6 +260,114 @@ out rather than folded into a PR that was already three review rounds deep.
   path its own generated Dockerfile names. Both gates were mutation-proved (22 declared, 22
   graded as expected), and both were written because rehearsing that path by hand found real
   defects nothing else covered.
+
+## ADR-0048 status — the vinext single executable as the only target (2026-08-27)
+
+**Decision:** founder-directed. `build: vinext` + `runtime: bun` (1.4.0+), compiled with
+`bun build --compile --minify --bytecode`, is the ONLY supported target. turbopack and node are
+retired. Full record: `docs/adr/0048-vinext-single-exec-as-the-only-target.md`.
+
+**Why:** measured on an identical app, byte-identical responses, n=10 —
+
+| variant | cold median | p95 | req/s |
+|---|---|---|---|
+| node + turbopack | 884 ms | 1029 | 630 |
+| **vinext single-exec (bun 1.4.0)** | **61 ms** | **131** | **1103** |
+
+**14.5× faster to first response and 1.75× the throughput.** Its p95 beats node's *best* sample by
+6×, which for scale-to-zero is what a user feels. Bun 1.4.0 is a floor, not a preference: 1.3.5
+halves the win (121 ms) and cannot serve a Next standalone tree at all.
+
+**Done (knext side):** `AVAILABLE_BUILDERS` returns exactly `vinext`; turbopack rejected with a
+migration message; `runtime: node` rejected against the measured artifact shape; Bun 1.4.0 floor
+enforced in `cli/vinext-build.ts` (13 tests); `templates/app/Dockerfile.vinext.hbs` ships the
+binary; 18 validator tests green; `apps/file-manager` ported and **building and serving the vinext
+artifact** (HTTP 200).
+
+**UPDATE 2026-08-28 — the reference app now builds, serves and caches correctly.**
+
+`apps/file-manager` compiles to a single Bun executable and serves HTTP 200. Four blockers were
+cleared in sequence, each hiding the next: nitro's `codeSplitting` (the `manualChunks` key was
+wrong), Tailwind under Vite, a missing entry sibling, and ioredis reached through `@getknext/lib`'s
+built `dist` — that last one invisible until the library was rebuilt.
+
+**Measured, the reference app against itself** (same source, same route, n=6):
+
+| arm | cold median | p95 | req/s |
+|---|---|---|---|
+| node + standalone | 2670 ms | 2780 | 127 |
+| **vinext single-exec** | **753 ms** | **777** | **1092** |
+
+**3.5x cold start, 8.6x throughput — and WITHOUT bytecode.** The win is larger on the real app than
+on the sample ADR-0048 was justified with. node's standalone arm costs 2.67 seconds here.
+
+**Next.js caching verified on the binary: 7/7.** Static segments byte-stable, `force-dynamic`
+re-rendering, header-reading segments dynamic, time-based ISR serving its cached body inside the
+window. This was worth checking precisely because a binary that silently served everything
+dynamically would look healthy while having lost ISR.
+
+**Bytecode is unavailable and is NOT a blocker.** `bun build --bytecode` emits CommonJS, and the
+vinext/nitro *generated* bundle uses `import.meta` — a syntax error there. Not knext's code. The
+numbers above are without it. Do not "fix" this by rewriting generated output.
+
+**Not done, and these are what "only option" still needs:**
+
+1. **`--bytecode` fails on file-manager** — `import.meta is only valid inside modules`. Compiling
+   without it works, but bytecode is what buys the cold start, so the headline number is not yet
+   reproduced on the reference app.
+2. **`Cannot find module '@ioredis/commands'`** — a dynamic `require` that `--compile` cannot
+   bundle. The binary boots and listens; the cache path 500s.
+3. **Operator does not know the shape.** `nextapp_controller.go`'s only shape-aware branch
+   hardcodes `bun run server.js` (a spawn) for an artifact whose execution is `in-process`.
+4. **CRD enum still admits only `turbopack`** — deliberately. Widening it before item 3 would let a
+   GitOps controller store a CR the operator mis-reconciles, with no condition and no refusal.
+5. **No vinext coverage in the official compatibility suite.** `docs/compat-matrix.md` has zero
+   vinext rows and the Bun axis is still ❌. **This is the largest strategic cost of ADR-0048** —
+   verified-adapter status, the project's north star, is unreachable until a vinext-axis suite is
+   green. Do not claim parity on the shipped path until it is.
+6. **`examples/bun-exec` cannot be deleted yet.** Five tests bind to it and it is the reference
+   artifact source. It goes once file-manager's binary is fully working.
+
+**A correction on the record.** An earlier version of this analysis said the vinext path was blocked
+by an unfixable upstream defect. That was wrong — nine attempts all used rollup's `manualChunks`,
+which nitro-on-rolldown does not read; it keys off `output.codeSplitting`. The one-line fix now sits
+in `apps/file-manager/vite.config.ts`. Full chain in `docs/benchmarks/EXPERIMENTS.md` E9–E10.
+
+## Human pending tasks (nothing below can be done by an agent)
+
+Ordered by what unblocks the most.
+
+1. **Unlock GPG.** Blocks *every* commit, so it gates everything else in this file.
+   `gpg --sign </dev/null >/dev/null` in a terminal you are watching, then re-run the commit.
+   Consider raising `default-cache-ttl` in `~/.gnupg/gpg-agent.conf` — the 600 s default is why this
+   recurs mid-session.
+2. **Rotate `NPM_TOKEN`** on the **`npm-publish` environment** (not the repo secret list), then
+   re-run `release.yml`. Minting it needs an interactive 2FA login. Issue #853. `kn-next` is E404 on
+   npm until this happens.
+3. **Flip `ghcr.io/getknext-dev/kn-next-operator` to public.** Re-measured 2026-08-26:
+   `anonymous-token-denied … HTTP 401`. Unblocks #198/#707 and the anonymous-install nightly.
+4. **Enable GitHub private vulnerability reporting** (Settings → Security). Currently `false`, and
+   the new `SECURITY.md` links to it as the primary channel — that link 404s until it is on.
+5. **Cluster cleanup.** Deleting cluster objects is human-gated by `block-dangerous-bash.sh`
+   (ADR-0001: the operator is the single source of truth). Keep `default/file-manager` and
+   `knext-docs`; remove the rest. The commands are recorded in `docs/release/cluster-cleanup.sh`
+   next to this file — read it before running, it deletes eight services and two CRs.
+6. **Amend `.claude/rules/architecture.md`.** ADR-0048 sets the official-adapter target aside, which
+   contradicts *"never make anything but the node/official-adapter target the default."*
+   `.claude/rules/` is not an agent's file to edit. Until amended, an accepted ADR contradicts a
+   hard rule.
+7. **Review the vite override change** (`package.json` → `pnpm.overrides`). The `<8` ceiling was
+   lifted so vinext could resolve vite 8; the `>=7.3.5` floor — the actual #199 Trivy remediation —
+   was kept. vite 8.2.2 carries zero advisories at any severity, and the workspace's only vite
+   dependent is `apps/file-manager/vite.config.ts`.
+8. **Decide three open PRs/issues** an agent reviewed but should not close:
+   - **#748 and #742** — premises refuted by measurement (`ROADMAP.md` and its Phase↔Tier table both
+     exist). #742 is closed with evidence; #748 should follow.
+   - **#727** — adds two workflows pinning `actions/checkout@v4` and
+     `anthropics/claude-code-action@v1` by version ref while `id-token: write` and an OAuth secret
+     are in scope. `security.md` requires SHA pins there. Adopt with pins, or decline.
+9. **The vinext upstream bug report is WITHDRAWN.** Do not file it. It was a wrong-key mistake on
+   our side, not a vinext defect.
 
 ## Release checklist (in dependency order)
 

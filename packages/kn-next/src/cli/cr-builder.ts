@@ -266,6 +266,14 @@ export function buildNextAppCRObject(
     // Runtime
     const runtime = config.runtime ?? undefined;
 
+    // Build (B2). Emitted ONLY when set, never defaulted to "turbopack" here:
+    // absence is the wire spelling of the default, and it is the only spelling
+    // an operator that predates the field understands. Writing an explicit
+    // "turbopack" would make a CR that means exactly today's behaviour fail
+    // against an older CRD's enum — the #548 upgrade-order hazard, paid for
+    // nothing.
+    const build = config.build ?? undefined;
+
     const spec: Record<string, unknown> = {
         image,
         scaling,
@@ -287,6 +295,7 @@ export function buildNextAppCRObject(
             ? { healthCheckPath: config.healthCheckPath }
             : {}),
         ...(runtime ? { runtime } : {}),
+        ...(build ? { build } : {}),
         // #93 skew protection: carry the deploy's BUILD_ID so the operator can stamp
         // the `apps.kn-next.dev/build-id` revision label the asset GC resolves against.
         ...(buildId ? { buildId } : {}),

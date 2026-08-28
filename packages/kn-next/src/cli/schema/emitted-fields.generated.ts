@@ -18,6 +18,7 @@ export const EMITTED_CR_FIELD_PATHS: readonly string[] = [
     "metadata.name",
     "metadata.namespace",
     "spec",
+    "spec.build",
     "spec.buildId",
     "spec.cache",
     "spec.cache.keyPrefix",
