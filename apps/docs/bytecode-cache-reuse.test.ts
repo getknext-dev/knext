@@ -1,4 +1,24 @@
 /**
+ * MOVED here from apps/file-manager (ADR-0048).
+ *
+ * This guards `NODE_COMPILE_CACHE` reuse across cold starts of a Next.js
+ * STANDALONE server. file-manager no longer has one — it builds with vinext and
+ * its bytecode is baked into the compiled artifact, so there is nothing to warm
+ * or share. Left there, the guard would have skipped forever, which this repo
+ * treats as decoration rather than coverage.
+ *
+ * `apps/docs` is now the ONLY consumer of the standalone + compile-cache path
+ * (`next build --webpack`, and its Dockerfile still wires the cache), so the
+ * guard follows its subject. When docs migrates, this file and the
+ * `scripts/warm-compile-cache.sh` machinery it covers are deleted together —
+ * that is the last step of retiring the shared bytecode cache.
+ *
+ * It also caught a real hazard on the way: it was still finding 57MB of STALE
+ * `.next/standalone` output in file-manager left over from before the
+ * migration, booting that instead of skipping, and timing out. A stale build
+ * artifact reading as authoritative is the failure mode, not the timeout.
+ */
+/**
  * A2-2 (#38): bytecode cache REUSE across cold starts — deterministic PR-CI gate.
  *
  * A real scale-to-zero cold-start timing e2e cannot run in standard PR CI (no
@@ -38,10 +58,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 const __filename = fileURLToPath(import.meta.url);
 const APP_DIR = dirname(__filename);
-const STANDALONE_SERVER = resolve(APP_DIR, '.next/standalone/apps/file-manager/server.js');
-const STANDALONE_CWD = resolve(APP_DIR, '.next/standalone/apps/file-manager');
+const STANDALONE_SERVER = resolve(APP_DIR, '.next/standalone/apps/docs/server.js');
+const STANDALONE_CWD = resolve(APP_DIR, '.next/standalone/apps/docs');
 const CACHE_DIR = join(tmpdir(), 'knext-bytecode-reuse-test');
-const APP_NAME = 'file-manager-reuse-test';
+const APP_NAME = 'docs-reuse-test';
 
 const serverExists = existsSync(STANDALONE_SERVER);
 

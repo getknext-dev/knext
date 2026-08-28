@@ -43,7 +43,7 @@ function jobBlock(yaml: string, jobKey: string): string {
   const start = yaml.indexOf(`\n  ${jobKey}:`);
   expect(start, `job ${jobKey} not found`).toBeGreaterThan(-1);
   const rest = yaml.slice(start + 1);
-  const next = rest.slice(rest.indexOf('\n')).search(/\n  [a-zA-Z0-9_-]+:/);
+  const next = rest.slice(rest.indexOf('\n')).search(/\n {2}[a-zA-Z0-9_-]+:/);
   return next === -1 ? rest : rest.slice(0, next + rest.indexOf('\n'));
 }
 

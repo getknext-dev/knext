@@ -241,31 +241,36 @@ enabling private vulnerability reporting (already on the human task list).
 them into an unrelated branch would take that work out from under whoever wrote it. The
 worktree must NOT be pruned until they are committed — pruning it destroys the only copy.
 
-## The vinext migration branch is not green — 26 tests encode the retired contract
+## The vinext migration branch is green — 4485 passing, 0 failing
 
-`agent/vinext-image-optimization` stands at **1835 passing, 26 failing across 9 files**.
-Stated plainly rather than rounded off: the branch is **not mergeable as it stands**.
+The branch stood at 26 failing tests in `packages/kn-next` and 17 repo-wide.
+It is now **328 files, 4485 tests, 0 failures** across the whole repo.
 
-Every failure is in a file the migration touched, and they fail for one reason — they
-assert the **node + standalone + `NODE_COMPILE_CACHE` bytecode contract** that this
-direction removes:
+Working through them was not bookkeeping — the retired assertions were hiding
+five real defects, each of which would have shipped:
 
-- `cli-build-bun-bytecode.test.ts`, `build-run.test.ts`, `cli-build-bun-heal.test.ts` —
-  the standalone bytecode pass and the bun-exports heal, neither of which exists on the
-  vinext path (bytecode is baked into the artifact instead).
-- `compile-cache-health-bun.test.ts` — the shared compile-cache volume diagnostic.
-- `optional-storage.test.ts`, `artifact-contract-reality.test.ts`,
-  `cli-node-runtime.test.ts`, `cli-config-not-found.test.ts` — generated-Dockerfile and
-  scaffold expectations that changed shape.
+| defect | consequence if unfixed |
+| --- | --- |
+| trailing comma in the zone `package.json` template | every generated zone shipped a `package.json` no package manager could parse |
+| zone template never declared `vite`, `nitro`, the vite plugins | a zone generated outside this monorepo could not build at all — it worked here only by root hoisting |
+| `assetPrefix` dropped from `next.config` | a no-storage pod 404s every static chunk |
+| `Bun.RedisClient` branch skipped the error listener and bounded options | deep health unlistened and unbounded on the runtime we are moving to |
+| the shipped edge-safety guard still asserted `adapterPath` + a webpack `IgnorePlugin` | every generated app shipped a test that fails on first run |
 
-**They are not being rewritten yet, on purpose.** What they *should* assert depends on
-which artifact ships, and that is the open ADR-0048 Amendment 2 decision above. Rewriting
-them now would encode a premise that may be about to change — the same mistake as writing
-a claim before the measurement that tests it. The decision comes first, then one pass
-fixes all 26 against whatever was chosen.
+Two more came out of the sweep itself: 57 MB of stale `.next/standalone` output
+in file-manager was being booted by a guard that should have skipped (a stale
+artifact reading as authoritative), and several test harnesses created git
+commits without `--no-gpg-sign`, so they failed for any contributor whose
+commits are signed while passing in CI.
 
-What IS green and independent of that decision: the image-optimization work itself
-(16 tests, mutation-proved), and the other 1835.
+Nine timeouts were **budget, not logic** — `bun build --bytecode` measures
+4392/4352/4330 ms against a 5000 ms default. Raised with the measurements
+written into the tests so they are not trimmed back.
+
+The compile-cache guard moved from file-manager to `apps/docs`, which is now the
+only consumer of the standalone + `NODE_COMPILE_CACHE` path. It deletes together
+with `scripts/warm-compile-cache.sh` when docs migrates — that is the final step
+of retiring the shared bytecode cache.
 
 ## Known gaps that are NOT release blockers
 

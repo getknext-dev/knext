@@ -102,7 +102,9 @@ function assertCollected(listed: string, relPath: string, why: string) {
   expect(listed.includes(relPath), why).toBe(true);
 }
 
-describe("examples/bun-exec's guards are actually collected", () => {
+// Spawns a real `bun run test` in the example. Same story: passes alone,
+// exceeds 5s under full-suite parallelism.
+describe("examples/bun-exec's guards are actually collected", { timeout: 30_000 }, () => {
   it("the example's own `bun run test` command collects every non-docker test file", () => {
     const listed = collectedFiles(EXAMPLE_DIR, exampleTestScriptArgs());
     const expectedFiles = expectedGuardFiles();

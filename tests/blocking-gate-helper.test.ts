@@ -925,340 +925,353 @@ jobs:
  * than obeyed. A file that opts in and pins nothing is caught; a file that opts in
  * twice and pins once is not.
  */
-describe('#690 every `allowPathsFilter` caller pins the filter CONTENTS', () => {
-  const REPO_ROOT = resolve(import.meta.dirname, '..');
+// Shells out to git across the whole tracked tree. Green run alone, timed out
+// at the 5s default only inside the full suite — a budget problem, not a
+// logic one. Same class as the other spawners raised in this sweep.
+describe(
+  '#690 every `allowPathsFilter` caller pins the filter CONTENTS',
+  { timeout: 30_000 },
+  () => {
+    const REPO_ROOT = resolve(import.meta.dirname, '..');
 
-  /** The ONE file that declares the option, exempt because it defines it. */
-  const OPTION_DEFINITION_FILE = 'tests/helpers/blocking-gate.ts';
+    /** The ONE file that declares the option, exempt because it defines it. */
+    const OPTION_DEFINITION_FILE = 'tests/helpers/blocking-gate.ts';
 
-  /** `allowPathsFilter?: boolean` — the declaration, not a use of it. */
-  const DECLARES_OPTION = /\ballowPathsFilter\s*\?\s*:/;
+    /** `allowPathsFilter?: boolean` — the declaration, not a use of it. */
+    const DECLARES_OPTION = /\ballowPathsFilter\s*\?\s*:/;
 
-  /**
-   * Any code mention at all. Deliberately NOT `allowPathsFilter:\s*true`: a
-   * caller can pass `allowPathsFilter: flag`, spread it in from an object, or
-   * build the options elsewhere, and a pattern that only saw the literal form
-   * would wave all three through. Fail closed on the identifier.
-   */
-  const MENTIONS_OPTION = /\ballowPathsFilter\b/;
+    /**
+     * Any code mention at all. Deliberately NOT `allowPathsFilter:\s*true`: a
+     * caller can pass `allowPathsFilter: flag`, spread it in from an object, or
+     * build the options elsewhere, and a pattern that only saw the literal form
+     * would wave all three through. Fail closed on the identifier.
+     */
+    const MENTIONS_OPTION = /\ballowPathsFilter\b/;
 
-  /**
-   * The same option written as a QUOTED KEY — `{ 'allowPathsFilter': true }` or
-   * `{ ['allowPathsFilter']: true }`, and the quoted form of the declaration.
-   *
-   * Read from the literals-intact view, which the identifier patterns above are
-   * NOT: under `blankNonCode` a quoted key is emptied and escapes both halves,
-   * but reading every literal as code would claim any file that merely NAMES the
-   * option in an assertion message — a false positive is how a scan trains people
-   * to edit the guard. A quoted key is followed by `:` (optionally through a
-   * closing `]`), which prose never is.
-   */
-  const QUOTED_OPTION_KEY = /(['"])allowPathsFilter\1\s*\]?\s*\??\s*:/;
+    /**
+     * The same option written as a QUOTED KEY — `{ 'allowPathsFilter': true }` or
+     * `{ ['allowPathsFilter']: true }`, and the quoted form of the declaration.
+     *
+     * Read from the literals-intact view, which the identifier patterns above are
+     * NOT: under `blankNonCode` a quoted key is emptied and escapes both halves,
+     * but reading every literal as code would claim any file that merely NAMES the
+     * option in an assertion message — a false positive is how a scan trains people
+     * to edit the guard. A quoted key is followed by `:` (optionally through a
+     * closing `]`), which prose never is.
+     */
+    const QUOTED_OPTION_KEY = /(['"])allowPathsFilter\1\s*\]?\s*\??\s*:/;
 
-  /** The quoted form of the DECLARATION specifically — `'allowPathsFilter'?: boolean`. */
-  const QUOTED_DECLARATION = /(['"])allowPathsFilter\1\s*\?\s*:/;
+    /** The quoted form of the DECLARATION specifically — `'allowPathsFilter'?: boolean`. */
+    const QUOTED_DECLARATION = /(['"])allowPathsFilter\1\s*\?\s*:/;
 
-  /** The corpus: every tracked JS/TS-family file, by extension rather than by list. */
-  const JS_TS_FILE = /\.(?:[cm]?[jt]sx?)$/;
+    /** The corpus: every tracked JS/TS-family file, by extension rather than by list. */
+    const JS_TS_FILE = /\.(?:[cm]?[jt]sx?)$/;
 
-  /** The two matchers that compare CONTENTS. Everything else is not a pin. */
-  const CONTENTS_MATCHERS = new Set(['toEqual', 'toStrictEqual']);
+    /** The two matchers that compare CONTENTS. Everything else is not a pin. */
+    const CONTENTS_MATCHERS = new Set(['toEqual', 'toStrictEqual']);
 
-  /** `['a', "b"]` and nothing else — a non-empty literal array of string literals. */
-  const LITERAL_STRING_ARRAY =
-    /^\[\s*(?:(['"])(?:\\.|(?!\1)[^\\])*\1\s*,\s*)*(['"])(?:\\.|(?!\2)[^\\])*\2\s*,?\s*\]$/;
+    /** `['a', "b"]` and nothing else — a non-empty literal array of string literals. */
+    const LITERAL_STRING_ARRAY =
+      /^\[\s*(?:(['"])(?:\\.|(?!\1)[^\\])*\1\s*,\s*)*(['"])(?:\\.|(?!\2)[^\\])*\2\s*,?\s*\]$/;
 
-  type SourceFile = { path: string; source: string };
+    type SourceFile = { path: string; source: string };
 
-  /** The `[start, end)` of the argument list opened at `open` (a `(` or `[`). */
-  function balanced(code: string, open: number): [number, number] | null {
-    const pairs: Record<string, string> = { '(': ')', '[': ']' };
-    const close = pairs[code[open] as string];
-    if (!close) return null;
-    let depth = 0;
-    for (let i = open; i < code.length; i++) {
-      const c = code[i] as string;
-      if (c === '(' || c === '[') depth += 1;
-      else if (c === ')' || c === ']') {
-        depth -= 1;
-        if (depth === 0) return [open + 1, i];
+    /** The `[start, end)` of the argument list opened at `open` (a `(` or `[`). */
+    function balanced(code: string, open: number): [number, number] | null {
+      const pairs: Record<string, string> = { '(': ')', '[': ']' };
+      const close = pairs[code[open] as string];
+      if (!close) return null;
+      let depth = 0;
+      for (let i = open; i < code.length; i++) {
+        const c = code[i] as string;
+        if (c === '(' || c === '[') depth += 1;
+        else if (c === ')' || c === ']') {
+          depth -= 1;
+          if (depth === 0) return [open + 1, i];
+        }
       }
+      return null;
     }
-    return null;
-  }
 
-  /**
-   * Does this file contain at least one COMPLIANT pin?
-   *
-   * Structural rather than one regex: `expect(<subject>)` is read with balanced
-   * parens, the matcher that follows is read by name, and its argument is read the
-   * same way. A regex over the whole construct is what let `.length).toEqual(` in,
-   * because `[^;]*?\)` happily stopped at the wrong paren.
-   */
-  function hasCompliantPin(code: string): boolean {
-    // Aliases, both spellings: `const p = <expr mentioning pullRequestPaths>` and
-    // the destructuring rename `const { pullRequestPaths: got } = audit`. A guard
-    // that reds on a correct alias is how "edit the guard" becomes the way back to
-    // green, so the value is followed rather than the spelling policed.
-    const aliases = [
-      ...[...code.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]*)/g)]
-        .filter((m) => /\bpullRequestPaths\b/.test(m[2] as string))
-        .map((m) => m[1] as string),
-      ...[...code.matchAll(/\bpullRequestPaths\s*:\s*([A-Za-z_$][\w$]*)/g)].map(
-        (m) => m[1] as string,
-      ),
-    ];
-    const subjectRe = new RegExp(
-      `\\b(?:pullRequestPaths${aliases.map((a) => `|${a}`).join('')})\\b`,
-    );
-
-    // Identifiers bound to a literal string array, for `toEqual(TRIGGER_PATHS)`.
-    //
-    // SAME-FILE ONLY, and that is a KNOWN FALSE POSITIVE, not an oversight: a pin
-    // whose list is IMPORTED from another module reds here, even though sharing
-    // `TRIGGER_PATHS` between the workflow spec and the gate spec is the natural
-    // refactor. Resolving imports would mean parsing the module graph from a
-    // regex scan. The cost is real — a false red is exactly the pressure that
-    // makes editing the guard the way back to green — so if someone hits it,
-    // widen this by resolving the import, do NOT relax the pin form.
-    const literalArrayConsts = new Set(
-      [
-        ...code.matchAll(
-          /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]*)?=\s*(\[[^;]*?\])\s*(?:as\s+const\s*)?;/g,
+    /**
+     * Does this file contain at least one COMPLIANT pin?
+     *
+     * Structural rather than one regex: `expect(<subject>)` is read with balanced
+     * parens, the matcher that follows is read by name, and its argument is read the
+     * same way. A regex over the whole construct is what let `.length).toEqual(` in,
+     * because `[^;]*?\)` happily stopped at the wrong paren.
+     */
+    function hasCompliantPin(code: string): boolean {
+      // Aliases, both spellings: `const p = <expr mentioning pullRequestPaths>` and
+      // the destructuring rename `const { pullRequestPaths: got } = audit`. A guard
+      // that reds on a correct alias is how "edit the guard" becomes the way back to
+      // green, so the value is followed rather than the spelling policed.
+      const aliases = [
+        ...[...code.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]*)/g)]
+          .filter((m) => /\bpullRequestPaths\b/.test(m[2] as string))
+          .map((m) => m[1] as string),
+        ...[...code.matchAll(/\bpullRequestPaths\s*:\s*([A-Za-z_$][\w$]*)/g)].map(
+          (m) => m[1] as string,
         ),
-      ]
-        .filter((m) => LITERAL_STRING_ARRAY.test((m[2] as string).replace(/\s+/g, ' ').trim()))
-        .map((m) => m[1] as string),
-    );
+      ];
+      const subjectRe = new RegExp(
+        `\\b(?:pullRequestPaths${aliases.map((a) => `|${a}`).join('')})\\b`,
+      );
 
-    for (const m of code.matchAll(/\bexpect\s*\(/g)) {
-      const open = (m.index as number) + m[0].length - 1;
-      const span = balanced(code, open);
-      if (!span) continue;
-      const subject = code.slice(span[0], span[1]);
-      if (!subjectRe.test(subject)) continue;
-      // `expect(a.pullRequestPaths.length)` is a LENGTH assertion whatever matcher
-      // follows it — the round-1 bypass, in every spelling at once.
-      if (/\.\s*length\b/.test(subject)) continue;
-      const after = code.slice(span[1] + 1);
-      const call = after.match(/^\s*\.\s*([A-Za-z_$][\w$]*)\s*\(/);
-      if (!call) continue;
-      if (!CONTENTS_MATCHERS.has(call[1] as string)) continue;
-      const argOpen = span[1] + 1 + (call[0].length - 1) + (call.index as number);
-      const argSpan = balanced(code, argOpen);
-      if (!argSpan) continue;
-      const expected = code.slice(argSpan[0], argSpan[1]).replace(/\s+/g, ' ').trim();
-      if (LITERAL_STRING_ARRAY.test(expected)) return true;
-      if (/^[A-Za-z_$][\w$]*$/.test(expected) && literalArrayConsts.has(expected)) return true;
-      // Anything else — `expect.any(Array)`, `pr?.paths`, a call, a spread — is
-      // not a pin. Self-derived expectations are the point: a value read from the
-      // same workflow the audit just parsed agrees with whatever is there.
-    }
-    return false;
-  }
-
-  /**
-   * Classify a corpus.
-   *
-   * TWO VIEWS, for two different questions. `blanked` (comments AND literal
-   * contents emptied) answers "is the identifier used in code", so an assertion
-   * message that merely names the option is not a caller. `code` (comments
-   * blanked, literals intact) answers "is there a quoted key" and "is there a
-   * literal-array pin", both of which live inside literals by construction.
-   */
-  function auditAllowPathsCallers(files: SourceFile[]) {
-    const definers: string[] = [];
-    const callers: string[] = [];
-    const findings: string[] = [];
-    for (const { path, source } of files) {
-      const code = codeWithLiterals(source);
-      const blanked = blankNonCode(source);
-      if (DECLARES_OPTION.test(blanked) || QUOTED_DECLARATION.test(code)) definers.push(path);
-      if (
-        path === OPTION_DEFINITION_FILE ||
-        !(MENTIONS_OPTION.test(blanked) || QUOTED_OPTION_KEY.test(code))
-      ) {
-        continue;
-      }
-      callers.push(path);
-      if (!hasCompliantPin(code)) {
-        findings.push(
-          `${path} passes \`allowPathsFilter\` but carries no CONTENTS pin of \`pullRequestPaths\` — required form: expect(<…pullRequestPaths>).toEqual([<string literals>]) or .toEqual(<const bound to one>). A \`.length\` subject, a \`toHaveLength\`, an \`expect.any(...)\`, or a value derived from the same workflow are all NOT pins: only the caller can state that the filter COVERS what its gate protects`,
-        );
-      }
-    }
-    return { definers, callers, findings };
-  }
-
-  const trackedSources = (): SourceFile[] =>
-    execFileSync('git', ['ls-files', '-z'], { cwd: REPO_ROOT, maxBuffer: 64 * 1024 * 1024 })
-      .toString('utf8')
-      .split('\0')
-      .filter((p) => p && JS_TS_FILE.test(p))
-      .map((path) => ({ path, source: readFileSync(resolve(REPO_ROOT, path), 'utf8') }));
-
-  const pinFinding = (source: string, path = 'tests/synthetic.test.ts') =>
-    auditAllowPathsCallers([{ path, source }]).findings.join(' ');
-
-  const OPTS = 'const a = auditBlockingGate({ allowPathsFilter: true });\n';
-
-  it('the corpus is real and every caller in it pins the contents', () => {
-    const files = trackedSources();
-    // Non-vacuity, twice: an empty corpus, or a corpus with no caller in it,
-    // would make the findings assertion pass by having nothing to check.
-    expect(files.length, 'git ls-files returned nothing — the scan is vacuous').toBeGreaterThan(20);
-    const { callers, findings } = auditAllowPathsCallers(files);
-    expect(
-      callers,
-      'no caller found — either the option is gone or the scan is broken',
-    ).not.toEqual([]);
-    expect(findings, findings.join('\n')).toEqual([]);
-  });
-
-  it('the corpus reaches every JS/TS extension, `.cjs` included', () => {
-    // Round 1 hand-listed `*.ts *.tsx *.mts *.mjs *.js`, so five tracked `.cjs`
-    // files were invisible: a `.cjs` caller scanned GREEN while the byte-identical
-    // file named `.js` red. Derived from the extension regex now, so `.cts` and
-    // `.jsx` come along without anyone remembering them.
-    for (const ext of ['ts', 'tsx', 'cts', 'mts', 'js', 'jsx', 'cjs', 'mjs']) {
-      expect(JS_TS_FILE.test(`tests/x.${ext}`), `.${ext} must be in the corpus`).toBe(true);
-    }
-    expect(JS_TS_FILE.test('tests/x.json')).toBe(false);
-    // And the real corpus contains a `.cjs`, so the claim is measured, not assumed.
-    const exts = new Set(trackedSources().map((f) => f.path.replace(/^.*\./, '')));
-    expect([...exts].some((e) => e === 'cjs' || e === 'mjs')).toBe(true);
-  });
-
-  it('exactly ONE tracked file declares the option, and it is the exempt one', () => {
-    // The exemption above is path-anchored, and it is only sound while the
-    // declaration is unique: a second declaration is a copied option surface,
-    // and the copy would inherit the exemption for free.
-    const { definers } = auditAllowPathsCallers(trackedSources());
-    expect(definers, `allowPathsFilter is declared in: ${definers.join(', ')}`).toEqual([
-      OPTION_DEFINITION_FILE,
-    ]);
-  });
-
-  it('THE CASE THAT MATTERS: a new caller that pins nothing IS a finding', () => {
-    expect(pinFinding(OPTS, 'tests/a-second-caller.test.ts')).toMatch(/a-second-caller/);
-  });
-
-  it('a LENGTH subject is not a pin — in BOTH the round-1 and the bypass spelling', () => {
-    // The measured round-2 finding: the first spelling was the only one the
-    // round-1 regex refused, and the second walked straight through it while
-    // `paths: ['','','','','','']` satisfies the assertion itself.
-    expect(pinFinding(`${OPTS}expect(a.pullRequestPaths.length).toBeGreaterThan(0);`)).toMatch(
-      /no CONTENTS pin/,
-    );
-    expect(
-      pinFinding(`${OPTS}expect(a.pullRequestPaths.length).toEqual(TRIGGER_PATHS.length);`),
-    ).toMatch(/no CONTENTS pin/);
-  });
-
-  it('a LENGTH matcher is not a pin either — `toHaveLength`, two arities', () => {
-    expect(pinFinding(`${OPTS}expect(a.pullRequestPaths).toHaveLength(6);`)).toMatch(
-      /no CONTENTS pin/,
-    );
-    expect(pinFinding(`${OPTS}expect(a.pullRequestPaths).toHaveLength(SIX);`)).toMatch(
-      /no CONTENTS pin/,
-    );
-  });
-
-  it('an ASYMMETRIC matcher is not a pin — `expect.any` and `expect.arrayContaining`', () => {
-    expect(pinFinding(`${OPTS}expect(a.pullRequestPaths).toEqual(expect.any(Array));`)).toMatch(
-      /no CONTENTS pin/,
-    );
-    expect(
-      pinFinding(`${OPTS}expect(a.pullRequestPaths).toEqual(expect.arrayContaining(['x']));`),
-    ).toMatch(/no CONTENTS pin/);
-  });
-
-  it('a SELF-DERIVED expectation is not a pin — the audit cannot check itself', () => {
-    // `toEqual(pr?.paths)` compares the audit against the same workflow the audit
-    // just parsed, so it holds for `['']` exactly as well as for the real globs.
-    expect(pinFinding(`${OPTS}expect(a.pullRequestPaths).toEqual(pr?.paths);`)).toMatch(
-      /no CONTENTS pin/,
-    );
-    expect(
-      pinFinding(
-        `${OPTS}expect(a.pullRequestPaths).toEqual(parseWorkflow().on.pull_request.paths);`,
-      ),
-    ).toMatch(/no CONTENTS pin/);
-  });
-
-  it('an EMPTY literal array is not a pin — it asserts the gate has no filter', () => {
-    expect(pinFinding(`${OPTS}expect(a.pullRequestPaths).toEqual([]);`)).toMatch(/no CONTENTS pin/);
-  });
-
-  it('NEGATIVE CONTROL: an inline literal pin is clean, in both quoting styles', () => {
-    expect(pinFinding(`${OPTS}expect(a.pullRequestPaths).toEqual(['src/**', 'x/*.go']);`)).toBe('');
-    expect(pinFinding(`${OPTS}expect(a.pullRequestPaths).toStrictEqual(["src/**"]);`)).toBe('');
-  });
-
-  it('NEGATIVE CONTROL: a const bound to a literal array is a pin, `as const` too', () => {
-    expect(pinFinding(`const P = ['src/**'];\n${OPTS}expect(a.pullRequestPaths).toEqual(P);`)).toBe(
-      '',
-    );
-    expect(
-      pinFinding(
-        `const P = ['src/**', 'y/**'] as const;\n${OPTS}expect(a.pullRequestPaths).toEqual(P);`,
-      ),
-    ).toBe('');
-  });
-
-  it('NEGATIVE CONTROL: an ALIASED subject is a pin — the value, not the spelling', () => {
-    // Round 1 false-positived here, and a guard that reds on a correct form is
-    // how "edit the guard" becomes the routine way back to green.
-    expect(pinFinding(`${OPTS}const p = a.pullRequestPaths;\nexpect(p).toEqual(['src/**']);`)).toBe(
-      '',
-    );
-    expect(
-      pinFinding(`${OPTS}const { pullRequestPaths: got } = a;\nexpect(got).toEqual(['src/**']);`),
-    ).toBe('');
-  });
-
-  it('a multi-line `expect(...)` still counts — the pin is not required on one line', () => {
-    expect(
-      pinFinding(
+      // Identifiers bound to a literal string array, for `toEqual(TRIGGER_PATHS)`.
+      //
+      // SAME-FILE ONLY, and that is a KNOWN FALSE POSITIVE, not an oversight: a pin
+      // whose list is IMPORTED from another module reds here, even though sharing
+      // `TRIGGER_PATHS` between the workflow spec and the gate spec is the natural
+      // refactor. Resolving imports would mean parsing the module graph from a
+      // regex scan. The cost is real — a false red is exactly the pressure that
+      // makes editing the guard the way back to green — so if someone hits it,
+      // widen this by resolving the import, do NOT relax the pin form.
+      const literalArrayConsts = new Set(
         [
-          OPTS.trim(),
-          'expect(',
-          '  a.pullRequestPaths,',
-          "  'the filter must cover what the gate protects',",
-          ").toEqual(['src/**']);",
-        ].join('\n'),
-      ),
-    ).toBe('');
-  });
+          ...code.matchAll(
+            /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]*)?=\s*(\[[^;]*?\])\s*(?:as\s+const\s*)?;/g,
+          ),
+        ]
+          .filter((m) => LITERAL_STRING_ARRAY.test((m[2] as string).replace(/\s+/g, ' ').trim()))
+          .map((m) => m[1] as string),
+      );
 
-  it('a pin that survives only in a COMMENT does not satisfy it, block or line', () => {
-    expect(pinFinding(`${OPTS}// expect(a.pullRequestPaths).toEqual(['src/**']);`)).toMatch(
-      /no CONTENTS pin/,
-    );
-    expect(pinFinding(`${OPTS}/* expect(a.pullRequestPaths).toEqual(['src/**']); */`)).toMatch(
-      /no CONTENTS pin/,
-    );
-  });
+      for (const m of code.matchAll(/\bexpect\s*\(/g)) {
+        const open = (m.index as number) + m[0].length - 1;
+        const span = balanced(code, open);
+        if (!span) continue;
+        const subject = code.slice(span[0], span[1]);
+        if (!subjectRe.test(subject)) continue;
+        // `expect(a.pullRequestPaths.length)` is a LENGTH assertion whatever matcher
+        // follows it — the round-1 bypass, in every spelling at once.
+        if (/\.\s*length\b/.test(subject)) continue;
+        const after = code.slice(span[1] + 1);
+        const call = after.match(/^\s*\.\s*([A-Za-z_$][\w$]*)\s*\(/);
+        if (!call) continue;
+        if (!CONTENTS_MATCHERS.has(call[1] as string)) continue;
+        const argOpen = span[1] + 1 + (call[0].length - 1) + (call.index as number);
+        const argSpan = balanced(code, argOpen);
+        if (!argSpan) continue;
+        const expected = code.slice(argSpan[0], argSpan[1]).replace(/\s+/g, ' ').trim();
+        if (LITERAL_STRING_ARRAY.test(expected)) return true;
+        if (/^[A-Za-z_$][\w$]*$/.test(expected) && literalArrayConsts.has(expected)) return true;
+        // Anything else — `expect.any(Array)`, `pr?.paths`, a call, a spread — is
+        // not a pin. Self-derived expectations are the point: a value read from the
+        // same workflow the audit just parsed agrees with whatever is there.
+      }
+      return false;
+    }
 
-  it('a QUOTED option key is still a caller — the literal view sees it', () => {
-    // Under `blankNonCode` the key was emptied, so `{ ['allowPathsFilter']: true }`
-    // escaped the caller check AND the exactly-one-declarer anchor.
-    const { callers } = auditAllowPathsCallers([
-      {
-        path: 'tests/quoted-key.test.ts',
-        source: "auditBlockingGate({ ['allowPathsFilter']: true });",
-      },
-    ]);
-    expect(callers).toEqual(['tests/quoted-key.test.ts']);
-  });
+    /**
+     * Classify a corpus.
+     *
+     * TWO VIEWS, for two different questions. `blanked` (comments AND literal
+     * contents emptied) answers "is the identifier used in code", so an assertion
+     * message that merely names the option is not a caller. `code` (comments
+     * blanked, literals intact) answers "is there a quoted key" and "is there a
+     * literal-array pin", both of which live inside literals by construction.
+     */
+    function auditAllowPathsCallers(files: SourceFile[]) {
+      const definers: string[] = [];
+      const callers: string[] = [];
+      const findings: string[] = [];
+      for (const { path, source } of files) {
+        const code = codeWithLiterals(source);
+        const blanked = blankNonCode(source);
+        if (DECLARES_OPTION.test(blanked) || QUOTED_DECLARATION.test(code)) definers.push(path);
+        if (
+          path === OPTION_DEFINITION_FILE ||
+          !(MENTIONS_OPTION.test(blanked) || QUOTED_OPTION_KEY.test(code))
+        ) {
+          continue;
+        }
+        callers.push(path);
+        if (!hasCompliantPin(code)) {
+          findings.push(
+            `${path} passes \`allowPathsFilter\` but carries no CONTENTS pin of \`pullRequestPaths\` — required form: expect(<…pullRequestPaths>).toEqual([<string literals>]) or .toEqual(<const bound to one>). A \`.length\` subject, a \`toHaveLength\`, an \`expect.any(...)\`, or a value derived from the same workflow are all NOT pins: only the caller can state that the filter COVERS what its gate protects`,
+          );
+        }
+      }
+      return { definers, callers, findings };
+    }
 
-  it('a file that merely MENTIONS the option in a comment is not a caller', () => {
-    // The counter-half of the blanking: header comments discuss this option all
-    // over the repo, and claiming them would make the finding list noise — which
-    // is how a scan trains people to ignore it.
-    const { callers } = auditAllowPathsCallers([
-      { path: 'tests/prose.test.ts', source: '// the audit takes allowPathsFilter; see #677\n' },
-    ]);
-    expect(callers).toEqual([]);
-  });
-});
+    const trackedSources = (): SourceFile[] =>
+      execFileSync('git', ['ls-files', '-z'], { cwd: REPO_ROOT, maxBuffer: 64 * 1024 * 1024 })
+        .toString('utf8')
+        .split('\0')
+        .filter((p) => p && JS_TS_FILE.test(p))
+        .map((path) => ({ path, source: readFileSync(resolve(REPO_ROOT, path), 'utf8') }));
+
+    const pinFinding = (source: string, path = 'tests/synthetic.test.ts') =>
+      auditAllowPathsCallers([{ path, source }]).findings.join(' ');
+
+    const OPTS = 'const a = auditBlockingGate({ allowPathsFilter: true });\n';
+
+    it('the corpus is real and every caller in it pins the contents', () => {
+      const files = trackedSources();
+      // Non-vacuity, twice: an empty corpus, or a corpus with no caller in it,
+      // would make the findings assertion pass by having nothing to check.
+      expect(files.length, 'git ls-files returned nothing — the scan is vacuous').toBeGreaterThan(
+        20,
+      );
+      const { callers, findings } = auditAllowPathsCallers(files);
+      expect(
+        callers,
+        'no caller found — either the option is gone or the scan is broken',
+      ).not.toEqual([]);
+      expect(findings, findings.join('\n')).toEqual([]);
+    });
+
+    it('the corpus reaches every JS/TS extension, `.cjs` included', () => {
+      // Round 1 hand-listed `*.ts *.tsx *.mts *.mjs *.js`, so five tracked `.cjs`
+      // files were invisible: a `.cjs` caller scanned GREEN while the byte-identical
+      // file named `.js` red. Derived from the extension regex now, so `.cts` and
+      // `.jsx` come along without anyone remembering them.
+      for (const ext of ['ts', 'tsx', 'cts', 'mts', 'js', 'jsx', 'cjs', 'mjs']) {
+        expect(JS_TS_FILE.test(`tests/x.${ext}`), `.${ext} must be in the corpus`).toBe(true);
+      }
+      expect(JS_TS_FILE.test('tests/x.json')).toBe(false);
+      // And the real corpus contains a `.cjs`, so the claim is measured, not assumed.
+      const exts = new Set(trackedSources().map((f) => f.path.replace(/^.*\./, '')));
+      expect([...exts].some((e) => e === 'cjs' || e === 'mjs')).toBe(true);
+    });
+
+    it('exactly ONE tracked file declares the option, and it is the exempt one', () => {
+      // The exemption above is path-anchored, and it is only sound while the
+      // declaration is unique: a second declaration is a copied option surface,
+      // and the copy would inherit the exemption for free.
+      const { definers } = auditAllowPathsCallers(trackedSources());
+      expect(definers, `allowPathsFilter is declared in: ${definers.join(', ')}`).toEqual([
+        OPTION_DEFINITION_FILE,
+      ]);
+    });
+
+    it('THE CASE THAT MATTERS: a new caller that pins nothing IS a finding', () => {
+      expect(pinFinding(OPTS, 'tests/a-second-caller.test.ts')).toMatch(/a-second-caller/);
+    });
+
+    it('a LENGTH subject is not a pin — in BOTH the round-1 and the bypass spelling', () => {
+      // The measured round-2 finding: the first spelling was the only one the
+      // round-1 regex refused, and the second walked straight through it while
+      // `paths: ['','','','','','']` satisfies the assertion itself.
+      expect(pinFinding(`${OPTS}expect(a.pullRequestPaths.length).toBeGreaterThan(0);`)).toMatch(
+        /no CONTENTS pin/,
+      );
+      expect(
+        pinFinding(`${OPTS}expect(a.pullRequestPaths.length).toEqual(TRIGGER_PATHS.length);`),
+      ).toMatch(/no CONTENTS pin/);
+    });
+
+    it('a LENGTH matcher is not a pin either — `toHaveLength`, two arities', () => {
+      expect(pinFinding(`${OPTS}expect(a.pullRequestPaths).toHaveLength(6);`)).toMatch(
+        /no CONTENTS pin/,
+      );
+      expect(pinFinding(`${OPTS}expect(a.pullRequestPaths).toHaveLength(SIX);`)).toMatch(
+        /no CONTENTS pin/,
+      );
+    });
+
+    it('an ASYMMETRIC matcher is not a pin — `expect.any` and `expect.arrayContaining`', () => {
+      expect(pinFinding(`${OPTS}expect(a.pullRequestPaths).toEqual(expect.any(Array));`)).toMatch(
+        /no CONTENTS pin/,
+      );
+      expect(
+        pinFinding(`${OPTS}expect(a.pullRequestPaths).toEqual(expect.arrayContaining(['x']));`),
+      ).toMatch(/no CONTENTS pin/);
+    });
+
+    it('a SELF-DERIVED expectation is not a pin — the audit cannot check itself', () => {
+      // `toEqual(pr?.paths)` compares the audit against the same workflow the audit
+      // just parsed, so it holds for `['']` exactly as well as for the real globs.
+      expect(pinFinding(`${OPTS}expect(a.pullRequestPaths).toEqual(pr?.paths);`)).toMatch(
+        /no CONTENTS pin/,
+      );
+      expect(
+        pinFinding(
+          `${OPTS}expect(a.pullRequestPaths).toEqual(parseWorkflow().on.pull_request.paths);`,
+        ),
+      ).toMatch(/no CONTENTS pin/);
+    });
+
+    it('an EMPTY literal array is not a pin — it asserts the gate has no filter', () => {
+      expect(pinFinding(`${OPTS}expect(a.pullRequestPaths).toEqual([]);`)).toMatch(
+        /no CONTENTS pin/,
+      );
+    });
+
+    it('NEGATIVE CONTROL: an inline literal pin is clean, in both quoting styles', () => {
+      expect(pinFinding(`${OPTS}expect(a.pullRequestPaths).toEqual(['src/**', 'x/*.go']);`)).toBe(
+        '',
+      );
+      expect(pinFinding(`${OPTS}expect(a.pullRequestPaths).toStrictEqual(["src/**"]);`)).toBe('');
+    });
+
+    it('NEGATIVE CONTROL: a const bound to a literal array is a pin, `as const` too', () => {
+      expect(
+        pinFinding(`const P = ['src/**'];\n${OPTS}expect(a.pullRequestPaths).toEqual(P);`),
+      ).toBe('');
+      expect(
+        pinFinding(
+          `const P = ['src/**', 'y/**'] as const;\n${OPTS}expect(a.pullRequestPaths).toEqual(P);`,
+        ),
+      ).toBe('');
+    });
+
+    it('NEGATIVE CONTROL: an ALIASED subject is a pin — the value, not the spelling', () => {
+      // Round 1 false-positived here, and a guard that reds on a correct form is
+      // how "edit the guard" becomes the routine way back to green.
+      expect(
+        pinFinding(`${OPTS}const p = a.pullRequestPaths;\nexpect(p).toEqual(['src/**']);`),
+      ).toBe('');
+      expect(
+        pinFinding(`${OPTS}const { pullRequestPaths: got } = a;\nexpect(got).toEqual(['src/**']);`),
+      ).toBe('');
+    });
+
+    it('a multi-line `expect(...)` still counts — the pin is not required on one line', () => {
+      expect(
+        pinFinding(
+          [
+            OPTS.trim(),
+            'expect(',
+            '  a.pullRequestPaths,',
+            "  'the filter must cover what the gate protects',",
+            ").toEqual(['src/**']);",
+          ].join('\n'),
+        ),
+      ).toBe('');
+    });
+
+    it('a pin that survives only in a COMMENT does not satisfy it, block or line', () => {
+      expect(pinFinding(`${OPTS}// expect(a.pullRequestPaths).toEqual(['src/**']);`)).toMatch(
+        /no CONTENTS pin/,
+      );
+      expect(pinFinding(`${OPTS}/* expect(a.pullRequestPaths).toEqual(['src/**']); */`)).toMatch(
+        /no CONTENTS pin/,
+      );
+    });
+
+    it('a QUOTED option key is still a caller — the literal view sees it', () => {
+      // Under `blankNonCode` the key was emptied, so `{ ['allowPathsFilter']: true }`
+      // escaped the caller check AND the exactly-one-declarer anchor.
+      const { callers } = auditAllowPathsCallers([
+        {
+          path: 'tests/quoted-key.test.ts',
+          source: "auditBlockingGate({ ['allowPathsFilter']: true });",
+        },
+      ]);
+      expect(callers).toEqual(['tests/quoted-key.test.ts']);
+    });
+
+    it('a file that merely MENTIONS the option in a comment is not a caller', () => {
+      // The counter-half of the blanking: header comments discuss this option all
+      // over the repo, and claiming them would make the finding list noise — which
+      // is how a scan trains people to ignore it.
+      const { callers } = auditAllowPathsCallers([
+        { path: 'tests/prose.test.ts', source: '// the audit takes allowPathsFilter; see #677\n' },
+      ]);
+      expect(callers).toEqual([]);
+    });
+  },
+);

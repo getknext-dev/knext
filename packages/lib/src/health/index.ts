@@ -1,12 +1,12 @@
 import type RedisClient from 'ioredis';
+import { getDbPool } from '../clients';
+import { logger } from '../logger';
+import { attachQuietErrorListener, ensureDialable, quietRedisOptions } from '../redis/quiet';
 // ioredis is resolved at RUNTIME through this module, never statically
 // imported — see redis-ctor.ts for why, and for why it is a separate module
 // rather than an inline require (the inline version was unmockable and made
 // these tests dial a real Redis).
 import { loadRedisCtor } from './redis-ctor';
-import { getDbPool } from '../clients';
-import { logger } from '../logger';
-import { attachQuietErrorListener, ensureDialable, quietRedisOptions } from '../redis/quiet';
 
 export interface HealthStatus {
   status: 'ok' | 'degraded' | 'down' | 'waking';

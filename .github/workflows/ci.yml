@@ -358,14 +358,18 @@ jobs:
       - name: Build @getknext/core
         run: pnpm --filter @getknext/core build
 
-      - name: Build file-manager standalone (next build --webpack)
-        run: pnpm --filter file-manager build
+      # docs is the LAST standalone + compile-cache consumer since ADR-0048.
+      # file-manager builds with vinext now and emits no standalone tree, so
+      # this job was pointed at a build that could not satisfy
+      # KNEXT_REQUIRE_STANDALONE=1 — red by construction.
+      - name: Build docs standalone (next build --webpack)
+        run: pnpm --filter knext-docs build
 
       - name: Run bytecode-cache reuse gate (must NOT skip)
         env:
           # Converts the skipIf guard into a HARD failure if the build is missing.
           KNEXT_REQUIRE_STANDALONE: '1'
-        run: pnpm exec vitest run apps/file-manager/bytecode-cache-reuse.test.ts
+        run: pnpm exec vitest run apps/docs/bytecode-cache-reuse.test.ts
 
   sigterm-drain-shipped:
     # Per-PR GATE: proves the SHIPPED container layout actually boots the knext

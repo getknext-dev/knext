@@ -1,0 +1,100 @@
+---
+title: Use Bun's standard library
+description: Your app compiles into a single Bun executable, so prefer Bun's built-in APIs over npm packages that reimplement them.
+---
+
+Your app is built with vinext and compiled into a single Bun executable. Bun is the runtime, and
+that changes which library you should reach for.
+
+**Prefer Bun's built-in APIs over an npm package that does the same thing.** They are already inside
+the binary, so they cost nothing to add, and they are native code rather than JavaScript.
+
+## Why this matters more here than elsewhere
+
+Every npm dependency you add is compiled into the executable. That has three effects you can feel:
+
+- **Binary size.** A production build is around 70 MB before your dependencies. Each package that
+  duplicates something Bun already does adds to what your cluster pulls on every deploy.
+- **Cold start.** The whole point of this build is starting fast — measured at 61 ms to the first
+  response. Bun's built-ins are native, so they add no JavaScript for the runtime to parse and
+  execute at boot.
+- **Compatibility.** A package written for Node may reach for APIs Bun implements differently. A
+  built-in cannot have that problem.
+
+## What to use instead
+
+| Instead of | Use | Notes |
+|---|---|---|
+| `node-fetch`, `axios`, `got` | `fetch` | Built in and standards-based. No import needed. |
+| `bcrypt`, `argon2` | `Bun.password.hash` / `.verify` | Argon2id by default; native, no build step. |
+| `dotenv` | Nothing — `.env` is read automatically | Bun loads `.env` and friends itself. |
+| `glob`, `fast-glob` | `Bun.Glob` | Native matching. |
+| `pg` | `Bun.sql` | Native Postgres client, tagged-template queries. |
+| `better-sqlite3`, `sqlite3` | `bun:sqlite` | Native, synchronous, nothing to compile. |
+| `ws` | `Bun.serve`'s `websocket` handler | Built into the server. |
+| `crypto-js` | `Bun.CryptoHasher`, `crypto.subtle` | Native hashing. |
+| `execa`, `cross-spawn` | `Bun.$` or `Bun.spawn` | `Bun.$` is a cross-platform shell. |
+| `mime-types` | `Bun.file(path).type` | Content type from the file itself. |
+| `uuid` | `crypto.randomUUID()` | Web standard, already global. |
+
+Bun also implements most of Node's built-in modules, so `node:path`, `node:fs`, `node:crypto` and
+the rest keep working. You do not need to rewrite code that already uses them — this is about what
+you reach for **next**.
+
+## A worked example
+
+Reading input, hashing a password and querying Postgres, with no dependencies at all:
+
+```ts
+// app/api/signup/route.ts
+import { sql } from "bun";
+
+export async function POST(request: Request) {
+  const { email, password } = await request.json();
+
+  // Native Argon2id. No bcrypt, no node-gyp, no prebuilt binaries.
+  const hash = await Bun.password.hash(password);
+
+  // Native Postgres. No `pg`, no separate pool package.
+  const [user] = await sql`
+    insert into users (email, password_hash)
+    values (${email}, ${hash})
+    returning id, email
+  `;
+
+  return Response.json(user, { status: 201 });
+}
+```
+
+## When to keep the npm package
+
+This is a recommendation, not a rule, and there are good reasons to ignore it:
+
+- **You share code with a non-Bun runtime.** Code that must also run under Node or in a browser
+  should use portable APIs, not `Bun.*`.
+- **The package does more than the built-in.** `Bun.sql` is a client, not an ORM. If you want
+  Drizzle or Prisma, use them — they are a different tool, not a duplicate.
+- **It already works.** Rewriting a functioning integration to save a few hundred kilobytes is
+  rarely worth the risk.
+
+The rule of thumb: if a package exists only to do what the runtime now does natively, drop it. If it
+adds real abstraction on top, keep it.
+
+## Keeping imports off the startup path
+
+Cold start is dominated by what runs at module scope. A dependency you cannot remove can often still
+be moved out of the boot path by importing it inside the function that needs it:
+
+```ts
+// Runs at boot, every cold start pays for it:
+import { heavyThing } from "some-large-package";
+
+// Runs only when this route is actually hit:
+export async function GET() {
+  const { heavyThing } = await import("some-large-package");
+  return Response.json(await heavyThing());
+}
+```
+
+That helps even when the package stays in the binary, because the cost moves off the critical path
+between process start and first response.

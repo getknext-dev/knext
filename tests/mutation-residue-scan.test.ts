@@ -38,7 +38,9 @@ function makeRepo(): string {
 
 function commitAll(dir: string): void {
   execFileSync('git', ['add', '-A'], { cwd: dir, stdio: 'pipe' });
-  execFileSync('git', ['commit', '-qm', 'fixture'], { cwd: dir, stdio: 'pipe' });
+  // `--no-gpg-sign`: see compat-window-fingerprint — a fixture repo must not
+  // depend on the developer's commit-signing configuration.
+  execFileSync('git', ['commit', '--no-gpg-sign', '-qm', 'fixture'], { cwd: dir, stdio: 'pipe' });
 }
 
 afterAll(() => {

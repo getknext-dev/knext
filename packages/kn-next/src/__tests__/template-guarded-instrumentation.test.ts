@@ -311,7 +311,10 @@ describe("app template — package.json carries the instrumentation contract (#3
         //
         // Retiring the script is the honest move; leaving it would hand every
         // generated app a CI step that passes by finding nothing.
-        const scripts = (JSON.parse(pkg ?? "{}").scripts ?? {}) as Record<string, string>;
+        const scripts = (JSON.parse(pkg ?? "{}").scripts ?? {}) as Record<
+            string,
+            string
+        >;
         expect(scripts["test:seam"]).toBeUndefined();
     });
 
@@ -332,7 +335,10 @@ describe("app template — package.json carries the instrumentation contract (#3
             dependencies?: Record<string, string>;
             devDependencies?: Record<string, string>;
         };
-        const declared = { ...manifest.dependencies, ...manifest.devDependencies };
+        const declared = {
+            ...manifest.dependencies,
+            ...manifest.devDependencies,
+        };
 
         // Runtimes, not packages. `bun` and `node` are the process that RUNS
         // the app; requiring them as dependencies would be wrong, and the
@@ -340,7 +346,10 @@ describe("app template — package.json carries the instrumentation contract (#3
         const RUNTIMES = new Set(["bun", "node", "npm", "npx", "pnpm"]);
 
         const scripts = Object.entries(manifest.scripts ?? {});
-        expect(scripts.length, "template declares no scripts at all").toBeGreaterThan(0);
+        expect(
+            scripts.length,
+            "template declares no scripts at all",
+        ).toBeGreaterThan(0);
 
         for (const [name, script] of scripts) {
             const binaries = script
