@@ -335,7 +335,18 @@ describe('the root test tree imports only DECLARED root dependencies', () => {
     ...Object.keys(manifest.dependencies ?? {}),
     ...Object.keys(manifest.devDependencies ?? {}),
   ]);
-  const builtin = new Set(builtinModules);
+  // `node:module`'s list is Node's builtins only. Bun ships its own — `bun:test`,
+  // `bun:sqlite`, `bun:ffi` — which resolve from the runtime and are no more an
+  // npm dependency than `node:fs` is. Without these the gate reports a test
+  // helper importing `bun:test` as an undeclared package.
+  const builtin = new Set([
+    ...builtinModules,
+    'bun',
+    'bun:test',
+    'bun:sqlite',
+    'bun:ffi',
+    'bun:jsc',
+  ]);
 
   /** `@scope/pkg/sub` -> `@scope/pkg`; `pkg/sub` -> `pkg`. */
   const packageName = (specifier: string): string => {
