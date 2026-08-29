@@ -341,21 +341,31 @@ const DEFAULT_DB_WAKE_RETRY_BASE_MS = 100;
 /** Cap (ms) on a single backoff sleep so late attempts don't stall the request. */
 const DEFAULT_DB_WAKE_RETRY_MAX_MS = 1_000;
 
-/** The resolved total retry budget (env-overridable, clamped positive). */
-export const DB_WAKE_RETRY_BUDGET_MS = toFinitePositiveInt(
-  process.env.DB_WAKE_RETRY_BUDGET_MS,
-  DEFAULT_DB_WAKE_RETRY_BUDGET_MS,
-);
-/** The resolved base backoff (env-overridable, clamped positive). */
-export const DB_WAKE_RETRY_BASE_MS = toFinitePositiveInt(
-  process.env.DB_WAKE_RETRY_BASE_MS,
-  DEFAULT_DB_WAKE_RETRY_BASE_MS,
-);
-/** The resolved per-sleep backoff cap (env-overridable, clamped positive). */
-export const DB_WAKE_RETRY_MAX_MS = toFinitePositiveInt(
-  process.env.DB_WAKE_RETRY_MAX_MS,
-  DEFAULT_DB_WAKE_RETRY_MAX_MS,
-);
+/**
+ * The wake-retry budgets, resolved ON EACH READ rather than at import.
+ *
+ * These were module-level `const`s computed once when the module first loaded.
+ * That worked only because vitest's `vi.resetModules()` re-imported the module
+ * between tests, silently re-evaluating them. `bun:test` has no registry reset,
+ * so the first value won for the whole run: a test setting
+ * `DB_WAKE_RETRY_BUDGET_MS=1` to isolate the connect bound still waited the 8s
+ * default, and the failure read as an unbounded connect rather than as config
+ * that never took.
+ *
+ * Reading lazily removes the dependency on a test-runner feature entirely, and
+ * makes the knobs behave the way their names imply — env-overridable, not
+ * env-overridable-if-you-set-it-before-the-first-import. Same reasoning as
+ * `selectDbDriver()`.
+ *
+ * Kept as functions rather than getters so the cost is visible at the call site;
+ * they are read once per retry loop, not per iteration.
+ */
+export const dbWakeRetryBudgetMs = (): number =>
+  toFinitePositiveInt(process.env.DB_WAKE_RETRY_BUDGET_MS, DEFAULT_DB_WAKE_RETRY_BUDGET_MS);
+export const dbWakeRetryBaseMs = (): number =>
+  toFinitePositiveInt(process.env.DB_WAKE_RETRY_BASE_MS, DEFAULT_DB_WAKE_RETRY_BASE_MS);
+export const dbWakeRetryMaxMs = (): number =>
+  toFinitePositiveInt(process.env.DB_WAKE_RETRY_MAX_MS, DEFAULT_DB_WAKE_RETRY_MAX_MS);
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -384,7 +394,7 @@ const isPermanentAcquireError = (err: unknown): boolean => {
 /**
  * Wrap a pool's `connect`/`query` so a TRANSIENT acquire failure during the DB
  * wake window is retried with capped exponential backoff within
- * {@link DB_WAKE_RETRY_BUDGET_MS}. On budget exhaustion (or a permanent error)
+ * {@link dbWakeRetryBudgetMs}. On budget exhaustion (or a permanent error)
  * the LAST error is re-thrown deterministically. Applied INNER to the #339
  * single-flight so only the wake leader retries.
  *
@@ -404,7 +414,7 @@ const retryWake = (pool: Pool): Pool => {
       // Synchronous / non-promise result — pass straight through.
       return first;
     }
-    const deadline = Date.now() + DB_WAKE_RETRY_BUDGET_MS;
+    const deadline = Date.now() + dbWakeRetryBudgetMs();
     const attempt = (pending: Promise<R>, retries: number): Promise<R> =>
       pending.then(
         (value) => value,
@@ -412,7 +422,7 @@ const retryWake = (pool: Pool): Pool => {
           if (isPermanentAcquireError(err) || Date.now() >= deadline) {
             throw err;
           }
-          const backoff = Math.min(DB_WAKE_RETRY_MAX_MS, DB_WAKE_RETRY_BASE_MS * 2 ** retries);
+          const backoff = Math.min(dbWakeRetryMaxMs(), dbWakeRetryBaseMs() * 2 ** retries);
           // Don't sleep past the deadline.
           const remaining = deadline - Date.now();
           const wait = Math.max(0, Math.min(backoff, remaining));

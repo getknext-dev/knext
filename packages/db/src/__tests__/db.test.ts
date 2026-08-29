@@ -1,38 +1,39 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { resetDbState } from './reset';
 
 // Sentinel pools returned by the mocked @getknext/lib clients — we assert which
 // pool each drizzle client is wrapped over WITHOUT a real database.
 const WRITER_POOL = { id: 'writer-pool' };
 const RO_POOL = { id: 'ro-pool' };
 
-const getDbPool = vi.fn(() => WRITER_POOL);
-const getDbPoolRO = vi.fn<() => unknown>(() => null);
-const warn = vi.fn();
+const getDbPool = mock(() => WRITER_POOL);
+const getDbPoolRO = mock<() => unknown>(() => null);
+const warn = mock();
 
-vi.mock('@getknext/lib/clients', () => ({
+mock.module('@getknext/lib/clients', () => ({
   getDbPool: () => getDbPool(),
   getDbPoolRO: () => getDbPoolRO(),
 }));
-vi.mock('@getknext/lib/logger', () => ({
-  logger: { warn: (m: string) => warn(m), info: vi.fn() },
+mock.module('@getknext/lib/logger', () => ({
+  logger: { warn: (m: string) => warn(m), info: mock() },
 }));
 
 // Mock drizzle so no driver is touched; the returned client records its pool +
 // schema so tests can assert the wiring.
-const drizzle = vi.fn((pool: unknown, opts?: { schema?: unknown }) => ({
+const drizzle = mock((pool: unknown, opts?: { schema?: unknown }) => ({
   __client: true,
   pool,
   schema: opts?.schema,
 }));
-vi.mock('drizzle-orm/node-postgres', () => ({
+mock.module('drizzle-orm/node-postgres', () => ({
   // The param type matches the spy above (type-only, #261) — the wrapper
   // still forwards whatever it receives, unchanged.
   drizzle: (p: unknown, o?: { schema?: unknown }) => drizzle(p, o),
 }));
 
 describe('@getknext/db — client accessors over the @getknext/lib pools', () => {
-  beforeEach(() => {
-    vi.resetModules(); // resets the module-level writer/reader singletons
+  beforeEach(async () => {
+    await resetDbState(); // resets the module-level writer/reader singletons
     getDbPool.mockClear();
     getDbPoolRO.mockReset();
     getDbPoolRO.mockReturnValue(null);

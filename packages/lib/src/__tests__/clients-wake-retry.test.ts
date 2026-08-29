@@ -93,11 +93,24 @@ describe('@getknext/lib/clients — wake-path retry/backoff (#310)', () => {
     mod.resetDbWakeSingleflight?.();
   });
 
-  it('exposes a bounded default retry budget', async () => {
+  it('exposes a bounded default retry budget, resolved on each read', async () => {
     const mod = await import('../clients');
-    expect(mod.DB_WAKE_RETRY_BUDGET_MS).toBeGreaterThan(0);
+    expect(mod.dbWakeRetryBudgetMs()).toBeGreaterThan(0);
     // Comfortably above the ~2.5s scale-zero-pg cold wake.
-    expect(mod.DB_WAKE_RETRY_BUDGET_MS).toBeGreaterThanOrEqual(2_500);
+    expect(mod.dbWakeRetryBudgetMs()).toBeGreaterThanOrEqual(2_500);
+
+    // The budget is a FUNCTION now, not a constant frozen at import. It used to
+    // be the latter, which only worked because vitest re-imported the module
+    // between tests; with no registry reset the first value would win for the
+    // whole run, and a test setting the env to isolate a bound would silently
+    // get the 8s default. This asserts the override is live.
+    process.env.DB_WAKE_RETRY_BUDGET_MS = '1234';
+    try {
+      expect(mod.dbWakeRetryBudgetMs()).toBe(1234);
+    } finally {
+      delete process.env.DB_WAKE_RETRY_BUDGET_MS;
+    }
+    expect(mod.dbWakeRetryBudgetMs()).toBeGreaterThanOrEqual(2_500);
   });
 
   it('retries a transient connect failure during the wake window and ultimately succeeds', async () => {

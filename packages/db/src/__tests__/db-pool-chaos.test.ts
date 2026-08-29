@@ -1,5 +1,6 @@
+import { afterEach, beforeEach, describe, expect, it, jest, spyOn } from 'bun:test';
 import net from 'node:net';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { resetDbState } from './reset';
 
 /**
  * P1 data-plane resilience — DB connection CHAOS test (CI-runnable, no live
@@ -42,8 +43,8 @@ describe('db pool chaos: connection failure is BOUNDED, never a hang or false su
   // far below the 15s default — a reintroduced unbounded connect blows past it.
   const BOUNDED_CEILING_MS = 6_000;
 
-  beforeEach(() => {
-    vi.resetModules();
+  beforeEach(async () => {
+    await resetDbState();
     process.env.DB_POOL_CONNECT_TIMEOUT_MS = String(CONNECT_TIMEOUT_MS);
     // Keep the pool tiny so a single failed connect surfaces immediately.
     process.env.DB_POOL_MAX = '1';
@@ -54,13 +55,13 @@ describe('db pool chaos: connection failure is BOUNDED, never a hang or false su
     // attempt, no retry. (`toFinitePositiveInt` treats 0 as unset → default, so use 1.)
     process.env.DB_WAKE_RETRY_BUDGET_MS = '1';
     // Silence expected connection-error noise so suite output stays clean.
-    vi.spyOn(console, 'error').mockImplementation(() => {});
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    spyOn(console, 'error').mockImplementation(() => {});
+    spyOn(console, 'warn').mockImplementation(() => {});
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     process.env = { ...original };
-    vi.restoreAllMocks();
+    jest.restoreAllMocks();
   });
 
   it('dead loopback port (connection refused): getDb().execute rejects fast, well under the 15s default', async () => {

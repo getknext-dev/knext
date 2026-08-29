@@ -1,3 +1,4 @@
+import { createRequire } from 'node:module';
 import pino from 'pino';
 import { correlationLogFields } from '../context';
 
@@ -29,17 +30,45 @@ export const logger = pino({
   },
   // Automatically redact sensitive data from logs
   redact: ['req.headers.authorization', 'req.headers.cookie', 'password', 'token'],
-  // Auto-prettify logic for local development
-  ...(isProduction
-    ? {}
-    : {
-        transport: {
-          target: 'pino-pretty',
-          options: {
-            colorize: true,
-            singleLine: true,
-            translateTime: 'SYS:standard',
-          },
-        },
-      }),
+  // Auto-prettify logic for local development — only when pino-pretty is
+  // actually resolvable. See `prettyTransport`.
+  ...prettyTransport(),
 });
+
+/**
+ * The dev-only pretty transport, or nothing.
+ *
+ * `pino-pretty` is a devDependency: it is deliberately absent from a production
+ * install, and from any pruned tree. pino resolves `target` lazily in a worker,
+ * so an unresolvable target does not degrade — it throws
+ * `unable to determine transport target for "pino-pretty"` and the logger fails
+ * to CONSTRUCT, taking the importing module with it.
+ *
+ * That went unnoticed while this package emitted CommonJS from `tsc`; moving to
+ * a bundled ESM build changed the resolution base and the built entry stopped
+ * loading in exactly the environment `peer-shape.test.ts` checks — a consumer
+ * install with the dev tree pruned.
+ *
+ * So the presence of a human-readable log format is now a probe rather than an
+ * assumption. Absent it, pino's default JSON output is used, which is what
+ * production wants anyway. A missing optional prettifier must never be the
+ * reason an application cannot log.
+ */
+function prettyTransport(): Record<string, unknown> {
+  if (isProduction) return {};
+  try {
+    createRequire(import.meta.url).resolve('pino-pretty');
+  } catch {
+    return {};
+  }
+  return {
+    transport: {
+      target: 'pino-pretty',
+      options: {
+        colorize: true,
+        singleLine: true,
+        translateTime: 'SYS:standard',
+      },
+    },
+  };
+}

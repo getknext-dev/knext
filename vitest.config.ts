@@ -61,7 +61,17 @@ export default defineConfig({
     // the moment it is named — and the suites this pattern hides still run, in
     // their own jobs (`bun-exec-alpine-image` runs `bun run test:image`).
     // `tests/bun-exec-alpine-image-ci.test.ts` asserts this entry is here.
-    exclude: [...configDefaults.exclude, '**/.claude/**', '**/*.docker-e2e.test.ts'],
+    // PORTED-TO-BUN exclusions. These packages now import `bun:test`, which
+    // vitest cannot run, so they are excluded here and covered by
+    // `node scripts/bun-test.mjs` instead. The list shrinks vitest's scope one
+    // package at a time and reaches zero when the migration finishes — at which
+    // point this config goes away entirely.
+    exclude: [
+      ...configDefaults.exclude,
+      '**/.claude/**',
+      '**/*.docker-e2e.test.ts',
+      'packages/db/**',
+    ],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'text-summary', 'json', 'json-summary', 'html'],

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import { quoteIdent, quoteLiteral } from '../sql';
 
 // #278: shared quote helpers for the `@getknext/db` migration-SQL emitters. The

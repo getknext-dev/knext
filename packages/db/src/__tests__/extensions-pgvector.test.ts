@@ -1,5 +1,5 @@
+import { describe, expect, it } from 'bun:test';
 import { getTableConfig, PgDialect, pgTable, serial, text, vector } from 'drizzle-orm/pg-core';
-import { describe, expect, it } from 'vitest';
 import {
   CREATE_VECTOR_EXTENSION,
   cosineDistance,

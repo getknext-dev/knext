@@ -1,5 +1,5 @@
+import { describe, expect, it } from 'bun:test';
 import { doublePrecision, pgTable, text, timestamp } from 'drizzle-orm/pg-core';
-import { describe, expect, it } from 'vitest';
 import {
   CREATE_TIMESCALEDB_EXTENSION,
   createTimescaleExtension,

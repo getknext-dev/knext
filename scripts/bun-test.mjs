@@ -1,0 +1,114 @@
+#!/usr/bin/env node
+/**
+ * Run the suite under `bun test`, one PROCESS per test file.
+ *
+ * ## Why not just `bun test`
+ *
+ * Bun registers module mocks for the whole RUN, not per file, and they cannot
+ * be unregistered — `mock.restore()` restores spies, not `mock.module`. So one
+ * file's fake `pg` is still installed when a later file needs the real driver,
+ * and that file passes or fails depending only on collection order. Measured:
+ * `db-pool-chaos.test.ts` passes alone and fails when it runs after
+ * `db-ro-fallback.test.ts`, which mocks `pg`.
+ *
+ * vitest isolated per file, so nothing in this suite was written to expect
+ * otherwise. Rather than rewrite 55 mocking files to avoid each other — a
+ * constraint that would have to be re-checked on every new test — the runner
+ * gives each file the isolation the tests assume.
+ *
+ * ## Coverage
+ *
+ * `bunfig.toml` deliberately does NOT set `coverage = true`. A global 0.8
+ * threshold applied to a single file is meaningless and fails every run, which
+ * is what blocked per-file isolation in the first place. Pass `--coverage` here
+ * and it is applied once, to the whole set.
+ *
+ * Usage:
+ *   node scripts/bun-test.mjs [path...] [--coverage] [--concurrency=N] [--bun=PATH]
+ */
+
+import { execFileSync, spawn } from 'node:child_process';
+import { cpus } from 'node:os';
+
+const argv = process.argv.slice(2);
+const flag = (name, fallback) => {
+  const hit = argv.find((a) => a.startsWith(`--${name}=`));
+  return hit ? hit.split('=')[1] : fallback;
+};
+
+const withCoverage = argv.includes('--coverage');
+const bunBin = flag('bun', process.env.KNEXT_BUN ?? 'bun');
+const concurrency = Number(flag('concurrency', String(Math.max(2, cpus().length - 2))));
+const targets = argv.filter((a) => !a.startsWith('--'));
+
+const files = execFileSync('git', ['ls-files', ...(targets.length ? targets : ['.'])], {
+  encoding: 'utf8',
+  maxBuffer: 64 * 1024 * 1024,
+})
+  .split('\n')
+  .filter((f) => /\.test\.tsx?$/.test(f));
+
+if (files.length === 0) {
+  console.error('no test files matched');
+  process.exit(1);
+}
+
+console.log(`bun test — ${files.length} file(s), ${concurrency} at a time, isolated per process\n`);
+
+const failures = [];
+let done = 0;
+
+/** Run one file; resolve with its outcome rather than rejecting, so one red file does not abort the sweep. */
+function runFile(file) {
+  return new Promise((resolve) => {
+    const args = ['test', file];
+    if (withCoverage) args.push('--coverage');
+    const child = spawn(bunBin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = '';
+    child.stdout.on('data', (d) => (output += d));
+    child.stderr.on('data', (d) => (output += d));
+    child.on('close', (code) => {
+      done++;
+      const ok = code === 0;
+      if (!ok) failures.push({ file, output });
+      process.stdout.write(`  ${ok ? 'ok  ' : 'FAIL'} [${done}/${files.length}] ${file}\n`);
+      resolve(ok);
+    });
+    child.on('error', (err) => {
+      done++;
+      failures.push({ file, output: String(err.message) });
+      process.stdout.write(`  FAIL [${done}/${files.length}] ${file} (spawn error)\n`);
+      resolve(false);
+    });
+  });
+}
+
+const queue = [...files];
+const workers = Array.from({ length: Math.min(concurrency, queue.length) }, async () => {
+  for (;;) {
+    const next = queue.shift();
+    if (next === undefined) return;
+    await runFile(next);
+  }
+});
+
+await Promise.all(workers);
+
+if (failures.length > 0) {
+  console.log(`\n${failures.length} file(s) failed:\n`);
+  for (const { file, output } of failures) {
+    console.log(`──────── ${file}`);
+    // Only the tail: the interesting part of a bun test failure is at the end.
+    console.log(
+      output
+        .split('\n')
+        .filter((l) => l.trim())
+        .slice(-12)
+        .join('\n'),
+    );
+    console.log();
+  }
+  process.exit(1);
+}
+
+console.log(`\nall ${files.length} test file(s) green`);

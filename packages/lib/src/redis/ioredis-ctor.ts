@@ -43,6 +43,10 @@ export type RedisCtor = new (url: string, opts?: Record<string, unknown>) => Red
  * putting them here would split that decision across two modules.
  */
 export function loadRedisCtor(): RedisCtor {
+  // `createRequire`, not a bare `require`: this package ships ESM now, where
+  // `require` does not exist. The specifier stays computed so no bundler can
+  // follow it — that part is unchanged and still load-bearing.
+  const require = createRequire(import.meta.url);
   const mod = require(IOREDIS_SPECIFIER) as { default?: RedisCtor } & RedisCtor;
   return (mod.default ?? mod) as RedisCtor;
 }
