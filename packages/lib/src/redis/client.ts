@@ -110,7 +110,12 @@ export function createRedisClient(
 
   if (!ctorOverride && bunRedisAvailable()) {
     const bun = (globalThis as { Bun?: { RedisClient?: RedisCtor } }).Bun;
-    const client = new (bun?.RedisClient as RedisCtor)(url, toBunRedisOptions(quiet));
+    // Bind the constructor to a plain local FIRST. `new (bun?.RedisClient)(...)`
+    // is a SyntaxError — "constructor in/after an optional chaining is not
+    // allowed" — and it is one an older parser will happily accept, so this
+    // read as working code right up until a different bundler saw it.
+    const BunRedis = bun?.RedisClient as RedisCtor;
+    const client = new BunRedis(url, toBunRedisOptions(quiet));
     // Not optional. Failing open is right; failing open SILENTLY is what turns
     // a Redis blip into an unexplained log flood (#802).
     attachQuietErrorListener(client, tag);

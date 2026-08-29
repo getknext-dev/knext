@@ -320,10 +320,22 @@ describe('#465 docs-closure HIGH remediation is by BUMP, not suppression', () =>
     const pkg = JSON.parse(readFileSync(ROOT_PKG_PATH, 'utf8')) as {
       pnpm?: { overrides?: Record<string, string> };
     };
-    const overrides = pkg.pnpm?.overrides ?? {};
+    // Read BOTH locations. `bun install` silently relocates this block from
+    // `pnpm.overrides` to a top-level `overrides` when it rewrites the
+    // manifest — a package manager moving a SECURITY control without being
+    // asked. Both spellings are honoured by the installer that reads them, so
+    // what this guard cares about is that the floors exist SOMEWHERE, not
+    // which key they happen to sit under today.
+    const overrides = {
+      ...(pkg.pnpm?.overrides ?? {}),
+      ...(pkg.overrides ?? {}),
+    };
     for (const [selector, fixed, advisory] of REQUIRED) {
       const range = overrides[selector];
-      expect(range, `expected a pnpm override for "${selector}" (${advisory})`).toBeTruthy();
+      expect(
+        range,
+        `expected an override floor for "${selector}" (${advisory}) under either "overrides" or "pnpm.overrides"`,
+      ).toBeTruthy();
       expect(
         gte(floorOf(range as string), fixed),
         `override "${selector}": "${range}" must admit nothing below ${fixed.join('.')} (${advisory})`,

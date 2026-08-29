@@ -1,5 +1,8 @@
 {
   "name": "devfix",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "devDependencies": {
+    "@types/react": "19.2.18"
+  }
 }

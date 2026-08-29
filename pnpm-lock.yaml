@@ -4,20 +4,6 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
-overrides:
-  '@grpc/grpc-js': '>=1.14.4 <2'
-  rollup: '>=4.59.0 <5'
-  vite: '>=7.3.5'
-  picomatch@4: '>=4.0.4 <5'
-  fast-xml-parser@4: '>=4.5.5 <5'
-  fast-xml-parser@5: '>=5.10.1 <6'
-  form-data@2: '>=2.5.6 <3'
-  lodash: '>=4.18.0 <5'
-  nanoid@3: '>=3.3.17 <4'
-  postcss: '>=8.5.18 <9'
-  protobufjs: '>=7.6.1 <8'
-  sharp: '>=0.35.0 <1'
-
 importers:
 
   .:
@@ -434,6 +420,12 @@ importers:
       '@getknext/core':
         specifier: workspace:^
         version: link:../kn-next
+
+  packages/kn-next/src/__tests__/fixtures/dev-edge-fence:
+    devDependencies:
+      '@types/react':
+        specifier: 19.2.18
+        version: 19.2.18
 
   packages/lib:
     dependencies:
@@ -3372,6 +3364,9 @@ packages:
 
   '@types/react@19.2.13':
     resolution: {integrity: sha512-KkiJeU6VbYbUOp5ITMIc7kBfqlYkKA5KhEHVrGMmUUMt7NeaZg65ojdPk+FtNrBAOXNVM5QM72jnADjM+XVRAQ==}
+
+  '@types/react@19.2.18':
+    resolution: {integrity: sha512-AnzbBERsrLKtk2XSfTbYRLjQPdy116Sty4q+T+Bp3IC4l6jNBvreVPAHmpq9qhXQM7CXZPjLVmGMw9sy+hxQ3w==}
 
   '@types/request@2.48.13':
     resolution: {integrity: sha512-FGJ6udDNUCjd19pp0Q3iTiDkwhYup7J8hpMW9c4k53NrccQFFWKRho6hvtPPEhnXWKvukfwAlB6DbDz4yhH5Gg==}
@@ -9380,6 +9375,10 @@ snapshots:
       csstype: 3.2.3
 
   '@types/react@19.2.13':
+    dependencies:
+      csstype: 3.2.3
+
+  '@types/react@19.2.18':
     dependencies:
       csstype: 3.2.3
 

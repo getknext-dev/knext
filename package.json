@@ -58,25 +58,25 @@
     "//overrides": "Trivy HIGH/CRITICAL remediation for the shipped file-manager image (#199; same discipline as the operator fix in #155: bump the deps, don't suppress). Chains: @getknext/lib → @cerbos/grpc (grpc-js, protobufjs) + minio (fast-xml-parser 4); @getknext/core → @google-cloud/storage (fast-xml-parser 5, retry-request → @types/request → form-data 2). Guarded by tests/supply-chain-workflow.test.ts.",
     "//overrides-nanoid": "Supply Chain nightly RED 6/6 on main (CVE-2026-67213, HIGH): nanoid 3.3.16 DoS via infinite loop, fixed 3.3.17. It arrives ONLY transitively via postcss, which depends on nanoid ^3.3.11 — so the existing postcss >=8.5.18 floor does NOT subsume it: every postcss 8.5.x still resolves nanoid to the newest 3.3.x, which was 3.3.16. Pinned at the 3.x line rather than moved to 5.x/6.x because postcss requires ^3, and 3.3.17 is the fixed version Trivy names. Same discipline as the rest of this block: bump the dep, do not suppress the finding.",
     "//overrides-465": "Docs-closure nightly RED (#465). fast-xml-parser 5 floor raised 5.5.6 → 5.10.1 (GHSA-8r6m-32jq-jx6q). sharp + postcss are BOTH pulled in by `next` itself — next pins `postcss: 8.4.31` exactly and `sharp: ^0.34.5` optionally, and still does at 16.2.11, so a Next bump would NOT subsume these. sharp ≥0.35.0 = GHSA-f88m-g3jw-g9cj (inherited libvips CVE-2026-33327/33328/35590/35591); apps/file-manager already declares sharp ^0.35.2, so 0.35.x is the version already exercised in-tree. postcss ≥8.5.18 = CVE-2026-45623 + GHSA-r28c-9q8g-f849. Guarded by tests/docs-closure-nightly-workflow.test.ts.",
-    "//overrides-vite": "ADR-0048 lifted the vite <8 CEILING; the >=7.3.5 FLOOR (the #199 Trivy remediation) still binds. The ceiling was major-pinning, and vinext -- now the only supported build target -- needs vite 8 for its parseSync export. Verified before lifting: vite 8.2.2 carries ZERO advisories at any severity. Blast radius is one file, apps/file-manager/vite.config.ts, the workspace's only vite dependent.",
-    "overrides": {
-      "@grpc/grpc-js": ">=1.14.4 <2",
-      "rollup": ">=4.59.0 <5",
-      "vite": ">=7.3.5",
-      "picomatch@4": ">=4.0.4 <5",
-      "fast-xml-parser@4": ">=4.5.5 <5",
-      "fast-xml-parser@5": ">=5.10.1 <6",
-      "form-data@2": ">=2.5.6 <3",
-      "lodash": ">=4.18.0 <5",
-      "nanoid@3": ">=3.3.17 <4",
-      "postcss": ">=8.5.18 <9",
-      "protobufjs": ">=7.6.1 <8",
-      "sharp": ">=0.35.0 <1"
-    }
+    "//overrides-vite": "ADR-0048 lifted the vite <8 CEILING; the >=7.3.5 FLOOR (the #199 Trivy remediation) still binds. The ceiling was major-pinning, and vinext -- now the only supported build target -- needs vite 8 for its parseSync export. Verified before lifting: vite 8.2.2 carries ZERO advisories at any severity. Blast radius is one file, apps/file-manager/vite.config.ts, the workspace's only vite dependent."
   },
   "lint-staged": {
     "*": [
       "biome check --write --no-errors-on-unmatched --files-ignore-unknown=true"
     ]
+  },
+  "overrides": {
+    "@grpc/grpc-js": ">=1.14.4 <2",
+    "rollup": ">=4.59.0 <5",
+    "vite": ">=7.3.5",
+    "picomatch@4": ">=4.0.4 <5",
+    "fast-xml-parser@4": ">=4.5.5 <5",
+    "fast-xml-parser@5": ">=5.10.1 <6",
+    "form-data@2": ">=2.5.6 <3",
+    "lodash": ">=4.18.0 <5",
+    "nanoid@3": ">=3.3.17 <4",
+    "postcss": ">=8.5.18 <9",
+    "protobufjs": ">=7.6.1 <8",
+    "sharp": ">=0.35.0 <1"
   }
 }
