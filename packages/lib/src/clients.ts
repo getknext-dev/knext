@@ -637,10 +637,31 @@ const createWriterDriver = (config: {
   idleTimeoutMillis: number;
   connectionTimeoutMillis: number;
 }): Pool => {
-  if (bunSqlAvailable()) {
+  if (selectDbDriver() === 'bun') {
     return createBunSqlPool(config) as unknown as Pool;
   }
   return new Pool(config);
+};
+
+/**
+ * Which Postgres driver this process should use.
+ *
+ * Auto-detects by default — Bun's native client when running on Bun, `pg`
+ * otherwise. `KNEXT_DB_DRIVER` pins it, and that knob is not a convenience:
+ * without it the driver is a function of the RUNTIME, so a test asserting
+ * pg-specific behaviour silently exercises the Bun path the moment the suite is
+ * run under `bun test`. That is not a hypothetical — it is how four
+ * `getDbRO()` tests started failing, with an empty list of constructed pools
+ * and nothing pointing at the cause.
+ *
+ * Pinning also makes the OTHER path reachable: both drivers can now be
+ * exercised on one machine, instead of each being testable only under the
+ * runtime that selects it.
+ */
+export const selectDbDriver = (): 'bun' | 'pg' => {
+  const pinned = process.env.KNEXT_DB_DRIVER;
+  if (pinned === 'pg' || pinned === 'bun') return pinned;
+  return bunSqlAvailable() ? 'bun' : 'pg';
 };
 
 export const getDbPool = () => {

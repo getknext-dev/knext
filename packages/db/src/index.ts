@@ -74,3 +74,27 @@ export function getDbRO<TSchema extends AnySchema = Record<string, never>>(
   reader = drizzle(roPool, { schema }) as unknown as NodePgDatabase<AnySchema>;
   return reader as unknown as NodePgDatabase<TSchema>;
 }
+
+/**
+ * Drop the cached drizzle clients so the next `getDb()`/`getDbRO()` rebuilds them.
+ *
+ * Exported for tests, and public for the same reason `@getknext/lib`'s
+ * `closeDbPool` / `resetDbActivity` / `resetPoolInstrumentor` are: the state is
+ * module-level, so nothing outside this module can clear it. A test runner with
+ * a module-registry reset could paper over that — vitest's `vi.resetModules()`
+ * did — but `bun:test` deliberately has none, and relying on one hid which
+ * state a module actually owns. It worked until some of that state moved onto
+ * `globalThis` (ADR-0027), at which point the registry reset silently stopped
+ * resetting it and nothing said so.
+ *
+ * This does NOT close the underlying pools: their lifecycle belongs to
+ * `@getknext/lib` (`closeDbPool`/`closeDbPoolRO`, wired into the SIGTERM drain),
+ * and closing them from here would sever connections the app still owns.
+ * `warnedNoReadReplica` resets too, so the one-time RO warning is observable
+ * again in the next test rather than swallowed by a previous one.
+ */
+export function resetDbClients(): void {
+  writer = null;
+  reader = null;
+  warnedNoReadReplica = false;
+}
