@@ -31,10 +31,21 @@ import { attachQuietErrorListener, type QuietRedisClient, quietRedisOptions } fr
  * up with Bun's defaults while the code read as though it were bounded.
  */
 
+/**
+ * The ambient scope `Bun.RedisClient` is looked up on. Injectable ONLY so this
+ * can be tested in both directions: under `bun test`, `globalThis.Bun` is
+ * readonly AND non-configurable, so neither assignment nor
+ * `Object.defineProperty` can stand it up or take it away. A function reading
+ * the global directly is observable in one direction only — always true on Bun,
+ * always false on Node — which is not a probe.
+ */
+export interface BunRedisScope {
+  Bun?: { RedisClient?: unknown };
+}
+
 /** Is the Bun-native Redis client available in this process? */
-export function bunRedisAvailable(): boolean {
-  const bun = (globalThis as { Bun?: { RedisClient?: unknown } }).Bun;
-  return typeof bun?.RedisClient === 'function';
+export function bunRedisAvailable(scope: BunRedisScope = globalThis as BunRedisScope): boolean {
+  return typeof scope.Bun?.RedisClient === 'function';
 }
 
 /**
@@ -105,11 +116,15 @@ export function createRedisClient(
   tag: string,
   overrides: Record<string, unknown> = {},
   ctorOverride?: RedisCtor,
+  // Injectable for the same reason `bunRedisAvailable` takes one: the Bun
+  // global cannot be stubbed under `bun test`, so without this the Bun branch
+  // and the ioredis branch are not both reachable from one runtime.
+  scope: BunRedisScope = globalThis as BunRedisScope,
 ): KnextRedisClient {
   const quiet = quietRedisOptions(overrides);
 
-  if (!ctorOverride && bunRedisAvailable()) {
-    const bun = (globalThis as { Bun?: { RedisClient?: RedisCtor } }).Bun;
+  if (!ctorOverride && bunRedisAvailable(scope)) {
+    const bun = scope.Bun as { RedisClient?: RedisCtor } | undefined;
     // Bind the constructor to a plain local FIRST. `new (bun?.RedisClient)(...)`
     // is a SyntaxError — "constructor in/after an optional chaining is not
     // allowed" — and it is one an older parser will happily accept, so this

@@ -171,8 +171,11 @@ export function createBunSqlPool(
  * no module to import — it is a runtime global — and reaching it this way keeps
  * the Node bundle free of any Bun reference.
  */
-function defaultSqlFactory(config: BunSqlPoolConfig): BunSqlClient {
-  const bun = (globalThis as { Bun?: { SQL?: new (opts: unknown) => BunSqlClient } }).Bun;
+export function defaultSqlFactory(
+  config: BunSqlPoolConfig,
+  scope: BunScope = globalThis as BunScope,
+): BunSqlClient {
+  const bun = scope.Bun as { SQL?: new (opts: unknown) => BunSqlClient } | undefined;
   if (typeof bun?.SQL !== 'function') {
     throw new Error(
       'createBunSqlPool called without Bun.SQL available — this path must ' +
@@ -189,8 +192,22 @@ function defaultSqlFactory(config: BunSqlPoolConfig): BunSqlClient {
   });
 }
 
+/**
+ * The ambient scope `Bun.SQL` is looked up on. Injectable ONLY so this can be
+ * tested in both directions.
+ *
+ * Under `bun test`, `globalThis.Bun` is both readonly AND non-configurable:
+ * assignment throws, and so does `Object.defineProperty`. There is no way to
+ * stand it up or take it away, so a function that reads the global directly can
+ * only ever be observed returning one answer — on Bun, always `true`; on Node,
+ * always `false`. Taking the scope as a parameter is what makes the other
+ * branch reachable.
+ */
+export interface BunScope {
+  Bun?: { SQL?: unknown };
+}
+
 /** Is the Bun-native path available in this process? */
-export function bunSqlAvailable(): boolean {
-  const bun = (globalThis as { Bun?: { SQL?: unknown } }).Bun;
-  return typeof bun?.SQL === 'function';
+export function bunSqlAvailable(scope: BunScope = globalThis as BunScope): boolean {
+  return typeof scope.Bun?.SQL === 'function';
 }

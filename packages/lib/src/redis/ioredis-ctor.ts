@@ -1,3 +1,4 @@
+import { createRequire } from 'node:module';
 import type RedisClient from 'ioredis';
 
 /**
