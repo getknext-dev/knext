@@ -32,8 +32,8 @@ import { parseArgs } from "node:util";
 import { createLogger } from "../utils/logger";
 import { handleUsageError, UsageError } from "./shared";
 import {
-    findTracingRoot,
     NO_LOCKFILE_INSTALL,
+    resolveTracingRoot,
     shadowingConfigFor,
 } from "./tracing-root";
 
@@ -112,15 +112,26 @@ export interface Layout {
     installCmd: string;
 }
 
-/** Resolve the layout facts every emitted path depends on, once. */
-export function resolveLayout(appDir: string): Layout {
+/**
+ * Resolve the layout facts every emitted path depends on, once.
+ *
+ * Goes through the same resolver `deploy`/`preview` use (#644, #861), so an
+ * explicit `outputFileTracingRoot` moves what `create` bakes and what the build
+ * is rooted at together. Calling the walk directly is what let them disagree:
+ * pinning the root moved the deploy context while the Dockerfile kept the
+ * prefix inferred from the unpinned one.
+ *
+ * `create` still tolerates the no-lockfile case that `requireBuildContext`
+ * rejects: an app is scaffolded BEFORE anything is installed, and with no
+ * marker anywhere Next traces from the app directory itself — which is exactly
+ * what the null root falls back to here.
+ */
+export function resolveLayout(
+    appDir: string,
+    warn?: (message: string) => void,
+): Layout {
     const app = resolve(appDir);
-    // Same walk `deploy`/`preview` use for the docker build context (#644).
-    // `create` tolerates the no-lockfile case that `requireBuildContext`
-    // rejects: an app is scaffolded BEFORE anything is installed, and with no
-    // lockfile anywhere Next traces from the app directory itself — which is
-    // exactly what the null root falls back to here.
-    const { root: found, installCmd } = findTracingRoot(app);
+    const { root: found, installCmd } = resolveTracingRoot(app, warn);
     const root = found ?? app;
     const rel = relative(root, app);
     const standalonePrefix =

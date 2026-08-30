@@ -404,6 +404,63 @@ function warnDuplicatedLockFiles(
 const log = createLogger({ module: "tracing-root" });
 
 /**
+ * The install command for a root chosen by EXPLICIT CONFIG rather than by the
+ * walk.
+ *
+ * `findTracingRoot` picks its manager from the whole marker chain, because the
+ * chain is what it walked. A pinned root has no chain — the user named one
+ * directory — so the only question is which marker sits in it. That is also the
+ * directory the generated Dockerfile installs in (`WORKDIR` is the context
+ * root), so reading anywhere else would emit a command for a lockfile that is
+ * not there.
+ *
+ * pnpm is checked first for the same reason it wins in the walk: `npm ci`
+ * cannot install a pnpm workspace, so a root carrying both must not resolve
+ * to npm.
+ */
+function installCommandAt(root: string): string {
+    if (existsSync(join(root, "pnpm-lock.yaml")))
+        return "corepack enable && pnpm install --frozen-lockfile";
+    if (existsSync(join(root, PNPM_WORKSPACE_FILE)))
+        // A workspace with no lockfile beside it: frozen would fail the build.
+        return "corepack enable && pnpm install";
+    for (const l of LOCKFILES)
+        if (existsSync(join(root, l.file))) return l.install;
+    return NO_LOCKFILE_INSTALL;
+}
+
+/**
+ * The ONE resolution order — explicit config first, then the lockfile walk —
+ * shared by every caller that needs to know where the build is rooted.
+ *
+ * It exists because `create` and `deploy` each had their own (#860, #861).
+ * `deploy` honoured `outputFileTracingRoot` and warned on an ambiguous marker
+ * chain; `create` called the walk directly and did neither. So pinning the root
+ * moved the deploy context while leaving the Dockerfile `create` had already
+ * baked untouched — #857's symptom, baked paths pointing at a directory the
+ * build never wrote, reached by pinning instead of by a wrong inference.
+ *
+ * `root` is null only when nothing above the app carries a marker. What that
+ * means still differs per caller — normal for `create`, fatal for `deploy` —
+ * and that difference is the callers', not this function's.
+ */
+export function resolveTracingRoot(
+    appDir: string,
+    warn: (message: string) => void = (m) => log.warn(m),
+): { root: string | null; installCmd: string } {
+    const configured = configuredTracingRoot(appDir);
+    if (configured)
+        return {
+            root: configured.root,
+            installCmd: installCommandAt(configured.root),
+        };
+
+    const { root, installCmd, lockFiles } = findTracingRoot(appDir);
+    if (root) warnDuplicatedLockFiles(lockFiles, root, warn);
+    return { root, installCmd };
+}
+
+/**
  * The docker build context for an app at `appDir`, or THROW.
  *
  * Order of resolution mirrors Next's exactly: an explicit `outputFileTracingRoot`
@@ -419,11 +476,7 @@ export function requireBuildContext(
     appDir: string,
     warn: (message: string) => void = (m) => log.warn(m),
 ): string {
-    const configured = configuredTracingRoot(appDir);
-    if (configured) return configured.root;
-
-    const { root, lockFiles } = findTracingRoot(appDir);
-    if (root) warnDuplicatedLockFiles(lockFiles, root, warn);
+    const { root } = resolveTracingRoot(appDir, warn);
     if (!root) {
         throw new Error(
             `Cannot determine the Docker build context: no lockfile found in ${resolve(appDir)} ` +

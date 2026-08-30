@@ -563,3 +563,94 @@ describe("#857 — a pnpm-lock.yaml below the root does not make the install fro
         expect(found.installCmd).not.toContain("--frozen-lockfile");
     });
 });
+
+/**
+ * #860 + #861 — `create` and `deploy` must answer the root question the same way.
+ *
+ * They were two thirds of the way there. `deploy`/`preview` go through
+ * `requireBuildContext`, which resolves EXPLICIT CONFIG FIRST and warns when the
+ * marker chain is ambiguous. `resolveLayout` called `findTracingRoot` directly,
+ * so it did neither.
+ *
+ * The consequence is #857's exact symptom reached by a different road: baked
+ * paths pointing at a directory the build never wrote. `create` is the command
+ * that bakes the install command and the standalone prefix into the Dockerfile,
+ * so when the two disagree it is the Dockerfile that is wrong.
+ */
+describe("create resolves the root exactly as deploy does (#860, #861)", () => {
+    /**
+     * The measured case from #861: a marker at the outer root AND a workspace
+     * inside it, with `outputFileTracingRoot` pinned to the inner one. The walk
+     * says the outer; Next — and therefore `deploy` — says the inner.
+     */
+    const pinnedRepo = () => {
+        const root = repo({
+            "package-lock.json": "{}",
+            "proj/pnpm-workspace.yaml": "packages: ['apps/*']\n",
+            "proj/pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+            "proj/apps/a/package.json": "{}",
+        });
+        writeFileSync(
+            join(root, "proj/apps/a/next.config.ts"),
+            // `path.join(__dirname, "../..")` from `proj/apps/a` is `proj`.
+            'import { join } from "node:path";\n' +
+                "export default { outputFileTracingRoot: join(__dirname, \"../..\") };\n",
+        );
+        return root;
+    };
+
+    it("honours outputFileTracingRoot, so the layout root IS the build context", () => {
+        const root = pinnedRepo();
+        const appDir = join(root, "proj/apps/a");
+        expect(resolveLayout(appDir).root).toBe(requireBuildContext(appDir));
+    });
+
+    it("bakes a standalone prefix relative to the root the build actually uses", () => {
+        const root = pinnedRepo();
+        const appDir = join(root, "proj/apps/a");
+        // Against the OUTER root the prefix was `proj/apps/a/` — a path the
+        // pinned build never writes, which is what makes the image break.
+        expect(resolveLayout(appDir).standalonePrefix).toBe("apps/a/");
+    });
+
+    it("picks the install command from the pinned root, where the Dockerfile installs", () => {
+        const root = pinnedRepo();
+        // The context root carries `pnpm-lock.yaml`; the outer one carries an
+        // npm lockfile. `npm ci` cannot install a pnpm workspace.
+        expect(resolveLayout(join(root, "proj/apps/a")).installCmd).toContain(
+            "pnpm install --frozen-lockfile",
+        );
+    });
+
+    it("warns on an ambiguous marker chain — the warning create never surfaced", () => {
+        const root = repo({
+            "package-lock.json": "{}",
+            "proj/package-lock.json": "{}",
+            "proj/apps/a/package.json": "{}",
+        });
+        const warnings: string[] = [];
+        resolveLayout(join(root, "proj/apps/a"), (m) => warnings.push(m));
+        expect(warnings.join("\n")).toContain("Multiple root markers detected");
+    });
+
+    it("stays silent when the chain is unambiguous", () => {
+        const root = repo({
+            "package-lock.json": "{}",
+            "apps/a/package.json": "{}",
+        });
+        const warnings: string[] = [];
+        resolveLayout(join(root, "apps/a"), (m) => warnings.push(m));
+        expect(warnings).toEqual([]);
+    });
+
+    it("still tolerates the no-lockfile case deploy rejects", () => {
+        // An app is scaffolded BEFORE anything is installed. `deploy` throws
+        // here; `create` must fall back to the app directory itself, which is
+        // where Next traces from when nothing above carries a marker.
+        const root = repo({ "a/package.json": "{}" });
+        const appDir = join(root, "a");
+        expect(() => requireBuildContext(appDir)).toThrow();
+        expect(resolveLayout(appDir).root).toBe(appDir);
+        expect(resolveLayout(appDir).standalonePrefix).toBe("");
+    });
+});
