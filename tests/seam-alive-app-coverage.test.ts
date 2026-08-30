@@ -241,15 +241,15 @@ describe('#408 — seam-alive gate covers EVERY app, by scanning (not by enumera
   it('the matrix job BUILDS the app it gates, filtering by PATH (a name filter matches nothing)', () => {
     const job = ciWorkflow.slice(ciWorkflow.indexOf('\n  seam-alive:'));
     const body = job.slice(0, job.indexOf('\n  no-latest-guard:') + 1 || undefined);
-    // `pnpm --filter <x>` matches on PACKAGE NAME, but the matrix carries DIRECTORY
+    // `bun run --filter <x>` matches on PACKAGE NAME, but the matrix carries DIRECTORY
     // names — and they already differ (apps/docs is package "knext-docs"). Verified:
-    // `pnpm --filter docs exec pwd` prints "No projects matched the filters" and
+    // `bun run --filter docs exec pwd` prints "No projects matched the filters" and
     // exits 0, i.e. builds NOTHING while looking fine; `--filter ./apps/docs` works.
     expect(
       body,
       'the per-app build must filter by PATH (./apps/${{ matrix.app }}) — a name ' +
         'filter silently matches nothing whenever a package name differs from its dir',
-    ).toMatch(/pnpm --filter \.\/apps\/\$\{\{ matrix\.app \}\} build/);
+    ).toMatch(/bun run --filter \.\/apps\/\$\{\{ matrix\.app \}\} build/);
     expect(body).toMatch(/KNEXT_REQUIRE_STANDALONE: '1'/);
   });
 

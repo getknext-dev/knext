@@ -145,9 +145,9 @@ function ciJobs(yml: string): CiJob[] {
 }
 
 /** The command the gate step runs, matched against a PARSED `run:` value. */
-const TYPECHECK_COMMAND = /(?:^|\s)pnpm run typecheck\b/;
+const TYPECHECK_COMMAND = /(?:^|\s)bun run typecheck\b/;
 /** The same step, matched against the raw YAML text of a job block. */
-const TYPECHECK_RUN = /run:\s*pnpm run typecheck\b/;
+const TYPECHECK_RUN = /run:\s*bun run typecheck\b/;
 /** The job that must own it. */
 const TYPECHECK_JOB = 'typecheck-root';
 
@@ -244,12 +244,12 @@ describe('root typecheck script + CI wiring (#527)', () => {
 
   it('the root package.json has a `typecheck` script pointed at the root config', () => {
     const script = pkg.scripts?.typecheck;
-    expect(script, 'root `pnpm typecheck` must exist').toBeTypeOf('string');
+    expect(script, 'root `bun run typecheck` must exist').toBeTypeOf('string');
     expect(script).toContain(TSCONFIG);
   });
 
   it('ci.yml runs the root typecheck', () => {
-    expect(/run:\s*pnpm run typecheck\b/.test(ciYml)).toBe(true);
+    expect(/run:\s*bun run typecheck\b/.test(ciYml)).toBe(true);
   });
 
   it('it runs ALONGSIDE Lint & Test — its own job, not gated behind it', () => {

@@ -78,17 +78,19 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
 
       - name: Install deps
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       - name: Build CLI (dist/cli/preview.js)
         run: |
-          pnpm --filter @getknext/lib build
-          pnpm --filter @getknext/db build
-          pnpm --filter @getknext/core build
+          bun run --filter @getknext/lib build
+          bun run --filter @getknext/db build
+          bun run --filter @getknext/core build
 
       - name: Configure cluster + registry access
         # Cluster-gated: requires KUBECONFIG + registry creds that DO NOT exist
@@ -148,17 +150,19 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
 
       - name: Install deps
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       - name: Build CLI (dist/cli/preview.js)
         run: |
-          pnpm --filter @getknext/lib build
-          pnpm --filter @getknext/db build
-          pnpm --filter @getknext/core build
+          bun run --filter @getknext/lib build
+          bun run --filter @getknext/db build
+          bun run --filter @getknext/core build
 
       - name: Configure cluster access
         env:

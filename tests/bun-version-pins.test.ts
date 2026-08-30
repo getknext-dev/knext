@@ -76,8 +76,22 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
   it('finds exactly the known steps per file — a DISAPPEARING step is as loud as an unpinned one', () => {
     const byFile: Record<string, number> = {};
     for (const s of steps) byFile[s.file] = (byFile[s.file] ?? 0) + 1;
+    // Counts grew when the workspace moved off pnpm: `setup-bun` now installs
+    // the package manager for every lane that used to run `pnpm/action-setup`,
+    // so most workflows gained one step and ci.yml gained several. The exact
+    // map is the point — a step DISAPPEARING is as loud as an unpinned one,
+    // which a `toBeGreaterThan` would miss.
+    //
+    // test-e2e-deploy.yml is deliberately NOT in this list beyond its original
+    // step: its pnpm drives the next.js compat harness (next.js's own repo uses
+    // pnpm), not knext's workspace, so it was left alone.
     expect(byFile).toEqual({
-      'ci.yml': 5,
+      'ci.yml': 13,
+      'docs-closure-nightly.yml': 1,
+      'mutation-prover-nightly.yml': 1,
+      'operator-e2e-nightly.yml': 3,
+      'preview.yml': 2,
+      'scale-zero-pg.yml': 1,
       'test-e2e-deploy.yml': 1,
       'bun-sandbox-fetch-ab.yml': 1,
     });

@@ -101,21 +101,23 @@ jobs:
         with:
           node-version: '24'
       
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
       
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       - name: Run Biome lint & format check
-        run: pnpm run lint
+        run: bun run lint
 
       # Fail FAST on the TS5097 main-red class (#289): a relative import written
       # with an explicit .ts/.tsx extension passes vitest at runtime but fails
       # `tsc --noEmit` under moduleResolution:bundler. Runs before the builds so
       # the branch goes red at PR time, not only after the post-build typecheck.
       - name: Guard — no .ts/.tsx import extensions (TS5097)
-        run: pnpm run lint:ts-imports
+        run: bun run lint:ts-imports
 
       # Mutation residue (#645): a mutation-testing proof that was never restored
       # leaves the INVERSE of the fix in the tree, under a commit message
@@ -124,14 +126,14 @@ jobs:
       # scans every tracked file for the marker instead. This step is red-on-fail
       # and carries no soft-failure escape: it happened twice in one session.
       - name: Guard — no mutation residue in tracked files (#645)
-        run: pnpm run lint:mutation-residue
+        run: bun run lint:mutation-residue
 
       # ADR phase gates (#709): the validator that keeps a phase from advancing on a
       # number nobody measured. It shipped running in NO job and with NO test, so two
       # of the four rules its own docblock advertised were unenforced and nothing
       # noticed. A gate that runs nowhere is documentation.
       - name: Guard — ADR phase gates are internally consistent
-        run: pnpm run verify:phase-gates
+        run: bun run verify:phase-gates
 
       # @getknext/core ships only dist/ and its exports resolve to ./dist/* (#114).
       # The publish-surface test asserts every exports subpath exists in dist, so
@@ -140,16 +142,16 @@ jobs:
       # so without lib's dist the core build hard-fails (TS2307). Same lib→core
       # order as the compat-smoke and bytecode jobs.
       - name: Build @getknext/lib
-        run: pnpm --filter @getknext/lib build
+        run: bun run --filter @getknext/lib build
 
       # @getknext/core type-imports @getknext/db (the `kn-next db migrate` runner lives
       # in @getknext/db/migrate, #242), so without db's dist the core build hard-fails
       # (TS2307). db depends on lib, so the order is lib→db→core.
       - name: Build @getknext/db
-        run: pnpm --filter @getknext/db build
+        run: bun run --filter @getknext/db build
 
       - name: Build @getknext/core
-        run: pnpm --filter @getknext/core build
+        run: bun run --filter @getknext/core build
 
       # Typecheck gate (#261): per-package `tsc --noEmit` so the strict-mode
       # baseline can never regrow silently. Runs AFTER the lib→db→core builds
@@ -159,27 +161,27 @@ jobs:
       # tsconfig.typecheck.json, which (unlike their build tsconfigs) pulls the
       # test files into scope — the exact gap this gate closes.
       - name: Typecheck @getknext/lib (tsc --noEmit, tests in scope)
-        run: pnpm --filter @getknext/lib typecheck
+        run: bun run --filter @getknext/lib typecheck
 
       - name: Typecheck @getknext/db (tsc --noEmit, tests in scope)
-        run: pnpm --filter @getknext/db typecheck
+        run: bun run --filter @getknext/db typecheck
 
       - name: Typecheck @getknext/core (tsc --noEmit, tests in scope)
-        run: pnpm --filter @getknext/core typecheck
+        run: bun run --filter @getknext/core typecheck
 
       - name: Typecheck kn-next (alias shim — node --check, no TS)
-        run: pnpm --filter kn-next typecheck
+        run: bun run --filter kn-next typecheck
 
       # @getknext/ui (private component lib) — self-contained, no dist deps; the
       # P6c coverage guard (ci-typecheck-contract.test.ts) requires every TS
       # workspace member be gated or documented-excluded.
       - name: Typecheck @getknext/ui (tsc --noEmit)
-        run: pnpm --filter @getknext/ui typecheck
+        run: bun run --filter @getknext/ui typecheck
 
       # apps/db-demo — dist-dependent on @getknext/db + @getknext/core (imports
       # @getknext/db and @getknext/db/schema), so it runs AFTER those builds above.
       - name: Typecheck db-demo (tsc --noEmit)
-        run: pnpm --filter db-demo typecheck
+        run: bun run --filter db-demo typecheck
 
       # apps/file-manager (#804) — reference e2e Next app, previously the
       # checker-that-never-runs: no typecheck gate anywhere, so real TS errors
@@ -188,10 +190,10 @@ jobs:
       # above. tsconfig.typecheck.json keeps generated `.next/` types out of
       # scope so the check is deterministic on this cold checkout.
       - name: Typecheck file-manager (tsc --noEmit)
-        run: pnpm --filter file-manager typecheck
+        run: bun run --filter file-manager typecheck
 
       - name: Run tests
-        run: pnpm exec vitest run --coverage
+        run: bun x vitest run --coverage
       
       - name: Upload coverage reports
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
@@ -226,14 +228,16 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       - name: Typecheck root tests/ (tsc --noEmit)
-        run: pnpm run typecheck
+        run: bun run typecheck
 
   compat-smoke:
     # knext adapter SMOKE suite — NOT the official Next.js compatibility suite (ADR-0007,
@@ -274,8 +278,10 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
 
       - name: Setup Bun
         if: matrix.runtime == 'bun'
@@ -290,26 +296,26 @@ jobs:
           # re-baseline (see #188's bun-version knob). 1.4 compat: #807.
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       # @getknext/lib and @getknext/core both ship only dist/ — they MUST be built
       # before the app. file-manager imports @getknext/core/adapters/otel-config and
       # the KnativeNextConfig type, and @getknext/core's exports now resolve to
       # ./dist/* (#114), so a missing core build breaks `next build`.
       - name: Build @getknext/lib
-        run: pnpm --filter @getknext/lib build
+        run: bun run --filter @getknext/lib build
 
       # @getknext/core type-imports @getknext/db (the `kn-next db migrate` runner lives
       # in @getknext/db/migrate, #242), so without db's dist the core build hard-fails
       # (TS2307). db depends on lib, so the order is lib→db→core.
       - name: Build @getknext/db
-        run: pnpm --filter @getknext/db build
+        run: bun run --filter @getknext/db build
 
       - name: Build @getknext/core
-        run: pnpm --filter @getknext/core build
+        run: bun run --filter @getknext/core build
 
       - name: Build file-manager via adapter
-        run: pnpm --filter file-manager build
+        run: bun run --filter file-manager build
 
       - name: Run knext compat-smoke (${{ matrix.runtime }})
         working-directory: apps/file-manager
@@ -343,28 +349,30 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       # @getknext/lib and @getknext/core ship only dist/ and must be built before the
       # app; the test also `pnpm deploy`s @getknext/core (needs its dist present).
       - name: Build @getknext/lib
-        run: pnpm --filter @getknext/lib build
+        run: bun run --filter @getknext/lib build
 
       # @getknext/core type-imports @getknext/db (the `kn-next db migrate` runner lives
       # in @getknext/db/migrate, #242), so without db's dist the core build hard-fails
       # (TS2307). db depends on lib, so the order is lib→db→core.
       - name: Build @getknext/db
-        run: pnpm --filter @getknext/db build
+        run: bun run --filter @getknext/db build
 
       - name: Build @getknext/core
-        run: pnpm --filter @getknext/core build
+        run: bun run --filter @getknext/core build
 
       - name: Build file-manager standalone (next build --webpack)
-        run: pnpm --filter file-manager build
+        run: bun run --filter file-manager build
 
       - name: Run SIGTERM shipped-bundle gates — drain + hard-cap (must NOT skip)
         env:
@@ -386,7 +394,7 @@ jobs:
           # `EADDRINUSE :::39188` on PR #676.
           KNEXT_REQUIRE_STANDALONE: '1'
         run: >-
-          pnpm exec vitest run
+          bun x vitest run
           apps/file-manager/sigterm-drain-e2e.test.ts
           apps/file-manager/sigterm-hardcap-e2e.test.ts
 
@@ -452,36 +460,38 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       # @getknext/lib and @getknext/core ship only dist/ and must be built before any
       # app; @getknext/core type-imports @getknext/db, so the order is lib→db→core.
       - name: Build @getknext/lib
-        run: pnpm --filter @getknext/lib build
+        run: bun run --filter @getknext/lib build
 
       - name: Build @getknext/db
-        run: pnpm --filter @getknext/db build
+        run: bun run --filter @getknext/db build
 
       - name: Build @getknext/core
-        run: pnpm --filter @getknext/core build
+        run: bun run --filter @getknext/core build
 
       # PATH filter, not a name filter: the matrix carries DIRECTORY names and
       # `pnpm --filter <name>` matches on PACKAGE NAME — which already differs for
       # apps/docs (package "knext-docs"). A name miss prints "No projects matched
       # the filters" and exits 0, i.e. builds nothing while looking fine.
       - name: Build ${{ matrix.app }} standalone (next build --webpack)
-        run: pnpm --filter ./apps/${{ matrix.app }} build
+        run: bun run --filter ./apps/${{ matrix.app }} build
 
       - name: Run seam-alive artifact gate (#352/#344, must NOT skip)
         env:
           # Converts the skipIf guard into a HARD failure if the build is missing,
           # so a green check can never mean "skipped".
           KNEXT_REQUIRE_STANDALONE: '1'
-        run: pnpm exec vitest run apps/${{ matrix.app }}/standalone-seam-alive.test.ts
+        run: bun x vitest run apps/${{ matrix.app }}/standalone-seam-alive.test.ts
 
   no-latest-guard:
     name: No :latest images in operator manifests
@@ -802,16 +812,18 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       # The live suite + its hermetic guards (DSN host guard, workflow contract).
       - name: Run the live @getknext/db suite
         run: >-
-          pnpm exec vitest run
+          bun x vitest run
           packages/db/src/__tests__/integration/live-postgres.test.ts
           packages/db/src/__tests__/live-dsn-guard.test.ts
           tests/db-live-workflow.test.ts
@@ -860,13 +872,15 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Setup pnpm
+      - name: Setup bun
         if: steps.filter.outputs.docs == 'true'
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
 
       - name: Install dependencies
         if: steps.filter.outputs.docs == 'true'
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       # lib→db→core, same ordering rationale as compat-smoke: core's dts build
       # type-imports @getknext/lib/clients and @getknext/db/migrate, so both must ship
@@ -874,15 +888,15 @@ jobs:
       # @getknext/core (and its ./adapter + ./validate subpaths) against that dist.
       - name: Build @getknext/lib
         if: steps.filter.outputs.docs == 'true'
-        run: pnpm --filter @getknext/lib build
+        run: bun run --filter @getknext/lib build
 
       - name: Build @getknext/db
         if: steps.filter.outputs.docs == 'true'
-        run: pnpm --filter @getknext/db build
+        run: bun run --filter @getknext/db build
 
       - name: Build @getknext/core
         if: steps.filter.outputs.docs == 'true'
-        run: pnpm --filter @getknext/core build
+        run: bun run --filter @getknext/core build
 
       # Config-validate gate: run the docs dogfood kn-next.config.ts through the
       # REAL @getknext/core/validate (the public surface), same code path
@@ -890,12 +904,12 @@ jobs:
       - name: Validate the docs kn-next.config.ts (real validateConfig)
         if: steps.filter.outputs.docs == 'true'
         working-directory: apps/docs
-        run: pnpm config:validate
+        run: bun run config:validate
 
       # Leg 1 — vanilla managed-host build (Vercel parity; KNEXT_ADAPTER unset).
       - name: Build knext-docs (vanilla / managed-host, KNEXT_ADAPTER unset)
         if: steps.filter.outputs.docs == 'true'
-        run: pnpm --filter knext-docs build
+        run: bun run --filter knext-docs build
 
       - name: Assert vanilla build output
         if: steps.filter.outputs.docs == 'true'
@@ -907,7 +921,7 @@ jobs:
         if: steps.filter.outputs.docs == 'true'
         env:
           KNEXT_ADAPTER: '1'
-        run: pnpm --filter knext-docs build
+        run: bun run --filter knext-docs build
 
       - name: Assert adapter standalone server output
         if: steps.filter.outputs.docs == 'true'
@@ -922,7 +936,7 @@ jobs:
       # remediations) are checked against the docs-only tree, not the whole repo.
       - name: Prune docs dependency closure (turbo prune → scoped lockfile)
         if: steps.filter.outputs.docs == 'true'
-        run: pnpm exec turbo prune knext-docs --out-dir ./.docs-closure
+        run: bun x turbo prune knext-docs --out-dir ./.docs-closure
 
       # Trivy fs scan of the docs closure lockfile. Report (don't block) on PRs;
       # ENFORCE (fail) on main — the same phased gate the image supply-chain job
@@ -1231,8 +1245,10 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -1240,9 +1256,9 @@ jobs:
           bun-version: '1.3.14' # PINNED — see the first setup-bun step's rationale (#754); guarded by tests/bun-version-pins.test.ts
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       - name: Compile-cache diagnostic under real bun
         env:
           KNEXT_REQUIRE_BUN: '1'
-        run: pnpm exec vitest run packages/kn-next/src/__tests__/compile-cache-health-bun.test.ts
+        run: bun x vitest run packages/kn-next/src/__tests__/compile-cache-health-bun.test.ts

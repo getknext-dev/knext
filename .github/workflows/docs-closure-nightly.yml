@@ -52,11 +52,13 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       # Materialise the DOCS-SCOPED dependency closure — identical to the ci.yml
       # docs-site step. Under pnpm the whole workspace shares ONE root
@@ -64,7 +66,7 @@ jobs:
       # pnpm-lock.yaml contains ONLY knext-docs + its @getknext/{core,db,lib}
       # closure; Trivy scans THAT lockfile.
       - name: Prune docs dependency closure (turbo prune → scoped lockfile)
-        run: pnpm exec turbo prune knext-docs --out-dir ./.docs-closure
+        run: bun x turbo prune knext-docs --out-dir ./.docs-closure
 
       # Trivy fs scan of the docs closure lockfile. NO path filter, NO
       # continue-on-error: the nightly ALWAYS enforces. The `with:` block below

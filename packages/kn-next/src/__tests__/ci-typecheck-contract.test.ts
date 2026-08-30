@@ -9,7 +9,7 @@
  *
  * This test pins the contract from BOTH sides:
  *   1. every non-private TS package under packages/* has a `typecheck` script
- *      AND a `pnpm --filter <name> typecheck` step in ci.yml;
+ *      AND a `bun run --filter <name> typecheck` step in ci.yml;
  *   2. every typecheck step in ci.yml points at an existing workspace package
  *      (no stale steps after a rename/removal).
  *
@@ -101,9 +101,9 @@ function hasTypecheckScript(m: PkgManifest): boolean {
     return typeof m.scripts?.typecheck === "string";
 }
 
-/** The `pnpm --filter <name> typecheck` invocations present in ci.yml. */
+/** The `bun run --filter <name> typecheck` invocations present in ci.yml. */
 function ciTypecheckFilters(): string[] {
-    return [...ciYml.matchAll(/pnpm --filter (\S+) typecheck/g)].map(
+    return [...ciYml.matchAll(/bun run --filter (\S+) typecheck/g)].map(
         (m) => m[1],
     );
 }
@@ -125,7 +125,7 @@ describe("ci.yml typecheck steps ↔ workspace non-private packages (#261 gate c
         expect(missing).toEqual([]);
     });
 
-    it("every non-private package has its own `pnpm --filter <name> typecheck` step in ci.yml", () => {
+    it("every non-private package has its own `bun run --filter <name> typecheck` step in ci.yml", () => {
         const missing = nonPrivate
             .map((m) => m.name ?? "(unnamed)")
             .filter((name) => !filters.includes(name));
@@ -188,7 +188,7 @@ describe("every TS workspace member is typecheck-covered or documented-excluded 
             .map((m) => m._dir ?? m.name);
         expect(
             gaps,
-            "each of these TS members needs EITHER a `typecheck` script wired into ci.yml (a `pnpm --filter <name> typecheck` step) OR an entry in DOCUMENTED_EXCLUSIONS with a reason",
+            "each of these TS members needs EITHER a `typecheck` script wired into ci.yml (a `bun run --filter <name> typecheck` step) OR an entry in DOCUMENTED_EXCLUSIONS with a reason",
         ).toEqual([]);
     });
 

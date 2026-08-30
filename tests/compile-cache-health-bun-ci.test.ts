@@ -72,7 +72,7 @@ describe('the real-bun compile-cache probe is wired into CI (#309)', () => {
   });
 
   it('installs the workspace, since the probe runs under the repo vitest', () => {
-    expect(jobBlock(), 'the job never installs workspace dependencies').toMatch(/pnpm install/);
+    expect(jobBlock(), 'the job never installs workspace dependencies').toMatch(/bun install/);
   });
 
   it('runs unconditionally on a PR and its failure fails the run (#661)', () => {
