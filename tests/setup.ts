@@ -1,3 +1,5 @@
+import { mock } from 'bun:test';
+
 /**
  * Preloaded before every `bun test` run (see `bunfig.toml`).
  *
@@ -31,3 +33,16 @@
 if (!process.env.KNEXT_DB_DRIVER) {
   process.env.KNEXT_DB_DRIVER = 'pg';
 }
+
+// ── `server-only` ────────────────────────────────────────────────────────────
+//
+// A bare specifier the Next compiler provides at build time
+// (next/dist/compiled/server-only). It is not resolvable at the repo root, so
+// any server-only module — the observability Prometheus client, the Cerbos
+// wrapper — fails to import under `bun test`. vitest aliased it to a stub for
+// exactly this reason.
+//
+// A module mock is safe here where the workspace aliases were not: nothing in
+// the suite mocks `server-only` itself, so there is no collision with a test's
+// own registration. The real guard still applies under `next build`.
+mock.module('server-only', () => ({}));

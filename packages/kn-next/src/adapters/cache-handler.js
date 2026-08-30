@@ -75,7 +75,7 @@ function logCacheEvent(type, source, key, options) {
 
 // ─── Redis Client (lazy, only when REDIS_URL is set) ───
 
-const REDIS_URL = process.env.REDIS_URL;
+let REDIS_URL = process.env.REDIS_URL;
 // REDIS_KEY_PREFIX is set by the deploy path (manifest generator / operator) to the
 // app name, so each app owns an isolated ISR keyspace. If Redis is in use but the var
 // is unset, the fallback below ('kn-next') will NOT match the app-name keyspace other
@@ -88,7 +88,7 @@ if (REDIS_URL && !process.env.REDIS_KEY_PREFIX) {
       'set REDIS_KEY_PREFIX to avoid a split keyspace.',
   );
 }
-const KEY_PREFIX = process.env.REDIS_KEY_PREFIX || 'kn-next';
+let KEY_PREFIX = process.env.REDIS_KEY_PREFIX || 'kn-next';
 
 function envMs(name, fallback) {
   const raw = Number.parseInt(process.env[name] ?? '', 10);
@@ -113,9 +113,30 @@ function envMs(name, fallback) {
 //    the full budget again and re-opens a connection: N requests → N hung
 //    sockets. With it, one probe per cooldown and everything else fails fast to
 //    origin.
-const CONNECT_TIMEOUT_MS = envMs('REDIS_CONNECT_TIMEOUT_MS', 5000);
-const COMMAND_TIMEOUT_MS = envMs('REDIS_COMMAND_TIMEOUT_MS', 2000);
-const RETRY_COOLDOWN_MS = envMs('REDIS_RETRY_COOLDOWN_MS', 5000);
+let CONNECT_TIMEOUT_MS = envMs('REDIS_CONNECT_TIMEOUT_MS', 5000);
+let COMMAND_TIMEOUT_MS = envMs('REDIS_COMMAND_TIMEOUT_MS', 2000);
+let RETRY_COOLDOWN_MS = envMs('REDIS_RETRY_COOLDOWN_MS', 5000);
+
+/**
+ * Re-read every env-derived value, for tests.
+ *
+ * These are computed once at import, which is right for a running pod — the
+ * environment does not change under it — but it made the module untestable
+ * without a module-registry reset. vitest had `vi.resetModules()`; `bun:test`
+ * deliberately does not, so the first value a test set won for the whole file
+ * and later cases silently exercised the wrong prefix or budget.
+ *
+ * Exported rather than inferred: an explicit reset states exactly which state
+ * this module owns, which a registry reset never did — and could not, once any
+ * of it moved onto `globalThis`.
+ */
+function __resetEnvForTests() {
+  REDIS_URL = process.env.REDIS_URL;
+  KEY_PREFIX = process.env.REDIS_KEY_PREFIX || 'kn-next';
+  CONNECT_TIMEOUT_MS = envMs('REDIS_CONNECT_TIMEOUT_MS', 5000);
+  COMMAND_TIMEOUT_MS = envMs('REDIS_COMMAND_TIMEOUT_MS', 2000);
+  RETRY_COOLDOWN_MS = envMs('REDIS_RETRY_COOLDOWN_MS', 5000);
+}
 
 let Redis;
 let redis;
@@ -597,3 +618,4 @@ class CacheHandler {
 }
 
 export default CacheHandler;
+export { __resetEnvForTests };
