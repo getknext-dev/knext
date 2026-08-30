@@ -71,6 +71,8 @@ export default defineConfig({
       '**/.claude/**',
       '**/*.docker-e2e.test.ts',
       'packages/db/**',
+      'packages/ui/**',
+      'examples/bun-exec/**',
     ],
     coverage: {
       provider: 'v8',

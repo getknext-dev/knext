@@ -7,7 +7,7 @@
   "scripts": {
     "build": "./build.sh",
     "dev": "vite dev",
-    "test": "vitest run",
+    "test": "node ../../scripts/bun-test.mjs examples/bun-exec",
     "test:image": "vitest run --config vitest.image.config.ts"
   },
   "dependencies": {

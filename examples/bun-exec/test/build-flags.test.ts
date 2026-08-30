@@ -1,8 +1,8 @@
+import { describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
 
 // ADR-0042's A12 / Escalation 2' was discharged on a measurement whose subject is
 // ONE command: `bun build --compile --minify --bytecode … .output/server/index.mjs`

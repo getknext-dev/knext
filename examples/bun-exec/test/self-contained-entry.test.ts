@@ -28,10 +28,11 @@
 //   the Request (`runtime`/`waitUntil`) and normalises the result so nitro/vinext
 //   route matching works. A raw `Bun.serve({ fetch: r => useNitroApp().fetch(r) })`
 //   answers a framework 404 for every route (only :9091 metrics survive).
+
+import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ENTRY = readFileSync(resolve(__dirname, '../knext-bun-entry.mjs'), 'utf8');

@@ -33,6 +33,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
+import { blankNonCode } from './lib/blank-non-code.mjs';
 
 const args = process.argv.slice(2);
 const write = args.includes('--write');
@@ -98,8 +99,14 @@ for (const file of files) {
   let src = original;
   const helpersUsed = new Set();
 
-  // vi.hoisted(fn) -> fn() — bun evaluates in place, so hoisting is moot.
-  src = src.replace(/vi\.hoisted\(/g, '(');
+  // vi.hoisted(fn) -> (fn)() — bun evaluates in place, so hoisting is moot.
+  //
+  // The previous version replaced `vi.hoisted(` with `(` and stopped, which left
+  // the ARROW rather than its result: `vi.hoisted(() => ({ a: 1 }))` became
+  // `(() => ({ a: 1 }))`, so every read of `x.a` was `undefined` on a function
+  // object. It failed far from here, as a TypeError inside an event handler.
+  // Appending the call needs the matching close paren, which a regex cannot find.
+  src = callHoisted(src);
 
   // Module mocks.
   src = src.replace(/\bvi\.mock\(/g, 'mock.module(').replace(/\bvi\.doMock\(/g, 'mock.module(');
@@ -134,8 +141,16 @@ for (const file of files) {
       .split(',')
       .map((n) => n.trim())
       .filter((n) => n && n !== 'vi');
+    // Probe CODE only, and require the identifier to be CALLED or dereferenced.
+    //
+    // A bare `\\bjest\\b` over the raw source matched `@testing-library/jest-dom`
+    // — an import path — and added an unused `jest` import to every file that
+    // merely mentioned it, which biome then failed. Two separate mistakes, both
+    // of the kind this repo keeps re-learning: probing prose as if it were code,
+    // and matching a name where only a usage counts.
+    const code = blankNonCode(src);
     for (const needed of ['mock', 'spyOn', 'jest', 'setSystemTime']) {
-      const used = new RegExp(`\\b${needed}\\b`).test(src);
+      const used = new RegExp(`\\b${needed}\\s*[.(]`).test(code);
       if (used && !kept.includes(needed)) kept.push(needed);
     }
     return `import { ${kept.sort().join(', ')} } from 'bun:test';`;
@@ -173,4 +188,43 @@ for (const { blockers } of report.refused) {
 }
 for (const [name, count] of [...byBlocker].sort((a, b) => b[1] - a[1])) {
   console.log(`  vi.${name}: ${count} file(s)`);
+}
+
+/**
+ * Rewrite every `vi.hoisted(<expr>)` to `(<expr>)()`.
+ *
+ * Scans for the matching close paren rather than pattern-matching the argument,
+ * because the argument is an arbitrary expression — arrow bodies here contain
+ * parens, braces, generics and strings. Depth counting over a
+ * comment-and-string-blanked copy is enough, and it is the same technique the
+ * repo's other scanners use rather than a fourth hand-rolled tokenizer.
+ */
+export function callHoisted(src) {
+  const NEEDLE = 'vi.hoisted(';
+  let out = src;
+  for (;;) {
+    const blanked = blankNonCode(out);
+    const start = blanked.indexOf(NEEDLE);
+    if (start === -1) return out;
+    const open = start + NEEDLE.length - 1;
+    let depth = 0;
+    let close = -1;
+    for (let i = open; i < blanked.length; i++) {
+      const ch = blanked[i];
+      if (ch === '(') depth++;
+      else if (ch === ')') {
+        depth--;
+        if (depth === 0) {
+          close = i;
+          break;
+        }
+      }
+    }
+    if (close === -1) {
+      // Unbalanced source: leave it alone rather than emit something broken.
+      // Refusing loudly beats a silent half-transform.
+      throw new Error(`unbalanced vi.hoisted( at offset ${start}`);
+    }
+    out = `${out.slice(0, start)}(${out.slice(open + 1, close)})()${out.slice(close + 1)}`;
+  }
 }

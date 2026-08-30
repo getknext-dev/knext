@@ -16,10 +16,11 @@
 //
 // This exercises the NET-NEW knext code (metrics/drain/auth). The vinext handler
 // composition is proven by the P1a/P2 spikes and re-proven on OKE — see README.
+
+import { afterEach, describe, expect, it } from 'bun:test';
 import { spawn, spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
 import {
   checkBearer,
   createGracefulShutdown,

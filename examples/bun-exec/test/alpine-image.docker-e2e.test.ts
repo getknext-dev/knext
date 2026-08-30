@@ -27,11 +27,11 @@
 // `bun-exec-alpine-image` CI job invokes. That wiring has its own guard:
 // `tests/bun-exec-alpine-image-ci.test.ts` (removing the job reddens it).
 
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { freePorts } from './e2e-support/ports';
 
 const EXAMPLE_DIR = resolve(__dirname, '..');

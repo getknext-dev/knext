@@ -28,7 +28,9 @@
  */
 
 import { execFileSync, spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { cpus } from 'node:os';
+import { fileURLToPath } from 'node:url';
 
 const argv = process.argv.slice(2);
 const flag = (name, fallback) => {
@@ -46,7 +48,12 @@ const files = execFileSync('git', ['ls-files', ...(targets.length ? targets : ['
   maxBuffer: 64 * 1024 * 1024,
 })
   .split('\n')
-  .filter((f) => /\.test\.tsx?$/.test(f));
+  .filter((f) => /\.test\.tsx?$/.test(f))
+  // Mirror `vitest.config.ts`'s exclusion of docker-dependent e2e suites. They
+  // fail on a machine without a running daemon for environmental reasons, not
+  // porting ones, and a runner that reports those as migration failures buries
+  // the real ones. They still run — in the job that provides a daemon.
+  .filter((f) => !/\.docker-e2e\.test\.tsx?$/.test(f));
 
 if (files.length === 0) {
   console.error('no test files matched');
@@ -58,10 +65,44 @@ console.log(`bun test — ${files.length} file(s), ${concurrency} at a time, iso
 const failures = [];
 let done = 0;
 
+/**
+ * The happy-dom registration + testing-library cleanup, as a bun preload.
+ *
+ * ABSOLUTE, resolved from this script rather than from a cwd. bun resolves
+ * `--preload` relative to the test file's own directory, not the process cwd,
+ * so a repo-relative path is "not found" for every file outside the repo root.
+ */
+const DOM_PRELOAD = fileURLToPath(new URL('../tests/helpers/bun-dom-preload.ts', import.meta.url));
+
+/**
+ * Does this file need a DOM?
+ *
+ * Decided by CONTENT, not by extension. `.tsx` is a good hint and a bad rule: a
+ * `.ts` file can render a component, and a `.tsx` file can be a pure type-level
+ * or server-side test that must not receive browser globals. Reading the imports
+ * answers the question that actually matters.
+ */
+function needsDom(file) {
+  let src;
+  try {
+    src = readFileSync(file, 'utf8');
+  } catch {
+    return false;
+  }
+  return /@testing-library\/react|\bdocument\.|\bwindow\./.test(src);
+}
+
 /** Run one file; resolve with its outcome rather than rejecting, so one red file does not abort the sweep. */
 function runFile(file) {
   return new Promise((resolve) => {
     const args = ['test', file];
+    // DOM tests need a `document` before their modules evaluate.
+    // `@testing-library/react` reads it at module scope, so an import inside the
+    // test file is already too late — a preload is the only ordering that works.
+    // Applied per-file rather than globally: giving a server-side test a browser
+    // global would let a `typeof document` probe take the browser branch, which
+    // is exactly the kind of pass that means nothing.
+    if (needsDom(file)) args.push('--preload', DOM_PRELOAD);
     if (withCoverage) args.push('--coverage');
     const child = spawn(bunBin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let output = '';
