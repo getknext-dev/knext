@@ -117,6 +117,11 @@ describe("ADR-0049 credential preflight (#874)", () => {
             },
         ]);
         expect(v.ok).toBe(false);
+        // …and says WHY it is worse, not just that it is wrong. `*` is caught
+        // twice — the wildcard branch and the outside-the-Role verb filter —
+        // so without this assertion the branch that explains it is decoration,
+        // which a mutation run proved by deleting it and staying green.
+        expect(v.findings.join(" ")).toMatch(/includes delete/i);
     });
 
     it("tolerates the rule shapes the API actually returns", () => {
