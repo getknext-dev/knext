@@ -107,7 +107,20 @@ describe('the docs-closure SBOM generator fails closed (#878)', () => {
     // such copies added 22 HIGH findings against versions not actually present
     // — the fastest way to teach people to ignore a gate.
     const root = fakeWorkspace(60);
-    const vendored = join(root, 'node_modules', 'pkg-0', 'dist', 'compiled', 'picomatch');
+    // `picomatch` must be REACHABLE by name, or the traversal excludes it for a
+    // reason that has nothing to do with the filter — which is how the first
+    // version of this test passed while the filter was disabled. A mutation run
+    // caught it: deleting the canonical check left this green.
+    const parent = join(root, 'node_modules', 'pkg-0');
+    writeFileSync(
+      join(parent, 'package.json'),
+      JSON.stringify({
+        name: 'pkg-0',
+        version: '1.0.0',
+        dependencies: { picomatch: '2.3.1' },
+      }),
+    );
+    const vendored = join(parent, 'dist', 'compiled', 'picomatch');
     mkdirSync(vendored, { recursive: true });
     writeFileSync(
       join(vendored, 'package.json'),
