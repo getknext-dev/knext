@@ -6,7 +6,15 @@
 - **Amends:** **ADR-0036** — its `Status` line, its close-out verdict *"Rejected for 1.0 (measured)"*,
   its clause *"What is explicitly NOT authorised: making `bun-exec` the default."*, and its
   **2026-07-22 build×runtime matrix**, which this ADR reduces from three valid cells to two by
-  excluding `node + vinext` (see Decision 2). It does **not** supersede ADR-0036: that document remains
+  excluding `node + vinext` (see Decision 2). **State correction (2026-08-30):** that matrix reduction
+  operates on a matrix that, when this ADR was written, existed in **neither** `kn-next.config.ts` nor
+  the CRD — so Decision 2 is a decision about future work, not a narrowing of shipped behaviour, and
+  must not be read as one. The `build` axis has since landed on both (ADR-0048: `config.ts:290`,
+  `nextapp_types.go:158`), with the CRD enum admitting only `turbopack`. The `bun ⇒ vinext` invariant
+  the reduction inherits from ADR-0036 was **never implemented and is now deliberately abandoned** —
+  see the state-correction block in ADR-0036 and the field comment on `Build`, which records why the
+  pairing is enforced against the artifact contract in the CLI rather than by a CEL rule in every
+  cluster's CRD. It does **not** supersede ADR-0036: that document remains
   the load-bearing engineering record — the `RuntimeContract` enumeration, the opaque-binary
   supply-chain rule, the one-CRD invariant, and the two benchmark runs that argued *against* this
   decision. Superseding it would retire exactly the evidence that must stay visible.
