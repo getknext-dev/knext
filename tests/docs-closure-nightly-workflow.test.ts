@@ -128,11 +128,15 @@ describe('#320 docs-closure nightly workflow exists and is scheduled', () => {
 });
 
 describe('#320 the nightly Trivy scan is fail-loud on HIGH/CRITICAL', () => {
-  it('scans the pruned closure lockfile with severity HIGH,CRITICAL, exit-code 1, ignore-unfixed', () => {
+  it('scans the closure SBOM with severity HIGH,CRITICAL, exit-code 1, ignore-unfixed', () => {
     const cfg = trivyWithConfig(read(NIGHTLY_WORKFLOW_PATH));
-    expect(cfg['scan-type'], 'must be an fs scan').toBe('fs');
-    expect(cfg['scan-ref'], 'must scan the docs closure lockfile').toBe(
-      './.docs-closure/pnpm-lock.yaml',
+    // An SBOM, not a lockfile. Trivy's bun parser does not descend into nested
+    // `parent/child` keys, so scanning `bun.lock` saw 509 of the 777 packages
+    // pnpm-lock exposed and missed CVE-2026-33671 — a HIGH that IS in the file.
+    // A gate that goes green because its parser cannot see is worse than none.
+    expect(cfg['scan-type'], 'must be an sbom scan').toBe('sbom');
+    expect(cfg['scan-ref'], 'must scan the generated closure SBOM').toBe(
+      './.docs-closure/closure.cdx.json',
     );
     expect(cfg.severity, 'must scan HIGH,CRITICAL').toBe('HIGH,CRITICAL');
     expect(cfg['exit-code'], 'must exit non-zero on findings').toBe('1');

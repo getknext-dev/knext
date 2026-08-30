@@ -952,19 +952,36 @@ jobs:
         run: bun x turbo prune knext-docs --out-dir ./.docs-closure
 
       # Trivy fs scan of the docs closure lockfile. Report (don't block) on PRs;
+      # The gate scans an SBOM of the closure's PRODUCTION dependencies, read from
+      # the installed tree — not a lockfile. Pointing Trivy at `bun.lock` instead
+      # was measured at 509 packages vs pnpm-lock's 777, missing a HIGH that IS in
+      # the file under a nested key its parser does not descend into.
+      # `scripts/sbom-docs-closure.mjs` carries the full measurement.
+      - name: Install the docs closure (the SBOM is read from the installed tree)
+        if: steps.filter.outputs.docs == 'true'
+        working-directory: ./.docs-closure
+        run: bun install
+
+      - name: Build the docs closure SBOM (production dependencies)
+        if: steps.filter.outputs.docs == 'true'
+        run: node scripts/sbom-docs-closure.mjs ./.docs-closure ./.docs-closure/closure.cdx.json
+
       # ENFORCE (fail) on main — the same phased gate the image supply-chain job
-      # uses. FAIL on HIGH/CRITICAL. NOTE: the pruned closure pulls in the shared
-      # workspace DEV toolchain (vitest→vite→rollup, picomatch) — any HIGH there is
-      # a pre-existing REPO-WIDE toolchain CVE (remediate via the root
-      # pnpm.overrides, like the other entries), not a docs-runtime issue; next /
-      # fumadocs / react are clean.
+      # uses. FAIL on HIGH/CRITICAL.
+      #
+      # The old note here said any HIGH in this closure was "a pre-existing
+      # REPO-WIDE toolchain CVE ... not a docs-runtime issue". That was wrong on
+      # its own example: picomatch@2.3.1 is reachable at RUNTIME via
+      # fast-glob -> micromatch -> picomatch. Scoping to production dependencies
+      # removes the toolchain noise that made the excuse necessary, so a finding
+      # here is now a finding about what ships.
       - name: Trivy scan — docs dependency closure (FAIL on HIGH/CRITICAL)
         if: steps.filter.outputs.docs == 'true'
         continue-on-error: ${{ github.ref != 'refs/heads/main' }}
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          scan-type: fs
-          scan-ref: ./.docs-closure/pnpm-lock.yaml
+          scan-type: sbom
+          scan-ref: ./.docs-closure/closure.cdx.json
           severity: HIGH,CRITICAL
           exit-code: '1'
           ignore-unfixed: true

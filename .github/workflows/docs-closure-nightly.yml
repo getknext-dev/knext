@@ -61,12 +61,22 @@ jobs:
         run: bun install --frozen-lockfile
 
       # Materialise the DOCS-SCOPED dependency closure — identical to the ci.yml
-      # docs-site step. Under pnpm the whole workspace shares ONE root
-      # pnpm-lock.yaml, so `turbo prune` emits a pruned workspace whose
-      # pnpm-lock.yaml contains ONLY knext-docs + its @getknext/{core,db,lib}
-      # closure; Trivy scans THAT lockfile.
-      - name: Prune docs dependency closure (turbo prune → scoped lockfile)
+      # docs-site step. `turbo prune` emits a pruned workspace containing ONLY
+      # knext-docs + its @getknext/{core,db,lib} closure.
+      - name: Prune docs dependency closure (turbo prune → scoped workspace)
         run: bun x turbo prune knext-docs --out-dir ./.docs-closure
+
+      # The gate scans an SBOM of the closure's PRODUCTION dependencies, read from
+      # the installed tree — not a lockfile. Pointing Trivy at `bun.lock` instead
+      # was measured at 509 packages vs pnpm-lock's 777, missing a HIGH that IS in
+      # the file under a nested key its parser does not descend into.
+      # `scripts/sbom-docs-closure.mjs` carries the full measurement.
+      - name: Install the docs closure (the SBOM is read from the installed tree)
+        working-directory: ./.docs-closure
+        run: bun install
+
+      - name: Build the docs closure SBOM (production dependencies)
+        run: node scripts/sbom-docs-closure.mjs ./.docs-closure ./.docs-closure/closure.cdx.json
 
       # Trivy fs scan of the docs closure lockfile. NO path filter, NO
       # continue-on-error: the nightly ALWAYS enforces. The `with:` block below
@@ -75,8 +85,8 @@ jobs:
       - name: Trivy scan — docs dependency closure (FAIL on HIGH/CRITICAL)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          scan-type: fs
-          scan-ref: ./.docs-closure/pnpm-lock.yaml
+          scan-type: sbom
+          scan-ref: ./.docs-closure/closure.cdx.json
           severity: HIGH,CRITICAL
           exit-code: '1'
           ignore-unfixed: true
@@ -112,19 +122,20 @@ jobs:
           # create MUST share it, so keep it a constant (never interpolated).
           title='Docs closure nightly RED'
           body="The nightly Trivy scan of the docs dependency closure (\`turbo prune knext-docs\`
-          → \`.docs-closure/pnpm-lock.yaml\`) FAILED on a HIGH/CRITICAL finding.
+          → \`bun install\` → \`.docs-closure/closure.cdx.json\`) FAILED on a HIGH/CRITICAL finding.
 
           - Run: ${RUN_URL}
           - Scan job result: ${SCAN_RESULT}
 
-          A transitive HIGH/CRITICAL entered the docs dev-toolchain closure
-          (typically vitest→vite→rollup, picomatch, or a @getknext/* runtime dep).
+          A transitive HIGH/CRITICAL entered the docs closure. The scan is scoped to
+          PRODUCTION dependencies — what actually ships — so unlike the old lockfile
+          scan this is not build-toolchain noise to be explained away.
           Because the per-PR \`docs-site\` gate is path-filtered + fail-on-main,
           this can land on a green PR and only red main later — this nightly
           catches it continuously.
 
-          **Remediation** (per the #155/#199/#319 discipline): BUMP the flagged
-          package via the root \`pnpm.overrides\`, don't suppress. Re-run this
+          **Remediation**: BUMP the flagged package via the root \`overrides\`,
+          don't suppress. Re-run this
           workflow to confirm green, then close this issue."
           # Idempotency: exactly-one open alert issue. Comment on it if present,
           # create (+ pin, best-effort) only when absent. --limit 100 explicitly
