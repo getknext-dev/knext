@@ -1164,7 +1164,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Install syft
-        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        uses: anchore/sbom-action/download-syft@aa80c8c5bd439a416a62804f2151ab38c671a638 # v0.24.1
 
       # Unlike download-syft (which exports to PATH itself), download-grype only
       # exposes the binary location via its `cmd` output — spawning bare `grype`
@@ -1173,7 +1173,7 @@ jobs:
       # user-influenced text, so interpolating it into `run:` is safe.
       - name: Install grype
         id: grype
-        uses: anchore/scan-action/download-grype@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        uses: anchore/scan-action/download-grype@8964e60c6fabdb85fdbbbfd9834d8f19c97a3086 # v7.4.1
 
       - name: Put grype on PATH
         run: dirname "${{ steps.grype.outputs.cmd }}" >> "$GITHUB_PATH"
