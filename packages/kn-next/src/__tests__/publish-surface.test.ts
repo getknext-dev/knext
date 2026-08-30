@@ -16,7 +16,7 @@
  * RED-first: with only the CLI entries built, the library targets are missing.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -143,5 +143,57 @@ describe("PK1: @getknext/core publish surface", () => {
                 ).toBe(true);
             }
         }
+    });
+});
+
+describe("every exports subpath is reachable by require(), not just import()", () => {
+    /**
+     * A conditional-exports entry with `types` + `import` but no `default` (or
+     * `require`) is invisible to `require.resolve()`. Node does not say "no
+     * matching condition" — it says **"subpath X is not defined by exports"**,
+     * which points at the manifest and sends you looking for a missing key that
+     * is right there.
+     *
+     * That is not hypothetical. `./internal/vinext-image-optimizer` shipped that
+     * way, and `install-smoke` failed on it with exactly that message. The time
+     * went into disproving substitution theories — a cached registry copy, a
+     * stale dist, a bad `files` allowlist — because the error named the wrong
+     * thing. Every sibling subpath had `default`; this one did not.
+     *
+     * Scanned rather than enumerated: a list of known-good subpaths is how the
+     * next one gets missed.
+     */
+    const PUBLISHABLE = [
+        "packages/kn-next/package.json",
+        "packages/lib/package.json",
+        "packages/db/package.json",
+    ];
+
+    it.each(PUBLISHABLE)("%s — no subpath is import-only", (rel) => {
+        const repoRoot = resolve(
+            dirname(fileURLToPath(import.meta.url)),
+            "../../../..",
+        );
+        const manifest = JSON.parse(
+            readFileSync(resolve(repoRoot, rel), "utf8"),
+        ) as {
+            exports?: Record<string, unknown>;
+        };
+
+        const importOnly = Object.entries(manifest.exports ?? {})
+            .filter(([, value]) => value !== null && typeof value === "object")
+            .filter(([, value]) => {
+                const conditions = value as Record<string, unknown>;
+                // `default` is the catch-all; `require` covers CJS explicitly.
+                // Either makes the subpath reachable from require.resolve().
+                return !conditions.default && !conditions.require;
+            })
+            .map(([subpath]) => subpath);
+
+        expect(
+            importOnly,
+            `these subpaths declare no \`default\`/\`require\` condition, so require.resolve() ` +
+                'reports them as "not defined by exports" even though they are',
+        ).toEqual([]);
     });
 });

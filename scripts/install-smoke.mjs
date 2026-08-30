@@ -643,6 +643,49 @@ try {
     ...publishedEntrypoints(p.dir),
     hasExports: JSON.parse(readFileSync(join(p.dir, 'package.json'), 'utf8')).exports !== undefined,
   }));
+  // --- 5a. are we testing what we PACKED? --------------------------------
+  //
+  // The subpath list above comes from the WORKSPACE manifests; the resolution
+  // below happens against the INSTALLED tree. If npm substituted a cached
+  // registry copy — trivially possible, since the local packages carry the same
+  // version as the published ones — those two disagree and the failure surfaces
+  // as "subpath X is not defined by exports", which points at the manifest
+  // rather than at the substitution. That is a confusing error about the wrong
+  // thing, and it cost real time.
+  //
+  // So compare first, and say plainly which package is not the one under test.
+  for (const entry of entries) {
+    if (!entry.hasExports) continue;
+    const installedManifest = join(
+      workDir,
+      'node_modules',
+      ...entry.name.split('/'),
+      'package.json',
+    );
+    if (!existsSync(installedManifest)) {
+      finish(FAIL, `${entry.name} is not installed at all — nothing to resolve subpaths against`);
+    }
+    const installed = JSON.parse(readFileSync(installedManifest, 'utf8'));
+    const sourcePkg = JSON.parse(
+      readFileSync(join(packed.find((p) => p.name === entry.name).dir, 'package.json'), 'utf8'),
+    );
+    const installedSubs = Object.keys(installed.exports ?? {}).sort();
+    const sourceSubs = Object.keys(sourcePkg.exports ?? {}).sort();
+    const missing = sourceSubs.filter((k) => !installedSubs.includes(k));
+    if (missing.length > 0) {
+      finish(
+        FAIL,
+        `the installed ${entry.name} is NOT the one this gate packed — it is missing ` +
+          `${missing.length} exports subpath(s) that the workspace declares ` +
+          `(${missing.slice(0, 3).join(', ')}${missing.length > 3 ? ', …' : ''}). ` +
+          `installed version ${installed.version}, workspace version ${sourcePkg.version}. ` +
+          'npm most likely resolved a cached registry copy at the same version instead of ' +
+          'the local tarball, which means this step has been testing the last published ' +
+          'release rather than the working tree.',
+      );
+    }
+  }
+
   // @getknext/db's subpaths include ./migrate — this proves `@getknext/db/migrate` (the
   // `kn-next db migrate` runner) resolves to real JS in a clean install.
   const allSubpaths = entries.filter((e) => e.hasExports).flatMap((e) => e.subpaths);
