@@ -7,7 +7,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
@@ -67,7 +67,26 @@ import { waitForListeningPort } from './e2e-support/child-ports';
  */
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const APP_DIR = __dirname;
+/**
+ * The app whose standalone build supplies the runner environment.
+ *
+ * Defaults to this directory for a local run, but is overridable because
+ * file-manager STOPPED producing a standalone tree when ADR-0048 made vinext
+ * its build. The subject of this gate is the node-server SUPERVISOR, not any
+ * particular app — the app's own `server.js` is replaced by the slow fixture
+ * via STANDALONE_SERVER_PATH — so it needs *a* standalone tree, and
+ * `apps/db-demo` is the one that still emits one.
+ *
+ * Without this the gate is worse than absent: with KNEXT_REQUIRE_STANDALONE=1
+ * it hard-fails on a build that no longer exists, and without it, it silently
+ * skips and reports green while testing nothing.
+ */
+const APP_DIR = process.env.KNEXT_SIGTERM_APP_DIR
+  ? resolve(process.env.KNEXT_SIGTERM_APP_DIR)
+  : __dirname;
+
+/** The app's directory name, used to find its entry inside the mirror. */
+const APP_NAME = basename(APP_DIR);
 const IGNORE_SERVER = resolve(__dirname, '__fixtures__/ignore-sigterm-standalone-server.mjs');
 
 // PORTS ARE OS-ASSIGNED, NEVER LITERAL (#678). This file used to pin 39188/9092
@@ -101,9 +120,9 @@ const RUNTIME_IMPORT = "import('@getknext/core/internal/node-server')";
 function findStandaloneMirrorRoot(): string | null {
   const standaloneDir = resolve(APP_DIR, '.next/standalone');
   if (!existsSync(standaloneDir)) return null;
-  const direct = join(standaloneDir, 'apps/file-manager/server.js');
+  const direct = join(standaloneDir, `apps/${APP_NAME}/server.js`);
   if (existsSync(direct)) return standaloneDir;
-  const found = spawnSync('find', [standaloneDir, '-path', '*/apps/file-manager/server.js'], {
+  const found = spawnSync('find', [standaloneDir, '-path', `*/apps/${APP_NAME}/server.js`], {
     encoding: 'utf8',
   });
   const line = found.stdout.split('\n').find((l) => l.trim().length > 0);

@@ -340,7 +340,23 @@ async function main() {
 
   // (b) RSC flight payload: GET / with `RSC: 1` → 200, content-type text/x-component.
   await check('b. RSC flight GET / (RSC: 1)', async () => {
-    const res = await request('/', { headers: { RSC: '1' } });
+    // vinext 307s an RSC request that lacks the `?_rsc` marker and serves the
+    // flight payload from the redirect target. Measured: `GET / (RSC:1)` ->
+    // 307 -> `/?_rsc`, and `GET /?_rsc (RSC:1)` -> 200 text/x-component, 7878b.
+    //
+    // So follow ONE same-origin redirect rather than failing on it. The
+    // capability is present; only the route to it differs, and this row exists
+    // to prove the payload is served — not to pin Next's URL convention.
+    let res = await request('/', { headers: { RSC: '1' } });
+    if (res.status === 307 || res.status === 308) {
+      const location = res.headers.location ?? res.headers.Location;
+      assert.ok(location, `RSC request redirected ${res.status} with no Location header`);
+      assert.ok(
+        location.startsWith('/'),
+        `RSC redirect left the origin (${location}) — a flight payload must not be off-host`,
+      );
+      res = await request(location, { headers: { RSC: '1' } });
+    }
     assert.strictEqual(res.status, 200, `expected 200, got ${res.status}`);
     const ct = res.headers['content-type'] || '';
     assert.ok(
@@ -472,7 +488,18 @@ async function main() {
   await check('i. Server Action round-trip (no-JS form POST)', async () => {
     const page = await request(FIXTURE_STREAM);
     assert.strictEqual(page.status, 200, `${FIXTURE_STREAM}: ${page.status}`);
-    const idMatch = page.body.match(/name="(\$ACTION_ID_[0-9a-fA-F]+)"/);
+    // Capture the WHOLE field name, not just the hex. React's action id is
+    // `$ACTION_ID_<hex>` under Next's own bundler, but vinext appends the
+    // hoisted export it belongs to:
+    //
+    //   name="$ACTION_ID_a15295808193#$$hoist_0_echoAction"
+    //
+    // The old pattern required the name to END after the hex, so it reported
+    // "the Server Action was not wired into the HTML" for a page whose form was
+    // wired correctly — a capability failure claimed on a spelling difference.
+    // What this row exists to prove is the ROUND TRIP, so take whatever the
+    // field is called and post that.
+    const idMatch = page.body.match(/name="(\$ACTION_ID_[^"]+)"/);
     assert.ok(
       idMatch,
       'no $ACTION_ID_* field in the rendered form — the Server Action was not wired into the HTML',
