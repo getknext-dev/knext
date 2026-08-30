@@ -90,6 +90,11 @@
       "types": "./dist/adapters/vinext-image-optimizer.d.ts",
       "import": "./dist/adapters/vinext-image-optimizer.js",
       "default": "./dist/adapters/vinext-image-optimizer.js"
+    },
+    "./internal/credential-scope": {
+      "types": "./dist/cli/ci/credential-scope.d.ts",
+      "import": "./dist/cli/ci/credential-scope.js",
+      "default": "./dist/cli/ci/credential-scope.js"
     }
   },
   "knext": {

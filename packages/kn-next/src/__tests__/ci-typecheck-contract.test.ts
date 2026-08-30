@@ -41,6 +41,15 @@ const ciYml = readFileSync(
  * Keyed by package `name`.
  */
 const DOCUMENTED_EXCLUSIONS: Record<string, string> = {
+    // The GitHub Action (packages/kn-next-action). It ships an action.yml, a
+    // README and one `.mjs` runner — no TypeScript source and no tsconfig, so
+    // `tsc --noEmit` has nothing to check. The logic it would typecheck is
+    // deliberately NOT here: the credential classifier lives in
+    // @getknext/core (`cli/ci/credential-scope.ts`), where it is covered by
+    // that package's typecheck and sits beside the Role definition
+    // `kn-next init-ci` generates from. The runner is thin on purpose.
+    "@getknext/action":
+        "composite action — action.yml + one .mjs runner, no TS source and no tsconfig; its logic lives in @getknext/core, which IS covered",
     // file-manager was excluded here until #804: its next-adapter.test.ts
     // fixtures carried real type debt (TS2345 vs the current NextAdapter ctx
     // types). The fixtures are re-typed and the app is now COVERED — a

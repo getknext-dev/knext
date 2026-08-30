@@ -1,0 +1,13 @@
+{
+  "name": "@getknext/action",
+  "version": "0.0.0",
+  "private": true,
+  "description": "GitHub Action: build, push and deploy a Next.js app to your own Kubernetes cluster via the knext operator.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "files": [
+    "action.yml",
+    "preflight.mjs",
+    "README.md"
+  ]
+}

@@ -90,7 +90,12 @@ describe("every dispatched verb parses its own argv", () => {
     )("`%s`'s target module handles -h/--help", (verb) => {
         const module = branches
             .find((b) => b.verb === verb)
-            ?.body.match(/await import\("\.\/([a-z-]+)"\)/)?.[1];
+            // Subdirectories included: `init-ci` dispatches to `./ci/init-ci-cmd`,
+            // and a flat-only pattern does not fail safe here — it reports "no
+            // dynamic import found" for a branch that has one, so the verb is
+            // never actually checked for --help handling once the message is
+            // read as noise.
+            ?.body.match(/await import\("\.\/([a-z0-9-]+(?:\/[a-z0-9-]+)*)"\)/)?.[1];
         expect(
             module,
             `no dynamic import found in the ${verb} branch`,

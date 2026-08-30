@@ -199,6 +199,10 @@
         "next",
       ],
     },
+    "packages/kn-next-action": {
+      "name": "@getknext/action",
+      "version": "0.0.0",
+    },
     "packages/kn-next-alias": {
       "name": "kn-next",
       "version": "0.3.1",
@@ -480,6 +484,8 @@
     "@fuma-translate/react": ["@fuma-translate/react@1.0.2", "", { "peerDependencies": { "@types/react": "*", "react": "^19.2.0", "react-dom": "^19.2.0" }, "optionalPeers": ["@types/react"] }, "sha512-uOiOtBx3nRXR8Nu1GzBf1tApgF1FErDBTHxRIAQeyQdyOoZbrNRN6H4kDCWObY4qyGeGbHydG0DHzgeUgFDMIw=="],
 
     "@fumadocs/tailwind": ["@fumadocs/tailwind@0.1.1", "", { "peerDependencies": { "tailwindcss": "^4.0.0" }, "optionalPeers": ["tailwindcss"] }, "sha512-BnPe52UxSaG8yKlHMKBxXw8h6GpK5qO55ci6+Qd5JnquTvIw6SpfbC1P+qAi82PuPWv1KZAWY8bxRk4+x9ctXw=="],
+
+    "@getknext/action": ["@getknext/action@workspace:packages/kn-next-action"],
 
     "@getknext/core": ["@getknext/core@workspace:packages/kn-next"],
 

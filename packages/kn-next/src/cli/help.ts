@@ -73,6 +73,12 @@ export const COMMAND_GROUPS: readonly CliCommandGroup[] = [
                     "scaffold a new knext-ready Next.js app (writes files only, no cluster changes)",
             },
             {
+                verb: "init-ci",
+                display: "init-ci",
+                summary:
+                    "generate a deploy workflow and the scoped RBAC it needs (writes files only, no cluster changes)",
+            },
+            {
                 verb: "validate",
                 display: "validate",
                 summary:
