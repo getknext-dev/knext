@@ -85,6 +85,8 @@ const LAYOUT: Record<string, string> = {
 const CLI_ONLY: Record<string, string> = {
     "Dockerfile.hbs":
         "the zone app is built by this repo's pipeline; a created app needs its own image recipe",
+    ".dockerignore.hbs":
+        "paired with Dockerfile.hbs — it bounds THAT image recipe's build context, so it is CLI-only for the same reason",
     "public/.gitkeep.hbs":
         "keeps the generated Dockerfile's `COPY … public` layer resolvable before the app has assets",
 };

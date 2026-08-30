@@ -33,7 +33,8 @@ import {
     writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
     createMain,
@@ -888,5 +889,58 @@ describe("#864 follow-ups — dry-run refuses, and the precedence list matches u
         expect(() =>
             writeScaffold({ appDir, name: "cjs864", force: true }),
         ).not.toThrow();
+    });
+});
+
+describe("#867 the scaffold ships a .dockerignore", () => {
+    /**
+     * The generated Dockerfile does `COPY . .`, and its context is the resolved
+     * tracing root — which is not always the app directory. When the lockfile
+     * walk finds a marker above the app, the context widens to that ancestor
+     * and everything under it is uploaded to the daemon and baked into the
+     * builder layer.
+     *
+     * `create` already WARNS on a duplicate root marker. A warning tells the
+     * user something is wrong; this file is what makes being wrong harmless.
+     *
+     * The secret exclusions are the load-bearing half. A `.env` in the context
+     * lands in a layer, and layers are extractable from any pushed image — so
+     * it is readable by anyone who can pull, not just someone who can exec.
+     * The runtime reads config from Kubernetes Secrets via env
+     * (`.claude/rules/security.md`), so nothing here is needed at build time.
+     */
+    const dockerignore = (): string => {
+        const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
+        return readFileSync(
+            resolve(repoRoot, "packages/kn-next/templates/app/.dockerignore.hbs"),
+            "utf8",
+        );
+    };
+
+    it("excludes secrets — the exposure that costs the most", () => {
+        const body = dockerignore();
+        for (const pattern of [".env", ".env.*", "*.pem", "*.key", ".npmrc", "kubeconfig"]) {
+            expect(body.split("\n")).toContain(pattern);
+        }
+        // …while still allowing the committed example, which carries no secret
+        // and is what a reader copies from.
+        expect(body.split("\n")).toContain("!.env.example");
+    });
+
+    it("excludes .git, dependencies and build output", () => {
+        const lines = dockerignore().split("\n");
+        for (const pattern of ["node_modules", ".git", ".next", ".output", "knext-exec*"]) {
+            expect(lines).toContain(pattern);
+        }
+    });
+
+    it("is rendered into the scaffold, not just present in the template", () => {
+        // A template file the generator never writes is decoration. `create`
+        // renders every `.hbs` under the template root, so the guard is that
+        // the file carries the `.hbs` suffix the loader keys on.
+        const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
+        expect(
+            existsSync(resolve(repoRoot, "packages/kn-next/templates/app/.dockerignore.hbs")),
+        ).toBe(true);
     });
 });
