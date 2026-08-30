@@ -662,3 +662,62 @@ recorded here rather than resolved.
   a bare `catch {}`, so the only symptom was a response that looked fine and was 96x too
   big. It now logs once and says what broke. Failing open is right; failing open
   *silently* is what made this expensive to find.
+
+---
+
+## E14 — file-manager on the full Bun toolchain, re-measured
+
+Same app, same machine, after the migration work: `@getknext/lib` and
+`@getknext/db` rebuilt as bundled ESM, dependencies installed with `bun install`,
+served by Bun.
+
+### Time to first response (n=6, median)
+
+| target | median | min | max |
+| --- | --- | --- | --- |
+| uncompiled `.output` under Bun | **186 ms** | 163 | 191 |
+| compiled single executable | **170 ms** | 150 | 171 |
+
+**What this measures, precisely:** process start → a static asset served. It
+covers binding the listener and serving from `.output/public`. It does NOT cover
+evaluating the application graph, because nitro serves static assets before that
+happens. E11–E13 used the same probe, so the comparison is like-for-like.
+
+Against E13's numbers on the same probe (879 ms uncompiled, 469 ms compiled),
+this is roughly **4–5x faster**. The app did not change; its dependencies did.
+The plausible cause is the ESM rebuild — `@getknext/lib` went from `tsc`-emitted
+CommonJS to a tsup-bundled ESM graph, which is far fewer modules to resolve and
+evaluate at boot. Recorded as an observation, not a proven mechanism: it was not
+isolated by rebuilding only that one thing.
+
+The gap between compiled and uncompiled has also closed to ~16 ms, from ~410 ms.
+If that holds up, the central trade in **ADR-0048 Amendment 2** — image
+optimization vs the single executable — is much cheaper than it looked, because
+the uncompiled path now costs almost nothing. That deserves re-measuring
+deliberately before the decision is taken on it.
+
+### Throughput
+
+**21,941 req/s** over 4 s at concurrency 20, static asset, zero errors.
+
+### Image optimization (`/_next/image`)
+
+Judged on decoded magic bytes, not the declared content-type:
+
+| client | bytes | declared | actual | vs source |
+| --- | --- | --- | --- | --- |
+| avif-capable | 2,116 | avif | avif | 86x smaller |
+| webp-only | 1,880 | webp | webp | 96x smaller |
+| legacy `*/*` | 23,124 | png | png | 8x smaller (resized only) |
+
+Source: 181,277 b PNG.
+
+### One number that is NOT a cold-start figure
+
+A first request to `/dashboard` takes **8.2 s** here. That is not boot cost — it
+is the DB wake-retry budget (`DB_WAKE_RETRY_BUDGET_MS`, default 8 s) doing its
+job against an environment with no Postgres at all. Reported because it is
+exactly the kind of measurement that gets mistaken for a regression: the page
+renders, it is simply waiting out a bounded retry for a database that is never
+coming. On a cluster with a scale-to-zero DB the same budget covers the ~2.5 s
+cold wake instead.
