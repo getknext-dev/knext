@@ -3,7 +3,7 @@
 # file-manager — vinext single-executable image (ADR-0048).
 #
 # Replaces the multi-stage node/standalone image. What that one needed and this
-# one does not: pnpm in the runtime layer, a `node_modules` deploy, a separate
+# one does not: a package manager in the runtime layer, a `node_modules` deploy, a separate
 # `sharp` runtime stage, and the baked V8 compile cache
 # (`scripts/warm-compile-cache.sh`). None of it survives, because the server is
 # one binary.
@@ -27,22 +27,22 @@
 # ---------------------------------------------------------------------------
 FROM oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb AS builder
 
-# Node is still required in the BUILD stage: the workspace packages compile with
-# tsc/tsup, and pnpm drives the install. It does not reach the runtime image.
-RUN apk add --no-cache nodejs npm libstdc++ libgcc
-RUN npm install -g pnpm@10.4.1
+# Node is still required in the BUILD stage: tsup shells out to `tsc` for the
+# .d.ts pass. It does not reach the runtime image. pnpm is gone — `bun install`
+# drives the workspace now, which is also why there is no `npm i -g` layer.
+RUN apk add --no-cache nodejs libstdc++ libgcc
 
 WORKDIR /repo
 COPY . .
 
-RUN pnpm install --frozen-lockfile
+RUN bun install --frozen-lockfile
 
 # Order matters: file-manager imports @getknext/lib's dist. Building the app
 # before the library compiles the OLD library — a mistake that cost real time
 # here, because the app builds fine and the bug only appears at runtime.
-RUN pnpm --filter "@getknext/lib" build
-RUN pnpm --filter "@getknext/db" build
-RUN pnpm --filter "@getknext/core" build
+RUN bun run --filter "@getknext/lib" build
+RUN bun run --filter "@getknext/db" build
+RUN bun run --filter "@getknext/core" build
 
 WORKDIR /repo/apps/file-manager
 

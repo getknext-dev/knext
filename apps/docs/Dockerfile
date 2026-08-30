@@ -23,22 +23,22 @@
 # ---------------------------------------------------------------------------
 FROM oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb AS builder
 
-# Node is required in the BUILD stage only: the workspace packages compile with
-# tsc/tsup and pnpm drives the install. It does not reach the runtime image.
-RUN apk add --no-cache nodejs npm libstdc++ libgcc
-RUN npm install -g pnpm@10.4.1
+# Node is still required in the BUILD stage: tsup shells out to `tsc` for the
+# .d.ts pass. It does not reach the runtime image. pnpm is gone — `bun install`
+# drives the workspace now, which is also why there is no `npm i -g` layer.
+RUN apk add --no-cache nodejs libstdc++ libgcc
 
 WORKDIR /repo
 COPY . .
 
-RUN pnpm install --frozen-lockfile
+RUN bun install --frozen-lockfile
 
 # Order matters: docs imports the libraries' dist. Building docs first compiles
 # against the PREVIOUS library — the app builds fine and the bug only appears at
 # runtime, which is what made this expensive when file-manager hit it.
-RUN pnpm --filter "@getknext/lib" build
-RUN pnpm --filter "@getknext/db" build
-RUN pnpm --filter "@getknext/core" build
+RUN bun run --filter "@getknext/lib" build
+RUN bun run --filter "@getknext/db" build
+RUN bun run --filter "@getknext/core" build
 
 WORKDIR /repo/apps/docs
 
