@@ -4,15 +4,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "next dev",
-    "build": "next build --webpack",
-    "start": "NODE_COMPILE_CACHE=.next/compile-cache node .next/standalone/apps/file-manager/server.js",
-    "start:bun": "bun .next/standalone/apps/file-manager/server.js",
+    "dev": "vinext dev",
+    "build": "vite build",
+    "start": "bun .output/server/index.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
     "compat-smoke": "node scripts/compat-smoke.mjs",
     "prod-image-probe": "node scripts/prod-image-probe.mjs",
     "prod-image-probe:selftest": "node scripts/prod-image-probe.selftest.mjs",
-    "build:vinext": "vite build",
     "build:exec": "kn-next build --target=vinext"
   },
   "dependencies": {
