@@ -81,13 +81,26 @@ let REDIS_URL = process.env.REDIS_URL;
 // is unset, the fallback below ('kn-next') will NOT match the app-name keyspace other
 // pods read/write — a silent split keyspace = cache misses + cross-app collisions.
 // Surface it loudly rather than diverging quietly (see architecture review #2).
-if (REDIS_URL && !process.env.REDIS_KEY_PREFIX) {
-  console.warn(
-    "[cache-handler] REDIS_KEY_PREFIX is unset while REDIS_URL is set — falling back " +
-      "to 'kn-next'. ISR cache keys may not match the deploy-time prefix (app name); " +
-      'set REDIS_KEY_PREFIX to avoid a split keyspace.',
-  );
+/**
+ * The split-keyspace warning, as a function so the env reset can re-emit it.
+ *
+ * It used to be a bare `if` at module scope, which meant `__resetEnvForTests`
+ * re-read the values but not this SIDE EFFECT — so a test that set the env and
+ * reset saw the new prefix and no warning, and reported the guard as missing
+ * when it was simply never re-run. A reset that restores some of what module
+ * evaluation did is worse than none: it looks like a fresh module.
+ */
+function warnOnSplitKeyspace() {
+  if (REDIS_URL && !process.env.REDIS_KEY_PREFIX) {
+    console.warn(
+      "[cache-handler] REDIS_KEY_PREFIX is unset while REDIS_URL is set — falling back " +
+        "to 'kn-next'. ISR cache keys may not match the deploy-time prefix (app name); " +
+        'set REDIS_KEY_PREFIX to avoid a split keyspace.',
+    );
+  }
 }
+
+warnOnSplitKeyspace();
 let KEY_PREFIX = process.env.REDIS_KEY_PREFIX || 'kn-next';
 
 function envMs(name, fallback) {
@@ -133,6 +146,22 @@ let RETRY_COOLDOWN_MS = envMs('REDIS_RETRY_COOLDOWN_MS', 5000);
 function __resetEnvForTests() {
   REDIS_URL = process.env.REDIS_URL;
   KEY_PREFIX = process.env.REDIS_KEY_PREFIX || 'kn-next';
+  // Re-emit what module evaluation emits, not just what it assigns.
+  warnOnSplitKeyspace();
+  // EVERY piece of state module evaluation establishes, not just the env-derived
+  // values. A partial reset is worse than none: it leaves the module looking
+  // fresh while a live client, an in-flight connect promise, or a circuit-breaker
+  // deadline survives from the previous test — which produces order-dependent
+  // passes, the failure mode that reads as success.
+  //
+  // The client is DROPPED, not closed. Every caller is a test holding a fake;
+  // making this async to `quit()` a real one would put an await in every
+  // `beforeEach` for a case that does not exist. Production must not call this.
+  Redis = undefined;
+  redis = undefined;
+  connectPromise = undefined;
+  useRedis = !!REDIS_URL;
+  unhealthyUntil = 0;
   CONNECT_TIMEOUT_MS = envMs('REDIS_CONNECT_TIMEOUT_MS', 5000);
   COMMAND_TIMEOUT_MS = envMs('REDIS_COMMAND_TIMEOUT_MS', 2000);
   RETRY_COOLDOWN_MS = envMs('REDIS_RETRY_COOLDOWN_MS', 5000);

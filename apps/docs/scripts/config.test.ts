@@ -10,9 +10,10 @@
  * against the built workspace package (dist), which is what the switch to
  * `workspace:*` locks in.
  */
+
+import { describe, expect, it } from 'bun:test';
 import type { KnativeNextConfig } from '@getknext/core';
 import { ConfigValidationError, validateConfig } from '@getknext/core/validate';
-import { describe, expect, it } from 'vitest';
 import config from '../kn-next.config';
 
 describe('knext-docs dogfood kn-next.config.ts', () => {

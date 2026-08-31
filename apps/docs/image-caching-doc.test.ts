@@ -11,9 +11,10 @@
  * The general user-facing-language rules (no internal references) are enforced
  * for every page by content-hygiene.test.ts.
  */
+
+import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 
 const DOCS_DIR = resolve(import.meta.dirname, 'content/docs');
 const PAGE = join(DOCS_DIR, 'image-caching.mdx');

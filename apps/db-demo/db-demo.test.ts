@@ -1,5 +1,5 @@
+import { describe, expect, it } from 'bun:test';
 import { getTableName } from '@getknext/db';
-import { describe, expect, it } from 'vitest';
 
 /**
  * `apps/db-demo` — the runnable `@getknext/db` example (#243, ADR-0021 §Consequences).
