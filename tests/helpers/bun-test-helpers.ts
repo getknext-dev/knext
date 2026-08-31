@@ -85,7 +85,21 @@ export async function waitFor<T>(
   for (;;) {
     try {
       const result = await predicate();
-      if (result) return result;
+      // Success = "did not throw", NOT "returned something truthy".
+      //
+      // The truthy rule silently broke every assertion-style call. bun's
+      // matchers return `undefined`, so `waitFor(() => expect(fn)
+      // .toHaveBeenCalledTimes(1))` polled until timeout and reported
+      // "condition still falsy" — while the assertion inside it had PASSED on
+      // the first attempt. The failure named the helper's own bookkeeping and
+      // said nothing about the code, which is the most expensive kind of red.
+      //
+      // `false` is still treated as not-yet, so boolean predicates keep working.
+      // The trade: a predicate that forgets to return now succeeds immediately.
+      // That is vitest's semantics for `vi.waitFor` too, and it is the lesser
+      // hazard — a missing return is visible in the test, a matcher's return
+      // type is not.
+      if (result !== false) return result;
       lastError = undefined;
     } catch (error) {
       lastError = error;

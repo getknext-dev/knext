@@ -37,6 +37,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { NODE_BIN } from "../../../../tests/helpers/runtime-binaries";
 import { precompileBunBytecode } from "../adapters/standalone-bun-bytecode";
 
 // Mutable runtime so one mock serves both gate directions.
@@ -190,7 +191,13 @@ describe(
                     join(standaloneDir, "server.js"),
                 );
                 const node = spawnSync(
-                    process.execPath, // vitest runs under Node
+                    // NODE_BIN, not `process.execPath`. The old comment here
+                    // said "vitest runs under Node" — true, and exactly the
+                    // assumption that broke: under `bun test` this spawned bun,
+                    // which runs the bytecode entry happily, so the assertion
+                    // that Node REFUSES it failed on a premise rather than on
+                    // the behaviour.
+                    NODE_BIN,
                     [join(standaloneDir, "server.js")],
                     { stdio: "pipe" },
                 );
