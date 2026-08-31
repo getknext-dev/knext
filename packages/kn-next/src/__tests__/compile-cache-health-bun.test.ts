@@ -27,7 +27,14 @@
  * bun IS on PATH (the ordinary local case) these run regardless of the flag.
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, setDefaultTimeout } from "bun:test";
+
+// bun IGNORES `describe(name, { timeout }, fn)` — the options object is
+// accepted and silently DROPPED. Measured: a 50ms suite timeout let a 400ms
+// test pass, so these suites were running under bun's 5s default rather than
+// the timeout they declare. `setDefaultTimeout` is the form bun honours.
+setDefaultTimeout(30_000);
+
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -131,105 +138,101 @@ const bunRequired = process.env.KNEXT_REQUIRE_BUN === "1";
  * out at 5s inside the full run. The budget, not the diagnostic, was the
  * failure.
  */
-describe(
-    "#309 the compile-cache diagnostic under REAL bun",
-    { timeout: 30_000 },
-    () => {
-        it("has bun available whenever KNEXT_REQUIRE_BUN=1 (a missing bun FAILS)", () => {
-            if (!bunRequired) {
-                // Not the gate — the gate is the CI job that sets the flag.
-                expect(bunRequired).toBe(false);
-                return;
+describe("#309 the compile-cache diagnostic under REAL bun", () => {
+    it("has bun available whenever KNEXT_REQUIRE_BUN=1 (a missing bun FAILS)", () => {
+        if (!bunRequired) {
+            // Not the gate — the gate is the CI job that sets the flag.
+            expect(bunRequired).toBe(false);
+            return;
+        }
+        expect(
+            bun,
+            "KNEXT_REQUIRE_BUN=1 but `bun` is not on PATH. This suite proves the Bun false-alarm fix " +
+                "against a REAL bun process; passing without it would leave the fix asserted only " +
+                "against a stub of a runtime that does not exist.",
+        ).not.toBeNull();
+    });
+
+    it.skipIf(!bun)(
+        "observes the Bun shape the fix is built on, and it is VERSION-DEPENDENT since 1.4",
+        () => {
+            if (!bun) throw new Error("unreachable: guarded by skipIf");
+            const result = runHarness(bun, healthyCacheDir());
+
+            expect(result.runtime).toBe("bun");
+            expect(result.probeType).toBe("function");
+
+            // #807 — this assertion used to be an unconditional `toBeNull()`,
+            // written as a tripwire: "if a future bun implements
+            // NODE_COMPILE_CACHE, probeValue becomes a string and this fails,
+            // which is the signal to narrow the runtime check by version."
+            //
+            // Bun 1.4.0 (2026-08-20) is that future. The tripwire did its job,
+            // so it becomes a version-indexed premise rather than being deleted
+            // — deleting it would retire the only thing that notices the NEXT
+            // shape change.
+            if (bunAtLeast14(result.bunVersion)) {
+                expect(
+                    result.probeValue,
+                    "bun ≥1.4 implements NODE_COMPILE_CACHE; a healthy dir must yield a path",
+                ).toEqual(expect.any(String));
+            } else {
+                expect(
+                    result.probeValue,
+                    "bun ≤1.3 stubs the probe; a healthy dir yields undefined",
+                ).toBeNull();
             }
-            expect(
-                bun,
-                "KNEXT_REQUIRE_BUN=1 but `bun` is not on PATH. This suite proves the Bun false-alarm fix " +
-                    "against a REAL bun process; passing without it would leave the fix asserted only " +
-                    "against a stub of a runtime that does not exist.",
-            ).not.toBeNull();
-        });
+        },
+    );
 
-        it.skipIf(!bun)(
-            "observes the Bun shape the fix is built on, and it is VERSION-DEPENDENT since 1.4",
-            () => {
-                if (!bun) throw new Error("unreachable: guarded by skipIf");
-                const result = runHarness(bun, healthyCacheDir());
+    it.skipIf(!bun)(
+        "reports the verdict its bun version can actually earn, for a HEALTHY volume",
+        () => {
+            if (!bun) throw new Error("unreachable: guarded by skipIf");
+            const result = runHarness(bun, healthyCacheDir());
 
-                expect(result.runtime).toBe("bun");
-                expect(result.probeType).toBe("function");
+            // Both halves of #807. Silence on ≤1.3 is the #309 fix; a real
+            // `active` on ≥1.4 is the diagnostic finally working under bun.
+            // Either way the healthy case must never WARN.
+            expect(result.status).toBe(
+                bunAtLeast14(result.bunVersion) ? "active" : "unknown",
+            );
+            expect(result.warns).toEqual([]);
+        },
+    );
 
-                // #807 — this assertion used to be an unconditional `toBeNull()`,
-                // written as a tripwire: "if a future bun implements
-                // NODE_COMPILE_CACHE, probeValue becomes a string and this fails,
-                // which is the signal to narrow the runtime check by version."
-                //
-                // Bun 1.4.0 (2026-08-20) is that future. The tripwire did its job,
-                // so it becomes a version-indexed premise rather than being deleted
-                // — deleting it would retire the only thing that notices the NEXT
-                // shape change.
-                if (bunAtLeast14(result.bunVersion)) {
-                    expect(
-                        result.probeValue,
-                        "bun ≥1.4 implements NODE_COMPILE_CACHE; a healthy dir must yield a path",
-                    ).toEqual(expect.any(String));
-                } else {
-                    expect(
-                        result.probeValue,
-                        "bun ≤1.3 stubs the probe; a healthy dir yields undefined",
-                    ).toBeNull();
-                }
-            },
-        );
+    it.skipIf(!bun || !bunAtLeast14(bunVersionOf(bun)))(
+        "WARNS under bun ≥1.4 for a dir the runtime really refused",
+        () => {
+            if (!bun) throw new Error("unreachable: guarded by skipIf");
+            // The half that makes enabling the diagnostic safe. Verified against
+            // a real bun 1.4.0: `/dev/null` yields undefined there exactly as it
+            // does on node. Without this, `active` alone could not distinguish
+            // "refused" from "not implemented", and a genuinely bad volume would
+            // go silent on every 1.4 pod — the #309 defect inverted.
+            const result = runHarness(bun, "/dev/null");
 
-        it.skipIf(!bun)(
-            "reports the verdict its bun version can actually earn, for a HEALTHY volume",
-            () => {
-                if (!bun) throw new Error("unreachable: guarded by skipIf");
-                const result = runHarness(bun, healthyCacheDir());
-
-                // Both halves of #807. Silence on ≤1.3 is the #309 fix; a real
-                // `active` on ≥1.4 is the diagnostic finally working under bun.
-                // Either way the healthy case must never WARN.
-                expect(result.status).toBe(
-                    bunAtLeast14(result.bunVersion) ? "active" : "unknown",
-                );
-                expect(result.warns).toEqual([]);
-            },
-        );
-
-        it.skipIf(!bun || !bunAtLeast14(bunVersionOf(bun)))(
-            "WARNS under bun ≥1.4 for a dir the runtime really refused",
-            () => {
-                if (!bun) throw new Error("unreachable: guarded by skipIf");
-                // The half that makes enabling the diagnostic safe. Verified against
-                // a real bun 1.4.0: `/dev/null` yields undefined there exactly as it
-                // does on node. Without this, `active` alone could not distinguish
-                // "refused" from "not implemented", and a genuinely bad volume would
-                // go silent on every 1.4 pod — the #309 defect inverted.
-                const result = runHarness(bun, "/dev/null");
-
-                expect(result.status).toBe("degraded");
-                expect(result.warns).toHaveLength(1);
-                expect(result.warns[0]).toContain("/dev/null");
-            },
-        );
-
-        it("still WARNS under Node for a dir the runtime really refused", () => {
-            // The other half: the fix must buy silence on Bun, not silence
-            // everywhere. `/dev/null` is refused by V8 on Node (see
-            // compile-cache-volume-fallback.test.ts), so the same module, same
-            // harness, must speak here.
-            // NODE_BIN, not `process.execPath`: this case is titled "under
-            // Node" and asserts `runtime === "node"`. Under vitest the two were
-            // the same string; under `bun test` `process.execPath` is bun, so
-            // the case ran the wrong runtime and reported its own premise as a
-            // failure.
-            const result = runHarness(NODE_BIN, "/dev/null");
-
-            expect(result.runtime).toBe("node");
             expect(result.status).toBe("degraded");
             expect(result.warns).toHaveLength(1);
             expect(result.warns[0]).toContain("/dev/null");
-        });
-    },
-);
+        },
+    );
+
+    it("still WARNS under Node for a dir the runtime really refused", () => {
+        // The other half: the fix must buy silence on Bun, not silence
+        // everywhere. `/dev/null` is refused by V8 on Node (see
+        // compile-cache-volume-fallback.test.ts), so the same module, same
+        // harness, must speak here.
+        // NODE_BIN, not `process.execPath`: this case is titled "under
+        // Node" and asserts `runtime === "node"`. Under vitest the two were
+        // the same string; under `bun test` `process.execPath` is bun, so
+        // the case ran the wrong runtime and reported its own premise as a
+        // failure.
+        const result = runHarness(NODE_BIN, "/dev/null");
+
+        expect(result.runtime).toBe("node");
+        expect(result.status).toBe("degraded");
+        expect(result.warns).toHaveLength(1);
+        expect(result.warns[0]).toContain("/dev/null");
+    });
+});

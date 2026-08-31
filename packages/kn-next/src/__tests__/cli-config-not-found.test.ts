@@ -23,7 +23,14 @@
  *      stack, no `FATAL`.
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, setDefaultTimeout } from "bun:test";
+
+// bun IGNORES `describe(name, { timeout }, fn)` — the options object is
+// accepted and silently DROPPED. Measured: a 50ms suite timeout let a 400ms
+// test pass, so these suites were running under bun's 5s default rather than
+// the timeout they declare. `setDefaultTimeout` is the form bun honours.
+setDefaultTimeout(30_000);
+
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -179,36 +186,32 @@ function catchBodies(src: string): string[] {
  * a logic one. Raised with the reason attached so the next person does not
  * "fix" it by trimming the number back.
  */
-describe(
-    "end-to-end: the real deploy entry in a directory with no config",
-    { timeout: 30_000 },
-    () => {
-        const bun = process.env.BUN_PATH ?? "bun";
-        const entry = join(cliSrcDir, "deploy.ts");
+describe("end-to-end: the real deploy entry in a directory with no config", () => {
+    const bun = process.env.BUN_PATH ?? "bun";
+    const entry = join(cliSrcDir, "deploy.ts");
 
-        it("exits 1 with the guidance on stderr and no stack trace", () => {
-            const probe = spawnSync(bun, ["--version"], { encoding: "utf8" });
-            if (probe.error) {
-                // Bun runs the TS sources directly; on a Bun-less machine the same
-                // contract is covered by the dist-bin assertions in
-                // cli-node-runtime.test.ts. Never silently pass — assert we at
-                // least have the source to run.
-                expect(existsSync(entry)).toBe(true);
-                return;
-            }
-            const dir = mkdtempSync(join(tmpdir(), "knext-noconfig-e2e-"));
-            const r = spawnSync(bun, [entry], {
-                cwd: dir,
-                encoding: "utf8",
-                env: { ...process.env, NO_COLOR: "1" },
-            });
-            const combined = `${r.stdout}${r.stderr}`;
-            expect(r.status).toBe(1);
-            expect(combined).toContain("kn-next.config.ts");
-            expect(combined).toContain("npx @getknext/core create");
-            expect(combined).toContain("https://knext.dev");
-            expect(combined).not.toContain("FATAL");
-            expect(combined).not.toMatch(STACK_FRAME_RE);
+    it("exits 1 with the guidance on stderr and no stack trace", () => {
+        const probe = spawnSync(bun, ["--version"], { encoding: "utf8" });
+        if (probe.error) {
+            // Bun runs the TS sources directly; on a Bun-less machine the same
+            // contract is covered by the dist-bin assertions in
+            // cli-node-runtime.test.ts. Never silently pass — assert we at
+            // least have the source to run.
+            expect(existsSync(entry)).toBe(true);
+            return;
+        }
+        const dir = mkdtempSync(join(tmpdir(), "knext-noconfig-e2e-"));
+        const r = spawnSync(bun, [entry], {
+            cwd: dir,
+            encoding: "utf8",
+            env: { ...process.env, NO_COLOR: "1" },
         });
-    },
-);
+        const combined = `${r.stdout}${r.stderr}`;
+        expect(r.status).toBe(1);
+        expect(combined).toContain("kn-next.config.ts");
+        expect(combined).toContain("npx @getknext/core create");
+        expect(combined).toContain("https://knext.dev");
+        expect(combined).not.toContain("FATAL");
+        expect(combined).not.toMatch(STACK_FRAME_RE);
+    });
+});
