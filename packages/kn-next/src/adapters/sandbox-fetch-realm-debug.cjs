@@ -511,6 +511,19 @@ function resolveSandboxContext(appDir) {
  * @param {{ appDir: string, log?: (line: string) => void }} opts
  * @returns {{ patched: boolean, already?: boolean, contextPath?: string, reason?: string }}
  */
+/**
+ * The binary whose `--check` means "is this valid Node source".
+ *
+ * Under Node that is this process. Under Bun `process.execPath` is bun, whose
+ * `--check` also resolves imports and therefore rejects files Node accepts.
+ * There is nothing to resolve a real path from on Bun, so this falls back to
+ * the name and lets PATH answer; a knext build always has Node available, since
+ * the CLI is a Node program.
+ */
+function syntaxCheckerBin() {
+  return process.versions.bun === undefined ? process.execPath : 'node';
+}
+
 function patchSandboxContext({ appDir, log = () => {} }) {
   const fs = require('node:fs');
   const path = require('node:path');
@@ -600,13 +613,25 @@ function patchSandboxContext({ appDir, log = () => {} }) {
 
   // Syntax gate (A3-3 lesson: validate what lands on disk) — write a sibling
   // temp file, `node --check` it, then rename over the original.
+  //
+  // NODE specifically, never `process.execPath`. `bun --check` RESOLVES imports
+  // as well as parsing, measured directly on the unpatched fixture:
+  //
+  //   node --check ctx.js  -> exit 0
+  //   bun  --check ctx.js  -> error: Cannot find module '../../../shared/lib/constants'
+  //
+  // The file checked is Next's own `context.js`, whose relative imports are not
+  // resolvable from where it is validated — so under a bun-run build every
+  // patch failed validation and was SILENTLY refused, leaving the sandbox fetch
+  // fix unapplied. Node is also the runtime that executes this file, which
+  // makes its parser the right authority regardless.
   const tmpPath = path.join(
     path.dirname(contextPath),
     `.${path.basename(contextPath)}.knext-sfrd-${process.pid}.tmp.js`,
   );
   try {
     fs.writeFileSync(tmpPath, patched);
-    require('node:child_process').execFileSync(process.execPath, ['--check', tmpPath], {
+    require('node:child_process').execFileSync(syntaxCheckerBin(), ['--check', tmpPath], {
       stdio: 'pipe',
     });
     fs.renameSync(tmpPath, contextPath);

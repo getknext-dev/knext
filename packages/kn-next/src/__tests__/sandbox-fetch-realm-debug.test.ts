@@ -43,6 +43,7 @@ import {
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { NODE_BIN } from "../../../../tests/helpers/runtime-binaries";
 
 const require = createRequire(import.meta.url);
 const MODULE_PATH = resolve(
@@ -295,7 +296,11 @@ describe("sandbox-fetch-realm-debug — the context.js patcher", () => {
         // the original base capture must be gone (replaced, not duplicated)
         expect(patched.match(/const __fetch = context\.fetch;/g)).toBeNull();
         // syntax gate: the patched file must remain valid CommonJS
-        execFileSync(process.execPath, ["--check", contextPath], {
+        // NODE_BIN: `bun --check` RESOLVES imports as well as parsing, so it
+        // rejects this file over `'../../../shared/lib/constants'` — which is
+        // unresolvable from a temp dir and irrelevant to whether the patched
+        // source PARSES. Node is also what executes it in production.
+        execFileSync(NODE_BIN, ["--check", contextPath], {
             stdio: "pipe",
         });
     });

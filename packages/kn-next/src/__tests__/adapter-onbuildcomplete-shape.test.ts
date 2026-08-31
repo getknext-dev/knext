@@ -70,9 +70,15 @@ describe("next-adapter onBuildComplete — ctx shape tolerance (#147)", () => {
         };
         // The exact crash of the first real compat builds:
         // TypeError: Cannot read properties of undefined (reading 'headers')
+        // `.resolves.toBeUndefined()`, not `.resolves.not.toThrow()`.
+        // bun's `toThrow` requires a FUNCTION, so chaining it after
+        // `.resolves` — which yields the resolved VALUE — fails on the
+        // matcher rather than on the promise. The property meant here is
+        // "this settles instead of rejecting", and asserting the resolved
+        // value says that directly.
         await expect(
             adapter.onBuildComplete?.(ctx as unknown as OnBuildCompleteCtx),
-        ).resolves.not.toThrow();
+        ).resolves.toBeUndefined();
         // The counts must come from ctx.routing — and actually count it.
         const logged = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
         expect(logged).toContain("routing counts (ctx.routing)");
@@ -93,7 +99,7 @@ describe("next-adapter onBuildComplete — ctx shape tolerance (#147)", () => {
         };
         await expect(
             adapter.onBuildComplete?.(ctx as unknown as OnBuildCompleteCtx),
-        ).resolves.not.toThrow();
+        ).resolves.toBeUndefined();
         const logged = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
         expect(logged).toContain("routing counts (ctx.routes)");
         expect(logged).toMatch(/redirects\s*: 1/);
@@ -104,7 +110,7 @@ describe("next-adapter onBuildComplete — ctx shape tolerance (#147)", () => {
         const ctx = baseCtx();
         await expect(
             adapter.onBuildComplete?.(ctx as unknown as OnBuildCompleteCtx),
-        ).resolves.not.toThrow();
+        ).resolves.toBeUndefined();
         const logged = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
         expect(logged).toContain("routing counts (none present)");
     });
