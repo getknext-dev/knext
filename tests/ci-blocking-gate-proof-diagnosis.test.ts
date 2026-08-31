@@ -1,6 +1,6 @@
+import { describe, expect, it } from 'bun:test';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 import {
   declaredTestTitles,
   diagnoseNothingRan,

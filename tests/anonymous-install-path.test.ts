@@ -39,9 +39,10 @@
  * Everything here runs against an INJECTED transport, so the suite stays offline
  * and deterministic. The live resolution happens in the nightly, at run time.
  */
+
+import { describe, expect, it } from 'bun:test';
 import { type PathLike, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
 import {

@@ -28,11 +28,12 @@
  *   D2 — "ONE application on both arms, asserted by image DIGEST" was asserted by
  *       the file's header comment and by nothing in the file.
  */
+
+import { describe, expect, it } from 'bun:test';
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
 import type { PodFacts } from '../benchmarks/image-prewarm-oke/lib.mjs';
 import {

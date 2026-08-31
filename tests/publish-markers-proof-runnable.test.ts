@@ -1,9 +1,10 @@
+import { describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 import { resolveTestRunner } from '../scripts/lib/ci-blocking-gate-proof.mjs';
 import { MUTATIONS } from '../scripts/lib/publish-markers-proof.mjs';
+import { nodeDir } from './helpers/runtime-binaries';
 
 /**
  * The publish-marker mutation proof must be RUNNABLE (#681 item 4).
@@ -87,7 +88,13 @@ describe('the publish-marker mutation proof is runnable', () => {
       encoding: 'utf8',
       // Nothing from the ambient PATH may rescue a resolver that resolved
       // nothing; `node` stays reachable only because the bin shim execs it.
-      env: { ...process.env, PATH: `${dirname(process.execPath)}:/usr/bin:/bin` },
+      // `nodeDir()`, not `dirname(process.execPath)`. The restriction below is
+      // the point of this guard — a resolver that resolved nothing must not be
+      // rescued by the ambient PATH — but under `bun test` `process.execPath`
+      // is bun, so `node` fell off the list entirely and the child died with
+      // `env: node: No such file or directory`. That is a failure about the
+      // harness that says nothing about the resolver.
+      env: { ...process.env, PATH: `${nodeDir()}:/usr/bin:/bin` },
     });
     expect(
       res.status,

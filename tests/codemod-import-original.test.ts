@@ -1,5 +1,5 @@
 /**
- * `vi.mock(spec, async (importOriginal) => …)` -> bun (#871).
+ * `mock.module(spec, async (importOriginal) => …)` -> bun (#871).
  *
  * bun's `mock.module` factory takes no arguments, so `importOriginal` is
  * undefined and eight files died with "importOriginal is not a function".
@@ -14,7 +14,7 @@
  *
  * So the module must be imported AND spread before `mock.module` runs.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import { liftImportOriginal } from '../scripts/codemod-vitest-to-bun.mjs';
 
 describe('liftImportOriginal (#871)', () => {

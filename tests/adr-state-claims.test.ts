@@ -31,10 +31,11 @@
  * correction blocks assert. It does not generalise, and pretending otherwise
  * would be the same overclaim the corrections exist to fix.
  */
+
+import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (rel: string) => readFileSync(resolve(repoRoot, rel), 'utf8');

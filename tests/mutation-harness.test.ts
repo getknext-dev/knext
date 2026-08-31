@@ -1,8 +1,8 @@
+import { describe, expect, it } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
 import { MUTATION_MARKER, mutate, restore, snapshot } from '../scripts/lib/mutation-harness.mjs';
 
 /**

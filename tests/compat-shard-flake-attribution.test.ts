@@ -1,6 +1,6 @@
+import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import { DEFAULT_OUT_FILE } from '../scripts/compat-run-ledger.mjs';
 // Both scripts are untyped `.mjs`, but the root typecheck gate runs with

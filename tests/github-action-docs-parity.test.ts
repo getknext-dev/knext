@@ -17,10 +17,11 @@
  *   - every input the action REQUIRES must appear in the page's examples (or
  *     the shortest documented path does not run).
  */
+
+import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');

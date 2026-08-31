@@ -10,11 +10,11 @@
 //      so it is the interval most likely to be named spuriously.
 // A fourth: clipping per-interval excess at zero biases the explained share upward only.
 
+import { describe, expect, it } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 import {
   ATTRIBUTION_FLOOR,
   attributeSlowSample,

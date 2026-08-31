@@ -9,10 +9,11 @@
  * injected API/git doubles, exactly like the tag-resolution suite: the network
  * truth is the nightly's job, the LOGIC is this file's.
  */
+
+import { describe, expect, it } from 'bun:test';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
 import {
   fetchDeclaredInputs,
   formatFinding,

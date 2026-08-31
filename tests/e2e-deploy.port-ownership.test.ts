@@ -1,3 +1,4 @@
+import { afterAll, describe, expect, it } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
@@ -10,7 +11,6 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { afterAll, describe, expect, it, vi } from 'vitest';
 
 // #492: each `it` drives the extracted port_owned_by_server() bash function via a
 // synchronous execFileSync('/bin/bash', …) shell-out. In isolation these cost
@@ -19,7 +19,11 @@ import { afterAll, describe, expect, it, vi } from 'vitest';
 // default 5000ms testTimeout — an intermittent 5s timeout with no behavioral
 // cause. Raise the timeout FILE-SCOPED (never the global default, which must stay
 // tight to catch real hangs elsewhere). This does not weaken any assertion.
-vi.setConfig({ testTimeout: 20_000, hookTimeout: 20_000 });
+// bun has no `vi.setConfig` — a per-run timeout knob does not exist there, so
+// the budget moves onto each `describe`. Kept at the SAME value rather than
+// tightened: these spawn a real shell script, and a timeout chosen to make a
+// suite feel fast is how a slow machine turns into a flaky gate.
+const SUITE_TIMEOUT_MS = 20_000;
 
 /**
  * GUARD TEST for `port_owned_by_server()` in scripts/e2e-deploy.sh (#210 —
@@ -148,60 +152,64 @@ function runOwnershipCheck(stubs: Stubs): number {
   return Number((rc as RegExpMatchArray)[1]);
 }
 
-describe('port_owned_by_server (scripts/e2e-deploy.sh, #210 regression)', () => {
-  it('trusts ss ownership even when lsof is blind to the pid (the nightly-red scenario)', () => {
-    // run 28697744187: healthy next-server owns the port per ss, but lsof
-    // cannot parse the retitled comm and exits 1. MUST be owned (0) — the old
-    // lsof-first order returned 1 and refused all 477 node-lane deployments.
-    const rc = runOwnershipCheck({
-      ss: [SS_ROW_OWNED],
-      lsof: { pidQueryExit: 1 },
+describe(
+  'port_owned_by_server (scripts/e2e-deploy.sh, #210 regression)',
+  { timeout: SUITE_TIMEOUT_MS },
+  () => {
+    it('trusts ss ownership even when lsof is blind to the pid (the nightly-red scenario)', () => {
+      // run 28697744187: healthy next-server owns the port per ss, but lsof
+      // cannot parse the retitled comm and exits 1. MUST be owned (0) — the old
+      // lsof-first order returned 1 and refused all 477 node-lane deployments.
+      const rc = runOwnershipCheck({
+        ss: [SS_ROW_OWNED],
+        lsof: { pidQueryExit: 1 },
+      });
+      expect(rc).toBe(0);
     });
-    expect(rc).toBe(0);
-  });
 
-  it('refuses when ss attributes the port to a DIFFERENT pid (the real TOCTOU)', () => {
-    const rc = runOwnershipCheck({
-      ss: [SS_ROW_OTHER],
-      lsof: { pidQueryExit: 1 },
+    it('refuses when ss attributes the port to a DIFFERENT pid (the real TOCTOU)', () => {
+      const rc = runOwnershipCheck({
+        ss: [SS_ROW_OTHER],
+        lsof: { pidQueryExit: 1 },
+      });
+      expect(rc).toBe(1);
     });
-    expect(rc).toBe(1);
-  });
 
-  it('is indeterminate (2) when ss sees the listener but cannot attribute a pid', () => {
-    // ss -p prints no process column without permission — absence of evidence.
-    const rc = runOwnershipCheck({ ss: [SS_ROW_NO_PID] });
-    expect(rc).toBe(2);
-  });
-
-  it('is indeterminate (2) when ss shows no listener row at all', () => {
-    // the TCP probe already accepted, so an empty ss snapshot is a race —
-    // never proof of foreign ownership.
-    const rc = runOwnershipCheck({ ss: [] });
-    expect(rc).toBe(2);
-  });
-
-  it('accepts a positive lsof ownership when ss is unavailable (macOS dev path)', () => {
-    const rc = runOwnershipCheck({ lsof: { pidQueryExit: 0 } });
-    expect(rc).toBe(0);
-  });
-
-  it('treats a bare lsof negative as indeterminate, never as foreign ownership', () => {
-    // no ss; lsof per-pid query exits 1 AND the global port query sees
-    // nothing (lsof blind to the process class) — must be 2, not 1.
-    const rc = runOwnershipCheck({ lsof: { pidQueryExit: 1 } });
-    expect(rc).toBe(2);
-  });
-
-  it('refuses when lsof positively attributes the port to a DIFFERENT pid', () => {
-    const rc = runOwnershipCheck({
-      lsof: { pidQueryExit: 1, globalQueryStdout: [`p${OTHER_PID}`] },
+    it('is indeterminate (2) when ss sees the listener but cannot attribute a pid', () => {
+      // ss -p prints no process column without permission — absence of evidence.
+      const rc = runOwnershipCheck({ ss: [SS_ROW_NO_PID] });
+      expect(rc).toBe(2);
     });
-    expect(rc).toBe(1);
-  });
 
-  it('is indeterminate (2) when neither ss nor lsof is available', () => {
-    const rc = runOwnershipCheck({});
-    expect(rc).toBe(2);
-  });
-});
+    it('is indeterminate (2) when ss shows no listener row at all', () => {
+      // the TCP probe already accepted, so an empty ss snapshot is a race —
+      // never proof of foreign ownership.
+      const rc = runOwnershipCheck({ ss: [] });
+      expect(rc).toBe(2);
+    });
+
+    it('accepts a positive lsof ownership when ss is unavailable (macOS dev path)', () => {
+      const rc = runOwnershipCheck({ lsof: { pidQueryExit: 0 } });
+      expect(rc).toBe(0);
+    });
+
+    it('treats a bare lsof negative as indeterminate, never as foreign ownership', () => {
+      // no ss; lsof per-pid query exits 1 AND the global port query sees
+      // nothing (lsof blind to the process class) — must be 2, not 1.
+      const rc = runOwnershipCheck({ lsof: { pidQueryExit: 1 } });
+      expect(rc).toBe(2);
+    });
+
+    it('refuses when lsof positively attributes the port to a DIFFERENT pid', () => {
+      const rc = runOwnershipCheck({
+        lsof: { pidQueryExit: 1, globalQueryStdout: [`p${OTHER_PID}`] },
+      });
+      expect(rc).toBe(1);
+    });
+
+    it('is indeterminate (2) when neither ss nor lsof is available', () => {
+      const rc = runOwnershipCheck({});
+      expect(rc).toBe(2);
+    });
+  },
+);

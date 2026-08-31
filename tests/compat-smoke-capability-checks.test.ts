@@ -1,6 +1,6 @@
+import { describe, expect, it } from 'bun:test';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 
 /**
  * GUARD TEST for the four previously-unbacked capability rows (Sprint 1, T4).

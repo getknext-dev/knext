@@ -1,8 +1,8 @@
+import { describe, expect, it } from 'bun:test';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import { blankNonCode } from '../scripts/lib/blank-non-code.mjs';
 import {

@@ -1,6 +1,6 @@
+import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 // The plain-ESM helper the smoke runner itself imports (tsconfig.typecheck's `allowJs`
 // infers its types from the JSDoc) — the guard exercises the SAME code, not a copy.
 import {

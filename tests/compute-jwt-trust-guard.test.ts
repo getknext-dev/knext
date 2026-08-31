@@ -27,10 +27,11 @@
  *   3. no tracked file anywhere carries a PEM private-key block, so the next
  *      keypair cannot make the same mistake.
  */
+
+import { describe, expect, it } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 const COMPUTE_FILES = resolve(REPO_ROOT, 'packages/scale-zero-pg/deploy/54-compute-files.yaml');

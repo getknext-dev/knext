@@ -1,7 +1,7 @@
+import { describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import { blankNonCode } from '../scripts/lib/blank-non-code.mjs';
 import {
@@ -14,6 +14,7 @@ import {
 } from '../scripts/lib/ci-blocking-gate-proof.mjs';
 import { codeWithLiterals } from '../scripts/lib/prover-lane.mjs';
 import { auditJobCanNotSkip } from './helpers/blocking-gate.js';
+import { nodeDir } from './helpers/runtime-binaries';
 
 /**
  * The standing proof must be RUNNABLE (#672 round 5).
@@ -84,7 +85,13 @@ describe('the ci.yml blocking-gate mutation proof is runnable', () => {
       // `node` itself must stay reachable — the bin shim is a script that
       // execs it — but nothing else from the ambient PATH does, so a resolver
       // that resolved nothing cannot be rescued by the environment.
-      env: { ...process.env, PATH: `${dirname(process.execPath)}:/usr/bin:/bin` },
+      // `nodeDir()`, not `dirname(process.execPath)`. The restriction below is
+      // the point of this guard — a resolver that resolved nothing must not be
+      // rescued by the ambient PATH — but under `bun test` `process.execPath`
+      // is bun, so `node` fell off the list entirely and the child died with
+      // `env: node: No such file or directory`. That is a failure about the
+      // harness that says nothing about the resolver.
+      env: { ...process.env, PATH: `${nodeDir()}:/usr/bin:/bin` },
     });
     expect(
       res.status,

@@ -14,7 +14,7 @@
  *
  * Twelve files use `vi.hoisted`, so this was going to happen twelve times.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import { callHoisted } from '../scripts/codemod-vitest-to-bun.mjs';
 
 describe('callHoisted (#871)', () => {

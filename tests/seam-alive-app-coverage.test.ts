@@ -1,3 +1,4 @@
+import { describe, expect, it } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import {
   existsSync,
@@ -10,7 +11,6 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 
 /**
  * GUARD TEST for #408 item 2 — the generated-app seam-alive guard must not be

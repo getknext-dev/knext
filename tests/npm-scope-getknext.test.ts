@@ -1,7 +1,7 @@
+import { describe, expect, it } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
 
 /**
  * The npm org `knext` was unavailable; the founder owns `getknext`. Nothing was

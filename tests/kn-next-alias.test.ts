@@ -1,7 +1,7 @@
+import { describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 
 /**
  * The `kn-next` alias package (ergonomics ledger finding 1a): the bare name a

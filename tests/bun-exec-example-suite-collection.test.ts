@@ -105,6 +105,15 @@ function assertCollected(listed: string, relPath: string, why: string) {
 
 // Spawns a real `bun run test` in the example. Same story: passes alone,
 // exceeds 5s under full-suite parallelism.
+/**
+ * This guard stays on VITEST deliberately (#871).
+ *
+ * It spawns BOTH runners to ask what each one collects. Running it under bun
+ * meant a bun test spawning a bun test spawning vitest, and the nested run
+ * exceeded its own timeout — the guard failed on its harness rather than on the
+ * property. Checking a runner from inside that same runner is circular, and the
+ * circularity is the cost, not an incidental slowness.
+ */
 describe("examples/bun-exec's guards are actually collected", { timeout: 120_000 }, () => {
   /**
    * The example moved from vitest to `bun:test` (#871), so the runner this
@@ -175,8 +184,18 @@ describe("examples/bun-exec's guards are actually collected", { timeout: 120_000
         .filter(Boolean),
     );
     expect([...collectedFiles].filter((f) => f?.startsWith('examples/bun-exec/'))).toEqual([]);
-    // Non-vacuity: the parse must actually be finding files, or the assertion
-    // above is satisfied by an empty set.
-    expect(collectedFiles.size).toBeGreaterThan(50);
+    // Non-vacuity, without a number that rots.
+    //
+    // This was `> 50`, calibrated when vitest owned ~300 files. The bun
+    // migration moves files out one package at a time, so that threshold was
+    // guaranteed to start failing on a healthy repo — and it did, at 29. Any
+    // absolute count here is a countdown to a false alarm, and the fix for a
+    // false alarm is usually to lower the number, which quietly removes the
+    // check.
+    //
+    // THIS file is on vitest by construction — it is the one asserting that.
+    // So its own presence proves the parse works and that vitest still collects
+    // something, and it stays true at any suite size.
+    expect([...collectedFiles]).toContain('tests/bun-exec-example-suite-collection.test.ts');
   });
 });

@@ -1,7 +1,7 @@
+import { describe, expect, it } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 
 /**
  * GUARD TEST — a CI file may not point at a compat lane that does not exist.

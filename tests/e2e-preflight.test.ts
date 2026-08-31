@@ -1,8 +1,8 @@
+import { afterAll, describe, expect, it } from 'bun:test';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
 
 /**
  * Behavioral tests for scripts/e2e-preflight.mjs — the fail-fast gate #147 A3-3

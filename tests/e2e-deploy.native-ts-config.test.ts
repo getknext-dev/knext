@@ -1,3 +1,4 @@
+import { afterAll, describe, expect, it } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
@@ -10,7 +11,6 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
 
 /**
  * B2 (#173, A3-3 #147): the 18 `next-config-ts-native-ts` / `-native-mts` compat

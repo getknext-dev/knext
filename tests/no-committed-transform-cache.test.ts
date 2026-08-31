@@ -1,7 +1,7 @@
+import { describe, expect, it } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { closeSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 
 /**
  * GUARD TEST — machine-generated Vite/Vitest SSR transform cache may not be

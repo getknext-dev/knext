@@ -1,6 +1,6 @@
+import { describe, expect, it } from 'bun:test';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 
 /**
  * GUARD TEST for the release/support policy and the compatibility matrix (#314).

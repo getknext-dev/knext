@@ -27,7 +27,39 @@
  * so it falls back to the name and lets PATH answer; every environment that
  * runs this suite has Node, since the published CLI is a Node program.
  */
+import { execFileSync } from 'node:child_process';
+import { dirname } from 'node:path';
+
 export const NODE_BIN: string = process.versions.bun === undefined ? process.execPath : 'node';
+
+/**
+ * The DIRECTORY containing the Node executable.
+ *
+ * Several guards deliberately run a child with a MINIMAL `PATH` — typically
+ * `dirname(process.execPath):/usr/bin:/bin` — so that a resolver which resolved
+ * nothing cannot be rescued by the ambient environment. That construction
+ * silently assumed `process.execPath` was Node.
+ *
+ * Under bun it is bun, so `node` fell off the restricted PATH entirely and the
+ * child died with `env: node: No such file or directory` — a failure about the
+ * harness, describing nothing about the resolver under test.
+ *
+ * Resolved via `which` when running under bun, because there is no Node path to
+ * derive. If that fails there is no honest answer, so it throws rather than
+ * returning a directory that happens to exist: a guard whose restricted PATH
+ * quietly lost its subject would still run, and pass.
+ */
+export function nodeDir(): string {
+  if (process.versions.bun === undefined) return dirname(process.execPath);
+  const found = execFileSync('which', ['node'], { encoding: 'utf8' }).trim();
+  if (found.length === 0) {
+    throw new Error(
+      'cannot locate `node` under bun — guards that restrict PATH need its ' +
+        'real directory, and guessing one would let them run without it',
+    );
+  }
+  return dirname(found);
+}
 
 /**
  * The Bun executable, or `undefined` when there is no way to find one.

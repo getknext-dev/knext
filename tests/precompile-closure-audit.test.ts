@@ -1,7 +1,7 @@
+import { afterAll, describe, expect, it } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
 import {
   ANCHOR_PACKAGES,
   evaluateFindings,

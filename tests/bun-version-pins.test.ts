@@ -1,6 +1,6 @@
+import { describe, expect, it } from 'bun:test';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 
 // Absolute, not CWD-relative — the repo convention (vitest.config.ts explains
 // why: a run from a sub-directory must not resolve a non-existent path).

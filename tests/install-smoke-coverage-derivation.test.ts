@@ -12,10 +12,11 @@
  * Same division of labour the action-pin and anonymous-install gates use: form at
  * PR time, value at run time.
  */
+
+import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
 import { publishablePackages, readWorkspaceManifests } from '../scripts/publish-preflight.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');

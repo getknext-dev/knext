@@ -101,7 +101,15 @@ for (const file of files) {
   // `bun test` that means `vi.mock` never registers and the test dials the real
   // dependency: one such file spent 8 seconds per case talking to a real
   // Postgres before failing.
-  const code = original.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  // `blankNonCode`, not a hand-rolled comment stripper.
+  //
+  // The stripper removed comments but left STRING LITERALS, so a file whose
+  // strings contain `vi.hoisted(...)` — `tests/codemod-hoisted.test.ts`, which
+  // exists to test that very transform — was refused as if it CALLED it, and
+  // then silently stayed on vitest. Same defect as the prose case above, one
+  // level in. This repo keeps ONE blanker precisely so a fourth hand-rolled
+  // tokenizer does not get this wrong again.
+  const code = blankNonCode(original);
   if (!/from ['"]vitest['"]/.test(original)) {
     report.untouched.push(file);
     continue;
@@ -154,7 +162,7 @@ for (const file of files) {
 
   // Anything still spelled `vi.` was not in any table — refuse rather than ship
   // a file with a dangling reference.
-  const leftoverCode = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  const leftoverCode = blankNonCode(src);
   const leftovers = [...new Set([...leftoverCode.matchAll(VI_MEMBER)].map((m) => m[1]))];
   if (leftovers.length > 0) {
     report.refused.push({ file, blockers: leftovers });

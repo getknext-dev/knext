@@ -21,9 +21,10 @@
  * is what proves rules actually load and route. This asserts the rule's identity, its
  * expression, its debounce, and that the two homes of the number still agree.
  */
+
+import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');

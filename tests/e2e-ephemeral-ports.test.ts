@@ -73,10 +73,10 @@
 // against someone determined to route around it. Extend the patterns when a real
 // case escapes; do not read a green run as "no fixed port can exist anywhere".
 
+import { describe, expect, it } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 
