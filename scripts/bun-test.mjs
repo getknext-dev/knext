@@ -31,6 +31,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { cpus } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { importsFrom } from './lib/test-framework-import.mjs';
 
 const argv = process.argv.slice(2);
 const flag = (name, fallback) => {
@@ -66,7 +67,9 @@ const files = execFileSync('git', ['ls-files', ...(targets.length ? targets : ['
   // definition per side and no list to keep in sync.
   .filter((f) => {
     try {
-      return !/from\s+['"]vitest['"]/.test(readFileSync(f, 'utf8'));
+      // ONE definition of the partition — see `vitest.config.ts` and
+      // `scripts/lib/test-framework-import.mjs`.
+      return !importsFrom(readFileSync(f, 'utf8'), 'vitest');
     } catch {
       // Unreadable: run it. A file this runner skips silently is coverage lost
       // with nothing to notice, which is worse than a loud failure.

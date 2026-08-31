@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import react from '@vitejs/plugin-react';
 import { configDefaults, defineConfig } from 'vitest/config';
+import { importsFrom } from './scripts/lib/test-framework-import.mjs';
 
 // Resolve @getknext/lib subpaths to source (not dist) in tests.
 // CI runs `pnpm install` then `vitest` without building lib first, so dist/ is absent.
@@ -48,7 +49,12 @@ function portedToBun(): string[] {
 
   return files.filter((f) => {
     try {
-      return /from\s+['"]bun:test['"]/.test(readFileSync(f, 'utf8'));
+      // ONE definition of the partition, shared with `scripts/bun-test.mjs` and
+      // `tests/runner-partition.test.ts`. Neither a raw scan nor a blanked scan
+      // works — see the note in `test-framework-import.mjs`; the first lets a
+      // fixture string orphan a file, the second never matches at all because a
+      // module specifier IS a string.
+      return importsFrom(readFileSync(f, 'utf8'), 'bun:test');
     } catch {
       // Unreadable means we cannot tell which runner owns it. Leaving it IN
       // vitest fails loudly if it is a bun file; excluding it would drop the
