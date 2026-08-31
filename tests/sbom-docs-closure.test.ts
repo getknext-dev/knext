@@ -198,7 +198,7 @@ describe('both workflows generate the SBOM before scanning it (#878)', () => {
     return Object.values(doc.jobs).flatMap((j) => (j.steps ?? []).map((s) => s.run ?? ''));
   }
 
-  it.each(WORKFLOWS)('%s installs the closure and builds the SBOM', (wf) => {
+  it.each([...WORKFLOWS])('%s installs the closure and builds the SBOM', (wf) => {
     const runs = runSteps(wf).join('\n');
     // Without the install there is no tree to read, and without the generator
     // there is no file to scan. Trivy exits 1 on a missing file, so this would
@@ -208,7 +208,7 @@ describe('both workflows generate the SBOM before scanning it (#878)', () => {
     expect(runs).toContain(SCRIPT);
   });
 
-  it.each(WORKFLOWS)('%s scans the generated SBOM, not a lockfile', (wf) => {
+  it.each([...WORKFLOWS])('%s scans the generated SBOM, not a lockfile', (wf) => {
     const doc = parse(read(wf)) as {
       jobs: Record<string, { steps?: { with?: Record<string, string> }[] }>;
     };

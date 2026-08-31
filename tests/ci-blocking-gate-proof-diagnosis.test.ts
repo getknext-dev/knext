@@ -143,7 +143,10 @@ describe('the prover says WHY nothing ran, or says it does not know', () => {
       },
     };
 
-    for (const cause of NOTHING_RAN_CAUSES) {
+    // `NOTHING_RAN_CAUSES` comes from a .mjs, so TS widens its members to
+    // `string`. Bind to the union the diagnosis actually returns instead.
+    type Cause = ReturnType<typeof diagnoseNothingRan>['cause'];
+    for (const cause of NOTHING_RAN_CAUSES as readonly Cause[]) {
       const observation = reaching[cause];
       expect(
         observation,
@@ -189,7 +192,7 @@ describe('declaredTestTitles is satisfied only by a real declaration', () => {
     const src = [
       "it('plain', () => {});",
       "test.skip('skipped', () => {});",
-      'it.each(GATES)(`$spec templated`, () => {});',
+      'it.each([...GATES])(`$spec templated`, () => {});',
     ].join('\n');
     expect(declaredTestTitles(src)).toEqual(['plain', 'skipped', '$spec templated']);
   });
@@ -211,7 +214,7 @@ describe('declaredTestTitles is satisfied only by a real declaration', () => {
     expect(declaredTestTitles(src)).toEqual(['after the division']);
   });
 
-  it.each(GATES)('$spec still declares the selected assertion under the code-only view', ({
+  it.each([...GATES])('$spec still declares the selected assertion under the code-only view', ({
     spec,
     testName,
   }) => {

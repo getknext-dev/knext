@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, jest, mock, spyOn } from 'bun:test';
+import { afterEach, describe, expect, it, jest, spyOn } from 'bun:test';
 // The summary generator exposes a pure parse function so it is unit-testable
 // without invoking the workflow. It turns raw `run-tests.js` stdout into the
 // machine-readable summary the compat-matrix publisher (#41) consumes.

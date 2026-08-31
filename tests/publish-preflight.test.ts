@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { parse } from 'yaml';
 import { workspaceRoots } from '../scripts/lib/workspace-globs.mjs';
 import {
   decide,

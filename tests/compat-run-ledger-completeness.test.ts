@@ -251,7 +251,10 @@ describe('#695 — the fail-closed invariant: no error means COMPLETE', () => {
     const { ledger, errors } = build(shards, over);
     if (errors.length === 0) {
       expect(ledger.complete).toBe(true);
-      expect(ledger.shardsSeen).toBe(ledger.shardsExpected);
+      // Null only on a ledger that never learned its shard count, which the
+      // no-errors branch excludes. Assert it rather than casting it away.
+      expect(ledger.shardsExpected).not.toBeNull();
+      expect(ledger.shardsSeen).toBe(ledger.shardsExpected as number);
       expect(ledger.shards).toHaveLength(TOTAL);
       // and nothing in a clean ledger may be a placeholder
       expect(ledger.shards.filter((s) => s.status === 'missing')).toEqual([]);

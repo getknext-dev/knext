@@ -40,7 +40,7 @@ const LEGITIMATELY_UNCOLLECTED = /\.docker-e2e\.test\.ts$/;
  * second time it was the only error-level diagnostic in the repo — i.e. it broke
  * `Lint & Test` before any test ran.
  */
-const ROOT_LIST_TIMEOUT_MS = 600_000;
+const _ROOT_LIST_TIMEOUT_MS = 600_000;
 
 /**
  * The example's `test` script, read from `package.json` rather than hardcoded.

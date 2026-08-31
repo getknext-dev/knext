@@ -1,7 +1,7 @@
 {
   "name": "knative-next-monorepo",
   "private": true,
-  "packageManager": "pnpm@10.4.1",
+  "packageManager": "bun@1.4.0",
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev",
@@ -14,7 +14,7 @@
     "test": "vitest",
     "test:ui": "vitest --ui",
     "test:coverage": "vitest --coverage",
-    "ci": "biome check . && pnpm run typecheck && vitest run --coverage",
+    "ci": "biome check . && bun run typecheck && node scripts/bun-test.mjs && vitest run",
     "generate": "turbo gen",
     "gen:cr-fields": "bun scripts/gen-cr-fields.ts",
     "check:cr-fields": "bun scripts/gen-cr-fields.ts --check",
@@ -32,6 +32,7 @@
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.1",
     "@turbo/gen": "^2.8.10",
+    "@types/bun": "^1.4.0",
     "@types/node": "^25.3.0",
     "@vitejs/plugin-react": "^5.1.2",
     "@vitest/coverage-v8": "^4.0.18",

@@ -323,6 +323,8 @@ describe('#465 docs-closure HIGH remediation is by BUMP, not suppression', () =>
   it('root pnpm.overrides floor every flagged docs-closure package at its fixed version', () => {
     const pkg = JSON.parse(readFileSync(ROOT_PKG_PATH, 'utf8')) as {
       pnpm?: { overrides?: Record<string, string> };
+      // Top-level since the repo left pnpm; the reader below always looked here.
+      overrides?: Record<string, string>;
     };
     // Read BOTH locations. `bun install` silently relocates this block from
     // `pnpm.overrides` to a top-level `overrides` when it rewrites the

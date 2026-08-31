@@ -103,7 +103,7 @@ const BUN_SUMMARIZE_META = {
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 const WORKFLOW_PATH = resolve(REPO_ROOT, '.github/workflows/test-e2e-deploy.yml');
-const ROOT_PKG_PATH = resolve(REPO_ROOT, 'package.json');
+const _ROOT_PKG_PATH = resolve(REPO_ROOT, 'package.json');
 
 /**
  * The pnpm version this workflow pins for the UPSTREAM Next.js harness.
@@ -2407,7 +2407,7 @@ describe('compat-suite fail-on-red gate — revocation teeth (test-e2e-deploy.ym
     // First, because every per-tooth assertion below would pass over an empty
     // finding list if the parse had matched nothing at all.
     expect(teeth.branchesFound.slice().sort(), 'the audit did not locate all three teeth').toEqual(
-      ['failed-or-not-run', 'missing-summary', 'truncated'].sort(),
+      (['failed-or-not-run', 'missing-summary', 'truncated'] as typeof teeth.branchesFound).sort(),
     );
     expect(teeth.shellIfBlocks, 'no shell `if` block was parsed out of the gate').toBeGreaterThan(
       0,

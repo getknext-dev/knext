@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { parse } from 'yaml';
 import { blankNonCode } from '../scripts/lib/blank-non-code.mjs';
 import {
@@ -100,7 +100,10 @@ describe('the ci.yml blocking-gate mutation proof is runnable', () => {
     expect(`${res.stdout ?? ''}`).toMatch(/vitest\//);
   });
 
-  it.each(GATES)('$spec declares the assertion the proof selects by name', ({ spec, testName }) => {
+  it.each([...GATES])('$spec declares the assertion the proof selects by name', ({
+    spec,
+    testName,
+  }) => {
     // `vitest -t <no match>` exits 0, so a rename would silently make the proof
     // a no-op. Asserted against the spec's DECLARED titles — code only, so a
     // rename reds here even when the old title survives in a comment or a string
@@ -296,7 +299,7 @@ function auditNeedsDisarm(workflowText: string, gate: DisarmableGate): string[] 
 }
 
 describe('#690 every `needs:` disarm names a job that exists and can skip', () => {
-  it.each(GATES)('$jobId — its `needs:` disarm really disarms', (gate) => {
+  it.each([...GATES])('$jobId — its `needs:` disarm really disarms', (gate) => {
     const text = readFileSync(resolve(REPO_ROOT, gate.workflow), 'utf8');
     const problems = auditNeedsDisarm(text, gate as unknown as DisarmableGate);
     expect(problems, problems.join('\n')).toEqual([]);

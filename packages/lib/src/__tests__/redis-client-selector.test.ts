@@ -9,7 +9,7 @@
  * timeout" ends up retrying forever — the failure #802 was filed about.
  */
 
-import { describe, expect, it, mock, spyOn } from 'bun:test';
+import { describe, expect, it, spyOn } from 'bun:test';
 import { bunRedisAvailable, createRedisClient, toBunRedisOptions } from '../redis/client';
 import { attachQuietErrorListener, quietRedisOptions } from '../redis/quiet';
 

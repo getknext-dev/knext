@@ -67,6 +67,9 @@ describe('install-smoke covers the publishable set', () => {
     const named = packageDirsNamedInGate(source());
     for (const pkg of publishable()) {
       const leaf = pkg.dir.split('/').pop();
+      // `.pop()` is `string | undefined`. A package with no directory leaf would
+      // otherwise be compared against `undefined` and pass for the wrong reason.
+      if (leaf === undefined) throw new Error(`${pkg.name} has no directory leaf`);
       expect(
         named,
         `${pkg.name} (${pkg.dir}) is publishable but scripts/install-smoke.mjs never packs it — ` +

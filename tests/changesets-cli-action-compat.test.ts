@@ -227,6 +227,12 @@ describe('changesets/action major and @changesets/cli major stay compatible', ()
     const pins = changesetsActionPins();
     const actionMajor = (pins[0] as Pin).major;
     const expectedCliMajor = CLI_MAJOR_FOR_ACTION_MAJOR.get(actionMajor);
+    // A Map lookup is `V | undefined`, and an unmapped action major is a real gap
+    // in the pairing table. Throw rather than `expect(...).toBeDefined()`, which
+    // is not an assertion function and so leaves `undefined` in the type below.
+    if (expectedCliMajor === undefined) {
+      throw new Error(`no @changesets/cli major is paired with changesets/action v${actionMajor}`);
+    }
     expect(
       expectedCliMajor,
       `changesets/action v${actionMajor} has no recorded @changesets/cli compatibility in this guard. ` +

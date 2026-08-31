@@ -429,7 +429,6 @@ try {
   console.log('[install-smoke] installing + building the scaffolded app ...');
   const scaffoldPkgPath = join(scaffoldDir, 'package.json');
   const scaffoldPkg = JSON.parse(readFileSync(scaffoldPkgPath, 'utf8'));
-  const scaffoldStart = scaffoldPkg.scripts?.start;
   const packedByName = new Map(packed.map((p) => [p.name, p.tgz]));
   let redirected = 0;
   for (const field of ['dependencies', 'devDependencies']) {

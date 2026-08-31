@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, jest, mock, spyOn } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, jest, spyOn } from 'bun:test';
 import {
   APP_NAME_ENV,
   APP_NAMESPACE_ENV,

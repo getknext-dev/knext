@@ -27,8 +27,8 @@ import { resolve } from 'node:path';
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 const WORKFLOW_PATH = resolve(REPO_ROOT, '.github/workflows/supply-chain.yml');
 const DOCKERFILE_PATH = resolve(REPO_ROOT, 'apps/file-manager/Dockerfile');
-const ROOT_PKG_PATH = resolve(REPO_ROOT, 'package.json');
-const LOCKFILE_PATH = resolve(REPO_ROOT, 'pnpm-lock.yaml');
+const _ROOT_PKG_PATH = resolve(REPO_ROOT, 'package.json');
+const _LOCKFILE_PATH = resolve(REPO_ROOT, 'pnpm-lock.yaml');
 
 function workflowText(): string {
   return readFileSync(WORKFLOW_PATH, 'utf8');

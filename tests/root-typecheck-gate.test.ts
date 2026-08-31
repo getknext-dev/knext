@@ -199,7 +199,7 @@ describe('root typecheck config (#527)', () => {
 });
 
 describe('the covered set is real, not an include that matches nothing (#527)', () => {
-  it.each(COVERED_TIERS)('every $label file is in the tsc program', ({ label, files }) => {
+  it.each([...COVERED_TIERS])('every $label file is in the tsc program', ({ label, files }) => {
     const onDisk = files();
     expect(
       onDisk.length,

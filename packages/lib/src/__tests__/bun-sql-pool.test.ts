@@ -48,6 +48,7 @@ function fakeSql() {
         record();
         return Promise.resolve(ARRAY_ROWS);
       },
+      // biome-ignore lint/suspicious/noThenProperty: a thenable is the SUBJECT — this asserts the pool does not mistake one for a promise
       then(resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) {
         record();
         return Promise.resolve(OBJECT_ROWS).then(resolve, reject);
@@ -95,6 +96,7 @@ describe('bun-sql pool facade — the pg shape callers depend on', () => {
     const { client } = fakeSql();
     client.unsafe = mock(() => ({
       values: () => Promise.resolve(undefined),
+      // biome-ignore lint/suspicious/noThenProperty: a thenable is the SUBJECT — this asserts the pool does not mistake one for a promise
       then: (r: (v: unknown) => unknown) => Promise.resolve(undefined).then(r),
     })) as never;
     const pool = createBunSqlPool(CONFIG, () => client as never);

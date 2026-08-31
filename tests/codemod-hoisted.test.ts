@@ -23,6 +23,7 @@ describe('callHoisted (#871)', () => {
     // not to something you could still call.
     const out = callHoisted('const a = vi.hoisted(() => ({ n: 1 }));');
     expect(out).toBe('const a = (() => ({ n: 1 }))();');
+    // biome-ignore lint/security/noGlobalEval: the codemod's output is only proven correct by RUNNING it; a string compare passes on output that does not run
     expect(eval(`(${out.slice('const a = '.length, -1)})`)).toEqual({ n: 1 });
   });
 

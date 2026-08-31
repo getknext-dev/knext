@@ -31,6 +31,14 @@
  * string, so `from "bun:test"` becomes `from "        "` and matches nothing.
  * Applied here that read as "all 333 files are orphaned"; applied to one runner
  * only it would have silently handed the whole suite to the other.
+ *
+ * One consequence of enumerating with `git ls-files`, worth knowing before you
+ * spend time on it: a NEW test file is invisible to the partition until it is
+ * staged, so an unstaged `bun:test` file lands in vitest's run and fails there
+ * on the `bun:test` import. That is loud rather than silent — the fix is
+ * `git add`, not a change to this guard — and it is the price of an enumeration
+ * that ignores build output and throwaway worktrees. This guard cannot catch it,
+ * because it reads the same list.
  */
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';

@@ -137,7 +137,7 @@ describe('load-soak SLOs — the two copies of every default agree', () => {
     ).toMatch(/\[ -n "\$TARGET_URL" \] \|\| fail/);
   });
 
-  it.each(SHARED_KNOBS)('%s has the same default in the k6 script and the drill', (name) => {
+  it.each([...SHARED_KNOBS])('%s has the same default in the k6 script and the drill', (name) => {
     const inManifest = manifestDefault(name);
     const inDrill = drillDefault(name);
     expect(

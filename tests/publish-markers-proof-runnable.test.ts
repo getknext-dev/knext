@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { resolveTestRunner } from '../scripts/lib/ci-blocking-gate-proof.mjs';
 import { MUTATIONS } from '../scripts/lib/publish-markers-proof.mjs';
 import { nodeDir } from './helpers/runtime-binaries';
@@ -42,12 +42,12 @@ describe('the publish-marker mutation proof is runnable', () => {
     expect(new Set(MUTATIONS.map((m) => m.label)).size).toBe(MUTATIONS.length);
   });
 
-  it.each(MUTATIONS)('$label — its target file and spec exist', ({ file, spec }) => {
+  it.each([...MUTATIONS])('$label — its target file and spec exist', ({ file, spec }) => {
     expect(existsSync(resolve(REPO_ROOT, file)), `${file} is missing`).toBe(true);
     expect(existsSync(resolve(REPO_ROOT, spec)), `${spec} is missing`).toBe(true);
   });
 
-  it.each(MUTATIONS)('$label — its anchor still occurs EXACTLY once', ({ file, anchor }) => {
+  it.each([...MUTATIONS])('$label — its anchor still occurs EXACTLY once', ({ file, anchor }) => {
     // The precise precondition `mutate()` asserts before writing anything —
     // deliberately the SAME substring count (`countOccurrences`), not a
     // stricter reading of it. It aborts on 0 (the subject moved or was

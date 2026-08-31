@@ -275,7 +275,7 @@ describe('#678 e2e ports are OS-assigned, never hardcoded', () => {
     ).toBe(1);
   });
 
-  it.each(EXEMPT)('exemption for $file is still real', ({ file }) => {
+  it.each([...EXEMPT])('exemption for $file is still real', ({ file }) => {
     // A stale exemption is worse than none: it silently widens the hole. If the
     // file loses its literal (or the file goes away), delete the entry.
     const src = readFileSync(resolve(REPO_ROOT, file), 'utf8');
