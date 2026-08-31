@@ -33,6 +33,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { NODE_BIN } from "../../../../tests/helpers/runtime-binaries";
 
 const HEALTH_MODULE = resolve(
     dirname(fileURLToPath(import.meta.url)),
@@ -218,7 +219,12 @@ describe(
             // everywhere. `/dev/null` is refused by V8 on Node (see
             // compile-cache-volume-fallback.test.ts), so the same module, same
             // harness, must speak here.
-            const result = runHarness(process.execPath, "/dev/null");
+            // NODE_BIN, not `process.execPath`: this case is titled "under
+            // Node" and asserts `runtime === "node"`. Under vitest the two were
+            // the same string; under `bun test` `process.execPath` is bun, so
+            // the case ran the wrong runtime and reported its own premise as a
+            // failure.
+            const result = runHarness(NODE_BIN, "/dev/null");
 
             expect(result.runtime).toBe("node");
             expect(result.status).toBe("degraded");

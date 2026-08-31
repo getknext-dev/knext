@@ -38,13 +38,20 @@ describe("runProjectBuild", () => {
         } catch (err) {
             caught = err;
         }
-        expect(caught).toMatchObject({
-            code: USAGE_ERROR_CODE,
-            message: expect.stringContaining("npm install"),
-        });
-        expect((caught as Error).message.toLowerCase()).toContain(
-            "not installed",
-        );
+        // The message is read BEFORE `toMatchObject`, and the asymmetric
+        // matcher is gone from it.
+        //
+        // bun's `toMatchObject` MUTATES the received object: a property checked
+        // with `expect.stringContaining(...)` is replaced by the matcher
+        // instance itself. Reproduced in isolation — `typeof err.message` goes
+        // from "string" to "object" across the call — so every later assertion
+        // on that object is meaningless, and here it failed with
+        // "message.toLowerCase is not a function" pointing at the code rather
+        // than at the assertion that broke it.
+        const message = (caught as Error).message;
+        expect(caught).toMatchObject({ code: USAGE_ERROR_CODE });
+        expect(message).toContain("npm install");
+        expect(message.toLowerCase()).toContain("not installed");
         // both-streams contract: routed through the same handler every entry
         // already calls, it renders as a message — never a serialized Error.
         const chunks: string[] = [];

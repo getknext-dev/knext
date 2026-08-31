@@ -22,10 +22,12 @@
  */
 
 import { describe, expect, it } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { Agent, createServer, get as httpGet } from "node:http";
 import { createRequire } from "node:module";
 import type { AddressInfo } from "node:net";
 import { resolve } from "node:path";
+import { NODE_BIN } from "../../../../tests/helpers/runtime-binaries";
 
 const require = createRequire(import.meta.url);
 const MODULE_PATH = resolve(
@@ -82,12 +84,33 @@ describe("bun-keepalive-guard — version/env gating (shouldInstall)", () => {
 
 describe("bun-keepalive-guard — preload side effect is Node-inert", () => {
     it("does not patch http.createServer when required under Node", () => {
-        // The module was required at the top of this file under Node (vitest):
-        // the exported symbol marker must NOT be present on node:http.
-        const http = require("node:http");
-        expect(http[Symbol.for("knext.bunKeepaliveGuard.installed")]).toBe(
-            undefined,
-        );
+        // Asserted in a SPAWNED Node process, not in this one.
+        //
+        // The old version required the guard into the test process and checked
+        // that node:http was unpatched. That only tested anything while the
+        // test process WAS Node — under `bun test` the guard correctly installs
+        // itself, so the assertion inverted and reported a failure for the
+        // behaviour working exactly as designed.
+        //
+        // The property here is about Node, so Node has to be the one observing
+        // it. Spawning makes the subject explicit instead of inheriting it from
+        // whichever runner happens to be in use.
+        const probe = [
+            `require(${JSON.stringify(MODULE_PATH)});`,
+            'const http = require("node:http");',
+            'const marker = http[Symbol.for("knext.bunKeepaliveGuard.installed")];',
+            "process.stdout.write(String(marker));",
+        ].join("\n");
+
+        const result = spawnSync(NODE_BIN, ["-e", probe], { encoding: "utf8" });
+        // A probe that could not run is a FAILURE, never a pass: reporting
+        // "not installed" because Node never started would be the same green
+        // as the guard being correctly inert.
+        expect(
+            result.status,
+            `node probe failed (${result.status}): ${result.stderr?.slice(-300)}`,
+        ).toBe(0);
+        expect(result.stdout).toBe("undefined");
     });
 });
 
