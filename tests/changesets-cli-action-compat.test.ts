@@ -146,29 +146,24 @@ function majorOfCaretRange(range: string, what: string): number {
  * mistaken for it.
  */
 function lockfileResolvedCliVersion(): string {
-  const lock = readFileSync(resolve(REPO_ROOT, 'pnpm-lock.yaml'), 'utf8');
-  const importers = lock.indexOf('\nimporters:\n');
-  expect(
-    importers,
-    'pnpm-lock.yaml has no `importers:` section — the lockfile format changed',
-  ).toBeGreaterThan(-1);
-  // The root importer is the first `  .:` entry under `importers:`.
-  const rootStart = lock.indexOf('\n  .:\n', importers);
-  expect(rootStart, 'pnpm-lock.yaml has no root (`.`) importer').toBeGreaterThan(-1);
-  // Ends at the next importer key at the same indent level.
-  const nextImporter = /\n {2}[^\s:][^\n]*:\n/.exec(lock.slice(rootStart + 6));
-  const rootBlock = lock.slice(
-    rootStart,
-    nextImporter ? rootStart + 6 + nextImporter.index : lock.length,
-  );
-  const entry = /\n\s+'@changesets\/cli':\n\s+specifier:\s*(\S+)\n\s+version:\s*(\S+)/.exec(
-    rootBlock,
-  );
+  // `bun.lock` since the repo left pnpm. It is JSONC — trailing commas — with a
+  // flat `packages` map of resolved dependencies.
+  //
+  // The old code walked pnpm's `importers:` block to scope the lookup to the
+  // ROOT, so a workspace package's own devDependency could not be mistaken for
+  // it. bun gives that scoping more directly: a TOP-LEVEL key in `packages` is
+  // the hoisted resolution, and a dependency that resolved differently for some
+  // package appears under a nested `parent/name` key instead. So matching a
+  // top-level key IS "what the root installs".
+  const lock = readFileSync(resolve(REPO_ROOT, 'bun.lock'), 'utf8');
+  const entry = /\n {4}"@changesets\/cli": \["@changesets\/cli@(\d+\.\d+\.\d+)/.exec(lock);
   expect(
     entry,
-    'pnpm-lock.yaml does not resolve @changesets/cli for the root importer — CI installs with --frozen-lockfile, so this is what the action will actually find on disk',
+    'bun.lock does not resolve @changesets/cli at the top level — either the ' +
+      'lockfile format changed or the CLI is no longer a root dependency, and CI ' +
+      'would install a version this guard never checked',
   ).not.toBeNull();
-  return (entry as RegExpExecArray)[2] as string;
+  return (entry as RegExpExecArray)[1] as string;
 }
 
 /**

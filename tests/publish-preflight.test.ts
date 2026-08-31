@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse } from 'yaml';
+import { workspaceRoots } from '../scripts/lib/workspace-globs.mjs';
 import {
   decide,
   preflight,
@@ -121,14 +122,15 @@ describe('preflight — fails closed when the registry cannot be reached', () =>
 
 describe('the preflight reads THIS repo, not a fixture', () => {
   it('its hardcoded workspace roots still match pnpm-workspace.yaml', () => {
-    // The script cannot parse YAML — it runs with no dependencies installed —
-    // so the roots are a literal. This is the check that keeps that literal
-    // honest instead of trusting the comment beside it.
-    const workspace = parse(readFileSync(resolve(REPO_ROOT, 'pnpm-workspace.yaml'), 'utf8')) as {
-      packages: string[];
-    };
-    const roots = workspace.packages.map((glob) => glob.replace(/\/\*+$/, ''));
-    expect([...WORKSPACE_ROOTS].sort()).toEqual([...roots].sort());
+    // The script cannot parse the manifest itself — it runs with no
+    // dependencies installed — so the roots are a literal. This is the check
+    // that keeps that literal honest instead of trusting the comment beside it.
+    //
+    // The declaration moved from `pnpm-workspace.yaml` to `package.json`'s
+    // `workspaces` when the repo left pnpm; same information, and read through
+    // the shared helper so this guard and its two siblings cannot disagree
+    // about what the workspace is.
+    expect([...WORKSPACE_ROOTS].sort()).toEqual(workspaceRoots());
   });
 
   it('finds the four publishable packages in the real tree', () => {

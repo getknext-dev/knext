@@ -11,10 +11,11 @@
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
+import { workspaceGlobs as sharedWorkspaceGlobs } from '../../scripts/lib/workspace-globs.mjs';
 
 export const REPO_ROOT = resolve(__dirname, '..', '..');
 
-/** Workspace globs from `pnpm-workspace.yaml` — cross-checked by `workspaceGlobs`. */
+/** Workspace roots, cross-checked against the declaration by `workspaceGlobs`. */
 export const WORKSPACE_DIRS = ['apps', 'packages'];
 
 export interface Manifest {
@@ -23,10 +24,21 @@ export interface Manifest {
   pkg: Record<string, unknown>;
 }
 
-/** The globs `pnpm-workspace.yaml` actually declares. */
+/**
+ * The globs the repo actually declares — delegated, not re-parsed.
+ *
+ * The declaration moved from `pnpm-workspace.yaml` to `package.json`'s
+ * `workspaces` array when the repo left pnpm. The parsing lives in
+ * `scripts/lib/workspace-globs.mjs` because it is reachable from BOTH scripts
+ * and tests; this stays as the test-side name so callers are unchanged.
+ *
+ * Consolidating mattered more than the format change: five separate readings of
+ * the same declaration existed, and removing pnpm broke four of them
+ * independently. Guards that disagree about what the workspace IS are how a
+ * package falls outside all of them at once.
+ */
 export function workspaceGlobs(): string[] {
-  const yaml = readFileSync(resolve(REPO_ROOT, 'pnpm-workspace.yaml'), 'utf8');
-  return [...yaml.matchAll(/^\s*-\s*'([^']+)'/gm)].map((m) => m[1]).sort();
+  return [...sharedWorkspaceGlobs()].sort();
 }
 
 /**

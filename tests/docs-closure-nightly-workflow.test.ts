@@ -294,7 +294,7 @@ describe('#320 per-PR docs-site behavior is UNCHANGED', () => {
 
 describe('#465 docs-closure HIGH remediation is by BUMP, not suppression', () => {
   const ROOT_PKG_PATH = resolve(REPO_ROOT, 'package.json');
-  const ROOT_LOCK_PATH = resolve(REPO_ROOT, 'pnpm-lock.yaml');
+  const ROOT_LOCK_PATH = resolve(REPO_ROOT, 'bun.lock');
 
   /** Lowest version a `>=X.Y.Z <A` style override range admits, as [maj,min,pat]. */
   function floorOf(range: string): [number, number, number] {
@@ -353,10 +353,15 @@ describe('#465 docs-closure HIGH remediation is by BUMP, not suppression', () =>
       const name = selector.includes('@', 1)
         ? selector.slice(0, selector.lastIndexOf('@'))
         : selector;
-      const banned = `${name}@${badVersion}:`;
+      // `"name@version"` — bun.lock's quoted form — not pnpm's `name@version:`
+      // YAML key. The trailing colon was the old format's delimiter, and it is
+      // what stopped `1.2.3` matching inside `1.2.30`; the closing QUOTE does
+      // the same job here. Dropping the delimiter would make this guard
+      // fail-open on a version that merely shares a prefix.
+      const banned = `"${name}@${badVersion}"`;
       expect(
         lock.includes(banned),
-        `lockfile must not resolve ${banned.slice(0, -1)} (${advisory})`,
+        `lockfile must not resolve ${name}@${badVersion} (${advisory})`,
       ).toBe(false);
     }
   });

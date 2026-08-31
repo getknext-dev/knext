@@ -105,15 +105,29 @@ const REPO_ROOT = resolve(import.meta.dirname, '..');
 const WORKFLOW_PATH = resolve(REPO_ROOT, '.github/workflows/test-e2e-deploy.yml');
 const ROOT_PKG_PATH = resolve(REPO_ROOT, 'package.json');
 
-/** The pnpm version the repo pins via `packageManager` (e.g. "10.4.1"). */
+/**
+ * The pnpm version this workflow pins for the UPSTREAM Next.js harness.
+ *
+ * It used to read knext's own `packageManager` field, because the two had to
+ * agree: the action cannot resolve `packageManager` from the checkout path, so
+ * the workflow pinned it explicitly and this kept that literal honest.
+ *
+ * knext no longer uses pnpm at all — `packageManager` is `bun@…` — so there is
+ * nothing in the repo left to anchor against, and pretending otherwise would
+ * just re-couple a workflow to a field it has no relationship with. The
+ * reference is now the workflow's OWN first pin, which keeps the property that
+ * actually matters here: every `pnpm/action-setup` step agrees, so a second
+ * version (next.js's 9.6.0) cannot be introduced by one step and missed.
+ */
 function pinnedPnpmVersion(): string {
-  const pkg = JSON.parse(readFileSync(ROOT_PKG_PATH, 'utf8')) as {
-    packageManager?: string;
-  };
-  const pm = pkg.packageManager ?? '';
-  const match = pm.match(/^pnpm@(\d+\.\d+\.\d+)$/);
-  expect(match, `package.json packageManager should pin pnpm, got "${pm}"`).not.toBeNull();
-  return (match as RegExpMatchArray)[1];
+  const versions = pnpmSetupVersions();
+  expect(
+    versions.length,
+    'test-e2e-deploy.yml has no pnpm/action-setup step — this guard has no subject',
+  ).toBeGreaterThan(0);
+  const first = versions[0];
+  expect(first, 'the first pnpm/action-setup step must pin a version').not.toBeNull();
+  return String(first);
 }
 
 /**
@@ -194,12 +208,12 @@ describe('compat-suite workflow pnpm pin (test-e2e-deploy.yml)', () => {
     });
   });
 
-  it('the pinned pnpm version matches the repo packageManager field', () => {
+  it('every pnpm/action-setup step pins the SAME version', () => {
     const expected = pinnedPnpmVersion();
     pnpmSetupVersions().forEach((version, idx) => {
       expect(
         version,
-        `pnpm version in step #${idx + 1} must match packageManager pnpm@${expected}`,
+        `pnpm version in step #${idx + 1} must match the first step's pin (${expected}) — a second version here is how next.js's 9.6.0 gets in unnoticed`,
       ).toBe(expected);
     });
   });

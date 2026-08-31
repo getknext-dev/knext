@@ -44,6 +44,44 @@ const bunBin = flag('bun', process.env.KNEXT_BUN ?? 'bun');
 const concurrency = Number(flag('concurrency', String(Math.max(2, cpus().length - 2))));
 const targets = argv.filter((a) => !a.startsWith('--'));
 
+/**
+ * Warn when the local bun differs from the one `packageManager` names.
+ *
+ * bun does NOT enforce its own version pin — measured: 1.3.5 installs happily
+ * against both `packageManager: "bun@1.4.0"` and a `.bun-version` file. So a
+ * contributor on an older bun meets this instead:
+ *
+ *   error: lockfile had changes, but lockfile is frozen
+ *   note: try re-running without --frozen-lockfile and commit the updated lockfile
+ *
+ * Following that note halves the dependency tree and drops security overrides
+ * (#879). `tests/bun-lockfile-integrity.test.ts` catches the result at commit
+ * time; this says it earlier, while the fix is still "use the right bun".
+ *
+ * A WARNING, not a refusal: the version that wrote the lockfile is not
+ * necessarily the only one that can run the tests, and blocking a whole suite on
+ * a patch-level difference would get this deleted rather than heeded.
+ */
+function warnOnBunVersionSkew() {
+  try {
+    const pinned = JSON.parse(readFileSync('package.json', 'utf8')).packageManager ?? '';
+    const want = /^bun@(\d+\.\d+\.\d+)$/.exec(pinned)?.[1];
+    if (want === undefined) return;
+    const have = execFileSync(bunBin, ['--version'], { encoding: 'utf8' }).trim();
+    if (have === want) return;
+    console.warn(
+      `\n  warning: running bun ${have}, but package.json pins bun@${want}.\n` +
+        '  Tests should still pass. Do NOT run a bare `bun install` on this version:\n' +
+        '  it rewrites bun.lock to an older format, halving the dependency tree and\n' +
+        '  dropping security overrides (#879).\n',
+    );
+  } catch {
+    // Never let a version probe break the run it is advising on.
+  }
+}
+
+warnOnBunVersionSkew();
+
 const files = execFileSync('git', ['ls-files', ...(targets.length ? targets : ['.'])], {
   encoding: 'utf8',
   maxBuffer: 64 * 1024 * 1024,
