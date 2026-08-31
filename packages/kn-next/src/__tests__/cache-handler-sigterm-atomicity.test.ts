@@ -1,5 +1,31 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+    afterEach,
+    beforeEach,
+    describe,
+    expect,
+    it,
+    jest,
+    spyOn,
+} from "bun:test";
 import { type FakeRedis, startFakeRedis } from "./helpers/fake-redis";
+
+// This file asserts IOREDIS-shaped behaviour. Under `bun test` the handler
+// would otherwise pick Bun's native client, whose shape differs (`onclose`, no
+// `.on`) — the failure then names the client rather than the fact that a
+// different one was chosen. Set ONCE at module scope: a per-test pin is one
+// `process.env` line away from a case that silently uses the other client.
+process.env.KNEXT_CACHE_REDIS_CLIENT = "ioredis";
+
+/**
+ * Stands in for `vi.resetModules()`, which bun has no equivalent of: a distinct
+ * specifier is a distinct module key, so a bumped query suffix yields a FRESH
+ * cache-handler record with its own module-level state.
+ *
+ * Applied to the cache-handler ONLY. Suffixing a collaborator the handler also
+ * imports would give the test a different instance from the one the handler
+ * uses, and the failure would describe the behaviour rather than the split.
+ */
+let __handlerGen = 0;
 
 /**
  * T13 — SIGTERM during ISR revalidation must never leave a TORN write.
@@ -34,18 +60,18 @@ describe("T13 — cache-handler set() is atomic across a mid-write death", () =>
     let fake: FakeRedis | undefined;
 
     beforeEach(() => {
-        vi.resetModules();
+        __handlerGen += 1;
         process.env.REDIS_KEY_PREFIX = PREFIX;
-        vi.spyOn(console, "error").mockImplementation(() => {});
-        vi.spyOn(console, "warn").mockImplementation(() => {});
-        vi.spyOn(console, "log").mockImplementation(() => {});
+        spyOn(console, "error").mockImplementation(() => {});
+        spyOn(console, "warn").mockImplementation(() => {});
+        spyOn(console, "log").mockImplementation(() => {});
     });
 
     afterEach(async () => {
         await fake?.close();
         fake = undefined;
         process.env = { ...original };
-        vi.restoreAllMocks();
+        jest.restoreAllMocks();
     });
 
     /** What the server actually holds for this key + its tag membership. */
@@ -60,7 +86,7 @@ describe("T13 — cache-handler set() is atomic across a mid-write death", () =>
         set: (k: string, d: unknown, c: unknown) => Promise<void>;
         get: (k: string) => Promise<unknown>;
     }> => {
-        const mod = await import(CACHE_HANDLER);
+        const mod = await import(`${CACHE_HANDLER}?gen=${__handlerGen}`);
         return new mod.default({});
     };
 
@@ -178,7 +204,7 @@ describe("T13 — cache-handler set() is atomic across a mid-write death", () =>
         });
         process.env.REDIS_URL = fake.url;
 
-        const seed = await import(CACHE_HANDLER);
+        const seed = await import(`${CACHE_HANDLER}?gen=${__handlerGen}`);
         const handler = new seed.default({}) as {
             set: (k: string, d: unknown, c: unknown) => Promise<void>;
             revalidateTag: (t: string[]) => Promise<void>;
@@ -224,18 +250,18 @@ describe("T13 — in-flight cache writes are drainable", () => {
     const REGISTRY: string = "../adapters/cache-write-registry.js";
 
     beforeEach(() => {
-        vi.resetModules();
+        __handlerGen += 1;
         process.env.REDIS_KEY_PREFIX = "drain-app";
-        vi.spyOn(console, "error").mockImplementation(() => {});
-        vi.spyOn(console, "warn").mockImplementation(() => {});
-        vi.spyOn(console, "log").mockImplementation(() => {});
+        spyOn(console, "error").mockImplementation(() => {});
+        spyOn(console, "warn").mockImplementation(() => {});
+        spyOn(console, "log").mockImplementation(() => {});
     });
 
     afterEach(async () => {
         await fake?.close();
         fake = undefined;
         process.env = { ...original };
-        vi.restoreAllMocks();
+        jest.restoreAllMocks();
     });
 
     it("drainCacheWrites() resolves only after an in-flight set() has committed", async () => {
@@ -252,7 +278,7 @@ describe("T13 — in-flight cache writes are drainable", () => {
         });
         process.env.REDIS_URL = fake.url;
 
-        const mod = await import(CACHE_HANDLER);
+        const mod = await import(`${CACHE_HANDLER}?gen=${__handlerGen}`);
         const registry = await import(REGISTRY);
         const handler = new mod.default({});
 
@@ -284,7 +310,7 @@ describe("T13 — in-flight cache writes are drainable", () => {
         });
         process.env.REDIS_URL = fake.url;
 
-        const mod = await import(CACHE_HANDLER);
+        const mod = await import(`${CACHE_HANDLER}?gen=${__handlerGen}`);
         const registry = await import(REGISTRY);
         const handler = new mod.default({});
         void handler.set("/hung", { kind: "PAGE" }, { revalidate: 30 });

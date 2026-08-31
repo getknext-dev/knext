@@ -1,4 +1,31 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+    afterEach,
+    beforeEach,
+    describe,
+    expect,
+    it,
+    jest,
+    spyOn,
+} from "bun:test";
+
+// This file asserts IOREDIS-shaped behaviour. Under `bun test` the handler
+// would otherwise pick Bun's native client, whose shape differs (`onclose`, no
+// `.on`) — the failure then names the client rather than the fact that a
+// different one was chosen. Set ONCE at module scope: a per-test pin is one
+// `process.env` line away from a case that silently uses the other client.
+process.env.KNEXT_CACHE_REDIS_CLIENT = "ioredis";
+
+/**
+ * Stands in for `vi.resetModules()`, which bun has no equivalent of: a distinct
+ * specifier is a distinct module key, so a bumped query suffix yields a FRESH
+ * cache-handler record with its own module-level state.
+ *
+ * Applied to the cache-handler ONLY. Suffixing a collaborator the handler also
+ * imports would give the test a different instance from the one the handler
+ * uses, and the failure would describe the behaviour rather than the split.
+ */
+let __handlerGen = 0;
+
 import {
     type FakeRedis,
     reservedClosedPort,
@@ -71,22 +98,22 @@ describe("T14 — cache-handler failure injection: four modes fail OPEN", () => 
     let fake: FakeRedis | undefined;
 
     beforeEach(() => {
-        vi.resetModules();
+        __handlerGen += 1;
         process.env.REDIS_KEY_PREFIX = "fault-app";
         // Keep the fault budgets small so the suite is fast; production defaults
         // live in cache-handler.js.
         process.env.REDIS_COMMAND_TIMEOUT_MS = "300";
         process.env.REDIS_CONNECT_TIMEOUT_MS = "300";
-        vi.spyOn(console, "error").mockImplementation(() => {});
-        vi.spyOn(console, "warn").mockImplementation(() => {});
-        vi.spyOn(console, "log").mockImplementation(() => {});
+        spyOn(console, "error").mockImplementation(() => {});
+        spyOn(console, "warn").mockImplementation(() => {});
+        spyOn(console, "log").mockImplementation(() => {});
     });
 
     afterEach(async () => {
         await fake?.close();
         fake = undefined;
         process.env = { ...original };
-        vi.restoreAllMocks();
+        jest.restoreAllMocks();
     });
 
     /** Install one fault mode and return a fresh handler under it. */
@@ -107,7 +134,7 @@ describe("T14 — cache-handler failure injection: four modes fail OPEN", () => 
             fake = await startFakeRedis({ mode: "garbage" });
             process.env.REDIS_URL = fake.url;
         }
-        const mod = await import(CACHE_HANDLER);
+        const mod = await import(`${CACHE_HANDLER}?gen=${__handlerGen}`);
         return new mod.default({}) as Handler;
     };
 
@@ -201,13 +228,13 @@ describe("T14 — the HANG mode is a capacity fault, and stays bounded", () => {
     let fake: FakeRedis | undefined;
 
     beforeEach(async () => {
-        vi.resetModules();
+        __handlerGen += 1;
         process.env.REDIS_KEY_PREFIX = "fault-app";
         process.env.REDIS_COMMAND_TIMEOUT_MS = "300";
         process.env.REDIS_CONNECT_TIMEOUT_MS = "300";
-        vi.spyOn(console, "error").mockImplementation(() => {});
-        vi.spyOn(console, "warn").mockImplementation(() => {});
-        vi.spyOn(console, "log").mockImplementation(() => {});
+        spyOn(console, "error").mockImplementation(() => {});
+        spyOn(console, "warn").mockImplementation(() => {});
+        spyOn(console, "log").mockImplementation(() => {});
         fake = await startFakeRedis({ mode: "blackhole" });
         process.env.REDIS_URL = fake.url;
     });
@@ -216,11 +243,11 @@ describe("T14 — the HANG mode is a capacity fault, and stays bounded", () => {
         await fake?.close();
         fake = undefined;
         process.env = { ...original };
-        vi.restoreAllMocks();
+        jest.restoreAllMocks();
     });
 
     it("50 concurrent requests all get an origin response, and do NOT open 50 sockets", async () => {
-        const mod = await import(CACHE_HANDLER);
+        const mod = await import(`${CACHE_HANDLER}?gen=${__handlerGen}`);
         const handler = new mod.default({}) as Handler;
 
         const results = await Promise.all(
@@ -245,7 +272,7 @@ describe("T14 — the HANG mode is a capacity fault, and stays bounded", () => {
     }, 20_000);
 
     it("a second wave fails FAST — outstanding commands do not queue behind the first", async () => {
-        const mod = await import(CACHE_HANDLER);
+        const mod = await import(`${CACHE_HANDLER}?gen=${__handlerGen}`);
         const handler = new mod.default({}) as Handler;
 
         // First wave pays the fault budget.
@@ -280,13 +307,13 @@ describe("T14 — a busy-but-never-ready server is bounded by the readiness budg
     let fake: FakeRedis | undefined;
 
     beforeEach(async () => {
-        vi.resetModules();
+        __handlerGen += 1;
         process.env.REDIS_KEY_PREFIX = "fault-app";
         process.env.REDIS_CONNECT_TIMEOUT_MS = "400";
         process.env.REDIS_COMMAND_TIMEOUT_MS = "400";
-        vi.spyOn(console, "error").mockImplementation(() => {});
-        vi.spyOn(console, "warn").mockImplementation(() => {});
-        vi.spyOn(console, "log").mockImplementation(() => {});
+        spyOn(console, "error").mockImplementation(() => {});
+        spyOn(console, "warn").mockImplementation(() => {});
+        spyOn(console, "log").mockImplementation(() => {});
         fake = await startFakeRedis({ mode: "slow-ready" });
         process.env.REDIS_URL = fake.url;
     });
@@ -295,11 +322,11 @@ describe("T14 — a busy-but-never-ready server is bounded by the readiness budg
         await fake?.close();
         fake = undefined;
         process.env = { ...original };
-        vi.restoreAllMocks();
+        jest.restoreAllMocks();
     });
 
     it("serves an origin response instead of waiting on a handshake that never completes", async () => {
-        const mod = await import(CACHE_HANDLER);
+        const mod = await import(`${CACHE_HANDLER}?gen=${__handlerGen}`);
         const handler = new mod.default({}) as Handler;
 
         const startedAt = Date.now();
@@ -332,14 +359,14 @@ describe("T14 — an ESTABLISHED connection that stops answering is still bounde
     let fake: FakeRedis | undefined;
 
     beforeEach(async () => {
-        vi.resetModules();
+        __handlerGen += 1;
         process.env.REDIS_KEY_PREFIX = "fault-app";
         process.env.REDIS_COMMAND_TIMEOUT_MS = "300";
         process.env.REDIS_CONNECT_TIMEOUT_MS = "2000";
         process.env.REDIS_RETRY_COOLDOWN_MS = "5000";
-        vi.spyOn(console, "error").mockImplementation(() => {});
-        vi.spyOn(console, "warn").mockImplementation(() => {});
-        vi.spyOn(console, "log").mockImplementation(() => {});
+        spyOn(console, "error").mockImplementation(() => {});
+        spyOn(console, "warn").mockImplementation(() => {});
+        spyOn(console, "log").mockImplementation(() => {});
         // Handshake (client/info) is answered normally; reads never are.
         fake = await startFakeRedis({
             onCommand: async (cmd) => {
@@ -353,11 +380,11 @@ describe("T14 — an ESTABLISHED connection that stops answering is still bounde
         await fake?.close();
         fake = undefined;
         process.env = { ...original };
-        vi.restoreAllMocks();
+        jest.restoreAllMocks();
     });
 
     it("serves a genuine origin response despite the command never returning", async () => {
-        const mod = await import(CACHE_HANDLER);
+        const mod = await import(`${CACHE_HANDLER}?gen=${__handlerGen}`);
         const handler = new mod.default({}) as Handler;
 
         const result = await renderThroughCache(
@@ -372,7 +399,7 @@ describe("T14 — an ESTABLISHED connection that stops answering is still bounde
     }, 20_000);
 
     it("one hung command is enough — later requests fail fast, not one budget each", async () => {
-        const mod = await import(CACHE_HANDLER);
+        const mod = await import(`${CACHE_HANDLER}?gen=${__handlerGen}`);
         const handler = new mod.default({}) as Handler;
 
         await handler.get("/first");

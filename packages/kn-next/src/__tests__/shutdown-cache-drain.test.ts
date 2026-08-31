@@ -1,10 +1,38 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+    afterEach,
+    beforeEach,
+    describe,
+    expect,
+    it,
+    jest,
+    mock,
+    spyOn,
+} from "bun:test";
+import { waitFor } from "../../../../tests/helpers/bun-test-helpers";
 import {
     clearShutdownDrains,
     gracefulShutdown,
     registerShutdownDrain,
 } from "../adapters/shutdown";
 import { type FakeRedis, startFakeRedis } from "./helpers/fake-redis";
+
+// This file asserts IOREDIS-shaped behaviour. Under `bun test` the handler
+// would otherwise pick Bun's native client, whose shape differs (`onclose`, no
+// `.on`) — the failure then names the client rather than the fact that a
+// different one was chosen. Set ONCE at module scope: a per-test pin is one
+// `process.env` line away from a case that silently uses the other client.
+process.env.KNEXT_CACHE_REDIS_CLIENT = "ioredis";
+
+/**
+ * Stands in for `vi.resetModules()`, which bun has no equivalent of: a distinct
+ * specifier is a distinct module key, so a bumped query suffix yields a FRESH
+ * cache-handler record with its own module-level state.
+ *
+ * Applied to the cache-handler ONLY. Suffixing a collaborator the handler also
+ * imports would give the test a different instance from the one the handler
+ * uses, and the failure would describe the behaviour rather than the split.
+ */
+let __handlerGen = 0;
 
 /**
  * T13, composition half — the SIGTERM path must actually AWAIT in-flight ISR
@@ -33,12 +61,12 @@ describe("T13 — gracefulShutdown awaits in-flight ISR writes when they are reg
     let fake: FakeRedis | undefined;
 
     beforeEach(() => {
-        vi.resetModules();
+        __handlerGen += 1;
         clearShutdownDrains();
         process.env.REDIS_KEY_PREFIX = "shutdown-app";
-        vi.spyOn(console, "error").mockImplementation(() => {});
-        vi.spyOn(console, "warn").mockImplementation(() => {});
-        vi.spyOn(console, "log").mockImplementation(() => {});
+        spyOn(console, "error").mockImplementation(() => {});
+        spyOn(console, "warn").mockImplementation(() => {});
+        spyOn(console, "log").mockImplementation(() => {});
     });
 
     afterEach(async () => {
@@ -46,7 +74,7 @@ describe("T13 — gracefulShutdown awaits in-flight ISR writes when they are reg
         fake = undefined;
         clearShutdownDrains();
         process.env = { ...original };
-        vi.restoreAllMocks();
+        jest.restoreAllMocks();
     });
 
     const fakeChild = (): {
@@ -85,7 +113,7 @@ describe("T13 — gracefulShutdown awaits in-flight ISR writes when they are reg
         });
         process.env.REDIS_URL = fake.url;
 
-        const mod = await import(CACHE_HANDLER);
+        const mod = await import(`${CACHE_HANDLER}?gen=${__handlerGen}`);
         const registry = await import(REGISTRY);
         const handler = new mod.default({});
         const writing = handler.set(
@@ -96,7 +124,7 @@ describe("T13 — gracefulShutdown awaits in-flight ISR writes when they are reg
 
         registerShutdownDrain(() => registry.drainCacheWrites(5000));
 
-        const exit = vi.fn();
+        const exit = mock();
         const child = fakeChild();
         gracefulShutdown("SIGTERM", {
             child,
@@ -121,7 +149,7 @@ describe("T13 — gracefulShutdown awaits in-flight ISR writes when they are reg
 
         release?.();
         await writing;
-        await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(0));
+        await waitFor(() => expect(exit).toHaveBeenCalledWith(0));
 
         expect(fake.strings.has("shutdown-app:cache:/late-revalidation")).toBe(
             true,
@@ -136,14 +164,14 @@ describe("T13 — gracefulShutdown awaits in-flight ISR writes when they are reg
         });
         process.env.REDIS_URL = fake.url;
 
-        const mod = await import(CACHE_HANDLER);
+        const mod = await import(`${CACHE_HANDLER}?gen=${__handlerGen}`);
         const registry = await import(REGISTRY);
         const handler = new mod.default({});
         void handler.set("/never", { kind: "PAGE" }, { revalidate: 60 });
 
         registerShutdownDrain(() => registry.drainCacheWrites(60_000));
 
-        const exit = vi.fn();
+        const exit = mock();
         const child = fakeChild();
         let capFire: (() => void) | undefined;
         gracefulShutdown("SIGTERM", {

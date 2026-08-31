@@ -35,6 +35,28 @@ import {
  * spans — the processor and the pool wrapper create them, exactly as in prod.
  */
 
+/*
+ * STAYS ON VITEST (#871), with the diagnosis corrected.
+ *
+ * It was recorded as "OTel global-provider re-registration does not survive
+ * `trace.disable()` under bun". That is FALSE — probed directly: register,
+ * `shutdown()`, `disable()`, register again, and the second provider records
+ * normally. The theory was plausible and wrong, so it is written down rather
+ * than left to be re-derived.
+ *
+ * What is actually observed: `bootRuntime()` runs in this describe's
+ * `beforeEach`, so every case has a provider, and the FIRST case does emit
+ * `knext.db_wake`. Two later cases do not — the exporter holds only
+ * `knext.cold_start` and the request span. So something is once-per-process
+ * about the db-wake path rather than once-per-provider, and it is not the
+ * per-pool `waked` latch (each case builds a fresh pool).
+ *
+ * Left here because a wrong fix to an instrumentation guard is worse than a
+ * file on the older runner: this asserts that one cold request produces exactly
+ * one trace, and a change that made the assertion pass without understanding
+ * why would remove the only thing checking it.
+ */
+
 let exporter = new InMemorySpanExporter();
 let provider: BasicTracerProvider | undefined;
 const contextManager = new AsyncLocalStorageContextManager();
