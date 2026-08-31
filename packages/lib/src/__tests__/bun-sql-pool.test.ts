@@ -13,8 +13,13 @@
  * package has to keep working in.
  */
 
-import { describe, expect, it, vi } from 'vitest';
-import { type BunSqlPoolConfig, bunSqlAvailable, createBunSqlPool } from '../db/bun-sql-pool';
+import { describe, expect, it, mock } from 'bun:test';
+import {
+  type BunSqlPoolConfig,
+  bunSqlAvailable,
+  createBunSqlPool,
+  defaultSqlFactory,
+} from '../db/bun-sql-pool';
 
 const CONFIG: BunSqlPoolConfig = {
   connectionString: 'postgres://localhost/test',
@@ -51,14 +56,14 @@ function fakeSql() {
   };
 
   const client = {
-    unsafe: vi.fn(makeQuery),
-    reserve: vi.fn(async () => ({
-      unsafe: vi.fn(makeQuery),
+    unsafe: mock(makeQuery),
+    reserve: mock(async () => ({
+      unsafe: mock(makeQuery),
       release: () => {
         released.count++;
       },
     })),
-    close: vi.fn(async () => {}),
+    close: mock(async () => {}),
   };
   return { client, seen, released };
 }
@@ -88,7 +93,7 @@ describe('bun-sql pool facade — the pg shape callers depend on', () => {
 
   it('never yields an undefined rows array, whatever the client returns', async () => {
     const { client } = fakeSql();
-    client.unsafe = vi.fn(() => ({
+    client.unsafe = mock(() => ({
       values: () => Promise.resolve(undefined),
       then: (r: (v: unknown) => unknown) => Promise.resolve(undefined).then(r),
     })) as never;
@@ -166,55 +171,50 @@ describe("bun-sql pool facade — drizzle's rowMode: 'array' (the silent-diverge
 });
 
 describe('bun-sql availability probe', () => {
+  /**
+   * These probe an INJECTED scope, never `globalThis`.
+   *
+   * The vitest version assigned `globalThis.Bun` directly, which worked only
+   * because Node has no such global. Under `bun:test` it is readonly AND
+   * non-configurable — neither assignment nor `Object.defineProperty` works —
+   * so the whole describe failed with "Attempted to assign to readonly
+   * property" (#871).
+   *
+   * Injecting is better than a workaround for that: the old tests could only
+   * run where the real global was absent, which is precisely the environment
+   * this code does NOT target.
+   */
+  const scopeWith = (Bun: unknown) => ({ Bun }) as Parameters<typeof bunSqlAvailable>[0];
+
   it('reports false when Bun is absent, true when Bun.SQL is present', () => {
     // Both halves: a probe that only ever returns one answer is not a probe.
-    const g = globalThis as { Bun?: unknown };
-    const saved = g.Bun;
-    try {
-      g.Bun = undefined;
-      expect(bunSqlAvailable()).toBe(false);
-
-      g.Bun = { SQL: function SQL() {} };
-      expect(bunSqlAvailable()).toBe(true);
-
-      // Present but not a constructor is NOT available.
-      g.Bun = { SQL: 'nope' };
-      expect(bunSqlAvailable()).toBe(false);
-    } finally {
-      g.Bun = saved;
-    }
+    expect(bunSqlAvailable(scopeWith(undefined))).toBe(false);
+    expect(bunSqlAvailable(scopeWith({ SQL: function SQL() {} }))).toBe(true);
+    // Present but not a constructor is NOT available.
+    expect(bunSqlAvailable(scopeWith({ SQL: 'nope' }))).toBe(false);
   });
 
   it('refuses to build a pool when Bun.SQL is missing rather than failing later', () => {
-    const g = globalThis as { Bun?: unknown };
-    const saved = g.Bun;
-    try {
-      g.Bun = undefined;
-      // Default factory, no injection — must throw HERE, not at first query.
-      expect(() => createBunSqlPool(CONFIG)).toThrow(/Bun\.SQL/);
-    } finally {
-      g.Bun = saved;
-    }
+    // The default factory, resolved against a scope with no Bun — must throw
+    // HERE, not at the first query, where it would look like a database fault.
+    expect(() =>
+      createBunSqlPool(CONFIG, (c) => defaultSqlFactory(c, scopeWith(undefined))),
+    ).toThrow(/Bun\.SQL/);
   });
 
   it('converts pg millisecond timeouts into the seconds Bun expects', () => {
     // 15_000ms passed through unconverted becomes a 15,000-SECOND connect
     // budget — a hang that looks like a hung database.
-    const g = globalThis as { Bun?: unknown };
-    const saved = g.Bun;
     const opts: Array<Record<string, unknown>> = [];
-    try {
-      g.Bun = {
-        SQL: function SQL(o: Record<string, unknown>) {
-          opts.push(o);
-          return { unsafe: () => ({}), reserve: async () => ({}), close: async () => {} };
-        },
-      };
-      createBunSqlPool(CONFIG);
-      expect(opts[0]?.connectionTimeout).toBe(15);
-      expect(opts[0]?.idleTimeout).toBe(30);
-    } finally {
-      g.Bun = saved;
-    }
+    const scope = scopeWith({
+      SQL: function SQL(o: Record<string, unknown>) {
+        opts.push(o);
+        return { unsafe: () => ({}), reserve: async () => ({}), close: async () => {} };
+      },
+    });
+    createBunSqlPool(CONFIG, (c) => defaultSqlFactory(c, scope));
+    expect(opts).toHaveLength(1);
+    expect(opts[0]?.connectionTimeout).toBe(CONFIG.connectionTimeoutMillis / 1000);
+    expect(opts[0]?.idleTimeout).toBe(CONFIG.idleTimeoutMillis / 1000);
   });
 });

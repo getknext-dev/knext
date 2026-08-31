@@ -124,12 +124,20 @@ export function createRedisClient(
   const quiet = quietRedisOptions(overrides);
 
   if (!ctorOverride && bunRedisAvailable(scope)) {
-    const bun = scope.Bun as { RedisClient?: RedisCtor } | undefined;
-    // Bind the constructor to a plain local FIRST. `new (bun?.RedisClient)(...)`
-    // is a SyntaxError — "constructor in/after an optional chaining is not
-    // allowed" — and it is one an older parser will happily accept, so this
-    // read as working code right up until a different bundler saw it.
-    const BunRedis = bun?.RedisClient as RedisCtor;
+    // NO optional chaining anywhere on the path to `new`.
+    //
+    // `new (bun?.RedisClient)(...)` is a SyntaxError — "constructor in an
+    // optional chain" — and binding to a local first is NOT enough to avoid it:
+    // bun's runtime transpiler inlines the single-use const and re-parses the
+    // optional chain, so the file bundles cleanly with `bun build` and then
+    // fails to load under `bun test`. Two toolchains, one file, different
+    // answers — which is why this was only ever caught by running it.
+    //
+    // The narrowing is free: `bunRedisAvailable(scope)` has already established
+    // that both `Bun` and `Bun.RedisClient` are present, so a non-optional read
+    // asserts nothing new.
+    const bun = scope.Bun as { RedisClient: RedisCtor };
+    const BunRedis: RedisCtor = bun.RedisClient;
     const client = new BunRedis(url, toBunRedisOptions(quiet));
     // Not optional. Failing open is right; failing open SILENTLY is what turns
     // a Redis blip into an unexplained log flood (#802).

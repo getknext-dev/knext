@@ -19,6 +19,20 @@
 
 import { jest } from 'bun:test';
 
+/**
+ * The REAL `setImmediate`, captured at module load.
+ *
+ * `jest.useFakeTimers()` replaces `setImmediate` along with everything else, so
+ * `await new Promise((r) => setImmediate(r))` inside a faked test schedules a
+ * callback onto the fake clock and waits for it forever. The file does not
+ * fail — it HANGS, with no output at all, and the runner reports a timeout that
+ * names no test (#871).
+ *
+ * Captured here because this module is imported before any test installs fake
+ * timers, so the binding is still the real one.
+ */
+const realSetImmediate = globalThis.setImmediate;
+
 // ── env stubbing ─────────────────────────────────────────────────────────────
 
 const envStack: Array<[string, string | undefined]> = [];
@@ -97,11 +111,45 @@ export async function waitFor<T>(
  */
 export async function advanceTimersByTimeAsync(ms: number): Promise<void> {
   jest.advanceTimersByTime(ms);
-  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => realSetImmediate(resolve));
 }
 
-/** Run every pending fake timer, then drain the microtask queue. See above. */
-export async function runAllTimersAsync(): Promise<void> {
-  jest.runAllTimers();
-  await new Promise((resolve) => setImmediate(resolve));
+/**
+ * vitest's `vi.runAllTimersAsync()`, which bun's `jest.runAllTimers()` is NOT.
+ *
+ * Two differences, and both matter:
+ *
+ *  1. `jest.runAllTimers()` is SYNCHRONOUS. A timer whose callback awaits, then
+ *     schedules the next retry, never gets to schedule it — so the loop either
+ *     ends early or, when the continuation runs inside the same tick, spins.
+ *  2. It is UNBOUNDED. Against the DB wake-retry's self-rescheduling backoff it
+ *     blocks the event loop outright: the file produced no output at all, and
+ *     even `bun test --timeout` could not fire, because nothing yielded for the
+ *     timeout to run on. A hang with no test name is far worse to diagnose than
+ *     a failure.
+ *
+ * So this advances ONE timer at a time and yields a real macrotask between
+ * them, which is what lets a promise chained off a timer settle before the next
+ * one fires. The iteration cap converts an infinite reschedule into a named
+ * error instead of a hang — vitest's own implementation caps for the same
+ * reason.
+ */
+export async function runAllTimersAsync(maxIterations = 10_000): Promise<void> {
+  // Yield BEFORE the first check. The caller typically starts an async
+  // operation and then drains — and the first backoff timer is only scheduled
+  // once that operation's first continuation runs. Checking immediately finds
+  // zero timers, returns, and leaves the caller awaiting a promise nothing will
+  // ever settle: a hang, not a failure.
+  await new Promise((resolve) => realSetImmediate(resolve));
+
+  for (let i = 0; i < maxIterations; i++) {
+    if (jest.getTimerCount() === 0) return;
+    jest.advanceTimersToNextTimer();
+    await new Promise((resolve) => realSetImmediate(resolve));
+  }
+  throw new Error(
+    `runAllTimersAsync: ${jest.getTimerCount()} timer(s) still pending after ` +
+      `${maxIterations} iterations — a timer is almost certainly rescheduling ` +
+      'itself forever. Advance by a bounded amount instead.',
+  );
 }

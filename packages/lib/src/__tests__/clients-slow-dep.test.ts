@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, jest, mock, spyOn } from 'bun:test';
+import { resetClients } from '../clients';
 
 /**
  * PG half of the ledger row-3 discrimination instrument.
@@ -16,10 +17,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  * FIRST connect was slow" (the row-3 reading) from "a warm query was slow".
  */
 
-const query = vi.fn((..._args: unknown[]) => Promise.resolve({ rows: [] }));
-const connect = vi.fn(() => Promise.resolve({ release() {} }));
+const query = mock((..._args: unknown[]) => Promise.resolve({ rows: [] }));
+const connect = mock(() => Promise.resolve({ release() {} }));
 
-vi.mock('pg', () => ({
+mock.module('pg', () => ({
   Pool: class {
     query(...args: unknown[]) {
       return query(...(args as []));
@@ -33,7 +34,7 @@ vi.mock('pg', () => ({
   },
 }));
 
-type WarnSpy = ReturnType<typeof vi.fn>;
+type WarnSpy = ReturnType<typeof mock>;
 
 const slowLines = (warn: WarnSpy): string[] =>
   warn.mock.calls.map((c: unknown[]) => String(c[0])).filter((l) => l.startsWith('[slow-dep] '));
@@ -47,16 +48,16 @@ describe('@getknext/lib/clients — slow PG operations are named on the request 
   let warn: WarnSpy;
 
   beforeEach(async () => {
-    vi.resetModules();
-    vi.useRealTimers();
+    resetClients();
+    jest.useRealTimers();
     query.mockClear();
     query.mockImplementation((..._args: unknown[]) => Promise.resolve({ rows: [] }));
     connect.mockClear();
     connect.mockImplementation(() => Promise.resolve({ release() {} }));
     process.env.DATABASE_URL = 'postgres://app:s3cr3t@pggw-apps.scale-zero-pg.svc:5432/fm';
     process.env.SLOW_DEP_LOG_MS = '20';
-    warn = vi.fn();
-    vi.spyOn(console, 'warn').mockImplementation(warn as unknown as typeof console.warn);
+    warn = mock();
+    spyOn(console, 'warn').mockImplementation(warn as unknown as typeof console.warn);
     const mod = await import('../clients');
     mod.resetDbWakeSingleflight();
     mod.resetDbActivity();
@@ -66,7 +67,7 @@ describe('@getknext/lib/clients — slow PG operations are named on the request 
     const mod = await import('../clients');
     mod.resetDbWakeSingleflight();
     mod.resetDbActivity();
-    vi.restoreAllMocks();
+    jest.restoreAllMocks();
     delete process.env.DATABASE_URL;
     delete process.env.SLOW_DEP_LOG_MS;
   });
@@ -134,7 +135,7 @@ describe('@getknext/lib/clients — slow PG operations are named on the request 
     // Persistent failure: keep the #310 retry budget tiny so this stays fast.
     process.env.DB_WAKE_RETRY_BUDGET_MS = '25';
     process.env.DB_WAKE_RETRY_BASE_MS = '5';
-    vi.resetModules();
+    resetClients();
     const boom = Object.assign(new Error('connect ETIMEDOUT'), { code: 'ETIMEDOUT' });
     query.mockImplementation(() => new Promise((_, reject) => setTimeout(() => reject(boom), 30)));
     const mod = await import('../clients');
@@ -156,7 +157,7 @@ describe('@getknext/lib/clients — slow PG operations are named on the request 
     // app can reach is instrumented. file-manager uses the writer, but the
     // runbook is a general doc, so the RO gateway gets the same seam.
     process.env.DATABASE_URL_RO = 'postgres://reader:s3cr3t@replica.example.invalid:55434/fm';
-    vi.resetModules();
+    resetClients();
     query.mockImplementation(
       () => new Promise((resolve) => setTimeout(() => resolve({ rows: [] }), 60)),
     );
@@ -181,7 +182,7 @@ describe('@getknext/lib/clients — slow PG operations are named on the request 
 
   it('emits NOTHING for a fast read-only query (the other half)', async () => {
     process.env.DATABASE_URL_RO = 'postgres://reader:p@replica.example.invalid:55434/fm';
-    vi.resetModules();
+    resetClients();
     const mod = await import('../clients');
 
     await mod.getDbPoolRO()?.query('SELECT 1');

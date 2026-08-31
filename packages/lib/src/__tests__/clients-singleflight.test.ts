@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { resetClients } from '../clients';
 
 /**
  * #339 — single-flight the DB wake in the pool-acquire path.
@@ -79,11 +80,11 @@ class FakePool {
     return Promise.resolve();
   }
 }
-vi.mock('pg', () => ({ Pool: FakePool }));
+mock.module('pg', () => ({ Pool: FakePool }));
 
 describe('@getknext/lib/clients — single-flight DB wake (#339)', () => {
   beforeEach(async () => {
-    vi.resetModules();
+    resetClients();
     coldAcquires = 0;
     newGate();
     process.env.DATABASE_URL = 'postgres://u:p@localhost:5432/db';

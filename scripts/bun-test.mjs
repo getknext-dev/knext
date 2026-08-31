@@ -53,7 +53,26 @@ const files = execFileSync('git', ['ls-files', ...(targets.length ? targets : ['
   // fail on a machine without a running daemon for environmental reasons, not
   // porting ones, and a runner that reports those as migration failures buries
   // the real ones. They still run — in the job that provides a daemon.
-  .filter((f) => !/\.docker-e2e\.test\.tsx?$/.test(f));
+  .filter((f) => !/\.docker-e2e\.test\.tsx?$/.test(f))
+  // The OTHER half of the partition `vitest.config.ts` derives.
+  //
+  // A file importing `vitest` cannot run here, exactly as a file importing
+  // `bun:test` cannot run there. vitest already excludes itself from bun files
+  // by scanning; without the mirror image, every not-yet-ported file in a
+  // half-migrated package is reported as a bun FAILURE — which buries the real
+  // ones and makes the migration look like it is going backwards.
+  //
+  // Derived, not listed, for the same reason: the partition then has exactly one
+  // definition per side and no list to keep in sync.
+  .filter((f) => {
+    try {
+      return !/from\s+['"]vitest['"]/.test(readFileSync(f, 'utf8'));
+    } catch {
+      // Unreadable: run it. A file this runner skips silently is coverage lost
+      // with nothing to notice, which is worse than a loud failure.
+      return true;
+    }
+  });
 
 if (files.length === 0) {
   console.error('no test files matched');

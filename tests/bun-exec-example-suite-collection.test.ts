@@ -144,13 +144,39 @@ describe("examples/bun-exec's guards are actually collected", { timeout: 120_000
     expect(exampleTestScript()).toContain('bun-test.mjs');
   });
 
-  it('the ROOT vitest config excludes the example, and says so', () => {
-    // The other half. These files import `bun:test`, which vitest cannot run —
-    // so the exclusion is required for the root suite to pass at all. Asserting
-    // it here means the exclusion is visible to the guard that owns this
-    // example's coverage, rather than being a line in a config nobody connects
-    // to it.
-    const config = readFileSync(resolve(REPO_ROOT, 'vitest.config.ts'), 'utf8');
-    expect(config).toContain("'examples/bun-exec/**'");
+  it('the ROOT vitest run does NOT collect the example', () => {
+    // The other half. These files import `bun:test`, which vitest cannot run,
+    // so the root suite only passes if they are excluded.
+    //
+    // Asserted BEHAVIOURALLY — by asking vitest what it collects — not by
+    // grepping the config for a literal. The exclusion used to be a hardcoded
+    // glob and is now derived by scanning for `bun:test` imports; a textual
+    // assertion would have failed on that refactor while the property it cares
+    // about was still perfectly true.
+    const res = spawnSync('npx', ['vitest', 'list'], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      timeout: 300_000,
+      env: { ...process.env, CI: '1' },
+    });
+    expect(res.status, `\`vitest list\` failed (${res.status}): ${res.stderr?.slice(-400)}`).toBe(
+      0,
+    );
+    // Match the FILE column only, never the whole line. `vitest list` prints
+    // `<file> > <suite> > <test>`, and two other guards in this repo carry the
+    // example's paths inside their test NAMES — so a whole-line `toContain`
+    // matches them and this assertion passes, or fails, for reasons that have
+    // nothing to do with what vitest collected. The same fail-open shape as the
+    // basename-vs-path note on `assertCollected` above.
+    const collectedFiles = new Set(
+      res.stdout
+        .split('\n')
+        .map((line) => line.split(' > ')[0]?.trim())
+        .filter(Boolean),
+    );
+    expect([...collectedFiles].filter((f) => f?.startsWith('examples/bun-exec/'))).toEqual([]);
+    // Non-vacuity: the parse must actually be finding files, or the assertion
+    // above is satisfied by an empty set.
+    expect(collectedFiles.size).toBeGreaterThan(50);
   });
 });

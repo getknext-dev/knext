@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, jest, mock } from 'bun:test';
+import { stubEnv, unstubAllEnvs } from '../../../../tests/helpers/bun-test-helpers';
 
 // Correlation-ID layer (#318). The runtime request path adopts an inbound
 // `x-request-id` when it is well-formed, otherwise mints one; the id then flows
@@ -7,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // active), and it is echoed on the response + forwarded to downstream calls so a
 // request can be traced app -> db-wake.
 
+import { resetClients } from '../clients';
 import {
   applyCorrelationHeader,
   beginRequest,
@@ -146,7 +148,7 @@ describe('@getknext/lib correlation — outbound propagation', () => {
 
   it('(e) echoes x-request-id onto a Node ServerResponse-like object', () => {
     const ctx = createRequestContext({ correlationId: 'resp-node' });
-    const setHeader = vi.fn();
+    const setHeader = mock();
     runWithRequestContext(ctx, () => {
       applyCorrelationHeader({ setHeader });
     });
@@ -161,7 +163,7 @@ describe('@getknext/lib correlation — outbound propagation', () => {
 
   it('emits no header outside a request context (nothing to forward)', () => {
     expect(correlationHeaders()).toEqual({});
-    const setHeader = vi.fn();
+    const setHeader = mock();
     applyCorrelationHeader({ setHeader });
     expect(setHeader).not.toHaveBeenCalled();
   });
@@ -169,22 +171,26 @@ describe('@getknext/lib correlation — outbound propagation', () => {
 
 describe('@getknext/lib logger — correlation mixin (#318)', () => {
   beforeEach(() => {
-    vi.resetModules();
-    vi.stubEnv('NODE_ENV', 'production');
-    vi.stubEnv('LOG_LEVEL', undefined);
-    vi.stubEnv('KN_APP_NAME', undefined);
+    resetClients();
+    stubEnv('NODE_ENV', 'production');
+    stubEnv('LOG_LEVEL', undefined);
+    stubEnv('KN_APP_NAME', undefined);
   });
 
   afterEach(() => {
-    vi.unstubAllEnvs();
-    vi.doUnmock('pino');
-    vi.restoreAllMocks();
+    unstubAllEnvs();
+    // No `doUnmock`: bun cannot unregister a module mock. Safe here because
+    // this describe holds exactly ONE test that mocks pino, and it captures the
+    // real one BEFORE mocking — so nothing later in the file observes the mock.
+    // A second pino-mocking test added to this describe must capture its real
+    // pino at module scope, or it will silently receive the first test's fake.
+    jest.restoreAllMocks();
   });
 
   it('(d) every log line within a request carries correlation_id (+ trace_id when active)', async () => {
     const realPino = (await import('pino')).default;
     const lines: string[] = [];
-    vi.doMock('pino', () => ({
+    mock.module('pino', () => ({
       default: (options: Record<string, unknown>) =>
         realPino(options, { write: (s: string) => lines.push(s) }),
     }));

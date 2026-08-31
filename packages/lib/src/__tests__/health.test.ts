@@ -1,39 +1,52 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, jest, mock } from 'bun:test';
+import { advanceTimersByTimeAsync } from '../../../../tests/helpers/bun-test-helpers';
 
 // --- Postgres pool mock -----------------------------------------------------
 // `checkDeepHealth` calls `getDbPool().query('SELECT 1 ...')`. We drive that
 // query's behaviour per-test (resolve = alive, reject = blip, slow = timeout).
-const pgQuery = vi.fn<() => Promise<unknown>>();
-vi.mock('../clients', () => ({
+const pgQuery = mock<() => Promise<unknown>>();
+mock.module('../clients', () => ({
   getDbPool: () => ({ query: pgQuery }),
 }));
 
 // --- Redis mock -------------------------------------------------------------
 // The health module lazily `new RedisClient(url, opts)` then `.ping()`s it.
-const redisPing = vi.fn<() => Promise<unknown>>();
+const redisPing = mock<() => Promise<unknown>>();
 class FakeRedis {
   ping() {
     return redisPing();
   }
 }
-// Mock the SEAM, not the package. ioredis is resolved through a computed
-// specifier so it stays out of the bundle graph (redis-ctor.ts), and
-// `vi.mock('ioredis')` resolves by module id — it cannot intercept that. When
-// the loader was inline this mock silently stopped applying and the tests
-// dialled a real Redis, surfacing as `MaxRetriesPerRequestError` rather than
-// anything naming the cause.
-vi.mock('../redis/ioredis-ctor', () => ({ loadRedisCtor: () => FakeRedis }));
-vi.mock('ioredis', () => ({ default: FakeRedis }));
+// Mock the SEAM, not the package — and under bun the seam moved UP.
+//
+// The ioredis-ctor mock below is still right for Node: ioredis is resolved
+// through a computed specifier so it stays out of the bundle graph, and
+// `mock.module('ioredis')` resolves by module id, which cannot intercept that.
+//
+// But `createRedisClient` prefers `Bun.RedisClient` when it exists, and under
+// `bun test` it ALWAYS exists. So on bun the ioredis branch is never taken and
+// both mocks below are dead — the health check dialled a real Redis and failed
+// with "Connection timeout reached after 2000ms", which names a network problem
+// rather than a mocking one. The two mocks are kept because they document the
+// Node path, and `createRedisClient` is mocked above them because it is the one
+// seam BOTH runtimes go through.
+mock.module('../redis/client', () => ({
+  createRedisClient: () => new FakeRedis(),
+}));
+mock.module('../redis/ioredis-ctor', () => ({ loadRedisCtor: () => FakeRedis }));
+mock.module('ioredis', () => ({ default: FakeRedis }));
 
 // Silence the logger.
-vi.mock('../logger', () => ({
-  logger: { error: vi.fn(), info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+mock.module('../logger', () => ({
+  logger: { error: mock(), info: mock(), warn: mock(), debug: mock() },
 }));
 
 describe('checkDeepHealth — hard vs soft dependency taxonomy (readiness contract)', () => {
   beforeEach(() => {
-    vi.useRealTimers();
-    vi.resetModules();
+    jest.useRealTimers();
+    // No `resetClients()`: `../clients` is replaced wholesale above, so there
+    // is no real module state to clear. Calling the mock's no-op would only
+    // look like it was doing something.
     pgQuery.mockReset();
     redisPing.mockReset();
     delete process.env.DATABASE_URL;
@@ -41,7 +54,7 @@ describe('checkDeepHealth — hard vs soft dependency taxonomy (readiness contra
   });
 
   afterEach(() => {
-    vi.useRealTimers();
+    jest.useRealTimers();
     delete process.env.DATABASE_URL;
     delete process.env.REDIS_URL;
   });
@@ -111,11 +124,11 @@ describe('checkDeepHealth — hard vs soft dependency taxonomy (readiness contra
     // PG query never settles within the window (slow, not dead).
     pgQuery.mockImplementation(() => new Promise(() => {}));
 
-    vi.useFakeTimers();
+    jest.useFakeTimers();
     const { checkDeepHealth } = await import('../health');
     const promise = checkDeepHealth();
     // Advance past the deep cluster-timeout guard (default wake budget).
-    await vi.advanceTimersByTimeAsync(9000);
+    await advanceTimersByTimeAsync(9000);
     const res = await promise;
 
     // #338: a slow/waking hard-dep is 'waking', not fatal 'down' — but the
@@ -166,11 +179,11 @@ describe('checkDeepHealth — hard vs soft dependency taxonomy (readiness contra
     process.env.DATABASE_URL = 'postgres://u:p@h:5432/db';
     pgQuery.mockImplementation(() => new Promise(() => {}));
 
-    vi.useFakeTimers();
+    jest.useFakeTimers();
     const { checkDeepHealth } = await import('../health');
     const promise = checkDeepHealth();
     // Advance past the (default) deep timeout window.
-    await vi.advanceTimersByTimeAsync(9000);
+    await advanceTimersByTimeAsync(9000);
     const res = await promise;
 
     expect(res.status).toBe('waking');
@@ -182,11 +195,11 @@ describe('checkDeepHealth — hard vs soft dependency taxonomy (readiness contra
     process.env.HEALTH_DEEP_TIMEOUT_MS = '500';
     pgQuery.mockImplementation(() => new Promise(() => {}));
 
-    vi.useFakeTimers();
+    jest.useFakeTimers();
     const { checkDeepHealth } = await import('../health');
     const promise = checkDeepHealth();
     // A 500ms budget must fire before the default: advancing 600ms settles it.
-    await vi.advanceTimersByTimeAsync(600);
+    await advanceTimersByTimeAsync(600);
     const res = await promise;
 
     // Timed out at the configured budget ⇒ waking (wake still in progress).
@@ -198,12 +211,12 @@ describe('checkDeepHealth — hard vs soft dependency taxonomy (readiness contra
     process.env.DATABASE_URL = 'postgres://u:p@h:5432/db';
     pgQuery.mockImplementation(() => new Promise(() => {}));
 
-    vi.useFakeTimers();
+    jest.useFakeTimers();
     const { checkDeepHealth } = await import('../health');
     const promise = checkDeepHealth();
     // At 3.1s (the OLD hard-coded window) the check must NOT yet have timed out —
     // a waking DB gets the full wake budget.
-    await vi.advanceTimersByTimeAsync(3100);
+    await advanceTimersByTimeAsync(3100);
     let settled = false;
     promise.then(() => {
       settled = true;
@@ -211,15 +224,17 @@ describe('checkDeepHealth — hard vs soft dependency taxonomy (readiness contra
     await Promise.resolve();
     expect(settled).toBe(false);
     // Drain the remaining budget so the test doesn't leak a pending timer.
-    await vi.advanceTimersByTimeAsync(6000);
+    await advanceTimersByTimeAsync(6000);
     await promise;
   });
 });
 
 describe('checkShallowHealth — process-only readiness/liveness (#338)', () => {
   beforeEach(() => {
-    vi.useRealTimers();
-    vi.resetModules();
+    jest.useRealTimers();
+    // No `resetClients()`: `../clients` is replaced wholesale above, so there
+    // is no real module state to clear. Calling the mock's no-op would only
+    // look like it was doing something.
     pgQuery.mockReset();
     redisPing.mockReset();
     delete process.env.DATABASE_URL;

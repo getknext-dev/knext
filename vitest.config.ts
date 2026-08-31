@@ -1,3 +1,5 @@
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import react from '@vitejs/plugin-react';
 import { configDefaults, defineConfig } from 'vitest/config';
@@ -16,6 +18,45 @@ const DB_SRC = resolve(import.meta.dirname, 'packages/db/src');
 // many dist subpaths must keep resolving normally). The dist-surface contract
 // tests read dist by path, so they are unaffected.
 const CORE_SRC = resolve(import.meta.dirname, 'packages/kn-next/src');
+
+/**
+ * Every test file that has been ported to `bun:test`, DERIVED by reading them.
+ *
+ * A file importing `bun:test` cannot run under vitest, and one importing
+ * `vitest` cannot run under bun — so during the migration (#871) the two runners
+ * must partition the suite exactly. That partition used to be a hand-maintained
+ * list of package globs, which forced an all-or-nothing move: a package with
+ * fourteen converted files and two hard ones was green under neither runner,
+ * because the glob could only include or exclude the whole directory.
+ *
+ * Scanning removes the list and the constraint together. A file excludes itself
+ * the moment it is converted, so a package can migrate one file at a time, and
+ * there is no second place to update — which is where an enumerated list drifts.
+ * When the migration finishes this returns every test file and the config goes
+ * away entirely.
+ *
+ * `git ls-files` rather than a directory walk: it already ignores build output
+ * and stray worktrees, which is what a walk would have to re-learn.
+ */
+function portedToBun(): string[] {
+  const files = execFileSync('git', ['ls-files', '*.test.ts', '*.test.tsx'], {
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+  })
+    .split('\n')
+    .filter(Boolean);
+
+  return files.filter((f) => {
+    try {
+      return /from\s+['"]bun:test['"]/.test(readFileSync(f, 'utf8'));
+    } catch {
+      // Unreadable means we cannot tell which runner owns it. Leaving it IN
+      // vitest fails loudly if it is a bun file; excluding it would drop the
+      // file from both runners silently, which is the worse error.
+      return false;
+    }
+  });
+}
 
 export default defineConfig({
   plugins: [react()],
@@ -70,9 +111,7 @@ export default defineConfig({
       ...configDefaults.exclude,
       '**/.claude/**',
       '**/*.docker-e2e.test.ts',
-      'packages/db/**',
-      'packages/ui/**',
-      'examples/bun-exec/**',
+      ...portedToBun(),
     ],
     coverage: {
       provider: 'v8',

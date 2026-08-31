@@ -1,9 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { resetClients } from '../clients';
 
 // Capture the config object passed to `new Pool(...)` without a real DB.
-const poolCtor = vi.fn();
-const poolEnd = vi.fn(() => Promise.resolve());
-vi.mock('pg', () => ({
+const poolCtor = mock();
+const poolEnd = mock(() => Promise.resolve());
+mock.module('pg', () => ({
   Pool: class {
     constructor(config: unknown) {
       poolCtor(config);
@@ -18,7 +19,7 @@ describe('getDbPoolRO — bounded read-only pool for scale-to-zero', () => {
   beforeEach(() => {
     poolCtor.mockClear();
     poolEnd.mockClear();
-    vi.resetModules();
+    resetClients();
     delete process.env.DB_POOL_RO_MAX;
     delete process.env.DB_POOL_RO_IDLE_TIMEOUT_MS;
     delete process.env.DB_POOL_RO_CONNECT_TIMEOUT_MS;

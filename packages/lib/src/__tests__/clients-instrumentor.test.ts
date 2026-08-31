@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { resetClients } from '../clients';
 
 // #317 — the pool-instrumentor seam. `@getknext/lib/clients` stays OTel-free (a
 // dependency-inversion seam, mirroring `setTraceIdProvider` in ./context): an
@@ -15,11 +16,11 @@ class FakePool {
     return Promise.resolve();
   }
 }
-vi.mock('pg', () => ({ Pool: FakePool }));
+mock.module('pg', () => ({ Pool: FakePool }));
 
 describe('@getknext/lib/clients — pool instrumentor seam (#317)', () => {
   beforeEach(() => {
-    vi.resetModules();
+    resetClients();
     process.env.DATABASE_URL = 'postgres://u:p@localhost:5432/db';
     delete process.env.DATABASE_URL_RO;
   });
@@ -75,7 +76,7 @@ describe('@getknext/lib/clients — pool instrumentor seam (#317)', () => {
 
   it('resetPoolInstrumentor restores the default no-op', async () => {
     const mod = await import('../clients');
-    const fn = vi.fn();
+    const fn = mock();
     mod.setPoolInstrumentor(fn);
     mod.resetPoolInstrumentor();
     mod.getDbPool();

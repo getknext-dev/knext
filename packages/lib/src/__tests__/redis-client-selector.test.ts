@@ -9,7 +9,7 @@
  * timeout" ends up retrying forever — the failure #802 was filed about.
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, mock, spyOn } from 'bun:test';
 import { bunRedisAvailable, createRedisClient, toBunRedisOptions } from '../redis/client';
 import { attachQuietErrorListener, quietRedisOptions } from '../redis/quiet';
 
@@ -28,35 +28,47 @@ class FakeClient {
   }
 }
 
-function withBun<T>(bun: unknown, fn: () => T): T {
-  const g = globalThis as { Bun?: unknown };
-  const saved = g.Bun;
-  try {
-    g.Bun = bun;
-    return fn();
-  } finally {
-    g.Bun = saved;
-  }
+/**
+ * Build the injectable scope both entry points accept, instead of swapping
+ * `globalThis.Bun`.
+ *
+ * The previous version assigned the real global and restored it in a `finally`.
+ * That worked only under Node, where no such global exists; under `bun:test`
+ * `Bun` is readonly AND non-configurable, so every case here failed with
+ * "Attempted to assign to readonly property" (#871).
+ *
+ * Injecting is the better test regardless of runtime: the old version could
+ * only exercise the "Bun absent" branch on a runtime where Bun IS absent, which
+ * is precisely the environment this selector is not written for.
+ */
+function scopeWith(bun: unknown) {
+  return { Bun: bun } as Parameters<typeof bunRedisAvailable>[0];
 }
 
 describe('redis client selection', () => {
   it('reports availability honestly in both directions', () => {
     // A probe that only ever returns one answer is not a probe.
-    expect(withBun(undefined, bunRedisAvailable)).toBe(false);
-    expect(withBun({ RedisClient: class {} }, bunRedisAvailable)).toBe(true);
-    expect(withBun({ RedisClient: 'nope' }, bunRedisAvailable)).toBe(false);
+    expect(bunRedisAvailable(scopeWith(undefined))).toBe(false);
+    expect(bunRedisAvailable(scopeWith({ RedisClient: class {} }))).toBe(true);
+    expect(bunRedisAvailable(scopeWith({ RedisClient: 'nope' }))).toBe(false);
   });
 
   it('prefers Bun when present', () => {
     FakeClient.calls = [];
-    withBun({ RedisClient: FakeClient }, () => createRedisClient('redis://h:1', 'events'));
+    createRedisClient(
+      'redis://h:1',
+      'events',
+      {},
+      undefined,
+      scopeWith({ RedisClient: FakeClient }),
+    );
     expect(FakeClient.calls).toHaveLength(1);
     expect(FakeClient.calls[0]?.url).toBe('redis://h:1');
   });
 
   it('falls back to the injected ioredis constructor when Bun is absent', () => {
     FakeClient.calls = [];
-    withBun(undefined, () => createRedisClient('redis://h:1', 'events', {}, FakeClient as never));
+    createRedisClient('redis://h:1', 'events', {}, FakeClient as never, scopeWith(undefined));
     expect(FakeClient.calls).toHaveLength(1);
     // The Node path gets the ioredis-shaped options verbatim.
     expect(FakeClient.calls[0]?.options?.maxRetriesPerRequest).toBe(1);
@@ -95,7 +107,13 @@ describe('option translation into Bun vocabulary', () => {
 
   it('gives Bun a bounded client, not merely a constructed one', () => {
     FakeClient.calls = [];
-    withBun({ RedisClient: FakeClient }, () => createRedisClient('redis://h:1', 'events'));
+    createRedisClient(
+      'redis://h:1',
+      'events',
+      {},
+      undefined,
+      scopeWith({ RedisClient: FakeClient }),
+    );
     const options = FakeClient.calls[0]?.options ?? {};
     // Constructing with NO options at all is what the previous inline copy did.
     expect(Object.keys(options).length).toBeGreaterThan(0);
@@ -117,7 +135,7 @@ describe('attachQuietErrorListener across BOTH client shapes', () => {
         return undefined;
       },
     };
-    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const spy = spyOn(console, 'error').mockImplementation(() => {});
     try {
       attachQuietErrorListener(client, 'ioredis-shaped');
       expect(events).toEqual(['error']);
@@ -139,7 +157,7 @@ describe('attachQuietErrorListener across BOTH client shapes', () => {
         return undefined;
       },
     };
-    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const spy = spyOn(console, 'error').mockImplementation(() => {});
     try {
       attachQuietErrorListener(client, 'bun-shaped');
       expect(typeof client.onclose, 'no handler was attached — the Bun path is unquieted').toBe(
@@ -163,7 +181,7 @@ describe('attachQuietErrorListener across BOTH client shapes', () => {
         return undefined;
       },
     };
-    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const spy = spyOn(console, 'error').mockImplementation(() => {});
     try {
       attachQuietErrorListener(client, 'bun-dedupe');
       const fire = client.onclose as (e: unknown) => void;
@@ -178,7 +196,7 @@ describe('attachQuietErrorListener across BOTH client shapes', () => {
   });
 
   it('fails open on a client that supports neither shape', () => {
-    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const spy = spyOn(console, 'error').mockImplementation(() => {});
     try {
       expect(() =>
         attachQuietErrorListener(

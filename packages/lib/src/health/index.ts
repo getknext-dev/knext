@@ -91,6 +91,23 @@ export function checkShallowHealth(): ShallowHealthStatus {
 }
 
 let redisCache: RedisClient | null = null;
+
+/**
+ * Drop the cached Redis client (tests only).
+ *
+ * The explicit replacement for `vi.resetModules()`, which bun has no equivalent
+ * of: module mocks there are registered for the whole run and a fresh module
+ * instance cannot be obtained (#871). Without this, the first test to run
+ * constructs the client and every later one silently reuses it — so assertions
+ * about construction options, listener wiring and re-dialling all read an
+ * object built under a previous test's conditions.
+ *
+ * It does NOT quit the client. Callers are tests holding a fake; a real one
+ * would need an await, and there is no such caller.
+ */
+export const resetHealthRedisCache = (): void => {
+  redisCache = null;
+};
 function getRedisClient(): RedisClient | null {
   if (redisCache) return redisCache;
   if (!process.env.REDIS_URL) return null;

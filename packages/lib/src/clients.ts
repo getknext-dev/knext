@@ -212,6 +212,35 @@ export const resetDbWakeSingleflight = (): void => {
 };
 
 /**
+ * Clear every cached client and all module-scoped state (tests only).
+ *
+ * This is the explicit replacement for `vi.resetModules()`, which bun has no
+ * equivalent of — module mocks there are registered for the whole run and
+ * cannot be unregistered, so a fresh module instance is not obtainable
+ * (#871). The same shape as `@getknext/db`'s `resetDbClients`.
+ *
+ * Composed rather than left to callers. The four `let` caches and the three
+ * `globalThis`-anchored slots are reset by DIFFERENT mechanisms, and a test
+ * that remembers three of the seven gets state leaking across cases in a way
+ * that produces order-dependent passes — the failure mode that is worse than a
+ * crash, because it looks like success.
+ *
+ * It does NOT close the pools. Every caller is a test holding a fake, and
+ * making this async to `end()` real ones would put an await in every
+ * `beforeEach` for a case that does not exist. Production code must not call
+ * this: dropping a live pool's reference without ending it leaks sockets.
+ */
+export const resetClients = (): void => {
+  cerbosClient = null;
+  minioClient = null;
+  pgPool = null;
+  pgPoolRO = null;
+  resetPoolInstrumentor();
+  resetDbActivity();
+  resetDbWakeSingleflight();
+};
+
+/**
  * Wrap a pool's `connect`/`query` so the FIRST cold acquisition is single-flighted:
  * concurrent first-callers share ONE wake instead of each triggering a 0→1 wake.
  *
