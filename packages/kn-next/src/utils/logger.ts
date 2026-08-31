@@ -20,7 +20,7 @@ import type { Logger, LoggerOptions } from "pino";
 /** The callable pino factory (its default export), typed for the lazy require. */
 type PinoFactory = (opts?: LoggerOptions) => Logger;
 
-const isProduction = process.env.NODE_ENV === "production";
+let isProduction = process.env.NODE_ENV === "production";
 
 // Sync CJS require so the lazy load stays synchronous (pino is CJS). This is a
 // real Node require against node_modules; it is NOT a static import, so pino is
@@ -29,6 +29,23 @@ const requirePino = createRequire(import.meta.url);
 
 /** The lazily-instantiated root pino logger (created on first emit). */
 let rootLogger: Logger | undefined;
+
+/**
+ * Drop the memoised root logger and re-read the env it was built from (tests).
+ *
+ * The explicit replacement for `vi.resetModules()`, which bun has no equivalent
+ * of. BOTH halves are needed and forgetting either is silent: clearing
+ * `rootLogger` without re-reading `isProduction` rebuilds the logger with the
+ * previous NODE_ENV, and re-reading without clearing leaves the old instance in
+ * place — each looks like a reset and neither is one.
+ *
+ * `isProduction` is a `let` for exactly this reason; it is never reassigned
+ * outside this function.
+ */
+export function __resetLoggerForTests(): void {
+    rootLogger = undefined;
+    isProduction = process.env.NODE_ENV === "production";
+}
 
 /** Instantiate (once) the root pino logger with the framework's exact config. */
 function getRoot(): Logger {

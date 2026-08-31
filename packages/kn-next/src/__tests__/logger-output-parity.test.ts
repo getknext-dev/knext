@@ -8,23 +8,27 @@
  * and `msg` — exactly what the eager `pino({...}).child(...)` produced.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, spyOn } from "bun:test";
+import {
+    stubEnv,
+    unstubAllEnvs,
+} from "../../../../tests/helpers/bun-test-helpers";
 
 describe("logger output parity (prod JSON)", () => {
     it("emits pino default JSON with level, time, bindings and msg", async () => {
-        vi.stubEnv("NODE_ENV", "production");
-        vi.resetModules();
+        stubEnv("NODE_ENV", "production");
+        (await import("../utils/logger")).__resetLoggerForTests();
 
         const { createLogger } = await import("../utils/logger");
         const log = createLogger({ module: "parity" });
 
         const lines: string[] = [];
-        const spy = vi
-            .spyOn(process.stdout, "write")
-            .mockImplementation((chunk: unknown) => {
+        const spy = spyOn(process.stdout, "write").mockImplementation(
+            (chunk: unknown) => {
                 lines.push(String(chunk));
                 return true;
-            });
+            },
+        );
 
         log.info({ imageTag: "v1.0.0" }, "hello");
         spy.mockRestore();
@@ -38,6 +42,6 @@ describe("logger output parity (prod JSON)", () => {
         expect(parsed.msg).toBe("hello");
         expect(typeof parsed.time).toBe("number");
 
-        vi.unstubAllEnvs();
+        unstubAllEnvs();
     });
 });
