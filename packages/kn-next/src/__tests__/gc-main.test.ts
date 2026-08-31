@@ -17,6 +17,8 @@ import {
 } from "bun:test";
 
 const runCapture = (() => mock(() => ""))();
+const __knextRealShared = { ...(await import("../cli/shared")) };
+
 mock.module("../cli/exec", () => ({ runCapture, isEntrypoint: () => false }));
 
 const loadConfig = (() => mock())();
@@ -25,6 +27,11 @@ const loadConfig = (() => mock())();
 // actually throws — a stubbed one would let the presentation contract rot.
 const __knextReal1 = { ...(await import("../cli/shared")) };
 mock.module("../cli/shared", () => ({
+    // bun replaces a mocked module WHOLESALE — no partial mock, no
+    // automock — so a factory listing only what the test drives drops
+    // every other export and the importer dies naming the CONSUMER, not
+    // this factory. Spreading keeps it honest as `../cli/shared` grows.
+    ...__knextRealShared,
     ...__knextReal1,
     loadConfig,
 }));

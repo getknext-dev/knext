@@ -42,7 +42,14 @@ import { precompileBunBytecode } from "../adapters/standalone-bun-bytecode";
 
 // Mutable runtime so one mock serves both gate directions.
 let mockRuntime: string | undefined = "node";
+const __knextRealShared = { ...(await import("../cli/shared")) };
+
 mock.module("../cli/shared", () => ({
+    // bun replaces a mocked module WHOLESALE — no partial mock, no
+    // automock — so a factory listing only what the test drives drops
+    // every other export and the importer dies naming the CONSUMER, not
+    // this factory. Spreading keeps it honest as `../cli/shared` grows.
+    ...__knextRealShared,
     loadConfig: mock(async () => ({
         name: "bytecode-test-app",
         storage: { provider: "gcs", bucket: "test-bucket" },

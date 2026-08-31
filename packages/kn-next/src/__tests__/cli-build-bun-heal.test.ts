@@ -30,7 +30,14 @@ import { join, resolve } from "node:path";
 
 // Mock the config loader and asset upload so `build()` runs the real build
 // pipeline shape without a kn-next.config.ts or storage credentials.
+const __knextRealShared = { ...(await import("../cli/shared")) };
+
 mock.module("../cli/shared", () => ({
+    // bun replaces a mocked module WHOLESALE — no partial mock, no
+    // automock — so a factory listing only what the test drives drops
+    // every other export and the importer dies naming the CONSUMER, not
+    // this factory. Spreading keeps it honest as `../cli/shared` grows.
+    ...__knextRealShared,
     loadConfig: mock(async () => ({
         name: "heal-test-app",
         storage: { provider: "gcs", bucket: "test-bucket" },

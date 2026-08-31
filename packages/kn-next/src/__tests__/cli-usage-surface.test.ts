@@ -30,7 +30,14 @@ import { join } from "node:path";
 
 const loadConfig = (() => mock())();
 const __knextReal1 = { ...(await import("../cli/shared")) };
+const __knextRealShared = { ...(await import("../cli/shared")) };
+
 mock.module("../cli/shared", () => ({
+    // bun replaces a mocked module WHOLESALE — no partial mock, no
+    // automock — so a factory listing only what the test drives drops
+    // every other export and the importer dies naming the CONSUMER, not
+    // this factory. Spreading keeps it honest as `../cli/shared` grows.
+    ...__knextRealShared,
     ...__knextReal1,
     loadConfig,
 }));

@@ -31,6 +31,8 @@ const runQuiet = mock<AnyFn>();
 const runInherit = mock<AnyFn>();
 const runCapture = mock<AnyFn>(() => "");
 // `createRequire` and the REAL `node:fs` are resolved OUT HERE, not inside the
+const __knextRealShared = { ...(await import("../cli/shared")) };
+
 // `mock.module("node:fs", …)` factory below.
 //
 // An `await import(...)` inside a mock factory deadlocks under bun: the mock is
@@ -100,6 +102,11 @@ mock.module("../utils/logger", () => ({
 const loadConfig = (() => mock())();
 const __knextReal2 = { ...(await import("../cli/shared")) };
 mock.module("../cli/shared", () => ({
+    // bun replaces a mocked module WHOLESALE — no partial mock, no
+    // automock — so a factory listing only what the test drives drops
+    // every other export and the importer dies naming the CONSUMER, not
+    // this factory. Spreading keeps it honest as `../cli/shared` grows.
+    ...__knextRealShared,
     ...__knextReal2,
     loadConfig,
 }));

@@ -12,6 +12,8 @@ import { join } from "node:path";
 
 const execFileSync = (() => mock(() => Buffer.from("")))();
 const __knextReal1 = { ...(await import("node:child_process")) };
+const __knextRealShared = { ...(await import("../cli/shared")) };
+
 mock.module("node:child_process", async () => {
     const actual = __knextReal1;
     const o = { ...actual, execFileSync };
@@ -27,6 +29,11 @@ const loadConfig = (() => mock())();
 // (it must answer no for the generic error below, and let the breadcrumb run).
 const __knextReal2 = { ...(await import("../cli/shared")) };
 mock.module("../cli/shared", () => ({
+    // bun replaces a mocked module WHOLESALE — no partial mock, no
+    // automock — so a factory listing only what the test drives drops
+    // every other export and the importer dies naming the CONSUMER, not
+    // this factory. Spreading keeps it honest as `../cli/shared` grows.
+    ...__knextRealShared,
     ...__knextReal2,
     loadConfig,
 }));

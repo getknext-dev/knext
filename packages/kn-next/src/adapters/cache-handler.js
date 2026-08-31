@@ -219,8 +219,28 @@ function markUnhealthy(reason) {
  */
 const IOREDIS_SPECIFIER = ['io', 'redis'].join('');
 
-/** Bun's native client, or null when not running under Bun. */
+/**
+ * Bun's native client, or null when not running under Bun — or when the ioredis
+ * path is explicitly requested.
+ *
+ * `KNEXT_CACHE_REDIS_CLIENT=ioredis` forces the ioredis branch even on Bun. Two
+ * reasons it earns its place rather than being a test affordance:
+ *
+ *  - Operationally it is the same escape hatch `KNEXT_DB_DRIVER` provides for
+ *    the Postgres driver: a way to fall back to the mature client without
+ *    changing runtime, which is what you want at 3am when the native one is
+ *    suspected and nothing else is.
+ *  - The two clients have genuinely different SHAPES — Bun's has no `.on`, it
+ *    uses `onclose` — so any behaviour asserted against one says nothing about
+ *    the other. Without a way to select, a suite running under Bun silently
+ *    stops covering the ioredis path that Node deployments still take.
+ *
+ * Reads the env on every call, deliberately: `__resetEnvForTests` re-reads its
+ * cached values, and a third cached copy here would be one more thing to keep
+ * in sync.
+ */
 function bunRedisClient(url) {
+  if (process.env.KNEXT_CACHE_REDIS_CLIENT === 'ioredis') return null;
   const B = globalThis.Bun;
   if (!B || typeof B.RedisClient !== 'function') return null;
   return new B.RedisClient(url, {
