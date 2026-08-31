@@ -1,9 +1,9 @@
+import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 import { ServerResponse } from "node:http";
 import { CORRELATION_HEADER } from "@getknext/lib/context";
 import { context, trace } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { BasicTracerProvider } from "@opentelemetry/sdk-trace-base";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
     CORRELATION_RESPONSE_INSTALLED,
     installCorrelationResponseEcho,
@@ -107,7 +107,7 @@ afterEach(async () => {
     ServerResponse.prototype.getHeader = pristineGetHeader;
     // biome-ignore lint/suspicious/noExplicitAny: clearing the install latch for isolation.
     delete (ServerResponse.prototype as any)[CORRELATION_RESPONSE_INSTALLED];
-    vi.restoreAllMocks();
+    jest.restoreAllMocks();
 });
 
 /**

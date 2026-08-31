@@ -17,6 +17,7 @@
  * the latent 500 for exactly the users who flip runtimes after building.
  */
 
+import { afterEach, describe, expect, it, jest, mock, spyOn } from "bun:test";
 import {
     existsSync,
     mkdirSync,
@@ -26,12 +27,11 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
 
 // Mock the config loader and asset upload so `build()` runs the real build
 // pipeline shape without a kn-next.config.ts or storage credentials.
-vi.mock("../cli/shared", () => ({
-    loadConfig: vi.fn(async () => ({
+mock.module("../cli/shared", () => ({
+    loadConfig: mock(async () => ({
         name: "heal-test-app",
         storage: { provider: "gcs", bucket: "test-bucket" },
         cache: undefined,
@@ -44,10 +44,11 @@ vi.mock("../cli/shared", () => ({
         build: "turbopack",
     })),
 }));
-vi.mock("../utils/asset-upload", async (importOriginal) => ({
+const __knextReal1 = { ...(await import("../utils/asset-upload")) };
+mock.module("../utils/asset-upload", () => ({
     // keep the REAL hasStorage/notice exports (ADR-0047) — stub only the seams
-    ...(await importOriginal<object>()),
-    uploadAssets: vi.fn(async () => {}),
+    ...__knextReal1,
+    uploadAssets: mock(async () => {}),
 }));
 
 import { build } from "../cli/build";
@@ -96,13 +97,13 @@ function seedProject() {
 }
 
 afterEach(() => {
-    vi.restoreAllMocks();
+    jest.restoreAllMocks();
 });
 
 describe("kn-next build — bun-exports heal ships on the user build path (#188)", () => {
     it("heals the standalone tree during build(), even with a node runtime config", async () => {
         const { projectDir, standalonePkgDir } = seedProject();
-        vi.spyOn(process, "cwd").mockReturnValue(projectDir);
+        spyOn(process, "cwd").mockReturnValue(projectDir);
 
         await build({ skipNextBuild: true });
 
@@ -114,7 +115,7 @@ describe("kn-next build — bun-exports heal ships on the user build path (#188)
 
     it("survives a project without a standalone tree (no throw, build continues)", async () => {
         const projectDir = mkdtempSync(join(tmpdir(), "knext-cli-build-none-"));
-        vi.spyOn(process, "cwd").mockReturnValue(projectDir);
+        spyOn(process, "cwd").mockReturnValue(projectDir);
         await expect(build({ skipNextBuild: true })).resolves.toBeUndefined();
     });
 

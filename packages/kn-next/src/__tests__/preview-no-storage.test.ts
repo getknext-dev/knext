@@ -13,25 +13,39 @@
  *     an inherited ASSET_PREFIX is left for the build step to overwrite.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+    afterEach,
+    beforeEach,
+    describe,
+    expect,
+    it,
+    jest,
+    mock,
+} from "bun:test";
 import type { KnativeNextConfig } from "../config";
 
 type AnyFn = (...args: unknown[]) => unknown;
 
 // Capture the announcement: preview logs through createLogger().
-const logInfo = vi.fn<AnyFn>();
-vi.mock("../utils/logger", () => ({
+const logInfo = mock<AnyFn>();
+mock.module("../utils/logger", () => ({
     createLogger: () => ({
         info: (...a: unknown[]) => logInfo(...a),
-        warn: vi.fn(),
-        error: vi.fn(),
-        debug: vi.fn(),
-        fatal: vi.fn(),
-        trace: vi.fn(),
+        warn: mock(),
+        error: mock(),
+        debug: mock(),
+        fatal: mock(),
+        trace: mock(),
     }),
 }));
 
-import { runPreviewDeploy } from "../cli/preview";
+// Imported DYNAMICALLY, after the `mock.module` calls above.
+//
+// A static import is hoisted and evaluated BEFORE any of them register, so
+// `../cli/preview` binds the real `createLogger` and the mock never sees a
+// call — the notice this file asserts on is emitted to a logger nobody is
+// watching, and the failure reads as "the notice was not emitted".
+const { runPreviewDeploy } = await import("../cli/preview");
 
 const storagelessConfig: KnativeNextConfig = {
     name: "my-app",
@@ -61,12 +75,12 @@ function infoMessages(): string[] {
 
 function makeDeps() {
     return {
-        apply: vi.fn((_argv: readonly string[]) => {}),
-        capture: vi.fn(
+        apply: mock((_argv: readonly string[]) => {}),
+        capture: mock(
             (_argv: readonly string[]) =>
                 "https://my-app-pr-42.previews.example.com",
         ),
-        buildAndPush: vi.fn(async (_name: string) => digestImage),
+        buildAndPush: mock(async (_name: string) => digestImage),
         preflight: () => {},
     };
 }
@@ -74,7 +88,7 @@ function makeDeps() {
 const savedEnv = { ...process.env };
 
 beforeEach(() => {
-    vi.clearAllMocks();
+    jest.clearAllMocks();
     delete process.env.ASSET_PREFIX;
 });
 

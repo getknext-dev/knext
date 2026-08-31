@@ -12,7 +12,7 @@
  * missed — the adversarial-dodge cases below exist to kill that mutation.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import {
     findPlaceholders,
     formatPlaceholderFindings,

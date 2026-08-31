@@ -8,7 +8,7 @@
  *    throws past the streak cap, and times out (exit 1).
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import type { KubectlFn } from "../cli/doctor";
 import {
     runStatus,

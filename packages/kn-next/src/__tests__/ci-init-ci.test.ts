@@ -11,18 +11,19 @@
  * manifest nobody can apply, and grepping for `- delete` cannot tell a verb
  * from a comment.
  */
+
+import { describe, expect, it } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
 import { parse, parseAllDocuments } from "yaml";
 import { classifyCredentialScope } from "../cli/ci/credential-scope";
 import {
     initCi,
     RBAC_PATH,
+    REQUIRED_SECRETS,
     renderRbacManifest,
     renderWorkflow,
-    REQUIRED_SECRETS,
     WORKFLOW_PATH,
 } from "../cli/ci/init-ci";
 

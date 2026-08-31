@@ -13,10 +13,10 @@
  *  - config.ts runtime field comment does not mention "Nitro preset"
  */
 
+import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
 
 // Locate the kn-next src directory relative to this __tests__ file.
 const TESTS_DIR = dirname(fileURLToPath(import.meta.url));

@@ -1,3 +1,4 @@
+import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { context, SpanKind, trace } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import {
@@ -5,7 +6,6 @@ import {
     InMemorySpanExporter,
     SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
     DB_WAKE_SPAN_NAME,
@@ -81,7 +81,7 @@ describe("#336 db-wake lands on the first SUCCESSFUL acquisition (reject-then-re
     it("(a) connect(): first attempt REJECTS, retry SUCCEEDS → db_wake ends on the SUCCESS, failed attempt is error-spanned", async () => {
         const boom = new Error("gateway still waking");
         let attempt = 0;
-        const client = { release: vi.fn() };
+        const client = { release: mock() };
         const pool = {
             connect() {
                 attempt += 1;
@@ -91,7 +91,7 @@ describe("#336 db-wake lands on the first SUCCESSFUL acquisition (reject-then-re
                 return Promise.resolve(client);
             },
         };
-        const emitter = vi.fn();
+        const emitter = mock();
         instrumentPoolForDbWake(pool, "writer", emitter);
 
         await handleRequest("GET /files", async () => {
@@ -132,7 +132,7 @@ describe("#336 db-wake lands on the first SUCCESSFUL acquisition (reject-then-re
                 return Promise.resolve({ rows: [{ ok: 1 }] });
             },
         };
-        const emitter = vi.fn();
+        const emitter = mock();
         instrumentPoolForDbWake(pool, "reader", emitter);
 
         await handleRequest("GET /a", async () => {
@@ -164,7 +164,7 @@ describe("#336 db-wake lands on the first SUCCESSFUL acquisition (reject-then-re
                 return undefined;
             },
         };
-        const emitter = vi.fn();
+        const emitter = mock();
         instrumentPoolForDbWake(pool, "writer", emitter);
 
         await handleRequest("GET /a", async () => {
@@ -198,7 +198,7 @@ describe("#336 db-wake lands on the first SUCCESSFUL acquisition (reject-then-re
                 return Promise.resolve({ release() {} });
             },
         };
-        const emitter = vi.fn();
+        const emitter = mock();
         instrumentPoolForDbWake(pool, "writer", emitter);
 
         await handleRequest("GET /a", async () => {
@@ -224,7 +224,7 @@ describe("#336 db-wake lands on the first SUCCESSFUL acquisition (reject-then-re
                 return Promise.resolve({ rows: [] });
             },
         };
-        const emitter = vi.fn();
+        const emitter = mock();
         instrumentPoolForDbWake(pool, "writer", emitter);
 
         await handleRequest("GET /a", async () => {
@@ -260,7 +260,7 @@ describe("#336 db-wake lands on the first SUCCESSFUL acquisition (reject-then-re
                 return okClient;
             },
         };
-        const emitter = vi.fn();
+        const emitter = mock();
         instrumentPoolForDbWake(pool, "writer", emitter);
 
         await handleRequest("GET /a", async () => {
@@ -291,7 +291,7 @@ describe("#336 db-wake lands on the first SUCCESSFUL acquisition (reject-then-re
                     : Promise.resolve({ rows: [{ ok: 1 }] });
             },
         };
-        const throwing = vi.fn(() => {
+        const throwing = mock(() => {
             throw new Error("emitter blew up");
         });
         instrumentPoolForDbWake(pool, "writer", throwing);

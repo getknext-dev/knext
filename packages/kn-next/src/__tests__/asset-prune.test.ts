@@ -4,9 +4,10 @@ import {
     describe,
     expect,
     it,
+    jest,
     type Mock,
-    vi,
-} from "vitest";
+    mock,
+} from "bun:test";
 
 /**
  * Deploy-time build-prune tests (#93, ADR-0011; marker inversion #264).
@@ -29,10 +30,10 @@ import {
  * The provider CLIs are mocked at the `exec` layer, so these assert the argv
  * contract of the recursive delete (scoped to `<app>/_next/static/<id>/`).
  */
-vi.mock("../cli/exec", () => ({
-    runQuiet: vi.fn(),
-    runCapture: vi.fn(),
-    runQuietAllowFail: vi.fn(),
+mock.module("../cli/exec", () => ({
+    runQuiet: mock(),
+    runCapture: mock(),
+    runQuietAllowFail: mock(),
 }));
 
 import { runCapture, runQuietAllowFail } from "../cli/exec";
@@ -148,7 +149,7 @@ describe("pruneOldBuilds", () => {
         runCaptureMock.mockReset();
         runDeleteMock.mockReset();
     });
-    afterEach(() => vi.clearAllMocks());
+    afterEach(() => jest.clearAllMocks());
 
     /** Every token passed to the delete exec, joined for substring checks. */
     function deletedTokens(): string {
@@ -522,7 +523,7 @@ describe("reclaimBuildPrefix — failure-path orphan reclaim (v6-P2, ADR-0011)",
         runCaptureMock.mockReset();
         runDeleteMock.mockReset();
     });
-    afterEach(() => vi.clearAllMocks());
+    afterEach(() => jest.clearAllMocks());
 
     /** Every token passed to the delete exec, joined for substring checks. */
     function deletedTokens(): string {

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, mock } from "bun:test";
 
 /**
  * v3-P4b — PRODUCER-side guard for P4a's sysdesign residual.
@@ -117,13 +117,7 @@ const SKIP_PATHS: ReadonlyArray<{
 describe("runAssetGC producer sets a DEFINED skipReason on every skip (v3-P4b)", () => {
     for (const { name, exec } of SKIP_PATHS) {
         it(`${name} ⇒ pruned:false with a defined skipReason`, () => {
-            const res = runAssetGC(
-                makeConfig(),
-                "prod",
-                "bid-d",
-                exec,
-                vi.fn(),
-            );
+            const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, mock());
             expect(res.pruned).toBe(false);
             expect(res.skipReason).toBeDefined();
             expect(typeof res.skipReason).toBe("string");

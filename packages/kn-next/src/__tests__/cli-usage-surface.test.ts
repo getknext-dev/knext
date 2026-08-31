@@ -15,24 +15,34 @@
  * line without checking what it did.
  */
 
+import {
+    afterEach,
+    beforeEach,
+    describe,
+    expect,
+    it,
+    mock,
+    spyOn,
+} from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const loadConfig = vi.hoisted(() => vi.fn());
-vi.mock("../cli/shared", async (importOriginal) => ({
-    ...(await importOriginal<typeof import("../cli/shared")>()),
+const loadConfig = (() => mock())();
+const __knextReal1 = { ...(await import("../cli/shared")) };
+mock.module("../cli/shared", () => ({
+    ...__knextReal1,
     loadConfig,
 }));
 
-const runQuiet = vi.hoisted(() => vi.fn());
-const runCapture = vi.hoisted(() => vi.fn(() => ""));
-const kubectlMock = vi.hoisted(() =>
-    vi.fn(() => ({ ok: false, stdout: "", stderr: "" })),
-);
-vi.mock("../cli/doctor", async (importOriginal) => ({
-    ...(await importOriginal<typeof import("../cli/doctor")>()),
+const runQuiet = (() => mock())();
+const runCapture = (() => mock(() => ""))();
+const kubectlMock = (() =>
+    mock(() => ({ ok: false, stdout: "", stderr: "" })),
+)();
+const __knextReal2 = { ...(await import("../cli/doctor")) };
+mock.module("../cli/doctor", () => ({
+    ...__knextReal2,
     // statusMain wires kubectl from ./doctor's kubectlRunner (a REAL spawnSync),
     // NOT from ../cli/exec's runCapture — mocking only the latter left this
     // suite spawning real kubectl in CI, where a slow connection-refused dial
@@ -40,16 +50,17 @@ vi.mock("../cli/doctor", async (importOriginal) => ({
     // processes, deterministic fast failure past the usage stage.
     kubectlRunner: kubectlMock,
 }));
-vi.mock("../cli/exec", () => ({
+mock.module("../cli/exec", () => ({
     runQuiet,
     runCapture,
-    runInherit: vi.fn(),
+    runInherit: mock(),
     isEntrypoint: () => false,
 }));
 
-const uploadAssets = vi.hoisted(() => vi.fn(async () => undefined));
-vi.mock("../utils/asset-upload", async (importOriginal) => ({
-    ...(await importOriginal<typeof import("../utils/asset-upload")>()),
+const uploadAssets = (() => mock(async () => undefined))();
+const __knextReal3 = { ...(await import("../utils/asset-upload")) };
+mock.module("../utils/asset-upload", () => ({
+    ...__knextReal3,
     uploadAssets,
 }));
 
@@ -71,12 +82,10 @@ import { statusMain } from "../cli/status";
 /** Capture what a *Main writes to fd 1 without polluting the test output. */
 function captureStdout(): { text: () => string; restore: () => void } {
     const chunks: string[] = [];
-    const spy = vi
-        .spyOn(process.stdout, "write")
-        .mockImplementation((chunk) => {
-            chunks.push(String(chunk));
-            return true;
-        });
+    const spy = spyOn(process.stdout, "write").mockImplementation((chunk) => {
+        chunks.push(String(chunk));
+        return true;
+    });
     return { text: () => chunks.join(""), restore: () => spy.mockRestore() };
 }
 
@@ -283,12 +292,12 @@ describe("createMain — usage rejections are messages, real failures still log"
 
     function captureStderr(): { text: () => string; restore: () => void } {
         const chunks: string[] = [];
-        const spy = vi
-            .spyOn(process.stderr, "write")
-            .mockImplementation((chunk) => {
+        const spy = spyOn(process.stderr, "write").mockImplementation(
+            (chunk) => {
                 chunks.push(String(chunk));
                 return true;
-            });
+            },
+        );
         return {
             text: () => chunks.join(""),
             restore: () => spy.mockRestore(),

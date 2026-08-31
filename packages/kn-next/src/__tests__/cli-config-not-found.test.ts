@@ -23,12 +23,12 @@
  *      stack, no `FATAL`.
  */
 
+import { describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
 import {
     CONFIG_NOT_FOUND_CODE,
     formatConfigNotFound,

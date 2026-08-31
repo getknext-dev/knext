@@ -13,7 +13,7 @@
  * 5. A tag-only ref (no @sha256:) is REJECTED by validateCRImageRef.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, mock } from "bun:test";
 import YAML from "yaml";
 import {
     dryRunDeploy,
@@ -123,7 +123,7 @@ describe("dryRunDeploy exec boundary", () => {
     it("dry-run returns CR YAML and calls execFn 0 times", async () => {
         // execFn is the exec-boundary spy injected into dryRunDeploy.
         // In dry-run mode the function must never shell out.
-        const execSpy = vi.fn().mockResolvedValue(undefined);
+        const execSpy = mock().mockResolvedValue(undefined);
 
         const output = await dryRunDeploy(
             baseConfig,
@@ -190,7 +190,7 @@ describe("resolveDigest", () => {
     it("calls execFn with docker inspect ARGV array and returns a digest-pinned ref", async () => {
         // execSpy simulates: docker inspect --format ... returning a RepoDigest line.
         // ExecFn now receives string[] (ARGV), never a shell string.
-        const execSpy = vi.fn().mockResolvedValue(FAKE_REPO_DIGEST);
+        const execSpy = mock().mockResolvedValue(FAKE_REPO_DIGEST);
 
         const taggedRef = "registry.example.com/my-app:1234567890";
         const result = await resolveDigest(taggedRef, execSpy);
@@ -212,7 +212,7 @@ describe("resolveDigest", () => {
     });
 
     it("preserves the original tag alongside the digest (tag@sha256: form)", async () => {
-        const execSpy = vi.fn().mockResolvedValue(FAKE_REPO_DIGEST);
+        const execSpy = mock().mockResolvedValue(FAKE_REPO_DIGEST);
         const taggedRef = "registry.example.com/my-app:v42";
         const result = await resolveDigest(taggedRef, execSpy);
         // Result should be tag@sha256: or repo@sha256: — either way @sha256: must be present
@@ -220,14 +220,14 @@ describe("resolveDigest", () => {
     });
 
     it("throws if execFn returns output without a sha256 digest", async () => {
-        const execSpy = vi.fn().mockResolvedValue("");
+        const execSpy = mock().mockResolvedValue("");
         await expect(
             resolveDigest("registry.example.com/my-app:bad", execSpy),
         ).rejects.toThrow(/digest/);
     });
 
     it("passes the digest-pinned ref through renderNextAppCR unchanged", async () => {
-        const execSpy = vi.fn().mockResolvedValue(FAKE_REPO_DIGEST);
+        const execSpy = mock().mockResolvedValue(FAKE_REPO_DIGEST);
         const taggedRef = "registry.example.com/my-app:1234567890";
         const pinnedRef = await resolveDigest(taggedRef, execSpy);
 

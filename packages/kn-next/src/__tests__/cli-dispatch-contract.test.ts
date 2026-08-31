@@ -19,10 +19,10 @@
  * the two cannot drift without this file going red.
  */
 
+import { describe, expect, it } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
 import {
     formatUnknownCommand,
     KNOWN_VERBS,
@@ -95,7 +95,9 @@ describe("every dispatched verb parses its own argv", () => {
             // dynamic import found" for a branch that has one, so the verb is
             // never actually checked for --help handling once the message is
             // read as noise.
-            ?.body.match(/await import\("\.\/([a-z0-9-]+(?:\/[a-z0-9-]+)*)"\)/)?.[1];
+            ?.body.match(
+                /await import\("\.\/([a-z0-9-]+(?:\/[a-z0-9-]+)*)"\)/,
+            )?.[1];
         expect(
             module,
             `no dynamic import found in the ${verb} branch`,

@@ -23,6 +23,7 @@
  * failed on the missing module.
  */
 
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
     existsSync,
@@ -35,7 +36,6 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
     createMain,
     loadTemplates,
@@ -427,18 +427,18 @@ describe("kn-next create — the CLI entry (createMain)", () => {
     ): Promise<{ code: number; out: string; err: string }> {
         let out = "";
         let err = "";
-        const outSpy = vi
-            .spyOn(process.stdout, "write")
-            .mockImplementation((chunk) => {
+        const outSpy = spyOn(process.stdout, "write").mockImplementation(
+            (chunk) => {
                 out += String(chunk);
                 return true;
-            });
-        const errSpy = vi
-            .spyOn(process.stderr, "write")
-            .mockImplementation((chunk) => {
+            },
+        );
+        const errSpy = spyOn(process.stderr, "write").mockImplementation(
+            (chunk) => {
                 err += String(chunk);
                 return true;
-            });
+            },
+        );
         try {
             const code = await createMain(argv);
             return { code, out, err };
@@ -542,12 +542,12 @@ describe("kn-next create — the app name is VALIDATED, never escaped-and-shippe
     it("the CLI exits NON-ZERO on an invalid name (a broken app must never be exit 0)", async () => {
         const appDir = join(root, "apps", "cli-victim");
         mkdirSync(appDir, { recursive: true });
-        const errSpy = vi
-            .spyOn(process.stderr, "write")
-            .mockImplementation(() => true);
-        const outSpy = vi
-            .spyOn(process.stdout, "write")
-            .mockImplementation(() => true);
+        const errSpy = spyOn(process.stderr, "write").mockImplementation(
+            () => true,
+        );
+        const outSpy = spyOn(process.stdout, "write").mockImplementation(
+            () => true,
+        );
         let err = "";
         errSpy.mockImplementation((chunk) => {
             err += String(chunk);
@@ -910,16 +910,29 @@ describe("#867 the scaffold ships a .dockerignore", () => {
      * (`.claude/rules/security.md`), so nothing here is needed at build time.
      */
     const dockerignore = (): string => {
-        const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
+        const repoRoot = resolve(
+            dirname(fileURLToPath(import.meta.url)),
+            "../../../..",
+        );
         return readFileSync(
-            resolve(repoRoot, "packages/kn-next/templates/app/.dockerignore.hbs"),
+            resolve(
+                repoRoot,
+                "packages/kn-next/templates/app/.dockerignore.hbs",
+            ),
             "utf8",
         );
     };
 
     it("excludes secrets — the exposure that costs the most", () => {
         const body = dockerignore();
-        for (const pattern of [".env", ".env.*", "*.pem", "*.key", ".npmrc", "kubeconfig"]) {
+        for (const pattern of [
+            ".env",
+            ".env.*",
+            "*.pem",
+            "*.key",
+            ".npmrc",
+            "kubeconfig",
+        ]) {
             expect(body.split("\n")).toContain(pattern);
         }
         // …while still allowing the committed example, which carries no secret
@@ -929,7 +942,13 @@ describe("#867 the scaffold ships a .dockerignore", () => {
 
     it("excludes .git, dependencies and build output", () => {
         const lines = dockerignore().split("\n");
-        for (const pattern of ["node_modules", ".git", ".next", ".output", "knext-exec*"]) {
+        for (const pattern of [
+            "node_modules",
+            ".git",
+            ".next",
+            ".output",
+            "knext-exec*",
+        ]) {
             expect(lines).toContain(pattern);
         }
     });
@@ -938,9 +957,17 @@ describe("#867 the scaffold ships a .dockerignore", () => {
         // A template file the generator never writes is decoration. `create`
         // renders every `.hbs` under the template root, so the guard is that
         // the file carries the `.hbs` suffix the loader keys on.
-        const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
+        const repoRoot = resolve(
+            dirname(fileURLToPath(import.meta.url)),
+            "../../../..",
+        );
         expect(
-            existsSync(resolve(repoRoot, "packages/kn-next/templates/app/.dockerignore.hbs")),
+            existsSync(
+                resolve(
+                    repoRoot,
+                    "packages/kn-next/templates/app/.dockerignore.hbs",
+                ),
+            ),
         ).toBe(true);
     });
 });

@@ -14,7 +14,7 @@
  * degraded, missing CR, unreachable cluster, old-operator sparse status.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, spyOn } from "bun:test";
 import type { KubectlFn } from "../cli/doctor";
 import {
     extractStatus,
@@ -537,7 +537,7 @@ describe("--watch", () => {
             return { ok: true, stdout: JSON.stringify(cr), stderr: "" };
         };
         const { deps } = makeDeps(kubectl);
-        const sleep = vi.spyOn(deps, "sleep");
+        const sleep = spyOn(deps, "sleep");
         const code = await runStatus("web", opts({ watch: true }), deps);
         expect(code).toBe(0);
         expect(call).toBe(3);

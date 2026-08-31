@@ -20,10 +20,10 @@
  * find out would be whoever ran `docker run` on a cluster — the #857 ordering.
  */
 
+import { describe, expect, it } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
 import { turbopackBuilder, vinextBuilder } from "../adapters/artifact-contract";
 
 const REPO_ROOT = resolve(

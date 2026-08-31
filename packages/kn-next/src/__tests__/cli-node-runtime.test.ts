@@ -26,6 +26,7 @@
  * build` locally first.
  */
 
+import { beforeAll, describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
 import {
     existsSync,
@@ -37,7 +38,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { beforeAll, describe, expect, it } from "vitest";
+import { NODE_BIN } from "../../../../tests/helpers/runtime-binaries";
 import { KNOWN_VERBS } from "../cli/dispatch";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -274,7 +275,7 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
     });
 
     it("`node kn-next.js --help` exits 0 with usage text", () => {
-        const r = run(process.execPath, [distBin, "--help"]);
+        const r = run(NODE_BIN, [distBin, "--help"]);
         expect(r.error).toBeUndefined();
         expect(r.status).toBe(0);
         expect(r.stdout).toContain("kn-next deploy");
@@ -334,7 +335,7 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         // config is absent, so both paths stop early, but ONLY the deploy path
         // announces "kn-next deploy".
         const dir = mkdtempSync(join(tmpdir(), "knext-cleanup-dispatch-"));
-        const r = run(process.execPath, [distBin, "cleanup"], dir);
+        const r = run(NODE_BIN, [distBin, "cleanup"], dir);
         expect(`${r.stdout}${r.stderr}`).not.toContain("kn-next deploy");
         expect(r.status).toBe(1); // no config here → the guidance path
         expect(`${r.stdout}${r.stderr}`).toContain("npx @getknext/core create");
@@ -355,7 +356,7 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         // would announce itself (or fail on the missing config) rather than
         // exiting 0 in silence.
         const dir = mkdtempSync(join(tmpdir(), `knext-help-${verb}-`));
-        const r = run(process.execPath, [distBin, verb, "--help"], dir);
+        const r = run(NODE_BIN, [distBin, verb, "--help"], dir);
         expect(r.error).toBeUndefined();
         expect(r.status, `${verb} --help must exit 0`).toBe(0);
         expect(r.stdout).toContain(`kn-next ${verb}`);
@@ -369,7 +370,7 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
 
     it("an unknown verb is an error with a suggestion, never a silent deploy", () => {
         const dir = mkdtempSync(join(tmpdir(), "knext-unknown-verb-"));
-        const r = run(process.execPath, [distBin, "celanup", "--dry-run"], dir);
+        const r = run(NODE_BIN, [distBin, "celanup", "--dry-run"], dir);
         expect(r.status).toBe(1);
         const all = `${r.stdout}${r.stderr}`;
         expect(all).toContain("unknown command: celanup");
@@ -392,7 +393,7 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         [["--", "cleanup"], "cleanup"],
     ])("`kn-next %s` refuses rather than deploying", (argv, swallowed) => {
         const dir = mkdtempSync(join(tmpdir(), "knext-stray-positional-"));
-        const r = run(process.execPath, [distBin, ...argv], dir);
+        const r = run(NODE_BIN, [distBin, ...argv], dir);
         expect(r.status, `${argv.join(" ")} must exit 1`).toBe(1);
         const all = `${r.stdout}${r.stderr}`;
         expect(all).toContain(`unexpected argument: ${swallowed}`);
@@ -411,7 +412,7 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         // The rejection must not swallow the legitimate explicit form: in an
         // empty dir it reaches config loading and prints the guidance.
         const dir = mkdtempSync(join(tmpdir(), "knext-explicit-deploy-"));
-        const r = run(process.execPath, [distBin, "deploy"], dir);
+        const r = run(NODE_BIN, [distBin, "deploy"], dir);
         expect(r.status).toBe(1);
         expect(`${r.stdout}${r.stderr}`).toContain(
             "No kn-next.config.ts found",
@@ -463,7 +464,7 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         const argv = verb === "deploy" ? [BOGUS_FLAG] : [verb, BOGUS_FLAG];
         const dir = mkdtempSync(join(tmpdir(), `knext-badflag-${verb}-`));
         const all = assertPlainMessage(
-            run(process.execPath, [distBin, ...argv], dir),
+            run(NODE_BIN, [distBin, ...argv], dir),
             `kn-next ${argv.join(" ")}`,
         );
         // It must actually name the offending flag, not fail for some
@@ -484,7 +485,7 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
     ])("`kn-next %s` is a plain message, not a stack dump", (argv, needle) => {
         const dir = mkdtempSync(join(tmpdir(), "knext-usage-error-"));
         const all = assertPlainMessage(
-            run(process.execPath, [distBin, ...argv], dir),
+            run(NODE_BIN, [distBin, ...argv], dir),
             `kn-next ${argv.join(" ")}`,
         );
         expect(all).toContain(needle);
@@ -495,7 +496,7 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         // leading `-` is a flag. Run it where there is no config, so the deploy
         // path identifies itself by printing the config guidance and exiting 1.
         const dir = mkdtempSync(join(tmpdir(), "knext-flags-only-"));
-        const r = run(process.execPath, [distBin, "--skip-build"], dir);
+        const r = run(NODE_BIN, [distBin, "--skip-build"], dir);
         expect(r.status).toBe(1);
         const all = `${r.stdout}${r.stderr}`;
         expect(all).toContain("No kn-next.config.ts found");
@@ -507,7 +508,7 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         // deploy flow (which would try to build+deploy). The e2e_rollback suite
         // (test/e2e/rollback_e2e_test.go) exercises the real traffic patch; this
         // hermetic test pins the dispatch + help contract.
-        const r = run(process.execPath, [distBin, "rollback", "--help"]);
+        const r = run(NODE_BIN, [distBin, "rollback", "--help"]);
         expect(r.error).toBeUndefined();
         expect(r.status).toBe(0);
         expect(r.stdout).toContain("kn-next rollback");
@@ -525,7 +526,7 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         // flow (which would build + push + mutate the cluster). The e2e_gc
         // suite (test/e2e/asset_gc_e2e_test.go) exercises the real prune;
         // this hermetic test pins the dispatch + help contract.
-        const r = run(process.execPath, [distBin, "gc", "--help"]);
+        const r = run(NODE_BIN, [distBin, "gc", "--help"]);
         expect(r.error).toBeUndefined();
         expect(r.status).toBe(0);
         expect(r.stdout).toContain("kn-next gc");
@@ -545,13 +546,13 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         // error, never a silent fall-through with different retention
         // semantics. (Exit code only — the fatal log rides pino's async
         // transport and is not guaranteed flushed before exit.)
-        const r = run(process.execPath, [distBin, "gc", "--unknown-flag"]);
+        const r = run(NODE_BIN, [distBin, "gc", "--unknown-flag"]);
         expect(r.error).toBeUndefined();
         expect(r.status).toBe(1);
     });
 
     it("`node kn-next.js status --help` dispatches and exits 0", () => {
-        const r = run(process.execPath, [distBin, "status", "--help"]);
+        const r = run(NODE_BIN, [distBin, "status", "--help"]);
         expect(r.error).toBeUndefined();
         expect(r.status).toBe(0);
         expect(r.stdout).toContain("kn-next status");
@@ -560,7 +561,7 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
     });
 
     it("`node kn-next.js doctor --help` dispatches and exits 0", () => {
-        const r = run(process.execPath, [distBin, "doctor", "--help"]);
+        const r = run(NODE_BIN, [distBin, "doctor", "--help"]);
         expect(r.error).toBeUndefined();
         expect(r.status).toBe(0);
         expect(r.stdout).toContain("kn-next doctor");
@@ -568,7 +569,7 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
     });
 
     it("`node kn-next.js db bind --help` dispatches and exits 0", () => {
-        const r = run(process.execPath, [distBin, "db", "bind", "--help"]);
+        const r = run(NODE_BIN, [distBin, "db", "bind", "--help"]);
         expect(r.error).toBeUndefined();
         expect(r.status).toBe(0);
         expect(r.stdout).toContain("kn-next db bind");
@@ -580,7 +581,7 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         // #407: `create` must route to createMain, NOT fall through to the
         // deploy flow (which would try to build + push + apply a CR). The
         // discriminators below appear only in create's help.
-        const r = run(process.execPath, [distBin, "create", "--help"]);
+        const r = run(NODE_BIN, [distBin, "create", "--help"]);
         expect(r.error).toBeUndefined();
         expect(r.status).toBe(0);
         expect(r.stdout).toContain("kn-next create");
@@ -596,7 +597,7 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         // to observe that; a unit test on renderScaffold cannot.
         const dir = mkdtempSync(join(tmpdir(), "kn-next-create-bin-"));
         try {
-            const r = run(process.execPath, [
+            const r = run(NODE_BIN, [
                 distBin,
                 "create",
                 dir,
@@ -646,13 +647,13 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
     });
 
     it("`node kn-next.js create --unknown-flag` exits non-zero (strict parser through the real dispatch)", () => {
-        const r = run(process.execPath, [distBin, "create", "--unknown-flag"]);
+        const r = run(NODE_BIN, [distBin, "create", "--unknown-flag"]);
         expect(r.error).toBeUndefined();
         expect(r.status).toBe(1);
     });
 
     it("`node kn-next.js --version` exits 0 and prints a version", () => {
-        const r = run(process.execPath, [distBin, "--version"]);
+        const r = run(NODE_BIN, [distBin, "--version"]);
         expect(r.error).toBeUndefined();
         expect(r.status).toBe(0);
         expect(r.stdout).toMatch(/\d+\.\d+\.\d+/);
@@ -668,7 +669,7 @@ describe("runtime parity: the SAME built bin under bun", () => {
     it.skipIf(!bun)(
         "`bun kn-next.js --help` exits 0 with IDENTICAL output to node",
         () => {
-            const nodeRun = run(process.execPath, [distBin, "--help"]);
+            const nodeRun = run(NODE_BIN, [distBin, "--help"]);
             const bunRun = run("bun", [distBin, "--help"]);
             expect(bunRun.status).toBe(0);
             expect(bunRun.stdout).toBe(nodeRun.stdout);
@@ -676,7 +677,7 @@ describe("runtime parity: the SAME built bin under bun", () => {
     );
 
     it.skipIf(!bun)("`bun kn-next.js --version` matches node's", () => {
-        const nodeRun = run(process.execPath, [distBin, "--version"]);
+        const nodeRun = run(NODE_BIN, [distBin, "--version"]);
         const bunRun = run("bun", [distBin, "--version"]);
         expect(bunRun.status).toBe(0);
         expect(bunRun.stdout).toBe(nodeRun.stdout);

@@ -16,10 +16,10 @@
  * diagnosis, which is exactly what D-3 dissolves.
  */
 
+import { describe, expect, it, mock } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it, vi } from "vitest";
 import YAML from "yaml";
 import { type KubectlFn, runDoctor } from "../cli/doctor";
 
@@ -92,7 +92,7 @@ function stub(overrides: {
     };
 }
 
-const probeImage = vi.fn(async () => "ok" as const);
+const probeImage = mock(async () => "ok" as const);
 
 async function schemaCheck(kubectl: KubectlFn) {
     const report = await runDoctor({ kubectl, probeImage });

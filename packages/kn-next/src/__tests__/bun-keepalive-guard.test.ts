@@ -21,11 +21,11 @@
  * byte-identical.
  */
 
+import { describe, expect, it } from "bun:test";
 import { Agent, createServer, get as httpGet } from "node:http";
 import { createRequire } from "node:module";
 import type { AddressInfo } from "node:net";
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
 
 const require = createRequire(import.meta.url);
 const MODULE_PATH = resolve(

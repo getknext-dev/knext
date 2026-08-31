@@ -10,11 +10,12 @@
  * validateMain itself, hermetically, on injected streams.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, mock } from "bun:test";
 
-const loadConfig = vi.hoisted(() => vi.fn());
-vi.mock("../cli/shared", async (importOriginal) => ({
-    ...(await importOriginal<typeof import("../cli/shared")>()),
+const loadConfig = (() => mock())();
+const __knextReal1 = { ...(await import("../cli/shared")) };
+mock.module("../cli/shared", () => ({
+    ...__knextReal1,
     loadConfig,
 }));
 

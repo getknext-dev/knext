@@ -1,5 +1,5 @@
+import { beforeEach, describe, expect, it, mock } from "bun:test";
 import { Registry } from "prom-client";
-import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
     createMetricsRegistry,
@@ -28,7 +28,7 @@ async function scrape(): Promise<string> {
 
 describe("#348 gate: makeDeepHealthScrapeHook activity-gates the DB dial", () => {
     it("IDLE pool ⇒ hook does NOT run checkDeepHealth (DB not woken)", async () => {
-        const checkDeepHealth = vi.fn(async () => ({
+        const checkDeepHealth = mock(async () => ({
             status: "waking" as const,
             checks: {
                 postgres: "waking" as const,
@@ -47,7 +47,7 @@ describe("#348 gate: makeDeepHealthScrapeHook activity-gates the DB dial", () =>
     });
 
     it("RECENTLY-ACTIVE pool ⇒ hook runs checkDeepHealth and the gauge reflects the state", async () => {
-        const checkDeepHealth = vi.fn(async () => ({
+        const checkDeepHealth = mock(async () => ({
             status: "waking" as const,
             checks: {
                 postgres: "waking" as const,

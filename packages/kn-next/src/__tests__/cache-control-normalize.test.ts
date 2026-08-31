@@ -25,9 +25,9 @@
  *   - `immutable` values, non-GET/HEAD, marker-less private responses → untouched
  */
 
+import { beforeAll, describe, expect, it } from "bun:test";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
-import { beforeAll, describe, expect, it } from "vitest";
 
 const require = createRequire(import.meta.url);
 const MODULE_PATH = resolve(

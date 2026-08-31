@@ -1,3 +1,4 @@
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { context, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import {
@@ -6,7 +7,6 @@ import {
     SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
 import { Registry } from "prom-client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
     COLDSTART_DURATION_METRIC,

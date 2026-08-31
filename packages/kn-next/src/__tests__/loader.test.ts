@@ -5,8 +5,6 @@
  * happy path, using a real temp .mjs module so the dynamic import is genuine.
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import {
     afterAll,
     afterEach,
@@ -15,7 +13,9 @@ import {
     describe,
     expect,
     it,
-} from "vitest";
+} from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { loadConfig } from "../loader";
 
 let dir: string;

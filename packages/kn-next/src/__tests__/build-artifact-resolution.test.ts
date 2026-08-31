@@ -12,7 +12,7 @@
  * hardcoded path in the build command.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import {
     resolveBuildArtifact,
     standaloneStepsApply,

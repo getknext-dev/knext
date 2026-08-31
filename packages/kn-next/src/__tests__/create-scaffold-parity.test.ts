@@ -26,10 +26,11 @@
  * turbo zone template must appear in exactly one bucket, so a new template file
  * fails this test until someone decides which it is.
  */
+
+import { describe, expect, it } from "bun:test";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // packages/kn-next/src/__tests__ → repo root

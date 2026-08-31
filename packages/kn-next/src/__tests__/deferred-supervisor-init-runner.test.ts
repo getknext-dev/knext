@@ -5,7 +5,7 @@
  * after the child already serves traffic).
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, mock } from "bun:test";
 import {
     createDeferredSupervisorInit,
     DEFER_SUPERVISOR_INIT_ENV,
@@ -34,8 +34,8 @@ describe("isSupervisorInitDeferred", () => {
 
 describe("createDeferredSupervisorInit", () => {
     it("runs every step exactly once and reports started", async () => {
-        const a = vi.fn();
-        const b = vi.fn(async () => {});
+        const a = mock();
+        const b = mock(async () => {});
         const init = createDeferredSupervisorInit({
             steps: [
                 { name: "a", run: a },
@@ -55,9 +55,9 @@ describe("createDeferredSupervisorInit", () => {
     });
 
     it("never rejects — a throwing step is logged and the rest still run", async () => {
-        const warn = vi.fn();
-        const info = vi.fn();
-        const good = vi.fn();
+        const warn = mock();
+        const info = mock();
+        const good = mock();
         const init = createDeferredSupervisorInit({
             log: { warn, info },
             steps: [

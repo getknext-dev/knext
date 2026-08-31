@@ -10,18 +10,27 @@
  * `watchImpl` option: by default it never delivers an event, so everything
  * asserted below is pushed by the post-attach reconcile alone — or not at all.
  *
- * Injection, not vi.mock("node:fs"): a factory mock of node:fs is
+ * Injection, not mock.module("node:fs"): a factory mock of node:fs is
  * config-dependent — under the ROOT vitest config (which CI's
  * `vitest run --coverage` and `vitest list` use) `importOriginal` returns an
  * empty module, so a partial mock cannot be built there at all. This broke CI
  * on PR #837 while passing under the package-level config locally.
  */
 
+import {
+    afterEach,
+    beforeEach,
+    describe,
+    expect,
+    it,
+    jest,
+    mock,
+    spyOn,
+} from "bun:test";
 import { EventEmitter } from "node:events";
 import { promises as fs, type watch as fsWatch } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
     type ImageVariantStore,
     watchAndPushImageCache,
@@ -96,7 +105,7 @@ describe("image-cache-sync — the attach gap, forced (watch never fires)", () =
 
     afterEach(async () => {
         await fs.rm(cacheDir, { recursive: true, force: true });
-        vi.restoreAllMocks();
+        jest.restoreAllMocks();
     });
 
     it("pushes a pre-attach variant via the reconcile even with zero watch events", async () => {
@@ -140,7 +149,7 @@ describe("image-cache-sync — the attach gap, forced (watch never fires)", () =
         await fs.writeFile(join(cacheDir, "known", "1.2.e.u.webp"), "KNOWN");
         await fs.mkdir(join(cacheDir, "fresh"), { recursive: true });
         await fs.writeFile(join(cacheDir, "fresh", "1.2.e.u.webp"), "NEW");
-        const upload = vi.spyOn(store, "upload");
+        const upload = spyOn(store, "upload");
 
         const handle = await watchAndPushImageCache({
             bucket: "b",
@@ -164,7 +173,7 @@ describe("image-cache-sync — the attach gap, forced (watch never fires)", () =
     });
 
     it("warns when the readiness probe cannot confirm event delivery", async () => {
-        const warn = vi.fn();
+        const warn = mock();
         const handle = await watchAndPushImageCache({
             bucket: "b",
             cacheDir,

@@ -30,6 +30,7 @@
  *   - phase tracking + watchdog name where a hang stalls (the deliverable).
  */
 
+import { describe, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
     mkdirSync,
@@ -42,7 +43,6 @@ import {
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { describe, expect, it } from "vitest";
 
 const require = createRequire(import.meta.url);
 const MODULE_PATH = resolve(

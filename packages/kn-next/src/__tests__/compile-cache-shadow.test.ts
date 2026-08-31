@@ -14,10 +14,10 @@
  *    empty) ⇒ SILENT, fail-open, never throws.
  */
 
+import { describe, expect, it, mock } from "bun:test";
 import { existsSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { describe, expect, it, vi } from "vitest";
 import {
     detectCompileCacheShadow,
     isCompileCacheShadowed,
@@ -116,7 +116,7 @@ describe("detectCompileCacheShadow (filesystem-backed, fail-open)", () => {
 
 describe("warnOnCompileCacheShadow (logger)", () => {
     function makeLog() {
-        return { warn: vi.fn(), info: vi.fn() };
+        return { warn: mock(), info: mock() };
     }
     function bakedDir(files: number): string {
         const dir = mkdtempSync(join(tmpdir(), "knext-baked-warn-"));
@@ -164,10 +164,10 @@ describe("warnOnCompileCacheShadow (logger)", () => {
     it("never throws even if the logger throws (fail-open)", () => {
         const baked = bakedDir(2);
         const log = {
-            warn: vi.fn(() => {
+            warn: mock(() => {
                 throw new Error("boom");
             }),
-            info: vi.fn(),
+            info: mock(),
         };
         expect(() =>
             warnOnCompileCacheShadow({
@@ -244,7 +244,7 @@ describe("#451 realpath aliasing (symlinks)", () => {
         });
         expect(result.shadowed).toBe(false);
 
-        const log = { warn: vi.fn(), info: vi.fn() };
+        const log = { warn: mock(), info: mock() };
         warnOnCompileCacheShadow({
             env: { NODE_COMPILE_CACHE: alias },
             bakedDefaultPath: baked,
@@ -262,7 +262,7 @@ describe("#451 realpath aliasing (symlinks)", () => {
         expect(existsSync(missing)).toBe(false);
         expect(isCompileCacheShadowed(missing, baked, true)).toBe(true);
 
-        const log = { warn: vi.fn(), info: vi.fn() };
+        const log = { warn: mock(), info: mock() };
         expect(() =>
             warnOnCompileCacheShadow({
                 env: { NODE_COMPILE_CACHE: missing },

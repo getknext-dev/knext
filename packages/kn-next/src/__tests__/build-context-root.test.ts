@@ -19,6 +19,8 @@
  * deeper nesting than two levels, and no lockfile at all — which FAILS LOUDLY
  * rather than shipping an arbitrary directory as the context.
  */
+
+import { describe, expect, it } from "bun:test";
 import {
     mkdirSync,
     mkdtempSync,
@@ -29,7 +31,6 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
 import { resolveLayout } from "../cli/create";
 import { findTracingRoot, requireBuildContext } from "../cli/tracing-root";
 
@@ -594,7 +595,7 @@ describe("create resolves the root exactly as deploy does (#860, #861)", () => {
             join(root, "proj/apps/a/next.config.ts"),
             // `path.join(__dirname, "../..")` from `proj/apps/a` is `proj`.
             'import { join } from "node:path";\n' +
-                "export default { outputFileTracingRoot: join(__dirname, \"../..\") };\n",
+                'export default { outputFileTracingRoot: join(__dirname, "../..") };\n',
         );
         return root;
     };

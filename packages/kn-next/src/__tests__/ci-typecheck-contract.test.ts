@@ -20,10 +20,10 @@
  * A new TS package added with neither fails this test. No silent gaps.
  */
 
+import { describe, expect, it } from "bun:test";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..", "..", "..", "..");

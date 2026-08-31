@@ -20,10 +20,11 @@
  * Written RED-first for #356: `modifyConfig` previously returned no `webpack`
  * fn, so the "returns a webpack fn" assertion failed before the implementation.
  */
+
+import { describe, expect, it, mock } from "bun:test";
 import type { NextConfig } from "next";
 // NextConfigComplete is not re-exported from the 'next' public barrel; import directly.
 import type { NextConfigComplete } from "next/dist/server/config-shared";
-import { describe, expect, it, vi } from "vitest";
 import adapter from "../adapters/next-adapter";
 
 type ModifyConfig = NonNullable<typeof adapter.modifyConfig>;
@@ -97,7 +98,7 @@ describe("knext-adapter modifyConfig — platform-owned edge IgnorePlugin fence 
     });
 
     it("composes the app's own webpack hook instead of replacing it", async () => {
-        const appWebpack = vi.fn((config: { plugins: unknown[] }) => {
+        const appWebpack = mock((config: { plugins: unknown[] }) => {
             config.plugins.push("app-owned-plugin");
             return config;
         });
@@ -182,7 +183,7 @@ describe("knext-adapter modifyConfig — the fence covers next dev too (#408)", 
     });
 
     it("dev: composes the app's own webpack hook instead of replacing it", async () => {
-        const appWebpack = vi.fn((config: { plugins: unknown[] }) => {
+        const appWebpack = mock((config: { plugins: unknown[] }) => {
             config.plugins.push("app-owned-plugin");
             return config;
         });

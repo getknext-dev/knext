@@ -17,8 +17,8 @@
  * `createRequire(import.meta.url)("pino")` in logger.ts populates.
  */
 
+import { describe, expect, it } from "bun:test";
 import { createRequire } from "node:module";
-import { describe, expect, it } from "vitest";
 
 const req = createRequire(import.meta.url);
 

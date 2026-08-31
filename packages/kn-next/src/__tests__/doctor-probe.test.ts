@@ -6,7 +6,7 @@
  * (kubectl is absent in the sandbox, so the gate degrades to warn+SKIP, exit 0).
  */
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, jest, spyOn } from "bun:test";
 import { doctorMain, probeManifest } from "../cli/doctor";
 
 function res(init: {
@@ -26,12 +26,12 @@ function res(init: {
     } as unknown as Response;
 }
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => jest.restoreAllMocks());
 
 describe("probeManifest — anonymous token flow (#198)", () => {
     it("does the realm/service → Bearer → retry dance and returns 'ok'", async () => {
         const calls: string[] = [];
-        vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+        spyOn(globalThis, "fetch").mockImplementation(async (url) => {
             const u = String(url);
             calls.push(u);
             if (u.includes("/manifests/") && calls.length === 1) {
@@ -55,7 +55,7 @@ describe("probeManifest — anonymous token flow (#198)", () => {
     });
 
     it("returns 'auth-required' when the token endpoint itself fails", async () => {
-        vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+        spyOn(globalThis, "fetch").mockImplementation(async (url) => {
             const u = String(url);
             if (u.includes("/manifests/")) {
                 return res({
@@ -71,9 +71,9 @@ describe("probeManifest — anonymous token flow (#198)", () => {
     });
 
     it("maps a 404 to 'not-found' and a 403 to 'auth-required'", async () => {
-        const notFound = vi
-            .spyOn(globalThis, "fetch")
-            .mockResolvedValue(res({ status: 404 }));
+        const notFound = spyOn(globalThis, "fetch").mockResolvedValue(
+            res({ status: 404 }),
+        );
         expect(await probeManifest("ghcr.io/acme/app:v1")).toBe("not-found");
         notFound.mockResolvedValue(res({ status: 403 }));
         expect(await probeManifest("ghcr.io/acme/app:v1")).toBe(
@@ -82,7 +82,7 @@ describe("probeManifest — anonymous token flow (#198)", () => {
     });
 
     it("maps an unexpected 5xx (no auth challenge) to 'unreachable'", async () => {
-        vi.spyOn(globalThis, "fetch").mockResolvedValue(res({ status: 500 }));
+        spyOn(globalThis, "fetch").mockResolvedValue(res({ status: 500 }));
         expect(await probeManifest("ghcr.io/acme/app:v1")).toBe("unreachable");
     });
 });

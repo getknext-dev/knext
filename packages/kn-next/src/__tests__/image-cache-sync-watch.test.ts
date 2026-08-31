@@ -9,10 +9,19 @@
  * In-memory fake store + a real temp cache dir — no MinIO/network.
  */
 
+import {
+    afterEach,
+    beforeEach,
+    describe,
+    expect,
+    it,
+    jest,
+    mock,
+    spyOn,
+} from "bun:test";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
     type ImageVariantStore,
     pushVariant,
@@ -66,7 +75,7 @@ describe("image-cache-sync — watch + start", () => {
 
     afterEach(async () => {
         await fs.rm(cacheDir, { recursive: true, force: true });
-        vi.restoreAllMocks();
+        jest.restoreAllMocks();
     });
 
     it("watches the cache dir and pushes a newly-written variant to the store", async () => {
@@ -124,7 +133,7 @@ describe("image-cache-sync — watch + start", () => {
         const store = fakeStore({
             "image-cache/warm/9.9.e.u.avif": Buffer.from("WARMED"),
         });
-        const list = vi.spyOn(store, "list");
+        const list = spyOn(store, "list");
         const handle = await startImageCacheSync(
             {
                 STORAGE_BUCKET: "b",
@@ -179,7 +188,7 @@ describe("image-cache-sync — degrade-gracefully error branches", () => {
 
     afterEach(async () => {
         await fs.rm(cacheDir, { recursive: true, force: true });
-        vi.restoreAllMocks();
+        jest.restoreAllMocks();
     });
 
     it("restore: a per-key download failure is logged and skipped, others still restored", async () => {
@@ -189,13 +198,13 @@ describe("image-cache-sync — degrade-gracefully error branches", () => {
         });
         // Make ONLY the "bad" key fail to download.
         const realDownload = store.download.bind(store);
-        vi.spyOn(store, "download").mockImplementation(
+        spyOn(store, "download").mockImplementation(
             async (bucket, key, dest) => {
                 if (key.includes("/bad/")) throw new Error("blob read error");
                 return realDownload(bucket, key, dest);
             },
         );
-        const warn = vi.fn();
+        const warn = mock();
 
         const restored = await restoreImageCache({
             bucket: "b",
@@ -213,7 +222,7 @@ describe("image-cache-sync — degrade-gracefully error branches", () => {
 
     it("restore: skips a bare prefix key (no relative path)", async () => {
         const store = fakeStore({ "image-cache/": Buffer.from("") });
-        const download = vi.spyOn(store, "download");
+        const download = spyOn(store, "download");
         const restored = await restoreImageCache({
             bucket: "b",
             cacheDir,
@@ -237,11 +246,11 @@ describe("image-cache-sync — degrade-gracefully error branches", () => {
 
     it("pushVariant: a per-file upload failure is logged and skipped", async () => {
         const store = fakeStore();
-        vi.spyOn(store, "upload").mockRejectedValue(new Error("upload 500"));
+        spyOn(store, "upload").mockRejectedValue(new Error("upload 500"));
         const variantDir = join(cacheDir, "k");
         await fs.mkdir(variantDir, { recursive: true });
         await fs.writeFile(join(variantDir, "x.webp"), "DATA");
-        const warn = vi.fn();
+        const warn = mock();
 
         const uploaded = await pushVariant("k", {
             bucket: "b",

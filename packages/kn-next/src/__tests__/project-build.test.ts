@@ -10,7 +10,7 @@
  * project's build script, so the 127 translation cannot drift between them.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, mock } from "bun:test";
 import { runProjectBuild } from "../cli/project-build";
 import { handleUsageError, USAGE_ERROR_CODE } from "../cli/shared";
 
@@ -23,13 +23,13 @@ function exitError(status: number): Error & { status: number } {
 
 describe("runProjectBuild", () => {
     it("runs the project's npm build script through the injected runner", () => {
-        const run = vi.fn();
+        const run = mock();
         runProjectBuild(run);
         expect(run).toHaveBeenCalledWith(["npm", "run", "build"]);
     });
 
     it("translates exit 127 (command not found) into plain npm-install guidance", () => {
-        const run = vi.fn(() => {
+        const run = mock(() => {
             throw exitError(127);
         });
         let caught: unknown;
@@ -57,7 +57,7 @@ describe("runProjectBuild", () => {
 
     it("any other build failure is rethrown untouched (mutation half)", () => {
         const original = exitError(1);
-        const run = vi.fn(() => {
+        const run = mock(() => {
             throw original;
         });
         expect(() => runProjectBuild(run)).toThrow(original);

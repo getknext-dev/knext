@@ -12,7 +12,7 @@
  * ksvc / Route / kn directly.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, mock } from "bun:test";
 import {
     derivePreviewName,
     runPreviewDeploy,
@@ -57,12 +57,12 @@ describe("validatePreviewName (#91)", () => {
 
 describe("runPreviewDeploy (#91)", () => {
     it("applies a NextApp CR named <app>-pr-<n> carrying spec.preview, then reads status.url", async () => {
-        const apply = vi.fn((_argv: readonly string[]) => {});
-        const capture = vi.fn(
+        const apply = mock((_argv: readonly string[]) => {});
+        const capture = mock(
             (_argv: readonly string[]) =>
                 "https://my-app-pr-42.previews.example.com",
         );
-        const buildAndPush = vi.fn(async (_name: string) => digestImage);
+        const buildAndPush = mock(async (_name: string) => digestImage);
 
         const url = await runPreviewDeploy(
             baseConfig,
@@ -107,9 +107,9 @@ describe("runPreviewDeploy (#91)", () => {
             },
         };
 
-        const apply = vi.fn((_argv: readonly string[]) => {});
-        const capture = vi.fn((_argv: readonly string[]) => "https://x");
-        const buildAndPush = vi.fn(
+        const apply = mock((_argv: readonly string[]) => {});
+        const capture = mock((_argv: readonly string[]) => "https://x");
+        const buildAndPush = mock(
             async (
                 _name: string,
                 _config: KnativeNextConfig,
@@ -139,9 +139,9 @@ describe("runPreviewDeploy (#91)", () => {
     });
 
     it("leaves cache undefined when prod has no cache configured (no spurious cache block)", async () => {
-        const apply = vi.fn((_argv: readonly string[]) => {});
-        const capture = vi.fn((_argv: readonly string[]) => "https://x");
-        const buildAndPush = vi.fn(
+        const apply = mock((_argv: readonly string[]) => {});
+        const capture = mock((_argv: readonly string[]) => "https://x");
+        const buildAndPush = mock(
             async (
                 _name: string,
                 _config: KnativeNextConfig,
@@ -161,9 +161,9 @@ describe("runPreviewDeploy (#91)", () => {
     });
 
     it("NEGATIVE (ADR-0001): writes ONLY nextapp — never ksvc/route/kn/service", async () => {
-        const apply = vi.fn((_argv: readonly string[]) => {});
-        const capture = vi.fn((_argv: readonly string[]) => "https://x");
-        const buildAndPush = vi.fn(async (_name: string) => digestImage);
+        const apply = mock((_argv: readonly string[]) => {});
+        const capture = mock((_argv: readonly string[]) => "https://x");
+        const buildAndPush = mock(async (_name: string) => digestImage);
 
         await runPreviewDeploy(
             baseConfig,
@@ -191,9 +191,9 @@ describe("runPreviewDeploy (#91)", () => {
     });
 
     it("validates the derived name before any cluster write (long app name aborts)", async () => {
-        const apply = vi.fn((_argv: readonly string[]) => {});
-        const capture = vi.fn((_argv: readonly string[]) => "");
-        const buildAndPush = vi.fn(async (_name: string) => digestImage);
+        const apply = mock((_argv: readonly string[]) => {});
+        const capture = mock((_argv: readonly string[]) => "");
+        const buildAndPush = mock(async (_name: string) => digestImage);
         const longConfig: KnativeNextConfig = {
             ...baseConfig,
             name: "a".repeat(60),
@@ -214,7 +214,7 @@ describe("runPreviewDeploy (#91)", () => {
 
 describe("runPreviewDestroy (#91)", () => {
     it("deletes ONLY the nextapp <app>-pr-<n> with --ignore-not-found", () => {
-        const del = vi.fn((_argv: readonly string[]) => {});
+        const del = mock((_argv: readonly string[]) => {});
         runPreviewDestroy(
             baseConfig,
             { prId: "42", namespace: "previews" },
@@ -232,7 +232,7 @@ describe("runPreviewDestroy (#91)", () => {
     });
 
     it("NEGATIVE (ADR-0001): destroy targets only the nextapp kind", () => {
-        const del = vi.fn((_argv: readonly string[]) => {});
+        const del = mock((_argv: readonly string[]) => {});
         runPreviewDestroy(
             baseConfig,
             { prId: "42", namespace: "previews" },

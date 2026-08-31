@@ -28,9 +28,9 @@
  *   - phase tracking names where a hang stalls (the whole point of path 2).
  */
 
+import { describe, expect, it } from "bun:test";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
 
 const require = createRequire(import.meta.url);
 const MODULE_PATH = resolve(

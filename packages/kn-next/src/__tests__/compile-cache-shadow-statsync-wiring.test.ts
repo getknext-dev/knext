@@ -24,7 +24,7 @@
  * imported `statSync` reading the real filesystem. (Mocking `node:fs` was tried
  * first and is not viable here: under this vitest/node setup `importOriginal`
  * and `vi.importActual` both hand back an EMPTY namespace for the builtin, and
- * `vi.spyOn` fails with "Module namespace is not configurable in ESM".)
+ * `spyOn` fails with "Module namespace is not configurable in ESM".)
  *
  * Hard links are files; production compares directories, where the equivalent
  * alias is a bind mount. The mechanism exercised — inode identity through the
@@ -34,10 +34,10 @@
  * stub that does not read the real filesystem, turns the first two cases RED.
  */
 
+import { describe, expect, it } from "bun:test";
 import { linkSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
 import {
     isCompileCacheShadowed,
     isSameDirectory,

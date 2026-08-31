@@ -1,7 +1,15 @@
+import {
+    afterEach,
+    beforeEach,
+    describe,
+    expect,
+    it,
+    jest,
+    spyOn,
+} from "bun:test";
 import { existsSync, promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
     type ImageVariantStore,
     pushVariant,
@@ -49,7 +57,7 @@ describe("image-cache-sync", () => {
 
     afterEach(async () => {
         await fs.rm(cacheDir, { recursive: true, force: true });
-        vi.restoreAllMocks();
+        jest.restoreAllMocks();
     });
 
     it("restores persisted variants into the local cache dir, keyed by cacheKey", async () => {
@@ -81,7 +89,7 @@ describe("image-cache-sync", () => {
         const store = fakeStore({
             [`image-cache/key1/${variantFile}`]: Buffer.from("STORE-OLD"),
         });
-        const download = vi.spyOn(store, "download");
+        const download = spyOn(store, "download");
 
         const restored = await restoreImageCache({
             bucket: "b",
@@ -146,7 +154,7 @@ describe("image-cache-sync", () => {
 
     it("is a no-op when STORAGE_BUCKET is unset", async () => {
         const store = fakeStore();
-        const list = vi.spyOn(store, "list");
+        const list = spyOn(store, "list");
 
         const handle = await startImageCacheSync(
             // Type-level cast (#261): Next augments ProcessEnv with a REQUIRED
@@ -166,7 +174,7 @@ describe("image-cache-sync", () => {
 
     it("degrades gracefully: a store list failure does not throw", async () => {
         const store = fakeStore();
-        vi.spyOn(store, "list").mockRejectedValue(new Error("store down"));
+        spyOn(store, "list").mockRejectedValue(new Error("store down"));
 
         await expect(
             restoreImageCache({ bucket: "b", cacheDir, store, log: SILENT }),

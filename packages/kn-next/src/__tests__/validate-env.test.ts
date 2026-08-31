@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import { ConfigValidationError, validateConfig } from "../cli/validate";
 import type { KnativeNextConfig } from "../config";
 

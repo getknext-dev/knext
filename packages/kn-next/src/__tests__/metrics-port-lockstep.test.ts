@@ -19,9 +19,9 @@
  * the guard can never silently no-op after a refactor.
  */
 
+import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
 
 // repo root: packages/kn-next/src/__tests__ -> up 4
 const REPO_ROOT = resolve(__dirname, "..", "..", "..", "..");

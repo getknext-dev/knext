@@ -11,13 +11,13 @@
  * cwd with no config file (app name must come from the positional).
  */
 
+import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const runDbMigrate = vi.hoisted(() => vi.fn(async () => {}));
-vi.mock("../cli/db-migrate", () => ({ runDbMigrate }));
+const runDbMigrate = (() => mock(async () => {}))();
+mock.module("../cli/db-migrate", () => ({ runDbMigrate }));
 
 import { dbMain, runDbBind } from "../cli/db-bind";
 
@@ -48,11 +48,11 @@ describe("printDsnContract (via runDbBind --dry-run --secret-file)", () => {
             file,
             ["stringData:", "  DATABASE_URL: postgres://u@h/db"].join("\n"),
         );
-        const write = vi.fn();
+        const write = mock();
         await runDbBind(
             "my-app",
             { ...opts, secretFile: file },
-            { exec: vi.fn(), write },
+            { exec: mock(), write },
         );
         const printed = write.mock.calls.map((c) => c[0]).join("");
         expect(printed).toContain("Connection contract");
@@ -60,11 +60,11 @@ describe("printDsnContract (via runDbBind --dry-run --secret-file)", () => {
     });
 
     it("notes (does not throw) when the --secret-file cannot be read", async () => {
-        const write = vi.fn();
+        const write = mock();
         await runDbBind(
             "my-app",
             { ...opts, secretFile: join(dir, "nope.yaml") },
-            { exec: vi.fn(), write },
+            { exec: mock(), write },
         );
         const printed = write.mock.calls.map((c) => c[0]).join("");
         expect(printed).toMatch(/could not read --secret-file/);
@@ -73,11 +73,11 @@ describe("printDsnContract (via runDbBind --dry-run --secret-file)", () => {
     it("notes when the key is absent from the --secret-file", async () => {
         const file = join(dir, "secret.yaml");
         writeFileSync(file, ["stringData:", "  OTHER: x"].join("\n"));
-        const write = vi.fn();
+        const write = mock();
         await runDbBind(
             "my-app",
             { ...opts, secretFile: file },
-            { exec: vi.fn(), write },
+            { exec: mock(), write },
         );
         const printed = write.mock.calls.map((c) => c[0]).join("");
         expect(printed).toMatch(/not found in/);
@@ -86,8 +86,8 @@ describe("printDsnContract (via runDbBind --dry-run --secret-file)", () => {
 
 describe("runDbBind — local-config cross-check (ADR-0019 rules 3/4)", () => {
     it("rejects (before any exec) when the LOCAL config's envMap already defines DATABASE_URL", async () => {
-        const exec = vi.fn();
-        const write = vi.fn();
+        const exec = mock();
+        const write = mock();
         const localConfig = {
             secrets: {
                 envMap: { DATABASE_URL: { secretName: "x", secretKey: "y" } },

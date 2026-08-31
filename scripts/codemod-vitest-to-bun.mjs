@@ -35,6 +35,19 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { blankNonCode } from './lib/blank-non-code.mjs';
 
+/**
+ * `vi.<member>`, tolerating whitespace and newlines between the parts.
+ *
+ * A formatter breaks long chains — `const stderr = vi\n  .spyOn(…)` is what
+ * biome produces — and a `vi\.` pattern silently skips those. The file then
+ * converts "cleanly" and fails at runtime with `ReferenceError: vi is not
+ * defined`, which names the symptom and not the tool that left it there.
+ *
+ * Global and stateful (`g` flag): callers must not share the object across
+ * loops without resetting `lastIndex`; every use here is a single `matchAll`.
+ */
+const VI_MEMBER = /\bvi\s*\.\s*([a-zA-Z]+)/g;
+
 const args = process.argv.slice(2);
 const write = args.includes('--write');
 const targets = args.filter((a) => !a.startsWith('--'));
@@ -88,8 +101,8 @@ for (const file of files) {
     continue;
   }
 
-  const blockers = [...new Set([...code.matchAll(/vi\.([a-zA-Z]+)/g)].map((m) => m[1]))].filter(
-    (name) => REFUSE.has(name),
+  const blockers = [...new Set([...code.matchAll(VI_MEMBER)].map((m) => m[1]))].filter((name) =>
+    REFUSE.has(name),
   );
   if (blockers.length > 0) {
     report.refused.push({ file, blockers });
@@ -109,7 +122,15 @@ for (const file of files) {
   src = callHoisted(src);
 
   // Module mocks.
-  src = src.replace(/\bvi\.mock\(/g, 'mock.module(').replace(/\bvi\.doMock\(/g, 'mock.module(');
+  src = src
+    .replace(/\bvi\s*\.\s*mock\(/g, 'mock.module(')
+    .replace(/\bvi\s*\.\s*doMock\(/g, 'mock.module(');
+
+  // AFTER the rename above, not before: this searches for `mock.module(`, and
+  // running it first found nothing at all — the files converted "cleanly" and
+  // then failed at runtime with "importOriginal is not a function", which is
+  // the same symptom as not having the transform.
+  src = liftImportOriginal(src);
 
   // Helper-backed calls.
   for (const [from, to] of HELPERS) {
@@ -122,13 +143,13 @@ for (const file of files) {
 
   // Direct swaps.
   for (const [from, to] of DIRECT) {
-    src = src.replace(new RegExp(`\\bvi\\.${from}\\b`, 'g'), to);
+    src = src.replace(new RegExp(`\\bvi\\s*\\.\\s*${from}\\b`, 'g'), to);
   }
 
   // Anything still spelled `vi.` was not in any table — refuse rather than ship
   // a file with a dangling reference.
   const leftoverCode = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
-  const leftovers = [...new Set([...leftoverCode.matchAll(/vi\.([a-zA-Z]+)/g)].map((m) => m[1]))];
+  const leftovers = [...new Set([...leftoverCode.matchAll(VI_MEMBER)].map((m) => m[1]))];
   if (leftovers.length > 0) {
     report.refused.push({ file, blockers: leftovers });
     continue;
@@ -150,7 +171,7 @@ for (const file of files) {
     // and matching a name where only a usage counts.
     const code = blankNonCode(src);
     for (const needed of ['mock', 'spyOn', 'jest', 'setSystemTime']) {
-      const used = new RegExp(`\\b${needed}\\s*[.(]`).test(code);
+      const used = new RegExp(`\\b${needed}\\s*[.(<]`).test(code);
       if (used && !kept.includes(needed)) kept.push(needed);
     }
     return `import { ${kept.sort().join(', ')} } from 'bun:test';`;
@@ -227,4 +248,101 @@ export function callHoisted(src) {
     }
     out = `${out.slice(0, start)}(${out.slice(open + 1, close)})()${out.slice(close + 1)}`;
   }
+}
+
+/**
+ * Port `vi.mock(spec, async (importOriginal) => …)` to bun.
+ *
+ * bun's `mock.module` factory receives NO arguments, so `importOriginal` is
+ * simply undefined and every such file dies with "importOriginal is not a
+ * function". The three obvious fixes are all wrong, and each fails differently
+ * — which is why this is a codemod rather than a note telling people to do it
+ * by hand:
+ *
+ *  - `await import(spec)` INSIDE the factory DEADLOCKS. The mock is registered
+ *    by the time the factory runs, so the import re-enters it and waits on
+ *    itself: the file hangs with no output and the runner reports a timeout.
+ *  - Capturing the namespace outside and spreading it INSIDE recurses or copies
+ *    the mock, because bun mutates the module namespace IN PLACE — by the time
+ *    the factory runs, the namespace IS the replacement.
+ *  - Spreading eagerly but keeping a live reference has the same problem one
+ *    level down.
+ *
+ * So the real module is imported AND spread into a plain object before
+ * `mock.module` is called, and the factory only hands back what is already
+ * built.
+ */
+export function liftImportOriginal(src) {
+  const NEEDLE = 'mock.module(';
+  let out = src;
+  let seq = 0;
+
+  for (;;) {
+    const blanked = blankNonCode(out);
+    // Find a `mock.module(` whose factory takes `importOriginal`.
+    let start = -1;
+    for (const m of blanked.matchAll(/mock\.module\(/g)) {
+      const open = m.index + NEEDLE.length - 1;
+      const close = matchParen(blanked, open);
+      if (close === -1) continue;
+      // Test the BLANKED text. A string or comment mentioning
+      // `(importOriginal)` otherwise selects a call this transform cannot
+      // change, and the outer loop re-selects it forever — found by the test
+      // for exactly that case, which HUNG rather than failing.
+      const call = blanked.slice(m.index, close + 1);
+      if (/\(\s*importOriginal\s*\)/.test(call)) {
+        start = m.index;
+        break;
+      }
+    }
+    if (start === -1) return out;
+
+    const open = start + NEEDLE.length - 1;
+    const close = matchParen(blankNonCode(out), open);
+    const call = out.slice(start, close + 1);
+
+    const specMatch = call.match(/^mock\.module\(\s*(['"][^'"]+['"])/);
+    if (specMatch === null) {
+      throw new Error('mock.module with importOriginal but no literal specifier');
+    }
+    const spec = specMatch[1];
+
+    seq += 1;
+    const binding = `__knextReal${seq}`;
+
+    const rewritten = call
+      // Consume the wrapping parens of the common spread form so the output
+      // reads `...binding` rather than `...(binding)`.
+      .replace(/\(\s*await\s+importOriginal\s*(?:<[^>]*>)?\s*\(\s*\)\s*\)/g, binding)
+      // …and the bare form, for factories that assign it to a local first.
+      .replace(/await\s+importOriginal\s*(?:<[^>]*>)?\s*\(\s*\)/g, binding)
+      .replace(/async\s*\(\s*importOriginal\s*\)/, '()');
+
+    // Spread at CAPTURE time, not in the factory: a live namespace reference
+    // would resolve to the mock once it is registered.
+    if (rewritten === call) {
+      // Selected but unchanged means the next iteration selects it again.
+      // Refusing loudly beats an infinite loop, which presents as a hung
+      // process with no output — the worst thing to diagnose.
+      throw new Error(
+        `liftImportOriginal selected a mock.module call it could not rewrite: ${call.slice(0, 120)}`,
+      );
+    }
+
+    const capture = `const ${binding} = { ...(await import(${spec})) };\n`;
+    out = out.slice(0, start) + capture + rewritten + out.slice(close + 1);
+  }
+}
+
+/** Index of the `)` matching the `(` at `open`, or -1. */
+function matchParen(blanked, open) {
+  let depth = 0;
+  for (let i = open; i < blanked.length; i++) {
+    if (blanked[i] === '(') depth++;
+    else if (blanked[i] === ')') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
 }

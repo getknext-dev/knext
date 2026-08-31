@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import { buildNextAppCRObject, renderNextAppCR } from "../cli/cr-builder";
 import type { KnativeNextConfig } from "../config";
 

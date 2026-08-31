@@ -32,10 +32,10 @@
  * marking it internal under ./internal/* — this fails.
  */
 
+import { describe, expect, it } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const corePkgDir = resolve(__dirname, "../..");
@@ -43,9 +43,13 @@ const repoRoot = resolve(corePkgDir, "../..");
 const libPkgDir = resolve(repoRoot, "packages/lib");
 
 // biome-ignore lint/suspicious/noExplicitAny: reading arbitrary package.json shape
-const corePkg: any = require(resolve(corePkgDir, "package.json"));
+const corePkg: any = JSON.parse(
+    readFileSync(resolve(corePkgDir, "package.json"), "utf8"),
+);
 // biome-ignore lint/suspicious/noExplicitAny: reading arbitrary package.json shape
-const libPkg: any = require(resolve(libPkgDir, "package.json"));
+const libPkg: any = JSON.parse(
+    readFileSync(resolve(libPkgDir, "package.json"), "utf8"),
+);
 
 const PUBLIC_API_DOC = resolve(repoRoot, "docs/PUBLIC_API.md");
 const DOC = readFileSync(PUBLIC_API_DOC, "utf8");
@@ -200,10 +204,14 @@ describe("v5-P1 (#286): @getknext/lib public API is a 3-way contract", () => {
 describe("PK5: @getknext/core public API surface", () => {
     it("declares every public subpath in the exports map", () => {
         for (const sub of CORE_API.public) {
+            // `Object.keys(...)).toContain(sub)`, never `toHaveProperty(sub)`.
+            // Export keys are `"."` and `"./adapters/x"`, and bun parses a dot
+            // as a PATH separator — `toHaveProperty(".")` looks for a nested
+            // empty key and reports the subpath as missing when it is present.
             expect(
-                corePkg.exports,
+                Object.keys(corePkg.exports ?? {}),
                 `core must publicly export ${sub}`,
-            ).toHaveProperty(sub);
+            ).toContain(sub);
         }
     });
 
@@ -306,9 +314,9 @@ describe("PK5: @getknext/lib public API surface", () => {
     it("declares every public subpath in the exports map", () => {
         for (const sub of LIB_API.public) {
             expect(
-                libPkg.exports,
+                Object.keys(libPkg.exports ?? {}),
                 `lib must publicly export ${sub}`,
-            ).toHaveProperty(sub);
+            ).toContain(sub);
         }
     });
 

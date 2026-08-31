@@ -5,8 +5,8 @@
  * ephemeral port + an injected fetchChild so no real child is scraped.
  */
 
+import { afterEach, describe, expect, it, jest } from "bun:test";
 import http from "node:http";
-import { afterEach, describe, expect, it, vi } from "vitest";
 import { createLazyMetricsEndpoint } from "../adapters/deferred-supervisor-init";
 
 const endpoints: { closable: { close(cb?: () => void): void } }[] = [];
@@ -17,7 +17,7 @@ afterEach(async () => {
             .splice(0)
             .map((e) => new Promise<void>((r) => e.closable.close(() => r()))),
     );
-    vi.restoreAllMocks();
+    jest.restoreAllMocks();
 });
 
 function get(

@@ -7,38 +7,49 @@
  *  - assets are always uploaded last.
  */
 
+import {
+    afterEach,
+    beforeEach,
+    describe,
+    expect,
+    it,
+    jest,
+    mock,
+} from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BytecodePassResult } from "../adapters/standalone-bun-bytecode";
 
-const runQuiet = vi.hoisted(() => vi.fn());
-vi.mock("../cli/exec", () => ({ runQuiet, isEntrypoint: () => false }));
+const runQuiet = (() => mock())();
+mock.module("../cli/exec", () => ({ runQuiet, isEntrypoint: () => false }));
 
-const loadConfig = vi.hoisted(() => vi.fn());
-vi.mock("../cli/shared", () => ({ loadConfig }));
+const loadConfig = (() => mock())();
+mock.module("../cli/shared", () => ({ loadConfig }));
 
-const uploadAssets = vi.hoisted(() => vi.fn(async () => {}));
-vi.mock("../utils/asset-upload", async (importOriginal) => ({
+const uploadAssets = (() => mock(async () => {}))();
+const __knextReal1 = { ...(await import("../utils/asset-upload")) };
+mock.module("../utils/asset-upload", () => ({
     // keep the REAL hasStorage/notice exports (ADR-0047) — stub only the seams
-    ...(await importOriginal<object>()),
+    ...__knextReal1,
     uploadAssets,
 }));
 
-const healBunExportTargets = vi.hoisted(() =>
-    vi.fn(() => ({ copied: [], skipped: [] })),
-);
-vi.mock("../adapters/standalone-bun-exports", () => ({ healBunExportTargets }));
+const healBunExportTargets = (() =>
+    mock(() => ({ copied: [], skipped: [] })),
+)();
+mock.module("../adapters/standalone-bun-exports", () => ({
+    healBunExportTargets,
+}));
 
-const precompileBunBytecode = vi.hoisted(() =>
-    vi.fn<() => BytecodePassResult>(() => ({
+const precompileBunBytecode = (() =>
+    mock<() => BytecodePassResult>(() => ({
         compiled: 3,
         skipped: [],
         guarded: [],
     })),
-);
-vi.mock("../adapters/standalone-bun-bytecode", () => ({
+)();
+mock.module("../adapters/standalone-bun-bytecode", () => ({
     precompileBunBytecode,
 }));
 
@@ -73,7 +84,7 @@ const cfg = (over: Record<string, unknown> = {}) => ({
 beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "knext-build-"));
     process.chdir(dir);
-    vi.clearAllMocks();
+    jest.clearAllMocks();
     healBunExportTargets.mockReturnValue({ copied: [], skipped: [] });
     precompileBunBytecode.mockReturnValue({
         compiled: 3,

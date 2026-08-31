@@ -31,9 +31,9 @@
  *    wired before the spawn, and an early SIGTERM still drains the pools.
  */
 
+import { afterEach, describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
 import { drainDbPools, registerDbPoolDrain } from "../adapters/db-drain";
 import {
     createDeferredSupervisorInit,

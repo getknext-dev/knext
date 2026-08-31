@@ -26,11 +26,12 @@
  *    is off by request while the CMD still exports `NODE_COMPILE_CACHE`.
  */
 
+import { describe, expect, it, mock } from "bun:test";
 import { readFileSync } from "node:fs";
 import * as nodeModule from "node:module";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it, vi } from "vitest";
+import { NODE_BIN } from "../../../../tests/helpers/runtime-binaries";
 import {
     type CompileCacheSignals,
     evaluateCompileCacheStatus,
@@ -188,12 +189,18 @@ describe("runtimeHonoursCompileCache", () => {
 
 describe("warnOnDegradedCompileCache", () => {
     function logger() {
-        return { warn: vi.fn() };
+        return { warn: mock() };
     }
 
     it("warns ONCE, naming the path, when the cache was refused", () => {
         const log = logger();
         const status = warnOnDegradedCompileCache({
+            // Node-shaped `versions` explicitly: the default is
+            // `process.versions`, and under `bun test` that carries a `bun`
+            // key — which makes the production code return "unknown" by
+            // design. Without this the assertions below test the Bun branch
+            // while claiming to test the Node one.
+            versions: {},
             env: { NODE_COMPILE_CACHE: PVC },
             getCompileCacheDir: () => undefined,
             log,
@@ -215,6 +222,7 @@ describe("warnOnDegradedCompileCache", () => {
     it("is SILENT when the cache is active", () => {
         const log = logger();
         const status = warnOnDegradedCompileCache({
+            versions: {},
             env: { NODE_COMPILE_CACHE: PVC },
             getCompileCacheDir: () => `${PVC}/v24-arm64`,
             log,
@@ -226,6 +234,7 @@ describe("warnOnDegradedCompileCache", () => {
     it("is SILENT when NODE_COMPILE_CACHE is unset", () => {
         const log = logger();
         const status = warnOnDegradedCompileCache({
+            versions: {},
             env: {},
             getCompileCacheDir: () => undefined,
             log,
@@ -239,6 +248,7 @@ describe("warnOnDegradedCompileCache", () => {
         // REAL Bun shape is the next test — do not mistake this one for it.
         const log = logger();
         const status = warnOnDegradedCompileCache({
+            versions: {},
             env: { NODE_COMPILE_CACHE: PVC },
             getCompileCacheDir: undefined,
             log,
@@ -266,6 +276,7 @@ describe("warnOnDegradedCompileCache", () => {
     it("is SILENT when NODE_DISABLE_COMPILE_CACHE opted out", () => {
         const log = logger();
         const status = warnOnDegradedCompileCache({
+            versions: {},
             env: {
                 NODE_COMPILE_CACHE: PVC,
                 NODE_DISABLE_COMPILE_CACHE: "1",
@@ -283,6 +294,7 @@ describe("warnOnDegradedCompileCache", () => {
         for (const value of ["0", "", "false"]) {
             const log = logger();
             const status = warnOnDegradedCompileCache({
+                versions: {},
                 env: {
                     NODE_COMPILE_CACHE: PVC,
                     NODE_DISABLE_COMPILE_CACHE: value,
@@ -301,6 +313,7 @@ describe("warnOnDegradedCompileCache", () => {
         const log = logger();
         expect(() =>
             warnOnDegradedCompileCache({
+                versions: {},
                 env: { NODE_COMPILE_CACHE: PVC },
                 getCompileCacheDir: () => {
                     throw new Error("probe exploded");
@@ -321,6 +334,7 @@ describe("warnOnDegradedCompileCache", () => {
         };
         expect(() =>
             warnOnDegradedCompileCache({
+                versions: {},
                 env: { NODE_COMPILE_CACHE: PVC },
                 getCompileCacheDir: () => undefined,
                 log,
@@ -345,6 +359,7 @@ describe("warnOnDegradedCompileCache", () => {
 
         const log = logger();
         const status = warnOnDegradedCompileCache({
+            versions: {},
             env: { NODE_COMPILE_CACHE: PVC },
             log,
         });
@@ -368,6 +383,10 @@ describe("#309 node-server.ts wiring (source guard)", () => {
         // boot budget on it, which is precisely the #441 mistake.
         const stepsAt = src.indexOf("steps: [");
         const callAt = src.indexOf("warnOnDegradedCompileCache(");
+        // A search literal describing the PRODUCTION source, not code that runs
+        // here — so it stays `process.execPath`. A blanket rename to NODE_BIN
+        // rewrote this string too and the scan stopped matching, which is the
+        // same class of mistake as editing prose that merely mentions code.
         const spawnAt = src.indexOf("spawn(process.execPath");
         expect(stepsAt).toBeGreaterThan(-1);
         expect(callAt).toBeGreaterThan(-1);

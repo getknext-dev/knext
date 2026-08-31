@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import { buildNextAppCRObject } from "../cli/cr-builder";
 import { validateConfig } from "../cli/validate";
 

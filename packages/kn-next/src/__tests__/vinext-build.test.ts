@@ -10,7 +10,7 @@
  * slow artifact; rejecting 1.4+ would make the supported target unbuildable.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import {
     buildVinextExecutable,
     bunMeetsFloor,

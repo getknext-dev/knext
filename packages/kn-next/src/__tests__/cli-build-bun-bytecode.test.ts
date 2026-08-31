@@ -23,6 +23,7 @@
  *     CrashLooping mutely.
  */
 
+import { afterEach, describe, expect, it, jest, mock, spyOn } from "bun:test";
 import { spawnSync } from "node:child_process";
 import {
     existsSync,
@@ -36,13 +37,12 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
 import { precompileBunBytecode } from "../adapters/standalone-bun-bytecode";
 
 // Mutable runtime so one mock serves both gate directions.
 let mockRuntime: string | undefined = "node";
-vi.mock("../cli/shared", () => ({
-    loadConfig: vi.fn(async () => ({
+mock.module("../cli/shared", () => ({
+    loadConfig: mock(async () => ({
         name: "bytecode-test-app",
         storage: { provider: "gcs", bucket: "test-bucket" },
         cache: undefined,
@@ -56,10 +56,11 @@ vi.mock("../cli/shared", () => ({
         build: "turbopack",
     })),
 }));
-vi.mock("../utils/asset-upload", async (importOriginal) => ({
+const __knextReal1 = { ...(await import("../utils/asset-upload")) };
+mock.module("../utils/asset-upload", () => ({
     // keep the REAL hasStorage/notice exports (ADR-0047) — stub only the seams
-    ...(await importOriginal<object>()),
-    uploadAssets: vi.fn(async () => {}),
+    ...__knextReal1,
+    uploadAssets: mock(async () => {}),
 }));
 
 import { build } from "../cli/build";
@@ -91,7 +92,7 @@ function seedProject() {
 }
 
 afterEach(() => {
-    vi.restoreAllMocks();
+    jest.restoreAllMocks();
     mockRuntime = "node";
     delete process.env.KNEXT_BUN_BYTECODE;
 });
@@ -336,7 +337,7 @@ describe(
         it("does NOT run the pass for runtime=node (transformed files cannot load under Node)", async () => {
             const { projectDir, standaloneDir } = seedProject();
             mockRuntime = "node";
-            vi.spyOn(process, "cwd").mockReturnValue(projectDir);
+            spyOn(process, "cwd").mockReturnValue(projectDir);
             await build({ skipNextBuild: true });
             expect(readFileSync(join(standaloneDir, "server.js"), "utf8")).toBe(
                 CJS_SRC,
@@ -351,7 +352,7 @@ describe(
         it.skipIf(!bunAvailable)("runs the pass for runtime=bun", async () => {
             const { projectDir, standaloneDir } = seedProject();
             mockRuntime = "bun";
-            vi.spyOn(process, "cwd").mockReturnValue(projectDir);
+            spyOn(process, "cwd").mockReturnValue(projectDir);
             await build({ skipNextBuild: true });
             expect(
                 existsSync(
@@ -368,7 +369,7 @@ describe(
             const { projectDir, standaloneDir } = seedProject();
             mockRuntime = "bun";
             process.env.KNEXT_BUN_BYTECODE = "0";
-            vi.spyOn(process, "cwd").mockReturnValue(projectDir);
+            spyOn(process, "cwd").mockReturnValue(projectDir);
             await build({ skipNextBuild: true });
             expect(readFileSync(join(standaloneDir, "server.js"), "utf8")).toBe(
                 CJS_SRC,
@@ -422,7 +423,7 @@ describe(
                     "module.exports = 'bun';\n",
                 );
                 mockRuntime = "bun";
-                vi.spyOn(process, "cwd").mockReturnValue(projectDir);
+                spyOn(process, "cwd").mockReturnValue(projectDir);
                 await build({ skipNextBuild: true });
                 // heal ran: the missing bun-condition target was copied in
                 expect(

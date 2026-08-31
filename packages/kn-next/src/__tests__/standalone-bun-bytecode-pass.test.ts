@@ -12,6 +12,7 @@
  * and (as a separate "old bun" double) can fail the capability probe.
  */
 
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
     chmodSync,
     existsSync,
@@ -24,7 +25,6 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { precompileBunBytecode } from "../adapters/standalone-bun-bytecode";
 
 let root: string;

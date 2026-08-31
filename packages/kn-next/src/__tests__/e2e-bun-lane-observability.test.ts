@@ -15,11 +15,11 @@
  * teardown — failures carry the server-side exception, green files stay quiet.
  */
 
+import { describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { describe, expect, it } from "vitest";
 
 const SCRIPTS_DIR = resolve(import.meta.dirname, "../../../../scripts");
 const CLEANUP = join(SCRIPTS_DIR, "e2e-cleanup.sh");

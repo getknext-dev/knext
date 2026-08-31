@@ -14,9 +14,9 @@
  * which external series each dashboard depends on.
  */
 
+import { describe, expect, it } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
 import {
     EXPORTED_KNEXT_METRICS,
     extractKnextMetricTokens,

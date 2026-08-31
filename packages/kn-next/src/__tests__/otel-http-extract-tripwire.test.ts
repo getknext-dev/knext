@@ -1,3 +1,4 @@
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
@@ -10,7 +11,6 @@ import {
     InMemorySpanExporter,
     SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
     CorrelationContextPropagator,

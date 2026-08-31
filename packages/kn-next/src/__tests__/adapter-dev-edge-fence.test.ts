@@ -2,13 +2,14 @@
 //
 // This e2e talks to a real `next dev` child process over a socket; the repo's
 // default happy-dom environment enforces a Same-Origin Policy that blocks it.
+
+import { afterAll, describe, expect, it } from "bun:test";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
-import { afterAll, describe, expect, it } from "vitest";
 
 /**
  * #408 item 1 — the dev-phase half of the guarded-instrumentation fence

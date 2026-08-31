@@ -27,12 +27,12 @@
  * bun IS on PATH (the ordinary local case) these run regardless of the flag.
  */
 
+import { describe, expect, it } from "bun:test";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
 
 const HEALTH_MODULE = resolve(
     dirname(fileURLToPath(import.meta.url)),

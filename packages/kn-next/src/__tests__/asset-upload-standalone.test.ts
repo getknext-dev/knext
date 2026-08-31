@@ -1,15 +1,16 @@
-import { existsSync, promises as fs } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import {
     afterEach,
     beforeEach,
     describe,
     expect,
     it,
+    jest,
     type Mock,
-    vi,
-} from "vitest";
+    mock,
+} from "bun:test";
+import { existsSync, promises as fs } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 /**
  * uploadAssets must work against what `next build` (output:'standalone')
@@ -29,9 +30,9 @@ import {
  *   - stale files from a previous build's staging dir are NOT re-uploaded
  */
 
-vi.mock("../cli/exec", () => ({
-    runQuiet: vi.fn(),
-    runCapture: vi.fn(),
+mock.module("../cli/exec", () => ({
+    runQuiet: mock(),
+    runCapture: mock(),
 }));
 
 import { runCapture, runQuiet } from "../cli/exec";
@@ -96,7 +97,7 @@ describe("uploadAssets reads the standalone build output (not .output/public)", 
 
     afterEach(async () => {
         process.chdir(prevCwd);
-        vi.clearAllMocks();
+        jest.clearAllMocks();
     });
 
     it("uploads a simulated standalone build without a pre-existing .output/public (the ENOENT bug)", async () => {

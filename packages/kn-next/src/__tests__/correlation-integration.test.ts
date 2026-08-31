@@ -1,3 +1,4 @@
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { ServerResponse } from "node:http";
 import {
     CORRELATION_HEADER,
@@ -14,7 +15,6 @@ import {
     InMemorySpanExporter,
     SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
     CORRELATION_RESPONSE_INSTALLED,

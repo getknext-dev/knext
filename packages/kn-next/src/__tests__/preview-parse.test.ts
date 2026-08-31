@@ -4,7 +4,7 @@
  * the loud rejection of an unknown/missing subcommand.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import { parsePreviewArgs } from "../cli/preview";
 
 describe("parsePreviewArgs", () => {

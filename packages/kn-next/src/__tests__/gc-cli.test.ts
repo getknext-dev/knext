@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, mock } from "bun:test";
 
 /**
  * `kn-next gc` — the standalone entry point for the deploy-time asset
@@ -52,7 +52,7 @@ describe("runAssetGC", () => {
                 return ""; // no pin
             return "bid-a";
         };
-        const prune = vi.fn();
+        const prune = mock();
 
         const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
 
@@ -140,7 +140,7 @@ describe("runAssetGC", () => {
                 return ""; // no pin
             return "bid-a";
         };
-        const prune = vi.fn();
+        const prune = mock();
 
         const res = runAssetGC(
             makeConfig(),
@@ -169,7 +169,7 @@ describe("runAssetGC", () => {
             // shop-00001 resolves; shop-00002 has NO label (predates #93).
             return argv.includes("shop-00001") ? "bid-a" : "";
         };
-        const prune = vi.fn();
+        const prune = mock();
 
         const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
 
@@ -183,7 +183,7 @@ describe("runAssetGC", () => {
             if (argv.includes("nextapp")) return trafficJson(["shop-00002"]);
             throw new Error("kubectl blew up");
         };
-        const prune = vi.fn();
+        const prune = mock();
 
         const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
 
@@ -196,7 +196,7 @@ describe("runAssetGC", () => {
             throw new Error("no such nextapp");
         };
         expect(() =>
-            runAssetGC(makeConfig(), "prod", "bid-d", exec, vi.fn()),
+            runAssetGC(makeConfig(), "prod", "bid-d", exec, mock()),
         ).toThrow(/no such nextapp/);
     });
 
@@ -207,7 +207,7 @@ describe("runAssetGC", () => {
             if (argv.includes("nextapp")) return "";
             throw new Error("unexpected revision read");
         };
-        const prune = vi.fn();
+        const prune = mock();
 
         const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
 
@@ -229,7 +229,7 @@ describe("runAssetGC", () => {
                 return "shop-00007";
             throw new Error("unexpected read");
         };
-        const prune = vi.fn();
+        const prune = mock();
 
         const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
 
@@ -256,7 +256,7 @@ describe("runAssetGC", () => {
                 return "";
             throw new Error("kubectl blew up reading the spec");
         };
-        const prune = vi.fn();
+        const prune = mock();
 
         const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
 
@@ -282,7 +282,7 @@ describe("runAssetGC", () => {
             if (argv.includes("shop-00007")) return "bid-old";
             throw new Error("unexpected read");
         };
-        const prune = vi.fn();
+        const prune = mock();
 
         const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
 
@@ -319,7 +319,7 @@ describe("runAssetGC", () => {
                 return "shop-00007";
             return "bid-a";
         };
-        const prune = vi.fn();
+        const prune = mock();
 
         const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
 
@@ -348,7 +348,7 @@ describe("runAssetGC", () => {
                 return "shop-00007";
             return "bid-x"; // both revisions carry the same build
         };
-        const prune = vi.fn();
+        const prune = mock();
 
         runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
 
@@ -369,7 +369,7 @@ describe("runAssetGC", () => {
             // live revision resolves; the pinned one has NO label (or is gone).
             return argv.includes("shop-00008") ? "bid-new" : "";
         };
-        const prune = vi.fn();
+        const prune = mock();
 
         const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
 
@@ -404,7 +404,7 @@ describe("runAssetGC", () => {
                 return "bid-old";
             return "";
         };
-        const prune = vi.fn();
+        const prune = mock();
 
         const res = runAssetGC(makeConfig(), "prod", "bid-new", exec, prune);
 
@@ -424,7 +424,7 @@ describe("runAssetGC", () => {
             if (argv.includes("shop-00008")) return "bid-new";
             throw new Error("kubectl blew up on the pinned revision");
         };
-        const prune = vi.fn();
+        const prune = mock();
 
         const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
 
@@ -443,7 +443,7 @@ describe("runAssetGC", () => {
                 throw new Error("kubectl blew up reading the spec");
             return "bid-new";
         };
-        const prune = vi.fn();
+        const prune = mock();
 
         const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
 
@@ -490,7 +490,7 @@ describe("runAssetGC", () => {
                 );
             return "bid-old";
         };
-        const prune = vi.fn();
+        const prune = mock();
 
         const first = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
         expect(first.pruned).toBe(false);
@@ -523,7 +523,7 @@ describe("runAssetGC", () => {
                 throw new Error("kubectl blew up reading the spec");
             return ""; // live label unresolvable — must never be reached/win
         };
-        const prune = vi.fn();
+        const prune = mock();
 
         const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
 

@@ -12,7 +12,7 @@
  * content-type checks alone would not have caught it either.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, mock } from "bun:test";
 import {
     handleImageRequest,
     isImageRequest,
@@ -33,7 +33,7 @@ function imageRequest(
 
 /** A source that always succeeds, so a test failure means the ROUTE decided it. */
 function okSource(): (path: string) => Promise<Response> {
-    return vi.fn(
+    return mock(
         async () =>
             new Response(PNG, { headers: { "content-type": "image/png" } }),
     );

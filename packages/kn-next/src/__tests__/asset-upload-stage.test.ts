@@ -6,6 +6,7 @@
  * (a missing provider CLI is swallowed by runQuietAllowFail — no throw).
  */
 
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
     existsSync,
     mkdirSync,
@@ -16,7 +17,6 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
     BUILD_MARKER_FILENAME,
     reclaimBuildPrefix,

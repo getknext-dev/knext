@@ -15,10 +15,10 @@
  * "silent truncation reads as 'covered everything' when it didn't".
  */
 
+import { describe, expect, it } from "bun:test";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
 import {
     BUILDERS,
     type BuilderId,

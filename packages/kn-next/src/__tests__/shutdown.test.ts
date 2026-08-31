@@ -1,4 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+    afterEach,
+    beforeEach,
+    describe,
+    expect,
+    it,
+    jest,
+    mock,
+} from "bun:test";
 import {
     clearShutdownDrains,
     gracefulShutdown,
@@ -17,8 +25,8 @@ beforeEach(() => {
 function makeChild() {
     const handlers: Record<string, () => void> = {};
     return {
-        kill: vi.fn(),
-        once: vi.fn((ev: string, cb: () => void) => {
+        kill: mock(),
+        once: mock((ev: string, cb: () => void) => {
             handlers[ev] = cb;
         }),
         emitExit: () => handlers.exit?.(),
@@ -28,8 +36,8 @@ function makeChild() {
 describe("gracefulShutdown (A5 — drain on SIGTERM, no dropped requests)", () => {
     it("closes servers and FORWARDS SIGTERM to the child (so Next drains in-flight + runs after())", () => {
         const child = makeChild();
-        const closable = { close: vi.fn() };
-        const exit = vi.fn();
+        const closable = { close: mock() };
+        const exit = mock();
         gracefulShutdown("SIGTERM", {
             child,
             closables: [closable],
@@ -44,7 +52,7 @@ describe("gracefulShutdown (A5 — drain on SIGTERM, no dropped requests)", () =
 
     it("exits 0 as soon as the child exits (drain complete) — before the grace cap", () => {
         const child = makeChild();
-        const exit = vi.fn();
+        const exit = mock();
         gracefulShutdown("SIGTERM", {
             child,
             closables: [],
@@ -56,9 +64,9 @@ describe("gracefulShutdown (A5 — drain on SIGTERM, no dropped requests)", () =
     });
 
     it("force-exits at the grace cap if the child never drains", () => {
-        vi.useFakeTimers();
+        jest.useFakeTimers();
         const child = makeChild();
-        const exit = vi.fn();
+        const exit = mock();
         gracefulShutdown("SIGTERM", {
             child,
             closables: [],
@@ -66,15 +74,15 @@ describe("gracefulShutdown (A5 — drain on SIGTERM, no dropped requests)", () =
             exit,
         });
         expect(exit).not.toHaveBeenCalled();
-        vi.advanceTimersByTime(5_000);
+        jest.advanceTimersByTime(5_000);
         expect(exit).toHaveBeenCalledWith(0);
-        vi.useRealTimers();
+        jest.useRealTimers();
     });
 
     it("exits exactly once (child-exit and the cap timer never double-exit)", () => {
-        vi.useFakeTimers();
+        jest.useFakeTimers();
         const child = makeChild();
-        const exit = vi.fn();
+        const exit = mock();
         gracefulShutdown("SIGTERM", {
             child,
             closables: [],
@@ -82,9 +90,9 @@ describe("gracefulShutdown (A5 — drain on SIGTERM, no dropped requests)", () =
             exit,
         });
         child.emitExit();
-        vi.advanceTimersByTime(5_000);
+        jest.advanceTimersByTime(5_000);
         expect(exit).toHaveBeenCalledTimes(1);
-        vi.useRealTimers();
+        jest.useRealTimers();
     });
 });
 
@@ -108,7 +116,7 @@ describe("gracefulShutdown — DB drain on SIGTERM (PGS-1)", () => {
         });
 
         const child = makeChild();
-        const exit = vi.fn(() => {
+        const exit = mock(() => {
             order.push("exit");
         });
 
@@ -140,7 +148,7 @@ describe("gracefulShutdown — DB drain on SIGTERM (PGS-1)", () => {
         registerShutdownDrain(() => new Promise<void>(() => {}));
 
         const child = makeChild();
-        const exit = vi.fn();
+        const exit = mock();
         const timers: Array<{ fn: () => void; ms: number }> = [];
 
         gracefulShutdown("SIGTERM", {
@@ -169,7 +177,7 @@ describe("gracefulShutdown — DB drain on SIGTERM (PGS-1)", () => {
 
     it("still exits when no drain hook is registered (backwards compatible)", async () => {
         const child = makeChild();
-        const exit = vi.fn();
+        const exit = mock();
         gracefulShutdown("SIGTERM", {
             child,
             closables: [],

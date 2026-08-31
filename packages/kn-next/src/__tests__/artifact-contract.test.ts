@@ -12,7 +12,7 @@
  * remembered, a contract enumerates itself.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import {
     type ArtifactShape,
     AVAILABLE_BUILDERS,

@@ -36,6 +36,7 @@
  * cache" path exercised by the EACCES and read-only-dir cases below.
  */
 
+import { afterAll, describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
 import {
     chmodSync,
@@ -46,7 +47,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { NODE_BIN } from "../../../../tests/helpers/runtime-binaries";
 
 /**
  * A tiny "app": requires a second module (so there IS something for V8 to
@@ -110,7 +111,7 @@ interface BootResult {
  * failing-exit path reports it instead of hiding it.
  */
 function boot(entry: string, nodeCompileCache: string): BootResult {
-    const result = spawnSync(process.execPath, [entry], {
+    const result = spawnSync(NODE_BIN, [entry], {
         encoding: "utf8",
         env: {
             ...process.env,

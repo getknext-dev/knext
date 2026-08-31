@@ -16,16 +16,18 @@
  * RED-first: with only the CLI entries built, the library targets are missing.
  */
 
+import { describe, expect, it } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkgDir = resolve(__dirname, "../..");
 
 // biome-ignore lint/suspicious/noExplicitAny: reading arbitrary package.json shape
-const pkg: any = require(resolve(pkgDir, "package.json"));
+const pkg: any = JSON.parse(
+    readFileSync(resolve(pkgDir, "package.json"), "utf8"),
+);
 
 /** Collect every file path referenced by main/types/exports. */
 function exportTargets(): string[] {
@@ -95,9 +97,14 @@ describe("PK1: @getknext/core publish surface", () => {
             // .next/standalone exists — run 28616072395 evidence)
             "./internal/standalone-bun-exports",
         ]) {
-            expect(exp, `exports must declare ${subpath}`).toHaveProperty(
-                subpath,
-            );
+            // `Object.keys(...)).toContain(...)`, never `toHaveProperty`.
+            // Export keys carry dots and slashes, and bun parses a dot as a
+            // PATH separator — so `toHaveProperty("./x")` looks for a nested
+            // key and reports a declared subpath as missing.
+            expect(
+                Object.keys(exp ?? {}),
+                `exports must declare ${subpath}`,
+            ).toContain(subpath);
         }
     });
 

@@ -6,15 +6,23 @@
  * resolution from config when no positional is given.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+    afterEach,
+    beforeEach,
+    describe,
+    expect,
+    it,
+    jest,
+    mock,
+} from "bun:test";
 
-const runQuiet = vi.hoisted(() => vi.fn());
-vi.mock("../cli/exec", () => ({ runQuiet }));
+const runQuiet = (() => mock())();
+mock.module("../cli/exec", () => ({ runQuiet }));
 
-const loadConfig = vi.hoisted(() =>
-    vi.fn(async () => ({ name: "cfg-app", storage: {}, registry: "r" })),
-);
-vi.mock("../cli/shared", () => ({ loadConfig }));
+const loadConfig = (() =>
+    mock(async () => ({ name: "cfg-app", storage: {}, registry: "r" })),
+)();
+mock.module("../cli/shared", () => ({ loadConfig }));
 
 import { rollbackMain } from "../cli/rollback";
 
@@ -23,7 +31,7 @@ beforeEach(() => {
     loadConfig.mockClear();
 });
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => jest.restoreAllMocks());
 
 function patchOf(): Record<string, unknown> {
     const argv = runQuiet.mock.calls.at(-1)?.[0] as string[];

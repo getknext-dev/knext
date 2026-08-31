@@ -14,7 +14,7 @@
  * exited 0 the whole way while emitting a server nothing could find).
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import { checkPairing, validateConfig } from "../cli/validate";
 import type { KnativeNextConfig } from "../config";
 

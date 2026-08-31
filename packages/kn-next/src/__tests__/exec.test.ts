@@ -10,9 +10,10 @@
  * hermetic, no external binaries.
  */
 
+import { describe, expect, it } from "bun:test";
 import { realpathSync } from "node:fs";
-import { pathToFileURL } from "node:url";
-import { describe, expect, it } from "vitest";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
     isEntrypoint,
     runCapture,
@@ -97,7 +98,25 @@ describe("isEntrypoint", () => {
     });
 
     it("returns false when the module URL is a different existing file", () => {
-        expect(isEntrypoint(import.meta.url)).toBe(false);
+        // A NAMED other file, not `import.meta.url`.
+        //
+        // Under vitest `process.argv[1]` is the runner, so this file was never
+        // the entry and the old assertion held by accident. Under `bun test`
+        // argv[1] IS the test file — so `isEntrypoint(import.meta.url)` is
+        // correctly TRUE and the test failed while the code was right. It was
+        // asserting a property of the runner, not of `isEntrypoint`.
+        const other = pathToFileURL(
+            realpathSync(
+                resolve(
+                    dirname(fileURLToPath(import.meta.url)),
+                    "../cli/exec.ts",
+                ),
+            ),
+        ).href;
+        expect(other).not.toBe(
+            pathToFileURL(realpathSync(process.argv[1])).href,
+        );
+        expect(isEntrypoint(other)).toBe(false);
     });
 
     it("returns false (never throws) when the URL cannot be realpath-resolved", () => {

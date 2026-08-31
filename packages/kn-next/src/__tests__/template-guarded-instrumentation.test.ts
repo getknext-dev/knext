@@ -27,10 +27,11 @@
  * Written RED-first: none of the instrumentation template files existed before
  * #356, so every existence assertion failed.
  */
+
+import { describe, expect, it } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // packages/kn-next/src/__tests__ → repo root

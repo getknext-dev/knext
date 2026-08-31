@@ -1,15 +1,16 @@
-import { existsSync, promises as fs } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import {
     afterEach,
     beforeEach,
     describe,
     expect,
     it,
+    jest,
     type Mock,
-    vi,
-} from "vitest";
+    mock,
+} from "bun:test";
+import { existsSync, promises as fs } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 /**
  * Data-plane tests for asset upload + post-upload verification (#75).
@@ -25,9 +26,9 @@ import {
  * store are the two real data planes; the rest are thin shell-outs).
  */
 
-vi.mock("../cli/exec", () => ({
-    runQuiet: vi.fn(),
-    runCapture: vi.fn(),
+mock.module("../cli/exec", () => ({
+    runQuiet: mock(),
+    runCapture: mock(),
 }));
 
 import { runCapture, runQuiet } from "../cli/exec";
@@ -128,7 +129,7 @@ describe("uploadAssets data plane", () => {
 
     afterEach(async () => {
         process.chdir(prevCwd);
-        vi.clearAllMocks();
+        jest.clearAllMocks();
     });
 
     /** All argv arrays passed to either exec helper, for argv-shape assertions. */

@@ -4,8 +4,6 @@
  * A temp cwd UNDER the repo root keeps the dynamic import resolvable by vitest.
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import {
     afterAll,
     afterEach,
@@ -14,7 +12,9 @@ import {
     describe,
     expect,
     it,
-} from "vitest";
+} from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { excerpt, loadConfig } from "../cli/shared";
 
 const tmpRoot = join(import.meta.dirname, ".shared-tmp");

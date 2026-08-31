@@ -1,6 +1,6 @@
+import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
 import { ConfigValidationError, validateConfig } from "../cli/validate";
 import type { KnativeNextConfig } from "../config";
 

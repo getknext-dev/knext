@@ -29,6 +29,7 @@
  *      mutation target: delete the COPY and this file goes red).
  */
 
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import {
     mkdirSync,
     mkdtempSync,
@@ -37,7 +38,6 @@ import {
     writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildNextAppCRObject } from "../cli/cr-builder";
 import { writeScaffold } from "../cli/create";
 import type { KubectlFn } from "../cli/doctor";

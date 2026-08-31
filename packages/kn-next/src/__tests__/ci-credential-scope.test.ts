@@ -14,7 +14,7 @@
  * preflight refuses the only credential the docs tell people to create, which
  * is a different way of being useless).
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import {
     CI_ROLE_RULES,
     classifyCredentialScope,
