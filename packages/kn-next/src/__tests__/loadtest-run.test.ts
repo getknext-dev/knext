@@ -11,10 +11,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const execFileSync = (() =>
-    mock<(cmd: string, args: readonly string[], opts?: unknown) => Buffer>(
-        () => Buffer.from(""),
-    ),
-)();
+    mock<(cmd: string, args: readonly string[], opts?: unknown) => Buffer>(() =>
+        Buffer.from(""),
+    ))();
 const __knextReal1 = { ...(await import("node:child_process")) };
 mock.module("node:child_process", async () => {
     const actual = __knextReal1;

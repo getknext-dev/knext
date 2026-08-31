@@ -45,8 +45,7 @@ mock.module("../cli/shared", () => ({
 const runQuiet = (() => mock())();
 const runCapture = (() => mock(() => ""))();
 const kubectlMock = (() =>
-    mock(() => ({ ok: false, stdout: "", stderr: "" })),
-)();
+    mock(() => ({ ok: false, stdout: "", stderr: "" })))();
 const __knextReal2 = { ...(await import("../cli/doctor")) };
 mock.module("../cli/doctor", () => ({
     ...__knextReal2,

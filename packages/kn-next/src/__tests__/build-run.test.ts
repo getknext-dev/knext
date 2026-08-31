@@ -36,8 +36,7 @@ mock.module("../utils/asset-upload", () => ({
 }));
 
 const healBunExportTargets = (() =>
-    mock(() => ({ copied: [], skipped: [] })),
-)();
+    mock(() => ({ copied: [], skipped: [] })))();
 mock.module("../adapters/standalone-bun-exports", () => ({
     healBunExportTargets,
 }));
@@ -47,8 +46,7 @@ const precompileBunBytecode = (() =>
         compiled: 3,
         skipped: [],
         guarded: [],
-    })),
-)();
+    })))();
 mock.module("../adapters/standalone-bun-bytecode", () => ({
     precompileBunBytecode,
 }));

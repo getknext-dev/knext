@@ -20,8 +20,7 @@ const runQuiet = (() => mock())();
 mock.module("../cli/exec", () => ({ runQuiet }));
 
 const loadConfig = (() =>
-    mock(async () => ({ name: "cfg-app", storage: {}, registry: "r" })),
-)();
+    mock(async () => ({ name: "cfg-app", storage: {}, registry: "r" })))();
 mock.module("../cli/shared", () => ({ loadConfig }));
 
 import { rollbackMain } from "../cli/rollback";

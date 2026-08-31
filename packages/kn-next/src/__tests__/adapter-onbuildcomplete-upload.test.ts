@@ -37,8 +37,7 @@ const putObject = (() =>
                 stream.on("end", () => resolvePromise({}));
                 stream.resume();
             }),
-    ),
-)();
+    ))();
 const getMinioClient = (() => mock(() => ({ putObject })))();
 
 mock.module("@getknext/lib/clients", () => ({ getMinioClient }));

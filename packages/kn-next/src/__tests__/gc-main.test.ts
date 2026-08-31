@@ -44,8 +44,7 @@ const pruneOldBuilds = (() =>
         keptUnmarked: [],
         reservedExcluded: [],
         dryRun: false,
-    })),
-)();
+    })))();
 const __knextReal2 = { ...(await import("../utils/asset-upload")) };
 mock.module("../utils/asset-upload", async () => {
     const actual = __knextReal2;
