@@ -330,7 +330,11 @@ export function liftImportOriginal(src) {
       .replace(/\(\s*await\s+importOriginal\s*(?:<[^>]*>)?\s*\(\s*\)\s*\)/g, binding)
       // …and the bare form, for factories that assign it to a local first.
       .replace(/await\s+importOriginal\s*(?:<[^>]*>)?\s*\(\s*\)/g, binding)
-      .replace(/async\s*\(\s*importOriginal\s*\)/, '()');
+      // Keep `async`. Dropping it saved nothing and broke every factory whose
+      // body still awaits something else — `await import("node:module")` inside
+      // one of these is common — with `"await" can only be used inside an
+      // "async" function`, an error about the transform pointing at the test.
+      .replace(/async\s*\(\s*importOriginal\s*\)/, 'async ()');
 
     // Spread at CAPTURE time, not in the factory: a live namespace reference
     // would resolve to the mock once it is registered.

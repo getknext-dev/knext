@@ -16,7 +16,7 @@ const execFileSync = (() =>
     ),
 )();
 const __knextReal1 = { ...(await import("node:child_process")) };
-mock.module("node:child_process", () => {
+mock.module("node:child_process", async () => {
     const actual = __knextReal1;
     const overridden = { ...actual, execFileSync };
     return {

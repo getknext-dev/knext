@@ -12,7 +12,7 @@ import { join } from "node:path";
 
 const execFileSync = (() => mock(() => Buffer.from("")))();
 const __knextReal1 = { ...(await import("node:child_process")) };
-mock.module("node:child_process", () => {
+mock.module("node:child_process", async () => {
     const actual = __knextReal1;
     const o = { ...actual, execFileSync };
     return {

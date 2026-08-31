@@ -40,7 +40,7 @@ const pruneOldBuilds = (() =>
     })),
 )();
 const __knextReal2 = { ...(await import("../utils/asset-upload")) };
-mock.module("../utils/asset-upload", () => {
+mock.module("../utils/asset-upload", async () => {
     const actual = __knextReal2;
     return { ...actual, pruneOldBuilds };
 });

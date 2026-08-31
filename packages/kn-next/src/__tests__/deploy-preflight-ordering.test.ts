@@ -19,10 +19,18 @@
  * so this also covers the classification path end-to-end from deploy's side.
  */
 
+import {
+    afterEach,
+    beforeEach,
+    describe,
+    expect,
+    it,
+    jest,
+    mock,
+} from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { KnativeNextConfig } from "../config";
 
 type AnyFn = (...args: unknown[]) => unknown;
@@ -32,46 +40,59 @@ const effects: string[] = [];
 /** The fake bucket. If this is non-empty after a failed deploy, T6 has failed. */
 const bucket: string[] = [];
 
-const runQuiet = vi.fn<AnyFn>(() => {
+const runQuiet = mock<AnyFn>(() => {
     effects.push("next-build");
 });
-const runInherit = vi.fn<AnyFn>((argv: unknown) => {
+const runInherit = mock<AnyFn>((argv: unknown) => {
     const a = argv as string[];
     effects.push(a[0] === "docker" ? "docker-build-push" : `${a[0]} ${a[1]}`);
 });
 /** `docker inspect` (digest resolution) and the post-apply status read. */
-const runCapture = vi.fn<AnyFn>((argv: unknown) =>
+const runCapture = mock<AnyFn>((argv: unknown) =>
     (argv as string[])[0] === "docker"
         ? `registry.example.com/my-app@sha256:${"a".repeat(64)}`
         : "",
 );
-const isEntrypoint = vi.fn<AnyFn>(() => false);
+const isEntrypoint = mock<AnyFn>(() => false);
 
-vi.mock("../cli/exec", () => ({
+// `createRequire` and the REAL `node:fs` are resolved OUT HERE, not inside the
+// `mock.module("node:fs", …)` factory below.
+//
+// An `await import(...)` inside a mock factory deadlocks under bun: the mock is
+// already registered when the factory runs, so the import re-enters module
+// resolution and waits on itself. The file does not fail — it HANGS with no
+// output, which the runner can only report as a timeout naming no test.
+const { createRequire: __knextCreateRequire } = await import("node:module");
+const __knextRealFs = __knextCreateRequire(import.meta.url)(
+    "node:fs",
+) as typeof import("node:fs");
+
+mock.module("../cli/exec", () => ({
     runQuiet: (...a: unknown[]) => runQuiet(...a),
     runInherit: (...a: unknown[]) => runInherit(...a),
     runCapture: (...a: unknown[]) => runCapture(...a),
-    runQuietAllowFail: vi.fn(),
+    runQuietAllowFail: mock(),
     isEntrypoint: (...a: unknown[]) => isEntrypoint(...a),
 }));
 
-const uploadAssets = vi.fn<AnyFn>(async () => {
+const uploadAssets = mock<AnyFn>(async () => {
     effects.push("upload-assets");
     bucket.push("_next/static/deploytag/chunk.js");
 });
-const getAssetPrefix = vi.fn<AnyFn>(() => "https://cdn.example.com/_next");
-const reclaimBuildPrefix = vi.fn<AnyFn>();
+const getAssetPrefix = mock<AnyFn>(() => "https://cdn.example.com/_next");
+const reclaimBuildPrefix = mock<AnyFn>();
 
-vi.mock("../utils/asset-upload", async (importOriginal) => ({
+const __knextReal1 = { ...(await import("../utils/asset-upload")) };
+mock.module("../utils/asset-upload", () => ({
     // keep the REAL hasStorage/notice exports (ADR-0047) — stub only the seams
-    ...(await importOriginal<object>()),
+    ...__knextReal1,
     uploadAssets: (...a: unknown[]) => uploadAssets(...a),
     getAssetPrefix: (...a: unknown[]) => getAssetPrefix(...a),
     reclaimBuildPrefix: (...a: unknown[]) => reclaimBuildPrefix(...a),
 }));
 
 /** The kubectl boundary the preflight uses. Driven per-test. */
-const kubectl = vi.fn<
+const kubectl = mock<
     (argv: readonly string[]) => {
         ok: boolean;
         stdout: string;
@@ -79,7 +100,7 @@ const kubectl = vi.fn<
     }
 >(() => ({ ok: true, stdout: "", stderr: "" }));
 
-vi.mock("../cli/schema/kubectl-capture", () => ({
+mock.module("../cli/schema/kubectl-capture", () => ({
     captureKubectl: (argv: readonly string[]) => {
         effects.push(
             `kubectl ${argv[1]}${argv.includes("--dry-run=server") ? " --dry-run=server" : ""}`,
@@ -88,9 +109,9 @@ vi.mock("../cli/schema/kubectl-capture", () => ({
     },
 }));
 
-vi.mock("../cli/gc", () => ({
-    runAssetGC: vi.fn(() => ({ pruned: true })),
-    gcMain: vi.fn(),
+mock.module("../cli/gc", () => ({
+    runAssetGC: mock(() => ({ pruned: true })),
+    gcMain: mock(),
 }));
 
 const baseConfig: KnativeNextConfig = {
@@ -108,8 +129,18 @@ const baseConfig: KnativeNextConfig = {
     scaling: { minScale: 0, maxScale: 5 },
 };
 
-const loadConfig = vi.fn<AnyFn>(async () => baseConfig);
-vi.mock("../cli/shared", () => ({
+const loadConfig = mock<AnyFn>(async () => baseConfig);
+// The REAL module is spread first, then overridden.
+//
+// bun replaces a mocked module WHOLESALE — there is no partial/automock — so a
+// factory listing only what the test drives drops every other export, and the
+// importer dies with `Export named 'handleUsageError' not found in module`.
+// That error names the consumer, not this factory, which is what made it slow
+// to place. Spreading keeps the file honest as `../cli/shared` grows.
+const __knextRealShared = { ...(await import("../cli/shared")) };
+
+mock.module("../cli/shared", () => ({
+    ...__knextRealShared,
     loadConfig: (...a: unknown[]) => loadConfig(...a),
     excerpt: (s: string) => s,
     // placeholder-preflight.ts (imported by deploy.ts) extends UsageError at
@@ -117,27 +148,25 @@ vi.mock("../cli/shared", () => ({
     UsageError: class MockUsageError extends Error {},
 }));
 
-const readFileSyncMock = vi.fn<(...a: unknown[]) => string>(() => "deploytag");
-vi.mock("node:fs", async (importOriginal) => {
-    const actual = await importOriginal<typeof import("node:fs")>();
+const readFileSyncMock = mock<(...a: unknown[]) => string>(() => "deploytag");
+const __knextReal2 = { ...(await import("node:fs")) };
+mock.module("node:fs", async () => {
+    const actual = __knextReal2;
     // #644: deploy now infers the docker build context from the real
     // filesystem (the lockfile walk in tracing-root.ts). Spreading
     // `importOriginal()` does NOT carry node-builtin named exports under
     // vitest, so every fs function the code touches must be listed here —
     // `existsSync` is passed through to the REAL one rather than stubbed, so
     // the walk still answers about the actual tree.
-    const { createRequire } = await import("node:module");
-    const realFs = createRequire(import.meta.url)(
-        "node:fs",
-    ) as typeof import("node:fs");
+    const realFs = __knextRealFs;
     const overrides = {
         existsSync: realFs.existsSync,
         // This suite also uses mkdtempSync itself (the lockfile-free cwd).
         mkdtempSync: realFs.mkdtempSync,
         readFileSync: (...a: unknown[]) => readFileSyncMock(...(a as [string])),
-        writeFileSync: vi.fn(),
-        mkdirSync: vi.fn(),
-        writeSync: vi.fn(),
+        writeFileSync: mock(),
+        mkdirSync: mock(),
+        writeSync: mock(),
     };
     return {
         ...actual,
@@ -160,8 +189,11 @@ function setArgv(flags: string[]): void {
 }
 
 beforeEach(() => {
-    vi.resetModules();
-    vi.clearAllMocks();
+    // No `resetModules()`: everything this file varies goes through the mocks
+    // cleared on the next line and the fixtures set below. bun has no registry
+    // reset, and the deploy path holds no module state of its own — it reads
+    // config and calls injected collaborators.
+    jest.clearAllMocks();
     effects.length = 0;
     bucket.length = 0;
     kubectl.mockReturnValue({ ok: true, stdout: "", stderr: "" });

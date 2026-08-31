@@ -183,7 +183,10 @@ const savedArgv = process.argv;
 const savedEnv = { ...process.env };
 
 beforeEach(() => {
-    vi.resetModules();
+    // No `resetModules()`: everything this file varies goes through the mocks
+    // cleared on the next line and the fixtures set below. bun has no registry
+    // reset, and the deploy path holds no module state of its own — it reads
+    // config and calls injected collaborators.
     vi.clearAllMocks();
     runCapture.mockReturnValue("");
     resolveDigest.mockResolvedValue(
