@@ -33,6 +33,25 @@ export function trackCacheMiss(duration: number): void {
   globalThis.cacheStats.fetchDuration = duration;
 }
 
+/**
+ * Reset the counters (tests only).
+ *
+ * The explicit replacement for `vi.resetModules()`, which bun has no equivalent
+ * of. Worth noting that `resetModules` never reset this either: the state lives
+ * on `globalThis` behind an `if (!globalThis.cacheStats)` init guard, so
+ * re-evaluating the module found the object already there and left it alone.
+ * The test's comment claimed otherwise, so any case that appeared to depend on
+ * a reset was actually reading accumulated counts.
+ */
+export function resetCacheStats(): void {
+  globalThis.cacheStats = {
+    hits: 0,
+    misses: 0,
+    lastFetch: null,
+    fetchDuration: null,
+  };
+}
+
 export function getCacheStats() {
   return globalThis.cacheStats;
 }

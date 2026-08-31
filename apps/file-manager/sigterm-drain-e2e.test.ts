@@ -4,12 +4,13 @@
 // repo's default `apps` project runs happy-dom, whose fetch enforces a
 // Same-Origin Policy that blocks those calls. Force the node environment so the
 // drain proof exercises real sockets, not a DOM fetch shim.
+
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
 import { spawn, spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 // Shared port plumbing (#678). waitForListeningPort REJECTS — promptly, with the
 // child's stderr — when the runtime entry exits early (the MODULE_NOT_FOUND

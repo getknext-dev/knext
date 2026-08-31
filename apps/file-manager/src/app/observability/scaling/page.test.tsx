@@ -1,7 +1,7 @@
+import { afterEach, beforeEach, describe, expect, it, jest, mock, spyOn } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { APP_NAME_ENV, PROMETHEUS_URL_ENV, scalingQueries } from '../_prom/query';
 import { NO_DATA, UNAVAILABLE } from '../_ui/format';
 
@@ -28,9 +28,9 @@ import { NO_DATA, UNAVAILABLE } from '../_ui/format';
 // it. `_ui/access-denied.test.tsx` asserts the app really enables the flag.
 process.env.__NEXT_EXPERIMENTAL_AUTH_INTERRUPTS = '1';
 
-const authHeader = vi.fn<() => string | null>(() => null);
+const authHeader = mock<() => string | null>(() => null);
 
-vi.mock('next/headers', () => ({
+mock.module('next/headers', () => ({
   headers: async () => ({
     get: (name: string) => (name === 'authorization' ? authHeader() : null),
   }),
@@ -132,7 +132,7 @@ function seededFetch(url: unknown, opts: SeedOptions = {}): Response {
 }
 
 function mockFetch(opts: SeedOptions = {}) {
-  return vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => seededFetch(u, opts));
+  return spyOn(globalThis, 'fetch').mockImplementation(async (u) => seededFetch(u, opts));
 }
 
 /** Every PromQL string this render actually sent to Prometheus. */
@@ -151,8 +151,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  vi.restoreAllMocks();
-  vi.clearAllMocks();
+  jest.restoreAllMocks();
+  jest.clearAllMocks();
   if (ORIGINAL_TOKEN === undefined) delete process.env.OBSERVABILITY_TOKEN;
   else process.env.OBSERVABILITY_TOKEN = ORIGINAL_TOKEN;
   if (ORIGINAL_URL === undefined) delete process.env[PROMETHEUS_URL_ENV];
@@ -192,7 +192,7 @@ describe('scaling page route config', () => {
 describe('scaling page auth gate (fail-closed)', () => {
   it('denies with a real 401, leaks no data, and does NOT fetch', async () => {
     authHeader.mockReturnValue(null);
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const fetchSpy = spyOn(globalThis, 'fetch');
 
     expect(await denialDigest()).toBe(UNAUTHORIZED_DIGEST);
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -215,7 +215,7 @@ describe('scaling page auth gate (fail-closed)', () => {
 describe('scaling page degradation — unconfigured Prometheus', () => {
   it('renders a "not configured" empty state naming the env var, without fetching', async () => {
     delete process.env[PROMETHEUS_URL_ENV];
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const fetchSpy = spyOn(globalThis, 'fetch');
 
     const html = await renderPage();
 
@@ -227,7 +227,7 @@ describe('scaling page degradation — unconfigured Prometheus', () => {
 
 describe('scaling page degradation — unreachable Prometheus', () => {
   it('renders an error state but the page still renders (no crash)', async () => {
-    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('connect ECONNREFUSED'));
+    spyOn(globalThis, 'fetch').mockRejectedValue(new Error('connect ECONNREFUSED'));
 
     const html = await renderPage();
 
@@ -341,7 +341,7 @@ describe('scaling page — every query is scoped to THIS app (#516 review)', () 
 
   it('renders a DISTINCT "scope unknown" state when KN_APP_NAME is unset — and does NOT fetch', async () => {
     delete process.env[APP_NAME_ENV];
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const fetchSpy = spyOn(globalThis, 'fetch');
 
     const html = await renderPage();
 
@@ -354,7 +354,7 @@ describe('scaling page — every query is scoped to THIS app (#516 review)', () 
 
   it('treats an injection-shaped KN_APP_NAME as unknown scope (no PromQL built from it)', async () => {
     process.env[APP_NAME_ENV] = 'demo"} or on() up{';
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const fetchSpy = spyOn(globalThis, 'fetch');
 
     const html = await renderPage();
 
@@ -376,7 +376,7 @@ describe('scaling page — warm-start ratio (plan §5.3 AC)', () => {
 
 describe('scaling page — partial Prometheus failure ≠ no data', () => {
   it('marks the failed panel unavailable while healthy panels still render', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
+    spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
       if (String(u).includes('knext_coldstart')) {
         throw new Error('connect ECONNREFUSED');
       }

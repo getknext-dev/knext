@@ -4,12 +4,13 @@
 // timing; the repo's default `apps` project runs happy-dom, whose fetch/timers
 // are DOM shims. Force the node environment so the hard-cap proof exercises the
 // real spawned runtime entry, real signals, and real process exit.
+
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
 import { spawn, spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 // Shared port plumbing (#678). waitForListeningPort REJECTS — promptly, with the
 // child's stderr — when the runtime entry exits early or never announces a port,

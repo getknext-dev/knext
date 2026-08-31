@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import { httpRequestDuration, httpRequestsTotal, observeHttpRequest, register } from './registry';
 
 /**

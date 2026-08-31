@@ -13,10 +13,10 @@
  * gate here (fast static analysis), not the deploy build.
  */
 
+import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const instrumentationSrc = readFileSync(join(here, 'src', 'instrumentation.ts'), 'utf8');

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import { isAuthorized } from './auth';
 
 const TOKEN = 's3cr3t-invalidate-token';

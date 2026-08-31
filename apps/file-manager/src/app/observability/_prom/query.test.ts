@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, jest, mock, spyOn } from 'bun:test';
 import {
   APP_NAME_ENV,
   APP_NAMESPACE_ENV,
@@ -50,7 +50,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  vi.restoreAllMocks();
+  jest.restoreAllMocks();
   if (ORIGINAL === undefined) delete process.env[PROMETHEUS_URL_ENV];
   else process.env[PROMETHEUS_URL_ENV] = ORIGINAL;
 });
@@ -69,7 +69,7 @@ describe('prometheusBaseUrl', () => {
 describe('query util — unconfigured (env unset)', () => {
   it('returns a typed unconfigured result and does NOT fetch', async () => {
     delete process.env[PROMETHEUS_URL_ENV];
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const fetchSpy = spyOn(globalThis, 'fetch');
 
     const range = await queryRange('up', 0, 60, 15);
     const instant = await queryInstant('up');
@@ -100,7 +100,7 @@ describe('query util — ok path', () => {
         ],
       },
     };
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse(payload));
+    spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse(payload));
 
     const r = await queryRange('sum(rate(x[5m]))', 0, 60, 15);
     expect(r.status).toBe('ok');
@@ -115,7 +115,7 @@ describe('query util — ok path', () => {
         result: [{ metric: {}, value: [123, '7'] }],
       },
     };
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse(payload));
+    spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse(payload));
 
     const r = await queryInstant('sum(x)');
     expect(r.status).toBe('ok');
@@ -123,11 +123,9 @@ describe('query util — ok path', () => {
   });
 
   it('fetches uncached (no-store) with an abort signal, hitting the query_range API', async () => {
-    const spy = vi
-      .spyOn(globalThis, 'fetch')
-      .mockResolvedValue(
-        jsonResponse({ status: 'success', data: { resultType: 'matrix', result: [] } }),
-      );
+    const spy = spyOn(globalThis, 'fetch').mockResolvedValue(
+      jsonResponse({ status: 'success', data: { resultType: 'matrix', result: [] } }),
+    );
 
     await queryRange('up', 10, 70, 15);
 
@@ -142,9 +140,7 @@ describe('query util — ok path', () => {
 
 describe('query util — degradation (unreachable)', () => {
   it('degrades to unreachable when fetch rejects, leaking no raw error object', async () => {
-    vi.spyOn(globalThis, 'fetch').mockRejectedValue(
-      new Error('connect ECONNREFUSED 10.4.2.7:9090'),
-    );
+    spyOn(globalThis, 'fetch').mockRejectedValue(new Error('connect ECONNREFUSED 10.4.2.7:9090'));
 
     const r = await queryRange('up', 0, 60, 15);
     expect(r.status).toBe('unreachable');
@@ -158,14 +154,14 @@ describe('query util — degradation (unreachable)', () => {
   });
 
   it('degrades to unreachable on a non-2xx response', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('boom', { status: 503 }));
+    spyOn(globalThis, 'fetch').mockResolvedValue(new Response('boom', { status: 503 }));
     const r = await queryInstant('up');
     expect(r.status).toBe('unreachable');
     expect(instantValue(r)).toBeNull();
   });
 
   it('degrades to unreachable on a Prometheus error envelope', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+    spyOn(globalThis, 'fetch').mockResolvedValue(
       jsonResponse({ status: 'error', errorType: 'bad_data', error: 'parse error' }),
     );
     const r = await queryRange('up{', 0, 60, 15);
@@ -173,7 +169,7 @@ describe('query util — degradation (unreachable)', () => {
   });
 
   it('never throws — a rejecting fetch resolves to a typed result', async () => {
-    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('boom'));
+    spyOn(globalThis, 'fetch').mockRejectedValue(new Error('boom'));
     await expect(queryInstant('up')).resolves.toMatchObject({ status: 'unreachable' });
   });
 });
@@ -527,7 +523,7 @@ describe('startPageDeadline — one shared budget, not a per-call sum', () => {
   });
 
   it('does NOT fetch at all once the budget is gone, returning a typed deadline result', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const fetchSpy = spyOn(globalThis, 'fetch');
     let now = 0;
     const deadline = startPageDeadline(4000, () => now);
     now = 4000;
@@ -548,7 +544,7 @@ describe('startPageDeadline — one shared budget, not a per-call sum', () => {
     // A hung Prometheus: the request ends only when its signal aborts. Under the
     // per-call 4 s budget that takes ~4 s and reports "unreachable"; with a 30 ms
     // shared budget left it must end in ~30 ms and say "deadline".
-    vi.spyOn(globalThis, 'fetch').mockImplementation(
+    spyOn(globalThis, 'fetch').mockImplementation(
       (_url, init) =>
         new Promise((_resolve, reject) => {
           init?.signal?.addEventListener('abort', () =>
@@ -578,7 +574,7 @@ describe('startPageDeadline — one shared budget, not a per-call sum', () => {
    * asserts that Prometheus is down when only the page's own budget expired.
    */
   it('attributes a deadline-bounded abort to the deadline even when the clock still shows budget left', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(
+    spyOn(globalThis, 'fetch').mockImplementation(
       (_url, init) =>
         new Promise((_resolve, reject) => {
           init?.signal?.addEventListener('abort', () =>
@@ -603,7 +599,7 @@ describe('startPageDeadline — one shared budget, not a per-call sum', () => {
   });
 
   it('leaves attribution to the per-call budget when the deadline is NOT the binding bound', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(
+    spyOn(globalThis, 'fetch').mockImplementation(
       (_url, init) =>
         new Promise((_resolve, reject) => {
           init?.signal?.addEventListener('abort', () =>
@@ -623,7 +619,7 @@ describe('startPageDeadline — one shared budget, not a per-call sum', () => {
   });
 
   it('still reports an abort that is not the deadline as unreachable', async () => {
-    vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+    spyOn(globalThis, 'fetch').mockRejectedValue(
       new DOMException('The operation was aborted', 'AbortError'),
     );
     let now = 0;
@@ -636,7 +632,7 @@ describe('startPageDeadline — one shared budget, not a per-call sum', () => {
   });
 
   it('changes nothing for callers that pass no deadline (the other pages)', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+    spyOn(globalThis, 'fetch').mockResolvedValue(
       jsonResponse({ status: 'success', data: { resultType: 'vector', result: [] } }),
     );
     const r = await queryInstant('up');
@@ -716,7 +712,7 @@ describe('startPageDeadline — a reserved slice the ordinary reads cannot spend
    * `totalMs` stays the ceiling for messaging about the page as a whole.
    */
   it('reports the bound that applied to the READ, not the page ceiling, when an ordinary read runs out', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const fetchSpy = spyOn(globalThis, 'fetch');
     let now = 0;
     const deadline = startPageDeadline(4000, () => now, 500);
     now = 4000;
@@ -741,7 +737,7 @@ describe('startPageDeadline — a reserved slice the ordinary reads cannot spend
   });
 
   it('reports the applied bound for a read the deadline CUT SHORT, too', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(
+    spyOn(globalThis, 'fetch').mockImplementation(
       (_url, init) =>
         new Promise((_resolve, reject) => {
           init?.signal?.addEventListener('abort', () =>
@@ -761,11 +757,9 @@ describe('startPageDeadline — a reserved slice the ordinary reads cannot spend
   });
 
   it('lets a reserved query run when the ordinary share is spent, and reports the ceiling when even the reserve is gone', async () => {
-    const fetchSpy = vi
-      .spyOn(globalThis, 'fetch')
-      .mockResolvedValue(
-        jsonResponse({ status: 'success', data: { resultType: 'vector', result: [] } }),
-      );
+    const fetchSpy = spyOn(globalThis, 'fetch').mockResolvedValue(
+      jsonResponse({ status: 'success', data: { resultType: 'vector', result: [] } }),
+    );
     let now = 0;
     const deadline = startPageDeadline(4000, () => now, 500);
     now = 4000; // the ordinary wave spent its whole share

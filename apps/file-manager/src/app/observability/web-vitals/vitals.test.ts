@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'bun:test';
 import { observeWebVital, register } from '../../api/_metrics/registry';
 import { CORE_WEB_VITALS, computeVitalsSummary } from './vitals';
 

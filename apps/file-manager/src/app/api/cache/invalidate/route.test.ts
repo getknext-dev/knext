@@ -1,8 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 
 // revalidateTag touches Next.js internals that aren't available outside a
 // running server; stub it so we can exercise the authorized POST path.
-vi.mock('next/cache', () => ({ revalidateTag: vi.fn() }));
+mock.module('next/cache', () => ({ revalidateTag: mock() }));
 
 import * as route from './route';
 import { POST } from './route';

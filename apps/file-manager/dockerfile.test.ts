@@ -13,9 +13,9 @@
  * substrings in isolation.
  */
 
+import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
 
 const DF = readFileSync(join(import.meta.dirname, 'Dockerfile'), 'utf8');
 const lineOf = (needle: string): number => DF.split('\n').findIndex((l) => l.includes(needle));

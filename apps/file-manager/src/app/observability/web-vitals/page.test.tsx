@@ -1,5 +1,5 @@
+import { afterEach, beforeEach, describe, expect, it, jest, mock } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { observeWebVital, register } from '../../api/_metrics/registry';
 import { NO_DATA } from '../_ui/format';
 
@@ -16,9 +16,9 @@ import { NO_DATA } from '../_ui/format';
 // it. `_ui/access-denied.test.tsx` asserts the app really enables the flag.
 process.env.__NEXT_EXPERIMENTAL_AUTH_INTERRUPTS = '1';
 
-const authHeader = vi.fn<() => string | null>(() => null);
+const authHeader = mock<() => string | null>(() => null);
 
-vi.mock('next/headers', () => ({
+mock.module('next/headers', () => ({
   headers: async () => ({
     get: (name: string) => (name === 'authorization' ? authHeader() : null),
   }),
@@ -33,7 +33,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  vi.clearAllMocks();
+  jest.clearAllMocks();
   if (ORIGINAL === undefined) delete process.env.OBSERVABILITY_TOKEN;
   else process.env.OBSERVABILITY_TOKEN = ORIGINAL;
 });

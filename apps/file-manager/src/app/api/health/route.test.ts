@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 
 /**
  * #338 — the /api/health route backs the Knative readiness + liveness probes.
@@ -9,12 +9,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // If the route ever imports the deep check it would pull these; make them throw
 // so a regression to a deep probe is caught.
-const pgQuery = vi.fn(() => Promise.reject(new Error('readiness must not dial pg')));
-const redisPing = vi.fn(() => Promise.reject(new Error('readiness must not dial redis')));
-vi.mock('@getknext/lib/clients', () => ({
+const pgQuery = mock(() => Promise.reject(new Error('readiness must not dial pg')));
+const redisPing = mock(() => Promise.reject(new Error('readiness must not dial redis')));
+mock.module('@getknext/lib/clients', () => ({
   getDbPool: () => ({ query: pgQuery }),
 }));
-vi.mock('ioredis', () => ({
+mock.module('ioredis', () => ({
   default: class {
     ping() {
       return redisPing();

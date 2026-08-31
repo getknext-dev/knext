@@ -1,7 +1,7 @@
+import { afterEach, beforeEach, describe, expect, it, jest, mock, spyOn } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { APP_NAME_ENV, overviewQueries, PROMETHEUS_URL_ENV } from './_prom/query';
 import { NO_DATA } from './_ui/format';
 
@@ -21,9 +21,9 @@ import { NO_DATA } from './_ui/format';
 // it. `_ui/access-denied.test.tsx` asserts the app really enables the flag.
 process.env.__NEXT_EXPERIMENTAL_AUTH_INTERRUPTS = '1';
 
-const authHeader = vi.fn<() => string | null>(() => null);
+const authHeader = mock<() => string | null>(() => null);
 
-vi.mock('next/headers', () => ({
+mock.module('next/headers', () => ({
   headers: async () => ({
     get: (name: string) => (name === 'authorization' ? authHeader() : null),
   }),
@@ -78,8 +78,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  vi.restoreAllMocks();
-  vi.clearAllMocks();
+  jest.restoreAllMocks();
+  jest.clearAllMocks();
   if (ORIGINAL_TOKEN === undefined) delete process.env.OBSERVABILITY_TOKEN;
   else process.env.OBSERVABILITY_TOKEN = ORIGINAL_TOKEN;
   if (ORIGINAL_URL === undefined) delete process.env[PROMETHEUS_URL_ENV];
@@ -119,7 +119,7 @@ describe('overview page route config', () => {
 describe('overview page auth gate (fail-closed)', () => {
   it('denies with a real 401, leaks no data, and does NOT fetch', async () => {
     authHeader.mockReturnValue(null);
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const fetchSpy = spyOn(globalThis, 'fetch');
 
     expect(await denialDigest()).toBe(UNAUTHORIZED_DIGEST);
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -132,7 +132,7 @@ describe('overview page auth gate (fail-closed)', () => {
   });
 
   it('never renders the token into the HTML', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => seededFetch(u));
+    spyOn(globalThis, 'fetch').mockImplementation(async (u) => seededFetch(u));
     const html = await renderPage();
     expect(html).not.toContain(TOKEN);
   });
@@ -141,7 +141,7 @@ describe('overview page auth gate (fail-closed)', () => {
 describe('overview page degradation — unconfigured Prometheus', () => {
   it('renders a "not configured" empty state naming the env var, without fetching', async () => {
     delete process.env[PROMETHEUS_URL_ENV];
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const fetchSpy = spyOn(globalThis, 'fetch');
 
     const html = await renderPage();
 
@@ -153,7 +153,7 @@ describe('overview page degradation — unconfigured Prometheus', () => {
 
 describe('overview page degradation — unreachable Prometheus', () => {
   it('renders an error state but the page still renders (no crash)', async () => {
-    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('connect ECONNREFUSED'));
+    spyOn(globalThis, 'fetch').mockRejectedValue(new Error('connect ECONNREFUSED'));
 
     const html = await renderPage();
 
@@ -165,7 +165,7 @@ describe('overview page degradation — unreachable Prometheus', () => {
 
 describe('overview page authorized render (ok path)', () => {
   it('renders rate, 5xx error %, p75, p99 and in-flight from seeded PromQL', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => seededFetch(u));
+    spyOn(globalThis, 'fetch').mockImplementation(async (u) => seededFetch(u));
 
     const html = await renderPage();
 
@@ -179,7 +179,7 @@ describe('overview page authorized render (ok path)', () => {
   });
 
   it('links out to the Grafana dashboards (static, no iframe)', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => seededFetch(u));
+    spyOn(globalThis, 'fetch').mockImplementation(async (u) => seededFetch(u));
     const html = await renderPage();
     expect(html.toLowerCase()).toContain('grafana');
     expect(html).not.toContain('<iframe');
@@ -189,7 +189,7 @@ describe('overview page authorized render (ok path)', () => {
 describe('overview page — explicit "no data yet" marker (P1.2 sign-off follow-up)', () => {
   it('renders the no-data marker, not a bare dash, when a series has no samples', async () => {
     const empty = { status: 'success', data: { resultType: 'matrix', result: [] } };
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => jsonResponse(empty));
+    spyOn(globalThis, 'fetch').mockImplementation(async () => jsonResponse(empty));
 
     const html = await renderPage();
 
@@ -201,7 +201,7 @@ describe('overview page — explicit "no data yet" marker (P1.2 sign-off follow-
 
 describe('overview page — every query is scoped to THIS app (#516 code review)', () => {
   it('never sends a cluster-wide RED query: every PromQL carries the app scope', async () => {
-    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => seededFetch(u));
+    const spy = spyOn(globalThis, 'fetch').mockImplementation(async (u) => seededFetch(u));
 
     await renderPage();
 
@@ -214,7 +214,7 @@ describe('overview page — every query is scoped to THIS app (#516 code review)
 
   it('renders a DISTINCT "scope unknown" state when KN_APP_NAME is unset — and does NOT fetch', async () => {
     delete process.env[APP_NAME_ENV];
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const fetchSpy = spyOn(globalThis, 'fetch');
 
     const html = await renderPage();
 
@@ -226,7 +226,7 @@ describe('overview page — every query is scoped to THIS app (#516 code review)
 
   it('treats an injection-shaped KN_APP_NAME as unknown scope (no PromQL built from it)', async () => {
     process.env[APP_NAME_ENV] = 'demo"} or on() up{';
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const fetchSpy = spyOn(globalThis, 'fetch');
 
     const html = await renderPage();
 

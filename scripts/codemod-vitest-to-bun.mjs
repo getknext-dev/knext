@@ -71,6 +71,12 @@ const DIRECT = new Map([
   ['setSystemTime', 'setSystemTime'],
   ['advanceTimersByTime', 'jest.advanceTimersByTime'],
   ['runAllTimers', 'jest.runAllTimers'],
+  // Verified present on bun's `jest` object by probing it directly, not assumed
+  // from the jest docs — bun implements a subset and the gaps are the whole
+  // reason this table exists.
+  ['getTimerCount', 'jest.getTimerCount'],
+  ['advanceTimersToNextTimer', 'jest.advanceTimersToNextTimer'],
+  ['runOnlyPendingTimers', 'jest.runOnlyPendingTimers'],
 ]);
 
 /** Provided by tests/helpers/bun-test-helpers.ts. */
