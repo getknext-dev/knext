@@ -69,7 +69,7 @@ function sourceFiles(): string[] {
 }
 
 /** `mkdtemp(...)` call sites whose prefix is not rooted at the temp directory. */
-export function cwdRootedTempDirs(source: string): string[] {
+function cwdRootedTempDirs(source: string): string[] {
   // Blanked, so the family names listed in this file's own header — and any
   // fixture string elsewhere that spells `mkdtempSync` — cannot be reported.
   const code = blankNonCode(source);
