@@ -1,4 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, jest, mock, spyOn } from 'bun:test';
+
+/**
+ * Stands in for `vi.resetModules()`, which bun has no equivalent of.
+ *
+ * `route.ts` reads REDIS_URL and CONSTRUCTS its client at module evaluation, and
+ * these cases vary that env per test — so each needs a freshly evaluated record.
+ * A distinct specifier is a distinct module key, so bumping this and carrying it
+ * as a query suffix gives exactly that.
+ */
+let __routeGen = 0;
 
 /**
  * #802 — the module-scope Redis client must be quiet and bounded.
@@ -69,30 +79,51 @@ class FakeRedis {
 // The FakeRedis below still stands in for the constructed client, so every
 // #802 assertion (lazy, listened-to, bounded, on-demand re-dial) is unchanged —
 // only the route from the test to the constructor moved.
-vi.mock('../../../../../../../packages/lib/src/redis/ioredis-ctor', () => ({
+mock.module('../../../../../../../packages/lib/src/redis/ioredis-ctor', () => ({
   loadRedisCtor: () => FakeRedis,
 }));
-vi.mock('ioredis', () => ({ default: FakeRedis }));
+mock.module('ioredis', () => ({ default: FakeRedis }));
+
+// The route imports `createRedisClient` from `@getknext/lib`, so THAT is the
+// seam reachable from here. The deep mock above points into the lib's SOURCE and
+// only ever intercepted anything because `vitest.config.ts` aliases the package
+// to source; bun resolves the package's DIST, so it applies to nothing.
+//
+// The REAL `createRedisClient` is kept — this file is about the options the app
+// asks for — with its two runtime-dependent inputs pinned: the constructor, via
+// the `ctorOverride` parameter that exists for this, and the branch, via a scope
+// with no `Bun` (under `bun test` `Bun.RedisClient` always exists, so the
+// ioredis path would never be taken).
+//
+// Captured by VALUE before the mock registers: bun mutates a module namespace in
+// place, so holding it and dereferencing inside the factory resolves to the mock.
+const { createRedisClient: realCreateRedisClient, ensureDialable } = await import('@getknext/lib');
+
+mock.module('@getknext/lib', () => ({
+  ensureDialable,
+  createRedisClient: (url: string, tag: string, overrides?: Record<string, unknown>) =>
+    realCreateRedisClient(url, tag, overrides, FakeRedis as never, { Bun: undefined } as never),
+}));
 // The route pulls in the cache handler through `cache-init`; neither is the
 // subject here, and importing it would dial for real.
-vi.mock('../../../../cache-init', () => ({}));
+mock.module('../../../../cache-init', () => ({}));
 
 describe('#802 — cache-events route Redis client', () => {
   beforeEach(() => {
-    vi.resetModules();
+    __routeGen += 1;
     instances.length = 0;
     process.env.REDIS_URL = 'redis://redis.default.svc.cluster.local.:6379';
-    vi.spyOn(console, 'error').mockImplementation(() => {});
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    spyOn(console, 'error').mockImplementation(() => {});
+    spyOn(console, 'warn').mockImplementation(() => {});
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    jest.restoreAllMocks();
     delete process.env.REDIS_URL;
   });
 
   it('does NOT dial at module import — the client is lazy', async () => {
-    await import('./route');
+    await import(`./route?gen=${__routeGen}`);
 
     expect(instances).toHaveLength(1);
     expect(instances[0].options.lazyConnect).toBe(true);
@@ -100,7 +131,7 @@ describe('#802 — cache-events route Redis client', () => {
   });
 
   it('attaches an error listener at construction — no unhandled ioredis errors', async () => {
-    await import('./route');
+    await import(`./route?gen=${__routeGen}`);
 
     const errorListeners = instances[0].listeners.get('error') ?? [];
     expect(errorListeners).toHaveLength(1);
@@ -114,26 +145,26 @@ describe('#802 — cache-events route Redis client', () => {
   });
 
   it('logs a repeated error class ONCE, not once per retry (the 4-line capture)', async () => {
-    await import('./route');
+    await import(`./route?gen=${__routeGen}`);
     const err = Object.assign(new Error('connect ETIMEDOUT'), { code: 'ETIMEDOUT' });
 
     for (let i = 0; i < 4; i++) instances[0].emit('error', err);
 
-    const logged = (console.error as unknown as ReturnType<typeof vi.fn>).mock.calls
+    const logged = (console.error as unknown as ReturnType<typeof mock>).mock.calls
       .map((c: unknown[]) => String(c[0]))
       .filter((l) => l.includes('ETIMEDOUT'));
     expect(logged).toHaveLength(1);
   });
 
   it('still reports a DIFFERENT error class (the other half — not simply muted)', async () => {
-    await import('./route');
+    await import(`./route?gen=${__routeGen}`);
     instances[0].emit(
       'error',
       Object.assign(new Error('connect ETIMEDOUT'), { code: 'ETIMEDOUT' }),
     );
     instances[0].emit('error', Object.assign(new Error('nope'), { code: 'ECONNREFUSED' }));
 
-    const logged = (console.error as unknown as ReturnType<typeof vi.fn>).mock.calls.map(
+    const logged = (console.error as unknown as ReturnType<typeof mock>).mock.calls.map(
       (c: unknown[]) => String(c[0]),
     );
     expect(logged.filter((l) => l.includes('ETIMEDOUT'))).toHaveLength(1);
@@ -141,7 +172,7 @@ describe('#802 — cache-events route Redis client', () => {
   });
 
   it('bounds the retry strategy — it gives up instead of looping forever', async () => {
-    await import('./route');
+    await import(`./route?gen=${__routeGen}`);
     const retryStrategy = instances[0].options.retryStrategy as (times: number) => number | null;
 
     expect(typeof retryStrategy).toBe('function');
@@ -155,7 +186,7 @@ describe('#802 — cache-events route Redis client', () => {
     // Bounding the retry stops the background churn, but would otherwise leave
     // the client in `end` for the pod's life: the events view would go
     // permanently blind. Recovery is paid by a request that wants the data.
-    const route = await import('./route');
+    const route = await import(`./route?gen=${__routeGen}`);
     const client = instances[0];
     client.status = 'end';
 
@@ -165,7 +196,7 @@ describe('#802 — cache-events route Redis client', () => {
   });
 
   it('does NOT re-dial a client that is already usable (the other half)', async () => {
-    const route = await import('./route');
+    const route = await import(`./route?gen=${__routeGen}`);
     const client = instances[0];
     client.status = 'ready';
 
@@ -176,9 +207,9 @@ describe('#802 — cache-events route Redis client', () => {
 
   it('never logs the Redis URL or its credentials', async () => {
     process.env.REDIS_URL = 'redis://:hunter2@redis.default.svc.cluster.local.:6379';
-    vi.resetModules();
+    __routeGen += 1;
     instances.length = 0;
-    await import('./route');
+    await import(`./route?gen=${__routeGen}`);
     // The DSN must arrive the way it actually can — inside the error MESSAGE.
     // An error that never carried one cannot prove the line is stripped, which
     // is exactly how the first version of this test passed vacuously.
@@ -187,7 +218,7 @@ describe('#802 — cache-events route Redis client', () => {
       new Error('connect ETIMEDOUT redis://:hunter2@redis.default.svc.cluster.local.:6379'),
     );
 
-    const logged = (console.error as unknown as ReturnType<typeof vi.fn>).mock.calls
+    const logged = (console.error as unknown as ReturnType<typeof mock>).mock.calls
       .map((c: unknown[]) => c.map((a) => String(a)).join(' '))
       .join('\n');
     expect(logged).not.toContain('hunter2');
@@ -195,9 +226,9 @@ describe('#802 — cache-events route Redis client', () => {
   });
 
   it('still serves GET, failing open to the in-memory events when Redis errors', async () => {
-    const route = await import('./route');
+    const route = await import(`./route?gen=${__routeGen}`);
     const client = instances[0];
-    vi.spyOn(client, 'lrange').mockRejectedValue(new Error('connection is closed'));
+    spyOn(client, 'lrange').mockRejectedValue(new Error('connection is closed'));
 
     const res = await route.GET();
 

@@ -3,10 +3,20 @@
  * RED phase: these tests should fail before the adapter is implemented.
  */
 
+import { beforeAll, describe, expect, it, mock, spyOn } from 'bun:test';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+
+/**
+ * Stands in for `vi.resetModules()`, which bun has no equivalent of.
+ *
+ * `next-adapter.js` reads STORAGE_BUCKET at module evaluation, and these cases
+ * vary that env per test — so each needs a freshly evaluated record. A distinct
+ * specifier is a distinct module key, so bumping this and carrying it as a query
+ * suffix gives exactly that.
+ */
+let __adapterGen = 0;
 
 // NOTE: the adapter now re-exports @getknext/core/adapter (#89). We intentionally do
 // NOT annotate `mod.default` with the official `NextAdapter` type here: the app and
@@ -40,7 +50,7 @@ const emptyRouting: OnBuildCompleteCtx['routing'] = {
 
 describe('next-adapter (POC-ADAPTER-P0 spike)', () => {
   it('exports a valid NextAdapter with name, modifyConfig and onBuildComplete', async () => {
-    const mod = await import('./next-adapter.js');
+    const mod = await import(`./next-adapter.js?gen=${__adapterGen}`);
     const adapter = mod.default;
 
     expect(adapter).toBeDefined();
@@ -51,7 +61,7 @@ describe('next-adapter (POC-ADAPTER-P0 spike)', () => {
   });
 
   it('modifyConfig forces output:standalone and returns config unchanged otherwise', async () => {
-    const mod = await import('./next-adapter.js');
+    const mod = await import(`./next-adapter.js?gen=${__adapterGen}`);
     const adapter = mod.default;
 
     const baseConfig = {
@@ -71,7 +81,7 @@ describe('next-adapter (POC-ADAPTER-P0 spike)', () => {
   });
 
   it('modifyConfig is a no-op on non-build phases', async () => {
-    const mod = await import('./next-adapter.js');
+    const mod = await import(`./next-adapter.js?gen=${__adapterGen}`);
     const adapter = mod.default;
 
     const baseConfig = { output: 'export' } as any;
@@ -85,10 +95,10 @@ describe('next-adapter (POC-ADAPTER-P0 spike)', () => {
   });
 
   it('onBuildComplete logs output counts and build metadata without throwing', async () => {
-    const mod = await import('./next-adapter.js');
+    const mod = await import(`./next-adapter.js?gen=${__adapterGen}`);
     const adapter = mod.default;
 
-    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
 
     const fakeCtx = {
       buildId: 'test-build-id',
@@ -130,10 +140,10 @@ describe('next-adapter (POC-ADAPTER-P0 spike)', () => {
   });
 
   it('onBuildComplete logs ctx.routes (routing) counts — headers, redirects, rewrites, dynamicRoutes', async () => {
-    const mod = await import('./next-adapter.js');
+    const mod = await import(`./next-adapter.js?gen=${__adapterGen}`);
     const adapter = mod.default;
 
-    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
 
     const fakeCtx = {
       buildId: 'routing-test-id',
@@ -249,12 +259,12 @@ describe('next-adapter upload (POC-ADAPTER-P1-rework)', () => {
   });
 
   it('skips upload and logs clearly when STORAGE_BUCKET env var is not set', async () => {
-    vi.resetModules();
+    __adapterGen += 1;
     delete process.env.STORAGE_BUCKET;
 
-    const mod = await import('./next-adapter.js');
+    const mod = await import(`./next-adapter.js?gen=${__adapterGen}`);
     const adapter = mod.default;
-    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
 
     await adapter.onBuildComplete!(makeCtx());
 
@@ -266,22 +276,22 @@ describe('next-adapter upload (POC-ADAPTER-P1-rework)', () => {
   });
 
   it('calls putObject exactly twice (2 staticFiles; prerender has no fallback.filePath)', async () => {
-    vi.resetModules();
+    __adapterGen += 1;
     process.env.STORAGE_BUCKET = 'test-bucket';
 
     // Use real on-disk files (created in beforeAll) so existsSync + createReadStream
     // work without mocking node:fs (CJS interop makes that fragile in Vitest).
     // Destroy the stream immediately so no ENOENT fires after afterAll cleanup.
-    const putObjectMock = vi.fn().mockImplementation(async (_b, _k, stream: any) => {
+    const putObjectMock = mock().mockImplementation(async (_b, _k, stream: any) => {
       stream?.destroy?.();
       return { etag: 'mock-etag' };
     });
-    vi.doMock('@getknext/lib/clients', () => ({
+    mock.module('@getknext/lib/clients', () => ({
       getMinioClient: () => ({ putObject: putObjectMock }),
     }));
 
-    const { default: adapter } = await import('./next-adapter.js');
-    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { default: adapter } = await import(`./next-adapter.js?gen=${__adapterGen}`);
+    const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
 
     // 2 staticFiles with real file paths + 1 prerender WITHOUT fallback.filePath
     // (prerenders without fallback.filePath are filtered → expect exactly 2 uploads).
@@ -313,20 +323,23 @@ describe('next-adapter upload (POC-ADAPTER-P1-rework)', () => {
 
     consoleSpy.mockRestore();
     delete process.env.STORAGE_BUCKET;
-    vi.doUnmock('@getknext/lib/clients');
+    // No `doUnmock`: bun registers module mocks for the whole run and cannot
+    // unregister them. Safe here for two separate reasons — the next test
+    // RE-registers this same module with its own factory (bun allows that), and
+    // nothing at all runs after the second one.
   });
 
   it('calls putObject 3 times when prerender has fallback.filePath', async () => {
-    vi.resetModules();
+    __adapterGen += 1;
     process.env.STORAGE_BUCKET = 'test-bucket';
 
-    const putObjectMock = vi.fn().mockResolvedValue({ etag: 'mock-etag' });
-    vi.doMock('@getknext/lib/clients', () => ({
+    const putObjectMock = mock().mockResolvedValue({ etag: 'mock-etag' });
+    mock.module('@getknext/lib/clients', () => ({
       getMinioClient: () => ({ putObject: putObjectMock }),
     }));
 
-    const { default: adapter } = await import('./next-adapter.js');
-    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { default: adapter } = await import(`./next-adapter.js?gen=${__adapterGen}`);
+    const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
 
     const ctx = makeCtx({
       outputs: {
@@ -359,6 +372,6 @@ describe('next-adapter upload (POC-ADAPTER-P1-rework)', () => {
 
     consoleSpy.mockRestore();
     delete process.env.STORAGE_BUCKET;
-    vi.doUnmock('@getknext/lib/clients');
+    // No `doUnmock` — see the note above. Nothing runs after this case.
   });
 });

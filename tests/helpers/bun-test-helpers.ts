@@ -157,7 +157,18 @@ export async function runAllTimersAsync(maxIterations = 10_000): Promise<void> {
   await new Promise((resolve) => realSetImmediate(resolve));
 
   for (let i = 0; i < maxIterations; i++) {
-    if (jest.getTimerCount() === 0) return;
+    if (jest.getTimerCount() === 0) {
+      // Zero timers is not the same as "done". A backoff loop schedules its
+      // NEXT sleep from the continuation of the previous one, so there is a
+      // window where the clock has fired everything and nothing is pending yet.
+      // Returning there leaves the caller awaiting a promise nothing will
+      // settle — a hang, not a failure, and the runner can only report it as a
+      // timeout naming no test.
+      //
+      // So confirm across a real macrotask boundary before concluding.
+      await new Promise((resolve) => realSetImmediate(resolve));
+      if (jest.getTimerCount() === 0) return;
+    }
     jest.advanceTimersToNextTimer();
     await new Promise((resolve) => realSetImmediate(resolve));
   }

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "bun:test";
 
 /**
  * ADR-0027 §3 anchoring, for the in-flight cache-write registry.
@@ -26,13 +26,16 @@ describe("cache-write registry state is anchored on globalThis (ADR-0027 §3)", 
     const REGISTRY: string = "../adapters/cache-write-registry.js";
 
     it("two distinct module records observe the SAME in-flight set", async () => {
-        vi.resetModules();
-        const first = await import(REGISTRY);
-
-        // A fresh registry generation: re-importing after a reset re-evaluates
-        // the module, yielding a second, independent module record.
-        vi.resetModules();
-        const second = await import(REGISTRY);
+        // Two distinct module records via distinct SPECIFIERS, not
+        // `vi.resetModules()` — bun has no registry reset, but a query suffix
+        // is a distinct module key and bun honours it (verified: the two
+        // namespaces' exported functions are not identical).
+        //
+        // Better than the reset it replaces, for this test's purpose: a reset
+        // REPLACED the first record with the second, so only one was ever live.
+        // Bundle duplication has both live at once, which is what this asserts.
+        const first = await import(`${REGISTRY}?record=1`);
+        const second = await import(`${REGISTRY}?record=2`);
 
         // Guard the guard: if these were the same record, the assertion below
         // would hold trivially and prove nothing.
@@ -62,8 +65,9 @@ describe("cache-write registry state is anchored on globalThis (ADR-0027 §3)", 
     });
 
     it("uses the namespaced Symbol.for key, not a bare module binding", async () => {
-        vi.resetModules();
-        const mod = await import(REGISTRY);
+        // A fresh record, so the anchored Set below cannot be one this module
+        // happened to still hold from an earlier case.
+        const mod = await import(`${REGISTRY}?record=3`);
 
         const anchored = (
             globalThis as unknown as Record<symbol, Set<unknown> | undefined>
