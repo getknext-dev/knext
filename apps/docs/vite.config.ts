@@ -21,6 +21,21 @@ import { nitro } from 'nitro/vite';
 import vinext from 'vinext';
 import { defineConfig } from 'vite';
 
+/**
+ * Vercel builds the preview/production docs deployment from this same app, and
+ * it cannot run the `bun` target: `knext-bun-entry.mjs` serves through
+ * `Bun.serve`/`srvx/bun`, so a Vercel function built around it would compile
+ * cleanly and then fail at runtime — the worst shape of failure available.
+ *
+ * So the Vercel build overrides BOTH the preset and the entry. Overriding only
+ * the preset builds and deploys, which is exactly why the entry is named here:
+ * nitro's own default entry is what makes the emitted function runnable.
+ *
+ * `bun` remains the default with no env set, so the knext dogfood path — the
+ * one this app exists to exercise — is unchanged by anything below.
+ */
+const buildingForVercel = process.env.NITRO_PRESET === 'vercel';
+
 export default defineConfig({
   plugins: [
     // Tailwind through the VITE plugin, not postcss. With the postcss route
@@ -36,8 +51,9 @@ export default defineConfig({
     mdx(),
     vinext(),
     nitro({
-      preset: 'bun',
-      entry: './knext-bun-entry.mjs',
+      preset: buildingForVercel ? 'vercel' : 'bun',
+      // Only the bun target gets the bespoke entry; see the note above.
+      ...(buildingForVercel ? {} : { entry: './knext-bun-entry.mjs' }),
       // Single chunk. nitro-on-rolldown reads `output.codeSplitting`, NOT
       // rollup's `manualChunks` — nine attempts went into that discovery.
       rollupConfig: { output: { inlineDynamicImports: true } },
