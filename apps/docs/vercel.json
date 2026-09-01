@@ -1,6 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
   "installCommand": "cd ../.. && npm i -g --allow-scripts=bun $(node -p \"require('./package.json').packageManager\") && BUN=\"$(npm prefix -g)/bin/bun\" && \"$BUN\" --version && \"$BUN\" install --frozen-lockfile",
-  "buildCommand": "cd ../.. && NITRO_PRESET=vercel bunx turbo run build --filter=knext-docs",
-  "outputDirectory": ".vercel/output"
+  "buildCommand": "cd ../.. && NITRO_PRESET=vercel bunx turbo run build --filter=knext-docs"
 }
