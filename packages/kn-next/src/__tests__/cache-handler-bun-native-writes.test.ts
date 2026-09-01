@@ -107,6 +107,41 @@ describe("ISR cache writes through Bun’s native Redis client", () => {
         expect(fake?.received ?? []).toBeDefined();
     });
 
+    it("a value written through the native client READS BACK", async () => {
+        // The round trip, not just the write. compat-smoke reports
+        // "back-to-back requests rendered DIFFERENT values", which is exactly what
+        // a successful write plus a missing read looks like from outside.
+        const handler = await freshHandler();
+        await handler.set("bun-roundtrip", { value: "round-trip-value" }, {});
+        const hit = await handler.get("bun-roundtrip");
+        expect(
+            hit,
+            "the entry was written but does not read back — a split cache",
+        ).not.toBeNull();
+        expect(JSON.stringify(hit)).toContain("round-trip-value");
+    });
+
+    it("CONCURRENT writes do not nest transactions", async () => {
+        // The native client's MULTI/EXEC state lives on the CONNECTION, so two
+        // callers interleaving between MULTI and EXEC join the same transaction
+        // and Redis answers `ERR MULTI calls can not be nested`. compat-smoke hit
+        // exactly that — four times per run — and the entries were never written,
+        // so the ISR route was not cached at all.
+        const handler = await freshHandler();
+        await Promise.all([
+            handler.set("bun-conc-a", { value: "a" }, { tags: ["t-a"] }),
+            handler.set("bun-conc-b", { value: "b" }, { tags: ["t-b"] }),
+            handler.set("bun-conc-c", { value: "c" }, { tags: ["t-c"] }),
+        ]);
+        const wrote = [...(fake?.strings.keys() ?? [])].join(",");
+        for (const k of ["bun-conc-a", "bun-conc-b", "bun-conc-c"]) {
+            expect(
+                wrote.includes(k),
+                `${k} never landed — received: ${fake?.received.join(",")}`,
+            ).toBe(true);
+        }
+    });
+
     it("set then revalidateTag both complete without throwing", async () => {
         const handler = await freshHandler();
         await handler.set(

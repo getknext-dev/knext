@@ -265,6 +265,19 @@ export async function startFakeRedis(
                     if (socket.destroyed) return;
 
                     if (cmd === "multi") {
+                        // Real Redis REFUSES a nested MULTI, and modelling that is
+                        // load-bearing: a client that multiplexes commands on one
+                        // connection lets two concurrent callers interleave between
+                        // MULTI and EXEC, and the second gets this error while its
+                        // write is silently lost. Without this branch the server
+                        // accepted the nesting and the bug was invisible here while
+                        // failing four times per compat-smoke run.
+                        if (queued !== null) {
+                            socket.write(
+                                `-ERR MULTI calls can not be nested${CRLF}`,
+                            );
+                            return;
+                        }
                         queued = [];
                         socket.write(`+OK${CRLF}`);
                         return;

@@ -401,22 +401,53 @@ async function waitForNativeReady(client) {
  * index leaves an entry `revalidateTag` can never reach; `revalidateTag`
  * deleting the keys but not the tag set leaves the index pointing at nothing.
  *
- * Caveat, stated rather than discovered: on the native client the queue lives on
- * the CONNECTION, so a concurrent caller interleaving its own commands between
- * MULTI and EXEC would join this transaction. ioredis's `multi()` batches into a
- * single write and does not have that exposure. The handler holds one client and
- * awaits these sequentially, so it does not interleave with itself — but a
- * future caller that shares the client must know this.
+ * On the native client the transaction lives on the CONNECTION, not on a command
+ * object, so two concurrent callers interleave: the second's MULTI arrives before
+ * the first's EXEC and Redis answers `ERR MULTI calls can not be nested` — while
+ * its write is silently lost. That is not hypothetical. It was written here as a
+ * caveat and shipped unguarded, and compat-smoke hit it four times per run: ISR
+ * entries never landed, so the route was not cached at all.
+ *
+ * Native transactions are therefore SERIALIZED per client. ioredis needs no such
+ * gate — `multi()` builds a command object and batches it into a single write.
  *
  * @param {{ multi?: Function, send?: Function }} client
  * @param {string[][]} commands `[['SET', key, value, 'EX', '60'], …]`
  */
+const nativeTxQueue = new WeakMap();
+
 async function execAtomic(client, commands) {
   if (typeof client.multi === 'function') {
     const tx = client.multi();
     for (const [name, ...args] of commands) tx[name.toLowerCase()](...args);
     return await tx.exec();
   }
+  // One transaction at a time per client — see the note above. Keyed on the
+  // client so a replaced client (breaker trip, reconnect) starts a fresh chain
+  // rather than inheriting a queue that outlived its connection.
+  const previous = nativeTxQueue.get(client) ?? Promise.resolve();
+  let release;
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  nativeTxQueue.set(
+    client,
+    previous.then(
+      () => held,
+      () => held,
+    ),
+  );
+  // A failed predecessor must not poison the queue: its error belongs to its own
+  // caller, and swallowing it here only means "the connection is free again".
+  await previous.catch(() => {});
+  try {
+    return await runNativeTransaction(client, commands);
+  } finally {
+    release();
+  }
+}
+
+async function runNativeTransaction(client, commands) {
   await client.send('MULTI', []);
   try {
     for (const [name, ...args] of commands) {
