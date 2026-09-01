@@ -361,12 +361,45 @@ function waitForReady(client) {
   });
 }
 
+/**
+ * Readiness for Bun's NATIVE client, which has no EventEmitter surface at all.
+ * Measured on Bun 1.4.0:
+ *
+ *   status: undefined   on: undefined   removeListener: undefined
+ *   connected: boolean  connect: function
+ *
+ * `waitForReady` below is written against ioredis and calls `client.on('ready',
+ * …)`, so handing it a native client threw `TypeError: client.on is not a
+ * function` on EVERY cache read and write. That is worse than an outage: the
+ * in-memory fallback that exists for an unavailable Redis was never reached,
+ * because the failure arrived as a TypeError rather than a connection error.
+ *
+ * Same contract as `waitForReady`: resolves with the client or null, never
+ * rejects, and trips the breaker on failure so the next call fails open
+ * immediately instead of re-dialling a dead socket.
+ */
+async function waitForNativeReady(client) {
+  if (client.connected) return client;
+  try {
+    await client.connect();
+    return client.connected ? client : null;
+  } catch (err) {
+    markUnhealthy(err?.message || 'native redis connect failed');
+    return null;
+  }
+}
+
 async function ensureConnected() {
   if (!useRedis) return null;
   // Breaker open — fail open to origin/memory without touching the socket.
   if (Date.now() < unhealthyUntil) return null;
   const client = await getRedis();
   if (!client) return null;
+  // Branch on the client's SHAPE, not on an env flag: `getRedis` may hand back
+  // either the native client or ioredis, and only the latter has `.on`/`.status`.
+  // Reading `.status` on the native client yields undefined, which silently fell
+  // through to the ioredis path — that is how this reached production.
+  if (typeof client.on !== 'function') return await waitForNativeReady(client);
   if (client.status === 'ready') return client;
   if (!connectPromise) {
     connectPromise = waitForReady(client).then((result) => {
