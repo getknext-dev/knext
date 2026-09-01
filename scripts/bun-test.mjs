@@ -30,6 +30,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { cpus } from 'node:os';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { importsFrom } from './lib/test-framework-import.mjs';
 
@@ -41,6 +42,17 @@ const flag = (name, fallback) => {
 
 const withCoverage = argv.includes('--coverage');
 const bunBin = flag('bun', process.env.KNEXT_BUN ?? 'bun');
+
+/**
+ * Everything here is anchored on the REPO ROOT, not the caller's cwd.
+ *
+ * `examples/bun-exec`'s own `test` script is
+ * `node ../../scripts/bun-test.mjs examples/bun-exec` — a repo-root-relative
+ * path, run from inside the example. With `git ls-files` inheriting that cwd it
+ * looked for `examples/bun-exec/examples/bun-exec`, matched nothing, and exited
+ * 1 with "no test files matched". Three CI jobs run that script.
+ */
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const concurrency = Number(flag('concurrency', String(Math.max(2, cpus().length - 2))));
 const targets = argv.filter((a) => !a.startsWith('--'));
 
@@ -83,6 +95,7 @@ function warnOnBunVersionSkew() {
 warnOnBunVersionSkew();
 
 const files = execFileSync('git', ['ls-files', ...(targets.length ? targets : ['.'])], {
+  cwd: REPO_ROOT,
   encoding: 'utf8',
   maxBuffer: 64 * 1024 * 1024,
 })
@@ -93,6 +106,24 @@ const files = execFileSync('git', ['ls-files', ...(targets.length ? targets : ['
   // porting ones, and a runner that reports those as migration failures buries
   // the real ones. They still run — in the job that provides a daemon.
   .filter((f) => !/\.docker-e2e\.test\.tsx?$/.test(f))
+  // `examples/**` is NOT part of this workspace. It carries its own bun.lock,
+  // pinning vinext/nitro prereleases the workspace must not inherit, and its
+  // guards run via `bun run test` INSIDE the example — a contract
+  // `tests/bun-exec-example-suite-collection.test.ts` asserts behaviourally, and
+  // three dedicated CI jobs provide.
+  //
+  // Collecting them from the repo root resolves imports against the ROOT
+  // node_modules, where the example's deps do not exist:
+  //   error: Cannot find module 'srvx/bun' from examples/bun-exec/test/...
+  // It passes locally only because a developer has run `bun install` in the
+  // example at some point. Excluding it here is not lost coverage — those files
+  // still run, in the job that installs what they need.
+  // ...but ONLY when sweeping the repo. Naming a path is an explicit request,
+  // and the example's own `test` script does exactly that
+  // (`node ../../scripts/bun-test.mjs examples/bun-exec`) — excluding it there
+  // made that script exit 1 with "no test files matched", which is how this
+  // filter first went in and immediately broke the job it was protecting.
+  .filter((f) => targets.length > 0 || !/(^|\/)examples\//.test(f))
   // The OTHER half of the partition `vitest.config.ts` derives.
   //
   // A file importing `vitest` cannot run here, exactly as a file importing
@@ -107,7 +138,7 @@ const files = execFileSync('git', ['ls-files', ...(targets.length ? targets : ['
     try {
       // ONE definition of the partition — see `vitest.config.ts` and
       // `scripts/lib/test-framework-import.mjs`.
-      return !importsFrom(readFileSync(f, 'utf8'), 'vitest');
+      return !importsFrom(readFileSync(resolve(REPO_ROOT, f), 'utf8'), 'vitest');
     } catch {
       // Unreadable: run it. A file this runner skips silently is coverage lost
       // with nothing to notice, which is worse than a loud failure.
@@ -164,7 +195,7 @@ function runFile(file) {
     // is exactly the kind of pass that means nothing.
     if (needsDom(file)) args.push('--preload', DOM_PRELOAD);
     if (withCoverage) args.push('--coverage');
-    const child = spawn(bunBin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(bunBin, args, { cwd: REPO_ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = '';
     child.stdout.on('data', (d) => (output += d));
     child.stderr.on('data', (d) => (output += d));
