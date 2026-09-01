@@ -32,6 +32,7 @@ import { readFileSync } from 'node:fs';
 import { cpus } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { blankNonCode } from './lib/blank-non-code.mjs';
 import { importsFrom } from './lib/test-framework-import.mjs';
 
 const argv = process.argv.slice(2);
@@ -180,7 +181,20 @@ function needsDom(file) {
   } catch {
     return false;
   }
-  return /@testing-library\/react|\bdocument\.|\bwindow\./.test(src);
+  // TWO probes, because one does not work for both halves.
+  //
+  // The import is matched with `importsFrom`, which handles the trap that a
+  // module specifier IS a string: blanking `from '@testing-library/react'`
+  // erases the specifier and the match with it.
+  //
+  // `document.` / `window.` are matched against BLANKED code, because raw source
+  // matches prose. `asset-prune.test.ts` — a pure server-side test — was given
+  // browser globals by the comment "Aged out of every window.", and under bun
+  // 1.4 that made pino take its browser branch and throw at first use. This
+  // function's own docstring warns about exactly that outcome; it just did not
+  // guard against it. Fifteen files were misclassified this way.
+  if (importsFrom(src, '@testing-library/react')) return true;
+  return /\bdocument\.|\bwindow\./.test(blankNonCode(src));
 }
 
 /** Run one file; resolve with its outcome rather than rejecting, so one red file does not abort the sweep. */

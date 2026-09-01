@@ -126,9 +126,23 @@ describe("runtimeHonoursCompileCache", () => {
     });
 
     it("reads process.versions by default", () => {
-        // The suite runs under Node, so the production default must agree.
+        // Asserts the DEFAULT BINDING — that omitting the argument consults the
+        // real runtime — by comparing against the same call made explicitly.
+        //
+        // It used to assert `process.versions.bun === undefined`, on a comment
+        // that read "the suite runs under Node". That was true under vitest and
+        // stopped being true when the suite moved to `bun test`. It kept passing
+        // on bun 1.3 only by coincidence — the function returns false there, and
+        // `bun === undefined` is also false — and went red the moment CI moved to
+        // bun 1.4, where the function correctly reports that NODE_COMPILE_CACHE
+        // IS honoured. The function was right; the expectation encoded the
+        // runtime the suite no longer runs on.
+        //
+        // The rule itself (false on <=1.3, true on Node, true on >=1.4) is pinned
+        // by the sibling tests, so restating it here would just be a second copy
+        // to keep in sync.
         expect(runtimeHonoursCompileCache()).toBe(
-            process.versions.bun === undefined,
+            runtimeHonoursCompileCache(process.versions),
         );
     });
 
