@@ -32,11 +32,12 @@
  * code. This guard asserts both directions, because fixing either one alone
  * reintroduces the other.
  */
+
+import { describe, expect, it } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'bun:test';
 import { blankNonCode } from '../scripts/lib/blank-non-code.mjs';
 import { importsFrom } from '../scripts/lib/test-framework-import.mjs';
 
