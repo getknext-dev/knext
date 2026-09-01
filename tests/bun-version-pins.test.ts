@@ -86,7 +86,14 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
     // step: its pnpm drives the next.js compat harness (next.js's own repo uses
     // pnpm), not knext's workspace, so it was left alone.
     expect(byFile).toEqual({
-      'ci.yml': 13,
+      // 11, was 13: two jobs (compat-smoke, compile-cache-bun-probe) each set up
+      // bun TWICE — 1.4.0, then 1.3.14 underneath it — so the second step
+      // silently took the first one away, and every install in those jobs ran on
+      // a bun that cannot parse a lockfileVersion 3 bun.lock. The platform moved
+      // to bun 1.4 (#882) and both pairs collapsed to a single step. A count
+      // DROPPING is meant to be as loud as an unpinned step, so editing this
+      // number is the deliberate act the comment above asks for.
+      'ci.yml': 11,
       'docs-closure-nightly.yml': 1,
       'mutation-prover-nightly.yml': 1,
       'operator-e2e-nightly.yml': 3,
