@@ -136,6 +136,13 @@ describe("#408 — the edge fence covers `next dev --webpack` (real dev server)"
         child.on("exit", (code, signal) => {
             exited = `code=${code} signal=${signal}`;
         });
+        // A spawn that never starts emits `error`, not `exit`. Without this the
+        // failure was indistinguishable from a slow server: `exited` stayed null,
+        // no output was ever captured, and the poll simply ran out its 150s while
+        // the assertions below reported "never answered" with an EMPTY log.
+        child.on("error", (err) => {
+            exited = `spawn error: ${err?.message ?? err}`;
+        });
 
         // Readiness = the server actually answers, not a log line: `next dev`
         // prints "Ready in …" and only THEN bails out if another dev server holds
@@ -174,7 +181,11 @@ describe("#408 — the edge fence covers `next dev --webpack` (real dev server)"
         ).toBeNull();
         expect(
             res,
-            `dev server never answered on :${port}:\n${tail()}`,
+            // `out.length` is in the message on purpose: "never answered" and
+            // "never said anything" are different failures, and the second one
+            // means the process or its piping is broken rather than slow.
+            `dev server never answered on :${port} ` +
+                `(captured ${out.length} bytes of output, exited=${exited}):\n${tail()}`,
         ).toBeDefined();
         const response = res as Response;
         const body = await response.text();
