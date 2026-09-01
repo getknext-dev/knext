@@ -140,6 +140,11 @@ describe("#408 — the edge fence covers `next dev --webpack` (real dev server)"
         // Readiness = the server actually answers, not a log line: `next dev`
         // prints "Ready in …" and only THEN bails out if another dev server holds
         // the directory, so the banner alone would be a false green.
+        // The dev server's log, bounded. Embedding the WHOLE of it pushed the
+        // assertion's own label out of the runner's failure window, so CI
+        // reported the failure with its reason cut off.
+        const tail = () =>
+            out.split("\n").filter(Boolean).slice(-25).join("\n");
         const deadline = Date.now() + 150_000;
         let res: Response | undefined;
         while (Date.now() < deadline && !exited) {
@@ -165,11 +170,11 @@ describe("#408 — the edge fence covers `next dev --webpack` (real dev server)"
         }
         expect(
             exited,
-            `next dev exited before serving a request (${exited}):\n${out}`,
+            `next dev exited before serving a request (${exited}):\n${tail()}`,
         ).toBeNull();
         expect(
             res,
-            `dev server never answered on :${port}:\n${out}`,
+            `dev server never answered on :${port}:\n${tail()}`,
         ).toBeDefined();
         const response = res as Response;
         const body = await response.text();
@@ -177,11 +182,11 @@ describe("#408 — the edge fence covers `next dev --webpack` (real dev server)"
         expect(
             EDGE_COMPILE_FAILURE_RE.test(out),
             `next dev --webpack hit an edge-compile failure — the adapter fence ` +
-                `did not apply in the dev phase:\n${out}`,
+                `did not apply in the dev phase:\n${tail()}`,
         ).toBe(false);
         expect(
             response.status,
-            `dev server responded ${response.status}:\n${out}`,
+            `dev server responded ${response.status}:\n${tail()}`,
         ).toBe(200);
         expect(body).toContain("devfix ok");
         // The middleware (which is what forces the edge compile at all) really ran.

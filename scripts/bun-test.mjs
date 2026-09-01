@@ -253,11 +253,17 @@ if (failures.length > 0) {
   for (const { file, output } of failures) {
     console.log(`──────── ${file}`);
     // Only the tail: the interesting part of a bun test failure is at the end.
+    //
+    // 40, not 12. A test whose assertion message carries diagnostic context —
+    // a spawned server's log, a captured stderr — pushed its own label out of a
+    // 12-line window, so CI showed the failure with the reason cut off and the
+    // only way to learn anything was to reproduce locally. That is the opposite
+    // of what this output is for.
     console.log(
       output
         .split('\n')
         .filter((l) => l.trim())
-        .slice(-12)
+        .slice(-40)
         .join('\n'),
     );
     console.log();

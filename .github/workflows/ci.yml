@@ -855,6 +855,23 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # The suite imports `@getknext/db` and `@getknext/core` by PACKAGE NAME, so
+      # their dist must exist. Under vitest it did not have to: `vitest.config.ts`
+      # aliases those specifiers to `packages/*/src` precisely so a clean run works
+      # before any build. bun has no such alias, so the import failed with
+      # `Cannot find package '@getknext/db'` and five hermetic guards died on it.
+      #
+      # Building is the better half of the trade anyway — it exercises the real
+      # dist surface consumers get, rather than the source the alias substitutes.
+      - name: Build @getknext/lib
+        run: bun run --filter @getknext/lib build
+
+      - name: Build @getknext/db
+        run: bun run --filter @getknext/db build
+
+      - name: Build @getknext/core
+        run: bun run --filter @getknext/core build
+
       # The live suite + its hermetic guards (DSN host guard, workflow contract).
       - name: Run the live @getknext/db suite
         # bun, not vitest — all three import `bun:test`; same reason as above.
