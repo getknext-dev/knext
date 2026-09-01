@@ -144,8 +144,19 @@ describe("#408 — the edge fence covers `next dev --webpack` (real dev server)"
         let res: Response | undefined;
         while (Date.now() < deadline && !exited) {
             try {
+                // Short per-ATTEMPT budget, because this is a poll: the loop
+                // below re-tries every 500ms until its own 150s deadline.
+                //
+                // It was 120s, which is longer than the poll is allowed to run
+                // and two-thirds of the whole test budget. A dev server that
+                // ACCEPTS the connection and then compiles (rather than
+                // refusing it) makes one attempt hang for 120s; the second then
+                // runs past the 180s test timeout, so the informative
+                // assertions below — which print the dev server's own output —
+                // never execute. CI reported a bare "timed out after 180000ms"
+                // with 2 expect() calls, and the reason was thrown away.
                 res = await fetch(`http://127.0.0.1:${port}/`, {
-                    signal: AbortSignal.timeout(120_000),
+                    signal: AbortSignal.timeout(5_000),
                 });
                 break;
             } catch {
