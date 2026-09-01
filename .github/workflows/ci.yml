@@ -847,11 +847,11 @@ jobs:
     #
     # Two build legs, BOTH required:
     #   1. vanilla (KNEXT_ADAPTER unset) — the managed-host build (what Vercel
-    #      ships at knext.dev). Asserts .next/BUILD_ID.
-    #   2. adapter (KNEXT_ADAPTER=1) — the self-host / dogfood leg. NON-OPTIONAL:
-    #      exercises next.config's experimental.adapterPath branch so adapter-key
-    #      drift under the monorepo's pinned Next is caught in CI. Asserts the
-    #      standalone server at .next/standalone/apps/docs/server.js.
+    #      ships at knext.dev). Asserts .vercel/output (Build Output API v3).
+    #   2. the bun target (default preset) — the knext dogfood image — and the
+    #      node target (NITRO_PRESET=node) behind Dockerfile.oke. adapterPath /
+    #      adapter-key drift is covered by `seam-alive` against file-manager,
+    #      not here: this app no longer builds through next.config at all.
     #
     # Path-filtered: only runs when the docs app OR the public @getknext/core surface
     # changes (turbo-cache-friendly — an unrelated PR skips the ~minutes-long
@@ -916,26 +916,68 @@ jobs:
         working-directory: apps/docs
         run: bun run config:validate
 
-      # Leg 1 — vanilla managed-host build (Vercel parity; KNEXT_ADAPTER unset).
-      - name: Build knext-docs (vanilla / managed-host, KNEXT_ADAPTER unset)
+      # The two legs that used to live here — vanilla `.next/BUILD_ID` and adapter
+      # `.next/standalone/...` — were both dead. The docs app builds with
+      # vinext/vite now, which emits a nitro server under `.output/` and no
+      # `.next/` at all, and ignores `next.config.ts` entirely, so `KNEXT_ADAPTER=1`
+      # selected nothing. Neither assertion could pass; nothing noticed because
+      # ci.yml had never run against the branch that migrated the app.
+      #
+      # Adapter-key coverage is NOT lost with them: `seam-alive` builds
+      # apps/file-manager with `next build --webpack` and asserts the standalone
+      # artifact, which is what actually exercises `experimental.adapterPath`.
+      #
+      # What replaces them gates the three targets this app really deploys to.
+      # Each is a different nitro preset, and two of them cannot run the default
+      # one's output.
+      - name: Build knext-docs (default = bun target, the knext dogfood image)
         if: steps.filter.outputs.docs == 'true'
-        run: bun run --filter knext-docs build
+        run: |
+          rm -r apps/docs/.output apps/docs/.vercel 2>/dev/null || true
+          bun run --filter knext-docs build
 
-      - name: Assert vanilla build output
+      - name: Assert the bun target emits its bespoke entry
         if: steps.filter.outputs.docs == 'true'
-        run: test -f apps/docs/.next/BUILD_ID
+        # Both halves. The path alone passes for a build that silently fell back
+        # to nitro's default entry, which is exactly what a mis-set preset makes.
+        run: |
+          test -f apps/docs/.output/server/index.mjs
+          grep -q 'metricsServer' apps/docs/.output/server/index.mjs
 
-      # Leg 2 — adapter / self-host dogfood build (NON-OPTIONAL). Exercises the
-      # experimental.adapterPath branch so adapter-key drift is caught here.
-      - name: Build knext-docs via adapter (KNEXT_ADAPTER=1, self-host dogfood)
+      - name: Build knext-docs for Node (NITRO_PRESET=node — the OKE image)
         if: steps.filter.outputs.docs == 'true'
         env:
-          KNEXT_ADAPTER: '1'
-        run: bun run --filter knext-docs build
+          NITRO_PRESET: node
+        run: |
+          rm -r apps/docs/.output apps/docs/.vercel 2>/dev/null || true
+          bun run --filter knext-docs build
 
-      - name: Assert adapter standalone server output
+      - name: Assert the Node target does NOT carry the bun entry
         if: steps.filter.outputs.docs == 'true'
-        run: test -f apps/docs/.next/standalone/apps/docs/server.js
+        # knext-bun-entry.mjs serves through Bun.serve; carried into a node:22
+        # image it builds cleanly and dies at runtime. This is the assertion that
+        # would have caught Dockerfile.oke shipping a bun build.
+        run: |
+          test -f apps/docs/.output/server/index.mjs
+          ! grep -q 'metricsServer' apps/docs/.output/server/index.mjs
+
+      - name: Build knext-docs for Vercel (NITRO_PRESET=vercel — knext.dev)
+        if: steps.filter.outputs.docs == 'true'
+        env:
+          NITRO_PRESET: vercel
+        run: |
+          rm -r apps/docs/.output apps/docs/.vercel 2>/dev/null || true
+          bun run --filter knext-docs build
+
+      - name: Assert the Vercel target emits Build Output API v3
+        if: steps.filter.outputs.docs == 'true'
+        # Vercel consumes .vercel/output only when the build produces it. A build
+        # that quietly emitted .output instead reported "4 successful" and then
+        # failed the deploy — that is the failure this gates.
+        run: |
+          test -f apps/docs/.vercel/output/config.json
+          test -f apps/docs/.vercel/output/functions/__server.func/index.mjs
+          ! grep -q 'metricsServer' apps/docs/.vercel/output/functions/__server.func/index.mjs
 
       # Materialise the DOCS-SCOPED dependency closure. Under pnpm the whole
       # workspace shares ONE root pnpm-lock.yaml and node_modules hoists to the

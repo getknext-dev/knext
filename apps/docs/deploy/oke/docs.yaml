@@ -1,5 +1,7 @@
 # Plain-k8s deploy of knext-docs on OKE (no Knative / knext operator).
-# Image built from Dockerfile.oke (vanilla Next.js build + `next start`).
+# Image built from Dockerfile.oke (vinext/vite build with NITRO_PRESET=node,
+# served by `node .output/server/index.mjs`). It was a `next build` +
+# `next start` image until the app migrated to vinext.
 apiVersion: v1
 kind: Namespace
 metadata:

@@ -4,7 +4,9 @@ The docs site (Fumadocs/Next.js) runs as a **Knative Service** on the OKE cluste
 behind the existing Kourier ingress (no new LoadBalancer — the OCI LB quota is exhausted).
 
 ## Files
-- `../../Dockerfile.oke` — builds the standalone Next.js image. **Build for amd64** (OKE
+- `../../Dockerfile.oke` — builds the Node image (vinext/vite under
+  `NITRO_PRESET=node`; it was a standalone Next.js image before the vinext
+  migration). **Build for amd64** (OKE
   nodes are amd64; an arm64 image from a Mac crashes with exec-format-error).
 - `docs-ksvc.yaml` — the **authoritative** deploy: the Knative Service `knext-docs` in ns
   `knext-docs`, digest-pinned to the current image.

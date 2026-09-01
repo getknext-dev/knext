@@ -22,19 +22,27 @@ import vinext from 'vinext';
 import { defineConfig } from 'vite';
 
 /**
- * Vercel builds the preview/production docs deployment from this same app, and
- * it cannot run the `bun` target: `knext-bun-entry.mjs` serves through
- * `Bun.serve`/`srvx/bun`, so a Vercel function built around it would compile
- * cleanly and then fail at runtime — the worst shape of failure available.
+ * This one app has three deployment targets, and only one of them can run bun.
  *
- * So the Vercel build overrides BOTH the preset and the entry. Overriding only
- * the preset builds and deploys, which is exactly why the entry is named here:
- * nitro's own default entry is what makes the emitted function runnable.
+ *   - knext/Knative (`Dockerfile`) — the dogfood target, `oven/bun` image
+ *   - Vercel (`vercel.json`)       — a `nodejs24.x` function
+ *   - plain k8s on OKE (`Dockerfile.oke`) — a `node:22-alpine` image
  *
- * `bun` remains the default with no env set, so the knext dogfood path — the
- * one this app exists to exercise — is unchanged by anything below.
+ * `knext-bun-entry.mjs` serves through `Bun.serve`/`srvx/bun`, so carrying it
+ * into a Node target produces something that COMPILES and then fails at
+ * runtime — the worst shape of failure available. Overriding only the preset
+ * does exactly that, which is why the entry is conditional too: nitro's own
+ * default entry is what makes a Node build runnable.
+ *
+ * `NITRO_PRESET` passes through rather than being special-cased per target. An
+ * earlier version matched `=== 'vercel'` alone, so `NITRO_PRESET=node` silently
+ * produced a bun build — the env var was accepted and ignored, which is the
+ * same silent-success shape this app's deployment has already produced twice.
+ *
+ * `bun` remains the default with no env set, so the dogfood path is unchanged.
  */
-const buildingForVercel = process.env.NITRO_PRESET === 'vercel';
+const preset = process.env.NITRO_PRESET ?? 'bun';
+const usesBunEntry = preset === 'bun';
 
 export default defineConfig({
   plugins: [
@@ -51,9 +59,9 @@ export default defineConfig({
     mdx(),
     vinext(),
     nitro({
-      preset: buildingForVercel ? 'vercel' : 'bun',
+      preset,
       // Only the bun target gets the bespoke entry; see the note above.
-      ...(buildingForVercel ? {} : { entry: './knext-bun-entry.mjs' }),
+      ...(usesBunEntry ? { entry: './knext-bun-entry.mjs' } : {}),
       // Single chunk. nitro-on-rolldown reads `output.codeSplitting`, NOT
       // rollup's `manualChunks` — nine attempts went into that discovery.
       rollupConfig: { output: { inlineDynamicImports: true } },
