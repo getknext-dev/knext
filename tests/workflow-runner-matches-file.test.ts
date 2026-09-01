@@ -33,6 +33,14 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { importsFrom } from '../scripts/lib/test-framework-import.mjs';
 
+/**
+ * Stands in for a `${{ … }}` expression while splitting on whitespace. It must
+ * be a single non-space token: collapsing the template to a SPACE splits
+ * `apps/${{ matrix.app }}/x.test.ts` into `apps/` and `/x.test.ts`, and the
+ * second half then resolves against nothing.
+ */
+const PLACEHOLDER = '\u0000';
+
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const workflowDir = resolve(repoRoot, '.github/workflows');
 
@@ -46,27 +54,45 @@ interface Invocation {
  * Every `vitest run <file>` / `bun-test.mjs <file>` in a workflow that names a
  * concrete `.test.ts`.
  *
- * A `${{ matrix.app }}` in the path is expanded against the directories that
- * actually contain such a file, rather than skipped — the seam-alive gate is
- * matrix-templated, and skipping templated paths would have exempted exactly the
- * call site that was broken.
+ * Reads each step's `run` from the PARSED YAML rather than regexing file text,
+ * and that is not a style preference. The first version matched
+ * `vitest run ([^\n|&;]+)` against raw text, and a FOLDED SCALAR
+ *
+ *     run: >-
+ *       bun x vitest run
+ *       apps/file-manager/sigterm-drain-e2e.test.ts
+ *       apps/file-manager/sigterm-hardcap-e2e.test.ts
+ *
+ * puts the arguments on their own lines. The line-bounded capture matched
+ * `bun x vitest run` with NO files, found nothing to check, and passed — while
+ * that exact step was failing in CI for the reason this guard exists to catch.
+ * The YAML parser joins the scalar, so the wrapping cannot hide a call site.
+ *
+ * A `${{ matrix.app }}` path is expanded against the directories that really
+ * contain such a file, rather than skipped — the seam-alive gate is
+ * matrix-templated, and skipping templated paths would exempt the other call
+ * site that was broken.
  */
 function invocations(): Invocation[] {
   const out: Invocation[] = [];
   for (const wf of readdirSync(workflowDir).filter((f) => /\.ya?ml$/.test(f))) {
-    const text = readFileSync(resolve(workflowDir, wf), 'utf8');
-    const patterns: [RegExp, Invocation['runner']][] = [
-      [/vitest run ([^\n|&;]+)/g, 'vitest'],
-      [/bun-test\.mjs ([^\n|&;]+)/g, 'bun'],
-    ];
-    for (const [re, runner] of patterns) {
-      for (const m of text.matchAll(re)) {
-        // Collapse `${{ … }}` to a space-free placeholder BEFORE splitting on
-        // whitespace: the template contains spaces, so a naive split shatters
+    // biome-ignore lint/suspicious/noExplicitAny: the workflow schema is not modelled here
+    const doc = (Bun as any).YAML.parse(readFileSync(resolve(workflowDir, wf), 'utf8'));
+    const jobs = Object.values(doc?.jobs ?? {}) as { steps?: { run?: string }[] }[];
+    for (const job of jobs) {
+      for (const step of job.steps ?? []) {
+        if (typeof step.run !== 'string') continue;
+        const runner: Invocation['runner'] | null = /\bvitest run\b/.test(step.run)
+          ? 'vitest'
+          : /bun-test\.mjs\b/.test(step.run)
+            ? 'bun'
+            : null;
+        if (!runner) continue;
+        // Collapse `${{ … }}` to a space BEFORE splitting on whitespace: the
+        // template itself contains spaces, so a naive split shatters
         // `apps/${{ matrix.app }}/x.test.ts` into three tokens and the real path
-        // is never seen — which silently exempts the matrix-templated call site,
-        // the exact one that was broken.
-        const collapsed = m[1].trim().replace(/\$\{\{[^}]*\}\}/g, '\u0000');
+        // is never seen.
+        const collapsed = step.run.replace(/\$\{\{[^}]*\}\}/g, PLACEHOLDER);
         for (const token of collapsed.split(/\s+/)) {
           if (!/\.test\.tsx?$/.test(token)) continue;
           for (const file of expand(token)) out.push({ workflow: wf, runner, file });
@@ -79,8 +105,8 @@ function invocations(): Invocation[] {
 
 /** Resolve a possibly `${{ … }}`-templated path to the real files it can name. */
 function expand(token: string): string[] {
-  if (!token.includes('\u0000')) return [token];
-  const [prefix, suffix] = token.split('\u0000');
+  if (!token.includes(PLACEHOLDER)) return [token];
+  const [prefix, suffix] = token.split(PLACEHOLDER);
   const base = resolve(repoRoot, prefix);
   let entries: string[];
   try {

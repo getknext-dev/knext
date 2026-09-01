@@ -417,8 +417,13 @@ jobs:
           # `EADDRINUSE :::39188` on PR #676.
           KNEXT_REQUIRE_STANDALONE: '1'
           KNEXT_SIGTERM_APP_DIR: ${{ github.workspace }}/apps/db-demo
+        # bun, not vitest: both files import `bun:test`, so vitest's config
+        # excludes them and the step died with `No test files found` — a gate whose
+        # contract is "must NOT skip", failing for a reason unrelated to draining.
+        # `scripts/bun-test.mjs` also exits 1 on an empty selection, so a renamed
+        # file still fails loudly.
         run: >-
-          bun x vitest run
+          node scripts/bun-test.mjs
           apps/file-manager/sigterm-drain-e2e.test.ts
           apps/file-manager/sigterm-hardcap-e2e.test.ts
 
@@ -852,8 +857,9 @@ jobs:
 
       # The live suite + its hermetic guards (DSN host guard, workflow contract).
       - name: Run the live @getknext/db suite
+        # bun, not vitest — all three import `bun:test`; same reason as above.
         run: >-
-          bun x vitest run
+          node scripts/bun-test.mjs
           packages/db/src/__tests__/integration/live-postgres.test.ts
           packages/db/src/__tests__/live-dsn-guard.test.ts
           tests/db-live-workflow.test.ts
