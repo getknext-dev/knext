@@ -48,10 +48,10 @@ function logCacheEvent(type, source, key, options) {
     ensureConnected()
       .then((client) => {
         if (client) {
-          const pipeline = client.pipeline();
-          pipeline.lpush(`${KEY_PREFIX}:cache-events`, JSON.stringify(event));
-          pipeline.ltrim(`${KEY_PREFIX}:cache-events`, 0, MAX_EVENTS - 1);
-          pipeline.exec().catch(() => {});
+          execBatch(client, [
+            ['LPUSH', `${KEY_PREFIX}:cache-events`, JSON.stringify(event)],
+            ['LTRIM', `${KEY_PREFIX}:cache-events`, '0', String(MAX_EVENTS - 1)],
+          ]).catch(() => {});
         }
       })
       .catch(() => {});
@@ -389,6 +389,70 @@ async function waitForNativeReady(client) {
   }
 }
 
+/**
+ * Run `commands` as ONE atomic unit, whichever client is in play.
+ *
+ * ioredis exposes `multi()`. Bun's native client exposes neither `multi()` nor
+ * `pipeline()` — measured on 1.4.0, its prototype has only `send(command,
+ * args)` — so the transaction is issued explicitly. The Redis semantics are the
+ * same either way: commands queue at MULTI and apply only at EXEC.
+ *
+ * Atomicity is the point, not a nicety. `set` writing the entry but not its tag
+ * index leaves an entry `revalidateTag` can never reach; `revalidateTag`
+ * deleting the keys but not the tag set leaves the index pointing at nothing.
+ *
+ * Caveat, stated rather than discovered: on the native client the queue lives on
+ * the CONNECTION, so a concurrent caller interleaving its own commands between
+ * MULTI and EXEC would join this transaction. ioredis's `multi()` batches into a
+ * single write and does not have that exposure. The handler holds one client and
+ * awaits these sequentially, so it does not interleave with itself — but a
+ * future caller that shares the client must know this.
+ *
+ * @param {{ multi?: Function, send?: Function }} client
+ * @param {string[][]} commands `[['SET', key, value, 'EX', '60'], …]`
+ */
+async function execAtomic(client, commands) {
+  if (typeof client.multi === 'function') {
+    const tx = client.multi();
+    for (const [name, ...args] of commands) tx[name.toLowerCase()](...args);
+    return await tx.exec();
+  }
+  await client.send('MULTI', []);
+  try {
+    for (const [name, ...args] of commands) {
+      await client.send(name.toUpperCase(), args.map(String));
+    }
+    return await client.send('EXEC', []);
+  } catch (err) {
+    // Never leave a half-open transaction on the connection: the next command
+    // on it would silently be queued into this one.
+    try {
+      await client.send('DISCARD', []);
+    } catch {}
+    throw err;
+  }
+}
+
+/**
+ * Batch `commands` without transactional semantics — the event log, where
+ * ordering matters and atomicity does not. Mirrors `execAtomic`'s client split:
+ * `pipeline()` on ioredis, sequential `send` on the native client.
+ *
+ * @param {{ pipeline?: Function, send?: Function }} client
+ * @param {string[][]} commands
+ */
+async function execBatch(client, commands) {
+  if (typeof client.pipeline === 'function') {
+    const pipe = client.pipeline();
+    for (const [name, ...args] of commands) pipe[name.toLowerCase()](...args);
+    return await pipe.exec();
+  }
+  for (const [name, ...args] of commands) {
+    await client.send(name.toUpperCase(), args.map(String));
+  }
+  return undefined;
+}
+
 async function ensureConnected() {
   if (!useRedis) return null;
   // Breaker open — fail open to origin/memory without touching the socket.
@@ -611,14 +675,15 @@ class CacheHandler {
         // errors on a cluster — and `redisCall` now trips the breaker into a
         // clean fail-open rather than a hang. Stated here so it is read, not
         // discovered by whoever first points knext at a Redis Cluster.
-        const tx = client.multi();
-        tx.set(cacheKey(key), JSON.stringify(redisEntry), 'EX', ttl);
+        const commands = [
+          ['SET', cacheKey(key), JSON.stringify(redisEntry), 'EX', String(ttl)],
+        ];
         if (ctx?.tags?.length) {
           for (const tag of ctx.tags) {
-            tx.sadd(tagKey(tag), key);
+            commands.push(['SADD', tagKey(tag), key]);
           }
         }
-        await redisCall(() => tx.exec());
+        await redisCall(() => execAtomic(client, commands));
       } else {
         // In-memory fallback path: store original data with Map/Buffer types preserved
         // Only used when Redis is NOT available, to avoid unbounded memory growth
@@ -662,10 +727,9 @@ class CacheHandler {
               // leaves the tag set pointing at keys that no longer exist (or,
               // worse, entries that survive an invalidation that reported
               // success).
-              const tx = client.multi();
-              for (const k of keys) tx.del(cacheKey(k));
-              tx.del(tKey);
-              await redisCall(() => tx.exec());
+              const commands = keys.map((k) => ['DEL', cacheKey(k)]);
+              commands.push(['DEL', tKey]);
+              await redisCall(() => execAtomic(client, commands));
             }
             logCacheEvent('INVALIDATE', source, `tag:${tag}`, {
               durationMs: Date.now() - startTime,
