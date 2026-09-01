@@ -64,7 +64,12 @@ RUN bun build --compile --minify --target=${BUN_TARGET} \
 # Runtime — the binary, its public assets, and the two libraries Bun links.
 # No node, no npm, no package manager, no bytecode cache to mount.
 # ---------------------------------------------------------------------------
-FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+# Named `runner` because ci.yml's prod-image job builds `target: runner`. The
+# vinext rewrite replaced the old node-based runtime stage with this compiled
+# single-binary one and left it unnamed, so the build died with
+# `target stage "runner" could not be found`. Naming the stage keeps the
+# workflow's contract explicit rather than making it build whatever is last.
+FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce AS runner
 
 RUN apk add --no-cache libstdc++ libgcc
 
