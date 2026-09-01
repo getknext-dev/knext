@@ -68,7 +68,9 @@ spec:
               build:
                 description: |-
                   Build selects the build system that produced the image.
-                  Valid values: "turbopack" (default) or "vinext".
+                  Valid value: "turbopack" (also the default when absent). See the enum note
+                  below for why "vinext" is NOT admitted here yet even though the CLI type
+                  knows the name.
                   Maps from KnativeNextConfig.build.
 
                   INDEPENDENT of Runtime. The two axes are connected by the artifact SHAPE a
