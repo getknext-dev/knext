@@ -1,10 +1,20 @@
 {
   "$schema": "https://turbo.build/schema.json",
-  "globalDependencies": ["**/.env.*local"],
+  "globalDependencies": [
+    "**/.env.*local"
+  ],
   "tasks": {
     "build": {
-      "dependsOn": ["^build"],
-      "outputs": [".next/**", "!.next/cache/**", "dist/**"],
+      "dependsOn": [
+        "^build"
+      ],
+      "outputs": [
+        ".next/**",
+        "!.next/cache/**",
+        "dist/**",
+        ".vercel/output/**",
+        ".output/**"
+      ],
       "env": [
         "DATABASE_URL",
         "MINIO_*",
@@ -12,12 +22,15 @@
         "DASHBOARD_URL",
         "USERS_URL",
         "ASSET_PREFIX",
-        "REDIS_URL"
+        "REDIS_URL",
+        "NITRO_PRESET"
       ]
     },
     "lint": {},
     "typecheck": {
-      "dependsOn": ["^build"],
+      "dependsOn": [
+        "^build"
+      ],
       "outputs": []
     },
     "dev": {
@@ -25,8 +38,12 @@
       "persistent": true
     },
     "test": {
-      "dependsOn": ["^build"],
-      "outputs": ["coverage/**"],
+      "dependsOn": [
+        "^build"
+      ],
+      "outputs": [
+        "coverage/**"
+      ],
       "cache": true
     }
   }
