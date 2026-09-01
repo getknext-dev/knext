@@ -531,7 +531,7 @@ describe("kn-next create — the app name is VALIDATED, never escaped-and-shippe
         ["a".repeat(64), "RFC1123 labels cap at 63 characters"],
     ] as const;
 
-    it.each(INVALID)("rejects %j (%s)", (name) => {
+    it.each([...INVALID])("rejects %j (%s)", (name) => {
         const appDir = join(root, "apps", "victim");
         mkdirSync(appDir, { recursive: true });
         expect(() => writeScaffold({ appDir, name })).toThrow(/RFC1123|name/i);

@@ -27,6 +27,16 @@ import {
 } from './query';
 
 /**
+ * bun's `typeof fetch` carries a `preconnect` property; a bare arrow does not,
+ * so `spyOn(globalThis, 'fetch').mockImplementation(...)` is not assignable
+ * under `@types/bun`. This attaches the missing member instead of casting, so
+ * the callback's own parameter and return types stay checked — a cast would
+ * silence a genuinely wrong stub too.
+ */
+const fetchImpl = (fn: (...a: Parameters<typeof fetch>) => Promise<Response>) =>
+  Object.assign(fn, { preconnect: globalThis.fetch.preconnect });
+
+/**
  * P1.2 (obs-pages plan) / ADR-0038 — the server-only Prometheus query util:
  *  - reports a TYPED "unconfigured" result (never throws) when the env is unset,
  *    and does NOT hit the network in that case,
@@ -545,12 +555,14 @@ describe('startPageDeadline — one shared budget, not a per-call sum', () => {
     // per-call 4 s budget that takes ~4 s and reports "unreachable"; with a 30 ms
     // shared budget left it must end in ~30 ms and say "deadline".
     spyOn(globalThis, 'fetch').mockImplementation(
-      (_url, init) =>
-        new Promise((_resolve, reject) => {
-          init?.signal?.addEventListener('abort', () =>
-            reject(new DOMException('The operation was aborted', 'AbortError')),
-          );
-        }),
+      fetchImpl(
+        (_url, init) =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () =>
+              reject(new DOMException('The operation was aborted', 'AbortError')),
+            );
+          }),
+      ),
     );
 
     const startedAt = performance.now();
@@ -575,12 +587,14 @@ describe('startPageDeadline — one shared budget, not a per-call sum', () => {
    */
   it('attributes a deadline-bounded abort to the deadline even when the clock still shows budget left', async () => {
     spyOn(globalThis, 'fetch').mockImplementation(
-      (_url, init) =>
-        new Promise((_resolve, reject) => {
-          init?.signal?.addEventListener('abort', () =>
-            reject(new DOMException('The operation was aborted', 'AbortError')),
-          );
-        }),
+      fetchImpl(
+        (_url, init) =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () =>
+              reject(new DOMException('The operation was aborted', 'AbortError')),
+            );
+          }),
+      ),
     );
 
     // A clock that never advances: `remainingMs()` is 20 for the whole call, so
@@ -600,12 +614,14 @@ describe('startPageDeadline — one shared budget, not a per-call sum', () => {
 
   it('leaves attribution to the per-call budget when the deadline is NOT the binding bound', async () => {
     spyOn(globalThis, 'fetch').mockImplementation(
-      (_url, init) =>
-        new Promise((_resolve, reject) => {
-          init?.signal?.addEventListener('abort', () =>
-            reject(new DOMException('The operation was aborted', 'AbortError')),
-          );
-        }),
+      fetchImpl(
+        (_url, init) =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () =>
+              reject(new DOMException('The operation was aborted', 'AbortError')),
+            );
+          }),
+      ),
     );
 
     // 20 ms per-call budget under a 4 s page budget: the CALL is what ran out, so
@@ -738,12 +754,14 @@ describe('startPageDeadline — a reserved slice the ordinary reads cannot spend
 
   it('reports the applied bound for a read the deadline CUT SHORT, too', async () => {
     spyOn(globalThis, 'fetch').mockImplementation(
-      (_url, init) =>
-        new Promise((_resolve, reject) => {
-          init?.signal?.addEventListener('abort', () =>
-            reject(new DOMException('The operation was aborted', 'AbortError')),
-          );
-        }),
+      fetchImpl(
+        (_url, init) =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () =>
+              reject(new DOMException('The operation was aborted', 'AbortError')),
+            );
+          }),
+      ),
     );
 
     // A 30 ms share under a 30 + 20 ms ceiling: the hung request is aborted by

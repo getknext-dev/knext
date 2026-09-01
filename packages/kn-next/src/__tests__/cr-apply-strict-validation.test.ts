@@ -58,7 +58,12 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { KnativeNextConfig } from "../config";
 
-type AnyFn = (...args: unknown[]) => unknown;
+// bun types `mockResolvedValue`/`mockReturnValue` off the declared return
+// type. A mock returning `unknown` is not Promise-shaped, so every
+// `mockResolvedValue` call is rejected. Arguments stay `unknown[]` — that is
+// where the strictness that matters lives.
+// biome-ignore lint/suspicious/noExplicitAny: the return must be `any`; see above
+type AnyFn = (...args: unknown[]) => any;
 
 const runQuiet = mock<AnyFn>();
 const runInherit = mock<AnyFn>();

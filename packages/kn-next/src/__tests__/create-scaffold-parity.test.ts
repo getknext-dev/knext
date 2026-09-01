@@ -226,9 +226,9 @@ describe("kn-next create — no drift from the turbo zone template (#356/#407)",
         ).toEqual([]);
     });
 
-    it.each(
-        SHAPE_FROZEN,
-    )("%s stays in VERBATIM/NORMALIZED — its bucket is frozen", (rel) => {
+    it.each([
+        ...SHAPE_FROZEN,
+    ])("%s stays in VERBATIM/NORMALIZED — its bucket is frozen", (rel) => {
         const compared = new Set<string>([...VERBATIM, ...NORMALIZED]);
         expect(
             compared.has(rel),
@@ -243,7 +243,9 @@ describe("kn-next create — no drift from the turbo zone template (#356/#407)",
         ).toBe(false);
     });
 
-    it.each(VERBATIM)("%s is byte-identical in both template trees", (rel) => {
+    it.each([
+        ...VERBATIM,
+    ])("%s is byte-identical in both template trees", (rel) => {
         const zone = join(ZONE_TEMPLATE, rel);
         const cli = join(CLI_TEMPLATE, rel);
         expect(existsSync(cli), `${cli} missing`).toBe(true);

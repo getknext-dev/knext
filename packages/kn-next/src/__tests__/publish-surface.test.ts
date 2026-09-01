@@ -176,7 +176,7 @@ describe("every exports subpath is reachable by require(), not just import()", (
         "packages/db/package.json",
     ];
 
-    it.each(PUBLISHABLE)("%s — no subpath is import-only", (rel) => {
+    it.each([...PUBLISHABLE])("%s — no subpath is import-only", (rel) => {
         const repoRoot = resolve(
             dirname(fileURLToPath(import.meta.url)),
             "../../../..",

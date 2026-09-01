@@ -9,6 +9,16 @@
 import { afterEach, describe, expect, it, jest, spyOn } from "bun:test";
 import { doctorMain, probeManifest } from "../cli/doctor";
 
+/**
+ * bun's `typeof fetch` carries a `preconnect` property; a bare async arrow does
+ * not, so `spyOn(globalThis, 'fetch').mockImplementation(async () => …)` is not
+ * assignable under `@types/bun`. This attaches the missing member instead of
+ * casting, so the callback's own parameter and return types stay checked — a
+ * cast would silence a genuinely wrong stub too.
+ */
+const fetchImpl = (fn: (...a: Parameters<typeof fetch>) => Promise<Response>) =>
+    Object.assign(fn, { preconnect: globalThis.fetch.preconnect });
+
 function res(init: {
     status: number;
     ok?: boolean;
@@ -31,21 +41,23 @@ afterEach(() => jest.restoreAllMocks());
 describe("probeManifest — anonymous token flow (#198)", () => {
     it("does the realm/service → Bearer → retry dance and returns 'ok'", async () => {
         const calls: string[] = [];
-        spyOn(globalThis, "fetch").mockImplementation(async (url) => {
-            const u = String(url);
-            calls.push(u);
-            if (u.includes("/manifests/") && calls.length === 1) {
-                return res({
-                    status: 401,
-                    wwwAuth:
-                        'Bearer realm="https://ghcr.io/token",service="ghcr.io"',
-                });
-            }
-            if (u.startsWith("https://ghcr.io/token")) {
-                return res({ status: 200, json: { token: "abc" } });
-            }
-            return res({ status: 200 }); // authorized retry
-        });
+        spyOn(globalThis, "fetch").mockImplementation(
+            fetchImpl(async (url) => {
+                const u = String(url);
+                calls.push(u);
+                if (u.includes("/manifests/") && calls.length === 1) {
+                    return res({
+                        status: 401,
+                        wwwAuth:
+                            'Bearer realm="https://ghcr.io/token",service="ghcr.io"',
+                    });
+                }
+                if (u.startsWith("https://ghcr.io/token")) {
+                    return res({ status: 200, json: { token: "abc" } });
+                }
+                return res({ status: 200 }); // authorized retry
+            }),
+        );
 
         expect(await probeManifest("ghcr.io/acme/app:v1")).toBe("ok");
         // HEAD (401) → token → HEAD (Bearer) = 3 fetches.
@@ -55,16 +67,18 @@ describe("probeManifest — anonymous token flow (#198)", () => {
     });
 
     it("returns 'auth-required' when the token endpoint itself fails", async () => {
-        spyOn(globalThis, "fetch").mockImplementation(async (url) => {
-            const u = String(url);
-            if (u.includes("/manifests/")) {
-                return res({
-                    status: 401,
-                    wwwAuth: 'Bearer realm="https://ghcr.io/token"',
-                });
-            }
-            return res({ status: 500 }); // token fetch fails → no retry
-        });
+        spyOn(globalThis, "fetch").mockImplementation(
+            fetchImpl(async (url) => {
+                const u = String(url);
+                if (u.includes("/manifests/")) {
+                    return res({
+                        status: 401,
+                        wwwAuth: 'Bearer realm="https://ghcr.io/token"',
+                    });
+                }
+                return res({ status: 500 }); // token fetch fails → no retry
+            }),
+        );
         expect(await probeManifest("ghcr.io/acme/app:v1")).toBe(
             "auth-required",
         );

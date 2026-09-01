@@ -37,8 +37,8 @@ mock.module("../cli/exec", () => ({
 import { runCapture, runQuiet } from "../cli/exec";
 import { type StorageBackedConfig, uploadAssets } from "../utils/asset-upload";
 
-const runQuietMock = runQuiet as unknown as Mock;
-const runCaptureMock = runCapture as unknown as Mock;
+const runQuietMock = runQuiet as unknown as Mock<typeof runQuiet>;
+const runCaptureMock = runCapture as unknown as Mock<typeof runCapture>;
 
 /**
  * Writes a local asset by its UPLOAD KEY into the standalone-build source

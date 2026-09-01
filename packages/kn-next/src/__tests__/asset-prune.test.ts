@@ -44,8 +44,10 @@ import {
     type StorageBackedConfig,
 } from "../utils/asset-upload";
 
-const runCaptureMock = runCapture as unknown as Mock;
-const runDeleteMock = runQuietAllowFail as unknown as Mock;
+const runCaptureMock = runCapture as unknown as Mock<typeof runCapture>;
+const runDeleteMock = runQuietAllowFail as unknown as Mock<
+    typeof runQuietAllowFail
+>;
 
 /** The marker object name is a LOCKED contract (ADR-0011) — hardcoded here. */
 const MARKER = ".knext-build";

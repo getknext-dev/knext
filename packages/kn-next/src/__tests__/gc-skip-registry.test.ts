@@ -40,7 +40,10 @@ const GC_CLI_DOC = resolve(
 describe("GC_SKIP_REASONS registry (v3-P4a — condition 1)", () => {
     it("is an exported const whose value equals its key for every entry (enum-like stable tokens)", () => {
         for (const [key, value] of Object.entries(GC_SKIP_REASONS)) {
-            expect(value).toBe(key);
+            // `Object.entries` widens the key to `string`; comparing as strings
+            // keeps the assertion (value equals its own key) without loosening
+            // the union GC_SKIP_REASONS declares.
+            expect(String(value)).toBe(key);
         }
     });
 

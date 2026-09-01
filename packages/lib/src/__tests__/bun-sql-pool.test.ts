@@ -131,7 +131,14 @@ describe("bun-sql pool facade — drizzle's rowMode: 'array' (the silent-diverge
     const { client, seen } = fakeSql();
     const pool = createBunSqlPool(CONFIG, () => client as never);
 
-    const result = await pool.query({ text: 'select id, name from t', rowMode: 'array' });
+    // Parameterised: `rowMode: 'array'` makes Bun return POSITIONAL rows, so the
+    // row type is an array rather than the `Record<string, unknown>` default.
+    // The generic exists for exactly this; leaving it defaulted made the
+    // assertion below compare arrays against a record type.
+    const result = await pool.query<(string | number)[]>({
+      text: 'select id, name from t',
+      rowMode: 'array',
+    });
 
     expect(seen.at(-1)?.mode, 'must go through Bun .values() for array rows').toBe('array');
     expect(result.rows).toEqual(ARRAY_ROWS);
@@ -165,7 +172,10 @@ describe("bun-sql pool facade — drizzle's rowMode: 'array' (the silent-diverge
     const pool = createBunSqlPool(CONFIG, () => client as never);
 
     const conn = await pool.connect();
-    const result = await conn.query({ text: 'select 1', rowMode: 'array' });
+    const result = await conn.query<(string | number)[]>({
+      text: 'select 1',
+      rowMode: 'array',
+    });
 
     expect(seen.at(-1)?.mode).toBe('array');
     expect(result.rows).toEqual(ARRAY_ROWS);

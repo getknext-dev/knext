@@ -41,6 +41,16 @@ import {
     runDoctor,
 } from "../cli/doctor";
 
+/**
+ * bun's `typeof fetch` carries a `preconnect` property; a bare async arrow does
+ * not, so `spyOn(globalThis, 'fetch').mockImplementation(async () => …)` is not
+ * assignable under `@types/bun`. This attaches the missing member instead of
+ * casting, so the callback's own parameter and return types stay checked — a
+ * cast would silence a genuinely wrong stub too.
+ */
+const fetchImpl = (fn: (...a: Parameters<typeof fetch>) => Promise<Response>) =>
+    Object.assign(fn, { preconnect: globalThis.fetch.preconnect });
+
 /** Build a stub kubectl keyed on the joined argv (space-separated). */
 function stubKubectl(
     table: Record<string, { ok: boolean; stdout?: string; stderr?: string }>,
@@ -1153,7 +1163,7 @@ describe("probeManifest — bounded registry I/O", () => {
     it("passes an abort signal to every fetch and maps a timeout to 'unreachable' (SKIP path)", async () => {
         const seenInits: (RequestInit | undefined)[] = [];
         const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
-            async (_url, init) => {
+            fetchImpl(async (_url, init) => {
                 seenInits.push(init as RequestInit | undefined);
                 // Simulate a stalling registry: the bounded fetch rejects the
                 // way undici does when AbortSignal.timeout fires.
@@ -1161,7 +1171,7 @@ describe("probeManifest — bounded registry I/O", () => {
                     "The operation was aborted due to timeout",
                     "TimeoutError",
                 );
-            },
+            }),
         );
         try {
             const outcome = await probeManifest("ghcr.io/acme/app:v1");

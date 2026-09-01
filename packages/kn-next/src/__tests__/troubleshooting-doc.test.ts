@@ -117,7 +117,7 @@ describe("docs/runbooks/troubleshooting.md (#313)", () => {
         expect(doc()).toContain("kn-next doctor");
     });
 
-    it.each(GROUNDED_TOKENS)("grounds %s in its cited source", ({
+    it.each([...GROUNDED_TOKENS])("grounds %s in its cited source", ({
         token,
         source,
     }) => {

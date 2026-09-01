@@ -6,6 +6,21 @@ import { APP_NAME_ENV, overviewQueries, PROMETHEUS_URL_ENV } from './_prom/query
 import { NO_DATA } from './_ui/format';
 
 /**
+ * bun's `typeof fetch` carries a `preconnect` property that a bare arrow does
+ * not, so `spyOn(globalThis, 'fetch').mockImplementation(fn)` is not assignable
+ * under `@types/bun`. Attaching the member beats casting: the callback's own
+ * parameter and return types stay checked, so a genuinely wrong stub still errors.
+ *
+ * Written as a helper that REPLACES the call head rather than wrapping each
+ * callback, because wrapping needs paren matching and these files are JSX — that
+ * attempt produced `')' expected` and was reverted.
+ */
+const spyOnFetchImpl = (fn: (...a: Parameters<typeof fetch>) => Promise<Response>) =>
+  spyOn(globalThis, 'fetch').mockImplementation(
+    Object.assign(fn, { preconnect: globalThis.fetch.preconnect }),
+  );
+
+/**
  * P1.2 (obs-pages plan) / ADR-0038 — the /observability Overview (RED) page:
  *  - is auth-gated fail-closed (unauth ⇒ denied, no metric data / no fetch),
  *  - degrades gracefully: unconfigured Prometheus ⇒ a clear empty state naming
@@ -132,7 +147,7 @@ describe('overview page auth gate (fail-closed)', () => {
   });
 
   it('never renders the token into the HTML', async () => {
-    spyOn(globalThis, 'fetch').mockImplementation(async (u) => seededFetch(u));
+    spyOnFetchImpl(async (u) => seededFetch(u));
     const html = await renderPage();
     expect(html).not.toContain(TOKEN);
   });
@@ -165,7 +180,7 @@ describe('overview page degradation — unreachable Prometheus', () => {
 
 describe('overview page authorized render (ok path)', () => {
   it('renders rate, 5xx error %, p75, p99 and in-flight from seeded PromQL', async () => {
-    spyOn(globalThis, 'fetch').mockImplementation(async (u) => seededFetch(u));
+    spyOnFetchImpl(async (u) => seededFetch(u));
 
     const html = await renderPage();
 
@@ -179,7 +194,7 @@ describe('overview page authorized render (ok path)', () => {
   });
 
   it('links out to the Grafana dashboards (static, no iframe)', async () => {
-    spyOn(globalThis, 'fetch').mockImplementation(async (u) => seededFetch(u));
+    spyOnFetchImpl(async (u) => seededFetch(u));
     const html = await renderPage();
     expect(html.toLowerCase()).toContain('grafana');
     expect(html).not.toContain('<iframe');
@@ -189,7 +204,7 @@ describe('overview page authorized render (ok path)', () => {
 describe('overview page — explicit "no data yet" marker (P1.2 sign-off follow-up)', () => {
   it('renders the no-data marker, not a bare dash, when a series has no samples', async () => {
     const empty = { status: 'success', data: { resultType: 'matrix', result: [] } };
-    spyOn(globalThis, 'fetch').mockImplementation(async () => jsonResponse(empty));
+    spyOnFetchImpl(async () => jsonResponse(empty));
 
     const html = await renderPage();
 
@@ -201,7 +216,7 @@ describe('overview page — explicit "no data yet" marker (P1.2 sign-off follow-
 
 describe('overview page — every query is scoped to THIS app (#516 code review)', () => {
   it('never sends a cluster-wide RED query: every PromQL carries the app scope', async () => {
-    const spy = spyOn(globalThis, 'fetch').mockImplementation(async (u) => seededFetch(u));
+    const spy = spyOnFetchImpl(async (u) => seededFetch(u));
 
     await renderPage();
 

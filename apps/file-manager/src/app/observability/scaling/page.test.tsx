@@ -6,6 +6,21 @@ import { APP_NAME_ENV, PROMETHEUS_URL_ENV, scalingQueries } from '../_prom/query
 import { NO_DATA, UNAVAILABLE } from '../_ui/format';
 
 /**
+ * bun's `typeof fetch` carries a `preconnect` property that a bare arrow does
+ * not, so `spyOn(globalThis, 'fetch').mockImplementation(fn)` is not assignable
+ * under `@types/bun`. Attaching the member beats casting: the callback's own
+ * parameter and return types stay checked, so a genuinely wrong stub still errors.
+ *
+ * Written as a helper that REPLACES the call head rather than wrapping each
+ * callback, because wrapping needs paren matching and these files are JSX — that
+ * attempt produced `')' expected` and was reverted.
+ */
+const spyOnFetchImpl = (fn: (...a: Parameters<typeof fetch>) => Promise<Response>) =>
+  spyOn(globalThis, 'fetch').mockImplementation(
+    Object.assign(fn, { preconnect: globalThis.fetch.preconnect }),
+  );
+
+/**
  * P1.3 (obs-pages plan) / ADR-0038 — the /observability/scaling page (knext's
  * signature scale-to-zero page):
  *  - auth-gated fail-closed (unauth ⇒ denied, no metric data / no fetch),
@@ -132,7 +147,7 @@ function seededFetch(url: unknown, opts: SeedOptions = {}): Response {
 }
 
 function mockFetch(opts: SeedOptions = {}) {
-  return spyOn(globalThis, 'fetch').mockImplementation(async (u) => seededFetch(u, opts));
+  return spyOnFetchImpl(async (u) => seededFetch(u, opts));
 }
 
 /** Every PromQL string this render actually sent to Prometheus. */
@@ -376,7 +391,7 @@ describe('scaling page — warm-start ratio (plan §5.3 AC)', () => {
 
 describe('scaling page — partial Prometheus failure ≠ no data', () => {
   it('marks the failed panel unavailable while healthy panels still render', async () => {
-    spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
+    spyOnFetchImpl(async (u) => {
       if (String(u).includes('knext_coldstart')) {
         throw new Error('connect ECONNREFUSED');
       }

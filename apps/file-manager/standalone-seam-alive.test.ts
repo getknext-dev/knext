@@ -132,7 +132,10 @@ function allReaderChunks(writerFile: string): string[] {
   return [...set];
 }
 
-describe.skipIf(skipReason)('#352/#344 seam survives the standalone bundle', () => {
+// `skipIf` takes a boolean in bun; `skipReason` is `string | null`. Coerced
+// explicitly rather than relying on truthiness — this gate's contract is that
+// it must NOT skip, so the condition deciding that is worth stating exactly.
+describe.skipIf(Boolean(skipReason))('#352/#344 seam survives the standalone bundle', () => {
   it('build artifacts are present (or KNEXT_REQUIRE_STANDALONE forces a build)', () => {
     if (!buildPresent) {
       throw new Error(

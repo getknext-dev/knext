@@ -41,8 +41,8 @@ import {
     uploadAssets,
 } from "../utils/asset-upload";
 
-const runQuietMock = runQuiet as unknown as Mock;
-const runCaptureMock = runCapture as unknown as Mock;
+const runQuietMock = runQuiet as unknown as Mock<typeof runQuiet>;
+const runCaptureMock = runCapture as unknown as Mock<typeof runCapture>;
 
 /**
  * Writes a local asset by its UPLOAD KEY into the standalone-build source
@@ -256,7 +256,7 @@ describe("uploadAssets data plane", () => {
                 localKeys.filter((k) => k !== missingKey),
             ),
         );
-        runQuietMock.mockImplementation((argv: string[]) => {
+        runQuietMock.mockImplementation((argv: readonly string[]) => {
             // Bulk upload (the `sync`) is fine; only the single-file retry that
             // references the missing key throws.
             if (

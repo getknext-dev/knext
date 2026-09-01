@@ -15,6 +15,21 @@ import {
 } from '../_prom/query';
 
 /**
+ * bun's `typeof fetch` carries a `preconnect` property that a bare arrow does
+ * not, so `spyOn(globalThis, 'fetch').mockImplementation(fn)` is not assignable
+ * under `@types/bun`. Attaching the member beats casting: the callback's own
+ * parameter and return types stay checked, so a genuinely wrong stub still errors.
+ *
+ * Written as a helper that REPLACES the call head rather than wrapping each
+ * callback, because wrapping needs paren matching and these files are JSX — that
+ * attempt produced `')' expected` and was reverted.
+ */
+const spyOnFetchImpl = (fn: (...a: Parameters<typeof fetch>) => Promise<Response>) =>
+  spyOn(globalThis, 'fetch').mockImplementation(
+    Object.assign(fn, { preconnect: globalThis.fetch.preconnect }),
+  );
+
+/**
  * P1.4 (obs-pages plan) / ADR-0038 — the /observability/deployments page.
  *
  * The page resolves the plan §7 data-path fork as **(c) both, degrading**: the
@@ -182,7 +197,7 @@ function seededFetch(url: unknown, opts: SeedOptions = {}): Response {
 }
 
 function mockFetch(opts: SeedOptions = {}) {
-  return spyOn(globalThis, 'fetch').mockImplementation(async (u) => seededFetch(u, opts));
+  return spyOnFetchImpl(async (u) => seededFetch(u, opts));
 }
 
 function sentQueries(spy: ReturnType<typeof mockFetch>): string[] {
@@ -352,7 +367,7 @@ describe('deployments page degradation — ASYMMETRIC partial Prometheus failure
    * partial failure suppresses the WHOLE timeline and says "could not reach".
    */
   it('suppresses the whole timeline when only the replica queries fail', async () => {
-    const spy = spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
+    const spy = spyOnFetchImpl(async (u) => {
       const promql = decodeURIComponent(new URL(String(u)).searchParams.get('query') ?? '');
       if (promql.includes('kube_deployment_status_replicas')) {
         throw new Error('connect ECONNREFUSED');
@@ -387,7 +402,7 @@ describe('deployments page — the page-level deadline is honest when exhausted'
    * established ("kube-state-metrics is absent") and never a zero.
    */
   it('renders a distinct deadline state and issues NO probe once the budget is gone', async () => {
-    const spy = spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
+    const spy = spyOnFetchImpl(async (u) => {
       // The wave consumes the whole page CEILING between them — 1500 ms each,
       // i.e. the 4000 ms ordinary share AND the 500 ms probe reserve (#534)…
       clock.now += PAGE_DEADLINE_MS / 2 - 500;
@@ -413,7 +428,7 @@ describe('deployments page — the page-level deadline is honest when exhausted'
   });
 
   it('reports a probe that itself ran out of budget as the deadline, not as unreachable', async () => {
-    spyOn(globalThis, 'fetch').mockImplementation((u, init) => {
+    spyOnFetchImpl((u, init) => {
       const promql = decodeURIComponent(new URL(String(u)).searchParams.get('query') ?? '');
       if (promql === KUBE_STATE_PROBE) {
         // The probe was issued with the ~100 ms the wave left, and then HANGS: the
@@ -456,7 +471,7 @@ describe('deployments page — the page-level deadline is honest when exhausted'
    */
   it('reports the budget that actually applied, not the module constant', async () => {
     budget.totalMs = 1500;
-    spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
+    spyOnFetchImpl(async (u) => {
       // 3 × 700 ms = 2100 ms — past the 1500 + reserve ceiling, so even the
       // reserved probe is refused and the budget state is the honest answer.
       clock.now += 700;
@@ -484,7 +499,7 @@ describe('deployments page — the page-level deadline is honest when exhausted'
    */
   it('prints the SHARE, not the ceiling, when an ordinary wave read is the one cut short', async () => {
     budget.totalMs = 37; // distinctive: 37 is the share, 537 would be the ceiling
-    spyOn(globalThis, 'fetch').mockImplementation(
+    spyOnFetchImpl(
       (_u, init) =>
         // Hangs until the wave's own budget aborts it ⇒ deadline-exceeded.
         new Promise((_resolve, reject) => {
@@ -514,7 +529,7 @@ describe('deployments page — the page-level deadline is honest when exhausted'
    */
   it('suppresses an established "unreachable" when the same wave also ran out of budget', async () => {
     budget.totalMs = 30;
-    const spy = spyOn(globalThis, 'fetch').mockImplementation((u, init) => {
+    const spy = spyOnFetchImpl((u, init) => {
       const promql = decodeURIComponent(new URL(String(u)).searchParams.get('query') ?? '');
       if (promql.includes('kube_deployment_created')) {
         // Hangs until the SHARED budget's own signal aborts it ⇒ deadline-exceeded.
@@ -549,7 +564,7 @@ describe('deployments page — the page-level deadline is honest when exhausted'
    */
   it('does not claim "slow rather than absent" when a read in the same wave DID fail outright', async () => {
     budget.totalMs = 30;
-    spyOn(globalThis, 'fetch').mockImplementation((u, init) => {
+    spyOnFetchImpl((u, init) => {
       const promql = decodeURIComponent(new URL(String(u)).searchParams.get('query') ?? '');
       if (promql.includes('kube_deployment_created')) {
         return new Promise((_resolve, reject) => {
@@ -588,7 +603,7 @@ describe('deployments page — the page-level deadline is honest when exhausted'
       reason: 'unreachable',
       detail: 'connect ECONNREFUSED',
     });
-    spyOn(globalThis, 'fetch').mockImplementation(
+    spyOnFetchImpl(
       (_u, init) =>
         new Promise((_resolve, reject) => {
           init?.signal?.addEventListener('abort', () =>
@@ -628,7 +643,7 @@ describe('deployments page — the page-level deadline is honest when exhausted'
       reason: reason as 'crd-absent',
       detail: 'detail',
     });
-    spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
+    spyOnFetchImpl(async (u) => {
       clock.now += PAGE_TOTAL_BUDGET_MS / 3;
       return seededFetch(u, { kubeStateAbsent: true });
     });
@@ -641,7 +656,7 @@ describe('deployments page — the page-level deadline is honest when exhausted'
   });
 
   it('keeps the "slow rather than absent" reading when NO read failed outright', async () => {
-    spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
+    spyOnFetchImpl(async (u) => {
       clock.now += PAGE_TOTAL_BUDGET_MS / 3;
       return seededFetch(u, { kubeStateAbsent: true });
     });
@@ -677,7 +692,7 @@ describe('deployments page — the kube-state probe has a reserved slice (#534)'
     });
     let answered = 0;
 
-    const spy = spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
+    const spy = spyOnFetchImpl(async (u) => {
       const promql = decodeURIComponent(new URL(String(u)).searchParams.get('query') ?? '');
       const response = seededFetch(u, opts);
       if (promql !== KUBE_STATE_PROBE && ++answered === 3) {
@@ -733,7 +748,7 @@ describe('deployments page — the kube-state probe has a reserved slice (#534)'
    * nothing, and the page falls back to the honest budget state.
    */
   it('does not hand out a reserve the ceiling has already spent', async () => {
-    const spy = spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
+    const spy = spyOnFetchImpl(async (u) => {
       clock.now += PAGE_TOTAL_BUDGET_MS / 3;
       return seededFetch(u, { kubeStateAbsent: true });
     });
@@ -921,7 +936,7 @@ describe('deployments page degradation — kube-state-metrics PRESENT but nothin
 
   it('falls back to "could not reach" (never a cause claim) when the probe itself fails', async () => {
     process.env[APP_NAME_ENV] = 'ghost';
-    spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
+    spyOnFetchImpl(async (u) => {
       const promql = decodeURIComponent(new URL(String(u)).searchParams.get('query') ?? '');
       if (promql === KUBE_STATE_PROBE) {
         throw new Error('connect ECONNREFUSED');

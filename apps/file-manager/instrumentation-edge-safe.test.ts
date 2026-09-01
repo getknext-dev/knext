@@ -53,7 +53,9 @@ function topLevelStaticImportSpecifiers(source: string): string[] {
 describe('instrumentation.ts edge-bundle safety (#342)', () => {
   const staticSpecs = topLevelStaticImportSpecifiers(instrumentationSrc);
 
-  it.each(NODE_ONLY_MODULES)('does NOT top-level static-import the Node-only module %s', (mod) => {
+  it.each([
+    ...NODE_ONLY_MODULES,
+  ])('does NOT top-level static-import the Node-only module %s', (mod) => {
     expect(staticSpecs).not.toContain(mod);
   });
 
