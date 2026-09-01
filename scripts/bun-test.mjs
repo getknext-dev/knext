@@ -106,7 +106,15 @@ const files = execFileSync('git', ['ls-files', ...(targets.length ? targets : ['
   // fail on a machine without a running daemon for environmental reasons, not
   // porting ones, and a runner that reports those as migration failures buries
   // the real ones. They still run — in the job that provides a daemon.
-  .filter((f) => !/\.docker-e2e\.test\.tsx?$/.test(f))
+  // ...unless the FILE ITSELF was named. The container e2e has to be runnable
+  // by name — it imports `bun:test`, so vitest cannot collect it, and
+  // `examples/bun-exec`'s `test:image` is the job that runs it.
+  //
+  // Keyed on the exact path, not on `targets.length`: the example's own `test`
+  // script names a DIRECTORY, and a blanket "any target lifts the exclusion"
+  // swept the ~100 MB container build into the fast suite. The contract test
+  // `bun-exec-example-suite-collection` caught that, which is what it is for.
+  .filter((f) => !/\.docker-e2e\.test\.tsx?$/.test(f) || targets.includes(f))
   // `examples/**` is NOT part of this workspace. It carries its own bun.lock,
   // pinning vinext/nitro prereleases the workspace must not inherit, and its
   // guards run via `bun run test` INSIDE the example — a contract

@@ -8,7 +8,7 @@
     "build": "./build.sh",
     "dev": "vite dev",
     "test": "node ../../scripts/bun-test.mjs examples/bun-exec",
-    "test:image": "vitest run --config vitest.image.config.ts"
+    "test:image": "node ../../scripts/bun-test.mjs examples/bun-exec/test/alpine-image.docker-e2e.test.ts"
   },
   "dependencies": {
     "react": "^19.2.6",
