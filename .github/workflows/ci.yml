@@ -192,7 +192,21 @@ jobs:
       - name: Typecheck file-manager (tsc --noEmit)
         run: bun run --filter file-manager typecheck
 
-      - name: Run tests
+      # BOTH runners. This step ran `vitest` alone, which after the bun migration
+      # collects 3 files out of 338 — so CI's primary test job was executing 12
+      # tests and reporting green, and the coverage gate below was measuring a
+      # denominator of 3 files. The root `package.json` `ci` script had the same
+      # staleness and was fixed; this copy was missed because nothing compares
+      # them.
+      #
+      # The bun runner first: it is the suite. `scripts/bun-test.mjs` exits
+      # non-zero on any failing file, and `tests/runner-partition.test.ts` asserts
+      # every test file is claimed by exactly one of the two runners, so "ran
+      # under neither" cannot hide here.
+      - name: Run tests (bun — the suite)
+        run: node scripts/bun-test.mjs
+
+      - name: Run tests (vitest — the 3 files that cannot run under bun)
         run: bun x vitest run --coverage
       
       - name: Upload coverage reports
