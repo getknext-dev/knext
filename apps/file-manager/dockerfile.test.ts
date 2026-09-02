@@ -40,10 +40,45 @@ describe('#ADR-0048 file-manager vinext image — build order', () => {
     // ships a CMD pointing at nothing.
     const build = lineOf('vite build');
     const check = lineOf('.output/server/index.mjs \\');
-    const compile = lineOf('bun build --compile');
+    // The compile moved from a bare `bun build --compile` into
+    // `scripts/compile-single-exec.mjs`, because it now needs BUILD PLUGINS and
+    // the CLI has no `--plugin`: one rewrites `import.meta` so `--bytecode` can
+    // compile the bundle, the other swaps sharp's addon loader for a dlopen
+    // shim. The ordering this guards is unchanged.
+    const compile = lineOf('compile-single-exec.mjs');
 
     expect(build).toBeLessThan(check);
     expect(check).toBeLessThan(compile);
+  });
+
+  it('compiles WITH bytecode, through the script that can', () => {
+    // `--bytecode` is not reachable from the CLI here: it emits CommonJS, where
+    // the nitro bundle's `import.meta` is a syntax error, so the build fails
+    // with `Failed to generate bytecode`. The script rewrites those first.
+    // Asserted on the SCRIPT, not the Dockerfile, because that is where the
+    // flag lives now.
+    const script = readFileSync(
+      join(import.meta.dirname, 'scripts/compile-single-exec.mjs'),
+      'utf8',
+    );
+    expect(script, 'the single-exec build must enable bytecode').toMatch(/bytecode:\s*true/);
+    expect(script, 'the sharp addon shim must be wired into the compile').toContain(
+      'sharp-addon-dlopen',
+    );
+  });
+
+  it('ships the sharp native tree into the runtime layer', () => {
+    // Without it `/_next/image` serves unoptimized originals: a compiled binary
+    // cannot resolve a package from disk, so the addon has to be a real file
+    // beside the executable. Both packages, because the addon links libvips by
+    // a relative rpath and cannot be flattened.
+    expect(DF, 'the builder must stage the sharp addon').toMatch(
+      /cp -RL[^\n]*sharp-\$\{IMG_PLATFORM\}/,
+    );
+    expect(DF, 'and libvips alongside it').toMatch(/cp -RL[^\n]*sharp-libvips-\$\{IMG_PLATFORM\}/);
+    expect(DF, 'the runtime layer must receive the tree').toMatch(
+      /COPY --from=builder \/repo\/native \/app\/native/,
+    );
   });
 
   it('compiles for musl, matching the alpine runtime stage', () => {

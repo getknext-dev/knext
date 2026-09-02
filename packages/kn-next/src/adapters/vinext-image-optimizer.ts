@@ -104,7 +104,11 @@ let sharpModule: SharpModule | null | undefined;
  * Cached either way, so a missing sharp costs one failed resolve rather than
  * one per request.
  */
-async function loadSharp(): Promise<SharpModule | null> {
+async function loadSharp(provided?: SharpModule): Promise<SharpModule | null> {
+    // A directly-passed sharp wins and is never cached into `sharpModule`: the
+    // caller owns it, and caching it here would let one entry's collaborator
+    // leak into another's.
+    if (provided) return provided;
     if (sharpModule !== undefined) return sharpModule;
     try {
         // Anchored on cwd: inside a compiled binary `import.meta.url` is an
@@ -140,7 +144,10 @@ async function loadSharp(): Promise<SharpModule | null> {
  * error status. A broken optimizer must degrade to the behaviour that existed
  * before it — an unoptimized image — never to a broken page.
  */
-export function knextImageOptimizer(): KnextImageOptimizer {
+export function knextImageOptimizer(
+    /** sharp, when the caller has it. See `ImageRouteOptions.sharp`. */
+    provided?: SharpModule,
+): KnextImageOptimizer {
     return {
         async transformImage(body, { width, format, quality, sourceFormat }) {
             const source = Buffer.from(await new Response(body).arrayBuffer());
@@ -148,7 +155,7 @@ export function knextImageOptimizer(): KnextImageOptimizer {
             const target = normaliseFormat(format);
             if (!target) return passthrough(source, sourceFormat);
 
-            const sharp = await loadSharp();
+            const sharp = await loadSharp(provided);
             if (!sharp) return passthrough(source, sourceFormat);
 
             try {
@@ -228,6 +235,24 @@ export interface ImageRouteOptions {
      * this module deliberately does not.
      */
     fetchSource: (path: string) => Promise<Response>;
+
+    /**
+     * sharp itself, passed in by the entry.
+     *
+     * DIRECT-PASS rather than a module-state seam, per architecture.md §4, and
+     * here it is not merely preferred — it is the only thing that works inside a
+     * `bun build --compile` binary. Measured on bun 1.4.0: a compiled binary
+     * cannot resolve a package from disk AT ALL. `createRequire(cwd)('sharp')`
+     * fails with `Cannot find module 'sharp'` even when sharp and every one of
+     * its dependencies sit top-level in a flat `node_modules` beside the
+     * executable, and even though the identical call succeeds uncompiled. So the
+     * runtime-resolve path below can never serve the compiled target; sharp has
+     * to be in the bundle, which means the ENTRY has to hand it over.
+     *
+     * Optional: the node/uncompiled targets leave it unset and keep using the
+     * runtime resolve, which is what keeps sharp out of their static graph.
+     */
+    sharp?: SharpModule;
 }
 
 /** Requests this layer answers. Anything else is not ours. */
@@ -243,7 +268,7 @@ export function isImageRequest(url: URL): boolean {
  */
 export async function handleImageRequest(
     request: Request,
-    { fetchSource }: ImageRouteOptions,
+    { fetchSource, sharp }: ImageRouteOptions,
 ): Promise<Response | null> {
     const url = new URL(request.url);
     if (!isImageRequest(url)) return null;
@@ -271,7 +296,7 @@ export async function handleImageRequest(
         "png";
     const format = negotiateFormat(request.headers.get("accept"), sourceFormat);
 
-    return knextImageOptimizer().transformImage(source.body, {
+    return knextImageOptimizer(sharp).transformImage(source.body, {
         width,
         format,
         sourceFormat,

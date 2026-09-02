@@ -77,8 +77,37 @@ RUN set -eu; \
       esac; \
     fi; \
     echo "compiling for TARGETARCH=${TARGETARCH} -> ${BUN_TARGET}"; \
-    bun build --compile --minify --target="${BUN_TARGET}" \
-      .output/server/index.mjs --outfile /repo/knext-exec
+    cd apps/file-manager; \
+    KNEXT_BUN_TARGET="${BUN_TARGET}" \
+    KNEXT_EXEC_OUTFILE=/repo/knext-exec \
+      bun run scripts/compile-single-exec.mjs
+
+# The sharp addon, staged for the runtime layer.
+#
+# It cannot go INSIDE the binary: `--asset` embeds it and the OS still cannot
+# `dlopen` a path in the binary's virtual filesystem. It is loaded by absolute
+# path instead (see @getknext/core's sharp-addon-dlopen shim).
+#
+# `cp -RL` dereferences: bun's isolated store keeps these under
+# `node_modules/.bun/node_modules/@img`, reached by symlink, and a plain `cp -R`
+# would copy the links and leave the runtime layer with dangling pointers.
+#
+# BOTH packages, and their layout preserved: the addon links libvips by a
+# RELATIVE rpath, so flattening the tree makes `dlopen` find the addon and then
+# fail on `libvips-cpp`.
+RUN set -eu; \
+    case "${TARGETARCH}" in \
+      amd64) IMG_PLATFORM=linux-musl-x64 ;; \
+      arm64) IMG_PLATFORM=linux-musl-arm64 ;; \
+      *) echo "unsupported TARGETARCH='${TARGETARCH}'" >&2; exit 1 ;; \
+    esac; \
+    SRC=/repo/node_modules/.bun/node_modules/@img; \
+    mkdir -p /repo/native; \
+    cp -RL "$SRC/sharp-${IMG_PLATFORM}" /repo/native/; \
+    cp -RL "$SRC/sharp-libvips-${IMG_PLATFORM}" /repo/native/; \
+    ADDON=$(find "/repo/native/sharp-${IMG_PLATFORM}" -name 'sharp-*.node' | head -1); \
+    test -n "$ADDON" || { echo "no sharp addon found under /repo/native" >&2; exit 1; }; \
+    echo "staged sharp addon: $ADDON"
 
 # ---------------------------------------------------------------------------
 # Runtime — the binary, its public assets, and the two libraries Bun links.
@@ -100,6 +129,14 @@ WORKDIR /app
 # read the build tree's assets instead of the image's.
 COPY --from=builder /repo/knext-exec /app/server
 COPY --from=builder /repo/apps/file-manager/.output/public /app/.output/public
+# The sharp addon + libvips. ~18 MB, and the reason /_next/image can optimize at
+# all: a compiled binary cannot resolve a package from disk, so the native module
+# ships beside the executable and is opened by path.
+#
+# No env var wires this up — the shim DISCOVERS `native/sharp-*/lib/sharp-*.node`
+# next to the executable. One less value to set correctly in a deploy manifest,
+# and a mis-set one is a failure mode the shim already had to defend against.
+COPY --from=builder /repo/native /app/native
 
 USER 65532:65532
 

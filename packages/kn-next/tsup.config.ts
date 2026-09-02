@@ -78,6 +78,11 @@ export default defineConfig([
       'adapters/standalone-bun-exports': 'src/adapters/standalone-bun-exports.ts',
       // cache-handler is plain JS (untyped) — bundled to dist, no .d.ts emitted
       'adapters/cache-handler': 'src/adapters/cache-handler.js',
+      // The sharp addon shim. Plain untyped ESM, like cache-handler: it is
+      // pulled in by a BUNDLER ALIAS (apps/*/vite.config.ts) rather than
+      // imported by name, so it needs its own entry or it never reaches dist and
+      // the alias resolves to nothing.
+      'adapters/sharp-addon-dlopen': 'src/adapters/sharp-addon-dlopen.mjs',
       // The in-flight cache-write registry (`./internal/cache-drain`).
       // Measured, not assumed: tsup hoists it into a SHARED chunk that both
       // this entry and adapters/cache-handler.js import, so the published
