@@ -77,7 +77,6 @@ RUN set -eu; \
       esac; \
     fi; \
     echo "compiling for TARGETARCH=${TARGETARCH} -> ${BUN_TARGET}"; \
-    cd apps/file-manager; \
     KNEXT_BUN_TARGET="${BUN_TARGET}" \
     KNEXT_EXEC_OUTFILE=/repo/knext-exec \
       bun run scripts/compile-single-exec.mjs
