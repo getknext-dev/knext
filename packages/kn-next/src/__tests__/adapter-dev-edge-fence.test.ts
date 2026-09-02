@@ -122,11 +122,22 @@ describe("#408 — the edge fence covers `next dev --webpack` (real dev server)"
         const port = await freePort();
         let out = "";
         let exited: string | null = null;
-        child = spawn(NEXT_BIN, ["dev", "--webpack", "-p", String(port)], {
-            cwd: FIXTURE,
-            detached: true,
-            env: { ...process.env, NODE_ENV: "development" },
-        });
+        // `-H 127.0.0.1`: bind the interface the poll below dials.
+        //
+        // Without it `next dev` binds `localhost`, and the CI runner resolves
+        // that to `::1` only — so the server reported `✓ Ready in 376ms` and
+        // listened happily on IPv6 while every IPv4 probe was refused. The poll
+        // then ran its full 150s against a healthy server it could not reach.
+        // Locally the two agree, which is why this only ever failed in CI.
+        child = spawn(
+            NEXT_BIN,
+            ["dev", "--webpack", "-p", String(port), "-H", "127.0.0.1"],
+            {
+                cwd: FIXTURE,
+                detached: true,
+                env: { ...process.env, NODE_ENV: "development" },
+            },
+        );
         child.stdout?.on("data", (b) => {
             out += String(b);
         });
