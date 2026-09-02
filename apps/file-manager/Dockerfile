@@ -54,10 +54,30 @@ RUN ./node_modules/.bin/vite build
 RUN test -f .output/server/index.mjs \
     || (echo "vite build produced no .output/server/index.mjs" && exit 1)
 
-# The compile target must match the RUNTIME image's libc. alpine is musl; a
-# glibc binary exits here with no useful message.
-ARG BUN_TARGET=bun-linux-arm64-musl
-RUN bun build --compile --minify --target=${BUN_TARGET} \
+# The compile target must match the RUNTIME image's libc AND its architecture.
+# alpine is musl; a glibc binary exits with no useful message.
+#
+# Derived from buildx's TARGETARCH rather than defaulted, because a default is
+# only ever right on one machine. It used to be `bun-linux-arm64-musl` — correct
+# on an Apple Silicon laptop, and silently wrong everywhere else. CI passes no
+# build-arg, so the amd64 runner compiled an arm64 binary and the container died
+# with `exec /app/server: exec format error` after starting successfully. OKE is
+# amd64 too, so the same image could not have run there.
+#
+# BUN_TARGET stays overridable for a caller that wants to cross-compile
+# deliberately; it just no longer has a guess baked in as its default.
+ARG TARGETARCH
+ARG BUN_TARGET=
+RUN set -eu; \
+    if [ -z "${BUN_TARGET}" ]; then \
+      case "${TARGETARCH}" in \
+        amd64) BUN_TARGET=bun-linux-x64-musl ;; \
+        arm64) BUN_TARGET=bun-linux-arm64-musl ;; \
+        *) echo "unsupported TARGETARCH='${TARGETARCH}' — add its bun target" >&2; exit 1 ;; \
+      esac; \
+    fi; \
+    echo "compiling for TARGETARCH=${TARGETARCH} -> ${BUN_TARGET}"; \
+    bun build --compile --minify --target="${BUN_TARGET}" \
       .output/server/index.mjs --outfile /repo/knext-exec
 
 # ---------------------------------------------------------------------------
