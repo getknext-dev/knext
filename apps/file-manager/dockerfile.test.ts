@@ -70,12 +70,22 @@ describe('#ADR-0048 file-manager vinext image — build order', () => {
   it('ships the sharp native tree into the runtime layer', () => {
     // Without it `/_next/image` serves unoptimized originals: a compiled binary
     // cannot resolve a package from disk, so the addon has to be a real file
-    // beside the executable. Both packages, because the addon links libvips by
-    // a relative rpath and cannot be flattened.
-    expect(DF, 'the builder must stage the sharp addon').toMatch(
-      /cp -RL[^\n]*sharp-\$\{IMG_PLATFORM\}/,
+    // beside the executable, with its layout intact (relative rpath to libvips).
+    // Two halves, because the path lives in a variable: the tree is SOURCED
+    // from @img, and it is copied with -RL (dereferencing bun's symlinked
+    // isolated store — a plain -R would leave dangling links in the image).
+    expect(DF, 'the builder must source the @img tree').toMatch(/SRC=[^\n]*@img/);
+    expect(DF, 'and copy it dereferenced').toMatch(/cp -RL[^\n]*\$SRC/);
+    // NOT per-platform. Naming the directory means encoding sharp's own scheme,
+    // and that guess was wrong once: sharp uses `linuxmusl`, one word, so the
+    // build died on `can't stat .../@img/sharp-linux-musl-x64`. Copying whatever
+    // bun installed for this platform avoids the guess entirely.
+    expect(DF, 'staging must not hardcode a per-platform @img directory').not.toMatch(
+      /sharp-\$\{IMG_PLATFORM\}/,
     );
-    expect(DF, 'and libvips alongside it').toMatch(/cp -RL[^\n]*sharp-libvips-\$\{IMG_PLATFORM\}/);
+    // libvips ships a `stub.node` that also matches `sharp-*`; picking it would
+    // dlopen the wrong library.
+    expect(DF, 'addon selection must exclude libvips').toMatch(/-not -path[^\n]*libvips/);
     expect(DF, 'the runtime layer must receive the tree').toMatch(
       /COPY --from=builder \/repo\/native \/app\/native/,
     );

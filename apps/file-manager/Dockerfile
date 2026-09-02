@@ -91,21 +91,25 @@ RUN set -eu; \
 # `node_modules/.bun/node_modules/@img`, reached by symlink, and a plain `cp -R`
 # would copy the links and leave the runtime layer with dangling pointers.
 #
-# BOTH packages, and their layout preserved: the addon links libvips by a
-# RELATIVE rpath, so flattening the tree makes `dlopen` find the addon and then
-# fail on `libvips-cpp`.
+# The WHOLE `@img` tree, not a per-platform pair, and the layout preserved:
+#
+#   - naming it per-platform means encoding sharp's own scheme, and that guess
+#     was wrong — sharp uses `linuxmusl`, one word, not `linux-musl`. The build
+#     failed on `can't stat .../@img/sharp-linux-musl-x64`.
+#   - bun installs only the optional packages matching the build platform, so
+#     copying everything present IS the per-platform set, without the naming.
+#   - the addon links libvips by a RELATIVE rpath, so flattening the tree makes
+#     `dlopen` find the addon and then fail on `libvips-cpp`.
+#
+# The `-not -path '*libvips*'` matters: libvips ships a `stub.node` that also
+# matches `sharp-*`, and selecting it would dlopen the wrong library.
 RUN set -eu; \
-    case "${TARGETARCH}" in \
-      amd64) IMG_PLATFORM=linux-musl-x64 ;; \
-      arm64) IMG_PLATFORM=linux-musl-arm64 ;; \
-      *) echo "unsupported TARGETARCH='${TARGETARCH}'" >&2; exit 1 ;; \
-    esac; \
     SRC=/repo/node_modules/.bun/node_modules/@img; \
+    test -d "$SRC" || { echo "no @img packages installed at $SRC" >&2; exit 1; }; \
     mkdir -p /repo/native; \
-    cp -RL "$SRC/sharp-${IMG_PLATFORM}" /repo/native/; \
-    cp -RL "$SRC/sharp-libvips-${IMG_PLATFORM}" /repo/native/; \
-    ADDON=$(find "/repo/native/sharp-${IMG_PLATFORM}" -name 'sharp-*.node' | head -1); \
-    test -n "$ADDON" || { echo "no sharp addon found under /repo/native" >&2; exit 1; }; \
+    cp -RL "$SRC"/. /repo/native/; \
+    ADDON=$(find /repo/native -name 'sharp-*.node' -not -path '*libvips*' | head -1); \
+    test -n "$ADDON" || { echo "no sharp addon staged under /repo/native" >&2; exit 1; }; \
     echo "staged sharp addon: $ADDON"
 
 # ---------------------------------------------------------------------------
