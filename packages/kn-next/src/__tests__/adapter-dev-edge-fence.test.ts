@@ -167,8 +167,24 @@ describe("#408 — the edge fence covers `next dev --webpack` (real dev server)"
         let res: Response | undefined;
         while (Date.now() < deadline && !exited) {
             try {
-                // Short per-ATTEMPT budget, because this is a poll: the loop
-                // below re-tries every 500ms until its own 150s deadline.
+                // Per-ATTEMPT budget, sized between two failures rather than
+                // guessed:
+                //
+                //   120s (original) is longer than the poll's own 150s deadline,
+                //   so one hung attempt ate it and the SECOND ran past the 180s
+                //   test timeout — the informative assertions below never ran and
+                //   CI reported a bare timeout.
+                //
+                //   5s (my first correction) over-shot the other way. `next dev
+                //   --webpack` answers its FIRST request only after a cold
+                //   compile, which takes longer than that on a CI runner, so every
+                //   attempt aborted mid-compile and the loop never converged —
+                //   with the server reporting `✓ Ready in 305ms` and bound to the
+                //   very address being dialled.
+                //
+                // 30s leaves room for that compile and still lets the loop iterate
+                // ~5 times inside its deadline, so a genuine failure reaches the
+                // assertion instead of the test timeout.
                 //
                 // It was 120s, which is longer than the poll is allowed to run
                 // and two-thirds of the whole test budget. A dev server that
@@ -179,7 +195,7 @@ describe("#408 — the edge fence covers `next dev --webpack` (real dev server)"
                 // never execute. CI reported a bare "timed out after 180000ms"
                 // with 2 expect() calls, and the reason was thrown away.
                 res = await fetch(`http://127.0.0.1:${port}/`, {
-                    signal: AbortSignal.timeout(5_000),
+                    signal: AbortSignal.timeout(30_000),
                 });
                 break;
             } catch {
