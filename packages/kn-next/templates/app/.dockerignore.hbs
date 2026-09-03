@@ -1,10 +1,10 @@
 # {{ name }} — Docker build context exclusions.
 #
-# The generated Dockerfile does `COPY . .`, and its context is the resolved
-# tracing root — which is NOT always this directory. When the lockfile walk
-# finds a marker above the app, the context widens to that ancestor, and
-# everything under it is uploaded to the Docker daemon and baked into the
-# builder stage.
+# The generated Dockerfile COPYs three things from the context — the compiled
+# executable, `.output/public`, and `native/` — and the context is the
+# resolved tracing root, which is NOT always this directory. When the lockfile
+# walk finds a marker above the app, the context widens to that ancestor, and
+# everything not excluded here is uploaded to the Docker daemon.
 #
 # `kn-next create` warns when it detects more than one root marker. This file is
 # what makes a wrong context HARMLESS rather than merely reported.
@@ -43,13 +43,19 @@ kubeconfig
 node_modules
 .next
 .output
+# …but the Dockerfile COPYs the SERVED static tree out of the build output, so
+# it must come back in. An exclusion the Dockerfile contradicts is not a
+# tidier context — it is an unbuildable image (`COPY .output/public` fails).
+!.output/public
 .vinext
 dist
 build
 *.tsbuildinfo
 
-# Compiled single-executables are ~60-90 MB each and are build OUTPUT.
+# Compiled single-executables are ~60-90 MB each and are build OUTPUT — except
+# the ship binaries, which are exactly what `COPY ${BINARY}` needs.
 knext-exec*
+!knext-exec-linux-*
 server
 
 # ── Test, coverage and editor noise ──────────────────────────────────────────

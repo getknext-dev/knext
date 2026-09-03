@@ -138,11 +138,15 @@ describe("stageNitroPublicAssets", () => {
         writeFileSync(join(cwd, ".output", "public", "favicon.ico"), "icon");
     }
 
-    it("stages .output/public into .knext-upload, key-space preserved", () => {
+    it("stages .output/public into a temp dir OUTSIDE the repo, key-space preserved", () => {
+        // Outside the repo means outside deploy's docker build context and
+        // outside git — an in-repo staging dir raced buildx's context walk
+        // and wedged `git status` (re-gate residual on the fix round).
         seedNitroBuild();
         const staged = stageNitroPublicAssets(cwd);
 
-        expect(staged).toBe(join(cwd, ".knext-upload"));
+        expect(staged.startsWith(cwd)).toBe(false);
+        expect(staged).toContain("knext-upload-");
         expect(
             existsSync(
                 join(
@@ -185,13 +189,14 @@ describe("stageNitroPublicAssets", () => {
         );
     });
 
-    it("clears stale files from a previous staging run", () => {
+    it("a re-stage cannot see a previous run's stale files — fresh dir per run", () => {
         seedNitroBuild();
-        const staged = stageNitroPublicAssets(cwd);
-        writeFileSync(join(staged, "stale.js"), "old");
+        const first = stageNitroPublicAssets(cwd);
+        writeFileSync(join(first, "stale.js"), "old");
 
-        stageNitroPublicAssets(cwd);
-        expect(existsSync(join(staged, "stale.js"))).toBe(false);
+        const second = stageNitroPublicAssets(cwd);
+        expect(second).not.toBe(first);
+        expect(existsSync(join(second, "stale.js"))).toBe(false);
     });
 
     it("throws vinext-appropriate advice when .output/public is missing", () => {

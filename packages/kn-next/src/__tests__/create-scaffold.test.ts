@@ -940,7 +940,7 @@ describe("#867 the scaffold ships a .dockerignore", () => {
         expect(body.split("\n")).toContain("!.env.example");
     });
 
-    it("excludes .git, dependencies and build output", () => {
+    it("excludes .git, dependencies and build output — and re-includes what the Dockerfile COPYs", () => {
         const lines = dockerignore().split("\n");
         for (const pattern of [
             "node_modules",
@@ -951,6 +951,20 @@ describe("#867 the scaffold ships a .dockerignore", () => {
         ]) {
             expect(lines).toContain(pattern);
         }
+        // The other half, without which the image is UNBUILDABLE: the
+        // Dockerfile COPYs `.output/public` and the compiled binary out of
+        // this very context, so blanket build-output exclusions must carry
+        // their negations (dockerignore is last-match-wins).
+        for (const negation of ["!.output/public", "!knext-exec-linux-*"]) {
+            expect(lines).toContain(negation);
+        }
+        // And order matters: a negation ABOVE its exclusion is dead.
+        expect(lines.indexOf("!.output/public")).toBeGreaterThan(
+            lines.indexOf(".output"),
+        );
+        expect(lines.indexOf("!knext-exec-linux-*")).toBeGreaterThan(
+            lines.indexOf("knext-exec*"),
+        );
     });
 
     it("is rendered into the scaffold, not just present in the template", () => {

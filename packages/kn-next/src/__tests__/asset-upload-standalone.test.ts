@@ -172,7 +172,7 @@ describe("uploadAssets reads the standalone build output (not .output/public)", 
         const bulk = runQuietMock.mock.calls
             .map((c) => c[0] as string[])
             .find((argv) => argv.includes("-r"));
-        expect(bulk?.join(" ")).toContain(".knext-upload");
+        expect(bulk?.join(" ")).toContain("knext-upload-");
         expect(bulk?.join(" ")).not.toContain(".output/public");
     });
 

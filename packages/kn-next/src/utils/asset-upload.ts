@@ -2,11 +2,13 @@ import {
     cpSync,
     existsSync,
     mkdirSync,
+    mkdtempSync,
     readdirSync,
     readFileSync,
     rmSync,
     writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { DEFAULT_BUILDER_ID } from "../adapters/artifact-contract";
 import { runCapture, runQuiet, runQuietAllowFail } from "../cli/exec";
@@ -582,7 +584,8 @@ export function stageStandaloneAssets(cwd: string = process.cwd()): string {
  *    `.output/public` (chosen back when nothing else wrote `.output`) would
  *    `rmSync` the vinext build's real static root — concurrently with the
  *    docker build that COPYs it, in `deploy`'s parallel task set. So this
- *    stages into `.knext-upload/`, and treats the artifact as READ-ONLY.
+ *    stages into a fresh temp dir outside the repo, and treats the artifact
+ *    as READ-ONLY.
  *
  * No `.knext-build` marker is staged for this shape, deliberately. vinext
  * namespaces its chunks under its own generated id (`_next/static/<uuid>/`),
@@ -597,7 +600,6 @@ export function stageStandaloneAssets(cwd: string = process.cwd()): string {
  */
 export function stageNitroPublicAssets(cwd: string = process.cwd()): string {
     const sourceDir = join(cwd, ".output", "public");
-    const stagingDir = join(cwd, ".knext-upload");
 
     if (!existsSync(sourceDir)) {
         throw new Error(
@@ -607,11 +609,14 @@ export function stageNitroPublicAssets(cwd: string = process.cwd()): string {
         );
     }
 
-    // Rebuild the staging area from scratch: stale files from a previous
-    // build must not enter this build's upload/verify set. Only the staging
-    // dir is ever cleared — the artifact root is read, never written.
-    rmSync(stagingDir, { recursive: true, force: true });
-    mkdirSync(stagingDir, { recursive: true });
+    // A FRESH temp dir per staging run, OUTSIDE the repo and the docker build
+    // context by construction (re-gate residual on PR #890): an in-repo
+    // staging dir sits inside deploy's build context, where buildx's context
+    // walk races the concurrent re-staging (intermittent `no such file`
+    // during context transfer) and an unignored copy of every asset wedges
+    // `git status`. Fresh-per-run also makes staleness impossible — no clear
+    // step, so there is nothing to mis-aim at the artifact.
+    const stagingDir = mkdtempSync(join(tmpdir(), "knext-upload-"));
     cpSync(sourceDir, stagingDir, { recursive: true });
 
     log.warn(
