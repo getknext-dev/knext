@@ -57,6 +57,10 @@ async function seedSourceFile(root: string, key: string): Promise<void> {
 function makeConfig(): StorageBackedConfig {
     return {
         name: "shop",
+        // Pins the STANDALONE upload path explicitly: since ADR-0048 the
+        // default build is vinext (stages from .output/public), and these
+        // tests seed .next/static.
+        build: "turbopack",
         storage: {
             provider: "gcs",
             bucket: "my-bucket",

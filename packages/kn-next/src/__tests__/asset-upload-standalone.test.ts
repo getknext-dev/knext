@@ -47,6 +47,11 @@ const BUCKET = "my-bucket";
 function makeConfig(): StorageBackedConfig {
     return {
         name: APP_NAME,
+        // These suites exercise the STANDALONE upload path (staging from
+        // .next/static). Since ADR-0048 the default build is vinext, whose
+        // staging reads .output/public instead — so the shape is pinned
+        // explicitly here rather than inherited from a default that moved.
+        build: "turbopack",
         storage: {
             provider: "gcs",
             bucket: BUCKET,
@@ -125,6 +130,50 @@ describe("uploadAssets reads the standalone build output (not .output/public)", 
             .map((c) => c[0] as string[])
             .filter((argv) => argv.includes("cp") && !argv.includes("-r"));
         expect(singleFileRetries).toHaveLength(0);
+    });
+
+    it("routes a DEFAULT (vinext) config to the nitro staging — .knext-upload, sourced from .output/public", async () => {
+        // The other half of this suite's shape pin, and the dispatch guard:
+        // deleting the shape dispatch in uploadAssets would leave every
+        // turbopack-pinned test green while the default path silently staged
+        // from a tree vinext never produces. Config carries NO build field.
+        const nitroKeys = ["_next/static/uuid-1/chunk.js", "favicon.ico"];
+        await fs.mkdir(
+            join(root, ".output", "public", "_next", "static", "uuid-1"),
+            {
+                recursive: true,
+            },
+        );
+        await fs.writeFile(
+            join(
+                root,
+                ".output",
+                "public",
+                "_next",
+                "static",
+                "uuid-1",
+                "chunk.js",
+            ),
+            "chunk",
+        );
+        await fs.writeFile(
+            join(root, ".output", "public", "favicon.ico"),
+            "icon",
+        );
+        // NO .next/static anywhere — the standalone staging would throw here.
+        runCaptureMock.mockReturnValue(gcsListing(nitroKeys));
+
+        const config = { ...makeConfig() };
+        // biome-ignore lint/performance/noDelete: absence (not undefined) is the case under test
+        delete (config as Record<string, unknown>).build;
+        await expect(uploadAssets(config)).resolves.toBeUndefined();
+
+        // The bulk upload must read the staging dir, never the artifact root.
+        const bulk = runQuietMock.mock.calls
+            .map((c) => c[0] as string[])
+            .find((argv) => argv.includes("-r"));
+        expect(bulk?.join(" ")).toContain(".knext-upload");
+        expect(bulk?.join(" ")).not.toContain(".output/public");
     });
 
     it("fails loudly with a next-build hint (not a bare ENOENT) when .next/static is missing", async () => {

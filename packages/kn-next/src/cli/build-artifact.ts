@@ -22,12 +22,10 @@ import {
     BUILDERS,
     type BuildArtifact,
     type BuilderAdapter,
+    DEFAULT_BUILDER_ID,
 } from "../adapters/artifact-contract";
 import type { KnativeNextConfig } from "../config";
 import { UsageError } from "./shared";
-
-/** The default builder — absence of `config.build` means vinext (ADR-0048). */
-const DEFAULT_BUILD = "vinext";
 
 export interface ResolvedBuild {
     readonly builder: BuilderAdapter;
@@ -47,7 +45,7 @@ export function resolveBuildArtifact(
     config: KnativeNextConfig,
     root: string,
 ): ResolvedBuild {
-    const id = config.build ?? DEFAULT_BUILD;
+    const id = config.build ?? DEFAULT_BUILDER_ID;
     const builder = BUILDERS.find((b) => b.id === id);
     if (!builder) {
         // UsageError, not a plain Error: this is a config mistake, and the

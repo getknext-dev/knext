@@ -289,6 +289,16 @@ export const BUILDERS: readonly BuilderAdapter[] = [
     vinextBuilder,
 ];
 
+/**
+ * What an ABSENT `config.build` means (ADR-0048): the vinext single
+ * executable. One constant, because the default is load-bearing in three
+ * places that must never disagree — artifact resolution (`build-artifact.ts`),
+ * the CR the CLI emits (`cr-builder.ts`, where the resolved value is written
+ * explicitly since wire-absence permanently means turbopack), and the asset
+ * staging path (`asset-upload.ts`, which sources a different tree per shape).
+ */
+export const DEFAULT_BUILDER_ID = "vinext";
+
 /** The builders this release can actually run. */
 export const AVAILABLE_BUILDERS: readonly BuilderAdapter[] = BUILDERS.filter(
     (b) => b.available,

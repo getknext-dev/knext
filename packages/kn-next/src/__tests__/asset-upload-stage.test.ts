@@ -11,6 +11,7 @@ import {
     existsSync,
     mkdirSync,
     mkdtempSync,
+    readdirSync,
     readFileSync,
     rmSync,
     writeFileSync,
@@ -21,6 +22,7 @@ import {
     BUILD_MARKER_FILENAME,
     reclaimBuildPrefix,
     type StorageBackedConfig,
+    stageNitroPublicAssets,
     stageStandaloneAssets,
 } from "../utils/asset-upload";
 
@@ -111,5 +113,113 @@ describe("reclaimBuildPrefix", () => {
     it("is a no-op for an empty build id (never scopes to the static root)", () => {
         // Returns BEFORE building a delete URI or spawning any provider CLI.
         expect(() => reclaimBuildPrefix(config, "")).not.toThrow();
+    });
+});
+
+/**
+ * The nitro (vinext) staging path — the coverage gap the PR #890 design gate
+ * named: nothing anywhere ran the upload path against a vinext artifact, which
+ * is how two defects shipped unseen — a throw whose remediation named the
+ * retired builder, and an `rmSync` over the artifact's own static root, racing
+ * the docker build that COPYs it.
+ */
+describe("stageNitroPublicAssets", () => {
+    function seedNitroBuild(): void {
+        const uuid = join(
+            cwd,
+            ".output",
+            "public",
+            "_next",
+            "static",
+            "1bf62579-a57c-4fec-b3a0-c6ce1c59ff1b",
+        );
+        mkdirSync(uuid, { recursive: true });
+        writeFileSync(join(uuid, "chunk.js"), "console.log(1)");
+        writeFileSync(join(cwd, ".output", "public", "favicon.ico"), "icon");
+    }
+
+    it("stages .output/public into .knext-upload, key-space preserved", () => {
+        seedNitroBuild();
+        const staged = stageNitroPublicAssets(cwd);
+
+        expect(staged).toBe(join(cwd, ".knext-upload"));
+        expect(
+            existsSync(
+                join(
+                    staged,
+                    "_next",
+                    "static",
+                    "1bf62579-a57c-4fec-b3a0-c6ce1c59ff1b",
+                    "chunk.js",
+                ),
+            ),
+        ).toBe(true);
+        expect(existsSync(join(staged, "favicon.ico"))).toBe(true);
+    });
+
+    it("NEVER writes into the artifact — .output/public is byte-identical after staging", () => {
+        // The defect this pins: the standalone staging dir IS .output/public,
+        // so reusing it would rmSync the vinext build's real static root —
+        // concurrently with the docker build that COPYs it (deploy runs the
+        // upload and the image build as parallel tasks).
+        seedNitroBuild();
+        const artifactFile = join(
+            cwd,
+            ".output",
+            "public",
+            "_next",
+            "static",
+            "1bf62579-a57c-4fec-b3a0-c6ce1c59ff1b",
+            "chunk.js",
+        );
+        const before = readFileSync(artifactFile, "utf8");
+
+        stageNitroPublicAssets(cwd);
+        // Stage twice: the second run clears the STAGING dir — proving the
+        // clear targets .knext-upload and not the artifact.
+        stageNitroPublicAssets(cwd);
+
+        expect(readFileSync(artifactFile, "utf8")).toBe(before);
+        expect(existsSync(join(cwd, ".output", "public", "favicon.ico"))).toBe(
+            true,
+        );
+    });
+
+    it("clears stale files from a previous staging run", () => {
+        seedNitroBuild();
+        const staged = stageNitroPublicAssets(cwd);
+        writeFileSync(join(staged, "stale.js"), "old");
+
+        stageNitroPublicAssets(cwd);
+        expect(existsSync(join(staged, "stale.js"))).toBe(false);
+    });
+
+    it("throws vinext-appropriate advice when .output/public is missing", () => {
+        // NOT the standalone message: telling a vinext user to run
+        // `next build` with output:'standalone' names a builder their config
+        // cannot select.
+        expect(() => stageNitroPublicAssets(cwd)).toThrow(/\.output\/public/);
+        expect(() => stageNitroPublicAssets(cwd)).not.toThrow(
+            /output: 'standalone'/,
+        );
+    });
+
+    it("stages no .knext-build marker — vinext prefixes must stay over-kept", () => {
+        // Marking vinext's uuid prefix would let the GC classify the CURRENT
+        // build's assets as reapable while its protection keys (deploy tags
+        // from revision labels) never match — an over-delete. Fail-safe is
+        // unmarked (never reaped) until the GC learns the vinext namespace.
+        seedNitroBuild();
+        const staged = stageNitroPublicAssets(cwd);
+        const markers: string[] = [];
+        const walk = (d: string): void => {
+            for (const e of readdirSync(d, { withFileTypes: true })) {
+                if (e.isDirectory()) walk(join(d, e.name));
+                else if (e.name === BUILD_MARKER_FILENAME)
+                    markers.push(join(d, e.name));
+            }
+        };
+        walk(staged);
+        expect(markers).toEqual([]);
     });
 });

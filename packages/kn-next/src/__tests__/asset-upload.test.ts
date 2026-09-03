@@ -69,6 +69,10 @@ function makeConfig(
 ): StorageBackedConfig {
     return {
         name,
+        // Pins the STANDALONE upload path explicitly: since ADR-0048 the
+        // default build is vinext (stages from .output/public), and these
+        // tests seed .next/static.
+        build: "turbopack",
         storage: {
             provider,
             bucket,

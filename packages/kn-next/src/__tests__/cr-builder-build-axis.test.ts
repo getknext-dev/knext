@@ -59,9 +59,29 @@ describe("#B2 spec.build on the emitted CR", () => {
         // default.
         for (const runtime of ["node", "bun"] as const) {
             const spec = specOf(baseConfig({ runtime }));
-            expect(spec.runtime).toBe(runtime);
             expect(spec.build).toBe("vinext");
         }
+    });
+
+    it("OMITS runtime on the vinext shape — even when the config sets it", () => {
+        // Two reasons, both wire-level (design-gate finding on PR #890):
+        // the field is meaningless for a single-exec image (the runtime is
+        // compiled in), and during a CRD-first upgrade an OLD operator pod
+        // still forces `bun run server.js` onto any runtime:"bun" CR
+        // regardless of build — CrashLooping the binary image until the pod
+        // rolls. No runtime on the wire, no window.
+        for (const runtime of ["node", "bun"] as const) {
+            const spec = specOf(baseConfig({ runtime }));
+            expect("runtime" in spec).toBe(false);
+        }
+    });
+
+    it("still emits runtime for the standalone (turbopack) shape", () => {
+        // The omission is shape-scoped, not global — stored standalone CRs
+        // and their images genuinely need the field.
+        const spec = specOf(baseConfig({ build: "turbopack", runtime: "bun" }));
+        expect(spec.runtime).toBe("bun");
+        expect(spec.build).toBe("turbopack");
     });
 
     it("carries an explicit turbopack when the user asked for it", () => {
