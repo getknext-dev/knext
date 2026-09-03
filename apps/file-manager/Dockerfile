@@ -77,9 +77,10 @@ RUN set -eu; \
       esac; \
     fi; \
     echo "compiling for TARGETARCH=${TARGETARCH} -> ${BUN_TARGET}"; \
-    KNEXT_BUN_TARGET="${BUN_TARGET}" \
-    KNEXT_EXEC_OUTFILE=/repo/knext-exec \
-      bun run scripts/compile-single-exec.mjs
+    bun run node_modules/@getknext/core/dist/adapters/vinext-compile.js \
+      --entry .output/server/index.mjs \
+      --outfile /repo/knext-exec \
+      --target "${BUN_TARGET}"
 
 # The sharp addon, staged for the runtime layer.
 #

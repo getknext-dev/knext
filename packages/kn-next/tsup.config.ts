@@ -83,6 +83,10 @@ export default defineConfig([
       // imported by name, so it needs its own entry or it never reaches dist and
       // the alias resolves to nothing.
       'adapters/sharp-addon-dlopen': 'src/adapters/sharp-addon-dlopen.mjs',
+      // The vinext single-exec compile. Spawned as a SCRIPT (`bun run …`) by
+      // `kn-next build`, not imported, because it needs `Bun.build` plugins and
+      // the published CLI runs under node.
+      'adapters/vinext-compile': 'src/adapters/vinext-compile.mjs',
       // The in-flight cache-write registry (`./internal/cache-drain`).
       // Measured, not assumed: tsup hoists it into a SHARED chunk that both
       // this entry and adapters/cache-handler.js import, so the published

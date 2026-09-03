@@ -11,6 +11,8 @@
  */
 
 import { describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
     buildVinextExecutable,
     bunMeetsFloor,
@@ -55,28 +57,61 @@ describe("#ADR-0048 the Bun floor", () => {
 });
 
 describe("#ADR-0048 the compile argv", () => {
-    it("carries --compile AND --bytecode AND --minify", () => {
+    it("runs the shipped compile SCRIPT, not a bare `bun build`", () => {
         const argv = compileArgv(
             "linux-arm64",
             ".output/server/index.mjs",
             "out",
         );
 
-        expect(argv).toContain("--compile");
-        expect(argv).toContain("--bytecode");
-        expect(argv).toContain("--minify");
+        // `bun build` cannot do this job: it has no `--plugin`, and the compile
+        // needs two. `--bytecode` emits CommonJS, where the nitro bundle's
+        // `import.meta` is a syntax error, and sharp's addon cannot be resolved
+        // from inside a compiled binary — without the shim `/_next/image`
+        // silently serves unoptimized originals.
+        expect(argv.slice(0, 2)).toEqual(["bun", "run"]);
+        // Extension-agnostic: the source is `.mjs` and the shipped build emits
+        // `.js`, and this guard runs against both.
+        expect(argv.join(" ")).toMatch(/vinext-compile\.(m?js)\b/);
+        expect(
+            argv,
+            "a bare `bun build` cannot apply the plugins",
+        ).not.toContain("build");
+    });
+
+    it("still compiles WITH bytecode — asserted where the flag now lives", () => {
+        // The flag moved into the script, so asserting the argv would no longer
+        // catch its removal. Dropping `--bytecode` still produces a WORKING
+        // binary, just a slow one, which is exactly the regression nobody
+        // notices without an assertion.
+        const script = readFileSync(
+            resolve(
+                import.meta.dirname,
+                "..",
+                "adapters",
+                "vinext-compile.mjs",
+            ),
+            "utf8",
+        );
+        expect(script, "the compile must enable bytecode").toMatch(
+            /bytecode:\s*true/,
+        );
+        expect(script, "and minify").toMatch(/minify:\s*true/);
+        expect(script, "and wire in the sharp dlopen shim").toContain(
+            "sharp-addon-dlopen",
+        );
     });
 
     it("maps each supported arch to a musl/darwin target triple", () => {
-        expect(compileArgv("linux-x64", "e", "o")).toContain(
-            "--target=bun-linux-x64-musl",
-        );
-        expect(compileArgv("linux-arm64", "e", "o")).toContain(
-            "--target=bun-linux-arm64-musl",
-        );
-        expect(compileArgv("darwin-arm64", "e", "o")).toContain(
-            "--target=bun-darwin-arm64",
-        );
+        // `--target <triple>` as a PAIR now, rather than `--target=<triple>`:
+        // the script takes flag/value arguments.
+        const targetOf = (arch: string): string | undefined => {
+            const argv = compileArgv(arch, "e", "o");
+            return argv[argv.indexOf("--target") + 1];
+        };
+        expect(targetOf("linux-x64")).toBe("bun-linux-x64-musl");
+        expect(targetOf("linux-arm64")).toBe("bun-linux-arm64-musl");
+        expect(targetOf("darwin-arm64")).toBe("bun-darwin-arm64");
     });
 
     it("compiles the nitro entry, into the named outfile", () => {
@@ -86,7 +121,9 @@ describe("#ADR-0048 the compile argv", () => {
             "app",
         );
 
-        expect(argv).toContain(".output/server/index.mjs");
+        expect(argv[argv.indexOf("--entry") + 1]).toBe(
+            ".output/server/index.mjs",
+        );
         expect(argv[argv.indexOf("--outfile") + 1]).toBe("app");
     });
 

@@ -4,8 +4,8 @@ description: next/image optimization via sharp, with optimized variants persiste
 ---
 
 knext serves `next/image` runtime optimization (the `/_next/image` endpoint: resize, quality, and
-format negotiation to AVIF/WebP) with [**sharp**](https://sharp.pixelplumbing.com/) bundled into the
-runtime image. Optimization is configured in `next.config.ts`:
+format negotiation to AVIF/WebP) using [**sharp**](https://sharp.pixelplumbing.com/). Optimization is
+configured in `next.config.ts`:
 
 ```ts title="next.config.ts"
 images: {
@@ -46,12 +46,38 @@ The sync is guarded by `STORAGE_BUCKET`: when it is unset, the sync is a no-op a
 to pod-local caching. Both restore and push are **best-effort** — a store outage degrades to
 local-only optimization rather than crashing the pod.
 
+## Shipping sharp with your image
+
+Your app compiles to a single executable, and sharp is not entirely JavaScript — the part that
+actually resizes pixels is a native library. A compiled executable can only load code that was
+built into it, so that native library has to travel as a **real file next to the binary**, in a
+`native/` directory.
+
+`kn-next build` creates that directory for you, and the generated `Dockerfile` copies it in. You
+only need to know this exists if you write your own Dockerfile or copy the binary somewhere by
+hand.
+
 <Callout type="warn">
-**Honest scope.** Image optimization is implemented and working, but the dedicated per-PR image
-check is **skip-on-fail** (a missing or failed optimizer downgrades to a skip rather than a red
-build), so it is currently marked **⚠️ partial** in the
-[compatibility matrix](/docs/compat-matrix) rather than ✅ — functional, but not yet hard-gated by
-its own red-on-fail check.
+**If `native/` is missing, nothing crashes.** `/_next/image` answers `200` and returns the
+**original image, unresized**. Pages render and look correct — every photo just ships at full size.
+
+The quickest check against a running container:
+
+```bash
+curl -sI -H 'Accept: image/avif,image/webp' \
+  'http://localhost:3000/_next/image?url=%2Fyour-image.png&w=256&q=75' | grep -i content-type
+```
+
+`image/avif` or `image/webp` means optimization is working. Getting back `image/png` — the format
+you asked it to convert *from* — means sharp could not load, and the endpoint is passing the
+original through.
+</Callout>
+
+<Callout>
+**Verified, not asserted.** Every build runs a check that starts the real production container,
+requests an optimized image, and fails the build unless it comes back as a modern format *and*
+smaller than the source. The check also tests itself against a deliberately broken optimizer first,
+so it cannot pass by accident.
 </Callout>
 
 ## Related

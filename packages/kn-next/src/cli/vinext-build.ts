@@ -31,8 +31,9 @@
  * slower artifact whose provenance nobody records.
  */
 
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { cpSync, existsSync, mkdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { runQuiet } from "./exec";
 import { UsageError } from "./shared";
 
@@ -90,17 +91,45 @@ export function compileArgv(
             `Unknown build arch '${arch}'. Known: ${Object.keys(COMPILE_TARGETS).join(", ")}.`,
         );
     }
+    // `bun run <script>`, not `bun build`. The compile needs BUILD PLUGINS and
+    // the CLI has no `--plugin`:
+    //
+    //   - `--bytecode` emits CommonJS, where the nitro bundle's `import.meta` is
+    //     a syntax error — the bare command fails with `Failed to generate
+    //     bytecode for ./index.js`;
+    //   - sharp's native addon cannot be resolved from inside a compiled binary,
+    //     so its loader is swapped for a `process.dlopen` shim. Without that,
+    //     `/_next/image` silently serves unoptimized originals.
+    //
+    // The script ships in this package, so a user's `kn-next build` gets the same
+    // treatment knext's own reference app does rather than a second copy that
+    // drifts.
     return [
         "bun",
-        "build",
-        "--compile",
-        "--minify",
-        "--bytecode",
-        `--target=${target}`,
+        "run",
+        compileScriptPath(),
+        "--entry",
         entry,
         "--outfile",
         outFile,
+        "--target",
+        target,
     ];
+}
+
+/**
+ * The shipped compile script, resolved from THIS module rather than by package
+ * name: the CLI is bundled to `dist/cli/`, and the script sits in
+ * `dist/adapters/`, so a bare specifier would resolve against the consumer's
+ * tree instead of ours.
+ */
+export function compileScriptPath(): string {
+    return join(
+        dirname(fileURLToPath(import.meta.url)),
+        "..",
+        "adapters",
+        "vinext-compile.js",
+    );
 }
 
 export interface VinextBuildOptions {
@@ -151,7 +180,53 @@ export function buildVinextExecutable(opts: VinextBuildOptions): string {
 
     // 2. compile + bytecode
     run(compileArgv(arch, entry, outFile));
+
+    // 3. stage sharp's native module beside the binary
+    stageSharpNative(opts.cwd);
+
     return outFile;
+}
+
+/**
+ * Copy sharp's native packages to `<cwd>/native`, which the generated Dockerfile
+ * COPYs into the image.
+ *
+ * A compiled binary cannot resolve a package from disk, so sharp's addon has to
+ * be a real file next to the executable, opened by absolute path. Without it
+ * `/_next/image` answers 200 with the ORIGINAL bytes — working, and every image
+ * full size, which is the kind of failure nobody reports.
+ *
+ * The directory is created even when the app has no sharp, because the
+ * Dockerfile's `COPY native` would otherwise fail the build for every app that
+ * does not use `next/image`.
+ *
+ * Everything present is copied rather than a per-platform pair: the package
+ * manager installs only the optional packages matching this platform, so what is
+ * there IS the right set — and mirroring sharp's own naming scheme here would be
+ * a guess. (It is `linuxmusl`, one word, which is exactly the guess that failed.)
+ */
+export function stageSharpNative(cwd: string): void {
+    const dest = join(cwd, "native");
+    mkdirSync(dest, { recursive: true });
+
+    const source = findImgPackages(cwd);
+    if (!source) return;
+
+    // `dereference` follows the symlinks a bun/pnpm isolated store uses; copying
+    // the links would put dangling pointers in the image.
+    cpSync(source, dest, { recursive: true, dereference: true });
+}
+
+/** `node_modules/@img`, wherever this install layout put it. */
+function findImgPackages(cwd: string): string | undefined {
+    const candidates = [
+        join(cwd, "node_modules", "@img"),
+        // bun's isolated store, and the workspace root above an app.
+        join(cwd, "node_modules", ".bun", "node_modules", "@img"),
+        join(cwd, "..", "..", "node_modules", "@img"),
+        join(cwd, "..", "..", "node_modules", ".bun", "node_modules", "@img"),
+    ];
+    return candidates.find((c) => existsSync(c));
 }
 
 /** Reads `bun --version`. Separate so the floor check is testable without a Bun. */

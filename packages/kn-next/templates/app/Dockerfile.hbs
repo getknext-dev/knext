@@ -37,6 +37,22 @@ ARG BINARY
 COPY ${BINARY} /app/server
 COPY .output/public /app/.output/public
 
+# sharp's native module, if the app uses `next/image`.
+#
+# It CANNOT live inside the binary: a compiled executable resolves modules only
+# from its own embedded graph, so sharp's addon is unreachable from in there —
+# and embedding the `.node` does not help either, because the OS cannot load a
+# native library from a path inside the binary. It is opened by absolute path
+# instead, from a real file next to the executable.
+#
+# `kn-next build` stages this directory. If it is absent the image still runs and
+# `/_next/image` returns the ORIGINAL image unresized — working, but every photo
+# ships at full size.
+#
+# Keep the directory layout: the addon finds its image library by a relative
+# path, so flattening the tree breaks it.
+COPY native /app/native
+
 # Non-root, matching the distroless convention used across knext images.
 USER 65532:65532
 

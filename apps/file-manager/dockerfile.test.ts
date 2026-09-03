@@ -45,7 +45,7 @@ describe('#ADR-0048 file-manager vinext image — build order', () => {
     // the CLI has no `--plugin`: one rewrites `import.meta` so `--bytecode` can
     // compile the bundle, the other swaps sharp's addon loader for a dlopen
     // shim. The ordering this guards is unchanged.
-    const compile = lineOf('compile-single-exec.mjs');
+    const compile = lineOf('vinext-compile.js');
 
     expect(build).toBeLessThan(check);
     expect(check).toBeLessThan(compile);
@@ -57,8 +57,11 @@ describe('#ADR-0048 file-manager vinext image — build order', () => {
     // with `Failed to generate bytecode`. The script rewrites those first.
     // Asserted on the SCRIPT, not the Dockerfile, because that is where the
     // flag lives now.
+    // Reads the SHARED script the CLI ships, not an app-local copy: this app
+    // deliberately builds the same way a user's `kn-next build` does, so a
+    // private copy here would let the two drift and hide a user-facing break.
     const script = readFileSync(
-      join(import.meta.dirname, 'scripts/compile-single-exec.mjs'),
+      join(import.meta.dirname, '../../packages/kn-next/src/adapters/vinext-compile.mjs'),
       'utf8',
     );
     expect(script, 'the single-exec build must enable bytecode').toMatch(/bytecode:\s*true/);
