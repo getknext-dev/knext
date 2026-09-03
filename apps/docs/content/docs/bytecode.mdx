@@ -1,13 +1,13 @@
 ---
 title: Bytecode caching
-description: Skipping JS recompilation on cold pods — a compile cache baked into your image on Node, per-file .jsc precompilation on Bun.
+description: Skipping JS recompilation on cold pods — bytecode baked into the compiled executable by default, or a V8 compile cache in the image on the legacy Node shape.
 ---
 
 Scale-to-zero means cold starts. The expensive part of a Next.js cold start is the JS engine
-compiling JavaScript from source. knext skips that work on both runtimes by doing the compilation
-**at build time** and shipping the result inside your application image: on **Node** as a V8 compile
-cache, and on **Bun** as per-file bytecode (see [Bun runtime](/docs/bun-runtime)). This page covers
-the Node mechanism.
+compiling JavaScript from source. knext does that work **at build time** and ships the result
+inside your application image. On the default target the whole server bundle is precompiled to
+bytecode inside the [compiled executable](/docs/bun-runtime); on the legacy Node standalone shape
+it is a V8 compile cache baked into the image. This page covers the Node mechanism.
 
 **There is nothing to configure and nothing to enable.** The cache is built when your image is
 built, so it is present from the very first pod, on any cluster.

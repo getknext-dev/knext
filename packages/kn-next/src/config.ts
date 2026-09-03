@@ -266,22 +266,30 @@ export interface KnativeNextConfig {
     cache?: CacheConfig;
     queue?: QueueConfig; // For ISR revalidation (Kafka for Knative Eventing)
     registry: string;
-    runtime?: "bun" | "node"; // Runtime to execute the Next.js standalone server.js: 'bun' or 'node' (default)
+    // Runtime for the standalone (turbopack) shape only: 'bun' or 'node'
+    // (default). Irrelevant to the vinext single executable, where the runtime
+    // is compiled into the binary.
+    runtime?: "bun" | "node";
     /**
      * Which build system produces the app (Track B2 of the build/runtime
      * separation; see `src/adapters/artifact-contract.ts`).
      *
-     * - `turbopack` (**default**) — Next's own `next build`, emitting
-     *   `.next/standalone`. The only all-apps-verified path, and what every
-     *   existing deployment uses.
-     * - `vinext` — the Vite/rolldown Next reimplementation, emitting a nitro
-     *   `.output`. **Not usable yet**: vinext is not a dependency of this repo,
-     *   so selecting it is rejected by the validator rather than silently
-     *   producing a broken image.
+     * - `vinext` (**default** — ADR-0048) — the Vite/rolldown Next
+     *   reimplementation. Its nitro `.output` is compiled WHOLE into a single
+     *   executable (`bun build --compile --minify --bytecode`, Bun 1.4.0+):
+     *   measured 61 ms cold start and 1103 req/s against the node standalone's
+     *   884 ms / 630 req/s on an identical app. This is the only builder the
+     *   validator accepts, and the only shape that gets bytecode — the
+     *   per-file standalone bytecode pass is retired (it traded throughput
+     *   for cold start; the whole-bundle compile wins both).
+     * - `turbopack` — Next's own `next build`, emitting `.next/standalone`.
+     *   RETIRED as user-selectable by ADR-0048; still described in the
+     *   artifact contract so existing CRs and the migration message stay
+     *   coherent.
      *
-     * Additive and optional at `v1alpha1` (ADR-0017): absence means `turbopack`,
-     * so every CR ever written keeps its exact meaning and an older operator
-     * that does not know the field behaves identically.
+     * On the WIRE the meanings differ from the config: CR absence permanently
+     * means `turbopack` (ADR-0017), so the CLI resolves this default and
+     * writes `build: "vinext"` into the CR explicitly (see cr-builder.ts).
      *
      * `build` and `runtime` are INDEPENDENT. `runtime` does not select a build,
      * and `build` does not select a runtime — what connects them is the artifact

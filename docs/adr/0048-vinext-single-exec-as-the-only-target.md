@@ -69,7 +69,7 @@ scale-to-zero the tail is what users feel.
    (HTTP 500, `Expected CommonJS module to have a function`), and halves the single-exec's
    cold-start win (121 ms vs 61 ms).
 
-## BLOCKED: the decision is not executable today (measured 2026-08-27)
+## BLOCKED: the decision is not executable today (measured 2026-08-27) — **RESOLVED, see Amendment 3**
 
 **Consequence #1 arrived immediately.** The reference app cannot build the mandated target.
 
@@ -98,7 +98,17 @@ the contract reality test binds to it. Full detail: `docs/benchmarks/EXPERIMENTS
 
 ## Amendment 2 — image optimization does not survive the single executable (2026-08-28)
 
-**Status: OPEN. This escalates to the founder** under `.claude/rules/workflow.md` on two
+**Status: RESOLVED by Amendment 3 (2026-09-03).** The blocking fact below was *disproved*: the
+"no external native module is reachable" claim held only for routes that go through module
+resolution. `process.dlopen` on an absolute real path works inside the compiled binary, so sharp's
+JavaScript is bundled and its native addon ships beside the executable
+(`packages/kn-next/src/adapters/sharp-addon-dlopen.mjs` + `vinext-compile.mjs`), keeping its
+`@img` directory layout because the addon links libvips by relative rpath. CI-verified against the
+real production image: `/_next/image` answers 200 `image/avif`, 2,116 bytes optimized from a
+181,277-byte source. The A/B/C/D table below is therefore obsolete — the single executable keeps
+image optimization, so the trade it prices no longer exists. Kept for the record:
+
+**Original text: OPEN. This escalates to the founder** under `.claude/rules/workflow.md` on two
 separate triggers: a discovered fact that invalidates the plan, and a change that
 contradicts an existing ADR. It is recorded, not resolved.
 
@@ -154,11 +164,48 @@ the codec behind it would change. Nothing here is wasted by picking A or C.
 ## Action items
 
 1. `build.ts`: add the vinext build path (`vite build` → nitro `.output` → `bun build --compile`).
-2. `templates/app/Dockerfile.hbs`: ship the single executable, not `.next/standalone`.
+   **DONE (Amendment 3):** `buildVinextExecutable` (`cli/vinext-build.ts`) is wired into
+   `kn-next build` for the nitro shape — compile + bytecode + sharp-native staging, Bun 1.4 floor.
+2. `templates/app/Dockerfile.hbs`: ship the single executable, not `.next/standalone`. **DONE** —
+   the scaffolded Dockerfile ships the binary (`CMD ["/app/server"]`).
 3. Operator: teach `nextapp_controller.go` the in-process shape — today its only shape-aware branch
-   hardcodes `bun run server.js`.
+   hardcodes `bun run server.js`. **DONE (Amendment 3):** `spec.build == "vinext"` leaves the
+   container command to the image's own CMD; mutation-proved by
+   `build_ksvc_command_test.go`.
 4. CRD: widen `spec.build`'s enum to admit `vinext` **in the same change** as item 3, never before.
-5. Enforce the Bun 1.4.0 floor in the validator and the CRD.
+   **DONE (Amendment 3), in the same change** — `Enum=turbopack;vinext`, and the CLI now resolves
+   its vinext default EXPLICITLY into the CR (`cr-builder.ts`), because wire-absence permanently
+   means turbopack (ADR-0017) and omitting it would make the operator exec `bun run server.js`
+   into an image that has no server.js.
+5. Enforce the Bun 1.4.0 floor in the validator and the CRD. **CLI half DONE**
+   (`vinext-build.ts` refuses < 1.4.0); a CRD-side floor is not expressible — the Bun version
+   lives inside the image, not in the CR.
 6. Compat: stand up a vinext-axis suite run, and mark `docs/compat-matrix.md` honestly until it is
-   green — no row may claim verified while unverified.
+   green — no row may claim verified while unverified. **STILL OPEN** — the docs site states the
+   compiled path is measured-per-feature, not suite-verified.
 7. **Maintainer:** amend `.claude/rules/architecture.md`'s official-adapter-default rule.
+   **STILL OPEN.**
+
+## Amendment 3 — bytecode means the single executable, and it ships whole (founder-directed, 2026-09-03)
+
+Two facts arrived after Amendment 2 and changed its terms:
+
+1. **Image optimization works inside the compiled binary** (see Amendment 2's resolution above) —
+   the capability loss that motivated recommending the uncompiled Option A is gone.
+2. **The build blocker fell.** The `rsc_exports` upstream failure that made the reference app
+   unbuildable no longer reproduces: `apps/file-manager` compiles with
+   `--compile --minify --bytecode` and serves — the CI production-image probe passes against the
+   real Alpine/musl image.
+
+**Founder decision:** *"Make vinext the only builder when the user chooses bun with bytecode."*
+Concretely:
+
+- **Bytecode belongs to exactly one builder.** The per-file standalone bytecode pass
+  (`standalone-bun-bytecode.ts`, `KNEXT_BUN_BYTECODE`) is **retired and deleted**. It bought cold
+  start (554 ms vs 703 ms) but cost throughput (537 req/s vs 714 — the per-module CommonJS
+  conversion taxes every module boundary), while the whole-bundle compile wins both axes
+  (61 ms, 1103 req/s). One bytecode story, not two.
+- **Action items 3 + 4 executed in one change**, exactly as the CRD comment demanded: enum
+  widened, operator taught the shape, CLI emits the resolved builder explicitly.
+- **Upgrade order is load-bearing (#548):** a CRD that predates `"vinext"` rejects the new CR
+  under `--validate=strict` — loud, before the cluster is touched. Operator/CRD first, then CLI.

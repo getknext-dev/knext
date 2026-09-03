@@ -143,6 +143,13 @@ export interface VinextBuildOptions {
     readonly run?: (argv: readonly string[]) => void;
     /** Injectable for tests. */
     readonly bunVersion?: string;
+    /**
+     * Skip step 1 (`vite build`) and compile an EXISTING `.output`. The caller
+     * that sets this is `kn-next build`, which has just run the app's own
+     * build script — running vite twice would double the slowest part of the
+     * build for nothing. The `.output` existence check still runs either way.
+     */
+    readonly skipViteBuild?: boolean;
 }
 
 /**
@@ -167,7 +174,9 @@ export function buildVinextExecutable(opts: VinextBuildOptions): string {
     }
 
     // 1. vinext → nitro bun-preset .output
-    run(["npx", "vite", "build"]);
+    if (!opts.skipViteBuild) {
+        run(["npx", "vite", "build"]);
+    }
 
     const entry = join(".output", "server", "index.mjs");
     if (!existsSync(join(opts.cwd, entry))) {

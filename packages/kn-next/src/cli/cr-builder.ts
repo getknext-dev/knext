@@ -266,13 +266,21 @@ export function buildNextAppCRObject(
     // Runtime
     const runtime = config.runtime ?? undefined;
 
-    // Build (B2). Emitted ONLY when set, never defaulted to "turbopack" here:
-    // absence is the wire spelling of the default, and it is the only spelling
-    // an operator that predates the field understands. Writing an explicit
-    // "turbopack" would make a CR that means exactly today's behaviour fail
-    // against an older CRD's enum — the #548 upgrade-order hazard, paid for
-    // nothing.
-    const build = config.build ?? undefined;
+    // Build (B2/ADR-0048). ALWAYS emitted, resolved to the CLI's default when
+    // the config is silent. The two absences mean different things and must
+    // not be conflated: absence in the CONFIG means "vinext" (ADR-0048 made it
+    // the default builder), while absence on the WIRE permanently means
+    // "turbopack" (ADR-0017 — the only spelling an operator that predates the
+    // field understands). Omitting the field for a default config would hand
+    // the operator a single-executable image while telling it to run the
+    // standalone shape — it would exec `bun run server.js` into an image that
+    // has no server.js and CrashLoop.
+    //
+    // The #548 upgrade-order hazard is accepted and LOUD, not silent: a CRD
+    // that predates "vinext" rejects this CR under --validate=strict (which
+    // every CLI apply passes), and deploy's preflightCRSchema reports the
+    // unknown value before the cluster is touched. Upgrade operator first.
+    const build = config.build ?? "vinext";
 
     const spec: Record<string, unknown> = {
         image,

@@ -73,22 +73,30 @@ describe('ADR-0036 / ADR-0042 state corrections stay true (#869)', () => {
     expect(read(TYPES)).toMatch(/Build string `json:"build,omitempty"`/);
   });
 
-  it('the CRD enum admits turbopack only, so the CLI/CRD gap is real', () => {
-    // The CLI type knows `vinext`; the wire contract does not admit it. The
-    // ADR corrections lean on that asymmetry being deliberate — if the enum
-    // widens, the reasoning in `nextapp_types.go` and the correction blocks
-    // both need revisiting, and this is what forces that.
+  it('the CRD enum admits BOTH builders — the CLI/CRD gap is closed, in one change', () => {
+    // This guard used to pin the opposite: enum=turbopack only, with the gap
+    // deliberate. ADR-0048 Amendment 3 closed it (2026-09-03) — and the
+    // types.go comment demanded the closure happen "in the same change" as
+    // the operator learning the shape, so BOTH halves are pinned here: the
+    // enum admits vinext, and the controller's command branch knows the
+    // single-exec shape. Widening the enum while reverting the controller
+    // (or vice versa) is the regression this now catches.
     const types = read(TYPES);
-    const enumLine = types
-      .split('\n')
-      .find(
-        (l, i) =>
-          l.includes('kubebuilder:validation:Enum') &&
-          types.split('\n')[i + 1]?.includes('Build string'),
-      );
+    const lines = types.split('\n');
+    const enumLine = lines.find(
+      (l, i) => l.includes('kubebuilder:validation:Enum') && lines[i + 1]?.includes('Build string'),
+    );
     expect(enumLine).toBeDefined();
-    expect(enumLine).toContain('Enum=turbopack');
-    expect(enumLine).not.toContain('vinext');
+    expect(enumLine).toContain('Enum=turbopack;vinext');
+
+    // The generated CRD carries the same enum — types.go alone is not what
+    // the apiserver enforces.
+    expect(read(CRD_YAML)).toMatch(/enum:\n\s+- turbopack\n\s+- vinext/);
+
+    // The other half of the "same change" contract: the controller must gate
+    // the standalone command away from the vinext shape.
+    const controller = read('packages/kn-next-operator/internal/controller/nextapp_controller.go');
+    expect(controller).toMatch(/Spec\.Build != "vinext" && nextApp\.Spec\.Runtime == "bun"/);
   });
 
   it('both ADRs carry a dated state-correction block', () => {

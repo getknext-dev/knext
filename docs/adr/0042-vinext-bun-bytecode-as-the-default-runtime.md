@@ -10,7 +10,9 @@
   operates on a matrix that, when this ADR was written, existed in **neither** `kn-next.config.ts` nor
   the CRD — so Decision 2 is a decision about future work, not a narrowing of shipped behaviour, and
   must not be read as one. The `build` axis has since landed on both (ADR-0048: `config.ts:290`,
-  `nextapp_types.go:158`), with the CRD enum admitting only `turbopack`. The `bun ⇒ vinext` invariant
+  `nextapp_types.go:158`); the CRD enum admitted only `turbopack` until 2026-09-03, when ADR-0048
+  Amendment 3 widened it to `turbopack;vinext` in the same change that taught the operator the
+  single-exec shape. The `bun ⇒ vinext` invariant
   the reduction inherits from ADR-0036 was **never implemented and is now deliberately abandoned** —
   see the state-correction block in ADR-0036 and the field comment on `Build`, which records why the
   pairing is enforced against the artifact contract in the CLI rather than by a CEL rule in every

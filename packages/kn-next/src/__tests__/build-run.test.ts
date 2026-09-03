@@ -1,10 +1,16 @@
 /**
- * build.ts — the `build()` orchestrator (official-adapter + standalone). Drives
- * both post-build passes with the side-effecting seams mocked (loadConfig,
- * uploadAssets, runQuiet, the bun-heal + bytecode helpers):
- *  - no standalone dir → the heal/bytecode passes are skipped (warn branch),
- *  - standalone dir present + runtime=bun → heal runs AND the bytecode pass runs,
+ * build.ts — the `build()` orchestrator. Drives the post-build steps with the
+ * side-effecting seams mocked (loadConfig, uploadAssets, runQuiet, the bun-heal
+ * helper, the single-exec compile):
+ *  - default (vinext) build → the single-executable compile runs, the
+ *    standalone-tree steps do not,
+ *  - turbopack shape → the heal runs, the compile does not,
  *  - assets are always uploaded last.
+ *
+ * The per-file Bun bytecode pass that used to be asserted here is RETIRED
+ * (ADR-0048 Amendment 3): bytecode now exists only inside the whole-bundle
+ * single-executable compile. `standalone-bun-bytecode` is gone; these tests
+ * are the guard that nothing standalone-shaped re-grows a bytecode step.
  */
 
 import {
@@ -19,7 +25,6 @@ import {
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { BytecodePassResult } from "../adapters/standalone-bun-bytecode";
 
 const runQuiet = (() => mock())();
 mock.module("../cli/exec", () => ({ runQuiet, isEntrypoint: () => false }));
@@ -41,14 +46,11 @@ mock.module("../adapters/standalone-bun-exports", () => ({
     healBunExportTargets,
 }));
 
-const precompileBunBytecode = (() =>
-    mock<() => BytecodePassResult>(() => ({
-        compiled: 3,
-        skipped: [],
-        guarded: [],
-    })))();
-mock.module("../adapters/standalone-bun-bytecode", () => ({
-    precompileBunBytecode,
+const buildVinextExecutable = (() => mock(() => "knext-exec-linux-x64"))();
+const __knextRealVinext = { ...(await import("../cli/vinext-build")) };
+mock.module("../cli/vinext-build", () => ({
+    ...__knextRealVinext,
+    buildVinextExecutable,
 }));
 
 import { build } from "../cli/build";
@@ -59,17 +61,15 @@ const savedCwd = process.cwd();
 /**
  * `build: "turbopack"` is explicit here, and it is not incidental.
  *
- * The bun-exports heal and the bytecode pass walk a `.next/standalone` tree, so
- * they only run for an artifact of that SHAPE. Since ADR-0048 the default build
- * is vinext, whose artifact is a nitro output — meaning a config that omits
- * `build` correctly skips both passes, and these tests would be asserting the
- * old world if they relied on the default.
+ * The bun-exports heal walks a `.next/standalone` tree, so it only runs for an
+ * artifact of that SHAPE. Since ADR-0048 the default build is vinext, whose
+ * artifact is a nitro output — meaning a config that omits `build` correctly
+ * skips the heal and instead compiles the single executable.
  *
  * turbopack is retired (`available: false`) but still described, because
- * `apps/docs` has not migrated yet. These tests therefore cover machinery that
- * is alive but scheduled for deletion: when the last standalone consumer moves,
- * the passes and this file go together. `skips both passes on the default
- * (vinext) build` below is the guard for the other half.
+ * `apps/docs` has not migrated yet. The turbopack tests therefore cover
+ * machinery that is alive but scheduled for deletion: when the last standalone
+ * consumer moves, the heal and those tests go together.
  */
 const cfg = (over: Record<string, unknown> = {}) => ({
     name: "my-app",
@@ -84,11 +84,7 @@ beforeEach(() => {
     process.chdir(dir);
     jest.clearAllMocks();
     healBunExportTargets.mockReturnValue({ copied: [], skipped: [] });
-    precompileBunBytecode.mockReturnValue({
-        compiled: 3,
-        skipped: [],
-        guarded: [],
-    });
+    buildVinextExecutable.mockReturnValue("knext-exec-linux-x64");
 });
 
 afterEach(() => {
@@ -97,76 +93,66 @@ afterEach(() => {
 });
 
 describe("build()", () => {
-    it("skips the heal/bytecode passes and uploads assets when no standalone dir exists", async () => {
+    it("skips the heal and uploads assets when no standalone dir exists (turbopack)", async () => {
         loadConfig.mockResolvedValue(cfg());
         await build({ skipNextBuild: true });
 
         expect(healBunExportTargets).not.toHaveBeenCalled();
-        expect(precompileBunBytecode).not.toHaveBeenCalled();
+        expect(buildVinextExecutable).not.toHaveBeenCalled();
         expect(uploadAssets).toHaveBeenCalledTimes(1);
         // skipNextBuild → no `npm run build`.
         expect(runQuiet).not.toHaveBeenCalled();
     });
 
-    it("runs `next build` when not skipped", async () => {
+    it("runs the project build when not skipped", async () => {
         loadConfig.mockResolvedValue(cfg());
         await build({});
         expect(runQuiet).toHaveBeenCalledWith(["npm", "run", "build"]);
     });
 
-    it("runs the heal AND bytecode passes when a standalone dir exists and runtime=bun", async () => {
+    it("runs the heal (not the compile) when a standalone dir exists on the turbopack shape", async () => {
         loadConfig.mockResolvedValue(cfg({ runtime: "bun" }));
         mkdirSync(join(dir, ".next", "standalone"), { recursive: true });
 
         await build({ skipNextBuild: true });
 
         expect(healBunExportTargets).toHaveBeenCalledTimes(1);
-        expect(precompileBunBytecode).toHaveBeenCalledTimes(1);
+        expect(buildVinextExecutable).not.toHaveBeenCalled();
         expect(uploadAssets).toHaveBeenCalledTimes(1);
     });
 
-    it("skips BOTH standalone passes on the default (vinext) build, even with a standalone dir present", async () => {
-        // The other half of the `build: "turbopack"` pin above. Without this,
-        // every test here could keep passing while the default build silently
-        // ran standalone-shaped steps against a nitro artifact — walking a
-        // `.next/standalone` tree that vinext never produces.
-        //
+    it("compiles the single executable on the default (vinext) build", async () => {
+        // The load-bearing case: `kn-next deploy` builds an image whose
+        // Dockerfile COPYs `knext-exec-linux-x64` from the build context, so a
+        // default `kn-next build` that does not produce it emits a build that
+        // fails at docker-build time — or worse, dockerizes a stale binary.
+        loadConfig.mockResolvedValue(cfg({ build: undefined }));
+
+        await build({ skipNextBuild: true });
+
+        expect(buildVinextExecutable).toHaveBeenCalledTimes(1);
+        expect(buildVinextExecutable).toHaveBeenCalledWith(
+            expect.objectContaining({
+                arch: "linux-x64",
+                // build() already ran the app's own `vite build` (or the user
+                // asked to reuse one) — compiling must not run vite twice.
+                skipViteBuild: true,
+            }),
+        );
+        expect(uploadAssets).toHaveBeenCalledTimes(1);
+    });
+
+    it("skips the standalone heal on the default (vinext) build, even with a standalone dir present", async () => {
         // The directory is created ON PURPOSE: the gate must key on the
         // artifact SHAPE, not on whether a stale standalone tree happens to be
-        // lying around from an earlier build. That is the failure this asserts.
+        // lying around from an earlier build.
         loadConfig.mockResolvedValue(cfg({ runtime: "bun", build: undefined }));
         mkdirSync(join(dir, ".next", "standalone"), { recursive: true });
 
         await build({ skipNextBuild: true });
 
         expect(healBunExportTargets).not.toHaveBeenCalled();
-        expect(precompileBunBytecode).not.toHaveBeenCalled();
-        // The build itself still completes — skipping the passes must not
-        // skip the deploy-relevant work.
+        expect(buildVinextExecutable).toHaveBeenCalledTimes(1);
         expect(uploadAssets).toHaveBeenCalledTimes(1);
-    });
-
-    it("logs per-file skip reasons when the bytecode pass skips files", async () => {
-        loadConfig.mockResolvedValue(cfg({ runtime: "bun" }));
-        precompileBunBytecode.mockReturnValue({
-            compiled: 1,
-            skipped: ["a.js: too small", "b.js: probe failed"],
-            guarded: ["server.js"],
-            disabled: undefined,
-        });
-        mkdirSync(join(dir, ".next", "standalone"), { recursive: true });
-
-        await build({ skipNextBuild: true });
-        expect(precompileBunBytecode).toHaveBeenCalledTimes(1);
-    });
-
-    it("skips the bytecode pass on a node runtime even with a standalone dir", async () => {
-        loadConfig.mockResolvedValue(cfg({ runtime: "node" }));
-        mkdirSync(join(dir, ".next", "standalone"), { recursive: true });
-
-        await build({ skipNextBuild: true });
-
-        expect(healBunExportTargets).toHaveBeenCalledTimes(1);
-        expect(precompileBunBytecode).not.toHaveBeenCalled();
     });
 });

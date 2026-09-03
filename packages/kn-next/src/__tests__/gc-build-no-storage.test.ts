@@ -116,6 +116,17 @@ mock.module("../cli/shared", () => ({
     handleConfigNotFound: () => false,
 }));
 
+// The single-exec compile (ADR-0048 Amendment 3) runs for the default (vinext)
+// artifact shape inside build(). Left unmocked it probes the host's real Bun
+// version and tries a real compile — neither belongs in a hermetic ADR-0047
+// test about storage modes.
+const buildVinextExecutable = mock<AnyFn>(() => "knext-exec-linux-x64");
+const __knextRealVinextBuild = { ...(await import("../cli/vinext-build")) };
+mock.module("../cli/vinext-build", () => ({
+    ...__knextRealVinextBuild,
+    buildVinextExecutable: (...a: unknown[]) => buildVinextExecutable(...a),
+}));
+
 const writeSyncMock = mock<AnyFn>();
 mock.module("node:fs", async () => {
     // Spreading importOriginal() does NOT carry node-builtin named exports

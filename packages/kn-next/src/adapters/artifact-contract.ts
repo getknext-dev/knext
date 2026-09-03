@@ -193,12 +193,12 @@ export const turbopackBuilder: BuilderAdapter = {
  * vinext (the Vite/rolldown Next reimplementation) → a nitro `.output`, run
  * **in-process**.
  *
- * `available: false`. vinext is published (npm `vinext`, currently a 1.0
- * prerelease) but is **not a dependency of this repo**, so nothing here can run
- * it. The descriptor exists anyway, and that is deliberate: it is what the
- * contract test exercises, what the validator derives its "known but not
- * available" message from, and what makes adopting the toolchain an
- * implementation step rather than a redesign.
+ * `available: true` — the ONLY available builder (ADR-0048). Both halves of
+ * the pipeline exist: `cli/vinext-build.ts` produces the executable and the
+ * scaffolded Dockerfile ships it. (An earlier revision of this docstring said
+ * `available: false` because vinext was not yet a dependency; that era ended
+ * when the toolchain landed, and `kn-next build` now compiles the binary
+ * itself for the nitro shape.)
  *
  * The entry is nitro's **bun** preset output — `.output/nitro.json` carries
  * `"preset": "bun"` and the entry calls that runtime's global `serve()` at

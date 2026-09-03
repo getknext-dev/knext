@@ -105,56 +105,54 @@ type NextAppSpec struct {
 	// Runtime selects the process that executes the Next.js standalone server.js.
 	// Valid values: "bun" or "node" (default "node").
 	// Maps from KnativeNextConfig.runtime.
-	// NOTE: images built by `kn-next build` with runtime "bun" have their
-	// server-side JS precompiled to Bun bytecode and only boot under Bun —
-	// flipping this field to "node" for such an image requires REBUILDING the
-	// image (the entry exits 1 with a FATAL message under Node rather than
-	// crash-looping silently). Images built for "node" run under either runtime.
+	// Only meaningful for the standalone shape (Build absent / "turbopack");
+	// for Build "vinext" the runtime is compiled into the executable and this
+	// field does not affect how the container starts.
+	// (Historical: images built by the retired per-file Bun bytecode pass were
+	// Bun-only and needed a rebuild to flip back to "node". ADR-0048 replaced
+	// that pass with the vinext single executable, where the question cannot
+	// arise.)
 	// +optional
 	// +kubebuilder:validation:Enum=bun;node
 	Runtime string `json:"runtime,omitempty"`
 
 	// Build selects the build system that produced the image.
-	// Valid value: "turbopack" (also the default when absent). See the enum note
-	// below for why "vinext" is NOT admitted here yet even though the CLI type
-	// knows the name.
+	// Valid values: "turbopack" and "vinext" (ADR-0048).
 	// Maps from KnativeNextConfig.build.
+	//
+	// "vinext" is the compiled single-executable artifact — the app is one
+	// binary the image's own CMD runs. For that value the controller must NOT
+	// force a container command: there is no server.js in the image, and the
+	// old Runtime="bun" command would CrashLoop it. That controller branch and
+	// this enum widened in the SAME change, exactly as the previous version of
+	// this comment demanded ("never before" — the enum is the cluster-side
+	// contract, and publishing a value the controller cannot reconcile would
+	// let a GitOps controller, which does not assert strict validation, store
+	// a CR the operator then mis-runs with no condition, event, or refusal).
 	//
 	// INDEPENDENT of Runtime. The two axes are connected by the artifact SHAPE a
 	// builder emits and a runtime must accept — never by a rule pairing the two
 	// names. Any value of Build is admissible with any value of Runtime; a
 	// builder/runtime pairing that cannot work is rejected by the CLI against
-	// the artifact contract, before a CR is ever emitted.
+	// the artifact contract, before a CR is ever emitted. (For "vinext" the
+	// runtime is baked into the binary, so Runtime does not affect how the
+	// container starts.)
 	//
 	// Deliberately NOT a CEL cross-field rule. ADR-0036 specified a fail-closed
-	// `bun => vinext` admission rule; it was never implemented, and the shipped
-	// meaning of Runtime "bun" is "run the Next standalone server under Bun",
-	// which that rule would have rejected. Encoding compatibility here would
-	// pin a policy into every cluster's CRD, where changing it later needs a
-	// CRD roll rather than a CLI release.
+	// `bun => vinext` admission rule; it was never implemented, and encoding
+	// compatibility here would pin a policy into every cluster's CRD, where
+	// changing it later needs a CRD roll rather than a CLI release.
 	//
 	// Additive and optional at v1alpha1 (ADR-0017): absence means "turbopack",
-	// so every CR ever written keeps its exact meaning, and an operator that
-	// predates this field ignores it rather than misreading it.
+	// so every CR ever written keeps its exact meaning. That is why the CLI
+	// writes "vinext" EXPLICITLY for its (now default) vinext builds — absence
+	// is permanently reserved for the standalone shape and cannot be re-read.
 	//
-	// The enum admits ONLY "turbopack" today, and that is deliberate. A CRD enum
-	// is not documentation — it is the cluster-side contract, and it is the whole
-	// statement, because nothing else here rejects a value: the webhook validates
-	// only the ADR-0019 DATABASE_URL rule, internal/validation carries no Build
-	// case, and the controller's only shape-aware branch hardcodes the standalone
-	// shape (`bun run server.js`). Publishing "vinext" would let a GitOps controller
-	// — which CLAUDE.md §4 records does NOT assert strict validation — store a CR
-	// the operator then reconciles into a spawn command for an artifact whose
-	// entry is `.output/server/index.mjs` and whose execution is in-process. No
-	// condition, no event, no refusal.
-	//
-	// The CLI's "known but unavailable" distinction is coherent in TypeScript and
-	// incoherent on the wire. Widen this enum in the same change that teaches the
-	// operator the shape — never before. Order matters: removing a value from a
-	// SHIPPED enum rejects CRs already stored against it, so publishing early is
-	// expensive to undo.
+	// Order matters for upgrades (#548): a cluster whose CRD predates "vinext"
+	// rejects such a CR under --validate=strict, which the CLI always passes —
+	// a loud stop, not a silent mis-run. Upgrade the operator/CRD first.
 	// +optional
-	// +kubebuilder:validation:Enum=turbopack
+	// +kubebuilder:validation:Enum=turbopack;vinext
 	Build string `json:"build,omitempty"`
 
 	// TimeoutSeconds is the maximum number of seconds a request can take before

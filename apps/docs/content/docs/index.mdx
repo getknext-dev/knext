@@ -94,13 +94,13 @@ in-core-vs-recipe split, and never treat an unbuilt generator as shipping.
   [Verified compatibility](/docs/compat-suite).
 - **True scale-to-zero.** Knative's autoscaler + activator take idle services to `0` replicas and
   wake them on the first request. See [Scale-to-zero & cold starts](/docs/scale-to-zero).
-- **Bytecode-cached cold starts.** On Node, `NODE_COMPILE_CACHE` persists V8 bytecode on a volume
-  across cold pods — opt-in, and it trades horizontal fan-out for boot speed; on Bun, the standalone
-  tree is precompiled to bytecode at build time (−47% measured boot) with no such trade-off. See
-  [Bytecode caching](/docs/bytecode) and [Bun runtime](/docs/bun-runtime).
-- **Two runtimes, one artifact.** The same standalone `server.js` runs under Node (default) or Bun
-  (`runtime: 'bun'`) — both exercised against the official suite. See
-  [Bun runtime](/docs/bun-runtime).
+- **A compiled single executable by default.** The server bundle is minified and precompiled to
+  bytecode at build time, then baked together with the Bun runtime into one binary — measured
+  **61 ms** cold start and **1103 req/s** against the Node standalone's 884 ms / 630 req/s. See
+  [Bun & the compiled executable](/docs/bun-runtime) and [Bytecode caching](/docs/bytecode).
+- **The standalone shape remains supported** for existing deployments: the same `server.js` runs
+  under Node or Bun (`runtime: 'bun'`), exercised against the official suite. See
+  [Bun & the compiled executable](/docs/bun-runtime).
 - **The operator is the source of truth.** A Go operator reconciles a `NextApp` custom resource
   into a Knative Service, reports honest `Ready`/`Degraded` conditions, and rejects
   non-digest-pinned (`:latest`) images. See [Operator & the NextApp CRD](/docs/operator).

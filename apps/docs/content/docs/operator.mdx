@@ -56,7 +56,8 @@ status:
 | `env` | Plain, **non-secret** env vars (name → value). Reserved names are rejected at admission (see below). |
 | `secrets` | `envFrom`, `envMap` (Kubernetes Secret refs) — see [Binding secrets](#binding-secrets-envmap--database_url). |
 | `database` | Bind a **bring-your-own** Postgres by referencing an existing Secret (`secretRef` / optional `roSecretRef`). knext does not provision databases. See [Databases](#databases-specdatabase). |
-| `runtime` | `bun` or `node` (default `node`). A Bun **bytecode-built** image only boots under Bun — flipping it to `node` makes the pod exit with a loud `FATAL` message; rebuild instead. See [Bun runtime](/docs/bun-runtime). |
+| `build` | `vinext` (the compiled single executable — the default the CLI writes) or `turbopack` (the legacy standalone shape, also what absence means). Drives how the operator starts the container. See [Bun & the compiled executable](/docs/bun-runtime). |
+| `runtime` | `bun` or `node` (default `node`). Standalone shape only — for `build: "vinext"` the runtime ships inside the binary and this field has no effect on startup. |
 | `security` | `networkPolicy` — pod-level L3/L4 isolation, default-on. |
 | `traffic` | `revisionName`, `canaryPercent` (rollback / canary). |
 | `buildId` | Next.js BUILD_ID, stamped as label `apps.kn-next.dev/build-id` (skew protection). |
