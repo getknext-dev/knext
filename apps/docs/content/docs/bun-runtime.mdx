@@ -8,6 +8,48 @@ you choose the process that executes it: **Node** (the default) or **Bun**. Bun 
 suite-tested runtime choice, and it unlocks a cold-start optimization Node doesn't have: **per-file
 bytecode precompilation** at build time.
 
+## If you care about cold start and throughput, use Bun 1.4
+
+Under scale-to-zero your users pay the cold start, so it is usually the number that matters most.
+Setting `runtime: "bun"` is the single change that improves it, and on Bun 1.4 it improves
+throughput at the same time.
+
+All figures below are the same app and the same route, responses verified byte-identical, ten
+samples each with a fresh process and port:
+
+| Runtime | Cold start | Requests/sec |
+|---|---|---|
+| Node (default) | 884 ms | 630 |
+| **Bun 1.4** | **703 ms** | **714** |
+| Bun 1.4, with bytecode | 554 ms | 537 |
+
+Bun 1.4 starts **21% faster** and serves **13% more** requests per second than the Node default.
+
+```ts title="kn-next.config.ts"
+const config: KnativeNextConfig = {
+  name: 'acme',
+  registry: 'registry.example.com/acme',
+  runtime: 'bun',
+  // ...
+};
+```
+
+<Callout type="warn">
+**Use Bun 1.4 or newer.** Earlier versions are measurably slower on the same artifact, and some
+Next.js features do not work under Bun 1.3 at all. Upgrade with `bun upgrade`.
+</Callout>
+
+<Callout>
+**Read the third row carefully.** Bytecode precompilation is applied automatically when you set
+`runtime: "bun"`, and it is a genuine trade rather than a free win: a faster cold start, and
+throughput that drops *below* the Node default (537 req/s against 630). If your traffic is steady
+rather than bursty, that is the wrong direction for you — opt out with `KNEXT_BUN_BYTECODE=0` and
+keep the runtime.
+
+It is also a one-way door per build: bytecode-transformed files are Bun-only, and the image will
+refuse to start under Node rather than crash-looping. Switching back means rebuilding.
+</Callout>
+
 ## Enabling it
 
 Set `runtime: "bun"` in your deploy config:
