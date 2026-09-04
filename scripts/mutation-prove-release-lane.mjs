@@ -36,7 +36,25 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const WORKFLOW = resolve(REPO_ROOT, '.github/workflows/release.yml');
 const PREFLIGHT = resolve(REPO_ROOT, 'scripts/publish-preflight.mjs');
 const MANIFEST = resolve(REPO_ROOT, 'package.json');
-const LOCKFILE = resolve(REPO_ROOT, 'pnpm-lock.yaml');
+/**
+ * #912 — THE PROVER FOLLOWS ITS SUBJECT.
+ *
+ * This was `pnpm-lock.yaml` until the workspace moved to bun, after which
+ * `readFileSync` ENOENTed on line one and the whole prover exited before
+ * planting anything. Twenty-two mutations read as PROVED in every PR body that
+ * cited it, and nothing said otherwise except a nightly nobody was reading.
+ *
+ * The SUBJECT never moved: `changesets-cli-action-compat.test.ts`'s
+ * `lockfileResolvedCliVersion()` reads `bun.lock`, and mutation 21 exists to
+ * prove that a manifest bumped without a lockfile update is caught. Pointing
+ * here at the file the guard actually reads is what restores that proof, rather
+ * than deleting the mutation because its old file is gone.
+ *
+ * `tests/mutation-prover-lane.test.ts` now asserts, at PR time, that every file
+ * a prover READS exists — so this specific way of going quietly inert cannot
+ * recur without a red CI.
+ */
+const LOCKFILE = resolve(REPO_ROOT, 'bun.lock');
 const LIVENESS_SPEC = 'tests/release-lane-liveness.test.ts';
 const PREFLIGHT_SPEC = 'tests/publish-preflight.test.ts';
 const PINS_SPEC = 'tests/release-action-pins.test.ts';
@@ -138,16 +156,28 @@ const PIN_MAJOR = Number(VERSION_PIN[2]);
 const WRONG_PIN_MAJOR = PIN_MAJOR === 1 ? 2 : 1;
 
 /**
- * The ROOT importer's resolution. Anchored on the package name AND the
- * `specifier:` key — `specifier:` appears only under `importers:`, and the name
- * alone recurs in `packages:`/`snapshots:`. The trailing peer suffix
- * (`(@types/node@…)`) is deliberately left out of the capture so the anchor is a
- * substring that survives a peer-resolution change.
+ * The root resolution of `@changesets/cli` in `bun.lock` (#912).
+ *
+ * REWRITTEN, not merely repointed. The old pattern walked pnpm's `importers:`
+ * block and anchored on a `specifier:`/`version:` pair to scope the lookup to
+ * the ROOT, because in pnpm the bare package name recurs under `packages:` and
+ * `snapshots:`. `bun.lock` gives that scoping directly: a four-space-indented
+ * key in the flat `packages` map IS the hoisted root resolution, and a
+ * dependency that resolved differently for some workspace package appears under
+ * a nested `parent/name` key instead.
+ *
+ * Kept deliberately IDENTICAL to the regex in
+ * `changesets-cli-action-compat.test.ts:159` — the guard being proved. A prover
+ * that read the lockfile its own way could plant a mutation the guard's own
+ * parser never sees and report a survivor that is really a parser mismatch.
+ *
+ * The capture is `(prefix)(major)(rest)` so the mutation below flips one digit,
+ * exactly as the pnpm-era version did.
  */
 const LOCK_ENTRY = derive(
-  "the lockfile's root-importer resolution of @changesets/cli",
+  "the lockfile's root resolution of @changesets/cli",
   LOCK_TEXT,
-  /( {6}'@changesets\/cli':\n {8}specifier: \^\d+\.\d+\.\d+\n {8}version: )(\d+)(\.\d+\.\d+)/,
+  /(\n {4}"@changesets\/cli": \["@changesets\/cli@)(\d+)(\.\d+\.\d+)/,
 );
 
 for (const spec of [LIVENESS_SPEC, PREFLIGHT_SPEC, PINS_SPEC, COMPAT_SPEC]) {

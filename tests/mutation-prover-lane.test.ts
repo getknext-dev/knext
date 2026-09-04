@@ -14,7 +14,9 @@ import { basename, join, resolve } from 'node:path';
 import { parse } from 'yaml';
 import { blankNonCode } from '../scripts/lib/blank-non-code.mjs';
 import {
+  auditAnchorLiveness,
   auditProverSource,
+  proverPathBindings,
   auditRunnerResolution,
   auditSpecFrameworkMatch,
   codeStringLiterals,
@@ -530,5 +532,152 @@ describe('#693 the two behaviours the lane SELLS are asserted, not merely descri
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('#912 a prover whose anchors no longer match its subjects is a PR-time finding', () => {
+  /**
+   * THE FAILURE THIS EXISTS FOR, measured on the tip of sprint 2.
+   *
+   * `mutation-prove-install-smoke-coverage.mjs` declares 22 mutations. Ten of
+   * them anchor on `{{ standalonePrefix }}` text that ADR-0048 deleted from the
+   * templates, so its preflight ABORTS on the first one and the script exits 2
+   * before planting anything. `mutation-prove-release-lane.mjs` reads
+   * `pnpm-lock.yaml`, which left the workspace, and ENOENTs the same way.
+   *
+   * Both were caught by running the fleet by hand. Nothing in CI said a word:
+   * the nightly reports a failed prover, but only ONCE A NIGHT and only after
+   * the fact, and in the meantime the guards those provers cover read as PROVED
+   * in every PR body that cites them. That is this repo's most common defect
+   * shape — a control that reports success while inert — applied to the machine
+   * that exists to detect it.
+   *
+   * So liveness is checked STATICALLY, at PR time, from the prover's own source:
+   * resolve each `mutate(target, anchor, …)` to a file and an anchor, and count.
+   * Exactly one occurrence is live. Zero means the subject moved and the prover
+   * is inert. More than one means `assertAnchorOnce` would abort, which is the
+   * same inertness with a different message.
+   *
+   * NON-VACUITY IS THE WHOLE RISK HERE, and it gets its own assertion. A static
+   * extractor that silently parses nothing reports zero dead anchors and looks
+   * identical to a clean tree — the exact shape being guarded against, one level
+   * up. So the corpus size is asserted too, and an anchor the extractor cannot
+   * resolve is REPORTED rather than dropped.
+   */
+  const provers = discoverProvers(REPO_ROOT);
+  const readTarget = (rel: string) => {
+    const p = resolve(REPO_ROOT, rel);
+    return existsSync(p) ? read(p) : undefined;
+  };
+
+  it('resolves a real corpus of anchors across the fleet (non-vacuity)', () => {
+    const total = provers.reduce(
+      (n, p) => n + auditAnchorLiveness(read(p.absPath), readTarget).resolved.length,
+      0,
+    );
+    // MEASURED, not aspirational: 14 anchors resolve today, across the provers
+    // that call `mutate(PATH, 'literal', …)` inline. The table-driven ones pass
+    // their anchor to `mutate` as a parameter, which no static pass can follow
+    // without evaluating the table — see the module docs, and the SUBJECT
+    // EXISTENCE check below, which does reach them.
+    //
+    // It was 22 before this audit was written, and the difference is the point:
+    // ten of those anchors were DEAD (`{{ standalonePrefix }}` text ADR-0048
+    // deleted), and retiring the seven with no vinext-era subject is what the
+    // audit was for. A floor that had been set to "keep the old number" would
+    // have made honest retirement the thing that reds.
+    //
+    // The floor is what stops the extractor rotting: an extractor that quietly
+    // parses nothing reports zero dead anchors and reads exactly like a clean
+    // tree, which is the defect shape this whole file is about.
+    expect(total).toBeGreaterThanOrEqual(12);
+  });
+
+  it('every file a prover READS still exists', () => {
+    // The half that reaches the table-driven provers. `mutation-prove-release-lane.mjs`
+    // bound `pnpm-lock.yaml` and ENOENTed on every run from the day the
+    // workspace moved to bun — its anchors never got far enough to be wrong,
+    // because the read failed first. No table evaluation is needed to ask this.
+    const findings: string[] = [];
+    let bindings = 0;
+    for (const p of provers) {
+      for (const b of proverPathBindings(read(p.absPath))) {
+        bindings += 1;
+        if (!existsSync(resolve(REPO_ROOT, b.path))) {
+          findings.push(`${p.relPath}: reads ${b.name} = ${b.path}, which does not exist`);
+        }
+      }
+    }
+    expect(bindings, 'no read-bindings resolved — the scan would pass vacuously').toBeGreaterThan(
+      8,
+    );
+    expect(findings, findings.join('\n  ')).toEqual([]);
+  });
+
+  it.each(provers.map((p) => p.relPath))('%s: every resolved anchor is live', (relPath) => {
+    const { findings } = auditAnchorLiveness(read(resolve(REPO_ROOT, relPath)), readTarget);
+    expect(findings, `${relPath}:\n  ${findings.join('\n  ')}`).toEqual([]);
+  });
+
+  it('an anchor that no longer occurs in its subject IS a finding', () => {
+    const { findings } = auditAnchorLiveness(
+      [
+        "const ROOT = '';",
+        "const TPL = join(ROOT, 'templates', 'app.hbs');",
+        "mutate(TPL, 'output: \"standalone\"', '');",
+      ].join('\n'),
+      () => 'a template that says nothing of the sort\n',
+    );
+    expect(findings.join(' ')).toMatch(/0 time\(s\)/);
+  });
+
+  it('an anchor occurring TWICE is a finding too — assertAnchorOnce would abort', () => {
+    const { findings } = auditAnchorLiveness(
+      ["const F = join(ROOT, 'a.txt');", "mutate(F, 'dup', 'x');"].join('\n'),
+      () => 'dup\ndup\n',
+    );
+    expect(findings.join(' ')).toMatch(/2 time\(s\)/);
+  });
+
+  it('a live anchor is NOT a finding (the audit is not a tripwire)', () => {
+    const { findings, resolved } = auditAnchorLiveness(
+      ["const F = join(ROOT, 'a.txt');", "mutate(F, 'live', 'x');"].join('\n'),
+      () => 'exactly one live occurrence\n',
+    );
+    expect(findings).toEqual([]);
+    expect(resolved).toHaveLength(1);
+  });
+
+  it('an anchor whose SUBJECT FILE is gone is a finding, not a silent skip', () => {
+    const { findings } = auditAnchorLiveness(
+      ["const F = join(ROOT, 'deleted.txt');", "mutate(F, 'x', 'y');"].join('\n'),
+      () => undefined,
+    );
+    expect(findings.join(' ')).toMatch(/does not exist/);
+  });
+
+  it('resolves an anchor reached through snapshot(), not just a bare path', () => {
+    // The two prover shapes in the tree: `mutate(PATH, …)` and
+    // `const snap = snapshot(PATH); mutate(snap, …)`. Following only the first
+    // would leave every snapshot-style prover unaudited while reporting clean.
+    const { resolved } = auditAnchorLiveness(
+      [
+        "const GUARD = join(ROOT, 'g.test.ts');",
+        'const snap = snapshot(GUARD);',
+        "mutate(snap, 'anchor-text', 'x');",
+      ].join('\n'),
+      () => 'anchor-text\n',
+    );
+    expect(resolved.map((r) => r.file)).toEqual(['g.test.ts']);
+  });
+
+  it('an anchor the extractor cannot resolve is REPORTED, never dropped', () => {
+    // A dropped unparseable anchor is indistinguishable from a live one in the
+    // summary, which is how a static audit rots into decoration.
+    const { unresolved } = auditAnchorLiveness(
+      "mutate(SOMETHING_COMPUTED, `${prefix} tail`, 'x');",
+      () => 'whatever',
+    );
+    expect(unresolved.length).toBeGreaterThan(0);
   });
 });

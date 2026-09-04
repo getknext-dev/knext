@@ -457,3 +457,273 @@ export function auditSpecFrameworkMatch(source, readSpec) {
   }
   return findings;
 }
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * #912 — ANCHOR LIVENESS
+ *
+ * A prover whose anchors no longer occur in their subjects proves nothing while
+ * every PR body citing it still says PROVED. Two were in exactly that state on
+ * the sprint-2 tip: `mutation-prove-install-smoke-coverage.mjs` aborts on the
+ * first of TEN `{{ standalonePrefix }}` anchors ADR-0048 deleted, and
+ * `mutation-prove-release-lane.mjs` ENOENTs on `pnpm-lock.yaml`. The nightly
+ * reports both — once a night, after the fact. This makes it a PR-time finding.
+ *
+ * WHY STATIC. The dynamic answer already exists (each prover's own preflight),
+ * and it costs a full prover run. The question "does this anchor still occur in
+ * that file" is answerable from the source, and answering it in the PR is the
+ * whole difference between a finding and a surprise.
+ *
+ * WHAT IT DELIBERATELY DOES NOT DO. It resolves the shapes provers actually use
+ * — `join(ROOT, 'a', 'b')`, `resolve(...)`, a name bound to another resolved
+ * name, and `snapshot(PATH)` — and it does NOT evaluate arbitrary expressions.
+ * An argument it cannot resolve is returned in `unresolved` rather than dropped,
+ * because a dropped anchor is indistinguishable from a live one in the summary,
+ * which is how a static audit rots into decoration.
+ * `tests/mutation-prover-lane.test.ts` asserts the resolved corpus stays large,
+ * so an extractor that quietly stops extracting cannot pass as a clean tree.
+ *
+ * COVERAGE, MEASURED AND STATED RATHER THAN IMPLIED. Two of the eighteen provers
+ * write `mutate(PATH, 'literal', …)` inline and are fully covered. The rest are
+ * TABLE-DRIVEN — a `MUTATIONS` array of `{ apply: (checkOnly) => mutate(snap,
+ * anchor, …) }` closures — so the anchor reaches `mutate` as a parameter and is
+ * not statically resolvable without evaluating the table, which is most of
+ * running the prover. Those are covered by the SECOND check below (every path a
+ * prover resolves must exist, which is the `pnpm-lock.yaml` failure verbatim)
+ * and, dynamically, by their own preflights. Claiming the anchor check covers
+ * all eighteen would be the decoration this module exists to catch.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * The `[start, end)` span of a balanced argument list starting at `open` (the
+ * index of the `(`), or `undefined` if it never closes.
+ *
+ * Walks the BLANKED view so a bracket inside a string or comment cannot
+ * unbalance the walk — the reason this is not a regex.
+ *
+ * @param {string} blanked
+ * @param {number} open
+ */
+function argSpan(blanked, open) {
+  let depth = 0;
+  for (let i = open; i < blanked.length; i++) {
+    const c = blanked[i];
+    if (c === '(' || c === '[' || c === '{') depth += 1;
+    else if (c === ')' || c === ']' || c === '}') {
+      depth -= 1;
+      if (depth === 0) return { start: open + 1, end: i };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Split an argument list into top-level arguments, by comma.
+ *
+ * @param {string} blanked the blanked view, for finding the commas
+ * @param {number} start
+ * @param {number} end
+ * @returns {Array<{ start: number, end: number }>}
+ */
+function splitArgs(blanked, start, end) {
+  const out = [];
+  let depth = 0;
+  let from = start;
+  for (let i = start; i < end; i++) {
+    const c = blanked[i];
+    if (c === '(' || c === '[' || c === '{') depth += 1;
+    else if (c === ')' || c === ']' || c === '}') depth -= 1;
+    else if (c === ',' && depth === 0) {
+      out.push({ start: from, end: i });
+      from = i + 1;
+    }
+  }
+  if (from < end) out.push({ start: from, end });
+  return out;
+}
+
+/** Decode a single- or double-quoted JS literal's source into its value. */
+function decodeLiteral(raw) {
+  try {
+    return JSON.parse(raw[0] === "'" ? `"${raw.slice(1, -1).replace(/"/g, '\\"')}"` : raw);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The VALUE of an expression that is one or more quoted literals joined by `+`.
+ *
+ * `+`-concatenation is not an edge case: several provers assemble a long anchor
+ * that way to stay inside the line length, and an audit that could not read
+ * those would silently exempt the longest anchors — the ones most likely to
+ * have drifted.
+ *
+ * @param {string} source
+ * @param {string} blanked
+ * @param {{ start: number, end: number }} span
+ */
+function literalValue(source, blanked, span) {
+  const view = blanked.slice(span.start, span.end);
+  const parts = [];
+  let i = 0;
+  while (i < view.length) {
+    const c = view[i];
+    if (c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '+') {
+      i += 1;
+      continue;
+    }
+    if (c !== "'" && c !== '"') return undefined;
+    const close = view.indexOf(c, i + 1);
+    if (close === -1) return undefined;
+    const value = decodeLiteral(source.slice(span.start + i, span.start + close + 1));
+    if (value === undefined) return undefined;
+    parts.push(value);
+    i = close + 1;
+  }
+  return parts.length ? parts.join('') : undefined;
+}
+
+/** Roots a prover joins from. Their value is the repo root, i.e. the empty prefix. */
+const PATH_ROOT_NAMES = new Set(['WT', 'REPO_ROOT', 'ROOT', 'REPO', 'repoRoot']);
+
+/**
+ * Every `const NAME = …` in the source that resolves to a repo-relative PATH.
+ *
+ * Resolved in two passes so a constant built from a LATER constant still lands;
+ * a `snapshot(PATH)` binding inherits its target's path, because both prover
+ * shapes in the tree must be audited and following only `mutate(PATH, …)` would
+ * leave every snapshot-style prover unaudited while reporting clean.
+ *
+ * @param {string} source
+ * @returns {Map<string, string>}
+ */
+function pathBindings(source) {
+  const blanked = blankNonCode(source);
+  const known = new Map();
+  for (const name of PATH_ROOT_NAMES) known.set(name, '');
+
+  /** Resolve one right-hand side to a path, or undefined. */
+  const resolveRhs = (rhs) => {
+    const trimmed = rhs.trim();
+    if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(trimmed)) return known.get(trimmed);
+    if (/^(['"])(?:[^\\]|\\.)*?\1$/.test(trimmed)) return decodeLiteral(trimmed);
+    const call = /^(join|resolve|snapshot)\s*\(/.exec(trimmed);
+    if (!call) return undefined;
+    const blankedRhs = blankNonCode(trimmed);
+    const span = argSpan(blankedRhs, blankedRhs.indexOf('('));
+    if (!span) return undefined;
+    const args = splitArgs(blankedRhs, span.start, span.end);
+    const parts = [];
+    for (const arg of args) {
+      const piece = resolveRhs(trimmed.slice(arg.start, arg.end));
+      if (piece === undefined) return undefined;
+      parts.push(piece);
+    }
+    // `snapshot(PATH)` carries its target's path; join/resolve concatenate.
+    if (call[1] === 'snapshot') return parts[0];
+    return parts.filter((p) => p !== '').join('/');
+  };
+
+  for (let pass = 0; pass < 2; pass++) {
+    const decl = /(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*/g;
+    for (let m = decl.exec(blanked); m; m = decl.exec(blanked)) {
+      const name = m[1];
+      if (known.get(name) !== undefined) continue;
+      // The RHS runs to the top-level `;`, found on the BLANKED view so a
+      // semicolon inside a string cannot truncate it.
+      let end = m.index + m[0].length;
+      let depth = 0;
+      for (; end < blanked.length; end++) {
+        const c = blanked[end];
+        if (c === '(' || c === '[' || c === '{') depth += 1;
+        else if (c === ')' || c === ']' || c === '}') depth -= 1;
+        else if (c === ';' && depth === 0) break;
+      }
+      const value = resolveRhs(source.slice(m.index + m[0].length, end));
+      if (value !== undefined) known.set(name, value);
+    }
+  }
+  for (const name of PATH_ROOT_NAMES) known.delete(name);
+  return known;
+}
+
+/**
+ * Audit one prover's anchors against the files they claim to anchor in.
+ *
+ * @param {string} source the prover's source
+ * @param {(relPath: string) => string | undefined} readTarget returns the
+ *   subject's contents, or `undefined` when the path does not resolve. A
+ *   missing subject is a FINDING, not a skip: a prover pointed at a deleted
+ *   file is the `pnpm-lock.yaml` case verbatim.
+ * @returns {{ findings: string[], resolved: Array<{file: string, anchor: string, count: number}>, unresolved: string[] }}
+ */
+export function auditAnchorLiveness(source, readTarget) {
+  const blanked = blankNonCode(source);
+  const bindings = pathBindings(source);
+  const findings = [];
+  const resolved = [];
+  const unresolved = [];
+
+  const call = /(?<![.\w$])mutate\s*\(/g;
+  for (let m = call.exec(blanked); m; m = call.exec(blanked)) {
+    const span = argSpan(blanked, m.index + m[0].length - 1);
+    if (!span) continue;
+    const args = splitArgs(blanked, span.start, span.end);
+    if (args.length < 2) continue;
+    const targetExpr = source.slice(args[0].start, args[0].end).trim();
+    const anchor = literalValue(source, blanked, args[1]);
+    const file = bindings.get(targetExpr);
+    if (anchor === undefined || file === undefined) {
+      unresolved.push(
+        `mutate(${targetExpr}, …) — ${anchor === undefined ? 'anchor is not a literal' : 'target does not resolve to a path'}`,
+      );
+      continue;
+    }
+    const contents = readTarget(file);
+    if (contents === undefined) {
+      findings.push(`anchors in ${file}, which does not exist: ${JSON.stringify(anchor)}`);
+      continue;
+    }
+    const count = contents.split(anchor).length - 1;
+    resolved.push({ file, anchor, count });
+    if (count !== 1) {
+      findings.push(
+        `anchor occurs ${count} time(s) in ${file} (expected exactly 1): ${JSON.stringify(anchor.slice(0, 80))}`,
+      );
+    }
+  }
+  return { findings, resolved, unresolved };
+}
+
+/**
+ * Every repo-relative path a prover binds to a constant, so callers can check
+ * the subjects EXIST (#912).
+ *
+ * This is the half that reaches the table-driven provers the anchor check
+ * cannot. `mutation-prove-release-lane.mjs` binds `pnpm-lock.yaml` and ENOENTs
+ * on every run since the workspace moved to bun; the anchor never gets far
+ * enough to be wrong, because the read fails first. A prover pointed at a
+ * deleted file proves nothing regardless of how its anchors are spelled, and
+ * that question needs no table evaluation at all.
+ *
+ * A SUBJECT IS SOMETHING THE PROVER READS. That qualifier is not tidiness, it
+ * is what makes the check usable: provers legitimately name files that do not
+ * exist yet and never should — `tests/__canary-*.test.ts` is WRITTEN by the
+ * prover to prove the harness can see red, and the probe files
+ * `mutation-prove-committed-transform-cache.mjs` plants are the mutations
+ * themselves. Reporting those would produce eight noisy findings around the one
+ * real one, and a check with a 9:1 noise ratio gets an allowlist and then gets
+ * ignored. So a binding qualifies only if it reaches `readFileSync` or
+ * `snapshot` — the two verbs that REQUIRE the file to be there already.
+ *
+ * @param {string} source
+ * @returns {Array<{ name: string, path: string }>}
+ */
+export function proverPathBindings(source) {
+  const code = blankNonCode(source);
+  const isRead = (name) =>
+    new RegExp(`(?:readFileSync|snapshot)\\s*\\(\\s*${name}\\s*[,)]`).test(code);
+  return [...pathBindings(source)]
+    .filter(([name, path]) => path !== '' && !/\s/.test(path) && path.includes('.') && isRead(name))
+    .map(([name, path]) => ({ name, path }));
+}
