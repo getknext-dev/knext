@@ -19,11 +19,11 @@ name: Compat suite (official Next.js deploy harness)
 # Nightly + manual dispatch only — the fast per-PR gate is the compat-smoke job.
 #
 # LANES (#147 item 4): the NIGHTLY schedule is the NODE lane — the credential
-# behind the compat-matrix official-suite ✅. The Bun runtime axis runs as a
-# SEPARATE, cheaper lane: `workflow_dispatch` input `runtime=bun` on demand +
-# the WEEKLY Sunday schedule — never a second nightly matrix dimension. The Bun
-# lane's results claim NOTHING for the matrix until a green bun run is observed
-# (docs/compat-matrix.md, the Bun runtime-axis row).
+# behind the compat-matrix official-suite ✅. The Bun runtime axis is
+# DISPATCH-ONLY (`runtime=bun`): its weekly schedule retired with the
+# standalone-under-bun artifact (ADR-0048/#710), and the recurring compute
+# moved to the shipped artifact's lane, compat-vinext.yml. Bun-lane results
+# claim NOTHING for the matrix (docs/compat-matrix.md, Bun runtime-axis row).
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
@@ -86,10 +86,11 @@ on:
     # 03:17 UTC nightly — off-peak; the run takes the better part of an hour.
     # This is the NODE lane: the compat-matrix credential (docs/compat-matrix.md).
     - cron: '17 3 * * *'
-    # 05:17 UTC SUNDAY — the weekly BUN lane (#147 item 4). Keep this cron string
-    # in sync with the KNEXT_RUNTIME expression below (guard-tested): the env
-    # expression compares github.event.schedule against it to pick the lane.
-    - cron: '17 5 * * 0'
+    # The weekly Sunday BUN cron is RETIRED (#710, stability
+    # sprint): it exercised the standalone-under-bun artifact, which is no
+    # longer user-selectable (ADR-0048), and its weekly compute now belongs to
+    # the shipped artifact's lane — .github/workflows/compat-vinext.yml. The
+    # bun lane stays DISPATCHABLE (runtime=bun) for legacy-CR archaeology.
 
 # Pin the Next.js ref so a failure is attributable to knext, not upstream churn.
 # NEXTJS_REF is the git TAG (kept for the source checkout that supplies the
@@ -133,7 +134,7 @@ env:
   # ('17 3 * * *') and any dispatch without the input stay on node (the
   # credential lane). Keep the cron literal in sync with the schedule block
   # above — guard-tested in tests/compat-suite-workflow.test.ts.
-  KNEXT_RUNTIME: ${{ github.event.inputs.runtime || (github.event.schedule == '17 5 * * 0' && 'bun') || 'node' }}
+  KNEXT_RUNTIME: ${{ github.event.inputs.runtime || 'node' }}
   # #188 path 2 — dispatch input ONLY, never a schedule branch: on schedule
   # events github.event.inputs is empty, so this is '' (off) on the nightly
   # AND the weekly bun lane. '1' is the exact value scripts/e2e-deploy.sh

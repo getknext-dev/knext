@@ -327,16 +327,46 @@ jobs:
       - name: Build file-manager (vinext -> nitro .output)
         run: bun run --filter file-manager build
 
-      # Boots the nitro entry, not a standalone server.js — file-manager stopped
-      # producing one at ADR-0048. SERVER_CMD is bun because the output uses
-      # nitro's BUN preset; there is no node-runnable server for a node lane to
-      # boot, which is why the runtime matrix is gone rather than reduced.
-      - name: Run knext compat-smoke (bun)
+      # The smoke gates the ARTIFACT USERS GET (#900 exit criterion 2): compile
+      # the nitro output into the single executable exactly as the Dockerfile
+      # does, and boot THAT. Booting `.output/server/index.mjs` under bun — the
+      # previous shape — misses every divergence that exists only in the
+      # compiled binary: the sharp `process.dlopen` shim, the re-derived asset
+      # root, closed module resolution. No --target: the smoke runs on THIS
+      # runner, so the host triple is the right one (the musl cross-target is
+      # the Dockerfile's concern).
+      - name: Compile the single executable
+        working-directory: apps/file-manager
+        run: |
+          bun run node_modules/@getknext/core/dist/adapters/vinext-compile.js \
+            --entry .output/server/index.mjs \
+            --outfile knext-smoke-exec
+
+      # The sharp addon tree, staged beside the binary (the shim discovers
+      # `native/` next to the executable; the addon links libvips by RELATIVE
+      # rpath so the @img layout must survive intact — cp -RL dereferences
+      # bun's isolated-store symlinks).
+      - name: Stage the sharp native tree beside the binary
+        run: |
+          set -eu
+          SRC=""
+          for c in node_modules/.bun/node_modules/@img node_modules/@img; do
+            [ -d "$c" ] && SRC="$c" && break
+          done
+          test -n "$SRC" || { echo "no @img tree found for sharp staging" >&2; exit 1; }
+          mkdir -p apps/file-manager/native
+          cp -RL "$SRC"/sharp-linux-x64 apps/file-manager/native/ 2>/dev/null || true
+          cp -RL "$SRC"/sharp-libvips-linux-x64 apps/file-manager/native/ 2>/dev/null || true
+          ls apps/file-manager/native/ | grep -q sharp- || { echo "sharp addon not staged" >&2; exit 1; }
+
+      # SERVER_CMD == SERVER_PATH is the smoke's single-exec signal: no script
+      # arg, no preload — the binary IS the server.
+      - name: Run knext compat-smoke (compiled single executable)
         working-directory: apps/file-manager
         env:
           RUNTIME: bun
-          SERVER_CMD: bun
-          SERVER_PATH: ${{ github.workspace }}/apps/file-manager/.output/server/index.mjs
+          SERVER_CMD: ${{ github.workspace }}/apps/file-manager/knext-smoke-exec
+          SERVER_PATH: ${{ github.workspace }}/apps/file-manager/knext-smoke-exec
           # The service container above, reachable on localhost from the job.
           REDIS_URL: redis://127.0.0.1:6379
         run: node scripts/compat-smoke.mjs

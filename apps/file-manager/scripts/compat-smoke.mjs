@@ -281,8 +281,18 @@ function startServer() {
 
   // #188: on Bun, preload the keep-alive guard (self-disables on fixed Bun
   // versions ≥1.4.0). Never added on Node.
-  const serverArgs =
-    RUNTIME === 'bun' && BUN_GUARD_PRELOAD ? ['-r', BUN_GUARD_PRELOAD, SERVER_PATH] : [SERVER_PATH];
+  // Single-executable mode: when SERVER_CMD *is* the server (the compiled
+  // binary, ADR-0048), there is no script argument and no preload — a compiled
+  // binary cannot take `-r` (its argv is the app's), and the keep-alive bug the
+  // preload guards is fixed in the >=1.4 bun embedded in it. Signalled by
+  // pointing both env vars at the same file, which also keeps the existsSync
+  // preflight meaningful.
+  const singleExec = SERVER_CMD === SERVER_PATH;
+  const serverArgs = singleExec
+    ? []
+    : RUNTIME === 'bun' && BUN_GUARD_PRELOAD
+      ? ['-r', BUN_GUARD_PRELOAD, SERVER_PATH]
+      : [SERVER_PATH];
   console.log(`[compat-smoke] runtime=${RUNTIME} cmd=${SERVER_CMD} args=${serverArgs.join(' ')}`);
   console.log(`[compat-smoke] booting ${SERVER_PATH} on ${HOST}:${PORT}`);
   serverProc = spawn(SERVER_CMD, serverArgs, {
