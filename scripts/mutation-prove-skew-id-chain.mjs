@@ -18,28 +18,38 @@
  *        (marker, protection, reclaim) is keyed on a value nothing can resolve.
  *        Two rows because "we fixed the app template" is how the zone
  *        generator would be left behind.
- *   3.   The vinext leg's unresolvable branch is disarmed — the pre-T2
+ *   3.   The vinext leg's missing-prefix branch is disarmed — the pre-T2
  *        behaviour, a guard that reports success while inert.
- *   4.   The mismatch branch is disarmed. The prefix may be any id at all.
- *   5.   The guard stops running under `--skip-build`. That is the leg with no
+ *   4.   The guard stops running under `--skip-build`. That is the leg with no
  *        other check on it: nothing else notices that `.output` belongs to an
  *        earlier deploy, so the assets upload under the wrong prefix and the
  *        GC reaps them out from under the new revision.
- *   6.   The `.knext-build` marker write is removed — #892's subject. The GC
+ *   5.   The guard's SCOPE is widened back to every deploy, so a no-storage or
+ *        `--skip-upload` deploy aborts over a directory name while uploading
+ *        nothing. Scored against `deploy-no-storage`, the suite that owns that
+ *        mode — in round 1 it stubbed the seam to always agree, which is
+ *        precisely why this reached review.
+ *   6.   The `--skip-build` case reverts to a plain Error, so a mistake with a
+ *        one-word fix prints a FATAL stack dump instead of the fix.
+ *   7.   The T2d override warning goes silent. It was green-if-deleted in
+ *        round 1: a decision recorded only in a comment.
+ *   8.   The `.knext-build` marker write is removed — #892's subject. The GC
  *        reverts to over-keeping every vinext build forever.
- *   7.   The marker is written into the ARTIFACT instead of the staging copy,
+ *   9.   The marker is written into the ARTIFACT instead of the staging copy,
  *        which mutates a tree the concurrent docker build is COPYing.
- *   8.   The FAIL-SAFE is inverted: an ambiguous id resolves to the first
- *        candidate instead of refusing. This is the over-delete direction
- *        ADR-0011 forbids, and it is the mutation most likely to look
- *        harmless in review.
- *   9.   The resolver stops excluding the reserved shared dirs, so `chunks/`
- *        becomes a markerable "build" — the max-blast-radius reap.
- *   10.  `reclaimBuildPrefix` short-circuits. It deletes nothing and logs that
+ *   10.  The write site stops VERIFYING the caller's id and just writes the
+ *        marker. This is the round-2 rule — the equality is enforced where the
+ *        marker is written, not by call-site discipline — and its absence is
+ *        what let `kn-next build` mark a UUID no revision can protect.
+ *   11.  THE OVER-DELETE DIRECTION: any prefix satisfies the check rather than
+ *        the stated one. The mutation most likely to look harmless in review.
+ *   12.  `_vinext_fonts` drops out of the pruner's reserved set — the
+ *        `next/font` namespace that broke round 1's discovery rule.
+ *   13.  `reclaimBuildPrefix` short-circuits. It deletes nothing and logs that
  *        it reclaimed the prefix — the pre-T2 behaviour, and the reason T2c is
  *        a store-mutating test rather than an argv assertion.
- *   11.  The CR stops carrying NEXT_DEPLOYMENT_ID at all.
- *   12.  The user's colliding value wins over the deploy's. The entry is still
+ *   14.  The CR stops carrying NEXT_DEPLOYMENT_ID at all.
+ *   15.  The user's colliding value wins over the deploy's. The entry is still
  *        there, so any "is the key present" check passes.
  *
  * Every spec here imports `bun:test`, so the runner is resolved through
@@ -72,11 +82,12 @@ const SPEC_DEPLOY = 'packages/kn-next/src/__tests__/deploy-orchestrator.test.ts'
 const SPEC_STAGE = 'packages/kn-next/src/__tests__/asset-upload-stage.test.ts';
 const SPEC_GC = 'packages/kn-next/src/__tests__/vinext-asset-gc.test.ts';
 const SPEC_CR_ENV = 'packages/kn-next/src/__tests__/cr-builder-env.test.ts';
+const SPEC_NO_STORAGE = 'packages/kn-next/src/__tests__/deploy-no-storage.test.ts';
 
 /** SGR colour codes in runner output — matched without a raw escape byte. */
 const ANSI = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g');
 
-const GENERATE_BUILD_ID = '    generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID ?? null,\n';
+const GENERATE_BUILD_ID = '    generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID || null,\n';
 
 /**
  * Every disarm, as `[file, label, anchor, replacement, spec, opts?]`.
@@ -105,52 +116,75 @@ const MUTATIONS = [
   ],
   [
     DEPLOY,
-    'PRE-T2 BEHAVIOUR: an unresolvable static id stops aborting the deploy',
-    '        if (!staticId.ok) {\n',
-    '        if (false) {\n',
-    SPEC_DEPLOY,
-  ],
-  [
-    DEPLOY,
-    'the static-prefix-vs-deploy-tag mismatch check is disarmed',
-    '        if (staticId.id !== buildId) {\n',
+    'PRE-T2 BEHAVIOUR: a missing build prefix stops aborting the deploy',
+    '        if (!prefix.ok) {\n',
     '        if (false) {\n',
     SPEC_DEPLOY,
   ],
   [
     DEPLOY,
     'the guard stops running under --skip-build (the leg nothing else checks)',
-    '    if (resolvedBuild === "vinext") {\n',
-    '    if (resolvedBuild === "vinext" && !options.skipBuild) {\n',
+    '    if (resolvedBuild === "vinext" && uploadsAssets) {\n',
+    '    if (resolvedBuild === "vinext" && uploadsAssets && !options.skipBuild) {\n',
+    SPEC_DEPLOY,
+  ],
+  [
+    DEPLOY,
+    'ROUND 2: the guard fires on deploys that upload NOTHING (no-storage / --skip-upload)',
+    '    const uploadsAssets = hasStorage(config) && !options.skipUpload;\n',
+    '    const uploadsAssets = true;\n',
+    // The suite that owns ADR-0047's mode. Round 1 stubbed the seam to always
+    // agree here, which is exactly why this defect reached review.
+    SPEC_NO_STORAGE,
+  ],
+  [
+    DEPLOY,
+    'the --skip-build case reverts to a FATAL dump instead of usage guidance',
+    '                throw new UsageError(\n',
+    '                throw new Error(\n',
+    SPEC_DEPLOY,
+  ],
+  [
+    DEPLOY,
+    'T2d: the config-override warning goes silent (green-if-deleted in round 1)',
+    '        config.env?.NEXT_DEPLOYMENT_ID !== undefined &&\n',
+    '        false &&\n',
     SPEC_DEPLOY,
   ],
   [
     UPLOAD,
     '#892 ITSELF: the .knext-build marker is not staged for a vinext build',
-    '    if (resolved.ok) {\n',
+    '    if (buildId) {\n',
     '    if (false) {\n',
     SPEC_GC,
   ],
   [
     UPLOAD,
     'the marker is written into the ARTIFACT instead of the staging copy',
-    '                stagingDir,\n                "_next",\n',
-    '                sourceDir,\n                "_next",\n',
+    '            join(stagingDir, "_next", "static", buildId, BUILD_MARKER_FILENAME),\n',
+    '            join(sourceDir, "_next", "static", buildId, BUILD_MARKER_FILENAME),\n',
     SPEC_STAGE,
   ],
   [
     UPLOAD,
-    'THE OVER-DELETE DIRECTION: an ambiguous id resolves to the first candidate',
-    '    if (ids.length === 1) return { ok: true, id: ids[0] as string };\n',
-    '    if (ids.length >= 1) return { ok: true, id: ids[0] as string };\n',
+    'ROUND 2: the write site TRUSTS the caller instead of verifying the prefix',
+    '        if (!check.ok) {\n',
+    '        if (false) {\n',
     SPEC_STAGE,
   ],
   [
     UPLOAD,
-    "the resolver stops excluding Next's shared dirs, so chunks/ becomes a build",
-    '        .filter((name) => !RESERVED_STATIC_DIRS.has(name))\n',
-    '        .filter(() => true)\n',
+    'THE OVER-DELETE DIRECTION: any prefix satisfies the check, not the stated one',
+    '    if (expectedId && siblings.includes(expectedId)) return { ok: true };\n',
+    '    if (siblings.length > 0) return { ok: true };\n',
     SPEC_STAGE,
+  ],
+  [
+    UPLOAD,
+    "ROUND 2: _vinext_fonts drops out of the pruner's reserved set (the next/font app)",
+    '    "_vinext_fonts",\n',
+    '',
+    SPEC_GC,
   ],
   [
     UPLOAD,
