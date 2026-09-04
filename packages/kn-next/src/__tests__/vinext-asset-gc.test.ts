@@ -163,10 +163,28 @@ function uploadStaged(stagedDir: string): void {
     walk(stagedDir);
 }
 
+/**
+ * Seeds a `next/font` app's `.output/public` — the real tree shape, with
+ * `_vinext_fonts/` as a first-level sibling of the build prefix (vinext's
+ * `createGoogleFontsPlugin` writeBundle hook copies fonts to
+ * `<assetsDir>/_vinext_fonts/`, and `assetsDir` is `_next/static`).
+ */
+function seedFontAppBuild(id: string): void {
+    seedVinextBuild(id);
+    const staticRoot = join(cwd, ".output", "public", "_next", "static");
+    mkdirSync(join(staticRoot, "_vinext_fonts"), { recursive: true });
+    writeFileSync(
+        join(staticRoot, "_vinext_fonts", "inter-latin.woff2"),
+        "font",
+    );
+    mkdirSync(join(staticRoot, "css"), { recursive: true });
+    writeFileSync(join(staticRoot, "css", "app.css"), "body{}");
+}
+
 /** Stages + uploads one vinext build under `id`, as a deploy would. */
 function deployBuild(id: string): void {
     seedVinextBuild(id);
-    uploadStaged(stageNitroPublicAssets(cwd));
+    uploadStaged(stageNitroPublicAssets(cwd, id));
 }
 
 describe("T2b (#892) — a vinext build is markered, protected, and reapable", () => {
@@ -213,35 +231,62 @@ describe("T2b (#892) — a vinext build is markered, protected, and reapable", (
         expect(store.keys).toContain(`${APP}/_next/static/t3/chunks/main.js`);
     });
 
-    it("an UNRESOLVABLE build id is over-kept, never reaped (the fail-safe)", () => {
-        // Two candidate prefixes in one artifact ⇒ no marker staged ⇒ the
-        // pruner cannot classify it, so it survives even outside the window.
-        seedVinextBuild("t1");
-        mkdirSync(
-            join(cwd, ".output", "public", "_next", "static", "stray-uuid"),
-            { recursive: true },
-        );
-        writeFileSync(
-            join(
-                cwd,
-                ".output",
-                "public",
-                "_next",
-                "static",
-                "stray-uuid",
-                "x.js",
-            ),
-            "x",
-        );
+    it("an upload with NO stated build id is over-kept, never reaped (the fail-safe)", () => {
+        // `kn-next build`: assets uploaded, no deploy id, no revision. No
+        // marker ⇒ the pruner cannot classify it ⇒ it survives even outside
+        // the window. The alternative — marking whatever id vinext minted —
+        // would make it reapable while no revision label could ever protect it.
+        seedVinextBuild("some-vinext-uuid");
         uploadStaged(stageNitroPublicAssets(cwd));
         deployBuild("t2");
         deployBuild("t3");
 
         const summary = pruneOldBuilds(makeConfig(1), ["t3"], "t3");
 
-        expect(summary.keptUnmarked.sort()).toEqual(["stray-uuid", "t1"]);
-        expect(summary.reaped).not.toContain("t1");
-        expect(store.keys).toContain(`${APP}/_next/static/t1/chunks/main.js`);
+        expect(summary.keptUnmarked).toEqual(["some-vinext-uuid"]);
+        expect(summary.reaped).not.toContain("some-vinext-uuid");
+        expect(store.keys).toContain(
+            `${APP}/_next/static/some-vinext-uuid/chunks/main.js`,
+        );
+    });
+
+    /**
+     * The blocking defect from review round 1, at the GC layer.
+     *
+     * A build-id DISCOVERY rule saw `_vinext_fonts/` as a rival candidate, so
+     * for every `next/font` app it staged no marker at all — the build was
+     * over-kept forever and the font namespace polluted the prune listing as a
+     * suspicious unmarked prefix on every single run.
+     */
+    it("a next/font app is markered, protected and reapable like any other", () => {
+        seedFontAppBuild("t1");
+        uploadStaged(stageNitroPublicAssets(cwd, "t1"));
+        seedFontAppBuild("t2");
+        uploadStaged(stageNitroPublicAssets(cwd, "t2"));
+        seedFontAppBuild("t3");
+        uploadStaged(stageNitroPublicAssets(cwd, "t3"));
+
+        // The marker is there — the half that used to be silently skipped.
+        expect(store.keys).toContain(
+            `${APP}/_next/static/t1/${BUILD_MARKER_FILENAME}`,
+        );
+
+        const summary = pruneOldBuilds(makeConfig(1), ["t3"], "t3");
+
+        // Reaped like any other build...
+        expect(summary.reaped.sort()).toEqual(["t1", "t2"]);
+        expect(
+            store.staticKeys().filter((k) => k.includes("/t1/")),
+        ).toHaveLength(0);
+        // ...and the shared font/css namespaces are NEVER touched, nor
+        // reported as mystery unmarked prefixes.
+        expect(store.keys).toContain(
+            `${APP}/_next/static/_vinext_fonts/inter-latin.woff2`,
+        );
+        expect(store.keys).toContain(`${APP}/_next/static/css/app.css`);
+        expect(summary.keptUnmarked).toEqual([]);
+        expect(summary.reservedExcluded).toContain("_vinext_fonts");
+        expect(summary.reaped).not.toContain("_vinext_fonts");
     });
 });
 

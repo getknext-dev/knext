@@ -21,10 +21,10 @@ import { join } from "node:path";
 import {
     BUILD_MARKER_FILENAME,
     reclaimBuildPrefix,
-    resolveVinextStaticId,
     type StorageBackedConfig,
     stageNitroPublicAssets,
     stageStandaloneAssets,
+    verifyVinextStaticPrefix,
 } from "../utils/asset-upload";
 
 let cwd: string;
@@ -218,14 +218,21 @@ describe("stageNitroPublicAssets", () => {
     }
 
     /**
-     * T2b (#892) — the marker. Safe ONLY because T2a made the vinext static id
-     * the deploy tag: marker key ≡ protection key ≡ image tag ≡ spec.buildId,
-     * so the over-delete this staging path used to avoid by staying silent
-     * cannot be expressed any more.
+     * T2b (#892) — the marker, keyed on the id the CALLER passes.
+     *
+     * Round 2 moved this from "discover the id from the tree" to "the caller
+     * states the id and the write site verifies it". The discovery version was
+     * wrong twice over, and both were real: vinext emits `_vinext_fonts/`
+     * beside the build prefix for any app using `next/font`, which made the
+     * single-candidate rule ambiguous; and `kn-next build` — which exports no
+     * deploy id at all — would have had a UUID discovered for it and marked,
+     * producing a marker no revision label can ever match. A marker that can be
+     * classified as reapable but never protected is the over-delete ADR-0011
+     * forbids, and it would have shipped on the path nobody tests.
      */
-    it("stages the .knext-build marker into _next/static/<id>/ (#892)", () => {
+    it("stages the .knext-build marker into _next/static/<buildId>/ (#892)", () => {
         seedNitroBuild("deploytag-7");
-        const staged = stageNitroPublicAssets(cwd);
+        const staged = stageNitroPublicAssets(cwd, "deploytag-7");
 
         const marker = join(
             staged,
@@ -237,7 +244,7 @@ describe("stageNitroPublicAssets", () => {
         expect(existsSync(marker)).toBe(true);
         expect(readFileSync(marker, "utf8").trim()).toBe("deploytag-7");
         // ...and NOWHERE else. A marker on a shared dir is the max-blast-radius
-        // failure the RESERVED deny-list exists to make impossible.
+        // failure the reserved deny-list exists to make impossible.
         expect(markersUnder(staged)).toEqual([
             join("_next", "static", "deploytag-7", BUILD_MARKER_FILENAME),
         ]);
@@ -247,7 +254,7 @@ describe("stageNitroPublicAssets", () => {
         // The staging dir is a copy; the artifact is read-only (it is being
         // COPYd by the concurrent docker build).
         seedNitroBuild("deploytag-7");
-        stageNitroPublicAssets(cwd);
+        stageNitroPublicAssets(cwd, "deploytag-7");
         expect(
             existsSync(
                 join(
@@ -263,35 +270,94 @@ describe("stageNitroPublicAssets", () => {
         ).toBe(false);
     });
 
-    it("stages NO marker when the static id is ambiguous — fail-safe over-keep (#892)", () => {
-        // Two candidate prefixes: the id cannot be resolved, so the build is
-        // over-kept forever rather than marked under a guess. Never throws —
-        // an unmarked upload is the safe outcome, not a failed deploy.
-        seedNitroBuild("id-a");
-        seedNitroBuild("id-b");
-        const staged = stageNitroPublicAssets(cwd);
-        expect(markersUnder(staged)).toEqual([]);
+    /**
+     * The REAL tree a `next/font` app produces. Measured from vinext's
+     * `createGoogleFontsPlugin` writeBundle hook, which copies font files into
+     * `<outDir>/<assetsDir>/_vinext_fonts/` — `assetsDir` being `_next/static`.
+     * So `_vinext_fonts` is a first-level sibling of the build prefix, exactly
+     * like `chunks` and `css`.
+     */
+    function seedFontAppBuild(buildId: string): void {
+        const staticRoot = join(cwd, ".output", "public", "_next", "static");
+        rmSync(join(cwd, ".output"), { recursive: true, force: true });
+        for (const dir of [buildId, "_vinext_fonts", "chunks", "css"]) {
+            mkdirSync(join(staticRoot, dir), { recursive: true });
+            writeFileSync(join(staticRoot, dir, "f.bin"), "x");
+        }
+        writeFileSync(join(cwd, ".output", "public", "favicon.ico"), "icon");
+    }
+
+    it("marks a next/font app correctly — _vinext_fonts is a sibling, not a rival", () => {
+        // The blocking defect round 1 shipped: a build-id DISCOVERY rule saw
+        // `_vinext_fonts` as a second candidate, called the id ambiguous, and
+        // (a) staged no marker and (b) aborted the deploy — for every app that
+        // uses next/font, including this repo's own dogfood app.
+        seedFontAppBuild("deploytag-7");
+        const staged = stageNitroPublicAssets(cwd, "deploytag-7");
+
+        expect(markersUnder(staged)).toEqual([
+            join("_next", "static", "deploytag-7", BUILD_MARKER_FILENAME),
+        ]);
+        // The fonts, chunks and css the app actually serves are still staged.
+        for (const dir of ["_vinext_fonts", "chunks", "css"]) {
+            expect(
+                existsSync(join(staged, "_next", "static", dir, "f.bin")),
+            ).toBe(true);
+        }
     });
 
-    it("stages NO marker when there is no non-reserved prefix at all", () => {
-        mkdirSync(join(cwd, ".output", "public", "_next", "static", "chunks"), {
-            recursive: true,
-        });
-        writeFileSync(
-            join(cwd, ".output", "public", "_next", "static", "chunks", "a.js"),
-            "x",
-        );
+    it("stages NO marker when the caller states no build id — fail-safe over-keep", () => {
+        // This is `kn-next build`: it uploads assets but creates no revision,
+        // so nothing could ever protect the prefix. Unmarked means over-kept
+        // forever, which is the safe direction; marking it would make it
+        // reapable-but-never-protectable.
+        seedNitroBuild("some-vinext-uuid");
         const staged = stageNitroPublicAssets(cwd);
         expect(markersUnder(staged)).toEqual([]);
+        // ...and it still stages the assets. Refusing to mark is not refusing
+        // to upload.
+        expect(
+            existsSync(
+                join(staged, "_next", "static", "some-vinext-uuid", "chunk.js"),
+            ),
+        ).toBe(true);
+    });
+
+    it("REFUSES, deliberately, when the stated build id has no prefix", () => {
+        // The write site enforces the equality rather than trusting the caller.
+        // A marker written beside the real prefix would be a phantom build the
+        // GC could reap while the chunks it names stay unprotected.
+        //
+        // The assertion is on the REFUSAL, not merely on throwing: with the
+        // check removed, `writeFileSync` into the missing directory throws
+        // ENOENT — whose message contains the path, and therefore the claimed
+        // id. A `toThrow(/claimed-this/)` passed that mutation. (Found by
+        // `mutation-prove-skew-id-chain.mjs`, which is what it is for.)
+        seedNitroBuild("actually-built-under-this");
+        expect(() => stageNitroPublicAssets(cwd, "claimed-this")).toThrow(
+            /Refusing to stage a \.knext-build marker/,
+        );
+        // ...and it names what WAS built, so the message is a diagnosis.
+        expect(() => stageNitroPublicAssets(cwd, "claimed-this")).toThrow(
+            /actually-built-under-this/,
+        );
     });
 });
 
 /**
- * T2a/T2b — the ONE resolver both the deploy lock-step guard and the marker
- * staging use. Sharing it is what makes "marker key ≡ protection key" true by
- * construction rather than by two call sites agreeing today.
+ * T2a/T2b round 2 — the ONE check both the deploy lock-step guard and the
+ * marker staging use. Sharing it is what makes "marker key ≡ protection key"
+ * true by construction rather than by two call sites agreeing today.
+ *
+ * It asks "does the prefix this deploy claims to have built EXIST?" — never
+ * "which of these directories is the build?". That is not a stylistic
+ * preference: any classify-the-siblings rule has to enumerate what vinext may
+ * emit beside the build prefix, and `_vinext_fonts` is the proof that such an
+ * enumeration is a list someone will be short an entry on. An existence check
+ * has nothing to enumerate, so a future sibling — a fifth namespace, a plugin
+ * nobody here has seen — cannot break it.
  */
-describe("resolveVinextStaticId", () => {
+describe("verifyVinextStaticPrefix", () => {
     function seedStatic(ids: string[]): void {
         for (const id of ids) {
             const dir = join(cwd, ".output", "public", "_next", "static", id);
@@ -300,59 +366,68 @@ describe("resolveVinextStaticId", () => {
         }
     }
 
-    it("resolves the single non-reserved first-level prefix", () => {
+    it("passes when the expected prefix is there", () => {
         seedStatic(["deploytag-7"]);
-        expect(resolveVinextStaticId(cwd)).toEqual({
+        expect(verifyVinextStaticPrefix(cwd, "deploytag-7")).toEqual({
             ok: true,
-            id: "deploytag-7",
         });
     });
 
-    it("ignores the reserved shared dirs when picking the id", () => {
-        // Next's shared dirs sit beside the build prefix; treating one as the
-        // id would mark `chunks/` — the max-blast-radius over-delete.
-        seedStatic(["chunks", "css", "media", "deploytag-7"]);
-        expect(resolveVinextStaticId(cwd)).toEqual({
+    it("passes REGARDLESS of how many siblings vinext emitted", () => {
+        // Every sibling vinext is known to emit, plus one it does not — the
+        // point being that the check does not care, so tomorrow's namespace
+        // needs no code change here.
+        seedStatic([
+            "deploytag-7",
+            "_vinext_fonts",
+            "chunks",
+            "css",
+            "media",
+            "_some_future_vinext_namespace",
+        ]);
+        expect(verifyVinextStaticPrefix(cwd, "deploytag-7")).toEqual({
             ok: true,
-            id: "deploytag-7",
         });
     });
 
-    it("reports `ambiguous` (never a guess) when two prefixes are present", () => {
-        seedStatic(["id-a", "id-b"]);
-        expect(resolveVinextStaticId(cwd)).toEqual({
-            ok: false,
-            reason: "ambiguous",
-            ids: ["id-a", "id-b"],
-        });
-    });
-
-    it("reports `none` when only reserved dirs are present", () => {
-        seedStatic(["chunks"]);
-        expect(resolveVinextStaticId(cwd)).toEqual({
-            ok: false,
-            reason: "none",
-            ids: [],
-        });
-    });
-
-    it("reports `missing` when _next/static does not exist", () => {
-        expect(resolveVinextStaticId(cwd)).toEqual({
-            ok: false,
-            reason: "missing",
-            ids: [],
-        });
-    });
-
-    it("ignores FILES at the first level — only directories are candidates", () => {
-        seedStatic(["deploytag-7"]);
-        writeFileSync(
-            join(cwd, ".output", "public", "_next", "static", "stray.txt"),
-            "x",
+    it("fails, naming the siblings, when the expected prefix is absent", () => {
+        seedStatic(["1bf62579-a57c-4fec-b3a0-c6ce1c59ff1b", "chunks"]);
+        const result = verifyVinextStaticPrefix(cwd, "deploytag-7");
+        expect(result.ok).toBe(false);
+        expect(result).toMatchObject({ reason: "prefix-missing" });
+        // The siblings are reported so the error can say what WAS built —
+        // "expected t1, found a UUID" is the diagnosis; "not found" is not.
+        expect(result.ok === false && result.siblings).toContain(
+            "1bf62579-a57c-4fec-b3a0-c6ce1c59ff1b",
         );
-        expect(resolveVinextStaticId(cwd)).toEqual({
-            ok: true,
-            id: "deploytag-7",
+    });
+
+    it("fails with `no-static-root` when _next/static does not exist", () => {
+        expect(verifyVinextStaticPrefix(cwd, "deploytag-7")).toEqual({
+            ok: false,
+            reason: "no-static-root",
+            siblings: [],
+        });
+    });
+
+    it("a FILE of the right name is not a prefix", () => {
+        mkdirSync(join(cwd, ".output", "public", "_next", "static"), {
+            recursive: true,
+        });
+        writeFileSync(
+            join(cwd, ".output", "public", "_next", "static", "deploytag-7"),
+            "not a directory",
+        );
+        expect(verifyVinextStaticPrefix(cwd, "deploytag-7")).toMatchObject({
+            ok: false,
+            reason: "prefix-missing",
+        });
+    });
+
+    it("refuses an empty build id rather than scoping to the static root", () => {
+        seedStatic(["deploytag-7"]);
+        expect(verifyVinextStaticPrefix(cwd, "")).toMatchObject({
+            ok: false,
         });
     });
 });

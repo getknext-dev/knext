@@ -94,15 +94,13 @@ mock.module("../utils/asset-upload", () => ({
     uploadAssets: (...a: unknown[]) => uploadAssets(...a),
     getAssetPrefix: (...a: unknown[]) => getAssetPrefix(...a),
     reclaimBuildPrefix: (...a: unknown[]) => reclaimBuildPrefix(...a),
-    // T2a: this suite mocks the BUILD, so no `.output` exists and the vinext
-    // lock-step guard would abort every case for reasons unrelated to what is
-    // under test. Stand in for a correct build by echoing the id deploy
-    // exported before the guard runs — so the stub cannot silently agree with
-    // a WRONG tag either.
-    resolveVinextStaticId: () => ({
-        ok: true,
-        id: process.env.NEXT_DEPLOYMENT_ID,
-    }),
+    // T2a: this suite mocks the BUILD, so there is no `.output`, and these
+    // deploys DO upload — which puts the vinext lock-step guard in scope. It
+    // would abort every case here for a reason unrelated to what is under
+    // test, so state that the artifact was built under this deploy's tag. The
+    // guard's own branches are exercised in deploy-orchestrator.test.ts, and
+    // its out-of-scope modes in deploy-no-storage.test.ts.
+    verifyVinextStaticPrefix: () => ({ ok: true }),
 }));
 
 /** The kubectl boundary the preflight uses. Driven per-test. */

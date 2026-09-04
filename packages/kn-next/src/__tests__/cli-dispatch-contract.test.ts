@@ -192,12 +192,16 @@ describe("usage mistakes are UsageErrors, so they render as messages", () => {
             "formatPreflightFailure(outcome",
             'BUILD_ID "',
             "describeFailedCRApply()",
-            // T2a, the vinext leg of the same BUILD_ID skew check: the state of
-            // the BUILD ARTIFACT, not of argv. Fixing it means re-running the
-            // build (or restoring the template's generateBuildId), never
-            // retyping the command.
-            "Could not resolve this build's static id",
-            ".output/public/_next/static/${staticId.id}",
+            // T2a, the vinext leg of the same BUILD_ID skew check. Justified as
+            // NON-usage only in the branch where it IS non-usage: the build
+            // just ran and produced a prefix under a different id, which the
+            // user fixes in `next.config.ts`, not on the command line.
+            //
+            // The `--skip-build` branch is deliberately NOT here — it is a
+            // UsageError, because dropping the flag fixes it and a stack dump
+            // would bury that. Round 1 filed both under this allowlist, which
+            // misclassified the avoidable one.
+            "throw new Error(detail)",
         ],
         // Derived name validity: composed from the config's app name + PR id.
         "preview.ts": ["exceeds the 63-char", "is not a valid DNS-1123 label"],

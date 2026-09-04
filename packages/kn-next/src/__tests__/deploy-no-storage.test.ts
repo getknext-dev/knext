@@ -59,6 +59,12 @@ mock.module("../cli/exec", () => ({
 const uploadAssets = mock<AnyFn>(async () => {});
 const getAssetPrefix = mock<AnyFn>(() => "https://cdn.example.com/my-app");
 const reclaimBuildPrefix = mock<AnyFn>();
+/** Default: the artifact is in the worst state the guard knows about. */
+const verifyVinextStaticPrefix = mock<AnyFn>(() => ({
+    ok: false,
+    reason: "no-static-root",
+    siblings: [],
+}));
 const __knextReal1 = { ...(await import("../utils/asset-upload")) };
 mock.module("../utils/asset-upload", async () => {
     const actual = __knextReal1;
@@ -67,15 +73,16 @@ mock.module("../utils/asset-upload", async () => {
         uploadAssets: (...a: unknown[]) => uploadAssets(...a),
         getAssetPrefix: (...a: unknown[]) => getAssetPrefix(...a),
         reclaimBuildPrefix: (...a: unknown[]) => reclaimBuildPrefix(...a),
-        // T2a: this suite mocks the BUILD, so no `.output` exists and the
-        // vinext lock-step guard would abort every case for reasons that have
-        // nothing to do with the no-storage mode. Stand in for a correct
-        // build by echoing the id deploy exported before the guard runs — so
-        // the stub cannot silently agree with a WRONG tag either.
-        resolveVinextStaticId: () => ({
-            ok: true,
-            id: process.env.NEXT_DEPLOYMENT_ID,
-        }),
+        // T2a. Round 1 stubbed this to ALWAYS AGREE, which is precisely why
+        // this suite — the one that owns the no-storage mode — did not catch
+        // the guard firing in a mode that uploads nothing. It now defaults to
+        // the WORST answer the guard understands (`no-static-root`, which is
+        // also the true state of this suite's tree: the build is mocked, so
+        // there is no `.output` at all). A no-storage deploy must therefore
+        // complete BECAUSE the guard is out of scope, not because the stub
+        // said yes; the storage-backed cases opt in explicitly below.
+        verifyVinextStaticPrefix: (...a: unknown[]) =>
+            verifyVinextStaticPrefix(...a),
     };
 });
 
@@ -202,6 +209,13 @@ beforeEach(() => {
     runAssetGC.mockReturnValue({ pruned: true });
     loadConfig.mockResolvedValue(storagelessConfig);
     readFileSyncMock.mockReturnValue("deploytag");
+    // Restored after clearAllMocks: the honest default is "there is no
+    // `.output` here", because this suite mocks the build.
+    verifyVinextStaticPrefix.mockReturnValue({
+        ok: false,
+        reason: "no-static-root",
+        siblings: [],
+    });
     delete process.env.ASSET_PREFIX;
 });
 
@@ -223,6 +237,35 @@ describe("deploy without storage (ADR-0047 conditions 1 + 3)", () => {
         // The CR is still rendered and applied — from the storage-less config.
         const cfg = renderNextAppCR.mock.calls.at(-1)?.[0] as KnativeNextConfig;
         expect(cfg.storage).toBeUndefined();
+    });
+
+    /**
+     * Review round 2. The vinext build-id lock-step guard protects the
+     * correspondence between the uploaded asset PREFIX and the key the GC
+     * resolves from a revision label. In this mode nothing is uploaded, there
+     * are no remote prefixes and the GC never runs — so there is nothing to
+     * protect, and aborting the deploy over the name of a directory inside the
+     * image would be a hard failure protecting nothing.
+     *
+     * `verifyVinextStaticPrefix` is left at its honest default here (this suite
+     * mocks the build, so there IS no `.output`): the deploy must complete
+     * because the guard is OUT OF SCOPE, never because a stub agreed with it.
+     */
+    it("the vinext build-id guard is out of scope — it is never even consulted", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const deploy = await importDeploy();
+        await expect(deploy()).resolves.toBeUndefined();
+
+        expect(verifyVinextStaticPrefix).not.toHaveBeenCalled();
+        // Non-vacuity: the deploy really did reach the mutating apply, so this
+        // is "the guard did not fire", not "nothing happened".
+        expect(
+            runInherit.mock.calls.some(
+                (c) =>
+                    (c[0] as string[])?.[0] === "kubectl" &&
+                    (c[0] as string[])?.[1] === "apply",
+            ),
+        ).toBe(true);
     });
 
     it("announces the mode at info — image-served assets, no CDN, no retention, skew, docs link", async () => {
@@ -270,6 +313,11 @@ describe("deploy without storage (ADR-0047 conditions 1 + 3)", () => {
 describe("deploy WITH storage — unchanged (regression pins)", () => {
     beforeEach(() => {
         loadConfig.mockResolvedValue(storageBackedConfig);
+        // These deploys DO upload, so the guard is in scope and this suite has
+        // to opt in explicitly — stating that the artifact was built under the
+        // tag. The opt-in is per-describe, so the no-storage cases above can
+        // never inherit it.
+        verifyVinextStaticPrefix.mockReturnValue({ ok: true });
     });
 
     it("uploads, sets ASSET_PREFIX, runs the retention GC, prints no mode notice", async () => {
