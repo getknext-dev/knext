@@ -160,13 +160,37 @@ export function createGuardProver({ repoRoot, spec, subjects }) {
    * Plant one mutation, grade it on the EXIT CODE, restore, and verify the tree.
    *
    * @param {{id: string, expect: 'red'|'green', claim: string, subject: string,
-   *          anchor: string, replacement: string, options?: object}} m
+   *          anchor: string, replacement: string, options?: object,
+   *          validate?: (mutated: string) => string | undefined}} m
+   *   `validate` returns a PROBLEM string when the mutated subject is not the
+   *   thing it claims to be (unparseable YAML, broken JSON). Returning a problem
+   *   ABORTS rather than grading — see the note inside.
    * @returns {number} the exit code, so the caller can log it
    */
   function run(m) {
     assertTreeClean(repoRoot, `before ${m.id}`);
     const snap = snaps[m.subject];
     mutate(snap, m.anchor, m.replacement, m.options ?? {});
+    // VALIDITY BEFORE VERDICT. A mutation that leaves its subject unparseable
+    // reds the guard for the wrong reason, and a red for the wrong reason is
+    // indistinguishable in the log from a guard doing its job — the invalid
+    // mutation this repo has already had to tell apart from a decorative guard.
+    //
+    // MEASURED, not anticipated: this check was added after a NEGATIVE control
+    // reddened, and the cause was the harness's residue marker landing at column
+    // zero inside a YAML block scalar, ending the scalar. Without the negative
+    // control the four reds beside it would have read as proof.
+    if (m.validate) {
+      const problem = m.validate(readFileSync(snap.path, 'utf8'));
+      if (problem) {
+        restore(snap);
+        console.error(
+          `ABORT: ${m.id} left its subject INVALID (${problem}). Its verdict would be a red for ` +
+            'the wrong reason. Fix the mutation, do not accept the red.',
+        );
+        process.exit(1);
+      }
+    }
     const status = runSpecExit(repoRoot, spec);
     restore(snap);
     assertTreeClean(repoRoot, `after ${m.id}`);
