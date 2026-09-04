@@ -118,11 +118,39 @@ describe('S2 KNEXT_REQUIRE_NATIVE_INTEGRITY is a fail-closed switch', () => {
     expect(r.stderr).toContain('does not match the integrity manifest');
   });
 
-  it('only the exact value 1 enables it — a stray "0"/"false" does not fail closed by accident', () => {
+  it('an explicit OFF value stays permissive — it does not fail a fleet closed by accident', () => {
     const { dir, addon } = stageUnpinned();
-    for (const value of ['0', 'false', '']) {
+    for (const value of ['0', 'false', 'no', 'off', '', '  ']) {
       const r = loadShim(addon, dir, { KNEXT_REQUIRE_NATIVE_INTEGRITY: value });
       expect(r.status, `KNEXT_REQUIRE_NATIVE_INTEGRITY=${JSON.stringify(value)}`).toBe(0);
+    }
+  });
+
+  it('the usual spellings of ON all fail closed — the switch does not silently mean nothing', () => {
+    // The fail-OPEN bug this closes. `KNEXT_REQUIRE_NATIVE_INTEGRITY=true` used
+    // to fall through to the permissive warn path with no signal at all, so an
+    // operator who believed their fleet refused an unverifiable native tree had
+    // in fact changed nothing. A security opt-in that quietly means "off" is
+    // worse than no opt-in, because it is *believed*.
+    const { dir, addon } = stageUnpinned();
+    for (const value of ['1', 'true', 'TRUE', 'yes', 'on', ' 1 ', 'True']) {
+      const r = loadShim(addon, dir, { KNEXT_REQUIRE_NATIVE_INTEGRITY: value });
+      expect(r.status, `KNEXT_REQUIRE_NATIVE_INTEGRITY=${JSON.stringify(value)}`).not.toBe(0);
+      expect(r.stdout).not.toContain('DLOPENED');
+    }
+  });
+
+  it('an UNRECOGNISED value REFUSES rather than guessing which way it meant', () => {
+    // Neither direction is safe to assume for a value nobody can parse:
+    // guessing "off" is the fail-open bug above, and guessing "on" bricks a
+    // fleet on a typo. Refusing names the mistake and stops. The message must
+    // say what the accepted values are, or the operator cannot act on it.
+    const { dir, addon } = stageUnpinned();
+    for (const value of ['banana', '2', 'enabled', 'require']) {
+      const r = loadShim(addon, dir, { KNEXT_REQUIRE_NATIVE_INTEGRITY: value });
+      expect(r.status, `KNEXT_REQUIRE_NATIVE_INTEGRITY=${JSON.stringify(value)}`).not.toBe(0);
+      expect(r.stderr).toContain('KNEXT_REQUIRE_NATIVE_INTEGRITY');
+      expect(r.stderr).toMatch(/1 \| true \| yes \| on/);
     }
   });
 

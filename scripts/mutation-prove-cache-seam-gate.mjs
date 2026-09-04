@@ -79,6 +79,28 @@ const MUTATIONS = [
       ' * unconditionally under NODE_ENV=production — the flag cannot re-enable it in a\n * production process, because nothing legitimate calls it there.',
     replacement: ' * unconditionally — see the .js.',
   },
+  {
+    id: 'M5',
+    expect: 'red',
+    claim:
+      'a THIRD gated seam ships without the production refusal — the spec derives the seam set ' +
+      'from the gate calls precisely so this cannot pass, which an enumerated pair could not do. ' +
+      'Spec review, round 1',
+    subject: 'handler',
+    anchor: "function __resetEnvForTests() {\n  assertTestSeamEnabled('__resetEnvForTests');",
+    replacement:
+      "function __dropCacheForTests() {\n  assertTestSeamEnabled('__dropCacheForTests');\n}\n\nfunction __resetEnvForTests() {\n  assertTestSeamEnabled('__resetEnvForTests');",
+  },
+  {
+    id: 'M6',
+    expect: 'red',
+    claim:
+      "the relocation deferral loses its clock — #936's exception then reads as dated forever, " +
+      'which is the quietest way to neuter a deferral. Spec review, round 1',
+    subject: 'seamPolicy',
+    anchor: "  return activeExemptions(SEAM_RELOCATION_EXEMPTIONS, { field: 'seam', now });",
+    replacement: '  void now;\n  return new Set(SEAM_RELOCATION_EXEMPTIONS.map((e) => e.seam));',
+  },
 ];
 
 /**
@@ -88,7 +110,7 @@ const MUTATIONS = [
  * GREEN, or the four reds above are equally explained by a text assertion.
  */
 const NEGATIVE = {
-  id: 'M5',
+  id: 'M7',
   expect: 'green',
   claim: 'the refusal MESSAGE is reworded — the guard asserts behaviour, not prose',
   subject: 'handler',
@@ -105,6 +127,7 @@ const prover = createGuardProver({
   subjects: {
     handler: 'packages/kn-next/src/adapters/cache-handler.js',
     dts: 'packages/kn-next/src/adapters/cache-handler.d.ts',
+    seamPolicy: 'scripts/lib/published-seam-policy.mjs',
   },
 });
 

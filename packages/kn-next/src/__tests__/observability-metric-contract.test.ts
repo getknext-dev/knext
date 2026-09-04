@@ -491,12 +491,20 @@ describe("extractor guards (fail-first)", () => {
  * So the same scan runs over the docs. Discovered by walking the tracked tree,
  * never enumerated: a new doc naming a metric is covered the day it lands,
  * which an enumerated list is exactly how to miss.
+ *
+ * SCOPE IS EVERY TRACKED `.md`/`.mdx`, deliberately. The first version of this
+ * scanned `docs/ + apps/docs/content/ + README.md`, which SOUNDS exhaustive and
+ * is not: it missed `apps/file-manager/README.md` (`knext_coldstart_*`) and
+ * `apps/file-manager/docs/bytecode-cache-reuse-runbook.md`
+ * (`kn_next_bytecode_cache_files_total`). A directory allowlist is the same
+ * enumeration failure as a file list, one level up — so there is no allowlist.
+ * Measured when widening: 291 tracked docs, 60 tokens (up from 22), all resolve.
  */
-const DOC_FILES = execFileSync(
-    "git",
-    ["ls-files", "docs", "apps/docs/content", "README.md"],
-    { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 },
-)
+const DOC_FILES = execFileSync("git", ["ls-files"], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+})
     .split("\n")
     .filter((f) => /\.mdx?$/.test(f));
 
@@ -508,6 +516,13 @@ describe("every metric a DOC names is one something emits (S5)", () => {
         expect(DOC_FILES).toContain("apps/docs/content/docs/observability.mdx");
         expect(DOC_FILES).toContain("docs/observability/metrics.md");
         expect(DOC_FILES).toContain("docs/security/threat-model.md");
+        // The two the directory-scoped version missed. Asserted by name because
+        // they are the evidence that the scope had to widen — not because the
+        // scan needs a list.
+        expect(DOC_FILES).toContain("apps/file-manager/README.md");
+        expect(DOC_FILES).toContain(
+            "apps/file-manager/docs/bytecode-cache-reuse-runbook.md",
+        );
     });
 
     it("resolves every backticked knext metric name in every doc", () => {
@@ -524,8 +539,10 @@ describe("every metric a DOC names is one something emits (S5)", () => {
             }
         }
         // The floor is the anti-vacuity half: an extractor that silently stopped
-        // matching would otherwise report zero dead names and pass.
-        expect(checked).toBeGreaterThan(20);
+        // matching would otherwise report zero dead names and pass. Raised from
+        // 20 to 50 when the scope widened — 60 tokens measured, so a floor of 20
+        // would no longer notice the scan losing two thirds of its subjects.
+        expect(checked).toBeGreaterThan(50);
         expect(
             dead,
             "these docs name metrics NOTHING emits — a rename landed without the prose:\n" +
@@ -587,6 +604,59 @@ describe("the threat model's :9091 disclosure list is the bunexec set (S5)", () 
             notOnPort,
             "the threat model claims :9091 discloses series the bun-exec runtime does not emit:\n" +
                 notOnPort.join("\n"),
+        ).toEqual([]);
+    });
+
+    /**
+     * THE OTHER DIRECTION, which the subset check above cannot give.
+     *
+     * "documented ⊆ emitted" catches the section OVERSTATING the exposure — the
+     * defect that was actually there. It says nothing about UNDERSTATING it, and
+     * the section makes a closed claim: "**Six series, and no more.**" A new
+     * series added to the runtime contract satisfies every assertion above while
+     * silently falsifying that sentence, in a security document, on the exact
+     * axis it is read for.
+     *
+     * So: emitted ⊆ documented as well. Adding a `:9091` series now reds until
+     * the disclosure list is updated — which is the review this repo wants to
+     * force, since a new series on that port IS new cross-tenant disclosure.
+     *
+     * Compared on FAMILY names, not series names: Prometheus derives
+     * `_bucket`/`_sum`/`_count` from a histogram, and a threat model listing
+     * those separately would be noise rather than precision.
+     */
+    it("documents EVERY series :9091 emits — the 'and no more' claim is closed", () => {
+        const section = fencedDocSection(THREAT_MODEL, "9091-disclosure") ?? "";
+        const documented = new Set(extractDocMetricTokens(section));
+        const emittedFamilies = [
+            ...scanBunexecMetrics(read(BUNEXEC_TEMPLATE)).keys(),
+        ].sort();
+
+        expect(
+            emittedFamilies.length,
+            "the bunexec scan found no families — this check would pass vacuously",
+        ).toBeGreaterThan(1);
+
+        const undocumented = emittedFamilies.filter((family) => {
+            if (documented.has(family)) return false;
+            // A `prefix_*` glob in the prose legitimately covers the family.
+            for (const token of documented) {
+                if (
+                    token.endsWith("*") &&
+                    family.startsWith(token.slice(0, -1))
+                ) {
+                    return false;
+                }
+            }
+            return true;
+        });
+
+        expect(
+            undocumented,
+            "the threat model says :9091 exposes these series 'and no more', but the runtime now " +
+                "emits others. A NEW series on that port is new cross-tenant disclosure and has to " +
+                "be reviewed, not silently shipped:\n" +
+                undocumented.join("\n"),
         ).toEqual([]);
     });
 });

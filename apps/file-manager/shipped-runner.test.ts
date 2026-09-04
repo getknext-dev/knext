@@ -28,7 +28,7 @@
  */
 
 import { describe, expect, it } from 'bun:test';
-import { mkdirSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { installShippedPackages, SHIPPED_PACKAGE_DIRS } from './e2e-support/shipped-runner';
@@ -66,6 +66,14 @@ function fakeSpawn(opts: {
   readonly installed: Record<string, string>;
   readonly failPackFor?: string;
   readonly runnerRoot: string;
+  /**
+   * `node_modules/…` path -> lock entry. Defaults to a clean local install:
+   * every `installed` package top-level with a `file:` resolution. Overriding it
+   * is how the registry-substitution and nested-copy cases are expressed.
+   */
+  readonly lockPackages?: Record<string, { version: string; resolved?: string }>;
+  /** Omit `.package-lock.json` entirely. */
+  readonly noLockfile?: boolean;
 }) {
   return (cmd: string, args: readonly string[], options: { cwd: string }) => {
     opts.calls.push({ cmd, args });
@@ -93,6 +101,25 @@ function fakeSpawn(opts: {
       join(opts.runnerRoot, 'node_modules/@getknext/core/dist/adapters/node-server.js'),
       '',
     );
+    if (!opts.noLockfile) {
+      const packages =
+        opts.lockPackages ??
+        Object.fromEntries(
+          Object.entries(opts.installed).map(([name, version]) => [
+            `node_modules/${name}`,
+            { version, resolved: `file:../../tmp/knext-core-pack-XXXX/${name}-${version}.tgz` },
+          ]),
+        );
+      writeFileSync(
+        join(opts.runnerRoot, 'node_modules/.package-lock.json'),
+        // Shape taken from a REAL `npm install` of these tarballs, not invented:
+        // lockfileVersion 3, `packages` keyed by node_modules path, `resolved`
+        // carrying `file:` for a local tarball and an `https://` registry URL
+        // otherwise. The real run also nests (`@getknext/lib/node_modules/pino`),
+        // which is why the nested case below is reachable rather than theoretical.
+        JSON.stringify({ name: 'runner', lockfileVersion: 3, packages }),
+      );
+    }
     return { status: 0, stdout: '', stderr: '' };
   };
 }
@@ -136,6 +163,139 @@ describe('T6a shipped-runner install proves PROVENANCE, not just presence', () =
         }),
       }),
     ).toThrow(/@getknext\/lib/);
+  });
+
+  // ── The two cases a version comparison alone CANNOT see ──────────────────
+  //
+  // Version identity is not provenance. Both of these leave every @getknext/*
+  // at exactly the workspace version, so the version check passes and the gate
+  // proves bytes nobody in this repo built.
+
+  it('REFUSES a REGISTRY tarball at the very same version', () => {
+    const repoRoot = fakeRepo(MATCHING);
+    const runnerRoot = mkdtempSync(join(tmpdir(), 'knext-t6a-runner-'));
+    expect(() =>
+      installShippedPackages({
+        repoRoot,
+        runnerRoot,
+        env: process.env,
+        spawn: fakeSpawn({
+          calls: [],
+          installed: { ...MATCHING },
+          runnerRoot,
+          lockPackages: {
+            'node_modules/@getknext/core': {
+              version: '1.2.3',
+              resolved: 'file:../../tmp/pack/core.tgz',
+            },
+            'node_modules/@getknext/db': {
+              version: '1.2.3',
+              resolved: 'file:../../tmp/pack/db.tgz',
+            },
+            // Same version, published bytes. Indistinguishable to every check
+            // this helper had before the lockfile was read.
+            'node_modules/@getknext/lib': {
+              version: '1.2.3',
+              resolved: 'https://registry.npmjs.org/@getknext/lib/-/lib-1.2.3.tgz',
+            },
+          },
+        }),
+      }),
+    ).toThrow(/@getknext\/lib[\s\S]*registry/i);
+  });
+
+  it('REFUSES a NESTED @getknext/* copy even when the top-level one is correct', () => {
+    // npm hoists what it can and NESTS what it cannot — the real install of
+    // these tarballs nests `@getknext/lib/node_modules/pino` today. A nested
+    // `@getknext/*` means two copies resolve depending on who requires it, and
+    // the correct top-level copy is the one every existing assertion inspects.
+    const repoRoot = fakeRepo(MATCHING);
+    const runnerRoot = mkdtempSync(join(tmpdir(), 'knext-t6a-runner-'));
+    expect(() =>
+      installShippedPackages({
+        repoRoot,
+        runnerRoot,
+        env: process.env,
+        spawn: fakeSpawn({
+          calls: [],
+          installed: { ...MATCHING },
+          runnerRoot,
+          lockPackages: {
+            'node_modules/@getknext/core': {
+              version: '1.2.3',
+              resolved: 'file:../../tmp/pack/core.tgz',
+            },
+            'node_modules/@getknext/db': {
+              version: '1.2.3',
+              resolved: 'file:../../tmp/pack/db.tgz',
+            },
+            'node_modules/@getknext/lib': {
+              version: '1.2.3',
+              resolved: 'file:../../tmp/pack/lib.tgz',
+            },
+            // The second copy. Everything above it is still perfect.
+            'node_modules/@getknext/core/node_modules/@getknext/lib': {
+              version: '1.2.3',
+              resolved: 'https://registry.npmjs.org/@getknext/lib/-/lib-1.2.3.tgz',
+            },
+          },
+        }),
+      }),
+    ).toThrow(/nested/i);
+  });
+
+  it('does NOT mistake a nested non-knext dep for a nested @getknext copy', () => {
+    // The other half, and a real shape: `@getknext/lib/node_modules/pino` is in
+    // every genuine install of this closure. A nesting check that keyed on the
+    // path containing "@getknext" rather than on the package NAME would refuse
+    // every correct install — a guard nobody could keep.
+    const repoRoot = fakeRepo(MATCHING);
+    const runnerRoot = mkdtempSync(join(tmpdir(), 'knext-t6a-runner-'));
+    expect(() =>
+      installShippedPackages({
+        repoRoot,
+        runnerRoot,
+        env: process.env,
+        spawn: fakeSpawn({
+          calls: [],
+          installed: { ...MATCHING },
+          runnerRoot,
+          lockPackages: {
+            'node_modules/@getknext/core': {
+              version: '1.2.3',
+              resolved: 'file:../../tmp/pack/core.tgz',
+            },
+            'node_modules/@getknext/db': {
+              version: '1.2.3',
+              resolved: 'file:../../tmp/pack/db.tgz',
+            },
+            'node_modules/@getknext/lib': {
+              version: '1.2.3',
+              resolved: 'file:../../tmp/pack/lib.tgz',
+            },
+            'node_modules/@getknext/lib/node_modules/pino': {
+              version: '10.3.1',
+              resolved: 'https://registry.npmjs.org/pino/-/pino-10.3.1.tgz',
+            },
+          },
+        }),
+      }),
+    ).not.toThrow();
+  });
+
+  it('REFUSES an install with no .package-lock.json — provenance unverifiable', () => {
+    // Fails closed. "No record" must not read as "nothing to check": that is
+    // the exact shape of the presence-only assertion this replaced.
+    const repoRoot = fakeRepo(MATCHING);
+    const runnerRoot = mkdtempSync(join(tmpdir(), 'knext-t6a-runner-'));
+    expect(() =>
+      installShippedPackages({
+        repoRoot,
+        runnerRoot,
+        env: process.env,
+        spawn: fakeSpawn({ calls: [], installed: { ...MATCHING }, runnerRoot, noLockfile: true }),
+      }),
+    ).toThrow(/package-lock/);
   });
 
   it('REFUSES an install that produced no @getknext/lib at all', () => {
@@ -208,16 +368,42 @@ describe('T6a shipped-runner install proves PROVENANCE, not just presence', () =
   });
 });
 
-describe('T6a both SIGTERM e2es go through the shared helper', () => {
-  // Scanned, not enumerated. The whole defect existed twice because the block
-  // was copy-pasted; a reviewer remembering to fix both copies is what failed.
-  const specs = ['sigterm-drain-e2e.test.ts', 'sigterm-hardcap-e2e.test.ts'];
+/**
+ * DISCOVERED, not enumerated.
+ *
+ * The whole defect existed twice because the block was copy-pasted, and a
+ * reviewer remembering to fix both copies is exactly what failed. A test naming
+ * `sigterm-drain-e2e.test.ts` and `sigterm-hardcap-e2e.test.ts` is a test that
+ * stays green on the day someone adds a third — the same shape as the drift
+ * `runtime-entry-copy-parity.test.ts` was written to catch. So the set comes off
+ * the filesystem, and the known two are asserted only as a FLOOR (an empty scan
+ * must fail, never pass vacuously).
+ *
+ * This file is deliberately not in the discovered set — its name carries no
+ * `sigterm` — so the literals it asserts on cannot match itself.
+ */
+function discoverSigtermE2eSpecs(): string[] {
+  return readdirSync(import.meta.dirname)
+    .filter((f) => /sigterm.*e2e\.test\.tsx?$/.test(f))
+    .sort();
+}
 
-  for (const spec of specs) {
-    it(`${spec} does not carry its own pack/install block`, async () => {
-      const { readFileSync } = await import('node:fs');
+describe('T6a every SIGTERM e2e goes through the shared helper', () => {
+  it('the scan finds the specs it is supposed to guard', () => {
+    const found = discoverSigtermE2eSpecs();
+    expect(
+      found.length,
+      'the sigterm e2e scan found nothing — it would pass vacuously',
+    ).toBeGreaterThanOrEqual(2);
+    for (const known of ['sigterm-drain-e2e.test.ts', 'sigterm-hardcap-e2e.test.ts']) {
+      expect(found, `the scan missed ${known}`).toContain(known);
+    }
+  });
+
+  for (const spec of discoverSigtermE2eSpecs()) {
+    it(`${spec} does not carry its own pack/install block`, () => {
       const text = readFileSync(join(import.meta.dirname, spec), 'utf8');
-      expect(text).toContain('installShippedPackages');
+      expect(text, `${spec} does not use the shared helper`).toContain('installShippedPackages');
       expect(text, `${spec} still spawns its own bun pm pack`).not.toContain("'pm', 'pack'");
       expect(text, `${spec} still spawns its own npm install`).not.toMatch(/spawnSync\(\s*'npm'/);
     });

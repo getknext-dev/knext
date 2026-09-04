@@ -140,6 +140,18 @@ const MUTATIONS = [
     anchor: '    if (start === -1 || end === -1 || end <= start) return null;',
     replacement: '    if (start === -1 || end === -1 || end <= start) return "";',
   },
+  {
+    id: 'M10',
+    expect: 'red',
+    claim:
+      'a NEW series appears on :9091 while the threat model still says "six, and no more" — the ' +
+      'subset check cannot see this direction, and a new series on that port IS new ' +
+      'cross-tenant disclosure. Spec review, round 1',
+    subject: 'bunexecTemplate',
+    anchor: "    '# TYPE knext_bunexec_http_inflight_requests gauge',",
+    replacement:
+      "    '# TYPE knext_bunexec_http_inflight_requests gauge',\n    '# TYPE knext_bunexec_tenant_id_total counter',",
+  },
 ];
 
 /**
@@ -175,6 +187,9 @@ const prover = createGuardProver({
     // stale is the drift the alerts-and-dashboards half cannot see.
     publishedDoc: 'apps/docs/content/docs/observability.mdx',
     threatModel: 'docs/security/threat-model.md',
+    // The CANONICAL bunexec exposition. Adding a series here is what the
+    // threat model's closed "and no more" claim has to notice (M10).
+    bunexecTemplate: 'packages/kn-next/templates/app/runtime-contract.mjs.hbs',
   },
 });
 

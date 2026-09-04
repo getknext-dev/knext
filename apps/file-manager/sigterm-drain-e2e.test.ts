@@ -212,9 +212,11 @@ beforeAll(() => {
   //    pino) all land under <runner>/node_modules, exactly how the CMD's
   //    resolution sees them for a consumer of the published packages.
   //    The pack + install + PROVENANCE check lives in `e2e-support/shipped-runner`
-  //    (T6a) — it asserts the installed @getknext/* versions ARE the workspace's,
-  //    so a rewritten `workspace:^` range that npm satisfies from the public
-  //    registry reds here instead of silently proving a published dependency.
+  //    (T6a) — it reads npm's own `.package-lock.json` and requires every
+  //    @getknext/* to have been resolved from a `file:` tarball, at the workspace
+  //    version, with no nested second copy. So a rewritten `workspace:^` range
+  //    that npm satisfies from the public registry reds here — INCLUDING when the
+  //    published package carries the very same version number.
   const repoRoot = resolve(APP_DIR, '../..');
   installShippedPackages({ repoRoot, runnerRoot, env: childEnv() });
 }, 180_000);

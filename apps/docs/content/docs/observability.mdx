@@ -39,7 +39,8 @@ The series the shipped scrape exposes:
 | `knext_bunexec_http_request_duration_seconds` | Histogram | Request latency (buckets down to 5 ms — cold starts are ~61 ms). |
 | `knext_bunexec_http_inflight_requests` | Gauge | Current concurrency (saturation). |
 | `knext_bunexec_startup_duration_seconds` | Gauge | How long this pod took to become ready. |
-| `knext_bunexec_process_resident_memory_bytes` / `_uptime_seconds` | Gauge | Process health. |
+| `knext_bunexec_process_resident_memory_bytes` | Gauge | Resident set size. |
+| `knext_bunexec_process_uptime_seconds` | Gauge | Seconds since the process started. |
 
 Ready-made Grafana dashboards ship with knext (see [Dashboards](#dashboards) below).
 

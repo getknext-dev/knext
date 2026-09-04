@@ -41,11 +41,11 @@ const MUTATIONS = [
     id: 'M1',
     expect: 'red',
     claim:
-      'KNEXT_REQUIRE_NATIVE_INTEGRITY=1 stops refusing — an operator who set it believes the ' +
-      'fleet fails closed on an unverifiable native tree, and it does not',
+      'the switch stops refusing — an operator who set it believes the fleet fails closed on an ' +
+      'unverifiable native tree, and it does not',
     subject: 'shim',
-    anchor: "    if (process.env.KNEXT_REQUIRE_NATIVE_INTEGRITY === '1') {",
-    replacement: "    if (false && process.env.KNEXT_REQUIRE_NATIVE_INTEGRITY === '1') {",
+    anchor: '    if (requireIntegrity()) {',
+    replacement: '    if (false && requireIntegrity()) {',
   },
   {
     id: 'M2',
@@ -54,18 +54,43 @@ const MUTATIONS = [
       'the switch becomes UNCONDITIONAL — every image predating native-tree pinning stops ' +
       'loading sharp at all, which is the fleet outage the exception exists to prevent',
     subject: 'shim',
-    anchor: "    if (process.env.KNEXT_REQUIRE_NATIVE_INTEGRITY === '1') {",
+    anchor: '    if (requireIntegrity()) {',
     replacement: '    if (true) {',
   },
   {
     id: 'M3',
     expect: 'red',
     claim:
-      'the switch becomes truthiness rather than the exact value 1 — KNEXT_REQUIRE_NATIVE_INTEGRITY=0 ' +
-      'then fails a whole fleet closed, the classic env-var-as-boolean defect',
+      'the switch becomes bare truthiness — KNEXT_REQUIRE_NATIVE_INTEGRITY=0/false then fails a ' +
+      'whole fleet closed, the classic env-var-as-boolean defect',
     subject: 'shim',
-    anchor: "process.env.KNEXT_REQUIRE_NATIVE_INTEGRITY === '1'",
-    replacement: 'process.env.KNEXT_REQUIRE_NATIVE_INTEGRITY',
+    anchor: '  const raw = process.env.KNEXT_REQUIRE_NATIVE_INTEGRITY;',
+    replacement:
+      '  return !!process.env.KNEXT_REQUIRE_NATIVE_INTEGRITY;\n  // eslint-disable-next-line\n  const raw = process.env.KNEXT_REQUIRE_NATIVE_INTEGRITY;',
+  },
+  {
+    id: 'M3b',
+    expect: 'red',
+    claim:
+      'the parse reverts to `=== "1"` — every OTHER spelling (`true`, `yes`, `1 ` off a YAML ' +
+      'block scalar) falls silently down the PERMISSIVE branch, so an operator who set ' +
+      '`=true` believes the fleet refuses an unverifiable tree while nothing changed. This is ' +
+      'the fail-OPEN defect code review found in round 1',
+    subject: 'shim',
+    anchor: '  if (REQUIRE_ON.includes(value)) return true;',
+    replacement: "  if (value === '1') return true;\n  return false;\n  // unreachable:",
+  },
+  {
+    id: 'M3c',
+    expect: 'red',
+    claim:
+      'an UNRECOGNISED value is guessed as "off" instead of refused — the same fail-open hole ' +
+      'one level down: a typo in a security control reads as "not enabled", silently',
+    subject: 'shim',
+    anchor:
+      '  throw new Error(\n    `knext: KNEXT_REQUIRE_NATIVE_INTEGRITY=${JSON.stringify(raw)} is not a value this `',
+    replacement:
+      '  return false;\n  // biome-ignore lint: mutation\n  throw new Error(\n    `knext: KNEXT_REQUIRE_NATIVE_INTEGRITY=${JSON.stringify(raw)} is not a value this `',
   },
   {
     id: 'M4',

@@ -82,6 +82,52 @@ const MUTATIONS = [
     anchor: '  } finally {',
     replacement: '  } catch (rethrow) {\n    throw rethrow;\n  }\n  if (false) {',
   },
+  // ── The three the FIRST round's version-only check could not see ─────────
+  //
+  // Code review, round 1: "the PROVENANCE block proves version identity, not
+  // provenance." Correct, and each of these leaves every version matching.
+  {
+    id: 'M5',
+    expect: 'red',
+    claim:
+      'the `file:` resolution check goes — a REGISTRY tarball at the very same version then ' +
+      'passes every check, which is the substitution the whole block exists to catch',
+    subject: 'src',
+    anchor: "    if (!resolved.startsWith('file:')) {",
+    replacement: "    if (false && !resolved.startsWith('file:')) {",
+  },
+  {
+    id: 'M6',
+    expect: 'red',
+    claim:
+      'a NESTED @getknext/* copy stops being refused — two copies resolve depending on who ' +
+      'requires it, and the correct top-level one is what every other check inspects',
+    subject: 'src',
+    anchor: '    if (depth > 1) {',
+    replacement: '    if (false && depth > 1) {',
+  },
+  {
+    id: 'M7',
+    expect: 'red',
+    claim:
+      'a MISSING .package-lock.json stops being fatal — "no record" reads as "nothing to check", ' +
+      'the exact shape of the presence-only assertion this replaced',
+    subject: 'src',
+    anchor: '  if (!existsSync(lockPath)) {',
+    replacement: '  if (!existsSync(lockPath)) {\n    return;\n  }\n  if (false) {',
+  },
+  {
+    id: 'M8',
+    expect: 'red',
+    claim:
+      'nesting is detected by PATH SUBSTRING rather than package NAME — every correct install ' +
+      'is then refused, because npm genuinely nests @getknext/lib/node_modules/pino',
+    subject: 'src',
+    anchor:
+      "  const parts = path.split('node_modules/');\n  return { name: parts.at(-1) ?? '', depth: parts.length - 1 };",
+    replacement:
+      "  const parts = path.split('node_modules/');\n  return { name: path.includes('@getknext/') ? '@getknext/x' : (parts.at(-1) ?? ''), depth: parts.length - 1 };",
+  },
 ];
 
 /**
@@ -95,7 +141,7 @@ const MUTATIONS = [
  * would then weaken.
  */
 const NEGATIVE = {
-  id: 'M5',
+  id: 'M9',
   expect: 'green',
   claim: 'a refusal MESSAGE is reworded — the guard asserts behaviour, not prose',
   subject: 'src',

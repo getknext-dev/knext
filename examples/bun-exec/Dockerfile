@@ -39,8 +39,13 @@ COPY .output/public /app/.output/public
 # Non-root (security.md runtime hardening). Both ports are >1024.
 USER 65532:65532
 
+# NODE_ENV=production is load-bearing here, not cosmetic: the published
+# cache-handler seams refuse UNCONDITIONALLY under it (T6b), and this is the one
+# image CI actually builds and boots. Without it that control is inert in the
+# only place it is ever exercised. Pinned by tests/runtime-image-node-env.test.ts.
 ENV PORT=3000 \
-    METRICS_PORT=9091
+    METRICS_PORT=9091 \
+    NODE_ENV=production
 
 EXPOSE 3000 9091
 

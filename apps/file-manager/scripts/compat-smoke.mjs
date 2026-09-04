@@ -58,9 +58,10 @@ const HOST = '127.0.0.1';
 // the staleness was invisible because CI overrides BOTH variables on every
 // invocation — so the default was reachable only by a human running the smoke
 // locally, i.e. exactly the reader least able to tell that it points at a build
-// the repo no longer produces. Defaulting to the binary also makes
-// `singleExec` true by default, so the local run and the CI run take the same
-// branch instead of diverging silently.
+// the repo no longer produces. Defaulting to the binary also makes the run
+// single-exec by default, so the local run and the CI run take the same branch
+// instead of diverging silently. Which branch that is comes from `resolveSmokeMode`
+// below — realpath on both sides, never a string comparison (T6c).
 const SERVER_PATH = process.env.SERVER_PATH || path.resolve(APP_DIR, 'knext-smoke-exec');
 // Runtime binary. Defaults to SERVER_PATH so single-exec holds without the
 // caller setting two variables to one value.

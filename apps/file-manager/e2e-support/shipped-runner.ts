@@ -16,8 +16,13 @@
  *      checked that `node-server.js`, `prom-client` and `pino` existed, all of
  *      which they still do. So a fail-closed runtime-hardening gate could go
  *      green having exercised the shipped supervisor against a stale published
- *      dependency. {@link installShippedPackages} now reads each installed
- *      `package.json`'s version and requires it to EQUAL the workspace version.
+ *      dependency. {@link installShippedPackages} now reads npm's own record —
+ *      `node_modules/.package-lock.json` — and requires each `@getknext/*` to
+ *      have been RESOLVED FROM A `file:` TARBALL, at the workspace version, with
+ *      no nested second copy. Version identity alone is deliberately not the
+ *      test: a published tarball at the very same version passes that, and so
+ *      does a nested copy sitting under a correct top-level one. See
+ *      {@link assertLocalProvenance}.
  *   2. IT RAN INSTALL SCRIPTS. npm executes lifecycle scripts for the whole
  *      closure by default. `--ignore-scripts` removes that from a gate that
  *      runs on every PR. (The install still reaches the registry for `core`'s
@@ -70,6 +75,113 @@ const realSpawn: SpawnFn = (cmd, args, options) => {
 
 function readManifest(file: string): { name?: string; version?: string } {
   return JSON.parse(readFileSync(file, 'utf8')) as { name?: string; version?: string };
+}
+
+/**
+ * The package NAME an npm lock path addresses, and how deeply it is nested.
+ *
+ * `node_modules/@getknext/lib`                       -> lib, depth 1
+ * `node_modules/@getknext/lib/node_modules/pino`     -> pino, depth 2
+ * `node_modules/a/node_modules/@getknext/lib`        -> @getknext/lib, depth 2
+ *
+ * Keyed on the segment after the LAST `node_modules/`, never on "the path
+ * contains @getknext" — the real install of this closure nests
+ * `@getknext/lib/node_modules/pino`, so a path-substring test would refuse
+ * every correct install and could not survive.
+ */
+function lockEntryIdentity(path: string): { name: string; depth: number } {
+  const parts = path.split('node_modules/');
+  return { name: parts.at(-1) ?? '', depth: parts.length - 1 };
+}
+
+/**
+ * PROVENANCE — that these @getknext/* came from THIS workspace's tarballs.
+ *
+ * Version identity is not provenance, and that distinction is the whole point:
+ * a **published tarball at the very same version** satisfies every
+ * file-existence and version check, and so does npm quietly **nesting** a second
+ * copy under a package while a correct one sits at the top level. Both leave the
+ * e2e proving bytes nobody in this repo built, and neither is visible on disk
+ * without reading what npm recorded.
+ *
+ * So this reads `node_modules/.package-lock.json` — npm's own record of where
+ * every tree entry came from — and requires, for each of the three:
+ *
+ *   1. a TOP-LEVEL entry (depth 1) exists;
+ *   2. its `resolved` is a `file:` URL, i.e. one of the tarballs just packed —
+ *      an `https://` registry URL is the substitution being caught;
+ *   3. its version is the workspace's (a stale local tarball is still wrong);
+ *   4. NO nested `@getknext/*` copy exists anywhere in the tree.
+ *
+ * FAILS CLOSED on a missing lockfile: "no record" must not read as "nothing to
+ * check", which is the exact shape of the presence-only assertion this replaced.
+ */
+function assertLocalProvenance(runnerRoot: string, workspaceVersions: Map<string, string>): void {
+  const lockPath = join(runnerRoot, 'node_modules/.package-lock.json');
+  if (!existsSync(lockPath)) {
+    throw new Error(
+      `npm wrote no ${lockPath} — without it there is no record of WHERE each @getknext/* came ` +
+        'from, and an install whose provenance cannot be checked is not one to prove the shipped ' +
+        'supervisor against.',
+    );
+  }
+  let lock: { packages?: Record<string, { version?: string; resolved?: string }> };
+  try {
+    lock = JSON.parse(readFileSync(lockPath, 'utf8'));
+  } catch (error) {
+    throw new Error(
+      `${lockPath} is unreadable: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  const entries = Object.entries(lock.packages ?? {});
+  if (entries.length === 0) {
+    throw new Error(
+      `${lockPath} records no packages at all — nothing to verify provenance against.`,
+    );
+  }
+
+  const topLevel = new Map<string, { version?: string; resolved?: string }>();
+  for (const [path, entry] of entries) {
+    const { name, depth } = lockEntryIdentity(path);
+    if (!name.startsWith('@getknext/')) continue;
+    if (depth > 1) {
+      throw new Error(
+        `a NESTED copy of ${name} is installed at ${path}.\n` +
+          '  npm hoists what it can and nests what it cannot, so a second copy resolves for\n' +
+          '  whoever requires it while the correct top-level copy is the one every other check\n' +
+          '  inspects. The e2e would exercise whichever one the supervisor happened to load.',
+      );
+    }
+    topLevel.set(name, entry);
+  }
+
+  for (const [name, expected] of workspaceVersions) {
+    const entry = topLevel.get(name);
+    if (!entry) {
+      throw new Error(
+        `${name} is not installed in the runner at all — the packed tarball did not land, so ` +
+          'whatever the e2e proves, it is not the shipped closure.',
+      );
+    }
+    const resolved = entry.resolved ?? '';
+    if (!resolved.startsWith('file:')) {
+      throw new Error(
+        `${name} was resolved from ${resolved || '(nothing recorded)'}, not from a local tarball.\n` +
+          '  npm went to the registry instead of using the tarball `bun pm pack` just produced —\n' +
+          "  most likely a changeset bumped one package's version and left the rewritten\n" +
+          '  `workspace:^` range unsatisfiable locally. The version can match exactly and the\n' +
+          '  bytes still be published ones, which is why this reads the resolution and not the\n' +
+          '  version alone.',
+      );
+    }
+    if (entry.version !== expected) {
+      throw new Error(
+        `${name} in the runner is ${entry.version}, but this workspace holds ${expected}.\n` +
+          '  The tarball that landed is not the one this tree would publish, so the e2e would\n' +
+          '  have gone green against a stale local build.',
+      );
+    }
+  }
 }
 
 export interface InstallShippedOptions {
@@ -149,25 +261,7 @@ export function installShippedPackages(options: InstallShippedOptions): void {
       );
     }
 
-    // PROVENANCE. Everything above is satisfied by a published tarball too.
-    for (const [name, expected] of workspaceVersions) {
-      const installed = join(runnerRoot, 'node_modules', ...name.split('/'), 'package.json');
-      if (!existsSync(installed)) {
-        throw new Error(
-          `${name} is not installed in the runner at all — the packed tarball did not ` +
-            'land, so whatever the e2e proves, it is not the shipped closure.',
-        );
-      }
-      const actual = readManifest(installed).version;
-      if (actual !== expected) {
-        throw new Error(
-          `${name} in the runner is ${actual}, but this workspace holds ${expected}.\n` +
-            '  npm resolved the PUBLISHED package instead of the local tarball — most likely a\n' +
-            "  changeset bumped one package's version and not the range `bun pm pack` rewrote.\n" +
-            '  The e2e would otherwise have gone green against a stale published dependency.',
-        );
-      }
-    }
+    assertLocalProvenance(runnerRoot, workspaceVersions);
   } finally {
     // `finally`, not after the throws: a pack that fails on the third package
     // used to leak the two dirs created before it.
