@@ -234,3 +234,24 @@ pass-through, readiness-gates-on-listen, two-stage drain, red-on-fail compat gat
 constraint set transfers to the single-exec runtime as-is — the compiled binary's entry
 (`knext-bun-entry.mjs`) is now the one place the cap lives, which simplifies the "both build
 targets, never one" clause to a single target by ADR-0048.
+
+## Amendment 3: flannel clusters are formally unsupported-for-isolation (records #744's criterion 5)
+
+**Status of this amendment: ACCEPTED (stability sprint, C4 verification pass).**
+
+Issue #744's last acceptance criterion asked for a decision that the shipped code and docs had
+already taken de facto but nothing recorded: what knext does about clusters whose CNI enforces no
+NetworkPolicy (flannel — which OKE GA and OrbStack, the reference clusters, both run).
+
+**Decision: flannel-class clusters are formally documented as unsupported for network isolation;
+the reference cluster is NOT moved to a policy-capable CNI.** The operator still writes its
+default-on NetworkPolicy (harmless, and correct the moment a policy controller appears), and the
+inertness is OBSERVABLE on both halves — the `NetworkPolicyEnforced` condition computed in
+`computeStatusVerdict` (`status_verdict.go:484-552`, envtest-covered including the flannel case)
+and the `kn-next doctor` CNI check (`doctor.ts:1178-1268`, fail-honest: "cannot determine" is
+never folded into "enforced"). Users who need enforced isolation install Calico or Cilium; the
+docs say exactly that (`security.mdx`, `hardening.mdx`).
+
+Why not move the reference cluster: the enforcement contract is already proved by the kind+Calico
+drill this ADR requires, and moving OKE's CNI buys no user-facing guarantee — any user's flannel
+cluster would be in the same observable, documented state regardless of what our cluster runs.
