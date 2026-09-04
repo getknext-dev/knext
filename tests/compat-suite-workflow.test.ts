@@ -2701,39 +2701,36 @@ describe('compat-suite Bun runtime axis (test-e2e-deploy.yml, #147 item 4)', () 
     expect(/^\s*-\s*'?bun'?\s*$/m.test(input), 'options must include bun').toBe(true);
   });
 
-  it('keeps the nightly cron AND adds exactly one weekly (Sunday) cron for the bun lane', () => {
+  it('keeps ONLY the nightly cron — the weekly bun schedule is retired, not replaced', () => {
+    // The weekly bun cron retired with the standalone-under-bun artifact
+    // (ADR-0048/#710); its recurring compute moved to compat-vinext.yml. Both
+    // halves: the credential nightly survives, and NO extra schedule may
+    // return — a resurrected weekly would burn compute on an artifact users
+    // cannot build while reading as coverage.
     const all = crons();
     expect(all, 'the nightly Node cron must stay untouched (the credential lane)').toContain(
       '17 3 * * *',
     );
-    const weekly = all.filter((c) => c !== '17 3 * * *');
-    expect(weekly.length, 'exactly ONE extra schedule: the weekly bun lane').toBe(1);
     expect(
-      /^\S+\s+\S+\s+\*\s+\*\s+(0|7|SUN|sun)$/.test(weekly[0]),
-      `the extra cron must be WEEKLY on Sunday (day-of-week field), got "${weekly[0]}"`,
-    ).toBe(true);
+      all.filter((c) => c !== '17 3 * * *'),
+      'no schedule beyond the nightly — the bun lane is dispatch-only now',
+    ).toEqual([]);
   });
 
-  it('derives KNEXT_RUNTIME at the workflow level: dispatch input > weekly cron → bun > default node', () => {
+  it('derives KNEXT_RUNTIME at the workflow level: dispatch input > default node — no schedule branch', () => {
     const envLine = src.split('\n').find((l) => /^\s*KNEXT_RUNTIME:\s*\$\{\{/.test(l));
     expect(envLine, 'a workflow-level KNEXT_RUNTIME env expression must exist').toBeTruthy();
     expect(
       /inputs\.runtime/.test(envLine ?? ''),
       'the lane must honor the workflow_dispatch runtime input',
     ).toBe(true);
+    // With the weekly retired there is exactly one schedule, so a
+    // github.event.schedule comparison is dead code that reads as a second
+    // lane — it must NOT exist.
     expect(
       /github\.event\.schedule/.test(envLine ?? ''),
-      'the lane must branch on github.event.schedule (which cron fired)',
-    ).toBe(true);
-    // The cron string the expression compares against must be EXACTLY the weekly
-    // cron declared under schedule: — a drifted string silently runs the weekly
-    // lane on Node forever.
-    const weekly = crons().filter((c) => c !== '17 3 * * *')[0] ?? '';
-    expect(
-      (envLine ?? '').includes(`'${weekly}'`),
-      `the KNEXT_RUNTIME expression must compare github.event.schedule to the weekly cron ('${weekly}')`,
-    ).toBe(true);
-    expect(/'bun'/.test(envLine ?? ''), 'the weekly branch must yield bun').toBe(true);
+      'no schedule branch: the bun lane is dispatch-only',
+    ).toBe(false);
     expect(/'node'/.test(envLine ?? ''), 'the fallback must be node').toBe(true);
   });
 

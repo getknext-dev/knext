@@ -92,3 +92,27 @@ duplicated-state hazard exists for them.
   reference for the preferred path; the `@getknext/lib`-OTel-free dependency
   inversion that ADR-0012 relies on is exactly what makes the (now-safe) seams
   necessary.
+
+## Amendment (stability sprint): the artifact guard is retired; the anchoring stays
+
+**Status: Accepted.** Issue #885 — the build-artifact guard
+(`standalone-seam-alive.test.ts`, the `seam-alive` CI matrix, `scripts/seam-alive-apps.mjs`)
+is **retired and deleted**, because its SUBJECT cannot exist on the shipped build path: the #352
+defect was webpack duplicating `@getknext/lib` across the instrumentation and app-server layers,
+and the vinext (vite/rollup) build has one module graph — there are no layers to duplicate
+across. The guard also hard-required a `.next/standalone` tree (`KNEXT_REQUIRE_STANDALONE=1`)
+that no vinext app produces, so on the current stack it was red for a reason that said nothing
+about the seam. Repointing it was rejected on principle: a guard aimed at a defect that cannot
+occur is decoration, and this repo's rules say decoration is worse than absence.
+
+**What does NOT retire:** the `globalThis` `Symbol.for('knext.lib.*')` anchoring itself, and the
+rule that `@getknext/lib` stays bundled. Both remain pinned by
+`template-guarded-instrumentation.test.ts` (the seam symbols, the anchoring, and the
+no-`serverExternalPackages` assertion). The anchoring is retained as defense-in-depth: it costs
+nothing, and a future bundling change that reintroduces graph duplication fails safe instead of
+resurrecting #352.
+
+**Rule impact:** `.claude/rules/architecture.md` §4's seam clause mandates the retired guard by
+name. The rules file is the maintainer's to edit; the proposed amendment text is staged at
+`docs/adr/drafts/rules-amendment-architecture-s4.md` together with the ADR-0048 item-7
+official-adapter-default amendment, so both §4 edits land as one maintainer action.

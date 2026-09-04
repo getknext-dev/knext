@@ -342,16 +342,46 @@ jobs:
       - name: Build file-manager (vinext -> nitro .output)
         run: bun run --filter file-manager build
 
-      # Boots the nitro entry, not a standalone server.js — file-manager stopped
-      # producing one at ADR-0048. SERVER_CMD is bun because the output uses
-      # nitro's BUN preset; there is no node-runnable server for a node lane to
-      # boot, which is why the runtime matrix is gone rather than reduced.
-      - name: Run knext compat-smoke (bun)
+      # The smoke gates the ARTIFACT USERS GET (#900 exit criterion 2): compile
+      # the nitro output into the single executable exactly as the Dockerfile
+      # does, and boot THAT. Booting `.output/server/index.mjs` under bun — the
+      # previous shape — misses every divergence that exists only in the
+      # compiled binary: the sharp `process.dlopen` shim, the re-derived asset
+      # root, closed module resolution. No --target: the smoke runs on THIS
+      # runner, so the host triple is the right one (the musl cross-target is
+      # the Dockerfile's concern).
+      - name: Compile the single executable
+        working-directory: apps/file-manager
+        run: |
+          bun run node_modules/@getknext/core/dist/adapters/vinext-compile.js \
+            --entry .output/server/index.mjs \
+            --outfile knext-smoke-exec
+
+      # The sharp addon tree, staged beside the binary (the shim discovers
+      # `native/` next to the executable; the addon links libvips by RELATIVE
+      # rpath so the @img layout must survive intact — cp -RL dereferences
+      # bun's isolated-store symlinks).
+      - name: Stage the sharp native tree beside the binary
+        run: |
+          set -eu
+          SRC=""
+          for c in node_modules/.bun/node_modules/@img node_modules/@img; do
+            [ -d "$c" ] && SRC="$c" && break
+          done
+          test -n "$SRC" || { echo "no @img tree found for sharp staging" >&2; exit 1; }
+          mkdir -p apps/file-manager/native
+          cp -RL "$SRC"/sharp-linux-x64 apps/file-manager/native/ 2>/dev/null || true
+          cp -RL "$SRC"/sharp-libvips-linux-x64 apps/file-manager/native/ 2>/dev/null || true
+          ls apps/file-manager/native/ | grep -q sharp- || { echo "sharp addon not staged" >&2; exit 1; }
+
+      # SERVER_CMD == SERVER_PATH is the smoke's single-exec signal: no script
+      # arg, no preload — the binary IS the server.
+      - name: Run knext compat-smoke (compiled single executable)
         working-directory: apps/file-manager
         env:
           RUNTIME: bun
-          SERVER_CMD: bun
-          SERVER_PATH: ${{ github.workspace }}/apps/file-manager/.output/server/index.mjs
+          SERVER_CMD: ${{ github.workspace }}/apps/file-manager/knext-smoke-exec
+          SERVER_PATH: ${{ github.workspace }}/apps/file-manager/knext-smoke-exec
           # The service container above, reachable on localhost from the job.
           REDIS_URL: redis://127.0.0.1:6379
         run: node scripts/compat-smoke.mjs
@@ -446,106 +476,14 @@ jobs:
           apps/file-manager/sigterm-drain-e2e.test.ts
           apps/file-manager/sigterm-hardcap-e2e.test.ts
 
-  seam-alive-discover:
-    # #408 item 2 — DISCOVER which apps carry the #352/#344 seam-alive guard.
-    # The gate used to be one hard-coded step for file-manager, so every other
-    # app (including every app `turbo gen zone` generates) ran its copy of the
-    # guard build-less and passed by SKIPPING. An enumerated list is how the
-    # second app gets missed; this scans the tree instead, and the scanner exits
-    # non-zero rather than emitting an empty (vacuous) matrix. It discovers GUARD
-    # FILES, so an app is covered the moment it CARRIES the guard — a companion
-    # assertion in tests/seam-alive-app-coverage.test.ts is what makes an app that
-    # NEEDS the guard (instrumentation + @getknext/lib) but lacks it fail.
-    # Guarded by tests/seam-alive-app-coverage.test.ts.
-    name: Discover apps carrying the seam-alive guard
-    runs-on: ubuntu-latest
-    outputs:
-      apps: ${{ steps.scan.outputs.apps }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '24'
-
-      - name: Scan apps/ for standalone-seam-alive.test.ts
-        id: scan
-        # TWO statements, deliberately. `echo "apps=$(node …)"` would DISCARD the
-        # scanner's exit status — a command substitution's status is dropped and
-        # `echo` succeeds — so an empty-matrix refusal would exit 0 and the gate
-        # would go vacuous exactly where it must not. A bare assignment propagates
-        # the failure under bash -e. Guarded by tests/seam-alive-app-coverage.test.ts.
-        run: |
-          apps=$(node scripts/seam-alive-apps.mjs)
-          echo "apps=$apps" >> "$GITHUB_OUTPUT"
-
-  seam-alive:
-    # PER-APP build + gate: #352 shipped with db_wake + correlation DEAD in prod
-    # because @getknext/lib is DUPLICATED across the instrumentation vs app-server
-    # webpack layers and the seam was not shared. The fix backs the seam with
-    # globalThis Symbol.for(...) cells; the artifact assertion checks those symbols
-    # co-occur in BOTH the instrumentation (writer) chunk AND an app-server
-    # (reader) chunk of the real `next build --webpack` output. The guard needs a
-    # standalone build, which is gitignored — so this job BUILDS the app it gates
-    # and runs the guard with KNEXT_REQUIRE_STANDALONE=1, making a missing build a
-    # HARD failure. Chunk-level drift therefore fails the app that introduced it.
-    name: Seam-alive artifact gate (${{ matrix.app }})
-    needs: seam-alive-discover
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        app: ${{ fromJSON(needs.seam-alive-discover.outputs.apps) }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '24'
-
-      - name: Setup bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: 1.4.0
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      # @getknext/lib and @getknext/core ship only dist/ and must be built before any
-      # app; @getknext/core type-imports @getknext/db, so the order is lib→db→core.
-      - name: Build @getknext/lib
-        run: bun run --filter @getknext/lib build
-
-      - name: Build @getknext/db
-        run: bun run --filter @getknext/db build
-
-      - name: Build @getknext/core
-        run: bun run --filter @getknext/core build
-
-      # PATH filter, not a name filter: the matrix carries DIRECTORY names and
-      # `pnpm --filter <name>` matches on PACKAGE NAME — which already differs for
-      # apps/docs (package "knext-docs"). A name miss prints "No projects matched
-      # the filters" and exits 0, i.e. builds nothing while looking fine.
-      - name: Build ${{ matrix.app }} standalone (next build --webpack)
-        run: bun run --filter ./apps/${{ matrix.app }} build
-
-      - name: Run seam-alive artifact gate (#352/#344, must NOT skip)
-        env:
-          # Converts the skipIf guard into a HARD failure if the build is missing,
-          # so a green check can never mean "skipped".
-          KNEXT_REQUIRE_STANDALONE: '1'
-        # bun, not vitest: this file imports `bun:test`, so vitest's config
-        # excludes it and the step died with `No test files found, exiting with
-        # code 1` — a gate whose whole contract is "must NOT skip", failing for
-        # the one reason that says nothing about the artifact it guards.
-        # `scripts/bun-test.mjs` exits 1 on an empty selection too, so the loud
-        # failure on a missing or renamed file is preserved, not traded away.
-        run: node scripts/bun-test.mjs apps/${{ matrix.app }}/standalone-seam-alive.test.ts
+  # seam-alive gates: RETIRED (#885, stability sprint). The #352 defect class —
+  # webpack layers duplicating @getknext/lib module state across the
+  # instrumentation and app-server chunks — cannot occur under the vinext
+  # (vite/rollup) single-graph build, and the guard hard-required a
+  # `.next/standalone` tree no app on this path produces. The globalThis
+  # Symbol.for anchoring in @getknext/lib STAYS (defense-in-depth, still
+  # pinned by template-guarded-instrumentation.test.ts); what retired is the
+  # artifact assertion whose subject no longer exists. See ADR-0027 Amendment.
 
   no-latest-guard:
     name: No :latest images in operator manifests

@@ -93,13 +93,22 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // to bun 1.4 (#882) and both pairs collapsed to a single step. A count
       // DROPPING is meant to be as loud as an unpinned step, so editing this
       // number is the deliberate act the comment above asks for.
-      'ci.yml': 11,
+      // 10, was 11: the seam-alive matrix job retired with its subject
+      // (#885 — no webpack layers under the vinext single-graph build),
+      // taking its setup-bun step with it. Deliberate edit, per the rule
+      // above that a dropping count is a decision, not drift.
+      'ci.yml': 10,
       'docs-closure-nightly.yml': 1,
       'mutation-prover-nightly.yml': 1,
       'operator-e2e-nightly.yml': 3,
       'preview.yml': 2,
       'scale-zero-pg.yml': 1,
       'test-e2e-deploy.yml': 1,
+      // #608 — the vinext-axis compat lane. Its one setup-bun is UNCONDITIONAL
+      // (the compiled artifact has no node arm) and carries the same
+      // `inputs.bun-version || '<pin>'` fallback form, so the pin assertion
+      // below covers it exactly as it covers the bun lane's.
+      'compat-vinext.yml': 1,
       'bun-sandbox-fetch-ab.yml': 1,
     });
   });
