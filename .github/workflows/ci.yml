@@ -1145,10 +1145,18 @@ jobs:
   # bytes ARE the attached bytes. security.md says "Trivy/Grype"; the image gates
   # in supply-chain.yml stay Trivy.
   #
-  # NO VINEXT IMAGE IS PUBLISHED FROM CI TODAY. The only job that builds a vinext
-  # artifact is `bun-exec-alpine-image` below, which now `needs:` this gate -- so
-  # the precondition holds the day a publish lane ships, rather than being
-  # remembered then. `tests/precompile-closure-gate-ci.test.ts` SCANS EVERY
+  # A VINEXT IMAGE *IS* PUBLISHED FROM CI (corrected 2026-09-04, C1/#785). This
+  # block used to read "NO VINEXT IMAGE IS PUBLISHED FROM CI TODAY"; that was
+  # true when it was written and stopped being true at ADR-0048.
+  # `supply-chain.yml`'s `image-supply-chain` job builds apps/file-manager's
+  # image -- alpine + a `bun build --compile` single executable -- `crane push`es
+  # it to GHCR on main, cosign-signs the digest and attests an SBOM. THIS job's
+  # subject is still only `examples/bun-exec`; the published app's closure is
+  # gated inside that lane instead (`--app apps/file-manager`, run before the
+  # build), guarded by `tests/published-image-closure-gate.test.ts`. The one job
+  # here that builds a vinext artifact is `bun-exec-alpine-image` below, which
+  # `needs:` this gate -- so the precondition holds for the example, and the
+  # publish lane carries its own. `tests/precompile-closure-gate-ci.test.ts` SCANS EVERY
   # `.github/workflows/*.yml` (not just this file) for any job that compiles the
   # binary or builds its image -- including via the `bun run build` package-script
   # alias for `./build.sh` -- and requires a job running the closure audit in its
@@ -1159,13 +1167,15 @@ jobs:
   # `tests/helpers/vinext-artifact-scan.ts` in the same PR.
   #
   # AND IT GUARDS ORDERING ONLY. ADR-0042 C6's other half -- the closure SBOM
-  # ATTACHED TO THE IMAGE DIGEST AS A COSIGN ATTESTATION -- remains OWED: the day
-  # a vinext publish lane ships, that attestation must ship with it; a `needs:`
-  # edge alone would let an image publish with no SBOM bound to its digest. Today
-  # the SBOM is a per-run Actions artifact, which is evidence, not provenance.
-  # The subject is also exactly one closure: the in-repo `examples/bun-exec`, the
-  # only vinext app there is. A USER app on the vinext target has no equivalent
-  # closure gate yet.
+  # ATTACHED TO THE IMAGE DIGEST AS A COSIGN ATTESTATION -- is no longer owed for
+  # the PUBLISHED image (#785, done in supply-chain.yml: `cosign attest --type
+  # cyclonedx --predicate sbom/app-closure.cdx.json` onto the pushed digest). It
+  # is still true HERE: this job's SBOM is a per-run Actions artifact, which is
+  # evidence, not provenance -- and correctly so, because nothing publishes an
+  # examples/bun-exec image, so there is no digest to bind it to.
+  # The subject of THIS job is exactly one closure: the in-repo
+  # `examples/bun-exec`. A USER app on the vinext target still has no equivalent
+  # closure gate; what changed is that the repo's own published app now does.
   #
   # THE EMPTINESS GUARD IS THE POINT. A scan of nothing exits 0, and both ways of
   # scanning nothing here are SILENT: `syft scan dir:` with default catalogers

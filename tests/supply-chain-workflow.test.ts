@@ -278,7 +278,12 @@ describe('buildkit provenance is restored without weakening the gate (#202)', ()
   });
 
   it('the SBOM is generated from the same OCI layout blobs (oci-dir source), not the docker daemon', () => {
-    const sbom = stepBlock(/uses:\s*anchore\/sbom-action/);
+    // `@` is load-bearing, not tidiness: the workflow also uses the SUBPATH
+    // action `anchore/sbom-action/download-syft` (the JS-closure gate installs
+    // syft with it, C1/#785), which is a plain installer with no `image:` input
+    // and appears EARLIER in the file. A prefix match picked that step up and
+    // reported the real SBOM step as missing its oci-dir source.
+    const sbom = stepBlock(/uses:\s*anchore\/sbom-action@/);
     expect(sbom, 'expected an anchore/sbom-action step').not.toBe('');
     expect(
       /^\s*image:\s*oci-dir:\S+/m.test(stripComments(sbom)),

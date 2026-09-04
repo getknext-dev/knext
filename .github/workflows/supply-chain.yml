@@ -46,6 +46,77 @@ jobs:
         env:
           OWNER: ${{ github.repository_owner }}
 
+      # ── THE JS CLOSURE GATE (C1 / #785) — runs BEFORE anything is built ─────
+      #
+      # WHY IT IS HERE AND NOT ONLY IN ci.yml. Everything below this block scans
+      # the IMAGE. Since ADR-0048 the image is `alpine + /app/server`, where
+      # /app/server is a `bun build --compile` single executable with react,
+      # next, vinext, nitro and the app inlined into it. Trivy and syft can read
+      # the Alpine package DB out of that; they cannot read one byte of the
+      # binary. So the image scan is clean by construction, and — worse — the
+      # SBOM it produces used to be the `cosign attest` predicate below. A signed
+      # attestation asserting nothing is worse than no attestation: it makes an
+      # absent control look audited.
+      #
+      # ADR-0042 C6 built the right gate (SBOM + HIGH/CRITICAL scan of the
+      # PRE-COMPILE closure) but scoped it to examples/bun-exec. This is that
+      # gate pointed at the app THIS lane publishes. `--app` (rather than
+      # `--closure`) because apps/file-manager is a workspace member: its
+      # node_modules is symlinks into bun's isolated store, which syft will not
+      # follow — MEASURED, `syft scan dir:apps/file-manager/node_modules` returns
+      # ZERO npm components. See scripts/lib/bun-app-closure.mjs.
+      #
+      # Ordering is the point: it runs before the build, so a HIGH/CRITICAL in
+      # the closure stops the binary existing rather than being noticed after it
+      # is pushed. `tests/published-image-closure-gate.test.ts` asserts that
+      # ordering by step index, and asserts the audited app is the app this job
+      # builds — auditing examples/bun-exec here would NOT be credited.
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.0'
+          # PINNED to the version the Dockerfile's builder stage uses
+          # (oven/bun:1.4.0-alpine). The closure this scans must be the closure
+          # that image installs, and a different bun can resolve differently.
+
+      # The SAME command the Dockerfile's builder runs, so the scanned tree is
+      # the tree that feeds `vite build` in the image being published.
+      - name: Install the workspace closure (the tree the builder compiles)
+        run: bun install --frozen-lockfile
+
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+
+      # download-grype only exposes the binary path as an output; spawning bare
+      # `grype` without the PATH step is an ENOENT (caught on ci.yml's first real
+      # run of the sibling gate). The output is the pinned action's own value.
+      - name: Install grype
+        id: grype
+        uses: anchore/scan-action/download-grype@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+
+      - name: Put grype on PATH
+        run: dirname "${{ steps.grype.outputs.cmd }}" >> "$GITHUB_PATH"
+
+      - name: SBOM + HIGH/CRITICAL scan of the published app's JS closure
+        run: node scripts/precompile-closure-audit.mjs --app apps/file-manager
+
+      # `always()` so a FAILING scan still publishes the evidence of what was
+      # scanned — the artifact is how a triage decision gets made, and
+      # withholding it on failure is backwards. A step-level `if:` is not a
+      # disarm; a step-level `continue-on-error:` would be, and there is none.
+      - name: Upload the app closure SBOM
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: app-closure-sbom-${{ github.sha }}
+          path: sbom/app-closure.cdx.json
+          if-no-files-found: error
+
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       # Reproducible-build inputs: pin SOURCE_DATE_EPOCH to the commit time so
@@ -104,7 +175,15 @@ jobs:
                manifests: [.manifests[] | select(.annotations["vnd.docker.reference.type"] != "attestation-manifest")]}' \
             "image-oci/blobs/sha256/${NESTED}" > image-oci-sbom/index.json
 
-      - name: Generate SBOM (syft, SPDX-JSON)
+      # KEPT, AND HONESTLY LABELLED (C1). This document covers the RUNTIME
+      # LAYER'S OS PACKAGES — alpine 3.22, musl, libstdc++, libgcc — which is
+      # real coverage and the only thing that has it. It does NOT see the
+      # compiled JS closure: `/app/server` is one opaque executable to syft. The
+      # step name says so because the name is the control: an unqualified
+      # "Generate SBOM" is precisely what let a vacuous document read as this
+      # image's bill of materials. The JS half is the closure SBOM above, and
+      # BOTH are attested below.
+      - name: Generate image SBOM (syft, SPDX-JSON — OS packages only, does not see the JS closure)
         # SHA-pinned (#202): sbom-action runs in a job with packages:write +
         # id-token:write, so a mutable tag is a supply-chain hole. v0.24.0.
         # The oci-dir: source is passed verbatim to syft (verified against the
@@ -213,14 +292,34 @@ jobs:
         if: github.ref == 'refs/heads/main'
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
-      - name: Sign image + attest SBOM (keyless)
+      # TWO attestations, because this artifact has two disjoint halves and no
+      # single tool sees both (#785):
+      #
+      #   spdxjson  — the image's OS packages (alpine, musl, libstdc++, libgcc).
+      #               Syft's view of the layers. Says NOTHING about the binary.
+      #   cyclonedx — the app's pre-compile JS closure: the ~560 npm components
+      #               `bun build --compile` inlined into /app/server, scanned
+      #               HIGH/CRITICAL-clean by the gate at the top of this job.
+      #
+      # The second one is the half #785 was filed for, and it is what makes the
+      # first one honest rather than misleading: on its own, an SBOM attestation
+      # on a compiled-binary image is a signed claim about an Alpine package DB
+      # presented as a claim about the software. Keep both, or the JS closure
+      # goes back to being unattested.
+      #
+      # Still NOT covered by either, stated so it is not mistaken for coverage:
+      # `/app/native` (the sharp addon + libvips) is a `.node` blob no SBOM
+      # describes — tracked separately as the native-provenance gap.
+      - name: Sign image + attest both SBOMs (keyless)
         if: github.ref == 'refs/heads/main'
         env:
           COSIGN_EXPERIMENTAL: "1"
           DIGEST: ${{ steps.push.outputs.digest }}
         run: |
+          set -euo pipefail
           cosign sign --yes "${IMAGE}@${DIGEST}"
           cosign attest --yes --predicate sbom.spdx.json --type spdxjson "${IMAGE}@${DIGEST}"
+          cosign attest --yes --predicate sbom/app-closure.cdx.json --type cyclonedx "${IMAGE}@${DIGEST}"
 
       # Verify the signature we just produced, parameterized by the pushed digest.
       # Mirrors the operator's verify step (operator-supply-chain.yml): it proves the
