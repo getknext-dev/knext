@@ -3,15 +3,29 @@
  *
  * The turnkey Grafana dashboards shipped in the operator bundle
  * (`packages/kn-next-operator/config/grafana/dashboards`) must never contain a
- * dangling query: every `knext_*` series a panel references has to exist in the
- * runtime metric set exported by `adapters/metrics.ts`. This test asserts that
- * parity, sourcing the allowed names from the code (EXPORTED_KNEXT_METRICS,
- * derived from the metrics.ts constants) — not a hand-copied list.
+ * dangling query: every `knext_*` series a panel references has to exist in a
+ * runtime metric set this repo exports. This test asserts that parity, sourcing
+ * the allowed names from the code — not a hand-copied list.
  *
- * Non-`knext_` metrics (kube_* replica counts, kn_next_* RUM/bytecode, knative
- * autoscaler) come from other exporters / the cluster and are out of scope for
- * the assertion — but we collect and surface them so a reviewer can see exactly
- * which external series each dashboard depends on.
+ * TWO emitters now contribute `knext_*` names, and conflating them is what let
+ * #792 happen:
+ *   - `adapters/metrics.ts` (EXPORTED_KNEXT_METRICS) — the prom-client registry
+ *     an app registers, reachable through an app-level `/api/metrics` route.
+ *   - the compiled runtime's own `:9091` exposition (`knext_bunexec_*`, scanned
+ *     out of `templates/app/runtime-contract.mjs.hbs`) — the ONLY thing the
+ *     shipped PodMonitor scrapes.
+ *
+ * WHICH of the two a given dashboard is allowed to use is a separate and
+ * sharper question, and it is answered by
+ * `observability-metric-contract.test.ts` — that test classifies every
+ * dashboard and every alert group by emitter and covers non-`knext_` prefixes
+ * too. This file keeps the structural invariants (raw model, datasource
+ * variable) plus the coarse no-dangling-`knext_`-name check.
+ *
+ * Non-`knext_` metrics (kube_* replica counts, k6/OTel series) come from other
+ * exporters / the cluster and are out of scope for the assertion here — but we
+ * collect and surface them so a reviewer can see exactly which external series
+ * each dashboard depends on.
  */
 
 import { describe, expect, it } from "bun:test";
@@ -22,11 +36,30 @@ import {
     extractKnextMetricTokens,
     findDanglingKnextMetrics,
 } from "../adapters/dashboard-metrics";
+import { scanBunexecMetrics } from "../adapters/metric-contract";
 
 const DASHBOARD_DIR = path.resolve(
     import.meta.dirname,
     "../../../kn-next-operator/config/grafana/dashboards",
 );
+
+/**
+ * The allowed `knext_*` base names: the app-registry set PLUS whatever the
+ * compiled runtime's exposition actually renders, scanned from its `# TYPE`
+ * lines rather than re-typed. Renaming a series on either side moves this set.
+ */
+const ALLOWED_KNEXT_METRICS: readonly string[] = [
+    ...EXPORTED_KNEXT_METRICS,
+    ...scanBunexecMetrics(
+        readFileSync(
+            path.resolve(
+                import.meta.dirname,
+                "../../templates/app/runtime-contract.mjs.hbs",
+            ),
+            "utf8",
+        ),
+    ).keys(),
+];
 
 function dashboardFiles(): string[] {
     return readdirSync(DASHBOARD_DIR)
@@ -64,8 +97,13 @@ function nonKnextReviewTokens(json: string): string[] {
 describe("Grafana dashboard ↔ exported-metric parity (#316)", () => {
     const files = dashboardFiles();
 
-    it("ships the five bundled dashboards", () => {
-        expect(files.length).toBe(5);
+    // Three, not five: rum.json and bytecode.json were DELETED (#792) — their
+    // subjects are gone (an app-port RUM collection path the shipped PodMonitor
+    // never scrapes, and NODE_COMPILE_CACHE warmth the compiled binary has no
+    // equivalent of). A blank dashboard reads as a quiet system, so deleting
+    // beat repointing.
+    it("ships the three bundled dashboards", () => {
+        expect(files.length).toBe(3);
     });
 
     it.each(files)("%s references only real knext_* metrics", (file) => {
@@ -73,10 +111,10 @@ describe("Grafana dashboard ↔ exported-metric parity (#316)", () => {
         // Parse — a dashboard must be valid JSON.
         expect(() => JSON.parse(json)).not.toThrow();
 
-        const dangling = findDanglingKnextMetrics(json);
+        const dangling = findDanglingKnextMetrics(json, ALLOWED_KNEXT_METRICS);
         expect(
             dangling,
-            `${file} queries knext_* metric(s) not exported by metrics.ts: ${dangling.join(", ")}`,
+            `${file} queries knext_* metric(s) no emitter exports: ${dangling.join(", ")}`,
         ).toEqual([]);
     });
 
@@ -98,8 +136,8 @@ describe("Grafana dashboard ↔ exported-metric parity (#316)", () => {
     });
 
     // Structural invariants that hold for EVERY bundled dashboard — these run on
-    // all five (unlike the knext_* parity assertion, which is vacuous for the
-    // three dashboards that carry no knext_* series). This is the guard that
+    // all three (unlike the knext_* parity assertion, which is vacuous for the
+    // one dashboard that carries no knext_* series). This is the guard that
     // would have caught an HTTP-API import envelope masquerading as a raw model.
     it.each(
         files,

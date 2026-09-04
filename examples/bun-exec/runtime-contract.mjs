@@ -226,35 +226,172 @@ export function resolveAssetAnchor({ bakedMain, execPath, exists, isCompiled, cw
 // self-contained and compile-safe. Mirrors the process-metric shape the node
 // supervisor exposes (packages/kn-next/src/adapters/node-server.ts) but scoped
 // to what a single in-process runtime can measure without a child scrape.
+//
+// :9091 is the ONLY endpoint knext's shipped PodMonitor scrapes, so whatever is
+// NOT here is not on any dashboard and cannot back any alert. That makes the
+// shape below a contract, not an implementation detail — `sum(rate(...))` over a
+// series nobody emits returns an empty vector, so a query naming one is blank
+// and an alert on it never fires, silently and forever (#792). The set here is
+// pinned against every shipped alert and dashboard by
+// packages/kn-next/src/__tests__/observability-metric-contract.test.ts.
+//
+// CARDINALITY IS DELIBERATELY BOUNDED. A scale-to-zero fleet churns pods, and
+// every pod is a fresh series set, so an unbounded label here multiplies across
+// the whole fleet:
+//   - the request counter carries `status_class` ONLY — five values, fixed at
+//     compile time. NOT the raw status (≈60 values) and NOT the route/path,
+//     which is unbounded by construction: a single crawler hitting
+//     /a, /b, /c … mints a series per URL and never stops. Per-route RED needs
+//     an explicit, bounded route allowlist; until there is one, there is no
+//     route label. `KnextCacheUnreachable`'s old `route="/api/health"` filter
+//     was exactly this, and it is why that alert was retired rather than
+//     repointed.
+//   - the duration histogram carries NO labels at all. Buckets already multiply
+//     it 13×; crossing that with status_class would make one histogram the
+//     dominant term in the fleet's series count for no SLO that needs it.
+// Total: 23 series per pod, constant — 3 process/startup gauges, 5 counters,
+// 1 in-flight gauge, 13 buckets, `_sum`, `_count`.
 export const METRICS_CONTENT_TYPE = 'text/plain; version=0.0.4; charset=utf-8';
+
+// Latency buckets, in seconds. Tuned for a scale-to-zero Next.js service rather
+// than copied from prom-client's defaults: the measured cold-start floor is tens
+// of milliseconds and a warm SSR hit is faster still, so a histogram whose
+// finest bucket is 100 ms cannot resolve a p50 at all — every warm request lands
+// in the first bucket and `histogram_quantile` interpolates a straight line
+// through it. Five sub-100 ms buckets give real resolution where the traffic is,
+// and the tail out to 10 s covers a cold wake plus a slow upstream.
+export const REQUEST_DURATION_BUCKETS = [
+  0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 1, 2.5, 5, 10,
+];
+
+// Fixed, exhaustive, and emitted even at zero. Pre-seeding every class means
+// `rate()` is well-defined from the FIRST scrape after a pod starts — otherwise
+// a series appears only once its first 5xx lands, and the error-rate query has
+// no denominator until then. Five values is the entire cardinality of this
+// label, forever: `statusClass` clamps anything else into it.
+const STATUS_CLASSES = ['1xx', '2xx', '3xx', '4xx', '5xx'];
+
+/**
+ * Bucket an HTTP status into its class. Anything outside 100-599 — including a
+ * non-numeric value, or a handler that threw before producing a response — is
+ * counted as `5xx`: it is a server-side failure, and folding it into the class
+ * that already means "we broke it" is what keeps the label's value set closed.
+ *
+ * @param {number | string} status
+ * @returns {string}
+ */
+export function statusClass(status) {
+  const n = Math.floor(Number(status) / 100);
+  return n >= 1 && n <= 5 ? `${n}xx` : '5xx';
+}
 
 export function createMetricsState() {
   return {
     requestsTotal: 0,
     inflight: 0,
     startNs: process.hrtime.bigint(),
+    // Seconds from process start to both listeners being bound. Set ONCE, by
+    // recordStartupComplete(); null until then.
+    startupSeconds: null,
+    // status_class → count. Seeded with every class (see STATUS_CLASSES).
+    byStatusClass: Object.fromEntries(STATUS_CLASSES.map((c) => [c, 0])),
+    // Cumulative-by-construction counts, parallel to REQUEST_DURATION_BUCKETS,
+    // plus the implicit +Inf bucket which is requestsTotal.
+    durationBuckets: REQUEST_DURATION_BUCKETS.map(() => 0),
+    durationSum: 0,
   };
+}
+
+/**
+ * Record one completed request. Called from the entry's single srvx middleware,
+ * which already wraps every request — so the RED signals cost one increment and
+ * a short loop, on a path that exists either way.
+ *
+ * @param {ReturnType<typeof createMetricsState>} state
+ * @param {number | string} status         HTTP status of the response.
+ * @param {number} durationSeconds         Wall time the handler took.
+ */
+export function observeRequest(state, status, durationSeconds) {
+  state.requestsTotal++;
+  const cls = statusClass(status);
+  state.byStatusClass[cls] = (state.byStatusClass[cls] ?? 0) + 1;
+  const d = Number.isFinite(durationSeconds) ? Math.max(0, durationSeconds) : 0;
+  state.durationSum += d;
+  for (let i = 0; i < REQUEST_DURATION_BUCKETS.length; i++) {
+    if (d <= REQUEST_DURATION_BUCKETS[i]) state.durationBuckets[i]++;
+  }
+}
+
+/**
+ * Mark the runtime as up. Cold start is THE product metric for a scale-to-zero
+ * service, and the binary is the only thing that can measure it honestly:
+ * `process.uptime()` at the moment both listeners are bound includes the Bun
+ * bootstrap and every module evaluation before it, which is exactly the latency
+ * a user waking a scaled-to-zero pod pays.
+ *
+ * A gauge rather than a histogram on purpose: each pod records it exactly once,
+ * so the fleet-wide distribution is already one sample per pod and
+ * `max by (app)` / `quantile` over the gauge is the correct aggregation. A
+ * histogram here would cost 13 series to hold one observation.
+ *
+ * @param {ReturnType<typeof createMetricsState>} state
+ * @param {number} [uptimeSeconds]
+ */
+export function recordStartupComplete(state, uptimeSeconds = process.uptime()) {
+  if (state.startupSeconds === null) state.startupSeconds = uptimeSeconds;
 }
 
 export function renderMetrics(state) {
   const mem = process.memoryUsage();
   const uptimeSec = Number(process.hrtime.bigint() - state.startNs) / 1e9;
-  return (
-    [
-      '# HELP knext_bunexec_process_resident_memory_bytes Resident set size of the runtime in bytes.',
-      '# TYPE knext_bunexec_process_resident_memory_bytes gauge',
-      `knext_bunexec_process_resident_memory_bytes ${mem.rss}`,
-      '# HELP knext_bunexec_process_uptime_seconds Seconds since the runtime process started.',
-      '# TYPE knext_bunexec_process_uptime_seconds gauge',
-      `knext_bunexec_process_uptime_seconds ${uptimeSec.toFixed(3)}`,
-      '# HELP knext_bunexec_http_requests_total Total app HTTP requests handled.',
-      '# TYPE knext_bunexec_http_requests_total counter',
-      `knext_bunexec_http_requests_total ${state.requestsTotal}`,
-      '# HELP knext_bunexec_http_inflight_requests App HTTP requests currently in flight.',
-      '# TYPE knext_bunexec_http_inflight_requests gauge',
-      `knext_bunexec_http_inflight_requests ${state.inflight}`,
-    ].join('\n') + '\n'
+  const lines = [
+    '# HELP knext_bunexec_process_resident_memory_bytes Resident set size of the runtime in bytes.',
+    '# TYPE knext_bunexec_process_resident_memory_bytes gauge',
+    `knext_bunexec_process_resident_memory_bytes ${mem.rss}`,
+    '# HELP knext_bunexec_process_uptime_seconds Seconds since the runtime process started.',
+    '# TYPE knext_bunexec_process_uptime_seconds gauge',
+    `knext_bunexec_process_uptime_seconds ${uptimeSec.toFixed(3)}`,
+  ];
+
+  // Omitted, not zeroed, until the listeners are actually bound: a `0` here
+  // would read as "this pod started instantly", which is the one wrong answer.
+  if (state.startupSeconds !== null) {
+    lines.push(
+      '# HELP knext_bunexec_startup_duration_seconds Seconds from process start until both listeners were bound (cold start).',
+      '# TYPE knext_bunexec_startup_duration_seconds gauge',
+      `knext_bunexec_startup_duration_seconds ${state.startupSeconds.toFixed(3)}`,
+    );
+  }
+
+  lines.push(
+    '# HELP knext_bunexec_http_requests_total Total app HTTP requests handled, by response status class.',
+    '# TYPE knext_bunexec_http_requests_total counter',
   );
+  for (const cls of STATUS_CLASSES) {
+    lines.push(
+      `knext_bunexec_http_requests_total{status_class="${cls}"} ${state.byStatusClass[cls] ?? 0}`,
+    );
+  }
+
+  lines.push(
+    '# HELP knext_bunexec_http_inflight_requests App HTTP requests currently in flight.',
+    '# TYPE knext_bunexec_http_inflight_requests gauge',
+    `knext_bunexec_http_inflight_requests ${state.inflight}`,
+    '# HELP knext_bunexec_http_request_duration_seconds App HTTP request duration in seconds.',
+    '# TYPE knext_bunexec_http_request_duration_seconds histogram',
+  );
+  for (let i = 0; i < REQUEST_DURATION_BUCKETS.length; i++) {
+    lines.push(
+      `knext_bunexec_http_request_duration_seconds_bucket{le="${REQUEST_DURATION_BUCKETS[i]}"} ${state.durationBuckets[i]}`,
+    );
+  }
+  lines.push(
+    `knext_bunexec_http_request_duration_seconds_bucket{le="+Inf"} ${state.requestsTotal}`,
+    `knext_bunexec_http_request_duration_seconds_sum ${state.durationSum.toFixed(6)}`,
+    `knext_bunexec_http_request_duration_seconds_count ${state.requestsTotal}`,
+  );
+
+  return lines.join('\n') + '\n';
 }
 
 // ── (5) Bearer-authenticated, fail-closed mutating-route guard ──────────────

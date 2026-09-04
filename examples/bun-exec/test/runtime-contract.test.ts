@@ -26,9 +26,12 @@ import {
   createGracefulShutdown,
   createMetricsState,
   METRICS_CONTENT_TYPE,
+  observeRequest,
+  recordStartupComplete,
   renderMetrics,
   resolveAssetAnchor,
   resolveBindHost,
+  statusClass,
 } from '../runtime-contract.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -42,15 +45,85 @@ const SRVX_HARNESS = resolve(__dirname, 'srvx-close-harness.mjs');
 describe('renderMetrics — Prometheus exposition', () => {
   it('emits valid HELP/TYPE lines and real process metrics', () => {
     const state = createMetricsState();
-    state.requestsTotal = 3;
+    observeRequest(state, 200, 0.01);
+    observeRequest(state, 200, 0.01);
+    observeRequest(state, 503, 0.4);
     state.inflight = 1;
     const text = renderMetrics(state);
     expect(text).toContain('# TYPE knext_bunexec_process_resident_memory_bytes gauge');
     expect(text).toMatch(/knext_bunexec_process_resident_memory_bytes \d+/);
     expect(text).toContain('# TYPE knext_bunexec_http_requests_total counter');
-    expect(text).toContain('knext_bunexec_http_requests_total 3');
     expect(text).toContain('knext_bunexec_http_inflight_requests 1');
     expect(METRICS_CONTENT_TYPE).toMatch(/version=0\.0\.4/);
+  });
+
+  // #792: an error rate is not computable from an unlabelled counter, which is
+  // what this emitted before. The label is the capability, not a cosmetic.
+  it('splits the request counter by status_class', () => {
+    const state = createMetricsState();
+    observeRequest(state, 200, 0.01);
+    observeRequest(state, 200, 0.01);
+    observeRequest(state, 503, 0.4);
+    observeRequest(state, 404, 0.02);
+    const text = renderMetrics(state);
+    expect(text).toContain('knext_bunexec_http_requests_total{status_class="2xx"} 2');
+    expect(text).toContain('knext_bunexec_http_requests_total{status_class="5xx"} 1');
+    expect(text).toContain('knext_bunexec_http_requests_total{status_class="4xx"} 1');
+    // Every class is present even at zero, so rate() has a denominator from the
+    // first scrape rather than only once a 5xx has happened.
+    expect(text).toContain('knext_bunexec_http_requests_total{status_class="1xx"} 0');
+    expect(text).toContain('knext_bunexec_http_requests_total{status_class="3xx"} 0');
+  });
+
+  // Cardinality is the reason this label is `status_class` and not `status`.
+  it('clamps every status into exactly five classes', () => {
+    expect(statusClass(204)).toBe('2xx');
+    expect(statusClass(301)).toBe('3xx');
+    expect(statusClass(418)).toBe('4xx');
+    expect(statusClass(599)).toBe('5xx');
+    expect(statusClass(101)).toBe('1xx');
+    // Anything unrepresentable is a server-side failure, folded into 5xx so the
+    // label's value set stays closed.
+    expect(statusClass(0)).toBe('5xx');
+    expect(statusClass(999)).toBe('5xx');
+    expect(statusClass(Number.NaN)).toBe('5xx');
+    expect(statusClass('nonsense')).toBe('5xx');
+
+    const state = createMetricsState();
+    observeRequest(state, 999, 0.01);
+    const emitted = [...renderMetrics(state).matchAll(/status_class="([^"]+)"/g)].map((m) => m[1]);
+    expect([...new Set(emitted)].sort()).toEqual(['1xx', '2xx', '3xx', '4xx', '5xx']);
+  });
+
+  it('emits a cumulative duration histogram with a +Inf bucket, sum and count', () => {
+    const state = createMetricsState();
+    observeRequest(state, 200, 0.02); // ≤ 0.025
+    observeRequest(state, 200, 2.0); // ≤ 2.5
+    const text = renderMetrics(state);
+    expect(text).toContain('# TYPE knext_bunexec_http_request_duration_seconds histogram');
+    // Cumulative: the 0.025 bucket holds the fast request only…
+    expect(text).toContain('knext_bunexec_http_request_duration_seconds_bucket{le="0.025"} 1');
+    // …and every bucket at or above 2.5 holds both.
+    expect(text).toContain('knext_bunexec_http_request_duration_seconds_bucket{le="2.5"} 2');
+    expect(text).toContain('knext_bunexec_http_request_duration_seconds_bucket{le="+Inf"} 2');
+    expect(text).toContain('knext_bunexec_http_request_duration_seconds_count 2');
+    expect(text).toMatch(/knext_bunexec_http_request_duration_seconds_sum 2\.02\d*/);
+    // Buckets must be monotonically non-decreasing or histogram_quantile lies.
+    const counts = [...text.matchAll(/_duration_seconds_bucket\{le="[^"]+"\} (\d+)/g)].map((m) =>
+      Number(m[1]),
+    );
+    expect(counts).toEqual([...counts].sort((a, b) => a - b));
+  });
+
+  // The cold-start gauge: absent until the listeners bind, then fixed forever.
+  it('omits the startup gauge until recorded, then pins it', () => {
+    const state = createMetricsState();
+    expect(renderMetrics(state)).not.toContain('knext_bunexec_startup_duration_seconds');
+    recordStartupComplete(state, 0.061);
+    expect(renderMetrics(state)).toContain('knext_bunexec_startup_duration_seconds 0.061');
+    // Set once: a later call must not overwrite the real cold start.
+    recordStartupComplete(state, 99);
+    expect(renderMetrics(state)).toContain('knext_bunexec_startup_duration_seconds 0.061');
   });
 });
 

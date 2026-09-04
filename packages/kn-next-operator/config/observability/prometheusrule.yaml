@@ -4,9 +4,12 @@
 # actually exports:
 #   - operator:  knext_nextapp_reconcile_{total,errors_total,duration_seconds}
 #                (packages/kn-next-operator/internal/controller/metrics.go)
-#   - app:       kn_next_http_requests_total, kn_next_http_request_duration_seconds,
-#                kn_next_startup_duration_seconds, kn_next_bytecode_cache_warm_start
-#                (apps/file-manager/src/app/api/_metrics/registry.ts)
+#   - app:       knext_bunexec_{http_requests_total, http_request_duration_seconds,
+#                http_inflight_requests, startup_duration_seconds,
+#                process_uptime_seconds, process_resident_memory_bytes}
+#                — rendered by the compiled runtime's :9091 endpoint
+#                (packages/kn-next/templates/app/runtime-contract.mjs.hbs,
+#                `renderMetrics`), which is what the shipped PodMonitor scrapes.
 #   - condition: knext_nextapp_condition — a kube-state-metrics CRD metric
 #                exposing the NextApp .status.conditions. The KSM
 #                CustomResourceStateMetrics config now ships as an applyable
@@ -18,6 +21,15 @@
 #
 # Validate locally with:  promtool check rules prometheusrule.yaml
 # (extract .spec.groups first, or use kube-prometheus's rule unit harness).
+#
+# EVERY metric name below is pinned against a real emitter by
+# packages/kn-next/src/__tests__/observability-metric-contract.test.ts. That
+# gate exists because the failure mode here is SILENT: PromQL over a series
+# nobody emits returns an empty vector, so `for:` is never satisfied and the
+# alert simply never fires — no error, no red, nothing to notice. It is how the
+# whole `knext.app` group sat dead after ADR-0048 moved the runtime to the
+# compiled binary and the metric names stopped overlapping (#792). Adding a
+# rule that queries a name the runtime does not render reds that test.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -104,42 +116,170 @@ spec:
               Knative Service to the desired revision/traffic state.
             runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/runbooks/incident.md#scenario-4-rollback--bad-revision"
 
+    # ── The guard goes in BEFORE the things it guards ──────────────────────
+    #
+    # #792's lesson, applied here rather than re-learned: a dashboard that goes
+    # blank and an alert that stops firing look EXACTLY like a healthy, quiet
+    # system. Nothing pages, nothing reds, and the gap is discovered only when
+    # someone eventually goes looking — five weeks later, in the original case.
+    #
+    # So the first rules in this file are the ones that alert on knext's own
+    # blindness. Everything below them assumes app series exist; these two are
+    # what notice when they do not. Mirrors the KubeStateMetricsDown self-guard
+    # in packages/scale-zero-pg/deploy/60-prometheus.yaml, which is the same
+    # pattern applied to the same class of failure.
+    #
+    # Scale-to-zero makes the naive form wrong, and that is worth stating: a
+    # scaled-to-zero app has NO pods, so it exports no series and its targets
+    # vanish entirely. A bare `absent(knext_bunexec_...)` would therefore fire
+    # on every idle app, every night, and be muted within a week. Both rules
+    # below are instead keyed on a target that EXISTS — `up` is only present for
+    # a discovered target — so an app at zero is silent by construction.
+    - name: knext.app.staleness
+      rules:
+        # (1) The target is discovered but cannot be scraped: wrong port, the
+        # :9091 listener never bound, a NetworkPolicy in the way. The app may
+        # still be serving traffic perfectly — which is the point, because every
+        # other app alert in this file is blind while this is true.
+        - alert: KnextAppMetricsTargetDown
+          expr: up{job="knext-nextapp"} == 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "knext app metrics target {{ $labels.namespace }}/{{ $labels.pod }} is not scrapeable"
+            description: >-
+              Prometheus has discovered this app pod but the :9091 /metrics
+              scrape has failed for 10m. Every knext.app alert is blind for this
+              app until it recovers. Check that the runtime bound its metrics
+              listener (the pod logs `LISTENING:<port> METRICS:<port>` at
+              startup) and that a NetworkPolicy is not blocking 9091.
+            runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/runbooks/troubleshooting.md"
+
+        # (2) THE #792 SHAPE ITSELF, and the reason this group exists. The
+        # scrape SUCCEEDS — `up == 1`, the endpoint answers 200 — and returns
+        # nothing this file recognises. That is what a metric RENAME looks like
+        # from Prometheus' side: perfectly healthy plumbing carrying series no
+        # query names. Nothing else in this repo can see it.
+        #
+        # `unless on(namespace, pod)` is the whole rule: a scraped pod that does
+        # not export the runtime's most basic gauge is either not a knext
+        # runtime or is exporting under names these rules do not know.
+        - alert: KnextAppMetricsContractBroken
+          expr: >-
+            (up{job="knext-nextapp"} == 1)
+              unless on (namespace, pod) knext_bunexec_process_uptime_seconds
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: "knext app pod {{ $labels.namespace }}/{{ $labels.pod }} scrapes OK but exports no knext series"
+            description: >-
+              The :9091 endpoint is answering, but it is not exporting
+              knext_bunexec_process_uptime_seconds. The metric contract has
+              drifted: every dashboard panel and every knext.app alert for this
+              app is silently empty. Compare the pod's live /metrics output
+              against renderMetrics() in runtime-contract.mjs.
+            runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/runbooks/troubleshooting.md"
+
     - name: knext.app
       rules:
-        # SLO: cold-start p95. kn_next_startup_duration_seconds is observed once
-        # per process start with cache_status=cold|warm. A cold-start p95 over
-        # 3s breaches the scale-to-zero UX target (see slos.md).
+        # SLO: cold start. knext_bunexec_startup_duration_seconds is set ONCE
+        # per process, at the moment both listeners bind, from process.uptime()
+        # — so it covers the Bun bootstrap and every module evaluation a waking
+        # pod pays for. One sample per pod means the fleet distribution is
+        # already the gauge itself; `max by (app)` is the right aggregation, and
+        # `histogram_quantile` would need 13 series to hold one observation.
+        #
+        # (Was `histogram_quantile(0.95, kn_next_startup_duration_seconds_bucket
+        # {cache_status="cold"})` — a prom-client histogram from the retired
+        # node-server path, with a warm/cold split that only meant anything when
+        # the runtime used NODE_COMPILE_CACHE. The compiled binary has no such
+        # split: every start is a cold start.)
         - alert: KnextColdStartLatencyHigh
-          expr: >-
-            histogram_quantile(0.95,
-              sum(rate(kn_next_startup_duration_seconds_bucket{cache_status="cold"}[15m])) by (le, app)
-            ) > 3
+          expr: max by (app) (knext_bunexec_startup_duration_seconds) > 3
           for: 15m
           labels:
             severity: warning
           annotations:
-            summary: "knext cold-start p95 latency is high for {{ $labels.app }}"
+            summary: "knext cold-start latency is high for {{ $labels.app }}"
             description: >-
-              Cold-start p95 is {{ $value | humanizeDuration }} (>3s SLO). Cold
-              starts dominate when the app scales from zero; check bytecode cache
-              warmth (kn_next_bytecode_cache_warm_start).
+              Slowest observed cold start is {{ $value | humanizeDuration }}
+              (>3s SLO). Cold starts dominate when the app scales from zero.
             runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/runbooks/incident.md#scenario-2-cold-start-latency-spike"
 
-        # Availability SLI: server-side 5xx rate from the RED metrics.
+        # Availability SLI: server-side 5xx ratio. Computable at all only
+        # because the runtime's request counter now carries `status_class` —
+        # before that the binary emitted ONE unlabelled counter and an error
+        # rate could not be expressed, which is a capability gap, not a naming
+        # one. Five label values, fixed; see the cardinality note in
+        # runtime-contract.mjs.
         - alert: KnextHighErrorRate
           expr: >-
-            sum(rate(kn_next_http_requests_total{status_class="5xx"}[5m])) by (app)
+            sum(rate(knext_bunexec_http_requests_total{status_class="5xx"}[5m])) by (app)
               /
-            sum(rate(kn_next_http_requests_total[5m])) by (app)
+            clamp_min(sum(rate(knext_bunexec_http_requests_total[5m])) by (app), 0.001)
               > 0.05
           for: 10m
           labels:
             severity: critical
           annotations:
             summary: "knext app {{ $labels.app }} 5xx ratio above 5%"
-            description: "Server-side error ratio is {{ $value | humanizePercentage }} over 5m."
+            description: >-
+              Server-side error ratio is {{ $value | humanizePercentage }} over
+              5m. This is also the signal for an unreachable backing dependency
+              (Redis ISR cache, Postgres): a deep-health route failing its
+              checks returns 5xx and lands here.
             runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/runbooks/incident.md#scenario-3-rediscache-down"
 
+        # Latency SLI. The duration histogram is new with the status_class work
+        # — the runtime previously emitted no duration series at all, so no
+        # latency SLO was computable. Buckets are tuned sub-100ms (the measured
+        # cold-start floor is tens of ms), so a p95 here is a real number rather
+        # than an interpolation across one enormous first bucket.
+        - alert: KnextHighRequestLatency
+          expr: >-
+            histogram_quantile(0.95,
+              sum(rate(knext_bunexec_http_request_duration_seconds_bucket[5m])) by (le, app)
+            ) > 1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "knext app {{ $labels.app }} request p95 latency is high"
+            description: "Request p95 is {{ $value | humanizeDuration }} (>1s)."
+            runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/runbooks/incident.md#scenario-2-cold-start-latency-spike"
+
+        # RETIRED HERE, DELIBERATELY — do not re-add without the label it needs.
+        #
+        # `KnextCacheUnreachable` filtered on `route="/api/health"`. A route
+        # label is unbounded by construction (one crawler mints a series per
+        # URL), so the runtime does not emit one and will not until there is an
+        # explicit bounded route allowlist. Its concept — a backing dependency
+        # is down — is covered by KnextHighErrorRate above, since a failing deep
+        # health check returns 5xx.
+        #
+        # `KnextDeepHealthStuckWaking` (#348) moved to knext.app.node-legacy
+        # below: knext_deep_health_state is registered by the APP into a
+        # prom-client registry served on the app port, and the shipped
+        # PodMonitor scrapes :9091 only.
+
+    # ── Opt-in: apps that ALSO scrape their own /api/metrics ────────────────
+    #
+    # These rules are NOT live on a default knext deployment, and saying so is
+    # the point of a separate group. The series they query
+    # (packages/kn-next/src/adapters/metrics.ts, the `kn_next_*` registry in an
+    # app's own route) are real, but they are exported on the APP port through
+    # an application-level `/api/metrics` route. Before ADR-0048 the node-server
+    # supervisor merged them onto :9091; the compiled binary does not, and the
+    # shipped PodMonitor scrapes :9091 only.
+    #
+    # So: keep this group if you run the node-server path, or if you have added
+    # a scrape config for your app's /api/metrics. Otherwise it is inert — which
+    # is exactly what the knext.app.staleness guard above is for, and why these
+    # rules are not allowed to sit in `knext.app` pretending to be turnkey.
+    - name: knext.app.node-legacy
+      rules:
         # #348: SUSTAINED deep-health `waking` = a permanent connection-level DB
         # outage. checkDeepHealth (packages/lib/src/health/index.ts) classifies a
         # connection-level failure (ECONNREFUSED / timeout / dead DNS / bad
@@ -148,10 +288,10 @@ spec:
         # connection-level signature, so it sits at `waking` FOREVER and never
         # becomes `down` (only a reachable-but-erroring query yields `down`).
         # Alerts keyed on `down`/503 alone therefore never page on it. This rule
-        # closes that gap: the deep-health state gauge (knext_deep_health_state,
-        # refreshed on the :9091 scrape cadence) reporting overall waking=1 for
-        # LONGER than the wake budget is a stuck-waking real outage. `for: 2m` is
-        # far above the legitimate 2-6s wake, so a normal wake never pages.
+        # closes that gap: the deep-health state gauge reporting overall
+        # waking=1 for LONGER than the wake budget is a stuck-waking real
+        # outage. `for: 2m` is far above the legitimate 2-6s wake, so a normal
+        # wake never pages.
         - alert: KnextDeepHealthStuckWaking
           expr: >-
             max by (app) (
@@ -170,21 +310,3 @@ spec:
               never `down`. Check the scale-zero-pg gateway / compute and the
               app's DATABASE_URL.
             runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/runbooks/troubleshooting.md#deep-health-stuck-waking-permanent-db-outage"
-
-        # Cache/Redis unreachable. The /api/health route runs deep readiness
-        # checks against Postgres/Redis and returns 503 when a dependency is
-        # down; that route is wrapped in withRedMetrics, so a Redis outage shows
-        # as a sustained 5xx rate on route="/api/health".
-        - alert: KnextCacheUnreachable
-          expr: >-
-            sum(rate(kn_next_http_requests_total{route="/api/health",status_class="5xx"}[5m])) by (app)
-              > 0
-          for: 5m
-          labels:
-            severity: critical
-          annotations:
-            summary: "knext app {{ $labels.app }} deep health check failing (Redis/cache?)"
-            description: >-
-              The /api/health deep readiness check is returning 5xx, which means
-              a backing dependency (Redis ISR cache or Postgres) is unreachable.
-            runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/runbooks/incident.md#scenario-3-rediscache-down"

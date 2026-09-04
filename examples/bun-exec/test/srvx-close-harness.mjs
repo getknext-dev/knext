@@ -15,6 +15,7 @@ import {
   createMetricsState,
   drainPending,
   METRICS_CONTENT_TYPE,
+  observeRequest,
   renderMetrics,
 } from '../runtime-contract.mjs';
 
@@ -67,11 +68,20 @@ const appSrvx = serve({
   gracefulShutdown: false,
   silent: true,
   middleware: [
+    // Mirrors knext-bun-entry.mjs's middleware, including the status_class +
+    // duration recording (#792) — a harness that counts differently from the
+    // entry is a harness that proves something the binary does not do.
     async (_req, next) => {
-      metrics.requestsTotal++;
       metrics.inflight++;
+      const startedNs = process.hrtime.bigint();
+      const elapsed = () => Number(process.hrtime.bigint() - startedNs) / 1e9;
       try {
-        return await next();
+        const res = await next();
+        observeRequest(metrics, res?.status ?? 200, elapsed());
+        return res;
+      } catch (err) {
+        observeRequest(metrics, 500, elapsed());
+        throw err;
       } finally {
         metrics.inflight--;
       }
