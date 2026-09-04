@@ -32,9 +32,12 @@ import {
  * BE PRECISE ABOUT WHAT PART 3 GUARANTEES, because the honest boundary is
  * narrower than "any future publish lane is covered":
  *   - it covers ORDERING only — that the audit ran before the build. It does
- *     NOT check that the resulting SBOM is attached to the published image as a
- *     cosign attestation, which is the other half of ADR-0042 C6 and remains
- *     OWED (see docs/security/threat-model.md);
+ *     NOT check that the resulting SBOM is attached to a published image as a
+ *     cosign attestation. For THIS subject that is correct rather than owed:
+ *     nothing publishes an examples/bun-exec image, so there is no digest to
+ *     bind an attestation to. For the app that IS published
+ *     (apps/file-manager, via supply-chain.yml) the attestation half is covered
+ *     by tests/published-image-closure-gate.test.ts (C1/#785);
  *   - a job is recognised as building a vinext artifact when it mentions
  *     `examples/bun-exec` AND runs `build.sh`, `test:image`, `docker build`, or
  *     a `bun|npm|pnpm|yarn run build` (the package.json alias for `./build.sh`).
@@ -42,8 +45,15 @@ import {
  *     (`uses:` a `workflow_call`), a composite action, a shell wrapper — is not
  *     seen. Adding one of those to a vinext build path means extending
  *     `tests/helpers/vinext-artifact-scan.ts` in the same PR;
- *   - the subject is the in-repo `examples/bun-exec` closure, the only vinext
- *     app today. A USER app built on the vinext target has no equivalent gate.
+ *   - the subject of THIS scan is the in-repo `examples/bun-exec` closure. A
+ *     USER app built on the vinext target still has no equivalent gate. The
+ *     repo's OWN published app does, as of C1/#785: `supply-chain.yml` runs the
+ *     same audit in `--app apps/file-manager` mode before its build and attests
+ *     the result onto the pushed digest — a separate lane with a separate guard
+ *     (tests/published-image-closure-gate.test.ts), deliberately not merged into
+ *     this one, because widening this `needs:`-based scan to every vinext image
+ *     build would also catch ci.yml's local-only `prod-image-optimization`
+ *     probe, which is a lower risk than a published, signed, attested image.
  */
 
 const REPO_ROOT = resolve(__dirname, '..');

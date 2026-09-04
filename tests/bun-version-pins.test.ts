@@ -103,6 +103,11 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       'operator-e2e-nightly.yml': 3,
       'preview.yml': 2,
       'scale-zero-pg.yml': 1,
+      // NEW (C1/#785): the publish lane now installs the workspace closure and
+      // scans it before building the image it pushes, so it needs the same bun
+      // the Dockerfile's builder stage uses. A count RISING is a decision too —
+      // this one is it.
+      'supply-chain.yml': 1,
       'test-e2e-deploy.yml': 1,
       // #608 — the vinext-axis compat lane. Its one setup-bun is UNCONDITIONAL
       // (the compiled artifact has no node arm) and carries the same
