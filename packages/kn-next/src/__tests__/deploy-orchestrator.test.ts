@@ -83,6 +83,13 @@ const getAssetPrefix = mock<AnyFn>(() => "https://cdn.example.com/_next");
 // the confirmed upload-ok-then-push-failed leg to reclaim EXACTLY this run's
 // `<app>/_next/static/<BUILD_ID>/` prefix (NOT runAssetGC / pruneOldBuilds).
 const reclaimBuildPrefix = mock<AnyFn>();
+// T2a: the vinext leg of the lock-step guard resolves the built static id off
+// the filesystem through THIS seam (the same one the #892 marker uses). Stubbed
+// so the guard's branches are drivable without a real `.output` tree.
+const resolveVinextStaticId = mock<AnyFn>(() => ({
+    ok: true,
+    id: "deploytag",
+}));
 
 const __knextReal1 = { ...(await import("../utils/asset-upload")) };
 mock.module("../utils/asset-upload", () => ({
@@ -91,6 +98,7 @@ mock.module("../utils/asset-upload", () => ({
     uploadAssets: (...a: unknown[]) => uploadAssets(...a),
     getAssetPrefix: (...a: unknown[]) => getAssetPrefix(...a),
     reclaimBuildPrefix: (...a: unknown[]) => reclaimBuildPrefix(...a),
+    resolveVinextStaticId: (...a: unknown[]) => resolveVinextStaticId(...a),
 }));
 
 const renderNextAppCR = mock<AnyFn>(() => "kind: NextApp\n");
@@ -249,6 +257,8 @@ beforeEach(() => {
     loadConfig.mockResolvedValue(baseConfig);
     // Skew guard reads .next/BUILD_ID — default: match the tag we pass.
     readFileSyncMock.mockReturnValue("deploytag");
+    // ...and on the vinext leg, the built static id — default: match too.
+    resolveVinextStaticId.mockReturnValue({ ok: true, id: "deploytag" });
 });
 
 afterEach(() => {
@@ -290,7 +300,19 @@ describe("deploy() happy-path ordering", () => {
     });
 });
 
-describe("deploy() skew guard (ADR-0011 / #93)", () => {
+/** Did the mutating `kubectl apply` run? */
+function applied(): boolean {
+    return runInherit.mock.calls.some(
+        (c) => argvOf(c)[0] === "kubectl" && argvOf(c)[1] === "apply",
+    );
+}
+
+/** The standalone (turbopack) leg — `.next/BUILD_ID` is the built id there. */
+const standaloneConfig = { ...baseConfig, build: "turbopack" as const };
+
+describe("deploy() skew guard — standalone leg (ADR-0011 / #93)", () => {
+    beforeEach(() => loadConfig.mockResolvedValue(standaloneConfig));
+
     it("THROWS and aborts BEFORE apply when .next/BUILD_ID != deploy tag", async () => {
         setArgv(["deploy", "--tag", "deploytag"]);
         // BUILD_ID on disk is a different (random) id → mismatch.
@@ -299,12 +321,7 @@ describe("deploy() skew guard (ADR-0011 / #93)", () => {
         const deploy = await importDeploy();
 
         await expect(deploy()).rejects.toThrow(/BUILD_ID/);
-
-        // The mutating apply must NEVER have run.
-        const applied = runInherit.mock.calls.some(
-            (c) => argvOf(c)[0] === "kubectl" && argvOf(c)[1] === "apply",
-        );
-        expect(applied).toBe(false);
+        expect(applied()).toBe(false);
     });
 
     it("WARNS and PROCEEDS to apply when .next/BUILD_ID is MISSING (ENOENT)", async () => {
@@ -322,11 +339,85 @@ describe("deploy() skew guard (ADR-0011 / #93)", () => {
 
         // ENOENT is swallowed (warn) — deploy continues to the apply.
         await expect(deploy()).resolves.toBeUndefined();
+        expect(applied()).toBe(true);
+    });
+});
 
-        const applied = runInherit.mock.calls.some(
-            (c) => argvOf(c)[0] === "kubectl" && argvOf(c)[1] === "apply",
+/**
+ * T2a — the vinext leg of the SAME guarantee. vinext writes no
+ * `.next/BUILD_ID`, so the pre-T2a guard hit ENOENT and warn-skipped on EVERY
+ * vinext deploy: a control reporting success while inert, in the exact place
+ * ADR-0011's guarantee lives. The built id here is the static prefix, and the
+ * check FAILS LOUDLY in every branch — including the one that used to skip.
+ */
+describe("deploy() skew guard — vinext leg (T2a)", () => {
+    // baseConfig sets no `build`, which resolves to vinext (ADR-0048).
+
+    it("PROCEEDS to apply when the built static id == the deploy tag", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        resolveVinextStaticId.mockReturnValue({ ok: true, id: "deploytag" });
+
+        const deploy = await importDeploy();
+        await expect(deploy()).resolves.toBeUndefined();
+        expect(applied()).toBe(true);
+        // It must NOT be reading .next/BUILD_ID on this leg — vinext never
+        // writes one, and a guard that consults it is the inert guard.
+        expect(resolveVinextStaticId).toHaveBeenCalled();
+    });
+
+    it("THROWS and aborts BEFORE apply when the static id != the deploy tag", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        // The pre-T2a symptom: a UUID vinext minted because the app's Next
+        // config sets no generateBuildId.
+        resolveVinextStaticId.mockReturnValue({
+            ok: true,
+            id: "1bf62579-a57c-4fec-b3a0-c6ce1c59ff1b",
+        });
+
+        const deploy = await importDeploy();
+        await expect(deploy()).rejects.toThrow(
+            /1bf62579-a57c-4fec-b3a0-c6ce1c59ff1b/,
         );
-        expect(applied).toBe(true);
+        expect(applied()).toBe(false);
+    });
+
+    it("THROWS (never skips) when _next/static is missing entirely", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        resolveVinextStaticId.mockReturnValue({
+            ok: false,
+            reason: "missing",
+            ids: [],
+        });
+
+        const deploy = await importDeploy();
+        await expect(deploy()).rejects.toThrow(/_next\/static/);
+        expect(applied()).toBe(false);
+    });
+
+    it("THROWS when the static id is ambiguous, naming the candidates", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        resolveVinextStaticId.mockReturnValue({
+            ok: false,
+            reason: "ambiguous",
+            ids: ["id-a", "id-b"],
+        });
+
+        const deploy = await importDeploy();
+        await expect(deploy()).rejects.toThrow(/id-a/);
+        expect(applied()).toBe(false);
+    });
+
+    it("--skip-build STILL checks: a .output built under a different tag aborts", async () => {
+        // The case that silently orphans assets today — the build is not re-run,
+        // so nothing else can notice the artifact belongs to another deploy.
+        setArgv(["deploy", "--tag", "deploytag", "--skip-build"]);
+        resolveVinextStaticId.mockReturnValue({ ok: true, id: "older-tag" });
+
+        const deploy = await importDeploy();
+        await expect(deploy()).rejects.toThrow(/older-tag/);
+        expect(applied()).toBe(false);
+        // ...and nothing was uploaded under the wrong prefix.
+        expect(uploadAssets).not.toHaveBeenCalled();
     });
 });
 

@@ -587,14 +587,18 @@ export function stageStandaloneAssets(cwd: string = process.cwd()): string {
  *    stages into a fresh temp dir outside the repo, and treats the artifact
  *    as READ-ONLY.
  *
- * No `.knext-build` marker is staged for this shape, deliberately. vinext
- * namespaces its chunks under its own generated id (`_next/static/<uuid>/`),
- * which is NOT the deploy tag that `kn-next gc` resolves from revision
- * labels. Marking the uuid prefix would let the GC classify the CURRENT
- * build's assets as reapable while its protection keys never match — an
- * over-delete. Unmarked prefixes are never reaped (fail-safe over-keep);
- * teaching the GC the vinext namespace is tracked follow-up work, not a
- * side effect of staging.
+ * The `.knext-build` marker IS staged here (#892), which it deliberately was
+ * not before: the templates now set
+ * `generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID ?? null`, so the
+ * vinext static prefix IS the deploy tag, and marker key ≡ protection key ≡
+ * image tag ≡ CR `spec.buildId`. The over-delete that justified staying silent
+ * — marking a UUID the GC's revision-label protection could never match —
+ * cannot be expressed once those keys are the same value by construction.
+ *
+ * The id comes from {@link resolveVinextStaticId}, the SAME resolver the deploy
+ * lock-step guard uses. When it cannot resolve one (no prefix, or more than
+ * one) NO marker is staged and the build is over-kept forever — the ADR-0011
+ * fail-safe direction, never a guess, and never a failed deploy.
  *
  * @throws when `.output/public` is missing — the app's build has not run.
  */
@@ -619,13 +623,79 @@ export function stageNitroPublicAssets(cwd: string = process.cwd()): string {
     const stagingDir = mkdtempSync(join(tmpdir(), "knext-upload-"));
     cpSync(sourceDir, stagingDir, { recursive: true });
 
-    log.warn(
-        "vinext asset prefixes are not marker-staged — this build's " +
-            "_next/static/<id>/ objects will be over-kept (never reaped) by " +
-            "`kn-next gc` until the GC learns the vinext namespace",
-    );
+    // #892 marker, written into the STAGING copy only — the artifact stays
+    // read-only (the concurrent docker build is COPYing it).
+    const resolved = resolveVinextStaticId(cwd);
+    if (resolved.ok) {
+        writeFileSync(
+            join(
+                stagingDir,
+                "_next",
+                "static",
+                resolved.id,
+                BUILD_MARKER_FILENAME,
+            ),
+            `${resolved.id}\n`,
+        );
+    } else {
+        log.warn(
+            { reason: resolved.reason, candidates: resolved.ids },
+            "Could not resolve this vinext build's static id from " +
+                ".output/public/_next/static — no .knext-build marker staged, " +
+                "so these objects will be over-kept (never reaped) by " +
+                "`kn-next gc`. Fail-safe: an unresolvable id is never a guess.",
+        );
+    }
 
     return stagingDir;
+}
+
+/**
+ * Where the vinext build's chunks live: the single non-reserved first-level
+ * directory under `.output/public/_next/static/` (#892).
+ *
+ * With T2a's `generateBuildId` in the scaffold templates that directory IS the
+ * deploy tag, which is what lets ONE value serve as the marker key, the GC's
+ * protection key (from the `apps.kn-next.dev/build-id` revision label), the
+ * image tag and the CR's `spec.buildId`. Both consumers — the deploy lock-step
+ * guard and {@link stageNitroPublicAssets}' marker — call THIS function, so the
+ * keys cannot drift apart into the half-migration #892 warns about.
+ *
+ * Never guesses. Zero candidates or more than one is reported, not resolved:
+ * the guard turns that into a loud abort, the marker path into a fail-safe
+ * over-keep.
+ */
+export type VinextStaticId =
+    | { ok: true; id: string }
+    | {
+          ok: false;
+          /** `missing` = no `_next/static` at all; `none`/`ambiguous` = 0 / >1 candidates. */
+          reason: "missing" | "none" | "ambiguous";
+          /** The non-reserved candidates seen, sorted — named in the error. */
+          ids: string[];
+      };
+
+export function resolveVinextStaticId(
+    cwd: string = process.cwd(),
+): VinextStaticId {
+    const staticDir = join(cwd, ".output", "public", "_next", "static");
+    if (!existsSync(staticDir)) {
+        return { ok: false, reason: "missing", ids: [] };
+    }
+    const ids = readdirSync(staticDir, { withFileTypes: true })
+        // Directories only: a stray file at this level is not a build prefix.
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name)
+        // The shared dirs are never a build id (defense-in-depth: the same
+        // deny-list the pruner refuses to reap).
+        .filter((name) => !RESERVED_STATIC_DIRS.has(name))
+        .sort();
+    if (ids.length === 1) return { ok: true, id: ids[0] as string };
+    return {
+        ok: false,
+        reason: ids.length === 0 ? "none" : "ambiguous",
+        ids,
+    };
 }
 
 export async function uploadAssets(config: StorageBackedConfig): Promise<void> {

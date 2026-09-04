@@ -21,6 +21,7 @@ import { join } from "node:path";
 import {
     BUILD_MARKER_FILENAME,
     reclaimBuildPrefix,
+    resolveVinextStaticId,
     type StorageBackedConfig,
     stageNitroPublicAssets,
     stageStandaloneAssets,
@@ -124,15 +125,8 @@ describe("reclaimBuildPrefix", () => {
  * the docker build that COPYs it.
  */
 describe("stageNitroPublicAssets", () => {
-    function seedNitroBuild(): void {
-        const uuid = join(
-            cwd,
-            ".output",
-            "public",
-            "_next",
-            "static",
-            "1bf62579-a57c-4fec-b3a0-c6ce1c59ff1b",
-        );
+    function seedNitroBuild(id = "1bf62579-a57c-4fec-b3a0-c6ce1c59ff1b"): void {
+        const uuid = join(cwd, ".output", "public", "_next", "static", id);
         mkdirSync(uuid, { recursive: true });
         writeFileSync(join(uuid, "chunk.js"), "console.log(1)");
         writeFileSync(join(cwd, ".output", "public", "favicon.ico"), "icon");
@@ -209,22 +203,156 @@ describe("stageNitroPublicAssets", () => {
         );
     });
 
-    it("stages no .knext-build marker — vinext prefixes must stay over-kept", () => {
-        // Marking vinext's uuid prefix would let the GC classify the CURRENT
-        // build's assets as reapable while its protection keys (deploy tags
-        // from revision labels) never match — an over-delete. Fail-safe is
-        // unmarked (never reaped) until the GC learns the vinext namespace.
-        seedNitroBuild();
-        const staged = stageNitroPublicAssets(cwd);
-        const markers: string[] = [];
+    /** Every `.knext-build` object under `dir`, relative to it. */
+    function markersUnder(dir: string): string[] {
+        const found: string[] = [];
         const walk = (d: string): void => {
             for (const e of readdirSync(d, { withFileTypes: true })) {
                 if (e.isDirectory()) walk(join(d, e.name));
                 else if (e.name === BUILD_MARKER_FILENAME)
-                    markers.push(join(d, e.name));
+                    found.push(join(d, e.name).slice(dir.length + 1));
             }
         };
-        walk(staged);
-        expect(markers).toEqual([]);
+        walk(dir);
+        return found;
+    }
+
+    /**
+     * T2b (#892) — the marker. Safe ONLY because T2a made the vinext static id
+     * the deploy tag: marker key ≡ protection key ≡ image tag ≡ spec.buildId,
+     * so the over-delete this staging path used to avoid by staying silent
+     * cannot be expressed any more.
+     */
+    it("stages the .knext-build marker into _next/static/<id>/ (#892)", () => {
+        seedNitroBuild("deploytag-7");
+        const staged = stageNitroPublicAssets(cwd);
+
+        const marker = join(
+            staged,
+            "_next",
+            "static",
+            "deploytag-7",
+            BUILD_MARKER_FILENAME,
+        );
+        expect(existsSync(marker)).toBe(true);
+        expect(readFileSync(marker, "utf8").trim()).toBe("deploytag-7");
+        // ...and NOWHERE else. A marker on a shared dir is the max-blast-radius
+        // failure the RESERVED deny-list exists to make impossible.
+        expect(markersUnder(staged)).toEqual([
+            join("_next", "static", "deploytag-7", BUILD_MARKER_FILENAME),
+        ]);
+    });
+
+    it("writes the marker into the STAGING copy only — the artifact is untouched", () => {
+        // The staging dir is a copy; the artifact is read-only (it is being
+        // COPYd by the concurrent docker build).
+        seedNitroBuild("deploytag-7");
+        stageNitroPublicAssets(cwd);
+        expect(
+            existsSync(
+                join(
+                    cwd,
+                    ".output",
+                    "public",
+                    "_next",
+                    "static",
+                    "deploytag-7",
+                    BUILD_MARKER_FILENAME,
+                ),
+            ),
+        ).toBe(false);
+    });
+
+    it("stages NO marker when the static id is ambiguous — fail-safe over-keep (#892)", () => {
+        // Two candidate prefixes: the id cannot be resolved, so the build is
+        // over-kept forever rather than marked under a guess. Never throws —
+        // an unmarked upload is the safe outcome, not a failed deploy.
+        seedNitroBuild("id-a");
+        seedNitroBuild("id-b");
+        const staged = stageNitroPublicAssets(cwd);
+        expect(markersUnder(staged)).toEqual([]);
+    });
+
+    it("stages NO marker when there is no non-reserved prefix at all", () => {
+        mkdirSync(join(cwd, ".output", "public", "_next", "static", "chunks"), {
+            recursive: true,
+        });
+        writeFileSync(
+            join(cwd, ".output", "public", "_next", "static", "chunks", "a.js"),
+            "x",
+        );
+        const staged = stageNitroPublicAssets(cwd);
+        expect(markersUnder(staged)).toEqual([]);
+    });
+});
+
+/**
+ * T2a/T2b — the ONE resolver both the deploy lock-step guard and the marker
+ * staging use. Sharing it is what makes "marker key ≡ protection key" true by
+ * construction rather than by two call sites agreeing today.
+ */
+describe("resolveVinextStaticId", () => {
+    function seedStatic(ids: string[]): void {
+        for (const id of ids) {
+            const dir = join(cwd, ".output", "public", "_next", "static", id);
+            mkdirSync(dir, { recursive: true });
+            writeFileSync(join(dir, "f.js"), "x");
+        }
+    }
+
+    it("resolves the single non-reserved first-level prefix", () => {
+        seedStatic(["deploytag-7"]);
+        expect(resolveVinextStaticId(cwd)).toEqual({
+            ok: true,
+            id: "deploytag-7",
+        });
+    });
+
+    it("ignores the reserved shared dirs when picking the id", () => {
+        // Next's shared dirs sit beside the build prefix; treating one as the
+        // id would mark `chunks/` — the max-blast-radius over-delete.
+        seedStatic(["chunks", "css", "media", "deploytag-7"]);
+        expect(resolveVinextStaticId(cwd)).toEqual({
+            ok: true,
+            id: "deploytag-7",
+        });
+    });
+
+    it("reports `ambiguous` (never a guess) when two prefixes are present", () => {
+        seedStatic(["id-a", "id-b"]);
+        expect(resolveVinextStaticId(cwd)).toEqual({
+            ok: false,
+            reason: "ambiguous",
+            ids: ["id-a", "id-b"],
+        });
+    });
+
+    it("reports `none` when only reserved dirs are present", () => {
+        seedStatic(["chunks"]);
+        expect(resolveVinextStaticId(cwd)).toEqual({
+            ok: false,
+            reason: "none",
+            ids: [],
+        });
+    });
+
+    it("reports `missing` when _next/static does not exist", () => {
+        expect(resolveVinextStaticId(cwd)).toEqual({
+            ok: false,
+            reason: "missing",
+            ids: [],
+        });
+    });
+
+    it("ignores FILES at the first level — only directories are candidates", () => {
+        seedStatic(["deploytag-7"]);
+        writeFileSync(
+            join(cwd, ".output", "public", "_next", "static", "stray.txt"),
+            "x",
+        );
+        expect(resolveVinextStaticId(cwd)).toEqual({
+            ok: true,
+            id: "deploytag-7",
+        });
     });
 });

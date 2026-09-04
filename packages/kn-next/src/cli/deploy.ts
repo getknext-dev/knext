@@ -20,12 +20,14 @@ import { readFileSync, writeSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { DEFAULT_BUILDER_ID } from "../adapters/artifact-contract";
 import type { KnativeNextConfig } from "../config";
 import {
     getAssetPrefix,
     hasStorage,
     NO_STORAGE_MODE_NOTICE,
     reclaimBuildPrefix,
+    resolveVinextStaticId,
     uploadAssets,
 } from "../utils/asset-upload";
 import { createLogger } from "../utils/logger";
@@ -398,6 +400,28 @@ export async function deploy() {
     const buildId = options.tag || `${Date.now()}`;
     process.env.NEXT_DEPLOYMENT_ID = buildId;
 
+    // T2d: the deploy's id wins over a colliding `env.NEXT_DEPLOYMENT_ID` in
+    // the user's config (it is a fact about the artifact, not a preference) —
+    // but never silently, because the user wrote it expecting it to take.
+    if (
+        config.env?.NEXT_DEPLOYMENT_ID !== undefined &&
+        config.env.NEXT_DEPLOYMENT_ID !== buildId
+    ) {
+        log.warn(
+            { configured: config.env.NEXT_DEPLOYMENT_ID, buildId },
+            "Ignoring env.NEXT_DEPLOYMENT_ID from kn-next.config: this deploy's " +
+                "build id is the authority (it is what the assets are namespaced " +
+                "under and what the operator stamps on the revision). Remove it " +
+                "from the config, or set the deploy --tag instead.",
+        );
+    }
+
+    // The resolved build target (ADR-0048: an absent `build` means vinext).
+    // Resolved once here because the lock-step guard below reads a DIFFERENT
+    // artifact per target — `.next/BUILD_ID` for standalone, the
+    // `.output/public/_next/static/<id>/` prefix for vinext.
+    const resolvedBuild = config.build ?? DEFAULT_BUILDER_ID;
+
     // #644: resolve the Docker build context HERE, in the same before-any-side-
     // effect phase as the prune preflight. "Which directory does Next trace
     // from?" is answerable at t=0 from the filesystem — deferring it into the
@@ -434,30 +458,82 @@ export async function deploy() {
             "Next.js build complete — standalone output in .next/standalone/",
         );
 
-        // Defect-A guard: fail LOUDLY if `.next/BUILD_ID` is not the deploy tag.
-        // `_next/static/<BUILD_ID>/` is the upload prefix the GC prunes by; if Next
-        // ever ignores `generateBuildId` and falls back to a random nanoid, the GC
-        // would silently match nothing and the "just-deployed build is protected"
-        // guarantee would break. Better to abort the deploy than ship that.
-        try {
-            const builtId = readFileSync(
-                join(process.cwd(), ".next", "BUILD_ID"),
-                "utf-8",
-            ).trim();
-            if (builtId !== buildId) {
-                throw new Error(
-                    `.next/BUILD_ID "${builtId}" != deploy tag "${buildId}". ` +
-                        "Skew-protection asset retention requires BUILD_ID == NEXT_DEPLOYMENT_ID " +
-                        "(check next.config generateBuildId).",
+        // Defect-A guard, STANDALONE leg: fail LOUDLY if `.next/BUILD_ID` is not
+        // the deploy tag. `_next/static/<BUILD_ID>/` is the upload prefix the GC
+        // prunes by; if Next ever ignores `generateBuildId` and falls back to a
+        // random nanoid, the GC would silently match nothing and the
+        // "just-deployed build is protected" guarantee would break. Better to
+        // abort the deploy than ship that.
+        //
+        // The ENOENT-warn-skip below is scoped to THIS leg on purpose: a
+        // turbopack app that writes no BUILD_ID is a shape we do not control.
+        // The vinext leg — which NEVER writes this file, so it warn-skipped on
+        // every single deploy — is checked separately, and loudly, below.
+        if (resolvedBuild !== "vinext") {
+            try {
+                const builtId = readFileSync(
+                    join(process.cwd(), ".next", "BUILD_ID"),
+                    "utf-8",
+                ).trim();
+                if (builtId !== buildId) {
+                    throw new Error(
+                        `.next/BUILD_ID "${builtId}" != deploy tag "${buildId}". ` +
+                            "Skew-protection asset retention requires BUILD_ID == NEXT_DEPLOYMENT_ID " +
+                            "(check next.config generateBuildId).",
+                    );
+                }
+            } catch (err) {
+                // Only swallow a missing-file error (e.g. an app that does not write it);
+                // a real mismatch above must propagate and fail the deploy.
+                const code = (err as NodeJS.ErrnoException)?.code;
+                if (code !== "ENOENT") throw err;
+                log.warn(
+                    ".next/BUILD_ID not found — skipping build-id lock-step check",
                 );
             }
-        } catch (err) {
-            // Only swallow a missing-file error (e.g. an app that does not write it);
-            // a real mismatch above must propagate and fail the deploy.
-            const code = (err as NodeJS.ErrnoException)?.code;
-            if (code !== "ENOENT") throw err;
-            log.warn(
-                ".next/BUILD_ID not found — skipping build-id lock-step check",
+        }
+    }
+
+    // T2a — the SAME lock-step guarantee on the vinext leg, where the built id
+    // is the static namespace `.output/public/_next/static/<id>/` rather than a
+    // `.next/BUILD_ID` file. Three things make this its own block:
+    //
+    //  - It has NO skip path. vinext writes no BUILD_ID, so the standalone
+    //    guard above hit ENOENT and warn-skipped on EVERY vinext deploy — a
+    //    control reporting success while inert, in the exact place ADR-0011's
+    //    guarantee lives. Every branch here aborts the deploy.
+    //  - It runs even under `--skip-build`. That is the case that silently
+    //    orphans assets today: a `.output` built under an EARLIER tag gets
+    //    uploaded under that earlier prefix, which the GC then reaps out from
+    //    under the revision this deploy is about to create.
+    //  - It resolves the id through the SAME function the #892 marker uses
+    //    (`resolveVinextStaticId`), so marker key ≡ protection key ≡ image tag
+    //    ≡ CR spec.buildId is true by construction, not by two call sites
+    //    happening to agree.
+    if (resolvedBuild === "vinext") {
+        const staticId = resolveVinextStaticId(process.cwd());
+        if (!staticId.ok) {
+            throw new Error(
+                `Could not resolve this build's static id from ` +
+                    `.output/public/_next/static (${staticId.reason}` +
+                    (staticId.ids.length
+                        ? `: ${staticId.ids.join(", ")}`
+                        : "") +
+                    `). Skew-protection asset retention requires exactly one ` +
+                    `build prefix, and it must equal the deploy tag "${buildId}" ` +
+                    `— run the app's build, or check next.config generateBuildId.`,
+            );
+        }
+        if (staticId.id !== buildId) {
+            throw new Error(
+                `.output/public/_next/static/${staticId.id}/ != deploy tag "${buildId}". ` +
+                    "Skew-protection asset retention requires the static prefix == " +
+                    "NEXT_DEPLOYMENT_ID (check next.config " +
+                    "`generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID ?? null`" +
+                    (options.skipBuild
+                        ? "; with --skip-build this usually means .output was built under an earlier tag"
+                        : "") +
+                    ").",
             );
         }
     }
