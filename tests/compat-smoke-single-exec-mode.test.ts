@@ -74,11 +74,23 @@ describe('T6c compat-smoke single-exec mode resolution', () => {
   it('an UNRESOLVABLE path does not silently read as single-exec', () => {
     const { dir } = stage();
     const missing = join(dir, 'not-built-yet');
-    // Neither side exists as the same real file, so the answer must be the
-    // conservative one rather than an accidental string match on two ENOENTs.
     expect(resolveSmokeMode({ serverCmd: process.execPath, serverPath: missing }).singleExec).toBe(
       false,
     );
+  });
+
+  it('TWO unresolvable paths that spell the same thing are NOT single-exec', () => {
+    // The case a lexical fallback would get wrong, and the one that matters: an
+    // unbuilt binary named identically on both sides. `null === null` must not
+    // be an identity. Reading this as single-exec would skip the `--version`
+    // probe — the one check that would have reported the missing build.
+    const { dir } = stage();
+    const missing = join(dir, 'not-built-yet');
+    expect(resolveSmokeMode({ serverCmd: missing, serverPath: missing }).singleExec).toBe(false);
+    // ...including when an explicit mode claims otherwise.
+    expect(() =>
+      resolveSmokeMode({ serverCmd: missing, serverPath: missing, smokeMode: 'single-exec' }),
+    ).toThrow(/SMOKE_MODE/);
   });
 
   it('an explicit SMOKE_MODE that CONTRADICTS the paths is a loud failure', () => {
@@ -93,14 +105,29 @@ describe('T6c compat-smoke single-exec mode resolution', () => {
     ).toThrow(/SMOKE_MODE/);
   });
 
-  it('an explicit SMOKE_MODE that AGREES is accepted, and an unknown value is refused', () => {
+  it('an explicit SMOKE_MODE that AGREES is accepted', () => {
     const { binary } = stage();
     expect(
       resolveSmokeMode({ serverCmd: binary, serverPath: binary, smokeMode: 'single-exec' })
         .singleExec,
     ).toBe(true);
+  });
+
+  it('an UNKNOWN SMOKE_MODE value is refused, not silently read as "standalone"', () => {
+    // The shape a bare contradiction check cannot catch, so it is asserted on
+    // its own: a TYPO whose stated mode happens to agree with the paths. Here
+    // the paths say standalone and `standalne` is not `single-exec`, so a
+    // contradiction check alone passes it through — and the caller believes it
+    // set a mode it did not. The refusal must name the accepted values.
+    const { dir, binary } = stage();
+    const other = join(dir, 'node');
+    writeFileSync(other, '');
     expect(() =>
-      resolveSmokeMode({ serverCmd: binary, serverPath: binary, smokeMode: 'compiled' }),
+      resolveSmokeMode({ serverCmd: other, serverPath: binary, smokeMode: 'standalne' }),
+    ).toThrow(/SMOKE_MODE.*single-exec \| standalone/s);
+    // ...and the same for a typo on the other side of the agreement.
+    expect(() =>
+      resolveSmokeMode({ serverCmd: binary, serverPath: binary, smokeMode: 'single_exec' }),
     ).toThrow(/SMOKE_MODE/);
   });
 
