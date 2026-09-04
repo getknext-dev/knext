@@ -52,6 +52,23 @@ function discoverAppDockerfiles(): string[] {
     .sort();
 }
 
+/**
+ * Does this Dockerfile actually SET `NODE_ENV=production`?
+ *
+ * Comments are stripped first, and that is not a nicety — it is the whole
+ * correctness of the check. Every one of these Dockerfiles carries a comment
+ * explaining why the variable is load-bearing, so a matcher that scanned the
+ * raw text would read its own explanation back and stay green after the real
+ * `ENV` was deleted. The mutation prover caught exactly that (M1 survived).
+ */
+export function setsNodeEnvProduction(dockerfile: string): boolean {
+  const code = dockerfile
+    .split('\n')
+    .filter((line) => !line.trimStart().startsWith('#'))
+    .join('\n');
+  return /\bNODE_ENV\s*=\s*production\b/.test(code);
+}
+
 describe('every knext app runtime image sets NODE_ENV=production', () => {
   it('the scan finds the app Dockerfiles it is supposed to guard', () => {
     const found = discoverAppDockerfiles();
@@ -68,12 +85,9 @@ describe('every knext app runtime image sets NODE_ENV=production', () => {
   });
 
   it('sets NODE_ENV=production in each of them', () => {
-    const offenders = discoverAppDockerfiles().filter((f) => {
-      const text = readFileSync(resolve(REPO_ROOT, f), 'utf8');
-      // Matches both `ENV NODE_ENV=production` and the multi-line
-      // `ENV A=b \` … `NODE_ENV=production` continuation form all four use.
-      return !/\bNODE_ENV\s*=\s*production\b/.test(text);
-    });
+    const offenders = discoverAppDockerfiles().filter(
+      (f) => !setsNodeEnvProduction(readFileSync(resolve(REPO_ROOT, f), 'utf8')),
+    );
     expect(
       offenders,
       'these app runtime images do not set NODE_ENV=production, so every control that keys on ' +
@@ -82,12 +96,31 @@ describe('every knext app runtime image sets NODE_ENV=production', () => {
     ).toEqual([]);
   });
 
+  it('reads the ENV INSTRUCTION, not a comment that merely mentions it', () => {
+    // The defect the prover found: the first version of this matched anywhere in
+    // the file, and every one of these Dockerfiles carries a COMMENT explaining
+    // why `NODE_ENV=production` is load-bearing. So deleting the actual `ENV`
+    // left the guard green — it was reading its own explanation back.
+    expect(
+      setsNodeEnvProduction(
+        '# NODE_ENV=production is load-bearing here, not cosmetic.\nENV PORT=3000\n',
+      ),
+      'a comment mentioning it must NOT satisfy the check',
+    ).toBe(false);
+    expect(setsNodeEnvProduction('ENV NODE_ENV=production\n')).toBe(true);
+  });
+
   it('the check can actually fail — a Dockerfile without it is detected', () => {
-    // Anti-vacuity for the regex itself. A pattern that matched everything would
+    // Anti-vacuity for the matcher itself. One that matched everything would
     // report zero offenders above and read as a pass forever.
-    expect(/\bNODE_ENV\s*=\s*production\b/.test('FROM scratch\nCMD ["/app/server"]\n')).toBe(false);
-    expect(/\bNODE_ENV\s*=\s*production\b/.test('ENV NODE_ENV=production\n')).toBe(true);
+    expect(setsNodeEnvProduction('FROM scratch\nCMD ["/app/server"]\n')).toBe(false);
+    // The multi-line continuation form all four images actually use.
+    expect(
+      setsNodeEnvProduction(
+        'ENV PORT=3000 \\\n    METRICS_PORT=9091 \\\n    NODE_ENV=production\n',
+      ),
+    ).toBe(true);
     // ...and it must not be satisfied by a DIFFERENT value.
-    expect(/\bNODE_ENV\s*=\s*production\b/.test('ENV NODE_ENV=development\n')).toBe(false);
+    expect(setsNodeEnvProduction('ENV NODE_ENV=development\n')).toBe(false);
   });
 });

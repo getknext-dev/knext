@@ -81,6 +81,18 @@ const MUTATIONS = [
     anchor: "const NOT_APP_RUNTIMES = ['packages/kn-next-operator/', 'packages/scale-zero-pg/'];",
     replacement: "const NOT_APP_RUNTIMES = ['packages/', 'apps/', 'examples/'];",
   },
+  {
+    id: 'M5',
+    expect: 'red',
+    claim:
+      'comment stripping goes, so the matcher reads the file raw — and every one of these ' +
+      'Dockerfiles carries a COMMENT saying why NODE_ENV=production matters, so the guard reads ' +
+      'its own explanation back and stays green after the real ENV is deleted. This is the ' +
+      'defect M1 exposed on the first run of this very prover, not a hypothetical',
+    subject: 'spec',
+    anchor: "    .filter((line) => !line.trimStart().startsWith('#'))",
+    replacement: '    .filter(() => true)',
+  },
 ];
 
 /**
@@ -91,7 +103,7 @@ const MUTATIONS = [
  * improvement.
  */
 const NEGATIVE = {
-  id: 'M5',
+  id: 'M6',
   expect: 'green',
   claim: 'the explanatory COMMENT is reworded — the guard asserts the ENV, not the prose',
   subject: 'exampleDockerfile',
@@ -123,8 +135,8 @@ prover.baseline();
 // pointed at this spec rather than exiting 0 on a file it never collected.
 prover.proveCanSeeRed({
   subject: 'spec',
-  anchor: 'return !/\\bNODE_ENV\\s*=\\s*production\\b/.test(text);',
-  replacement: 'return !/\\bNODE_ENV_CANARY\\s*=\\s*production\\b/.test(text);',
+  anchor: '  return /\\bNODE_ENV\\s*=\\s*production\\b/.test(code);',
+  replacement: '  return /\\bNODE_ENV_CANARY\\s*=\\s*production\\b/.test(code);',
 });
 
 console.log('\n=== mutations ===');
