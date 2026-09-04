@@ -1,13 +1,25 @@
 # Bun test runner configuration
 [test]
 # Enable coverage by default
-coverage = true
+# coverage is opted into per RUN (`bun test --coverage`), not forced here.
+# Forcing it made every single-file run fail the global 0.8 threshold, which is
+# meaningless for one file and blocks per-file process isolation.
+# coverage = true
 
-# Enforce minimum 80% coverage threshold
-coverageThreshold = 0.8
-
-# Coverage output directory
-coverageDir = "coverage"
+# NO coverageThreshold, and NO coverageDir. Both are deliberate (#884):
+#
+#   - coverageThreshold applies PER PROCESS, and this repo runs one process per
+#     test file (see scripts/bun-test.mjs). A global floor against a single
+#     file's report is meaningless. The floors now live in
+#     scripts/lib/coverage-policy.mjs and are enforced by
+#     scripts/check-coverage.mjs over the MERGED report of both runners.
+#   - coverageDir SILENTLY OVERRIDES --coverage-dir (measured, bun 1.4.0: the
+#     flag is accepted, ignored, and nothing is printed). With it set, every
+#     parallel spawn wrote the same coverage/lcov.info and all but the last were
+#     lost. scripts/bun-test.mjs passes a unique --coverage-dir per spawn, which
+#     only works while this key is absent.
+#
+# tests/bun-test-coverage-emission.test.ts fails if either comes back.
 
 # Preload TypeScript configuration
 preload = ["./tests/setup.ts"]

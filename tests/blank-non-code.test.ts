@@ -1,7 +1,7 @@
+import { describe, expect, it } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 import { blankNonCode } from '../scripts/lib/blank-non-code.mjs';
 import { testBlocks } from '../scripts/scan-half-scan-candidates.mjs';
 

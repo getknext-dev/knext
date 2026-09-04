@@ -10,10 +10,10 @@
  *     command that exits without output reads as false success.
  */
 
+import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
 import { runLoadTestCli } from "../cli/loadtest";
 
 const HERE = dirname(fileURLToPath(import.meta.url));

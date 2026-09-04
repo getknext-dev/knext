@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, jest, mock } from 'bun:test';
+import { resetClients } from '../clients';
 
 /**
  * #348 (gate fix) — per-pool DB ACTIVITY tracking, so the deep-health scrape
@@ -17,9 +18,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // A fake pg Pool whose query() resolves, so the activity wrapper can hook it.
 // `query` is a swappable spy so a test can make it REJECT (#361).
-const query = vi.fn((..._args: unknown[]) => Promise.resolve({ rows: [] }));
-const connect = vi.fn(() => Promise.resolve({ release() {} }));
-vi.mock('pg', () => ({
+const query = mock((..._args: unknown[]) => Promise.resolve({ rows: [] }));
+const connect = mock(() => Promise.resolve({ release() {} }));
+mock.module('pg', () => ({
   Pool: class {
     query(...args: unknown[]) {
       return query(...(args as []));
@@ -35,8 +36,8 @@ vi.mock('pg', () => ({
 
 describe('@getknext/lib/clients — DB activity tracking (#348 gate fix)', () => {
   beforeEach(async () => {
-    vi.resetModules();
-    vi.useRealTimers();
+    resetClients();
+    jest.useRealTimers();
     query.mockClear();
     query.mockImplementation((..._args: unknown[]) => Promise.resolve({ rows: [] }));
     connect.mockClear();
@@ -53,7 +54,7 @@ describe('@getknext/lib/clients — DB activity tracking (#348 gate fix)', () =>
   });
 
   afterEach(() => {
-    vi.useRealTimers();
+    jest.useRealTimers();
     delete process.env.DATABASE_URL;
     delete process.env.DB_WAKE_RETRY_BUDGET_MS;
     delete process.env.DB_WAKE_RETRY_BASE_MS;
@@ -74,7 +75,7 @@ describe('@getknext/lib/clients — DB activity tracking (#348 gate fix)', () =>
   });
 
   it('isDbRecentlyActive is true right after a query, false once idle past the budget', async () => {
-    vi.useFakeTimers();
+    jest.useFakeTimers();
     const mod = await import('../clients');
 
     await mod.getDbPool().query('SELECT 1');
@@ -82,7 +83,7 @@ describe('@getknext/lib/clients — DB activity tracking (#348 gate fix)', () =>
     expect(mod.isDbRecentlyActive(50_000)).toBe(true);
 
     // Advance past the budget (below the 60s gateway idle) → NOT recently active.
-    vi.advanceTimersByTime(50_001);
+    jest.advanceTimersByTime(50_001);
     expect(mod.isDbRecentlyActive(50_000)).toBe(false);
   });
 

@@ -1,9 +1,25 @@
+import { afterEach, beforeEach, describe, expect, it, jest, mock, spyOn } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { scanBunexecMetrics } from '../../../../../packages/kn-next/src/adapters/metric-contract';
 import { APP_NAME_ENV, overviewQueries, PROMETHEUS_URL_ENV } from './_prom/query';
 import { NO_DATA } from './_ui/format';
+
+/**
+ * bun's `typeof fetch` carries a `preconnect` property that a bare arrow does
+ * not, so `spyOn(globalThis, 'fetch').mockImplementation(fn)` is not assignable
+ * under `@types/bun`. Attaching the member beats casting: the callback's own
+ * parameter and return types stay checked, so a genuinely wrong stub still errors.
+ *
+ * Written as a helper that REPLACES the call head rather than wrapping each
+ * callback, because wrapping needs paren matching and these files are JSX — that
+ * attempt produced `')' expected` and was reverted.
+ */
+const spyOnFetchImpl = (fn: (...a: Parameters<typeof fetch>) => Promise<Response>) =>
+  spyOn(globalThis, 'fetch').mockImplementation(
+    Object.assign(fn, { preconnect: globalThis.fetch.preconnect }),
+  );
 
 /**
  * P1.2 (obs-pages plan) / ADR-0038 — the /observability Overview (RED) page:
@@ -21,9 +37,9 @@ import { NO_DATA } from './_ui/format';
 // it. `_ui/access-denied.test.tsx` asserts the app really enables the flag.
 process.env.__NEXT_EXPERIMENTAL_AUTH_INTERRUPTS = '1';
 
-const authHeader = vi.fn<() => string | null>(() => null);
+const authHeader = mock<() => string | null>(() => null);
 
-vi.mock('next/headers', () => ({
+mock.module('next/headers', () => ({
   headers: async () => ({
     get: (name: string) => (name === 'authorization' ? authHeader() : null),
   }),
@@ -78,8 +94,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  vi.restoreAllMocks();
-  vi.clearAllMocks();
+  jest.restoreAllMocks();
+  jest.clearAllMocks();
   if (ORIGINAL_TOKEN === undefined) delete process.env.OBSERVABILITY_TOKEN;
   else process.env.OBSERVABILITY_TOKEN = ORIGINAL_TOKEN;
   if (ORIGINAL_URL === undefined) delete process.env[PROMETHEUS_URL_ENV];
@@ -119,7 +135,7 @@ describe('overview page route config', () => {
 describe('overview page auth gate (fail-closed)', () => {
   it('denies with a real 401, leaks no data, and does NOT fetch', async () => {
     authHeader.mockReturnValue(null);
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const fetchSpy = spyOn(globalThis, 'fetch');
 
     expect(await denialDigest()).toBe(UNAUTHORIZED_DIGEST);
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -132,7 +148,7 @@ describe('overview page auth gate (fail-closed)', () => {
   });
 
   it('never renders the token into the HTML', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => seededFetch(u));
+    spyOnFetchImpl(async (u) => seededFetch(u));
     const html = await renderPage();
     expect(html).not.toContain(TOKEN);
   });
@@ -141,7 +157,7 @@ describe('overview page auth gate (fail-closed)', () => {
 describe('overview page degradation — unconfigured Prometheus', () => {
   it('renders a "not configured" empty state naming the env var, without fetching', async () => {
     delete process.env[PROMETHEUS_URL_ENV];
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const fetchSpy = spyOn(globalThis, 'fetch');
 
     const html = await renderPage();
 
@@ -153,7 +169,7 @@ describe('overview page degradation — unconfigured Prometheus', () => {
 
 describe('overview page degradation — unreachable Prometheus', () => {
   it('renders an error state but the page still renders (no crash)', async () => {
-    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('connect ECONNREFUSED'));
+    spyOn(globalThis, 'fetch').mockRejectedValue(new Error('connect ECONNREFUSED'));
 
     const html = await renderPage();
 
@@ -165,7 +181,7 @@ describe('overview page degradation — unreachable Prometheus', () => {
 
 describe('overview page authorized render (ok path)', () => {
   it('renders rate, 5xx error %, p75, p99 and in-flight from seeded PromQL', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => seededFetch(u));
+    spyOnFetchImpl(async (u) => seededFetch(u));
 
     const html = await renderPage();
 
@@ -179,7 +195,7 @@ describe('overview page authorized render (ok path)', () => {
   });
 
   it('links out to the Grafana dashboards (static, no iframe)', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => seededFetch(u));
+    spyOnFetchImpl(async (u) => seededFetch(u));
     const html = await renderPage();
     expect(html.toLowerCase()).toContain('grafana');
     expect(html).not.toContain('<iframe');
@@ -189,7 +205,7 @@ describe('overview page authorized render (ok path)', () => {
 describe('overview page — explicit "no data yet" marker (P1.2 sign-off follow-up)', () => {
   it('renders the no-data marker, not a bare dash, when a series has no samples', async () => {
     const empty = { status: 'success', data: { resultType: 'matrix', result: [] } };
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => jsonResponse(empty));
+    spyOnFetchImpl(async () => jsonResponse(empty));
 
     const html = await renderPage();
 
@@ -201,7 +217,7 @@ describe('overview page — explicit "no data yet" marker (P1.2 sign-off follow-
 
 describe('overview page — every query is scoped to THIS app (#516 code review)', () => {
   it('never sends a cluster-wide RED query: every PromQL carries the app scope', async () => {
-    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => seededFetch(u));
+    const spy = spyOnFetchImpl(async (u) => seededFetch(u));
 
     await renderPage();
 
@@ -214,7 +230,7 @@ describe('overview page — every query is scoped to THIS app (#516 code review)
 
   it('renders a DISTINCT "scope unknown" state when KN_APP_NAME is unset — and does NOT fetch', async () => {
     delete process.env[APP_NAME_ENV];
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const fetchSpy = spyOn(globalThis, 'fetch');
 
     const html = await renderPage();
 
@@ -226,7 +242,7 @@ describe('overview page — every query is scoped to THIS app (#516 code review)
 
   it('treats an injection-shaped KN_APP_NAME as unknown scope (no PromQL built from it)', async () => {
     process.env[APP_NAME_ENV] = 'demo"} or on() up{';
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const fetchSpy = spyOn(globalThis, 'fetch');
 
     const html = await renderPage();
 
@@ -241,6 +257,10 @@ describe('overview PromQL ↔ metrics.ts parity', () => {
   const METRICS_SRC = resolve(
     import.meta.dirname,
     '../../../../../packages/kn-next/src/adapters/metrics.ts',
+  );
+  const RUNTIME_CONTRACT_TEMPLATE = resolve(
+    import.meta.dirname,
+    '../../../../../packages/kn-next/templates/app/runtime-contract.mjs.hbs',
   );
 
   const HISTOGRAM_SUFFIXES = ['_bucket', '_sum', '_count'];
@@ -258,9 +278,15 @@ describe('overview PromQL ↔ metrics.ts parity', () => {
     return token;
   }
 
-  it('every knext_* series referenced by an Overview query exists in metrics.ts', () => {
+  it('every knext_* series referenced by an Overview query has a real emitter', () => {
+    // The RED queries moved to the knext_bunexec_* family (stability sprint
+    // D1) — the series the shipped :9091 scrape actually has. metrics.ts's
+    // app-registry names remain allowed for the legacy series.
     const allowed = exportedMetricNames();
-    expect(allowed.has('knext_http_requests_total')).toBe(true);
+    for (const name of scanBunexecMetrics(readFileSync(RUNTIME_CONTRACT_TEMPLATE, 'utf8')).keys()) {
+      allowed.add(name);
+    }
+    expect(allowed.has('knext_bunexec_http_requests_total')).toBe(true);
 
     const dangling: string[] = [];
     for (const promql of Object.values(QUERIES)) {
@@ -274,8 +300,8 @@ describe('overview PromQL ↔ metrics.ts parity', () => {
 
   it('references the three RED series (rate/latency/in-flight)', () => {
     const joined = Object.values(QUERIES).join(' ');
-    expect(joined).toContain('knext_http_requests_total');
-    expect(joined).toContain('knext_http_request_duration_seconds_bucket');
-    expect(joined).toContain('knext_http_inflight_requests');
+    expect(joined).toContain('knext_bunexec_http_requests_total');
+    expect(joined).toContain('knext_bunexec_http_request_duration_seconds_bucket');
+    expect(joined).toContain('knext_bunexec_http_inflight_requests');
   });
 });

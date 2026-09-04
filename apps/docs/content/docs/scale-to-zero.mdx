@@ -100,10 +100,10 @@ app.
 
 A cold start is **pod scheduling + container start + the server boot + first-request work**. The
 boot is where a Next.js app spends real CPU compiling JavaScript — so knext attacks exactly that
-with [bytecode caching](/docs/bytecode): on Node, `NODE_COMPILE_CACHE` on a persistent volume means
-each cold pod reads pre-compiled V8 bytecode instead of recompiling from source; on the
-[Bun runtime](/docs/bun-runtime), the standalone tree is precompiled to bytecode at **build time**
-(measured −47% boot, 287 ms → 152 ms median on a real Next.js 16.2 build).
+by compiling **at build time**: the default target is a [compiled single executable](/docs/bun-runtime)
+whose whole server bundle is precompiled to bytecode (measured **61 ms** median cold boot against
+the Node standalone's 884 ms); on the legacy Node standalone shape, a V8 compile cache baked into
+the image does the same job — see [bytecode caching](/docs/bytecode).
 
 
 

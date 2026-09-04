@@ -1,15 +1,16 @@
-import { promises as fs } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import {
     afterEach,
     beforeEach,
     describe,
     expect,
     it,
+    jest,
     type Mock,
-    vi,
-} from "vitest";
+    mock,
+} from "bun:test";
+import { promises as fs } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 /**
  * P1 data-plane resilience — deploy-time object-store-LOSS chaos case.
@@ -28,16 +29,16 @@ import {
  * offending keys.
  */
 
-vi.mock("../cli/exec", () => ({
-    runQuiet: vi.fn(),
-    runCapture: vi.fn(),
+mock.module("../cli/exec", () => ({
+    runQuiet: mock(),
+    runCapture: mock(),
 }));
 
 import { runCapture, runQuiet } from "../cli/exec";
 import { type StorageBackedConfig, uploadAssets } from "../utils/asset-upload";
 
-const runQuietMock = runQuiet as unknown as Mock;
-const runCaptureMock = runCapture as unknown as Mock;
+const runQuietMock = runQuiet as unknown as Mock<typeof runQuiet>;
+const runCaptureMock = runCapture as unknown as Mock<typeof runCapture>;
 
 /**
  * Writes a local asset by its UPLOAD KEY into the standalone-build source
@@ -56,6 +57,10 @@ async function seedSourceFile(root: string, key: string): Promise<void> {
 function makeConfig(): StorageBackedConfig {
     return {
         name: "shop",
+        // Pins the STANDALONE upload path explicitly: since ADR-0048 the
+        // default build is vinext (stages from .output/public), and these
+        // tests seed .next/static.
+        build: "turbopack",
         storage: {
             provider: "gcs",
             bucket: "my-bucket",
@@ -87,7 +92,7 @@ describe("uploadAssets chaos: object-store loss fails LOUD", () => {
 
     afterEach(() => {
         process.chdir(prevCwd);
-        vi.clearAllMocks();
+        jest.clearAllMocks();
     });
 
     it("aborts the deploy (throws → non-zero exit) when the store lists nothing back", async () => {

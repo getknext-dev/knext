@@ -26,11 +26,12 @@
  *    is off by request while the CMD still exports `NODE_COMPILE_CACHE`.
  */
 
+import { describe, expect, it, mock } from "bun:test";
 import { readFileSync } from "node:fs";
 import * as nodeModule from "node:module";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it, vi } from "vitest";
+import { NODE_BIN } from "../../../../tests/helpers/runtime-binaries";
 import {
     type CompileCacheSignals,
     evaluateCompileCacheStatus,
@@ -119,27 +120,101 @@ describe("evaluateCompileCacheStatus (pure)", () => {
 });
 
 describe("runtimeHonoursCompileCache", () => {
-    it("is false under Bun and true under Node", () => {
+    it("is false under Bun ≤1.3 and true under Node", () => {
         expect(runtimeHonoursCompileCache({ bun: "1.3.5" })).toBe(false);
         expect(runtimeHonoursCompileCache({})).toBe(true);
     });
 
     it("reads process.versions by default", () => {
-        // The suite runs under Node, so the production default must agree.
+        // Asserts the DEFAULT BINDING — that omitting the argument consults the
+        // real runtime — by comparing against the same call made explicitly.
+        //
+        // It used to assert `process.versions.bun === undefined`, on a comment
+        // that read "the suite runs under Node". That was true under vitest and
+        // stopped being true when the suite moved to `bun test`. It kept passing
+        // on bun 1.3 only by coincidence — the function returns false there, and
+        // `bun === undefined` is also false — and went red the moment CI moved to
+        // bun 1.4, where the function correctly reports that NODE_COMPILE_CACHE
+        // IS honoured. The function was right; the expectation encoded the
+        // runtime the suite no longer runs on.
+        //
+        // The rule itself (false on <=1.3, true on Node, true on >=1.4) is pinned
+        // by the sibling tests, so restating it here would just be a second copy
+        // to keep in sync.
         expect(runtimeHonoursCompileCache()).toBe(
-            process.versions.bun === undefined,
+            runtimeHonoursCompileCache(process.versions),
         );
+    });
+
+    /**
+     * #807 — Bun 1.4.0 (2026-08-20) implements `NODE_COMPILE_CACHE` for real.
+     *
+     * MEASURED against a real bun 1.4.0, not inferred from the changelog. Both
+     * directions, because only having both makes the diagnostic safe to enable:
+     *
+     *   healthy writable dir  → returns a PATH   (…/v1.4.0-aarch64-34cbb9a40-501)
+     *   refused dir (/dev/null) → returns undefined
+     *
+     * That is Node's shape exactly. Had only the healthy case been checked, we
+     * would have enabled a diagnostic that could not distinguish "refused" from
+     * "not implemented" and every 1.4 pod with a bad volume would have gone
+     * silent — the #309 false-alarm inverted.
+     *
+     * The ≤1.3 half must keep returning false: bun 1.3.5 returns undefined for a
+     * HEALTHY dir (measured), so a verdict there would warn about a good volume.
+     */
+    it("is true under Bun ≥1.4, which implements the cache for real", () => {
+        expect(runtimeHonoursCompileCache({ bun: "1.4.0" })).toBe(true);
+        expect(runtimeHonoursCompileCache({ bun: "1.4.7" })).toBe(true);
+        expect(runtimeHonoursCompileCache({ bun: "2.0.0" })).toBe(true);
+    });
+
+    it("stays false for every Bun below 1.4", () => {
+        for (const v of ["1.0.0", "1.3.5", "1.3.14", "0.8.1"]) {
+            expect(
+                runtimeHonoursCompileCache({ bun: v }),
+                `bun ${v} returns undefined for a healthy dir; a verdict would be a false alarm`,
+            ).toBe(false);
+        }
+    });
+
+    it("compares numerically, not lexically", () => {
+        // "1.10.0" < "1.4.0" as strings. A string compare would call the newer
+        // runtime old and silently keep the diagnostic off forever.
+        expect(runtimeHonoursCompileCache({ bun: "1.10.0" })).toBe(true);
+        // And the mirror: "1.4" must not be beaten by a longer ≤1.3 string.
+        expect(runtimeHonoursCompileCache({ bun: "1.3.100" })).toBe(false);
+    });
+
+    it("treats an unparseable version as ≤1.3 — the silent direction", () => {
+        // Never guess upward: a missed diagnostic beats a false alarm, which is
+        // the same asymmetry the original Bun check was built on.
+        for (const v of ["", "next", "1", "x.y.z"]) {
+            expect(runtimeHonoursCompileCache({ bun: v })).toBe(false);
+        }
+    });
+
+    it("accepts a canary/prerelease 1.4 as 1.4", () => {
+        expect(
+            runtimeHonoursCompileCache({ bun: "1.4.0-canary.20260820" }),
+        ).toBe(true);
     });
 });
 
 describe("warnOnDegradedCompileCache", () => {
     function logger() {
-        return { warn: vi.fn() };
+        return { warn: mock() };
     }
 
     it("warns ONCE, naming the path, when the cache was refused", () => {
         const log = logger();
         const status = warnOnDegradedCompileCache({
+            // Node-shaped `versions` explicitly: the default is
+            // `process.versions`, and under `bun test` that carries a `bun`
+            // key — which makes the production code return "unknown" by
+            // design. Without this the assertions below test the Bun branch
+            // while claiming to test the Node one.
+            versions: {},
             env: { NODE_COMPILE_CACHE: PVC },
             getCompileCacheDir: () => undefined,
             log,
@@ -161,6 +236,7 @@ describe("warnOnDegradedCompileCache", () => {
     it("is SILENT when the cache is active", () => {
         const log = logger();
         const status = warnOnDegradedCompileCache({
+            versions: {},
             env: { NODE_COMPILE_CACHE: PVC },
             getCompileCacheDir: () => `${PVC}/v24-arm64`,
             log,
@@ -172,6 +248,7 @@ describe("warnOnDegradedCompileCache", () => {
     it("is SILENT when NODE_COMPILE_CACHE is unset", () => {
         const log = logger();
         const status = warnOnDegradedCompileCache({
+            versions: {},
             env: {},
             getCompileCacheDir: () => undefined,
             log,
@@ -185,6 +262,7 @@ describe("warnOnDegradedCompileCache", () => {
         // REAL Bun shape is the next test — do not mistake this one for it.
         const log = logger();
         const status = warnOnDegradedCompileCache({
+            versions: {},
             env: { NODE_COMPILE_CACHE: PVC },
             getCompileCacheDir: undefined,
             log,
@@ -212,6 +290,7 @@ describe("warnOnDegradedCompileCache", () => {
     it("is SILENT when NODE_DISABLE_COMPILE_CACHE opted out", () => {
         const log = logger();
         const status = warnOnDegradedCompileCache({
+            versions: {},
             env: {
                 NODE_COMPILE_CACHE: PVC,
                 NODE_DISABLE_COMPILE_CACHE: "1",
@@ -229,6 +308,7 @@ describe("warnOnDegradedCompileCache", () => {
         for (const value of ["0", "", "false"]) {
             const log = logger();
             const status = warnOnDegradedCompileCache({
+                versions: {},
                 env: {
                     NODE_COMPILE_CACHE: PVC,
                     NODE_DISABLE_COMPILE_CACHE: value,
@@ -247,6 +327,7 @@ describe("warnOnDegradedCompileCache", () => {
         const log = logger();
         expect(() =>
             warnOnDegradedCompileCache({
+                versions: {},
                 env: { NODE_COMPILE_CACHE: PVC },
                 getCompileCacheDir: () => {
                     throw new Error("probe exploded");
@@ -267,6 +348,7 @@ describe("warnOnDegradedCompileCache", () => {
         };
         expect(() =>
             warnOnDegradedCompileCache({
+                versions: {},
                 env: { NODE_COMPILE_CACHE: PVC },
                 getCompileCacheDir: () => undefined,
                 log,
@@ -291,6 +373,7 @@ describe("warnOnDegradedCompileCache", () => {
 
         const log = logger();
         const status = warnOnDegradedCompileCache({
+            versions: {},
             env: { NODE_COMPILE_CACHE: PVC },
             log,
         });
@@ -314,6 +397,10 @@ describe("#309 node-server.ts wiring (source guard)", () => {
         // boot budget on it, which is precisely the #441 mistake.
         const stepsAt = src.indexOf("steps: [");
         const callAt = src.indexOf("warnOnDegradedCompileCache(");
+        // A search literal describing the PRODUCTION source, not code that runs
+        // here — so it stays `process.execPath`. A blanket rename to NODE_BIN
+        // rewrote this string too and the scan stopped matching, which is the
+        // same class of mistake as editing prose that merely mentions code.
         const spawnAt = src.indexOf("spawn(process.execPath");
         expect(stepsAt).toBeGreaterThan(-1);
         expect(callAt).toBeGreaterThan(-1);

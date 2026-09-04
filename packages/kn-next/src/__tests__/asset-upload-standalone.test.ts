@@ -1,15 +1,16 @@
-import { existsSync, promises as fs } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import {
     afterEach,
     beforeEach,
     describe,
     expect,
     it,
+    jest,
     type Mock,
-    vi,
-} from "vitest";
+    mock,
+} from "bun:test";
+import { existsSync, promises as fs } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 /**
  * uploadAssets must work against what `next build` (output:'standalone')
@@ -29,16 +30,16 @@ import {
  *   - stale files from a previous build's staging dir are NOT re-uploaded
  */
 
-vi.mock("../cli/exec", () => ({
-    runQuiet: vi.fn(),
-    runCapture: vi.fn(),
+mock.module("../cli/exec", () => ({
+    runQuiet: mock(),
+    runCapture: mock(),
 }));
 
 import { runCapture, runQuiet } from "../cli/exec";
 import { type StorageBackedConfig, uploadAssets } from "../utils/asset-upload";
 
-const runQuietMock = runQuiet as unknown as Mock;
-const runCaptureMock = runCapture as unknown as Mock;
+const runQuietMock = runQuiet as unknown as Mock<typeof runQuiet>;
+const runCaptureMock = runCapture as unknown as Mock<typeof runCapture>;
 
 const APP_NAME = "shop";
 const BUCKET = "my-bucket";
@@ -46,6 +47,11 @@ const BUCKET = "my-bucket";
 function makeConfig(): StorageBackedConfig {
     return {
         name: APP_NAME,
+        // These suites exercise the STANDALONE upload path (staging from
+        // .next/static). Since ADR-0048 the default build is vinext, whose
+        // staging reads .output/public instead — so the shape is pinned
+        // explicitly here rather than inherited from a default that moved.
+        build: "turbopack",
         storage: {
             provider: "gcs",
             bucket: BUCKET,
@@ -96,7 +102,7 @@ describe("uploadAssets reads the standalone build output (not .output/public)", 
 
     afterEach(async () => {
         process.chdir(prevCwd);
-        vi.clearAllMocks();
+        jest.clearAllMocks();
     });
 
     it("uploads a simulated standalone build without a pre-existing .output/public (the ENOENT bug)", async () => {
@@ -124,6 +130,92 @@ describe("uploadAssets reads the standalone build output (not .output/public)", 
             .map((c) => c[0] as string[])
             .filter((argv) => argv.includes("cp") && !argv.includes("-r"));
         expect(singleFileRetries).toHaveLength(0);
+    });
+
+    it("routes a DEFAULT (vinext) config to the nitro staging — .knext-upload, sourced from .output/public", async () => {
+        // The other half of this suite's shape pin, and the dispatch guard:
+        // deleting the shape dispatch in uploadAssets would leave every
+        // turbopack-pinned test green while the default path silently staged
+        // from a tree vinext never produces. Config carries NO build field.
+        const nitroKeys = ["_next/static/uuid-1/chunk.js", "favicon.ico"];
+        await fs.mkdir(
+            join(root, ".output", "public", "_next", "static", "uuid-1"),
+            {
+                recursive: true,
+            },
+        );
+        await fs.writeFile(
+            join(
+                root,
+                ".output",
+                "public",
+                "_next",
+                "static",
+                "uuid-1",
+                "chunk.js",
+            ),
+            "chunk",
+        );
+        await fs.writeFile(
+            join(root, ".output", "public", "favicon.ico"),
+            "icon",
+        );
+        // NO .next/static anywhere — the standalone staging would throw here.
+        runCaptureMock.mockReturnValue(gcsListing(nitroKeys));
+
+        const config = { ...makeConfig() };
+        // biome-ignore lint/performance/noDelete: absence (not undefined) is the case under test
+        delete (config as Record<string, unknown>).build;
+        await expect(uploadAssets(config)).resolves.toBeUndefined();
+
+        // The bulk upload must read the staging dir, never the artifact root.
+        const bulk = runQuietMock.mock.calls
+            .map((c) => c[0] as string[])
+            .find((argv) => argv.includes("-r"));
+        expect(bulk?.join(" ")).toContain("knext-upload-");
+        expect(bulk?.join(" ")).not.toContain(".output/public");
+    });
+
+    it("removes the nitro staging temp dir after the upload — success AND failure", async () => {
+        // Sprint-close finding: mkdtemp-per-run with no cleanup leaks a full
+        // asset copy per deploy on a long-lived build machine; the temp-dir
+        // guard only asserts LOCATION. Both halves here: the dir is gone on
+        // success, gone on a failed upload, and the ARTIFACT (.output/public)
+        // survives both.
+        const seed = async () => {
+            await fs.mkdir(join(root, ".output", "public"), {
+                recursive: true,
+            });
+            await fs.writeFile(join(root, ".output", "public", "a.js"), "x");
+        };
+        await seed();
+        runCaptureMock.mockReturnValue(gcsListing(["a.js"]));
+        const config = { ...makeConfig() };
+        // biome-ignore lint/performance/noDelete: absence is the case under test
+        delete (config as Record<string, unknown>).build;
+
+        await uploadAssets(config);
+        const bulk = runQuietMock.mock.calls
+            .map((c) => c[0] as string[])
+            .find((argv) => argv.includes("-r"));
+        const staged = bulk?.find((t) => t.includes("knext-upload-"));
+        expect(staged).toBeTruthy();
+        expect(existsSync(staged as string)).toBe(false);
+        expect(existsSync(join(root, ".output", "public", "a.js"))).toBe(true);
+
+        // Failure half: the provider throws, the staging still dies.
+        runQuietMock.mockClear();
+        runQuietMock.mockImplementationOnce(() => {
+            throw new Error("bulk upload exploded");
+        });
+        await expect(uploadAssets(config)).rejects.toThrow("exploded");
+        const bulk2 = runQuietMock.mock.calls
+            .map((c) => c[0] as string[])
+            .find((argv) => argv?.includes?.("-r"));
+        const staged2 = bulk2?.find((t) => t.includes("knext-upload-"));
+        expect(staged2).toBeTruthy();
+        expect(existsSync(staged2 as string)).toBe(false);
+        expect(existsSync(join(root, ".output", "public", "a.js"))).toBe(true);
     });
 
     it("fails loudly with a next-build hint (not a bare ENOENT) when .next/static is missing", async () => {

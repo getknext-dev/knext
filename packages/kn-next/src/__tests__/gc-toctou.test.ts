@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, mock } from "bun:test";
 
 /**
  * v3-P4b — the TOCTOU narrowing for the asset retention GC (ADR-0011 §TOCTOU).
@@ -93,7 +93,7 @@ describe("runAssetGC — TOCTOU re-read (v3-P4b)", () => {
             pin2: "",
             labels: { "shop-00008": "bid-new" },
         });
-        const prune = vi.fn();
+        const prune = mock();
 
         const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
 
@@ -115,7 +115,7 @@ describe("runAssetGC — TOCTOU re-read (v3-P4b)", () => {
             pin2: "shop-00007", // a rollback pinned mid-run
             labels: { "shop-00008": "bid-new", "shop-00007": "bid-old" },
         });
-        const prune = vi.fn();
+        const prune = mock();
 
         const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
 
@@ -132,7 +132,7 @@ describe("runAssetGC — TOCTOU re-read (v3-P4b)", () => {
             pin2: "",
             labels: { "shop-00008": "bid-new", "shop-00009": "bid-canary" },
         });
-        const prune = vi.fn();
+        const prune = mock();
 
         const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
 
@@ -149,7 +149,7 @@ describe("runAssetGC — TOCTOU re-read (v3-P4b)", () => {
             pin2: "",
             labels: { "shop-00008": "bid-new", "shop-00009": "bid-canary" },
         });
-        const prune = vi.fn();
+        const prune = mock();
 
         const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
 
@@ -166,7 +166,7 @@ describe("runAssetGC — TOCTOU re-read (v3-P4b)", () => {
             pin2: "",
             labels: { "shop-00008": "bid-new", "shop-00009": "bid-b" },
         });
-        const prune = vi.fn();
+        const prune = mock();
 
         const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
 
@@ -183,7 +183,7 @@ describe("runAssetGC — TOCTOU re-read (v3-P4b)", () => {
             labels: { "shop-00008": "bid-new" },
             trafficThrowsOn: 2, // the SECOND (re-read) currentTraffic read throws
         });
-        const prune = vi.fn();
+        const prune = mock();
 
         const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
 
@@ -201,7 +201,7 @@ describe("runAssetGC — TOCTOU re-read (v3-P4b)", () => {
             labels: { "shop-00008": "bid-new" },
             pinThrowsOn: 2, // the SECOND (re-read) pin probe throws
         });
-        const prune = vi.fn();
+        const prune = mock();
 
         const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
 
@@ -221,7 +221,7 @@ describe("runAssetGC — TOCTOU re-read (v3-P4b)", () => {
             pin2: "shop-00007",
             labels: { "shop-00008": "bid-new" },
         });
-        const prune = vi.fn();
+        const prune = mock();
 
         const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
 

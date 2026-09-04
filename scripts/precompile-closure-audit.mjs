@@ -41,15 +41,37 @@
  * mean the scanner no longer reads the artifact that was attached. grype
  * consumes it as-is. security.md says "Trivy/Grype"; the image gate stays Trivy.
  *
+ * TWO CLOSURE SHAPES, because the repo has two (C1, #785).
+ *
+ *   --closure <dir>   the dir is its OWN install root (examples/bun-exec has its
+ *                     own bun.lock). syft scans `<dir>/node_modules` directly.
+ *   --app <dir>       the dir is a WORKSPACE MEMBER (apps/file-manager). Its
+ *                     `node_modules` is symlinks into the shared isolated store,
+ *                     which syft refuses to follow (MEASURED: 0 npm components),
+ *                     so the workspace root is scanned once and the SBOM is
+ *                     projected onto the app's own transitive closure —
+ *                     see scripts/lib/bun-app-closure.mjs for why the whole
+ *                     workspace is the wrong subject (90 HIGH/CRITICAL, mostly
+ *                     other packages' dev tooling and vendored Go CLIs).
+ *
+ * `--app` is what the PUBLISH lane runs, and it is the half ADR-0042 C6 left
+ * open: the image `supply-chain.yml` pushes and cosign-attests is
+ * apps/file-manager's compiled binary, and until this existed the SBOM in that
+ * attestation described an Alpine package DB and one opaque 70 MB blob. A signed
+ * attestation asserting nothing is worse than no attestation, because it makes
+ * an absent control look audited.
+ *
  * Locally runnable:
  *   node scripts/precompile-closure-audit.mjs --closure examples/bun-exec
+ *   node scripts/precompile-closure-audit.mjs --app apps/file-manager
  * (the closure must already be installed: `bun install --frozen-lockfile`).
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { filterSbomToClosure, resolveAppClosure } from './lib/bun-app-closure.mjs';
 import {
   ANCHOR_PACKAGES,
   evaluateFindings,
@@ -67,9 +89,19 @@ function arg(name, fallback) {
   return i === -1 ? fallback : process.argv[i + 1];
 }
 
+const appArg = arg('app', undefined);
 const closureRoot = resolve(repoRoot, arg('closure', 'examples/bun-exec'));
-const nodeModules = join(closureRoot, 'node_modules');
-const sbomPath = resolve(repoRoot, arg('sbom-out', 'sbom/precompile-closure.cdx.json'));
+// `--app` scans the workspace root (the only tree syft can traverse) and
+// projects; `--closure` scans the install root directly.
+const scanRoot = appArg === undefined ? closureRoot : repoRoot;
+const nodeModules = join(scanRoot, 'node_modules');
+const sbomPath = resolve(
+  repoRoot,
+  arg(
+    'sbom-out',
+    appArg === undefined ? 'sbom/precompile-closure.cdx.json' : 'sbom/app-closure.cdx.json',
+  ),
+);
 
 function fail(message) {
   console.error(`\n::error::${message}`);
@@ -87,12 +119,38 @@ function run(cmd, args) {
 }
 
 // ── 1. the installed closure ────────────────────────────────────────────────
-console.log(`Pre-compile closure: ${nodeModules}`);
-const installed = installedPackages(nodeModules);
-console.log(`  installed packages on disk: ${installed.size}`);
+//
+// `--app`: the app's OWN transitive closure, resolved by following declared
+// dependency edges through bun's isolated store (the app's `node_modules` is
+// symlinks, so neither syft nor the plain tree walker can see past it).
+// `--closure`: the tree on disk, walked directly.
+let appClosure = null;
+let installed;
+if (appArg === undefined) {
+  console.log(`Pre-compile closure: ${nodeModules}`);
+  installed = installedPackages(nodeModules);
+  console.log(`  installed packages on disk: ${installed.size}`);
+} else {
+  const appDir = resolve(repoRoot, appArg);
+  console.log(`Pre-compile closure of app: ${appDir}`);
+  const resolved = resolveAppClosure(appDir);
+  appClosure = new Set(resolved.packages.keys());
+  installed = new Set([...appClosure].map((key) => key.slice(0, key.lastIndexOf('@'))));
+  console.log(`  packages in the app's transitive closure: ${appClosure.size}`);
+  if (resolved.unresolved.length > 0) {
+    // A REQUIRED edge that does not resolve means the tree is not the tree the
+    // manifests describe — scanning it would report on something else.
+    for (const miss of resolved.unresolved.slice(0, 20)) console.error(`  - ${miss}`);
+    fail(
+      `${resolved.unresolved.length} declared dependency(ies) of ${appArg} could not be resolved ` +
+        'in the installed tree — run `bun install --frozen-lockfile` first',
+    );
+  }
+}
 
 // ── 2. SBOM (CycloneDX) over the installed tree ─────────────────────────────
 mkdirSync(dirname(sbomPath), { recursive: true });
+const rawSbomPath = appArg === undefined ? sbomPath : `${sbomPath}.workspace`;
 run('syft', [
   'scan',
   `dir:${nodeModules}`,
@@ -100,11 +158,30 @@ run('syft', [
   '--select-catalogers',
   '+javascript-package-cataloger',
   '-o',
-  `cyclonedx-json=${sbomPath}`,
+  `cyclonedx-json=${rawSbomPath}`,
   '-q',
 ]);
-if (!existsSync(sbomPath)) fail(`syft produced no SBOM at ${sbomPath}`);
-const sbom = JSON.parse(readFileSync(sbomPath, 'utf8'));
+if (!existsSync(rawSbomPath)) fail(`syft produced no SBOM at ${rawSbomPath}`);
+let sbom = JSON.parse(readFileSync(rawSbomPath, 'utf8'));
+
+if (appClosure !== null) {
+  // Project the workspace SBOM onto the app's closure and WRITE THAT — the
+  // document grype reads below is byte-for-byte the document that gets
+  // cosign-attested onto the pushed digest, so "the scan covered the closure"
+  // stays provable rather than asserted.
+  const projected = filterSbomToClosure(sbom, appClosure);
+  sbom = projected.sbom;
+  writeFileSync(sbomPath, JSON.stringify(sbom, null, 2));
+  console.log(
+    `  projected onto the app closure: ${projected.kept.length} components kept, ` +
+      `${projected.missing.length} closure member(s) syft did not catalogue`,
+  );
+  // Named, not just counted: the workspace's own `@getknext/*` packages resolve
+  // to source directories outside `node_modules`, so syft does not catalogue
+  // them. They are first-party code, covered by the npm-audit gate over the
+  // published closure — say which ones rather than leaving a bare number.
+  for (const key of projected.missing) console.log(`    not catalogued: ${key}`);
+}
 console.log(`  SBOM: ${sbomPath}`);
 
 // ── 3. the emptiness / coverage guard ───────────────────────────────────────

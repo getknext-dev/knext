@@ -1,3 +1,5 @@
+import { afterAll, describe, expect, it, setDefaultTimeout } from 'bun:test';
+
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
@@ -10,7 +12,6 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { afterAll, describe, expect, it, vi } from 'vitest';
 
 // #492: each `it` drives the extracted port_owned_by_server() bash function via a
 // synchronous execFileSync('/bin/bash', …) shell-out. In isolation these cost
@@ -19,8 +20,17 @@ import { afterAll, describe, expect, it, vi } from 'vitest';
 // default 5000ms testTimeout — an intermittent 5s timeout with no behavioral
 // cause. Raise the timeout FILE-SCOPED (never the global default, which must stay
 // tight to catch real hangs elsewhere). This does not weaken any assertion.
-vi.setConfig({ testTimeout: 20_000, hookTimeout: 20_000 });
+// bun has no `vi.setConfig` — a per-run timeout knob does not exist there, so
+// the budget moves onto each `describe`. Kept at the SAME value rather than
+// tightened: these spawn a real shell script, and a timeout chosen to make a
+// suite feel fast is how a slow machine turns into a flaky gate.
+const SUITE_TIMEOUT_MS = 20_000;
 
+// bun IGNORES `describe(name, { timeout }, fn)` — the options object is
+// accepted and silently DROPPED. Measured: a 50ms suite timeout let a 400ms
+// test pass, so these suites were running under bun's 5s default rather than
+// the timeout they declare. `setDefaultTimeout` is the form bun honours.
+setDefaultTimeout(SUITE_TIMEOUT_MS);
 /**
  * GUARD TEST for `port_owned_by_server()` in scripts/e2e-deploy.sh (#210 —
  * the July-4 nightly regression, run 28697744187: 311/477 RED).

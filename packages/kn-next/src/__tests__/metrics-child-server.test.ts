@@ -7,9 +7,9 @@
  *  - initRuntimeMetrics is idempotent and can seed prom-client defaults.
  */
 
+import { afterEach, describe, expect, it, jest, mock } from "bun:test";
 import http from "node:http";
 import { Counter, Registry } from "prom-client";
-import { afterEach, describe, expect, it, vi } from "vitest";
 import {
     CHILD_METRICS_PORT,
     fetchChildMetrics,
@@ -40,7 +40,7 @@ afterEach(async () => {
             .map((s) => new Promise<void>((r) => s.close(() => r()))),
     );
     resetRuntimeMetrics();
-    vi.restoreAllMocks();
+    jest.restoreAllMocks();
 });
 
 function registryWith(name = "test_counter"): Registry {
@@ -61,7 +61,7 @@ describe("startChildMetricsServer + fetchChildMetrics", () => {
 
     it("runs the onScrape hook before serving and is fail-open on a throwing hook", async () => {
         const reg = registryWith();
-        const good = vi.fn(async () => {});
+        const good = mock(async () => {});
         const srvGood = await ready(
             track(startChildMetricsServer(reg, 0, "127.0.0.1", good)),
         );
@@ -70,7 +70,7 @@ describe("startChildMetricsServer + fetchChildMetrics", () => {
         );
         expect(good).toHaveBeenCalled();
 
-        const bad = vi.fn(async () => {
+        const bad = mock(async () => {
             throw new Error("scrape hook boom");
         });
         const srvBad = await ready(

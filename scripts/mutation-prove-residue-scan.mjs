@@ -20,7 +20,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { appendFileSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveTestRunner } from './lib/ci-blocking-gate-proof.mjs';
+import { resolveSpecRunner } from './lib/ci-blocking-gate-proof.mjs';
 import { mutate, restore, snapshot } from './lib/mutation-harness.mjs';
 import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 import { scanForResidue } from './scan-mutation-residue.mjs';
@@ -49,10 +49,11 @@ let fail = 0;
  * A fix that is not propagated is a fix with a countdown on it, which is why
  * `tests/mutation-prover-lane.test.ts` now scans every prover for this.
  */
-const RUNNER = resolveTestRunner(REPO_ROOT);
+// #902: per-spec dispatch — this prover's spec is bun:test.
+const RUNNER = (spec) => resolveSpecRunner(REPO_ROOT, spec);
 
 function vitest(spec) {
-  const r = spawnSync(RUNNER.command, [...RUNNER.args, 'run', spec], {
+  const r = spawnSync(RUNNER(spec).command, [...RUNNER(spec).args, ...RUNNER(spec).runArgs(spec)], {
     cwd: REPO_ROOT,
     encoding: 'utf8',
   });

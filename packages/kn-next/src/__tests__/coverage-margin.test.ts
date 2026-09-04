@@ -7,9 +7,9 @@
  *  - metrics: fetchChildMetrics' request-timeout branch and mergeExposition.
  */
 
+import { afterEach, describe, expect, it } from "bun:test";
 import http from "node:http";
 import { Registry } from "prom-client";
-import { afterEach, describe, expect, it } from "vitest";
 import {
     createDeferredDefaultMetrics,
     waitForChildServing,

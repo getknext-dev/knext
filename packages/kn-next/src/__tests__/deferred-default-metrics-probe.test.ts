@@ -5,8 +5,8 @@
  * fallbacks. Uses a real ephemeral loopback server so the probe is genuine.
  */
 
+import { afterEach, describe, expect, it } from "bun:test";
 import net from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
 import {
     CHILD_READY_DEADLINE_ENV,
     CHILD_READY_INTERVAL_ENV,

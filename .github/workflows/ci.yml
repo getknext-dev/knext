@@ -101,21 +101,33 @@ jobs:
         with:
           node-version: '24'
       
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
       
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
+
+      # examples/bun-exec sits OUTSIDE the workspace (own bun.lock) and its
+      # test harnesses import from its own node_modules (srvx et al). The
+      # bun-suite step below runs the example-suite collection guard, whose
+      # child runs every example test file — without this install those files
+      # die on `Cannot find module 'srvx/bun'`, which cost three CI rounds to
+      # see through a guard message that printed only (empty) stderr.
+      - name: Install example dependencies (examples/bun-exec)
+        working-directory: examples/bun-exec
+        run: bun install --frozen-lockfile
 
       - name: Run Biome lint & format check
-        run: pnpm run lint
+        run: bun run lint
 
       # Fail FAST on the TS5097 main-red class (#289): a relative import written
       # with an explicit .ts/.tsx extension passes vitest at runtime but fails
       # `tsc --noEmit` under moduleResolution:bundler. Runs before the builds so
       # the branch goes red at PR time, not only after the post-build typecheck.
       - name: Guard — no .ts/.tsx import extensions (TS5097)
-        run: pnpm run lint:ts-imports
+        run: bun run lint:ts-imports
 
       # Mutation residue (#645): a mutation-testing proof that was never restored
       # leaves the INVERSE of the fix in the tree, under a commit message
@@ -124,14 +136,14 @@ jobs:
       # scans every tracked file for the marker instead. This step is red-on-fail
       # and carries no soft-failure escape: it happened twice in one session.
       - name: Guard — no mutation residue in tracked files (#645)
-        run: pnpm run lint:mutation-residue
+        run: bun run lint:mutation-residue
 
       # ADR phase gates (#709): the validator that keeps a phase from advancing on a
       # number nobody measured. It shipped running in NO job and with NO test, so two
       # of the four rules its own docblock advertised were unenforced and nothing
       # noticed. A gate that runs nowhere is documentation.
       - name: Guard — ADR phase gates are internally consistent
-        run: pnpm run verify:phase-gates
+        run: bun run verify:phase-gates
 
       # @getknext/core ships only dist/ and its exports resolve to ./dist/* (#114).
       # The publish-surface test asserts every exports subpath exists in dist, so
@@ -140,16 +152,16 @@ jobs:
       # so without lib's dist the core build hard-fails (TS2307). Same lib→core
       # order as the compat-smoke and bytecode jobs.
       - name: Build @getknext/lib
-        run: pnpm --filter @getknext/lib build
+        run: bun run --filter @getknext/lib build
 
       # @getknext/core type-imports @getknext/db (the `kn-next db migrate` runner lives
       # in @getknext/db/migrate, #242), so without db's dist the core build hard-fails
       # (TS2307). db depends on lib, so the order is lib→db→core.
       - name: Build @getknext/db
-        run: pnpm --filter @getknext/db build
+        run: bun run --filter @getknext/db build
 
       - name: Build @getknext/core
-        run: pnpm --filter @getknext/core build
+        run: bun run --filter @getknext/core build
 
       # Typecheck gate (#261): per-package `tsc --noEmit` so the strict-mode
       # baseline can never regrow silently. Runs AFTER the lib→db→core builds
@@ -159,27 +171,27 @@ jobs:
       # tsconfig.typecheck.json, which (unlike their build tsconfigs) pulls the
       # test files into scope — the exact gap this gate closes.
       - name: Typecheck @getknext/lib (tsc --noEmit, tests in scope)
-        run: pnpm --filter @getknext/lib typecheck
+        run: bun run --filter @getknext/lib typecheck
 
       - name: Typecheck @getknext/db (tsc --noEmit, tests in scope)
-        run: pnpm --filter @getknext/db typecheck
+        run: bun run --filter @getknext/db typecheck
 
       - name: Typecheck @getknext/core (tsc --noEmit, tests in scope)
-        run: pnpm --filter @getknext/core typecheck
+        run: bun run --filter @getknext/core typecheck
 
       - name: Typecheck kn-next (alias shim — node --check, no TS)
-        run: pnpm --filter kn-next typecheck
+        run: bun run --filter kn-next typecheck
 
       # @getknext/ui (private component lib) — self-contained, no dist deps; the
       # P6c coverage guard (ci-typecheck-contract.test.ts) requires every TS
       # workspace member be gated or documented-excluded.
       - name: Typecheck @getknext/ui (tsc --noEmit)
-        run: pnpm --filter @getknext/ui typecheck
+        run: bun run --filter @getknext/ui typecheck
 
       # apps/db-demo — dist-dependent on @getknext/db + @getknext/core (imports
       # @getknext/db and @getknext/db/schema), so it runs AFTER those builds above.
       - name: Typecheck db-demo (tsc --noEmit)
-        run: pnpm --filter db-demo typecheck
+        run: bun run --filter db-demo typecheck
 
       # apps/file-manager (#804) — reference e2e Next app, previously the
       # checker-that-never-runs: no typecheck gate anywhere, so real TS errors
@@ -188,11 +200,40 @@ jobs:
       # above. tsconfig.typecheck.json keeps generated `.next/` types out of
       # scope so the check is deterministic on this cold checkout.
       - name: Typecheck file-manager (tsc --noEmit)
-        run: pnpm --filter file-manager typecheck
+        run: bun run --filter file-manager typecheck
 
-      - name: Run tests
-        run: pnpm exec vitest run --coverage
-      
+      # BOTH runners. This step ran `vitest` alone, which after the bun migration
+      # collects 3 files out of 338 — so CI's primary test job was executing 12
+      # tests and reporting green, and the coverage gate below was measuring a
+      # denominator of 3 files. The root `package.json` `ci` script had the same
+      # staleness and was fixed; this copy was missed because nothing compares
+      # them.
+      #
+      # The bun runner first: it is the suite. `scripts/bun-test.mjs` exits
+      # non-zero on any failing file, and `tests/runner-partition.test.ts` asserts
+      # every test file is claimed by exactly one of the two runners, so "ran
+      # under neither" cannot hide here.
+      #
+      # `--coverage` here is NOT optional (#884). It is one lcov per spawned test
+      # file, in `coverage-bun/`, and it is almost the entire NUMERATOR of the
+      # coverage gate below. Dropping it would leave that gate measuring vitest's
+      # 3 files, which is how it came to report 1.37% against a 77% floor.
+      - name: Run tests (bun — the suite)
+        run: node scripts/bun-test.mjs --coverage
+
+      # The vitest half. Its 3 test files barely move the numerator, but its
+      # `include` enumeration is the honest DENOMINATOR — every source file
+      # listed, untouched ones at 0%.
+      - name: Run tests (vitest — the 3 files that cannot run under bun)
+        run: bun x vitest run --coverage
+
+      # The gate itself: merge both runners' lcov, then check the floors from
+      # scripts/lib/coverage-policy.mjs. It must run AFTER both steps above, and
+      # it fails closed on a missing report — a coverage gate that goes green
+      # because it found nothing to measure is the defect this replaced.
+      - name: Coverage gate (merged across both runners)
+        run: node scripts/check-coverage.mjs
+
       - name: Upload coverage reports
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         if: always()
@@ -226,14 +267,16 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       - name: Typecheck root tests/ (tsc --noEmit)
-        run: pnpm run typecheck
+        run: bun run typecheck
 
   compat-smoke:
     # knext adapter SMOKE suite — NOT the official Next.js compatibility suite (ADR-0007,
@@ -274,112 +317,102 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
-
       - name: Setup Bun
-        if: matrix.runtime == 'bun'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: '1.3.14' # PINNED (was `latest`, #754): Bun 1.4.0 shipped mid-day
-          # 2026-08-20 and changed the compile-cache probe shape — the first
-          # lane to run after the release went red while main's morning run
-          # (1.3.14) passed. The unpinned-toolchain drift this repo pins
-          # images/actions/pnpm against; guarded by tests/bun-version-pins.test.ts
-          # (scans every workflow's setup-bun). Bump DELIBERATELY with a
-          # re-baseline (see #188's bun-version knob). 1.4 compat: #807.
+          bun-version: '1.4.0'
+          # PINNED, and now at 1.4.0 (was '1.3.14', #754/#807). The platform runs
+          # bun 1.4: the root bun.lock is lockfileVersion 3, which 1.3.x cannot
+          # parse at all, and all three container images are already
+          # oven/bun:1.4.0-alpine. The 1.3 lane that used to run here is gone
+          # deliberately — see #882. Still PINNED rather than `latest`: the
+          # mid-day 1.4.0 release is exactly the unpinned-toolchain drift this
+          # repo pins images and actions against. Guarded by
+          # tests/bun-version-pins.test.ts, which scans every workflow's setup-bun.
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       # @getknext/lib and @getknext/core both ship only dist/ — they MUST be built
       # before the app. file-manager imports @getknext/core/adapters/otel-config and
       # the KnativeNextConfig type, and @getknext/core's exports now resolve to
       # ./dist/* (#114), so a missing core build breaks `next build`.
       - name: Build @getknext/lib
-        run: pnpm --filter @getknext/lib build
+        run: bun run --filter @getknext/lib build
 
       # @getknext/core type-imports @getknext/db (the `kn-next db migrate` runner lives
       # in @getknext/db/migrate, #242), so without db's dist the core build hard-fails
       # (TS2307). db depends on lib, so the order is lib→db→core.
       - name: Build @getknext/db
-        run: pnpm --filter @getknext/db build
+        run: bun run --filter @getknext/db build
 
       - name: Build @getknext/core
-        run: pnpm --filter @getknext/core build
+        run: bun run --filter @getknext/core build
 
-      - name: Build file-manager via adapter
-        run: pnpm --filter file-manager build
+      - name: Build file-manager (vinext -> nitro .output)
+        run: bun run --filter file-manager build
 
-      - name: Run knext compat-smoke (${{ matrix.runtime }})
+      # The smoke gates the ARTIFACT USERS GET (#900 exit criterion 2): compile
+      # the nitro output into the single executable exactly as the Dockerfile
+      # does, and boot THAT. Booting `.output/server/index.mjs` under bun — the
+      # previous shape — misses every divergence that exists only in the
+      # compiled binary: the sharp `process.dlopen` shim, the re-derived asset
+      # root, closed module resolution. No --target: the smoke runs on THIS
+      # runner, so the host triple is the right one (the musl cross-target is
+      # the Dockerfile's concern).
+      - name: Compile the single executable
+        working-directory: apps/file-manager
+        run: |
+          bun run node_modules/@getknext/core/dist/adapters/vinext-compile.js \
+            --entry .output/server/index.mjs \
+            --outfile knext-smoke-exec
+
+      # The sharp addon tree, staged beside the binary (the shim discovers
+      # `native/` next to the executable; the addon links libvips by RELATIVE
+      # rpath so the @img layout must survive intact — cp -RL dereferences
+      # bun's isolated-store symlinks).
+      - name: Stage the sharp native tree beside the binary
+        run: |
+          set -eu
+          SRC=""
+          for c in node_modules/.bun/node_modules/@img node_modules/@img; do
+            [ -d "$c" ] && SRC="$c" && break
+          done
+          test -n "$SRC" || { echo "no @img tree found for sharp staging" >&2; exit 1; }
+          mkdir -p apps/file-manager/native
+          cp -RL "$SRC"/sharp-linux-x64 apps/file-manager/native/ 2>/dev/null || true
+          cp -RL "$SRC"/sharp-libvips-linux-x64 apps/file-manager/native/ 2>/dev/null || true
+          ls apps/file-manager/native/ | grep -q sharp- || { echo "sharp addon not staged" >&2; exit 1; }
+
+      # SERVER_CMD == SERVER_PATH is the smoke's single-exec signal: no script
+      # arg, no preload — the binary IS the server.
+      - name: Run knext compat-smoke (compiled single executable)
         working-directory: apps/file-manager
         env:
-          RUNTIME: ${{ matrix.runtime }}
+          RUNTIME: bun
+          SERVER_CMD: ${{ github.workspace }}/apps/file-manager/knext-smoke-exec
+          SERVER_PATH: ${{ github.workspace }}/apps/file-manager/knext-smoke-exec
           # The service container above, reachable on localhost from the job.
           REDIS_URL: redis://127.0.0.1:6379
         run: node scripts/compat-smoke.mjs
 
-  bytecode-cache-reuse:
-    # A2-2 (#38) Layer 1 per-PR GATE: proves the V8 bytecode cache is REUSED across
-    # cold starts (no recompile). The deterministic proof needs the standalone build,
-    # which is gitignored — so this job BUILDS it first, then runs the vitest spec
-    # with KNEXT_REQUIRE_STANDALONE=1 so a missing build HARD-FAILS instead of
-    # skipping silently (a green check can never mean "skipped").
-    name: Bytecode cache reuse (Layer 1 gate)
-    runs-on: ubuntu-latest
-    timeout-minutes: 12
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '24'
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      # @getknext/lib and @getknext/core both ship only dist/ — they MUST be built
-      # before the app. @getknext/core's exports now resolve to ./dist/* (#114), and
-      # file-manager imports it, so a missing core build breaks `next build`.
-      - name: Build @getknext/lib
-        run: pnpm --filter @getknext/lib build
-
-      # @getknext/core type-imports @getknext/db (the `kn-next db migrate` runner lives
-      # in @getknext/db/migrate, #242), so without db's dist the core build hard-fails
-      # (TS2307). db depends on lib, so the order is lib→db→core.
-      - name: Build @getknext/db
-        run: pnpm --filter @getknext/db build
-
-      - name: Build @getknext/core
-        run: pnpm --filter @getknext/core build
-
-      - name: Build file-manager standalone (next build --webpack)
-        run: pnpm --filter file-manager build
-
-      - name: Run bytecode-cache reuse gate (must NOT skip)
-        env:
-          # Converts the skipIf guard into a HARD failure if the build is missing.
-          KNEXT_REQUIRE_STANDALONE: '1'
-        run: pnpm exec vitest run apps/file-manager/bytecode-cache-reuse.test.ts
-
   sigterm-drain-shipped:
-    # Per-PR GATE: proves the SHIPPED container layout actually boots the knext
-    # runtime entry and drains in-flight requests on SIGTERM (security.md graceful
-    # shutdown). The image CMD is `node -e import('@getknext/core/internal/node-server')`,
-    # but Next's standalone output is import-graph driven and NOTHING imports
-    # node-server.js — so neither it nor its hard deps (prom-client, pino) are
-    # traced into `.next/standalone`. The Dockerfile fixes this with a
-    # `pnpm --prod deploy` of @getknext/core into the runner; this job proves the fix
-    # by assembling that exact layout and running the real CMD. Without it, the
-    # image crash-loops at boot (ERR_MODULE_NOT_FOUND) while CI stays green —
-    # exactly the regression this guards. KNEXT_REQUIRE_STANDALONE=1 hard-fails
-    # (never skips) if the standalone build is missing.
-    name: SIGTERM drain (shipped bundle gate)
+    # Per-PR GATE for the LEGACY standalone supervisor's SIGTERM drain
+    # (security.md graceful shutdown). HONESTY NOTE (#887): this job's subject
+    # is node-server — the standalone-shape supervisor that still ships for
+    # back-compat (stored CRs with build=turbopack) — NOT the artifact new
+    # builds produce. An earlier version of this header claimed it proved "the
+    # SHIPPED container layout"; since ADR-0048 the shipped layout is the
+    # compiled single executable, whose drain is proved where the binary is —
+    # `bun-exec-alpine-image` runs test/alpine-image.docker-e2e.test.ts, which
+    # sends a real TERM to the real container and asserts the in-flight
+    # request completes, exit 0, drain markers in order.
+    # Mechanics (unchanged): node-server's hard deps are not traced into
+    # `.next/standalone`; the legacy Dockerfile's `pnpm --prod deploy` of
+    # @getknext/core is what makes the CMD bootable, and this job assembles
+    # that exact layout. KNEXT_REQUIRE_STANDALONE=1 hard-fails (never skips)
+    # if the standalone build is missing.
+    name: SIGTERM drain (legacy standalone supervisor)
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
@@ -391,28 +424,37 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       # @getknext/lib and @getknext/core ship only dist/ and must be built before the
       # app; the test also `pnpm deploy`s @getknext/core (needs its dist present).
       - name: Build @getknext/lib
-        run: pnpm --filter @getknext/lib build
+        run: bun run --filter @getknext/lib build
 
       # @getknext/core type-imports @getknext/db (the `kn-next db migrate` runner lives
       # in @getknext/db/migrate, #242), so without db's dist the core build hard-fails
       # (TS2307). db depends on lib, so the order is lib→db→core.
       - name: Build @getknext/db
-        run: pnpm --filter @getknext/db build
+        run: bun run --filter @getknext/db build
 
       - name: Build @getknext/core
-        run: pnpm --filter @getknext/core build
+        run: bun run --filter @getknext/core build
 
-      - name: Build file-manager standalone (next build --webpack)
-        run: pnpm --filter file-manager build
+      # db-demo, not file-manager: this gate's subject is the node-server
+      # SUPERVISOR — the app's own server.js is replaced by a slow fixture via
+      # STANDALONE_SERVER_PATH — so it needs *a* standalone tree, and db-demo is
+      # the only app still emitting one since ADR-0048 moved file-manager to
+      # vinext. Left pointing at file-manager, this gate would hard-fail on a
+      # build that no longer exists (KNEXT_REQUIRE_STANDALONE=1) or, without
+      # that, skip silently and report green while testing nothing.
+      - name: Build db-demo standalone (next build --webpack)
+        run: bun run --filter db-demo build
 
       - name: Run SIGTERM shipped-bundle gates — drain + hard-cap (must NOT skip)
         env:
@@ -433,103 +475,25 @@ jobs:
           # to share this runner. That collision is what made this gate flake with
           # `EADDRINUSE :::39188` on PR #676.
           KNEXT_REQUIRE_STANDALONE: '1'
+          KNEXT_SIGTERM_APP_DIR: ${{ github.workspace }}/apps/db-demo
+        # bun, not vitest: both files import `bun:test`, so vitest's config
+        # excludes them and the step died with `No test files found` — a gate whose
+        # contract is "must NOT skip", failing for a reason unrelated to draining.
+        # `scripts/bun-test.mjs` also exits 1 on an empty selection, so a renamed
+        # file still fails loudly.
         run: >-
-          pnpm exec vitest run
+          node scripts/bun-test.mjs
           apps/file-manager/sigterm-drain-e2e.test.ts
           apps/file-manager/sigterm-hardcap-e2e.test.ts
 
-  seam-alive-discover:
-    # #408 item 2 — DISCOVER which apps carry the #352/#344 seam-alive guard.
-    # The gate used to be one hard-coded step for file-manager, so every other
-    # app (including every app `turbo gen zone` generates) ran its copy of the
-    # guard build-less and passed by SKIPPING. An enumerated list is how the
-    # second app gets missed; this scans the tree instead, and the scanner exits
-    # non-zero rather than emitting an empty (vacuous) matrix. It discovers GUARD
-    # FILES, so an app is covered the moment it CARRIES the guard — a companion
-    # assertion in tests/seam-alive-app-coverage.test.ts is what makes an app that
-    # NEEDS the guard (instrumentation + @getknext/lib) but lacks it fail.
-    # Guarded by tests/seam-alive-app-coverage.test.ts.
-    name: Discover apps carrying the seam-alive guard
-    runs-on: ubuntu-latest
-    outputs:
-      apps: ${{ steps.scan.outputs.apps }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '24'
-
-      - name: Scan apps/ for standalone-seam-alive.test.ts
-        id: scan
-        # TWO statements, deliberately. `echo "apps=$(node …)"` would DISCARD the
-        # scanner's exit status — a command substitution's status is dropped and
-        # `echo` succeeds — so an empty-matrix refusal would exit 0 and the gate
-        # would go vacuous exactly where it must not. A bare assignment propagates
-        # the failure under bash -e. Guarded by tests/seam-alive-app-coverage.test.ts.
-        run: |
-          apps=$(node scripts/seam-alive-apps.mjs)
-          echo "apps=$apps" >> "$GITHUB_OUTPUT"
-
-  seam-alive:
-    # PER-APP build + gate: #352 shipped with db_wake + correlation DEAD in prod
-    # because @getknext/lib is DUPLICATED across the instrumentation vs app-server
-    # webpack layers and the seam was not shared. The fix backs the seam with
-    # globalThis Symbol.for(...) cells; the artifact assertion checks those symbols
-    # co-occur in BOTH the instrumentation (writer) chunk AND an app-server
-    # (reader) chunk of the real `next build --webpack` output. The guard needs a
-    # standalone build, which is gitignored — so this job BUILDS the app it gates
-    # and runs the guard with KNEXT_REQUIRE_STANDALONE=1, making a missing build a
-    # HARD failure. Chunk-level drift therefore fails the app that introduced it.
-    name: Seam-alive artifact gate (${{ matrix.app }})
-    needs: seam-alive-discover
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        app: ${{ fromJSON(needs.seam-alive-discover.outputs.apps) }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '24'
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      # @getknext/lib and @getknext/core ship only dist/ and must be built before any
-      # app; @getknext/core type-imports @getknext/db, so the order is lib→db→core.
-      - name: Build @getknext/lib
-        run: pnpm --filter @getknext/lib build
-
-      - name: Build @getknext/db
-        run: pnpm --filter @getknext/db build
-
-      - name: Build @getknext/core
-        run: pnpm --filter @getknext/core build
-
-      # PATH filter, not a name filter: the matrix carries DIRECTORY names and
-      # `pnpm --filter <name>` matches on PACKAGE NAME — which already differs for
-      # apps/docs (package "knext-docs"). A name miss prints "No projects matched
-      # the filters" and exits 0, i.e. builds nothing while looking fine.
-      - name: Build ${{ matrix.app }} standalone (next build --webpack)
-        run: pnpm --filter ./apps/${{ matrix.app }} build
-
-      - name: Run seam-alive artifact gate (#352/#344, must NOT skip)
-        env:
-          # Converts the skipIf guard into a HARD failure if the build is missing,
-          # so a green check can never mean "skipped".
-          KNEXT_REQUIRE_STANDALONE: '1'
-        run: pnpm exec vitest run apps/${{ matrix.app }}/standalone-seam-alive.test.ts
+  # seam-alive gates: RETIRED (#885, stability sprint). The #352 defect class —
+  # webpack layers duplicating @getknext/lib module state across the
+  # instrumentation and app-server chunks — cannot occur under the vinext
+  # (vite/rollup) single-graph build, and the guard hard-required a
+  # `.next/standalone` tree no app on this path produces. The globalThis
+  # Symbol.for anchoring in @getknext/lib STAYS (defense-in-depth, still
+  # pinned by template-guarded-instrumentation.test.ts); what retired is the
+  # artifact assertion whose subject no longer exists. See ADR-0027 Amendment.
 
   no-latest-guard:
     name: No :latest images in operator manifests
@@ -850,16 +814,36 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
+
+      # The suite imports `@getknext/db` and `@getknext/core` by PACKAGE NAME, so
+      # their dist must exist. Under vitest it did not have to: `vitest.config.ts`
+      # aliases those specifiers to `packages/*/src` precisely so a clean run works
+      # before any build. bun has no such alias, so the import failed with
+      # `Cannot find package '@getknext/db'` and five hermetic guards died on it.
+      #
+      # Building is the better half of the trade anyway — it exercises the real
+      # dist surface consumers get, rather than the source the alias substitutes.
+      - name: Build @getknext/lib
+        run: bun run --filter @getknext/lib build
+
+      - name: Build @getknext/db
+        run: bun run --filter @getknext/db build
+
+      - name: Build @getknext/core
+        run: bun run --filter @getknext/core build
 
       # The live suite + its hermetic guards (DSN host guard, workflow contract).
       - name: Run the live @getknext/db suite
+        # bun, not vitest — all three import `bun:test`; same reason as above.
         run: >-
-          pnpm exec vitest run
+          node scripts/bun-test.mjs
           packages/db/src/__tests__/integration/live-postgres.test.ts
           packages/db/src/__tests__/live-dsn-guard.test.ts
           tests/db-live-workflow.test.ts
@@ -873,11 +857,11 @@ jobs:
     #
     # Two build legs, BOTH required:
     #   1. vanilla (KNEXT_ADAPTER unset) — the managed-host build (what Vercel
-    #      ships at knext.dev). Asserts .next/BUILD_ID.
-    #   2. adapter (KNEXT_ADAPTER=1) — the self-host / dogfood leg. NON-OPTIONAL:
-    #      exercises next.config's experimental.adapterPath branch so adapter-key
-    #      drift under the monorepo's pinned Next is caught in CI. Asserts the
-    #      standalone server at .next/standalone/apps/docs/server.js.
+    #      ships at knext.dev). Asserts .vercel/output (Build Output API v3).
+    #   2. the bun target (default preset) — the knext dogfood image — and the
+    #      node target (NITRO_PRESET=node) behind Dockerfile.oke. adapterPath /
+    #      adapter-key drift is covered by `seam-alive` against file-manager,
+    #      not here: this app no longer builds through next.config at all.
     #
     # Path-filtered: only runs when the docs app OR the public @getknext/core surface
     # changes (turbo-cache-friendly — an unrelated PR skips the ~minutes-long
@@ -908,13 +892,15 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Setup pnpm
+      - name: Setup bun
         if: steps.filter.outputs.docs == 'true'
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
 
       - name: Install dependencies
         if: steps.filter.outputs.docs == 'true'
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       # lib→db→core, same ordering rationale as compat-smoke: core's dts build
       # type-imports @getknext/lib/clients and @getknext/db/migrate, so both must ship
@@ -922,15 +908,15 @@ jobs:
       # @getknext/core (and its ./adapter + ./validate subpaths) against that dist.
       - name: Build @getknext/lib
         if: steps.filter.outputs.docs == 'true'
-        run: pnpm --filter @getknext/lib build
+        run: bun run --filter @getknext/lib build
 
       - name: Build @getknext/db
         if: steps.filter.outputs.docs == 'true'
-        run: pnpm --filter @getknext/db build
+        run: bun run --filter @getknext/db build
 
       - name: Build @getknext/core
         if: steps.filter.outputs.docs == 'true'
-        run: pnpm --filter @getknext/core build
+        run: bun run --filter @getknext/core build
 
       # Config-validate gate: run the docs dogfood kn-next.config.ts through the
       # REAL @getknext/core/validate (the public surface), same code path
@@ -938,28 +924,70 @@ jobs:
       - name: Validate the docs kn-next.config.ts (real validateConfig)
         if: steps.filter.outputs.docs == 'true'
         working-directory: apps/docs
-        run: pnpm config:validate
+        run: bun run config:validate
 
-      # Leg 1 — vanilla managed-host build (Vercel parity; KNEXT_ADAPTER unset).
-      - name: Build knext-docs (vanilla / managed-host, KNEXT_ADAPTER unset)
+      # The two legs that used to live here — vanilla `.next/BUILD_ID` and adapter
+      # `.next/standalone/...` — were both dead. The docs app builds with
+      # vinext/vite now, which emits a nitro server under `.output/` and no
+      # `.next/` at all, and ignores `next.config.ts` entirely, so `KNEXT_ADAPTER=1`
+      # selected nothing. Neither assertion could pass; nothing noticed because
+      # ci.yml had never run against the branch that migrated the app.
+      #
+      # Adapter-key coverage is NOT lost with them: `seam-alive` builds
+      # apps/file-manager with `next build --webpack` and asserts the standalone
+      # artifact, which is what actually exercises `experimental.adapterPath`.
+      #
+      # What replaces them gates the three targets this app really deploys to.
+      # Each is a different nitro preset, and two of them cannot run the default
+      # one's output.
+      - name: Build knext-docs (default = bun target, the knext dogfood image)
         if: steps.filter.outputs.docs == 'true'
-        run: pnpm --filter knext-docs build
+        run: |
+          rm -r apps/docs/.output apps/docs/.vercel 2>/dev/null || true
+          bun run --filter knext-docs build
 
-      - name: Assert vanilla build output
+      - name: Assert the bun target emits its bespoke entry
         if: steps.filter.outputs.docs == 'true'
-        run: test -f apps/docs/.next/BUILD_ID
+        # Both halves. The path alone passes for a build that silently fell back
+        # to nitro's default entry, which is exactly what a mis-set preset makes.
+        run: |
+          test -f apps/docs/.output/server/index.mjs
+          grep -q 'metricsServer' apps/docs/.output/server/index.mjs
 
-      # Leg 2 — adapter / self-host dogfood build (NON-OPTIONAL). Exercises the
-      # experimental.adapterPath branch so adapter-key drift is caught here.
-      - name: Build knext-docs via adapter (KNEXT_ADAPTER=1, self-host dogfood)
+      - name: Build knext-docs for Node (NITRO_PRESET=node — the OKE image)
         if: steps.filter.outputs.docs == 'true'
         env:
-          KNEXT_ADAPTER: '1'
-        run: pnpm --filter knext-docs build
+          NITRO_PRESET: node
+        run: |
+          rm -r apps/docs/.output apps/docs/.vercel 2>/dev/null || true
+          bun run --filter knext-docs build
 
-      - name: Assert adapter standalone server output
+      - name: Assert the Node target does NOT carry the bun entry
         if: steps.filter.outputs.docs == 'true'
-        run: test -f apps/docs/.next/standalone/apps/docs/server.js
+        # knext-bun-entry.mjs serves through Bun.serve; carried into a node:22
+        # image it builds cleanly and dies at runtime. This is the assertion that
+        # would have caught Dockerfile.oke shipping a bun build.
+        run: |
+          test -f apps/docs/.output/server/index.mjs
+          ! grep -q 'metricsServer' apps/docs/.output/server/index.mjs
+
+      - name: Build knext-docs for Vercel (NITRO_PRESET=vercel — knext.dev)
+        if: steps.filter.outputs.docs == 'true'
+        env:
+          NITRO_PRESET: vercel
+        run: |
+          rm -r apps/docs/.output apps/docs/.vercel 2>/dev/null || true
+          bun run --filter knext-docs build
+
+      - name: Assert the Vercel target emits Build Output API v3
+        if: steps.filter.outputs.docs == 'true'
+        # Vercel consumes .vercel/output only when the build produces it. A build
+        # that quietly emitted .output instead reported "4 successful" and then
+        # failed the deploy — that is the failure this gates.
+        run: |
+          test -f apps/docs/.vercel/output/config.json
+          test -f apps/docs/.vercel/output/functions/__server.func/index.mjs
+          ! grep -q 'metricsServer' apps/docs/.vercel/output/functions/__server.func/index.mjs
 
       # Materialise the DOCS-SCOPED dependency closure. Under pnpm the whole
       # workspace shares ONE root pnpm-lock.yaml and node_modules hoists to the
@@ -970,22 +998,39 @@ jobs:
       # remediations) are checked against the docs-only tree, not the whole repo.
       - name: Prune docs dependency closure (turbo prune → scoped lockfile)
         if: steps.filter.outputs.docs == 'true'
-        run: pnpm exec turbo prune knext-docs --out-dir ./.docs-closure
+        run: bun x turbo prune knext-docs --out-dir ./.docs-closure
 
       # Trivy fs scan of the docs closure lockfile. Report (don't block) on PRs;
+      # The gate scans an SBOM of the closure's PRODUCTION dependencies, read from
+      # the installed tree — not a lockfile. Pointing Trivy at `bun.lock` instead
+      # was measured at 509 packages vs pnpm-lock's 777, missing a HIGH that IS in
+      # the file under a nested key its parser does not descend into.
+      # `scripts/sbom-docs-closure.mjs` carries the full measurement.
+      - name: Install the docs closure (the SBOM is read from the installed tree)
+        if: steps.filter.outputs.docs == 'true'
+        working-directory: ./.docs-closure
+        run: bun install
+
+      - name: Build the docs closure SBOM (production dependencies)
+        if: steps.filter.outputs.docs == 'true'
+        run: node scripts/sbom-docs-closure.mjs ./.docs-closure ./.docs-closure/closure.cdx.json
+
       # ENFORCE (fail) on main — the same phased gate the image supply-chain job
-      # uses. FAIL on HIGH/CRITICAL. NOTE: the pruned closure pulls in the shared
-      # workspace DEV toolchain (vitest→vite→rollup, picomatch) — any HIGH there is
-      # a pre-existing REPO-WIDE toolchain CVE (remediate via the root
-      # pnpm.overrides, like the other entries), not a docs-runtime issue; next /
-      # fumadocs / react are clean.
+      # uses. FAIL on HIGH/CRITICAL.
+      #
+      # The old note here said any HIGH in this closure was "a pre-existing
+      # REPO-WIDE toolchain CVE ... not a docs-runtime issue". That was wrong on
+      # its own example: picomatch@2.3.1 is reachable at RUNTIME via
+      # fast-glob -> micromatch -> picomatch. Scoping to production dependencies
+      # removes the toolchain noise that made the excuse necessary, so a finding
+      # here is now a finding about what ships.
       - name: Trivy scan — docs dependency closure (FAIL on HIGH/CRITICAL)
         if: steps.filter.outputs.docs == 'true'
         continue-on-error: ${{ github.ref != 'refs/heads/main' }}
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          scan-type: fs
-          scan-ref: ./.docs-closure/pnpm-lock.yaml
+          scan-type: sbom
+          scan-ref: ./.docs-closure/closure.cdx.json
           severity: HIGH,CRITICAL
           exit-code: '1'
           ignore-unfixed: true
@@ -1061,7 +1106,8 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: '1.3.14' # PINNED — see the first setup-bun step's rationale (#754); guarded by tests/bun-version-pins.test.ts
+          bun-version: '1.4.0'
+          # PINNED — see the first setup-bun step's rationale (#754/#807/#882).
 
       - name: Install example dependencies
         working-directory: examples/bun-exec
@@ -1109,10 +1155,18 @@ jobs:
   # bytes ARE the attached bytes. security.md says "Trivy/Grype"; the image gates
   # in supply-chain.yml stay Trivy.
   #
-  # NO VINEXT IMAGE IS PUBLISHED FROM CI TODAY. The only job that builds a vinext
-  # artifact is `bun-exec-alpine-image` below, which now `needs:` this gate -- so
-  # the precondition holds the day a publish lane ships, rather than being
-  # remembered then. `tests/precompile-closure-gate-ci.test.ts` SCANS EVERY
+  # A VINEXT IMAGE *IS* PUBLISHED FROM CI (corrected 2026-09-04, C1/#785). This
+  # block used to read "NO VINEXT IMAGE IS PUBLISHED FROM CI TODAY"; that was
+  # true when it was written and stopped being true at ADR-0048.
+  # `supply-chain.yml`'s `image-supply-chain` job builds apps/file-manager's
+  # image -- alpine + a `bun build --compile` single executable -- `crane push`es
+  # it to GHCR on main, cosign-signs the digest and attests an SBOM. THIS job's
+  # subject is still only `examples/bun-exec`; the published app's closure is
+  # gated inside that lane instead (`--app apps/file-manager`, run before the
+  # build), guarded by `tests/published-image-closure-gate.test.ts`. The one job
+  # here that builds a vinext artifact is `bun-exec-alpine-image` below, which
+  # `needs:` this gate -- so the precondition holds for the example, and the
+  # publish lane carries its own. `tests/precompile-closure-gate-ci.test.ts` SCANS EVERY
   # `.github/workflows/*.yml` (not just this file) for any job that compiles the
   # binary or builds its image -- including via the `bun run build` package-script
   # alias for `./build.sh` -- and requires a job running the closure audit in its
@@ -1123,13 +1177,15 @@ jobs:
   # `tests/helpers/vinext-artifact-scan.ts` in the same PR.
   #
   # AND IT GUARDS ORDERING ONLY. ADR-0042 C6's other half -- the closure SBOM
-  # ATTACHED TO THE IMAGE DIGEST AS A COSIGN ATTESTATION -- remains OWED: the day
-  # a vinext publish lane ships, that attestation must ship with it; a `needs:`
-  # edge alone would let an image publish with no SBOM bound to its digest. Today
-  # the SBOM is a per-run Actions artifact, which is evidence, not provenance.
-  # The subject is also exactly one closure: the in-repo `examples/bun-exec`, the
-  # only vinext app there is. A USER app on the vinext target has no equivalent
-  # closure gate yet.
+  # ATTACHED TO THE IMAGE DIGEST AS A COSIGN ATTESTATION -- is no longer owed for
+  # the PUBLISHED image (#785, done in supply-chain.yml: `cosign attest --type
+  # cyclonedx --predicate sbom/app-closure.cdx.json` onto the pushed digest). It
+  # is still true HERE: this job's SBOM is a per-run Actions artifact, which is
+  # evidence, not provenance -- and correctly so, because nothing publishes an
+  # examples/bun-exec image, so there is no digest to bind it to.
+  # The subject of THIS job is exactly one closure: the in-repo
+  # `examples/bun-exec`. A USER app on the vinext target still has no equivalent
+  # closure gate; what changed is that the repo's own published app now does.
   #
   # THE EMPTINESS GUARD IS THE POINT. A scan of nothing exits 0, and both ways of
   # scanning nothing here are SILENT: `syft scan dir:` with default catalogers
@@ -1152,7 +1208,8 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: '1.3.14' # PINNED — see the first setup-bun step's rationale (#754); guarded by tests/bun-version-pins.test.ts
+          bun-version: '1.4.0'
+          # PINNED — see the first setup-bun step's rationale (#754/#807/#882).
 
       # examples/bun-exec is OUTSIDE the pnpm workspace (own bun.lock, pins the
       # vinext/nitro prereleases the workspace must not inherit), so the closure
@@ -1238,7 +1295,8 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: '1.3.14' # PINNED — see the first setup-bun step's rationale (#754); guarded by tests/bun-version-pins.test.ts
+          bun-version: '1.4.0'
+          # PINNED — see the first setup-bun step's rationale (#754/#807/#882).
 
       - name: Install example dependencies
         working-directory: examples/bun-exec
@@ -1279,18 +1337,18 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
-
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: '1.3.14' # PINNED — see the first setup-bun step's rationale (#754); guarded by tests/bun-version-pins.test.ts
+          bun-version: '1.4.0'
+          # PINNED — see the first setup-bun step's rationale (#754/#807/#882).
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       - name: Compile-cache diagnostic under real bun
         env:
           KNEXT_REQUIRE_BUN: '1'
-        run: pnpm exec vitest run packages/kn-next/src/__tests__/compile-cache-health-bun.test.ts
+        # bun, not vitest — same reason as the seam-alive gate: the file imports
+        # `bun:test`, so vitest collected nothing and exited 1.
+        run: node scripts/bun-test.mjs packages/kn-next/src/__tests__/compile-cache-health-bun.test.ts

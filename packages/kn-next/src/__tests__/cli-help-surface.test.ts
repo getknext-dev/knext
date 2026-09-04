@@ -11,10 +11,10 @@
  * reds this file instead of shipping.
  */
 
+import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
 import { CLI_HELP, INTERNAL_ONLY_VERBS } from "../cli/help";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));

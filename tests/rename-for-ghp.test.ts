@@ -1,7 +1,7 @@
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 // The GHP rename script exposes pure, staging-based helpers so the rewrite logic
 // is unit-testable without touching the real working tree or publishing anything.
 import { rewriteManifest, rewriteScopeString, stageForGhp } from '../scripts/rename-for-ghp.mjs';

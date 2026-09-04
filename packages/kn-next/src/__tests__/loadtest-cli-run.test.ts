@@ -5,14 +5,17 @@
  * return a NON-ZERO code — never a silent exit(0).
  */
 
+import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const execFileSync = vi.hoisted(() => vi.fn(() => Buffer.from("")));
-vi.mock("node:child_process", async (importOriginal) => {
-    const actual = await importOriginal<typeof import("node:child_process")>();
+const execFileSync = (() => mock(() => Buffer.from("")))();
+const __knextReal1 = { ...(await import("node:child_process")) };
+const __knextRealShared = { ...(await import("../cli/shared")) };
+
+mock.module("node:child_process", async () => {
+    const actual = __knextReal1;
     const o = { ...actual, execFileSync };
     return {
         ...o,
@@ -20,12 +23,18 @@ vi.mock("node:child_process", async (importOriginal) => {
     };
 });
 
-const loadConfig = vi.hoisted(() => vi.fn());
+const loadConfig = (() => mock())();
 // Only loadConfig is faked; handleConfigNotFound stays REAL so this file still
 // exercises the true "is this the expected no-config state?" discrimination
 // (it must answer no for the generic error below, and let the breadcrumb run).
-vi.mock("../cli/shared", async (importOriginal) => ({
-    ...(await importOriginal<typeof import("../cli/shared")>()),
+const __knextReal2 = { ...(await import("../cli/shared")) };
+mock.module("../cli/shared", () => ({
+    // bun replaces a mocked module WHOLESALE — no partial mock, no
+    // automock — so a factory listing only what the test drives drops
+    // every other export and the importer dies naming the CONSUMER, not
+    // this factory. Spreading keeps it honest as `../cli/shared` grows.
+    ...__knextRealShared,
+    ...__knextReal2,
     loadConfig,
 }));
 
@@ -48,7 +57,7 @@ afterEach(() => {
 
 describe("runLoadTestCli", () => {
     it("returns 1 with a stderr hint when --url is missing", async () => {
-        const stderr = vi.fn();
+        const stderr = mock();
         expect(await runLoadTestCli([], { stderr })).toBe(1);
         expect(stderr).toHaveBeenCalledWith(
             expect.stringMatching(/--url .* is required/),
@@ -56,7 +65,7 @@ describe("runLoadTestCli", () => {
     });
 
     it("returns 1 with a stderr hint for an invalid --type", async () => {
-        const stderr = vi.fn();
+        const stderr = mock();
         expect(
             await runLoadTestCli(["--url", "https://x", "--type", "bogus"], {
                 stderr,
@@ -74,7 +83,7 @@ describe("runLoadTestCli", () => {
         });
         const code = await runLoadTestCli(
             ["--url", "https://app.example.com", "--type", "smoke"],
-            { stderr: vi.fn() },
+            { stderr: mock() },
         );
         expect(code).toBe(0);
         expect(execFileSync).toHaveBeenCalledWith(
@@ -86,7 +95,7 @@ describe("runLoadTestCli", () => {
 
     it("returns 1 and writes a breadcrumb when config load fails (never silent exit)", async () => {
         loadConfig.mockRejectedValue(new Error("no kn-next.config.ts"));
-        const stderr = vi.fn();
+        const stderr = mock();
         const code = await runLoadTestCli(
             ["--url", "https://app.example.com", "--type", "smoke"],
             { stderr },

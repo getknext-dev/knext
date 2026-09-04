@@ -1,6 +1,6 @@
+import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 
 /**
  * GUARD TESTS for the docs dependency-closure NIGHTLY Trivy scan (#320).
@@ -128,11 +128,15 @@ describe('#320 docs-closure nightly workflow exists and is scheduled', () => {
 });
 
 describe('#320 the nightly Trivy scan is fail-loud on HIGH/CRITICAL', () => {
-  it('scans the pruned closure lockfile with severity HIGH,CRITICAL, exit-code 1, ignore-unfixed', () => {
+  it('scans the closure SBOM with severity HIGH,CRITICAL, exit-code 1, ignore-unfixed', () => {
     const cfg = trivyWithConfig(read(NIGHTLY_WORKFLOW_PATH));
-    expect(cfg['scan-type'], 'must be an fs scan').toBe('fs');
-    expect(cfg['scan-ref'], 'must scan the docs closure lockfile').toBe(
-      './.docs-closure/pnpm-lock.yaml',
+    // An SBOM, not a lockfile. Trivy's bun parser does not descend into nested
+    // `parent/child` keys, so scanning `bun.lock` saw 509 of the 777 packages
+    // pnpm-lock exposed and missed CVE-2026-33671 — a HIGH that IS in the file.
+    // A gate that goes green because its parser cannot see is worse than none.
+    expect(cfg['scan-type'], 'must be an sbom scan').toBe('sbom');
+    expect(cfg['scan-ref'], 'must scan the generated closure SBOM').toBe(
+      './.docs-closure/closure.cdx.json',
     );
     expect(cfg.severity, 'must scan HIGH,CRITICAL').toBe('HIGH,CRITICAL');
     expect(cfg['exit-code'], 'must exit non-zero on findings').toBe('1');
@@ -290,7 +294,7 @@ describe('#320 per-PR docs-site behavior is UNCHANGED', () => {
 
 describe('#465 docs-closure HIGH remediation is by BUMP, not suppression', () => {
   const ROOT_PKG_PATH = resolve(REPO_ROOT, 'package.json');
-  const ROOT_LOCK_PATH = resolve(REPO_ROOT, 'pnpm-lock.yaml');
+  const ROOT_LOCK_PATH = resolve(REPO_ROOT, 'bun.lock');
 
   /** Lowest version a `>=X.Y.Z <A` style override range admits, as [maj,min,pat]. */
   function floorOf(range: string): [number, number, number] {
@@ -319,11 +323,25 @@ describe('#465 docs-closure HIGH remediation is by BUMP, not suppression', () =>
   it('root pnpm.overrides floor every flagged docs-closure package at its fixed version', () => {
     const pkg = JSON.parse(readFileSync(ROOT_PKG_PATH, 'utf8')) as {
       pnpm?: { overrides?: Record<string, string> };
+      // Top-level since the repo left pnpm; the reader below always looked here.
+      overrides?: Record<string, string>;
     };
-    const overrides = pkg.pnpm?.overrides ?? {};
+    // Read BOTH locations. `bun install` silently relocates this block from
+    // `pnpm.overrides` to a top-level `overrides` when it rewrites the
+    // manifest — a package manager moving a SECURITY control without being
+    // asked. Both spellings are honoured by the installer that reads them, so
+    // what this guard cares about is that the floors exist SOMEWHERE, not
+    // which key they happen to sit under today.
+    const overrides = {
+      ...(pkg.pnpm?.overrides ?? {}),
+      ...(pkg.overrides ?? {}),
+    };
     for (const [selector, fixed, advisory] of REQUIRED) {
       const range = overrides[selector];
-      expect(range, `expected a pnpm override for "${selector}" (${advisory})`).toBeTruthy();
+      expect(
+        range,
+        `expected an override floor for "${selector}" (${advisory}) under either "overrides" or "pnpm.overrides"`,
+      ).toBeTruthy();
       expect(
         gte(floorOf(range as string), fixed),
         `override "${selector}": "${range}" must admit nothing below ${fixed.join('.')} (${advisory})`,
@@ -337,10 +355,15 @@ describe('#465 docs-closure HIGH remediation is by BUMP, not suppression', () =>
       const name = selector.includes('@', 1)
         ? selector.slice(0, selector.lastIndexOf('@'))
         : selector;
-      const banned = `${name}@${badVersion}:`;
+      // `"name@version"` — bun.lock's quoted form — not pnpm's `name@version:`
+      // YAML key. The trailing colon was the old format's delimiter, and it is
+      // what stopped `1.2.3` matching inside `1.2.30`; the closing QUOTE does
+      // the same job here. Dropping the delimiter would make this guard
+      // fail-open on a version that merely shares a prefix.
+      const banned = `"${name}@${badVersion}"`;
       expect(
         lock.includes(banned),
-        `lockfile must not resolve ${banned.slice(0, -1)} (${advisory})`,
+        `lockfile must not resolve ${name}@${badVersion} (${advisory})`,
       ).toBe(false);
     }
   });

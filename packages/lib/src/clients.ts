@@ -1,6 +1,7 @@
 import { GRPC as Cerbos } from '@cerbos/grpc';
 import * as Minio from 'minio';
 import { Pool } from 'pg';
+import { bunSqlAvailable, createBunSqlPool } from './db/bun-sql-pool';
 import { logSlowDep } from './slow-dep';
 
 // Singleton instances
@@ -211,6 +212,35 @@ export const resetDbWakeSingleflight = (): void => {
 };
 
 /**
+ * Clear every cached client and all module-scoped state (tests only).
+ *
+ * This is the explicit replacement for `vi.resetModules()`, which bun has no
+ * equivalent of — module mocks there are registered for the whole run and
+ * cannot be unregistered, so a fresh module instance is not obtainable
+ * (#871). The same shape as `@getknext/db`'s `resetDbClients`.
+ *
+ * Composed rather than left to callers. The four `let` caches and the three
+ * `globalThis`-anchored slots are reset by DIFFERENT mechanisms, and a test
+ * that remembers three of the seven gets state leaking across cases in a way
+ * that produces order-dependent passes — the failure mode that is worse than a
+ * crash, because it looks like success.
+ *
+ * It does NOT close the pools. Every caller is a test holding a fake, and
+ * making this async to `end()` real ones would put an await in every
+ * `beforeEach` for a case that does not exist. Production code must not call
+ * this: dropping a live pool's reference without ending it leaks sockets.
+ */
+export const resetClients = (): void => {
+  cerbosClient = null;
+  minioClient = null;
+  pgPool = null;
+  pgPoolRO = null;
+  resetPoolInstrumentor();
+  resetDbActivity();
+  resetDbWakeSingleflight();
+};
+
+/**
  * Wrap a pool's `connect`/`query` so the FIRST cold acquisition is single-flighted:
  * concurrent first-callers share ONE wake instead of each triggering a 0→1 wake.
  *
@@ -340,21 +370,31 @@ const DEFAULT_DB_WAKE_RETRY_BASE_MS = 100;
 /** Cap (ms) on a single backoff sleep so late attempts don't stall the request. */
 const DEFAULT_DB_WAKE_RETRY_MAX_MS = 1_000;
 
-/** The resolved total retry budget (env-overridable, clamped positive). */
-export const DB_WAKE_RETRY_BUDGET_MS = toFinitePositiveInt(
-  process.env.DB_WAKE_RETRY_BUDGET_MS,
-  DEFAULT_DB_WAKE_RETRY_BUDGET_MS,
-);
-/** The resolved base backoff (env-overridable, clamped positive). */
-export const DB_WAKE_RETRY_BASE_MS = toFinitePositiveInt(
-  process.env.DB_WAKE_RETRY_BASE_MS,
-  DEFAULT_DB_WAKE_RETRY_BASE_MS,
-);
-/** The resolved per-sleep backoff cap (env-overridable, clamped positive). */
-export const DB_WAKE_RETRY_MAX_MS = toFinitePositiveInt(
-  process.env.DB_WAKE_RETRY_MAX_MS,
-  DEFAULT_DB_WAKE_RETRY_MAX_MS,
-);
+/**
+ * The wake-retry budgets, resolved ON EACH READ rather than at import.
+ *
+ * These were module-level `const`s computed once when the module first loaded.
+ * That worked only because vitest's `vi.resetModules()` re-imported the module
+ * between tests, silently re-evaluating them. `bun:test` has no registry reset,
+ * so the first value won for the whole run: a test setting
+ * `DB_WAKE_RETRY_BUDGET_MS=1` to isolate the connect bound still waited the 8s
+ * default, and the failure read as an unbounded connect rather than as config
+ * that never took.
+ *
+ * Reading lazily removes the dependency on a test-runner feature entirely, and
+ * makes the knobs behave the way their names imply — env-overridable, not
+ * env-overridable-if-you-set-it-before-the-first-import. Same reasoning as
+ * `selectDbDriver()`.
+ *
+ * Kept as functions rather than getters so the cost is visible at the call site;
+ * they are read once per retry loop, not per iteration.
+ */
+export const dbWakeRetryBudgetMs = (): number =>
+  toFinitePositiveInt(process.env.DB_WAKE_RETRY_BUDGET_MS, DEFAULT_DB_WAKE_RETRY_BUDGET_MS);
+export const dbWakeRetryBaseMs = (): number =>
+  toFinitePositiveInt(process.env.DB_WAKE_RETRY_BASE_MS, DEFAULT_DB_WAKE_RETRY_BASE_MS);
+export const dbWakeRetryMaxMs = (): number =>
+  toFinitePositiveInt(process.env.DB_WAKE_RETRY_MAX_MS, DEFAULT_DB_WAKE_RETRY_MAX_MS);
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -383,7 +423,7 @@ const isPermanentAcquireError = (err: unknown): boolean => {
 /**
  * Wrap a pool's `connect`/`query` so a TRANSIENT acquire failure during the DB
  * wake window is retried with capped exponential backoff within
- * {@link DB_WAKE_RETRY_BUDGET_MS}. On budget exhaustion (or a permanent error)
+ * {@link dbWakeRetryBudgetMs}. On budget exhaustion (or a permanent error)
  * the LAST error is re-thrown deterministically. Applied INNER to the #339
  * single-flight so only the wake leader retries.
  *
@@ -403,7 +443,7 @@ const retryWake = (pool: Pool): Pool => {
       // Synchronous / non-promise result — pass straight through.
       return first;
     }
-    const deadline = Date.now() + DB_WAKE_RETRY_BUDGET_MS;
+    const deadline = Date.now() + dbWakeRetryBudgetMs();
     const attempt = (pending: Promise<R>, retries: number): Promise<R> =>
       pending.then(
         (value) => value,
@@ -411,7 +451,7 @@ const retryWake = (pool: Pool): Pool => {
           if (isPermanentAcquireError(err) || Date.now() >= deadline) {
             throw err;
           }
-          const backoff = Math.min(DB_WAKE_RETRY_MAX_MS, DB_WAKE_RETRY_BASE_MS * 2 ** retries);
+          const backoff = Math.min(dbWakeRetryMaxMs(), dbWakeRetryBaseMs() * 2 ** retries);
           // Don't sleep past the deadline.
           const remaining = deadline - Date.now();
           const wait = Math.max(0, Math.min(backoff, remaining));
@@ -614,9 +654,58 @@ const resolveDbPoolMax = (
 // per zone (DB_POOL_CONNECT_TIMEOUT_MS).
 const DEFAULT_DB_POOL_CONNECT_TIMEOUT_MS = 15_000;
 
+/**
+ * Build the writer pool's driver.
+ *
+ * Bun ships a native Postgres client, and the app targets Bun (ADR-0048), so
+ * prefer it there: it is native, it needs no `pg` in the bundle, and it is the
+ * one thing the compiled single executable can actually load — the same reason
+ * the deep-health Redis client prefers `Bun.RedisClient`.
+ *
+ * On Node this MUST stay `pg`. `@getknext/lib` is published, and
+ * `install-smoke.yml` proves it runs with no bun on PATH at all.
+ *
+ * Either way the result goes through the same five wrapper layers below, so the
+ * wake single-flight and activity tracking are identical on both paths. That is
+ * the entire reason the Bun driver is a pg-shaped facade rather than a second
+ * implementation (see `db/bun-sql-pool.ts`).
+ */
+const createWriterDriver = (config: {
+  connectionString: string | undefined;
+  max: number;
+  idleTimeoutMillis: number;
+  connectionTimeoutMillis: number;
+}): Pool => {
+  if (selectDbDriver() === 'bun') {
+    return createBunSqlPool(config) as unknown as Pool;
+  }
+  return new Pool(config);
+};
+
+/**
+ * Which Postgres driver this process should use.
+ *
+ * Auto-detects by default — Bun's native client when running on Bun, `pg`
+ * otherwise. `KNEXT_DB_DRIVER` pins it, and that knob is not a convenience:
+ * without it the driver is a function of the RUNTIME, so a test asserting
+ * pg-specific behaviour silently exercises the Bun path the moment the suite is
+ * run under `bun test`. That is not a hypothetical — it is how four
+ * `getDbRO()` tests started failing, with an empty list of constructed pools
+ * and nothing pointing at the cause.
+ *
+ * Pinning also makes the OTHER path reachable: both drivers can now be
+ * exercised on one machine, instead of each being testable only under the
+ * runtime that selects it.
+ */
+export const selectDbDriver = (): 'bun' | 'pg' => {
+  const pinned = process.env.KNEXT_DB_DRIVER;
+  if (pinned === 'pg' || pinned === 'bun') return pinned;
+  return bunSqlAvailable() ? 'bun' : 'pg';
+};
+
 export const getDbPool = () => {
   if (!pgPool) {
-    pgPool = new Pool({
+    pgPool = createWriterDriver({
       connectionString: process.env.DATABASE_URL,
       // #378: cap the pool at the operator-declared KNEXT_DB_POOL_MAX (min wins).
       max: resolveDbPoolMax(

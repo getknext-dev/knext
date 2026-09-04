@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, jest, mock, spyOn } from 'bun:test';
 
 /**
  * The slow-dependency discrimination instrument (cold-start ledger row 3).
@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  * fast one MUST emit none.
  */
 
-type WarnSpy = ReturnType<typeof vi.fn>;
+type WarnSpy = ReturnType<typeof mock>;
 
 const lines = (warn: WarnSpy): string[] => warn.mock.calls.map((c: unknown[]) => String(c[0]));
 
@@ -28,13 +28,13 @@ describe('@getknext/lib slow-dep emitter', () => {
   let warn: WarnSpy;
 
   beforeEach(() => {
-    warn = vi.fn();
-    vi.spyOn(console, 'warn').mockImplementation(warn as unknown as typeof console.warn);
+    warn = mock();
+    spyOn(console, 'warn').mockImplementation(warn as unknown as typeof console.warn);
     delete process.env.SLOW_DEP_LOG_MS;
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    jest.restoreAllMocks();
     delete process.env.SLOW_DEP_LOG_MS;
   });
 

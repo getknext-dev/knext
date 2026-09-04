@@ -4,12 +4,13 @@
 // repo's default `apps` project runs happy-dom, whose fetch enforces a
 // Same-Origin Policy that blocks those calls. Force the node environment so the
 // drain proof exercises real sockets, not a DOM fetch shim.
+
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
 import { spawn, spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 // Shared port plumbing (#678). waitForListeningPort REJECTS — promptly, with the
 // child's stderr — when the runtime entry exits early (the MODULE_NOT_FOUND
@@ -39,10 +40,13 @@ import { freePorts, waitForListeningPort } from './e2e-support/child-ports';
  *      positive the reviewers flagged). Without step 2 below, the CMD here fails
  *      with `ERR_MODULE_NOT_FOUND: Cannot find package '@getknext/core'` — exactly
  *      the container crash-loop.
- *   2. Replicate the Dockerfile's runtime COPY: `pnpm --filter @getknext/core
- *      --prod deploy` a self-contained @getknext/core into
- *      `<runner>/node_modules/@getknext/core` (dist + a real node_modules with
- *      prom-client/pino). This is the fix under test.
+ *   2. Install the REAL published shape: `npm pack` the three @getknext/*
+ *      workspace packages and `npm install --omit=dev` the tarballs into the
+ *      runner (the install-smoke.mjs pattern). The old `pnpm --prod deploy`
+ *      replication died with the legacy Dockerfile it mirrored — pnpm left
+ *      the workspace entirely (fe28ad9c), and this gate's subject is the
+ *      LEGACY standalone supervisor, whose only remaining consumers get it
+ *      via the published packages. This is the fix under test.
  *   3. Run the EXACT Dockerfile CMD (`node -e import('@getknext/core/internal/node-server')`)
  *      from the runner root, pointed at a slow fixture server via
  *      STANDALONE_SERVER_PATH, send SIGTERM mid-inflight-request, and assert the
@@ -66,7 +70,26 @@ import { freePorts, waitForListeningPort } from './e2e-support/child-ports';
  */
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const APP_DIR = __dirname;
+/**
+ * The app whose standalone build supplies the runner environment.
+ *
+ * Defaults to this directory for a local run, but is overridable because
+ * file-manager STOPPED producing a standalone tree when ADR-0048 made vinext
+ * its build. The subject of this gate is the node-server SUPERVISOR, not any
+ * particular app — the app's own `server.js` is replaced by the slow fixture
+ * via STANDALONE_SERVER_PATH — so it needs *a* standalone tree, and
+ * `apps/db-demo` is the one that still emits one.
+ *
+ * Without this the gate is worse than absent: with KNEXT_REQUIRE_STANDALONE=1
+ * it hard-fails on a build that no longer exists, and without it, it silently
+ * skips and reports green while testing nothing.
+ */
+const APP_DIR = process.env.KNEXT_SIGTERM_APP_DIR
+  ? resolve(process.env.KNEXT_SIGTERM_APP_DIR)
+  : __dirname;
+
+/** The app's directory name, used to find its entry inside the mirror. */
+const APP_NAME = basename(APP_DIR);
 const SLOW_SERVER = resolve(__dirname, '__fixtures__/slow-standalone-server.mjs');
 
 // PORTS ARE OS-ASSIGNED, NEVER LITERAL (#678). "Unlikely to collide" is not the
@@ -122,7 +145,7 @@ const RUNTIME_IMPORT = "import('@getknext/core/internal/node-server')";
  * Locate the standalone "tracing-root mirror" that contains the app's server.js.
  * Next preserves paths relative to the auto-detected tracing root (the repo
  * root, by lockfile), so the app entry lands at
- * `.next/standalone/<rel>/apps/file-manager/server.js`. We search for it rather
+ * `.next/standalone/<rel>/apps/<app>/server.js`. We search for it rather
  * than hardcoding `<rel>` (which differs between a plain checkout and a git
  * worktree).
  */
@@ -130,10 +153,10 @@ function findStandaloneMirrorRoot(): string | null {
   const standaloneDir = resolve(APP_DIR, '.next/standalone');
   if (!existsSync(standaloneDir)) return null;
   // Candidate 1: single-app / repo-root layout → apps/file-manager/server.js
-  const direct = join(standaloneDir, 'apps/file-manager/server.js');
+  const direct = join(standaloneDir, `apps/${APP_NAME}/server.js`);
   if (existsSync(direct)) return standaloneDir;
   // Candidate 2: worktree/nested-root layout → <rel>/apps/file-manager/server.js
-  const found = spawnSync('find', [standaloneDir, '-path', '*/apps/file-manager/server.js'], {
+  const found = spawnSync('find', [standaloneDir, '-path', `*/apps/${APP_NAME}/server.js`], {
     encoding: 'utf8',
   });
   const line = found.stdout.split('\n').find((l) => l.trim().length > 0);
@@ -181,36 +204,56 @@ beforeAll(() => {
   //    the only @getknext/core it can find is the one we deploy into it (step 2).
   runnerRoot = mkdtempSync(join(tmpdir(), 'knext-shipped-runner-'));
 
-  // 2. Replicate the Dockerfile runtime COPY: a self-contained @getknext/core with
-  //    its prod deps (prom-client, pino) at node_modules/@getknext/core. We run the
-  //    SAME `pnpm deploy` the Dockerfile uses so the test exercises the actual
-  //    fix, not a hand-assembled stand-in.
-  const deployDir = mkdtempSync(join(tmpdir(), 'knext-core-deploy-'));
+  // 2. Install the real published shape (install-smoke.mjs pattern): pack the
+  //    three workspace packages — core depends on lib and db, so all three or
+  //    npm 404s the missing member — and npm-install the tarballs into the
+  //    runner. Flat npm layout: @getknext/core AND its prod deps (prom-client,
+  //    pino) all land under <runner>/node_modules, exactly how the CMD's
+  //    resolution sees them for a consumer of the published packages.
   const repoRoot = resolve(APP_DIR, '../..');
-  const dep = spawnSync(
-    'pnpm',
-    ['--filter', '@getknext/core', '--prod', 'deploy', '--legacy', deployDir],
-    { cwd: repoRoot, encoding: 'utf8', env: childEnv() },
-  );
+  const packDirs: string[] = [];
+  const tarballs: string[] = [];
+  for (const pkg of ['packages/lib', 'packages/db', 'packages/kn-next']) {
+    // `bun pm pack`, NOT `npm pack`: core depends on lib/db via `workspace:^`,
+    // which npm leaves verbatim (the install then dies with
+    // EUNSUPPORTEDPROTOCOL) while bun rewrites it to a real version — the
+    // same reason install-smoke.mjs packs with bun.
+    // Rooted at tmpdir() directly — the #880 guard scans mkdtemp call sites
+    // and cannot see that a nested parent is itself temp-rooted.
+    const dest = mkdtempSync(join(tmpdir(), 'knext-core-pack-'));
+    const packed = spawnSync('bun', ['pm', 'pack', '--destination', dest], {
+      cwd: join(repoRoot, pkg),
+      encoding: 'utf8',
+      env: childEnv(),
+    });
+    const tgz = readdirSync(dest)
+      .filter((f) => f.endsWith('.tgz'))
+      .map((f) => join(dest, f))
+      .sort()
+      .at(-1);
+    if (packed.status !== 0 || !tgz) {
+      throw new Error(`bun pm pack failed for ${pkg}. stderr:\n${packed.stderr}`);
+    }
+    packDirs.push(dest);
+    tarballs.push(tgz);
+  }
+  const inst = spawnSync('npm', ['install', '--omit=dev', '--no-audit', '--no-fund', ...tarballs], {
+    cwd: runnerRoot,
+    encoding: 'utf8',
+    env: childEnv(),
+  });
+  for (const d of packDirs) rmSync(d, { recursive: true, force: true });
   if (
-    !existsSync(join(deployDir, 'dist/adapters/node-server.js')) ||
-    !existsSync(join(deployDir, 'node_modules/prom-client')) ||
-    !existsSync(join(deployDir, 'node_modules/pino'))
+    inst.status !== 0 ||
+    !existsSync(join(runnerRoot, 'node_modules/@getknext/core/dist/adapters/node-server.js')) ||
+    !existsSync(join(runnerRoot, 'node_modules/prom-client')) ||
+    !existsSync(join(runnerRoot, 'node_modules/pino'))
   ) {
     throw new Error(
-      `pnpm deploy did not produce a self-contained @getknext/core ` +
-        `(node-server.js + prom-client + pino). stderr:\n${dep.stderr}`,
+      `npm install of the packed @getknext/* tarballs did not produce a runnable ` +
+        `@getknext/core (node-server.js + prom-client + pino). stderr:\n${inst.stderr}`,
     );
   }
-  // verbatimSymlinks: KEEP pnpm's RELATIVE `.pnpm/…` symlinks intact. The default
-  // (false) rewrites them to ABSOLUTE paths pointing back at deployDir, which we
-  // then delete → dangling links → MODULE_NOT_FOUND for prom-client/pino. The
-  // Dockerfile `COPY` preserves them verbatim, so we must too.
-  cpSync(deployDir, join(runnerRoot, 'node_modules/@getknext/core'), {
-    recursive: true,
-    verbatimSymlinks: true,
-  });
-  rmSync(deployDir, { recursive: true, force: true });
 }, 180_000);
 
 afterAll(() => {

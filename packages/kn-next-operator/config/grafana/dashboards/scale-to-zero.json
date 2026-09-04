@@ -20,7 +20,7 @@
   "liveNow": false,
   "panels": [
     {
-      "title": "Replica count 0\u2192N (kube-state-metrics)",
+      "title": "Replica count 0→N (kube-state-metrics)",
       "type": "timeseries",
       "gridPos": {
         "h": 8,
@@ -56,7 +56,7 @@
       "description": "Replica count comes from kube-state-metrics (the CLUSTER), NOT from knext. Requires kube-state-metrics scraped by the same Prometheus. Knative revision Deployments are named <service>-<revision>-deployment; the regex matches the app."
     },
     {
-      "title": "Cold starts (rate /s)",
+      "title": "Pods that have paid a cold start",
       "type": "stat",
       "gridPos": {
         "h": 8,
@@ -86,15 +86,15 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(knext_coldstart_total{app=~\"$app\"}[$__rate_interval]))",
-          "legendFormat": "cold starts",
+          "expr": "count by (app) (knext_bunexec_startup_duration_seconds{app=~\"$app\"})",
+          "legendFormat": "{{app}}",
           "refId": "A"
         }
       ],
-      "description": "Scale-to-zero wakes: cold-start count (app boot / first-request wake) from the knext counter."
+      "description": "Each live pod recorded knext_bunexec_startup_duration_seconds exactly once, at the moment it bound its listeners. Under scale-to-zero every pod IS a cold start, so this counts them. (Was rate(knext_coldstart_total) - a counter from the retired node-server path; the compiled runtime does not emit it.)"
     },
     {
-      "title": "Cold-start latency p50 / p99 (s)",
+      "title": "Cold-start duration - median / worst (s)",
       "type": "timeseries",
       "gridPos": {
         "h": 8,
@@ -122,17 +122,17 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(knext_coldstart_duration_seconds_bucket{app=~\"$app\"}[$__rate_interval])))",
+          "expr": "quantile by (app) (0.5, knext_bunexec_startup_duration_seconds{app=~\"$app\"})",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(knext_coldstart_duration_seconds_bucket{app=~\"$app\"}[$__rate_interval])))",
-          "legendFormat": "p99",
+          "expr": "max by (app) (knext_bunexec_startup_duration_seconds{app=~\"$app\"})",
+          "legendFormat": "max",
           "refId": "B"
         }
       ],
-      "description": "Cold-start wake latency quantiles from the knext cold-start duration histogram."
+      "description": "knext_bunexec_startup_duration_seconds is a gauge set ONCE per process (process.uptime() at listener bind), so the fleet distribution is already one sample per pod and quantile()/max() over the gauge is the correct aggregation - not histogram_quantile over buckets that do not exist."
     },
     {
       "title": "DB wake rate by role (/s)",
@@ -168,7 +168,7 @@
           "refId": "A"
         }
       ],
-      "description": "Scale-to-zero Postgres 0\u21921 wakes (first connect) by pool role, from the knext db-wake counter."
+      "description": "NODE-LEGACY EMITTER: the knext db-wake series (knext_db_wake_total, knext_db_wake_duration_seconds) is registered by the APP (packages/kn-next/src/adapters/metrics.ts, wired from instrumentation) into a prom-client registry served on the APP port. The shipped PodMonitor scrapes :9091 only, so this panel is EMPTY unless you also scrape your app's /api/metrics route."
     },
     {
       "title": "DB wake latency p50 / p99 by role (s)",
@@ -209,7 +209,7 @@
           "refId": "B"
         }
       ],
-      "description": "DB 0\u21921 wake / first-connect latency quantiles from the knext db-wake duration histogram."
+      "description": "NODE-LEGACY EMITTER: the knext db-wake series (knext_db_wake_total, knext_db_wake_duration_seconds) is registered by the APP (packages/kn-next/src/adapters/metrics.ts, wired from instrumentation) into a prom-client registry served on the APP port. The shipped PodMonitor scrapes :9091 only, so this panel is EMPTY unless you also scrape your app's /api/metrics route."
     }
   ],
   "refresh": "30s",
@@ -269,7 +269,7 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "knext \u2014 Scale-to-zero lifecycle",
+  "title": "knext — Scale-to-zero lifecycle",
   "uid": "knext-scale-to-zero",
   "version": 1,
   "weekStart": ""

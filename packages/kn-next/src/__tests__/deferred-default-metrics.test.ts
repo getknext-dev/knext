@@ -22,10 +22,10 @@
  *  - the SIGTERM drain wiring in node-server.ts is untouched.
  */
 
+import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { Registry } from "prom-client";
-import { describe, expect, it } from "vitest";
 import {
     createDeferredDefaultMetrics,
     waitForChildServing,

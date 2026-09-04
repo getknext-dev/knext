@@ -1,7 +1,8 @@
+import { afterEach, describe, expect, it, jest, mock } from "bun:test";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { waitFor } from "../../../../tests/helpers/bun-test-helpers";
 import { registerDbPoolDrain } from "../adapters/db-drain";
 import {
     clearShutdownDrains,
@@ -29,12 +30,12 @@ import {
 
 /** A faithful child double: a real EventEmitter (fires `on` + `once`) + kill(). */
 class FakeChild extends EventEmitter {
-    kill = vi.fn(() => true);
+    kill = mock(() => true);
 }
 
 afterEach(() => {
     clearShutdownDrains();
-    vi.restoreAllMocks();
+    jest.restoreAllMocks();
 });
 
 describe("isShuttingDown()", () => {
@@ -45,7 +46,7 @@ describe("isShuttingDown()", () => {
             child,
             closables: [],
             graceMs: 10_000,
-            exit: vi.fn(),
+            exit: mock(),
         });
         expect(isShuttingDown()).toBe(true);
     });
@@ -55,7 +56,7 @@ describe("isShuttingDown()", () => {
             child: new FakeChild(),
             closables: [],
             graceMs: 10_000,
-            exit: vi.fn(),
+            exit: mock(),
         });
         expect(isShuttingDown()).toBe(true);
         clearShutdownDrains();
@@ -69,14 +70,14 @@ describe("child-exit does not preempt the DB-pool drain (#449)", () => {
 
         // Async drain (a real pool.end() takes ticks) — records when it settled.
         let drainDone = false;
-        const drain = vi.fn(async () => {
+        const drain = mock(async () => {
             await new Promise((r) => setTimeout(r, 5));
             drainDone = true;
         });
         registerShutdownDrain(drain);
 
-        const gracefulExit = vi.fn();
-        const moduleExit = vi.fn(); // stands in for process.exit() in node-server
+        const gracefulExit = mock();
+        const moduleExit = mock(); // stands in for process.exit() in node-server
 
         // The supervisor's module-level `nextProc.on("exit")` — GUARDED by the fix.
         child.on("exit", (code: number) => {
@@ -104,7 +105,7 @@ describe("child-exit does not preempt the DB-pool drain (#449)", () => {
         expect(drainDone).toBe(false);
 
         // Let the async drain settle.
-        await vi.waitFor(() => expect(gracefulExit).toHaveBeenCalledTimes(1));
+        await waitFor(() => expect(gracefulExit).toHaveBeenCalledTimes(1));
 
         // The drain completed BEFORE the exit, and the module-level handler never
         // called process.exit — no preemption.
@@ -119,16 +120,16 @@ describe("child-exit does not preempt the DB-pool drain (#449)", () => {
 
         // The real DB-pool drain (db-drain.ts) with injected pool closers, so we
         // assert the pools are actually end()'d — the exact coverage gap #449 named.
-        const closeDbPool = vi.fn(async () => {
+        const closeDbPool = mock(async () => {
             await new Promise((r) => setTimeout(r, 5));
         });
-        const closeDbPoolRO = vi.fn(async () => {});
+        const closeDbPoolRO = mock(async () => {});
         registerDbPoolDrain({
             loadClients: async () => ({ closeDbPool, closeDbPoolRO }),
         });
 
-        const gracefulExit = vi.fn();
-        const moduleExit = vi.fn();
+        const gracefulExit = mock();
+        const moduleExit = mock();
         child.on("exit", (code: number) => {
             if (isShuttingDown()) {
                 return;
@@ -144,7 +145,7 @@ describe("child-exit does not preempt the DB-pool drain (#449)", () => {
         });
         child.emit("exit", 0);
 
-        await vi.waitFor(() => expect(gracefulExit).toHaveBeenCalledTimes(1));
+        await waitFor(() => expect(gracefulExit).toHaveBeenCalledTimes(1));
 
         // Both pools were closed, and the exit came only after — no preemption.
         expect(closeDbPool).toHaveBeenCalledTimes(1);
@@ -181,7 +182,7 @@ describe("child-exit does not preempt the DB-pool drain (#449)", () => {
 
     it("still exits via the module-level handler on an UNEXPECTED child crash (no shutdown in progress)", () => {
         const child = new FakeChild();
-        const moduleExit = vi.fn();
+        const moduleExit = mock();
         child.on("exit", (code: number) => {
             if (isShuttingDown()) {
                 return;
@@ -200,10 +201,10 @@ describe("child-exit does not preempt the DB-pool drain (#449)", () => {
 describe("gracefulShutdown re-entrancy (#494)", () => {
     it("ignores a second signal mid-shutdown — one kill, one timer, one drain, one exit", async () => {
         const child = new FakeChild();
-        const drain = vi.fn(async () => {});
+        const drain = mock(async () => {});
         registerShutdownDrain(drain);
-        const exit = vi.fn();
-        const setTimeoutFn = vi.fn(() => ({ unref() {} }));
+        const exit = mock();
+        const setTimeoutFn = mock(() => ({ unref() {} }));
 
         const opts = {
             child,
@@ -221,7 +222,7 @@ describe("gracefulShutdown re-entrancy (#494)", () => {
         expect(setTimeoutFn).toHaveBeenCalledTimes(1);
 
         child.emit("exit", 0);
-        await vi.waitFor(() => expect(exit).toHaveBeenCalledTimes(1));
+        await waitFor(() => expect(exit).toHaveBeenCalledTimes(1));
         expect(drain).toHaveBeenCalledTimes(1);
         expect(exit).toHaveBeenCalledWith(0);
     });

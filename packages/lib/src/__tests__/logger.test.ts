@@ -1,4 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, jest, mock } from 'bun:test';
+import { stubEnv, unstubAllEnvs } from '../../../../tests/helpers/bun-test-helpers';
+import { resetClients } from '../clients';
 
 // The shared @getknext/lib logger (`../logger`) builds a pino instance at module
 // load. In production it writes raw JSON (no pino-pretty worker); we pin its
@@ -14,23 +16,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 function forceProdEnv() {
   // Force the raw-JSON branch — no pino-pretty transport worker under vitest.
-  vi.stubEnv('NODE_ENV', 'production');
-  vi.stubEnv('LOG_LEVEL', undefined);
-  vi.stubEnv('KN_APP_NAME', undefined);
+  stubEnv('NODE_ENV', 'production');
+  stubEnv('LOG_LEVEL', undefined);
+  stubEnv('KN_APP_NAME', undefined);
 }
 
 describe('@getknext/lib logger — instance contract', () => {
   beforeEach(() => {
-    vi.resetModules();
+    resetClients();
     forceProdEnv();
   });
 
   afterEach(() => {
-    vi.unstubAllEnvs();
+    unstubAllEnvs();
   });
 
   it('constructs and exports a usable logger without throwing', async () => {
-    const { logger } = await import('../logger');
+    // `buildLogger()`, not the `logger` singleton: the singleton is built once at
+    // module evaluation, and bun cannot re-evaluate a module the way
+    // `vi.resetModules()` did. Reading the singleton here would assert against
+    // whatever env the FIRST test in the file happened to set.
+    const logger = (await import('../logger')).buildLogger();
     expect(logger).toBeDefined();
     expect(typeof logger.info).toBe('function');
     // Emitting must not throw (writes structured JSON to the default dest).
@@ -38,8 +44,8 @@ describe('@getknext/lib logger — instance contract', () => {
   });
 
   it('honors LOG_LEVEL from the environment', async () => {
-    vi.stubEnv('LOG_LEVEL', 'warn');
-    const { logger } = await import('../logger');
+    stubEnv('LOG_LEVEL', 'warn');
+    const logger = (await import('../logger')).buildLogger();
     expect(logger.level).toBe('warn');
     // Level filtering is real: info is below the configured floor.
     expect(logger.isLevelEnabled('warn')).toBe(true);
@@ -47,33 +53,33 @@ describe('@getknext/lib logger — instance contract', () => {
   });
 
   it('defaults to info level when LOG_LEVEL is unset', async () => {
-    const { logger } = await import('../logger');
+    const logger = (await import('../logger')).buildLogger();
     expect(logger.level).toBe('info');
   });
 
   it('carries the load-bearing base fields (app, env)', async () => {
-    vi.stubEnv('KN_APP_NAME', 'zone-checkout');
-    const { logger } = await import('../logger');
+    stubEnv('KN_APP_NAME', 'zone-checkout');
+    const logger = (await import('../logger')).buildLogger();
     const base = logger.bindings();
     expect(base.app).toBe('zone-checkout');
     expect(base.env).toBe('production');
   });
 
   it('falls back to app="kn-next" when KN_APP_NAME is unset', async () => {
-    const { logger } = await import('../logger');
+    const logger = (await import('../logger')).buildLogger();
     expect(logger.bindings().app).toBe('kn-next');
   });
 });
 
 describe('@getknext/lib logger — serialization + redaction contract', () => {
   beforeEach(() => {
-    vi.resetModules();
+    resetClients();
     forceProdEnv();
   });
 
   afterEach(() => {
-    vi.unstubAllEnvs();
-    vi.restoreAllMocks();
+    unstubAllEnvs();
+    jest.restoreAllMocks();
   });
 
   it('emits structured JSON with a string level label and redacts secrets', async () => {
@@ -85,14 +91,14 @@ describe('@getknext/lib logger — serialization + redaction contract', () => {
     const lines: string[] = [];
     let capturedOptions: Record<string, unknown> | undefined;
 
-    vi.doMock('pino', () => ({
+    mock.module('pino', () => ({
       default: (options: Record<string, unknown>) => {
         capturedOptions = options;
         return realPino(options, { write: (s: string) => lines.push(s) });
       },
     }));
 
-    const { logger } = await import('../logger');
+    const logger = (await import('../logger')).buildLogger();
     logger.info({ password: 'hunter2', token: 'abc', keep: 'visible' }, 'hello');
 
     expect(capturedOptions).toBeDefined();
@@ -108,6 +114,9 @@ describe('@getknext/lib logger — serialization + redaction contract', () => {
     expect(record.token).toBe('[Redacted]');
     expect(record.keep).toBe('visible');
 
-    vi.doUnmock('pino');
+    // No `doUnmock`: bun registers module mocks for the whole run and cannot
+    // unregister them (`mock.restore()` restores spies only). Safe here because
+    // the runner gives each FILE its own process and nothing in this one runs
+    // after this test — the mock dies with the process.
   });
 });

@@ -1,8 +1,8 @@
+import { afterAll, describe, expect, it } from 'bun:test';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
 import { MUTATION_MARKER } from '../scripts/lib/mutation-harness.mjs';
 import { scanForResidue, scanTracked } from '../scripts/scan-mutation-residue.mjs';
 import { auditBlockingGate } from './helpers/blocking-gate';
@@ -38,7 +38,9 @@ function makeRepo(): string {
 
 function commitAll(dir: string): void {
   execFileSync('git', ['add', '-A'], { cwd: dir, stdio: 'pipe' });
-  execFileSync('git', ['commit', '-qm', 'fixture'], { cwd: dir, stdio: 'pipe' });
+  // `--no-gpg-sign`: see compat-window-fingerprint — a fixture repo must not
+  // depend on the developer's commit-signing configuration.
+  execFileSync('git', ['commit', '--no-gpg-sign', '-qm', 'fixture'], { cwd: dir, stdio: 'pipe' });
 }
 
 afterAll(() => {

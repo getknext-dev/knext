@@ -4,7 +4,7 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
-      "outputs": [".next/**", "!.next/cache/**", "dist/**"],
+      "outputs": [".next/**", "!.next/cache/**", "dist/**", ".vercel/output/**", ".output/**"],
       "env": [
         "DATABASE_URL",
         "MINIO_*",
@@ -12,7 +12,8 @@
         "DASHBOARD_URL",
         "USERS_URL",
         "ASSET_PREFIX",
-        "REDIS_URL"
+        "REDIS_URL",
+        "NITRO_PRESET"
       ]
     },
     "lint": {},

@@ -1,8 +1,8 @@
+import { afterAll, describe, expect, it } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
 
 /**
  * S1 / #545 — the COMPAT-WINDOW FINGERPRINT.
@@ -276,7 +276,11 @@ describe('compat-window fingerprint — suite provenance is RECORDED, not frozen
     git('config', 'user.email', 'test@example.com');
     git('config', 'user.name', 'test');
     git('add', '-A');
-    git('commit', '-qm', 'harness');
+    // `--no-gpg-sign`: the fixture repo must not inherit the DEVELOPER's
+    // `commit.gpgsign=true`. Without it this harness fails on any machine
+    // that signs commits — green in CI, red for the contributor, and the
+    // error surfaces as an opaque `Command failed: git ... commit`.
+    git('commit', '--no-gpg-sign', '-qm', 'harness');
     return { dir, head: git('rev-parse', 'HEAD').trim() };
   }
 
@@ -343,7 +347,7 @@ describe('compat-window fingerprint — suite provenance is RECORDED, not frozen
     // A DIFFERENT suite commit and a DIFFERENT next tarball…
     const b = fakeNextJsCheckout();
     writeFileSync(join(b.dir, 'run-tests.js'), 'console.log("harness v2");\n');
-    execFileSync('git', ['-C', b.dir, 'commit', '-aqm', 'retag']);
+    execFileSync('git', ['-C', b.dir, 'commit', '--no-gpg-sign', '-aqm', 'retag']);
     const tarballB = join(tempDir('knext-fp-nexttgz-b-'), 'next.tgz');
     writeFileSync(tarballB, 'pretend-next-tarball-v2');
     const withB = withProvenance(repoRoot, tarballsDir, b.dir, tarballB);

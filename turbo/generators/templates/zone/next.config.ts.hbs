@@ -1,29 +1,38 @@
-import path from "node:path";
 import type { NextConfig } from "next";
 
+/**
+ * {{ name }} — Next.js options.
+ *
+ * Deliberately minimal. knext builds this app with vinext (see
+ * `vite.config.ts`), which reads your Next config for app-level options —
+ * redirects, rewrites, headers, image settings — but does NOT use the
+ * webpack/turbopack build pipeline.
+ *
+ * Three things that belong in a Next config elsewhere do NOT belong here:
+ *
+ *   - `output: 'standalone'` — there is no standalone server. The build emits
+ *     a Nitro `.output` that gets compiled into a single Bun executable.
+ *   - `adapterPath` — the official Next Deployment Adapter hooks are a
+ *     turbopack/webpack mechanism. vinext is Vite/rolldown and never calls
+ *     them, so pointing at an adapter here would silently do nothing.
+ *   - `serverExternalPackages` for `@getknext/lib` — that existed to stop
+ *     webpack layering from duplicating module state. There are no webpack
+ *     layers here.
+ *
+ * Bytecode: nothing to configure. `bun build --compile --bytecode` bakes V8
+ * bytecode into the binary itself, so there is no `NODE_COMPILE_CACHE`, no
+ * cache directory to mount, and no warm-up step. It ships inside the artifact.
+ */
 const nextConfig: NextConfig = {
-  // Required: self-contained server.js output for the knext container image.
-  output: "standalone",
-  // Next.js Multi-Zone configuration.
-  basePath: "/{{ name }}",
-  // kn-next deploy sets ASSET_PREFIX so browsers load static assets from the
-  // storage bucket; unset in `next dev`, so local development serves them locally.
-  assetPrefix: process.env.ASSET_PREFIX || "",
-  // kn-next deploy sets NEXT_DEPLOYMENT_ID (the deploy tag). Pinning the build
-  // ID to it keeps the uploaded asset paths and the deployed build in lock-step,
-  // and deploymentId pins each browser session to the build it loaded (#93).
-  generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID || null,
-  deploymentId: process.env.NEXT_DEPLOYMENT_ID || undefined,
-  // The knext adapter (thin re-export in ./next-adapter.ts). Beyond forcing
-  // standalone output, its modifyConfig injects the edge-scoped webpack
-  // IgnorePlugin that excludes src/instrumentation-node.ts from the EDGE bundle
-  // (#342/#356, ADR-0031) — do NOT hand-write that webpack hook here; the
-  // adapter composes the fence after any webpack fn you add yourself.
-  adapterPath: path.resolve(import.meta.dirname, "next-adapter.ts"),
-  // ADR-0027 / #352: NEVER add @getknext/lib to serverExternalPackages — it must
-  // stay bundled (not externalized) so the globalThis-anchored seam state
-  // (`Symbol.for('knext.lib.*')`) survives the standalone bundle's webpack-layer
-  // duplication.
+    assetPrefix: process.env.ASSET_PREFIX || "",
+    // Redis-backed ISR/data cache (multi-pod consistency on Knative). Without
+    // this, the app still serves 200s — with NO cache at all: every render a
+    // full recompute and the provisioned Redis unused, which is why the gap
+    // shipped silently once. The handler falls back to in-memory when
+    // REDIS_URL is unset (local dev), so wiring it costs nothing.
+    cacheHandler: new URL("./cache-handler.js", import.meta.url).pathname,
+    // Per-pod memory caches diverge across pods — Redis is the one cache.
+    cacheMaxMemorySize: 0,
 };
 
 export default nextConfig;

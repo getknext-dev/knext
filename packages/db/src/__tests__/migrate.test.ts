@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import {
   DEFAULT_MIGRATIONS_DIR,
   DEFAULT_SCHEMA_PATH,
@@ -143,10 +143,10 @@ describe('@getknext/db/migrate — runMigrations()', () => {
   });
 
   function spyDeps(migrateImpl?: (db: unknown, folder: string) => Promise<void>) {
-    const close = vi.fn(async () => {});
+    const close = mock(async () => {});
     const db = { __db: true };
-    const connect = vi.fn(async (_url: string) => ({ db, close }));
-    const migrate = vi.fn(migrateImpl ?? (async () => {}));
+    const connect = mock(async (_url: string) => ({ db, close }));
+    const migrate = mock(migrateImpl ?? (async () => {}));
     const deps: RunMigrationsDeps = { connect, migrate };
     return { deps, connect, migrate, close, db };
   }

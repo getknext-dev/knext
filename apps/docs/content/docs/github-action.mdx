@@ -27,10 +27,12 @@ jobs:
           username: ${{ secrets.REGISTRY_USER }}
           password: ${{ secrets.REGISTRY_TOKEN }}
 
-      - uses: getknext-dev/knext@v1
+      - uses: getknext-dev/knext/packages/kn-next-action@v1
         with:
           kubeconfig: ${{ secrets.KUBECONFIG_B64 }}
+          namespace: acme
           registry: registry.example.com/acme
+          registry-token: ${{ secrets.REGISTRY_TOKEN }}
           skip-upload: 'true'
 ```
 
@@ -72,10 +74,12 @@ whichever action your provider already publishes:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.GCP_SA }}
 
-      - uses: getknext-dev/knext@v1
+      - uses: getknext-dev/knext/packages/kn-next-action@v1
         with:
           kubeconfig: ${{ secrets.KUBECONFIG_B64 }}
+          namespace: acme
           registry: registry.example.com/acme
+          registry-token: ${{ secrets.REGISTRY_TOKEN }}
           bucket: acme-assets
 ```
 
@@ -89,36 +93,85 @@ does not care which you use; it only needs the provider CLI to be authenticated 
 
 ## Getting the kubeconfig
 
-Base64-encode it and store it as an encrypted repository secret:
+Do not use your personal admin kubeconfig. The action **refuses** one — see below — so the fastest
+path is also the correct one:
 
 ```bash title="shell"
-base64 -w0 < ~/.kube/config    # macOS: base64 -i ~/.kube/config
+kn-next init-ci --namespace my-app
 ```
 
-Paste the output into **Settings → Secrets and variables → Actions** as `KUBECONFIG_B64`.
+That writes two files and touches nothing in your cluster:
+
+- `.github/workflows/knext-deploy.yml` — the workflow, with every secret it needs documented at the top
+- `knext-ci-rbac.yaml` — a ServiceAccount, a Role and a RoleBinding
+
+Read the manifest, then apply it yourself:
+
+```bash title="shell"
+kubectl apply -f knext-ci-rbac.yaml
+```
+
+Build a kubeconfig from the `knext-deployer` ServiceAccount's token, base64-encode it, and store it
+as an encrypted repository secret under **Settings → Secrets and variables → Actions**.
+
+```bash title="shell"
+base64 -w0 < ci-kubeconfig.yaml    # macOS: base64 -i ci-kubeconfig.yaml
+```
+
+### What the credential can actually do
+
+This is the whole Role. There is no second page:
+
+```yaml title="knext-ci-rbac.yaml (excerpt)"
+rules:
+  - apiGroups:
+      - apps.kn-next.dev
+    resources:
+      - nextapps
+    verbs:
+      - get
+      - list
+      - create
+      - patch
+      - update
+```
+
+No `delete`, so a leaked token cannot remove your app. No `secrets`, so it cannot read your database
+password. No Deployments, Services or Pods at all.
+
+That is possible because deploying is *writing one object*. The operator running in your cluster
+watches for it and does everything else — Knative configuration, autoscaling, networking. CI never
+needs to touch any of it.
 
 <Callout type="warn">
-**Do not reuse your personal admin kubeconfig.** Create a ServiceAccount scoped to the namespace you
-deploy into and build a kubeconfig from its token. This action never needs cluster-admin, and a CI
-secret is a wider blast radius than a laptop.
+**An over-broad kubeconfig is refused, not merely discouraged.** On startup the action asks your
+cluster what the credential can do. If it can read Secrets, act on Deployments, or carries a
+wildcard rule, the job fails and prints the Role above instead of deploying. Asking for less than
+you are offered is the point — a CI secret has a wider blast radius than a laptop.
+
+If your cluster's authorizer cannot answer that question, the action fails rather than guessing. A
+check that passes when it cannot see is not a check. `skip-credential-preflight: true` exists for
+that case, and turns the check off rather than satisfying it.
 </Callout>
 
 ## Inputs
 
 | Input | Required | Default | Notes |
 |---|---|---|---|
-| `kubeconfig` | **yes** | — | Base64-encoded, scoped to the target cluster |
-| `registry` | no | from config | Log in separately with `docker/login-action` |
-| `namespace` | no | `default` | |
-| `tag` | no | timestamp | Prefer `${{ github.sha }}` for traceability |
-| `bucket` | no | from config | |
-| `skip-upload` | no | `false` | `true` = the credential-free path |
-| `dry-run` | no | `false` | Prints the `NextApp` CR, applies nothing |
+| `kubeconfig` | **yes** | — | Base64-encoded, from the scoped ServiceAccount |
+| `namespace` | **yes** | — | No default: it is what bounds the credential's blast radius |
+| `registry` | **yes** | — | Registry host and repository, e.g. `ghcr.io/acme/app` |
+| `registry-token` | no | — | On GHCR, `github.token` suffices |
+| `registry-username` | no | `github.actor` | |
+| `auth` | no | `kubeconfig` | Reserved for short-lived cloud credentials later |
+| `dry-run` | no | `false` | Prints the `NextApp` resource, applies nothing |
 | `working-directory` | no | `.` | Where `kn-next.config.ts` lives |
 | `doctor` | no | `true` | Read-only preflight; fails fast on an unready cluster |
+| `skip-credential-preflight` | no | `false` | Turns off the credential check. Read the callout above first |
 
-**Output:** `url` — the deployed app URL as reported by the cluster. Empty on a dry run, because a
-dry run applies nothing and there is no URL to report.
+The action sets no outputs. The deployed URL is reported by the cluster — read it with
+`kubectl get ksvc -n <namespace>`, or `kn-next status`. An output that was empty on every dry run
+and unreliable otherwise would be worse than none.
 
 ## Preview deploys on pull requests
 
@@ -135,9 +188,11 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - run: npm ci
-      - uses: getknext-dev/knext@v1
+      - uses: getknext-dev/knext/packages/kn-next-action@v1
         with:
           kubeconfig: ${{ secrets.KUBECONFIG_B64 }}
+          namespace: acme
+          registry: registry.example.com/acme
           dry-run: 'true'
 ```
 

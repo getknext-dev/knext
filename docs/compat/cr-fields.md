@@ -29,6 +29,7 @@ Every field the CLI can emit is defined by the bundled CRD.
 | `metadata.name` | yes |
 | `metadata.namespace` | yes |
 | `spec` | yes |
+| `spec.build` | yes |
 | `spec.buildId` | yes |
 | `spec.cache` | yes |
 | `spec.cache.keyPrefix` | yes |

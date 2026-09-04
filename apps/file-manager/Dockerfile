@@ -1,233 +1,167 @@
-# Stage 1: Build Next.js app with standalone output
+# syntax=docker/dockerfile:1
 #
-# Base image is DIGEST-PINNED (not the floating node:22-alpine tag) so the CVE
-# surface of the image we sign cannot change under us via an unreviewed upstream
-# push. The human-readable tag is kept in this comment block (Docker rejects
-# trailing/inline comments on a FROM line); refresh both the digest and this
-# comment together when bumping. Resolve a new digest with:
-#   docker buildx imagetools inspect node:22-alpine
-# Enforced by scripts/check-base-images-pinned.sh (CI: base-image-pin-guard).
-FROM node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2 AS builder
-# Reproducible-build input (best effort): the CI supply-chain workflow passes the
-# commit time here. Declared so build-push-action doesn't warn on an unknown ARG.
-# NOT yet a full reproducibility guarantee — see docs/security/threat-model.md.
-ARG SOURCE_DATE_EPOCH
-ENV PNPM_HOME="/pnpm"
-ENV PATH="$PNPM_HOME:$PATH"
-# PIN pnpm to the version in the root package.json's `packageManager` field.
+# file-manager — vinext single-executable image (ADR-0048).
 #
-# This was `npm install -g pnpm` — unpinned — which meant every image build
-# installed whatever pnpm was latest at that moment. It broke without a single
-# repo change when pnpm shipped a release that requires `@pnpm/exe` native
-# binaries to be recorded in the lockfile: the committed lockfile was generated
-# by 10.4.1 and has none, so `--frozen-lockfile` below failed with
-# "Cannot verify the identity of the @pnpm/exe.linux-x64 native binary".
+# Replaces the multi-stage node/standalone image. What that one needed and this
+# one does not: a package manager in the runtime layer, a `node_modules` deploy, a separate
+# `sharp` runtime stage, and the baked V8 compile cache
+# (`scripts/warm-compile-cache.sh`). None of it survives, because the server is
+# one binary.
 #
-# It also contradicted this repo's own discipline. Base images are pinned by
-# digest and GitHub Actions by commit SHA precisely so an upstream change cannot
-# alter a build — and then the package manager that resolves the entire
-# dependency tree was installed unpinned.
+# MEASURED on this app, same source, same route, n=6:
 #
-# MUST match `packageManager` in the root package.json. Guarded by
-# tests/dockerfile-pnpm-pin.test.ts, which fails if the two drift.
-RUN npm install -g pnpm@10.4.1
-WORKDIR /app
+#   node + standalone      cold 2670ms   p95 2780   127 req/s
+#   vinext single-exec      cold  753ms   p95  777  1092 req/s
+#                          3.5x faster    8.6x throughput
+#
+# Bytecode is NOT passed. `bun build --bytecode` emits CommonJS, and the
+# vinext/nitro generated bundle uses `import.meta`, which is a syntax error
+# there — the binary builds with a warning and then dies at boot. That is an
+# upstream limitation, not a knext one, and the numbers above are without it.
+# Add `--bytecode` the day it works; nothing else here changes.
+# See docs/benchmarks/EXPERIMENTS.md E11-E12.
+
+# ---------------------------------------------------------------------------
+# Builder — needs the whole workspace, because the app depends on the local
+# @getknext/* packages and they are consumed as BUILT dist, not source.
+# ---------------------------------------------------------------------------
+FROM oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb AS builder
+
+# Node is still required in the BUILD stage: tsup shells out to `tsc` for the
+# .d.ts pass. It does not reach the runtime image. pnpm is gone — `bun install`
+# drives the workspace now, which is also why there is no `npm i -g` layer.
+RUN apk add --no-cache nodejs libstdc++ libgcc
+
+WORKDIR /repo
 COPY . .
-RUN pnpm install --frozen-lockfile
-# Build the workspace lib (@getknext/lib ships only dist/) BEFORE the app, in a
-# SEPARATE step so its dist/ is fully emitted before `next build` resolves it.
-# (A combined recursive build can race the app's build ahead of the lib's emit.)
-RUN pnpm --filter "@getknext/lib" build
-# @getknext/db ships only dist/ and depends on @getknext/lib; @getknext/core type-imports it
-# (the `kn-next db migrate` runner lives in @getknext/db/migrate, #242), so db must be
-# built after lib and before core or core's dts build hard-fails (TS2307).
-RUN pnpm --filter "@getknext/db" build
-# @getknext/core also ships only dist/ and its exports resolve to ./dist/* (#114);
-# file-manager imports @getknext/core (adapter + KnativeNextConfig), so core must be
-# built (after lib + db, whose types core's build needs) BEFORE `next build`
-# resolves it from dist. Order: lib → db → core → file-manager.
-RUN pnpm --filter "@getknext/core" build
-RUN pnpm --filter file-manager build
 
-# Produce a SELF-CONTAINED @getknext/core for the runner. The container CMD boots the
-# knext runtime entry (`@getknext/core/internal/node-server`), but Next's standalone
-# output is import-graph driven and NOTHING in app code imports node-server.js — so
-# neither node-server.js, its build chunks, NOR its hard runtime deps (prom-client,
-# pino) land in `.next/standalone`. Without this the image's CMD resolves
-# `@getknext/core/internal/node-server` → MODULE_NOT_FOUND and crash-loops at boot.
+RUN bun install --frozen-lockfile
+
+# Order matters: file-manager imports @getknext/lib's dist. Building the app
+# before the library compiles the OLD library — a mistake that cost real time
+# here, because the app builds fine and the bug only appears at runtime.
+RUN bun run --filter "@getknext/lib" build
+RUN bun run --filter "@getknext/db" build
+RUN bun run --filter "@getknext/core" build
+
+WORKDIR /repo/apps/file-manager
+
+# vinext -> nitro bun-preset .output/server/index.mjs
+RUN ./node_modules/.bin/vite build
+
+# Fail loudly here rather than shipping an image whose CMD points at nothing.
+# This is the #857 shape: a build that exits 0 while emitting no server.
+RUN test -f .output/server/index.mjs \
+    || (echo "vite build produced no .output/server/index.mjs" && exit 1)
+
+# The compile target must match the RUNTIME image's libc AND its architecture.
+# alpine is musl; a glibc binary exits with no useful message.
 #
-# `pnpm deploy --prod` emits a flat, self-contained package dir (dist + a real
-# node_modules with prom-client/pino resolved) that we drop into the runner at
-# node_modules/@getknext/core, so the package specifier resolves with its deps.
-RUN pnpm --filter "@getknext/core" --prod deploy --legacy /knext-core-runtime
+# Derived from buildx's TARGETARCH rather than defaulted, because a default is
+# only ever right on one machine. It used to be `bun-linux-arm64-musl` — correct
+# on an Apple Silicon laptop, and silently wrong everywhere else. CI passes no
+# build-arg, so the amd64 runner compiled an arm64 binary and the container died
+# with `exec /app/server: exec format error` after starting successfully. OKE is
+# amd64 too, so the same image could not have run there.
+#
+# BUN_TARGET stays overridable for a caller that wants to cross-compile
+# deliberately; it just no longer has a guess baked in as its default.
+ARG TARGETARCH
+ARG BUN_TARGET=
+RUN set -eu; \
+    if [ -z "${BUN_TARGET}" ]; then \
+      case "${TARGETARCH}" in \
+        amd64) BUN_TARGET=bun-linux-x64-musl ;; \
+        arm64) BUN_TARGET=bun-linux-arm64-musl ;; \
+        *) echo "unsupported TARGETARCH='${TARGETARCH}' — add its bun target" >&2; exit 1 ;; \
+      esac; \
+    fi; \
+    echo "compiling for TARGETARCH=${TARGETARCH} -> ${BUN_TARGET}"; \
+    bun run node_modules/@getknext/core/dist/adapters/vinext-compile.js \
+      --entry .output/server/index.mjs \
+      --outfile /repo/knext-exec \
+      --target "${BUN_TARGET}"
 
-# Prune BUILD TOOLING that `pnpm deploy --prod` wrongly carries into the runtime
-# package. @getknext/db declares drizzle-kit as an OPTIONAL peerDependency and pnpm
-# resolves it from the workspace (it is db's devDependency), so the deployed
-# "prod" tree ships drizzle-kit's dependency graph: @esbuild-kit/esm-loader →
-# esbuild@0.18.20 (a Go 1.20.7-built binary — 20 HIGH/CRITICAL Go-stdlib
-# findings, 2 CRITICAL), drizzle-kit's own esbuild@0.25.12 (Go 1.23.12 — 15
-# findings), tsx → esbuild@0.28.0, and @drizzle-team/brocli. None of it is
-# runtime code: this image's CMD only boots @getknext/core/internal/node-server
-# (prom-client + pino); `kn-next db migrate` runs CLI-side in the app's own
-# tree, never inside this image. Same discipline as the npm/corepack strip in
-# the runner stage below (#199): remove what we don't run, don't suppress the
-# scanner. Guarded by tests/supply-chain-workflow.test.ts. The trailing
-# `! find …` is a self-check: fail the build if any esbuild binary survives.
-RUN rm -rf /knext-core-runtime/node_modules/.pnpm/esbuild@* \
-    /knext-core-runtime/node_modules/.pnpm/@esbuild+* \
-    /knext-core-runtime/node_modules/.pnpm/@esbuild-kit+* \
-    /knext-core-runtime/node_modules/.pnpm/tsx@* \
-    /knext-core-runtime/node_modules/.pnpm/drizzle-kit@* \
-    /knext-core-runtime/node_modules/.pnpm/@drizzle-team+* \
-    /knext-core-runtime/node_modules/.bin/tsx \
-    /knext-core-runtime/node_modules/.bin/esbuild \
-    /knext-core-runtime/node_modules/.bin/drizzle-kit \
-    && ! find /knext-core-runtime -type f -name esbuild -path '*bin*' | grep -q .
+# The sharp addon, staged for the runtime layer.
+#
+# It cannot go INSIDE the binary: `--asset` embeds it and the OS still cannot
+# `dlopen` a path in the binary's virtual filesystem. It is loaded by absolute
+# path instead (see @getknext/core's sharp-addon-dlopen shim).
+#
+# `cp -RL` dereferences: bun's isolated store keeps these under
+# `node_modules/.bun/node_modules/@img`, reached by symlink, and a plain `cp -R`
+# would copy the links and leave the runtime layer with dangling pointers.
+#
+# The WHOLE `@img` tree, not a per-platform pair, and the layout preserved:
+#
+#   - naming it per-platform means encoding sharp's own scheme, and that guess
+#     was wrong — sharp uses `linuxmusl`, one word, not `linux-musl`. The build
+#     failed on `can't stat .../@img/sharp-linux-musl-x64`.
+#   - bun installs only the optional packages matching the build platform, so
+#     copying everything present IS the per-platform set, without the naming.
+#   - the addon links libvips by a RELATIVE rpath, so flattening the tree makes
+#     `dlopen` find the addon and then fail on `libvips-cpp`.
+#
+# The `-not -path '*libvips*'` matters: libvips ships a `stub.node` that also
+# matches `sharp-*`, and selecting it would dlopen the wrong library.
+RUN set -eu; \
+    SRC=/repo/node_modules/.bun/node_modules/@img; \
+    test -d "$SRC" || { echo "no @img packages installed at $SRC" >&2; exit 1; }; \
+    mkdir -p /repo/native; \
+    cp -RL "$SRC"/. /repo/native/; \
+    ADDON=$(find /repo/native -name 'sharp-*.node' -not -path '*libvips*' | head -1); \
+    test -n "$ADDON" || { echo "no sharp addon staged under /repo/native" >&2; exit 1; }; \
+    echo "staged sharp addon: $ADDON"
 
-# Build a clean, flat, production-only sharp install for THIS platform (musl) that
-# the runner stage can copy verbatim into the app's node_modules. We do NOT rely on
-# Next's standalone trace to carry sharp: Next's image optimizer require()s sharp
-# lazily at runtime, and with pnpm's symlinked store the node-file-trace step does
-# not reliably include sharp + its @img/sharp-* native platform packages — that is
-# exactly why `require('sharp')` failed in the runner before (#66). The builder is
-# already node:22-alpine (linux/musl), so `npm install` here resolves the correct
-# @img/sharp-linuxmusl-* prebuilt + bundled libvips for the runner's musl arch.
-# Pin to the same major as apps/file-manager/package.json ("sharp": "^0.35.2").
-RUN mkdir -p /sharp-runtime \
-    && cd /sharp-runtime \
-    && npm init -y >/dev/null 2>&1 \
-    && npm install --no-audit --no-fund --omit=dev sharp@^0.35.2 \
-    && node -e "const s=require('/sharp-runtime/node_modules/sharp');console.log('builder sharp ok: libvips '+s.versions.vips)"
+# Pin what was just staged (C2). Everything above copies from the install store
+# straight into a tree the binary `dlopen`s at native-code privilege, and the
+# closure SBOM does not cover `/app/native` — a `.node` is an opaque blob, so an
+# SBOM that lists the package cannot see a swapped addon.
+#
+# This runs the SAME module `kn-next build`'s `stageSharpNative` calls, not a
+# shell reimplementation: two implementations of "hash the tree, check the
+# lockfile" would drift, and the one that drifts is the one nobody runs.
+RUN set -eu; \
+    bun /repo/scripts/write-native-integrity.mjs /repo/native /repo/bun.lock; \
+    test -f /repo/native/.integrity.json
 
-# Stage 2: Lean production image using Node.js standalone output.
-# Digest-pinned (same digest as the builder stage); see the builder FROM above.
-FROM node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2 AS runner
+# ---------------------------------------------------------------------------
+# Runtime — the binary, its public assets, and the two libraries Bun links.
+# No node, no npm, no package manager, no bytecode cache to mount.
+# ---------------------------------------------------------------------------
+# Named `runner` because ci.yml's prod-image job builds `target: runner`. The
+# vinext rewrite replaced the old node-based runtime stage with this compiled
+# single-binary one and left it unnamed, so the build died with
+# `target stage "runner" could not be found`. Naming the stage keeps the
+# workflow's contract explicit rather than making it build whatever is last.
+FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce AS runner
+
+RUN apk add --no-cache libstdc++ libgcc
+
 WORKDIR /app
-ENV NODE_ENV=production
-ENV PORT=3000
 
-# Install curl for healthcheck. sharp 0.35's musl prebuilt (@img/sharp-linuxmusl-*)
-# bundles its own libvips, so the `vips` apk package is NOT strictly required; we keep
-# it as a defensive fallback for any code path that prefers a global libvips. (#66 AC#3.)
+# NEVER name this after a runtime (`bun`, `node`, `deno`): knext's asset-root
+# resolver classifies a compiled binary by basename, and those names make it
+# read the build tree's assets instead of the image's.
+COPY --from=builder /repo/knext-exec /app/server
+COPY --from=builder /repo/apps/file-manager/.output/public /app/.output/public
+# The sharp addon + libvips. ~18 MB, and the reason /_next/image can optimize at
+# all: a compiled binary cannot resolve a package from disk, so the native module
+# ships beside the executable and is opened by path.
 #
-# `apk upgrade --no-cache` first: the digest-pinned base freezes the provenance of
-# the base bytes, but apk security fixes published AFTER that digest (e.g. c-ares
-# 1.34.8-r0 for CVE-2026-33630, pulled in via libcurl) would otherwise trip the
-# Trivy HIGH/CRITICAL gate until the next digest bump. The upgrade only pulls
-# published fixes from the SAME pinned alpine stable branch — it cannot float
-# the base to a different alpine release. Policy: docs/security/threat-model.md
-# §4 "Patching policy" (#267).
-RUN apk upgrade --no-cache && apk add --no-cache curl vips
+# No env var wires this up — the shim DISCOVERS `native/sharp-*/lib/sharp-*.node`
+# next to the executable. One less value to set correctly in a deploy manifest,
+# and a mis-set one is a failure mode the shim already had to defend against.
+COPY --from=builder /repo/native /app/native
 
-# Strip the package managers from the RUNTIME image (#199). The standalone server
-# never runs npm/corepack/yarn (the CMD is a bare `node`), and node:alpine's BUNDLED
-# npm ships dependencies Trivy rightly flags in the image we sign — sigstore 3.1.0
-# (CVE-2026-48815, HIGH) and picomatch 4.0.3 (CVE-2026-33671, HIGH) under
-# /usr/local/lib/node_modules/npm. Removing them clears those findings and shrinks
-# the runtime surface without touching the app dependency tree. (The builder stage
-# keeps its npm/pnpm — it never ships.) Guarded by tests/supply-chain-workflow.test.ts.
-RUN rm -rf /usr/local/lib/node_modules/npm \
-    /usr/local/lib/node_modules/corepack \
-    /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
-    /opt/yarn* /usr/local/bin/yarn /usr/local/bin/yarnpkg
+USER 65532:65532
 
-# node:22-alpine already ships a non-root `node` user/group at uid/gid 1000;
-# recreating it fails ("group 'node' in use"). Reuse the existing user.
-
-# Copy standalone server bundle (includes node_modules trace)
-COPY --from=builder /app/apps/file-manager/.next/standalone ./
-# Copy static assets served locally (non-CDN fallback)
-COPY --from=builder /app/apps/file-manager/.next/static ./apps/file-manager/.next/static
-# Copy public assets
-COPY --from=builder /app/apps/file-manager/public ./apps/file-manager/public
-# Copy the self-contained knext runtime package (node-server entry + its prod deps:
-# prom-client, pino). Placed at node_modules/@getknext/core so the CMD's
-# `@getknext/core/internal/node-server` specifier resolves from /app with its own
-# nested node_modules — the standalone trace omits it (see builder stage).
-COPY --from=builder /knext-core-runtime ./node_modules/@getknext/core
-
-# Place the flat musl sharp install — sharp itself, its @img native platform
-# packages, AND sharp's own runtime deps (detect-libc, semver, color, …) — into the
-# app's node_modules so `require('sharp')` (resolved from server.js) finds it. This is
-# the fix for #66: the standalone trace alone does not carry sharp's native runtime.
-# We copy the WHOLE flat tree (not just sharp + @img) because sharp require()s
-# detect-libc at load time, which is a sibling in the flat install; copying only
-# sharp/@img leaves it with "Cannot find module 'detect-libc'". COPY merges into the
-# existing traced node_modules without clobbering the app's own modules.
-COPY --from=builder /sharp-runtime/node_modules/ ./apps/file-manager/node_modules/
-
-# Verify sharp's native (musl) runtime actually loads in THIS image — fail the
-# build now rather than 500ing at request time on /_next/image. The standalone
-# trace places sharp under the app's node_modules; resolve from there. (#66 AC#3.)
-RUN node -e "const{createRequire}=require('module');const r=createRequire('/app/apps/file-manager/server.js');const s=r('sharp');console.log('sharp ok: libvips '+s.versions.vips)" \
-    || (echo 'FATAL: sharp failed to load — next/image optimization is broken in this image (missing libvips/musl runtime?)' && exit 1)
-
-# ── Bake the V8 module compile cache INTO the image (#437) ───────────────────
-# This used to be a bare `mkdir -p …/compile-cache`, which shipped an EMPTY
-# directory that nothing ever populated. Since NODE_COMPILE_CACHE only helps when
-# the cache is already populated at process start, every cold pod recompiled the
-# whole standalone server from scratch (~2s of a 3.81s median cold start measured
-# on OKE), wrote the cache to the ephemeral container layer, and discarded it on
-# scale-to-zero — no cold start ever benefited.
-#
-# Now the build boots the runtime entry once, with the SAME NODE_COMPILE_CACHE and
-# STANDALONE_SERVER_PATH the CMD below uses (V8 keys entries by module filename,
-# so paths must match), waits for the dependency-free shallow health route, then
-# SIGTERMs it — which is when V8 flushes its entries to disk. The result lands in
-# the image layer, so it is present from the FIRST pod onward, needs no volume
-# (works on stock Knative, #436; no RWO scale-out conflict, #432), and can never
-# go stale because it is versioned with the image.
-#
-# The script FAILS THE BUILD if the cache ends up empty — the empty-dir bug above
-# shipped unnoticed precisely because nothing asserted this.
-#
-# NODE_COMPILE_CACHE here is ABSOLUTE (/app/…) on purpose: the warm-up script
-# CLEARS the cache dir before booting (#440), and its safety guard FATALs on a
-# RELATIVE path — clearing a cwd-relative path is unsafe. WORKDIR is /app, so
-# this is the SAME on-disk dir as the CMD's default below (which resolves the
-# relative fallback against the runtime cwd /app); V8 keys entries by module
-# filename, so the baked cache is read either way.
-COPY --from=builder /app/scripts/warm-compile-cache.sh /usr/local/bin/warm-compile-cache.sh
-RUN chmod +x /usr/local/bin/warm-compile-cache.sh \
-    && NODE_ENV=production \
-       PORT=3000 \
-       METRICS_PORT=9099 \
-       NODE_COMPILE_CACHE=/app/apps/file-manager/.next/compile-cache \
-       STANDALONE_SERVER_PATH=apps/file-manager/server.js \
-       /usr/local/bin/warm-compile-cache.sh \
-    && chown -R node:node apps/file-manager/.next
+ENV PORT=3000 \
+    HOSTNAME=0.0.0.0 \
+    NODE_ENV=production
 
 EXPOSE 3000
 
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:3000/api/health || exit 1
-
-# Drop privileges
-USER node
-
-# Runtime entry: boot the knext runtime (@getknext/core node-server), NOT bare
-# `node server.js`. The runtime entry is the ONLY thing that (1) installs the
-# SIGTERM handler that forwards the signal so Next drains in-flight requests +
-# runs `after()` callbacks on scale-down (security.md graceful shutdown), and
-# (2) serves the Prometheus metrics sidecar on :9091. Bare-exec'ing server.js
-# bypasses both, so a real knext deploy must run the runtime entry — matching
-# how the operator-managed image runs. The entry then SPAWNS server.js itself.
-#
-# @getknext/core is COPY'd into node_modules/@getknext/core as a self-contained package
-# (the runner stage above — Next's standalone trace omits node-server.js + its
-# prom-client/pino deps), so the package specifier resolves via its `exports` map
-# (./internal/node-server) with its own nested node_modules.
-# The container layout puts server.js at apps/file-manager/server.js, so we tell
-# the runtime entry where it is via STANDALONE_SERVER_PATH (its default,
-# .next/standalone/server.js, is the single-app layout).
-#
-# NODE_COMPILE_CACHE: points at the V8 module compile cache that was POPULATED at
-# image build time by the warm-up above (#437), so a cold pod loads baked bytecode
-# instead of compiling the standalone server from source. Runtime writes to this
-# dir are ephemeral (container layer) and that is fine — the baked entries are what
-# every cold start reads.
-# EXPORT so the value reaches the exec'd node process (a bare `${VAR:=default}` only sets a shell
-# variable, not an env var). The operator's externally-injected value (PVC path) still wins via
-# `:-`; the Dockerfile only supplies the fallback when the env var is unset at runtime.
-CMD ["sh", "-c", "export NODE_COMPILE_CACHE=\"${NODE_COMPILE_CACHE:-/app/apps/file-manager/.next/compile-cache}\"; export STANDALONE_SERVER_PATH=\"${STANDALONE_SERVER_PATH:-apps/file-manager/server.js}\"; exec node -e \"import('@getknext/core/internal/node-server')\""]
+# One process. No supervisor, no `sh -c`, nothing to spawn — which is also why
+# draining on SIGTERM is the entry's own job rather than a parent's.
+CMD ["/app/server"]

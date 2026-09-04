@@ -10,6 +10,7 @@
     "metadata.name",
     "metadata.namespace",
     "spec",
+    "spec.build",
     "spec.buildId",
     "spec.cache",
     "spec.cache.keyPrefix",
@@ -74,5 +75,5 @@
     "spec.storage.region"
   ],
   "notInBundledCRD": [],
-  "fieldCount": 68
+  "fieldCount": 69
 }

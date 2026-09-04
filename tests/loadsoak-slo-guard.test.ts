@@ -21,9 +21,10 @@
  * itself is a drill, applied on demand. This asserts only that the SLOs exist, agree
  * across their two homes, and remain capable of failing.
  */
+
+import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 const MANIFEST = resolve(REPO_ROOT, 'packages/scale-zero-pg/deploy/88-loadsoak-k6.yaml');
@@ -136,7 +137,7 @@ describe('load-soak SLOs — the two copies of every default agree', () => {
     ).toMatch(/\[ -n "\$TARGET_URL" \] \|\| fail/);
   });
 
-  it.each(SHARED_KNOBS)('%s has the same default in the k6 script and the drill', (name) => {
+  it.each([...SHARED_KNOBS])('%s has the same default in the k6 script and the drill', (name) => {
     const inManifest = manifestDefault(name);
     const inDrill = drillDefault(name);
     expect(

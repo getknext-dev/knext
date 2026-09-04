@@ -12,10 +12,11 @@
  * Same division of labour the action-pin and anonymous-install gates use: form at
  * PR time, value at run time.
  */
+
+import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
 import { publishablePackages, readWorkspaceManifests } from '../scripts/publish-preflight.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -66,6 +67,9 @@ describe('install-smoke covers the publishable set', () => {
     const named = packageDirsNamedInGate(source());
     for (const pkg of publishable()) {
       const leaf = pkg.dir.split('/').pop();
+      // `.pop()` is `string | undefined`. A package with no directory leaf would
+      // otherwise be compared against `undefined` and pass for the wrong reason.
+      if (leaf === undefined) throw new Error(`${pkg.name} has no directory leaf`);
       expect(
         named,
         `${pkg.name} (${pkg.dir}) is publishable but scripts/install-smoke.mjs never packs it — ` +
@@ -85,14 +89,30 @@ describe('install-smoke covers the publishable set', () => {
     }
   });
 
-  it('derives the Dockerfile prefix count from the template, not a literal', () => {
-    // The run-time check compares the shipped template's interpolations against the
-    // rendered Dockerfile. Swapping that derivation for a hardcoded number would stay green
-    // today and go blind the moment the template gains or loses a COPY — the same decay the
-    // publishable-set checks above exist to stop, one file over.
+  it('checks the Dockerfile against the REAL build output, not against the template', () => {
+    // What this replaces: the gate used to derive a `standalonePrefix` from a
+    // `WORKDIR /repo/...` line and count the template's interpolations. ADR-0048
+    // removed the standalone tree entirely, so there is no prefix to derive and
+    // no interpolation to count.
+    //
+    // The requirement is unchanged and is the one worth keeping: the paths
+    // `create` bakes into the Dockerfile must be paths the build actually
+    // emits. So the gate now asserts against `.output/` as produced by the
+    // scaffolded build — comparing the Dockerfile to the template would let a
+    // template and a builder drift apart and still agree with each other, which
+    // is precisely the #857 failure (build exits 0, image entry points at
+    // nothing).
     const src = source();
-    expect(src).toMatch(/tplDockerfile\.match\(/);
-    expect(src).toMatch(/emittedPrefixUses !== declaredPrefixUses/);
+    expect(src).toMatch(/scaffoldOutputServer/);
+    expect(src).toMatch(/\.output['"], ['"]server/);
+    // And both halves: it must also reject a template still naming the tree this
+    // build never produces.
+    expect(src).toMatch(/\\\.next\\\/standalone/);
+    // The old counter comparison (`emittedPrefixUses !== declaredPrefixUses`)
+    // went with the prefix. Its replacement is the existence check on the built
+    // asset root: a Dockerfile that copies `.output/public` from a build that
+    // emitted none is the same class of lie, one directory over.
+    expect(src).toMatch(/scaffoldOutputPublic/);
   });
 
   it('resolves the alias bin through the installed manifest, not a hardcoded filename', () => {

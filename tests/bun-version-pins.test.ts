@@ -1,6 +1,6 @@
+import { describe, expect, it } from 'bun:test';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 
 // Absolute, not CWD-relative — the repo convention (vitest.config.ts explains
 // why: a run from a sub-directory must not resolve a non-existent path).
@@ -76,9 +76,44 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
   it('finds exactly the known steps per file — a DISAPPEARING step is as loud as an unpinned one', () => {
     const byFile: Record<string, number> = {};
     for (const s of steps) byFile[s.file] = (byFile[s.file] ?? 0) + 1;
+    // Counts grew when the workspace moved off pnpm: `setup-bun` now installs
+    // the package manager for every lane that used to run `pnpm/action-setup`,
+    // so most workflows gained one step and ci.yml gained several. The exact
+    // map is the point — a step DISAPPEARING is as loud as an unpinned one,
+    // which a `toBeGreaterThan` would miss.
+    //
+    // test-e2e-deploy.yml is deliberately NOT in this list beyond its original
+    // step: its pnpm drives the next.js compat harness (next.js's own repo uses
+    // pnpm), not knext's workspace, so it was left alone.
     expect(byFile).toEqual({
-      'ci.yml': 5,
+      // 11, was 13: two jobs (compat-smoke, compile-cache-bun-probe) each set up
+      // bun TWICE — 1.4.0, then 1.3.14 underneath it — so the second step
+      // silently took the first one away, and every install in those jobs ran on
+      // a bun that cannot parse a lockfileVersion 3 bun.lock. The platform moved
+      // to bun 1.4 (#882) and both pairs collapsed to a single step. A count
+      // DROPPING is meant to be as loud as an unpinned step, so editing this
+      // number is the deliberate act the comment above asks for.
+      // 10, was 11: the seam-alive matrix job retired with its subject
+      // (#885 — no webpack layers under the vinext single-graph build),
+      // taking its setup-bun step with it. Deliberate edit, per the rule
+      // above that a dropping count is a decision, not drift.
+      'ci.yml': 10,
+      'docs-closure-nightly.yml': 1,
+      'mutation-prover-nightly.yml': 1,
+      'operator-e2e-nightly.yml': 3,
+      'preview.yml': 2,
+      'scale-zero-pg.yml': 1,
+      // NEW (C1/#785): the publish lane now installs the workspace closure and
+      // scans it before building the image it pushes, so it needs the same bun
+      // the Dockerfile's builder stage uses. A count RISING is a decision too —
+      // this one is it.
+      'supply-chain.yml': 1,
       'test-e2e-deploy.yml': 1,
+      // #608 — the vinext-axis compat lane. Its one setup-bun is UNCONDITIONAL
+      // (the compiled artifact has no node arm) and carries the same
+      // `inputs.bun-version || '<pin>'` fallback form, so the pin assertion
+      // below covers it exactly as it covers the bun lane's.
+      'compat-vinext.yml': 1,
       'bun-sandbox-fetch-ab.yml': 1,
     });
   });

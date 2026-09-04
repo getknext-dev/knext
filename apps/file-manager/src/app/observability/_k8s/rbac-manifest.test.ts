@@ -1,6 +1,6 @@
+import { describe, expect, it } from 'bun:test';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 
 /**
  * P1.4 (ADR-0038) — the opt-in RBAC manifest must stay LEAST-PRIVILEGE.

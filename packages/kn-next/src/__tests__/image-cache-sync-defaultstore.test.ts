@@ -7,16 +7,24 @@
  * store, plus the "client unavailable" degrade path.
  */
 
+import {
+    afterEach,
+    beforeEach,
+    describe,
+    expect,
+    it,
+    jest,
+    mock,
+} from "bun:test";
 import { EventEmitter } from "node:events";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Mutable client double the mock resolves to; swapped per test.
-const clientRef = vi.hoisted(() => ({ current: null as unknown }));
-const getMinioClient = vi.hoisted(() => vi.fn(() => clientRef.current));
-vi.mock("@getknext/lib/clients", () => ({ getMinioClient }));
+const clientRef = (() => ({ current: null as unknown }))();
+const getMinioClient = (() => mock(() => clientRef.current))();
+mock.module("@getknext/lib/clients", () => ({ getMinioClient }));
 
 import {
     restoreImageCache,
@@ -34,7 +42,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
     await fs.rm(cacheDir, { recursive: true, force: true });
-    vi.restoreAllMocks();
+    jest.restoreAllMocks();
 });
 
 describe("image-cache-sync defaultStore (MinIO-backed)", () => {
@@ -79,7 +87,7 @@ describe("image-cache-sync defaultStore (MinIO-backed)", () => {
                 setImmediate(() => em.emit("error", new Error("stream boom")));
                 return em;
             },
-            fGetObject: vi.fn(),
+            fGetObject: mock(),
         };
         await expect(
             restoreImageCache({ bucket: "b", cacheDir, log: SILENT }),
@@ -122,7 +130,7 @@ describe("image-cache-sync defaultStore (MinIO-backed)", () => {
         getMinioClient.mockImplementationOnce(() => {
             throw new Error("no minio credentials");
         });
-        const warn = vi.fn();
+        const warn = mock();
         const restored = await restoreImageCache({
             bucket: "b",
             cacheDir,

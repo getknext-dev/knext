@@ -363,9 +363,17 @@ export function auditRunnerResolution(source, relPath) {
   // it spawns NOTHING and delegates to a shared proof helper that does (which is
   // what `mutation-prove-ci-blocking-gates.mjs` does via `runGateTest`). What is
   // not allowed is spawning a process without going through the resolver.
-  if (spawner !== undefined && !definesResolver && !callsFunction(source, 'resolveTestRunner')) {
+  if (
+    spawner !== undefined &&
+    !definesResolver &&
+    !callsFunction(source, 'resolveTestRunner') &&
+    // #902: the per-spec dispatcher is the OTHER sanctioned resolver — it
+    // wraps resolveTestRunner for vitest specs and routes bun:test specs to
+    // scripts/bun-test.mjs, which vitest cannot collect.
+    !callsFunction(source, 'resolveSpecRunner')
+  ) {
     findings.push(
-      `calls ${spawner}() without resolveTestRunner — a prover that spawns must resolve its runner through the shared resolver`,
+      `calls ${spawner}() without resolveTestRunner/resolveSpecRunner — a prover that spawns must resolve its runner through a shared resolver`,
     );
   }
   return findings;
@@ -404,4 +412,48 @@ export function evaluateProverRun(run) {
 /** Read a prover's source. Kept here so callers need no fs import. */
 export function readProver(absPath) {
   return readFileSync(absPath, 'utf8');
+}
+
+/** The framework a spec file's SOURCE declares. bun:test files cannot run under vitest. */
+export function specFramework(specSource) {
+  return /from\s+['"]bun:test['"]/.test(specSource) ? 'bun' : 'vitest';
+}
+
+/**
+ * Every `*.test.ts(x)` path a prover's source references as a string literal.
+ * Scanned, not declared: a prover that renames its SPEC const would otherwise
+ * exit the audit while still targeting the wrong framework.
+ */
+export function referencedSpecs(source) {
+  const out = new Set();
+  for (const m of source.matchAll(/['"]([^'"\n]+\.test\.tsx?)['"]/g)) out.add(m[1]);
+  return [...out];
+}
+
+/**
+ * #902 — the framework half of the audit. `resolveTestRunner` resolves VITEST;
+ * a prover pointing it at a `bun:test` spec collects nothing and can only fail
+ * (or, worse, pass a grep on empty output). Such a prover must resolve through
+ * `resolveSpecRunner`, which dispatches per spec framework.
+ *
+ * @param {string} source prover source
+ * @param {(spec: string) => string | undefined} readSpec returns a referenced
+ *   spec's source, or undefined when the path does not resolve (not a finding
+ *   here — dangling paths are another guard's subject).
+ * @returns {string[]}
+ */
+export function auditSpecFrameworkMatch(source, readSpec) {
+  const findings = [];
+  const usesVitestResolver =
+    /\bresolveTestRunner\s*\(/.test(source) && !/\bresolveSpecRunner\s*\(/.test(source);
+  if (!usesVitestResolver) return findings;
+  for (const spec of referencedSpecs(source)) {
+    const specSource = readSpec(spec);
+    if (specSource !== undefined && specFramework(specSource) === 'bun') {
+      findings.push(
+        `targets bun:test spec ${spec} through resolveTestRunner (vitest) — vitest collects nothing there; use resolveSpecRunner`,
+      );
+    }
+  }
+  return findings;
 }

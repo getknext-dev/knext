@@ -988,9 +988,16 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 		timeoutSeconds = int64(nextApp.Spec.TimeoutSeconds)
 	}
 
-	// Runtime: select bun or node to exec server.js
+	// Container command, by artifact shape (spec.build):
+	//   - "vinext": the app is ONE compiled executable and the image's own CMD
+	//     runs it. Command stays nil — forcing `bun run server.js` here would
+	//     CrashLoop, because that file does not exist in a single-exec image.
+	//     Runtime is irrelevant to startup for this shape (bun is baked into
+	//     the binary).
+	//   - absent / "turbopack": the Next standalone tree. Runtime "bun" execs
+	//     `bun run server.js`; "node"/absent uses the image default.
 	var containerCommand []string
-	if nextApp.Spec.Runtime == "bun" {
+	if nextApp.Spec.Build != "vinext" && nextApp.Spec.Runtime == "bun" {
 		containerCommand = []string{"bun", "run", "server.js"}
 	}
 

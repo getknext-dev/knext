@@ -767,6 +767,12 @@ if (isEntrypoint(import.meta.url)) {
         if (sub === "create") {
             const { createMain } = await import("./create");
             process.exit(await createMain(process.argv.slice(3)));
+        } else if (sub === "init-ci") {
+            // ADR-0049 stage 1. Writes files only — the client applies the RBAC
+            // themselves, because knext holding their cluster credential is
+            // exactly what stage 1 exists to avoid.
+            const { initCiMain } = await import("./ci/init-ci-cmd");
+            process.exit(await initCiMain(process.argv.slice(3)));
         } else if (sub === "doctor") {
             const { doctorMain } = await import("./doctor");
             process.exit(await doctorMain(process.argv.slice(3)));

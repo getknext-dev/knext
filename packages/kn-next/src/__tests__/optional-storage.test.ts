@@ -29,6 +29,7 @@
  *      mutation target: delete the COPY and this file goes red).
  */
 
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import {
     mkdirSync,
     mkdtempSync,
@@ -37,7 +38,6 @@ import {
     writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildNextAppCRObject } from "../cli/cr-builder";
 import { writeScaffold } from "../cli/create";
 import type { KubectlFn } from "../cli/doctor";
@@ -309,23 +309,32 @@ describe("kn-next create scaffolds the no-storage default (condition 6)", () => 
 });
 
 describe("the image serves its own statics (condition 4 build-time halves)", () => {
-    it("the generated Dockerfile COPYs .next/static into the runner image", () => {
-        // THE mutation target: delete the `.next/static` COPY line from
+    it("the generated Dockerfile COPYs the served asset root into the runner image", () => {
+        // THE mutation target: delete the `.output/public` COPY line from
         // templates/app/Dockerfile.hbs and this expectation goes red — a
         // no-storage pod would boot and 404 every chunk.
+        //
+        // The path changed with ADR-0048, the requirement did not. Under vinext
+        // the nitro build emits ONE served root, `.output/public`, holding both
+        // the hashed `_next` chunks and the app's own `public/` files. Two
+        // COPY lines collapsed into one because the artifact merged them, not
+        // because a guard was relaxed.
         const { appDir } = scaffoldApp("static-copy");
         const dockerfile = readFileSync(join(appDir, "Dockerfile"), "utf8");
         expect(dockerfile).toMatch(
-            /COPY --from=builder \/repo\/[^\s]*\.next\/static \.\/[^\s]*\.next\/static/,
+            /COPY\s+[^\n]*\.output\/public\s+\S*\.output\/public/,
         );
     });
 
-    it("…and the public/ directory", () => {
+    it("…and does NOT still reference the retired standalone asset paths", () => {
+        // The other half. Without it, a template that COPYs `.output/public`
+        // AND drags along a dead `.next/static` line would pass — which is how
+        // a migration leaves rubble that reads as intentional. `.next/standalone`
+        // is checked too: it is the directory this build never produces.
         const { appDir } = scaffoldApp("public-copy");
         const dockerfile = readFileSync(join(appDir, "Dockerfile"), "utf8");
-        expect(dockerfile).toMatch(
-            /COPY --from=builder \/repo\/[^\s]*public \.\/[^\s]*public/,
-        );
+        expect(dockerfile).not.toMatch(/\.next\/static/);
+        expect(dockerfile).not.toMatch(/\.next\/standalone/);
     });
 
     it("the generated next.config gates assetPrefix on ASSET_PREFIX — unset env ⇒ no prefix in emitted HTML", () => {
@@ -349,15 +358,18 @@ describe("create's parting line speaks to the persona (row 3a)", () => {
         const install = text.indexOf("npm install");
         const dev = text.indexOf("npm run dev");
         const deploy = text.indexOf("deploy");
-        const seam = text.indexOf("test:seam");
+        const guardCheck = text.indexOf("npm test");
         // The persona's actual path, in the order they will type it.
         expect(cd).toBeGreaterThanOrEqual(0);
         expect(install).toBeGreaterThan(cd);
         expect(dev).toBeGreaterThan(install);
         expect(deploy).toBeGreaterThan(dev);
-        // test:seam is still mentioned — but last, and not in contributor
-        // jargon ("instrumentation seams survive the standalone build").
-        expect(seam).toBeGreaterThan(deploy);
+        // The pre-ship guard advice is still mentioned — last, in plain words,
+        // and it names a script that EXISTS: `npm test`. (`test:seam` was
+        // retired with the seam guard, #885 — the old parting line told users
+        // to run a script the scaffold no longer ships.)
+        expect(guardCheck).toBeGreaterThan(deploy);
+        expect(text).not.toMatch(/test:seam/);
         expect(text).not.toMatch(/instrumentation seams/);
         expect(text).toMatch(/doctor/);
     });

@@ -12,11 +12,11 @@
  * un-pinning regression is caught by `vitest run`, not just in CI YAML.
  */
 
+import { describe, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { describe, expect, it } from "vitest";
 
 // repo root: packages/kn-next/src/__tests__ -> up 4
 const REPO_ROOT = resolve(__dirname, "..", "..", "..", "..");

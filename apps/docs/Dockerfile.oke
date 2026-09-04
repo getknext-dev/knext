@@ -1,16 +1,28 @@
-# Plain-k8s image for the OKE deploy: vanilla Next.js build (KNEXT_ADAPTER unset)
-# + `next start`. No knext adapter, no standalone, no @getknext/core — fully self-contained.
+# Plain-k8s image for the OKE deploy: no knext adapter, no @getknext/core —
+# fully self-contained.
+#
+# This used to be a vanilla `next build` + `next start`. The app now builds with
+# vinext/vite, which emits a nitro server under `.output/` and no `.next/` at
+# all, so `next start` had nothing to serve — the image was broken by the vinext
+# migration and nothing noticed, because nothing builds it in CI.
+#
+# NITRO_PRESET=node is load-bearing. The app's default preset is `bun`, whose
+# entry serves through `Bun.serve`/`srvx/bun`; that output builds fine and then
+# fails at runtime on a `node:22-alpine` base. `node` selects nitro's own entry.
 FROM node:22-alpine AS build
 WORKDIR /app
 COPY . .
 RUN npm install --no-audit --no-fund          # postinstall: fumadocs-mdx compiles content
-RUN npm run build                              # vanilla build (no adapter)
+RUN NITRO_PRESET=node npm run build           # -> .output/server/index.mjs (nitro node-server)
 
 FROM node:22-alpine AS run
 WORKDIR /app
-ENV NODE_ENV=production PORT=3000 HOSTNAME=0.0.0.0
+# nitro's node-server reads HOST, not Next.js's HOSTNAME. Both are set: HOSTNAME
+# is what the old `next start` used and is left so the deploy manifests that
+# reference it keep working.
+ENV NODE_ENV=production PORT=3000 HOST=0.0.0.0 HOSTNAME=0.0.0.0
 RUN apk add --no-cache curl
 COPY --from=build /app ./
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 CMD curl -fsS http://localhost:3000/ || exit 1
-CMD ["npx", "next", "start", "-p", "3000", "-H", "0.0.0.0"]
+CMD ["node", ".output/server/index.mjs"]

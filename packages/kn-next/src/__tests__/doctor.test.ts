@@ -15,12 +15,16 @@
  * cluster degrades every check to a clear SKIP (never a crash, never exit 1).
  */
 
+import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir as osTmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it, vi } from "vitest";
 import YAML from "yaml";
+import {
+    stubEnv,
+    unstubAllEnvs,
+} from "../../../../tests/helpers/bun-test-helpers";
 import {
     type CheckResult,
     classifyKubectlFailure,
@@ -36,6 +40,16 @@ import {
     probeManifest,
     runDoctor,
 } from "../cli/doctor";
+
+/**
+ * bun's `typeof fetch` carries a `preconnect` property; a bare async arrow does
+ * not, so `spyOn(globalThis, 'fetch').mockImplementation(async () => …)` is not
+ * assignable under `@types/bun`. This attaches the missing member instead of
+ * casting, so the callback's own parameter and return types stay checked — a
+ * cast would silence a genuinely wrong stub too.
+ */
+const fetchImpl = (fn: (...a: Parameters<typeof fetch>) => Promise<Response>) =>
+    Object.assign(fn, { preconnect: globalThis.fetch.preconnect });
 
 /** Build a stub kubectl keyed on the joined argv (space-separated). */
 function stubKubectl(
@@ -239,7 +253,7 @@ describe("runDoctor — unreachable cluster degrades to SKIP", () => {
             stdout: "",
             stderr: "The connection to the server 10.0.0.1:6443 was refused - did you specify the right host or port?",
         });
-        const probe = vi.fn(okProbe);
+        const probe = mock(okProbe);
         const report = await runDoctor({
             kubectl,
             probeImage: probe,
@@ -329,7 +343,7 @@ describe("runDoctor — check (b) operator Deployment", () => {
             ok: false,
             stderr: 'namespaces "kn-next-operator-system" not found',
         };
-        const probe = vi.fn(okProbe);
+        const probe = mock(okProbe);
         const report = await runDoctor({
             kubectl: stubKubectl(stubs),
             probeImage: probe,
@@ -425,7 +439,7 @@ describe("runDoctor — check (d) ingress-class (#208)", () => {
 
 describe("runDoctor — check (e) image pullability (#198)", () => {
     it("probes the operator's configured image ref and passes when anonymously pullable", async () => {
-        const probe = vi.fn(okProbe);
+        const probe = mock(okProbe);
         const report = await runDoctor({
             kubectl: stubKubectl(healthyStubs()),
             probeImage: probe,
@@ -832,7 +846,7 @@ describe("runDoctor — probe-infra errors are not 'not found' (#230)", () => {
             ok: false,
             stderr: CRED_EXEC_STDERR,
         };
-        const probe = vi.fn(okProbe);
+        const probe = mock(okProbe);
         const report = await runDoctor({
             kubectl: stubKubectl(stubs),
             probeImage: probe,
@@ -1148,9 +1162,8 @@ describe("output surface", () => {
 describe("probeManifest — bounded registry I/O", () => {
     it("passes an abort signal to every fetch and maps a timeout to 'unreachable' (SKIP path)", async () => {
         const seenInits: (RequestInit | undefined)[] = [];
-        const fetchSpy = vi
-            .spyOn(globalThis, "fetch")
-            .mockImplementation(async (_url, init) => {
+        const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+            fetchImpl(async (_url, init) => {
                 seenInits.push(init as RequestInit | undefined);
                 // Simulate a stalling registry: the bounded fetch rejects the
                 // way undici does when AbortSignal.timeout fires.
@@ -1158,7 +1171,8 @@ describe("probeManifest — bounded registry I/O", () => {
                     "The operation was aborted due to timeout",
                     "TimeoutError",
                 );
-            });
+            }),
+        );
         try {
             const outcome = await probeManifest("ghcr.io/acme/app:v1");
             expect(outcome).toBe("unreachable");
@@ -1324,7 +1338,7 @@ describe("runDoctor — finding 1c: no-cluster-configured is not a 'flake'", () 
         // has-current-context stub (the reviewer's M2 mutation) must go red
         // here, not stay green.
         const dir = mkdtempSync(join(osTmpdir(), "knext-doctor-1c-wiring-"));
-        vi.stubEnv("KUBECONFIG", join(dir, "does-not-exist"));
+        stubEnv("KUBECONFIG", join(dir, "does-not-exist"));
         try {
             const report = await runDoctor({
                 kubectl: gateFailKubectl(NO_CONFIG_STDERR),
@@ -1339,7 +1353,7 @@ describe("runDoctor — finding 1c: no-cluster-configured is not a 'flake'", () 
                 "https://knext.dev/docs/getting-started",
             );
         } finally {
-            vi.unstubAllEnvs();
+            unstubAllEnvs();
             rmSync(dir, { recursive: true, force: true });
         }
     });
@@ -1371,7 +1385,7 @@ describe("inspectKubeconfig — the default local kubeconfig inspector", () => {
         return d;
     };
     afterEach(() => {
-        vi.unstubAllEnvs();
+        unstubAllEnvs();
         for (const d of dirs.splice(0)) {
             rmSync(d, { recursive: true, force: true });
         }
@@ -1380,7 +1394,7 @@ describe("inspectKubeconfig — the default local kubeconfig inspector", () => {
     it("absent: $KUBECONFIG points at nothing that exists", () => {
         const dir = tmp();
         const missing = join(dir, "nope");
-        vi.stubEnv("KUBECONFIG", missing);
+        stubEnv("KUBECONFIG", missing);
         expect(inspectKubeconfig()).toEqual({
             kind: "absent",
             searched: [missing],
@@ -1389,8 +1403,8 @@ describe("inspectKubeconfig — the default local kubeconfig inspector", () => {
 
     it("absent: no $KUBECONFIG and no ~/.kube/config (HOME redirected)", () => {
         const dir = tmp();
-        vi.stubEnv("KUBECONFIG", "");
-        vi.stubEnv("HOME", dir);
+        stubEnv("KUBECONFIG", "");
+        stubEnv("HOME", dir);
         expect(inspectKubeconfig()).toEqual({
             kind: "absent",
             searched: [join(dir, ".kube", "config")],
@@ -1401,7 +1415,7 @@ describe("inspectKubeconfig — the default local kubeconfig inspector", () => {
         const dir = tmp();
         const cfg = join(dir, "config");
         writeFileSync(cfg, "");
-        vi.stubEnv("KUBECONFIG", cfg);
+        stubEnv("KUBECONFIG", cfg);
         expect(inspectKubeconfig()).toEqual({
             kind: "no-current-context",
             path: cfg,
@@ -1412,7 +1426,7 @@ describe("inspectKubeconfig — the default local kubeconfig inspector", () => {
         const dir = tmp();
         const cfg = join(dir, "config");
         writeFileSync(cfg, 'apiVersion: v1\ncurrent-context: ""\n');
-        vi.stubEnv("KUBECONFIG", cfg);
+        stubEnv("KUBECONFIG", cfg);
         expect(inspectKubeconfig()).toEqual({
             kind: "no-current-context",
             path: cfg,
@@ -1423,7 +1437,7 @@ describe("inspectKubeconfig — the default local kubeconfig inspector", () => {
         const dir = tmp();
         const cfg = join(dir, "config");
         writeFileSync(cfg, "current-context: prod\n");
-        vi.stubEnv("KUBECONFIG", cfg);
+        stubEnv("KUBECONFIG", cfg);
         expect(inspectKubeconfig()).toEqual({ kind: "has-current-context" });
     });
 
@@ -1433,7 +1447,7 @@ describe("inspectKubeconfig — the default local kubeconfig inspector", () => {
         const b = join(dir, "b");
         writeFileSync(a, "");
         writeFileSync(b, "current-context: prod\n");
-        vi.stubEnv("KUBECONFIG", `${a}${delimiter}${b}`);
+        stubEnv("KUBECONFIG", `${a}${delimiter}${b}`);
         expect(inspectKubeconfig()).toEqual({ kind: "has-current-context" });
     });
 
@@ -1441,7 +1455,7 @@ describe("inspectKubeconfig — the default local kubeconfig inspector", () => {
         const dir = tmp();
         const cfg = join(dir, "config");
         writeFileSync(cfg, "{{{ not yaml");
-        vi.stubEnv("KUBECONFIG", cfg);
+        stubEnv("KUBECONFIG", cfg);
         expect(inspectKubeconfig()).toEqual({ kind: "has-current-context" });
     });
 });

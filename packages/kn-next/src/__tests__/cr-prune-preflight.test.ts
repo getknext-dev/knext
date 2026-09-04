@@ -28,10 +28,10 @@
  * that still reports Ready=True.
  */
 
+import { describe, expect, it, mock } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it, vi } from "vitest";
 import YAML from "yaml";
 import {
     crdSchemaFromOpenApiV3Doc,
@@ -382,13 +382,13 @@ describe("preview deploy runs the same preflight BEFORE it builds", () => {
     it("aborts before buildAndPush when the CR would be pruned", async () => {
         const { runPreviewDeploy } = await import("../cli/preview");
         const order: string[] = [];
-        const preflight = vi.fn(() => {
+        const preflight = mock(() => {
             order.push("preflight");
             throw new Error(
                 "preflight: unknown field spec.database.roSecretRef",
             );
         });
-        const buildAndPush = vi.fn(async () => {
+        const buildAndPush = mock(async () => {
             order.push("build");
             return `registry.example.com/app-pr-1:t@sha256:${"a".repeat(64)}`;
         });
@@ -405,7 +405,7 @@ describe("preview deploy runs the same preflight BEFORE it builds", () => {
                 },
                 { prId: "1", branch: "b", namespace: "previews" },
                 {
-                    apply: vi.fn(),
+                    apply: mock(),
                     capture: () => "",
                     buildAndPush,
                     preflight,

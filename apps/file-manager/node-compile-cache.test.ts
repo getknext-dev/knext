@@ -5,12 +5,13 @@
  *   .next/standalone/.../server.js does not exist (no production build present).
  *   Runs locally after `next build --webpack`; skips cleanly on CI without a build.
  */
+
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { execSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 // Resolve paths relative to this test file — portable across any checkout.
 const __filename = fileURLToPath(import.meta.url);

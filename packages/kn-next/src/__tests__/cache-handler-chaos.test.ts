@@ -1,4 +1,16 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+// The cache handler's mutating test seams fail closed on a published
+// subpath (design-gate block, sprint close): the harness opts in.
+process.env.KNEXT_TEST_SEAMS = "1";
+
+import {
+    afterEach,
+    beforeEach,
+    describe,
+    expect,
+    it,
+    jest,
+    spyOn,
+} from "bun:test";
 
 /**
  * P1 data-plane resilience — CHAOS test (CI-runnable, no live Redis).
@@ -30,19 +42,34 @@ describe("cache-handler chaos: Redis DOWN fails OPEN", () => {
     // type declarations; a variable import avoids tsc's implicit-any on the module.
     const CACHE_HANDLER: string = "../adapters/cache-handler.js";
 
-    beforeEach(() => {
-        vi.resetModules();
+    beforeEach(async () => {
+        // This file asserts IOREDIS-shaped behaviour (`.on("ready")`, the retry
+        // strategy). Under `bun test` the handler would otherwise pick Bun's
+        // native client, which has no `.on` at all — so the failure read
+        // `client.on is not a function`, describing the client rather than the
+        // fact that a different one was chosen.
+        process.env.KNEXT_CACHE_REDIS_CLIENT = "ioredis";
         process.env.REDIS_URL = DEAD_REDIS_URL;
         process.env.REDIS_KEY_PREFIX = "chaos-app";
+        // The reset runs AFTER the env, not before. It re-reads REDIS_URL and
+        // recomputes `useRedis`, so resetting first would recompute from the
+        // PREVIOUS test's values and leave the handler pointed somewhere else —
+        // the failure then describes the handler rather than the ordering.
+        //
+        // This replaces `vi.resetModules()`, which bun has no equivalent of; the
+        // reset also drops the cached client, the in-flight connect promise and
+        // the circuit-breaker deadline, which is everything module evaluation
+        // establishes.
+        (await import(CACHE_HANDLER)).__resetEnvForTests();
         // Silence the expected connection-error noise so the suite output is clean.
-        vi.spyOn(console, "error").mockImplementation(() => {});
-        vi.spyOn(console, "warn").mockImplementation(() => {});
-        vi.spyOn(console, "log").mockImplementation(() => {});
+        spyOn(console, "error").mockImplementation(() => {});
+        spyOn(console, "warn").mockImplementation(() => {});
+        spyOn(console, "log").mockImplementation(() => {});
     });
 
     afterEach(() => {
         process.env = { ...original };
-        vi.restoreAllMocks();
+        jest.restoreAllMocks();
     });
 
     it("get() on a dead Redis returns null (MISS → origin render), never throws", async () => {

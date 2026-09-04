@@ -1,0 +1,446 @@
+/**
+ * observability-metric-contract.test.ts (#792, sprint task D13 + D14)
+ *
+ * THE DEFECT THIS EXISTS TO MAKE IMPOSSIBLE.
+ *
+ * A PromQL query naming a series nobody emits does not error. It returns an
+ * empty vector: the panel is blank, `for:` is never satisfied, the alert never
+ * fires. Nothing is red anywhere. #792 lived for five weeks that way in
+ * scale-zero-pg; after ADR-0048 moved the runtime to a compiled single
+ * executable, the same drift went repo-wide — every `knext.app` alert and every
+ * app dashboard queried `kn_next_*` / `knext_*` names while the binary emitted
+ * four `knext_bunexec_*` series, with ZERO overlap.
+ *
+ * So the two sides are compared mechanically, and the emitted side is SCANNED
+ * from the emitters' own source (metric-contract.ts) rather than enumerated
+ * here. Renaming an emitted metric moves the set and reds every query that
+ * still names the old one — which is the mutation proof for this whole file.
+ *
+ * The classification below is an ALLOWLIST that FAILS CLOSED: every rule group
+ * and every dashboard must be classified, so a new one reds this test until
+ * someone decides which emitters it is allowed to depend on. That matters more
+ * than it looks — `bunexec` is the ONLY emitter the shipped PodMonitor
+ * scrapes, so classifying something `node-legacy` is a statement that it is
+ * blank on a default knext deployment, and it has to be made deliberately.
+ */
+
+import { describe, expect, it } from "bun:test";
+import { readdirSync, readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+    dashboardExprs,
+    expandFamily,
+    extractMetricNames,
+    parsePrometheusRules,
+    scanBunexecMetrics,
+    scanNameConstants,
+    scanOperatorMetrics,
+    scanPromClientMetrics,
+    seriesNames,
+} from "../adapters/metric-contract";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = resolve(here, "../../../..");
+const PKG_ROOT = resolve(here, "../..");
+const OPERATOR = join(REPO_ROOT, "packages", "kn-next-operator");
+const DASHBOARD_DIR = join(OPERATOR, "config", "grafana", "dashboards");
+const RULE_FILE = join(
+    OPERATOR,
+    "config",
+    "observability",
+    "prometheusrule.yaml",
+);
+
+/** The canonical bun-exec runtime contract — what `kn-next create` emits. */
+const BUNEXEC_TEMPLATE = join(
+    PKG_ROOT,
+    "templates",
+    "app",
+    "runtime-contract.mjs.hbs",
+);
+
+/**
+ * Every shipped copy of the runtime contract. The two `.hbs` trees are pinned
+ * byte-identical by create-scaffold-parity.test.ts, but the three checked-in
+ * `.mjs` copies are NOT — and `examples/bun-exec`'s copy is the one the
+ * container e2e actually boots (the "reality binding"). A metric added to the
+ * template and forgotten in the example would leave the gate green while the
+ * binary under test emitted the old set, so every copy is compared here.
+ */
+const CONTRACT_COPIES = [
+    BUNEXEC_TEMPLATE,
+    join(REPO_ROOT, "turbo/generators/templates/zone/runtime-contract.mjs.hbs"),
+    join(REPO_ROOT, "examples/bun-exec/runtime-contract.mjs"),
+    join(REPO_ROOT, "apps/file-manager/runtime-contract.mjs"),
+    join(REPO_ROOT, "apps/docs/runtime-contract.mjs"),
+];
+
+const read = (p: string) => readFileSync(p, "utf8");
+
+// ── The emitted side ────────────────────────────────────────────────────────
+
+/** The compiled single executable's :9091 exposition (the scraped emitter). */
+const BUNEXEC = seriesNames(scanBunexecMetrics(read(BUNEXEC_TEMPLATE)));
+
+/** The Go controller's own /metrics. */
+const OPERATOR_EMITTED = seriesNames(
+    scanOperatorMetrics(read(join(OPERATOR, "internal/controller/metrics.go"))),
+);
+
+/**
+ * prom-client registries reachable only through an app-level `/api/metrics`
+ * route. Real series; NOT on the shipped :9091 scrape path since ADR-0048.
+ *
+ * metrics.ts names its metrics through exported constants, so the scan reads
+ * those constants out of the same file — the same source of truth as importing
+ * them, without dragging the OpenTelemetry SDK into a source-scanning test.
+ * file-manager's registry uses string literals.
+ */
+const METRICS_TS = read(join(PKG_ROOT, "src", "adapters", "metrics.ts"));
+const NODE_LEGACY_TYPES = scanPromClientMetrics(
+    METRICS_TS,
+    scanNameConstants(METRICS_TS),
+);
+for (const [name, type] of scanPromClientMetrics(
+    read(join(REPO_ROOT, "apps/file-manager/src/app/api/_metrics/registry.ts")),
+)) {
+    NODE_LEGACY_TYPES.set(name, type);
+}
+const NODE_LEGACY = seriesNames(NODE_LEGACY_TYPES);
+
+/**
+ * Series produced by exporters outside this repo. Nothing here can scan them,
+ * so each carries the exporter it comes from — an entry without a reason is a
+ * hole, and the shape of this map is asserted below.
+ */
+const EXTERNAL: Record<string, string> = {
+    up: "Prometheus' own per-target scrape-health series.",
+    kube_deployment_status_replicas: "kube-state-metrics",
+    kube_pod_status_phase: "kube-state-metrics",
+    knext_nextapp_condition:
+        "kube-state-metrics CustomResourceStateMetrics over NextApp .status.conditions (config/observability/kube-state-metrics-crd-config.yaml)",
+    http_server_request_duration_seconds:
+        "k6 / OpenTelemetry HTTP semantic conventions, emitted by the load generator — not by the app",
+};
+const EXTERNAL_SERIES = new Set<string>();
+for (const name of Object.keys(EXTERNAL)) {
+    for (const s of expandFamily(name, "histogram")) EXTERNAL_SERIES.add(s);
+}
+
+const EMITTERS = {
+    bunexec: BUNEXEC,
+    operator: OPERATOR_EMITTED,
+    "node-legacy": NODE_LEGACY,
+    external: EXTERNAL_SERIES,
+} as const;
+type EmitterId = keyof typeof EMITTERS;
+
+function allowed(ids: readonly EmitterId[]): Set<string> {
+    const out = new Set<string>();
+    for (const id of ids) for (const n of EMITTERS[id]) out.add(n);
+    return out;
+}
+
+// ── The querying side: classification (ALLOWLIST, FAILS CLOSED) ─────────────
+
+/**
+ * Which emitters each alert group may depend on, and why.
+ *
+ * `knext.app` is deliberately restricted to `bunexec` + `external`: it is the
+ * turnkey app-alert group, it ships to every user, and it must therefore
+ * reference only series the shipped PodMonitor actually scrapes. That
+ * restriction is the whole point — it is what would have caught this defect.
+ */
+const RULE_GROUPS: Record<
+    string,
+    { emitters: readonly EmitterId[]; why: string }
+> = {
+    "knext.operator": {
+        emitters: ["operator"],
+        why: "the Go controller's own registry",
+    },
+    "knext.nextapp": {
+        emitters: ["external"],
+        why: "kube-state-metrics over the NextApp CR's conditions",
+    },
+    "knext.app.staleness": {
+        emitters: ["bunexec", "external"],
+        why: "the meta-alerts: `up` plus the bun-exec series whose absence they detect",
+    },
+    "knext.app": {
+        emitters: ["bunexec", "external"],
+        why: "turnkey app alerts — MUST reference only what the shipped :9091 PodMonitor scrapes",
+    },
+    "knext.app.node-legacy": {
+        emitters: ["node-legacy", "external"],
+        why: "opt-in: applies only to apps that still serve a prom-client /api/metrics route and scrape it themselves",
+    },
+};
+
+/**
+ * Which emitters each dashboard may depend on, and why. Same fail-closed rule:
+ * a new dashboard file reds this test until it is classified.
+ */
+const DASHBOARDS: Record<
+    string,
+    { emitters: readonly EmitterId[]; why: string }
+> = {
+    "red-overview.json": {
+        emitters: ["bunexec"],
+        why: "RED golden signals straight off the scraped :9091 endpoint",
+    },
+    "scale-to-zero.json": {
+        emitters: ["bunexec", "external", "node-legacy"],
+        why: "cold start + replicas are bunexec/KSM; the DB-wake panels are node-legacy (scale-zero-pg wake instrumentation is registered by the app, not by the runtime contract)",
+    },
+    "loadtesting.json": {
+        emitters: ["bunexec", "external"],
+        why: "k6/OTel series from the load generator, KSM pod phase, plus the runtime's own saturation gauge",
+    },
+};
+
+// ── Assertions ──────────────────────────────────────────────────────────────
+
+describe("emitted-metric scanners", () => {
+    it("scans the bun-exec runtime contract's exposition", () => {
+        expect(BUNEXEC.size).toBeGreaterThan(0);
+        expect(BUNEXEC).toContain("knext_bunexec_http_requests_total");
+    });
+
+    it("scans the operator's Go registry", () => {
+        expect(OPERATOR_EMITTED).toContain(
+            "knext_nextapp_reconcile_errors_total",
+        );
+        // a histogram must contribute its derived series
+        expect(OPERATOR_EMITTED).toContain(
+            "knext_nextapp_reconcile_duration_seconds_bucket",
+        );
+    });
+
+    it("scans the node-legacy prom-client registries", () => {
+        expect(NODE_LEGACY).toContain(
+            "kn_next_startup_duration_seconds_bucket",
+        );
+        expect(NODE_LEGACY).toContain("knext_deep_health_state");
+    });
+
+    it("gives every external series a named exporter", () => {
+        for (const [name, why] of Object.entries(EXTERNAL)) {
+            expect(
+                why.length,
+                `${name} has no exporter reason`,
+            ).toBeGreaterThan(10);
+        }
+    });
+});
+
+describe("the shipped runtime emits an SLO-computable RED contract (#792 / D14)", () => {
+    const families = scanBunexecMetrics(read(BUNEXEC_TEMPLATE));
+
+    it("labels the request counter by status_class so an error rate is computable", () => {
+        const body = read(BUNEXEC_TEMPLATE);
+        expect(families.get("knext_bunexec_http_requests_total")).toBe(
+            "counter",
+        );
+        // The label must be EMITTED, not merely mentioned: assert a rendered
+        // sample line carrying it.
+        expect(body).toMatch(
+            /knext_bunexec_http_requests_total\{status_class="/,
+        );
+    });
+
+    it("bounds status_class cardinality to the five HTTP classes", () => {
+        const body = read(BUNEXEC_TEMPLATE);
+        const classes = [
+            ...new Set(
+                [...body.matchAll(/'([1-5]xx)'/g)].map((m) => m[1] as string),
+            ),
+        ];
+        expect(classes.sort()).toEqual(["1xx", "2xx", "3xx", "4xx", "5xx"]);
+        // No per-path/per-route label may appear on the counter — an unbounded
+        // path label is the classic way a scale-to-zero fleet's TSDB explodes.
+        expect(body).not.toMatch(
+            /knext_bunexec_http_requests_total\{[^}]*\b(route|path|url|method)=/,
+        );
+    });
+
+    it("emits a duration histogram with sub-100ms resolution", () => {
+        expect(
+            families.get("knext_bunexec_http_request_duration_seconds"),
+        ).toBe("histogram");
+        const body = read(BUNEXEC_TEMPLATE);
+        const buckets = (
+            body.match(/REQUEST_DURATION_BUCKETS\s*=\s*\[([^\]]*)\]/)?.[1] ?? ""
+        )
+            .split(",")
+            .map((s) => s.trim())
+            .filter((s) => s.length > 0)
+            .map(Number);
+        expect(buckets.length).toBeGreaterThan(0);
+        // Cold starts are measured in tens of ms; a histogram whose finest
+        // bucket is 100ms cannot see them.
+        expect(buckets.filter((b) => b < 0.1).length).toBeGreaterThanOrEqual(4);
+        expect(buckets).toEqual([...buckets].sort((a, b) => a - b));
+        // Bounded: buckets are the dominant series multiplier.
+        expect(buckets.length).toBeLessThanOrEqual(16);
+    });
+
+    it("emits a startup duration so the cold-start SLO is computable", () => {
+        expect(families.has("knext_bunexec_startup_duration_seconds")).toBe(
+            true,
+        );
+    });
+
+    it("keeps every checked-in copy of the contract on the same metric set", () => {
+        const canonical = [...BUNEXEC].sort();
+        for (const copy of CONTRACT_COPIES) {
+            const set = [...seriesNames(scanBunexecMetrics(read(copy)))].sort();
+            expect(
+                set,
+                `${copy} drifted from the template's metric set`,
+            ).toEqual(canonical);
+        }
+    });
+});
+
+describe("every alert queries a series something actually emits (#792)", () => {
+    const yaml = read(RULE_FILE);
+    const rules = parsePrometheusRules(yaml);
+
+    it("parses every alert in the manifest (parser fails closed)", () => {
+        const declared = (yaml.match(/^\s*-\s+alert:/gm) ?? []).length;
+        expect(rules.length).toBe(declared);
+        expect(rules.length).toBeGreaterThan(0);
+        for (const r of rules) expect(r.expr.length).toBeGreaterThan(0);
+    });
+
+    it("classifies every rule group (fails closed on a new one)", () => {
+        const groups = [...new Set(rules.map((r) => r.group))].sort();
+        for (const g of groups) {
+            expect(
+                RULE_GROUPS[g],
+                `rule group "${g}" is unclassified — declare which emitters it may depend on`,
+            ).toBeDefined();
+        }
+    });
+
+    it("resolves every metric name in every alert expression", () => {
+        const dangling: string[] = [];
+        for (const rule of rules) {
+            const spec = RULE_GROUPS[rule.group];
+            if (!spec) continue; // reported by the test above
+            const ok = allowed(spec.emitters);
+            for (const name of extractMetricNames(rule.expr)) {
+                if (!ok.has(name)) {
+                    dangling.push(
+                        `${rule.group}/${rule.alert}: "${name}" is emitted by no ${spec.emitters.join("+")} emitter`,
+                    );
+                }
+            }
+        }
+        expect(dangling.join("\n")).toBe("");
+    });
+
+    it("alerts on its own blindness — a scraped app with no knext series", () => {
+        // D13: the guard goes in BEFORE the thing it guards. Without this, the
+        // next name drift is silent all over again.
+        const staleness = rules.filter(
+            (r) => r.group === "knext.app.staleness",
+        );
+        expect(staleness.length).toBeGreaterThanOrEqual(2);
+        const exprs = staleness.map((r) => r.expr).join(" ");
+        // up == 0 catches a target that is discovered but unscrapeable.
+        expect(exprs).toMatch(/\bup\{[^}]*\}\s*==\s*0/);
+        // `unless` against the core runtime series catches the #792 shape:
+        // the scrape SUCCEEDS and returns nothing we recognise.
+        expect(exprs).toMatch(/unless/);
+        expect(exprs).toContain("knext_bunexec_process_uptime_seconds");
+    });
+});
+
+describe("every dashboard panel queries a series something emits (#792)", () => {
+    const files = readdirSync(DASHBOARD_DIR)
+        .filter((f) => f.endsWith(".json"))
+        .sort();
+
+    it("classifies every shipped dashboard (fails closed on a new one)", () => {
+        for (const f of files) {
+            expect(
+                DASHBOARDS[f],
+                `dashboard "${f}" is unclassified — declare which emitters it may depend on`,
+            ).toBeDefined();
+        }
+        // And the reverse: a classification with no file is stale.
+        expect(Object.keys(DASHBOARDS).sort()).toEqual(files);
+    });
+
+    it.each(files)("%s resolves every metric name", (file) => {
+        const spec = DASHBOARDS[file];
+        expect(spec, `${file} unclassified`).toBeDefined();
+        const ok = allowed(
+            (spec as { emitters: readonly EmitterId[] }).emitters,
+        );
+        const model = JSON.parse(read(join(DASHBOARD_DIR, file)));
+        const dangling: string[] = [];
+        for (const expr of dashboardExprs(model)) {
+            for (const name of extractMetricNames(expr)) {
+                if (!ok.has(name)) dangling.push(`"${name}" in: ${expr}`);
+            }
+        }
+        expect(dangling.join("\n")).toBe("");
+    });
+});
+
+describe("extractor guards (fail-first)", () => {
+    it("flags a made-up series", () => {
+        expect(
+            extractMetricNames("sum(rate(knext_totally_made_up_total[5m]))"),
+        ).toEqual(["knext_totally_made_up_total"]);
+    });
+
+    it("does not mistake label matchers or functions for metrics", () => {
+        expect(
+            extractMetricNames(
+                'histogram_quantile(0.95, sum by (le, app) (rate(knext_x_seconds_bucket{app=~"$app", status_class="5xx"}[$__rate_interval])))',
+            ),
+        ).toEqual(["knext_x_seconds_bucket"]);
+    });
+
+    it("expands a histogram family into its derived series", () => {
+        expect(expandFamily("k_seconds", "histogram")).toEqual([
+            "k_seconds",
+            "k_seconds_bucket",
+            "k_seconds_sum",
+            "k_seconds_count",
+        ]);
+        expect(expandFamily("k_total", "counter")).toEqual(["k_total"]);
+    });
+
+    it("parses inline and folded-block alert expressions alike", () => {
+        const parsed = parsePrometheusRules(
+            [
+                "spec:",
+                "  groups:",
+                "    - name: g1",
+                "      rules:",
+                "        - alert: Inline",
+                "          expr: up == 0",
+                "          for: 5m",
+                "        - alert: Folded",
+                "          expr: >-",
+                "            sum(rate(a_total[5m]))",
+                "              > 1",
+                "          for: 5m",
+            ].join("\n"),
+        );
+        expect(parsed).toEqual([
+            { group: "g1", alert: "Inline", expr: "up == 0" },
+            {
+                group: "g1",
+                alert: "Folded",
+                expr: "sum(rate(a_total[5m])) > 1",
+            },
+        ]);
+    });
+});

@@ -1,8 +1,8 @@
+import { describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 
 /**
  * GUARD TESTS for #147 A3-3 fix round 1 (triage of baseline run 28558576615).

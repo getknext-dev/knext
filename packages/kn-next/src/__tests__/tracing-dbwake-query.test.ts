@@ -1,3 +1,4 @@
+import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { context, SpanKind, trace } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import {
@@ -5,7 +6,6 @@ import {
     InMemorySpanExporter,
     SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
     DB_WAKE_SPAN_NAME,
@@ -109,7 +109,7 @@ describe("#345 db-wake fires on the pool.query() path", () => {
 
     it("(a) query-first (no explicit connect) fires exactly ONE db_wake span + emitter call", async () => {
         const pool = makeFakePool();
-        const emitter = vi.fn();
+        const emitter = mock();
         instrumentPoolForDbWake(pool, "writer", emitter);
 
         // Real usage: getDbPool() → db.query('select 1'). No connect().
@@ -162,7 +162,7 @@ describe("#345 db-wake fires on the pool.query() path", () => {
 
     it("(b) connect-first still fires exactly once (no regression)", async () => {
         const pool = makeFakePool();
-        const emitter = vi.fn();
+        const emitter = mock();
         instrumentPoolForDbWake(pool, "reader", emitter);
 
         await handleRequest("GET /a", async () => {
@@ -177,7 +177,7 @@ describe("#345 db-wake fires on the pool.query() path", () => {
 
     it("(c) SHARED latch: query-first then connect → still exactly ONE db_wake", async () => {
         const pool = makeFakePool();
-        const emitter = vi.fn();
+        const emitter = mock();
         instrumentPoolForDbWake(pool, "writer", emitter);
 
         await handleRequest("GET /a", async () => {
@@ -192,7 +192,7 @@ describe("#345 db-wake fires on the pool.query() path", () => {
 
     it("(c2) SHARED latch: connect-first then query → still exactly ONE db_wake", async () => {
         const pool = makeFakePool();
-        const emitter = vi.fn();
+        const emitter = mock();
         instrumentPoolForDbWake(pool, "writer", emitter);
 
         await handleRequest("GET /a", async () => {
@@ -229,7 +229,7 @@ describe("#345 db-wake fires on the pool.query() path", () => {
 
     it("(e) fail-open: a throwing emitter never breaks pool.query", async () => {
         const pool = makeFakePool();
-        const throwingEmitter = vi.fn(() => {
+        const throwingEmitter = mock(() => {
             throw new Error("emitter blew up");
         });
         // Wrapping + a broken emitter must not change pool.query's contract.

@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { resetDbState } from './reset';
 
 /**
  * P1 — prove the previously-UNTESTED-at-the-DSN-level `getDbRO()` writer
@@ -26,7 +27,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // Capture the connectionString every `new Pool(...)` is constructed with —
 // the observable DSN routing decision, without touching a real database.
 const poolConnectionStrings: Array<string | undefined> = [];
-vi.mock('pg', () => ({
+mock.module('pg', () => ({
   Pool: class {
     constructor(config: { connectionString?: string }) {
       poolConnectionStrings.push(config?.connectionString);
@@ -39,7 +40,7 @@ vi.mock('pg', () => ({
 
 // drizzle only wraps the pool; stub it so no driver runs. Record the wrapped
 // pool so the singleton/identity assertions still hold.
-vi.mock('drizzle-orm/node-postgres', () => ({
+mock.module('drizzle-orm/node-postgres', () => ({
   drizzle: (pool: unknown, opts?: { schema?: unknown }) => ({
     __client: true,
     pool,
@@ -48,9 +49,9 @@ vi.mock('drizzle-orm/node-postgres', () => ({
 }));
 
 // Capture the one-time warning.
-const warn = vi.fn();
-vi.mock('@getknext/lib/logger', () => ({
-  logger: { warn: (m: string) => warn(m), info: vi.fn(), error: vi.fn(), debug: vi.fn() },
+const warn = mock();
+mock.module('@getknext/lib/logger', () => ({
+  logger: { warn: (m: string) => warn(m), info: mock(), error: mock(), debug: mock() },
 }));
 
 const WRITER_DSN = 'postgres://u:p@writer.local:5432/app';
@@ -58,8 +59,8 @@ const RO_DSN = 'postgres://u:p@reader.local:55434/app';
 const savedEnv = { ...process.env };
 
 describe('getDbRO() writer-fallback — observable DSN routing + one-time warning', () => {
-  beforeEach(() => {
-    vi.resetModules(); // reset warnedNoReadReplica + writer/reader + lib pool singletons
+  beforeEach(async () => {
+    await resetDbState(); // reset warnedNoReadReplica + writer/reader + lib pool singletons
     poolConnectionStrings.length = 0;
     warn.mockClear();
     process.env = { ...savedEnv };
@@ -68,7 +69,7 @@ describe('getDbRO() writer-fallback — observable DSN routing + one-time warnin
     process.env.DATABASE_URL = WRITER_DSN;
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     process.env = { ...savedEnv };
   });
 
@@ -130,4 +131,12 @@ describe('getDbRO() writer-fallback — observable DSN routing + one-time warnin
     expect(poolConnectionStrings.filter((c) => c === RO_DSN)).toHaveLength(1);
     expect(warn).not.toHaveBeenCalled();
   });
+});
+
+// Bun registers module mocks for the whole RUN, not per file: without this,
+// this file's fake `pg` is still installed when a later file needs the real
+// driver, and that file fails depending only on collection order. vitest
+// isolated per file, so nothing in the suite was written to expect this.
+afterAll(() => {
+  mock.restore();
 });

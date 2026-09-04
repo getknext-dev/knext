@@ -97,6 +97,7 @@ const FILE_TOKEN = String.raw`test\/[^\r\n]*?\.test\.`;
  * @property {string} shard
  * @property {string} runtime
  * @property {string} [runtimeVersion]
+ * @property {string} [builder] #608 — 'vinext' on the compiled single-executable axis
  * @property {number} [expectedTotal]
  * @property {boolean} [truncated]
  * @property {ShardFailure[]} [failures] #545 — present only on a RED shard
@@ -106,7 +107,7 @@ const FILE_TOKEN = String.raw`test\/[^\r\n]*?\.test\.`;
 /**
  * Parse jest-style runner output + run metadata into the summary artifact shape.
  * @param {string} runnerOutput raw stdout from run-tests.js
- * @param {{ref:string, shard:string, excluded:number, runtime?:string, runtimeVersion?:string, expectedTotal?:number}} meta
+ * @param {{ref:string, shard:string, excluded:number, runtime?:string, runtimeVersion?:string, builder?:string, expectedTotal?:number}} meta
  * @returns {ShardSummary}
  */
 export function summarize(runnerOutput, meta) {
@@ -236,6 +237,15 @@ export function summarize(runnerOutput, meta) {
     ...(typeof meta?.runtimeVersion === 'string' && meta.runtimeVersion.trim() !== ''
       ? { runtimeVersion: meta.runtimeVersion.trim() }
       : {}),
+    // #608 (the vinext AXIS): `runtime` says which process serves; it does NOT
+    // say which ARTIFACT was served. Both lanes that run on bun would otherwise
+    // be indistinguishable in the ledger — the retired bun-standalone weekly
+    // booted `.next/standalone/server.js`, the vinext lane boots a COMPILED
+    // SINGLE EXECUTABLE, and their pass counts mean different things. Same
+    // omit-by-default discipline as `runtimeVersion`: absent on the
+    // next-build lanes, so those artifacts stay byte-stable for the #41
+    // publisher, and only an explicit 'vinext' records the compiled axis.
+    ...(meta?.builder === 'vinext' ? { builder: 'vinext' } : {}),
     // #171 — truncated means "fewer results than the shard's selection count
     // were reported": a killed shard's partial green must never read as green.
     // failed AND notRun both count as reported results (a fully-reported red
@@ -392,6 +402,9 @@ function main() {
     // #188 — the observed serving-runtime version (bun lane only; "" on node
     // → summarize omits the key). See the shape comment in summarize().
     runtimeVersion: args['runtime-version'],
+    // #608 — the BUILD axis ('vinext' on the compiled single-executable lane;
+    // absent/anything else on the next-build lanes). See summarize()'s shape note.
+    builder: args.builder,
     // #171 — optional explicit selected-test count; when absent summarize()
     // derives it from the runner log's `total: N` header.
     expectedTotal:

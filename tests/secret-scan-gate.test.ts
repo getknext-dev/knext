@@ -22,9 +22,10 @@
  *      forever) and `false-positive` (needs a dated expiry) — and the wrapper
  *      script REJECTS any entry outside that schema rather than honoring it.
  */
+
+import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 import { auditBlockingGate } from './helpers/blocking-gate';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
@@ -43,7 +44,7 @@ function jobBlock(yaml: string, jobKey: string): string {
   const start = yaml.indexOf(`\n  ${jobKey}:`);
   expect(start, `job ${jobKey} not found`).toBeGreaterThan(-1);
   const rest = yaml.slice(start + 1);
-  const next = rest.slice(rest.indexOf('\n')).search(/\n  [a-zA-Z0-9_-]+:/);
+  const next = rest.slice(rest.indexOf('\n')).search(/\n {2}[a-zA-Z0-9_-]+:/);
   return next === -1 ? rest : rest.slice(0, next + rest.indexOf('\n'));
 }
 

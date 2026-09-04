@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 
 /**
  * #352 — the module-state seams (setPoolInstrumentor / setTraceIdProvider /
@@ -28,13 +28,28 @@ class FakePool {
     return Promise.resolve();
   }
 }
-vi.mock('pg', () => ({ Pool: FakePool }));
+mock.module('pg', () => ({ Pool: FakePool }));
 
-/** Import a FRESH instance of a module (new module-level state), mimicking a
- * second bundle copy. */
+/**
+ * Import a FRESH instance of a module — new module-level state, mimicking a
+ * second bundle copy.
+ *
+ * A QUERY SUFFIX, not `vi.resetModules()`. bun has no module-registry reset,
+ * and this file was written off as unportable for that reason — but a distinct
+ * specifier is a distinct module key, and bun honours it: verified directly,
+ * `import('…/clients')` and `import('…/clients?copy=2')` return namespaces whose
+ * exported functions are NOT identical, which is exactly the two-copies-with-
+ * separate-`let`s condition this file needs.
+ *
+ * It is arguably a better reproduction than the registry reset was. Two bundle
+ * copies coexist; `resetModules` replaced one with the other, so instance A was
+ * gone by the time B existed. Here both are live at once, which is the real
+ * shape of the #352 bug.
+ */
+let freshCopy = 0;
 async function freshImport<T>(spec: string): Promise<T> {
-  vi.resetModules();
-  return (await import(spec)) as T;
+  freshCopy += 1;
+  return (await import(`${spec}?seam-copy=${freshCopy}`)) as T;
 }
 
 describe('#352 — pool-instrumentor seam survives module duplication', () => {
@@ -72,7 +87,7 @@ describe('#352 — pool-instrumentor seam survives module duplication', () => {
   it('resetPoolInstrumentor on any instance clears the shared state', async () => {
     type Clients = typeof import('../clients');
     const instanceA = await freshImport<Clients>('../clients');
-    const fn = vi.fn();
+    const fn = mock();
     instanceA.setPoolInstrumentor(fn);
 
     // Reset from a DIFFERENT instance — must clear the shared store.

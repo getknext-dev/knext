@@ -13,10 +13,10 @@
  * Comments are stripped first so a comment mention can't false-match.
  */
 
+import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const NODE_SERVER_SRC = resolve(__dirname, "..", "adapters", "node-server.ts");

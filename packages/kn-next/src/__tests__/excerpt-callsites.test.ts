@@ -10,7 +10,7 @@
  *   consistency fix in this change).
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import type { KubectlFn, KubectlResult } from "../cli/doctor";
 import { runDoctor } from "../cli/doctor";
 import { runStatus, type StatusDeps } from "../cli/status";

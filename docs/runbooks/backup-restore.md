@@ -110,7 +110,8 @@ So there is nothing to back up. What you can do is make a **restart** warmer:
 Full recipes and the fallback-mode caveats:
 [`../operator/data-plane-durability.md`](../operator/data-plane-durability.md).
 
-If Redis is *down* (not lost) and firing `KnextCacheUnreachable`, that is an
+If Redis is *down* (not lost) — surfacing as `KnextHighErrorRate` and 503s on the
+deep health route (the old `KnextCacheUnreachable` alert is retired) — that is an
 incident, not a restore — see
 [incident.md § Scenario 3](./incident.md#scenario-3-rediscache-down).
 

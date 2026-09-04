@@ -17,17 +17,20 @@
  *     returns on good config) without terminating the process.
  */
 
+import { describe, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { NODE_BIN } from "../../../../tests/helpers/runtime-binaries";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const corePkgDir = resolve(__dirname, "../..");
 
 // biome-ignore lint/suspicious/noExplicitAny: reading arbitrary package.json shape
-const corePkg: any = require(resolve(corePkgDir, "package.json"));
+const corePkg: any = JSON.parse(
+    readFileSync(resolve(corePkgDir, "package.json"), "utf8"),
+);
 
 function jsTargetOf(value: unknown): string | undefined {
     if (typeof value === "string") return value;
@@ -47,10 +50,12 @@ function dtsTargetOf(value: unknown): string | undefined {
 
 describe("@getknext/core/validate — public export pinning", () => {
     it("declares the ./validate subpath in the exports map", () => {
+        // Keys, not `toHaveProperty`: bun parses the dot in "./validate" as a
+        // path separator, so the property lookup fails on a key that is there.
         expect(
-            corePkg.exports,
+            Object.keys(corePkg.exports ?? {}),
             "@getknext/core must publicly export ./validate",
-        ).toHaveProperty("./validate");
+        ).toContain("./validate");
     });
 
     it("resolves ./validate to real compiled JS + .d.ts in dist", () => {
@@ -131,7 +136,7 @@ describe("@getknext/core/validate — public export pinning", () => {
         const entry = jsTargetOf(corePkg.exports["./validate"]);
         const abs = resolve(corePkgDir, entry as string);
         const out = execFileSync(
-            process.execPath,
+            NODE_BIN,
             [
                 "--input-type=module",
                 "-e",

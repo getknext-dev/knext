@@ -2,12 +2,15 @@ import {
     cpSync,
     existsSync,
     mkdirSync,
+    mkdtempSync,
     readdirSync,
     readFileSync,
     rmSync,
     writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
+import { DEFAULT_BUILDER_ID } from "../adapters/artifact-contract";
 import { runCapture, runQuiet, runQuietAllowFail } from "../cli/exec";
 import type { KnativeNextConfig, StorageConfig } from "../config";
 import { classifyBuilds, DEFAULT_RETAIN } from "./asset-gc";
@@ -565,19 +568,99 @@ export function stageStandaloneAssets(cwd: string = process.cwd()): string {
     return stagingDir;
 }
 
-export async function uploadAssets(config: StorageBackedConfig): Promise<void> {
-    const assetsDir = stageStandaloneAssets(process.cwd());
+/**
+ * Stages the vinext (nitro `.output`) build's served assets for upload and
+ * returns the staging dir.
+ *
+ * The nitro shape needs its own staging for two reasons, both learned the
+ * hard way in the PR #890 design gate:
+ *
+ * 1. **The source moved.** vinext serves everything from `.output/public`
+ *    (`_next/static/**` and the app's public files, already merged into the
+ *    exact key-space the bucket expects) — `.next/static` does not exist, so
+ *    `stageStandaloneAssets` would throw advice naming a builder the config
+ *    cannot even select.
+ * 2. **The standalone staging dir IS this shape's artifact.** Staging into
+ *    `.output/public` (chosen back when nothing else wrote `.output`) would
+ *    `rmSync` the vinext build's real static root — concurrently with the
+ *    docker build that COPYs it, in `deploy`'s parallel task set. So this
+ *    stages into a fresh temp dir outside the repo, and treats the artifact
+ *    as READ-ONLY.
+ *
+ * No `.knext-build` marker is staged for this shape, deliberately. vinext
+ * namespaces its chunks under its own generated id (`_next/static/<uuid>/`),
+ * which is NOT the deploy tag that `kn-next gc` resolves from revision
+ * labels. Marking the uuid prefix would let the GC classify the CURRENT
+ * build's assets as reapable while its protection keys never match — an
+ * over-delete. Unmarked prefixes are never reaped (fail-safe over-keep);
+ * teaching the GC the vinext namespace is tracked follow-up work, not a
+ * side effect of staging.
+ *
+ * @throws when `.output/public` is missing — the app's build has not run.
+ */
+export function stageNitroPublicAssets(cwd: string = process.cwd()): string {
+    const sourceDir = join(cwd, ".output", "public");
 
-    log.info(
-        { provider: config.storage.provider, bucket: config.storage.bucket },
-        "Syncing assets to storage",
+    if (!existsSync(sourceDir)) {
+        throw new Error(
+            `No .output/public directory found in ${cwd} — run the app's build ` +
+                "(`vite build`, or `kn-next build`) before deploying, or pass " +
+                "--skip-upload to skip the asset upload.",
+        );
+    }
+
+    // A FRESH temp dir per staging run, OUTSIDE the repo and the docker build
+    // context by construction (re-gate residual on PR #890): an in-repo
+    // staging dir sits inside deploy's build context, where buildx's context
+    // walk races the concurrent re-staging (intermittent `no such file`
+    // during context transfer) and an unignored copy of every asset wedges
+    // `git status`. Fresh-per-run also makes staleness impossible — no clear
+    // step, so there is nothing to mis-aim at the artifact.
+    const stagingDir = mkdtempSync(join(tmpdir(), "knext-upload-"));
+    cpSync(sourceDir, stagingDir, { recursive: true });
+
+    log.warn(
+        "vinext asset prefixes are not marker-staged — this build's " +
+            "_next/static/<id>/ objects will be over-kept (never reaped) by " +
+            "`kn-next gc` until the GC learns the vinext namespace",
     );
 
-    const ops = providerOps(config, assetsDir);
-    const localFiles = collectFiles(assetsDir, assetsDir);
+    return stagingDir;
+}
 
-    ops.bulkUpload();
-    verifyAndRetry(ops, localFiles, config.storage.bucket);
+export async function uploadAssets(config: StorageBackedConfig): Promise<void> {
+    // Shape dispatch — the builder decides where served assets live, so the
+    // staging step must ask (the resolved default, not the raw field: an
+    // absent `build` means vinext, ADR-0048).
+    const nitroShape = (config.build ?? DEFAULT_BUILDER_ID) === "vinext";
+    const assetsDir = nitroShape
+        ? stageNitroPublicAssets(process.cwd())
+        : stageStandaloneAssets(process.cwd());
+
+    try {
+        log.info(
+            {
+                provider: config.storage.provider,
+                bucket: config.storage.bucket,
+            },
+            "Syncing assets to storage",
+        );
+
+        const ops = providerOps(config, assetsDir);
+        const localFiles = collectFiles(assetsDir, assetsDir);
+
+        ops.bulkUpload();
+        verifyAndRetry(ops, localFiles, config.storage.bucket);
+    } finally {
+        // The nitro staging is a fresh mkdtemp per run — without this, every
+        // deploy on a long-lived build machine leaks a full copy of the
+        // app's static assets into the OS temp dir (sprint-close finding: the
+        // temp-dir guard asserts LOCATION, never lifetime). finally, not
+        // success-only: a failed upload's staging is equally dead weight.
+        // The standalone shape stages into .output/public, which is NOT ours
+        // to delete (it is the artifact on that shape) — never remove it.
+        if (nitroShape) rmSync(assetsDir, { recursive: true, force: true });
+    }
 }
 
 /**

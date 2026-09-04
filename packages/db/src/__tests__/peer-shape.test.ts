@@ -1,8 +1,8 @@
+import { describe, expect, it } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
 import { defineDrizzleConfig } from '../migrate';
 
 // v3-P3c — the @getknext/db peer/dependency shape contract (ADR-0021 amendment,

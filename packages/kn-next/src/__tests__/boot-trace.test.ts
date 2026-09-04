@@ -14,7 +14,7 @@
  *     a diagnostic. A broken writer must be swallowed.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, mock, spyOn } from "bun:test";
 import {
     BOOT_TRACE_ENV,
     createBootTracer,
@@ -57,13 +57,13 @@ describe("createBootTracer (disabled)", () => {
      * the globals a leaking implementation would actually reach.
      */
     it("does not read the clock and does not write — not even the real ones", () => {
-        const now = vi.fn(() => 0n);
-        const write = vi.fn();
-        const stderr = vi
-            .spyOn(process.stderr, "write")
-            .mockImplementation(() => true);
-        const hrtime = vi.spyOn(process.hrtime, "bigint");
-        const uptime = vi.spyOn(process, "uptime");
+        const now = mock(() => 0n);
+        const write = mock();
+        const stderr = spyOn(process.stderr, "write").mockImplementation(
+            () => true,
+        );
+        const hrtime = spyOn(process.hrtime, "bigint");
+        const uptime = spyOn(process, "uptime");
 
         try {
             const tracer = createBootTracer({ enabled: false, now, write });

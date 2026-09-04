@@ -209,3 +209,49 @@ your own.
       fire, so as written this exception renews forever — the architect gate's verdict was that it
       "is a way to ship without the control". Re-anchor once #742 defines the term, and replace this
       prose re-review with a mechanical one.
+
+## Amendment 2: the expiry is re-anchored — its old anchor became unreachable
+
+**Status of this amendment: ACCEPTED (founder-approved, stability-sprint planning).**
+
+Decision 4's hard expiry — "the exception closes at Tier-A exit or v1.0, whichever comes first" —
+was already flagged above as anchored to an undefined event (#742). It has since gotten worse, not
+better: ADR-0048 made the official compat suite unable to cover the shipped path, and Tier-A exit
+was defined in terms of compat-suite green. **The expiry's anchor is now unreachable by
+construction, not merely undefined.** A live security exception whose deadline can never fire is a
+decision to ship without the control, made as a side effect of a performance decision — the exact
+shape this ADR's own architect gate objected to.
+
+**Re-anchor:** the exception now expires at the **first sprint close after the vinext-axis compat
+lane publishes its first run** (the lane is this sprint's centerpiece, task B1 of
+`.claude/sprint-stability-taskgraph.md`). That event is scheduled work with an owner, not an
+aspiration: if B1 lands this sprint, the Option C byte cap becomes next sprint's obligation, and
+this exception may not be renewed past it without a further founder-approved amendment recorded
+here. The v1.0 backstop stays: whichever comes first.
+
+Unchanged: every pre-recorded design constraint in Decision 4 (counted-bytes, Upgrade/101
+pass-through, readiness-gates-on-listen, two-stage drain, red-on-fail compat gating). The
+constraint set transfers to the single-exec runtime as-is — the compiled binary's entry
+(`knext-bun-entry.mjs`) is now the one place the cap lives, which simplifies the "both build
+targets, never one" clause to a single target by ADR-0048.
+
+## Amendment 3: flannel clusters are formally unsupported-for-isolation (records #744's criterion 5)
+
+**Status of this amendment: ACCEPTED (stability sprint, C4 verification pass).**
+
+Issue #744's last acceptance criterion asked for a decision that the shipped code and docs had
+already taken de facto but nothing recorded: what knext does about clusters whose CNI enforces no
+NetworkPolicy (flannel — which OKE GA and OrbStack, the reference clusters, both run).
+
+**Decision: flannel-class clusters are formally documented as unsupported for network isolation;
+the reference cluster is NOT moved to a policy-capable CNI.** The operator still writes its
+default-on NetworkPolicy (harmless, and correct the moment a policy controller appears), and the
+inertness is OBSERVABLE on both halves — the `NetworkPolicyEnforced` condition computed in
+`computeStatusVerdict` (`status_verdict.go:484-552`, envtest-covered including the flannel case)
+and the `kn-next doctor` CNI check (`doctor.ts:1178-1268`, fail-honest: "cannot determine" is
+never folded into "enforced"). Users who need enforced isolation install Calico or Cilium; the
+docs say exactly that (`security.mdx`, `hardening.mdx`).
+
+Why not move the reference cluster: the enforcement contract is already proved by the kind+Calico
+drill this ADR requires, and moving OKE's CNI buys no user-facing guarantee — any user's flannel
+cluster would be in the same observable, documented state regardless of what our cluster runs.

@@ -2,6 +2,12 @@
  * Config validation — runs at load time, fails fast with clear errors.
  */
 
+import {
+    BUILDERS,
+    AVAILABLE_BUILDERS as CONTRACT_AVAILABLE,
+    explainIncompatibility,
+    RUNTIMES,
+} from "../adapters/artifact-contract";
 import type { KnativeNextConfig } from "../config";
 
 // Storage providers with a real, tested upload/verify path in `asset-upload.ts`.
@@ -28,6 +34,49 @@ const IMPLEMENTED_CACHE_PROVIDERS = ["redis"] as const;
 // `kafka` and `none` validate here; the deferral is observable at reconcile time.
 const SUPPORTED_QUEUE_PROVIDERS = ["kafka", "none"] as const;
 const SUPPORTED_RUNTIMES = ["bun", "node"] as const;
+
+/**
+ * Builders the `build` axis knows about (B2).
+ *
+ * Two lists, deliberately, because "we have never heard of this" and "this is
+ * real but you cannot use it here" are different user errors with different
+ * fixes. Collapsing them would tell someone selecting `vinext` to check their
+ * spelling.
+ *
+ * `AVAILABLE_BUILDERS` is derived from the artifact contract's registry rather
+ * than restated, so a builder becomes selectable by being implemented — not by
+ * someone also remembering to edit this file. That is the failure mode the
+ * contract exists to end.
+ */
+/**
+ * Is this build/runtime pairing executable, per the artifact contract?
+ * Returns the reason it is not, or null.
+ *
+ * EXPORTED and pure so it can be exercised directly. It has to be: with only
+ * `turbopack` available today, and both runtimes accepting `next-standalone`,
+ * NO reachable config can produce an incompatible pairing — measured. A design
+ * gate wired this check in to give the contract a production caller, and a
+ * mutation then showed that deleting it broke no test, because nothing could
+ * reach it through `validateConfig`.
+ *
+ * Keeping it unexercised would have been the very thing the gate objected to,
+ * one level down: a check that exists and proves nothing. Testing the function
+ * directly covers the incompatible case (`vinext` + `node`) that config cannot
+ * currently express, so the seam is live the moment a second builder ships.
+ */
+export function checkPairing(
+    build: string | undefined,
+    runtime: string | undefined,
+): string | null {
+    const builder = BUILDERS.find((b) => b.id === (build ?? "vinext"));
+    const rt = RUNTIMES.find((r) => r.id === (runtime ?? "bun"));
+    if (!builder || !rt) return null; // shape/enum errors are reported elsewhere
+    // Root is irrelevant to shape compatibility; "." keeps it pure.
+    return explainIncompatibility(rt, builder.describeArtifact("."));
+}
+
+const KNOWN_BUILDERS = BUILDERS.map((b) => b.id);
+const AVAILABLE_BUILDERS = CONTRACT_AVAILABLE.map((b) => b.id);
 
 // #186 — config.env local validation, MIRRORING the NextApp CRD's CEL rules
 // (api/v1alpha1/nextapp_types.go). The cluster rejects these at `kubectl
@@ -260,6 +309,70 @@ export function validateConfig(config: KnativeNextConfig): void {
             `Runtime '${config.runtime}' is not supported. Supported: ${SUPPORTED_RUNTIMES.join(", ")}`,
         );
     }
+
+    // Build validation (B2). Independent of `runtime`: the axes are connected
+    // by the artifact SHAPE a builder emits and a runtime accepts, never by a
+    // rule pairing the two names. See src/adapters/artifact-contract.ts.
+    if (
+        config.build &&
+        !(KNOWN_BUILDERS as readonly string[]).includes(config.build)
+    ) {
+        errors.push(
+            `Build '${config.build}' is not supported. Supported: ${KNOWN_BUILDERS.join(", ")}`,
+        );
+    } else if (
+        config.build &&
+        !(AVAILABLE_BUILDERS as readonly string[]).includes(config.build)
+    ) {
+        // KNOWN but not AVAILABLE. Kept as a separate branch from "unknown" on
+        // purpose: telling someone `vinext` is "not supported" reads as a typo
+        // and sends them to the spelling, when the truth is that the builder is
+        // real and this build of knext cannot run it.
+        //
+        // Rejecting here rather than at build time is the whole point. vinext
+        // is not a dependency of this repo, so accepting the key would emit an
+        // image with no build output and surface it at `docker run` on a
+        // cluster — the #857 ordering, where `next build` exited 0 the whole
+        // way while producing a server nothing could find.
+        // ADR-0048 retired every target except vinext + bun. A retired builder is
+        // not a typo, so the message is a MIGRATION, not a spelling correction.
+        errors.push(
+            `Build '${config.build}' was retired by ADR-0048. The only supported target is ` +
+                `${AVAILABLE_BUILDERS.join(", ")} (single executable, Bun 1.4.0+).\n\n` +
+                `Set \`build: "vinext", runtime: "bun"\` in kn-next.config.ts. Measured on an identical app: ` +
+                `61ms cold start vs 884ms, and 1.75x the requests/sec.`,
+        );
+    }
+
+    // The PAIRING check — against the artifact contract, which is the point of
+    // having one. This is `isCompatible`'s production caller.
+    //
+    // Runs for any KNOWN builder, deliberately NOT only available ones, and
+    // that placement is the whole fix. Three design-gate rounds defeated
+    // earlier versions, each time because the enforcement sat somewhere the
+    // defect could not reach it:
+    //
+    //   - inside the available-only branch, no reachable config could produce
+    //     an incompatible pairing, so deleting the call broke nothing across
+    //     162 files and 1833 tests;
+    //   - guarding it with a source scan instead was defeated twice — once by
+    //     keeping the call byte-identical and dropping the reporting
+    //     (`if (why) { /* not reported */ }`), once by deleting the call and
+    //     leaving a TODO comment containing its text, which a raw-source regex
+    //     happily matches.
+    //
+    // Running it for known builders makes `build: vinext` + `runtime: node`
+    // REACHABLE — the pairing genuinely cannot execute (a bun-preset nitro
+    // output crashes under node), so `validateConfig` now rejects it with a
+    // real error a behavioural test can assert on. That is what closes the
+    // hole: neutering the enforcement now fails a test about OUTPUT, not a
+    // test about the shape of the source.
+    //
+    // Such a config collects two errors — "not available" and the pairing
+    // refusal — and that is correct rather than noisy: they are independent
+    // facts, and the pairing one stays true after vinext becomes available.
+    const pairingProblem = checkPairing(config.build, config.runtime);
+    if (pairingProblem) errors.push(pairingProblem);
 
     // Scaling validation
     if (config.scaling) {

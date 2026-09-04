@@ -25,9 +25,9 @@
  * conversion bit: it disarms this job five ways and requires this file to red.
  */
 
+import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 import { auditBlockingGate } from './helpers/blocking-gate';
 
 const REPO_ROOT = resolve(__dirname, '..');
@@ -72,7 +72,7 @@ describe('the real-bun compile-cache probe is wired into CI (#309)', () => {
   });
 
   it('installs the workspace, since the probe runs under the repo vitest', () => {
-    expect(jobBlock(), 'the job never installs workspace dependencies').toMatch(/pnpm install/);
+    expect(jobBlock(), 'the job never installs workspace dependencies').toMatch(/bun install/);
   });
 
   it('runs unconditionally on a PR and its failure fails the run (#661)', () => {

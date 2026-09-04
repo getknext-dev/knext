@@ -7,7 +7,7 @@
  * whitespace); they now share this helper so the two sites behave identically.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import { excerpt } from "../cli/shared";
 
 describe("excerpt", () => {

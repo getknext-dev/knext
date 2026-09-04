@@ -9,10 +9,11 @@
  * injected API/git doubles, exactly like the tag-resolution suite: the network
  * truth is the nightly's job, the LOGIC is this file's.
  */
+
+import { describe, expect, it } from 'bun:test';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
 import {
   fetchDeclaredInputs,
   formatFinding,
@@ -437,7 +438,7 @@ describe('input existence — API transport retry (#750)', () => {
       // Thrown once, then answered: the retry converts a transient reset into
       // the answer — measured on this branch, one such reset fanned out into
       // 62 findings via the memoised cache.
-      globalThis.fetch = (async () => {
+      globalThis.fetch = (async (..._args: Parameters<typeof fetch>): Promise<Response> => {
         calls += 1;
         if (calls === 1) throw new Error('socket reset');
         return { status: 200, json: async () => ({ ok: true }) } as Response;
@@ -447,7 +448,7 @@ describe('input existence — API transport retry (#750)', () => {
 
       // An HTTP failure status is an answer: exactly one request.
       calls = 0;
-      globalThis.fetch = (async () => {
+      globalThis.fetch = (async (..._args: Parameters<typeof fetch>): Promise<Response> => {
         calls += 1;
         return { status: 500, json: async () => ({}) } as Response;
       }) as typeof fetch;
@@ -456,7 +457,7 @@ describe('input existence — API transport retry (#750)', () => {
 
       // A second thrown transport still THROWS — a retry is not a softened verdict.
       calls = 0;
-      globalThis.fetch = (async () => {
+      globalThis.fetch = (async (..._args: Parameters<typeof fetch>): Promise<Response> => {
         calls += 1;
         throw new Error('socket reset');
       }) as typeof fetch;

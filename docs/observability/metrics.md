@@ -14,7 +14,8 @@ spans these counters mirror) · [structured logging + correlation IDs](./logging
 
 | Target | Process | Port / path | Series |
 | --- | --- | --- | --- |
-| **App runtime** | the runtime supervisor (`node-server.ts`) | `:9091/metrics` | golden signals + cold-start + DB-wake (merged from the child) and the Node process metrics |
+| **App runtime (default — compiled executable)** | the single-exec entry (`knext-bun-entry.mjs`) | `:9091/metrics` | `knext_bunexec_*`: http_requests_total{status_class} + duration histogram + in-flight + startup_duration + process RSS/uptime — the ONLY series on the shipped scrape path |
+| **App runtime (legacy standalone supervisor)** | `node-server.ts` | `:9091/metrics` | golden signals + cold-start + DB-wake (merged from the child) and the Node process metrics — this shape only |
 | **Operator** | the controller manager | its `/metrics` (HTTPS `:8443` by default) | reconcile count/duration/errors + `workqueue_depth` + controller-runtime + Go process metrics |
 
 The operator sets `prometheus.io/scrape=true`, `prometheus.io/port=9091`,
@@ -24,7 +25,11 @@ Operator** setup (CRD-based discovery, annotations ignored) ship the CRs in
 `packages/kn-next-operator/config/prometheus/`: `monitor.yaml` (ServiceMonitor
 for the operator) and `app-podmonitor.yaml` (PodMonitor for the per-app `:9091`).
 
-### Why the app metrics ride a cross-process bridge
+### Why the LEGACY shape's app metrics ride a cross-process bridge
+
+> Everything in this section describes the retired standalone-supervisor shape
+> only. The compiled executable is one process: its entry registers the
+> `knext_bunexec_*` series directly, no bridge, no child registry.
 
 The golden-signal / cold-start / DB-wake metrics are **derived from core-owned
 OpenTelemetry hooks** — the inbound HTTP SERVER span lifecycle, the
@@ -48,35 +53,58 @@ reject). Because the metrics ride the OTel spans they share tracing's
 
 ## App runtime series (`:9091`)
 
-Labels are deliberately **bounded** — `app` (from `KN_APP_NAME`), `method` (HTTP
-verb), `status_class` (`2xx`..`5xx`, never the raw code), `role`
-(`writer`|`reader`). No raw path/route, user, or session labels (unbounded
-cardinality).
+**Since ADR-0048 the app scrape is served by the compiled single executable**
+(`renderMetrics` in the runtime contract the scaffolder emits), not by the
+node-server supervisor. That endpoint is what the shipped `PodMonitor` scrapes,
+so the table below is the whole of what a turnkey dashboard or alert can use.
+
+Labels are deliberately **bounded**, and the bound is the design rather than a
+default. A scale-to-zero fleet churns pods and every pod is a fresh series set,
+so an unbounded label multiplies fleet-wide: the counter carries `status_class`
+only (five values, fixed) — never the raw status, and never a route/path label,
+which is unbounded by construction (one crawler mints a series per URL). The
+duration histogram carries no labels at all: its 13 buckets already multiply it,
+and crossing them with `status_class` would make one histogram the dominant term
+in the fleet's series count for no SLO that needs it. **Total: 23 series per
+pod, constant.**
 
 | Series | Type | Labels | Meaning |
 | --- | --- | --- | --- |
-| `knext_http_requests_total` | counter | `app`, `method`, `status_class` | request RATE; the `status_class="5xx"` slice is the ERROR rate |
-| `knext_http_request_duration_seconds` | histogram | `app`, `method`, `status_class` | request LATENCY |
-| `knext_http_inflight_requests` | gauge | `app` | SATURATION (concurrently-handled requests) |
-| `knext_coldstart_total` | counter | `app` | cold starts (app boot / first-request wake) observed |
-| `knext_coldstart_duration_seconds` | histogram | `app` | cold-start wake duration |
-| `knext_db_wake_total` | counter | `app`, `role` | scale-zero-pg 0→1 DB wakes (first `query()` or `connect()`) |
-| `knext_db_wake_duration_seconds` | histogram | `app`, `role` | DB 0→1 wake duration (first `query()`/`connect()`) |
+| `knext_bunexec_http_requests_total` | counter | `status_class` (`1xx`..`5xx`) | request RATE; the `status_class="5xx"` slice is the ERROR rate |
+| `knext_bunexec_http_request_duration_seconds` | histogram | — | request LATENCY. Buckets 5ms…10s, five of them under 100ms (a warm SSR hit is tens of ms, so coarser buckets cannot resolve a p50) |
+| `knext_bunexec_http_inflight_requests` | gauge | — | SATURATION (concurrently-handled requests) |
+| `knext_bunexec_startup_duration_seconds` | gauge | — | COLD START: seconds from process start to both listeners bound. Set once per process; absent until then |
+| `knext_bunexec_process_uptime_seconds` | gauge | — | seconds since process start |
+| `knext_bunexec_process_resident_memory_bytes` | gauge | — | RSS |
 
-### Also on the app scrape (app-owned, not from the OTel hooks)
+The `app` label every query uses is added by the scrape, not by the runtime: the
+`PodMonitor` relabels the pod's `app` label onto each series, and pins
+`job="knext-nextapp"` so the staleness meta-alerts can name their own targets.
 
-These predate #315 and are emitted by the app itself on `/api/metrics` (see
-`apps/file-manager/src/app/api/_metrics/registry.ts`): the RED series
-`kn_next_http_requests_total` / `kn_next_http_request_duration_seconds`
-(hand-instrumented per route via `withRedMetrics`), the Web-Vitals RUM
-histograms `kn_next_web_vitals_*`, and the **bytecode-cache** series —
-`kn_next_bytecode_cache_files_total`, `kn_next_bytecode_cache_size_bytes`,
-`kn_next_bytecode_cache_warm_start`, `kn_next_bytecode_cache_write_count`,
-`kn_next_startup_duration_seconds{cache_status}`. The bytecode-cache hit/miss
-signal is `kn_next_bytecode_cache_warm_start` (1 = warm/hit, 0 = cold/miss) plus
-the `cache_status` label on the startup histogram. These live where the cache
-decision is made (the app's compile-cache scan), which is why they are on
-`/api/metrics` rather than the core `:9091` bridge — see the deferred note below.
+### NOT on the shipped scrape: app-owned registries
+
+An app may register its own prom-client metrics — `knext_http_*`,
+`knext_coldstart_*`, `knext_db_wake_*`, `knext_deep_health_state`
+(`@getknext/core/adapters/metrics`), or the `kn_next_*` RED / RUM / bytecode
+series in `apps/file-manager/src/app/api/_metrics/registry.ts`. These are real,
+but they are served on the **app port** through an `/api/metrics` route. The
+node-server supervisor used to merge them onto `:9091`; the compiled binary does
+not, and the shipped `PodMonitor` scrapes `:9091` only.
+
+So a query naming one of them is **empty on a default knext deployment** unless
+you add a scrape config for your app's `/api/metrics`. That is why the
+`knext.app.node-legacy` alert group is kept separate from `knext.app`, and why
+the DB-wake panels on the scale-to-zero dashboard say so in their descriptions.
+
+### The contract is gated, because its failure is silent
+
+PromQL over a series nobody emits returns an empty vector: no error, no red — a
+blank panel and an alert that never fires. That is exactly how the whole
+`knext.app` group went dead when ADR-0048 changed the runtime's metric names.
+`packages/kn-next/src/__tests__/observability-metric-contract.test.ts` now
+extracts every metric name from every shipped alert and dashboard and resolves
+it against an emitter **scanned from that emitter's own source**. Renaming a
+series moves the set and reds every query that still names the old one.
 
 ## Operator series (operator `/metrics`)
 
@@ -110,14 +138,15 @@ single app by adding `app: <NextApp name>` to the PodMonitor selector.
 Plain (non-operator) Prometheus needs no CRs: it honors the
 `prometheus.io/scrape` annotations the operator already injects.
 
-## Deferred: core-owned bytecode-cache hit/miss
+## Closed: core-owned bytecode-cache hit/miss
 
-Issue #315 lists a bytecode-cache hit/miss metric. It already exists as
-`kn_next_bytecode_cache_warm_start` (+ the `cache_status` startup-histogram
-label), but on the **app-owned** `/api/metrics` registry, not the core `:9091`
-bridge — because the cache decision is made in the app's compile-cache scan
-(`_metrics/registry.ts`), which knext-core does not own (the runtime supervisor
-does not participate in the child's `NODE_COMPILE_CACHE` warm/cold decision).
-Moving it onto the core bridge would require a core-owned hook at the compile-
-cache decision point; that is tracked as a follow-up rather than duplicated
-here.
+Issue #315 listed a bytecode-cache hit/miss metric, deferred because the
+warm/cold decision lived in the app's `NODE_COMPILE_CACHE` scan rather than in
+core. **ADR-0048 closed it by removing the subject, not by building it:** the
+compiled single executable has no V8 compile cache to be warm or cold about —
+every start is a cold start, and `knext_bunexec_startup_duration_seconds`
+measures it directly. The `kn_next_bytecode_cache_*` series and the
+`cache_status` label survive only for apps still on the node-server path, on
+their own `/api/metrics` registry. The Grafana bytecode dashboard was deleted
+rather than repointed (#792): its subject no longer exists, and a blank
+dashboard reads as a quiet system.

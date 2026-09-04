@@ -9,7 +9,7 @@
  *
  * This test pins the contract from BOTH sides:
  *   1. every non-private TS package under packages/* has a `typecheck` script
- *      AND a `pnpm --filter <name> typecheck` step in ci.yml;
+ *      AND a `bun run --filter <name> typecheck` step in ci.yml;
  *   2. every typecheck step in ci.yml points at an existing workspace package
  *      (no stale steps after a rename/removal).
  *
@@ -20,10 +20,10 @@
  * A new TS package added with neither fails this test. No silent gaps.
  */
 
+import { describe, expect, it } from "bun:test";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..", "..", "..", "..");
@@ -41,6 +41,15 @@ const ciYml = readFileSync(
  * Keyed by package `name`.
  */
 const DOCUMENTED_EXCLUSIONS: Record<string, string> = {
+    // The GitHub Action (packages/kn-next-action). It ships an action.yml, a
+    // README and one `.mjs` runner — no TypeScript source and no tsconfig, so
+    // `tsc --noEmit` has nothing to check. The logic it would typecheck is
+    // deliberately NOT here: the credential classifier lives in
+    // @getknext/core (`cli/ci/credential-scope.ts`), where it is covered by
+    // that package's typecheck and sits beside the Role definition
+    // `kn-next init-ci` generates from. The runner is thin on purpose.
+    "@getknext/action":
+        "composite action — action.yml + one .mjs runner, no TS source and no tsconfig; its logic lives in @getknext/core, which IS covered",
     // file-manager was excluded here until #804: its next-adapter.test.ts
     // fixtures carried real type debt (TS2345 vs the current NextAdapter ctx
     // types). The fixtures are re-typed and the app is now COVERED — a
@@ -101,9 +110,9 @@ function hasTypecheckScript(m: PkgManifest): boolean {
     return typeof m.scripts?.typecheck === "string";
 }
 
-/** The `pnpm --filter <name> typecheck` invocations present in ci.yml. */
+/** The `bun run --filter <name> typecheck` invocations present in ci.yml. */
 function ciTypecheckFilters(): string[] {
-    return [...ciYml.matchAll(/pnpm --filter (\S+) typecheck/g)].map(
+    return [...ciYml.matchAll(/bun run --filter (\S+) typecheck/g)].map(
         (m) => m[1],
     );
 }
@@ -125,7 +134,7 @@ describe("ci.yml typecheck steps ↔ workspace non-private packages (#261 gate c
         expect(missing).toEqual([]);
     });
 
-    it("every non-private package has its own `pnpm --filter <name> typecheck` step in ci.yml", () => {
+    it("every non-private package has its own `bun run --filter <name> typecheck` step in ci.yml", () => {
         const missing = nonPrivate
             .map((m) => m.name ?? "(unnamed)")
             .filter((name) => !filters.includes(name));
@@ -188,7 +197,7 @@ describe("every TS workspace member is typecheck-covered or documented-excluded 
             .map((m) => m._dir ?? m.name);
         expect(
             gaps,
-            "each of these TS members needs EITHER a `typecheck` script wired into ci.yml (a `pnpm --filter <name> typecheck` step) OR an entry in DOCUMENTED_EXCLUSIONS with a reason",
+            "each of these TS members needs EITHER a `typecheck` script wired into ci.yml (a `bun run --filter <name> typecheck` step) OR an entry in DOCUMENTED_EXCLUSIONS with a reason",
         ).toEqual([]);
     });
 

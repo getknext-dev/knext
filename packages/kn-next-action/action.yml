@@ -1,0 +1,188 @@
+# ADR-0049 stage 1 — deploy to the client's own cluster, from the client's own repo.
+#
+# knext hosts nothing and holds no credentials. This action runs in your CI,
+# builds your image, pushes it to your registry, and writes ONE object to your
+# cluster: a NextApp resource. The knext operator reconciles from there.
+#
+# It is deliberately thin. It does not know how to configure Knative,
+# autoscaling, NetworkPolicies or ingress — the operator owns all of that, so
+# everything the operator learns later is inherited here for free.
+name: Deploy with knext
+description: Build, push and deploy a Next.js app to your own Kubernetes cluster via the knext operator.
+author: knext
+
+branding:
+  icon: upload-cloud
+  color: blue
+
+inputs:
+  working-directory:
+    description: Where kn-next.config.ts lives, relative to the repository root.
+    required: false
+    default: .
+  auth:
+    description: >-
+      How to authenticate to the cluster. Only "kubeconfig" is implemented
+      today; this input exists so GitHub OIDC federation is an added case
+      rather than a rewrite of everything that reads it.
+    required: false
+    default: kubeconfig
+  kubeconfig:
+    description: >-
+      base64-encoded kubeconfig for a SCOPED ServiceAccount — the one
+      `kn-next init-ci` generates. An over-broad credential is REFUSED, not
+      used.
+    required: false
+  namespace:
+    description: Namespace to deploy into.
+    required: true
+  dry-run:
+    description: >-
+      Print the NextApp resource that WOULD be applied and stop. The
+      credential preflight still runs — a dry run that skipped it would report
+      success for a credential the real run refuses.
+    required: false
+    default: 'false'
+  doctor:
+    description: >-
+      Run the read-only `kn-next doctor` preflight and fail on an unready
+      cluster. Much cheaper to read here than halfway through a build.
+    required: false
+    default: 'true'
+  registry:
+    description: Registry host and repository, e.g. ghcr.io/acme/app.
+    required: true
+  registry-token:
+    description: Push token for that registry. On GHCR, github.token suffices.
+    required: false
+  registry-username:
+    description: Registry username. Defaults to the triggering actor.
+    required: false
+    default: ${{ github.actor }}
+  tag:
+    description: Image tag. Prefer github.sha — a timestamp cannot be traced to a commit.
+    required: false
+    default: ${{ github.sha }}
+  bucket:
+    description: Object-storage bucket for static assets. Defaults to kn-next.config.ts.
+    required: false
+  skip-upload:
+    description: >-
+      Skip the static-asset upload. This is the credential-free path: it needs
+      only a kubeconfig and registry auth, nothing cloud-specific. The app still
+      builds, deploys, serves and scales to zero.
+    required: false
+    default: 'false'
+  skip-build:
+    description: Skip `next build` — for when a previous job already produced the output.
+    required: false
+    default: 'false'
+  skip-credential-preflight:
+    description: >-
+      Escape hatch for clusters whose authorizer does not implement
+      SelfSubjectRulesReview. It disables a SECURITY check — an unreadable
+      policy becomes "proceed" instead of "refuse" — so it is off by default
+      and logs loudly when on.
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    # ── 1. Cluster credential ────────────────────────────────────────────────
+    # Written to a file under RUNNER_TEMP, never to the workspace: the workspace
+    # is what a later step might upload as an artifact or bake into an image.
+    - name: Configure cluster access
+      shell: bash
+      env:
+        KNEXT_AUTH: ${{ inputs.auth }}
+        KNEXT_KUBECONFIG_B64: ${{ inputs.kubeconfig }}
+      run: |
+        set -euo pipefail
+        case "$KNEXT_AUTH" in
+          kubeconfig)
+            if [ -z "${KNEXT_KUBECONFIG_B64:-}" ]; then
+              echo "::error::auth=kubeconfig but no kubeconfig input was provided."
+              exit 1
+            fi
+            umask 077
+            printf '%s' "$KNEXT_KUBECONFIG_B64" | base64 -d > "$RUNNER_TEMP/kubeconfig"
+            echo "KUBECONFIG=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_ENV"
+            ;;
+          oidc)
+            # The seam ADR-0049 asks for. Not implemented: OIDC federation is
+            # per-cloud work (EKS/GKE/AKS/OKE each differ), and shipping a
+            # branch that silently fell back to kubeconfig would be worse than
+            # this refusal.
+            echo "::error::auth=oidc is not implemented yet. Use auth=kubeconfig."
+            exit 1
+            ;;
+          *)
+            echo "::error::unknown auth mode '$KNEXT_AUTH' (expected: kubeconfig)"
+            exit 1
+            ;;
+        esac
+
+    # ── 2. Credential preflight — refuse more than we asked for ──────────────
+    # ADR-0049: "a cluster-admin kubeconfig must be refused, not merely
+    # discouraged." Asking for less than you are offered is the entire trust
+    # argument for handing this action a cluster credential at all.
+    - name: Credential preflight
+      shell: bash
+      env:
+        KNEXT_NAMESPACE: ${{ inputs.namespace }}
+        KNEXT_SKIP_PREFLIGHT: ${{ inputs.skip-credential-preflight }}
+      run: |
+        set -euo pipefail
+        if [ "$KNEXT_SKIP_PREFLIGHT" = "true" ]; then
+          echo "::warning::Credential preflight SKIPPED. An over-broad kubeconfig will be used as-is."
+          exit 0
+        fi
+        node "${{ github.action_path }}/preflight.mjs" --namespace "$KNEXT_NAMESPACE"
+
+    - name: Log in to the registry
+      shell: bash
+      env:
+        KNEXT_REGISTRY: ${{ inputs.registry }}
+        KNEXT_REGISTRY_TOKEN: ${{ inputs.registry-token }}
+        KNEXT_REGISTRY_USERNAME: ${{ inputs.registry-username }}
+      run: |
+        set -euo pipefail
+        if [ -z "${KNEXT_REGISTRY_TOKEN:-}" ]; then
+          echo "::error::no registry-token provided — cannot push the image."
+          exit 1
+        fi
+        # --password-stdin, never an argv password: argv is visible in `ps` to
+        # anything else on the runner.
+        printf '%s' "$KNEXT_REGISTRY_TOKEN" \
+          | docker login "${KNEXT_REGISTRY%%/*}" -u "$KNEXT_REGISTRY_USERNAME" --password-stdin
+
+    # ── 3. Build, push, emit the CR, apply, wait ─────────────────────────────
+    # All of it is `kn-next deploy`. The action adds no deployment logic of its
+    # own — if it did, the CLI and the action would drift, and the cluster would
+    # get whichever one ran last.
+    - name: Deploy
+      id: deploy
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        KNEXT_NAMESPACE: ${{ inputs.namespace }}
+        KNEXT_REGISTRY: ${{ inputs.registry }}
+      run: |
+        set -euo pipefail
+        if [ "${{ inputs.doctor }}" = "true" ]; then
+          npx --yes @getknext/core doctor --namespace "$KNEXT_NAMESPACE"
+        fi
+        DEPLOY_ARGS=(--namespace "$KNEXT_NAMESPACE" --registry "$KNEXT_REGISTRY")
+        # `if`, not `[ … ] && …`. Under `set -e`, a `[ … ] && …` whose test is
+        # false is fatal ONLY when it is the last command in the step — which it
+        # is not here, today. The `if` form is used anyway because that safety
+        # depends on a line that follows it: append one optional flag after the
+        # deploy call, or reorder these, and the default configuration starts
+        # exiting 1 for no visible reason.
+        if [ -n "${{ inputs.tag }}" ]; then DEPLOY_ARGS+=(--tag "${{ inputs.tag }}"); fi
+        if [ -n "${{ inputs.bucket }}" ]; then DEPLOY_ARGS+=(--bucket "${{ inputs.bucket }}"); fi
+        if [ "${{ inputs.skip-upload }}" = "true" ]; then DEPLOY_ARGS+=(--skip-upload); fi
+        if [ "${{ inputs.skip-build }}" = "true" ]; then DEPLOY_ARGS+=(--skip-build); fi
+        if [ "${{ inputs.dry-run }}" = "true" ]; then DEPLOY_ARGS+=(--dry-run); fi
+        npx --yes @getknext/core deploy "${DEPLOY_ARGS[@]}"

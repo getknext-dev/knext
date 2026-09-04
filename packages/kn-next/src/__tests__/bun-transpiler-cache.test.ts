@@ -29,7 +29,7 @@
  *     byte-identical: the derivation is gated on running under Bun.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import { buildChildEnv, deriveBunTranspilerCachePath } from "../adapters/env";
 
 describe("deriveBunTranspilerCachePath", () => {

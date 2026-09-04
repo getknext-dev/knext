@@ -1,7 +1,7 @@
+import { describe, expect, it } from 'bun:test';
 import IORedis from 'ioredis';
 import IORedis5 from 'ioredis5';
 import { parse as parsePg } from 'pg-connection-string';
-import { describe, expect, it } from 'vitest';
 
 /**
  * Consumer compatibility for the ROOTED (trailing-dot) hostname, EXECUTED against the

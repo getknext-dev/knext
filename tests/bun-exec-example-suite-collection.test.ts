@@ -40,16 +40,16 @@ const LEGITIMATELY_UNCOLLECTED = /\.docker-e2e\.test\.ts$/;
  * second time it was the only error-level diagnostic in the repo — i.e. it broke
  * `Lint & Test` before any test ran.
  */
-const ROOT_LIST_TIMEOUT_MS = 600_000;
+const _ROOT_LIST_TIMEOUT_MS = 600_000;
 
 /**
- * The args `examples/bun-exec`'s own `test` script passes, read from
- * `package.json` rather than hardcoded. Hardcoding `['--config',
- * 'vitest.config.ts']` left a hole: adding `--exclude` to that script orphaned a
- * guard with the config file untouched, while this test stayed green and claimed
- * immunity to exactly that.
+ * The example's `test` script, read from `package.json` rather than hardcoded.
+ *
+ * Hardcoding the command left a hole once before: adding a flag to that script
+ * orphaned a guard with the config file untouched, while this test stayed green
+ * and claimed immunity to exactly that.
  */
-function exampleTestScriptArgs(): string[] {
+function exampleTestScript(): string {
   const pkg = JSON.parse(readFileSync(resolve(EXAMPLE_DIR, 'package.json'), 'utf8')) as {
     scripts?: Record<string, string>;
   };
@@ -58,28 +58,32 @@ function exampleTestScriptArgs(): string[] {
     script,
     'examples/bun-exec has no `test` script — this guard cannot evaluate its subject',
   ).toBeTruthy();
-  const parts = (script as string).trim().split(/\s+/);
   expect(
-    parts[0],
-    `the example's \`test\` script is \`${script}\`, which does not start with vitest; this guard ` +
-      'reproduces that command and no longer knows how to.',
-  ).toBe('vitest');
-  // `vitest run …` -> `vitest list …`; keep every remaining flag verbatim.
-  return parts.slice(1).filter((p) => p !== 'run');
+    script,
+    `the example's \`test\` script is \`${script}\`, which does not invoke the bun runner; ` +
+      'this guard reproduces that command and no longer knows how to.',
+  ).toContain('bun-test.mjs');
+  return script as string;
 }
 
-function collectedFiles(cwd: string, args: string[]): string {
-  const res = spawnSync('npx', ['vitest', 'list', ...args], {
-    cwd,
+function collectedFiles(): string {
+  // The bun runner prints one `ok`/`FAIL` line per file it ran, so its own
+  // output IS the collection list. Asking it what it ran beats maintaining a
+  // second idea of what it should run.
+  const res = spawnSync('node', [resolve(REPO_ROOT, 'scripts/bun-test.mjs'), 'examples/bun-exec'], {
+    cwd: REPO_ROOT,
     encoding: 'utf8',
     timeout: 300_000,
     env: { ...process.env, CI: '1' },
   });
   // Unreachable is a FAILURE, never a pass (security.md). A guard that goes
   // green because it could not run its own subject is worse than no guard.
+  // stdout, not just stderr: the runner reports per-file FAIL lines and the
+  // failing child's error on STDOUT, and the old message printed an empty
+  // stderr as "undefined" — three CI rounds of a red with no diagnosis.
   expect(
     res.status,
-    `\`vitest list\` failed in ${cwd} (${res.status}): ${res.stderr?.slice(-600) || res.error?.message}`,
+    `the bun runner failed (${res.status}):\n--- stdout tail ---\n${res.stdout?.slice(-1200)}\n--- stderr tail ---\n${res.stderr?.slice(-600) || res.error?.message}`,
   ).toBe(0);
   return res.stdout;
 }
@@ -102,9 +106,32 @@ function assertCollected(listed: string, relPath: string, why: string) {
   expect(listed.includes(relPath), why).toBe(true);
 }
 
-describe("examples/bun-exec's guards are actually collected", () => {
-  it("the example's own `bun run test` command collects every non-docker test file", () => {
-    const listed = collectedFiles(EXAMPLE_DIR, exampleTestScriptArgs());
+// Spawns a real `bun run test` in the example. Same story: passes alone,
+// exceeds 5s under full-suite parallelism.
+/**
+ * This guard stays on VITEST deliberately (#871).
+ *
+ * It spawns BOTH runners to ask what each one collects. Running it under bun
+ * meant a bun test spawning a bun test spawning vitest, and the nested run
+ * exceeded its own timeout — the guard failed on its harness rather than on the
+ * property. Checking a runner from inside that same runner is circular, and the
+ * circularity is the cost, not an incidental slowness.
+ */
+describe("examples/bun-exec's guards are actually collected", { timeout: 120_000 }, () => {
+  /**
+   * The example moved from vitest to `bun:test` (#871), so the runner this
+   * guard reproduces changed. What it protects did NOT: a test file that stops
+   * being run must fail something.
+   *
+   * The old version asserted collection by BOTH the example's own vitest config
+   * and the root one. There is now a single runner and a single answer, so the
+   * two assertions collapse into one — and the root vitest config's job here is
+   * the opposite: to EXCLUDE these files, since a `bun:test` import cannot run
+   * under vitest at all. That exclusion is asserted below, because an exclude
+   * pattern is precisely how a suite gets silently dropped.
+   */
+  it('the bun runner runs every non-docker test file in the example', () => {
+    const listed = collectedFiles();
     const expectedFiles = expectedGuardFiles();
     expect(
       expectedFiles.length,
@@ -113,36 +140,65 @@ describe("examples/bun-exec's guards are actually collected", () => {
     for (const file of expectedFiles) {
       assertCollected(
         listed,
-        `test/${file}`,
-        `\`${file}\` exists in examples/bun-exec/test/ but \`bun run test\` does not collect it. ` +
-          'That command will still exit 0 and the CI job guard will still pass, so nothing notices ' +
-          'it stopped running. If it must not run there, give it its own CI job and the ' +
-          '`.docker-e2e.test.ts` suffix — that is the one sanctioned way out.',
+        `examples/bun-exec/test/${file}`,
+        `\`${file}\` exists in examples/bun-exec/test/ but the bun runner does not run it. ` +
+          'Nothing else notices: the runner still exits 0 and the CI job guard still passes. ' +
+          'If it must not run there, give it its own CI job and the `.docker-e2e.test.ts` ' +
+          'suffix — that is the one sanctioned way out.',
       );
     }
   });
 
-  it(
-    'the ROOT config collects them too — that is the job that actually runs in `Lint & Test`',
-    () => {
-      const listed = collectedFiles(REPO_ROOT, []);
-      const expectedFiles = expectedGuardFiles();
-      // Non-vacuity, asserted here too and not only in the sibling: an empty
-      // list would make this loop a silent pass.
-      expect(
-        expectedFiles.length,
-        'no test files found to check — the scan found nothing',
-      ).toBeGreaterThan(0);
-      for (const file of expectedFiles) {
-        assertCollected(
-          listed,
-          `examples/bun-exec/test/${file}`,
-          `\`${file}\` is not collected by the ROOT vitest config. The root run is what ` +
-            '`Lint & Test` executes, so a guard missing here is unenforced on every PR even while ' +
-            "the example's own config still collects it.",
-        );
-      }
-    },
-    ROOT_LIST_TIMEOUT_MS,
-  );
+  it('the example script and this guard invoke the same runner', () => {
+    // Reading the script is what stops the two drifting: if someone points the
+    // example at a different command, this fails rather than continuing to
+    // verify a runner nobody uses.
+    expect(exampleTestScript()).toContain('bun-test.mjs');
+  });
+
+  it('the ROOT vitest run does NOT collect the example', () => {
+    // The other half. These files import `bun:test`, which vitest cannot run,
+    // so the root suite only passes if they are excluded.
+    //
+    // Asserted BEHAVIOURALLY — by asking vitest what it collects — not by
+    // grepping the config for a literal. The exclusion used to be a hardcoded
+    // glob and is now derived by scanning for `bun:test` imports; a textual
+    // assertion would have failed on that refactor while the property it cares
+    // about was still perfectly true.
+    const res = spawnSync('npx', ['vitest', 'list'], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      timeout: 300_000,
+      env: { ...process.env, CI: '1' },
+    });
+    expect(res.status, `\`vitest list\` failed (${res.status}): ${res.stderr?.slice(-400)}`).toBe(
+      0,
+    );
+    // Match the FILE column only, never the whole line. `vitest list` prints
+    // `<file> > <suite> > <test>`, and two other guards in this repo carry the
+    // example's paths inside their test NAMES — so a whole-line `toContain`
+    // matches them and this assertion passes, or fails, for reasons that have
+    // nothing to do with what vitest collected. The same fail-open shape as the
+    // basename-vs-path note on `assertCollected` above.
+    const collectedFiles = new Set(
+      res.stdout
+        .split('\n')
+        .map((line) => line.split(' > ')[0]?.trim())
+        .filter(Boolean),
+    );
+    expect([...collectedFiles].filter((f) => f?.startsWith('examples/bun-exec/'))).toEqual([]);
+    // Non-vacuity, without a number that rots.
+    //
+    // This was `> 50`, calibrated when vitest owned ~300 files. The bun
+    // migration moves files out one package at a time, so that threshold was
+    // guaranteed to start failing on a healthy repo — and it did, at 29. Any
+    // absolute count here is a countdown to a false alarm, and the fix for a
+    // false alarm is usually to lower the number, which quietly removes the
+    // check.
+    //
+    // THIS file is on vitest by construction — it is the one asserting that.
+    // So its own presence proves the parse works and that vitest still collects
+    // something, and it stays true at any suite size.
+    expect([...collectedFiles]).toContain('tests/bun-exec-example-suite-collection.test.ts');
+  });
 });

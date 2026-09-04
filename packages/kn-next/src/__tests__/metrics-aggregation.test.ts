@@ -1,6 +1,6 @@
+import { afterEach, describe, expect, it } from "bun:test";
 import type http from "node:http";
 import { collectDefaultMetrics, Registry } from "prom-client";
-import { afterEach, describe, expect, it } from "vitest";
 
 import {
     createMetricsRegistry,

@@ -11,7 +11,7 @@
  * isolation is automatic; the CR just has to switch the operator into preview mode.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import { buildNextAppCRObject } from "../cli/cr-builder";
 import type { KnativeNextConfig } from "../config";
 

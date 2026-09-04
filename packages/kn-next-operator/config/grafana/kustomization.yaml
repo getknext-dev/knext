@@ -37,12 +37,17 @@ configMapGenerator:
   - name: knext-dashboard-scale-to-zero
     files:
       - dashboards/scale-to-zero.json
-  - name: knext-dashboard-rum
-    files:
-      - dashboards/rum.json
-  - name: knext-dashboard-bytecode
-    files:
-      - dashboards/bytecode.json
+  # REMOVED (#792), not merely unlisted — the JSON is deleted too:
+  #   knext-dashboard-rum       kn_next_web_vitals_* is collected by an app-level
+  #                             /api/rum route into a prom-client registry served
+  #                             on the APP port. The shipped PodMonitor scrapes
+  #                             :9091 only, so every panel was permanently blank.
+  #   knext-dashboard-bytecode  its subject was NODE_COMPILE_CACHE warmth on the
+  #                             node-server path. ADR-0048's compiled binary has
+  #                             no bytecode cache to measure — the metric is not
+  #                             renamed, the thing it measured is gone.
+  # A blank dashboard is worse than no dashboard: it reads as "the system is
+  # quiet". Deleting is the honest outcome.
   - name: knext-dashboard-loadtesting
     files:
       - dashboards/loadtesting.json

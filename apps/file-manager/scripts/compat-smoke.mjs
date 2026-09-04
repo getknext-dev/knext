@@ -54,6 +54,10 @@ const SERVER_PATH =
   process.env.SERVER_PATH || path.resolve(APP_DIR, '.next/standalone/apps/file-manager/server.js');
 // Runtime binary: node | bun. RUNTIME=bun boots the same standalone server.js under Bun.
 const SERVER_CMD = process.env.SERVER_CMD || (RUNTIME === 'bun' ? 'bun' : process.execPath);
+// Single-executable mode (ADR-0048): SERVER_CMD *is* the server. Module-scoped
+// because both the spawn (no script arg, no preload) and check (h) (no
+// --version probe — the binary would boot a second server) branch on it.
+const singleExec = SERVER_CMD === SERVER_PATH;
 
 // #188 — Bun ≤1.3.x keep-alive mitigation preload (bun runtime only; the Node
 // boot args stay byte-identical). Resolved from the built workspace package,
@@ -268,21 +272,34 @@ function startServer() {
   // `output:'standalone'` does NOT copy `.next/static` or `public/` into the standalone
   // tree (mirrors what the Dockerfile does manually). Stage them so static assets and the
   // next/image optimizer can resolve local files. Idempotent + best-effort.
-  const standaloneAppDir = path.dirname(SERVER_PATH);
-  const stage = [
-    [path.resolve(APP_DIR, '.next/static'), path.join(standaloneAppDir, '.next/static')],
-    [path.resolve(APP_DIR, 'public'), path.join(standaloneAppDir, 'public')],
-  ];
-  for (const [src, dest] of stage) {
-    if (existsSync(src)) {
-      cpSync(src, dest, { recursive: true });
+  // Standalone-tree staging ONLY: the compiled binary serves its assets from
+  // `.output/public` (its own baked asset root), and with the binary sitting
+  // in the app root this loop's dest EQUALS its src — node throws
+  // ERR_FS_CP_EINVAL ('src and dest cannot be the same'), which is exactly
+  // how CI failed the first single-exec smoke run.
+  if (!singleExec) {
+    const standaloneAppDir = path.dirname(SERVER_PATH);
+    const stage = [
+      [path.resolve(APP_DIR, '.next/static'), path.join(standaloneAppDir, '.next/static')],
+      [path.resolve(APP_DIR, 'public'), path.join(standaloneAppDir, 'public')],
+    ];
+    for (const [src, dest] of stage) {
+      if (existsSync(src)) {
+        cpSync(src, dest, { recursive: true });
+      }
     }
   }
 
   // #188: on Bun, preload the keep-alive guard (self-disables on fixed Bun
   // versions ≥1.4.0). Never added on Node.
-  const serverArgs =
-    RUNTIME === 'bun' && BUN_GUARD_PRELOAD ? ['-r', BUN_GUARD_PRELOAD, SERVER_PATH] : [SERVER_PATH];
+  // Single-executable mode (see module-scope const): no script argument and no
+  // preload — a compiled binary cannot take `-r` (its argv is the app's), and
+  // the keep-alive bug the preload guards is fixed in the embedded >=1.4 bun.
+  const serverArgs = singleExec
+    ? []
+    : RUNTIME === 'bun' && BUN_GUARD_PRELOAD
+      ? ['-r', BUN_GUARD_PRELOAD, SERVER_PATH]
+      : [SERVER_PATH];
   console.log(`[compat-smoke] runtime=${RUNTIME} cmd=${SERVER_CMD} args=${serverArgs.join(' ')}`);
   console.log(`[compat-smoke] booting ${SERVER_PATH} on ${HOST}:${PORT}`);
   serverProc = spawn(SERVER_CMD, serverArgs, {
@@ -340,7 +357,23 @@ async function main() {
 
   // (b) RSC flight payload: GET / with `RSC: 1` → 200, content-type text/x-component.
   await check('b. RSC flight GET / (RSC: 1)', async () => {
-    const res = await request('/', { headers: { RSC: '1' } });
+    // vinext 307s an RSC request that lacks the `?_rsc` marker and serves the
+    // flight payload from the redirect target. Measured: `GET / (RSC:1)` ->
+    // 307 -> `/?_rsc`, and `GET /?_rsc (RSC:1)` -> 200 text/x-component, 7878b.
+    //
+    // So follow ONE same-origin redirect rather than failing on it. The
+    // capability is present; only the route to it differs, and this row exists
+    // to prove the payload is served — not to pin Next's URL convention.
+    let res = await request('/', { headers: { RSC: '1' } });
+    if (res.status === 307 || res.status === 308) {
+      const location = res.headers.location ?? res.headers.Location;
+      assert.ok(location, `RSC request redirected ${res.status} with no Location header`);
+      assert.ok(
+        location.startsWith('/'),
+        `RSC redirect left the origin (${location}) — a flight payload must not be off-host`,
+      );
+      res = await request(location, { headers: { RSC: '1' } });
+    }
     assert.strictEqual(res.status, 200, `expected 200, got ${res.status}`);
     const ct = res.headers['content-type'] || '';
     assert.ok(
@@ -435,6 +468,21 @@ async function main() {
         req.setTimeout(15000, () => req.destroy(new Error('request timeout')));
       });
       if (RUNTIME === 'bun') {
+        if (singleExec) {
+          // The compiled binary embeds bun >= 1.4 by construction — the
+          // vinext build REFUSES older (vinext-build.ts floor) — and no
+          // preload is loaded, so the contract here is simply "keep-alive
+          // intact". Probing the version is not an option: a --compile
+          // binary does NOT intercept --version (measured — argv reaches the
+          // app), so `SERVER_CMD --version` boots a SECOND server that
+          // collides on the metrics port or hangs forever.
+          assert.notStrictEqual(
+            res.connection,
+            'close',
+            'single-exec serving must stay keep-alive — the embedded bun is >= 1.4 and no guard loads',
+          );
+          return `single-exec: keep-alive intact (embedded bun >= 1.4 by build floor)`;
+        }
         if (!BUN_GUARD_PRELOAD) {
           throw new Error('bun-keepalive-guard preload not found in the workspace');
         }
@@ -472,7 +520,18 @@ async function main() {
   await check('i. Server Action round-trip (no-JS form POST)', async () => {
     const page = await request(FIXTURE_STREAM);
     assert.strictEqual(page.status, 200, `${FIXTURE_STREAM}: ${page.status}`);
-    const idMatch = page.body.match(/name="(\$ACTION_ID_[0-9a-fA-F]+)"/);
+    // Capture the WHOLE field name, not just the hex. React's action id is
+    // `$ACTION_ID_<hex>` under Next's own bundler, but vinext appends the
+    // hoisted export it belongs to:
+    //
+    //   name="$ACTION_ID_a15295808193#$$hoist_0_echoAction"
+    //
+    // The old pattern required the name to END after the hex, so it reported
+    // "the Server Action was not wired into the HTML" for a page whose form was
+    // wired correctly — a capability failure claimed on a spelling difference.
+    // What this row exists to prove is the ROUND TRIP, so take whatever the
+    // field is called and post that.
+    const idMatch = page.body.match(/name="(\$ACTION_ID_[^"]+)"/);
     assert.ok(
       idMatch,
       'no $ACTION_ID_* field in the rendered form — the Server Action was not wired into the HTML',
@@ -541,30 +600,58 @@ async function main() {
   });
 
   // (k) ISR / Data Cache against a REAL Redis. Two 200s would prove nothing, so this asserts
-  // the CONTENT: identical across back-to-back requests (it is cached, not re-rendered), then
-  // CHANGED after the revalidate window (it is revalidated, not frozen) — and finally that the
-  // configured Redis actually holds keys (the cache was not the in-memory fallback).
+  // the CACHE STATE of each response, then that the CONTENT CHANGED after the revalidate
+  // window (it is revalidated, not frozen) — and finally that the configured Redis actually
+  // holds keys (the cache was not the in-memory fallback).
+  //
+  // #886 — WHY THE FIRST ASSERT IS ON THE HEADER AND NOT ON VALUE IDENTITY. It used to
+  // require two back-to-back requests to render the SAME value. That is not what
+  // stale-while-revalidate guarantees and it made this check unsound in BOTH directions,
+  // measured against the fixed handler on a real Redis: with `revalidate = 1` the first
+  // request is legitimately served STALE and kicks off a background regeneration that
+  // finishes in tens of milliseconds, so the second request is a HIT on the NEW value.
+  // Both responses came from the cache; their values differ; the old assertion failed a
+  // correct server. Widening the fixture's window would only make the flake rarer.
+  //
+  // The cache-state header is the direct evidence and it is not a race: the defect this
+  // check exists to catch produced MISS on BOTH requests (vinext's `x-nextjs-cache`,
+  // which knext's handler feeds via the entry's `cacheState`). Asserting "neither request
+  // was a MISS" fails on exactly that and on nothing else.
   await check('k. ISR revalidation with a real REDIS_URL', async () => {
     assert.ok(
       REDIS_URL,
       'REDIS_URL is not set — ISR cannot be verified against the real cache backend. ' +
         'This check never skips: start a Redis and set REDIS_URL (CI provides a service container).',
     );
-    const readValue = async () => {
+    const read = async () => {
       const res = await request(FIXTURE_ISR);
       assert.strictEqual(res.status, 200, `${FIXTURE_ISR}: ${res.status}`);
       const m = res.body.match(/data-knext-isr-value="([\w-]+)"/);
       assert.ok(m, 'ISR fixture did not render its value marker');
-      return m[1];
+      return { value: m[1], cacheState: res.headers['x-nextjs-cache'] };
     };
+    const readValue = async () => (await read()).value;
 
-    const first = await readValue();
-    const immediate = await readValue();
-    assert.strictEqual(
-      immediate,
-      first,
-      'back-to-back requests rendered DIFFERENT values — the route is not being cached at all',
-    );
+    // Prime the cache, then take the pair. Without the priming request the first
+    // read is a MISS by definition and says nothing about caching.
+    await read();
+    const firstRead = await read();
+    const secondRead = await read();
+    const first = firstRead.value;
+    for (const [label, res] of [
+      ['first', firstRead],
+      ['second', secondRead],
+    ]) {
+      assert.ok(
+        res.cacheState,
+        `the ${label} request carried no x-nextjs-cache header — the ISR cache path was not taken at all`,
+      );
+      assert.notStrictEqual(
+        res.cacheState,
+        'MISS',
+        `the ${label} of two back-to-back requests was a cache MISS — the route is not being cached at all`,
+      );
+    }
 
     // Past the 1s window each request serves stale and kicks off a background regeneration,
     // so the change shows up on a later poll.
@@ -586,7 +673,7 @@ async function main() {
       keys > 0,
       `Redis at ${REDIS_URL} holds ${keys} keys — the ISR cache did not reach the configured Redis`,
     );
-    return `cached ${first} → revalidated ${current}; redis keys=${keys}`;
+    return `cached ${firstRead.cacheState}/${secondRead.cacheState} ${first} → revalidated ${current}; redis keys=${keys}`;
   });
 
   // ── report ──────────────────────────────────────────────────────────────

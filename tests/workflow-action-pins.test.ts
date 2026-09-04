@@ -1,6 +1,6 @@
+import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 import { discoverPinnableFiles, mentionsUses } from '../scripts/verify-action-pins.mjs';
 
 /**
@@ -98,7 +98,7 @@ describe('every workflow SHA-pins every action (#528)', () => {
     expect(FILES, 'the root composite action must be in the scanned set').toContain('action.yml');
   });
 
-  it.each(COVERED)('%s pins every `uses:` to an immutable 40-hex SHA', (file) => {
+  it.each([...COVERED])('%s pins every `uses:` to an immutable 40-hex SHA', (file) => {
     for (const entry of usesRefs(file)) {
       expect(
         /^[0-9a-f]{40}$/.test(entry.ref),
@@ -109,7 +109,7 @@ describe('every workflow SHA-pins every action (#528)', () => {
     }
   });
 
-  it.each(COVERED)('%s annotates every pin with the tag it claims', (file) => {
+  it.each([...COVERED])('%s annotates every pin with the tag it claims', (file) => {
     for (const entry of usesRefs(file)) {
       expect(
         entry.comment,

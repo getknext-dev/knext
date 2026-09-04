@@ -14,7 +14,7 @@
  * All I/O is injected (ExecFn / ReadFileFn) so tests run without Docker.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, mock } from "bun:test";
 import {
     buildNextAppCRObject,
     resolveDigest,
@@ -65,7 +65,7 @@ const baseConfig: KnativeNextConfig = {
 
 describe("resolveDigestFromMetadataFile", () => {
     it("extracts containerimage.digest from a buildx metadata JSON string", () => {
-        const readFileFn = vi.fn().mockReturnValue(FAKE_METADATA_JSON);
+        const readFileFn = mock().mockReturnValue(FAKE_METADATA_JSON);
         const digest = resolveDigestFromMetadataFile(
             "/tmp/meta.json",
             readFileFn,
@@ -77,7 +77,7 @@ describe("resolveDigestFromMetadataFile", () => {
     });
 
     it("returns a value that starts with sha256:", () => {
-        const readFileFn = vi.fn().mockReturnValue(FAKE_METADATA_JSON);
+        const readFileFn = mock().mockReturnValue(FAKE_METADATA_JSON);
         const digest = resolveDigestFromMetadataFile(
             "/tmp/meta.json",
             readFileFn,
@@ -86,27 +86,25 @@ describe("resolveDigestFromMetadataFile", () => {
     });
 
     it("throws when containerimage.digest is absent from the JSON", () => {
-        const readFileFn = vi
-            .fn()
-            .mockReturnValue(JSON.stringify({ other: "data" }));
+        const readFileFn = mock().mockReturnValue(
+            JSON.stringify({ other: "data" }),
+        );
         expect(() =>
             resolveDigestFromMetadataFile("/tmp/meta.json", readFileFn),
         ).toThrow(/digest/i);
     });
 
     it("throws when containerimage.digest does not start with sha256:", () => {
-        const readFileFn = vi
-            .fn()
-            .mockReturnValue(
-                JSON.stringify({ "containerimage.digest": "not-a-digest" }),
-            );
+        const readFileFn = mock().mockReturnValue(
+            JSON.stringify({ "containerimage.digest": "not-a-digest" }),
+        );
         expect(() =>
             resolveDigestFromMetadataFile("/tmp/meta.json", readFileFn),
         ).toThrow(/sha256/i);
     });
 
     it("throws when the file content is not valid JSON", () => {
-        const readFileFn = vi.fn().mockReturnValue("not-json-at-all");
+        const readFileFn = mock().mockReturnValue("not-json-at-all");
         expect(() =>
             resolveDigestFromMetadataFile("/tmp/meta.json", readFileFn),
         ).toThrow();
@@ -169,8 +167,8 @@ describe("validateTaggedRef", () => {
 
 describe("resolveDigest — metadata-file-first (PRIMARY path)", () => {
     it("uses metadata file when metadataFilePath + readFileFn are provided", async () => {
-        const execSpy = vi.fn();
-        const readFileFn = vi.fn().mockReturnValue(FAKE_METADATA_JSON);
+        const execSpy = mock();
+        const readFileFn = mock().mockReturnValue(FAKE_METADATA_JSON);
         const taggedRef = "registry.example.com/my-app:20240101";
 
         const result = await resolveDigest(
@@ -188,8 +186,8 @@ describe("resolveDigest — metadata-file-first (PRIMARY path)", () => {
     });
 
     it("emits taggedRef@sha256:<digest> preserving the original tag", async () => {
-        const execSpy = vi.fn();
-        const readFileFn = vi.fn().mockReturnValue(FAKE_METADATA_JSON);
+        const execSpy = mock();
+        const readFileFn = mock().mockReturnValue(FAKE_METADATA_JSON);
         const taggedRef = "registry.example.com/my-app:v42";
 
         const result = await resolveDigest(
@@ -204,8 +202,8 @@ describe("resolveDigest — metadata-file-first (PRIMARY path)", () => {
     });
 
     it("result passes validateCRImageRef (operator accept rule)", async () => {
-        const execSpy = vi.fn();
-        const readFileFn = vi.fn().mockReturnValue(FAKE_METADATA_JSON);
+        const execSpy = mock();
+        const readFileFn = mock().mockReturnValue(FAKE_METADATA_JSON);
         const taggedRef = "registry.example.com/my-app:build-99";
 
         const pinnedRef = await resolveDigest(
@@ -223,7 +221,7 @@ describe("resolveDigest — metadata-file-first (PRIMARY path)", () => {
 describe("resolveDigest — docker-inspect fallback (FALLBACK path)", () => {
     it("falls back to docker inspect when metadataFilePath is not provided", async () => {
         // ExecFn now takes an ARGV array (string[]), NOT a shell string.
-        const execSpy = vi.fn().mockResolvedValue(FAKE_REPO_DIGEST);
+        const execSpy = mock().mockResolvedValue(FAKE_REPO_DIGEST);
         const taggedRef = "registry.example.com/my-app:1234567890";
 
         const result = await resolveDigest(taggedRef, execSpy);
@@ -249,7 +247,7 @@ describe("resolveDigest — docker-inspect fallback (FALLBACK path)", () => {
         // If taggedRef contains shell metacharacters, they must still arrive as ONE
         // element in the argv array — no shell will interpret them.
         const metaCharRef = "registry.example.com/my-app:tag;touch /tmp/pwned";
-        const execSpy = vi.fn().mockResolvedValue(FAKE_REPO_DIGEST);
+        const execSpy = mock().mockResolvedValue(FAKE_REPO_DIGEST);
 
         // validateTaggedRef should REJECT before we even reach execFn
         await expect(resolveDigest(metaCharRef, execSpy)).rejects.toThrow(
@@ -261,8 +259,8 @@ describe("resolveDigest — docker-inspect fallback (FALLBACK path)", () => {
     });
 
     it("falls back to docker inspect when metadata file read throws", async () => {
-        const execSpy = vi.fn().mockResolvedValue(FAKE_REPO_DIGEST);
-        const readFileFn = vi.fn().mockImplementation(() => {
+        const execSpy = mock().mockResolvedValue(FAKE_REPO_DIGEST);
+        const readFileFn = mock().mockImplementation(() => {
             throw new Error("ENOENT: no such file");
         });
         const taggedRef = "registry.example.com/my-app:1234567890";
@@ -282,8 +280,8 @@ describe("resolveDigest — docker-inspect fallback (FALLBACK path)", () => {
     });
 
     it("falls back to docker inspect when metadata JSON is invalid", async () => {
-        const execSpy = vi.fn().mockResolvedValue(FAKE_REPO_DIGEST);
-        const readFileFn = vi.fn().mockReturnValue("not-json");
+        const execSpy = mock().mockResolvedValue(FAKE_REPO_DIGEST);
+        const readFileFn = mock().mockReturnValue("not-json");
         const taggedRef = "registry.example.com/my-app:1234567890";
 
         const result = await resolveDigest(
@@ -300,8 +298,8 @@ describe("resolveDigest — docker-inspect fallback (FALLBACK path)", () => {
     });
 
     it("throws when both metadata and docker inspect fail", async () => {
-        const execSpy = vi.fn().mockResolvedValue(""); // returns empty — bad inspect output
-        const readFileFn = vi.fn().mockImplementation(() => {
+        const execSpy = mock().mockResolvedValue(""); // returns empty — bad inspect output
+        const readFileFn = mock().mockImplementation(() => {
             throw new Error("ENOENT");
         });
 
@@ -322,8 +320,8 @@ describe("resolveDigest — docker-inspect fallback (FALLBACK path)", () => {
 
 describe("CR image field — digest-pinned ref (CLI-58 E2E invariant)", () => {
     it("CR image contains @sha256: when metadata-file path resolves it", async () => {
-        const execSpy = vi.fn();
-        const readFileFn = vi.fn().mockReturnValue(FAKE_METADATA_JSON);
+        const execSpy = mock();
+        const readFileFn = mock().mockReturnValue(FAKE_METADATA_JSON);
         const taggedRef = "registry.example.com/my-app:1234567890";
 
         const pinnedRef = await resolveDigest(
@@ -344,10 +342,10 @@ describe("CR image field — digest-pinned ref (CLI-58 E2E invariant)", () => {
     });
 
     it("CR preserves minScale:0 (scale-to-zero invariant) with digest-pinned image", async () => {
-        const readFileFn = vi.fn().mockReturnValue(FAKE_METADATA_JSON);
+        const readFileFn = mock().mockReturnValue(FAKE_METADATA_JSON);
         const pinnedRef = await resolveDigest(
             "registry.example.com/my-app:ts",
-            vi.fn(),
+            mock(),
             "/tmp/meta.json",
             readFileFn,
         );

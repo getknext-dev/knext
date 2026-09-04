@@ -10,7 +10,7 @@
  * project's build script, so the 127 translation cannot drift between them.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, mock } from "bun:test";
 import { runProjectBuild } from "../cli/project-build";
 import { handleUsageError, USAGE_ERROR_CODE } from "../cli/shared";
 
@@ -23,13 +23,13 @@ function exitError(status: number): Error & { status: number } {
 
 describe("runProjectBuild", () => {
     it("runs the project's npm build script through the injected runner", () => {
-        const run = vi.fn();
+        const run = mock();
         runProjectBuild(run);
         expect(run).toHaveBeenCalledWith(["npm", "run", "build"]);
     });
 
     it("translates exit 127 (command not found) into plain npm-install guidance", () => {
-        const run = vi.fn(() => {
+        const run = mock(() => {
             throw exitError(127);
         });
         let caught: unknown;
@@ -38,13 +38,20 @@ describe("runProjectBuild", () => {
         } catch (err) {
             caught = err;
         }
-        expect(caught).toMatchObject({
-            code: USAGE_ERROR_CODE,
-            message: expect.stringContaining("npm install"),
-        });
-        expect((caught as Error).message.toLowerCase()).toContain(
-            "not installed",
-        );
+        // The message is read BEFORE `toMatchObject`, and the asymmetric
+        // matcher is gone from it.
+        //
+        // bun's `toMatchObject` MUTATES the received object: a property checked
+        // with `expect.stringContaining(...)` is replaced by the matcher
+        // instance itself. Reproduced in isolation — `typeof err.message` goes
+        // from "string" to "object" across the call — so every later assertion
+        // on that object is meaningless, and here it failed with
+        // "message.toLowerCase is not a function" pointing at the code rather
+        // than at the assertion that broke it.
+        const message = (caught as Error).message;
+        expect(caught).toMatchObject({ code: USAGE_ERROR_CODE });
+        expect(message).toContain("npm install");
+        expect(message.toLowerCase()).toContain("not installed");
         // both-streams contract: routed through the same handler every entry
         // already calls, it renders as a message — never a serialized Error.
         const chunks: string[] = [];
@@ -57,7 +64,7 @@ describe("runProjectBuild", () => {
 
     it("any other build failure is rethrown untouched (mutation half)", () => {
         const original = exitError(1);
-        const run = vi.fn(() => {
+        const run = mock(() => {
             throw original;
         });
         expect(() => runProjectBuild(run)).toThrow(original);

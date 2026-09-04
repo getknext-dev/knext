@@ -21,14 +21,41 @@ spec:
   image: ghcr.io/org/repo/app:v1.2.3@sha256:abc123...   # digest-pinned, never :latest
 ```
 
+### `build` (Optional)
+Names the build system that produced the image: `"turbopack"` or `"vinext"`.
+**Absence permanently means `turbopack`** (the field is additive at `v1alpha1`,
+ADR-0017), which is why the CLI writes `build: "vinext"` explicitly for its
+(now default, ADR-0048) vinext builds.
+```yaml
+spec:
+  build: "vinext"
+```
+
+The value drives the operator's only shape-aware decision, the container
+command: for `vinext` the app is one compiled executable and the operator
+leaves the command to the image's own `CMD` (forcing the standalone command
+would CrashLoop — there is no `server.js` in that image); for `turbopack` or
+absence, `runtime: bun` execs `bun run server.js`.
+
+> **Upgrade order (#548):** a cluster whose CRD predates `"vinext"` rejects
+> such a CR under `--validate=strict` (which every CLI apply passes) — a loud
+> stop, not a silent mis-run. Roll the operator/CRD before the CLI.
+
 ### `runtime` (Optional)
 Selects the process that executes the standalone server: `"node"` (default) or `"bun"`.
+Only meaningful for the standalone shape (`build` absent or `"turbopack"`); for
+`build: "vinext"` the runtime is compiled into the executable and this field
+does not affect how the container starts.
 ```yaml
 spec:
   runtime: "bun"
 ```
 
-> **Warning — runtime flips and bytecode-built images:** an image built by `kn-next build` with `runtime: bun` has its server-side JavaScript precompiled to Bun bytecode and **only boots under Bun**. Setting this field to `node` for such an image makes the pod exit immediately with a `FATAL` message (a deliberate loud failure instead of a silent crash-loop) — switching a bytecode-built app back to Node requires **rebuilding the image** with `runtime: node` (or `KNEXT_BUN_BYTECODE=0`). Images built for `node` run under either runtime.
+> **Historical note:** images built by the retired per-file Bun bytecode pass
+> (pre-ADR-0048-Amendment-3) were Bun-only and exited with a `FATAL` message
+> under Node; flipping such an image back to `node` requires rebuilding it.
+> New builds never hit this — bytecode now exists only inside the vinext
+> single executable.
 
 ### `scaling` (Optional)
 Controls the autoscaling behavior of the underlying Knative Service.

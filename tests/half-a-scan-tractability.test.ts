@@ -1,6 +1,6 @@
+import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 import { scanRepo, scanSource } from '../scripts/scan-half-scan-candidates.mjs';
 
 /**

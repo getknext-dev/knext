@@ -18,10 +18,10 @@
  *    start pays for — the exact class of cost #441 exists to remove.
  */
 
+import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ADAPTERS = resolve(__dirname, "..", "adapters");

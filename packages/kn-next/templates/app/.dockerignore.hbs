@@ -1,0 +1,75 @@
+# {{ name }} — Docker build context exclusions.
+#
+# The generated Dockerfile COPYs three things from the context — the compiled
+# executable, `.output/public`, and `native/` — and the context is the
+# resolved tracing root, which is NOT always this directory. When the lockfile
+# walk finds a marker above the app, the context widens to that ancestor, and
+# everything not excluded here is uploaded to the Docker daemon.
+#
+# `kn-next create` warns when it detects more than one root marker. This file is
+# what makes a wrong context HARMLESS rather than merely reported.
+#
+# Ordered by what it costs to get wrong: secrets first, then size.
+
+# ── Secrets and local credentials ────────────────────────────────────────────
+# A `.env` in the context ends up in the builder layer. Layers are extractable
+# from any image you push, so this is not "someone would have to exec in" — it
+# is readable by anyone who can pull. The runtime reads config from Kubernetes
+# Secrets via env (see `.claude/rules/security.md`), never from a file in the
+# image, so nothing here is needed at build time.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+.npmrc
+.netrc
+kubeconfig
+.kube/
+
+# ── Version control and CI ───────────────────────────────────────────────────
+# `.git` is frequently the largest single directory in a repo and carries the
+# full history — including anything ever committed and later removed.
+.git
+.gitignore
+.github
+.gitlab-ci.yml
+
+# ── Dependencies and build output ────────────────────────────────────────────
+# All regenerated inside the image. Copying a host `node_modules` is also a
+# correctness hazard: native modules built for the host libc do not run on the
+# runtime base image.
+node_modules
+.next
+.output
+# …but the Dockerfile COPYs the SERVED static tree out of the build output, so
+# it must come back in. An exclusion the Dockerfile contradicts is not a
+# tidier context — it is an unbuildable image (`COPY .output/public` fails).
+!.output/public
+.vinext
+dist
+build
+*.tsbuildinfo
+
+# Compiled single-executables are ~60-90 MB each and are build OUTPUT — except
+# the ship binaries, which are exactly what `COPY ${BINARY}` needs.
+knext-exec*
+!knext-exec-linux-*
+server
+
+# ── Test, coverage and editor noise ──────────────────────────────────────────
+coverage
+.nyc_output
+*.log
+.DS_Store
+.idea
+.vscode
+*.swp
+
+# ── Docker's own files ───────────────────────────────────────────────────────
+# Nothing in the image needs them, and excluding them keeps an edit to the
+# Dockerfile from invalidating the COPY layer's cache.
+Dockerfile*
+.dockerignore
+docker-compose*.yml

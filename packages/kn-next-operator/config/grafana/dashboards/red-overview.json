@@ -48,7 +48,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (status_class) (rate(knext_http_requests_total{app=~\"$app\"}[$__rate_interval]))",
+          "expr": "sum by (status_class) (rate(knext_bunexec_http_requests_total{app=~\"$app\"}[$__rate_interval]))",
           "legendFormat": "{{status_class}}",
           "refId": "A"
         }
@@ -101,7 +101,7 @@
       },
       "targets": [
         {
-          "expr": "100 * sum(rate(knext_http_requests_total{app=~\"$app\",status_class=\"5xx\"}[$__rate_interval])) / clamp_min(sum(rate(knext_http_requests_total{app=~\"$app\"}[$__rate_interval])), 1)",
+          "expr": "100 * sum(rate(knext_bunexec_http_requests_total{app=~\"$app\",status_class=\"5xx\"}[$__rate_interval])) / clamp_min(sum(rate(knext_bunexec_http_requests_total{app=~\"$app\"}[$__rate_interval])), 1)",
           "legendFormat": "5xx %",
           "refId": "A"
         }
@@ -137,17 +137,17 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(knext_http_request_duration_seconds_bucket{app=~\"$app\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(knext_bunexec_http_request_duration_seconds_bucket{app=~\"$app\"}[$__rate_interval])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(knext_http_request_duration_seconds_bucket{app=~\"$app\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(knext_bunexec_http_request_duration_seconds_bucket{app=~\"$app\"}[$__rate_interval])))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(knext_http_request_duration_seconds_bucket{app=~\"$app\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(knext_bunexec_http_request_duration_seconds_bucket{app=~\"$app\"}[$__rate_interval])))",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -183,7 +183,7 @@
       },
       "targets": [
         {
-          "expr": "sum(knext_http_inflight_requests{app=~\"$app\"})",
+          "expr": "sum(knext_bunexec_http_inflight_requests{app=~\"$app\"})",
           "legendFormat": "in-flight",
           "refId": "A"
         }
@@ -227,13 +227,13 @@
           "type": "prometheus",
           "uid": "${datasource}"
         },
-        "definition": "label_values(knext_http_requests_total, app)",
+        "definition": "label_values(knext_bunexec_http_requests_total, app)",
         "hide": 0,
         "includeAll": true,
         "label": "Application",
         "multi": true,
         "name": "app",
-        "query": "label_values(knext_http_requests_total, app)",
+        "query": "label_values(knext_bunexec_http_requests_total, app)",
         "refresh": 2,
         "regex": "",
         "skipUrlSync": false,

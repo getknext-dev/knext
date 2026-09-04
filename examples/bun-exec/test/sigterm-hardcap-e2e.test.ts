@@ -30,11 +30,12 @@
 // with a loud reason — and under `KNEXT_REQUIRE_BUN=1` (what CI must set when
 // this recipe is wired into a real target, ADR-0036 P2) a missing bun is a HARD
 // failure, so a green check can never mean "skipped".
+
+import { afterEach, describe, expect, it } from 'bun:test';
 import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONTRACT_SRC = resolve(__dirname, '../runtime-contract.mjs');

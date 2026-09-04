@@ -7,12 +7,16 @@
 # those annotations and discovers targets via CRDs) this PodMonitor makes the
 # same per-app :9091 endpoint discoverable.
 #
-# :9091 is the runtime SUPERVISOR's endpoint (node-server.ts). It serves the
-# process metrics AND merges in the child's core golden-signal / cold-start /
-# db-wake series (knext_http_requests_total, knext_http_request_duration_seconds,
-# knext_http_inflight_requests, knext_coldstart_*, knext_db_wake_*). Every app
-# pod the operator generates carries the label `generated-by: kn-next-operator`,
-# which is the selector below — one PodMonitor covers all NextApps.
+# :9091 is the runtime's own metrics endpoint. Since ADR-0048 that is the
+# compiled single executable's second Bun.serve listener (see `renderMetrics` in
+# packages/kn-next/templates/app/runtime-contract.mjs.hbs), which exports the
+# knext_bunexec_* process, RED and cold-start series. It is the ONLY endpoint
+# this PodMonitor scrapes, so anything an app registers into its own prom-client
+# registry and serves on the APP port (an `/api/metrics` route) is NOT collected
+# here — that path used to be merged in by the node-server supervisor and no
+# longer is. Every app pod the operator generates carries the label
+# `generated-by: kn-next-operator`, which is the selector below — one PodMonitor
+# covers all NextApps.
 #
 # Scale-to-zero note: a scaled-to-zero app has no pods, so it exports no series
 # and its targets vanish from Prometheus until the next request wakes it. That
@@ -46,3 +50,11 @@ spec:
         # Surface the app name (the operator labels every pod `app=<NextApp>`).
         - sourceLabels: [__meta_kubernetes_pod_label_app]
           targetLabel: app
+        # Pin a STABLE `job` label. Without this, prometheus-operator derives
+        # `job` from the pod's app.kubernetes.io/name label (or falls back to
+        # `<namespace>/<podmonitor>`), so it varies per app and per install —
+        # and the knext.app.staleness rules in
+        # config/observability/prometheusrule.yaml select on `up{job=...}`.
+        # A meta-alert that cannot name its own targets is not a meta-alert.
+        - targetLabel: job
+          replacement: knext-nextapp

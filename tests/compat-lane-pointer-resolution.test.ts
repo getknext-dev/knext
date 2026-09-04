@@ -1,7 +1,7 @@
+import { describe, expect, it } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 
 /**
  * GUARD TEST — a CI file may not point at a compat lane that does not exist.
@@ -194,18 +194,23 @@ describe('the official compat lane exists (the positive half)', () => {
     expect(text()).toMatch(/^name:\s*Compat suite \(official Next\.js deploy harness\)\s*$/m);
   });
 
-  it('runs on BOTH schedules — the node nightly and the bun weekly', () => {
-    // Named, not counted: a guard that only asserted "two crons" would stay
-    // green if the weekly bun lane were replaced by a second nightly.
+  it('runs ONLY the node nightly — the bun weekly is retired, not replaced by a second nightly', () => {
+    // Named, not counted. The weekly bun cron ('17 5 * * 0') retired with the
+    // standalone-under-bun artifact (ADR-0048/#710); its recurring compute
+    // moved to compat-vinext.yml, which has its own cron guard
+    // (tests/compat-vinext-lane.test.ts). BOTH halves asserted: the nightly
+    // survives, and the retired cron must not quietly return — a resurrected
+    // schedule would burn weekly compute exercising an artifact users cannot
+    // build, while reading as coverage.
     expect(text(), 'the node nightly cron is gone').toMatch(/^\s*-\s*cron:\s*'17 3 \* \* \*'/m);
-    expect(text(), 'the weekly bun cron is gone').toMatch(/^\s*-\s*cron:\s*'17 5 \* \* 0'/m);
+    expect(text(), 'the retired bun weekly cron came back').not.toMatch(/17 5 \* \* 0/);
   });
 
-  it('selects the bun lane FROM the weekly cron, so the two crons are not interchangeable', () => {
-    // The cron literal has to appear in the lane expression too, or the weekly
-    // schedule would silently run the node lane and the bun axis would never
-    // execute while both crons still read as present above.
-    expect(text()).toMatch(/KNEXT_RUNTIME:.*github\.event\.schedule == '17 5 \* \* 0'.*'bun'/);
+  it('the lane selection no longer consults a schedule — dispatch input or node', () => {
+    // With one cron left, a schedule comparison is dead code that reads as a
+    // second lane. The expression must be input-or-node, nothing else.
+    expect(text()).toMatch(/KNEXT_RUNTIME:.*github\.event\.inputs\.runtime \|\| 'node'/);
+    expect(text()).not.toMatch(/github\.event\.schedule ==/);
   });
 });
 

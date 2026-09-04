@@ -44,46 +44,82 @@
  * pattern as deploy-orchestrator.test.ts); no cluster, no docker, no build.
  */
 
+import {
+    afterEach,
+    beforeEach,
+    describe,
+    expect,
+    it,
+    jest,
+    mock,
+} from "bun:test";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { KnativeNextConfig } from "../config";
 
-type AnyFn = (...args: unknown[]) => unknown;
+// bun types `mockResolvedValue`/`mockReturnValue` off the declared return
+// type. A mock returning `unknown` is not Promise-shaped, so every
+// `mockResolvedValue` call is rejected. Arguments stay `unknown[]` — that is
+// where the strictness that matters lives.
+// biome-ignore lint/suspicious/noExplicitAny: the return must be `any`; see above
+type AnyFn = (...args: unknown[]) => any;
 
-const runQuiet = vi.fn<AnyFn>();
-const runInherit = vi.fn<AnyFn>();
-const runCapture = vi.fn<AnyFn>(() => "");
-const isEntrypoint = vi.fn<AnyFn>(() => false);
+const runQuiet = mock<AnyFn>();
+const runInherit = mock<AnyFn>();
+const runCapture = mock<AnyFn>(() => "");
+const isEntrypoint = mock<AnyFn>(() => false);
 
-vi.mock("../cli/exec", () => ({
+// `createRequire` and the REAL `node:fs` are resolved OUT HERE, not inside the
+const __knextRealShared = { ...(await import("../cli/shared")) };
+
+// `mock.module("node:fs", …)` factory below. An `await import(...)` in a mock
+// factory deadlocks under bun: the mock is already registered when the factory
+// runs, so the import re-enters resolution and waits on itself. The file does
+// not fail — it HANGS with no output at all.
+const { createRequire: __knextCreateRequire } = await import("node:module");
+const __knextRealFs = __knextCreateRequire(import.meta.url)(
+    "node:fs",
+) as typeof import("node:fs");
+
+// The REAL cr-builder, captured before ANY mock registers.
+//
+// Placement is the whole point: after `mock.module("../cli/cr-builder", …)`
+// the import returns the MOCK, and the spread comes back empty — which surfaces
+// as `buildNextAppCRObject is not a function`, naming the module rather than the
+// ordering. bun has no `vi.importActual`, so this is the replacement.
+const __knextRealCrBuilder = {
+    ...(await import("../cli/cr-builder")),
+} as typeof import("../cli/cr-builder");
+
+mock.module("../cli/exec", () => ({
     runQuiet: (...a: unknown[]) => runQuiet(...a),
     runInherit: (...a: unknown[]) => runInherit(...a),
     runCapture: (...a: unknown[]) => runCapture(...a),
-    runQuietAllowFail: vi.fn(),
+    runQuietAllowFail: mock(),
     isEntrypoint: (...a: unknown[]) => isEntrypoint(...a),
 }));
 
-const uploadAssets = vi.fn<AnyFn>(async () => {});
-const getAssetPrefix = vi.fn<AnyFn>(() => "https://cdn.example.com/_next");
-const reclaimBuildPrefix = vi.fn<AnyFn>();
+const uploadAssets = mock<AnyFn>(async () => {});
+const getAssetPrefix = mock<AnyFn>(() => "https://cdn.example.com/_next");
+const reclaimBuildPrefix = mock<AnyFn>();
 
-vi.mock("../utils/asset-upload", async (importOriginal) => ({
+const __knextReal1 = { ...(await import("../utils/asset-upload")) };
+mock.module("../utils/asset-upload", async () => ({
     // keep the REAL hasStorage/notice exports (ADR-0047) — stub only the seams
-    ...(await importOriginal<object>()),
+    ...__knextReal1,
     uploadAssets: (...a: unknown[]) => uploadAssets(...a),
     getAssetPrefix: (...a: unknown[]) => getAssetPrefix(...a),
     reclaimBuildPrefix: (...a: unknown[]) => reclaimBuildPrefix(...a),
 }));
 
-const renderNextAppCR = vi.fn<AnyFn>(() => "kind: NextApp\n");
-const resolveDigest = vi.fn<AnyFn>(
+const renderNextAppCR = mock<AnyFn>(() => "kind: NextApp\n");
+const resolveDigest = mock<AnyFn>(
     async () => "registry.example.com/my-app@sha256:deadbeef",
 );
-const validateCRImageRef = vi.fn<AnyFn>();
+const validateCRImageRef = mock<AnyFn>();
 
-vi.mock("../cli/cr-builder", () => ({
+mock.module("../cli/cr-builder", () => ({
     renderNextAppCR: (...a: unknown[]) => renderNextAppCR(...a),
     resolveDigest: (...a: unknown[]) => resolveDigest(...a),
     validateCRImageRef: (...a: unknown[]) => validateCRImageRef(...a),
@@ -93,15 +129,15 @@ vi.mock("../cli/cr-builder", () => ({
 // Stub the kubectl boundary it uses so this suite stays hermetic and keeps
 // asserting the real APPLY argv; the preflight itself is covered by
 // cr-prune-preflight.test.ts and deploy-preflight-ordering.test.ts.
-vi.mock("../cli/schema/kubectl-capture", () => ({
+mock.module("../cli/schema/kubectl-capture", () => ({
     captureKubectl: () => ({ ok: true, stdout: "", stderr: "" }),
 }));
 
-const runAssetGC = vi.fn<AnyFn>(() => ({ pruned: true }));
+const runAssetGC = mock<AnyFn>(() => ({ pruned: true }));
 
-vi.mock("../cli/gc", () => ({
+mock.module("../cli/gc", () => ({
     runAssetGC: (...a: unknown[]) => runAssetGC(...a),
-    gcMain: vi.fn(),
+    gcMain: mock(),
 }));
 
 const baseConfig: KnativeNextConfig = {
@@ -120,8 +156,13 @@ const baseConfig: KnativeNextConfig = {
     scaling: { minScale: 0, maxScale: 5 },
 };
 
-const loadConfig = vi.fn<AnyFn>(async () => baseConfig);
-vi.mock("../cli/shared", () => ({
+const loadConfig = mock<AnyFn>(async () => baseConfig);
+mock.module("../cli/shared", () => ({
+    // bun replaces a mocked module WHOLESALE — no partial mock, no
+    // automock — so a factory listing only what the test drives drops
+    // every other export and the importer dies naming the CONSUMER, not
+    // this factory. Spreading keeps it honest as `../cli/shared` grows.
+    ...__knextRealShared,
     loadConfig: (...a: unknown[]) => loadConfig(...a),
     excerpt: (s: string) => s,
     // placeholder-preflight.ts (imported by deploy.ts) extends UsageError at
@@ -129,25 +170,23 @@ vi.mock("../cli/shared", () => ({
     UsageError: class MockUsageError extends Error {},
 }));
 
-const readFileSyncMock = vi.fn<(...a: unknown[]) => string>(() => "");
-vi.mock("node:fs", async (importOriginal) => {
-    const actual = await importOriginal<typeof import("node:fs")>();
+const readFileSyncMock = mock<(...a: unknown[]) => string>(() => "");
+const __knextReal2 = { ...(await import("node:fs")) };
+mock.module("node:fs", async () => {
+    const actual = __knextReal2;
     // #644: deploy now infers the docker build context from the real
     // filesystem (the lockfile walk in tracing-root.ts). Spreading
     // `importOriginal()` does NOT carry node-builtin named exports under
     // vitest, so every fs function the code touches must be listed here —
     // `existsSync` is passed through to the REAL one rather than stubbed, so
     // the walk still answers about the actual tree.
-    const { createRequire } = await import("node:module");
-    const realFs = createRequire(import.meta.url)(
-        "node:fs",
-    ) as typeof import("node:fs");
+    const realFs = __knextRealFs;
     const overrides = {
         existsSync: realFs.existsSync,
         readFileSync: (...a: unknown[]) => readFileSyncMock(...(a as [string])),
-        writeFileSync: vi.fn(),
-        mkdirSync: vi.fn(),
-        writeSync: vi.fn(),
+        writeFileSync: mock(),
+        mkdirSync: mock(),
+        writeSync: mock(),
     };
     return {
         ...actual,
@@ -183,8 +222,11 @@ const savedArgv = process.argv;
 const savedEnv = { ...process.env };
 
 beforeEach(() => {
-    vi.resetModules();
-    vi.clearAllMocks();
+    // No `resetModules()`: everything this file varies goes through the mocks
+    // cleared on the next line and the fixtures set below. bun has no registry
+    // reset, and the deploy path holds no module state of its own — it reads
+    // config and calls injected collaborators.
+    jest.clearAllMocks();
     runCapture.mockReturnValue("");
     resolveDigest.mockResolvedValue(
         "registry.example.com/my-app@sha256:deadbeef",
@@ -586,7 +628,7 @@ describe("preview deploy — the OTHER NextApp CR apply (same CR, same skew)", (
 
     async function runPreview(): Promise<string[]> {
         const { runPreviewDeploy } = await import("../cli/preview");
-        const apply = vi.fn<(argv: readonly string[]) => void>();
+        const apply = mock<(argv: readonly string[]) => void>();
         await runPreviewDeploy(
             baseConfig,
             { prId: "42", branch: "feat/x", namespace: "previews" },
@@ -670,10 +712,13 @@ describe("strict-validation prose — every cited spec field is one the CLI emit
     };
 
     async function builtCR(): Promise<Record<string, unknown>> {
-        const actual =
-            await vi.importActual<typeof import("../cli/cr-builder")>(
-                "../cli/cr-builder",
-            );
+        // The real module, captured ONCE at module scope below — not
+        // `vi.importActual`, which bun has no equivalent of.
+        //
+        // It must be captured before `mock.module("../cli/cr-builder", …)`
+        // registers: importing inside the mocked window returns the mock, and
+        // importing inside a factory deadlocks outright.
+        const actual = __knextRealCrBuilder;
         return actual.buildNextAppCRObject(
             maximalConfig,
             `registry.example.com/my-app@sha256:${"b".repeat(64)}`,

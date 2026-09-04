@@ -66,8 +66,16 @@ Knative services behind the Next.js gateway. See `docs/adr/0002-0004` + `docs/de
 | ROADMAP | MATURITY_PLAN phase |
 |---|---|
 | Phase 0 migration | Phase 0 + Phase 1 (correctness start) |
-| Tier A | Phase 1 (correctness) + Phase 2 (control-plane) + image opt from Phase 4 |
+| Tier A | Phase 1 (correctness, incl. graceful shutdown) + Phase 2 (control-plane) + image opt from Phase 4 |
 | Tier B | Phase 3 (security) + previews/rollback |
 | Tier C | (new — edge, upstream-gated) |
 | Track P | Phase 5 (release) + docs |
 | gRPC module | Phase 6 |
+
+**All four Tier-A contents are routed above** — image optimization, graceful shutdown,
+control-plane consolidation, compat-suite gate. Graceful shutdown had no row until it was
+noticed that a reader resolving "what does Tier-A exit mean?" through this table got three of
+the four and silently dropped the fourth. That mattered less than it looks — graceful shutdown
+is implemented and tested, so the gap could not have declared Tier-A exit over unfinished work
+— but this table is what makes the ADR-0044 Option C deferral's "hard expiry at Tier-A exit"
+checkable, and a mapping that reads complete while missing a row cannot do that job.

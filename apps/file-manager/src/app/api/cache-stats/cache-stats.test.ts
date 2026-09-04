@@ -2,12 +2,14 @@
  * TDD (POC-ADAPTER-P1): cache-stats tracker utility
  * RED: fails until trackCacheHit/trackCacheMiss are moved to cache-stats.ts utility.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it } from 'bun:test';
 
 describe('cache-stats utility (POC-ADAPTER-P1)', () => {
   beforeEach(async () => {
-    // Reset module cache so global cacheStats resets between tests
-    vi.resetModules();
+    // An EXPLICIT reset. The old `vi.resetModules()` did not do what its comment
+    // said: the counters live on `globalThis` behind an init guard, so
+    // re-evaluating the module left them exactly as they were.
+    (await import('./cache-stats')).resetCacheStats();
   });
 
   it('exports trackCacheHit and trackCacheMiss as named functions', async () => {

@@ -1,7 +1,7 @@
+import { describe, expect, it } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 import { auditBlockingGate } from './helpers/blocking-gate';
 
 /**
@@ -105,36 +105,47 @@ describe('bun-exec alpine-image gate is wired into CI (ADR-0042 A1/A9)', () => {
  * config's include matches nothing. The script and config CONTENT was not.)
  *
  * The chain asserted here, end to end:
- *   ci.yml job -> `bun run test:image` -> vitest.image.config.ts
- *   -> include `*.docker-e2e.test.ts` -> a file matching it exists
- * plus the root-run exclude that keeps that same pattern out of `Lint & Test`.
+ *   ci.yml job -> `bun run test:image` -> scripts/bun-test.mjs <the e2e file>
+ *   -> that file exists and matches `*.docker-e2e.test.ts`
+ * plus the root-sweep exclude that keeps that same pattern out of `Lint & Test`.
+ *
+ * It ran under VITEST until the file migrated to `bun:test`, at which point
+ * vitest could no longer collect it and the job died with
+ * `Cannot find package 'bun:test'`. The runner changed; the property this guards
+ * did not — the job must reach the suite, and must not pass by matching nothing.
+ * `scripts/bun-test.mjs` exits 1 on an empty selection, which is what preserves
+ * the second half.
  */
 describe('the `test:image` chain actually reaches the suite (both halves)', () => {
   const EXAMPLE = resolve(REPO_ROOT, 'examples/bun-exec');
   const PATTERN = 'docker-e2e';
 
-  it('the `test:image` script runs the image vitest config', () => {
+  it('the `test:image` script runs the container e2e under the bun runner', () => {
     const pkg = JSON.parse(readFileSync(resolve(EXAMPLE, 'package.json'), 'utf8'));
     const script: string = pkg.scripts?.['test:image'] ?? '';
     expect(script, 'examples/bun-exec has no `test:image` script for the CI job to run').toMatch(
-      /vitest run/,
+      /bun-test\.mjs/,
     );
-    expect(script, '`test:image` does not point at vitest.image.config.ts').toMatch(
-      /--config\s+vitest\.image\.config\.ts/,
+    // NOT vitest: the e2e imports `bun:test`, so vitest cannot collect it and the
+    // job died with `Cannot find package 'bun:test'`.
+    expect(script, '`test:image` must not run vitest — the e2e imports bun:test').not.toMatch(
+      /vitest/,
     );
-    expect(existsSync(resolve(EXAMPLE, 'vitest.image.config.ts'))).toBe(true);
   });
 
-  it('the image config INCLUDES the container-e2e pattern and does not exclude it', () => {
-    const cfg = readFileSync(resolve(EXAMPLE, 'vitest.image.config.ts'), 'utf8');
-    const include = cfg.match(/include:\s*\[([^\]]*)\]/)?.[1] ?? '';
-    expect(include, `the image config's include does not match *.${PATTERN}.test.ts`).toContain(
-      PATTERN,
-    );
-    // An exclude of the very pattern it includes would leave `test:image`
-    // running zero container tests while exiting 0 on some other file.
-    const exclude = cfg.match(/exclude:\s*\[([^\]]*)\]/)?.[1] ?? '';
-    expect(exclude, 'the image config excludes the pattern it includes').not.toContain(PATTERN);
+  it('the script names a container-e2e file that exists', () => {
+    // The path is named explicitly rather than pattern-matched, so assert it
+    // RESOLVES. A renamed file would otherwise leave the script pointing at
+    // nothing — the runner exits 1 on that, but failing here says why.
+    const pkg = JSON.parse(readFileSync(resolve(EXAMPLE, 'package.json'), 'utf8'));
+    const named = (pkg.scripts?.['test:image'] ?? '')
+      .split(/\s+/)
+      .filter((t: string) => /\.test\.tsx?$/.test(t));
+    expect(named.length, '`test:image` names no test file').toBeGreaterThan(0);
+    for (const rel of named) {
+      expect(rel, `${rel} is not a ${PATTERN} file`).toContain(PATTERN);
+      expect(existsSync(resolve(REPO_ROOT, rel)), `${rel} does not exist`).toBe(true);
+    }
   });
 
   it('at least one container e2e file matches that pattern', () => {

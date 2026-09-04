@@ -6,33 +6,48 @@
  * object store is touched.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+    afterEach,
+    beforeEach,
+    describe,
+    expect,
+    it,
+    jest,
+    mock,
+} from "bun:test";
 
-const runCapture = vi.hoisted(() => vi.fn(() => ""));
-vi.mock("../cli/exec", () => ({ runCapture, isEntrypoint: () => false }));
+const runCapture = (() => mock(() => ""))();
+const __knextRealShared = { ...(await import("../cli/shared")) };
 
-const loadConfig = vi.hoisted(() => vi.fn());
+mock.module("../cli/exec", () => ({ runCapture, isEntrypoint: () => false }));
+
+const loadConfig = (() => mock())();
 // Only loadConfig is faked. UsageError (and the handlers beside it) stay REAL,
 // so the "unknown flag" assertion below still exercises the class the CLI
 // actually throws — a stubbed one would let the presentation contract rot.
-vi.mock("../cli/shared", async (importOriginal) => ({
-    ...(await importOriginal<typeof import("../cli/shared")>()),
+const __knextReal1 = { ...(await import("../cli/shared")) };
+mock.module("../cli/shared", () => ({
+    // bun replaces a mocked module WHOLESALE — no partial mock, no
+    // automock — so a factory listing only what the test drives drops
+    // every other export and the importer dies naming the CONSUMER, not
+    // this factory. Spreading keeps it honest as `../cli/shared` grows.
+    ...__knextRealShared,
+    ...__knextReal1,
     loadConfig,
 }));
 
-const pruneOldBuilds = vi.hoisted(() =>
-    vi.fn(() => ({
+const pruneOldBuilds = (() =>
+    mock(() => ({
         reaped: [],
         keptWindow: [],
         keptLive: [],
         keptUnmarked: [],
         reservedExcluded: [],
         dryRun: false,
-    })),
-);
-vi.mock("../utils/asset-upload", async (importOriginal) => {
-    const actual =
-        await importOriginal<typeof import("../utils/asset-upload")>();
+    })))();
+const __knextReal2 = { ...(await import("../utils/asset-upload")) };
+mock.module("../utils/asset-upload", async () => {
+    const actual = __knextReal2;
     return { ...actual, pruneOldBuilds };
 });
 
@@ -51,7 +66,7 @@ beforeEach(() => {
     pruneOldBuilds.mockClear();
 });
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => jest.restoreAllMocks());
 
 describe("gcMain", () => {
     it("returns 0 for --help without loading config", async () => {

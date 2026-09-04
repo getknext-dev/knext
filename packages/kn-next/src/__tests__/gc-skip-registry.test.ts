@@ -1,7 +1,7 @@
+import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
 
 /**
  * v3-P4a — the machine-readable skip-reason TOKEN REGISTRY for the asset-GC
@@ -40,7 +40,10 @@ const GC_CLI_DOC = resolve(
 describe("GC_SKIP_REASONS registry (v3-P4a — condition 1)", () => {
     it("is an exported const whose value equals its key for every entry (enum-like stable tokens)", () => {
         for (const [key, value] of Object.entries(GC_SKIP_REASONS)) {
-            expect(value).toBe(key);
+            // `Object.entries` widens the key to `string`; comparing as strings
+            // keeps the assertion (value equals its own key) without loosening
+            // the union GC_SKIP_REASONS declares.
+            expect(String(value)).toBe(key);
         }
     });
 

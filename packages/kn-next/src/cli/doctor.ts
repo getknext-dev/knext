@@ -288,11 +288,30 @@ export type KubeconfigInspectFn = () => KubeconfigState;
  * than the generic unreachable message, so parse failures report
  * has-current-context and the caller keeps the legacy path.
  */
+/**
+ * The home directory to search for `~/.kube/config`, preferring `$HOME`.
+ *
+ * This is what kubectl does, and what Node's own `os.homedir()` does — so on
+ * Node the two agree and this reads as redundant. **Bun's `os.homedir()`
+ * ignores `$HOME`** and returns the passwd entry, measured directly:
+ *
+ *   HOME=/tmp/zzz  node -> /tmp/zzz      bun -> /Users/<real>
+ *
+ * That is a behaviour difference, not just a test inconvenience: a container or
+ * CI job that sets `HOME` — which is the ordinary way to point a tool at a
+ * scoped config — would have its kubeconfig looked up in the wrong place the
+ * moment this CLI ran under Bun.
+ */
+function kubeconfigHome(): string {
+    const home = process.env.HOME;
+    return home !== undefined && home.length > 0 ? home : homedir();
+}
+
 export function inspectKubeconfig(): KubeconfigState {
     const env = process.env.KUBECONFIG;
     const searched = env?.length
         ? env.split(delimiter).filter((p) => p.length > 0)
-        : [join(homedir(), ".kube", "config")];
+        : [join(kubeconfigHome(), ".kube", "config")];
     const existing = searched.filter((p) => existsSync(p));
     const first = existing[0];
     if (first === undefined) {

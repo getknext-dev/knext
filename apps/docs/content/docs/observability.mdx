@@ -30,33 +30,32 @@ In addition, the server runs a **metrics sidecar on port `9091`** (separate from
 `$PORT`/3000), exposing `/metrics`. The pod is annotated with `prometheus.io/port: "9091"` and
 `prometheus.io/path: /metrics` for scrape discovery.
 
-Custom `kn_next_*` series include:
+The series the shipped scrape exposes:
 
 | Metric | Type | Meaning |
 |---|---|---|
-| `kn_next_startup_duration_seconds` | Histogram | Time for the server to become ready (labelled `cache_status` warm/cold). |
-| `kn_next_bytecode_cache_files_total` | Gauge | Files in the V8 bytecode cache. |
-| `kn_next_bytecode_cache_size_bytes` | Gauge | Total bytecode-cache size. |
-| `kn_next_bytecode_cache_warm_start` | Gauge | `1` if the cache was warm at startup, else `0`. |
-| `kn_next_bytecode_cache_write_count` | Counter | New bytecode files written this run. |
-| `kn_next_web_vitals_*` | Histogram | Core Web Vitals (see [RUM](#rum-web-vitals)). |
+| `knext_bunexec_http_requests_total` | Counter | Requests served, labelled `status_class` (2xx/3xx/4xx/5xx) — request and error rate. |
+| `knext_bunexec_http_request_duration_seconds` | Histogram | Request latency (buckets down to 5 ms — cold starts are ~61 ms). |
+| `knext_bunexec_http_inflight_requests` | Gauge | Current concurrency (saturation). |
+| `knext_bunexec_startup_duration_seconds` | Gauge | How long this pod took to become ready. |
+| `knext_bunexec_process_resident_memory_bytes` / `_uptime_seconds` | Gauge | Process health. |
 
-These complement the default Node.js process metrics. Ready-made Grafana dashboards ship with knext
-(see [Dashboards](#dashboards) below).
+Ready-made Grafana dashboards ship with knext (see [Dashboards](#dashboards) below).
 
 <Callout type="info">
-The bytecode-cache metrics tell you whether [scale-to-zero](/docs/scale-to-zero) cold starts are
-landing on a warm cache — a cold pod that reads `kn_next_bytecode_cache_warm_start = 0` is
-recompiling JavaScript instead of reusing cached V8 bytecode.
+There is no bytecode-cache metric family any more, because there is no cache to be warm or cold
+about: the [compiled executable](/docs/bun-runtime) bakes its bytecode into the binary at build
+time, so every start reads it — `knext_bunexec_startup_duration_seconds` measures the result
+directly.
 </Callout>
 
 ## Dashboards
 
-knext ships five ready-made Grafana dashboards. You do **not** import them by hand — they are
+knext ships three ready-made Grafana dashboards. You do **not** import them by hand — they are
 packaged as `ConfigMap`s labeled `grafana_dashboard: "1"`, the standard label a Grafana sidecar
 (kube-prometheus-stack, the Grafana Helm chart) watches to auto-load dashboards.
 
-Install all five with one command:
+Install them with one command:
 
 ```bash
 kubectl apply -k config/grafana
@@ -69,11 +68,15 @@ from port `9091`.
 
 | Dashboard | What it shows |
 |---|---|
-| **RED service health** | Request rate, error rate (5xx %), duration p50/p95/p99, and in-flight requests — the golden signals. |
-| **Scale-to-zero lifecycle** | Replica count 0→N, cold-start rate and latency (p50/p99), and Postgres 0→1 wake rate and latency by pool role. |
-| **RUM — Web Vitals** | LCP, INP, CLS, FCP, TTFB percentiles per route (needs [RUM](#rum-web-vitals) enabled). |
-| **Bytecode cache** | Warm-start ratio, cache size, and startup duration by cache state. |
+| **RED service health** | Request rate, error rate (5xx %), duration percentiles, and in-flight requests — the golden signals. |
+| **Scale-to-zero lifecycle** | Replica count 0→N, startup durations across pods, and Postgres 0→1 wake rate and latency by pool role. |
 | **Load testing** | Request throughput and latency under a k6 run. |
+
+Two former dashboards were removed rather than left blank: the **bytecode cache** board (its
+subject no longer exists — bytecode ships inside the compiled executable) and the **RUM — Web
+Vitals** board (its series are collected on the app's own metrics route, which the default scrape
+does not reach — see the honesty note under [RUM](#rum-web-vitals)). A dashboard whose every panel
+reads "no data" looks like a quiet system, which is worse than its absence.
 
 <Callout type="info">
 **Pick your datasource, once.** Every dashboard uses a Grafana **datasource template variable**
@@ -102,6 +105,13 @@ nothing.
 
 The ingest endpoint records into `kn_next_web_vitals_*` histograms, merged into `/api/metrics`.
 Each carries three labels: `app`, `route`, and `rating`.
+
+<Callout type="warn">
+**These series are not on the default scrape.** The shipped Prometheus configuration scrapes the
+runtime's metrics port (`9091`), and the Web Vitals histograms live on the app's own
+`/api/metrics` route — so out of the box they are collected but not stored. To use RUM data,
+add a scrape target for your app's `/api/metrics` route to your Prometheus.
+</Callout>
 
 ### Why a public beacon is safe
 

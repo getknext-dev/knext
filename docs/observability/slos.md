@@ -17,66 +17,105 @@ label, and the scrape setup) is in [`metrics.md`](./metrics.md).
 
 | Series | Exported by |
 | --- | --- |
-| `knext_http_requests_total{app,method,status_class}` | runtime — core-owned OTel HTTP-span processor on `:9091` (#315); the golden request-rate / error-rate signal |
-| `knext_http_request_duration_seconds_bucket{…}` | runtime — same processor (golden latency) |
-| `knext_http_inflight_requests{app}` | runtime — same processor (golden saturation) |
-| `knext_coldstart_total{app}` / `knext_coldstart_duration_seconds_bucket{app}` | runtime — the `ColdStartSpanProcessor` path (#315/#317) |
-| `knext_db_wake_total{app,role}` / `knext_db_wake_duration_seconds_bucket{app,role}` | runtime — the `instrumentPoolForDbWake` path (#315/#317) |
-| `kn_next_http_requests_total{app,method,route,status_class}` | app — `apps/file-manager/src/app/api/_metrics/registry.ts` (`observeHttpRequest` / `withRedMetrics`), the app-owned RED series with a `route` label |
-| `kn_next_http_request_duration_seconds_bucket{…}` | app — same registry (RED duration histogram) |
-| `kn_next_startup_duration_seconds_bucket{cache_status,app}` | app — observed once per process start |
-| `kn_next_bytecode_cache_warm_start{app}` | app — 1 if the V8 bytecode cache was warm at boot |
+| `knext_bunexec_http_requests_total{status_class}` | **runtime** — the compiled executable's `:9091` exposition (`renderMetrics`). Request rate; the `5xx` slice is the error rate |
+| `knext_bunexec_http_request_duration_seconds_bucket{le}` | runtime — same endpoint (golden latency) |
+| `knext_bunexec_http_inflight_requests` | runtime — same endpoint (golden saturation) |
+| `knext_bunexec_startup_duration_seconds` | runtime — set once per process, at listener bind. The cold-start signal |
+| `knext_bunexec_process_uptime_seconds` / `knext_bunexec_process_resident_memory_bytes` | runtime — same endpoint |
 | `knext_nextapp_reconcile_total{result}` | operator — `internal/controller/metrics.go` |
 | `knext_nextapp_reconcile_errors_total` | operator — same |
 | `knext_nextapp_reconcile_duration_seconds_bucket` | operator — same |
+| `knext_nextapp_image_prewarm_errors_total` | operator — same |
 | `workqueue_depth{name="nextapp"}` | operator — controller-runtime workqueue provider (control-plane saturation) |
 | `knext_nextapp_condition{type,status,namespace,name}` | kube-state-metrics, reading `NextApp.status.conditions` (Ready / Degraded / Reconciling) the reconciler populates — see "kube-state-metrics" below |
+| `up{job="knext-nextapp"}` | Prometheus itself — per-target scrape health, and the anchor for the staleness meta-alerts |
+
+**Not on the shipped scrape.** `knext_http_*`, `knext_coldstart_*`,
+`knext_db_wake_*`, `knext_deep_health_state` and every `kn_next_*` series are
+registered by an APP into a prom-client registry served on the app port through
+`/api/metrics`. Since ADR-0048 the runtime no longer merges those onto `:9091`,
+and the shipped `PodMonitor` scrapes `:9091` only — so an SLI written against
+one of them is empty unless you add your own scrape config. Those rules live in
+the separate `knext.app.node-legacy` group. See
+[`metrics.md`](./metrics.md#not-on-the-shipped-scrape-app-owned-registries).
 
 Scale-to-zero caveat: when an app is scaled to zero it exports **no** app series
 and its Grafana panels go blank. Availability/latency SLIs are therefore
 evaluated over rolling windows and the control-plane SLOs (operator) remain
-observable because the operator is always-on.
+observable because the operator is always-on. This is also why the staleness
+meta-alerts below anchor on `up` rather than on `absent()` of an app series: an
+idle app is legitimately absent, and an alert that fires nightly gets muted.
 
 ## SLOs
+
+### 0. The alerting is not blind (meta)
+**Objective:** every SLI below is actually being measured.
+
+A PromQL query naming a series nobody emits returns an empty vector — no error,
+no alert, a blank panel. A healthy quiet system and a totally broken metrics
+pipeline look identical, which is how the app-alert group sat dead for weeks
+after the runtime's metric names changed. Two rules close that:
+
+```promql
+up{job="knext-nextapp"} == 0
+```
+Alert: `KnextAppMetricsTargetDown` (10m, critical) — the target is discovered
+but unscrapeable.
+
+```promql
+(up{job="knext-nextapp"} == 1)
+  unless on (namespace, pod) knext_bunexec_process_uptime_seconds
+```
+Alert: `KnextAppMetricsContractBroken` (15m, critical) — the scrape *succeeds*
+and returns nothing these rules recognise. That is what a metric rename looks
+like from Prometheus' side.
 
 ### 1. Availability (app)
 **Objective:** ≥ 99.5% of server-handled requests succeed (non-5xx) over 28 days.
 
 SLI (5xx ratio — the alert inverts this):
 ```promql
-sum(rate(kn_next_http_requests_total{status_class="5xx"}[5m])) by (app)
+sum(rate(knext_bunexec_http_requests_total{status_class="5xx"}[5m])) by (app)
   /
-sum(rate(kn_next_http_requests_total[5m])) by (app)
+sum(rate(knext_bunexec_http_requests_total[5m])) by (app)
 ```
 Alert: `KnextHighErrorRate` fires when the 5m ratio exceeds 5% for 10m.
 
-A specific availability signal — backing-store (Redis ISR cache / Postgres)
-reachability — is read off the deep `/api/health` route, which returns 503 when a
-dependency is down and is wrapped in `withRedMetrics`:
-```promql
-sum(rate(kn_next_http_requests_total{route="/api/health",status_class="5xx"}[5m])) by (app)
-```
-Alert: `KnextCacheUnreachable`.
+This also carries the backing-store signal. A deep `/api/health` route returns
+503 when Redis or Postgres is unreachable, and that 503 lands in the `5xx`
+slice. The old per-route form (`KnextCacheUnreachable`, filtering
+`route="/api/health"`) is **retired**: the runtime emits no `route` label,
+because a route label is unbounded by construction and one crawler would mint a
+series per URL. Reintroducing it needs an explicit bounded route allowlist
+first.
 
 ### 2. Cold-start latency (app)
-**Objective:** cold-start p95 ≤ 3s. Cold starts dominate the user-visible latency
+**Objective:** cold start ≤ 3s. Cold starts dominate the user-visible latency
 of a scale-to-zero app, so this is the latency SLO that matters most.
 
 SLI:
 ```promql
-histogram_quantile(0.95,
-  sum(rate(kn_next_startup_duration_seconds_bucket{cache_status="cold"}[15m])) by (le, app)
-)
+max by (app) (knext_bunexec_startup_duration_seconds)
 ```
-Alert: `KnextColdStartLatencyHigh` (p95 > 3s for 15m). Correlate with
-`kn_next_bytecode_cache_warm_start` — a cold cache after deploy is the usual cause.
+Alert: `KnextColdStartLatencyHigh` (> 3s for 15m). The gauge is set once per
+process from `process.uptime()` at the moment both listeners bind, so it covers
+the Bun bootstrap and every module evaluation a waking pod pays for. One sample
+per pod means the fleet distribution *is* the gauge; `max`/`quantile` over it is
+the correct aggregation, not `histogram_quantile`.
 
-Request-latency SLI (warm path), for reference:
+There is no warm/cold split any more. The compiled executable has no V8 compile
+cache, so every start is a cold start — the `cache_status` label and the
+`kn_next_bytecode_cache_*` series belong to the retired node-server path.
+
+Request-latency SLI (warm path):
 ```promql
 histogram_quantile(0.95,
-  sum(rate(kn_next_http_request_duration_seconds_bucket[5m])) by (le, app, route)
+  sum(rate(knext_bunexec_http_request_duration_seconds_bucket[5m])) by (le, app)
 )
 ```
+Alert: `KnextHighRequestLatency` (p95 > 1s for 15m). Buckets run 5ms…10s with
+five under 100ms, so a warm p50 is a real number rather than an interpolation
+across one enormous first bucket.
 
 ### 3. Reconcile-error rate (control plane / operator)
 **Objective:** zero reconcile errors in steady state; reconcile p95 ≤ 30s.

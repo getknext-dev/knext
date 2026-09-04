@@ -68,11 +68,25 @@ export default defineConfig([
       loader: 'src/loader.ts',
       'adapters/next-adapter': 'src/adapters/next-adapter.ts',
       'adapters/node-server': 'src/adapters/node-server.ts',
+      'adapters/vinext-image-optimizer':
+        'src/adapters/vinext-image-optimizer.ts',
+      // The ADR-0049 credential classifier. Published so the GitHub Action's
+      // preflight reads the SAME Role definition `init-ci` generates from.
+      'cli/ci/credential-scope': 'src/cli/ci/credential-scope.ts',
       // #188 round 3 — own dist entry so e2e-deploy.sh can import the heal
       // POST-build (onBuildComplete fires before .next/standalone exists).
       'adapters/standalone-bun-exports': 'src/adapters/standalone-bun-exports.ts',
       // cache-handler is plain JS (untyped) — bundled to dist, no .d.ts emitted
       'adapters/cache-handler': 'src/adapters/cache-handler.js',
+      // The sharp addon shim. Plain untyped ESM, like cache-handler: it is
+      // pulled in by a BUNDLER ALIAS (apps/*/vite.config.ts) rather than
+      // imported by name, so it needs its own entry or it never reaches dist and
+      // the alias resolves to nothing.
+      'adapters/sharp-addon-dlopen': 'src/adapters/sharp-addon-dlopen.mjs',
+      // The vinext single-exec compile. Spawned as a SCRIPT (`bun run …`) by
+      // `kn-next build`, not imported, because it needs `Bun.build` plugins and
+      // the published CLI runs under node.
+      'adapters/vinext-compile': 'src/adapters/vinext-compile.mjs',
       // The in-flight cache-write registry (`./internal/cache-drain`).
       // Measured, not assumed: tsup hoists it into a SHARED chunk that both
       // this entry and adapters/cache-handler.js import, so the published
@@ -109,6 +123,11 @@ export default defineConfig([
         loader: 'src/loader.ts',
         'adapters/next-adapter': 'src/adapters/next-adapter.ts',
         'adapters/node-server': 'src/adapters/node-server.ts',
+      'adapters/vinext-image-optimizer':
+        'src/adapters/vinext-image-optimizer.ts',
+      // The ADR-0049 credential classifier. Published so the GitHub Action's
+      // preflight reads the SAME Role definition `init-ci` generates from.
+      'cli/ci/credential-scope': 'src/cli/ci/credential-scope.ts',
         'adapters/standalone-bun-exports': 'src/adapters/standalone-bun-exports.ts',
         'adapters/otel-config': 'src/adapters/otel-config.ts',
         'adapters/tracing': 'src/adapters/tracing.ts',
@@ -163,5 +182,22 @@ export default defineConfig([
     outDir: 'dist',
     clean: false,
     sourcemap: true,
+    // The sharp dlopen shim, copied VERBATIM as a build artifact. The bundled
+    // dist/adapters/sharp-addon-dlopen.js is an entry in the ESM pass above,
+    // and tsup freely factors shared code into `chunk-*.js` files it imports —
+    // which is fine for a module that is IMPORTED, and poison for this one:
+    // vinext-compile injects the shim's TEXT as the replacement contents of
+    // sharp/dist/sharp.mjs, so a `import "../chunk-…"` inside it resolves
+    // relative to SHARP's path and the whole single-exec compile dies with
+    // `Could not resolve "../chunk-…"` (the sprint-close root cause — it
+    // reddened four CI checks). The compile script therefore reads THIS
+    // verbatim copy, and refuses any shim with a relative import.
+    async onSuccess() {
+      const { copyFileSync } = await import('node:fs');
+      copyFileSync(
+        'src/adapters/sharp-addon-dlopen.mjs',
+        'dist/adapters/sharp-addon-dlopen.source.mjs',
+      );
+    },
   },
 ]);

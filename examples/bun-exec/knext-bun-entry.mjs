@@ -50,6 +50,8 @@ import {
   createMetricsState,
   drainPending,
   METRICS_CONTENT_TYPE,
+  observeRequest,
+  recordStartupComplete,
   renderMetrics,
   resolveAssetAnchor,
   resolveBindHost,
@@ -139,11 +141,24 @@ const appSrvx = serve({
   gracefulShutdown: false,
   silent: true,
   middleware: [
+    // ONE middleware, wrapping every request — which is why the full RED
+    // contract (rate / errors / duration) is cheap here and nowhere else. It
+    // records the response STATUS CLASS and the wall time, so an error-rate
+    // and a latency SLO are computable from the :9091 scrape; before #792 this
+    // only counted requests, and neither was. A throw is recorded as 5xx and
+    // RE-THROWN — swallowing it would turn a crash into a silent 0-request
+    // gap, which is the failure shape this whole change exists to remove.
     async (_req, next) => {
-      metrics.requestsTotal++;
       metrics.inflight++;
+      const startedNs = process.hrtime.bigint();
+      const elapsed = () => Number(process.hrtime.bigint() - startedNs) / 1e9;
       try {
-        return await next();
+        const res = await next();
+        observeRequest(metrics, res?.status ?? 200, elapsed());
+        return res;
+      } catch (err) {
+        observeRequest(metrics, 500, elapsed());
+        throw err;
       } finally {
         metrics.inflight--;
       }
@@ -183,6 +198,12 @@ const metricsServer = Bun.serve({
 // Startup-order signal (RuntimeContract startup-order test): both listeners are
 // bound synchronously above BEFORE this line prints — nothing accepts a first
 // request before the app + :9091 listeners are up.
+// Cold start, measured where it is measurable: both listeners are bound as of
+// this line, and `process.uptime()` covers the Bun bootstrap plus every module
+// evaluation that preceded it — the latency a user waking a scaled-to-zero pod
+// actually pays. Recorded BEFORE the log line so a scrape racing startup can
+// never observe the runtime up but the gauge missing.
+recordStartupComplete(metrics);
 console.log(`LISTENING:${appServer.port} METRICS:${metricsServer.port}`);
 
 // ── Eager app-graph warmup ───────────────────────────────────────────────────

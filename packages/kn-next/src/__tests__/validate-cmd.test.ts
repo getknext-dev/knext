@@ -10,11 +10,19 @@
  * validateMain itself, hermetically, on injected streams.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, mock } from "bun:test";
 
-const loadConfig = vi.hoisted(() => vi.fn());
-vi.mock("../cli/shared", async (importOriginal) => ({
-    ...(await importOriginal<typeof import("../cli/shared")>()),
+const loadConfig = (() => mock())();
+const __knextReal1 = { ...(await import("../cli/shared")) };
+const __knextRealShared = { ...(await import("../cli/shared")) };
+
+mock.module("../cli/shared", () => ({
+    // bun replaces a mocked module WHOLESALE — no partial mock, no
+    // automock — so a factory listing only what the test drives drops
+    // every other export and the importer dies naming the CONSUMER, not
+    // this factory. Spreading keeps it honest as `../cli/shared` grows.
+    ...__knextRealShared,
+    ...__knextReal1,
     loadConfig,
 }));
 

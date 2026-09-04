@@ -105,14 +105,55 @@ type NextAppSpec struct {
 	// Runtime selects the process that executes the Next.js standalone server.js.
 	// Valid values: "bun" or "node" (default "node").
 	// Maps from KnativeNextConfig.runtime.
-	// NOTE: images built by `kn-next build` with runtime "bun" have their
-	// server-side JS precompiled to Bun bytecode and only boot under Bun —
-	// flipping this field to "node" for such an image requires REBUILDING the
-	// image (the entry exits 1 with a FATAL message under Node rather than
-	// crash-looping silently). Images built for "node" run under either runtime.
+	// Only meaningful for the standalone shape (Build absent / "turbopack");
+	// for Build "vinext" the runtime is compiled into the executable and this
+	// field does not affect how the container starts.
+	// (Historical: images built by the retired per-file Bun bytecode pass were
+	// Bun-only and needed a rebuild to flip back to "node". ADR-0048 replaced
+	// that pass with the vinext single executable, where the question cannot
+	// arise.)
 	// +optional
 	// +kubebuilder:validation:Enum=bun;node
 	Runtime string `json:"runtime,omitempty"`
+
+	// Build selects the build system that produced the image.
+	// Valid values: "turbopack" and "vinext" (ADR-0048).
+	// Maps from KnativeNextConfig.build.
+	//
+	// "vinext" is the compiled single-executable artifact — the app is one
+	// binary the image's own CMD runs. For that value the controller must NOT
+	// force a container command: there is no server.js in the image, and the
+	// old Runtime="bun" command would CrashLoop it. That controller branch and
+	// this enum widened in the SAME change, exactly as the previous version of
+	// this comment demanded ("never before" — the enum is the cluster-side
+	// contract, and publishing a value the controller cannot reconcile would
+	// let a GitOps controller, which does not assert strict validation, store
+	// a CR the operator then mis-runs with no condition, event, or refusal).
+	//
+	// INDEPENDENT of Runtime. The two axes are connected by the artifact SHAPE a
+	// builder emits and a runtime must accept — never by a rule pairing the two
+	// names. Any value of Build is admissible with any value of Runtime; a
+	// builder/runtime pairing that cannot work is rejected by the CLI against
+	// the artifact contract, before a CR is ever emitted. (For "vinext" the
+	// runtime is baked into the binary, so Runtime does not affect how the
+	// container starts.)
+	//
+	// Deliberately NOT a CEL cross-field rule. ADR-0036 specified a fail-closed
+	// `bun => vinext` admission rule; it was never implemented, and encoding
+	// compatibility here would pin a policy into every cluster's CRD, where
+	// changing it later needs a CRD roll rather than a CLI release.
+	//
+	// Additive and optional at v1alpha1 (ADR-0017): absence means "turbopack",
+	// so every CR ever written keeps its exact meaning. That is why the CLI
+	// writes "vinext" EXPLICITLY for its (now default) vinext builds — absence
+	// is permanently reserved for the standalone shape and cannot be re-read.
+	//
+	// Order matters for upgrades (#548): a cluster whose CRD predates "vinext"
+	// rejects such a CR under --validate=strict, which the CLI always passes —
+	// a loud stop, not a silent mis-run. Upgrade the operator/CRD first.
+	// +optional
+	// +kubebuilder:validation:Enum=turbopack;vinext
+	Build string `json:"build,omitempty"`
 
 	// TimeoutSeconds is the maximum number of seconds a request can take before
 	// the Knative Service times it out.  Defaults to 300 (5 min) when unset.

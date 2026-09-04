@@ -9,7 +9,7 @@
  * must NOT shell out to any storage CLI (gsutil/aws/mc/az) to clear buckets.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, mock } from "bun:test";
 import { runCleanup } from "../cli/cleanup";
 import type { KnativeNextConfig } from "../config";
 
@@ -30,7 +30,7 @@ const baseConfig: KnativeNextConfig = {
 
 describe("runCleanup (#74 — CR-only teardown)", () => {
     it("issues exactly one command: kubectl delete nextapp <name>", () => {
-        const exec = vi.fn();
+        const exec = mock();
         runCleanup(baseConfig, exec);
 
         expect(exec).toHaveBeenCalledTimes(1);
@@ -42,7 +42,7 @@ describe("runCleanup (#74 — CR-only teardown)", () => {
     });
 
     it("passes the app name as a single uninterpreted argv token (no shell)", () => {
-        const exec = vi.fn();
+        const exec = mock();
         runCleanup({ ...baseConfig, name: "my-app" }, exec);
         const argv = exec.mock.calls[0][0] as string[];
         expect(Array.isArray(argv)).toBe(true);
@@ -50,7 +50,7 @@ describe("runCleanup (#74 — CR-only teardown)", () => {
     });
 
     it("NEVER deletes ksvc / SA / PVC / statefulset / svc directly (ownerRef GC owns those)", () => {
-        const exec = vi.fn();
+        const exec = mock();
         runCleanup(baseConfig, exec);
         const forbidden = [
             "ksvc",
@@ -72,7 +72,7 @@ describe("runCleanup (#74 — CR-only teardown)", () => {
     });
 
     it("NEVER shells out to a storage CLI (gsutil/aws/mc/az) — the operator finalizer clears storage", () => {
-        const exec = vi.fn();
+        const exec = mock();
         runCleanup(
             {
                 ...baseConfig,

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import { toDns1123Label } from '../scripts/lib/names';
 
 describe('toDns1123Label', () => {

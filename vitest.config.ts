@@ -1,6 +1,10 @@
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import react from '@vitejs/plugin-react';
 import { configDefaults, defineConfig } from 'vitest/config';
+import { COVERAGE_EXCLUDE, COVERAGE_INCLUDE } from './scripts/lib/coverage-policy.mjs';
+import { importsFrom } from './scripts/lib/test-framework-import.mjs';
 
 // Resolve @getknext/lib subpaths to source (not dist) in tests.
 // CI runs `pnpm install` then `vitest` without building lib first, so dist/ is absent.
@@ -16,6 +20,50 @@ const DB_SRC = resolve(import.meta.dirname, 'packages/db/src');
 // many dist subpaths must keep resolving normally). The dist-surface contract
 // tests read dist by path, so they are unaffected.
 const CORE_SRC = resolve(import.meta.dirname, 'packages/kn-next/src');
+
+/**
+ * Every test file that has been ported to `bun:test`, DERIVED by reading them.
+ *
+ * A file importing `bun:test` cannot run under vitest, and one importing
+ * `vitest` cannot run under bun — so during the migration (#871) the two runners
+ * must partition the suite exactly. That partition used to be a hand-maintained
+ * list of package globs, which forced an all-or-nothing move: a package with
+ * fourteen converted files and two hard ones was green under neither runner,
+ * because the glob could only include or exclude the whole directory.
+ *
+ * Scanning removes the list and the constraint together. A file excludes itself
+ * the moment it is converted, so a package can migrate one file at a time, and
+ * there is no second place to update — which is where an enumerated list drifts.
+ * When the migration finishes this returns every test file and the config goes
+ * away entirely.
+ *
+ * `git ls-files` rather than a directory walk: it already ignores build output
+ * and stray worktrees, which is what a walk would have to re-learn.
+ */
+function portedToBun(): string[] {
+  const files = execFileSync('git', ['ls-files', '*.test.ts', '*.test.tsx'], {
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+  })
+    .split('\n')
+    .filter(Boolean);
+
+  return files.filter((f) => {
+    try {
+      // ONE definition of the partition, shared with `scripts/bun-test.mjs` and
+      // `tests/runner-partition.test.ts`. Neither a raw scan nor a blanked scan
+      // works — see the note in `test-framework-import.mjs`; the first lets a
+      // fixture string orphan a file, the second never matches at all because a
+      // module specifier IS a string.
+      return importsFrom(readFileSync(f, 'utf8'), 'bun:test');
+    } catch {
+      // Unreadable means we cannot tell which runner owns it. Leaving it IN
+      // vitest fails loudly if it is a bun file; excluding it would drop the
+      // file from both runners silently, which is the worse error.
+      return false;
+    }
+  });
+}
 
 export default defineConfig({
   plugins: [react()],
@@ -61,53 +109,44 @@ export default defineConfig({
     // the moment it is named — and the suites this pattern hides still run, in
     // their own jobs (`bun-exec-alpine-image` runs `bun run test:image`).
     // `tests/bun-exec-alpine-image-ci.test.ts` asserts this entry is here.
-    exclude: [...configDefaults.exclude, '**/.claude/**', '**/*.docker-e2e.test.ts'],
+    // PORTED-TO-BUN exclusions. These packages now import `bun:test`, which
+    // vitest cannot run, so they are excluded here and covered by
+    // `node scripts/bun-test.mjs` instead. The list shrinks vitest's scope one
+    // package at a time and reaches zero when the migration finishes — at which
+    // point this config goes away entirely.
+    exclude: [
+      ...configDefaults.exclude,
+      '**/.claude/**',
+      '**/*.docker-e2e.test.ts',
+      ...portedToBun(),
+    ],
     coverage: {
       provider: 'v8',
-      reporter: ['text', 'text-summary', 'json', 'json-summary', 'html'],
+      // `lcov` is what the merged gate reads. This run supplies the honest
+      // DENOMINATOR — every `include` match enumerated, untouched files at 0% —
+      // while `scripts/bun-test.mjs` supplies almost all of the numerator.
+      reporter: ['text', 'text-summary', 'json', 'json-summary', 'html', 'lcov'],
       // Honest denominator: an explicit `include` makes Vitest count every
       // matching source file, not only the ones a test happens to import — so
       // adding an untested file can no longer silently RAISE the percentage.
       // (Vitest 4 measures all `include` matches by default; the v3 `all` flag
       // was removed.)
-      include: ['packages/*/src/**/*.{ts,tsx}'],
-      exclude: [
-        ...(configDefaults.coverage.exclude ?? []),
-        // Untracked local cruft (0 tracked files in git) — never repo code.
-        '**/packages/admin/**',
-        '**/packages/knext/**',
-        // Tests, type-only decls, and generated/index barrels carry no logic to cover.
-        '**/*.test.{ts,tsx}',
-        '**/*.d.ts',
-        '**/__tests__/**',
-        '**/__mocks__/**',
-        '**/*.config.{ts,js,mjs}',
-      ],
-      // Regression ratchet: floors set just below the measured baseline
-      // (@getknext/core ~78% lines / ~72% branches on 2026-07-24; lib/db/ui already
-      // >90%). CI fails if coverage drops below these — they are RAISED toward 90
-      // as the @getknext/core coverage push lands. See docs/benchmarks/coverage-baseline.md.
-      thresholds: {
-        statements: 77,
-        branches: 70,
-        functions: 74,
-        lines: 77,
-        // Per-package floor for @getknext/core (packages/kn-next). The @getknext/core
-        // coverage push (2026-07) raised its lines to ~90% (from ~78%); this glob
-        // threshold pins that per-package so the aggregate ratchet above can no
-        // longer mask a regression in this one package (reviewers flagged
-        // aggregate-only thresholds). Floors sit at/just below the measured
-        // achieved numbers — lines 90.1 / statements 89.4 / functions 87.5 /
-        // branches 82.8 — so CI fails on any drop below these without red-lining
-        // the current state. node-server.ts (the spawn+sidecar runtime entry) is
-        // the remaining 0%-covered residual; see the coverage report.
-        'packages/kn-next/src/**': {
-          lines: 90,
-          statements: 88,
-          functions: 87,
-          branches: 80,
-        },
-      },
+      //
+      // Shared with `scripts/check-coverage.mjs` so the two halves of the gate
+      // cannot drift into two different denominators.
+      include: COVERAGE_INCLUDE,
+      exclude: [...(configDefaults.coverage.exclude ?? []), ...COVERAGE_EXCLUDE],
+      // NO `thresholds:` here — deliberately (#884).
+      //
+      // After the bun migration this run collects 3 test files out of 338, so
+      // its numerator is a rounding error while its denominator is the whole
+      // tree: the floors were being checked against 1.37%. They now live in
+      // `scripts/lib/coverage-policy.mjs` and are enforced by
+      // `node scripts/check-coverage.mjs`, over the MERGE of this report and the
+      // ~338 per-file reports from `scripts/bun-test.mjs --coverage`.
+      //
+      // `tests/coverage-gate.test.ts` fails if a `thresholds:` block reappears
+      // here — two copies of a floor means one is wrong and nothing says which.
     },
   },
 });

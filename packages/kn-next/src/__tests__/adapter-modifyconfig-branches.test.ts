@@ -8,7 +8,7 @@
  * runtime.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, mock, spyOn } from "bun:test";
 import adapter from "../adapters/next-adapter";
 
 type ModifyConfig = NonNullable<typeof adapter.modifyConfig>;
@@ -16,7 +16,7 @@ const modifyConfig = adapter.modifyConfig as ModifyConfig;
 
 describe("adapter.modifyConfig", () => {
     it("outside phase-production-build: keeps output unset but still carries the fence", () => {
-        vi.spyOn(console, "log").mockImplementation(() => {});
+        spyOn(console, "log").mockImplementation(() => {});
         const config = {
             output: undefined,
             reactStrictMode: true,
@@ -35,8 +35,8 @@ describe("adapter.modifyConfig", () => {
     });
 
     it("forces output:standalone and composes the app's own webpack hook (nodejs runtime)", () => {
-        vi.spyOn(console, "log").mockImplementation(() => {});
-        const appWebpack = vi.fn((wc: Record<string, unknown>) => ({
+        spyOn(console, "log").mockImplementation(() => {});
+        const appWebpack = mock((wc: Record<string, unknown>) => ({
             ...wc,
             appTouched: true,
         }));

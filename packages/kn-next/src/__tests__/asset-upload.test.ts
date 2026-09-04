@@ -1,15 +1,16 @@
-import { existsSync, promises as fs } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import {
     afterEach,
     beforeEach,
     describe,
     expect,
     it,
+    jest,
     type Mock,
-    vi,
-} from "vitest";
+    mock,
+} from "bun:test";
+import { existsSync, promises as fs } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 /**
  * Data-plane tests for asset upload + post-upload verification (#75).
@@ -25,9 +26,9 @@ import {
  * store are the two real data planes; the rest are thin shell-outs).
  */
 
-vi.mock("../cli/exec", () => ({
-    runQuiet: vi.fn(),
-    runCapture: vi.fn(),
+mock.module("../cli/exec", () => ({
+    runQuiet: mock(),
+    runCapture: mock(),
 }));
 
 import { runCapture, runQuiet } from "../cli/exec";
@@ -40,8 +41,8 @@ import {
     uploadAssets,
 } from "../utils/asset-upload";
 
-const runQuietMock = runQuiet as unknown as Mock;
-const runCaptureMock = runCapture as unknown as Mock;
+const runQuietMock = runQuiet as unknown as Mock<typeof runQuiet>;
+const runCaptureMock = runCapture as unknown as Mock<typeof runCapture>;
 
 /**
  * Writes a local asset by its UPLOAD KEY into the standalone-build source
@@ -68,6 +69,10 @@ function makeConfig(
 ): StorageBackedConfig {
     return {
         name,
+        // Pins the STANDALONE upload path explicitly: since ADR-0048 the
+        // default build is vinext (stages from .output/public), and these
+        // tests seed .next/static.
+        build: "turbopack",
         storage: {
             provider,
             bucket,
@@ -128,7 +133,7 @@ describe("uploadAssets data plane", () => {
 
     afterEach(async () => {
         process.chdir(prevCwd);
-        vi.clearAllMocks();
+        jest.clearAllMocks();
     });
 
     /** All argv arrays passed to either exec helper, for argv-shape assertions. */
@@ -255,7 +260,7 @@ describe("uploadAssets data plane", () => {
                 localKeys.filter((k) => k !== missingKey),
             ),
         );
-        runQuietMock.mockImplementation((argv: string[]) => {
+        runQuietMock.mockImplementation((argv: readonly string[]) => {
             // Bulk upload (the `sync`) is fine; only the single-file retry that
             // references the missing key throws.
             if (

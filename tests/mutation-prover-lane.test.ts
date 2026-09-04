@@ -1,13 +1,22 @@
+import { describe, expect, it } from 'bun:test';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import { blankNonCode } from '../scripts/lib/blank-non-code.mjs';
 import {
   auditProverSource,
   auditRunnerResolution,
+  auditSpecFrameworkMatch,
   codeStringLiterals,
   discoverProvers,
   evaluateProverRun,
@@ -68,6 +77,28 @@ describe('#685 the prover set is DISCOVERED, never enumerated', () => {
       4,
     );
     expect(discoverProvers(REPO_ROOT).map((p) => p.relPath)).toEqual(tracked);
+  });
+});
+
+describe("#902 a prover's runner can execute its spec's framework", () => {
+  const provers = discoverProvers(REPO_ROOT);
+  const readSpec = (spec: string): string | undefined => {
+    const p = resolve(REPO_ROOT, spec);
+    return existsSync(p) ? read(p) : undefined;
+  };
+
+  it.each(provers.map((p) => p.relPath))('%s has no framework mismatch', (relPath) => {
+    const findings = auditSpecFrameworkMatch(read(resolve(REPO_ROOT, relPath)), readSpec);
+    expect(findings, `${relPath}: ${findings.join(' | ')}`).toEqual([]);
+  });
+
+  it('a vitest-resolved prover aimed at a bun:test spec IS a finding', () => {
+    const findings = auditSpecFrameworkMatch(
+      "import { resolveTestRunner } from './lib/ci-blocking-gate-proof.mjs';\n" +
+        "const SPEC = 'fake/spec.test.ts';\nresolveTestRunner(root);",
+      () => "import { it } from 'bun:test';",
+    );
+    expect(findings.join(' ')).toMatch(/bun:test .* through resolveTestRunner/);
   });
 });
 

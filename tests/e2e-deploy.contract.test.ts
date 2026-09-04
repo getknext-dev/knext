@@ -1,3 +1,5 @@
+import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from 'bun:test';
+
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
@@ -12,7 +14,6 @@ import { get as httpGet } from 'node:http';
 import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 // #492: this file runs REAL work in synchronous child processes — beforeAll shells
 // out to bash scripts/e2e-deploy.sh (fake `next build` + standalone server boot +
@@ -24,8 +25,17 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 // Raise the timeouts FILE-SCOPED (never the global default, which stays tight to
 // catch real hangs). hookTimeout covers the full deploy in beforeAll (its own
 // execFileSync timeout is 60s). No assertion is weakened.
-vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
+// bun has no `vi.setConfig` — a per-run timeout knob does not exist there, so
+// the budget moves onto each `describe`. Kept at the SAME value rather than
+// tightened: these spawn a real shell script, and a timeout chosen to make a
+// suite feel fast is how a slow machine turns into a flaky gate.
+const SUITE_TIMEOUT_MS = 60_000;
 
+// bun IGNORES `describe(name, { timeout }, fn)` — the options object is
+// accepted and silently DROPPED. Measured: a 50ms suite timeout let a 400ms
+// test pass, so these suites were running under bun's 5s default rather than
+// the timeout they declare. `setDefaultTimeout` is the form bun honours.
+setDefaultTimeout(SUITE_TIMEOUT_MS);
 /**
  * Contract test for scripts/e2e-deploy.sh + scripts/e2e-cleanup.sh (#89, ADR-0007 A3-2).
  *

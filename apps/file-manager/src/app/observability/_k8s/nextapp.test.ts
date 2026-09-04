@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, jest, mock } from 'bun:test';
+import { advanceTimersByTimeAsync } from '../../../../../../tests/helpers/bun-test-helpers';
 
 /**
  * P1.4 (obs-pages plan) / ADR-0038 — the OPT-IN `NextApp` status reader.
@@ -12,18 +13,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  *  - anything else ⇒ `unreachable` (short summary, never a raw error).
  */
 
-const readFileSyncMock = vi.fn<(path: string, enc?: unknown) => string>();
+const readFileSyncMock = mock<(path: string, enc?: unknown) => string>();
 const httpsRequestMock =
-  vi.fn<(url: string, opts: HttpsOptions, cb: (res: FakeResponse) => void) => FakeRequest>();
+  mock<(url: string, opts: HttpsOptions, cb: (res: FakeResponse) => void) => FakeRequest>();
 
-vi.mock('node:fs', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs')>();
+const __knextReal1 = { ...(await import('node:fs')) };
+mock.module('node:fs', () => {
+  const actual = __knextReal1;
   const readFileSync = (p: string, enc?: unknown) => readFileSyncMock(p, enc);
   return { ...actual, readFileSync, default: { ...actual, readFileSync } };
 });
 
-vi.mock('node:https', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:https')>();
+const __knextReal2 = { ...(await import('node:https')) };
+mock.module('node:https', () => {
+  const actual = __knextReal2;
   const request = (url: string, opts: HttpsOptions, cb: (res: FakeResponse) => void) =>
     httpsRequestMock(url, opts, cb);
   return { ...actual, request, default: { ...actual, request } };
@@ -152,7 +155,10 @@ const NEXTAPP_BODY = {
 };
 
 beforeEach(() => {
-  vi.resetModules();
+  // No `resetModules()`: `nextapp.ts` holds no module-level mutable state —
+  // everything this file varies goes through the mocks reset below and the env
+  // vars set after. bun has no equivalent anyway, and re-evaluating a stateless
+  // module was never doing anything here.
   readFileSyncMock.mockReset();
   httpsRequestMock.mockReset();
   process.env.KUBERNETES_SERVICE_HOST = '10.96.0.1';
@@ -162,8 +168,8 @@ beforeEach(() => {
 
 afterEach(() => {
   // Tests that pin the deadline timer opt into fake timers; nobody else sees them.
-  vi.useRealTimers();
-  vi.restoreAllMocks();
+  jest.useRealTimers();
+  jest.restoreAllMocks();
   if (ORIGINAL_SOURCE === undefined) delete process.env.OBSERVABILITY_NEXTAPP_SOURCE;
   else process.env.OBSERVABILITY_NEXTAPP_SOURCE = ORIGINAL_SOURCE;
   if (ORIGINAL_HOST === undefined) delete process.env.KUBERNETES_SERVICE_HOST;
@@ -494,14 +500,14 @@ describe('NextApp reader — the page budget is a real bound, and a spent one st
    *     the ordering is part of the assertion, not an implementation detail.
    */
   it('cuts off a TRICKLING API server at exactly the caller budget, destroying the socket before it settles', async () => {
-    vi.useFakeTimers();
+    jest.useFakeTimers();
     seedServiceAccount();
     // A server that keeps sending data and never ends. `node:https`' `timeout`
     // option is reset by every received chunk, so the inactivity timer alone would
     // hold this connection open forever — only a total-duration bound ends it.
     let trickle: ReturnType<typeof setInterval> | undefined;
     const order: string[] = [];
-    const destroy = vi.fn((_err?: Error) => {
+    const destroy = mock((_err?: Error) => {
       order.push('destroy');
       // A real socket stops producing data once destroyed.
       clearInterval(trickle);
@@ -535,10 +541,10 @@ describe('NextApp reader — the page budget is a real bound, and a spent one st
     // 1 ms short of the caller's budget: the request is in flight and trickling,
     // and NOTHING has happened yet. Any bound not derived from `timeoutMs` fails
     // here (too early) or at the next step (never fires).
-    await vi.advanceTimersByTimeAsync(59);
+    await advanceTimersByTimeAsync(59);
     expect(order).toEqual([]);
 
-    await vi.advanceTimersByTimeAsync(1);
+    await advanceTimersByTimeAsync(1);
 
     expect(await pending).toEqual({
       status: 'source-unavailable',
@@ -553,9 +559,9 @@ describe('NextApp reader — the page budget is a real bound, and a spent one st
   });
 
   it('leaves no armed deadline timer behind after a SUCCESSFUL read', async () => {
-    vi.useFakeTimers();
+    jest.useFakeTimers();
     seedServiceAccount();
-    const destroy = vi.fn();
+    const destroy = mock();
     respondWith(200, NEXTAPP_BODY, (req) => {
       req.destroy = destroy;
     });
@@ -566,16 +572,16 @@ describe('NextApp reader — the page budget is a real bound, and a spent one st
     expect(result.status).toBe('ok');
     // The total-duration timer is armed unconditionally, so a success path that
     // does not clear it leaks a ref'd timer per read…
-    expect(vi.getTimerCount()).toBe(0);
+    expect(jest.getTimerCount()).toBe(0);
     // …which would later destroy an already-completed request.
-    await vi.advanceTimersByTimeAsync(5000);
+    await advanceTimersByTimeAsync(5000);
     expect(destroy).not.toHaveBeenCalled();
   });
 
   it('refuses an oversized response body instead of buffering it without bound', async () => {
     seedServiceAccount();
     const { readNextAppStatus, MAX_RESPONSE_BYTES } = await load();
-    const destroy = vi.fn();
+    const destroy = mock();
     // Two chunks that together exceed the cap: the read must fail closed while the
     // body is still streaming, without ever waiting for `end`.
     const half = Buffer.alloc(Math.ceil(MAX_RESPONSE_BYTES / 2) + 1, 0x20);

@@ -2,7 +2,7 @@
 
 > **Production-ready framework for deploying Next.js applications on Knative with Fluid Compute characteristics.**
 
-Built on the **official Next.js Adapter API** with `output: 'standalone'` — no forks, no vendor build tools — for serverless compatibility with distributed caching (Redis). Runs natively on **Node 20+** (and Bun), with Vercel-Fluid-style cold-start bytecode caching.
+The default build compiles your app with **vinext** (an open-source Vite-based Next.js implementation) into a **single executable** with bytecode baked in — ~61 ms cold starts under scale-to-zero, with distributed caching (Redis). knext also maintains an adapter on the **official Next.js Adapter API** — the suite-verified lane its 778/778 compatibility credential was earned on — and keeps the two claims separate.
 
 ---
 
@@ -159,10 +159,11 @@ The Dockerfile uses a **2-stage build** producing a lean distroless Node image:
 The cache is **populated at build time** and baked into the image, so every pod — including the very first cold start — deserializes precompiled bytecode instead of re-parsing and JIT-compiling. This is the same approach Vercel Fluid uses. It needs no volume, no PVC, and no cluster feature flags.
 
 
-**Running on Bun?** Two mechanisms combine when your app is deployed with `runtime: bun`:
+**On the default (compiled-executable) target** the whole question dissolves: the server bundle is minified and precompiled to bytecode as one unit at build time and baked together with the Bun runtime into a single binary — measured **61 ms** median cold start against the Node standalone's 884 ms, at **higher** steady-state throughput (1103 vs 630 req/s). The per-file bytecode pass that used to run for `runtime: bun` standalone builds is retired: it traded throughput for cold start (537 req/s), and the whole-bundle compile wins both axes.
 
-1. **Build-time bytecode (biggest win):** `kn-next build` precompiles every server-side JavaScript file in the standalone output to Bun (JSC) bytecode — file by file, so the module graph is untouched. On a minimal Next 16.2 app this cut server startup by **~47%** (287ms → 152ms median). It is safe by construction: a bytecode file that is stale, corrupted, or built by a different Bun version is silently ignored and the source runs instead. Trade-offs to know: the build takes longer (about 12 seconds for a ~970-file tree, paid on every `runtime: bun` build), the image grows (the standalone tree roughly 2.5×), and the resulting build only runs under Bun — booting it with Node exits immediately with a clear `FATAL` message telling you to use Bun or rebuild, and switching back to the Node runtime requires rebuilding. Set `KNEXT_BUN_BYTECODE=0` to opt out.
-2. **Runtime transpiler cache:** Bun's transpiler cache is derived from the image-baked `NODE_COMPILE_CACHE` path. Bun persists the *transpiled source* of large modules (roughly 50 KB and up) so a pod skips re-transpiling them — about 20% faster alone, and it picks up whatever the build-time pass didn't cover. **Per-pod only:** it no longer survives scale-to-zero, because the persistent volume that used to carry it across cold starts has been removed. Fail-open: if the cache directory is missing or unwritable, Bun simply serves without it. Set `BUN_RUNTIME_TRANSPILER_CACHE_PATH=0` to opt out.
+**Running the legacy standalone shape on Bun?** One mechanism still applies:
+
+1. **Runtime transpiler cache:** Bun's transpiler cache is derived from the image-baked `NODE_COMPILE_CACHE` path. Bun persists the *transpiled source* of large modules (roughly 50 KB and up) so a pod skips re-transpiling them — about 20% faster alone, and it picks up whatever the build-time pass didn't cover. **Per-pod only:** it no longer survives scale-to-zero, because the persistent volume that used to carry it across cold starts has been removed. Fail-open: if the cache directory is missing or unwritable, Bun simply serves without it. Set `BUN_RUNTIME_TRANSPILER_CACHE_PATH=0` to opt out.
 
 ---
 

@@ -12,11 +12,11 @@
  * on CI runners that don't install Bun or run the build step.
  */
 
+import { describe, expect, it } from 'bun:test';
 import { execFileSync, execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
 
 // Resolve paths relative to this test file so they work from any checkout location.
 const __filename = fileURLToPath(import.meta.url);

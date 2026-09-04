@@ -23,12 +23,19 @@
  *      stack, no `FATAL`.
  */
 
+import { describe, expect, it, setDefaultTimeout } from "bun:test";
+
+// bun IGNORES `describe(name, { timeout }, fn)` — the options object is
+// accepted and silently DROPPED. Measured: a 50ms suite timeout let a 400ms
+// test pass, so these suites were running under bun's 5s default rather than
+// the timeout they declare. `setDefaultTimeout` is the form bun honours.
+setDefaultTimeout(30_000);
+
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
 import {
     CONFIG_NOT_FOUND_CODE,
     formatConfigNotFound,
@@ -172,6 +179,13 @@ function catchBodies(src: string): string[] {
     return out;
 }
 
+/**
+ * Spawns the REAL built CLI as a subprocess. Under full-suite parallelism that
+ * routinely exceeds the 5s default — these passed run alone and failed only in
+ * the whole-package run, which is the signature of a budget problem rather than
+ * a logic one. Raised with the reason attached so the next person does not
+ * "fix" it by trimming the number back.
+ */
 describe("end-to-end: the real deploy entry in a directory with no config", () => {
     const bun = process.env.BUN_PATH ?? "bun";
     const entry = join(cliSrcDir, "deploy.ts");

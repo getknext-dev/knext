@@ -10,6 +10,7 @@
  */
 
 import YAML from "yaml";
+import { DEFAULT_BUILDER_ID } from "../adapters/artifact-contract";
 import type { KnativeNextConfig } from "../config";
 
 /**
@@ -263,8 +264,34 @@ export function buildNextAppCRObject(
           }
         : undefined;
 
-    // Runtime
-    const runtime = config.runtime ?? undefined;
+    // Runtime — emitted for the STANDALONE shape only. For the vinext single
+    // executable the field is meaningless (the runtime is compiled into the
+    // binary; the operator ignores it for that shape), and omitting it also
+    // closes a real upgrade window: with the CRD rolled but the operator pod
+    // not yet updated, an old controller binary forces `bun run server.js`
+    // onto any runtime:"bun" CR regardless of build — which CrashLoops a
+    // single-exec image until the pod rolls. No runtime on the wire, no
+    // window. (Round-trip fidelity yields here to the safer wire contract;
+    // --dry-run output documents the omission via this comment's test.)
+    const resolvedBuild = config.build ?? DEFAULT_BUILDER_ID;
+    const runtime =
+        resolvedBuild === "vinext" ? undefined : (config.runtime ?? undefined);
+
+    // Build (B2/ADR-0048). ALWAYS emitted, resolved to the CLI's default when
+    // the config is silent. The two absences mean different things and must
+    // not be conflated: absence in the CONFIG means "vinext" (ADR-0048 made it
+    // the default builder), while absence on the WIRE permanently means
+    // "turbopack" (ADR-0017 — the only spelling an operator that predates the
+    // field understands). Omitting the field for a default config would hand
+    // the operator a single-executable image while telling it to run the
+    // standalone shape — it would exec `bun run server.js` into an image that
+    // has no server.js and CrashLoop.
+    //
+    // The #548 upgrade-order hazard is accepted and LOUD, not silent: a CRD
+    // that predates "vinext" rejects this CR under --validate=strict (which
+    // every CLI apply passes), and deploy's preflightCRSchema reports the
+    // unknown value before the cluster is touched. Upgrade operator first.
+    const build = resolvedBuild;
 
     const spec: Record<string, unknown> = {
         image,
@@ -287,6 +314,7 @@ export function buildNextAppCRObject(
             ? { healthCheckPath: config.healthCheckPath }
             : {}),
         ...(runtime ? { runtime } : {}),
+        ...(build ? { build } : {}),
         // #93 skew protection: carry the deploy's BUILD_ID so the operator can stamp
         // the `apps.kn-next.dev/build-id` revision label the asset GC resolves against.
         ...(buildId ? { buildId } : {}),

@@ -5,18 +5,18 @@
  * observability-on branch (Prometheus remote-write URL) and the argv shape.
  */
 
+import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const execFileSync = vi.hoisted(() =>
-    vi.fn<(cmd: string, args: readonly string[], opts?: unknown) => Buffer>(
-        () => Buffer.from(""),
-    ),
-);
-vi.mock("node:child_process", async (importOriginal) => {
-    const actual = await importOriginal<typeof import("node:child_process")>();
+const execFileSync = (() =>
+    mock<(cmd: string, args: readonly string[], opts?: unknown) => Buffer>(() =>
+        Buffer.from(""),
+    ))();
+const __knextReal1 = { ...(await import("node:child_process")) };
+mock.module("node:child_process", async () => {
+    const actual = __knextReal1;
     const overridden = { ...actual, execFileSync };
     return {
         ...overridden,

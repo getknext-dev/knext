@@ -17,9 +17,9 @@
  * fails until the guide is authored and stays green only while it stays honest.
  */
 
+import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
 
 // packages/kn-next/src/__tests__ -> repo root is four levels up.
 const REPO_ROOT = join(__dirname, "..", "..", "..", "..");
@@ -117,7 +117,7 @@ describe("docs/runbooks/troubleshooting.md (#313)", () => {
         expect(doc()).toContain("kn-next doctor");
     });
 
-    it.each(GROUNDED_TOKENS)("grounds %s in its cited source", ({
+    it.each([...GROUNDED_TOKENS])("grounds %s in its cited source", ({
         token,
         source,
     }) => {

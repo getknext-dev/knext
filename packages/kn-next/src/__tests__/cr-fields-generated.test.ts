@@ -19,10 +19,10 @@
  * from day one and that number is asserted here — consumers may rely on it.
  */
 
+import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
 import YAML from "yaml";
 import {
     crdSchemaFromCrdObject,

@@ -15,7 +15,7 @@
  * BYO via secretRef is the only mode (#404).
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, mock } from "bun:test";
 import {
     analyzeDsn,
     buildDbBindPatch,
@@ -258,8 +258,8 @@ describe("runDbBind — CR-only write (ADR-0001)", () => {
         });
 
     it("--dry-run prints the patch YAML and performs ZERO exec calls", async () => {
-        const exec = vi.fn();
-        const write = vi.fn();
+        const exec = mock();
+        const write = mock();
         await runDbBind("my-app", opts({ dryRun: true }), { exec, write });
         expect(exec).toHaveBeenCalledTimes(0);
         const printed = write.mock.calls.map((c) => c[0]).join("");
@@ -268,14 +268,13 @@ describe("runDbBind — CR-only write (ADR-0001)", () => {
     });
 
     it("live: reads the CR, issues exactly ONE kubectl patch nextapp --type merge, then verifies the field stuck", async () => {
-        const exec = vi
-            .fn()
+        const exec = mock()
             .mockReturnValueOnce(liveCr()) // kubectl get nextapp -o json (pre-validate)
             .mockReturnValueOnce("") // kubectl patch
             .mockReturnValueOnce(
                 liveCr({ database: { secretRef: { name: "shop-db" } } }),
             ); // kubectl get (post-patch prune guard)
-        const write = vi.fn();
+        const write = mock();
         await runDbBind("my-app", opts({ namespace: "prod" }), {
             exec,
             write,
@@ -302,13 +301,12 @@ describe("runDbBind — CR-only write (ADR-0001)", () => {
     });
 
     it("live: silent-prune guard — a pre-#222 CRD that drops secretRef fails loudly with the upgrade message", async () => {
-        const exec = vi
-            .fn()
+        const exec = mock()
             .mockReturnValueOnce(liveCr()) // pre-validate get
             .mockReturnValueOnce("") // kubectl patch exits 0…
             .mockReturnValueOnce(liveCr()); // …but pruning dropped spec.database.secretRef
         await expect(
-            runDbBind("my-app", opts(), { exec, write: vi.fn() }),
+            runDbBind("my-app", opts(), { exec, write: mock() }),
         ).rejects.toThrow(
             "operator predates spec.database.secretRef — upgrade the operator bundle (kubectl apply the latest install.yaml), then re-run. " +
                 "Upgrade order: operator/CRD first, then CLI (docs/RELEASING.md#upgrade-order)",
@@ -317,7 +315,7 @@ describe("runDbBind — CR-only write (ADR-0001)", () => {
     });
 
     it("live: an envMap DATABASE_URL collision on the cluster blocks the patch (validation runs BEFORE the write)", async () => {
-        const exec = vi.fn().mockReturnValueOnce(
+        const exec = mock().mockReturnValueOnce(
             liveCr({
                 secrets: {
                     envMap: {
@@ -326,7 +324,7 @@ describe("runDbBind — CR-only write (ADR-0001)", () => {
                 },
             }),
         );
-        const write = vi.fn();
+        const write = mock();
         await expect(
             runDbBind("my-app", opts(), { exec, write }),
         ).rejects.toThrow(/spec.database owns DATABASE_URL/);
@@ -335,17 +333,17 @@ describe("runDbBind — CR-only write (ADR-0001)", () => {
     });
 
     it("live: a missing NextApp fails with a deploy-first hint", async () => {
-        const exec = vi.fn(() => {
+        const exec = mock(() => {
             throw new Error("NotFound");
         });
         await expect(
-            runDbBind("my-app", opts(), { exec, write: vi.fn() }),
+            runDbBind("my-app", opts(), { exec, write: mock() }),
         ).rejects.toThrow(/kn-next deploy|--dry-run/);
     });
 
     it("warns on sslmode=disable and prints the pool contract when a DSN is given", async () => {
-        const exec = vi.fn();
-        const write = vi.fn();
+        const exec = mock();
+        const write = mock();
         await runDbBind(
             "my-app",
             opts({

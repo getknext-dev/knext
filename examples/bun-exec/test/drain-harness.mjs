@@ -16,6 +16,7 @@ import {
   createMetricsState,
   drainPending,
   METRICS_CONTENT_TYPE,
+  observeRequest,
   renderMetrics,
 } from '../runtime-contract.mjs';
 
@@ -55,10 +56,22 @@ async function app(req) {
 const appServer = Bun.serve({
   port: PORT,
   async fetch(req) {
-    metrics.requestsTotal++;
+    // Mirrors knext-bun-entry.mjs's middleware, including the status_class +
+    // duration recording (#792) — a harness that counts differently from the
+    // entry is a harness that proves something the binary does not do.
     metrics.inflight++;
+    const startedNs = process.hrtime.bigint();
     try {
-      return await app(req);
+      const res = await app(req);
+      observeRequest(
+        metrics,
+        res?.status ?? 200,
+        Number(process.hrtime.bigint() - startedNs) / 1e9,
+      );
+      return res;
+    } catch (err) {
+      observeRequest(metrics, 500, Number(process.hrtime.bigint() - startedNs) / 1e9);
+      throw err;
     } finally {
       metrics.inflight--;
     }

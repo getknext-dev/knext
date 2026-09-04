@@ -1,7 +1,7 @@
+import { afterEach, describe, expect, it } from "bun:test";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { Registry } from "prom-client";
-import { afterEach, describe, expect, it } from "vitest";
 
 import {
     createMetricsRegistry,

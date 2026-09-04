@@ -33,14 +33,23 @@ jobs:
         with:
           node-version: '24'
 
-      # pnpm is needed ONLY to build + pack (it rewrites @getknext/core's `workspace:^`
-      # dep on @getknext/lib the same way `changeset publish` does). The INSTALL + RUN
-      # legs use plain npm + node — the outside-consumer experience.
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      # bun is needed ONLY to build + pack: it rewrites @getknext/core's
+      # `workspace:^` deps to real versions, which `npm pack` leaves verbatim
+      # (the tarball then fails to install with EUNSUPPORTEDPROTOCOL).
+      #
+      # It is installed to an explicit path and NOT put on PATH, because the
+      # assertion below — no bun anywhere on PATH — is the entire point of this
+      # job. `oven-sh/setup-bun` would satisfy the build and destroy the proof.
+      # The install + run half stays plain npm and plain node, exactly as a
+      # consumer would.
+      - name: Install bun off-PATH (build/pack only)
+        run: |
+          npm install --no-audit --no-fund --prefix "$RUNNER_TEMP/bun-packer" bun@1.4.0
+          echo "KNEXT_BUN=$RUNNER_TEMP/bun-packer/node_modules/.bin/bun" >> "$GITHUB_ENV"
 
       - name: Install workspace dependencies
-        run: pnpm install --frozen-lockfile
+        run: |
+          "$KNEXT_BUN" install --frozen-lockfile
 
       # Guard the core invariant of this job: there must be NO bun on PATH, so the
       # clean install/run cannot accidentally lean on Bun's native TS handling.

@@ -26,10 +26,11 @@
  * turbo zone template must appear in exactly one bucket, so a new template file
  * fails this test until someone decides which it is.
  */
+
+import { describe, expect, it } from "bun:test";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // packages/kn-next/src/__tests__ → repo root
@@ -46,14 +47,23 @@ const CLI_TEMPLATE = join(PKG_ROOT, "templates", "app");
 
 /** Files that must be byte-identical in both template trees. */
 const VERBATIM = [
-    "next-adapter.ts.hbs",
+    "cache-handler.js.hbs",
     "instrumentation-edge-safe.test.ts.hbs",
+    "knext-bun-entry.mjs.hbs",
+    "runtime-contract.mjs.hbs",
     "src/instrumentation.ts.hbs",
     "src/instrumentation-node.ts.hbs",
 ] as const;
 
-/** Files identical once placeholder-bearing lines are dropped. */
-const NORMALIZED = ["standalone-seam-alive.test.ts.hbs"] as const;
+/**
+ * Files identical once placeholder-bearing lines are dropped.
+ *
+ * Empty since ADR-0048. It held `standalone-seam-alive.test.ts.hbs`, whose only
+ * difference between the trees was the standalone path each layout produces.
+ * There is no standalone path any more, so the file was DELETED rather than
+ * un-compared — see SHAPE_FROZEN's note.
+ */
+const NORMALIZED = [] as const;
 
 /** Files that legitimately differ, each with the reason it does. */
 const LAYOUT: Record<string, string> = {
@@ -62,6 +72,8 @@ const LAYOUT: Record<string, string> = {
     "next.config.ts.hbs":
         "the zone template sets a multi-zone basePath; a CLI-created app has none",
     "kn-next.config.ts.hbs": "app name/registry/storage placeholders differ",
+    "vite.config.ts.hbs":
+        "same plugin stack, but the zone variant carries the multi-zone basePath wiring",
     "tsconfig.json.hbs": "the zone tsconfig is tuned for this workspace",
     "src/app/page.tsx.hbs": "the zone page is a workspace-UI demo",
     "src/app/layout.tsx.hbs":
@@ -75,6 +87,8 @@ const LAYOUT: Record<string, string> = {
 const CLI_ONLY: Record<string, string> = {
     "Dockerfile.hbs":
         "the zone app is built by this repo's pipeline; a created app needs its own image recipe",
+    ".dockerignore.hbs":
+        "paired with Dockerfile.hbs — it bounds THAT image recipe's build context, so it is CLI-only for the same reason",
     "public/.gitkeep.hbs":
         "keeps the generated Dockerfile's `COPY … public` layer resolvable before the app has assets",
 };
@@ -94,12 +108,39 @@ const CLI_ONLY: Record<string, string> = {
  * comparing a file whose whole purpose is to be compared.
  */
 const SHAPE_FROZEN = [
-    "next-adapter.ts.hbs",
     "instrumentation-edge-safe.test.ts.hbs",
-    "standalone-seam-alive.test.ts.hbs",
+    "knext-bun-entry.mjs.hbs",
+    "runtime-contract.mjs.hbs",
     "src/instrumentation.ts.hbs",
     "src/instrumentation-node.ts.hbs",
 ] as const;
+
+/*
+ * ADR-0048 changed WHICH files are safety-critical, and the change is recorded
+ * rather than made quietly, because this list exists to make quiet changes
+ * impossible.
+ *
+ * REMOVED — both DELETED from both trees, not moved to LAYOUT:
+ *   `next-adapter.ts.hbs`            the official-adapter hooks are a
+ *                                    webpack/turbopack mechanism. vinext is
+ *                                    Vite/rolldown and never calls them, so the
+ *                                    file would be inert in a scaffolded app.
+ *   `standalone-seam-alive.test.ts.hbs`
+ *                                    guarded module state across webpack layers
+ *                                    in the Next standalone bundle. vinext emits
+ *                                    no standalone tree and no layers.
+ *
+ * ADDED — these now carry what those protected:
+ *   `knext-bun-entry.mjs.hbs`        re-provides the RuntimeContract (health,
+ *   `runtime-contract.mjs.hbs`       :9091 metrics, SIGTERM drain) that vinext
+ *                                    cannot get from adapter hooks. If these
+ *                                    drift between the trees, one scaffolder
+ *                                    emits an app that fails its probes.
+ *
+ * `vite.config.ts.hbs` is deliberately NOT frozen: it is in LAYOUT because the
+ * zone and CLI variants legitimately differ, and its one load-bearing line
+ * (`inlineDynamicImports`) is asserted directly in create-scaffold.test.ts.
+ */
 
 /** Every `.hbs` under `dir`, as POSIX-ish relative paths, sorted. */
 function templateFiles(dir: string): string[] {
@@ -186,9 +227,9 @@ describe("kn-next create — no drift from the turbo zone template (#356/#407)",
         ).toEqual([]);
     });
 
-    it.each(
-        SHAPE_FROZEN,
-    )("%s stays in VERBATIM/NORMALIZED — its bucket is frozen", (rel) => {
+    it.each([
+        ...SHAPE_FROZEN,
+    ])("%s stays in VERBATIM/NORMALIZED — its bucket is frozen", (rel) => {
         const compared = new Set<string>([...VERBATIM, ...NORMALIZED]);
         expect(
             compared.has(rel),
@@ -203,7 +244,9 @@ describe("kn-next create — no drift from the turbo zone template (#356/#407)",
         ).toBe(false);
     });
 
-    it.each(VERBATIM)("%s is byte-identical in both template trees", (rel) => {
+    it.each([
+        ...VERBATIM,
+    ])("%s is byte-identical in both template trees", (rel) => {
         const zone = join(ZONE_TEMPLATE, rel);
         const cli = join(CLI_TEMPLATE, rel);
         expect(existsSync(cli), `${cli} missing`).toBe(true);

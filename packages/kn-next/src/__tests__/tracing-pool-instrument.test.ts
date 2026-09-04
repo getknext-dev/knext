@@ -10,15 +10,15 @@
  *  - connect() is wrapped on the same shared latch.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, mock } from "bun:test";
 import { instrumentPoolForDbWake } from "../adapters/tracing";
 
 describe("instrumentPoolForDbWake — query()", () => {
     it("emits the db_wake metric once on the first query, then treats later queries as warm", async () => {
-        const onDbWake = vi.fn();
+        const onDbWake = mock();
         // Keep a ref to the ORIGINAL spy — instrumentPoolForDbWake replaces
         // pool.query with a wrapper that delegates to this underlying fn.
-        const underlying = vi.fn(async (..._a: unknown[]) => ({ rows: [] }));
+        const underlying = mock(async (..._a: unknown[]) => ({ rows: [] }));
         const pool = { query: underlying };
         instrumentPoolForDbWake(pool, "writer", onDbWake);
 
@@ -31,7 +31,7 @@ describe("instrumentPoolForDbWake — query()", () => {
     });
 
     it("supports the callback overload and still emits + delivers via the callback", async () => {
-        const onDbWake = vi.fn();
+        const onDbWake = mock();
         const pool = {
             query: (
                 _text: string,
@@ -46,7 +46,7 @@ describe("instrumentPoolForDbWake — query()", () => {
             onDbWake,
         );
 
-        const userCb = vi.fn();
+        const userCb = mock();
         (pool.query as unknown as (t: string, cb: unknown) => unknown)(
             "select 1",
             userCb,
@@ -57,10 +57,10 @@ describe("instrumentPoolForDbWake — query()", () => {
     });
 
     it("a rejected first query does NOT consume the latch — the retry re-wakes", async () => {
-        const onDbWake = vi.fn();
+        const onDbWake = mock();
         let attempt = 0;
         const pool = {
-            query: vi.fn(async (..._a: unknown[]) => {
+            query: mock(async (..._a: unknown[]) => {
                 attempt++;
                 if (attempt === 1) throw new Error("cold wake timeout");
                 return { rows: [] };
@@ -78,10 +78,10 @@ describe("instrumentPoolForDbWake — query()", () => {
 
 describe("instrumentPoolForDbWake — connect()", () => {
     it("wraps connect() on the same shared wake latch", async () => {
-        const onDbWake = vi.fn();
+        const onDbWake = mock();
         const pool = {
-            connect: vi.fn(async (..._a: unknown[]) => ({ release() {} })),
-            query: vi.fn(async (..._a: unknown[]) => ({ rows: [] })),
+            connect: mock(async (..._a: unknown[]) => ({ release() {} })),
+            query: mock(async (..._a: unknown[]) => ({ rows: [] })),
         };
         instrumentPoolForDbWake(pool, "writer", onDbWake);
 
@@ -93,11 +93,11 @@ describe("instrumentPoolForDbWake — connect()", () => {
     });
 
     it("a throwing metric emitter never breaks the query (fail-open)", async () => {
-        const onDbWake = vi.fn(() => {
+        const onDbWake = mock(() => {
             throw new Error("emitter boom");
         });
         const pool = {
-            query: vi.fn(async (..._a: unknown[]) => ({ rows: [42] })),
+            query: mock(async (..._a: unknown[]) => ({ rows: [42] })),
         };
         instrumentPoolForDbWake(pool, "reader", onDbWake);
 

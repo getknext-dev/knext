@@ -10,10 +10,10 @@
  * these exports; PK5/#116 froze the public set. This job CATCHES regressions in either
  * (a raw-`.ts` export, a missing dist file, a broken bin) BEFORE the first publish.
  *
- * Why the install is plain `npm` but the PACK uses `pnpm`:
+ * Why the install is plain `npm` but the PACK uses `bun`:
  *   - @getknext/core depends on @getknext/lib AND @getknext/db via `workspace:^` (package.json),
  *     and @getknext/db depends on @getknext/lib. `npm pack` leaves those verbatim, which fails
- *     to install (EUNSUPPORTEDPROTOCOL). `pnpm pack` REWRITES `workspace:^` to a real
+ *     to install (EUNSUPPORTEDPROTOCOL). `bun pm pack` REWRITES `workspace:^` to a real
  *     version range — EXACTLY what `changeset publish` does (release.yml runs under
  *     pnpm). So we pack the way we publish, then install + run the way a CONSUMER would:
  *     plain `npm install`, plain `node`, outside the repo.
@@ -21,7 +21,7 @@
  *     are satisfied by installing ALL THREE tarballs together in the fresh consumer dir.
  *
  * Steps:
- *   1. Build (lib → db → core — each build/types need the prior's dist) and `pnpm pack` all.
+ *   1. Build (lib → db → core — each build/types need the prior's dist) and `bun pm pack` all.
  *   2. Fresh temp dir OUTSIDE the workspace. `npm init -y`, `npm install <all tarballs>`.
  *   3. CLI checks:  `node <bin> --help` (exit 0 + expected output) AND drive the config
  *      `validate` path via the public-ish `./internal/cli-validate` export — a VALID
@@ -54,6 +54,20 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { findWorkspaceProtocolDeps } from './lib/workspace-protocol.mjs';
 import { publishablePackages, readWorkspaceManifests } from './publish-preflight.mjs';
+
+/**
+ * The bun binary used for the BUILD + PACK half of this gate.
+ *
+ * Deliberately an explicit path, not `bun` off PATH. This job's whole purpose is
+ * to prove `npx kn-next` works for a consumer with NO bun present, and it
+ * asserts exactly that — `command -v bun` must find nothing. Putting bun on PATH
+ * to pack would delete the guarantee the job exists to make.
+ *
+ * So CI installs bun somewhere specific and points `KNEXT_BUN` at it. The
+ * install/run half below still uses plain `npm` and plain `node`, exactly as a
+ * consumer would.
+ */
+const BUN = process.env.KNEXT_BUN ?? 'bun';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
@@ -96,9 +110,9 @@ function run(cmd, args, opts = {}) {
  * real version (what `changeset publish` does), while `npm pack` leaves it verbatim and
  * the install fails with EUNSUPPORTEDPROTOCOL.
  */
-function pnpmPack(pkgDir, dest, label) {
+function packWorkspacePackage(pkgDir, dest, label) {
   console.log(`[install-smoke] packing ${label} -> ${dest}`);
-  execFileSync('pnpm', ['pack', '--pack-destination', dest], {
+  execFileSync(BUN, ['pm', 'pack', '--destination', dest], {
     cwd: pkgDir,
     stdio: ['ignore', 'inherit', 'inherit'],
   });
@@ -107,7 +121,7 @@ function pnpmPack(pkgDir, dest, label) {
     .map((f) => join(dest, f))
     .sort()
     .at(-1);
-  if (!tgz || !existsSync(tgz)) finish(FAIL, `pnpm pack produced no .tgz for ${label}`);
+  if (!tgz || !existsSync(tgz)) finish(FAIL, `bun pm pack produced no .tgz for ${label}`);
   return tgz;
 }
 
@@ -130,15 +144,15 @@ try {
   // (the `kn-next db migrate` runner lives in @getknext/db/migrate, #242), so the
   // order is lib → db → core.
   console.log('[install-smoke] building @getknext/lib then @getknext/db then @getknext/core ...');
-  execFileSync('pnpm', ['--filter', '@getknext/lib', 'build'], {
+  execFileSync(BUN, ['run', '--filter', '@getknext/lib', 'build'], {
     cwd: repoRoot,
     stdio: ['ignore', 'inherit', 'inherit'],
   });
-  execFileSync('pnpm', ['--filter', '@getknext/db', 'build'], {
+  execFileSync(BUN, ['run', '--filter', '@getknext/db', 'build'], {
     cwd: repoRoot,
     stdio: ['ignore', 'inherit', 'inherit'],
   });
-  execFileSync('pnpm', ['--filter', '@getknext/core', 'build'], {
+  execFileSync(BUN, ['run', '--filter', '@getknext/core', 'build'], {
     cwd: repoRoot,
     stdio: ['ignore', 'inherit', 'inherit'],
   });
@@ -146,12 +160,12 @@ try {
   libDest = mkdtempSync(join(tmpdir(), 'knext-pack-lib-'));
   dbDest = mkdtempSync(join(tmpdir(), 'knext-pack-db-'));
   coreDest = mkdtempSync(join(tmpdir(), 'knext-pack-core-'));
-  const libTarball = pnpmPack(libPkgDir, libDest, '@getknext/lib');
-  const dbTarball = pnpmPack(dbPkgDir, dbDest, '@getknext/db');
-  const coreTarball = pnpmPack(corePkgDir, coreDest, '@getknext/core');
+  const libTarball = packWorkspacePackage(libPkgDir, libDest, '@getknext/lib');
+  const dbTarball = packWorkspacePackage(dbPkgDir, dbDest, '@getknext/db');
+  const coreTarball = packWorkspacePackage(corePkgDir, coreDest, '@getknext/core');
   // The alias needs no build step — it ships one forwarding shim and a manifest.
   aliasDest = mkdtempSync(join(tmpdir(), 'knext-pack-alias-'));
-  const aliasTarball = pnpmPack(aliasPkgDir, aliasDest, 'kn-next (the npx alias)');
+  const aliasTarball = packWorkspacePackage(aliasPkgDir, aliasDest, 'kn-next (the npx alias)');
 
   // --- 1a. what this gate covers is DERIVED, not enumerated -----------------
   // The `kn-next` alias — the package `npx kn-next` installs — was outside this gate
@@ -374,15 +388,29 @@ try {
   const createOut = `${create.stdout || ''}${create.stderr || ''}`;
   console.log(createOut.trim());
   if (create.status !== 0) finish(FAIL, `kn-next create exited ${create.status} (expected 0)`);
+  // The vinext shape (ADR-0048). `next-adapter.ts` and
+  // `standalone-seam-alive.test.ts` are deliberately NOT here: the official
+  // adapter hooks are a webpack/turbopack mechanism vinext never calls, and the
+  // seam guard existed to catch webpack layering duplicating @getknext/lib
+  // module state — there are no webpack layers on this path.
   for (const rel of [
     'src/instrumentation.ts',
     'src/instrumentation-node.ts',
-    'next-adapter.ts',
+    'vite.config.ts',
+    'knext-bun-entry.mjs',
+    'runtime-contract.mjs',
     'instrumentation-edge-safe.test.ts',
-    'standalone-seam-alive.test.ts',
   ]) {
     if (!existsSync(join(scaffoldDir, rel))) {
       finish(FAIL, `kn-next create did not emit ${rel} — templates missing from the tarball?`);
+    }
+  }
+  // Both halves: the vinext files are present AND the retired ones are gone.
+  // Asserting only presence would pass on a scaffold that still shipped a dead
+  // adapter file into every new app.
+  for (const rel of ['next-adapter.ts', 'standalone-seam-alive.test.ts']) {
+    if (existsSync(join(scaffoldDir, rel))) {
+      finish(FAIL, `kn-next create emitted ${rel}, which is retired — the template still ships it`);
     }
   }
 
@@ -401,7 +429,6 @@ try {
   console.log('[install-smoke] installing + building the scaffolded app ...');
   const scaffoldPkgPath = join(scaffoldDir, 'package.json');
   const scaffoldPkg = JSON.parse(readFileSync(scaffoldPkgPath, 'utf8'));
-  const scaffoldStart = scaffoldPkg.scripts?.start;
   const packedByName = new Map(packed.map((p) => [p.name, p.tgz]));
   let redirected = 0;
   for (const field of ['dependencies', 'devDependencies']) {
@@ -492,192 +519,57 @@ try {
   // server fails here, for the layout the fixture builds, and that pairing is not checked
   // anywhere else.
   const scaffoldDockerfile = readFileSync(join(scaffoldDir, 'Dockerfile'), 'utf8');
-  // `matchAll` + require-exactly-one, not `.match()`. Taking the first is safe only while
-  // the builder stage's bare `WORKDIR /repo` happens not to match; requiring one makes a
-  // second one an error instead of a silent choice between them.
-  const workdirs = [...scaffoldDockerfile.matchAll(/^WORKDIR \/repo\/(.*)$/gm)];
-  if (workdirs.length > 1) {
-    finish(
-      FAIL,
-      `the scaffolded Dockerfile declares ${workdirs.length} \`WORKDIR /repo/...\` lines — ` +
-        'which one names the standalone output is then a guess, so this check refuses to make it',
-    );
-  }
-  const workdir = workdirs[0] ?? null;
-  if (workdir === null) {
-    finish(
-      FAIL,
-      'the scaffolded Dockerfile declares no `WORKDIR /repo/...` — there is no way to tell ' +
-        'where it expects the standalone server, so the build cannot be checked against it',
-    );
-  }
-  const standalonePrefix = workdir[1];
-  // The prefix is contractually slash-terminated, or '' when the app IS the tracing root,
-  // and every consumer CONCATENATES it — the Dockerfile's COPYs, its CMD's
-  // STANDALONE_SERVER_PATH, and the app's `start` script. Assert that directly rather than
-  // letting a path lookup decide it: `path.join` normalises a missing separator back in, so
-  // a prefix that breaks all three of those would still resolve here.
-  if (standalonePrefix !== '' && !standalonePrefix.endsWith('/')) {
-    finish(
-      FAIL,
-      `create emitted a non-slash-terminated standalonePrefix '${standalonePrefix}' — the ` +
-        "Dockerfile's COPYs, its CMD and the app's `start` script all concatenate it, so " +
-        'every one of them would point at a path that does not exist',
-    );
-  }
-  // N6: M13's entire value depends on the fixture producing a NESTED prefix. If it is ever
-  // empty the slash-termination check cannot fire and M13 passes while testing nothing —
-  // the silent degradation this whole gate exists to prevent. It is safe today, but that
-  // is a property of the environment, so assert it rather than inherit it.
-  if (standalonePrefix === '') {
-    finish(
-      FAIL,
-      'the scaffold fixture stopped producing a nested layout — the nested-output pairing ' +
-        'is no longer under test, so a green here would mean nothing',
-    );
-  }
-  // N2: the prefix has FOUR consumers and reading one of them proves one of them. Review
-  // measured the gap: dropping `{{ standalonePrefix }}` from the template's `start` script
-  // survives the entire repo — nothing anywhere asserts the scaffolded app's start script.
-  const expectedServerPath = `.next/standalone/${standalonePrefix}server.js`;
-  const startScript = scaffoldStart ?? '';
-  if (!startScript.includes(expectedServerPath)) {
-    finish(
-      FAIL,
-      `the scaffolded app's \`start\` script does not point at ${expectedServerPath} — it ` +
-        `runs \`${startScript}\`, so \`npm start\` would miss the server this very build emits`,
-    );
-  }
-  if (!scaffoldDockerfile.includes(`${standalonePrefix}server.js`)) {
-    finish(
-      FAIL,
-      `the generated Dockerfile names no ${standalonePrefix}server.js — its CMD would start ` +
-        'a path this build does not produce',
-    );
-  }
-  // Every consumer, derived — not a list. The previous round claimed to read "every
-  // consumer" while reading three of six: the two `COPY --from=builder` lines went unread,
-  // and review measured the silent one. Dropping the prefix from the `static` COPY's
-  // DESTINATION is green across the whole repo, `docker build` succeeds, the container
-  // boots, and every `/_next/static/*` request then 404s because the assets landed beside
-  // the server instead of under it.
+
+  // ── the Dockerfile must name paths THIS build actually produces ───────────
   //
-  // The template ships in the tarball, so the expected count comes from the template's own
-  // interpolations rather than from call sites someone has to keep in step — the decay M6
-  // and M9 exist to stop. A template that legitimately drops a whole COPY moves both counts
-  // together and stays green.
-  const tplDockerfile = readFileSync(
-    join(workDir, 'node_modules', '@getknext', 'core', 'templates', 'app', 'Dockerfile.hbs'),
-    'utf8',
-  );
-  // What this count actually guards, stated narrowly because the first version of it did
-  // not: it compares the SHIPPED TEMPLATE against what `create` RENDERED from it, so it
-  // catches the renderer dropping an interpolation. It cannot catch a change to the
-  // template itself — mutate the template and both sides move together, which is exactly
-  // how M16 survived its first attempt. The template's own consistency is checked
-  // structurally below instead.
-  const declaredPrefixUses = (tplDockerfile.match(/\{\{\s*standalonePrefix\s*\}\}/g) ?? []).length;
-  const emittedPrefixUses = scaffoldDockerfile.split(standalonePrefix).length - 1;
-  if (declaredPrefixUses === 0) {
-    finish(
-      FAIL,
-      'the shipped Dockerfile template interpolates standalonePrefix nowhere — either the ' +
-        'template stopped being prefix-aware or this check is reading the wrong file',
-    );
-  }
-  if (emittedPrefixUses !== declaredPrefixUses) {
-    finish(
-      FAIL,
-      `the generated Dockerfile names the prefix ${emittedPrefixUses}x but its template ` +
-        `interpolates it ${declaredPrefixUses}x — a COPY, WORKDIR or CMD dropped it, so the ` +
-        'image would either fail to build or serve every static asset from the wrong path',
-    );
-  }
-  // Structural rule over the emitted COPYs, derived from each line rather than from a list
-  // of paths someone maintains. A `COPY --from=builder` whose SOURCE is under the app's
-  // prefixed build output must land at a DESTINATION that carries the prefix too —
-  // otherwise the file is copied to the wrong place inside the image. The one documented
-  // exception is the standalone copy itself, which lands at the image root by design.
+  // What this replaces: ~90 lines that derived a `standalonePrefix` from a
+  // `WORKDIR /repo/...` line and checked four consumers of it against
+  // `.next/standalone/<prefix>server.js`. Every part of that is gone — ADR-0048
+  // made vinext the build, so there is no standalone tree, no tracing-root
+  // prefix, and the runtime image WORKDIRs at `/app`.
   //
-  // This is the check that catches the silent break: the image builds, the container
-  // boots, and every `/_next/static/*` request 404s because the assets landed beside the
-  // server instead of under it. A template that removes a whole COPY line stays green,
-  // because there is then no line to disagree with itself.
-  // An unparseable line is a SILENTLY EXEMPT line, and zero matched reads exactly like zero
-  // violations. Review measured the disarm: adding `--chown=node:node` to the `static` COPY
-  // — the ordinary next hardening step, since the template already does `USER node` — makes
-  // the same break M16 catches sail straight through. So count what should parse against
-  // what did, and refuse rather than exempt. `workflow.md`: make the unparseable construct
-  // FAIL rather than pass.
-  // Counted the way DOCKER reads it, not the way this reader's happy path does. The
-  // previous counter demanded column zero, uppercase and a single space, so an indent, a
-  // lowercase keyword or a tab evaded BOTH counters at once — the totals then agreed and
-  // the line was silently exempt again, restoring the exact disarm the refusal was written
-  // to close. All three forms are valid Dockerfile syntax; review confirmed it against
-  // BuildKit's own linter rather than asserting it.
-  const copyFromLines = [...scaffoldDockerfile.matchAll(/^[ \t]*copy[ \t]+--from=/gim)].length;
-  const parsedCopyLines = [
-    ...scaffoldDockerfile.matchAll(/^(COPY --from=builder\s+(\S+)\s+(\S+))\s*$/gm),
-  ].length;
-  if (parsedCopyLines !== copyFromLines) {
+  // The REQUIREMENT survives and is the one worth keeping: the paths `create`
+  // bakes into the Dockerfile must be the paths the build emits. The failure it
+  // exists to catch (#857) is a build that exits 0 while the image's entry
+  // points at nothing — which nobody discovers until `docker run` on a cluster.
+  //
+  // Asserted against the REAL build output below, not against the template, so
+  // a template and a builder that drift apart cannot both be wrong in the same
+  // way and pass.
+  const scaffoldOutputServer = join(scaffoldDir, '.output', 'server', 'index.mjs');
+  if (!existsSync(scaffoldOutputServer)) {
     finish(
       FAIL,
-      `${copyFromLines - parsedCopyLines} \`COPY --from=\` line(s) in the generated ` +
-        'Dockerfile are in a form this check cannot read — a flag, a continuation, extra ' +
-        'arguments, or a `--from=` naming a stage other than `builder`. An unreadable line ' +
-        'would be silently exempt, so this refuses rather than guesses',
+      'the scaffolded build produced no .output/server/index.mjs — the image CMD would ' +
+        'start a path this build does not emit (the #857 shape: build exits 0, entry missing)',
     );
   }
-  for (const [, line, rawSrc, rawDest] of scaffoldDockerfile.matchAll(
-    /^(COPY --from=builder\s+(\S+)\s+(\S+))\s*$/gm,
-  )) {
-    // Trailing slashes are cosmetic in a COPY path and legitimately vary, so normalise
-    // before comparing rather than letting `/` decide a pass.
-    const src = rawSrc.replace(/\/+$/, '');
-    const dest = rawDest.replace(/\/+$/, '');
-    const sourceIsPrefixed = src.includes(`/${standalonePrefix}`);
-    // Keyed on the copy BEING the standalone output, not on where it happens to land.
-    // The previous draft exempted any prefixed source whose destination was `./`, which is
-    // not what the comment claimed and let the very break this rule exists for escape one
-    // token away: point the `static` COPY at `./` and it unpacks into the image root, the
-    // container boots, and every `/_next/static/*` request 404s.
-    const isStandaloneCopy = src.endsWith(`/${standalonePrefix}.next/standalone`);
-    // DERIVE the destination from the source rather than asking whether the prefix appears
-    // anywhere in it. `includes` is a substring test, and a destination can carry the prefix
-    // while still putting the file in the wrong place — copying `.next/static` to the prefix
-    // DIRECTORY passes a substring test and lands the assets a level up from where the
-    // server looks for them. A prefixed source must land at the same path under the image
-    // root, and that is a comparison, not a search.
-    const expectedDest = `./${src.replace(/^\/repo\//, '')}`.replace(/\/+$/, '');
-    // The standalone copy is not EXEMPT — it has a DIFFERENT expected destination: the
-    // image root, by design. Exempting it left the one COPY that actually places server.js
-    // unchecked by this rule and by anything else in the repo, which is the inverse of the
-    // break M18 covers. `dest` is already trailing-slash-normalised, so `./` and `.` agree.
-    const wantedDest = isStandaloneCopy ? '.' : expectedDest;
-    if (sourceIsPrefixed && dest !== wantedDest) {
-      finish(
-        FAIL,
-        `the generated Dockerfile copies a prefixed source to the wrong destination: ` +
-          `\`${line.trim()}\` should land at \`${wantedDest}\` — inside the image that ` +
-          'file lands somewhere the server does not look, which builds and boots cleanly ' +
-          'and then 404s at runtime',
-      );
-    }
-  }
-  const scaffoldServer = join(scaffoldDir, '.next', 'standalone', `${standalonePrefix}server.js`);
-  if (!existsSync(scaffoldServer)) {
+  const scaffoldOutputPublic = join(scaffoldDir, '.output', 'public');
+  if (!existsSync(scaffoldOutputPublic)) {
     finish(
       FAIL,
-      `the scaffolded app built but emitted no standalone server at ` +
-        `.next/standalone/${standalonePrefix}server.js — the Dockerfile \`create\` generated ` +
-        'COPYs from exactly that path, so the image would have nothing to run (lost ' +
-        '`output: standalone`, or computed the wrong standalonePrefix?)',
+      'the scaffolded build produced no .output/public — a no-storage pod would boot and ' +
+        '404 every static asset',
     );
   }
-  console.log(
-    `[install-smoke] the scaffolded app installs, builds, and emits a standalone server where ` +
-      `its own Dockerfile expects it (.next/standalone/${standalonePrefix}server.js)`,
-  );
+  // Both halves: the Dockerfile ships the asset root the build emits, AND it no
+  // longer references the standalone tree this build never produces. Checking
+  // only the first would pass on a template carrying dead `.next/standalone`
+  // COPYs beside the live ones.
+  if (!/COPY\s+[^\n]*\.output\/public/.test(scaffoldDockerfile)) {
+    finish(
+      FAIL,
+      'the scaffolded Dockerfile COPYs no .output/public — the image would serve no static ' +
+        'assets at all',
+    );
+  }
+  if (/\.next\/standalone/.test(scaffoldDockerfile)) {
+    finish(
+      FAIL,
+      'the scaffolded Dockerfile still references .next/standalone, which this build does ' +
+        'not produce — leftover from the pre-vinext template',
+    );
+  }
 
   // --- 3b. CLI: exercise the config `validate` path (zero-exit assertion) ----
   // The deploy bin's validate path needs a built Next app + cluster, so it cannot give
@@ -750,6 +642,49 @@ try {
     ...publishedEntrypoints(p.dir),
     hasExports: JSON.parse(readFileSync(join(p.dir, 'package.json'), 'utf8')).exports !== undefined,
   }));
+  // --- 5a. are we testing what we PACKED? --------------------------------
+  //
+  // The subpath list above comes from the WORKSPACE manifests; the resolution
+  // below happens against the INSTALLED tree. If npm substituted a cached
+  // registry copy — trivially possible, since the local packages carry the same
+  // version as the published ones — those two disagree and the failure surfaces
+  // as "subpath X is not defined by exports", which points at the manifest
+  // rather than at the substitution. That is a confusing error about the wrong
+  // thing, and it cost real time.
+  //
+  // So compare first, and say plainly which package is not the one under test.
+  for (const entry of entries) {
+    if (!entry.hasExports) continue;
+    const installedManifest = join(
+      workDir,
+      'node_modules',
+      ...entry.name.split('/'),
+      'package.json',
+    );
+    if (!existsSync(installedManifest)) {
+      finish(FAIL, `${entry.name} is not installed at all — nothing to resolve subpaths against`);
+    }
+    const installed = JSON.parse(readFileSync(installedManifest, 'utf8'));
+    const sourcePkg = JSON.parse(
+      readFileSync(join(packed.find((p) => p.name === entry.name).dir, 'package.json'), 'utf8'),
+    );
+    const installedSubs = Object.keys(installed.exports ?? {}).sort();
+    const sourceSubs = Object.keys(sourcePkg.exports ?? {}).sort();
+    const missing = sourceSubs.filter((k) => !installedSubs.includes(k));
+    if (missing.length > 0) {
+      finish(
+        FAIL,
+        `the installed ${entry.name} is NOT the one this gate packed — it is missing ` +
+          `${missing.length} exports subpath(s) that the workspace declares ` +
+          `(${missing.slice(0, 3).join(', ')}${missing.length > 3 ? ', …' : ''}). ` +
+          `installed version ${installed.version}, workspace version ${sourcePkg.version}. ` +
+          'npm most likely resolved a cached registry copy at the same version instead of ' +
+          'the local tarball, which means this step has been testing the last published ' +
+          'release rather than the working tree.',
+      );
+    }
+  }
+
   // @getknext/db's subpaths include ./migrate — this proves `@getknext/db/migrate` (the
   // `kn-next db migrate` runner) resolves to real JS in a clean install.
   const allSubpaths = entries.filter((e) => e.hasExports).flatMap((e) => e.subpaths);

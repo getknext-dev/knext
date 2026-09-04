@@ -32,8 +32,8 @@ import { parseArgs } from "node:util";
 import { createLogger } from "../utils/logger";
 import { handleUsageError, UsageError } from "./shared";
 import {
-    findTracingRoot,
     NO_LOCKFILE_INSTALL,
+    resolveTracingRoot,
     shadowingConfigFor,
 } from "./tracing-root";
 
@@ -112,15 +112,26 @@ export interface Layout {
     installCmd: string;
 }
 
-/** Resolve the layout facts every emitted path depends on, once. */
-export function resolveLayout(appDir: string): Layout {
+/**
+ * Resolve the layout facts every emitted path depends on, once.
+ *
+ * Goes through the same resolver `deploy`/`preview` use (#644, #861), so an
+ * explicit `outputFileTracingRoot` moves what `create` bakes and what the build
+ * is rooted at together. Calling the walk directly is what let them disagree:
+ * pinning the root moved the deploy context while the Dockerfile kept the
+ * prefix inferred from the unpinned one.
+ *
+ * `create` still tolerates the no-lockfile case that `requireBuildContext`
+ * rejects: an app is scaffolded BEFORE anything is installed, and with no
+ * marker anywhere Next traces from the app directory itself — which is exactly
+ * what the null root falls back to here.
+ */
+export function resolveLayout(
+    appDir: string,
+    warn?: (message: string) => void,
+): Layout {
     const app = resolve(appDir);
-    // Same walk `deploy`/`preview` use for the docker build context (#644).
-    // `create` tolerates the no-lockfile case that `requireBuildContext`
-    // rejects: an app is scaffolded BEFORE anything is installed, and with no
-    // lockfile anywhere Next traces from the app directory itself — which is
-    // exactly what the null root falls back to here.
-    const { root: found, installCmd } = findTracingRoot(app);
+    const { root: found, installCmd } = resolveTracingRoot(app, warn);
     const root = found ?? app;
     const rel = relative(root, app);
     const standalonePrefix =
@@ -330,9 +341,9 @@ Usage:
 Emits the SAME guarded-instrumentation shape the in-repo app template does
 (ADR-0031/#407): an edge-clean src/instrumentation.ts, the Node-only
 src/instrumentation-node.ts wiring the globalThis-anchored @getknext/lib seams,
-next-adapter.ts + adapterPath (the platform-owned edge IgnorePlugin fence), and
-both per-app guards (instrumentation-edge-safe / standalone-seam-alive) plus the
-\`test:seam\` script that runs the latter for real.
+and the per-app instrumentation-edge-safe guard. (The old standalone-seam-alive
+guard and its test:seam script are retired — the webpack layering they caught
+cannot occur in the vinext single-graph build.)
 
 Options:
   --name <name>   App name (default: the directory name)
@@ -344,9 +355,7 @@ Options:
 /**
  * The scaffold's parting words (UX ledger row 3a). The persona is a Next.js
  * developer with zero cluster knowledge, so this speaks their language: the
- * real next steps in the order they will type them. The seam guard is still
- * mentioned — last, and in plain words — because it matters before a
- * production build ships, not on day one.
+ * real next steps in the order they will type them.
  */
 export function partingLine(dir: string): string {
     const cdPrefix = dir === "." ? "" : `cd ${dir} && `;
@@ -357,9 +366,8 @@ export function partingLine(dir: string): string {
         "\nWhen you are ready to put it on your cluster:\n" +
         "  kn-next doctor           # checks your cluster connection and setup\n" +
         "  kn-next deploy           # builds the image and ships the app\n" +
-        "\nBefore you ship real traffic, run `npm run test:seam` once — it " +
-        "double-checks\nthat the app's built-in tracing still works after a " +
-        "production build.\n"
+        "\nBefore you ship real traffic, run `npm test` once — it checks the\n" +
+        "app's built-in guards against a production build.\n"
     );
 }
 

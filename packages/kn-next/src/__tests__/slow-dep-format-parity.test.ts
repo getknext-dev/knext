@@ -1,4 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+    afterEach,
+    beforeEach,
+    describe,
+    expect,
+    it,
+    jest,
+    mock,
+    spyOn,
+} from "bun:test";
 // Deliberately a cross-package RELATIVE import, not a subpath: the emitter is
 // internal to @getknext/lib (no new public subpath, no public-API change), and
 // this test exists precisely to hold the two copies to one format.
@@ -17,18 +26,18 @@ import { logSlowDep as coreLogSlowDep } from "../adapters/slow-dep-log.js";
  * all three readings in one comparable shape.
  */
 describe("slow-dep line format parity across the two emitters", () => {
-    let warn: ReturnType<typeof vi.fn>;
+    let warn: ReturnType<typeof mock>;
 
     beforeEach(() => {
-        warn = vi.fn();
-        vi.spyOn(console, "warn").mockImplementation(
+        warn = mock();
+        spyOn(console, "warn").mockImplementation(
             warn as unknown as typeof console.warn,
         );
         delete process.env.SLOW_DEP_LOG_MS;
     });
 
     afterEach(() => {
-        vi.restoreAllMocks();
+        jest.restoreAllMocks();
     });
 
     it("produces byte-identical lines for the same input", () => {

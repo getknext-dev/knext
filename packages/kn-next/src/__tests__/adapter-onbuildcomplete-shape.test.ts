@@ -15,7 +15,7 @@
  * the whole compat run right after the tarball-install fix finally let builds
  * happen. Diagnostics must NEVER crash the build: count whatever shape is present.
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, jest, mock, spyOn } from "bun:test";
 import adapter from "../adapters/next-adapter";
 
 /** The ctx type the adapter declares — fixtures are deliberately cast across API revisions. */
@@ -49,11 +49,11 @@ function baseCtx() {
 
 describe("next-adapter onBuildComplete — ctx shape tolerance (#147)", () => {
     afterEach(() => {
-        vi.restoreAllMocks();
+        jest.restoreAllMocks();
     });
 
     it("counts the v16.2.x shape via the typed ctx.routing (ctx.routes ABSENT)", async () => {
-        const logSpy = vi.spyOn(console, "log");
+        const logSpy = spyOn(console, "log");
         const ctx = {
             ...baseCtx(),
             nextVersion: "16.2.0",
@@ -70,9 +70,15 @@ describe("next-adapter onBuildComplete — ctx shape tolerance (#147)", () => {
         };
         // The exact crash of the first real compat builds:
         // TypeError: Cannot read properties of undefined (reading 'headers')
+        // `.resolves.toBeUndefined()`, not `.resolves.not.toThrow()`.
+        // bun's `toThrow` requires a FUNCTION, so chaining it after
+        // `.resolves` — which yields the resolved VALUE — fails on the
+        // matcher rather than on the promise. The property meant here is
+        // "this settles instead of rejecting", and asserting the resolved
+        // value says that directly.
         await expect(
             adapter.onBuildComplete?.(ctx as unknown as OnBuildCompleteCtx),
-        ).resolves.not.toThrow();
+        ).resolves.toBeUndefined();
         // The counts must come from ctx.routing — and actually count it.
         const logged = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
         expect(logged).toContain("routing counts (ctx.routing)");
@@ -80,7 +86,7 @@ describe("next-adapter onBuildComplete — ctx shape tolerance (#147)", () => {
     });
 
     it("still counts the v16.0.x shape (legacy ctx.routes present) — peerDep >=16.0.0", async () => {
-        const logSpy = vi.spyOn(console, "log");
+        const logSpy = spyOn(console, "log");
         const ctx = {
             ...baseCtx(),
             nextVersion: "16.0.3",
@@ -93,18 +99,18 @@ describe("next-adapter onBuildComplete — ctx shape tolerance (#147)", () => {
         };
         await expect(
             adapter.onBuildComplete?.(ctx as unknown as OnBuildCompleteCtx),
-        ).resolves.not.toThrow();
+        ).resolves.toBeUndefined();
         const logged = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
         expect(logged).toContain("routing counts (ctx.routes)");
         expect(logged).toMatch(/redirects\s*: 1/);
     });
 
     it("does not throw even when NEITHER routes nor routing is present (diagnostics never kill a build)", async () => {
-        const logSpy = vi.spyOn(console, "log");
+        const logSpy = spyOn(console, "log");
         const ctx = baseCtx();
         await expect(
             adapter.onBuildComplete?.(ctx as unknown as OnBuildCompleteCtx),
-        ).resolves.not.toThrow();
+        ).resolves.toBeUndefined();
         const logged = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
         expect(logged).toContain("routing counts (none present)");
     });

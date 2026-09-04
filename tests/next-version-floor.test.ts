@@ -1,6 +1,7 @@
+import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { workspaceGlobs } from '../scripts/lib/workspace-globs.mjs';
 import { REPO_ROOT, WORKSPACE_DIRS, workspaceManifests } from './helpers/workspace-manifests';
 
 /**
@@ -58,10 +59,13 @@ function gte(a: Version, b: Version): boolean {
 }
 
 describe('#579 — the workspace `next` floor is 16.2.11', () => {
-  it('scans the same workspace globs pnpm-workspace.yaml declares', () => {
-    const yaml = readFileSync(resolve(REPO_ROOT, 'pnpm-workspace.yaml'), 'utf8');
-    const globs = [...yaml.matchAll(/^\s*-\s*'([^']+)'/gm)].map((m) => m[1]);
-    expect(globs.sort()).toEqual(WORKSPACE_DIRS.map((d) => `${d}/*`).sort());
+  it('scans the same workspace globs the repo declares', () => {
+    // Read through the shared helper, not by re-parsing the declaration here.
+    // Three guards make this same "hardcoded list still matches the workspace"
+    // check, and each parsed `pnpm-workspace.yaml` its own way — so removing
+    // pnpm broke all three separately, and nothing stopped them disagreeing
+    // about what the workspace IS.
+    expect(workspaceGlobs().sort()).toEqual(WORKSPACE_DIRS.map((d) => `${d}/*`).sort());
   });
 
   it('finds at least one workspace member depending on next', () => {
@@ -86,7 +90,11 @@ describe('#579 — the workspace `next` floor is 16.2.11', () => {
   });
 
   it('resolves no next below 16.2.11 anywhere in the lockfile', () => {
-    const lock = readFileSync(resolve(REPO_ROOT, 'pnpm-lock.yaml'), 'utf8');
+    // `bun.lock` since the repo left pnpm. The scan is unchanged because both
+    // formats spell a resolved dependency the same way — `name@x.y.z` — so this
+    // guard's subject (no `next` below the floor resolves ANYWHERE) survives the
+    // format change intact.
+    const lock = readFileSync(resolve(REPO_ROOT, 'bun.lock'), 'utf8');
     const resolved = [...new Set([...lock.matchAll(/\bnext@(\d+\.\d+\.\d+)\b/g)].map((m) => m[1]))];
     expect(resolved.length).toBeGreaterThan(0);
     expect(resolved.filter((v) => !gte(floorOf(v), FLOOR))).toEqual([]);

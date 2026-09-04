@@ -207,10 +207,9 @@ export default async function ScalingPage() {
 
   const [
     replicas,
-    coldStartRate,
-    coldStartP50,
-    coldStartP99,
-    warmStartRatio,
+    startsObserved,
+    startupP50,
+    startupMax,
     dbWakeRate,
     dbWakeP50,
     dbWakeP99,
@@ -218,10 +217,9 @@ export default async function ScalingPage() {
     inFlight,
   ] = await Promise.all([
     range(queries.replicas),
-    range(queries.coldStartRate),
-    range(queries.coldStartP50),
-    range(queries.coldStartP99),
-    range(queries.warmStartRatioPct),
+    range(queries.startsObserved),
+    range(queries.startupP50),
+    range(queries.startupMax),
     range(queries.dbWakeRateByRole),
     range(queries.dbWakeP50ByRole),
     range(queries.dbWakeP99ByRole),
@@ -231,10 +229,9 @@ export default async function ScalingPage() {
 
   const results: PromResult<unknown>[] = [
     replicas,
-    coldStartRate,
-    coldStartP50,
-    coldStartP99,
-    warmStartRatio,
+    startsObserved,
+    startupP50,
+    startupMax,
     dbWakeRate,
     dbWakeP50,
     dbWakeP99,
@@ -279,13 +276,12 @@ export default async function ScalingPage() {
       ];
 
   const coldStartRows: PanelRow[] = [
-    { label: 'Cold starts /s', display: matrixDisplay(coldStartRate, (v) => formatNumber(v, 2)) },
-    { label: 'Cold start p50', display: matrixDisplay(coldStartP50, formatMillis) },
-    { label: 'Cold start p99', display: matrixDisplay(coldStartP99, formatMillis) },
-    {
-      label: 'Warm start ratio',
-      display: matrixDisplay(warmStartRatio, (v) => formatNumber(v, 1, ' %')),
-    },
+    // Gauge-derived, matching the shipped dashboard: the entry reports each
+    // pod's startup duration once; there is no per-request cold/warm counter,
+    // so a rate or a warm-ratio is not computable from the emitted set.
+    { label: 'Starts observed', display: matrixDisplay(startsObserved, (v) => formatNumber(v, 0)) },
+    { label: 'Startup p50', display: matrixDisplay(startupP50, formatMillis) },
+    { label: 'Startup max', display: matrixDisplay(startupMax, formatMillis) },
   ];
 
   const dbWakeRows: PanelRow[] = [
@@ -299,7 +295,7 @@ export default async function ScalingPage() {
       <h1>Cold start &amp; scaling</h1>
       <p>
         The scale-to-zero lifecycle of this app over the last hour: how many replicas are running,
-        how often and how slowly it cold starts (<code>knext_coldstart_*</code>), and how long the
+        how slowly it starts (<code>knext_bunexec_startup_duration_seconds</code>), and how long the
         database takes to wake per pool role (<code>knext_db_wake_*</code>). Values marked “
         {NO_DATA}” have produced no sample — that is not the same as a measured zero. Every query is
         scoped to this app (<code>{app}</code>).
@@ -350,7 +346,7 @@ export default async function ScalingPage() {
 
       <Panel
         title="Cold starts"
-        note="Warm start ratio is derived (1 − cold starts ÷ requests over 5m): how rare a cold start is per served request, not a per-request warm/cold attribution."
+        note="Gauge-derived from each pod's reported startup duration — there is no per-request cold/warm counter, so no rate or warm-ratio is shown."
         rows={coldStartRows}
       />
       <Panel title="Database wake (by pool role)" rows={dbWakeRows} />

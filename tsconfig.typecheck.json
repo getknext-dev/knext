@@ -85,7 +85,13 @@
     // config's `globals: true`. If a future root test does rely on the globals,
     // add a `/// <reference types="vitest/globals" />` to that file instead of
     // unpinning typeRoots.
-    "types": ["node"]
+    // `bun` alongside `node`: the root `tests/` tree now runs under `bun test`
+    // (#871), so it imports `bun:test`. An explicit `types` array turns OFF
+    // automatic @types discovery, which is why installing `@types/bun` alone
+    // changed nothing — 94 `Cannot find module 'bun:test'` errors, and 84 more
+    // implicit-any errors cascading from the untyped `mock()` callbacks behind
+    // them.
+    "types": ["node", "bun"]
   },
   "include": [
     "tests/**/*.ts",

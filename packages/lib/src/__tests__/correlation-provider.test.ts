@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'bun:test';
 
 /**
  * #346 — the correlation id must land on in-request log lines WITHOUT any

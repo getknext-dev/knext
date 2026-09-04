@@ -1,13 +1,8 @@
-import Redis from 'ioredis';
+import { createRedisClient, ensureDialable } from '@getknext/lib';
 import { NextResponse } from 'next/server';
 import '../../../../cache-init';
 // Reuse the single auth helper from the invalidate route — DELETE here is a
 // mutating endpoint (clears cache events) and must not be open (E4-2, security.md).
-import {
-  attachQuietErrorListener,
-  ensureDialable,
-  quietRedisOptions,
-} from '../../../../lib/redis-quiet';
 import { withRedMetrics } from '../../_metrics/registry';
 import { isAuthorized } from '../invalidate/auth';
 
@@ -32,15 +27,21 @@ interface CacheEvent {
 
 const REDIS_URL = process.env.REDIS_URL;
 const KEY_PREFIX = process.env.REDIS_KEY_PREFIX || 'kn-next';
-let redisClient: Redis | null = null;
+let redisClient: ReturnType<typeof createRedisClient> | null = null;
 
 if (REDIS_URL) {
-  // #802: lazy (no dial at module evaluation), listened-to (ioredis prints
-  // `Unhandled error event` only when a client has none), and bounded (the
+  // #802: lazy (no dial at module evaluation), listened-to, and bounded (the
   // retry gives up instead of looping for the pod's life). Recovery is on
-  // demand — see `ensureDialable` in getEvents/DELETE.
-  redisClient = new Redis(REDIS_URL, quietRedisOptions());
-  attachQuietErrorListener(redisClient, 'cache-events');
+  // demand — see `ensureDialable` in getEvents/DELETE. The selector attaches
+  // the error listener itself, so there is no second call here.
+  //
+  // Bun-native when running on Bun, ioredis under Node. This used to construct
+  // ioredis directly against a LOCAL copy of the quiet helpers, which had
+  // already drifted from the shared one: the copy only knew how to attach a
+  // listener via `.on()`, and Bun's client has no `.on()` at all — so on the
+  // runtime this app actually targets it attached nothing and the #802 log
+  // noise came back silently.
+  redisClient = createRedisClient(REDIS_URL, 'cache-events');
 }
 
 async function getEvents(): Promise<CacheEvent[]> {
@@ -48,7 +49,7 @@ async function getEvents(): Promise<CacheEvent[]> {
     try {
       ensureDialable(redisClient);
       const items = await redisClient.lrange(`${KEY_PREFIX}:cache-events`, 0, 50);
-      return items.map((i) => JSON.parse(i));
+      return items.map((i: string) => JSON.parse(i) as CacheEvent);
     } catch (e) {
       console.error('[Cache Events] Error reading from Redis:', e);
       return [];

@@ -1,7 +1,7 @@
+import { describe, expect, it } from 'bun:test';
 import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 import {
   classifyTriggerShape,
   type TriageEntry,
@@ -46,7 +46,23 @@ import {
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 
 /** Categories that are claims about the `on:` block, so they are measurable. */
-const TRIGGER_CATEGORIES = new Set(['no-pull-request-trigger', 'paths-scoped-pull-request']);
+/** The classifier's own return union — restating it here would let the two drift. */
+type TriggerShape = ReturnType<typeof classifyTriggerShape>;
+/** The union a triage entry may record. It OVERLAPS `TriggerShape` rather than
+ *  containing it — the classifier can report shapes no entry names, and entries
+ *  carry categories that are not claims about `on:` at all. */
+type TriageCategory = TriageEntry['category'];
+
+// Typed as the INTERSECTION, which is what these two names actually have to be:
+// a value the classifier can return AND a category an entry can record. Either
+// half alone is too weak — `TriggerShape` would not fit the Set below, and
+// `TriageCategory` would let a non-trigger category in and silently widen the
+// filter to entries this suite cannot measure.
+const TRIGGER_SHAPED: readonly (TriggerShape & TriageCategory)[] = [
+  'no-pull-request-trigger',
+  'paths-scoped-pull-request',
+];
+const TRIGGER_CATEGORIES: ReadonlySet<TriageCategory> = new Set<TriageCategory>(TRIGGER_SHAPED);
 
 const triggerEntries: TriageEntry[] = UNCONVERTED_GUARD_TRIAGE.filter((entry) =>
   TRIGGER_CATEGORIES.has(entry.category),
@@ -92,7 +108,7 @@ describe('the unconverted-guard triage checks itself', () => {
     ).toEqual([]);
   });
 
-  it.each(UNCONVERTED_GUARD_TRIAGE)('$test — the guard and its workflow exist', (entry) => {
+  it.each([...UNCONVERTED_GUARD_TRIAGE])('$test — the guard and its workflow exist', (entry) => {
     // A triage entry naming a file that was renamed or deleted is an exemption
     // for something that is no longer there.
     expect(existsSync(resolve(REPO_ROOT, entry.test)), `${entry.test} is missing`).toBe(true);
@@ -104,7 +120,10 @@ describe('the unconverted-guard triage checks itself', () => {
   it.each(triggerEntries)('$test — the recorded reason is the real one', (entry) => {
     // The whole point: the category is not taken on trust, it is derived from
     // the workflow and compared.
-    expect(classifyTriggerShape(resolve(REPO_ROOT, entry.workflow))).toBe(entry.category);
+    // `category` is the wider triage union; this list is filtered to the two
+    // members that ARE trigger shapes, so the narrow is sound rather than a cast.
+    const category = entry.category as TriggerShape;
+    expect(classifyTriggerShape(resolve(REPO_ROOT, entry.workflow))).toBe(category);
   });
 
   // There was a fourth `it.each` here asserting

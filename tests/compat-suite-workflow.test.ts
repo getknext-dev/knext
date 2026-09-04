@@ -1,6 +1,6 @@
+import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 import { summarize } from '../scripts/e2e-summary.mjs';
 import {
   COMMAND_POSITION_CHARS,
@@ -103,17 +103,31 @@ const BUN_SUMMARIZE_META = {
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 const WORKFLOW_PATH = resolve(REPO_ROOT, '.github/workflows/test-e2e-deploy.yml');
-const ROOT_PKG_PATH = resolve(REPO_ROOT, 'package.json');
+const _ROOT_PKG_PATH = resolve(REPO_ROOT, 'package.json');
 
-/** The pnpm version the repo pins via `packageManager` (e.g. "10.4.1"). */
+/**
+ * The pnpm version this workflow pins for the UPSTREAM Next.js harness.
+ *
+ * It used to read knext's own `packageManager` field, because the two had to
+ * agree: the action cannot resolve `packageManager` from the checkout path, so
+ * the workflow pinned it explicitly and this kept that literal honest.
+ *
+ * knext no longer uses pnpm at all — `packageManager` is `bun@…` — so there is
+ * nothing in the repo left to anchor against, and pretending otherwise would
+ * just re-couple a workflow to a field it has no relationship with. The
+ * reference is now the workflow's OWN first pin, which keeps the property that
+ * actually matters here: every `pnpm/action-setup` step agrees, so a second
+ * version (next.js's 9.6.0) cannot be introduced by one step and missed.
+ */
 function pinnedPnpmVersion(): string {
-  const pkg = JSON.parse(readFileSync(ROOT_PKG_PATH, 'utf8')) as {
-    packageManager?: string;
-  };
-  const pm = pkg.packageManager ?? '';
-  const match = pm.match(/^pnpm@(\d+\.\d+\.\d+)$/);
-  expect(match, `package.json packageManager should pin pnpm, got "${pm}"`).not.toBeNull();
-  return (match as RegExpMatchArray)[1];
+  const versions = pnpmSetupVersions();
+  expect(
+    versions.length,
+    'test-e2e-deploy.yml has no pnpm/action-setup step — this guard has no subject',
+  ).toBeGreaterThan(0);
+  const first = versions[0];
+  expect(first, 'the first pnpm/action-setup step must pin a version').not.toBeNull();
+  return String(first);
 }
 
 /**
@@ -194,12 +208,12 @@ describe('compat-suite workflow pnpm pin (test-e2e-deploy.yml)', () => {
     });
   });
 
-  it('the pinned pnpm version matches the repo packageManager field', () => {
+  it('every pnpm/action-setup step pins the SAME version', () => {
     const expected = pinnedPnpmVersion();
     pnpmSetupVersions().forEach((version, idx) => {
       expect(
         version,
-        `pnpm version in step #${idx + 1} must match packageManager pnpm@${expected}`,
+        `pnpm version in step #${idx + 1} must match the first step's pin (${expected}) — a second version here is how next.js's 9.6.0 gets in unnoticed`,
       ).toBe(expected);
     });
   });
@@ -2393,7 +2407,7 @@ describe('compat-suite fail-on-red gate — revocation teeth (test-e2e-deploy.ym
     // First, because every per-tooth assertion below would pass over an empty
     // finding list if the parse had matched nothing at all.
     expect(teeth.branchesFound.slice().sort(), 'the audit did not locate all three teeth').toEqual(
-      ['failed-or-not-run', 'missing-summary', 'truncated'].sort(),
+      (['failed-or-not-run', 'missing-summary', 'truncated'] as typeof teeth.branchesFound).sort(),
     );
     expect(teeth.shellIfBlocks, 'no shell `if` block was parsed out of the gate').toBeGreaterThan(
       0,
@@ -2687,39 +2701,36 @@ describe('compat-suite Bun runtime axis (test-e2e-deploy.yml, #147 item 4)', () 
     expect(/^\s*-\s*'?bun'?\s*$/m.test(input), 'options must include bun').toBe(true);
   });
 
-  it('keeps the nightly cron AND adds exactly one weekly (Sunday) cron for the bun lane', () => {
+  it('keeps ONLY the nightly cron — the weekly bun schedule is retired, not replaced', () => {
+    // The weekly bun cron retired with the standalone-under-bun artifact
+    // (ADR-0048/#710); its recurring compute moved to compat-vinext.yml. Both
+    // halves: the credential nightly survives, and NO extra schedule may
+    // return — a resurrected weekly would burn compute on an artifact users
+    // cannot build while reading as coverage.
     const all = crons();
     expect(all, 'the nightly Node cron must stay untouched (the credential lane)').toContain(
       '17 3 * * *',
     );
-    const weekly = all.filter((c) => c !== '17 3 * * *');
-    expect(weekly.length, 'exactly ONE extra schedule: the weekly bun lane').toBe(1);
     expect(
-      /^\S+\s+\S+\s+\*\s+\*\s+(0|7|SUN|sun)$/.test(weekly[0]),
-      `the extra cron must be WEEKLY on Sunday (day-of-week field), got "${weekly[0]}"`,
-    ).toBe(true);
+      all.filter((c) => c !== '17 3 * * *'),
+      'no schedule beyond the nightly — the bun lane is dispatch-only now',
+    ).toEqual([]);
   });
 
-  it('derives KNEXT_RUNTIME at the workflow level: dispatch input > weekly cron → bun > default node', () => {
+  it('derives KNEXT_RUNTIME at the workflow level: dispatch input > default node — no schedule branch', () => {
     const envLine = src.split('\n').find((l) => /^\s*KNEXT_RUNTIME:\s*\$\{\{/.test(l));
     expect(envLine, 'a workflow-level KNEXT_RUNTIME env expression must exist').toBeTruthy();
     expect(
       /inputs\.runtime/.test(envLine ?? ''),
       'the lane must honor the workflow_dispatch runtime input',
     ).toBe(true);
+    // With the weekly retired there is exactly one schedule, so a
+    // github.event.schedule comparison is dead code that reads as a second
+    // lane — it must NOT exist.
     expect(
       /github\.event\.schedule/.test(envLine ?? ''),
-      'the lane must branch on github.event.schedule (which cron fired)',
-    ).toBe(true);
-    // The cron string the expression compares against must be EXACTLY the weekly
-    // cron declared under schedule: — a drifted string silently runs the weekly
-    // lane on Node forever.
-    const weekly = crons().filter((c) => c !== '17 3 * * *')[0] ?? '';
-    expect(
-      (envLine ?? '').includes(`'${weekly}'`),
-      `the KNEXT_RUNTIME expression must compare github.event.schedule to the weekly cron ('${weekly}')`,
-    ).toBe(true);
-    expect(/'bun'/.test(envLine ?? ''), 'the weekly branch must yield bun').toBe(true);
+      'no schedule branch: the bun lane is dispatch-only',
+    ).toBe(false);
     expect(/'node'/.test(envLine ?? ''), 'the fallback must be node').toBe(true);
   });
 

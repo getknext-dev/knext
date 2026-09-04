@@ -46,10 +46,10 @@
  * inert — deliberately stays GREEN.
  */
 
+import { beforeAll, describe, expect, it } from "bun:test";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build, type OutputFile } from "esbuild";
-import { beforeAll, describe, expect, it } from "vitest";
 import tsupConfig from "../../tsup.config";
 
 const PKG_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");

@@ -9,7 +9,7 @@
  * `@getknext/db`'s own `migrate.test.ts` (`runMigrations`/`resolveWriterDsn`).
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, mock } from "bun:test";
 import {
     type DbMigrateOptions,
     type MigrateRunner,
@@ -59,7 +59,7 @@ describe("parseDbMigrateArgs", () => {
 
 describe("runDbMigrate", () => {
     function deps(runImpl?: MigrateRunner) {
-        const run = vi.fn<MigrateRunner>(
+        const run = mock<MigrateRunner>(
             runImpl ??
                 (async (o) => ({
                     migrationsFolder: o.migrationsFolder ?? "./drizzle",

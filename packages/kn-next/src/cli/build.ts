@@ -11,9 +11,10 @@
  *   2. Run `next build` (output:'standalone' set in the app's next.config.ts)
  *   3. Upload static assets to storage (GCS/S3/MinIO)
  *
- * NOTE: The Vinext/Nitro build orchestration was removed in the official
- * Next.js Adapter migration. The CLI now delegates to the project's
- * `npm run build` script which runs `next build` with output:'standalone'.
+ * NOTE: the project's own `npm run build` produces the bundle (vinext's
+ * `vite build` on the default target, `next build` + output:'standalone' on
+ * the retired turbopack shape); for the vinext shape this command then
+ * compiles the single executable (ADR-0048 — see step 2c).
  *
  * ADR-0001: build does NOT emit raw Knative/infrastructure manifests. The
  * operator is the single source of truth for cluster desired-state and
@@ -22,7 +23,6 @@
 
 import { existsSync, writeSync } from "node:fs";
 import { join } from "node:path";
-import { precompileBunBytecode } from "../adapters/standalone-bun-bytecode";
 import { healBunExportTargets } from "../adapters/standalone-bun-exports";
 import {
     hasStorage,
@@ -30,6 +30,7 @@ import {
     uploadAssets,
 } from "../utils/asset-upload";
 import { createLogger } from "../utils/logger";
+import { resolveBuildArtifact, standaloneStepsApply } from "./build-artifact";
 import { isEntrypoint } from "./exec";
 import { runProjectBuild } from "./project-build";
 import {
@@ -38,6 +39,7 @@ import {
     loadConfig,
     UsageError,
 } from "./shared";
+import { buildVinextExecutable } from "./vinext-build";
 
 const log = createLogger({ module: "build" });
 
@@ -74,13 +76,14 @@ export async function build(options: BuildOptions = {}) {
     // 2. Run `next build` via the project's build script.
     //    The app's next.config.ts must set output:'standalone'.
     if (!options.skipNextBuild) {
-        log.info("Running next build (output:standalone)...");
+        log.info(
+            { builder: config.build ?? "vinext" },
+            "Running the project build...",
+        );
         // UX ledger row 4 (4c): the seam translates a deps-not-installed failure
         // (`next: command not found`, exit 127) into plain npm-install guidance.
         runProjectBuild();
-        log.info(
-            "Next.js build complete — standalone output in .next/standalone/",
-        );
+        log.info("Project build complete");
     }
 
     // 2b. Heal Bun-condition export targets in the standalone output (#188).
@@ -94,13 +97,35 @@ export async function build(options: BuildOptions = {}) {
     //     this tree verbatim). UNCONDITIONAL by design (not gated on
     //     config.runtime): the heal is additive-only, version-checked, and never
     //     throws — on Node it costs a few small file copies and changes nothing
-    //     at runtime. Contrast with step 2c below: node→bun flips DO happen
-    //     without a rebuild, and the heal keeps them safe for free — whereas
-    //     the bytecode pass is the one build step that deliberately ENDS
-    //     flippability (bun→node then needs a rebuild), which is why 2c is
-    //     opt-in via config.runtime and guards the entry loudly.
+    //     at runtime.
+    // Which artifact should this app have produced? Asked of the contract, not
+    // assumed — see build-artifact.ts. `kn-next build` runs the app's OWN
+    // `npm run build`, so a vinext-configured app already builds with vinext;
+    // what knext needs to know is where to look afterwards and which post-build
+    // steps still mean anything.
+    const { builder, artifact } = resolveBuildArtifact(config, process.cwd());
+    const artifactPath = join(artifact.root, artifact.entry);
+    if (!options.skipNextBuild && !existsSync(artifactPath)) {
+        // Loud, and BEFORE the upload/image steps. #857 is the precedent: a
+        // build that exits 0 while emitting a server nothing can find is
+        // discovered at `docker run` on a cluster otherwise.
+        log.warn(
+            { builder: builder.id, expected: artifactPath },
+            `The ${builder.id} build finished but '${artifact.entry}' is not there — the image would start a server that does not exist.`,
+        );
+    }
+
     const standaloneDir = join(process.cwd(), ".next", "standalone");
-    if (existsSync(standaloneDir)) {
+    // Keyed on the artifact SHAPE, not on the directory existing. The old
+    // `existsSync` check warned "is output:'standalone' set?" for ANY build
+    // without that tree — advice that names a Next.js option a vinext user
+    // does not have and cannot act on.
+    if (!standaloneStepsApply(artifact)) {
+        log.info(
+            { builder: builder.id, shape: artifact.shape },
+            "Skipping the standalone-tree post-build steps — they do not apply to this artifact shape",
+        );
+    } else if (existsSync(standaloneDir)) {
         const healed = healBunExportTargets({
             projectDir: process.cwd(),
             standaloneDir,
@@ -117,47 +142,29 @@ export async function build(options: BuildOptions = {}) {
         );
     }
 
-    // 2c. Per-file Bun bytecode precompilation (runtime=bun only).
-    //     Each server-side .js in the standalone tree is transformed
-    //     individually (`--external '*'` keeps the require graph untouched)
-    //     with a companion .jsc that Bun's runtime consumes on require() —
-    //     measured -47% startup on a real next@16.2.4 standalone tree.
-    //     GATED on config.runtime === "bun", the inverse of the heal's
-    //     unconditionality: this pass ENDS runtime flippability (transformed
-    //     files are Bun-only and do not load under Node), so it must be an
-    //     explicit build-time commitment — and the pass injects a fail-fast
-    //     guard into the untransformed entry server.js so `node server.js` on
-    //     a bytecode-built image exits 1 with a FATAL message instead of
-    //     CrashLooping silently. Flipping back to node requires a rebuild.
-    //     Opt out with KNEXT_BUN_BYTECODE=0. Fail-open: per-file failures skip
-    //     that file; a failed capability probe (Bun <1.1.30, no bun binary)
-    //     disables the pass; never throws. Cost: one bun-build spawn per file
-    //     (~12s for a ~970-file tree), paid on every runtime=bun build.
-    if (
-        (config.runtime ?? "node") === "bun" &&
-        process.env.KNEXT_BUN_BYTECODE !== "0" &&
-        existsSync(standaloneDir)
-    ) {
-        const pass = precompileBunBytecode({
-            standaloneDir,
-            log: (message) => log.debug(message),
-        });
-        if (pass.skipped.length > 0) {
-            // full per-file reasons at debug so a noisy tree doesn't flood builds
-            log.debug(
-                { skipped: pass.skipped },
-                "Bun bytecode per-file skip reasons",
-            );
-        }
+    // 2c. Single-executable compile (the vinext shape — ADR-0048).
+    //     Bytecode belongs to ONE builder: the vinext bundle is compiled
+    //     whole (`bun build --compile --minify --bytecode`) into the binary
+    //     the Dockerfile ships. The retired per-file bytecode pass that used
+    //     to sit here transformed the standalone tree file-by-file — it bought
+    //     cold start (554ms vs 703ms) but COST throughput (537 vs 714 req/s,
+    //     the per-module CJS conversion taxing every module boundary), while
+    //     the whole-bundle compile wins both axes at once (61ms, 1103 req/s).
+    //     Keyed on the artifact SHAPE, not on config.runtime: the shape is
+    //     what says "this app's server is one compiled binary".
+    //     Compiles for linux-x64 regardless of the host — `kn-next deploy`
+    //     builds a linux/amd64 image whose Dockerfile expects
+    //     `knext-exec-linux-x64` in the build context.
+    if (artifact.shape === "nitro-output-bun") {
         log.info(
-            {
-                compiled: pass.compiled,
-                skipped: pass.skipped.length,
-                guarded: pass.guarded.length,
-                ...(pass.disabled ? { disabled: pass.disabled } : {}),
-            },
-            "Bun bytecode precompilation (standalone output)",
+            "Compiling the single executable (bun, bytecode, minified)...",
         );
+        const binary = buildVinextExecutable({
+            cwd: process.cwd(),
+            arch: "linux-x64",
+            skipViteBuild: true, // step 2 (the project's own `vite build`) already produced .output
+        });
+        log.info({ binary }, "Single executable compiled");
     }
 
     // 3. Upload static assets — only when a storage block is configured.

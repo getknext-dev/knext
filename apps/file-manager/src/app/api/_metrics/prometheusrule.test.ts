@@ -1,42 +1,41 @@
+import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
 import { parseAllDocuments } from 'yaml';
 
 /**
  * PrometheusRule manifest validity (observability P0).
  *
  * The runbook + SLOs are only operable if the alert rules actually parse and
- * reference metric series that this codebase exports. This test asserts:
+ * carry the hygiene an on-call needs. This test asserts:
  *   1. the manifest is valid YAML and a well-formed PrometheusRule,
- *   2. every alert's `expr` is non-empty and references a real series,
- *   3. the four required SLO-breach alerts are present.
+ *   2. every alert has a name, non-empty expr, severity and runbook link,
+ *   3. the required SLO-breach and meta alerts are present.
+ *
+ * WHAT THIS TEST DELIBERATELY NO LONGER DOES, and why (#792). It used to assert
+ * "every expr references at least one series this repo exports" against a
+ * HAND-COPIED `KNOWN_SERIES` array. That array is why the drift survived: it
+ * listed `kn_next_http_requests_total` because a human typed it, not because
+ * anything emitted it, so the whole `knext.app` group could go dead while this
+ * test stayed green. An enumerated list of names cannot detect a rename — it IS
+ * the second copy that drifts.
+ *
+ * That assertion now lives in
+ * `packages/kn-next/src/__tests__/observability-metric-contract.test.ts`, which
+ * SCANS each emitter's own source (the runtime contract's exposition, the
+ * operator's Go registry, the prom-client registries) instead of enumerating,
+ * and covers the dashboards too. It is strictly stronger; this is a move, not a
+ * relaxation.
  *
  * (If `promtool` is installed in CI, `promtool check rules` is the stronger
- * gate — see the rule file header. This test is the always-available floor.)
+ * gate on SYNTAX — see the rule file header. This test is the always-available
+ * floor.)
  */
 
 const RULE_PATH = join(
   __dirname,
   '../../../../../../packages/kn-next-operator/config/observability/prometheusrule.yaml',
 );
-
-// Series this repo actually exports (operator metrics.go + app registry.ts).
-const KNOWN_SERIES = [
-  'knext_nextapp_reconcile_total',
-  'knext_nextapp_reconcile_duration_seconds',
-  'knext_nextapp_reconcile_errors_total',
-  'knext_nextapp_image_prewarm_errors_total',
-  'kn_next_http_requests_total',
-  'kn_next_http_request_duration_seconds',
-  'kn_next_startup_duration_seconds',
-  'kn_next_bytecode_cache_warm_start',
-  // kube-state-metrics series for the Degraded condition (documented dependency)
-  'kube_customresource',
-  'knext_nextapp_condition',
-  // #348 deep-health state gauge (packages/kn-next/src/adapters/metrics.ts).
-  'knext_deep_health_state',
-];
 
 interface Rule {
   alert?: string;
@@ -77,17 +76,7 @@ describe('PrometheusRule manifest', () => {
     }
   });
 
-  it('every expr references at least one series this repo exports', () => {
-    const { docs } = loadRule();
-    const rule = docs.find((d) => d?.kind === 'PrometheusRule');
-    const alerts: Rule[] = rule.spec.groups.flatMap((g: { rules: Rule[] }) => g.rules);
-    for (const a of alerts) {
-      const referencesKnown = KNOWN_SERIES.some((s) => (a.expr ?? '').includes(s));
-      expect(referencesKnown, `expr has no known series: ${a.expr}`).toBe(true);
-    }
-  });
-
-  it('wires the four required SLO-breach alerts', () => {
+  it('wires the required SLO-breach alerts', () => {
     const { docs } = loadRule();
     const rule = docs.find((d) => d?.kind === 'PrometheusRule');
     const names: string[] = rule.spec.groups
@@ -98,10 +87,41 @@ describe('PrometheusRule manifest', () => {
     expect(names).toContain('KnextOperatorReconcileErrors');
     // NextApp Degraded=True
     expect(names).toContain('KnextNextAppDegraded');
-    // cold-start p95 breach
+    // cold-start breach
     expect(names).toContain('KnextColdStartLatencyHigh');
-    // cache/Redis unreachable
-    expect(names).toContain('KnextCacheUnreachable');
+    // server-side error ratio. This also subsumes the retired
+    // `KnextCacheUnreachable`, which filtered on `route="/api/health"` — the
+    // runtime emits no route label (unbounded cardinality; see the note in
+    // runtime-contract.mjs), and a failing deep-health route returns 5xx, so it
+    // lands here.
+    expect(names).toContain('KnextHighErrorRate');
+    // request latency — computable at all only since the runtime gained a
+    // duration histogram (#792).
+    expect(names).toContain('KnextHighRequestLatency');
+  });
+
+  // #792: the alerts that fire when the alerting itself has gone blind. A
+  // renamed metric makes every rule above evaluate an empty vector — which is
+  // indistinguishable from a healthy quiet system, and pages nobody. These two
+  // are the only rules in the file that notice, so their presence is asserted
+  // rather than assumed.
+  it('ships the metrics-staleness meta-alerts', () => {
+    const { docs } = loadRule();
+    const rule = docs.find((d) => d?.kind === 'PrometheusRule');
+    const alerts: Rule[] = rule.spec.groups.flatMap((g: { rules: Rule[] }) => g.rules);
+    const names = alerts.map((r) => r.alert);
+
+    expect(names).toContain('KnextAppMetricsTargetDown');
+    expect(names).toContain('KnextAppMetricsContractBroken');
+
+    // Neither may key on the app series alone: a scaled-to-zero app has no
+    // pods and no series, so a bare absent() would fire nightly on every idle
+    // app and be muted within a week. Both must anchor on `up`, which exists
+    // only for a DISCOVERED target.
+    for (const n of ['KnextAppMetricsTargetDown', 'KnextAppMetricsContractBroken']) {
+      const a = alerts.find((r) => r.alert === n);
+      expect(a?.expr, `${n} must anchor on up{...}`).toMatch(/\bup\{/);
+    }
   });
 
   // #348: a permanent connection-level DB outage sits at `waking` forever and

@@ -87,6 +87,21 @@ is refined: **the build system and the runtime are independent user choices.** T
   `.next/standalone`; `vinext` = the Vite/rolldown Next reimplementation → nitro `.output`.
 - **`runtime: node | bun`**.
 
+> **State correction (2026-08-30) — this section is a SPECIFICATION, and three of its state
+> claims were being read as descriptions of shipped behaviour.** Two readings came straight from
+> here and both were wrong, which is why the correction sits at the top of the section rather than
+> in a footnote. Measured against `main`:
+>
+> | claimed below | actual state of `main` |
+> |---|---|
+> | `bun ⇒ vinext` "enforced fail-closed by CEL admission on the CRD" | **Never implemented, and now deliberately abandoned.** No CEL rule constrains `build` against `runtime`; `nextapp_types.go` states the reason — the two axes are connected by the artifact *shape* a builder emits and a runtime must accept, never by a rule pairing the two names, and encoding compatibility in the CRD would pin a policy into every cluster where changing it needs a CRD roll rather than a CLI release. |
+> | `bun` + `turbopack` is **rejected** | **It is the shipped meaning of `runtime: bun`** — "run the Next standalone server under Bun". The rule specified below would have rejected the combination knext actually ships. |
+> | the `build` axis exists on `kn-next.config.ts` and the CRD | **True as of ADR-0048** (`config.ts:290`, `nextapp_types.go:158`), and it was not when this ADR was written. ~~The CRD enum admits only `turbopack`; the CLI type knows `vinext`. That gap is intentional and its reasoning is in `nextapp_types.go`.~~ **Gap closed 2026-09-03 (ADR-0048 Amendment 3):** the enum admits `turbopack;vinext` and the operator reconciles the single-exec shape (image CMD, no forced command). |
+>
+> The decision below is not being rewritten — it may still be the right one. What is corrected is
+> the tense: read the table as *what was specified*, and the operator's field comments as *what
+> is*.
+
 **Valid combinations (3) — the sole invariant is `bun ⇒ vinext`:**
 
 | | build: `turbopack` (Next) | build: `vinext` |

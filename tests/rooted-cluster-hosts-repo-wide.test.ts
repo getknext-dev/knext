@@ -1,7 +1,7 @@
+import { describe, expect, it } from 'bun:test';
 import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
 
 /**
  * REPO-WIDE scan: no in-cluster Postgres-gateway host may be written UNROOTED, in any

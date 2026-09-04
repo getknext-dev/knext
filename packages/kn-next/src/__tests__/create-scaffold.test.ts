@@ -23,6 +23,7 @@
  * failed on the missing module.
  */
 
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
     existsSync,
@@ -33,8 +34,8 @@ import {
     writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
     createMain,
     loadTemplates,
@@ -173,129 +174,121 @@ describe("kn-next create — seam-alive instrumentation-node.ts (#352/ADR-0027)"
     });
 });
 
-describe("kn-next create — next.config wires the platform fence (#356/ADR-0031)", () => {
-    it("wires adapterPath, keeps standalone output, and never hand-writes the IgnorePlugin", () => {
+describe("kn-next create — next.config is minimal under vinext (ADR-0048)", () => {
+    it("does NOT wire turbopack-only machinery", () => {
+        // `output: 'standalone'`, `adapterPath` and the @getknext/lib
+        // externalisation were all webpack/turbopack mechanisms. vinext is
+        // Vite/rolldown and never calls them, so emitting them would ship
+        // config that silently does nothing.
         const { appDir } = scaffoldApp();
         const src = readFileSync(join(appDir, "next.config.ts"), "utf8");
-        expect(src).toMatch(/adapterPath\s*:/);
-        expect(src).toMatch(/output:\s*['"]standalone['"]/);
-        expect(src).not.toMatch(/new\s+webpack\.IgnorePlugin\s*\(/);
-        expect(src).not.toMatch(/^\s*webpack\s*[:(]/m);
+        // Strip comments first. The template EXPLAINS why these keys are gone,
+        // so a raw grep would match the explanation and fail on its own prose —
+        // which is exactly what the first version of this test did.
+        const code = src
+            .replace(/\/\*[\s\S]*?\*\//g, "")
+            .replace(/^\s*\/\/.*$/gm, "");
+
+        expect(code).not.toMatch(/output:\s*['"]standalone['"]/);
+        expect(code).not.toMatch(/adapterPath\s*:/);
+        expect(code).not.toMatch(/serverExternalPackages/);
+        // And what IS there is there on purpose. `assetPrefix` is knext's own
+        // wiring, not turbopack residue: with object storage configured it
+        // points assets at the bucket or CDN, and the empty-string fallback is
+        // what keeps a no-storage pod emitting relative `/_next/static/...`
+        // paths instead of 404ing every chunk (optional-storage.test.ts owns
+        // that behaviour).
+        //
+        // An earlier version of this test asserted `NextConfig = {}` — that the
+        // config was EMPTY rather than free of the retired keys. It passed
+        // while quietly requiring the assetPrefix regression to stay in place.
+        // "Minimal" is a claim about what was removed, not a byte count.
+        expect(code).toMatch(/assetPrefix:\s*process\.env\.ASSET_PREFIX/);
     });
 
-    it("never externalizes @getknext/lib (ADR-0027: would re-split the seam state)", () => {
+    it("still exports a NextConfig, so app-level options have a home", () => {
         const { appDir } = scaffoldApp();
         const src = readFileSync(join(appDir, "next.config.ts"), "utf8");
-        const externals =
-            src.match(/serverExternalPackages:\s*\[([^\]]*)\]/s)?.[1] ?? "";
-        expect(externals).not.toMatch(/@getknext\/lib/);
+
+        expect(src).toMatch(/NextConfig/);
+        expect(src).toMatch(/export default/);
     });
 
-    it("ships the thin app adapter re-exporting @getknext/core/adapter", () => {
+    it("emits no next-adapter.ts — the hooks it wired are never called", () => {
         const { appDir } = scaffoldApp();
-        const src = readFileSync(join(appDir, "next-adapter.ts"), "utf8");
-        expect(src).toMatch(/from\s*['"]@getknext\/core\/adapter['"]/);
+        expect(existsSync(join(appDir, "next-adapter.ts"))).toBe(false);
+    });
+
+    it("wires the Redis cache handler — a scaffold without one has NO ISR/data cache at all (#895)", () => {
+        // The silent-degradation defect the stability planning gate found:
+        // nothing wired `cacheHandler`, so every `kn-next create` app served
+        // 200s with no ISR cache and no data cache — full recompute per
+        // render, the provisioned Redis unused, and nothing red anywhere.
+        const { appDir } = scaffoldApp();
+        const src = readFileSync(join(appDir, "next.config.ts"), "utf8");
+        const code = src
+            .replace(/\/\*[\s\S]*?\*\//g, "")
+            .replace(/^\s*\/\/.*$/gm, "");
+
+        expect(code).toMatch(/cacheHandler\s*:/);
+        // The default in-memory cache must be OFF — per-pod memory caches
+        // diverge across Knative pods (multi-pod consistency is the whole
+        // reason the handler is Redis-backed).
+        expect(code).toMatch(/cacheMaxMemorySize:\s*0/);
+    });
+
+    it("ships cache-handler.js as a thin re-export of the framework handler (#895)", () => {
+        // Same shape as apps/file-manager/cache-handler.js: the file exists
+        // only because Next requires a PATH; the logic stays in
+        // @getknext/core so fixes reach every app.
+        const { appDir } = scaffoldApp();
+        const handlerPath = join(appDir, "cache-handler.js");
+        expect(existsSync(handlerPath)).toBe(true);
+        const src = readFileSync(handlerPath, "utf8");
+        expect(src).toContain("@getknext/core/adapters/cache-handler");
+        expect(src).toMatch(/export\s*\{\s*default\s*\}/);
     });
 });
 
 describe("kn-next create — graduated per-app guards ship with the app (#344/#408)", () => {
-    it("ships instrumentation-edge-safe.test.ts with both halves of the fence", () => {
+    it("ships the edge-safety guard, which still applies", () => {
+        // #342 is a Next-level concern (instrumentation compiled for BOTH the
+        // nodejs and edge runtimes), independent of which bundler builds it.
         const { appDir } = scaffoldApp();
-        const guard = readFileSync(
-            join(appDir, "instrumentation-edge-safe.test.ts"),
-            "utf8",
-        );
-        expect(guard).toContain("NEXT_RUNTIME");
-        expect(guard).toContain("@getknext/lib/clients");
-        expect(guard).toContain("adapterPath");
-        expect(guard).toContain("IgnorePlugin");
-    });
-
-    it("ships standalone-seam-alive.test.ts asserting BOTH globalThis seam keys", () => {
-        const { appDir } = scaffoldApp();
-        const guard = readFileSync(
-            join(appDir, "standalone-seam-alive.test.ts"),
-            "utf8",
-        );
-        // STRUCTURAL, not substring: assert the symbols appear in the ARRAY the
-        // guard actually asserts over (`SEAM_SYMBOLS`), and the API pairing in
-        // `SEAM_FAMILIES`. A plain `toContain` is satisfied by the docblock,
-        // which names both symbols in prose — so gutting the array while
-        // leaving the comments would keep a substring check green while the
-        // shipped guard asserts nothing.
-        const symbols =
-            guard.match(/const\s+SEAM_SYMBOLS\s*=\s*\[([^\]]*)\]/s)?.[1] ?? "";
         expect(
-            symbols,
-            "the emitted guard has no SEAM_SYMBOLS array to assert over",
-        ).not.toBe("");
-        expect(symbols).toContain("knext.lib.clients.poolInstrumentor");
-        expect(symbols).toContain("knext.lib.context.state");
-
-        const families =
-            guard.match(/const\s+SEAM_FAMILIES[^=]*=\s*\[(.*?)\];/s)?.[1] ?? "";
-        expect(families).toContain("setPoolInstrumentor");
-        expect(families).toContain("correlationLogFields");
-
-        expect(guard).toContain("KNEXT_REQUIRE_STANDALONE");
+            existsSync(join(appDir, "instrumentation-edge-safe.test.ts")),
+        ).toBe(true);
     });
 
-    it("points the seam guard at the standalone path THIS app's layout produces", () => {
-        // Next nests the standalone output under the app's path relative to the
-        // inferred tracing root (the nearest lockfile). A guard aimed at the
-        // wrong directory finds no build and SKIPS — green-by-skip, the exact
-        // decoration #408 removed. So the emitted path must track the layout.
-        const { appDir } = scaffoldApp("hello-knext");
-        const guard = readFileSync(
-            join(appDir, "standalone-seam-alive.test.ts"),
+    it("no longer ships the STANDALONE seam guard — its subject is gone", () => {
+        // ADR-0048. That guard asserted module state survived webpack layering
+        // in the Next standalone bundle (#352/#344). vinext is Vite/rolldown
+        // and emits no standalone tree, so the file would assert against a path
+        // no build produces — a guard that can only pass is decoration.
+        const { appDir } = scaffoldApp();
+        expect(existsSync(join(appDir, "standalone-seam-alive.test.ts"))).toBe(
+            false,
+        );
+    });
+
+    it("keeps the seams globalThis-anchored, which is what that guard protected", () => {
+        // The INVARIANT outlives the guard: ADR-0027 requires the seam state on
+        // a namespaced globalThis symbol precisely because bundlers duplicate
+        // module state, and rolldown bundles too. A bare module-level `let`
+        // here would reintroduce #352 under a different bundler.
+        const { appDir } = scaffoldApp();
+        const src = readFileSync(
+            join(appDir, "src", "instrumentation-node.ts"),
             "utf8",
         );
-        expect(guard).toContain(
-            ".next/standalone/apps/hello-knext/.next/server",
-        );
-    });
 
-    it("emits the FLAT standalone path when the app dir IS the tracing root", () => {
-        const appDir = join(root, "flat-app");
-        mkdirSync(appDir, { recursive: true });
-        writeFileSync(join(appDir, "package-lock.json"), "{}\n");
-        writeScaffold({ appDir, name: "flat-app" });
-        const guard = readFileSync(
-            join(appDir, "standalone-seam-alive.test.ts"),
-            "utf8",
-        );
-        expect(guard).toContain(".next/standalone/.next/server");
-        expect(guard).not.toContain("standalone/flat-app/");
-    });
-
-    it("standalonePrefixFor mirrors Next's lockfile-based tracing-root inference", () => {
-        writeFileSync(join(root, "pnpm-lock.yaml"), "\n");
-        const nested = join(root, "apps", "z");
-        mkdirSync(nested, { recursive: true });
-        expect(standalonePrefixFor(nested)).toBe("apps/z/");
-        expect(standalonePrefixFor(root)).toBe("");
-    });
-
-    it("treats pnpm-workspace.yaml as a root marker, because Next checks it FIRST", () => {
-        // This spec used to assert the opposite, and the reason it gave was wrong:
-        // it said next 16.2.11 considers only the five lockfiles. It does not.
-        // `dist/lib/find-root.js`'s `findWorkRoot` searches up for
-        // `pnpm-workspace.yaml` BEFORE any lockfile — its own comment explains why,
-        // since lockfiles "can be included in the application directory by accident".
-        //
-        // Asserting the divergence kept it GREEN while every path `create` baked
-        // pointed at a file the build never wrote: both COPY sources, the WORKDIR,
-        // the CMD's STANDALONE_SERVER_PATH and `npm start`. The image built, the
-        // container started, and there was nothing to run (#857).
-        writeFileSync(join(root, "pnpm-workspace.yaml"), "packages:\n  - a\n");
-        const app = join(root, "apps", "a");
-        mkdirSync(app, { recursive: true });
-        expect(standalonePrefixFor(app)).toBe("apps/a/");
+        expect(src).toContain("setPoolInstrumentor");
+        expect(src).toContain("setTraceIdProvider");
     });
 });
 
 describe("kn-next create — the generated package.json is runnable OUTSIDE this monorepo", () => {
-    it("builds with `next build --webpack` and declares no workspace: protocol deps", () => {
+    it("builds with vite/vinext and declares no workspace: protocol deps", () => {
         const { appDir } = scaffoldApp();
         const raw = readFileSync(join(appDir, "package.json"), "utf8");
         const pkg = JSON.parse(raw) as {
@@ -303,7 +296,22 @@ describe("kn-next create — the generated package.json is runnable OUTSIDE this
             dependencies?: Record<string, string>;
             devDependencies?: Record<string, string>;
         };
-        expect(pkg.scripts?.build).toBe("next build --webpack");
+        // ADR-0048: the scaffold emits a vinext app, not a Next/turbopack one.
+        // Both halves — the new builder present AND the retired one absent —
+        // because a scaffold that emitted both would produce a config the
+        // validator accepts describing files it cannot build.
+        expect(pkg.scripts?.build).toBe("vite build");
+        expect(pkg.scripts?.dev).toBe("vinext dev");
+        expect(pkg.scripts?.start).toBe("bun .output/server/index.mjs");
+        expect(pkg.dependencies?.vinext).toBeDefined();
+        expect(pkg.devDependencies?.nitro).toBeDefined();
+        expect(pkg.scripts?.build).not.toContain("next build");
+        // No Cloudflare Workers surface: knext targets Knative, so the artifact
+        // is a Bun binary, not a Worker.
+        expect(raw).not.toContain("wrangler");
+        expect(raw).not.toContain("@cloudflare/");
+        expect(raw).not.toContain("@vinext/cloudflare");
+
         expect(raw).not.toContain("workspace:");
         // @getknext/ui is PRIVATE and never publishes — a generated app that
         // depends on it cannot install.
@@ -332,57 +340,54 @@ describe("kn-next create — the generated package.json is runnable OUTSIDE this
         }
     });
 
-    it("ships a `test:seam` script that BUILDS and then hard-fails (no green-by-skip)", () => {
+    it("ships the RuntimeContract entry the vinext build needs", () => {
+        // Replaces the old `test:seam` pair. That guarded the Next STANDALONE
+        // bundle, where webpack layering duplicates `@getknext/lib` and breaks
+        // module state (#344/#352). vinext is Vite/rolldown and emits no
+        // standalone tree, so that specific guard has no subject.
+        //
+        // The invariant underneath it still matters, so it is asserted here in
+        // the form it now takes: vinext cannot see knext's adapter hooks, so the
+        // platform contract — health, `:9091` metrics, SIGTERM drain — is
+        // re-provided by a Nitro server entry the app ships. If that entry were
+        // missing, the build would still succeed and the pod would fail its
+        // probes in the cluster.
         const { appDir } = scaffoldApp();
-        const pkg = JSON.parse(
-            readFileSync(join(appDir, "package.json"), "utf8"),
-        ) as { scripts?: Record<string, string> };
-        const script = pkg.scripts?.["test:seam"];
-        expect(script, "generated app has no test:seam script").toBeDefined();
-        expect(script).toContain("next build --webpack");
-        expect(script).toContain("KNEXT_REQUIRE_STANDALONE=1");
-        expect(script).toContain("standalone-seam-alive.test.ts");
+
+        expect(existsSync(join(appDir, "knext-bun-entry.mjs"))).toBe(true);
+        expect(existsSync(join(appDir, "runtime-contract.mjs"))).toBe(true);
+
+        const vite = readFileSync(join(appDir, "vite.config.ts"), "utf8");
+        // Both halves: the entry is wired AND the preset it requires is set.
+        expect(vite).toContain("./knext-bun-entry.mjs");
+        expect(vite).toContain("preset: 'bun'");
     });
 
-    it("declares every binary `test:seam` invokes (no root-hoisting rescue outside a monorepo)", () => {
+    it("disables code splitting — without it the server bundle does not run", () => {
+        // Not a tuning knob. When the bundle splits, vinext's Next-compat shims
+        // land in a second chunk re-exporting a symbol declared in no emitted
+        // module; the server then 500s on any runtime and `--compile` refuses
+        // it. Measured, see docs/benchmarks/EXPERIMENTS.md E9-E10.
         const { appDir } = scaffoldApp();
-        const manifest = JSON.parse(
-            readFileSync(join(appDir, "package.json"), "utf8"),
-        ) as {
-            scripts?: Record<string, string>;
-            dependencies?: Record<string, string>;
-            devDependencies?: Record<string, string>;
-        };
-        const script = manifest.scripts?.["test:seam"] ?? "";
-        const declared = {
-            ...manifest.dependencies,
-            ...manifest.devDependencies,
-        };
-        const binaries = script
-            .split(/&&|\|\||;|\|/)
-            .map((segment) =>
-                segment
-                    .trim()
-                    .split(/\s+/)
-                    .find((token) => !/^[A-Z_][A-Z0-9_]*=/.test(token)),
-            )
-            .filter((bin): bin is string => Boolean(bin));
-        expect(binaries.length).toBeGreaterThan(0);
-        for (const bin of binaries) {
-            expect(
-                Object.hasOwn(declared, bin),
-                `test:seam runs \`${bin}\` but the scaffold never declares it`,
-            ).toBe(true);
-        }
-    });
+        const vite = readFileSync(join(appDir, "vite.config.ts"), "utf8");
 
-    it("the Dockerfile copies the SAME standalone path the seam guard asserts", () => {
-        // One layout inference, two consumers. If they disagree, either the
-        // image has no server.js or the guard silently skips.
+        expect(vite).toContain("inlineDynamicImports: true");
+    });
+    it("the Dockerfile and vite.config agree on the artifact (ADR-0048)", () => {
+        // Same "one inference, two consumers" property the standalone version
+        // of this test protected, restated for the shape that ships now: the
+        // build emits `.output`, and the image must copy from `.output`. If
+        // they disagree the image starts a server that is not there — the #857
+        // failure, which exits 0 the whole way.
         const { appDir } = scaffoldApp("hello-knext");
         const dockerfile = readFileSync(join(appDir, "Dockerfile"), "utf8");
-        expect(dockerfile).toContain("apps/hello-knext/.next/standalone");
-        expect(dockerfile).toContain("apps/hello-knext/server.js");
+        const vite = readFileSync(join(appDir, "vite.config.ts"), "utf8");
+
+        expect(vite).toContain("preset: 'bun'");
+        expect(dockerfile).toContain(".output/public");
+        expect(dockerfile).toContain("/app/server");
+        // And the retired path appears in neither.
+        expect(dockerfile).not.toContain(".next/standalone");
     });
 });
 
@@ -393,193 +398,55 @@ describe("kn-next create — the generated package.json is runnable OUTSIDE this
  * check passes on a Dockerfile that cannot build, which is what shipped in the
  * first round. These tests interpret the instruction stream instead.
  */
-describe("kn-next create — the generated Dockerfile actually builds (structurally)", () => {
-    interface Docker {
-        /** WORKDIR in effect for each RUN, paired with the command. */
-        runs: { cwd: string; cmd: string }[];
-        copies: { from: string; src: string; dest: string }[];
-        froms: string[];
-        user: string | null;
-        cmd: string | null;
-    }
+describe("kn-next create — the generated Dockerfile ships the compiled binary (ADR-0048)", () => {
+    it("copies a prebuilt binary and runs it directly", () => {
+        // No builder stage, no install, no `npm run build`. The binary is built
+        // by `kn-next build` outside the image, because cross-compiling inside
+        // it would force a Bun toolchain into the runtime layer for nothing.
+        const { appDir } = scaffoldApp();
+        const df = readFileSync(join(appDir, "Dockerfile"), "utf8");
 
-    /** Interpret the Dockerfile's instruction stream, tracking WORKDIR state. */
-    function parseDockerfile(src: string): Docker {
-        const out: Docker = {
-            runs: [],
-            copies: [],
-            froms: [],
-            user: null,
-            cmd: null,
-        };
-        let cwd = "/";
-        // Join line continuations so a multi-line RUN is one command.
-        const lines = src
-            .replace(/\\\n\s*/g, " ")
-            .split("\n")
-            .map((l) => l.trim())
-            .filter((l) => l && !l.startsWith("#"));
-        for (const line of lines) {
-            const [verbRaw, ...rest] = line.split(/\s+/);
-            const verb = verbRaw.toUpperCase();
-            const arg = rest.join(" ");
-            if (verb === "FROM") {
-                out.froms.push(arg);
-                cwd = "/";
-            } else if (verb === "WORKDIR") {
-                const p = rest[0];
-                // Normalise the trailing slash `/repo/{{prefix}}` leaves when
-                // the prefix is empty — Docker treats `/repo/` and `/repo` the
-                // same, so the parser must too.
-                cwd = (p.startsWith("/") ? p : join(cwd, p)).replace(
-                    /(.)\/$/,
-                    "$1",
-                );
-            } else if (verb === "RUN") {
-                out.runs.push({ cwd, cmd: arg });
-            } else if (verb === "COPY") {
-                const m = line.match(
-                    /^COPY\s+(?:--from=(\S+)\s+)?(\S+)\s+(\S+)\s*$/i,
-                );
-                if (m) {
-                    out.copies.push({
-                        from: m[1] ?? "",
-                        src: m[2],
-                        dest: m[3],
-                    });
-                }
-            } else if (verb === "USER") {
-                out.user = rest[0];
-            } else if (verb === "CMD") {
-                out.cmd = arg;
-            }
-        }
-        return out;
-    }
-
-    /** Scaffold at `<root>/<sub>` with the lockfile at `<lockAt>`. */
-    function dockerfileFor(
-        sub: string,
-        lockAt: string,
-        lockName = "package-lock.json",
-    ): { docker: Docker; text: string; appDir: string } {
-        mkdirSync(join(root, lockAt), { recursive: true });
-        writeFileSync(join(root, lockAt, lockName), "{}\n");
-        const appDir = join(root, sub);
-        mkdirSync(appDir, { recursive: true });
-        writeScaffold({ appDir, name: "hello-knext" });
-        const text = readFileSync(join(appDir, "Dockerfile"), "utf8");
-        return { docker: parseDockerfile(text), text, appDir };
-    }
-
-    it("runs the dependency install in the directory that HAS the lockfile (nested layout)", () => {
-        // `npm ci` does not walk up. Running it in the app dir of a workspace,
-        // where only the root has a package-lock.json, is a hard build failure.
-        const { docker } = dockerfileFor("apps/hello-knext", ".");
-        const install = docker.runs.find((r) =>
-            /npm ci|npm install/.test(r.cmd),
-        );
-        expect(
-            install,
-            "no dependency-install RUN in the Dockerfile",
-        ).toBeDefined();
-        expect(
-            (install as { cwd: string }).cwd,
-            "the install must run at the build context root, where the lockfile is",
-        ).toBe("/repo");
+        expect(df).toMatch(/COPY \$\{BINARY\} \/app\/server/);
+        expect(df).toMatch(/CMD \["\/app\/server"\]/);
     });
 
-    it("runs `npm run build` in the APP directory, not the context root (nested layout)", () => {
-        const { docker } = dockerfileFor("apps/hello-knext", ".");
-        const build = docker.runs.find((r) => /npm run build/.test(r.cmd));
-        expect(build).toBeDefined();
-        expect((build as { cwd: string }).cwd).toBe("/repo/apps/hello-knext");
+    it("ships the static assets the server resolves at runtime", () => {
+        // Without `.output/public` beside the binary, the server starts and
+        // then 500s every asset request — it logs "no static-asset root found"
+        // and keeps serving, so this fails quietly rather than loudly.
+        const { appDir } = scaffoldApp();
+        const df = readFileSync(join(appDir, "Dockerfile"), "utf8");
+
+        expect(df).toMatch(/COPY \.output\/public/);
     });
 
-    it("FLAT layout: install AND build both run at the context root", () => {
-        // App carries its own lockfile, nothing above — the layout QUICKSTART's
-        // `npm ci` in the app dir implies. Here the app IS the context root, so
-        // a `/repo/<prefix>` that still carried a prefix would point at nothing.
-        const { docker } = dockerfileFor("flat", "flat");
-        const install = docker.runs.find((r) =>
-            /npm ci|npm install/.test(r.cmd),
-        );
-        const build = docker.runs.find((r) => /npm run build/.test(r.cmd));
-        expect((install as { cwd: string }).cwd).toBe("/repo");
-        expect((build as { cwd: string }).cwd).toBe("/repo");
-        const standaloneCopy = docker.copies.find((c) =>
-            c.src.includes(".next/standalone"),
-        );
-        expect((standaloneCopy as { src: string }).src).toBe(
-            "/repo/.next/standalone",
-        );
+    it("carries NO node, npm, or standalone machinery", () => {
+        // Both halves of the ADR-0048 cleanup: the new shape is present above,
+        // and the retired shape is gone. A Dockerfile that still installed node
+        // would build an image nothing in it uses.
+        const { appDir } = scaffoldApp();
+        const df = readFileSync(join(appDir, "Dockerfile"), "utf8");
+
+        expect(df).not.toMatch(/\.next\/standalone/);
+        expect(df).not.toMatch(/npm (ci|install|run build)/);
+        expect(df).not.toMatch(/NODE_COMPILE_CACHE/);
+        expect(df).not.toMatch(/FROM node:/);
     });
 
-    it("emits the install command matching the lockfile it found (pnpm ≠ npm)", () => {
-        // Deriving the root from a pnpm-lock.yaml and then running `npm ci`
-        // against it fails: npm cannot consume a pnpm lockfile.
-        const { docker } = dockerfileFor(
-            "apps/hello-knext",
-            ".",
-            "pnpm-lock.yaml",
-        );
-        const install = docker.runs.find((r) =>
-            /npm ci|npm install|pnpm install|yarn install|bun install/.test(
-                r.cmd,
-            ),
-        );
-        expect((install as { cmd: string }).cmd).toMatch(/pnpm install/);
+    it("needs no bytecode cache mount — it is baked into the binary", () => {
+        // `bun build --compile --bytecode` puts V8 bytecode inside the
+        // executable. There is nothing to warm, mount, or share between pods.
+        const { appDir } = scaffoldApp();
+        const df = readFileSync(join(appDir, "Dockerfile"), "utf8");
+
+        expect(df).not.toMatch(/compile-cache/);
+        expect(df).not.toMatch(/VOLUME/);
     });
 
-    it("pins every base image by digest (security.md supply chain)", () => {
-        const { docker } = dockerfileFor("apps/hello-knext", ".");
-        const external = docker.froms.filter(
-            (f) => !/^(builder|runner|scratch)\b/i.test(f),
-        );
-        expect(external.length).toBeGreaterThan(0);
-        for (const from of external) {
-            expect(from, `floating base image: ${from}`).toMatch(
-                /@sha256:[0-9a-f]{64}/,
-            );
-        }
-    });
-
-    it("drops privileges to a non-root USER before CMD (security.md)", () => {
-        const { docker } = dockerfileFor("apps/hello-knext", ".");
-        expect(docker.user).toBe("node");
-    });
-
-    it("boots the knext runtime entry, NOT a bare `node server.js` (graceful shutdown)", () => {
-        // adapters/node-server.ts is the ONLY thing that installs the SIGTERM
-        // handler draining in-flight requests + running after() callbacks on
-        // scale-down. Bare-exec'ing the standalone server bypasses it, so every
-        // created app would ship without the graceful-shutdown invariant.
-        const { docker } = dockerfileFor("apps/hello-knext", ".");
-        expect(docker.cmd).toContain("@getknext/core/internal/node-server");
-        expect(
-            docker.cmd,
-            "CMD bare-execs server.js — that bypasses the SIGTERM drain",
-        ).not.toMatch(/\bnode(\\?")?\s*,?\s*(\\?")?[^"]*server\.js/);
-        // The runtime entry needs to be told where the standalone server is.
-        expect(docker.cmd).toContain("STANDALONE_SERVER_PATH");
-        expect(docker.cmd).toContain("apps/hello-knext/server.js");
-    });
-
-    it("is covered by the repo's base-image pin guard (scan, not an enumerated list)", () => {
-        // The guard's default file list used to enumerate file-manager + the
-        // operator, so this template escaped it entirely — the enumerate-vs-scan
-        // trap. Run the guard with NO arguments and assert it reached this file.
-        const out = execFileSync(
-            "bash",
-            [
-                resolve(
-                    import.meta.dirname,
-                    "../../../../scripts/check-base-images-pinned.sh",
-                ),
-            ],
-            { encoding: "utf8" },
-        );
-        expect(out).toContain("packages/kn-next/templates/app/Dockerfile.hbs");
+    it("runs as non-root", () => {
+        const { appDir } = scaffoldApp();
+        const df = readFileSync(join(appDir, "Dockerfile"), "utf8");
+        expect(df).toMatch(/USER 65532:65532/);
     });
 });
 
@@ -590,18 +457,18 @@ describe("kn-next create — the CLI entry (createMain)", () => {
     ): Promise<{ code: number; out: string; err: string }> {
         let out = "";
         let err = "";
-        const outSpy = vi
-            .spyOn(process.stdout, "write")
-            .mockImplementation((chunk) => {
+        const outSpy = spyOn(process.stdout, "write").mockImplementation(
+            (chunk) => {
                 out += String(chunk);
                 return true;
-            });
-        const errSpy = vi
-            .spyOn(process.stderr, "write")
-            .mockImplementation((chunk) => {
+            },
+        );
+        const errSpy = spyOn(process.stderr, "write").mockImplementation(
+            (chunk) => {
                 err += String(chunk);
                 return true;
-            });
+            },
+        );
         try {
             const code = await createMain(argv);
             return { code, out, err };
@@ -694,7 +561,7 @@ describe("kn-next create — the app name is VALIDATED, never escaped-and-shippe
         ["a".repeat(64), "RFC1123 labels cap at 63 characters"],
     ] as const;
 
-    it.each(INVALID)("rejects %j (%s)", (name) => {
+    it.each([...INVALID])("rejects %j (%s)", (name) => {
         const appDir = join(root, "apps", "victim");
         mkdirSync(appDir, { recursive: true });
         expect(() => writeScaffold({ appDir, name })).toThrow(/RFC1123|name/i);
@@ -705,12 +572,12 @@ describe("kn-next create — the app name is VALIDATED, never escaped-and-shippe
     it("the CLI exits NON-ZERO on an invalid name (a broken app must never be exit 0)", async () => {
         const appDir = join(root, "apps", "cli-victim");
         mkdirSync(appDir, { recursive: true });
-        const errSpy = vi
-            .spyOn(process.stderr, "write")
-            .mockImplementation(() => true);
-        const outSpy = vi
-            .spyOn(process.stdout, "write")
-            .mockImplementation(() => true);
+        const errSpy = spyOn(process.stderr, "write").mockImplementation(
+            () => true,
+        );
+        const outSpy = spyOn(process.stdout, "write").mockImplementation(
+            () => true,
+        );
         let err = "";
         errSpy.mockImplementation((chunk) => {
             err += String(chunk);
@@ -833,17 +700,18 @@ describe("kn-next create — file safety", () => {
     });
 });
 
-describe("kn-next create — a generated app is COVERED by the seam-guard CI matrix (#408)", () => {
-    it("appears in BOTH appsRequiringSeamGuard and discoverSeamAliveApps", async () => {
-        const { appsRequiringSeamGuard, discoverSeamAliveApps } =
-            await loadScanner();
-        // The per-app seam matrix asserts that every app which NEEDS the guard
-        // CARRIES it. Scaffolding into `apps/<name>` must therefore land on the
-        // covered side of that difference, never open a coverage hole.
+describe("kn-next create — the seam-guard CI matrix no longer applies (ADR-0048)", () => {
+    it("does not require a scaffolded app to carry the standalone seam guard", () => {
+        // The matrix pairs "apps that NEED the guard" with "apps that CARRY
+        // it". Under ADR-0048 a scaffolded app needs neither, so it must sit
+        // outside the matrix rather than on its uncovered side — which would
+        // read as a coverage hole that no longer exists.
         const { appDir } = scaffoldApp("scaffolded");
+
         expect(existsSync(appDir)).toBe(true);
-        expect(appsRequiringSeamGuard(root)).toContain("scaffolded");
-        expect(discoverSeamAliveApps(root)).toContain("scaffolded");
+        expect(existsSync(join(appDir, "standalone-seam-alive.test.ts"))).toBe(
+            false,
+        );
     });
 });
 
@@ -1051,5 +919,99 @@ describe("#864 follow-ups — dry-run refuses, and the precedence list matches u
         expect(() =>
             writeScaffold({ appDir, name: "cjs864", force: true }),
         ).not.toThrow();
+    });
+});
+
+describe("#867 the scaffold ships a .dockerignore", () => {
+    /**
+     * The generated Dockerfile does `COPY . .`, and its context is the resolved
+     * tracing root — which is not always the app directory. When the lockfile
+     * walk finds a marker above the app, the context widens to that ancestor
+     * and everything under it is uploaded to the daemon and baked into the
+     * builder layer.
+     *
+     * `create` already WARNS on a duplicate root marker. A warning tells the
+     * user something is wrong; this file is what makes being wrong harmless.
+     *
+     * The secret exclusions are the load-bearing half. A `.env` in the context
+     * lands in a layer, and layers are extractable from any pushed image — so
+     * it is readable by anyone who can pull, not just someone who can exec.
+     * The runtime reads config from Kubernetes Secrets via env
+     * (`.claude/rules/security.md`), so nothing here is needed at build time.
+     */
+    const dockerignore = (): string => {
+        const repoRoot = resolve(
+            dirname(fileURLToPath(import.meta.url)),
+            "../../../..",
+        );
+        return readFileSync(
+            resolve(
+                repoRoot,
+                "packages/kn-next/templates/app/.dockerignore.hbs",
+            ),
+            "utf8",
+        );
+    };
+
+    it("excludes secrets — the exposure that costs the most", () => {
+        const body = dockerignore();
+        for (const pattern of [
+            ".env",
+            ".env.*",
+            "*.pem",
+            "*.key",
+            ".npmrc",
+            "kubeconfig",
+        ]) {
+            expect(body.split("\n")).toContain(pattern);
+        }
+        // …while still allowing the committed example, which carries no secret
+        // and is what a reader copies from.
+        expect(body.split("\n")).toContain("!.env.example");
+    });
+
+    it("excludes .git, dependencies and build output — and re-includes what the Dockerfile COPYs", () => {
+        const lines = dockerignore().split("\n");
+        for (const pattern of [
+            "node_modules",
+            ".git",
+            ".next",
+            ".output",
+            "knext-exec*",
+        ]) {
+            expect(lines).toContain(pattern);
+        }
+        // The other half, without which the image is UNBUILDABLE: the
+        // Dockerfile COPYs `.output/public` and the compiled binary out of
+        // this very context, so blanket build-output exclusions must carry
+        // their negations (dockerignore is last-match-wins).
+        for (const negation of ["!.output/public", "!knext-exec-linux-*"]) {
+            expect(lines).toContain(negation);
+        }
+        // And order matters: a negation ABOVE its exclusion is dead.
+        expect(lines.indexOf("!.output/public")).toBeGreaterThan(
+            lines.indexOf(".output"),
+        );
+        expect(lines.indexOf("!knext-exec-linux-*")).toBeGreaterThan(
+            lines.indexOf("knext-exec*"),
+        );
+    });
+
+    it("is rendered into the scaffold, not just present in the template", () => {
+        // A template file the generator never writes is decoration. `create`
+        // renders every `.hbs` under the template root, so the guard is that
+        // the file carries the `.hbs` suffix the loader keys on.
+        const repoRoot = resolve(
+            dirname(fileURLToPath(import.meta.url)),
+            "../../../..",
+        );
+        expect(
+            existsSync(
+                resolve(
+                    repoRoot,
+                    "packages/kn-next/templates/app/.dockerignore.hbs",
+                ),
+            ),
+        ).toBe(true);
     });
 });

@@ -1,8 +1,15 @@
+import { describe, expect, it, setDefaultTimeout } from 'bun:test';
+
+// bun IGNORES `describe(name, { timeout }, fn)` — the options object is
+// accepted and silently DROPPED. Measured: a 50ms suite timeout let a 400ms
+// test pass, so these suites were running under bun's 5s default rather than
+// the timeout they declare. `setDefaultTimeout` is the form bun honours.
+setDefaultTimeout(30_000);
+
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 import { blankNonCode } from '../scripts/lib/blank-non-code.mjs';
 import { codeWithLiterals } from '../scripts/lib/prover-lane.mjs';
 import { auditBlockingGate, type BlockingGateOptions } from './helpers/blocking-gate';
@@ -925,6 +932,9 @@ jobs:
  * than obeyed. A file that opts in and pins nothing is caught; a file that opts in
  * twice and pins once is not.
  */
+// Shells out to git across the whole tracked tree. Green run alone, timed out
+// at the 5s default only inside the full suite — a budget problem, not a
+// logic one. Same class as the other spawners raised in this sweep.
 describe('#690 every `allowPathsFilter` caller pins the filter CONTENTS', () => {
   const REPO_ROOT = resolve(import.meta.dirname, '..');
 

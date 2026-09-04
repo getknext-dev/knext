@@ -1,6 +1,6 @@
+import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
 
 /**
  * Every gateway hostname the PLATFORM mints into an app-consumed Secret must be
@@ -121,7 +121,7 @@ function gatewayHostsIn(relPath: string): string[] {
 }
 
 describe('platform-minted gateway hostnames are rooted', () => {
-  it.each(MINTING_ARTIFACTS)('%s mints only rooted gateway hosts', (relPath) => {
+  it.each([...MINTING_ARTIFACTS])('%s mints only rooted gateway hosts', (relPath) => {
     const hosts = gatewayHostsIn(relPath);
 
     // Both halves: the file must actually contain a gateway host, or "no unrooted

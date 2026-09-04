@@ -11,8 +11,8 @@
  *  - activeTraceId is undefined with no recording span.
  */
 
+import { describe, expect, it, mock } from "bun:test";
 import { ROOT_CONTEXT, SpanKind } from "@opentelemetry/api";
-import { describe, expect, it, vi } from "vitest";
 import {
     activeCorrelationId,
     activeTraceId,
@@ -37,7 +37,7 @@ function serverSpan() {
             traceId: "a".repeat(32),
             spanId: "b".repeat(16),
         }),
-        setAttribute: vi.fn(),
+        setAttribute: mock(),
     };
 }
 
@@ -69,7 +69,7 @@ describe("withColdStartSpan / withDbWakeSpan", () => {
 
 describe("ColdStartSpanProcessor", () => {
     it("emits the cold-start metric exactly once, on the first SERVER span", () => {
-        const onColdStart = vi.fn();
+        const onColdStart = mock();
         const proc = new ColdStartSpanProcessor(Date.now() - 100, onColdStart);
 
         proc.onStart(serverSpan(), ROOT_CONTEXT);
@@ -80,7 +80,7 @@ describe("ColdStartSpanProcessor", () => {
     });
 
     it("ignores non-SERVER spans", () => {
-        const onColdStart = vi.fn();
+        const onColdStart = mock();
         const proc = new ColdStartSpanProcessor(Date.now(), onColdStart);
         proc.onStart({ ...serverSpan(), kind: SpanKind.CLIENT }, ROOT_CONTEXT);
         expect(onColdStart).not.toHaveBeenCalled();
@@ -114,7 +114,7 @@ describe("correlation context", () => {
         const ctx = prop.extract(ROOT_CONTEXT, {}, getter);
         expect(correlationIdFromContext(ctx)).toBe(UUID);
         // inject is a deliberate no-op; fields advertises the header.
-        const setter = { set: vi.fn() };
+        const setter = { set: mock() };
         prop.inject(ctx, {}, setter);
         expect(setter.set).not.toHaveBeenCalled();
         expect(prop.fields().length).toBeGreaterThan(0);

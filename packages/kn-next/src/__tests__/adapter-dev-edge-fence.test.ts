@@ -2,13 +2,21 @@
 //
 // This e2e talks to a real `next dev` child process over a socket; the repo's
 // default happy-dom environment enforces a Same-Origin Policy that blocks it.
+
+import { afterAll, describe, expect, it } from "bun:test";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+    existsSync,
+    mkdirSync,
+    rmSync,
+    symlinkSync,
+    writeFileSync,
+} from "node:fs";
+import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
-import { afterAll, describe, expect, it } from "vitest";
 
 /**
  * #408 item 1 — the dev-phase half of the guarded-instrumentation fence
@@ -39,6 +47,7 @@ import { afterAll, describe, expect, it } from "vitest";
  */
 
 const here = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = resolve(here, "../../../..");
 const FIXTURE = join(here, "fixtures", "dev-edge-fence");
 const ADAPTER_SRC = resolve(here, "../adapters/next-adapter.ts");
 // next.config.mjs in the fixture points `adapterPath` here; the bundle is
@@ -100,6 +109,32 @@ async function bundleAdapter(): Promise<void> {
     writeFileSync(join(FIXTURE, ".knext", ".gitignore"), "*\n");
 }
 
+/**
+ * Materialize the fixture's TypeScript types from the WORKSPACE's real
+ * resolution. The fixture is a TS app on purpose (the .ts instrumentation
+ * files are the fence's subject), so `next dev`'s TypeScript preflight
+ * requires `@types/react` resolvable from the fixture — and the fixture's
+ * `node_modules` is untracked, so a CI checkout has none: the dev server
+ * booted, printed "Please install @types/react", and died as an unhandled
+ * rejection, which this suite could only report as "never answered". That was
+ * DETERMINISTIC in CI and invisible locally, where a stale install satisfied
+ * it — the exact works-on-my-machine shape. Symlinked fresh on every run so
+ * neither environment depends on leftover state.
+ */
+function materializeFixtureTypes(): void {
+    const req = createRequire(
+        join(REPO_ROOT, "apps", "file-manager", "package.json"),
+    );
+    const typesDir = join(FIXTURE, "node_modules", "@types");
+    mkdirSync(typesDir, { recursive: true });
+    for (const pkg of ["@types/react", "@types/react-dom"]) {
+        const target = dirname(req.resolve(`${pkg}/package.json`));
+        const dest = join(typesDir, pkg.split("/")[1]);
+        rmSync(dest, { recursive: true, force: true });
+        symlinkSync(target, dest, "dir");
+    }
+}
+
 describe("#408 — the edge fence covers `next dev --webpack` (real dev server)", () => {
     it("serves a middleware app with guarded instrumentation, with no edge-compile failure", async () => {
         expect(
@@ -112,6 +147,7 @@ describe("#408 — the edge fence covers `next dev --webpack` (real dev server)"
         ).toBe(true);
 
         await bundleAdapter();
+        materializeFixtureTypes();
         // Start from a clean `.next`: a SIGKILLed dev server leaves a stale
         // `.next/dev/lock` behind, and the next run refuses to start ("Another
         // next dev server is already running") — which would look like a fence
@@ -121,11 +157,22 @@ describe("#408 — the edge fence covers `next dev --webpack` (real dev server)"
         const port = await freePort();
         let out = "";
         let exited: string | null = null;
-        child = spawn(NEXT_BIN, ["dev", "--webpack", "-p", String(port)], {
-            cwd: FIXTURE,
-            detached: true,
-            env: { ...process.env, NODE_ENV: "development" },
-        });
+        // `-H 127.0.0.1`: bind the interface the poll below dials.
+        //
+        // Without it `next dev` binds `localhost`, and the CI runner resolves
+        // that to `::1` only — so the server reported `✓ Ready in 376ms` and
+        // listened happily on IPv6 while every IPv4 probe was refused. The poll
+        // then ran its full 150s against a healthy server it could not reach.
+        // Locally the two agree, which is why this only ever failed in CI.
+        child = spawn(
+            NEXT_BIN,
+            ["dev", "--webpack", "-p", String(port), "-H", "127.0.0.1"],
+            {
+                cwd: FIXTURE,
+                detached: true,
+                env: { ...process.env, NODE_ENV: "development" },
+            },
+        );
         child.stdout?.on("data", (b) => {
             out += String(b);
         });
@@ -135,16 +182,55 @@ describe("#408 — the edge fence covers `next dev --webpack` (real dev server)"
         child.on("exit", (code, signal) => {
             exited = `code=${code} signal=${signal}`;
         });
+        // A spawn that never starts emits `error`, not `exit`. Without this the
+        // failure was indistinguishable from a slow server: `exited` stayed null,
+        // no output was ever captured, and the poll simply ran out its 150s while
+        // the assertions below reported "never answered" with an EMPTY log.
+        child.on("error", (err) => {
+            exited = `spawn error: ${err?.message ?? err}`;
+        });
 
         // Readiness = the server actually answers, not a log line: `next dev`
         // prints "Ready in …" and only THEN bails out if another dev server holds
         // the directory, so the banner alone would be a false green.
+        // The dev server's log, bounded. Embedding the WHOLE of it pushed the
+        // assertion's own label out of the runner's failure window, so CI
+        // reported the failure with its reason cut off.
+        const tail = () =>
+            out.split("\n").filter(Boolean).slice(-25).join("\n");
         const deadline = Date.now() + 150_000;
         let res: Response | undefined;
         while (Date.now() < deadline && !exited) {
             try {
+                // Per-ATTEMPT budget, sized between two failures rather than
+                // guessed:
+                //
+                //   120s (original) is longer than the poll's own 150s deadline,
+                //   so one hung attempt ate it and the SECOND ran past the 180s
+                //   test timeout — the informative assertions below never ran and
+                //   CI reported a bare timeout.
+                //
+                //   5s (my first correction) over-shot the other way. `next dev
+                //   --webpack` answers its FIRST request only after a cold
+                //   compile, which takes longer than that on a CI runner, so every
+                //   attempt aborted mid-compile and the loop never converged —
+                //   with the server reporting `✓ Ready in 305ms` and bound to the
+                //   very address being dialled.
+                //
+                // 30s leaves room for that compile and still lets the loop iterate
+                // ~5 times inside its deadline, so a genuine failure reaches the
+                // assertion instead of the test timeout.
+                //
+                // It was 120s, which is longer than the poll is allowed to run
+                // and two-thirds of the whole test budget. A dev server that
+                // ACCEPTS the connection and then compiles (rather than
+                // refusing it) makes one attempt hang for 120s; the second then
+                // runs past the 180s test timeout, so the informative
+                // assertions below — which print the dev server's own output —
+                // never execute. CI reported a bare "timed out after 180000ms"
+                // with 2 expect() calls, and the reason was thrown away.
                 res = await fetch(`http://127.0.0.1:${port}/`, {
-                    signal: AbortSignal.timeout(120_000),
+                    signal: AbortSignal.timeout(30_000),
                 });
                 break;
             } catch {
@@ -153,11 +239,15 @@ describe("#408 — the edge fence covers `next dev --webpack` (real dev server)"
         }
         expect(
             exited,
-            `next dev exited before serving a request (${exited}):\n${out}`,
+            `next dev exited before serving a request (${exited}):\n${tail()}`,
         ).toBeNull();
         expect(
             res,
-            `dev server never answered on :${port}:\n${out}`,
+            // `out.length` is in the message on purpose: "never answered" and
+            // "never said anything" are different failures, and the second one
+            // means the process or its piping is broken rather than slow.
+            `dev server never answered on :${port} ` +
+                `(captured ${out.length} bytes of output, exited=${exited}):\n${tail()}`,
         ).toBeDefined();
         const response = res as Response;
         const body = await response.text();
@@ -165,11 +255,11 @@ describe("#408 — the edge fence covers `next dev --webpack` (real dev server)"
         expect(
             EDGE_COMPILE_FAILURE_RE.test(out),
             `next dev --webpack hit an edge-compile failure — the adapter fence ` +
-                `did not apply in the dev phase:\n${out}`,
+                `did not apply in the dev phase:\n${tail()}`,
         ).toBe(false);
         expect(
             response.status,
-            `dev server responded ${response.status}:\n${out}`,
+            `dev server responded ${response.status}:\n${tail()}`,
         ).toBe(200);
         expect(body).toContain("devfix ok");
         // The middleware (which is what forces the edge compile at all) really ran.

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import * as schema from '../schema';
 
 // `@getknext/db/schema` is the one place an app imports its table/column builders

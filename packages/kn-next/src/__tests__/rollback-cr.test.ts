@@ -8,12 +8,12 @@
  * directly — only the NextApp CR.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, mock } from "bun:test";
 import { parseRollbackArgs, runRollback } from "../cli/rollback";
 
 describe("runRollback (#92 — CR-only traffic patch)", () => {
     it("pins to a revision: exactly ONE kubectl patch nextapp setting spec.traffic.revisionName", () => {
-        const exec = vi.fn();
+        const exec = mock();
         runRollback("my-app", "default", "my-app-00002", undefined, exec);
 
         expect(exec).toHaveBeenCalledTimes(1);
@@ -33,7 +33,7 @@ describe("runRollback (#92 — CR-only traffic patch)", () => {
     });
 
     it("latest-ready (no --to): patches spec.traffic to null to clear any pin", () => {
-        const exec = vi.fn();
+        const exec = mock();
         runRollback("my-app", "default", undefined, undefined, exec);
 
         expect(exec).toHaveBeenCalledTimes(1);
@@ -43,7 +43,7 @@ describe("runRollback (#92 — CR-only traffic patch)", () => {
     });
 
     it("canary flows into the patch JSON alongside the pinned revision", () => {
-        const exec = vi.fn();
+        const exec = mock();
         runRollback("my-app", "default", "my-app-00002", 20, exec);
 
         const argv = exec.mock.calls[0][0] as string[];
@@ -53,7 +53,7 @@ describe("runRollback (#92 — CR-only traffic patch)", () => {
     });
 
     it("passes -n <namespace> so the patch targets the right namespace", () => {
-        const exec = vi.fn();
+        const exec = mock();
         runRollback("my-app", "preview", "my-app-00002", undefined, exec);
         const argv = exec.mock.calls[0][0] as string[];
         const nIdx = argv.indexOf("-n");
@@ -62,7 +62,7 @@ describe("runRollback (#92 — CR-only traffic patch)", () => {
     });
 
     it("the patch JSON is a single uninterpreted argv token (shell:false safe)", () => {
-        const exec = vi.fn();
+        const exec = mock();
         runRollback("my-app", "default", "my-app-00002", undefined, exec);
         const argv = exec.mock.calls[0][0] as string[];
         const pIdx = argv.indexOf("-p");
@@ -72,7 +72,7 @@ describe("runRollback (#92 — CR-only traffic patch)", () => {
     });
 
     it("NEGATIVE (ADR-0001): never targets ksvc / service / route / kn / knative — only nextapp", () => {
-        const exec = vi.fn();
+        const exec = mock();
         runRollback("my-app", "default", "my-app-00002", 20, exec);
         const forbidden = [
             "ksvc",

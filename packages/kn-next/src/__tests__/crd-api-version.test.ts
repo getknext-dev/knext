@@ -16,9 +16,9 @@
  * list is exactly how the first such site would be missed (cf. `preview.ts`).
  */
 
+import { describe, expect, it } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { describe, expect, it } from "vitest";
 import YAML from "yaml";
 import { buildNextAppCRObject, renderNextAppCR } from "../cli/cr-builder";
 import type { KnativeNextConfig } from "../config";

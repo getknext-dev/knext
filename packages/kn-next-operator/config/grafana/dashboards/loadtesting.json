@@ -19,7 +19,7 @@
   "links": [],
   "liveNow": false,
   "uid": "kn-next-loadtest",
-  "title": "knext \u2014 Load Testing",
+  "title": "knext — Load Testing",
   "tags": ["knext", "knative", "nextjs", "load-test"],
   "timezone": "",
   "schemaVersion": 39,
@@ -162,7 +162,7 @@
       }
     },
     {
-      "title": "Node.js Event Loop Lag",
+      "title": "In-flight requests (saturation) by pod",
       "type": "timeseries",
       "gridPos": {
         "h": 8,
@@ -176,7 +176,7 @@
       },
       "targets": [
         {
-          "expr": "max(nodejs_eventloop_lag_max_seconds{service=~\"$app\"}) by (pod)",
+          "expr": "max(knext_bunexec_http_inflight_requests{service=~\"$app\"}) by (pod)",
           "legendFormat": "Lag {{pod}}",
           "refId": "A"
         }
@@ -186,7 +186,8 @@
           "unit": "s"
         },
         "overrides": []
-      }
+      },
+      "description": "Saturation for the compiled runtime. Was max(nodejs_eventloop_lag_max_seconds) — a prom-client default metric from the retired node path, which the Bun single executable never emits (no prom-client at all). In-flight request count is the saturation signal the runtime does export."
     }
   ],
   "templating": {

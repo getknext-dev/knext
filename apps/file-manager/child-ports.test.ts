@@ -9,9 +9,10 @@
 // timeout with no message) or into a skip — the green-by-skip class already closed
 // three times here (#408, #448, #659). So a crashing child and a silent child both
 // have their own case, and both assert the REASON is in the message.
+
+import { afterEach, describe, expect, it, mock } from 'bun:test';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   freePort,
@@ -28,10 +29,11 @@ import {
  * Inert unless `failAfter >= 0`, so every other case in this file — including
  * the spawn-based ones — runs against the real `node:net`.
  */
-const netFault = vi.hoisted(() => ({ failAfter: -1, created: 0, opened: [] as number[] }));
+const netFault = (() => ({ failAfter: -1, created: 0, opened: [] as number[] }))();
 
-vi.mock('node:net', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:net')>();
+const __knextReal1 = { ...(await import('node:net')) };
+mock.module('node:net', () => {
+  const actual = __knextReal1;
   return {
     ...actual,
     default: actual,

@@ -1,0 +1,114 @@
+/**
+ * The coverage policy — ONE definition, read by both consumers (#884).
+ *
+ * Consumers:
+ *   - `vitest.config.ts`      — the include/exclude that define the honest
+ *                               DENOMINATOR (every source file enumerated, an
+ *                               untouched one at 0%).
+ *   - `scripts/check-coverage.mjs` — the floors, enforced over the MERGED lcov
+ *                               of both runners.
+ *
+ * Why vitest no longer enforces the floors: after the bun migration it collects
+ * 3 test files out of 338, so its numerator is a rounding error while its
+ * denominator is the whole tree. Thresholds there measured 1.37% against a 77%
+ * floor. The gate moved; the numbers did not.
+ *
+ * ## What survives an lcov merge, and what does not
+ *
+ * Measured on bun 1.4.0. bun's lcov emits `SF` / `FNF` / `FNH` / `DA` / `LF` /
+ * `LH` and nothing else — no `FN`/`FNDA` names, no `BRDA`/`BRF`/`BRH`.
+ * Consequences, stated rather than papered over:
+ *
+ *   - **lines** merge EXACTLY. `DA` carries per-line identity, so the union of
+ *     executed lines across reports is the true union. This is the floor that
+ *     matters and it is enforced.
+ *   - **functions** merge as a CONSERVATIVE LOWER BOUND. With counts but no
+ *     identity, `max()` across reports under-reports a file both runners
+ *     touched. Under-reporting is the safe direction for a floor, so it is
+ *     enforced — at a floor set to the measured merged number.
+ *   - **branches** do NOT merge at all: bun emits no branch records, so a branch
+ *     percentage over the merge would be computed from vitest's 3 files only.
+ *     That is the dishonest denominator this gate exists to prevent, so the
+ *     branch floor is NOT carried over. It is not "lowered" — it is
+ *     unmeasurable under this shape, and a number describing a measurement
+ *     nobody makes is decoration.
+ *   - **statements** are not an lcov concept at all; the old `statements` floor
+ *     was v8/istanbul-only and has no representation here.
+ *
+ * The branch/statement gap is real lost signal. It is recorded in
+ * `docs/benchmarks/coverage-baseline.md` rather than hidden behind a floor that
+ * cannot fail.
+ */
+
+/** Where `scripts/bun-test.mjs --coverage` drops its per-file lcov reports. */
+export const BUN_COVERAGE_DIR = 'coverage-bun';
+
+/** Where vitest writes its report (its default), and the merged report we write next to it. */
+export const VITEST_LCOV = 'coverage/lcov.info';
+export const MERGED_LCOV = 'coverage/lcov.merged.info';
+
+/**
+ * The honest denominator: every source file under a package's `src/`, counted
+ * whether or not a test imports it. Adding an untested file must LOWER the
+ * percentage, never raise it.
+ */
+export const COVERAGE_INCLUDE = ['packages/*/src/**/*.{ts,tsx}'];
+
+export const COVERAGE_EXCLUDE = [
+  // Untracked local cruft (0 tracked files in git) — never repo code.
+  '**/packages/admin/**',
+  '**/packages/knext/**',
+  // Tests, type-only decls, and generated/index barrels carry no logic to cover.
+  '**/*.test.{ts,tsx}',
+  '**/*.d.ts',
+  '**/__tests__/**',
+  '**/__mocks__/**',
+  '**/*.config.{ts,js,mjs}',
+];
+
+/**
+ * Global floors, over the MERGED report.
+ *
+ * Measured 2026-09-04 on the full merge (336 bun reports + vitest's):
+ * **lines 78.41% (8546/10899), functions 79.70%** over 79 files. The old
+ * global floors — 77 lines / 74 functions — still hold against that, so they
+ * are UNCHANGED. Ratchet convention: floors sit just below the measured
+ * baseline; raise them as coverage lands, never lower one to get green.
+ */
+export const THRESHOLDS = {
+  lines: 77,
+  functions: 74,
+};
+
+/**
+ * Per-package floor for @getknext/core (`packages/kn-next`). The aggregate
+ * ratchet above can otherwise mask a regression in this one package behind
+ * lib/db/ui, which sit above 90%.
+ *
+ * ## Why these are 78/76 and not the old 90/87
+ *
+ * This is a RE-BASELINE onto a different denominator, not a coverage
+ * regression, and the difference is measurable rather than argued. For
+ * `packages/kn-next/src/**`:
+ *
+ *   - vitest's v8 provider counts **3430** lines;
+ *   - the merged report counts **9644** — bun's `DA` records are ~2.8x more
+ *     granular over the same files.
+ *
+ * A percentage over 9644 lines is simply not the same quantity as one over
+ * 3430, so carrying 90 across would be asserting a number nobody has measured.
+ * The merged baseline, measured 2026-09-04, is **lines 78.09% (7531/9644),
+ * functions 76.88% (492/640)**; the floors are set just below it, per the
+ * ratchet convention, so any drop from today reds.
+ *
+ * The old 90/87 figures are NOT lost — they are recorded in
+ * `docs/benchmarks/coverage-baseline.md` with the provider they were measured
+ * under. What was lost when vitest stopped collecting the suite was the
+ * measurement, not the coverage.
+ */
+export const PER_PATH_THRESHOLDS = {
+  'packages/kn-next/src/**': {
+    lines: 78,
+    functions: 76,
+  },
+};

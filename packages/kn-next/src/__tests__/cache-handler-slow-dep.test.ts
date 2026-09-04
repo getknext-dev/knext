@@ -1,6 +1,36 @@
+import {
+    afterEach,
+    beforeEach,
+    describe,
+    expect,
+    it,
+    jest,
+    mock,
+    spyOn,
+} from "bun:test";
 import { EventEmitter } from "node:events";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { startFakeRedis } from "./helpers/fake-redis";
+
+// This file asserts IOREDIS-shaped behaviour (`.on("ready")`, the connect/ready
+// split). Under `bun test` the handler would otherwise pick Bun's native client,
+// which has no `.on` at all — the failure then names the client rather than the
+// fact that a different one was chosen.
+//
+// Set ONCE at module scope, not per-test: a per-site pin is one `process.env`
+// line away from a case that silently exercises the other client, which is
+// exactly what happened before this moved up here.
+process.env.KNEXT_CACHE_REDIS_CLIENT = "ioredis";
+
+/**
+ * Stands in for `vi.resetModules()`, which bun has no equivalent of: a distinct
+ * specifier is a distinct module key, so a bumped query suffix yields a FRESH
+ * cache-handler record with its own module-level state.
+ *
+ * Applied to the cache-handler ONLY. Suffixing a collaborator the handler also
+ * imports would give the test a different instance from the one the handler
+ * uses, and the failure would describe the behaviour rather than the split.
+ */
+let __handlerGen = 0;
 
 /**
  * Redis half of the ledger row-3 discrimination instrument.
@@ -19,7 +49,7 @@ import { startFakeRedis } from "./helpers/fake-redis";
  * Behaviour is untouched: no new timers, no new budget, listeners only.
  */
 
-type WarnSpy = ReturnType<typeof vi.fn>;
+type WarnSpy = ReturnType<typeof mock>;
 
 const slowLines = (warn: WarnSpy): string[] =>
     warn.mock.calls
@@ -33,16 +63,16 @@ describe("slow-dep-log — the redis connect/ready split (unit)", () => {
     let warn: WarnSpy;
 
     beforeEach(() => {
-        vi.resetModules();
+        __handlerGen += 1;
         process.env.SLOW_DEP_LOG_MS = "50";
-        warn = vi.fn();
-        vi.spyOn(console, "warn").mockImplementation(
+        warn = mock();
+        spyOn(console, "warn").mockImplementation(
             warn as unknown as typeof console.warn,
         );
     });
 
     afterEach(() => {
-        vi.restoreAllMocks();
+        jest.restoreAllMocks();
         process.env.SLOW_DEP_LOG_MS = undefined;
         delete process.env.SLOW_DEP_LOG_MS;
     });
@@ -152,22 +182,22 @@ describe("cache-handler — a slow ready-check against a REAL socket is attribut
     let fake: Awaited<ReturnType<typeof startFakeRedis>> | undefined;
 
     beforeEach(() => {
-        vi.resetModules();
+        __handlerGen += 1;
         process.env.REDIS_KEY_PREFIX = "slowdep-app";
         process.env.SLOW_DEP_LOG_MS = "80";
-        warn = vi.fn();
-        vi.spyOn(console, "warn").mockImplementation(
+        warn = mock();
+        spyOn(console, "warn").mockImplementation(
             warn as unknown as typeof console.warn,
         );
-        vi.spyOn(console, "log").mockImplementation(() => {});
-        vi.spyOn(console, "error").mockImplementation(() => {});
+        spyOn(console, "log").mockImplementation(() => {});
+        spyOn(console, "error").mockImplementation(() => {});
     });
 
     afterEach(async () => {
         await fake?.close();
         fake = undefined;
         process.env = { ...original };
-        vi.restoreAllMocks();
+        jest.restoreAllMocks();
     });
 
     it("logs `redis-ready` when the handshake is fast and INFO is slow-but-inside-budget", async () => {
@@ -185,7 +215,9 @@ describe("cache-handler — a slow ready-check against a REAL socket is attribut
         process.env.REDIS_COMMAND_TIMEOUT_MS = "5000";
         process.env.REDIS_CONNECT_TIMEOUT_MS = "5000";
 
-        const mod = await import("../adapters/cache-handler.js");
+        const mod = await import(
+            `../adapters/cache-handler.js?gen=${__handlerGen}`
+        );
         const CacheHandler = mod.default as new (
             o: unknown,
         ) => {
@@ -213,7 +245,9 @@ describe("cache-handler — a slow ready-check against a REAL socket is attribut
         process.env.REDIS_COMMAND_TIMEOUT_MS = "5000";
         process.env.REDIS_CONNECT_TIMEOUT_MS = "5000";
 
-        const mod = await import("../adapters/cache-handler.js");
+        const mod = await import(
+            `../adapters/cache-handler.js?gen=${__handlerGen}`
+        );
         const CacheHandler = mod.default as new (
             o: unknown,
         ) => {

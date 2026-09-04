@@ -29,7 +29,7 @@ route never programs, webhook down), see the
 | Alert | Scenario |
 | --- | --- |
 | `KnextColdStartLatencyHigh` | [2 — cold-start latency spike](#scenario-2-cold-start-latency-spike) |
-| `KnextHighErrorRate`, `KnextCacheUnreachable` | [3 — Redis/cache down](#scenario-3-rediscache-down) |
+| `KnextHighErrorRate` | [3 — Redis/cache down](#scenario-3-rediscache-down) |
 | `KnextOperatorReconcileErrors`, `KnextOperatorReconcileSlow` | [1](#scenario-1-scale-to-zero-stuck) / [4](#scenario-4-rollback--bad-revision) |
 | `KnextNextAppDegraded` | [1](#scenario-1-scale-to-zero-stuck) / [4](#scenario-4-rollback--bad-revision) |
 
@@ -108,7 +108,9 @@ The Redis ISR/data cache (`cache-handler.js`) or Postgres is unreachable. ISR
 reads/writes fail; deep health checks fail.
 
 ### Detect
-- `KnextCacheUnreachable` firing — the deep `/api/health` route (which probes
+- (Retired alert: `KnextCacheUnreachable` no longer exists — it needed an unbounded
+  per-route label the shipped metrics deliberately do not carry. Detect this scenario
+  via `KnextHighErrorRate` plus) the deep `/api/health` route (which probes
   Postgres/Redis and is wrapped in `withRedMetrics`) returns 503:
   ```promql
   sum(rate(kn_next_http_requests_total{route="/api/health",status_class="5xx"}[5m])) by (app)

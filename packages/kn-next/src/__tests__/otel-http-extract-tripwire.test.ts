@@ -1,5 +1,8 @@
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { CORRELATION_HEADER } from "@getknext/lib/context";
 import { context, SpanKind, trace } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
@@ -8,7 +11,6 @@ import {
     InMemorySpanExporter,
     SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
     CorrelationContextPropagator,
@@ -61,11 +63,21 @@ const require_ = createRequire(import.meta.url);
 // Resolve @vercel/otel the way the app does (from apps/file-manager), so the
 // tripwire pins the SAME copy the runtime ships.
 function resolveVercelOtel(): { path: string; mod: Record<string, unknown> } {
+    // Do NOT use `new URL(rel, import.meta.url)` here. Vite rewrites that exact
+    // pattern as an ASSET reference, so under vitest it does not do URL maths at
+    // all — it produced "/apps/file-manager", the filesystem root, and the
+    // resolve then fell through to a path that does not exist. Plain Node
+    // computes the same expression correctly, which is what made this so
+    // confusing: the code was right and the runner was rewriting it.
+    //
+    // `fileURLToPath` + `resolve` is the same computation in a form Vite leaves
+    // alone.
+    const here = dirname(fileURLToPath(import.meta.url));
+    const repoRoot = resolve(here, "../../../..");
     const p = require_.resolve("@vercel/otel", {
-        paths: [
-            new URL("../../../../apps/file-manager", import.meta.url).pathname,
-            new URL("../../..", import.meta.url).pathname,
-        ],
+        // file-manager FIRST: it is the package that declares the dependency,
+        // so it pins the copy the runtime actually ships.
+        paths: [join(repoRoot, "apps/file-manager"), repoRoot],
     });
     return { path: p, mod: require_(p) as Record<string, unknown> };
 }

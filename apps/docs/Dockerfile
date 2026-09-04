@@ -1,90 +1,83 @@
-# knext-docs runtime image — ported from apps/file-manager/Dockerfile in the knext
-# monorepo, adapted for a single-package (npm) repo instead of the pnpm workspace.
+# syntax=docker/dockerfile:1
 #
-# Stage 1: build the Fumadocs Next.js app with standalone output.
-FROM node:22-alpine AS builder
-WORKDIR /app
+# knext-docs — vinext image (ADR-0048).
+#
+# Replaces the node/standalone image and, with it, the last consumer of the
+# shared V8 compile cache. What that image needed and this one does not: a
+# `.next/standalone` tree, `NODE_COMPILE_CACHE`, the vendored
+# `scripts/warm-compile-cache.sh` warm-up step, and the absolute-path rules that
+# warm-up imposed (V8 keys entries by module filename, so the build-time and
+# run-time paths had to match exactly). None of it survives, because the build
+# now emits a Nitro output that Bun runs directly.
+#
+# This image runs the UNCOMPILED `.output` under Bun rather than a
+# `bun build --compile` single executable. That is deliberate and measured: the
+# compiled binary cannot load a native module, which is what image optimization
+# needs (EXPERIMENTS.md E13, ADR-0048 Amendment 2). Docs is served, not
+# scaled-to-zero-critical, so the ~410ms it gives up is the cheaper side of that
+# trade — and it is still far below the node standalone it replaces.
+
+# ---------------------------------------------------------------------------
+# Builder — the whole workspace, because docs depends on local @getknext/*
+# packages and consumes them as BUILT dist, not source.
+# ---------------------------------------------------------------------------
+FROM oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb AS builder
+
+# Node is still required in the BUILD stage: tsup shells out to `tsc` for the
+# .d.ts pass. It does not reach the runtime image. pnpm is gone — `bun install`
+# drives the workspace now, which is also why there is no `npm i -g` layer.
+RUN apk add --no-cache nodejs libstdc++ libgcc
+
+WORKDIR /repo
 COPY . .
-# @getknext/core is a file: dependency in the monorepo; in a real build it must be
-# resolvable (vendored or published). See DEPLOY.md "Building the image".
-RUN npm install --no-audit --no-fund
-RUN npm run build
 
-# Stage 2: lean production image using the Node standalone output.
-FROM node:22-alpine AS runner
+RUN bun install --frozen-lockfile
+
+# Order matters: docs imports the libraries' dist. Building docs first compiles
+# against the PREVIOUS library — the app builds fine and the bug only appears at
+# runtime, which is what made this expensive when file-manager hit it.
+RUN bun run --filter "@getknext/lib" build
+RUN bun run --filter "@getknext/db" build
+RUN bun run --filter "@getknext/core" build
+
+WORKDIR /repo/apps/docs
+
+# fumadocs' MDX codegen. Bundler-independent — it emits `.source/` as ordinary
+# TypeScript, which is what makes this site buildable off webpack at all.
+RUN bunx fumadocs-mdx
+
+# vinext -> nitro bun-preset .output/server/index.mjs
+RUN ./node_modules/.bin/vite build
+
+# Fail loudly rather than shipping an image whose CMD points at nothing — the
+# #857 shape, where a build exits 0 while emitting no server.
+RUN test -f .output/server/index.mjs \
+    || (echo "vite build produced no .output/server/index.mjs" && exit 1)
+
+# ---------------------------------------------------------------------------
+# Runtime — the nitro output and its assets. No node, no npm, no package
+# manager, no compile-cache volume to mount or warm.
+# ---------------------------------------------------------------------------
+FROM oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb
+
+RUN apk add --no-cache libstdc++ libgcc
+
 WORKDIR /app
-ENV NODE_ENV=production
-ENV PORT=3000
 
-# Install curl for the healthcheck.
-RUN apk add --no-cache curl
+COPY --from=builder /repo/apps/docs/.output /app/.output
+# sharp is a native module and cannot be bundled; it ships beside the server so
+# /_next/image can optimize instead of silently serving originals.
+COPY --from=builder /repo/apps/docs/node_modules/sharp /app/node_modules/sharp
+COPY --from=builder /repo/node_modules/@img /app/node_modules/@img
 
-# node:22-alpine ships a non-root `node` user/group at uid/gid 1000.
+USER 65532:65532
 
-# Copy the standalone server bundle (includes the node_modules trace).
-COPY --from=builder /app/.next/standalone ./
-# Static assets served locally (non-CDN fallback).
-COPY --from=builder /app/.next/static ./.next/static
-# Public assets.
-COPY --from=builder /app/public ./public
-
-# ── Bake the V8 module compile cache INTO the image (#439) ───────────────────
-# This used to be a bare `mkdir -p .next/compile-cache`, which shipped an EMPTY
-# directory that nothing populated. NODE_COMPILE_CACHE only helps when the cache
-# is already populated at process start, so every cold pod recompiled the whole
-# standalone server from scratch, wrote the cache into the ephemeral container
-# layer, and threw it away on scale-to-zero — the IDENTICAL bug ADR-0035 fixed
-# for apps/file-manager (#437).
-#
-# The build now boots the SAME bare `node server.js` the CMD runs, with the SAME
-# absolute NODE_COMPILE_CACHE (V8 keys entries by module filename, so the paths
-# must match), waits for the dependency-free static home page `/` (docs serves no
-# /api/health route, unlike file-manager), then SIGTERMs it — which is when V8
-# flushes its accumulated entries to disk. The result lands in the image layer,
-# so it is present from the FIRST pod onward (no volume; works on stock Knative)
-# and can never go stale because it is versioned with the image. The script
-# FAILS THE BUILD if the cache ends up empty or truncated.
-#
-# The warm-up script is the SHARED, promoted copy (ADR-0035 action item 2:
-# scripts/warm-compile-cache.sh), so this second consumer inherits the guards
-# instead of copy-pasting them. This single-package (npm) image builds from an
-# apps/docs-rooted context, so — exactly as @getknext/core is vendored into the
-# build context (see DEPLOY.md "Resolve @getknext/core") — the shared script is
-# vendored to ./scripts/warm-compile-cache.sh before the build.
-#
-# NODE_COMPILE_CACHE here is ABSOLUTE (/app/…) on purpose: the warm-up CLEARS the
-# cache dir before booting (#440) and its safety guard FATALs on a RELATIVE path.
-# WORKDIR is /app, so this is the SAME on-disk dir the CMD default resolves to.
-# The plausibility floor is sized for the smaller docs app (a static fumadocs
-# site: no sharp, no @getknext/core runtime supervisor), well below file-manager's
-# 1106 entries / 4.25 MB reference — see the ADR-0035 determinism note.
-COPY --from=builder /app/scripts/warm-compile-cache.sh /usr/local/bin/warm-compile-cache.sh
-RUN chmod +x /usr/local/bin/warm-compile-cache.sh \
-    && NODE_ENV=production \
-       PORT=3000 \
-       NODE_COMPILE_CACHE=/app/.next/compile-cache \
-       KNEXT_WARMUP_BOOT_CMD="node server.js" \
-       KNEXT_WARMUP_HEALTH_PATH=/ \
-       KNEXT_WARMUP_MIN_FILES=100 \
-       KNEXT_WARMUP_MIN_BYTES=300000 \
-       /usr/local/bin/warm-compile-cache.sh \
-    && chown -R node:node .next
+ENV PORT=3000 \
+    HOSTNAME=0.0.0.0 \
+    NODE_ENV=production
 
 EXPOSE 3000
 
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:3000/ || exit 1
-
-# Drop privileges.
-USER node
-
-# NODE_COMPILE_CACHE: points at the V8 module compile cache that was POPULATED at
-# image build time by the warm-up above (#439), so a cold pod loads baked bytecode
-# instead of compiling the standalone server from source. Runtime writes to this
-# dir are ephemeral (container layer) and that is fine — the baked entries are what
-# every cold start reads.
-# EXPORT so the value reaches the exec'd node process. The operator's
-# externally-injected value (PVC path) still wins via `:-`; the Dockerfile only
-# supplies the fallback, which is ABSOLUTE so it names the SAME dir the warm-up
-# baked (WORKDIR is /app).
-CMD ["sh", "-c", "export NODE_COMPILE_CACHE=\"${NODE_COMPILE_CACHE:-/app/.next/compile-cache}\"; exec node server.js"]
+# One process, nothing wrapping it — which is also why draining on SIGTERM is
+# the entry's own job rather than a parent's.
+CMD ["bun", ".output/server/index.mjs"]

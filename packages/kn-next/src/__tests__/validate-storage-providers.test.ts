@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import {
     ConfigValidationError,
     SUPPORTED_STORAGE_PROVIDERS,
@@ -31,7 +31,11 @@ describe("validateConfig storage providers", () => {
 
     it("supports the four multi-cloud providers (gcs, s3, minio, azure)", () => {
         expect([...SUPPORTED_STORAGE_PROVIDERS].sort()).toEqual(
-            ["azure", "gcs", "minio", "s3"].sort(),
+            (
+                [
+                    ...["azure", "gcs", "minio", "s3"],
+                ] as unknown as (typeof SUPPORTED_STORAGE_PROVIDERS)[number][]
+            ).sort(),
         );
     });
 

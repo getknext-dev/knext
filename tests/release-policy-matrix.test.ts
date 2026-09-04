@@ -1,6 +1,7 @@
+import { describe, expect, it } from 'bun:test';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { workspaceGlobs as sharedWorkspaceGlobs } from '../scripts/lib/workspace-globs.mjs';
 
 /**
  * GUARD TEST for the release/support policy and the compatibility matrix (#314).
@@ -79,18 +80,16 @@ type WorkspacePackage = { dir: string; manifest: Manifest };
  * scan would abort with `unsupported workspace glob "esbuild"` — CI red, on a
  * message pointing at the wrong thing entirely.
  */
+// Read through the shared helper rather than parsed here.
+//
+// Three guards make this same "a hardcoded list still matches the workspace"
+// check, and each parsed the declaration its own way — so removing pnpm broke
+// all three separately, and nothing stopped them disagreeing about what the
+// workspace IS. The careful `overrides:`-vs-`packages:` distinction the old
+// parser needed is gone with the YAML: `package.json`'s `workspaces` array
+// contains globs and nothing else.
 function workspaceGlobs(): string[] {
-  const lines = readFileSync(resolve(REPO_ROOT, 'pnpm-workspace.yaml'), 'utf8').split('\n');
-  const start = lines.findIndex((l) => /^packages:\s*$/.test(l));
-  if (start === -1) throw new Error('pnpm-workspace.yaml has no top-level `packages:` key');
-  const globs: string[] = [];
-  for (const line of lines.slice(start + 1)) {
-    // A new top-level key ends the block; blanks and comments do not.
-    if (/^\S/.test(line)) break;
-    const item = line.match(/^\s+-\s*['"]?([^'"#\n]+?)['"]?\s*$/);
-    if (item) globs.push(item[1].trim());
-  }
-  return globs;
+  return sharedWorkspaceGlobs();
 }
 
 /**

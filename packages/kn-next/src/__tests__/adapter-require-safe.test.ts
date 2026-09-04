@@ -1,8 +1,8 @@
+import { describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
 
 /**
  * B2 regression gate (#173, A3-3 #147): the adapter entry served by the

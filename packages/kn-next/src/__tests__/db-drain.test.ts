@@ -10,14 +10,14 @@
  *
  * @getknext/lib/clients is mocked so the drain is exercised without a real Postgres.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 
 // The rest params are type-only (#261): the mock factory below forwards
 // `...args`, so the spies must ACCEPT args for TS2556 — they still ignore them.
-const closeDbPool = vi.fn(async (..._args: unknown[]) => {});
-const closeDbPoolRO = vi.fn(async (..._args: unknown[]) => {});
+const closeDbPool = mock(async (..._args: unknown[]) => {});
+const closeDbPoolRO = mock(async (..._args: unknown[]) => {});
 
-vi.mock("@getknext/lib/clients", () => ({
+mock.module("@getknext/lib/clients", () => ({
     closeDbPool: (...args: unknown[]) => closeDbPool(...args),
     closeDbPoolRO: (...args: unknown[]) => closeDbPoolRO(...args),
 }));
@@ -29,8 +29,8 @@ import { clearShutdownDrains, gracefulShutdown } from "../adapters/shutdown";
 function makeChild() {
     const handlers: Record<string, () => void> = {};
     return {
-        kill: vi.fn(),
-        once: vi.fn((ev: string, cb: () => void) => {
+        kill: mock(),
+        once: mock((ev: string, cb: () => void) => {
             handlers[ev] = cb;
         }),
         emitExit: () => handlers.exit?.(),
@@ -56,7 +56,7 @@ describe("db-drain — writer + RO pool teardown on SIGTERM (#246)", () => {
         registerDbPoolDrain();
 
         const child = makeChild();
-        const exit = vi.fn();
+        const exit = mock();
         gracefulShutdown("SIGTERM", {
             child,
             closables: [],

@@ -1,8 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { resetClients } from '../clients';
 
 // Capture the config object passed to `new Pool(...)` without a real DB.
-const poolCtor = vi.fn();
-vi.mock('pg', () => ({
+const poolCtor = mock();
+mock.module('pg', () => ({
   Pool: class {
     constructor(config: unknown) {
       poolCtor(config);
@@ -17,7 +18,7 @@ vi.mock('pg', () => ({
 describe('getDbPool — bounded pool for scale-to-zero', () => {
   beforeEach(() => {
     poolCtor.mockClear();
-    vi.resetModules();
+    resetClients();
     delete process.env.DB_POOL_MAX;
     delete process.env.DB_POOL_IDLE_TIMEOUT_MS;
     delete process.env.DB_POOL_CONNECT_TIMEOUT_MS;

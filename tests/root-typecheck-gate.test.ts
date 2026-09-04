@@ -22,12 +22,12 @@
  *      early as a lint error.
  */
 
+import { describe, expect, it } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { builtinModules } from 'node:module';
 import { join, relative, resolve, sep } from 'node:path';
 import ts from 'typescript';
-import { describe, expect, it } from 'vitest';
 import { auditBlockingGate } from './helpers/blocking-gate';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
@@ -145,9 +145,9 @@ function ciJobs(yml: string): CiJob[] {
 }
 
 /** The command the gate step runs, matched against a PARSED `run:` value. */
-const TYPECHECK_COMMAND = /(?:^|\s)pnpm run typecheck\b/;
+const TYPECHECK_COMMAND = /(?:^|\s)bun run typecheck\b/;
 /** The same step, matched against the raw YAML text of a job block. */
-const TYPECHECK_RUN = /run:\s*pnpm run typecheck\b/;
+const TYPECHECK_RUN = /run:\s*bun run typecheck\b/;
 /** The job that must own it. */
 const TYPECHECK_JOB = 'typecheck-root';
 
@@ -199,7 +199,7 @@ describe('root typecheck config (#527)', () => {
 });
 
 describe('the covered set is real, not an include that matches nothing (#527)', () => {
-  it.each(COVERED_TIERS)('every $label file is in the tsc program', ({ label, files }) => {
+  it.each([...COVERED_TIERS])('every $label file is in the tsc program', ({ label, files }) => {
     const onDisk = files();
     expect(
       onDisk.length,
@@ -244,12 +244,12 @@ describe('root typecheck script + CI wiring (#527)', () => {
 
   it('the root package.json has a `typecheck` script pointed at the root config', () => {
     const script = pkg.scripts?.typecheck;
-    expect(script, 'root `pnpm typecheck` must exist').toBeTypeOf('string');
+    expect(script, 'root `bun run typecheck` must exist').toBeTypeOf('string');
     expect(script).toContain(TSCONFIG);
   });
 
   it('ci.yml runs the root typecheck', () => {
-    expect(/run:\s*pnpm run typecheck\b/.test(ciYml)).toBe(true);
+    expect(/run:\s*bun run typecheck\b/.test(ciYml)).toBe(true);
   });
 
   it('it runs ALONGSIDE Lint & Test — its own job, not gated behind it', () => {
@@ -335,7 +335,18 @@ describe('the root test tree imports only DECLARED root dependencies', () => {
     ...Object.keys(manifest.dependencies ?? {}),
     ...Object.keys(manifest.devDependencies ?? {}),
   ]);
-  const builtin = new Set(builtinModules);
+  // `node:module`'s list is Node's builtins only. Bun ships its own — `bun:test`,
+  // `bun:sqlite`, `bun:ffi` — which resolve from the runtime and are no more an
+  // npm dependency than `node:fs` is. Without these the gate reports a test
+  // helper importing `bun:test` as an undeclared package.
+  const builtin = new Set([
+    ...builtinModules,
+    'bun',
+    'bun:test',
+    'bun:sqlite',
+    'bun:ffi',
+    'bun:jsc',
+  ]);
 
   /** `@scope/pkg/sub` -> `@scope/pkg`; `pkg/sub` -> `pkg`. */
   const packageName = (specifier: string): string => {

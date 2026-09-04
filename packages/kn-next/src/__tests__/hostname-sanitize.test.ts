@@ -21,8 +21,8 @@
  * (otel host.name) — sanitizing must not silently drop the pod identity.
  */
 
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { hostname as kernelHostname } from "node:os";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildChildEnv } from "../adapters/env";
 import { resolveOtelOptions } from "../adapters/otel-config";
 

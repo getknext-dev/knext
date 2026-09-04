@@ -12,27 +12,35 @@
  *  - both routing ctx shapes (legacy ctx.routes / typed ctx.routing) are counted.
  */
 
+import {
+    afterEach,
+    beforeEach,
+    describe,
+    expect,
+    it,
+    jest,
+    mock,
+    spyOn,
+} from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Hoisted mock handle for the MinIO client's putObject. It DRAINS the passed
 // ReadStream to completion so the source file is fully read before afterEach
 // removes the temp dir (an unconsumed lazy stream would open-ENOENT afterwards).
-const putObject = vi.hoisted(() =>
-    vi.fn(
+const putObject = (() =>
+    mock(
         (_bucket: string, _key: string, stream: NodeJS.ReadableStream) =>
             new Promise((resolvePromise) => {
                 stream.on("error", () => resolvePromise({}));
                 stream.on("end", () => resolvePromise({}));
                 stream.resume();
             }),
-    ),
-);
-const getMinioClient = vi.hoisted(() => vi.fn(() => ({ putObject })));
+    ))();
+const getMinioClient = (() => mock(() => ({ putObject })))();
 
-vi.mock("@getknext/lib/clients", () => ({ getMinioClient }));
+mock.module("@getknext/lib/clients", () => ({ getMinioClient }));
 
 import adapter from "../adapters/next-adapter";
 
@@ -71,7 +79,7 @@ function makeCtx(over: Partial<Ctx> = {}): Ctx {
 
 beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "knext-adapter-"));
-    vi.spyOn(console, "log").mockImplementation(() => {});
+    spyOn(console, "log").mockImplementation(() => {});
     putObject.mockClear();
     getMinioClient.mockClear();
     getMinioClient.mockReturnValue({ putObject });
@@ -81,7 +89,7 @@ afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
     if (savedBucket === undefined) delete process.env.STORAGE_BUCKET;
     else process.env.STORAGE_BUCKET = savedBucket;
-    vi.restoreAllMocks();
+    jest.restoreAllMocks();
 });
 
 describe("onBuildComplete — artifact upload", () => {

@@ -1,6 +1,6 @@
+import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
 import { jobBlocks, jobNeeds } from './helpers/release-workflow';
 
 /**
@@ -111,7 +111,7 @@ function allUsesRefs(): UsesRef[] {
 }
 
 describe('publish-path workflows SHA-pin every third-party action (#522)', () => {
-  it.each(PINNED_WORKFLOWS)('%s uses exactly its expected set of actions', (file) => {
+  it.each([...PINNED_WORKFLOWS])('%s uses exactly its expected set of actions', (file) => {
     const entries = usesRefs(file);
     // Sanity: if the extraction regex ever stops matching, every per-entry
     // assertion below would pass vacuously over an empty list.
@@ -129,7 +129,7 @@ describe('publish-path workflows SHA-pin every third-party action (#522)', () =>
     expect(actions).toEqual(Array.from(EXPECTED_ACTIONS_BY_FILE[file]).sort());
   });
 
-  it.each(PINNED_WORKFLOWS)('%s has no `uses:` on a mutable tag or branch', (file) => {
+  it.each([...PINNED_WORKFLOWS])('%s has no `uses:` on a mutable tag or branch', (file) => {
     for (const entry of usesRefs(file)) {
       const mutable =
         /^v?\d+(?:\.\d+)*$/.test(entry.ref) || // v4, v1, 4.3.0, …
@@ -141,7 +141,9 @@ describe('publish-path workflows SHA-pin every third-party action (#522)', () =>
     }
   });
 
-  it.each(PINNED_WORKFLOWS)('%s annotates every pin with its human-readable version', (file) => {
+  it.each([
+    ...PINNED_WORKFLOWS,
+  ])('%s annotates every pin with its human-readable version', (file) => {
     for (const entry of usesRefs(file)) {
       expect(
         entry.comment,

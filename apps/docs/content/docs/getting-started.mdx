@@ -4,7 +4,7 @@ description: Take a Next.js app from next build to a scale-to-zero Knative servi
 ---
 
 Take an existing Next.js app from `next build` to a scale-to-zero Knative service. knext uses the
-**official Next.js Deployment Adapter API** — no fork, no custom runtime.
+**vinext**, an open-source Vite-based implementation of Next.js, compiled into a single fast executable. (The official Deployment Adapter API remains supported as the suite-verified legacy lane.)
 
 <Callout type="info">
 **Prerequisites.** A Kubernetes cluster with **Knative Serving** installed (don't have one?
@@ -92,8 +92,8 @@ const config: KnativeNextConfig = {
     publicUrl: 'https://storage.googleapis.com/acme-assets',
   },
   scaling: { minScale: 0, maxScale: 20 }, // minScale 0 = scale to zero
-  // runtime: 'bun',  // optional — run the standalone server under Bun, with
-  //                  // build-time bytecode precompilation. See /docs/bun-runtime.
+  // The default build compiles your app into a single executable (bundled,
+  // minified, bytecode-precompiled, Bun baked in). See /docs/bun-runtime.
 };
 
 export default config;

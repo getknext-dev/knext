@@ -1,7 +1,7 @@
+import { afterEach, beforeEach, describe, expect, it, jest, mock, spyOn } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NextAppReadResult, NextAppStatusView } from '../_k8s/nextapp';
 import {
   APP_NAME_ENV,
@@ -13,6 +13,21 @@ import {
   PAGE_TOTAL_BUDGET_MS,
   PROMETHEUS_URL_ENV,
 } from '../_prom/query';
+
+/**
+ * bun's `typeof fetch` carries a `preconnect` property that a bare arrow does
+ * not, so `spyOn(globalThis, 'fetch').mockImplementation(fn)` is not assignable
+ * under `@types/bun`. Attaching the member beats casting: the callback's own
+ * parameter and return types stay checked, so a genuinely wrong stub still errors.
+ *
+ * Written as a helper that REPLACES the call head rather than wrapping each
+ * callback, because wrapping needs paren matching and these files are JSX — that
+ * attempt produced `')' expected` and was reverted.
+ */
+const spyOnFetchImpl = (fn: (...a: Parameters<typeof fetch>) => Promise<Response>) =>
+  spyOn(globalThis, 'fetch').mockImplementation(
+    Object.assign(fn, { preconnect: globalThis.fetch.preconnect }),
+  );
 
 /**
  * P1.4 (obs-pages plan) / ADR-0038 — the /observability/deployments page.
@@ -39,20 +54,21 @@ import {
 // it. `_ui/access-denied.test.tsx` asserts the app really enables the flag.
 process.env.__NEXT_EXPERIMENTAL_AUTH_INTERRUPTS = '1';
 
-const authHeader = vi.fn<() => string | null>(() => null);
+const authHeader = mock<() => string | null>(() => null);
 
-vi.mock('next/headers', () => ({
+mock.module('next/headers', () => ({
   headers: async () => ({
     get: (name: string) => (name === 'authorization' ? authHeader() : null),
   }),
 }));
 
-const readNextAppStatus = vi.fn<() => Promise<NextAppReadResult>>(async () => ({
+const readNextAppStatus = mock<() => Promise<NextAppReadResult>>(async () => ({
   status: 'disabled',
 }));
 
-vi.mock('../_k8s/nextapp', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../_k8s/nextapp')>();
+const __knextReal1 = { ...(await import('../_k8s/nextapp')) };
+mock.module('../_k8s/nextapp', () => {
+  const actual = __knextReal1;
   return { ...actual, readNextAppStatus: () => readNextAppStatus() };
 });
 
@@ -76,8 +92,9 @@ const clock = { now: 0 };
  */
 const budget: { totalMs?: number } = {};
 
-vi.mock('../_prom/query', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../_prom/query')>();
+const __knextReal2 = { ...(await import('../_prom/query')) };
+mock.module('../_prom/query', () => {
+  const actual = __knextReal2;
   return {
     ...actual,
     // Only the CLOCK is injected — the requested budget AND the reserved slice
@@ -180,7 +197,7 @@ function seededFetch(url: unknown, opts: SeedOptions = {}): Response {
 }
 
 function mockFetch(opts: SeedOptions = {}) {
-  return vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => seededFetch(u, opts));
+  return spyOnFetchImpl(async (u) => seededFetch(u, opts));
 }
 
 function sentQueries(spy: ReturnType<typeof mockFetch>): string[] {
@@ -233,8 +250,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  vi.restoreAllMocks();
-  vi.clearAllMocks();
+  jest.restoreAllMocks();
+  jest.clearAllMocks();
   if (ORIGINAL_TOKEN === undefined) delete process.env.OBSERVABILITY_TOKEN;
   else process.env.OBSERVABILITY_TOKEN = ORIGINAL_TOKEN;
   if (ORIGINAL_URL === undefined) delete process.env[PROMETHEUS_URL_ENV];
@@ -276,7 +293,7 @@ describe('deployments page route config', () => {
 describe('deployments page auth gate (fail-closed)', () => {
   it('denies with a real 401, leaks no data, and performs NO read at all', async () => {
     authHeader.mockReturnValue(null);
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const fetchSpy = spyOn(globalThis, 'fetch');
 
     expect(await denialDigest()).toBe(UNAUTHORIZED_DIGEST);
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -302,7 +319,7 @@ describe('deployments page auth gate (fail-closed)', () => {
 describe('deployments page degradation — NOTHING configured', () => {
   it('says no source is configured (naming the env vars) and performs no query', async () => {
     delete process.env[PROMETHEUS_URL_ENV];
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const fetchSpy = spyOn(globalThis, 'fetch');
 
     const html = await renderPage();
 
@@ -330,7 +347,7 @@ describe('deployments page degradation — NOTHING configured', () => {
 
 describe('deployments page degradation — Prometheus unreachable', () => {
   it('renders the unreachable state (distinct from unconfigured) without crashing', async () => {
-    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('connect ECONNREFUSED'));
+    spyOn(globalThis, 'fetch').mockRejectedValue(new Error('connect ECONNREFUSED'));
 
     const html = await renderPage();
 
@@ -350,7 +367,7 @@ describe('deployments page degradation — ASYMMETRIC partial Prometheus failure
    * partial failure suppresses the WHOLE timeline and says "could not reach".
    */
   it('suppresses the whole timeline when only the replica queries fail', async () => {
-    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
+    const spy = spyOnFetchImpl(async (u) => {
       const promql = decodeURIComponent(new URL(String(u)).searchParams.get('query') ?? '');
       if (promql.includes('kube_deployment_status_replicas')) {
         throw new Error('connect ECONNREFUSED');
@@ -385,7 +402,7 @@ describe('deployments page — the page-level deadline is honest when exhausted'
    * established ("kube-state-metrics is absent") and never a zero.
    */
   it('renders a distinct deadline state and issues NO probe once the budget is gone', async () => {
-    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
+    const spy = spyOnFetchImpl(async (u) => {
       // The wave consumes the whole page CEILING between them — 1500 ms each,
       // i.e. the 4000 ms ordinary share AND the 500 ms probe reserve (#534)…
       clock.now += PAGE_DEADLINE_MS / 2 - 500;
@@ -411,7 +428,7 @@ describe('deployments page — the page-level deadline is honest when exhausted'
   });
 
   it('reports a probe that itself ran out of budget as the deadline, not as unreachable', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation((u, init) => {
+    spyOnFetchImpl((u, init) => {
       const promql = decodeURIComponent(new URL(String(u)).searchParams.get('query') ?? '');
       if (promql === KUBE_STATE_PROBE) {
         // The probe was issued with the ~100 ms the wave left, and then HANGS: the
@@ -454,7 +471,7 @@ describe('deployments page — the page-level deadline is honest when exhausted'
    */
   it('reports the budget that actually applied, not the module constant', async () => {
     budget.totalMs = 1500;
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
+    spyOnFetchImpl(async (u) => {
       // 3 × 700 ms = 2100 ms — past the 1500 + reserve ceiling, so even the
       // reserved probe is refused and the budget state is the honest answer.
       clock.now += 700;
@@ -482,7 +499,7 @@ describe('deployments page — the page-level deadline is honest when exhausted'
    */
   it('prints the SHARE, not the ceiling, when an ordinary wave read is the one cut short', async () => {
     budget.totalMs = 37; // distinctive: 37 is the share, 537 would be the ceiling
-    vi.spyOn(globalThis, 'fetch').mockImplementation(
+    spyOnFetchImpl(
       (_u, init) =>
         // Hangs until the wave's own budget aborts it ⇒ deadline-exceeded.
         new Promise((_resolve, reject) => {
@@ -512,7 +529,7 @@ describe('deployments page — the page-level deadline is honest when exhausted'
    */
   it('suppresses an established "unreachable" when the same wave also ran out of budget', async () => {
     budget.totalMs = 30;
-    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation((u, init) => {
+    const spy = spyOnFetchImpl((u, init) => {
       const promql = decodeURIComponent(new URL(String(u)).searchParams.get('query') ?? '');
       if (promql.includes('kube_deployment_created')) {
         // Hangs until the SHARED budget's own signal aborts it ⇒ deadline-exceeded.
@@ -547,7 +564,7 @@ describe('deployments page — the page-level deadline is honest when exhausted'
    */
   it('does not claim "slow rather than absent" when a read in the same wave DID fail outright', async () => {
     budget.totalMs = 30;
-    vi.spyOn(globalThis, 'fetch').mockImplementation((u, init) => {
+    spyOnFetchImpl((u, init) => {
       const promql = decodeURIComponent(new URL(String(u)).searchParams.get('query') ?? '');
       if (promql.includes('kube_deployment_created')) {
         return new Promise((_resolve, reject) => {
@@ -586,7 +603,7 @@ describe('deployments page — the page-level deadline is honest when exhausted'
       reason: 'unreachable',
       detail: 'connect ECONNREFUSED',
     });
-    vi.spyOn(globalThis, 'fetch').mockImplementation(
+    spyOnFetchImpl(
       (_u, init) =>
         new Promise((_resolve, reject) => {
           init?.signal?.addEventListener('abort', () =>
@@ -626,7 +643,7 @@ describe('deployments page — the page-level deadline is honest when exhausted'
       reason: reason as 'crd-absent',
       detail: 'detail',
     });
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
+    spyOnFetchImpl(async (u) => {
       clock.now += PAGE_TOTAL_BUDGET_MS / 3;
       return seededFetch(u, { kubeStateAbsent: true });
     });
@@ -639,7 +656,7 @@ describe('deployments page — the page-level deadline is honest when exhausted'
   });
 
   it('keeps the "slow rather than absent" reading when NO read failed outright', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
+    spyOnFetchImpl(async (u) => {
       clock.now += PAGE_TOTAL_BUDGET_MS / 3;
       return seededFetch(u, { kubeStateAbsent: true });
     });
@@ -675,7 +692,7 @@ describe('deployments page — the kube-state probe has a reserved slice (#534)'
     });
     let answered = 0;
 
-    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
+    const spy = spyOnFetchImpl(async (u) => {
       const promql = decodeURIComponent(new URL(String(u)).searchParams.get('query') ?? '');
       const response = seededFetch(u, opts);
       if (promql !== KUBE_STATE_PROBE && ++answered === 3) {
@@ -731,7 +748,7 @@ describe('deployments page — the kube-state probe has a reserved slice (#534)'
    * nothing, and the page falls back to the honest budget state.
    */
   it('does not hand out a reserve the ceiling has already spent', async () => {
-    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
+    const spy = spyOnFetchImpl(async (u) => {
       clock.now += PAGE_TOTAL_BUDGET_MS / 3;
       return seededFetch(u, { kubeStateAbsent: true });
     });
@@ -919,7 +936,7 @@ describe('deployments page degradation — kube-state-metrics PRESENT but nothin
 
   it('falls back to "could not reach" (never a cause claim) when the probe itself fails', async () => {
     process.env[APP_NAME_ENV] = 'ghost';
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
+    spyOnFetchImpl(async (u) => {
       const promql = decodeURIComponent(new URL(String(u)).searchParams.get('query') ?? '');
       if (promql === KUBE_STATE_PROBE) {
         throw new Error('connect ECONNREFUSED');
@@ -1142,7 +1159,7 @@ describe('deployments page — NextApp status history (high-fidelity source)', (
 describe('deployments page — scope is required before any query (#516 contract)', () => {
   it('renders "scope unknown" and issues NO query when KN_APP_NAME is unset', async () => {
     delete process.env[APP_NAME_ENV];
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const fetchSpy = spyOn(globalThis, 'fetch');
 
     const html = await renderPage();
 
@@ -1154,7 +1171,7 @@ describe('deployments page — scope is required before any query (#516 contract
 
   it('treats an injection-shaped KN_APP_NAME as unknown scope', async () => {
     process.env[APP_NAME_ENV] = 'demo"} or on() up{';
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const fetchSpy = spyOn(globalThis, 'fetch');
 
     const html = await renderPage();
 

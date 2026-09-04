@@ -194,7 +194,10 @@ defer bucket 1.
   dispatched verb, plus node/bun output parity on the same bundle. So
   `npx kn-next` works under plain Node the moment the packages are published. (Bun is still required
   to run the CLI **from a source checkout**, where the TS is executed directly — that is a contributor
-  concern, not a consumer one.)
+  concern, not a consumer one. **Scope caveat since ADR-0048 Amendment 3:** the CLI *runs* under
+  plain Node, but `kn-next build` on the default vinext target shells out to `bun` to compile the
+  single executable, so a consumer BUILDING an app needs Bun ≥ 1.4 on PATH — the node-parity claim
+  covers dispatch/help/deploy verbs, not the compile step.)
 
 ## 10. Hard rules (enforce in all work)
 Official adapter API, not Nitro reverse-engineering · operator = single source of truth ·

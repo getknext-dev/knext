@@ -1,6 +1,6 @@
+import { afterAll, afterEach, beforeAll, describe, expect, it, mock } from 'bun:test';
 import { resolve } from 'node:path';
 import { Pool } from 'pg';
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 // The CLI of record for `kn-next db migrate` (thin wrapper over this package's
 // engine) — imported relatively because the live lane exercises the real
 // dispatch path, not a mock runner.
@@ -9,6 +9,7 @@ import { createVectorExtension, hnsw } from '../../extensions/pgvector';
 import { createTimescaleExtension, dropChunks, hypertable } from '../../extensions/timescaledb';
 import { runMigrations } from '../../migrate';
 import { pgTable, serial, vector } from '../../schema';
+import { resetDbState } from '../reset';
 import { checkLiveDbDsn } from './live-dsn-guard';
 
 // Table used only by the (skipped) pgvector spec — kept real so flipping the
@@ -61,7 +62,7 @@ const MIGRATIONS_DIR = resolve(REPO_ROOT, 'apps/db-demo/drizzle');
 // One-time warning capture for the RO-fallback spec. Mocked file-wide; only
 // packages/db/src/index.ts consumes this module here.
 const warned: string[] = [];
-vi.mock('@getknext/lib/logger', () => ({
+mock.module('@getknext/lib/logger', () => ({
   logger: {
     warn: (msg: string) => warned.push(msg),
     info: () => {},
@@ -204,7 +205,7 @@ describe.skipIf(!LIVE)(
        * each routing spec needs its own module generation.
        */
       async function freshSdk(env: { url: string; ro?: string }) {
-        vi.resetModules();
+        await resetDbState();
         process.env.DATABASE_URL = env.url;
         if (env.ro === undefined) {
           delete process.env.DATABASE_URL_RO;

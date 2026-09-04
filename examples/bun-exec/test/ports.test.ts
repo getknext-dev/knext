@@ -13,9 +13,15 @@
 // the very close-then-reopen implementation it is meant to catch. It asserts the
 // HOLD directly, by trying to bind each reserved port while the batch is held.
 
+import { describe, expect, it, mock } from 'bun:test';
 import { createServer } from 'node:net';
-import { describe, expect, it, vi } from 'vitest';
-import { freePorts, reserveHeldPorts } from './e2e-support/ports';
+
+// Imported DYNAMICALLY, below the `mock.module` call, because `./e2e-support/ports`
+// imports `node:net` at ITS module scope. A static import here is hoisted and
+// evaluated before the mock is registered, so the module under test captures the
+// real `createServer` and the fault injection below silently does nothing — the
+// EMFILE case then fails with "expected to throw", which reads like a bug in the
+// code rather than in the test's ordering.
 
 /**
  * Fault injection for the PARTIAL-FAILURE case below. A reservation that dies
@@ -25,34 +31,56 @@ import { freePorts, reserveHeldPorts } from './e2e-support/ports';
  * Inert unless `failAfter >= 0`, so every other case in this file runs against
  * the real `node:net`.
  */
-const netFault = vi.hoisted(() => ({ failAfter: -1, created: 0, opened: [] as number[] }));
+const netFault = (() => ({ failAfter: -1, created: 0, opened: [] as number[] }))();
 
-vi.mock('node:net', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:net')>();
-  return {
-    ...actual,
-    default: actual,
-    createServer: ((...args: Parameters<typeof actual.createServer>) => {
-      const srv = actual.createServer(...args);
-      srv.on('listening', () => {
-        const addr = srv.address();
-        if (addr !== null && typeof addr === 'object') netFault.opened.push(addr.port);
-      });
-      if (netFault.failAfter >= 0 && netFault.created++ >= netFault.failAfter) {
-        srv.listen = ((..._ignored: unknown[]) => {
-          setImmediate(() =>
-            srv.emit(
-              'error',
-              Object.assign(new Error('EMFILE: too many open files'), { code: 'EMFILE' }),
-            ),
-          );
-          return srv;
-        }) as typeof srv.listen;
-      }
-      return srv;
-    }) as typeof actual.createServer,
-  };
-});
+// Porting vitest's `vi.mock(spec, (importOriginal) => …)` to bun took three
+// corrections, each of which failed in a DIFFERENT way. Recorded because every
+// remaining `importOriginal` call site will hit the same wall:
+//
+//  1. bun's factory receives NO arguments — there is no `importOriginal`.
+//  2. `await import('node:net')` INSIDE the factory deadlocks. The mock is
+//     already registered when the factory runs, so the import re-enters it and
+//     waits on itself: the file hangs with no output, and the runner reports a
+//     timeout rather than a failure.
+//  3. Capturing the namespace outside and dereferencing it inside recurses
+//     forever. bun mutates the module namespace IN PLACE, so by the time the
+//     factory runs `real.createServer` IS the mock — "Maximum call stack size
+//     exceeded", which reads like a bug in the code under test.
+//
+// So everything that reads the real module is evaluated eagerly, before
+// `mock.module` is called, and the factory only hands back an already-built
+// object.
+const realNet = await import('node:net');
+const realCreateServer = realNet.createServer;
+
+const patchedNet: typeof realNet = {
+  ...realNet,
+  createServer: ((...args: Parameters<typeof realCreateServer>) => {
+    const srv = realCreateServer(...args);
+    srv.on('listening', () => {
+      const addr = srv.address();
+      if (addr !== null && typeof addr === 'object') netFault.opened.push(addr.port);
+    });
+    if (netFault.failAfter >= 0 && netFault.created++ >= netFault.failAfter) {
+      srv.listen = ((..._ignored: unknown[]) => {
+        setImmediate(() =>
+          srv.emit(
+            'error',
+            Object.assign(new Error('EMFILE: too many open files'), { code: 'EMFILE' }),
+          ),
+        );
+        return srv;
+      }) as typeof srv.listen;
+    }
+    return srv;
+  }) as typeof realCreateServer,
+};
+// `import net from 'node:net'` must receive the patched object too, not the raw
+// namespace — otherwise the default and named imports disagree about which
+// `createServer` they hold.
+(patchedNet as { default?: unknown }).default = patchedNet;
+
+mock.module('node:net', () => patchedNet);
 
 /** Resolve true if `port` can be bound right now, false on EADDRINUSE. */
 function isBindable(port: number): Promise<boolean> {
@@ -64,6 +92,8 @@ function isBindable(port: number): Promise<boolean> {
     });
   });
 }
+
+const { freePorts, reserveHeldPorts } = await import('./e2e-support/ports');
 
 describe('#686 held host-port reservation for the container e2e', () => {
   it('holds EVERY reserved port in LISTEN until release()', async () => {
