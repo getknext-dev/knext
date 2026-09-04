@@ -62,6 +62,14 @@ const COMPILE_TARGETS: Record<string, string> = {
     "darwin-x64": "bun-darwin-x64",
 };
 
+/** Smoke-only, glibc-linked: never put one of these in the alpine image. */
+const SMOKE_ONLY_ARCHES = ["linux-x64-gnu", "linux-arm64-gnu"] as const;
+
+/** Derived, never a second hand-maintained list — the two must stay disjoint. */
+const SHIPPABLE_ARCHES = Object.keys(COMPILE_TARGETS).filter(
+    (a) => !SMOKE_ONLY_ARCHES.includes(a as (typeof SMOKE_ONLY_ARCHES)[number]),
+);
+
 /**
  * `major.minor` of a Bun version string, or undefined if unreadable.
  *
@@ -100,8 +108,15 @@ export function compileArgv(
 ): string[] {
     const target = COMPILE_TARGETS[arch];
     if (!target) {
+        // The two lists are kept APART on purpose. Advertising the `-gnu` keys
+        // as buildable invites someone to compile one and put it in the image,
+        // where the alpine base has no glibc and it cannot run at all — the
+        // exact class of failure the alpine e2e exists to catch. They are
+        // reachable only through `hostSmokeArch()`.
         throw new UsageError(
-            `Unknown build arch '${arch}'. Known: ${Object.keys(COMPILE_TARGETS).join(", ")}.`,
+            `Unknown build arch '${arch}'. Shippable targets: ${SHIPPABLE_ARCHES.join(", ")}.\n\n` +
+                `(${SMOKE_ONLY_ARCHES.join(", ")} also compile, but exist ONLY for the post-compile smoke's\n` +
+                "host-arch binary — they are glibc-linked and the shipped alpine image cannot run them.)",
         );
     }
     // `bun run <script>`, not `bun build`. The compile needs BUILD PLUGINS and

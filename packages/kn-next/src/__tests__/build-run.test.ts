@@ -25,6 +25,7 @@ import {
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { VinextBuildOptions } from "../cli/vinext-build";
 
 const runQuiet = (() => mock())();
 mock.module("../cli/exec", () => ({ runQuiet, isEntrypoint: () => false }));
@@ -46,7 +47,12 @@ mock.module("../adapters/standalone-bun-exports", () => ({
     healBunExportTargets,
 }));
 
-const buildVinextExecutable = (() => mock(() => "knext-exec-linux-x64"))();
+// TYPED signature: an untyped `mock()` infers `calls` as `[]`, so reading
+// `calls[n][0].arch` in `shipCompiles()` below is a TS2493 under the PACKAGE
+// typecheck (`bun run --filter @getknext/core typecheck`). The root typecheck
+// excludes `packages/`, so it never sees it.
+const buildVinextExecutable = (() =>
+    mock((_opts: VinextBuildOptions): string => "knext-exec-linux-x64"))();
 const __knextRealVinext = { ...(await import("../cli/vinext-build")) };
 mock.module("../cli/vinext-build", () => ({
     ...__knextRealVinext,
@@ -115,9 +121,7 @@ afterEach(() => {
 
 /** The compiles that target the SHIPPED arch, ignoring any host-arch smoke one. */
 const shipCompiles = () =>
-    buildVinextExecutable.mock.calls.filter(
-        (c) => (c[0] as { arch?: string } | undefined)?.arch === "linux-x64",
-    );
+    buildVinextExecutable.mock.calls.filter((c) => c[0]?.arch === "linux-x64");
 
 describe("build()", () => {
     it("skips the heal and uploads assets when no standalone dir exists (turbopack)", async () => {

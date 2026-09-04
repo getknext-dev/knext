@@ -42,7 +42,7 @@ const metrics = createServer((req, res) => {
   const path = new URL(req.url ?? '/', 'http://localhost').pathname;
   if (path === '/metrics' && MODE !== 'no-metrics') {
     res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4' });
-    res.end('knext_startup_duration_seconds 0.061\n');
+    res.end('knext_startup_duration_seconds 0.061\n', maybeExitAfterServing);
     return;
   }
   res.writeHead(404).end('Not Found');
@@ -50,12 +50,31 @@ const metrics = createServer((req, res) => {
 
 // SIGTERM handling is installed BEFORE the boot line, so a smoke that sees the
 // line has a process that can already be drained.
-process.on('SIGTERM', () => {
-  if (MODE === 'ignore-sigterm') return; // handler present, exit never happens
+//
+// `unhandled-sigterm` installs NO handler at all, which is the DEFAULT
+// disposition and the likeliest real regression: an entry that simply never
+// registers the drain. The kernel then terminates the process by signal, so it
+// exits fast and looks fine to anything that only checks "did it stop?" — the
+// two failure modes are opposite in timing and a smoke needs both.
+if (MODE !== 'unhandled-sigterm') {
+  process.on('SIGTERM', () => {
+    if (MODE === 'ignore-sigterm') return; // handler present, exit never happens
+    app.close();
+    metrics.close();
+    process.exit(0);
+  });
+}
+
+// `exits-after-serving` is gone BEFORE any SIGTERM arrives. Keyed on having
+// SERVED the metrics scrape rather than on a timer: a timer would race the
+// probes and make the case flaky in whichever direction the machine was slow.
+// Nothing here is a drain failure, so a smoke must not report one.
+function maybeExitAfterServing() {
+  if (MODE !== 'exits-after-serving') return;
   app.close();
   metrics.close();
-  process.exit(0);
-});
+  setImmediate(() => process.exit(0));
+}
 
 let bound = 0;
 const announce = () => {

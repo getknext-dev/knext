@@ -21,7 +21,7 @@
  * reconciles everything from the NextApp CR emitted by `deploy`.
  */
 
-import { existsSync, writeSync } from "node:fs";
+import { existsSync, rmSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { healBunExportTargets } from "../adapters/standalone-bun-exports";
 import {
@@ -113,21 +113,36 @@ async function smokeCompiledBinary(
         });
     }
 
-    log.info("Smoking the compiled executable (health, metrics, SIGTERM)...");
-    const result = await runPostCompileSmoke({
-        binaryPath: join(process.cwd(), plan.outFile),
-        cwd: process.cwd(),
-        healthPath: config.healthCheckPath,
-    });
-    log.info(
-        {
-            bootMs: result.bootMs,
-            termMs: result.termMs,
-            health: result.healthStatus,
-            metrics: result.metricsStatus,
-        },
-        "Post-compile smoke passed",
-    );
+    const binaryPath = join(process.cwd(), plan.outFile);
+    try {
+        log.info(
+            "Smoking the compiled executable (health, metrics, SIGTERM)...",
+        );
+        const result = await runPostCompileSmoke({
+            binaryPath,
+            cwd: process.cwd(),
+            healthPath: config.healthCheckPath,
+        });
+        log.info(
+            {
+                bootMs: result.bootMs,
+                termMs: result.termMs,
+                health: result.healthStatus,
+                metrics: result.metricsStatus,
+            },
+            "Post-compile smoke passed",
+        );
+    } finally {
+        // The smoke binary is ~60-90 MB of build scratch that nothing ships and
+        // no ignore list covers — neither `.gitignore`'s `knext-exec*` nor the
+        // template `.dockerignore`. Leaving it in the app root is how a blob
+        // gets staged and wedges someone's `git add -A`, and the docker context
+        // grows by that much on every build. `finally`, so a FAILING smoke — the
+        // case where a developer runs the build repeatedly — cleans up too.
+        if (!plan.reuseShipBinary) {
+            rmSync(binaryPath, { force: true });
+        }
+    }
 }
 
 export async function build(options: BuildOptions = {}) {

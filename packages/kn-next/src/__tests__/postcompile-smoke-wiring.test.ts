@@ -23,9 +23,24 @@ import {
     jest,
     mock,
 } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import {
+    existsSync,
+    mkdirSync,
+    mkdtempSync,
+    realpathSync,
+    rmSync,
+    writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type {
+    PostCompileSmokeOptions,
+    PostCompileSmokeResult,
+} from "../cli/postcompile-smoke";
+import type { VinextBuildOptions } from "../cli/vinext-build";
+
+/** The host arch `build()` sees. Mutable so both plan branches are reachable. */
+let hostArch = "darwin-arm64";
 
 const runQuiet = (() => mock())();
 const __knextRealExec = { ...(await import("../cli/exec")) };
@@ -49,23 +64,39 @@ mock.module("../utils/asset-upload", () => ({
     uploadAssets,
 }));
 
-const buildVinextExecutable = (() => mock(() => "knext-exec-linux-x64"))();
+// TYPED mock signatures throughout, never `as` casts on `mock.calls[0][0]`:
+// an untyped `mock()` infers its calls as `[]`, so indexing it is TS2493 and the
+// cast that hides it is TS2352. The package typecheck (`bun run --filter
+// @getknext/core typecheck`) catches this; the ROOT typecheck does not, because
+// its config excludes `packages/`.
+const buildVinextExecutable = (() =>
+    mock((_opts: VinextBuildOptions): string => "knext-exec-linux-x64"))();
 const __knextRealVinext = { ...(await import("../cli/vinext-build")) };
 mock.module("../cli/vinext-build", () => ({
     ...__knextRealVinext,
     buildVinextExecutable,
+    // Injectable so BOTH host-arch branches are reachable from a test: the
+    // real one answers for whatever machine happens to be running, which is
+    // exactly how a mechanism gets covered on one developer's laptop and
+    // nowhere else.
+    hostSmokeArch: () => hostArch,
 }));
 
+const SMOKE_OK: PostCompileSmokeResult = {
+    appPort: 1,
+    metricsPort: 2,
+    healthStatus: 200,
+    metricsStatus: 200,
+    exitCode: 0,
+    bootMs: 1,
+    termMs: 1,
+};
 const runPostCompileSmoke = (() =>
-    mock(async () => ({
-        appPort: 1,
-        metricsPort: 2,
-        healthStatus: 200,
-        metricsStatus: 200,
-        exitCode: 0,
-        bootMs: 1,
-        termMs: 1,
-    })))();
+    mock(
+        async (
+            _opts: PostCompileSmokeOptions,
+        ): Promise<PostCompileSmokeResult> => SMOKE_OK,
+    ))();
 const __knextRealSmoke = { ...(await import("../cli/postcompile-smoke")) };
 mock.module("../cli/postcompile-smoke", () => ({
     ...__knextRealSmoke,
@@ -109,17 +140,21 @@ beforeEach(() => {
     dir = realpathSync(mkdtempSync(join(tmpdir(), "knext-smoke-wire-")));
     process.chdir(dir);
     jest.clearAllMocks();
+    hostArch = "darwin-arm64"; // cross-arch by default: the developer-machine case
     buildVinextExecutable.mockReturnValue("knext-exec-linux-x64");
-    runPostCompileSmoke.mockResolvedValue({
-        appPort: 1,
-        metricsPort: 2,
-        healthStatus: 200,
-        metricsStatus: 200,
-        exitCode: 0,
-        bootMs: 1,
-        termMs: 1,
-    });
+    runPostCompileSmoke.mockResolvedValue(SMOKE_OK);
 });
+
+/** The options `build()` handed the smoke on its first (only) call. */
+const smokeArg = (): PostCompileSmokeOptions => {
+    const call = runPostCompileSmoke.mock.calls[0];
+    if (!call) throw new Error("the smoke was never called");
+    return call[0];
+};
+
+/** The arches `build()` asked to compile, in order. */
+const compiledArches = (): (string | undefined)[] =>
+    buildVinextExecutable.mock.calls.map((c) => c[0]?.arch);
 
 afterEach(() => {
     process.chdir(savedCwd);
@@ -132,22 +167,14 @@ describe("#894 build() runs the smoke", () => {
         await build({ skipNextBuild: true });
 
         expect(runPostCompileSmoke).toHaveBeenCalledTimes(1);
-        const arg = runPostCompileSmoke.mock.calls[0][0] as {
-            binaryPath: string;
-            healthPath?: string;
-            cwd?: string;
-        };
-        expect(arg.binaryPath).toContain(dir);
-        expect(arg.cwd).toBe(dir);
+        expect(smokeArg().binaryPath).toContain(dir);
+        expect(smokeArg().cwd).toBe(dir);
     });
 
     it("probes the app's CONFIGURED health path", async () => {
         loadConfig.mockResolvedValue(cfg({ healthCheckPath: "/healthz" }));
         await build({ skipNextBuild: true });
-        expect(
-            (runPostCompileSmoke.mock.calls[0][0] as { healthPath?: string })
-                .healthPath,
-        ).toBe("/healthz");
+        expect(smokeArg().healthPath).toBe("/healthz");
     });
 
     it("does NOT smoke the turbopack shape — there is no binary to boot", async () => {
@@ -212,6 +239,78 @@ describe("#894 the skip is explicit and LOUD", () => {
         expect(await buildMain(["--skip-smoke"])).toBe(0);
         expect(runPostCompileSmoke).not.toHaveBeenCalled();
         expect(BUILD_HELP).toContain("--skip-smoke");
+    });
+});
+
+describe("#894 build() HONOURS the host-arch plan", () => {
+    it("compiles a second, host-arch binary on a cross-arch host, and smokes THAT", async () => {
+        hostArch = "darwin-arm64";
+        loadConfig.mockResolvedValue(cfg());
+        await build({ skipNextBuild: true });
+
+        // Without this case the whole host-arch mechanism could be deleted —
+        // `build()` reusing the linux-musl ship binary everywhere — and nothing
+        // would go red, because the plan's own unit test does not observe the
+        // caller.
+        expect(compiledArches()).toEqual(["linux-x64", "darwin-arm64"]);
+        expect(smokeArg().binaryPath).toContain("knext-smoke-darwin-arm64");
+        expect(smokeArg().binaryPath).not.toContain("knext-exec-");
+    });
+
+    it("compiles ONCE and smokes the ship binary when the host IS the ship target", async () => {
+        hostArch = "linux-x64";
+        loadConfig.mockResolvedValue(cfg());
+        await build({ skipNextBuild: true });
+
+        expect(compiledArches()).toEqual(["linux-x64"]);
+        expect(smokeArg().binaryPath).toContain("knext-exec-linux-x64");
+    });
+});
+
+describe("#894 the host-arch smoke binary is not left behind", () => {
+    /** Stand in for the compile: drop a file where the plan says it will be. */
+    const compileWritesTheBinary = () => {
+        buildVinextExecutable.mockImplementation((opts: VinextBuildOptions) => {
+            const out = opts.outFile ?? `knext-exec-${opts.arch}`;
+            writeFileSync(join(dir, out), "#!/bin/sh\n");
+            return out;
+        });
+    };
+
+    it("deletes it after a PASSING smoke", async () => {
+        hostArch = "darwin-arm64";
+        compileWritesTheBinary();
+        loadConfig.mockResolvedValue(cfg());
+        await build({ skipNextBuild: true });
+
+        // ~60-90 MB of scratch that matches neither `.gitignore`'s `knext-exec*`
+        // nor the template `.dockerignore`, sitting in the app root.
+        expect(existsSync(join(dir, "knext-smoke-darwin-arm64"))).toBe(false);
+        // The SHIP binary is the build's product and must survive — the other
+        // half, without which "delete the binary" could pass by deleting both.
+        expect(existsSync(join(dir, "knext-exec-linux-x64"))).toBe(true);
+    });
+
+    it("deletes it after a FAILING smoke too", async () => {
+        hostArch = "darwin-arm64";
+        compileWritesTheBinary();
+        loadConfig.mockResolvedValue(cfg());
+        runPostCompileSmoke.mockRejectedValue(
+            new PostCompileSmokeError("health", "no health route", 4242),
+        );
+
+        await build({ skipNextBuild: true }).catch(() => {});
+        // This is the case that matters: a developer iterating on a broken entry
+        // runs the failing build repeatedly.
+        expect(existsSync(join(dir, "knext-smoke-darwin-arm64"))).toBe(false);
+    });
+
+    it("never deletes the ship binary when it IS the smoke binary", async () => {
+        hostArch = "linux-x64";
+        compileWritesTheBinary();
+        loadConfig.mockResolvedValue(cfg());
+        await build({ skipNextBuild: true });
+        expect(existsSync(join(dir, "knext-exec-linux-x64"))).toBe(true);
     });
 });
 

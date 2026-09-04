@@ -113,9 +113,33 @@ export interface PostCompileSmokeResult {
     readonly termMs: number;
 }
 
-const STARTUP_LINE = /LISTENING:(\d+)\s+METRICS:(\d+)/;
+/**
+ * The startup-order signal every knext server entry prints once BOTH listeners
+ * are bound. Exported because it is a CONTRACT with the scaffolded entry, not a
+ * private detail: `postcompile-smoke-startup-contract.test.ts` scan-pins it
+ * against what the templates actually print, so renaming the line in a template
+ * cannot silently turn this smoke into a boot-timeout for every app.
+ */
+export const STARTUP_LINE = /LISTENING:(\d+)\s+METRICS:(\d+)/;
 /** Keep the tail of the child's output for the failure message, not all of it. */
 const MAX_CAPTURED_BYTES = 8192;
+
+/**
+ * Install a permanent no-op `error` listener on the child.
+ *
+ * Node THROWS on an `error` event with no listener. The startup watcher installs
+ * one, but removes it again the moment the child announces itself — so an
+ * `EPERM` from the later `kill()` (a child that changed uid, a restrictive
+ * sandbox) arrived at an unlistened emitter and took `kn-next build` down with
+ * an uncaught exception rather than a build failure. The listener must outlive
+ * every phase, so it is installed once at spawn and never removed.
+ */
+export function keepErrorsNonFatal(child: ChildProcess): void {
+    child.on("error", () => {
+        // Deliberately empty: every phase already decides for itself what an
+        // unreachable child means. This exists only so the emitter never throws.
+    });
+}
 
 /**
  * Boot the binary, assert the three obligations, and stop it.
@@ -149,6 +173,9 @@ export async function runPostCompileSmoke(
         },
         stdio: ["ignore", "pipe", "pipe"],
     });
+    // FIRST thing after spawn, and never removed: an `error` event with no
+    // listener throws, and the phases below each install and REMOVE their own.
+    keepErrorsNonFatal(child);
 
     let output = "";
     const capture = (chunk: Buffer) => {
@@ -216,26 +243,15 @@ export async function runPostCompileSmoke(
         }
 
         const termStartedAt = Date.now();
-        const exit = await terminate(child, budgets.termMs);
-        if (exit === undefined) {
+        const outcome = await terminate(child, budgets.termMs);
+        const drainFailure = describeDrainFailure(outcome, budgets.termMs);
+        if (drainFailure) {
             throw new PostCompileSmokeError(
                 "sigterm",
                 obligationMessage(
                     "sigterm",
                     opts.binaryPath,
-                    `it was still running ${budgets.termMs} ms after SIGTERM — on scale-down Kubernetes would SIGKILL it and drop in-flight requests`,
-                    output,
-                ),
-                child.pid,
-            );
-        }
-        if (exit !== 0) {
-            throw new PostCompileSmokeError(
-                "sigterm",
-                obligationMessage(
-                    "sigterm",
-                    opts.binaryPath,
-                    `it exited ${exit} on SIGTERM rather than 0 — a non-zero exit reads as a crash to the kubelet`,
+                    drainFailure,
                     output,
                 ),
                 child.pid,
@@ -247,7 +263,7 @@ export async function runPostCompileSmoke(
             metricsPort: ports.metricsPort,
             healthStatus: health.status,
             metricsStatus: metrics.status,
-            exitCode: exit,
+            exitCode: 0,
             bootMs,
             termMs: Date.now() - termStartedAt,
         };
@@ -259,6 +275,48 @@ export async function runPostCompileSmoke(
             child.kill("SIGKILL");
         }
     }
+}
+
+/**
+ * What is wrong with how the child ended, or undefined if it drained cleanly.
+ *
+ * Split out so every drain verdict is decided in ONE place, from the outcome's
+ * own shape. The three failures are genuinely different events and reporting
+ * them interchangeably is how the CLI ended up telling a developer their
+ * already-dead process was "still running".
+ */
+export function describeDrainFailure(
+    outcome: TerminateOutcome,
+    termBudgetMs: number,
+): string | undefined {
+    switch (outcome.kind) {
+        case "early":
+            return (
+                `it had ALREADY EXITED (${formatEnd(outcome.code, outcome.signal)}) before SIGTERM was sent — ` +
+                "the server did not stay up, so its drain could not be checked at all"
+            );
+        case "timeout":
+            return `it was still running ${termBudgetMs} ms after SIGTERM — on scale-down Kubernetes would SIGKILL it and drop in-flight requests`;
+        default:
+            if (outcome.signal) {
+                // No handler at all: the kernel's default disposition killed it.
+                // Fast, tidy-looking, and nothing drained.
+                return (
+                    `it was KILLED BY ${outcome.signal} rather than handling it — the entry registers no ` +
+                    "SIGTERM handler, so in-flight requests and after() callbacks are dropped on every scale-down"
+                );
+            }
+            return outcome.code === 0
+                ? undefined
+                : `it exited ${outcome.code} on SIGTERM rather than 0 — a non-zero exit reads as a crash to the kubelet`;
+    }
+}
+
+/** "exit code 3" / "signal SIGKILL" / "cause unknown" — never a bare number. */
+function formatEnd(code: number | null, signal: NodeJS.Signals | null): string {
+    if (signal) return `signal ${signal}`;
+    if (code !== null) return `exit code ${code}`;
+    return "cause unknown";
 }
 
 /** The message shape: obligation, binary, what happened, and the child's tail. */
@@ -350,25 +408,58 @@ async function probe(
     }
 }
 
-/** SIGTERM, then the exit code — or undefined if the budget passed. */
+/** How the child's life ended, relative to the SIGTERM we sent. */
+export type TerminateOutcome =
+    /** Exited on its own BEFORE any SIGTERM was sent. */
+    | {
+          readonly kind: "early";
+          readonly code: number | null;
+          readonly signal: NodeJS.Signals | null;
+      }
+    /** Exited after SIGTERM. `signal` set ⇒ the kernel killed it, no handler. */
+    | {
+          readonly kind: "exited";
+          readonly code: number | null;
+          readonly signal: NodeJS.Signals | null;
+      }
+    /** Still running when the budget ran out. */
+    | { readonly kind: "timeout" };
+
+/**
+ * SIGTERM, then how it ended.
+ *
+ * The already-exited case is checked FIRST and reported as its own outcome. It
+ * used to fall through to the timer, which burned the whole term budget and
+ * then reported "still running after SIGTERM" — the exact opposite of the truth,
+ * under the wrong obligation, at the cost of the budget.
+ */
 function terminate(
     child: ChildProcess,
     timeoutMs: number,
-): Promise<number | undefined> {
+): Promise<TerminateOutcome> {
+    if (child.exitCode !== null || child.signalCode !== null) {
+        return Promise.resolve({
+            kind: "early",
+            code: child.exitCode,
+            signal: child.signalCode,
+        });
+    }
     return new Promise((resolve) => {
         let settled = false;
-        const done = (code: number | undefined) => {
+        const done = (outcome: TerminateOutcome) => {
             if (settled) return;
             settled = true;
             clearTimeout(timer);
-            resolve(code);
+            resolve(outcome);
         };
-        const timer = setTimeout(() => done(undefined), timeoutMs);
+        const timer = setTimeout(() => done({ kind: "timeout" }), timeoutMs);
         child.once("exit", (code, signal) => {
-            // A child killed by a signal it did not handle exited because of
-            // the signal, not because it drained — surface that as non-zero.
-            done(signal ? 128 : (code ?? 0));
+            done({ kind: "exited", code, signal });
         });
+        // Racy by nature: the child can die between the check above and here.
+        // `exit` still fires, so that lands on the `exited` path rather than
+        // the timeout — which is why the check above is an optimisation for the
+        // ALREADY-dead case, not the only guard against it.
         child.kill("SIGTERM");
     });
 }

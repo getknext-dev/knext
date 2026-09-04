@@ -19,9 +19,13 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { chmodSync } from "node:fs";
+import type { ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { chmodSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+    describeDrainFailure,
+    keepErrorsNonFatal,
     PostCompileSmokeError,
     runPostCompileSmoke,
 } from "../cli/postcompile-smoke";
@@ -116,6 +120,26 @@ describe("#894 post-compile smoke — each obligation, removed", () => {
         expect(await obligationOf(smoke("ignore-sigterm"))).toBe("sigterm");
     }, 30_000);
 
+    it("names 'sigterm' when SIGTERM is UNHANDLED and the process dies by signal", async () => {
+        // The likeliest real regression: the entry never registers the handler
+        // at all. The kernel's default disposition then kills it FAST, so it
+        // stops promptly and looks fine to anything that only asks "did it
+        // stop?" — the opposite timing to `ignore-sigterm`, and the branch that
+        // reads a death-by-signal as a non-zero exit.
+        expect(await obligationOf(smoke("unhandled-sigterm"))).toBe("sigterm");
+    }, 30_000);
+
+    it("says the process died BY SIGNAL, not that it exited 0", async () => {
+        const err = (await smoke("unhandled-sigterm").catch(
+            (e: PostCompileSmokeError) => e,
+        )) as PostCompileSmokeError;
+        // Non-vacuity for the case above: the drain branch could be satisfied
+        // by any non-zero code, so the message has to distinguish a signal
+        // death from a crash with a code — an operator reads this line.
+        expect(err.message).toMatch(/SIGTERM/);
+        expect(err.message).not.toMatch(/exited 0/);
+    }, 30_000);
+
     it("names 'boot' when the binary exits instead of listening", async () => {
         expect(await obligationOf(smoke("crash"))).toBe("boot");
     }, 30_000);
@@ -147,6 +171,94 @@ describe("#894 post-compile smoke — each obligation, removed", () => {
             ),
         ).toBe("boot");
     }, 30_000);
+});
+
+describe("#894 a process that is already gone is not a drain failure", () => {
+    // The DETERMINISTIC half. Whether a child that exits the instant it finishes
+    // serving is dead *before* or *after* our SIGTERM lands is a genuine race of
+    // microseconds, so the verdict for each outcome is decided by one pure
+    // function and asserted here directly. All four kinds, no timing.
+    it("reports an already-exited child as exactly that", () => {
+        const msg = describeDrainFailure(
+            { kind: "early", code: 0, signal: null },
+            20_000,
+        );
+        expect(msg).toBeDefined();
+        // Before the fix this outcome could not be distinguished at all: the
+        // child was already gone, the timer ran to completion, and the CLI told
+        // the developer the opposite of the truth.
+        expect(msg).not.toMatch(/still running/);
+        expect(msg).toMatch(/ALREADY EXITED/);
+        expect(msg).toMatch(/exit code 0/);
+    });
+
+    it("keeps the other three verdicts distinct", () => {
+        expect(describeDrainFailure({ kind: "timeout" }, 20_000)).toMatch(
+            /still running 20000 ms after SIGTERM/,
+        );
+        expect(
+            describeDrainFailure(
+                { kind: "exited", code: null, signal: "SIGTERM" },
+                20_000,
+            ),
+        ).toMatch(/KILLED BY SIGTERM/);
+        expect(
+            describeDrainFailure(
+                { kind: "exited", code: 3, signal: null },
+                20_000,
+            ),
+        ).toMatch(/exited 3 on SIGTERM/);
+        // The ONLY passing shape — non-vacuity for every case above.
+        expect(
+            describeDrainFailure(
+                { kind: "exited", code: 0, signal: null },
+                20_000,
+            ),
+        ).toBeUndefined();
+    });
+
+    it("never burns the term budget on a child that stopped by itself", async () => {
+        // The integration half, asserting the property that holds either way the
+        // race falls: a self-terminating child is resolved FAST and is never
+        // described as still running. (Which of the two verdicts it gets is the
+        // race; that both are correct is the pure test above.)
+        const startedAt = Date.now();
+        const outcome = await smoke("exits-after-serving").catch(
+            (e: PostCompileSmokeError) => e,
+        );
+        if (outcome instanceof PostCompileSmokeError) {
+            expect(outcome.message).not.toMatch(/still running/);
+        }
+        // The budget here is 3 s; anything near it means the timeout path ran.
+        expect(Date.now() - startedAt).toBeLessThan(2_500);
+    }, 30_000);
+});
+
+describe("#894 a late spawn error never crashes the CLI", () => {
+    it("keeps an 'error' listener for the child's whole lifetime", () => {
+        // Node throws on an 'error' event with no listener, and the only
+        // listener used to be removed once startup succeeded — so an EPERM from
+        // the later kill() would take down `kn-next build` with an uncaught
+        // exception instead of a build failure. Proved on a bare emitter, both
+        // halves: unguarded throws, guarded does not.
+        const bare = new EventEmitter();
+        expect(() => bare.emit("error", new Error("EPERM"))).toThrow();
+
+        const guarded = new EventEmitter();
+        keepErrorsNonFatal(guarded as unknown as ChildProcess);
+        expect(() => guarded.emit("error", new Error("EPERM"))).not.toThrow();
+    });
+
+    it("is installed by the smoke itself, not merely available", () => {
+        // A helper nothing calls is decoration. Pinned by scanning the source:
+        // an enumerated call site is how the second one gets missed, and there
+        // is exactly one child here.
+        const src = readFileSync(
+            resolve(import.meta.dir, "../cli/postcompile-smoke.ts"),
+            "utf8",
+        );
+        expect(src).toMatch(/keepErrorsNonFatal\(child\)/);
+    });
 });
 
 describe("#894 post-compile smoke — the failure a developer reads", () => {
