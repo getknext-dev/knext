@@ -18,14 +18,25 @@ knext ties Next.js's `BUILD_ID` to the deploy tag rather than a random id. At bu
 sets `NEXT_DEPLOYMENT_ID` to the deploy tag, and `next.config` reads it back as the build id:
 
 ```ts title="next.config.ts"
-generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID || null,
-deploymentId:    process.env.NEXT_DEPLOYMENT_ID || undefined,
+generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID ?? null,
 ```
 
-Because `BUILD_ID === NEXT_DEPLOYMENT_ID`, the uploaded asset prefix
-(`_next/static/<BUILD_ID>/`), the image tag, and the static prefix the GC prunes by all share one
-id. `deploymentId` additionally makes Next append `?dpl=<id>` to asset and RSC requests —
-client-to-build pinning so a client only ever resolves chunks for its own build.
+Scaffolded apps ship that line already. Returning `null` keeps a plain local build on its own
+generated id, so building outside `kn-next deploy` is unchanged.
+
+Because the build id is the deploy tag, the uploaded asset prefix (`_next/static/<id>/`), the
+image tag, and the prefix the GC prunes by all share one value. `NEXT_DEPLOYMENT_ID` also makes
+the build append `?dpl=<id>` to asset and RSC requests — client-to-build pinning, so a client only
+ever resolves chunks for its own build — and the deploy carries the same id into the running pod's
+environment.
+
+<Callout type="warn">
+If the built asset prefix does not match the deploy tag, `kn-next deploy` **aborts before
+anything is uploaded or applied**. It never warns and continues. The two ways to see this are a
+`next.config.ts` that has lost `generateBuildId`, and `--skip-build` run against a build directory
+left over from an earlier tag — in that second case the assets would otherwise be uploaded under
+the old build's prefix, which the collector may then reap while the new revision is serving.
+</Callout>
 
 ## Uploads are additive
 
@@ -59,6 +70,12 @@ The GC is **fail-safe**: if any live revision cannot be resolved to a build-id (
 the read failed), the whole GC is skipped for that deploy. The only failure mode is over-keeping
 assets — never over-deleting a build a client still needs.
 </Callout>
+
+Each upload also writes a small marker object into its own `_next/static/<id>/` prefix, and the
+collector only ever considers prefixes that carry one. Anything else in that space — an upload from
+an older knext, a directory a future Next release introduces, a file someone put there by hand — is
+kept. That is the same direction as the rule above: a prefix whose origin cannot be established is
+kept forever rather than guessed at.
 
 ## Tuning retention
 
