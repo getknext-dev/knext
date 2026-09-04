@@ -358,15 +358,18 @@ describe("create's parting line speaks to the persona (row 3a)", () => {
         const install = text.indexOf("npm install");
         const dev = text.indexOf("npm run dev");
         const deploy = text.indexOf("deploy");
-        const seam = text.indexOf("test:seam");
+        const guardCheck = text.indexOf("npm test");
         // The persona's actual path, in the order they will type it.
         expect(cd).toBeGreaterThanOrEqual(0);
         expect(install).toBeGreaterThan(cd);
         expect(dev).toBeGreaterThan(install);
         expect(deploy).toBeGreaterThan(dev);
-        // test:seam is still mentioned — but last, and not in contributor
-        // jargon ("instrumentation seams survive the standalone build").
-        expect(seam).toBeGreaterThan(deploy);
+        // The pre-ship guard advice is still mentioned — last, in plain words,
+        // and it names a script that EXISTS: `npm test`. (`test:seam` was
+        // retired with the seam guard, #885 — the old parting line told users
+        // to run a script the scaffold no longer ships.)
+        expect(guardCheck).toBeGreaterThan(deploy);
+        expect(text).not.toMatch(/test:seam/);
         expect(text).not.toMatch(/instrumentation seams/);
         expect(text).toMatch(/doctor/);
     });

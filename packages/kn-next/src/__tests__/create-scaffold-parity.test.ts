@@ -47,6 +47,7 @@ const CLI_TEMPLATE = join(PKG_ROOT, "templates", "app");
 
 /** Files that must be byte-identical in both template trees. */
 const VERBATIM = [
+    "cache-handler.js.hbs",
     "instrumentation-edge-safe.test.ts.hbs",
     "knext-bun-entry.mjs.hbs",
     "runtime-contract.mjs.hbs",

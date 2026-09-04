@@ -218,6 +218,36 @@ describe("kn-next create — next.config is minimal under vinext (ADR-0048)", ()
         const { appDir } = scaffoldApp();
         expect(existsSync(join(appDir, "next-adapter.ts"))).toBe(false);
     });
+
+    it("wires the Redis cache handler — a scaffold without one has NO ISR/data cache at all (#895)", () => {
+        // The silent-degradation defect the stability planning gate found:
+        // nothing wired `cacheHandler`, so every `kn-next create` app served
+        // 200s with no ISR cache and no data cache — full recompute per
+        // render, the provisioned Redis unused, and nothing red anywhere.
+        const { appDir } = scaffoldApp();
+        const src = readFileSync(join(appDir, "next.config.ts"), "utf8");
+        const code = src
+            .replace(/\/\*[\s\S]*?\*\//g, "")
+            .replace(/^\s*\/\/.*$/gm, "");
+
+        expect(code).toMatch(/cacheHandler\s*:/);
+        // The default in-memory cache must be OFF — per-pod memory caches
+        // diverge across Knative pods (multi-pod consistency is the whole
+        // reason the handler is Redis-backed).
+        expect(code).toMatch(/cacheMaxMemorySize:\s*0/);
+    });
+
+    it("ships cache-handler.js as a thin re-export of the framework handler (#895)", () => {
+        // Same shape as apps/file-manager/cache-handler.js: the file exists
+        // only because Next requires a PATH; the logic stays in
+        // @getknext/core so fixes reach every app.
+        const { appDir } = scaffoldApp();
+        const handlerPath = join(appDir, "cache-handler.js");
+        expect(existsSync(handlerPath)).toBe(true);
+        const src = readFileSync(handlerPath, "utf8");
+        expect(src).toContain("@getknext/core/adapters/cache-handler");
+        expect(src).toMatch(/export\s*\{\s*default\s*\}/);
+    });
 });
 
 describe("kn-next create — graduated per-app guards ship with the app (#344/#408)", () => {

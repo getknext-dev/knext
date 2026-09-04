@@ -856,6 +856,13 @@ async function main() {
       ).toEqual([]);
     });
 
+    it('the vinext-axis row exists — the shipped artifact has a lane row, not a blind spot', () => {
+      // Deleting the row would silently return the matrix to claiming nothing
+      // about the only artifact users can build. The row may be ❌ (that is
+      // its honest state until the lane goes green) but it must EXIST.
+      expect(rows.filter((r) => /vinext single-executable axis/i.test(r.feature)).length).toBe(1);
+    });
+
     it('enforces the evidence contract IFF a row is ✅ — an honest ❌ flip-back is always free', () => {
       expect(officialRows.length).toBeGreaterThan(0);
       for (const row of officialRows) {
