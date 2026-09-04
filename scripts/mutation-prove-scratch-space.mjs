@@ -33,6 +33,13 @@
  *   M5c adds a fourth repo write to the one file licensed for three, so the
  *      write exception is proved to be pinned to what it licences rather than
  *      to the file's name.
+ *   M5d SUBSTITUTES a licensed write for a `tests/*.tmp.ts` one. The count is
+ *      unchanged, which is exactly why a count-pinned licence stayed green
+ *      through it — the licence names destinations because of this mutation.
+ *   M5e adds an UNREGISTERED leak to a genuinely drained-registry file. The
+ *      registry exemption used to discharge every same-named creation once one
+ *      was pushed; no synthetic vector caught it, because none of them had an
+ *      unregistered sibling. This one is asserted against the real tree.
  *   M6 blinds the lifetime scan, which makes every baseline entry stale —
  *      proving the ratchet is asserted in BOTH directions and cannot rot into a
  *      permanent licence.
@@ -121,14 +128,39 @@ const MUTATIONS = [
     id: 'M5c',
     expect: 'red',
     claim:
-      'the write exception stops being count-pinned — a FOURTH repo write in the one file ' +
-      'licensed for three rides in free, which is how a file-global exception makes the worst ' +
-      'offender the safest place to add the next offence',
+      'a FOURTH repo write is added to the one file licensed for three — the licence must not ' +
+      'extend to whatever lands next to it',
     subject: 'licensed',
     anchor: '    const typesDir = join(FIXTURE, "node_modules", "@types");',
     replacement:
       '    writeFileSync(join(FIXTURE, "extra-write.txt"), "x");\n' +
       '    const typesDir = join(FIXTURE, "node_modules", "@types");',
+  },
+  {
+    id: 'M5d',
+    expect: 'red',
+    claim:
+      'a licensed write is SUBSTITUTED for a `tests/*.tmp.ts` scratch write — the COUNT stays ' +
+      'at three, so the count-pinned licence stayed GREEN through the exact #918 shape it was ' +
+      'meant to be narrowing. This is why the licence names destinations',
+    subject: 'licensed',
+    anchor: '    writeFileSync(join(FIXTURE, ".knext", ".gitignore"), "*\\n");',
+    replacement: '    writeFileSync("tests/.a.tmp.ts", "*\\n");',
+  },
+  {
+    id: 'M5e',
+    expect: 'red',
+    claim:
+      'a leak is added to a genuinely drained-registry file WITHOUT enrolling it — the ' +
+      'file-global exemption discharged every same-named creation once one was pushed, so five ' +
+      'appended leaks reported zero. No synthetic vector caught this, because none of them had ' +
+      'an unregistered sibling',
+    subject: 'registry',
+    anchor: "  const dir = mkdtempSync(join(tmpdir(), 'port-owned-'));",
+    replacement:
+      "  const dir = mkdtempSync(join(tmpdir(), 'knext-d9-unregistered-'));\n" +
+      "  const dir2 = mkdtempSync(join(tmpdir(), 'port-owned-'));\n" +
+      '  void dir2;',
   },
   {
     id: 'M6',
@@ -167,6 +199,7 @@ const prover = createGuardProver({
     victim: 'tests/tomatchobject-mutation-guard.test.ts',
     listed: 'tests/action-pin-sha-tag-nightly.test.ts',
     licensed: 'packages/kn-next/src/__tests__/adapter-dev-edge-fence.test.ts',
+    registry: 'tests/e2e-deploy.port-ownership.test.ts',
   },
 });
 

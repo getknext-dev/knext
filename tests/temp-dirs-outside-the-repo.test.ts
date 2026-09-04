@@ -54,8 +54,10 @@
  * list is how the second call site gets missed. The two exception sets in
  * `tests/scratch-space-exceptions.json` are the deliberate opposite — a
  * ratchet over a measured population, asserted in BOTH directions so an entry
- * that stops being needed reds the guard instead of rotting in place, and
- * COUNT-PINNED so a new offence inside an already-listed file reds too. A
+ * that stops being needed reds the guard instead of rotting in place. The write
+ * licence names the DESTINATIONS, not a number — a count licences "three writes
+ * in this file", which substitution satisfies — and the leak ceiling is per file
+ * and per count, so a new leak inside an already-listed file reds too. A
  * file-global exception would make the one file already allowed to write into
  * the checkout the safest place in the repo to put the next such write.
  * The `unremovedTempDirs` burn-down is tracked in #939.
@@ -76,9 +78,14 @@ import {
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 type Exceptions = {
-  repoRootedWrites: Record<string, { findings: number; reason: string }>;
+  repoRootedWrites: Record<string, { writes: string[]; reason: string }>;
   unremovedTempDirs: { recordedOn: string; note: string; files: Record<string, number> };
 };
+
+/** How a finding is named, in the offender report AND in the licence. */
+function render(w: { call: string; target: string; embedded: boolean }): string {
+  return `${w.call}(${w.target})${w.embedded ? ' [inside a command string]' : ''}`;
+}
 
 const exceptions: Exceptions = JSON.parse(
   readFileSync(resolve(repoRoot, 'tests/scratch-space-exceptions.json'), 'utf8'),
@@ -196,16 +203,15 @@ describe('a spec writes its scratch OUTSIDE the checkout (#918)', () => {
   it('no spec writes into the checkout', () => {
     const offenders = specFiles()
       .flatMap((f) => {
-        const found = repoRootedWrites(readFileSync(resolve(repoRoot, f), 'utf8'));
-        // COUNT-PINNED, not file-global. An exception that licences a FILE makes
-        // the one file already allowed to write into the checkout the safest
-        // place in the repo to add the next such write.
-        const licensed = exceptions.repoRootedWrites[f]?.findings ?? 0;
-        return found
-          .slice(licensed)
-          .map(
-            (w) => `${f}: ${w.call}(${w.target}${w.embedded ? '  [inside a command string]' : ''}`,
-          );
+        // TARGET-PINNED, not count-pinned and not file-global. A count licences
+        // "three writes in this file", which SUBSTITUTION satisfies: replacing
+        // the three legitimate fixture writes with three `tests/.a.tmp.ts`
+        // writes kept the guard green. The licence names the destinations.
+        const licensed = new Set(exceptions.repoRootedWrites[f]?.writes ?? []);
+        return repoRootedWrites(readFileSync(resolve(repoRoot, f), 'utf8'))
+          .map(render)
+          .filter((w) => !licensed.has(w))
+          .map((w) => `${f}: ${w}`);
       })
       .sort();
     expect(
@@ -265,6 +271,14 @@ describe('a spec writes its scratch OUTSIDE the checkout (#918)', () => {
       repoRootedWrites(`${repoRootDecl}writeFileSync(resolve(root, '/tmp/x'), body);`),
     ).toEqual([]);
     expect(repoRootedWrites("writeFileSync(join('/tmp', 'x'), body);")).toEqual([]);
+    // …and only a TOP-LEVEL argument of `resolve` can take over. A slash on a
+    // literal nested inside a subpath is the same mistake one level down.
+    expect(
+      repoRootedWrites(
+        "const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');\n" +
+          "writeFileSync(resolve(root, join(x, '/seg')), body);",
+      ),
+    ).toHaveLength(1);
   });
 
   it('accepts the tmpdir rewrite that actually fixed #918', () => {
@@ -299,18 +313,21 @@ describe('a spec writes its scratch OUTSIDE the checkout (#918)', () => {
     }
   });
 
-  it('every write exception is still needed, and pinned to what it actually licences', () => {
-    for (const [file, { findings, reason }] of Object.entries(exceptions.repoRootedWrites)) {
+  it('every licensed write still exists — a licence outliving its subject reds', () => {
+    for (const [file, { writes, reason }] of Object.entries(exceptions.repoRootedWrites)) {
       expect(existsSync(resolve(repoRoot, file)), `${file} is gone; drop its exception`).toBe(true);
       expect(reason.length, `${file}'s exception carries no reason`).toBeGreaterThan(40);
-      // EXACT, in both directions. Too low and the guard reds (above); too high
-      // and the surplus is a silent licence for writes nobody argued for.
+      const live = repoRootedWrites(readFileSync(resolve(repoRoot, file), 'utf8')).map(render);
+      // Both directions. The offender check above catches a write the licence
+      // does NOT name; this catches a licence the file no longer contains —
+      // which is what a SUBSTITUTION looks like from the other side, and what
+      // stops the list rotting into permission for whatever lands here later.
       expect(
-        repoRootedWrites(readFileSync(resolve(repoRoot, file), 'utf8')).length,
-        `${file}'s exception licences ${findings} write(s) but the file no longer has that ` +
-          'many. Lower it, or delete the entry — a licence wider than its subject is how the ' +
-          'next write gets in for free',
-      ).toBe(findings);
+        writes.filter((w) => !live.includes(w)),
+        `${file} no longer performs these licensed write(s). Delete them from the exception ` +
+          'rather than leaving a licence nobody needs — a stale entry is a free pass for the ' +
+          'next write that happens to be spelled the same way',
+      ).toEqual([]);
     }
   });
 });
@@ -389,6 +406,54 @@ describe('a temp directory is REMOVED, not just correctly placed (D9, #880)', ()
       unpairedTempDirs(
         "const dir = mkdtempSync(join(tmpdir(), 'a-'));\nrmSync(dir, { recursive: true });\n" +
           "const dir2 = mkdtempSync(join(tmpdir(), 'b-'));\nrmSync(dir2, { recursive: true });",
+      ),
+    ).toEqual([]);
+  });
+
+  it('enrols in a registry PER SITE, on a real registry file', () => {
+    // Asserted against the tree, not a synthetic string: the synthetic vectors
+    // below all passed while the file-global exemption was live, because they
+    // never contained an UNREGISTERED sibling. Five unregistered `dir` leaks
+    // appended to a genuinely-drained file reported zero.
+    const file = 'tests/e2e-deploy.port-ownership.test.ts';
+    const source = readFileSync(resolve(repoRoot, file), 'utf8');
+    expect(
+      unpairedTempDirs(source),
+      `${file} is the real drained-registry fixture for this check — if it stopped using ` +
+        '`for (const d of tempDirs) rmSync(d, …)`, repoint the check',
+    ).toEqual([]);
+    const appended = Array.from(
+      { length: 5 },
+      (_, i) => `const dir = mkdtempSync(join(tmpdir(), 'knext-unregistered-${i}-'));`,
+    ).join('\n');
+    expect(
+      unpairedTempDirs(`${source}\n${appended}\n`),
+      'one `temps.push(dir)` cannot discharge five creations that were never pushed',
+    ).toHaveLength(5);
+  });
+
+  it('does not treat an unrelated rm as draining the registry', () => {
+    expect(
+      unpairedTempDirs(
+        'const temps = [];\n' +
+          "const dir = mkdtempSync(join(tmpdir(), 'x-'));\ntemps.push(dir);\n" +
+          'afterAll(() => { rmSync(someOtherFile, { force: true }); });',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('does not credit removing a FILE INSIDE the directory', () => {
+    // `asset-upload.test.ts` removes `join(root, '.next', 'BUILD_ID')` and never
+    // removes `root`; a substring match read that as a cleanup.
+    expect(
+      unpairedTempDirs(
+        "const root = mkdtempSync(join(tmpdir(), 'x-'));\n" +
+          "await fs.rm(join(root, '.next', 'BUILD_ID'), { force: true });",
+      ),
+    ).toHaveLength(1);
+    expect(
+      unpairedTempDirs(
+        "const root = mkdtempSync(join(tmpdir(), 'x-'));\nrmSync(root, { recursive: true });",
       ),
     ).toEqual([]);
   });

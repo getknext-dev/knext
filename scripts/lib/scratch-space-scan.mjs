@@ -309,9 +309,14 @@ export function classifyPathExpr(expr, blanked, raw, where = {}) {
   // ABSOLUTE. Under `resolve` the LAST absolute argument wins, so any of them
   // acquits; under `join` — and for a bare literal — only the root can be
   // absolute, and a leading slash anywhere else is just a segment separator.
-  const absolute = (l) => l.startsWith('/');
-  if (outer === 'resolve' && stringLiterals(expr).some(absolute)) return 'tmp';
-  if (outer !== 'resolve' && stringLiterals(rootArg ?? '').some(absolute)) return 'tmp';
+  //
+  // TOP-LEVEL ARGUMENTS ONLY, and only where the argument IS a literal. Reading
+  // every literal in the expression would let one nested deep inside a subpath
+  // (`resolve(root, join(x, '/seg'))`) acquit the whole destination — the same
+  // "a slash anywhere means absolute" mistake one level down.
+  const absolute = (text) => (staticPrefixOfLiteral(text) ?? '').startsWith('/');
+  if (outer === 'resolve' && outerArgs(expr).some(absolute)) return 'tmp';
+  if (outer !== 'resolve' && rootArg !== undefined && absolute(rootArg)) return 'tmp';
 
   // THE ROOT IS A LITERAL, and it is relative — the destination is inside the
   // CWD, which for this suite is the repo root.
@@ -483,39 +488,142 @@ export function unpairedTempDirs(source) {
     else created.set(binding, (created.get(binding) ?? 0) + 1);
   }
 
+  // A REGISTRY discharges the sites that are actually ENROLLED in it — no more.
+  // The first version discharged every same-named creation once ONE was pushed,
+  // and matched its `rm` leg against any removal anywhere in the file: five
+  // unregistered `dir` leaks appended to `e2e-deploy.port-ownership.test.ts`
+  // reported ZERO, and a push beside an unrelated `rmSync(someOtherFile)` also
+  // reported zero. Credit is now COUNTED like every other removal, and the `rm`
+  // has to be over the registry's own elements.
+  const drained = drainedRegistries(blanked);
+
   for (const [name, creations] of created) {
-    // A REGISTRY discharges all of them at once, and this repo uses one:
-    // `compat-window-fingerprint.test.ts` pushes every scratch dir onto `temps`
-    // and empties it in `afterAll`. Counting removals there would report a leak
-    // per creation, which is a guard reporting the correct pattern as the bug.
-    const removals = registryDischarged(blanked, name)
-      ? creations
-      : [
-          ...blanked.matchAll(
-            new RegExp(`\\b(?:rmSync|rm|rmdirSync|rmdir)\\s*\\([^)]*\\b${name}\\b`, 'g'),
-          ),
-        ].length;
-    for (let i = removals; i < creations; i++) found.push({ binding: name });
+    const credit = directRemovals(blanked, name) + enrolments(blanked, name, drained);
+    for (let i = credit; i < creations; i++) found.push({ binding: name });
   }
   return found;
 }
 
+/** Every rm-shaped call's FIRST argument, as raw text. */
+function removalFirstArgs(text) {
+  /** @type {string[]} */
+  const args = [];
+  for (const m of text.matchAll(/\b(?:rmSync|rm|rmdirSync|rmdir)\s*\(/g)) {
+    const open = m.index + m[0].length - 1;
+    const close = matchParen(text, open);
+    if (close === -1) continue;
+    const inner = text.slice(open + 1, close);
+    args.push(splitArgs(inner, inner)[0]?.trim() ?? '');
+  }
+  return args;
+}
+
 /**
- * Is `name` pushed onto an array that is later iterated and removed wholesale?
+ * Does this removal argument remove `name` ITSELF?
+ *
+ * `fs.rm(join(root, '.next', 'BUILD_ID'))` removes a FILE INSIDE `root` and
+ * leaves the directory exactly where it was — `asset-upload.test.ts:120` does
+ * precisely that and never removes `root`, and a substring match credited it as
+ * a cleanup. So the binding must BE the path, not a component of one.
+ *
+ * @param {string} arg
+ * @param {string} name
+ */
+function removesBindingItself(arg, name) {
+  return new RegExp(
+    `^(?:await\\s+)?(?:(?:path\\s*\\.\\s*)?(?:resolve|join|normalize)\\s*\\(\\s*)?${name}\\s*\\)?$`,
+  ).test(arg.trim());
+}
+
+/**
+ * How many removals name this binding as the thing being removed.
  *
  * @param {string} blanked
  * @param {string} name
  */
-function registryDischarged(blanked, name) {
-  const push = blanked.match(
-    new RegExp(`\\b([A-Za-z_$][\\w$]*)\\s*\\.\\s*push\\s*\\(\\s*${name}\\b`),
-  );
-  if (!push) return false;
-  const registry = push[1];
-  const iterated = new RegExp(
-    `\\bof\\s+${registry}\\b|\\b${registry}\\s*\\.\\s*(?:forEach|map)\\s*\\(`,
-  );
-  return iterated.test(blanked) && /\b(?:rmSync|rm|rmdirSync|rmdir)\s*\(/.test(blanked);
+function directRemovals(blanked, name) {
+  return removalFirstArgs(blanked).filter((a) => removesBindingItself(a, name)).length;
+}
+
+/**
+ * Arrays that are iterated with an `rm` over THEIR OWN elements.
+ *
+ * @param {string} blanked
+ * @returns {Set<string>}
+ */
+function drainedRegistries(blanked) {
+  /** @type {Set<string>} */
+  const drained = new Set();
+
+  // `for (const d of tempDirs) rmSync(d, …)` — the shape in
+  // `e2e-deploy.port-ownership.test.ts` and `compat-window-fingerprint.test.ts`.
+  for (const m of blanked.matchAll(
+    /\bfor\s*\(\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s+of\s+([A-Za-z_$][\w$]*)\s*\)/g,
+  )) {
+    const [element, registry] = [m[1], m[2]];
+    if (
+      removalFirstArgs(bodyAfter(blanked, m.index + m[0].length)).some((a) =>
+        removesBindingItself(a, element),
+      )
+    ) {
+      drained.add(registry);
+    }
+  }
+
+  // `tempDirs.forEach((d) => rmSync(d, …))`
+  for (const m of blanked.matchAll(
+    /\b([A-Za-z_$][\w$]*)\s*\.\s*forEach\s*\(\s*(?:\(\s*([A-Za-z_$][\w$]*)|([A-Za-z_$][\w$]*)\s*=>)/g,
+  )) {
+    const element = m[2] ?? m[3];
+    const open = blanked.indexOf('(', m.index + m[1].length);
+    const close = matchParen(blanked, open);
+    if (close === -1 || !element) continue;
+    if (
+      removalFirstArgs(blanked.slice(open, close + 1)).some((a) => removesBindingItself(a, element))
+    ) {
+      drained.add(m[1]);
+    }
+  }
+  return drained;
+}
+
+/**
+ * The statement or block that follows `index` — a loop's body.
+ *
+ * @param {string} blanked
+ * @param {number} index
+ */
+function bodyAfter(blanked, index) {
+  const rest = blanked.slice(index);
+  const braceAt = rest.search(/\S/);
+  if (rest[braceAt] !== '{') return rest.split(';')[0];
+  let depth = 0;
+  for (let i = braceAt; i < rest.length; i++) {
+    if (rest[i] === '{') depth++;
+    else if (rest[i] === '}') {
+      depth--;
+      if (depth === 0) return rest.slice(braceAt, i + 1);
+    }
+  }
+  return rest;
+}
+
+/**
+ * How many creations of `name` are ENROLLED in a drained registry — counted, so
+ * one `temps.push(dir)` cannot discharge six unregistered `dir` creations.
+ *
+ * @param {string} blanked
+ * @param {string} name
+ * @param {Set<string>} drained
+ */
+function enrolments(blanked, name, drained) {
+  let n = 0;
+  for (const m of blanked.matchAll(
+    new RegExp(`\\b([A-Za-z_$][\\w$]*)\\s*\\.\\s*push\\s*\\(\\s*${name}\\s*\\)`, 'g'),
+  )) {
+    if (drained.has(m[1])) n += 1;
+  }
+  return n;
 }
 
 /**
