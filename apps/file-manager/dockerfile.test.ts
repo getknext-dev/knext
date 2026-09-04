@@ -94,6 +94,24 @@ describe('#ADR-0048 file-manager vinext image — build order', () => {
     );
   });
 
+  it('pins the staged native tree before the runtime layer copies it', () => {
+    // C2: this Dockerfile stages @img ITSELF rather than calling
+    // `stageSharpNative`, so the CLI's pinning does not reach it. Ordering is
+    // the whole assertion — a manifest written after the COPY would ship a
+    // record of a tree the image never received.
+    const staged = lineOf('cp -RL');
+    const pinned = lineOf('write-native-integrity.mjs');
+    const copied = lineOf('COPY --from=builder /repo/native');
+    expect(pinned, 'the native tree must be pinned by the shared writer').toBeGreaterThan(-1);
+    expect(pinned).toBeGreaterThan(staged);
+    expect(pinned).toBeLessThan(copied);
+    // The lockfile is the provenance half; hashing a tree without checking what
+    // it claims to be would record whatever was there.
+    expect(DF, 'pinning must read the lockfile').toMatch(
+      /write-native-integrity\.mjs [^\n]*bun\.lock/,
+    );
+  });
+
   it('compiles for musl, matching the alpine runtime stage', () => {
     // A glibc binary exits on alpine with no useful message. The target and
     // the base image are a matched pair; asserting one without the other

@@ -35,6 +35,7 @@ import { cpSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runQuiet } from "./exec";
+import { findLockfile, writeNativeIntegrityManifest } from "./native-integrity";
 import { UsageError } from "./shared";
 
 /** The first Bun that ADR-0048 accepts. See the docstring for the measurements. */
@@ -209,6 +210,12 @@ export function buildVinextExecutable(opts: VinextBuildOptions): string {
  * Dockerfile's `COPY native` would otherwise fail the build for every app that
  * does not use `next/image`.
  *
+ * Whatever lands here is then PINNED — every staged `@img` package checked
+ * against the app's `bun.lock` and every staged file hashed into
+ * `native/.integrity.json`, which the dlopen shim re-checks in the image. This
+ * copy is otherwise an unguarded path from the install store to native-code
+ * privilege, and the closure SBOM does not cover `/app/native`.
+ *
  * Everything present is copied rather than a per-platform pair: the package
  * manager installs only the optional packages matching this platform, so what is
  * there IS the right set — and mirroring sharp's own naming scheme here would be
@@ -219,11 +226,16 @@ export function stageSharpNative(cwd: string): void {
     mkdirSync(dest, { recursive: true });
 
     const source = findImgPackages(cwd);
-    if (!source) return;
+    if (source) {
+        // `dereference` follows the symlinks a bun/pnpm isolated store uses;
+        // copying the links would put dangling pointers in the image.
+        cpSync(source, dest, { recursive: true, dereference: true });
+    }
 
-    // `dereference` follows the symlinks a bun/pnpm isolated store uses; copying
-    // the links would put dangling pointers in the image.
-    cpSync(source, dest, { recursive: true, dereference: true });
+    // Unconditional, including the empty case: a `native/` with no manifest is
+    // indistinguishable from one whose manifest was stripped, and the shim reads
+    // absence as "legacy image, load unverified".
+    writeNativeIntegrityManifest(dest, findLockfile(cwd));
 }
 
 /** `node_modules/@img`, wherever this install layout put it. */
