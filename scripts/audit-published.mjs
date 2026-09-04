@@ -12,10 +12,10 @@
  * JS dependency closure.
  *
  * WHAT IT AUDITS — the ACTUALLY-PUBLISHED PRODUCTION closure, not root devDeps:
- *   1. `pnpm pack` each published package (lib → db → core). pnpm (not npm) pack
- *      rewrites the `workspace:^` deps between them to a real version range,
- *      EXACTLY what `changeset publish` does — so we audit the graph consumers
- *      actually resolve.
+ *   1. `bun pm pack` each published package (lib → db → core). bun (not npm)
+ *      pack rewrites the `workspace:^` deps between them to a real version
+ *      range, EXACTLY what `changeset publish` does — so we audit the graph
+ *      consumers actually resolve.
  *   2. Install all three tarballs together in a scratch dir OUTSIDE the repo with
  *      `--omit=dev` (auditing root devDeps — drizzle-kit, esbuild, vitest, biome,
  *      tsx — would be FALSE CONFIDENCE: none of it ships to consumers).
@@ -125,9 +125,15 @@ function loadAllowlist() {
   return ids;
 }
 
-/** Pack a workspace package with `pnpm pack` (rewrites workspace:^ like publish). */
-function pnpmPack(dir, dest) {
-  execFileSync('pnpm', ['pack', '--pack-destination', dest], {
+/**
+ * Pack a workspace package with `bun pm pack` (rewrites workspace:^ like
+ * publish). Was `pnpm pack` until the workspace moved to bun (#926): without
+ * pnpm-workspace.yaml pnpm cannot resolve `workspace:^` at all, so the old
+ * command was dead the moment the lockfile left — the same class as the
+ * `pnpm install --frozen-lockfile` steps this lane died on.
+ */
+function packPublished(dir, dest) {
+  execFileSync('bun', ['pm', 'pack', '--destination', dest], {
     cwd: dir,
     stdio: ['ignore', 'inherit', 'inherit'],
   });
@@ -143,7 +149,7 @@ function main() {
   mkdirSync(sbomOutDir, { recursive: true });
 
   console.log('[audit-published] packing the published set (lib → db → core)…');
-  for (const pkg of PUBLISHED) pnpmPack(pkg.dir, tarballDir);
+  for (const pkg of PUBLISHED) packPublished(pkg.dir, tarballDir);
   const tarballs = readdirSync(tarballDir)
     .filter((f) => f.endsWith('.tgz'))
     .map((f) => join(tarballDir, f));

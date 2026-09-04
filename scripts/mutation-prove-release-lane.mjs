@@ -270,7 +270,7 @@ prove(
   WORKFLOW,
   LIVENESS_SPEC,
   '          create-github-releases: false\n',
-  '          create-github-releases: false\n          publish-script: pnpm run release\n',
+  '          create-github-releases: false\n          publish-script: bun run release\n',
 );
 
 // ── The "decide before you start" half ───────────────────────────────────────
@@ -443,7 +443,7 @@ prove(
 
 // 21. MANIFEST BUMPED, LOCKFILE NOT. `validateChangesetsCliVersion` reads the
 //     declared range AND `require.resolve`s the installed package, and CI runs
-//     `pnpm install --frozen-lockfile` — so the lockfile, not the manifest,
+//     `bun install --frozen-lockfile` — so the lockfile, not the manifest,
 //     decides what is on disk. A manifest-only assertion would call this green
 //     and the live run would still fail with the identical error.
 prove(
@@ -464,8 +464,8 @@ prove(
   'the v1 input name `version` comes back under a v2 action',
   WORKFLOW,
   COMPAT_SPEC,
-  '          version-script: pnpm run changeset:version\n',
-  '          version: pnpm run changeset:version\n',
+  '          version-script: bun run changeset:version\n',
+  '          version: bun run changeset:version\n',
 );
 
 console.log(`\n${pass} mutation(s) went red as required, ${fail} stayed green.`);
