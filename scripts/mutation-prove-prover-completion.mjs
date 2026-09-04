@@ -31,6 +31,7 @@ import { fileURLToPath } from 'node:url';
 import { resolveSpecRunner } from './lib/ci-blocking-gate-proof.mjs';
 import { countOccurrences, mutate, restore, snapshot } from './lib/mutation-harness.mjs';
 import { assessCompletion, evaluatePreflight } from './lib/prover-completion.mjs';
+import { jsStillParses } from './lib/parse-validity.mjs';
 import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -138,8 +139,15 @@ const PLAN = [
     // and biome had already reflowed that chain across three lines — so the
     // anchor did not resolve. Exactly the M10 failure, caught this time by the
     // preflight before anything was planted, which is what the preflight is for.
-    anchor: '(a) => a.count !== 1',
-    replacement: '(a) => a.count > 1',
+    // End-of-line span ON PURPOSE (PR #940 sweep): the harness appends a
+    // line-comment residue marker after a single-line replacement, and the
+    // previous mid-line anchor ('(a) => a.count !== 1') had that marker
+    // comment out the chain's closing ')' — the file stopped parsing, the
+    // guard reddened on the failed import, and the kill was for the wrong
+    // reason. The predicate concern in the comment above still holds: the
+    // anchor stays on THIS line only, never spanning the reflowable chain.
+    anchor: '    .filter((a) => a.count !== 1)',
+    replacement: '    .filter((a) => a.count > 1)',
   },
   {
     id: 'C7',
@@ -219,6 +227,20 @@ try {
     inFlight = m;
     console.log(`── planting ${m.id}: ${m.title}`);
     mutate(coreSnap, m.anchor, m.replacement);
+    // VALIDITY BEFORE VERDICT (PR #940 sweep). A mutation that leaves the
+    // subject unparseable reds the guard on the failed import, and that red
+    // is indistinguishable in the log from the guard doing its job — C6's old
+    // mid-line anchor did exactly this. Throwing here is safe: the `finally`
+    // below restores the snapshot, and assessCompletion reports the death.
+    {
+      const parseProblem = jsStillParses(readFileSync(CORE, 'utf8'));
+      if (parseProblem) {
+        throw new Error(
+          `${m.id} left its subject INVALID (${parseProblem}). Its verdict would be a red for ` +
+            'the wrong reason. Fix the mutation, do not accept the red.',
+        );
+      }
+    }
     check(m.id, m.desc, m.expected, runSpec(SPEC));
     recordMutation();
     executedIds.push(m.id);

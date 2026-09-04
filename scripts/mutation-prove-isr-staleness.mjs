@@ -35,37 +35,18 @@
 
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import ts from 'typescript';
 import { createGuardProver } from './lib/guard-prover.mjs';
+// The parse-validity validate on every mutation below is not optional
+// ceremony: this prover's first M6 used a mid-line anchor, the harness's
+// appended line-comment residue marker commented out the tail of the
+// `if (...) {` line, and the "KILLED" the unparseable handler produced would
+// have certified a boundary case the test did not have. A sweep confirmed the
+// same shape in two sibling provers — hence the shared helper.
+import { jsStillParses } from './lib/parse-validity.mjs';
 import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SPEC = 'packages/kn-next/src/__tests__/cache-handler-isr-staleness.test.ts';
-
-/**
- * A mutated handler that stopped PARSING reds every test in the guard for the
- * wrong reason — the module fails to import — and that red is indistinguishable
- * in the log from the guard doing its job. Not hypothetical here: this prover's
- * first M6 used a mid-line anchor, the harness's appended line-comment residue
- * marker commented out the tail of the `if (...) {` line, and the "KILLED" that
- * produced would have certified a boundary case the test did not have.
- *
- * Checked IN-PROCESS with the TypeScript parser (already a root devDependency)
- * rather than by spawning `node --check`: the prover-lane audit rightly refuses
- * a prover that spawns anything outside the shared runner resolvers. Same
- * pattern as the metric-contract prover's in-process YAML validation.
- */
-const jsStillParses = (mutated) => {
-  const syntaxErrors = ts
-    .transpileModule(mutated, {
-      reportDiagnostics: true,
-      compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ESNext },
-    })
-    .diagnostics.filter((d) => d.category === ts.DiagnosticCategory.Error);
-  if (syntaxErrors.length === 0) return undefined;
-  const first = ts.flattenDiagnosticMessageText(syntaxErrors[0].messageText, ' ');
-  return `the mutated handler no longer parses: ${first}`;
-};
 
 const MUTATIONS = [
   {
@@ -143,6 +124,19 @@ const MUTATIONS = [
     anchor: 'ageSeconds > revalidate) {',
     replacement: 'ageSeconds >= revalidate) {',
   },
+  {
+    id: 'M7',
+    expect: 'red',
+    claim:
+      "the expire comparison flips the same way (age > expire becomes age >= expire) — M6's " +
+      'unguarded twin: an entry exactly at its expire window flips from stale-but-servable to ' +
+      'expired, so the last servable instant is silently withdrawn (code-review round 1)',
+    subject: 'handler',
+    validate: jsStillParses,
+    // End-of-line anchor for the same reason as M6's.
+    anchor: 'ageSeconds > expire) {',
+    replacement: 'ageSeconds >= expire) {',
+  },
 ];
 
 /**
@@ -153,7 +147,7 @@ const MUTATIONS = [
  * reddened on retention tuning would be the first one disabled.
  */
 const NEGATIVE = {
-  id: 'M7',
+  id: 'M8',
   expect: 'green',
   claim: 'the retention default is retuned — the guard checks the TTL rule, not the constant',
   subject: 'handler',

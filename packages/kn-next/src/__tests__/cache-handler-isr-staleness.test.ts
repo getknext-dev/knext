@@ -228,9 +228,12 @@ describe("ISR stale-while-revalidate — the Redis path", () => {
         });
 
         /**
-         * An entry read at EXACTLY its revalidate window is still fresh:
-         * stale means the age EXCEEDS the window (`age > revalidate`) — the
-         * boundary instant itself is inside the window.
+         * An entry read at EXACTLY its revalidate window is still fresh.
+         * This is THIS HANDLER'S tie-break rule — `withCacheState` labels
+         * stale only when the age EXCEEDS the window (`age > revalidate`), so
+         * the boundary instant itself is inside the window. It is asserted
+         * here as knext's contract; no upstream (vinext/Next) source pinning
+         * the tie-break direction is vendored in this repo to cite.
          *
          * This case exists because a mutation run proved its absence: flipping
          * the comparison to `age >= revalidate` — the off-by-one a refactor
@@ -272,6 +275,50 @@ describe("ISR stale-while-revalidate — the Redis path", () => {
             const { handler } = await redisBackedHandler(stored);
             const hit = await handler.get("isr-redis-past-boundary");
             expect(hit?.cacheState).toBe("stale");
+        });
+
+        /**
+         * The expire boundary follows the same tie-break direction, derived
+         * from the code: `withCacheState` checks `age > expire` BEFORE the
+         * revalidate check, so at age === expire the expired branch does not
+         * fire and the entry falls through to the revalidate comparison —
+         * age (60) exceeds revalidate (1), so the boundary instant is the
+         * LAST STALE-BUT-SERVABLE moment, not the first expired one. One
+         * millisecond later it is regeneration input only.
+         */
+        it("a read at exactly the expire window is still (only) stale", async () => {
+            const frozen = new Date("2026-09-05T12:00:00.000Z");
+            setSystemTime(frozen);
+            const expire = 60;
+            const stored = JSON.stringify({
+                value: { kind: "APP_PAGE" },
+                lastModified: frozen.getTime() - expire * 1000,
+                tags: [],
+                cacheControl: { revalidate: 1, expire },
+            });
+            const { handler } = await redisBackedHandler(stored);
+            const hit = await handler.get("isr-redis-expire-boundary");
+            expect(hit, "the boundary read is still a hit").not.toBeNull();
+            expect(
+                hit?.cacheState,
+                "age === expire is the last stale instant, not the first expired one",
+            ).toBe("stale");
+        });
+
+        /** One millisecond past the expire window, it is expired. */
+        it("one millisecond past the expire window it is expired", async () => {
+            const frozen = new Date("2026-09-05T12:00:00.000Z");
+            setSystemTime(frozen);
+            const expire = 60;
+            const stored = JSON.stringify({
+                value: { kind: "APP_PAGE" },
+                lastModified: frozen.getTime() - expire * 1000 - 1,
+                tags: [],
+                cacheControl: { revalidate: 1, expire },
+            });
+            const { handler } = await redisBackedHandler(stored);
+            const hit = await handler.get("isr-redis-past-expire");
+            expect(hit?.cacheState).toBe("expired");
         });
     });
 });
