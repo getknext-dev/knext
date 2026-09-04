@@ -15,8 +15,10 @@ import {
   createMetricsState,
   drainPending,
   METRICS_CONTENT_TYPE,
+  METRICS_MAX_REQUEST_BYTES,
   observeRequest,
   renderMetrics,
+  resolveMaxRequestBytes,
 } from '../runtime-contract.mjs';
 
 // 0 → the OS assigns a free port (#678). A fixed fallback is how two concurrent
@@ -26,6 +28,10 @@ const PORT = Number(process.env.PORT ?? 0);
 const METRICS_PORT = Number(process.env.METRICS_PORT ?? 0);
 const GRACE_MS = Number(process.env.SHUTDOWN_GRACE_MS ?? 25_000);
 const HOSTNAME = '127.0.0.1';
+// Mirrors knext-bun-entry.mjs (ADR-0044 Option C). A harness that resolved the
+// cap differently from the entry would prove a different program — which is the
+// same argument that put the entry's `observeRequest` middleware in here.
+const REQUEST_CAP = resolveMaxRequestBytes(process.env);
 
 const metrics = createMetricsState();
 
@@ -43,6 +49,36 @@ async function app(req) {
   if (url.pathname === '/hang') {
     await new Promise(() => {}); // never resolves → forces the hardcap
     return new Response('unreachable');
+  }
+  // Reads the WHOLE body and reports its length — the only way to tell "the cap
+  // refused it" from "the cap silently truncated it", which is exactly the shape a
+  // Content-Length-trusting cap has: a lying Content-Length makes the handler see
+  // only the declared bytes.
+  if (url.pathname === '/echo') {
+    const body = await req.arrayBuffer();
+    return new Response(`bytes:${body.byteLength}`, {
+      status: 200,
+      headers: { 'content-type': 'text/plain' },
+    });
+  }
+  // A streaming RESPONSE. The cap is request-body-side and wraps nothing on the
+  // way out, but "by construction" is what this repo keeps finding to be false, so
+  // the e2e measures that the first event lands well before the last.
+  if (url.pathname === '/sse') {
+    const stream = new ReadableStream({
+      async start(controller) {
+        const enc = new TextEncoder();
+        for (let i = 1; i <= 3; i++) {
+          controller.enqueue(enc.encode(`data: ${i}\n\n`));
+          await new Promise((r) => setTimeout(r, 120));
+        }
+        controller.close();
+      },
+    });
+    return new Response(stream, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' },
+    });
   }
   if (url.pathname === '/api/health') {
     return Response.json({ status: 'ok', target: 'bun-exec' });
@@ -65,6 +101,8 @@ const appSrvx = serve({
   port: PORT,
   hostname: HOSTNAME,
   fetch: app,
+  // ADR-0044 Option C — the same key, from the same resolver, as the entry.
+  maxRequestBodySize: REQUEST_CAP.bytes,
   gracefulShutdown: false,
   silent: true,
   middleware: [
@@ -96,6 +134,8 @@ const appServer = {
 const metricsServer = Bun.serve({
   port: METRICS_PORT,
   hostname: HOSTNAME,
+  // FIXED, never REQUEST_CAP.bytes — see the entry.
+  maxRequestBodySize: METRICS_MAX_REQUEST_BYTES,
   fetch(req) {
     const url = new URL(req.url);
     if (url.pathname === '/metrics' && req.method === 'GET') {
@@ -109,6 +149,12 @@ const metricsServer = Bun.serve({
 });
 
 console.log(`LISTENING:${appServer.port} METRICS:${metricsServer.port}`);
+if (REQUEST_CAP.warning) {
+  console.warn(`REQUEST_BYTE_CAP: ${REQUEST_CAP.source.toUpperCase()} — ${REQUEST_CAP.warning}`);
+}
+console.log(
+  `REQUEST_BYTE_CAP:${REQUEST_CAP.bytes ?? 'none'} METRICS_BYTE_CAP:${REQUEST_CAP.metricsBytes} (${REQUEST_CAP.source})`,
+);
 
 const shutdown = createGracefulShutdown({
   appServers: [appServer],

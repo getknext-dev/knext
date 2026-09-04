@@ -3,19 +3,30 @@ title: Request hardening
 description: Rate limiting, payload-size caps, and malformed-request handling for a knext app — what the platform gives you, what it does not, and the recipe for the rest.
 ---
 
-knext bounds *how many* requests hit your app. It does **not** yet bound *how large* a single
-request body can be. This page is precise about which is which, because the difference decides
-whether you need to do anything.
+knext bounds *how many* requests hit your app, *how long* each may run, and — since the in-process
+byte cap shipped — *how large* a single request body may be. It does not bound request **rate** per
+client. This page is precise about which is which, because the difference decides whether you need
+to do anything.
+
+<Callout type="info">
+**Request bodies are capped at 8 MiB by default, for every route.** The runtime refuses a larger
+body with `413` before your handler is entered, and it **counts bytes** rather than trusting
+`Content-Length` — so a chunked request that sends no length is refused too. Change it with the
+`KNEXT_MAX_REQUEST_BYTES` environment variable; see
+[The request body cap](#the-request-body-cap).
+</Callout>
 
 <Callout type="warn">
-**There is no global request-body limit.** Next.js caps **Server Action** payloads at 1 MB by
-default — that setting does **not** cover App Router route handlers. A `POST` to a route handler
-that does `await req.json()` will buffer whatever it is sent. Capping that is your app's job today;
-see [Cap request bodies in app code](#cap-request-bodies-in-app-code).
+**The 8 MiB cap is not the same limit as Next.js's.** Next caps **Server Action** payloads at 1 MB
+by default, and that setting does not cover App Router route handlers. The two are deliberately
+different numbers so that a `413` tells you which one fired: 1 MB is Next, 8 MiB (or whatever you
+set) is knext.
 </Callout>
 
 ## What the platform already bounds
 
+- **Request body size** — 8 MiB by default, on every route, enforced by the runtime before your
+  code runs. See [The request body cap](#the-request-body-cap).
 - **Concurrency per pod** — `spec.scaling.containerConcurrency` (default 20) is enforced by the
   Knative queue-proxy *inside* the pod, so it applies to every request that reaches your app.
 - **Request duration** — `spec.timeoutSeconds` (default 300s) caps how long one request may occupy
@@ -34,7 +45,6 @@ see [Cap request bodies in app code](#cap-request-bodies-in-app-code).
 
 | Gap | What it means in practice |
 |---|---|
-| **Request body size** to route handlers | One oversized body that your handler buffers can exhaust the pod's memory. Scaling out does not help — the pressure is on a single pod. |
 | **Request rate per client** | Nothing limits how fast one client can call you. A flood scales you out to `maxScale` and stops there. |
 | **Slow clients in aggregate** | Bounded per pod by concurrency and by `timeoutSeconds`, but not globally. |
 
@@ -57,11 +67,46 @@ before you rely on one:
 - **Cloud LB payload policies vary.** Verify your provider actually offers one; several do not.
 </Callout>
 
-### 2. Cap request bodies in app code
+### 2. Set the request body cap [#the-request-body-cap]
 
-Until knext ships an in-process cap, this is the control that actually protects a route handler.
-Check the length **as you read**, rather than trusting the header — `Content-Length` is absent on
-chunked requests and is attacker-controlled in any case:
+knext caps request bodies in-process, so this control applies whether the traffic came through your
+proxy, through the Knative ingress, or from a pod inside the cluster dialling your app directly.
+
+- **Default: `8388608` bytes (8 MiB).** Chosen against the memory limit and `containerConcurrency`
+  (20 in-flight × 8 MiB stays far inside a 1Gi pod), and deliberately above Next's 1 MB Server
+  Action limit so the two never answer at the same threshold.
+- **The runtime counts bytes.** A body sent with chunked transfer encoding and no `Content-Length`
+  is refused at the same size as one that declares its length. `Content-Length` is never trusted on
+  its own.
+- **The response is a bare `413`** with no body. It is produced by the runtime before any knext or
+  Next.js code runs, so there is nothing to attach a message to. To confirm which cap is in force,
+  read the line the app prints on start:
+
+  ```
+  REQUEST_BYTE_CAP:8388608 METRICS_BYTE_CAP:65536 (default)
+  ```
+
+Change it per app with an environment variable:
+
+```yaml
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+spec:
+  env:
+    - name: KNEXT_MAX_REQUEST_BYTES
+      value: "20971520"          # 20 MiB
+```
+
+<Callout type="warn">
+**`KNEXT_MAX_REQUEST_BYTES=0` removes the cap entirely.** The app then buffers a body of any size
+the runtime accepts, and with `containerConcurrency` above 1 that is an out-of-memory kill rather
+than a `413`. It is deliberate, it is logged loudly on every start, and it should be temporary. Any
+value that is not a non-negative integer is ignored with a warning and the 8 MiB default stays in
+force — a typo cannot silently remove the cap. The metrics port stays capped either way.
+</Callout>
+
+If you need a **smaller, per-route** limit — say 100 KB on one JSON endpoint — the platform cap does
+not replace it. Check the length **as you read**, rather than trusting the header:
 
 ```ts
 // app/api/upload/route.ts
@@ -115,7 +160,10 @@ spec:
 ## Why knext does not ship a proxy
 
 Putting a proxy sidecar next to every app would add a container to the cold-start path, which is the
-one thing a scale-to-zero platform cannot spend freely. The alternative — an in-process cap owned by
-knext — is the planned fix, and it is deferred only until the runtime that owns the port is settled.
-Until then this page is the honest position: the platform bounds concurrency, duration and scale;
-you bound bytes.
+one thing a scale-to-zero platform cannot spend freely. The byte cap above is the in-process
+alternative, and it costs one integer parse at start — nothing per request, and nothing at all on
+the cold-start path.
+
+Rate limiting is the piece that is still yours. The platform bounds concurrency, duration, scale and
+bytes; nothing bounds how fast one client may call you, and a proxy is still the right place for
+that.
