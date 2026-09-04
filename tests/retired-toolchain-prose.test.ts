@@ -211,3 +211,78 @@ describe('§4.2 an "only X available today" claim names the builder that IS avai
     expect(findings, findings.join('\n  ')).toEqual([]);
   });
 });
+
+describe('no surviving prose claims compat-smoke can skip a capability check', () => {
+  /**
+   * The "no self-skipping guard survives" sweep (sprint 2, lane G), and the half
+   * that was still open.
+   *
+   * The CODE half has been closed for a while: check (g)'s two `skip()` paths are
+   * gone and `tests/compat-smoke-capability-checks.test.ts` SCANS the runner, so
+   * reintroducing one reds CI.
+   *
+   * The PROSE half was not. `ci.yml` described compat-smoke check 'g' in the
+   * present tense as something that "skip()s on non-200 so a no-bucket CI stays
+   * green" — a mechanism that no longer exists. That is not cosmetic: a comment
+   * presenting a skip as the established behaviour of a neighbouring gate reads
+   * as licence to add one, and the compat rows are precisely where this repo has
+   * been burned by capability checks that skip rather than fail.
+   *
+   * TIED TO THE CODE, not to a list. The rule is conditional — IF the runner has
+   * no skip mechanism, THEN nothing may say it does — so the day someone
+   * deliberately adds one back this guard stops firing and the capability-checks
+   * guard takes over. The two cannot both be satisfied by the same wrong answer.
+   *
+   * ROUND 1 OF THIS GUARD WAS DECORATION, and it is worth recording how. It
+   * excluded any line matching `/\b(no|never|not|cannot|reds|refus)/i` on the
+   * theory that a sentence about the ABSENCE of a skip is the assertion rather
+   * than a finding. The stale sentence contains the words "no-bucket", so `\bno`
+   * matched and the guard passed against the exact line it was written for —
+   * caught only by mutating it back in. The exclusions below are whole phrases.
+   */
+  const RUNNER = 'apps/file-manager/scripts/compat-smoke.mjs';
+
+  /**
+   * Phrases that make a mention a statement about ABSENCE. Whole phrases, never
+   * bare words: "no" alone matched "no-bucket" and neutered round 1.
+   */
+  const ABOUT_ABSENCE =
+    /\b(no longer|does not|do not|must not|cannot|never|is gone|are gone|reds|refuses|removed|previously described|used to)\b/i;
+
+  it('the runner really has no skip mechanism (the premise of the scan below)', () => {
+    // Non-vacuity, and the conditional's antecedent. If this ever fails, the
+    // scan below is meaningless and must not silently keep passing.
+    expect(readFileSync(resolve(REPO_ROOT, RUNNER), 'utf8')).not.toMatch(/\bskip\s*\(/);
+  });
+
+  it('no tracked file says compat-smoke skips', () => {
+    const files = tracked('.github/workflows/*.yml', 'docs/**/*.md', 'scripts/*.mjs', 'tests/*.ts');
+    expect(files.length, 'nothing to scan — the guard would pass vacuously').toBeGreaterThan(20);
+    const findings: string[] = [];
+    for (const relPath of files) {
+      // This guard's own file is exempt BY PATH — it necessarily quotes the
+      // sentence it forbids — and by path so the exemption cannot be bought by
+      // wording, which is the #693 lesson applied here.
+      if (relPath === 'tests/retired-toolchain-prose.test.ts') continue;
+      for (const line of read(relPath).split('\n')) {
+        if (!/compat-smoke/.test(line)) continue;
+        if (!/\bskip\(\)?s?\b/.test(line)) continue;
+        if (ABOUT_ABSENCE.test(line)) continue;
+        findings.push(`${relPath}: ${line.trim()}`);
+      }
+    }
+    expect(
+      findings,
+      `the runner cannot skip; these say it can:\n  ${findings.join('\n  ')}`,
+    ).toEqual([]);
+  });
+
+  it('the exclusion is by PHRASE — "no-bucket" does not launder a claim (round 1\'s defect)', () => {
+    // The mutation that caught round 1, frozen as an assertion so the loose
+    // form cannot come back.
+    expect(ABOUT_ABSENCE.test('which skip()s on non-200 so a no-bucket CI stays green')).toBe(
+      false,
+    );
+    expect(ABOUT_ABSENCE.test('the runner does not skip')).toBe(true);
+  });
+});
