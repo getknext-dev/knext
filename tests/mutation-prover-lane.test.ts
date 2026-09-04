@@ -16,15 +16,17 @@ import { blankNonCode } from '../scripts/lib/blank-non-code.mjs';
 import {
   auditAnchorLiveness,
   auditProverSource,
-  proverPathBindings,
   auditRunnerResolution,
   auditSpecFrameworkMatch,
   codeStringLiterals,
   discoverProvers,
   evaluateProverRun,
+  isSharedMutationDriver,
   mutatesViaHarness,
   PROVER_RE,
+  proverPathBindings,
   RESOLVER_DEFINITION_FILE,
+  SHARED_MUTATION_DRIVERS,
 } from '../scripts/lib/prover-lane.mjs';
 import { PROVER_SUMMARY_PREFIX, parseProverSummary } from '../scripts/lib/prover-report.mjs';
 import { auditJobCanNotSkip } from './helpers/blocking-gate.js';
@@ -473,11 +475,44 @@ describe('#693 an off-convention prover is invisible to BOTH halves — so scan 
       4,
     );
     for (const relPath of mutators) {
+      if (isSharedMutationDriver(relPath, read(resolve(REPO_ROOT, relPath)))) continue;
       expect(
         PROVER_RE.test(basename(relPath)) && relPath === `scripts/${basename(relPath)}`,
         `${relPath} mutates tracked files via lib/mutation-harness.mjs but does not match scripts/${PROVER_RE.source} — the lane discovers by that glob, so it would never run`,
       ).toBe(true);
     }
+  });
+
+  it('the shared-driver exemption is PATH-anchored and cannot hide a prover', () => {
+    // The exemption's own guard. #693 already had a SHAPE-based exemption here
+    // that a file could buy by copying a function name; this one is a path, and
+    // the two properties below are what stop the path from being a hole.
+    expect(SHARED_MUTATION_DRIVERS.length, 'the exemption list is empty').toBeGreaterThan(0);
+    for (const relPath of SHARED_MUTATION_DRIVERS) {
+      // Under scripts/lib/, so the lane's `scripts/*.mjs` glob can never mistake
+      // it for a prover in the first place.
+      expect(relPath.startsWith('scripts/lib/'), `${relPath} is not under scripts/lib/`).toBe(true);
+      expect(existsSync(resolve(REPO_ROOT, relPath)), `${relPath} does not exist`).toBe(true);
+      // And it is a DRIVER, not a prover: the moment it declares or records
+      // mutations it stops being exempt, because then it IS a prover the lane
+      // cannot discover — the exact failure this describe block is about.
+      expect(isSharedMutationDriver(relPath, read(resolve(REPO_ROOT, relPath)))).toBe(true);
+    }
+  });
+
+  it('a "driver" that declares mutations LOSES the exemption', () => {
+    // Mutation-proved by construction: the discriminator is exercised directly,
+    // so a future edit that made the exemption unconditional reds here.
+    expect(
+      isSharedMutationDriver(
+        SHARED_MUTATION_DRIVERS[0] as string,
+        "import { mutate } from './mutation-harness.mjs';\ndeclareMutations(3);\n",
+      ),
+    ).toBe(false);
+  });
+
+  it('a file NOT on the list is never exempt, whatever it contains', () => {
+    expect(isSharedMutationDriver('scripts/lib/pretending.mjs', 'const a = 1;')).toBe(false);
   });
 
   it('a file that only READS the harness marker is not claimed as a prover', () => {

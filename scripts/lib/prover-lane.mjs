@@ -30,6 +30,44 @@ export const PROVER_RE = /^mutation-prove-.*\.mjs$/;
 export const RESOLVER_DEFINITION_FILE = 'scripts/lib/ci-blocking-gate-proof.mjs';
 
 /**
+ * Shared DRIVERS that call the harness's mutating verbs on a prover's behalf.
+ *
+ * The convention scan below asks "does every file that mutates via the harness
+ * match `scripts/mutation-prove-*.mjs`", because an off-convention prover is
+ * discovered by nothing and runs never. `scripts/lib/guard-prover.mjs` mutates
+ * and is deliberately not a prover: it is the ceremony (baseline, canary, clean
+ * tree, exit-code bookkeeping) that sprint 1's nine guards went without because
+ * writing it nine times cost more than the mutation tables did.
+ *
+ * PATH-ANCHORED, like `RESOLVER_DEFINITION_FILE` and for the same reason: #693
+ * had a SHAPE-based exemption here (`/function\s+resolveTestRunner\b/`), and
+ * copying a function name into a new file bought that file a full exemption —
+ * the copy-instead-of-share failure this lane exists to catch, defeating the
+ * guard against it.
+ *
+ * The exemption is NOT a hole, and `tests/mutation-prover-lane.test.ts` asserts
+ * why rather than asserting the list: an exempt file must live under
+ * `scripts/lib/` (so the lane's `scripts/*.mjs` glob can never mistake it for a
+ * prover) AND must NOT call `declareMutations`/`recordMutation` (so it cannot BE
+ * a prover hiding from the lane, which is the thing being guarded against).
+ */
+export const SHARED_MUTATION_DRIVERS = Object.freeze(['scripts/lib/guard-prover.mjs']);
+
+/**
+ * Is this path a sanctioned shared driver rather than an off-convention prover?
+ *
+ * @param {string} relPath
+ * @param {string} source
+ */
+export function isSharedMutationDriver(relPath, source) {
+  if (!SHARED_MUTATION_DRIVERS.includes(relPath)) return false;
+  // Fail closed if the "driver" has grown into a prover: a file that declares
+  // and records mutations is a prover, and one the lane cannot discover is
+  // exactly the failure the convention scan exists for.
+  return !callsFunction(source, 'declareMutations') && !callsFunction(source, 'recordMutation');
+}
+
+/**
  * Every mutation prover in the tree, as `{ relPath, absPath }`, sorted.
  *
  * DISCOVERED, because the bug this lane exists for is a fix that was applied to
