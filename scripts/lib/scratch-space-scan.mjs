@@ -166,20 +166,25 @@ function matchParen(blanked, open) {
 }
 
 /**
- * EVERY initializer text assigned to `name` in this file.
+ * EVERY initializer assigned to `name` in this file, with its offset.
  *
  * All of them, not the first: `image-prewarm-harness.test.ts` assigns `dir` in
  * four separate tests and also has a `dir: string = HARNESS` DEFAULT PARAMETER
  * sixty lines earlier, and `create-scaffold.test.ts` declares `(root: string) =>`
  * in a type before ever assigning `root`. First-match resolution classified both
- * on the wrong binding and reported 41 findings, none real. The caller reads the
- * list optimistically — one tmp-rooted assignment is enough — which is the
- * fail-open direction this scan takes everywhere it cannot be certain.
+ * on the wrong binding and reported 41 findings, none real.
+ *
+ * The caller picks the NEAREST PRECEDING one — see `nearest` — which is the
+ * closest a regex gets to scope. Reading them optimistically instead (any
+ * tmp-rooted assignment acquits the name) was tried and MEASURED WRONG: it let
+ * the reintroduced #918 mutation survive, because the file that carried the bug
+ * binds `tmp` twice — once repo-rooted in the offending test and once at
+ * `tmpdir()` in the test below it — and the second acquitted the first.
  *
  * @param {string} blanked
  * @param {string} raw
  * @param {string} name
- * @returns {string[]}
+ * @returns {{ at: number, text: string }[]}
  */
 function initializersOf(blanked, raw, name) {
   // `(?![=>])` excludes `==` AND `=>`: an arrow in a type position
@@ -188,7 +193,7 @@ function initializersOf(blanked, raw, name) {
     `(?:\\b(?:const|let|var)\\s+)?\\b${name}\\b\\s*(?::[^=;\\n]*)?=\\s*(?![=>])`,
     'g',
   );
-  /** @type {string[]} */
+  /** @type {{ at: number, text: string }[]} */
   const found = [];
   for (const m of blanked.matchAll(decl)) {
     const from = m.index + m[0].length;
@@ -207,9 +212,22 @@ function initializersOf(blanked, raw, name) {
       to++;
     }
     const text = raw.slice(from, to).trim();
-    if (text) found.push(text);
+    if (text) found.push({ at: m.index, text });
   }
   return found;
+}
+
+/**
+ * The assignment in scope at `use`: the nearest one BEFORE it, or — when the
+ * name is only assigned later, as a `beforeAll` does for a `let` a helper above
+ * it reads — the nearest one after.
+ *
+ * @param {{ at: number, text: string }[]} inits
+ * @param {number} use
+ */
+function nearest(inits, use) {
+  const before = inits.filter((i) => i.at < use).sort((a, b) => b.at - a.at)[0];
+  return before ?? inits.filter((i) => i.at >= use).sort((a, b) => a.at - b.at)[0] ?? null;
 }
 
 /**
@@ -218,10 +236,13 @@ function initializersOf(blanked, raw, name) {
  * @param {string} expr the RAW expression text
  * @param {string} blanked the whole file, blanked
  * @param {string} raw the whole file
- * @param {number} [depth] recursion budget for identifier resolution
+ * @param {{ at?: number, depth?: number }} [where] `at` is the offset the
+ *   expression is USED at, which is what makes "the nearest preceding
+ *   assignment" meaningful; `depth` is the recursion budget.
  * @returns {'tmp'|'repo'|'unknown'}
  */
-export function classifyPathExpr(expr, blanked, raw, depth = 0) {
+export function classifyPathExpr(expr, blanked, raw, where = {}) {
+  const { at = blanked.length, depth = 0 } = where;
   if (!expr || !expr.trim()) return 'unknown';
   if (TMP_ROOTED.test(expr)) return 'tmp';
   if (REPO_ROOTED.test(expr)) return 'repo';
@@ -249,12 +270,16 @@ export function classifyPathExpr(expr, blanked, raw, depth = 0) {
     /** @type {Set<'tmp'|'repo'|'unknown'>} */
     const verdicts = new Set();
     for (const id of identifiers) {
-      for (const init of initializersOf(blanked, raw, id)) {
-        verdicts.add(classifyPathExpr(init, blanked, raw, depth + 1));
+      const init = nearest(initializersOf(blanked, raw, id), at);
+      if (init) {
+        verdicts.add(classifyPathExpr(init.text, blanked, raw, { at: init.at, depth: depth + 1 }));
       }
     }
-    // OPTIMISTIC: one tmp-rooted assignment acquits the name. A name assigned
-    // both ways in one file is not evidence of a repo write.
+    // `tmp` wins a TIE between two different identifiers in one expression
+    // (`join(scratchRoot, repoRelativeName)`), which is the fail-open direction
+    // this scan takes wherever it is not certain. It is not an override of the
+    // nearest-assignment rule above: that rule already picked ONE initializer
+    // per name.
     if (verdicts.has('tmp')) return 'tmp';
     if (verdicts.has('repo')) return 'repo';
   }
@@ -282,7 +307,7 @@ export function repoRootedWrites(source) {
   /** @type {{ call: string, target: string, embedded: boolean }[]} */
   const found = [];
 
-  const record = (call, target, embedded) => {
+  const record = (call, target, embedded, at) => {
     // INSIDE a `node -e` string, `__dirname` and `process.cwd()` belong to the
     // CHILD, not to the spec — `tests/e2e-deploy.contract.test.ts` writes
     // `path.join(__dirname, 'HOSTNAME_AT_BOOT')` from a script that lives in a
@@ -293,7 +318,7 @@ export function repoRootedWrites(source) {
       ? [...target.matchAll(/\$\{([^}]*)\}/g)].map((m) => m[1]).join(' ')
       : target;
     if (!expr.trim()) return;
-    if (classifyPathExpr(expr, blanked, source) !== 'repo') return;
+    if (classifyPathExpr(expr, blanked, source, { at }) !== 'repo') return;
     found.push({ call, target: target.replace(/\s+/g, ' ').trim().slice(0, 80), embedded });
   };
 
@@ -305,7 +330,7 @@ export function repoRootedWrites(source) {
     if (close === -1) continue;
     const args = splitArgs(blanked.slice(open + 1, close), source.slice(open + 1, close));
     const target = args[WRITE_CALLS[m[1]]];
-    if (target !== undefined) record(m[1], target, false);
+    if (target !== undefined) record(m[1], target, false, m.index);
   }
 
   // PASS 2 — embedded, over the RAW text inside string literals. `blankNonCode`
@@ -317,7 +342,7 @@ export function repoRootedWrites(source) {
     for (const m of text.matchAll(new RegExp(`${receiver}(${names})\\s*\\(`, 'g'))) {
       const rest = text.slice(m.index + m[0].length);
       const target = splitArgs(blankNonCode(rest), rest)[WRITE_CALLS[m[1]]];
-      if (target !== undefined) record(m[1], target, true);
+      if (target !== undefined) record(m[1], target, true, from + m.index);
     }
   }
 

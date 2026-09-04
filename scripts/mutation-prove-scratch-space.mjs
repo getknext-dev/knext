@@ -23,8 +23,12 @@
  *      `copyFileSync(<repo>, <tmp>)` — reading a tracked file INTO scratch, the
  *      correct direction — reads as a repo write. Two live call sites do this.
  *   M4 removes the embedded pass, which is the ONLY pass that can see #918.
- *   M5 adds a baseline entry for a file that does not leak, proving the ratchet
- *      is asserted in both directions and cannot rot into a permanent licence.
+ *   M5 adds one leak to the file ALREADY at the top of the baseline (42 sites),
+ *      because a ceiling that binds only for unlisted files hands the worst
+ *      offender a place to hide the next one.
+ *   M6 blinds the lifetime scan, which makes every baseline entry stale —
+ *      proving the ratchet is asserted in BOTH directions and cannot rot into a
+ *      permanent licence.
  *
  * DISCIPLINE (`.claude/rules/workflow.md`): exit codes only; green baseline; a
  * canary red first; anchors exactly once or abort; clean tree between mutations.
@@ -37,16 +41,6 @@ import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SPEC = 'tests/temp-dirs-outside-the-repo.test.ts';
-
-/** JSON that no longer parses would red for the wrong reason. */
-const parses = (text) => {
-  try {
-    JSON.parse(text);
-    return undefined;
-  } catch (error) {
-    return `not JSON: ${error instanceof Error ? error.message : String(error)}`;
-  }
-};
 
 const MUTATIONS = [
   {
@@ -94,13 +88,23 @@ const MUTATIONS = [
     id: 'M5',
     expect: 'red',
     claim:
-      'the leak baseline gains an entry for a file that does not leak — a ratchet asserted ' +
-      'in one direction only becomes a list nobody ever shortens',
-    subject: 'baseline',
-    anchor: '      "tests/verify-phase-gates.test.ts": 1',
+      'a file ALREADY in the leak baseline gains one more leak — the ceiling has to bind ' +
+      'per file, or the worst offender (42 sites) becomes a place to hide the next one',
+    subject: 'listed',
+    anchor: "    const dir = mkdtempSync(join(tmpdir(), 'knext-pin-throw-'));",
     replacement:
-      '      "tests/root-typecheck-gate.test.ts": 1,\n      "tests/verify-phase-gates.test.ts": 1',
-    validate: parses,
+      "    const extra = mkdtempSync(join(tmpdir(), 'knext-d9-extra-'));\n" +
+      "    const dir = mkdtempSync(join(tmpdir(), 'knext-pin-throw-'));",
+  },
+  {
+    id: 'M6',
+    expect: 'red',
+    claim:
+      'the lifetime scan goes blind — every baseline entry silently becomes stale, which is ' +
+      'the direction a one-way ratchet never checks and the reason this one does',
+    subject: 'scan',
+    anchor: '  for (const m of blanked.matchAll(/\\bmkdtemp(?:Sync)?\\s*\\(/g)) {',
+    replacement: '  for (const m of []) {',
   },
 ];
 
@@ -111,7 +115,7 @@ const MUTATIONS = [
  * improvement to the diagnostics would red the guard.
  */
 const NEGATIVE = {
-  id: 'M6',
+  id: 'M7',
   expect: 'green',
   claim: 'the diagnostic is reworded — the guard asserts behaviour, not its own message text',
   subject: 'scan',
@@ -127,7 +131,7 @@ const prover = createGuardProver({
   subjects: {
     scan: 'scripts/lib/scratch-space-scan.mjs',
     victim: 'tests/tomatchobject-mutation-guard.test.ts',
-    baseline: 'tests/scratch-space-exceptions.json',
+    listed: 'tests/action-pin-sha-tag-nightly.test.ts',
   },
 });
 
