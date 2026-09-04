@@ -35,6 +35,8 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  activeMetricExceptions,
+  assertEveryMetricAccountedFor,
   BUN_COVERAGE_DIR,
   COVERAGE_EXCLUDE,
   COVERAGE_INCLUDE,
@@ -141,6 +143,16 @@ function check(label, summary, floors) {
 }
 
 console.log(`\ncoverage — merged from ${inputs.length} lcov report(s)\n`);
+
+// Every gated metric must have a floor or a LIVE dated exception (sprint 2,
+// lane G). This THROWS rather than joining `failures`, and deliberately: an
+// expired exception is not a coverage regression to report alongside the
+// numbers, it is the gate no longer knowing what it is supposed to check. It
+// also runs BEFORE the floors, so `--report-only` cannot carry an ungated metric
+// past it — `--report-only` exists to soften a coverage DROP, never to soften
+// the gate losing a metric entirely.
+assertEveryMetricAccountedFor(THRESHOLDS, activeMetricExceptions());
+
 check('global', summarize(scoped), THRESHOLDS);
 for (const [glob, floors] of Object.entries(PER_PATH_THRESHOLDS)) {
   check(glob, summarize(scoped, glob), floors);

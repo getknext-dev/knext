@@ -26,6 +26,33 @@ only, which is exactly the dishonest denominator this gate exists to prevent.
 `statements` likewise has no lcov representation. Restoring a branch floor needs
 branch records from the bun side, not a smaller denominator.
 
+### That is now a DATED EXCEPTION, not this paragraph
+
+The reasoning above stands. The FORM it was recorded in did not: it was prose,
+and a paragraph is not a control. Nothing re-asked the question and nothing dated
+it, so two metrics left the gate with only somebody's memory between that and
+permanence.
+
+Both are now entries in `COVERAGE_METRIC_EXCEPTIONS`
+(`scripts/lib/coverage-policy.mjs`), each carrying a justification, an `added`
+date and an **`expires` date of 2026-12-01**. `scripts/check-coverage.mjs` calls
+`assertEveryMetricAccountedFor` before it checks any floor, so:
+
+- while an exception is live, its metric is excused and the gate runs as today;
+- **past `expires`, the gate FAILS CLOSED** — the metric has neither a floor nor a
+  live exception, and `check-coverage.mjs` throws with the reason. `--report-only`
+  does not soften it, because that flag exists to soften a coverage *drop*, not
+  the gate losing a metric.
+
+An unknown key in an entry throws rather than being ignored: a typo'd `expiress`
+would otherwise read as an exception that never expires while looking exactly
+like one that does.
+
+Renewing is a deliberate act, not a default. If bun still emits no branch records
+on 2026-12-01, the answer is a new entry with a fresh measurement in its
+justification — the expiry is a date precisely because "when upstream ships it"
+is an expiry that never arrives.
+
 ## Previous — vitest/v8 only (2026-07-24)
 
 Kept for provenance. This is what the numbers meant under the v8 provider, back
