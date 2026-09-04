@@ -57,7 +57,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveTestRunner } from './lib/ci-blocking-gate-proof.mjs';
+import { resolveSpecRunner } from './lib/ci-blocking-gate-proof.mjs';
 import { countOccurrences, mutate, restore, snapshot } from './lib/mutation-harness.mjs';
 import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
@@ -84,7 +84,7 @@ const ANSI = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g');
  * — a git worktree, or a fresh clone before install — and every run then reports
  * `ran === 0` and blames the wrong thing (#680/#681/#685).
  */
-const RUNNER = resolveTestRunner(REPO_ROOT);
+const RUNNER = resolveSpecRunner(REPO_ROOT, SPEC);
 
 /**
  * Every disarm, as `[file, label, anchor, replacement]`.
@@ -407,7 +407,7 @@ let pass = 0;
 let fail = 0;
 
 function runSpec() {
-  const result = spawnSync(RUNNER.command, [...RUNNER.args, 'run', SPEC], {
+  const result = spawnSync(RUNNER.command, [...RUNNER.args, ...RUNNER.runArgs(SPEC, '')], {
     cwd: REPO_ROOT,
     encoding: 'utf8',
   });
@@ -419,8 +419,15 @@ function runSpec() {
   // "1 test ran" — an undercount that makes the `ran === 0` non-vacuity guard
   // read as almost-tripped on every single mutation.
   const summary = output.match(/Tests\s+(.+)/)?.[1] ?? '';
-  const passed = Number(summary.match(/(\d+) passed/)?.[1] ?? 0);
-  const failed = Number(summary.match(/(\d+) failed/)?.[1] ?? 0);
+  // Both runners' formats (#902): vitest's `Tests N failed | M passed` line,
+  // and bun test's ` N pass` / ` N fail` lines (forwarded by bun-test.mjs
+  // under a -t filter, printed directly otherwise on failure output).
+  const passed = Number(
+    summary.match(/(\d+) passed/)?.[1] ?? output.match(/^\s*(\d+) pass\b/m)?.[1] ?? 0,
+  );
+  const failed = Number(
+    summary.match(/(\d+) failed/)?.[1] ?? output.match(/^\s*(\d+) fail\b/m)?.[1] ?? 0,
+  );
   return { ok: result.status === 0, ran: passed + failed };
 }
 

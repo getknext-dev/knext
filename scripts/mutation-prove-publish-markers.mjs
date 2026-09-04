@@ -25,7 +25,7 @@
 import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveTestRunner } from './lib/ci-blocking-gate-proof.mjs';
+import { resolveSpecRunner } from './lib/ci-blocking-gate-proof.mjs';
 import { mutate, restore, snapshot } from './lib/mutation-harness.mjs';
 import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 import { MUTATIONS } from './lib/publish-markers-proof.mjs';
@@ -52,11 +52,11 @@ let fail = 0;
  * never started. Same resolver as the other prover (#672 round 5), for the same
  * reason.
  */
-const RUNNER = resolveTestRunner(REPO_ROOT);
+const RUNNER = (spec) => resolveSpecRunner(REPO_ROOT, spec);
 
 function vitest(spec) {
   return (
-    spawnSync(RUNNER.command, [...RUNNER.args, 'run', spec], {
+    spawnSync(RUNNER(spec).command, [...RUNNER(spec).args, ...RUNNER(spec).runArgs(spec)], {
       cwd: REPO_ROOT,
       encoding: 'utf8',
     }).status === 0

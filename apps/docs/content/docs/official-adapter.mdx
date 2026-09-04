@@ -1,11 +1,21 @@
 ---
-title: Official adapter
-description: How knext runs on the official Next.js Deployment Adapter API.
+title: The adapter and the compiled build
+description: How knext's vinext-compiled default and its official-adapter lane relate — and which claims each carries.
 ---
 
-knext is built on the **official Next.js Deployment Adapter API** — not a reverse-engineered
-runtime. The adapter is a small object implementing the official `NextAdapter` shape, shipped as a
-package export so any app (and the official compatibility harness) can point at it.
+<Callout type="warn">
+**Scope, stated plainly.** knext's **default build does not use this adapter**: it compiles your
+app with [vinext](https://vinext.dev) — an open-source, Vite-based implementation of the Next.js
+framework — into a [single executable](/docs/bun-runtime), and the adapter hooks described below
+are never called on that path. The adapter remains fully maintained as the lane where knext's
+**778/778 official-suite credential** was earned, and it is what the legacy standalone deployments
+run on. Which claim covers which path is tracked row-by-row on the
+[compatibility matrix](/docs/compat-matrix).
+</Callout>
+
+knext's adapter implements the **official Next.js Deployment Adapter API** — a small object of the
+official `NextAdapter` shape, shipped as a package export so any app (and the official
+compatibility harness) can point at it.
 
 ## The adapter object
 

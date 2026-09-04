@@ -5,7 +5,14 @@
 
 import { afterAll, describe, expect, it } from "bun:test";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+    existsSync,
+    mkdirSync,
+    rmSync,
+    symlinkSync,
+    writeFileSync,
+} from "node:fs";
+import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -40,6 +47,7 @@ import { build } from "esbuild";
  */
 
 const here = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = resolve(here, "../../../..");
 const FIXTURE = join(here, "fixtures", "dev-edge-fence");
 const ADAPTER_SRC = resolve(here, "../adapters/next-adapter.ts");
 // next.config.mjs in the fixture points `adapterPath` here; the bundle is
@@ -101,6 +109,32 @@ async function bundleAdapter(): Promise<void> {
     writeFileSync(join(FIXTURE, ".knext", ".gitignore"), "*\n");
 }
 
+/**
+ * Materialize the fixture's TypeScript types from the WORKSPACE's real
+ * resolution. The fixture is a TS app on purpose (the .ts instrumentation
+ * files are the fence's subject), so `next dev`'s TypeScript preflight
+ * requires `@types/react` resolvable from the fixture — and the fixture's
+ * `node_modules` is untracked, so a CI checkout has none: the dev server
+ * booted, printed "Please install @types/react", and died as an unhandled
+ * rejection, which this suite could only report as "never answered". That was
+ * DETERMINISTIC in CI and invisible locally, where a stale install satisfied
+ * it — the exact works-on-my-machine shape. Symlinked fresh on every run so
+ * neither environment depends on leftover state.
+ */
+function materializeFixtureTypes(): void {
+    const req = createRequire(
+        join(REPO_ROOT, "apps", "file-manager", "package.json"),
+    );
+    const typesDir = join(FIXTURE, "node_modules", "@types");
+    mkdirSync(typesDir, { recursive: true });
+    for (const pkg of ["@types/react", "@types/react-dom"]) {
+        const target = dirname(req.resolve(`${pkg}/package.json`));
+        const dest = join(typesDir, pkg.split("/")[1]);
+        rmSync(dest, { recursive: true, force: true });
+        symlinkSync(target, dest, "dir");
+    }
+}
+
 describe("#408 — the edge fence covers `next dev --webpack` (real dev server)", () => {
     it("serves a middleware app with guarded instrumentation, with no edge-compile failure", async () => {
         expect(
@@ -113,6 +147,7 @@ describe("#408 — the edge fence covers `next dev --webpack` (real dev server)"
         ).toBe(true);
 
         await bundleAdapter();
+        materializeFixtureTypes();
         // Start from a clean `.next`: a SIGKILLed dev server leaves a stale
         // `.next/dev/lock` behind, and the next run refuses to start ("Another
         // next dev server is already running") — which would look like a fence
