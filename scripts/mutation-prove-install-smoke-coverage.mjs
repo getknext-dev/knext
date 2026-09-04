@@ -38,6 +38,12 @@ const LOCKSTEP_SPEC = 'tests/publish-preflight.test.ts';
 // deleted. The prefix is still computed and still exported, so the invariant is
 // still real — see #931 for whether the surface should exist at all.
 const PREFIX_SPEC = 'packages/kn-next/src/__tests__/build-context-root.test.ts';
+// #927 round 2: the spec that OWNS the scaffolded `start` script (`:305`).
+// install-smoke asserts nothing about it — the gate runs `npm run build`, never
+// `npm start` — so M15 had no observer and SURVIVED once the run was honest.
+// It was reported KILLED in round 1; that was a spurious red, and finding it
+// took re-running the fleet rather than trusting the previous log.
+const SCAFFOLD_SPEC = 'packages/kn-next/src/__tests__/create-scaffold.test.ts';
 const TEMPLATE_DIR = join(WT, 'packages', 'kn-next', 'templates', 'app');
 // `NEXT_CONFIG_TPL` and `ADAPTER_SRC` were dropped with the rewrite of M10
 // (#912): the vinext template deliberately carries no `output` key and the
@@ -322,6 +328,7 @@ const MUTATIONS = [
   {
     id: 'M15',
     expect: 'red',
+    graded: 'scaffold',
     guard:
       "the template's `start` script points at a path this build does not emit — review " +
       'measured the pre-vinext form of this surviving the ENTIRE repo, because nothing ' +
@@ -416,6 +423,14 @@ if (ncLock !== 0) {
   );
   process.exit(1);
 }
+const ncScaffold = runSpec(SCAFFOLD_SPEC);
+console.log(`NC(scaffold) exit=${ncScaffold}`);
+if (ncScaffold !== 0) {
+  console.error(
+    'ABORT: the scaffold spec is red before any mutation — M15 would grade meaningless.',
+  );
+  process.exit(1);
+}
 const ncPrefix = runSpec(PREFIX_SPEC);
 console.log(`NC(prefix) exit=${ncPrefix}`);
 if (ncPrefix !== 0) {
@@ -440,11 +455,13 @@ for (const m of MUTATIONS) {
   const status =
     m.graded === 'shape'
       ? runSpec(SHAPE_SPEC)
-      : m.graded === 'prefix'
-        ? runSpec(PREFIX_SPEC)
-        : m.graded === 'lockstep'
-          ? runSpec(LOCKSTEP_SPEC)
-          : runSmoke();
+      : m.graded === 'scaffold'
+        ? runSpec(SCAFFOLD_SPEC)
+        : m.graded === 'prefix'
+          ? runSpec(PREFIX_SPEC)
+          : m.graded === 'lockstep'
+            ? runSpec(LOCKSTEP_SPEC)
+            : runSmoke();
   recordMutation();
   m.restore();
   clean(`after ${m.id}`);
