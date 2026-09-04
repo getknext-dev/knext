@@ -33,6 +33,7 @@
  * canary red first; anchors exactly once or abort; clean tree between mutations.
  */
 
+import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createGuardProver } from './lib/guard-prover.mjs';
@@ -40,6 +41,23 @@ import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SPEC = 'packages/kn-next/src/__tests__/cache-handler-isr-staleness.test.ts';
+const HANDLER = 'packages/kn-next/src/adapters/cache-handler.js';
+
+/**
+ * A mutated handler that stopped PARSING reds every test in the guard for the
+ * wrong reason — the module fails to import — and that red is indistinguishable
+ * in the log from the guard doing its job. Not hypothetical here: this prover's
+ * first M6 used a mid-line anchor, the harness's appended `// KNEXT-MUTATION`
+ * marker commented out the tail of the `if (...) {` line, and the "KILLED" that
+ * produced would have certified a boundary case the test did not have.
+ * (`packages/kn-next` is `"type": "module"`, so `--check` parses it as ESM.)
+ */
+const jsStillParses = () => {
+  const res = spawnSync(process.execPath, ['--check', resolve(REPO_ROOT, HANDLER)], {
+    encoding: 'utf8',
+  });
+  return res.status === 0 ? undefined : `the mutated handler no longer parses: ${res.stderr}`;
+};
 
 const MUTATIONS = [
   {
@@ -49,6 +67,7 @@ const MUTATIONS = [
       'the Redis TTL becomes the revalidate window again — this IS the #886 bug: the entry is ' +
       'deleted at the moment it should become stale, so nothing can ever be served stale',
     subject: 'handler',
+    validate: jsStillParses,
     anchor: 'return Math.max(revalidate * 2, DEFAULT_TTL_SECONDS);',
     replacement: 'return revalidate;',
   },
@@ -60,6 +79,7 @@ const MUTATIONS = [
       'three state assertions must fall; any that survives asserts on something other than ' +
       'the contract',
     subject: 'handler',
+    validate: jsStillParses,
     anchor: 'const revalidate = entry.cacheControl?.revalidate;',
     replacement: 'return entry; const revalidate = entry.cacheControl?.revalidate;',
   },
@@ -70,6 +90,7 @@ const MUTATIONS = [
       "every Redis hit is forced to cacheState 'fresh' — the original \"every hit reads fresh, " +
       'background regeneration unreachable" defect, in the string form vinext does not recognise',
     subject: 'handler',
+    validate: jsStillParses,
     anchor: 'const parsed = withCacheState(deserializeCacheValue(JSON.parse(data)));',
     replacement:
       "const parsed = { ...deserializeCacheValue(JSON.parse(data)), cacheState: 'fresh' };",
@@ -82,6 +103,7 @@ const MUTATIONS = [
       'lastModified + cacheControl.revalidate (its revalidateAt), so dropping it makes STALE ' +
       'unreachable',
     subject: 'handler',
+    validate: jsStillParses,
     anchor: 'cacheControl.revalidate = revalidate;',
     replacement: 'void revalidate;',
   },
@@ -92,6 +114,7 @@ const MUTATIONS = [
       'set stops persisting the expire window — the expireAt equivalent — so EXPIRED becomes ' +
       'unreachable and an expired body would be handed to vinext as merely stale',
     subject: 'handler',
+    validate: jsStillParses,
     anchor: 'if (expire !== undefined) cacheControl.expire = expire;',
     replacement: 'void expire;',
   },
@@ -104,8 +127,13 @@ const MUTATIONS = [
       'this survives, the TEST has no boundary case; the fix is a failing boundary test, ' +
       'never a weaker prover',
     subject: 'handler',
-    anchor: 'ageSeconds > revalidate',
-    replacement: 'ageSeconds >= revalidate',
+    validate: jsStillParses,
+    // The anchor spans to the end of the line: the harness appends a `//`
+    // residue marker after a single-line replacement, and a mid-line anchor
+    // would have it comment out the closing `) {` — an unparseable subject,
+    // which is a red for the wrong reason (see `jsStillParses`).
+    anchor: 'ageSeconds > revalidate) {',
+    replacement: 'ageSeconds >= revalidate) {',
   },
 ];
 
@@ -121,6 +149,7 @@ const NEGATIVE = {
   expect: 'green',
   claim: 'the retention default is retuned — the guard checks the TTL rule, not the constant',
   subject: 'handler',
+  validate: jsStillParses,
   anchor: 'const DEFAULT_TTL_SECONDS = 3600;',
   replacement: 'const DEFAULT_TTL_SECONDS = 3601;',
 };
