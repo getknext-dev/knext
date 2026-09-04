@@ -554,6 +554,27 @@ describe("the threat model's :9091 disclosure list is the bunexec set (S5)", () 
         ).not.toBeNull();
     });
 
+    it("a MISSING fence reads as null, never as an empty section", () => {
+        // The other half, and the one that matters: `""` is not `null`, so a
+        // reader that degraded to an empty string would satisfy the case above
+        // while every assertion below silently ran over nothing. Caught by the
+        // prover — this case did not exist and the mutation survived.
+        expect(
+            fencedDocSection("no fence anywhere in here", "9091-disclosure"),
+        ).toBeNull();
+        // Half a fence is worse than none: it looks deliberate.
+        expect(
+            fencedDocSection(
+                "<!-- metric-contract:9091-disclosure start -->\nbut never closed",
+                "9091-disclosure",
+            ),
+        ).toBeNull();
+        // ...and the real document must not answer for a DIFFERENT id.
+        expect(
+            fencedDocSection(THREAT_MODEL, "not-a-real-fence-id"),
+        ).toBeNull();
+    });
+
     it("names only series the compiled binary actually emits on :9091", () => {
         const section = fencedDocSection(THREAT_MODEL, "9091-disclosure");
         const tokens = extractDocMetricTokens(section ?? "");
