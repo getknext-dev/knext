@@ -30,8 +30,8 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveSpecRunner } from './lib/ci-blocking-gate-proof.mjs';
 import { countOccurrences, mutate, restore, snapshot } from './lib/mutation-harness.mjs';
-import { assessCompletion, evaluatePreflight } from './lib/prover-completion.mjs';
 import { jsStillParses } from './lib/parse-validity.mjs';
+import { assessCompletion, evaluatePreflight } from './lib/prover-completion.mjs';
 import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
