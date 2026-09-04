@@ -868,6 +868,28 @@ describe('#912 a prover whose anchors no longer match its subjects is a PR-time 
       expect(resolved).toEqual([{ file: 'a.txt', anchor: '  run: node audit.mjs\n', count: 1 }]);
     });
 
+    it('a template literal with a CONCATENATED tail is not silently truncated', () => {
+      // The template branch closed on `lastIndexOf('\`')` and ignored whatever
+      // followed, so `\`a\${X}\` + 'TAIL'` resolved to "aMID" — an anchor the prover
+      // never uses. Worse than a miss: the audit then COUNTS the wrong string, so
+      // a target containing the truncated form exactly once reports a live,
+      // healthy anchor for a mutation that would abort at the harness.
+      //
+      // Reported as unresolved rather than half-read, per this module's rule
+      // that a dropped anchor is indistinguishable from a live one.
+      const src = [
+        "const X = 'MID';",
+        "const prover = createGuardProver({ subjects: { g: 'a.txt' } });",
+        "const M = [{ subject: 'g', anchor: `a${X}` + 'TAIL', replacement: 'z' }];",
+      ].join('\n');
+      // A target where the TRUNCATED anchor occurs exactly once and the real one
+      // does not occur at all — the fully silent shape.
+      const { resolved, findings, unresolved } = auditAnchorLiveness(src, () => 'aMID only\n');
+      expect(resolved, 'a truncated anchor must never be reported as resolved').toEqual([]);
+      expect(findings).toEqual([]);
+      expect(unresolved.length).toBeGreaterThan(0);
+    });
+
     it('a template literal with an UNKNOWN interpolation is reported, not dropped', () => {
       const src = [
         "const prover = createGuardProver({ subjects: { g: 'a.txt' } });",
@@ -997,17 +1019,63 @@ describe('#927 SE-3 — every sprint-1 guard has a prover OR a dated exemption',
    * proven on the strength of a mutation about the `start` script, i.e. exactly
    * the false green this check exists to prevent.
    */
+  /**
+   * The spec a prover source declares as `const SPEC = '…'`, or undefined.
+   *
+   * ONE POSITION, not two matches. The first version ran the same regex twice —
+   * once over the blanked view to establish the declaration is CODE, once over
+   * the raw source to read the value — and then used the raw match's capture.
+   * The two can land in different places: a comment containing
+   * `const SPEC = 'some/other.test.ts'` above the real declaration satisfies the
+   * blanked check via the real one while the raw match returns the comment's
+   * path, so the wrong spec is credited as proven and a guard reads as covered
+   * by a prover that does not touch it.
+   *
+   * The position now comes from the blanked view only, and the value is sliced
+   * from the raw source starting at that same index — so the two cannot disagree
+   * by construction.
+   */
+  const specOf = (source: string): string | undefined => {
+    const blanked = blankNonCode(source);
+    const m = /(?<![.\w$])const SPEC\s*=\s*'/.exec(blanked);
+    if (!m) return undefined;
+    const openQuote = m.index + m[0].length - 1;
+    // Blanking empties a literal's CONTENTS but keeps its delimiters, so the
+    // closing quote's position is readable from the blanked view too.
+    const closeQuote = blanked.indexOf("'", openQuote + 1);
+    if (closeQuote === -1) return undefined;
+    return source.slice(openQuote + 1, closeQuote);
+  };
+
   const provenSpecs = (): Set<string> => {
     const out = new Set<string>();
     for (const p of discoverProvers(REPO_ROOT)) {
-      const m = /(?<![.\w$])const SPEC\s*=\s*'([^']+)'/.exec(blankNonCode(read(p.absPath)));
-      // The path is a code literal, so it survives blanking's delimiters; slice
-      // it back out of the original by re-matching there.
-      const raw = /(?<![.\w$])const SPEC\s*=\s*'([^']+)'/.exec(read(p.absPath));
-      if (m && raw) out.add(raw[1] as string);
+      const spec = specOf(read(p.absPath));
+      if (spec !== undefined) out.add(spec);
     }
     return out;
   };
+
+  it('a decoy const SPEC in a COMMENT does not displace the real one', () => {
+    // The two-match bug, as a case. Both regexes matched; they matched
+    // different declarations; the raw one won.
+    const src = [
+      "// historical note: this used to be const SPEC = 'tests/old-and-wrong.test.ts'",
+      "const SPEC = 'tests/the-real-one.test.ts';",
+    ].join('\n');
+    expect(specOf(src)).toBe('tests/the-real-one.test.ts');
+  });
+
+  it('a const SPEC that exists ONLY in a comment is not credited at all', () => {
+    const src = "// const SPEC = 'tests/only-in-a-comment.test.ts'\nconst OTHER = 1;";
+    expect(specOf(src)).toBeUndefined();
+  });
+
+  it('reads the value, not the blanked placeholder', () => {
+    // The other half: reading the position from the blanked view is only correct
+    // if the VALUE still comes from the raw source.
+    expect(specOf("const SPEC = 'tests/x.test.ts';")).toBe('tests/x.test.ts');
+  });
 
   it('reads a real set of proven specs (non-vacuity)', () => {
     // Without this, a regex that stopped matching would report every guard

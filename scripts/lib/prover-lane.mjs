@@ -623,6 +623,15 @@ function literalValue(source, blanked, span, consts) {
   if (tpl) {
     const openAt = view.indexOf('`');
     const closeAt = view.lastIndexOf('`');
+    // NOTHING MAY FOLLOW THE CLOSING BACKTICK. Closing on `lastIndexOf` and
+    // ignoring the remainder made `` `a${X}` + 'TAIL' `` resolve to "aMID" — an
+    // anchor the prover never uses. That is worse than failing to read it: the
+    // audit then COUNTS the truncated string, so a subject containing it exactly
+    // once reports a live, healthy anchor for a mutation the harness would abort
+    // on. Returning undefined routes it to `unresolved`, which the caller
+    // reports, per this module's rule that a dropped anchor is
+    // indistinguishable from a live one.
+    if (closeAt > openAt && view.slice(closeAt + 1).trim() !== '') return undefined;
     if (closeAt > openAt) {
       let out = '';
       let k = openAt + 1;
