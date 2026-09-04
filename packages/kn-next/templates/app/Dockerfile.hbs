@@ -35,6 +35,7 @@ ARG BINARY
 # resolver classifies a compiled binary by basename, and those names make it
 # read the build tree's assets instead of the image's.
 COPY ${BINARY} /app/server
+COPY .output/public /app/.output/public
 
 # sharp's native module, if the app uses `next/image`.
 #
