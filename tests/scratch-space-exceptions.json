@@ -1,13 +1,15 @@
 {
-  "$schema-note": "Read tests/temp-dirs-outside-the-repo.test.ts first. Both sets are RATCHETS over a measured population, not licences: the guard asserts them in BOTH directions, so an entry whose file has stopped offending reds the guard until the entry is deleted.",
+  "$schema-note": "Read tests/temp-dirs-outside-the-repo.test.ts first. Both sets are RATCHETS over a measured population, not licences: the guard asserts them in BOTH directions, so an entry whose file has stopped offending reds the guard until the entry is deleted. Both are COUNT-PINNED, so a new offence inside an already-listed file reds too — a file-global exception would have made the worst offender the safest place to add the next one.",
   "repoRootedWrites": {
-    "packages/kn-next/src/__tests__/adapter-dev-edge-fence.test.ts": "Boots a REAL `next dev` server against a checked-in fixture project, so the destinations (the generated `.knext/adapter.mjs` bundle, its `.gitignore`, and the `node_modules/@types` symlinks) have to sit inside that project. Next resolves a project by directory, and a dev server rooted at a temp copy would no longer be exercising the tracked fixture the test names. Not the #918 shape either: nothing here writes a transient `.ts` into `tests/`, which is what raced the typecheck gate."
+    "packages/kn-next/src/__tests__/adapter-dev-edge-fence.test.ts": {
+      "findings": 3,
+      "reason": "Boots a REAL `next dev` server against a checked-in fixture project, so the destinations (the generated `.knext/adapter.mjs` bundle, its `.gitignore`, and the `node_modules/@types` symlinks) have to sit inside that project. Next resolves a project by directory, and a dev server rooted at a temp copy would no longer be exercising the tracked fixture the test names. Not the #918 shape either: nothing here writes a transient `.ts` into `tests/`, which is what raced the typecheck gate. Pinned at 3 — a FOURTH repo write in this file is a red, licensed exceptions do not extend to whatever lands next to them."
+    }
   },
   "unremovedTempDirs": {
     "recordedOn": "2026-09-05",
-    "note": "156 unremoved `mkdtemp` sites across 49 files, measured when the LIFETIME half of this guard landed (D9). They are recorded rather than fixed because fixing them means touching 49 files across every package mid-sprint, and a guard that lands with its subject already red teaches people to disable it. This list is a CEILING: a file may only leak fewer than it does today, never more, and a file that stops leaking must leave the list. Nothing may be added to it — a new leak is a red, which is the entire point.",
+    "note": "160 unremoved `mkdtemp` sites across 47 files, measured when the LIFETIME half of this guard landed (D9). Burn-down tracked in #939. They are recorded rather than fixed because fixing them means touching 47 files across every package mid-sprint, and a guard that lands with its subject already red teaches people to disable it. This list is a CEILING: a file may only leak fewer than it does today, never more, and a file that stops leaking must leave the list. Nothing may be added to it — a new leak is a red, including a new leak in a file already here, which is why the count and not just the name is pinned.",
     "files": {
-      "apps/file-manager/e2e-support/shipped-runner.ts": 1,
       "apps/file-manager/next-adapter.test.ts": 1,
       "apps/file-manager/shipped-runner.test.ts": 13,
       "packages/kn-next/bench/boot-phase-trace.mjs": 2,
@@ -18,6 +20,7 @@
       "packages/kn-next/src/__tests__/ci-init-ci.test.ts": 1,
       "packages/kn-next/src/__tests__/cli-build-bun-heal.test.ts": 2,
       "packages/kn-next/src/__tests__/cli-config-not-found.test.ts": 2,
+      "packages/kn-next/src/__tests__/cli-node-runtime.test.ts": 8,
       "packages/kn-next/src/__tests__/cli-usage-surface.test.ts": 4,
       "packages/kn-next/src/__tests__/compile-cache-health-bun.test.ts": 2,
       "packages/kn-next/src/__tests__/compile-cache-shadow-statsync-wiring.test.ts": 4,
@@ -46,10 +49,8 @@
       "tests/compat-run-ledger-completeness.test.ts": 1,
       "tests/compat-smoke-single-exec-mode.test.ts": 1,
       "tests/coverage-gate.test.ts": 1,
-      "tests/e2e-deploy.contract.test.ts": 2,
+      "tests/e2e-deploy.contract.test.ts": 1,
       "tests/e2e-deploy.fixture-install.test.ts": 2,
-      "tests/e2e-deploy.native-ts-config.test.ts": 1,
-      "tests/e2e-deploy.port-ownership.test.ts": 1,
       "tests/image-prewarm-harness.test.ts": 4,
       "tests/mutation-harness.test.ts": 1,
       "tests/native-integrity-absence-exception.test.ts": 1,

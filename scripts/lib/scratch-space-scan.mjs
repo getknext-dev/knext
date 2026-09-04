@@ -217,6 +217,56 @@ function initializersOf(blanked, raw, name) {
   return found;
 }
 
+/** The outermost call of a path expression, when it is one of the two joiners. */
+const OUTER_RESOLVE = /^\s*(?:path\s*\.\s*)?resolve\s*\(/;
+const OUTER_JOIN = /^\s*(?:path\s*\.\s*)?join\s*\(/;
+
+/**
+ * The arguments of the outermost call in `expr`, as raw text.
+ *
+ * @param {string} expr
+ * @returns {string[]}
+ */
+function outerArgs(expr) {
+  const blanked = blankNonCode(expr);
+  const open = blanked.indexOf('(');
+  if (open === -1) return [];
+  const close = matchParen(blanked, open);
+  if (close === -1) return [];
+  return splitArgs(blanked.slice(open + 1, close), expr.slice(open + 1, close)).map((a) =>
+    a.trim(),
+  );
+}
+
+/**
+ * Every string literal's CONTENT in `expr`, backticks included.
+ *
+ * Backticks are not optional. Without them `` writeFileSync(`tests/.x.tmp.ts`, …) ``
+ * — and its `${pid}`-suffixed twin, which is the shape a spec reaches for when it
+ * needs a unique scratch name — yielded ZERO findings, while the single-quoted
+ * spelling of the identical bug was the unit-tested case.
+ *
+ * @param {string} expr
+ * @returns {string[]}
+ */
+function stringLiterals(expr) {
+  return [...expr.matchAll(/(['"`])([\s\S]*?)\1/g)].map((m) => m[2]);
+}
+
+/**
+ * When `expr` is a single string or template literal, the fixed text before its
+ * first `${…}` hole — otherwise `null`.
+ *
+ * @param {string} expr
+ * @returns {string | null}
+ */
+function staticPrefixOfLiteral(expr) {
+  const m = expr.trim().match(/^(['"`])([\s\S]*)\1$/);
+  if (!m) return null;
+  const prefix = m[2].split('${')[0];
+  return prefix.length > 0 ? prefix : null;
+}
+
 /**
  * The assignment in scope at `use`: the nearest one BEFORE it, or — when the
  * name is only assigned later, as a `beforeAll` does for a `let` a helper above
@@ -247,11 +297,41 @@ export function classifyPathExpr(expr, blanked, raw, where = {}) {
   if (TMP_ROOTED.test(expr)) return 'tmp';
   if (REPO_ROOTED.test(expr)) return 'repo';
 
-  // An ABSOLUTE literal is somewhere deliberate; only a RELATIVE one is a
-  // finding, because a relative path resolves against the process CWD, which
-  // for this suite is the repo root.
-  const literals = [...expr.matchAll(/['"]([^'"]*)['"]/g)].map((m) => m[1]);
-  if (literals.some((l) => l.startsWith('/'))) return 'tmp';
+  // WHICH ARGUMENT IS THE ROOT. `join(a, b)` roots at `a`; only `resolve(a, b)`
+  // lets a LATER argument take over, and it does so only when that argument is
+  // absolute. Conflating the two is not academic: `join(root, '/tests/x')` is
+  // `root/tests/x`, not `/tests/x`, so treating any absolute-looking literal as
+  // "somewhere deliberate" acquits every repo write whose relative segment
+  // happens to be spelled with a leading slash.
+  const outer = OUTER_RESOLVE.test(expr) ? 'resolve' : OUTER_JOIN.test(expr) ? 'join' : 'none';
+  const rootArg = outer === 'none' ? expr : outerArgs(expr)[0];
+
+  // ABSOLUTE. Under `resolve` the LAST absolute argument wins, so any of them
+  // acquits; under `join` — and for a bare literal — only the root can be
+  // absolute, and a leading slash anywhere else is just a segment separator.
+  const absolute = (l) => l.startsWith('/');
+  if (outer === 'resolve' && stringLiterals(expr).some(absolute)) return 'tmp';
+  if (outer !== 'resolve' && stringLiterals(rootArg ?? '').some(absolute)) return 'tmp';
+
+  // THE ROOT IS A LITERAL, and it is relative — the destination is inside the
+  // CWD, which for this suite is the repo root.
+  //
+  // Reads the STATIC PREFIX so a template literal is judged on the part that is
+  // actually fixed: `` `tests/.x-${pid}.tmp.ts` `` roots at `tests/` whatever
+  // `pid` turns out to be, and reporting it does not depend on resolving the
+  // hole. A literal that STARTS with a hole (`` `${dir}/x.ts` ``) has no static
+  // root, so it falls through to the identifier resolution below.
+  //
+  // DEPTH 0 ONLY. A relative literal reached through an identifier is not a
+  // destination, it is a fragment: `asset-upload.test.ts` builds a path from
+  // `const staticNs = "_next/static/"`, and applying this rule at depth reported
+  // that namespace constant as a repo write in two files.
+  if (depth === 0 && rootArg !== undefined) {
+    const staticRoot = staticPrefixOfLiteral(rootArg);
+    if (staticRoot) return 'repo';
+  }
+
+  const literals = stringLiterals(expr);
 
   // MODULE QUALIFIERS ONLY, stripped as `x.` prefixes rather than listed as
   // wrapper NAMES: `path` was in the wrapper set, and `mkdir(join(path, '..'))`
@@ -374,11 +454,18 @@ function literalSpans(blanked) {
 /**
  * Every `mkdtemp` whose directory is never removed in the same file.
  *
- * PAIRING IS FILE-LOCAL AND NAME-BASED. A directory removed by a helper in
- * another module reads as unpaired here — the safe direction, and the one that
- * keeps this readable. Anything the scan cannot bind to a name is reported as
- * `(unbound)` rather than dropped, because a dropped site is a leak the guard
- * promised to see.
+ * PAIRING IS COUNTED, NOT EXISTENTIAL. "Is there an `rmSync(dir)` anywhere in
+ * this file" is what the first version asked, and it is the same defeat as the
+ * write half's optimistic name resolution: `cli-node-runtime.test.ts` creates
+ * NINE directories called `dir` and removes ONE, and reported zero leaks —
+ * appending a tenth same-named leak kept it green, while a leak under a fresh
+ * name reddened. One cleanup cannot discharge nine creations, so n creations
+ * bound to a name require n removals naming it.
+ *
+ * PAIRING IS ALSO FILE-LOCAL. A directory removed by a helper in another module
+ * reads as unpaired — the safe direction. Anything the scan cannot bind to a
+ * name is reported as `(unbound)` rather than dropped, because a dropped site is
+ * a leak the guard promised to see.
  *
  * @param {string} source
  * @returns {{ binding: string }[]}
@@ -387,16 +474,48 @@ export function unpairedTempDirs(source) {
   const blanked = blankNonCode(source);
   /** @type {{ binding: string }[]} */
   const found = [];
+  /** @type {Map<string, number>} */
+  const created = new Map();
+
   for (const m of blanked.matchAll(/\bmkdtemp(?:Sync)?\s*\(/g)) {
     const binding = bindingBefore(blanked, m.index);
-    if (binding === null) {
-      found.push({ binding: '(unbound)' });
-      continue;
-    }
-    const cleanup = new RegExp(`\\b(?:rmSync|rm|rmdirSync|rmdir)\\s*\\([^)]*\\b${binding}\\b`);
-    if (!cleanup.test(blanked)) found.push({ binding });
+    if (binding === null) found.push({ binding: '(unbound)' });
+    else created.set(binding, (created.get(binding) ?? 0) + 1);
+  }
+
+  for (const [name, creations] of created) {
+    // A REGISTRY discharges all of them at once, and this repo uses one:
+    // `compat-window-fingerprint.test.ts` pushes every scratch dir onto `temps`
+    // and empties it in `afterAll`. Counting removals there would report a leak
+    // per creation, which is a guard reporting the correct pattern as the bug.
+    const removals = registryDischarged(blanked, name)
+      ? creations
+      : [
+          ...blanked.matchAll(
+            new RegExp(`\\b(?:rmSync|rm|rmdirSync|rmdir)\\s*\\([^)]*\\b${name}\\b`, 'g'),
+          ),
+        ].length;
+    for (let i = removals; i < creations; i++) found.push({ binding: name });
   }
   return found;
+}
+
+/**
+ * Is `name` pushed onto an array that is later iterated and removed wholesale?
+ *
+ * @param {string} blanked
+ * @param {string} name
+ */
+function registryDischarged(blanked, name) {
+  const push = blanked.match(
+    new RegExp(`\\b([A-Za-z_$][\\w$]*)\\s*\\.\\s*push\\s*\\(\\s*${name}\\b`),
+  );
+  if (!push) return false;
+  const registry = push[1];
+  const iterated = new RegExp(
+    `\\bof\\s+${registry}\\b|\\b${registry}\\s*\\.\\s*(?:forEach|map)\\s*\\(`,
+  );
+  return iterated.test(blanked) && /\b(?:rmSync|rm|rmdirSync|rmdir)\s*\(/.test(blanked);
 }
 
 /**

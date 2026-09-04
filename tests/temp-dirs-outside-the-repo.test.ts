@@ -54,7 +54,11 @@
  * list is how the second call site gets missed. The two exception sets in
  * `tests/scratch-space-exceptions.json` are the deliberate opposite — a
  * ratchet over a measured population, asserted in BOTH directions so an entry
- * that stops being needed reds the guard instead of rotting in place.
+ * that stops being needed reds the guard instead of rotting in place, and
+ * COUNT-PINNED so a new offence inside an already-listed file reds too. A
+ * file-global exception would make the one file already allowed to write into
+ * the checkout the safest place in the repo to put the next such write.
+ * The `unremovedTempDirs` burn-down is tracked in #939.
  */
 
 import { describe, expect, it } from 'bun:test';
@@ -72,7 +76,7 @@ import {
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 type Exceptions = {
-  repoRootedWrites: Record<string, string>;
+  repoRootedWrites: Record<string, { findings: number; reason: string }>;
   unremovedTempDirs: { recordedOn: string; note: string; files: Record<string, number> };
 };
 
@@ -191,12 +195,18 @@ describe('a spec writes its scratch OUTSIDE the checkout (#918)', () => {
 
   it('no spec writes into the checkout', () => {
     const offenders = specFiles()
-      .filter((f) => !(f in exceptions.repoRootedWrites))
-      .flatMap((f) =>
-        repoRootedWrites(readFileSync(resolve(repoRoot, f), 'utf8')).map(
-          (w) => `${f}: ${w.call}(${w.target}${w.embedded ? '  [inside a command string]' : ''}`,
-        ),
-      )
+      .flatMap((f) => {
+        const found = repoRootedWrites(readFileSync(resolve(repoRoot, f), 'utf8'));
+        // COUNT-PINNED, not file-global. An exception that licences a FILE makes
+        // the one file already allowed to write into the checkout the safest
+        // place in the repo to add the next such write.
+        const licensed = exceptions.repoRootedWrites[f]?.findings ?? 0;
+        return found
+          .slice(licensed)
+          .map(
+            (w) => `${f}: ${w.call}(${w.target}${w.embedded ? '  [inside a command string]' : ''}`,
+          );
+      })
       .sort();
     expect(
       offenders,
@@ -219,6 +229,42 @@ describe('a spec writes its scratch OUTSIDE the checkout (#918)', () => {
     expect(
       repoRootedWrites("mkdirSync(resolve(dirname(fileURLToPath(import.meta.url)), 'out'));"),
     ).toHaveLength(1);
+  });
+
+  it('recognises a BACKTICK destination, with and without an unresolvable hole', () => {
+    // A template literal is what a spec reaches for when the scratch name needs
+    // to be unique, so the interpolated form is the LIKELIER spelling of the
+    // bug — and the scan read only quotes, which made both of these silent
+    // while their single-quoted twin above was the unit-tested case.
+    expect(repoRootedWrites('writeFileSync(`tests/.scratch.tmp.ts`, body);')).toHaveLength(1);
+    expect(
+      repoRootedWrites('writeFileSync(`tests/.scratch-${process.pid}.tmp.ts`, body);'),
+      'the hole does not resolve to a root, but `tests/` already is one — an unresolvable ' +
+        'suffix must not buy silence',
+    ).toHaveLength(1);
+  });
+
+  it('acquits a template whose ROOT is the hole', () => {
+    expect(
+      repoRootedWrites(
+        "const dir = mkdtempSync(join(tmpdir(), 'x-'));\nwriteFileSync(`${dir}/x.ts`, body);",
+      ),
+    ).toEqual([]);
+  });
+
+  it('distinguishes an absolute segment under join() from one under resolve()', () => {
+    const repoRootDecl = "const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');\n";
+    // `join(root, '/tests/x')` is `root/tests/x` — the leading slash is a
+    // separator, not a new root. Treating any absolute-looking literal as
+    // "somewhere deliberate" acquits every repo write spelled this way.
+    expect(
+      repoRootedWrites(`${repoRootDecl}writeFileSync(join(root, '/tests/x.tmp.ts'), body);`),
+    ).toHaveLength(1);
+    // Under `resolve`, an absolute argument really does take over.
+    expect(
+      repoRootedWrites(`${repoRootDecl}writeFileSync(resolve(root, '/tmp/x'), body);`),
+    ).toEqual([]);
+    expect(repoRootedWrites("writeFileSync(join('/tmp', 'x'), body);")).toEqual([]);
   });
 
   it('accepts the tmpdir rewrite that actually fixed #918', () => {
@@ -253,15 +299,18 @@ describe('a spec writes its scratch OUTSIDE the checkout (#918)', () => {
     }
   });
 
-  it('every write exception is still needed — a stale entry reds', () => {
-    for (const [file, reason] of Object.entries(exceptions.repoRootedWrites)) {
+  it('every write exception is still needed, and pinned to what it actually licences', () => {
+    for (const [file, { findings, reason }] of Object.entries(exceptions.repoRootedWrites)) {
       expect(existsSync(resolve(repoRoot, file)), `${file} is gone; drop its exception`).toBe(true);
       expect(reason.length, `${file}'s exception carries no reason`).toBeGreaterThan(40);
+      // EXACT, in both directions. Too low and the guard reds (above); too high
+      // and the surplus is a silent licence for writes nobody argued for.
       expect(
         repoRootedWrites(readFileSync(resolve(repoRoot, file), 'utf8')).length,
-        `${file} no longer writes into the checkout — delete its exception rather than ` +
-          'leaving a licence nobody needs',
-      ).toBeGreaterThan(0);
+        `${file}'s exception licences ${findings} write(s) but the file no longer has that ` +
+          'many. Lower it, or delete the entry — a licence wider than its subject is how the ' +
+          'next write gets in for free',
+      ).toBe(findings);
     }
   });
 });
@@ -323,6 +372,38 @@ describe('a temp directory is REMOVED, not just correctly placed (D9, #880)', ()
     expect(unpairedTempDirs("const dir = mkdtempSync(join(tmpdir(), 'knext-x-'));")).toHaveLength(
       1,
     );
+  });
+
+  it('counts pairing rather than asking whether a removal EXISTS', () => {
+    // One `rmSync(dir)` cannot discharge two `mkdtempSync` bound to `dir`.
+    // Existential pairing is what shipped first, and `cli-node-runtime.test.ts`
+    // — nine creations named `dir`, one removal — reported ZERO leaks under it,
+    // which also meant a tenth same-named leak stayed green.
+    expect(
+      unpairedTempDirs(
+        "let dir = mkdtempSync(join(tmpdir(), 'a-'));\nrmSync(dir, { recursive: true });\n" +
+          "dir = mkdtempSync(join(tmpdir(), 'b-'));",
+      ),
+    ).toHaveLength(1);
+    expect(
+      unpairedTempDirs(
+        "const dir = mkdtempSync(join(tmpdir(), 'a-'));\nrmSync(dir, { recursive: true });\n" +
+          "const dir2 = mkdtempSync(join(tmpdir(), 'b-'));\nrmSync(dir2, { recursive: true });",
+      ),
+    ).toEqual([]);
+  });
+
+  it('accepts a registry that discharges every directory at once', () => {
+    // Real pattern, `compat-window-fingerprint.test.ts`: push each scratch dir
+    // onto an array and empty it in `afterAll`. Counting removals naively would
+    // report one leak per creation — a guard reporting the correct pattern.
+    expect(
+      unpairedTempDirs(
+        'const temps = [];\n' +
+          "function t() { const dir = mkdtempSync(join(tmpdir(), 'x-')); temps.push(dir); return dir; }\n" +
+          'afterAll(() => { for (const dir of temps) rmSync(dir, { recursive: true, force: true }); });',
+      ),
+    ).toEqual([]);
   });
 
   it('accepts a try/finally and an afterAll cleanup', () => {

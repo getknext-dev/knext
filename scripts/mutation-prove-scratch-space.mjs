@@ -26,6 +26,13 @@
  *   M5 adds one leak to the file ALREADY at the top of the baseline (42 sites),
  *      because a ceiling that binds only for unlisted files hands the worst
  *      offender a place to hide the next one.
+ *   M5b does the same with an EXISTING binding name. M5 and M2 both use fresh
+ *      names, which is exactly why existential pairing survived them both:
+ *      `cli-node-runtime.test.ts` had nine `dir` creations and one removal and
+ *      reported zero leaks. A same-named leak is the shape that got through.
+ *   M5c adds a fourth repo write to the one file licensed for three, so the
+ *      write exception is proved to be pinned to what it licences rather than
+ *      to the file's name.
  *   M6 blinds the lifetime scan, which makes every baseline entry stale —
  *      proving the ratchet is asserted in BOTH directions and cannot rot into a
  *      permanent licence.
@@ -97,6 +104,33 @@ const MUTATIONS = [
       "    const dir = mkdtempSync(join(tmpdir(), 'knext-pin-throw-'));",
   },
   {
+    id: 'M5b',
+    expect: 'red',
+    claim:
+      'the new leak reuses an EXISTING binding name in a listed file — the shape that defeated ' +
+      'existential pairing, where one `rmSync(dir)` acquitted nine `dir` creations and a tenth ' +
+      'stayed green. M5 uses a fresh name, so it never had to see this',
+    subject: 'listed',
+    anchor: "    const dir = mkdtempSync(join(tmpdir(), 'knext-pin-scope-'));",
+    replacement:
+      "    const dir = mkdtempSync(join(tmpdir(), 'knext-d9-samename-'));\n" +
+      "    const dir2 = mkdtempSync(join(tmpdir(), 'knext-pin-scope-'));\n" +
+      '    void dir2;',
+  },
+  {
+    id: 'M5c',
+    expect: 'red',
+    claim:
+      'the write exception stops being count-pinned — a FOURTH repo write in the one file ' +
+      'licensed for three rides in free, which is how a file-global exception makes the worst ' +
+      'offender the safest place to add the next offence',
+    subject: 'licensed',
+    anchor: '    const typesDir = join(FIXTURE, "node_modules", "@types");',
+    replacement:
+      '    writeFileSync(join(FIXTURE, "extra-write.txt"), "x");\n' +
+      '    const typesDir = join(FIXTURE, "node_modules", "@types");',
+  },
+  {
     id: 'M6',
     expect: 'red',
     claim:
@@ -132,6 +166,7 @@ const prover = createGuardProver({
     scan: 'scripts/lib/scratch-space-scan.mjs',
     victim: 'tests/tomatchobject-mutation-guard.test.ts',
     listed: 'tests/action-pin-sha-tag-nightly.test.ts',
+    licensed: 'packages/kn-next/src/__tests__/adapter-dev-edge-fence.test.ts',
   },
 });
 
