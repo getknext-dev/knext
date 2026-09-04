@@ -33,15 +33,14 @@
  * canary red first; anchors exactly once or abort; clean tree between mutations.
  */
 
-import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 import { createGuardProver } from './lib/guard-prover.mjs';
 import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SPEC = 'packages/kn-next/src/__tests__/cache-handler-isr-staleness.test.ts';
-const HANDLER = 'packages/kn-next/src/adapters/cache-handler.js';
 
 /**
  * A mutated handler that stopped PARSING reds every test in the guard for the
@@ -50,13 +49,22 @@ const HANDLER = 'packages/kn-next/src/adapters/cache-handler.js';
  * first M6 used a mid-line anchor, the harness's appended line-comment residue
  * marker commented out the tail of the `if (...) {` line, and the "KILLED" that
  * produced would have certified a boundary case the test did not have.
- * (`packages/kn-next` is `"type": "module"`, so `--check` parses it as ESM.)
+ *
+ * Checked IN-PROCESS with the TypeScript parser (already a root devDependency)
+ * rather than by spawning `node --check`: the prover-lane audit rightly refuses
+ * a prover that spawns anything outside the shared runner resolvers. Same
+ * pattern as the metric-contract prover's in-process YAML validation.
  */
-const jsStillParses = () => {
-  const res = spawnSync(process.execPath, ['--check', resolve(REPO_ROOT, HANDLER)], {
-    encoding: 'utf8',
-  });
-  return res.status === 0 ? undefined : `the mutated handler no longer parses: ${res.stderr}`;
+const jsStillParses = (mutated) => {
+  const syntaxErrors = ts
+    .transpileModule(mutated, {
+      reportDiagnostics: true,
+      compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ESNext },
+    })
+    .diagnostics.filter((d) => d.category === ts.DiagnosticCategory.Error);
+  if (syntaxErrors.length === 0) return undefined;
+  const first = ts.flattenDiagnosticMessageText(syntaxErrors[0].messageText, ' ');
+  return `the mutated handler no longer parses: ${first}`;
 };
 
 const MUTATIONS = [
