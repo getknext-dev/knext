@@ -34,7 +34,7 @@
 // subpath (design-gate block, sprint close): the harness opts in.
 process.env.KNEXT_TEST_SEAMS = "1";
 
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, setSystemTime } from "bun:test";
 
 async function freshHandler(): Promise<{
     handler: {
@@ -217,5 +217,61 @@ describe("ISR stale-while-revalidate — the Redis path", () => {
         const { handler } = await redisBackedHandler(stored);
         const hit = await handler.get("isr-redis-fresh");
         expect(hit?.cacheState).toBeUndefined();
+    });
+
+    describe("the revalidate boundary itself", () => {
+        // The clock is frozen so age lands EXACTLY on the window; unfreeze
+        // even if the assertion throws, or every later Date.now() in the
+        // process is stuck at the frozen instant.
+        afterEach(() => {
+            setSystemTime();
+        });
+
+        /**
+         * An entry read at EXACTLY its revalidate window is still fresh:
+         * stale means the age EXCEEDS the window (`age > revalidate`) — the
+         * boundary instant itself is inside the window.
+         *
+         * This case exists because a mutation run proved its absence: flipping
+         * the comparison to `age >= revalidate` — the off-by-one a refactor
+         * introduces silently — left every other case green. Wall-clock cases
+         * cannot see that flip: real time between `set` and `get` never lands
+         * on the exact instant. Only a frozen clock puts age precisely ON the
+         * boundary, where `>` and `>=` disagree.
+         */
+        it("a read at exactly the revalidate window is still fresh", async () => {
+            const frozen = new Date("2026-09-05T12:00:00.000Z");
+            setSystemTime(frozen);
+            const revalidate = 60;
+            const stored = JSON.stringify({
+                value: { kind: "APP_PAGE" },
+                lastModified: frozen.getTime() - revalidate * 1000,
+                tags: [],
+                cacheControl: { revalidate },
+            });
+            const { handler } = await redisBackedHandler(stored);
+            const hit = await handler.get("isr-redis-boundary");
+            expect(hit, "the boundary read is still a hit").not.toBeNull();
+            expect(
+                hit?.cacheState,
+                "age === revalidate is the last fresh instant, not the first stale one",
+            ).toBeUndefined();
+        });
+
+        /** One millisecond past the window, the same entry is stale. */
+        it("one millisecond past the window it is stale", async () => {
+            const frozen = new Date("2026-09-05T12:00:00.000Z");
+            setSystemTime(frozen);
+            const revalidate = 60;
+            const stored = JSON.stringify({
+                value: { kind: "APP_PAGE" },
+                lastModified: frozen.getTime() - revalidate * 1000 - 1,
+                tags: [],
+                cacheControl: { revalidate },
+            });
+            const { handler } = await redisBackedHandler(stored);
+            const hit = await handler.get("isr-redis-past-boundary");
+            expect(hit?.cacheState).toBe("stale");
+        });
     });
 });
