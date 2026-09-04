@@ -100,6 +100,11 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       'preview.yml': 2,
       'scale-zero-pg.yml': 1,
       'test-e2e-deploy.yml': 1,
+      // #608 — the vinext-axis compat lane. Its one setup-bun is UNCONDITIONAL
+      // (the compiled artifact has no node arm) and carries the same
+      // `inputs.bun-version || '<pin>'` fallback form, so the pin assertion
+      // below covers it exactly as it covers the bun lane's.
+      'compat-vinext.yml': 1,
       'bun-sandbox-fetch-ab.yml': 1,
     });
   });

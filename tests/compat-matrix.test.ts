@@ -835,15 +835,20 @@ async function main() {
       ).toBe(1);
     });
 
-    it('every official-claiming row is either the credential row or the Bun runtime-axis lane row', () => {
-      // No third row may ride the word "official" into the evidence contract's
-      // blind spot: anything claiming official-suite backing is one of the two
-      // known rows, each individually guarded.
+    it('every official-claiming row is one of the known lane rows', () => {
+      // No unnamed row may ride the word "official" into the evidence contract's
+      // blind spot: anything claiming official-suite backing is one of the known
+      // rows — the Node credential, the Bun runtime axis, and (#608) the vinext
+      // single-executable axis, the lane that runs the same corpus against the
+      // artifact ADR-0048 actually ships. Each is still held INDIVIDUALLY to the
+      // ✅ evidence contract by the test below, so widening this allowlist buys
+      // a row no ceremony — only the right to exist while it is ❌.
       const unknown = rows.filter(
         (r) =>
           /official/i.test(r.feature) &&
           !/official next\.js compatibility suite/i.test(r.feature) &&
-          !/bun runtime axis/i.test(r.feature),
+          !/bun runtime axis/i.test(r.feature) &&
+          !/vinext single-executable axis/i.test(r.feature),
       );
       expect(
         unknown.map((r) => r.feature),

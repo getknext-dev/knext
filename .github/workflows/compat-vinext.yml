@@ -1,0 +1,861 @@
+name: Compat suite — vinext single-executable axis
+
+# ─────────────────────────────────────────────────────────────────────────────
+# #608 / ADR-0048 — the compat lane for the artifact knext actually ships.
+#
+# ADR-0048 makes `vinext` + Bun, compiled to a single executable, the ONLY
+# supported target. Its own consequence #2 states the cost plainly: "the official
+# Next.js compatibility suite no longer covers the shipped path". This lane is
+# what starts closing that, and it does so by changing exactly ONE variable.
+#
+# SAME as the node credential lane (test-e2e-deploy.yml), deliberately and
+# byte-for-byte where it matters:
+#   * the corpus — `test/deploy-tests-manifest.knext.json`, the §d selection that
+#     produced 778 passed / 0 failed on the node axis;
+#   * the shard count (COMPAT_SHARD_TOTAL), the summary script, the ledger script,
+#     the fail-on-red gate, the alert-on-red-schedule behaviour.
+# DIFFERENT: the deploy script — scripts/e2e-deploy-vinext.sh builds each fixture
+# with vinext (vite → nitro bun preset), compiles it with knext's SHIPPED
+# vinext-compile, and boots THE BINARY.
+#
+# So a number from this lane is directly comparable to 778: same denominator,
+# different artifact.
+#
+# ## The first number will be LOW, and that is the deliverable
+#
+# Green is explicitly NOT this sprint's bar. Nearly every fixture in the corpus
+# has only ever been built by `next build`; a fixture whose vite build or compile
+# step fails is a REAL red on this axis. The lane publishes what it measures.
+# Nothing here may be softened to raise that number: no continue-on-error, no
+# skip-on-fail, no narrowing of the manifest (guarded by
+# tests/compat-vinext-lane.test.ts).
+#
+# ## Why the BINARY, not `.output/server/index.mjs` under bun
+#
+# Two divergences exist only in the compiled artifact: sharp's addon must be
+# dlopen'd from a real file staged beside the executable, and the asset root baked
+# into the binary is the build machine's tree and has to be re-derived at run
+# time. `compat-smoke` boots the uncompiled entry and therefore sees neither. A
+# lane that did the same would publish a number about an artifact no user runs.
+#
+# ## What this lane does NOT retire
+#
+# #710's bun-standalone weekly still lives INSIDE test-e2e-deploy.yml (the
+# `17 5 * * 0` cron + the `runtime` input), not in a workflow file of its own.
+# Retiring it means editing the node credential lane, which this PR deliberately
+# does not touch. Left for that file's owner, with the reason recorded here.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_dispatch:
+    inputs:
+      nextjsRef:
+        description: 'vercel/next.js git ref to test against (pinned tag >= v16.2.0; do NOT use canary)'
+        required: false
+        default: 'v16.2.0'
+      bun-version:
+        description: 'Bun for the compiled binary (oven-sh/setup-bun spec). ADR-0048 floor is 1.4.0 — 1.3.x compiles a binary that boots ~2x slower.'
+        required: false
+        type: string
+        default: '1.4.0'
+  schedule:
+    # 07:17 UTC Sunday — weekly, and deliberately NOT nightly: the axis is new,
+    # its number will move on knext/vinext changes rather than nightly noise, and
+    # a second 16-shard nightly is pure cost. Offset from the node lane's schedules
+    # (03:17 daily, 05:17 Sunday) so the three never contend for runners.
+    - cron: '17 7 * * 0'
+
+env:
+  NEXTJS_REF: ${{ github.event.inputs.nextjsRef || 'v16.2.0' }}
+  # DECLARED, not inferred from the artifacts that arrived — inference is the
+  # defect run 30790778590 taught the node lane (fifteen arriving shards
+  # "declare" fifteen and reconcile perfectly). Kept equal to the node lane's
+  # total so the two lanes' numbers share a denominator; cross-checked by
+  # tests/compat-vinext-lane.test.ts.
+  COMPAT_SHARD_TOTAL: '16'
+  # The serving runtime is bun by construction here: the nitro bun-preset entry
+  # calls that runtime's global `serve()` at module top level, so there is no node
+  # arm to select. This is not a lane choice, it is what the artifact is.
+  KNEXT_RUNTIME: bun
+  KNEXT_BUILDER: vinext
+
+jobs:
+  build-next:
+    name: Prepare prebuilt next + harness (vinext axis)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout knext
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: knext
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          # knext is checked out under `path: knext`, so the action cannot resolve
+          # a `packageManager` at the workspace root. Keep in sync with package.json.
+          version: 10.4.1
+
+      - name: Install knext deps
+        working-directory: knext
+        run: pnpm install --frozen-lockfile
+
+      - name: Build @getknext/lib + @getknext/db + @getknext/core
+        working-directory: knext
+        run: |
+          pnpm --filter @getknext/lib build
+          pnpm --filter @getknext/db build
+          pnpm --filter @getknext/core build
+
+      # `pnpm pack` (never `npm pack`): npm ships pnpm's raw `workspace:^` deps
+      # verbatim, and every fixture install then dies with EUNSUPPORTEDPROTOCOL.
+      # Packed ONCE for the whole run — the vinext deploy script installs these
+      # three, and @getknext/core is what ships dist/adapters/vinext-compile.js,
+      # the compile this lane measures.
+      - name: Pack knext tarballs (pnpm pack — npm-installable, once for the whole run)
+        working-directory: knext
+        run: |
+          set -euo pipefail
+          DEST="${GITHUB_WORKSPACE}/knext-tarballs"
+          mkdir -p "${DEST}"
+          (cd packages/lib && pnpm pack --pack-destination "${DEST}")
+          (cd packages/db && pnpm pack --pack-destination "${DEST}")
+          (cd packages/kn-next && pnpm pack --pack-destination "${DEST}")
+          ls -la "${DEST}"
+
+      - name: Preflight — packed tarballs must npm-install + adapter must resolve (fail-fast)
+        run: node knext/scripts/e2e-preflight.mjs --tarballs-dir "${GITHUB_WORKSPACE}/knext-tarballs"
+
+      # The compile script must be IN the packed tarball, not merely in the repo:
+      # the deploy script resolves it from the fixture's installed
+      # @getknext/core, so a packaging regression here would otherwise surface as
+      # ~50 identical per-fixture failures 40 minutes deep in every shard.
+      - name: Preflight — the packed @getknext/core ships the compile script
+        run: |
+          set -euo pipefail
+          CORE_TGZ="$(ls -1 "${GITHUB_WORKSPACE}"/knext-tarballs/getknext-core-*.tgz | sort | tail -n1)"
+          if ! tar tzf "${CORE_TGZ}" | grep -q 'package/dist/adapters/vinext-compile.js'; then
+            echo "::error::${CORE_TGZ} ships no dist/adapters/vinext-compile.js — the vinext axis has nothing to compile with" >&2
+            exit 1
+          fi
+          if ! tar tzf "${CORE_TGZ}" | grep -q 'package/dist/adapters/sharp-addon-dlopen'; then
+            echo "::error::${CORE_TGZ} ships no dist/adapters/sharp-addon-dlopen* — the compile step throws on a missing shim" >&2
+            exit 1
+          fi
+          echo "packed @getknext/core carries the compile script + the sharp dlopen shim"
+
+      # The PUBLISHED next tarball at the pinned version, installed into each
+      # fixture by the harness (NEXT_TEST_PKG_PATHS) — no source build, no Rust.
+      - name: Acquire prebuilt next (npm pack)
+        id: prebuilt
+        run: |
+          NEXT_NPM_VERSION="${NEXTJS_REF#v}"
+          echo "Packing published next@${NEXT_NPM_VERSION}"
+          mkdir -p "${GITHUB_WORKSPACE}/next-prebuilt"
+          ( cd "${GITHUB_WORKSPACE}/next-prebuilt" \
+            && TARBALL="$(npm pack "next@${NEXT_NPM_VERSION}" --silent | tail -n1)" \
+            && mv "${TARBALL}" next.tgz )
+          ls -la "${GITHUB_WORKSPACE}/next-prebuilt"
+          echo "version=${NEXT_NPM_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout vercel/next.js (pinned ref — supplies the test harness)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: vercel/next.js
+          ref: ${{ env.NEXTJS_REF }}
+          path: next.js
+
+      # The frozen-set digest (ADR-0039). Recorded, not asserted: this lane makes
+      # no 14-night window claim yet, but a number without a harness identity is
+      # unattributable a month later, and the ledger below requires it.
+      - name: Fingerprint the frozen compat-window set
+        run: |
+          set -euo pipefail
+          node knext/scripts/compat-window-fingerprint.mjs \
+            --repo-root knext \
+            --tarballs-dir "${GITHUB_WORKSPACE}/knext-tarballs" \
+            --next-js-dir "${GITHUB_WORKSPACE}/next.js" \
+            --next-tarball "${GITHUB_WORKSPACE}/next-prebuilt/next.tgz" \
+            --next-ref "${NEXTJS_REF}" \
+            --out "${GITHUB_WORKSPACE}/compat-window-fingerprint.json" \
+            | tee "${RUNNER_TEMP}/fingerprint.txt"
+          {
+            echo '### Compat-window fingerprint (vinext axis)'
+            echo
+            echo '```'
+            cat "${RUNNER_TEMP}/fingerprint.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the compat-window fingerprint
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: compat-vinext-window-fingerprint
+          path: compat-window-fingerprint.json
+          retention-days: 90
+
+      # next.js pins its OWN pnpm (9.6.0), which clashes with the knext pin above.
+      # corepack selects per-project, so drive every next.js step through it.
+      - name: Enable corepack (next.js per-project package manager)
+        working-directory: next.js
+        run: corepack enable
+
+      - name: Resolve next.js pnpm store path
+        id: pnpm-store
+        working-directory: next.js
+        run: echo "path=$(corepack pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache next.js pnpm store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: nextjs-pnpm-store-${{ env.NEXTJS_REF }}-${{ hashFiles('next.js/pnpm-lock.yaml') }}
+          restore-keys: |
+            nextjs-pnpm-store-${{ env.NEXTJS_REF }}-
+
+      # Root devDeps only (`--filter "{.}"`): the harness imports nothing from
+      # next.js's workspace packages in prebuilt mode, and a full monorepo install
+      # exceeded a 180-minute ceiling on the node lane.
+      # PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: the browser fetch is the 40-minute hang;
+      # chromium is installed by the dedicated cached step below.
+      - name: Install next.js harness deps
+        working-directory: next.js
+        env:
+          NEXT_SKIP_NATIVE_POSTINSTALL: '1'
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+          PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS: '1'
+          NPM_CONFIG_FETCH_RETRIES: '5'
+          NPM_CONFIG_FETCH_TIMEOUT: '600000'
+        run: |
+          attempts=4
+          installed=0
+          for i in $(seq 1 "$attempts"); do
+            echo "::group::pnpm install attempt $i/$attempts (per-attempt timeout 40m)"
+            if timeout 40m corepack pnpm install --frozen-lockfile --prefer-offline --filter "{.}"; then
+              installed=1
+              echo "::endgroup::"
+              break
+            fi
+            echo "::endgroup::"
+            sleep 15
+          done
+          if [ "$installed" -ne 1 ]; then
+            echo "pnpm install did not complete within $attempts attempts" >&2
+            exit 1
+          fi
+
+      - name: Resolve Playwright version (for the chromium cache key)
+        id: pw
+        working-directory: next.js
+        run: |
+          set -euo pipefail
+          VERSION="$(node -e 'try { console.log(require("playwright-chromium/package.json").version) } catch { console.log("") }')"
+          if ! printf '%s' "${VERSION}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$'; then
+            echo "::warning::playwright-chromium version resolve produced a non-version value ('${VERSION}'); cache key falls back to 'unknown'"
+            VERSION="unknown"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ steps.pw.outputs.version }}
+          restore-keys: |
+            playwright-chromium-${{ runner.os }}-
+
+      # Warm the cache once here so 16 shards exact-hit instead of racing 16
+      # concurrent CDN downloads. A warning, not a failure: the shards retry.
+      - name: Install Playwright chromium (warm the cache; retry + timeout)
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        working-directory: next.js
+        env:
+          PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS: '1'
+        run: |
+          attempts=3
+          installed=0
+          for i in $(seq 1 "$attempts"); do
+            echo "::group::playwright install chromium attempt $i/$attempts (per-attempt timeout 15m)"
+            if timeout 15m corepack pnpm playwright install chromium --with-deps; then
+              installed=1
+              echo "::endgroup::"
+              break
+            fi
+            echo "::endgroup::"
+            sleep 15
+          done
+          if [ "$installed" -ne 1 ]; then
+            echo "::warning::chromium warm-up failed; shards will download individually"
+          fi
+
+      # tar, never the zip artifact: zip MATERIALIZES symlinks, and next.js's
+      # corpus has symlinked fixture packages whose duplication makes
+      # jest-haste-map throw and every shard list 0 tests.
+      - name: Pack workspace tarball (preserves symlinks + exec bits)
+        run: |
+          set -euo pipefail
+          tar czf "${RUNNER_TEMP}/compat-workspace.tgz" \
+            --exclude='./knext/node_modules' \
+            --exclude='./knext/apps/*/node_modules' \
+            --exclude='./knext/packages/*/node_modules' \
+            --exclude='./next.js/node_modules' \
+            ./knext ./next.js ./next-prebuilt ./knext-tarballs
+          ls -la "${RUNNER_TEMP}/compat-workspace.tgz"
+
+      - name: Upload workspace
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: compat-vinext-workspace
+          path: ${{ runner.temp }}/compat-workspace.tgz
+          retention-days: 1
+
+  deploy-tests:
+    name: Deploy tests — vinext binary (shard ${{ matrix.shard }})
+    needs: build-next
+    runs-on: ubuntu-latest
+    # The node lane's budget plus headroom: this axis pays a `vite build` AND a
+    # `bun build --compile --bytecode` per fixture, where the node lane pays one
+    # `next build`. HONESTY: 120 is inherited, not measured for this axis — the
+    # first run's data is what tunes it, and a truncated shard fails rather than
+    # reads as green (the fail-on-red gate's truncation arm).
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep in sync with COMPAT_SHARD_TOTAL — cross-checked in both directions
+        # by tests/compat-vinext-lane.test.ts.
+        shard:
+          [
+            '1/16', '2/16', '3/16', '4/16', '5/16', '6/16', '7/16', '8/16',
+            '9/16', '10/16', '11/16', '12/16', '13/16', '14/16', '15/16', '16/16',
+          ]
+    steps:
+      - name: Download workspace
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: compat-vinext-workspace
+
+      - name: Unpack workspace tarball (restores symlinks + exec bits)
+        run: |
+          set -euo pipefail
+          tar xzf compat-workspace.tgz
+          rm compat-workspace.tgz
+          test -d knext && test -d next.js && test -d next-prebuilt && test -d knext-tarballs
+          SYMLINK_PROBE="next.js/test/e2e/app-dir/next-condition/fixtures/middleware/sym-linked-packages"
+          if [ ! -L "${SYMLINK_PROBE}" ]; then
+            echo "::error::${SYMLINK_PROBE} is not a symlink after unpack — jest-haste-map will throw and every shard will list 0 tests" >&2
+            exit 1
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 10.4.1
+
+      - name: Enable corepack (next.js per-project package manager)
+        working-directory: next.js
+        run: corepack enable
+
+      # UNCONDITIONAL, unlike the node lane's lane-gated setup: this axis has no
+      # node arm. ADR-0048's floor is 1.4.0 — 1.3.5 cannot serve the standalone
+      # tree at all and halves the compiled binary's cold-start win — so the
+      # default is the floor, and the dispatch input exists to move it
+      # deliberately (with the OBSERVED version captured into every summary).
+      - name: Setup Bun (the compile + serving runtime)
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ github.event.inputs.bun-version || '1.4.0' }}
+
+      - name: Assert the Bun floor ADR-0048 requires
+        run: |
+          set -euo pipefail
+          VERSION="$(bun --version)"
+          MAJOR="${VERSION%%.*}"
+          REST="${VERSION#*.}"
+          MINOR="${REST%%.*}"
+          if [ "${MAJOR}" -lt 1 ] || { [ "${MAJOR}" -eq 1 ] && [ "${MINOR}" -lt 4 ]; }; then
+            echo "::error::bun ${VERSION} is below the ADR-0048 floor (1.4.0); the compiled binary would be measured on a runtime knext refuses to ship" >&2
+            exit 1
+          fi
+          echo "bun ${VERSION} satisfies the ADR-0048 floor"
+
+      - name: Resolve next.js pnpm store path
+        id: pnpm-store
+        working-directory: next.js
+        run: echo "path=$(corepack pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore next.js pnpm store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: nextjs-pnpm-store-${{ env.NEXTJS_REF }}-${{ hashFiles('next.js/pnpm-lock.yaml') }}
+          restore-keys: |
+            nextjs-pnpm-store-${{ env.NEXTJS_REF }}-
+
+      - name: Re-install next.js harness deps (offline cache hit; node_modules rebuilt)
+        working-directory: next.js
+        env:
+          NEXT_SKIP_NATIVE_POSTINSTALL: '1'
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+          PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS: '1'
+          NPM_CONFIG_FETCH_RETRIES: '5'
+          NPM_CONFIG_FETCH_TIMEOUT: '600000'
+        run: |
+          attempts=4
+          installed=0
+          for i in $(seq 1 "$attempts"); do
+            echo "::group::pnpm install attempt $i/$attempts (per-attempt timeout 40m)"
+            if timeout 40m corepack pnpm install --frozen-lockfile --prefer-offline --filter "{.}"; then
+              installed=1
+              echo "::endgroup::"
+              break
+            fi
+            echo "::endgroup::"
+            sleep 15
+          done
+          if [ "$installed" -ne 1 ]; then
+            echo "pnpm install did not complete within $attempts attempts" >&2
+            exit 1
+          fi
+
+      - name: Resolve Playwright version (for the chromium cache key)
+        id: pw
+        working-directory: next.js
+        run: |
+          set -euo pipefail
+          VERSION="$(node -e 'try { console.log(require("playwright-chromium/package.json").version) } catch { console.log("") }')"
+          if ! printf '%s' "${VERSION}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$'; then
+            VERSION="unknown"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ steps.pw.outputs.version }}
+          restore-keys: |
+            playwright-chromium-${{ runner.os }}-
+
+      - name: Install Playwright chromium (retry + per-attempt timeout)
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        working-directory: next.js
+        env:
+          PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS: '1'
+        run: |
+          attempts=4
+          installed=0
+          for i in $(seq 1 "$attempts"); do
+            echo "::group::playwright install chromium attempt $i/$attempts (per-attempt timeout 15m)"
+            if timeout 15m corepack pnpm playwright install chromium --with-deps; then
+              installed=1
+              echo "::endgroup::"
+              break
+            fi
+            echo "::endgroup::"
+            sleep 15
+          done
+          if [ "$installed" -ne 1 ]; then
+            echo "::warning::chromium unavailable; browser-driving e2e will fail but the rest of the shard still runs"
+          fi
+
+      - name: Make lifecycle scripts executable
+        working-directory: knext
+        run: chmod +x scripts/e2e-deploy-vinext.sh scripts/e2e-logs.sh scripts/e2e-cleanup.sh
+
+      - name: Preflight — adapter tarballs survived transport + still npm-install (fail-fast)
+        run: node knext/scripts/e2e-preflight.mjs --tarballs-dir "${GITHUB_WORKSPACE}/knext-tarballs"
+
+      # The published next tarball IS the built packages/next at this version;
+      # overlay its dist so the harness's module-scope imports resolve without a
+      # source build.
+      - name: Hydrate workspace next/dist from the prebuilt tarball (so jest can load tests)
+        working-directory: next.js
+        run: |
+          set -euo pipefail
+          PKG_DIR="packages/next"
+          test -d "$PKG_DIR"
+          EXTRACT_DIR="$(mktemp -d)"
+          tar xzf "${GITHUB_WORKSPACE}/next-prebuilt/next.tgz" -C "${EXTRACT_DIR}"
+          SRC="${EXTRACT_DIR}/package"
+          for probe in jest.js constants.js dist/server/next.js dist/build/jest/jest.js; do
+            if [ ! -e "${SRC}/${probe}" ]; then
+              echo "::error::published next tarball lacks ${probe} — the prebuilt dist layout changed" >&2
+              exit 1
+            fi
+          done
+          rm -rf "${PKG_DIR}/dist"
+          cp -R "${SRC}/dist" "${PKG_DIR}/dist"
+          for f in "${SRC}"/*.js; do
+            [ -e "$f" ] || continue
+            cp "$f" "${PKG_DIR}/$(basename "$f")"
+          done
+          node -e '
+            for (const s of ["next/jest", "next/constants", "next/dist/trace", "next/dist/server/next"]) {
+              console.log("resolves:", s, "->", require.resolve(s, { paths: [process.cwd()] }));
+            }
+          '
+
+      - name: Hydrate @next/* harness load closure from published tarballs
+        working-directory: next.js
+        run: |
+          set -euo pipefail
+          NEXT_NPM_VERSION="${NEXTJS_REF#v}"
+          PKGS=(
+            "@next/env:packages/next-env"
+            "@next/playwright:packages/next-playwright"
+          )
+          for entry in "${PKGS[@]}"; do
+            pkg="${entry%%:*}"
+            src_dir="${entry##*:}"
+            test -d "$src_dir"
+            echo "::group::hydrate ${pkg}@${NEXT_NPM_VERSION} -> ${src_dir}/dist"
+            work="$(mktemp -d)"
+            ( cd "$work" && npm pack "${pkg}@${NEXT_NPM_VERSION}" --silent >/dev/null )
+            tar xzf "$work"/*.tgz -C "$work"
+            if [ ! -d "$work/package/dist" ]; then
+              echo "::error::published ${pkg}@${NEXT_NPM_VERSION} has no dist/ to hydrate" >&2
+              exit 1
+            fi
+            rm -rf "${src_dir}/dist"
+            cp -R "$work/package/dist" "${src_dir}/dist"
+            echo "::endgroup::"
+          done
+
+      # The fixture builds run through vinext, not `next build` — but the HARNESS
+      # still loads next/jest, which loads the SWC binding. Hydrating it keeps
+      # jest's config load off the WASM/registry path that hangs on this network.
+      - name: Hydrate prebuilt @next/swc native binary
+        id: swc
+        working-directory: next.js
+        env:
+          NATIVE_DIR: ${{ github.workspace }}/next-swc-native
+        run: |
+          set -euo pipefail
+          NEXT_NPM_VERSION="${NEXTJS_REF#v}"
+          mkdir -p "${NATIVE_DIR}"
+          work="$(mktemp -d)"
+          ( cd "$work" && npm pack "@next/swc-linux-x64-gnu@${NEXT_NPM_VERSION}" --silent >/dev/null )
+          tar xzf "$work"/*.tgz -C "$work"
+          NODE_FILE="$work/package/next-swc.linux-x64-gnu.node"
+          if [ ! -f "${NODE_FILE}" ]; then
+            echo "::error::published @next/swc-linux-x64-gnu@${NEXT_NPM_VERSION} has no next-swc.linux-x64-gnu.node" >&2
+            exit 1
+          fi
+          cp "${NODE_FILE}" "${NATIVE_DIR}/next-swc.linux-x64-gnu.node"
+          FALLBACK_DIR="packages/next/next-swc-fallback/@next/swc-linux-x64-gnu"
+          mkdir -p "${FALLBACK_DIR}"
+          cp "${NATIVE_DIR}/next-swc.linux-x64-gnu.node" "${FALLBACK_DIR}/next-swc.linux-x64-gnu.node"
+          echo "dir=${NATIVE_DIR}" >> "$GITHUB_OUTPUT"
+          echo "NEXT_TEST_NATIVE_DIR=${NATIVE_DIR}" >> "$GITHUB_ENV"
+
+      # UPSTREAM BUG: next/jest injects testPathIgnorePatterns ['/node_modules/',
+      # '/.next/'] with the dot UNESCAPED. Those are REGEXES, so '/.next/' matches
+      # this runner's '/knext/' path segment and excludes every test file — purely
+      # because the repo is named knext.
+      - name: Patch next/jest unescaped /.next/ ignore pattern (upstream bug)
+        working-directory: next.js
+        run: |
+          set -euo pipefail
+          node - <<'PATCHEOF'
+          const fs = require('fs');
+          const path = require('path');
+          let entry;
+          try {
+            entry = require.resolve('next/jest', { paths: [process.cwd()] });
+          } catch (e) {
+            console.error('FAIL: cannot resolve next/jest from', process.cwd(), '-', e.message);
+            process.exit(1);
+          }
+          const cands = new Set([entry]);
+          for (const m of fs.readFileSync(entry, 'utf8').matchAll(/require\(['"](\.[^'"]+)['"]\)/g)) {
+            try { cands.add(require.resolve(path.join(path.dirname(entry), m[1]))); } catch {}
+          }
+          const known = path.join(path.dirname(entry), 'dist/build/jest/jest.js');
+          if (fs.existsSync(known)) cands.add(known);
+          const files = [...cands].filter((f) => fs.existsSync(f));
+          if (!files.some((f) => f.endsWith(path.join('dist', 'build', 'jest', 'jest.js')))) {
+            console.error('FAIL: next/jest dist not found near', entry, '- did the next/dist hydrate regress?');
+            process.exit(1);
+          }
+          let applied = false;
+          for (const f of files) {
+            const s = fs.readFileSync(f, 'utf8');
+            const t = s.replace(/(['"])\/\.next\/\1/g, "'/\\\\.next/'");
+            if (t !== s) { fs.writeFileSync(f, t); applied = true; console.log('APPLIED:', f); }
+          }
+          if (!applied) console.log('NOOP: no unescaped /.next/ literal found in', files.join(', '));
+          PATCHEOF
+
+      - name: Clear jest haste cache (fresh crawl against the patched next/jest)
+        run: rm -rf /tmp/jest_*
+
+      # The DISCOVERY TRIPWIRE. Three separate discovery regressions each produced
+      # a silent 0-test "green" on the node lane; a 0-test run on THIS lane would
+      # publish a meaningless number, which is worse than a low one.
+      - name: Gate — jest --listTests must match >0 (loud-fail, no silent 0-test runs)
+        working-directory: next.js
+        run: |
+          set -euo pipefail
+          PROBE="test/e2e/404-page-router/index.test.ts"
+          GATE_ERR="$(mktemp)"
+          set +e
+          LIST="$(node_modules/.bin/jest --listTests "$PROBE" 2>"${GATE_ERR}")"
+          JEST_EXIT=$?
+          set -e
+          COUNT="$(printf '%s\n' "$LIST" | grep -c '404-page-router' || true)"
+          if [ "${COUNT}" -eq 0 ]; then
+            echo "::error::jest --listTests matched 0 files for ${PROBE} (jest exit ${JEST_EXIT}) — the discovery stack regressed; aborting before a vacuous 0-test run"
+            head -n 60 "${GATE_ERR}" >&2 || true
+            exit 1
+          fi
+          echo "jest discovery alive: ${COUNT} match(es) for ${PROBE}"
+
+      - name: Run official deploy tests (vinext single executable)
+        working-directory: next.js
+        env:
+          NEXT_TEST_MODE: deploy
+          # Upstream's own adapter deploy lane sets both: IS_TURBOPACK_TEST picks
+          # the bundler-lane assertions, NEXT_ENABLE_ADAPTER switches in-scope
+          # tests to ADAPTER expectations. Kept identical to the node lane so the
+          # two numbers differ by the ARTIFACT and nothing else.
+          IS_TURBOPACK_TEST: '1'
+          NEXT_ENABLE_ADAPTER: '1'
+          NEXT_E2E_TEST_TIMEOUT: '240000'
+          # THE axis. Everything else on this line is the node lane's.
+          NEXT_TEST_DEPLOY_SCRIPT_PATH: ${{ github.workspace }}/knext/scripts/e2e-deploy-vinext.sh
+          NEXT_TEST_DEPLOY_LOGS_SCRIPT_PATH: ${{ github.workspace }}/knext/scripts/e2e-logs.sh
+          NEXT_TEST_CLEANUP_SCRIPT_PATH: ${{ github.workspace }}/knext/scripts/e2e-cleanup.sh
+          KNEXT_E2E_TARBALLS_DIR: ${{ github.workspace }}/knext-tarballs
+          ADAPTER_DIR: ${{ github.workspace }}/knext/packages/kn-next
+          # THE SAME CORPUS. Changing this file, or narrowing it for this lane,
+          # would make the published number incomparable to the node lane's 778 —
+          # guarded by tests/compat-vinext-lane.test.ts.
+          NEXT_EXTERNAL_TESTS_FILTERS: ${{ github.workspace }}/knext/test/deploy-tests-manifest.knext.json
+          KNEXT_RUNTIME: ${{ env.KNEXT_RUNTIME }}
+          KNEXT_BUILDER: ${{ env.KNEXT_BUILDER }}
+          NEXT_TEST_CONTINUE_ON_ERROR: 'true'
+          NEXT_TEST_PKG_PATHS: '[["next", "${{ github.workspace }}/next-prebuilt/next.tgz"]]'
+          NEXT_TEST_NATIVE_DIR: ${{ steps.swc.outputs.dir }}
+        # `|| true` swallows the STEP's exit so the `if: always()` summarize tail
+        # always emits the ledger artifact. The JOB still fails honestly — on the
+        # shard's own summary, in the fail-on-red gate below. Both halves, or this
+        # is a silent green.
+        timeout-minutes: 105
+        run: |
+          node run-tests.js --type e2e -c 2 -g ${{ matrix.shard }} 2>&1 | tee runner.log || true
+
+      - name: Compute excluded count from manifest
+        if: always()
+        id: excl
+        working-directory: knext
+        run: |
+          COUNT=$(node -e "console.log(require('./test/deploy-tests-manifest.knext.json').rules.exclude.length)")
+          echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
+
+      - name: Summarize shard result
+        if: always()
+        working-directory: knext
+        run: |
+          SAFE_SHARD="${{ matrix.shard }}"
+          SAFE_SHARD="${SAFE_SHARD/\//-}"
+          # The OBSERVED bun, not the requested spec: "canary" is not a version,
+          # and this lane's number is only attributable with the real one.
+          RUNTIME_VERSION="$(bun --version 2>/dev/null || echo unknown)"
+          node scripts/e2e-summary.mjs \
+            --runner-log "${{ github.workspace }}/next.js/runner.log" \
+            --ref "${NEXTJS_REF}" \
+            --shard "${{ matrix.shard }}" \
+            --excluded "${{ steps.excl.outputs.count }}" \
+            --runtime bun \
+            --runtime-version "${RUNTIME_VERSION}" \
+            --builder vinext \
+            --out "compat-suite-summary-${SAFE_SHARD}.json"
+
+      - name: Upload summary artifact (vinext axis)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: compat-vinext-summary-${{ strategy.job-index }}
+          path: knext/compat-suite-summary-*.json
+          # The evidence has to outlive the sprint that reads it.
+          retention-days: 90
+
+      # ── Fail-on-red gate (revocation teeth) ────────────────────────────────
+      # Runs LAST, after the `if: always()` summarize/upload, so the evidence
+      # always lands before the job fails on it. A missing summary is NOT green;
+      # a truncated shard is NOT green; failed>0 or notRun>0 is NOT green.
+      #
+      # This lane is EXPECTED to be red for a while. That is not a reason to
+      # soften this step — a low number that fails the run is the honest report,
+      # and softening it is how a lane becomes decoration.
+      - name: Fail shard on red results (revocation teeth)
+        if: always()
+        working-directory: knext
+        run: |
+          set -euo pipefail
+          SAFE_SHARD="${{ matrix.shard }}"
+          SAFE_SHARD="${SAFE_SHARD/\//-}"
+          SUMMARY="compat-suite-summary-${SAFE_SHARD}.json"
+          if [ ! -f "${SUMMARY}" ]; then
+            echo "::error::${SUMMARY} is missing — no results is NOT green; the summarize step failed upstream"
+            exit 1
+          fi
+          node -e '
+            const s = require("./" + process.argv[1]);
+            console.log(
+              "shard " + s.shard + " [builder=" + (s.builder ?? "next") + " runtime=" + s.runtime +
+              " " + (s.runtimeVersion ?? "") + "]: passed=" + s.passed + " failed=" + s.failed +
+              " notRun=" + s.notRun + " excluded=" + s.excluded +
+              " expectedTotal=" + (s.expectedTotal ?? "n/a") +
+              " truncated=" + (s.truncated ?? false) + " (ref " + s.ref + ")"
+            );
+            for (const f of s.failures ?? []) {
+              console.error(
+                "::error::red test — " + f.file + " [kind=" + f.kind +
+                (f.timeoutMs !== undefined ? " timeoutMs=" + f.timeoutMs : "") + "]" +
+                (f.cases?.length ? " cases: " + f.cases.join(" | ") : "")
+              );
+            }
+            for (const file of s.notRunFiles ?? []) {
+              console.error("::error::not-run file (jest infra abort, NOT a test result) — " + file);
+            }
+            if ((s.failed ?? 0) > 0 || (s.notRun ?? 0) > 0) {
+              console.error(
+                "::error::red shard on the vinext axis — failed=" + s.failed + " notRun=" + s.notRun +
+                ". This lane publishes a NUMBER, not a green: triage the named files above, and " +
+                "record the count in docs/compat-matrix.md (vinext axis row) rather than softening this gate."
+              );
+              process.exit(1);
+            }
+            if (s.truncated === true) {
+              const reported = (s.passed ?? 0) + (s.failed ?? 0) + (s.notRun ?? 0);
+              console.error(
+                "::error::truncated shard — only " + reported + " of expectedTotal=" +
+                s.expectedTotal + " selected tests reported a result. Missing results are NOT green."
+              );
+              process.exit(1);
+            }
+          ' "${SUMMARY}"
+
+  # ── Per-shard ledger: THE PUBLISHED NUMBER ─────────────────────────────────
+  # Same script the node lane runs (scripts/compat-run-ledger.mjs — reviewed and
+  # unit-tested, not a heredoc), pointed at this lane's artifacts. It renders the
+  # run's per-shard counts into the job summary and uploads them for 90 days, and
+  # it FAILS when the summaries it finds disagree with COMPAT_SHARD_TOTAL: a
+  # fifteen-of-sixteen night must never bank as a clean sheet.
+  shard-ledger:
+    name: Per-shard ledger (the published number)
+    needs: deploy-tests
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      red_detail: ${{ steps.ledger.outputs.red_detail }}
+    steps:
+      - name: Checkout knext (the ledger script + its guards)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: knext
+
+      - name: Download every shard summary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: compat-vinext-summary-*
+          merge-multiple: true
+          path: summaries
+
+      - name: Download the compat-window fingerprint
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: compat-vinext-window-fingerprint
+          path: fingerprint
+
+      - name: Build the per-shard ledger
+        id: ledger
+        env:
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: node knext/scripts/compat-run-ledger.mjs
+
+      - name: Upload the run ledger (vinext axis)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: compat-vinext-run-ledger
+          path: compat-run-ledger.json
+          retention-days: 90
+
+  # ── Red-schedule alert ─────────────────────────────────────────────────────
+  # Its OWN issue title. A red here says nothing about the node lane, and sharing
+  # a title would both mislead and collide with that lane's idempotency key.
+  vinext-red-alert:
+    name: Weekly red alert (pinned issue)
+    needs: [build-next, deploy-tests, shard-ledger]
+    if: >-
+      always() &&
+      github.event_name == 'schedule' &&
+      (needs.build-next.result == 'failure' || needs.deploy-tests.result == 'failure' ||
+       needs.shard-ledger.result == 'failure' || needs.shard-ledger.result == 'cancelled' ||
+       needs.deploy-tests.result == 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Create or update the "Compat weekly RED (vinext axis)" issue (idempotent)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BUILD_RESULT: ${{ needs.build-next.result }}
+          SHARDS_RESULT: ${{ needs.deploy-tests.result }}
+          LEDGER_RESULT: ${{ needs.shard-ledger.result }}
+          NEXTJS_REF_TESTED: ${{ env.NEXTJS_REF }}
+          RED_SHARD_DETAIL: ${{ needs.shard-ledger.outputs.red_detail }}
+        run: |
+          set -euo pipefail
+          title='Compat weekly RED (vinext axis)'
+          body="The scheduled **vinext single-executable** compat run FAILED.
+
+          - Run: ${RUN_URL}
+          - Axis: compiled single executable (vinext + bun, \`bun build --compile --bytecode\`)
+          - Prepare: ${BUILD_RESULT}
+          - Shards: ${SHARDS_RESULT}
+          - Ledger: ${LEDGER_RESULT}
+          - Pinned ref: ${NEXTJS_REF_TESTED}
+
+          This is the **vinext axis**, not the node-standalone lane. A red here
+          says NOTHING about that lane's row, and while this axis is being stood
+          up a red is the EXPECTED state: the deliverable is the per-shard NUMBER
+          in the \`compat-vinext-run-ledger\` artifact, not a green.
+
+          **Named failures** (from the per-shard ledger):
+
+          ${RED_SHARD_DETAIL}
+
+          Record the run's total in docs/compat-matrix.md (the vinext axis row).
+          Never soften the fail-on-red gate to raise it."
+          existing="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 100 \
+            --json number,title \
+            --jq "[.[] | select(.title == \"${title}\")][0].number // empty")"
+          if [ -n "${existing}" ]; then
+            gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
+          else
+            new_url="$(gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}")"
+            new_num="${new_url##*/}"
+            gh issue pin "${new_num}" --repo "${GITHUB_REPOSITORY}" || echo "::warning::could not pin issue #${new_num} (non-fatal)"
+          fi
