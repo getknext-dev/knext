@@ -290,7 +290,7 @@ describe("T2b (#892) — a vinext build is markered, protected, and reapable", (
     });
 });
 
-describe("T2c — reclaim真: the failure-path reclaim actually deletes", () => {
+describe("T2c — the failure-path reclaim actually deletes", () => {
     it("the orphaned prefix EXISTS before the reclaim and is GONE after", () => {
         deployBuild("t1"); // a previous, still-live build
         deployBuild("t2"); // this run: uploaded, then the docker push rejects

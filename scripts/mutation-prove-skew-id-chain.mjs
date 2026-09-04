@@ -41,15 +41,21 @@
  *        marker. This is the round-2 rule — the equality is enforced where the
  *        marker is written, not by call-site discipline — and its absence is
  *        what let `kn-next build` mark a UUID no revision can protect.
- *   11.  THE OVER-DELETE DIRECTION: any prefix satisfies the check rather than
+ *   11.  A RESERVED name (`chunks`, `css`, `_vinext_fonts`, …) is accepted as a
+ *        build id, so `--tag chunks` marks a prefix every build shares. The
+ *        standalone write site has always refused this; the vinext one did not.
+ *   12.  A copy happens BEFORE the refusals, which leaks a full duplicate of
+ *        the static tree per failed deploy — the cleanup keys off a staging dir
+ *        that a throw never returns.
+ *   13.  THE OVER-DELETE DIRECTION: any prefix satisfies the check rather than
  *        the stated one. The mutation most likely to look harmless in review.
- *   12.  `_vinext_fonts` drops out of the pruner's reserved set — the
+ *   14.  `_vinext_fonts` drops out of the pruner's reserved set — the
  *        `next/font` namespace that broke round 1's discovery rule.
- *   13.  `reclaimBuildPrefix` short-circuits. It deletes nothing and logs that
+ *   15.  `reclaimBuildPrefix` short-circuits. It deletes nothing and logs that
  *        it reclaimed the prefix — the pre-T2 behaviour, and the reason T2c is
  *        a store-mutating test rather than an argv assertion.
- *   14.  The CR stops carrying NEXT_DEPLOYMENT_ID at all.
- *   15.  The user's colliding value wins over the deploy's. The entry is still
+ *   16.  The CR stops carrying NEXT_DEPLOYMENT_ID at all.
+ *   17.  The user's colliding value wins over the deploy's. The entry is still
  *        there, so any "is the key present" check passes.
  *
  * Every spec here imports `bun:test`, so the runner is resolved through
@@ -154,8 +160,11 @@ const MUTATIONS = [
   [
     UPLOAD,
     '#892 ITSELF: the .knext-build marker is not staged for a vinext build',
-    '    if (buildId) {\n',
-    '    if (false) {\n',
+    // Anchored on the WRITE site: since round 3 there are two `if (buildId)`
+    // blocks (validate, then write), and the preflight refused the ambiguous
+    // anchor rather than silently scoring the wrong one.
+    '    if (buildId) {\n        writeFileSync(\n',
+    '    if (false) {\n        writeFileSync(\n',
     SPEC_GC,
   ],
   [
@@ -170,6 +179,25 @@ const MUTATIONS = [
     'ROUND 2: the write site TRUSTS the caller instead of verifying the prefix',
     '        if (!check.ok) {\n',
     '        if (false) {\n',
+    SPEC_STAGE,
+  ],
+  [
+    UPLOAD,
+    'ROUND 3: a RESERVED name is accepted as a build id, marking a shared prefix',
+    '        if (RESERVED_STATIC_DIRS.has(buildId)) {\n',
+    '        if (false) {\n',
+    SPEC_STAGE,
+  ],
+  [
+    UPLOAD,
+    'ROUND 3: a copy happens BEFORE the refusals, leaking a temp dir per failed deploy',
+    // Reinstates the round-2 ordering as a single substitution: the tree is
+    // duplicated first, so every refusal below now throws with a staging dir
+    // already created and nothing holding a reference to clean it up.
+    '    if (buildId) {\n        // A reserved segment can never be a build-id.',
+    '    const leaked = mkdtempSync(join(tmpdir(), "knext-upload-"));\n' +
+      '    cpSync(sourceDir, leaked, { recursive: true });\n' +
+      '    if (buildId) {\n        // A reserved segment can never be a build-id.',
     SPEC_STAGE,
   ],
   [

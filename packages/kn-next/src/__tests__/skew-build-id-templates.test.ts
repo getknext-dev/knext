@@ -18,7 +18,7 @@
 
 import { describe, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..", "..", "..");
@@ -130,21 +130,59 @@ describe("T2a — scaffold templates mint the static namespace from the deploy i
  * checked tonight, and "we forgot the fourth one" is how this shipped.
  */
 describe("in-repo apps carry the same generateBuildId", () => {
-    const configs = execFileSync(
-        "git",
-        ["ls-files", "apps/*/next.config.ts", "examples/*/next.config.ts"],
-        { cwd: REPO_ROOT, encoding: "utf8" },
-    )
+    /** Every tracked Next config under `apps/` and `examples/`, any extension. */
+    const tracked = execFileSync("git", ["ls-files", "apps", "examples"], {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+    })
         .split("\n")
-        .filter(Boolean);
+        .filter((p) => /(^|\/)next\.config\.(ts|mts|cts|js|mjs|cjs)$/.test(p));
+
+    /**
+     * An app is in scope iff knext can BUILD or DEPLOY it — that is, it has a
+     * `kn-next.config.ts` (deployable) or a `vite.config.ts` (the vinext build
+     * entry, which is how `examples/bun-exec` qualifies without the former).
+     *
+     * Derived rather than a hand-written skip list, and the excluded set is
+     * ASSERTED below rather than silently dropped. Round 2's version globbed
+     * `apps/*` + `.ts` only, which silently missed
+     * `apps/spike-bun-bytecode/next.config.mjs` — a bare bytecode benchmark
+     * with neither config, so out of scope, but nothing said so.
+     */
+    const isKnextApp = (rel: string): boolean => {
+        const dir = join(REPO_ROOT, rel, "..");
+        return (
+            existsSync(join(dir, "kn-next.config.ts")) ||
+            existsSync(join(dir, "vite.config.ts"))
+        );
+    };
+
+    const inScope = tracked.filter(isKnextApp);
+    const outOfScope = tracked.filter((p) => !isKnextApp(p));
 
     it("the scan found the apps (a glob matching nothing proves nothing)", () => {
-        expect(configs.length).toBeGreaterThanOrEqual(4);
+        // It must see MORE than the in-scope set, or the exclusion below is
+        // vacuous — a filter that filters nothing is not a filter.
+        expect(tracked.length).toBeGreaterThan(inScope.length);
+        expect(inScope.length).toBeGreaterThanOrEqual(4);
+        // And it must reach past one directory level and past `.ts`.
+        expect(tracked.some((p) => p.endsWith(".mjs"))).toBe(true);
     });
 
-    it.each(configs)("%s mints its build id from the deploy id", (rel) => {
+    it("everything excluded is excluded for a stated reason", () => {
+        // Not an allowlist of names: the assertion is that each excluded app
+        // genuinely has neither config, so knext never builds or deploys it.
+        for (const rel of outOfScope) {
+            expect(isKnextApp(rel)).toBe(false);
+        }
+        // Named so the exclusion is visible in the test output rather than
+        // being a silent gap, and so adding a knext config to one of these
+        // moves it into scope loudly.
+        expect(outOfScope).toEqual(["apps/spike-bun-bytecode/next.config.mjs"]);
+    });
+
+    it.each(inScope)("%s mints its build id from the deploy id", (rel) => {
         const source = readFileSync(join(REPO_ROOT, rel), "utf8");
-        expect(source).toContain("NextConfig");
         expect(mintsBuildIdFromDeploymentId(source)).toBe(true);
     });
 });

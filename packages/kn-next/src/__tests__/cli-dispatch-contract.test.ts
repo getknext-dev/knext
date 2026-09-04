@@ -201,7 +201,13 @@ describe("usage mistakes are UsageErrors, so they render as messages", () => {
             // UsageError, because dropping the flag fixes it and a stack dump
             // would bury that. Round 1 filed both under this allowlist, which
             // misclassified the avoidable one.
-            "throw new Error(detail)",
+            //
+            // Anchored on the MESSAGE, not on the variable name it was built
+            // in. `throw new Error(detail)` would pre-legitimise any future
+            // plain throw in this file that happened to name its message
+            // `detail` — an allowlist entry that grants itself scope it was
+            // never reviewed for.
+            "Skew-protection asset retention requires the",
         ],
         // Derived name validity: composed from the config's app name + PR id.
         "preview.ts": ["exceeds the 63-char", "is not a valid DNS-1123 label"],

@@ -630,19 +630,26 @@ export function stageNitroPublicAssets(
         );
     }
 
-    // A FRESH temp dir per staging run, OUTSIDE the repo and the docker build
-    // context by construction (re-gate residual on PR #890): an in-repo
-    // staging dir sits inside deploy's build context, where buildx's context
-    // walk races the concurrent re-staging (intermittent `no such file`
-    // during context transfer) and an unignored copy of every asset wedges
-    // `git status`. Fresh-per-run also makes staleness impossible — no clear
-    // step, so there is nothing to mis-aim at the artifact.
-    const stagingDir = mkdtempSync(join(tmpdir(), "knext-upload-"));
-    cpSync(sourceDir, stagingDir, { recursive: true });
-
-    // #892 marker, written into the STAGING copy only — the artifact stays
-    // read-only (the concurrent docker build is COPYing it).
+    // EVERY refusal happens BEFORE the copy. `mkdtempSync` + `cpSync` duplicate
+    // the whole static tree, and this function's `finally`-based cleanup in
+    // `uploadAssets` keys off the returned staging dir — which a throw never
+    // returns, so a temp dir leaked per failed deploy. That is the exact leak
+    // class the fresh-per-run design fixed for the success path; validating
+    // first means there is nothing to clean up because nothing was created.
     if (buildId) {
+        // A reserved segment can never be a build-id. The standalone write site
+        // has always refused this; without the same refusal here `--tag chunks`
+        // would write a marker INTO a shared, cross-build prefix and hand the
+        // pruner a licence to reap it — the max-blast-radius over-delete.
+        if (RESERVED_STATIC_DIRS.has(buildId)) {
+            throw new Error(
+                `Refusing to stage a .knext-build marker for "${buildId}": ` +
+                    "that name is a shared static directory (" +
+                    `${[...RESERVED_STATIC_DIRS].sort().join(", ")}), not a ` +
+                    "build prefix. Marking it would let the GC reap assets " +
+                    "every build shares. Use a different deploy tag.",
+            );
+        }
         const check = verifyVinextStaticPrefix(cwd, buildId);
         if (!check.ok) {
             throw new Error(
@@ -657,6 +664,22 @@ export function stageNitroPublicAssets(
                     "name while the chunks it protects stay unmarked.",
             );
         }
+    }
+
+    // A FRESH temp dir per staging run, OUTSIDE the repo and the docker build
+    // context by construction (re-gate residual on PR #890): an in-repo
+    // staging dir sits inside deploy's build context, where buildx's context
+    // walk races the concurrent re-staging (intermittent `no such file`
+    // during context transfer) and an unignored copy of every asset wedges
+    // `git status`. Fresh-per-run also makes staleness impossible — no clear
+    // step, so there is nothing to mis-aim at the artifact.
+    const stagingDir = mkdtempSync(join(tmpdir(), "knext-upload-"));
+    cpSync(sourceDir, stagingDir, { recursive: true });
+
+    // #892 marker, written into the STAGING copy only — the artifact stays
+    // read-only (the concurrent docker build is COPYing it). Already validated
+    // above, before anything was created.
+    if (buildId) {
         writeFileSync(
             join(stagingDir, "_next", "static", buildId, BUILD_MARKER_FILENAME),
             `${buildId}\n`,

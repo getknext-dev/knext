@@ -526,25 +526,34 @@ export async function deploy() {
             const found = prefix.siblings.length
                 ? `found: ${prefix.siblings.join(", ")}`
                 : "the directory is empty";
+            // Just the varying diagnostic — the fixed sentence stays INSIDE
+            // each throw below, so `cli-dispatch-contract`'s allowlist can
+            // anchor on message TEXT rather than on the variable name. An
+            // anchor naming the variable would pre-legitimise any future plain
+            // throw in this file that reused it.
             const detail =
                 `.output/public/_next/static/${buildId}/ does not exist ` +
-                `(${prefix.reason}; ${found}). Skew-protection asset retention ` +
-                "requires the static prefix to BE the deploy tag — check " +
-                "next.config `generateBuildId: () => " +
-                "process.env.NEXT_DEPLOYMENT_ID || null`.";
+                `(${prefix.reason}; ${found})`;
             // With --skip-build this is a user mistake with a one-word fix, so
             // it renders as a message rather than a FATAL stack dump: the
             // build that produced `.output` ran under a different tag, and
             // dropping the flag rebuilds it under this one.
             if (options.skipBuild) {
                 throw new UsageError(
-                    `${detail} You passed --skip-build, so .output is whatever ` +
-                        "an earlier build left behind — drop --skip-build to " +
-                        `rebuild it under "${buildId}", or deploy with the tag ` +
-                        "that .output was built under.",
+                    `${detail}. Skew-protection asset retention requires the ` +
+                        "static prefix to BE the deploy tag. You passed " +
+                        "--skip-build, so .output is whatever an earlier build " +
+                        "left behind — drop --skip-build to rebuild it under " +
+                        `"${buildId}", or deploy with the tag that .output was ` +
+                        "built under.",
                 );
             }
-            throw new Error(detail);
+            throw new Error(
+                `${detail}. Skew-protection asset retention requires the ` +
+                    "static prefix to BE the deploy tag — check next.config " +
+                    "`generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID " +
+                    "|| null`.",
+            );
         }
     }
 

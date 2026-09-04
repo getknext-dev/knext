@@ -342,6 +342,61 @@ describe("stageNitroPublicAssets", () => {
             /actually-built-under-this/,
         );
     });
+
+    it("REFUSES a build id that is a shared static directory", () => {
+        // The standalone write site has always refused this. Without the same
+        // refusal here, `--tag chunks` writes a marker INTO the cross-build
+        // `chunks/` prefix and hands the pruner a licence to reap assets every
+        // build shares — the max-blast-radius over-delete.
+        mkdirSync(join(cwd, ".output", "public", "_next", "static", "chunks"), {
+            recursive: true,
+        });
+        writeFileSync(
+            join(cwd, ".output", "public", "_next", "static", "chunks", "a.js"),
+            "x",
+        );
+        // The prefix EXISTS, so this is not the missing-prefix refusal — it is
+        // a refusal on the name itself.
+        expect(() => stageNitroPublicAssets(cwd, "chunks")).toThrow(
+            /shared static directory/,
+        );
+    });
+
+    /**
+     * Every refusal must happen BEFORE the copy.
+     *
+     * `mkdtempSync` + `cpSync` duplicate the whole static tree, and the
+     * `finally` cleanup keys off the staging dir this function RETURNS — which
+     * a throw never returns. So a refusal after the copy leaks a full copy of
+     * the tree per failed deploy: the exact leak class the fresh-per-run design
+     * fixed for the success path.
+     */
+    it("leaks no temp dir when it refuses (validate before copying)", () => {
+        const before = new Set(
+            readdirSync(tmpdir()).filter((n) => n.startsWith("knext-upload-")),
+        );
+
+        seedNitroBuild("actually-built-under-this");
+        expect(() => stageNitroPublicAssets(cwd, "claimed-this")).toThrow();
+        expect(() => stageNitroPublicAssets(cwd, "chunks")).toThrow();
+
+        const after = readdirSync(tmpdir()).filter(
+            (n) => n.startsWith("knext-upload-") && !before.has(n),
+        );
+        expect(after).toEqual([]);
+
+        // Non-vacuity: the SUCCESS path really does create one there, so an
+        // empty diff above means "refused without creating", not "this check
+        // is looking in the wrong place".
+        const staged = stageNitroPublicAssets(cwd, "actually-built-under-this");
+        expect(staged.startsWith(tmpdir())).toBe(true);
+        expect(
+            readdirSync(tmpdir()).filter(
+                (n) => n.startsWith("knext-upload-") && !before.has(n),
+            ),
+        ).toHaveLength(1);
+        rmSync(staged, { recursive: true, force: true });
+    });
 });
 
 /**
