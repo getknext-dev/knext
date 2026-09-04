@@ -43,11 +43,19 @@
  *   M5f is M5e under the DRAIN ELEMENT's own name. The drain's `rmSync(d)` was
  *      being counted a second time as a direct removal, so `d` — and only `d` —
  *      rode free in that file. M5e picks `dir`, which is exactly the name that
- *      cannot expose it, and twelve file/name pairs corpus-wide had the same
- *      collision available.
+ *      cannot expose it. Measured against the pre-fix scan, 12 (file, name)
+ *      pairs corpus-wide had that collision available — 8 closed by excluding
+ *      drain bodies from direct credit, 4 more by widening that exclusion to
+ *      loops over a non-identifier iterable; 0 remain.
  *   M5g DUPLICATES a licensed write. Pinning destinations fixed substitution
  *      (M5d) but licensed a spelling however many times it appeared, so the
  *      licence is a multiset and this is the mutation that says so.
+ *   M5h un-escapes the binding name before it is interpolated into a `RegExp`.
+ *      `$` is a legal identifier character AND an anchor, so a variable could
+ *      defeat the entire scan by being CALLED `tmp$` — the literal #918 shape
+ *      reported nothing under that name.
+ *   M5i narrows the drain scan back to a bare-identifier iterable, which is how
+ *      `of [appDir]` and `of dirs.splice(0)` escaped being drains at all.
  *   M6 blinds the lifetime scan, which makes every baseline entry stale —
  *      proving the ratchet is asserted in BOTH directions and cannot rot into a
  *      permanent licence.
@@ -176,7 +184,7 @@ const MUTATIONS = [
     claim:
       "the unregistered leak is named `d` — the DRAIN ELEMENT's own name. Its `rmSync(d)` was " +
       'counted a second time as a direct removal, so this one name rode free while every other ' +
-      'name reddened; twelve file/name pairs corpus-wide sat on that collision, and M5e uses ' +
+      'name reddened; 12 file/name pairs corpus-wide sat on that collision, and M5e uses ' +
       '`dir`, the one name that cannot expose it',
     subject: 'registry',
     anchor: "  const dir = mkdtempSync(join(tmpdir(), 'port-owned-'));",
@@ -197,6 +205,31 @@ const MUTATIONS = [
     replacement:
       '    writeFileSync(join(FIXTURE, ".knext", ".gitignore"), "*\\n");\n' +
       '    writeFileSync(join(FIXTURE, ".knext", ".gitignore"), "*\\n");',
+  },
+  {
+    id: 'M5h',
+    expect: 'red',
+    claim:
+      'binding names go back into `RegExp` UNESCAPED — `$` is both a legal identifier character ' +
+      'and an anchor, so `const tmp$ = resolve(repoRoot, …)` defeats the whole scan by what the ' +
+      'variable is CALLED. Both halves fall to it: the declaration stops resolving, and removal ' +
+      'credit and enrolment stop matching',
+    subject: 'scan',
+    anchor: "  const escaped = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');",
+    replacement: '  const escaped = name;',
+  },
+  {
+    id: 'M5i',
+    expect: 'red',
+    claim:
+      'the drain scan goes back to requiring a BARE IDENTIFIER iterable, so `of [appDir]` and ' +
+      '`of dirs.splice(0)` stop being drains at all — the first hands its `rmSync(d)` back to ' +
+      'any creation named `d` (four of the twelve collision pairs), the second turns a ' +
+      'correctly-cleaned directory into a false finding',
+    subject: 'scan',
+    anchor: '    /\\bfor\\s*\\(\\s*(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s+of\\s+/g,',
+    replacement:
+      '    /\\bfor\\s*\\(\\s*(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s+of\\s+[A-Za-z_$][\\w$]*\\s*\\)/g,',
   },
   {
     id: 'M6',

@@ -190,7 +190,7 @@ function initializersOf(blanked, raw, name) {
   // `(?![=>])` excludes `==` AND `=>`: an arrow in a type position
   // (`(root: string) => string[]`) otherwise reads as an assignment to `root`.
   const decl = new RegExp(
-    `(?:\\b(?:const|let|var)\\s+)?\\b${name}\\b\\s*(?::[^=;\\n]*)?=\\s*(?![=>])`,
+    `(?:\\b(?:const|let|var)\\s+)?${identifierPattern(name)}\\s*(?::[^=;\\n]*)?=\\s*(?![=>])`,
     'g',
   );
   /** @type {{ at: number, text: string }[]} */
@@ -215,6 +215,29 @@ function initializersOf(blanked, raw, name) {
     if (text) found.push({ at: m.index, text });
   }
   return found;
+}
+
+/**
+ * A binding name, made safe to interpolate into a `RegExp`, with a JS-identifier
+ * token boundary.
+ *
+ * `$` IS A LEGAL IDENTIFIER CHARACTER AND A REGEX ANCHOR, and interpolating a
+ * name raw let a binding defeat the scan BY ITS NAME. Measured: `const tmp$ =
+ * resolve(repoRoot, 'tests/.x.tmp.ts'); writeFileSync(tmp$, …)` — the literal
+ * #918 shape — reported ZERO findings, because `\btmp$\b` anchors at
+ * end-of-line and never matched the declaration, leaving the binding
+ * unresolvable and therefore acquitted. The same trick defeated removal credit
+ * and enrolment on the lifetime half.
+ *
+ * `\b` cannot express this boundary either way: it is defined over `\w`, which
+ * excludes `$`, so `\b` is wrong at BOTH ends of a `$`-bearing identifier.
+ * Lookarounds over `[\w$]` are the correct token boundary for JS.
+ *
+ * @param {string} name
+ */
+function identifierPattern(name) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return `(?<![\\w$])${escaped}(?![\\w$])`;
 }
 
 /** The outermost call of a path expression, when it is one of the two joiners. */
@@ -541,7 +564,9 @@ function removalFirstArgs(text) {
  */
 function removesBindingItself(arg, name) {
   return new RegExp(
-    `^(?:await\\s+)?(?:(?:path\\s*\\.\\s*)?(?:resolve|join|normalize)\\s*\\(\\s*)?${name}\\s*\\)?$`,
+    `^(?:await\\s+)?(?:(?:path\\s*\\.\\s*)?(?:resolve|join|normalize)\\s*\\(\\s*)?${identifierPattern(
+      name,
+    )}\\s*\\)?$`,
   ).test(arg.trim());
 }
 
@@ -552,8 +577,15 @@ function removesBindingItself(arg, name) {
  * once per ENROLMENT, via `enrolments`; counting it here as well hands a second,
  * unearned credit to any creation that happens to share the loop element's name.
  * Measured: a leak named `d` in `e2e-deploy.port-ownership.test.ts` — whose drain
- * element IS `d` — SURVIVED, while the identical leak named `dir` reddened, and
- * twelve file/name pairs across the corpus sat on that collision.
+ * element IS `d` — SURVIVED, while the identical leak named `dir` reddened.
+ *
+ * EXCLUSION IS BY ELEMENT NAME, NOT BY NAMED REGISTRY. The two concerns come
+ * apart, and conflating them left a residual of this same class: a drain over an
+ * ARRAY LITERAL (`for (const d of [appDir]) rmSync(d, …)`, live in
+ * `e2e-deploy.contract.test.ts`) has no registry identifier to enrol into, so it
+ * was not recognised as a drain at all and its `rmSync(d)` went on crediting any
+ * creation named `d`. Enrolment needs the registry's NAME; exclusion needs only
+ * the element name and the body span.
  *
  * @param {string} blanked
  * @param {string} name
@@ -567,8 +599,9 @@ function directRemovals(blanked, name, drainSpans) {
 }
 
 /**
- * Arrays that are iterated with an `rm` over THEIR OWN elements, and the spans
- * of the iteration bodies that do the removing.
+ * Iterations that `rm` their OWN elements: the spans of their bodies (every such
+ * loop, whatever it iterates) and the NAMES of the registries drained (only the
+ * ones iterating a plain identifier, which is what `A.push(x)` can enrol into).
  *
  * @param {string} blanked
  * @returns {{ names: Set<string>, spans: [number, number][] }}
@@ -579,19 +612,33 @@ function drainedRegistries(blanked) {
   /** @type {[number, number][]} */
   const spans = [];
 
-  // `for (const d of tempDirs) rmSync(d, …)` — the shape in
-  // `e2e-deploy.port-ownership.test.ts` and `compat-window-fingerprint.test.ts`.
+  // `for (const d of tempDirs) rmSync(d, …)` — and equally `of [appDir]`, `of
+  // Object.values(x)`, or any other iterable. The header is paren-matched rather
+  // than pattern-matched so the iterable's SHAPE cannot decide whether the loop
+  // is seen at all.
   for (const m of blanked.matchAll(
-    /\bfor\s*\(\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s+of\s+([A-Za-z_$][\w$]*)\s*\)/g,
+    /\bfor\s*\(\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s+of\s+/g,
   )) {
-    const [element, registry] = [m[1], m[2]];
-    const [from, to] = bodySpanAfter(blanked, m.index + m[0].length);
+    const element = m[1];
+    const headerOpen = blanked.lastIndexOf('(', m.index + 5);
+    const headerClose = matchParen(blanked, headerOpen);
+    if (headerClose === -1) continue;
+    const iterable = blanked.slice(m.index + m[0].length, headerClose).trim();
+    const [from, to] = bodySpanAfter(blanked, headerClose + 1);
     if (
       removalFirstArgs(blanked.slice(from, to)).some(({ arg }) =>
         removesBindingItself(arg, element),
       )
     ) {
-      names.add(registry);
+      // The registry is the iterable's ROOT identifier, so a drain that reads
+      // the array through an accessor still enrols: `doctor.test.ts` drains with
+      // `for (const d of dirs.splice(0))`, and requiring a BARE identifier here
+      // credited nothing while the span suppressed the direct removal — turning
+      // a correctly-cleaned directory into a false finding. An array LITERAL
+      // (`of [appDir]`) has no root identifier and contributes a span only,
+      // which is right: nothing can be pushed onto a literal.
+      const registry = iterable.match(/^([A-Za-z_$][\w$]*)\b/)?.[1];
+      if (registry) names.add(registry);
       spans.push([from, to]);
     }
   }
@@ -654,7 +701,10 @@ function bodySpanAfter(blanked, index) {
 function enrolments(blanked, name, drained) {
   let n = 0;
   for (const m of blanked.matchAll(
-    new RegExp(`\\b([A-Za-z_$][\\w$]*)\\s*\\.\\s*push\\s*\\(\\s*${name}\\s*\\)`, 'g'),
+    new RegExp(
+      `([A-Za-z_$][\\w$]*)\\s*\\.\\s*push\\s*\\(\\s*${identifierPattern(name)}\\s*\\)`,
+      'g',
+    ),
   )) {
     if (drained.has(m[1])) n += 1;
   }

@@ -262,6 +262,24 @@ describe('a spec writes its scratch OUTSIDE the checkout (#918)', () => {
     ).toHaveLength(1);
   });
 
+  it('is not defeated by a `$` in the binding name', () => {
+    // `$` is a legal identifier character AND a regex anchor. Interpolated raw,
+    // `\btmp$\b` anchors at end-of-line, the declaration never resolves, and the
+    // binding is acquitted — so this exact #918 shape reported nothing, purely
+    // because of what the variable was called.
+    expect(
+      repoRootedWrites(
+        "const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');\n" +
+          "const tmp$ = resolve(repoRoot, 'tests/.x.tmp.ts');\nwriteFileSync(tmp$, body);",
+      ),
+    ).toHaveLength(1);
+    expect(
+      repoRootedWrites(
+        "const tmp$ = join(tmpdir(), 'knext-x.tmp.ts');\nwriteFileSync(tmp$, body);",
+      ),
+    ).toEqual([]);
+  });
+
   it('acquits a template whose ROOT is the hole', () => {
     expect(
       repoRootedWrites(
@@ -438,8 +456,11 @@ describe('a temp directory is REMOVED, not just correctly placed (D9, #880)', ()
     // drains with `for (const d of tempDirs) rmSync(d, …)`, so `d` is the one
     // name whose leak the drain body's own `rmSync` could credit as a direct
     // removal — and the earlier version of this check appended `dir`, the single
-    // name that could not expose it. Twelve file/name pairs corpus-wide sat on
-    // that collision.
+    // name that could not expose it. Measured against the pre-fix scan by
+    // appending a probe leak under every loop-element name in the corpus:
+    // 12 (file, name) pairs sat on that collision, 8 closed by excluding drain
+    // bodies from direct credit and 4 by widening that exclusion to loops over a
+    // non-identifier iterable; 0 remain.
     const file = 'tests/e2e-deploy.port-ownership.test.ts';
     const source = readFileSync(resolve(repoRoot, file), 'utf8');
     expect(
@@ -475,6 +496,52 @@ describe('a temp directory is REMOVED, not just correctly placed (D9, #880)', ()
       unpairedTempDirs(
         `const temps = [];\nconst d = mkdtempSync(join(tmpdir(), 'x-'));\n` +
           `rmSync(d, { recursive: true });\n${drain}`,
+      ),
+    ).toEqual([]);
+  });
+
+  it('is not defeated by a `$` in the binding name, on the lifetime half either', () => {
+    // Same defeat, both other interpolation sites: removal credit and enrolment.
+    expect(unpairedTempDirs("const dir$ = mkdtempSync(join(tmpdir(), 'x-'));")).toHaveLength(1);
+    expect(
+      unpairedTempDirs(
+        "const dir$ = mkdtempSync(join(tmpdir(), 'x-'));\nrmSync(dir$, { recursive: true });",
+      ),
+    ).toEqual([]);
+    expect(
+      unpairedTempDirs(
+        'const temps = [];\n' +
+          "const a$ = mkdtempSync(join(tmpdir(), 'x-'));\ntemps.push(a$);\n" +
+          'afterAll(() => { for (const d of temps) rmSync(d, { recursive: true }); });',
+      ),
+    ).toEqual([]);
+  });
+
+  it('sees a drain over a non-identifier iterable, in both directions', () => {
+    // `of [appDir]` (live in `e2e-deploy.contract.test.ts`) and
+    // `of dirs.splice(0)` (live in `doctor.test.ts`). The first has no registry
+    // to enrol into, so its rm must only be EXCLUDED from direct credit; the
+    // second must still enrol, or a correctly-cleaned directory becomes a false
+    // finding. Requiring a bare identifier got each of these wrong in turn.
+    expect(
+      unpairedTempDirs(
+        "const appDir = mkdtempSync(join(tmpdir(), 'x-'));\n" +
+          "const d = mkdtempSync(join(tmpdir(), 'y-'));\n" +
+          'afterAll(() => { for (const d of [appDir]) rmSync(d, { recursive: true }); });',
+      ).map((u) => u.binding),
+      // TWO, and the second is a deliberate over-report: `appDir` really is
+      // removed, but only by being named inside an array literal, which is not
+      // an enrolment the scan can count. Fail-closed is the direction this scan
+      // takes wherever it cannot be certain — an uncredited cleanup costs one
+      // baseline entry, an uncounted leak costs the guard. What must NOT happen
+      // is the loop element `d` picking up credit from that same rm.
+      'the array-literal drain must not credit the unrelated `d`',
+    ).toEqual(['appDir', 'd']);
+    expect(
+      unpairedTempDirs(
+        'const dirs = [];\n' +
+          "function make() { const d = mkdtempSync(join(tmpdir(), 'x-')); dirs.push(d); return d; }\n" +
+          'afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true }); });',
       ),
     ).toEqual([]);
   });
