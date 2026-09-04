@@ -40,6 +40,14 @@
  *      registry exemption used to discharge every same-named creation once one
  *      was pushed; no synthetic vector caught it, because none of them had an
  *      unregistered sibling. This one is asserted against the real tree.
+ *   M5f is M5e under the DRAIN ELEMENT's own name. The drain's `rmSync(d)` was
+ *      being counted a second time as a direct removal, so `d` — and only `d` —
+ *      rode free in that file. M5e picks `dir`, which is exactly the name that
+ *      cannot expose it, and twelve file/name pairs corpus-wide had the same
+ *      collision available.
+ *   M5g DUPLICATES a licensed write. Pinning destinations fixed substitution
+ *      (M5d) but licensed a spelling however many times it appeared, so the
+ *      licence is a multiset and this is the mutation that says so.
  *   M6 blinds the lifetime scan, which makes every baseline entry stale —
  *      proving the ratchet is asserted in BOTH directions and cannot rot into a
  *      permanent licence.
@@ -161,6 +169,34 @@ const MUTATIONS = [
       "  const dir = mkdtempSync(join(tmpdir(), 'knext-d9-unregistered-'));\n" +
       "  const dir2 = mkdtempSync(join(tmpdir(), 'port-owned-'));\n" +
       '  void dir2;',
+  },
+  {
+    id: 'M5f',
+    expect: 'red',
+    claim:
+      "the unregistered leak is named `d` — the DRAIN ELEMENT's own name. Its `rmSync(d)` was " +
+      'counted a second time as a direct removal, so this one name rode free while every other ' +
+      'name reddened; twelve file/name pairs corpus-wide sat on that collision, and M5e uses ' +
+      '`dir`, the one name that cannot expose it',
+    subject: 'registry',
+    anchor: "  const dir = mkdtempSync(join(tmpdir(), 'port-owned-'));",
+    replacement:
+      "  const d = mkdtempSync(join(tmpdir(), 'knext-d9-collide-'));\n" +
+      '  void d;\n' +
+      "  const dir = mkdtempSync(join(tmpdir(), 'port-owned-'));",
+  },
+  {
+    id: 'M5g',
+    expect: 'red',
+    claim:
+      'a licensed write is DUPLICATED rather than added or substituted — a destination-only ' +
+      'licence covers a spelling however many times it appears, so the copy rode free. The ' +
+      'licence is a multiset for this reason',
+    subject: 'licensed',
+    anchor: '    writeFileSync(join(FIXTURE, ".knext", ".gitignore"), "*\\n");',
+    replacement:
+      '    writeFileSync(join(FIXTURE, ".knext", ".gitignore"), "*\\n");\n' +
+      '    writeFileSync(join(FIXTURE, ".knext", ".gitignore"), "*\\n");',
   },
   {
     id: 'M6',

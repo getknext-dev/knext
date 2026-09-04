@@ -498,22 +498,32 @@ export function unpairedTempDirs(source) {
   const drained = drainedRegistries(blanked);
 
   for (const [name, creations] of created) {
-    const credit = directRemovals(blanked, name) + enrolments(blanked, name, drained);
+    const credit =
+      directRemovals(blanked, name, drained.spans) + enrolments(blanked, name, drained.names);
     for (let i = credit; i < creations; i++) found.push({ binding: name });
   }
   return found;
 }
 
-/** Every rm-shaped call's FIRST argument, as raw text. */
+/**
+ * Every rm-shaped call's FIRST argument, with the call's offset.
+ *
+ * The offset is load-bearing: a drained registry's own `rmSync(d)` has to be
+ * EXCLUDED from direct credit, and telling it apart from a real direct removal
+ * is positional — both spell the same text.
+ *
+ * @param {string} text
+ * @returns {{ at: number, arg: string }[]}
+ */
 function removalFirstArgs(text) {
-  /** @type {string[]} */
+  /** @type {{ at: number, arg: string }[]} */
   const args = [];
   for (const m of text.matchAll(/\b(?:rmSync|rm|rmdirSync|rmdir)\s*\(/g)) {
     const open = m.index + m[0].length - 1;
     const close = matchParen(text, open);
     if (close === -1) continue;
     const inner = text.slice(open + 1, close);
-    args.push(splitArgs(inner, inner)[0]?.trim() ?? '');
+    args.push({ at: m.index, arg: splitArgs(inner, inner)[0]?.trim() ?? '' });
   }
   return args;
 }
@@ -538,22 +548,36 @@ function removesBindingItself(arg, name) {
 /**
  * How many removals name this binding as the thing being removed.
  *
+ * DRAIN BODIES ARE EXCLUDED. `for (const d of tempDirs) rmSync(d)` is credited
+ * once per ENROLMENT, via `enrolments`; counting it here as well hands a second,
+ * unearned credit to any creation that happens to share the loop element's name.
+ * Measured: a leak named `d` in `e2e-deploy.port-ownership.test.ts` — whose drain
+ * element IS `d` — SURVIVED, while the identical leak named `dir` reddened, and
+ * twelve file/name pairs across the corpus sat on that collision.
+ *
  * @param {string} blanked
  * @param {string} name
+ * @param {[number, number][]} drainSpans
  */
-function directRemovals(blanked, name) {
-  return removalFirstArgs(blanked).filter((a) => removesBindingItself(a, name)).length;
+function directRemovals(blanked, name, drainSpans) {
+  return removalFirstArgs(blanked).filter(
+    ({ at, arg }) =>
+      removesBindingItself(arg, name) && !drainSpans.some(([from, to]) => at >= from && at < to),
+  ).length;
 }
 
 /**
- * Arrays that are iterated with an `rm` over THEIR OWN elements.
+ * Arrays that are iterated with an `rm` over THEIR OWN elements, and the spans
+ * of the iteration bodies that do the removing.
  *
  * @param {string} blanked
- * @returns {Set<string>}
+ * @returns {{ names: Set<string>, spans: [number, number][] }}
  */
 function drainedRegistries(blanked) {
   /** @type {Set<string>} */
-  const drained = new Set();
+  const names = new Set();
+  /** @type {[number, number][]} */
+  const spans = [];
 
   // `for (const d of tempDirs) rmSync(d, …)` — the shape in
   // `e2e-deploy.port-ownership.test.ts` and `compat-window-fingerprint.test.ts`.
@@ -561,12 +585,14 @@ function drainedRegistries(blanked) {
     /\bfor\s*\(\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s+of\s+([A-Za-z_$][\w$]*)\s*\)/g,
   )) {
     const [element, registry] = [m[1], m[2]];
+    const [from, to] = bodySpanAfter(blanked, m.index + m[0].length);
     if (
-      removalFirstArgs(bodyAfter(blanked, m.index + m[0].length)).some((a) =>
-        removesBindingItself(a, element),
+      removalFirstArgs(blanked.slice(from, to)).some(({ arg }) =>
+        removesBindingItself(arg, element),
       )
     ) {
-      drained.add(registry);
+      names.add(registry);
+      spans.push([from, to]);
     }
   }
 
@@ -579,33 +605,42 @@ function drainedRegistries(blanked) {
     const close = matchParen(blanked, open);
     if (close === -1 || !element) continue;
     if (
-      removalFirstArgs(blanked.slice(open, close + 1)).some((a) => removesBindingItself(a, element))
+      removalFirstArgs(blanked.slice(open, close + 1)).some(({ arg }) =>
+        removesBindingItself(arg, element),
+      )
     ) {
-      drained.add(m[1]);
+      names.add(m[1]);
+      spans.push([open, close + 1]);
     }
   }
-  return drained;
+  return { names, spans };
 }
 
 /**
- * The statement or block that follows `index` — a loop's body.
+ * The ABSOLUTE span of the statement or block that follows `index` — a loop's
+ * body. Absolute rather than a slice, because the caller needs to exclude these
+ * offsets from direct-removal credit.
  *
  * @param {string} blanked
  * @param {number} index
+ * @returns {[number, number]}
  */
-function bodyAfter(blanked, index) {
+function bodySpanAfter(blanked, index) {
   const rest = blanked.slice(index);
   const braceAt = rest.search(/\S/);
-  if (rest[braceAt] !== '{') return rest.split(';')[0];
+  if (rest[braceAt] !== '{') {
+    const end = rest.indexOf(';');
+    return [index, end === -1 ? blanked.length : index + end + 1];
+  }
   let depth = 0;
   for (let i = braceAt; i < rest.length; i++) {
     if (rest[i] === '{') depth++;
     else if (rest[i] === '}') {
       depth--;
-      if (depth === 0) return rest.slice(braceAt, i + 1);
+      if (depth === 0) return [index + braceAt, index + i + 1];
     }
   }
-  return rest;
+  return [index, blanked.length];
 }
 
 /**

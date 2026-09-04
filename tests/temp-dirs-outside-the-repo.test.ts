@@ -55,9 +55,11 @@
  * `tests/scratch-space-exceptions.json` are the deliberate opposite — a
  * ratchet over a measured population, asserted in BOTH directions so an entry
  * that stops being needed reds the guard instead of rotting in place. The write
- * licence names the DESTINATIONS, not a number — a count licences "three writes
- * in this file", which substitution satisfies — and the leak ceiling is per file
- * and per count, so a new leak inside an already-listed file reds too. A
+ * licence is a MULTISET of destinations — a count alone licences "three writes
+ * in this file", which substitution satisfies, and a destination set alone
+ * licences a spelling however many times it appears, so duplication rode free —
+ * and the leak ceiling is per file and per count, so a new leak inside an
+ * already-listed file, including one reusing a binding name already there, reds. A
  * file-global exception would make the one file already allowed to write into
  * the checkout the safest place in the repo to put the next such write.
  * The `unremovedTempDirs` burn-down is tracked in #939.
@@ -203,14 +205,24 @@ describe('a spec writes its scratch OUTSIDE the checkout (#918)', () => {
   it('no spec writes into the checkout', () => {
     const offenders = specFiles()
       .flatMap((f) => {
-        // TARGET-PINNED, not count-pinned and not file-global. A count licences
-        // "three writes in this file", which SUBSTITUTION satisfies: replacing
-        // the three legitimate fixture writes with three `tests/.a.tmp.ts`
-        // writes kept the guard green. The licence names the destinations.
-        const licensed = new Set(exceptions.repoRootedWrites[f]?.writes ?? []);
+        // A MULTISET of destinations — both halves, because each alone has a
+        // hole. A COUNT alone licences "three writes in this file", which
+        // SUBSTITUTION satisfies: swapping the three legitimate fixture writes
+        // for three `tests/.a.tmp.ts` writes stayed green. A destination SET
+        // alone licences a spelling however many times it appears, so
+        // DUPLICATING a licensed write rode free. Pin both.
+        const budget = new Map<string, number>();
+        for (const w of exceptions.repoRootedWrites[f]?.writes ?? []) {
+          budget.set(w, (budget.get(w) ?? 0) + 1);
+        }
         return repoRootedWrites(readFileSync(resolve(repoRoot, f), 'utf8'))
           .map(render)
-          .filter((w) => !licensed.has(w))
+          .filter((w) => {
+            const left = budget.get(w) ?? 0;
+            if (left === 0) return true;
+            budget.set(w, left - 1);
+            return false;
+          })
           .map((w) => `${f}: ${w}`);
       })
       .sort();
@@ -318,12 +330,19 @@ describe('a spec writes its scratch OUTSIDE the checkout (#918)', () => {
       expect(existsSync(resolve(repoRoot, file)), `${file} is gone; drop its exception`).toBe(true);
       expect(reason.length, `${file}'s exception carries no reason`).toBeGreaterThan(40);
       const live = repoRootedWrites(readFileSync(resolve(repoRoot, file), 'utf8')).map(render);
-      // Both directions. The offender check above catches a write the licence
-      // does NOT name; this catches a licence the file no longer contains —
-      // which is what a SUBSTITUTION looks like from the other side, and what
-      // stops the list rotting into permission for whatever lands here later.
+      // Both directions, and as a MULTISET. The offender check above catches a
+      // write the licence does not cover; this catches a licence the file no
+      // longer contains — which is what a SUBSTITUTION looks like from the other
+      // side — and, by consuming one live write per licensed entry, a licence
+      // that claims more copies than the file actually has.
+      const remaining = [...live];
       expect(
-        writes.filter((w) => !live.includes(w)),
+        writes.filter((w) => {
+          const i = remaining.indexOf(w);
+          if (i === -1) return true;
+          remaining.splice(i, 1);
+          return false;
+        }),
         `${file} no longer performs these licensed write(s). Delete them from the exception ` +
           'rather than leaving a licence nobody needs — a stale entry is a free pass for the ' +
           'next write that happens to be spelled the same way',
@@ -410,26 +429,54 @@ describe('a temp directory is REMOVED, not just correctly placed (D9, #880)', ()
     ).toEqual([]);
   });
 
-  it('enrols in a registry PER SITE, on a real registry file', () => {
+  it('enrols in a registry PER SITE, on a real registry file, under the COLLIDING name', () => {
     // Asserted against the tree, not a synthetic string: the synthetic vectors
     // below all passed while the file-global exemption was live, because they
-    // never contained an UNREGISTERED sibling. Five unregistered `dir` leaks
-    // appended to a genuinely-drained file reported zero.
+    // never contained an UNREGISTERED sibling.
+    //
+    // And the appended name is the DRAIN ELEMENT's name on purpose. This file
+    // drains with `for (const d of tempDirs) rmSync(d, …)`, so `d` is the one
+    // name whose leak the drain body's own `rmSync` could credit as a direct
+    // removal — and the earlier version of this check appended `dir`, the single
+    // name that could not expose it. Twelve file/name pairs corpus-wide sat on
+    // that collision.
     const file = 'tests/e2e-deploy.port-ownership.test.ts';
     const source = readFileSync(resolve(repoRoot, file), 'utf8');
     expect(
-      unpairedTempDirs(source),
-      `${file} is the real drained-registry fixture for this check — if it stopped using ` +
-        '`for (const d of tempDirs) rmSync(d, …)`, repoint the check',
-    ).toEqual([]);
-    const appended = Array.from(
-      { length: 5 },
-      (_, i) => `const dir = mkdtempSync(join(tmpdir(), 'knext-unregistered-${i}-'));`,
-    ).join('\n');
+      source,
+      `${file} is the real drained-registry fixture for this check — if it stopped draining ` +
+        'with `for (const d of tempDirs) rmSync(d, …)`, repoint the check and the name below',
+    ).toContain('for (const d of tempDirs) rmSync(d,');
+    expect(unpairedTempDirs(source)).toEqual([]);
+
+    for (const name of ['d', 'dir']) {
+      const appended = Array.from(
+        { length: 5 },
+        (_, i) => `const ${name} = mkdtempSync(join(tmpdir(), 'knext-unregistered-${i}-'));`,
+      ).join('\n');
+      expect(
+        unpairedTempDirs(`${source}\n${appended}\n`),
+        `five unregistered creations named \`${name}\` — one enrolment cannot discharge them, ` +
+          "and the drain's own rm is credited per enrolment, not per name",
+      ).toHaveLength(5);
+    }
+  });
+
+  it("does not let the drain's own rm double as a direct removal", () => {
+    const drain = 'afterAll(() => { for (const d of temps) rmSync(d, { recursive: true }); });';
+    // `d` is the drain element's name. Its `rmSync(d)` is credited ONCE per
+    // enrolment; counting it again here would acquit an unenrolled creation
+    // that merely shares the name.
     expect(
-      unpairedTempDirs(`${source}\n${appended}\n`),
-      'one `temps.push(dir)` cannot discharge five creations that were never pushed',
-    ).toHaveLength(5);
+      unpairedTempDirs(`const temps = [];\nconst d = mkdtempSync(join(tmpdir(), 'x-'));\n${drain}`),
+    ).toHaveLength(1);
+    // …while a real removal OUTSIDE the drain body still credits.
+    expect(
+      unpairedTempDirs(
+        `const temps = [];\nconst d = mkdtempSync(join(tmpdir(), 'x-'));\n` +
+          `rmSync(d, { recursive: true });\n${drain}`,
+      ),
+    ).toEqual([]);
   });
 
   it('does not treat an unrelated rm as draining the registry', () => {
