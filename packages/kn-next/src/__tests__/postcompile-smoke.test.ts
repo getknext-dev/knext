@@ -19,7 +19,7 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import type { ChildProcess } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { chmodSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -28,6 +28,7 @@ import {
     keepErrorsNonFatal,
     PostCompileSmokeError,
     runPostCompileSmoke,
+    terminate,
 } from "../cli/postcompile-smoke";
 import { USAGE_ERROR_CODE } from "../cli/shared";
 
@@ -216,6 +217,24 @@ describe("#894 a process that is already gone is not a drain failure", () => {
             ),
         ).toBeUndefined();
     });
+
+    it("classifies an ALREADY-DEAD child as 'early', without waiting", async () => {
+        // Deterministic where the end-to-end case cannot be: the child is
+        // reaped BEFORE terminate() is called, so the already-exited branch is
+        // the only one reachable. Without that branch this falls to the timer —
+        // 5 s here — which is precisely the defect (budget burned, then the
+        // wrong verdict). The integration case below is race-tolerant by
+        // necessity and therefore cannot pin this.
+        const dead = spawn(process.execPath, ["-e", "process.exit(7)"]);
+        await new Promise((r) => dead.once("exit", r));
+
+        const startedAt = Date.now();
+        const outcome = await terminate(dead, 5_000);
+
+        expect(outcome.kind).toBe("early");
+        expect(outcome).toMatchObject({ code: 7 });
+        expect(Date.now() - startedAt).toBeLessThan(1_000);
+    }, 30_000);
 
     it("never burns the term budget on a child that stopped by itself", async () => {
         // The integration half, asserting the property that holds either way the

@@ -347,6 +347,27 @@ describe("#894 the smoke runs a HOST-arch binary", () => {
         expect(hostSmokeArch("darwin", "x64")).toBe("darwin-x64");
     });
 
+    it("never advertises the smoke-only targets as shippable", () => {
+        // The `-gnu` keys are glibc-linked; the shipped alpine image cannot run
+        // one at all. Listing them in the "unknown arch" help is an invitation
+        // to compile one and put it in the image, which fails only at
+        // `docker run` on a cluster.
+        const { compileArgv } = __knextRealVinext;
+        let message = "";
+        try {
+            compileArgv("linux-riscv64", "e.mjs", "out");
+        } catch (err) {
+            message = (err as Error).message;
+        }
+        expect(message).toContain("linux-x64");
+        const shippableLine = message.split("\n")[0];
+        expect(shippableLine).not.toContain("gnu");
+        // The other half: they must still be NAMED somewhere, with the reason —
+        // silently omitting them makes the next reader think they do not exist.
+        expect(message).toContain("linux-x64-gnu");
+        expect(message).toMatch(/smoke/i);
+    });
+
     it("refuses a host it cannot compile for rather than guessing", () => {
         expect(() => hostSmokeArch("win32", "x64")).toThrow(/smoke/i);
         expect(() => hostSmokeArch("linux", "ppc64")).toThrow(/smoke/i);

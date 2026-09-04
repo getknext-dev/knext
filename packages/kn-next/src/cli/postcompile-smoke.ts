@@ -433,7 +433,7 @@ export type TerminateOutcome =
  * then reported "still running after SIGTERM" — the exact opposite of the truth,
  * under the wrong obligation, at the cost of the budget.
  */
-function terminate(
+export function terminate(
     child: ChildProcess,
     timeoutMs: number,
 ): Promise<TerminateOutcome> {
