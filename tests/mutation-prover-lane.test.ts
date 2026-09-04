@@ -14,6 +14,8 @@ import { basename, join, resolve } from 'node:path';
 import { parse } from 'yaml';
 import { blankNonCode } from '../scripts/lib/blank-non-code.mjs';
 import {
+  activeGuardProverExemptions,
+  activeProverAuditExemptions,
   auditAnchorLiveness,
   auditProverSource,
   auditRunnerResolution,
@@ -21,8 +23,10 @@ import {
   codeStringLiterals,
   discoverProvers,
   evaluateProverRun,
+  GUARD_PROVER_EXEMPTIONS,
   isSharedMutationDriver,
   mutatesViaHarness,
+  PROVER_AUDIT_EXEMPTIONS,
   PROVER_RE,
   proverPathBindings,
   RESOLVER_DEFINITION_FILE,
@@ -610,29 +614,94 @@ describe('#912 a prover whose anchors no longer match its subjects is a PR-time 
       (n, p) => n + auditAnchorLiveness(read(p.absPath), readTarget).resolved.length,
       0,
     );
-    // MEASURED, not aspirational: 14 anchors resolve today, across the provers
-    // that call `mutate(PATH, 'literal', …)` inline. The table-driven ones pass
-    // their anchor to `mutate` as a parameter, which no static pass can follow
-    // without evaluating the table — see the module docs, and the SUBJECT
-    // EXISTENCE check below, which does reach them.
+    // MEASURED on the tree, and RE-measured twice. Round 1 of this comment said
+    // "14 anchors resolve today" when the real figure was 20 — written before this
+    // branch added a prover and never re-derived. Round 2 raised it to 45, after
+    // review found the driver shape unreadable and the extractors were taught to
+    // read it (+16) and to follow const-valued anchors (+9).
     //
-    // It was 22 before this audit was written, and the difference is the point:
-    // ten of those anchors were DEAD (`{{ standalonePrefix }}` text ADR-0048
-    // deleted), and retiring the seven with no vinext-era subject is what the
-    // audit was for. A floor that had been set to "keep the old number" would
-    // have made honest retirement the thing that reds.
+    // TODAY, and these are the numbers the PR body must match: 45 anchors and 24
+    // read-subjects across 23 provers; 9 provers are anchor-covered, 16 have at
+    // least one audited subject, and the 7 that have neither each carry a DATED
+    // exemption in PROVER_AUDIT_EXEMPTIONS. "The rest are covered by subject
+    // existence" was the round-1 claim and it was false for eleven of them.
     //
-    // The floor is what stops the extractor rotting: an extractor that quietly
-    // parses nothing reports zero dead anchors and reads exactly like a clean
-    // tree, which is the defect shape this whole file is about.
-    expect(total).toBeGreaterThanOrEqual(12);
+    // It was 22 before this audit existed. Ten of those were DEAD
+    // (`{{ standalonePrefix }}` text ADR-0048 deleted); retiring the seven with
+    // no vinext-era subject is what the audit was FOR, so a floor set to "keep
+    // the old number" would have made honest retirement the thing that reds.
+    //
+    // The floor stops the extractor rotting: one that quietly parses nothing
+    // reports zero dead anchors and reads exactly like a clean tree.
+    expect(total).toBeGreaterThanOrEqual(40);
+  });
+
+  it('EVERY prover resolves at least one anchor or one read-subject', () => {
+    // THE REVIEW FINDING (#927 round 1), and the reason the aggregate floor
+    // above is not enough on its own.
+    //
+    // Four provers on this branch drive their mutations through
+    // `createGuardProver({ subjects: { … } })`, which passes paths as
+    // OBJECT-LITERAL VALUES rather than `const X = join(…)`. Both extractors
+    // were blind to that shape, so all four reported anchors=0 AND bindings=0 —
+    // completely unaudited — while the aggregate floor stayed comfortably green
+    // on the other provers' 20. Repointing one of them at a DELETED file left
+    // this whole file 120/120 green.
+    //
+    // That is the #912 defect class reintroduced by the fix for #912: the
+    // cheapest path through the lane was the unguarded one. An aggregate cannot
+    // see a hole in one member, so this asserts PER PROVER. A new prover in a
+    // shape neither extractor understands now reds on arrival instead of being
+    // silently exempt.
+    const excused = activeProverAuditExemptions();
+    const unaudited: string[] = [];
+    const audited: string[] = [];
+    for (const p of provers) {
+      const src = read(p.absPath);
+      const anchors = auditAnchorLiveness(src, readTarget).resolved.length;
+      const bindings = proverPathBindings(src).length;
+      if (anchors === 0 && bindings === 0) unaudited.push(p.relPath);
+      else audited.push(p.relPath);
+    }
+    const unexcused = unaudited.filter((r) => !excused.has(r));
+    expect(
+      unexcused,
+      'these provers are invisible to BOTH extractors and carry no dated exemption — a dead ' +
+        `subject in them would report nothing:\n  ${unexcused.join('\n  ')}`,
+    ).toEqual([]);
+
+    // FAIL CLOSED THE OTHER WAY. An exemption for a prover that IS now audited
+    // is stale text, and stale text in an exemption list is how a carve-out
+    // outlives its reason — the same defect the `expires` field exists for,
+    // arriving from the other direction.
+    const stale = [...excused].filter((r) => audited.includes(r));
+    expect(
+      stale,
+      `these provers ARE audited now; drop their exemption:\n  ${stale.join('\n  ')}`,
+    ).toEqual([]);
+  });
+
+  it('every audit exemption names a prover that exists, and has not lapsed', () => {
+    // A lapsed entry silently stops excusing, which is correct — but an entry
+    // naming a DELETED prover excuses nothing and hides that fact, so both
+    // directions are checked. `activeProverAuditExemptions()` throws on a
+    // malformed entry, which is the third direction.
+    expect(PROVER_AUDIT_EXEMPTIONS.length).toBeGreaterThan(0);
+    const known = new Set(provers.map((p) => p.relPath));
+    for (const e of PROVER_AUDIT_EXEMPTIONS) {
+      expect(known.has(e.prover), `${e.prover} is exempted but does not exist`).toBe(true);
+    }
+    expect(
+      activeProverAuditExemptions().size,
+      'every exemption has already lapsed — they are doing nothing and should be deleted',
+    ).toBeGreaterThan(0);
   });
 
   it('every file a prover READS still exists', () => {
-    // The half that reaches the table-driven provers. `mutation-prove-release-lane.mjs`
-    // bound `pnpm-lock.yaml` and ENOENTed on every run from the day the
-    // workspace moved to bun — its anchors never got far enough to be wrong,
-    // because the read failed first. No table evaluation is needed to ask this.
+    // The half that reaches the provers whose anchors are not statically
+    // resolvable. `mutation-prove-release-lane.mjs` bound `pnpm-lock.yaml` and
+    // ENOENTed on every run from the day the workspace moved to bun — its
+    // anchors never got far enough to be wrong, because the read failed first.
     const findings: string[] = [];
     let bindings = 0;
     for (const p of provers) {
@@ -647,6 +716,89 @@ describe('#912 a prover whose anchors no longer match its subjects is a PR-time 
       8,
     );
     expect(findings, findings.join('\n  ')).toEqual([]);
+  });
+
+  describe('#927 the driver shape is audited, not exempt', () => {
+    /**
+     * `createGuardProver({ repoRoot, spec, subjects: { key: 'path' } })` plus a
+     * table of `{ subject: 'key', anchor: '…' }` is the shape four provers on
+     * this branch use. Review measured it invisible to both extractors. These
+     * cases pin the fix, in both directions.
+     */
+    const DRIVER_PROVER = [
+      "import { createGuardProver } from './lib/guard-prover.mjs';",
+      'const prover = createGuardProver({',
+      '  repoRoot: REPO_ROOT,',
+      "  spec: 'tests/x.test.ts',",
+      '  subjects: {',
+      "    matrix: 'docs/thing.md',",
+      '  },',
+      '});',
+      'const MUTATIONS = [',
+      '  {',
+      "    id: 'M1',",
+      "    expect: 'red',",
+      "    subject: 'matrix',",
+      "    anchor: 'the anchor text',",
+      "    replacement: 'other',",
+      '  },',
+      '];',
+    ].join('\n');
+
+    it('resolves an anchor reached through the subjects map', () => {
+      const { resolved, findings } = auditAnchorLiveness(
+        DRIVER_PROVER,
+        () => 'a file containing the anchor text once\n',
+      );
+      expect(resolved).toEqual([{ file: 'docs/thing.md', anchor: 'the anchor text', count: 1 }]);
+      expect(findings).toEqual([]);
+    });
+
+    it('a DEAD anchor in the driver shape IS a finding', () => {
+      const { findings } = auditAnchorLiveness(DRIVER_PROVER, () => 'nothing of the sort\n');
+      expect(findings.join(' ')).toMatch(/0 time\(s\)/);
+    });
+
+    it('a DELETED subject file IS a finding — the case that stayed green', () => {
+      // Measured by review: repointing native-integrity's subject at a deleted
+      // file left the lane 120/120 green. This is that exact scenario.
+      const { findings } = auditAnchorLiveness(DRIVER_PROVER, () => undefined);
+      expect(findings.join(' ')).toMatch(/does not exist/);
+    });
+
+    it('the subjects map is reported as a read-binding too', () => {
+      // Belt and braces: even if a prover's anchors were unresolvable, its
+      // subjects must still be existence-checked.
+      expect(proverPathBindings(DRIVER_PROVER).map((b) => b.path)).toContain('docs/thing.md');
+    });
+
+    it('a COMMENT inside the subjects object does not hide it', () => {
+      // Measured, not anticipated: matching the key on RAW source made an entry
+      // beginning with `//` fail the key regex, and the prover carrying that
+      // comment went silently unaudited. The per-prover check above caught it.
+      const src = [
+        'createGuardProver({',
+        '  subjects: {',
+        '    // why this is the only subject',
+        "    matrix: 'docs/thing.md',",
+        '  },',
+        '});',
+      ].join('\n');
+      expect(proverPathBindings(src).map((b) => b.path)).toContain('docs/thing.md');
+    });
+
+    it('a subject named by an IDENTIFIER resolves, not just a literal', () => {
+      // `subjects: { guard: SPEC }` is the shape in the tree; following only
+      // string literals would leave it silently unaudited.
+      const src = [
+        "const SPEC = 'tests/y.test.ts';",
+        'const prover = createGuardProver({',
+        '  subjects: { guard: SPEC },',
+        '});',
+        "const M = [{ subject: 'guard', anchor: 'zzz', replacement: 'q' }];",
+      ].join('\n');
+      expect(proverPathBindings(src).map((b) => b.path)).toContain('tests/y.test.ts');
+    });
   });
 
   it.each(provers.map((p) => p.relPath))('%s: every resolved anchor is live', (relPath) => {
@@ -714,5 +866,42 @@ describe('#912 a prover whose anchors no longer match its subjects is a PR-time 
       () => 'whatever',
     );
     expect(unresolved.length).toBeGreaterThan(0);
+  });
+});
+
+describe('#927 SE-3 — every sprint-1 guard has a prover OR a dated exemption', () => {
+  /**
+   * The review finding this closes: four of sprint 1's nine guards shipped
+   * neither, and the REASONS lived only in a PR body. A PR body becomes a squash
+   * message, and the issues it cited are closed — so the reasoning would survive
+   * nowhere anyone would look, which is the same "recorded in prose, enforced by
+   * nobody" shape the coverage exception was converted out of.
+   *
+   * The exemptions now live in the tree with expiries. This asserts they are
+   * real, live, and pointed at files that exist.
+   */
+  it('each exempted guard is a real spec file', () => {
+    expect(GUARD_PROVER_EXEMPTIONS.length).toBe(4);
+    for (const e of GUARD_PROVER_EXEMPTIONS) {
+      expect(existsSync(resolve(REPO_ROOT, e.guard)), `${e.guard} does not exist`).toBe(true);
+    }
+  });
+
+  it('every exemption carries a justification, a date and a live clock', () => {
+    // `activeGuardProverExemptions` throws on a malformed entry — unknown key,
+    // missing `expires`, an expiry on or before `added`, a duplicate subject.
+    expect(activeGuardProverExemptions().size).toBe(GUARD_PROVER_EXEMPTIONS.length);
+  });
+
+  it('EXPIRY FAILS CLOSED — read past the dates, nothing is excused', () => {
+    expect(activeGuardProverExemptions(new Date('2099-01-01T00:00:00Z')).size).toBe(0);
+  });
+
+  it('every exemption points at the tracking issue', () => {
+    // Without a live issue number the expiry has nowhere to land: the entry
+    // lapses, someone re-dates it, and no work is ever scheduled.
+    for (const e of GUARD_PROVER_EXEMPTIONS) {
+      expect(`${e.note ?? ''}`, `${e.guard} cites no tracking issue`).toMatch(/#\d+/);
+    }
   });
 });

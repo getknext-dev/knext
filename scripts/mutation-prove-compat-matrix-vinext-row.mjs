@@ -131,8 +131,11 @@ const prover = createGuardProver({
   repoRoot: REPO_ROOT,
   spec: SPEC,
   subjects: {
+    // Only the DOCUMENT. Round 1 also declared `guard: SPEC`, left over from a
+    // mutation of the guard's own allowlist that turned out to be invalid (see
+    // the note above M3) — a subject no mutation used, i.e. exactly the dead
+    // declaration the #927 liveness audit exists to surface.
     matrix: 'docs/compat-matrix.md',
-    guard: SPEC,
   },
 });
 

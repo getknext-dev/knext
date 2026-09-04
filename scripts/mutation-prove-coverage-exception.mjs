@@ -44,6 +44,12 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SPEC = 'tests/coverage-gate.test.ts';
 const POLICY = join(REPO_ROOT, 'scripts/lib/coverage-policy.mjs');
 const CHECKER = join(REPO_ROOT, 'scripts/check-coverage.mjs');
+// #927: the unknown-key and expiry rules moved into the SHARED dated-exemption
+// reader, because the prover lane needed the same two rules and a second copy of
+// a check whose failure mode is silent in both directions is the
+// copy-instead-of-share defect this repo keeps fixing. M2/M3 follow their
+// subject rather than being deleted — the claims they prove are unchanged.
+const SHARED = join(REPO_ROOT, 'scripts/lib/dated-exemptions.mjs');
 
 const git = (...args) => execFileSync('git', args, { cwd: REPO_ROOT, encoding: 'utf8' });
 
@@ -82,6 +88,7 @@ console.log('── baseline: the unmutated guard is green');
 assertTreeClean('baseline');
 const policySnap = snapshot(POLICY);
 const checkerSnap = snapshot(CHECKER);
+const sharedSnap = snapshot(SHARED);
 if (runSpec(SPEC) !== 0) {
   console.error(
     'ABORT: the guard is not green before any mutation. Nothing below would mean anything.',
@@ -120,26 +127,26 @@ assertTreeClean('after M1');
 
 console.log('── planting M2: expiry stops failing closed (lapsed entries keep suppressing)');
 mutate(
-  policySnap,
-  'if (new Date(`${entry.expires}T00:00:00Z`) <= now) continue; // lapsed — no longer suppresses',
+  sharedSnap,
+  'if (new Date(`${entry.expires}T00:00:00Z`) <= now) continue; // lapsed',
   '// lapsed entries deliberately keep suppressing (the mutation)',
 );
 check('M2', 'a lapsed exception must stop excusing its metric', 1, runSpec(SPEC));
 recordMutation();
-restore(policySnap);
+restore(sharedSnap);
 assertTreeClean('after M2');
 
 console.log('── planting M3: an unknown key is IGNORED instead of throwing');
 // The quietest way to neuter the clock: `expiress` parses as an entry with no
 // expiry, so it never lapses while looking exactly like one that does.
 mutate(
-  policySnap,
-  'const unknown = Object.keys(entry).filter((k) => !EXCEPTION_KEYS.has(k));',
+  sharedSnap,
+  'const unknown = Object.keys(entry).filter((k) => k !== field && !ALLOWED_KEYS.has(k));',
   'const unknown = [];',
 );
 check('M3', "a typo'd key must THROW, never be dropped", 1, runSpec(SPEC));
 recordMutation();
-restore(policySnap);
+restore(sharedSnap);
 assertTreeClean('after M3');
 
 console.log('── planting M4: the GATE SCRIPT stops consulting the exceptions');

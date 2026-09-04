@@ -1,3 +1,4 @@
+import { activeExemptions } from './dated-exemptions.mjs';
 /**
  * The coverage policy — ONE definition, read by both consumers (#884).
  *
@@ -144,8 +145,6 @@ export const PER_PATH_THRESHOLDS = {
 /** Every metric the gate is expected to have an opinion about. */
 export const GATED_METRICS = Object.freeze(['lines', 'functions', 'branches', 'statements']);
 
-const EXCEPTION_KEYS = new Set(['metric', 'justification', 'added', 'expires', 'note']);
-
 /**
  * The two metrics excused today, with the clock that forces the re-decision.
  *
@@ -186,40 +185,11 @@ export const COVERAGE_METRIC_EXCEPTIONS = Object.freeze([
  * @returns {Set<string>}
  */
 export function activeMetricExceptions(now = new Date(), entries = COVERAGE_METRIC_EXCEPTIONS) {
-  const active = new Set();
-  for (const entry of entries) {
-    if (!entry?.metric) {
-      throw new Error(`coverage exception: an entry has no \`metric\`: ${JSON.stringify(entry)}`);
-    }
-    const unknown = Object.keys(entry).filter((k) => !EXCEPTION_KEYS.has(k));
-    if (unknown.length > 0) {
-      throw new Error(
-        `coverage exception: ${entry.metric} has unknown key(s) [${unknown.join(', ')}] — allowed ` +
-          `keys are [${[...EXCEPTION_KEYS].join(', ')}]. A misspelled \`expires\` never expires.`,
-      );
-    }
-    if (typeof entry.justification !== 'string' || entry.justification.length < 40) {
-      throw new Error(
-        `coverage exception: ${entry.metric} has no substantive \`justification\` — "we do not ` +
-          'measure it" is the thing being excused, not the reason',
-      );
-    }
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(entry.added ?? '')) {
-      throw new Error(`coverage exception: ${entry.metric} has no valid \`added\` date`);
-    }
-    // REQUIRED, unlike the security allowlist's optional form. That one covers
-    // findings that can be permanently accepted; a metric leaving the gate never
-    // can be, so an entry with no clock is rejected outright.
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(entry.expires ?? '')) {
-      throw new Error(
-        `coverage exception: ${entry.metric} has no valid \`expires\` date — an exception with no ` +
-          'clock is not an exception, it is a silent removal',
-      );
-    }
-    if (new Date(`${entry.expires}T00:00:00Z`) <= now) continue; // lapsed — no longer suppresses
-    active.add(entry.metric);
-  }
-  return active;
+  // Delegated to the shared reader (#927). This function used to carry its own
+  // copy of the unknown-key / required-`expires` rules, and the prover lane then
+  // needed the same rules — two copies of a check whose failure mode is silent in
+  // both directions is the copy-instead-of-share defect this repo keeps fixing.
+  return activeExemptions(entries, { field: 'metric', now });
 }
 
 /**

@@ -869,7 +869,7 @@ jobs:
     #      node target (NITRO_PRESET=node) behind Dockerfile.oke. adapterPath /
     #      adapter-key drift is NOT covered here: this app no longer builds
     #      through next.config at all. (This line used to locate that coverage
-    #      in `seam-alive` against file-manager. #899 RETIRED that gate — see the
+    #      in `seam-alive` against file-manager. #885 RETIRED that gate — see the
     #      note at the top of this file — so the sentence named a job that does
     #      not run. #899 recorded the honest position: no replacement gate
     #      asserts single-instantiation on the binary.)
@@ -946,7 +946,7 @@ jobs:
       #
       # This used to reassure that adapter-key coverage was "NOT lost with them"
       # because `seam-alive` built apps/file-manager with `next build --webpack`
-      # and asserted the standalone artifact. #899 RETIRED that gate, so the
+      # and asserted the standalone artifact. #885 RETIRED that gate, so the
       # reassurance pointed at nothing. Corrected rather than deleted, because it
       # was load-bearing for the decision below: under ADR-0048 there is no
       # standalone artifact to assert and `experimental.adapterPath` is a

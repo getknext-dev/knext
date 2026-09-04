@@ -10,6 +10,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { blankNonCode } from './blank-non-code.mjs';
+import { activeExemptions } from './dated-exemptions.mjs';
 import { parseProverSummary } from './prover-report.mjs';
 
 /** Every prover file lives here and matches this shape. Glob, never a list. */
@@ -600,8 +601,14 @@ function decodeLiteral(raw) {
  * @param {string} blanked
  * @param {{ start: number, end: number }} span
  */
-function literalValue(source, blanked, span) {
+function literalValue(source, blanked, span, consts) {
   const view = blanked.slice(span.start, span.end);
+  // An anchor hoisted into a `const` is the common spelling for one that is
+  // reused across mutations — which makes it the anchor MOST worth auditing, and
+  // the one a literals-only pass silently skipped (#927). Resolved from the
+  // string-constant map when the whole expression is a bare identifier.
+  const bare = /^\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*$/.exec(view);
+  if (bare && consts) return consts.get(bare[1]);
   const parts = [];
   let i = 0;
   while (i < view.length) {
@@ -619,6 +626,35 @@ function literalValue(source, blanked, span) {
     i = close + 1;
   }
   return parts.length ? parts.join('') : undefined;
+}
+
+/**
+ * Every `const NAME = 'literal'` (or `'a' + 'b'`) in the source (#927).
+ *
+ * Anchors are routinely hoisted into a constant when more than one mutation
+ * shares them — so the constant-valued anchors are, systematically, the ones
+ * covering the most mutations, and a literals-only pass skipped exactly those.
+ *
+ * @param {string} source
+ * @returns {Map<string, string>}
+ */
+function stringConsts(source) {
+  const blanked = blankNonCode(source);
+  const out = new Map();
+  const decl = /(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*/g;
+  for (let m = decl.exec(blanked); m; m = decl.exec(blanked)) {
+    let end = m.index + m[0].length;
+    let depth = 0;
+    for (; end < blanked.length; end++) {
+      const c = blanked[end];
+      if (c === '(' || c === '[' || c === '{') depth += 1;
+      else if (c === ')' || c === ']' || c === '}') depth -= 1;
+      else if (c === ';' && depth === 0) break;
+    }
+    const value = literalValue(source, blanked, { start: m.index + m[0].length, end });
+    if (typeof value === 'string') out.set(m[1], value);
+  }
+  return out;
 }
 
 /** Roots a prover joins from. Their value is the repo root, i.e. the empty prefix. */
@@ -686,6 +722,118 @@ function pathBindings(source) {
 }
 
 /**
+ * The `subjects: { key: 'repo/relative/path' }` map a driver-based prover
+ * declares (#927).
+ *
+ * WHY THIS EXISTS. Four provers drive their mutations through
+ * `createGuardProver({ repoRoot, spec, subjects })` and a table of
+ * `{ subject: 'key', anchor: '…' }` entries. Their paths are OBJECT-LITERAL
+ * VALUES, not `const X = join(…)`, so `pathBindings` — which only walks `const`
+ * declarations — saw none of them. Review measured the consequence: all four
+ * reported anchors=0 AND bindings=0, and repointing one at a DELETED file left
+ * the lane green.
+ *
+ * That is the #912 defect class reintroduced by the fix for #912. The cheapest
+ * path through the lane was the unguarded one, which is exactly the shape a new
+ * prover author would copy. So the shape is READ rather than exempted.
+ *
+ * Values may be a string literal or an identifier already resolved by
+ * `pathBindings` (`subjects: { guard: SPEC }` is in the tree), because
+ * following only literals would leave that spelling silently unaudited — the
+ * same half-a-scan this module keeps having to fix.
+ *
+ * @param {string} source
+ * @returns {Map<string, string>}
+ */
+export function proverSubjectPaths(source) {
+  const blanked = blankNonCode(source);
+  const consts = pathBindings(source);
+  const out = new Map();
+  const key = /(?<![.\w$])subjects\s*:\s*\{/g;
+  for (let m = key.exec(blanked); m; m = key.exec(blanked)) {
+    const span = argSpan(blanked, m.index + m[0].length - 1);
+    if (!span) continue;
+    for (const entry of splitArgs(blanked, span.start, span.end)) {
+      // The KEY is located on the BLANKED view and the VALUE sliced from the
+      // original. Matching both on raw source broke the moment a comment sat
+      // inside the object literal — `// Only the DOCUMENT…` made the entry start
+      // with `/`, the key regex failed, and the prover went silently unaudited.
+      // Caught by this file's own per-prover check, which is the argument for
+      // having it.
+      const view = blanked.slice(entry.start, entry.end);
+      const pair = /^(\s*)([A-Za-z_$][A-Za-z0-9_$]*)\s*:\s*/.exec(view);
+      if (!pair) continue;
+      const rhs = source.slice(entry.start + pair[0].length, entry.end).trim();
+      const lit = /^(['"])((?:[^\\]|\\.)*?)\1$/.exec(rhs);
+      const value = lit ? decodeLiteral(rhs) : consts.get(rhs);
+      if (typeof value === 'string' && value !== '') out.set(pair[2], value);
+    }
+  }
+  return out;
+}
+
+/**
+ * Every `{ subject: 'key', anchor: '…' }` entry in a driver-based mutation
+ * table, resolved against the `subjects` map (#927).
+ *
+ * Scoped to object literals carrying BOTH keys, so an unrelated `{ subject: … }`
+ * elsewhere cannot produce a phantom anchor.
+ *
+ * @param {string} source
+ * @param {Map<string, string>} subjects
+ * @returns {{ entries: Array<{file: string, anchor: string}>, unresolved: string[] }}
+ */
+function driverTableAnchors(source, subjects) {
+  const blanked = blankNonCode(source);
+  const consts = stringConsts(source);
+  const entries = [];
+  const unresolved = [];
+  const key = /(?<![.\w$])subject\s*:\s*/g;
+  for (let m = key.exec(blanked); m; m = key.exec(blanked)) {
+    // Walk out to the enclosing object literal, then read its `anchor:`.
+    let depth = 0;
+    let open = -1;
+    for (let i = m.index; i >= 0; i--) {
+      const c = blanked[i];
+      if (c === '}' || c === ')' || c === ']') depth += 1;
+      else if (c === '{' || c === '(' || c === '[') {
+        if (depth === 0) {
+          open = i;
+          break;
+        }
+        depth -= 1;
+      }
+    }
+    if (open === -1 || blanked[open] !== '{') continue;
+    const span = argSpan(blanked, open);
+    if (!span) continue;
+    let subjectKey;
+    let anchor;
+    for (const prop of splitArgs(blanked, span.start, span.end)) {
+      const text = source.slice(prop.start, prop.end);
+      const name = /^\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*:/.exec(text);
+      if (!name) continue;
+      const valueSpan = { start: prop.start + text.indexOf(':') + 1, end: prop.end };
+      if (name[1] === 'subject') {
+        const raw = source.slice(valueSpan.start, valueSpan.end).trim();
+        const lit = /^(['"])((?:[^\\]|\\.)*?)\1$/.exec(raw);
+        if (lit) subjectKey = decodeLiteral(raw);
+      } else if (name[1] === 'anchor') {
+        anchor = literalValue(source, blanked, valueSpan, consts);
+      }
+    }
+    if (subjectKey === undefined || anchor === undefined) continue;
+    const file = subjects.get(subjectKey);
+    if (file === undefined) {
+      unresolved.push(`subject ${JSON.stringify(subjectKey)} names no entry in the subjects map`);
+      continue;
+    }
+    entries.push({ file, anchor });
+  }
+  return { entries, unresolved };
+}
+
+/**
  * Audit one prover's anchors against the files they claim to anchor in.
  *
  * @param {string} source the prover's source
@@ -698,6 +846,7 @@ function pathBindings(source) {
 export function auditAnchorLiveness(source, readTarget) {
   const blanked = blankNonCode(source);
   const bindings = pathBindings(source);
+  const consts = stringConsts(source);
   const findings = [];
   const resolved = [];
   const unresolved = [];
@@ -709,7 +858,7 @@ export function auditAnchorLiveness(source, readTarget) {
     const args = splitArgs(blanked, span.start, span.end);
     if (args.length < 2) continue;
     const targetExpr = source.slice(args[0].start, args[0].end).trim();
-    const anchor = literalValue(source, blanked, args[1]);
+    const anchor = literalValue(source, blanked, args[1], consts);
     const file = bindings.get(targetExpr);
     if (anchor === undefined || file === undefined) {
       unresolved.push(
@@ -717,6 +866,27 @@ export function auditAnchorLiveness(source, readTarget) {
       );
       continue;
     }
+    const contents = readTarget(file);
+    if (contents === undefined) {
+      findings.push(`anchors in ${file}, which does not exist: ${JSON.stringify(anchor)}`);
+      continue;
+    }
+    const count = contents.split(anchor).length - 1;
+    resolved.push({ file, anchor, count });
+    if (count !== 1) {
+      findings.push(
+        `anchor occurs ${count} time(s) in ${file} (expected exactly 1): ${JSON.stringify(anchor.slice(0, 80))}`,
+      );
+    }
+  }
+
+  // The driver shape (#927), graded identically. Same findings, same `resolved`
+  // corpus — a prover is audited for what it DOES, not for which helper it uses
+  // to do it, and treating the two shapes differently is how one of them became
+  // the cheap unguarded path in the first place.
+  const table = driverTableAnchors(source, proverSubjectPaths(source));
+  unresolved.push(...table.unresolved);
+  for (const { file, anchor } of table.entries) {
     const contents = readTarget(file);
     if (contents === undefined) {
       findings.push(`anchors in ${file}, which does not exist: ${JSON.stringify(anchor)}`);
@@ -761,7 +931,164 @@ export function proverPathBindings(source) {
   const code = blankNonCode(source);
   const isRead = (name) =>
     new RegExp(`(?:readFileSync|snapshot)\\s*\\(\\s*${name}\\s*[,)]`).test(code);
-  return [...pathBindings(source)]
+  const out = [...pathBindings(source)]
     .filter(([name, path]) => path !== '' && !/\s/.test(path) && path.includes('.') && isRead(name))
     .map(([name, path]) => ({ name, path }));
+
+  // Every entry in a driver's `subjects` map is read-by-construction: the driver
+  // `snapshot()`s all of them before the first mutation, so a missing one throws
+  // on line one exactly like `pnpm-lock.yaml` did. No `isRead` heuristic is
+  // needed or wanted here — the shape itself is the guarantee.
+  for (const [name, path] of proverSubjectPaths(source)) {
+    if (!out.some((b) => b.path === path)) out.push({ name: `subjects.${name}`, path });
+  }
+  return out;
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * DATED EXEMPTIONS (#927)
+ *
+ * Two things in this lane are excused today, and both are excused the same way
+ * the coverage gate excuses a metric: with a justification, a date and a clock,
+ * read by the shared `dated-exemptions.mjs`. Neither is a permanent carve-out,
+ * and the difference between "exempt" and "forgotten" is the `expires` field.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Provers neither extractor can reach, and why.
+ *
+ * The #927 review found four provers invisible to BOTH the anchor pass and the
+ * subject-existence pass — the driver shape — and that is FIXED, not exempted.
+ * These seven are the pre-existing remainder: each builds its anchors at runtime
+ * (a mutation table of closures, a workflow re-serialised from parsed YAML, a
+ * shell fragment assembled from an imported token list), so there is no literal
+ * to resolve without evaluating the prover.
+ *
+ * WHAT THE EXEMPTION DOES NOT MEAN. It does not mean they are unproved — every
+ * one runs in the nightly with `declared == run`. It means the PR-TIME liveness
+ * audit cannot see them, so a dead anchor in one of them surfaces at nightly
+ * speed rather than at review speed. That is the pre-#912 status quo for these
+ * files, held deliberately and with a date on it rather than silently.
+ */
+export const PROVER_AUDIT_EXEMPTIONS = Object.freeze([
+  Object.freeze({
+    prover: 'scripts/mutation-prove-anonymous-install.mjs',
+    justification:
+      'Builds every anchor inside per-case closures over a fixture tree it creates at runtime; no ' +
+      'anchor exists as a literal in the source for a static pass to resolve.',
+    added: '2026-09-04',
+    expires: '2026-12-01',
+  }),
+  Object.freeze({
+    prover: 'scripts/mutation-prove-ci-blocking-gates.mjs',
+    justification:
+      'Delegates both mutation and running to runGateTest in ci-blocking-gate-proof.mjs, so the ' +
+      'anchors live in the shared helper rather than in the prover the lane discovers.',
+    added: '2026-09-04',
+    expires: '2026-12-01',
+  }),
+  Object.freeze({
+    prover: 'scripts/mutation-prove-compat-fail-on-red-teeth.mjs',
+    justification:
+      'Anchors are shell fragments assembled from shell-command-position.mjs token lists at ' +
+      'runtime — deliberately generated so a new token is covered without a new row, which is ' +
+      'the property that also makes them unresolvable statically.',
+    added: '2026-09-04',
+    expires: '2026-12-01',
+  }),
+  Object.freeze({
+    prover: 'scripts/mutation-prove-compat-lane-pointer.mjs',
+    justification:
+      'Mutates a workflow re-serialised from parsed YAML rather than by text anchor, so there is ' +
+      'no source literal to count occurrences of.',
+    added: '2026-09-04',
+    expires: '2026-12-01',
+  }),
+  Object.freeze({
+    prover: 'scripts/mutation-prove-entry-copy-parity.mjs',
+    justification:
+      'Iterates the runtime-entry copy list from runtime-entry-copies.mjs and mutates each by ' +
+      'computed offset; the subject set is derived, never named in this file.',
+    added: '2026-09-04',
+    expires: '2026-12-01',
+  }),
+  Object.freeze({
+    prover: 'scripts/mutation-prove-ledger-completeness.mjs',
+    justification:
+      'Anchors are built from ledger fixture JSON generated per case; the prover writes its own ' +
+      'subjects rather than reading tracked ones.',
+    added: '2026-09-04',
+    expires: '2026-12-01',
+  }),
+  Object.freeze({
+    prover: 'scripts/mutation-prove-publish-markers.mjs',
+    justification:
+      'Delegates to publish-markers-proof.mjs, which holds the anchors; the prover itself is a ' +
+      'thin driver with no literals.',
+    added: '2026-09-04',
+    expires: '2026-12-01',
+  }),
+]);
+
+/**
+ * Sprint-1 guards shipping WITHOUT a committed prover (SE-3), and why.
+ *
+ * SE-3 requires every new guard to ship a prover or a dated exemption. Four of
+ * sprint 1's nine have neither in the PR that introduced them; this is the
+ * exemption half, recorded in the tree rather than in a PR body — a PR body
+ * becomes a squash message, and the issues it cites are closed, so the reason
+ * would survive nowhere anyone looks. Tracked by #928.
+ */
+export const GUARD_PROVER_EXEMPTIONS = Object.freeze([
+  Object.freeze({
+    guard: 'packages/kn-next/src/__tests__/create-scaffold.test.ts',
+    justification:
+      '#896 scaffold cache-handler wiring. Its subject is templates/app/*.hbs, which concurrent ' +
+      "sprint-2 work owns; a prover anchored in another team's live diff is inert on arrival, " +
+      "which is #912's exact failure. Write it once the template work has landed.",
+    added: '2026-09-04',
+    expires: '2026-11-01',
+    note: 'Tracked by #928.',
+  }),
+  Object.freeze({
+    guard: 'examples/bun-exec/test/alpine-image.docker-e2e.test.ts',
+    justification:
+      '#897 SIGTERM drain on the shipped binary. Each mutation needs a docker build plus a ' +
+      'container boot, so the prover is only runnable where the alpine e2e already runs; ' +
+      'proving it on a host without docker would mean asserting on a skipped run.',
+    added: '2026-09-04',
+    expires: '2026-11-01',
+    note: 'Tracked by #928. Belongs in the alpine e2e lane, not the PR-time fleet.',
+  }),
+  Object.freeze({
+    guard: 'packages/kn-next/src/__tests__/cli-node-runtime.test.ts',
+    justification:
+      '#899 seam-guard retirement. The surviving assertions are NEGATIVE (the deleted files must ' +
+      'stay deleted); mutating a file back into existence proves the scan sees it, which ' +
+      'install-smoke.mjs already asserts on the packed artifact. Lowest marginal value of the nine.',
+    added: '2026-09-04',
+    expires: '2026-11-01',
+    note: 'Tracked by #928.',
+  }),
+  Object.freeze({
+    guard: 'packages/kn-next/src/__tests__/cache-handler-isr-staleness.test.ts',
+    justification:
+      '#906 ISR under vinext. Deferred for BUDGET, not conflict: the round-1 claim that a sibling ' +
+      'PR owned cache-handler.js was checked and is false, and saying so is the point — an ' +
+      'exemption resting on a wrong reason is worse than none. It is the strongest remaining ' +
+      'candidate and should be written first.',
+    added: '2026-09-04',
+    expires: '2026-11-01',
+    note: 'Tracked by #928. Highest priority of the four.',
+  }),
+]);
+
+/** Provers currently excused from the liveness audit. Throws on a malformed entry. */
+export function activeProverAuditExemptions(now = new Date()) {
+  return activeExemptions(PROVER_AUDIT_EXEMPTIONS, { field: 'prover', now });
+}
+
+/** Guards currently excused from SE-3's prover requirement. Throws on a malformed entry. */
+export function activeGuardProverExemptions(now = new Date()) {
+  return activeExemptions(GUARD_PROVER_EXEMPTIONS, { field: 'guard', now });
 }

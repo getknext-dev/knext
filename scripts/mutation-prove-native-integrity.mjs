@@ -139,8 +139,8 @@ prover.baseline();
 // because it is a real (small) finding rather than a mistake worth hiding:
 // changing the manifest's `version: 1` to `version: 99` reds NOTHING. The
 // declared schema version is written and never asserted, so a bump the `dlopen`
-// verifier does not understand would ship silently. Filed as a follow-up on
-// #907 rather than fixed here — widening #907's guard is not this prover's job,
+// verifier does not understand would ship silently. Filed as issue
+// #929 rather than fixed here — widening #907's guard is not this prover's job,
 // and inventing the assertion in order to have a canary would be writing the
 // test to fit the proof.
 prover.proveCanSeeRed({

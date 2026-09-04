@@ -243,11 +243,97 @@ describe('no surviving prose claims compat-smoke can skip a capability check', (
   const RUNNER = 'apps/file-manager/scripts/compat-smoke.mjs';
 
   /**
+   * A file's text as CONTIGUOUS BLOCKS, so a sentence spanning two comment lines
+   * is one string.
+   *
+   * Runs of consecutive comment-ish lines (`#`, `//`, ` * `) are joined with a
+   * space, their markers stripped; any other line stands alone. That is enough
+   * for the wrap this exists to catch without collapsing the whole file into one
+   * haystack, which would let an unrelated "compat-smoke" a hundred lines from
+   * an unrelated "skip()" read as a claim.
+   */
+  const commentBlocks = (text: string): string[] => {
+    const out: string[] = [];
+    let run: string[] = [];
+    const flush = () => {
+      if (run.length > 0) out.push(run.join(' '));
+      run = [];
+    };
+    for (const line of text.split('\n')) {
+      const comment = /^\s*(?:#|\/\/|\*)\s?(.*)$/.exec(line);
+      if (comment) {
+        run.push((comment[1] ?? '').trim());
+      } else {
+        flush();
+        out.push(line);
+      }
+    }
+    flush();
+    return out;
+  };
+
+  /**
+   * Every place a file CLAIMS compat-smoke can skip, as the text around the claim.
+   *
+   * Three rounds got this wrong in three different ways, so the reasoning is
+   * recorded rather than the final regex alone:
+   *
+   *   1. LINE-SCOPED missed the wrap. A sentence broken across two comment lines
+   *      put "compat-smoke" on one and "skip()s" on the next; both tests passed
+   *      with the claim fully intact. Proved by planting it.
+   *   2. JOINING WHOLE RUNS fixed that and broke the other end: one
+   *      absence-phrase anywhere in a long paragraph excused every claim inside
+   *      it. The wrap was planted INSIDE the corrected paragraph — which says
+   *      "are gone" — and the scan went green again.
+   *   3. SENTENCE-SPLITTING needed to guess where sentences end, and comments
+   *      wrap mid-sentence with lowercase continuations, so the guess was wrong
+   *      immediately.
+   *
+   * PROXIMITY, not punctuation. Comment runs are joined (fixing 1), then the
+   * exclusion is judged only on the text AROUND the two tokens (fixing 2), with
+   * no sentence boundaries to get wrong (fixing 3). The window is generous
+   * enough to hold a real disclaimer and far too small to reach a paragraph
+   * away.
+   */
+  /**
    * Phrases that make a mention a statement about ABSENCE. Whole phrases, never
-   * bare words: "no" alone matched "no-bucket" and neutered round 1.
+   * bare words: `no` alone matched "no-bucket" and neutered round 1 of this guard.
    */
   const ABOUT_ABSENCE =
     /\b(no longer|does not|do not|must not|cannot|never|is gone|are gone|reds|refuses|removed|previously described|used to)\b/i;
+
+  /**
+   * How far a `skip()` may sit from a `compat-smoke` and still be about it, and
+   * how much text either side counts as the claim's own wording.
+   */
+  const CLAIM_REACH = 200;
+  const CLAIM_MARGIN = 40;
+  const skipClaims = (text: string): string[] => {
+    const claims: string[] = [];
+    for (const block of commentBlocks(text)) {
+      const verbs = [...block.matchAll(/\bskip\(\)?s?\b/g)].map((m) => m.index ?? 0);
+      for (const subject of block.matchAll(/compat-smoke/g)) {
+        const at = subject.index ?? 0;
+        // The NEAREST skip(), so an unrelated one far down the paragraph neither
+        // creates a claim nor drags in wording that would excuse one.
+        const verb = verbs.map((v) => ({ v, d: Math.abs(v - at) })).sort((a, b) => a.d - b.d)[0];
+        if (!verb || verb.d > CLAIM_REACH) continue;
+        // THE SPAN BETWEEN THE TWO TOKENS, plus a small margin, is the claim.
+        // Judging a fixed window around the subject instead reached into the
+        // ADJACENT corrected paragraph, whose "previously described" excused the
+        // planted claim — measured, and the third way this scan has been wrong.
+        const from = Math.max(0, Math.min(at, verb.v) - CLAIM_MARGIN);
+        const to = Math.min(
+          block.length,
+          Math.max(at + 'compat-smoke'.length, verb.v) + CLAIM_MARGIN,
+        );
+        const claim = block.slice(from, to);
+        if (ABOUT_ABSENCE.test(claim)) continue;
+        claims.push(claim);
+      }
+    }
+    return claims;
+  };
 
   it('the runner really has no skip mechanism (the premise of the scan below)', () => {
     // Non-vacuity, and the conditional's antecedent. If this ever fails, the
@@ -264,17 +350,62 @@ describe('no surviving prose claims compat-smoke can skip a capability check', (
       // sentence it forbids — and by path so the exemption cannot be bought by
       // wording, which is the #693 lesson applied here.
       if (relPath === 'tests/retired-toolchain-prose.test.ts') continue;
-      for (const line of read(relPath).split('\n')) {
-        if (!/compat-smoke/.test(line)) continue;
-        if (!/\bskip\(\)?s?\b/.test(line)) continue;
-        if (ABOUT_ABSENCE.test(line)) continue;
-        findings.push(`${relPath}: ${line.trim()}`);
+      // JOINED, NOT LINE-BY-LINE. Review proved the line-scoped version:
+      // wrapping the forbidden sentence across two comment lines — which is what
+      // a formatter or an 80-column habit does to it unprompted — put
+      // "compat-smoke" on one line and "skip()s" on the next, and BOTH tests
+      // passed. The claim was intact and the scan could not see it.
+      //
+      // A guard defeated by a line break is not a guard, and the fix is not a
+      // wider regex: comment blocks are joined into one string first, so the
+      // sentence is matched as a sentence however it happens to be wrapped.
+      for (const claim of skipClaims(read(relPath))) {
+        findings.push(`${relPath}: ${claim.trim().slice(0, 160)}`);
       }
     }
     expect(
       findings,
       `the runner cannot skip; these say it can:\n  ${findings.join('\n  ')}`,
     ).toEqual([]);
+  });
+
+  it('a two-line WRAP of the forbidden sentence is still caught (review round 1)', () => {
+    const wrapped = [
+      '    # probe (unlike compat-smoke check (g), which',
+      '    # skip()s on non-200 so a bucketless CI stays green).',
+    ].join('\n');
+    expect(skipClaims(wrapped).length).toBeGreaterThan(0);
+    // …and line-by-line, neither line carries both tokens — which is what makes
+    // this a regression test rather than a restatement of the scan.
+    expect(
+      wrapped.split('\n').some((l) => /compat-smoke/.test(l) && /\bskip\(\)?s?\b/.test(l)),
+    ).toBe(false);
+  });
+
+  it('an absence-phrase a paragraph away does not launder the claim (review round 2)', () => {
+    // Joining whole runs made this pass: the wrap sat inside a paragraph that
+    // itself says "are gone", so the exclusion swallowed the lot.
+    const paragraph = [
+      '    # This comment previously described check (g) that way and those paths are gone now,',
+      '    # which is worth recording because the sentence read as licence to add one back, and',
+      '    # the compat rows are where this repo has been burned by exactly that before, twice.',
+      '    # probe (unlike compat-smoke check (g), which',
+      '    # skip()s on non-200 so a bucketless CI stays green).',
+    ].join('\n');
+    expect(skipClaims(paragraph).length).toBeGreaterThan(0);
+  });
+
+  it('a real disclaimer beside the claim IS excused (not a tripwire)', () => {
+    const disclaimed = '    # compat-smoke does not skip() any check — the paths are gone.';
+    expect(skipClaims(disclaimed)).toEqual([]);
+  });
+
+  it('the two tokens far apart are not a claim (the scan stays precise)', () => {
+    const separated = [
+      `    # compat-smoke runs here${' and here'.repeat(60)}`,
+      '    # skip() is discussed somewhere else entirely',
+    ].join('\n');
+    expect(skipClaims(separated)).toEqual([]);
   });
 
   it('the exclusion is by PHRASE — "no-bucket" does not launder a claim (round 1\'s defect)', () => {

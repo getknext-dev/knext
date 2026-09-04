@@ -143,8 +143,14 @@ export function createGuardProver({ repoRoot, spec, subjects }) {
   function proveCanSeeRed(canary) {
     const snap = snaps[canary.subject];
     mutate(snap, canary.anchor, canary.replacement, canary.options ?? {});
-    const status = runSpecExit(repoRoot, spec);
-    restore(snap);
+    // Same unconditional restore as `run()` — the canary plants a real mutation
+    // in a real tracked file, so a runner that dies here would leave it there.
+    let status;
+    try {
+      status = runSpecExit(repoRoot, spec);
+    } finally {
+      restore(snap);
+    }
     if (status === 0) {
       console.error(
         'ABORT: the canary mutation left the guard GREEN. The harness cannot observe red, so ' +
@@ -180,19 +186,34 @@ export function createGuardProver({ repoRoot, spec, subjects }) {
     // reddened, and the cause was the harness's residue marker landing at column
     // zero inside a YAML block scalar, ending the scalar. Without the negative
     // control the four reds beside it would have read as proof.
-    if (m.validate) {
-      const problem = m.validate(readFileSync(snap.path, 'utf8'));
-      if (problem) {
-        restore(snap);
-        console.error(
-          `ABORT: ${m.id} left its subject INVALID (${problem}). Its verdict would be a red for ` +
-            'the wrong reason. Fix the mutation, do not accept the red.',
-        );
-        process.exit(1);
+    // RESTORE IS UNCONDITIONAL (#927 review). Everything between the mutation
+    // and the restore now sits in a `try`, because the two things that can throw
+    // here — `m.validate` and `runSpecExit` (which throws when the runner dies
+    // on a signal rather than exiting) — would otherwise leave the subject
+    // MUTATED on disk and the process on its way out.
+    //
+    // This is not hypothetical: commit e64c4892 on this branch repaired exactly
+    // that outcome arriving by a different route, and the residue scanner could
+    // not see it because the planted mutation was a DELETION and a deletion
+    // leaves no marker. A prover that dies dirty hands the next `git add -A` a
+    // silent revert of the thing it exists to protect.
+    let status;
+    try {
+      if (m.validate) {
+        const problem = m.validate(readFileSync(snap.path, 'utf8'));
+        if (problem) {
+          // `throw`, not `process.exit`: exiting here would skip the `finally`
+          // and leave the tree dirty — the bug this block was added to fix.
+          throw new Error(
+            `${m.id} left its subject INVALID (${problem}). Its verdict would be a red for the ` +
+              'wrong reason. Fix the mutation, do not accept the red.',
+          );
+        }
       }
+      status = runSpecExit(repoRoot, spec);
+    } finally {
+      restore(snap);
     }
-    const status = runSpecExit(repoRoot, spec);
-    restore(snap);
     assertTreeClean(repoRoot, `after ${m.id}`);
     ran += 1;
     const ok = m.expect === 'red' ? status !== 0 : status === 0;

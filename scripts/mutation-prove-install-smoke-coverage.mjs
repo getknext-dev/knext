@@ -28,6 +28,16 @@ const SHAPE_SPEC = 'tests/install-smoke-coverage-derivation.test.ts';
 const NEWPUB_DIR = join(WT, 'packages', 'newpub');
 const LIB_PKG = join(WT, 'packages', 'lib', 'package.json');
 const LOCKSTEP_SPEC = 'tests/publish-preflight.test.ts';
+// #927: the spec that OWNS the standalone-prefix invariant. M13 used to be
+// graded by the install-smoke gate, which CANNOT observe it: no template
+// consumes `standalonePrefix` any more (measured — zero occurrences under
+// packages/kn-next/templates and turbo/generators/templates), so a prefix built
+// without its trailing slash changes no emitted artifact and the gate exits 0.
+// Same move M2 already made: when a gate stops being able to see a mutation,
+// the mutation follows the guard that owns the invariant rather than being
+// deleted. The prefix is still computed and still exported, so the invariant is
+// still real — see #931 for whether the surface should exist at all.
+const PREFIX_SPEC = 'packages/kn-next/src/__tests__/build-context-root.test.ts';
 const TEMPLATE_DIR = join(WT, 'packages', 'kn-next', 'templates', 'app');
 // `NEXT_CONFIG_TPL` and `ADAPTER_SRC` were dropped with the rewrite of M10
 // (#912): the vinext template deliberately carries no `output` key and the
@@ -241,6 +251,7 @@ const MUTATIONS = [
   {
     id: 'M13',
     expect: 'red',
+    graded: 'prefix',
     guard:
       'create emits a prefix that is not slash-terminated — every consumer CONCATENATES it, ' +
       'so the Dockerfile COPYs, the CMD and the start script all point at nothing',
@@ -306,8 +317,8 @@ const MUTATIONS = [
   // of the Dockerfile's binary COPY destination. M15 is REPLACED below rather than
   // retired, because its subject survived the migration in a new spelling. The binary
   // COPY destination has no assertion in `install-smoke.mjs` to grade against, so it
-  // is left uncovered and SAID SO here rather than papered over — filed as the
-  // follow-up on #912.
+  // is left uncovered and SAID SO here rather than papered over — filed as
+  // issue #930.
   {
     id: 'M15',
     expect: 'red',
@@ -405,6 +416,12 @@ if (ncLock !== 0) {
   );
   process.exit(1);
 }
+const ncPrefix = runSpec(PREFIX_SPEC);
+console.log(`NC(prefix) exit=${ncPrefix}`);
+if (ncPrefix !== 0) {
+  console.error('ABORT: the prefix spec is red before any mutation — M13 would grade meaningless.');
+  process.exit(1);
+}
 const nc = runSmoke();
 console.log(`NC exit=${nc}`);
 if (nc !== 0) {
@@ -423,9 +440,11 @@ for (const m of MUTATIONS) {
   const status =
     m.graded === 'shape'
       ? runSpec(SHAPE_SPEC)
-      : m.graded === 'lockstep'
-        ? runSpec(LOCKSTEP_SPEC)
-        : runSmoke();
+      : m.graded === 'prefix'
+        ? runSpec(PREFIX_SPEC)
+        : m.graded === 'lockstep'
+          ? runSpec(LOCKSTEP_SPEC)
+          : runSmoke();
   recordMutation();
   m.restore();
   clean(`after ${m.id}`);
