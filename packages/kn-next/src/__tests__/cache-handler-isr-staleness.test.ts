@@ -125,3 +125,93 @@ describe("ISR stale-while-revalidate", () => {
         });
     });
 });
+
+/**
+ * The same two properties, on the REDIS path.
+ *
+ * Kept as its own describe because the distinction is what a mutation run
+ * exposed: asserting `__redisTtlSeconds` proves the function, not that `set`
+ * CALLS it, and the in-memory cases above never touch the Redis read at all.
+ * Both Redis-path call sites survived mutation while the suite stayed green.
+ */
+describe("ISR stale-while-revalidate — the Redis path", () => {
+    /** A native-shaped client (no `.on`) recording the commands it receives. */
+    function fakeNativeClient(stored: string | null = null) {
+        const sent: string[][] = [];
+        return {
+            sent,
+            client: {
+                connected: true,
+                async connect() {},
+                async get() {
+                    return stored;
+                },
+                async send(command: string, args: string[] = []) {
+                    sent.push([command, ...args]);
+                    return "OK";
+                },
+            },
+        };
+    }
+
+    async function redisBackedHandler(stored: string | null = null) {
+        const mod = (await import(
+            `../adapters/cache-handler.js?redisisr=${Math.random()}`
+        )) as {
+            default: new () => {
+                get: (k: string) => Promise<Record<string, unknown> | null>;
+                set: (k: string, d: unknown, c: unknown) => Promise<void>;
+            };
+            __setRedisClientForTests: (c: unknown) => void;
+        };
+        const fake = fakeNativeClient(stored);
+        const handler = new mod.default();
+        mod.__setRedisClientForTests(fake.client);
+        return { handler, sent: fake.sent };
+    }
+
+    it("does not write the entry with EX <revalidate>", async () => {
+        const { handler, sent } = await redisBackedHandler();
+        await handler.set(
+            "isr-redis-ttl",
+            { kind: "APP_PAGE" },
+            ONE_SECOND_ROUTE,
+        );
+        const set = sent.find((cmd) => cmd[0] === "SET");
+        expect(
+            set,
+            `no SET was issued — commands were ${JSON.stringify(sent)}`,
+        ).toBeTruthy();
+        const ex = (set as string[])[(set as string[]).indexOf("EX") + 1];
+        expect(
+            ex,
+            "EX <revalidate> evicts the entry exactly when it should go stale",
+        ).not.toBe("1");
+        expect(Number(ex)).toBeGreaterThan(1);
+    });
+
+    it("labels a read past the revalidate window STALE", async () => {
+        const stored = JSON.stringify({
+            value: { kind: "APP_PAGE" },
+            lastModified: Date.now() - 5000,
+            tags: [],
+            cacheControl: { revalidate: 1 },
+        });
+        const { handler } = await redisBackedHandler(stored);
+        const hit = await handler.get("isr-redis-stale");
+        expect(hit, "the entry is retained, not evicted").not.toBeNull();
+        expect(hit?.cacheState).toBe("stale");
+    });
+
+    it("labels a read inside the revalidate window fresh", async () => {
+        const stored = JSON.stringify({
+            value: { kind: "APP_PAGE" },
+            lastModified: Date.now(),
+            tags: [],
+            cacheControl: { revalidate: 60 },
+        });
+        const { handler } = await redisBackedHandler(stored);
+        const hit = await handler.get("isr-redis-fresh");
+        expect(hit?.cacheState).toBeUndefined();
+    });
+});

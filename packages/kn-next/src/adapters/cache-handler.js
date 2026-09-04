@@ -167,6 +167,26 @@ function __resetEnvForTests() {
   RETRY_COOLDOWN_MS = envMs('REDIS_RETRY_COOLDOWN_MS', 5000);
 }
 
+/**
+ * Install a fake Redis client, for tests.
+ *
+ * Without this the ENTIRE Redis branch of `get`/`set` was unreachable from a
+ * unit test — it needs a live server — so the two things #886 fixed on that
+ * branch (the entry's TTL, and labelling a read `stale`) were provable only
+ * against the in-memory fallback, where neither exists. That is not a
+ * theoretical gap: mutating the Redis-path call sites left the suite GREEN.
+ *
+ * Takes a NATIVE-shaped client (no `.on`), which is the shape production uses
+ * on Bun, and wraps it exactly as `getRedis` does so the gate and the command
+ * budget are in play too. Production must not call this.
+ */
+function __setRedisClientForTests(client) {
+  redis = client ? budgetNativeClient(client) : undefined;
+  useRedis = !!client;
+  unhealthyUntil = 0;
+  connectPromise = null;
+}
+
 let Redis;
 let redis;
 let connectPromise;
@@ -992,4 +1012,5 @@ export {
   budgetNativeClient as __budgetNativeClient,
   __redisTtlSeconds,
   execAtomic as __execAtomic,
+  __setRedisClientForTests,
 };
