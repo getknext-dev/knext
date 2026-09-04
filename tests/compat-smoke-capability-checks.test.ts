@@ -92,8 +92,14 @@ describe('compat-smoke — the four capability checks are red-on-fail (T4)', () 
   it('(k) refuses to run without a real REDIS_URL and asserts CHANGED content', () => {
     const body = checkBody('k');
     expect(body).toMatch(/assert\.ok\(\s*REDIS_URL/);
-    // cached (identical back-to-back) AND revalidated (changed afterwards)
-    expect(body).toMatch(/assert\.strictEqual\(\s*immediate,\s*first/);
+    // SERVED FROM CACHE — the cache-state header, not value identity across two
+    // back-to-back requests. #886: with `revalidate = 1` the pair legitimately
+    // straddles a background regeneration, so identical values are not what
+    // stale-while-revalidate guarantees; a MISS on either request is exactly the
+    // defect, and is what this must stay able to see.
+    expect(body).toMatch(/x-nextjs-cache/);
+    expect(body).toMatch(/assert\.notStrictEqual\([\s\S]*?'MISS'/);
+    // AND revalidated (changed afterwards)
     expect(body).toMatch(/assert\.notStrictEqual\(\s*current,\s*first/);
     // named evidence that the cache really was the configured Redis
     expect(body).toMatch(/redisDbSize\(/);

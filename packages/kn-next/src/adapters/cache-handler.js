@@ -239,31 +239,150 @@ const IOREDIS_SPECIFIER = ['io', 'redis'].join('');
  * cached values, and a third cached copy here would be one more thing to keep
  * in sync.
  */
-function bunRedisClient(url) {
-  if (process.env.KNEXT_CACHE_REDIS_CLIENT === 'ioredis') return null;
-  const B = globalThis.Bun;
-  if (!B || typeof B.RedisClient !== 'function') return null;
-  return new B.RedisClient(url, {
-    // Same budget the ioredis path uses, so a slow Redis cannot outlive the
-    // request it is serving.
+/**
+ * The options handed to `Bun.RedisClient`, as their own function so the value a
+ * test asserts is the value production constructs.
+ *
+ * `idleTimeout: 0` is load-bearing and was a real outage (#886). This used to
+ * read `idleTimeout: COMMAND_TIMEOUT_MS`, on the belief that it was the
+ * per-command budget ioredis's `commandTimeout` provides. It is not — Bun's
+ * `idleTimeout` REAPS AN IDLE CONNECTION. Measured on bun 1.3.5 against
+ * redis:7-alpine with `idleTimeout: 2000`: a 3 s gap survived, a 5 s gap and an
+ * 11 s gap both failed with `ERR_REDIS_CONNECTION_CLOSED` ("Connection has
+ * failed"); with the option omitted, both succeeded. `client.connected` still
+ * reads `true` across the reap, so the socket dies silently and the failure
+ * arrives as a command error on the next request.
+ *
+ * For a scale-to-zero pod every gap is longer than any command budget, so the
+ * effect was a cache that flapped between Redis and the in-memory fallback —
+ * two requests either side of a trip served by two different backends. That is
+ * what #886 saw as "ISR is not cached at all".
+ *
+ * The budget the old value was mistaken for has NOT been dropped: it moved to
+ * `budgetNativeClient` below, where it is what it claims to be.
+ */
+function __nativeClientOptions() {
+  return {
     connectionTimeout: CONNECT_TIMEOUT_MS,
-    idleTimeout: COMMAND_TIMEOUT_MS,
+    // 0 = never reap. Stated explicitly rather than omitted: Bun's default is
+    // not ours to assume, and this is the line that caused the outage.
+    idleTimeout: 0,
     // Fail open rather than queue. An offline queue is the unbounded structure
     // that turns a cache outage into a memory leak — the same reason
     // `enableOfflineQueue: false` is set below.
     autoReconnect: true,
     maxRetries: 3,
+  };
+}
+
+/**
+ * Bound every command issued on the NATIVE client by `COMMAND_TIMEOUT_MS`.
+ *
+ * ioredis gets this from its own `commandTimeout` option; Bun's client has no
+ * equivalent, and the fault it exists for is real — an established-but-dead
+ * socket accepts writes and never answers, so without a bound each request
+ * hangs for its whole lifetime and the outstanding-command queue grows with
+ * traffic (a capacity failure, not a latency one).
+ *
+ * Wrapping is done by PROXY rather than by naming the four methods the handler
+ * happens to call today: an enumerated list is how the fifth call site gets
+ * missed. `connect` is the one deliberate exclusion — the handshake has its own,
+ * longer, `CONNECT_TIMEOUT_MS`, and applying the command budget to it would turn
+ * a merely slow Redis into an unreachable one.
+ *
+ * Created ONCE per client (in `getRedis`) because `nativeTxQueue` keys its
+ * serialization chain on client identity; a fresh proxy per call would hand every
+ * transaction its own empty queue and reopen the nested-MULTI bug.
+ */
+/**
+ * The connection gate, and the raw client behind the proxy.
+ *
+ * On Bun's native client a MULTI lives on the CONNECTION, so ANY command issued
+ * between `MULTI` and `EXEC` — a concurrent transaction OR an ordinary `GET` —
+ * is queued into that transaction and answered `+QUEUED`. Serializing
+ * transactions against each other is not enough: the read that broke the ISR
+ * fixture was not a transaction (#886). So every command on a native client
+ * takes ONE per-connection gate, and a transaction holds it for its whole
+ * MULTI…EXEC span.
+ */
+const NATIVE_GATE = Symbol('knext.cacheHandler.nativeGate');
+const NATIVE_TARGET = Symbol('knext.cacheHandler.nativeTarget');
+
+/** Run `fn` with exclusive use of the connection the gate stands for. */
+async function runGated(gate, fn) {
+  if (!gate) return await fn();
+  const previous = gate.tail;
+  let release;
+  gate.tail = new Promise((resolve) => {
+    release = resolve;
   });
+  // A failed predecessor must not poison the queue: its error belongs to its own
+  // caller, and swallowing it here only means "the connection is free again".
+  await previous.catch(() => {});
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
+}
+
+function budgetNativeClient(client) {
+  const gate = { tail: Promise.resolve() };
+  return new Proxy(client, {
+    get(target, prop) {
+      if (prop === NATIVE_GATE) return gate;
+      if (prop === NATIVE_TARGET) return target;
+      const value = Reflect.get(target, prop, target);
+      if (typeof value !== 'function') return value;
+      // EVERY method is re-bound to the real client, budgeted or not. Bun's
+      // native methods brand-check their receiver — handing one the proxy fails
+      // with "Expected this to be instanceof RedisClient", which is a hard error
+      // on `connect()` and therefore an unconditional cache outage. Returning
+      // the raw function for the unbudgeted case is what caused exactly that.
+      const budgeted = prop !== 'connect';
+      const call = (...args) => {
+        const out = value.apply(target, args);
+        if (!budgeted || !out || typeof out.then !== 'function') return out;
+        return Promise.race([
+          out,
+          new Promise((_resolve, reject) =>
+            setTimeout(
+              () => reject(new Error(`redis command ${String(prop)} timed out`)),
+              COMMAND_TIMEOUT_MS,
+            ).unref?.(),
+          ),
+        ]);
+      };
+      // `connect` must not take the gate: nothing else can be in flight before
+      // the handshake, and blocking on it would deadlock a reconnect.
+      if (!budgeted) return call;
+      return (...args) => runGated(gate, () => call(...args));
+    },
+    set(target, prop, value) {
+      target[prop] = value;
+      return true;
+    },
+  });
+}
+
+function bunRedisClient(url) {
+  if (process.env.KNEXT_CACHE_REDIS_CLIENT === 'ioredis') return null;
+  const B = globalThis.Bun;
+  if (!B || typeof B.RedisClient !== 'function') return null;
+  return new B.RedisClient(url, __nativeClientOptions());
 }
 
 async function getRedis() {
   if (!redis && REDIS_URL) {
     const native = bunRedisClient(REDIS_URL);
     if (native) {
-      native.onclose = (err) => {
+      // Budgeted ONCE, here — see `budgetNativeClient`. Everything downstream
+      // (including `nativeTxQueue`) must see one stable client identity.
+      const budgeted = budgetNativeClient(native);
+      budgeted.onclose = (err) => {
         if (err) console.error('[CacheHandler] Redis error:', err.message);
       };
-      redis = native;
+      redis = budgeted;
       return redis;
     }
     if (!Redis) {
@@ -408,43 +527,28 @@ async function waitForNativeReady(client) {
  * caveat and shipped unguarded, and compat-smoke hit it four times per run: ISR
  * entries never landed, so the route was not cached at all.
  *
- * Native transactions are therefore SERIALIZED per client. ioredis needs no such
- * gate — `multi()` builds a command object and batches it into a single write.
+ * Native transactions therefore hold the connection gate for their WHOLE span —
+ * and so does every ordinary command, because the queue-into-MULTI hazard is not
+ * specific to writers. A `GET` issued between another caller's `MULTI` and its
+ * `EXEC` is answered `+QUEUED`, which reads as a cache miss and re-renders the
+ * page; that is the residual ISR miss in #886, and serializing transactions
+ * against each other alone did not close it. ioredis needs no gate at all —
+ * `multi()` builds a command object and batches it into a single write.
  *
  * @param {{ multi?: Function, send?: Function }} client
  * @param {string[][]} commands `[['SET', key, value, 'EX', '60'], …]`
  */
-const nativeTxQueue = new WeakMap();
-
 async function execAtomic(client, commands) {
   if (typeof client.multi === 'function') {
     const tx = client.multi();
     for (const [name, ...args] of commands) tx[name.toLowerCase()](...args);
     return await tx.exec();
   }
-  // One transaction at a time per client — see the note above. Keyed on the
-  // client so a replaced client (breaker trip, reconnect) starts a fresh chain
-  // rather than inheriting a queue that outlived its connection.
-  const previous = nativeTxQueue.get(client) ?? Promise.resolve();
-  let release;
-  const held = new Promise((resolve) => {
-    release = resolve;
-  });
-  nativeTxQueue.set(
-    client,
-    previous.then(
-      () => held,
-      () => held,
-    ),
-  );
-  // A failed predecessor must not poison the queue: its error belongs to its own
-  // caller, and swallowing it here only means "the connection is free again".
-  await previous.catch(() => {});
-  try {
-    return await runNativeTransaction(client, commands);
-  } finally {
-    release();
-  }
+  // Taken ONCE for the whole transaction, and the sends inside it go to the RAW
+  // client — routing them back through the proxy would have each of them queue
+  // behind a gate this call already holds, which is a deadlock.
+  const raw = client[NATIVE_TARGET] ?? client;
+  return await runGated(client[NATIVE_GATE], () => runNativeTransaction(raw, commands));
 }
 
 async function runNativeTransaction(client, commands) {
@@ -596,6 +700,82 @@ function cloneCacheValue(data) {
   return cloned;
 }
 
+// ─── ISR staleness (#886) ───
+//
+// `revalidate` marks an entry STALE. It does not delete it. Next.js and vinext
+// both keep serving the stale body while a background render replaces it, and
+// vinext reads which of the three states applies off the `cacheState` field of
+// whatever the handler's `get` returns (`isrGet` in vinext's isr-cache: absent =
+// fresh, `"stale"` = serve and regenerate, `"expired"` = regeneration input
+// only). Its own default handler computes that from `revalidateAt`/`expireAt`.
+//
+// This handler used to compute neither, and wrote the Redis entry with
+// `EX <revalidate>` — so the entry was EVICTED at precisely the moment it should
+// have become stale-but-servable, every request past the window was a cold MISS,
+// and two closely-spaced requests could both miss (the first's write lands
+// asynchronously) and render two different values. That is #886.
+
+/** Seconds, from the cache-control metadata vinext attaches to a write. */
+function cacheControlSeconds(ctx, field) {
+  const value = ctx?.cacheControl?.[field];
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+/**
+ * Redis key TTL for one write.
+ *
+ * The ceiling is `expire` when the render claimed one; otherwise the entry must
+ * simply outlive its revalidate window by enough to be served stale, which is
+ * what `RETENTION_FLOOR_SECONDS` buys. Returning the revalidate window itself —
+ * the old behaviour — makes the stale state unreachable by construction.
+ */
+const DEFAULT_TTL_SECONDS = 3600;
+function __redisTtlSeconds(ctx) {
+  const expire = cacheControlSeconds(ctx, 'expire');
+  if (expire !== undefined) return expire;
+  const revalidate = ctx?.revalidate;
+  if (typeof revalidate === 'number' && revalidate > 0) {
+    // A route may legitimately revalidate less often than the default TTL; the
+    // entry must never be evicted before it is even due for revalidation.
+    return Math.max(revalidate * 2, DEFAULT_TTL_SECONDS);
+  }
+  return DEFAULT_TTL_SECONDS;
+}
+
+/** The cache-control metadata worth persisting with an entry. */
+function writeCacheControl(ctx) {
+  const revalidate = cacheControlSeconds(ctx, 'revalidate') ?? ctx?.revalidate;
+  const cacheControl = {};
+  if (typeof revalidate === 'number' && Number.isFinite(revalidate))
+    cacheControl.revalidate = revalidate;
+  const expire = cacheControlSeconds(ctx, 'expire');
+  if (expire !== undefined) cacheControl.expire = expire;
+  const stale = cacheControlSeconds(ctx, 'stale');
+  if (stale !== undefined) cacheControl.stale = stale;
+  return cacheControl;
+}
+
+/**
+ * Label a stored entry fresh / stale / expired, on read.
+ *
+ * Returns the entry with `cacheState` set only when it is NOT fresh — absence is
+ * vinext's encoding of "fresh", and inventing a `"fresh"` string would be a
+ * value it does not recognise.
+ */
+function withCacheState(entry, now = Date.now()) {
+  if (!entry || typeof entry !== 'object') return entry;
+  const revalidate = entry.cacheControl?.revalidate;
+  const expire = entry.cacheControl?.expire;
+  const ageSeconds = (now - (entry.lastModified ?? now)) / 1000;
+  if (typeof expire === 'number' && ageSeconds > expire) {
+    return { ...entry, cacheState: 'expired' };
+  }
+  if (typeof revalidate === 'number' && revalidate > 0 && ageSeconds > revalidate) {
+    return { ...entry, cacheState: 'stale' };
+  }
+  return entry;
+}
+
 // ─── CacheHandler Class ───
 
 class CacheHandler {
@@ -618,8 +798,8 @@ class CacheHandler {
             });
             return null;
           }
-          const parsed = deserializeCacheValue(JSON.parse(data));
-          logCacheEvent('HIT', source, key, {
+          const parsed = withCacheState(deserializeCacheValue(JSON.parse(data)));
+          logCacheEvent(parsed?.cacheState === 'stale' ? 'STALE' : 'HIT', source, key, {
             durationMs: Date.now() - startTime,
           });
           return parsed;
@@ -633,8 +813,11 @@ class CacheHandler {
         });
         return null;
       }
-      logCacheEvent('HIT', source, key, { durationMs: Date.now() - startTime });
-      return entry;
+      const labelled = withCacheState(entry);
+      logCacheEvent(labelled?.cacheState === 'stale' ? 'STALE' : 'HIT', source, key, {
+        durationMs: Date.now() - startTime,
+      });
+      return labelled;
     } catch (error) {
       logCacheEvent('MISS', source, key, {
         durationMs: Date.now() - startTime,
@@ -669,7 +852,10 @@ class CacheHandler {
         return;
       }
 
-      const ttl = ctx?.revalidate || 3600;
+      // NOT `ctx.revalidate` — see `__redisTtlSeconds`. Evicting at the
+      // revalidate window is what made stale-while-revalidate unreachable (#886).
+      const ttl = __redisTtlSeconds(ctx);
+      const cacheControl = writeCacheControl(ctx);
 
       if (client) {
         // Redis path: serialize Map/Buffer → JSON-safe types for JSON.stringify
@@ -677,6 +863,7 @@ class CacheHandler {
           value: serializeCacheValue(data),
           lastModified: Date.now(),
           tags: ctx?.tags || [],
+          cacheControl,
         };
 
         // ─── ATOMICITY GUARD (T13) ───
@@ -723,6 +910,7 @@ class CacheHandler {
           value: cloneCacheValue(data),
           lastModified: Date.now(),
           tags: ctx?.tags || [],
+          cacheControl,
         };
         memoryCache.set(key, memEntry);
       }
@@ -795,4 +983,13 @@ class CacheHandler {
 }
 
 export default CacheHandler;
-export { __resetEnvForTests };
+// Test seams, same contract as `__resetEnvForTests`: named so a reader cannot
+// mistake them for API, exported so the value a test asserts is the value
+// production uses rather than a copy of it (#886).
+export {
+  __resetEnvForTests,
+  __nativeClientOptions,
+  budgetNativeClient as __budgetNativeClient,
+  __redisTtlSeconds,
+  execAtomic as __execAtomic,
+};

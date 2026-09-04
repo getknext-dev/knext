@@ -578,30 +578,58 @@ async function main() {
   });
 
   // (k) ISR / Data Cache against a REAL Redis. Two 200s would prove nothing, so this asserts
-  // the CONTENT: identical across back-to-back requests (it is cached, not re-rendered), then
-  // CHANGED after the revalidate window (it is revalidated, not frozen) — and finally that the
-  // configured Redis actually holds keys (the cache was not the in-memory fallback).
+  // the CACHE STATE of each response, then that the CONTENT CHANGED after the revalidate
+  // window (it is revalidated, not frozen) — and finally that the configured Redis actually
+  // holds keys (the cache was not the in-memory fallback).
+  //
+  // #886 — WHY THE FIRST ASSERT IS ON THE HEADER AND NOT ON VALUE IDENTITY. It used to
+  // require two back-to-back requests to render the SAME value. That is not what
+  // stale-while-revalidate guarantees and it made this check unsound in BOTH directions,
+  // measured against the fixed handler on a real Redis: with `revalidate = 1` the first
+  // request is legitimately served STALE and kicks off a background regeneration that
+  // finishes in tens of milliseconds, so the second request is a HIT on the NEW value.
+  // Both responses came from the cache; their values differ; the old assertion failed a
+  // correct server. Widening the fixture's window would only make the flake rarer.
+  //
+  // The cache-state header is the direct evidence and it is not a race: the defect this
+  // check exists to catch produced MISS on BOTH requests (vinext's `x-nextjs-cache`,
+  // which knext's handler feeds via the entry's `cacheState`). Asserting "neither request
+  // was a MISS" fails on exactly that and on nothing else.
   await check('k. ISR revalidation with a real REDIS_URL', async () => {
     assert.ok(
       REDIS_URL,
       'REDIS_URL is not set — ISR cannot be verified against the real cache backend. ' +
         'This check never skips: start a Redis and set REDIS_URL (CI provides a service container).',
     );
-    const readValue = async () => {
+    const read = async () => {
       const res = await request(FIXTURE_ISR);
       assert.strictEqual(res.status, 200, `${FIXTURE_ISR}: ${res.status}`);
       const m = res.body.match(/data-knext-isr-value="([\w-]+)"/);
       assert.ok(m, 'ISR fixture did not render its value marker');
-      return m[1];
+      return { value: m[1], cacheState: res.headers['x-nextjs-cache'] };
     };
+    const readValue = async () => (await read()).value;
 
-    const first = await readValue();
-    const immediate = await readValue();
-    assert.strictEqual(
-      immediate,
-      first,
-      'back-to-back requests rendered DIFFERENT values — the route is not being cached at all',
-    );
+    // Prime the cache, then take the pair. Without the priming request the first
+    // read is a MISS by definition and says nothing about caching.
+    await read();
+    const firstRead = await read();
+    const secondRead = await read();
+    const first = firstRead.value;
+    for (const [label, res] of [
+      ['first', firstRead],
+      ['second', secondRead],
+    ]) {
+      assert.ok(
+        res.cacheState,
+        `the ${label} request carried no x-nextjs-cache header — the ISR cache path was not taken at all`,
+      );
+      assert.notStrictEqual(
+        res.cacheState,
+        'MISS',
+        `the ${label} of two back-to-back requests was a cache MISS — the route is not being cached at all`,
+      );
+    }
 
     // Past the 1s window each request serves stale and kicks off a background regeneration,
     // so the change shows up on a later poll.
@@ -623,7 +651,7 @@ async function main() {
       keys > 0,
       `Redis at ${REDIS_URL} holds ${keys} keys — the ISR cache did not reach the configured Redis`,
     );
-    return `cached ${first} → revalidated ${current}; redis keys=${keys}`;
+    return `cached ${firstRead.cacheState}/${secondRead.cacheState} ${first} → revalidated ${current}; redis keys=${keys}`;
   });
 
   // ── report ──────────────────────────────────────────────────────────────
