@@ -293,6 +293,32 @@ export function buildNextAppCRObject(
     // unknown value before the cluster is touched. Upgrade operator first.
     const build = resolvedBuild;
 
+    // T2d — carry the deploy id into the POD's environment, not just into the
+    // bundle. vinext resolves NEXT_DEPLOYMENT_ID at BUILD time (that is how the
+    // `?dpl=` suffix and the `_next/static/<id>/` namespace get minted), so at
+    // runtime this is belt-and-braces today. It stops being belt-and-braces the
+    // moment anything serves or reports the id, and a CR that carries it is
+    // assertable now.
+    //
+    // Precedence, decided explicitly: knext's id WINS over a colliding
+    // `config.env` entry, because the id is a FACT about the artifact that was
+    // just built rather than a preference. A user value would disagree with
+    // `spec.buildId` — the same value, which the operator stamps on the revision
+    // as `apps.kn-next.dev/build-id` and the asset GC protects by — and would
+    // point the runtime at a build whose assets live under a different prefix.
+    //
+    // #186 name safety: NEXT_DEPLOYMENT_ID is a C_IDENTIFIER, is not in the
+    // CRD's CEL-rejected set (HOSTNAME / PORT / K_*), and is not injected by the
+    // operator, so `appendUserEnv` keeps it rather than dropping it with a
+    // Warning event.
+    const env =
+        config.env || buildId
+            ? {
+                  ...config.env,
+                  ...(buildId ? { NEXT_DEPLOYMENT_ID: buildId } : {}),
+              }
+            : undefined;
+
     const spec: Record<string, unknown> = {
         image,
         scaling,
@@ -306,9 +332,7 @@ export function buildNextAppCRObject(
         // them on the ksvc container; reserved names (HOSTNAME, PORT, K_*)
         // are rejected by CRD CEL validation at apply time. Secrets stay on
         // spec.secrets — never put sensitive values here.
-        ...(config.env && Object.keys(config.env).length
-            ? { env: config.env }
-            : {}),
+        ...(env && Object.keys(env).length ? { env } : {}),
         ...(observability ? { observability } : {}),
         ...(config.healthCheckPath
             ? { healthCheckPath: config.healthCheckPath }
