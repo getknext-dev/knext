@@ -76,7 +76,7 @@ deployability, and pay-per-use — per self-contained system.
 
 <Callout type="info">
 **Honest scope — substrate today, framework tomorrow.** What ships in knext core *today* is the
-substrate: the official adapter, per-zone scale-to-zero deploy, `assetPrefix` wiring, and serving
+substrate: the compiled single-executable build, per-zone scale-to-zero deploy, `assetPrefix` wiring, and serving
 the App Shell. The full SCS toolkit — a `generate zone` scaffolder, micro-frontend (asset +
 Module-Federation) isolation, and the PWA stitching layer — is the **end goal**; today those are
 app-level recipes, not framework code. They will be promoted into core only **after** the
@@ -86,9 +86,11 @@ in-core-vs-recipe split, and never treat an unbuilt generator as shipping.
 
 ## The pillars
 
-- **Official adapter, not a fork.** Built on the official Deployment Adapter API (`NextAdapter`,
-  top-level `adapterPath` on Next.js 16.2+, `output: 'standalone'`). knext ships the adapter as a
-  reusable package export (`@getknext/core/adapter`). See [Official adapter](/docs/official-adapter).
+- **Honest claims, verified in the open.** The default build compiles your app with **vinext**
+  (an open-source Vite-based Next.js implementation) into a single executable. knext also ships an
+  adapter on the official Next.js Deployment Adapter API (`@getknext/core/adapter`) — the lane
+  where its 778/778 suite credential was earned — and never blurs which claim covers which path.
+  See [The adapter and the compiled build](/docs/official-adapter).
 - **Verified compatibility.** The official `vercel/next.js` deploy-mode e2e suite runs against
   knext nightly: 778 tests, zero failures on Node. See
   [Verified compatibility](/docs/compat-suite).

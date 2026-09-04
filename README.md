@@ -2,7 +2,7 @@
 
 > **Production-ready framework for deploying Next.js applications on Knative with Fluid Compute characteristics.**
 
-Built on the **official Next.js Adapter API** with `output: 'standalone'` — no forks, no vendor build tools — for serverless compatibility with distributed caching (Redis). Runs natively on **Node 20+** (and Bun), with Vercel-Fluid-style cold-start bytecode caching.
+The default build compiles your app with **vinext** (an open-source Vite-based Next.js implementation) into a **single executable** with bytecode baked in — ~61 ms cold starts under scale-to-zero, with distributed caching (Redis). knext also maintains an adapter on the **official Next.js Adapter API** — the suite-verified lane its 778/778 compatibility credential was earned on — and keeps the two claims separate.
 
 ---
 

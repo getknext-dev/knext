@@ -13,14 +13,16 @@ export default function HomePage() {
     <main className={styles.page}>
       <header className={styles.hero}>
         <div className={styles.wrap}>
-          <div className={styles.eyebrow}>official next.js deployment adapter · knative</div>
+          <div className={styles.eyebrow}>
+            scale-to-zero next.js · knative · single-binary deploys
+          </div>
           <h1 className={styles.h1}>
             Scale&#8209;to&#8209;<span className={styles.z}>zero</span> Next.js, on Knative.
           </h1>
           <p className={styles.lede}>
-            knext is a deployment adapter that runs Next.js on the <b>official Adapter API</b> with
-            true <b>scale-to-zero</b> — pods drop to nothing when idle and wake on the first
-            request, with <b>bytecode-cached</b> cold starts. One operator. Any cloud. No lock-in.
+            knext deploys Next.js apps as <b>compiled single executables</b> with true{' '}
+            <b>scale-to-zero</b> — pods drop to nothing when idle and wake on the first request in{' '}
+            <b>~61&nbsp;ms</b>, bytecode baked into the binary. One operator. Any cloud. No lock-in.
           </p>
           <div className={styles.cta}>
             <Link className={`${styles.btn} ${styles.btnPrimary}`} href="/docs/learn">
@@ -68,12 +70,14 @@ export default function HomePage() {
           <div className={styles.grid}>
             <div className={styles.cell}>
               <div className={styles.n}>01</div>
-              <h3>Official adapter, not a fork</h3>
+              <h3>Verified in the open — claims match the code</h3>
               <p>
-                Built on Next.js&apos;s official Deployment Adapter API (<code>NextAdapter</code>,{' '}
-                <code>output:&apos;standalone&apos;</code>). No reverse-engineered runtime.
-                Validated against the official Next.js deploy-mode e2e suite —{' '}
-                <b>778 tests, zero failures</b> on Node, re-verified nightly. Scope and exclusions:{' '}
+                The default build compiles your app with <b>vinext</b>, an open-source Vite-based
+                Next.js implementation, into one fast binary. knext&apos;s compatibility record is
+                public and honest: <b>778 tests, zero failures</b> against Next.js&apos;s own
+                deploy-mode e2e suite on the Node adapter lane, re-verified nightly — and the
+                compiled path is measured per feature until its own suite lane is green. Scope,
+                exclusions, and what each claim covers:{' '}
                 <Link href="/docs/compat-suite">verified compatibility</Link>.
               </p>
             </div>
