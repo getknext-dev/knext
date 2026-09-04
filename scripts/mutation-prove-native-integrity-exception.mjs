@@ -13,15 +13,19 @@
  *
  * S2 adds both, and each half can fail silently in a different direction:
  *
- *   1. `KNEXT_REQUIRE_NATIVE_INTEGRITY=1` must REFUSE an absent manifest. If the
- *      throw goes, an operator who believes their fleet is fail-closed is not,
- *      and nothing anywhere says so.
+ *   1. An ON spelling of `KNEXT_REQUIRE_NATIVE_INTEGRITY` must REFUSE an absent
+ *      manifest. If the throw goes, an operator who believes their fleet is
+ *      fail-closed is not, and nothing anywhere says so.
  *   2. Without the variable it must still LOAD. A shim that refuses on absence
  *      unconditionally satisfies (1) while bricking every pre-pinning image —
  *      the outage the exception exists to prevent.
- *   3. Only the exact value `1` enables it, so a stray `0`/`false` cannot fail a
- *      fleet closed by accident.
- *   4. The exception carries a real CLOCK. An `expires` that stops being read is
+ *   3. An OFF spelling stays permissive, so a stray `0`/`false` cannot fail a
+ *      fleet closed by accident — while `true`/`yes`/`on` DO enable it, because
+ *      `=== '1'` sent every other spelling silently down the permissive path.
+ *   4. An UNRECOGNISED value refuses to start, on every image rather than only
+ *      on unpinned ones. Guessing "off" is the fail-open bug; guessing "on"
+ *      bricks a fleet on a typo without saying so.
+ *   5. The exception carries a real CLOCK. An `expires` that stops being read is
  *      the quietest way to neuter a deferral: it still reads as dated.
  *
  * DISCIPLINE (`.claude/rules/workflow.md`): exit codes only; green baseline; a
@@ -44,8 +48,8 @@ const MUTATIONS = [
       'the switch stops refusing — an operator who set it believes the fleet fails closed on an ' +
       'unverifiable native tree, and it does not',
     subject: 'shim',
-    anchor: '    if (requireIntegrity()) {',
-    replacement: '    if (false && requireIntegrity()) {',
+    anchor: '    if (required) {',
+    replacement: '    if (false && required) {',
   },
   {
     id: 'M2',
@@ -54,7 +58,7 @@ const MUTATIONS = [
       'the switch becomes UNCONDITIONAL — every image predating native-tree pinning stops ' +
       'loading sharp at all, which is the fleet outage the exception exists to prevent',
     subject: 'shim',
-    anchor: '    if (requireIntegrity()) {',
+    anchor: '    if (required) {',
     replacement: '    if (true) {',
   },
   {
@@ -91,6 +95,18 @@ const MUTATIONS = [
       '  throw new Error(\n    `knext: KNEXT_REQUIRE_NATIVE_INTEGRITY=${JSON.stringify(raw)} is not a value this `',
     replacement:
       '  return false;\n  // biome-ignore lint: mutation\n  throw new Error(\n    `knext: KNEXT_REQUIRE_NATIVE_INTEGRITY=${JSON.stringify(raw)} is not a value this `',
+  },
+  {
+    id: 'M3d',
+    expect: 'red',
+    claim:
+      'the value is parsed ONLY on the absent-manifest path again — the same typo then refuses on ' +
+      'a pre-pinning image and is silently ignored on a pinned one, an asymmetry an operator meets ' +
+      'as a surprise mid-rollout. Re-review, round 2',
+    subject: 'shim',
+    anchor: '  const required = requireIntegrity();',
+    replacement:
+      '  const required = findManifest(dirname(addon)) === null ? requireIntegrity() : false;',
   },
   {
     id: 'M4',

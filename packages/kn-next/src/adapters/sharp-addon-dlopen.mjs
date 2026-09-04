@@ -178,6 +178,14 @@ function requireIntegrity() {
  * on first sharp import (the first `/_next/image` request), not at boot.
  */
 function verifyAgainstManifest(addon) {
+  // Parsed UNCONDITIONALLY, before anything branches on it. A value nobody can
+  // read is an operator mistake in a security control whether or not this
+  // particular image happens to carry a manifest — and validating it only on
+  // the absent-manifest path would mean the same typo refuses on one image and
+  // is silently ignored on the next, which is a worse contract to explain than
+  // either answer on its own.
+  const required = requireIntegrity();
+
   const manifestPath = findManifest(dirname(addon));
   if (manifestPath === null) {
     // S2. Absence is the ONE permissive branch here, and it is a dated
@@ -192,7 +200,7 @@ function verifyAgainstManifest(addon) {
     // The exception's EXPIRY is deliberately not read here: a wall-clock branch
     // in the runtime would brick running pods at midnight on the expiry date.
     // The clock reds CI instead (`tests/native-integrity-absence-exception.test.ts`).
-    if (requireIntegrity()) {
+    if (required) {
       throw new Error(
         `knext: refusing to dlopen — no native integrity manifest beside ${addon}, and\n` +
           '  KNEXT_REQUIRE_NATIVE_INTEGRITY requires one. This image predates native-tree\n' +

@@ -159,11 +159,30 @@ narrows the window to an image mutated after build; closing it fully needs the m
 image digest by a signature, which is the same owed work as the closure SBOM attestation above.
 
 That permissiveness is now a **dated exception with an off switch**, not an open-ended default.
-Setting **`KNEXT_REQUIRE_NATIVE_INTEGRITY=1`** in the app's environment makes an absent manifest a
+Setting **`KNEXT_REQUIRE_NATIVE_INTEGRITY`** in the app's environment makes an absent manifest a
 refusal — an operator who knows every image in their fleet postdates native-tree pinning can close
-the downgrade path today, without waiting for the default to change. Only the exact value `1`
-enables it, so a stray `0`/`false` cannot fail a fleet closed by accident, and a *mismatch* stays
-fatal either way. The exception's expiry and its re-raise condition live in
+the downgrade path today, without waiting for the default to change. A *mismatch* stays fatal either
+way.
+
+The variable has three outcomes, and the third is the one to plan a rollout around:
+
+| value | behaviour |
+| --- | --- |
+| `1`, `true`, `yes`, `on` (any case, surrounding whitespace ignored) | **fail closed** — an absent manifest refuses to `dlopen` |
+| `0`, `false`, `no`, `off`, empty, or unset | the dated exception stands — an absent manifest warns and loads |
+| anything else | **the process refuses to start** |
+
+That last row is deliberate and worth stating plainly as an operational consequence: a value the
+runtime cannot parse — `enabled`, `2`, a typo — is neither read as "on" nor as "off". Reading it as
+"off" is the fail-open case an operator would never see (they would believe the fleet refuses an
+unverifiable native tree while nothing had changed); reading it as "on" would brick a fleet on a
+typo *silently*. So it throws, by name, listing the accepted values. On a pre-pinning image that
+surfaces as a **crash loop on first `/_next/image` request** rather than a quiet misconfiguration —
+loud, immediate, and fixed by correcting the variable. Set it from a reviewed manifest, not by hand
+on a live workload. The check runs whether or not the image carries a manifest, so a bad value
+cannot pass on one image and refuse on the next.
+
+The exception's expiry and its re-raise condition live in
 `scripts/lib/native-integrity-policy.mjs`, read by the shared dated-exemption reader; the clock reds
 CI rather than the runtime, because a wall-clock branch inside the shim would brick running pods at
 midnight on the expiry date — the same fleet outage the exception exists to avoid.

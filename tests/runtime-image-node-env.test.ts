@@ -53,20 +53,38 @@ function discoverAppDockerfiles(): string[] {
 }
 
 /**
- * Does this Dockerfile actually SET `NODE_ENV=production`?
+ * Does this Dockerfile actually SET `NODE_ENV=production` **in the image that
+ * ships**?
  *
- * Comments are stripped first, and that is not a nicety — it is the whole
- * correctness of the check. Every one of these Dockerfiles carries a comment
- * explaining why the variable is load-bearing, so a matcher that scanned the
- * raw text would read its own explanation back and stay green after the real
- * `ENV` was deleted. The mutation prover caught exactly that (M1 survived).
+ * Two narrowings, each closing a way this could pass while the artifact is
+ * wrong:
+ *
+ *   1. COMMENTS ARE STRIPPED. Every one of these Dockerfiles carries a comment
+ *      explaining why the variable is load-bearing, so a matcher over raw text
+ *      reads its own explanation back and stays green after the real `ENV` is
+ *      deleted. The mutation prover caught exactly that — M1 survived the first
+ *      run of this guard.
+ *   2. ONLY THE FINAL STAGE COUNTS. `ENV` does not cross a `FROM`: a builder
+ *      stage setting `NODE_ENV=production` contributes nothing to the runtime
+ *      image, and three of these files are multi-stage. Checking "anywhere in
+ *      the file" would accept a build-only `ENV` as if it configured the
+ *      running container.
+ *
+ * Measured when this narrowed: all six app Dockerfiles already set it in their
+ * final stage, so this closes a hole rather than papering over a break.
  */
-function setsNodeEnvProduction(dockerfile: string): boolean {
+function finalStage(dockerfile: string): string {
   const code = dockerfile
     .split('\n')
     .filter((line) => !line.trimStart().startsWith('#'))
     .join('\n');
-  return /\bNODE_ENV\s*=\s*production\b/.test(code);
+  // Stages are delimited by `FROM` at the start of a line. The last chunk is
+  // the stage that becomes the image.
+  return code.split(/^FROM /m).at(-1) ?? '';
+}
+
+function setsNodeEnvProduction(dockerfile: string): boolean {
+  return /\bNODE_ENV\s*=\s*production\b/.test(finalStage(dockerfile));
 }
 
 describe('every knext app runtime image sets NODE_ENV=production', () => {
@@ -108,6 +126,34 @@ describe('every knext app runtime image sets NODE_ENV=production', () => {
       'a comment mentioning it must NOT satisfy the check',
     ).toBe(false);
     expect(setsNodeEnvProduction('ENV NODE_ENV=production\n')).toBe(true);
+  });
+
+  it('reads the FINAL stage — a builder-stage ENV does not reach the image', () => {
+    // `ENV` does not cross a `FROM`. A build stage setting it configures the
+    // build, not the running container, so accepting it here would certify an
+    // image whose T6b refusal is inert — the exact defect this guard exists for,
+    // wearing a different disguise.
+    const builderOnly = [
+      'FROM node:22 AS builder',
+      'ENV NODE_ENV=production',
+      'RUN npm run build',
+      '',
+      'FROM gcr.io/distroless/nodejs22',
+      'COPY --from=builder /app /app',
+      'CMD ["server.js"]',
+    ].join('\n');
+    expect(
+      setsNodeEnvProduction(builderOnly),
+      'a builder-stage ENV must NOT satisfy the check',
+    ).toBe(false);
+
+    // ...and the same file with the ENV in the final stage passes, so this is a
+    // narrowing rather than a blanket refusal of multi-stage builds.
+    const finalStageSet = builderOnly.replace(
+      'COPY --from=builder /app /app',
+      'COPY --from=builder /app /app\nENV NODE_ENV=production',
+    );
+    expect(setsNodeEnvProduction(finalStageSet)).toBe(true);
   });
 
   it('the check can actually fail — a Dockerfile without it is detected', () => {

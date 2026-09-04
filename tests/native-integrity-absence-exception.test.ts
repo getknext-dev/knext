@@ -154,6 +154,19 @@ describe('S2 KNEXT_REQUIRE_NATIVE_INTEGRITY is a fail-closed switch', () => {
     }
   });
 
+  it('refuses an UNRECOGNISED value on a PINNED image too, not only an unpinned one', () => {
+    // The value is parsed before anything branches on the manifest. Validating
+    // it only on the absent-manifest path would mean the same typo refuses on
+    // one image and is silently ignored on the next — an asymmetry that is
+    // harder to explain than either answer, and one an operator would meet as a
+    // surprise during a rollout rather than at the first image.
+    const { dir, addon } = stagePinned();
+    const r = loadShim(addon, dir, { KNEXT_REQUIRE_NATIVE_INTEGRITY: 'enabled' });
+    expect(r.status).not.toBe(0);
+    expect(r.stdout).not.toContain('DLOPENED');
+    expect(r.stderr).toMatch(/1 \| true \| yes \| on/);
+  });
+
   it('the switch is documented on the shim itself, where an operator reads it', () => {
     expect(readFileSync(SHIM, 'utf8')).toContain('KNEXT_REQUIRE_NATIVE_INTEGRITY');
   });

@@ -93,6 +93,17 @@ const MUTATIONS = [
     anchor: "    .filter((line) => !line.trimStart().startsWith('#'))",
     replacement: '    .filter(() => true)',
   },
+  {
+    id: 'M6',
+    expect: 'red',
+    claim:
+      'the final-stage narrowing goes, so a BUILDER-stage `ENV NODE_ENV=production` satisfies the ' +
+      'check — `ENV` does not cross a `FROM`, so the running image is unconfigured and the T6b ' +
+      'refusal is inert while the guard certifies it. Re-review, round 2',
+    subject: 'spec',
+    anchor: "  return code.split(/^FROM /m).at(-1) ?? '';",
+    replacement: '  return code;',
+  },
 ];
 
 /**
@@ -103,7 +114,7 @@ const MUTATIONS = [
  * improvement.
  */
 const NEGATIVE = {
-  id: 'M6',
+  id: 'M7',
   expect: 'green',
   claim: 'the explanatory COMMENT is reworded — the guard asserts the ENV, not the prose',
   subject: 'exampleDockerfile',
