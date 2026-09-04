@@ -172,8 +172,21 @@ describe('the lane is red-on-fail — no skip, no swallow', () => {
 describe('the lane measures the COMPILED BINARY, not the uncompiled nitro output', () => {
   const script = () => read(DEPLOY_SCRIPT);
 
-  it('compiles the vinext bundle into a single executable', () => {
-    expect(script()).toContain('vinext-compile.mjs');
+  it('compiles the vinext bundle into a single executable, in CODE and not only in prose', () => {
+    // Comments are stripped first. The first version of this assertion matched
+    // `vinext-compile.mjs` anywhere in the file and stayed GREEN when the whole
+    // compile invocation was replaced with `if ! true` — the header comment
+    // still mentioned it. A guard a mutation survives is decoration.
+    const lines = script()
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('#'));
+    const resolves = lines.filter((l) => /COMPILE_SCRIPT=.*vinext-compile\.js/.test(l));
+    const invokes = lines.filter((l) => /bun run "\$\{COMPILE_SCRIPT\}"/.test(l));
+    expect(resolves.length, 'the shipped compile script must be resolved').toBe(1);
+    expect(invokes.length, 'and actually invoked, not merely named').toBe(1);
+    // What is compiled and what is booted must be the same file — a compile
+    // whose output nobody boots proves nothing.
+    expect(invokes[0]).toContain('--outfile "${KNEXT_EXEC}"');
   });
 
   it('boots the compiled binary itself', () => {
