@@ -47,7 +47,7 @@ const HANDLER = 'packages/kn-next/src/adapters/cache-handler.js';
  * A mutated handler that stopped PARSING reds every test in the guard for the
  * wrong reason — the module fails to import — and that red is indistinguishable
  * in the log from the guard doing its job. Not hypothetical here: this prover's
- * first M6 used a mid-line anchor, the harness's appended `// KNEXT-MUTATION`
+ * first M6 used a mid-line anchor, the harness's appended line-comment residue
  * marker commented out the tail of the `if (...) {` line, and the "KILLED" that
  * produced would have certified a boundary case the test did not have.
  * (`packages/kn-next` is `"type": "module"`, so `--check` parses it as ESM.)
