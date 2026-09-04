@@ -87,11 +87,11 @@ function runSpec(spec) {
 }
 
 /** The spec must be RED while the defect is restored, and GREEN once undone. */
-function prove(label, file, spec, anchor, replacement) {
+function prove(label, file, spec, anchor, replacement, options) {
   console.log(`── mutation: ${label}`);
   const snap = snapshot(file);
   try {
-    mutate(snap, anchor, replacement);
+    mutate(snap, anchor, replacement, options);
     if (runSpec(spec)) {
       console.log('   x DECORATION: the spec stayed GREEN with the defect restored');
       fail += 1;
@@ -446,12 +446,21 @@ prove(
 //     `bun install --frozen-lockfile` — so the lockfile, not the manifest,
 //     decides what is on disk. A manifest-only assertion would call this green
 //     and the live run would still fail with the identical error.
+//     `.lock` is in no comment-syntax map, so the harness cannot infer a marker
+//     for bun.lock — and WITHOUT an explicit prefix `mutate` throws before
+//     writing, which is how #912's fix left this prover dying at 21/22 while
+//     `declared==run` was cited as proved (the exact class the completeness
+//     lane exists to catch, caught this time by running it). bun.lock is JSONC
+//     — bun's own docs call it "a JSONC file" and the guard reads it as TEXT —
+//     so a `//` line-comment marker is legal in the file and invisible to the
+//     regex the guard anchors on.
 prove(
   'the lockfile still resolves the old @changesets/cli major',
   LOCKFILE,
   COMPAT_SPEC,
   `${LOCK_ENTRY[1]}${LOCK_ENTRY[2]}${LOCK_ENTRY[3]}`,
   `${LOCK_ENTRY[1]}${WRONG_CLI_MAJOR}${LOCK_ENTRY[3]}`,
+  { commentPrefix: '//' },
 );
 
 // 22. The renamed-input class (#750) folded into the same spec, because it is
