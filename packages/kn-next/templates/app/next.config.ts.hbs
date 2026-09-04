@@ -44,7 +44,7 @@ import type { NextConfig } from "next";
  */
 const nextConfig: NextConfig = {
     assetPrefix: process.env.ASSET_PREFIX || "",
-    generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID ?? null,
+    generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID || null,
     // Redis-backed ISR/data cache (multi-pod consistency on Knative). Without
     // this, the app still serves 200s — with NO cache at all: every render a
     // full recompute and the provisioned Redis unused, which is why the gap
