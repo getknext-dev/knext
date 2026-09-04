@@ -47,8 +47,8 @@ const MUTATIONS = [
       'a version mismatch stops being a refusal — npm silently swapped in the PUBLISHED package ' +
       'and the runtime-hardening gate proves bytes nobody in this repo built',
     subject: 'src',
-    anchor: '      if (actual !== expected) {',
-    replacement: '      if (false && actual !== expected) {',
+    anchor: '    if (entry.version !== expected) {',
+    replacement: '    if (false && entry.version !== expected) {',
   },
   {
     id: 'M2',
@@ -57,9 +57,8 @@ const MUTATIONS = [
       'an @getknext/* that never landed is SKIPPED instead of refused — "absent" reading as ' +
       '"nothing to compare" is exactly how the presence-only assertion failed in the first place',
     subject: 'src',
-    anchor: '      if (!existsSync(installed)) {',
-    replacement:
-      '      if (!existsSync(installed)) {\n        continue;\n      }\n      if (false) {',
+    anchor: '    if (!entry) {',
+    replacement: '    if (!entry) {\n      continue;\n    }\n    if (false) {',
   },
   {
     id: 'M3',
@@ -145,9 +144,9 @@ const NEGATIVE = {
   expect: 'green',
   claim: 'a refusal MESSAGE is reworded — the guard asserts behaviour, not prose',
   subject: 'src',
-  anchor: "            'land, so whatever the e2e proves, it is not the shipped closure.',",
+  anchor: "          'whatever the e2e proves, it is not the shipped closure.',",
   replacement:
-    "            'land (reworded by the negative control), so whatever the e2e proves, it is not the shipped closure.',",
+    "          'whatever the e2e proves, it is not the shipped closure (reworded by the negative control).',",
 };
 
 const ALL = [...MUTATIONS, NEGATIVE];
