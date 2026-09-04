@@ -165,7 +165,7 @@ today is cheap and belongs to whoever reads the graph, not whoever merged: `grap
 divergence as "re-run the AST pass", not as a reason to distrust the whole graph. The hook above
 is what would convert this from an expectation into a gate.
 
-## Step 10 — clean up after every successful merge
+## Step 10 — clean up after every successful merge, and at every review checkpoint
 
 Do all four. Each has bitten this project.
 
@@ -174,6 +174,14 @@ Do all four. Each has bitten this project.
   it were current.
 - **Close the multiplexer panes** those agents occupied (`herdr pane close <id>`). Never close a
   pane you did not create — other sessions and editor panes are not yours to reap.
+- **Reap unused agents mid-sprint, not only at merge time** (founder-directed, 2026-09-04). An
+  agent that turned out to be unusable — spawned in a mode that cannot report, superseded by a
+  respawn, or whose task was reassigned — is "finished" the moment you stop waiting on it, even
+  though it never produced a verdict. Sweep at every review checkpoint: `TaskList` + `herdr pane
+  list`, then `TaskStop` and close every pane whose agent nothing is waiting on. The precedent:
+  four reviewer agents spawned in a mailbox mode whose tool set could not send results sat idle
+  for hours holding panes, while working replacements ran alongside them — the sweep was only
+  triggered by a human noticing the pane clutter.
 - **Remove the git worktrees.** `git worktree remove <path> --force`, then `git worktree prune`.
   Verify the work is pushed first: compare the worktree's `HEAD` against `origin/<branch>`.
 - **Delete the merged local branch.** It will refuse while a worktree still holds it — that refusal
