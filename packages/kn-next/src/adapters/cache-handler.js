@@ -153,6 +153,21 @@ let RETRY_COOLDOWN_MS = envMs('REDIS_RETRY_COOLDOWN_MS', 5000);
  * nothing.
  */
 function assertTestSeamEnabled(name) {
+  // UNCONDITIONAL in production, flag or no flag (T6b). The opt-in is an env
+  // var on a published subpath, and anything that can set an env var in the
+  // app's process — an npm postinstall, a compromised transitive dep, a
+  // Dockerfile `ENV` copied from a blog post — could otherwise re-enable a seam
+  // that repoints the process-wide cache. There is no legitimate production
+  // caller of these two, so the flag has nothing to unlock here. The scan that
+  // moves the seams off the published subpath entirely is still the real fix;
+  // this is the half that costs nothing and closes the re-enable path today.
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      `knext: ${name} is a TEST-ONLY seam on a published module and is REFUSED under ` +
+        'NODE_ENV=production regardless of KNEXT_TEST_SEAMS — it repoints the process-wide ' +
+        'cache. Nothing legitimate calls it in a production process.',
+    );
+  }
   if (process.env.KNEXT_TEST_SEAMS !== '1') {
     throw new Error(
       `knext: ${name} is a TEST-ONLY seam on a published module — it repoints ` +

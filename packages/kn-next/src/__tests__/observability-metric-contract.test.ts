@@ -25,13 +25,17 @@
  */
 
 import { describe, expect, it } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
     dashboardExprs,
+    docTokenResolves,
     expandFamily,
+    extractDocMetricTokens,
     extractMetricNames,
+    fencedDocSection,
     parsePrometheusRules,
     scanBunexecMetrics,
     scanNameConstants,
@@ -472,5 +476,96 @@ describe("extractor guards (fail-first)", () => {
                 expr: "sum(rate(a_total[5m])) > 1",
             },
         ]);
+    });
+});
+
+// ── The DOCS side (S5): prose is the third consumer of the contract ─────────
+
+/**
+ * #792 closed alerts-vs-emitters and dashboards-vs-emitters. The docs were
+ * swept BY HAND, which is the mechanism that fails silently: renaming an
+ * emitted metric moves the set, every alert and panel reds — and every prose
+ * reference to the old name keeps reading perfectly correct. One of these files
+ * is PUBLISHED and user-facing.
+ *
+ * So the same scan runs over the docs. Discovered by walking the tracked tree,
+ * never enumerated: a new doc naming a metric is covered the day it lands,
+ * which an enumerated list is exactly how to miss.
+ */
+const DOC_FILES = execFileSync(
+    "git",
+    ["ls-files", "docs", "apps/docs/content", "README.md"],
+    { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 },
+)
+    .split("\n")
+    .filter((f) => /\.mdx?$/.test(f));
+
+const ALL_EMITTED = allowed(["bunexec", "operator", "node-legacy", "external"]);
+
+describe("every metric a DOC names is one something emits (S5)", () => {
+    it("finds doc files at all — a vacuous scan would pass everything", () => {
+        expect(DOC_FILES.length).toBeGreaterThan(50);
+        expect(DOC_FILES).toContain("apps/docs/content/docs/observability.mdx");
+        expect(DOC_FILES).toContain("docs/observability/metrics.md");
+        expect(DOC_FILES).toContain("docs/security/threat-model.md");
+    });
+
+    it("resolves every backticked knext metric name in every doc", () => {
+        const dead: string[] = [];
+        let checked = 0;
+        for (const file of DOC_FILES) {
+            for (const token of extractDocMetricTokens(
+                read(join(REPO_ROOT, file)),
+            )) {
+                checked += 1;
+                if (!docTokenResolves(token, ALL_EMITTED)) {
+                    dead.push(`${file}: ${token}`);
+                }
+            }
+        }
+        // The floor is the anti-vacuity half: an extractor that silently stopped
+        // matching would otherwise report zero dead names and pass.
+        expect(checked).toBeGreaterThan(20);
+        expect(
+            dead,
+            "these docs name metrics NOTHING emits — a rename landed without the prose:\n" +
+                dead.join("\n"),
+        ).toEqual([]);
+    });
+});
+
+/**
+ * The security-relevant half. `docs/security/threat-model.md` enumerates what a
+ * cross-namespace scraper can read off `:9091`, and since ADR-0048 the compiled
+ * binary — not the retired node supervisor — is what serves that port. A section
+ * that lists node-legacy series as `:9091` disclosure OVERSTATES the exposure,
+ * which the document itself says erodes it as surely as understating one.
+ *
+ * So the fenced section may name ONLY series the bun-exec runtime emits, and a
+ * missing fence is a failure, never a skip.
+ */
+describe("the threat model's :9091 disclosure list is the bunexec set (S5)", () => {
+    const THREAT_MODEL = read(join(REPO_ROOT, "docs/security/threat-model.md"));
+
+    it("the fenced section exists — a reflow cannot silently unhook the check", () => {
+        expect(
+            fencedDocSection(THREAT_MODEL, "9091-disclosure"),
+            "the <!-- metric-contract:9091-disclosure --> fence is gone from the threat model",
+        ).not.toBeNull();
+    });
+
+    it("names only series the compiled binary actually emits on :9091", () => {
+        const section = fencedDocSection(THREAT_MODEL, "9091-disclosure");
+        const tokens = extractDocMetricTokens(section ?? "");
+        expect(
+            tokens.length,
+            "the fenced section names no metrics at all",
+        ).toBeGreaterThan(1);
+        const notOnPort = tokens.filter((t) => !docTokenResolves(t, BUNEXEC));
+        expect(
+            notOnPort,
+            "the threat model claims :9091 discloses series the bun-exec runtime does not emit:\n" +
+                notOnPort.join("\n"),
+        ).toEqual([]);
     });
 });

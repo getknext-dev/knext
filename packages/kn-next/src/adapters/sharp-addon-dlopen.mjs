@@ -37,7 +37,9 @@
  * anything to the OS loader. A mismatch or an unlisted payload is FATAL. An
  * ABSENT manifest is a warning, not a failure: images built before this landed
  * have none, and failing closed on absence would turn a supply-chain fix into a
- * fleet outage.
+ * fleet outage. That permissiveness is a DATED exception with an off switch (S2)
+ * — `KNEXT_REQUIRE_NATIVE_INTEGRITY=1` makes absence fatal today, and the expiry
+ * on the exception itself lives in `scripts/lib/native-integrity-policy.mjs`.
  *
  * ## Why everything here is inline
  *
@@ -140,10 +142,30 @@ function sha256(file) {
 function verifyAgainstManifest(addon) {
   const manifestPath = findManifest(dirname(addon));
   if (manifestPath === null) {
+    // S2. Absence is the ONE permissive branch here, and it is a dated
+    // exception (`scripts/lib/native-integrity-policy.mjs`), not a permanent
+    // default: an image built before native-tree pinning has no manifest, so
+    // refusing on absence would turn a supply-chain fix into a fleet outage.
+    // `KNEXT_REQUIRE_NATIVE_INTEGRITY=1` turns the exception off for an operator
+    // who knows every image in their fleet is current — exact value `1`, so a
+    // stray `0`/`false` cannot fail a fleet closed by accident.
+    //
+    // The exception's EXPIRY is deliberately not read here: a wall-clock branch
+    // in the runtime would brick running pods at midnight on the expiry date.
+    // The clock reds CI instead (`tests/native-integrity-absence-exception.test.ts`).
+    if (process.env.KNEXT_REQUIRE_NATIVE_INTEGRITY === '1') {
+      throw new Error(
+        `knext: refusing to dlopen — no native integrity manifest beside ${addon}, and\n` +
+          '  KNEXT_REQUIRE_NATIVE_INTEGRITY=1 requires one. This image predates native-tree\n' +
+          '  integrity pinning; rebuild it with a current `kn-next build`, or unset the variable\n' +
+          '  to accept an UNVERIFIED native tree.',
+      );
+    }
     console.warn(
       `knext: no native integrity manifest beside ${addon} — loading it UNVERIFIED.\n` +
         '  images built before native-tree integrity pinning have none; rebuild with a current\n' +
-        '  `kn-next build` to get one, after which a mismatch becomes a hard failure.',
+        '  `kn-next build` to get one, after which a mismatch becomes a hard failure.\n' +
+        '  set KNEXT_REQUIRE_NATIVE_INTEGRITY=1 to make this absence a hard failure instead.',
     );
     return;
   }

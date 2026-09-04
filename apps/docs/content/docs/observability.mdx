@@ -22,13 +22,14 @@ observability: {
 
 ## Metrics (Prometheus)
 
-The app exposes a Prometheus scrape endpoint at **`GET /api/metrics`**. A single shared registry
-serves both the V8 bytecode-cache metrics and the RUM Web Vitals histograms, so all series merge
-into one scrape.
+The runtime exposes a Prometheus endpoint on **port `9091`**, at `/metrics` — separate from the
+app's `$PORT`/3000. That is the port knext ships scrape configuration for: the pod is annotated with
+`prometheus.io/port: "9091"` and `prometheus.io/path: /metrics`, and the shipped `PodMonitor`
+targets nothing else. The compiled executable serves it in-process; there is no sidecar.
 
-In addition, the server runs a **metrics sidecar on port `9091`** (separate from the app's
-`$PORT`/3000), exposing `/metrics`. The pod is annotated with `prometheus.io/port: "9091"` and
-`prometheus.io/path: /metrics` for scrape discovery.
+Your app may additionally serve its own **`GET /api/metrics`** route — that is where the RUM Web
+Vitals histograms below land. It is a route in your application, not part of the runtime, and the
+default scrape does **not** reach it.
 
 The series the shipped scrape exposes:
 

@@ -7,7 +7,7 @@
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 // port for discovery cannot turn a real boot failure into a hang or a skip. Its
 // own guard: apps/file-manager/child-ports.test.ts.
 import { freePorts, waitForListeningPort } from './e2e-support/child-ports';
+import { installShippedPackages } from './e2e-support/shipped-runner';
 
 /**
  * SHIPPED-PATH SIGTERM-drain e2e for the knext runtime entry.
@@ -210,50 +211,12 @@ beforeAll(() => {
   //    runner. Flat npm layout: @getknext/core AND its prod deps (prom-client,
   //    pino) all land under <runner>/node_modules, exactly how the CMD's
   //    resolution sees them for a consumer of the published packages.
+  //    The pack + install + PROVENANCE check lives in `e2e-support/shipped-runner`
+  //    (T6a) — it asserts the installed @getknext/* versions ARE the workspace's,
+  //    so a rewritten `workspace:^` range that npm satisfies from the public
+  //    registry reds here instead of silently proving a published dependency.
   const repoRoot = resolve(APP_DIR, '../..');
-  const packDirs: string[] = [];
-  const tarballs: string[] = [];
-  for (const pkg of ['packages/lib', 'packages/db', 'packages/kn-next']) {
-    // `bun pm pack`, NOT `npm pack`: core depends on lib/db via `workspace:^`,
-    // which npm leaves verbatim (the install then dies with
-    // EUNSUPPORTEDPROTOCOL) while bun rewrites it to a real version — the
-    // same reason install-smoke.mjs packs with bun.
-    // Rooted at tmpdir() directly — the #880 guard scans mkdtemp call sites
-    // and cannot see that a nested parent is itself temp-rooted.
-    const dest = mkdtempSync(join(tmpdir(), 'knext-core-pack-'));
-    const packed = spawnSync('bun', ['pm', 'pack', '--destination', dest], {
-      cwd: join(repoRoot, pkg),
-      encoding: 'utf8',
-      env: childEnv(),
-    });
-    const tgz = readdirSync(dest)
-      .filter((f) => f.endsWith('.tgz'))
-      .map((f) => join(dest, f))
-      .sort()
-      .at(-1);
-    if (packed.status !== 0 || !tgz) {
-      throw new Error(`bun pm pack failed for ${pkg}. stderr:\n${packed.stderr}`);
-    }
-    packDirs.push(dest);
-    tarballs.push(tgz);
-  }
-  const inst = spawnSync('npm', ['install', '--omit=dev', '--no-audit', '--no-fund', ...tarballs], {
-    cwd: runnerRoot,
-    encoding: 'utf8',
-    env: childEnv(),
-  });
-  for (const d of packDirs) rmSync(d, { recursive: true, force: true });
-  if (
-    inst.status !== 0 ||
-    !existsSync(join(runnerRoot, 'node_modules/@getknext/core/dist/adapters/node-server.js')) ||
-    !existsSync(join(runnerRoot, 'node_modules/prom-client')) ||
-    !existsSync(join(runnerRoot, 'node_modules/pino'))
-  ) {
-    throw new Error(
-      `npm install of the packed @getknext/* tarballs did not produce a runnable ` +
-        `@getknext/core (node-server.js + prom-client + pino). stderr:\n${inst.stderr}`,
-    );
-  }
+  installShippedPackages({ repoRoot, runnerRoot, env: childEnv() });
 }, 180_000);
 
 afterAll(() => {

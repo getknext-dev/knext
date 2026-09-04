@@ -10,7 +10,7 @@ Related: [SLOs / SLIs](./slos.md) (the objectives these signals feed) ·
 spans these counters mirror) · [structured logging + correlation IDs](./logging.md)
 · [OTel tracing backend](../adr/0012-otel-tracing-backend.md).
 
-## Two scrape targets
+## Scrape targets
 
 | Target | Process | Port / path | Series |
 | --- | --- | --- | --- |

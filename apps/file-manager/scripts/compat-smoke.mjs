@@ -41,6 +41,7 @@ import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolveSmokeMode } from './compat-smoke-mode.mjs';
 import { formatLaneSummary, loadQuarantineLedger } from './compat-smoke-quarantines.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -61,8 +62,8 @@ const HOST = '127.0.0.1';
 // `singleExec` true by default, so the local run and the CI run take the same
 // branch instead of diverging silently.
 const SERVER_PATH = process.env.SERVER_PATH || path.resolve(APP_DIR, 'knext-smoke-exec');
-// Runtime binary. Defaults to SERVER_PATH so `SERVER_CMD === SERVER_PATH`
-// (single-exec) holds without the caller setting two variables to one value.
+// Runtime binary. Defaults to SERVER_PATH so single-exec holds without the
+// caller setting two variables to one value.
 // RUNTIME=node|bun is still honoured for a standalone tree passed explicitly.
 const SERVER_CMD =
   process.env.SERVER_CMD ||
@@ -70,7 +71,18 @@ const SERVER_CMD =
 // Single-executable mode (ADR-0048): SERVER_CMD *is* the server. Module-scoped
 // because both the spawn (no script arg, no preload) and check (h) (no
 // --version probe — the binary would boot a second server) branch on it.
-const singleExec = SERVER_CMD === SERVER_PATH;
+//
+// T6c: derived from `realpathSync` of BOTH sides, not from `===` on two strings.
+// A symlink, a relative spelling or a `./` prefix names the same file and used
+// to flip the runner into the standalone branch silently — which stages a
+// preload, hands the binary a script argument it does not accept, and re-enters
+// the `--version` probe that hangs. `SMOKE_MODE` may state the mode explicitly;
+// stating one the filesystem contradicts is a loud failure.
+const { singleExec } = resolveSmokeMode({
+  serverCmd: SERVER_CMD,
+  serverPath: SERVER_PATH,
+  smokeMode: process.env.SMOKE_MODE,
+});
 
 // #188 — Bun ≤1.3.x keep-alive mitigation preload (bun runtime only; the Node
 // boot args stay byte-identical). Resolved from the built workspace package,

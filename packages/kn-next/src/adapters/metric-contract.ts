@@ -146,6 +146,61 @@ export function seriesNames(families: Map<string, string>): Set<string> {
 }
 
 /**
+ * Every knext metric name a MARKDOWN document names, in backticks (S5).
+ *
+ * The third side of the contract. #792 closed alerts-vs-emitters and
+ * dashboards-vs-emitters; the docs were swept by hand, which is the mechanism
+ * that fails silently — a rename moves the emitted set and every prose reference
+ * to the old name simply keeps reading correct. Nothing errors, nobody notices,
+ * and the doc is published (`apps/docs/content/docs/observability.mdx` is
+ * user-facing).
+ *
+ * Only BACKTICKED tokens count. Prose naming a metric without code formatting is
+ * not a claim this can resolve, and widening the match to bare words drags in
+ * every `knext_`-prefixed identifier that is not a metric at all.
+ *
+ * A trailing `*` is kept: docs legitimately name a FAMILY (`knext_coldstart_*`),
+ * and the caller resolves that as a prefix against at least one emitted series.
+ */
+export function extractDocMetricTokens(markdown: string): string[] {
+    const out = new Set<string>();
+    for (const m of markdown.matchAll(/`((?:knext|kn_next)_[a-z0-9_]*\*?)`/g)) {
+        out.add(m[1] as string);
+    }
+    return [...out].sort();
+}
+
+/**
+ * Does `token` — an exact name or a `prefix_*` family — resolve against
+ * `emitted`?
+ */
+export function docTokenResolves(
+    token: string,
+    emitted: ReadonlySet<string>,
+): boolean {
+    if (token.endsWith("*")) {
+        const prefix = token.slice(0, -1);
+        for (const name of emitted) if (name.startsWith(prefix)) return true;
+        return false;
+    }
+    return emitted.has(token);
+}
+
+/**
+ * The text between `<!-- metric-contract:<id> start -->` and its `end` marker.
+ *
+ * FAILS CLOSED: a missing or unbalanced fence returns `null`, and the caller
+ * treats that as a failure. A doc section that quietly stops being checked
+ * because someone reflowed a paragraph is the exact decay this guards against.
+ */
+export function fencedDocSection(markdown: string, id: string): string | null {
+    const start = markdown.indexOf(`<!-- metric-contract:${id} start -->`);
+    const end = markdown.indexOf(`<!-- metric-contract:${id} end -->`);
+    if (start === -1 || end === -1 || end <= start) return null;
+    return markdown.slice(start, end);
+}
+
+/**
  * PromQL tokens that are NOT metric names: functions, keywords, aggregation
  * modifiers, and the label names this repo's queries match on. Anything left
  * after this filter is treated as a metric selector, which is the fail-closed
