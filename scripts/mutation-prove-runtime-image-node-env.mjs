@@ -146,8 +146,8 @@ prover.baseline();
 // pointed at this spec rather than exiting 0 on a file it never collected.
 prover.proveCanSeeRed({
   subject: 'spec',
-  anchor: '  return /\\bNODE_ENV\\s*=\\s*production\\b/.test(code);',
-  replacement: '  return /\\bNODE_ENV_CANARY\\s*=\\s*production\\b/.test(code);',
+  anchor: '  return /\\bNODE_ENV\\s*=\\s*production\\b/.test(finalStage(dockerfile));',
+  replacement: '  return /\\bNODE_ENV_CANARY\\s*=\\s*production\\b/.test(finalStage(dockerfile));',
 });
 
 console.log('\n=== mutations ===');
