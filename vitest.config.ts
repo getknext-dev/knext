@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import react from '@vitejs/plugin-react';
 import { configDefaults, defineConfig } from 'vitest/config';
+import { COVERAGE_EXCLUDE, COVERAGE_INCLUDE } from './scripts/lib/coverage-policy.mjs';
 import { importsFrom } from './scripts/lib/test-framework-import.mjs';
 
 // Resolve @getknext/lib subpaths to source (not dist) in tests.
@@ -121,50 +122,31 @@ export default defineConfig({
     ],
     coverage: {
       provider: 'v8',
-      reporter: ['text', 'text-summary', 'json', 'json-summary', 'html'],
+      // `lcov` is what the merged gate reads. This run supplies the honest
+      // DENOMINATOR — every `include` match enumerated, untouched files at 0% —
+      // while `scripts/bun-test.mjs` supplies almost all of the numerator.
+      reporter: ['text', 'text-summary', 'json', 'json-summary', 'html', 'lcov'],
       // Honest denominator: an explicit `include` makes Vitest count every
       // matching source file, not only the ones a test happens to import — so
       // adding an untested file can no longer silently RAISE the percentage.
       // (Vitest 4 measures all `include` matches by default; the v3 `all` flag
       // was removed.)
-      include: ['packages/*/src/**/*.{ts,tsx}'],
-      exclude: [
-        ...(configDefaults.coverage.exclude ?? []),
-        // Untracked local cruft (0 tracked files in git) — never repo code.
-        '**/packages/admin/**',
-        '**/packages/knext/**',
-        // Tests, type-only decls, and generated/index barrels carry no logic to cover.
-        '**/*.test.{ts,tsx}',
-        '**/*.d.ts',
-        '**/__tests__/**',
-        '**/__mocks__/**',
-        '**/*.config.{ts,js,mjs}',
-      ],
-      // Regression ratchet: floors set just below the measured baseline
-      // (@getknext/core ~78% lines / ~72% branches on 2026-07-24; lib/db/ui already
-      // >90%). CI fails if coverage drops below these — they are RAISED toward 90
-      // as the @getknext/core coverage push lands. See docs/benchmarks/coverage-baseline.md.
-      thresholds: {
-        statements: 77,
-        branches: 70,
-        functions: 74,
-        lines: 77,
-        // Per-package floor for @getknext/core (packages/kn-next). The @getknext/core
-        // coverage push (2026-07) raised its lines to ~90% (from ~78%); this glob
-        // threshold pins that per-package so the aggregate ratchet above can no
-        // longer mask a regression in this one package (reviewers flagged
-        // aggregate-only thresholds). Floors sit at/just below the measured
-        // achieved numbers — lines 90.1 / statements 89.4 / functions 87.5 /
-        // branches 82.8 — so CI fails on any drop below these without red-lining
-        // the current state. node-server.ts (the spawn+sidecar runtime entry) is
-        // the remaining 0%-covered residual; see the coverage report.
-        'packages/kn-next/src/**': {
-          lines: 90,
-          statements: 88,
-          functions: 87,
-          branches: 80,
-        },
-      },
+      //
+      // Shared with `scripts/check-coverage.mjs` so the two halves of the gate
+      // cannot drift into two different denominators.
+      include: COVERAGE_INCLUDE,
+      exclude: [...(configDefaults.coverage.exclude ?? []), ...COVERAGE_EXCLUDE],
+      // NO `thresholds:` here — deliberately (#884).
+      //
+      // After the bun migration this run collects 3 test files out of 338, so
+      // its numerator is a rounding error while its denominator is the whole
+      // tree: the floors were being checked against 1.37%. They now live in
+      // `scripts/lib/coverage-policy.mjs` and are enforced by
+      // `node scripts/check-coverage.mjs`, over the MERGE of this report and the
+      // ~338 per-file reports from `scripts/bun-test.mjs --coverage`.
+      //
+      // `tests/coverage-gate.test.ts` fails if a `thresholds:` block reappears
+      // here — two copies of a floor means one is wrong and nothing says which.
     },
   },
 });

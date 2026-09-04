@@ -72,6 +72,8 @@ package-lock.json
 
 # Testing
 coverage/
+# One lcov per test file, from `node scripts/bun-test.mjs --coverage` (#884).
+coverage-bun/
 .nyc_output/
 
 # Compiled Bun binaries (output of: bun build --compile)

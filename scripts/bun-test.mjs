@@ -18,21 +18,39 @@
  *
  * ## Coverage
  *
- * `bunfig.toml` deliberately does NOT set `coverage = true`. A global 0.8
- * threshold applied to a single file is meaningless and fails every run, which
- * is what blocked per-file isolation in the first place. Pass `--coverage` here
- * and it is applied once, to the whole set.
+ * `--coverage` is applied PER FILE, because that is the only place it can go in
+ * a one-process-per-file runner — each spawn measures only what it loaded. The
+ * previous version of this paragraph claimed the opposite ("applied once, to the
+ * whole set"), which is what let the gate rot unnoticed (#884).
+ *
+ * So each spawn writes its own lcov into `coverage-bun/<n>-<file>.info`, and
+ * `scripts/check-coverage.mjs` merges all of them with vitest's report before
+ * checking any floor. Two measured facts hold that together:
+ *
+ *   - bun writes `lcov.info` into ONE directory per process, so parallel spawns
+ *     sharing a directory silently overwrite each other — hence a unique
+ *     `--coverage-dir` per spawn;
+ *   - `coverageDir` in `bunfig.toml` SILENTLY OVERRIDES `--coverage-dir` (bun
+ *     1.4.0: the flag is accepted, ignored, and no error is printed). That key
+ *     is therefore absent from `bunfig.toml`, and
+ *     `tests/bun-test-coverage-emission.test.ts` fails if it comes back.
+ *
+ * `bunfig.toml` also sets no `coverage = true` and no `coverageThreshold`: a
+ * global threshold applied to a single file is meaningless and fails every run,
+ * which is what blocked per-file isolation in the first place. The floors are
+ * the merged gate's.
  *
  * Usage:
  *   node scripts/bun-test.mjs [path...] [--coverage] [--concurrency=N] [--bun=PATH]
  */
 
 import { execFileSync, spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { cpus } from 'node:os';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { blankNonCode } from './lib/blank-non-code.mjs';
+import { BUN_COVERAGE_DIR } from './lib/coverage-policy.mjs';
 import { importsFrom } from './lib/test-framework-import.mjs';
 
 const argv = process.argv.slice(2);
@@ -162,6 +180,24 @@ if (files.length === 0) {
 
 console.log(`bun test — ${files.length} file(s), ${concurrency} at a time, isolated per process\n`);
 
+/**
+ * Per-file lcov, collected for `scripts/check-coverage.mjs` to merge.
+ *
+ * WIPED at the start of a coverage run. Stale reports from a previous run would
+ * keep crediting lines of files that no longer exist, which raises the number
+ * without covering anything — the same dishonesty as a shrinking denominator,
+ * from the other end.
+ */
+// `KNEXT_BUN_COVERAGE_DIR` redirects the pile. Not a convenience: a test that
+// exercises this runner is itself part of the suite, so a nested `--coverage`
+// run would otherwise WIPE the outer run's reports halfway through it.
+const COVERAGE_OUT = resolve(REPO_ROOT, process.env.KNEXT_BUN_COVERAGE_DIR ?? BUN_COVERAGE_DIR);
+const COVERAGE_RAW = join(COVERAGE_OUT, '.raw');
+if (withCoverage) {
+  if (existsSync(COVERAGE_OUT)) rmSync(COVERAGE_OUT, { recursive: true, force: true });
+  mkdirSync(COVERAGE_RAW, { recursive: true });
+}
+
 const failures = [];
 let done = 0;
 
@@ -216,13 +252,30 @@ function runFile(file) {
     // global would let a `typeof document` probe take the browser branch, which
     // is exactly the kind of pass that means nothing.
     if (needsDom(file)) args.push('--preload', DOM_PRELOAD);
-    if (withCoverage) args.push('--coverage');
+    // One coverage directory PER SPAWN: bun always names its report `lcov.info`,
+    // so concurrent spawns sharing a directory overwrite each other and the
+    // merge silently loses every file but the last writer.
+    const slug = file.replace(/[/\\]/g, '__');
+    const covDir = join(COVERAGE_RAW, slug);
+    if (withCoverage) {
+      args.push('--coverage', '--coverage-reporter=lcov', `--coverage-dir=${covDir}`);
+    }
     const child = spawn(bunBin, args, { cwd: REPO_ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = '';
     child.stdout.on('data', (d) => (output += d));
     child.stderr.on('data', (d) => (output += d));
     child.on('close', (code) => {
       done++;
+      // Flatten each spawn's report to `coverage-bun/<slug>.info`, so the
+      // directory is a readable pile of per-file lcov rather than a tree of
+      // identically-named files.
+      if (withCoverage) {
+        const produced = join(covDir, 'lcov.info');
+        if (existsSync(produced)) {
+          cpSync(produced, join(COVERAGE_OUT, `${slug}.info`));
+          rmSync(covDir, { recursive: true, force: true });
+        }
+      }
       const ok = code === 0;
       if (!ok) failures.push({ file, output });
       process.stdout.write(`  ${ok ? 'ok  ' : 'FAIL'} [${done}/${files.length}] ${file}\n`);

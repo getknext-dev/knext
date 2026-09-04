@@ -203,12 +203,27 @@ jobs:
       # non-zero on any failing file, and `tests/runner-partition.test.ts` asserts
       # every test file is claimed by exactly one of the two runners, so "ran
       # under neither" cannot hide here.
+      #
+      # `--coverage` here is NOT optional (#884). It is one lcov per spawned test
+      # file, in `coverage-bun/`, and it is almost the entire NUMERATOR of the
+      # coverage gate below. Dropping it would leave that gate measuring vitest's
+      # 3 files, which is how it came to report 1.37% against a 77% floor.
       - name: Run tests (bun — the suite)
-        run: node scripts/bun-test.mjs
+        run: node scripts/bun-test.mjs --coverage
 
+      # The vitest half. Its 3 test files barely move the numerator, but its
+      # `include` enumeration is the honest DENOMINATOR — every source file
+      # listed, untouched ones at 0%.
       - name: Run tests (vitest — the 3 files that cannot run under bun)
         run: bun x vitest run --coverage
-      
+
+      # The gate itself: merge both runners' lcov, then check the floors from
+      # scripts/lib/coverage-policy.mjs. It must run AFTER both steps above, and
+      # it fails closed on a missing report — a coverage gate that goes green
+      # because it found nothing to measure is the defect this replaced.
+      - name: Coverage gate (merged across both runners)
+        run: node scripts/check-coverage.mjs
+
       - name: Upload coverage reports
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         if: always()
