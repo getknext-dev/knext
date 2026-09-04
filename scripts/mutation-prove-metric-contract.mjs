@@ -148,6 +148,9 @@ const MUTATIONS = [
       'subset check cannot see this direction, and a new series on that port IS new ' +
       'cross-tenant disclosure. Spec review, round 1',
     subject: 'bunexecTemplate',
+    // `.hbs` is not in the harness's comment table; the file is JS inside a
+    // handlebars template, so `//` is the right marker syntax.
+    options: { commentPrefix: '//' },
     anchor: "    '# TYPE knext_bunexec_http_inflight_requests gauge',",
     replacement:
       "    '# TYPE knext_bunexec_http_inflight_requests gauge',\n    '# TYPE knext_bunexec_tenant_id_total counter',",
