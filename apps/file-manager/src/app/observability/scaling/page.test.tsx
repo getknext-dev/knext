@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, jest, mock, spyOn } from '
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { scanBunexecMetrics } from '../../../../../../packages/kn-next/src/adapters/metric-contract';
 import { APP_NAME_ENV, PROMETHEUS_URL_ENV, scalingQueries } from '../_prom/query';
 import { NO_DATA, UNAVAILABLE } from '../_ui/format';
 
@@ -111,20 +112,18 @@ function seededFetch(url: unknown, opts: SeedOptions = {}): Response {
           ),
     );
   }
-  if (raw.includes('knext_http_inflight_requests')) {
+  if (raw.includes('knext_bunexec_http_inflight_requests')) {
     return jsonResponse(vector('7'));
   }
-  if (raw.includes('knext_http_requests_total')) {
-    // Warm-start ratio: derived from cold starts vs served requests.
-    return jsonResponse(matrix({ value: '97.5' }));
-  }
-  if (raw.includes('knext_coldstart_duration_seconds')) {
+  if (raw.includes('knext_bunexec_startup_duration_seconds')) {
+    // Gauge-derived startup panels (the dashboard's shapes): count / p50 / max.
     if (opts.coldStartEmpty) return jsonResponse(EMPTY_MATRIX);
-    return jsonResponse(matrix({ value: raw.includes('0.99') ? '2.5' : '1.2' }));
-  }
-  if (raw.includes('knext_coldstart_total')) {
-    if (opts.coldStartEmpty) return jsonResponse(EMPTY_MATRIX);
-    return jsonResponse(matrix({ value: '0.42' }));
+    // Discriminate on space-free fragments: URLSearchParams encodes spaces as
+    // '+', which decodeURIComponent does NOT turn back — 'count by' never
+    // matches the raw query string.
+    if (raw.includes('quantile')) return jsonResponse(matrix({ value: '1.2' }));
+    if (raw.includes('max')) return jsonResponse(matrix({ value: '2.5' }));
+    return jsonResponse(matrix({ value: '3' }));
   }
   if (raw.includes('knext_db_wake_duration_seconds')) {
     const p99 = raw.includes('0.99');
@@ -260,9 +259,9 @@ describe('scaling page authorized render (ok path)', () => {
     // Assert on rendered VALUE cells — a bare toContain('3') / toContain('7')
     // matches almost any HTML (the code-review's "weak assertion" finding).
     expect(html).toContain('>3<'); // replicas (2 + 1 across revisions)
-    expect(html).toContain('>0.42<'); // cold starts /s
-    expect(html).toContain('>1200 ms<'); // cold-start p50 = 1.2s
-    expect(html).toContain('>2500 ms<'); // cold-start p99 = 2.5s
+    expect(html).toContain('>3<'); // starts observed (gauge count)
+    expect(html).toContain('>1200 ms<'); // startup p50 = 1.2s
+    expect(html).toContain('>2500 ms<'); // startup max = 2.5s
     expect(html).toContain('writer');
     expect(html).toContain('reader');
     expect(html).toContain('>80 ms<'); // writer DB-wake p50 = 0.08s
@@ -308,7 +307,7 @@ describe('scaling page — kube-state-metrics absent is a DISTINCT state', () =>
     // And no replica VALUE is rendered at all — not a zero, not "no data yet".
     expect(html).not.toMatch(/Replicas \((latest|now)\)/);
     // The rest of the page (knext-owned series) still renders.
-    expect(html).toContain('>0.42<');
+    expect(html).toContain('>3<'); // starts observed still renders
   });
 
   it('does NOT claim kube-state-metrics is missing when the series is present', async () => {
@@ -378,21 +377,27 @@ describe('scaling page — every query is scoped to THIS app (#516 review)', () 
   });
 });
 
-describe('scaling page — warm-start ratio (plan §5.3 AC)', () => {
-  it('renders the warm-start ratio derived from cold starts vs served requests', async () => {
+describe('scaling page — startup panels (stability sprint D1)', () => {
+  it('renders the gauge-derived startup rows and has NO warm-start ratio', async () => {
+    // The warm-start ratio was REMOVED with its inputs: the entry emits a
+    // per-pod startup gauge, not a cold-start counter, so the ratio is not
+    // computable from the shipped scrape — a panel over a dead series would
+    // render "no data yet" forever and read as a quiet system.
     mockFetch();
 
     const html = await renderPage();
 
-    expect(html).toMatch(/warm start/i);
-    expect(html).toContain('97.5');
+    expect(html).toContain('Starts observed');
+    expect(html).toMatch(/Startup p50/);
+    expect(html).toMatch(/Startup max/);
+    expect(html).not.toMatch(/warm start ratio/i);
   });
 });
 
 describe('scaling page — partial Prometheus failure ≠ no data', () => {
   it('marks the failed panel unavailable while healthy panels still render', async () => {
     spyOnFetchImpl(async (u) => {
-      if (String(u).includes('knext_coldstart')) {
+      if (String(u).includes('knext_bunexec_startup_duration_seconds')) {
         throw new Error('connect ECONNREFUSED');
       }
       return seededFetch(u);
@@ -419,6 +424,10 @@ describe('scaling page — partial Prometheus failure ≠ no data', () => {
 describe('scaling PromQL ↔ metrics.ts + scale-to-zero dashboard parity', () => {
   const REPO_ROOT = resolve(import.meta.dirname, '../../../../../..');
   const METRICS_SRC = resolve(REPO_ROOT, 'packages/kn-next/src/adapters/metrics.ts');
+  const RUNTIME_CONTRACT_TEMPLATE = resolve(
+    REPO_ROOT,
+    'packages/kn-next/templates/app/runtime-contract.mjs.hbs',
+  );
   const DASHBOARD = resolve(
     REPO_ROOT,
     'packages/kn-next-operator/config/grafana/dashboards/scale-to-zero.json',
@@ -457,9 +466,15 @@ describe('scaling PromQL ↔ metrics.ts + scale-to-zero dashboard parity', () =>
     return new Set(exprs.map((e) => e.replace(/\$__rate_interval/g, '5m').replace(/\$app/g, APP)));
   }
 
-  it('every knext_* series referenced by a Scaling query exists in metrics.ts', () => {
+  it('every knext_* series referenced by a Scaling query has a real emitter', () => {
+    // Two emitter sets since D1: metrics.ts (the app-registry legacy series,
+    // e.g. db-wake) and the entry template's knext_bunexec_* registrations
+    // (the shipped :9091 scrape). A query outside BOTH is dangling.
     const allowed = exportedMetricNames();
-    expect(allowed.has('knext_coldstart_total')).toBe(true);
+    for (const name of scanBunexecMetrics(readFileSync(RUNTIME_CONTRACT_TEMPLATE, 'utf8')).keys()) {
+      allowed.add(name);
+    }
+    expect(allowed.has('knext_bunexec_startup_duration_seconds')).toBe(true);
     expect(allowed.has('knext_db_wake_duration_seconds')).toBe(true);
 
     const dangling: string[] = [];
@@ -475,9 +490,9 @@ describe('scaling PromQL ↔ metrics.ts + scale-to-zero dashboard parity', () =>
     const fromDashboard = dashboardQueries();
     const mirrored = [
       QUERIES.replicas,
-      QUERIES.coldStartRate,
-      QUERIES.coldStartP50,
-      QUERIES.coldStartP99,
+      QUERIES.startsObserved,
+      QUERIES.startupP50,
+      QUERIES.startupMax,
       QUERIES.dbWakeRateByRole,
       QUERIES.dbWakeP50ByRole,
       QUERIES.dbWakeP99ByRole,

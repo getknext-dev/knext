@@ -22,7 +22,7 @@ import { isObservabilityAuthorized, observabilityToken } from './auth';
  *
  * A Vercel-"Observability-overview"-analogue: request rate, 5xx error-rate, p75 +
  * p99 latency and current in-flight concurrency, computed server-side from the
- * core `knext_http_*` series via Prometheus (`_prom/query.ts`).
+ * core `knext_bunexec_http_*` series via Prometheus (`_prom/query.ts`).
  *
  * Security + degradation (`.claude/rules/security.md` + ADR-0038):
  *  - Auth-gated, FAIL-CLOSED: unset `OBSERVABILITY_TOKEN` ⇒ deny-all; the check
@@ -34,7 +34,7 @@ import { isObservabilityAuthorized, observabilityToken } from './auth';
  *    still 200s and never crashes/hangs. All queries are server-side only; the
  *    browser receives rendered aggregates, never the Prometheus URL or a token.
  *  - Scoped to THIS app via the operator-injected `KN_APP_NAME` (the same source
- *    `adapters/metrics.ts` labels the series with). The `knext_http_*` series are
+ *    `adapters/metrics.ts` labels the series with). The `knext_bunexec_http_*` series are
  *    per-app and a cluster runs many apps, so an unscoped query would report the
  *    cluster under this app's heading; a missing/invalid scope renders a distinct
  *    "scope unknown" state and queries nothing.
@@ -94,11 +94,12 @@ function ScopeUnknown() {
       <h1>Overview</h1>
       <p>
         The <strong>metric scope for this app is unknown</strong>: <code>{APP_NAME_ENV}</code> is
-        unset or is not a valid Kubernetes name, so no query was run. The <code>knext_http_*</code>{' '}
-        series are labelled per app and a cluster runs many of them, so an unscoped query would
-        report the whole cluster&rsquo;s RED signals under this app&rsquo;s heading. The operator
-        sets <code>{APP_NAME_ENV}</code> when <code>spec.observability.enabled</code> is true; set
-        it to this app&rsquo;s <code>NextApp</code> name to enable this page.
+        unset or is not a valid Kubernetes name, so no query was run. The{' '}
+        <code>knext_bunexec_http_*</code> series are labelled per app and a cluster runs many of
+        them, so an unscoped query would report the whole cluster&rsquo;s RED signals under this
+        app&rsquo;s heading. The operator sets <code>{APP_NAME_ENV}</code> when{' '}
+        <code>spec.observability.enabled</code> is true; set it to this app&rsquo;s{' '}
+        <code>NextApp</code> name to enable this page.
       </p>
       <GrafanaLinkOut />
     </main>
@@ -196,9 +197,9 @@ export default async function OverviewPage() {
       <h1>Overview</h1>
       <p>
         RED signals for this app over the last hour — request rate, 5xx error rate, latency
-        percentiles and current concurrency, from the core <code>knext_http_*</code> metrics. Values
-        marked “{NO_DATA}” have produced no sample — that is not the same as a measured zero. Every
-        query is scoped to this app (<code>{app}</code>).
+        percentiles and current concurrency, from the core <code>knext_bunexec_http_*</code>{' '}
+        metrics. Values marked “{NO_DATA}” have produced no sample — that is not the same as a
+        measured zero. Every query is scoped to this app (<code>{app}</code>).
       </p>
       {partiallyUnavailable ? (
         <p style={{ fontSize: '0.9rem' }}>

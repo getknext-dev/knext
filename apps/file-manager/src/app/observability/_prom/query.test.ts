@@ -344,12 +344,15 @@ describe('scalingQueries — every series is scoped to THIS app', () => {
     expect(unscoped).toEqual([]);
   });
 
-  it('exposes a warm-start ratio derived from cold starts vs requests', () => {
-    expect(q.warmStartRatioPct).toContain('knext_coldstart_total');
-    expect(q.warmStartRatioPct).toContain('knext_http_requests_total');
-    // Clamped so a cold-start burst with no served requests cannot render a
-    // negative / infinite "ratio".
-    expect(q.warmStartRatioPct).toContain('clamp');
+  it('exposes gauge-derived startup queries and NO warm-start ratio', () => {
+    // The warm-start ratio was removed with its inputs (stability sprint D1):
+    // the shipped scrape has a per-pod startup GAUGE, not a cold-start
+    // counter, so the ratio is not computable — a query over dead series
+    // would render "no data yet" forever and read as a quiet system.
+    expect(q.startsObserved).toContain('knext_bunexec_startup_duration_seconds');
+    expect(q.startupP50).toContain('quantile by (app) (0.5');
+    expect(q.startupMax).toContain('max by (app)');
+    expect('warmStartRatioPct' in q).toBe(false);
   });
 });
 

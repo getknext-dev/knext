@@ -5,7 +5,7 @@ import 'server-only';
  * (obs-pages plan P1.2, ADR-0038).
  *
  * The Overview (RED) and Scaling pages need range/rate math over the core
- * `knext_http_*` / `knext_coldstart_*` series, which only Prometheus can compute.
+ * `knext_bunexec_*` series, which only Prometheus can compute.
  * This module issues those queries **server-side only** (`import 'server-only'`)
  * so the browser never sees the Prometheus URL, a token, or raw metrics — it
  * receives only the rendered aggregates.
@@ -577,15 +577,15 @@ export interface OverviewQueries {
  *
  * Every `knext_*` series carries an `app` label (`adapters/metrics.ts`, sourced
  * from the same `KN_APP_NAME`), and a cluster runs many knext apps — so an
- * unscoped `sum(rate(knext_http_requests_total[5m]))` reports the CLUSTER's
+ * unscoped `sum(rate(knext_bunexec_http_requests_total[5m]))` reports the CLUSTER's
  * request rate under this app's heading. The `{app=~"…"}` selector matches the
  * shipped `red-overview` dashboard's `$app` template variable.
  *
  * A parity test asserts every `knext_*` series here exists in
  * `adapters/metrics.ts`, so the queries cannot drift from the runtime metric set:
- *  - `knext_http_requests_total{status_class}`    — request + 5xx error rate,
- *  - `knext_http_request_duration_seconds_bucket` — p75 / p99 latency,
- *  - `knext_http_inflight_requests`               — current concurrency.
+ *  - `knext_bunexec_http_requests_total{status_class}`    — request + 5xx error rate,
+ *  - `knext_bunexec_http_request_duration_seconds_bucket` — p75 / p99 latency,
+ *  - `knext_bunexec_http_inflight_requests`               — current concurrency.
  *
  * @param app a name already validated by {@link observabilityAppName}.
  */
@@ -594,15 +594,15 @@ export function overviewQueries(app: string): OverviewQueries {
 
   return {
     /** Total request rate (req/s), 5-minute rate. */
-    requestRate: `sum(rate(knext_http_requests_total${byApp}[5m]))`,
+    requestRate: `sum(rate(knext_bunexec_http_requests_total${byApp}[5m]))`,
     /** 5xx error rate as a percentage of all requests. */
-    errorRatePct: `sum(rate(knext_http_requests_total{app=~"${app}",status_class="5xx"}[5m])) / clamp_min(sum(rate(knext_http_requests_total${byApp}[5m])), 1) * 100`,
+    errorRatePct: `sum(rate(knext_bunexec_http_requests_total{app=~"${app}",status_class="5xx"}[5m])) / clamp_min(sum(rate(knext_bunexec_http_requests_total${byApp}[5m])), 1) * 100`,
     /** p75 request latency (seconds). */
-    latencyP75: `histogram_quantile(0.75, sum by (le) (rate(knext_http_request_duration_seconds_bucket${byApp}[5m])))`,
+    latencyP75: `histogram_quantile(0.75, sum by (le) (rate(knext_bunexec_http_request_duration_seconds_bucket${byApp}[5m])))`,
     /** p99 request latency (seconds). */
-    latencyP99: `histogram_quantile(0.99, sum by (le) (rate(knext_http_request_duration_seconds_bucket${byApp}[5m])))`,
+    latencyP99: `histogram_quantile(0.99, sum by (le) (rate(knext_bunexec_http_request_duration_seconds_bucket${byApp}[5m])))`,
     /** Current in-flight requests (saturation). */
-    inFlight: `sum(knext_http_inflight_requests${byApp})`,
+    inFlight: `sum(knext_bunexec_http_inflight_requests${byApp})`,
   };
 }
 
@@ -692,10 +692,9 @@ export const KUBE_STATE_PROBE = 'count(kube_deployment_created)';
 export interface ScalingQueries {
   readonly replicas: string;
   readonly currentReplicas: string;
-  readonly coldStartRate: string;
-  readonly coldStartP50: string;
-  readonly coldStartP99: string;
-  readonly warmStartRatioPct: string;
+  readonly startsObserved: string;
+  readonly startupP50: string;
+  readonly startupMax: string;
   readonly dbWakeRateByRole: string;
   readonly dbWakeP50ByRole: string;
   readonly dbWakeP99ByRole: string;
@@ -748,24 +747,12 @@ export function scalingQueries(app: string): ScalingQueries {
     replicas: `sum by (deployment) (kube_deployment_status_replicas${byDeployment})`,
     /** Current replica count (kube-state-metrics; cluster-provided). */
     currentReplicas: `sum(kube_deployment_status_replicas${byDeployment})`,
-    /** Cold starts per second. */
-    coldStartRate: `sum(rate(knext_coldstart_total${byApp}[5m]))`,
-    /** p50 cold-start duration (seconds). */
-    coldStartP50: `histogram_quantile(0.50, sum by (le) (rate(knext_coldstart_duration_seconds_bucket${byApp}[5m])))`,
-    /** p99 cold-start duration (seconds). */
-    coldStartP99: `histogram_quantile(0.99, sum by (le) (rate(knext_coldstart_duration_seconds_bucket${byApp}[5m])))`,
-    /**
-     * Share of served requests that did NOT pay a cold start, as a percentage.
-     *
-     * Derivation (honest about its limits): knext exports a cold-start COUNTER,
-     * not a per-request warm/cold flag, so this is `1 − coldstarts/requests`
-     * over the same 5m window — i.e. "how rare is a cold start per request",
-     * not a per-request attribution. `clamp_min(…, 0)` keeps a burst of cold
-     * starts with very few served requests from rendering a negative ratio.
-     * It has no dashboard counterpart (page-derived), so it is excluded from
-     * the mirrored-query parity list but still parity-checked for real series.
-     */
-    warmStartRatioPct: `clamp_min((1 - sum(rate(knext_coldstart_total${byApp}[5m])) / sum(rate(knext_http_requests_total${byApp}[5m]))) * 100, 0)`,
+    /** Pods reporting a startup duration — starts observed, not a rate. */
+    startsObserved: `count by (app) (knext_bunexec_startup_duration_seconds${byApp})`,
+    /** Median startup duration across live pods (gauge quantile, seconds). */
+    startupP50: `quantile by (app) (0.5, knext_bunexec_startup_duration_seconds${byApp})`,
+    /** Worst startup duration across live pods (seconds). */
+    startupMax: `max by (app) (knext_bunexec_startup_duration_seconds${byApp})`,
     /** DB 0→1 wakes per second, by pool role (writer|reader). */
     dbWakeRateByRole: `sum by (role) (rate(knext_db_wake_total${byApp}[5m]))`,
     /** p50 DB-wake duration (seconds), by pool role. */
@@ -773,6 +760,6 @@ export function scalingQueries(app: string): ScalingQueries {
     /** p99 DB-wake duration (seconds), by pool role. */
     dbWakeP99ByRole: `histogram_quantile(0.99, sum by (le, role) (rate(knext_db_wake_duration_seconds_bucket${byApp}[5m])))`,
     /** Current in-flight requests for THIS app (saturation). */
-    inFlight: `sum(knext_http_inflight_requests${byApp})`,
+    inFlight: `sum(knext_bunexec_http_inflight_requests${byApp})`,
   };
 }

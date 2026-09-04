@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, jest, mock, spyOn } from '
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { scanBunexecMetrics } from '../../../../../packages/kn-next/src/adapters/metric-contract';
 import { APP_NAME_ENV, overviewQueries, PROMETHEUS_URL_ENV } from './_prom/query';
 import { NO_DATA } from './_ui/format';
 
@@ -257,6 +258,10 @@ describe('overview PromQL ↔ metrics.ts parity', () => {
     import.meta.dirname,
     '../../../../../packages/kn-next/src/adapters/metrics.ts',
   );
+  const RUNTIME_CONTRACT_TEMPLATE = resolve(
+    import.meta.dirname,
+    '../../../../../packages/kn-next/templates/app/runtime-contract.mjs.hbs',
+  );
 
   const HISTOGRAM_SUFFIXES = ['_bucket', '_sum', '_count'];
 
@@ -273,9 +278,15 @@ describe('overview PromQL ↔ metrics.ts parity', () => {
     return token;
   }
 
-  it('every knext_* series referenced by an Overview query exists in metrics.ts', () => {
+  it('every knext_* series referenced by an Overview query has a real emitter', () => {
+    // The RED queries moved to the knext_bunexec_* family (stability sprint
+    // D1) — the series the shipped :9091 scrape actually has. metrics.ts's
+    // app-registry names remain allowed for the legacy series.
     const allowed = exportedMetricNames();
-    expect(allowed.has('knext_http_requests_total')).toBe(true);
+    for (const name of scanBunexecMetrics(readFileSync(RUNTIME_CONTRACT_TEMPLATE, 'utf8')).keys()) {
+      allowed.add(name);
+    }
+    expect(allowed.has('knext_bunexec_http_requests_total')).toBe(true);
 
     const dangling: string[] = [];
     for (const promql of Object.values(QUERIES)) {
@@ -289,8 +300,8 @@ describe('overview PromQL ↔ metrics.ts parity', () => {
 
   it('references the three RED series (rate/latency/in-flight)', () => {
     const joined = Object.values(QUERIES).join(' ');
-    expect(joined).toContain('knext_http_requests_total');
-    expect(joined).toContain('knext_http_request_duration_seconds_bucket');
-    expect(joined).toContain('knext_http_inflight_requests');
+    expect(joined).toContain('knext_bunexec_http_requests_total');
+    expect(joined).toContain('knext_bunexec_http_request_duration_seconds_bucket');
+    expect(joined).toContain('knext_bunexec_http_inflight_requests');
   });
 });

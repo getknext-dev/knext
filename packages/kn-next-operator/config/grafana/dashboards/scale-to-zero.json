@@ -168,7 +168,7 @@
           "refId": "A"
         }
       ],
-      "description": "NODE-LEGACY EMITTER: knext_db_wake_* is registered by the APP (packages/kn-next/src/adapters/metrics.ts, wired from instrumentation) into a prom-client registry served on the APP port. The shipped PodMonitor scrapes :9091 only, so this panel is EMPTY unless you also scrape your app's /api/metrics route."
+      "description": "NODE-LEGACY EMITTER: the knext db-wake series (knext_db_wake_total, knext_db_wake_duration_seconds) is registered by the APP (packages/kn-next/src/adapters/metrics.ts, wired from instrumentation) into a prom-client registry served on the APP port. The shipped PodMonitor scrapes :9091 only, so this panel is EMPTY unless you also scrape your app's /api/metrics route."
     },
     {
       "title": "DB wake latency p50 / p99 by role (s)",
@@ -209,7 +209,7 @@
           "refId": "B"
         }
       ],
-      "description": "NODE-LEGACY EMITTER: knext_db_wake_* is registered by the APP (packages/kn-next/src/adapters/metrics.ts, wired from instrumentation) into a prom-client registry served on the APP port. The shipped PodMonitor scrapes :9091 only, so this panel is EMPTY unless you also scrape your app's /api/metrics route."
+      "description": "NODE-LEGACY EMITTER: the knext db-wake series (knext_db_wake_total, knext_db_wake_duration_seconds) is registered by the APP (packages/kn-next/src/adapters/metrics.ts, wired from instrumentation) into a prom-client registry served on the APP port. The shipped PodMonitor scrapes :9091 only, so this panel is EMPTY unless you also scrape your app's /api/metrics route."
     }
   ],
   "refresh": "30s",
