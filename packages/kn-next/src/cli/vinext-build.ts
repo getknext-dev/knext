@@ -42,10 +42,22 @@ import { UsageError } from "./shared";
 export const MIN_BUN_MAJOR = 1;
 export const MIN_BUN_MINOR = 4;
 
-/** `bun build --compile` target triples, keyed by knext's arch names. */
+/**
+ * `bun build --compile` target triples, keyed by knext's arch names.
+ *
+ * The bare `linux-*` keys are MUSL, because that is what the shipped image is
+ * (`FROM alpine` + `apk add libstdc++ libgcc` — see the reference Dockerfile and
+ * `alpine-image.docker-e2e.test.ts`). The `-gnu` keys exist only for the
+ * post-compile smoke (#894): those binaries are dynamically linked against musl
+ * and a glibc host cannot execute them at all, so a smoke on a Debian/Ubuntu
+ * runner has to compile against glibc or it would report a boot failure for
+ * every CORRECT build. Nothing SHIPS a `-gnu` binary.
+ */
 const COMPILE_TARGETS: Record<string, string> = {
     "linux-x64": "bun-linux-x64-musl",
     "linux-arm64": "bun-linux-arm64-musl",
+    "linux-x64-gnu": "bun-linux-x64",
+    "linux-arm64-gnu": "bun-linux-arm64",
     "darwin-arm64": "bun-darwin-arm64",
     "darwin-x64": "bun-darwin-x64",
 };
@@ -131,6 +143,106 @@ export function compileScriptPath(): string {
         "adapters",
         "vinext-compile.js",
     );
+}
+
+/** glibc or musl, for a linux host. Injectable so both branches are testable. */
+export type LinuxLibc = "gnu" | "musl";
+
+/**
+ * Which libc this linux host runs.
+ *
+ * `process.report` carries `glibcVersionRuntime` on a glibc build and omits it
+ * on musl — the same signal node's own `detect-libc` consumers use. The
+ * loader-path fallback covers a runtime that does not expose the report.
+ */
+export function detectLinuxLibc(): LinuxLibc {
+    try {
+        const report = process.report?.getReport();
+        const header =
+            typeof report === "object" && report !== null
+                ? (report as { header?: { glibcVersionRuntime?: string } })
+                      .header
+                : undefined;
+        if (header?.glibcVersionRuntime) return "gnu";
+    } catch {
+        // fall through to the loader probe
+    }
+    const muslLoaders = [
+        "/lib/ld-musl-x86_64.so.1",
+        "/lib/ld-musl-aarch64.so.1",
+    ];
+    return muslLoaders.some((p) => existsSync(p)) ? "musl" : "gnu";
+}
+
+/**
+ * The arch key whose binary THIS machine can actually execute (#894).
+ *
+ * The smoke has to boot the thing it just compiled, and the ship target is
+ * `bun-linux-*-musl` — unrunnable on a darwin host and on a glibc linux host
+ * alike. Rather than a container run (which would put docker on the critical
+ * path of every build), the smoke compiles a second, HOST-arch binary and boots
+ * that; the cross-compiled linux-musl artifact stays proved by the alpine
+ * container e2e, which is where a cross-target claim belongs.
+ *
+ * Throws rather than guessing on an unsupported host: a wrong guess produces a
+ * binary that cannot exec, which the smoke would then report as a broken app.
+ */
+export function hostSmokeArch(
+    platform: string = process.platform,
+    arch: string = process.arch,
+    libc: () => LinuxLibc = detectLinuxLibc,
+): string {
+    const key =
+        platform === "darwin"
+            ? `darwin-${arch}`
+            : platform === "linux"
+              ? libc() === "musl"
+                  ? `linux-${arch}`
+                  : `linux-${arch}-gnu`
+              : "";
+    if (!key || !COMPILE_TARGETS[key]) {
+        throw new UsageError(
+            `The post-compile smoke cannot run on ${platform}/${arch} — knext has no bun compile target for it.\n\n` +
+                `Known targets: ${Object.keys(COMPILE_TARGETS).join(", ")}.\n` +
+                "Pass --skip-smoke to build anyway; the binary will be UNVERIFIED.",
+        );
+    }
+    return key;
+}
+
+/** What the smoke should boot: the ship binary itself, or a host-arch twin. */
+export interface SmokeBinaryPlan {
+    readonly arch: string;
+    readonly outFile: string;
+    readonly reuseShipBinary: boolean;
+}
+
+/**
+ * Reuse the ship binary when the host IS the ship target, else plan a second
+ * compile. The second compile costs seconds and is the price of booting the
+ * artifact at all on a developer machine; reusing it when the arch matches
+ * keeps the linux-musl CI path down to one.
+ *
+ * The name never contains a runtime word (`bun`, `node`): the asset-root
+ * resolver classifies a compiled binary by basename, and those names make it
+ * read the BUILD TREE's assets silently.
+ */
+export function smokeBinaryPlan(
+    shipArch: string,
+    hostArch: string,
+): SmokeBinaryPlan {
+    if (shipArch === hostArch) {
+        return {
+            arch: shipArch,
+            outFile: `knext-exec-${shipArch}`,
+            reuseShipBinary: true,
+        };
+    }
+    return {
+        arch: hostArch,
+        outFile: `knext-smoke-${hostArch}`,
+        reuseShipBinary: false,
+    };
 }
 
 export interface VinextBuildOptions {
