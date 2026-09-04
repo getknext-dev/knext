@@ -25,7 +25,7 @@
 import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveTestRunner } from './lib/ci-blocking-gate-proof.mjs';
+import { resolveSpecRunner } from './lib/ci-blocking-gate-proof.mjs';
 import { mutate, restore, snapshot } from './lib/mutation-harness.mjs';
 import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
@@ -53,11 +53,11 @@ let fail = 0;
  * instead of scoring every mutation off a runner that never started. Same
  * failure and same resolver as #672 round 5.
  */
-const RUNNER = resolveTestRunner(REPO_ROOT);
+const RUNNER = (spec) => resolveSpecRunner(REPO_ROOT, spec);
 
 function vitest(spec) {
   return (
-    spawnSync(RUNNER.command, [...RUNNER.args, 'run', spec], {
+    spawnSync(RUNNER(spec).command, [...RUNNER(spec).args, ...RUNNER(spec).runArgs(spec)], {
       cwd: REPO_ROOT,
       encoding: 'utf8',
     }).status === 0

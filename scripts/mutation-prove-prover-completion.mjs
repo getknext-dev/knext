@@ -28,7 +28,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveTestRunner } from './lib/ci-blocking-gate-proof.mjs';
+import { resolveSpecRunner } from './lib/ci-blocking-gate-proof.mjs';
 import { countOccurrences, mutate, restore, snapshot } from './lib/mutation-harness.mjs';
 import { assessCompletion, evaluatePreflight } from './lib/prover-completion.mjs';
 import { declareMutations, recordMutation } from './lib/prover-report.mjs';
@@ -44,8 +44,8 @@ const git = (...args) =>
 
 /** Run a spec. Returns ONLY the exit code. */
 function runSpec(spec) {
-  const runner = resolveTestRunner(REPO_ROOT);
-  const res = spawnSync(runner.command, [...runner.args, 'run', spec], {
+  const runner = resolveSpecRunner(REPO_ROOT, spec);
+  const res = spawnSync(runner.command, [...runner.args, ...runner.runArgs(spec)], {
     cwd: REPO_ROOT,
     encoding: 'utf8',
     timeout: 300_000,

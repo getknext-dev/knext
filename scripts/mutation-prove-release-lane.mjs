@@ -28,7 +28,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveTestRunner } from './lib/ci-blocking-gate-proof.mjs';
+import { resolveSpecRunner } from './lib/ci-blocking-gate-proof.mjs';
 import { MUTATION_MARKER, mutate, restore, snapshot } from './lib/mutation-harness.mjs';
 import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
@@ -57,11 +57,11 @@ let fail = 0;
  * — a git worktree, a fresh clone before install — and this prover was written
  * in exactly such a worktree.
  */
-const RUNNER = resolveTestRunner(REPO_ROOT);
-
-function vitest(spec) {
+function runSpec(spec) {
+  // #902: resolved PER SPEC — this prover drives both vitest and bun:test files.
+  const runner = resolveSpecRunner(REPO_ROOT, spec);
   return (
-    spawnSync(RUNNER.command, [...RUNNER.args, 'run', spec], {
+    spawnSync(runner.command, [...runner.args, ...runner.runArgs(spec)], {
       cwd: REPO_ROOT,
       encoding: 'utf8',
     }).status === 0
@@ -74,7 +74,7 @@ function prove(label, file, spec, anchor, replacement) {
   const snap = snapshot(file);
   try {
     mutate(snap, anchor, replacement);
-    if (vitest(spec)) {
+    if (runSpec(spec)) {
       console.log('   x DECORATION: the spec stayed GREEN with the defect restored');
       fail += 1;
     } else {
@@ -85,7 +85,7 @@ function prove(label, file, spec, anchor, replacement) {
   } finally {
     restore(snap);
   }
-  if (!vitest(spec)) {
+  if (!runSpec(spec)) {
     console.error(`   FATAL: ${spec} did not go green again after restore`);
     process.exit(1);
   }
@@ -152,7 +152,7 @@ const LOCK_ENTRY = derive(
 
 for (const spec of [LIVENESS_SPEC, PREFLIGHT_SPEC, PINS_SPEC, COMPAT_SPEC]) {
   console.log(`Baseline: ${spec} must be GREEN before anything is mutated.`);
-  if (!vitest(spec)) {
+  if (!runSpec(spec)) {
     console.error(`FATAL: ${spec} is not green to begin with`);
     process.exit(1);
   }

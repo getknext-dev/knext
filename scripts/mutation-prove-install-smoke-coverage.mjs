@@ -15,7 +15,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveTestRunner } from './lib/ci-blocking-gate-proof.mjs';
+import { resolveSpecRunner } from './lib/ci-blocking-gate-proof.mjs';
 import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
 const WT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -416,8 +416,9 @@ const runSmoke = () =>
  * derivation still exists, so mutations of that shape are graded here.
  */
 const runSpec = (spec) => {
-  const runner = resolveTestRunner(WT);
-  return spawnSync(runner.command, [...runner.args, 'run', spec], {
+  // #902: per-spec dispatch — some specs here are bun:test, which vitest collects nothing from.
+  const runner = resolveSpecRunner(WT, spec);
+  return spawnSync(runner.command, [...runner.args, ...runner.runArgs(spec)], {
     cwd: WT,
     encoding: 'utf8',
     timeout: 10 * 60 * 1000,
