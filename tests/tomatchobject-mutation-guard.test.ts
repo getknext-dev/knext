@@ -47,7 +47,8 @@
 import { describe, expect, it } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { blankNonCode } from '../scripts/lib/blank-non-code.mjs';
 import { importsFrom } from '../scripts/lib/test-framework-import.mjs';
@@ -124,13 +125,17 @@ describe('toMatchObject + asymmetric matcher must not bind the receiver (#881)',
       'const caught = boom();',
       "expect(caught).toMatchObject({ message: expect.stringContaining('x') });",
     ].join('\n');
-    const tmp = resolve(repoRoot, 'tests/.tomatchobject-guard-sample.tmp.ts');
+    // OUTSIDE the repo. A transient `.ts` under `tests/` races the concurrent
+    // suite: root-typecheck-gate walks the real directory while tsc's `**/*.ts`
+    // can never match a dot-prefixed name, so the gate reds whenever the walk
+    // lands inside this file's lifetime (#914's deterministic CI failure).
+    const tmp = join(tmpdir(), 'knext-tomatchobject-guard-sample.tmp.ts');
     try {
       execFileSync('node', [
         '-e',
         `require('fs').writeFileSync(${JSON.stringify(tmp)}, ${JSON.stringify(sample)})`,
       ]);
-      expect(unsafeUses('tests/.tomatchobject-guard-sample.tmp.ts')).toEqual(['caught']);
+      expect(unsafeUses(tmp)).toEqual(['caught']);
     } finally {
       execFileSync('node', ['-e', `try{require('fs').unlinkSync(${JSON.stringify(tmp)})}catch{}`]);
     }
@@ -139,13 +144,13 @@ describe('toMatchObject + asymmetric matcher must not bind the receiver (#881)',
   it('accepts the inline shape, which cannot be read afterwards', () => {
     const sample =
       "await expect(validateMain(['--zzz'])).rejects.toMatchObject({ message: expect.stringContaining('--zzz') });";
-    const tmp = resolve(repoRoot, 'tests/.tomatchobject-guard-safe.tmp.ts');
+    const tmp = join(tmpdir(), 'knext-tomatchobject-guard-safe.tmp.ts');
     try {
       execFileSync('node', [
         '-e',
         `require('fs').writeFileSync(${JSON.stringify(tmp)}, ${JSON.stringify(sample)})`,
       ]);
-      expect(unsafeUses('tests/.tomatchobject-guard-safe.tmp.ts')).toEqual([]);
+      expect(unsafeUses(tmp)).toEqual([]);
     } finally {
       execFileSync('node', ['-e', `try{require('fs').unlinkSync(${JSON.stringify(tmp)})}catch{}`]);
     }
