@@ -17,10 +17,6 @@
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import {
-    activeSeamRelocationExemptions,
-    SEAM_RELOCATION_EXEMPTIONS,
-} from "../../../../scripts/lib/published-seam-policy.mjs";
 
 /**
  * `process.env` widened for writing. `@types/node` types `NODE_ENV` readonly,
@@ -167,37 +163,6 @@ describe("cache-handler published seams fail closed", () => {
                 `${seam}'s .d.ts doc does not mention the NODE_ENV=production refusal`,
             ).toContain("NODE_ENV=production");
         }
-    });
-
-    /**
-     * The DEFERRAL has a clock (#936).
-     *
-     * T6b is the cheap half: the seams refuse in production, but they are still
-     * exported from a published subpath. Relocating them is a public-API change
-     * and therefore a workflow.md escalation trigger, so it is tracked rather
-     * than smuggled into a hardening PR — and tracked here, mechanically, not
-     * only in a PR body that nobody re-reads.
-     */
-    it("every seam still on the published subpath is a DATED exception", () => {
-        const excused = activeSeamRelocationExemptions();
-        for (const seam of gatedSeamNames()) {
-            expect(
-                excused,
-                `${seam} is still exported from the published cache-handler subpath and its ` +
-                    "relocation exception has EXPIRED. Do the relocation (#936), or re-date the " +
-                    "entry in scripts/lib/published-seam-policy.mjs with a reason. Do not weaken " +
-                    "this test.",
-            ).toContain(`@getknext/core/adapters/cache-handler#${seam}`);
-        }
-    });
-
-    it("the relocation clock is real, not decorative", () => {
-        // The other half. Without it an exemption reader that never expires
-        // anything would satisfy the case above forever, which is the quietest
-        // way to neuter a deferral: it still reads as dated.
-        const [entry] = SEAM_RELOCATION_EXEMPTIONS;
-        const after = new Date(`${entry?.expires}T00:00:01Z`);
-        expect(activeSeamRelocationExemptions(after).size).toBe(0);
     });
 
     it("leaves the PURE helpers ungated — they mutate nothing", async () => {

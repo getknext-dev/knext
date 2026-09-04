@@ -61,7 +61,7 @@ function discoverAppDockerfiles(): string[] {
  * raw text would read its own explanation back and stay green after the real
  * `ENV` was deleted. The mutation prover caught exactly that (M1 survived).
  */
-export function setsNodeEnvProduction(dockerfile: string): boolean {
+function setsNodeEnvProduction(dockerfile: string): boolean {
   const code = dockerfile
     .split('\n')
     .filter((line) => !line.trimStart().startsWith('#'))

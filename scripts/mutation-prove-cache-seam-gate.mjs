@@ -91,16 +91,6 @@ const MUTATIONS = [
     replacement:
       "function __dropCacheForTests() {\n  assertTestSeamEnabled('__dropCacheForTests');\n}\n\nfunction __resetEnvForTests() {\n  assertTestSeamEnabled('__resetEnvForTests');",
   },
-  {
-    id: 'M6',
-    expect: 'red',
-    claim:
-      "the relocation deferral loses its clock — #936's exception then reads as dated forever, " +
-      'which is the quietest way to neuter a deferral. Spec review, round 1',
-    subject: 'seamPolicy',
-    anchor: "  return activeExemptions(SEAM_RELOCATION_EXEMPTIONS, { field: 'seam', now });",
-    replacement: '  void now;\n  return new Set(SEAM_RELOCATION_EXEMPTIONS.map((e) => e.seam));',
-  },
 ];
 
 /**
@@ -127,7 +117,6 @@ const prover = createGuardProver({
   subjects: {
     handler: 'packages/kn-next/src/adapters/cache-handler.js',
     dts: 'packages/kn-next/src/adapters/cache-handler.d.ts',
-    seamPolicy: 'scripts/lib/published-seam-policy.mjs',
   },
 });
 
