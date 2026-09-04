@@ -272,14 +272,21 @@ function startServer() {
   // `output:'standalone'` does NOT copy `.next/static` or `public/` into the standalone
   // tree (mirrors what the Dockerfile does manually). Stage them so static assets and the
   // next/image optimizer can resolve local files. Idempotent + best-effort.
-  const standaloneAppDir = path.dirname(SERVER_PATH);
-  const stage = [
-    [path.resolve(APP_DIR, '.next/static'), path.join(standaloneAppDir, '.next/static')],
-    [path.resolve(APP_DIR, 'public'), path.join(standaloneAppDir, 'public')],
-  ];
-  for (const [src, dest] of stage) {
-    if (existsSync(src)) {
-      cpSync(src, dest, { recursive: true });
+  // Standalone-tree staging ONLY: the compiled binary serves its assets from
+  // `.output/public` (its own baked asset root), and with the binary sitting
+  // in the app root this loop's dest EQUALS its src — node throws
+  // ERR_FS_CP_EINVAL ('src and dest cannot be the same'), which is exactly
+  // how CI failed the first single-exec smoke run.
+  if (!singleExec) {
+    const standaloneAppDir = path.dirname(SERVER_PATH);
+    const stage = [
+      [path.resolve(APP_DIR, '.next/static'), path.join(standaloneAppDir, '.next/static')],
+      [path.resolve(APP_DIR, 'public'), path.join(standaloneAppDir, 'public')],
+    ];
+    for (const [src, dest] of stage) {
+      if (existsSync(src)) {
+        cpSync(src, dest, { recursive: true });
+      }
     }
   }
 

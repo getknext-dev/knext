@@ -7,7 +7,7 @@
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -211,27 +211,38 @@ beforeAll(() => {
   //    pino) all land under <runner>/node_modules, exactly how the CMD's
   //    resolution sees them for a consumer of the published packages.
   const repoRoot = resolve(APP_DIR, '../..');
-  const packDir = mkdtempSync(join(tmpdir(), 'knext-core-pack-'));
+  const packDirs: string[] = [];
   const tarballs: string[] = [];
   for (const pkg of ['packages/lib', 'packages/db', 'packages/kn-next']) {
-    const packed = spawnSync(
-      'npm',
-      ['pack', '--json', '--pack-destination', packDir],
-      { cwd: join(repoRoot, pkg), encoding: 'utf8', env: childEnv() },
-    );
-    const parsed = JSON.parse(packed.stdout || '[]') as Array<{ filename?: string }>;
-    const filename = parsed[0]?.filename;
-    if (packed.status !== 0 || !filename) {
-      throw new Error(`npm pack failed for ${pkg}. stderr:\n${packed.stderr}`);
+    // `bun pm pack`, NOT `npm pack`: core depends on lib/db via `workspace:^`,
+    // which npm leaves verbatim (the install then dies with
+    // EUNSUPPORTEDPROTOCOL) while bun rewrites it to a real version — the
+    // same reason install-smoke.mjs packs with bun.
+    // Rooted at tmpdir() directly — the #880 guard scans mkdtemp call sites
+    // and cannot see that a nested parent is itself temp-rooted.
+    const dest = mkdtempSync(join(tmpdir(), 'knext-core-pack-'));
+    const packed = spawnSync('bun', ['pm', 'pack', '--destination', dest], {
+      cwd: join(repoRoot, pkg),
+      encoding: 'utf8',
+      env: childEnv(),
+    });
+    const tgz = readdirSync(dest)
+      .filter((f) => f.endsWith('.tgz'))
+      .map((f) => join(dest, f))
+      .sort()
+      .at(-1);
+    if (packed.status !== 0 || !tgz) {
+      throw new Error(`bun pm pack failed for ${pkg}. stderr:\n${packed.stderr}`);
     }
-    tarballs.push(join(packDir, filename));
+    packDirs.push(dest);
+    tarballs.push(tgz);
   }
-  const inst = spawnSync(
-    'npm',
-    ['install', '--omit=dev', '--no-audit', '--no-fund', ...tarballs],
-    { cwd: runnerRoot, encoding: 'utf8', env: childEnv() },
-  );
-  rmSync(packDir, { recursive: true, force: true });
+  const inst = spawnSync('npm', ['install', '--omit=dev', '--no-audit', '--no-fund', ...tarballs], {
+    cwd: runnerRoot,
+    encoding: 'utf8',
+    env: childEnv(),
+  });
+  for (const d of packDirs) rmSync(d, { recursive: true, force: true });
   if (
     inst.status !== 0 ||
     !existsSync(join(runnerRoot, 'node_modules/@getknext/core/dist/adapters/node-server.js')) ||
