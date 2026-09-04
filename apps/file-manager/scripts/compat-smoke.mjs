@@ -50,10 +50,23 @@ const REPO_ROOT = path.resolve(APP_DIR, '../..');
 const RUNTIME = (process.env.RUNTIME || 'node').toLowerCase();
 const PORT = Number(process.env.PORT || 3987);
 const HOST = '127.0.0.1';
-const SERVER_PATH =
-  process.env.SERVER_PATH || path.resolve(APP_DIR, '.next/standalone/apps/file-manager/server.js');
-// Runtime binary: node | bun. RUNTIME=bun boots the same standalone server.js under Bun.
-const SERVER_CMD = process.env.SERVER_CMD || (RUNTIME === 'bun' ? 'bun' : process.execPath);
+// DEFAULT = the compiled single executable, which is what `ci.yml:393-394`
+// actually runs and, since ADR-0048, the only supported target.
+//
+// It used to default to `.next/standalone/.../server.js` (sprint-1 §4.2), and
+// the staleness was invisible because CI overrides BOTH variables on every
+// invocation — so the default was reachable only by a human running the smoke
+// locally, i.e. exactly the reader least able to tell that it points at a build
+// the repo no longer produces. Defaulting to the binary also makes
+// `singleExec` true by default, so the local run and the CI run take the same
+// branch instead of diverging silently.
+const SERVER_PATH = process.env.SERVER_PATH || path.resolve(APP_DIR, 'knext-smoke-exec');
+// Runtime binary. Defaults to SERVER_PATH so `SERVER_CMD === SERVER_PATH`
+// (single-exec) holds without the caller setting two variables to one value.
+// RUNTIME=node|bun is still honoured for a standalone tree passed explicitly.
+const SERVER_CMD =
+  process.env.SERVER_CMD ||
+  (process.env.SERVER_PATH ? (RUNTIME === 'bun' ? 'bun' : process.execPath) : SERVER_PATH);
 // Single-executable mode (ADR-0048): SERVER_CMD *is* the server. Module-scoped
 // because both the spawn (no script arg, no preload) and check (h) (no
 // --version probe — the binary would boot a second server) branch on it.
@@ -264,9 +277,16 @@ async function check(name, fn, lanes = ['node', 'bun']) {
 let serverProc = null;
 function startServer() {
   if (!existsSync(SERVER_PATH)) {
+    // The command below is the one a reader COPIES, so it has to be runnable in
+    // the workspace as it is today. It said `pnpm --filter …` until sprint 2,
+    // by which point pnpm had been removed: whoever hit this error was handed
+    // an instruction that could only produce `command not found`, with the real
+    // fix nowhere on screen. `tests/retired-toolchain-prose.test.ts` scans every
+    // workspace script for that shape so it cannot silently come back.
     throw new Error(
-      `standalone server not found at ${SERVER_PATH}. Build first:\n` +
-        `  pnpm --filter @getknext/lib build && pnpm --filter file-manager build`,
+      `server not found at ${SERVER_PATH}. Build first:\n` +
+        `  bun run --filter @getknext/lib build && bun run --filter file-manager build\n` +
+        `(single-executable target: kn-next build, then SERVER_CMD=SERVER_PATH=<binary>)`,
     );
   }
   // `output:'standalone'` does NOT copy `.next/static` or `public/` into the standalone
