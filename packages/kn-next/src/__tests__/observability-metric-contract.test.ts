@@ -265,18 +265,23 @@ describe("the shipped runtime emits an SLO-computable RED contract (#792 / D14)"
         );
     });
 
-    it("emits a duration histogram with sub-100ms resolution", () => {
-        expect(
-            families.get("knext_bunexec_http_request_duration_seconds"),
-        ).toBe("histogram");
-        const body = read(BUNEXEC_TEMPLATE);
-        const buckets = (
-            body.match(/REQUEST_DURATION_BUCKETS\s*=\s*\[([^\]]*)\]/)?.[1] ?? ""
+    /** The bucket boundaries a contract copy declares, in source order. */
+    const bucketsOf = (path: string): number[] =>
+        (
+            read(path).match(
+                /REQUEST_DURATION_BUCKETS\s*=\s*\[([^\]]*)\]/,
+            )?.[1] ?? ""
         )
             .split(",")
             .map((s) => s.trim())
             .filter((s) => s.length > 0)
             .map(Number);
+
+    it("emits a duration histogram with sub-100ms resolution", () => {
+        expect(
+            families.get("knext_bunexec_http_request_duration_seconds"),
+        ).toBe("histogram");
+        const buckets = bucketsOf(BUNEXEC_TEMPLATE);
         expect(buckets.length).toBeGreaterThan(0);
         // Cold starts are measured in tens of ms; a histogram whose finest
         // bucket is 100ms cannot see them.
@@ -284,6 +289,31 @@ describe("the shipped runtime emits an SLO-computable RED contract (#792 / D14)"
         expect(buckets).toEqual([...buckets].sort((a, b) => a - b));
         // Bounded: buckets are the dominant series multiplier.
         expect(buckets.length).toBeLessThanOrEqual(16);
+    });
+
+    it("every copy declares the SAME bucket boundaries, not just the same series", () => {
+        // FOUND BY MUTATION (#908's prover, sprint 2 lane G). The drift check
+        // below compares series NAMES, and a histogram's names are
+        // `_bucket`/`_sum`/`_count` — which do not change when the boundaries
+        // do. So `examples/bun-exec`'s copy could declare [0.5, 1, 2, 5] while
+        // the template declared sub-100ms resolution, and every assertion in
+        // this file would stay green.
+        //
+        // That copy is the one the container e2e BOOTS. The consequence is not
+        // cosmetic: a `le="0.05"` bucket that exists in the template and not in
+        // the artifact under test makes the cold-start SLO uncomputable from the
+        // only binary anyone measures, while the metric keeps reporting.
+        const canonical = bucketsOf(BUNEXEC_TEMPLATE);
+        expect(
+            canonical.length,
+            "the template declares no buckets — the comparison below would be vacuous",
+        ).toBeGreaterThan(0);
+        for (const copy of CONTRACT_COPIES) {
+            expect(
+                bucketsOf(copy),
+                `${copy} declares different histogram buckets from the template`,
+            ).toEqual(canonical);
+        }
     });
 
     it("emits a startup duration so the cold-start SLO is computable", () => {
