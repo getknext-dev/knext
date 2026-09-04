@@ -182,5 +182,22 @@ export default defineConfig([
     outDir: 'dist',
     clean: false,
     sourcemap: true,
+    // The sharp dlopen shim, copied VERBATIM as a build artifact. The bundled
+    // dist/adapters/sharp-addon-dlopen.js is an entry in the ESM pass above,
+    // and tsup freely factors shared code into `chunk-*.js` files it imports —
+    // which is fine for a module that is IMPORTED, and poison for this one:
+    // vinext-compile injects the shim's TEXT as the replacement contents of
+    // sharp/dist/sharp.mjs, so a `import "../chunk-…"` inside it resolves
+    // relative to SHARP's path and the whole single-exec compile dies with
+    // `Could not resolve "../chunk-…"` (the sprint-close root cause — it
+    // reddened four CI checks). The compile script therefore reads THIS
+    // verbatim copy, and refuses any shim with a relative import.
+    async onSuccess() {
+      const { copyFileSync } = await import('node:fs');
+      copyFileSync(
+        'src/adapters/sharp-addon-dlopen.mjs',
+        'dist/adapters/sharp-addon-dlopen.source.mjs',
+      );
+    },
   },
 ]);

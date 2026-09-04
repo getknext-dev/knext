@@ -632,21 +632,35 @@ export async function uploadAssets(config: StorageBackedConfig): Promise<void> {
     // Shape dispatch — the builder decides where served assets live, so the
     // staging step must ask (the resolved default, not the raw field: an
     // absent `build` means vinext, ADR-0048).
-    const assetsDir =
-        (config.build ?? DEFAULT_BUILDER_ID) === "vinext"
-            ? stageNitroPublicAssets(process.cwd())
-            : stageStandaloneAssets(process.cwd());
+    const nitroShape = (config.build ?? DEFAULT_BUILDER_ID) === "vinext";
+    const assetsDir = nitroShape
+        ? stageNitroPublicAssets(process.cwd())
+        : stageStandaloneAssets(process.cwd());
 
-    log.info(
-        { provider: config.storage.provider, bucket: config.storage.bucket },
-        "Syncing assets to storage",
-    );
+    try {
+        log.info(
+            {
+                provider: config.storage.provider,
+                bucket: config.storage.bucket,
+            },
+            "Syncing assets to storage",
+        );
 
-    const ops = providerOps(config, assetsDir);
-    const localFiles = collectFiles(assetsDir, assetsDir);
+        const ops = providerOps(config, assetsDir);
+        const localFiles = collectFiles(assetsDir, assetsDir);
 
-    ops.bulkUpload();
-    verifyAndRetry(ops, localFiles, config.storage.bucket);
+        ops.bulkUpload();
+        verifyAndRetry(ops, localFiles, config.storage.bucket);
+    } finally {
+        // The nitro staging is a fresh mkdtemp per run — without this, every
+        // deploy on a long-lived build machine leaks a full copy of the
+        // app's static assets into the OS temp dir (sprint-close finding: the
+        // temp-dir guard asserts LOCATION, never lifetime). finally, not
+        // success-only: a failed upload's staging is equally dead weight.
+        // The standalone shape stages into .output/public, which is NOT ours
+        // to delete (it is the artifact on that shape) — never remove it.
+        if (nitroShape) rmSync(assetsDir, { recursive: true, force: true });
+    }
 }
 
 /**

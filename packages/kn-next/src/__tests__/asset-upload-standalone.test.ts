@@ -176,6 +176,48 @@ describe("uploadAssets reads the standalone build output (not .output/public)", 
         expect(bulk?.join(" ")).not.toContain(".output/public");
     });
 
+    it("removes the nitro staging temp dir after the upload — success AND failure", async () => {
+        // Sprint-close finding: mkdtemp-per-run with no cleanup leaks a full
+        // asset copy per deploy on a long-lived build machine; the temp-dir
+        // guard only asserts LOCATION. Both halves here: the dir is gone on
+        // success, gone on a failed upload, and the ARTIFACT (.output/public)
+        // survives both.
+        const seed = async () => {
+            await fs.mkdir(join(root, ".output", "public"), {
+                recursive: true,
+            });
+            await fs.writeFile(join(root, ".output", "public", "a.js"), "x");
+        };
+        await seed();
+        runCaptureMock.mockReturnValue(gcsListing(["a.js"]));
+        const config = { ...makeConfig() };
+        // biome-ignore lint/performance/noDelete: absence is the case under test
+        delete (config as Record<string, unknown>).build;
+
+        await uploadAssets(config);
+        const bulk = runQuietMock.mock.calls
+            .map((c) => c[0] as string[])
+            .find((argv) => argv.includes("-r"));
+        const staged = bulk?.find((t) => t.includes("knext-upload-"));
+        expect(staged).toBeTruthy();
+        expect(existsSync(staged as string)).toBe(false);
+        expect(existsSync(join(root, ".output", "public", "a.js"))).toBe(true);
+
+        // Failure half: the provider throws, the staging still dies.
+        runQuietMock.mockClear();
+        runQuietMock.mockImplementationOnce(() => {
+            throw new Error("bulk upload exploded");
+        });
+        await expect(uploadAssets(config)).rejects.toThrow("exploded");
+        const bulk2 = runQuietMock.mock.calls
+            .map((c) => c[0] as string[])
+            .find((argv) => argv?.includes?.("-r"));
+        const staged2 = bulk2?.find((t) => t.includes("knext-upload-"));
+        expect(staged2).toBeTruthy();
+        expect(existsSync(staged2 as string)).toBe(false);
+        expect(existsSync(join(root, ".output", "public", "a.js"))).toBe(true);
+    });
+
     it("fails loudly with a next-build hint (not a bare ENOENT) when .next/static is missing", async () => {
         // No build at all: neither .next/static nor public exists.
         await expect(uploadAssets(makeConfig())).rejects.toThrow(/next build/i);

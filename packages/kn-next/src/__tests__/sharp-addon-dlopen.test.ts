@@ -93,6 +93,57 @@ function stage(): string {
     return dir;
 }
 
+describe("the shim the compile injects is VERBATIM and self-contained", () => {
+    // Sprint-close root cause, pinned: vinext-compile injects the shim's TEXT
+    // as sharp.mjs's contents, so a tsup `import "../chunk-…"` inside the
+    // BUNDLED dist shim resolved against sharp's directory and the single-exec
+    // compile died with `Could not resolve` — reddening four CI checks, while
+    // local runs (which read the chunkless source) stayed green.
+    const src = join(
+        dirname(import.meta.dirname),
+        "adapters",
+        "sharp-addon-dlopen.mjs",
+    );
+    const verbatim = join(
+        dirname(dirname(import.meta.dirname)),
+        "dist",
+        "adapters",
+        "sharp-addon-dlopen.source.mjs",
+    );
+
+    it("dist ships the verbatim source copy, byte-equal (tsup onSuccess)", () => {
+        // dist is a hard requirement here, as in cli-node-runtime.test.ts:
+        // skipping when dist is absent is how the bundled-shim poison shipped.
+        expect(
+            existsSync(verbatim),
+            "dist/adapters/sharp-addon-dlopen.source.mjs missing — run the package build; the compile script depends on it",
+        ).toBe(true);
+        expect(readFileSync(verbatim, "utf8")).toBe(readFileSync(src, "utf8"));
+    });
+
+    it("the source shim has NO relative imports — its text is injected into sharp's directory", () => {
+        const text = readFileSync(src, "utf8");
+        expect(text).not.toMatch(/from\s+["']\.\.?\//);
+        expect(text).not.toMatch(/import\s+["']\.\.?\//);
+    });
+
+    it("vinext-compile prefers the verbatim copy and refuses a non-self-contained shim", async () => {
+        const compile = await Bun.file(
+            join(
+                dirname(import.meta.dirname),
+                "adapters",
+                "vinext-compile.mjs",
+            ),
+        ).text();
+        expect(compile).toContain("sharp-addon-dlopen.source.mjs");
+        // The refusal is the fail-closed half: without it, the next chunked
+        // shim poisons the bundle again and blames sharp.mjs.
+        expect(compile).toContain("not self-contained");
+        // And the bundled dist entry must never be a candidate again.
+        expect(compile).not.toMatch(/sharp-addon-dlopen\.js["']/);
+    });
+});
+
 describe("sharp addon path resolution", () => {
     it("an explicit KNEXT_SHARP_ADDON wins", () => {
         const dir = stage();

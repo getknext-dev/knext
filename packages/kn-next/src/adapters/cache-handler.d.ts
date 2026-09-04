@@ -13,3 +13,14 @@ export default _default;
  * and TS consumers were told this real export does not exist.
  */
 export declare function __resetEnvForTests(): void;
+
+/**
+ * Test-only: repoints (or, with `undefined`, disables) the process-wide Redis
+ * client. FAIL-CLOSED on a published subpath: throws unless the harness sets
+ * KNEXT_TEST_SEAMS=1 (sprint-close design-gate block — a consumer calling this
+ * in production would silently drop every request to the in-memory fallback).
+ */
+export declare function __setRedisClientForTests(client: unknown): void;
+
+/** Pure helper: the Redis TTL (seconds) derived from a set() context. */
+export declare function __redisTtlSeconds(ctx: unknown): number;

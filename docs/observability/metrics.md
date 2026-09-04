@@ -14,7 +14,8 @@ spans these counters mirror) · [structured logging + correlation IDs](./logging
 
 | Target | Process | Port / path | Series |
 | --- | --- | --- | --- |
-| **App runtime** | the runtime supervisor (`node-server.ts`) | `:9091/metrics` | golden signals + cold-start + DB-wake (merged from the child) and the Node process metrics |
+| **App runtime (default — compiled executable)** | the single-exec entry (`knext-bun-entry.mjs`) | `:9091/metrics` | `knext_bunexec_*`: http_requests_total{status_class} + duration histogram + in-flight + startup_duration + process RSS/uptime — the ONLY series on the shipped scrape path |
+| **App runtime (legacy standalone supervisor)** | `node-server.ts` | `:9091/metrics` | golden signals + cold-start + DB-wake (merged from the child) and the Node process metrics — this shape only |
 | **Operator** | the controller manager | its `/metrics` (HTTPS `:8443` by default) | reconcile count/duration/errors + `workqueue_depth` + controller-runtime + Go process metrics |
 
 The operator sets `prometheus.io/scrape=true`, `prometheus.io/port=9091`,
@@ -24,7 +25,11 @@ Operator** setup (CRD-based discovery, annotations ignored) ship the CRs in
 `packages/kn-next-operator/config/prometheus/`: `monitor.yaml` (ServiceMonitor
 for the operator) and `app-podmonitor.yaml` (PodMonitor for the per-app `:9091`).
 
-### Why the app metrics ride a cross-process bridge
+### Why the LEGACY shape's app metrics ride a cross-process bridge
+
+> Everything in this section describes the retired standalone-supervisor shape
+> only. The compiled executable is one process: its entry registers the
+> `knext_bunexec_*` series directly, no bridge, no child registry.
 
 The golden-signal / cold-start / DB-wake metrics are **derived from core-owned
 OpenTelemetry hooks** — the inbound HTTP SERVER span lifecycle, the

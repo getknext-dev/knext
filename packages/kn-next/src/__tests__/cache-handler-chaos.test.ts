@@ -1,3 +1,7 @@
+// The cache handler's mutating test seams fail closed on a published
+// subpath (design-gate block, sprint close): the harness opts in.
+process.env.KNEXT_TEST_SEAMS = "1";
+
 import {
     afterEach,
     beforeEach,

@@ -143,7 +143,27 @@ let RETRY_COOLDOWN_MS = envMs('REDIS_RETRY_COOLDOWN_MS', 5000);
  * this module owns, which a registry reset never did — and could not, once any
  * of it moved onto `globalThis`.
  */
+/**
+ * The two seams below MUTATE process-wide cache state and ship on a PUBLISHED
+ * subpath (`@getknext/core/adapters/cache-handler`) — a consumer calling
+ * `__setRedisClientForTests(undefined)` would silently disable every app's
+ * cache. The design-gate verdict on the sprint that added them: a published
+ * mutating seam must fail closed. They now require an explicit harness opt-in;
+ * the pure `__`-helpers (options/budget/ttl/exec) stay ungated — they mutate
+ * nothing.
+ */
+function assertTestSeamEnabled(name) {
+  if (process.env.KNEXT_TEST_SEAMS !== '1') {
+    throw new Error(
+      `knext: ${name} is a TEST-ONLY seam on a published module — it repoints ` +
+        'the process-wide cache and must never run in production. A test ' +
+        'harness enables it with KNEXT_TEST_SEAMS=1.',
+    );
+  }
+}
+
 function __resetEnvForTests() {
+  assertTestSeamEnabled('__resetEnvForTests');
   REDIS_URL = process.env.REDIS_URL;
   KEY_PREFIX = process.env.REDIS_KEY_PREFIX || 'kn-next';
   // Re-emit what module evaluation emits, not just what it assigns.
@@ -181,6 +201,7 @@ function __resetEnvForTests() {
  * budget are in play too. Production must not call this.
  */
 function __setRedisClientForTests(client) {
+  assertTestSeamEnabled('__setRedisClientForTests');
   redis = client ? budgetNativeClient(client) : undefined;
   useRedis = !!client;
   unhealthyUntil = 0;

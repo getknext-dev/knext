@@ -7,7 +7,7 @@
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
 import { spawn, spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -38,7 +38,8 @@ import { waitForListeningPort } from './e2e-support/child-ports';
  * the SHIPPED `@getknext/core/internal/node-server` entry, not the source tree):
  *   1. Build an ISOLATED runner dir OUTSIDE the workspace so `@getknext/core`
  *      resolution cannot escape upward into the repo's node_modules.
- *   2. `pnpm --filter @getknext/core --prod deploy` a self-contained @getknext/core
+ *   2. npm-pack + npm-install the published @getknext/* shape (was: pnpm deploy,
+ *      retired with pnpm itself) — a self-contained @getknext/core
  *      (dist + prom-client + pino) into <runner>/node_modules/@getknext/core —
  *      replicating the Dockerfile runtime COPY.
  *   3. Run the EXACT Dockerfile CMD (`node -e import('@getknext/core/internal/node-server')`)
@@ -157,32 +158,44 @@ beforeAll(() => {
   // 1. Isolated runner dir OUTSIDE the workspace — see file header.
   runnerRoot = mkdtempSync(join(tmpdir(), 'knext-hardcap-runner-'));
 
-  // 2. Replicate the Dockerfile runtime COPY: self-contained @getknext/core + prod
-  //    deps at node_modules/@getknext/core via the SAME `pnpm deploy` the image uses.
-  const deployDir = mkdtempSync(join(tmpdir(), 'knext-core-deploy-'));
+  // 2. Install the real published shape (install-smoke.mjs pattern; the pnpm
+  //    deploy this replicated died with the legacy Dockerfile — pnpm left the
+  //    workspace, fe28ad9c): pack the three @getknext/* packages and
+  //    npm-install the tarballs into the runner. Flat npm layout puts core AND
+  //    its prod deps under <runner>/node_modules, as a real consumer resolves.
   const repoRoot = resolve(APP_DIR, '../..');
-  const dep = spawnSync(
-    'pnpm',
-    ['--filter', '@getknext/core', '--prod', 'deploy', '--legacy', deployDir],
-    { cwd: repoRoot, encoding: 'utf8', env: childEnv() },
+  const packDir = mkdtempSync(join(tmpdir(), 'knext-core-pack-'));
+  const tarballs: string[] = [];
+  for (const pkg of ['packages/lib', 'packages/db', 'packages/kn-next']) {
+    const packed = spawnSync(
+      'npm',
+      ['pack', '--json', '--pack-destination', packDir],
+      { cwd: join(repoRoot, pkg), encoding: 'utf8', env: childEnv() },
+    );
+    const parsed = JSON.parse(packed.stdout || '[]') as Array<{ filename?: string }>;
+    const filename = parsed[0]?.filename;
+    if (packed.status !== 0 || !filename) {
+      throw new Error(`npm pack failed for ${pkg}. stderr:\n${packed.stderr}`);
+    }
+    tarballs.push(join(packDir, filename));
+  }
+  const inst = spawnSync(
+    'npm',
+    ['install', '--omit=dev', '--no-audit', '--no-fund', ...tarballs],
+    { cwd: runnerRoot, encoding: 'utf8', env: childEnv() },
   );
+  rmSync(packDir, { recursive: true, force: true });
   if (
-    !existsSync(join(deployDir, 'dist/adapters/node-server.js')) ||
-    !existsSync(join(deployDir, 'node_modules/prom-client')) ||
-    !existsSync(join(deployDir, 'node_modules/pino'))
+    inst.status !== 0 ||
+    !existsSync(join(runnerRoot, 'node_modules/@getknext/core/dist/adapters/node-server.js')) ||
+    !existsSync(join(runnerRoot, 'node_modules/prom-client')) ||
+    !existsSync(join(runnerRoot, 'node_modules/pino'))
   ) {
     throw new Error(
-      `pnpm deploy did not produce a self-contained @getknext/core ` +
-        `(node-server.js + prom-client + pino). stderr:\n${dep.stderr}`,
+      `npm install of the packed @getknext/* tarballs did not produce a runnable ` +
+        `@getknext/core (node-server.js + prom-client + pino). stderr:\n${inst.stderr}`,
     );
   }
-  // verbatimSymlinks: keep pnpm's RELATIVE `.pnpm/…` symlinks intact (the
-  // Dockerfile COPY preserves them verbatim; the default rewrites to absolute
-  // paths into deployDir, which we then delete → dangling → MODULE_NOT_FOUND).
-  cpSync(deployDir, join(runnerRoot, 'node_modules/@getknext/core'), {
-    recursive: true,
-    verbatimSymlinks: true,
-  });
   rmSync(deployDir, { recursive: true, force: true });
 }, 180_000);
 

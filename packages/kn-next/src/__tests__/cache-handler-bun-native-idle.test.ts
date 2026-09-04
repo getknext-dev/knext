@@ -87,7 +87,7 @@ describe("Bun native Redis client: idle connection", () => {
             // A command that never settles — the established-but-dead socket the
             // old `idleTimeout` was believed to cover.
             const hung = __budgetNativeClient({
-                get: () => new Promise(() => {}),
+                get: (_key?: unknown) => new Promise(() => {}),
             });
             const started = Date.now();
             await expect(hung.get("k")).rejects.toThrow();
@@ -137,7 +137,7 @@ describe("Bun native Redis client: idle connection", () => {
                 seen.push(this);
                 return Promise.resolve();
             },
-            get() {
+            get(_key?: unknown) {
                 seen.push(this);
                 return Promise.resolve("v");
             },
@@ -153,7 +153,10 @@ describe("Bun native Redis client: idle connection", () => {
 
     it("passes non-promise property reads straight through", async () => {
         const { __budgetNativeClient } = await freshModule();
-        const client = __budgetNativeClient({ connected: true, onclose: null });
+        const client = __budgetNativeClient({
+            connected: true,
+            onclose: null as null | (() => void),
+        });
         expect(client.connected).toBe(true);
         // `getRedis` assigns `native.onclose = …`; a wrapper that swallowed writes
         // would silently drop the only error channel the native client has.

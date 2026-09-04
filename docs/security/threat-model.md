@@ -239,8 +239,8 @@ labelled, *every* pod in that namespace (not just Prometheus) can scrape `9091` 
 which in a shared cluster is cross-tenant metric disclosure. **What is actually exposed, enumerated
 from the exporter rather than assumed** (`adapters/metrics.ts`):
 
-- **No route, path, query or payload labels.** `knext_http_requests_total` /
-  `knext_http_request_duration` carry `app`, `method` and `status_class` only — `statusClass()`
+- **No route, path, query or payload labels.** `knext_bunexec_http_requests_total` /
+  `knext_bunexec_http_request_duration_seconds` carry `app`, `method` and `status_class` only — `statusClass()`
   deliberately buckets codes, so individual status codes do not leak either. An earlier version of
   this section claimed route labels leak; that was wrong, and overstating a risk erodes the document
   as surely as understating one.

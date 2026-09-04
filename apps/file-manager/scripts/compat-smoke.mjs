@@ -54,6 +54,10 @@ const SERVER_PATH =
   process.env.SERVER_PATH || path.resolve(APP_DIR, '.next/standalone/apps/file-manager/server.js');
 // Runtime binary: node | bun. RUNTIME=bun boots the same standalone server.js under Bun.
 const SERVER_CMD = process.env.SERVER_CMD || (RUNTIME === 'bun' ? 'bun' : process.execPath);
+// Single-executable mode (ADR-0048): SERVER_CMD *is* the server. Module-scoped
+// because both the spawn (no script arg, no preload) and check (h) (no
+// --version probe — the binary would boot a second server) branch on it.
+const singleExec = SERVER_CMD === SERVER_PATH;
 
 // #188 — Bun ≤1.3.x keep-alive mitigation preload (bun runtime only; the Node
 // boot args stay byte-identical). Resolved from the built workspace package,
@@ -281,13 +285,9 @@ function startServer() {
 
   // #188: on Bun, preload the keep-alive guard (self-disables on fixed Bun
   // versions ≥1.4.0). Never added on Node.
-  // Single-executable mode: when SERVER_CMD *is* the server (the compiled
-  // binary, ADR-0048), there is no script argument and no preload — a compiled
-  // binary cannot take `-r` (its argv is the app's), and the keep-alive bug the
-  // preload guards is fixed in the >=1.4 bun embedded in it. Signalled by
-  // pointing both env vars at the same file, which also keeps the existsSync
-  // preflight meaningful.
-  const singleExec = SERVER_CMD === SERVER_PATH;
+  // Single-executable mode (see module-scope const): no script argument and no
+  // preload — a compiled binary cannot take `-r` (its argv is the app's), and
+  // the keep-alive bug the preload guards is fixed in the embedded >=1.4 bun.
   const serverArgs = singleExec
     ? []
     : RUNTIME === 'bun' && BUN_GUARD_PRELOAD
@@ -461,6 +461,21 @@ async function main() {
         req.setTimeout(15000, () => req.destroy(new Error('request timeout')));
       });
       if (RUNTIME === 'bun') {
+        if (singleExec) {
+          // The compiled binary embeds bun >= 1.4 by construction — the
+          // vinext build REFUSES older (vinext-build.ts floor) — and no
+          // preload is loaded, so the contract here is simply "keep-alive
+          // intact". Probing the version is not an option: a --compile
+          // binary does NOT intercept --version (measured — argv reaches the
+          // app), so `SERVER_CMD --version` boots a SECOND server that
+          // collides on the metrics port or hangs forever.
+          assert.notStrictEqual(
+            res.connection,
+            'close',
+            'single-exec serving must stay keep-alive — the embedded bun is >= 1.4 and no guard loads',
+          );
+          return `single-exec: keep-alive intact (embedded bun >= 1.4 by build floor)`;
+        }
         if (!BUN_GUARD_PRELOAD) {
           throw new Error('bun-keepalive-guard preload not found in the workspace');
         }

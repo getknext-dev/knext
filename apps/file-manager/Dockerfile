@@ -122,7 +122,7 @@ RUN set -eu; \
 # shell reimplementation: two implementations of "hash the tree, check the
 # lockfile" would drift, and the one that drifts is the one nobody runs.
 RUN set -eu; \
-    bun scripts/write-native-integrity.mjs /repo/native /repo/bun.lock; \
+    bun /repo/scripts/write-native-integrity.mjs /repo/native /repo/bun.lock; \
     test -f /repo/native/.integrity.json
 
 # ---------------------------------------------------------------------------

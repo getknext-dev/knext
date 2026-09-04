@@ -226,7 +226,8 @@ gone, re-push and re-pin (§1).
 
 **Symptom.** The pod never becomes Ready; `kubectl get pod` shows
 `CreateContainerConfigError`. The app's deep `/api/health` (once it does start)
-returns 503 and `KnextCacheUnreachable` fires.
+returns 503 and `KnextHighErrorRate` fires (the dedicated `KnextCacheUnreachable`
+alert is retired — its per-route label was unbounded).
 
 **Cause.** `spec.database.secretRef` / `spec.secrets.envMap` names a Secret (or
 key) that does not exist in the app's namespace. The binding is pure envMap
@@ -341,7 +342,7 @@ to be silent; a **new** class still prints.
 
 **Symptom.** The first DB query after the app *and* its database have both been
 idle fails or is very slow; app logs show a connect timeout / `connection
-refused` to the Postgres host, and `KnextCacheUnreachable` may fire (the deep
+refused` to the Postgres host, and `KnextHighErrorRate` may fire (the deep
 `/api/health` probes Postgres).
 
 **Cause.** knext binds Postgres via a Secret DSN (ADR-0019); it builds **no** DB

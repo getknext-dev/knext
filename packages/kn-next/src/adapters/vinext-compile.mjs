@@ -121,16 +121,44 @@ const importMetaToCjs = {
 const sharpAddonDlopen = {
     name: "knext-sharp-addon-dlopen",
     setup(build) {
-        const shim = join(dirname(new URL(import.meta.url).pathname), "sharp-addon-dlopen.js");
-        const shimSrc = existsSync(shim)
-            ? shim
-            : join(dirname(new URL(import.meta.url).pathname), "sharp-addon-dlopen.mjs");
-        if (!existsSync(shimSrc)) {
-            throw new Error(`[knext compile] sharp dlopen shim missing at ${shim}`);
+        // The VERBATIM shim, never the bundled one. `sharp-addon-dlopen.js`
+        // (the tsup entry) is a legitimate module for the vite-alias path, but
+        // tsup factors shared code into `chunk-*.js` files it imports — and
+        // this plugin injects the shim's TEXT as sharp.mjs's contents, so any
+        // relative import inside it resolves against SHARP's directory and
+        // the compile dies with `Could not resolve "../chunk-…"`. That was
+        // the sprint-close root cause: local runs used the chunkless source
+        // and passed, CI ran the bundled dist and reddened four checks.
+        const here = dirname(new URL(import.meta.url).pathname);
+        const candidates = [
+            // dist: the build-time verbatim copy (tsup onSuccess).
+            join(here, "sharp-addon-dlopen.source.mjs"),
+            // source tree: the original, for `bun run src/adapters/…` dev runs.
+            join(here, "sharp-addon-dlopen.mjs"),
+        ];
+        const shimSrc = candidates.find((c) => existsSync(c));
+        if (!shimSrc) {
+            throw new Error(
+                `[knext compile] sharp dlopen shim missing — looked for ${candidates.join(", ")}`,
+            );
         }
         build.onLoad({ filter: /[\\/]sharp[\\/]dist[\\/]sharp\.(m|c)?js$/ }, async () => {
+            const contents = await Bun.file(shimSrc).text();
+            // Fail CLOSED on a non-self-contained shim: a relative import in
+            // injected contents is exactly the poison described above, and
+            // failing here names the cause instead of blaming sharp.mjs.
+            const relativeImport = contents.match(/from\s+["']\.\.?\/|import\s+["']\.\.?\//);
+            if (relativeImport) {
+                throw new Error(
+                    `[knext compile] the sharp dlopen shim at ${shimSrc} is not self-contained ` +
+                        `(found ${JSON.stringify(relativeImport[0])}…) — its text is injected as ` +
+                        "sharp.mjs's contents, so relative imports resolve against sharp's " +
+                        "directory and cannot exist. Use the verbatim source copy, never a " +
+                        "bundled build.",
+                );
+            }
             console.log("[knext compile] sharp addon loader -> dlopen shim");
-            return { contents: await Bun.file(shimSrc).text(), loader: "js" };
+            return { contents, loader: "js" };
         });
     },
 };
