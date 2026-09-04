@@ -50,7 +50,7 @@
 import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveTestRunner } from './lib/ci-blocking-gate-proof.mjs';
+import { resolveSpecRunner } from './lib/ci-blocking-gate-proof.mjs';
 import { mutate, restore, snapshot } from './lib/mutation-harness.mjs';
 import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
@@ -60,11 +60,11 @@ const SPEC = 'tests/compat-window-audit.test.ts';
 
 declareMutations(5);
 
-const RUNNER = resolveTestRunner(REPO_ROOT);
+const RUNNER = resolveSpecRunner(REPO_ROOT, SPEC);
 
 /** True when the spec PASSED. Exit code only — never the output. */
 function specPasses() {
-  const r = spawnSync(RUNNER.command, [...RUNNER.args, 'run', SPEC], {
+  const r = spawnSync(RUNNER.command, [...RUNNER.args, ...RUNNER.runArgs(SPEC)], {
     cwd: REPO_ROOT,
     encoding: 'utf8',
   });

@@ -49,7 +49,10 @@ On Next.js 16.0.x–16.1.x this option lives under `experimental`
 You used Next.js's **official Deployment Adapter API**. That deserves a sentence, because it is the
 main architectural claim knext makes.
 
-knext is **not a fork of Next.js** and **not a custom runtime**. `adapterPath` is a supported
+knext's default build uses **vinext** — an open-source, Vite-based implementation of the
+Next.js framework — compiled into one executable. knext also maintains an adapter on the
+official Deployment Adapter API (the lane its compatibility credential was earned on);
+`adapterPath` is a supported
 extension point that Next.js itself provides for deployment targets. At build time the adapter:
 
 - forces `output: 'standalone'`, so `next build` emits a self-contained server — you do not add this

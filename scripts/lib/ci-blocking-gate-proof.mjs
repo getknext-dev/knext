@@ -175,6 +175,39 @@ export function resolveTestRunner(repoRoot) {
 }
 
 /**
+ * #902 — resolve the runner FOR A SPECIFIC SPEC, dispatching on its framework.
+ *
+ * `resolveTestRunner` above resolves vitest unconditionally, which is wrong
+ * for the majority framework since the bun:test migration: vitest COLLECTS
+ * NOTHING from a `bun:test` file, so a prover pointed at one either fails on
+ * an empty run or — worse — passes a grep over empty output. Three committed
+ * provers had exactly that defect when this landed.
+ *
+ * Returns `{ command, args, runArgs(spec, testName?) }`; spawn as
+ * `spawnSync(command, [...args, ...runArgs(spec, name)])`. bun specs run
+ * through `scripts/bun-test.mjs` (same exit-code contract, `-t` forwarded);
+ * vitest specs keep the resolver above.
+ */
+export function resolveSpecRunner(repoRoot, spec) {
+  const specSource = readFileSync(resolve(repoRoot, spec), 'utf8');
+  if (/from\s+['"]bun:test['"]/.test(specSource)) {
+    return {
+      command: process.execPath,
+      args: [join(repoRoot, 'scripts', 'bun-test.mjs')],
+      // `!== undefined`, not truthiness: '' is the match-everything filter a
+      // caller uses to force the per-child summary forwarding on.
+      runArgs: (s, testName) => (testName !== undefined ? [s, '-t', testName] : [s]),
+    };
+  }
+  const vit = resolveTestRunner(repoRoot);
+  return {
+    command: vit.command,
+    args: vit.args,
+    runArgs: (s, testName) => (testName !== undefined ? ['run', s, '-t', testName] : ['run', s]),
+  };
+}
+
+/**
  * Every literal test title DECLARED in a spec's source — code only.
  *
  * Deliberately source-level: it answers "what does this file declare", which is

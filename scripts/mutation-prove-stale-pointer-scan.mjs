@@ -28,7 +28,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveTestRunner } from './lib/ci-blocking-gate-proof.mjs';
+import { resolveSpecRunner } from './lib/ci-blocking-gate-proof.mjs';
 import { mutate, restore, snapshot } from './lib/mutation-harness.mjs';
 import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
@@ -63,7 +63,8 @@ let fail = 0;
  * provers; #685 backported it here and added the scan that stops the next such
  * gap from depending on someone remembering.
  */
-const RUNNER = resolveTestRunner(REPO_ROOT);
+// #902: the SPEC is bun:test — resolveTestRunner (vitest) collects nothing there.
+const RUNNER = resolveSpecRunner(REPO_ROOT, SPEC);
 
 /** A basename shared by more than one tracked test file, or `null` if none is. */
 function anAmbiguousBasename() {
@@ -80,13 +81,19 @@ function anAmbiguousBasename() {
 }
 
 function runScan() {
-  const res = spawnSync(RUNNER.command, [...RUNNER.args, 'run', SPEC, '-t', TEST_NAME], {
+  const res = spawnSync(RUNNER.command, [...RUNNER.args, ...RUNNER.runArgs(SPEC, TEST_NAME)], {
     cwd: REPO_ROOT,
     encoding: 'utf8',
   });
   const out = `${res.stdout ?? ''}${res.stderr ?? ''}`.replace(ANSI, '');
-  const passed = Number(out.match(/Tests\s+(\d+) passed/)?.[1] ?? 0);
-  const failed = Number(out.match(/Tests\s+.*?(\d+) failed/)?.[1] ?? 0);
+  // Both runners' summaries (#902): vitest prints `Tests N passed`, bun test
+  // prints ` N pass` / ` N fail` lines.
+  const passed = Number(
+    out.match(/Tests\s+(\d+) passed/)?.[1] ?? out.match(/^\s*(\d+) pass\b/m)?.[1] ?? 0,
+  );
+  const failed = Number(
+    out.match(/Tests\s+.*?(\d+) failed/)?.[1] ?? out.match(/^\s*(\d+) fail\b/m)?.[1] ?? 0,
+  );
   return { ok: res.status === 0, ran: passed + failed };
 }
 

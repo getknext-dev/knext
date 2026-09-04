@@ -30,7 +30,7 @@
 import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveTestRunner } from './lib/ci-blocking-gate-proof.mjs';
+import { resolveSpecRunner } from './lib/ci-blocking-gate-proof.mjs';
 import { mutate, restore, snapshot } from './lib/mutation-harness.mjs';
 import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
@@ -56,7 +56,7 @@ let fail = 0;
  * — a fresh worktree, a clone before install — and every run then reports zero
  * tests while naming a cause that is not the cause. #680/#681/#685.
  */
-const RUNNER = resolveTestRunner(REPO_ROOT);
+const RUNNER = resolveSpecRunner(REPO_ROOT, SPEC);
 
 /**
  * Run the whole spec file and report ONLY its exit code plus whether the file
@@ -68,23 +68,21 @@ const RUNNER = resolveTestRunner(REPO_ROOT);
  * this a mutation that BROKE the spec would be scored as "the guard fired".
  */
 function runSpec() {
-  const res = spawnSync(RUNNER.command, [...RUNNER.args, 'run', SPEC, '--reporter=json'], {
+  // #902: the SPEC is bun:test, so the runner is scripts/bun-test.mjs and the
+  // vitest `--reporter=json` probe is unavailable. The did-anything-run check
+  // keeps its teeth through the runner's own contract instead: bun-test.mjs
+  // exits 1 on an EMPTY SELECTION (a renamed/uncollected file can never read
+  // as "the guard fired"), and with a `-t` of the file's whole run absent we
+  // read the forwarded `N pass`/`N fail` summary lines it prints per child.
+  const res = spawnSync(RUNNER.command, [...RUNNER.args, ...RUNNER.runArgs(SPEC, '')], {
     cwd: REPO_ROOT,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
   });
-  const raw = `${res.stdout ?? ''}`;
-  let ran = 0;
-  const start = raw.indexOf('{');
-  if (start !== -1) {
-    try {
-      const report = JSON.parse(raw.slice(start));
-      ran = Number(report.numTotalTests ?? 0);
-    } catch {
-      ran = 0;
-    }
-  }
-  return { ok: res.status === 0, ran };
+  const raw = `${res.stdout ?? ''}${res.stderr ?? ''}`;
+  const passed = Number(raw.match(/^\s*(\d+) pass\b/m)?.[1] ?? 0);
+  const failed = Number(raw.match(/^\s*(\d+) fail\b/m)?.[1] ?? 0);
+  return { ok: res.status === 0, ran: passed + failed };
 }
 
 /**
@@ -158,11 +156,16 @@ prove(
 // If the weekly Bun schedule were deleted, claims (2) and (3) would both stay
 // GREEN — with no lane, nothing dangles. This is the mutation that decides
 // whether the positive half is load-bearing or ornamental.
+// The weekly Bun cron RETIRED with the standalone-under-bun artifact (#710,
+// stability sprint) and the guard flipped to assert its ABSENCE — so the
+// mutation flips with it: RESURRECT the cron and the guard must go red.
+// (The pre-flip form deleted the cron and expected red; planting a deletion
+// of something already absent is the anchor-miss the harness aborts on.)
 prove(
-  'the weekly Bun cron deleted from the schedule',
+  'the retired weekly Bun cron resurrected in the schedule',
   COMPAT_YML,
-  "    - cron: '17 5 * * 0'\n",
-  '',
+  "    - cron: '17 3 * * *'\n",
+  "    - cron: '17 3 * * *'\n    - cron: '17 5 * * 0'\n",
 );
 
 // ── 4. The node credential lane, same argument in the other direction. ─────
@@ -175,14 +178,15 @@ prove(
 
 // ── 5. BOTH CRONS PRESENT IS NOT ENOUGH. ───────────────────────────────────
 // The weekly schedule only reaches the Bun lane because the lane-selection
-// expression compares against that exact cron literal. Point it at the nightly
-// and the Bun axis silently never runs while both crons still read as present
-// — a guard that only counted crons would sail past this.
+// expression is now dispatch-input-or-node — the schedule comparison retired
+// with the weekly cron, and the guard asserts NO schedule branch exists. So
+// the mutation flips: RE-INTRODUCE a schedule comparison and the guard must
+// red (a resurrected branch is a second lane hiding in an expression).
 prove(
-  'the lane-selection expression pointed at the wrong cron',
+  'a schedule branch re-introduced into the lane-selection expression',
   COMPAT_YML,
-  "github.event.schedule == '17 5 * * 0'",
-  "github.event.schedule == '17 3 * * *'",
+  "KNEXT_RUNTIME: ${{ github.event.inputs.runtime || 'node' }}",
+  "KNEXT_RUNTIME: ${{ github.event.inputs.runtime || (github.event.schedule == '17 3 * * *' && 'node') || 'node' }}",
 );
 
 console.log(`\n${pass} mutation(s) went red as required, ${fail} were survived by the guard.`);

@@ -73,6 +73,16 @@ const bunBin = flag('bun', process.env.KNEXT_BUN ?? 'bun');
  */
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const concurrency = Number(flag('concurrency', String(Math.max(2, cpus().length - 2))));
+// `-t <name>` filters test titles, forwarded to every bun child (#902 — the
+// prover lane runs single tests through this runner). Extracted BEFORE target
+// collection: `-t` starts with one dash, so the filter below would otherwise
+// swallow the flag and treat the name as a test file.
+let testNameFilter;
+const tIdx = argv.indexOf('-t');
+if (tIdx !== -1) {
+  testNameFilter = argv[tIdx + 1];
+  argv.splice(tIdx, 2);
+}
 const targets = argv.filter((a) => !a.startsWith('--'));
 
 /**
@@ -245,6 +255,7 @@ function needsDom(file) {
 function runFile(file) {
   return new Promise((resolve) => {
     const args = ['test', file];
+    if (testNameFilter !== undefined) args.push('-t', testNameFilter);
     // DOM tests need a `document` before their modules evaluate.
     // `@testing-library/react` reads it at module scope, so an import inside the
     // test file is already too late — a preload is the only ordering that works.
@@ -279,6 +290,15 @@ function runFile(file) {
       const ok = code === 0;
       if (!ok) failures.push({ file, output });
       process.stdout.write(`  ${ok ? 'ok  ' : 'FAIL'} [${done}/${files.length}] ${file}\n`);
+      // Under a -t filter (#902: the prover lane runs single tests through this
+      // runner) the caller needs the CHILD's pass/fail counts — a filter that
+      // matches nothing is a green file with zero tests, which a prover must
+      // treat as "nothing ran", not as proof. Forward the summary lines.
+      if (testNameFilter !== undefined) {
+        for (const line of output.split('\n')) {
+          if (/^\s*\d+ (pass|fail|skip)\b/.test(line)) process.stdout.write(`${line}\n`);
+        }
+      }
       resolve(ok);
     });
     child.on('error', (err) => {
