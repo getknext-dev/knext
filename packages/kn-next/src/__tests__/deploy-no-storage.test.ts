@@ -67,6 +67,15 @@ mock.module("../utils/asset-upload", async () => {
         uploadAssets: (...a: unknown[]) => uploadAssets(...a),
         getAssetPrefix: (...a: unknown[]) => getAssetPrefix(...a),
         reclaimBuildPrefix: (...a: unknown[]) => reclaimBuildPrefix(...a),
+        // T2a: this suite mocks the BUILD, so no `.output` exists and the
+        // vinext lock-step guard would abort every case for reasons that have
+        // nothing to do with the no-storage mode. Stand in for a correct
+        // build by echoing the id deploy exported before the guard runs — so
+        // the stub cannot silently agree with a WRONG tag either.
+        resolveVinextStaticId: () => ({
+            ok: true,
+            id: process.env.NEXT_DEPLOYMENT_ID,
+        }),
     };
 });
 

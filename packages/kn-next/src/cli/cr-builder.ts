@@ -29,6 +29,16 @@ export interface PreviewInput {
 }
 
 /**
+ * The `spec.env` entry that carries this deploy's build id into the pod (T2d).
+ *
+ * A named constant, not an inline key — see the comment at its use site: a
+ * literal key inside the CR object literal is recorded by the emitted-fields
+ * extractor as a CRD field path, and `spec.env` is a free-form map with no
+ * such path.
+ */
+export const DEPLOYMENT_ID_ENV = "NEXT_DEPLOYMENT_ID";
+
+/**
  * Builds a NextApp CR object from a KnativeNextConfig and a resolved image ref.
  * The image MUST be digest-pinned (the operator enforces this at reconcile time).
  *
@@ -311,11 +321,21 @@ export function buildNextAppCRObject(
     // CRD's CEL-rejected set (HOSTNAME / PORT / K_*), and is not injected by the
     // operator, so `appendUserEnv` keeps it rather than dropping it with a
     // Warning event.
+    //
+    // The key comes from {@link DEPLOYMENT_ID_ENV} rather than being written
+    // inline, and that is load-bearing rather than stylistic: `spec.env` is an
+    // `additionalProperties` MAP in the CRD, so `spec.env.<ANY_KEY>` is not a
+    // schema path. Written as a literal key, the emitted-fields extractor
+    // records `spec.env.NEXT_DEPLOYMENT_ID` as a field, `unknownEmittedFields`
+    // finds no such path in the CRD, and `preflightCRSchema` aborts EVERY
+    // deploy on a field the apiserver would accept happily. A const-referenced
+    // computed key is how the extractor is told "this is a map value, not a
+    // field" — the same reason `...config.env`'s user keys never appear there.
     const env =
         config.env || buildId
             ? {
                   ...config.env,
-                  ...(buildId ? { NEXT_DEPLOYMENT_ID: buildId } : {}),
+                  ...(buildId ? { [DEPLOYMENT_ID_ENV]: buildId } : {}),
               }
             : undefined;
 

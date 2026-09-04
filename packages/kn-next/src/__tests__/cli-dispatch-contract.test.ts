@@ -192,6 +192,12 @@ describe("usage mistakes are UsageErrors, so they render as messages", () => {
             "formatPreflightFailure(outcome",
             'BUILD_ID "',
             "describeFailedCRApply()",
+            // T2a, the vinext leg of the same BUILD_ID skew check: the state of
+            // the BUILD ARTIFACT, not of argv. Fixing it means re-running the
+            // build (or restoring the template's generateBuildId), never
+            // retyping the command.
+            "Could not resolve this build's static id",
+            ".output/public/_next/static/${staticId.id}",
         ],
         // Derived name validity: composed from the config's app name + PR id.
         "preview.ts": ["exceeds the 63-char", "is not a valid DNS-1123 label"],
