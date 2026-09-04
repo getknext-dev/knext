@@ -78,9 +78,12 @@ function collectedFiles(): string {
   });
   // Unreachable is a FAILURE, never a pass (security.md). A guard that goes
   // green because it could not run its own subject is worse than no guard.
+  // stdout, not just stderr: the runner reports per-file FAIL lines and the
+  // failing child's error on STDOUT, and the old message printed an empty
+  // stderr as "undefined" — three CI rounds of a red with no diagnosis.
   expect(
     res.status,
-    `the bun runner failed (${res.status}): ${res.stderr?.slice(-600) || res.error?.message}`,
+    `the bun runner failed (${res.status}):\n--- stdout tail ---\n${res.stdout?.slice(-1200)}\n--- stderr tail ---\n${res.stderr?.slice(-600) || res.error?.message}`,
   ).toBe(0);
   return res.stdout;
 }

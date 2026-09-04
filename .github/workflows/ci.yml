@@ -109,6 +109,16 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # examples/bun-exec sits OUTSIDE the workspace (own bun.lock) and its
+      # test harnesses import from its own node_modules (srvx et al). The
+      # bun-suite step below runs the example-suite collection guard, whose
+      # child runs every example test file — without this install those files
+      # die on `Cannot find module 'srvx/bun'`, which cost three CI rounds to
+      # see through a guard message that printed only (empty) stderr.
+      - name: Install example dependencies (examples/bun-exec)
+        working-directory: examples/bun-exec
+        run: bun install --frozen-lockfile
+
       - name: Run Biome lint & format check
         run: bun run lint
 
