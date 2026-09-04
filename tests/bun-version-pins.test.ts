@@ -93,7 +93,11 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // to bun 1.4 (#882) and both pairs collapsed to a single step. A count
       // DROPPING is meant to be as loud as an unpinned step, so editing this
       // number is the deliberate act the comment above asks for.
-      'ci.yml': 11,
+      // 10, was 11: the seam-alive matrix job retired with its subject
+      // (#885 — no webpack layers under the vinext single-graph build),
+      // taking its setup-bun step with it. Deliberate edit, per the rule
+      // above that a dropping count is a decision, not drift.
+      'ci.yml': 10,
       'docs-closure-nightly.yml': 1,
       'mutation-prover-nightly.yml': 1,
       'operator-e2e-nightly.yml': 3,

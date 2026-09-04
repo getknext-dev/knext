@@ -587,7 +587,11 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         expect(r.stdout).toContain("kn-next create");
         expect(r.stdout).toContain("--dry-run");
         expect(r.stdout).toContain("guarded instrumentation");
-        expect(r.stdout).toContain("standalone-seam-alive");
+        // The help must tell the truth about the retirement (#885): the seam
+        // guard may appear only in its "retired" sentence, never as a shipped
+        // deliverable — and instrumentation-edge-safe IS still shipped.
+        expect(r.stdout).toContain("instrumentation-edge-safe");
+        expect(r.stdout).toContain("retired");
     });
 
     it("`node kn-next.js create` scaffolds through the BUNDLED bin (templates ship with the package)", () => {
