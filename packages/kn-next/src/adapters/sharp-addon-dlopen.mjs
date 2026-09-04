@@ -27,9 +27,28 @@
  * next to `@img/sharp-libvips-<platform>/lib/…`), or `dlopen` finds the addon
  * and then fails resolving `libvips-cpp`. Copying the bare `.node` alone is the
  * mistake this paragraph exists to prevent; it was made once.
+ *
+ * ## Integrity (C2)
+ *
+ * This is the last gate before native-code privilege, so it is where the
+ * verification has to be. `kn-next build` writes `native/.integrity.json` — a
+ * sha256 per staged file, plus the `@img` versions its lockfile pinned — and
+ * this shim re-checks every native payload the manifest lists before handing
+ * anything to the OS loader. A mismatch or an unlisted payload is FATAL. An
+ * ABSENT manifest is a warning, not a failure: images built before this landed
+ * have none, and failing closed on absence would turn a supply-chain fix into a
+ * fleet outage.
+ *
+ * ## Why everything here is inline
+ *
+ * `vinext-compile.mjs` injects this file's SOURCE TEXT into sharp's module slot
+ * via an `onLoad` hook, so a relative import would resolve against
+ * `sharp/dist/`, not against this directory. The file must stay self-contained
+ * over node builtins — that constraint is pinned by a test, not just stated.
  */
-import { existsSync, readdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { createHash } from "node:crypto";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { dirname, join, relative, sep } from "node:path";
 
 /**
  * Absolute path to the addon. `KNEXT_SHARP_ADDON` wins so an image can put the
@@ -80,8 +99,112 @@ function safeReadDir(dir) {
   }
 }
 
+/**
+ * The nearest `.integrity.json` at or above the addon, or `null`.
+ *
+ * Bounded rather than unbounded: the manifest sits at the root of the staged
+ * tree, three levels above the addon (`native/<pkg>/lib/<addon>.node`). Walking
+ * to `/` would let an unrelated manifest higher up the filesystem answer for a
+ * tree that has none, which is a worse failure than not finding one.
+ */
+function findManifest(startDir) {
+  let dir = startDir;
+  for (let up = 0; up < 4; up++) {
+    const candidate = join(dir, '.integrity.json');
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+/** `.node`, `.dylib`, `.so`, `.so.42` — the files an OS loader will execute. */
+function isNativePayload(file) {
+  return /\.(node|dylib|so)$|\.so\.[0-9]+$/.test(file);
+}
+
+function sha256(file) {
+  return createHash('sha256').update(readFileSync(file)).digest('hex');
+}
+
+/**
+ * Fail-closed check of the staged native tree against its manifest.
+ *
+ * Every listed payload is checked, not only the addon being dlopened: libvips is
+ * pulled in transitively by the OS loader off a relative rpath and never passes
+ * through this function, so verifying just the addon would leave the larger — and
+ * more easily swapped — binary unpinned. The cost is one hash of the tree, paid
+ * on first sharp import (the first `/_next/image` request), not at boot.
+ */
+function verifyAgainstManifest(addon) {
+  const manifestPath = findManifest(dirname(addon));
+  if (manifestPath === null) {
+    console.warn(
+      `knext: no native integrity manifest beside ${addon} — loading it UNVERIFIED.\n` +
+        '  images built before native-tree integrity pinning have none; rebuild with a current\n' +
+        '  `kn-next build` to get one, after which a mismatch becomes a hard failure.',
+    );
+    return;
+  }
+
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  } catch (error) {
+    throw new Error(
+      `knext: refusing to dlopen — the native integrity manifest at ${manifestPath} is unreadable\n` +
+        `  underlying error: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  const root = dirname(manifestPath);
+  const files = manifest && manifest.files ? manifest.files : {};
+
+  // The addon itself must be LISTED. A payload sitting in a tree that has a
+  // manifest but is absent from it is the injected-file case, and treating it as
+  // "nothing recorded, nothing to check" is exactly the hole being closed.
+  const addonKey = relative(root, addon).split(sep).join('/');
+  if (!Object.hasOwn(files, addonKey)) {
+    throw new Error(
+      `knext: refusing to dlopen a native module the integrity manifest does not list\n` +
+        `  file: ${addonKey} (${addon})\n` +
+        `  manifest: ${manifestPath}\n` +
+        '  the manifest records every file `kn-next build` staged; one that is not in it was\n' +
+        '  added to the image afterwards.',
+    );
+  }
+
+  for (const [rel, expected] of Object.entries(files)) {
+    if (!isNativePayload(rel)) continue;
+    const abs = join(root, ...rel.split('/'));
+    let actual;
+    try {
+      actual = sha256(abs);
+    } catch (error) {
+      throw new Error(
+        `knext: refusing to dlopen — a native payload the integrity manifest lists is unreadable\n` +
+          `  file: ${rel} (${abs})\n` +
+          `  underlying error: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (actual !== expected) {
+      throw new Error(
+        `knext: refusing to dlopen a native module that does not match the integrity manifest\n` +
+          `  file: ${rel} (${abs})\n` +
+          `  expected sha256 ${expected}\n` +
+          `  actual   sha256 ${actual}\n` +
+          `  manifest: ${manifestPath}\n` +
+          '  the native tree changed after `kn-next build` staged it. Rebuild the image; do not\n' +
+          '  work around this by editing the manifest.',
+      );
+    }
+  }
+}
+
 const path = addonPath();
 const container = { exports: {} };
+
+verifyAgainstManifest(path);
 
 try {
     process.dlopen(container, path);

@@ -32,11 +32,14 @@
  */
 
 import { describe, expect, it } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
     existsSync,
     mkdirSync,
     mkdtempSync,
     readdirSync,
+    readFileSync,
     writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -163,6 +166,177 @@ describe("sharp addon path resolution", () => {
                 text,
                 "shim must search a native/ tree beside the executable",
             ).toMatch(/join\(beside,\s*['"]native['"]\)/);
+            // C2: the shim is the last gate before native-code privilege, so
+            // the verification must be IN it and must run BEFORE the dlopen.
+            expect(
+                text,
+                "shim must verify against the integrity manifest",
+            ).toContain(".integrity.json");
+            expect(text, "shim must hash with node:crypto").toContain(
+                "createHash",
+            );
+            expect(
+                text.indexOf("verifyAgainstManifest("),
+                "the verification call must precede process.dlopen",
+            ).toBeLessThan(text.indexOf("process.dlopen("));
+            // The shim's source is injected as TEXT into sharp's module slot by
+            // vinext-compile.mjs's onLoad, so a relative import would resolve
+            // against `sharp/dist/`, not against this directory. It must stay a
+            // single self-contained file over node builtins.
+            const imports = [...text.matchAll(/from\s+['"]([^'"]+)['"]/g)].map(
+                (m) => m[1],
+            );
+            expect(
+                imports.every((s) => s.startsWith("node:")),
+                `shim must import only node builtins, saw: ${imports.join(", ")}`,
+            ).toBe(true);
         });
+    });
+});
+
+/**
+ * The shim's fail-closed half, exercised on the REAL shim rather than a restated
+ * copy: the module is imported in a subprocess with `process.dlopen` stubbed, so
+ * everything up to and including the verification runs for real and only the
+ * call into the OS loader is replaced.
+ *
+ * A restated copy is what the resolution tests above have to do (the shim's
+ * `addonPath` is not exported), and it is the weaker option — worth paying a
+ * subprocess to avoid it for the security-relevant branch.
+ */
+const SHIM = join(
+    dirname(import.meta.dirname),
+    "adapters",
+    "sharp-addon-dlopen.mjs",
+);
+
+function stageVerifiable(): {
+    dir: string;
+    addon: string;
+    manifest: string;
+    lib: string;
+} {
+    const dir = mkdtempSync(join(tmpdir(), "knext-sharp-verify-"));
+    const pkgLib = join(dir, "native", "sharp-linux-x64", "lib");
+    mkdirSync(pkgLib, { recursive: true });
+    const addon = join(pkgLib, "sharp-linux-x64.node");
+    writeFileSync(addon, "ADDON BYTES");
+    const vipsLib = join(dir, "native", "sharp-libvips-linux-x64", "lib");
+    mkdirSync(vipsLib, { recursive: true });
+    const lib = join(vipsLib, "libvips-cpp.so.42");
+    writeFileSync(lib, "VIPS BYTES");
+
+    const sha = (p: string) =>
+        createHash("sha256").update(readFileSync(p)).digest("hex");
+    const manifest = join(dir, "native", ".integrity.json");
+    writeFileSync(
+        manifest,
+        JSON.stringify({
+            version: 1,
+            algorithm: "sha256",
+            packages: {},
+            files: {
+                "sharp-linux-x64/lib/sharp-linux-x64.node": sha(addon),
+                "sharp-libvips-linux-x64/lib/libvips-cpp.so.42": sha(lib),
+            },
+        }),
+    );
+    return { dir, addon, manifest, lib };
+}
+
+/** Import the real shim with `process.dlopen` stubbed. Returns the exit code. */
+function loadShim(
+    addon: string,
+    dir: string,
+): { status: number; stderr: string; stdout: string } {
+    const harness = join(dir, "harness.mjs");
+    writeFileSync(
+        harness,
+        `process.dlopen = (m) => { m.exports = { KNEXT_STUB: true }; };\n` +
+            `const mod = await import(${JSON.stringify(`file://${SHIM}`)});\n` +
+            `if (!mod.default?.KNEXT_STUB) { console.error('shim did not dlopen'); process.exit(3); }\n` +
+            `console.log('DLOPENED');\n`,
+    );
+    const r = spawnSync(process.execPath, [harness], {
+        encoding: "utf8",
+        env: { ...process.env, KNEXT_SHARP_ADDON: addon },
+    });
+    return {
+        status: r.status ?? -1,
+        stderr: r.stderr ?? "",
+        stdout: r.stdout ?? "",
+    };
+}
+
+describe("sharp addon integrity verification", () => {
+    it("loads when every listed payload matches the manifest", () => {
+        const { dir, addon } = stageVerifiable();
+        const r = loadShim(addon, dir);
+        expect(r.stderr).not.toContain("refusing");
+        expect(r.status).toBe(0);
+        expect(r.stdout).toContain("DLOPENED");
+    });
+
+    it("REFUSES a tampered addon, naming the file", () => {
+        const { dir, addon } = stageVerifiable();
+        // One byte. The whole point is that a `.node` is an opaque blob: an SBOM
+        // that lists the package cannot tell this apart from the real thing.
+        writeFileSync(addon, "aDDON BYTES");
+
+        const r = loadShim(addon, dir);
+        expect(r.status).not.toBe(0);
+        expect(r.stdout).not.toContain("DLOPENED");
+        expect(r.stderr).toContain("refusing to dlopen");
+        expect(r.stderr).toContain("sharp-linux-x64/lib/sharp-linux-x64.node");
+    });
+
+    it("REFUSES a tampered libvips even though the addon itself is intact", () => {
+        // The addon links libvips by relative rpath and the OS loader pulls it
+        // in transitively — it never passes through this shim, so verifying only
+        // the dlopened file would leave the larger payload unpinned.
+        const { dir, addon, lib } = stageVerifiable();
+        writeFileSync(lib, "vIPS BYTES");
+
+        const r = loadShim(addon, dir);
+        expect(r.status).not.toBe(0);
+        expect(r.stderr).toContain(
+            "sharp-libvips-linux-x64/lib/libvips-cpp.so.42",
+        );
+    });
+
+    it("REFUSES an addon the manifest does not list", () => {
+        // A native payload present in a tree that HAS a manifest, but absent
+        // from it, is the injected-file case — it must not read as "nothing to
+        // check".
+        const { dir } = stageVerifiable();
+        const rogue = join(
+            dir,
+            "native",
+            "sharp-linux-x64",
+            "lib",
+            "evil.node",
+        );
+        writeFileSync(rogue, "EVIL");
+
+        const r = loadShim(rogue, dir);
+        expect(r.status).not.toBe(0);
+        expect(r.stderr).toContain("does not list");
+        expect(r.stderr).toContain("evil.node");
+    });
+
+    it("warns and loads when there is no manifest — never bricks an older image", () => {
+        // Images built before this landed have no manifest. Failing closed on
+        // absence would turn a security improvement into a fleet outage, so
+        // absence is loud and permissive while a MISMATCH is fatal.
+        const dir = mkdtempSync(join(tmpdir(), "knext-sharp-legacy-"));
+        const lib = join(dir, "native", "sharp-linux-x64", "lib");
+        mkdirSync(lib, { recursive: true });
+        const addon = join(lib, "sharp-linux-x64.node");
+        writeFileSync(addon, "ADDON BYTES");
+
+        const r = loadShim(addon, dir);
+        expect(r.status).toBe(0);
+        expect(r.stdout).toContain("DLOPENED");
+        expect(r.stderr).toContain("no native integrity manifest");
     });
 });

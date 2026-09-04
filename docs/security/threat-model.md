@@ -125,6 +125,39 @@ count and the on-disk package count (an empty tree has *perfect* coverage), a co
 named toolchain anchors. Mutation-proved by pointing it at an empty directory (exit 1) and at a
 default-cataloger SBOM (0 components, red).
 
+### `/app/native`: the one thing in a vinext image that is neither compiled in nor scanned
+
+The closure audit above covers the JS the binary swallows. It does **not** cover `/app/native` —
+sharp's `@img` addon plus libvips, ~18 MB of `.node` / `.so` that ships *beside* the executable
+because a compiled binary cannot `dlopen` a path inside its own virtual filesystem. That tree is the
+only remaining path from the install store to native-code privilege in the running pod, and an SBOM
+would not close it anyway: a `.node` is an opaque blob, so an SBOM listing the *package* cannot tell
+a swapped addon from the real one.
+
+It is pinned instead, in two halves of deliberately different strength:
+
+- **Provenance, at stage time.** `writeNativeIntegrityManifest`
+  (`packages/kn-next/src/cli/native-integrity.ts`, called from `stageSharpNative` and from
+  `apps/file-manager/Dockerfile` via `scripts/write-native-integrity.mjs`) requires every staged
+  `@img` package to appear in `bun.lock` at exactly the version on disk. A missing entry or a
+  version mismatch **fails the build** — an `@img` package the lockfile never resolved is the
+  injected-dependency case, not a thing to skip. Stated precisely: bun records the integrity of the
+  packed **tarball** and what ships is the **extracted tree**, so this pins *which package*, not
+  *which bytes*.
+- **Bytes, at load time.** The same step writes `native/.integrity.json` — sha256 per staged file —
+  and the dlopen shim (`packages/kn-next/src/adapters/sharp-addon-dlopen.mjs`) re-hashes every
+  native payload the manifest lists **before** calling `process.dlopen`. A mismatch, or a payload
+  the manifest does not list, is fatal and names the file. libvips is covered too, not just the
+  addon: the OS loader pulls it in transitively off a relative rpath, so it never passes through the
+  shim and verifying only the dlopened file would leave the larger binary unpinned.
+
+**Residual, stated rather than implied.** A manifest that is *absent* warns and loads — images built
+before this landed have none, and failing closed on absence would turn a supply-chain fix into a
+fleet outage. So an attacker who can strip a file from the image can also downgrade verification to
+a warning. The template Dockerfile therefore fails the **build** when the manifest is missing, which
+narrows the window to an image mutated after build; closing it fully needs the manifest bound to the
+image digest by a signature, which is the same owed work as the closure SBOM attestation above.
+
 ### Patching policy — `apk upgrade` on a digest-pinned base (#267)
 
 Runner stages **MAY** run `apk upgrade --no-cache` against a digest-pinned base image

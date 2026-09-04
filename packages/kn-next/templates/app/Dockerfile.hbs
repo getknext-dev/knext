@@ -51,7 +51,21 @@ COPY .output/public /app/.output/public
 #
 # Keep the directory layout: the addon finds its image library by a relative
 # path, so flattening the tree breaks it.
+#
+# `native/.integrity.json` travels INSIDE this directory and must not be stripped
+# out: it is the sha256-per-file record `kn-next build` wrote from the lockfile,
+# and the binary refuses to `dlopen` anything that disagrees with it. Copying the
+# directory ships it — that is why the manifest lives in the tree rather than
+# beside it, so no second COPY line can be forgotten.
 COPY native /app/native
+
+# Fail here rather than at the first `/_next/image` request. Without the manifest
+# the binary still runs, warns, and loads the addon UNVERIFIED (older images must
+# not brick) — which is a state to catch at build time, not to discover in a log.
+RUN test -f /app/native/.integrity.json || { \
+      echo "native/.integrity.json missing — run 'kn-next build' to stage a pinned native tree" >&2; \
+      exit 1; \
+    }
 
 # Non-root, matching the distroless convention used across knext images.
 USER 65532:65532

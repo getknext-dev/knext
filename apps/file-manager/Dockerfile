@@ -113,6 +113,18 @@ RUN set -eu; \
     test -n "$ADDON" || { echo "no sharp addon staged under /repo/native" >&2; exit 1; }; \
     echo "staged sharp addon: $ADDON"
 
+# Pin what was just staged (C2). Everything above copies from the install store
+# straight into a tree the binary `dlopen`s at native-code privilege, and the
+# closure SBOM does not cover `/app/native` — a `.node` is an opaque blob, so an
+# SBOM that lists the package cannot see a swapped addon.
+#
+# This runs the SAME module `kn-next build`'s `stageSharpNative` calls, not a
+# shell reimplementation: two implementations of "hash the tree, check the
+# lockfile" would drift, and the one that drifts is the one nobody runs.
+RUN set -eu; \
+    bun scripts/write-native-integrity.mjs /repo/native /repo/bun.lock; \
+    test -f /repo/native/.integrity.json
+
 # ---------------------------------------------------------------------------
 # Runtime — the binary, its public assets, and the two libraries Bun links.
 # No node, no npm, no package manager, no bytecode cache to mount.
