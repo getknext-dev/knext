@@ -30,7 +30,13 @@
 
 import { describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import {
+    existsSync,
+    mkdirSync,
+    mkdtempSync,
+    readFileSync,
+    writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -145,6 +151,46 @@ describe("native tree integrity manifest — staging", () => {
                 f.includes(INTEGRITY_MANIFEST_NAME),
             ),
         ).toBe(false);
+    });
+
+    it("a REBUILD does not fold the previous manifest into the new record", () => {
+        // THE HALF THE FIRST TEST CANNOT COVER, found by mutation (#907's
+        // prover, sprint 2 lane G). The assertion above — "the manifest never
+        // hashes itself" — runs against a directory where `.integrity.json` does
+        // not exist yet, so deleting the `rel === INTEGRITY_MANIFEST_NAME`
+        // exclusion from the source is a NO-OP there and the guard stayed green.
+        // The source's own comment claims both halves ("cannot hash itself, and
+        // a stale one must not leak into the new record"); only the first was
+        // tested.
+        //
+        // It matters on the path that actually happens: a rebuild in a tree that
+        // already carries a manifest. Without the exclusion the new record would
+        // contain a hash of the OLD manifest, so the shipped `.integrity.json`
+        // describes a file that no longer exists by the time it is written —
+        // and the `dlopen` verifier then refuses a tree that is perfectly fine.
+        const { dir, nativeDir } = stageNative();
+        const lock = writeLock(dir, lockfile());
+
+        writeNativeIntegrityManifest(nativeDir, lock);
+        const first = readManifest(nativeDir);
+        // Non-vacuity: the manifest must be on disk for the second write to be
+        // the rebuild case at all. Without this the test would pass against a
+        // build that silently wrote nothing.
+        expect(existsSync(join(nativeDir, INTEGRITY_MANIFEST_NAME))).toBe(true);
+
+        writeNativeIntegrityManifest(nativeDir, lock);
+        const second = readManifest(nativeDir);
+
+        expect(
+            Object.keys(second.files).some((f) =>
+                f.includes(INTEGRITY_MANIFEST_NAME),
+            ),
+            "the rebuild recorded a hash of the previous manifest",
+        ).toBe(false);
+        // Idempotence is the observable consequence: same tree in, same record
+        // out. A build whose manifest depends on what a previous build left
+        // behind is not reproducible.
+        expect(second).toEqual(first);
     });
 
     it("records each package's lockfile version and integrity string", () => {
