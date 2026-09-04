@@ -43,6 +43,9 @@ const MUTATIONS = [
       'then inert in the only place it is ever exercised, which is exactly the state this guard ' +
       'was written to end',
     subject: 'exampleDockerfile',
+    // A Dockerfile has no extension, so the harness cannot infer its comment
+    // syntax from the filename the way it does for .ts/.mjs/.md.
+    options: { commentPrefix: '#' },
     anchor: '    METRICS_PORT=9091 \\\n    NODE_ENV=production',
     replacement: '    METRICS_PORT=9091',
   },
@@ -53,6 +56,7 @@ const MUTATIONS = [
       'the TEMPLATE loses it — every app scaffolded from now on ships with the refusal inert, ' +
       'which is the widest possible blast radius for this defect',
     subject: 'template',
+    options: { commentPrefix: '#' },
     anchor: '    NODE_ENV=production',
     replacement: '    NODE_ENV=development',
   },
@@ -91,6 +95,7 @@ const NEGATIVE = {
   expect: 'green',
   claim: 'the explanatory COMMENT is reworded — the guard asserts the ENV, not the prose',
   subject: 'exampleDockerfile',
+  options: { commentPrefix: '#' },
   anchor: '# image CI actually builds and boots. Without it that control is inert in the',
   replacement:
     '# image CI builds and boots (reworded by the negative control). Without it it is inert in the',
