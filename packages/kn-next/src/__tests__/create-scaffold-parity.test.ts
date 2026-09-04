@@ -51,6 +51,11 @@ const VERBATIM = [
     "instrumentation-edge-safe.test.ts.hbs",
     "knext-bun-entry.mjs.hbs",
     "runtime-contract.mjs.hbs",
+    // The shallow readiness/liveness route (#910). It carries no layout
+    // assumption — the operator probes the SAME default path whichever
+    // scaffolder emitted the app — so there is no version of this file that
+    // may legitimately differ between the trees.
+    "src/app/api/health/route.ts.hbs",
     "src/instrumentation.ts.hbs",
     "src/instrumentation-node.ts.hbs",
 ] as const;
@@ -111,6 +116,10 @@ const SHAPE_FROZEN = [
     "instrumentation-edge-safe.test.ts.hbs",
     "knext-bun-entry.mjs.hbs",
     "runtime-contract.mjs.hbs",
+    // #910: a scaffolded app whose readiness AND liveness probes both 404 never
+    // becomes Ready and then restart-loops. Dropping this file out of the
+    // compared buckets would stop comparing the one route Kubernetes calls.
+    "src/app/api/health/route.ts.hbs",
     "src/instrumentation.ts.hbs",
     "src/instrumentation-node.ts.hbs",
 ] as const;

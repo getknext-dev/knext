@@ -18,6 +18,12 @@ export function GET() {
 **Why it matters more than it looks.** The operator points Knative's readiness *and* liveness probes
 at `/api/health` by default. `create-next-app` does not generate that route.
 
+<Callout type="info">
+**`kn-next create` writes this file for you.** If you scaffolded the app with `kn-next create`, the
+route above is already there — skip ahead. This section is for an existing app you are adding knext
+to, which is where the missing route bites.
+</Callout>
+
 Without it, the probe gets a 404. The revision never becomes Ready. Your deploy "succeeds", the pod
 starts, and then `kn-next status` reports `Ready=False` forever — with nothing obviously wrong in
 your application logs, because nothing *is* wrong with your application. It is being asked a
@@ -25,6 +31,12 @@ question it cannot answer.
 
 That is enough to go Ready. For a real app you want a health check that reports on its dependencies
 too — `@getknext/lib` ships `checkShallowHealth()` and `checkDeepHealth()` for that.
+
+**Keep the probe route shallow.** It should answer "is this process serving?", never "is every
+dependency awake?". knext scales databases and caches to zero, so an asleep dependency is the normal
+state — a probe that dials one flaps readiness on every cold wake, and liveness then restarts a pod
+that was perfectly healthy. Put dependency checks on a separate path (`/api/health/deep` by
+convention) and point alerting at that, not Kubernetes.
 
 <Callout type="info">
 Prefer a different path? Set `healthCheckPath` in the config below and the operator points the probes

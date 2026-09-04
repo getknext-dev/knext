@@ -54,6 +54,32 @@
 // vinext route wiring entirely → the compiled binary answers a framework 404 for
 // every app route (no `_ssr` chunks are even emitted). With it, routes are bundled
 // and the binary is self-contained.
+// ---------------------------------------------------------------------------
+// Image optimization (ADR-0048 / ADR-0006).
+//
+// vinext's `/_next/image` is gated on the Cloudflare Workers assets binding:
+//
+//     if (isImageOptimizationPath(...) && env?.ASSETS && getImageOptimizer())
+//
+// On the node/bun platform `env.ASSETS` is undefined, so that branch is DEAD —
+// registering an optimizer cannot reach it. Both registration routes were tried
+// and measured: the `images: { optimizer }` plugin option (read only on the
+// Cloudflare init path) and a direct `setImageOptimizer()` call from this entry.
+// Each left /_next/image returning 181,277 bytes of image/png, byte-identical
+// to the source, even with `Accept: image/webp`.
+//
+// So knext INTERCEPTS the route here instead, before nitro routing sees it.
+// The handler returns null for anything that is not a same-origin optimizable
+// request, and that null falls through to the app unchanged.
+// ---------------------------------------------------------------------------
+import { handleImageRequest } from '@getknext/core/internal/vinext-image-optimizer';
+// Statically imported so the BUNDLER embeds sharp's JavaScript. That is not a
+// preference — inside a `bun build --compile` binary nothing can resolve a
+// package from disk, so a runtime `require('sharp')` cannot work there no matter
+// where sharp is installed. Only the native addon stays external, opened by path
+// (see @getknext/core's sharp-addon-dlopen shim, aliased in vite.config.ts).
+import sharp from 'sharp';
+
 import '#nitro/virtual/polyfills';
 import { existsSync } from 'node:fs';
 import { useNitroApp } from 'nitro/app';
@@ -175,6 +201,20 @@ const appSrvx = serve({
       } finally {
         metrics.inflight--;
       }
+    },
+    // Image optimization — see the note above on why this is an intercept and
+    // not a registered optimizer. Inside the counting middleware, so optimized
+    // requests are still counted like any other.
+    async (req, next) => {
+      const optimized = await handleImageRequest(req, {
+        // Resolve the source through the app's own pipeline, so it finds the
+        // asset exactly as a normal static request would.
+        fetchSource: (path) => nitro.fetch(new Request(new URL(path, req.url))),
+        // Direct-pass, per architecture.md §4 — and the only thing that works in
+        // the compiled binary, where the optimizer's own runtime resolve cannot.
+        sharp,
+      });
+      return optimized ?? next();
     },
   ],
 });

@@ -133,7 +133,7 @@ export function isCompiledExecutable(execPath) {
  * @param {(path: string) => boolean} opts.exists
  * @param {boolean} [opts.isCompiled]         Defaults to `isCompiledExecutable(execPath)`.
  * @param {string} [opts.cwd]                 Reported in the warning only — never a candidate.
- * @returns {{ mainUrl: string | null, source: 'baked' | 'execdir' | 'unresolved', warning: string | null }}
+ * @returns { { mainUrl: string | null, source: 'baked' | 'execdir' | 'unresolved', warning: string | null } }
  *   `mainUrl` is null when `__nitro_main__` must be left alone (candidate 1 or 3).
  */
 export function resolveAssetAnchor({ bakedMain, execPath, exists, isCompiled, cwd }) {
@@ -471,14 +471,14 @@ export async function drainPending() {
 //   5. Exit 0. `server.stop(true)` (force) is the hardcap path only.
 // Idempotent: a second signal while draining is ignored.
 /**
- * @param {{
+ * @param { {
  *   appServers: Array<{ stop: (force?: boolean) => Promise<void> | void }>,
  *   metricsServer?: { stop: (force?: boolean) => Promise<void> | void },
  *   drainTasks?: () => Promise<void>,
  *   graceMs?: number,
  *   log?: (msg: string) => void,
  *   exit?: (code: number) => void,
- * }} opts
+ * } } opts
  */
 export function createGracefulShutdown({
   appServers,

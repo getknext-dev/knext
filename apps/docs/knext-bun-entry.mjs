@@ -60,6 +60,12 @@
 // request, and that null falls through to the app unchanged.
 // ---------------------------------------------------------------------------
 import { handleImageRequest } from '@getknext/core/internal/vinext-image-optimizer';
+// Statically imported so the BUNDLER embeds sharp's JavaScript. That is not a
+// preference — inside a `bun build --compile` binary nothing can resolve a
+// package from disk, so a runtime `require('sharp')` cannot work there no matter
+// where sharp is installed. Only the native addon stays external, opened by path
+// (see @getknext/core's sharp-addon-dlopen shim, aliased in vite.config.ts).
+import sharp from 'sharp';
 
 import '#nitro/virtual/polyfills';
 import { existsSync } from 'node:fs';
@@ -191,6 +197,9 @@ const appSrvx = serve({
         // Resolve the source through the app's own pipeline, so it finds the
         // asset exactly as a normal static request would.
         fetchSource: (path) => nitro.fetch(new Request(new URL(path, req.url))),
+        // Direct-pass, per architecture.md §4 — and the only thing that works in
+        // the compiled binary, where the optimizer's own runtime resolve cannot.
+        sharp,
       });
       return optimized ?? next();
     },
