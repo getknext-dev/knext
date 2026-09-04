@@ -70,19 +70,54 @@ const read = (relPath: string) => readFileSync(resolve(REPO_ROOT, relPath), 'utf
 const WORKSPACE_PNPM = /(?:^|\n|&&)[ \t]*pnpm\s+(?:--filter\b|install\b|run\b|exec\b|add\b)/;
 
 /**
- * The scripts a developer is instructed BY. Their string literals are read as
- * instructions; their comments are not.
+ * Everything a developer is instructed BY: the workspace scripts, and the
+ * MARKDOWN they read first.
  *
- * `.github/workflows` is excluded on purpose and the reason is specific: the
- * next.js compatibility harness is a pnpm workspace of its own (next.js's repo
- * uses pnpm), so `compat-suite.yml` legitimately runs pnpm against a tree that
- * is not ours. Widening this scan to workflows would have to carve that out,
- * and a scan with a carve-out is one edit away from a scan with two.
+ * The markdown half was missing, and that is where the instructions actually
+ * were. The scan covered `scripts/*.mjs` and reported clean while
+ * `CONTRIBUTING.md`, the root `README.md` and three app READMEs all told a
+ * newcomer to run `pnpm install` against a bun-pinned workspace — the very
+ * first command anyone runs, in the file they run it from. A guard aimed at the
+ * least-read copy of an instruction and not the most-read one is close to
+ * backwards.
+ *
+ * `.github/workflows` is still excluded, and the reason is specific: the next.js
+ * compatibility harness is a pnpm workspace of its own (next.js's repo uses
+ * pnpm), so `compat-suite.yml` legitimately runs pnpm against a tree that is not
+ * ours. Widening to workflows would need a carve-out, and a scan with a
+ * carve-out is one edit away from a scan with two.
  */
-const SCRIPT_PATHSPECS = ['scripts/*.mjs', 'scripts/lib/*.mjs', 'apps/*/scripts/*.mjs'];
+const SCRIPT_PATHSPECS = [
+  'scripts/*.mjs',
+  'scripts/lib/*.mjs',
+  'apps/*/scripts/*.mjs',
+  // `:(glob)` magic so `*` does NOT cross a slash: without it git matches
+  // every .md at any depth, which pulls in maintainer-owned `.claude/` and the
+  // whole of `docs/`. Those carry live pnpm instructions too — filed as #933
+  // rather than swept in here, because widening a scan and fixing what it finds
+  // are two changes and this round is scoped to one.
+  ':(glob)*.md',
+  ':(glob)apps/*/README.md',
+  ':(glob)packages/*/README.md',
+];
 
 describe('§4.2 the workspace no longer instructs anyone through pnpm', () => {
   const files = tracked(...SCRIPT_PATHSPECS);
+
+  it('the scan reaches the MARKDOWN, not just the scripts', () => {
+    // Named explicitly, because "the pathspec covers everything" is exactly what
+    // was believed while five files instructed a newcomer through pnpm.
+    expect(files).toContain('CONTRIBUTING.md');
+    expect(files).toContain('README.md');
+    expect(files.some((f) => f.startsWith('apps/') && f.endsWith('README.md'))).toBe(true);
+  });
+
+  it('a markdown fenced instruction IS matched (the shape the scan missed)', () => {
+    // The literal-only reader saw nothing in markdown. This pins the raw-line
+    // path so it cannot quietly revert to reading string literals.
+    expect(WORKSPACE_PNPM.test('pnpm install')).toBe(true);
+    expect(WORKSPACE_PNPM.test('bun install')).toBe(false);
+  });
 
   it('finds workspace scripts to scan at all (non-vacuity)', () => {
     // Without this, an empty pathspec would make the scan below pass by
@@ -90,12 +125,16 @@ describe('§4.2 the workspace no longer instructs anyone through pnpm', () => {
     expect(files.length).toBeGreaterThan(10);
   });
 
-  it('no tracked workspace script carries a runnable pnpm instruction', () => {
+  it('no tracked workspace script or doc carries a runnable pnpm instruction', () => {
     const findings: string[] = [];
     for (const relPath of files) {
       const source = read(relPath);
-      for (const literal of codeStringLiterals(source)) {
-        const hit = WORKSPACE_PNPM.exec(literal);
+      // MARKDOWN is read as raw lines: its instructions live in fenced code
+      // blocks, not in string literals, so the code-literal reader that keeps
+      // `prover-lane.mjs`'s diagnostic legal would see nothing at all here.
+      const haystacks = relPath.endsWith('.md') ? source.split('\n') : codeStringLiterals(source);
+      for (const text of haystacks) {
+        const hit = WORKSPACE_PNPM.exec(text);
         if (hit) findings.push(`${relPath}: ${JSON.stringify(hit[0])}`);
       }
     }
@@ -342,7 +381,21 @@ describe('no surviving prose claims compat-smoke can skip a capability check', (
   });
 
   it('no tracked file says compat-smoke skips', () => {
-    const files = tracked('.github/workflows/*.yml', 'docs/**/*.md', 'scripts/*.mjs', 'tests/*.ts');
+    // `apps/**` was missing, and the runner LIVES there — the one directory
+    // whose files are most likely to describe its behaviour was the one the scan
+    // could not see. Re-running the identical logic over the wider set is zero
+    // findings today, so this changes nothing now and catches the apps/ case
+    // later, which is the only useful time to widen a scan.
+    const files = tracked(
+      '.github/workflows/*.yml',
+      'docs/**/*.md',
+      'scripts/*.mjs',
+      'scripts/lib/*.mjs',
+      'tests/*.ts',
+      'apps/**/*.mjs',
+      'apps/**/*.md',
+      'apps/**/*.ts',
+    );
     expect(files.length, 'nothing to scan — the guard would pass vacuously').toBeGreaterThan(20);
     const findings: string[] = [];
     for (const relPath of files) {

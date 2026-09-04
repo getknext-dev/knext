@@ -344,7 +344,7 @@ The SDK's product claims (migrations apply + are idempotent, writer
 read-your-writes, RO fallback/routing, the `kn-next db migrate` runner) are
 verified against a real Postgres by
 `packages/db/src/__tests__/integration/live-postgres.test.ts`. The suite is
-**env-gated** — the default `pnpm test` run stays hermetic and skips it — and
+**env-gated** — the default `bun run test` run stays hermetic and skips it — and
 runs in CI against a `postgres:16` service container (`db-live-integration`).
 
 Run it locally against a throwaway Docker Postgres:
@@ -357,7 +357,7 @@ docker run --rm -d --name knext-db-live \
 
 # run the live lane (both env vars are required; otherwise it skips cleanly)
 KNEXT_DB_LIVE=1 DATABASE_URL=postgres://knext:knext@127.0.0.1:55432/knext \
-  pnpm exec vitest run packages/db/src/__tests__/integration/live-postgres.test.ts
+  node scripts/bun-test.mjs packages/db/src/__tests__/integration/live-postgres.test.ts
 
 # teardown
 docker rm -f knext-db-live

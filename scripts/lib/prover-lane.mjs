@@ -609,6 +609,51 @@ function literalValue(source, blanked, span, consts) {
   // string-constant map when the whole expression is a bare identifier.
   const bare = /^\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*$/.exec(view);
   if (bare && consts) return consts.get(bare[1]);
+
+  // A TEMPLATE LITERAL whose interpolations are all known string constants.
+  // `blankNonCode` empties a template's text but deliberately leaves `${…}`
+  // holes as code, so the holes are read from the blanked view and the literal
+  // text between them from the original.
+  //
+  // Not an edge case: `mutation-prove-published-image-closure.mjs`'s M2 anchors
+  // on an indented `${AUDIT_STEP}\n`, and it was the one entry of seven that
+  // disappeared. An interpolation this cannot resolve returns undefined, which
+  // the caller now REPORTS rather than dropping.
+  const tpl = /^\s*`/.exec(view);
+  if (tpl) {
+    const openAt = view.indexOf('`');
+    const closeAt = view.lastIndexOf('`');
+    if (closeAt > openAt) {
+      let out = '';
+      let k = openAt + 1;
+      while (k < closeAt) {
+        if (view[k] === '$' && view[k + 1] === '{') {
+          const holeEnd = view.indexOf('}', k + 2);
+          if (holeEnd === -1 || holeEnd > closeAt) return undefined;
+          const name = source.slice(span.start + k + 2, span.start + holeEnd).trim();
+          const value = consts?.get(name);
+          if (value === undefined) return undefined;
+          out += value;
+          k = holeEnd + 1;
+          continue;
+        }
+        // Escapes are decoded through JSON so `\n` in the source is a newline
+        // here, matching what the harness will actually search for.
+        if (source[span.start + k] === '\\') {
+          const decoded = decodeLiteral(`"${source.slice(span.start + k, span.start + k + 2)}"`);
+          if (decoded === undefined) return undefined;
+          out += decoded;
+          k += 2;
+          continue;
+        }
+        out += source[span.start + k];
+        k += 1;
+      }
+      return out;
+    }
+    return undefined;
+  }
+
   const parts = [];
   let i = 0;
   while (i < view.length) {
@@ -809,20 +854,41 @@ function driverTableAnchors(source, subjects) {
     if (!span) continue;
     let subjectKey;
     let anchor;
+    let sawAnchorKey = false;
     for (const prop of splitArgs(blanked, span.start, span.end)) {
-      const text = source.slice(prop.start, prop.end);
-      const name = /^\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*:/.exec(text);
+      // KEYS ON THE BLANKED VIEW, values sliced from the original — the same fix
+      // `proverSubjectPaths` already carries, which was left out of this sibling
+      // function. Matching the key on RAW source meant a comment line inside a
+      // `{ subject, anchor }` entry made the regex fail, and the entry vanished
+      // with nothing reported anywhere.
+      const view = blanked.slice(prop.start, prop.end);
+      const name = /^(\s*)([A-Za-z_$][A-Za-z0-9_$]*)\s*:/.exec(view);
       if (!name) continue;
-      const valueSpan = { start: prop.start + text.indexOf(':') + 1, end: prop.end };
-      if (name[1] === 'subject') {
+      const valueSpan = { start: prop.start + name[0].length, end: prop.end };
+      if (name[2] === 'subject') {
         const raw = source.slice(valueSpan.start, valueSpan.end).trim();
         const lit = /^(['"])((?:[^\\]|\\.)*?)\1$/.exec(raw);
         if (lit) subjectKey = decodeLiteral(raw);
-      } else if (name[1] === 'anchor') {
+      } else if (name[2] === 'anchor') {
+        sawAnchorKey = true;
         anchor = literalValue(source, blanked, valueSpan, consts);
       }
     }
-    if (subjectKey === undefined || anchor === undefined) continue;
+    // REPORTED, NEVER DROPPED. This function used to `continue` here, which
+    // contradicts the invariant stated in this module's own header: a dropped
+    // anchor is indistinguishable from a live one in the summary, which is how a
+    // static audit rots into decoration. `sawAnchorKey` distinguishes "this
+    // object is not a mutation entry" (no `anchor:` at all — skip it, silently
+    // and correctly) from "it is one and we could not read it" (report it).
+    if (!sawAnchorKey) continue;
+    if (subjectKey === undefined || anchor === undefined) {
+      unresolved.push(
+        `{ subject: ${subjectKey === undefined ? '<unreadable>' : JSON.stringify(subjectKey)}, ` +
+          `anchor: ${anchor === undefined ? '<not a resolvable literal>' : '…'} } — the entry was ` +
+          'read but not resolved',
+      );
+      continue;
+    }
     const file = subjects.get(subjectKey);
     if (file === undefined) {
       unresolved.push(`subject ${JSON.stringify(subjectKey)} names no entry in the subjects map`);

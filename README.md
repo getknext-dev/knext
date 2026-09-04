@@ -153,7 +153,7 @@ seq 1 100000 | xargs -n1 -P100 -I {} curl -s -o /dev/null -w "%{time_total}\n" \
 
 The Dockerfile uses a **2-stage build** producing a lean distroless Node image:
 
-1. **Build Stage** – `node:22` + `pnpm` runs `next build` (`output: 'standalone'`) → self-contained `server.js`
+1. **Build Stage** – `node:22` + `bun` runs `next build` (`output: 'standalone'`) → self-contained `server.js`
 2. **Runtime Stage** – `gcr.io/distroless/nodejs22` runs the standalone server with `NODE_COMPILE_CACHE` pointed at the cache baked into the image
 
 The cache is **populated at build time** and baked into the image, so every pod — including the very first cold start — deserializes precompiled bytecode instead of re-parsing and JIT-compiling. This is the same approach Vercel Fluid uses. It needs no volume, no PVC, and no cluster feature flags.
@@ -183,7 +183,7 @@ The cache is **populated at build time** and baked into the image, so every pod 
 ### 1. Install Dependencies
 
 ```bash
-pnpm install
+bun install
 ```
 
 ### 2. Configure Your App
@@ -786,7 +786,7 @@ The example app demonstrates all framework capabilities:
 
 ```bash
 cd apps/file-manager
-pnpm dev
+bun run dev
 ```
 
 ### Build & Deploy
