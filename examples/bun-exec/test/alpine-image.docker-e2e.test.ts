@@ -588,3 +588,56 @@ describe('A1 — self-contained on the current vinext/vite pins', () => {
     expect(await metrics.text()).toMatch(/^# HELP /m);
   });
 });
+
+// ── SIGTERM drain — MUST BE THE LAST DESCRIBE: it terminates the container ──
+//
+// The gap this closes (#887): every SIGTERM gate in the repo exercised the
+// LEGACY standalone supervisor (node-server via db-demo) or a harness that
+// admits it "MIRRORS the entry" — nothing ever sent a signal to the artifact
+// that actually ships. On a scale-to-zero platform every scale-down IS a
+// SIGTERM, so the drain guarantee sits exactly on the product thesis
+// (security.md: drain in-flight requests, then exit).
+//
+// The contract under test is runtime-contract.mjs createGracefulShutdown():
+// in-flight requests complete (srvx stop() without force), `DRAINED cleanly`
+// is logged, exit code 0. The hardcap force-stop path is exit 1 and is
+// covered by test/sigterm-hardcap-e2e.test.ts against the entry — here we
+// prove the REAL binary in the REAL container takes the graceful path.
+describe('SIGTERM — the shipped binary drains in-flight work and exits 0 (#887)', () => {
+  it('completes an in-flight request across the TERM, then exits 0 with the drain markers logged', async () => {
+    // 1. Put a request genuinely in flight (the /api/slow fixture sleeps
+    //    server-side; 4s leaves room for signal delivery + drain well inside
+    //    the 25s grace).
+    const inFlight = fetch(`http://127.0.0.1:${appPort}/api/slow?ms=4000`);
+    // Give the request time to reach the handler before the signal.
+    await new Promise((r) => setTimeout(r, 750));
+
+    // 2. Deliver SIGTERM exactly as Knative/Kubernetes does.
+    const killed = run('docker', ['kill', '--signal=TERM', CONTAINER], { timeout: 60_000 });
+    expect(killed.status, `docker kill failed:\n${killed.stderr}`).toBe(0);
+
+    // 3. The in-flight request must COMPLETE — a dropped connection here is
+    //    the exact user-visible failure the drain exists to prevent.
+    const res = await inFlight;
+    expect(res.status, 'the in-flight request was dropped by the drain').toBe(200);
+    expect(await res.json()).toEqual({ ok: true, sleptMs: 4000 });
+
+    // 4. The container must exit ON ITS OWN, with code 0 (graceful path) —
+    //    exit 1 is the hardcap/force path, and a container still running is a
+    //    drain that never concluded. `docker wait` blocks until exit.
+    const waited = run('docker', ['wait', CONTAINER], { timeout: 30_000 });
+    expect(waited.status, `docker wait failed:\n${waited.stderr}`).toBe(0);
+    expect(
+      waited.stdout.trim(),
+      'the binary did not take the graceful exit-0 path on SIGTERM',
+    ).toBe('0');
+
+    // 5. And it must be the DRAIN that concluded, not an incidental exit:
+    //    both markers come from createGracefulShutdown, in order.
+    const logs = run('docker', ['logs', CONTAINER], { timeout: 60_000 });
+    const out = `${logs.stdout}\n${logs.stderr}`;
+    expect(out).toContain('SIGNAL:SIGTERM');
+    expect(out).toContain('DRAINED cleanly');
+    expect(out.indexOf('SIGNAL:SIGTERM')).toBeLessThan(out.indexOf('DRAINED cleanly'));
+  }, 60_000);
+});

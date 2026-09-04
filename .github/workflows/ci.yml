@@ -342,18 +342,22 @@ jobs:
         run: node scripts/compat-smoke.mjs
 
   sigterm-drain-shipped:
-    # Per-PR GATE: proves the SHIPPED container layout actually boots the knext
-    # runtime entry and drains in-flight requests on SIGTERM (security.md graceful
-    # shutdown). The image CMD is `node -e import('@getknext/core/internal/node-server')`,
-    # but Next's standalone output is import-graph driven and NOTHING imports
-    # node-server.js — so neither it nor its hard deps (prom-client, pino) are
-    # traced into `.next/standalone`. The Dockerfile fixes this with a
-    # `pnpm --prod deploy` of @getknext/core into the runner; this job proves the fix
-    # by assembling that exact layout and running the real CMD. Without it, the
-    # image crash-loops at boot (ERR_MODULE_NOT_FOUND) while CI stays green —
-    # exactly the regression this guards. KNEXT_REQUIRE_STANDALONE=1 hard-fails
-    # (never skips) if the standalone build is missing.
-    name: SIGTERM drain (shipped bundle gate)
+    # Per-PR GATE for the LEGACY standalone supervisor's SIGTERM drain
+    # (security.md graceful shutdown). HONESTY NOTE (#887): this job's subject
+    # is node-server — the standalone-shape supervisor that still ships for
+    # back-compat (stored CRs with build=turbopack) — NOT the artifact new
+    # builds produce. An earlier version of this header claimed it proved "the
+    # SHIPPED container layout"; since ADR-0048 the shipped layout is the
+    # compiled single executable, whose drain is proved where the binary is —
+    # `bun-exec-alpine-image` runs test/alpine-image.docker-e2e.test.ts, which
+    # sends a real TERM to the real container and asserts the in-flight
+    # request completes, exit 0, drain markers in order.
+    # Mechanics (unchanged): node-server's hard deps are not traced into
+    # `.next/standalone`; the legacy Dockerfile's `pnpm --prod deploy` of
+    # @getknext/core is what makes the CMD bootable, and this job assembles
+    # that exact layout. KNEXT_REQUIRE_STANDALONE=1 hard-fails (never skips)
+    # if the standalone build is missing.
+    name: SIGTERM drain (legacy standalone supervisor)
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
