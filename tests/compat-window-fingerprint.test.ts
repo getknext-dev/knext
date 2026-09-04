@@ -1,6 +1,14 @@
 import { afterAll, describe, expect, it } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -28,6 +36,18 @@ import { join, resolve } from 'node:path';
  * commit and the `next` tarball digest are therefore written into the artifact,
  * but deliberately kept OUT of the digest: a legitimate suite bump should be a
  * visible decision, not a silent window reset.
+ *
+ * A fourth, added while investigating #850 (V4): the `packed` component is
+ * anchored on the packed CONTENT, never on the tarball's bytes. #850 proposes
+ * "re-anchor the window to a content hash of the packed closure" as the remedy
+ * for a window that restarts on every merge — and the anchor is already exactly
+ * that, which is why the remedy as written buys nothing. Measured on this
+ * branch, twice: two independent `npm pack`s of `packages/{lib,db,kn-next}`, and
+ * a third after a full rebuild of all three, produced the identical `packed`
+ * digest `sha256:fb964074…`. The property was true by construction and untested,
+ * so a later "optimisation" to digest the tarball itself would have restarted
+ * the window EVERY night — gzip stores an mtime — while reading as a
+ * simplification. `is anchored on packed CONTENT` below is that guard.
  */
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
@@ -77,6 +97,13 @@ function packFixtureTarball(
   name: string,
   version: string,
   extra?: Record<string, string>,
+  /**
+   * Stamp every staged entry with this time before `tar`. tar records a per-file
+   * mtime, so two packs of IDENTICAL content under different stamps differ in
+   * bytes — which is what makes the content-anchor claim below falsifiable
+   * rather than a repeat of the determinism test above.
+   */
+  mtime?: Date,
 ) {
   const stage = tempDir(`knext-fp-pack-${name}-`);
   const pkgDir = join(stage, 'package');
@@ -90,13 +117,17 @@ function packFixtureTarball(
     mkdirSync(join(pkgDir, rel, '..'), { recursive: true });
     writeFileSync(join(pkgDir, rel), contents);
   }
-  execFileSync('tar', [
-    'czf',
-    join(destDir, `getknext-${name}-${version}.tgz`),
-    '-C',
-    stage,
-    'package',
-  ]);
+  if (mtime) {
+    for (const rel of [
+      'package.json',
+      'dist/adapters/next-adapter.js',
+      ...Object.keys(extra ?? {}),
+    ])
+      utimesSync(join(pkgDir, rel), mtime, mtime);
+  }
+  const tarball = join(destDir, `getknext-${name}-${version}.tgz`);
+  execFileSync('tar', ['czf', tarball, '-C', stage, 'package']);
+  return tarball;
 }
 
 function fingerprint(
@@ -118,6 +149,36 @@ describe('compat-window fingerprint — the frozen set is digestible and complet
     const b = fingerprint(repoRoot, tarballsDir);
     expect(a.fingerprint).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(b.fingerprint).toBe(a.fingerprint);
+  });
+
+  it('is anchored on packed CONTENT, not on the tarball bytes (#850)', () => {
+    // The frozen harness is held constant so the ONLY thing that could move the
+    // digest is the packed half.
+    const { repoRoot } = makeFixture();
+    const older = new Date('2020-01-02T03:04:05Z');
+    const newer = new Date('2026-09-05T06:07:08Z');
+
+    const dirA = tempDir('knext-fp-anchor-a-');
+    const dirB = tempDir('knext-fp-anchor-b-');
+    const tarA = packFixtureTarball(dirA, 'core', '0.3.0', undefined, older);
+    const tarB = packFixtureTarball(dirB, 'core', '0.3.0', undefined, newer);
+
+    // BOTH HALVES. Without this the assertion below is satisfied by two byte-
+    // identical tarballs and proves only that sha256 is a function — which is
+    // what `is deterministic across runs` already proves.
+    expect(
+      readFileSync(tarA).equals(readFileSync(tarB)),
+      'the two tarballs came out byte-identical, so this test cannot distinguish a ' +
+        'content anchor from a byte anchor. Widen the mtime skew.',
+    ).toBe(false);
+
+    expect(
+      fingerprint(repoRoot, dirB).components.packed,
+      'the packed component moved without any packed CONTENT changing. A window keyed on ' +
+        'tarball bytes restarts every night — gzip and tar both record mtimes — so the ' +
+        '14-night gate could never close for reasons that have nothing to do with the code ' +
+        'under test (#850).',
+    ).toBe(fingerprint(repoRoot, dirA).components.packed);
   });
 
   it('changes when a HARNESS file changes (the workflow)', () => {
