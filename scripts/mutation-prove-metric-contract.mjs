@@ -104,6 +104,8 @@ const MUTATIONS = [
       'panel and leaves the prose reading perfectly correct, which is why the docs drifted while ' +
       'the queries did not',
     subject: 'publishedDoc',
+    // `.mdx` is not in the harness's comment table; MDX takes HTML comments.
+    options: { commentPrefix: '<!--' },
     anchor: '| `knext_bunexec_http_inflight_requests` | Gauge |',
     replacement: '| `knext_bunexec_concurrent_requests` | Gauge |',
   },
