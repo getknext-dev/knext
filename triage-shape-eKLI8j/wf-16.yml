@@ -1,0 +1,7 @@
+name: f
+true:
+  pull_request:
+    paths: ["a/**"]
+jobs:
+  g:
+    runs-on: x

@@ -238,6 +238,101 @@ function redisDbSize(url, timeoutMs = 5000) {
   });
 }
 
+/**
+ * One arbitrary Redis command as raw RESP, same zero-dependency contract as
+ * `redisDbSize`. Parses the single reply: integer → number, bulk → string|null,
+ * array of bulks → string[], error → reject. Exists because check (k)'s
+ * DBSIZE-only evidence was DECORATIVE: any key from any writer satisfied
+ * `DBSIZE > 0`, so an imperative side-registration kept the check green while
+ * the wiring under test was absent. The ISR evidence has to be the ISR KEY,
+ * by name, with its TTL.
+ */
+function redisCommand(url, argv, timeoutMs = 5000) {
+  return new Promise((resolve, reject) => {
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch {
+      reject(new Error(`REDIS_URL is not a URL: ${url}`));
+      return;
+    }
+    const sock = net.createConnection({
+      host: parsed.hostname,
+      port: Number(parsed.port || 6379),
+    });
+    sock.setTimeout(timeoutMs, () => sock.destroy(new Error(`redis ${argv[0]} timeout`)));
+    let buf = '';
+    sock.on('connect', () => {
+      const enc = argv.map((a) => `$${Buffer.byteLength(String(a))}\r\n${a}\r\n`).join('');
+      sock.write(`*${argv.length}\r\n${enc}`);
+    });
+    const fail = (msg) => {
+      sock.destroy();
+      reject(new Error(msg));
+    };
+    sock.on('data', (d) => {
+      buf += d.toString('utf8');
+      const head = buf.indexOf('\r\n');
+      if (head === -1) return;
+      const first = buf.slice(0, head);
+      if (first.startsWith(':')) {
+        sock.end();
+        resolve(Number(first.slice(1)));
+        return;
+      }
+      if (first.startsWith('+')) {
+        sock.end();
+        resolve(first.slice(1));
+        return;
+      }
+      if (first.startsWith('-')) {
+        fail(`redis ${argv[0]} error: ${first.slice(1)}`);
+        return;
+      }
+      if (first.startsWith('$')) {
+        const len = Number(first.slice(1));
+        if (len === -1) {
+          sock.end();
+          resolve(null);
+          return;
+        }
+        if (buf.length < head + 2 + len + 2) return; // await the rest
+        sock.end();
+        resolve(buf.slice(head + 2, head + 2 + len));
+        return;
+      }
+      if (first.startsWith('*')) {
+        const count = Number(first.slice(1));
+        const items = [];
+        let i = head + 2;
+        while (items.length < count) {
+          const lineEnd = buf.indexOf('\r\n', i);
+          if (lineEnd === -1) return; // await the rest
+          const marker = buf.slice(i, lineEnd);
+          if (!marker.startsWith('$')) {
+            fail(`unexpected ${argv[0]} array element: ${JSON.stringify(marker)}`);
+            return;
+          }
+          const len = Number(marker.slice(1));
+          if (len === -1) {
+            items.push(null);
+            i = lineEnd + 2;
+            continue;
+          }
+          if (buf.length < lineEnd + 2 + len + 2) return; // await the rest
+          items.push(buf.slice(lineEnd + 2, lineEnd + 2 + len));
+          i = lineEnd + 2 + len + 2;
+        }
+        sock.end();
+        resolve(items);
+        return;
+      }
+      fail(`unexpected ${argv[0]} reply: ${JSON.stringify(first)}`);
+    });
+    sock.on('error', reject);
+  });
+}
+
 async function waitForReady(timeoutMs = 60000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -288,6 +383,10 @@ async function check(name, fn, lanes = ['node', 'bun']) {
 
 // ── server lifecycle ─────────────────────────────────────────────────────────
 let serverProc = null;
+// Everything the server printed, for checks that assert on ABSENCE of a log
+// line. Check (k) uses it for vinext's cache-adapter registration failure
+// warn, which is the silent path back to the per-pod memory fallback.
+let serverLog = '';
 function startServer() {
   if (!existsSync(SERVER_PATH)) {
     // The command below is the one a reader COPIES, so it has to be runnable in
@@ -348,8 +447,14 @@ function startServer() {
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  serverProc.stdout.on('data', (d) => process.stdout.write(`[server] ${d}`));
-  serverProc.stderr.on('data', (d) => process.stderr.write(`[server] ${d}`));
+  serverProc.stdout.on('data', (d) => {
+    serverLog += d.toString('utf8');
+    process.stdout.write(`[server] ${d}`);
+  });
+  serverProc.stderr.on('data', (d) => {
+    serverLog += d.toString('utf8');
+    process.stderr.write(`[server] ${d}`);
+  });
   serverProc.on('exit', (code, signal) => {
     if (code && code !== 0 && !shuttingDown) {
       console.error(`[compat-smoke] server exited early code=${code} signal=${signal}`);
@@ -706,7 +811,53 @@ async function main() {
       keys > 0,
       `Redis at ${REDIS_URL} holds ${keys} keys — the ISR cache did not reach the configured Redis`,
     );
-    return `cached ${firstRead.cacheState}/${secondRead.cacheState} ${first} → revalidated ${current}; redis keys=${keys}`;
+
+    // ── The ISR key BY NAME, not "some key exists" (#953 review round) ──────
+    //
+    // `DBSIZE > 0` was decorative evidence: apps/file-manager carried a second,
+    // imperative handler registration (cache-init.ts, alive only under
+    // vinext's next/cache shim) whose writes satisfied it, so this check was
+    // byte-identical green before AND after the vite-plugin cache wiring
+    // existed — while every fresh scaffold, which has no cache-init, served
+    // MISS/no-store with an EMPTY Redis on both clusters. The evidence that
+    // cannot be satisfied by a bystander writer is the ISR route's own key:
+    //   <prefix>:cache:app:<build-id>:/knext-smoke/isr:<part>
+    // (prefix defaults to 'kn-next' here — the smoke sets no REDIS_KEY_PREFIX).
+    const isrKeys = await redisCommand(REDIS_URL, ['KEYS', '*:cache:*knext-smoke/isr*']);
+    assert.ok(
+      Array.isArray(isrKeys) && isrKeys.length > 0,
+      `no Redis key matches the ISR route (*:cache:*knext-smoke/isr*) — the page cache ` +
+        `never reached Redis; DBSIZE=${keys} proves only that SOMETHING wrote (row E, #953)`,
+    );
+
+    // …and its TTL must OUTLIVE the revalidate window (fixture revalidate=1s).
+    // TTL == revalidate is the #886 regression (entry evicted the moment it
+    // becomes stale-but-servable); TTL == -1 is an unbounded key. Checked on
+    // EVERY matched key: html and rsc halves both carry the rule.
+    for (const key of isrKeys) {
+      const ttl = await redisCommand(REDIS_URL, ['TTL', key]);
+      assert.ok(
+        typeof ttl === 'number' && ttl > 1,
+        `ISR key ${key} has TTL=${ttl} — it must exceed the revalidate window (1s) so ` +
+          `stale-while-revalidate has an entry to serve (and never be -1/unbounded or -2/missing)`,
+      );
+    }
+
+    // ── The registration itself did not silently fail ───────────────────────
+    // vinext swallows a throwing cache-adapter factory: one warn, then the
+    // per-pod memory fallback — the exact failure shape #953 shipped with. A
+    // green HIT sequence with that warn in the log would mean the memory
+    // handler served it, so the warn's ABSENCE is part of the evidence.
+    assert.ok(
+      !serverLog.includes('failed to initialize the configured data cache adapter'),
+      'the server logged vinext’s cache-adapter registration failure — ISR is being ' +
+        'served from the per-pod memory fallback, not Redis',
+    );
+
+    return (
+      `cached ${firstRead.cacheState}/${secondRead.cacheState} ${first} → revalidated ${current}; ` +
+      `redis keys=${keys}, isr keys=${isrKeys.length} (ttl>${1}s each), no fallback warn`
+    );
   });
 
   // ── report ──────────────────────────────────────────────────────────────

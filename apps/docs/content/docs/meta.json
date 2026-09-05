@@ -12,6 +12,7 @@
     "official-adapter",
     "scale-to-zero",
     "warm-floors",
+    "isr-caching",
     "image-caching",
     "bytecode",
     "bun-runtime",

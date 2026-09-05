@@ -1,0 +1,5 @@
+name: fixture
+on: [pull_request, push]
+jobs:
+  gate:
+    runs-on: ubuntu-latest

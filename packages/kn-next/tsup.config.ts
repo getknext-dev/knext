@@ -87,6 +87,11 @@ export default defineConfig([
       // `kn-next build`, not imported, because it needs `Bun.build` plugins and
       // the published CLI runs under node.
       'adapters/vinext-compile': 'src/adapters/vinext-compile.mjs',
+      // The vinext data-cache adapter FACTORY (#953) — the scaffold's
+      // vite.config hands this subpath to `vinext({ cache: { data } })`, and
+      // vinext's generated registration module imports it at the app's build
+      // time. Plain untyped ESM like cache-handler (which it wraps).
+      'adapters/vinext-cache-adapter': 'src/adapters/vinext-cache-adapter.mjs',
       // The in-flight cache-write registry (`./internal/cache-drain`).
       // Measured, not assumed: tsup hoists it into a SHARED chunk that both
       // this entry and adapters/cache-handler.js import, so the published
