@@ -394,7 +394,13 @@ function detectBunVersion(run: (argv: readonly string[]) => void): string {
     // point remains explicit rather than pretending.
     void run;
     try {
-        return execFileSync("bun", ["--version"], { encoding: "utf8" }).trim();
+        return execFileSync("bun", ["--version"], {
+            encoding: "utf8",
+            // stderr is CAPTURED, never inherited: a failing bun's own words
+            // must land IN the error message below (which the docs promise),
+            // not scroll past on the terminal detached from the failure.
+            stdio: ["ignore", "pipe", "pipe"],
+        }).trim();
     } catch (err) {
         // Only a spawn that never found a binary means "bun is missing".
         // Anything else — a bun that crashed, a shim that exited non-zero —
@@ -408,10 +414,14 @@ function detectBunVersion(run: (argv: readonly string[]) => void): string {
             );
         }
         const detail = err instanceof Error ? err.message : String(err);
+        const stderrRaw = (err as { stderr?: unknown }).stderr;
+        const stderrText =
+            typeof stderrRaw === "string" ? stderrRaw.trim() : "";
         throw new UsageError(
             "Detecting Bun failed: `bun --version` did not return a version.\n\n" +
-                `Underlying error: ${detail}\n\n` +
-                "Bun IS on PATH (this is not a missing install) — check that `bun --version` runs in this shell.",
+                `Underlying error: ${detail}\n` +
+                (stderrText ? `bun's stderr: ${stderrText}\n` : "") +
+                "\nBun IS on PATH (this is not a missing install) — check that `bun --version` runs in this shell.",
         );
     }
 }

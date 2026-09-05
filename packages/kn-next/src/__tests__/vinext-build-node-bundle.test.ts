@@ -34,6 +34,7 @@ import { describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
 import {
     chmodSync,
+    existsSync,
     mkdirSync,
     mkdtempSync,
     readdirSync,
@@ -182,6 +183,11 @@ describe("bundled `kn-next build` (vinext) under plain Node — #948", () => {
             expect(r.status).not.toBe(0);
             // The honest half: the real failure is named…
             expect(r.output).toContain("bun --version");
+            // …including what the failing bun itself said — captured into the
+            // message, not merely inherited to a terminal (review round 1).
+            expect(r.output).toContain(
+                "bun exploded before printing a version",
+            );
             // …and the mislabel is gone: bun IS on PATH here.
             expect(r.output).not.toMatch(/not found/i);
         } finally {
@@ -190,21 +196,43 @@ describe("bundled `kn-next build` (vinext) under plain Node — #948", () => {
     });
 });
 
-describe("dist/cli bundles carry no dynamic-require landmine (#948 static guard)", () => {
-    it('no dist/cli/*.js calls __require("…") — the shim throws under ESM Node', () => {
-        // Scanned, not enumerated: every published CLI bundle, so the next
-        // lazily-required builtin in ANY cli module fails here instead of on a
-        // user's machine. The esbuild shim only ever appears as a CALL with a
-        // literal specifier at the site that will throw; its definition lives
-        // in a shared chunk and is not matched by this pattern.
+describe("dist bundles carry no dynamic-require landmine (#948 static guard)", () => {
+    it('no ESM bundle under dist/ calls __require("…") — the shim throws under ESM Node', () => {
+        // Recursive over ALL of dist/, not just top-level dist/cli/*.js: tsup
+        // factors shared cli modules into dist/chunk-*.js (build.js imports
+        // eight of them), and dist/cli/ci/ is a subdirectory — a lazy require
+        // in any SHARED module emits its __require call into a chunk a
+        // cli-only scan never reads. Scanned, not enumerated, so the next
+        // lazily-required builtin anywhere in the published closure fails here
+        // instead of on a user's machine. The pattern matches the shim's CALL
+        // with a literal specifier (the site that throws), not its definition
+        // (`var __require = …`), so the shim merely existing in a chunk is not
+        // a false hit.
+        // .js only: the .cjs pass is CommonJS, where a plain `require` is
+        // legitimate and esbuild never emits the throwing shim.
+        const distDir = join(pkgRoot, "dist");
+        expect(existsSync(distBin)).toBe(true);
         const offenders: string[] = [];
-        for (const file of readdirSync(distCliDir)) {
-            if (!file.endsWith(".js")) continue;
-            const content = readFileSync(join(distCliDir, file), "utf8");
-            if (/__require\s*\(\s*["']/.test(content)) {
-                offenders.push(`dist/cli/${file}`);
+        let scanned = 0;
+        const walk = (dir: string): void => {
+            for (const entry of readdirSync(dir, { withFileTypes: true })) {
+                const path = join(dir, entry.name);
+                if (entry.isDirectory()) {
+                    walk(path);
+                    continue;
+                }
+                if (!entry.name.endsWith(".js")) continue;
+                scanned += 1;
+                if (/__require\s*\(\s*["']/.test(readFileSync(path, "utf8"))) {
+                    offenders.push(path.slice(pkgRoot.length + 1));
+                }
             }
-        }
+        };
+        walk(distDir);
+        // Anti-vacuity: an empty or missing dist must FAIL, not pass by
+        // scanning nothing — zero files scanned is a broken precondition,
+        // never a clean bill.
+        expect(scanned).toBeGreaterThan(0);
         expect(offenders).toEqual([]);
     });
 });
