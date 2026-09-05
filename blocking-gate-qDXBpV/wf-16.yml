@@ -1,6 +1,0 @@
-
-on:
-  pull_request:
-jobs:
-  gate:
-    uses: ./.github/workflows/other.yml

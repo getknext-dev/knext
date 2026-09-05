@@ -1,3 +1,0 @@
-#!/bin/sh
-for a in "$@"; do case "$a" in *.yaml|*nodesh*) [ -f "$a" ] && cat "$a" >> /Users/banna/alpheya/pocs/knext/nodesh-mLTjSR/applied.yaml;; esac; done
-exit 0
