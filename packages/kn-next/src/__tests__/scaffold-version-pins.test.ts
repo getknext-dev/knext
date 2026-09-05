@@ -34,7 +34,7 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import type { Server } from "node:http";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -295,15 +295,30 @@ describe("scaffoldGetknextPins — scans the rendered package.json (#950)", () =
 });
 
 describe("unpublishedPinsWarning — the honest message (#950)", () => {
-    it("names every missing pin and says npm install will fail", () => {
-        const text = unpublishedPinsWarning([
+    const text = () =>
+        unpublishedPinsWarning([
             { name: "@getknext/core", range: "^0.3.1", version: "0.3.1" },
             { name: "@getknext/lib", range: "^0.3.1", version: "0.3.1" },
         ]);
-        expect(text).toContain("@getknext/core@0.3.1");
-        expect(text).toContain("@getknext/lib@0.3.1");
-        expect(text).toContain("npm install");
-        expect(text.toLowerCase()).toContain("not");
+
+    it("names every missing pin and says npm install will fail", () => {
+        expect(text()).toContain("@getknext/core@0.3.1");
+        expect(text()).toContain("@getknext/lib@0.3.1");
+        expect(text()).toContain("npm install");
+        expect(text()).toContain("not on the npm registry");
+        expect(text()).toContain("will fail");
+    });
+
+    it("never recommends the published CLI as the remedy (the other half)", () => {
+        // Review round 1: the warning used to say "re-run create with
+        // `npx @getknext/core@latest`" — a remedy that could not work, because
+        // the published release cannot scaffold at all (no `create` verb, no
+        // templates/ in the tarball, #964). Whether ANY published release can
+        // scaffold is a registry fact this static string cannot know, so the
+        // dishonest advice must stay out — a remedy that fails is worse than
+        // none. Both halves: the honest content above AND the absence here.
+        expect(text().toLowerCase()).not.toContain("npx");
+        expect(text().toLowerCase()).not.toContain("@latest");
     });
 });
 
@@ -423,6 +438,36 @@ describe("createMain — warns when the CLI's version was never published (#950)
             expect(stderr.text()).not.toContain("@getknext/core@");
         } finally {
             stderr.restore();
+            restoreOut();
+        }
+    });
+
+    it("a probe-path throw can never fail an already-successful scaffold", async () => {
+        // The deepest throw injectable through the REAL wiring: the registry
+        // double reports the pins missing, and stderr THROWS on the warning
+        // write (the EPIPE class). checkPinsPublished itself is total by
+        // design, so this is what exercises the probe's OWN catch inside
+        // createMain — without it, the command's outer catch converts a
+        // scaffold that already wrote every file into exit 1. Discriminating:
+        // remove that catch and this test goes red ("never a gate" must be a
+        // property of the shape).
+        const { url } = await emptyRegistry();
+        process.env[envKey] = url;
+        const appDir = freshAppDir();
+        const original = process.stderr.write.bind(process.stderr);
+        process.stderr.write = ((chunk: string | Uint8Array) => {
+            if (String(chunk).includes("not on the npm registry")) {
+                throw new Error("EPIPE (injected)");
+            }
+            return true;
+        }) as typeof process.stderr.write;
+        const restoreOut = captureStdout();
+        try {
+            const code = await createMain([appDir, "--name", "pins-epipe"]);
+            expect(code).toBe(0);
+            expect(existsSync(join(appDir, "package.json"))).toBe(true);
+        } finally {
+            process.stderr.write = original;
             restoreOut();
         }
     });

@@ -75,23 +75,23 @@ function templatePins() {
 
 console.log('── phase 1: HEAD template pins vs the registry ──');
 for (const [name, range] of templatePins()) {
-  // `npm view <name>@<range> version` exits 0 with empty output when the range
-  // matches NOTHING (npm treats an empty result set as success), and exits
-  // non-zero on E404/network trouble. Both are failures here; only a non-empty
-  // resolution is a pass.
+  // On npm >= 11 (measured, npm 11.6.2), a range that matches NOTHING exits 1
+  // with an E404 error object on STDOUT (under `--json`) and prose on stderr —
+  // notarget goes through the non-zero branch below. The exit-0-empty branch
+  // after it is DEAD DEFENSE for that npm: kept because older npm treated an
+  // empty result set as success, and a checker must never pass on silence.
   const r = spawnSync('npm', ['view', `${name}@${range}`, 'version', '--json'], {
     encoding: 'utf8',
     timeout: 120_000,
   });
   if (r.status !== 0) {
     // The REASON can land on either stream: with `--json`, npm >= 11 writes
-    // the E404 error OBJECT to STDOUT and the prose to stderr — a stderr-only
-    // slice reported the most common failure (notarget) with an empty reason.
-    const reason = [r.stderr, r.stdout]
-      .map((s) => (s || '').trim())
-      .filter(Boolean)
-      .join(' | ')
-      .slice(0, 400);
+    // the E404 error OBJECT to STDOUT and the prose to stderr. Capped PER
+    // STREAM with stdout first — the stderr prose alone (441 chars measured)
+    // would blow a shared cap and push the machine-readable reason out of the
+    // message entirely.
+    const slice = (s) => (s || '').trim().slice(0, 200);
+    const reason = [slice(r.stdout), slice(r.stderr)].filter(Boolean).join(' | ');
     fail('template-pins', `npm view ${name}@${range} exited ${r.status}: ${reason}`);
   } else if ((r.stdout || '').trim() === '') {
     fail(
