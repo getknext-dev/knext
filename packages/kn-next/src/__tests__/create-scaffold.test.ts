@@ -451,6 +451,19 @@ describe("kn-next create — the generated Dockerfile ships the compiled binary 
 });
 
 describe("kn-next create — the CLI entry (createMain)", () => {
+    // #950: createMain now probes the registry for the scaffold's @getknext
+    // pins. Point it at a closed local port so these tests stay offline and
+    // deterministic — connection refused is the probe's silent path. The
+    // probe's own behavior is covered in scaffold-version-pins.test.ts.
+    const savedRegistry = process.env.npm_config_registry;
+    beforeEach(() => {
+        process.env.npm_config_registry = "http://127.0.0.1:9";
+    });
+    afterEach(() => {
+        if (savedRegistry === undefined) delete process.env.npm_config_registry;
+        else process.env.npm_config_registry = savedRegistry;
+    });
+
     /** Capture what createMain writes to stdout/stderr for one invocation. */
     async function capture(
         argv: string[],

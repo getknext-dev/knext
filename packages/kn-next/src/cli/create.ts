@@ -30,6 +30,11 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { createLogger } from "../utils/logger";
+import {
+    checkPinsPublished,
+    scaffoldGetknextPins,
+    unpublishedPinsWarning,
+} from "./scaffold-registry";
 import { handleUsageError, UsageError } from "./shared";
 import {
     NO_LOCKFILE_INSTALL,
@@ -425,6 +430,24 @@ export async function createMain(argv: string[]): Promise<number> {
                 `${rels.map((r) => `  ${r}\n`).join("")}` +
                 (values["dry-run"] ? "" : partingLine(positionals[0] ?? ".")),
         );
+        // #950 honesty check, AFTER the success output so it reads as the last
+        // word: the scaffold pins @getknext/* at this CLI's own version, which
+        // only installs if that version was actually published. A CLI run from
+        // a source checkout (or a publish lane that died before `npm publish`)
+        // scaffolds pins `npm install` rejects with `notarget` — say so NOW,
+        // not at the first command the quickstart tells the user to run.
+        // Best-effort by design: `create` must work offline, so an unreachable
+        // registry stays silent; the scaffold-install nightly is the check
+        // that treats unreachable as red. Skipped for --dry-run (no files were
+        // written, and a listing should not wait on the network).
+        if (!values["dry-run"]) {
+            const verdict = await checkPinsPublished(
+                scaffoldGetknextPins(files),
+            );
+            if (verdict.kind === "missing") {
+                process.stderr.write(unpublishedPinsWarning(verdict.missing));
+            }
+        }
         return 0;
     } catch (err) {
         // A user mistake (an app name that is not an RFC1123 label, a scaffold

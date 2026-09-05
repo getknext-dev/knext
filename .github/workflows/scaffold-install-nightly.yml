@@ -1,0 +1,66 @@
+name: Scaffold install path (nightly)
+
+# ── #950: can a STRANGER scaffold an app and `npm install` it? ────────────────
+# The S3-V verification run (Finding A-1) found the front door dead: the
+# scaffold pinned `@getknext/*` at the CLI's own version, that version was
+# never published (#853's dead npm token), and the FIRST documented command —
+# `npm install` — failed with `notarget`. Nothing tied "the version the
+# templates reference" to "the version actually on npm".
+#
+# This nightly is that tie, at RUN time (`scripts/verify-scaffold-install.mjs`):
+#   1. resolve the HEAD templates' rendered @getknext/* ranges against the
+#      live registry — red on notarget, i.e. "publishing is due";
+#   2. scaffold with the latest PUBLISHED CLI in a clean temp dir and run its
+#      own quickstart (`npm install`) verbatim — the stranger's experience
+#      today.
+#
+# WHY NIGHTLY AND NOT A PR GATE — same ruling as anonymous-install-nightly:
+# the answer lives on registry.npmjs.org and legitimately changes at every
+# publish, and the workspace version is routinely ahead of the registry
+# between a changesets bump and its publish. A PR gate would go red for
+# reasons the PR did not cause, and a flaky gate trains people to bypass it.
+# The PR-time half is `packages/kn-next/src/__tests__/scaffold-version-pins.test.ts`
+# (offline: pins DERIVE from the CLI version, no hardcoded literal, the
+# changesets `fixed` group keeps one version sound for all pinned packages),
+# plus `scripts/install-smoke.mjs`, which installs+builds the scaffold against
+# the tarballs the commit itself packs. Form at PR time, value at run time.
+#
+# AN UNREACHABLE REGISTRY IS A FAILURE, NEVER A PASS (the verify-action-pins
+# ruling). The `release` trigger is the point, not an extra: publishing is the
+# moment the answer changes.
+#
+# The job needs no credential — a stranger is the persona — so none is granted.
+
+on:
+  # 06:41 UTC — offset from the action-pin (05:11), image-pin (05:41) and
+  # anonymous-install (06:11) nightlies so the supply-chain signals do not
+  # queue behind each other and a red one is attributable at a glance.
+  schedule:
+    - cron: '41 6 * * *'
+  # Publishing is when the answer changes. See the header.
+  release:
+    types: [published]
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  scaffold-install:
+    name: Scaffold with the published CLI and npm-install as a stranger
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions: {}
+    steps:
+      # `persist-credentials: false` for the same measured reason the sibling
+      # nightlies set it: the default writes the runner's token into
+      # `.git/config`, and this job's whole point is to act as a stranger.
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No install step: the script is dependency-free ESM on the runner's
+      # built-in Node + npm, so the check cannot itself depend on the
+      # workspace's dependency tree resolving.
+      - name: Resolve template pins and walk the quickstart against the registry
+        run: node scripts/verify-scaffold-install.mjs
