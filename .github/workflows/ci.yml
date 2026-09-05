@@ -384,8 +384,10 @@ jobs:
           cp -RL "$SRC"/sharp-libvips-linux-x64 apps/file-manager/native/ 2>/dev/null || true
           ls apps/file-manager/native/ | grep -q sharp- || { echo "sharp addon not staged" >&2; exit 1; }
 
-      # SERVER_CMD == SERVER_PATH is the smoke's single-exec signal: no script
-      # arg, no preload — the binary IS the server.
+      # SERVER_CMD and SERVER_PATH resolving (realpathSync, T6c) to the SAME
+      # FILE is the smoke's single-exec signal: no script arg, no preload — the
+      # binary IS the server. Not a string comparison: a symlinked or relative
+      # spelling used to flip the runner into the standalone branch silently.
       - name: Run knext compat-smoke (compiled single executable)
         working-directory: apps/file-manager
         env:

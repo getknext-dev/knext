@@ -95,6 +95,66 @@ const MUTATIONS = [
     anchor: 'const REQUEST_DURATION_BUCKETS = [',
     replacement: 'const REQUEST_DURATION_BUCKETS = [0.5, 1, 2, 5]; const _OLD_BUCKETS = [',
   },
+  // ── S5: the DOCS are the third consumer, and nothing checked them ─────────
+  {
+    id: 'M5',
+    expect: 'red',
+    claim:
+      'a PUBLISHED, user-facing doc names a series nothing emits — a rename reds every alert and ' +
+      'panel and leaves the prose reading perfectly correct, which is why the docs drifted while ' +
+      'the queries did not',
+    subject: 'publishedDoc',
+    // `.mdx` is not in the harness's comment table; MDX takes HTML comments.
+    options: { commentPrefix: '<!--' },
+    anchor: '| `knext_bunexec_http_inflight_requests` | Gauge |',
+    replacement: '| `knext_bunexec_concurrent_requests` | Gauge |',
+  },
+  {
+    id: 'M6',
+    expect: 'red',
+    claim:
+      'the doc EXTRACTOR matches nothing — every doc then reports zero metric references and ' +
+      'passes, the vacuous-scan shape this repo has already had to close twice',
+    subject: 'scanner',
+    anchor: '/`((?:knext|kn_next)_[a-z0-9_]*\\*?)`/g',
+    replacement: '/`((?:knextX|kn_nextX)_[a-z0-9_]*\\*?)`/g',
+  },
+  {
+    id: 'M7',
+    expect: 'red',
+    claim:
+      'the threat model claims :9091 discloses a series the compiled binary does not emit — ' +
+      'overstating an exposure erodes a security document as surely as understating one, and ' +
+      'this exact list already had to be corrected twice',
+    subject: 'threatModel',
+    anchor: '  `knext_bunexec_process_uptime_seconds`. The list is pinned against the emitter by',
+    replacement: '  `knext_db_wake_total`. The list is pinned against the emitter by',
+  },
+  {
+    id: 'M8',
+    expect: 'red',
+    claim:
+      'the fenced-section reader stops failing closed on a missing fence — a reflow then silently ' +
+      'unhooks the :9091 disclosure check while the test still reports green',
+    subject: 'scanner',
+    anchor: '    if (start === -1 || end === -1 || end <= start) return null;',
+    replacement: '    if (start === -1 || end === -1 || end <= start) return "";',
+  },
+  {
+    id: 'M10',
+    expect: 'red',
+    claim:
+      'a NEW series appears on :9091 while the threat model still says "six, and no more" — the ' +
+      'subset check cannot see this direction, and a new series on that port IS new ' +
+      'cross-tenant disclosure. Spec review, round 1',
+    subject: 'bunexecTemplate',
+    // `.hbs` is not in the harness's comment table; the file is JS inside a
+    // handlebars template, so `//` is the right marker syntax.
+    options: { commentPrefix: '//' },
+    anchor: "    '# TYPE knext_bunexec_http_inflight_requests gauge',",
+    replacement:
+      "    '# TYPE knext_bunexec_http_inflight_requests gauge',\n    '# TYPE knext_bunexec_tenant_id_total counter',",
+  },
 ];
 
 /**
@@ -106,7 +166,7 @@ const MUTATIONS = [
  * and a guard that reddened on it would be the first one disabled.
  */
 const NEGATIVE = {
-  id: 'M5',
+  id: 'M9',
   expect: 'green',
   claim: 'an alert DESCRIPTION is reworded — the guard checks queries, not prose',
   subject: 'rules',
@@ -125,6 +185,14 @@ const prover = createGuardProver({
     rules: 'packages/kn-next-operator/config/observability/prometheusrule.yaml',
     exampleContract: 'examples/bun-exec/runtime-contract.mjs',
     scanner: 'packages/kn-next/src/adapters/metric-contract.ts',
+    // S5. The published user-facing doc and the security document are now
+    // subjects, not just prose beside the code: a rename that leaves either
+    // stale is the drift the alerts-and-dashboards half cannot see.
+    publishedDoc: 'apps/docs/content/docs/observability.mdx',
+    threatModel: 'docs/security/threat-model.md',
+    // The CANONICAL bunexec exposition. Adding a series here is what the
+    // threat model's closed "and no more" claim has to notice (M10).
+    bunexecTemplate: 'packages/kn-next/templates/app/runtime-contract.mjs.hbs',
   },
 });
 

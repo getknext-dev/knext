@@ -37,7 +37,9 @@
  * anything to the OS loader. A mismatch or an unlisted payload is FATAL. An
  * ABSENT manifest is a warning, not a failure: images built before this landed
  * have none, and failing closed on absence would turn a supply-chain fix into a
- * fleet outage.
+ * fleet outage. That permissiveness is a DATED exception with an off switch (S2)
+ * — `KNEXT_REQUIRE_NATIVE_INTEGRITY=1` makes absence fatal today, and the expiry
+ * on the exception itself lives in `scripts/lib/native-integrity-policy.mjs`.
  *
  * ## Why everything here is inline
  *
@@ -128,6 +130,44 @@ function sha256(file) {
   return createHash('sha256').update(readFileSync(file)).digest('hex');
 }
 
+/** Every spelling of on/off this accepts, trimmed and lower-cased. */
+const REQUIRE_ON = ['1', 'true', 'yes', 'on'];
+const REQUIRE_OFF = ['0', 'false', 'no', 'off'];
+
+/**
+ * Is the fail-closed switch on?
+ *
+ * NOT `process.env.X === '1'`, and the difference is the whole point. A strict
+ * equality test sends every OTHER non-empty value — `true`, `yes`, `1 ` with a
+ * trailing space from a YAML block scalar — down the PERMISSIVE branch, with no
+ * signal anywhere. An operator who set `KNEXT_REQUIRE_NATIVE_INTEGRITY=true`
+ * would believe their fleet refuses an unverifiable native tree while nothing at
+ * all had changed. A security opt-in that silently means "off" is worse than no
+ * opt-in, precisely because it is believed.
+ *
+ * So: the usual spellings of ON turn it on, the usual spellings of OFF (and
+ * unset, and whitespace) leave the dated exception in force, and anything else
+ * THROWS. Refusing is the only sound answer for an unparseable value in a
+ * security control — guessing "off" is the bug above, and guessing "on" bricks a
+ * fleet on a typo. Same fail-closed shape as `cache-handler.js`'s seam gate.
+ */
+function requireIntegrity() {
+  const raw = process.env.KNEXT_REQUIRE_NATIVE_INTEGRITY;
+  if (raw === undefined) return false;
+  const value = raw.trim().toLowerCase();
+  if (value === '') return false;
+  if (REQUIRE_ON.includes(value)) return true;
+  if (REQUIRE_OFF.includes(value)) return false;
+  throw new Error(
+    `knext: KNEXT_REQUIRE_NATIVE_INTEGRITY=${JSON.stringify(raw)} is not a value this ` +
+      'understands, and it will not guess.\n' +
+      `  accepted (on):  ${REQUIRE_ON.join(' | ')}\n` +
+      `  accepted (off): ${REQUIRE_OFF.join(' | ')}, or leave it unset\n` +
+      '  reading an unrecognised value as "off" would leave an operator believing the fleet\n' +
+      '  fails closed on an unverifiable native tree when it does not.',
+  );
+}
+
 /**
  * Fail-closed check of the staged native tree against its manifest.
  *
@@ -138,12 +178,41 @@ function sha256(file) {
  * on first sharp import (the first `/_next/image` request), not at boot.
  */
 function verifyAgainstManifest(addon) {
+  // Parsed UNCONDITIONALLY, before anything branches on it. A value nobody can
+  // read is an operator mistake in a security control whether or not this
+  // particular image happens to carry a manifest — and validating it only on
+  // the absent-manifest path would mean the same typo refuses on one image and
+  // is silently ignored on the next, which is a worse contract to explain than
+  // either answer on its own.
+  const required = requireIntegrity();
+
   const manifestPath = findManifest(dirname(addon));
   if (manifestPath === null) {
+    // S2. Absence is the ONE permissive branch here, and it is a dated
+    // exception (`scripts/lib/native-integrity-policy.mjs`), not a permanent
+    // default: an image built before native-tree pinning has no manifest, so
+    // refusing on absence would turn a supply-chain fix into a fleet outage.
+    // `KNEXT_REQUIRE_NATIVE_INTEGRITY` turns the exception off for an operator
+    // who knows every image in their fleet is current. See `requireIntegrity()`
+    // for why it accepts every usual spelling of on/off and REFUSES anything
+    // else, rather than testing `=== '1'`.
+    //
+    // The exception's EXPIRY is deliberately not read here: a wall-clock branch
+    // in the runtime would brick running pods at midnight on the expiry date.
+    // The clock reds CI instead (`tests/native-integrity-absence-exception.test.ts`).
+    if (required) {
+      throw new Error(
+        `knext: refusing to dlopen — no native integrity manifest beside ${addon}, and\n` +
+          '  KNEXT_REQUIRE_NATIVE_INTEGRITY requires one. This image predates native-tree\n' +
+          '  integrity pinning; rebuild it with a current `kn-next build`, or unset the variable\n' +
+          '  to accept an UNVERIFIED native tree.',
+      );
+    }
     console.warn(
       `knext: no native integrity manifest beside ${addon} — loading it UNVERIFIED.\n` +
         '  images built before native-tree integrity pinning have none; rebuild with a current\n' +
-        '  `kn-next build` to get one, after which a mismatch becomes a hard failure.',
+        '  `kn-next build` to get one, after which a mismatch becomes a hard failure.\n' +
+        '  set KNEXT_REQUIRE_NATIVE_INTEGRITY=1 to make this absence a hard failure instead.',
     );
     return;
   }
