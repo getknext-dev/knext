@@ -31,6 +31,7 @@
  * slower artifact whose provenance nobody records.
  */
 
+import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -377,20 +378,40 @@ function findImgPackages(cwd: string): string | undefined {
     return candidates.find((c) => existsSync(c));
 }
 
-/** Reads `bun --version`. Separate so the floor check is testable without a Bun. */
+/**
+ * Reads `bun --version`. Separate so the floor check is testable without a Bun.
+ *
+ * `execFileSync` comes from the STATIC top-level import, never a lazy
+ * `require(...)`: tsup's ESM bundle turns a dynamic require into the esbuild
+ * `__require` shim, which THROWS under Node — and a bare catch here then
+ * mislabelled that throw as "bun not found" on every node-run vinext build,
+ * bun present or not (#948, S3-V Finding B-1). The static import spawns
+ * nothing by itself, so tests that inject `bunVersion` still never spawn.
+ */
 function detectBunVersion(run: (argv: readonly string[]) => void): string {
-    // `runQuiet` does not capture stdout, so shell the version into a file-free
-    // read via execFileSync in the caller when a real detection is needed. The
-    // default path here keeps the seam explicit rather than pretending.
+    // `runQuiet` does not capture stdout, so the version is read via
+    // execFileSync directly. The unused seam parameter stays so the injection
+    // point remains explicit rather than pretending.
     void run;
     try {
-        // Lazily required so tests that inject `bunVersion` never spawn.
-        const { execFileSync } =
-            require("node:child_process") as typeof import("node:child_process");
         return execFileSync("bun", ["--version"], { encoding: "utf8" }).trim();
-    } catch {
+    } catch (err) {
+        // Only a spawn that never found a binary means "bun is missing".
+        // Anything else — a bun that crashed, a shim that exited non-zero —
+        // surfaces its own failure; mislabelling it as absence sends the user
+        // chasing an install they already have (#948).
+        if ((err as NodeJS.ErrnoException)?.code === "ENOENT") {
+            throw new UsageError(
+                "The vinext single-executable target needs `bun` on PATH (https://bun.sh), and it was not found.\n\n" +
+                    `Install Bun ${MIN_BUN_MAJOR}.${MIN_BUN_MINOR}+ (https://bun.sh/docs/installation) and re-run \`kn-next build\`.\n` +
+                    "(The kn-next CLI itself runs under plain Node — only this compile step shells out to Bun.)",
+            );
+        }
+        const detail = err instanceof Error ? err.message : String(err);
         throw new UsageError(
-            "The vinext single-executable target needs `bun` on PATH (https://bun.sh), and it was not found.",
+            "Detecting Bun failed: `bun --version` did not return a version.\n\n" +
+                `Underlying error: ${detail}\n\n` +
+                "Bun IS on PATH (this is not a missing install) — check that `bun --version` runs in this shell.",
         );
     }
 }

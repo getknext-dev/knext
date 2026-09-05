@@ -21,6 +21,13 @@
  *     --version → exit 0, usage text) and, when bun is on PATH, under `bun`
  *     with byte-identical --help output — ONE code path, two runtimes.
  *
+ * SCOPE: this suite covers dispatch/help/deploy verbs. The vinext COMPILE step
+ * legitimately shells out to `bun` (ADR-0048 Amendment 3), so "Bun-free" here
+ * means the CLI process itself, not the toolchain it invokes — and the bundled
+ * build path under Node up to and through that Bun handoff is guarded
+ * separately by vinext-build-node-bundle.test.ts (#948, where a bundled
+ * dynamic require broke it while this suite stayed green by design).
+ *
  * dist/ must exist: CI builds @getknext/core before vitest (ci.yml), same
  * contract publish-surface.test.ts relies on. Run `pnpm --filter @getknext/core
  * build` locally first.

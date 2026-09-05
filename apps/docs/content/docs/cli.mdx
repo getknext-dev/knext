@@ -124,6 +124,13 @@ cluster, and the error names the obligation that is missing.
 The smoke boots a binary built for **your** machine's architecture; the binary that ships in the
 image is built for Linux and is verified separately when the image is built.
 
+<Callout type="info">
+**The compile step needs Bun.** The CLI runs under plain Node, but compiling the single
+executable shells out to `bun` (1.4 or newer) on your PATH. A missing Bun stops the build with
+install guidance; a Bun that is present but cannot report its version stops the build with that
+underlying error — the two are never conflated. See [the Bun runtime](/docs/bun-runtime).
+</Callout>
+
 | Flag | Notes |
 |---|---|
 | `--skip-next` | Reuse an existing `.next/` build instead of running it again. |
