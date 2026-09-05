@@ -41,6 +41,7 @@
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { QUEUE_PROXY_OWNED_PORTS } from "../cli/doctor";
 
 // repo root: packages/kn-next/src/__tests__ -> up 4
 const REPO_ROOT = resolve(__dirname, "..", "..", "..", "..");
@@ -78,16 +79,25 @@ const PODMONITOR_FILE = resolve(
     "app-podmonitor.yaml",
 );
 
-/**
- * Ports Knative serving's queue-proxy sidecar (or its data path) owns on every
- * revision pod, so the app's metrics listener must never default to any of
- * them (#951):
- *   8012 queue-proxy HTTP1, 8013 h2c, 8112 HTTPS, 8022 admin/drain,
- *   9090 autoscaling metrics, 9091 user metrics (bound whenever
- *   `metrics.request-metrics-backend-destination` is active — the stock
- *   config-observability default; the S3-V C-2 crash-loop).
- */
-const QUEUE_PROXY_OWNED_PORTS = new Set([8012, 8013, 8022, 8112, 9090, 9091]);
+const BUNEXEC_DOCKERFILE = resolve(
+    REPO_ROOT,
+    "examples",
+    "bun-exec",
+    "Dockerfile",
+);
+const BUNEXEC_ENTRY = resolve(
+    REPO_ROOT,
+    "examples",
+    "bun-exec",
+    "knext-bun-entry.mjs",
+);
+
+// QUEUE_PROXY_OWNED_PORTS is imported from cli/doctor.ts — ONE definition of
+// "queue-proxy-owned", shared with the doctor check, so this guard and the
+// runtime preflight cannot disagree about which ports are forbidden (#951):
+//   8012 queue-proxy HTTP1, 8013 h2c, 8112 HTTPS, 8022 admin/drain,
+//   9090 autoscaling metrics (always bound), 9091 user metrics (bound when the
+//   request-metrics protocol is prometheus — the S3-V C-2 crash-loop).
 
 /**
  * Runtime default: `process.env.METRICS_PORT ?? <N>`.
@@ -154,6 +164,32 @@ function extractPodMonitorTargetPort(src: string): number {
     return Number(m[1]);
 }
 
+/**
+ * bun-exec Dockerfile: `METRICS_PORT=<N>` in the ENV block. This is the ONE
+ * image CI actually builds and boots — the round-2 review found it still
+ * pinned to 9091 after the platform moved, which made the alpine docker e2e
+ * map a host port to a container port nothing binds. The EXPOSE line must
+ * carry the same number.
+ */
+function extractDockerfileMetricsPort(src: string): number {
+    const env = src.match(/^\s*(?:ENV\s+.*?)?METRICS_PORT=([0-9]+)/m);
+    if (!env) {
+        throw new Error(
+            `Could not find METRICS_PORT=<N> in ${BUNEXEC_DOCKERFILE}. ` +
+                `The lockstep guard cannot run — fix the regex or the source.`,
+        );
+    }
+    const port = Number(env[1]);
+    const expose = src.match(/^EXPOSE\s+(.+)$/m);
+    if (!expose || !expose[1].split(/\s+/).includes(String(port))) {
+        throw new Error(
+            `${BUNEXEC_DOCKERFILE}: EXPOSE does not list the METRICS_PORT ${port} — ` +
+                `the ENV and EXPOSE lines must move together.`,
+        );
+    }
+    return port;
+}
+
 function allSurfaces(): Record<string, number> {
     return {
         "node-server.ts METRICS_PORT default": extractMetricsPortDefault(
@@ -175,6 +211,19 @@ function allSurfaces(): Record<string, number> {
         "PodMonitor targetPort": extractPodMonitorTargetPort(
             readFileSync(PODMONITOR_FILE, "utf8"),
         ),
+        // The one image CI builds and boots — ENV + EXPOSE move together.
+        "bun-exec Dockerfile METRICS_PORT": extractDockerfileMetricsPort(
+            readFileSync(BUNEXEC_DOCKERFILE, "utf8"),
+        ),
+        // The bun-exec entry is a RECORDED divergence in the copy pin
+        // (runtime-entry-copies.mjs), so a hash re-pin could smuggle a port
+        // drift past the parity audit without touching the template. Reading
+        // its default directly closes that hole (round-2 F4).
+        "bun-exec knext-bun-entry.mjs METRICS_PORT default":
+            extractMetricsPortDefault(
+                readFileSync(BUNEXEC_ENTRY, "utf8"),
+                BUNEXEC_ENTRY,
+            ),
     };
 }
 
@@ -248,6 +297,17 @@ describe("metrics-port lockstep (runtime defaults ↔ operator annotation ↔ Ne
         expect(extractPodMonitorTargetPort("    - targetPort: 9464")).toBe(
             9464,
         );
+        expect(
+            extractDockerfileMetricsPort(
+                "ENV PORT=3000 \\\n    METRICS_PORT=9464 \\\n    NODE_ENV=production\n\nEXPOSE 3000 9464\n",
+            ),
+        ).toBe(9464);
+        // An ENV/EXPOSE mismatch is an extraction FAILURE, not a silent pass.
+        expect(() =>
+            extractDockerfileMetricsPort(
+                "ENV METRICS_PORT=9464\nEXPOSE 3000 9091\n",
+            ),
+        ).toThrow(/EXPOSE does not list/);
         // A drifted operator value would surface as 9464 !== 9099 above.
         const drifted = extractOperatorScrapePort(
             'annotations["prometheus.io/port"] = "9099"',

@@ -101,8 +101,13 @@ export const DIVERGENT = {
       ':9464 prose mention were changed in the template and lifted into this copy in the same ' +
       'diff — textually identical hunks. The recorded divergence is still ONLY the image ' +
       'intercept; leaving this copy on 9091 would have kept the one shipped example binary ' +
-      'racing queue-proxy for its port (S3-V Finding C-2).',
-    sha256: '9b5c2da4915e83e38463b67dec6a8ef1a7864d252a0ab49bc170b7009f56c6ab',
+      'racing queue-proxy for its port (S3-V Finding C-2).\n\n' +
+      'HASH UPDATED again for the #951 round-2 EADDRINUSE-naming hunk (the metrics Bun.serve ' +
+      'wrapped to name the port + point at `kn-next doctor` on bind failure), lifted from the ' +
+      'template VERBATIM. NOTE this hash pin alone cannot stop a port drift smuggled in via a ' +
+      'routine re-pin — that hole is closed by metrics-port-lockstep.test.ts, which reads this ' +
+      "copy's METRICS_PORT default directly.",
+    sha256: '16751da55e93f5efac8952ea7e050fe24c31af5df6b302d9cc8f7d662677e277',
   },
 };
 

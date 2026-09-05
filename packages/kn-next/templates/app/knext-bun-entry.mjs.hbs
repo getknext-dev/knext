@@ -249,25 +249,43 @@ const appServer = {
 
 // ── (2) In-process Prometheus :9464 — a SECOND Bun.serve, bound at listen-time
 // so a scrape while the runtime is up is always answered (RuntimeContract §2).
-const metricsServer = Bun.serve({
-  port: METRICS_PORT,
-  hostname: HOSTNAME,
-  // FIXED at 64 KiB, never the app's resolved cap: this listener answers one GET
-  // and ran at Bun's 128 MB default until now — the exact co-resident-pod path
-  // ADR-0044's threat scope calls unbounded. Wiring REQUEST_CAP.bytes here would
-  // let KNEXT_MAX_REQUEST_BYTES=0 re-open it.
-  maxRequestBodySize: METRICS_MAX_REQUEST_BYTES,
-  fetch(req) {
-    const url = new URL(req.url);
-    if (url.pathname === '/metrics' && req.method === 'GET') {
-      return new Response(renderMetrics(metrics), {
-        status: 200,
-        headers: { 'content-type': METRICS_CONTENT_TYPE },
-      });
-    }
-    return new Response('Not Found', { status: 404 });
-  },
-});
+// A bind failure is NAMED before rethrowing (#951): Bun's bare EADDRINUSE says
+// "Failed to start server" without the port or the culprit, and on Knative the
+// usual culprit is queue-proxy, which owns :9091 whenever serving's
+// request-metrics protocol is prometheus. The process still exits — same crash
+// semantics, but the crash-loop now carries its own diagnosis.
+const metricsServer = (() => {
+  try {
+    return Bun.serve({
+      port: METRICS_PORT,
+      hostname: HOSTNAME,
+      // FIXED at 64 KiB, never the app's resolved cap: this listener answers one GET
+      // and ran at Bun's 128 MB default until now — the exact co-resident-pod path
+      // ADR-0044's threat scope calls unbounded. Wiring REQUEST_CAP.bytes here would
+      // let KNEXT_MAX_REQUEST_BYTES=0 re-open it.
+      maxRequestBodySize: METRICS_MAX_REQUEST_BYTES,
+      fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === '/metrics' && req.method === 'GET') {
+          return new Response(renderMetrics(metrics), {
+            status: 200,
+            headers: { 'content-type': METRICS_CONTENT_TYPE },
+          });
+        }
+        return new Response('Not Found', { status: 404 });
+      },
+    });
+  } catch (err) {
+    console.error(
+      `[knext] failed to bind the metrics listener on :${METRICS_PORT}` +
+        (err?.code ? ` (${err.code})` : '') +
+        ' — if this is EADDRINUSE, another listener owns the port; on Knative, queue-proxy' +
+        ' binds :9091 whenever request metrics are enabled. Run `kn-next doctor`' +
+        ' (metrics-port check), or move METRICS_PORT off the queue-proxy-owned ports.',
+    );
+    throw err;
+  }
+})();
 
 // Startup-order signal (RuntimeContract startup-order test): both listeners are
 // bound synchronously above BEFORE this line prints — nothing accepts a first

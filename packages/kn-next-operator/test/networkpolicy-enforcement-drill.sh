@@ -35,7 +35,11 @@ set -euo pipefail
 CLUSTER="${CLUSTER:-knext-np-enforcement}"
 NS=np-drill
 APP_PORT=3000
-METRICS_PORT=9091
+# 9464 since #951 / ADR-0044 Amendment 5 — the app metrics port moved off
+# queue-proxy's 9091. The grep below asserts the OPERATOR's rendered policy
+# admits this port, so a drill pinned to the old number would fail step 0
+# rather than silently prove the wrong policy.
+METRICS_PORT=9464
 
 log() { printf '\n=== %s\n' "$*"; }
 cleanup() { kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true; }

@@ -137,7 +137,9 @@ await prove(
 await prove(
   'the :9464 metrics serve site loses maxRequestBodySize',
   ENTRY_TEMPLATE,
-  '  maxRequestBodySize: METRICS_MAX_REQUEST_BYTES,\n',
+  // Six-space indent since the #951 round-2 bind-failure wrapper moved the
+  // metrics Bun.serve inside an IIFE try block; the anchor tracks the bytes.
+  '      maxRequestBodySize: METRICS_MAX_REQUEST_BYTES,\n',
   '',
   /knext-bun-entry\.mjs\.hbs: the Bun\.serve call .* does not set maxRequestBodySize/,
   // The anchor sits in a `.hbs` file, which the harness has no comment syntax
@@ -150,8 +152,8 @@ await prove(
 await prove(
   'the metrics cap is wired to the app’s resolved value, so 0 re-opens it',
   ENTRY_TEMPLATE,
-  '  maxRequestBodySize: METRICS_MAX_REQUEST_BYTES,\n',
-  '  maxRequestBodySize: REQUEST_CAP.bytes,\n',
+  '      maxRequestBodySize: METRICS_MAX_REQUEST_BYTES,\n',
+  '      maxRequestBodySize: REQUEST_CAP.bytes,\n',
   /Bun\.serve \(:9464 metrics\) call sets maxRequestBodySize to .* instead of METRICS_MAX_REQUEST_BYTES/,
   // The anchor sits in a `.hbs` file, which the harness has no comment syntax
   // for — so the residue marker's prefix is supplied here.

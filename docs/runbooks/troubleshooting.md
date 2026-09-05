@@ -501,6 +501,27 @@ cert-manager webhook prereq directly. Once the webhook endpoint answers, re-appl
 
 ---
 
+## 13 — App crash-loops with `EADDRINUSE` on the metrics port, or metrics went dark after an upgrade
+
+Two faces of the same fact: **queue-proxy owns `:9091`** in every revision pod whenever serving's
+request-metrics protocol is prometheus, and the app metrics port therefore moved to **`:9464`**.
+
+- **Crash-loop, log says `Failed to start server. Is port … in use?` / `EADDRINUSE` naming the
+  metrics port.** The pod is racing queue-proxy — either the image predates the `:9464` default or
+  the CR pins `METRICS_PORT` onto a queue-proxy-owned port (`8012/8013/8022/8112/9090/9091`).
+  Run `kn-next doctor` (the `metrics-port` check names the offending app and the governing
+  ConfigMap key); redeploy with a current build or drop the override.
+- **Metrics dark after upgrading the operator.** The scrape contract
+  (annotation/NetworkPolicy/PodMonitor) now targets `:9464`, but a pod running a pre-upgrade image
+  still binds `:9091` until redeployed — and any scrape config you authored yourself keeps
+  pointing at the old port. Redeploy the app, repoint hand-rolled scrape configs, then verify:
+
+  ```bash
+  kubectl exec deploy/<your-scraper> -- wget -qO- http://<pod-ip>:9464/metrics | head -3
+  ```
+
+  See the [upgrading page](https://knext.dev/docs/upgrading) for the full ordered steps.
+
 ## When none of these match
 
 - Re-run `kn-next doctor --json` and attach the output.

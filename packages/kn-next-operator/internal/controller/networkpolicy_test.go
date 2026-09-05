@@ -123,8 +123,9 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 		// (the architect gate proved this in ADR-0044 round 1). The allowlist:
 		//   8012/8013  queue-proxy serving (http1/h2c) — the ONLY way to the app
 		//   9090       queue-proxy's own metrics
-		//   9464       the app's metrics sidecar (prometheus.io/port stamps 9464,
-		//              nextapp_controller.go:820 — a queue-proxy-only rule would
+		//   9464       the app's metrics listener (the observability-annotations
+		//              block in nextapp_controller.go stamps prometheus.io/port
+		//              with the same number — a queue-proxy-only rule would
 		//              kill scraping; both halves asserted here)
 		// :3000 (the user port) is deliberately ABSENT: queue-proxy reaches it
 		// over pod-local loopback (127.0.0.1:USER_PORT), which no NetworkPolicy
