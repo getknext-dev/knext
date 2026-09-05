@@ -251,23 +251,40 @@ jobs:
       #
       # This step runs ONLY when the best-effort step above actually failed
       # (`outcome == 'failure'` — its pre-continue-on-error result). When it
-      # fails, the observable side effect distinguishes the two causes:
-      #   - `changeset-release/main` present on origin  -> the push SUCCEEDED and
-      #     only the PR-open was refused (the org toggle) — tolerated.
-      #   - `changeset-release/main` ABSENT on origin    -> the PUSH failed — a
-      #     real release defect — so FAIL the job.
-      # It has NO continue-on-error, so its `exit 1` reds the lane. On the merge
-      # push (no changesets, action succeeds) `outcome` is 'success' and this is
-      # skipped; if the fail-closed bump step failed, `outcome` is 'skipped' and
-      # this is skipped too (the job is already red at the bump).
-      - name: Assert the version branch was pushed (a real push failure stays red)
+      # fails, we must distinguish the two causes.
+      #
+      # EXISTENCE IS NOT ENOUGH — assert FRESHNESS. The org toggle is
+      # permanently off, so the action force-pushes `changeset-release/main`
+      # every run and the branch PERSISTS between runs. A bare
+      # `git ls-remote`/existence check would therefore go green on last run's
+      # leftover even when THIS run's push failed — decoration by this repo's
+      # own standard (green when its subject is removed), and the exact
+      # unverified-cause falsehood this PR exists to kill, one level down. So we
+      # fetch the branch and require THIS run's commit ($GITHUB_SHA) to be an
+      # ANCESTOR of the pushed tip: the action bases the branch on the checked-out
+      # HEAD and commits the bump on top, so a fresh push descends from
+      # $GITHUB_SHA, while a stale leftover from an earlier main tip does not.
+      #   - fresh push (descends from $GITHUB_SHA) -> only the PR-open was refused
+      #     (the org toggle) — tolerated.
+      #   - branch missing, unfetchable, OR stale  -> the PUSH failed — a real
+      #     release defect — so FAIL the job.
+      # A fetch failure is a FAILURE, never a pass (a network/ref error must not
+      # read as "fresh"). NO continue-on-error, so `exit 1` reds the lane. On the
+      # merge push (no changesets, action succeeds) `outcome` is 'success' and
+      # this is skipped; if the fail-closed bump step failed, `outcome` is
+      # 'skipped' and this is skipped too (the job is already red at the bump).
+      - name: Assert the version branch push is FRESH (a real push failure stays red)
         if: steps.changesets.outcome == 'failure'
         run: |
           set -euo pipefail
-          if git ls-remote --exit-code origin refs/heads/changeset-release/main >/dev/null 2>&1; then
-            echo "changeset-release/main is present on origin — the version branch push succeeded; only the PR-open was refused." >> "$GITHUB_STEP_SUMMARY"
+          if ! git fetch --no-tags origin changeset-release/main; then
+            echo "::error title=Version branch push failed::The version bump PASSED but 'changeset-release/main' could not be fetched from origin — the changesets/action branch push (GITHUB_TOKEN, contents:write) did not land it. That is a real release defect (reduced token scope, branch protection, a rejected ref), NOT the org PR-open limitation. Failing the job."
+            exit 1
+          fi
+          if git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD; then
+            echo "changeset-release/main on origin descends from $GITHUB_SHA — this run's version branch push is FRESH; only the PR-open was refused." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "::error title=Version branch push failed::The version bump PASSED but 'changeset-release/main' is ABSENT on origin — the changesets/action branch push (GITHUB_TOKEN, contents:write) FAILED. That is a real release defect (reduced token scope, branch protection, a rejected ref), NOT the org PR-open limitation. Failing the job."
+            echo "::error title=Version branch push failed (stale)::The version bump PASSED but 'changeset-release/main' on origin does NOT descend from this run's commit ($GITHUB_SHA) — this run's push FAILED and only a stale leftover from an earlier run remains. That is a real release defect (reduced token scope, branch protection, a rejected ref), NOT the org PR-open limitation. Failing the job."
             exit 1
           fi
 

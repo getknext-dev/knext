@@ -137,29 +137,46 @@ describe('release.yml version-pr: the fail-closed bump runs BEFORE the PR-open (
 });
 
 describe('release.yml version-pr: a swallowed PUSH failure stays red (gate)', () => {
-  it('has a FAIL-CLOSED step that asserts the version branch was pushed', () => {
+  it('has a FAIL-CLOSED step that asserts the version branch push is FRESH', () => {
     // `continue-on-error` on the PR-open step swallows the branch push too (the
     // action pushes changeset-release/main with GITHUB_TOKEN BEFORE opening the
     // PR). A real push failure must NOT be tolerated as "the org limitation".
     const gate = stepsOf(VERSION_JOB).find(
-      (s) =>
-        typeof s.run === 'string' &&
-        s.run.includes('git ls-remote') &&
-        s.run.includes('changeset-release/main'),
+      (s) => typeof s.run === 'string' && s.run.includes('changeset-release/main'),
     );
     expect(
       gate,
-      `\`${VERSION_JOB}\` has no push-integrity gate. The best-effort PR step swallows the branch push failure too; add a step that runs \`git ls-remote --exit-code origin refs/heads/changeset-release/main\` and FAILS when the branch is absent.`,
+      `\`${VERSION_JOB}\` has no push-integrity gate. The best-effort PR step swallows the branch push failure too; add a step that verifies changeset-release/main and FAILS when the push did not land.`,
     ).toBeDefined();
     const g = gate as Step;
+    const run = String(g.run ?? '');
     // It must be able to red the job.
     expect(
       isBestEffort(g),
       'the push-integrity gate is continue-on-error — then a swallowed push failure would be swallowed a second time and never red the lane',
     ).toBe(false);
     expect(
-      typeof g.run === 'string' && /exit\s+1/.test(g.run),
-      'the push-integrity gate never exits non-zero on a missing branch — it cannot red the lane',
+      /exit\s+1/.test(run),
+      'the push-integrity gate never exits non-zero — it cannot red the lane',
+    ).toBe(true);
+    // FRESHNESS, not existence. The org toggle is permanently off, so the
+    // action force-pushes changeset-release/main every run and it PERSISTS
+    // between runs — a bare existence check (`git ls-remote`/`show-ref`) goes
+    // green on last run's leftover even when THIS run's push failed. The gate
+    // must assert this run's commit is an ancestor of the pushed tip.
+    expect(
+      /merge-base\s+--is-ancestor/.test(run),
+      "the push-integrity gate does not assert FRESHNESS (`git merge-base --is-ancestor`). A persisted stale branch would pass an existence-only check even when this run's push failed — decoration by this repo's own standard.",
+    ).toBe(true);
+    expect(
+      run.includes('GITHUB_SHA'),
+      "the freshness check must compare against this run's commit (`$GITHUB_SHA`), or it does not distinguish a fresh push from a stale leftover",
+    ).toBe(true);
+    // A fetch failure must be a failure, not a pass: the gate must fetch the
+    // branch (so FETCH_HEAD is the tip it tests) rather than trust a local ref.
+    expect(
+      /git fetch\b/.test(run) && run.includes('FETCH_HEAD'),
+      'the freshness check must FETCH the remote branch and test FETCH_HEAD; trusting a local ref or letting a fetch error read as fresh reopens the hole',
     ).toBe(true);
     // It must only run when the best-effort step actually failed (something was
     // swallowed) — otherwise it either never runs or runs when there is no
