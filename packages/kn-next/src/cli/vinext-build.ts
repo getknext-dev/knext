@@ -48,7 +48,9 @@ import { fileURLToPath } from "node:url";
 import { runQuiet } from "./exec";
 import {
     findLockfile,
+    formatLockedVersions,
     INTEGRITY_MANIFEST_NAME,
+    type LockedPackage,
     readLockfilePackages,
     writeNativeIntegrityManifest,
 } from "./native-integrity";
@@ -296,6 +298,9 @@ export function stageSharpNative(
     const stagedThisRun: string[] = [];
     try {
         if (appUsesSharp(cwd, imgRoot, locked)) {
+            // Read once, used by the fetch path to disambiguate a lockfile
+            // that pins an @img package at two versions at once (#954).
+            const resolvedSharp = readResolvedSharpManifest(cwd);
             // The addon links libvips by RELATIVE rpath, so the pair ships
             // together in its original layout or `dlopen` fails resolving
             // `libvips-cpp` after finding the addon.
@@ -332,14 +337,8 @@ export function stageSharpNative(
                             "Run `bun install --save-text-lockfile` in the app and rebuild.",
                     );
                 }
-                // `[0]` is the lockfile's canonical (root/hoisted) resolution
-                // by `readLockfilePackages`'s ordering contract — load-bearing
-                // when the lock pins the package at two versions at once (the
-                // scaffold's app-sharp ^0.35 beside next's 0.34 pin, #954):
-                // fetching "whichever entry won a name-keyed map" would stage
-                // an addon version the bundled sharp never resolved.
-                const entry = locked.get(name)?.[0];
-                if (!entry) {
+                const versions = locked.get(name);
+                if (!versions || versions.length === 0) {
                     throw new UsageError(
                         `The image targets ${platformId}, but neither this host's install nor ${lockfilePath} has '${name}' — the image would ship unable to load sharp.\n\n` +
                             "sharp resolves its native addons as optionalDependencies, so the lockfile\n" +
@@ -348,6 +347,12 @@ export function stageSharpNative(
                             `'${name}', and rebuild.`,
                     );
                 }
+                const entry = pickFetchVersion(
+                    name,
+                    versions,
+                    resolvedSharp,
+                    lockfilePath,
+                );
                 (opts.fetchPackage ?? fetchImgPackage)(
                     {
                         name,
@@ -583,6 +588,106 @@ function findImgPackages(cwd: string): string | undefined {
         join(cwd, "..", "..", "node_modules", ".bun", "node_modules", "@img"),
     ];
     return candidates.find((c) => existsSync(c));
+}
+
+/**
+ * The app's RESOLVED sharp manifest — the version its bundle actually loads,
+ * and sharp's own `optionalDependencies` pins for every `@img/*` platform
+ * package (sharp publishes those as exact versions).
+ *
+ * This is the #954 disambiguator for the fetch path: a fresh scaffold's
+ * lockfile legitimately pins each @img package at TWO versions (the app's
+ * sharp ^0.35 beside next's own 0.34 devDependency pin), and which one bun
+ * hoists to the bare lockfile key is bun's layout choice — NOT a statement of
+ * what the app's `require('sharp')` resolves. Only the installed sharp's own
+ * manifest says which addon version its loader expects, and fetching any
+ * other one would pass the integrity manifest (that version IS in the lock)
+ * and fail only at dlopen, inside the image.
+ */
+function readResolvedSharpManifest(
+    cwd: string,
+): { version: string; imgPins: Record<string, string> } | undefined {
+    // The same candidate walk as `findImgPackages`: the app's own install,
+    // bun's isolated store, then a workspace root above the app.
+    const candidates = [
+        join(cwd, "node_modules", "sharp", "package.json"),
+        join(
+            cwd,
+            "node_modules",
+            ".bun",
+            "node_modules",
+            "sharp",
+            "package.json",
+        ),
+        join(cwd, "..", "..", "node_modules", "sharp", "package.json"),
+        join(
+            cwd,
+            "..",
+            "..",
+            "node_modules",
+            ".bun",
+            "node_modules",
+            "sharp",
+            "package.json",
+        ),
+    ];
+    for (const candidate of candidates) {
+        if (!existsSync(candidate)) continue;
+        try {
+            const parsed = JSON.parse(readFileSync(candidate, "utf8")) as {
+                version?: unknown;
+                optionalDependencies?: Record<string, string>;
+            };
+            if (typeof parsed.version !== "string") continue;
+            return {
+                version: parsed.version,
+                imgPins: parsed.optionalDependencies ?? {},
+            };
+        } catch {
+            // Unreadable manifest — keep walking. Total absence is handled by
+            // the caller's documented fallback, not silently here.
+        }
+    }
+    return undefined;
+}
+
+/**
+ * Which lockfile entry to FETCH for `name`, when the host install lacks it.
+ *
+ * One pinned version is no decision at all. With two or more (#954), the
+ * installed sharp's own exact pin selects; knowing that pin and NOT finding
+ * it in the lock is the store-vs-lockfile disagreement and fails closed. Only
+ * when nothing can disambiguate — no findable sharp manifest (a pnpm `.pnpm`
+ * store), or one that does not pin this package — does `[0]` (the bare-key
+ * resolution when present, first-in-file otherwise) get used, and then
+ * LOUDLY: it is a guess between two legitimate pins, and a wrong guess ships
+ * an addon the bundled sharp never resolved.
+ */
+function pickFetchVersion(
+    name: string,
+    versions: readonly LockedPackage[],
+    resolvedSharp:
+        | { version: string; imgPins: Record<string, string> }
+        | undefined,
+    lockfilePath: string,
+): LockedPackage {
+    if (versions.length === 1) return versions[0];
+    const pinned = resolvedSharp?.imgPins[name];
+    if (resolvedSharp !== undefined && pinned !== undefined) {
+        const match = versions.find((v) => v.version === pinned);
+        if (match) return match;
+        throw new UsageError(
+            `The installed sharp@${resolvedSharp.version} pins '${name}' at ${pinned}, but ${lockfilePath} pins only ${formatLockedVersions([...versions])}.\n\n` +
+                "The store and the lockfile disagree about what is installed. Reinstall with\n" +
+                "`bun install --frozen-lockfile` and rebuild rather than shipping the difference.",
+        );
+    }
+    process.stderr.write(
+        `knext: ${lockfilePath} pins '${name}' at multiple versions (${formatLockedVersions([...versions])}) and no installed sharp manifest was found to disambiguate.\n` +
+            `Staging ${versions[0].version} — the lockfile's root resolution when present, its first entry otherwise. If the image fails to load sharp,\n` +
+            `pin a single sharp version via package.json "overrides" and rebuild.\n`,
+    );
+    return versions[0];
 }
 
 /** Reads `bun --version`. Separate so the floor check is testable without a Bun. */

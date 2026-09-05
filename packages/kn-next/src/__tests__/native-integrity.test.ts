@@ -36,6 +36,7 @@ import {
     mkdtempSync,
     readdirSync,
     readFileSync,
+    rmSync,
     writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -43,6 +44,7 @@ import { dirname, join } from "node:path";
 import {
     INTEGRITY_MANIFEST_NAME,
     readImgPackageVersions,
+    readLockfilePackages,
     writeNativeIntegrityManifest,
 } from "../cli/native-integrity";
 import { stageSharpNative } from "../cli/vinext-build";
@@ -331,6 +333,33 @@ describe("#954 two coexisting sharp versions in one lockfile", () => {
             version: NEXT_SHARP,
             lockfileIntegrity: "sha512-imgnext==",
         });
+    });
+
+    it("orders a purely path-keyed shape (no bare key) in FILE ORDER — [0] is first-in-file, nothing more", () => {
+        // A workspace install can key EVERY resolution by path, so no entry is
+        // canonical. The ordering contract then degrades honestly: [0] is
+        // whatever the lockfile lists first, which is why callers that need
+        // one representative version treat [0] as a fallback, not an answer.
+        const dir = mkdtempSync(join(tmpdir(), "knext-954-pathkeys-"));
+        try {
+            const lock = writeLock(
+                dir,
+                `{\n  "lockfileVersion": 1,\n  "packages": {\n` +
+                    `    "apps/web/node_modules/@img/sharp-linux-x64": ["@img/sharp-linux-x64@${NEXT_SHARP}", "", {}, "sha512-webpin=="],\n` +
+                    `    "apps/admin/node_modules/@img/sharp-linux-x64": ["@img/sharp-linux-x64@${APP_SHARP}", "", {}, "sha512-adminpin=="],\n` +
+                    `  }\n}\n`,
+            );
+
+            const versions = readLockfilePackages(lock).get(
+                "@img/sharp-linux-x64",
+            );
+            expect(versions?.map((v) => v.version)).toEqual([
+                NEXT_SHARP,
+                APP_SHARP,
+            ]);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
     });
 
     it("still FAILS closed, naming every pinned version, when the staged version matches neither", () => {

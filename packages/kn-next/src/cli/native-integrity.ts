@@ -138,7 +138,7 @@ export function writeNativeIntegrityManifest(
             const entry = versions.find((v) => v.version === pkg.version);
             if (!entry) {
                 throw new UsageError(
-                    `The native package '${pkg.name}' is staged at ${pkg.version} but ${lockfilePath} pins only ${formatVersions(versions)}.\n\n` +
+                    `The native package '${pkg.name}' is staged at ${pkg.version} but ${lockfilePath} pins only ${formatLockedVersions(versions)}.\n\n` +
                         "The store and the lockfile disagree about what is installed. Reinstall with\n" +
                         "`bun install --frozen-lockfile` and rebuild rather than shipping the difference.",
                 );
@@ -185,16 +185,20 @@ export function findLockfile(cwd: string): string | undefined {
     }
 }
 
-interface LockedPackage {
+export interface LockedPackage {
     version: string;
     integrity: string | null;
 }
 
-/** `pins only 0.34.5, 0.35.4` — every version the lockfile holds, sorted. */
-function formatVersions(versions: LockedPackage[]): string {
+/**
+ * `pins only 0.34.5, 0.35.4` — every version the lockfile holds, in
+ * numeric-aware order (a lexical sort puts 0.10.0 before 0.9.0, which reads
+ * as nonsense in a refusal an operator is expected to act on).
+ */
+export function formatLockedVersions(versions: LockedPackage[]): string {
     return versions
         .map((v) => v.version)
-        .sort()
+        .sort((a, b) => a.localeCompare(b, "en", { numeric: true }))
         .join(", ");
 }
 
@@ -213,9 +217,12 @@ function formatVersions(versions: LockedPackage[]): string {
  * sharp ^0.35 beside next's own sharp 0.34 devDependency pin — and collapsing
  * them to one entry made the integrity check compare staged trees against
  * whichever version happened to win (#954). Ordering contract: the bare-key
- * (root/hoisted) resolution is FIRST when present, so callers that need one
- * representative version (`stageSharpNative`'s fetch path) take `[0]` and get
- * the hoisted resolution deterministically, regardless of entry order.
+ * (root/hoisted) resolution is FIRST **when present**; a purely path-keyed
+ * shape (workspace installs) has no canonical entry, and `[0]` is then simply
+ * the lockfile's first entry in file order. Which of two versions bun hoists
+ * to the bare key is bun's choice, not the app's resolution — so `[0]` is a
+ * FALLBACK for callers that need one representative version, never an answer
+ * to "which version does this app use".
  */
 export function readLockfilePackages(
     lockfilePath: string,

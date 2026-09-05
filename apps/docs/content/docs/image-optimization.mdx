@@ -60,8 +60,9 @@ hand.
 The native library is platform-specific, and the platform that matters is the **container image's**
 (Linux/musl), not your laptop's. `kn-next build` stages the image's addon set regardless of where
 you build: when your local install already has it (a Linux host) it is copied, and when it does not
-(a macOS host holds only macOS addons) the build downloads the exact version your `bun.lock` pins
-and verifies the download against the lockfile's integrity hash before staging it. If neither your
+(a macOS host holds only macOS addons) the build downloads the version your app's installed sharp
+resolves to, as pinned in `bun.lock`, and verifies the download against the lockfile's integrity
+hash before staging it. If neither your
 install nor your lockfile has the image's addon, the build **fails and names the missing package**
 — it never ships an image that cannot load sharp.
 

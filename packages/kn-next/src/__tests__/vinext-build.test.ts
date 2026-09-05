@@ -336,24 +336,56 @@ describe("#949 stageSharpNative stages the image target's platform, not the host
         ).toBeDefined();
     });
 
-    it("fetches the ROOT resolution when the lockfile holds two versions of the target package (#954)", () => {
-        // The scaffold's two-sharp shape (app ^0.35 + next-pinned 0.34) also
-        // reaches the fetch path: the lock then pins the target @img package
-        // twice, and a name-only lookup would fetch whichever entry happened to
-        // win. The bare root key IS the hoisted resolution, so that is the one
-        // to fetch — deterministically, regardless of entry order.
-        const cwd = tempDir("knext-954-fetch-");
-        writeFileSync(
-            join(cwd, "bun.lock"),
+    /**
+     * The reproduced #954 reality (S3-V Finding B-3): bun hoisted NEXT's
+     * sharp 0.34 pin to the bare keys, and the app's own ^0.35 resolution
+     * lives under nested keys. This fixture deliberately matches the
+     * native-integrity.test.ts one — the bare key is next's pin, NOT the
+     * app's — because which version wins the hoist is bun's choice, which is
+     * exactly why the fetch path cannot trust any single lockfile entry.
+     */
+    function twoVersionLock(): string {
+        return (
             `{\n  "lockfileVersion": 1,\n  "packages": {\n` +
-                // Nested (next's pin) FIRST, so first-wins parsing would pick
-                // the wrong one.
-                `    "next/@img/sharp-linuxmusl-x64": ["@img/sharp-linuxmusl-x64@0.34.5", "", {}, "sha512-nested=="],\n` +
-                `    "@img/sharp-linuxmusl-x64": ["@img/sharp-linuxmusl-x64@${SHARP_V}", "", {}, "sha512-root=="],\n` +
-                `    "next/@img/sharp-libvips-linuxmusl-x64": ["@img/sharp-libvips-linuxmusl-x64@1.2.9", "", {}, "sha512-vnested=="],\n` +
-                `    "@img/sharp-libvips-linuxmusl-x64": ["@img/sharp-libvips-linuxmusl-x64@${VIPS_V}", "", {}, "sha512-vroot=="],\n` +
-                `  }\n}\n`,
+            `    "@img/sharp-linuxmusl-x64": ["@img/sharp-linuxmusl-x64@0.34.5", "", {}, "sha512-imgnext=="],\n` +
+            `    "@img/sharp-libvips-linuxmusl-x64": ["@img/sharp-libvips-linuxmusl-x64@1.2.9", "", {}, "sha512-vnext=="],\n` +
+            `    "myapp/@img/sharp-linuxmusl-x64": ["@img/sharp-linuxmusl-x64@${SHARP_V}", "", {}, "sha512-imgapp=="],\n` +
+            `    "myapp/@img/sharp-libvips-linuxmusl-x64": ["@img/sharp-libvips-linuxmusl-x64@${VIPS_V}", "", {}, "sha512-vapp=="],\n` +
+            `  }\n}\n`
         );
+    }
+
+    /** The app's RESOLVED sharp install — what its bundle actually loads. */
+    function writeSharpManifest(
+        cwd: string,
+        version: string,
+        imgPins: Record<string, string>,
+    ): void {
+        const dir = join(cwd, "node_modules", "sharp");
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+            join(dir, "package.json"),
+            JSON.stringify({
+                name: "sharp",
+                version,
+                optionalDependencies: imgPins,
+            }),
+        );
+    }
+
+    it("fetches the version the app's sharp RESOLVED, not whichever lockfile entry is first (#954)", () => {
+        // The silent-mismatch shape both reviewers flagged: with two pins in
+        // the lock, ANY fetched version passes the integrity manifest (it IS
+        // in the lock) — so fetching the wrong one ships @img 0.34.5 beside a
+        // bundled sharp 0.35.4 without a single red gate. The app's resolved
+        // sharp manifest is the disambiguator: its optionalDependencies pin
+        // the exact @img versions its loader expects.
+        const cwd = tempDir("knext-954-fetch-");
+        writeFileSync(join(cwd, "bun.lock"), twoVersionLock());
+        writeSharpManifest(cwd, SHARP_V, {
+            "@img/sharp-linuxmusl-x64": SHARP_V,
+            "@img/sharp-libvips-linuxmusl-x64": VIPS_V,
+        });
         const { calls, fetch } = recordingFetch();
 
         stageSharpNative(cwd, { arch: "linux-x64", fetchPackage: fetch });
@@ -362,11 +394,61 @@ describe("#949 stageSharpNative stages the image target's platform, not the host
             `@img/sharp-libvips-linuxmusl-x64@${VIPS_V}`,
             `@img/sharp-linuxmusl-x64@${SHARP_V}`,
         ]);
-        // And the matched entries' integrity strings travelled with them.
+        // The MATCHED entries' integrity strings travelled with the fetch —
+        // not the bare-key entries'.
         expect(calls.map((c) => c.integrity).sort()).toEqual([
-            "sha512-root==",
-            "sha512-vroot==",
+            "sha512-imgapp==",
+            "sha512-vapp==",
         ]);
+    });
+
+    it("FAILS namedly when the app's sharp pins a version the lockfile does not hold", () => {
+        // Knowing the app's resolution and NOT finding it in the lock is the
+        // store-vs-lockfile disagreement — fetching some other version instead
+        // would be the exact silent mismatch this path exists to prevent.
+        const cwd = tempDir("knext-954-mismatch-");
+        writeFileSync(join(cwd, "bun.lock"), twoVersionLock());
+        writeSharpManifest(cwd, "0.36.0", {
+            "@img/sharp-linuxmusl-x64": "0.36.0",
+            "@img/sharp-libvips-linuxmusl-x64": "1.4.0",
+        });
+        const { fetch } = recordingFetch();
+
+        expect(() =>
+            stageSharpNative(cwd, { arch: "linux-x64", fetchPackage: fetch }),
+        ).toThrow(/0\.36\.0/);
+        expect(() =>
+            stageSharpNative(cwd, { arch: "linux-x64", fetchPackage: fetch }),
+        ).toThrow(/0\.34\.5.*0\.35\.4|0\.35\.4.*0\.34\.5/s);
+    });
+
+    it("falls back to the first lockfile entry WITH A WARNING when no resolved sharp manifest is findable", () => {
+        // A pnpm `.pnpm` store hides node_modules/sharp from the candidate
+        // walk. With nothing to disambiguate by, [0] (the bare-key resolution
+        // when present) is the documented fallback — taken loudly, never
+        // silently, because it is a guess between two legitimate pins.
+        const cwd = tempDir("knext-954-fallback-");
+        writeFileSync(join(cwd, "bun.lock"), twoVersionLock());
+        const { calls, fetch } = recordingFetch();
+
+        const writes: string[] = [];
+        const original = process.stderr.write.bind(process.stderr);
+        process.stderr.write = ((chunk: unknown) => {
+            writes.push(String(chunk));
+            return true;
+        }) as typeof process.stderr.write;
+        try {
+            stageSharpNative(cwd, { arch: "linux-x64", fetchPackage: fetch });
+        } finally {
+            process.stderr.write = original;
+        }
+
+        // Bare keys hold 0.34.5 / 1.2.9 in this fixture, and they are [0].
+        expect(calls.map((c) => `${c.name}@${c.version}`).sort()).toEqual([
+            "@img/sharp-libvips-linuxmusl-x64@1.2.9",
+            "@img/sharp-linuxmusl-x64@0.34.5",
+        ]);
+        expect(writes.join("")).toMatch(/two versions|multiple versions/i);
     });
 
     it("copies the target set from the host install when it IS there — no fetch", () => {
