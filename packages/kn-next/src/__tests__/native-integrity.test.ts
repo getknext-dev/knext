@@ -34,6 +34,7 @@ import {
     existsSync,
     mkdirSync,
     mkdtempSync,
+    readdirSync,
     readFileSync,
     writeFileSync,
 } from "node:fs";
@@ -279,26 +280,65 @@ describe("native tree integrity manifest — staging", () => {
 });
 
 describe("stageSharpNative pins what it stages", () => {
-    /** An app tree with `node_modules/@img` and a lockfile, as bun installs it. */
+    /**
+     * An app tree with `node_modules/@img` and a lockfile, holding the DEFAULT
+     * IMAGE TARGET's packages (`linuxmusl`, #949 — staging selects by target,
+     * so a fixture with only a foreign platform's packages would exercise the
+     * fetch path, not the copy path this block pins).
+     */
     function appTree(): string {
         const cwd = mkdtempSync(join(tmpdir(), "knext-stage-app-"));
-        const img = join(cwd, "node_modules", "@img", "sharp-linux-x64", "lib");
+        const img = join(
+            cwd,
+            "node_modules",
+            "@img",
+            "sharp-linuxmusl-x64",
+            "lib",
+        );
         mkdirSync(img, { recursive: true });
         writeFileSync(
             join(
                 cwd,
                 "node_modules",
                 "@img",
-                "sharp-linux-x64",
+                "sharp-linuxmusl-x64",
                 "package.json",
             ),
             JSON.stringify({
-                name: "@img/sharp-linux-x64",
+                name: "@img/sharp-linuxmusl-x64",
                 version: SHARP_VERSION,
             }),
         );
-        writeFileSync(join(img, "sharp-linux-x64.node"), "ADDON BYTES");
-        writeFileSync(join(cwd, "bun.lock"), lockfile());
+        writeFileSync(join(img, "sharp-linuxmusl-x64.node"), "ADDON BYTES");
+        const vips = join(
+            cwd,
+            "node_modules",
+            "@img",
+            "sharp-libvips-linuxmusl-x64",
+            "lib",
+        );
+        mkdirSync(vips, { recursive: true });
+        writeFileSync(
+            join(
+                cwd,
+                "node_modules",
+                "@img",
+                "sharp-libvips-linuxmusl-x64",
+                "package.json",
+            ),
+            JSON.stringify({
+                name: "@img/sharp-libvips-linuxmusl-x64",
+                version: VIPS_VERSION,
+            }),
+        );
+        writeFileSync(join(vips, "libvips-cpp.so.42"), "VIPS BYTES");
+        writeFileSync(
+            join(cwd, "bun.lock"),
+            lockfile({
+                "@img/sharp-linuxmusl-x64": SHARP_VERSION,
+                "@img/sharp-libvips-linuxmusl-x64": VIPS_VERSION,
+            }),
+        );
         return cwd;
     }
 
@@ -310,12 +350,14 @@ describe("stageSharpNative pins what it stages", () => {
         stageSharpNative(cwd);
 
         const manifest = readManifest(join(cwd, "native"));
-        expect(manifest.files["sharp-linux-x64/lib/sharp-linux-x64.node"]).toBe(
+        expect(
+            manifest.files["sharp-linuxmusl-x64/lib/sharp-linuxmusl-x64.node"],
+        ).toBe(
             createHash("sha256")
                 .update(Buffer.from("ADDON BYTES"))
                 .digest("hex"),
         );
-        expect(manifest.packages["@img/sharp-linux-x64"].version).toBe(
+        expect(manifest.packages["@img/sharp-linuxmusl-x64"].version).toBe(
             SHARP_VERSION,
         );
     });
@@ -333,9 +375,31 @@ describe("stageSharpNative pins what it stages", () => {
         const cwd = appTree();
         writeFileSync(
             join(cwd, "bun.lock"),
-            lockfile({ "@img/sharp-linux-x64": undefined }),
+            lockfile({
+                "@img/sharp-libvips-linuxmusl-x64": VIPS_VERSION,
+                "@img/sharp-linuxmusl-x64": undefined,
+            }),
         );
-        expect(() => stageSharpNative(cwd)).toThrow(/@img\/sharp-linux-x64/);
+        expect(() => stageSharpNative(cwd)).toThrow(
+            /@img\/sharp-linuxmusl-x64/,
+        );
+        // The refusal happens AFTER the copies, so it must also unwind them
+        // (#958 round 3, I1): a native/ left holding unmanifested copies would
+        // wedge every later build on the ownership refusal.
+        expect(readdirSync(join(cwd, "native"))).toEqual([]);
+
+        // Restoring the lockfile makes the SAME tree build again.
+        writeFileSync(
+            join(cwd, "bun.lock"),
+            lockfile({
+                "@img/sharp-linuxmusl-x64": SHARP_VERSION,
+                "@img/sharp-libvips-linuxmusl-x64": VIPS_VERSION,
+            }),
+        );
+        stageSharpNative(cwd);
+        expect(existsSync(join(cwd, "native", INTEGRITY_MANIFEST_NAME))).toBe(
+            true,
+        );
     });
 });
 

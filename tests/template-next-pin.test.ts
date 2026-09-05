@@ -1,11 +1,8 @@
 import { describe, expect, it } from 'bun:test';
-import { readdirSync } from 'node:fs';
-import { join } from 'node:path';
 import {
-  type Manifest,
+  KNOWN_TEMPLATE_MANIFESTS,
   nextRange,
-  REPO_ROOT,
-  readManifest,
+  templateManifests,
   WORKSPACE_DIRS,
   workspaceGlobs,
   workspaceManifests,
@@ -49,53 +46,16 @@ import {
  * PR removes.
  */
 
-/** Directories a template tree is never found under. */
-const SKIP_DIRS = new Set([
-  '.git',
-  '.claude',
-  '.next',
-  '.turbo',
-  'node_modules',
-  'coverage',
-  'dist',
-  'graphify-out',
-  'out',
-]);
-
-/** The scaffolders that MUST be covered, so an over-narrowed scan cannot pass. */
-const KNOWN_TEMPLATE_MANIFESTS = [
-  'packages/kn-next/templates/app/package.json.hbs',
-  'turbo/generators/templates/zone/package.json.hbs',
-];
+// The template scan (`templateManifests`) and the covered-scaffolder list
+// (`KNOWN_TEMPLATE_MANIFESTS`) moved to `helpers/workspace-manifests.ts` when
+// `template-sharp-pin.test.ts` became their second consumer — two copies of one
+// walk is the defect class this file's own header describes.
 
 /** The exact `X.Y.Z` a `1.2.3` / `^1.2.3` / `>=1.2.3` range is anchored on. */
 function versionOf(range: string): string {
   const m = range.match(/(\d+\.\d+\.\d+)/);
   if (!m) throw new Error(`next range "${range}" has no X.Y.Z to compare`);
   return m[1];
-}
-
-/**
- * Every `package.json` / `package.json.hbs` living under a `templates/`
- * directory, found by walking the repo. Scanned, not enumerated.
- */
-function templateManifests(): Manifest[] {
-  const found: Manifest[] = [];
-  const walk = (dir: string, inTemplates: boolean) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.isDirectory()) {
-        if (SKIP_DIRS.has(entry.name)) continue;
-        walk(join(dir, entry.name), inTemplates || entry.name === 'templates');
-      } else if (
-        inTemplates &&
-        (entry.name === 'package.json' || entry.name === 'package.json.hbs')
-      ) {
-        found.push(readManifest(join(dir, entry.name)));
-      }
-    }
-  };
-  walk(REPO_ROOT, false);
-  return found.sort((a, b) => a.path.localeCompare(b.path));
 }
 
 /** The single `next` version the workspace is built and compat-run against. */

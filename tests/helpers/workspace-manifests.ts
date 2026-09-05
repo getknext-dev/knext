@@ -77,3 +77,59 @@ export function nextRange(pkg: Record<string, unknown>): string | undefined {
   }
   return undefined;
 }
+
+/** The range a manifest declares for `name`, from any dependency field. */
+export function dependencyRange(pkg: Record<string, unknown>, name: string): string | undefined {
+  for (const field of ['dependencies', 'devDependencies', 'optionalDependencies'] as const) {
+    const range = (pkg[field] as Record<string, string> | undefined)?.[name];
+    if (range) return range;
+  }
+  return undefined;
+}
+
+/** Directories a template tree is never found under. */
+const SKIP_DIRS = new Set([
+  '.git',
+  '.claude',
+  '.next',
+  '.turbo',
+  'node_modules',
+  'coverage',
+  'dist',
+  'graphify-out',
+  'out',
+]);
+
+/** The scaffolders that MUST be covered, so an over-narrowed scan cannot pass. */
+export const KNOWN_TEMPLATE_MANIFESTS = [
+  'packages/kn-next/templates/app/package.json.hbs',
+  'turbo/generators/templates/zone/package.json.hbs',
+];
+
+/**
+ * Every `package.json` / `package.json.hbs` living under a `templates/`
+ * directory, found by walking the repo. Scanned, not enumerated — "we added a
+ * scaffolder and forgot the pin" is the bug class every consumer of this exists
+ * to catch (#643 for `next`, #949's injection-filter coupling for `sharp`), so
+ * a third template tree is covered the moment it lands. Shared here because the
+ * second consumer arriving with its own copy of the walk is the same two-copies
+ * defect this helper was created to remove.
+ */
+export function templateManifests(): Manifest[] {
+  const found: Manifest[] = [];
+  const walk = (dir: string, inTemplates: boolean) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        if (SKIP_DIRS.has(entry.name)) continue;
+        walk(join(dir, entry.name), inTemplates || entry.name === 'templates');
+      } else if (
+        inTemplates &&
+        (entry.name === 'package.json' || entry.name === 'package.json.hbs')
+      ) {
+        found.push(readManifest(join(dir, entry.name)));
+      }
+    }
+  };
+  walk(REPO_ROOT, false);
+  return found.sort((a, b) => a.path.localeCompare(b.path));
+}

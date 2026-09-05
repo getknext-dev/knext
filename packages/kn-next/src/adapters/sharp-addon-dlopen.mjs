@@ -82,14 +82,77 @@ function addonPath() {
   // value to set correctly, and a wrong env var is the failure mode this
   // function already had to defend against.
   const nativeRoot = join(beside, 'native');
-  for (const pkg of safeReadDir(nativeRoot)) {
-    if (!pkg.startsWith('sharp-') || pkg.startsWith('sharp-libvips-')) continue;
-    const lib = join(nativeRoot, pkg, 'lib');
+  const sharpDirs = safeReadDir(nativeRoot).filter(
+    (pkg) => pkg.startsWith('sharp-') && !pkg.startsWith('sharp-libvips-'),
+  );
+
+  // #949: selection is by RUNTIME platform, never by directory order. The tree
+  // can hold more than one platform's addon — a macOS-built image staged
+  // `sharp-darwin-arm64` next to `sharp-linuxmusl-x64`, `darwin` sorts (and can
+  // readdir) first, and dlopening it on alpine was a CrashLoopBackOff on
+  // `Exec format error` with nothing in the message naming the real cause.
+  for (const id of runtimePlatformIds()) {
+    const dir = `sharp-${id}`;
+    if (!sharpDirs.includes(dir)) continue;
+    const lib = join(nativeRoot, dir, 'lib');
     for (const file of safeReadDir(lib)) {
       if (file.startsWith('sharp-') && file.endsWith('.node')) return join(lib, file);
     }
   }
+
+  if (sharpDirs.length > 0) {
+    // Addons are staged but none of them can run HERE. Dlopening a foreign one
+    // anyway is the crash-loop this replaces; a named refusal is diagnosable.
+    throw new Error(
+      'knext: no staged sharp addon matches this runtime\n' +
+        `  runtime wants: ${runtimePlatformIds()
+          .map((id) => `sharp-${id}`)
+          .join(' or ')}\n` +
+        `  staged under ${nativeRoot}: ${sharpDirs.join(', ')}\n` +
+        '  the native/ tree was staged for a different platform. Rebuild with a current\n' +
+        "  `kn-next build` (it stages the image target's addons regardless of the build\n" +
+        '  host), or set KNEXT_SHARP_ADDON to the correct .node inside its @img tree.',
+    );
+  }
   return flat;
+}
+
+/**
+ * The sharp platform ids THIS process can load, most specific first.
+ *
+ * Sharp spells its per-platform packages `sharp-<platform>-<arch>`, with musl
+ * as `linuxmusl` — one word, a spelling this repo has already guessed wrong
+ * once. On linux both libc flavours are returned, exact match first: libc
+ * detection is a heuristic, and when only one flavour is staged (which is what
+ * `kn-next build` produces) trying the other second turns a mis-detection into
+ * a working load instead of a refusal.
+ */
+function runtimePlatformIds() {
+  const arch = process.arch;
+  if (process.platform !== 'linux') return [`${process.platform}-${arch}`];
+  return isMuslLibc()
+    ? [`linuxmusl-${arch}`, `linux-${arch}`]
+    : [`linux-${arch}`, `linuxmusl-${arch}`];
+}
+
+/**
+ * musl or glibc? detect-libc's own primary heuristic, restated over builtins
+ * (this file must stay self-contained): a glibc runtime reports its version in
+ * `process.report`; musl has none. Where the report is unavailable or partial
+ * (compiled bun binaries), fall back to musl's dynamic loader on disk —
+ * `/lib/ld-musl-<arch>.so.1` — which is how the alpine runtime image looks.
+ */
+function isMuslLibc() {
+  try {
+    const header = process.report?.getReport?.()?.header;
+    if (header && typeof header.glibcVersionRuntime === 'string') return false;
+  } catch {
+    // fall through to the filesystem probe
+  }
+  return (
+    safeReadDir('/lib').some((f) => f.startsWith('ld-musl-')) ||
+    existsSync('/etc/alpine-release')
+  );
 }
 
 /** `readdirSync` that treats "not there" as "nothing", not as a crash. */
@@ -175,7 +238,9 @@ function requireIntegrity() {
  * pulled in transitively by the OS loader off a relative rpath and never passes
  * through this function, so verifying just the addon would leave the larger — and
  * more easily swapped — binary unpinned. The cost is one hash of the tree, paid
- * on first sharp import (the first `/_next/image` request), not at boot.
+ * once, when sharp is first imported — and the generated entry imports sharp
+ * STATICALLY, so in practice that is at boot (S3-V C-1a proved a failing load
+ * here is a boot crash, not a lazy per-request one).
  */
 function verifyAgainstManifest(addon) {
   // Parsed UNCONDITIONALLY, before anything branches on it. A value nobody can
