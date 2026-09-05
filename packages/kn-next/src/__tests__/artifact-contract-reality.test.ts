@@ -24,7 +24,14 @@ import { describe, expect, it } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { requireIsolatedProcess } from "../../../../tests/helpers/require-isolated-process";
 import { turbopackBuilder, vinextBuilder } from "../adapters/artifact-contract";
+
+// #965: a VICTIM of the build/GC specs' process-global `mock.module` fakes —
+// imports the real CLI modules and gets the fakes when batched with them. The
+// per-file runner (`scripts/bun-test.mjs`) isolates it; this makes a hand-rolled
+// batch fail loud with a pointer there instead of a phantom failure here.
+requireIsolatedProcess("artifact-contract-reality.test.ts");
 
 const REPO_ROOT = resolve(
     dirname(fileURLToPath(import.meta.url)),

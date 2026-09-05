@@ -33,6 +33,13 @@ import {
   METRICS_MAX_REQUEST_BYTES,
   serveCalls,
 } from '../scripts/lib/request-byte-cap.mjs';
+import { requireIsolatedProcess } from './helpers/require-isolated-process';
+
+// #965: a VICTIM of the build/GC specs' process-global `mock.module` fakes when
+// batched with them. The per-file runner (`scripts/bun-test.mjs`) isolates it;
+// this makes a hand-rolled batch fail loud with a pointer there instead of a
+// phantom failure here.
+requireIsolatedProcess('tests/request-byte-cap.test.ts');
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 

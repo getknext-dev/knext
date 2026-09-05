@@ -35,6 +35,13 @@ import {
 } from '../scripts/lib/prover-lane.mjs';
 import { PROVER_SUMMARY_PREFIX, parseProverSummary } from '../scripts/lib/prover-report.mjs';
 import { auditJobCanNotSkip } from './helpers/blocking-gate.js';
+import { requireIsolatedProcess } from './helpers/require-isolated-process';
+
+// #965: a VICTIM of the build/GC specs' process-global `mock.module` fakes when
+// batched with them. The per-file runner (`scripts/bun-test.mjs`) isolates it;
+// this makes a hand-rolled batch fail loud with a pointer there instead of a
+// phantom failure here.
+requireIsolatedProcess('tests/mutation-prover-lane.test.ts');
 
 /**
  * GUARDS for the mutation-prover nightly lane (#685).
