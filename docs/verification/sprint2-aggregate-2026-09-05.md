@@ -442,3 +442,87 @@ merged** — #920 wires the NEXT_DEPLOYMENT_ID chain, not ISR.
 - OKE: namespace `knext-s3-verify` (NextApp knext-s3-app, redis, ocir-secret copy, patched SA) left
   for the lead's inspection; operator + CRD left at the subject pair (see P2).
 
+---
+
+## Row E re-observation on df4dd318 (2026-09-05, post-#957 merge — kind only)
+
+Runner: s3v-rowE-recheck. Subject tree: `origin/agent/s2-tail` (9e96881e) merged with
+`origin/agent/s3-isr-wiring` — a **fast-forward** to `df4dd318` (the wiring chain already
+contained the s2-tail tip), so the observed tree is exactly the ISR-wiring branch's head.
+Cluster: the SAME kind `knext-s3-verify` + `knext-s3-registry` (:5077) + `deploy/knext-s3-redis`
+as the run above — reused, not rebuilt. OKE deliberately untouched (rides post-merge A7).
+
+Subject app: a **fresh `kn-next create` app** (`rowe-app`, clean scratch root) built from this
+tree's CLI (driven under bun per Finding B-1, which was not retested). Its scaffolded
+`vite.config.ts` carries the new
+`cache: { data: { adapter: '@getknext/core/internal/vinext-cache-adapter' } }` block, and the
+factory symbol is present in the emitted server bundle (grep on `.output/server/index.mjs`).
+`@getknext/*` substituted with bun-packed tarballs of the subject SHA via `overrides`
+(**Finding A-1 still stands** — `^0.3.1` remains unpublished; a consumer still cannot install).
+`overrides.sharp = "0.35.4"` still required (**Finding B-3 still stands**). Added content:
+`src/app/isr/page.tsx` (`export const revalidate = 30`, body carries a rendered-at timestamp).
+Deployed via `kn-next deploy` → NextApp CR only; revision `00003` Ready.
+
+**New sub-finding C-1a′ (darwin build hosts; refines C-1a):** staging the linuxmusl addons
+*alongside* the host's darwin ones is NOT enough — `stageSharpNative` copies everything under
+`node_modules/@img`, and the dlopen shim's discovery (`sharp-addon-dlopen.mjs`, `addonPath()`)
+takes the **first** `sharp-*` directory readdir returns, so `sharp-darwin-arm64` wins over
+`sharp-linuxmusl-x64` and revisions 00001/00002 crash-looped on
+`Exec format error … /app/native/sharp-darwin-arm64/…`. Workaround observed to work: keep ONLY
+the linuxmusl pair in `node_modules/@img` (the text lockfile already pins all platforms) and a
+clean `native/` before `kn-next build`. The shim should prefer the addon matching
+`process.platform`/`process.arch` — belongs to the darwin-staging fix (#949 scope).
+
+### E — ISR on the Redis path · **OBSERVED — GREEN (all six probes)**
+
+Probed through a `kourier-internal` port-forward, Host `rowe-app.default.svc.cluster.local`:
+
+```
+E.1  GET /isr → 200, x-nextjs-cache: MISS,  cache-control: no-store, must-revalidate
+E.2  +2s     → 200, x-nextjs-cache: HIT,   cache-control: s-maxage=30, stale-while-revalidate=31535970
+E.3  +35s (> revalidate=30) → 200, x-nextjs-cache: STALE, same cache-control
+E.4  +3s     → 200, x-nextjs-cache: HIT — and the BODY DIFFERS from E.2's
+     (rendered-at 12:00:25.740Z → 12:01:02.878Z: background regeneration ran)
+E.5  redis-cli --scan on knext-s3-redis → the ISR keys EXIST BY NAME:
+       kn-next:cache:app:0e23b062-…:/isr:html
+       kn-next:cache:app:0e23b062-…:/isr:rsc
+     (+ tag keys kn-next:tag:_N_T_/isr, kn-next:tag:/isr, …; DBSIZE 8 — it was 0 on 9e96881e)
+E.6  TTL kn-next:cache:…:/isr:html → 31,535,986 s (~1 y) — NOT equal to revalidate (30),
+     and > revalidate, so stale-while-revalidate is reachable (the #886 rule holds live)
+```
+
+**vinext registration-failure warn: ABSENT.** Server-log grep for the fallback signature
+(`Class constructor` / `without 'new'` / `MemoryCacheHandler` / falling-back-to-memory) → 0
+matches; every cache line is labelled `(redis)`
+(`[Cache] MISS/SET/HIT/STALE app:…:/isr:html (redis)`).
+
+**Negative half (fail-open): OBSERVED — GREEN.** `kubectl scale deploy/knext-s3-redis
+--replicas=0`, pod gone, then:
+
+```
+GET /api/health → 200 in 20 ms
+GET /isr        → 200 (x-nextjs-cache: MISS, full 7,226-byte body — re-rendered, not a 5xx)
+log: "[CacheHandler] Redis unhealthy, failing open: Connection closed"
+     then [Cache] MISS/SET … (memory)   ← per-pod fallback, exactly the designed degradation
+```
+
+Redis restored to 1 replica afterwards (rollout complete).
+
+**Benign observation (not a blocker):** the runtime warns `REDIS_KEY_PREFIX is unset while
+REDIS_URL is set — falling back to 'kn-next'`. The operator injects `REDIS_URL` but no
+`REDIS_KEY_PREFIX`, so keys land under the `kn-next:` fallback prefix with an app-UUID segment.
+Works, but two apps sharing one Redis rely on the UUID rather than the prefix for separation —
+worth a look when prefix injection is next touched.
+
+### Verdict
+
+Row E moves **RED → OBSERVED GREEN on `df4dd318`**: the sprint-2 NOT-MET ISR clause of exit
+criterion 2 is **MET on the vinext target, kind half** — the scaffold wiring emits, registers,
+writes Redis by name with a TTL outliving the window, serves MISS→HIT→STALE→HIT with real
+regeneration, and fails open when Redis is gone. Remaining for full closure: the OKE half
+(post-merge A7) and the consumer-install path (A-1, npm token #853).
+
+Cluster residue added by this re-observation (deliberate, recorded): NextApp `rowe-app` +
+revisions 00001–00003 in `default` on kind `knext-s3-verify` (deletes are human-gated on this
+machine) — remove via the CR (`nextapp rowe-app` in `default`).
+
