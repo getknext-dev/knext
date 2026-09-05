@@ -19,7 +19,14 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { PER_PATH_THRESHOLDS, THRESHOLDS } from '../scripts/lib/coverage-policy.mjs';
+import { blankNonCode } from '../scripts/lib/blank-non-code.mjs';
+import {
+  activeMetricExceptions,
+  assertEveryMetricAccountedFor,
+  COVERAGE_METRIC_EXCEPTIONS,
+  PER_PATH_THRESHOLDS,
+  THRESHOLDS,
+} from '../scripts/lib/coverage-policy.mjs';
 import { auditCoverageWiring } from '../scripts/lib/coverage-wiring.mjs';
 
 const REPO_ROOT = resolve(import.meta.dir, '..');
@@ -211,5 +218,98 @@ describe('the thresholds live in exactly one place', () => {
   test('the policy carries the floors the ratchet was set to', () => {
     expect(THRESHOLDS.lines).toBeGreaterThanOrEqual(70);
     expect(PER_PATH_THRESHOLDS[CORE_GLOB].lines).toBeGreaterThanOrEqual(THRESHOLDS.lines);
+  });
+});
+
+describe('the branch/statement loss is a DATED exception, not prose (sprint 2, lane G)', () => {
+  /**
+   * WHAT THIS REPLACES. `docs/benchmarks/coverage-baseline.md` recorded, in
+   * prose, that bun's lcov carries no `BRDA`/`BRF`/`BRH` so branch coverage does
+   * not survive the merge, and that `statements` has no lcov representation at
+   * all. Both floors were therefore dropped. That reasoning was correct and the
+   * decision was right — but a paragraph is not a control. Nothing re-asks the
+   * question, nothing dates it, and `security.md`'s own standard applies: a
+   * documented expectation degrades, and its efficacy is unobservable until it
+   * has already failed. Two metrics stopped being gated, and the only thing
+   * between that and permanence was somebody remembering.
+   *
+   * So it becomes the shape the repo already uses for an accepted Trivy or
+   * npm-audit finding (`precompile-closure.mjs:206-248`): an entry with a
+   * justification, an `added` date and an `expires` date, where an unknown key
+   * THROWS — a typo'd `expiress` is otherwise an exception that never expires
+   * while reading as one that does — and where expiry FAILS CLOSED rather than
+   * quietly resuming the ungated behaviour.
+   */
+  test('branches and statements are both excused, and by name', () => {
+    const metrics = COVERAGE_METRIC_EXCEPTIONS.map((e) => e.metric).sort();
+    expect(metrics).toEqual(['branches', 'statements']);
+  });
+
+  test('every exception carries a justification and both dates', () => {
+    for (const e of COVERAGE_METRIC_EXCEPTIONS) {
+      expect(e.justification.length, `${e.metric}: no justification`).toBeGreaterThan(40);
+      expect(e.added, `${e.metric}: added`).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(e.expires, `${e.metric}: expires`).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(
+        new Date(`${e.expires}T00:00:00Z`).getTime(),
+        `${e.metric}: expires before it was added`,
+      ).toBeGreaterThan(new Date(`${e.added}T00:00:00Z`).getTime());
+    }
+  });
+
+  test('an unexpired exception suppresses its metric', () => {
+    const active = activeMetricExceptions(new Date('2026-09-05T00:00:00Z'));
+    expect([...active].sort()).toEqual(['branches', 'statements']);
+  });
+
+  test('EXPIRY FAILS CLOSED — a lapsed exception stops suppressing', () => {
+    // The whole point. Read at a date past every `expires`, nothing is excused,
+    // so the gate has to fail rather than carry on ungated.
+    const active = activeMetricExceptions(new Date('2099-01-01T00:00:00Z'));
+    expect([...active]).toEqual([]);
+  });
+
+  test('a MISSING expires is rejected — an exception with no clock is not an exception', () => {
+    expect(() =>
+      activeMetricExceptions(new Date(), [
+        { metric: 'branches', justification: 'x'.repeat(50), added: '2026-09-04' },
+      ]),
+    ).toThrow(/expires/);
+  });
+
+  test("a typo'd key THROWS rather than being ignored", () => {
+    // `expiress` would otherwise parse as an entry with no expiry at all — an
+    // exception that never lapses, wearing the appearance of one that does.
+    expect(() =>
+      activeMetricExceptions(new Date(), [
+        {
+          metric: 'branches',
+          justification: 'x'.repeat(50),
+          added: '2026-09-04',
+          expiress: '2026-12-01',
+        },
+      ]),
+    ).toThrow(/expiress/);
+  });
+
+  test('a metric with neither a floor nor a live exception is a FAILURE', () => {
+    // The half that makes the exception mean anything. If `branches` were simply
+    // deleted from the list without a floor appearing, the gate must notice —
+    // otherwise "expired" and "quietly removed" look identical from outside.
+    expect(() => assertEveryMetricAccountedFor({ lines: 77 }, new Set())).toThrow(/branches/);
+  });
+
+  test('a metric excused by a LIVE exception is accounted for', () => {
+    expect(() =>
+      assertEveryMetricAccountedFor(
+        { lines: 77, functions: 74 },
+        new Set(['branches', 'statements']),
+      ),
+    ).not.toThrow();
+  });
+
+  test('the gate script consults the exceptions (the wiring is not decoration)', () => {
+    const source = readFileSync(resolve(REPO_ROOT, 'scripts/check-coverage.mjs'), 'utf8');
+    expect(blankNonCode(source)).toMatch(/assertEveryMetricAccountedFor\s*\(/);
   });
 });

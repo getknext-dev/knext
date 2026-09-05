@@ -17,7 +17,7 @@ A demo Next.js 16 application showcasing the Knative Next.js framework with GCS 
 ```
 
 This command handles everything:
-1. Builds Next.js with `pnpm build`
+1. Builds Next.js with `bun run build`
 2. Runs OpenNext: `npx open-next build`
 3. Syncs static assets to GCS
 4. Builds & pushes Docker image with BUILD_ID tag
@@ -97,13 +97,13 @@ curl -X POST http://localhost:3000/api/cache/invalidate \
 
 ```bash
 # Install dependencies
-pnpm install
+bun install
 
 # Run development server
-pnpm dev
+bun run dev
 
 # Build for production
-pnpm build
+bun run build
 
 # Run OpenNext build
 npx open-next build

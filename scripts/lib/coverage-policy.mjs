@@ -1,3 +1,4 @@
+import { activeExemptions } from './dated-exemptions.mjs';
 /**
  * The coverage policy — ONE definition, read by both consumers (#884).
  *
@@ -112,3 +113,104 @@ export const PER_PATH_THRESHOLDS = {
     functions: 76,
   },
 };
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * DATED EXCEPTIONS for the metrics this shape cannot measure (sprint 2, lane G)
+ *
+ * The module docs above explain, correctly, why `branches` and `statements` are
+ * not gated: bun's lcov carries no `BRDA`/`BRF`/`BRH`, so a branch percentage
+ * over the merge would come from vitest's three collected files, and
+ * `statements` is not an lcov concept at all. That reasoning stands.
+ *
+ * WHAT DID NOT STAND is the form it was recorded in. It was a paragraph — here
+ * and in `docs/benchmarks/coverage-baseline.md` — and a paragraph is not a
+ * control. Nothing re-asked the question, nothing dated it, and by
+ * `security.md`'s own words a documented expectation degrades and its efficacy
+ * is unobservable until it has already failed. Two metrics left the gate and the
+ * only thing standing between that and permanence was somebody remembering.
+ *
+ * So it is now the same dated-exception shape the repo already uses for an
+ * accepted Trivy or npm-audit finding (`precompile-closure.mjs:206-248`), with
+ * the two properties that made that one work:
+ *
+ *   - an UNKNOWN KEY THROWS. A typo'd `expiress` otherwise reads as an entry
+ *     that never expires while looking exactly like one that does — the
+ *     quietest possible way to neuter the clock.
+ *   - EXPIRY FAILS CLOSED. Past `expires`, the metric stops being excused, and
+ *     `assertEveryMetricAccountedFor` then throws because it has neither a floor
+ *     nor a live exception. The gate goes RED and someone has to decide again,
+ *     which is the entire purpose of a date.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** Every metric the gate is expected to have an opinion about. */
+export const GATED_METRICS = Object.freeze(['lines', 'functions', 'branches', 'statements']);
+
+/**
+ * The two metrics excused today, with the clock that forces the re-decision.
+ *
+ * The expiry is deliberately NOT "when bun ships BRDA" — an exception whose
+ * expiry is another project's roadmap never expires. It is a date, and if bun
+ * still emits no branch records on that date the answer is a renewed entry with
+ * a fresh justification, made deliberately, rather than by default.
+ */
+export const COVERAGE_METRIC_EXCEPTIONS = Object.freeze([
+  Object.freeze({
+    metric: 'branches',
+    justification:
+      'bun 1.4.0 lcov emits SF/FNF/FNH/DA/LF/LH and no BRDA/BRF/BRH, so a branch percentage over ' +
+      "the merged report would be computed from vitest's 3 collected files against the whole " +
+      "tree's denominator — the dishonest denominator this gate exists to prevent. Restoring a " +
+      'branch floor needs branch records from the bun side, not a smaller denominator.',
+    added: '2026-09-04',
+    expires: '2026-12-01',
+    note: "Renew with a fresh measurement of bun's lcov output, or land a branch source and a floor.",
+  }),
+  Object.freeze({
+    metric: 'statements',
+    justification:
+      'statements is not an lcov concept at all — the old floor was a v8/istanbul-provider ' +
+      'quantity with no representation in the merged report. There is nothing to lower and ' +
+      'nothing to measure; a floor here would be a number describing a measurement nobody makes.',
+    added: '2026-09-04',
+    expires: '2026-12-01',
+    note: 'Only actionable if the gate gains an istanbul-shaped source; otherwise renew or retire the metric from GATED_METRICS.',
+  }),
+]);
+
+/**
+ * The metrics excused RIGHT NOW. Throws on a malformed or unknown-keyed entry.
+ *
+ * @param {Date} [now]
+ * @param {ReadonlyArray<Record<string, unknown>>} [entries] injectable for tests
+ * @returns {Set<string>}
+ */
+export function activeMetricExceptions(now = new Date(), entries = COVERAGE_METRIC_EXCEPTIONS) {
+  // Delegated to the shared reader (#927). This function used to carry its own
+  // copy of the unknown-key / required-`expires` rules, and the prover lane then
+  // needed the same rules — two copies of a check whose failure mode is silent in
+  // both directions is the copy-instead-of-share defect this repo keeps fixing.
+  return activeExemptions(entries, { field: 'metric', now });
+}
+
+/**
+ * Every gated metric must have EITHER a floor OR a live exception. Throws if not.
+ *
+ * This is what turns the expiry into teeth. Without it, a lapsed exception and a
+ * quietly deleted one are indistinguishable from outside: in both cases the
+ * metric simply is not checked, and the gate stays green.
+ *
+ * @param {Record<string, number>} floors
+ * @param {Set<string>} excused
+ */
+export function assertEveryMetricAccountedFor(floors, excused) {
+  const orphans = GATED_METRICS.filter((m) => floors[m] === undefined && !excused.has(m));
+  if (orphans.length > 0) {
+    throw new Error(
+      `coverage gate: [${orphans.join(', ')}] have neither a floor nor a live dated exception. ` +
+        'An exception in `COVERAGE_METRIC_EXCEPTIONS` has expired (or was removed): either set a ' +
+        'floor now that the metric is measurable, or renew the exception with a fresh ' +
+        'justification and a new `expires`. This is deliberately fail-closed — see ' +
+        'docs/benchmarks/coverage-baseline.md.',
+    );
+  }
+}

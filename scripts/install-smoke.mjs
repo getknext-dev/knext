@@ -485,8 +485,10 @@ try {
     );
   }
   // Both halves. A green build is not the claim; the claim is that the build produces what
-  // knext deploys. The template sets `output: 'standalone'`, and losing that is a SILENT
-  // break — `next build` still exits 0 and the container then has no server to start.
+  // knext deploys. This used to add "the template sets `output: 'standalone'`, and losing
+  // that is a SILENT break" — STALE since ADR-0048: the vinext template deliberately has no
+  // `output` key at all, and its absence is itself guard-tested. The claim survives with a
+  // different subject, asserted below against `.output/server/index.mjs` and `.output/public`.
   //
   // WHERE that server lands is not a constant, and the first cut of this check assumed it
   // was. Next nests the standalone output under the app's path relative to the tracing
