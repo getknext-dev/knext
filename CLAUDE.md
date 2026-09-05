@@ -1,6 +1,7 @@
 # knext — Project Strategy & Hard Rules (canonical)
 
-> This is the persistent source of truth for **direction**. Detailed roadmap: `ROADMAP.md`.
+> This is the persistent source of truth for **direction**. Detailed roadmap:
+> `docs/MATURITY_PLAN.md`.
 > Architect operating discipline: `.claude/rules/architecture.md`. Decisions: `docs/adr/`.
 > Delivery pipeline (plan → TDD → OKE → review → sign-off → merge → **clean up**):
 > `.claude/rules/workflow.md`.
@@ -88,7 +89,13 @@
   **Server Actions** (`'use server'`) for mutations, **generated API routes** (JSON-over-HTTP
   facade). Generated code runs under the **official adapter**, not Vinext.
 
-## 6. Maturity roadmap (see `ROADMAP.md` for detail + exit criteria)
+## 6. Maturity roadmap (see `docs/MATURITY_PLAN.md` for detail + phase exit criteria)
+
+> **Known gap (#742):** this section speaks in **Tiers**; `docs/MATURITY_PLAN.md` speaks in
+> **Phases 0–6**, and **nothing maps them**. Tier A's four contents span several phases and two of
+> them (image optimization, graceful shutdown) are not phases at all — so "Tier-A exit" has no
+> checkable definition, and every deferral anchored to it cannot expire. The mapping is a scoping
+> decision, not a doc edit; #742 carries the inventory of what is anchored to it.
 Phase 0 official-adapter migration (largely done) → **Tier A correctness** (image optimization,
 graceful shutdown, control-plane consolidation, compat-suite gate) → **Tier B platform**
 (security/SBOM, endpoint auth, previews, rollback, skew protection, RUM) → **Tier C edge** (CDN,

@@ -1,8 +1,18 @@
 # knext Maturity Plan (detailed exit criteria)
 
-> **Canonical roadmap + strategy now live in `ROADMAP.md` and `CLAUDE.md`.** This file is the
-> detailed, phase-level exit-criteria companion; its Phases map to the ROADMAP Tiers (see the
-> mapping table at the bottom of `ROADMAP.md`). Architect discipline: `.claude/rules/architecture.md`.
+> **Canonical strategy lives in `CLAUDE.md`.** (This line used to cite a `ROADMAP.md` that does
+> not exist — see #742.) This file is the
+> detailed, phase-level exit-criteria companion.
+>
+> **The Phase → Tier mapping does not exist (#742).** This line used to say the Phases "map to the
+> ROADMAP Tiers (see the mapping table at the bottom of `ROADMAP.md`)" — and `ROADMAP.md` was never
+> written, so the mapping table it pointed at has never existed either. That is why "Tier-A exit"
+> has no checkable meaning: `CLAUDE.md` §6 names Tier A's *contents* (image optimization, graceful
+> shutdown, control-plane consolidation, compat-suite gate), those contents span several Phases
+> below, and two of them are not Phases at all. Writing the mapping is a scoping decision for the
+> maintainer, not a doc edit — it decides when deferred work becomes due.
+>
+> Architect discipline: `.claude/rules/architecture.md`.
 > North star: a **verified** Next.js-on-Knative deployment adapter (open source + official compat
 > suite + Next.js-docs listing) — a narrow adapter, not a general PaaS.
 >
