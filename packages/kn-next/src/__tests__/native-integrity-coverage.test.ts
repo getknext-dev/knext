@@ -94,7 +94,9 @@ describe("readLockfilePackages fails closed on an unparseable lockfile", () => {
         );
 
         const pkgs = readLockfilePackages(lock);
-        const entry = pkgs.get("@img/sharp-linuxmusl-x64");
+        // #954 made this a Map<name, LockedPackage[]> (two versions of one
+        // package can be legitimately pinned); the single entry is [0].
+        const entry = pkgs.get("@img/sharp-linuxmusl-x64")?.[0];
         expect(entry?.version).toBe("0.35.4");
         // The escaped quote survived the JSONC pass — the integrity is intact.
         expect(entry?.integrity).toBe('sha512-ab"cd==');
