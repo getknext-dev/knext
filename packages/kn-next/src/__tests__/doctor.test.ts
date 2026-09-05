@@ -244,6 +244,7 @@ describe("runDoctor — healthy cluster", () => {
             "cert-manager",
             "ingress",
             "image",
+            "app-image",
             "knative",
             "metrics-port",
             "netpol",
@@ -253,6 +254,13 @@ describe("runDoctor — healthy cluster", () => {
             // the test's cwd it reports skip — an informational state, never
             // a failure, and never a reason for a healthy cluster to exit 1.
             if (c.id === "storage-mode") {
+                expect(c.status, `${c.id}: ${c.detail}`).toBe("skip");
+                continue;
+            }
+            // app-image (#952) SKIPs on the healthy fixture because it has no
+            // NextApps deployed — "nothing to verify" is informational, and
+            // deliberately not a pass.
+            if (c.id === "app-image") {
                 expect(c.status, `${c.id}: ${c.detail}`).toBe("skip");
                 continue;
             }
@@ -285,6 +293,7 @@ describe("runDoctor — unreachable cluster degrades to SKIP", () => {
             "cert-manager",
             "ingress",
             "image",
+            "app-image",
             "knative",
             "netpol",
         ]) {
