@@ -348,7 +348,7 @@ describe("kn-next create — the generated package.json is runnable OUTSIDE this
         //
         // The invariant underneath it still matters, so it is asserted here in
         // the form it now takes: vinext cannot see knext's adapter hooks, so the
-        // platform contract — health, `:9091` metrics, SIGTERM drain — is
+        // platform contract — health, `:9464` metrics, SIGTERM drain — is
         // re-provided by a Nitro server entry the app ships. If that entry were
         // missing, the build would still succeed and the pod would fail its
         // probes in the cluster.

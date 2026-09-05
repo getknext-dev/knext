@@ -300,7 +300,7 @@ func ActivateAndGet(namespace, ksvc, path string) (int, string, error) {
 }
 
 // ScrapeAppMetrics curls the app's own `/api/metrics` route (port 3000 inside
-// the app container, NOT the :9091 sidecar) from an ephemeral in-cluster pod and
+// the app container, NOT the :9464 sidecar) from an ephemeral in-cluster pod and
 // returns the Prometheus exposition text. The app URL is the Knative service's
 // cluster-local address. Used to read `kn_next_bytecode_cache_warm_start`.
 func ScrapeAppMetrics(namespace, ksvc string) (string, error) {

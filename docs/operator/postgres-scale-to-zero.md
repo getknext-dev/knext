@@ -317,7 +317,7 @@ livenessProbe:
 Point Prometheus/alerting at `/api/health/deep`, not at the probe path.
 
 **Deep health as a scrapable metric (activity-gated, #348).** The deep verdict
-is also exported on the runtime `:9091` registry as
+is also exported on the runtime `:9464` registry as
 `knext_deep_health_state{app,dependency,state}` (active state=1, others=0), which
 the `KnextDeepHealthStuckWaking` alert keys on to page when a permanent
 connection-level DB outage sits at `waking` past the wake budget (a case

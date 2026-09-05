@@ -136,7 +136,7 @@ describe(`${ENV_VAR}: the operator override, and what an invalid value must not 
     }
   });
 
-  it('caps the :9091 metrics listener small, and FIXED — the knob must not reach it', async () => {
+  it('caps the :9464 metrics listener small, and FIXED — the knob must not reach it', async () => {
     const { resolveMaxRequestBytes } = await loadCapResolver(REPO_ROOT);
     expect(METRICS_MAX_REQUEST_BYTES).toBe(64 * 1024);
     // The metrics listener answers one GET. `KNEXT_MAX_REQUEST_BYTES=0` is an

@@ -116,7 +116,7 @@ wiring). `GoldenSignalMetricsProcessor` (pass to `registerOTel({ spanProcessors 
 turns each inbound HTTP SERVER span into request rate / error rate / latency /
 saturation series; `recordColdStart` / `recordDbWake` bump the cold-start and
 DB-wake counters from the tracing hooks. The metrics live in a core-owned
-registry served on a localhost-only child port; the runtime supervisor's `:9091`
+registry served on a localhost-only child port; the runtime supervisor's `:9464`
 (the operator's scrape target) merges it in. Because they ride the OTel spans,
 they share tracing's default-off gate.
 

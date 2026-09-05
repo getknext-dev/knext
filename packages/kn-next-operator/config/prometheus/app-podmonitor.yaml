@@ -1,13 +1,13 @@
 # Per-app golden-signal metrics (#315).
 #
 # The operator annotates every generated Knative Service with
-# `prometheus.io/scrape=true`, `prometheus.io/port=9091`, `prometheus.io/path=/metrics`
+# `prometheus.io/scrape=true`, `prometheus.io/port=9464`, `prometheus.io/path=/metrics`
 # (see internal/controller/nextapp_controller.go) — the annotation-based scrape
 # that plain Prometheus honors. For a Prometheus OPERATOR setup (which ignores
 # those annotations and discovers targets via CRDs) this PodMonitor makes the
-# same per-app :9091 endpoint discoverable.
+# same per-app :9464 endpoint discoverable.
 #
-# :9091 is the runtime's own metrics endpoint. Since ADR-0048 that is the
+# :9464 is the runtime's own metrics endpoint. Since ADR-0048 that is the
 # compiled single executable's second Bun.serve listener (see `renderMetrics` in
 # packages/kn-next/templates/app/runtime-contract.mjs.hbs), which exports the
 # knext_bunexec_* process, RED and cold-start series. It is the ONLY endpoint
@@ -41,8 +41,8 @@ spec:
     any: true
   podMetricsEndpoints:
     # Knative user-container ports are unnamed in the pod spec, so target the
-    # supervisor metrics port by NUMBER (9091) rather than by port name.
-    - targetPort: 9091
+    # supervisor metrics port by NUMBER (9464) rather than by port name.
+    - targetPort: 9464
       path: /metrics
       interval: 30s
       scheme: http

@@ -8,12 +8,12 @@
 > `bun-exec-alpine-image`) builds the binary, builds `Dockerfile`, runs the container with `/app`
 > holding ONLY the binary + `.output/public` (`.output/server` asserted absent), and probes SSR, a
 > route handler, a **dynamic** page and handler, a 404, a **static asset fetched from the page's own
-> `<script src>`**, the fail-closed `POST /api/cache/invalidate`, and `:9091/metrics`.
+> `<script src>`**, the fail-closed `POST /api/cache/invalidate`, and `:9464/metrics`.
 >
 > **Three** root causes have now been fixed. The third (below) was found by adding that static-asset
 > probe — until then, the shipped image served correct SSR HTML and **500'd every single JS chunk**,
 > so the page rendered and never hydrated. Every earlier verification, including #460's, probed only
-> `/`, `/api/health`, `:9091/metrics` and the auth route, so nothing ever noticed:
+> `/`, `/api/health`, `:9464/metrics` and the auth route, so nothing ever noticed:
 >
 > 1. **Versions / bundling.** `vinext@1.0.0-beta.2` emitted a runtime-CHUNKED server
 >    (`.output/server/index.mjs` a ~7 KB loader that reads route chunks from `.output/server/` at
@@ -97,7 +97,7 @@ suite (a later P3/P4 increment), not by this recipe. When in doubt, use `node`.
 |---|---|
 | `app/` | Minimal App-Router sample: home page, `GET /api/health` (shallow), `GET /slow` (~2s, for the drain test), `POST /api/cache/invalidate` (Bearer-auth, fail-closed), and — added for ADR-0042 A1 — a **dynamic page** `GET /item/[id]` and a **dynamic handler** `GET /api/echo/[slug]`, the dimension the self-containment proof was previously missing. |
 | `Dockerfile` | The reference ship image: `FROM alpine` **+ `apk add libstdc++ libgcc`** (mandatory — see the warning under "Binary size") + the binary + `.output/public`, non-root. |
-| `knext-bun-entry.mjs` | The bespoke **Nitro server entry**. Imports `#nitro/virtual/polyfills` (keeps vinext's routes in the bundle), serves the app through srvx's `serve` (nitro's real request path) with an in-flight-counting middleware, runs a second `Bun.serve` for in-process `:9091` metrics, and owns SIGTERM/SIGINT graceful drain. |
+| `knext-bun-entry.mjs` | The bespoke **Nitro server entry**. Imports `#nitro/virtual/polyfills` (keeps vinext's routes in the bundle), serves the app through srvx's `serve` (nitro's real request path) with an in-flight-counting middleware, runs a second `Bun.serve` for in-process `:9464` metrics, and owns SIGTERM/SIGINT graceful drain. |
 | `runtime-contract.mjs` | Pure, dependency-free contract helpers (Prometheus exposition, fail-closed Bearer guard, drain orchestration + `after()`/waitUntil registry). Shared by the entry **and** the tests, so the binary and the tests enforce identical logic. |
 | `vite.config.ts` | Wires `nitro({ preset: "bun", entry: "./knext-bun-entry.mjs" })` so the build inlines our entry. |
 | `build.sh` | The reproducible `bun install` → `vite build` → `bun build --compile --minify --bytecode` sequence. Parameterised by target arch. |
@@ -108,7 +108,7 @@ suite (a later P3/P4 increment), not by this recipe. When in doubt, use `node`.
 ADR-0036 requires both targets satisfy one contract. This recipe covers:
 
 1. **Health** — shallow `GET /api/health` (no PG/Redis dial).
-2. **Metrics** — Prometheus on **`:9091`, in-process, bound at listen-time** (a
+2. **Metrics** — Prometheus on **`:9464`, in-process, bound at listen-time** (a
    second `Bun.serve`). Hand-rolled exposition (no `prom-client`) to stay
    self-contained and compile-safe.
 3. **SIGTERM/SIGINT graceful drain** — `server.stop()` lets in-flight requests
@@ -196,7 +196,7 @@ Requires [Bun](https://bun.sh) (≥1.3).
 # Run it (operator injects these envs in production). Any cwd works — assets are
 # anchored on the BINARY's own directory — but SHIP the binary and .output/public
 # side by side, in one directory:
-PORT=3000 METRICS_PORT=9091 CACHE_INVALIDATE_TOKEN=changeme \
+PORT=3000 METRICS_PORT=9464 CACHE_INVALIDATE_TOKEN=changeme \
   ./knext-bun-exec-linux-x64
 ```
 
@@ -204,7 +204,7 @@ Then:
 
 - `GET  http://localhost:3000/`                    → the sample page
 - `GET  http://localhost:3000/api/health`          → `{"status":"ok","target":"bun-exec"}`
-- `GET  http://localhost:9091/metrics`             → Prometheus exposition
+- `GET  http://localhost:9464/metrics`             → Prometheus exposition
 - `POST http://localhost:3000/api/cache/invalidate` → **401** without
   `Authorization: Bearer $CACHE_INVALIDATE_TOKEN`, **200** with it
 - `SIGTERM` the process while a `GET /slow` is in flight → it still completes
