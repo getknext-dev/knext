@@ -587,18 +587,39 @@ export function stageStandaloneAssets(cwd: string = process.cwd()): string {
  *    stages into a fresh temp dir outside the repo, and treats the artifact
  *    as READ-ONLY.
  *
- * No `.knext-build` marker is staged for this shape, deliberately. vinext
- * namespaces its chunks under its own generated id (`_next/static/<uuid>/`),
- * which is NOT the deploy tag that `kn-next gc` resolves from revision
- * labels. Marking the uuid prefix would let the GC classify the CURRENT
- * build's assets as reapable while its protection keys never match — an
- * over-delete. Unmarked prefixes are never reaped (fail-safe over-keep);
- * teaching the GC the vinext namespace is tracked follow-up work, not a
- * side effect of staging.
+ * The `.knext-build` marker IS staged here (#892), which it deliberately was
+ * not before: the templates now set
+ * `generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID || null`, so the
+ * vinext static prefix IS the deploy tag, and marker key ≡ protection key ≡
+ * image tag ≡ CR `spec.buildId`. The over-delete that justified staying silent
+ * — marking a UUID the GC's revision-label protection could never match —
+ * cannot be expressed once those keys are the same value by construction.
+ *
+ * **`buildId` is what makes that true, so this function requires it rather than
+ * discovering it.** The write site enforces the equality; it does not trust the
+ * caller to have enforced it. Two failures made that non-negotiable:
+ *
+ *  - `kn-next build` (`build.ts`) uploads assets while exporting NO deploy id
+ *    and creating NO revision. A discovered id there is whatever vinext minted
+ *    — a UUID no `apps.kn-next.dev/build-id` label can ever carry — so the
+ *    marker would make the prefix a prune CANDIDATE that is permanently
+ *    unprotectable. That is the over-delete direction ADR-0011 forbids, on the
+ *    path least likely to be noticed.
+ *  - Discovery itself is unsound: vinext emits `_vinext_fonts/` beside the
+ *    build prefix for any app using `next/font`, so "the single non-reserved
+ *    directory" is not a rule that survives contact with the tree.
+ *
+ * So: **no `buildId` ⇒ no marker** (over-kept forever, the safe direction, with
+ * a warning), and a `buildId` whose prefix is absent ⇒ **throw**, never a
+ * marker written beside the real prefix.
  *
  * @throws when `.output/public` is missing — the app's build has not run.
+ * @throws when `buildId` is given but `_next/static/<buildId>/` is not there.
  */
-export function stageNitroPublicAssets(cwd: string = process.cwd()): string {
+export function stageNitroPublicAssets(
+    cwd: string = process.cwd(),
+    buildId?: string,
+): string {
     const sourceDir = join(cwd, ".output", "public");
 
     if (!existsSync(sourceDir)) {
@@ -607,6 +628,42 @@ export function stageNitroPublicAssets(cwd: string = process.cwd()): string {
                 "(`vite build`, or `kn-next build`) before deploying, or pass " +
                 "--skip-upload to skip the asset upload.",
         );
+    }
+
+    // EVERY refusal happens BEFORE the copy. `mkdtempSync` + `cpSync` duplicate
+    // the whole static tree, and this function's `finally`-based cleanup in
+    // `uploadAssets` keys off the returned staging dir — which a throw never
+    // returns, so a temp dir leaked per failed deploy. That is the exact leak
+    // class the fresh-per-run design fixed for the success path; validating
+    // first means there is nothing to clean up because nothing was created.
+    if (buildId) {
+        // A reserved segment can never be a build-id. The standalone write site
+        // has always refused this; without the same refusal here `--tag chunks`
+        // would write a marker INTO a shared, cross-build prefix and hand the
+        // pruner a licence to reap it — the max-blast-radius over-delete.
+        if (RESERVED_STATIC_DIRS.has(buildId)) {
+            throw new Error(
+                `Refusing to stage a .knext-build marker for "${buildId}": ` +
+                    "that name is a shared static directory (" +
+                    `${[...RESERVED_STATIC_DIRS].sort().join(", ")}), not a ` +
+                    "build prefix. Marking it would let the GC reap assets " +
+                    "every build shares. Use a different deploy tag.",
+            );
+        }
+        const check = verifyVinextStaticPrefix(cwd, buildId);
+        if (!check.ok) {
+            throw new Error(
+                `Refusing to stage a .knext-build marker for "${buildId}": ` +
+                    `.output/public/_next/static/${buildId}/ does not exist ` +
+                    `(${check.reason}${
+                        check.siblings.length
+                            ? `; found ${check.siblings.join(", ")}`
+                            : ""
+                    }). A marker written beside the real prefix names a build ` +
+                    "whose assets are not under it — the GC could reap that " +
+                    "name while the chunks it protects stay unmarked.",
+            );
+        }
     }
 
     // A FRESH temp dir per staging run, OUTSIDE the repo and the docker build
@@ -619,22 +676,95 @@ export function stageNitroPublicAssets(cwd: string = process.cwd()): string {
     const stagingDir = mkdtempSync(join(tmpdir(), "knext-upload-"));
     cpSync(sourceDir, stagingDir, { recursive: true });
 
-    log.warn(
-        "vinext asset prefixes are not marker-staged — this build's " +
-            "_next/static/<id>/ objects will be over-kept (never reaped) by " +
-            "`kn-next gc` until the GC learns the vinext namespace",
-    );
+    // #892 marker, written into the STAGING copy only — the artifact stays
+    // read-only (the concurrent docker build is COPYing it). Already validated
+    // above, before anything was created.
+    if (buildId) {
+        writeFileSync(
+            join(stagingDir, "_next", "static", buildId, BUILD_MARKER_FILENAME),
+            `${buildId}\n`,
+        );
+    } else {
+        log.warn(
+            "No deploy build id for this upload — no .knext-build marker " +
+                "staged, so these objects will be over-kept (never reaped) by " +
+                "`kn-next gc`. Expected for `kn-next build`, which creates no " +
+                "revision: nothing could ever protect the prefix, so marking " +
+                "it would make it reapable but never protectable.",
+        );
+    }
 
     return stagingDir;
 }
 
-export async function uploadAssets(config: StorageBackedConfig): Promise<void> {
+/**
+ * Does `.output/public/_next/static/<expectedId>/` exist? (#892, round 2.)
+ *
+ * The ONE check the deploy lock-step guard and {@link stageNitroPublicAssets}'
+ * marker both call, which is what makes "marker key ≡ protection key" true by
+ * construction rather than by two call sites agreeing today.
+ *
+ * **It verifies a KNOWN id; it does not discover one.** Round 1 discovered "the
+ * single non-reserved first-level directory", and that rule is unsound: vinext
+ * copies fonts into `<assetsDir>/_vinext_fonts/` (`createGoogleFontsPlugin`'s
+ * `writeBundle` hook, `assetsDir` = `_next/static`), so every `next/font` app
+ * has a second candidate and would have been called ambiguous — no marker, and
+ * an aborted deploy, for a naming detail.
+ *
+ * The repo's "prefer scanning to enumerating" rule is why the fix is not simply
+ * `_vinext_fonts` added to the deny-list. Any classify-the-siblings rule needs
+ * an exhaustive list of what vinext may emit beside the build prefix, and
+ * `_vinext_fonts` is the proof that such a list is one someone will be short an
+ * entry on — the next namespace breaks it exactly as this one did. Asking
+ * "is the prefix I built at the id I claim?" has nothing to enumerate, so a
+ * sibling nobody here has seen cannot break it.
+ *
+ * `siblings` is reported for the ERROR MESSAGE only: "expected `t1`, found a
+ * UUID" is a diagnosis, "not found" is not. Nothing branches on it.
+ */
+export type VinextPrefixCheck =
+    | { ok: true }
+    | {
+          ok: false;
+          /** `no-static-root` = no `_next/static` at all. */
+          reason: "no-static-root" | "prefix-missing";
+          /** First-level directories actually present, sorted. Diagnostic only. */
+          siblings: string[];
+      };
+
+export function verifyVinextStaticPrefix(
+    cwd: string,
+    expectedId: string,
+): VinextPrefixCheck {
+    const staticDir = join(cwd, ".output", "public", "_next", "static");
+    if (!existsSync(staticDir)) {
+        return { ok: false, reason: "no-static-root", siblings: [] };
+    }
+    const siblings = readdirSync(staticDir, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name)
+        .sort();
+    // An empty id would scope to the static ROOT — never a valid prefix, and
+    // `siblings.includes("")` is false anyway; this is the explicit form.
+    if (expectedId && siblings.includes(expectedId)) return { ok: true };
+    return { ok: false, reason: "prefix-missing", siblings };
+}
+
+/**
+ * @param buildId this deploy's id. Threaded from the caller rather than read
+ *   back off disk — see {@link stageNitroPublicAssets}. Omitted by
+ *   `kn-next build`, which creates no revision, so its upload is over-kept.
+ */
+export async function uploadAssets(
+    config: StorageBackedConfig,
+    buildId?: string,
+): Promise<void> {
     // Shape dispatch — the builder decides where served assets live, so the
     // staging step must ask (the resolved default, not the raw field: an
     // absent `build` means vinext, ADR-0048).
     const nitroShape = (config.build ?? DEFAULT_BUILDER_ID) === "vinext";
     const assetsDir = nitroShape
-        ? stageNitroPublicAssets(process.cwd())
+        ? stageNitroPublicAssets(process.cwd(), buildId)
         : stageStandaloneAssets(process.cwd());
 
     try {
@@ -680,6 +810,22 @@ const STATIC_NS = "_next/static/";
  * fall outside the retain window the GC would reap them, 404ing the CURRENT
  * build's own JS/CSS (over-delete; found while building the e2e_gc suite).
  * Never add a real build-id shape here: deploy tags are user-chosen.
+ *
+ * `_vinext_fonts` is the vinext equivalent: `createGoogleFontsPlugin`'s
+ * `writeBundle` hook copies every `next/font` file into
+ * `<outDir>/<assetsDir>/_vinext_fonts/`, and `assetsDir` is `_next/static`. So
+ * on any app using `next/font` it is a first-level sibling of the build prefix,
+ * shared across builds exactly like `chunks/`.
+ *
+ * **What this list is and is not, since round 1 got it wrong.** It is
+ * defense-in-depth for the PRUNER, layered on top of the marker inversion that
+ * already does the real work: an unmarked prefix is kept regardless, so a
+ * namespace missing from this list is over-KEPT (noisy, safe), never reaped.
+ * It is NOT a way to identify the build prefix — nothing may classify siblings
+ * to find the build id, because that turns a missing entry here into an aborted
+ * deploy. {@link verifyVinextStaticPrefix} exists so the id never has to be
+ * inferred from this list. Enumerating is acceptable here precisely because
+ * being short an entry is harmless.
  */
 const RESERVED_STATIC_DIRS: ReadonlySet<string> = new Set([
     "chunks",
@@ -687,6 +833,7 @@ const RESERVED_STATIC_DIRS: ReadonlySet<string> = new Set([
     "media",
     "webpack",
     "development",
+    "_vinext_fonts",
 ]);
 
 /**

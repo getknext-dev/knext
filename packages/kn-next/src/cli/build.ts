@@ -278,6 +278,16 @@ export async function build(options: BuildOptions = {}) {
     // 3. Upload static assets — only when a storage block is configured.
     if (hasStorage(config)) {
         log.info("Uploading static assets...");
+        // NO build id, deliberately (#892). `kn-next build` exports no
+        // NEXT_DEPLOYMENT_ID and creates no revision, so there is nothing for
+        // the operator to stamp `apps.kn-next.dev/build-id` on and nothing the
+        // asset GC could ever resolve as live. Passing an id here — or letting
+        // the staging code discover one from the tree — would write a
+        // `.knext-build` marker keyed on a value no revision label can carry,
+        // making the prefix a prune CANDIDATE that is permanently
+        // unprotectable: the over-delete direction ADR-0011 forbids. Absent an
+        // id the upload is unmarked and therefore over-kept forever, which is
+        // the safe direction. `uploadAssets` warns about it on every run.
         await uploadAssets(config);
         log.info("Assets uploaded");
     } else {
