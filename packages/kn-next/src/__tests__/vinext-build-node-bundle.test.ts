@@ -184,9 +184,15 @@ describe("bundled `kn-next build` (vinext) under plain Node — #948", () => {
             // The honest half: the real failure is named…
             expect(r.output).toContain("bun --version");
             // …including what the failing bun itself said — captured into the
-            // message, not merely inherited to a terminal (review round 1).
+            // UsageError message, not merely inherited to a terminal (review
+            // rounds 1+2). The "bun's stderr:" prefix is the discriminator:
+            // runNodeBuild merges stdout+stderr, so the bare shim text alone
+            // would ALSO match stderr the child merely inherited, and the
+            // assertion would stay green with the stdio capture deleted. Only
+            // the quoted-into-the-message form carries this prefix
+            // (mutation-proved: deleting the capture reds exactly this line).
             expect(r.output).toContain(
-                "bun exploded before printing a version",
+                "bun's stderr: bun exploded before printing a version",
             );
             // …and the mislabel is gone: bun IS on PATH here.
             expect(r.output).not.toMatch(/not found/i);
