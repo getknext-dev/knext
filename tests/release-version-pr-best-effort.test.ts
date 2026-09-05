@@ -46,6 +46,7 @@ interface Step {
   id?: string;
   uses?: string;
   run?: string;
+  if?: string;
   'continue-on-error'?: unknown;
 }
 
@@ -60,6 +61,16 @@ function isBestEffort(step: Step): boolean {
   if (value === undefined || value === null) return false;
   return value !== false;
 }
+
+/** Index of the first step matching a predicate, or -1. */
+function stepIndex(jobId: string, pred: (s: Step) => boolean): number {
+  return stepsOf(jobId).findIndex(pred);
+}
+
+const isBumpStep = (s: Step): boolean =>
+  typeof s.run === 'string' && s.run.includes('changeset:version');
+const isPrStep = (s: Step): boolean =>
+  typeof s.uses === 'string' && s.uses.includes('changesets/action');
 
 describe('release.yml version-pr: opening the PR is best-effort', () => {
   it('the changesets/action step that opens the PR carries continue-on-error', () => {
@@ -104,6 +115,93 @@ describe('release.yml version-pr: the version bump still fails loudly', () => {
         `the version-bump step "${step.name ?? step.id ?? '(unnamed)'}" is continue-on-error — a broken bump would then be swallowed. The bump must be fail-closed; only the PR-open is best-effort.`,
       ).toBe(false);
     }
+  });
+});
+
+describe('release.yml version-pr: the fail-closed bump runs BEFORE the PR-open (F2)', () => {
+  it('orders the version-bump step before the changesets/action step', () => {
+    // Mutation-proved defect: move the bump AFTER the action and this whole PR
+    // is decoration — the action consumes the changesets first, so the
+    // standalone `changeset version` in the "fail-closed" step then runs with
+    // NONE left, exits 0 vacuously, and validates nothing. Order is the
+    // invariant, so assert it, not just presence.
+    const bumpIdx = stepIndex(VERSION_JOB, isBumpStep);
+    const prIdx = stepIndex(VERSION_JOB, isPrStep);
+    expect(bumpIdx, `\`${VERSION_JOB}\` has no version-bump step`).toBeGreaterThanOrEqual(0);
+    expect(prIdx, `\`${VERSION_JOB}\` has no changesets/action step`).toBeGreaterThanOrEqual(0);
+    expect(
+      bumpIdx < prIdx,
+      `the fail-closed version-bump step must come BEFORE the changesets/action step. If it runs after, the action consumes the changesets first and the standalone \`changeset version\` validates nothing (exits 0 with no changesets), making "fail-closed bump" decoration.`,
+    ).toBe(true);
+  });
+});
+
+describe('release.yml version-pr: a swallowed PUSH failure stays red (gate)', () => {
+  it('has a FAIL-CLOSED step that asserts the version branch was pushed', () => {
+    // `continue-on-error` on the PR-open step swallows the branch push too (the
+    // action pushes changeset-release/main with GITHUB_TOKEN BEFORE opening the
+    // PR). A real push failure must NOT be tolerated as "the org limitation".
+    const gate = stepsOf(VERSION_JOB).find(
+      (s) =>
+        typeof s.run === 'string' &&
+        s.run.includes('git ls-remote') &&
+        s.run.includes('changeset-release/main'),
+    );
+    expect(
+      gate,
+      `\`${VERSION_JOB}\` has no push-integrity gate. The best-effort PR step swallows the branch push failure too; add a step that runs \`git ls-remote --exit-code origin refs/heads/changeset-release/main\` and FAILS when the branch is absent.`,
+    ).toBeDefined();
+    const g = gate as Step;
+    // It must be able to red the job.
+    expect(
+      isBestEffort(g),
+      'the push-integrity gate is continue-on-error — then a swallowed push failure would be swallowed a second time and never red the lane',
+    ).toBe(false);
+    expect(
+      typeof g.run === 'string' && /exit\s+1/.test(g.run),
+      'the push-integrity gate never exits non-zero on a missing branch — it cannot red the lane',
+    ).toBe(true);
+    // It must only run when the best-effort step actually failed (something was
+    // swallowed) — otherwise it either never runs or runs when there is no
+    // branch to expect.
+    expect(
+      String(g.if ?? ''),
+      "the push-integrity gate must be gated on the PR-open step's failure (`steps.changesets.outcome == 'failure'`), so it runs exactly when a push OR a PR-open was swallowed",
+    ).toContain("steps.changesets.outcome == 'failure'");
+  });
+});
+
+describe('release.yml version-pr: the honesty warning never asserts an unverified cause (F1)', () => {
+  it('gates the "open by hand / not a release defect" claim on bump-success AND PR failure', () => {
+    // The bug this prevents: an `else` that fires on `outcome != 'success'`
+    // ALSO fires on `skipped` (bump failed → job red), printing "the version
+    // bump PASSED … not a release defect" on a RED job — the exact inversion
+    // this PR exists to stop. The claim may appear ONLY when the bump actually
+    // succeeded.
+    const nudge = stepsOf(VERSION_JOB).find(
+      (s) =>
+        typeof s.run === 'string' &&
+        s.run.includes('not a release defect') &&
+        /by hand/i.test(s.run),
+    );
+    expect(
+      nudge,
+      `\`${VERSION_JOB}\` has no "open by hand" nudge step to check — the F1 guard would be vacuous`,
+    ).toBeDefined();
+    const cond = String((nudge as Step).if ?? '').replace(/\s+/g, ' ');
+    expect(
+      cond,
+      `the "not a release defect" nudge is not gated on the bump having SUCCEEDED. Without \`steps.bump.outcome == 'success'\` it can fire on a skipped/failed bump and claim the bump passed on a red job.`,
+    ).toContain("steps.bump.outcome == 'success'");
+    // And it must be tied to the PR-open failure, not fired unconditionally.
+    expect(cond, 'the nudge must only fire when the PR-open actually failed').toContain(
+      "steps.changesets.outcome == 'failure'",
+    );
+    // The nudge must NOT be able to red or mask — it is annotation only.
+    expect(
+      /\bexit\s+1\b/.test(String((nudge as Step).run ?? '')),
+      'the nudge step exits 1 — annotation must not red the job; the push-integrity gate is what reds a real failure',
+    ).toBe(false);
   });
 });
 

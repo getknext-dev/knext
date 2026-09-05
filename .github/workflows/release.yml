@@ -185,6 +185,7 @@ jobs:
       # ALSO swallow a genuine version-bump failure — blanket-greening a real
       # defect, which is exactly what this must not do.
       - name: Verify the version bump succeeds (fail-closed)
+        id: bump
         run: |
           set -euo pipefail
           bun run changeset:version
@@ -241,23 +242,52 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # A clear, honest log line so the softened step above does not read as a
-      # silent green. `if: always()` so it runs whether the PR-open succeeded or
-      # hit the org limitation. This step is NOT a gate — it only annotates — so
-      # it must never fail the job (that is what the fail-closed bump step is
-      # for); it emits a warning that names the human follow-up.
-      - name: Report the Version PR outcome
-        if: always()
+      # ── PUSH-INTEGRITY GATE: a swallowed push failure MUST stay red ───────
+      # The `continue-on-error` above swallows more than the PR-create 403. The
+      # action, BEFORE it opens the PR, pushes the `changeset-release/main`
+      # branch with GITHUB_TOKEN (contents:write). So a real push failure —
+      # reduced token scope, new branch protection, a rejected ref — is now
+      # swallowed too, and must NOT be mistaken for the org PR-open limitation.
+      #
+      # This step runs ONLY when the best-effort step above actually failed
+      # (`outcome == 'failure'` — its pre-continue-on-error result). When it
+      # fails, the observable side effect distinguishes the two causes:
+      #   - `changeset-release/main` present on origin  -> the push SUCCEEDED and
+      #     only the PR-open was refused (the org toggle) — tolerated.
+      #   - `changeset-release/main` ABSENT on origin    -> the PUSH failed — a
+      #     real release defect — so FAIL the job.
+      # It has NO continue-on-error, so its `exit 1` reds the lane. On the merge
+      # push (no changesets, action succeeds) `outcome` is 'success' and this is
+      # skipped; if the fail-closed bump step failed, `outcome` is 'skipped' and
+      # this is skipped too (the job is already red at the bump).
+      - name: Assert the version branch was pushed (a real push failure stays red)
+        if: steps.changesets.outcome == 'failure'
         run: |
-          if [ "${{ steps.changesets.outcome }}" = "success" ]; then
-            echo "Version PR step succeeded." >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+          if git ls-remote --exit-code origin refs/heads/changeset-release/main >/dev/null 2>&1; then
+            echo "changeset-release/main is present on origin — the version branch push succeeded; only the PR-open was refused." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "::warning title=Version PR must be opened by hand::The version bump PASSED; opening the Version PR was skipped because GitHub Actions cannot create PRs in getknext-dev (the org toggle is OFF, a human-only setting). Open or refresh the 'chore: version packages' PR by hand. This is an environment limitation, not a release defect."
-            {
-              echo "### Version PR: open by hand"
-              echo "The version bump PASSED. Opening the Version PR failed on the standing org limitation (\`GitHub Actions is not permitted to create or approve pull requests\`), so open/refresh the \`chore: version packages\` PR by hand. Not a release defect."
-            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=Version branch push failed::The version bump PASSED but 'changeset-release/main' is ABSENT on origin — the changesets/action branch push (GITHUB_TOKEN, contents:write) FAILED. That is a real release defect (reduced token scope, branch protection, a rejected ref), NOT the org PR-open limitation. Failing the job."
+            exit 1
           fi
+
+      # ── HONEST NUDGE (only when it is genuinely the org limitation) ───────
+      # Gated so it can NEVER assert a cause it did not verify: it runs only
+      # when the bump SUCCEEDED (`steps.bump.outcome == 'success'`) AND the
+      # PR-open step failed (`steps.changesets.outcome == 'failure'`). The
+      # implicit `success()` on this un-annotated `if:` also requires the
+      # push-integrity gate above to have PASSED — so if the push failed (gate
+      # exited 1) this step is skipped and never prints "not a release defect".
+      # The claim is therefore true by construction: bump passed, branch pushed,
+      # only the PR-open was refused.
+      - name: Report the Version PR must be opened by hand
+        if: steps.bump.outcome == 'success' && steps.changesets.outcome == 'failure'
+        run: |
+          echo "::warning title=Version PR must be opened by hand::The version bump PASSED and 'changeset-release/main' was pushed; only opening the Version PR was refused because GitHub Actions cannot create PRs in getknext-dev (the org toggle is OFF, a human-only setting). Open or refresh the 'chore: version packages' PR by hand. This is an environment limitation, not a release defect."
+          {
+            echo "### Version PR: open by hand"
+            echo "The version bump PASSED and the version branch was pushed. Opening the Version PR was refused by the standing org limitation (\`GitHub Actions is not permitted to create or approve pull requests\`), so open/refresh the \`chore: version packages\` PR by hand. Not a release defect."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # Decide whether `release` should start AT ALL.
   #
