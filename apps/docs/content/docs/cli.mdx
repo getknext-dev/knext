@@ -115,9 +115,19 @@ The build half of `deploy`, on its own: runs the project's build script (`next b
 uploads static assets to the bucket (with no `storage` block, the upload is skipped with a notice;
 assets ship inside the image). It makes **no** cluster writes.
 
+After compiling the single executable, `build` **boots it once** and checks the three things the
+platform depends on: your health path answers `200`, the metrics port serves `/metrics`, and the
+process exits cleanly on `SIGTERM`. Those obligations live in your app's server entry, so an entry
+that was swapped or broken still compiles — this catches it on your machine instead of on the
+cluster, and the error names the obligation that is missing.
+
+The smoke boots a binary built for **your** machine's architecture; the binary that ships in the
+image is built for Linux and is verified separately when the image is built.
+
 | Flag | Notes |
 |---|---|
 | `--skip-next` | Reuse an existing `.next/` build instead of running it again. |
+| `--skip-smoke` | Do not boot the compiled executable. For CI that cannot execute it (a foreign-architecture runner). The build prints a loud warning and the artifact ships unverified. |
 | `-h`, `--help` | Show the usage help. |
 
 ## `kn-next cleanup`

@@ -21,7 +21,7 @@
  * reconciles everything from the NextApp CR emitted by `deploy`.
  */
 
-import { existsSync, writeSync } from "node:fs";
+import { existsSync, rmSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { healBunExportTargets } from "../adapters/standalone-bun-exports";
 import {
@@ -32,6 +32,7 @@ import {
 import { createLogger } from "../utils/logger";
 import { resolveBuildArtifact, standaloneStepsApply } from "./build-artifact";
 import { isEntrypoint } from "./exec";
+import { runPostCompileSmoke } from "./postcompile-smoke";
 import { runProjectBuild } from "./project-build";
 import {
     handleConfigNotFound,
@@ -39,12 +40,109 @@ import {
     loadConfig,
     UsageError,
 } from "./shared";
-import { buildVinextExecutable } from "./vinext-build";
+import {
+    buildVinextExecutable,
+    hostSmokeArch,
+    smokeBinaryPlan,
+} from "./vinext-build";
 
 const log = createLogger({ module: "build" });
 
+/**
+ * The arch the IMAGE ships. `kn-next deploy` builds a linux/amd64 image whose
+ * Dockerfile expects `knext-exec-linux-x64` in the build context.
+ */
+const SHIP_ARCH = "linux-x64";
+
 interface BuildOptions {
     skipNextBuild?: boolean;
+    /**
+     * Skip the post-compile smoke (#894). EXPLICIT only — nothing infers it —
+     * and loud when used, because what it turns off is the one check that the
+     * artifact this build produced can actually serve, scrape, and drain.
+     */
+    skipSmoke?: boolean;
+}
+
+/**
+ * Boot the freshly compiled binary and assert the three RuntimeContract
+ * obligations, or fail the build naming the one that is missing.
+ *
+ * ## Which binary
+ *
+ * Not the one the image ships: that is `bun-linux-x64-musl`, which neither a
+ * darwin host nor a glibc linux host can execute. The issue's two options were
+ * a container run or a host-arch smoke build; this takes the host-arch build,
+ * because a container run would put docker on the critical path of every
+ * `kn-next build`, and because the cross-compiled musl artifact already has a
+ * container gate of its own (`alpine-image.docker-e2e.test.ts`). When the host
+ * IS the ship target, no second compile happens.
+ *
+ * ## What this therefore does NOT prove
+ *
+ * That the SHIPPED binary boots — only that the entry compiled from this
+ * `.output` honours the contract on this machine's arch. The alpine e2e is what
+ * covers the cross-target half, and it is a separate gate on purpose.
+ */
+async function smokeCompiledBinary(
+    config: { healthCheckPath?: string },
+    skipSmoke: boolean,
+): Promise<void> {
+    if (skipSmoke) {
+        // LOUD, and it names what is now unverified rather than merely saying a
+        // step was skipped — "a step was skipped" is ignorable in a build log.
+        log.warn(
+            "⚠️  POST-COMPILE SMOKE SKIPPED (--skip-smoke): the compiled executable was NOT booted, " +
+                "so its health route, its metrics exposition, and its SIGTERM drain are UNVERIFIED. " +
+                "A binary that cannot serve or drain will fail on the cluster instead of here.",
+        );
+        return;
+    }
+
+    const plan = smokeBinaryPlan(SHIP_ARCH, hostSmokeArch());
+    if (!plan.reuseShipBinary) {
+        log.info(
+            { arch: plan.arch },
+            "Compiling a host-arch binary for the post-compile smoke (the ship binary is linux-musl and cannot run here)...",
+        );
+        buildVinextExecutable({
+            cwd: process.cwd(),
+            arch: plan.arch,
+            outFile: plan.outFile,
+            skipViteBuild: true,
+        });
+    }
+
+    const binaryPath = join(process.cwd(), plan.outFile);
+    try {
+        log.info(
+            "Smoking the compiled executable (health, metrics, SIGTERM)...",
+        );
+        const result = await runPostCompileSmoke({
+            binaryPath,
+            cwd: process.cwd(),
+            healthPath: config.healthCheckPath,
+        });
+        log.info(
+            {
+                bootMs: result.bootMs,
+                termMs: result.termMs,
+                health: result.healthStatus,
+                metrics: result.metricsStatus,
+            },
+            "Post-compile smoke passed",
+        );
+    } finally {
+        // The smoke binary is ~60-90 MB of build scratch that nothing ships and
+        // no ignore list covers — neither `.gitignore`'s `knext-exec*` nor the
+        // template `.dockerignore`. Leaving it in the app root is how a blob
+        // gets staged and wedges someone's `git add -A`, and the docker context
+        // grows by that much on every build. `finally`, so a FAILING smoke — the
+        // case where a developer runs the build repeatedly — cleans up too.
+        if (!plan.reuseShipBinary) {
+            rmSync(binaryPath, { force: true });
+        }
+    }
 }
 
 export async function build(options: BuildOptions = {}) {
@@ -161,10 +259,20 @@ export async function build(options: BuildOptions = {}) {
         );
         const binary = buildVinextExecutable({
             cwd: process.cwd(),
-            arch: "linux-x64",
+            arch: SHIP_ARCH,
             skipViteBuild: true, // step 2 (the project's own `vite build`) already produced .output
         });
         log.info({ binary }, "Single executable compiled");
+
+        // 2d. Post-compile RuntimeContract smoke (#894).
+        //     The compile bakes `.output/server/index.mjs` WHATEVER it contains,
+        //     and the obligations the operator depends on — the health route it
+        //     probes, the :9091 exposition the PodMonitor scrapes, the SIGTERM
+        //     drain — live in the app's own entry. So an app that swapped or
+        //     broke that entry compiles, deploys, and never goes Ready. This
+        //     boots the binary and checks all three HERE, before the assets are
+        //     uploaded and long before a cluster sees it.
+        await smokeCompiledBinary(config, options.skipSmoke === true);
     }
 
     // 3. Upload static assets — only when a storage block is configured.
@@ -182,10 +290,10 @@ export async function build(options: BuildOptions = {}) {
     );
 }
 
-const BUILD_HELP = `kn-next build — run the build + asset-upload steps, without deploying
+export const BUILD_HELP = `kn-next build — run the build + asset-upload steps, without deploying
 
 Usage:
-  kn-next build [--skip-next]
+  kn-next build [--skip-next] [--skip-smoke]
 
 Runs the project's build script (\`next build\`, output:'standalone'), heals the
 standalone output, and uploads static assets to the configured bucket. It makes
@@ -193,6 +301,10 @@ NO cluster writes — \`kn-next deploy\` is what hands the app to the operator.
 
 Options:
   --skip-next           Reuse an existing .next/ build instead of running it again
+  --skip-smoke          Do NOT boot the compiled executable to check its health
+                        route, metrics port, and SIGTERM drain. For CI that
+                        cannot execute the binary (a foreign-arch runner). The
+                        artifact ships UNVERIFIED and the build says so loudly.
   -h, --help            Show this help
 `;
 
@@ -212,8 +324,9 @@ export async function buildMain(argv: readonly string[]): Promise<number> {
         writeSync(1, BUILD_HELP);
         return 0;
     }
+    const KNOWN = new Set(["--skip-next", "--skip-smoke"]);
     for (const a of argv) {
-        if (a !== "--skip-next") {
+        if (!KNOWN.has(a)) {
             throw new UsageError(
                 a.startsWith("-")
                     ? `unknown flag "${a}" (see kn-next build --help)`
@@ -221,7 +334,10 @@ export async function buildMain(argv: readonly string[]): Promise<number> {
             );
         }
     }
-    await build({ skipNextBuild: argv.includes("--skip-next") });
+    await build({
+        skipNextBuild: argv.includes("--skip-next"),
+        skipSmoke: argv.includes("--skip-smoke"),
+    });
     return 0;
 }
 

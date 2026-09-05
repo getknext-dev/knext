@@ -25,6 +25,7 @@ import {
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { VinextBuildOptions } from "../cli/vinext-build";
 
 const runQuiet = (() => mock())();
 mock.module("../cli/exec", () => ({ runQuiet, isEntrypoint: () => false }));
@@ -46,11 +47,37 @@ mock.module("../adapters/standalone-bun-exports", () => ({
     healBunExportTargets,
 }));
 
-const buildVinextExecutable = (() => mock(() => "knext-exec-linux-x64"))();
+// TYPED signature: an untyped `mock()` infers `calls` as `[]`, so reading
+// `calls[n][0].arch` in `shipCompiles()` below is a TS2493 under the PACKAGE
+// typecheck (`bun run --filter @getknext/core typecheck`). The root typecheck
+// excludes `packages/`, so it never sees it.
+const buildVinextExecutable = (() =>
+    mock((_opts: VinextBuildOptions): string => "knext-exec-linux-x64"))();
 const __knextRealVinext = { ...(await import("../cli/vinext-build")) };
 mock.module("../cli/vinext-build", () => ({
     ...__knextRealVinext,
     buildVinextExecutable,
+}));
+
+// The post-compile smoke (#894) BOOTS the compiled binary, and these cases mock
+// the compile — so without this the smoke would spawn a path that was never
+// produced and fail every vinext case here. Its own coverage is
+// `postcompile-smoke.test.ts` (behaviour) + `postcompile-smoke-wiring.test.ts`
+// (that build() calls it, fail-closed).
+const runPostCompileSmoke = (() =>
+    mock(async () => ({
+        appPort: 1,
+        metricsPort: 2,
+        healthStatus: 200,
+        metricsStatus: 200,
+        exitCode: 0,
+        bootMs: 1,
+        termMs: 1,
+    })))();
+const __knextRealSmoke = { ...(await import("../cli/postcompile-smoke")) };
+mock.module("../cli/postcompile-smoke", () => ({
+    ...__knextRealSmoke,
+    runPostCompileSmoke,
 }));
 
 import { build } from "../cli/build";
@@ -92,6 +119,10 @@ afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
 });
 
+/** The compiles that target the SHIPPED arch, ignoring any host-arch smoke one. */
+const shipCompiles = () =>
+    buildVinextExecutable.mock.calls.filter((c) => c[0]?.arch === "linux-x64");
+
 describe("build()", () => {
     it("skips the heal and uploads assets when no standalone dir exists (turbopack)", async () => {
         loadConfig.mockResolvedValue(cfg());
@@ -130,7 +161,12 @@ describe("build()", () => {
 
         await build({ skipNextBuild: true });
 
-        expect(buildVinextExecutable).toHaveBeenCalledTimes(1);
+        // Exactly ONE ship compile. Not "one compile": since #894 a host whose
+        // arch differs from the ship target gets a SECOND, host-arch compile so
+        // the post-compile smoke has something it can actually execute, and a
+        // bare call count would make this case pass or fail by which machine
+        // ran it.
+        expect(shipCompiles()).toHaveLength(1);
         expect(buildVinextExecutable).toHaveBeenCalledWith(
             expect.objectContaining({
                 arch: "linux-x64",
@@ -152,7 +188,7 @@ describe("build()", () => {
         await build({ skipNextBuild: true });
 
         expect(healBunExportTargets).not.toHaveBeenCalled();
-        expect(buildVinextExecutable).toHaveBeenCalledTimes(1);
+        expect(shipCompiles()).toHaveLength(1);
         expect(uploadAssets).toHaveBeenCalledTimes(1);
     });
 });
