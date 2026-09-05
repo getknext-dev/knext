@@ -10,9 +10,10 @@ import {
   rmSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join, resolve } from 'node:path';
+import { basename, extname, join, resolve } from 'node:path';
 import { parse } from 'yaml';
 import { blankNonCode } from '../scripts/lib/blank-non-code.mjs';
+import { COMMENT_PREFIX } from '../scripts/lib/mutation-harness.mjs';
 import {
   activeGuardProverExemptions,
   activeProverAuditExemptions,
@@ -1170,5 +1171,56 @@ describe('#927 SE-3 — every sprint-1 guard has a prover OR a dated exemption',
     for (const e of GUARD_PROVER_EXEMPTIONS) {
       expect(`${e.note ?? ''}`, `${e.guard} cites no tracking issue`).toMatch(/#\d+/);
     }
+  });
+});
+
+describe('#942 F5 — every prover subject is MARKABLE, asserted at PR time', () => {
+  /**
+   * THE CLASS THIS CLOSES. `mutate()` throws BEFORE writing when a subject's
+   * extension is in no COMMENT_PREFIX entry and the call passes no explicit
+   * `commentPrefix` — so the prover dies mid-sweep with everything before it
+   * already reported. The release-lane prover lived in exactly that state for
+   * weeks after #912 repointed mutation 21 at bun.lock: the PR-time audits were
+   * green (the file existed, the anchor matched once) because the miss was
+   * neither of the two things they check, and `declared==run` was cited as
+   * proved off runs that stopped at 20 of 22. The nightly is the wrong speed
+   * for that discovery; this is the review-speed half.
+   *
+   * WHAT IT ASSERTS, per prover: every path binding (const reads, snapshot()
+   * targets, driver `subjects` entries) whose extension is NOT in
+   * COMMENT_PREFIX requires the prover to pass `commentPrefix` somewhere in
+   * CODE (not prose — the source is blanked first). Deliberately coarse:
+   * prover-level, not per-call, because statically pairing each mutate() with
+   * its options object is the enumeration trap. The coarse form still catches
+   * the incident shape — a prover mutating an unmappable subject with NO
+   * escape hatch anywhere — and the fix message pushes toward the durable
+   * repair (add the extension to COMMENT_PREFIX) rather than the local one.
+   */
+  const provers = discoverProvers(REPO_ROOT);
+
+  it('non-vacuity: the extension map itself covers the workhorse types', () => {
+    // If COMMENT_PREFIX ever shrank to nothing, every per-prover check below
+    // would demand `commentPrefix` everywhere or nothing — either way, noise.
+    for (const ext of ['.ts', '.mjs', '.yml', '.lock', '.json']) {
+      expect(ext in COMMENT_PREFIX, `COMMENT_PREFIX lost ${ext}`).toBe(true);
+    }
+  });
+
+  it.each(provers.map((p) => p.relPath))('%s can mark every subject it mutates', (relPath) => {
+    const prover = provers.find((p) => p.relPath === relPath);
+    if (!prover) throw new Error(`prover ${relPath} vanished mid-run`);
+    const src = read(prover.absPath);
+    const unmappable = proverPathBindings(src)
+      .map((b) => b.path)
+      .filter((path) => !(extname(path).toLowerCase() in COMMENT_PREFIX));
+    if (unmappable.length === 0) return;
+    expect(
+      blankNonCode(src).includes('commentPrefix'),
+      `${relPath} touches ${unmappable.join(', ')}, whose extension has no COMMENT_PREFIX ` +
+        'entry, and never passes an explicit commentPrefix — mutate() will THROW mid-sweep at ' +
+        'run time, which is how the release-lane prover silently stopped at 21/22 (#942 F5). ' +
+        'Prefer adding the extension to COMMENT_PREFIX in scripts/lib/mutation-harness.mjs; ' +
+        'pass { commentPrefix } only when the comment syntax is genuinely file-specific.',
+    ).toBe(true);
   });
 });

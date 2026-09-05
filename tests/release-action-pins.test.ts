@@ -50,7 +50,13 @@ const EXPECTED_ACTIONS: ReadonlySet<string> = new Set([
   'actions/checkout',
   'actions/setup-node',
   'actions/upload-artifact',
-  'pnpm/action-setup',
+  // #926: the publish path installs with bun (the workspace's lockfile is
+  // bun.lock — `pnpm install --frozen-lockfile` cannot run at all without
+  // pnpm-lock.yaml, which is what killed the lane). Same scope argument as the
+  // action it replaces: setup-bun runs in jobs where a registry-write
+  // credential is in scope, so it is SHA-pinned and Dependabot-bumped exactly
+  // like every other entry here. pnpm/action-setup left with the lockfile.
+  'oven-sh/setup-bun',
   'changesets/action',
 ]);
 
@@ -65,14 +71,14 @@ const EXPECTED_ACTIONS_BY_FILE: Record<(typeof PINNED_WORKFLOWS)[number], Readon
     'actions/checkout',
     'actions/setup-node',
     'actions/upload-artifact',
-    'pnpm/action-setup',
+    'oven-sh/setup-bun',
     'changesets/action',
   ]),
   'release-ghp.yml': new Set([
     'actions/checkout',
     'actions/setup-node',
     'actions/upload-artifact',
-    'pnpm/action-setup',
+    'oven-sh/setup-bun',
   ]),
 };
 

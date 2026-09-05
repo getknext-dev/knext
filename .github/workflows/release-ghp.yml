@@ -63,14 +63,16 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       - name: Build publishable packages
-        run: pnpm --filter @getknext/lib build && pnpm --filter @getknext/db build && pnpm --filter @getknext/core build
+        run: bun run --filter @getknext/lib build && bun run --filter @getknext/db build && bun run --filter @getknext/core build
 
       - name: Audit published production closure + generate SBOMs
         run: node scripts/audit-published.mjs
@@ -107,17 +109,19 @@ jobs:
           registry-url: 'https://npm.pkg.github.com'
           scope: '@getknext-dev'
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       # Build in dependency order: @getknext/lib, then @getknext/db (depends on lib;
       # holds the `kn-next db migrate` runner, #242), then @getknext/core (which
       # type-imports both @getknext/lib and @getknext/db at build time).
       - name: Build publishable packages
-        run: pnpm --filter @getknext/lib build && pnpm --filter @getknext/db build && pnpm --filter @getknext/core build
+        run: bun run --filter @getknext/lib build && bun run --filter @getknext/db build && bun run --filter @getknext/core build
 
       # Stage renamed copies into .ghp-staging/{lib,db,core}. Fails LOUDLY if any
       # staged package's dist no longer contains the externalized imports for one
