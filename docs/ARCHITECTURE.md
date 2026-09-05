@@ -410,7 +410,7 @@ sequenceDiagram
     A->>AS: report demand
     AS->>P: scale 0 → 1
     Note over P: image pull — ~0 s cached / ~2 s uncached (run 18)
-    Note over P: process boot + code-cache deserialize + :9091 metrics up
+    Note over P: process boot + code-cache deserialize + :9464 metrics up
     P-->>A: Ready (shallow /api/health)
     A->>P: forward buffered request
     P-->>C: 200 — cold ~2–4 s · warm p99 ~285 ms (run 19)

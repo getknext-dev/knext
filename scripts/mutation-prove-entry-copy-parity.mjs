@@ -115,7 +115,7 @@ await prove(
 await prove(
   'the recorded divergence drifts one line further',
   resolve(REPO_ROOT, 'examples/bun-exec/knext-bun-entry.mjs'),
-  'const METRICS_PORT = Number(process.env.METRICS_PORT ?? 9091);',
+  'const METRICS_PORT = Number(process.env.METRICS_PORT ?? 9464);',
   'const METRICS_PORT = Number(process.env.METRICS_PORT ?? 9092);',
   /examples\/bun-exec\/knext-bun-entry\.mjs is a RECORDED divergence whose bytes changed/,
 );

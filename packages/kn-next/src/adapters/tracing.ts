@@ -429,7 +429,7 @@ export class ColdStartSpanProcessor implements KnextSpanProcessor {
     private emitted = false;
     /**
      * Optional Prometheus emitter (#315). When supplied, the FIRST-request wake
-     * is ALSO recorded as a `knext_coldstart_*` metric on the core :9091
+     * is ALSO recorded as a `knext_coldstart_*` metric on the core :9464
      * registry, not only as a span. Kept optional so #317's tracing-only wiring
      * (and its tests) is unchanged and this module stays prom-client-free unless
      * the runtime passes an emitter.

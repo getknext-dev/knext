@@ -56,15 +56,15 @@ is **not** a hand-applied or CLI-generated manifest).
   pod, equal to the NextApp name. The policy therefore targets the app's serving pods.
 - **policyTypes:** `Ingress`.
 - **Ingress rules (three, each port-scoped since ADR-0044):**
-  1. **Serving + metrics ports** (`8012`, `8013`, `8112`, `9090`, `9091`) from a
+  1. **Serving + metrics ports** (`8012`, `8013`, `8112`, `9090`, `9464`) from a
      `namespaceSelector` matching `kubernetes.io/metadata.name in (knative-serving, kourier-system)`
      — the Knative serving system (the activator handles scale-from-zero) and the Kourier ingress
      gateway. This keeps scale-from-zero traffic flowing.
-  2. **Metrics ports only** (`9090`, `9091`) from an empty `podSelector` (`{}`) — same-namespace pods
+  2. **Metrics ports only** (`9090`, `9464`) from an empty `podSelector` (`{}`) — same-namespace pods
      (a `NamespaceSelector`-nil peer matches the policy's own namespace). Narrowed from "all ports"
      by ADR-0044: a co-resident pod reaching the app's container port would bypass the queue-proxy,
      and a co-resident *zone* calling another zone's pods synchronously breaks the SCS contract.
-  3. **The app metrics port only** (`9091`) from any namespace **labelled**
+  3. **The app metrics port only** (`9464`) from any namespace **labelled**
      `knext.dev/metrics-scrape=true` (#735). Without this, the operator's own shipped `PodMonitor` —
      which scrapes with `namespaceSelector: any` — was denied on every policy-enforcing CNI.
 
@@ -75,7 +75,7 @@ is **not** a hand-applied or CLI-generated manifest).
 
   **Honest scope of rule 3.** It is namespace RBAC, not a per-app privilege boundary: the label is on
   a cluster-scoped Namespace, so the grantor is whoever holds `update namespaces`, and once labelled
-  *every* pod in that namespace — not only Prometheus — can scrape `9091` on *every* knext app. There
+  *every* pod in that namespace — not only Prometheus — can scrape `9464` on *every* knext app. There
   is no `PodSelector` because the operator cannot know a user's Prometheus labels. **A second
   NetworkPolicy cannot narrow this** — policies are additive, so they union allow-rules; the only
   narrowing lever is `spec.security.networkPolicy: false` plus a bring-your-own policy. See
@@ -115,7 +115,7 @@ network, or readiness probes can fail.
   object shape — envtest has no CNI and no dataplane, so it can only assert what was written. The
   drill asserts: a same-namespace pod is refused on the app's container port, admitted on metrics; an
   **unlabelled** namespace is refused cross-namespace (asserted *first*, so the label demonstrably
-  grants something); the same namespace **labelled** is admitted on `9091` but still refused on the
+  grants something); the same namespace **labelled** is admitted on `9464` but still refused on the
   container port; and — the mutation — deleting the policy makes the container port reachable again,
   proving the refusal was the policy's doing.
 - **out-of-cluster blocked (manual check, requires an enforcing CNI):** on a kind/real cluster with a

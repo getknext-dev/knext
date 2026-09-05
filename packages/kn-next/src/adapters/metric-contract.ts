@@ -19,12 +19,12 @@
  * collapsing them is what let the drift hide:
  *
  *   bunexec      the compiled single-executable runtime (ADR-0048). This is the
- *                ONLY emitter the shipped PodMonitor scrapes (:9091 /metrics),
+ *                ONLY emitter the shipped PodMonitor scrapes (:9464 /metrics),
  *                so it is the only one a turnkey alert can rely on.
  *   operator     the Go controller's own /metrics.
  *   node-legacy  the prom-client registries reachable only through an app-level
  *                `/api/metrics` route (the pre-ADR-0048 node-server supervisor
- *                merged these onto :9091; the compiled binary does not). REAL
+ *                merged these onto :9464; the compiled binary does not). REAL
  *                series, but NOT on the shipped scrape path — referencing one
  *                is a declared choice, never the default.
  *   external     kube-state-metrics, `up`, k6/OTel. Not ours; allowlisted with

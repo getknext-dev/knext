@@ -1145,17 +1145,11 @@ export const GUARD_PROVER_EXEMPTIONS = Object.freeze([
     expires: '2026-11-01',
     note: 'Tracked by #928.',
   }),
-  Object.freeze({
-    guard: 'packages/kn-next/src/__tests__/cache-handler-isr-staleness.test.ts',
-    justification:
-      '#906 ISR under vinext. Deferred for BUDGET, not conflict: the round-1 claim that a sibling ' +
-      'PR owned cache-handler.js was checked and is false, and saying so is the point — an ' +
-      'exemption resting on a wrong reason is worse than none. It is the strongest remaining ' +
-      'candidate and should be written first.',
-    added: '2026-09-04',
-    expires: '2026-11-01',
-    note: 'Tracked by #928. Highest priority of the four.',
-  }),
+  // #906 (`cache-handler-isr-staleness.test.ts`) was the fourth entry — the
+  // highest-priority of the four. Removed 2026-09-05 in the same commit that
+  // committed its prover (`scripts/mutation-prove-isr-staleness.mjs`, sprint-3
+  // A5): a guard that is proven must not also be excused, and the SE-3 check
+  // asserts exactly that.
 ]);
 
 /** Provers currently excused from the liveness audit. Throws on a malformed entry. */

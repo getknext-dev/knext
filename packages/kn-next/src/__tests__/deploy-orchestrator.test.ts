@@ -83,6 +83,11 @@ const getAssetPrefix = mock<AnyFn>(() => "https://cdn.example.com/_next");
 // the confirmed upload-ok-then-push-failed leg to reclaim EXACTLY this run's
 // `<app>/_next/static/<BUILD_ID>/` prefix (NOT runAssetGC / pruneOldBuilds).
 const reclaimBuildPrefix = mock<AnyFn>();
+// T2a: the vinext leg of the lock-step guard asks whether the prefix this
+// deploy claims to have built EXISTS, through THIS seam (the same one the #892
+// marker write asks). Stubbed so the branches are drivable without a real
+// `.output` tree.
+const verifyVinextStaticPrefix = mock<AnyFn>(() => ({ ok: true }));
 
 const __knextReal1 = { ...(await import("../utils/asset-upload")) };
 mock.module("../utils/asset-upload", () => ({
@@ -91,6 +96,8 @@ mock.module("../utils/asset-upload", () => ({
     uploadAssets: (...a: unknown[]) => uploadAssets(...a),
     getAssetPrefix: (...a: unknown[]) => getAssetPrefix(...a),
     reclaimBuildPrefix: (...a: unknown[]) => reclaimBuildPrefix(...a),
+    verifyVinextStaticPrefix: (...a: unknown[]) =>
+        verifyVinextStaticPrefix(...a),
 }));
 
 const renderNextAppCR = mock<AnyFn>(() => "kind: NextApp\n");
@@ -112,6 +119,21 @@ const runAssetGC = mock<AnyFn>(() => ({ pruned: true }));
 // itself is covered by cr-prune-preflight.test.ts + deploy-preflight-ordering.test.ts.
 mock.module("../cli/schema/kubectl-capture", () => ({
     captureKubectl: () => ({ ok: true, stdout: "", stderr: "" }),
+}));
+
+// T2d: the override warning is only observable through the logger, and pino
+// writes through sonic-boom on a raw fd — patching `process.stderr.write`
+// captures nothing (measured). Same module mock `deploy-no-storage` uses.
+const logWarn = mock<AnyFn>();
+mock.module("../utils/logger", () => ({
+    createLogger: () => ({
+        info: mock(),
+        warn: (...a: unknown[]) => logWarn(...a),
+        error: mock(),
+        debug: mock(),
+        fatal: mock(),
+        trace: mock(),
+    }),
 }));
 
 mock.module("../cli/gc", () => ({
@@ -249,6 +271,8 @@ beforeEach(() => {
     loadConfig.mockResolvedValue(baseConfig);
     // Skew guard reads .next/BUILD_ID — default: match the tag we pass.
     readFileSyncMock.mockReturnValue("deploytag");
+    // ...and on the vinext leg, the built prefix — default: it is there.
+    verifyVinextStaticPrefix.mockReturnValue({ ok: true });
 });
 
 afterEach(() => {
@@ -290,7 +314,19 @@ describe("deploy() happy-path ordering", () => {
     });
 });
 
-describe("deploy() skew guard (ADR-0011 / #93)", () => {
+/** Did the mutating `kubectl apply` run? */
+function applied(): boolean {
+    return runInherit.mock.calls.some(
+        (c) => argvOf(c)[0] === "kubectl" && argvOf(c)[1] === "apply",
+    );
+}
+
+/** The standalone (turbopack) leg — `.next/BUILD_ID` is the built id there. */
+const standaloneConfig = { ...baseConfig, build: "turbopack" as const };
+
+describe("deploy() skew guard — standalone leg (ADR-0011 / #93)", () => {
+    beforeEach(() => loadConfig.mockResolvedValue(standaloneConfig));
+
     it("THROWS and aborts BEFORE apply when .next/BUILD_ID != deploy tag", async () => {
         setArgv(["deploy", "--tag", "deploytag"]);
         // BUILD_ID on disk is a different (random) id → mismatch.
@@ -299,12 +335,7 @@ describe("deploy() skew guard (ADR-0011 / #93)", () => {
         const deploy = await importDeploy();
 
         await expect(deploy()).rejects.toThrow(/BUILD_ID/);
-
-        // The mutating apply must NEVER have run.
-        const applied = runInherit.mock.calls.some(
-            (c) => argvOf(c)[0] === "kubectl" && argvOf(c)[1] === "apply",
-        );
-        expect(applied).toBe(false);
+        expect(applied()).toBe(false);
     });
 
     it("WARNS and PROCEEDS to apply when .next/BUILD_ID is MISSING (ENOENT)", async () => {
@@ -322,11 +353,195 @@ describe("deploy() skew guard (ADR-0011 / #93)", () => {
 
         // ENOENT is swallowed (warn) — deploy continues to the apply.
         await expect(deploy()).resolves.toBeUndefined();
+        expect(applied()).toBe(true);
+    });
+});
 
-        const applied = runInherit.mock.calls.some(
-            (c) => argvOf(c)[0] === "kubectl" && argvOf(c)[1] === "apply",
+/**
+ * T2a — the vinext leg of the SAME guarantee. vinext writes no
+ * `.next/BUILD_ID`, so the pre-T2a guard hit ENOENT and warn-skipped on EVERY
+ * vinext deploy: a control reporting success while inert, in the exact place
+ * ADR-0011's guarantee lives. The built id here is the static prefix, and the
+ * check FAILS LOUDLY in every branch — including the one that used to skip.
+ */
+describe("deploy() skew guard — vinext leg (T2a)", () => {
+    // baseConfig sets no `build`, which resolves to vinext (ADR-0048), and it
+    // HAS a storage block — so the guard's subject exists.
+
+    it("PROCEEDS to apply when the built prefix IS the deploy tag", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        verifyVinextStaticPrefix.mockReturnValue({ ok: true });
+
+        const deploy = await importDeploy();
+        await expect(deploy()).resolves.toBeUndefined();
+        expect(applied()).toBe(true);
+        // It asks about the DEPLOY TAG, not "which directory looks like a
+        // build" — a discovery rule breaks on any next/font app, whose
+        // `_vinext_fonts/` sits right beside the build prefix.
+        expect(verifyVinextStaticPrefix).toHaveBeenCalledWith(
+            expect.any(String),
+            "deploytag",
         );
-        expect(applied).toBe(true);
+    });
+
+    it("THROWS and aborts BEFORE apply when the tag's prefix is absent", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        // The pre-T2a symptom: vinext minted a UUID because the app's Next
+        // config sets no generateBuildId, so nothing was built under the tag.
+        verifyVinextStaticPrefix.mockReturnValue({
+            ok: false,
+            reason: "prefix-missing",
+            siblings: ["1bf62579-a57c-4fec-b3a0-c6ce1c59ff1b", "chunks"],
+        });
+
+        const deploy = await importDeploy();
+        // The error names BOTH the tag it wanted and what it found — "not
+        // found" alone is not a diagnosis.
+        await expect(deploy()).rejects.toThrow(
+            /1bf62579-a57c-4fec-b3a0-c6ce1c59ff1b/,
+        );
+        expect(applied()).toBe(false);
+        expect(uploadAssets).not.toHaveBeenCalled();
+    });
+
+    it("THROWS (never skips) when _next/static is missing entirely", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        verifyVinextStaticPrefix.mockReturnValue({
+            ok: false,
+            reason: "no-static-root",
+            siblings: [],
+        });
+
+        const deploy = await importDeploy();
+        await expect(deploy()).rejects.toThrow(/no-static-root/);
+        expect(applied()).toBe(false);
+    });
+
+    it("--skip-build STILL checks, and reports it as a fixable mistake", async () => {
+        // The case that silently orphans assets — the build is not re-run, so
+        // nothing else can notice the artifact belongs to another deploy. It is
+        // a UsageError because there is a one-word fix (drop the flag), and a
+        // FATAL stack dump would bury that.
+        setArgv(["deploy", "--tag", "deploytag", "--skip-build"]);
+        verifyVinextStaticPrefix.mockReturnValue({
+            ok: false,
+            reason: "prefix-missing",
+            siblings: ["older-tag"],
+        });
+
+        const { UsageError } = await import("../cli/shared");
+        const deploy = await importDeploy();
+        await expect(deploy()).rejects.toBeInstanceOf(UsageError);
+        await expect(deploy()).rejects.toThrow(/--skip-build/);
+        expect(applied()).toBe(false);
+        // ...and nothing was uploaded under the wrong prefix.
+        expect(uploadAssets).not.toHaveBeenCalled();
+    });
+
+    /**
+     * Review round 2: the guard protects the correspondence between the
+     * uploaded PREFIX and the key the GC resolves from a revision label. Where
+     * nothing uploads there is no correspondence to break, and aborting over
+     * the name of a directory inside the image is a hard failure protecting
+     * nothing. Both of these deploys are legitimate and must complete.
+     */
+    describe("is scoped to deploys that actually upload", () => {
+        it("--skip-upload: the guard is not consulted, and the deploy applies", async () => {
+            setArgv(["deploy", "--tag", "deploytag", "--skip-upload"]);
+            // Even with the artifact in the WORST state the guard knows about.
+            verifyVinextStaticPrefix.mockReturnValue({
+                ok: false,
+                reason: "no-static-root",
+                siblings: [],
+            });
+
+            const deploy = await importDeploy();
+            await expect(deploy()).resolves.toBeUndefined();
+            expect(applied()).toBe(true);
+            expect(verifyVinextStaticPrefix).not.toHaveBeenCalled();
+        });
+
+        it("no-storage mode (ADR-0047): the guard is not consulted", async () => {
+            // The real hasStorage is kept in this suite's module mock, so this
+            // exercises the actual predicate rather than a stub of it.
+            const { storage: _dropped, ...noStorage } = baseConfig;
+            loadConfig.mockResolvedValue(noStorage);
+            setArgv(["deploy", "--tag", "deploytag"]);
+            verifyVinextStaticPrefix.mockReturnValue({
+                ok: false,
+                reason: "no-static-root",
+                siblings: [],
+            });
+
+            const deploy = await importDeploy();
+            await expect(deploy()).resolves.toBeUndefined();
+            expect(applied()).toBe(true);
+            expect(verifyVinextStaticPrefix).not.toHaveBeenCalled();
+        });
+    });
+});
+
+/**
+ * T2d — the precedence decision has to be OBSERVABLE, or it is a comment.
+ * knext's build id overrides a colliding `env.NEXT_DEPLOYMENT_ID` in the user's
+ * config, and the user has to be told, because they wrote it expecting it to
+ * take effect.
+ */
+describe("deploy() warns when config.env.NEXT_DEPLOYMENT_ID is overridden (T2d)", () => {
+    /**
+     * Every `log.warn` deploy() emitted for one run, flattened to text.
+     *
+     * Through the logger MODULE mock (the pattern `deploy-no-storage` uses):
+     * pino writes through sonic-boom on a raw fd, so monkey-patching
+     * `process.stderr.write` captures nothing — measured, it returned "".
+     */
+    async function warningsFrom(config: KnativeNextConfig): Promise<string> {
+        loadConfig.mockResolvedValue(config);
+        logWarn.mockClear();
+        const deploy = await importDeploy();
+        await deploy();
+        return logWarn.mock.calls
+            .map((call) => call.map((a) => JSON.stringify(a)).join(" "))
+            .join("\n");
+    }
+
+    it("names the ignored value AND the id that won", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const output = await warningsFrom({
+            ...baseConfig,
+            env: { NEXT_DEPLOYMENT_ID: "user-typed-this" },
+        });
+
+        expect(output).toContain("user-typed-this");
+        expect(output).toContain("deploytag");
+        // Non-vacuity: it is the OVERRIDE being reported, not just any log line
+        // that happens to mention the tag.
+        expect(output).toMatch(/NEXT_DEPLOYMENT_ID/);
+        expect(output.toLowerCase()).toContain("ignoring");
+    });
+
+    it("says NOTHING when the user set no colliding value", async () => {
+        // The other half: a warning that fires on every deploy is noise, and
+        // noise is how the real one gets scrolled past.
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const output = await warningsFrom({
+            ...baseConfig,
+            env: { FEATURE_FLAG_BETA: "on" },
+        });
+        expect(output.toLowerCase()).not.toContain(
+            "ignoring env.next_deployment_id",
+        );
+    });
+
+    it("says nothing when the user's value AGREES with the deploy tag", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const output = await warningsFrom({
+            ...baseConfig,
+            env: { NEXT_DEPLOYMENT_ID: "deploytag" },
+        });
+        expect(output.toLowerCase()).not.toContain(
+            "ignoring env.next_deployment_id",
+        );
     });
 });
 

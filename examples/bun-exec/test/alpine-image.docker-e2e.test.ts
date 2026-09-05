@@ -212,7 +212,7 @@ beforeAll(async () => {
       '--publish',
       `${appPort}:3000`,
       '--publish',
-      `${metricsPort}:9091`,
+      `${metricsPort}:9464`,
       '--env',
       `CACHE_INVALIDATE_TOKEN=${TOKEN}`,
       IMAGE,

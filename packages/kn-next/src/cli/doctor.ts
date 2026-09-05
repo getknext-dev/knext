@@ -17,6 +17,12 @@
  *       KIngress silently skip (routes never program, no error surfaced)
  *   (e) operator-image anonymous pullability — #198: a private ghcr package
  *       ImagePullBackOffs every fresh cluster the quickstart touches
+ *   (e2) APP-image pullability vs the app SA's pull credentials — #952: a
+ *       private app image (OCIR/private GHCR/ECR are the normal targets) with
+ *       no imagePullSecrets on the app SA ImagePullBackOffs on first deploy.
+ *       This reads DEPLOYED NextApps, so it catches the standing
+ *       misconfiguration on the cluster; pre-deploy (fresh namespace, no CR
+ *       yet) it reports "nothing to verify" and the docs page is the guard
  *   (f) Knative Serving installed
  *   (g) the LOCAL kubectl is new enough (>= v1.25) for `--validate=strict` —
  *       the flag `kn-next deploy` passes explicitly on the NextApp CR apply so
@@ -68,6 +74,22 @@ import { excerpt, loadConfig, UsageError } from "./shared";
 
 /** The ingress class net-kourier actually registers a reconciler for (#208). */
 export const KOURIER_INGRESS_CLASS = "kourier.ingress.networking.knative.dev";
+
+/**
+ * Ports Knative serving's queue-proxy (or its data path) owns on every
+ * revision pod (#951). An app's METRICS_PORT override must never land on any
+ * of them. 9091 is CONDITIONAL — queue-proxy binds it for its user-metrics
+ * server only when the request-metrics protocol is prometheus — while the
+ * rest are bound unconditionally. Shared with metrics-port-lockstep.test.ts
+ * so the doctor check and the cross-file port guard cannot disagree on what
+ * "queue-proxy-owned" means.
+ */
+export const QUEUE_PROXY_OWNED_PORTS: ReadonlySet<number> = new Set([
+    8012, 8013, 8022, 8112, 9090, 9091,
+]);
+
+/** The one CONDITIONALLY-bound member of {@link QUEUE_PROXY_OWNED_PORTS}. */
+export const QUEUE_PROXY_USER_METRICS_PORT = 9091;
 
 const OPERATOR_NAMESPACE = "kn-next-operator-system";
 const NEXTAPP_CRD = "nextapps.apps.kn-next.dev";
@@ -131,6 +153,13 @@ export interface DoctorDeps {
      * check (ADR-0047). Defaults to the real cwd loader; tests inject.
      */
     loadAppConfig?: () => Promise<KnativeNextConfig | undefined>;
+    /**
+     * TOTAL time budget for the app-image pullability probes (#952) — the
+     * whole fan-out, not per image, so many dead registries cannot stall
+     * doctor. Images the budget cuts off report "not verified", never a
+     * pass. Defaults to 30s; tests inject 0 to pin the exhausted path.
+     */
+    appImageProbeBudgetMs?: number;
 }
 
 /**
@@ -508,6 +537,13 @@ export async function probeManifest(image: string): Promise<ProbeOutcome> {
 }
 
 const SKIP_UNREACHABLE = "cluster unreachable — check skipped";
+
+/**
+ * User-facing walkthrough for pulling from a private registry (#952): create
+ * the dockerconfigjson Secret, attach it to the app ServiceAccount, redeploy.
+ */
+export const PRIVATE_REGISTRY_DOCS_URL =
+    "https://knext.dev/docs/private-registries";
 
 /**
  * Minimum kubectl CLIENT version for which `--validate=strict` is meaningful.
@@ -1137,6 +1173,301 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
         }
     }
 
+    // (e2, #952) APP image pullability — check (e)'s anonymous-manifest probe,
+    // extended from the operator image to every NextApp's spec.image. The S3-V
+    // evidence: a fresh namespace's first deploy sat in ImagePullBackOff
+    // because the app image lived on a private registry (OCIR/private
+    // GHCR/ECR — the NORMAL targets, not an exotic case) and nothing in the
+    // namespace carried a credential.
+    //
+    // The ONLY carrier that counts for a pass is the app ServiceAccount
+    // (<app>-sa — the SA the operator creates and the revision template
+    // names): pods resolve pull secrets from the SA at pod creation, and the
+    // operator writes imagePullSecrets nowhere else on the revision template.
+    // A dockerconfigjson Secret sitting in the namespace UNATTACHED is dead
+    // weight — it is the exact "created the secret, skipped the attach"
+    // mistake — so it gets its own WARN, never a pass.
+    //
+    // Honest-status shape throughout (#198/#963 precedent): an unreachable
+    // registry, an exhausted probe budget, or an unreadable SA degrades to
+    // "not verified", NEVER to a pass — and attachment PRESENCE is all this
+    // read-only check can see; it never proves the credential actually
+    // authorizes the pull.
+    if (skipAll) {
+        push("app-image", "App image pullable", "skip", SKIP_UNREACHABLE);
+    } else {
+        const apps = deps.kubectl([
+            "kubectl",
+            "get",
+            "nextapps",
+            "--all-namespaces",
+            "-o",
+            "json",
+        ]);
+        const appsInfra = apps.ok ? undefined : infraFailure(apps);
+        if (appsInfra) {
+            push(
+                "app-image",
+                "App image pullable",
+                "error",
+                `${appsInfra.detail} — NextApp image pullability could not be verified`,
+                appsInfra.hint,
+            );
+        } else {
+            // A non-infra list failure (CRD not installed yet) means no
+            // NextApps exist whose images could need pulling.
+            const items = apps.ok
+                ? (safeJson<{
+                      items?: {
+                          metadata?: { name?: string; namespace?: string };
+                          spec?: { image?: string };
+                      }[];
+                  }>(apps.stdout)?.items ?? [])
+                : [];
+            const targets = items.flatMap((i) => {
+                const name = i.metadata?.name;
+                const namespace = i.metadata?.namespace;
+                const image = i.spec?.image;
+                return name && namespace && image
+                    ? [{ name, namespace, image }]
+                    : [];
+            });
+            if (targets.length === 0) {
+                push(
+                    "app-image",
+                    "App image pullable",
+                    "skip",
+                    "no NextApps on this cluster — nothing to verify",
+                );
+            } else {
+                // Evidence buckets; the row's status is the WORST bucket hit
+                // (warn > skip > pass) and the detail names every non-empty
+                // one, so a mixed cluster never hides an app.
+                const notFound: string[] = [];
+                const noCreds: string[] = [];
+                const unattached: string[] = [];
+                const credsUnknown: string[] = [];
+                const withCreds: string[] = [];
+                const anonymous: string[] = [];
+                const unreachable: string[] = [];
+                const unprobed: string[] = [];
+                // Bounded fan-out: unique images only (apps share images), a
+                // small concurrent pool, and a TOTAL time budget — 20 dead
+                // registries must cost seconds, not 20 × the per-fetch
+                // timeout. Images the budget cuts off are "not verified",
+                // never guessed. (In-flight probes are not cancelled — each
+                // is bounded internally — so the overrun past the deadline is
+                // at most one probe's worth, not the whole queue's.)
+                const budgetMs = deps.appImageProbeBudgetMs ?? 30_000;
+                const deadline = Date.now() + budgetMs;
+                const uniqueImages = [...new Set(targets.map((t) => t.image))];
+                if (uniqueImages.length > 3) {
+                    writeSync(
+                        2,
+                        `doctor: probing ${uniqueImages.length} app images for anonymous pullability (bounded, <=${Math.round(budgetMs / 1000)}s total)\n`,
+                    );
+                }
+                const probeCache = new Map<
+                    string,
+                    ProbeOutcome | "budget-exhausted"
+                >();
+                let nextImage = 0;
+                const worker = async () => {
+                    while (nextImage < uniqueImages.length) {
+                        const image = uniqueImages[nextImage];
+                        nextImage += 1;
+                        if (image === undefined) break;
+                        if (Date.now() >= deadline) {
+                            probeCache.set(image, "budget-exhausted");
+                            continue;
+                        }
+                        probeCache.set(image, await deps.probeImage(image));
+                    }
+                };
+                await Promise.all(
+                    Array.from(
+                        { length: Math.min(4, uniqueImages.length) },
+                        worker,
+                    ),
+                );
+                // Namespace Secret listings answer for every app in the
+                // namespace, so cache per namespace.
+                const nsSecretCache = new Map<
+                    string,
+                    "has" | "none" | "unknown"
+                >();
+                for (const t of targets) {
+                    const outcome = probeCache.get(t.image);
+                    const label = `${t.namespace}/${t.name} (${t.image})`;
+                    if (
+                        outcome === "budget-exhausted" ||
+                        outcome === undefined
+                    ) {
+                        unprobed.push(label);
+                        continue;
+                    }
+                    if (outcome === "ok") {
+                        anonymous.push(label);
+                        continue;
+                    }
+                    if (outcome === "not-found") {
+                        notFound.push(label);
+                        continue;
+                    }
+                    if (outcome === "unreachable") {
+                        unreachable.push(label);
+                        continue;
+                    }
+                    // auth-required: the ONLY carrier that counts for a pass
+                    // is the app SA — pods resolve pull secrets from it at
+                    // pod creation, and the operator writes imagePullSecrets
+                    // nowhere else on the revision template.
+                    const sa = deps.kubectl([
+                        "kubectl",
+                        "get",
+                        "serviceaccount",
+                        `${t.name}-sa`,
+                        "-n",
+                        t.namespace,
+                        "-o",
+                        "json",
+                    ]);
+                    let saState: "has" | "none" | "unknown";
+                    if (sa.ok) {
+                        const parsed = safeJson<{
+                            imagePullSecrets?: { name?: string }[];
+                        }>(sa.stdout);
+                        saState =
+                            (parsed?.imagePullSecrets?.length ?? 0) > 0
+                                ? "has"
+                                : "none";
+                    } else {
+                        // A missing SA (operator not yet reconciled) carries
+                        // no credential — that is a fact, not an unknown.
+                        saState =
+                            classifyKubectlFailure(sa.stderr) === "not-found"
+                                ? "none"
+                                : "unknown";
+                    }
+                    // The namespace Secret listing is DIAGNOSTIC only — it
+                    // tells "no credential anywhere" apart from "created the
+                    // Secret, skipped the attach". It can never produce a
+                    // pass, so it is fetched only when the SA verifiably has
+                    // nothing, and it is field-selector-narrowed: no Secret
+                    // payloads are materialized, and RBAC can grant the read
+                    // narrowly.
+                    let nsState: "has" | "none" | "unknown" | undefined;
+                    if (saState === "none") {
+                        nsState = nsSecretCache.get(t.namespace);
+                        if (nsState === undefined) {
+                            const secrets = deps.kubectl([
+                                "kubectl",
+                                "get",
+                                "secrets",
+                                "-n",
+                                t.namespace,
+                                "--field-selector",
+                                "type=kubernetes.io/dockerconfigjson",
+                                "-o",
+                                "name",
+                            ]);
+                            if (secrets.ok) {
+                                nsState =
+                                    secrets.stdout.trim() === ""
+                                        ? "none"
+                                        : "has";
+                            } else {
+                                nsState =
+                                    classifyKubectlFailure(secrets.stderr) ===
+                                    "not-found"
+                                        ? "none"
+                                        : "unknown";
+                            }
+                            nsSecretCache.set(t.namespace, nsState);
+                        }
+                    }
+                    if (saState === "has") {
+                        withCreds.push(
+                            `${label}: imagePullSecrets on ServiceAccount ${t.name}-sa`,
+                        );
+                    } else if (nsState === "has") {
+                        unattached.push(label);
+                    } else if (saState === "none" && nsState === "none") {
+                        noCreds.push(label);
+                    } else {
+                        credsUnknown.push(label);
+                    }
+                }
+                const parts: string[] = [];
+                if (notFound.length > 0) {
+                    // A 404 is AMBIGUOUS anonymously: some registries
+                    // (Artifactory, Harbor) answer 404 rather than 401 for
+                    // private repositories, so "does not exist" would
+                    // false-red every such user. Warn with both readings.
+                    parts.push(
+                        `${notFound.join(", ")}: 404 anonymously — either the image does not exist on its registry (new nodes cannot pull it; pods go ImagePullBackOff) or the registry hides private repositories behind 404 rather than 401 (Artifactory and Harbor do) — verify the image ref, and attach a pull credential if the repository is private (#952)`,
+                    );
+                }
+                if (noCreds.length > 0) {
+                    parts.push(
+                        `${noCreds.join(", ")} is NOT anonymously pullable and NO pull credential is visible — the namespace has no kubernetes.io/dockerconfigjson Secret and the app ServiceAccount lists no imagePullSecrets, so pods will sit in ImagePullBackOff (the registry answers 401/403, e.g. "Anonymous users are only allowed read access") (#952)`,
+                    );
+                }
+                if (unattached.length > 0) {
+                    parts.push(
+                        `${unattached.join(", ")}: a kubernetes.io/dockerconfigjson Secret exists in the namespace but the app ServiceAccount lists no imagePullSecrets — pods resolve pull secrets from the ServiceAccount, NOT from the namespace, so the credential does nothing until attached; attach it, then redeploy (#952)`,
+                    );
+                }
+                if (credsUnknown.length > 0) {
+                    parts.push(
+                        `${credsUnknown.join(", ")} is NOT anonymously pullable and doctor could not verify pull credentials (reading the app ServiceAccount, or the namespace's Secrets, was denied or failed) — treat the image as unpullable until verified`,
+                    );
+                }
+                if (unreachable.length > 0) {
+                    parts.push(
+                        `${unreachable.join(", ")}: registry unreachable (offline?) — pullability not verified`,
+                    );
+                }
+                if (unprobed.length > 0) {
+                    parts.push(
+                        `${unprobed.join(", ")}: not probed (the app-image probe budget ran out) — pullability not verified`,
+                    );
+                }
+                if (withCreds.length > 0) {
+                    parts.push(
+                        `${withCreds.join("; ")} — not anonymously pullable, but a pull credential is attached to the app ServiceAccount (doctor verifies attachment, not that the credential actually authorizes the pull)`,
+                    );
+                }
+                if (anonymous.length > 0) {
+                    parts.push(`${anonymous.join(", ")} anonymously pullable`);
+                }
+                const hasWarn =
+                    notFound.length > 0 ||
+                    noCreds.length > 0 ||
+                    unattached.length > 0 ||
+                    credsUnknown.length > 0;
+                const status: CheckStatus = hasWarn
+                    ? "warn"
+                    : unreachable.length > 0 || unprobed.length > 0
+                      ? "skip"
+                      : "pass";
+                const hint =
+                    noCreds.length > 0 || credsUnknown.length > 0
+                        ? `create the registry credential and attach it to the app ServiceAccount, then redeploy — pull secrets are resolved at pod creation, so patching the SA alone does not rescue a running revision: kubectl create secret docker-registry <name> -n <namespace> --docker-server=… --docker-username=… --docker-password=…; full walkthrough: ${PRIVATE_REGISTRY_DOCS_URL}`
+                        : unattached.length > 0
+                          ? `attach the existing Secret to the app ServiceAccount and redeploy — pull secrets are resolved at pod creation: kubectl patch serviceaccount <app>-sa -n <namespace> --patch '{"imagePullSecrets":[{"name":"<secret>"}]}' (the patch REPLACES the whole imagePullSecrets list — include every entry); full walkthrough: ${PRIVATE_REGISTRY_DOCS_URL}`
+                          : undefined;
+                push(
+                    "app-image",
+                    "App image pullable",
+                    status,
+                    parts.join("; "),
+                    hint,
+                );
+            }
+        }
+    }
+
     // (f) Knative Serving present
     if (skipAll) {
         push("knative", "Knative Serving", "skip", SKIP_UNREACHABLE);
@@ -1172,6 +1503,217 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
                 "fail",
                 `${KSVC_CRD} not found — install Knative Serving + Kourier (see docs/QUICKSTART.md prerequisites)`,
             );
+        }
+    }
+
+    // (h, #951) metrics-port collision with queue-proxy. Knative's queue-proxy
+    // sidecar binds several ports in EVERY revision pod: 8012/8013/8022/8112
+    // and its own metrics port 9090 unconditionally, and :9091 (its
+    // user-metrics server) whenever the serving-wide request-metrics protocol
+    // is prometheus. knext's runtime used to default its own metrics listener
+    // to that same 9091, so on a cluster with request-metrics active the app
+    // lost the port race and crash-looped with EADDRINUSE (S3-V Finding C-2).
+    // The platform default is now :9464; this check exists for the override
+    // path (spec.env.METRICS_PORT — the only port knob a NextApp has; the
+    // operator injects no METRICS_PORT itself) and to teach the constraint
+    // before it costs a debugging session.
+    //
+    // WHICH CONFIG KEY GOVERNS :9091 DEPENDS ON THE SERVING VERSION, and the
+    // first version of this check got it wrong: it keyed on
+    // `metrics.request-metrics-backend-destination` (absent => prometheus),
+    // which serving's OTel migration REPLACED with `request-metrics-protocol`
+    // (absent => ProtocolNone) — vendored serving v0.48.0 does not read the
+    // legacy key at all. Keying on either alone false-reds one era of
+    // clusters. So: read BOTH keys; an explicit "none" on either wins; an
+    // explicit "prometheus" on either means bound; anything else present
+    // means a non-prometheus backend (only prometheus serves :9091); NEITHER
+    // key present — including a NotFound configmap — is "cannot determine",
+    // never silently "bound" (the honest-status shape the netpol check below
+    // uses: an unknowable fact is reported as unknowable, not guessed).
+    if (skipAll) {
+        push(
+            "metrics-port",
+            "Metrics-port collision (queue-proxy :9091)",
+            "skip",
+            SKIP_UNREACHABLE,
+        );
+    } else {
+        const obs = deps.kubectl([
+            "kubectl",
+            "get",
+            "configmap",
+            "config-observability",
+            "-n",
+            "knative-serving",
+            "-o",
+            "json",
+        ]);
+        const obsInfra = obs.ok ? undefined : infraFailure(obs);
+        if (obsInfra) {
+            push(
+                "metrics-port",
+                "Metrics-port collision (queue-proxy :9091)",
+                "error",
+                obsInfra.detail,
+                obsInfra.hint,
+            );
+        } else {
+            // undefined = configmap NotFound (a cluster fact, but one that
+            // leaves the protocol undeterminable, not one that implies it).
+            const data = obs.ok
+                ? (safeJson<{ data?: Record<string, string> }>(obs.stdout)
+                      ?.data ?? {})
+                : undefined;
+            const legacy =
+                data?.["metrics.request-metrics-backend-destination"];
+            const modern = data?.["request-metrics-protocol"];
+            let proto: "prometheus" | "off" | "unknown";
+            let protoWhy: string;
+            if (legacy === "none" || modern === "none") {
+                proto = "off";
+                protoWhy = `${
+                    modern === "none"
+                        ? "request-metrics-protocol"
+                        : "metrics.request-metrics-backend-destination"
+                } is "none" — queue-proxy leaves :9091 unbound`;
+            } else if (modern === "prometheus" || legacy === "prometheus") {
+                proto = "prometheus";
+                protoWhy = `${
+                    modern === "prometheus"
+                        ? "request-metrics-protocol"
+                        : "metrics.request-metrics-backend-destination"
+                } is "prometheus" — queue-proxy binds :9091 for its user-metrics server`;
+            } else if (modern !== undefined || legacy !== undefined) {
+                proto = "off";
+                protoWhy = `request-metrics backend is "${modern ?? legacy}" — only "prometheus" makes queue-proxy bind :9091`;
+            } else {
+                proto = "unknown";
+                protoWhy =
+                    data === undefined
+                        ? "configmap knative-serving/config-observability not found, so the request-metrics protocol cannot be determined"
+                        : "cannot determine whether queue-proxy binds :9091 — neither request-metrics-protocol (serving v0.48+, absent means none) nor metrics.request-metrics-backend-destination (older serving, absent means prometheus) is set, and the default depends on the serving version";
+            }
+
+            const apps = deps.kubectl([
+                "kubectl",
+                "get",
+                "nextapps",
+                "--all-namespaces",
+                "-o",
+                "json",
+            ]);
+            const appsInfra = apps.ok ? undefined : infraFailure(apps);
+            if (appsInfra) {
+                push(
+                    "metrics-port",
+                    "Metrics-port collision (queue-proxy :9091)",
+                    "error",
+                    `${appsInfra.detail} — NextApp METRICS_PORT overrides could not be verified`,
+                    appsInfra.hint,
+                );
+            } else {
+                // A non-infra list failure (CRD not installed yet) means no
+                // NextApps exist to collide; the default-port reasoning below
+                // still holds.
+                const items = apps.ok
+                    ? (safeJson<{
+                          items?: {
+                              metadata?: {
+                                  name?: string;
+                                  namespace?: string;
+                              };
+                              spec?: { env?: Record<string, string> };
+                          }[];
+                      }>(apps.stdout)?.items ?? [])
+                    : [];
+                const pinned = items
+                    .map((i) => ({
+                        app: `${i.metadata?.namespace ?? "?"}/${i.metadata?.name ?? "?"}`,
+                        port: Number.parseInt(
+                            (i.spec?.env?.METRICS_PORT ?? "").trim(),
+                            10,
+                        ),
+                    }))
+                    .filter((p) => Number.isInteger(p.port));
+                // The whole owned set, not the 9091 literal: 9090 (and the
+                // serving ports) are bound UNCONDITIONALLY, so pinning onto
+                // them crash-loops regardless of the request-metrics protocol.
+                const always = pinned.filter(
+                    (p) =>
+                        QUEUE_PROXY_OWNED_PORTS.has(p.port) &&
+                        p.port !== QUEUE_PROXY_USER_METRICS_PORT,
+                );
+                const onUserMetrics = pinned.filter(
+                    (p) => p.port === QUEUE_PROXY_USER_METRICS_PORT,
+                );
+                const names = (l: typeof pinned) =>
+                    l
+                        .map((p) => `${p.app} (METRICS_PORT=${p.port})`)
+                        .join(", ");
+                const remedyHint =
+                    `move METRICS_PORT off the queue-proxy-owned ports ` +
+                    `{8012, 8013, 8022, 8112, 9090, 9091} — knext's default is 9464 and needs no ` +
+                    `override — or, for :9091 only, disable request metrics in configmap ` +
+                    `knative-serving/config-observability (request-metrics-protocol: "none" on ` +
+                    `serving v0.48+, metrics.request-metrics-backend-destination: "none" on older ` +
+                    `releases)`;
+                // HONEST SCOPE for the green paths: a pod still running an
+                // image built before the 9464 default binds :9091 with NO env
+                // override on its CR, which this read-only check cannot see —
+                // so "no collision" is a claim about current builds and
+                // visible overrides, never about every running revision.
+                const imageCaveat =
+                    `apps running images built before the 9464 default bind :9091 with no ` +
+                    `visible override and cannot be detected here — an EADDRINUSE crash-loop on ` +
+                    `such a revision means: redeploy with a current build`;
+                if (always.length > 0) {
+                    push(
+                        "metrics-port",
+                        "Metrics-port collision (queue-proxy :9091)",
+                        "fail",
+                        `${names(always)} pins METRICS_PORT onto a port queue-proxy binds ` +
+                            `UNCONDITIONALLY in every revision pod — the app loses the port race ` +
+                            `and crash-loops with EADDRINUSE (#951)`,
+                        remedyHint,
+                    );
+                } else if (onUserMetrics.length > 0 && proto === "prometheus") {
+                    push(
+                        "metrics-port",
+                        "Metrics-port collision (queue-proxy :9091)",
+                        "fail",
+                        `${protoWhy} on this cluster, and ${names(onUserMetrics)} pins ` +
+                            `METRICS_PORT=9091 — the app loses the port race and crash-loops ` +
+                            `with EADDRINUSE (#951)`,
+                        remedyHint,
+                    );
+                } else if (onUserMetrics.length > 0 && proto === "unknown") {
+                    push(
+                        "metrics-port",
+                        "Metrics-port collision (queue-proxy :9091)",
+                        "warn",
+                        `${protoWhy}; ${names(onUserMetrics)} pins METRICS_PORT=9091 and WILL ` +
+                            `crash-loop with EADDRINUSE if it is bound (#951)`,
+                        remedyHint,
+                    );
+                } else if (proto === "unknown") {
+                    push(
+                        "metrics-port",
+                        "Metrics-port collision (queue-proxy :9091)",
+                        "pass",
+                        `${protoWhy}; no NextApp overrides METRICS_PORT onto a queue-proxy-owned ` +
+                            `port and current builds default to :9464, which queue-proxy never ` +
+                            `binds. Caveat: ${imageCaveat}`,
+                    );
+                } else {
+                    push(
+                        "metrics-port",
+                        "Metrics-port collision (queue-proxy :9091)",
+                        "pass",
+                        `${protoWhy}; no NextApp overrides METRICS_PORT onto a queue-proxy-owned ` +
+                            `port and current builds default to :9464. Caveat: ${imageCaveat}`,
+                    );
+                }
+            }
         }
     }
 
@@ -1324,6 +1866,7 @@ const DOCTOR_HELP = `kn-next doctor — cluster-prereq preflight (read-only)
 
 Checks: NextApp CRD, operator readiness, cert-manager webhook, Knative
 ingress-class vs its reconciler (#208), operator-image pullability (#198),
+app-image pullability vs the namespace's pull credentials (#952),
 Knative Serving, CNI NetworkPolicy enforcement (whether the cluster can\nenforce the operator's default-on policy — on flannel it cannot), and the\nlocal kubectl's --validate=strict support. Exit 1 on
 hard FAILs and on probe ERRORs (a check's kubectl
 probe hit a network/TLS/credential/RBAC failure — the cluster state could not

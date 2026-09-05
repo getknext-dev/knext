@@ -272,7 +272,7 @@ await timeProcess([fixture], 43901, childCwd);
 
 // The ordered boot chain. Intervals are derived from each rep's ABSOLUTE
 // sinceStartMs values rather than from the marks' own sinceLastMs, so the table
-// stays correct no matter what order the async marks (e.g. the :9091 bind, which
+// stays correct no matter what order the async marks (e.g. the :9464 bind, which
 // races the spawn by design) happen to land in.
 const CHAIN = [
     ["entry-eval", "process start → entry module graph evaluated"],
@@ -342,7 +342,7 @@ for (const [phase, meaning] of CHAIN) {
 const bind = absolute.get("metrics-listening");
 if (bind?.length) {
     console.log(
-        `\n(async, off the chain) metrics-listening — :9091 bound at median ${fmt(median(bind))}ms since process start`,
+        `\n(async, off the chain) metrics-listening — :9464 bound at median ${fmt(median(bind))}ms since process start`,
     );
 }
 

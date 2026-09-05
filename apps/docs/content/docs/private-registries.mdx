@@ -1,0 +1,112 @@
+---
+title: Private registries
+description: Pulling your app image from OCIR, private GHCR, ECR, or any registry that requires credentials — the manual pull-secret path that works today, and what to expect from doctor.
+---
+
+Most real registries are private. OCIR, a private GitHub Container Registry
+package, and ECR all refuse anonymous pulls — so the first deploy of an app
+whose image lives on one of them fails in a specific, confusing way: the
+deploy applies cleanly, the service is created, and then the pod sits in
+`ImagePullBackOff` while the registry answers `401`/`403` (GHCR words it
+"Anonymous users are only allowed read access").
+
+`kn-next doctor` checks for exactly this before it costs you a debugging
+session: for every deployed app it probes whether the image is anonymously
+pullable, and if it is not — and no pull credential is **attached to the
+app's ServiceAccount** — it warns and points here. A credential Secret that
+merely exists in the namespace is not enough (that case gets its own,
+more specific warning — see step 2).
+
+<Callout type="warn">
+This page documents the **current, manual path**: you create the credential
+and attach it yourself using standard Kubernetes objects. Attaching pull
+secrets is planned as a first-class knext config option, at which point this
+page becomes the long way around — the recipe below will keep working either
+way, because it only uses Kubernetes-native mechanics.
+</Callout>
+
+## The recipe
+
+Three steps, in order. The order matters — step 3 is not optional.
+
+### 1. Create the registry credential
+
+A `kubernetes.io/dockerconfigjson` Secret in the **app's namespace** (the
+namespace you deploy into):
+
+```bash
+kubectl create secret docker-registry regcred \
+  --namespace <app-namespace> \
+  --docker-server=<registry> \
+  --docker-username=<username> \
+  --docker-password=<password-or-token>
+```
+
+What goes in `--docker-server` and the credential fields differs per registry:
+
+| Registry | `--docker-server` | Credential |
+| --- | --- | --- |
+| GHCR | `ghcr.io` | a GitHub PAT with `read:packages` as the password |
+| OCIR | `<region-key>.ocir.io` (e.g. `fra.ocir.io`) | username `<tenancy-namespace>/<user>`, an auth token as the password |
+| ECR | `<account>.dkr.ecr.<region>.amazonaws.com` | username `AWS`, `aws ecr get-login-password` output as the password — note ECR tokens expire after 12 hours, so this needs a refresh mechanism (e.g. a credential-helper CronJob) |
+
+### 2. Attach it to the app's ServiceAccount
+
+Each app runs under a ServiceAccount named `<app-name>-sa` in its namespace.
+Pods resolve their pull secrets from that ServiceAccount, so that is where the
+credential attaches:
+
+```bash
+kubectl patch serviceaccount <app-name>-sa \
+  --namespace <app-namespace> \
+  --patch '{"imagePullSecrets": [{"name": "regcred"}]}'
+```
+
+This step is the one that actually takes effect — creating the Secret without
+attaching it here changes nothing, and `kn-next doctor` calls that case out
+specifically.
+
+**The patch replaces the whole `imagePullSecrets` list.** If the
+ServiceAccount already lists a credential — a second registry, say — include
+every entry in the patch, not just the new one, or the existing one is
+silently dropped.
+
+### 3. Redeploy
+
+Pull secrets are resolved **when a pod is created**, not when the
+ServiceAccount changes. A revision that is already stuck in
+`ImagePullBackOff` was created without the credential and will not pick it up
+retroactively — patching the ServiceAccount alone rescues nothing you can see.
+Roll a new revision:
+
+```bash
+kn-next deploy
+```
+
+The new revision's pods resolve the credential at creation and pull cleanly.
+
+## Verifying
+
+- `kn-next doctor` — the "App image pullable" check turns from a warning into
+  a pass once the credential is **attached to the app's ServiceAccount**. A
+  Secret that exists but is not attached keeps a warning (with the attach
+  command in the hint). Note what a pass verifies: **attachment**, not that
+  the registry accepts the credential — an attached but wrong credential
+  still fails at pod creation.
+- `kubectl get pods -n <app-namespace>` — a stuck pull shows
+  `ImagePullBackOff` / `ErrImagePull`; `kubectl describe pod <pod>` shows the
+  registry's actual error message in the events.
+
+## Caveats worth knowing
+
+- **The ServiceAccount is managed by the operator.** knext creates
+  `<app-name>-sa` and reconciles it. Today a manually added
+  `imagePullSecrets` list is preserved across reconciles — but it is a manual
+  patch on a managed object, which is exactly why a first-class option is
+  planned. Keep the patch in your cluster runbook so it is re-applied if the
+  ServiceAccount is ever recreated.
+- **One credential per namespace is usually enough.** The Secret is
+  namespace-scoped; every app in the namespace can reference the same one from
+  its own ServiceAccount.
+- **Never commit the credential.** The Secret lives in the cluster only —
+  not in your repository, not in `kn-next.config.ts`, not in the image.

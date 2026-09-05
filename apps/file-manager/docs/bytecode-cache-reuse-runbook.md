@@ -62,7 +62,7 @@ Prerequisites: a NextApp deployed with `cache.enableBytecodeCache: true`,
 bound at `NODE_COMPILE_CACHE`.
 
 1. **Warm up.** Hit the app a few times, then scrape the app's own metrics route (port 3000,
-   NOT the `:9091` sidecar — the sidecar has no bytecode metric):
+   NOT the `:9464` sidecar — the sidecar has no bytecode metric):
 
    ```bash
    kubectl run scrape --rm -i --restart=Never --image=curlimages/curl:8.11.1 -- \

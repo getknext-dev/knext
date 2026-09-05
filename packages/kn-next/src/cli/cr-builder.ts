@@ -29,6 +29,16 @@ export interface PreviewInput {
 }
 
 /**
+ * The `spec.env` entry that carries this deploy's build id into the pod (T2d).
+ *
+ * A named constant, not an inline key — see the comment at its use site: a
+ * literal key inside the CR object literal is recorded by the emitted-fields
+ * extractor as a CRD field path, and `spec.env` is a free-form map with no
+ * such path.
+ */
+export const DEPLOYMENT_ID_ENV = "NEXT_DEPLOYMENT_ID";
+
+/**
  * Builds a NextApp CR object from a KnativeNextConfig and a resolved image ref.
  * The image MUST be digest-pinned (the operator enforces this at reconcile time).
  *
@@ -293,6 +303,42 @@ export function buildNextAppCRObject(
     // unknown value before the cluster is touched. Upgrade operator first.
     const build = resolvedBuild;
 
+    // T2d — carry the deploy id into the POD's environment, not just into the
+    // bundle. vinext resolves NEXT_DEPLOYMENT_ID at BUILD time (that is how the
+    // `?dpl=` suffix and the `_next/static/<id>/` namespace get minted), so at
+    // runtime this is belt-and-braces today. It stops being belt-and-braces the
+    // moment anything serves or reports the id, and a CR that carries it is
+    // assertable now.
+    //
+    // Precedence, decided explicitly: knext's id WINS over a colliding
+    // `config.env` entry, because the id is a FACT about the artifact that was
+    // just built rather than a preference. A user value would disagree with
+    // `spec.buildId` — the same value, which the operator stamps on the revision
+    // as `apps.kn-next.dev/build-id` and the asset GC protects by — and would
+    // point the runtime at a build whose assets live under a different prefix.
+    //
+    // #186 name safety: NEXT_DEPLOYMENT_ID is a C_IDENTIFIER, is not in the
+    // CRD's CEL-rejected set (HOSTNAME / PORT / K_*), and is not injected by the
+    // operator, so `appendUserEnv` keeps it rather than dropping it with a
+    // Warning event.
+    //
+    // The key comes from {@link DEPLOYMENT_ID_ENV} rather than being written
+    // inline, and that is load-bearing rather than stylistic: `spec.env` is an
+    // `additionalProperties` MAP in the CRD, so `spec.env.<ANY_KEY>` is not a
+    // schema path. Written as a literal key, the emitted-fields extractor
+    // records `spec.env.NEXT_DEPLOYMENT_ID` as a field, `unknownEmittedFields`
+    // finds no such path in the CRD, and `preflightCRSchema` aborts EVERY
+    // deploy on a field the apiserver would accept happily. A const-referenced
+    // computed key is how the extractor is told "this is a map value, not a
+    // field" — the same reason `...config.env`'s user keys never appear there.
+    const env =
+        config.env || buildId
+            ? {
+                  ...config.env,
+                  ...(buildId ? { [DEPLOYMENT_ID_ENV]: buildId } : {}),
+              }
+            : undefined;
+
     const spec: Record<string, unknown> = {
         image,
         scaling,
@@ -306,9 +352,7 @@ export function buildNextAppCRObject(
         // them on the ksvc container; reserved names (HOSTNAME, PORT, K_*)
         // are rejected by CRD CEL validation at apply time. Secrets stay on
         // spec.secrets — never put sensitive values here.
-        ...(config.env && Object.keys(config.env).length
-            ? { env: config.env }
-            : {}),
+        ...(env && Object.keys(env).length ? { env } : {}),
         ...(observability ? { observability } : {}),
         ...(config.healthCheckPath
             ? { healthCheckPath: config.healthCheckPath }

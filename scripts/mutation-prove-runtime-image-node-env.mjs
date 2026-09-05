@@ -46,8 +46,8 @@ const MUTATIONS = [
     // A Dockerfile has no extension, so the harness cannot infer its comment
     // syntax from the filename the way it does for .ts/.mjs/.md.
     options: { commentPrefix: '#' },
-    anchor: '    METRICS_PORT=9091 \\\n    NODE_ENV=production',
-    replacement: '    METRICS_PORT=9091',
+    anchor: '    METRICS_PORT=9464 \\\n    NODE_ENV=production',
+    replacement: '    METRICS_PORT=9464',
   },
   {
     id: 'M2',

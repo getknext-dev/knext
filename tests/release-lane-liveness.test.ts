@@ -158,7 +158,7 @@ describe('release.yml: the version lane runs unapproved and cannot publish', () 
     // The positive half — it must still actually run the version path, or the
     // assertion above is satisfied by an empty job.
     expect(
-      json.includes('"version-script":"pnpm run changeset:version"'),
+      json.includes('"version-script":"bun run changeset:version"'),
       `\`${VERSION_JOB}\` no longer runs the changeset version script — this guard would be about nothing`,
     ).toBe(true);
   });

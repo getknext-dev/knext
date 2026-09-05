@@ -1,11 +1,11 @@
 /**
- * metrics.ts — knext runtime golden-signal metrics on the core-owned :9091
+ * metrics.ts — knext runtime golden-signal metrics on the core-owned :9464
  * Prometheus registry (#315, C1).
  *
  * ## Why this is core-owned, not app-owned
  *
  * `node-server.ts` is a SUPERVISOR: it spawns the standalone Next.js child and
- * exposes a metrics endpoint on :9091, but knext-core does NOT own the app's
+ * exposes a metrics endpoint on :9464, but knext-core does NOT own the app's
  * route-handler chain (`.claude/rules/architecture.md` — request routing is out
  * of scope). So per-request golden signals must NOT be produced by wrapping app
  * route handlers (that pushes hand-instrumentation onto app authors and lives in
@@ -31,7 +31,7 @@
  * The #317 cold-start / db-wake tracing HOOKS already compute the wake latency;
  * `recordColdStart` / `recordDbWake` let those same hooks also bump a Prometheus
  * counter + duration histogram in this registry, so the numbers show up on the
- * :9091 scrape (not only as spans). Emission stays on the core-owned path — no
+ * :9464 scrape (not only as spans). Emission stays on the core-owned path — no
  * app code.
  *
  * ## Cardinality
@@ -110,7 +110,7 @@ const WAKE_LATENCY_BUCKETS = [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30];
 /**
  * The bundle of knext runtime metrics plus the registry they live in. Grouped so
  * the processor + the cold-start/db-wake emitters share ONE registry instance
- * (the one served on :9091), and tests can stand up an isolated registry.
+ * (the one served on :9464), and tests can stand up an isolated registry.
  */
 export interface KnextMetrics {
     readonly registry: Registry;
@@ -143,7 +143,7 @@ export interface DeepHealthSnapshot {
 /**
  * Build the knext metric set against `registry`, labeled by `app` (KN_APP_NAME).
  * Callers register these on the SAME registry that `node-server.ts` serves on
- * :9091 so the golden signals merge with the default process metrics.
+ * :9464 so the golden signals merge with the default process metrics.
  */
 export function createMetricsRegistry(
     registry: Registry,
@@ -257,7 +257,7 @@ export function recordDbWake(
  * SELF-CLEARS when the state flips — the previously-active series drops to 0,
  * with no stale `waking=1` left behind.
  *
- * Called by the app wiring on the :9091 SCRAPE cadence (right before serving
+ * Called by the app wiring on the :9464 SCRAPE cadence (right before serving
  * exposition) after running `checkDeepHealth()` — no new background timer, the
  * deep check runs on Prometheus's scrape interval.
  */
@@ -294,13 +294,13 @@ export interface DeepHealthScrapeDeps {
     /**
      * Whether the app used the DB pool RECENTLY (bridged from `@getknext/lib`'s
      * `isDbRecentlyActive`). When false, the hook SKIPS the deep check so an idle
-     * app's scale-to-zero DB is never woken by the :9091 scrape (#348 gate fix).
+     * app's scale-to-zero DB is never woken by the :9464 scrape (#348 gate fix).
      */
     readonly isRecentlyActive: () => boolean;
 }
 
 /**
- * Build the :9091 scrape hook that refreshes the deep-health gauge — ACTIVITY-
+ * Build the :9464 scrape hook that refreshes the deep-health gauge — ACTIVITY-
  * GATED (#348 gate fix). It runs `checkDeepHealth()` (which dials Postgres) ONLY
  * when `isRecentlyActive()` is true; when the app has been idle past the DB
  * activity budget it does NOTHING, leaving the gauge at its last-known value so
@@ -451,7 +451,7 @@ let runtimeMetrics: KnextMetrics | undefined;
  * default process metrics, because the persistent SUPERVISOR (`node-server.ts`)
  * already owns them on its own registry. Seeding them here too would duplicate
  * every default family (`process_*`, `nodejs_*`) in the supervisor's merged
- * `:9091` exposition on the healthy warm path — duplicate `# HELP`/`# TYPE`
+ * `:9464` exposition on the healthy warm path — duplicate `# HELP`/`# TYPE`
  * lines and duplicate zero-label samples, which Prometheus rejects. Opt in via
  * `collectDefaults` only for a standalone registry that has no supervisor in
  * front of it (not the case for the knext runtime).
@@ -485,11 +485,11 @@ export function resetRuntimeMetrics(): void {
 //
 // The golden-signal / cold-start / db-wake metrics are emitted in the Next.js
 // CHILD process (that's where the @vercel/otel HTTP spans and the #317 hooks
-// run). But the operator scrapes the SUPERVISOR's :9091 (it injects
-// prometheus.io/port=9091). So the child serves its core registry on a small
-// localhost-only port, and the supervisor's :9091 handler merges its own
+// run). But the operator scrapes the SUPERVISOR's :9464 (it injects
+// prometheus.io/port=9464). So the child serves its core registry on a small
+// localhost-only port, and the supervisor's :9464 handler merges its own
 // process-metric exposition with a best-effort fetch of the child's — no app
-// route code, one core-owned scrape target unchanged (:9091).
+// route code, one core-owned scrape target unchanged (:9464).
 
 /** Default port the child binds for its core metrics (supervisor scrapes it). */
 export const CHILD_METRICS_PORT = Number(
@@ -500,7 +500,7 @@ export const CHILD_METRICS_PORT = Number(
  * Bind a tiny localhost HTTP server that serves `registry` at `/metrics`. Used
  * by the child (Next standalone) so the supervisor can scrape its core series.
  * Bound to 127.0.0.1 by default — never externally reachable; the pod-external
- * scrape target stays the supervisor's :9091.
+ * scrape target stays the supervisor's :9464.
  */
 export function startChildMetricsServer(
     registry: Registry,
@@ -583,7 +583,7 @@ interface MetricsResponse {
 }
 
 export interface SupervisorMetricsHandlerDeps {
-    /** The supervisor's :9091 registry. */
+    /** The supervisor's :9464 registry. */
     readonly registry: Registry;
     /**
      * Starts prom-client's default-metric collection if it has not started yet

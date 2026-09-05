@@ -2,7 +2,7 @@
  * Knative runtime entry for the Next.js standalone server.
  *
  * Responsibilities:
- *  1. Expose Prometheus metrics on :9091 (sidecar pattern — separate port from app).
+ *  1. Expose Prometheus metrics on :9464 (sidecar pattern — separate port from app).
  *  2. Spawn the Next.js standalone server.js produced by `next build` with
  *     output:'standalone'. The standalone server self-starts on $PORT (default 3000).
  *
@@ -45,17 +45,17 @@ import { type ChildLike, gracefulShutdown, isShuttingDown } from "./shutdown";
 bootTrace.mark("entry-eval");
 
 const log = createLogger({ module: "server" });
-// Prometheus metrics port. Defaults to 9091 (no behavior change); overridable via
+// Prometheus metrics port. Defaults to 9464 (no behavior change); overridable via
 // METRICS_PORT so two runtime entries can coexist on one host without colliding on
 // the fixed port (e.g. the sigterm e2es in CI). A metrics port is a legitimate
 // production knob — mirrors the SHUTDOWN_GRACE_MS env pattern below.
-const METRICS_PORT = Number(process.env.METRICS_PORT ?? 9091);
+const METRICS_PORT = Number(process.env.METRICS_PORT ?? 9464);
 // Hard cap for draining in-flight requests on SIGTERM. Keep below the pod's
 // terminationGracePeriodSeconds (k8s default 30s) so the child drains in time.
 const SHUTDOWN_GRACE_MS = Number(process.env.SHUTDOWN_GRACE_MS ?? 25_000);
 
-// ── Prometheus metrics endpoint on :9091 (#441) ───────────────────────────────
-// Clean separation: Next.js standalone owns $PORT (3000), metrics owns 9091.
+// ── Prometheus metrics endpoint on :9464 (#441) ───────────────────────────────
+// Clean separation: Next.js standalone owns $PORT (3000), metrics owns 9464.
 //
 // The SOCKET binds early (see the eager section below) so the sidecar answers
 // from process start — the platform contract enforced by the shipped-bundle drain
@@ -70,7 +70,7 @@ const SHUTDOWN_GRACE_MS = Number(process.env.SHUTDOWN_GRACE_MS ?? 25_000);
 //
 // The golden-signal / cold-start / db-wake metrics (#315) are emitted in the
 // Next.js CHILD (that's where the @vercel/otel HTTP spans + the #317 hooks run).
-// The operator scrapes THIS supervisor endpoint (prometheus.io/port=9091), so we
+// The operator scrapes THIS supervisor endpoint (prometheus.io/port=9464), so we
 // merge our own process metrics with a best-effort localhost scrape of the
 // child's core metrics port. If the child is scaled to zero / not yet up / has
 // tracing off (no child server), the fetch returns "" and we serve just the
@@ -159,7 +159,7 @@ const deferredInit = createDeferredSupervisorInit({
                 }),
         },
         {
-            // The :9091 socket is already bound (eager section below); this step
+            // The :9464 socket is already bound (eager section below); this step
             // warms the heavy metrics graph + starts collectDefaultMetrics once
             // the child is serving, so the ~790ms load stays off its boot path.
             name: "metrics-collector",
@@ -290,7 +290,7 @@ const onSignal = (signal: string) => {
 process.on("SIGTERM", () => onSignal("SIGTERM"));
 process.on("SIGINT", () => onSignal("SIGINT"));
 
-// ── Bind :9091 EARLY (#441) ──────────────────────────────────────────────────
+// ── Bind :9464 EARLY (#441) ──────────────────────────────────────────────────
 // The metrics sidecar must answer WHILE the runtime entry is up (platform
 // contract, enforced by the shipped-bundle drain gate). Binding the socket is
 // free — the lightweight listener pulls no heavy module; prom-client +
@@ -303,7 +303,7 @@ process.on("SIGINT", () => onSignal("SIGINT"));
 void metricsEndpoint.ensureListening("startup").then(
     () => bootTrace.mark("metrics-listening"),
     (err: unknown) => {
-        log.warn({ err }, "Metrics endpoint failed to bind :9091");
+        log.warn({ err }, "Metrics endpoint failed to bind :9464");
     },
 );
 
@@ -346,7 +346,7 @@ nextProc.on("exit", (code, signal) => {
 // (stdio is `inherit`, so the child's logs stay untouched). Once it answers, the
 // cold-start critical path is over and the supervisor can finally pay for its
 // own startup: warm the metrics graph (loading prom-client + @opentelemetry/api)
-// and start collectDefaultMetrics + the image-cache sync. :9091 itself is already
+// and start collectDefaultMetrics + the image-cache sync. :9464 itself is already
 // bound (eager section above); this only loads the heavy graph behind it. The
 // deadline covers a child that never binds, so a broken app never leaves the
 // endpoint permanently un-warmed — and a scrape meanwhile still warms it on

@@ -26,7 +26,7 @@
  *  - `@getknext/lib/clients` → `@cerbos/grpc` + `minio` + `pg` (needed only to close
  *    two pools at SIGTERM) — moved to a dynamic import in `db-drain.ts`;
  *  - `./metrics` → `@opentelemetry/api` + `prom-client` (needed only to serve
- *    :9091) — moved behind {@link createLazyMetricsEndpoint};
+ *    :9464) — moved behind {@link createLazyMetricsEndpoint};
  *  - `./image-cache-sync` (a no-op unless `STORAGE_BUCKET` is set) — moved into a
  *    deferred step.
  *
@@ -43,23 +43,23 @@
  * ## What binds early vs what loads lazily (#441 correction)
  *
  * The platform contract — enforced by the shipped-bundle SIGTERM drain gate — is
- * that the :9091 sidecar answers WHILE the runtime entry is up. An idle
+ * that the :9464 sidecar answers WHILE the runtime entry is up. An idle
  * `http.createServer(...).listen()` is free (it samples nothing and pulls no heavy
  * module), so the FIRST attempt's regression was deferring the `listen()` itself.
  * The expensive thing is the ~790ms module GRAPH (`prom-client` +
  * `@opentelemetry/api` via `./metrics`, plus the `@getknext/lib` clients via
  * `db-drain`), NOT binding a socket. So the split is:
  *
- *  - {@link LazyMetricsEndpoint.ensureListening} binds :9091 EARLY with a
+ *  - {@link LazyMetricsEndpoint.ensureListening} binds :9464 EARLY with a
  *    LIGHTWEIGHT request listener that statically references NONE of the heavy
  *    modules. The graph is pulled by a dynamic `import()` on the FIRST scrape (a
  *    boot-window scrape is answered — possibly slowly — with a COMPLETE
- *    exposition, never refused), so :9091 is up from process start.
+ *    exposition, never refused), so :9464 is up from process start.
  *  - {@link LazyMetricsEndpoint.startCollector} loads that same graph and starts
  *    `collectDefaultMetrics` — driven off the child-ready probe as a deferred
  *    step, so the heavy load lands AFTER the child is serving, not on its boot.
  *
- * Net: :9091 listens from t=0 (contract satisfied), but the prom-client/OTel graph
+ * Net: :9464 listens from t=0 (contract satisfied), but the prom-client/OTel graph
  * only loads on the first scrape or on child-ready (cold-start budget preserved).
  * Operators who prefer eager collection set `KNEXT_DEFER_SUPERVISOR_INIT=0`.
  */
@@ -151,7 +151,7 @@ export function createDeferredSupervisorInit(
 }
 
 export interface LazyMetricsEndpointOptions {
-    /** Port to bind (`METRICS_PORT`, default 9091). `0` picks a free port. */
+    /** Port to bind (`METRICS_PORT`, default 9464). `0` picks a free port. */
     readonly port: number;
     readonly log?: StepLogger;
     /**
@@ -170,7 +170,7 @@ export interface LazyMetricsEndpoint {
      */
     readonly closable: Closable;
     /**
-     * Bind :9091 with a LIGHTWEIGHT request listener. Idempotent. Does NOT load
+     * Bind :9464 with a LIGHTWEIGHT request listener. Idempotent. Does NOT load
      * `prom-client` / `./metrics` — that heavy graph is pulled lazily by the
      * first scrape (or by {@link startCollector}), so binding stays cheap enough
      * to run from process start and honour the sidecar-always-up contract.
@@ -202,7 +202,7 @@ interface MetricsGraph {
 }
 
 /**
- * A :9091 metrics endpoint whose SOCKET binds early but whose ~790ms module graph
+ * A :9464 metrics endpoint whose SOCKET binds early but whose ~790ms module graph
  * (`prom-client` + `@opentelemetry/api` via `./metrics`) loads lazily.
  *
  * The request listener passed to `http.createServer` is a plain closure that

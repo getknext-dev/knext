@@ -21,6 +21,13 @@
  *     --version → exit 0, usage text) and, when bun is on PATH, under `bun`
  *     with byte-identical --help output — ONE code path, two runtimes.
  *
+ * SCOPE: this suite covers dispatch/help/deploy verbs. The vinext COMPILE step
+ * legitimately shells out to `bun` (ADR-0048 Amendment 3), so "Bun-free" here
+ * means the CLI process itself, not the toolchain it invokes — and the bundled
+ * build path under Node up to and through that Bun handoff is guarded
+ * separately by vinext-build-node-bundle.test.ts (#948, where a bundled
+ * dynamic require broke it while this suite stayed green by design).
+ *
  * dist/ must exist: CI builds @getknext/core before vitest (ci.yml), same
  * contract publish-surface.test.ts relies on. Run `pnpm --filter @getknext/core
  * build` locally first.
@@ -51,8 +58,18 @@ const distBin = join(pkgRoot, "dist", "cli", "kn-next.js");
 const STACK_FRAME_RE = /\n\s+at\s/;
 const CHUNK_PATH_RE = /\b[\w./-]+\.(?:js|cjs|mjs):\d+/;
 
-/** Spawn env: neutralize inherited NODE_OPTIONS (preloads) and force no TTY color. */
-const spawnEnv = { ...process.env, NODE_OPTIONS: "", NO_COLOR: "1" };
+/**
+ * Spawn env: neutralize inherited NODE_OPTIONS (preloads) and force no TTY
+ * color. `npm_config_registry` points `create`'s #950 pin probe at a closed
+ * local port so the bundled-bin scaffold below stays offline and
+ * deterministic (connection refused is the probe's silent path).
+ */
+const spawnEnv = {
+    ...process.env,
+    NODE_OPTIONS: "",
+    NO_COLOR: "1",
+    npm_config_registry: "http://127.0.0.1:9",
+};
 
 function run(cmd: string, args: string[], cwd?: string) {
     return spawnSync(cmd, args, {

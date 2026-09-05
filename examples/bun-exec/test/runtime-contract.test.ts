@@ -9,7 +9,7 @@
 //   B. A real-sockets e2e that spawns `test/drain-harness.mjs` under BUN (the
 //      same two Bun.serve listeners + shared contract as knext-bun-entry.mjs,
 //      minus the vinext handler): fire a ~2s /slow request, SIGTERM mid-flight,
-//      assert it STILL completes 200 and the process exits 0; scrape :9091
+//      assert it STILL completes 200 and the process exits 0; scrape :9464
 //      /metrics for a valid Prometheus exposition; assert /api/cache/invalidate
 //      is 401 without the token and 200 with it. Skips (does not fail) if `bun`
 //      is not on PATH — noted as a coverage gap; OKE runs the compiled binary.

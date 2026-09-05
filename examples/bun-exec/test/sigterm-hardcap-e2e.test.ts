@@ -7,7 +7,7 @@
 // property observed two ways):
 //
 //   1. The drain in `runtime-contract.mjs` stops the app listener, awaits
-//      `after()`/waitUntil tasks, and stops the `:9091` metrics listener LAST.
+//      `after()`/waitUntil tasks, and stops the `:9464` metrics listener LAST.
 //      That ordering is LOAD-BEARING, not incidental: the hardcap timer is
 //      `unref()`ed, so it can only fire while SOMETHING ELSE holds the event
 //      loop open. During a drain that "something else" is the metrics listener.

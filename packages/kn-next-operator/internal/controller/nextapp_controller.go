@@ -847,7 +847,11 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 	// Observability annotations — aligned with CLI
 	if nextApp.Spec.Observability != nil && nextApp.Spec.Observability.Enabled {
 		annotations["prometheus.io/scrape"] = "true"
-		annotations["prometheus.io/port"] = "9091"
+		// 9464, NOT 9091: queue-proxy owns :9091 on a stock serving install
+		// (#951). In lockstep with the runtime entries' METRICS_PORT default,
+		// appMetricsPort below, and the shipped PodMonitor
+		// (metrics-port-lockstep.test.ts).
+		annotations["prometheus.io/port"] = "9464"
 		annotations["prometheus.io/path"] = "/metrics"
 	}
 
@@ -1367,10 +1371,21 @@ var (
 	queueProxyHTTPPort  = int32(knativenetworking.BackendHTTPPort)
 	queueProxyH2CPort   = int32(knativenetworking.BackendHTTP2Port)
 	queueProxyHTTPSPort = int32(knativenetworking.BackendHTTPSPort)
-	// queueProxyMetricsPort is knative's AutoscalingQueueMetricsPort; the app's
-	// metrics sidecar uses UserQueueMetricsPort (9091) by default.
+	// queueProxyMetricsPort is knative's AutoscalingQueueMetricsPort (9090).
 	queueProxyMetricsPort = int32(knativenetworking.AutoscalingQueueMetricsPort)
-	appMetricsPort        = int32(knativenetworking.UserQueueMetricsPort)
+	// appMetricsPort is the knext runtime's OWN metrics listener — a LITERAL,
+	// deliberately NOT knativenetworking.UserQueueMetricsPort (#951). It used to
+	// be exactly that alias (9091), which is the port queue-proxy ITSELF binds
+	// for its user-metrics server whenever serving's
+	// `metrics.request-metrics-backend-destination` is active — the stock
+	// config-observability default. App and sidecar raced for :9091 in the
+	// shared pod netns, the app lost with EADDRINUSE, and every scaffolded app
+	// crash-looped on a default Knative install (S3-V Finding C-2). 9464 is the
+	// conventional OpenTelemetry Prometheus-exporter port and belongs to no
+	// queue-proxy listener. Kept in lockstep with the runtime entries' default,
+	// the prometheus.io/port annotation, and the shipped PodMonitor by
+	// metrics-port-lockstep.test.ts — change them together or not at all.
+	appMetricsPort = int32(9464)
 )
 
 // desiredIngressRules is the ingress half of the app NetworkPolicy, as a PURE
@@ -1404,13 +1419,13 @@ func desiredIngressRules() []networkingv1.NetworkPolicyIngressRule {
 			// on. Omitting it makes every app unreachable on a policy-enforcing
 			// CNI with internal TLS enabled.
 			//
-			// 9091 is NOT optional: the operator stamps prometheus.io/port=9091,
+			// 9464 is NOT optional: the operator stamps prometheus.io/port=9464,
 			// so omitting it would kill metric scraping by a Prometheus running
 			// BESIDE the app (the same-namespace rule below is what serves that
 			// scrape — a scraper in a third namespace is already excluded by the
 			// From peers, so that is the only scraping this policy can support).
 			// CAVEAT: the runtime lets an app override its metrics port via
-			// METRICS_PORT; this allowlist is fixed at the default 9091, so an
+			// METRICS_PORT; this allowlist is fixed at the default 9464, so an
 			// app that moves its metrics port loses scraping until the policy is
 			// disabled. Recorded rather than solved — wiring it through the CRD
 			// is a public-API change, which is a separate, gated decision.
@@ -1467,7 +1482,7 @@ func desiredIngressRules() []networkingv1.NetworkPolicyIngressRule {
 		//
 		// The APP metrics port ONLY — deliberately narrower than the
 		// same-namespace rule above. #735's motivation is the operator's shipped
-		// PodMonitor, which targets 9091 and nothing else
+		// PodMonitor, which targets 9464 and nothing else
 		// (config/prometheus/app-podmonitor.yaml), so admitting queue-proxy's
 		// autoscaling metrics (9090) across namespaces would be allowlist breadth
 		// with no driving requirement. Code review caught that; "match broadly,
@@ -1478,7 +1493,7 @@ func desiredIngressRules() []networkingv1.NetworkPolicyIngressRule {
 		// grantor is whoever holds `update namespaces` (normally cluster-admin,
 		// but any platform with self-service namespace creation lets a tenant
 		// create-and-label its own). Once labelled, EVERY pod in that namespace —
-		// not merely Prometheus — can scrape :9091 on EVERY knext app in the
+		// not merely Prometheus — can scrape :9464 on EVERY knext app in the
 		// cluster, and an individual NextApp owner has no per-app opt-out short
 		// of disabling their whole policy. There is no PodSelector here precisely
 		// because the operator cannot know a user's Prometheus labels.
@@ -1545,7 +1560,7 @@ func DesiredNetworkPolicy(appName, namespace string) *networkingv1.NetworkPolicy
 //
 // The operator ships its own PodMonitor (config/prometheus/app-podmonitor.yaml)
 // in the `system` namespace with `namespaceSelector: any`, so its scrape of
-// :9091 is cross-namespace — and the policy admitted no third namespace, which
+// :9464 is cross-namespace — and the policy admitted no third namespace, which
 // meant the operator's OWN metrics path was denied on any policy-enforcing CNI.
 // Both design gates surfaced this while reviewing ADR-0044; it stayed invisible
 // because flannel (OKE GA, OrbStack) enforces no NetworkPolicy at all.

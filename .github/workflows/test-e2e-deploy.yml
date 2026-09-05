@@ -196,18 +196,28 @@ jobs:
         with:
           version: 10.4.1
 
+      # Setup Bun for knext's OWN workspace: the pnpm era ended with the bun
+      # migration (fe28ad9c) — `packageManager` pins bun, so `pnpm install`
+      # refuses with "This project is configured to use bun". pnpm remains
+      # below ONLY for next.js's harness (their repo pins pnpm) and for
+      # `bun pm pack`'s job (bun rewrites workspace:^ like pnpm pack did).
+      - name: Setup Bun (knext workspace)
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.0'
+
       - name: Install knext deps
         working-directory: knext
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       # Build the runtime + the adapter package so `npm pack @getknext/core` ships a
       # working adapter for NEXT_ADAPTER_PATH.
       - name: Build @getknext/lib + @getknext/db + @getknext/core
         working-directory: knext
         run: |
-          pnpm --filter @getknext/lib build
-          pnpm --filter @getknext/db build
-          pnpm --filter @getknext/core build
+          bun run --filter @getknext/lib build
+          bun run --filter @getknext/db build
+          bun run --filter @getknext/core build
 
       # #147 A3-3 fix round 1 (triage of run 28558576615 — the ONE bug behind
       # 472/473 failures): this step used to run a bare `npm pack` of
@@ -224,15 +234,15 @@ jobs:
       # lib+core made the preflight npm install 404 on the unpublished
       # @getknext/db. The preflight now DERIVES the required set from the packed
       # manifests, so a missing member fails loud with its name.
-      - name: Pack knext adapter tarballs (pnpm pack — npm-installable, once for the whole run)
+      - name: Pack knext adapter tarballs (bun pm pack — rewrites workspace:^, npm-installable)
         working-directory: knext
         run: |
           set -euo pipefail
           DEST="${GITHUB_WORKSPACE}/knext-tarballs"
           mkdir -p "${DEST}"
-          (cd packages/lib && pnpm pack --pack-destination "${DEST}")
-          (cd packages/db && pnpm pack --pack-destination "${DEST}")
-          (cd packages/kn-next && pnpm pack --pack-destination "${DEST}")
+          (cd packages/lib && bun pm pack --destination "${DEST}")
+          (cd packages/db && bun pm pack --destination "${DEST}")
+          (cd packages/kn-next && bun pm pack --destination "${DEST}")
           ls -la "${DEST}"
 
       # The fail-fast gate that SHOULD have existed before run 28558576615:

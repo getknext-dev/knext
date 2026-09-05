@@ -14,7 +14,7 @@ import {
 /**
  * #315 — the cross-process bridge. Golden-signal / cold-start / db-wake metrics
  * are emitted in the Next.js CHILD process (from the #317 OTel hooks); the
- * operator scrapes the SUPERVISOR's :9091. So the supervisor's /metrics must
+ * operator scrapes the SUPERVISOR's :9464. So the supervisor's /metrics must
  * merge its own (default process) series with the child's core series, fetched
  * over localhost. These tests exercise the REAL child server + fetch + merge.
  */

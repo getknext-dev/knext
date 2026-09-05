@@ -11,7 +11,7 @@
  * #792 happen:
  *   - `adapters/metrics.ts` (EXPORTED_KNEXT_METRICS) — the prom-client registry
  *     an app registers, reachable through an app-level `/api/metrics` route.
- *   - the compiled runtime's own `:9091` exposition (`knext_bunexec_*`, scanned
+ *   - the compiled runtime's own `:9464` exposition (`knext_bunexec_*`, scanned
  *     out of `templates/app/runtime-contract.mjs.hbs`) — the ONLY thing the
  *     shipped PodMonitor scrapes.
  *

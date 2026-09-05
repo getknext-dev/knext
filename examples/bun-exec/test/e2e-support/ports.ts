@@ -2,7 +2,7 @@
  * Host-port reservation for this example's container e2e (#686).
  *
  * WHY IT EXISTS AT ALL: `alpine-image.docker-e2e.test.ts` publishes two host
- * ports (`--publish <app>:3000`, `--publish <metrics>:9091`), and docker binds
+ * ports (`--publish <app>:3000`, `--publish <metrics>:9464`), and docker binds
  * them — so unlike a child that can bind 0 and report back, the spec must KNOW
  * both numbers up front. That is the one case where a reservation is
  * unavoidable.
