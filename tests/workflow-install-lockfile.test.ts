@@ -88,21 +88,10 @@ const PENDING_FIXES: ReadonlyArray<{
   command: string;
   note: string;
 }> = [
-  {
-    workflow: '.github/workflows/test-e2e-deploy.yml',
-    jobId: 'build-next',
-    command: 'pnpm install --frozen-lockfile',
-    // 2026-09-05 (#926): fixed by PR #917 (green, unmerged at time of writing).
-    // Remove this entry when it lands — the staleness assertion will insist.
-    note: 'fixed by PR #917, unmerged at time of writing',
-  },
-  {
-    workflow: '.github/workflows/compat-vinext.yml',
-    jobId: 'build-next',
-    command: 'pnpm install --frozen-lockfile',
-    // 2026-09-05 (#926): same PR, same fix, same removal obligation.
-    note: 'fixed by PR #917, unmerged at time of writing',
-  },
+  // 2026-09-05: the two #917-owned entries (test-e2e-deploy.yml and
+  // compat-vinext.yml pnpm installs) died with the defect when that PR merged,
+  // exactly as the staleness assertion demands. The list is empty until the
+  // next known-but-owned hole appears.
 ];
 
 interface Installer {

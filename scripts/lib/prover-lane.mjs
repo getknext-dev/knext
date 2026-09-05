@@ -1047,6 +1047,17 @@ export function proverPathBindings(source) {
  */
 export const PROVER_AUDIT_EXEMPTIONS = Object.freeze([
   Object.freeze({
+    prover: 'scripts/mutation-prove-skew-id-chain.mjs',
+    justification:
+      'POSITIONAL-array mutation table ([file, label, anchor, replacement, spec]) predating the ' +
+      'per-prover audit; neither extractor reads that shape. The collision surfaced only once #920 ' +
+      '(the prover) and #927 (the audit) both reached main. Follow-up: convert the table to the ' +
+      '{subject, anchor} object shape both extractors read. Expiry deliberately OFF the 2026-12-01 ' +
+      'bloc (sprint-2 close C6: staggered clocks).',
+    added: '2026-09-05',
+    expires: '2026-11-20',
+  }),
+  Object.freeze({
     prover: 'scripts/mutation-prove-anonymous-install.mjs',
     justification:
       'Builds every anchor inside per-case closures over a fixture tree it creates at runtime; no ' +

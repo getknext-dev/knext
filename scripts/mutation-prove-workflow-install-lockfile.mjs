@@ -172,20 +172,14 @@ const MUTATIONS = [
       `${PREFLIGHT_STEP}`,
     validate: validYaml,
   },
-  {
-    id: 'M8',
-    expect: 'red',
-    claim:
-      'the ledger cannot outlive its defect — this simulates PR #917 actually LANDING (the ' +
-      "compat lane's pnpm install becomes a bun install), after which the PENDING_FIXES entry " +
-      'covers no live violation and the staleness assertion must red until the entry is deleted. ' +
-      'Round 1 mutated the entry to point at a nonexistent workflow, which trivially matches ' +
-      'nothing and never exercised the fix-lands path (#942 review, F2)',
-    subject: 'compatWorkflow',
-    anchor: '        run: pnpm install --frozen-lockfile',
-    replacement: '        run: bun install --frozen-lockfile',
-    validate: validYaml,
-  },
+  // M8 RETIRED 2026-09-05: it simulated PR #917 landing (the compat lane's
+  // pnpm install becoming a bun install, after which the PENDING_FIXES entry
+  // covers no live violation and the staleness assertion reds until deleted).
+  // #917 then actually landed, its `pnpm install` anchor no longer exists in
+  // compat-vinext.yml, and the ledger entries were deleted. The simulated world
+  // is the real one; the staleness assertion stays live for any FUTURE entry,
+  // which is what M8 was really guarding. The row is removed so the declared
+  // count reflects what still runs.
   {
     id: 'M9',
     expect: 'red',
