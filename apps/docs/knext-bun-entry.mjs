@@ -32,6 +32,10 @@
 //                      node path so the listener stays reachable in-cluster.
 //   METRICS_PORT       Prometheus port            (default 9091)
 //   SHUTDOWN_GRACE_MS  drain hardcap in ms        (default 25000)
+//   KNEXT_MAX_REQUEST_BYTES  request body cap in bytes (default 8388608 = 8 MiB;
+//                      0 = explicitly uncapped, logged loudly). ADR-0044 Option
+//                      C — see resolveMaxRequestBytes in runtime-contract.mjs
+//                      for the measurement behind it.
 //   CACHE_INVALIDATE_TOKEN  read by the app route, not here (see app/api/cache).
 
 // MUST be first (#460 bug 1). Nitro's DEFAULT bun entry opens with this import;
@@ -76,11 +80,13 @@ import {
   createMetricsState,
   drainPending,
   METRICS_CONTENT_TYPE,
+  METRICS_MAX_REQUEST_BYTES,
   observeRequest,
   recordStartupComplete,
   renderMetrics,
   resolveAssetAnchor,
   resolveBindHost,
+  resolveMaxRequestBytes,
 } from './runtime-contract.mjs';
 
 // ── #460 bug 3: static assets resolved against the BUILD MACHINE's path ─────
@@ -147,6 +153,10 @@ const PORT = Number(process.env.PORT ?? 3000);
 const HOSTNAME = resolveBindHost(process.env);
 const METRICS_PORT = Number(process.env.METRICS_PORT ?? 9091);
 const GRACE_MS = Number(process.env.SHUTDOWN_GRACE_MS ?? 25_000);
+// ADR-0044 Option C. One env read and one integer parse at module scope — the
+// cold-start budget for this control is zero measurable delta, and the whole
+// enforcement is a flag both listeners below hand to Bun.
+const REQUEST_CAP = resolveMaxRequestBytes(process.env);
 
 // biome-ignore lint/correctness/useHookAtTopLevel: useNitroApp() is Nitro's server-app accessor, not a React hook — the "use" prefix is coincidental.
 const nitro = useNitroApp();
@@ -164,6 +174,12 @@ const appSrvx = serve({
   port: PORT,
   hostname: HOSTNAME,
   fetch: nitro.fetch,
+  // ADR-0044 Option C: srvx forwards this to `Bun.serve`, which answers 413
+  // BEFORE this handler or any middleware runs — and counts bytes rather than
+  // trusting `Content-Length`, so a chunked body cannot slip the cap by omitting
+  // the header. `undefined` (KNEXT_MAX_REQUEST_BYTES=0) omits the option
+  // entirely, which is the only value srvx reads as "no cap".
+  maxRequestBodySize: REQUEST_CAP.bytes,
   gracefulShutdown: false,
   silent: true,
   middleware: [
@@ -223,6 +239,11 @@ const appServer = {
 const metricsServer = Bun.serve({
   port: METRICS_PORT,
   hostname: HOSTNAME,
+  // FIXED at 64 KiB, never the app's resolved cap: this listener answers one GET
+  // and ran at Bun's 128 MB default until now — the exact co-resident-pod path
+  // ADR-0044's threat scope calls unbounded. Wiring REQUEST_CAP.bytes here would
+  // let KNEXT_MAX_REQUEST_BYTES=0 re-open it.
+  maxRequestBodySize: METRICS_MAX_REQUEST_BYTES,
   fetch(req) {
     const url = new URL(req.url);
     if (url.pathname === '/metrics' && req.method === 'GET') {
@@ -245,6 +266,19 @@ const metricsServer = Bun.serve({
 // never observe the runtime up but the gauge missing.
 recordStartupComplete(metrics);
 console.log(`LISTENING:${appServer.port} METRICS:${metricsServer.port}`);
+// Bun's 413 is synthesized before user code: empty body, no content-type, and
+// the `error` hook does not fire — so there is no in-process seam at which knext
+// can tell an operator reading a 413 WHICH cap fired (framework 1 MB, platform,
+// or proxy). The boot log is that seam instead, and it prints on every start.
+if (REQUEST_CAP.warning) {
+  // The prefix is the source, never a fixed word: an INVALID value falls back to
+  // the default and is still capped, so labelling it UNCAPPED would be a lie in
+  // the one log line an operator greps.
+  console.warn(`REQUEST_BYTE_CAP: ${REQUEST_CAP.source.toUpperCase()} — ${REQUEST_CAP.warning}`);
+}
+console.log(
+  `REQUEST_BYTE_CAP:${REQUEST_CAP.bytes ?? 'none'} METRICS_BYTE_CAP:${REQUEST_CAP.metricsBytes} (${REQUEST_CAP.source})`,
+);
 
 // ── Eager app-graph warmup ───────────────────────────────────────────────────
 // Nitro reaches the application through ONE lazy `import()` (the `_ssr` chunk),

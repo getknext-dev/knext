@@ -90,8 +90,14 @@ export const DIVERGENT = {
       'whose native addon resolves under alpine/musl, and the only gate that could prove that ' +
       'is the alpine docker e2e. Reconciling it is real work with a docker-gated exit ' +
       'criterion, so it is RECORDED here rather than done blind — pinned by hash so it cannot ' +
-      'drift any further while it waits (#911).',
-    sha256: '641e2ea4099e5d677a3eeb3ff49ca0a89a07cc76af527d478e41087fd53ab69b',
+      'drift any further while it waits (#911).\n\n' +
+      'HASH UPDATED for the ADR-0044 Option C byte cap: the cap wiring (both serve sites, the ' +
+      'resolver call, the boot log) was lifted from the template VERBATIM into this copy in the ' +
+      'same diff — `git diff` shows the two hunks are textually identical. The divergence this ' +
+      'exemption records is still ONLY the image intercept; widening it to also mean "and the ' +
+      'byte cap is missing here" would have left the one entry that is actually compiled into ' +
+      'the shipped example binary uncapped, which is the opposite of the point.',
+    sha256: 'bb18bb556b9ededa87715ba1a42cbd5a9515791058224b304c71883da3fe9645',
   },
 };
 

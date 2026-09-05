@@ -255,3 +255,92 @@ docs say exactly that (`security.mdx`, `hardening.mdx`).
 Why not move the reference cluster: the enforcement contract is already proved by the kind+Calico
 drill this ADR requires, and moving OKE's CNI buys no user-facing guarantee — any user's flannel
 cluster would be in the same observable, documented state regardless of what our cluster runs.
+
+
+## Amendment 4: Option C is implemented in-process — the dated exception CLOSES
+
+**Status of this amendment: ACCEPTED (sprint-2 task T1).**
+
+### The measurement that collapsed Option C from a subsystem to a flag
+
+Decision 4 described Option C as a knext-owned front socket that owns `$PORT` and loopback-forwards
+to a child. That shape was correct for the world it was written in: `node-server.ts` spawned a
+separate `server.js` and there was **no knext-owned request path**. ADR-0048 removed that premise —
+vinext is now the only available builder, the compiled binary's entry (`knext-bun-entry.mjs`) *is*
+the request path, and it already serves through srvx.
+
+srvx exposes `maxRequestBodySize` and, on Bun, forwards it straight to `Bun.serve`
+(`dist/adapters/bun.mjs`). Its own portable fallback (`_body-limit.mjs`) is **counted bytes** —
+`size += value.byteLength`, never `Content-Length`. So the whole of Option C is one option key at
+each of the two listeners. **Measured before any code was written**, on Bun 1.4.0, cap 1000 bytes:
+
+| case | result |
+|---|---|
+| honest 500-byte body | `200`, handler sees 500 |
+| honest 5000-byte body, `Content-Length: 5000` | `413` |
+| **chunked 5000 bytes, NO `Content-Length`** | **`413` — the cap counts bytes** |
+| lying `Content-Length: 100`, 5000 bytes sent | handler sees exactly 100; the excess never arrives |
+
+Decision 4's counted-bytes constraint is therefore met by the flag, and the "counting
+`TransformStream` in srvx middleware" fallback the design named is not needed. (It could not have
+been built as described anyway: srvx's `callMiddleware` passes the **original** request to `next()`
+and discards whatever a middleware returns, so a middleware cannot substitute a limited request.)
+
+### The dependency that measurement also exposed: the Bun floor is now load-bearing
+
+The same experiment on **Bun 1.3.5** gives a different answer: honest oversize → `413`, but the
+**chunked** body of the same size reaches the handler with a `200`. The counted-bytes guarantee
+arrives in Bun 1.4.0. `packages/kn-next/src/cli/vinext-build.ts` already refuses to build under
+1.4.0 — a floor put there for compile correctness — so every shipped binary carries a compliant
+runtime. That floor is now a **security** dependency as well, and lowering it would silently
+downgrade this control, so `scripts/lib/request-byte-cap.mjs` fails if `MIN_BUN_MINOR` drops.
+
+### What shipped
+
+- **Default `8388608` (8 MiB).** This ADR's own arithmetic: 1Gi limit ÷ `containerConcurrency` 20.
+  Deliberately **above** Next's 1 MB `serverActions.bodySizeLimit` so two layers never answer at one
+  threshold.
+- **`:9091` capped at 64 KiB, FIXED.** That listener ran at Bun's 128 MB default on the exact
+  co-resident-pod path this ADR's threat scope names as unbounded. It is not a function of the env
+  knob, so the app-side escape hatch cannot re-open it.
+- **Config surface: env only — `KNEXT_MAX_REQUEST_BYTES`.** Deliberately **not** a CRD field: that
+  would trip both the CRD/public-API trigger and ADR-0017/#548's operator-then-CLI upgrade order for
+  a value `spec.env` already delivers. A CRD field remains available as follow-up, with that
+  upgrade-order consequence written down here at design time as Decision 4 requires.
+  `0` uncaps explicitly and is logged loudly; any invalid value falls back to the default with a
+  warning — a manifest typo must never remove a control.
+- **Cold-start cost: one integer parse at module scope.** No new import, nothing per request.
+
+### The one constraint that could NOT be met, stated rather than quietly dropped
+
+Decision 4 asked that the `413` name which cap fired. **It cannot, in-process.** Bun synthesizes the
+rejection before any user code: the body is empty, there is no `content-type`, and the `error` hook
+does not fire (measured). The only ways to attach a message would be to widen the cap so oversize
+declared-length requests reach a knext handler — weakening the control — or to rebuild the `Request`
+and drop srvx's expando augmentation (the #460 bug-2 class). Both were rejected. The cap is made
+discoverable at **boot** instead (`REQUEST_BYTE_CAP:<bytes> METRICS_BYTE_CAP:<bytes> (<source>)` on
+stdout, every start) and in `hardening.mdx`, which now documents the platform cap as shipped rather
+than the reverse-proxy recipe as the only payload control.
+
+### The clock, honestly
+
+Amendment 2 re-anchored the expiry to "the first sprint close after the vinext-axis compat lane
+publishes its first run", with a v1.0 backstop. **This did not wait for that anchor.** The control
+is roughly four lines; landing it early retires a live security exception, which is strictly better
+than renewing it a third time and strictly better than making a security fix wait on a CI lane.
+Nothing here should be read as the anchor having fired — it is a decision not to need it.
+
+**The dated exception recorded in Decision 4 and §"Why this is admissible under `security.md`" is
+CLOSED as of this amendment.** `security.md`'s "reverse proxy in front for rate/payload limits" is
+now satisfied for **payload** by a platform control on every path, including the co-resident one a
+front proxy never saw. **Rate limiting remains a documented recipe, not a platform feature** — that
+half of the runtime-hardening invariant is still open and must not be claimed as closed.
+
+### Guards
+
+`tests/request-byte-cap.test.ts` (wiring, over a SCAN of every file that serves through `srvx/bun`
+— the five entry copies plus the e2e harness, so a cap wired into two of five reds) and
+`examples/bun-exec/test/request-byte-cap.test.ts` (behavioural, real sockets: honest-413,
+**chunked-413**, under-limit pass-through, bodyless `Upgrade` pass-through, a streaming SSE response
+still streaming, the `:9091` cap with a working scrape, the env override, and `0` uncapping with its
+boot log). Mutation-proved by `scripts/mutation-prove-bytecap.mjs`, 7/7.
