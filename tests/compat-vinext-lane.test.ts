@@ -29,8 +29,18 @@
  */
 
 import { describe, expect, it } from 'bun:test';
-import { accessSync, constants, existsSync, readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import {
+  accessSync,
+  constants,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { summarize } from '../scripts/e2e-summary.mjs';
 
@@ -252,6 +262,76 @@ describe('the packed @getknext/core preflight verifies the compile script — an
   });
 });
 
+describe('the compile-script preflight, RUN as shell against synthetic tarballs', () => {
+  // A YAML-text guard cannot tell a correct `case` from one whose arms are
+  // swapped (present → error, absent → pass). Execute the ACTUAL step script so
+  // an inverted arm reds here: build a real getknext-core tarball with/without
+  // each required entry and assert the exit code the arm produces.
+  const preflightRun = (): string => {
+    const s = steps(parse(LANE)).find((st) => /ships the compile script/i.test(st.name ?? ''));
+    if (!s?.run) throw new Error('the compile-script preflight step must exist with a run block');
+    return s.run;
+  };
+
+  /** Pack a getknext-core-*.tgz under a fresh GITHUB_WORKSPACE/knext-tarballs. */
+  function makeWorkspace(entries: string[]): string {
+    const ws = mkdtempSync(join(tmpdir(), 'vinext-preflight-ws-'));
+    const tarballs = join(ws, 'knext-tarballs');
+    const stage = join(ws, 'stage', 'package');
+    mkdirSync(tarballs, { recursive: true });
+    for (const rel of entries) {
+      const abs = join(stage, rel);
+      mkdirSync(dirname(abs), { recursive: true });
+      // Content is irrelevant — the preflight lists names, never reads bytes.
+      spawnSync('bash', ['-c', `printf 'x' > "${abs}"`]);
+    }
+    // `package/…` is the npm/bun tarball prefix the preflight greps for.
+    const pack = spawnSync(
+      'tar',
+      ['czf', join(tarballs, 'getknext-core-0.0.0.tgz'), '-C', join(ws, 'stage'), 'package'],
+      { encoding: 'utf8' },
+    );
+    if (pack.status !== 0) throw new Error(`tar failed: ${pack.stderr}`);
+    return ws;
+  }
+
+  function runPreflight(entries: string[]): { status: number | null; stderr: string } {
+    const ws = makeWorkspace(entries);
+    try {
+      const r = spawnSync('bash', ['-c', preflightRun()], {
+        env: { ...process.env, GITHUB_WORKSPACE: ws },
+        encoding: 'utf8',
+        timeout: 30000,
+      });
+      return { status: r.status, stderr: `${r.stderr}` };
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  }
+
+  const COMPILE = 'dist/adapters/vinext-compile.js';
+  const SHIM = 'dist/adapters/sharp-addon-dlopen.source.mjs';
+
+  it('exits 0 when BOTH the compile script and the sharp shim are present (the SIGPIPE regression’s scenario)', () => {
+    // This is exactly the tarball run 33965643199 had — a healthy one the old
+    // `tar | grep -q` under pipefail reddened. The fixed `case` must pass it.
+    const r = runPreflight([COMPILE, SHIM]);
+    expect(r.status, `preflight rejected a healthy tarball: ${r.stderr}`).toBe(0);
+  });
+
+  it('exits non-zero, naming the cause, when the compile script is MISSING', () => {
+    const r = runPreflight([SHIM]);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('vinext-compile.js');
+  });
+
+  it('exits non-zero, naming the cause, when the sharp dlopen shim is MISSING', () => {
+    const r = runPreflight([COMPILE]);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('sharp-addon-dlopen');
+  });
+});
+
 describe('the lane publishes its number where the node lane publishes', () => {
   const wf = () => parse(LANE);
 
@@ -299,6 +379,11 @@ describe('summarize() carries the builder axis', () => {
 
   it('omits the key entirely on the node lane, keeping that artifact shape byte-stable', () => {
     const s = summarize('test/e2e/x.test.ts finished on retry 1/3 in 1s', meta);
-    expect(Object.hasOwn(s, 'builder')).toBe(false);
+    // `Object.prototype.hasOwnProperty.call`, not `Object.hasOwn`: the root
+    // typecheck gate's lib does not guarantee es2022, where `Object.hasOwn`
+    // lands (TS2550). biome-ignore is required BOTH ways — its autofix would
+    // rewrite this back to `Object.hasOwn` and re-break the typecheck.
+    // biome-ignore lint/suspicious/noPrototypeBuiltins: Object.hasOwn is es2022; the typecheck lib does not guarantee it (TS2550)
+    expect(Object.prototype.hasOwnProperty.call(s, 'builder')).toBe(false);
   });
 });

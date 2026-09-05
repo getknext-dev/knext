@@ -123,11 +123,12 @@ jobs:
           bun run --filter @getknext/db build
           bun run --filter @getknext/core build
 
-      # `pnpm pack` (never `npm pack`): npm ships pnpm's raw `workspace:^` deps
-      # verbatim, and every fixture install then dies with EUNSUPPORTEDPROTOCOL.
-      # Packed ONCE for the whole run — the vinext deploy script installs these
-      # three, and @getknext/core is what ships dist/adapters/vinext-compile.js,
-      # the compile this lane measures.
+      # `bun pm pack` (never `npm pack`): npm ships the raw `workspace:^` deps
+      # verbatim, and every fixture install then dies with EUNSUPPORTEDPROTOCOL;
+      # bun pm pack rewrites `workspace:^` to real semver exactly as pnpm pack
+      # did. Packed ONCE for the whole run — the vinext deploy script installs
+      # these three, and @getknext/core is what ships
+      # dist/adapters/vinext-compile.js, the compile this lane measures.
       - name: Pack knext tarballs (bun pm pack — rewrites workspace:^, npm-installable)
         working-directory: knext
         run: |
