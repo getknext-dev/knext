@@ -17,6 +17,10 @@
  *       KIngress silently skip (routes never program, no error surfaced)
  *   (e) operator-image anonymous pullability — #198: a private ghcr package
  *       ImagePullBackOffs every fresh cluster the quickstart touches
+ *   (e2) APP-image pullability vs the namespace's pull credentials — #952: a
+ *       private app image (OCIR/private GHCR/ECR are the normal targets) with
+ *       no dockerconfigjson Secret and no imagePullSecrets on the app SA
+ *       ImagePullBackOffs on first deploy; warn BEFORE the pod does
  *   (f) Knative Serving installed
  *   (g) the LOCAL kubectl is new enough (>= v1.25) for `--validate=strict` —
  *       the flag `kn-next deploy` passes explicitly on the NextApp CR apply so
@@ -524,6 +528,13 @@ export async function probeManifest(image: string): Promise<ProbeOutcome> {
 }
 
 const SKIP_UNREACHABLE = "cluster unreachable — check skipped";
+
+/**
+ * User-facing walkthrough for pulling from a private registry (#952): create
+ * the dockerconfigjson Secret, attach it to the app ServiceAccount, redeploy.
+ */
+export const PRIVATE_REGISTRY_DOCS_URL =
+    "https://knext.dev/docs/private-registries";
 
 /**
  * Minimum kubectl CLIENT version for which `--validate=strict` is meaningful.
@@ -1153,6 +1164,229 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
         }
     }
 
+    // (e2, #952) APP image pullability — check (e)'s anonymous-manifest probe,
+    // extended from the operator image to every NextApp's spec.image. The S3-V
+    // evidence: a fresh namespace's first deploy sat in ImagePullBackOff
+    // because the app image lived on a private registry (OCIR/private
+    // GHCR/ECR — the NORMAL targets, not an exotic case) and nothing in the
+    // namespace carried a credential. A not-anonymously-pullable image is only
+    // a problem when no credential is visible, so the warn requires all three:
+    // probe says auth-required, AND no kubernetes.io/dockerconfigjson Secret
+    // in the app's namespace, AND no imagePullSecrets on the app
+    // ServiceAccount (<app>-sa — the SA the operator creates and the revision
+    // template names; pull secrets are resolved from it at pod creation).
+    // Honest-status shape throughout (#198/#963 precedent): an unreachable
+    // registry or an unreadable Secret/SA degrades to "not verified", NEVER to
+    // a pass — and credential PRESENCE is all this read-only check can see; it
+    // never proves the credential actually authorizes the pull.
+    if (skipAll) {
+        push("app-image", "App image pullable", "skip", SKIP_UNREACHABLE);
+    } else {
+        const apps = deps.kubectl([
+            "kubectl",
+            "get",
+            "nextapps",
+            "--all-namespaces",
+            "-o",
+            "json",
+        ]);
+        const appsInfra = apps.ok ? undefined : infraFailure(apps);
+        if (appsInfra) {
+            push(
+                "app-image",
+                "App image pullable",
+                "error",
+                `${appsInfra.detail} — NextApp image pullability could not be verified`,
+                appsInfra.hint,
+            );
+        } else {
+            // A non-infra list failure (CRD not installed yet) means no
+            // NextApps exist whose images could need pulling.
+            const items = apps.ok
+                ? (safeJson<{
+                      items?: {
+                          metadata?: { name?: string; namespace?: string };
+                          spec?: { image?: string };
+                      }[];
+                  }>(apps.stdout)?.items ?? [])
+                : [];
+            const targets = items.flatMap((i) => {
+                const name = i.metadata?.name;
+                const namespace = i.metadata?.namespace;
+                const image = i.spec?.image;
+                return name && namespace && image
+                    ? [{ name, namespace, image }]
+                    : [];
+            });
+            if (targets.length === 0) {
+                push(
+                    "app-image",
+                    "App image pullable",
+                    "skip",
+                    "no NextApps on this cluster — nothing to verify",
+                );
+            } else {
+                // Evidence buckets; the row's status is the WORST bucket hit
+                // (fail > warn > skip > pass) and the detail names every
+                // non-empty one, so a mixed cluster never hides an app.
+                const notFound: string[] = [];
+                const noCreds: string[] = [];
+                const credsUnknown: string[] = [];
+                const withCreds: string[] = [];
+                const anonymous: string[] = [];
+                const unreachable: string[] = [];
+                // Two caches: apps often share an image, and a namespace's
+                // Secret list answers for every app in it.
+                const probeCache = new Map<string, ProbeOutcome>();
+                const nsSecretCache = new Map<
+                    string,
+                    "has" | "none" | "unknown"
+                >();
+                for (const t of targets) {
+                    let outcome = probeCache.get(t.image);
+                    if (outcome === undefined) {
+                        outcome = await deps.probeImage(t.image);
+                        probeCache.set(t.image, outcome);
+                    }
+                    const label = `${t.namespace}/${t.name} (${t.image})`;
+                    if (outcome === "ok") {
+                        anonymous.push(label);
+                        continue;
+                    }
+                    if (outcome === "not-found") {
+                        notFound.push(label);
+                        continue;
+                    }
+                    if (outcome === "unreachable") {
+                        unreachable.push(label);
+                        continue;
+                    }
+                    // auth-required: is a credential visible on either
+                    // carrier? SA first — it is what pods actually resolve.
+                    const sa = deps.kubectl([
+                        "kubectl",
+                        "get",
+                        "serviceaccount",
+                        `${t.name}-sa`,
+                        "-n",
+                        t.namespace,
+                        "-o",
+                        "json",
+                    ]);
+                    let saState: "has" | "none" | "unknown";
+                    if (sa.ok) {
+                        const parsed = safeJson<{
+                            imagePullSecrets?: { name?: string }[];
+                        }>(sa.stdout);
+                        saState =
+                            (parsed?.imagePullSecrets?.length ?? 0) > 0
+                                ? "has"
+                                : "none";
+                    } else {
+                        // A missing SA (operator not yet reconciled) carries
+                        // no credential — that is a fact, not an unknown.
+                        saState =
+                            classifyKubectlFailure(sa.stderr) === "not-found"
+                                ? "none"
+                                : "unknown";
+                    }
+                    let nsState = nsSecretCache.get(t.namespace);
+                    if (nsState === undefined) {
+                        const secrets = deps.kubectl([
+                            "kubectl",
+                            "get",
+                            "secrets",
+                            "-n",
+                            t.namespace,
+                            "-o",
+                            "json",
+                        ]);
+                        if (secrets.ok) {
+                            const secretItems =
+                                safeJson<{ items?: { type?: string }[] }>(
+                                    secrets.stdout,
+                                )?.items ?? [];
+                            nsState = secretItems.some(
+                                (s) =>
+                                    s.type === "kubernetes.io/dockerconfigjson",
+                            )
+                                ? "has"
+                                : "none";
+                        } else {
+                            nsState =
+                                classifyKubectlFailure(secrets.stderr) ===
+                                "not-found"
+                                    ? "none"
+                                    : "unknown";
+                        }
+                        nsSecretCache.set(t.namespace, nsState);
+                    }
+                    if (saState === "has") {
+                        withCreds.push(
+                            `${label}: imagePullSecrets on ServiceAccount ${t.name}-sa`,
+                        );
+                    } else if (nsState === "has") {
+                        withCreds.push(
+                            `${label}: a kubernetes.io/dockerconfigjson Secret exists in ${t.namespace}`,
+                        );
+                    } else if (saState === "none" && nsState === "none") {
+                        noCreds.push(label);
+                    } else {
+                        credsUnknown.push(label);
+                    }
+                }
+                const parts: string[] = [];
+                if (notFound.length > 0) {
+                    parts.push(
+                        `${notFound.join(", ")} does not exist on its registry — new nodes cannot pull it, pods go ImagePullBackOff (anything still running survives only on node-cached layers)`,
+                    );
+                }
+                if (noCreds.length > 0) {
+                    parts.push(
+                        `${noCreds.join(", ")} is NOT anonymously pullable and NO pull credential is visible — the namespace has no kubernetes.io/dockerconfigjson Secret and the app ServiceAccount lists no imagePullSecrets, so pods will sit in ImagePullBackOff (the registry answers 401/403, e.g. "Anonymous users are only allowed read access") (#952)`,
+                    );
+                }
+                if (credsUnknown.length > 0) {
+                    parts.push(
+                        `${credsUnknown.join(", ")} is NOT anonymously pullable and doctor could not verify pull credentials (reading the namespace's Secrets and the app ServiceAccount was denied or failed) — treat the image as unpullable until verified`,
+                    );
+                }
+                if (unreachable.length > 0) {
+                    parts.push(
+                        `${unreachable.join(", ")}: registry unreachable (offline?) — pullability not verified`,
+                    );
+                }
+                if (withCreds.length > 0) {
+                    parts.push(
+                        `${withCreds.join("; ")} — not anonymously pullable, but a pull credential is present (doctor verifies presence, not that the credential authorizes the pull)`,
+                    );
+                }
+                if (anonymous.length > 0) {
+                    parts.push(`${anonymous.join(", ")} anonymously pullable`);
+                }
+                const status: CheckStatus =
+                    notFound.length > 0
+                        ? "fail"
+                        : noCreds.length > 0 || credsUnknown.length > 0
+                          ? "warn"
+                          : unreachable.length > 0
+                            ? "skip"
+                            : "pass";
+                const hint =
+                    noCreds.length > 0 || credsUnknown.length > 0
+                        ? `create the registry credential and attach it to the app ServiceAccount, then redeploy — pull secrets are resolved at pod creation, so patching the SA alone does not rescue a running revision: kubectl create secret docker-registry <name> -n <namespace> --docker-server=… --docker-username=… --docker-password=…; full walkthrough: ${PRIVATE_REGISTRY_DOCS_URL}`
+                        : undefined;
+                push(
+                    "app-image",
+                    "App image pullable",
+                    status,
+                    parts.join("; "),
+                    hint,
+                );
+            }
+        }
+    }
+
     // (f) Knative Serving present
     if (skipAll) {
         push("knative", "Knative Serving", "skip", SKIP_UNREACHABLE);
@@ -1551,6 +1785,7 @@ const DOCTOR_HELP = `kn-next doctor — cluster-prereq preflight (read-only)
 
 Checks: NextApp CRD, operator readiness, cert-manager webhook, Knative
 ingress-class vs its reconciler (#208), operator-image pullability (#198),
+app-image pullability vs the namespace's pull credentials (#952),
 Knative Serving, CNI NetworkPolicy enforcement (whether the cluster can\nenforce the operator's default-on policy — on flannel it cannot), and the\nlocal kubectl's --validate=strict support. Exit 1 on
 hard FAILs and on probe ERRORs (a check's kubectl
 probe hit a network/TLS/credential/RBAC failure — the cluster state could not
