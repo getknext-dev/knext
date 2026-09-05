@@ -209,7 +209,7 @@ ISR clause is NOT MET on the shipped (vinext) target** — consistent with #906'
 pure function with `REDIS_URL` deleted. This is the row the plan predicted could only be closed
 here, and it closed red.
 
-### F — skew guard · **OBSERVED — the guard cannot fire on the vinext axis (criterion-3 finding)**
+### F — skew guard · **OBSERVED on 9e96881e — no vinext guard in this tree (topology; see re-attribution below and the merged-tree re-run)**
 
 ```
 F.1  recorded resourceVersion of nextapp/knext-s3-app: 12546
@@ -227,10 +227,13 @@ F.3  kn-next gc → exit 0, "no object storage configured — nothing to reap �
      mode, not a failure" — correct, and it reaped nothing (trivially satisfies "nothing from F.2").
 ```
 
-**The id-flow / skew-abort half of exit criterion 3 is UNVERIFIABLE-BY-DESIGN on the only
-supported target** (ADR-0048 made vinext the only target; the guard is a `.next`-shape check).
-The CR-apply atomicity half of criterion 3 (abort before apply on push/upload failure) was not
-separately exercised.
+**RE-ATTRIBUTION (2026-09-05, post-run correction from the lead):** `origin/agent/s2-tail` does
+NOT contain #920 (`agent/s2-skew-chain`) — the skew-chain is a sibling branch off
+`agent/s2-byte-cap`, never merged into the hardening chain (`git merge-base --is-ancestor` says
+not-in). So the F.1 result above is evidence of **tree topology** — on a tree where the vinext
+skew guard does not exist, "cannot fire" is the expected behaviour, not a defect in #920. The
+observations stand as facts about `9e96881e`; the *verdict* moves to the re-run below.
+See "Row F re-run on the merged tree".
 
 ### G — byte cap on the wire · **OBSERVED (green, all six)**
 
@@ -336,6 +339,49 @@ the *second* (post-upgrade) deploy; the 00:25 abort left **no NextApp at all** i
 
 ---
 
+## Row F re-run on the merged tree (subject + #920)
+
+Scratch branch `agent/s3-verify-with-920` = `origin/agent/s2-tail` (9e96881e) + a **clean,
+conflict-free merge** of `origin/agent/s2-skew-chain` (baf435fd) → merge SHA
+**b7c1155171a8eaaa52a73e46155ceb127c075d42**. Packages rebuilt from that tree; the app invoked the
+merged-tree `dist/cli/kn-next.js` directly. Run on the still-running kind cluster.
+
+**Scope fact first:** #920's T2a vinext guard (`deploy.ts:497-523` on the merged tree) is scoped
+to deploys that actually upload — `hasStorage(config) && !options.skipUpload` — with the rationale
+in-code: in no-storage mode there is no prefix/GC correspondence to protect. The kind app was
+storage-less, so a `storage` block (`provider: s3`, deliberately nonexistent bucket) was added to
+bring the deploy into the guard's scope. The mismatch case aborts BEFORE any upload/push/apply, so
+the fake bucket is never touched on the negative path.
+
+```
+F.1  resourceVersion before: 15464
+     deploy --skip-build -t skew-probe-mismatch   (merged-tree CLI, .output prefix = 694ed3c1-…)
+       → exit 1, message:
+         ".output/public/_next/static/skew-probe-mismatch/ does not exist (prefix-missing;
+          found: 694ed3c1-b38d-4a37-9003-5897a8523ec8, chunks). Skew-protection asset retention
+          requires the static prefix to BE the deploy tag. You passed --skip-build, …"
+       → zero docker/upload/apply log lines; resourceVersion after: 15464 (UNCHANGED)  ✓
+F.pos deploy --skip-build -t 694ed3c1-b38d-4a37-9003-5897a8523ec8   (the MATCHING tag)
+       → guard PASSED (no prefix sentence), proceeded to "Running parallel tasks: asset upload +
+         Docker build", then failed on the nonexistent bucket (aws s3 sync non-zero)
+       → exit 1, and resourceVersion STILL 15464 — a post-guard failure never reaches the CR
+         apply (the ADR-0011 abort-before-apply leg, observed rather than asserted)  ✓
+```
+
+**Verdict: on the merged tree the vinext skew guard fires on mismatch with the fixed sentence and
+an untouched cluster, passes on match, and post-guard failures preserve CR-apply atomicity.**
+Remaining scope note, not a defect: the guard is inert in no-storage mode by documented design,
+and the positive *GC/retention* case (F.2/F.3 with a real bucket) was not run — no real bucket was
+available; that residue is a storage-backed e2e, not a kind gap.
+
+**Row E re-checked on the merged tree's account:** the merge diff contains **zero ISR-path files**
+(only deploy/build/cr-builder/asset-upload, `next.config` `generateBuildId` templates, tests,
+prover, docs — full `--stat` verified), and the live probes repeated against the running app:
+`/isr` → MISS + `no-store` twice, Redis `DBSIZE` = 0. **Row E's red stands unchanged with #920
+merged** — #920 wires the NEXT_DEPLOYMENT_ID chain, not ISR.
+
+---
+
 ## Verdict table
 
 | row | kind | OKE | negative half recorded |
@@ -347,16 +393,20 @@ the *second* (post-upgrade) deploy; the 00:25 abort left **no NextApp at all** i
 | C | OBSERVED green after C-1a/C-1c/C-2 fixes | OBSERVED green | C.4 restartCount 0/0 at ≥5 min on BOTH clusters |
 | D | OBSERVED green (5,343,524 → 17,380 B avif) | OBSERVED green (→ 16,438 B avif) | D.3 bytes < source ✓; D.4 log-grep empty (no such log line exists) |
 | E | **OBSERVED RED** — no HIT/STALE, Redis empty | **OBSERVED RED** — same | E.5 key does NOT exist; E.6 unreachable |
-| F | OBSERVED — guard cannot fire on vinext shape (exit 0, CR 12546→14114 on induced mismatch) | preflight abort OBSERVED (exit≠0, cluster untouched) | F.1 resourceVersion comparison done; F.2 inconclusive by construction (no storage) |
+| F | 9e96881e: no vinext guard in tree (topology — #920 is a sibling, expected). **Merged tree b7c11551: OBSERVED GREEN** — mismatch → exit 1 + fixed sentence + resourceVersion 15464 unchanged; match → guard passes; post-guard failure still never touches the CR | preflight abort OBSERVED (exit≠0, cluster untouched) | resourceVersion compared on both legs; F.2/F.3 retention needs a real bucket (not run) |
 | G | OBSERVED green (6/6) | OBSERVED green (6/6) | G.2 chunked-no-CL 413 ✓; G.4+G.5 metrics 200-while-capped ✓ |
 | H | OBSERVED green | OBSERVED green | H.2 dependency-down health 200 ✓ |
 
-**Exit criteria 2 and 3 (sprint-2 close): NOT closed.**
-- Criterion 2: boots/READY/image-optimization **green on both clusters**, but the **ISR clause is
-  red** — no scaffolded vinext app caches ISR to Redis at this SHA (row E, both clusters).
-- Criterion 3: the CR-schema preflight abort is green (observed, side-effect-free), but the
-  **NEXT_DEPLOYMENT_ID lock-step guard structurally cannot fire** on the only supported (vinext)
-  artifact shape, and asset retention is vacuous without a storage block.
+**Exit criteria (sprint-2 close), re-scored after the #920 re-run:**
+- **Criterion 2: NOT closed.** Boots/READY/image-optimization **green on both clusters**, but the
+  **ISR clause is red** — no scaffolded vinext app caches ISR to Redis, on 9e96881e AND with #920
+  merged (row E; the merge touches no ISR-path file).
+- **Criterion 3: substantially closed on the merged tree, open on `agent/s2-tail` itself.** The
+  skew guard's loud abort (fixed sentence, exit ≠ 0, unchanged resourceVersion), its pass-on-match,
+  the post-guard abort-before-apply atomicity, and the #548 CRD preflight abort are all OBSERVED.
+  Still unobserved: the retention/GC positive case against a real bucket (F.2/F.3), and none of
+  this exists on `agent/s2-tail` until #920 actually lands — the criterion closes only on the tree
+  that merges the skew-chain.
 
 ## Findings index (fix, don't propagate)
 
@@ -376,8 +426,11 @@ the *second* (post-upgrade) deploy; the 00:25 abort left **no NextApp at all** i
    default-configured Knative install (kind repro; OKE's config dodges it).
 8. **E** ISR→Redis unwired on the vinext axis (RuntimeContract item 4 "explicitly deferred") — the
    half #906's unit prover cannot see, observed red on both clusters.
-9. **F** skew lock-step guard is `.next`-shape-only; deploy.ts also overwrites the env var, so the
-   guard is unreachable on the shipped target.
+9. ~~**F** skew lock-step guard is `.next`-shape-only~~ — **RE-ATTRIBUTED, not a defect**: true
+   only of `agent/s2-tail`'s topology (the #920 skew-chain is an unmerged sibling). With #920
+   merged the vinext guard exists, fires, and preserves atomicity — see "Row F re-run on the
+   merged tree". The actionable remainder is sequencing: criterion 3 needs #920 in the tree it is
+   scored against.
 10. **B-6** no pull-secret story for private registries: operator-created SA has no imagePullSecrets;
     every working namespace was hand-patched.
 
