@@ -23,7 +23,7 @@ import {
 
 /**
  * The full set of `knext_*` metric BASE names the runtime registers on the
- * :9091 registry — the single source of truth a dashboard query may reference.
+ * :9464 registry — the single source of truth a dashboard query may reference.
  * Derived from the metrics.ts constants (not re-typed) so the two can never
  * drift.
  */

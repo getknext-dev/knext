@@ -123,7 +123,7 @@ const MUTATIONS = [
     id: 'M7',
     expect: 'red',
     claim:
-      'the threat model claims :9091 discloses a series the compiled binary does not emit — ' +
+      'the threat model claims :9464 discloses a series the compiled binary does not emit — ' +
       'overstating an exposure erodes a security document as surely as understating one, and ' +
       'this exact list already had to be corrected twice',
     subject: 'threatModel',
@@ -135,7 +135,7 @@ const MUTATIONS = [
     expect: 'red',
     claim:
       'the fenced-section reader stops failing closed on a missing fence — a reflow then silently ' +
-      'unhooks the :9091 disclosure check while the test still reports green',
+      'unhooks the :9464 disclosure check while the test still reports green',
     subject: 'scanner',
     anchor: '    if (start === -1 || end === -1 || end <= start) return null;',
     replacement: '    if (start === -1 || end === -1 || end <= start) return "";',
@@ -144,7 +144,7 @@ const MUTATIONS = [
     id: 'M10',
     expect: 'red',
     claim:
-      'a NEW series appears on :9091 while the threat model still says "six, and no more" — the ' +
+      'a NEW series appears on :9464 while the threat model still says "six, and no more" — the ' +
       'subset check cannot see this direction, and a new series on that port IS new ' +
       'cross-tenant disclosure. Spec review, round 1',
     subject: 'bunexecTemplate',

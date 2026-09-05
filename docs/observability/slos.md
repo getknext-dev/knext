@@ -17,7 +17,7 @@ label, and the scrape setup) is in [`metrics.md`](./metrics.md).
 
 | Series | Exported by |
 | --- | --- |
-| `knext_bunexec_http_requests_total{status_class}` | **runtime** — the compiled executable's `:9091` exposition (`renderMetrics`). Request rate; the `5xx` slice is the error rate |
+| `knext_bunexec_http_requests_total{status_class}` | **runtime** — the compiled executable's `:9464` exposition (`renderMetrics`). Request rate; the `5xx` slice is the error rate |
 | `knext_bunexec_http_request_duration_seconds_bucket{le}` | runtime — same endpoint (golden latency) |
 | `knext_bunexec_http_inflight_requests` | runtime — same endpoint (golden saturation) |
 | `knext_bunexec_startup_duration_seconds` | runtime — set once per process, at listener bind. The cold-start signal |
@@ -33,8 +33,8 @@ label, and the scrape setup) is in [`metrics.md`](./metrics.md).
 **Not on the shipped scrape.** `knext_http_*`, `knext_coldstart_*`,
 `knext_db_wake_*`, `knext_deep_health_state` and every `kn_next_*` series are
 registered by an APP into a prom-client registry served on the app port through
-`/api/metrics`. Since ADR-0048 the runtime no longer merges those onto `:9091`,
-and the shipped `PodMonitor` scrapes `:9091` only — so an SLI written against
+`/api/metrics`. Since ADR-0048 the runtime no longer merges those onto `:9464`,
+and the shipped `PodMonitor` scrapes `:9464` only — so an SLI written against
 one of them is empty unless you add your own scrape config. Those rules live in
 the separate `knext.app.node-legacy` group. See
 [`metrics.md`](./metrics.md#not-on-the-shipped-scrape-app-owned-registries).

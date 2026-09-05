@@ -5,7 +5,7 @@ import { resetClients } from '../clients';
  * #348 (gate fix) — per-pool DB ACTIVITY tracking, so the deep-health scrape
  * only dials Postgres when the app has actually used the DB recently.
  *
- * Without this, the :9091 scrape (every ~30s) ran `checkDeepHealth()` →
+ * Without this, the :9464 scrape (every ~30s) ran `checkDeepHealth()` →
  * `SELECT 1` through the scale-zero-pg gateway on EVERY scrape, re-arming the
  * gateway's 60s DB idle timer → the DB never sleeps while the pod is up. This
  * BREAKS scale-to-zero (the platform's core value prop).

@@ -96,8 +96,13 @@ export const DIVERGENT = {
       'same diff — `git diff` shows the two hunks are textually identical. The divergence this ' +
       'exemption records is still ONLY the image intercept; widening it to also mean "and the ' +
       'byte cap is missing here" would have left the one entry that is actually compiled into ' +
-      'the shipped example binary uncapped, which is the opposite of the point.',
-    sha256: 'bb18bb556b9ededa87715ba1a42cbd5a9515791058224b304c71883da3fe9645',
+      'the shipped example binary uncapped, which is the opposite of the point.\n\n' +
+      'HASH UPDATED for #951 (metrics port 9091 -> 9464): the default METRICS_PORT and every ' +
+      ':9464 prose mention were changed in the template and lifted into this copy in the same ' +
+      'diff — textually identical hunks. The recorded divergence is still ONLY the image ' +
+      'intercept; leaving this copy on 9091 would have kept the one shipped example binary ' +
+      'racing queue-proxy for its port (S3-V Finding C-2).',
+    sha256: '9b5c2da4915e83e38463b67dec6a8ef1a7864d252a0ab49bc170b7009f56c6ab',
   },
 };
 

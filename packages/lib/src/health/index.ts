@@ -112,7 +112,7 @@ function getRedisClient(): RedisClient | null {
   if (redisCache) return redisCache;
   if (!process.env.REDIS_URL) return null;
   // #802: lazy + listened-to + bounded retry. Deep health is on-demand (the
-  // :9091 scrape), so `lazyConnect` costs nothing — the first `ping()` dials —
+  // :9464 scrape), so `lazyConnect` costs nothing — the first `ping()` dials —
   // while the previous shape churned a reconnect loop and printed ioredis's
   // `Unhandled error event` from module scope on every troubled pod.
   // `maxRetriesPerRequest: 1` / `connectTimeout: 2000` are unchanged: a health

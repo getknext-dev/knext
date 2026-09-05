@@ -56,6 +56,15 @@ If Knative routes never become reachable even though Kourier is installed, the u
 missing or wrong `ingress-class`: the routes are never wired to the installed Kourier ingress.
 Setting `ingress-class` explicitly to the controller-qualified value (above) fixes routing.
 
+<Callout type="info">
+**Port `9091` belongs to Knative, not to your app.** On a stock Serving install (default
+`config-observability`), the queue-proxy sidecar binds `:9091` inside every revision pod for its own
+user-metrics server. knext apps therefore serve their Prometheus metrics on **`:9464`** by default —
+no serving ConfigMap needs editing. Do **not** override `METRICS_PORT` to `9091`: the app loses the
+port race against queue-proxy and crash-loops with `EADDRINUSE`. `kn-next doctor` detects this
+collision and says how to resolve it.
+</Callout>
+
 ## 3 · cert-manager
 
 The operator runs a validating webhook, which needs a serving certificate.

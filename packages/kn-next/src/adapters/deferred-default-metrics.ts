@@ -18,7 +18,7 @@
  *
  * By contrast an idle `http.createServer(...).listen(...)` samples nothing — it
  * only wakes on a connection. So the supervisor keeps listening EARLY (the
- * :9091 scrape target must never be a moving target) and defers only the
+ * :9464 scrape target must never be a moving target) and defers only the
  * sampler startup.
  *
  * ## When collection starts
@@ -58,7 +58,7 @@ export const DEFAULT_READY_DEADLINE_MS = 60_000;
 type Env = Record<string, string | undefined>;
 
 export interface DeferredDefaultMetricsOptions {
-    /** Registry the default families are registered on (the :9091 registry). */
+    /** Registry the default families are registered on (the :9464 registry). */
     readonly registry: Registry;
     /** Injected for tests; defaults to prom-client's `collectDefaultMetrics`. */
     readonly collect?: (opts: { register: Registry }) => void | Promise<void>;

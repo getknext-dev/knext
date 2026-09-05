@@ -1175,6 +1175,138 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
         }
     }
 
+    // (h, #951) metrics-port collision with queue-proxy. Knative's queue-proxy
+    // sidecar binds :9091 (its user-metrics server) in EVERY revision pod
+    // whenever serving's `metrics.request-metrics-backend-destination` is
+    // active — and "active" is the stock config-observability default (the key
+    // is absent; only `_example` is set). knext's runtime used to default its
+    // own metrics listener to the same 9091, so on a default-configured
+    // cluster the app lost the port race and crash-looped with EADDRINUSE
+    // (S3-V Finding C-2). The platform default is now :9464; this check exists
+    // for the override path (spec.env.METRICS_PORT) and to teach the
+    // constraint before it costs a debugging session.
+    if (skipAll) {
+        push(
+            "metrics-port",
+            "Metrics-port collision (queue-proxy :9091)",
+            "skip",
+            SKIP_UNREACHABLE,
+        );
+    } else {
+        const obs = deps.kubectl([
+            "kubectl",
+            "get",
+            "configmap",
+            "config-observability",
+            "-n",
+            "knative-serving",
+            "-o",
+            "json",
+        ]);
+        const obsInfra = obs.ok ? undefined : infraFailure(obs);
+        if (obsInfra) {
+            push(
+                "metrics-port",
+                "Metrics-port collision (queue-proxy :9091)",
+                "error",
+                obsInfra.detail,
+                obsInfra.hint,
+            );
+        } else {
+            // Absent configmap or absent key = Knative's default = a live
+            // prometheus request-metrics backend, so queue-proxy binds :9091.
+            const data =
+                (obs.ok
+                    ? safeJson<{ data?: Record<string, string> }>(obs.stdout)
+                          ?.data
+                    : undefined) ?? {};
+            const backend =
+                data["metrics.request-metrics-backend-destination"] ??
+                "prometheus (Knative default — key unset)";
+            const userMetricsActive =
+                data["metrics.request-metrics-backend-destination"] !== "none";
+            if (!userMetricsActive) {
+                push(
+                    "metrics-port",
+                    "Metrics-port collision (queue-proxy :9091)",
+                    "pass",
+                    `request-metrics-backend-destination is "none" — queue-proxy leaves :9091 unbound; knext apps default their metrics listener to :9464 regardless`,
+                );
+            } else {
+                // spec.env is the only knob a NextApp has for moving the port
+                // (the operator injects no METRICS_PORT itself), so scan for
+                // apps pinned onto queue-proxy's 9091.
+                const apps = deps.kubectl([
+                    "kubectl",
+                    "get",
+                    "nextapps",
+                    "--all-namespaces",
+                    "-o",
+                    "json",
+                ]);
+                const appsInfra = apps.ok ? undefined : infraFailure(apps);
+                if (appsInfra) {
+                    push(
+                        "metrics-port",
+                        "Metrics-port collision (queue-proxy :9091)",
+                        "error",
+                        `${appsInfra.detail} — NextApp METRICS_PORT overrides could not be verified`,
+                        appsInfra.hint,
+                    );
+                } else {
+                    // A non-infra list failure (CRD not installed yet) means
+                    // no NextApps exist to collide; the default-port reasoning
+                    // below still holds.
+                    const items = apps.ok
+                        ? (safeJson<{
+                              items?: {
+                                  metadata?: {
+                                      name?: string;
+                                      namespace?: string;
+                                  };
+                                  spec?: { env?: Record<string, string> };
+                              }[];
+                          }>(apps.stdout)?.items ?? [])
+                        : [];
+                    const colliding = items
+                        .filter(
+                            (i) =>
+                                (i.spec?.env?.METRICS_PORT ?? "").trim() ===
+                                "9091",
+                        )
+                        .map(
+                            (i) =>
+                                `${i.metadata?.namespace ?? "?"}/${i.metadata?.name ?? "?"}`,
+                        );
+                    if (colliding.length > 0) {
+                        push(
+                            "metrics-port",
+                            "Metrics-port collision (queue-proxy :9091)",
+                            "fail",
+                            `queue-proxy binds :9091 for its user-metrics server on this cluster ` +
+                                `(request-metrics-backend-destination=${backend}), and ` +
+                                `${colliding.join(", ")} pins METRICS_PORT=9091 — the app loses ` +
+                                `the port race and crash-loops with EADDRINUSE (#951)`,
+                            `move METRICS_PORT off 9091 (knext's default is 9464 and needs no ` +
+                                `override), or set metrics.request-metrics-backend-destination: ` +
+                                `"none" in configmap knative-serving/config-observability`,
+                        );
+                    } else {
+                        push(
+                            "metrics-port",
+                            "Metrics-port collision (queue-proxy :9091)",
+                            "pass",
+                            `queue-proxy owns :9091 on this cluster ` +
+                                `(request-metrics-backend-destination=${backend}); knext apps ` +
+                                `default their metrics listener to :9464 and no NextApp overrides ` +
+                                `METRICS_PORT onto 9091`,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // (i) CNI NetworkPolicy enforcement (#744). The operator reconciles a
     // default-on NetworkPolicy for every app, but flannel — which OKE GA and
     // OrbStack both run — ships no NetworkPolicy controller, so there the

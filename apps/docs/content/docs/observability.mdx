@@ -22,10 +22,19 @@ observability: {
 
 ## Metrics (Prometheus)
 
-The runtime exposes a Prometheus endpoint on **port `9091`**, at `/metrics` — separate from the
+The runtime exposes a Prometheus endpoint on **port `9464`**, at `/metrics` — separate from the
 app's `$PORT`/3000. That is the port knext ships scrape configuration for: the pod is annotated with
-`prometheus.io/port: "9091"` and `prometheus.io/path: /metrics`, and the shipped `PodMonitor`
+`prometheus.io/port: "9464"` and `prometheus.io/path: /metrics`, and the shipped `PodMonitor`
 targets nothing else. The compiled executable serves it in-process; there is no sidecar.
+
+Why `9464` and not the more common `9091`: on a stock Knative Serving install (default
+`config-observability`), the **queue-proxy sidecar binds `:9091`** in every revision pod for its own
+user-metrics server, so an app defaulting to `9091` loses the port race and crash-loops with
+`EADDRINUSE`. `9464` is the conventional OpenTelemetry Prometheus-exporter port and collides with
+nothing Knative runs in the pod. The port is overridable via the `METRICS_PORT` env — but never set
+it to `9091`, and note the default NetworkPolicy's scrape grants are fixed at `9464` (an app that
+moves the port opts out of the shipped scrape path). `kn-next doctor` flags any app pinned onto
+`9091` while queue-proxy's user metrics are active.
 
 Your app may additionally serve its own **`GET /api/metrics`** route — that is where the RUM Web
 Vitals histograms below land. It is a route in your application, not part of the runtime, and the
@@ -66,7 +75,7 @@ kubectl apply -k config/grafana
 They land in the `monitoring` namespace by default. If your Grafana sidecar watches a different
 namespace, apply into it (`kubectl apply -k config/grafana -n <ns>`) or edit the overlay's
 `namespace:` field. The dashboards then graph the per-app metrics your Prometheus already scrapes
-from port `9091`.
+from port `9464`.
 
 | Dashboard | What it shows |
 |---|---|
@@ -89,7 +98,7 @@ the **Datasource** dropdown at the top of the dashboard the first time you open 
 The **replica-count** panel on the scale-to-zero dashboard reads
 `kube_deployment_status_replicas`, which comes from **kube-state-metrics** (the cluster), not from
 knext — so that panel needs kube-state-metrics scraped by the same Prometheus. Every other panel
-reads a `knext_*` series exported on `9091`.
+reads a `knext_*` series exported on `9464`.
 
 ## RUM (Web Vitals)
 
@@ -110,7 +119,7 @@ Each carries three labels: `app`, `route`, and `rating`.
 
 <Callout type="warn">
 **These series are not on the default scrape.** The shipped Prometheus configuration scrapes the
-runtime's metrics port (`9091`), and the Web Vitals histograms live on the app's own
+runtime's metrics port (`9464`), and the Web Vitals histograms live on the app's own
 `/api/metrics` route — so out of the box they are collected but not stored. To use RUM data,
 add a scrape target for your app's `/api/metrics` route to your Prometheus.
 </Callout>

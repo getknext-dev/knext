@@ -30,7 +30,7 @@
 //                      pod-name HOSTNAME is NOT a bind address — it falls
 //                      through to 0.0.0.0 (see resolveBindHost), matching the
 //                      node path so the listener stays reachable in-cluster.
-//   METRICS_PORT       Prometheus port            (default 9091)
+//   METRICS_PORT       Prometheus port            (default 9464)
 //   SHUTDOWN_GRACE_MS  drain hardcap in ms        (default 25000)
 //   KNEXT_MAX_REQUEST_BYTES  request body cap in bytes (default 8388608 = 8 MiB;
 //                      0 = explicitly uncapped, logged loudly). ADR-0044 Option
@@ -125,7 +125,7 @@ const PORT = Number(process.env.PORT ?? 3000);
 // HOSTNAME=<pod-name> in every pod; binding to a pod name makes the server
 // unreachable on 127.0.0.1 / the pod IP (mirrors the node path — see env.ts).
 const HOSTNAME = resolveBindHost(process.env);
-const METRICS_PORT = Number(process.env.METRICS_PORT ?? 9091);
+const METRICS_PORT = Number(process.env.METRICS_PORT ?? 9464);
 const GRACE_MS = Number(process.env.SHUTDOWN_GRACE_MS ?? 25_000);
 // ADR-0044 Option C. One env read and one integer parse at module scope — the
 // cold-start budget for this control is zero measurable delta, and the whole
@@ -160,7 +160,7 @@ const appSrvx = serve({
     // ONE middleware, wrapping every request — which is why the full RED
     // contract (rate / errors / duration) is cheap here and nowhere else. It
     // records the response STATUS CLASS and the wall time, so an error-rate
-    // and a latency SLO are computable from the :9091 scrape; before #792 this
+    // and a latency SLO are computable from the :9464 scrape; before #792 this
     // only counted requests, and neither was. A throw is recorded as 5xx and
     // RE-THROWN — swallowing it would turn a crash into a silent 0-request
     // gap, which is the failure shape this whole change exists to remove.
@@ -194,7 +194,7 @@ const appServer = {
   stop: (force) => appSrvx.close(force),
 };
 
-// ── (2) In-process Prometheus :9091 — a SECOND Bun.serve, bound at listen-time
+// ── (2) In-process Prometheus :9464 — a SECOND Bun.serve, bound at listen-time
 // so a scrape while the runtime is up is always answered (RuntimeContract §2).
 const metricsServer = Bun.serve({
   port: METRICS_PORT,
@@ -218,7 +218,7 @@ const metricsServer = Bun.serve({
 
 // Startup-order signal (RuntimeContract startup-order test): both listeners are
 // bound synchronously above BEFORE this line prints — nothing accepts a first
-// request before the app + :9091 listeners are up.
+// request before the app + :9464 listeners are up.
 // Cold start, measured where it is measurable: both listeners are bound as of
 // this line, and `process.uptime()` covers the Bun bootstrap plus every module
 // evaluation that preceded it — the latency a user waking a scaled-to-zero pod

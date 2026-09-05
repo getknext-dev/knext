@@ -10,7 +10,7 @@
 // SUPERVISOR = shipped CMD `node -e import('@getknext/core/internal/node-server')`
 //              spawning the SAME fixture via STANDALONE_SERVER_PATH.
 // The DELTA is the wrapper's own overhead (parent module load + eager wiring +
-// :9091 bind + spawn + the inherent second Node process). A fast fixture removes
+// :9464 bind + spawn + the inherent second Node process). A fast fixture removes
 // Next's ~1957ms boot so only the supervisor cost remains.
 //
 // Absolute numbers are machine-specific; report the DELTA and the separation. An

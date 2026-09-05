@@ -397,7 +397,7 @@ minutes — this is a real outage, not a wake.
 The alert resolves automatically once a scrape observes the DB reachable again
 (the gauge flips `waking`→`ok`/`up` on the next scrape).
 
-**Why this doesn't break scale-to-zero.** The gauge is refreshed on the :9091
+**Why this doesn't break scale-to-zero.** The gauge is refreshed on the :9464
 scrape by running `checkDeepHealth()`, which issues a real `SELECT 1` through
 the scale-zero-pg gateway — and that would re-arm the gateway's 60s DB idle
 timer on every ~30s scrape, keeping an idle app's DB awake forever. So the

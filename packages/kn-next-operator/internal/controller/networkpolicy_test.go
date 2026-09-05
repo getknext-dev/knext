@@ -123,7 +123,7 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 		// (the architect gate proved this in ADR-0044 round 1). The allowlist:
 		//   8012/8013  queue-proxy serving (http1/h2c) — the ONLY way to the app
 		//   9090       queue-proxy's own metrics
-		//   9091       the app's metrics sidecar (prometheus.io/port stamps 9091,
+		//   9464       the app's metrics sidecar (prometheus.io/port stamps 9464,
 		//              nextapp_controller.go:820 — a queue-proxy-only rule would
 		//              kill scraping; both halves asserted here)
 		// :3000 (the user port) is deliberately ABSENT: queue-proxy reaches it
@@ -153,7 +153,7 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 		// review caught its absence here.
 		Expect(got).To(ContainElements(int32(8012), int32(8013), int32(8112)))
 		By("still admitting BOTH metrics ports — a queue-proxy-only rule kills scraping")
-		Expect(got).To(ContainElements(int32(9090), int32(9091)))
+		Expect(got).To(ContainElements(int32(9090), int32(9464)))
 		By("refusing the app's user port — the direct-dial bypass this exists to close")
 		Expect(got).NotTo(ContainElement(int32(3000)))
 		By("and nothing else — an allowlist that grows silently is how the next bypass lands")
@@ -207,7 +207,7 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 			if hasSameNs {
 				sameNsRules++
 				By("the same-namespace rule admits metrics ports ONLY")
-				Expect(portsOf(rule)).To(ConsistOf(int32(9090), int32(9091)),
+				Expect(portsOf(rule)).To(ConsistOf(int32(9090), int32(9464)),
 					"a same-namespace peer that can reach a serving port is the SCS contract leak")
 			} else {
 				systemRules++
@@ -221,7 +221,7 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 
 	It("admits a LABELLED monitoring namespace on the metrics ports only (#735)", func() {
 		// The operator ships its own PodMonitor (config/prometheus/app-podmonitor.yaml)
-		// in the `system` namespace with `namespaceSelector: any`, scraping :9091
+		// in the `system` namespace with `namespaceSelector: any`, scraping :9464
 		// across every namespace. The policy admitted no third namespace, so on a
 		// policy-enforcing CNI the operator's OWN scrape path was denied — found by
 		// both design gates while reviewing ADR-0044's Option E, and invisible until
@@ -258,11 +258,11 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 			Expect(p.EndPort).To(BeNil(), "a port RANGE reopens what the allowlist closes")
 			ports = append(ports, p.Port.IntVal)
 		}
-		// 9091 ONLY, narrower than the same-namespace rule: the shipped PodMonitor
-		// targets 9091, so admitting queue-proxy's 9090 across namespaces would be
+		// 9464 ONLY, narrower than the same-namespace rule: the shipped PodMonitor
+		// targets 9464, so admitting queue-proxy's 9090 across namespaces would be
 		// breadth without a requirement (code review). Both halves: the port that
 		// IS needed is present, and nothing else is.
-		Expect(ports).To(ConsistOf(int32(9091)),
+		Expect(ports).To(ConsistOf(int32(9464)),
 			"a monitoring namespace gets the APP metrics port only — never the serving ports, and not queue-proxy's 9090")
 
 		By("the selector matches the label EXPLICITLY: an empty selector would admit every namespace")

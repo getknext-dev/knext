@@ -145,6 +145,22 @@ function healthyStubs(): Record<
             ok: true,
             stdout: JSON.stringify({ spec: {} }),
         },
+        // (h, #951) queue-proxy user-metrics DISABLED on the healthy fixture so
+        // the metrics-port check exercises its cleanest pass path; the
+        // stock-default (collision-prone) shape is covered by its own describe.
+        "kubectl get configmap config-observability -n knative-serving -o json":
+            {
+                ok: true,
+                stdout: JSON.stringify({
+                    data: {
+                        "metrics.request-metrics-backend-destination": "none",
+                    },
+                }),
+            },
+        "kubectl get nextapps --all-namespaces -o json": {
+            ok: true,
+            stdout: JSON.stringify({ items: [] }),
+        },
         // (i, #744) a policy-capable CNI runs AND is healthy: enforcement
         // detected. numberReady is not decoration — a calico-node DaemonSet
         // with zero ready pods enforces nothing, so a fixture claiming a
@@ -230,6 +246,7 @@ describe("runDoctor — healthy cluster", () => {
             "ingress",
             "image",
             "knative",
+            "metrics-port",
             "netpol",
         ]);
         for (const c of report.checks) {
@@ -1457,5 +1474,111 @@ describe("inspectKubeconfig — the default local kubeconfig inspector", () => {
         writeFileSync(cfg, "{{{ not yaml");
         stubEnv("KUBECONFIG", cfg);
         expect(inspectKubeconfig()).toEqual({ kind: "has-current-context" });
+    });
+});
+
+describe("runDoctor — metrics-port collision with queue-proxy (#951)", () => {
+    const OBS_KEY =
+        "kubectl get configmap config-observability -n knative-serving -o json";
+    const NEXTAPPS_KEY = "kubectl get nextapps --all-namespaces -o json";
+
+    /**
+     * Stock install: config-observability carries only `_example`, so the
+     * request-metrics backend DEFAULTS to prometheus and queue-proxy binds
+     * :9091 in every revision pod (S3-V Finding C-2).
+     */
+    const stockObservability = {
+        ok: true,
+        stdout: JSON.stringify({ data: { _example: "# commented defaults" } }),
+    };
+
+    const nextapps = (env?: Record<string, string>) => ({
+        ok: true,
+        stdout: JSON.stringify({
+            items: [
+                {
+                    metadata: { name: "shop", namespace: "default" },
+                    spec: env ? { env } : {},
+                },
+            ],
+        }),
+    });
+
+    it("FAILS when queue-proxy user-metrics is active and an app pins METRICS_PORT=9091", async () => {
+        const report = await runDoctor({
+            kubectl: stubKubectl({
+                ...healthyStubs(),
+                [OBS_KEY]: stockObservability,
+                [NEXTAPPS_KEY]: nextapps({ METRICS_PORT: "9091" }),
+            }),
+            probeImage: okProbe,
+        });
+        const check = byId(report.checks)["metrics-port"];
+        expect(check, "doctor has no metrics-port check").toBeDefined();
+        expect(check.status).toBe("fail");
+        expect(check.detail).toContain("default/shop");
+        expect(check.detail).toContain("9091");
+        // Says what to do: move the port, or disable the request-metrics backend.
+        expect(`${check.detail} ${check.hint ?? ""}`).toContain(
+            "request-metrics-backend-destination",
+        );
+        expect(report.exitCode).toBe(1);
+    });
+
+    it("passes on a stock install when no app overrides onto 9091 (knext default avoids the race)", async () => {
+        const report = await runDoctor({
+            kubectl: stubKubectl({
+                ...healthyStubs(),
+                [OBS_KEY]: stockObservability,
+                [NEXTAPPS_KEY]: nextapps(),
+            }),
+            probeImage: okProbe,
+        });
+        const check = byId(report.checks)["metrics-port"];
+        expect(check, "doctor has no metrics-port check").toBeDefined();
+        expect(check.status).toBe("pass");
+        // Names the reserved port so the operator learns the constraint.
+        expect(check.detail).toContain("9091");
+        expect(report.exitCode).toBe(0);
+    });
+
+    it("passes when metrics.request-metrics-backend-destination is none (queue-proxy leaves :9091 unbound)", async () => {
+        const report = await runDoctor({
+            kubectl: stubKubectl({
+                ...healthyStubs(),
+                [OBS_KEY]: {
+                    ok: true,
+                    stdout: JSON.stringify({
+                        data: {
+                            "metrics.request-metrics-backend-destination":
+                                "none",
+                        },
+                    }),
+                },
+                [NEXTAPPS_KEY]: nextapps({ METRICS_PORT: "9091" }),
+            }),
+            probeImage: okProbe,
+        });
+        const check = byId(report.checks)["metrics-port"];
+        expect(check, "doctor has no metrics-port check").toBeDefined();
+        expect(check.status).toBe("pass");
+        expect(report.exitCode).toBe(0);
+    });
+
+    it("classifies a probe-infra failure on the configmap read as ERROR, not a cluster fact (#230)", async () => {
+        const report = await runDoctor({
+            kubectl: stubKubectl({
+                ...healthyStubs(),
+                [OBS_KEY]: {
+                    ok: false,
+                    stderr: "Unable to connect to the server: net/http: TLS handshake timeout",
+                },
+                [NEXTAPPS_KEY]: nextapps(),
+            }),
+            probeImage: okProbe,
+        });
+        const check = byId(report.checks)["metrics-port"];
+        expect(check, "doctor has no metrics-port check").toBeDefined();
+        expect(check.status).toBe("error");
     });
 });
