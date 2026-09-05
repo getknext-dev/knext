@@ -120,7 +120,17 @@ Work the task graph, not the backlog order.
    attributing behaviour to code you read.
 5. **Update the docs** for anything user-visible — the docs site is dogfooded, so it is part of
    delivery, not a follow-up. A feature whose docs land "later" ships undocumented.
-6. **Review** — code review *and* spec review, in parallel.
+   **Enforced, not aspirational (founder-directed, 2026-09-05):** every PR either carries its docs
+   change or states "no user-visible surface changed" in the PR body — and the spec reviewer
+   verifies whichever claim was made, the same way acceptance criteria are verified. A PR that
+   changes CLI flags, config schema, env vars, endpoints, error messages users act on, or default
+   behaviour, with no docs delta and no explicit no-impact claim, is `ISSUES_FOUND` on that ground
+   alone. Docs are user-facing: no issue/PR/ADR numbers or internal codenames in them
+   (`apps/docs/content-hygiene.test.ts` enforces the mechanical half). At **sprint close**, the
+   gates check the aggregate the same way: any user-visible change that shipped in the sprint
+   without its docs is a named condition, not a follow-up.
+6. **Review** — code review *and* spec review, in parallel. The spec reviewer owns the step-5
+   docs check above.
 7. **Sign off** — normally the two reviews above are the gate. Summon architect and/or system
    designer **only** when a trigger fired or a reviewer escalated; the sprint-close review covers
    the rest. Whatever gates ran, a `BLOCK` or `ISSUES_FOUND` means another round — never a
