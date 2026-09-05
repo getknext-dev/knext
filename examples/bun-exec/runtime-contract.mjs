@@ -11,12 +11,16 @@
 //   (2) in-process Prometheus `:9091` exposition,
 //   (3) SIGTERM graceful drain (+ `after()`/waitUntil draining, + hardcap),
 //   (5) Bearer-authenticated, fail-closed mutating-route guard.
-// Items 1 (health), 4 (Redis cache-handler — WIRED: the vinext() plugin's
-// `cache.data` adapter in vite.config.ts registers
-// @getknext/core/internal/vinext-cache-adapter in every server entry, #953),
-// 6 (operator env-injection) and 7 (module-state seam) are covered by the
-// sample app routes / the vite plugin config / the env contract / the
-// globalThis anchor below — see README.md.
+// Items 1 (health), 6 (operator env-injection) and 7 (module-state seam) are
+// covered by the sample app routes / the env contract / the globalThis anchor
+// below — see README.md. Item 4 (Redis cache-handler) is NOT wired in THIS
+// example: it pins vinext@1.0.0-beta.4, which predates the vinext() plugin's
+// `cache.data` option, and it installs standalone (no @getknext/* deps), so
+// ISR here is vinext's per-pod in-memory fallback. The wired form — the
+// plugin registering @getknext/core/internal/vinext-cache-adapter in every
+// server entry (#953) — is what the scaffold templates and the workspace apps
+// carry; this divergence is recorded (with its expiry condition) in
+// scripts/lib/runtime-entry-copies.mjs and vinext-isr-redis-wiring.test.ts.
 
 // The only imports are node: builtins, which resolve identically under node,
 // under bun, and inside the compiled binary — the "dependency-free" property

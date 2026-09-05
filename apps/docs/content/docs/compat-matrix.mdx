@@ -38,7 +38,7 @@ official suite.
 | Static / prerendered routes (`force-static`) | ✅ | Hard-asserts 200 on a `force-static` route. |
 | Middleware (Node runtime, header injection) | ✅ | Hard-asserts a middleware-injected header. Node-runtime middleware only. |
 | Graceful shutdown (SIGTERM drain) | ✅ | Unit-tested drain-on-SIGTERM in the standalone runtime. Not yet exercised end-to-end by `compat-smoke`. |
-| ISR / Data Cache (Redis-backed cache handler) | ⚠️ | Redis cache handler, **not** GCS. `compat-smoke` runs with `REDIS_URL=""` (in-memory fallback) and has no revalidate/ISR-freshness assertion, so ISR correctness is unverified by the gate. |
+| ISR / Data Cache (Redis-backed cache handler) | ✅ | Redis cache handler, **not** GCS — registered by the `vinext()` plugin's `cache.data` adapter in `vite.config.ts` (Next's `cacheHandler` config option is not read by this build; see [ISR & the Redis cache](/docs/isr-caching)). The gate runs against a **real Redis** and asserts behaviour: back-to-back requests served from cache (never `MISS`/`MISS`), the value changing after the revalidate window, the ISR route's **own key present in Redis by name** with a TTL longer than the revalidate window, and no cache-registration failure in the server log. |
 | `next/image` optimization (sharp, avif/webp) | ⚠️ | Implementation landed, but the `compat-smoke` image check is **skip-on-fail**, not a hard gate — so the matrix does not mark this ✅. |
 | Server Actions (`'use server'` mutations) | ⚠️ | Server Actions exist in the app, but no `compat-smoke` or unit assertion exercises a round-trip. Configured, not verified. |
 | Streaming / Suspense (incremental flush) | ❌ | No streaming/Suspense flush assertion and no other evidence. Planned, not built. |

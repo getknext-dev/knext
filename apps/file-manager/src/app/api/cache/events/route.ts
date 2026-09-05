@@ -1,6 +1,14 @@
 import { createRedisClient, ensureDialable } from '@getknext/lib';
 import { NextResponse } from 'next/server';
-import '../../../../cache-init';
+// NOTE: this route used to import `cache-init`, an imperative
+// `setCacheHandler(new CacheHandler())` probe written for Next (where the
+// setter never existed, so it no-opped). Under vinext's next/cache shim the
+// setter IS real, so that import silently became a SECOND registration racing
+// the vinext() plugin's declarative `cache.data` wiring (vite.config.ts) —
+// two handler instances, order-dependent winner. The plugin wiring is the one
+// registration mechanism now; the `globalThis.cacheEvents` fallback this route
+// reads is initialised by the handler module itself, which the registration
+// module loads before any route runs.
 // Reuse the single auth helper from the invalidate route — DELETE here is a
 // mutating endpoint (clears cache events) and must not be open (E4-2, security.md).
 import { withRedMetrics } from '../../_metrics/registry';

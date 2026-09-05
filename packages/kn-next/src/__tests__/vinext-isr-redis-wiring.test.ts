@@ -165,6 +165,72 @@ describe("#953 layer 1 — every vinext() vite config registers the Redis data-c
             ).toBe(true);
         }
     });
+
+    it("the bun-exec exemption SELF-EXPIRES: it is valid only while the example pins vinext beta.4", () => {
+        // The exemption's stated reason is the beta.4 pin (predates the plugin
+        // `cache` option). A reason that nothing re-checks outlives its subject
+        // — the moment someone bumps the example's vinext, this reds and stays
+        // red until the exemption is REMOVED and the example is wired like
+        // every other vinext() config.
+        const pkg = JSON.parse(
+            readFileSync(
+                join(REPO_ROOT, "examples/bun-exec/package.json"),
+                "utf8",
+            ),
+        ) as { dependencies?: Record<string, string> };
+        expect(
+            pkg.dependencies?.vinext,
+            "examples/bun-exec no longer pins vinext@1.0.0-beta.4 — the EXEMPT " +
+                "entry's reason is gone: wire cache.data there and delete the exemption",
+        ).toBe("1.0.0-beta.4");
+    });
+
+    it("NO imperative setCacheHandler/setDataCacheHandler registration exists outside vinext's generated module", () => {
+        // The declarative plugin wiring is the ONE registration mechanism. An
+        // imperative call is how the double-registration hid: apps/file-manager
+        // carried a `setCacheHandler(new CacheHandler())` in cache-init.ts that
+        // predated vinext (a next/cache probe that was a no-op under Next) and
+        // came ALIVE under vinext's next/cache shim — it is why compat-smoke's
+        // ISR check stayed green while every fresh scaffold was row-E red, and
+        // with the plugin wiring added it would register the handler TWICE.
+        // vinext aliases setCacheHandler → setDataCacheHandler, so both names
+        // are scanned.
+        const offenders: string[] = [];
+        const CODE = /\.(ts|tsx|js|jsx|mjs|cjs|hbs)$/;
+        const walk = (dir: string) => {
+            for (const entry of readdirSync(dir, { withFileTypes: true })) {
+                if (entry.isDirectory()) {
+                    if (SKIP_DIRS.has(entry.name)) continue;
+                    if (entry.name === "__tests__") continue;
+                    walk(join(dir, entry.name));
+                    continue;
+                }
+                if (!CODE.test(entry.name)) continue;
+                if (/\.(test|spec)\./.test(entry.name)) continue;
+                const full = join(dir, entry.name);
+                // A CALL, not a mention: comments may (and do) explain the
+                // mechanism, so they are BLANKED before matching — otherwise
+                // the factory's own docstring, which quotes vinext's generated
+                // `setDataCacheHandler(factory(...))` line, would be an
+                // offender and the fix would be deleting the explanation.
+                const src = readFileSync(full, "utf8")
+                    .replace(/\/\*[\s\S]*?\*\//g, "")
+                    .replace(/(^|[^:])\/\/.*$/gm, "$1");
+                if (/\bset(?:Data)?CacheHandler\s*\(/.test(src)) {
+                    offenders.push(
+                        full.slice(REPO_ROOT.length + 1).replaceAll("\\", "/"),
+                    );
+                }
+            }
+        };
+        walk(REPO_ROOT);
+        expect(
+            offenders,
+            "imperative cache-handler registration found — the vinext() plugin's " +
+                "cache.data option is the single registration mechanism (double " +
+                "registration means two handler instances and an order-dependent winner)",
+        ).toEqual([]);
+    });
 });
 
 describe("#953 layer 2 — the adapter subpath the templates reference actually ships", () => {
@@ -356,12 +422,20 @@ describe("#953 layer 3 — vinext's real registration + ISR path writes SET/EX t
         expect(exIndex, "the ISR SET carries no EX — unbounded key").not.toBe(
             -1,
         );
+        // PINNED, not merely bounded. `isrCacheControl(1)` yields
+        // `{ revalidate: 1 }` with NO expire claim, so `__redisTtlSeconds`
+        // takes its no-expire branch: max(revalidate * 2, 3600) = 3600. (A
+        // route whose render CLAIMS an expire — e.g. cacheLife's 1-year
+        // default, which is what a booted file-manager bundle writes — gets
+        // that expire as the TTL instead; this path is the claimless one.)
+        // The exact value is the guard: `EX 1` (TTL == revalidate) is the
+        // #886 regression where the entry is evicted at the moment it becomes
+        // stale-but-servable.
         const ttlSeconds = Number(ttlArgs[exIndex + 1]);
-        expect(ttlSeconds).toBeGreaterThan(1);
         expect(
             ttlSeconds,
-            "Redis TTL must NOT equal revalidate (#886 / #953 acceptance)",
-        ).not.toBe(1);
+            "Redis TTL must be the no-expire floor (3600s), never the revalidate window (#886 / #953 acceptance)",
+        ).toBe(3600);
 
         // HIT while fresh: served from Redis, body intact, not stale.
         const hit = await isr.isrGet("/isr");
