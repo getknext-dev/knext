@@ -63,8 +63,28 @@ export const MUTATION_MARKER = ['KNEXT', 'MUTATION'].join('-');
 
 export class MutationHarnessError extends Error {}
 
-/** Line-comment syntax per file type, used to make the marker inert in-place. */
-const COMMENT_PREFIX = {
+/**
+ * Line-comment syntax per file type, used to make the marker inert in-place.
+ *
+ * EXPORTED (#942 F5) so `tests/mutation-prover-lane.test.ts` can assert at PR
+ * time that every prover subject is markable: an extension absent from this map
+ * with no explicit `commentPrefix` makes `mutate()` THROW before writing — the
+ * release-lane prover died that way at mutation 21 of 22 for weeks while
+ * `declared==run` was cited as proved, because the miss was neither a bad
+ * anchor nor a missing file, the only two things the PR-time audit checked.
+ *
+ * `.lock` is bun.lock — JSONC by bun's own description, `//` is legal.
+ * `.json` carries a caveat: strict JSON has no comments, so a guard that
+ * PARSES its subject will red on the marker line — that is a red for the
+ * wrong reason, and such provers should embed a JSON-legal marker in the
+ * replacement instead (the release-lane prover's mutation 19 shows the
+ * `"//<marker>": …` key form). The entry exists so an unmarked `.json`
+ * mutation FAILS AS A GRADED RED rather than throwing mid-run and leaving
+ * the sweep half-reported.
+ */
+export const COMMENT_PREFIX = {
+  '.json': '//',
+  '.lock': '//',
   '.go': '//',
   '.ts': '//',
   '.tsx': '//',

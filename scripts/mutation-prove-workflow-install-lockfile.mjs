@@ -49,7 +49,7 @@ const validYaml = (mutated) => {
     parse(mutated);
     return undefined;
   } catch (err) {
-    return `release.yml no longer parses as YAML: ${err.message}`;
+    return `the mutated workflow no longer parses as YAML: ${err.message}`;
   }
 };
 
@@ -176,13 +176,39 @@ const MUTATIONS = [
     id: 'M8',
     expect: 'red',
     claim:
-      'a PENDING_FIXES entry goes stale — repointing it at a workflow with no such violation ' +
-      'must red BOTH ways: the entry covers nothing (the self-enforcing staleness assertion), ' +
-      'and the violation it used to cover reds the main assertion. This is what makes the ' +
-      'ledger unable to outlive, or be borrowed beyond, the defect it documents',
-    subject: 'spec',
-    anchor: "    workflow: '.github/workflows/compat-vinext.yml',",
-    replacement: "    workflow: '.github/workflows/does-not-exist.yml',",
+      'the ledger cannot outlive its defect — this simulates PR #917 actually LANDING (the ' +
+      "compat lane's pnpm install becomes a bun install), after which the PENDING_FIXES entry " +
+      'covers no live violation and the staleness assertion must red until the entry is deleted. ' +
+      'Round 1 mutated the entry to point at a nonexistent workflow, which trivially matches ' +
+      'nothing and never exercised the fix-lands path (#942 review, F2)',
+    subject: 'compatWorkflow',
+    anchor: '        run: pnpm install --frozen-lockfile',
+    replacement: '        run: bun install --frozen-lockfile',
+    validate: validYaml,
+  },
+  {
+    id: 'M9',
+    expect: 'red',
+    claim:
+      'an installer hidden behind an echo — chaining `pnpm install --frozen-lockfile` after an ' +
+      '`echo "…"` is a REAL install on the publish path, and a scanner that drops the whole line ' +
+      'on a leading `echo ` token exempts it (#942 review, F3). The echo negative control (M7) ' +
+      'must still hold beside this: quoting the words is data, chaining after them is a command',
+    subject: 'workflow',
+    anchor: PREFLIGHT_STEP,
+    replacement:
+      '      - name: Chatty install (planted — an echo prefix must not exempt the command)\n' +
+      // Assembled from parts so no single literal carries the runnable
+      // `&&-then-pnpm` shape — the same reason MUTATION_MARKER is built from
+      // parts in the harness: `retired-toolchain-prose.test.ts` scans every
+      // script's string literals for pnpm-in-command-position, and this text
+      // exists precisely to BE that defect, planted and restored, never an
+      // instruction to a reader.
+      '        run: echo "installing dependencies" &' +
+      '& pnpm install --frozen-lockfile\n' +
+      '\n' +
+      `${PREFLIGHT_STEP}`,
+    validate: validYaml,
   },
 ];
 
@@ -191,6 +217,7 @@ const prover = createGuardProver({
   spec: SPEC,
   subjects: {
     workflow: '.github/workflows/release.yml',
+    compatWorkflow: '.github/workflows/compat-vinext.yml',
     spec: SPEC,
   },
 });

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse } from 'yaml';
 
@@ -114,22 +114,38 @@ interface Installer {
 /** A command position: start of line/literal, or after a separator — never a substring of prose. */
 const cmd = (re: RegExp) => (line: string) => re.test(line);
 
+/**
+ * Alias coverage is part of the scan thesis (#942 F4): `pnpm i`, `bun i`,
+ * `npm clean-install` and yarn's frozen modes are the same defect spelled
+ * differently, and a matcher that knows only the spelling that already bit is
+ * an enumeration wearing a scan's clothes. `npm install`/`pnpm add` etc. stay
+ * out of scope — they do not REQUIRE a lockfile, so a missing one is drift
+ * there, not death.
+ */
 const INSTALLERS: readonly Installer[] = [
   {
     tool: 'pnpm',
     lockfile: 'pnpm-lock.yaml',
-    matches: cmd(/(?:^|[\s;&|(])pnpm\s+install\b/),
+    matches: cmd(/(?:^|[\s;&|(])pnpm\s+(?:install|i)\b/),
   },
   {
     tool: 'npm',
     lockfile: 'package-lock.json',
-    matches: cmd(/(?:^|[\s;&|(])npm\s+ci\b/),
+    matches: cmd(/(?:^|[\s;&|(])npm\s+(?:ci|clean-install|install-clean)\b/),
   },
   {
     tool: 'bun',
     lockfile: 'bun.lock',
     matches: (line) =>
-      /(?:^|[\s;&|(])bun\s+install\b/.test(line) && line.includes('--frozen-lockfile'),
+      /(?:^|[\s;&|(])bun\s+(?:install|i)\b/.test(line) && line.includes('--frozen-lockfile'),
+  },
+  {
+    tool: 'yarn',
+    lockfile: 'yarn.lock',
+    // Classic `--frozen-lockfile`, berry `--immutable`; bare `yarn` with either
+    // flag is also an install.
+    matches: (line) =>
+      /(?:^|[\s;&|(])yarn\b/.test(line) && /--(?:immutable|frozen-lockfile)\b/.test(line),
   },
 ];
 
@@ -172,13 +188,25 @@ const underDir = (wd: string, base: string): boolean =>
   base === '.' || wd === base || wd.startsWith(`${base}/`);
 
 /**
- * True when `lockfile` exists at `dir` or any ancestor up to the repo root —
- * the same upward workspace-root discovery pnpm, npm and bun all perform.
+ * Every TRACKED file, so lockfile existence is judged against what CI will
+ * check out — an untracked local lockfile must not make this green here and
+ * red in CI (the corpus above is `git ls-files` for the same reason).
+ */
+const TRACKED_FILES: ReadonlySet<string> = new Set(
+  execFileSync('git', ['ls-files', '-z'], { cwd: REPO_ROOT, maxBuffer: 64 * 1024 * 1024 })
+    .toString('utf8')
+    .split('\0')
+    .filter(Boolean),
+);
+
+/**
+ * True when `lockfile` is TRACKED at `dir` or any ancestor up to the repo root
+ * — the same upward workspace-root discovery pnpm, npm and bun all perform.
  */
 function lockfileReachable(dir: string, lockfile: string): boolean {
   let current = dir;
   for (;;) {
-    if (existsSync(resolve(REPO_ROOT, current, lockfile))) return true;
+    if (TRACKED_FILES.has(current === '.' ? lockfile : `${current}/${lockfile}`)) return true;
     if (current === '.') return false;
     const parent = current.includes('/') ? current.slice(0, current.lastIndexOf('/')) : '.';
     current = parent;
@@ -236,72 +264,84 @@ function scanWorkflow(file: string): InstallHit[] {
           '.',
       );
       for (const runLine of step.run.split('\n')) {
-        const command = runLine.trim();
-        // A log line QUOTING an install command is not an install command, and
-        // the harness retry loops print exactly such lines.
-        if (command.startsWith('#') || command.startsWith('echo ') || command.startsWith('echo"')) {
-          continue;
-        }
-        for (const installer of INSTALLERS) {
-          if (!installer.matches(command)) continue;
-          const hit: InstallHit = {
-            workflow: file,
-            line: lineNumberOf(rawLines, runLine.trimEnd() === '' ? command : runLine),
-            jobId,
-            command,
-            tool: installer.tool,
-            lockfile: installer.lockfile,
-            workingDirectory: wd,
-            exemptedBy: null,
-            pendingFix: null,
-            problem: null,
-          };
-          const exception = FOREIGN_CHECKOUTS.find((e) => underDir(wd, e.path));
-          if (exception) {
-            if (foreignHere.get(exception.path) === exception.repository) {
-              hit.exemptedBy = exception.path;
-            } else {
-              hit.problem =
-                `sits under the '${exception.path}' foreign-checkout exception, but this ` +
-                `workflow never checks out ${exception.repository} at that path — the ` +
-                'exception cannot be borrowed for a directory that is not that checkout';
-            }
-          } else if (wd.includes('${{')) {
-            hit.problem =
-              `runs in the dynamic working-directory '${wd}', which this guard cannot ` +
-              'resolve to a lockfile. Use a static path, or add a scoped exception with a dated note.';
-          } else {
-            const selfBase = [...selfPaths]
-              .filter((p) => underDir(wd, p))
-              .sort((a, b) => b.length - a.length)[0];
-            if (selfBase === undefined) {
-              hit.problem =
-                `runs in '${wd}', which is neither inside a checkout of ${SELF_REPOSITORY} ` +
-                'nor a declared foreign-checkout exception — there is nothing there to install';
-            } else {
-              const repoDir =
-                selfBase === '.' ? wd : wd === selfBase ? '.' : wd.slice(selfBase.length + 1);
-              if (!lockfileReachable(repoDir, installer.lockfile)) {
+        const trimmed = runLine.trim();
+        // Bash comments inside the block scalar are never commands.
+        if (trimmed.startsWith('#')) continue;
+        // Quoted text is DATA: blank it before matching, so a log line QUOTING
+        // an install command cannot match (the harness retry loops print
+        // exactly such lines) — while an installer CHAINED after an echo still
+        // can. #942 F3: the old leading-`echo ` skip dropped the WHOLE line,
+        // leaving `echo "…" && pnpm install --frozen-lockfile` silently exempt
+        // (proved red-first: planted exactly that on the publish path and this
+        // guard stayed green).
+        const blanked = trimmed.replace(/"[^"]*"/g, '""').replace(/'[^']*'/g, "''");
+        // Per-command segmentation: `echo` consumes only ITS OWN arguments, not
+        // whatever follows the next shell separator.
+        const segments = blanked.split(/&&|\|\||[;|]/);
+        for (const segment of segments) {
+          const command = segment.trim();
+          if (command === 'echo' || command.startsWith('echo ')) continue;
+          for (const installer of INSTALLERS) {
+            if (!installer.matches(command)) continue;
+            const hit: InstallHit = {
+              workflow: file,
+              line: lineNumberOf(rawLines, runLine.trimEnd() === '' ? command : runLine),
+              jobId,
+              command,
+              tool: installer.tool,
+              lockfile: installer.lockfile,
+              workingDirectory: wd,
+              exemptedBy: null,
+              pendingFix: null,
+              problem: null,
+            };
+            const exception = FOREIGN_CHECKOUTS.find((e) => underDir(wd, e.path));
+            if (exception) {
+              if (foreignHere.get(exception.path) === exception.repository) {
+                hit.exemptedBy = exception.path;
+              } else {
                 hit.problem =
-                  `needs ${installer.lockfile}, which exists neither at '${repoDir}' nor any ` +
-                  'ancestor — this install DIES on its first run, and every step after it is dead ' +
-                  'code. Install with the package manager whose lockfile the repo actually carries.';
+                  `sits under the '${exception.path}' foreign-checkout exception, but this ` +
+                  `workflow never checks out ${exception.repository} at that path — the ` +
+                  'exception cannot be borrowed for a directory that is not that checkout';
+              }
+            } else if (wd.includes('${{')) {
+              hit.problem =
+                `runs in the dynamic working-directory '${wd}', which this guard cannot ` +
+                'resolve to a lockfile. Use a static path, or add a scoped exception with a dated note.';
+            } else {
+              const selfBase = [...selfPaths]
+                .filter((p) => underDir(wd, p))
+                .sort((a, b) => b.length - a.length)[0];
+              if (selfBase === undefined) {
+                hit.problem =
+                  `runs in '${wd}', which is neither inside a checkout of ${SELF_REPOSITORY} ` +
+                  'nor a declared foreign-checkout exception — there is nothing there to install';
+              } else {
+                const repoDir =
+                  selfBase === '.' ? wd : wd === selfBase ? '.' : wd.slice(selfBase.length + 1);
+                if (!lockfileReachable(repoDir, installer.lockfile)) {
+                  hit.problem =
+                    `needs ${installer.lockfile}, which exists neither at '${repoDir}' nor any ` +
+                    'ancestor — this install DIES on its first run, and every step after it is dead ' +
+                    'code. Install with the package manager whose lockfile the repo actually carries.';
+                }
               }
             }
-          }
-          // A PENDING_FIXES entry may cover a REAL violation (never a healthy
-          // install): the hole stays documented here instead of red, and the
-          // staleness assertion below forces the entry out when the fix lands.
-          if (hit.problem !== null) {
-            const pending = PENDING_FIXES.find(
-              (p) => p.workflow === file && p.jobId === jobId && p.command === command,
-            );
-            if (pending) {
-              hit.pendingFix = pending.note;
-              hit.problem = null;
+            // A PENDING_FIXES entry may cover a REAL violation (never a healthy
+            // install): the hole stays documented here instead of red, and the
+            // staleness assertion below forces the entry out when the fix lands.
+            if (hit.problem !== null) {
+              const pending = PENDING_FIXES.find(
+                (p) => p.workflow === file && p.jobId === jobId && p.command === command,
+              );
+              if (pending) {
+                hit.pendingFix = pending.note;
+                hit.problem = null;
+              }
             }
+            hits.push(hit);
           }
-          hits.push(hit);
         }
       }
     }
