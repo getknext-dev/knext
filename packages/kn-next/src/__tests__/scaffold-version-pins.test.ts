@@ -99,7 +99,11 @@ describe("scaffold templates — @getknext pins derive, never hardcode (#950)", 
     it("no template file anywhere carries a literal @getknext version pin", () => {
         // Scan, don't enumerate: a NEW template file with a hardcoded pin must
         // fail here without anyone remembering to list it.
-        const hardcodedPin = /@getknext\/[\w-]+["']?\s*[:@]\s*["']?[~^=]?\d/;
+        // `[~^=<>]{0,2}` covers every semver range operator (`^` `~` `=` `>`
+        // `<` `>=` `<=`), with optional space before the digits — a `>=0.3.1`
+        // pin is the same defect as a `^0.3.1` one.
+        const hardcodedPin =
+            /@getknext\/[\w-]+["']?\s*[:@]\s*["']?[~^=<>]{0,2}\s*\d/;
         for (const [rel, source] of loadTemplates()) {
             expect(
                 hardcodedPin.test(source),

@@ -440,12 +440,24 @@ export async function createMain(argv: string[]): Promise<number> {
         // registry stays silent; the scaffold-install nightly is the check
         // that treats unreachable as red. Skipped for --dry-run (no files were
         // written, and a listing should not wait on the network).
+        //
+        // Structurally unable to fail the scaffold: this sits inside the
+        // command's try/catch, so an unexpected throw here would turn an
+        // ALREADY-SUCCESSFUL scaffold into exit 1 — its own catch makes
+        // "never a gate" a property of the shape, not of checkPinsPublished's
+        // internal care.
         if (!values["dry-run"]) {
-            const verdict = await checkPinsPublished(
-                scaffoldGetknextPins(files),
-            );
-            if (verdict.kind === "missing") {
-                process.stderr.write(unpublishedPinsWarning(verdict.missing));
+            try {
+                const verdict = await checkPinsPublished(
+                    scaffoldGetknextPins(files),
+                );
+                if (verdict.kind === "missing") {
+                    process.stderr.write(
+                        unpublishedPinsWarning(verdict.missing),
+                    );
+                }
+            } catch {
+                // The probe is advisory; the files are already written.
             }
         }
         return 0;

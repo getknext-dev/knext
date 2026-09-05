@@ -152,7 +152,13 @@ export async function checkPinsPublished(
 /**
  * The warning `create` prints when the pins cannot install. Speaks the
  * scaffold persona's language (a Next.js developer, not a knext contributor):
- * what will fail, why, and the two ways out.
+ * what will fail, why, and the ways out.
+ *
+ * Deliberately does NOT recommend re-running create with the latest published
+ * CLI: whether that release can scaffold at all is a registry fact this
+ * warning cannot know (at the time of writing it could not — the published
+ * 0.3.0 ships neither the `create` verb nor the templates, #964), and a
+ * remedy that fails is worse than none.
  */
 export function unpublishedPinsWarning(missing: ScaffoldPin[]): string {
     const list = missing
@@ -163,8 +169,10 @@ export function unpublishedPinsWarning(missing: ScaffoldPin[]): string {
         `${list}\n` +
         "`npm install` will fail with 'notarget' until they are published. This usually\n" +
         "means the kn-next CLI you ran is newer than the latest published release (for\n" +
-        "example, a build from a source checkout). Either re-run create with the latest\n" +
-        "published CLI (`npx @getknext/core@latest ...` exposes `kn-next`), or point the\n" +
-        "generated package.json at locally packed tarballs (`file:` references).\n"
+        "example, a build from a source checkout). Until a release carrying these\n" +
+        "versions lands on the registry, either point the generated package.json at\n" +
+        "locally packed tarballs of the same source tree (`file:` references), or wait\n" +
+        "for the publish and run `npm install` then. The app's files themselves are\n" +
+        "complete and correct.\n"
     );
 }

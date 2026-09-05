@@ -84,10 +84,15 @@ for (const [name, range] of templatePins()) {
     timeout: 120_000,
   });
   if (r.status !== 0) {
-    fail(
-      'template-pins',
-      `npm view ${name}@${range} exited ${r.status}: ${(r.stderr || '').trim().slice(0, 300)}`,
-    );
+    // The REASON can land on either stream: with `--json`, npm >= 11 writes
+    // the E404 error OBJECT to STDOUT and the prose to stderr — a stderr-only
+    // slice reported the most common failure (notarget) with an empty reason.
+    const reason = [r.stderr, r.stdout]
+      .map((s) => (s || '').trim())
+      .filter(Boolean)
+      .join(' | ')
+      .slice(0, 400);
+    fail('template-pins', `npm view ${name}@${range} exited ${r.status}: ${reason}`);
   } else if ((r.stdout || '').trim() === '') {
     fail(
       'template-pins',
