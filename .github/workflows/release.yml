@@ -171,10 +171,50 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # ── The version bump MUST pass (FAIL-CLOSED) ──────────────────────────
+      # Split out of the best-effort changesets/action step below so a REAL
+      # release defect — a malformed changeset, a broken bump, a changelog hook
+      # that throws — still turns this job RED. We run the exact command the
+      # action runs (`bun run changeset:version`), assert it exits 0, then
+      # RESTORE the tree so the action below still finds the changesets to
+      # consume and opens/updates the PR from an identical starting point.
+      #
+      # Why this split exists: the action below does the bump AND the PR-open in
+      # ONE step, and that step must be `continue-on-error` (see its comment).
+      # Without validating the bump here first, that continue-on-error would
+      # ALSO swallow a genuine version-bump failure — blanket-greening a real
+      # defect, which is exactly what this must not do.
+      - name: Verify the version bump succeeds (fail-closed)
+        id: bump
+        run: |
+          set -euo pipefail
+          bun run changeset:version
+          # Undo it: the action below re-runs the same bump and opens the PR.
+          # Restore tracked edits/deletions (package.json versions, CHANGELOGs,
+          # the deleted .changeset/*.md) and drop the newly generated untracked
+          # CHANGELOG files, so the action starts from the tree this step did.
+          git checkout -- .
+          git clean -fd
+
       # NO `publish-script` and NO `NODE_AUTH_TOKEN`: this step is structurally
       # incapable of publishing, which is what lets it run unapproved.
-      - name: Create or update the Version Packages PR
+      #
+      # ── Opening the PR is BEST-EFFORT (environment limit, not a defect) ────
+      # `continue-on-error: true` is scoped to THIS step only. The getknext-dev
+      # org/repo toggle "Allow GitHub Actions to create and approve pull
+      # requests" is OFF — a human-only setting — so after the bump succeeds
+      # this step ALWAYS ends in `HttpError: GitHub Actions is not permitted to
+      # create or approve pull requests` and the Version PR is opened by hand
+      # (as it always has been). That is an environment limitation, NOT a
+      # release defect, so it must not paint the main CI rollup permanently red
+      # — two permanently-red lanes trained the rollup to noise, which is how a
+      # live HIGH CVE hid for a whole sprint. The bump above is already
+      # fail-closed and the `release` publish job stays fully fail-closed; only
+      # this PR-open is softened. The moment the org toggle is flipped on, this
+      # step simply starts succeeding — no further change needed.
+      - name: Create or update the Version Packages PR (best-effort)
         id: changesets
+        continue-on-error: true
         uses: changesets/action@8488615a623b1b9c987934bb89eae8af6a946ac1 # v2.1.1
         with:
           # v2 RENAMED EVERY INPUT THIS STEP PASSES, and #831 took the v1→v2 pin
@@ -201,6 +241,70 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── PUSH-INTEGRITY GATE: a swallowed push failure MUST stay red ───────
+      # The `continue-on-error` above swallows more than the PR-create 403. The
+      # action, BEFORE it opens the PR, pushes the `changeset-release/main`
+      # branch with GITHUB_TOKEN (contents:write). So a real push failure —
+      # reduced token scope, new branch protection, a rejected ref — is now
+      # swallowed too, and must NOT be mistaken for the org PR-open limitation.
+      #
+      # This step runs ONLY when the best-effort step above actually failed
+      # (`outcome == 'failure'` — its pre-continue-on-error result). When it
+      # fails, we must distinguish the two causes.
+      #
+      # EXISTENCE IS NOT ENOUGH — assert FRESHNESS. The org toggle is
+      # permanently off, so the action force-pushes `changeset-release/main`
+      # every run and the branch PERSISTS between runs. A bare
+      # `git ls-remote`/existence check would therefore go green on last run's
+      # leftover even when THIS run's push failed — decoration by this repo's
+      # own standard (green when its subject is removed), and the exact
+      # unverified-cause falsehood this PR exists to kill, one level down. So we
+      # fetch the branch and require THIS run's commit ($GITHUB_SHA) to be an
+      # ANCESTOR of the pushed tip: the action bases the branch on the checked-out
+      # HEAD and commits the bump on top, so a fresh push descends from
+      # $GITHUB_SHA, while a stale leftover from an earlier main tip does not.
+      #   - fresh push (descends from $GITHUB_SHA) -> only the PR-open was refused
+      #     (the org toggle) — tolerated.
+      #   - branch missing, unfetchable, OR stale  -> the PUSH failed — a real
+      #     release defect — so FAIL the job.
+      # A fetch failure is a FAILURE, never a pass (a network/ref error must not
+      # read as "fresh"). NO continue-on-error, so `exit 1` reds the lane. On the
+      # merge push (no changesets, action succeeds) `outcome` is 'success' and
+      # this is skipped; if the fail-closed bump step failed, `outcome` is
+      # 'skipped' and this is skipped too (the job is already red at the bump).
+      - name: Assert the version branch push is FRESH (a real push failure stays red)
+        if: steps.changesets.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          if ! git fetch --no-tags origin changeset-release/main; then
+            echo "::error title=Version branch push failed::The version bump PASSED but 'changeset-release/main' could not be fetched from origin — the changesets/action branch push (GITHUB_TOKEN, contents:write) did not land it. That is a real release defect (reduced token scope, branch protection, a rejected ref), NOT the org PR-open limitation. Failing the job."
+            exit 1
+          fi
+          if git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD; then
+            echo "changeset-release/main on origin descends from $GITHUB_SHA — this run's version branch push is FRESH; only the PR-open was refused." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error title=Version branch push failed (stale)::The version bump PASSED but 'changeset-release/main' on origin does NOT descend from this run's commit ($GITHUB_SHA) — this run's push FAILED and only a stale leftover from an earlier run remains. That is a real release defect (reduced token scope, branch protection, a rejected ref), NOT the org PR-open limitation. Failing the job."
+            exit 1
+          fi
+
+      # ── HONEST NUDGE (only when it is genuinely the org limitation) ───────
+      # Gated so it can NEVER assert a cause it did not verify: it runs only
+      # when the bump SUCCEEDED (`steps.bump.outcome == 'success'`) AND the
+      # PR-open step failed (`steps.changesets.outcome == 'failure'`). The
+      # implicit `success()` on this un-annotated `if:` also requires the
+      # push-integrity gate above to have PASSED — so if the push failed (gate
+      # exited 1) this step is skipped and never prints "not a release defect".
+      # The claim is therefore true by construction: bump passed, branch pushed,
+      # only the PR-open was refused.
+      - name: Report the Version PR must be opened by hand
+        if: steps.bump.outcome == 'success' && steps.changesets.outcome == 'failure'
+        run: |
+          echo "::warning title=Version PR must be opened by hand::The version bump PASSED and 'changeset-release/main' was pushed; only opening the Version PR was refused because GitHub Actions cannot create PRs in getknext-dev (the org toggle is OFF, a human-only setting). Open or refresh the 'chore: version packages' PR by hand. This is an environment limitation, not a release defect."
+          {
+            echo "### Version PR: open by hand"
+            echo "The version bump PASSED and the version branch was pushed. Opening the Version PR was refused by the standing org limitation (\`GitHub Actions is not permitted to create or approve pull requests\`), so open/refresh the \`chore: version packages\` PR by hand. Not a release defect."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # Decide whether `release` should start AT ALL.
   #
