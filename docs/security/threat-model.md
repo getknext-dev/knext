@@ -189,11 +189,21 @@ midnight on the expiry date — the same fleet outage the exception exists to av
 
 ### Patching policy — `apk upgrade` on a digest-pinned base (#267)
 
-Runner stages **MAY** run `apk upgrade --no-cache` against a digest-pinned base image
-(precedent: the `apps/file-manager/Dockerfile` runner stage, added in #267). This is not a
-pinning violation, and `scripts/check-base-images-pinned.sh` deliberately does not flag it —
-its scope is `FROM` lines only (the base *input*), not packages resolved at build time.
+Runner/runtime stages of every shipped alpine image run `apk upgrade --no-cache`
+against a digest-pinned base (precedent: the `apps/file-manager/Dockerfile` runner stage,
+added in #267). This is not a pinning violation, and `scripts/check-base-images-pinned.sh`
+deliberately does not flag it — its scope is `FROM` lines only (the base *input*), not
+packages resolved at build time.
 
+- **Whole base, not a named list (#971).** The idiom is a **whole-base** `apk upgrade
+  --no-cache` before the `apk add` of the runtime's link libs — NOT `apk add --upgrade
+  <named packages>`. A named list only patches the packages someone thought to enumerate
+  (libstdc++/libgcc/libcrypto3/libssl3), so the next base-layer HIGH in busybox/zlib/
+  apk-tools/ssl_client recurs and needs a bespoke PR; the whole-base upgrade patches every
+  base package to the branch's current version at once. Package **versions are deliberately
+  not pinned** — a pinned version goes stale like the digest and hard-fails the day the branch
+  drops it. Enforced across the shipped alpine surface by `tests/base-image-cve-hygiene.test.ts`,
+  which scans (not enumerates) so a newly added alpine Dockerfile without the idiom fails.
 - **The base digest pins provenance of the input.** `apk upgrade` pulls only fixes already
   published on the **same pinned alpine stable branch** — it cannot float the base to a
   different alpine release.
@@ -203,6 +213,12 @@ its scope is `FROM` lines only (the base *input*), not packages resolved at buil
   digest on `main` — a scan-failed image is never pullable at a stable tag and never signed.
   PR builds are Trivy-scanned too (report-only — the gate enforces on `main`), and never
   pushed or signed.
+- **The two previously-unscanned shipped alpine bases are now Trivy-scanned (#971).**
+  `apps/docs/Dockerfile`'s runtime (`oven/bun:*-alpine`) and
+  `examples/bun-exec/Dockerfile.node` (`node:22-alpine`) had no image-layer Trivy gate. The
+  `base-image-trivy` matrix in `supply-chain.yml` now scans each pinned base reference
+  (HIGH/CRITICAL, `--ignore-unfixed`, report on PRs / enforce on `main`). A failure there is
+  the signal to bump the pinned digest — the durable maintenance loop, not a reason to unpin.
 - **Digests are still refreshed on intentional bumps.** The in-place upgrade only covers the
   window between a published apk fix and the next digest bump (e.g. c-ares 1.34.8-r0 for
   CVE-2026-33630); it is a complement to digest pinning, not a substitute.

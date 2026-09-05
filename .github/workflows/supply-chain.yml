@@ -332,3 +332,50 @@ jobs:
           IDENTITY_REGEXP: https://github.com/${{ github.repository }}/.*
           DIGEST: ${{ steps.push.outputs.digest }}
         run: bash apps/file-manager/hack/cosign-verify.sh "${IMAGE}@${DIGEST}"
+
+  # ── BASE-IMAGE CVE HYGIENE (#971) ────────────────────────────────────────
+  #
+  # The job above scans the file-manager image, and ci.yml's docs-closure step
+  # scans the docs JS closure — but two SHIPPED alpine BASES had no image-layer
+  # Trivy gate at all: apps/docs/Dockerfile's runtime (oven/bun:*-alpine) and
+  # examples/bun-exec/Dockerfile.node (node:22-alpine). A base-layer HIGH in
+  # busybox/zlib/apk-tools/openssl could sit there unnoticed.
+  #
+  # This scans each PINNED base reference directly (no app build needed — the
+  # concern is the base OS layer, which the reference already carries). The
+  # Dockerfiles additionally run a whole-base `apk upgrade --no-cache` at build
+  # time, so the SHIPPED image is patched even while the pinned digest lags; a
+  # failure HERE is the signal to bump the pinned digest — the durable
+  # maintenance loop ADR-0035 pinning implies, not a reason to unpin.
+  #
+  # `ignore-unfixed: true` mirrors the file-manager gate: only ACTIONABLE
+  # (fix-available) HIGH/CRITICALs fail. Phased like that gate too — report on
+  # PRs, ENFORCE (fail) on main — so a freshly-disclosed base CVE cannot block
+  # an unrelated PR while main stays gated. Guarded by
+  # tests/base-image-cve-hygiene.test.ts.
+  base-image-trivy:
+    name: Trivy — shipped alpine base images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # apps/docs/Dockerfile runtime base.
+          - image: oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb
+          # examples/bun-exec/Dockerfile.node base.
+          - image: node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
+    steps:
+      - name: Trivy scan base image — FAIL on HIGH/CRITICAL
+        # Report (don't block) on PRs; ENFORCE (fail) on main — same phased
+        # rollout as the file-manager image gate above.
+        continue-on-error: ${{ github.ref != 'refs/heads/main' }}
+        # SHA-pinned to match the image gate above.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ matrix.image }}
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+          format: table

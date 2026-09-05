@@ -434,12 +434,23 @@ describe('the reference image keeps the C++ runtime libraries (ADR-0042 A9)', ()
   it('installs libstdc++ and libgcc', () => {
     // Cheap, static echo of what the e2e proves dynamically — this one fails in
     // seconds on a PR, before anyone waits for a container to exit 127.
+    // The `apk add` is no longer at line-start: the runner layer now runs a
+    // whole-base `apk upgrade --no-cache && apk add ... libstdc++ libgcc`
+    // (base-image CVE hygiene), so the anchor matches `apk add` within the RUN.
     expect(dockerfile, 'the musl binary will fail to load without libstdc++').toMatch(
-      /^RUN apk add .*libstdc\+\+/m,
+      /^RUN .*apk add .*libstdc\+\+/m,
     );
     expect(dockerfile, 'the musl binary will fail to load without libgcc').toMatch(
-      /^RUN apk add .*libgcc/m,
+      /^RUN .*apk add .*libgcc/m,
     );
+  });
+
+  it('runs a whole-base apk upgrade so non-named base CVEs are patched too', () => {
+    // Durability (base-image CVE hygiene): a whole-base `apk upgrade` patches
+    // busybox/zlib/apk-tools/ssl_client/openssl to the branch's current version,
+    // not just a hand-picked named list. Cross-checked repo-wide by
+    // tests/base-image-cve-hygiene.test.ts.
+    expect(dockerfile).toMatch(/apk\s+upgrade\s+--no-cache/);
   });
 
   it('does not ship .output/server — the routes are embedded in the binary', () => {
