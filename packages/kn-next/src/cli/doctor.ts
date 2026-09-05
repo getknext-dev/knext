@@ -17,10 +17,12 @@
  *       KIngress silently skip (routes never program, no error surfaced)
  *   (e) operator-image anonymous pullability — #198: a private ghcr package
  *       ImagePullBackOffs every fresh cluster the quickstart touches
- *   (e2) APP-image pullability vs the namespace's pull credentials — #952: a
+ *   (e2) APP-image pullability vs the app SA's pull credentials — #952: a
  *       private app image (OCIR/private GHCR/ECR are the normal targets) with
- *       no dockerconfigjson Secret and no imagePullSecrets on the app SA
- *       ImagePullBackOffs on first deploy; warn BEFORE the pod does
+ *       no imagePullSecrets on the app SA ImagePullBackOffs on first deploy.
+ *       This reads DEPLOYED NextApps, so it catches the standing
+ *       misconfiguration on the cluster; pre-deploy (fresh namespace, no CR
+ *       yet) it reports "nothing to verify" and the docs page is the guard
  *   (f) Knative Serving installed
  *   (g) the LOCAL kubectl is new enough (>= v1.25) for `--validate=strict` —
  *       the flag `kn-next deploy` passes explicitly on the NextApp CR apply so
@@ -151,6 +153,13 @@ export interface DoctorDeps {
      * check (ADR-0047). Defaults to the real cwd loader; tests inject.
      */
     loadAppConfig?: () => Promise<KnativeNextConfig | undefined>;
+    /**
+     * TOTAL time budget for the app-image pullability probes (#952) — the
+     * whole fan-out, not per image, so many dead registries cannot stall
+     * doctor. Images the budget cuts off report "not verified", never a
+     * pass. Defaults to 30s; tests inject 0 to pin the exhausted path.
+     */
+    appImageProbeBudgetMs?: number;
 }
 
 /**
@@ -1169,16 +1178,21 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
     // evidence: a fresh namespace's first deploy sat in ImagePullBackOff
     // because the app image lived on a private registry (OCIR/private
     // GHCR/ECR — the NORMAL targets, not an exotic case) and nothing in the
-    // namespace carried a credential. A not-anonymously-pullable image is only
-    // a problem when no credential is visible, so the warn requires all three:
-    // probe says auth-required, AND no kubernetes.io/dockerconfigjson Secret
-    // in the app's namespace, AND no imagePullSecrets on the app
-    // ServiceAccount (<app>-sa — the SA the operator creates and the revision
-    // template names; pull secrets are resolved from it at pod creation).
+    // namespace carried a credential.
+    //
+    // The ONLY carrier that counts for a pass is the app ServiceAccount
+    // (<app>-sa — the SA the operator creates and the revision template
+    // names): pods resolve pull secrets from the SA at pod creation, and the
+    // operator writes imagePullSecrets nowhere else on the revision template.
+    // A dockerconfigjson Secret sitting in the namespace UNATTACHED is dead
+    // weight — it is the exact "created the secret, skipped the attach"
+    // mistake — so it gets its own WARN, never a pass.
+    //
     // Honest-status shape throughout (#198/#963 precedent): an unreachable
-    // registry or an unreadable Secret/SA degrades to "not verified", NEVER to
-    // a pass — and credential PRESENCE is all this read-only check can see; it
-    // never proves the credential actually authorizes the pull.
+    // registry, an exhausted probe budget, or an unreadable SA degrades to
+    // "not verified", NEVER to a pass — and attachment PRESENCE is all this
+    // read-only check can see; it never proves the credential actually
+    // authorizes the pull.
     if (skipAll) {
         push("app-image", "App image pullable", "skip", SKIP_UNREACHABLE);
     } else {
@@ -1227,28 +1241,71 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
                 );
             } else {
                 // Evidence buckets; the row's status is the WORST bucket hit
-                // (fail > warn > skip > pass) and the detail names every
-                // non-empty one, so a mixed cluster never hides an app.
+                // (warn > skip > pass) and the detail names every non-empty
+                // one, so a mixed cluster never hides an app.
                 const notFound: string[] = [];
                 const noCreds: string[] = [];
+                const unattached: string[] = [];
                 const credsUnknown: string[] = [];
                 const withCreds: string[] = [];
                 const anonymous: string[] = [];
                 const unreachable: string[] = [];
-                // Two caches: apps often share an image, and a namespace's
-                // Secret list answers for every app in it.
-                const probeCache = new Map<string, ProbeOutcome>();
+                const unprobed: string[] = [];
+                // Bounded fan-out: unique images only (apps share images), a
+                // small concurrent pool, and a TOTAL time budget — 20 dead
+                // registries must cost seconds, not 20 × the per-fetch
+                // timeout. Images the budget cuts off are "not verified",
+                // never guessed. (In-flight probes are not cancelled — each
+                // is bounded internally — so the overrun past the deadline is
+                // at most one probe's worth, not the whole queue's.)
+                const budgetMs = deps.appImageProbeBudgetMs ?? 30_000;
+                const deadline = Date.now() + budgetMs;
+                const uniqueImages = [...new Set(targets.map((t) => t.image))];
+                if (uniqueImages.length > 3) {
+                    writeSync(
+                        2,
+                        `doctor: probing ${uniqueImages.length} app images for anonymous pullability (bounded, <=${Math.round(budgetMs / 1000)}s total)\n`,
+                    );
+                }
+                const probeCache = new Map<
+                    string,
+                    ProbeOutcome | "budget-exhausted"
+                >();
+                let nextImage = 0;
+                const worker = async () => {
+                    while (nextImage < uniqueImages.length) {
+                        const image = uniqueImages[nextImage];
+                        nextImage += 1;
+                        if (image === undefined) break;
+                        if (Date.now() >= deadline) {
+                            probeCache.set(image, "budget-exhausted");
+                            continue;
+                        }
+                        probeCache.set(image, await deps.probeImage(image));
+                    }
+                };
+                await Promise.all(
+                    Array.from(
+                        { length: Math.min(4, uniqueImages.length) },
+                        worker,
+                    ),
+                );
+                // Namespace Secret listings answer for every app in the
+                // namespace, so cache per namespace.
                 const nsSecretCache = new Map<
                     string,
                     "has" | "none" | "unknown"
                 >();
                 for (const t of targets) {
-                    let outcome = probeCache.get(t.image);
-                    if (outcome === undefined) {
-                        outcome = await deps.probeImage(t.image);
-                        probeCache.set(t.image, outcome);
-                    }
+                    const outcome = probeCache.get(t.image);
                     const label = `${t.namespace}/${t.name} (${t.image})`;
+                    if (
+                        outcome === "budget-exhausted" ||
+                        outcome === undefined
+                    ) {
+                        unprobed.push(label);
+                        continue;
+                    }
                     if (outcome === "ok") {
                         anonymous.push(label);
                         continue;
@@ -1261,8 +1318,10 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
                         unreachable.push(label);
                         continue;
                     }
-                    // auth-required: is a credential visible on either
-                    // carrier? SA first — it is what pods actually resolve.
+                    // auth-required: the ONLY carrier that counts for a pass
+                    // is the app SA — pods resolve pull secrets from it at
+                    // pod creation, and the operator writes imagePullSecrets
+                    // nowhere else on the revision template.
                     const sa = deps.kubectl([
                         "kubectl",
                         "get",
@@ -1290,45 +1349,49 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
                                 ? "none"
                                 : "unknown";
                     }
-                    let nsState = nsSecretCache.get(t.namespace);
-                    if (nsState === undefined) {
-                        const secrets = deps.kubectl([
-                            "kubectl",
-                            "get",
-                            "secrets",
-                            "-n",
-                            t.namespace,
-                            "-o",
-                            "json",
-                        ]);
-                        if (secrets.ok) {
-                            const secretItems =
-                                safeJson<{ items?: { type?: string }[] }>(
-                                    secrets.stdout,
-                                )?.items ?? [];
-                            nsState = secretItems.some(
-                                (s) =>
-                                    s.type === "kubernetes.io/dockerconfigjson",
-                            )
-                                ? "has"
-                                : "none";
-                        } else {
-                            nsState =
-                                classifyKubectlFailure(secrets.stderr) ===
-                                "not-found"
-                                    ? "none"
-                                    : "unknown";
+                    // The namespace Secret listing is DIAGNOSTIC only — it
+                    // tells "no credential anywhere" apart from "created the
+                    // Secret, skipped the attach". It can never produce a
+                    // pass, so it is fetched only when the SA verifiably has
+                    // nothing, and it is field-selector-narrowed: no Secret
+                    // payloads are materialized, and RBAC can grant the read
+                    // narrowly.
+                    let nsState: "has" | "none" | "unknown" | undefined;
+                    if (saState === "none") {
+                        nsState = nsSecretCache.get(t.namespace);
+                        if (nsState === undefined) {
+                            const secrets = deps.kubectl([
+                                "kubectl",
+                                "get",
+                                "secrets",
+                                "-n",
+                                t.namespace,
+                                "--field-selector",
+                                "type=kubernetes.io/dockerconfigjson",
+                                "-o",
+                                "name",
+                            ]);
+                            if (secrets.ok) {
+                                nsState =
+                                    secrets.stdout.trim() === ""
+                                        ? "none"
+                                        : "has";
+                            } else {
+                                nsState =
+                                    classifyKubectlFailure(secrets.stderr) ===
+                                    "not-found"
+                                        ? "none"
+                                        : "unknown";
+                            }
+                            nsSecretCache.set(t.namespace, nsState);
                         }
-                        nsSecretCache.set(t.namespace, nsState);
                     }
                     if (saState === "has") {
                         withCreds.push(
                             `${label}: imagePullSecrets on ServiceAccount ${t.name}-sa`,
                         );
                     } else if (nsState === "has") {
-                        withCreds.push(
-                            `${label}: a kubernetes.io/dockerconfigjson Secret exists in ${t.namespace}`,
-                        );
+                        unattached.push(label);
                     } else if (saState === "none" && nsState === "none") {
                         noCreds.push(label);
                     } else {
@@ -1337,8 +1400,12 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
                 }
                 const parts: string[] = [];
                 if (notFound.length > 0) {
+                    // A 404 is AMBIGUOUS anonymously: some registries
+                    // (Artifactory, Harbor) answer 404 rather than 401 for
+                    // private repositories, so "does not exist" would
+                    // false-red every such user. Warn with both readings.
                     parts.push(
-                        `${notFound.join(", ")} does not exist on its registry — new nodes cannot pull it, pods go ImagePullBackOff (anything still running survives only on node-cached layers)`,
+                        `${notFound.join(", ")}: 404 anonymously — either the image does not exist on its registry (new nodes cannot pull it; pods go ImagePullBackOff) or the registry hides private repositories behind 404 rather than 401 (Artifactory and Harbor do) — verify the image ref, and attach a pull credential if the repository is private (#952)`,
                     );
                 }
                 if (noCreds.length > 0) {
@@ -1346,9 +1413,14 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
                         `${noCreds.join(", ")} is NOT anonymously pullable and NO pull credential is visible — the namespace has no kubernetes.io/dockerconfigjson Secret and the app ServiceAccount lists no imagePullSecrets, so pods will sit in ImagePullBackOff (the registry answers 401/403, e.g. "Anonymous users are only allowed read access") (#952)`,
                     );
                 }
+                if (unattached.length > 0) {
+                    parts.push(
+                        `${unattached.join(", ")}: a kubernetes.io/dockerconfigjson Secret exists in the namespace but the app ServiceAccount lists no imagePullSecrets — pods resolve pull secrets from the ServiceAccount, NOT from the namespace, so the credential does nothing until attached; attach it, then redeploy (#952)`,
+                    );
+                }
                 if (credsUnknown.length > 0) {
                     parts.push(
-                        `${credsUnknown.join(", ")} is NOT anonymously pullable and doctor could not verify pull credentials (reading the namespace's Secrets and the app ServiceAccount was denied or failed) — treat the image as unpullable until verified`,
+                        `${credsUnknown.join(", ")} is NOT anonymously pullable and doctor could not verify pull credentials (reading the app ServiceAccount, or the namespace's Secrets, was denied or failed) — treat the image as unpullable until verified`,
                     );
                 }
                 if (unreachable.length > 0) {
@@ -1356,26 +1428,35 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
                         `${unreachable.join(", ")}: registry unreachable (offline?) — pullability not verified`,
                     );
                 }
+                if (unprobed.length > 0) {
+                    parts.push(
+                        `${unprobed.join(", ")}: not probed (the app-image probe budget ran out) — pullability not verified`,
+                    );
+                }
                 if (withCreds.length > 0) {
                     parts.push(
-                        `${withCreds.join("; ")} — not anonymously pullable, but a pull credential is present (doctor verifies presence, not that the credential authorizes the pull)`,
+                        `${withCreds.join("; ")} — not anonymously pullable, but a pull credential is attached to the app ServiceAccount (doctor verifies attachment, not that the credential actually authorizes the pull)`,
                     );
                 }
                 if (anonymous.length > 0) {
                     parts.push(`${anonymous.join(", ")} anonymously pullable`);
                 }
-                const status: CheckStatus =
-                    notFound.length > 0
-                        ? "fail"
-                        : noCreds.length > 0 || credsUnknown.length > 0
-                          ? "warn"
-                          : unreachable.length > 0
-                            ? "skip"
-                            : "pass";
+                const hasWarn =
+                    notFound.length > 0 ||
+                    noCreds.length > 0 ||
+                    unattached.length > 0 ||
+                    credsUnknown.length > 0;
+                const status: CheckStatus = hasWarn
+                    ? "warn"
+                    : unreachable.length > 0 || unprobed.length > 0
+                      ? "skip"
+                      : "pass";
                 const hint =
                     noCreds.length > 0 || credsUnknown.length > 0
                         ? `create the registry credential and attach it to the app ServiceAccount, then redeploy — pull secrets are resolved at pod creation, so patching the SA alone does not rescue a running revision: kubectl create secret docker-registry <name> -n <namespace> --docker-server=… --docker-username=… --docker-password=…; full walkthrough: ${PRIVATE_REGISTRY_DOCS_URL}`
-                        : undefined;
+                        : unattached.length > 0
+                          ? `attach the existing Secret to the app ServiceAccount and redeploy — pull secrets are resolved at pod creation: kubectl patch serviceaccount <app>-sa -n <namespace> --patch '{"imagePullSecrets":[{"name":"<secret>"}]}' (the patch REPLACES the whole imagePullSecrets list — include every entry); full walkthrough: ${PRIVATE_REGISTRY_DOCS_URL}`
+                          : undefined;
                 push(
                     "app-image",
                     "App image pullable",

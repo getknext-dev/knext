@@ -12,14 +12,24 @@
  *                               the namespace + no imagePullSecrets on the app
  *                               SA => warn naming ImagePullBackOff, with the
  *                               private-registry docs pointer
- *   - secret-present-pass:      auth-required but a credential is visible
- *                               (either carrier) => pass, worded as
- *                               presence-not-validity
+ *   - sa-attached-pass:         auth-required but the app SA lists
+ *                               imagePullSecrets => pass, worded as
+ *                               attachment-not-authorization. The SA is the
+ *                               ONLY carrier that can pass: pods resolve pull
+ *                               secrets from the SA at pod creation
+ *   - unattached-secret-warn:   auth-required + a dockerconfigjson Secret in
+ *                               the namespace that no SA references => WARN
+ *                               (the created-the-secret-skipped-the-attach
+ *                               mistake), never a pass
  *   - unreachable-not-verified: registry unreachable => "not verified", NEVER
  *                               a pass (the honest-status shape of #198/#963)
- *   - creds-unreadable:         auth-required and RBAC denies reading
- *                               Secrets/ServiceAccounts => warn "could not
- *                               verify", never a pass
+ *   - budget-exhausted:         probe budget 0 => "not verified", never a pass
+ *   - creds-unreadable:         auth-required and RBAC denies reading the
+ *                               SA/Secrets => warn "could not verify", never a
+ *                               pass
+ *   - 404-ambiguity:            not-found => warn (Artifactory/Harbor answer
+ *                               404 for private repos, so "does not exist"
+ *                               would false-red them), not a hard fail
  */
 
 import { describe, expect, it } from "bun:test";
@@ -201,16 +211,14 @@ function healthyStubsWithApp(): Record<
             }),
         },
         // Default credential carriers for team-a: nothing attached. Individual
-        // tests override these two keys to build the secret-present branches.
-        "kubectl get secrets -n team-a -o json": {
-            ok: true,
-            stdout: JSON.stringify({
-                items: [
-                    // an unrelated Opaque secret must NOT count as a credential
-                    { metadata: { name: "app-env" }, type: "Opaque" },
-                ],
-            }),
-        },
+        // tests override these two keys to build the credential branches. The
+        // listing is field-selector-narrowed to dockerconfigjson and -o name
+        // (no Secret payloads are ever materialized).
+        "kubectl get secrets -n team-a --field-selector type=kubernetes.io/dockerconfigjson -o name":
+            {
+                ok: true,
+                stdout: "",
+            },
         "kubectl get serviceaccount shop-sa -n team-a -o json": {
             ok: true,
             stdout: JSON.stringify({
@@ -272,34 +280,38 @@ describe("doctor app-image pullability (#952)", () => {
         expect(report.exitCode).toBe(0);
     });
 
-    it("private image + dockerconfigjson Secret in the namespace => pass, worded presence-not-validity", async () => {
+    it("private image + UNATTACHED dockerconfigjson Secret in the namespace => WARN, never a pass", async () => {
         const stubs = healthyStubsWithApp();
-        stubs["kubectl get secrets -n team-a -o json"] = {
+        stubs[
+            "kubectl get secrets -n team-a --field-selector type=kubernetes.io/dockerconfigjson -o name"
+        ] = {
             ok: true,
-            stdout: JSON.stringify({
-                items: [
-                    {
-                        metadata: { name: "ocir-secret" },
-                        type: "kubernetes.io/dockerconfigjson",
-                    },
-                ],
-            }),
+            stdout: "secret/ocir-secret\n",
         };
         const report = await runDoctor({
             kubectl: stubKubectl(stubs),
             probeImage: probeWith("auth-required"),
         });
         const c = appImageCheck(report.checks);
-        expect(c.status, c.detail).toBe("pass");
+        // The blocking-review fix: pods resolve pull secrets from the
+        // ServiceAccount, not from the namespace, so an unattached Secret is
+        // the exact "created the secret, skipped the attach" mistake — a pass
+        // here would greenlight the failure mode the docs page warns about.
+        expect(c.status, c.detail).toBe("warn");
+        expect(c.status).not.toBe("pass");
         expect(c.detail).toContain("team-a/shop");
-        // presence is verified, authorization is not — the wording must say so
-        expect(c.detail).toMatch(
-            /presence|does not verify|not verified? that/i,
+        expect(c.detail).toMatch(/lists no imagePullSecrets/);
+        expect(c.detail).toMatch(/attach it, then redeploy/);
+        expect(c.hint ?? "").toContain("kubectl patch serviceaccount");
+        // the strategic-merge patch replaces the whole list — the hint says so
+        expect(c.hint ?? "").toMatch(
+            /REPLACES the whole imagePullSecrets list/,
         );
+        expect(c.hint ?? "").toContain(PRIVATE_REGISTRY_DOCS_URL);
         expect(report.exitCode).toBe(0);
     });
 
-    it("private image + imagePullSecrets on the app SA => pass (the SA is a sufficient carrier)", async () => {
+    it("private image + imagePullSecrets on the app SA => pass, worded attachment-not-authorization", async () => {
         const stubs = healthyStubsWithApp();
         stubs["kubectl get serviceaccount shop-sa -n team-a -o json"] = {
             ok: true,
@@ -314,6 +326,10 @@ describe("doctor app-image pullability (#952)", () => {
         });
         const c = appImageCheck(report.checks);
         expect(c.status, c.detail).toBe("pass");
+        expect(c.detail).toContain("team-a/shop");
+        // attachment is verified, authorization is not — the wording says so
+        expect(c.detail).toMatch(/attached to the app ServiceAccount/);
+        expect(c.detail).toMatch(/not that the credential actually authorizes/);
         expect(report.exitCode).toBe(0);
     });
 
@@ -328,23 +344,38 @@ describe("doctor app-image pullability (#952)", () => {
         expect(c.status).not.toBe("pass");
     });
 
-    it("image missing from the registry => fail (and exit 1)", async () => {
+    it("image 404s anonymously => warn stating the ambiguity (Artifactory/Harbor 404 private repos), exit stays 0", async () => {
         const report = await runDoctor({
             kubectl: stubKubectl(healthyStubsWithApp()),
             probeImage: probeWith("not-found"),
         });
         const c = appImageCheck(report.checks);
-        expect(c.status, c.detail).toBe("fail");
+        // 404 anonymously is AMBIGUOUS: truly-missing image OR a registry
+        // that hides private repos behind 404 — a hard fail would false-red
+        // every Artifactory/Harbor private repo, so this warns with both
+        // readings and never exits 1 for it.
+        expect(c.status, c.detail).toBe("warn");
         expect(c.detail).toContain("team-a/shop");
-        expect(report.exitCode).toBe(1);
+        expect(c.detail).toContain("404");
+        expect(c.detail).toMatch(/does not exist|hides private repositories/);
+        expect(report.exitCode).toBe(0);
     });
 
-    it("private image + RBAC-denied Secret/SA reads => warn 'could not verify', never a pass", async () => {
+    it("probe budget exhausted => 'not verified' skip, NEVER a pass", async () => {
+        const report = await runDoctor({
+            kubectl: stubKubectl(healthyStubsWithApp()),
+            probeImage: probeWith("ok"),
+            appImageProbeBudgetMs: 0,
+        });
+        const c = appImageCheck(report.checks);
+        expect(c.status, c.detail).toBe("skip");
+        expect(c.detail).toContain("not verified");
+        expect(c.status).not.toBe("pass");
+        expect(report.exitCode).toBe(0);
+    });
+
+    it("private image + RBAC-denied SA read => warn 'could not verify', never a pass", async () => {
         const stubs = healthyStubsWithApp();
-        stubs["kubectl get secrets -n team-a -o json"] = {
-            ok: false,
-            stderr: 'Error from server (Forbidden): secrets is forbidden: User "doctor" cannot list resource "secrets"',
-        };
         stubs["kubectl get serviceaccount shop-sa -n team-a -o json"] = {
             ok: false,
             stderr: 'Error from server (Forbidden): serviceaccounts "shop-sa" is forbidden',

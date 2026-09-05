@@ -12,8 +12,10 @@ deploy applies cleanly, the service is created, and then the pod sits in
 
 `kn-next doctor` checks for exactly this before it costs you a debugging
 session: for every deployed app it probes whether the image is anonymously
-pullable, and if it is not — and no pull credential is visible in the app's
-namespace — it warns and points here.
+pullable, and if it is not — and no pull credential is **attached to the
+app's ServiceAccount** — it warns and points here. A credential Secret that
+merely exists in the namespace is not enough (that case gets its own,
+more specific warning — see step 2).
 
 <Callout type="warn">
 This page documents the **current, manual path**: you create the credential
@@ -60,6 +62,15 @@ kubectl patch serviceaccount <app-name>-sa \
   --patch '{"imagePullSecrets": [{"name": "regcred"}]}'
 ```
 
+This step is the one that actually takes effect — creating the Secret without
+attaching it here changes nothing, and `kn-next doctor` calls that case out
+specifically.
+
+**The patch replaces the whole `imagePullSecrets` list.** If the
+ServiceAccount already lists a credential — a second registry, say — include
+every entry in the patch, not just the new one, or the existing one is
+silently dropped.
+
 ### 3. Redeploy
 
 Pull secrets are resolved **when a pod is created**, not when the
@@ -77,9 +88,11 @@ The new revision's pods resolve the credential at creation and pull cleanly.
 ## Verifying
 
 - `kn-next doctor` — the "App image pullable" check turns from a warning into
-  a pass once a credential is visible. Note what it verifies: that a
-  credential is **present**, not that the registry accepts it. A present but
-  wrong credential still fails at pod creation.
+  a pass once the credential is **attached to the app's ServiceAccount**. A
+  Secret that exists but is not attached keeps a warning (with the attach
+  command in the hint). Note what a pass verifies: **attachment**, not that
+  the registry accepts the credential — an attached but wrong credential
+  still fails at pod creation.
 - `kubectl get pods -n <app-namespace>` — a stuck pull shows
   `ImagePullBackOff` / `ErrImagePull`; `kubectl describe pod <pod>` shows the
   registry's actual error message in the events.
