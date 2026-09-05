@@ -208,6 +208,50 @@ describe('the lane measures the COMPILED BINARY, not the uncompiled nitro output
   });
 });
 
+describe('the packed @getknext/core preflight verifies the compile script — and does so SIGPIPE-safely', () => {
+  // Run 33965643199 (the vinext lane's first firing PAST the pnpm→bun fix) died
+  // at "Preflight — the packed @getknext/core ships the compile script" reporting
+  // the tarball ships NO dist/adapters/vinext-compile.js — while the pack log two
+  // steps earlier printed `packed 3.70KB dist/adapters/vinext-compile.js`. The
+  // file WAS there; the CHECK was wrong: `set -euo pipefail` + `tar tzf … | grep
+  // -q P`. `grep -q` exits on its first match, closes the pipe, `tar` dies with
+  // SIGPIPE (write error → 141), and `pipefail` propagates 141 as the pipeline's
+  // status, so `if ! <pipeline>` reads a PRESENT file as absent and reds the lane
+  // on a healthy tarball. The whole 16-shard axis skips behind a false negative.
+  const preflightStep = (): Step => {
+    const s = steps(parse(LANE)).find((st) => /ships the compile script/i.test(st.name ?? ''));
+    if (!s) throw new Error('the compile-script preflight step must exist');
+    return s;
+  };
+
+  it('still verifies the tarball carries BOTH the compile script and the sharp dlopen shim', () => {
+    // Both halves, so a fix that "silences" the check by deleting it reds here.
+    const run = preflightStep().run ?? '';
+    expect(run).toContain('dist/adapters/vinext-compile.js');
+    expect(run).toContain('dist/adapters/sharp-addon-dlopen');
+  });
+
+  it('does not gate that check on a `tar … | grep -q` pipeline under pipefail', () => {
+    const run = preflightStep().run ?? '';
+    // Bash comments are literal text in a `run:` block, so the explanatory
+    // comment above the fix (which QUOTES the fragile pattern) is part of this
+    // string — strip full-line comments before matching, exactly as `code()` does.
+    const executable = run
+      .split('\n')
+      .filter((line) => !/^\s*#/.test(line))
+      .join('\n');
+    const usesPipefail = /\bpipefail\b/.test(executable);
+    // `tar t…f … | grep -q …` — the producer left to SIGPIPE.
+    const fragile = /\btar\s+t[a-z]*f\b[^\n|]*\|\s*grep\s+-[a-zA-Z]*q\b/.test(executable);
+    expect(
+      fragile && usesPipefail,
+      'the compile-script preflight materialises `tar … | grep -q` under `set -o pipefail`: ' +
+        'grep -q SIGPIPEs tar and pipefail reads that as "file absent". List into a variable ' +
+        '(or a temp file) and search THAT, so there is no upstream producer to SIGPIPE.',
+    ).toBe(false);
+  });
+});
+
 describe('the lane publishes its number where the node lane publishes', () => {
   const wf = () => parse(LANE);
 
