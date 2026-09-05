@@ -817,7 +817,6 @@ function pickFetchVersion(
     return versions[0];
 }
 
-
 /**
  * Reads `bun --version`. Separate so the floor check is testable without a Bun.
  *
