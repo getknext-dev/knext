@@ -31,6 +31,7 @@
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createGuardProver } from './lib/guard-prover.mjs';
+import { jsStillParses } from './lib/parse-validity.mjs';
 import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -44,6 +45,7 @@ const MUTATIONS = [
       "the exemption reader stops expiring anything — #936's deferral then reads as dated " +
       'forever while its clock has silently stopped, which is the failure this file exists for',
     subject: 'policy',
+    validate: jsStillParses,
     anchor: "  return activeExemptions(SEAM_RELOCATION_EXEMPTIONS, { field: 'seam', now });",
     replacement: '  void now;\n  return new Set(SEAM_RELOCATION_EXEMPTIONS.map((e) => e.seam));',
   },
@@ -54,6 +56,7 @@ const MUTATIONS = [
       'a gated seam loses its exemption entry — it is then on a published subpath with NO ' +
       'tracked deferral at all, which is the state before #936 was filed',
     subject: 'policy',
+    validate: jsStillParses,
     anchor: "    seam: '@getknext/core/adapters/cache-handler#__resetEnvForTests',",
     replacement: "    seam: '@getknext/core/adapters/cache-handler#__someOtherThing',",
   },
@@ -64,8 +67,13 @@ const MUTATIONS = [
       'the seam scan stops discovering — zero seams means both loops iterate zero times and the ' +
       'whole file passes vacuously, the shape this repo has already had to close twice',
     subject: 'spec',
-    anchor: '/assertTestSeamEnabled\\(\\s*[\'"](__[A-Za-z0-9_]+)[\'"]\\s*\\)/g',
-    replacement: '/assertTestSeamEnabledXX\\(\\s*[\'"](__[A-Za-z0-9_]+)[\'"]\\s*\\)/g',
+    validate: jsStillParses,
+    // End-of-line span ON PURPOSE (PR #940 sweep): the previous anchor ended
+    // at the regex literal, so the harness's appended line-comment residue
+    // marker commented out the `)) {` tail — the spec stopped parsing and the
+    // kill was for the wrong reason (the failed import, not the vacuous scan).
+    anchor: '/assertTestSeamEnabled\\(\\s*[\'"](__[A-Za-z0-9_]+)[\'"]\\s*\\)/g)) {',
+    replacement: '/assertTestSeamEnabledXX\\(\\s*[\'"](__[A-Za-z0-9_]+)[\'"]\\s*\\)/g)) {',
   },
 ];
 
@@ -81,6 +89,7 @@ const NEGATIVE = {
   expect: 'green',
   claim: 'an exemption JUSTIFICATION is reworded — the guard asserts the clock, not the prose',
   subject: 'policy',
+  validate: jsStillParses,
   anchor:
     "      'Repoints the process-wide Redis client from a published subpath. Fails closed under ' +",
   replacement:
