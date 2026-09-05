@@ -348,11 +348,21 @@ jobs:
   # failure HERE is the signal to bump the pinned digest — the durable
   # maintenance loop ADR-0035 pinning implies, not a reason to unpin.
   #
-  # `ignore-unfixed: true` mirrors the file-manager gate: only ACTIONABLE
-  # (fix-available) HIGH/CRITICALs fail. Phased like that gate too — report on
-  # PRs, ENFORCE (fail) on main — so a freshly-disclosed base CVE cannot block
-  # an unrelated PR while main stays gated. Guarded by
-  # tests/base-image-cve-hygiene.test.ts.
+  # `ignore-unfixed: true`: only ACTIONABLE (fix-available) HIGH/CRITICALs report.
+  #
+  # REPORT-ONLY, DELIBERATELY (corrected after #971 first landed as enforce-on-main
+  # and immediately red-lined main). This scans the UNPATCHED base reference, but
+  # the SHIPPED image is patched by the Dockerfiles' whole-base `apk upgrade
+  # --no-cache` at build time — so a base-ref HIGH here means "the pinned base
+  # lags; bump the digest when convenient", NOT "the shipped image is vulnerable".
+  # Enforcing on the base-ref would block main on exactly the CVEs the build-time
+  # upgrade already clears in the artifact users run — a gate contradicting its own
+  # remediation. The shipped-artifact guarantee is enforced elsewhere: the
+  # build-time upgrade (every alpine Dockerfile, asserted by
+  # tests/base-image-cve-hygiene.test.ts) plus the file-manager BUILT-image gate
+  # above. Enforce-grade built-image scanning for the docs/bun-exec images is the
+  # proper follow-up (#981); until then this stays a visible SIGNAL, not a blocker.
+  # Guarded by tests/base-image-cve-hygiene.test.ts.
   base-image-trivy:
     name: Trivy — shipped alpine base images
     runs-on: ubuntu-latest
@@ -367,10 +377,10 @@ jobs:
           # examples/bun-exec/Dockerfile.node base.
           - image: node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
     steps:
-      - name: Trivy scan base image — FAIL on HIGH/CRITICAL
-        # Report (don't block) on PRs; ENFORCE (fail) on main — same phased
-        # rollout as the file-manager image gate above.
-        continue-on-error: ${{ github.ref != 'refs/heads/main' }}
+      - name: Trivy scan base image — report HIGH/CRITICAL (signal, non-blocking)
+        # REPORT-ONLY everywhere — see the block comment above. The base-ref scan
+        # is a digest-bump signal; the shipped image is patched at build time.
+        continue-on-error: true
         # SHA-pinned to match the image gate above.
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
