@@ -119,3 +119,5 @@ export function runQuietAllowFail(argv: readonly string[]): void {
         maxBuffer: 64 * 1024 * 1024,
     });
 }
+
+// A11 probe (sprint-3): trigger-path touch to prove the escalation gate reds. Reverted with the probe PR.
