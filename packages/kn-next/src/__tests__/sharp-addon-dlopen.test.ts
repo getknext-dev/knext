@@ -5,14 +5,14 @@
  *
  * `/_next/image` served unoptimized originals on the single-executable image
  * (ADR-0048 Amendment 2). Every route that reaches sharp through module
- * RESOLUTION fails inside a `bun build --compile` binary â measured on bun
+ * RESOLUTION fails inside a `bun build --compile` binary — measured on bun
  * 1.4.0, and none of these is a misconfiguration:
  *
  *   - sharp's own `require('@img/sharp-<platform>/sharp.node')` throws
  *     `Could not load the "sharp" module`;
  *   - `--external sharp` resolves from `/$bunfs/root/`, which has no
  *     `node_modules` above it;
- *   - `--asset=` embeds the `.node` and it is STILL unusable â the OS cannot
+ *   - `--asset=` embeds the `.node` and it is STILL unusable — the OS cannot
  *     `dlopen` a path inside the binary's virtual filesystem;
  *   - `createRequire(cwd)('sharp')` fails even with sharp and every dependency
  *     top-level in a flat `node_modules` beside the executable, while the same
@@ -24,7 +24,7 @@
  * ## What this file guards
  *
  * The PATH RESOLUTION, which is the part with branches. The dlopen itself is
- * proven by the prod-image probe against a real container â an assertion here
+ * proven by the prod-image probe against a real container — an assertion here
  * that "sharp loads" would only re-test the platform's loader.
  *
  * Both discovery bugs found while building this are pinned below, because both
@@ -59,7 +59,7 @@ function tempDir(prefix: string): string {
 
 /**
  * The shim's resolution rule, restated so it can be exercised without dlopening
- * anything. Kept in step with the real one by the source assertions below â
+ * anything. Kept in step with the real one by the source assertions below —
  * a private copy that silently drifts is the failure this repo keeps hitting.
  *
  * `platformIds` is what the real shim computes from `process.platform` /
@@ -87,7 +87,7 @@ function addonPath(
     const sharpDirs = read(nativeRoot).filter(
         (pkg) => pkg.startsWith("sharp-") && !pkg.startsWith("sharp-libvips-"),
     );
-    // #949: by RUNTIME PLATFORM, never by directory order â `sharp-darwin-arm64`
+    // #949: by RUNTIME PLATFORM, never by directory order — `sharp-darwin-arm64`
     // sorts before `sharp-linuxmusl-x64`, and picking it in a linux image is an
     // `Exec format error` crash-loop.
     for (const id of platformIds) {
@@ -117,8 +117,8 @@ function stage(): string {
     const lib = join(dir, "native", "sharp-linuxmusl-x64", "lib");
     mkdirSync(lib, { recursive: true });
     writeFileSync(join(lib, "sharp-linuxmusl-x64-0.35.2.node"), "");
-    // libvips ships alongside and ALSO matches `sharp-*` â the discovery must not
-    // return its stub. A `find â¦ -name '*.node' | head -1` did exactly that while
+    // libvips ships alongside and ALSO matches `sharp-*` — the discovery must not
+    // return its stub. A `find … -name '*.node' | head -1` did exactly that while
     // this was being built, and the binary then dlopened libvips' stub instead of
     // the addon.
     const vips = join(dir, "native", "sharp-libvips-linuxmusl-x64", "lib");
@@ -129,9 +129,9 @@ function stage(): string {
 
 describe("the shim the compile injects is VERBATIM and self-contained", () => {
     // Sprint-close root cause, pinned: vinext-compile injects the shim's TEXT
-    // as sharp.mjs's contents, so a tsup `import "../chunk-â¦"` inside the
+    // as sharp.mjs's contents, so a tsup `import "../chunk-…"` inside the
     // BUNDLED dist shim resolved against sharp's directory and the single-exec
-    // compile died with `Could not resolve` â reddening four CI checks, while
+    // compile died with `Could not resolve` — reddening four CI checks, while
     // local runs (which read the chunkless source) stayed green.
     const src = join(
         dirname(import.meta.dirname),
@@ -150,12 +150,12 @@ describe("the shim the compile injects is VERBATIM and self-contained", () => {
         // skipping when dist is absent is how the bundled-shim poison shipped.
         expect(
             existsSync(verbatim),
-            "dist/adapters/sharp-addon-dlopen.source.mjs missing â run the package build; the compile script depends on it",
+            "dist/adapters/sharp-addon-dlopen.source.mjs missing — run the package build; the compile script depends on it",
         ).toBe(true);
         expect(readFileSync(verbatim, "utf8")).toBe(readFileSync(src, "utf8"));
     });
 
-    it("the source shim has NO relative imports â its text is injected into sharp's directory", () => {
+    it("the source shim has NO relative imports — its text is injected into sharp's directory", () => {
         const text = readFileSync(src, "utf8");
         expect(text).not.toMatch(/from\s+["']\.\.?\//);
         expect(text).not.toMatch(/import\s+["']\.\.?\//);
@@ -192,9 +192,9 @@ describe("sharp addon path resolution", () => {
     });
 
     it('an EMPTY KNEXT_SHARP_ADDON falls back instead of dlopening ""', () => {
-        // `??` accepts `""`. A staging step like `KNEXT_SHARP_ADDON=$(find â¦ )` that
+        // `??` accepts `""`. A staging step like `KNEXT_SHARP_ADDON=$(find … )` that
         // matches nothing sets exactly that, and the failure read
-        // `could not dlopen the sharp addon at ` â a message with a hole in it.
+        // `could not dlopen the sharp addon at ` — a message with a hole in it.
         const dir = stage();
         const resolved = addonPath({ KNEXT_SHARP_ADDON: "" }, dir, MUSL_IDS);
         expect(resolved).not.toBe("");
@@ -246,15 +246,15 @@ describe("sharp addon path resolution", () => {
         mkdirSync(glibc, { recursive: true });
         writeFileSync(join(glibc, "sharp-linux-x64.node"), "");
 
-        // musl runtime â the musl addon, though `linux-x64` sorts first.
+        // musl runtime → the musl addon, though `linux-x64` sorts first.
         expect(addonPath({}, dir, MUSL_IDS)).toContain("sharp-linuxmusl-x64");
-        // glibc runtime â the glibc addon.
+        // glibc runtime → the glibc addon.
         expect(addonPath({}, dir, ["linux-x64", "linuxmusl-x64"])).toContain(
             `${sep}sharp-linux-x64${sep}`,
         );
     });
 
-    it("#949 FAILS LOUDLY when no staged addon matches the runtime â never dlopens a foreign one", () => {
+    it("#949 FAILS LOUDLY when no staged addon matches the runtime — never dlopens a foreign one", () => {
         // A darwin-only tree in a linux image is the macOS-built deploy. The
         // old behaviour dlopened it and crash-looped; a named error is the fix.
         const dir = tempDir("knext-sharp-foreign-");
@@ -297,7 +297,7 @@ describe("sharp addon path resolution", () => {
                 "shim must search a native/ tree beside the executable",
             ).toMatch(/join\(beside,\s*['"]native['"]\)/);
             // #949: selection is by RUNTIME platform/libc, never directory
-            // order â `sharp-darwin-arm64` sorts before `sharp-linuxmusl-x64`
+            // order — `sharp-darwin-arm64` sorts before `sharp-linuxmusl-x64`
             // and dlopening it in the alpine image is a crash-loop.
             expect(
                 text,
@@ -346,7 +346,7 @@ describe("sharp addon path resolution", () => {
  * call into the OS loader is replaced.
  *
  * A restated copy is what the resolution tests above have to do (the shim's
- * `addonPath` is not exported), and it is the weaker option â worth paying a
+ * `addonPath` is not exported), and it is the weaker option — worth paying a
  * subprocess to avoid it for the security-relevant branch.
  */
 const SHIM = join(
@@ -417,7 +417,7 @@ function loadShim(
  * Run the REAL shim's discovery on this host: `process.execPath` is pointed
  * into a staged temp tree (a plain writable property under both node and bun,
  * verified) and `process.dlopen` is stubbed to print the path it was handed.
- * No `KNEXT_SHARP_ADDON`, so the platform-matching branch itself is on trial â
+ * No `KNEXT_SHARP_ADDON`, so the platform-matching branch itself is on trial —
  * the restated-copy tests above cannot catch the shipped shim disagreeing with
  * them about the RUNTIME platform computation.
  */
@@ -460,7 +460,7 @@ describe("#949 the SHIPPED shim selects by runtime platform", () => {
     it("picks this host's addon over an alien one that sorts first", () => {
         const dir = tempDir("knext-sharp-runtime-");
         // `android` sorts before both `darwin` and `linux*`, so directory-order
-        // discovery returns it â the exact shape of finding C-1c.
+        // discovery returns it — the exact shape of finding C-1c.
         stageDir(dir, `sharp-android-${process.arch}`);
         stageDir(dir, `sharp-darwin-${process.arch}`);
         stageDir(dir, `sharp-linux-${process.arch}`);
@@ -479,7 +479,7 @@ describe("#949 the SHIPPED shim selects by runtime platform", () => {
 
     it("FAILS LOUDLY, naming platforms, when only a foreign addon is staged", () => {
         // The macOS-built image before the staging fix: a darwin-only tree on
-        // an alpine runtime. The old shim dlopened it â CrashLoopBackOff with
+        // an alpine runtime. The old shim dlopened it — CrashLoopBackOff with
         // `Exec format error`. A named refusal is diagnosable; that is not.
         const dir = tempDir("knext-sharp-foreignonly-");
         stageDir(dir, `sharp-android-${process.arch}`);
@@ -518,7 +518,7 @@ describe("sharp addon integrity verification", () => {
 
     it("REFUSES a tampered libvips even though the addon itself is intact", () => {
         // The addon links libvips by relative rpath and the OS loader pulls it
-        // in transitively â it never passes through this shim, so verifying only
+        // in transitively — it never passes through this shim, so verifying only
         // the dlopened file would leave the larger payload unpinned.
         const { dir, addon, lib } = stageVerifiable();
         writeFileSync(lib, "vIPS BYTES");
@@ -532,7 +532,7 @@ describe("sharp addon integrity verification", () => {
 
     it("REFUSES an addon the manifest does not list", () => {
         // A native payload present in a tree that HAS a manifest, but absent
-        // from it, is the injected-file case â it must not read as "nothing to
+        // from it, is the injected-file case — it must not read as "nothing to
         // check".
         const { dir } = stageVerifiable();
         const rogue = join(
@@ -550,7 +550,7 @@ describe("sharp addon integrity verification", () => {
         expect(r.stderr).toContain("evil.node");
     });
 
-    it("warns and loads when there is no manifest â never bricks an older image", () => {
+    it("warns and loads when there is no manifest — never bricks an older image", () => {
         // Images built before this landed have no manifest. Failing closed on
         // absence would turn a security improvement into a fleet outage, so
         // absence is loud and permissive while a MISMATCH is fatal.

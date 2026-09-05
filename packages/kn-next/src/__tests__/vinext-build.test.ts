@@ -461,6 +461,36 @@ describe("#949 stageSharpNative stages the image target's platform, not the host
         );
     });
 
+    it("a FAILED staging unwinds its own writes — the next build is not wedged", () => {
+        // Review round 3, I1: a mid-loop throw (second fetch fails) used to
+        // leave native/ holding the first package and no manifest, and the
+        // NEXT build's ownership refusal then blamed the user for knext's own
+        // residue — permanently, since every retry hit the same refusal.
+        const cwd = darwinAppTree();
+        const good = recordingFetch();
+        let fetches = 0;
+        expect(() =>
+            stageSharpNative(cwd, {
+                arch: "linux-x64",
+                fetchPackage: (pkg, destDir) => {
+                    fetches++;
+                    if (fetches > 1) throw new Error("registry down");
+                    good.fetch(pkg, destDir);
+                },
+            }),
+        ).toThrow(/registry down/);
+        // No half-staged residue: the run removed what it wrote.
+        expect(readdirSync(join(cwd, "native"))).toEqual([]);
+
+        // And the retry — the thing the wedge made impossible — succeeds.
+        const retry = recordingFetch();
+        stageSharpNative(cwd, { arch: "linux-x64", fetchPackage: retry.fetch });
+        expect(existsSync(join(cwd, "native", ".integrity.json"))).toBe(true);
+        expect(existsSync(join(cwd, "native", "sharp-linuxmusl-x64"))).toBe(
+            true,
+        );
+    });
+
     it("#949-class: sharp DECLARED but not findable → NAMED failure, never an empty native/", () => {
         // The pnpm layout: `@img` lives under `.pnpm`, none of the walked
         // node_modules candidates match, and inferring "no sharp" from that

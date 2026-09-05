@@ -287,60 +287,87 @@ export function stageSharpNative(
     const locked = lockfilePath
         ? readLockfilePackages(lockfilePath)
         : undefined;
-    if (appUsesSharp(cwd, imgRoot, locked)) {
-        // The addon links libvips by RELATIVE rpath, so the pair ships
-        // together in its original layout or `dlopen` fails resolving
-        // `libvips-cpp` after finding the addon.
-        for (const dir of [
-            `sharp-${platformId}`,
-            `sharp-libvips-${platformId}`,
-        ]) {
-            const hostDir =
-                imgRoot === undefined ? undefined : join(imgRoot, dir);
-            const destDir = join(dest, dir);
-            if (hostDir !== undefined && existsSync(hostDir)) {
-                // `dereference` follows the symlinks a bun/pnpm isolated store
-                // uses; copying the links would put dangling pointers in the
-                // image.
-                cpSync(hostDir, destDir, {
-                    recursive: true,
-                    dereference: true,
-                });
-                continue;
-            }
-            // The host install lacks the target's package — a macOS build
-            // host, or an install layout the candidate walk cannot see (pnpm's
-            // `.pnpm` store). Fetch the exact version the lockfile pins, or
-            // fail the build NAMING the missing addon; the one outcome that is
-            // never acceptable is an image that cannot load sharp (#949).
-            const name = `@img/${dir}`;
-            if (!lockfilePath || locked === undefined) {
-                throw new UsageError(
-                    `This app uses sharp, the image targets ${platformId}, and this host's install has no '${name}' — and there is no bun.lock to fetch a pinned version from.\n\n` +
-                        "Run `bun install --save-text-lockfile` in the app and rebuild.",
-                );
-            }
-            const entry = locked.get(name);
-            if (!entry) {
-                throw new UsageError(
-                    `The image targets ${platformId}, but neither this host's install nor ${lockfilePath} has '${name}' — the image would ship unable to load sharp.\n\n` +
-                        "sharp resolves its native addons as optionalDependencies, so the lockfile\n" +
-                        "normally pins every platform's package. Reinstall from a clean lockfile\n" +
-                        "(`bun install --save-text-lockfile`) with a sharp version that publishes\n" +
-                        `'${name}', and rebuild.`,
-                );
-            }
-            (opts.fetchPackage ?? fetchImgPackage)(
-                { name, version: entry.version, integrity: entry.integrity },
-                destDir,
-            );
-        }
-    }
 
-    // Unconditional, including the empty case: a `native/` with no manifest is
-    // indistinguishable from one whose manifest was stripped, and the shim reads
-    // absence as "legacy image, load unverified".
-    writeNativeIntegrityManifest(dest, lockfilePath);
+    // Every directory THIS run writes, so a mid-staging failure can unwind
+    // them (#958 round 3, I1). Without the unwind, a failed second fetch (or a
+    // manifest refusal after the copies) left native/ holding content with no
+    // manifest — and the NEXT build's ownership refusal then blamed the user
+    // for knext's own residue, permanently, since every retry re-hit it.
+    const stagedThisRun: string[] = [];
+    try {
+        if (appUsesSharp(cwd, imgRoot, locked)) {
+            // The addon links libvips by RELATIVE rpath, so the pair ships
+            // together in its original layout or `dlopen` fails resolving
+            // `libvips-cpp` after finding the addon.
+            for (const dir of [
+                `sharp-${platformId}`,
+                `sharp-libvips-${platformId}`,
+            ]) {
+                const hostDir =
+                    imgRoot === undefined ? undefined : join(imgRoot, dir);
+                const destDir = join(dest, dir);
+                // Enrolled BEFORE the write, so even a half-finished copy or
+                // fetch is unwound.
+                stagedThisRun.push(destDir);
+                if (hostDir !== undefined && existsSync(hostDir)) {
+                    // `dereference` follows the symlinks a bun/pnpm isolated
+                    // store uses; copying the links would put dangling
+                    // pointers in the image.
+                    cpSync(hostDir, destDir, {
+                        recursive: true,
+                        dereference: true,
+                    });
+                    continue;
+                }
+                // The host install lacks the target's package — a macOS build
+                // host, or an install layout the candidate walk cannot see
+                // (pnpm's `.pnpm` store). Fetch the exact version the lockfile
+                // pins, or fail the build NAMING the missing addon; the one
+                // outcome that is never acceptable is an image that cannot
+                // load sharp (#949).
+                const name = `@img/${dir}`;
+                if (!lockfilePath || locked === undefined) {
+                    throw new UsageError(
+                        `This app uses sharp, the image targets ${platformId}, and this host's install has no '${name}' — and there is no bun.lock to fetch a pinned version from.\n\n` +
+                            "Run `bun install --save-text-lockfile` in the app and rebuild.",
+                    );
+                }
+                const entry = locked.get(name);
+                if (!entry) {
+                    throw new UsageError(
+                        `The image targets ${platformId}, but neither this host's install nor ${lockfilePath} has '${name}' — the image would ship unable to load sharp.\n\n` +
+                            "sharp resolves its native addons as optionalDependencies, so the lockfile\n" +
+                            "normally pins every platform's package. Reinstall from a clean lockfile\n" +
+                            "(`bun install --save-text-lockfile`) with a sharp version that publishes\n" +
+                            `'${name}', and rebuild.`,
+                    );
+                }
+                (opts.fetchPackage ?? fetchImgPackage)(
+                    {
+                        name,
+                        version: entry.version,
+                        integrity: entry.integrity,
+                    },
+                    destDir,
+                );
+            }
+        }
+
+        // Unconditional, including the empty case: a `native/` with no
+        // manifest is indistinguishable from one whose manifest was stripped,
+        // and the shim reads absence as "legacy image, load unverified".
+        // Inside the try because its refusals (lockfile pin disagreements)
+        // throw AFTER the copies — the same wedge, one step later.
+        writeNativeIntegrityManifest(dest, lockfilePath);
+    } catch (error) {
+        for (const d of stagedThisRun) {
+            rmSync(d, { recursive: true, force: true });
+        }
+        // Any manifest present is this run's partial product — the previous
+        // build's was removed by clearStagedNative above.
+        rmSync(join(dest, INTEGRITY_MANIFEST_NAME), { force: true });
+        throw error;
+    }
 }
 
 /**

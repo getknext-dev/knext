@@ -34,6 +34,7 @@ import {
     existsSync,
     mkdirSync,
     mkdtempSync,
+    readdirSync,
     readFileSync,
     writeFileSync,
 } from "node:fs";
@@ -381,6 +382,23 @@ describe("stageSharpNative pins what it stages", () => {
         );
         expect(() => stageSharpNative(cwd)).toThrow(
             /@img\/sharp-linuxmusl-x64/,
+        );
+        // The refusal happens AFTER the copies, so it must also unwind them
+        // (#958 round 3, I1): a native/ left holding unmanifested copies would
+        // wedge every later build on the ownership refusal.
+        expect(readdirSync(join(cwd, "native"))).toEqual([]);
+
+        // Restoring the lockfile makes the SAME tree build again.
+        writeFileSync(
+            join(cwd, "bun.lock"),
+            lockfile({
+                "@img/sharp-linuxmusl-x64": SHARP_VERSION,
+                "@img/sharp-libvips-linuxmusl-x64": VIPS_VERSION,
+            }),
+        );
+        stageSharpNative(cwd);
+        expect(existsSync(join(cwd, "native", INTEGRITY_MANIFEST_NAME))).toBe(
+            true,
         );
     });
 });
