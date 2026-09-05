@@ -120,7 +120,17 @@ Work the task graph, not the backlog order.
    attributing behaviour to code you read.
 5. **Update the docs** for anything user-visible — the docs site is dogfooded, so it is part of
    delivery, not a follow-up. A feature whose docs land "later" ships undocumented.
-6. **Review** — code review *and* spec review, in parallel.
+   **Enforced, not aspirational (founder-directed, 2026-09-05):** every PR either carries its docs
+   change or states "no user-visible surface changed" in the PR body — and the spec reviewer
+   verifies whichever claim was made, the same way acceptance criteria are verified. A PR that
+   changes CLI flags, config schema, env vars, endpoints, error messages users act on, or default
+   behaviour, with no docs delta and no explicit no-impact claim, is `ISSUES_FOUND` on that ground
+   alone. Docs are user-facing: no issue/PR/ADR numbers or internal codenames in them
+   (`apps/docs/content-hygiene.test.ts` enforces the mechanical half). At **sprint close**, the
+   gates check the aggregate the same way: any user-visible change that shipped in the sprint
+   without its docs is a named condition, not a follow-up.
+6. **Review** — code review *and* spec review, in parallel. The spec reviewer owns the step-5
+   docs check above.
 7. **Sign off** — normally the two reviews above are the gate. Summon architect and/or system
    designer **only** when a trigger fired or a reviewer escalated; the sprint-close review covers
    the rest. Whatever gates ran, a `BLOCK` or `ISSUES_FOUND` means another round — never a
@@ -165,7 +175,7 @@ today is cheap and belongs to whoever reads the graph, not whoever merged: `grap
 divergence as "re-run the AST pass", not as a reason to distrust the whole graph. The hook above
 is what would convert this from an expectation into a gate.
 
-## Step 10 — clean up after every successful merge
+## Step 10 — clean up after every successful merge, and at every review checkpoint
 
 Do all four. Each has bitten this project.
 
@@ -174,6 +184,14 @@ Do all four. Each has bitten this project.
   it were current.
 - **Close the multiplexer panes** those agents occupied (`herdr pane close <id>`). Never close a
   pane you did not create — other sessions and editor panes are not yours to reap.
+- **Reap unused agents mid-sprint, not only at merge time** (founder-directed, 2026-09-04). An
+  agent that turned out to be unusable — spawned in a mode that cannot report, superseded by a
+  respawn, or whose task was reassigned — is "finished" the moment you stop waiting on it, even
+  though it never produced a verdict. Sweep at every review checkpoint: `TaskList` + `herdr pane
+  list`, then `TaskStop` and close every pane whose agent nothing is waiting on. The precedent:
+  four reviewer agents spawned in a mailbox mode whose tool set could not send results sat idle
+  for hours holding panes, while working replacements ran alongside them — the sweep was only
+  triggered by a human noticing the pane clutter.
 - **Remove the git worktrees.** `git worktree remove <path> --force`, then `git worktree prune`.
   Verify the work is pushed first: compare the worktree's `HEAD` against `origin/<branch>`.
 - **Delete the merged local branch.** It will refuse while a worktree still holds it — that refusal
