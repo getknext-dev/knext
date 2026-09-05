@@ -368,25 +368,34 @@ export function fetchImgPackage(
     }
     const tmp = mkdtempSync(join(tmpdir(), "knext-img-fetch-"));
     try {
-        execFileSync(
-            "npm",
-            ["pack", `${pkg.name}@${pkg.version}`, "--pack-destination", tmp],
-            { stdio: ["ignore", "pipe", "pipe"] },
-        );
-    } catch (error) {
-        throw new UsageError(
-            `Could not fetch '${pkg.name}@${pkg.version}' from the registry (needed because this host's install has no ${pkg.name} and the image target requires it).\n\n` +
-                `  underlying error: ${error instanceof Error ? error.message : String(error)}\n\n` +
-                "Check network/registry access, or install the package on a matching host and rebuild.",
-        );
+        try {
+            execFileSync(
+                "npm",
+                [
+                    "pack",
+                    `${pkg.name}@${pkg.version}`,
+                    "--pack-destination",
+                    tmp,
+                ],
+                { stdio: ["ignore", "pipe", "pipe"] },
+            );
+        } catch (error) {
+            throw new UsageError(
+                `Could not fetch '${pkg.name}@${pkg.version}' from the registry (needed because this host's install has no ${pkg.name} and the image target requires it).\n\n` +
+                    `  underlying error: ${error instanceof Error ? error.message : String(error)}\n\n` +
+                    "Check network/registry access, or install the package on a matching host and rebuild.",
+            );
+        }
+        const tgz = readdirSync(tmp).find((f) => f.endsWith(".tgz"));
+        if (!tgz) {
+            throw new UsageError(
+                `npm pack reported success for '${pkg.name}@${pkg.version}' but left no tarball in ${tmp}.`,
+            );
+        }
+        extractVerifiedTarball(join(tmp, tgz), pkg, destDir);
+    } finally {
+        rmSync(tmp, { recursive: true, force: true });
     }
-    const tgz = readdirSync(tmp).find((f) => f.endsWith(".tgz"));
-    if (!tgz) {
-        throw new UsageError(
-            `npm pack reported success for '${pkg.name}@${pkg.version}' but left no tarball in ${tmp}.`,
-        );
-    }
-    extractVerifiedTarball(join(tmp, tgz), pkg, destDir);
 }
 
 /**
@@ -413,16 +422,20 @@ export function extractVerifiedTarball(
         );
     }
     const extractDir = mkdtempSync(join(tmpdir(), "knext-img-extract-"));
-    execFileSync("tar", ["-xzf", tgzPath, "-C", extractDir], {
-        stdio: ["ignore", "pipe", "pipe"],
-    });
-    const payload = join(extractDir, "package");
-    if (!existsSync(payload)) {
-        throw new UsageError(
-            `The tarball for '${pkg.name}@${pkg.version}' has no 'package/' payload — not an npm registry tarball.`,
-        );
+    try {
+        execFileSync("tar", ["-xzf", tgzPath, "-C", extractDir], {
+            stdio: ["ignore", "pipe", "pipe"],
+        });
+        const payload = join(extractDir, "package");
+        if (!existsSync(payload)) {
+            throw new UsageError(
+                `The tarball for '${pkg.name}@${pkg.version}' has no 'package/' payload — not an npm registry tarball.`,
+            );
+        }
+        cpSync(payload, destDir, { recursive: true });
+    } finally {
+        rmSync(extractDir, { recursive: true, force: true });
     }
-    cpSync(payload, destDir, { recursive: true });
 }
 
 /** `node_modules/@img`, wherever this install layout put it. */

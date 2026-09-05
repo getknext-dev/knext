@@ -31,7 +31,7 @@
  * shipped once and neither is obvious from reading the happy path.
  */
 
-import { describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -40,10 +40,22 @@ import {
     mkdtempSync,
     readdirSync,
     readFileSync,
+    rmSync,
     writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
+
+/** Every temp dir the #949 tests create, drained after the run (D9, #880). */
+const tempDirs: string[] = [];
+afterAll(() => {
+    for (const d of tempDirs) rmSync(d, { recursive: true, force: true });
+});
+function tempDir(prefix: string): string {
+    const dir = mkdtempSync(join(tmpdir(), prefix));
+    tempDirs.push(dir);
+    return dir;
+}
 
 /**
  * The shim's resolution rule, restated so it can be exercised without dlopening
@@ -296,7 +308,7 @@ describe("sharp addon path resolution", () => {
     it("#949 FAILS LOUDLY when no staged addon matches the runtime — never dlopens a foreign one", () => {
         // A darwin-only tree in a linux image is the macOS-built deploy. The
         // old behaviour dlopened it and crash-looped; a named error is the fix.
-        const dir = mkdtempSync(join(tmpdir(), "knext-sharp-foreign-"));
+        const dir = tempDir("knext-sharp-foreign-");
         const mac = join(dir, "native", "sharp-darwin-arm64", "lib");
         mkdirSync(mac, { recursive: true });
         writeFileSync(join(mac, "sharp-darwin-arm64.node"), "");
@@ -497,7 +509,7 @@ function stageDir(root: string, pkg: string): void {
 
 describe("#949 the SHIPPED shim selects by runtime platform", () => {
     it("picks this host's addon over an alien one that sorts first", () => {
-        const dir = mkdtempSync(join(tmpdir(), "knext-sharp-runtime-"));
+        const dir = tempDir("knext-sharp-runtime-");
         // `android` sorts before both `darwin` and `linux*`, so directory-order
         // discovery returns it — the exact shape of finding C-1c.
         stageDir(dir, `sharp-android-${process.arch}`);
@@ -520,7 +532,7 @@ describe("#949 the SHIPPED shim selects by runtime platform", () => {
         // The macOS-built image before the staging fix: a darwin-only tree on
         // an alpine runtime. The old shim dlopened it — CrashLoopBackOff with
         // `Exec format error`. A named refusal is diagnosable; that is not.
-        const dir = mkdtempSync(join(tmpdir(), "knext-sharp-foreignonly-"));
+        const dir = tempDir("knext-sharp-foreignonly-");
         stageDir(dir, `sharp-android-${process.arch}`);
 
         const r = discoverShim(dir);

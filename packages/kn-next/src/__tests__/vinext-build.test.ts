@@ -10,7 +10,7 @@
  * slow artifact; rejecting 1.4+ would make the supported target unbuildable.
  */
 
-import { describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -19,6 +19,7 @@ import {
     mkdtempSync,
     readdirSync,
     readFileSync,
+    rmSync,
     writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -33,6 +34,17 @@ import {
     SHARP_PLATFORM_IDS,
     stageSharpNative,
 } from "../cli/vinext-build";
+
+/** Every temp dir this file creates, drained after the run (D9, #880). */
+const tempDirs: string[] = [];
+afterAll(() => {
+    for (const d of tempDirs) rmSync(d, { recursive: true, force: true });
+});
+function tempDir(prefix: string): string {
+    const dir = mkdtempSync(join(tmpdir(), prefix));
+    tempDirs.push(dir);
+    return dir;
+}
 
 describe("#ADR-0048 the Bun floor", () => {
     it("accepts 1.4.0 and newer", () => {
@@ -244,7 +256,7 @@ describe("#949 stageSharpNative stages the image target's platform, not the host
             "sharp-wasm32": SHARP_V,
         },
     ): string {
-        const cwd = mkdtempSync(join(tmpdir(), "knext-949-stage-"));
+        const cwd = tempDir("knext-949-stage-");
         for (const [dir, version] of Object.entries(hostPkgs)) {
             const pkgDir = join(cwd, "node_modules", "@img", dir);
             mkdirSync(join(pkgDir, "lib"), { recursive: true });
@@ -400,7 +412,7 @@ describe("#949 stageSharpNative stages the image target's platform, not the host
     });
 
     it("an app with no sharp still stages an empty manifest, and never fetches", () => {
-        const cwd = mkdtempSync(join(tmpdir(), "knext-949-nosharp-"));
+        const cwd = tempDir("knext-949-nosharp-");
         stageSharpNative(cwd, {
             arch: "linux-x64",
             fetchPackage: () => {
@@ -444,7 +456,7 @@ describe("#949 stageSharpNative stages the image target's platform, not the host
 describe("#949 the registry fetch is verified against the lockfile pin", () => {
     /** A real tgz in bun.lock's shape: the payload under `package/`. */
     function packTarball(): { tgz: string; integrity: string } {
-        const dir = mkdtempSync(join(tmpdir(), "knext-949-tgz-"));
+        const dir = tempDir("knext-949-tgz-");
         const pkg = join(dir, "package");
         mkdirSync(join(pkg, "lib"), { recursive: true });
         writeFileSync(
@@ -465,7 +477,7 @@ describe("#949 the registry fetch is verified against the lockfile pin", () => {
 
     it("extracts a tarball whose sha512 matches the lockfile integrity", () => {
         const { tgz, integrity } = packTarball();
-        const dest = join(mkdtempSync(join(tmpdir(), "knext-949-x-")), "out");
+        const dest = join(tempDir("knext-949-x-"), "out");
 
         extractVerifiedTarball(
             tgz,
@@ -483,7 +495,7 @@ describe("#949 the registry fetch is verified against the lockfile pin", () => {
         // the only thing standing between the registry and native-code
         // privilege in the image. A mismatch is a hard failure, not a warning.
         const { tgz } = packTarball();
-        const dest = join(mkdtempSync(join(tmpdir(), "knext-949-bad-")), "out");
+        const dest = join(tempDir("knext-949-bad-"), "out");
 
         expect(() =>
             extractVerifiedTarball(
