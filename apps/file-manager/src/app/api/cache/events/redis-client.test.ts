@@ -104,9 +104,9 @@ mock.module('@getknext/lib', () => ({
   createRedisClient: (url: string, tag: string, overrides?: Record<string, unknown>) =>
     realCreateRedisClient(url, tag, overrides, FakeRedis as never, { Bun: undefined } as never),
 }));
-// The route pulls in the cache handler through `cache-init`; neither is the
-// subject here, and importing it would dial for real.
-mock.module('../../../../cache-init', () => ({}));
+// (The route used to pull in the cache handler through `cache-init`, which
+// this suite mocked away; that import is gone — registration is the vinext
+// plugin's `cache.data` wiring now, so there is nothing left to mock.)
 
 describe('#802 — cache-events route Redis client', () => {
   beforeEach(() => {

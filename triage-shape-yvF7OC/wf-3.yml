@@ -1,0 +1,7 @@
+name: fixture
+on:
+  pull_request:
+    paths: ["src/**"]
+jobs:
+  gate:
+    runs-on: ubuntu-latest

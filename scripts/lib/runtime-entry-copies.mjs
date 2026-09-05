@@ -109,6 +109,18 @@ export const DIVERGENT = {
       "copy's METRICS_PORT default directly.",
     sha256: '16751da55e93f5efac8952ea7e050fe24c31af5df6b302d9cc8f7d662677e277',
   },
+  'examples/bun-exec/runtime-contract.mjs': {
+    reason:
+      'ONE comment block differs: the RuntimeContract item-4 status. The template says item 4 ' +
+      '(Redis cache-handler) is WIRED via the vinext() plugin’s `cache.data` adapter (#953); ' +
+      'this example pins vinext@1.0.0-beta.4, which predates that option, and installs standalone ' +
+      'with no @getknext/* deps — so ISR here really is the per-pod memory fallback, and saying ' +
+      'otherwise would be the stale-doc class §9 exists to kill. Code is byte-identical to the ' +
+      'template; only the honesty differs. EXPIRY: bumping the example’s vinext past beta.4 ' +
+      'reds the beta.4 pin assertion in vinext-isr-redis-wiring.test.ts — wire cache.data ' +
+      'there, restore the template text, and delete this entry in the same change.',
+    sha256: '5a9389c8eaf094ea6ada32138c8220ee68b454aa7659f0e201485a360ed68626',
+  },
 };
 
 /**

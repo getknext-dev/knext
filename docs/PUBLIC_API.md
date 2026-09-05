@@ -366,12 +366,33 @@ in any release, including patch releases.
 | Internal import | What it is |
 | --- | --- |
 | `@getknext/core/internal/next-adapter` | The adapter implementation behind `@getknext/core/adapter`; import the public alias instead. |
-| `@getknext/core/internal/node-server` | The standalone server entry the runtime spawns. |
+| `@getknext/core/internal/node-server` | The standalone server entry the runtime spawns. **Generated-file-referenced** (see below). |
 | `@getknext/core/internal/loader` | Internal config loader. |
 | `@getknext/core/internal/logger` | Internal CLI/runtime logger (apps use `@getknext/lib/logger`). |
 | `@getknext/core/internal/cli-validate` | CLI config validation helpers. |
 | `@getknext/core/internal/cli-shared` | Shared CLI utilities. |
 | `@getknext/core/internal/cache-drain` | Cache-write registry the runtime drains on shutdown; wiring, not an app API. |
+| `@getknext/core/internal/vinext-cache-adapter` | The data-cache adapter factory the scaffold's `vite.config.ts` hands to the `vinext()` plugin (Redis ISR/data cache). **Generated-file-referenced** (see below). |
+| `@getknext/core/internal/vinext-image-optimizer` | The `/_next/image` intercept the scaffolded runtime entry imports. **Generated-file-referenced** (see below). |
+| `@getknext/core/internal/cache-control-normalize` | Deployed-platform `Cache-Control` preload (CJS, loaded with `--require`). |
+| `@getknext/core/internal/bun-keepalive-guard` | Bun ≤1.3.x keep-alive mitigation preload; Node-inert. |
+| `@getknext/core/internal/sandbox-fetch-debug` | Opt-in sandbox-fetch instrumentation (compat investigation lane). |
+| `@getknext/core/internal/sandbox-fetch-realm-debug` | In-realm variant of the sandbox-fetch instrumentation. |
+| `@getknext/core/internal/standalone-bun-exports` | Post-build standalone-exports heal used by the deploy pipeline. |
+| `@getknext/core/internal/credential-scope` | The CI credential classifier the GitHub Action preflight reads. |
+
+### Generated-file-referenced internal subpaths
+
+Three internal subpaths are imported by **files knext generates into user
+projects** (`kn-next create` / `turbo gen zone`): `internal/vinext-cache-adapter`
+(the scaffolded `vite.config.ts`), `internal/vinext-image-optimizer` (the
+scaffolded runtime entry), and `internal/node-server` (deploy wiring). The
+`/internal/` prefix still means "not an API you call" — but because already
+scaffolded apps reference these by name, they carry a **real obligation** the
+other internal subpaths do not: **no rename or removal without a minor version
+bump, a changelog entry, and a scaffold/codemod migration path** for existing
+apps. Breaking one of these silently breaks every previously generated project
+on its next dependency update.
 
 `@getknext/lib` exposes no internal subpaths — its entire surface is public.
 
