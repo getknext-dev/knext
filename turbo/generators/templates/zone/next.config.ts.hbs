@@ -22,9 +22,21 @@ import type { NextConfig } from "next";
  * Bytecode: nothing to configure. `bun build --compile --bytecode` bakes V8
  * bytecode into the binary itself, so there is no `NODE_COMPILE_CACHE`, no
  * cache directory to mount, and no warm-up step. It ships inside the artifact.
+ *
+ * `generateBuildId` is knext's own wiring (ADR-0011 skew protection).
+ * `kn-next deploy` exports NEXT_DEPLOYMENT_ID = the deploy tag BEFORE the
+ * build. vinext reads that env var by itself for `?dpl=` asset suffixing, but
+ * the STATIC NAMESPACE (`_next/static/<id>/`) comes from `generateBuildId` —
+ * and with no `generateBuildId`, vinext falls back to a random UUID. That UUID
+ * is a namespace nothing can resolve: the asset GC protects live builds by the
+ * deploy tag it reads off a revision label, so a UUID prefix can never be
+ * matched, marked, or reclaimed. Returning null outside `kn-next deploy` (a
+ * plain `vite build`) keeps vinext's UUID fallback, so local builds are
+ * unchanged.
  */
 const nextConfig: NextConfig = {
     assetPrefix: process.env.ASSET_PREFIX || "",
+    generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID || null,
     // NOT the live ISR wiring on this build target (#953). vinext never reads
     // `cacheHandler` — it is a webpack/turbopack mechanism, like `adapterPath`
     // above — so for a while every request was a MISS and the provisioned

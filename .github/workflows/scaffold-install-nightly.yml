@@ -1,0 +1,141 @@
+name: Scaffold install path (nightly)
+
+# ── #950: can a STRANGER scaffold an app and `npm install` it? ────────────────
+# The S3-V verification run (Finding A-1) found the front door dead: the
+# scaffold pinned `@getknext/*` at the CLI's own version, that version was
+# never published (#853's dead npm token), and the FIRST documented command —
+# `npm install` — failed with `notarget`. Nothing tied "the version the
+# templates reference" to "the version actually on npm".
+#
+# This nightly is that tie, at RUN time (`scripts/verify-scaffold-install.mjs`):
+#   1. resolve the HEAD templates' rendered @getknext/* ranges against the
+#      live registry — red on notarget, i.e. "publishing is due";
+#   2. scaffold with the latest PUBLISHED CLI in a clean temp dir and run its
+#      own quickstart (`npm install`) verbatim — the stranger's experience
+#      today.
+#
+# WHY NIGHTLY AND NOT A PR GATE — same ruling as anonymous-install-nightly:
+# the answer lives on registry.npmjs.org and legitimately changes at every
+# publish, and the workspace version is routinely ahead of the registry
+# between a changesets bump and its publish. A PR gate would go red for
+# reasons the PR did not cause, and a flaky gate trains people to bypass it.
+# The PR-time half is `packages/kn-next/src/__tests__/scaffold-version-pins.test.ts`
+# (offline: pins DERIVE from the CLI version, no hardcoded literal, the
+# changesets `fixed` group keeps one version sound for all pinned packages),
+# plus `scripts/install-smoke.mjs`, which installs+builds the scaffold against
+# the tarballs the commit itself packs. Form at PR time, value at run time.
+#
+# AN UNREACHABLE REGISTRY IS A FAILURE, NEVER A PASS (the verify-action-pins
+# ruling). The `release` trigger is the point, not an extra: publishing is the
+# moment the answer changes.
+#
+# KNOWN DAY-ONE REDS, so the first failures are attributable rather than
+# alarming — all three resolve on the next publish (blocked on #853):
+#   1. template-pins: @getknext/core@^0.3.1 matches nothing published;
+#   2. template-pins: @getknext/lib@^0.3.1 matches nothing published;
+#   3. stranger-quickstart: the published 0.3.0 CLI cannot scaffold AT ALL —
+#      no `create` verb and no templates/ in its tarball (#964).
+#
+# A red run is REPORTED, not just logged: the `nightly-red-alert` job below
+# opens/updates a pinned alert issue, the same consumer pattern as
+# anonymous-install-nightly — a nightly whose failures reach nobody is
+# decoration.
+#
+# The check job needs no credential — a stranger is the persona — so none is
+# granted; only the alert job holds `issues: write`, and only to file the red.
+
+on:
+  # 06:41 UTC — offset from the action-pin (05:11), image-pin (05:41) and
+  # anonymous-install (06:11) nightlies so the supply-chain signals do not
+  # queue behind each other and a red one is attributable at a glance.
+  schedule:
+    - cron: '41 6 * * *'
+  # Publishing is when the answer changes. See the header.
+  release:
+    types: [published]
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  scaffold-install:
+    name: Scaffold with the published CLI and npm-install as a stranger
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions: {}
+    steps:
+      # `persist-credentials: false` for the same measured reason the sibling
+      # nightlies set it: the default writes the runner's token into
+      # `.git/config`, and this job's whole point is to act as a stranger.
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No install step: the script is dependency-free ESM on the runner's
+      # built-in Node + npm, so the check cannot itself depend on the
+      # workspace's dependency tree resolving.
+      - name: Resolve template pins and walk the quickstart against the registry
+        run: node scripts/verify-scaffold-install.mjs
+
+  nightly-red-alert:
+    name: Nightly red alert (pinned issue)
+    needs: [scaffold-install]
+    if: >-
+      always() &&
+      (github.event_name == 'schedule' || github.event_name == 'release') &&
+      needs.scaffold-install.result == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Create or update the "scaffold install path RED" issue (idempotent)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CHECK_RESULT: ${{ needs.scaffold-install.result }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          # The idempotency KEY is this fixed literal title — the lookup and the
+          # create MUST share it, so keep it a constant (never interpolated).
+          title='Scaffolded apps cannot npm install for anonymous users'
+          body="The nightly scaffold-install check FAILED: a stranger following the scaffold
+          quickstart — \`kn-next create\`, then the \`npm install\` its own output prescribes —
+          cannot complete it against the public registry. The job log carries the per-phase
+          finding.
+
+          - Run (full report in the job log): ${RUN_URL}
+          - Check job result: ${CHECK_RESULT}
+          - Triggered by: ${EVENT}
+
+          **Why this is not cosmetic.** This is the front door for app developers. Every other
+          scaffold gate verifies artifacts this repo built itself (install-smoke installs the
+          commit's own tarballs); only this check plays the stranger.
+
+          **Triage**
+          - *template-pins … notarget* — the templates at HEAD pin \`@getknext/*\` versions the
+            registry does not serve. Publishing is due (or the release lane is broken — a dead
+            npm token produced exactly this, #853). Expected red until the 0.3.1 publish lands.
+          - *stranger-quickstart: kn-next create … exited non-zero* — the latest PUBLISHED CLI
+            cannot scaffold. Known for 0.3.0: no \`create\` verb and no templates/ in the
+            tarball (#964). Resolves at the next publish.
+          - *stranger-quickstart: npm install … exited non-zero* — the scaffold was produced but
+            its dependencies do not resolve; the log slice names the offending package.
+          - *npm view … exited* with a non-404 / network error — unreachable is a failure, never
+            a pass. Re-run to confirm before assuming it was transient.
+
+          Re-run this workflow to confirm green, then close this issue."
+          existing="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 100 \
+            --json number,title \
+            --jq "[.[] | select(.title == \"${title}\")][0].number // empty")"
+          if [ -n "${existing}" ]; then
+            echo "updating existing alert issue #${existing}"
+            gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
+          else
+            echo "creating the alert issue"
+            new_url="$(gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}")"
+            new_num="${new_url##*/}"
+            gh issue pin "${new_num}" --repo "${GITHUB_REPOSITORY}" || echo "::warning::could not pin issue #${new_num} (non-fatal)"
+          fi

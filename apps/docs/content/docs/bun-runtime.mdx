@@ -42,8 +42,12 @@ it), and `kn-next deploy` builds it into the image. The `NextApp` resource recor
 entrypoint — the executable *is* the server.
 
 <Callout type="warn">
-**Building from source requires Bun 1.4 or newer.** The build refuses older versions rather than
-silently producing a binary that boots roughly twice as slowly. Upgrade with `bun upgrade`.
+**Building from source requires Bun 1.4 or newer on your PATH.** The `kn-next` CLI itself runs
+under plain Node — only this compile step shells out to `bun`. If Bun is missing, the build stops
+and tells you how to install it; if Bun is present but `bun --version` fails for another reason,
+the build reports that underlying error instead of claiming Bun is not installed. Older versions
+are refused rather than silently producing a binary that boots roughly twice as slowly — upgrade
+with `bun upgrade`.
 </Callout>
 
 ## Image optimization is included

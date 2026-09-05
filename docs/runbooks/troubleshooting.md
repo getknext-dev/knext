@@ -397,7 +397,7 @@ minutes — this is a real outage, not a wake.
 The alert resolves automatically once a scrape observes the DB reachable again
 (the gauge flips `waking`→`ok`/`up` on the next scrape).
 
-**Why this doesn't break scale-to-zero.** The gauge is refreshed on the :9091
+**Why this doesn't break scale-to-zero.** The gauge is refreshed on the :9464
 scrape by running `checkDeepHealth()`, which issues a real `SELECT 1` through
 the scale-zero-pg gateway — and that would re-arm the gateway's 60s DB idle
 timer on every ~30s scrape, keeping an idle app's DB awake forever. So the
@@ -500,6 +500,27 @@ webhook + issue its cert). `kn-next doctor` verifies the operator readiness and
 cert-manager webhook prereq directly. Once the webhook endpoint answers, re-apply.
 
 ---
+
+## 13 — App crash-loops with `EADDRINUSE` on the metrics port, or metrics went dark after an upgrade
+
+Two faces of the same fact: **queue-proxy owns `:9091`** in every revision pod whenever serving's
+request-metrics protocol is prometheus, and the app metrics port therefore moved to **`:9464`**.
+
+- **Crash-loop, log says `Failed to start server. Is port … in use?` / `EADDRINUSE` naming the
+  metrics port.** The pod is racing queue-proxy — either the image predates the `:9464` default or
+  the CR pins `METRICS_PORT` onto a queue-proxy-owned port (`8012/8013/8022/8112/9090/9091`).
+  Run `kn-next doctor` (the `metrics-port` check names the offending app and the governing
+  ConfigMap key); redeploy with a current build or drop the override.
+- **Metrics dark after upgrading the operator.** The scrape contract
+  (annotation/NetworkPolicy/PodMonitor) now targets `:9464`, but a pod running a pre-upgrade image
+  still binds `:9091` until redeployed — and any scrape config you authored yourself keeps
+  pointing at the old port. Redeploy the app, repoint hand-rolled scrape configs, then verify:
+
+  ```bash
+  kubectl exec deploy/<your-scraper> -- wget -qO- http://<pod-ip>:9464/metrics | head -3
+  ```
+
+  See the [upgrading page](https://knext.dev/docs/upgrading) for the full ordered steps.
 
 ## When none of these match
 

@@ -26,6 +26,7 @@
     "---Platform---",
     "operator",
     "multi-cloud",
+    "private-registries",
     "observability",
     "security",
     "hardening",

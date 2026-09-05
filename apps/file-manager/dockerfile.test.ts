@@ -150,7 +150,7 @@ describe('#ADR-0048 file-manager vinext image — what it must NOT carry', () =>
     // assertions named the node/standalone entry, which is gone, but the
     // INVARIANT is not: whatever the build target, the container process must
     // be knext's own entry. Bare-execing the framework's server skips the drain
-    // handler and the :9091 metrics listener, and the pod looks healthy right
+    // handler and the :9464 metrics listener, and the pod looks healthy right
     // up until a scale-down drops in-flight requests.
     expect(runtimeStage).not.toMatch(/exec\s+node\s/);
     expect(runtimeStage).not.toMatch(/server\.js/);

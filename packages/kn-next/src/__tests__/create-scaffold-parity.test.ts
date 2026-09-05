@@ -141,7 +141,7 @@ const SHAPE_FROZEN = [
  *
  * ADDED — these now carry what those protected:
  *   `knext-bun-entry.mjs.hbs`        re-provides the RuntimeContract (health,
- *   `runtime-contract.mjs.hbs`       :9091 metrics, SIGTERM drain) that vinext
+ *   `runtime-contract.mjs.hbs`       :9464 metrics, SIGTERM drain) that vinext
  *                                    cannot get from adapter hooks. If these
  *                                    drift between the trees, one scaffolder
  *                                    emits an app that fails its probes.

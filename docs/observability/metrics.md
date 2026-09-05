@@ -14,16 +14,16 @@ spans these counters mirror) · [structured logging + correlation IDs](./logging
 
 | Target | Process | Port / path | Series |
 | --- | --- | --- | --- |
-| **App runtime (default — compiled executable)** | the single-exec entry (`knext-bun-entry.mjs`) | `:9091/metrics` | `knext_bunexec_*`: http_requests_total{status_class} + duration histogram + in-flight + startup_duration + process RSS/uptime — the ONLY series on the shipped scrape path |
-| **App runtime (legacy standalone supervisor)** | `node-server.ts` | `:9091/metrics` | golden signals + cold-start + DB-wake (merged from the child) and the Node process metrics — this shape only |
+| **App runtime (default — compiled executable)** | the single-exec entry (`knext-bun-entry.mjs`) | `:9464/metrics` | `knext_bunexec_*`: http_requests_total{status_class} + duration histogram + in-flight + startup_duration + process RSS/uptime — the ONLY series on the shipped scrape path |
+| **App runtime (legacy standalone supervisor)** | `node-server.ts` | `:9464/metrics` | golden signals + cold-start + DB-wake (merged from the child) and the Node process metrics — this shape only |
 | **Operator** | the controller manager | its `/metrics` (HTTPS `:8443` by default) | reconcile count/duration/errors + `workqueue_depth` + controller-runtime + Go process metrics |
 
-The operator sets `prometheus.io/scrape=true`, `prometheus.io/port=9091`,
+The operator sets `prometheus.io/scrape=true`, `prometheus.io/port=9464`,
 `prometheus.io/path=/metrics` on every generated Knative Service, so annotation-
-based Prometheus scrapes the app `:9091` with no extra config. For a **Prometheus
+based Prometheus scrapes the app `:9464` with no extra config. For a **Prometheus
 Operator** setup (CRD-based discovery, annotations ignored) ship the CRs in
 `packages/kn-next-operator/config/prometheus/`: `monitor.yaml` (ServiceMonitor
-for the operator) and `app-podmonitor.yaml` (PodMonitor for the per-app `:9091`).
+for the operator) and `app-podmonitor.yaml` (PodMonitor for the per-app `:9464`).
 
 ### Why the LEGACY shape's app metrics ride a cross-process bridge
 
@@ -40,9 +40,9 @@ not own the app's route chain, so per-request signals are read off the OTel
 spans, not by wrapping handlers.
 
 Those hooks run in the **Next.js child process**; the operator scrapes the
-**supervisor's `:9091`**. So the child serves its core registry (only the
+**supervisor's `:9464`**. So the child serves its core registry (only the
 `knext_*` families) on a localhost-only port (`KN_CHILD_METRICS_PORT`, default
-9092) and the supervisor's `:9091` handler merges it in (best-effort — a
+9092) and the supervisor's `:9464` handler merges it in (best-effort — a
 not-yet-up / scaled-to-zero child just yields the process metrics). The default
 process metrics (`process_*`, `nodejs_*`) are seeded **only** on the persistent
 supervisor registry, never on the child, so the merged exposition carries each
@@ -51,7 +51,7 @@ reject). Because the metrics ride the OTel spans they share tracing's
 **default-off** gate: they appear once `spec.observability.tracing.enabled` (⇒
 `OTEL_TRACING_ENABLED=true`) is set on the `NextApp`.
 
-## App runtime series (`:9091`)
+## App runtime series (`:9464`)
 
 **Since ADR-0048 the app scrape is served by the compiled single executable**
 (`renderMetrics` in the runtime contract the scaffolder emits), not by the
@@ -88,8 +88,8 @@ An app may register its own prom-client metrics — `knext_http_*`,
 (`@getknext/core/adapters/metrics`), or the `kn_next_*` RED / RUM / bytecode
 series in `apps/file-manager/src/app/api/_metrics/registry.ts`. These are real,
 but they are served on the **app port** through an `/api/metrics` route. The
-node-server supervisor used to merge them onto `:9091`; the compiled binary does
-not, and the shipped `PodMonitor` scrapes `:9091` only.
+node-server supervisor used to merge them onto `:9464`; the compiled binary does
+not, and the shipped `PodMonitor` scrapes `:9464` only.
 
 So a query naming one of them is **empty on a default knext deployment** unless
 you add a scrape config for your app's `/api/metrics`. That is why the
@@ -132,7 +132,7 @@ kubectl apply -k packages/kn-next-operator/config/prometheus/
 
 This installs the operator `ServiceMonitor` and the per-app `PodMonitor`
 (`nextapp-metrics`), which selects every knext-generated pod by the
-`generated-by: kn-next-operator` label and scrapes port `9091`. Narrow to a
+`generated-by: kn-next-operator` label and scrapes port `9464`. Narrow to a
 single app by adding `app: <NextApp name>` to the PodMonitor selector.
 
 Plain (non-operator) Prometheus needs no CRs: it honors the

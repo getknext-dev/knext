@@ -8,7 +8,7 @@
 // binary — so the behaviour the tests assert is the behaviour the binary ships.
 //
 // It provides three of the seven RuntimeContract items ADR-0036 enumerates:
-//   (2) in-process Prometheus `:9091` exposition,
+//   (2) in-process Prometheus `:9464` exposition,
 //   (3) SIGTERM graceful drain (+ `after()`/waitUntil draining, + hardcap),
 //   (5) Bearer-authenticated, fail-closed mutating-route guard.
 // Items 1 (health), 4 (Redis cache-handler — WIRED: the vinext() plugin's
@@ -28,7 +28,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 // Kubernetes injects HOSTNAME=<pod-name> (e.g. `recipe-validate-fn252`) into
 // EVERY pod. A pod name is an identity, not a bind address: binding
 // `Bun.serve({ hostname: '<pod-name>' })` makes the listener unreachable on
-// 127.0.0.1 / the pod IP, so every request (app :PORT AND metrics :9091) is
+// 127.0.0.1 / the pod IP, so every request (app :PORT AND metrics :9464) is
 // connection-refused and boot times out (confirmed on OKE).
 //
 // Mirror the node supervisor's intent (packages/kn-next/src/adapters/env.ts
@@ -98,7 +98,7 @@ export function resolveBindHost(env = process.env) {
 export const DEFAULT_MAX_REQUEST_BYTES = 8 * 1024 * 1024;
 
 /**
- * 64 KiB — the `:9091` metrics cap, FIXED.
+ * 64 KiB — the `:9464` metrics cap, FIXED.
  *
  * That listener answers exactly one GET. It is not a function of the env knob:
  * `KNEXT_MAX_REQUEST_BYTES=0` is an app-side escape hatch and must not re-open
@@ -112,7 +112,7 @@ export const MAX_REQUEST_BYTES_ENV = 'KNEXT_MAX_REQUEST_BYTES';
 /**
  * @typedef ResolvedRequestCap
  * @property {number | undefined} bytes app cap; `undefined` means no cap at all
- * @property {number} metricsBytes the fixed `:9091` cap
+ * @property {number} metricsBytes the fixed `:9464` cap
  * @property {'default' | 'env' | 'uncapped' | 'invalid'} source where it came from
  * @property {string} [warning] set for `uncapped` and `invalid`; log it loudly
  */
@@ -167,7 +167,7 @@ export function resolveMaxRequestBytes(env = process.env) {
       warning:
         `${MAX_REQUEST_BYTES_ENV}=0 — request bodies are UNCAPPED. This pod will buffer a body ` +
         'of any size the runtime accepts; with containerConcurrency > 1 that is an OOM kill ' +
-        'rather than a 413 (ADR-0044). The :9091 metrics listener stays capped regardless.',
+        'rather than a 413 (ADR-0044). The :9464 metrics listener stays capped regardless.',
     };
   }
   return { bytes: parsed, metricsBytes, source: 'env' };
@@ -344,7 +344,7 @@ export function resolveAssetAnchor({ bakedMain, execPath, exists, isCompiled, cw
 // supervisor exposes (packages/kn-next/src/adapters/node-server.ts) but scoped
 // to what a single in-process runtime can measure without a child scrape.
 //
-// :9091 is the ONLY endpoint knext's shipped PodMonitor scrapes, so whatever is
+// :9464 is the ONLY endpoint knext's shipped PodMonitor scrapes, so whatever is
 // NOT here is not on any dashboard and cannot back any alert. That makes the
 // shape below a contract, not an implementation detail — `sum(rate(...))` over a
 // series nobody emits returns an empty vector, so a query naming one is blank

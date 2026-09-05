@@ -44,9 +44,9 @@ USER 65532:65532
 # image CI actually builds and boots. Without it that control is inert in the
 # only place it is ever exercised. Pinned by tests/runtime-image-node-env.test.ts.
 ENV PORT=3000 \
-    METRICS_PORT=9091 \
+    METRICS_PORT=9464 \
     NODE_ENV=production
 
-EXPOSE 3000 9091
+EXPOSE 3000 9464
 
 CMD ["/app/server"]

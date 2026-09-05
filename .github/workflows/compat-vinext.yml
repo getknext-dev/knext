@@ -102,31 +102,41 @@ jobs:
           # a `packageManager` at the workspace root. Keep in sync with package.json.
           version: 10.4.1
 
+      # Setup Bun for knext's OWN workspace: the pnpm era ended with the bun
+      # migration (fe28ad9c) — `packageManager` pins bun, so `pnpm install`
+      # refuses with "This project is configured to use bun". pnpm remains
+      # below ONLY for next.js's harness (their repo pins pnpm) and for
+      # `bun pm pack`'s job (bun rewrites workspace:^ like pnpm pack did).
+      - name: Setup Bun (knext workspace)
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.0'
+
       - name: Install knext deps
         working-directory: knext
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       - name: Build @getknext/lib + @getknext/db + @getknext/core
         working-directory: knext
         run: |
-          pnpm --filter @getknext/lib build
-          pnpm --filter @getknext/db build
-          pnpm --filter @getknext/core build
+          bun run --filter @getknext/lib build
+          bun run --filter @getknext/db build
+          bun run --filter @getknext/core build
 
       # `pnpm pack` (never `npm pack`): npm ships pnpm's raw `workspace:^` deps
       # verbatim, and every fixture install then dies with EUNSUPPORTEDPROTOCOL.
       # Packed ONCE for the whole run — the vinext deploy script installs these
       # three, and @getknext/core is what ships dist/adapters/vinext-compile.js,
       # the compile this lane measures.
-      - name: Pack knext tarballs (pnpm pack — npm-installable, once for the whole run)
+      - name: Pack knext tarballs (bun pm pack — rewrites workspace:^, npm-installable)
         working-directory: knext
         run: |
           set -euo pipefail
           DEST="${GITHUB_WORKSPACE}/knext-tarballs"
           mkdir -p "${DEST}"
-          (cd packages/lib && pnpm pack --pack-destination "${DEST}")
-          (cd packages/db && pnpm pack --pack-destination "${DEST}")
-          (cd packages/kn-next && pnpm pack --pack-destination "${DEST}")
+          (cd packages/lib && bun pm pack --destination "${DEST}")
+          (cd packages/db && bun pm pack --destination "${DEST}")
+          (cd packages/kn-next && bun pm pack --destination "${DEST}")
           ls -la "${DEST}"
 
       - name: Preflight — packed tarballs must npm-install + adapter must resolve (fail-fast)

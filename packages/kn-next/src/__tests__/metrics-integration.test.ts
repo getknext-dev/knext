@@ -27,7 +27,7 @@ import {
 } from "../adapters/tracing";
 
 /**
- * #315 — golden-signal metrics on the core-owned :9091 registry, derived from
+ * #315 — golden-signal metrics on the core-owned :9464 registry, derived from
  * core-owned OTel hooks (NO app route-handler wiring), mirroring #317's
  * tracing-integration style: exercise the REAL processor / pool wrapper, never
  * hand-increment a counter in the test body.

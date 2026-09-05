@@ -51,13 +51,13 @@ Auth is one factor; **network isolation** is the second. knext reconciles a defa
   pod-direct traffic — is denied.
 - **Ports are restricted, and your app's own port is not among them.** The policy admits the
   Knative queue-proxy ports (`8012`/`8013`, plus `8112` for internal TLS), the queue-proxy
-  metrics port (`9090`) and knext's app-metrics port (`9091`). Your app's container port is deliberately **excluded**: the
+  metrics port (`9090`) and knext's app-metrics port (`9464`). Your app's container port is deliberately **excluded**: the
   queue-proxy reaches it over pod-local loopback, which no `NetworkPolicy` governs. The effect
   is that a pod sharing your namespace can no longer dial your app container directly and
   bypass the queue-proxy — and with it your concurrency limit.
 - **Scraping from another namespace requires a label on that namespace.** If your Prometheus runs
   outside your app's namespace, label its namespace and it may scrape the app metrics port
-  (`9091`) — and only that:
+  (`9464`) — and only that:
 
   ```bash
   kubectl label namespace monitoring knext.dev/metrics-scrape=true
@@ -72,7 +72,7 @@ Auth is one factor; **network isolation** is the second. knext reconciles a defa
 - The label lives on the **Namespace** object, so whoever can `update namespaces` decides — normally
   a cluster admin, but on a platform with self-service namespace creation a tenant can create and
   label its own.
-- Once a namespace is labelled, **every pod in it** — not only Prometheus — can scrape `9091` on
+- Once a namespace is labelled, **every pod in it** — not only Prometheus — can scrape `9464` on
   **every knext app in the cluster**. The policy matches the namespace, not a specific workload,
   because knext cannot know how your Prometheus pods are labelled.
 - An individual app owner has no per-app opt-out short of `spec.security.networkPolicy: false`.

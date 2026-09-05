@@ -51,7 +51,7 @@ describe('.github/workflows/release-ghp.yml', () => {
   it('builds lib and db before core', () => {
     const text = workflowText();
     expect(text).toContain(
-      'pnpm --filter @getknext/lib build && pnpm --filter @getknext/db build && pnpm --filter @getknext/core build',
+      'bun run --filter @getknext/lib build && bun run --filter @getknext/db build && bun run --filter @getknext/core build',
     );
   });
 

@@ -29,9 +29,22 @@ import type { NextConfig } from "next";
  * CDN; when it is not, the empty-string fallback keeps the emitted HTML on
  * relative `/_next/static/...` paths so the app serves its own assets. Deleting
  * it does not fail the build — it silently breaks the no-storage mode.
+ *
+ * `generateBuildId` is the other piece of knext's own wiring (ADR-0011 skew
+ * protection). `kn-next deploy` exports NEXT_DEPLOYMENT_ID = the deploy tag
+ * BEFORE the build. vinext reads that env var by itself for `?dpl=` asset
+ * suffixing, but the STATIC NAMESPACE (`_next/static/<id>/`) comes from
+ * `generateBuildId` — and with no `generateBuildId`, vinext falls back to a
+ * random UUID. That UUID is a namespace nothing can resolve: the asset GC
+ * protects live builds by the deploy tag it reads off a revision label, so a
+ * UUID prefix can never be matched, marked, or reclaimed. Returning null
+ * outside `kn-next deploy` (a plain `vite build`) keeps vinext's UUID fallback,
+ * so local builds are unchanged. Deleting this line does not fail the build —
+ * `kn-next deploy` aborts instead, loudly, which is the point.
  */
 const nextConfig: NextConfig = {
     assetPrefix: process.env.ASSET_PREFIX || "",
+    generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID || null,
     // NOT the live ISR wiring on this build target (#953). vinext never reads
     // `cacheHandler` — it is a webpack/turbopack mechanism, like `adapterPath`
     // above — so for a while every request was a MISS and the provisioned

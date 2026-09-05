@@ -64,7 +64,7 @@ export const resetPoolInstrumentor = (): void => {
 };
 
 // ── Writer-pool ACTIVITY tracking (#348 gate fix) ─────────────────────────────
-// The deep-health scrape (:9091, every ~30s) must dial Postgres ONLY when the
+// The deep-health scrape (:9464, every ~30s) must dial Postgres ONLY when the
 // app has actually used the writer pool RECENTLY — otherwise `SELECT 1` on every
 // scrape re-arms the scale-zero-pg gateway's 60s DB idle timer and the DB never
 // sleeps while the pod is up, BREAKING scale-to-zero. So we record the wall-clock

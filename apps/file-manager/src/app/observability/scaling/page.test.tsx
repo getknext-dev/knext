@@ -469,7 +469,7 @@ describe('scaling PromQL ↔ metrics.ts + scale-to-zero dashboard parity', () =>
   it('every knext_* series referenced by a Scaling query has a real emitter', () => {
     // Two emitter sets since D1: metrics.ts (the app-registry legacy series,
     // e.g. db-wake) and the entry template's knext_bunexec_* registrations
-    // (the shipped :9091 scrape). A query outside BOTH is dangling.
+    // (the shipped :9464 scrape). A query outside BOTH is dangling.
     const allowed = exportedMetricNames();
     for (const name of scanBunexecMetrics(readFileSync(RUNTIME_CONTRACT_TEMPLATE, 'utf8')).keys()) {
       allowed.add(name);

@@ -27,7 +27,7 @@
 //   (`srvx/bun`) — the exact path nitro's default bun entry uses, which augments
 //   the Request (`runtime`/`waitUntil`) and normalises the result so nitro/vinext
 //   route matching works. A raw `Bun.serve({ fetch: r => useNitroApp().fetch(r) })`
-//   answers a framework 404 for every route (only :9091 metrics survive).
+//   answers a framework 404 for every route (only :9464 metrics survive).
 
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -62,7 +62,7 @@ describe('#460 bug 2 — the app handler is served through nitro’s real path',
   });
 
   it('does NOT route app requests through a raw Bun.serve (the broken pattern)', () => {
-    // The only Bun.serve in the entry is the :9091 metrics listener. The APP
+    // The only Bun.serve in the entry is the :9464 metrics listener. The APP
     // handler must not be a raw Bun.serve delegating to useNitroApp().fetch —
     // that is exactly the pattern that 404s every route.
     expect(CODE).not.toMatch(/Bun\.serve\([^)]*nitro\.fetch/s);

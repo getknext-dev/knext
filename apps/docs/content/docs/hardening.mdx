@@ -40,6 +40,11 @@ set) is knext.
   `kn-next doctor` and the `NetworkPolicyEnforced` condition on your app both report which case
   your cluster is in.
 - **Malformed HTTP** — external traffic passes three independent HTTP parsers before your code.
+- **Metrics-port separation** — the app's Prometheus listener defaults to `:9464`, deliberately off
+  `:9091`, which Knative's queue-proxy binds inside every pod on a stock Serving install (default
+  `config-observability`). The NetworkPolicy's scrape grants, the `prometheus.io/port` annotation
+  and the shipped `PodMonitor` are all fixed to `9464`. Never set `METRICS_PORT=9091` — the app
+  races queue-proxy for the port and crash-loops with `EADDRINUSE`; `kn-next doctor` detects this.
 
 ## What it does not bound
 

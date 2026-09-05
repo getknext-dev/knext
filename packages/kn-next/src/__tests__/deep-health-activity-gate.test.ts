@@ -10,7 +10,7 @@ import {
 
 /**
  * #348 (gate fix) — the scrape hook must ACTIVITY-GATE the Postgres dial so an
- * idle app's scale-to-zero DB is never woken by the :9091 scrape. This is the
+ * idle app's scale-to-zero DB is never woken by the :9464 scrape. This is the
  * acceptance for the fix: when the pool has been idle past the budget, the hook
  * must NOT run the deep check (no `SELECT 1`, no DB wake); when the pool was used
  * recently, the hook DOES run and the gauge reflects the state.

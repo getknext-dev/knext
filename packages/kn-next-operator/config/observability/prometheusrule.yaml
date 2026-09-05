@@ -7,7 +7,7 @@
 #   - app:       knext_bunexec_{http_requests_total, http_request_duration_seconds,
 #                http_inflight_requests, startup_duration_seconds,
 #                process_uptime_seconds, process_resident_memory_bytes}
-#                — rendered by the compiled runtime's :9091 endpoint
+#                — rendered by the compiled runtime's :9464 endpoint
 #                (packages/kn-next/templates/app/runtime-contract.mjs.hbs,
 #                `renderMetrics`), which is what the shipped PodMonitor scrapes.
 #   - condition: knext_nextapp_condition — a kube-state-metrics CRD metric
@@ -138,7 +138,7 @@ spec:
     - name: knext.app.staleness
       rules:
         # (1) The target is discovered but cannot be scraped: wrong port, the
-        # :9091 listener never bound, a NetworkPolicy in the way. The app may
+        # :9464 listener never bound, a NetworkPolicy in the way. The app may
         # still be serving traffic perfectly — which is the point, because every
         # other app alert in this file is blind while this is true.
         - alert: KnextAppMetricsTargetDown
@@ -149,11 +149,11 @@ spec:
           annotations:
             summary: "knext app metrics target {{ $labels.namespace }}/{{ $labels.pod }} is not scrapeable"
             description: >-
-              Prometheus has discovered this app pod but the :9091 /metrics
+              Prometheus has discovered this app pod but the :9464 /metrics
               scrape has failed for 10m. Every knext.app alert is blind for this
               app until it recovers. Check that the runtime bound its metrics
               listener (the pod logs `LISTENING:<port> METRICS:<port>` at
-              startup) and that a NetworkPolicy is not blocking 9091.
+              startup) and that a NetworkPolicy is not blocking 9464.
             runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/runbooks/troubleshooting.md"
 
         # (2) THE #792 SHAPE ITSELF, and the reason this group exists. The
@@ -175,7 +175,7 @@ spec:
           annotations:
             summary: "knext app pod {{ $labels.namespace }}/{{ $labels.pod }} scrapes OK but exports no knext series"
             description: >-
-              The :9091 endpoint is answering, but it is not exporting
+              The :9464 endpoint is answering, but it is not exporting
               knext_bunexec_process_uptime_seconds. The metric contract has
               drifted: every dashboard panel and every knext.app alert for this
               app is silently empty. Compare the pod's live /metrics output
@@ -262,7 +262,7 @@ spec:
         # `KnextDeepHealthStuckWaking` (#348) moved to knext.app.node-legacy
         # below: knext_deep_health_state is registered by the APP into a
         # prom-client registry served on the app port, and the shipped
-        # PodMonitor scrapes :9091 only.
+        # PodMonitor scrapes :9464 only.
 
     # ── Opt-in: apps that ALSO scrape their own /api/metrics ────────────────
     #
@@ -271,8 +271,8 @@ spec:
     # (packages/kn-next/src/adapters/metrics.ts, the `kn_next_*` registry in an
     # app's own route) are real, but they are exported on the APP port through
     # an application-level `/api/metrics` route. Before ADR-0048 the node-server
-    # supervisor merged them onto :9091; the compiled binary does not, and the
-    # shipped PodMonitor scrapes :9091 only.
+    # supervisor merged them onto :9464; the compiled binary does not, and the
+    # shipped PodMonitor scrapes :9464 only.
     #
     # So: keep this group if you run the node-server path, or if you have added
     # a scrape config for your app's /api/metrics. Otherwise it is inert — which
