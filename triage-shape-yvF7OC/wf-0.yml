@@ -1,0 +1,7 @@
+name: fixture
+on:
+  schedule:
+    - cron: "0 3 * * *"
+jobs:
+  gate:
+    runs-on: ubuntu-latest

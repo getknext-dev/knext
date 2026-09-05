@@ -1,0 +1,5 @@
+name: fixture
+on: [push, workflow_dispatch]
+jobs:
+  gate:
+    runs-on: ubuntu-latest

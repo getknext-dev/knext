@@ -1,0 +1,10 @@
+
+on:
+  pull_request:
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run it
+        continue-on-error: true
+        run: run-the-gate

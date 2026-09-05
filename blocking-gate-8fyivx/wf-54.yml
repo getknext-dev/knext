@@ -1,0 +1,19 @@
+concurrency:
+  group: ci
+  cancel-in-progress: ${{ true }}
+
+on:
+  pull_request:
+jobs:
+  gate:
+    name: Gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run it
+        run: run-the-gate
+  other:
+    name: Other
+    runs-on: ubuntu-latest
+    steps:
+      - name: Something
+        run: echo hi

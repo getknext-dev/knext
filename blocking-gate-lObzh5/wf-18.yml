@@ -1,0 +1,17 @@
+
+on:
+  pull_request:
+jobs:
+  upstream:
+    strategy:
+      matrix:
+        n: [1]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+  gate:
+    needs: upstream
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run it
+        run: run-the-gate

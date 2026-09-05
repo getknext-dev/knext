@@ -119,7 +119,7 @@ export const DIVERGENT = {
       'template; only the honesty differs. EXPIRY: bumping the example’s vinext past beta.4 ' +
       'reds the beta.4 pin assertion in vinext-isr-redis-wiring.test.ts — wire cache.data ' +
       'there, restore the template text, and delete this entry in the same change.',
-    sha256: 'ef12adc50c5cc039ce8e50092669a995071168d95f9486e858b0886310f5d32f',
+    sha256: '5a9389c8eaf094ea6ada32138c8220ee68b454aa7659f0e201485a360ed68626',
   },
 };
 

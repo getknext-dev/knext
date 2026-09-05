@@ -1,0 +1,34 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nodesh-node-1-example-com-214049018
+  namespace: knext-prewarm
+  labels:
+    knext.dev/benchmark: image-prewarm
+spec:
+  ttlSecondsAfterFinished: 60
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        knext.dev/benchmark: image-prewarm
+    spec:
+      nodeName: node-1.example.com
+      hostPID: true
+      hostNetwork: true
+      restartPolicy: Never
+      tolerations: [{operator: Exists}]
+      containers:
+      - name: sh
+        # Digest-pinned like every other image this repo runs (security.md), and
+        # this one especially: it is a PRIVILEGED, hostPID pod that nsenters the
+        # host. The whole finding this harness produced is that the artifact
+        # behind a tag is mutable and load-bearing — which is why the tag is kept
+        # alongside the digest and resolved against it by
+        # scripts/verify-image-pins.mjs, and why the value is VALIDATED above
+        # before it reaches this spec.
+        # Bump with: crane digest alpine:<tag>
+        image: alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+        command: ["nsenter","-t","1","-m","-u","-i","-n","-p","--","sh","-c","echo ZWNobyBoaQ== | base64 -d | sh"]
+        securityContext: {privileged: true}
+        resources: {requests: {cpu: 5m, memory: 16Mi}}
