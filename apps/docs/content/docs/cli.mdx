@@ -48,6 +48,12 @@ the package (see [Directly runnable entries](#directly-runnable-entries) below).
 
 ## `kn-next create`
 
+<Callout type="warn">
+`kn-next create` ships in an **upcoming release** — it is not yet included in any published
+`@getknext/core` version. An installed CLI that does not recognize the command is current, not
+broken; this page documents `create` ahead of that release.
+</Callout>
+
 Scaffolds a new knext-ready Next.js app into the current directory (or the one you name). It writes
 files and makes **no** cluster changes, so it is safe to run and inspect before anything is deployed.
 
@@ -67,6 +73,13 @@ hand, and both are silent failures rather than loud ones:
 `create` refuses to clobber: an existing file aborts the whole write before anything is touched,
 unless you pass `--force`. It also refuses when a config file already present would shadow the one
 it writes, rather than emitting a config Next would never read.
+
+The generated `package.json` pins its `@getknext/*` dependencies at the **CLI's own version** — the
+CLI and those packages release together, so a published CLI always scaffolds versions that exist on
+the registry. If the CLI you ran carries a version that was never published (typically a build from
+a source checkout), `create` checks the registry and prints a warning telling you that
+`npm install` would fail and what to do instead. The check is best-effort: with no network access,
+`create` still scaffolds normally and stays quiet.
 
 ## `kn-next deploy` (default)
 

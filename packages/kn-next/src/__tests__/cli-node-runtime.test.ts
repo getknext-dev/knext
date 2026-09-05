@@ -58,8 +58,18 @@ const distBin = join(pkgRoot, "dist", "cli", "kn-next.js");
 const STACK_FRAME_RE = /\n\s+at\s/;
 const CHUNK_PATH_RE = /\b[\w./-]+\.(?:js|cjs|mjs):\d+/;
 
-/** Spawn env: neutralize inherited NODE_OPTIONS (preloads) and force no TTY color. */
-const spawnEnv = { ...process.env, NODE_OPTIONS: "", NO_COLOR: "1" };
+/**
+ * Spawn env: neutralize inherited NODE_OPTIONS (preloads) and force no TTY
+ * color. `npm_config_registry` points `create`'s #950 pin probe at a closed
+ * local port so the bundled-bin scaffold below stays offline and
+ * deterministic (connection refused is the probe's silent path).
+ */
+const spawnEnv = {
+    ...process.env,
+    NODE_OPTIONS: "",
+    NO_COLOR: "1",
+    npm_config_registry: "http://127.0.0.1:9",
+};
 
 function run(cmd: string, args: string[], cwd?: string) {
     return spawnSync(cmd, args, {
