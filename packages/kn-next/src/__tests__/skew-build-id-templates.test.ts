@@ -23,25 +23,23 @@ import { join } from "node:path";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..", "..", "..");
 
-/** Every scaffold template that ships a Next config. */
-const NEXT_CONFIG_TEMPLATES = [
-    join(
-        REPO_ROOT,
-        "packages",
-        "kn-next",
-        "templates",
-        "app",
-        "next.config.ts.hbs",
-    ),
-    join(
-        REPO_ROOT,
-        "turbo",
-        "generators",
-        "templates",
-        "zone",
-        "next.config.ts.hbs",
-    ),
-];
+/**
+ * Every scaffold template that ships a Next config.
+ *
+ * DISCOVERED by `git ls-files`, never listed — the same fix the in-repo apps
+ * half of this file already carries (#920 review round 2). An enumerated array
+ * is how the THIRD template ships unchecked while the suite stays green (the
+ * #892 root cause reappearing in a new scaffold). A glob that matches nothing
+ * is asserted to FAIL below, so discovery cannot pass vacuously.
+ */
+const NEXT_CONFIG_TEMPLATES = execFileSync(
+    "git",
+    ["ls-files", "**/templates/**/next.config.ts.hbs"],
+    { cwd: REPO_ROOT, encoding: "utf8" },
+)
+    .split("\n")
+    .filter((p) => p.length > 0)
+    .map((rel) => join(REPO_ROOT, rel));
 
 /**
  * True when the source mints the build id from `NEXT_DEPLOYMENT_ID` via
@@ -101,6 +99,40 @@ describe("T2a — scaffold templates mint the static namespace from the deploy i
         expect(
             mintsBuildIdFromDeploymentId(
                 `const nextConfig = { generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID || null };`,
+            ),
+        ).toBe(true);
+    });
+
+    it("the glob found the templates (a glob matching nothing proves nothing)", () => {
+        // Non-vacuity on the discovery itself: a glob that matched nothing
+        // would make the `it.each` below run zero cases and pass silently.
+        // The two known scaffold templates are the floor, not the ceiling — a
+        // third one added later is discovered and checked without editing here.
+        expect(NEXT_CONFIG_TEMPLATES.length).toBeGreaterThanOrEqual(2);
+        expect(
+            NEXT_CONFIG_TEMPLATES.some((p) =>
+                p.endsWith(
+                    join(
+                        "packages",
+                        "kn-next",
+                        "templates",
+                        "app",
+                        "next.config.ts.hbs",
+                    ),
+                ),
+            ),
+        ).toBe(true);
+        expect(
+            NEXT_CONFIG_TEMPLATES.some((p) =>
+                p.endsWith(
+                    join(
+                        "turbo",
+                        "generators",
+                        "templates",
+                        "zone",
+                        "next.config.ts.hbs",
+                    ),
+                ),
             ),
         ).toBe(true);
     });
