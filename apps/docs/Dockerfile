@@ -60,7 +60,14 @@ RUN test -f .output/server/index.mjs \
 # ---------------------------------------------------------------------------
 FROM oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb
 
-RUN apk add --no-cache libstdc++ libgcc
+# Whole-base upgrade BEFORE the link libs: `apk upgrade --no-cache` pulls EVERY
+# base-layer package (busybox, zlib, apk-tools, ssl_client, openssl, ...) up to the
+# alpine branch's current patch — not a hand-picked few — so the NEXT base-layer HIGH
+# is cleared without a bespoke PR naming the package. Base digest stays PINNED for
+# reproducibility (ADR-0035); versions deliberately NOT pinned (a pinned version goes
+# stale like the digest and hard-fails the day the branch drops it). This base is also
+# Trivy-scanned by the base-image matrix in .github/workflows/supply-chain.yml.
+RUN apk upgrade --no-cache && apk add --no-cache libstdc++ libgcc
 
 WORKDIR /app
 

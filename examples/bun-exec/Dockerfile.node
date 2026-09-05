@@ -17,6 +17,15 @@
 # node:22-alpine
 FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
 
+# Whole-base upgrade: `apk upgrade --no-cache` pulls EVERY base-layer (alpine)
+# package — busybox, zlib, apk-tools, ssl_client, openssl, ... — up to the branch's
+# current patch, so the NEXT base-layer HIGH is cleared without a bespoke per-package
+# PR. Base digest stays PINNED for reproducibility (ADR-0035); versions deliberately
+# NOT pinned (a pinned version goes stale like the digest and hard-fails the day the
+# branch drops it). This base is also Trivy-scanned by the base-image matrix in
+# .github/workflows/supply-chain.yml.
+RUN apk upgrade --no-cache
+
 WORKDIR /app
 
 # COPY THE STANDALONE TREE WHOLE, and move WORKDIR to the app inside it, rather

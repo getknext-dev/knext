@@ -136,7 +136,13 @@ RUN set -eu; \
 # workflow's contract explicit rather than making it build whatever is last.
 FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce AS runner
 
-RUN apk add --no-cache --upgrade libstdc++ libgcc libcrypto3 libssl3  # --upgrade clears base-layer openssl CVEs (Trivy HIGH); base digest stays pinned
+# Whole-base upgrade BEFORE the link libs: `apk upgrade --no-cache` pulls EVERY
+# base-layer package (busybox, zlib, apk-tools, ssl_client, openssl, ...) up to the
+# 3.22 branch's current patch — not a hand-picked few — so the NEXT base-layer HIGH
+# Trivy fails on is cleared without a bespoke PR naming the package. Base digest
+# stays PINNED for reproducibility (ADR-0035); versions deliberately NOT pinned (a
+# pinned version goes stale like the digest and hard-fails the day the branch drops it).
+RUN apk upgrade --no-cache && apk add --no-cache libstdc++ libgcc
 
 WORKDIR /app
 
