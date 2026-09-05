@@ -136,7 +136,7 @@ function majorOfCaretRange(range: string, what: string): number {
 }
 
 /**
- * What `pnpm install --frozen-lockfile` will actually put on disk for the ROOT
+ * What `bun install --frozen-lockfile` will actually put on disk for the ROOT
  * importer — which is what the action resolves via
  * `require.resolve('@changesets/cli/package.json')`.
  *
@@ -256,7 +256,7 @@ describe('changesets/action major and @changesets/cli major stay compatible', ()
     ).toBe(expectedCliMajor);
   });
 
-  it('resolves the same CLI major in pnpm-lock.yaml as package.json declares', () => {
+  it('resolves the same CLI major in bun.lock as package.json declares', () => {
     // The action checks the DECLARED range and separately `require.resolve`s the
     // installed `@changesets/cli/package.json`. A manifest bumped without a
     // lockfile update would satisfy the assertion above and still fail live,
@@ -269,8 +269,8 @@ describe('changesets/action major and @changesets/cli major stay compatible', ()
     const resolvedMajor = Number((/^(\d+)\./.exec(resolved) as RegExpExecArray)[1]);
     expect(
       resolvedMajor,
-      `package.json declares @changesets/cli major v${declaredMajor} but pnpm-lock.yaml resolves ` +
-        `${resolved} for the root importer. CI runs \`pnpm install --frozen-lockfile\`, so the ` +
+      `package.json declares @changesets/cli major v${declaredMajor} but bun.lock resolves ` +
+        `${resolved} for the root importer. CI runs \`bun install --frozen-lockfile\`, so the ` +
         'lockfile — not the manifest — decides what the action finds on disk.',
     ).toBe(declaredMajor);
   });

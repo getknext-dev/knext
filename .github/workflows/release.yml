@@ -107,17 +107,21 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       # Build in dependency order so the packed tarballs carry real dist/ (lib →
-      # db → core) — audit-published.mjs pnpm-packs each (rewriting workspace:^
-      # exactly like changeset publish) and audits the resolved prod closure.
+      # db → core) — audit-published.mjs packs each with `bun pm pack`, asserts
+      # the rewritten workspace:^ sibling ranges match the co-packed versions
+      # (bun rewrites from bun.lock, which drifts on every changeset bump —
+      # #942 F1), and audits the resolved prod closure.
       - name: Build publishable packages
-        run: pnpm --filter @getknext/lib build && pnpm --filter @getknext/db build && pnpm --filter @getknext/core build
+        run: bun run --filter @getknext/lib build && bun run --filter @getknext/db build && bun run --filter @getknext/core build
 
       # Audits the PUBLISHED production closure (--omit=dev, HIGH/CRITICAL) and
       # writes sbom/*.cdx.json. Non-zero exit here fails the job → blocks publish.
@@ -159,11 +163,13 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       # NO `publish-script` and NO `NODE_AUTH_TOKEN`: this step is structurally
       # incapable of publishing, which is what lets it run unapproved.
@@ -183,7 +189,7 @@ jobs:
           #   commit               -> commit-message
           #   title                -> pr-title
           #   createGithubReleases -> create-github-releases
-          version-script: pnpm run changeset:version
+          version-script: bun run changeset:version
           commit-message: 'chore: version packages'
           pr-title: 'chore: version packages'
           # Releases are created by the publish job, from the published set.
@@ -270,17 +276,19 @@ jobs:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       # Build in dependency order: @getknext/lib, then @getknext/db (depends on lib and
       # holds the `kn-next db migrate` runner, #242), then @getknext/core (type-imports
       # both). @getknext/lib/@getknext/db ship only dist/, so they must build first.
       - name: Build publishable packages
-        run: pnpm --filter @getknext/lib build && pnpm --filter @getknext/db build && pnpm --filter @getknext/core build
+        run: bun run --filter @getknext/lib build && bun run --filter @getknext/db build && bun run --filter @getknext/core build
 
       # Gate the publish command WITHOUT referencing `secrets` inside the action's
       # `with:` input (that expression caused GitHub startup-failure runs).
@@ -308,7 +316,7 @@ jobs:
             echo "::error::NPM_TOKEN is PRESENT but the registry REJECTED it (npm whoami exited non-zero). Rotate the npm-publish environment secret; presence is not validity."
             exit 1
           fi
-          echo "publish=pnpm run release" >> "$GITHUB_OUTPUT"
+          echo "publish=bun run release" >> "$GITHUB_OUTPUT"
 
       # No `version-script` here on purpose: this job must never take the version
       # path. It is reached only when there are no changesets, and it is the one

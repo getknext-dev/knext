@@ -62,11 +62,11 @@ export function registerNode() {
   // DERIVED from the same core-owned OTel hooks (the HTTP SERVER span lifecycle,
   // the cold-start processor, the db-wake pool wrapper) — NO app route-handler
   // wiring. They live in a core-owned registry served on a localhost-only child
-  // port; the supervisor's :9091 (the operator's scrape target) merges it in.
+  // port; the supervisor's :9464 (the operator's scrape target) merges it in.
   // Because they ride the OTel spans, they share tracing's default-off gate.
   const metrics = initRuntimeMetrics(new Registry());
   // Refresh the #348 deep-health state gauge ON THE SCRAPE CADENCE: when
-  // Prometheus scrapes :9091 (~30s), run checkDeepHealth() once and map its
+  // Prometheus scrapes :9464 (~30s), run checkDeepHealth() once and map its
   // verdict onto knext_deep_health_state. This surfaces a SUSTAINED `waking`
   // (a permanent connection-level DB outage that checkDeepHealth classifies
   // `waking` forever, never `down`) as a scrapable series the alert rule keys

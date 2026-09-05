@@ -14,7 +14,7 @@
  *
  * `entry` points at knext's own Nitro server entry rather than Nitro's default.
  * vinext is Vite/rolldown and ignores knext's webpack adapter hooks, so it
- * cannot re-provide the RuntimeContract (health, `:9091` metrics, SIGTERM
+ * cannot re-provide the RuntimeContract (health, `:9464` metrics, SIGTERM
  * drain, mutating-endpoint auth) the node supervisor gives. A Nitro server
  * entry is a replaceable template, so the wrapper goes there instead of hooking
  * the pipeline.

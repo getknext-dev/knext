@@ -9,7 +9,7 @@
 // carries no length, so a cap that only reads the header is not a cap.
 //
 // The subject is `srvx-close-harness.mjs`, which wires `srvx/bun` serve + the
-// `:9091` `Bun.serve` exactly as `knext-bun-entry.mjs` does (that mirroring is
+// `:9464` `Bun.serve` exactly as `knext-bun-entry.mjs` does (that mirroring is
 // itself pinned by the wiring scan). Booting the compiled binary instead would
 // be better and is what the alpine docker e2e is for; this runs on every PR.
 //
@@ -191,7 +191,7 @@ describe.skipIf(!bunAvailable)('the request byte cap, over real sockets', () => 
     expect(firstMs).toBeLessThan(lastMs / 2);
   });
 
-  it('caps the :9091 metrics listener small while a scrape still works', async () => {
+  it('caps the :9464 metrics listener small while a scrape still works', async () => {
     const { metricsPort } = await boot();
     const scrape = await fetch(`http://127.0.0.1:${metricsPort}/metrics`);
     expect(scrape.status).toBe(200);

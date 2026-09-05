@@ -108,13 +108,26 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // the Dockerfile's builder stage uses. A count RISING is a decision too —
       // this one is it.
       'supply-chain.yml': 1,
-      'test-e2e-deploy.yml': 1,
+      // 2, was 1: the Prepare job's knext-deps install moved from pnpm to a
+      // pinned setup-bun after the bun migration merged — pnpm refuses a
+      // bun-pinned workspace ("This project is configured to use bun"), which
+      // would have reddened the nightly credential lane on its first
+      // post-merge run. Deliberate edit per the rule above.
+      'test-e2e-deploy.yml': 2,
       // #608 — the vinext-axis compat lane. Its one setup-bun is UNCONDITIONAL
       // (the compiled artifact has no node arm) and carries the same
       // `inputs.bun-version || '<pin>'` fallback form, so the pin assertion
       // below covers it exactly as it covers the bun lane's.
-      'compat-vinext.yml': 1,
+      // Same fix as test-e2e-deploy.yml — the vinext lane's first-ever firing
+      // is what exposed the pnpm/bun mismatch (run 33883692192).
+      'compat-vinext.yml': 2,
       'bun-sandbox-fetch-ab.yml': 1,
+      // NEW (#926): the npm publish lane installed with `pnpm install
+      // --frozen-lockfile` against a repo with NO pnpm-lock.yaml, so every job
+      // died at install. All three release.yml jobs and both release-ghp.yml
+      // jobs now install with bun, pinned like every other lane.
+      'release.yml': 3,
+      'release-ghp.yml': 2,
     });
   });
 

@@ -12,10 +12,16 @@
  * JS dependency closure.
  *
  * WHAT IT AUDITS — the ACTUALLY-PUBLISHED PRODUCTION closure, not root devDeps:
- *   1. `pnpm pack` each published package (lib → db → core). pnpm (not npm) pack
- *      rewrites the `workspace:^` deps between them to a real version range,
- *      EXACTLY what `changeset publish` does — so we audit the graph consumers
- *      actually resolve.
+ *   1. `bun pm pack` each published package (lib → db → core), then ASSERT the
+ *      packed sibling ranges are coherent. bun (not npm) pack rewrites the
+ *      `workspace:^` deps between them to a real range — but MEASURED (#942
+ *      review, F1): it rewrites from the version BUN.LOCK records for the
+ *      sibling, not from its package.json, and `changeset version` bumps only
+ *      the manifests while `--frozen-lockfile` never refreshes the lock. So on
+ *      the release after any bump the raw pack output would declare the
+ *      PREVIOUS sibling range and npm would quietly satisfy it from the
+ *      registry. `siblingRangeProblems` below dies loud on exactly that, so
+ *      what we audit is provably the graph consumers are about to resolve.
  *   2. Install all three tarballs together in a scratch dir OUTSIDE the repo with
  *      `--omit=dev` (auditing root devDeps — drizzle-kit, esbuild, vitest, biome,
  *      tsx — would be FALSE CONFIDENCE: none of it ships to consumers).
@@ -46,7 +52,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
@@ -125,12 +131,125 @@ function loadAllowlist() {
   return ids;
 }
 
-/** Pack a workspace package with `pnpm pack` (rewrites workspace:^ like publish). */
-function pnpmPack(dir, dest) {
-  execFileSync('pnpm', ['pack', '--pack-destination', dest], {
+/**
+ * Pack a workspace package with `bun pm pack`. Was `pnpm pack` until the
+ * workspace moved to bun (#926): without pnpm-workspace.yaml pnpm cannot
+ * resolve `workspace:^` at all, so the old command was dead the moment the
+ * lockfile left — the same class as the `pnpm install --frozen-lockfile`
+ * steps this lane died on.
+ *
+ * NOTE the trade this makes (#942 review, F1): bun rewrites `workspace:^`
+ * from bun.lock's recorded sibling version, where pnpm resolved from the
+ * workspace manifests. The post-pack `siblingRangeProblems` assertion in
+ * main() is what makes that difference loud instead of silent.
+ */
+function packPublished(dir, dest) {
+  execFileSync('bun', ['pm', 'pack', '--destination', dest], {
     cwd: dir,
     stdio: ['ignore', 'inherit', 'inherit'],
   });
+}
+
+/** The scope whose sibling edges the post-pack assertion vouches for. */
+const SIBLING_SCOPE = '@getknext/';
+
+/** Parse `x.y.z` (an optional leading v tolerated); null when not that shape. */
+function parseSemver(version) {
+  const m = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(String(version).trim());
+  if (!m) return null;
+  return { major: Number(m[1]), minor: Number(m[2]), patch: Number(m[3]) };
+}
+
+/**
+ * Caret satisfaction for plain `^x.y.z` ranges — npm's rule: same major (same
+ * minor when major is 0, same patch when major and minor are both 0), and the
+ * version is >= the range's floor. Deliberately NOT a general semver engine:
+ * anything the packer legitimately emits for a workspace sibling is a caret
+ * over a release version, and any other shape is a question the caller must
+ * fail closed on rather than have this function guess.
+ */
+function caretSatisfies(range, version) {
+  const m = /^\^(\d+)\.(\d+)\.(\d+)$/.exec(String(range).trim());
+  const v = parseSemver(version);
+  if (!m || !v) return false;
+  const floor = { major: Number(m[1]), minor: Number(m[2]), patch: Number(m[3]) };
+  if (v.major !== floor.major) return false;
+  if (floor.major === 0 && v.minor !== floor.minor) return false;
+  if (floor.major === 0 && floor.minor === 0 && v.patch !== floor.patch) return false;
+  const cmp = v.major - floor.major || v.minor - floor.minor || v.patch - floor.patch;
+  return cmp >= 0;
+}
+
+/**
+ * The post-pack tripwire (#942 review, F1). Every packed manifest's
+ * `@getknext/*` dependency must be satisfied by the CO-PACKED sibling —
+ * otherwise the closure npm is about to install (and the audit + SBOM are
+ * about to describe) contains a REGISTRY copy of some previous release, and
+ * the publish-blocking gate certifies a graph nobody is publishing.
+ *
+ * Pure and exported so the drifted-lock shape stays pinned by
+ * `tests/audit-published-sibling-ranges.test.ts`; fail-closed on any range
+ * shape it cannot vouch for (a surviving `workspace:^` included). It also
+ * guards FUTURE packer changes: whatever tool packs next, an incoherent
+ * sibling edge dies here rather than in a consumer's install.
+ *
+ * @param {Array<{name: string, version: string,
+ *   dependencies?: Record<string,string>,
+ *   optionalDependencies?: Record<string,string>,
+ *   peerDependencies?: Record<string,string>}>} manifests the PACKED manifests
+ * @returns {string[]} human-readable problems; empty means coherent
+ */
+export function siblingRangeProblems(manifests) {
+  const problems = [];
+  const packedVersions = new Map(manifests.map((m) => [m.name, m.version]));
+  for (const manifest of manifests) {
+    for (const group of ['dependencies', 'optionalDependencies', 'peerDependencies']) {
+      for (const [dep, range] of Object.entries(manifest[group] ?? {})) {
+        if (!dep.startsWith(SIBLING_SCOPE)) continue;
+        const sibling = packedVersions.get(dep);
+        if (sibling === undefined) {
+          problems.push(
+            `${manifest.name}@${manifest.version} ${group} on ${dep} (${range}), but ${dep} is ` +
+              'not in the packed set — the #255/#256 shape: consumers can only 404 or fetch a ' +
+              'stale registry copy',
+          );
+          continue;
+        }
+        if (!/^\^\d+\.\d+\.\d+$/.test(String(range).trim())) {
+          problems.push(
+            `${manifest.name}@${manifest.version} ${group} on ${dep} has range '${range}', which ` +
+              'this gate cannot vouch for (expected ^x.y.z after pack rewriting) — a surviving ' +
+              'workspace: spec or an unexpected packer output; investigate, do not widen this check',
+          );
+          continue;
+        }
+        if (!caretSatisfies(range, sibling)) {
+          problems.push(
+            `${manifest.name}@${manifest.version} declares ${dep}@'${range}' but the co-packed ` +
+              `${dep} is ${sibling} — the drifted-bun.lock shape: npm would satisfy this from the ` +
+              'REGISTRY and the audit/SBOM would describe the previous release. Refresh bun.lock ' +
+              '(bun install) so the pack rewrites against the versions being published',
+          );
+        }
+      }
+    }
+  }
+  return problems;
+}
+
+/** Read `package/package.json` out of a packed tarball. */
+function packedManifest(tarball) {
+  const out = spawnSync('tar', ['-xzOf', tarball, 'package/package.json'], { encoding: 'utf8' });
+  if (out.status !== 0 || !out.stdout) {
+    die(
+      `could not read package/package.json from ${tarball}: ${out.stderr || `exit ${out.status}`}`,
+    );
+  }
+  try {
+    return JSON.parse(out.stdout);
+  } catch (err) {
+    die(`packed manifest in ${tarball} is not valid JSON: ${err.message}`);
+  }
 }
 
 function main() {
@@ -143,12 +262,23 @@ function main() {
   mkdirSync(sbomOutDir, { recursive: true });
 
   console.log('[audit-published] packing the published set (lib → db → core)…');
-  for (const pkg of PUBLISHED) pnpmPack(pkg.dir, tarballDir);
+  for (const pkg of PUBLISHED) packPublished(pkg.dir, tarballDir);
   const tarballs = readdirSync(tarballDir)
     .filter((f) => f.endsWith('.tgz'))
     .map((f) => join(tarballDir, f));
   if (tarballs.length !== PUBLISHED.length) {
     die(`expected ${PUBLISHED.length} tarballs, got ${tarballs.length}`);
+  }
+
+  // #942 F1 — BEFORE anything installs: the packed sibling edges must point at
+  // the tarballs beside them, not at some previous release on the registry.
+  console.log('[audit-published] asserting packed sibling ranges are coherent…');
+  const problems = siblingRangeProblems(tarballs.map(packedManifest));
+  if (problems.length > 0) {
+    die(
+      `packed sibling ranges are INCOHERENT — auditing this closure would describe a graph ` +
+        `nobody is publishing:\n  - ${problems.join('\n  - ')}`,
+    );
   }
 
   // Install the PROD closure only — outside the repo, no scripts, no audit yet.
@@ -247,4 +377,9 @@ function advisoryId(a) {
   return '';
 }
 
-main();
+// Entrypoint-guarded so the sibling-range test can import the pure helper
+// without triggering a full pack+install+audit run. The workflows invoke this
+// file directly (`node scripts/audit-published.mjs`), which still runs main().
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main();
+}

@@ -137,7 +137,15 @@ describe("uploadAssets reads the standalone build output (not .output/public)", 
         // deleting the shape dispatch in uploadAssets would leave every
         // turbopack-pinned test green while the default path silently staged
         // from a tree vinext never produces. Config carries NO build field.
-        const nitroKeys = ["_next/static/uuid-1/chunk.js", "favicon.ico"];
+        // The #892 marker is part of the staged set, so it rides the bulk
+        // upload AND the #75 verify-and-retry pass: a remote that does not
+        // carry it fails the deploy. Listing it here is the assertion that it
+        // is verified, not merely written.
+        const nitroKeys = [
+            "_next/static/uuid-1/chunk.js",
+            "_next/static/uuid-1/.knext-build",
+            "favicon.ico",
+        ];
         await fs.mkdir(
             join(root, ".output", "public", "_next", "static", "uuid-1"),
             {

@@ -84,7 +84,7 @@ const read = (p: string) => readFileSync(p, "utf8");
 
 // ── The emitted side ────────────────────────────────────────────────────────
 
-/** The compiled single executable's :9091 exposition (the scraped emitter). */
+/** The compiled single executable's :9464 exposition (the scraped emitter). */
 const BUNEXEC = seriesNames(scanBunexecMetrics(read(BUNEXEC_TEMPLATE)));
 
 /** The Go controller's own /metrics. */
@@ -94,7 +94,7 @@ const OPERATOR_EMITTED = seriesNames(
 
 /**
  * prom-client registries reachable only through an app-level `/api/metrics`
- * route. Real series; NOT on the shipped :9091 scrape path since ADR-0048.
+ * route. Real series; NOT on the shipped :9464 scrape path since ADR-0048.
  *
  * metrics.ts names its metrics through exported constants, so the scan reads
  * those constants out of the same file — the same source of truth as importing
@@ -174,7 +174,7 @@ const RULE_GROUPS: Record<
     },
     "knext.app": {
         emitters: ["bunexec", "external"],
-        why: "turnkey app alerts — MUST reference only what the shipped :9091 PodMonitor scrapes",
+        why: "turnkey app alerts — MUST reference only what the shipped :9464 PodMonitor scrapes",
     },
     "knext.app.node-legacy": {
         emitters: ["node-legacy", "external"],
@@ -192,7 +192,7 @@ const DASHBOARDS: Record<
 > = {
     "red-overview.json": {
         emitters: ["bunexec"],
-        why: "RED golden signals straight off the scraped :9091 endpoint",
+        why: "RED golden signals straight off the scraped :9464 endpoint",
     },
     "scale-to-zero.json": {
         emitters: ["bunexec", "external", "node-legacy"],
@@ -553,15 +553,15 @@ describe("every metric a DOC names is one something emits (S5)", () => {
 
 /**
  * The security-relevant half. `docs/security/threat-model.md` enumerates what a
- * cross-namespace scraper can read off `:9091`, and since ADR-0048 the compiled
+ * cross-namespace scraper can read off `:9464`, and since ADR-0048 the compiled
  * binary — not the retired node supervisor — is what serves that port. A section
- * that lists node-legacy series as `:9091` disclosure OVERSTATES the exposure,
+ * that lists node-legacy series as `:9464` disclosure OVERSTATES the exposure,
  * which the document itself says erodes it as surely as understating one.
  *
  * So the fenced section may name ONLY series the bun-exec runtime emits, and a
  * missing fence is a failure, never a skip.
  */
-describe("the threat model's :9091 disclosure list is the bunexec set (S5)", () => {
+describe("the threat model's :9464 disclosure list is the bunexec set (S5)", () => {
     const THREAT_MODEL = read(join(REPO_ROOT, "docs/security/threat-model.md"));
 
     it("the fenced section exists — a reflow cannot silently unhook the check", () => {
@@ -592,7 +592,7 @@ describe("the threat model's :9091 disclosure list is the bunexec set (S5)", () 
         ).toBeNull();
     });
 
-    it("names only series the compiled binary actually emits on :9091", () => {
+    it("names only series the compiled binary actually emits on :9464", () => {
         const section = fencedDocSection(THREAT_MODEL, "9091-disclosure");
         const tokens = extractDocMetricTokens(section ?? "");
         expect(
@@ -602,7 +602,7 @@ describe("the threat model's :9091 disclosure list is the bunexec set (S5)", () 
         const notOnPort = tokens.filter((t) => !docTokenResolves(t, BUNEXEC));
         expect(
             notOnPort,
-            "the threat model claims :9091 discloses series the bun-exec runtime does not emit:\n" +
+            "the threat model claims :9464 discloses series the bun-exec runtime does not emit:\n" +
                 notOnPort.join("\n"),
         ).toEqual([]);
     });
@@ -617,7 +617,7 @@ describe("the threat model's :9091 disclosure list is the bunexec set (S5)", () 
      * silently falsifying that sentence, in a security document, on the exact
      * axis it is read for.
      *
-     * So: emitted ⊆ documented as well. Adding a `:9091` series now reds until
+     * So: emitted ⊆ documented as well. Adding a `:9464` series now reds until
      * the disclosure list is updated — which is the review this repo wants to
      * force, since a new series on that port IS new cross-tenant disclosure.
      *
@@ -625,7 +625,7 @@ describe("the threat model's :9091 disclosure list is the bunexec set (S5)", () 
      * `_bucket`/`_sum`/`_count` from a histogram, and a threat model listing
      * those separately would be noise rather than precision.
      */
-    it("documents EVERY series :9091 emits — the 'and no more' claim is closed", () => {
+    it("documents EVERY series :9464 emits — the 'and no more' claim is closed", () => {
         const section = fencedDocSection(THREAT_MODEL, "9091-disclosure") ?? "";
         const documented = new Set(extractDocMetricTokens(section));
         const emittedFamilies = [
@@ -653,7 +653,7 @@ describe("the threat model's :9091 disclosure list is the bunexec set (S5)", () 
 
         expect(
             undocumented,
-            "the threat model says :9091 exposes these series 'and no more', but the runtime now " +
+            "the threat model says :9464 exposes these series 'and no more', but the runtime now " +
                 "emits others. A NEW series on that port is new cross-tenant disclosure and has to " +
                 "be reviewed, not silently shipped:\n" +
                 undocumented.join("\n"),

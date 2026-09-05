@@ -89,6 +89,33 @@ Once that reports the version you expect, upgrade the CLI:
 npm install -D @getknext/core@latest
 ```
 
+## Version-specific step: the metrics port moved from 9091 to 9464
+
+Older releases served app metrics on `:9091` — a port Knative's queue-proxy binds inside every pod
+on a stock Serving install, which could crash-loop apps with `EADDRINUSE`. Current releases serve
+metrics on **`:9464`** everywhere: the runtime's default, the `prometheus.io/port` annotation, the
+default NetworkPolicy's scrape grants, the shipped PodMonitor and the bundled Grafana dashboards
+all move together when you upgrade the operator and redeploy your apps.
+
+What does **not** move automatically is anything you wrote yourself against the old port:
+
+1. Hand-rolled Prometheus `scrape_configs`, or ServiceMonitors/PodMonitors you authored — repoint
+   them from `9091` to `9464`.
+2. Grafana panels or alert rules of your own pinned to the old target.
+3. Any NetworkPolicy you added alongside knext's default one that grants `9091` for scraping.
+4. **Redeploy each app** after upgrading: a pod still running an image built before the change
+   binds `:9091` until its next deploy, and during that window the upgraded operator's scrape
+   configuration points at `:9464` — so that app's metrics are dark until it is rebuilt.
+
+Verify an app after redeploying (from a pod or node that can reach it):
+
+```bash
+kubectl exec deploy/<your-scraper> -- wget -qO- http://<pod-ip>:9464/metrics | head -3
+```
+
+`kn-next doctor` (the `metrics-port` check) flags any app still pinned onto a queue-proxy-owned
+port and tells you which serving ConfigMap key governs `:9091` on your cluster.
+
 ## What this does not cover
 
 Deployment tools that apply manifests directly to your cluster — GitOps controllers, for example —

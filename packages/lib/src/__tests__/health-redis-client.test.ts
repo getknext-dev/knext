@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, jest, mock, spyOn } from '
  * `[ioredis] Unhandled error event` on its own schedule, which is what
  * contaminated the ledger row-3 stall capture.
  *
- * Deep health is on-demand (the :9091 scrape), so `lazyConnect` costs nothing:
+ * Deep health is on-demand (the :9464 scrape), so `lazyConnect` costs nothing:
  * the first `ping()` connects. Behaviour is otherwise untouched — the check
  * still fails OPEN to `degraded`, and readiness is still shallow (ADR-0026).
  */

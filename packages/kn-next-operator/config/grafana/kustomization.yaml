@@ -4,7 +4,7 @@
 # `grafana_dashboard: "1"` — the standard Grafana sidecar convention
 # (kube-prometheus-stack / grafana Helm chart). A Grafana whose sidecar watches
 # this namespace auto-imports them; no manual "Import dashboard" step. They graph
-# the per-app :9091 series discovered by the PodMonitor in ../prometheus.
+# the per-app :9464 series discovered by the PodMonitor in ../prometheus.
 #
 # OPT-IN, mirroring ../prometheus: this overlay is NOT part of the default
 # install bundle (config/default/kustomization.yaml keeps the `- ../grafana`
@@ -41,7 +41,7 @@ configMapGenerator:
   #   knext-dashboard-rum       kn_next_web_vitals_* is collected by an app-level
   #                             /api/rum route into a prom-client registry served
   #                             on the APP port. The shipped PodMonitor scrapes
-  #                             :9091 only, so every panel was permanently blank.
+  #                             :9464 only, so every panel was permanently blank.
   #   knext-dashboard-bytecode  its subject was NODE_COMPILE_CACHE warmth on the
   #                             node-server path. ADR-0048's compiled binary has
   #                             no bytecode cache to measure — the metric is not

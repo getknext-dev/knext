@@ -240,7 +240,7 @@ same-namespace `PodSelector`, so a neighbour pod reached the app container's por
 queue-proxy and with it the concurrency bound and the Go parser.
 
 ADR-0044 Option E closed the *path*: the policy now admits only the queue-proxy ports
-(8012/8013/8112) and metrics ports (9090/9091) from `knative-serving`/`kourier-system`, and metrics
+(8012/8013/8112) and metrics ports (9090/9464) from `knative-serving`/`kourier-system`, and metrics
 ports only from the same namespace. **It does not cap bytes** — that is Option C, deferred on a
 dated clock with a hard expiry at Tier-A exit or v1.0.
 
@@ -257,19 +257,23 @@ dated clock with a hard expiry at Tier-A exit or v1.0.
 `PodMonitor` with `namespaceSelector: any` — so on a policy-enforcing CNI the operator's own scrape
 was denied, and the tests asserted *same-namespace* scraping and would have stayed green forever.
 Closed by a third ingress rule admitting namespaces labelled `knext.dev/metrics-scrape=true` on the
-**app metrics port only** (`9091` — deliberately narrower than the same-namespace rule, since the
+**app metrics port only** (`9464` — deliberately narrower than the same-namespace rule, since the
 shipped PodMonitor targets nothing else). A cluster that labels nothing keeps the prior posture
 exactly, and a labelled namespace never reaches the serving ports.
 
 **Residual, stated rather than implied:** this is **namespace RBAC, not a per-app privilege
 boundary**. The label sits on a cluster-scoped Namespace, so the grantor is whoever holds
 `update namespaces` — on a platform with self-service namespaces, a tenant can grant itself. Once
-labelled, *every* pod in that namespace (not just Prometheus) can scrape `9091` on *every* knext app,
+labelled, *every* pod in that namespace (not just Prometheus) can scrape `9464` on *every* knext app,
 which in a shared cluster is cross-tenant metric disclosure. **What is actually exposed, enumerated
 from the exporter rather than assumed** — and since ADR-0048 that exporter is the compiled
 executable's own exposition (`templates/app/runtime-contract.mjs.hbs`), **not** the retired node
 supervisor's prom-client registry (`adapters/metrics.ts`), which no longer serves this port:
 
+<!-- The "9091" in this anchor id is HISTORICAL — the app metrics port moved to 9464 (#951:
+     queue-proxy owns :9091 on a stock serving install). The id is pinned by
+     observability-metric-contract.test.ts and scripts/mutation-prove-metric-contract.mjs;
+     renaming it is a three-file change with no informational payoff. -->
 <!-- metric-contract:9091-disclosure start -->
 
 - **Six series, and no more.** `knext_bunexec_http_requests_total`,
@@ -295,7 +299,7 @@ are prom-client metrics on an app's own `/api/metrics` route, which the shipped 
 scrape — an app that publishes that route publishes them itself, and that is the app's decision to
 make, not this port's exposure.
 
-`:9091` serves `GET /metrics` and nothing else — no pprof, health or debug endpoints — so the
+`:9464` serves `GET /metrics` and nothing else — no pprof, health or debug endpoints — so the
 exposure is bounded to the above. There is no `PodSelector` because the operator cannot know a user's
 Prometheus labels. Operators needing workload-level identity **cannot** fix this by adding a policy alongside:
 NetworkPolicies are additive, so a second policy unions its allow-rules with knext's rather than

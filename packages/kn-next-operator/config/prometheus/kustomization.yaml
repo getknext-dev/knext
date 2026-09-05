@@ -1,7 +1,7 @@
 resources:
 - monitor.yaml
 # Per-app golden-signal metrics (#315): a PodMonitor so Prometheus Operator
-# setups discover the per-app :9091 endpoint (plain Prometheus uses the
+# setups discover the per-app :9464 endpoint (plain Prometheus uses the
 # operator-injected prometheus.io/scrape annotations instead).
 - app-podmonitor.yaml
 

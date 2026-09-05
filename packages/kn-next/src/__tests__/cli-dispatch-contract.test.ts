@@ -192,6 +192,22 @@ describe("usage mistakes are UsageErrors, so they render as messages", () => {
             "formatPreflightFailure(outcome",
             'BUILD_ID "',
             "describeFailedCRApply()",
+            // T2a, the vinext leg of the same BUILD_ID skew check. Justified as
+            // NON-usage only in the branch where it IS non-usage: the build
+            // just ran and produced a prefix under a different id, which the
+            // user fixes in `next.config.ts`, not on the command line.
+            //
+            // The `--skip-build` branch is deliberately NOT here — it is a
+            // UsageError, because dropping the flag fixes it and a stack dump
+            // would bury that. Round 1 filed both under this allowlist, which
+            // misclassified the avoidable one.
+            //
+            // Anchored on the MESSAGE, not on the variable name it was built
+            // in. `throw new Error(detail)` would pre-legitimise any future
+            // plain throw in this file that happened to name its message
+            // `detail` — an allowlist entry that grants itself scope it was
+            // never reviewed for.
+            "Skew-protection asset retention requires the",
         ],
         // Derived name validity: composed from the config's app name + PR id.
         "preview.ts": ["exceeds the 63-char", "is not a valid DNS-1123 label"],

@@ -127,6 +127,24 @@ mock.module("../cli/vinext-build", () => ({
     buildVinextExecutable: (...a: unknown[]) => buildVinextExecutable(...a),
 }));
 
+// Same reasoning one step later: with the compile mocked there is no binary, and
+// the post-compile smoke (#894) would spawn a path that does not exist. Its own
+// behaviour is covered by `postcompile-smoke*.test.ts`.
+const runPostCompileSmoke = mock<AnyFn>(async () => ({
+    appPort: 1,
+    metricsPort: 2,
+    healthStatus: 200,
+    metricsStatus: 200,
+    exitCode: 0,
+    bootMs: 1,
+    termMs: 1,
+}));
+const __knextRealSmoke = { ...(await import("../cli/postcompile-smoke")) };
+mock.module("../cli/postcompile-smoke", () => ({
+    ...__knextRealSmoke,
+    runPostCompileSmoke: (...a: unknown[]) => runPostCompileSmoke(...a),
+}));
+
 const writeSyncMock = mock<AnyFn>();
 mock.module("node:fs", async () => {
     // Spreading importOriginal() does NOT carry node-builtin named exports

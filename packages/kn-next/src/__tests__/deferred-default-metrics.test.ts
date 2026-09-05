@@ -238,11 +238,11 @@ describe("node-server.ts wiring (source guard)", () => {
         expect(src).toContain("waitForChildServing");
     });
 
-    it("binds :9091 EARLY (before the spawn) but warms the graph after (#441)", () => {
+    it("binds :9464 EARLY (before the spawn) but warms the graph after (#441)", () => {
         // #441 correction: an idle http listener really IS free — the ~790ms
         // cost is the prom-client + @opentelemetry/api module GRAPH, which loads
         // lazily on the first scrape / child-ready, NOT at listen() time. So the
-        // platform contract (the :9091 sidecar answers while the runtime entry is
+        // platform contract (the :9464 sidecar answers while the runtime entry is
         // up, enforced by the shipped-bundle drain gate) is honoured by binding
         // the socket BEFORE the spawn, while the heavy load stays deferred.
         expect(src).not.toContain("metricsServer.listen(");

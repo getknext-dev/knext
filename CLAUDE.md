@@ -112,7 +112,10 @@ docs site on knext**). gRPC layer = **design-now / build-later, after correctnes
   - **ADR-0044 ingress hardening (Accepted, Amendment 1 Accepted).** The default NetworkPolicy is
     now **port-restricted** — a co-resident pod can no longer bypass the queue-proxy by dialling the
     app's container port — the same-namespace peer is scoped to metrics, and cross-namespace
-    scraping is a label-gated grant on `9091`. Enforcement is proved by a kind+Calico drill, not by
+    scraping is a label-gated grant on the app metrics port — `9464` since #951 (was `9091`, which
+    queue-proxy itself binds on a stock serving install, crash-looping every app; the grant, the
+    `prometheus.io/port` annotation, the entries' `METRICS_PORT` default and the shipped PodMonitor
+    moved together, locksteped by `metrics-port-lockstep.test.ts`). Enforcement is proved by a kind+Calico drill, not by
     an envtest object assertion.
   - **Still open and deliberately so:** the in-process byte cap (ADR-0044 Option C) is deferred on a
     **dated exception with a hard expiry at Tier-A exit or v1.0**. Rate limiting and payload caps are

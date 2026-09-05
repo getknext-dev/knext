@@ -280,7 +280,7 @@ describe('overview PromQL ↔ metrics.ts parity', () => {
 
   it('every knext_* series referenced by an Overview query has a real emitter', () => {
     // The RED queries moved to the knext_bunexec_* family (stability sprint
-    // D1) — the series the shipped :9091 scrape actually has. metrics.ts's
+    // D1) — the series the shipped :9464 scrape actually has. metrics.ts's
     // app-registry names remain allowed for the legacy series.
     const allowed = exportedMetricNames();
     for (const name of scanBunexecMetrics(readFileSync(RUNTIME_CONTRACT_TEMPLATE, 'utf8')).keys()) {

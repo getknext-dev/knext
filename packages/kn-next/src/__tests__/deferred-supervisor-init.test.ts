@@ -1,5 +1,5 @@
 // @vitest-environment node
-// These tests bind a real TCP socket for the lazy :9091 metrics endpoint and scrape
+// These tests bind a real TCP socket for the lazy :9464 metrics endpoint and scrape
 // it over fetch(). The root vitest workspace runs packages/** under happy-dom, whose
 // Same-Origin Policy blocks a cross-origin fetch to 127.0.0.1:<random-port>; node has
 // no such policy. Pin this file to the node environment so the socket scrape works.
@@ -365,7 +365,7 @@ describe("createLazyMetricsEndpoint", () => {
         // lazily. ensureListening must bind the port even though startCollector
         // was never called, and the FIRST scrape must still produce a complete
         // exposition (default families warmed on demand). This is exactly what
-        // the shipped-bundle drain gate asserts against :9091.
+        // the shipped-bundle drain gate asserts against :9464.
         const endpoint = createLazyMetricsEndpoint({
             port: 0,
             fetchChild: async () => "",

@@ -15,7 +15,7 @@ import {
  * background timer). `startChildMetricsServer` accepts an optional async
  * `onScrape` hook that runs before each exposition is served; the app wiring
  * passes a hook that runs `checkDeepHealth()` and calls `refreshDeepHealthGauge`.
- * Prometheus scraping :9091 (~30s) is what drives the deep check — no extra load.
+ * Prometheus scraping :9464 (~30s) is what drives the deep check — no extra load.
  */
 
 let server: http.Server | undefined;
@@ -50,7 +50,7 @@ function fetchMetrics(port: number): Promise<string> {
     });
 }
 
-describe("#348 deep-health gauge refreshes on the :9091 scrape cadence", () => {
+describe("#348 deep-health gauge refreshes on the :9464 scrape cadence", () => {
     it("runs the onScrape hook before serving so a scrape reflects the latest deep-health state", async () => {
         const metrics = createMetricsRegistry(new Registry(), "test-app");
 

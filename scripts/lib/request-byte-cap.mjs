@@ -72,7 +72,7 @@ export const ENV_VAR = 'KNEXT_MAX_REQUEST_BYTES';
 export const DEFAULT_MAX_REQUEST_BYTES = 8 * 1024 * 1024;
 
 /**
- * 64 KiB, FIXED, for the `:9091` listener.
+ * 64 KiB, FIXED, for the `:9464` listener.
  *
  * It answers exactly one GET, and until now ran at Bun's 128 MB default on the
  * co-resident-pod path ADR-0044's threat scope names as unbounded. It is not a
@@ -377,7 +377,7 @@ export async function auditRequestByteCap({ repoRoot }) {
         findings.push(
           `${rel}: the ${call.kind === 'bun' ? 'Bun.serve' : 'srvx serve'} call at offset ` +
             `${call.index} does not set ${CAP_OPTION}. ADR-0044 Option C: an uncapped listener ` +
-            'buffers an unbounded request body in the pod, and the :9091 listener is the exact ' +
+            'buffers an unbounded request body in the pod, and the :9464 listener is the exact ' +
             'co-resident path the ADR names.',
         );
         continue;
@@ -386,7 +386,7 @@ export async function auditRequestByteCap({ repoRoot }) {
       // resolved value there would let `KNEXT_MAX_REQUEST_BYTES=0` uncap it.
       if (call.kind === 'bun' && !/METRICS_MAX_REQUEST_BYTES/.test(call.value ?? '')) {
         findings.push(
-          `${rel}: the Bun.serve (:9091 metrics) call sets ${CAP_OPTION} to ` +
+          `${rel}: the Bun.serve (:9464 metrics) call sets ${CAP_OPTION} to ` +
             `${JSON.stringify(call.value)} instead of METRICS_MAX_REQUEST_BYTES. The metrics ` +
             `cap is fixed on purpose — ${ENV_VAR}=0 must not re-open it.`,
         );

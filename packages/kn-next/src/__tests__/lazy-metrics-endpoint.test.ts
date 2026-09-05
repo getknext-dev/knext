@@ -1,5 +1,5 @@
 /**
- * deferred-supervisor-init.ts — createLazyMetricsEndpoint (#441). The :9091
+ * deferred-supervisor-init.ts — createLazyMetricsEndpoint (#441). The :9464
  * socket must bind EARLY with a lightweight listener, then lazy-load the heavy
  * prom-client/OTel graph on the first scrape or startCollector. Uses a real
  * ephemeral port + an injected fetchChild so no real child is scraped.

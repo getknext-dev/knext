@@ -187,8 +187,9 @@ your own.
 
 - [x] **DONE (#734, #739).** S4-op: NetworkPolicy `Ports` + scoped same-namespace peer + `timeoutSeconds`
       evaluation (operator; contract test proves the direct-dial refusal). Architect-gate
-      residuals bound into the task: the `Ports` restriction **must still admit :9091**
-      (the operator stamps `prometheus.io/port=9091`, `nextapp_controller.go:820` — a
+      residuals bound into the task: the `Ports` restriction **must still admit the app
+      metrics port** (:9091 as accepted; **:9464 since Amendment 5**)
+      (the operator stamps `prometheus.io/port` with the same number — a
       queue-proxy-only rule kills scraping; the contract test asserts BOTH halves: app-port
       refused AND metrics-port scrapable); tightening a default-on policy is a **behavior
       break** for existing in-namespace callers, so it ships with a
@@ -342,5 +343,43 @@ half of the runtime-hardening invariant is still open and must not be claimed as
 — the five entry copies plus the e2e harness, so a cap wired into two of five reds) and
 `examples/bun-exec/test/request-byte-cap.test.ts` (behavioural, real sockets: honest-413,
 **chunked-413**, under-limit pass-through, bodyless `Upgrade` pass-through, a streaming SSE response
-still streaming, the `:9091` cap with a working scrape, the env override, and `0` uncapping with its
-boot log). Mutation-proved by `scripts/mutation-prove-bytecap.mjs`, 7/7.
+still streaming, the metrics-listener cap (`:9091` then, `:9464` since Amendment 5) with a working
+scrape, the env override, and `0` uncapping with its boot log). Mutation-proved by
+`scripts/mutation-prove-bytecap.mjs`, 7/7.
+
+## Amendment 5 (2026-09-05, #951): the app metrics port moves 9091 → 9464
+
+Every `:9091` in this ADR — Amendment 1's grant, the Action-item residual that the `Ports`
+restriction "must still admit :9091", Amendment 4's metrics-listener cap — described the app
+metrics port **as it was when those sections were accepted**. That port is now **9464**, and the
+reason is a defect this ADR's own threat modelling missed:
+
+**The collision.** knext's `appMetricsPort` was literally
+`knativenetworking.UserQueueMetricsPort` (9091) — but that constant names the port **queue-proxy
+itself binds** for its user-metrics server whenever serving's request-metrics protocol is
+`prometheus`. On such a cluster (the pre-OTel serving default; still one `config-observability`
+key away on v0.48+), app and sidecar raced for :9091 inside the shared pod netns, the app lost
+with `EADDRINUSE`, and every scaffolded app crash-looped (S3-V Finding C-2, reproduced on fresh
+kind, Serving v1.16.0). The port this ADR hardened was one the platform could never safely own.
+
+**The swap.** 9464 (the conventional OpenTelemetry Prometheus-exporter port; queue-proxy binds
+nothing there under any protocol) on every contract surface in one change: the entries'
+`METRICS_PORT` default (all five copy-pinned homes + the bun-exec Dockerfile), the operator's
+`prometheus.io/port` annotation, this policy's `appMetricsPort` in all three ingress rules, and
+the shipped PodMonitor. Locksteped by `metrics-port-lockstep.test.ts`, which also asserts the
+shared port is outside the queue-proxy-owned set `{8012, 8013, 8022, 8112, 9090, 9091}`.
+
+**A grant is deliberately LOST, not migrated.** The old rules' 9091 entries incidentally admitted
+scrapes of **queue-proxy's user-metrics server** (same port, same pod) from the same namespace
+and from `knext.dev/metrics-scrape`-labelled namespaces. After the swap, :9091 is not admitted by
+any rule: on a policy-enforcing CNI, queue-proxy user metrics are no longer scrapable through the
+default policy. That loss is intentional — the grant existed only as a side effect of the port
+collision, no shipped scrape config targets it (the PodMonitor never did), and re-adding 9091 to
+keep it would re-widen the policy for a consumer that does not exist. A cluster that wants
+queue-proxy user metrics brings its own policy (`spec.security.networkPolicy: false` + BYO, per
+Amendment 1's additivity note).
+
+**Rule structure is unchanged**: same three ingress rules, same peers, same policy shape — only
+the app-metrics port number moved. The Amendment-1 kind+Calico enforcement drill
+(`test/networkpolicy-enforcement-drill.sh`) is repointed to 9464 and must be re-run to remain the
+enforcement evidence; a drill run recorded against 9091 no longer proves the shipped policy.

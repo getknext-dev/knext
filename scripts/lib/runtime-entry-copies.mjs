@@ -96,8 +96,18 @@ export const DIVERGENT = {
       'same diff — `git diff` shows the two hunks are textually identical. The divergence this ' +
       'exemption records is still ONLY the image intercept; widening it to also mean "and the ' +
       'byte cap is missing here" would have left the one entry that is actually compiled into ' +
-      'the shipped example binary uncapped, which is the opposite of the point.',
-    sha256: 'bb18bb556b9ededa87715ba1a42cbd5a9515791058224b304c71883da3fe9645',
+      'the shipped example binary uncapped, which is the opposite of the point.\n\n' +
+      'HASH UPDATED for #951 (metrics port 9091 -> 9464): the default METRICS_PORT and every ' +
+      ':9464 prose mention were changed in the template and lifted into this copy in the same ' +
+      'diff — textually identical hunks. The recorded divergence is still ONLY the image ' +
+      'intercept; leaving this copy on 9091 would have kept the one shipped example binary ' +
+      'racing queue-proxy for its port (S3-V Finding C-2).\n\n' +
+      'HASH UPDATED again for the #951 round-2 EADDRINUSE-naming hunk (the metrics Bun.serve ' +
+      'wrapped to name the port + point at `kn-next doctor` on bind failure), lifted from the ' +
+      'template VERBATIM. NOTE this hash pin alone cannot stop a port drift smuggled in via a ' +
+      'routine re-pin — that hole is closed by metrics-port-lockstep.test.ts, which reads this ' +
+      "copy's METRICS_PORT default directly.",
+    sha256: '16751da55e93f5efac8952ea7e050fe24c31af5df6b302d9cc8f7d662677e277',
   },
 };
 
