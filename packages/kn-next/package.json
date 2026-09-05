@@ -47,6 +47,7 @@
       "default": "./dist/validate-public.js"
     },
     "./internal/cache-drain": "./dist/adapters/cache-write-registry.js",
+    "./internal/vinext-cache-adapter": "./dist/adapters/vinext-cache-adapter.js",
     "./internal/cache-control-normalize": "./dist/adapters/cache-control-normalize.cjs",
     "./internal/bun-keepalive-guard": "./dist/adapters/bun-keepalive-guard.cjs",
     "./internal/sandbox-fetch-debug": "./dist/adapters/sandbox-fetch-debug.cjs",
@@ -170,6 +171,7 @@
     "next": "16.2.11",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "vinext": "1.0.0-beta.8",
     "vitest": "^4.0.18"
   },
   "dependencies": {

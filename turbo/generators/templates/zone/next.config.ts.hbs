@@ -25,11 +25,13 @@ import type { NextConfig } from "next";
  */
 const nextConfig: NextConfig = {
     assetPrefix: process.env.ASSET_PREFIX || "",
-    // Redis-backed ISR/data cache (multi-pod consistency on Knative). Without
-    // this, the app still serves 200s — with NO cache at all: every render a
-    // full recompute and the provisioned Redis unused, which is why the gap
-    // shipped silently once. The handler falls back to in-memory when
-    // REDIS_URL is unset (local dev), so wiring it costs nothing.
+    // NOT the live ISR wiring on this build target (#953). vinext never reads
+    // `cacheHandler` — it is a webpack/turbopack mechanism, like `adapterPath`
+    // above — so for a while every request was a MISS and the provisioned
+    // Redis stayed empty while this line sat here looking like wiring. The
+    // REAL registration is the vinext() plugin's `cache.data` adapter in
+    // vite.config.ts. This option is kept for Next-aware tooling and points at
+    // the same handler, so the two can never drift apart.
     cacheHandler: new URL("./cache-handler.js", import.meta.url).pathname,
     // Per-pod memory caches diverge across pods — Redis is the one cache.
     cacheMaxMemorySize: 0,
