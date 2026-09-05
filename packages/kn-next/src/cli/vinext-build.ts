@@ -31,11 +31,26 @@
  * slower artifact whose provenance nobody records.
  */
 
-import { cpSync, existsSync, mkdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import {
+    cpSync,
+    existsSync,
+    mkdirSync,
+    mkdtempSync,
+    readdirSync,
+    readFileSync,
+    rmSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runQuiet } from "./exec";
-import { findLockfile, writeNativeIntegrityManifest } from "./native-integrity";
+import {
+    findLockfile,
+    readLockfilePackages,
+    writeNativeIntegrityManifest,
+} from "./native-integrity";
 import { UsageError } from "./shared";
 
 /** The first Bun that ADR-0048 accepts. See the docstring for the measurements. */
@@ -191,51 +206,223 @@ export function buildVinextExecutable(opts: VinextBuildOptions): string {
     // 2. compile + bytecode
     run(compileArgv(arch, entry, outFile));
 
-    // 3. stage sharp's native module beside the binary
-    stageSharpNative(opts.cwd);
+    // 3. stage sharp's native module beside the binary — for the arch being
+    // compiled, which is NOT necessarily the host's (#949).
+    stageSharpNative(opts.cwd, { arch });
 
     return outFile;
 }
 
 /**
- * Copy sharp's native packages to `<cwd>/native`, which the generated Dockerfile
- * COPYs into the image.
+ * sharp's per-platform package suffix (`@img/sharp-<id>`) for each knext arch.
+ *
+ * The linux entries are `linuxmusl` — one word, sharp's own spelling, which
+ * this repo has already guessed wrong once — because the runtime image is
+ * alpine and the compile triples are `-musl`. A glibc addon in that image
+ * cannot load, so the map is the compile-target map's shadow: an arch added to
+ * one belongs in the other, and a test derives the pairing from
+ * `compileArgv`'s own known-arch list rather than an enumerated copy.
+ */
+export const SHARP_PLATFORM_IDS: Record<string, string> = {
+    "linux-x64": "linuxmusl-x64",
+    "linux-arm64": "linuxmusl-arm64",
+    "darwin-arm64": "darwin-arm64",
+    "darwin-x64": "darwin-x64",
+};
+
+export interface StageSharpNativeOptions {
+    /** Image target arch; defaults to the ship target, like the compile. */
+    readonly arch?: string;
+    /** Injectable for tests; the real one fetches from the npm registry. */
+    readonly fetchPackage?: (
+        pkg: { name: string; version: string; integrity: string | null },
+        destDir: string,
+    ) => void;
+}
+
+/**
+ * Stage sharp's native packages for the IMAGE TARGET into `<cwd>/native`, which
+ * the generated Dockerfile COPYs into the image.
  *
  * A compiled binary cannot resolve a package from disk, so sharp's addon has to
- * be a real file next to the executable, opened by absolute path. Without it
- * `/_next/image` answers 200 with the ORIGINAL bytes — working, and every image
- * full size, which is the kind of failure nobody reports.
+ * be a real file next to the executable, opened by absolute path. And it has to
+ * be the addon the IMAGE can run: this function used to copy whatever the build
+ * host's install held under `node_modules/@img`, which on a mac is the darwin
+ * set — the alpine image then shipped with no linuxmusl addon at all and every
+ * macOS-built deploy crash-looped at import (#949, S3-V finding C-1a). So the
+ * target's package pair is selected by name, taken from the host install when
+ * it is there and fetched at the lockfile-pinned version when it is not, and
+ * the host's own platform addons are never staged for a foreign target.
  *
  * The directory is created even when the app has no sharp, because the
  * Dockerfile's `COPY native` would otherwise fail the build for every app that
- * does not use `next/image`.
+ * does not use `next/image`. It is also cleared first: a rebuild must not
+ * inherit a previous build's (possibly foreign-platform) addons.
  *
  * Whatever lands here is then PINNED — every staged `@img` package checked
  * against the app's `bun.lock` and every staged file hashed into
  * `native/.integrity.json`, which the dlopen shim re-checks in the image. This
  * copy is otherwise an unguarded path from the install store to native-code
  * privilege, and the closure SBOM does not cover `/app/native`.
- *
- * Everything present is copied rather than a per-platform pair: the package
- * manager installs only the optional packages matching this platform, so what is
- * there IS the right set — and mirroring sharp's own naming scheme here would be
- * a guess. (It is `linuxmusl`, one word, which is exactly the guess that failed.)
  */
-export function stageSharpNative(cwd: string): void {
+export function stageSharpNative(
+    cwd: string,
+    opts: StageSharpNativeOptions = {},
+): void {
+    const arch = opts.arch ?? "linux-x64";
+    const platformId = SHARP_PLATFORM_IDS[arch];
+    if (!platformId) {
+        throw new UsageError(
+            `Unknown build arch '${arch}'. Known: ${Object.keys(SHARP_PLATFORM_IDS).join(", ")}.`,
+        );
+    }
+
     const dest = join(cwd, "native");
+    rmSync(dest, { recursive: true, force: true });
     mkdirSync(dest, { recursive: true });
 
-    const source = findImgPackages(cwd);
-    if (source) {
-        // `dereference` follows the symlinks a bun/pnpm isolated store uses;
-        // copying the links would put dangling pointers in the image.
-        cpSync(source, dest, { recursive: true, dereference: true });
+    const imgRoot = findImgPackages(cwd);
+    const usesSharp =
+        imgRoot !== undefined &&
+        readdirSync(imgRoot).some((entry) => entry.startsWith("sharp-"));
+    if (usesSharp) {
+        const lockfilePath = findLockfile(cwd);
+        // The addon links libvips by RELATIVE rpath, so the pair ships
+        // together in its original layout or `dlopen` fails resolving
+        // `libvips-cpp` after finding the addon.
+        for (const dir of [
+            `sharp-${platformId}`,
+            `sharp-libvips-${platformId}`,
+        ]) {
+            const hostDir = join(imgRoot, dir);
+            const destDir = join(dest, dir);
+            if (existsSync(hostDir)) {
+                // `dereference` follows the symlinks a bun/pnpm isolated store
+                // uses; copying the links would put dangling pointers in the
+                // image.
+                cpSync(hostDir, destDir, {
+                    recursive: true,
+                    dereference: true,
+                });
+                continue;
+            }
+            // The host install lacks the target's package — the macOS-built
+            // deploy. Fetch the exact version the lockfile pins, or fail the
+            // build NAMING the missing addon; the one outcome that is never
+            // acceptable is an image that cannot load sharp (#949).
+            const name = `@img/${dir}`;
+            if (!lockfilePath) {
+                throw new UsageError(
+                    `The image targets ${platformId} but this host's install has no '${name}' and there is no bun.lock to fetch a pinned version from.\n\n` +
+                        "Run `bun install --save-text-lockfile` in the app and rebuild.",
+                );
+            }
+            const entry = readLockfilePackages(lockfilePath).get(name);
+            if (!entry) {
+                throw new UsageError(
+                    `The image targets ${platformId}, but neither this host's install nor ${lockfilePath} has '${name}' — the image would ship unable to load sharp.\n\n` +
+                        "sharp resolves its native addons as optionalDependencies, so the lockfile\n" +
+                        "normally pins every platform's package. Reinstall from a clean lockfile\n" +
+                        "(`bun install --save-text-lockfile`) with a sharp version that publishes\n" +
+                        `'${name}', and rebuild.`,
+                );
+            }
+            (opts.fetchPackage ?? fetchImgPackage)(
+                { name, version: entry.version, integrity: entry.integrity },
+                destDir,
+            );
+        }
     }
 
     // Unconditional, including the empty case: a `native/` with no manifest is
     // indistinguishable from one whose manifest was stripped, and the shim reads
     // absence as "legacy image, load unverified".
     writeNativeIntegrityManifest(dest, findLockfile(cwd));
+}
+
+/**
+ * Fetch one `@img` package from the npm registry at its lockfile-pinned
+ * version, verify the tarball against the lockfile's integrity string, and
+ * extract it to `destDir`.
+ *
+ * `npm pack` rather than an install: bun refuses to install another platform's
+ * optional packages (measured — that refusal is WHY the darwin host has no
+ * linuxmusl set to copy), and npm's platform-override install flags drag a full
+ * node_modules with them. A tarball download is the smallest thing that works,
+ * and the lockfile pin keeps it exactly as verified as the install path.
+ */
+export function fetchImgPackage(
+    pkg: { name: string; version: string; integrity: string | null },
+    destDir: string,
+): void {
+    // Refused BEFORE any network: an unverifiable fetch would ship whatever
+    // the registry answered, at native-code privilege. bun.lock records a
+    // sha512 for every registry package, so a missing one means the entry is
+    // not a registry resolution at all.
+    if (!pkg.integrity?.startsWith("sha512-")) {
+        throw new UsageError(
+            `Refusing to fetch '${pkg.name}@${pkg.version}': its lockfile entry has no sha512 integrity to verify the download against.\n\n` +
+                "Reinstall from the registry (`bun install --save-text-lockfile`) so the\n" +
+                "lockfile carries one, and rebuild.",
+        );
+    }
+    const tmp = mkdtempSync(join(tmpdir(), "knext-img-fetch-"));
+    try {
+        execFileSync(
+            "npm",
+            ["pack", `${pkg.name}@${pkg.version}`, "--pack-destination", tmp],
+            { stdio: ["ignore", "pipe", "pipe"] },
+        );
+    } catch (error) {
+        throw new UsageError(
+            `Could not fetch '${pkg.name}@${pkg.version}' from the registry (needed because this host's install has no ${pkg.name} and the image target requires it).\n\n` +
+                `  underlying error: ${error instanceof Error ? error.message : String(error)}\n\n` +
+                "Check network/registry access, or install the package on a matching host and rebuild.",
+        );
+    }
+    const tgz = readdirSync(tmp).find((f) => f.endsWith(".tgz"));
+    if (!tgz) {
+        throw new UsageError(
+            `npm pack reported success for '${pkg.name}@${pkg.version}' but left no tarball in ${tmp}.`,
+        );
+    }
+    extractVerifiedTarball(join(tmp, tgz), pkg, destDir);
+}
+
+/**
+ * Verify a packed tarball against the lockfile pin, then extract its
+ * `package/` payload to `destDir`. Exported for the offline half of the test:
+ * the network step above is a thin shell-out, this is where the guarantee is.
+ */
+export function extractVerifiedTarball(
+    tgzPath: string,
+    pkg: { name: string; version: string; integrity: string | null },
+    destDir: string,
+): void {
+    const actual = `sha512-${createHash("sha512")
+        .update(readFileSync(tgzPath))
+        .digest("base64")}`;
+    if (actual !== pkg.integrity) {
+        throw new UsageError(
+            `The fetched tarball for '${pkg.name}@${pkg.version}' does not match the lockfile pin.\n\n` +
+                `  expected ${pkg.integrity}\n` +
+                `  actual   ${actual}\n\n` +
+                "The registry served different bytes than the install the lockfile records.\n" +
+                "That is exactly what this check exists to refuse; do not work around it by\n" +
+                "editing the lockfile.",
+        );
+    }
+    const extractDir = mkdtempSync(join(tmpdir(), "knext-img-extract-"));
+    execFileSync("tar", ["-xzf", tgzPath, "-C", extractDir], {
+        stdio: ["ignore", "pipe", "pipe"],
+    });
+    const payload = join(extractDir, "package");
+    if (!existsSync(payload)) {
+        throw new UsageError(
+            `The tarball for '${pkg.name}@${pkg.version}' has no 'package/' payload — not an npm registry tarball.`,
+        );
+    }
+    cpSync(payload, destDir, { recursive: true });
 }
 
 /** `node_modules/@img`, wherever this install layout put it. */

@@ -3,7 +3,7 @@
  *
  * ## The gap this closes
  *
- * `stageSharpNative` copies whatever is under `node_modules/@img` into
+ * `stageSharpNative` stages the image target's `@img` packages into
  * `native/`, the Dockerfile `COPY`s that verbatim into the image, and the
  * compiled binary `process.dlopen`s it — at native-code privilege, on the first
  * `/_next/image` request. Nothing tied those bytes to anything: not to the

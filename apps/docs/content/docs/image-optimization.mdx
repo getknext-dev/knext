@@ -57,9 +57,26 @@ built into it, so that native library has to travel as a **real file next to the
 only need to know this exists if you write your own Dockerfile or copy the binary somewhere by
 hand.
 
+The native library is platform-specific, and the platform that matters is the **container image's**
+(Linux/musl), not your laptop's. `kn-next build` stages the image's addon set regardless of where
+you build: when your local install already has it (a Linux host) it is copied, and when it does not
+(a macOS host holds only macOS addons) the build downloads the exact version your `bun.lock` pins
+and verifies the download against the lockfile's integrity hash before staging it. If neither your
+install nor your lockfile has the image's addon, the build **fails and names the missing package**
+— it never ships an image that cannot load sharp.
+
+At boot, the binary picks the addon matching the platform it is actually running on — never just
+the first directory it finds — and if nothing staged matches, it fails with an error naming the
+platforms involved instead of crashing on an unreadable binary. If you need to override the
+selection (say, a hand-built image with a custom layout), set `KNEXT_SHARP_ADDON` to the absolute
+path of the `.node` file inside its `@img` tree.
+
 <Callout type="warn">
-**If `native/` is missing, nothing crashes.** `/_next/image` answers `200` and returns the
-**original image, unresized**. Pages render and look correct — every photo just ships at full size.
+**If your app imports sharp and its addon cannot load, the pod does not start** — the generated
+server entry imports sharp at boot, so a missing or wrong-platform addon is a startup failure with
+an error naming the cause, not a silent degradation. Only an app that never pulls sharp into its
+bundle (no `next/image`) runs with an empty `native/`; for such an app `/_next/image` answers `200`
+and returns the **original image, unresized**.
 
 The quickest check against a running container:
 

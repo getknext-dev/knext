@@ -11,13 +11,27 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import {
+    existsSync,
+    mkdirSync,
+    mkdtempSync,
+    readdirSync,
+    readFileSync,
+    writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import {
     buildVinextExecutable,
     bunMeetsFloor,
     compileArgv,
+    extractVerifiedTarball,
+    fetchImgPackage,
     parseBunVersion,
+    SHARP_PLATFORM_IDS,
+    stageSharpNative,
 } from "../cli/vinext-build";
 
 describe("#ADR-0048 the Bun floor", () => {
@@ -188,5 +202,315 @@ describe("#ADR-0048 buildVinextExecutable", () => {
                 run: () => {},
             }),
         ).toThrow(/\.output.*index\.mjs.*is not there/s);
+    });
+});
+
+/**
+ * #949 — the S3-V finding C-1a: `stageSharpNative` copied whatever the BUILD
+ * HOST's install held under `node_modules/@img`. On a mac that is the darwin
+ * addon set, the alpine image shipped with no linuxmusl addon at all, and every
+ * macOS-built deploy crash-looped at import. Staging must follow the IMAGE
+ * TARGET, fetching the pinned target packages when the host install lacks them.
+ */
+describe("#949 stageSharpNative stages the image target's platform, not the host's", () => {
+    const SHARP_V = "0.35.4";
+    const VIPS_V = "1.3.3";
+
+    /** bun.lock's real JSONC shape (trailing commas), as bun writes it. */
+    function lockText(entries: Record<string, string | undefined>): string {
+        const lines = Object.entries(entries)
+            .filter(([, v]) => v !== undefined)
+            .map(
+                ([name, v]) =>
+                    `    ${JSON.stringify(name)}: [${JSON.stringify(`${name}@${v}`)}, "", {}, "sha512-pin/${name.length}=="],`,
+            );
+        return `{\n  "lockfileVersion": 1,\n  "packages": {\n${lines.join("\n")}\n  }\n}\n`;
+    }
+
+    const FULL_LOCK: Record<string, string> = {
+        "@img/sharp-darwin-arm64": SHARP_V,
+        "@img/sharp-libvips-darwin-arm64": VIPS_V,
+        "@img/sharp-linuxmusl-x64": SHARP_V,
+        "@img/sharp-libvips-linuxmusl-x64": VIPS_V,
+        "@img/sharp-wasm32": SHARP_V,
+    };
+
+    /** An app tree as a darwin host's `bun install` leaves it. */
+    function darwinAppTree(
+        lock: Record<string, string | undefined> = FULL_LOCK,
+        hostPkgs: Record<string, string> = {
+            "sharp-darwin-arm64": SHARP_V,
+            "sharp-libvips-darwin-arm64": VIPS_V,
+            "sharp-wasm32": SHARP_V,
+        },
+    ): string {
+        const cwd = mkdtempSync(join(tmpdir(), "knext-949-stage-"));
+        for (const [dir, version] of Object.entries(hostPkgs)) {
+            const pkgDir = join(cwd, "node_modules", "@img", dir);
+            mkdirSync(join(pkgDir, "lib"), { recursive: true });
+            writeFileSync(
+                join(pkgDir, "package.json"),
+                JSON.stringify({ name: `@img/${dir}`, version }),
+            );
+            writeFileSync(join(pkgDir, "lib", `${dir}.node`), `${dir} BYTES`);
+        }
+        writeFileSync(join(cwd, "bun.lock"), lockText(lock));
+        return cwd;
+    }
+
+    /** A fetch stub that stages a plausible extracted package, and records. */
+    function recordingFetch(): {
+        calls: { name: string; version: string; integrity: string | null }[];
+        fetch: (
+            pkg: { name: string; version: string; integrity: string | null },
+            destDir: string,
+        ) => void;
+    } {
+        const calls: {
+            name: string;
+            version: string;
+            integrity: string | null;
+        }[] = [];
+        return {
+            calls,
+            fetch: (pkg, destDir) => {
+                calls.push({ ...pkg });
+                mkdirSync(join(destDir, "lib"), { recursive: true });
+                writeFileSync(
+                    join(destDir, "package.json"),
+                    JSON.stringify({ name: pkg.name, version: pkg.version }),
+                );
+                writeFileSync(
+                    join(destDir, "lib", "addon.node"),
+                    `${pkg.name} FETCHED`,
+                );
+            },
+        };
+    }
+
+    it("fetches the linuxmusl set a darwin host lacks, and EXCLUDES the host's own addons", () => {
+        const cwd = darwinAppTree();
+        const { calls, fetch } = recordingFetch();
+
+        stageSharpNative(cwd, { arch: "linux-x64", fetchPackage: fetch });
+
+        const staged = readdirSync(join(cwd, "native")).sort();
+        expect(staged).toContain("sharp-linuxmusl-x64");
+        expect(staged).toContain("sharp-libvips-linuxmusl-x64");
+        // The host's platform must NOT ship: darwin sorts before linuxmusl, and
+        // an image carrying both is one shim bug away from `Exec format error`.
+        expect(staged).not.toContain("sharp-darwin-arm64");
+        expect(staged).not.toContain("sharp-libvips-darwin-arm64");
+        expect(staged).not.toContain("sharp-wasm32");
+
+        // Fetched at the exact versions the lockfile pins — never `latest`.
+        expect(calls.map((c) => `${c.name}@${c.version}`).sort()).toEqual([
+            `@img/sharp-libvips-linuxmusl-x64@${VIPS_V}`,
+            `@img/sharp-linuxmusl-x64@${SHARP_V}`,
+        ]);
+        for (const c of calls) expect(c.integrity).toMatch(/^sha512-/);
+
+        // And the staged tree still gets its integrity manifest, covering the
+        // fetched files.
+        const manifest = JSON.parse(
+            readFileSync(join(cwd, "native", ".integrity.json"), "utf8"),
+        );
+        expect(Object.keys(manifest.packages).sort()).toEqual([
+            "@img/sharp-libvips-linuxmusl-x64",
+            "@img/sharp-linuxmusl-x64",
+        ]);
+        expect(
+            manifest.files["sharp-linuxmusl-x64/lib/addon.node"],
+        ).toBeDefined();
+    });
+
+    it("copies the target set from the host install when it IS there — no fetch", () => {
+        // A linux-x64 host building the default image: bun installed the musl
+        // packages, so staging is a local copy exactly as before.
+        const cwd = darwinAppTree(FULL_LOCK, {
+            "sharp-linuxmusl-x64": SHARP_V,
+            "sharp-libvips-linuxmusl-x64": VIPS_V,
+            "sharp-darwin-arm64": SHARP_V,
+            "sharp-libvips-darwin-arm64": VIPS_V,
+        });
+
+        stageSharpNative(cwd, {
+            arch: "linux-x64",
+            fetchPackage: () => {
+                throw new Error(
+                    "must not fetch — the host install has the target set",
+                );
+            },
+        });
+
+        const staged = readdirSync(join(cwd, "native")).sort();
+        expect(staged).toContain("sharp-linuxmusl-x64");
+        expect(staged).toContain("sharp-libvips-linuxmusl-x64");
+        expect(staged).not.toContain("sharp-darwin-arm64");
+        expect(
+            readFileSync(
+                join(
+                    cwd,
+                    "native",
+                    "sharp-linuxmusl-x64",
+                    "lib",
+                    "sharp-linuxmusl-x64.node",
+                ),
+                "utf8",
+            ),
+        ).toBe("sharp-linuxmusl-x64 BYTES");
+    });
+
+    it("a rebuild CLEARS a previous build's foreign addons out of native/", () => {
+        // The upgrade path: an app tree that still carries a darwin-staged
+        // native/ from an old CLI. mkdir+copy would leave the darwin dirs
+        // beside the new ones — shipped dead weight at best, and the multi-
+        // platform tree the shim bug needed at worst.
+        const cwd = darwinAppTree(FULL_LOCK, {
+            "sharp-linuxmusl-x64": SHARP_V,
+            "sharp-libvips-linuxmusl-x64": VIPS_V,
+        });
+        const stale = join(cwd, "native", "sharp-darwin-arm64", "lib");
+        mkdirSync(stale, { recursive: true });
+        writeFileSync(join(stale, "sharp-darwin-arm64.node"), "STALE");
+
+        stageSharpNative(cwd, { arch: "linux-x64" });
+
+        expect(existsSync(join(cwd, "native", "sharp-darwin-arm64"))).toBe(
+            false,
+        );
+        expect(existsSync(join(cwd, "native", "sharp-linuxmusl-x64"))).toBe(
+            true,
+        );
+    });
+
+    it("FAILS naming the missing target addon when the lockfile does not pin it", () => {
+        // No fetchable pin means the image WOULD ship unable to load sharp —
+        // the acceptance criterion is a named build failure, never that image.
+        const cwd = darwinAppTree({
+            "@img/sharp-darwin-arm64": SHARP_V,
+            "@img/sharp-libvips-darwin-arm64": VIPS_V,
+        });
+        const { calls, fetch } = recordingFetch();
+
+        expect(() =>
+            stageSharpNative(cwd, { arch: "linux-x64", fetchPackage: fetch }),
+        ).toThrow(/@img\/sharp-linuxmusl-x64/);
+        expect(calls).toEqual([]);
+    });
+
+    it("an app with no sharp still stages an empty manifest, and never fetches", () => {
+        const cwd = mkdtempSync(join(tmpdir(), "knext-949-nosharp-"));
+        stageSharpNative(cwd, {
+            arch: "linux-x64",
+            fetchPackage: () => {
+                throw new Error("must not fetch for an app without sharp");
+            },
+        });
+        const manifest = JSON.parse(
+            readFileSync(join(cwd, "native", ".integrity.json"), "utf8"),
+        );
+        expect(manifest.files).toEqual({});
+    });
+
+    it("maps EVERY compile arch to a sharp platform id, musl matching the -musl triples", () => {
+        // Scanned, not enumerated: the known-arch list is read out of
+        // compileArgv's own refusal, so an arch added to one map but not the
+        // other fails here instead of at a user's build.
+        let known: string[] = [];
+        try {
+            compileArgv("__not_an_arch__", "e", "o");
+        } catch (e) {
+            known =
+                /Known: (.*)\.$/.exec((e as Error).message)?.[1]?.split(", ") ??
+                [];
+        }
+        expect(known.length).toBeGreaterThan(0);
+        expect(Object.keys(SHARP_PLATFORM_IDS).sort()).toEqual(known.sort());
+
+        // The default image is alpine and the linux triples are `-musl`: the
+        // staged sharp set must match the runtime libc, one-word `linuxmusl`
+        // (the spelling this repo has already guessed wrong once).
+        for (const [arch, id] of Object.entries(SHARP_PLATFORM_IDS)) {
+            if (arch.startsWith("linux-")) {
+                expect(id).toBe(`linuxmusl-${arch.slice("linux-".length)}`);
+            } else {
+                expect(id).toBe(arch);
+            }
+        }
+    });
+});
+
+describe("#949 the registry fetch is verified against the lockfile pin", () => {
+    /** A real tgz in bun.lock's shape: the payload under `package/`. */
+    function packTarball(): { tgz: string; integrity: string } {
+        const dir = mkdtempSync(join(tmpdir(), "knext-949-tgz-"));
+        const pkg = join(dir, "package");
+        mkdirSync(join(pkg, "lib"), { recursive: true });
+        writeFileSync(
+            join(pkg, "package.json"),
+            JSON.stringify({
+                name: "@img/sharp-linuxmusl-x64",
+                version: "0.35.4",
+            }),
+        );
+        writeFileSync(join(pkg, "lib", "addon.node"), "REAL ADDON BYTES");
+        const tgz = join(dir, "pkg.tgz");
+        execFileSync("tar", ["-czf", tgz, "-C", dir, "package"]);
+        const integrity = `sha512-${createHash("sha512")
+            .update(readFileSync(tgz))
+            .digest("base64")}`;
+        return { tgz, integrity };
+    }
+
+    it("extracts a tarball whose sha512 matches the lockfile integrity", () => {
+        const { tgz, integrity } = packTarball();
+        const dest = join(mkdtempSync(join(tmpdir(), "knext-949-x-")), "out");
+
+        extractVerifiedTarball(
+            tgz,
+            { name: "@img/sharp-linuxmusl-x64", version: "0.35.4", integrity },
+            dest,
+        );
+
+        expect(readFileSync(join(dest, "lib", "addon.node"), "utf8")).toBe(
+            "REAL ADDON BYTES",
+        );
+    });
+
+    it("REFUSES a tarball that does not match the pin, naming both hashes", () => {
+        // The fetch path bypasses the package manager, so the lockfile pin is
+        // the only thing standing between the registry and native-code
+        // privilege in the image. A mismatch is a hard failure, not a warning.
+        const { tgz } = packTarball();
+        const dest = join(mkdtempSync(join(tmpdir(), "knext-949-bad-")), "out");
+
+        expect(() =>
+            extractVerifiedTarball(
+                tgz,
+                {
+                    name: "@img/sharp-linuxmusl-x64",
+                    version: "0.35.4",
+                    integrity: "sha512-notTheRealHash==",
+                },
+                dest,
+            ),
+        ).toThrow(/sha512-notTheRealHash==/);
+        expect(existsSync(join(dest, "lib", "addon.node"))).toBe(false);
+    });
+
+    it("REFUSES to fetch at all without a usable lockfile integrity", () => {
+        // Reached before any network call: an unverifiable fetch would ship
+        // whatever the registry answered, which is the hole, not the fix.
+        expect(() =>
+            fetchImgPackage(
+                {
+                    name: "@img/sharp-linuxmusl-x64",
+                    version: "0.35.4",
+                    integrity: null,
+                },
+                join(tmpdir(), "knext-949-nofetch"),
+            ),
+        ).toThrow(/integrity/);
     });
 });

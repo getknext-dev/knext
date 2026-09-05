@@ -43,16 +43,22 @@ import {
     writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 
 /**
  * The shim's resolution rule, restated so it can be exercised without dlopening
  * anything. Kept in step with the real one by the source assertions below —
  * a private copy that silently drifts is the failure this repo keeps hitting.
+ *
+ * `platformIds` is what the real shim computes from `process.platform` /
+ * `process.arch` / libc; injected here so the rule is testable for platforms
+ * this test host is not. The real computation is exercised by the subprocess
+ * tests below, which run the shipped shim on THIS host.
  */
 function addonPath(
     env: Record<string, string | undefined>,
     execDir: string,
+    platformIds: readonly string[],
 ): string {
     const configured = env.KNEXT_SHARP_ADDON;
     if (configured && configured.trim() !== "") return configured;
@@ -66,28 +72,44 @@ function addonPath(
             return [];
         }
     };
-    for (const pkg of read(nativeRoot)) {
-        if (!pkg.startsWith("sharp-") || pkg.startsWith("sharp-libvips-"))
-            continue;
-        const lib = join(nativeRoot, pkg, "lib");
+    const sharpDirs = read(nativeRoot).filter(
+        (pkg) => pkg.startsWith("sharp-") && !pkg.startsWith("sharp-libvips-"),
+    );
+    // #949: by RUNTIME PLATFORM, never by directory order — `sharp-darwin-arm64`
+    // sorts before `sharp-linuxmusl-x64`, and picking it in a linux image is an
+    // `Exec format error` crash-loop.
+    for (const id of platformIds) {
+        const dir = `sharp-${id}`;
+        if (!sharpDirs.includes(dir)) continue;
+        const lib = join(nativeRoot, dir, "lib");
         for (const file of read(lib)) {
             if (file.startsWith("sharp-") && file.endsWith(".node"))
                 return join(lib, file);
         }
     }
+    if (sharpDirs.length > 0) {
+        throw new Error(
+            `no staged sharp addon matches this runtime (wanted sharp-{${platformIds.join(
+                "|",
+            )}}, staged: ${sharpDirs.join(", ")})`,
+        );
+    }
     return flat;
 }
 
+/** The image's own platform ids for the tests that model the alpine runtime. */
+const MUSL_IDS = ["linuxmusl-x64", "linux-x64"] as const;
+
 function stage(): string {
     const dir = mkdtempSync(join(tmpdir(), "knext-sharp-shim-"));
-    const lib = join(dir, "native", "sharp-linux-musl-x64", "lib");
+    const lib = join(dir, "native", "sharp-linuxmusl-x64", "lib");
     mkdirSync(lib, { recursive: true });
-    writeFileSync(join(lib, "sharp-linux-musl-x64-0.35.2.node"), "");
+    writeFileSync(join(lib, "sharp-linuxmusl-x64-0.35.2.node"), "");
     // libvips ships alongside and ALSO matches `sharp-*` — the discovery must not
     // return its stub. A `find … -name '*.node' | head -1` did exactly that while
     // this was being built, and the binary then dlopened libvips' stub instead of
     // the addon.
-    const vips = join(dir, "native", "sharp-libvips-linux-musl-x64", "lib");
+    const vips = join(dir, "native", "sharp-libvips-linuxmusl-x64", "lib");
     mkdirSync(vips, { recursive: true });
     writeFileSync(join(vips, "stub.node"), "");
     return dir;
@@ -142,14 +164,70 @@ describe("the shim the compile injects is VERBATIM and self-contained", () => {
         // And the bundled dist entry must never be a candidate again.
         expect(compile).not.toMatch(/sharp-addon-dlopen\.js["']/);
     });
+
+    it("#949 the injection filter is PROVEN against the sharp range the scaffold pins", async () => {
+        // Finding C-1b: the onLoad filter matches sharp >=0.35's
+        // `dist/sharp.(m|c)js` layout only. sharp 0.34 ships `lib/sharp.js`,
+        // so with an 0.34 resolution the shim silently never injects and the
+        // compiled binary cannot load sharp. Widening the filter to `lib/` was
+        // REJECTED rather than done: 0.34's loader is CJS
+        // (`module.exports = <addon>`) and injecting this ESM shim there
+        // changes the require-interop shape unmeasured. The no-silent-path fix
+        // is a pin the filter is proven against — this test couples the two,
+        // so loosening the scaffold's sharp range OR narrowing the filter
+        // fails here instead of at a user's first `/_next/image` request.
+        const compile = await Bun.file(
+            join(
+                dirname(import.meta.dirname),
+                "adapters",
+                "vinext-compile.mjs",
+            ),
+        ).text();
+        const filters = [...compile.matchAll(/filter:\s*\/(.+?)\/\s*\}/g)]
+            .map((m) => m[1])
+            .filter((p) => p.includes("sharp"));
+        expect(filters, "exactly one sharp onLoad filter").toHaveLength(1);
+        const filter = new RegExp(filters[0]);
+
+        // The layout every sharp >=0.35 resolution presents:
+        expect(filter.test("/x/node_modules/sharp/dist/sharp.mjs")).toBe(true);
+        expect(filter.test("/x/node_modules/sharp/dist/sharp.cjs")).toBe(true);
+        expect(filter.test("/x/node_modules/sharp/dist/sharp.js")).toBe(true);
+        // Never a lookalike from another package's tree:
+        expect(filter.test("/x/node_modules/not-sharp/dist/sharp.mjs")).toBe(
+            false,
+        );
+
+        // And the scaffold pins a range whose floor has that layout. `^0.x.y`
+        // stays within 0.x, so asserting the floor's minor is >=35 covers the
+        // whole resolvable range.
+        const scaffold = JSON.parse(
+            await Bun.file(
+                join(
+                    dirname(dirname(import.meta.dirname)),
+                    "templates",
+                    "app",
+                    "package.json.hbs",
+                ),
+            ).text(),
+        );
+        const pin: string = scaffold.dependencies.sharp;
+        const floor = /^\^(\d+)\.(\d+)\.\d+$/.exec(pin);
+        expect(
+            floor,
+            `scaffold sharp pin '${pin}' must be a caret range`,
+        ).not.toBeNull();
+        expect(Number(floor?.[1])).toBe(0);
+        expect(Number(floor?.[2])).toBeGreaterThanOrEqual(35);
+    });
 });
 
 describe("sharp addon path resolution", () => {
     it("an explicit KNEXT_SHARP_ADDON wins", () => {
         const dir = stage();
-        expect(addonPath({ KNEXT_SHARP_ADDON: "/custom/x.node" }, dir)).toBe(
-            "/custom/x.node",
-        );
+        expect(
+            addonPath({ KNEXT_SHARP_ADDON: "/custom/x.node" }, dir, MUSL_IDS),
+        ).toBe("/custom/x.node");
     });
 
     it('an EMPTY KNEXT_SHARP_ADDON falls back instead of dlopening ""', () => {
@@ -157,36 +235,76 @@ describe("sharp addon path resolution", () => {
         // matches nothing sets exactly that, and the failure read
         // `could not dlopen the sharp addon at ` — a message with a hole in it.
         const dir = stage();
-        const resolved = addonPath({ KNEXT_SHARP_ADDON: "" }, dir);
+        const resolved = addonPath({ KNEXT_SHARP_ADDON: "" }, dir, MUSL_IDS);
         expect(resolved).not.toBe("");
-        expect(resolved.endsWith("sharp-linux-musl-x64-0.35.2.node")).toBe(
-            true,
-        );
+        expect(resolved.endsWith("sharp-linuxmusl-x64-0.35.2.node")).toBe(true);
     });
 
     it("discovers the addon inside the staged native tree", () => {
         const dir = stage();
-        expect(addonPath({}, dir)).toBe(
+        expect(addonPath({}, dir, MUSL_IDS)).toBe(
             join(
                 dir,
                 "native",
-                "sharp-linux-musl-x64",
+                "sharp-linuxmusl-x64",
                 "lib",
-                "sharp-linux-musl-x64-0.35.2.node",
+                "sharp-linuxmusl-x64-0.35.2.node",
             ),
         );
     });
 
     it("never returns the libvips stub, which also matches sharp-*", () => {
         const dir = stage();
-        expect(addonPath({}, dir)).not.toContain("libvips");
-        expect(addonPath({}, dir)).not.toContain("stub.node");
+        expect(addonPath({}, dir, MUSL_IDS)).not.toContain("libvips");
+        expect(addonPath({}, dir, MUSL_IDS)).not.toContain("stub.node");
     });
 
     it("falls back to a flat sharp.node beside the executable", () => {
         const dir = mkdtempSync(join(tmpdir(), "knext-sharp-flat-"));
         writeFileSync(join(dir, "sharp.node"), "");
-        expect(addonPath({}, dir)).toBe(join(dir, "sharp.node"));
+        expect(addonPath({}, dir, MUSL_IDS)).toBe(join(dir, "sharp.node"));
+    });
+
+    it("#949 picks the RUNTIME platform's addon, not the first directory alphabetically", () => {
+        // The S3-V finding (C-1c): with darwin AND linuxmusl both staged,
+        // `sharp-darwin-arm64` sorts first, the shim dlopened it inside the
+        // alpine image, and the pod crash-looped on `Exec format error`.
+        const dir = stage();
+        const mac = join(dir, "native", "sharp-darwin-arm64", "lib");
+        mkdirSync(mac, { recursive: true });
+        writeFileSync(join(mac, "sharp-darwin-arm64.node"), "");
+
+        const picked = addonPath({}, dir, MUSL_IDS);
+        expect(picked).not.toContain("darwin");
+        expect(picked).toContain("sharp-linuxmusl-x64");
+    });
+
+    it("#949 prefers the exact libc match when both linux flavours are staged", () => {
+        const dir = stage();
+        const glibc = join(dir, "native", "sharp-linux-x64", "lib");
+        mkdirSync(glibc, { recursive: true });
+        writeFileSync(join(glibc, "sharp-linux-x64.node"), "");
+
+        // musl runtime → the musl addon, though `linux-x64` sorts first.
+        expect(addonPath({}, dir, MUSL_IDS)).toContain("sharp-linuxmusl-x64");
+        // glibc runtime → the glibc addon.
+        expect(addonPath({}, dir, ["linux-x64", "linuxmusl-x64"])).toContain(
+            `${sep}sharp-linux-x64${sep}`,
+        );
+    });
+
+    it("#949 FAILS LOUDLY when no staged addon matches the runtime — never dlopens a foreign one", () => {
+        // A darwin-only tree in a linux image is the macOS-built deploy. The
+        // old behaviour dlopened it and crash-looped; a named error is the fix.
+        const dir = mkdtempSync(join(tmpdir(), "knext-sharp-foreign-"));
+        const mac = join(dir, "native", "sharp-darwin-arm64", "lib");
+        mkdirSync(mac, { recursive: true });
+        writeFileSync(join(mac, "sharp-darwin-arm64.node"), "");
+
+        expect(() => addonPath({}, dir, MUSL_IDS)).toThrow(
+            /sharp-darwin-arm64/,
+        );
+        expect(() => addonPath({}, dir, MUSL_IDS)).toThrow(/linuxmusl-x64/);
     });
 
     it("the shipped shim implements the rule this file restates", () => {
@@ -217,6 +335,21 @@ describe("sharp addon path resolution", () => {
                 text,
                 "shim must search a native/ tree beside the executable",
             ).toMatch(/join\(beside,\s*['"]native['"]\)/);
+            // #949: selection is by RUNTIME platform/libc, never directory
+            // order — `sharp-darwin-arm64` sorts before `sharp-linuxmusl-x64`
+            // and dlopening it in the alpine image is a crash-loop.
+            expect(
+                text,
+                "shim must compute candidate ids from the runtime platform",
+            ).toContain("process.platform");
+            expect(
+                text,
+                "shim must know sharp's one-word musl spelling",
+            ).toContain("linuxmusl-");
+            expect(
+                text,
+                "shim must fail loudly when no staged addon matches the runtime",
+            ).toContain("matches this runtime");
             // C2: the shim is the last gate before native-code privilege, so
             // the verification must be IN it and must run BEFORE the dlopen.
             expect(
@@ -318,6 +451,87 @@ function loadShim(
         stdout: r.stdout ?? "",
     };
 }
+
+/**
+ * Run the REAL shim's discovery on this host: `process.execPath` is pointed
+ * into a staged temp tree (a plain writable property under both node and bun,
+ * verified) and `process.dlopen` is stubbed to print the path it was handed.
+ * No `KNEXT_SHARP_ADDON`, so the platform-matching branch itself is on trial —
+ * the restated-copy tests above cannot catch the shipped shim disagreeing with
+ * them about the RUNTIME platform computation.
+ */
+function discoverShim(dir: string): {
+    status: number;
+    stderr: string;
+    stdout: string;
+} {
+    const harness = join(dir, "discover-harness.mjs");
+    writeFileSync(
+        harness,
+        `process.execPath = ${JSON.stringify(join(dir, "knext-exec"))};\n` +
+            `process.dlopen = (m, path) => { console.log("KNEXT_PICKED:" + path); m.exports = { KNEXT_STUB: true }; };\n` +
+            `await import(${JSON.stringify(`file://${SHIM}`)});\n`,
+    );
+    const r = spawnSync(process.execPath, [harness], {
+        encoding: "utf8",
+        env: { ...process.env, KNEXT_SHARP_ADDON: "" },
+    });
+    return {
+        status: r.status ?? -1,
+        stderr: r.stderr ?? "",
+        stdout: r.stdout ?? "",
+    };
+}
+
+/** This host's sharp platform ids, either linux libc flavour accepted. */
+const HOST_ID_PATTERN =
+    process.platform === "linux"
+        ? new RegExp(`sharp-linux(musl)?-${process.arch}`)
+        : new RegExp(`sharp-${process.platform}-${process.arch}`);
+
+function stageDir(root: string, pkg: string): void {
+    const lib = join(root, "native", pkg, "lib");
+    mkdirSync(lib, { recursive: true });
+    writeFileSync(join(lib, `${pkg}.node`), "");
+}
+
+describe("#949 the SHIPPED shim selects by runtime platform", () => {
+    it("picks this host's addon over an alien one that sorts first", () => {
+        const dir = mkdtempSync(join(tmpdir(), "knext-sharp-runtime-"));
+        // `android` sorts before both `darwin` and `linux*`, so directory-order
+        // discovery returns it — the exact shape of finding C-1c.
+        stageDir(dir, `sharp-android-${process.arch}`);
+        stageDir(dir, `sharp-darwin-${process.arch}`);
+        stageDir(dir, `sharp-linux-${process.arch}`);
+        stageDir(dir, `sharp-linuxmusl-${process.arch}`);
+
+        const r = discoverShim(dir);
+        expect(r.stderr).not.toContain("could not dlopen");
+        expect(r.status).toBe(0);
+        const picked = r.stdout
+            .split("\n")
+            .find((l) => l.startsWith("KNEXT_PICKED:"));
+        expect(picked, "the shim never reached dlopen").toBeDefined();
+        expect(picked).not.toContain("sharp-android-");
+        expect(picked).toMatch(HOST_ID_PATTERN);
+    });
+
+    it("FAILS LOUDLY, naming platforms, when only a foreign addon is staged", () => {
+        // The macOS-built image before the staging fix: a darwin-only tree on
+        // an alpine runtime. The old shim dlopened it — CrashLoopBackOff with
+        // `Exec format error`. A named refusal is diagnosable; that is not.
+        const dir = mkdtempSync(join(tmpdir(), "knext-sharp-foreignonly-"));
+        stageDir(dir, `sharp-android-${process.arch}`);
+
+        const r = discoverShim(dir);
+        expect(r.status).not.toBe(0);
+        expect(r.stdout).not.toContain("KNEXT_PICKED:");
+        expect(r.stderr).toContain(`sharp-android-${process.arch}`);
+        // The remedy is named: rebuild (staging now follows the image target)
+        // or point KNEXT_SHARP_ADDON at the right .node.
+        expect(r.stderr).toContain("KNEXT_SHARP_ADDON");
+    });
+});
 
 describe("sharp addon integrity verification", () => {
     it("loads when every listed payload matches the manifest", () => {
