@@ -139,7 +139,7 @@ B.4      the CR yaml contains exactly one document, kind: NextApp (grep -c "kind
 
 App infra added for the rows (created and owned by this run): `deploy/knext-s3-redis` +
 `svc/knext-s3-redis` (redis:7-alpine) in `default`; `cache: { provider: "redis", url:
-"redis://knext-s3-redis.default.svc.cluster.local:6379" }` in kn-next.config.ts — the operator
+"redis://knext-s3-redis.default.svc.cluster.local.:6379" }` in kn-next.config.ts — the operator
 correctly injected `CACHE_PROVIDER=redis` + `REDIS_URL` into the pod (observed in pod spec).
 
 ### C — boot → READY + the negative half · **OBSERVED (green only after two more findings)**
