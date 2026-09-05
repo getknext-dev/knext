@@ -48,7 +48,7 @@ COPY .output/public /app/.output/public
 # `kn-next build` stages the addons for THIS IMAGE's platform (linuxmusl),
 # fetching them at the lockfile-pinned version when the build host runs
 # something else — a mac's own install holds only darwin addons, and shipping
-# those was a boot crash-loop, not a graceful fallback (#949): the generated
+# those was a boot crash-loop, not a graceful fallback: the generated
 # entry imports sharp statically, so an app that uses `next/image` dies at
 # import when no addon here matches the runtime. Only an app with no sharp in
 # its bundle runs with this directory empty.

@@ -373,6 +373,29 @@ describe("#949 stageSharpNative stages the image target's platform, not the host
         ).toBe("sharp-linuxmusl-x64 BYTES");
     });
 
+    /** What a previous `kn-next build` leaves behind: tree + manifest. */
+    function stagePreviousBuild(
+        cwd: string,
+        files: Record<string, string>,
+    ): void {
+        for (const [rel, bytes] of Object.entries(files)) {
+            const abs = join(cwd, "native", ...rel.split("/"));
+            mkdirSync(join(abs, ".."), { recursive: true });
+            writeFileSync(abs, bytes);
+        }
+        writeFileSync(
+            join(cwd, "native", ".integrity.json"),
+            JSON.stringify({
+                version: 1,
+                algorithm: "sha256",
+                packages: {},
+                files: Object.fromEntries(
+                    Object.keys(files).map((rel) => [rel, "previous-hash"]),
+                ),
+            }),
+        );
+    }
+
     it("a rebuild CLEARS a previous build's foreign addons out of native/", () => {
         // The upgrade path: an app tree that still carries a darwin-staged
         // native/ from an old CLI. mkdir+copy would leave the darwin dirs
@@ -382,15 +405,103 @@ describe("#949 stageSharpNative stages the image target's platform, not the host
             "sharp-linuxmusl-x64": SHARP_V,
             "sharp-libvips-linuxmusl-x64": VIPS_V,
         });
-        const stale = join(cwd, "native", "sharp-darwin-arm64", "lib");
-        mkdirSync(stale, { recursive: true });
-        writeFileSync(join(stale, "sharp-darwin-arm64.node"), "STALE");
+        stagePreviousBuild(cwd, {
+            "sharp-darwin-arm64/lib/sharp-darwin-arm64.node": "STALE",
+        });
 
         stageSharpNative(cwd, { arch: "linux-x64" });
 
         expect(existsSync(join(cwd, "native", "sharp-darwin-arm64"))).toBe(
             false,
         );
+        expect(existsSync(join(cwd, "native", "sharp-linuxmusl-x64"))).toBe(
+            true,
+        );
+    });
+
+    it("REFUSES to clear a native/ that knext did not stage — never deletes user files", () => {
+        // `native/` is a standard N-API convention, and the scaffold ships no
+        // .gitignore claiming the name for knext. A hand-written native/ has
+        // no `.integrity.json`; deleting it because a build ran would be data
+        // loss. The refusal names the marker so the message is actionable.
+        const cwd = darwinAppTree(FULL_LOCK, {
+            "sharp-linuxmusl-x64": SHARP_V,
+            "sharp-libvips-linuxmusl-x64": VIPS_V,
+        });
+        mkdirSync(join(cwd, "native"), { recursive: true });
+        writeFileSync(join(cwd, "native", "my-addon.node"), "USER BYTES");
+
+        expect(() => stageSharpNative(cwd, { arch: "linux-x64" })).toThrow(
+            /\.integrity\.json/,
+        );
+        // And nothing was deleted on the way to the refusal.
+        expect(readFileSync(join(cwd, "native", "my-addon.node"), "utf8")).toBe(
+            "USER BYTES",
+        );
+    });
+
+    it("prunes ONLY what the previous manifest lists — a user extra beside it survives", () => {
+        const cwd = darwinAppTree(FULL_LOCK, {
+            "sharp-linuxmusl-x64": SHARP_V,
+            "sharp-libvips-linuxmusl-x64": VIPS_V,
+        });
+        stagePreviousBuild(cwd, {
+            "sharp-darwin-arm64/lib/sharp-darwin-arm64.node": "STALE",
+        });
+        // A file the previous manifest does not list is not knext's to delete.
+        writeFileSync(join(cwd, "native", "NOTES.txt"), "USER NOTES");
+
+        stageSharpNative(cwd, { arch: "linux-x64" });
+
+        expect(existsSync(join(cwd, "native", "sharp-darwin-arm64"))).toBe(
+            false,
+        );
+        expect(readFileSync(join(cwd, "native", "NOTES.txt"), "utf8")).toBe(
+            "USER NOTES",
+        );
+    });
+
+    it("#949-class: sharp DECLARED but not findable → NAMED failure, never an empty native/", () => {
+        // The pnpm layout: `@img` lives under `.pnpm`, none of the walked
+        // node_modules candidates match, and inferring "no sharp" from that
+        // absence ships an empty native/ — the silent crash-loop this issue
+        // exists to close. The signal must come from the app's own manifest.
+        const cwd = tempDir("knext-949-declared-");
+        writeFileSync(
+            join(cwd, "package.json"),
+            JSON.stringify({
+                name: "app",
+                dependencies: { sharp: "^0.35.2" },
+            }),
+        );
+        const { calls, fetch } = recordingFetch();
+
+        expect(() =>
+            stageSharpNative(cwd, { arch: "linux-x64", fetchPackage: fetch }),
+        ).toThrow(/@img\/sharp-linuxmusl-x64|bun\.lock/);
+        expect(calls).toEqual([]);
+        // The failure mode being replaced: an empty-but-manifested native/.
+        expect(
+            existsSync(join(cwd, "native", ".integrity.json")),
+            "the build must fail before writing a manifest that blesses an empty tree",
+        ).toBe(false);
+    });
+
+    it("fetches from the lockfile pin when the install layout hides @img entirely", () => {
+        // bun.lock pins the packages but no node_modules/@img candidate
+        // exists (isolated stores, hoisting differences). The lockfile is the
+        // signal AND the pin — the fetch path covers the layout, named
+        // failure covers everything else.
+        const cwd = tempDir("knext-949-hidden-");
+        writeFileSync(join(cwd, "bun.lock"), lockText(FULL_LOCK));
+        const { calls, fetch } = recordingFetch();
+
+        stageSharpNative(cwd, { arch: "linux-x64", fetchPackage: fetch });
+
+        expect(calls.map((c) => c.name).sort()).toEqual([
+            "@img/sharp-libvips-linuxmusl-x64",
+            "@img/sharp-linuxmusl-x64",
+        ]);
         expect(existsSync(join(cwd, "native", "sharp-linuxmusl-x64"))).toBe(
             true,
         );
@@ -412,6 +523,10 @@ describe("#949 stageSharpNative stages the image target's platform, not the host
     });
 
     it("an app with no sharp still stages an empty manifest, and never fetches", () => {
+        // "No sharp" means NO signal says otherwise: not the app's
+        // package.json, not a lockfile, not an installed @img tree. Absence of
+        // one install layout is NOT absence of sharp — that inference is the
+        // #949-class bug the two tests above pin from the other side.
         const cwd = tempDir("knext-949-nosharp-");
         stageSharpNative(cwd, {
             arch: "linux-x64",

@@ -37,7 +37,6 @@
       "packages/kn-next/src/__tests__/optional-storage.test.ts": 3,
       "packages/kn-next/src/__tests__/sandbox-fetch-debug.test.ts": 2,
       "packages/kn-next/src/__tests__/sandbox-fetch-realm-debug.test.ts": 9,
-      "packages/kn-next/src/__tests__/sharp-addon-dlopen.test.ts": 4,
       "packages/kn-next/src/__tests__/standalone-bun-exports.test.ts": 2,
       "scripts/install-smoke.mjs": 6,
       "scripts/smoke-pack-cli.mjs": 4,

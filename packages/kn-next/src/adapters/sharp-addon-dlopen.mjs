@@ -238,7 +238,9 @@ function requireIntegrity() {
  * pulled in transitively by the OS loader off a relative rpath and never passes
  * through this function, so verifying just the addon would leave the larger — and
  * more easily swapped — binary unpinned. The cost is one hash of the tree, paid
- * on first sharp import (the first `/_next/image` request), not at boot.
+ * once, when sharp is first imported — and the generated entry imports sharp
+ * STATICALLY, so in practice that is at boot (S3-V C-1a proved a failing load
+ * here is a boot crash, not a lazy per-request one).
  */
 function verifyAgainstManifest(addon) {
   // Parsed UNCONDITIONALLY, before anything branches on it. A value nobody can

@@ -71,6 +71,10 @@ platforms involved instead of crashing on an unreadable binary. If you need to o
 selection (say, a hand-built image with a custom layout), set `KNEXT_SHARP_ADDON` to the absolute
 path of the `.node` file inside its `@img` tree.
 
+**Upgrading:** if you built an app image on macOS before this behaviour existed, the old addon
+selection is baked into that binary — rebuild and redeploy with the current `kn-next build` to get
+working image optimization; no configuration change is needed.
+
 <Callout type="warn">
 **If your app imports sharp and its addon cannot load, the pod does not start** — the generated
 server entry imports sharp at boot, so a missing or wrong-platform addon is a startup failure with

@@ -48,6 +48,7 @@ import { fileURLToPath } from "node:url";
 import { runQuiet } from "./exec";
 import {
     findLockfile,
+    INTEGRITY_MANIFEST_NAME,
     readLockfilePackages,
     writeNativeIntegrityManifest,
 } from "./native-integrity";
@@ -278,15 +279,15 @@ export function stageSharpNative(
     }
 
     const dest = join(cwd, "native");
-    rmSync(dest, { recursive: true, force: true });
+    clearStagedNative(dest);
     mkdirSync(dest, { recursive: true });
 
     const imgRoot = findImgPackages(cwd);
-    const usesSharp =
-        imgRoot !== undefined &&
-        readdirSync(imgRoot).some((entry) => entry.startsWith("sharp-"));
-    if (usesSharp) {
-        const lockfilePath = findLockfile(cwd);
+    const lockfilePath = findLockfile(cwd);
+    const locked = lockfilePath
+        ? readLockfilePackages(lockfilePath)
+        : undefined;
+    if (appUsesSharp(cwd, imgRoot, locked)) {
         // The addon links libvips by RELATIVE rpath, so the pair ships
         // together in its original layout or `dlopen` fails resolving
         // `libvips-cpp` after finding the addon.
@@ -294,9 +295,10 @@ export function stageSharpNative(
             `sharp-${platformId}`,
             `sharp-libvips-${platformId}`,
         ]) {
-            const hostDir = join(imgRoot, dir);
+            const hostDir =
+                imgRoot === undefined ? undefined : join(imgRoot, dir);
             const destDir = join(dest, dir);
-            if (existsSync(hostDir)) {
+            if (hostDir !== undefined && existsSync(hostDir)) {
                 // `dereference` follows the symlinks a bun/pnpm isolated store
                 // uses; copying the links would put dangling pointers in the
                 // image.
@@ -306,18 +308,19 @@ export function stageSharpNative(
                 });
                 continue;
             }
-            // The host install lacks the target's package — the macOS-built
-            // deploy. Fetch the exact version the lockfile pins, or fail the
-            // build NAMING the missing addon; the one outcome that is never
-            // acceptable is an image that cannot load sharp (#949).
+            // The host install lacks the target's package — a macOS build
+            // host, or an install layout the candidate walk cannot see (pnpm's
+            // `.pnpm` store). Fetch the exact version the lockfile pins, or
+            // fail the build NAMING the missing addon; the one outcome that is
+            // never acceptable is an image that cannot load sharp (#949).
             const name = `@img/${dir}`;
-            if (!lockfilePath) {
+            if (!lockfilePath || locked === undefined) {
                 throw new UsageError(
-                    `The image targets ${platformId} but this host's install has no '${name}' and there is no bun.lock to fetch a pinned version from.\n\n` +
+                    `This app uses sharp, the image targets ${platformId}, and this host's install has no '${name}' — and there is no bun.lock to fetch a pinned version from.\n\n` +
                         "Run `bun install --save-text-lockfile` in the app and rebuild.",
                 );
             }
-            const entry = readLockfilePackages(lockfilePath).get(name);
+            const entry = locked.get(name);
             if (!entry) {
                 throw new UsageError(
                     `The image targets ${platformId}, but neither this host's install nor ${lockfilePath} has '${name}' — the image would ship unable to load sharp.\n\n` +
@@ -337,7 +340,106 @@ export function stageSharpNative(
     // Unconditional, including the empty case: a `native/` with no manifest is
     // indistinguishable from one whose manifest was stripped, and the shim reads
     // absence as "legacy image, load unverified".
-    writeNativeIntegrityManifest(dest, findLockfile(cwd));
+    writeNativeIntegrityManifest(dest, lockfilePath);
+}
+
+/**
+ * Does this app pull sharp into its bundle? ANY signal counts:
+ *
+ *   - an installed `@img` tree (the original signal),
+ *   - the lockfile resolving `sharp` or any `@img/*` package,
+ *   - the app's own `package.json` declaring `sharp`.
+ *
+ * The union matters because the first two are LAYOUT-dependent: a pnpm install
+ * keeps `@img` under `.pnpm` where the candidate walk cannot see it, and
+ * inferring "no sharp" from that absence ships an empty `native/` — the exact
+ * silent crash-loop class #949 closes. With the signal true and no source
+ * findable, staging fails NAMING the missing addon instead of staging nothing.
+ */
+function appUsesSharp(
+    cwd: string,
+    imgRoot: string | undefined,
+    locked: ReturnType<typeof readLockfilePackages> | undefined,
+): boolean {
+    if (
+        imgRoot !== undefined &&
+        readdirSync(imgRoot).some((entry) => entry.startsWith("sharp-"))
+    ) {
+        return true;
+    }
+    if (
+        locked !== undefined &&
+        (locked.has("sharp") ||
+            [...locked.keys()].some((k) => k.startsWith("@img/")))
+    ) {
+        return true;
+    }
+    try {
+        const pkg = JSON.parse(
+            readFileSync(join(cwd, "package.json"), "utf8"),
+        ) as Record<string, Record<string, string> | undefined>;
+        return ["dependencies", "devDependencies", "optionalDependencies"].some(
+            (field) => pkg[field]?.sharp !== undefined,
+        );
+    } catch {
+        // No readable package.json — nothing left to say sharp is here.
+        return false;
+    }
+}
+
+/**
+ * Clear the PREVIOUS build's staging out of `native/` — and only that.
+ *
+ * `native/` is a standard N-API convention, so the name alone does not make the
+ * directory knext's to delete: a hand-written `native/` holds someone's source.
+ * The ownership marker is the `.integrity.json` manifest every `kn-next build`
+ * writes — present, the manifest's own file list says exactly what knext staged
+ * and only those entries (plus the manifest) are removed; absent with content,
+ * the build REFUSES rather than deleting what it cannot prove it created.
+ */
+function clearStagedNative(dest: string): void {
+    if (!existsSync(dest)) return;
+    const entries = readdirSync(dest);
+    if (entries.length === 0) return;
+
+    const manifestPath = join(dest, INTEGRITY_MANIFEST_NAME);
+    if (!existsSync(manifestPath)) {
+        throw new UsageError(
+            `Refusing to stage into ${dest}: it has content but no ${INTEGRITY_MANIFEST_NAME}, so knext did not stage it.\n\n` +
+                "`kn-next build` stages sharp's native addons into 'native/' beside the compiled\n" +
+                "binary and clears its own previous staging on rebuild — but this tree was not\n" +
+                "written by knext, and deleting it could destroy your files. Move it aside (or\n" +
+                "delete it yourself if it is disposable) and rebuild.",
+        );
+    }
+    let files: Record<string, unknown>;
+    try {
+        files =
+            (
+                JSON.parse(readFileSync(manifestPath, "utf8")) as {
+                    files?: Record<string, unknown>;
+                }
+            ).files ?? {};
+    } catch (error) {
+        throw new UsageError(
+            `Refusing to stage into ${dest}: its ${INTEGRITY_MANIFEST_NAME} is unreadable, so what the previous build staged cannot be told apart from your files.\n\n` +
+                `  underlying error: ${error instanceof Error ? error.message : String(error)}\n\n` +
+                "Move the directory aside (or delete it yourself) and rebuild.",
+        );
+    }
+    // Top-level entries the previous manifest covers. Guarded against a
+    // manifest whose keys escape the tree — those are nobody's to delete.
+    const owned = new Set<string>();
+    for (const rel of Object.keys(files)) {
+        const seg = rel.split("/")[0];
+        if (seg && seg !== "." && seg !== ".." && !seg.includes("\\")) {
+            owned.add(seg);
+        }
+    }
+    for (const seg of owned) {
+        rmSync(join(dest, seg), { recursive: true, force: true });
+    }
+    rmSync(manifestPath, { force: true });
 }
 
 /**
