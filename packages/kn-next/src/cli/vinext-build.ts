@@ -332,7 +332,13 @@ export function stageSharpNative(
                             "Run `bun install --save-text-lockfile` in the app and rebuild.",
                     );
                 }
-                const entry = locked.get(name);
+                // `[0]` is the lockfile's canonical (root/hoisted) resolution
+                // by `readLockfilePackages`'s ordering contract — load-bearing
+                // when the lock pins the package at two versions at once (the
+                // scaffold's app-sharp ^0.35 beside next's 0.34 pin, #954):
+                // fetching "whichever entry won a name-keyed map" would stage
+                // an addon version the bundled sharp never resolved.
+                const entry = locked.get(name)?.[0];
                 if (!entry) {
                     throw new UsageError(
                         `The image targets ${platformId}, but neither this host's install nor ${lockfilePath} has '${name}' — the image would ship unable to load sharp.\n\n` +

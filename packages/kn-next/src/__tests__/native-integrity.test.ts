@@ -279,6 +279,77 @@ describe("native tree integrity manifest — staging", () => {
     });
 });
 
+describe("#954 two coexisting sharp versions in one lockfile", () => {
+    // The scaffold's REAL dependency shape: the app depends on sharp ^0.35
+    // while its `next` devDependency pins its own sharp@0.34.x, so a fresh
+    // `kn-next create` app's bun.lock legitimately holds TWO versions of every
+    // @img package — one under the bare root key, the other under a nested
+    // `parent/…` key. A name-only lookup keeps exactly one of them, and
+    // whichever it keeps, the other version's staging false-fails (#954).
+    const APP_SHARP = "0.35.4";
+    const NEXT_SHARP = "0.34.5";
+
+    function twoVersionLock(dir: string): string {
+        const lines = [
+            // The hoisted root resolutions (bare keys) carry next's pin…
+            `    "sharp": ["sharp@${NEXT_SHARP}", "", {}, "sha512-rootsharp=="],`,
+            `    "@img/sharp-linux-x64": ["@img/sharp-linux-x64@${NEXT_SHARP}", "", {}, "sha512-imgnext=="],`,
+            // …and the app's own ^0.35 resolution lives under nested keys.
+            `    "myapp/sharp": ["sharp@${APP_SHARP}", "", {}, "sha512-appsharp=="],`,
+            `    "myapp/@img/sharp-linux-x64": ["@img/sharp-linux-x64@${APP_SHARP}", "", {}, "sha512-imgapp=="],`,
+            `    "@img/sharp-libvips-linux-x64": ["@img/sharp-libvips-linux-x64@${VIPS_VERSION}", "", {}, "sha512-vipsonly=="],`,
+        ];
+        return writeLock(
+            dir,
+            `{\n  "lockfileVersion": 1,\n  "packages": {\n${lines.join("\n")}\n  }\n}\n`,
+        );
+    }
+
+    it("passes when the staged version matches the NESTED pin, not the root one", () => {
+        // The reproduced false-fail: staged 0.35.4, bare-key pin 0.34.5. The
+        // lookup must find the nested 0.35.4 entry instead of comparing the
+        // staged tree against the one version a name-keyed map happened to keep.
+        const { dir, nativeDir } = stageNative({ sharpVersion: APP_SHARP });
+        writeNativeIntegrityManifest(nativeDir, twoVersionLock(dir));
+
+        const manifest = readManifest(nativeDir);
+        expect(manifest.packages["@img/sharp-linux-x64"]).toEqual({
+            version: APP_SHARP,
+            // The MATCHED entry's integrity — recording the other version's
+            // string would pin the staged bytes to a tarball they never came
+            // from.
+            lockfileIntegrity: "sha512-imgapp==",
+        });
+    });
+
+    it("passes when the staged version matches the ROOT pin", () => {
+        const { dir, nativeDir } = stageNative({ sharpVersion: NEXT_SHARP });
+        writeNativeIntegrityManifest(nativeDir, twoVersionLock(dir));
+
+        const manifest = readManifest(nativeDir);
+        expect(manifest.packages["@img/sharp-linux-x64"]).toEqual({
+            version: NEXT_SHARP,
+            lockfileIntegrity: "sha512-imgnext==",
+        });
+    });
+
+    it("still FAILS closed, naming every pinned version, when the staged version matches neither", () => {
+        // Version-disambiguation must not become version-tolerance: a staged
+        // version absent from the lock at ANY version is still the
+        // store-vs-lockfile disagreement, and the refusal names what the lock
+        // DOES pin so the operator can see the two-version situation.
+        const { dir, nativeDir } = stageNative({ sharpVersion: "0.36.0" });
+        const lock = twoVersionLock(dir);
+
+        expect(() => writeNativeIntegrityManifest(nativeDir, lock)).toThrow(
+            /0\.36\.0/,
+        );
+        expect(() => writeNativeIntegrityManifest(nativeDir, lock)).toThrow(
+            /0\.34\.5.*0\.35\.4|0\.35\.4.*0\.34\.5/s,
+        );
+    });
+});
+
 describe("stageSharpNative pins what it stages", () => {
     /**
      * An app tree with `node_modules/@img` and a lockfile, holding the DEFAULT

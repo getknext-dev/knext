@@ -121,8 +121,8 @@ export function writeNativeIntegrityManifest(
         }
         const locked = readLockfilePackages(lockfilePath);
         for (const pkg of staged) {
-            const entry = locked.get(pkg.name);
-            if (!entry) {
+            const versions = locked.get(pkg.name);
+            if (!versions) {
                 throw new UsageError(
                     `The native package '${pkg.name}' is staged for the image but ${lockfilePath} pins no such package.\n\n` +
                         "An @img package on disk that the lockfile never resolved is exactly the\n" +
@@ -130,9 +130,15 @@ export function writeNativeIntegrityManifest(
                         "Reinstall from the lockfile (`bun install --frozen-lockfile`) and rebuild.",
                 );
             }
-            if (entry.version !== pkg.version) {
+            // Matched by name AND version: a lockfile can legitimately pin the
+            // same package at two versions at once (a scaffold's app sharp
+            // ^0.35 next to next's own sharp 0.34 pin, #954), and comparing
+            // the staged tree against whichever single entry a name-keyed map
+            // kept false-failed brand-new apps.
+            const entry = versions.find((v) => v.version === pkg.version);
+            if (!entry) {
                 throw new UsageError(
-                    `The native package '${pkg.name}' is staged at ${pkg.version} but ${lockfilePath} pins ${entry.version}.\n\n` +
+                    `The native package '${pkg.name}' is staged at ${pkg.version} but ${lockfilePath} pins only ${formatVersions(versions)}.\n\n` +
                         "The store and the lockfile disagree about what is installed. Reinstall with\n" +
                         "`bun install --frozen-lockfile` and rebuild rather than shipping the difference.",
                 );
@@ -184,18 +190,36 @@ interface LockedPackage {
     integrity: string | null;
 }
 
+/** `pins only 0.34.5, 0.35.4` — every version the lockfile holds, sorted. */
+function formatVersions(versions: LockedPackage[]): string {
+    return versions
+        .map((v) => v.version)
+        .sort()
+        .join(", ");
+}
+
 /**
- * `bun.lock`'s `packages` map, keyed by package name.
+ * `bun.lock`'s `packages` map, keyed by package name — each name mapping to
+ * EVERY distinct version the lockfile pins for it, canonical resolution first.
  *
  * The file is JSONC — trailing commas, which `JSON.parse` rejects — and each
  * value is a tuple whose first element is `"<name>@<version>"` and whose last
  * element, when present, is the registry integrity string. Workspace installs
  * key some entries by path (`apps/x/node_modules/@img/y`), so the trailing
  * package name is what identifies an entry, not the whole key.
+ *
+ * A name maps to a LIST because two versions of one package coexisting in a
+ * lockfile is a legitimate, common state — a fresh scaffold pins the app's
+ * sharp ^0.35 beside next's own sharp 0.34 devDependency pin — and collapsing
+ * them to one entry made the integrity check compare staged trees against
+ * whichever version happened to win (#954). Ordering contract: the bare-key
+ * (root/hoisted) resolution is FIRST when present, so callers that need one
+ * representative version (`stageSharpNative`'s fetch path) take `[0]` and get
+ * the hoisted resolution deterministically, regardless of entry order.
  */
 export function readLockfilePackages(
     lockfilePath: string,
-): Map<string, LockedPackage> {
+): Map<string, LockedPackage[]> {
     const raw = readFileSync(lockfilePath, "utf8");
     let doc: { packages?: Record<string, unknown> };
     try {
@@ -207,7 +231,7 @@ export function readLockfilePackages(
         );
     }
 
-    const out = new Map<string, LockedPackage>();
+    const out = new Map<string, LockedPackage[]>();
     for (const [key, value] of Object.entries(doc.packages ?? {})) {
         if (!Array.isArray(value) || typeof value[0] !== "string") continue;
         const descriptor = value[0];
@@ -222,11 +246,16 @@ export function readLockfilePackages(
             last !== descriptor
                 ? last
                 : null;
-        // A path-keyed duplicate must not overwrite the root resolution with a
-        // different version silently; first wins, and the key check keeps the
-        // canonical entry ahead of nested ones.
-        if (!out.has(name) || key === name)
-            out.set(name, { version, integrity });
+        const entries = out.get(name) ?? [];
+        if (entries.length === 0) out.set(name, entries);
+        // Every distinct version is kept; a canonical (bare-key) record moves
+        // to the front, and for a version seen twice the canonical record's
+        // integrity string is the one retained.
+        const existing = entries.findIndex((e) => e.version === version);
+        if (existing !== -1 && key !== name) continue;
+        if (existing !== -1) entries.splice(existing, 1);
+        if (key === name) entries.unshift({ version, integrity });
+        else entries.push({ version, integrity });
     }
     return out;
 }

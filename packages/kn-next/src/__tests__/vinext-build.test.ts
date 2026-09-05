@@ -336,6 +336,39 @@ describe("#949 stageSharpNative stages the image target's platform, not the host
         ).toBeDefined();
     });
 
+    it("fetches the ROOT resolution when the lockfile holds two versions of the target package (#954)", () => {
+        // The scaffold's two-sharp shape (app ^0.35 + next-pinned 0.34) also
+        // reaches the fetch path: the lock then pins the target @img package
+        // twice, and a name-only lookup would fetch whichever entry happened to
+        // win. The bare root key IS the hoisted resolution, so that is the one
+        // to fetch — deterministically, regardless of entry order.
+        const cwd = tempDir("knext-954-fetch-");
+        writeFileSync(
+            join(cwd, "bun.lock"),
+            `{\n  "lockfileVersion": 1,\n  "packages": {\n` +
+                // Nested (next's pin) FIRST, so first-wins parsing would pick
+                // the wrong one.
+                `    "next/@img/sharp-linuxmusl-x64": ["@img/sharp-linuxmusl-x64@0.34.5", "", {}, "sha512-nested=="],\n` +
+                `    "@img/sharp-linuxmusl-x64": ["@img/sharp-linuxmusl-x64@${SHARP_V}", "", {}, "sha512-root=="],\n` +
+                `    "next/@img/sharp-libvips-linuxmusl-x64": ["@img/sharp-libvips-linuxmusl-x64@1.2.9", "", {}, "sha512-vnested=="],\n` +
+                `    "@img/sharp-libvips-linuxmusl-x64": ["@img/sharp-libvips-linuxmusl-x64@${VIPS_V}", "", {}, "sha512-vroot=="],\n` +
+                `  }\n}\n`,
+        );
+        const { calls, fetch } = recordingFetch();
+
+        stageSharpNative(cwd, { arch: "linux-x64", fetchPackage: fetch });
+
+        expect(calls.map((c) => `${c.name}@${c.version}`).sort()).toEqual([
+            `@img/sharp-libvips-linuxmusl-x64@${VIPS_V}`,
+            `@img/sharp-linuxmusl-x64@${SHARP_V}`,
+        ]);
+        // And the matched entries' integrity strings travelled with them.
+        expect(calls.map((c) => c.integrity).sort()).toEqual([
+            "sha512-root==",
+            "sha512-vroot==",
+        ]);
+    });
+
     it("copies the target set from the host install when it IS there — no fetch", () => {
         // A linux-x64 host building the default image: bun installed the musl
         // packages, so staging is a local copy exactly as before.
