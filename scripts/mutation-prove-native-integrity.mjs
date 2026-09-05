@@ -61,19 +61,31 @@ const MUTATIONS = [
       'a staged package the lockfile never resolved is SKIPPED instead of refused — a package on ' +
       'disk that no install produced is exactly what an attacker leaves behind',
     subject: 'src',
-    anchor: '            if (!entry) {',
+    anchor: '            if (!versions) {',
     replacement:
-      '            if (!entry) {\n                continue;\n            }\n            if (false) {',
+      '            if (!versions) {\n                continue;\n            }\n            if (false) {',
   },
   {
     id: 'M3',
     expect: 'red',
     claim:
-      'a staged VERSION disagreeing with the lockfile is tolerated — the store and the lockfile ' +
-      'disagree and the build ships the difference rather than stopping',
+      'a staged VERSION disagreeing with the lockfile is tolerated — the mismatch lookup falls ' +
+      'back to some pinned entry and the build ships the difference rather than stopping',
     subject: 'src',
-    anchor: 'if (entry.version !== pkg.version) {',
-    replacement: 'if (false && entry.version !== pkg.version) {',
+    anchor: 'const entry = versions.find((v) => v.version === pkg.version);',
+    replacement: 'const entry = versions.find((v) => v.version === pkg.version) ?? versions[0];',
+  },
+  {
+    id: 'M7',
+    expect: 'red',
+    claim:
+      'the lockfile map collapses back to ONE version per name — the #954 two-sharp scaffold ' +
+      '(app sharp ^0.35 beside next’s 0.34 pin) false-fails again, against whichever version ' +
+      'lost the collapse',
+    subject: 'src',
+    anchor: '        if (existing !== -1 && key !== name) continue;',
+    replacement:
+      '        if (existing === -1 && entries.length > 0) continue;\n        if (existing !== -1 && key !== name) continue;',
   },
   {
     id: 'M4',
