@@ -90,14 +90,14 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Install syft
-        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
 
       # download-grype only exposes the binary path as an output; spawning bare
       # `grype` without the PATH step is an ENOENT (caught on ci.yml's first real
       # run of the sibling gate). The output is the pinned action's own value.
       - name: Install grype
         id: grype
-        uses: anchore/scan-action/download-grype@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        uses: anchore/scan-action/download-grype@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
 
       - name: Put grype on PATH
         run: dirname "${{ steps.grype.outputs.cmd }}" >> "$GITHUB_PATH"
@@ -188,7 +188,7 @@ jobs:
         # id-token:write, so a mutable tag is a supply-chain hole. v0.24.0.
         # The oci-dir: source is passed verbatim to syft (verified against the
         # pinned action source) — the image no longer exists in the docker daemon.
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           image: oci-dir:image-oci-sbom
           format: spdx-json
