@@ -22,7 +22,7 @@
 # alpine:3.22
 FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 
-RUN apk add --no-cache libstdc++ libgcc
+RUN apk add --no-cache --upgrade libstdc++ libgcc libcrypto3 libssl3  # --upgrade clears base-layer openssl CVEs (Trivy HIGH); base digest stays pinned
 
 # The binary produced by `./build.sh <arch>`; override for a non-default arch.
 ARG BINARY=knext-bun-exec-linux-x64

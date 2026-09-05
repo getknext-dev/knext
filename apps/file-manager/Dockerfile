@@ -30,7 +30,7 @@ FROM oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5d
 # Node is still required in the BUILD stage: tsup shells out to `tsc` for the
 # .d.ts pass. It does not reach the runtime image. pnpm is gone — `bun install`
 # drives the workspace now, which is also why there is no `npm i -g` layer.
-RUN apk add --no-cache nodejs libstdc++ libgcc
+RUN apk add --no-cache --upgrade nodejs libstdc++ libgcc libcrypto3 libssl3  # --upgrade clears base-layer openssl CVEs (Trivy HIGH)
 
 WORKDIR /repo
 COPY . .
@@ -136,7 +136,7 @@ RUN set -eu; \
 # workflow's contract explicit rather than making it build whatever is last.
 FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce AS runner
 
-RUN apk add --no-cache libstdc++ libgcc
+RUN apk add --no-cache --upgrade libstdc++ libgcc libcrypto3 libssl3  # --upgrade clears base-layer openssl CVEs (Trivy HIGH); base digest stays pinned
 
 WORKDIR /app
 
