@@ -171,10 +171,49 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # ── The version bump MUST pass (FAIL-CLOSED) ──────────────────────────
+      # Split out of the best-effort changesets/action step below so a REAL
+      # release defect — a malformed changeset, a broken bump, a changelog hook
+      # that throws — still turns this job RED. We run the exact command the
+      # action runs (`bun run changeset:version`), assert it exits 0, then
+      # RESTORE the tree so the action below still finds the changesets to
+      # consume and opens/updates the PR from an identical starting point.
+      #
+      # Why this split exists: the action below does the bump AND the PR-open in
+      # ONE step, and that step must be `continue-on-error` (see its comment).
+      # Without validating the bump here first, that continue-on-error would
+      # ALSO swallow a genuine version-bump failure — blanket-greening a real
+      # defect, which is exactly what this must not do.
+      - name: Verify the version bump succeeds (fail-closed)
+        run: |
+          set -euo pipefail
+          bun run changeset:version
+          # Undo it: the action below re-runs the same bump and opens the PR.
+          # Restore tracked edits/deletions (package.json versions, CHANGELOGs,
+          # the deleted .changeset/*.md) and drop the newly generated untracked
+          # CHANGELOG files, so the action starts from the tree this step did.
+          git checkout -- .
+          git clean -fd
+
       # NO `publish-script` and NO `NODE_AUTH_TOKEN`: this step is structurally
       # incapable of publishing, which is what lets it run unapproved.
-      - name: Create or update the Version Packages PR
+      #
+      # ── Opening the PR is BEST-EFFORT (environment limit, not a defect) ────
+      # `continue-on-error: true` is scoped to THIS step only. The getknext-dev
+      # org/repo toggle "Allow GitHub Actions to create and approve pull
+      # requests" is OFF — a human-only setting — so after the bump succeeds
+      # this step ALWAYS ends in `HttpError: GitHub Actions is not permitted to
+      # create or approve pull requests` and the Version PR is opened by hand
+      # (as it always has been). That is an environment limitation, NOT a
+      # release defect, so it must not paint the main CI rollup permanently red
+      # — two permanently-red lanes trained the rollup to noise, which is how a
+      # live HIGH CVE hid for a whole sprint. The bump above is already
+      # fail-closed and the `release` publish job stays fully fail-closed; only
+      # this PR-open is softened. The moment the org toggle is flipped on, this
+      # step simply starts succeeding — no further change needed.
+      - name: Create or update the Version Packages PR (best-effort)
         id: changesets
+        continue-on-error: true
         uses: changesets/action@8488615a623b1b9c987934bb89eae8af6a946ac1 # v2.1.1
         with:
           # v2 RENAMED EVERY INPUT THIS STEP PASSES, and #831 took the v1→v2 pin
@@ -201,6 +240,24 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # A clear, honest log line so the softened step above does not read as a
+      # silent green. `if: always()` so it runs whether the PR-open succeeded or
+      # hit the org limitation. This step is NOT a gate — it only annotates — so
+      # it must never fail the job (that is what the fail-closed bump step is
+      # for); it emits a warning that names the human follow-up.
+      - name: Report the Version PR outcome
+        if: always()
+        run: |
+          if [ "${{ steps.changesets.outcome }}" = "success" ]; then
+            echo "Version PR step succeeded." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning title=Version PR must be opened by hand::The version bump PASSED; opening the Version PR was skipped because GitHub Actions cannot create PRs in getknext-dev (the org toggle is OFF, a human-only setting). Open or refresh the 'chore: version packages' PR by hand. This is an environment limitation, not a release defect."
+            {
+              echo "### Version PR: open by hand"
+              echo "The version bump PASSED. Opening the Version PR failed on the standing org limitation (\`GitHub Actions is not permitted to create or approve pull requests\`), so open/refresh the \`chore: version packages\` PR by hand. Not a release defect."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   # Decide whether `release` should start AT ALL.
   #
