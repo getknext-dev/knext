@@ -80,16 +80,34 @@ describe('#942 F1 — packed sibling ranges must be satisfied by the co-packed s
     expect(siblingRangeProblems([lib('0.4.0'), core('0.4.0', '^0.3.1')]).length).toBeGreaterThan(0);
   });
 
-  it('the audit script actually CALLS the tripwire between pack and install', () => {
+  it('main() actually CALLS the tripwire between pack and install', () => {
     // The helper being correct is worth nothing if main() never consults it —
     // the guards-must-assert-both-halves rule this repo keeps relearning.
+    //
+    // Round-3 fix (#942): round 2 asserted this with whole-file indexOf, whose
+    // first hits were the DECLARATION sites — helper-definition order alone
+    // satisfied the ordering, and replacing main()'s call with
+    // `const problems = [];` left every test here green. Decorative. So: slice
+    // from `function main()` (the declarations all sit above it) and anchor on
+    // CALL-shaped needles — `siblingRangeProblems(tarballs` is the call, never
+    // the `export function siblingRangeProblems(manifests` declaration.
     const source = readFileSync(resolve(REPO_ROOT, 'scripts/audit-published.mjs'), 'utf8');
-    const packIdx = source.indexOf('packPublished(');
-    const checkIdx = source.indexOf('siblingRangeProblems(');
-    const installIdx = source.indexOf("'install',");
-    expect(packIdx, 'pack call missing').toBeGreaterThan(-1);
-    expect(checkIdx, 'main() never calls siblingRangeProblems').toBeGreaterThan(-1);
-    expect(installIdx, 'install call missing').toBeGreaterThan(-1);
+    const mainIdx = source.indexOf('function main()');
+    expect(mainIdx, 'function main() not found in audit-published.mjs').toBeGreaterThan(-1);
+    expect(
+      source.indexOf('function main()', mainIdx + 1),
+      'two function main() declarations — the slice below no longer isolates one body',
+    ).toBe(-1);
+    const body = source.slice(mainIdx);
+    const packIdx = body.indexOf('packPublished(pkg.dir');
+    const checkIdx = body.indexOf('siblingRangeProblems(tarballs');
+    const installIdx = body.indexOf("'install',");
+    expect(packIdx, 'main() never calls packPublished(pkg.dir …)').toBeGreaterThan(-1);
+    expect(
+      checkIdx,
+      'main() never calls siblingRangeProblems(tarballs…) — the tripwire is decoration',
+    ).toBeGreaterThan(-1);
+    expect(installIdx, "main() never spawns the npm 'install' of the closure").toBeGreaterThan(-1);
     expect(checkIdx, 'the tripwire must sit AFTER packing').toBeGreaterThan(packIdx);
     expect(installIdx, 'the tripwire must sit BEFORE the closure install').toBeGreaterThan(
       checkIdx,
