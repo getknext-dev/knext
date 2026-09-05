@@ -25,7 +25,14 @@ import {
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { requireIsolatedProcess } from "../../../../tests/helpers/require-isolated-process";
 import type { VinextBuildOptions } from "../cli/vinext-build";
+
+// #965: installs process-global `mock.module` fakes of shared CLI modules that
+// bun cannot unregister. MUST have the `bun test` process to itself — the
+// suite of record (`scripts/bun-test.mjs`) gives it one; a hand-rolled batch
+// gets a loud pointer there instead of phantom failures in a sibling.
+requireIsolatedProcess("build-run.test.ts");
 
 const runQuiet = (() => mock())();
 mock.module("../cli/exec", () => ({ runQuiet, isEntrypoint: () => false }));

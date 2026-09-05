@@ -37,6 +37,7 @@ import {
     rmSync,
     writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildNextAppCRObject } from "../cli/cr-builder";
 import { writeScaffold } from "../cli/create";
@@ -250,7 +251,15 @@ describe("doctor reports the static-asset mode (condition 1)", () => {
 // ---------------------------------------------------------------------------
 
 let root: string;
-const loaderTmpRoot = join(import.meta.dirname, ".optional-storage-tmp");
+// The OS tmp dir, NOT a path under the repo (#968). Rooted at
+// `import.meta.dirname` this scaffold tree — including a
+// `knext-bun-entry.mjs` — was created and torn down INSIDE
+// `packages/kn-next/src/__tests__/`, exactly where
+// `postcompile-smoke-startup-contract.test.ts` recursively scans for entries.
+// A concurrent run (the per-file runner spawns files in parallel) would let the
+// scan discover this transient entry and then ENOENT on it the moment `afterAll`
+// removed it — a ~50% flake that named neither this test nor the collision.
+const loaderTmpRoot = join(tmpdir(), "knext-optional-storage");
 
 beforeAll(() => {
     mkdirSync(loaderTmpRoot, { recursive: true });
