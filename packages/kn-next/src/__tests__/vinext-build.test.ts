@@ -578,9 +578,14 @@ describe("#949 stageSharpNative stages the image target's platform, not the host
         try {
             compileArgv("__not_an_arch__", "e", "o");
         } catch (e) {
+            // Post-#956 wording: the refusal separates shippable targets from
+            // the smoke-only -gnu keys. The sharp map must cover exactly the
+            // SHIPPABLE set — the gnu smoke binaries reuse the host/image
+            // addons the shim disambiguates at runtime, so they need no row.
             known =
-                /Known: (.*)\.$/.exec((e as Error).message)?.[1]?.split(", ") ??
-                [];
+                /Shippable targets: (.*?)\.\n/
+                    .exec((e as Error).message)?.[1]
+                    ?.split(", ") ?? [];
         }
         expect(known.length).toBeGreaterThan(0);
         expect(Object.keys(SHARP_PLATFORM_IDS).sort()).toEqual(known.sort());
