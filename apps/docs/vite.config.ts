@@ -57,7 +57,17 @@ export default defineConfig({
     // raw `.mdx` reached vinext's RSC scanner and es-module-lexer tried to
     // parse Markdown as JavaScript (44 `Parse error` failures, one per doc).
     mdx(),
-    vinext(),
+    vinext({
+      // ISR/data cache → Redis (#953). vinext never reads next.config's
+      // `cacheHandler`; its hook is THIS plugin option — the generated
+      // registration module runs in every server entry and vinext's default
+      // origin-managed ISR strategy stores/serves page artifacts through the
+      // registered data cache. Without it the app silently falls back to a
+      // per-pod in-memory cache and the provisioned Redis stays empty.
+      cache: {
+        data: { adapter: '@getknext/core/internal/vinext-cache-adapter' },
+      },
+    }),
     nitro({
       preset,
       // Only the bun target gets the bespoke entry; see the note above.

@@ -1,0 +1,7 @@
+name: fixture
+on:
+  pull_request:
+    branches: ["**"]
+jobs:
+  gate:
+    runs-on: ubuntu-latest

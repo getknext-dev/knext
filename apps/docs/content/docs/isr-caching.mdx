@@ -1,0 +1,72 @@
+---
+title: ISR & the Redis cache
+description: How a knext app's ISR/data cache reaches Redis — where the wiring lives, what the runtime guarantees, and how to upgrade an app scaffolded before the cache wiring landed.
+---
+
+knext's ISR / data cache is **Redis**. Every pod shares one keyspace, so a page rendered (or a tag
+invalidated) by one pod is seen by all of them — which is what makes ISR coherent under
+scale-to-zero, where pods appear and disappear constantly.
+
+## Where the wiring lives
+
+knext builds your app with **vinext** (Vite/rolldown). vinext does **not** read the
+`cacheHandler` option in `next.config.ts` — that option belongs to Next's webpack/turbopack
+pipeline, which this build never runs. The line is kept in scaffolded apps for Next-aware tooling,
+but it is inert at runtime.
+
+The live registration is in `vite.config.ts`, on the `vinext()` plugin itself:
+
+```ts title="vite.config.ts"
+import vinext from 'vinext';
+
+export default defineConfig({
+  plugins: [
+    vinext({
+      cache: {
+        data: { adapter: '@getknext/core/internal/vinext-cache-adapter' },
+      },
+    }),
+    // …nitro(…)
+  ],
+});
+```
+
+At build time, vinext generates a registration module from this option and runs it in every server
+entry, so the Redis-backed handler is registered before any route executes. Page-level ISR
+(HIT / STALE serving and in-process background regeneration) then flows through that handler.
+
+<Callout type="warn">
+**Deleting this block does not fail the build.** The app still serves 200s — with a **per-pod
+in-memory cache** instead: every pod renders independently, nothing survives scale-to-zero, and
+the provisioned Redis stays empty. If you see `x-nextjs-cache: MISS` on every request and an empty
+Redis, this block is the first thing to check.
+</Callout>
+
+## What the runtime guarantees
+
+- **First request** after a cold cache is a `MISS` and writes the rendered page to Redis.
+- **Within the revalidate window** requests are served `HIT` from Redis.
+- **Past the window** requests are served `STALE` from Redis while a background render replaces the
+  entry — stale-while-revalidate, not a blocking re-render.
+- The Redis entry's TTL is deliberately **longer than the revalidate window** (it is the route's
+  expire time when one is declared, and a floor of one hour otherwise). If the entry expired
+  exactly at the revalidate window there would be nothing left to serve stale.
+- When `REDIS_URL` is unset (local dev), the handler falls back to in-memory caching, so `vinext
+  dev` and local builds work without a Redis.
+
+The connection details come from the environment — `REDIS_URL` and `REDIS_KEY_PREFIX` are injected
+into your pods from the `cache` block of your deploy config (see
+[the operator reference](/docs/operator)); nothing about Redis is hardcoded in your app.
+
+## Upgrading an app scaffolded before the cache wiring
+
+Apps created by earlier versions of `kn-next create` wired the cache handler **only** through
+`next.config.ts`'s `cacheHandler` — which the vinext build ignores, so their ISR never reached
+Redis. To fix an existing app, add the `cache` block to the `vinext()` call in your
+`vite.config.ts` exactly as shown above, and make sure `@getknext/core` is in your
+`devDependencies`. No other change is needed: the handler, the environment contract, and the
+operator side were already in place.
+
+To verify after deploying: request an ISR route twice — the second response should carry
+`x-nextjs-cache: HIT` — and `redis-cli KEYS '<your-prefix>:cache:*'` should show the page's
+entries, with `TTL` greater than the route's revalidate window.

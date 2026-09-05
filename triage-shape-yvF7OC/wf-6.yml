@@ -1,0 +1,7 @@
+name: fixture
+on:
+  pull_request:
+    types: [labeled]
+jobs:
+  gate:
+    runs-on: ubuntu-latest

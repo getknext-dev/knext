@@ -41,7 +41,17 @@ export default defineConfig({
     // NOTE: `images: { optimizer }` is NOT passed here. vinext reads that
     // option only on its Cloudflare init path; on the node platform it is
     // ignored. knext registers the optimizer directly in knext-bun-entry.mjs.
-    vinext(),
+    vinext({
+      // ISR/data cache → Redis (#953). vinext never reads next.config's
+      // `cacheHandler`; its hook is THIS plugin option — the generated
+      // registration module runs in every server entry and vinext's default
+      // origin-managed ISR strategy stores/serves page artifacts through the
+      // registered data cache. Without it the app silently falls back to a
+      // per-pod in-memory cache and the provisioned Redis stays empty.
+      cache: {
+        data: { adapter: '@getknext/core/internal/vinext-cache-adapter' },
+      },
+    }),
     nitro({
       preset: 'bun',
       entry: './knext-bun-entry.mjs',

@@ -18,7 +18,20 @@ import { defineConfig } from 'vite';
 
 export default defineConfig({
   plugins: [
-    vinext(),
+    vinext({
+      // ISR/data cache → Redis (#953). vinext never reads next.config's
+      // `cacheHandler` (that is a webpack/turbopack mechanism); its hook is
+      // THIS plugin option. It generates a registration module every server
+      // entry runs, and vinext's default origin-managed ISR strategy then
+      // stores page artifacts through the registered data cache and serves
+      // HIT/STALE from it. Deleting this block does not fail the build — the
+      // app silently falls back to a per-pod in-memory cache and the
+      // provisioned Redis stays empty, which is exactly how the gap shipped
+      // unnoticed once.
+      cache: {
+        data: { adapter: '@getknext/core/internal/vinext-cache-adapter' },
+      },
+    }),
     nitro({
       // Bun, because the artifact is compiled with `bun build --compile`.
       // Not interchangeable with the node preset: the emitted entry calls Bun's
