@@ -34,9 +34,9 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import type { Server } from "node:http";
 import { createServer } from "node:http";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -307,15 +307,21 @@ describe("unpublishedPinsWarning — the honest message (#950)", () => {
 
 describe("createMain — warns when the CLI's version was never published (#950)", () => {
     let server: Server | undefined;
-    let appDir: string | undefined;
+    let tmpRoot: string | undefined;
     const envKey = "npm_config_registry";
     const savedEnv = process.env[envKey];
+
+    /** mkdtemp paired with removal (#880): the ROOT is what gets reaped. */
+    const freshAppDir = (): string => {
+        tmpRoot = mkdtempSync(join(tmpdir(), "knext-pins-"));
+        return join(tmpRoot, "app");
+    };
 
     afterEach(async () => {
         if (server) await new Promise((done) => server?.close(done));
         server = undefined;
-        if (appDir) rmSync(appDir, { recursive: true, force: true });
-        appDir = undefined;
+        if (tmpRoot) rmSync(tmpRoot, { recursive: true, force: true });
+        tmpRoot = undefined;
         if (savedEnv === undefined) delete process.env[envKey];
         else process.env[envKey] = savedEnv;
     });
@@ -362,7 +368,7 @@ describe("createMain — warns when the CLI's version was never published (#950)
     it("scaffold succeeds (exit 0) AND stderr carries the unpublished warning", async () => {
         const { url } = await emptyRegistry();
         process.env[envKey] = url;
-        appDir = join(mkdtempSync(join(tmpdir(), "knext-pins-")), "app");
+        const appDir = freshAppDir();
         const stderr = captureStderr();
         const restoreOut = captureStdout();
         try {
@@ -382,7 +388,7 @@ describe("createMain — warns when the CLI's version was never published (#950)
         await new Promise((done) => server?.close(done));
         server = undefined;
         process.env[envKey] = url;
-        appDir = join(mkdtempSync(join(tmpdir(), "knext-pins-")), "app");
+        const appDir = freshAppDir();
         const stderr = captureStderr();
         const restoreOut = captureStdout();
         try {
@@ -398,7 +404,7 @@ describe("createMain — warns when the CLI's version was never published (#950)
     it("--dry-run writes nothing and never touches the registry", async () => {
         const { url, hits } = await emptyRegistry();
         process.env[envKey] = url;
-        appDir = join(mkdtempSync(join(tmpdir(), "knext-pins-")), "app");
+        const appDir = freshAppDir();
         const stderr = captureStderr();
         const restoreOut = captureStdout();
         try {

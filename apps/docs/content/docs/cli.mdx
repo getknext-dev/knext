@@ -68,6 +68,13 @@ hand, and both are silent failures rather than loud ones:
 unless you pass `--force`. It also refuses when a config file already present would shadow the one
 it writes, rather than emitting a config Next would never read.
 
+The generated `package.json` pins its `@getknext/*` dependencies at the **CLI's own version** — the
+CLI and those packages release together, so a published CLI always scaffolds versions that exist on
+the registry. If the CLI you ran carries a version that was never published (typically a build from
+a source checkout), `create` checks the registry and prints a warning telling you that
+`npm install` would fail and what to do instead. The check is best-effort: with no network access,
+`create` still scaffolds normally and stays quiet.
+
 ## `kn-next deploy` (default)
 
 Loads and validates `kn-next.config.ts`, runs `next build` (standalone output), uploads static

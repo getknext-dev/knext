@@ -72,9 +72,19 @@ export function scaffoldGetknextPins(
         }));
 }
 
+/**
+ * Structural fetch shape, NOT `typeof fetch`: bun's global fetch type carries
+ * a `preconnect` member, which would force every injected test double to fake
+ * an API this module never calls.
+ */
+export type FetchLike = (
+    input: string | URL | Request,
+    init?: RequestInit,
+) => Promise<Response>;
+
 export interface CheckOptions {
     /** Injectable for tests; defaults to the global fetch. */
-    fetchImpl?: typeof fetch;
+    fetchImpl?: FetchLike;
     /** Registry base URL; defaults to npm's override env var, then npmjs. */
     registry?: string;
     /** Per-request timeout — a scaffold must not hang on a slow registry. */
