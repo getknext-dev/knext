@@ -123,11 +123,12 @@ jobs:
           bun run --filter @getknext/db build
           bun run --filter @getknext/core build
 
-      # `pnpm pack` (never `npm pack`): npm ships pnpm's raw `workspace:^` deps
-      # verbatim, and every fixture install then dies with EUNSUPPORTEDPROTOCOL.
-      # Packed ONCE for the whole run — the vinext deploy script installs these
-      # three, and @getknext/core is what ships dist/adapters/vinext-compile.js,
-      # the compile this lane measures.
+      # `bun pm pack` (never `npm pack`): npm ships the raw `workspace:^` deps
+      # verbatim, and every fixture install then dies with EUNSUPPORTEDPROTOCOL;
+      # bun pm pack rewrites `workspace:^` to real semver exactly as pnpm pack
+      # did. Packed ONCE for the whole run — the vinext deploy script installs
+      # these three, and @getknext/core is what ships
+      # dist/adapters/vinext-compile.js, the compile this lane measures.
       - name: Pack knext tarballs (bun pm pack — rewrites workspace:^, npm-installable)
         working-directory: knext
         run: |
@@ -150,14 +151,29 @@ jobs:
         run: |
           set -euo pipefail
           CORE_TGZ="$(ls -1 "${GITHUB_WORKSPACE}"/knext-tarballs/getknext-core-*.tgz | sort | tail -n1)"
-          if ! tar tzf "${CORE_TGZ}" | grep -q 'package/dist/adapters/vinext-compile.js'; then
-            echo "::error::${CORE_TGZ} ships no dist/adapters/vinext-compile.js — the vinext axis has nothing to compile with" >&2
-            exit 1
-          fi
-          if ! tar tzf "${CORE_TGZ}" | grep -q 'package/dist/adapters/sharp-addon-dlopen'; then
-            echo "::error::${CORE_TGZ} ships no dist/adapters/sharp-addon-dlopen* — the compile step throws on a missing shim" >&2
-            exit 1
-          fi
+          # Materialise the listing ONCE, then search the string — never
+          # `tar tzf … | grep -q …`. `grep -q` exits on its first match, closes
+          # the pipe, and `tar` dies with SIGPIPE (exit 141); under the `pipefail`
+          # above that 141 becomes the pipeline's status, so `if !` reads a
+          # PRESENT entry as absent and reds the lane on a healthy tarball (run
+          # 33965643199 — the log even printed `packed … vinext-compile.js` two
+          # steps earlier). `case` on the captured string has no producer to
+          # SIGPIPE.
+          ENTRIES="$(tar tzf "${CORE_TGZ}")"
+          case "${ENTRIES}" in
+            *package/dist/adapters/vinext-compile.js*) ;;
+            *)
+              echo "::error::${CORE_TGZ} ships no dist/adapters/vinext-compile.js — the vinext axis has nothing to compile with" >&2
+              exit 1
+              ;;
+          esac
+          case "${ENTRIES}" in
+            *package/dist/adapters/sharp-addon-dlopen*) ;;
+            *)
+              echo "::error::${CORE_TGZ} ships no dist/adapters/sharp-addon-dlopen* — the compile step throws on a missing shim" >&2
+              exit 1
+              ;;
+          esac
           echo "packed @getknext/core carries the compile script + the sharp dlopen shim"
 
       # The PUBLISHED next tarball at the pinned version, installed into each

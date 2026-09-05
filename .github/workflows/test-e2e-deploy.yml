@@ -551,11 +551,20 @@ jobs:
           # Tripwire at the SOURCE side too: the collision-critical fixture
           # symlink must be in the tarball AS a symlink (tar type 'l' listing
           # shows '->'). If upstream restructures the fixture, update the probe.
-          if ! tar tvzf "${RUNNER_TEMP}/compat-workspace.tgz" \
-            './next.js/test/e2e/app-dir/next-condition/fixtures/middleware/sym-linked-packages' 2>/dev/null \
-            | grep -q ' -> '; then
-            echo "::warning::expected fixture symlink not found as a symlink in the workspace tarball; if upstream moved it, update the probe (shard tripwire will catch a real regression)"
-          fi
+          # Materialise the listing, then `case`-match it — never `tar … | grep
+          # -q`: grep -q exits on first match, SIGPIPEs tar (exit 141), and the
+          # `pipefail` above turns that 141 into the pipeline's status, so the
+          # `if !` fires on a symlink that IS present and degrades this tripwire
+          # to noise (same SIGPIPE anti-pattern as the vinext lane's compile-
+          # script preflight).
+          SYMLINK_LISTING="$(tar tvzf "${RUNNER_TEMP}/compat-workspace.tgz" \
+            './next.js/test/e2e/app-dir/next-condition/fixtures/middleware/sym-linked-packages' 2>/dev/null || true)"
+          case "${SYMLINK_LISTING}" in
+            *' -> '*) ;;
+            *)
+              echo "::warning::expected fixture symlink not found as a symlink in the workspace tarball; if upstream moved it, update the probe (shard tripwire will catch a real regression)"
+              ;;
+          esac
 
       - name: Upload workspace
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

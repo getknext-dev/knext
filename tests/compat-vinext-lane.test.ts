@@ -29,8 +29,18 @@
  */
 
 import { describe, expect, it } from 'bun:test';
-import { accessSync, constants, existsSync, readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import {
+  accessSync,
+  constants,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { summarize } from '../scripts/e2e-summary.mjs';
 
@@ -208,6 +218,120 @@ describe('the lane measures the COMPILED BINARY, not the uncompiled nitro output
   });
 });
 
+describe('the packed @getknext/core preflight verifies the compile script — and does so SIGPIPE-safely', () => {
+  // Run 33965643199 (the vinext lane's first firing PAST the pnpm→bun fix) died
+  // at "Preflight — the packed @getknext/core ships the compile script" reporting
+  // the tarball ships NO dist/adapters/vinext-compile.js — while the pack log two
+  // steps earlier printed `packed 3.70KB dist/adapters/vinext-compile.js`. The
+  // file WAS there; the CHECK was wrong: `set -euo pipefail` + `tar tzf … | grep
+  // -q P`. `grep -q` exits on its first match, closes the pipe, `tar` dies with
+  // SIGPIPE (write error → 141), and `pipefail` propagates 141 as the pipeline's
+  // status, so `if ! <pipeline>` reads a PRESENT file as absent and reds the lane
+  // on a healthy tarball. The whole 16-shard axis skips behind a false negative.
+  const preflightStep = (): Step => {
+    const s = steps(parse(LANE)).find((st) => /ships the compile script/i.test(st.name ?? ''));
+    if (!s) throw new Error('the compile-script preflight step must exist');
+    return s;
+  };
+
+  it('still verifies the tarball carries BOTH the compile script and the sharp dlopen shim', () => {
+    // Both halves, so a fix that "silences" the check by deleting it reds here.
+    const run = preflightStep().run ?? '';
+    expect(run).toContain('dist/adapters/vinext-compile.js');
+    expect(run).toContain('dist/adapters/sharp-addon-dlopen');
+  });
+
+  it('does not gate that check on a `tar … | grep -q` pipeline under pipefail', () => {
+    const run = preflightStep().run ?? '';
+    // Bash comments are literal text in a `run:` block, so the explanatory
+    // comment above the fix (which QUOTES the fragile pattern) is part of this
+    // string — strip full-line comments before matching, exactly as `code()` does.
+    const executable = run
+      .split('\n')
+      .filter((line) => !/^\s*#/.test(line))
+      .join('\n');
+    const usesPipefail = /\bpipefail\b/.test(executable);
+    // `tar t…f … | grep -q …` — the producer left to SIGPIPE.
+    const fragile = /\btar\s+t[a-z]*f\b[^\n|]*\|\s*grep\s+-[a-zA-Z]*q\b/.test(executable);
+    expect(
+      fragile && usesPipefail,
+      'the compile-script preflight materialises `tar … | grep -q` under `set -o pipefail`: ' +
+        'grep -q SIGPIPEs tar and pipefail reads that as "file absent". List into a variable ' +
+        '(or a temp file) and search THAT, so there is no upstream producer to SIGPIPE.',
+    ).toBe(false);
+  });
+});
+
+describe('the compile-script preflight, RUN as shell against synthetic tarballs', () => {
+  // A YAML-text guard cannot tell a correct `case` from one whose arms are
+  // swapped (present → error, absent → pass). Execute the ACTUAL step script so
+  // an inverted arm reds here: build a real getknext-core tarball with/without
+  // each required entry and assert the exit code the arm produces.
+  const preflightRun = (): string => {
+    const s = steps(parse(LANE)).find((st) => /ships the compile script/i.test(st.name ?? ''));
+    if (!s?.run) throw new Error('the compile-script preflight step must exist with a run block');
+    return s.run;
+  };
+
+  /** Pack a getknext-core-*.tgz under a fresh GITHUB_WORKSPACE/knext-tarballs. */
+  function makeWorkspace(entries: string[]): string {
+    const ws = mkdtempSync(join(tmpdir(), 'vinext-preflight-ws-'));
+    const tarballs = join(ws, 'knext-tarballs');
+    const stage = join(ws, 'stage', 'package');
+    mkdirSync(tarballs, { recursive: true });
+    for (const rel of entries) {
+      const abs = join(stage, rel);
+      mkdirSync(dirname(abs), { recursive: true });
+      // Content is irrelevant — the preflight lists names, never reads bytes.
+      spawnSync('bash', ['-c', `printf 'x' > "${abs}"`]);
+    }
+    // `package/…` is the npm/bun tarball prefix the preflight greps for.
+    const pack = spawnSync(
+      'tar',
+      ['czf', join(tarballs, 'getknext-core-0.0.0.tgz'), '-C', join(ws, 'stage'), 'package'],
+      { encoding: 'utf8' },
+    );
+    if (pack.status !== 0) throw new Error(`tar failed: ${pack.stderr}`);
+    return ws;
+  }
+
+  function runPreflight(entries: string[]): { status: number | null; stderr: string } {
+    const ws = makeWorkspace(entries);
+    try {
+      const r = spawnSync('bash', ['-c', preflightRun()], {
+        env: { ...process.env, GITHUB_WORKSPACE: ws },
+        encoding: 'utf8',
+        timeout: 30000,
+      });
+      return { status: r.status, stderr: `${r.stderr}` };
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  }
+
+  const COMPILE = 'dist/adapters/vinext-compile.js';
+  const SHIM = 'dist/adapters/sharp-addon-dlopen.source.mjs';
+
+  it('exits 0 when BOTH the compile script and the sharp shim are present (the SIGPIPE regression’s scenario)', () => {
+    // This is exactly the tarball run 33965643199 had — a healthy one the old
+    // `tar | grep -q` under pipefail reddened. The fixed `case` must pass it.
+    const r = runPreflight([COMPILE, SHIM]);
+    expect(r.status, `preflight rejected a healthy tarball: ${r.stderr}`).toBe(0);
+  });
+
+  it('exits non-zero, naming the cause, when the compile script is MISSING', () => {
+    const r = runPreflight([SHIM]);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('vinext-compile.js');
+  });
+
+  it('exits non-zero, naming the cause, when the sharp dlopen shim is MISSING', () => {
+    const r = runPreflight([COMPILE]);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('sharp-addon-dlopen');
+  });
+});
+
 describe('the lane publishes its number where the node lane publishes', () => {
   const wf = () => parse(LANE);
 
@@ -255,6 +379,11 @@ describe('summarize() carries the builder axis', () => {
 
   it('omits the key entirely on the node lane, keeping that artifact shape byte-stable', () => {
     const s = summarize('test/e2e/x.test.ts finished on retry 1/3 in 1s', meta);
-    expect(Object.hasOwn(s, 'builder')).toBe(false);
+    // `Object.prototype.hasOwnProperty.call`, not `Object.hasOwn`: the root
+    // typecheck gate's lib does not guarantee es2022, where `Object.hasOwn`
+    // lands (TS2550). biome-ignore is required BOTH ways — its autofix would
+    // rewrite this back to `Object.hasOwn` and re-break the typecheck.
+    // biome-ignore lint/suspicious/noPrototypeBuiltins: Object.hasOwn is es2022; the typecheck lib does not guarantee it (TS2550)
+    expect(Object.prototype.hasOwnProperty.call(s, 'builder')).toBe(false);
   });
 });
