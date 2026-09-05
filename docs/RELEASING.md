@@ -74,6 +74,25 @@ concurrency groups, and the job-level `if:` on `release` exist to make that impo
 The gate also runs `npm whoami` before publishing and fails loudly if the token is present but
 rejected. Presence is not validity.
 
+### The packed tarball must be able to scaffold
+
+A published `@getknext/core` whose tarball omits the `create` verb or the `templates/` directory is
+worse than a broken release — it publishes green and the front door (`npx kn-next create`) is dead
+for every stranger, with nothing in the release lane objecting. That is exactly what shipped in
+`0.3.0`: its tarball carried no `dist/cli/create.js` and zero `templates/` entries.
+
+Three layers now assert the tarball can scaffold, form-at-PR-time / value-at-run-time:
+
+- **PR-time (fast, no publish):** `tests/scaffold-pack-contents.test.ts` feeds the real
+  `npm pack --dry-run` manifest of `packages/kn-next` to `scaffoldPackProblems`
+  (`scripts/scaffold-pack-contents.mjs`) and reds if the `create` bundle or any template is missing,
+  and separately pins the config chain that lands `create` in `dist` (the `files` allowlist, the
+  `cli/create` tsup entry, the bin's `create` dispatch). A `files`/tsup regression cannot merge.
+- **Run-time (packs + installs + scaffolds):** `scripts/install-smoke.mjs` scaffolds from the
+  packed-and-installed package in a clean, Bun-free dir.
+- **Stranger, against the live registry:** the `verify-scaffold-install.mjs` nightly runs the
+  documented `npm exec --package=@getknext/core@latest -- kn-next create` quickstart.
+
 ## First publish — DONE (2026-07-26)
 
 **The first npmjs publish has happened.** Verified against the registry:
