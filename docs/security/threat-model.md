@@ -158,6 +158,35 @@ a warning. The template Dockerfile therefore fails the **build** when the manife
 narrows the window to an image mutated after build; closing it fully needs the manifest bound to the
 image digest by a signature, which is the same owed work as the closure SBOM attestation above.
 
+That permissiveness is now a **dated exception with an off switch**, not an open-ended default.
+Setting **`KNEXT_REQUIRE_NATIVE_INTEGRITY`** in the app's environment makes an absent manifest a
+refusal — an operator who knows every image in their fleet postdates native-tree pinning can close
+the downgrade path today, without waiting for the default to change. A *mismatch* stays fatal either
+way.
+
+The variable has three outcomes, and the third is the one to plan a rollout around:
+
+| value | behaviour |
+| --- | --- |
+| `1`, `true`, `yes`, `on` (any case, surrounding whitespace ignored) | **fail closed** — an absent manifest refuses to `dlopen` |
+| `0`, `false`, `no`, `off`, empty, or unset | the dated exception stands — an absent manifest warns and loads |
+| anything else | **the process refuses to start** |
+
+That last row is deliberate and worth stating plainly as an operational consequence: a value the
+runtime cannot parse — `enabled`, `2`, a typo — is neither read as "on" nor as "off". Reading it as
+"off" is the fail-open case an operator would never see (they would believe the fleet refuses an
+unverifiable native tree while nothing had changed); reading it as "on" would brick a fleet on a
+typo *silently*. So it throws, by name, listing the accepted values. On a pre-pinning image that
+surfaces as a **crash loop on first `/_next/image` request** rather than a quiet misconfiguration —
+loud, immediate, and fixed by correcting the variable. Set it from a reviewed manifest, not by hand
+on a live workload. The check runs whether or not the image carries a manifest, so a bad value
+cannot pass on one image and refuse on the next.
+
+The exception's expiry and its re-raise condition live in
+`scripts/lib/native-integrity-policy.mjs`, read by the shared dated-exemption reader; the clock reds
+CI rather than the runtime, because a wall-clock branch inside the shim would brick running pods at
+midnight on the expiry date — the same fleet outage the exception exists to avoid.
+
 ### Patching policy — `apk upgrade` on a digest-pinned base (#267)
 
 Runner stages **MAY** run `apk upgrade --no-cache` against a digest-pinned base image
@@ -237,20 +266,34 @@ boundary**. The label sits on a cluster-scoped Namespace, so the grantor is whoe
 `update namespaces` — on a platform with self-service namespaces, a tenant can grant itself. Once
 labelled, *every* pod in that namespace (not just Prometheus) can scrape `9091` on *every* knext app,
 which in a shared cluster is cross-tenant metric disclosure. **What is actually exposed, enumerated
-from the exporter rather than assumed** (`adapters/metrics.ts`):
+from the exporter rather than assumed** — and since ADR-0048 that exporter is the compiled
+executable's own exposition (`templates/app/runtime-contract.mjs.hbs`), **not** the retired node
+supervisor's prom-client registry (`adapters/metrics.ts`), which no longer serves this port:
 
-- **No route, path, query or payload labels.** `knext_bunexec_http_requests_total` /
-  `knext_bunexec_http_request_duration_seconds` carry `app`, `method` and `status_class` only — `statusClass()`
-  deliberately buckets codes, so individual status codes do not leak either. An earlier version of
-  this section claimed route labels leak; that was wrong, and overstating a risk erodes the document
-  as surely as understating one.
-- **Request volume and error ratio per app**, by method and status class.
-- **Cold-start and DB-wake timing** (`knext_coldstart_*`, `knext_db_wake_*`, the latter labelled by
-  `role`) and **deep-health state** (`knext_deep_health_state`, labelled by `dependency`) — i.e.
-  another tenant's dependency health.
-- **Node/process metadata**, because `collectDefaultMetrics` registers on the *same* registry served
-  on `:9091`: `nodejs_version_info` is a runtime fingerprint, and `process_start_time_seconds`
-  reveals restart and scale-to-zero timing, from which per-app traffic patterns can be inferred.
+<!-- metric-contract:9091-disclosure start -->
+
+- **Six series, and no more.** `knext_bunexec_http_requests_total`,
+  `knext_bunexec_http_request_duration_seconds`, `knext_bunexec_http_inflight_requests`,
+  `knext_bunexec_startup_duration_seconds`, `knext_bunexec_process_resident_memory_bytes`,
+  `knext_bunexec_process_uptime_seconds`. The list is pinned against the emitter by
+  `observability-metric-contract.test.ts`, so it cannot drift from what the binary serves.
+- **No route, path, query, payload — or even method — labels.** The request counter carries
+  `status_class` alone, five fixed values; the duration histogram carries none. Individual status
+  codes do not leak either. An earlier version of this section claimed route labels leak, and a
+  later one claimed `app` and `method` labels; both were wrong, and overstating a risk erodes the
+  document as surely as understating one.
+- **Request volume and error ratio for the pod**, by status class only.
+- **Restart and scale-to-zero timing**, from `knext_bunexec_process_uptime_seconds` and
+  `knext_bunexec_startup_duration_seconds` — per-app traffic patterns can be inferred from these.
+- **Resident memory**, a coarse load signal.
+
+<!-- metric-contract:9091-disclosure end -->
+
+**What is NOT on this port, contrary to earlier versions of this section:** cold-start, DB-wake and
+deep-health series, and the `nodejs_*`/`process_*` families `collectDefaultMetrics` registers. Those
+are prom-client metrics on an app's own `/api/metrics` route, which the shipped PodMonitor does not
+scrape — an app that publishes that route publishes them itself, and that is the app's decision to
+make, not this port's exposure.
 
 `:9091` serves `GET /metrics` and nothing else — no pprof, health or debug endpoints — so the
 exposure is bounded to the above. There is no `PodSelector` because the operator cannot know a user's

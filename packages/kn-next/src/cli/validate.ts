@@ -52,17 +52,24 @@ const SUPPORTED_RUNTIMES = ["bun", "node"] as const;
  * Is this build/runtime pairing executable, per the artifact contract?
  * Returns the reason it is not, or null.
  *
- * EXPORTED and pure so it can be exercised directly. It has to be: with only
- * `turbopack` available today, and both runtimes accepting `next-standalone`,
- * NO reachable config can produce an incompatible pairing — measured. A design
- * gate wired this check in to give the contract a production caller, and a
- * mutation then showed that deleting it broke no test, because nothing could
- * reach it through `validateConfig`.
+ * EXPORTED and pure so it can be exercised directly. That started as a
+ * workaround and is now belt-and-braces, and the difference matters enough to
+ * record rather than leave a stale sentence in place.
  *
- * Keeping it unexercised would have been the very thing the gate objected to,
- * one level down: a check that exists and proves nothing. Testing the function
- * directly covers the incompatible case (`vinext` + `node`) that config cannot
- * currently express, so the seam is live the moment a second builder ships.
+ * WHAT THIS COMMENT USED TO SAY, AND WHY IT WAS WRONG (sprint-2 §4.2). It named
+ * `turbopack` as the sole selectable builder and concluded that NO reachable
+ * config could produce an incompatible pairing, so the direct unit test was the
+ * only way to exercise the seam. Both halves inverted under ADR-0048:
+ * `turbopack` is `available: false`, `vinext` is `available: true` AND the
+ * default, and the pairing the old text called inexpressible — `vinext` +
+ * `node` — is exactly
+ * what a user writes when they keep a `runtime: "node"` from before the
+ * migration. It is reachable from `validateConfig` (see the `checkPairing` call
+ * below), so the production caller a design gate asked for is real.
+ *
+ * The direct unit test stays anyway. A check reachable through one caller is
+ * one refactor away from being reachable through none, and that is the state
+ * this comment spent a sprint describing.
  */
 export function checkPairing(
     build: string | undefined,

@@ -1,0 +1,67 @@
+{
+  "$schema-note": "Read tests/temp-dirs-outside-the-repo.test.ts first. Both sets are RATCHETS over a measured population, not licences: the guard asserts them in BOTH directions, so an entry whose file has stopped offending reds the guard until the entry is deleted. The write set pins a MULTISET of licensed destinations — pinning only the count let three legitimate fixture writes be SUBSTITUTED for three `tests/*.tmp.ts` writes, and pinning only the destinations let a licensed write be DUPLICATED, both with the guard still green. The leak set pins counts per file, so a new leak inside an already-listed file reds too.",
+  "repoRootedWrites": {
+    "packages/kn-next/src/__tests__/adapter-dev-edge-fence.test.ts": {
+      "writes": [
+        "mkdirSync(dirname(ADAPTER_BUNDLE))",
+        "writeFileSync(join(FIXTURE, \".knext\", \".gitignore\"))",
+        "mkdirSync(typesDir)"
+      ],
+      "reason": "Boots a REAL `next dev` server against a checked-in fixture project, so these three destinations — the generated `.knext/adapter.mjs` bundle, its `.gitignore`, and the `node_modules/@types` symlink parent — have to sit inside that project. Next resolves a project by directory, and a dev server rooted at a temp copy would no longer be exercising the tracked fixture the test names. Not the #918 shape either: nothing here writes a transient `.ts` into `tests/`, which is what raced the typecheck gate. The licence is these three EXPRESSIONS: any other destination in this file, including one substituted for one of these, is a red."
+    }
+  },
+  "unremovedTempDirs": {
+    "recordedOn": "2026-09-05",
+    "note": "161 unremoved `mkdtemp` sites across 48 files, measured when the LIFETIME half of this guard landed (D9). Burn-down tracked in #939 — note the sizing there: 161/48, not the 156/49 the issue was filed with, because two rounds of review found the scan crediting cleanups it should not have (one `rmSync` for many same-named creations; a registry push discharging unenrolled siblings; removing a FILE INSIDE a directory counted as removing the directory). They are recorded rather than fixed because fixing them means touching 48 files across every package mid-sprint, and a guard that lands with its subject already red teaches people to disable it. This list is a CEILING: a file may only leak fewer than it does today, never more, and a file that stops leaking must leave the list. Nothing may be added to it — a new leak is a red, including a new leak in a file already here and a new leak that reuses a binding name already here. That last clause was FALSE when it was first written: a leak whose name collided with a drained iteration's loop element rode free, because that loop's own `rmSync(d)` was counted a second time as a direct removal. Measured against the pre-fix scan by appending a probe leak under each loop-element name: 12 (file, name) pairs, of which 8 were closed by excluding drain bodies from direct credit and 4 more needed that exclusion widened to loops over a non-identifier iterable (`of [appDir]`, `of dirs.splice(0)`). 0 remain. The guard proves the claim on the colliding name rather than on a name chosen to pass.",
+    "files": {
+      "apps/file-manager/next-adapter.test.ts": 1,
+      "apps/file-manager/shipped-runner.test.ts": 13,
+      "packages/kn-next/bench/boot-phase-trace.mjs": 2,
+      "packages/kn-next/bench/coldstart-supervisor-overhead.mjs": 2,
+      "packages/kn-next/src/__tests__/asset-upload-chaos.test.ts": 1,
+      "packages/kn-next/src/__tests__/asset-upload-standalone.test.ts": 1,
+      "packages/kn-next/src/__tests__/asset-upload.test.ts": 1,
+      "packages/kn-next/src/__tests__/build-context-root.test.ts": 1,
+      "packages/kn-next/src/__tests__/ci-init-ci.test.ts": 1,
+      "packages/kn-next/src/__tests__/cli-build-bun-heal.test.ts": 2,
+      "packages/kn-next/src/__tests__/cli-config-not-found.test.ts": 2,
+      "packages/kn-next/src/__tests__/cli-node-runtime.test.ts": 8,
+      "packages/kn-next/src/__tests__/cli-usage-surface.test.ts": 4,
+      "packages/kn-next/src/__tests__/compile-cache-health-bun.test.ts": 2,
+      "packages/kn-next/src/__tests__/compile-cache-shadow-statsync-wiring.test.ts": 4,
+      "packages/kn-next/src/__tests__/compile-cache-shadow.test.ts": 6,
+      "packages/kn-next/src/__tests__/compile-cache-volume-fallback.test.ts": 1,
+      "packages/kn-next/src/__tests__/deploy-preflight-ordering.test.ts": 1,
+      "packages/kn-next/src/__tests__/e2e-bun-lane-observability.test.ts": 1,
+      "packages/kn-next/src/__tests__/native-integrity.test.ts": 4,
+      "packages/kn-next/src/__tests__/optional-storage.test.ts": 3,
+      "packages/kn-next/src/__tests__/sandbox-fetch-debug.test.ts": 2,
+      "packages/kn-next/src/__tests__/sandbox-fetch-realm-debug.test.ts": 9,
+      "packages/kn-next/src/__tests__/sharp-addon-dlopen.test.ts": 4,
+      "packages/kn-next/src/__tests__/standalone-bun-exports.test.ts": 2,
+      "scripts/install-smoke.mjs": 6,
+      "scripts/smoke-pack-cli.mjs": 4,
+      "scripts/verify-action-pins.mjs": 2,
+      "test/bun-sandbox-fetch-ab/run-trials.mjs": 1,
+      "tests/action-pin-input-existence.test.ts": 1,
+      "tests/action-pin-sha-tag-nightly.test.ts": 42,
+      "tests/blocking-gate-helper.test.ts": 1,
+      "tests/blocking-gate-triage.test.ts": 1,
+      "tests/bun-app-closure.test.ts": 1,
+      "tests/bun-sandbox-fetch-ab-workflow.test.ts": 1,
+      "tests/bun-test-coverage-emission.test.ts": 1,
+      "tests/cold-attribution-attribute.test.ts": 1,
+      "tests/compat-run-ledger-completeness.test.ts": 1,
+      "tests/compat-smoke-single-exec-mode.test.ts": 1,
+      "tests/coverage-gate.test.ts": 1,
+      "tests/e2e-deploy.contract.test.ts": 1,
+      "tests/e2e-deploy.fixture-install.test.ts": 2,
+      "tests/image-prewarm-harness.test.ts": 4,
+      "tests/mutation-harness.test.ts": 1,
+      "tests/native-integrity-absence-exception.test.ts": 1,
+      "tests/operator-e2e-scale-image-preflight.test.ts": 1,
+      "tests/sbom-docs-closure.test.ts": 7,
+      "tests/verify-phase-gates.test.ts": 1
+    }
+  }
+}

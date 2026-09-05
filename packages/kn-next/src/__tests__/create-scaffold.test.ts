@@ -1015,3 +1015,112 @@ describe("#867 the scaffold ships a .dockerignore", () => {
         ).toBe(true);
     });
 });
+
+describe("#910 the scaffold ships the shallow health route the operator probes", () => {
+    /**
+     * Until this landed, a scaffolded app could never become Ready.
+     *
+     * `readinessProbePath` in the operator defaults to `/api/health` when
+     * `spec.healthCheckPath` is unset, and that ONE path backs both the
+     * readiness probe and the liveness probe. Neither template tree shipped a
+     * route for it, so a Knative httpGet probe got a 404: the revision never
+     * went Ready, and liveness then restart-looped the pod. The symptom was
+     * even being printed on every boot — the bun entry's default warm path is
+     * `/api/health`, so every scaffolded app logged `WARMED:/api/health
+     * status=404` and nothing read it.
+     *
+     * Written RED-first: `src/app/api/health/route.ts.hbs` did not exist.
+     */
+    const repoRoot = () =>
+        resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
+
+    /**
+     * The operator's default probe path, read from the operator's own source
+     * rather than copied here. A literal would let a future default change
+     * desync the scaffold from the thing that probes it, silently.
+     */
+    const operatorDefaultProbePath = (): string => {
+        const go = readFileSync(
+            resolve(
+                repoRoot(),
+                "packages/kn-next-operator/internal/controller/nextapp_controller.go",
+            ),
+            "utf8",
+        );
+        const fn = /func readinessProbePath\([\s\S]*?\n\}/.exec(go)?.[0] ?? "";
+        const literal = /return\s+"(\/[^"]*)"/.exec(fn)?.[1];
+        expect(
+            literal,
+            "could not read the operator's default readiness path — the scaffold " +
+                "guard must not fall back to a hardcoded one",
+        ).toBeDefined();
+        return literal as string;
+    };
+
+    it("serves the operator's DEFAULT probe path (resolved from the operator, not a literal)", () => {
+        const { appDir } = scaffoldApp();
+        const routeFile = join(
+            appDir,
+            "src",
+            "app",
+            ...operatorDefaultProbePath().split("/").filter(Boolean),
+            "route.ts",
+        );
+        expect(
+            existsSync(routeFile),
+            `a scaffolded app 404s ${operatorDefaultProbePath()} — the Knative ` +
+                "readiness AND liveness probes both target it, so the revision " +
+                "never goes Ready and then restart-loops",
+        ).toBe(true);
+    });
+
+    it("is SHALLOW: 200 without touching a database (ADR-0026/#338)", () => {
+        const { files } = scaffoldApp();
+        const src = files.get("src/app/api/health/route.ts");
+        expect(
+            src,
+            "src/app/api/health/route.ts was not rendered",
+        ).toBeDefined();
+        const body = src as string;
+        // A deep check would flap readiness on every cold wake of a
+        // scale-to-zero database — an asleep DB is NORMAL here.
+        expect(body).toContain("status: 200");
+        expect(body).toContain("force-dynamic");
+        for (const forbidden of [
+            "@getknext/lib/clients",
+            "DATABASE_URL",
+            "pg",
+            "redis",
+        ]) {
+            expect(
+                body.includes(forbidden),
+                `the shallow health route must not reference ${forbidden}`,
+            ).toBe(false);
+        }
+    });
+
+    it("is dependency-free — no imports at all, so it cannot break a created app's install", () => {
+        const { files } = scaffoldApp();
+        expect(
+            topLevelStaticImportSpecifiers(
+                files.get("src/app/api/health/route.ts") as string,
+            ),
+        ).toEqual([]);
+    });
+
+    it("the bun entry's default warm path is the route that now exists", () => {
+        // These two defaults drifted apart once already, and the drift was
+        // visible in the boot log for months. Pin them to each other.
+        const entry = readFileSync(
+            resolve(
+                repoRoot(),
+                "packages/kn-next/templates/app/knext-bun-entry.mjs.hbs",
+            ),
+            "utf8",
+        );
+        const warmDefault = /KNEXT_WARM_PATH\s*\?\?\s*'([^']+)'/.exec(
+            entry,
+        )?.[1];
+        expect(warmDefault).toBe(operatorDefaultProbePath());
+    });
+});

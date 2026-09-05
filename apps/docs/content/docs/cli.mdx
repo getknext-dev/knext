@@ -46,6 +46,28 @@ deploying to `prod`. Running the bin with **no** command (`npx @getknext/core`) 
 the package (see [Directly runnable entries](#directly-runnable-entries) below).
 </Callout>
 
+## `kn-next create`
+
+Scaffolds a new knext-ready Next.js app into the current directory (or the one you name). It writes
+files and makes **no** cluster changes, so it is safe to run and inspect before anything is deployed.
+
+Two of the files it writes are the ones people most often miss when wiring knext into an app by
+hand, and both are silent failures rather than loud ones:
+
+- **`src/app/api/health/route.ts`** — the shallow route Knative's readiness *and* liveness probes
+  both target. Without it a deployed revision answers 404 there, never reports Ready, and then gets
+  restart-looped by liveness while the application logs show nothing wrong. The generated route is
+  deliberately shallow: no imports, no I/O, no database. See
+  [Configure the deploy](/docs/learn/configure-the-deploy#the-health-route--do-not-skip-this).
+- **the server entry that serves `/_next/image`** — `next/image` optimization is handled by knext's
+  own runtime entry rather than by the platform, so an app scaffolded without it serves the original
+  bytes for every image and nothing reports the difference. See
+  [Image caching](/docs/image-caching).
+
+`create` refuses to clobber: an existing file aborts the whole write before anything is touched,
+unless you pass `--force`. It also refuses when a config file already present would shadow the one
+it writes, rather than emitting a config Next would never read.
+
 ## `kn-next deploy` (default)
 
 Loads and validates `kn-next.config.ts`, runs `next build` (standalone output), uploads static

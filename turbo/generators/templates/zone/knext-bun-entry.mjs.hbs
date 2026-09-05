@@ -45,6 +45,10 @@
 //                      node path so the listener stays reachable in-cluster.
 //   METRICS_PORT       Prometheus port            (default 9091)
 //   SHUTDOWN_GRACE_MS  drain hardcap in ms        (default 25000)
+//   KNEXT_MAX_REQUEST_BYTES  request body cap in bytes (default 8388608 = 8 MiB;
+//                      0 = explicitly uncapped, logged loudly). ADR-0044 Option
+//                      C — see resolveMaxRequestBytes in runtime-contract.mjs
+//                      for the measurement behind it.
 //   CACHE_INVALIDATE_TOKEN  read by the app route, not here (see app/api/cache).
 
 // MUST be first (#460 bug 1). Nitro's DEFAULT bun entry opens with this import;
@@ -54,6 +58,32 @@
 // vinext route wiring entirely → the compiled binary answers a framework 404 for
 // every app route (no `_ssr` chunks are even emitted). With it, routes are bundled
 // and the binary is self-contained.
+// ---------------------------------------------------------------------------
+// Image optimization (ADR-0048 / ADR-0006).
+//
+// vinext's `/_next/image` is gated on the Cloudflare Workers assets binding:
+//
+//     if (isImageOptimizationPath(...) && env?.ASSETS && getImageOptimizer())
+//
+// On the node/bun platform `env.ASSETS` is undefined, so that branch is DEAD —
+// registering an optimizer cannot reach it. Both registration routes were tried
+// and measured: the `images: { optimizer }` plugin option (read only on the
+// Cloudflare init path) and a direct `setImageOptimizer()` call from this entry.
+// Each left /_next/image returning 181,277 bytes of image/png, byte-identical
+// to the source, even with `Accept: image/webp`.
+//
+// So knext INTERCEPTS the route here instead, before nitro routing sees it.
+// The handler returns null for anything that is not a same-origin optimizable
+// request, and that null falls through to the app unchanged.
+// ---------------------------------------------------------------------------
+import { handleImageRequest } from '@getknext/core/internal/vinext-image-optimizer';
+// Statically imported so the BUNDLER embeds sharp's JavaScript. That is not a
+// preference — inside a `bun build --compile` binary nothing can resolve a
+// package from disk, so a runtime `require('sharp')` cannot work there no matter
+// where sharp is installed. Only the native addon stays external, opened by path
+// (see @getknext/core's sharp-addon-dlopen shim, aliased in vite.config.ts).
+import sharp from 'sharp';
+
 import '#nitro/virtual/polyfills';
 import { existsSync } from 'node:fs';
 import { useNitroApp } from 'nitro/app';
@@ -63,11 +93,13 @@ import {
   createMetricsState,
   drainPending,
   METRICS_CONTENT_TYPE,
+  METRICS_MAX_REQUEST_BYTES,
   observeRequest,
   recordStartupComplete,
   renderMetrics,
   resolveAssetAnchor,
   resolveBindHost,
+  resolveMaxRequestBytes,
 } from './runtime-contract.mjs';
 
 // ── #460 bug 3: static assets resolved against the BUILD MACHINE's path ─────
@@ -134,6 +166,10 @@ const PORT = Number(process.env.PORT ?? 3000);
 const HOSTNAME = resolveBindHost(process.env);
 const METRICS_PORT = Number(process.env.METRICS_PORT ?? 9091);
 const GRACE_MS = Number(process.env.SHUTDOWN_GRACE_MS ?? 25_000);
+// ADR-0044 Option C. One env read and one integer parse at module scope — the
+// cold-start budget for this control is zero measurable delta, and the whole
+// enforcement is a flag both listeners below hand to Bun.
+const REQUEST_CAP = resolveMaxRequestBytes(process.env);
 
 // biome-ignore lint/correctness/useHookAtTopLevel: useNitroApp() is Nitro's server-app accessor, not a React hook — the "use" prefix is coincidental.
 const nitro = useNitroApp();
@@ -151,6 +187,12 @@ const appSrvx = serve({
   port: PORT,
   hostname: HOSTNAME,
   fetch: nitro.fetch,
+  // ADR-0044 Option C: srvx forwards this to `Bun.serve`, which answers 413
+  // BEFORE this handler or any middleware runs — and counts bytes rather than
+  // trusting `Content-Length`, so a chunked body cannot slip the cap by omitting
+  // the header. `undefined` (KNEXT_MAX_REQUEST_BYTES=0) omits the option
+  // entirely, which is the only value srvx reads as "no cap".
+  maxRequestBodySize: REQUEST_CAP.bytes,
   gracefulShutdown: false,
   silent: true,
   middleware: [
@@ -176,6 +218,20 @@ const appSrvx = serve({
         metrics.inflight--;
       }
     },
+    // Image optimization — see the note above on why this is an intercept and
+    // not a registered optimizer. Inside the counting middleware, so optimized
+    // requests are still counted like any other.
+    async (req, next) => {
+      const optimized = await handleImageRequest(req, {
+        // Resolve the source through the app's own pipeline, so it finds the
+        // asset exactly as a normal static request would.
+        fetchSource: (path) => nitro.fetch(new Request(new URL(path, req.url))),
+        // Direct-pass, per architecture.md §4 — and the only thing that works in
+        // the compiled binary, where the optimizer's own runtime resolve cannot.
+        sharp,
+      });
+      return optimized ?? next();
+    },
   ],
 });
 // Adapt srvx's BunServer to the { port, stop(force) } shape the metrics log and
@@ -196,6 +252,11 @@ const appServer = {
 const metricsServer = Bun.serve({
   port: METRICS_PORT,
   hostname: HOSTNAME,
+  // FIXED at 64 KiB, never the app's resolved cap: this listener answers one GET
+  // and ran at Bun's 128 MB default until now — the exact co-resident-pod path
+  // ADR-0044's threat scope calls unbounded. Wiring REQUEST_CAP.bytes here would
+  // let KNEXT_MAX_REQUEST_BYTES=0 re-open it.
+  maxRequestBodySize: METRICS_MAX_REQUEST_BYTES,
   fetch(req) {
     const url = new URL(req.url);
     if (url.pathname === '/metrics' && req.method === 'GET') {
@@ -218,6 +279,19 @@ const metricsServer = Bun.serve({
 // never observe the runtime up but the gauge missing.
 recordStartupComplete(metrics);
 console.log(`LISTENING:${appServer.port} METRICS:${metricsServer.port}`);
+// Bun's 413 is synthesized before user code: empty body, no content-type, and
+// the `error` hook does not fire — so there is no in-process seam at which knext
+// can tell an operator reading a 413 WHICH cap fired (framework 1 MB, platform,
+// or proxy). The boot log is that seam instead, and it prints on every start.
+if (REQUEST_CAP.warning) {
+  // The prefix is the source, never a fixed word: an INVALID value falls back to
+  // the default and is still capped, so labelling it UNCAPPED would be a lie in
+  // the one log line an operator greps.
+  console.warn(`REQUEST_BYTE_CAP: ${REQUEST_CAP.source.toUpperCase()} — ${REQUEST_CAP.warning}`);
+}
+console.log(
+  `REQUEST_BYTE_CAP:${REQUEST_CAP.bytes ?? 'none'} METRICS_BYTE_CAP:${REQUEST_CAP.metricsBytes} (${REQUEST_CAP.source})`,
+);
 
 // ── Eager app-graph warmup ───────────────────────────────────────────────────
 // Nitro reaches the application through ONE lazy `import()` (the `_ssr` chunk),

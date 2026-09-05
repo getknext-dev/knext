@@ -8,7 +8,7 @@ residue in a file your PR legitimately modifies, which is how two near-misses ha
 session:
 
 ```bash
-pnpm run lint:mutation-residue     # red-on-fail in CI; run it before you commit
+bun run lint:mutation-residue     # red-on-fail in CI; run it before you commit
 ```
 
 Read [`docs/guides/mutation-testing.md`](docs/guides/mutation-testing.md) before writing a harness;
@@ -38,8 +38,8 @@ The user-facing docs site (knext.dev) lives in this monorepo at **`apps/docs/`**
 From the repo root (workspace-aware install/build):
 
 ```bash
-pnpm install
-pnpm --filter @getknext/lib build && pnpm --filter @getknext/db build && pnpm --filter @getknext/core build
-pnpm --filter knext-docs build            # vanilla (managed-host / Vercel) build
-KNEXT_ADAPTER=1 pnpm --filter knext-docs build   # self-host / adapter dogfood build
+bun install
+bun run --filter @getknext/lib build && bun run --filter @getknext/db build && bun run --filter @getknext/core build
+bun run --filter knext-docs build            # vanilla (managed-host / Vercel) build
+KNEXT_ADAPTER=1 bun run --filter knext-docs build   # self-host / adapter dogfood build
 ```

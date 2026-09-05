@@ -25,11 +25,11 @@ the explicit two-client contract (ADR-0021 §1). If `DATABASE_URL_RO` is unset,
 ## Run it locally
 
 ```bash
-pnpm install
-pnpm --filter @getknext/lib --filter @getknext/db build   # the SDK is consumed from dist
-pnpm --filter db-demo db:generate                   # (re)generate ./drizzle from the schema
-DATABASE_URL=postgres://user:pass@localhost:5432/db pnpm --filter db-demo db:migrate
-pnpm --filter db-demo dev
+bun install
+bun run --filter @getknext/lib --filter @getknext/db build   # the SDK is consumed from dist
+bun run --filter db-demo db:generate                   # (re)generate ./drizzle from the schema
+DATABASE_URL=postgres://user:pass@localhost:5432/db bun run --filter db-demo db:migrate
+bun run --filter db-demo dev
 ```
 
 ## Deploy on knext (both wake on one request)

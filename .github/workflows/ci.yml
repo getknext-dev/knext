@@ -384,8 +384,10 @@ jobs:
           cp -RL "$SRC"/sharp-libvips-linux-x64 apps/file-manager/native/ 2>/dev/null || true
           ls apps/file-manager/native/ | grep -q sharp- || { echo "sharp addon not staged" >&2; exit 1; }
 
-      # SERVER_CMD == SERVER_PATH is the smoke's single-exec signal: no script
-      # arg, no preload — the binary IS the server.
+      # SERVER_CMD and SERVER_PATH resolving (realpathSync, T6c) to the SAME
+      # FILE is the smoke's single-exec signal: no script arg, no preload — the
+      # binary IS the server. Not a string comparison: a symlinked or relative
+      # spelling used to flip the runner into the standalone branch silently.
       - name: Run knext compat-smoke (compiled single executable)
         working-directory: apps/file-manager
         env:
@@ -708,8 +710,15 @@ jobs:
     # #66 AC#2 + AC#3: the ONLY job that verifies next/image optimization in the
     # SHIPPED Alpine production image. It BUILDS apps/file-manager/Dockerfile (musl),
     # runs the container, and runs scripts/prod-image-probe.mjs — a STRICT, fail-closed
-    # probe (unlike compat-smoke check 'g', which skip()s on non-200 so a no-bucket CI
-    # stays green, and which only ever ran on the ubuntu/glibc standalone server.js).
+    # probe. (This comment previously described compat-smoke check 'g' as something that
+    # "skip()s on non-200 so a no-bucket CI stays green". That was STALE and is corrected
+    # rather than left: the runner has no skip mechanism at all any more — check (g)'s two
+    # skip() paths are gone, and tests/compat-smoke-capability-checks.test.ts SCANS the
+    # runner so reintroducing one reds CI. A comment presenting a skip as the established
+    # behaviour of a neighbouring gate reads as licence to add one back, and the compat
+    # rows are exactly where this repo has been burned by checks that skip rather than
+    # fail. What IS still true, and the reason this job exists: compat-smoke only ever ran
+    # on the ubuntu/glibc standalone server.js, never inside the shipped musl image.)
     #
     # AC#3 (sharp present) is also enforced inside the build itself: the Dockerfile runs
     # `node -e require('sharp')` and `apk add vips`, so a missing musl runtime fails the
@@ -860,8 +869,12 @@ jobs:
     #      ships at knext.dev). Asserts .vercel/output (Build Output API v3).
     #   2. the bun target (default preset) — the knext dogfood image — and the
     #      node target (NITRO_PRESET=node) behind Dockerfile.oke. adapterPath /
-    #      adapter-key drift is covered by `seam-alive` against file-manager,
-    #      not here: this app no longer builds through next.config at all.
+    #      adapter-key drift is NOT covered here: this app no longer builds
+    #      through next.config at all. (This line used to locate that coverage
+    #      in `seam-alive` against file-manager. #885 RETIRED that gate — see the
+    #      note at the top of this file — so the sentence named a job that does
+    #      not run. #899 recorded the honest position: no replacement gate
+    #      asserts single-instantiation on the binary.)
     #
     # Path-filtered: only runs when the docs app OR the public @getknext/core surface
     # changes (turbo-cache-friendly — an unrelated PR skips the ~minutes-long
@@ -933,9 +946,14 @@ jobs:
       # selected nothing. Neither assertion could pass; nothing noticed because
       # ci.yml had never run against the branch that migrated the app.
       #
-      # Adapter-key coverage is NOT lost with them: `seam-alive` builds
-      # apps/file-manager with `next build --webpack` and asserts the standalone
-      # artifact, which is what actually exercises `experimental.adapterPath`.
+      # This used to reassure that adapter-key coverage was "NOT lost with them"
+      # because `seam-alive` built apps/file-manager with `next build --webpack`
+      # and asserted the standalone artifact. #885 RETIRED that gate, so the
+      # reassurance pointed at nothing. Corrected rather than deleted, because it
+      # was load-bearing for the decision below: under ADR-0048 there is no
+      # standalone artifact to assert and `experimental.adapterPath` is a
+      # webpack/turbopack mechanism vinext never calls, so the coverage is not
+      # lost — it has no subject. A different claim, and a true one.
       #
       # What replaces them gates the three targets this app really deploys to.
       # Each is a different nitro preset, and two of them cannot run the default

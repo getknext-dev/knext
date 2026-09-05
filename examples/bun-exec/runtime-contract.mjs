@@ -56,6 +56,121 @@ export function resolveBindHost(env = process.env) {
   return h && isBindOrLoopback(h) ? h : '0.0.0.0';
 }
 
+// ── The in-process request byte cap (ADR-0044 Option C) ─────────────────────
+//
+// Until this landed, both listeners ran at Bun's 128 MB default: a single POST
+// could make the pod buffer 128 MB, and `containerConcurrency` 20 against a 1Gi
+// limit turns that into an OOM kill rather than a 413. The reverse-proxy recipe
+// in the docs was the only payload cap, and it is not in the request path of a
+// pod a co-resident workload can dial directly.
+//
+// The whole enforcement is srvx's `maxRequestBodySize`, which on Bun is handed
+// to `Bun.serve` and answered BEFORE any user code runs. Measured on two
+// runtimes, because the difference is the entire guarantee:
+//
+//   bun 1.3.5  honest 5 KB / cap 1 KB → 413 · CHUNKED 5 KB, no length → 200
+//   bun 1.4.0  honest 5 KB / cap 1 KB → 413 · CHUNKED 5 KB, no length → 413
+//
+// ADR-0044 Decision 4 requires COUNTED bytes, never a trusted `Content-Length`
+// (chunked encoding carries none), so only >= 1.4.0 satisfies it — which is why
+// `vinext-build.ts`'s existing Bun 1.4.0 build floor is now load-bearing for a
+// security control and pinned by `scripts/lib/request-byte-cap.mjs`.
+//
+// Bun's 413 is synthesized by the runtime: empty body, no `content-type`, and
+// the `error` hook does not fire. srvx passes the ORIGINAL request down its
+// middleware chain and ignores what a middleware returns, so nothing in-process
+// can name knext in that body without either widening the cap or rebuilding the
+// Request (which drops srvx's expando augmentation — the #460 bug-2 class). The
+// cap is therefore made discoverable at BOOT and in the docs instead.
+
+/**
+ * 8 MiB — the default cap.
+ *
+ * ADR-0044's own arithmetic: 1Gi memory limit, `containerConcurrency` 20, so 20
+ * worst-case buffered bodies must stay far under the limit (20 x 8 MiB =
+ * 160 MiB). Deliberately ABOVE Next's 1 MB `serverActions.bodySizeLimit`: two
+ * layers answering different errors at one threshold is how a support ticket
+ * becomes unanswerable. The platform cap sits above the framework cap on
+ * purpose.
+ */
+export const DEFAULT_MAX_REQUEST_BYTES = 8 * 1024 * 1024;
+
+/**
+ * 64 KiB — the `:9091` metrics cap, FIXED.
+ *
+ * That listener answers exactly one GET. It is not a function of the env knob:
+ * `KNEXT_MAX_REQUEST_BYTES=0` is an app-side escape hatch and must not re-open
+ * the co-resident-pod path ADR-0044's threat scope names.
+ */
+export const METRICS_MAX_REQUEST_BYTES = 64 * 1024;
+
+/** The operator-facing knob. Env only — deliberately not a CRD field. */
+export const MAX_REQUEST_BYTES_ENV = 'KNEXT_MAX_REQUEST_BYTES';
+
+/**
+ * @typedef ResolvedRequestCap
+ * @property {number | undefined} bytes app cap; `undefined` means no cap at all
+ * @property {number} metricsBytes the fixed `:9091` cap
+ * @property {'default' | 'env' | 'uncapped' | 'invalid'} source where it came from
+ * @property {string} [warning] set for `uncapped` and `invalid`; log it loudly
+ */
+
+/**
+ * Resolve the effective request byte caps from the environment.
+ *
+ * `bytes` is `undefined` when explicitly uncapped, because `undefined` is what
+ * srvx and `Bun.serve` both read as "no option given". Returning `0` or
+ * `Infinity` would be forwarded and misbehave.
+ *
+ * An INVALID value falls back to the default and never to uncapped — the
+ * security-relevant direction. A typo in a manifest must not silently remove a
+ * control; it must be loud and still capped.
+ *
+ * (The return type is a `@typedef` rather than an inline object type on purpose:
+ * an inline `@returns` object type opens with a doubled brace, which the
+ * scaffolder's renderer reads as an unsubstituted placeholder and refuses to
+ * emit — so every `kn-next create` would fail on this file. Do not reintroduce
+ * one, in code OR in a comment; the renderer does not care which.)
+ *
+ * @param {Record<string, string | undefined>} [env]
+ * @returns {ResolvedRequestCap}
+ */
+export function resolveMaxRequestBytes(env = process.env) {
+  const metricsBytes = METRICS_MAX_REQUEST_BYTES;
+  const raw = env[MAX_REQUEST_BYTES_ENV];
+  if (raw === undefined) {
+    return { bytes: DEFAULT_MAX_REQUEST_BYTES, metricsBytes, source: 'default' };
+  }
+  const trimmed = String(raw).trim();
+  // `Number('')` is 0 and `Number(' ')` is 0 — an empty value must NOT read as
+  // "uncapped". Digits only, so `1.5`, `-1`, `1e9`, `NaN` and `Infinity` are all
+  // invalid rather than silently coerced.
+  const valid = /^\d+$/.test(trimmed);
+  const parsed = valid ? Number(trimmed) : Number.NaN;
+  if (!valid || !Number.isSafeInteger(parsed)) {
+    return {
+      bytes: DEFAULT_MAX_REQUEST_BYTES,
+      metricsBytes,
+      source: 'invalid',
+      warning:
+        `${MAX_REQUEST_BYTES_ENV}=${JSON.stringify(raw)} is not a non-negative integer — ` +
+        `falling back to the ${DEFAULT_MAX_REQUEST_BYTES}-byte default. Set 0 to uncap deliberately.`,
+    };
+  }
+  if (parsed === 0) {
+    return {
+      bytes: undefined,
+      metricsBytes,
+      source: 'uncapped',
+      warning:
+        `${MAX_REQUEST_BYTES_ENV}=0 — request bodies are UNCAPPED. This pod will buffer a body ` +
+        'of any size the runtime accepts; with containerConcurrency > 1 that is an OOM kill ' +
+        'rather than a 413 (ADR-0044). The :9091 metrics listener stays capped regardless.',
+    };
+  }
+  return { bytes: parsed, metricsBytes, source: 'env' };
+}
+
 // ── (#460 bug 3) Where the runtime reads `.output/public` from ──────────────
 //
 // Nitro prepends `globalThis.__nitro_main__ = import.meta.url` to the server
@@ -133,7 +248,7 @@ export function isCompiledExecutable(execPath) {
  * @param {(path: string) => boolean} opts.exists
  * @param {boolean} [opts.isCompiled]         Defaults to `isCompiledExecutable(execPath)`.
  * @param {string} [opts.cwd]                 Reported in the warning only — never a candidate.
- * @returns {{ mainUrl: string | null, source: 'baked' | 'execdir' | 'unresolved', warning: string | null }}
+ * @returns { { mainUrl: string | null, source: 'baked' | 'execdir' | 'unresolved', warning: string | null } }
  *   `mainUrl` is null when `__nitro_main__` must be left alone (candidate 1 or 3).
  */
 export function resolveAssetAnchor({ bakedMain, execPath, exists, isCompiled, cwd }) {
@@ -471,14 +586,14 @@ export async function drainPending() {
 //   5. Exit 0. `server.stop(true)` (force) is the hardcap path only.
 // Idempotent: a second signal while draining is ignored.
 /**
- * @param {{
+ * @param { {
  *   appServers: Array<{ stop: (force?: boolean) => Promise<void> | void }>,
  *   metricsServer?: { stop: (force?: boolean) => Promise<void> | void },
  *   drainTasks?: () => Promise<void>,
  *   graceMs?: number,
  *   log?: (msg: string) => void,
  *   exit?: (code: number) => void,
- * }} opts
+ * } } opts
  */
 export function createGracefulShutdown({
   appServers,

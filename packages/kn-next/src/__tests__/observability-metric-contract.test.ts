@@ -25,13 +25,17 @@
  */
 
 import { describe, expect, it } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
     dashboardExprs,
+    docTokenResolves,
     expandFamily,
+    extractDocMetricTokens,
     extractMetricNames,
+    fencedDocSection,
     parsePrometheusRules,
     scanBunexecMetrics,
     scanNameConstants,
@@ -265,18 +269,23 @@ describe("the shipped runtime emits an SLO-computable RED contract (#792 / D14)"
         );
     });
 
-    it("emits a duration histogram with sub-100ms resolution", () => {
-        expect(
-            families.get("knext_bunexec_http_request_duration_seconds"),
-        ).toBe("histogram");
-        const body = read(BUNEXEC_TEMPLATE);
-        const buckets = (
-            body.match(/REQUEST_DURATION_BUCKETS\s*=\s*\[([^\]]*)\]/)?.[1] ?? ""
+    /** The bucket boundaries a contract copy declares, in source order. */
+    const bucketsOf = (path: string): number[] =>
+        (
+            read(path).match(
+                /REQUEST_DURATION_BUCKETS\s*=\s*\[([^\]]*)\]/,
+            )?.[1] ?? ""
         )
             .split(",")
             .map((s) => s.trim())
             .filter((s) => s.length > 0)
             .map(Number);
+
+    it("emits a duration histogram with sub-100ms resolution", () => {
+        expect(
+            families.get("knext_bunexec_http_request_duration_seconds"),
+        ).toBe("histogram");
+        const buckets = bucketsOf(BUNEXEC_TEMPLATE);
         expect(buckets.length).toBeGreaterThan(0);
         // Cold starts are measured in tens of ms; a histogram whose finest
         // bucket is 100ms cannot see them.
@@ -284,6 +293,31 @@ describe("the shipped runtime emits an SLO-computable RED contract (#792 / D14)"
         expect(buckets).toEqual([...buckets].sort((a, b) => a - b));
         // Bounded: buckets are the dominant series multiplier.
         expect(buckets.length).toBeLessThanOrEqual(16);
+    });
+
+    it("every copy declares the SAME bucket boundaries, not just the same series", () => {
+        // FOUND BY MUTATION (#908's prover, sprint 2 lane G). The drift check
+        // below compares series NAMES, and a histogram's names are
+        // `_bucket`/`_sum`/`_count` — which do not change when the boundaries
+        // do. So `examples/bun-exec`'s copy could declare [0.5, 1, 2, 5] while
+        // the template declared sub-100ms resolution, and every assertion in
+        // this file would stay green.
+        //
+        // That copy is the one the container e2e BOOTS. The consequence is not
+        // cosmetic: a `le="0.05"` bucket that exists in the template and not in
+        // the artifact under test makes the cold-start SLO uncomputable from the
+        // only binary anyone measures, while the metric keeps reporting.
+        const canonical = bucketsOf(BUNEXEC_TEMPLATE);
+        expect(
+            canonical.length,
+            "the template declares no buckets — the comparison below would be vacuous",
+        ).toBeGreaterThan(0);
+        for (const copy of CONTRACT_COPIES) {
+            expect(
+                bucketsOf(copy),
+                `${copy} declares different histogram buckets from the template`,
+            ).toEqual(canonical);
+        }
     });
 
     it("emits a startup duration so the cold-start SLO is computable", () => {
@@ -442,5 +476,187 @@ describe("extractor guards (fail-first)", () => {
                 expr: "sum(rate(a_total[5m])) > 1",
             },
         ]);
+    });
+});
+
+// ── The DOCS side (S5): prose is the third consumer of the contract ─────────
+
+/**
+ * #792 closed alerts-vs-emitters and dashboards-vs-emitters. The docs were
+ * swept BY HAND, which is the mechanism that fails silently: renaming an
+ * emitted metric moves the set, every alert and panel reds — and every prose
+ * reference to the old name keeps reading perfectly correct. One of these files
+ * is PUBLISHED and user-facing.
+ *
+ * So the same scan runs over the docs. Discovered by walking the tracked tree,
+ * never enumerated: a new doc naming a metric is covered the day it lands,
+ * which an enumerated list is exactly how to miss.
+ *
+ * SCOPE IS EVERY TRACKED `.md`/`.mdx`, deliberately. The first version of this
+ * scanned `docs/ + apps/docs/content/ + README.md`, which SOUNDS exhaustive and
+ * is not: it missed `apps/file-manager/README.md` (`knext_coldstart_*`) and
+ * `apps/file-manager/docs/bytecode-cache-reuse-runbook.md`
+ * (`kn_next_bytecode_cache_files_total`). A directory allowlist is the same
+ * enumeration failure as a file list, one level up — so there is no allowlist.
+ * Measured when widening: 291 tracked docs, 60 tokens (up from 22), all resolve.
+ */
+const DOC_FILES = execFileSync("git", ["ls-files"], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+})
+    .split("\n")
+    .filter((f) => /\.mdx?$/.test(f));
+
+const ALL_EMITTED = allowed(["bunexec", "operator", "node-legacy", "external"]);
+
+describe("every metric a DOC names is one something emits (S5)", () => {
+    it("finds doc files at all — a vacuous scan would pass everything", () => {
+        expect(DOC_FILES.length).toBeGreaterThan(50);
+        expect(DOC_FILES).toContain("apps/docs/content/docs/observability.mdx");
+        expect(DOC_FILES).toContain("docs/observability/metrics.md");
+        expect(DOC_FILES).toContain("docs/security/threat-model.md");
+        // The two the directory-scoped version missed. Asserted by name because
+        // they are the evidence that the scope had to widen — not because the
+        // scan needs a list.
+        expect(DOC_FILES).toContain("apps/file-manager/README.md");
+        expect(DOC_FILES).toContain(
+            "apps/file-manager/docs/bytecode-cache-reuse-runbook.md",
+        );
+    });
+
+    it("resolves every backticked knext metric name in every doc", () => {
+        const dead: string[] = [];
+        let checked = 0;
+        for (const file of DOC_FILES) {
+            for (const token of extractDocMetricTokens(
+                read(join(REPO_ROOT, file)),
+            )) {
+                checked += 1;
+                if (!docTokenResolves(token, ALL_EMITTED)) {
+                    dead.push(`${file}: ${token}`);
+                }
+            }
+        }
+        // The floor is the anti-vacuity half: an extractor that silently stopped
+        // matching would otherwise report zero dead names and pass. Raised from
+        // 20 to 50 when the scope widened — 60 tokens measured, so a floor of 20
+        // would no longer notice the scan losing two thirds of its subjects.
+        expect(checked).toBeGreaterThan(50);
+        expect(
+            dead,
+            "these docs name metrics NOTHING emits — a rename landed without the prose:\n" +
+                dead.join("\n"),
+        ).toEqual([]);
+    });
+});
+
+/**
+ * The security-relevant half. `docs/security/threat-model.md` enumerates what a
+ * cross-namespace scraper can read off `:9091`, and since ADR-0048 the compiled
+ * binary — not the retired node supervisor — is what serves that port. A section
+ * that lists node-legacy series as `:9091` disclosure OVERSTATES the exposure,
+ * which the document itself says erodes it as surely as understating one.
+ *
+ * So the fenced section may name ONLY series the bun-exec runtime emits, and a
+ * missing fence is a failure, never a skip.
+ */
+describe("the threat model's :9091 disclosure list is the bunexec set (S5)", () => {
+    const THREAT_MODEL = read(join(REPO_ROOT, "docs/security/threat-model.md"));
+
+    it("the fenced section exists — a reflow cannot silently unhook the check", () => {
+        expect(
+            fencedDocSection(THREAT_MODEL, "9091-disclosure"),
+            "the <!-- metric-contract:9091-disclosure --> fence is gone from the threat model",
+        ).not.toBeNull();
+    });
+
+    it("a MISSING fence reads as null, never as an empty section", () => {
+        // The other half, and the one that matters: `""` is not `null`, so a
+        // reader that degraded to an empty string would satisfy the case above
+        // while every assertion below silently ran over nothing. Caught by the
+        // prover — this case did not exist and the mutation survived.
+        expect(
+            fencedDocSection("no fence anywhere in here", "9091-disclosure"),
+        ).toBeNull();
+        // Half a fence is worse than none: it looks deliberate.
+        expect(
+            fencedDocSection(
+                "<!-- metric-contract:9091-disclosure start -->\nbut never closed",
+                "9091-disclosure",
+            ),
+        ).toBeNull();
+        // ...and the real document must not answer for a DIFFERENT id.
+        expect(
+            fencedDocSection(THREAT_MODEL, "not-a-real-fence-id"),
+        ).toBeNull();
+    });
+
+    it("names only series the compiled binary actually emits on :9091", () => {
+        const section = fencedDocSection(THREAT_MODEL, "9091-disclosure");
+        const tokens = extractDocMetricTokens(section ?? "");
+        expect(
+            tokens.length,
+            "the fenced section names no metrics at all",
+        ).toBeGreaterThan(1);
+        const notOnPort = tokens.filter((t) => !docTokenResolves(t, BUNEXEC));
+        expect(
+            notOnPort,
+            "the threat model claims :9091 discloses series the bun-exec runtime does not emit:\n" +
+                notOnPort.join("\n"),
+        ).toEqual([]);
+    });
+
+    /**
+     * THE OTHER DIRECTION, which the subset check above cannot give.
+     *
+     * "documented ⊆ emitted" catches the section OVERSTATING the exposure — the
+     * defect that was actually there. It says nothing about UNDERSTATING it, and
+     * the section makes a closed claim: "**Six series, and no more.**" A new
+     * series added to the runtime contract satisfies every assertion above while
+     * silently falsifying that sentence, in a security document, on the exact
+     * axis it is read for.
+     *
+     * So: emitted ⊆ documented as well. Adding a `:9091` series now reds until
+     * the disclosure list is updated — which is the review this repo wants to
+     * force, since a new series on that port IS new cross-tenant disclosure.
+     *
+     * Compared on FAMILY names, not series names: Prometheus derives
+     * `_bucket`/`_sum`/`_count` from a histogram, and a threat model listing
+     * those separately would be noise rather than precision.
+     */
+    it("documents EVERY series :9091 emits — the 'and no more' claim is closed", () => {
+        const section = fencedDocSection(THREAT_MODEL, "9091-disclosure") ?? "";
+        const documented = new Set(extractDocMetricTokens(section));
+        const emittedFamilies = [
+            ...scanBunexecMetrics(read(BUNEXEC_TEMPLATE)).keys(),
+        ].sort();
+
+        expect(
+            emittedFamilies.length,
+            "the bunexec scan found no families — this check would pass vacuously",
+        ).toBeGreaterThan(1);
+
+        const undocumented = emittedFamilies.filter((family) => {
+            if (documented.has(family)) return false;
+            // A `prefix_*` glob in the prose legitimately covers the family.
+            for (const token of documented) {
+                if (
+                    token.endsWith("*") &&
+                    family.startsWith(token.slice(0, -1))
+                ) {
+                    return false;
+                }
+            }
+            return true;
+        });
+
+        expect(
+            undocumented,
+            "the threat model says :9091 exposes these series 'and no more', but the runtime now " +
+                "emits others. A NEW series on that port is new cross-tenant disclosure and has to " +
+                "be reviewed, not silently shipped:\n" +
+                undocumented.join("\n"),
+        ).toEqual([]);
     });
 });

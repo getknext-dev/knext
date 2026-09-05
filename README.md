@@ -151,15 +151,17 @@ seq 1 100000 | xargs -n1 -P100 -I {} curl -s -o /dev/null -w "%{time_total}\n" \
 
 ### How Cold Starts Are Optimized
 
-The Dockerfile uses a **2-stage build** producing a lean distroless Node image:
+The Dockerfile uses a **2-stage build** producing a small Alpine image that ships one executable:
 
-1. **Build Stage** – `node:22` + `pnpm` runs `next build` (`output: 'standalone'`) → self-contained `server.js`
-2. **Runtime Stage** – `gcr.io/distroless/nodejs22` runs the standalone server with `NODE_COMPILE_CACHE` pointed at the cache baked into the image
+1. **Build Stage** – `oven/bun:1.4.0-alpine` runs `vite build` (Vite/rolldown → a Nitro `.output`), then compiles that output into a **single self-contained binary** with `bun build --compile --minify --bytecode`. sharp's native addon is staged beside it into `native/`, with a sha256 manifest derived from the lockfile.
+2. **Runtime Stage** – `alpine:3.22` with only `libstdc++` and `libgcc`, running the compiled binary directly. No Node, no npm, no package manager, and no bytecode cache to mount.
 
-The cache is **populated at build time** and baked into the image, so every pod — including the very first cold start — deserializes precompiled bytecode instead of re-parsing and JIT-compiling. This is the same approach Vercel Fluid uses. It needs no volume, no PVC, and no cluster feature flags.
+Bytecode is compiled **into the binary** at build time, as one unit, so every pod — including the very first cold start — starts from precompiled bytecode rather than parsing and JIT-compiling JavaScript. It needs no volume, no PVC, and no cluster feature flags.
+
+*(This section previously described a `node:22` builder emitting `output: 'standalone'` and a distroless Node runtime reading a `NODE_COMPILE_CACHE` directory. That is the older shape and no longer what this Dockerfile builds.)*
 
 
-**On the default (compiled-executable) target** the whole question dissolves: the server bundle is minified and precompiled to bytecode as one unit at build time and baked together with the Bun runtime into a single binary — measured **61 ms** median cold start against the Node standalone's 884 ms, at **higher** steady-state throughput (1103 vs 630 req/s). The per-file bytecode pass that used to run for `runtime: bun` standalone builds is retired: it traded throughput for cold start (537 req/s), and the whole-bundle compile wins both axes.
+**What that buys, measured:** **61 ms** median cold start against the Node standalone's 884 ms, at **higher** steady-state throughput (1103 vs 630 req/s). The per-file bytecode pass that used to run for `runtime: bun` standalone builds is retired: it traded throughput for cold start (537 req/s), and the whole-bundle compile wins both axes.
 
 **Running the legacy standalone shape on Bun?** One mechanism still applies:
 
@@ -183,7 +185,7 @@ The cache is **populated at build time** and baked into the image, so every pod 
 ### 1. Install Dependencies
 
 ```bash
-pnpm install
+bun install
 ```
 
 ### 2. Configure Your App
@@ -786,7 +788,7 @@ The example app demonstrates all framework capabilities:
 
 ```bash
 cd apps/file-manager
-pnpm dev
+bun run dev
 ```
 
 ### Build & Deploy
