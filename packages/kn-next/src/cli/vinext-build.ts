@@ -827,7 +827,6 @@ function pickFetchVersion(
  * bun present or not (#948, S3-V Finding B-1). The static import spawns
  * nothing by itself, so tests that inject `bunVersion` still never spawn.
  */
-
 function detectBunVersion(run: (argv: readonly string[]) => void): string {
     // `runQuiet` does not capture stdout, so the version is read via
     // execFileSync directly. The unused seam parameter stays so the injection

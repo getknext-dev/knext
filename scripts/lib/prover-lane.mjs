@@ -1034,10 +1034,14 @@ export function proverPathBindings(source) {
  *
  * The #927 review found four provers invisible to BOTH the anchor pass and the
  * subject-existence pass — the driver shape — and that is FIXED, not exempted.
- * These seven are the pre-existing remainder: each builds its anchors at runtime
- * (a mutation table of closures, a workflow re-serialised from parsed YAML, a
- * shell fragment assembled from an imported token list), so there is no literal
- * to resolve without evaluating the prover.
+ * The remainder below fall into two shapes, neither statically resolvable: most
+ * build their anchors at runtime (a mutation table of closures, a workflow
+ * re-serialised from parsed YAML, a shell fragment assembled from an imported
+ * token list), so there is no literal to resolve without evaluating the prover;
+ * and skew-id-chain (added on the 2026-09-05 merge train) carries a POSITIONAL
+ * mutation array `[file, label, anchor, replacement, spec]` that predates the
+ * per-prover audit and that neither extractor reads. Its follow-up is the
+ * object-shape conversion; until then it is dated like the rest.
  *
  * WHAT THE EXEMPTION DOES NOT MEAN. It does not mean they are unproved — every
  * one runs in the nightly with `declared == run`. It means the PR-TIME liveness

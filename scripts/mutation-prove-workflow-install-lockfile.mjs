@@ -211,7 +211,9 @@ const prover = createGuardProver({
   spec: SPEC,
   subjects: {
     workflow: '.github/workflows/release.yml',
-    compatWorkflow: '.github/workflows/compat-vinext.yml',
+    // compatWorkflow was M8's subject; M8 retired on the 2026-09-05 merge train
+    // (#917 landed, its pnpm install is gone), so the binding is dropped rather
+    // than left dangling.
     spec: SPEC,
   },
 });
