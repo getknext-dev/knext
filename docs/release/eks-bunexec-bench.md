@@ -1,5 +1,11 @@
 # EKS bun-exec bench — file-manager single-executable (vinext `bun build --compile`)
 
+> **Status: complete.** Ran on EKS (t3 + c6i) and GKE (n2), all clusters torn down, zero residual
+> billing. Verdict below is final: a genuine Knative scale-from-zero cold start is **~1.4–1.5s on both
+> EKS c6i and GKE n2** (within ~70ms), platform-bound (activator + scheduling + CNI), **not** the bun
+> runtime and **not** image caching; the remembered "~600ms GKE" was a *warm* hit (warm p50 ~60ms).
+> Next phase: typed-client codegen over scale-to-zero backend functions — see the design brief.
+
 Measured on a **healthy** AWS EKS cluster (the point of the exercise: OKE's numbers were
 taken on a CPU-request-saturated cluster and were not trustworthy).
 
