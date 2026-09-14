@@ -69,10 +69,29 @@ Same cluster, added a `c6i.xlarge` node group, cordoned the t3 nodes, pre-warmed
   gating — which a faster node does not touch. Closing the rest toward GKE's ~600ms would require
   attacking that layer (or the GKE figure was measured from a warmer state).
 
+## GKE cross-cloud retest (the "GKE sub-second" question, settled)
+Same image (`file-manager:vinext-inlined`, identical digest), same method (confirm 0 pods, then one
+timed request), Knative v1.23 + Kourier, GKE 1.35, **n2-standard-4 (non-burstable, the GKE analog of
+c6i)**, `europe-west1`.
+
+| metric | EKS t3 (burst) | EKS c6i (non-burst) | GKE n2 (non-burst) | local |
+|--------|----------------|---------------------|--------------------|-------|
+| cold-start median | ~2090ms | 1398ms | **1773ms** | — |
+| warm p50 | 77ms | — | **60ms** | — |
+| RPS / pod (C=250) | 1143 | — | **1754** | 1103 |
+
+- **GKE cold start is ~1.8s — NOT sub-second**, and marginally *slower* than EKS c6i's 1.4s.
+- Yet GKE's warm p50 is 60ms and it does the highest RPS/pod (1754, beating EKS and local). A faster
+  node buys **throughput, not a faster cold start** → cold start is **platform-bound** (activator +
+  scheduling + pod networking), confirmed on both clouds.
+- Therefore the remembered "~600ms GKE cold" was a **warm** hit (matches ~60ms warm + client RTT),
+  not a genuine scale-from-zero. On a confirmed 0→1 cold start, **both clouds land at 1.4–1.8s**.
+
 ## Bottom line
-- knext's own contribution (bun single-exec) is sub-second cold and ~1100 rps/pod warm on both
-  EKS and local — parity confirmed.
-- The EKS cold-start penalty vs GKE is the **cluster/node**, not knext: burstable t3 + VPC-CNI.
-  Retest on a compute-optimized node group before attributing cold-start cost to the runtime.
+- knext's own contribution (bun single-exec) is <1s to boot+self-warm and 1100–1750 rps/pod warm
+  across EKS, GKE, and local — parity confirmed; the runtime is not the cold-start cost.
+- A genuine Knative scale-from-zero cold start is **~1.4–1.8s on both EKS and GKE** and is
+  platform-bound (activator + scheduling + CNI), not runtime- or node-CPU-bound. "Sub-second cold
+  start" claims are warm hits or `min-scale: 1` unless scale-to-zero is verified before timing.
 
 > Teardown: `eksctl delete cluster --name knext --region eu-west-1` stops billing.
