@@ -74,13 +74,20 @@ Same image (`file-manager:vinext-inlined`, identical digest), same method (confi
 timed request), Knative v1.23 + Kourier, GKE 1.35, **n2-standard-4 (non-burstable, the GKE analog of
 c6i)**, `europe-west1`.
 
+Image: the compiled **bun single-exec on alpine** (`/app/server`, ~51 MB, 5 layers) — same digest on
+both clouds. Cold-start trials are **cached-only** (cordoned to the node holding the image, so every
+scale-from-zero pays zero pull — matching the EKS c6i method). NB: an uncached first pass on GKE read
+1773ms median because one trial landed on the 2nd (un-cached) node and paid a 2.4s pull; cordoning to
+the cached node gives the clean number below.
+
 | metric | EKS t3 (burst) | EKS c6i (non-burst) | GKE n2 (non-burst) | local |
 |--------|----------------|---------------------|--------------------|-------|
-| cold-start median | ~2090ms | 1398ms | **1773ms** | — |
+| cold-start median (cached) | ~2090ms | 1398ms | **1465ms** | — |
 | warm p50 | 77ms | — | **60ms** | — |
 | RPS / pod (C=250) | 1143 | — | **1754** | 1103 |
 
-- **GKE cold start is ~1.8s — NOT sub-second**, and marginally *slower* than EKS c6i's 1.4s.
+- **GKE cold start ≈ EKS c6i (~1.4–1.5s) — NOT sub-second.** On comparable non-burstable nodes with
+  cached images, the two clouds are within ~70ms of each other.
 - Yet GKE's warm p50 is 60ms and it does the highest RPS/pod (1754, beating EKS and local). A faster
   node buys **throughput, not a faster cold start** → cold start is **platform-bound** (activator +
   scheduling + pod networking), confirmed on both clouds.
