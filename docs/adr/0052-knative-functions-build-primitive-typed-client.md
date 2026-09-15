@@ -1,6 +1,6 @@
 # ADR-0052: Knative Functions as a build-only primitive; proto stays the typed-client source of truth
 
-Status: Proposed (design only) · Date: 2026-09 · Depends on: ADR-0001, ADR-0002, ADR-0003, ADR-0004, ADR-0035, ADR-0048 · Amends: ADR-0004
+Status: Accepted (design only) · Date: 2026-09 · Depends on: ADR-0001, ADR-0002, ADR-0003, ADR-0004, ADR-0035, ADR-0048 · Amends: ADR-0004
 
 > **Founder direction refined (2026-09):** support **all languages Knative Functions supports** (full
 > polyglot — this decisively confirms proto-first over signature-first), and add **Bun as a
