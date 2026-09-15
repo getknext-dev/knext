@@ -146,13 +146,13 @@ only a *build* tool.
 - Option C is barred by construction. Option B, if ever chosen, is a separate superseding ADR.
 
 ## Action items (typed-client/backend layer post-Tier-A; Bun runtime may ride the ADR-0048 track if re-sequenced)
-- [x] **Bun `node:http2` gRPC spike (load-bearing) — PASS (2026-09).** A `bun build --compile`
-      single-exec called an h2c gRPC server via connect-node `createGrpcTransport` and read the
-      response (hence the gRPC status trailer) correctly — 14 ms, matching Node's 10 ms. Confirms
-      Decision 10: the Bun gateway needs no Connect shim to call gRPC-only backends. **Still open:**
-      (a) trailer survival through the **Knative activator cold path** (a proxy property, not a Bun
-      one — see next item); (b) a repeat against a pure grpc-go/tonic backend (the spike used a
-      connect-node gRPC server, same wire protocol).
+- [x] **Bun `node:http2` gRPC spike (load-bearing) — PASS (2026-09;** `docs/release/bun-func-runtime-spike.md`**).**
+      A `bun build --compile` single-exec called an h2c gRPC server via connect-node
+      `createGrpcTransport` and read the gRPC status trailer correctly — **including against a pure
+      grpc-go v1.83 backend** (22 ms), and against a connect-node server (14 ms), matching Node.
+      Confirms Decision 10: the Bun gateway needs no Connect shim to reach gRPC-only, any-language
+      backends. **Still open:** trailer survival through the **Knative activator cold path** (a proxy
+      property, not a Bun one — needs a live/kind cluster).
 - [ ] **Trailer survival:** verify `grpc-status` HTTP/2 trailers survive the **through-activator cold
       path**; the client treats a missing trailer as fail-closed non-retryable.
 - [ ] **Per-language token interceptor:** each template ships the fail-closed token-verifying server
@@ -160,9 +160,12 @@ only a *build* tool.
       NetworkPolicy** case proving the interceptor — not the CNI — is the control.
 - [ ] **Per-language supply-chain:** a language enters the matrix only with Trivy + SBOM + cosign on
       its image *and* an ecosystem advisory scan on its pinned server deps.
-- [ ] **Bun func template:** `bun build --compile` single-exec (ADR-0048) serving `connect-es` over
-      h2c; measure the **Knative scale-from-zero** cold start (not process boot); exclude/normalise the
-      `--bytecode` layer from reproducible-build assertions.
+- [~] **Bun func template — runtime mechanism proven locally (2026-09;** `docs/release/bun-func-runtime-spike.md`**).**
+      A `bun build --compile` single-exec **serves** `connect-es`/gRPC over h2c (writes status
+      trailers), ~60 MB. **Still to build:** the generator (proto + handler → `main` + `buf generate`
+      + compile), the per-language/Bun token interceptor (D13); **still to measure:** Knative
+      scale-from-zero cold start on-cluster (not process boot); exclude/normalise the `--bytecode`
+      layer from reproducible-build assertions.
 - [ ] Per-language template matrix: pin the Connect **or** gRPC h2c server lib per language; drop
       languages with neither.
 - [ ] `func` emits image only; CLI renders/applies the `BackendService` CR (guard test: deploy path
