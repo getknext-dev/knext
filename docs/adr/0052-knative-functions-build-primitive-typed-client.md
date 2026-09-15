@@ -146,9 +146,13 @@ only a *build* tool.
 - Option C is barred by construction. Option B, if ever chosen, is a separate superseding ADR.
 
 ## Action items (typed-client/backend layer post-Tier-A; Bun runtime may ride the ADR-0048 track if re-sequenced)
-- [ ] **Bun `node:http2` gRPC spike (load-bearing):** verify the compiled Bun gateway's `node:http2`
-      client carries **h2c gRPC** via `createGrpcTransport` — else gRPC-only backends need a Connect
-      shim and Decision 10's reach shrinks (a discovered-fact trigger for a fresh amendment if it fails).
+- [x] **Bun `node:http2` gRPC spike (load-bearing) — PASS (2026-09).** A `bun build --compile`
+      single-exec called an h2c gRPC server via connect-node `createGrpcTransport` and read the
+      response (hence the gRPC status trailer) correctly — 14 ms, matching Node's 10 ms. Confirms
+      Decision 10: the Bun gateway needs no Connect shim to call gRPC-only backends. **Still open:**
+      (a) trailer survival through the **Knative activator cold path** (a proxy property, not a Bun
+      one — see next item); (b) a repeat against a pure grpc-go/tonic backend (the spike used a
+      connect-node gRPC server, same wire protocol).
 - [ ] **Trailer survival:** verify `grpc-status` HTTP/2 trailers survive the **through-activator cold
       path**; the client treats a missing trailer as fail-closed non-retryable.
 - [ ] **Per-language token interceptor:** each template ships the fail-closed token-verifying server
