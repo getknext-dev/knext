@@ -1,5 +1,14 @@
 # Feasibility: co-located backend + directive/decorator → packaged as a function
 
+> **Status: PARKED behind ADR-0052 (founder decision, 2026-09).** Not being built. The extraction
+> compiler is real work and is **not on the verified-adapter critical path** (CLAUDE.md §1). The
+> default backend model stands: (1) logic in the Next.js server (Server Actions, already scale-to-zero)
+> → (2) a proto-first `BackendService` (ADR-0052 Option A) when isolation / cross-app reuse / polyglot
+> is genuinely needed. **Revisit trigger:** a concrete app that needs to *graduate* an in-server
+> function to its own independently-scaled/deployed service **without a rewrite** — the one unique value
+> of the directive idea (Option A′ below). Until such an app exists, this stays a design note; do not
+> re-litigate. The polyglot backend story is unaffected — it lives in ADR-0052 Option A.
+
 Research spike (founder-directed) into a DX where a developer writes backend logic **inside** the
 Next.js app, marks it with a **directive** (`'use server'`-style) or **decorator**, and knext's build
 **extracts** it into a Knative function (`BackendService`) and rewrites the call site into a generated
