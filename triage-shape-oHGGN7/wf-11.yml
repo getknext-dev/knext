@@ -1,5 +1,0 @@
-name: fixture
-on: schedule
-jobs:
-  gate:
-    runs-on: ubuntu-latest

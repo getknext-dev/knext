@@ -161,3 +161,9 @@ sandbox-fetch-debug-*/
 # .output. Staging it once wedged `git add` with a SIGKILL.
 .vinext/
 knext-exec*
+
+# Agent-workflow scratch output (prewarm/triage). Random-suffixed dirs of
+# results.jsonl / wf-*.yml — build/analysis artifacts, never source. Removed
+# from tracking in chore/remove-stray-automation-dirs.
+prewarm-analyze-*/
+triage-shape-*/
