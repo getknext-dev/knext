@@ -45,7 +45,8 @@
         "noExplicitAny": "warn",
         "noDoubleEquals": "error",
         "noArrayIndexKey": "warn",
-        "noConsole": "warn"
+        "noConsole": "warn",
+        "noTsIgnore": "error"
       },
       "style": {
         "noNonNullAssertion": "off",
@@ -66,5 +67,11 @@
       "trailingCommas": "all"
     }
   },
-  "assist": { "actions": { "source": { "organizeImports": "on" } } }
+  "assist": { "actions": { "source": { "organizeImports": "on" } } },
+  "overrides": [
+    {
+      "includes": ["**/fixtures/**", "**/.next/**"],
+      "linter": { "rules": { "suspicious": { "noTsIgnore": "off" } } }
+    }
+  ]
 }
