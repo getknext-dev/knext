@@ -1,0 +1,620 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`doctor golden output (#1055 byte-identical pin) reachable — all checks pass (storage configured, app anonymously pullable): table 1`] = `
+"PASS  Cluster reachable                           apiserver responded
+PASS  kubectl strict validation                   client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)
+PASS  Static asset mode                           object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys
+PASS  NextApp CRD                                 served version: v1alpha1
+PASS  NextApp CRD schema coverage                 all 69 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
+PASS  Operator deployment                         kn-next-operator-controller-manager Ready in kn-next-operator-system
+PASS  cert-manager webhook                        cert-manager-webhook Ready
+PASS  Knative ingress-class                       ingress-class kourier.ingress.networking.knative.dev is served by net-kourier-controller
+PASS  Operator image pullable                     ghcr.io/getknext-dev/kn-next-operator@sha256:75be42bb6b4c6d03c902b4fc90b36b246cc6cacf2233926fa183a6051521a99d is anonymously pullable
+PASS  App image pullable                          demo/web (ghcr.io/getknext-dev/web@sha256:1111111111111111111111111111111111111111111111111111111111111111) anonymously pullable
+PASS  Knative Serving                             services.serving.knative.dev CRD present
+PASS  Metrics-port collision (queue-proxy :9091)  request-metrics-protocol is "none" — queue-proxy leaves :9091 unbound; no NextApp overrides METRICS_PORT onto a queue-proxy-owned port and current builds default to :9464. Caveat: apps running images built before the 9464 default bind :9091 with no visible override and cannot be detected here — an EADDRINUSE crash-loop on such a revision means: redeploy with a current build
+PASS  NetworkPolicy enforcement                   a NetworkPolicy-enforcing agent is running (Calico DaemonSet calico-node (kube-system)) — the operator's default-on NetworkPolicy objects should be enforced; per-CNI configuration can still exempt traffic, so verify directly if isolation is load-bearing
+"
+`;
+
+exports[`doctor golden output (#1055 byte-identical pin) reachable — all checks pass (storage configured, app anonymously pullable): rows 1`] = `
+[
+  {
+    "detail": "apiserver responded",
+    "id": "cluster",
+    "status": "pass",
+    "title": "Cluster reachable",
+  },
+  {
+    "detail": "client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)",
+    "id": "kubectl-validation",
+    "status": "pass",
+    "title": "kubectl strict validation",
+  },
+  {
+    "detail": "object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys",
+    "id": "storage-mode",
+    "status": "pass",
+    "title": "Static asset mode",
+  },
+  {
+    "detail": "served version: v1alpha1",
+    "id": "crd",
+    "status": "pass",
+    "title": "NextApp CRD",
+  },
+  {
+    "detail": "all 69 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)",
+    "id": "crd-schema",
+    "status": "pass",
+    "title": "NextApp CRD schema coverage",
+  },
+  {
+    "detail": "kn-next-operator-controller-manager Ready in kn-next-operator-system",
+    "id": "operator",
+    "status": "pass",
+    "title": "Operator deployment",
+  },
+  {
+    "detail": "cert-manager-webhook Ready",
+    "id": "cert-manager",
+    "status": "pass",
+    "title": "cert-manager webhook",
+  },
+  {
+    "detail": "ingress-class kourier.ingress.networking.knative.dev is served by net-kourier-controller",
+    "id": "ingress",
+    "status": "pass",
+    "title": "Knative ingress-class",
+  },
+  {
+    "detail": "ghcr.io/getknext-dev/kn-next-operator@sha256:75be42bb6b4c6d03c902b4fc90b36b246cc6cacf2233926fa183a6051521a99d is anonymously pullable",
+    "id": "image",
+    "status": "pass",
+    "title": "Operator image pullable",
+  },
+  {
+    "detail": "demo/web (ghcr.io/getknext-dev/web@sha256:1111111111111111111111111111111111111111111111111111111111111111) anonymously pullable",
+    "id": "app-image",
+    "status": "pass",
+    "title": "App image pullable",
+  },
+  {
+    "detail": "services.serving.knative.dev CRD present",
+    "id": "knative",
+    "status": "pass",
+    "title": "Knative Serving",
+  },
+  {
+    "detail": "request-metrics-protocol is "none" — queue-proxy leaves :9091 unbound; no NextApp overrides METRICS_PORT onto a queue-proxy-owned port and current builds default to :9464. Caveat: apps running images built before the 9464 default bind :9091 with no visible override and cannot be detected here — an EADDRINUSE crash-loop on such a revision means: redeploy with a current build",
+    "id": "metrics-port",
+    "status": "pass",
+    "title": "Metrics-port collision (queue-proxy :9091)",
+  },
+  {
+    "detail": "a NetworkPolicy-enforcing agent is running (Calico DaemonSet calico-node (kube-system)) — the operator's default-on NetworkPolicy objects should be enforced; per-CNI configuration can still exempt traffic, so verify directly if isolation is load-bearing",
+    "id": "netpol",
+    "status": "pass",
+    "title": "NetworkPolicy enforcement",
+  },
+]
+`;
+
+exports[`doctor golden output (#1055 byte-identical pin) reachable — all checks pass (storage configured, app anonymously pullable): exitCode 1`] = `0`;
+
+exports[`doctor golden output (#1055 byte-identical pin) unreachable — reachability gate WARNs, every cluster check SKIPs, exit 0: table 1`] = `
+"WARN  Cluster reachable                           apiserver unreachable (The connection to the server 10.0.0.1:6443 was refused - did you specify the right host or port?) — all cluster checks skipped (hint: cluster connection flaked — check network/VPN and retry)
+WARN  kubectl strict validation                   could not determine the kubectl client version — unable to confirm that the CR apply can be strictly validated (hint: run \`kubectl version --client\` and upgrade to >= v1.25 if older)
+SKIP  Static asset mode                           no kn-next.config.ts in this directory — run doctor from the app directory to see how its static assets will be served
+SKIP  NextApp CRD                                 cluster unreachable — check skipped
+SKIP  NextApp CRD schema coverage                 cluster unreachable — check skipped
+SKIP  Operator deployment                         cluster unreachable — check skipped
+SKIP  cert-manager webhook                        cluster unreachable — check skipped
+SKIP  Knative ingress-class                       cluster unreachable — check skipped
+SKIP  Operator image pullable                     cluster unreachable — check skipped
+SKIP  App image pullable                          cluster unreachable — check skipped
+SKIP  Knative Serving                             cluster unreachable — check skipped
+SKIP  Metrics-port collision (queue-proxy :9091)  cluster unreachable — check skipped
+SKIP  NetworkPolicy enforcement                   cluster unreachable — check skipped
+"
+`;
+
+exports[`doctor golden output (#1055 byte-identical pin) unreachable — reachability gate WARNs, every cluster check SKIPs, exit 0: rows 1`] = `
+[
+  {
+    "detail": "apiserver unreachable (The connection to the server 10.0.0.1:6443 was refused - did you specify the right host or port?) — all cluster checks skipped",
+    "hint": "cluster connection flaked — check network/VPN and retry",
+    "id": "cluster",
+    "status": "warn",
+    "title": "Cluster reachable",
+  },
+  {
+    "detail": "could not determine the kubectl client version — unable to confirm that the CR apply can be strictly validated",
+    "hint": "run \`kubectl version --client\` and upgrade to >= v1.25 if older",
+    "id": "kubectl-validation",
+    "status": "warn",
+    "title": "kubectl strict validation",
+  },
+  {
+    "detail": "no kn-next.config.ts in this directory — run doctor from the app directory to see how its static assets will be served",
+    "id": "storage-mode",
+    "status": "skip",
+    "title": "Static asset mode",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
+    "id": "crd",
+    "status": "skip",
+    "title": "NextApp CRD",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
+    "id": "crd-schema",
+    "status": "skip",
+    "title": "NextApp CRD schema coverage",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
+    "id": "operator",
+    "status": "skip",
+    "title": "Operator deployment",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
+    "id": "cert-manager",
+    "status": "skip",
+    "title": "cert-manager webhook",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
+    "id": "ingress",
+    "status": "skip",
+    "title": "Knative ingress-class",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
+    "id": "image",
+    "status": "skip",
+    "title": "Operator image pullable",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
+    "id": "app-image",
+    "status": "skip",
+    "title": "App image pullable",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
+    "id": "knative",
+    "status": "skip",
+    "title": "Knative Serving",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
+    "id": "metrics-port",
+    "status": "skip",
+    "title": "Metrics-port collision (queue-proxy :9091)",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
+    "id": "netpol",
+    "status": "skip",
+    "title": "NetworkPolicy enforcement",
+  },
+]
+`;
+
+exports[`doctor golden output (#1055 byte-identical pin) unreachable — reachability gate WARNs, every cluster check SKIPs, exit 0: exitCode 1`] = `0`;
+
+exports[`doctor golden output (#1055 byte-identical pin) auth-failure — the reachability gate reports a credentials failure: table 1`] = `
+"WARN  Cluster reachable                           apiserver unreachable (error: You must be logged in to the server (Unauthorized)) — all cluster checks skipped (hint: credentials failed — re-authenticate (refresh your kubeconfig token) and retry)
+WARN  kubectl strict validation                   could not determine the kubectl client version — unable to confirm that the CR apply can be strictly validated (hint: run \`kubectl version --client\` and upgrade to >= v1.25 if older)
+SKIP  Static asset mode                           no kn-next.config.ts in this directory — run doctor from the app directory to see how its static assets will be served
+SKIP  NextApp CRD                                 cluster unreachable — check skipped
+SKIP  NextApp CRD schema coverage                 cluster unreachable — check skipped
+SKIP  Operator deployment                         cluster unreachable — check skipped
+SKIP  cert-manager webhook                        cluster unreachable — check skipped
+SKIP  Knative ingress-class                       cluster unreachable — check skipped
+SKIP  Operator image pullable                     cluster unreachable — check skipped
+SKIP  App image pullable                          cluster unreachable — check skipped
+SKIP  Knative Serving                             cluster unreachable — check skipped
+SKIP  Metrics-port collision (queue-proxy :9091)  cluster unreachable — check skipped
+SKIP  NetworkPolicy enforcement                   cluster unreachable — check skipped
+"
+`;
+
+exports[`doctor golden output (#1055 byte-identical pin) auth-failure — the reachability gate reports a credentials failure: rows 1`] = `
+[
+  {
+    "detail": "apiserver unreachable (error: You must be logged in to the server (Unauthorized)) — all cluster checks skipped",
+    "hint": "credentials failed — re-authenticate (refresh your kubeconfig token) and retry",
+    "id": "cluster",
+    "status": "warn",
+    "title": "Cluster reachable",
+  },
+  {
+    "detail": "could not determine the kubectl client version — unable to confirm that the CR apply can be strictly validated",
+    "hint": "run \`kubectl version --client\` and upgrade to >= v1.25 if older",
+    "id": "kubectl-validation",
+    "status": "warn",
+    "title": "kubectl strict validation",
+  },
+  {
+    "detail": "no kn-next.config.ts in this directory — run doctor from the app directory to see how its static assets will be served",
+    "id": "storage-mode",
+    "status": "skip",
+    "title": "Static asset mode",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
+    "id": "crd",
+    "status": "skip",
+    "title": "NextApp CRD",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
+    "id": "crd-schema",
+    "status": "skip",
+    "title": "NextApp CRD schema coverage",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
+    "id": "operator",
+    "status": "skip",
+    "title": "Operator deployment",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
+    "id": "cert-manager",
+    "status": "skip",
+    "title": "cert-manager webhook",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
+    "id": "ingress",
+    "status": "skip",
+    "title": "Knative ingress-class",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
+    "id": "image",
+    "status": "skip",
+    "title": "Operator image pullable",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
+    "id": "app-image",
+    "status": "skip",
+    "title": "App image pullable",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
+    "id": "knative",
+    "status": "skip",
+    "title": "Knative Serving",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
+    "id": "metrics-port",
+    "status": "skip",
+    "title": "Metrics-port collision (queue-proxy :9091)",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
+    "id": "netpol",
+    "status": "skip",
+    "title": "NetworkPolicy enforcement",
+  },
+]
+`;
+
+exports[`doctor golden output (#1055 byte-identical pin) auth-failure — the reachability gate reports a credentials failure: exitCode 1`] = `0`;
+
+exports[`doctor golden output (#1055 byte-identical pin) forbidden — the reachability gate reports an RBAC denial: table 1`] = `
+"WARN  Cluster reachable                           apiserver unreachable (Error from server (Forbidden): nextapps.apps.kn-next.dev is forbidden: User "u" cannot get resource "nextapps") — all cluster checks skipped (hint: insufficient RBAC — ask a cluster admin for get/list on nextapps.apps.kn-next.dev)
+WARN  kubectl strict validation                   could not determine the kubectl client version — unable to confirm that the CR apply can be strictly validated (hint: run \`kubectl version --client\` and upgrade to >= v1.25 if older)
+SKIP  Static asset mode                           no kn-next.config.ts in this directory — run doctor from the app directory to see how its static assets will be served
+SKIP  NextApp CRD                                 cluster unreachable — check skipped
+SKIP  NextApp CRD schema coverage                 cluster unreachable — check skipped
+SKIP  Operator deployment                         cluster unreachable — check skipped
+SKIP  cert-manager webhook                        cluster unreachable — check skipped
+SKIP  Knative ingress-class                       cluster unreachable — check skipped
+SKIP  Operator image pullable                     cluster unreachable — check skipped
+SKIP  App image pullable                          cluster unreachable — check skipped
+SKIP  Knative Serving                             cluster unreachable — check skipped
+SKIP  Metrics-port collision (queue-proxy :9091)  cluster unreachable — check skipped
+SKIP  NetworkPolicy enforcement                   cluster unreachable — check skipped
+"
+`;
+
+exports[`doctor golden output (#1055 byte-identical pin) forbidden — the reachability gate reports an RBAC denial: rows 1`] = `
+[
+  {
+    "detail": "apiserver unreachable (Error from server (Forbidden): nextapps.apps.kn-next.dev is forbidden: User "u" cannot get resource "nextapps") — all cluster checks skipped",
+    "hint": "insufficient RBAC — ask a cluster admin for get/list on nextapps.apps.kn-next.dev",
+    "id": "cluster",
+    "status": "warn",
+    "title": "Cluster reachable",
+  },
+  {
+    "detail": "could not determine the kubectl client version — unable to confirm that the CR apply can be strictly validated",
+    "hint": "run \`kubectl version --client\` and upgrade to >= v1.25 if older",
+    "id": "kubectl-validation",
+    "status": "warn",
+    "title": "kubectl strict validation",
+  },
+  {
+    "detail": "no kn-next.config.ts in this directory — run doctor from the app directory to see how its static assets will be served",
+    "id": "storage-mode",
+    "status": "skip",
+    "title": "Static asset mode",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
+    "id": "crd",
+    "status": "skip",
+    "title": "NextApp CRD",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
+    "id": "crd-schema",
+    "status": "skip",
+    "title": "NextApp CRD schema coverage",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
+    "id": "operator",
+    "status": "skip",
+    "title": "Operator deployment",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
+    "id": "cert-manager",
+    "status": "skip",
+    "title": "cert-manager webhook",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
+    "id": "ingress",
+    "status": "skip",
+    "title": "Knative ingress-class",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
+    "id": "image",
+    "status": "skip",
+    "title": "Operator image pullable",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
+    "id": "app-image",
+    "status": "skip",
+    "title": "App image pullable",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
+    "id": "knative",
+    "status": "skip",
+    "title": "Knative Serving",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
+    "id": "metrics-port",
+    "status": "skip",
+    "title": "Metrics-port collision (queue-proxy :9091)",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
+    "id": "netpol",
+    "status": "skip",
+    "title": "NetworkPolicy enforcement",
+  },
+]
+`;
+
+exports[`doctor golden output (#1055 byte-identical pin) forbidden — the reachability gate reports an RBAC denial: exitCode 1`] = `0`;
+
+exports[`doctor golden output (#1055 byte-identical pin) budget-exhausted — the app-image probe budget of 0 leaves images unverified: table 1`] = `
+"PASS  Cluster reachable                           apiserver responded
+PASS  kubectl strict validation                   client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)
+PASS  Static asset mode                           object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys
+PASS  NextApp CRD                                 served version: v1alpha1
+PASS  NextApp CRD schema coverage                 all 69 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
+PASS  Operator deployment                         kn-next-operator-controller-manager Ready in kn-next-operator-system
+PASS  cert-manager webhook                        cert-manager-webhook Ready
+PASS  Knative ingress-class                       ingress-class kourier.ingress.networking.knative.dev is served by net-kourier-controller
+PASS  Operator image pullable                     ghcr.io/getknext-dev/kn-next-operator@sha256:75be42bb6b4c6d03c902b4fc90b36b246cc6cacf2233926fa183a6051521a99d is anonymously pullable
+SKIP  App image pullable                          demo/web (ghcr.io/getknext-dev/web@sha256:1111111111111111111111111111111111111111111111111111111111111111): not probed (the app-image probe budget ran out) — pullability not verified
+PASS  Knative Serving                             services.serving.knative.dev CRD present
+PASS  Metrics-port collision (queue-proxy :9091)  request-metrics-protocol is "none" — queue-proxy leaves :9091 unbound; no NextApp overrides METRICS_PORT onto a queue-proxy-owned port and current builds default to :9464. Caveat: apps running images built before the 9464 default bind :9091 with no visible override and cannot be detected here — an EADDRINUSE crash-loop on such a revision means: redeploy with a current build
+PASS  NetworkPolicy enforcement                   a NetworkPolicy-enforcing agent is running (Calico DaemonSet calico-node (kube-system)) — the operator's default-on NetworkPolicy objects should be enforced; per-CNI configuration can still exempt traffic, so verify directly if isolation is load-bearing
+"
+`;
+
+exports[`doctor golden output (#1055 byte-identical pin) budget-exhausted — the app-image probe budget of 0 leaves images unverified: rows 1`] = `
+[
+  {
+    "detail": "apiserver responded",
+    "id": "cluster",
+    "status": "pass",
+    "title": "Cluster reachable",
+  },
+  {
+    "detail": "client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)",
+    "id": "kubectl-validation",
+    "status": "pass",
+    "title": "kubectl strict validation",
+  },
+  {
+    "detail": "object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys",
+    "id": "storage-mode",
+    "status": "pass",
+    "title": "Static asset mode",
+  },
+  {
+    "detail": "served version: v1alpha1",
+    "id": "crd",
+    "status": "pass",
+    "title": "NextApp CRD",
+  },
+  {
+    "detail": "all 69 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)",
+    "id": "crd-schema",
+    "status": "pass",
+    "title": "NextApp CRD schema coverage",
+  },
+  {
+    "detail": "kn-next-operator-controller-manager Ready in kn-next-operator-system",
+    "id": "operator",
+    "status": "pass",
+    "title": "Operator deployment",
+  },
+  {
+    "detail": "cert-manager-webhook Ready",
+    "id": "cert-manager",
+    "status": "pass",
+    "title": "cert-manager webhook",
+  },
+  {
+    "detail": "ingress-class kourier.ingress.networking.knative.dev is served by net-kourier-controller",
+    "id": "ingress",
+    "status": "pass",
+    "title": "Knative ingress-class",
+  },
+  {
+    "detail": "ghcr.io/getknext-dev/kn-next-operator@sha256:75be42bb6b4c6d03c902b4fc90b36b246cc6cacf2233926fa183a6051521a99d is anonymously pullable",
+    "id": "image",
+    "status": "pass",
+    "title": "Operator image pullable",
+  },
+  {
+    "detail": "demo/web (ghcr.io/getknext-dev/web@sha256:1111111111111111111111111111111111111111111111111111111111111111): not probed (the app-image probe budget ran out) — pullability not verified",
+    "id": "app-image",
+    "status": "skip",
+    "title": "App image pullable",
+  },
+  {
+    "detail": "services.serving.knative.dev CRD present",
+    "id": "knative",
+    "status": "pass",
+    "title": "Knative Serving",
+  },
+  {
+    "detail": "request-metrics-protocol is "none" — queue-proxy leaves :9091 unbound; no NextApp overrides METRICS_PORT onto a queue-proxy-owned port and current builds default to :9464. Caveat: apps running images built before the 9464 default bind :9091 with no visible override and cannot be detected here — an EADDRINUSE crash-loop on such a revision means: redeploy with a current build",
+    "id": "metrics-port",
+    "status": "pass",
+    "title": "Metrics-port collision (queue-proxy :9091)",
+  },
+  {
+    "detail": "a NetworkPolicy-enforcing agent is running (Calico DaemonSet calico-node (kube-system)) — the operator's default-on NetworkPolicy objects should be enforced; per-CNI configuration can still exempt traffic, so verify directly if isolation is load-bearing",
+    "id": "netpol",
+    "status": "pass",
+    "title": "NetworkPolicy enforcement",
+  },
+]
+`;
+
+exports[`doctor golden output (#1055 byte-identical pin) budget-exhausted — the app-image probe budget of 0 leaves images unverified: exitCode 1`] = `0`;
+
+exports[`doctor golden output (#1055 byte-identical pin) crd-schema — an installed CRD missing an emitted field FAILs and names it: table 1`] = `
+"PASS  Cluster reachable                           apiserver responded
+PASS  kubectl strict validation                   client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)
+PASS  Static asset mode                           object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys
+PASS  NextApp CRD                                 served version: v1alpha1
+FAIL  NextApp CRD schema coverage                 the installed NextApp CRD does not define 1 field(s) this CLI emits: spec.database.roSecretRef — a deploy setting one of them is rejected (or, without strict validation, SILENTLY PRUNED). Source: read from the aggregated OpenAPI v3 discovery document (hint: upgrade the operator/CRD FIRST, then the CLI (docs/RELEASING.md))
+PASS  Operator deployment                         kn-next-operator-controller-manager Ready in kn-next-operator-system
+PASS  cert-manager webhook                        cert-manager-webhook Ready
+PASS  Knative ingress-class                       ingress-class kourier.ingress.networking.knative.dev is served by net-kourier-controller
+PASS  Operator image pullable                     ghcr.io/getknext-dev/kn-next-operator@sha256:75be42bb6b4c6d03c902b4fc90b36b246cc6cacf2233926fa183a6051521a99d is anonymously pullable
+PASS  App image pullable                          demo/web (ghcr.io/getknext-dev/web@sha256:1111111111111111111111111111111111111111111111111111111111111111) anonymously pullable
+PASS  Knative Serving                             services.serving.knative.dev CRD present
+PASS  Metrics-port collision (queue-proxy :9091)  request-metrics-protocol is "none" — queue-proxy leaves :9091 unbound; no NextApp overrides METRICS_PORT onto a queue-proxy-owned port and current builds default to :9464. Caveat: apps running images built before the 9464 default bind :9091 with no visible override and cannot be detected here — an EADDRINUSE crash-loop on such a revision means: redeploy with a current build
+PASS  NetworkPolicy enforcement                   a NetworkPolicy-enforcing agent is running (Calico DaemonSet calico-node (kube-system)) — the operator's default-on NetworkPolicy objects should be enforced; per-CNI configuration can still exempt traffic, so verify directly if isolation is load-bearing
+"
+`;
+
+exports[`doctor golden output (#1055 byte-identical pin) crd-schema — an installed CRD missing an emitted field FAILs and names it: rows 1`] = `
+[
+  {
+    "detail": "apiserver responded",
+    "id": "cluster",
+    "status": "pass",
+    "title": "Cluster reachable",
+  },
+  {
+    "detail": "client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)",
+    "id": "kubectl-validation",
+    "status": "pass",
+    "title": "kubectl strict validation",
+  },
+  {
+    "detail": "object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys",
+    "id": "storage-mode",
+    "status": "pass",
+    "title": "Static asset mode",
+  },
+  {
+    "detail": "served version: v1alpha1",
+    "id": "crd",
+    "status": "pass",
+    "title": "NextApp CRD",
+  },
+  {
+    "detail": "the installed NextApp CRD does not define 1 field(s) this CLI emits: spec.database.roSecretRef — a deploy setting one of them is rejected (or, without strict validation, SILENTLY PRUNED). Source: read from the aggregated OpenAPI v3 discovery document",
+    "hint": "upgrade the operator/CRD FIRST, then the CLI (docs/RELEASING.md)",
+    "id": "crd-schema",
+    "status": "fail",
+    "title": "NextApp CRD schema coverage",
+  },
+  {
+    "detail": "kn-next-operator-controller-manager Ready in kn-next-operator-system",
+    "id": "operator",
+    "status": "pass",
+    "title": "Operator deployment",
+  },
+  {
+    "detail": "cert-manager-webhook Ready",
+    "id": "cert-manager",
+    "status": "pass",
+    "title": "cert-manager webhook",
+  },
+  {
+    "detail": "ingress-class kourier.ingress.networking.knative.dev is served by net-kourier-controller",
+    "id": "ingress",
+    "status": "pass",
+    "title": "Knative ingress-class",
+  },
+  {
+    "detail": "ghcr.io/getknext-dev/kn-next-operator@sha256:75be42bb6b4c6d03c902b4fc90b36b246cc6cacf2233926fa183a6051521a99d is anonymously pullable",
+    "id": "image",
+    "status": "pass",
+    "title": "Operator image pullable",
+  },
+  {
+    "detail": "demo/web (ghcr.io/getknext-dev/web@sha256:1111111111111111111111111111111111111111111111111111111111111111) anonymously pullable",
+    "id": "app-image",
+    "status": "pass",
+    "title": "App image pullable",
+  },
+  {
+    "detail": "services.serving.knative.dev CRD present",
+    "id": "knative",
+    "status": "pass",
+    "title": "Knative Serving",
+  },
+  {
+    "detail": "request-metrics-protocol is "none" — queue-proxy leaves :9091 unbound; no NextApp overrides METRICS_PORT onto a queue-proxy-owned port and current builds default to :9464. Caveat: apps running images built before the 9464 default bind :9091 with no visible override and cannot be detected here — an EADDRINUSE crash-loop on such a revision means: redeploy with a current build",
+    "id": "metrics-port",
+    "status": "pass",
+    "title": "Metrics-port collision (queue-proxy :9091)",
+  },
+  {
+    "detail": "a NetworkPolicy-enforcing agent is running (Calico DaemonSet calico-node (kube-system)) — the operator's default-on NetworkPolicy objects should be enforced; per-CNI configuration can still exempt traffic, so verify directly if isolation is load-bearing",
+    "id": "netpol",
+    "status": "pass",
+    "title": "NetworkPolicy enforcement",
+  },
+]
+`;
+
+exports[`doctor golden output (#1055 byte-identical pin) crd-schema — an installed CRD missing an emitted field FAILs and names it: exitCode 1`] = `1`;
