@@ -167,3 +167,6 @@ knext-exec*
 # from tracking in chore/remove-stray-automation-dirs.
 prewarm-analyze-*/
 triage-shape-*/
+
+# Architect-Planner output (assessment + draft issues) — regenerated per sprint, not source.
+knext-plan-out/
