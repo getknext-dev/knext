@@ -104,7 +104,7 @@ export function stampConnectionClose(response) {
  * Wrap a `Bun.serve` `fetch` handler so every response it produces (sync or
  * async) is stamped. Preserves `this` and all arguments (req, server).
  *
- * @template {(...args: any[]) => any} F
+ * @template {(...args: unknown[]) => unknown} F
  * @param {F} fetchHandler
  * @returns {F}
  */
@@ -134,7 +134,7 @@ export function wrapServeOptions(options) {
   if (typeof opts.fetch !== 'function') return options;
   return {
     ...opts,
-    fetch: wrapFetch(/** @type {(...a: any[]) => any} */ (opts.fetch)),
+    fetch: wrapFetch(/** @type {(...a: unknown[]) => unknown} */ (opts.fetch)),
   };
 }
 
@@ -144,14 +144,14 @@ export function wrapServeOptions(options) {
  * the webpack-layer module duplication ADR-0027 warns about). A no-op when
  * `shouldInstall` says so.
  *
- * @param {{ serve?: (...a: any[]) => any, [k: symbol]: unknown } | undefined} bun `globalThis.Bun`
+ * @param {{ serve?: (...a: unknown[]) => unknown, [k: symbol]: unknown } | undefined} bun `globalThis.Bun`
  * @param {Record<string, string | undefined> | undefined} env
  * @returns {boolean} whether the patch was (or already was) installed
  */
 export function install(bun, env) {
   if (!shouldInstall(env, bun)) return false;
   // `bun` is a truthy object with a `serve` function here (shouldInstall).
-  const target = /** @type {{ serve: (...a: any[]) => any, [k: symbol]: unknown }} */ (bun);
+  const target = /** @type {{ serve: (...a: unknown[]) => unknown, [k: symbol]: unknown }} */ (bun);
   if (target[INSTALLED]) return true;
   target[INSTALLED] = true;
   const originalServe = target.serve;

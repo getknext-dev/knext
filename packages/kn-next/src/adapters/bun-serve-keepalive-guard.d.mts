@@ -23,8 +23,8 @@ export declare function stampConnectionClose<T>(response: T): T;
 // than preserving the handler's declared arity — the tests call the wrapper with
 // a Request even when the handler was written with no formal parameters.
 export declare function wrapFetch<R>(
-    fetchHandler: (...args: any[]) => R,
-): (...args: any[]) => R;
+    fetchHandler: (...args: unknown[]) => R,
+): (...args: unknown[]) => R;
 
 /** Shallow-clone Bun.serve options with the `fetch` handler wrapped. */
 export declare function wrapServeOptions(options: unknown): unknown;
@@ -32,7 +32,7 @@ export declare function wrapServeOptions(options: unknown): unknown;
 /** Patch `bun.serve` so every server it starts stamps `Connection: close`. */
 export declare function install(
     bun:
-        | { serve?: (...a: any[]) => any; [k: symbol]: unknown }
+        | { serve?: (...a: unknown[]) => unknown; [k: symbol]: unknown }
         | undefined,
     env: Record<string, string | undefined> | undefined,
 ): boolean;
