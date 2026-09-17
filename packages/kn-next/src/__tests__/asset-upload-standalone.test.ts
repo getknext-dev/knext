@@ -173,7 +173,6 @@ describe("uploadAssets reads the standalone build output (not .output/public)", 
         runCaptureMock.mockReturnValue(gcsListing(nitroKeys));
 
         const config = { ...makeConfig() };
-        // biome-ignore lint/performance/noDelete: absence (not undefined) is the case under test
         delete (config as Record<string, unknown>).build;
         await expect(uploadAssets(config)).resolves.toBeUndefined();
 
@@ -200,7 +199,6 @@ describe("uploadAssets reads the standalone build output (not .output/public)", 
         await seed();
         runCaptureMock.mockReturnValue(gcsListing(["a.js"]));
         const config = { ...makeConfig() };
-        // biome-ignore lint/performance/noDelete: absence is the case under test
         delete (config as Record<string, unknown>).build;
 
         await uploadAssets(config);

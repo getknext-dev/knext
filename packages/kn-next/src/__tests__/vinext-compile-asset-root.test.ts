@@ -40,7 +40,6 @@ function injectedExprs(): {
                 "the guard's subject moved; re-anchor it",
         );
     }
-    // biome-ignore lint/security/noGlobalEval: evaluating our own controlled string-builder block
     return new Function(
         `${block[0]}\nreturn { entryFileExpr, entryDirExpr, entryUrlExpr };`,
     )();
