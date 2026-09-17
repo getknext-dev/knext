@@ -168,8 +168,15 @@ export async function doctorMain(
     argv: readonly string[],
     deps: DoctorDeps = { kubectl: kubectlRunner, probeImage: probeManifest },
 ): Promise<number> {
+    // parseDoctorArgs first, so an unknown flag is rejected before anything
+    // runs (byte-identical to the pre-decomposition monolith). Then the
+    // -h/--help short-circuit prints DOCTOR_HELP and returns 0 WITHOUT touching
+    // the cluster — the ADR-0046 cli-verb-dispatch contract requires this
+    // module's own Main to parse its own argv for help (guarded by
+    // cli-dispatch-contract.test.ts, which scans for the includes("--help")
+    // idiom here).
     const args = parseDoctorArgs(argv);
-    if (args.help) {
+    if (args.help || argv.includes("--help") || argv.includes("-h")) {
         writeSync(1, DOCTOR_HELP);
         return 0;
     }
