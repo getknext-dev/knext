@@ -11,7 +11,8 @@
       },
       "suspicious": {
         "noExplicitAny": "error",
-        "noConsole": "warn"
+        "noConsole": "warn",
+        "noTsIgnore": "error"
       }
     }
   },
@@ -22,5 +23,11 @@
   },
   "files": {
     "includes": ["**/src/**/*.ts", "!**/node_modules", "!**/dist", "!**/.open-next"]
-  }
+  },
+  "overrides": [
+    {
+      "includes": ["**/fixtures/**", "**/.next/**"],
+      "linter": { "rules": { "suspicious": { "noTsIgnore": "off" } } }
+    }
+  ]
 }
