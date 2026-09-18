@@ -323,6 +323,18 @@ Options:
 `;
 
 /**
+ * The flags `kn-next build` accepts. Exported so a guard can hold reference-app
+ * and template `package.json` scripts to the real parser (`--target` was
+ * removed with ADR-0048 — vinext is the only target — and a script still
+ * passing it fails with `unknown flag`). `-h`/`--help` are handled separately
+ * above, so they are not in this set.
+ */
+export const ACCEPTED_BUILD_FLAGS: ReadonlySet<string> = new Set([
+    "--skip-next",
+    "--skip-smoke",
+]);
+
+/**
  * argv entry for `kn-next build`.
  *
  * Parses its OWN argv — that is the whole point. The first version of the
@@ -338,7 +350,7 @@ export async function buildMain(argv: readonly string[]): Promise<number> {
         writeSync(1, BUILD_HELP);
         return 0;
     }
-    const KNOWN = new Set(["--skip-next", "--skip-smoke"]);
+    const KNOWN = ACCEPTED_BUILD_FLAGS;
     for (const a of argv) {
         if (!KNOWN.has(a)) {
             throw new UsageError(

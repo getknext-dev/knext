@@ -104,10 +104,25 @@ bun run dev
 
 # Build for production
 bun run build
-
-# Run OpenNext build
-npx open-next build
 ```
+
+### `build:exec` — the knext build + asset upload
+
+```bash
+bun run build:exec   # kn-next build
+```
+
+`kn-next build` (vinext is the only target since ADR-0048, so there is no
+`--target` flag) runs the project build, compiles the single executable, and
+then **uploads the static assets to the configured `storage` bucket**. Because
+this app sets `storage: { provider: 'gcs' }`, `build:exec` performs a **real GCS
+upload** and needs GCS credentials on the machine that runs it
+(`GOOGLE_APPLICATION_CREDENTIALS`, plus `gsutil`/`gcloud` on `PATH`). Without
+them the upload step fails, so `build:exec` is not a fully offline/local command
+today. To iterate on the build alone without an upload you currently need an app
+whose config carries no `storage` block (knext then skips the upload and serves
+assets from the image). A `kn-next build` upload-skip affordance is tracked
+separately — do not add a CLI flag here to work around it.
 
 ## Deployment Files
 
