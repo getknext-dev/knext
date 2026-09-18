@@ -1,11 +1,14 @@
 # Multi-cloud portability — per-cloud prerequisites
 
 > **Status (issue #46):** knext is **portable by design** — it is a Knative/Kubernetes
-> adapter with no cloud-vendor SDK lock-in in the control plane. But end-to-end deploys
-> are currently **verified only on GKE and kind**. Standing up a 2nd cloud (EKS / AKS /
-> OKE) and proving a live `200` route is **human-only work tracked in #46**. This document
-> removes the *config and documentation* blockers ahead of that verification: the exact
-> per-cloud prerequisites you must satisfy, with the real config keys/files.
+> adapter with no cloud-vendor SDK lock-in in the control plane. The **core operator/CLI
+> deploy path is now validated end-to-end on EKS** (a second real cloud): `kn-next deploy`
+> → NextApp CR → operator reconciles → Knative Service → live `200` route (see
+> [EKS: validated](#eks-validated) below and `docs/release/eks-306-validation.md`). End-to-end
+> deploys remain **verified on GKE and kind**; the remaining EKS legs (S3 asset upload,
+> ISR/tag invalidation, CI smoke) and standing up AKS / OKE are **tracked in #46**. This
+> document records the per-cloud prerequisites you must satisfy, with the real config
+> keys/files.
 
 knext does **not** abstract these away — they are properties of *your* Knative install and
 cluster, not of knext. The four portability couplings below are the ones most likely to
@@ -149,13 +152,54 @@ secrets only, never in `kn-next.config.ts` or images (see `.claude/rules/securit
 
 ---
 
+## EKS: validated
+
+The **core operator/CLI deploy path is validated end-to-end on EKS** — a second real cloud —
+in a dated live run recorded in `docs/release/eks-306-validation.md`. Cluster: EKS `knext`,
+`eu-west-1`, Knative Serving + Kourier v1.18, gp3 default StorageClass, cert-manager, the knext
+operator built from `main` and running.
+
+**What was proven end-to-end:**
+
+1. `kn-next deploy` generates the **NextApp CR** (with `--registry` → ECR override).
+2. The **operator reconciles the CR into a Knative Service** — ADR-0001 single-writer; the CLI
+   never applies a raw ksvc.
+3. ksvc → revision → pod pulls the app image from ECR and boots the **full knext runtime**
+   (Next.js + Redis cache-handler + Postgres health check).
+4. **Kourier routes** the external `*.sslip.io` domain to the pod → **`/api/health` `200`**
+   (`{"status":"ok"}`) and **`/` `200`** (HTML).
+5. Bumping the CR's `buildId` rolls a **new revision** (the operator, not the CLI, writes the
+   ksvc) and traffic shifts to the fresh pod.
+6. The operator admission webhook **enforces digest-pinning** on EKS (a tag-only image ref is
+   rejected), and `kn-next doctor` runs its read-only checks against the cluster.
+
+**EKS-specific prerequisites surfaced by the run** (fold into your install checklist):
+
+- **No default StorageClass ships on EKS** — create a `gp3` (`ebs.csi.aws.com`) default before
+  Knative/PVCs bind (see §2).
+- **The operator requires cert-manager** — its install bundle ships a webhook `Certificate` +
+  `Issuer`, so install cert-manager first or the apply fails on `kind "Certificate"`.
+- **The operator image is private** — deploying on your own cluster needs registry auth or a
+  mirror to a registry your nodes can pull from (this run mirrored to ECR).
+- **The Kourier LoadBalancer is a hostname (ELB) on EKS**, not an IP — wire DNS with a CNAME
+  (see §3).
+
+**What remains in progress** (tracked in #46, detail in `docs/release/eks-306-validation.md`):
+**S3 asset upload** against a real bucket, **ISR / tag invalidation** on EKS, cold-start /
+throughput numbers, and a (cost-gated) **CI smoke workflow**. Until those land, treat EKS as
+"core deploy path validated," not "fully validated."
+
+---
+
 ## What is verified vs. portable-by-design
 
 | Concern | Status |
 | --- | --- |
 | GKE end-to-end deploy + scale-to-zero | **Verified** |
 | kind (CI / e2e) | **Verified** |
-| EKS / AKS / OKE end-to-end (live `200` route) | **Not yet verified — human work, #46** |
+| EKS — core operator/CLI deploy path (`deploy` → CR → operator → ksvc → live `200`) | **Validated end-to-end (dated run, `docs/release/eks-306-validation.md`)** |
+| EKS — S3 asset upload / ISR invalidation / CI smoke | **In progress — #46** |
+| AKS / OKE end-to-end (live `200` route) | **Not yet verified — human work, #46** |
 | Ingress-class override (Istio/Contour) | Config + test landed; **live route unverified** |
 
 This is **not multi-region or CDN** work — knext matches Vercel's *compute* layer, not its
