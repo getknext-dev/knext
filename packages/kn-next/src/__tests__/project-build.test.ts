@@ -11,6 +11,9 @@
  */
 
 import { describe, expect, it, mock } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { runProjectBuild } from "../cli/project-build";
 import { handleUsageError, USAGE_ERROR_CODE } from "../cli/shared";
 
@@ -21,10 +24,19 @@ function exitError(status: number): Error & { status: number } {
     });
 }
 
+/** Make a throwaway app dir under os.tmpdir() with the given package.json body. */
+function tmpAppDir(pkgJson: string | null): string {
+    const dir = mkdtempSync(join(tmpdir(), "knext-projbuild-"));
+    if (pkgJson !== null) {
+        writeFileSync(join(dir, "package.json"), pkgJson);
+    }
+    return dir;
+}
+
 describe("runProjectBuild", () => {
     it("runs the project's npm build script through the injected runner", () => {
         const run = mock();
-        runProjectBuild(run);
+        runProjectBuild({ requireEsm: false, run });
         expect(run).toHaveBeenCalledWith(["npm", "run", "build"]);
     });
 
@@ -34,7 +46,7 @@ describe("runProjectBuild", () => {
         });
         let caught: unknown;
         try {
-            runProjectBuild(run);
+            runProjectBuild({ requireEsm: false, run });
         } catch (err) {
             caught = err;
         }
@@ -67,9 +79,117 @@ describe("runProjectBuild", () => {
         const run = mock(() => {
             throw original;
         });
-        expect(() => runProjectBuild(run)).toThrow(original);
+        expect(() => runProjectBuild({ requireEsm: false, run })).toThrow(
+            original,
+        );
         // and it is NOT dressed up as a usage error
         expect(handleUsageError(original, () => {})).toBe(false);
+    });
+});
+
+describe("runProjectBuild ESM preflight (vinext target only)", () => {
+    it("requireEsm: true + no `type:module` → throws before the build runs", () => {
+        const run = mock();
+        const dir = tmpAppDir(JSON.stringify({ name: "app" }));
+        try {
+            let caught: unknown;
+            try {
+                runProjectBuild({ requireEsm: true, cwd: dir, run });
+            } catch (err) {
+                caught = err;
+            }
+            expect((caught as Error)?.message).toContain('"type": "module"');
+            expect(caught).toMatchObject({ code: USAGE_ERROR_CODE });
+            // fail-fast: the build never spawned
+            expect(run).not.toHaveBeenCalledWith(["npm", "run", "build"]);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("requireEsm: true + `type:commonjs` → throws before the build runs", () => {
+        const run = mock();
+        const dir = tmpAppDir(JSON.stringify({ type: "commonjs" }));
+        try {
+            expect(() =>
+                runProjectBuild({ requireEsm: true, cwd: dir, run }),
+            ).toThrow(/"type": "module"/);
+            expect(run).not.toHaveBeenCalledWith(["npm", "run", "build"]);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("requireEsm: true + `type:module` → passes preflight, runs the build", () => {
+        const run = mock();
+        const dir = tmpAppDir(JSON.stringify({ type: "module" }));
+        try {
+            runProjectBuild({ requireEsm: true, cwd: dir, run });
+            expect(run).toHaveBeenCalledWith(["npm", "run", "build"]);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("requireEsm: false (node target) + non-module pkg → does NOT preflight, runs the build", () => {
+        const run = mock();
+        const dir = tmpAppDir(JSON.stringify({ type: "commonjs" }));
+        try {
+            runProjectBuild({ requireEsm: false, cwd: dir, run });
+            expect(run).toHaveBeenCalledWith(["npm", "run", "build"]);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("requireEsm: true + `null` package.json → clean UsageError, not a TypeError", () => {
+        const run = mock();
+        const dir = tmpAppDir("null");
+        try {
+            let caught: unknown;
+            try {
+                runProjectBuild({ requireEsm: true, cwd: dir, run });
+            } catch (err) {
+                caught = err;
+            }
+            expect(caught).toMatchObject({ code: USAGE_ERROR_CODE });
+            expect((caught as Error).constructor.name).not.toBe("TypeError");
+            expect(run).not.toHaveBeenCalledWith(["npm", "run", "build"]);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+});
+
+describe("every runProjectBuild caller computes requireEsm (scan, not enumeration)", () => {
+    it("no CLI runProjectBuild( call omits the requireEsm argument", async () => {
+        const { readFileSync, readdirSync } = await import("node:fs");
+        const { dirname, join, resolve } = await import("node:path");
+        const { fileURLToPath } = await import("node:url");
+        const cliDir = join(
+            resolve(dirname(fileURLToPath(import.meta.url)), ".."),
+            "cli",
+        );
+        const offenders: string[] = [];
+        for (const file of readdirSync(cliDir)) {
+            if (!file.endsWith(".ts") || file === "project-build.ts") {
+                continue;
+            }
+            const src = readFileSync(join(cliDir, file), "utf8");
+            // Match every runProjectBuild( invocation and its argument list up to
+            // the balancing close. A call with no `requireEsm` in it is an
+            // offender — a future caller cannot silently skip the target gate.
+            const calls = src.matchAll(/runProjectBuild\(([\s\S]*?)\)/g);
+            for (const m of calls) {
+                if (!/requireEsm/.test(m[1])) {
+                    offenders.push(`${file}: ${m[0].slice(0, 40)}`);
+                }
+            }
+        }
+        expect(
+            offenders,
+            "pass requireEsm: (config.build ?? 'vinext') === 'vinext'",
+        ).toEqual([]);
     });
 });
 

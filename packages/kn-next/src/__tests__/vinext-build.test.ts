@@ -189,11 +189,22 @@ describe("#ADR-0048 buildVinextExecutable", () => {
         expect(message).toMatch(/121ms|61ms/);
     });
 
+    /** An ESM app dir (passes the preflight) with no `.output`. */
+    function esmAppNoOutput(): string {
+        const cwd = mkdtempSync(join(tmpdir(), "knext-vinext-esm-"));
+        tempDirs.push(cwd);
+        writeFileSync(
+            join(cwd, "package.json"),
+            JSON.stringify({ name: "app", type: "module" }),
+        );
+        return cwd;
+    }
+
     it("runs vite build BEFORE the compile step", () => {
         const calls: string[][] = [];
         try {
             buildVinextExecutable({
-                cwd: "/nonexistent-app",
+                cwd: esmAppNoOutput(),
                 bunVersion: "1.4.0",
                 run: (argv) => calls.push([...argv]),
             });
@@ -209,11 +220,121 @@ describe("#ADR-0048 buildVinextExecutable", () => {
         // must not reach the image step.
         expect(() =>
             buildVinextExecutable({
-                cwd: "/nonexistent-app",
+                cwd: esmAppNoOutput(),
                 bunVersion: "1.4.0",
                 run: () => {},
             }),
         ).toThrow(/\.output.*index\.mjs.*is not there/s);
+    });
+});
+
+/**
+ * The ESM preflight: a CommonJS app fails deep inside vite/nitro with a cryptic
+ * `[UNRESOLVED_IMPORT] Could not resolve '../ssr/index.js'`. The vinext target
+ * builds with Vite/Rollup (ESM), so the app's package.json must carry
+ * `"type": "module"`. Fail fast, before `vite build`, with an actionable message.
+ */
+describe("the ESM preflight fails fast on a non-module app", () => {
+    /** A temp cwd holding the given package.json object (or none). */
+    function appDir(pkg?: Record<string, unknown>, raw?: string): string {
+        const cwd = tempDir("knext-1033-esm-");
+        if (raw !== undefined) {
+            writeFileSync(join(cwd, "package.json"), raw);
+        } else if (pkg !== undefined) {
+            writeFileSync(join(cwd, "package.json"), JSON.stringify(pkg));
+        }
+        return cwd;
+    }
+
+    it("throws before vite build when package.json has NO type field", () => {
+        const calls: string[][] = [];
+        const cwd = appDir({ name: "app" });
+        expect(() =>
+            buildVinextExecutable({
+                cwd,
+                bunVersion: "1.4.0",
+                run: (argv) => calls.push([...argv]),
+            }),
+        ).toThrow(/"type":\s*"module"/);
+        // Fail FAST: the build must never have run.
+        expect(
+            calls.some((c) => c.includes("vite") && c.includes("build")),
+            "vite build must not run when the preflight fails",
+        ).toBe(false);
+    });
+
+    it('throws on "type":"commonjs" too', () => {
+        const calls: string[][] = [];
+        const cwd = appDir({ name: "app", type: "commonjs" });
+        expect(() =>
+            buildVinextExecutable({
+                cwd,
+                bunVersion: "1.4.0",
+                run: (argv) => calls.push([...argv]),
+            }),
+        ).toThrow(/"type":\s*"module"/);
+        expect(
+            calls.some((c) => c.includes("vite") && c.includes("build")),
+        ).toBe(false);
+    });
+
+    it('gets PAST the preflight when "type":"module", failing later on the missing entry', () => {
+        const calls: string[][] = [];
+        const cwd = appDir({ name: "app", type: "module" });
+        let message = "";
+        try {
+            buildVinextExecutable({
+                cwd,
+                bunVersion: "1.4.0",
+                run: (argv) => calls.push([...argv]),
+            });
+        } catch (e) {
+            message = (e as Error).message;
+        }
+        // vite build DID run — the preflight let it through.
+        expect(calls[0]).toEqual(["npx", "vite", "build"]);
+        // The only failure, if any, is the missing `.output` entry — NOT ESM.
+        expect(message).not.toMatch(/"type":\s*"module"/);
+        expect(message).toMatch(/is not there/);
+    });
+
+    it("skips the preflight entirely when skipViteBuild is set", () => {
+        // Nothing to preflight: an already-built `.output` is being reused, so
+        // a non-module package.json is not this build's concern.
+        const cwd = appDir({ name: "app", type: "commonjs" });
+        let message = "";
+        try {
+            buildVinextExecutable({
+                cwd,
+                bunVersion: "1.4.0",
+                skipViteBuild: true,
+                run: () => {},
+            });
+        } catch (e) {
+            message = (e as Error).message;
+        }
+        // It may still fail on the missing `.output` entry, but NOT on ESM.
+        expect(message).not.toMatch(/"type":\s*"module"/);
+    });
+
+    it("fails namedly when package.json is missing or unparseable", () => {
+        const missing = appDir();
+        expect(() =>
+            buildVinextExecutable({
+                cwd: missing,
+                bunVersion: "1.4.0",
+                run: () => {},
+            }),
+        ).toThrow(/package\.json/);
+
+        const broken = appDir(undefined, "{ this is not json");
+        expect(() =>
+            buildVinextExecutable({
+                cwd: broken,
+                bunVersion: "1.4.0",
+                run: () => {},
+            }),
+        ).toThrow(/package\.json/);
     });
 });
 

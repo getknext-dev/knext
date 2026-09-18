@@ -54,6 +54,7 @@ import {
     readLockfilePackages,
     writeNativeIntegrityManifest,
 } from "./native-integrity";
+import { preflightEsmPackage } from "./project-build";
 import { UsageError } from "./shared";
 
 /** The first Bun that ADR-0048 accepts. See the docstring for the measurements. */
@@ -321,6 +322,7 @@ export function buildVinextExecutable(opts: VinextBuildOptions): string {
 
     // 1. vinext → nitro bun-preset .output
     if (!opts.skipViteBuild) {
+        preflightEsmPackage(opts.cwd);
         run(["npx", "vite", "build"]);
     }
 

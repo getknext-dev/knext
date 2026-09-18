@@ -138,6 +138,9 @@ beforeEach(() => {
     // realpath: macOS resolves /var → /private/var, and `build()` reports
     // `process.cwd()`, so the raw mkdtemp path would never compare equal.
     dir = realpathSync(mkdtempSync(join(tmpdir(), "knext-smoke-wire-")));
+    // A vinext build's runProjectBuild preflights `"type":"module"` before the
+    // build runs; these tests simulate a real (ESM) vinext app.
+    writeFileSync(join(dir, "package.json"), '{"type":"module"}');
     process.chdir(dir);
     jest.clearAllMocks();
     hostArch = "darwin-arm64"; // cross-arch by default: the developer-machine case

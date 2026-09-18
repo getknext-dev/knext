@@ -180,7 +180,11 @@ export async function build(options: BuildOptions = {}) {
         );
         // UX ledger row 4 (4c): the seam translates a deps-not-installed failure
         // (`next: command not found`, exit 127) into plain npm-install guidance.
-        runProjectBuild();
+        // requireEsm gates the vinext ESM preflight: only the vinext target
+        // (the default) needs `"type":"module"`; a node app builds CommonJS fine.
+        runProjectBuild({
+            requireEsm: (config.build ?? "vinext") === "vinext",
+        });
         log.info("Project build complete");
     }
 
