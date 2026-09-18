@@ -376,7 +376,7 @@ describe("certManagerCheck (isolated)", () => {
         );
         expect(r?.status).toBe("pass");
     });
-    it("WARN when the webhook is absent", () => {
+    it("WARN when the webhook is absent, with an install-first hint", () => {
         const [r] = certManagerCheck(
             makeCtx({
                 [CM_KEY]: {
@@ -386,6 +386,11 @@ describe("certManagerCheck (isolated)", () => {
             }),
         );
         expect(r?.status).toBe("warn");
+        // The absent case is a hard prerequisite, so the hint must tell the
+        // operator to install cert-manager first and how (kubectl apply URL).
+        expect(r?.hint).toBeDefined();
+        expect(r?.hint).toContain("cert-manager");
+        expect(r?.hint).toMatch(/kubectl apply/);
     });
 });
 

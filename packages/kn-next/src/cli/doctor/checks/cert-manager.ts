@@ -47,6 +47,7 @@ export function certManagerCheck(ctx: CheckContext): CheckResult[] {
                 "cert-manager webhook",
                 "warn",
                 "cert-manager-webhook not found — the operator bundle includes webhook Certificates that need cert-manager installed",
+                "cert-manager is a prerequisite: install it BEFORE the operator bundle — `kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml`, then wait for the webhook to be Ready",
             ),
         ];
     }

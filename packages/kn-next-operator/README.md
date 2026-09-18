@@ -30,8 +30,16 @@ kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/do
 > `:latest` (enforced by `hack/check-no-latest.sh`).
 >
 > Prerequisites:
-> - [cert-manager](https://cert-manager.io) must be installed in the cluster (the
->   bundle includes the operator's `Issuer`/`Certificate` for its webhook).
+> - [cert-manager](https://cert-manager.io) must be installed in the cluster **before**
+>   this apply — the bundle ships the operator's `Issuer`/`Certificate`
+>   (`cert-manager.io/v1`) for its webhook, so on a fresh cluster the apply above fails
+>   with `no matches for kind "Certificate" in version "cert-manager.io/v1"` until
+>   cert-manager is present. Install it first, then wait for the webhook:
+>   ```sh
+>   kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml
+>   kubectl wait --for=condition=Available --timeout=120s \
+>     -n cert-manager deployment/cert-manager deployment/cert-manager-webhook deployment/cert-manager-cainjector
+>   ```
 > - **Knative Serving + Kourier** must be installed. The bundle ships a
 >   `config-network` ConfigMap (`namespace: knative-serving`) that pins
 >   `ingress-class: kourier.ingress.networking.knative.dev` — the full
