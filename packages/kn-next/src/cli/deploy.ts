@@ -70,6 +70,15 @@ interface DeployOptions {
     skipBuild: boolean;
     skipUpload: boolean;
     dryRun: boolean;
+    /**
+     * #1063: a pre-built, digest-pinned image ref to deploy AS-IS. When set the
+     * CLI SKIPS `docker buildx build … --push` (and the post-push digest
+     * resolution) entirely and applies the NextApp CR pointing at this image —
+     * the path for a user who already has a digest-pinned image or has no
+     * working buildx. Must contain `@sha256:` (the operator's admission webhook
+     * rejects a tag-only ref); orthogonal to `--skip-upload`.
+     */
+    image?: string;
 }
 
 /**
@@ -108,6 +117,7 @@ function parseCliArgs(): DeployOptions {
         "skip-build"?: boolean;
         "skip-upload"?: boolean;
         "dry-run"?: boolean;
+        image?: string;
         help?: boolean;
         version?: boolean;
     };
@@ -122,6 +132,7 @@ function parseCliArgs(): DeployOptions {
                 "skip-build": { type: "boolean", default: false },
                 "skip-upload": { type: "boolean", default: false },
                 "dry-run": { type: "boolean", default: false },
+                image: { type: "string" },
                 help: { type: "boolean", short: "h", default: false },
                 version: { type: "boolean", short: "v", default: false },
             },
@@ -180,6 +191,7 @@ function parseCliArgs(): DeployOptions {
         skipBuild: values["skip-build"] ?? false,
         skipUpload: values["skip-upload"] ?? false,
         dryRun: values["dry-run"] ?? false,
+        image: values.image || process.env.KN_IMAGE,
     };
 }
 
@@ -562,14 +574,39 @@ export async function deploy() {
     // The operator-facing CR image ref MUST be digest-pinned (see resolveDigest below).
     const taggedRef = `${config.registry}/${config.name}:${imageTag}`;
 
-    log.info(
-        { image: taggedRef },
-        "Image tag resolved (will be digest-pinned after push)",
-    );
-
-    // imageRef is what we put in the CR — starts as taggedRef for dry-run,
-    // then replaced with the @sha256:-pinned ref after a real push.
-    let imageRef = taggedRef;
+    // #1063: `--image <ref>` deploys a PRE-BUILT image. When set, the CLI skips
+    // the docker build+push (and the post-push digest resolution) entirely and
+    // points the CR at this ref. The image is validated up front — including
+    // under --dry-run — so a tag-only ref is rejected before anything runs,
+    // mirroring the operator's admission webhook (`validateCRImageRef` throws a
+    // message containing `@sha256:`). `--registry` is meaningless once the image
+    // is fully qualified, so --image wins and the registry override is reported
+    // as ignored rather than silently dropped.
+    let imageRef: string;
+    if (options.image) {
+        validateCRImageRef(options.image);
+        if (options.registry) {
+            log.warn(
+                { registry: options.registry, image: options.image },
+                "Ignoring --registry: --image is a fully-qualified, digest-pinned " +
+                    "ref, so no image is built or pushed and the registry override " +
+                    "has no effect.",
+            );
+        }
+        log.info(
+            { image: options.image },
+            "Using pre-built image — skipping docker build + push (--image)",
+        );
+        imageRef = options.image;
+    } else {
+        log.info(
+            { image: taggedRef },
+            "Image tag resolved (will be digest-pinned after push)",
+        );
+        // imageRef starts as taggedRef for dry-run, then is replaced with the
+        // @sha256:-pinned ref after a real push (below).
+        imageRef = taggedRef;
+    }
 
     if (!options.dryRun) {
         const tasks: Promise<void>[] = [];
@@ -602,35 +639,40 @@ export async function deploy() {
             "buildx-metadata.json",
         );
 
-        log.info("Building & pushing Docker image");
-        tasks.push(
-            (async () => {
-                // #644: `buildContext` was resolved in the preflight above —
-                // Next's file-tracing root, NOT a fixed `../..`. That hardcode
-                // assumed an `apps/<name>` layout and pointed outside the
-                // project for a flat repo, which is what `kn-next create`
-                // produces. Nothing is inferred at this point.
-                const repoRoot = buildContext;
-                // --metadata-file writes the buildx result JSON (includes containerimage.digest).
-                // ARGV array, no shell — taggedRef etc. arrive as single tokens.
-                runInherit([
-                    "docker",
-                    "buildx",
-                    "build",
-                    "--platform",
-                    "linux/amd64",
-                    "-f",
-                    `${process.cwd()}/Dockerfile`,
-                    "-t",
-                    taggedRef,
-                    "--push",
-                    "--metadata-file",
-                    metadataFilePath,
-                    repoRoot,
-                ]);
-                log.info("Docker image built and pushed");
-            })(),
-        );
+        // #1063: with --image there is nothing to build or push; the CR already
+        // points at the pre-built digest-pinned ref. The asset upload above is
+        // orthogonal and still runs unless --skip-upload was passed.
+        if (!options.image) {
+            log.info("Building & pushing Docker image");
+            tasks.push(
+                (async () => {
+                    // #644: `buildContext` was resolved in the preflight above —
+                    // Next's file-tracing root, NOT a fixed `../..`. That hardcode
+                    // assumed an `apps/<name>` layout and pointed outside the
+                    // project for a flat repo, which is what `kn-next create`
+                    // produces. Nothing is inferred at this point.
+                    const repoRoot = buildContext;
+                    // --metadata-file writes the buildx result JSON (includes containerimage.digest).
+                    // ARGV array, no shell — taggedRef etc. arrive as single tokens.
+                    runInherit([
+                        "docker",
+                        "buildx",
+                        "build",
+                        "--platform",
+                        "linux/amd64",
+                        "-f",
+                        `${process.cwd()}/Dockerfile`,
+                        "-t",
+                        taggedRef,
+                        "--push",
+                        "--metadata-file",
+                        metadataFilePath,
+                        repoRoot,
+                    ]);
+                    log.info("Docker image built and pushed");
+                })(),
+            );
+        }
 
         try {
             await Promise.all(tasks);
@@ -682,23 +724,28 @@ export async function deploy() {
         // PRIMARY: read containerimage.digest from the buildx metadata file (no extra I/O).
         // FALLBACK: docker inspect --format '{{index .RepoDigests 0}}' (if metadata missing).
         // The operator's validateImageRef rejects any ref without @sha256:.
-        log.info({ taggedRef }, "Resolving @sha256: digest...");
-        // ExecFn takes an ARGV array — no shell, no injection risk (CLI-58).
-        // runCapture spawns via execFileSync with shell:false, so each element
-        // is a separate, uninterpreted argv token — never concatenated into sh.
-        const execFn = async (argv: string[]): Promise<string> =>
-            runCapture(argv);
-        const readFileFn = (p: string) => readFileSync(p, "utf-8");
-        imageRef = await resolveDigest(
-            taggedRef,
-            execFn,
-            metadataFilePath,
-            readFileFn,
-        );
-        log.info({ imageRef }, "Digest-pinned image ref resolved");
+        //
+        // #1063: skipped for --image — the pre-built ref was already validated
+        // as digest-pinned above and nothing was pushed to resolve a digest for.
+        if (!options.image) {
+            log.info({ taggedRef }, "Resolving @sha256: digest...");
+            // ExecFn takes an ARGV array — no shell, no injection risk (CLI-58).
+            // runCapture spawns via execFileSync with shell:false, so each element
+            // is a separate, uninterpreted argv token — never concatenated into sh.
+            const execFn = async (argv: string[]): Promise<string> =>
+                runCapture(argv);
+            const readFileFn = (p: string) => readFileSync(p, "utf-8");
+            imageRef = await resolveDigest(
+                taggedRef,
+                execFn,
+                metadataFilePath,
+                readFileFn,
+            );
+            log.info({ imageRef }, "Digest-pinned image ref resolved");
 
-        // Guard: fail fast if digest resolution produced a non-pinned ref.
-        validateCRImageRef(imageRef);
+            // Guard: fail fast if digest resolution produced a non-pinned ref.
+            validateCRImageRef(imageRef);
+        }
     }
 
     // Render the NextApp CR from config + resolved image. Pass the buildId (== the

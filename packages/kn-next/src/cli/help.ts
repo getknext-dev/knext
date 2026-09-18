@@ -175,6 +175,8 @@ export const CLI_HELP = `${[
     "  -b, --bucket    Storage bucket (overrides config)",
     "  -t, --tag       Image tag (default: timestamp)",
     "  -n, --namespace Kubernetes namespace (default: default)",
+    "  --image <ref>   Deploy a pre-built, digest-pinned image (registry/name@sha256:...);",
+    "                  skips docker build + push. Overrides --registry.",
     "  --skip-build    Skip next build step",
     "  --skip-upload   Skip asset upload step",
     "  --dry-run       Print the NextApp CR without applying it",
