@@ -200,15 +200,22 @@ describe('ci.yml runs the gate, and feeds it', () => {
 
 describe('the thresholds live in exactly one place', () => {
   test('the gate derives its denominator from the policy include/exclude', () => {
-    // #871: with vitest gone, `check-coverage.mjs` IS the denominator — it
-    // enumerates the source files itself and folds untested ones in at 0%. If it
-    // stopped reading the policy globs, an untested file could silently drop out
-    // of the denominator, which is the dishonesty this gate exists to prevent.
-    const checker = readFileSync(join(REPO_ROOT, 'scripts', 'check-coverage.mjs'), 'utf8');
-    const code = blankNonCode(checker);
-    expect(code).toMatch(/COVERAGE_INCLUDE/);
-    expect(code).toMatch(/COVERAGE_EXCLUDE/);
-    expect(code).toMatch(/denominatorEntries\s*\(/);
+    // #871: with vitest gone, the gate IS the denominator — `check-coverage.mjs`
+    // calls `generateDenominator` (scripts/lib/coverage-denominator.mjs), which
+    // enumerates the source files itself and folds untested ones in at 0%. If the
+    // generator stopped reading the policy globs, an untested file could silently
+    // drop out of the denominator — the dishonesty this gate exists to prevent.
+    // The BEHAVIOUR of that generator is mutation-proven in
+    // tests/coverage-denominator.test.ts; this asserts the wiring.
+    const checker = blankNonCode(
+      readFileSync(join(REPO_ROOT, 'scripts', 'check-coverage.mjs'), 'utf8'),
+    );
+    expect(checker).toMatch(/generateDenominator\s*\(/);
+    const generator = blankNonCode(
+      readFileSync(join(REPO_ROOT, 'scripts', 'lib', 'coverage-denominator.mjs'), 'utf8'),
+    );
+    expect(generator).toMatch(/COVERAGE_INCLUDE/);
+    expect(generator).toMatch(/COVERAGE_EXCLUDE/);
   });
 
   test('the policy carries the floors the ratchet was set to', () => {

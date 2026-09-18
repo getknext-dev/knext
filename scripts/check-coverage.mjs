@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 /**
  * The coverage gate (#884) — measure the bun suite, then enforce the floors.
  *
@@ -21,13 +22,16 @@
  * denominator — the exact "measures less, so it is green" dishonesty this gate
  * exists to prevent.
  *
- * `denominatorEntries()` restores that enumeration deterministically and with no
- * second runner: it lists the `COVERAGE_INCLUDE \ COVERAGE_EXCLUDE` files from
- * `git ls-files` and, for any not already present in the merged bun report,
- * injects a zero-hit entry over its code lines. That over-counts an untested
- * file's lines slightly versus a coverage provider's executable-line notion, but
- * only ever LOWERS the percentage — the safe direction for a floor — and keeps
- * the invariant that adding an untested file cannot raise coverage.
+ * `enumerateSourceFiles()` (the `git ls-files` spawn) + `generateDenominator`
+ * (the pure filter, in `scripts/lib/coverage-denominator.mjs`) restore that
+ * enumeration deterministically and with no second runner: they list the
+ * `COVERAGE_INCLUDE \ COVERAGE_EXCLUDE` files and, for any not already present in
+ * the merged bun report, inject a zero-hit entry over its code lines — SKIPPING
+ * type-only files, which a coverage provider instruments as zero lines. That
+ * over-counts an untested file's lines slightly versus a provider's
+ * executable-line notion, but only ever LOWERS the percentage — the safe
+ * direction for a floor — and keeps the invariant that adding an untested file
+ * cannot raise coverage.
  *
  * ## Fail-closed
  *
@@ -45,6 +49,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { generateDenominator } from './lib/coverage-denominator.mjs';
 import {
   activeMetricExceptions,
   assertEveryMetricAccountedFor,
@@ -55,14 +60,7 @@ import {
   PER_PATH_THRESHOLDS,
   THRESHOLDS,
 } from './lib/coverage-policy.mjs';
-import {
-  countCodeLines,
-  formatLcov,
-  isTypeOnly,
-  matchesGlob,
-  mergeLcov,
-  summarize,
-} from './lib/lcov.mjs';
+import { formatLcov, matchesGlob, mergeLcov, summarize } from './lib/lcov.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
@@ -85,72 +83,6 @@ const inputs = explicit.length
   ? explicit.map((p) => resolve(REPO_ROOT, p))
   : lcovFilesUnder(resolve(REPO_ROOT, process.env.KNEXT_BUN_COVERAGE_DIR ?? BUN_COVERAGE_DIR));
 
-/**
- * The honest denominator, generated rather than borrowed from a second runner.
- *
- * Enumerate every `COVERAGE_INCLUDE \ COVERAGE_EXCLUDE` source file from
- * `git ls-files` and return a zero-hit coverage entry (over its code lines) for
- * each one NOT already present in `have`. Merged in, this reinstates vitest's
- * old role: an untested source file is counted at 0% and cannot vanish from the
- * denominator to inflate the percentage.
- *
- * Skipped in `--lcov=` mode: an explicit run is a controlled measurement (the
- * gate's own tests hand it synthetic paths), so it must not pull real repo files
- * into the denominator.
- *
- * @param {Map<string, import('./lib/lcov.mjs').FileCoverage>} have
- * @returns {Array<[string, import('./lib/lcov.mjs').FileCoverage]>}
- */
-function denominatorEntries(have) {
-  let listed;
-  try {
-    listed = execFileSync('git', ['ls-files', '-z', 'packages'], {
-      cwd: REPO_ROOT,
-      encoding: 'utf8',
-      maxBuffer: 64 * 1024 * 1024,
-    })
-      .split('\0')
-      .filter(Boolean);
-  } catch {
-    // Unreachable enumeration is a FAILURE, never a pass: a shrunken denominator
-    // reads as higher coverage, the exact dishonesty this gate prevents.
-    console.error('coverage: could not enumerate source files for the denominator (git ls-files).');
-    process.exit(1);
-  }
-  const entries = [];
-  for (const path of listed) {
-    if (!COVERAGE_INCLUDE.some((g) => matchesGlob(path, g))) continue;
-    if (COVERAGE_EXCLUDE.some((g) => matchesGlob(path, g))) continue;
-    if (have.has(path)) continue;
-    let src;
-    try {
-      src = readFileSync(resolve(REPO_ROOT, path), 'utf8');
-    } catch {
-      continue;
-    }
-    // A TYPE-ONLY file (only interfaces / type aliases / `import type`) transpiles
-    // to no runtime JS, so a coverage provider instruments ZERO lines of it — it
-    // never sat in vitest's denominator either. Counting its physical lines here
-    // would over-count an untested file and dishonestly DEPRESS coverage, the
-    // mirror of the inflation this generator prevents. Skip it (contributes 0),
-    // exactly as v8 did. `config.ts` is the load-bearing case: 315 type-only lines
-    // imported by ~40 tests, all `import type`, so no test ever loads it at runtime.
-    if (isTypeOnly(src)) continue;
-    const found = countCodeLines(src);
-    if (found === 0) continue;
-    entries.push([
-      path,
-      {
-        lines: new Map(Array.from({ length: found }, (_, i) => [i + 1, 0])),
-        fnFound: 0,
-        fnHit: 0,
-        fnNames: new Map(),
-      },
-    ]);
-  }
-  return entries;
-}
-
 const missing = inputs.filter((p) => !existsSync(p));
 if (missing.length > 0) {
   console.error(`coverage: named report(s) missing — ${missing.join(', ')}`);
@@ -167,11 +99,37 @@ if (inputs.length === 0) {
 
 const merged = mergeLcov(inputs.map((p) => readFileSync(p, 'utf8')));
 
-// Reinstate vitest's old denominator role deterministically: enumerate the
-// source files and fold in a 0% entry for any the bun suite never loaded. Only
-// in the disk-scan mode — an explicit `--lcov=` run controls its own inputs.
+/**
+ * Enumerate the tracked source files for the denominator. The spawn lives HERE,
+ * in the script, rather than in the `scripts/lib` helper — the prover-lane audit
+ * forbids a shared lib helper from spawning, and keeping `generateDenominator`
+ * pure is also what makes it unit-testable. Fail-closed: an unreachable
+ * enumeration is a FAILURE, never a pass — a shrunken denominator reads as higher
+ * coverage, the exact dishonesty this gate prevents.
+ */
+function enumerateSourceFiles() {
+  try {
+    return execFileSync('git', ['ls-files', '-z', 'packages'], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+    })
+      .split('\0')
+      .filter(Boolean);
+  } catch {
+    console.error('coverage: could not enumerate source files for the denominator (git ls-files).');
+    process.exit(1);
+  }
+}
+
+// Reinstate vitest's old denominator role deterministically (see
+// `scripts/lib/coverage-denominator.mjs`): enumerate the source files and fold
+// in a 0% entry for any the bun suite never loaded. Only in the disk-scan mode —
+// an explicit `--lcov=` run controls its own inputs.
 if (!explicit.length) {
-  for (const [path, cov] of denominatorEntries(merged)) merged.set(path, cov);
+  for (const [path, cov] of generateDenominator(REPO_ROOT, enumerateSourceFiles(), merged)) {
+    merged.set(path, cov);
+  }
 }
 
 /**

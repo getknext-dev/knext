@@ -154,7 +154,7 @@ jobs:
 
       # @getknext/core ships only dist/ and its exports resolve to ./dist/* (#114).
       # The publish-surface test asserts every exports subpath exists in dist, so
-      # core MUST be built before vitest runs. @getknext/lib must be built first —
+      # core MUST be built before the bun suite runs. @getknext/lib must be built first —
       # core's dts build imports @getknext/lib/clients types (next-adapter.ts:122),
       # so without lib's dist the core build hard-fails (TS2307). Same lib→core
       # order as the compat-smoke and bytecode jobs.
