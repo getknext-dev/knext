@@ -11,7 +11,7 @@
     "compat-smoke": "node scripts/compat-smoke.mjs",
     "prod-image-probe": "node scripts/prod-image-probe.mjs",
     "prod-image-probe:selftest": "node scripts/prod-image-probe.selftest.mjs",
-    "build:exec": "kn-next build --target=vinext"
+    "build:exec": "kn-next build"
   },
   "dependencies": {
     "@getknext/lib": "workspace:*",
