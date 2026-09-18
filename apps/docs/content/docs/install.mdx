@@ -68,8 +68,18 @@ collision and says how to resolve it.
 ## 3 · cert-manager
 
 The operator runs a validating webhook, which needs a serving certificate.
-[cert-manager](https://cert-manager.io) must be installed in the cluster before you apply the
-bundle — the bundle includes the operator's `Issuer`/`Certificate` for the webhook.
+[cert-manager](https://cert-manager.io) must be installed in the cluster **before** you apply the
+bundle — the bundle ships the operator's `Issuer`/`Certificate` for the webhook, which are
+`cert-manager.io/v1` resources. On a fresh cluster without cert-manager, applying the operator
+bundle fails with `no matches for kind "Certificate" in version "cert-manager.io/v1"`.
+
+Install it first, then wait for the webhook to be ready:
+
+```sh title="shell"
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml
+kubectl wait --for=condition=Available --timeout=120s \
+  -n cert-manager deployment/cert-manager deployment/cert-manager-webhook deployment/cert-manager-cainjector
+```
 
 ## 4 · Install the operator
 

@@ -17,7 +17,17 @@ Service with `minScale: 0`.
   (install both the Serving components and Kourier). The operator bundle pins
   Kourier as the ingress class.
 - **[cert-manager](https://cert-manager.io/docs/installation/)** installed in the
-  cluster (the operator bundle includes certificates for its admission webhook).
+  cluster **before** you apply the operator bundle — the bundle ships the
+  operator's `Issuer`/`Certificate` (`cert-manager.io/v1`) for its admission
+  webhook, so on a fresh cluster the operator apply fails with
+  `no matches for kind "Certificate" in version "cert-manager.io/v1"` until
+  cert-manager is present. Install it, then wait for the webhook:
+
+  ```sh
+  kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml
+  kubectl wait --for=condition=Available --timeout=120s \
+    -n cert-manager deployment/cert-manager deployment/cert-manager-webhook deployment/cert-manager-cainjector
+  ```
 - **kubectl** configured against that cluster.
 - **Node.js 22.18 or newer** (24 LTS recommended). The CLI runs on plain Node —
   no Bun required — and loads your TypeScript config file with Node's built-in
