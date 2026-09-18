@@ -9,6 +9,11 @@
 set -eu
 NS=scale-zero-pg
 K="kubectl -n $NS"
+# F6: GET /metrics.json is bearer-authenticated (fail-closed). Fetch the shared
+# fleet token the gateway mounts as GW_PEER_TOKEN (Secret pggw-peer-token, key
+# `token` — see deploy/gen-peer-token.sh + 10-gateway.yaml) ONCE and attach it as
+# an Authorization header on every peer scrape below (401 otherwise -> empty read).
+PEER_TOKEN=$($K get secret pggw-peer-token -o jsonpath='{.data.token}' 2>/dev/null | base64 -d 2>/dev/null || true)
 # Shared drill budget helpers (#340): adaptive wake budget (measured probe + safe
 # fallback) + bounded retry, so a transient scheduling stall on a pressured cluster
 # does not false-FAIL the DoD loop. HERE resolves this script's dir for the source.
@@ -70,7 +75,7 @@ METRIC() { # $1 tag  $2 field  $3 op: sum|max (default sum)
   IPS=$($K get pods -l app=pggw -o jsonpath='{.items[*].status.podIP}')
   $K run metric-$$-$1 --image=curlimages/curl:8.11.1 --restart=Never --rm -i --quiet \
     --command -- sh -c "t=0; for ip in $IPS; do
-        v=\$(curl -s http://\$ip:9090/metrics.json | grep -o '\"$2\": *[0-9.]*' | head -1 | grep -o '[0-9.]*\$'); v=\${v%.*};
+        v=\$(curl -s -H \"Authorization: Bearer $PEER_TOKEN\" http://\$ip:9090/metrics.json | grep -o '\"$2\": *[0-9.]*' | head -1 | grep -o '[0-9.]*\$'); v=\${v%.*};
         if [ '${3:-sum}' = max ]; then [ \"\$v\" -gt \"\$t\" ] && t=\$v; else t=\$((t + v)); fi; done; echo \$t" 2>/dev/null
 }
 # Count ALL compute pod objects (Terminating included): a draining pod still

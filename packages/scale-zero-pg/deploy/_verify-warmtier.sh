@@ -16,6 +16,11 @@ set -eu
 cd "$(dirname "$0")"
 NS=scale-zero-pg
 K="kubectl -n $NS"
+# F6: GET /metrics.json is bearer-authenticated (fail-closed). Fetch the shared
+# fleet token the gateway mounts as GW_PEER_TOKEN (Secret pggw-peer-token, key
+# `token` — see deploy/gen-peer-token.sh + 10-gateway.yaml) ONCE; WARM_METRIC
+# attaches it as an Authorization header (401 otherwise -> empty read).
+PEER_TOKEN=$($K get secret pggw-peer-token -o jsonpath='{.data.token}' 2>/dev/null | base64 -d 2>/dev/null || true)
 # Throwaway psql CLIENT pods use a small, ALWAYS-PULLABLE psql image (issue #171):
 # the neon compute image is pre-pulled on only SOME nodes, so a client pod pinned
 # to it with imagePullPolicy=Never intermittently hits ErrImageNeverPull (and its
@@ -77,7 +82,7 @@ WARM_METRIC() { # $1 field
   MC=$((MC + 1))
   IP=$($K get pods -l app=pggw-warm -o jsonpath='{.items[0].status.podIP}' 2>/dev/null)
   $K run "wmetric-$$-$MC" --image=curlimages/curl:8.11.1 --restart=Never --rm -i --quiet \
-    --command -- sh -c "curl -s http://$IP:9090/metrics.json | grep -o '\"$1\": *[0-9.]*' | head -1 | grep -o '[0-9.]*\$'" 2>/dev/null | tr -d '\r'
+    --command -- sh -c "curl -s -H \"Authorization: Bearer $PEER_TOKEN\" http://$IP:9090/metrics.json | grep -o '\"$1\": *[0-9.]*' | head -1 | grep -o '[0-9.]*\$'" 2>/dev/null | tr -d '\r'
 }
 
 COMPUTE_PODS() { $K get pods -l app=compute --no-headers 2>/dev/null | grep -c . || true; }
