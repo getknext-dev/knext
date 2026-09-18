@@ -52,7 +52,9 @@ import {
     handleConfigNotFound,
     handleUsageError,
     loadConfig,
+    resolveKubeContext,
     UsageError,
+    withKubeContext,
 } from "./shared";
 import { requireBuildContext } from "./tracing-root";
 
@@ -108,6 +110,8 @@ export interface PreviewDeployOptions {
     prId: string;
     branch: string;
     namespace: string;
+    /** kubectl context to target (#978); undefined ⇒ ambient current-context. */
+    context?: string;
 }
 
 /**
@@ -115,7 +119,11 @@ export interface PreviewDeployOptions {
  * namespace; MUST THROW when the installed CRD would reject or prune a field.
  * Injected so tests drive it without a cluster.
  */
-export type PreviewPreflight = (crPath: string, namespace: string) => void;
+export type PreviewPreflight = (
+    crPath: string,
+    namespace: string,
+    context?: string,
+) => void;
 
 export interface PreviewDeployDeps {
     apply: PreviewExec;
@@ -126,11 +134,13 @@ export interface PreviewDeployDeps {
 }
 
 /** The real preflight: server-side dry-run apply, hard failure (#314, T6). */
-const defaultPreflight: PreviewPreflight = (crPath, namespace) => {
+const defaultPreflight: PreviewPreflight = (crPath, namespace, context) => {
     assertCRSchemaCompatible({
         crPath,
         namespace,
-        kubectl: captureKubectl,
+        // #978: bind the target context so the dry-run apply + schema reads hit
+        // the named cluster, not the ambient current-context.
+        kubectl: (argv) => captureKubectl(withKubeContext(argv, context)),
     });
 };
 
@@ -208,7 +218,11 @@ export async function runPreviewDeploy(
         ),
         "utf-8",
     );
-    (deps.preflight ?? defaultPreflight)(preflightCrPath, options.namespace);
+    (deps.preflight ?? defaultPreflight)(
+        preflightCrPath,
+        options.namespace,
+        options.context,
+    );
 
     const imageRef = await deps.buildAndPush(
         previewName,
@@ -240,27 +254,37 @@ export async function runPreviewDeploy(
     // CR apply (see deploy.ts): a preview renders the SAME NextApp CR from the
     // same builder against the same CRD, so it carries the same field-skew
     // risk — and CI/PR-bot runs hit this path far more often than `deploy`.
-    deps.apply([
-        "kubectl",
-        "apply",
-        "--validate=strict",
-        "-f",
-        crPath,
-        "-n",
-        options.namespace,
-    ]);
+    deps.apply(
+        withKubeContext(
+            [
+                "kubectl",
+                "apply",
+                "--validate=strict",
+                "-f",
+                crPath,
+                "-n",
+                options.namespace,
+            ],
+            options.context,
+        ),
+    );
 
     const url = deps
-        .capture([
-            "kubectl",
-            "get",
-            "nextapp",
-            previewName,
-            "-n",
-            options.namespace,
-            "-o",
-            "jsonpath={.status.url}",
-        ])
+        .capture(
+            withKubeContext(
+                [
+                    "kubectl",
+                    "get",
+                    "nextapp",
+                    previewName,
+                    "-n",
+                    options.namespace,
+                    "-o",
+                    "jsonpath={.status.url}",
+                ],
+                options.context,
+            ),
+        )
         .replace(/'/g, "")
         .trim();
 
@@ -270,6 +294,8 @@ export async function runPreviewDeploy(
 export interface PreviewDestroyOptions {
     prId: string;
     namespace: string;
+    /** kubectl context to target (#978); undefined ⇒ ambient current-context. */
+    context?: string;
 }
 
 /**
@@ -283,15 +309,20 @@ export function runPreviewDestroy(
     exec: PreviewExec = runQuiet,
 ): void {
     const previewName = derivePreviewName(config.name, options.prId);
-    exec([
-        "kubectl",
-        "delete",
-        "nextapp",
-        previewName,
-        "-n",
-        options.namespace,
-        "--ignore-not-found",
-    ]);
+    exec(
+        withKubeContext(
+            [
+                "kubectl",
+                "delete",
+                "nextapp",
+                previewName,
+                "-n",
+                options.namespace,
+                "--ignore-not-found",
+            ],
+            options.context,
+        ),
+    );
 }
 
 /** Extract the `:tag` between the repo path and `@sha256:` from a pinned ref. */
@@ -374,6 +405,8 @@ interface PreviewArgs {
     prId?: string;
     branch?: string;
     namespace: string;
+    /** kubectl context to target (#978); undefined ⇒ ambient current-context. */
+    context?: string;
 }
 
 /** Parse argv into preview options. First positional is the subcommand. */
@@ -384,6 +417,7 @@ export function parsePreviewArgs(argv: readonly string[]): PreviewArgs {
             pr: { type: "string" },
             branch: { type: "string" },
             namespace: { type: "string", short: "n", default: "default" },
+            context: { type: "string" },
         },
         strict: true,
         allowPositionals: true,
@@ -399,6 +433,7 @@ export function parsePreviewArgs(argv: readonly string[]): PreviewArgs {
         prId: values.pr,
         branch: values.branch,
         namespace: values.namespace ?? "default",
+        context: values.context,
     };
 }
 
@@ -417,6 +452,7 @@ async function preview() {
         runPreviewDestroy(config, {
             prId: args.prId,
             namespace: args.namespace,
+            context: resolveKubeContext(args.context),
         });
         log.info("✨ Preview destroyed!");
         return;
@@ -438,6 +474,7 @@ async function preview() {
             prId: args.prId,
             branch: args.branch,
             namespace: args.namespace,
+            context: resolveKubeContext(args.context),
         },
         {
             apply: runInherit,

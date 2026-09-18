@@ -175,6 +175,7 @@ export const CLI_HELP = `${[
     "  -b, --bucket    Storage bucket (overrides config)",
     "  -t, --tag       Image tag (default: timestamp)",
     "  -n, --namespace Kubernetes namespace (default: default)",
+    "  --context <ctx> kubectl context to target (default: current-context)",
     "  --image <ref>   Deploy a pre-built, digest-pinned image (registry/name@sha256:...).",
     "                  Implies --skip-build + --skip-upload (the image self-serves its",
     "                  baked assets); overrides --registry.",

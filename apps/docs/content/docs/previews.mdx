@@ -27,6 +27,7 @@ kn-next preview destroy --pr 42
 | `--pr <n>` | Required. PR number; forms the `<app>-pr-<n>` name. |
 | `--branch <ref>` | Required for `deploy`. Git ref to build from. |
 | `-n`, `--namespace` | Target namespace (default `default`). |
+| `--context <ctx>` | kubectl context to target (default: your current-context; env fallback `KN_CONTEXT`). |
 
 `preview deploy` prints the resolved preview URL (read back from `status.url`) to stdout so CI can
 post it on the PR. The derived name must be a valid DNS-1123 label ≤63 chars, so a very long app

@@ -36,7 +36,12 @@ import YAML from "yaml";
 import type { KnativeNextConfig } from "../config";
 import { createLogger } from "../utils/logger";
 import { runCapture } from "./exec";
-import { loadConfig, UsageError } from "./shared";
+import {
+    loadConfig,
+    resolveKubeContext,
+    UsageError,
+    withKubeContext,
+} from "./shared";
 
 const log = createLogger({ module: "db-bind" });
 
@@ -66,6 +71,8 @@ export interface DbBindOptions {
     dsn?: string;
     /** Optional local Secret manifest to resolve the DSN from. */
     secretFile?: string;
+    /** kubectl context to target (#978); undefined ⇒ ambient current-context. */
+    context?: string;
 }
 
 /** Parse `kn-next db bind` argv (after the `db bind` words). */
@@ -95,6 +102,8 @@ export function parseDbBindArgs(argv: readonly string[]): DbBindOptions {
             out.roKey = need(a, ++i);
         } else if (a === "-n" || a === "--namespace") {
             out.namespace = need(a, ++i);
+        } else if (a === "--context") {
+            out.context = need(a, ++i);
         } else if (a === "--dry-run") {
             out.dryRun = true;
         } else if (a === "--dsn") {
@@ -336,6 +345,9 @@ export async function runDbBind(
     localConfig?: unknown,
 ): Promise<void> {
     validateDbBindOptions(opts);
+    // #978: every kubectl call this bind issues must target the NAMED cluster,
+    // not the ambient current-context.
+    const context = resolveKubeContext(opts.context);
 
     // Local config cross-check — envMap DATABASE_URL/_RO collisions (rules
     // 3/4) may be visible in kn-next.config.ts before ever reaching a CR.
@@ -361,16 +373,21 @@ export async function runDbBind(
     // BEFORE emitting the single write.
     let liveRaw: string;
     try {
-        liveRaw = deps.exec([
-            "kubectl",
-            "get",
-            "nextapp",
-            appName,
-            "-n",
-            opts.namespace,
-            "-o",
-            "json",
-        ]);
+        liveRaw = deps.exec(
+            withKubeContext(
+                [
+                    "kubectl",
+                    "get",
+                    "nextapp",
+                    appName,
+                    "-n",
+                    opts.namespace,
+                    "-o",
+                    "json",
+                ],
+                context,
+            ),
+        );
     } catch (err) {
         throw new Error(
             `NextApp "${appName}" not found in namespace "${opts.namespace}" — run \`kn-next deploy\` first, or use --dry-run to preview the patch. (${(err as Error).message})`,
@@ -380,33 +397,43 @@ export async function runDbBind(
     validateBindAgainstSpec(opts, live.spec ?? {}, "cluster");
 
     const patch = buildDbBindPatch(opts);
-    deps.exec([
-        "kubectl",
-        "patch",
-        "nextapp",
-        appName,
-        "-n",
-        opts.namespace,
-        "--type",
-        "merge",
-        "-p",
-        JSON.stringify(patch),
-    ]);
+    deps.exec(
+        withKubeContext(
+            [
+                "kubectl",
+                "patch",
+                "nextapp",
+                appName,
+                "-n",
+                opts.namespace,
+                "--type",
+                "merge",
+                "-p",
+                JSON.stringify(patch),
+            ],
+            context,
+        ),
+    );
 
     // Silent-prune guard: on a cluster whose operator predates the
     // spec.database.secretRef schema (pre-#222 CRD), structural-schema pruning
     // drops the field — `kubectl patch` still exits 0 and NOTHING binds.
     // Re-read the CR and fail loudly instead of logging a false success.
-    const verifyRaw = deps.exec([
-        "kubectl",
-        "get",
-        "nextapp",
-        appName,
-        "-n",
-        opts.namespace,
-        "-o",
-        "json",
-    ]);
+    const verifyRaw = deps.exec(
+        withKubeContext(
+            [
+                "kubectl",
+                "get",
+                "nextapp",
+                appName,
+                "-n",
+                opts.namespace,
+                "-o",
+                "json",
+            ],
+            context,
+        ),
+    );
     const verified = JSON.parse(verifyRaw) as {
         spec?: { database?: { secretRef?: unknown } };
     };
@@ -431,6 +458,7 @@ Options:
   --ro-secret <name>    Secret carrying a read-only DSN -> DATABASE_URL_RO
   --ro-key <key>        Key inside --ro-secret (server default: DATABASE_URL_RO)
   -n, --namespace <ns>  Kubernetes namespace (default: default)
+      --context <ctx>   kubectl context to target (default: current-context)
   --dry-run             Print the CR merge-patch YAML without applying it
   --dsn <dsn>           Local-only DSN to run the connection-contract check on
   --secret-file <path>  Local Secret manifest to resolve the DSN from

@@ -29,7 +29,9 @@ import {
     handleConfigNotFound,
     handleUsageError,
     loadConfig,
+    resolveKubeContext,
     UsageError,
+    withKubeContext,
 } from "./shared";
 
 const log = createLogger({ module: "cleanup" });
@@ -50,8 +52,14 @@ export type CleanupExec = (argv: readonly string[]) => void;
 export function runCleanup(
     config: KnativeNextConfig,
     exec: CleanupExec = runQuiet,
+    context?: string,
 ): void {
-    exec(["kubectl", "delete", "nextapp", config.name, "--ignore-not-found"]);
+    exec(
+        withKubeContext(
+            ["kubectl", "delete", "nextapp", config.name, "--ignore-not-found"],
+            context,
+        ),
+    );
 }
 
 /**
@@ -59,15 +67,18 @@ export function runCleanup(
  * `kn-next cleanup` bin subcommand can dispatch to it (the module also remains
  * a documented directly-runnable entry — see the self-entry block below).
  */
-export async function cleanup() {
+export async function cleanup(context?: string) {
     log.info("🧹 kn-next cleanup");
 
     log.info("Loading configuration...");
     const config = await loadConfig();
     log.info({ app: config.name }, "Configuration loaded");
 
-    log.info("Deleting NextApp CR (operator finalizer clears the rest)...");
-    runCleanup(config);
+    log.info(
+        { context: context ?? "(ambient current-context)" },
+        "Deleting NextApp CR (operator finalizer clears the rest)...",
+    );
+    runCleanup(config, runQuiet, context);
     log.info(
         { nextapp: config.name },
         "Deleted NextApp CR — operator will GC children and clear external state",
@@ -86,10 +97,12 @@ named in kn-next.config.ts. Owned resources (Knative Service, ServiceAccount,
 PVC) go with it via owner-reference garbage collection, and the operator's
 finalizer clears this app's object-store prefix and Redis keyspace.
 
-This is DESTRUCTIVE and takes no options — a stray flag is an error, never an
+This is DESTRUCTIVE — a stray positional or unknown flag is an error, never an
 ignored argument.
 
 Options:
+      --context <ctx>   kubectl context to target (default: current-context).
+                        Targets THAT cluster, never the ambient one.
   -h, --help            Show this help
 `;
 
@@ -107,15 +120,34 @@ export async function cleanupMain(argv: readonly string[]): Promise<number> {
         writeSync(1, CLEANUP_HELP);
         return 0;
     }
-    const stray = argv[0];
-    if (stray !== undefined) {
-        throw new UsageError(
-            stray.startsWith("-")
-                ? `unknown flag "${stray}" — kn-next cleanup takes no options (see kn-next cleanup --help)`
-                : `unexpected positional ${JSON.stringify(stray)} — the app comes from kn-next.config.ts (see kn-next cleanup --help)`,
-        );
+    // The ONLY flag cleanup accepts is --context (#978): a destructive verb must
+    // target the cluster the user NAMED, not the ambient current-context.
+    // Everything else is still a hard error — for a teardown, "ignored the flag
+    // and did it anyway" is the worst possible reading.
+    let contextFlag: string | undefined;
+    for (let i = 0; i < argv.length; i++) {
+        const a = argv[i];
+        if (a === "--context") {
+            const v = argv[++i];
+            if (v === undefined || v.startsWith("-")) {
+                throw new UsageError(
+                    "--context requires a value (see kn-next cleanup --help)",
+                );
+            }
+            contextFlag = v;
+        } else if (a.startsWith("--context=")) {
+            contextFlag = a.slice("--context=".length);
+        } else if (a.startsWith("-")) {
+            throw new UsageError(
+                `unknown flag "${a}" — kn-next cleanup accepts only --context (see kn-next cleanup --help)`,
+            );
+        } else {
+            throw new UsageError(
+                `unexpected positional ${JSON.stringify(a)} — the app comes from kn-next.config.ts (see kn-next cleanup --help)`,
+            );
+        }
     }
-    await cleanup();
+    await cleanup(resolveKubeContext(contextFlag));
     return 0;
 }
 

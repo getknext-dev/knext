@@ -486,6 +486,35 @@ describe("NextApp CR apply — asserted strict field validation", () => {
         expect(argv[argv.indexOf("-f") + 1]).toMatch(/nextapp-cr\.yaml$/);
         expect(argv[argv.indexOf("-n") + 1]).toBe("prod");
     });
+
+    // #978: deploy must target the NAMED context, not the ambient one. Without
+    // this the apply/status-read hit whatever kubectl's current-context is.
+    it("threads --context <ctx> into the apply argv when --context is passed", async () => {
+        setArgv(["deploy", "--tag", "deploytag", "--context", "staging"]);
+        const deploy = await importDeploy();
+        await deploy();
+
+        // withKubeContext inserts `--context <ctx>` right after `kubectl`, so
+        // the verb is no longer at argv[1] — locate the apply by content.
+        const call = runInherit.mock.calls.find(
+            (c) => argvOf(c)[0] === "kubectl" && argvOf(c).includes("apply"),
+        );
+        const argv = call ? argvOf(call) : [];
+        const idx = argv.indexOf("--context");
+        expect(idx).toBe(1);
+        expect(argv[idx + 1]).toBe("staging");
+        expect(argv.filter((a) => a === "--context")).toHaveLength(1);
+        // Still a strict, additive apply — the flag did not displace anything.
+        expect(argv).toContain("--validate=strict");
+    });
+
+    it("issues NO --context when the flag is absent (ambient current-context)", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const deploy = await importDeploy();
+        await deploy();
+
+        expect(applyArgv() ?? []).not.toContain("--context");
+    });
 });
 
 describe("NextApp CR apply — a rejected apply is never swallowed", () => {

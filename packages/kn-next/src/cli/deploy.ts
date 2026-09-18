@@ -56,7 +56,9 @@ import {
     handleConfigNotFound,
     handleUsageError,
     loadConfig,
+    resolveKubeContext,
     UsageError,
+    withKubeContext,
 } from "./shared";
 import { requireBuildContext } from "./tracing-root";
 
@@ -67,6 +69,8 @@ interface DeployOptions {
     bucket?: string;
     tag?: string;
     namespace: string;
+    /** kubectl context to target (#978); undefined ⇒ ambient current-context. */
+    context?: string;
     skipBuild: boolean;
     skipUpload: boolean;
     dryRun: boolean;
@@ -117,6 +121,7 @@ function parseCliArgs(): DeployOptions {
         bucket?: string;
         tag?: string;
         namespace?: string;
+        context?: string;
         "skip-build"?: boolean;
         "skip-upload"?: boolean;
         "dry-run"?: boolean;
@@ -132,6 +137,7 @@ function parseCliArgs(): DeployOptions {
                 bucket: { type: "string", short: "b" },
                 tag: { type: "string", short: "t" },
                 namespace: { type: "string", short: "n", default: "default" },
+                context: { type: "string" },
                 "skip-build": { type: "boolean", default: false },
                 "skip-upload": { type: "boolean", default: false },
                 "dry-run": { type: "boolean", default: false },
@@ -191,6 +197,7 @@ function parseCliArgs(): DeployOptions {
         bucket: values.bucket || process.env.KN_BUCKET,
         tag: values.tag || process.env.KN_IMAGE_TAG,
         namespace: values.namespace || process.env.KN_NAMESPACE || "default",
+        context: resolveKubeContext(values.context),
         skipBuild: values["skip-build"] ?? false,
         skipUpload: values["skip-upload"] ?? false,
         dryRun: values["dry-run"] ?? false,
@@ -326,6 +333,7 @@ async function runPrunePreflight(
     config: KnativeNextConfig,
     namespace: string,
     buildId: string,
+    context?: string,
 ): Promise<void> {
     const { writeFileSync, mkdirSync } = await import("node:fs");
     const crPath = join(process.cwd(), ".output", "nextapp-preflight-cr.yaml");
@@ -342,7 +350,10 @@ async function runPrunePreflight(
     );
 
     const outcome = preflightCRSchema(
-        { kubectl: captureKubectl },
+        // #978: bind the target context into the kubectl boundary so the
+        // server-side dry-run apply and the schema reads hit the cluster the
+        // user named, not the ambient current-context.
+        { kubectl: (argv) => captureKubectl(withKubeContext(argv, context)) },
         { crPath, namespace },
     );
     if (outcome.verdict === "ok") {
@@ -483,7 +494,12 @@ export async function deploy() {
     // #314 (T6): the prune preflight, BEFORE any side effect (see the block
     // comment on runPrunePreflight). A dry run makes no cluster calls at all.
     if (!options.dryRun) {
-        await runPrunePreflight(config, options.namespace, buildId);
+        await runPrunePreflight(
+            config,
+            options.namespace,
+            buildId,
+            options.context,
+        );
     }
 
     if (!options.skipBuild) {
@@ -827,15 +843,20 @@ export async function deploy() {
     // `kn-next doctor` reports when the local client is too old for the flag to
     // mean anything.
     try {
-        runInherit([
-            "kubectl",
-            "apply",
-            "--validate=strict",
-            "-f",
-            crPath,
-            "-n",
-            options.namespace,
-        ]);
+        runInherit(
+            withKubeContext(
+                [
+                    "kubectl",
+                    "apply",
+                    "--validate=strict",
+                    "-f",
+                    crPath,
+                    "-n",
+                    options.namespace,
+                ],
+                options.context,
+            ),
+        );
     } catch (err) {
         // Never swallow a failed apply — but do not name a cause knext cannot
         // establish. `runInherit` INHERITS stdio, so kubectl's stderr went
@@ -848,16 +869,21 @@ export async function deploy() {
     }
 
     // Wait briefly for the operator to begin reconciling, then read the URL.
-    const result = runCapture([
-        "kubectl",
-        "get",
-        "nextapp",
-        config.name,
-        "-n",
-        options.namespace,
-        "-o",
-        "jsonpath={.status.url}",
-    ]);
+    const result = runCapture(
+        withKubeContext(
+            [
+                "kubectl",
+                "get",
+                "nextapp",
+                config.name,
+                "-n",
+                options.namespace,
+                "-o",
+                "jsonpath={.status.url}",
+            ],
+            options.context,
+        ),
+    );
     log.info(
         { url: result.replace(/'/g, "") },
         "Deployment submitted — operator is reconciling",
@@ -873,7 +899,15 @@ export async function deploy() {
     // Best-effort: a GC failure never fails a deploy that has already shipped.
     if (!options.skipUpload && hasStorage(config)) {
         try {
-            const res = runAssetGC(config, options.namespace, buildId);
+            const res = runAssetGC(
+                config,
+                options.namespace,
+                buildId,
+                undefined,
+                undefined,
+                false,
+                options.context,
+            );
             if (!res.pruned) {
                 log.warn(
                     {

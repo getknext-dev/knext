@@ -167,6 +167,51 @@ export function handleConfigNotFound(
 }
 
 /**
+ * Thread an explicit `--context <ctx>` into a kubectl argv (#978).
+ *
+ * Every cluster-writing verb (deploy, cleanup, gc, rollback, db bind, preview)
+ * must target the cluster the user NAMED, not whatever `kubectl` happens to have
+ * as its ambient current-context — otherwise `kn-next cleanup --context staging`
+ * silently deletes on production. This is the single place that shape is built,
+ * so a verb honours `--context` by resolving it once (see {@link
+ * resolveKubeContext}) and wrapping every kubectl argv it issues.
+ *
+ * The flag is inserted immediately after the `kubectl` binary token. kubectl
+ * treats `--context` as a global flag, so position is not load-bearing, but
+ * keeping it first makes the argv guard's scan unambiguous. When no context was
+ * resolved the argv is returned UNCHANGED (a fresh copy) — the ambient
+ * current-context is the documented default, exactly as before this change.
+ *
+ * @param argv - a kubectl argv whose first element is the `kubectl` binary
+ * @param context - the resolved --context value, or undefined for "ambient"
+ */
+export function withKubeContext(
+    argv: readonly string[],
+    context?: string,
+): string[] {
+    if (!context) {
+        return [...argv];
+    }
+    const [cmd, ...rest] = argv;
+    if (cmd === undefined) {
+        // Defensive: an empty argv is a programmer error, but never fabricate a
+        // bare `kubectl --context <ctx>` out of nothing.
+        return [];
+    }
+    return [cmd, "--context", context, ...rest];
+}
+
+/**
+ * Resolve the kubectl context a verb should target: the explicit `--context`
+ * flag wins, else the `KN_CONTEXT` env var (parity with `KN_NAMESPACE`), else
+ * undefined ⇒ the ambient current-context. Returned undefined rather than a
+ * sentinel so {@link withKubeContext} is a no-op in the default case.
+ */
+export function resolveKubeContext(flag?: string): string | undefined {
+    return flag || process.env.KN_CONTEXT || undefined;
+}
+
+/**
  * Loads kn-next.config.ts from the current working directory.
  * Runs validation after loading — fails fast with clear error messages.
  */

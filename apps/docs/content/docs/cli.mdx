@@ -107,6 +107,7 @@ run `npm install` instead of printing a crash.
 | `-b`, `--bucket` | Storage bucket (overrides config; env fallback `KN_BUCKET`). Requires a `storage` block in the config — with none, the flag is a hard error rather than a silently-invented storage setup. |
 | `-t`, `--tag` | Image tag (default: timestamp; env fallback `KN_IMAGE_TAG`). The tag doubles as the Next.js `BUILD_ID` — see [Skew protection](/docs/skew-protection). |
 | `-n`, `--namespace` | Kubernetes namespace (default `default`; env fallback `KN_NAMESPACE`). |
+| `--context <ctx>` | kubectl context to target (default: your current-context; env fallback `KN_CONTEXT`). Every cluster call this deploy makes is sent to `<ctx>`, so it never lands on whichever cluster your kubeconfig happens to point at. |
 | `--image <ref>` | Deploy a **pre-built** image instead of building one. Applies a `NextApp` CR pointing at `<ref>` and does **no** docker build or push (env fallback `KN_IMAGE`). The ref must be **digest-pinned** (`registry/name@sha256:…`) — a tag-only ref is rejected, matching what the operator's admission accepts. Use it when you already have a published image or have no working `docker buildx`. A pre-built image is the source of truth for **both** its server and the static assets baked into it, so `--image` **implies `--skip-build` and `--skip-upload`**: knext does not re-run `next build` or upload assets, because it cannot know the image's baked `BUILD_ID` and any freshly-uploaded `_next/static/<id>/` prefix would not match what the deployed server serves (see [Skew protection](/docs/skew-protection)). `--registry` has no effect alongside it (the ref is already fully qualified) and is reported as ignored. |
 | `--skip-build` | Skip the `next build` step. |
 | `--skip-upload` | Skip the asset-upload step (also skips the post-deploy GC). |
@@ -158,8 +159,13 @@ Tears down the app named in `kn-next.config.ts` by issuing exactly **one** clust
 ServiceAccount, PVC) go with it via owner-reference garbage collection, and the operator's finalizer
 clears that app's object-store prefix and Redis keyspace — scoped strictly to that app.
 
-It takes **no options** beyond `-h`/`--help`; a stray flag is an error rather than an ignored
-argument, because the command is destructive.
+Because the command is destructive, a stray positional or an unknown flag is an error rather than an
+ignored argument.
+
+| Flag | Notes |
+|---|---|
+| `--context <ctx>` | kubectl context to target (default: your current-context; env fallback `KN_CONTEXT`). Cleanup deletes on `<ctx>`, never on whichever cluster your kubeconfig happens to point at — so `kn-next cleanup --context staging` cannot tear down production by mistake. |
+| `-h`, `--help` | Show the usage help. |
 
 ## `kn-next validate`
 
@@ -256,6 +262,7 @@ kn-next rollback acme                                    # clear the pin — bac
 | `--to <revision>` | Prior Knative Revision to pin. Omit to clear any pin. |
 | `--canary <n>` | Integer **1–99** only: percent sent to **latest-ready**; the remainder goes to the pinned revision. `0` and `100` are rejected (omit the flag, or don't pin). Requires `--to`. |
 | `-n`, `--namespace` | Namespace (default `default`). |
+| `--context <ctx>` | kubectl context to target (default: your current-context; env fallback `KN_CONTEXT`). |
 
 Because the bare form (`kn-next rollback <app>`) *clears* the pin, argument parsing is
 deliberately strict: a dangling `--to`, an unknown flag, or an extra positional is a hard error —
@@ -281,6 +288,7 @@ kn-next db bind acme --secret acme-db --dry-run                   # print the pa
 | `--ro-secret <name>` | Secret carrying a read-only DSN → `DATABASE_URL_RO`. |
 | `--ro-key <key>` | Key inside `--ro-secret` (default `DATABASE_URL_RO`). |
 | `-n`, `--namespace` | Namespace (default `default`). |
+| `--context <ctx>` | kubectl context to target (default: your current-context; env fallback `KN_CONTEXT`). |
 | `--dry-run` | Print the CR merge-patch YAML without applying it. |
 | `--dsn <dsn>` / `--secret-file <path>` | Local-only inputs for the connection-contract check (never sent to the cluster). |
 
@@ -331,6 +339,7 @@ kn-next gc --dry-run                # print the full reap/keep plan, delete noth
 |---|---|
 | `--build-id <id>` | Build-id to treat as the newest (e.g. a tag just deployed). |
 | `-n`, `--namespace` | Namespace of the `NextApp` (default `default`). |
+| `--context <ctx>` | kubectl context to target (default: your current-context; env fallback `KN_CONTEXT`). |
 | `--dry-run` | Compute and print the full reap/keep plan; issue **zero** deletes. Composes with `--build-id` and `-n`. |
 | `-h`, `--help` | Show the usage help. |
 
