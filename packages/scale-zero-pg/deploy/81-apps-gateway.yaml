@@ -146,6 +146,8 @@ spec:
               valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
             - name: GW_POD_IP
               valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            - name: GW_PEER_TOKEN # F6: shared fleet bearer token authenticating the peer idle-scrape (GET /metrics.json). Fail-closed: absent this Secret the gateway REFUSES to boot. Homogeneous fleet -> same pggw-peer-token Secret as the primary gateway. Mint via deploy/gen-peer-token.sh.
+              valueFrom: { secretKeyRef: { name: pggw-peer-token, key: token } }
             - name: GW_TLS_CERT_FILE # front-door TLS (issue #113): answer SSLRequest with 'S'
               value: "/etc/pggw-tls/tls.crt" # both set+loadable -> TLS on the wire
             - name: GW_TLS_KEY_FILE # sslmode=require works; sslmode=disable still allowed

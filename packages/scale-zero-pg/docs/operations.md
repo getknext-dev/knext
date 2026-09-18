@@ -1428,6 +1428,46 @@ or your org CA); swap the Secret contents and clients can then verify.
 `deploy/10-gateway.yaml` and restart. `SSLRequest` then gets `N` again and only
 `sslmode=disable` clients connect.
 
+## Peer-scrape token rotation
+
+The multi-replica idle decision reads each sibling gateway's active connection
+count from `GET /metrics.json`. That endpoint is authenticated by a shared fleet
+bearer token: every gateway pod reads the Secret `pggw-peer-token` as env
+`GW_PEER_TOKEN` and, as a server, requires `Authorization: Bearer <token>` on
+`/metrics.json` (401 otherwise), and as a client attaches that header when
+scraping peers. Only `/metrics.json` is gated — `/metrics` (Prometheus text)
+stays open for scraping.
+
+**Fail-closed by construction.** With `GW_PEER_TOKEN` empty and no explicit
+opt-out, the gateway **refuses to boot** rather than serve an unauthenticated
+`/metrics.json`. So shipping the Secret is the default: run
+`sh deploy/gen-peer-token.sh` **before** `kubectl apply -f deploy/10-gateway.yaml`
+(and `deploy/81-apps-gateway.yaml`). It mints a random 256-bit token into
+`pggw-peer-token` **only if absent** — idempotent, never rotates silently. The
+fleet is homogeneous: both gateway fronts mount the same Secret.
+
+**Dev-only opt-out.** Setting `GW_PEER_AUTH_DISABLED=true` starts the gateway
+with `/metrics.json` open and logs a loud `WARN`. Never use it in a shared or
+production cluster.
+
+**To rotate (deliberate):**
+
+1. Replace the token:
+   ```
+   kubectl -n scale-zero-pg delete secret pggw-peer-token
+   sh deploy/gen-peer-token.sh
+   ```
+2. Roll the gateways so they reload the env: `kubectl -n scale-zero-pg rollout
+   restart deploy/pggw deploy/pggw-apps`. The token is read once at startup, so
+   the restart is what picks it up.
+
+**Rotation is safe even mid-roll.** During the brief window where a scraping pod
+still holds the old token and a scraped pod already has the new one, the scrape
+gets a `401`. The gateway treats any non-200 peer response as **peer-unknown**
+and **postpones the sleep** (keeps the compute awake) rather than reading a bogus
+zero count — so a token mismatch can only delay a scale-to-zero, never wrongly
+scale an active database down. Once the roll completes, scrapes succeed again.
+
 ## Network isolation caveat
 
 `deploy/70-networkpolicy.yaml` (default-deny + per-flow allows; compute reachable

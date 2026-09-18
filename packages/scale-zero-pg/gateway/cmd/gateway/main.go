@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/alpheya/scale-zero-pg/gateway/internal/gateway"
+	"github.com/alpheya/scale-zero-pg/gateway/internal/metrics"
 	"github.com/alpheya/scale-zero-pg/gateway/internal/wake"
 )
 
@@ -38,11 +39,22 @@ func main() {
 	port := envInt("GW_PORT", 55432)
 	metricsPort := envInt("GW_METRICS_PORT", 9090)
 
+	// F6: fail-closed by construction. Resolve the peer-scrape bearer token BEFORE
+	// serving /metrics.json. An empty GW_PEER_TOKEN with no explicit
+	// GW_PEER_AUTH_DISABLED=true opt-out aborts the boot — never a silent open.
+	peerAuth, err := metrics.ResolvePeerAuth(os.Getenv)
+	if err != nil {
+		logger.Fatalf("[gw] %v", err)
+	}
+	if peerAuth.Disabled() {
+		logger.Printf("[gw] WARN: GW_PEER_AUTH_DISABLED=true — /metrics.json peer idle-scrape is UNAUTHENTICATED. Dev-only; NEVER run this in a shared/production cluster.")
+	}
+
 	// Peer-aware idle: with 2+ replicas, only sleep when the whole fleet is
 	// at zero. Selector/namespace/self-IP come from the Deployment (downward
 	// API); outside a cluster this stays nil and idle behaves single-replica.
 	peers, err := gateway.NewK8sPeers(
-		os.Getenv("GW_POD_NAMESPACE"), os.Getenv("GW_PEER_SELECTOR"), os.Getenv("GW_POD_IP"), metricsPort)
+		os.Getenv("GW_POD_NAMESPACE"), os.Getenv("GW_PEER_SELECTOR"), os.Getenv("GW_POD_IP"), metricsPort, os.Getenv("GW_PEER_TOKEN"))
 	if err != nil {
 		logger.Fatalf("[gw] peer checker: %v", err)
 	}
@@ -99,7 +111,7 @@ func main() {
 		roLnActive, roGwActive = roLn, roGw
 	}
 
-	metricsSrv := &http.Server{Addr: ":" + strconv.Itoa(metricsPort), Handler: gw.Metrics().Handler()}
+	metricsSrv := &http.Server{Addr: ":" + strconv.Itoa(metricsPort), Handler: gw.Metrics().HandlerWithPeerAuth(peerAuth)}
 	go func() {
 		if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Printf("[gw] metrics server: %v", err)

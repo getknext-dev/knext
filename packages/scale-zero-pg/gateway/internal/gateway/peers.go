@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -25,11 +26,17 @@ type k8sPeers struct {
 	selfIP      string
 	metricsPort int
 	http        *http.Client
+	// peerToken is the shared fleet bearer token (F6, GW_PEER_TOKEN) sent on each
+	// peer scrape. Empty only when peer-scrape auth is explicitly disabled (dev).
+	peerToken string
+	// logf logs a peer auth mismatch (401); nil-safe (defaults to log.Printf).
+	logf func(format string, args ...any)
 }
 
 // NewK8sPeers builds a PeerChecker from in-cluster config. Returns nil (no
-// peer checking) when not running in a cluster or selector is empty.
-func NewK8sPeers(namespace, selector, selfIP string, metricsPort int) (PeerChecker, error) {
+// peer checking) when not running in a cluster or selector is empty. peerToken
+// (GW_PEER_TOKEN, F6) authenticates the scrape against each peer's /metrics.json.
+func NewK8sPeers(namespace, selector, selfIP string, metricsPort int, peerToken string) (PeerChecker, error) {
 	if selector == "" || namespace == "" {
 		return nil, nil
 	}
@@ -48,6 +55,8 @@ func NewK8sPeers(namespace, selector, selfIP string, metricsPort int) (PeerCheck
 		selfIP:      selfIP,
 		metricsPort: metricsPort,
 		http:        &http.Client{Timeout: 2 * time.Second},
+		peerToken:   peerToken,
+		logf:        log.Printf,
 	}, nil
 }
 
@@ -83,11 +92,26 @@ func (p *k8sPeers) scrape(ctx context.Context, ip, key string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// F6: authenticate the scrape with the shared fleet bearer token.
+	if p.peerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+p.peerToken)
+	}
 	resp, err := p.http.Do(req)
 	if err != nil {
 		return 0, err
 	}
 	defer resp.Body.Close()
+	// C1 (LOAD-BEARING): check status BEFORE decoding. Any non-200 is a real
+	// error so the idle caller's err!=nil branch POSTPONES sleep (keeps the
+	// compute awake). Decoding a 401 body would yield Active=0 and wrongly scale
+	// an active DB to zero — the bug this guards. On 401 (peer auth mismatch,
+	// e.g. mid-rotation) log it, then return the error as "peer unknown".
+	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusUnauthorized && p.logf != nil {
+			p.logf("[gw] peer %s: /metrics.json 401 — peer auth token mismatch (rotation?); treating peer as unknown, postponing sleep", ip)
+		}
+		return 0, fmt.Errorf("peer %s: /metrics.json status %d", ip, resp.StatusCode)
+	}
 	var m struct {
 		PerSystem map[string]struct {
 			Active int `json:"active"`

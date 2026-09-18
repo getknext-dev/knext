@@ -3,13 +3,55 @@
 package metrics
 
 import (
+	"crypto/hmac"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
 	"strings"
 	"sync"
 )
+
+// PeerAuth configures bearer-token auth for the /metrics.json peer idle-scrape
+// (F6). It is fail-closed by construction — see ResolvePeerAuth.
+type PeerAuth struct {
+	token    string
+	disabled bool
+}
+
+// Disabled reports whether peer-scrape auth was EXPLICITLY turned off via the
+// dev opt-out (GW_PEER_AUTH_DISABLED=true). Boot logs a loud WARN in that case.
+func (a PeerAuth) Disabled() bool { return a.disabled }
+
+// ErrPeerAuthUnset is the fail-closed boot guard: an empty GW_PEER_TOKEN with no
+// explicit GW_PEER_AUTH_DISABLED=true opt-out must abort startup rather than
+// serve an open /metrics.json peer scrape.
+var ErrPeerAuthUnset = errors.New(
+	`GW_PEER_TOKEN is empty and GW_PEER_AUTH_DISABLED != "true": refusing to serve an unauthenticated /metrics.json peer idle-scrape. Set GW_PEER_TOKEN (from the pggw-peer-token Secret), or GW_PEER_AUTH_DISABLED=true for local dev only`)
+
+// ResolvePeerAuth reads the peer-scrape auth config, fail-closed by construction:
+// missing token without the explicit dev opt-out is a fatal error (never a
+// silent open). getenv is injectable for tests (pass os.Getenv in main).
+func ResolvePeerAuth(getenv func(string) string) (PeerAuth, error) {
+	token := getenv("GW_PEER_TOKEN")
+	disabled := getenv("GW_PEER_AUTH_DISABLED") == "true"
+	if token == "" && !disabled {
+		return PeerAuth{}, ErrPeerAuthUnset
+	}
+	return PeerAuth{token: token, disabled: disabled}, nil
+}
+
+// peerAuthOK constant-time-compares the Authorization header against the fleet
+// token. Requires the "Bearer " scheme; any mismatch (including a missing or
+// non-Bearer header) is a reject.
+func peerAuthOK(header, token string) bool {
+	const prefix = "Bearer "
+	if !strings.HasPrefix(header, prefix) {
+		return false
+	}
+	return hmac.Equal([]byte(header[len(prefix):]), []byte(token))
+}
 
 // sysMetrics holds per-compute-key counters.
 type sysMetrics struct {
@@ -274,14 +316,31 @@ func (m *Metrics) PromText() string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
-// Handler serves /healthz, /metrics.json and /metrics.
-func (m *Metrics) Handler() http.Handler {
+// Handler serves /healthz, /metrics.json and /metrics with NO peer-scrape auth.
+// Retained for the watcher sidecars (pswatcher, writer-autoscaler) that are not
+// peer-scraped; the gateway uses HandlerWithPeerAuth (F6).
+func (m *Metrics) Handler() http.Handler { return m.handler(nil) }
+
+// HandlerWithPeerAuth serves the same endpoints but gates /metrics.json behind a
+// bearer token (F6). /metrics (Prometheus text) and /healthz stay open.
+func (m *Metrics) HandlerWithPeerAuth(auth PeerAuth) http.Handler {
+	a := auth
+	return m.handler(&a)
+}
+
+// handler builds the mux. When auth is non-nil and not disabled, /metrics.json
+// requires Authorization: Bearer <auth.token> (constant-time compare) or 401.
+func (m *Metrics) handler(auth *PeerAuth) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
 	})
-	mux.HandleFunc("/metrics.json", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/metrics.json", func(w http.ResponseWriter, r *http.Request) {
+		if auth != nil && !auth.disabled && !peerAuthOK(r.Header.Get("Authorization"), auth.token) {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		m.mu.Lock()
 		b, err := json.MarshalIndent(m, "", "  ")
 		m.mu.Unlock()

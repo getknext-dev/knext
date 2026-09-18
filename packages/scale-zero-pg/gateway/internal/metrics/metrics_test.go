@@ -121,3 +121,119 @@ func TestHTTPEndpoints(t *testing.T) {
 		t.Fatalf("/metrics = %d %q", code, body)
 	}
 }
+
+// F6: with peer-scrape auth enabled, /metrics.json requires a matching bearer
+// token (401 otherwise), while /metrics (the Prometheus text endpoint) and
+// /healthz stay open — Prometheus scrapes /metrics, peers scrape /metrics.json.
+func TestMetricsJSONRequiresBearerToken(t *testing.T) {
+	m := NewMetrics()
+	m.ConnOpen("s")
+	auth, err := ResolvePeerAuth(func(k string) string {
+		if k == "GW_PEER_TOKEN" {
+			return "s3cr3t-fleet-token"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("ResolvePeerAuth: %v", err)
+	}
+	srv := httptest.NewServer(m.HandlerWithPeerAuth(auth))
+	defer srv.Close()
+
+	do := func(path, authHeader string) int {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+path, nil)
+		if authHeader != "" {
+			req.Header.Set("Authorization", authHeader)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		_, _ = io.ReadAll(resp.Body)
+		return resp.StatusCode
+	}
+
+	if code := do("/metrics.json", "Bearer s3cr3t-fleet-token"); code != 200 {
+		t.Fatalf("/metrics.json with correct bearer = %d, want 200", code)
+	}
+	if code := do("/metrics.json", "Bearer wrong-token"); code != 401 {
+		t.Fatalf("/metrics.json with wrong bearer = %d, want 401", code)
+	}
+	if code := do("/metrics.json", ""); code != 401 {
+		t.Fatalf("/metrics.json with no auth header = %d, want 401", code)
+	}
+	if code := do("/metrics.json", "s3cr3t-fleet-token"); code != 401 {
+		t.Fatalf("/metrics.json with non-Bearer scheme = %d, want 401", code)
+	}
+	// Prometheus text endpoint and healthz are NOT gated.
+	if code := do("/metrics", ""); code != 200 {
+		t.Fatalf("/metrics (prom text) with no auth = %d, want 200 (must stay open)", code)
+	}
+	if code := do("/healthz", ""); code != 200 {
+		t.Fatalf("/healthz with no auth = %d, want 200", code)
+	}
+}
+
+// F6 fail-closed by construction: an empty GW_PEER_TOKEN with no explicit
+// GW_PEER_AUTH_DISABLED opt-out is a fatal boot error — the /metrics.json scrape
+// must never serve open by accident. The dev opt-out disables auth explicitly.
+func TestResolvePeerAuthFailsClosed(t *testing.T) {
+	// empty token, no opt-out -> fatal error
+	if _, err := ResolvePeerAuth(func(string) string { return "" }); err == nil {
+		t.Fatal("ResolvePeerAuth with empty token and no opt-out: want error, got nil (silent-open regression)")
+	}
+
+	// explicit dev opt-out -> ok, and Disabled() reports true (main logs a WARN)
+	auth, err := ResolvePeerAuth(func(k string) string {
+		if k == "GW_PEER_AUTH_DISABLED" {
+			return "true"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("ResolvePeerAuth with opt-out: unexpected error %v", err)
+	}
+	if !auth.Disabled() {
+		t.Fatal("GW_PEER_AUTH_DISABLED=true should yield Disabled()==true")
+	}
+
+	// token set -> ok, auth enabled
+	auth, err = ResolvePeerAuth(func(k string) string {
+		if k == "GW_PEER_TOKEN" {
+			return "tok"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("ResolvePeerAuth with token: unexpected error %v", err)
+	}
+	if auth.Disabled() {
+		t.Fatal("a token was set; auth must be enabled (Disabled()==false)")
+	}
+}
+
+// With the dev opt-out, /metrics.json serves open (no bearer required).
+func TestMetricsJSONOpenWhenAuthDisabled(t *testing.T) {
+	m := NewMetrics()
+	auth, err := ResolvePeerAuth(func(k string) string {
+		if k == "GW_PEER_AUTH_DISABLED" {
+			return "true"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("ResolvePeerAuth: %v", err)
+	}
+	srv := httptest.NewServer(m.HandlerWithPeerAuth(auth))
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/metrics.json")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		t.Fatalf("/metrics.json with auth disabled = %d, want 200", resp.StatusCode)
+	}
+}
