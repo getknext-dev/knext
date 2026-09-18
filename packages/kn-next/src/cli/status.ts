@@ -30,7 +30,13 @@
 import { existsSync, writeSync } from "node:fs";
 import type { KnativeNextConfig } from "../config";
 import { type KubectlFn, kubectlRunner } from "./doctor";
-import { excerpt, loadConfig, UsageError } from "./shared";
+import {
+    excerpt,
+    loadConfig,
+    resolveKubeContext,
+    UsageError,
+    withKubeContext,
+} from "./shared";
 
 /** --watch poll interval. */
 const WATCH_INTERVAL_MS = 5_000;
@@ -51,6 +57,14 @@ export interface StatusOptions {
     watch: boolean;
     /** --watch bound; the poll gives up (exit 1) once this elapses. */
     timeoutMs: number;
+    /**
+     * kubectl context to target. `--context` wins over `KN_CONTEXT`, else
+     * undefined ⇒ the ambient current-context. The read must honour it so
+     * `kn-next status --context staging` reports staging's CR, never whatever
+     * cluster the kubeconfig happens to point at (the #978 wrong-cluster class,
+     * read-side).
+     */
+    context?: string;
 }
 
 /** Parse `kn-next status` argv (after the `status` word). */
@@ -77,6 +91,10 @@ export function parseStatusArgs(argv: readonly string[]): StatusOptions {
         const a = argv[i];
         if (a === "-n" || a === "--namespace") {
             out.namespace = need(a, ++i);
+        } else if (a === "--context") {
+            out.context = need(a, ++i);
+        } else if (a.startsWith("--context=")) {
+            out.context = a.slice("--context=".length);
         } else if (a === "--json") {
             out.json = true;
         } else if (a === "--watch") {
@@ -330,18 +348,24 @@ export interface StatusDeps {
 function fetchModel(
     appName: string,
     namespace: string,
+    context: string | undefined,
     deps: StatusDeps,
 ): StatusModel {
-    const r = deps.kubectl([
-        "kubectl",
-        "get",
-        "nextapp",
-        appName,
-        "-n",
-        namespace,
-        "-o",
-        "json",
-    ]);
+    const r = deps.kubectl(
+        withKubeContext(
+            [
+                "kubectl",
+                "get",
+                "nextapp",
+                appName,
+                "-n",
+                namespace,
+                "-o",
+                "json",
+            ],
+            context,
+        ),
+    );
     if (!r.ok) {
         const stderr = r.stderr.trim();
         if (/notfound|not found/i.test(stderr)) {
@@ -391,7 +415,7 @@ export async function runStatus(
     deps: StatusDeps,
 ): Promise<number> {
     if (!opts.watch) {
-        const model = fetchModel(appName, opts.namespace, deps);
+        const model = fetchModel(appName, opts.namespace, opts.context, deps);
         renderOnce(model, opts, deps);
         return exitCodeFor(model);
     }
@@ -403,7 +427,7 @@ export async function runStatus(
         // transient kubectl failures; only a persistent outage throws.
         let model: StatusModel | undefined;
         try {
-            model = fetchModel(appName, opts.namespace, deps);
+            model = fetchModel(appName, opts.namespace, opts.context, deps);
             consecutiveFailures = 0;
         } catch (err) {
             consecutiveFailures++;
@@ -444,6 +468,9 @@ Usage:
 
 Options:
   -n, --namespace <ns>  Kubernetes namespace (default: default)
+      --context <ctx>   kubectl context to target (default: current-context;
+                        env fallback KN_CONTEXT). Reads THAT cluster's CR, never
+                        the ambient one.
   --json                Emit the structured status subset as JSON (one-shot
                         only — cannot be combined with --watch; poll --json
                         from your script instead)
@@ -460,6 +487,9 @@ export async function statusMain(argv: readonly string[]): Promise<number> {
         return 0;
     }
     const opts = parseStatusArgs(argv);
+    // --context wins over KN_CONTEXT, else the ambient current-context — the
+    // same resolution every cluster-touching verb uses (see shared.ts).
+    opts.context = resolveKubeContext(opts.context);
 
     // Resolve the app name: positional wins, else the local config's name —
     // the same resolution `kn-next db bind` uses.

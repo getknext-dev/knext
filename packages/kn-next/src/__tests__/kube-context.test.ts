@@ -10,12 +10,22 @@
  */
 
 import { describe, expect, it, mock } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { runCleanup } from "../cli/cleanup";
 import { runDbBind } from "../cli/db-bind";
 import { runAssetGC } from "../cli/gc";
+import { runLoadTest } from "../cli/loadtest";
 import { runPreviewDeploy, runPreviewDestroy } from "../cli/preview";
 import { runRollback } from "../cli/rollback";
 import { resolveKubeContext, withKubeContext } from "../cli/shared";
+import {
+    parseStatusArgs,
+    runStatus,
+    type StatusDeps,
+    type StatusOptions,
+} from "../cli/status";
 import type { KnativeNextConfig } from "../config";
 
 const CTX = "staging-cluster";
@@ -204,5 +214,107 @@ describe("preview honours --context (#978)", () => {
             exec,
         );
         expectContext(exec.mock.calls[0][0] as string[], CTX);
+    });
+});
+
+describe("status honours --context (#978, read-side)", () => {
+    const deps = (kubectl: StatusDeps["kubectl"]): StatusDeps => ({
+        kubectl,
+        write: () => {},
+        now: () => new Date(0),
+        sleep: async () => {},
+    });
+    const opts = (context?: string): StatusOptions => ({
+        namespace: "default",
+        json: true,
+        watch: false,
+        timeoutMs: 1000,
+        context,
+    });
+
+    it("the `kubectl get nextapp` read argv carries --context", async () => {
+        const captured: string[][] = [];
+        const kubectl = mock((argv: readonly string[]) => {
+            captured.push([...argv]);
+            return { ok: true, stdout: "{}", stderr: "" };
+        });
+        await runStatus("my-app", opts(CTX), deps(kubectl));
+        const kubectlCalls = captured.filter((a) => a[0] === "kubectl");
+        expect(kubectlCalls.length).toBeGreaterThan(0);
+        for (const argv of kubectlCalls) {
+            expectContext(argv, CTX);
+        }
+    });
+
+    it("issues NO --context when none is resolved (ambient current-context)", async () => {
+        const captured: string[][] = [];
+        const kubectl = mock((argv: readonly string[]) => {
+            captured.push([...argv]);
+            return { ok: true, stdout: "{}", stderr: "" };
+        });
+        await runStatus("my-app", opts(undefined), deps(kubectl));
+        expect(captured[0]).not.toContain("--context");
+    });
+
+    it("parseStatusArgs reads --context and --context=<v>", () => {
+        expect(parseStatusArgs(["--context", CTX]).context).toBe(CTX);
+        expect(parseStatusArgs([`--context=${CTX}`]).context).toBe(CTX);
+        expect(parseStatusArgs([]).context).toBeUndefined();
+    });
+});
+
+describe("loadtest honours --context (#978, apply-side)", () => {
+    it("the k6-Job `kubectl apply` argv carries --context", async () => {
+        const savedCwd = process.cwd();
+        const dir = mkdtempSync(join(tmpdir(), "knext-loadtest-ctx-"));
+        process.chdir(dir);
+        try {
+            const captured: string[][] = [];
+            const exec = mock((argv: readonly string[]) => {
+                captured.push([...argv]);
+            });
+            await runLoadTest(
+                "my-app",
+                "https://app.example.com",
+                "smoke",
+                "default",
+                false,
+                CTX,
+                exec,
+            );
+            const kubectlCalls = captured.filter((a) => a[0] === "kubectl");
+            expect(kubectlCalls.length).toBeGreaterThan(0);
+            for (const argv of kubectlCalls) {
+                expectContext(argv, CTX);
+            }
+        } finally {
+            process.chdir(savedCwd);
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("issues NO --context when none is resolved (ambient current-context)", async () => {
+        const savedCwd = process.cwd();
+        const dir = mkdtempSync(join(tmpdir(), "knext-loadtest-noctx-"));
+        process.chdir(dir);
+        try {
+            const captured: string[][] = [];
+            const exec = mock((argv: readonly string[]) => {
+                captured.push([...argv]);
+            });
+            await runLoadTest(
+                "my-app",
+                "https://app.example.com",
+                "smoke",
+                "default",
+                false,
+                undefined,
+                exec,
+            );
+            expect(captured[0]).not.toContain("--context");
+        } finally {
+            process.chdir(savedCwd);
+            rmSync(dir, { recursive: true, force: true });
+        }
     });
 });
