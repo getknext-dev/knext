@@ -167,6 +167,25 @@ const files = execFileSync('git', ['ls-files', ...(targets.length ? targets : ['
 // test file imports `bun:test`, so a file that somehow imports `vitest` fails
 // loudly here rather than being silently skipped.
 
+// An explicitly-named target that IS an existing test file must run even if it
+// is UNTRACKED (#1073). `git ls-files` lists only tracked files, so a
+// freshly-written file — the mutation provers' green canary — matched nothing and
+// the runner exited 1 for a discovery reason, aborting the provers' RED-vs-GREEN
+// self-check. This honours the runner's own contract ("Naming a path is an
+// explicit request") for untracked files, in one place, rather than each prover
+// polluting the index with `git add`. Only a named FILE is unioned in — a named
+// directory is not a file to include directly, so it still expands via
+// `git ls-files` above. A genuinely-absent path matches nothing and still falls
+// through to the exit-1 guard the #879/#902 tests depend on.
+const named = new Set(files);
+for (const t of targets) {
+  const rel = resolve(REPO_ROOT, t);
+  if (!named.has(t) && existsSync(rel) && /\.test\.tsx?$/.test(t)) {
+    files.push(t);
+    named.add(t);
+  }
+}
+
 if (files.length === 0) {
   console.error('no test files matched');
   process.exit(1);
