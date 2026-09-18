@@ -291,6 +291,13 @@ func (r *NextAppReconciler) emitEvent(obj runtime.Object, eventType, reason, mes
 // there (config/rbac/appdb_driver.yaml); the appdatabases verbs live in that same
 // scoped Role (namespaced, NOT cluster-wide) — least privilege, no storage-plane access.
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// PersistentVolumeClaims: read-only. The controller-runtime cache watches
+// *v1.PersistentVolumeClaim (found live on EKS, #306/#1062); without a
+// cluster-scoped list/watch grant the manager's informer logs repeated
+// `persistentvolumeclaims is forbidden` errors. The operator no longer CREATES
+// PVCs (the PVC-backed bytecode cache was removed, ADR-0035), so this is
+// get;list;watch only — no create/update/delete — least privilege.
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
 
 func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	logger := logf.FromContext(ctx)
