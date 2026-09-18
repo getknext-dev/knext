@@ -133,9 +133,9 @@ describe("no-.ts-import-extension guard (#289, TS5097 class)", () => {
                 'import { a } from "./a.js";',
                 'import { b } from "./b";',
                 'import { join } from "node:path";',
-                'import vitest from "vitest";',
+                'import pkg from "some-bare-pkg";',
                 'const j = await import("./lazy.js");',
-                "export { a, b, join, vitest, j };",
+                "export { a, b, join, pkg, j };",
             ].join("\n") + "\n",
         );
         try {

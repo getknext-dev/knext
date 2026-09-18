@@ -209,35 +209,23 @@ jobs:
       - name: Typecheck file-manager (tsc --noEmit)
         run: bun run --filter file-manager typecheck
 
-      # BOTH runners. This step ran `vitest` alone, which after the bun migration
-      # collects 3 files out of 338 — so CI's primary test job was executing 12
-      # tests and reporting green, and the coverage gate below was measuring a
-      # denominator of 3 files. The root `package.json` `ci` script had the same
-      # staleness and was fixed; this copy was missed because nothing compares
-      # them.
-      #
-      # The bun runner first: it is the suite. `scripts/bun-test.mjs` exits
-      # non-zero on any failing file, and `tests/runner-partition.test.ts` asserts
-      # every test file is claimed by exactly one of the two runners, so "ran
-      # under neither" cannot hide here.
+      # The whole suite runs under bun (#871: vitest is gone). `scripts/bun-test.mjs`
+      # exits non-zero on any failing file, and `tests/runner-partition.test.ts`
+      # asserts every tracked test file imports `bun:test`, so a file that runs
+      # under no runner cannot hide here.
       #
       # `--coverage` here is NOT optional (#884). It is one lcov per spawned test
-      # file, in `coverage-bun/`, and it is almost the entire NUMERATOR of the
-      # coverage gate below. Dropping it would leave that gate measuring vitest's
-      # 3 files, which is how it came to report 1.37% against a 77% floor.
+      # file, in `coverage-bun/`, and it is the NUMERATOR of the coverage gate
+      # below; `check-coverage.mjs` supplies the honest DENOMINATOR itself by
+      # enumerating the source tree and folding untested files in at 0%.
       - name: Run tests (bun — the suite)
         run: node scripts/bun-test.mjs --coverage
 
-      # The vitest half. Its 3 test files barely move the numerator, but its
-      # `include` enumeration is the honest DENOMINATOR — every source file
-      # listed, untouched ones at 0%.
-      - name: Run tests (vitest — the 3 files that cannot run under bun)
-        run: bun x vitest run --coverage
-
-      # The gate itself: merge both runners' lcov, then check the floors from
-      # scripts/lib/coverage-policy.mjs. It must run AFTER both steps above, and
-      # it fails closed on a missing report — a coverage gate that goes green
-      # because it found nothing to measure is the defect this replaced.
+      # The gate itself: merge the bun per-file lcov, add the 0% denominator, then
+      # check the floors from scripts/lib/coverage-policy.mjs. It must run AFTER
+      # the bun step above, and it fails closed on a missing report — a coverage
+      # gate that goes green because it found nothing to measure is the defect
+      # this replaced.
       - name: Coverage gate (merged across both runners)
         run: node scripts/check-coverage.mjs
 

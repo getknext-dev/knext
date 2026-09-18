@@ -15,9 +15,9 @@
  * (left for a later cycle) and not `cli/doctor.ts` (owned by #1055).
  */
 
+import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
 
 const ADAPTERS = resolve(import.meta.dirname, "../adapters");
 

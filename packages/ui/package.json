@@ -9,7 +9,7 @@
     "./components/*": "./src/components/*.tsx"
   },
   "scripts": {
-    "test": "vitest",
+    "test": "node ../../scripts/bun-test.mjs packages/ui",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

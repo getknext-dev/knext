@@ -24,8 +24,9 @@
  * whole set"), which is what let the gate rot unnoticed (#884).
  *
  * So each spawn writes its own lcov into `coverage-bun/<n>-<file>.info`, and
- * `scripts/check-coverage.mjs` merges all of them with vitest's report before
- * checking any floor. Two measured facts hold that together:
+ * `scripts/check-coverage.mjs` merges all of them (and folds in a 0% entry for
+ * every untested source file — the honest denominator) before checking any
+ * floor. Two measured facts hold that together:
  *
  *   - bun writes `lcov.info` into ONE directory per process, so parallel spawns
  *     sharing a directory silently overwrite each other — hence a unique
@@ -160,28 +161,11 @@ const files = execFileSync('git', ['ls-files', ...(targets.length ? targets : ['
   // (`node ../../scripts/bun-test.mjs examples/bun-exec`) — excluding it there
   // made that script exit 1 with "no test files matched", which is how this
   // filter first went in and immediately broke the job it was protecting.
-  .filter((f) => targets.length > 0 || !/(^|\/)examples\//.test(f))
-  // The OTHER half of the partition `vitest.config.ts` derives.
-  //
-  // A file importing `vitest` cannot run here, exactly as a file importing
-  // `bun:test` cannot run there. vitest already excludes itself from bun files
-  // by scanning; without the mirror image, every not-yet-ported file in a
-  // half-migrated package is reported as a bun FAILURE — which buries the real
-  // ones and makes the migration look like it is going backwards.
-  //
-  // Derived, not listed, for the same reason: the partition then has exactly one
-  // definition per side and no list to keep in sync.
-  .filter((f) => {
-    try {
-      // ONE definition of the partition — see `vitest.config.ts` and
-      // `scripts/lib/test-framework-import.mjs`.
-      return !importsFrom(readFileSync(resolve(REPO_ROOT, f), 'utf8'), 'vitest');
-    } catch {
-      // Unreadable: run it. A file this runner skips silently is coverage lost
-      // with nothing to notice, which is worse than a loud failure.
-      return true;
-    }
-  });
+  .filter((f) => targets.length > 0 || !/(^|\/)examples\//.test(f));
+// #871: the whole suite runs under `bun test`. There is no longer a vitest half
+// to partition away — `tests/runner-partition.test.ts` asserts that every tracked
+// test file imports `bun:test`, so a file that somehow imports `vitest` fails
+// loudly here rather than being silently skipped.
 
 if (files.length === 0) {
   console.error('no test files matched');
