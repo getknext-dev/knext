@@ -184,7 +184,12 @@ mock.module("../cli/shared", () => ({
 // `default` (spread of the real default + the same overrides) so the mock stays
 // correct if deploy.ts ever switches to a default `import fs from "node:fs"` —
 // belt-and-suspenders, no behavior change to the current named-import path.
-const readFileSyncMock = mock<(...a: unknown[]) => string>(() => "");
+// Path-aware: the vinext build preflight reads package.json and needs a valid
+// ESM manifest. The turbopack skew-guard tests below override this wholesale,
+// but they use build:"turbopack" (requireEsm false), so they never preflight.
+const pkgOr = (fallback: string) => (p: unknown) =>
+    String(p).endsWith("package.json") ? '{"type":"module"}' : fallback;
+const readFileSyncMock = mock<(...a: unknown[]) => string>(pkgOr(""));
 const __knextReal2 = { ...(await import("node:fs")) };
 mock.module("node:fs", async () => {
     const actual = __knextReal2;
@@ -270,7 +275,7 @@ beforeEach(() => {
     runAssetGC.mockReturnValue({ pruned: true });
     loadConfig.mockResolvedValue(baseConfig);
     // Skew guard reads .next/BUILD_ID — default: match the tag we pass.
-    readFileSyncMock.mockReturnValue("deploytag");
+    readFileSyncMock.mockImplementation(pkgOr("deploytag"));
     // ...and on the vinext leg, the built prefix — default: it is there.
     verifyVinextStaticPrefix.mockReturnValue({ ok: true });
 });

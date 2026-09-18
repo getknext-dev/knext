@@ -123,7 +123,11 @@ mock.module("../cli/shared", () => ({
     loadConfig,
 }));
 
-const readFileSyncMock = mock<(...a: unknown[]) => string>(() => "deploytag");
+// Path-aware: the vinext build preflight reads package.json and needs a valid
+// ESM manifest; every other read (the deploy tag) stays "deploytag".
+const fsRead = (p: unknown): string =>
+    String(p).endsWith("package.json") ? '{"type":"module"}' : "deploytag";
+const readFileSyncMock = mock<(...a: unknown[]) => string>(fsRead);
 const __knextReal3 = { ...(await import("node:fs")) };
 mock.module("node:fs", async () => {
     const actual = __knextReal3;
@@ -179,7 +183,7 @@ beforeEach(() => {
     renderNextAppCR.mockReturnValue("kind: NextApp\n");
     runAssetGC.mockReturnValue({ pruned: true });
     loadConfig.mockResolvedValue(placeholderConfig);
-    readFileSyncMock.mockReturnValue("deploytag");
+    readFileSyncMock.mockImplementation(fsRead);
 });
 
 afterEach(() => {

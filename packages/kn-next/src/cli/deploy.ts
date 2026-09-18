@@ -502,7 +502,10 @@ export async function deploy() {
         }
         // UX ledger row 4 (4c): the seam translates a deps-not-installed failure
         // (`next: command not found`, exit 127) into plain npm-install guidance.
-        runProjectBuild();
+        // requireEsm gates the vinext ESM preflight (vinext target only).
+        runProjectBuild({
+            requireEsm: (config.build ?? "vinext") === "vinext",
+        });
         log.info(
             "Next.js build complete — standalone output in .next/standalone/",
         );

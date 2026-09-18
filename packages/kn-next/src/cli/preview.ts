@@ -337,7 +337,10 @@ async function defaultBuildAndPush(
     );
     // UX ledger row 4 (4c): the seam translates a deps-not-installed failure
     // (`next: command not found`, exit 127) into plain npm-install guidance.
-    runProjectBuild();
+    // requireEsm gates the vinext ESM preflight (vinext target only).
+    runProjectBuild({
+        requireEsm: (config.build ?? "vinext") === "vinext",
+    });
 
     const taggedRef = `${config.registry}/${previewName}:${tag}`;
     const metadataFilePath = join(

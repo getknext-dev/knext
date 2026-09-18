@@ -54,6 +54,7 @@ import {
     readLockfilePackages,
     writeNativeIntegrityManifest,
 } from "./native-integrity";
+import { preflightEsmPackage } from "./project-build";
 import { UsageError } from "./shared";
 
 /** The first Bun that ADR-0048 accepts. See the docstring for the measurements. */
@@ -296,37 +297,6 @@ export interface VinextBuildOptions {
      * build for nothing. The `.output` existence check still runs either way.
      */
     readonly skipViteBuild?: boolean;
-}
-
-/**
- * Fail fast, before `vite build`, when the app is not an ES module.
- *
- * vinext builds with Vite/Rollup (ESM). A CommonJS app dies deep inside
- * vite/nitro with a cryptic `[UNRESOLVED_IMPORT] Could not resolve
- * '../ssr/index.js'` — it cannot resolve the rsc↔ssr entry graph. Replace that
- * with a message that names the cause and the fix, thrown before the slow build
- * runs at all.
- */
-function preflightEsmPackage(cwd: string): void {
-    const pkgPath = join(cwd, "package.json");
-    let pkg: { type?: unknown };
-    try {
-        pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
-    } catch {
-        throw new UsageError(
-            "The vinext single-executable build must run in an app directory containing a readable package.json.\n\n" +
-                `Could not read or parse '${pkgPath}'.\n` +
-                "Run this from the app's root, where its package.json lives.",
-        );
-    }
-
-    if (pkg.type !== "module") {
-        throw new UsageError(
-            'The vinext single-executable target requires the app to be an ES module: its package.json must have `"type": "module"`.\n\n' +
-                "vinext builds with Vite/Rollup (ESM); a CommonJS app fails to resolve the rsc↔ssr entry graph and dies mid-build.\n" +
-                'Add `"type": "module"` to package.json (apps scaffolded with `kn-next create` already have it).',
-        );
-    }
 }
 
 /**

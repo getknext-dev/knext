@@ -248,6 +248,13 @@ describe("kn-next build without storage (ADR-0047 conditions 1 + 3)", () => {
     });
 
     it("clears an inherited ASSET_PREFIX BEFORE `next build` runs (review F3)", async () => {
+        // Non-vinext target: this test exercises the real build path in the
+        // checkout cwd (not an ESM app dir), and the ASSET_PREFIX clearing it
+        // asserts is target-agnostic — so avoid the vinext ESM preflight here.
+        loadConfig.mockResolvedValue({
+            ...storagelessConfig,
+            build: "turbopack",
+        });
         process.env.ASSET_PREFIX = "https://stale-bucket.example.com/app";
         let prefixDuringBuild: string | undefined = "unset-sentinel";
         runQuiet.mockImplementation((...args: unknown[]) => {
