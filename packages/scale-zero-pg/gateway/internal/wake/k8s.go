@@ -78,6 +78,24 @@ func (k *k8sScaler) Scale(ctx context.Context, namespace, deployment string, rep
 	return err
 }
 
+// DeploymentAnnotation reads a single metadata annotation off a Deployment (NOT
+// the scale subresource, which carries no parent annotations, and NOT the pod
+// template). ok=false means the annotation is absent. It uses the plain
+// Deployments().Get — RBAC deployments:[get] is already granted for the idle path
+// (#779). An API error is returned so the caller can fall back to the fleet
+// default rather than break the idle path.
+func (k *k8sScaler) DeploymentAnnotation(ctx context.Context, namespace, deployment, key string) (string, bool, error) {
+	if err := k.init(); err != nil {
+		return "", false, err
+	}
+	d, err := k.client.AppsV1().Deployments(namespace).Get(ctx, deployment, metav1.GetOptions{})
+	if err != nil {
+		return "", false, err
+	}
+	v, ok := d.Annotations[key]
+	return v, ok, nil
+}
+
 // Replicas reads a deployment's desired replica count (the single-writer check
 // wants desired, not observed: a just-scaled-up deployment must count as active
 // even before its pod appears).

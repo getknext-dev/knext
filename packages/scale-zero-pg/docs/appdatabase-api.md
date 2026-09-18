@@ -40,6 +40,8 @@ metadata:
 spec:
   appName: team-acme-shop         # required, immutable; the DSN db name + compute-<app> suffix
   tier: cold                      # cold (scale-to-zero) | warm (permanent warm hold; §2a)
+  alwaysWarm: false               # optional alias for tier: warm (§2a)
+  idleDelay: 5m                   # optional per-app idle window override; nil/0s => fleet default (§2b)
   readReplicas: false             # see roPool; drives DATABASE_URL_RO emission
   roPool: { enabled: false }      # read-replica pool; enabled => emit DATABASE_URL_RO
   quotas: { cpu: "1000m", mem: "1Gi", maxConnections: 100 }
@@ -151,6 +153,15 @@ AppDatabase is inert (it raises no `InvalidWarmWindow` event, because it is
 warming nothing that the tier is not already warming). Use `warmSchedule`
 *instead of* `tier: warm` when you want warmth only during declared hours.
 
+**`alwaysWarm` — an alias for `tier: warm`.** `spec.alwaysWarm: true` resolves to
+the **same** permanent held-connection warmhold as `tier: warm` — same mechanism,
+same cost, same precedence over `warmSchedule`. It exists because "always warm"
+reads more clearly than a tier enum for the common always-on case. The two are
+**OR'd**, so `alwaysWarm: false` is **not a kill-switch** for `tier: warm`: a CR
+with `tier: warm` and `alwaysWarm: false` is still held. Set warmth off by using
+`tier: cold` and no `alwaysWarm`/`warmSchedule`. Cost = one compute always up (one
+permanent gateway slot — see the capacity note above).
+
 **Degrade, don't fail.** If the hold cannot be established (compute still waking,
 gateway rollout, Secret not yet minted) the database is **not** warm — and says
 so rather than reporting warm-and-healthy:
@@ -171,6 +182,45 @@ the `appdb_warm_hold_active{app=...}` series disappears (it is emitted only whil
 held; the alert's PromQL carries `or vector(0)` for absence). A hold never outlives the spec
 that asked for it — if it did, the app's compute could never sleep again *and*
 the stale subtraction would blind the `ComputePhantomKeepalive` alert.
+
+---
+
+## 2b. Per-app idle window (`spec.idleDelay`)
+
+By default a cold app's compute is parked at zero `GW_IDLE_MS` (60 s, the cheap
+fleet default the cluster operator owns) after its last connection closes.
+`spec.idleDelay` overrides that window **for this app only**:
+
+```yaml
+spec:
+  appName: shop
+  idleDelay: 5m          # keep this app's DB idle for 5m, not the 60s fleet default
+```
+
+- A Go duration string (e.g. `30s`, `5m`, `2h`). **nil or `0s` ⇒ the fleet
+  default** — this is additive, so an app without the field behaves exactly as
+  before.
+- **Negative is rejected**, and the window is **capped at 6h** — a longer idle
+  window is an always-warm intent, so use `tier: warm` / `alwaysWarm` (§2a)
+  instead. There is no admission webhook on this CRD, so a bad value surfaces as
+  an `InvalidIdleDelay` Warning event and a `Failed` phase; a malformed value is
+  never applied.
+- It is **not** a warm hold: `idleDelay` only lengthens the *idle* window before
+  the compute sleeps; the first query after it still pays a cold wake. For no cold
+  wake at all, hold the compute warm (§2a).
+
+Use it to align the DB idle window with the app's own warm window
+(`NextApp.spec.scaling.scaleDownDelay`) so the first DB-touching request in the
+app's warm window does not block waking a compute the gateway already reaped —
+without raising the fleet default for every app.
+
+**Mechanism.** The operator stamps the resolved window (in integer milliseconds)
+on the compute `Deployment`'s `metadata.annotations`
+(`apps.kn-next.dev/idle-delay-ms`); the apps-gateway reads that annotation when it
+arms the idle timer and uses it in place of `GW_IDLE_MS` for this app. The operator
+is the only writer; the gateway only reads. Editing `idleDelay` does **not** restart
+the running compute (the annotation is on the Deployment metadata, not the pod
+template), and the new value takes effect the next time the idle timer arms.
 
 ---
 
@@ -303,10 +353,13 @@ nothing on the first DB-touching request** — the app answers in ~52 ms and the
 blocks ~2.3 s waking a compute the gateway already reaped (290 ms with the
 compute awake — measured on the file-manager spike, knext#766; the ~2.3 s wake
 is `docs/benchmarks/fm-same-source-oke-ab-2026-08-18.md` in the knext repo).
-The shipped manifest value (60 s) is BELOW the 5 m ADR-0045 scaffolds;
-whether to raise it fleet-wide is a costed decision tracked on
-the knext side (getknext-dev/knext#779), not something an app author can fix in
-this CR. An app that needs its database held warm regardless declares a
+The shipped fleet value (`GW_IDLE_MS`, 60 s) is BELOW the 5 m ADR-0045 scaffolds
+and **stays** the cheap fleet default — it is deliberately not raised fleet-wide,
+because that would make every idle DB pay a longer keep-warm cost. Instead, an app
+that needs a longer DB idle window sets **`spec.idleDelay`** (§2b) — the per-app
+symmetry lever: `idleDelay: 5m` aligns just this app's DB idle window with its
+app-side `scaleDownDelay`, bounding the cost to the opt-in app rather than the
+fleet. An app that needs its database held warm regardless declares a
 `warmSchedule` window — including 24/7 — which is the supported keep-warm knob;
 there is no `minWarm` replica floor and none is planned (rejected in the #766
 ruling: no writer can honour it without fighting the gateway's single-writer

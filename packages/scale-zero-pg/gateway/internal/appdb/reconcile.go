@@ -6,7 +6,53 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/alpheya/scale-zero-pg/gateway/internal/wake"
 )
+
+// IdleDelayAnnotation is the compute Deployment metadata annotation the operator
+// stamps with the per-app idle window in integer milliseconds (#779, ADR-0002).
+// The gateway reads it at idle-arm time and falls back to GW_IDLE_MS when it is
+// absent, malformed, or unreadable. Stamped on Deployment.metadata.annotations —
+// NEVER the pod template — so an idleDelay edit never churns the Recreate compute.
+// It is the SAME key the gateway reads (wake.IdleDelayAnnotation): one contract,
+// one source of truth — the operator writes it, the gateway reads it.
+const IdleDelayAnnotation = wake.IdleDelayAnnotation
+
+// maxIdleDelay caps a per-app idle window: a longer window is an always-warm
+// intent (use tier: warm / alwaysWarm), not an idle timer (#779).
+const maxIdleDelay = 6 * time.Hour
+
+// validateIdleDelay checks spec.idleDelay before it can reach the gateway timer
+// (#779, ADR-0002 C4): nil or 0s ⇒ "use the fleet default" (ok, NOT immediate
+// sleep); a NEGATIVE value is rejected; a value > 6h is rejected (that is an
+// always-warm intent, not an idle window). A malformed value must never be stamped.
+func validateIdleDelay(d *metav1.Duration) error {
+	if d == nil || d.Duration == 0 {
+		return nil
+	}
+	if d.Duration < 0 {
+		return fmt.Errorf("invalid idleDelay %s: must not be negative (nil or 0s means use the fleet default)", d.Duration)
+	}
+	if d.Duration > maxIdleDelay {
+		return fmt.Errorf("invalid idleDelay %s: must be <= 6h (a longer idle window is an always-warm intent — use tier: warm or alwaysWarm)", d.Duration)
+	}
+	return nil
+}
+
+// idleDelayMillis returns the per-app idle window in integer milliseconds to stamp
+// on the compute Deployment annotation, and ok=false when there is no override
+// (nil/0 ⇒ the fleet default; the operator then clears the annotation). Assumes an
+// already-validated (non-negative, <= 6h) value.
+func idleDelayMillis(d *metav1.Duration) (int, bool) {
+	if d == nil || d.Duration <= 0 {
+		return 0, false
+	}
+	return int(d.Duration / time.Millisecond), true
+}
 
 // ReservedNames must never be provisioned as apps — they route to non-app computes
 // (template / warm / RO lanes). Kept in lock-step with provision-app.sh RESERVED_NAMES
@@ -26,6 +72,15 @@ func (d *Deps) Reconcile(ctx context.Context, cr *AppDatabase) (requeue bool, er
 		cr.Status.ObservedGeneration = cr.Generation
 		d.setCondition(cr, CondProvisioned, "False", "InvalidAppName", verr.Error())
 		d.Cluster.Event(cr, "Warning", "InvalidAppName", verr.Error())
+		_ = d.Cluster.UpdateStatus(ctx, cr)
+		return false, nil
+	}
+	if verr := validateIdleDelay(cr.Spec.IdleDelay); verr != nil {
+		cr.Status.Phase = PhaseFailed
+		cr.Status.Message = verr.Error()
+		cr.Status.ObservedGeneration = cr.Generation
+		d.setCondition(cr, CondProvisioned, "False", "InvalidIdleDelay", verr.Error())
+		d.Cluster.Event(cr, "Warning", "InvalidIdleDelay", verr.Error())
 		_ = d.Cluster.UpdateStatus(ctx, cr)
 		return false, nil
 	}
@@ -120,13 +175,18 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 	//    at 0 starts nothing. This also HEALS drift — a hand-deleted Deployment is
 	//    re-applied here on the next pass.
 	quotas := cr.Spec.Quotas.resolved()
+	// Per-app idle window (#779): 0 ⇒ no override, the operator clears the annotation
+	// and the gateway uses the fleet-default GW_IDLE_MS. Stamped on the Deployment's
+	// metadata (ApplyCompute), never the pod template — so an edit never churns compute.
+	idleMs, _ := idleDelayMillis(cr.Spec.IdleDelay)
 	if err := d.Cluster.ApplyCompute(ctx, ComputeSpec{
-		App:        app,
-		TenantID:   d.Tenant,
-		TimelineID: tl,
-		Replicas:   cr.desiredReplicas(),
-		Quotas:     quotas,
-		OwnerRef:   owner,
+		App:         app,
+		TenantID:    d.Tenant,
+		TimelineID:  tl,
+		Replicas:    cr.desiredReplicas(),
+		Quotas:      quotas,
+		OwnerRef:    owner,
+		IdleDelayMs: idleMs,
 	}); err != nil {
 		return true, fmt.Errorf("apply compute: %w", err)
 	}
@@ -409,7 +469,10 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 // unreachable compute). The condition itself is still refreshed every pass
 // (never stale); only the duplicate Event object is suppressed.
 func (d *Deps) reconcileWarmHold(ctx context.Context, cr *AppDatabase, app string) {
-	permanent := cr.Spec.Tier == "warm"
+	// alwaysWarm is an additive ALIAS for the permanent hold (ADR-0002): OR'd with
+	// tier so alwaysWarm:false never releases a tier:warm hold, and a windowless
+	// alwaysWarm:true still subsumes any warmSchedule exactly like tier:warm.
+	permanent := cr.Spec.Tier == "warm" || cr.Spec.AlwaysWarm
 	active, invalid := true, []WarmWindow(nil)
 	if !permanent {
 		active, invalid = warmScheduleActive(cr.Spec.WarmSchedule, d.Now().Time)

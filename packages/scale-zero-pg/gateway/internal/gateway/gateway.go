@@ -969,16 +969,58 @@ func (g *Gateway) connEnded(target wake.Target, replication bool) {
 	if replication && e.replCount > 0 {
 		e.replCount--
 	}
+	shouldSleep := e.count <= 0 && e.replCount <= 0 && g.driver.CanSleep() && g.idleMs > 0 && !g.closed
+	g.mu.Unlock()
+	if !shouldSleep {
+		g.mu.Lock() // restore the deferred Unlock's invariant
+		return
+	}
+	// Resolve the per-app idle window WITHOUT holding g.mu — it may Get the compute
+	// Deployment's annotation (#779), and a slow/failing apiserver must never block
+	// connection accounting. Falls back to GW_IDLE_MS. Read per-arm (never cached),
+	// so an operator idleDelay edit takes effect on the NEXT arm.
+	windowMs := g.idleWindowMs(target)
+	g.mu.Lock()
+	// Re-check under the lock: a connection may have arrived while we resolved the
+	// window, or Drain may have closed the gateway.
 	if e.count <= 0 && e.replCount <= 0 && g.driver.CanSleep() && g.idleMs > 0 && !g.closed {
-		g.scheduleSleep(e, target)
+		g.scheduleSleep(e, target, windowMs)
 	}
 }
 
-// scheduleSleep arms the idle timer. Caller must hold g.mu. When the timer
-// fires, sleep proceeds only if this pod still has zero connections AND the
+// idleWindowSource is an OPTIONAL driver capability: given a resolved target it
+// returns the per-app idle window (from the compute Deployment's metadata
+// annotation, #779) in ms. ok=false means "no per-app override" — an absent
+// annotation, a malformed value, a transient Get error, or a driver that cannot
+// read it — and the caller falls back to the fleet-default GW_IDLE_MS. It NEVER
+// breaks the idle path: a flaky apiserver degrades to the fleet default.
+type idleWindowSource interface {
+	IdleDelayMs(ctx context.Context, t wake.Target) (int, bool)
+}
+
+// idleWindowMs resolves the idle window (ms) for a target at ARM time: the per-app
+// override stamped by the operator on the compute Deployment when present and valid,
+// else the fleet default g.idleMs. Read per-arm (never cached), so an operator edit
+// to spec.idleDelay takes effect on the NEXT arm without cancelling any in-flight
+// timer. Must NOT be called while holding g.mu (it may do a network Get).
+func (g *Gateway) idleWindowMs(target wake.Target) int {
+	src, ok := g.driver.(idleWindowSource)
+	if !ok {
+		return g.idleMs
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if ms, ok := src.IdleDelayMs(ctx, target); ok {
+		return ms
+	}
+	return g.idleMs
+}
+
+// scheduleSleep arms the idle timer for windowMs. Caller must hold g.mu. When the
+// timer fires, sleep proceeds only if this pod still has zero connections AND the
 // peer fleet reports zero; otherwise the timer re-arms for another window.
-func (g *Gateway) scheduleSleep(e *activeEntry, target wake.Target) {
-	e.timer = time.AfterFunc(time.Duration(g.idleMs)*time.Millisecond, func() {
+func (g *Gateway) scheduleSleep(e *activeEntry, target wake.Target, windowMs int) {
+	e.timer = time.AfterFunc(time.Duration(windowMs)*time.Millisecond, func() {
 		g.mu.Lock()
 		if e.count > 0 || e.replCount > 0 || g.closed {
 			g.mu.Unlock()
@@ -999,9 +1041,13 @@ func (g *Gateway) scheduleSleep(e *activeEntry, target wake.Target) {
 				} else {
 					g.log("[gw] " + target.Key + ": " + strconv.Itoa(n) + " active connection(s) on peer gateways, postponing sleep")
 				}
+				// Re-resolve the per-app idle window for the NEXT arm outside the
+				// lock (#779): an operator idleDelay edit takes effect here without
+				// cancelling this in-flight timer.
+				window := g.idleWindowMs(target)
 				g.mu.Lock()
 				if e.count == 0 && !g.closed {
-					g.scheduleSleep(e, target) // try again next window
+					g.scheduleSleep(e, target, window) // try again next window
 				}
 				g.mu.Unlock()
 				return
@@ -1023,7 +1069,7 @@ func (g *Gateway) scheduleSleep(e *activeEntry, target wake.Target) {
 			return
 		}
 		g.metrics.Sleep()
-		g.log("[gw] " + target.Key + ": idle " + strconv.Itoa(g.idleMs) + "ms -> scaled to zero")
+		g.log("[gw] " + target.Key + ": idle " + strconv.Itoa(windowMs) + "ms -> scaled to zero")
 
 		// TOCTOU heal: a connection may have arrived while Sleep was in
 		// flight. If so, wake the compute right back — the arriving client is

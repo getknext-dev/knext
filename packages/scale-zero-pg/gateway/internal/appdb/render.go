@@ -97,9 +97,19 @@ until curl -sf "${PS}/v1/tenant/${TENANT_ID}/timeline" | grep -q "${TIMELINE_ID}
 done
 echo "timeline ready"`
 
+	meta := c.objMeta("compute-"+s.App, s.App)
+	// Per-app idle window (#779, ADR-0002): stamp the millis on the Deployment's
+	// metadata.annotations — NEVER spec.template — so the gateway can read it without
+	// GetScale and an idleDelay edit never mutates the pod template (the compute uses
+	// the Recreate strategy; a template change would kill+recreate the running compute).
+	// 0 ⇒ no override: leave the annotation unset so the gateway uses GW_IDLE_MS.
+	if s.IdleDelayMs > 0 {
+		meta.Annotations = map[string]string{IdleDelayAnnotation: itoa(s.IdleDelayMs)}
+	}
+
 	return &appsv1.Deployment{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
-		ObjectMeta: c.objMeta("compute-"+s.App, s.App),
+		ObjectMeta: meta,
 		Spec: appsv1.DeploymentSpec{
 			Replicas:             &replicas,
 			RevisionHistoryLimit: &histLimit,

@@ -169,6 +169,21 @@ func (k *K8sCluster) DatabaseURL(ctx context.Context, app string) (string, error
 	return dsn, nil
 }
 
+// reconcileIdleDelayAnnotation merges the per-app idle-delay annotation onto a
+// live Deployment's metadata (#779): set it to want when non-empty, delete it when
+// want is empty (idleDelay withdrawn). It NEVER replaces the annotation map, so any
+// other operator- or GitOps-owned annotations are preserved.
+func reconcileIdleDelayAnnotation(meta *metav1.ObjectMeta, want string) {
+	if want == "" {
+		delete(meta.Annotations, IdleDelayAnnotation)
+		return
+	}
+	if meta.Annotations == nil {
+		meta.Annotations = map[string]string{}
+	}
+	meta.Annotations[IdleDelayAnnotation] = want
+}
+
 // ApplyCompute upserts the ConfigMap + Deployment + Service. It PRESERVES the
 // Deployment's live spec.replicas so it never fights the apps-gateway that scales
 // the compute 0<->1 on connect — the operator owns the template/quotas, the gateway
@@ -228,6 +243,10 @@ func (k *K8sCluster) ApplyCompute(ctx context.Context, spec ComputeSpec) error {
 		cur.Spec = dep.Spec
 		cur.Spec.Replicas = liveReplicas
 		cur.Labels = dep.Labels
+		// Reconcile ONLY the per-app idle-delay annotation on the Deployment's
+		// metadata (#779) — a merge, not a replace, so any operator/GitOps-owned
+		// annotations survive. Set it when requested, clear it when withdrawn.
+		reconcileIdleDelayAnnotation(&cur.ObjectMeta, dep.Annotations[IdleDelayAnnotation])
 		setOwnerRef(&cur.ObjectMeta, spec.OwnerRef)
 		if _, err := depApi.Update(ctx, cur, metav1.UpdateOptions{}); err != nil {
 			return fmt.Errorf("update deployment: %w", err)

@@ -106,6 +106,43 @@ type Driver interface {
 	CanSleep() bool
 }
 
+// IdleDelayAnnotation is the compute Deployment metadata annotation the appdb
+// operator (the single writer, ADR-0002) stamps with a per-app idle window in
+// integer milliseconds (#779). The gateway READS it (never writes it) at idle-arm
+// time and uses it in place of the fleet-default GW_IDLE_MS for that app; it falls
+// back to GW_IDLE_MS on an absent, malformed, or unreadable value.
+const IdleDelayAnnotation = "apps.kn-next.dev/idle-delay-ms"
+
+// AnnotationReader is an OPTIONAL capability a Scaler may also implement: read a
+// single metadata annotation off a Deployment (not the scale subresource, not the
+// pod template). The idle path uses it to honour a per-app idle window (#779). Kept
+// separate from Scaler so a test scaler that only fakes Scale need not implement it.
+type AnnotationReader interface {
+	DeploymentAnnotation(ctx context.Context, namespace, deployment, key string) (val string, ok bool, err error)
+}
+
+// deploymentIdleDelayMs reads the per-app idle window (ms) off a compute
+// Deployment's IdleDelayAnnotation via the scaler's optional AnnotationReader.
+// ok=false ⇒ "no per-app override, use the fleet default": the scaler cannot read
+// annotations, the annotation is absent, the value is malformed, or the API Get
+// errored. A transient apiserver error therefore degrades to GW_IDLE_MS and NEVER
+// breaks the idle path.
+func deploymentIdleDelayMs(ctx context.Context, scaler Scaler, namespace, deployment string) (int, bool) {
+	ar, ok := scaler.(AnnotationReader)
+	if !ok {
+		return 0, false
+	}
+	v, present, err := ar.DeploymentAnnotation(ctx, namespace, deployment, IdleDelayAnnotation)
+	if err != nil || !present {
+		return 0, false
+	}
+	ms, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || ms <= 0 {
+		return 0, false
+	}
+	return ms, true
+}
+
 // ParseHostPort splits "host" or "host:port", defaulting the port.
 func ParseHostPort(s string, defPort int) (host string, port int) {
 	i := strings.LastIndex(s, ":")
@@ -183,6 +220,12 @@ func (d *kubeDriver) Sleep(ctx context.Context, _ Target) error {
 }
 func (d *kubeDriver) CanSleep() bool { return true }
 
+// IdleDelayMs reads this compute's per-app idle window (#779) off its Deployment
+// annotation; ok=false ⇒ the gateway uses the fleet-default GW_IDLE_MS.
+func (d *kubeDriver) IdleDelayMs(ctx context.Context, _ Target) (int, bool) {
+	return deploymentIdleDelayMs(ctx, d.scaler, d.namespace, d.deployment)
+}
+
 // templateDriver: per-system target/deployment from a {system} template.
 type templateDriver struct {
 	namespace  string
@@ -226,6 +269,13 @@ func (d *templateDriver) Sleep(ctx context.Context, t Target) error {
 	return d.scaler.Scale(ctx, d.namespace, strings.ReplaceAll(d.depTpl, "{system}", t.Key), 0)
 }
 func (d *templateDriver) CanSleep() bool { return true }
+
+// IdleDelayMs reads the per-app idle window (#779) off THIS system's compute
+// Deployment annotation (compute-<system>). Per-target-key so each app honours its
+// own idleDelay; ok=false ⇒ the gateway uses the fleet-default GW_IDLE_MS.
+func (d *templateDriver) IdleDelayMs(ctx context.Context, t Target) (int, bool) {
+	return deploymentIdleDelayMs(ctx, d.scaler, d.namespace, strings.ReplaceAll(d.depTpl, "{system}", t.Key))
+}
 
 // MakeDriver builds a driver from env with the default (lazy) k8s scaler.
 func MakeDriver(env Env) (Driver, error) {

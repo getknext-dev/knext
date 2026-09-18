@@ -96,6 +96,25 @@ type AppDatabaseSpec struct {
 	ROPool               ROPool       `json:"roPool,omitempty"`
 	KeepTimelineOnDelete bool         `json:"keepTimelineOnDelete,omitempty"`
 	WarmSchedule         []WarmWindow `json:"warmSchedule,omitempty"`
+	// IdleDelay is a per-app override of the fleet-default idle window (GW_IDLE_MS)
+	// after which the apps-gateway parks this app's compute at zero (#779, ADR-0002).
+	// The operator stamps it as the compute Deployment annotation
+	// apps.kn-next.dev/idle-delay-ms (integer milliseconds); the gateway reads that at
+	// idle-arm time and uses it in place of GW_IDLE_MS for this app only. nil or 0s ⇒
+	// the fleet default (NO per-app override — this is additive back-compat). Negative
+	// is rejected; capped at ≤ 6h (a longer idle window is an always-warm intent —
+	// use tier: warm / alwaysWarm). The lever is how an app aligns its DB idle window
+	// with its app-side warm window (e.g. idleDelay: 5m) without raising the cheap
+	// 60s fleet default for every app.
+	IdleDelay *metav1.Duration `json:"idleDelay,omitempty"`
+	// AlwaysWarm is an additive alias over the existing spec.tier: warm warm hold
+	// (ADR-0002): true ⇒ the operator holds one authenticated gateway connection so
+	// the compute never idles to zero, byte-identically to tier: warm. It is OR'd with
+	// tier and warmSchedule (alwaysWarm || tier=="warm" || warmScheduleActive) — so
+	// alwaysWarm: false is NOT a kill-switch for tier: warm; both are just ways to ask
+	// for the same held-connection warmhold. No new machinery, no replica floor (a Neon
+	// compute is single-writer).
+	AlwaysWarm bool `json:"alwaysWarm,omitempty"`
 }
 
 // WarmWindow is one scheduled DB-warm window (knext #388, ADR-0030 addendum).
@@ -250,15 +269,16 @@ func (a *AppDatabase) ownerRef() *metav1.OwnerReference {
 func (a *AppDatabase) desiredReplicas() int { return 0 }
 
 // warmHoldRequested reports whether this CR asks the operator to hold its
-// compute warm at all — either permanently (spec.tier: warm) or on a schedule
-// (spec.warmSchedule).
+// compute warm at all — permanently (spec.tier: warm OR the spec.alwaysWarm
+// alias) or on a schedule (spec.warmSchedule). alwaysWarm is OR'd in, so it is
+// never a kill-switch: alwaysWarm:false with tier:warm still holds.
 //
-// PRECEDENCE (lead's call, #777): spec.tier: warm is a PERMANENT hold, active
+// PRECEDENCE (lead's call, #777): a permanent hold is active
 // regardless of any declared window. When BOTH are set the permanent hold
 // SUBSUMES the windows: the windows are not evaluated at all, because a hold
 // that is already permanent cannot be made more active by a window (and a
 // window boundary must never drop a warm tier's hold). Documented in
 // docs/appdatabase-api.md §2 + §3b.
 func (a *AppDatabase) warmHoldRequested() bool {
-	return a.Spec.Tier == "warm" || len(a.Spec.WarmSchedule) > 0
+	return a.Spec.AlwaysWarm || a.Spec.Tier == "warm" || len(a.Spec.WarmSchedule) > 0
 }
