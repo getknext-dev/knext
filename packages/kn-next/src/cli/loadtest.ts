@@ -24,11 +24,28 @@ import {
 } from "../generators/loadtest-job";
 import { createLogger } from "../utils/logger";
 import { isEntrypoint } from "./exec";
-import { handleConfigNotFound, handleUsageError, loadConfig } from "./shared";
+import {
+    handleConfigNotFound,
+    handleUsageError,
+    loadConfig,
+    resolveKubeContext,
+    withKubeContext,
+} from "./shared";
 
 const log = createLogger({ module: "loadtest" });
 
 const VALID_TYPES: LoadTestType[] = ["smoke", "load", "spike", "scale-to-zero"];
+
+/**
+ * How {@link runLoadTest} spawns kubectl. Injectable so the CLI wrapper is
+ * unit-testable and hermetic; the default shells out via `execFileSync` (ARGV
+ * array — no shell, no injection).
+ */
+export type LoadTestExec = (argv: readonly string[]) => void;
+
+const defaultLoadTestExec: LoadTestExec = (argv) => {
+    execFileSync(argv[0], argv.slice(1), { stdio: "inherit" });
+};
 
 export async function runLoadTest(
     appName: string,
@@ -36,6 +53,8 @@ export async function runLoadTest(
     type: LoadTestType,
     namespace = "default",
     observabilityEnabled = false,
+    context?: string,
+    exec: LoadTestExec = defaultLoadTestExec,
 ): Promise<string> {
     const outputDir = join(process.cwd(), ".kn-next", "loadtest", appName);
     if (!existsSync(outputDir)) {
@@ -59,16 +78,20 @@ export async function runLoadTest(
     log.info({ manifestPath }, "Generated load-test manifest");
 
     // Apply via kubectl using execFile (ARGV array — no shell, no injection).
-    log.info({ appName, type, namespace }, "Applying k6 load-test Job");
+    log.info(
+        { appName, type, namespace, context: context ?? "(ambient)" },
+        "Applying k6 load-test Job",
+    );
     // `--validate=strict` on every apply this CLI issues (see deploy.ts): a
     // typo'd field in the generated k6 Job must be rejected, not pruned into a
     // Job that runs but does not measure what the manifest says it measures.
-    execFileSync(
-        "kubectl",
-        ["apply", "--validate=strict", "-f", manifestPath],
-        {
-            stdio: "inherit",
-        },
+    // withKubeContext threads --context so `--context staging` applies the Job
+    // to staging, never the ambient current-context (#978, apply-side).
+    exec(
+        withKubeContext(
+            ["kubectl", "apply", "--validate=strict", "-f", manifestPath],
+            context,
+        ),
     );
     log.info(
         {
@@ -112,6 +135,7 @@ export async function runLoadTestCli(
             url: { type: "string", short: "u" },
             type: { type: "string", short: "t", default: "smoke" },
             namespace: { type: "string", short: "n", default: "default" },
+            context: { type: "string" },
         },
         strict: false,
         allowPositionals: true,
@@ -137,6 +161,8 @@ export async function runLoadTestCli(
             type,
             values.namespace as string,
             config.observability?.enabled ?? false,
+            // --context wins over KN_CONTEXT, else the ambient current-context.
+            resolveKubeContext(values.context as string | undefined),
         );
     } catch (e: unknown) {
         // A missing kn-next.config.ts is an expected state, not a failure to

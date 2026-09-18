@@ -238,6 +238,7 @@ kn-next deploy && kn-next status --watch  # CI gate: poll until Ready=True
 |---|---|
 | `<app>` | Positional, optional — defaults to `name` from `kn-next.config.ts`. |
 | `-n`, `--namespace` | Namespace (default `default`). |
+| `--context <ctx>` | kubectl context to target (default: your current-context; env fallback `KN_CONTEXT`). Reads the `NextApp` CR on `<ctx>`, never on whichever cluster your kubeconfig happens to point at. |
 | `--json` | One-shot only — rejected in combination with `--watch` (a 5s poll would emit concatenated JSON documents; poll `status --json` from your script instead). |
 | `--watch` | Poll every 5s until `Ready=True`. Bounded at 10 minutes (exit `1` on timeout); tolerates up to 3 consecutive transient `kubectl` failures. |
 
@@ -360,11 +361,15 @@ Some entries ship in the package as directly runnable scripts rather than bin su
   [preview environments](/docs/previews) (`preview deploy --pr <n> --branch <ref>` /
   `preview destroy --pr <n>`).
 - **loadtest** (`dist/cli/loadtest.js`) — generate and apply an ephemeral k6 load-test Job
-  against a deployed service. An operability tool, not part of the deploy path.
+  against a deployed service. An operability tool, not part of the deploy path. Accepts
+  `--url`, `--type`, `-n`/`--namespace`, and `--context <ctx>` (kubectl context to target;
+  default: your current-context; env fallback `KN_CONTEXT`). The k6 Job is applied to `<ctx>`,
+  never to whichever cluster your kubeconfig happens to point at.
 
 ```bash
 node node_modules/@getknext/core/dist/cli/preview.js deploy --pr 42 --branch my-branch
 node node_modules/@getknext/core/dist/cli/loadtest.js --type smoke
+node node_modules/@getknext/core/dist/cli/loadtest.js --type smoke --context staging
 ```
 
 `build` and `cleanup` also still ship as `dist/cli/build.js` / `dist/cli/cleanup.js`, but prefer
