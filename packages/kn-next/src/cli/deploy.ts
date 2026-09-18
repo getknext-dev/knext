@@ -76,7 +76,10 @@ interface DeployOptions {
      * resolution) entirely and applies the NextApp CR pointing at this image —
      * the path for a user who already has a digest-pinned image or has no
      * working buildx. Must contain `@sha256:` (the operator's admission webhook
-     * rejects a tag-only ref); orthogonal to `--skip-upload`.
+     * rejects a tag-only ref). IMPLIES `--skip-build` AND `--skip-upload`: the
+     * image is the source of truth for both its server and its baked static
+     * assets, so re-building/uploading under a fresh BUILD_ID would 404 at
+     * runtime (ADR-0011 lock-step). See the fail-fast block in `deploy()`.
      */
     image?: string;
 }
@@ -390,6 +393,40 @@ export async function deploy() {
     // dispatcher renders it as a plain message, never a FATAL dump.
     assertNoPlaceholders(config);
 
+    // #1063: a pre-built image is the SOURCE OF TRUTH for both the server and
+    // the static assets baked into it. Its server serves `_next/static/<baked
+    // BUILD_ID>/`, and knext cannot know that baked id from outside the image.
+    // Re-running `next build` + `uploadAssets` under a FRESH build id
+    // (`--tag` or `${Date.now()}`) would upload assets to
+    // `_next/static/<new-id>/` — a prefix the deployed server never references
+    // — so every static request 404s at runtime with no error at deploy time.
+    // `NEXT_DEPLOYMENT_ID` cannot move the baked prefix. So `--image` IMPLIES
+    // `--skip-build` AND `--skip-upload`: the image self-serves its assets, and
+    // the build/upload/GC asset path (which exists to keep upload-prefix ==
+    // served-prefix == deploy tag, ADR-0011) is turned off wholesale rather
+    // than run with a guaranteed-mismatched id. Validated here (fail-fast,
+    // before `next build`), mirroring the operator's admission webhook — a
+    // tag-only ref throws with an `@sha256:` message.
+    if (options.image) {
+        validateCRImageRef(options.image);
+        if (options.registry) {
+            log.warn(
+                { registry: options.registry, image: options.image },
+                "Ignoring --registry: --image is a fully-qualified, digest-pinned " +
+                    "ref, so nothing is built or pushed and the registry override " +
+                    "has no effect.",
+            );
+        }
+        options.skipBuild = true;
+        options.skipUpload = true;
+        log.info(
+            { image: options.image },
+            "Deploying a pre-built image (--image) — skipping next build, docker " +
+                "build/push and asset upload; the image self-serves its baked " +
+                "static assets (ADR-0011 build-id lock-step).",
+        );
+    }
+
     if (!hasStorage(config)) {
         // ADR-0047 condition 1: announce the image-served static mode at info
         // on EVERY deploy (dry-run included) — a dropped or mistyped `storage`
@@ -574,37 +611,19 @@ export async function deploy() {
     // The operator-facing CR image ref MUST be digest-pinned (see resolveDigest below).
     const taggedRef = `${config.registry}/${config.name}:${imageTag}`;
 
-    // #1063: `--image <ref>` deploys a PRE-BUILT image. When set, the CLI skips
-    // the docker build+push (and the post-push digest resolution) entirely and
-    // points the CR at this ref. The image is validated up front — including
-    // under --dry-run — so a tag-only ref is rejected before anything runs,
-    // mirroring the operator's admission webhook (`validateCRImageRef` throws a
-    // message containing `@sha256:`). `--registry` is meaningless once the image
-    // is fully qualified, so --image wins and the registry override is reported
-    // as ignored rather than silently dropped.
+    // #1063: with `--image` the CR points at the pre-built, already-validated
+    // digest-pinned ref (see the fail-fast block above, where --image also
+    // forced skip-build + skip-upload). Otherwise imageRef starts as taggedRef
+    // for dry-run and is replaced with the @sha256:-pinned ref after a real
+    // push (below).
     let imageRef: string;
     if (options.image) {
-        validateCRImageRef(options.image);
-        if (options.registry) {
-            log.warn(
-                { registry: options.registry, image: options.image },
-                "Ignoring --registry: --image is a fully-qualified, digest-pinned " +
-                    "ref, so no image is built or pushed and the registry override " +
-                    "has no effect.",
-            );
-        }
-        log.info(
-            { image: options.image },
-            "Using pre-built image — skipping docker build + push (--image)",
-        );
         imageRef = options.image;
     } else {
         log.info(
             { image: taggedRef },
             "Image tag resolved (will be digest-pinned after push)",
         );
-        // imageRef starts as taggedRef for dry-run, then is replaced with the
-        // @sha256:-pinned ref after a real push (below).
         imageRef = taggedRef;
     }
 

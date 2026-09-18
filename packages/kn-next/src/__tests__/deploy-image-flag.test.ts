@@ -198,8 +198,10 @@ beforeEach(() => {
     loadConfig.mockResolvedValue(baseConfig);
     readFileSyncMock.mockReturnValue("deploytag");
     verifyVinextStaticPrefix.mockReturnValue({ ok: true });
-    // A pre-built-image deploy never has a KN_REGISTRY in scope unless a test sets it.
+    // A pre-built-image deploy never has KN_REGISTRY/KN_IMAGE in scope unless a
+    // test sets it.
     delete process.env.KN_REGISTRY;
+    delete process.env.KN_IMAGE;
 });
 
 afterEach(() => {
@@ -225,9 +227,10 @@ describe("deploy --image (pre-built image, #1063)", () => {
         expect(dockerRan()).toBe(false);
         expect(applied()).toBe(false);
         // The pre-built image is already digest-pinned, so no post-push digest
-        // resolution runs. (`next build` is orthogonal — skipped via
-        // --skip-build, not --image.)
+        // resolution runs — and --image implies --skip-upload, so no assets are
+        // uploaded (ADR-0011: a fresh-build-id prefix would 404 at runtime).
         expect(resolveDigest).not.toHaveBeenCalled();
+        expect(uploadAssets).not.toHaveBeenCalled();
     });
 
     it("rejects a TAG-ONLY --image with the digest-pin (@sha256:) error, even in --dry-run", async () => {
@@ -255,7 +258,44 @@ describe("deploy --image (pre-built image, #1063)", () => {
         expect(applied()).toBe(true);
         expect(dockerRan()).toBe(false);
         expect(resolveDigest).not.toHaveBeenCalled();
+        expect(uploadAssets).not.toHaveBeenCalled();
         expect(renderedImages()).toContain(DIGEST_REF);
+    });
+
+    it("BLOCKER #1063: --image ALONE (storage configured, no skip flags) uploads NOTHING — no build-id-skewed assets", async () => {
+        // The obvious invocation of the feature: a user with a pre-built image
+        // and a `storage` block, passing neither --skip-build nor --skip-upload.
+        // Before the fix this re-ran next build + uploadAssets under a FRESH
+        // build id, landing assets at `_next/static/<new-id>/` while the image's
+        // server serves `_next/static/<its-own-baked-id>/` → runtime 404s with
+        // no deploy-time error (ADR-0011 lock-step defeated). --image must imply
+        // --skip-upload so nothing mismatched is ever uploaded.
+        setArgv(["deploy", "--image", DIGEST_REF]); // no --tag, no skip flags
+        const deploy = await importDeploy();
+
+        await deploy();
+
+        // The load-bearing assertion: NOTHING was uploaded.
+        expect(uploadAssets).not.toHaveBeenCalled();
+        // The deploy still succeeds — the image self-serves its assets.
+        expect(applied()).toBe(true);
+        expect(dockerRan()).toBe(false);
+        expect(renderedImages()).toContain(DIGEST_REF);
+    });
+
+    it("KN_IMAGE env fallback: sets the pre-built image when --image is absent", async () => {
+        process.env.KN_IMAGE = DIGEST_REF;
+        setArgv(["deploy", "--tag", "deploytag"]); // no --image flag
+        const deploy = await importDeploy();
+
+        await deploy();
+
+        expect(renderedImages()).toContain(DIGEST_REF);
+        // Same guarantees as the flag: no build/push, no digest resolve, no upload.
+        expect(dockerRan()).toBe(false);
+        expect(resolveDigest).not.toHaveBeenCalled();
+        expect(uploadAssets).not.toHaveBeenCalled();
+        expect(applied()).toBe(true);
     });
 
     it("--image + --registry: --image wins, a warning names the ignored registry", async () => {
@@ -280,7 +320,9 @@ describe("deploy --image (pre-built image, #1063)", () => {
         expect(warnings).toContain("other.example.com");
     });
 
-    it("--image --skip-upload stays orthogonal: no upload, still applies with the image", async () => {
+    it("--image --skip-upload: the redundant explicit flag is harmless (still no upload, applies)", async () => {
+        // --image already implies --skip-upload; passing it explicitly must not
+        // change the outcome.
         setArgv([
             "deploy",
             "--image",
