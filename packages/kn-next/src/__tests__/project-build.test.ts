@@ -10,10 +10,10 @@
  * project's build script, so the 127 translation cannot drift between them.
  */
 
+import { describe, expect, it, mock } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, mock } from "bun:test";
 import { runProjectBuild } from "../cli/project-build";
 import { handleUsageError, USAGE_ERROR_CODE } from "../cli/shared";
 
