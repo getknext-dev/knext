@@ -74,14 +74,14 @@ the scale subresource (waking/sleeping) and warmpool pod deletes, unchanged by t
 | B. Gateway reads the AppDatabase CR directly | No annotation indirection | Gives the gateway a second source of truth + CR read RBAC; drifts toward two readers of the spec | Rejected |
 | C. Per-app config via env | Simple | Not per-app at runtime (env is per-pod, fleet-homogeneous); needs a redeploy to change one app | Rejected |
 
-## idleDelay (design, implemented next)
+## idleDelay (design, implemented)
 
 A **per-app** idle window override. `spec.idleDelay` (a duration) on the AppDatabase; the operator
 writes it as the compute-Deployment annotation above; the gateway reads it per target key and uses it
 in place of the fleet-default `GW_IDLE_MS` for that app. **nil or `0s` ⇒ the fleet default** (current
 behaviour, no per-app override). This is additive: apps without the field behave exactly as today.
 
-## alwaysWarm (design, implemented next)
+## alwaysWarm (design, implemented)
 
 An **additive alias** over the **existing** `tier: warm` warmhold (`internal/appdb/warmhold.go`),
 not a new mechanism. `spec.alwaysWarm: true` resolves to the same warmhold that pins a compute ACTIVE
@@ -110,7 +110,15 @@ entirely. Recorded separately so the alias does not dilute the F6 security decis
 - [x] C1: reader checks status before decoding; non-200 → error → postpone sleep (mutation-proved).
 - [x] `pggw-peer-token` Secret + `gen-peer-token.sh` + mounts in `10-gateway.yaml` and
       `81-apps-gateway.yaml`; `_validate.sh` contract; rotation documented in `docs/operations.md`.
-- [ ] Implement `idleDelay` over the operator→annotation channel (next task).
-- [ ] Implement `alwaysWarm` as an alias over the existing `tier: warm` warmhold (next task).
+- [x] Implement `idleDelay` over the operator→annotation channel. Operator stamps
+      `apps.kn-next.dev/idle-delay-ms` on the compute **Deployment.metadata.annotations**
+      (never the pod template — the compute is `Recreate`); gateway reads it at idle-arm time via
+      `Deployments().Get` (not `GetScale`), per target key, and falls back to `GW_IDLE_MS` on
+      absent/malformed/Get-error. Spec validation: nil/`0s` ⇒ fleet default, reject negative,
+      reject `> 6h`.
+- [x] Implement `alwaysWarm` as an alias over the existing `tier: warm` warmhold — OR'd in at
+      BOTH decision sites (`warmHoldRequested()` and `reconcileWarmHold`'s `permanent`), so
+      `alwaysWarm: false` never releases a `tier: warm` hold and `alwaysWarm: true` alone reaches
+      the hold and subsumes windows identically to `tier: warm`.
 - [ ] At the ADR-0001 expiry: close F5 (gateway→compute mTLS) or re-justify; revisit per-pod mTLS on
       the scrape (option B) then.

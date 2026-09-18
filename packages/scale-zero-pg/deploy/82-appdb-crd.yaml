@@ -118,6 +118,34 @@ spec:
                     `provision-app.sh reclaim-orphans`. Default false = safe two-sided
                     timeline delete (no orphan branch, no unbounded safekeeper WAL).
                   default: false
+                idleDelay:
+                  type: string
+                  description: >-
+                    Per-app override of the fleet-default idle window (GW_IDLE_MS) after
+                    which the apps-gateway parks this app's compute at zero. A Go duration
+                    string, e.g. "5m". The operator stamps it as the compute Deployment
+                    annotation apps.kn-next.dev/idle-delay-ms (integer milliseconds) — the
+                    gateway reads it at idle-arm time and uses it in place of GW_IDLE_MS
+                    for this app only. nil or "0s" = the fleet default (no per-app
+                    override; additive back-compat). Negative is rejected; capped at 6h
+                    (a longer idle window is an always-warm intent — use tier: warm or
+                    alwaysWarm). There is no admission webhook on this CRD, so a bad value
+                    is surfaced as an InvalidIdleDelay Warning event + Failed phase, never
+                    silently applied. Use it to align the DB idle window with the app's
+                    own warm window without raising the cheap 60s fleet default for every
+                    app. See docs/appdatabase-api.md.
+                  pattern: '^([0-9]+(ns|us|µs|ms|s|m|h))+$'
+                alwaysWarm:
+                  type: boolean
+                  description: >-
+                    Additive alias over spec.tier: warm. true = the operator holds one
+                    authenticated gateway connection so the compute never idles to zero,
+                    byte-identically to tier: warm (same held-connection warmhold, no new
+                    machinery, no replica floor — a Neon compute is single-writer). It is
+                    OR'd with tier and warmSchedule, so alwaysWarm: false is NOT a
+                    kill-switch for tier: warm — both are just ways to ask for the same
+                    hold. Cost = one compute always up. See docs/appdatabase-api.md.
+                  default: false
                 warmSchedule:
                   type: array
                   description: >-

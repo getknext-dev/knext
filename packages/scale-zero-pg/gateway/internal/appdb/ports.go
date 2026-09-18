@@ -54,6 +54,12 @@ type ComputeSpec struct {
 	// the rendered children so k8s cascade-GC reaps them on CR delete (#122). Nil when
 	// the CR has no UID yet — the apply then leaves ownerReferences untouched.
 	OwnerRef *metav1.OwnerReference
+	// IdleDelayMs is the per-app idle window (#779, ADR-0002) in integer milliseconds,
+	// stamped by ApplyCompute onto the compute Deployment's metadata.annotations
+	// (apps.kn-next.dev/idle-delay-ms) — NEVER the pod template, so an edit never
+	// churns the Recreate compute. 0 ⇒ no override: the annotation is cleared and the
+	// gateway uses the fleet-default GW_IDLE_MS.
+	IdleDelayMs int
 }
 
 // ROComputeSpec is the fully-resolved input to rendering an app's PER-APP read-only
