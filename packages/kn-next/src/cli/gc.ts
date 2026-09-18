@@ -37,7 +37,12 @@ import {
 import { createLogger } from "../utils/logger";
 import { runCapture } from "./exec";
 // Single source of truth for config loading — also runs validateConfig.
-import { loadConfig, UsageError } from "./shared";
+import {
+    loadConfig,
+    resolveKubeContext,
+    UsageError,
+    withKubeContext,
+} from "./shared";
 
 const log = createLogger({ module: "gc" });
 
@@ -145,17 +150,23 @@ function readCurrentTrafficRevisions(
     exec: GcExec,
     config: KnativeNextConfig,
     namespace: string,
+    context?: string,
 ): string[] {
-    const trafficJson = exec([
-        "kubectl",
-        "get",
-        "nextapp",
-        config.name,
-        "-n",
-        namespace,
-        "-o",
-        "jsonpath={.status.currentTraffic}",
-    ]);
+    const trafficJson = exec(
+        withKubeContext(
+            [
+                "kubectl",
+                "get",
+                "nextapp",
+                config.name,
+                "-n",
+                namespace,
+                "-o",
+                "jsonpath={.status.currentTraffic}",
+            ],
+            context,
+        ),
+    );
     return parseLiveRevisionNames(trafficJson.replace(/^'|'$/g, ""));
 }
 
@@ -168,18 +179,24 @@ function readSpecPin(
     exec: GcExec,
     config: KnativeNextConfig,
     namespace: string,
+    context?: string,
 ): { ok: true; pin: string } | { ok: false } {
     try {
-        const pin = exec([
-            "kubectl",
-            "get",
-            "nextapp",
-            config.name,
-            "-n",
-            namespace,
-            "-o",
-            "jsonpath={.spec.traffic.revisionName}",
-        ])
+        const pin = exec(
+            withKubeContext(
+                [
+                    "kubectl",
+                    "get",
+                    "nextapp",
+                    config.name,
+                    "-n",
+                    namespace,
+                    "-o",
+                    "jsonpath={.spec.traffic.revisionName}",
+                ],
+                context,
+            ),
+        )
             .replace(/^'|'$/g, "")
             .trim();
         return { ok: true, pin };
@@ -195,11 +212,17 @@ export function runAssetGC(
     exec: GcExec = runCapture,
     prune: GcPrune = pruneOldBuilds,
     dryRun = false,
+    context?: string,
 ): AssetGCResult {
     // ── PLAN PHASE ── first observation of pin + status.currentTraffic; compute
     // the concrete delete set (via the prune's classify path) but DO NOT delete
     // until the re-read below confirms no drift.
-    const liveRevisions = readCurrentTrafficRevisions(exec, config, namespace);
+    const liveRevisions = readCurrentTrafficRevisions(
+        exec,
+        config,
+        namespace,
+        context,
+    );
     // Spec-pin probe — UNCONDITIONAL (#272 sysdesign-gate residual, folded
     // into #254): status.currentTraffic is the operator's OBSERVATION and can
     // LAG the spec — a fresh `kn-next rollback --to revA` pin may not be
@@ -208,7 +231,7 @@ export function runAssetGC(
     // skips (#264 fail-safe below); a populated status has the pin's build-id
     // unioned into the protected set after live resolution. A failed probe is
     // treated as "cannot prove there is no pin" — over-keep, never over-delete.
-    const pin1 = readSpecPin(exec, config, namespace);
+    const pin1 = readSpecPin(exec, config, namespace, context);
     const pinProbeFailed = !pin1.ok;
     const pinnedRevision = pin1.ok ? pin1.pin : "(unreadable)";
     // #264 fail-safe: an EMPTY status.currentTraffic while the CR PINS a
@@ -239,16 +262,21 @@ export function runAssetGC(
     // label (read-only). The single-token jsonpath escapes the dotted/slashed
     // label key. A missing label yields '' → resolveLiveBuildIds fails safe.
     const resolved = resolveLiveBuildIds(liveRevisions, (rev) =>
-        exec([
-            "kubectl",
-            "get",
-            "revision",
-            rev,
-            "-n",
-            namespace,
-            "-o",
-            "jsonpath={.metadata.labels.apps\\.kn-next\\.dev/build-id}",
-        ])
+        exec(
+            withKubeContext(
+                [
+                    "kubectl",
+                    "get",
+                    "revision",
+                    rev,
+                    "-n",
+                    namespace,
+                    "-o",
+                    "jsonpath={.metadata.labels.apps\\.kn-next\\.dev/build-id}",
+                ],
+                context,
+            ),
+        )
             .replace(/^'|'$/g, "")
             .trim(),
     );
@@ -267,16 +295,21 @@ export function runAssetGC(
     if (pinnedRevision && !liveRevisions.includes(pinnedRevision)) {
         let pinnedBuildId = "";
         try {
-            pinnedBuildId = exec([
-                "kubectl",
-                "get",
-                "revision",
-                pinnedRevision,
-                "-n",
-                namespace,
-                "-o",
-                "jsonpath={.metadata.labels.apps\\.kn-next\\.dev/build-id}",
-            ])
+            pinnedBuildId = exec(
+                withKubeContext(
+                    [
+                        "kubectl",
+                        "get",
+                        "revision",
+                        pinnedRevision,
+                        "-n",
+                        namespace,
+                        "-o",
+                        "jsonpath={.metadata.labels.apps\\.kn-next\\.dev/build-id}",
+                    ],
+                    context,
+                ),
+            )
                 .replace(/^'|'$/g, "")
                 .trim();
         } catch {
@@ -306,7 +339,7 @@ export function runAssetGC(
     // would change the argv-count contract the --dry-run tests pin).
     if (
         !dryRun &&
-        driftedSincePlan(exec, config, namespace, liveRevisions, pin1)
+        driftedSincePlan(exec, config, namespace, liveRevisions, pin1, context)
     ) {
         return {
             pruned: false,
@@ -337,11 +370,17 @@ function driftedSincePlan(
     namespace: string,
     planRevisions: readonly string[],
     planPin: { ok: true; pin: string } | { ok: false },
+    context?: string,
 ): boolean {
     let revisions2: string[];
-    const pin2 = readSpecPin(exec, config, namespace);
+    const pin2 = readSpecPin(exec, config, namespace, context);
     try {
-        revisions2 = readCurrentTrafficRevisions(exec, config, namespace);
+        revisions2 = readCurrentTrafficRevisions(
+            exec,
+            config,
+            namespace,
+            context,
+        );
     } catch {
         // Re-read failed → cannot prove no drift → fail-safe abort (over-keep).
         return true;
@@ -373,6 +412,8 @@ export interface GcArgs {
      * issue ZERO deletes. Composes with --build-id/-n.
      */
     dryRun: boolean;
+    /** kubectl context to target (#978); undefined ⇒ ambient current-context. */
+    context?: string;
 }
 
 /**
@@ -397,6 +438,8 @@ export function parseGcArgs(argv: readonly string[]): GcArgs {
             out.buildId = takeValue("--build-id", ++i);
         } else if (a === "-n" || a === "--namespace") {
             out.namespace = takeValue(a, ++i);
+        } else if (a === "--context") {
+            out.context = takeValue("--context", ++i);
         } else if (a === "--dry-run") {
             out.dryRun = true;
         } else if (a.startsWith("-")) {
@@ -442,6 +485,7 @@ Options:
   --build-id <id>       Build-id to treat as the newest (e.g. the tag just
                         deployed). Omit to order by the remote listing alone.
   -n, --namespace <ns>  Kubernetes namespace of the NextApp (default: default)
+      --context <ctx>   kubectl context to target (default: current-context)
   --dry-run             Print the FULL reap/keep plan (would-reap candidates,
                         window-kept, live-kept, unmarked-kept, reserved
                         shared dirs) and issue ZERO deletes. The cluster reads
@@ -594,6 +638,7 @@ export async function gcMain(argv: readonly string[]): Promise<number> {
         runCapture,
         pruneOldBuilds,
         args.dryRun,
+        resolveKubeContext(args.context),
     );
 
     // Synchronous outcome report on fd 1: pino's transport is async and a

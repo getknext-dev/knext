@@ -24,7 +24,12 @@ import { writeSync } from "node:fs";
 import { createLogger } from "../utils/logger";
 import { runQuiet } from "./exec";
 // Single source of truth for config loading — also runs validateConfig.
-import { loadConfig, UsageError } from "./shared";
+import {
+    loadConfig,
+    resolveKubeContext,
+    UsageError,
+    withKubeContext,
+} from "./shared";
 
 const log = createLogger({ module: "rollback" });
 
@@ -51,6 +56,7 @@ export function runRollback(
     toRevision: string | undefined,
     canaryPercent: number | undefined,
     exec: RollbackExec = runQuiet,
+    context?: string,
 ): void {
     let patch: unknown;
     if (toRevision) {
@@ -67,18 +73,23 @@ export function runRollback(
         patch = { spec: { traffic: null } };
     }
 
-    exec([
-        "kubectl",
-        "patch",
-        "nextapp",
-        appName,
-        "-n",
-        namespace,
-        "--type",
-        "merge",
-        "-p",
-        JSON.stringify(patch),
-    ]);
+    exec(
+        withKubeContext(
+            [
+                "kubectl",
+                "patch",
+                "nextapp",
+                appName,
+                "-n",
+                namespace,
+                "--type",
+                "merge",
+                "-p",
+                JSON.stringify(patch),
+            ],
+            context,
+        ),
+    );
 }
 
 interface RollbackArgs {
@@ -86,6 +97,8 @@ interface RollbackArgs {
     namespace: string;
     toRevision?: string;
     canaryPercent?: number;
+    /** kubectl context to target (#978); undefined ⇒ ambient current-context. */
+    context?: string;
 }
 
 /**
@@ -125,6 +138,8 @@ export function parseRollbackArgs(argv: readonly string[]): RollbackArgs {
             out.canaryPercent = n;
         } else if (a === "-n" || a === "--namespace") {
             out.namespace = takeValue(a, ++i);
+        } else if (a === "--context") {
+            out.context = takeValue("--context", ++i);
         } else if (a.startsWith("-")) {
             throw new UsageError(
                 `unknown flag "${a}" (see kn-next rollback --help)`,
@@ -161,6 +176,7 @@ Options:
   --canary <n>          With --to: send n% (1-99) of traffic to latest-ready,
                         (100-n)% to the pinned revision
   -n, --namespace <ns>  Kubernetes namespace (default: default)
+      --context <ctx>   kubectl context to target (default: current-context)
   -h, --help            Show this help
 `;
 
@@ -204,7 +220,14 @@ async function rollback(argv: readonly string[]) {
         "Patching NextApp CR spec.traffic (operator reconciles ksvc traffic)...",
     );
 
-    runRollback(appName, args.namespace, args.toRevision, args.canaryPercent);
+    runRollback(
+        appName,
+        args.namespace,
+        args.toRevision,
+        args.canaryPercent,
+        runQuiet,
+        resolveKubeContext(args.context),
+    );
 
     log.info(
         { nextapp: appName },
