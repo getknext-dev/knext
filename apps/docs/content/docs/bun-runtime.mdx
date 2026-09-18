@@ -61,6 +61,42 @@ are refused rather than silently producing a binary that boots roughly twice as 
 with `bun upgrade`.
 </Callout>
 
+## Warm-on-boot (optional)
+
+When a scaled-to-zero app wakes, the very first request pays the full cost of a cold process —
+JIT warm-up and the first render. To keep a real visitor from paying it, the runtime fires a
+**synthetic request at your own app the moment it boots**, overlapped with becoming ready, so the
+hot path is already warm when the first user arrives. This is **on by default**; you don't need to
+configure anything.
+
+Two environment variables tune it:
+
+- **`KNEXT_WARM_PATH`** — a comma-separated list of paths to warm, in order (default `/api/health`).
+  The first fires immediately; the rest follow one at a time, so a contended cold CPU isn't fighting
+  several warm requests at once. Point it at the routes whose first render is expensive:
+
+  ```ts title="kn-next.config.ts"
+  const config: KnativeNextConfig = {
+    name: 'acme',
+    env: {
+      KNEXT_WARM_PATH: '/,/api/health',
+    },
+  };
+  ```
+
+- **`KNEXT_EAGER_WARM=0`** — turns warm-on-boot off entirely.
+
+<Callout type="warn">
+**Only warm paths that render the same for every anonymous visitor.** The warm request is
+synthetic — it carries no cookies and no authentication — and its response is cached. Warming a
+per-user or authenticated page would prime the cache with the logged-out render and serve it to the
+first real user. `/` is a good choice **only** when your home page is identical for everyone;
+otherwise leave the default `/api/health`.
+</Callout>
+
+Set these in your `kn-next.config.ts` `env:` block (they become `spec.env` on the `NextApp`), the
+same way as any other runtime environment variable.
+
 ## Your app must be an ES module
 
 The compiled build requires your app to be an **ES module** — your `package.json` must set:
