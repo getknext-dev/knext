@@ -108,7 +108,7 @@ describe("#902 a prover's runner can execute its spec's framework", () => {
     expect(findings, `${relPath}: ${findings.join(' | ')}`).toEqual([]);
   });
 
-  it('a vitest-resolved prover aimed at a bun:test spec IS a finding', () => {
+  it('a prover that runs a bun:test spec through the engine resolver IS a finding', () => {
     const findings = auditSpecFrameworkMatch(
       "import { resolveTestRunner } from './lib/ci-blocking-gate-proof.mjs';\n" +
         "const SPEC = 'fake/spec.test.ts';\nresolveTestRunner(root);",

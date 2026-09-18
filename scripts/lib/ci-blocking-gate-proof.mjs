@@ -11,9 +11,9 @@
  * import.
  */
 
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { blankNonCode } from './blank-non-code.mjs';
 
 /**
@@ -149,61 +149,52 @@ export function disarmAnchor(jobId, disarm) {
 }
 
 /**
- * Locate a test runner that can actually start, as `{ command, args }`.
+ * Locate the test runner that can actually start, as `{ command, args }`.
  *
- * The prover used `pnpm exec vitest`, which resolves nothing in a tree that has
- * no `node_modules` of its own — a git worktree, or a fresh clone before
- * install. `pnpm exec` then failed with `Command "vitest" not found`, the
- * prover saw zero tests run, and reported it as a RENAMED ASSERTION. Wrong
- * cause, wrong next step, and the proof was offline for a whole PR.
+ * #871: there is ONE runner now — bun — so this resolves the bun binary's
+ * ABSOLUTE path, and the spawn then needs nothing from the ambient PATH. (It used
+ * to walk up for `node_modules/.bin/vitest` and fall back to `pnpm exec vitest`,
+ * which resolved NOTHING in a tree without its own `node_modules` — a git
+ * worktree, or a fresh clone before install — and took the proof offline. With
+ * vitest removed, a clean install has no such bin at all, so the whole
+ * walk-and-fallback is gone.)
  *
- * So resolve the binary the way node itself resolves modules: walk up from the
- * repo root for `node_modules/.bin/vitest` and spawn it directly. `pnpm exec`
- * remains the fallback for a tree where the bin shim is absent but the package
- * manager can still find it.
+ * Order: an explicit `KNEXT_BUN` override, then the running bun (`process.execPath`
+ * under `bun test`), then a PATH lookup. A resolver that resolves NOTHING returns
+ * the bare name `bun`, which fails `existsSync` — so the proof reds rather than
+ * being rescued by the ambient PATH, exactly the guarantee the proof test checks.
  */
 export function resolveTestRunner(repoRoot) {
-  let dir = resolve(repoRoot);
-  for (;;) {
-    const bin = join(dir, 'node_modules', '.bin', 'vitest');
-    if (existsSync(bin)) return { command: bin, args: [] };
-    const parent = dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
+  const override = process.env.KNEXT_BUN;
+  if (override && existsSync(override)) return { command: override, args: [] };
+  if (process.versions.bun !== undefined && existsSync(process.execPath)) {
+    return { command: process.execPath, args: [] };
   }
-  return { command: 'pnpm', args: ['exec', 'vitest'] };
+  try {
+    const found = execFileSync('which', ['bun'], { cwd: repoRoot, encoding: 'utf8' }).trim();
+    if (found.length > 0 && existsSync(found)) return { command: found, args: [] };
+  } catch {
+    // fall through to the bare name — existsSync fails on it, so the proof reds.
+  }
+  return { command: 'bun', args: [] };
 }
 
 /**
- * #902 — resolve the runner FOR A SPECIFIC SPEC, dispatching on its framework.
- *
- * `resolveTestRunner` above resolves vitest unconditionally, which is wrong
- * for the majority framework since the bun:test migration: vitest COLLECTS
- * NOTHING from a `bun:test` file, so a prover pointed at one either fails on
- * an empty run or — worse — passes a grep over empty output. Three committed
- * provers had exactly that defect when this landed.
+ * Resolve the runner for a spec. #871: every spec is `bun:test`, so there is one
+ * route — `scripts/bun-test.mjs` (same exit-code contract, `-t` forwarded). The
+ * `spec` argument is retained for the call sites and to keep the resolver
+ * spec-addressable; there is no longer a framework to dispatch on.
  *
  * Returns `{ command, args, runArgs(spec, testName?) }`; spawn as
- * `spawnSync(command, [...args, ...runArgs(spec, name)])`. bun specs run
- * through `scripts/bun-test.mjs` (same exit-code contract, `-t` forwarded);
- * vitest specs keep the resolver above.
+ * `spawnSync(command, [...args, ...runArgs(spec, name)])`.
  */
-export function resolveSpecRunner(repoRoot, spec) {
-  const specSource = readFileSync(resolve(repoRoot, spec), 'utf8');
-  if (/from\s+['"]bun:test['"]/.test(specSource)) {
-    return {
-      command: process.execPath,
-      args: [join(repoRoot, 'scripts', 'bun-test.mjs')],
-      // `!== undefined`, not truthiness: '' is the match-everything filter a
-      // caller uses to force the per-child summary forwarding on.
-      runArgs: (s, testName) => (testName !== undefined ? [s, '-t', testName] : [s]),
-    };
-  }
-  const vit = resolveTestRunner(repoRoot);
+export function resolveSpecRunner(repoRoot, _spec) {
   return {
-    command: vit.command,
-    args: vit.args,
-    runArgs: (s, testName) => (testName !== undefined ? ['run', s, '-t', testName] : ['run', s]),
+    command: process.execPath,
+    args: [join(repoRoot, 'scripts', 'bun-test.mjs')],
+    // `!== undefined`, not truthiness: '' is the match-everything filter a
+    // caller uses to force the per-child summary forwarding on.
+    runArgs: (s, testName) => (testName !== undefined ? [s, '-t', testName] : [s]),
   };
 }
 
@@ -243,41 +234,16 @@ export function declaredTestTitles(source) {
   return titles;
 }
 
-/**
- * vitest 4's banner, printed before it collects anything. Its ABSENCE is the
- * positive evidence that the runner never started — not an inference from the
- * absence of a summary, which is what previously blamed the runner for a spec
- * that was merely missing.
- */
-const RUNNER_BANNER = /\bRUN\b\s+v\d+\.\d+/;
-
-/**
- * What vitest 4 prints when the file filter matches nothing.
- *
- * MEASURED against the running version (4.0.18), not assumed:
- *   `vitest run tests/does-not-exist.test.ts -t x` →
- *   `No test files found, exiting with code 1`.
- * The previous detection tested for `no tests`, a string vitest 4 never emits,
- * which is exactly why a moved spec fell through to the runner branch (#680).
- */
-const NO_TEST_FILES = /No test files found/;
-
-/** A collection summary — vitest got as far as loading at least one file. */
-const TEST_FILES_SUMMARY = /Test Files\s+\d+/;
-
-/* ── #960: the gate specs migrated to bun:test, and `runGateTest` dispatches
- * through `scripts/bun-test.mjs` for them. Its output is not vitest's, so the
- * "did it run / how many / did it collect" detection needs bun equivalents
- * alongside the vitest ones. Measured against bun 1.4.0 through bun-test.mjs
- * under `-t`:
+/* ── #871: every gate spec is bun:test, and `runGateTest` runs them through
+ * `scripts/bun-test.mjs`. The vitest output shapes are gone; only bun's are
+ * parsed. Measured against bun 1.4.x through bun-test.mjs under `-t`:
  *   header:   `bun test — 1 file(s), …`
  *   per file: `  ok   [1/1] tests/foo.test.ts`  (or `FAIL [1/1] …`)
  *   summary:  ` 1 pass` / ` 0 fail`  (forwarded per-child only under `-t`)
- *   no file:  `no test files matched`  (bun-test.mjs, exit 1)
- * Both formats are parsed rather than branching on framework, so a GATES set
- * that is half-migrated is read correctly either way. */
+ *   no file:  `no test files matched`  (bun-test.mjs, exit 1) — the correct
+ *             not-collected signal for a MOVED spec, no framework read needed. */
 
-/** bun-test.mjs's header line — the bun analogue of vitest's RUN banner. */
+/** bun-test.mjs's header line — positive evidence the runner started. */
 const BUN_BANNER = /\bbun test\b[^\n]*\bfile\(s\)/;
 
 /** bun-test.mjs got as far as loading at least one file. */
@@ -297,21 +263,12 @@ const BUN_NO_TEST_FILES = /no test files matched/;
  * branch deciding the cause on too little evidence.
  */
 export function runGateTest(repoRoot, spec, name = GATE_TEST_NAME) {
-  // #960: dispatch per spec FRAMEWORK. `resolveTestRunner` resolves vitest,
-  // which collects NOTHING from a bun:test file — and the GATES specs have all
-  // migrated, so an unconditional vitest run reported `ran === 0` for every one
-  // and reddened the whole prover lane. `resolveSpecRunner` routes bun:test
-  // specs to `scripts/bun-test.mjs`. A spec that has MOVED cannot be read to
-  // detect its framework, so fall back to the vitest resolver — `existsSync`
-  // still attributes that as spec-not-collected (`diagnoseNothingRan`), which is
-  // the correct cause, rather than crashing on the read.
-  const runner = existsSync(resolve(repoRoot, spec))
-    ? resolveSpecRunner(repoRoot, spec)
-    : {
-        ...resolveTestRunner(repoRoot),
-        runArgs: (s, testName) =>
-          testName !== undefined ? ['run', s, '-t', testName] : ['run', s],
-      };
+  // #871: one runner. `scripts/bun-test.mjs` collects the spec — or, for a spec
+  // that has MOVED, prints `no test files matched` and exits 1, which is the
+  // correct not-collected signal (`diagnoseNothingRan`), no framework read
+  // needed. So a single unconditional route replaces the old per-framework
+  // dispatch.
+  const runner = resolveSpecRunner(repoRoot, spec);
   const res = spawnSync(runner.command, [...runner.args, ...runner.runArgs(spec, name)], {
     cwd: repoRoot,
     encoding: 'utf8',
@@ -322,22 +279,18 @@ export function runGateTest(repoRoot, spec, name = GATE_TEST_NAME) {
   // to a deliberate ANSI strip.
   const ansi = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g');
   const out = `${res.stdout ?? ''}${res.stderr ?? ''}`.replace(ansi, '');
-  // Both runners' pass/fail counts: vitest `Tests N passed`, bun ` N pass`
-  // (forwarded per-child by bun-test.mjs under `-t`). A `-t` matching nothing is
-  // ` 0 pass` / ` 0 fail` in bun, i.e. `ran === 0` WITH the file collected —
-  // exactly the renamed-assertion signal `diagnoseNothingRan` needs.
-  const passed = Number(
-    out.match(/Tests\s+(\d+) passed/)?.[1] ?? out.match(/^\s*(\d+) pass\b/m)?.[1] ?? 0,
-  );
-  const failed = Number(
-    out.match(/Tests\s+.*?(\d+) failed/)?.[1] ?? out.match(/^\s*(\d+) fail\b/m)?.[1] ?? 0,
-  );
-  const collected = TEST_FILES_SUMMARY.test(out) || BUN_BANNER.test(out) || BUN_COLLECTED.test(out);
-  const noTestFiles = NO_TEST_FILES.test(out) || BUN_NO_TEST_FILES.test(out);
+  // bun's per-child pass/fail counts (forwarded by bun-test.mjs under `-t`). A
+  // `-t` matching nothing is ` 0 pass` / ` 0 fail`, i.e. `ran === 0` WITH the
+  // file collected — exactly the renamed-assertion signal `diagnoseNothingRan`
+  // needs.
+  const passed = Number(out.match(/^\s*(\d+) pass\b/m)?.[1] ?? 0);
+  const failed = Number(out.match(/^\s*(\d+) fail\b/m)?.[1] ?? 0);
+  const collected = BUN_BANNER.test(out) || BUN_COLLECTED.test(out);
+  const noTestFiles = BUN_NO_TEST_FILES.test(out);
   // `launched` = the runner produced recognisable output. A run whose filter
   // matched nothing HAS launched; conflating that with a dead runner is the
   // third misattribution #680 closed.
-  const launched = RUNNER_BANNER.test(out) || BUN_BANNER.test(out) || collected || noTestFiles;
+  const launched = BUN_BANNER.test(out) || collected || noTestFiles;
   return {
     ok: res.status === 0,
     ran: passed + failed,
