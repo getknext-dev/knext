@@ -8,14 +8,16 @@
  * `bun:test`). Made pure, the same guard is proved by handing it a mutated
  * workflow string in memory, with nothing to restore and no residue to leak.
  *
- * The three findings are the three ways this gate has to die:
- *   1. the bun runner stops emitting coverage    -> the numerator vanishes;
- *   2. vitest stops emitting coverage            -> the denominator vanishes;
- *   3. the checker stops running, or is disarmed -> nothing is enforced.
+ * The two findings are the two ways this gate has to die (#871: the suite runs
+ * entirely under bun, so vitest is no longer a wiring concern):
+ *   1. the bun runner stops emitting coverage    -> the numerator vanishes and
+ *      `check-coverage.mjs` has no per-file reports to merge;
+ *   2. the checker stops running, or is disarmed -> nothing is enforced.
+ * (The honest DENOMINATOR is no longer a separate CI step — `check-coverage.mjs`
+ * enumerates the source files itself and folds untested ones in at 0%.)
  */
 
 const BUN_STEP = 'run: node scripts/bun-test.mjs --coverage';
-const VITEST_STEP = 'run: bun x vitest run --coverage';
 const GATE_STEP = 'run: node scripts/check-coverage.mjs';
 
 /**
@@ -27,17 +29,11 @@ export function auditCoverageWiring(ciYaml) {
   const steps = ciYaml.split('\n').map((l) => l.trim());
 
   const idxBun = steps.indexOf(BUN_STEP);
-  const idxVitest = steps.indexOf(VITEST_STEP);
   const idxGate = steps.indexOf(GATE_STEP);
 
   if (idxBun === -1) {
     findings.push(
-      `the bun runner is not invoked as \`${BUN_STEP}\` — without --coverage the merged gate has almost no numerator`,
-    );
-  }
-  if (idxVitest === -1) {
-    findings.push(
-      `vitest is not invoked as \`${VITEST_STEP}\` — its enumeration is the only honest denominator`,
+      `the bun runner is not invoked as \`${BUN_STEP}\` — without --coverage the gate has no numerator`,
     );
   }
   if (idxGate === -1) {
@@ -46,12 +42,9 @@ export function auditCoverageWiring(ciYaml) {
     );
   }
 
-  // Order matters: the checker merges what the two runners left on disk.
+  // Order matters: the checker merges what the bun runner left on disk.
   if (idxGate !== -1 && idxBun !== -1 && idxGate < idxBun) {
     findings.push('the coverage gate runs BEFORE the bun runner, so it would merge stale reports');
-  }
-  if (idxGate !== -1 && idxVitest !== -1 && idxGate < idxVitest) {
-    findings.push('the coverage gate runs BEFORE vitest, so it would merge stale reports');
   }
 
   // A step that cannot red is decoration. Scoped to the gate step's own block.

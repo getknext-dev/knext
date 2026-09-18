@@ -42,22 +42,16 @@
   // tests do their work. With it, tsc infers real types from the JS while
   // still not error-checking the JS itself (that is not this issue's scope).
   //
-  // NOT covered, deliberately: vitest.workspace.ts. It stays excluded — but the
-  // reason this comment used to give was WRONG and is corrected here rather than
-  // repeated. It said the file "is dead — it imports `defineWorkspace`, removed in
-  // vitest 4 ... and nothing references the file", and invited deleting it as "a
-  // separate change". That was measured and is false: on vitest 4.0.18 the file is
-  // still loaded, and it is what puts `apps/**` tests under happy-dom. Deleting it
-  // (with nothing else changed) turns apps/file-manager/child-ports.test.ts RED
-  // — restoring only that file turns it green again. So the exclusion here is a
-  // typecheck-scope decision about a LIVE file, not a headstone for a dead one.
-  // Do not delete vitest.workspace.ts on the strength of the old note.
+  // #871 removed vitest entirely — the root `vitest.config.ts`, `vitest.setup.ts`,
+  // `vitest.server-only-stub.ts` and `vitest.workspace.ts` are gone, along with
+  // the deps. The suite runs under `bun test`; `apps/**` tests get their DOM from
+  // `tests/helpers/bun-dom-preload.ts` (applied per-file by `scripts/bun-test.mjs`),
+  // not from a vitest workspace, so nothing here needs to reach those root files.
   //
   // module/moduleResolution are bundler semantics for the same reason
-  // packages/db/tsconfig.typecheck.json uses them: these files are loaded by
-  // vite, so extensionless relative imports and `import.meta` are how they
-  // actually resolve. Checking them under Node16/CJS would report config
-  // artifacts, not defects.
+  // packages/db/tsconfig.typecheck.json uses them: these files use extensionless
+  // relative imports and `import.meta`, which is how they actually resolve.
+  // Checking them under Node16/CJS would report config artifacts, not defects.
   "compilerOptions": {
     "target": "ES2022",
     "lib": ["ES2023"],
@@ -78,27 +72,13 @@
     // with TS2688. That false green happened on the first CI run of this very
     // gate. The pin makes the local run fail the same way CI does.
     "typeRoots": ["./node_modules/@types"],
-    // `node` only. `vitest/globals` is deliberately NOT listed: it is a package
-    // subpath, not a @types/* directory, so it cannot resolve under the pinned
-    // typeRoots above — and it is not needed, because every root test imports
-    // describe/expect/it explicitly from 'vitest' rather than relying on the
-    // config's `globals: true`. If a future root test does rely on the globals,
-    // add a `/// <reference types="vitest/globals" />` to that file instead of
-    // unpinning typeRoots.
-    // `bun` alongside `node`: the root `tests/` tree now runs under `bun test`
-    // (#871), so it imports `bun:test`. An explicit `types` array turns OFF
-    // automatic @types discovery, which is why installing `@types/bun` alone
-    // changed nothing — 94 `Cannot find module 'bun:test'` errors, and 84 more
-    // implicit-any errors cascading from the untyped `mock()` callbacks behind
-    // them.
+    // `node` + `bun`: the root `tests/` tree runs under `bun test` (#871), so it
+    // imports `bun:test`. An explicit `types` array turns OFF automatic @types
+    // discovery, which is why installing `@types/bun` alone changed nothing — 94
+    // `Cannot find module 'bun:test'` errors, and 84 more implicit-any errors
+    // cascading from the untyped `mock()` callbacks behind them.
     "types": ["node", "bun"]
   },
-  "include": [
-    "tests/**/*.ts",
-    "turbo/**/*.ts",
-    "vitest.config.ts",
-    "vitest.setup.ts",
-    "vitest.server-only-stub.ts"
-  ],
+  "include": ["tests/**/*.ts", "turbo/**/*.ts"],
   "exclude": ["node_modules", "dist", "packages", "apps", "examples", "benchmarks", "**/.claude/**"]
 }

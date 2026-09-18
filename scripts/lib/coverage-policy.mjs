@@ -1,18 +1,12 @@
 import { activeExemptions } from './dated-exemptions.mjs';
 /**
- * The coverage policy — ONE definition, read by both consumers (#884).
+ * The coverage policy — ONE definition (#884).
  *
- * Consumers:
- *   - `vitest.config.ts`      — the include/exclude that define the honest
- *                               DENOMINATOR (every source file enumerated, an
- *                               untouched one at 0%).
- *   - `scripts/check-coverage.mjs` — the floors, enforced over the MERGED lcov
- *                               of both runners.
- *
- * Why vitest no longer enforces the floors: after the bun migration it collects
- * 3 test files out of 338, so its numerator is a rounding error while its
- * denominator is the whole tree. Thresholds there measured 1.37% against a 77%
- * floor. The gate moved; the numbers did not.
+ * Read by `scripts/check-coverage.mjs`, which enforces the floors over the
+ * merged lcov of the bun suite (#871: vitest is gone, so there is one runner).
+ * The `COVERAGE_INCLUDE` / `COVERAGE_EXCLUDE` globs do double duty: they scope
+ * the floors AND define the honest DENOMINATOR — every matching source file is
+ * enumerated from `git ls-files`, and one no test imports is folded in at 0%.
  *
  * ## What survives an lcov merge, and what does not
  *
@@ -27,12 +21,10 @@ import { activeExemptions } from './dated-exemptions.mjs';
  *     identity, `max()` across reports under-reports a file both runners
  *     touched. Under-reporting is the safe direction for a floor, so it is
  *     enforced — at a floor set to the measured merged number.
- *   - **branches** do NOT merge at all: bun emits no branch records, so a branch
- *     percentage over the merge would be computed from vitest's 3 files only.
- *     That is the dishonest denominator this gate exists to prevent, so the
- *     branch floor is NOT carried over. It is not "lowered" — it is
- *     unmeasurable under this shape, and a number describing a measurement
- *     nobody makes is decoration.
+ *   - **branches** do NOT merge at all: bun emits no branch records, so the
+ *     suite produces no branch data whatsoever. The branch floor is NOT carried
+ *     over. It is not "lowered" — it is unmeasurable under this shape, and a
+ *     number describing a measurement nobody makes is decoration.
  *   - **statements** are not an lcov concept at all; the old `statements` floor
  *     was v8/istanbul-only and has no representation here.
  *
@@ -44,8 +36,7 @@ import { activeExemptions } from './dated-exemptions.mjs';
 /** Where `scripts/bun-test.mjs --coverage` drops its per-file lcov reports. */
 export const BUN_COVERAGE_DIR = 'coverage-bun';
 
-/** Where vitest writes its report (its default), and the merged report we write next to it. */
-export const VITEST_LCOV = 'coverage/lcov.info';
+/** The merged report `scripts/check-coverage.mjs` writes out for codecov / genhtml. */
 export const MERGED_LCOV = 'coverage/lcov.merged.info';
 
 /**
@@ -70,10 +61,10 @@ export const COVERAGE_EXCLUDE = [
 /**
  * Global floors, over the MERGED report.
  *
- * Measured 2026-09-04 on the full merge (336 bun reports + vitest's):
- * **lines 78.41% (8546/10899), functions 79.70%** over 79 files. The old
- * global floors — 77 lines / 74 functions — still hold against that, so they
- * are UNCHANGED. Ratchet convention: floors sit just below the measured
+ * Re-measured 2026-09-17 after vitest's removal (#871), over the bun per-file
+ * reports plus the generated 0% denominator: **lines 78.47%, functions 85.97%**.
+ * The old global floors — 77 lines / 74 functions — still hold against that, so
+ * they are UNCHANGED. Ratchet convention: floors sit just below the measured
  * baseline; raise them as coverage lands, never lower one to get green.
  */
 export const THRESHOLDS = {
@@ -157,10 +148,9 @@ export const COVERAGE_METRIC_EXCEPTIONS = Object.freeze([
   Object.freeze({
     metric: 'branches',
     justification:
-      'bun 1.4.0 lcov emits SF/FNF/FNH/DA/LF/LH and no BRDA/BRF/BRH, so a branch percentage over ' +
-      "the merged report would be computed from vitest's 3 collected files against the whole " +
-      "tree's denominator — the dishonest denominator this gate exists to prevent. Restoring a " +
-      'branch floor needs branch records from the bun side, not a smaller denominator.',
+      'bun 1.4.0 lcov emits SF/FNF/FNH/DA/LF/LH and no BRDA/BRF/BRH, so the suite emits no branch ' +
+      'records at all — there is nothing to compute a branch percentage from. Restoring a branch ' +
+      'floor needs branch records from the bun side, which the current lcov output does not carry.',
     added: '2026-09-04',
     expires: '2026-12-01',
     note: "Renew with a fresh measurement of bun's lcov output, or land a branch source and a floor.",

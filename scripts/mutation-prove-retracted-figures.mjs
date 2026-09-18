@@ -101,7 +101,7 @@ function writeCanary(path, shouldPass) {
   writeFileSync(
     join(REPO_ROOT, path),
     [
-      "import { describe, expect, it } from 'vitest';",
+      "import { describe, expect, it } from 'bun:test';",
       "describe('canary', () => {",
       `  it('${shouldPass ? 'passes' : 'fails'} on purpose', () => {`,
       `    expect(1).toBe(${shouldPass ? '1' : '2'});`,

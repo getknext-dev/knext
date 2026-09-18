@@ -126,7 +126,7 @@ const canaryAbs = join(REPO_ROOT, CANARY);
 writeFileSync(
   canaryAbs,
   [
-    "import { describe, expect, it } from 'vitest';",
+    "import { describe, expect, it } from 'bun:test';",
     "describe('canary', () => {",
     "  it('fails on purpose so the harness proves it can see red', () => {",
     '    expect(1).toBe(2);',

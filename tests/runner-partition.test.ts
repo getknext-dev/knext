@@ -1,55 +1,39 @@
 /**
- * Every test file is claimed by EXACTLY ONE runner (#871).
+ * Every test file runs under the ONE runner (#871).
  *
- * During the bun migration the suite is split: a file importing `bun:test`
- * cannot run under vitest, and one importing `vitest` cannot run under bun. Both
- * sides derive their half by reading the files, which removes the hand-maintained
- * list — but it introduces a failure the list never had. If both sides disown a
- * file, nothing fails. The file simply stops running, and the suite stays green.
+ * The bun migration is finished: vitest is gone, and the whole suite runs under
+ * `bun test` via `scripts/bun-test.mjs`. There is no partition left to police —
+ * but the failure this guard was written for still exists in a subtler form. A
+ * test file that imports NEITHER `bun:test` nor `vitest` (a botched migration, a
+ * stray copy) runs nothing when `bun test` loads it, yet nothing else reports
+ * that it is empty. And a file that still imports `vitest` cannot run under bun
+ * at all — it fails loudly, but with an error that looks like a missing module
+ * rather than "this file was never ported".
  *
- * That is not hypothetical. `ts-import-extension-guard.test.ts` builds a FIXTURE
- * containing the string `import vitest from "vitest"`, and both partitions
- * originally scanned raw source: vitest excluded it for importing `bun:test`,
- * the bun runner skipped it for "importing" vitest, and it ran nowhere at all.
- * It had been silently uncovered, and the only reason it surfaced was a
- * hand-count of what remained.
+ * So the invariant is now one-sided and simpler than the old partition: EVERY
+ * tracked test file imports `bun:test`, and NONE imports `vitest`.
  *
- * So the partition is asserted rather than trusted, in both directions:
- *
- *   - a file claimed by NEITHER runner is lost coverage that nothing else
- *     reports;
- *   - a file claimed by BOTH is a file one runner cannot execute, which fails
- *     loudly — worth catching here anyway, because it means the two rules have
- *     drifted apart.
- *
- * This guard calls the SAME `importsFrom` both runners call. A guard carrying
- * its own copy of the rule passes while the runners disagree with it — which is
- * the shape of the bug it exists for.
- *
- * Neither a raw scan nor a blanked one works, and the second is the subtler
- * trap: `blankNonCode` blanks string CONTENTS, and a module specifier IS a
- * string, so `from "bun:test"` becomes `from "        "` and matches nothing.
- * Applied here that read as "all 333 files are orphaned"; applied to one runner
- * only it would have silently handed the whole suite to the other.
- *
- * One consequence of enumerating with `git ls-files`, worth knowing before you
- * spend time on it: a NEW test file is invisible to the partition until it is
- * staged, so an unstaged `bun:test` file lands in vitest's run and fails there
- * on the `bun:test` import. That is loud rather than silent — the fix is
- * `git add`, not a change to this guard — and it is the price of an enumeration
- * that ignores build output and throwaway worktrees. This guard cannot catch it,
- * because it reads the same list.
+ * This calls the SAME `importsFrom` the runner (`scripts/bun-test.mjs`, via
+ * `needsDom`) and the coverage denominator share — a guard carrying its own copy
+ * of the rule passes while the runner disagrees with it, which is the shape of
+ * the bug it exists for. Neither a raw scan nor a blanked one works on its own:
+ * a raw scan is fooled by a fixture string like `import vitest from "vitest"`
+ * (`ts-import-extension-guard.test.ts` still builds one), and a blanked scan
+ * never matches because a module specifier IS a string. `importsFrom` handles
+ * both by finding candidates in the original and confirming them against the
+ * position-preserving blanked copy.
  */
+
+import { describe, expect, it } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
 import { importsFrom } from '../scripts/lib/test-framework-import.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-/** Every tracked test file, exactly as both runners enumerate them. */
+/** Every tracked test file, exactly as the runner enumerates them. */
 function testFiles(): string[] {
   return execFileSync('git', ['ls-files', '*.test.ts', '*.test.tsx'], {
     cwd: repoRoot,
@@ -77,55 +61,47 @@ function claims(): Claim[] {
   });
 }
 
-describe('the bun/vitest partition covers every test file (#871)', () => {
+describe('every test file runs under bun:test (#871)', () => {
   it('finds test files at all — the guard must not pass vacuously', () => {
     expect(testFiles().length).toBeGreaterThan(100);
   });
 
-  it('no test file is claimed by NEITHER runner', () => {
-    // The silent case, and the reason this file exists. A file here runs
-    // nowhere and nothing else in the suite notices.
-    const orphaned = claims()
-      .filter((c) => !c.bun && !c.vitest)
+  it('every tracked test file imports bun:test', () => {
+    // A file that imports neither runner runs nowhere and nothing else notices;
+    // this is the silent case the guard exists for.
+    const notBun = claims()
+      .filter((c) => !c.bun)
       .map((c) => c.file);
     expect(
-      orphaned,
-      'these import neither `bun:test` nor `vitest`, so no runner collects them ' +
-        'and they are silently uncovered',
+      notBun,
+      'these do not import `bun:test`, so the bun runner collects nothing from them — ' +
+        'a migration was left half-done and the file is silently uncovered',
     ).toEqual([]);
   });
 
-  it('no test file is claimed by BOTH runners', () => {
-    // Loud rather than silent — one of the two runners will fail on it — but it
-    // means the two derivation rules have drifted, so catch it here where the
-    // message says that.
-    const contested = claims()
-      .filter((c) => c.bun && c.vitest)
+  it('no test file still imports vitest', () => {
+    // vitest is gone (#871). A file that still imports it cannot run under bun —
+    // it fails with a module-resolution error that reads as an environment
+    // problem rather than "this was never ported". Catch it here where the
+    // message says what it actually is.
+    const stillVitest = claims()
+      .filter((c) => c.vitest)
       .map((c) => c.file);
     expect(
-      contested,
-      'these import BOTH test frameworks; whichever runner collects one will fail on it',
+      stillVitest,
+      'these still import `vitest`, which no longer exists in the tree — port them to `bun:test`',
     ).toEqual([]);
   });
 
-  it('the derivation rules are read from the runners, not restated here', () => {
-    // A guard carrying its own COPY of the rule passes while the runners
-    // disagree with it. Assert they CALL the shared helper — not merely that
-    // the name appears, which the leftover `import { importsFrom }` line
-    // satisfies on its own. A mutation run proved that: reverting the config to
-    // a raw regex left this green.
-    const vitestConfig = readFileSync(resolve(repoRoot, 'vitest.config.ts'), 'utf8');
+  it('the runner reads the shared importsFrom, not a private copy of the rule', () => {
+    // A guard carrying its own COPY of the rule passes while the runner disagrees
+    // with it. Assert the runner CALLS the shared helper — the same helper this
+    // file calls — so the two cannot drift. `scripts/bun-test.mjs` uses it in
+    // `needsDom` to decide which files get a DOM preload.
     const bunRunner = readFileSync(resolve(repoRoot, 'scripts/bun-test.mjs'), 'utf8');
-    for (const [name, src] of [
-      ['vitest.config.ts', vitestConfig],
-      ['scripts/bun-test.mjs', bunRunner],
-    ] as const) {
-      expect(
-        src,
-        `${name} must use the shared \`importsFrom\` rather than its own regex — a raw ` +
-          'scan lets a fixture string orphan a test, and a blanked scan never matches ' +
-          'at all because a module specifier IS a string',
-      ).toMatch(/importsFrom\(\s*readFileSync/);
-    }
+    expect(
+      bunRunner,
+      'scripts/bun-test.mjs must use the shared `importsFrom` rather than its own regex',
+    ).toMatch(/importsFrom\(/);
   });
 });

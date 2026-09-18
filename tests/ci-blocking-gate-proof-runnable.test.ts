@@ -65,39 +65,38 @@ describe('the ci.yml blocking-gate mutation proof is runnable', () => {
   it('the test runner it launches actually starts, on a PATH it did not inherit', () => {
     // The failure that took the proof offline, and the assertion had to be
     // written twice: the first version spawned the runner with the INHERITED
-    // environment and was decoration. Under vitest, `node_modules/.bin` is
-    // already on PATH, so even the broken `pnpm exec vitest` fallback starts —
-    // mutation-proved: breaking the resolver left that version GREEN.
+    // environment and was decoration. #871: the sole runner is now bun, resolved
+    // to its ABSOLUTE path — so a resolver that resolved nothing returns the bare
+    // name `bun`, which fails `existsSync` here (mutation-proved: breaking the
+    // resolver reds this).
     //
-    // So two things are asserted, neither of which the ambient PATH can supply:
-    // the resolver found a REAL binary on disk (not the last-resort fallback),
+    // Two things are asserted, neither of which the ambient PATH can supply: the
+    // resolver found a REAL binary on disk (an absolute path, not the bare name),
     // and that binary runs with PATH sanitised to the system default.
     const runner = resolveTestRunner(REPO_ROOT);
+    expect(runner.args, `runner carries args it should not: ${runner.args.join(' ')}`).toEqual([]);
     expect(
-      runner.args,
-      `resolver fell back to \`${runner.command} ${runner.args.join(' ')}\` — no runner binary was found by walking up from ${REPO_ROOT}, so the proof cannot run`,
-    ).toEqual([]);
-    expect(existsSync(runner.command), `${runner.command} does not exist`).toBe(true);
+      existsSync(runner.command),
+      `${runner.command} does not exist — the resolver found no bun binary, so the proof cannot run`,
+    ).toBe(true);
 
     const res = spawnSync(runner.command, ['--version'], {
       cwd: REPO_ROOT,
       encoding: 'utf8',
-      // `node` itself must stay reachable — the bin shim is a script that
-      // execs it — but nothing else from the ambient PATH does, so a resolver
-      // that resolved nothing cannot be rescued by the environment.
-      // `nodeDir()`, not `dirname(process.execPath)`. The restriction below is
-      // the point of this guard — a resolver that resolved nothing must not be
-      // rescued by the ambient PATH — but under `bun test` `process.execPath`
-      // is bun, so `node` fell off the list entirely and the child died with
-      // `env: node: No such file or directory`. That is a failure about the
-      // harness that says nothing about the resolver.
+      // bun is a native binary spawned by ABSOLUTE path, so it needs nothing from
+      // PATH — the restriction is the point of this guard: a resolver that
+      // resolved nothing (the bare `bun`) cannot be rescued by the ambient
+      // environment. `nodeDir()` keeps `node` reachable for any child that needs
+      // it; under `bun test` `process.execPath` is bun, so deriving the dir from
+      // it would drop `node` and mislead about the resolver.
       env: { ...process.env, PATH: `${nodeDir()}:/usr/bin:/bin` },
     });
     expect(
       res.status,
       `runner did not start: ${(res.stderr ?? '') || (res.error?.message ?? '')}`,
     ).toBe(0);
-    expect(`${res.stdout ?? ''}`).toMatch(/vitest\//);
+    // bun --version prints a bare semver (e.g. `1.4.2`).
+    expect(`${res.stdout ?? ''}`.trim()).toMatch(/^\d+\.\d+\.\d+/);
   });
 
   it.each([...GATES])('$spec declares the assertion the proof selects by name', ({

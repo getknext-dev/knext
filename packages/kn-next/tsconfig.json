@@ -12,7 +12,7 @@
     "declarationMap": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "types": ["bun-types", "node", "vitest/globals"]
+    "types": ["bun-types", "node"]
   },
   "include": ["src/**/*.ts"],
   "exclude": ["node_modules", "dist", ".open-next"]

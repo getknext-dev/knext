@@ -71,35 +71,34 @@ describe('the publish-marker mutation proof is runnable', () => {
   });
 
   it('the test runner the prover launches actually starts', () => {
-    // The prover used `pnpm exec vitest`, which resolves NOTHING in a tree with
-    // no `node_modules` of its own — a git worktree, or a fresh clone before
-    // install. Measured in this repo's agent worktrees: `ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL
-    // Command "vitest" not found`, on which the prover would score every spec
-    // as "went RED as required" and then report the restore as broken. A wrong
-    // green half and a wrong diagnosis, which is how the OTHER prover was
-    // misread for a whole PR (#672 round 5).
+    // #871: the sole runner is bun, resolved to its ABSOLUTE path. It used to be
+    // `pnpm exec vitest`, which resolved NOTHING in a tree with no `node_modules`
+    // of its own — a git worktree, or a fresh clone before install — on which the
+    // prover scored every spec as "went RED as required" and reported the restore
+    // as broken (a wrong green half AND a wrong diagnosis, #672 round 5). With
+    // vitest removed, a clean install has no such bin, so the resolver resolves
+    // bun; a resolver that resolves nothing returns the bare name `bun`, which
+    // fails `existsSync` and reds here.
     const runner = resolveTestRunner(REPO_ROOT);
+    expect(runner.args, `runner carries args it should not: ${runner.args.join(' ')}`).toEqual([]);
     expect(
-      runner.args,
-      `resolver fell back to \`${runner.command} ${runner.args.join(' ')}\` — no runner binary was found by walking up from ${REPO_ROOT}, so the proof cannot run`,
-    ).toEqual([]);
+      existsSync(runner.command),
+      `${runner.command} does not exist — the resolver found no bun binary, so the proof cannot run`,
+    ).toBe(true);
     const res = spawnSync(runner.command, ['--version'], {
       cwd: REPO_ROOT,
       encoding: 'utf8',
-      // Nothing from the ambient PATH may rescue a resolver that resolved
-      // nothing; `node` stays reachable only because the bin shim execs it.
-      // `nodeDir()`, not `dirname(process.execPath)`. The restriction below is
-      // the point of this guard — a resolver that resolved nothing must not be
-      // rescued by the ambient PATH — but under `bun test` `process.execPath`
-      // is bun, so `node` fell off the list entirely and the child died with
-      // `env: node: No such file or directory`. That is a failure about the
-      // harness that says nothing about the resolver.
+      // bun is a native binary spawned by ABSOLUTE path, so nothing from the
+      // ambient PATH may rescue a resolver that resolved nothing. `nodeDir()`
+      // keeps `node` reachable for any child that needs it; under `bun test`
+      // `process.execPath` is bun, so deriving the dir from it would drop `node`.
       env: { ...process.env, PATH: `${nodeDir()}:/usr/bin:/bin` },
     });
     expect(
       res.status,
       `runner did not start: ${(res.stderr ?? '') || (res.error?.message ?? '')}`,
     ).toBe(0);
-    expect(`${res.stdout ?? ''}`).toMatch(/vitest\//);
+    // bun --version prints a bare semver (e.g. `1.4.2`).
+    expect(`${res.stdout ?? ''}`.trim()).toMatch(/^\d+\.\d+\.\d+/);
   });
 });

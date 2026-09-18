@@ -19,11 +19,11 @@
  * token (`lint`/`format`/`assist`/`syntax`) after the marker so prose that
  * merely mentions "biome-ignore" in a comment is not mistaken for a directive.
  */
+import { describe, expect, it } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SELF = basename(fileURLToPath(import.meta.url));

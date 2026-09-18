@@ -470,10 +470,11 @@ export function referencedSpecs(source) {
 }
 
 /**
- * #902 — the framework half of the audit. `resolveTestRunner` resolves VITEST;
- * a prover pointing it at a `bun:test` spec collects nothing and can only fail
- * (or, worse, pass a grep on empty output). Such a prover must resolve through
- * `resolveSpecRunner`, which dispatches per spec framework.
+ * #902 — the RUNNER half of the audit. `resolveTestRunner` resolves the test
+ * ENGINE binary (post-#871: bun), not a spec runner — spawning `bun <spec>` runs
+ * the file as a plain script, so its `bun:test` registrations never execute and
+ * no assertion runs. A prover that means to RUN a spec must resolve through
+ * `resolveSpecRunner`, which routes to `scripts/bun-test.mjs` (`bun test <spec>`).
  *
  * @param {string} source prover source
  * @param {(spec: string) => string | undefined} readSpec returns a referenced
@@ -483,14 +484,14 @@ export function referencedSpecs(source) {
  */
 export function auditSpecFrameworkMatch(source, readSpec) {
   const findings = [];
-  const usesVitestResolver =
+  const usesEngineResolver =
     /\bresolveTestRunner\s*\(/.test(source) && !/\bresolveSpecRunner\s*\(/.test(source);
-  if (!usesVitestResolver) return findings;
+  if (!usesEngineResolver) return findings;
   for (const spec of referencedSpecs(source)) {
     const specSource = readSpec(spec);
     if (specSource !== undefined && specFramework(specSource) === 'bun') {
       findings.push(
-        `targets bun:test spec ${spec} through resolveTestRunner (vitest) — vitest collects nothing there; use resolveSpecRunner`,
+        `targets bun:test spec ${spec} through resolveTestRunner — that resolves the bun ENGINE, not a spec runner, so \`bun <spec>\` runs the file as a script and no test executes; use resolveSpecRunner`,
       );
     }
   }

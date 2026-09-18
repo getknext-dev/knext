@@ -1,12 +1,12 @@
 /**
- * The coverage gate, after it stopped being vitest's job (#884).
+ * The coverage gate, after it stopped being vitest's job (#884) and after vitest
+ * was removed entirely (#871).
  *
- * `vitest.config.ts` used to carry the thresholds, and after the bun migration
- * it was checking them against 3 collected files out of 338. The floors now live
- * in ONE module (`scripts/lib/coverage-policy.mjs`) read by both consumers —
- * vitest's config, for its include/exclude denominator, and
- * `scripts/check-coverage.mjs`, which enforces them over the MERGED lcov of both
- * runners.
+ * The floors live in ONE module (`scripts/lib/coverage-policy.mjs`) and
+ * `scripts/check-coverage.mjs` enforces them over the merged lcov of the bun
+ * suite — plus a generated 0% denominator entry for every source file no test
+ * loads, which is what keeps the denominator honest now that vitest no longer
+ * enumerates the tree.
  *
  * These tests are the mutation proof for that checker: it must go RED on a
  * merged report below a floor. Every assertion branches on the process EXIT
@@ -162,11 +162,6 @@ describe('ci.yml runs the gate, and feeds it', () => {
       'run: node scripts/bun-test.mjs --coverage',
       'run: node scripts/bun-test.mjs',
     ],
-    [
-      'vitest stops passing --coverage',
-      'run: bun x vitest run --coverage',
-      'run: bun x vitest run',
-    ],
     ['the gate stops running at all', 'run: node scripts/check-coverage.mjs', 'run: echo skipped'],
     [
       'the gate is disarmed with continue-on-error',
@@ -187,8 +182,8 @@ describe('ci.yml runs the gate, and feeds it', () => {
     });
   }
 
-  test('moving the gate BEFORE the runners is caught', () => {
-    // Order is load-bearing: the checker merges what the runners left on disk.
+  test('moving the gate BEFORE the runner is caught', () => {
+    // Order is load-bearing: the checker merges what the bun runner left on disk.
     const reordered = [
       'jobs:',
       '  test:',
@@ -197,8 +192,6 @@ describe('ci.yml runs the gate, and feeds it', () => {
       '        run: node scripts/check-coverage.mjs',
       '      - name: Run tests (bun)',
       '        run: node scripts/bun-test.mjs --coverage',
-      '      - name: Run tests (vitest)',
-      '        run: bun x vitest run --coverage',
       '',
     ].join('\n');
     expect(auditCoverageWiring(reordered).length).toBeGreaterThan(0);
@@ -206,17 +199,23 @@ describe('ci.yml runs the gate, and feeds it', () => {
 });
 
 describe('the thresholds live in exactly one place', () => {
-  test('vitest.config.ts declares no thresholds of its own', () => {
-    // Two copies of a floor means one of them is wrong and nothing says which.
-    // vitest keeps the include/exclude denominator; the floors are the
-    // checker's, because vitest can only see the 3 files it collects.
-    const config = readFileSync(join(REPO_ROOT, 'vitest.config.ts'), 'utf8');
-    expect(config).not.toMatch(/^\s*thresholds:/m);
-  });
-
-  test('vitest.config.ts takes its include/exclude from the policy module', () => {
-    const config = readFileSync(join(REPO_ROOT, 'vitest.config.ts'), 'utf8');
-    expect(config).toMatch(/coverage-policy\.mjs/);
+  test('the gate derives its denominator from the policy include/exclude', () => {
+    // #871: with vitest gone, the gate IS the denominator — `check-coverage.mjs`
+    // calls `generateDenominator` (scripts/lib/coverage-denominator.mjs), which
+    // enumerates the source files itself and folds untested ones in at 0%. If the
+    // generator stopped reading the policy globs, an untested file could silently
+    // drop out of the denominator — the dishonesty this gate exists to prevent.
+    // The BEHAVIOUR of that generator is mutation-proven in
+    // tests/coverage-denominator.test.ts; this asserts the wiring.
+    const checker = blankNonCode(
+      readFileSync(join(REPO_ROOT, 'scripts', 'check-coverage.mjs'), 'utf8'),
+    );
+    expect(checker).toMatch(/generateDenominator\s*\(/);
+    const generator = blankNonCode(
+      readFileSync(join(REPO_ROOT, 'scripts', 'lib', 'coverage-denominator.mjs'), 'utf8'),
+    );
+    expect(generator).toMatch(/COVERAGE_INCLUDE/);
+    expect(generator).toMatch(/COVERAGE_EXCLUDE/);
   });
 
   test('the policy carries the floors the ratchet was set to', () => {

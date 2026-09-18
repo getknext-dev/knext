@@ -1,26 +1,28 @@
 /**
  * A small lcov parser / merger / summariser (#884).
  *
- * knext has TWO coverage producers and neither is the truth on its own:
+ * The suite runs entirely under `bun test` (#871). `scripts/bun-test.mjs` runs
+ * it one PROCESS per test file (mock isolation), so it emits ~338 separate lcov
+ * reports that this module merges into one. bun reports only the files a given
+ * test loaded, so `scripts/check-coverage.mjs` folds in a 0% entry for every
+ * untested source file — the honest DENOMINATOR that vitest used to supply.
  *
- *   - `vitest` collects 3 test files but enumerates every source file, so it
- *     supplies the honest DENOMINATOR — untouched files present at 0%;
- *   - `scripts/bun-test.mjs` runs the suite one PROCESS per test file, so it
- *     supplies almost the whole NUMERATOR, spread across ~338 reports.
- *
- * Merging them is what makes the gate mean something again. The rules, and why:
+ * The merge rules, and why:
  *
  *   - the set of KNOWN lines is the union across reports. bun reports only the
- *     files a given test loaded, so intersecting would let the bun half shrink
- *     the denominator — the exact dishonesty the gate exists to prevent;
+ *     files a given test loaded, so intersecting would let a partial report
+ *     shrink the denominator — the exact dishonesty the gate exists to prevent;
  *   - a line's hits are SUMMED. Only `> 0` is load-bearing, but summing keeps
  *     the merged report a truthful lcov rather than a boolean mask;
  *   - functions merge to a conservative LOWER BOUND (see coverage-policy.mjs:
  *     bun emits `FNF`/`FNH` counts with no per-function identity);
  *   - branches are not represented, because bun emits none.
  *
- * No dependency: this runs under plain `node` in CI before anything is built.
+ * Runs under plain `node` in CI before anything is BUILT. It does import the
+ * `typescript` devDependency (for `isTypeOnly`), which is present after install —
+ * "before built", not "before installed".
  */
+import ts from 'typescript';
 
 /** @typedef {{ lines: Map<number, number>, fnFound: number, fnHit: number, fnNames: Map<string, number> }} FileCoverage */
 
@@ -218,9 +220,82 @@ function pct(hit, found) {
   return found === 0 ? 0 : (hit / found) * 100;
 }
 
-/** Repo-relative, forward slashes, no `./` prefix — both producers vary here. */
+/** Repo-relative, forward slashes, no `./` prefix — reports vary here. */
 export function normalisePath(path) {
   return path.replace(/\\/g, '/').replace(/^\.\//, '');
+}
+
+/**
+ * Is this TypeScript source TYPE-ONLY — i.e. does it transpile to no runtime JS?
+ *
+ * A file of only `interface` / `type` / `import type` declarations emits nothing
+ * a coverage provider can instrument (v8 sees zero lines, bun reports it not at
+ * all). Such a file must NOT sit in the generated 0% denominator
+ * (`scripts/check-coverage.mjs`): counting its physical lines would DEPRESS
+ * coverage for a file no tool ever measures — the mirror of the denominator
+ * inflation the gate exists to prevent. `packages/kn-next/src/config.ts` is the
+ * load-bearing case (315 type-only lines, imported only as `import type`).
+ *
+ * Detected by ACTUALLY transpiling with the repo's TypeScript, then stripping the
+ * inert residue an empty module still emits (`"use strict"`, `export {}`,
+ * comments, whitespace). If nothing runtime-bearing remains, it is type-only.
+ * `typescript` is a declared devDependency, resolvable under plain node once
+ * dependencies are installed — the gate runs after install, before any build.
+ *
+ * @param {string} src
+ * @returns {boolean}
+ */
+export function isTypeOnly(src) {
+  const out = ts
+    .transpileModule(src, {
+      compilerOptions: {
+        module: ts.ModuleKind.ESNext,
+        target: ts.ScriptTarget.ES2022,
+        // Off: with it on, a bare `import type` would be preserved as a runtime
+        // import and a genuinely type-only file would read as runtime-bearing.
+        verbatimModuleSyntax: false,
+      },
+    })
+    .outputText.replace(/\/\/.*$/gm, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/["']use strict["'];?/g, '')
+    .replace(/export\s*\{\s*\}\s*;?/g, '')
+    .replace(/\s+/g, '');
+  return out.length === 0;
+}
+
+/**
+ * Count the CODE lines in a source file — non-blank lines that are not wholly a
+ * line- or block-comment. Used to size the zero-hit denominator entry for a
+ * source file no test loads (`scripts/check-coverage.mjs`).
+ *
+ * This is deliberately a conservative OVER-count versus a coverage provider's
+ * executable-line notion (it counts declarations, braces, and multi-line
+ * expression continuations a provider would fold together). For an untested
+ * file every line is a miss regardless, so over-counting only ever LOWERS the
+ * percentage — the safe direction for a floor, never a way to inflate it.
+ *
+ * @param {string} src
+ * @returns {number}
+ */
+export function countCodeLines(src) {
+  let count = 0;
+  let inBlock = false;
+  for (const raw of src.split('\n')) {
+    const line = raw.trim();
+    if (line === '') continue;
+    if (inBlock) {
+      if (line.includes('*/')) inBlock = false;
+      continue;
+    }
+    if (line.startsWith('//')) continue;
+    if (line.startsWith('/*')) {
+      if (!line.includes('*/')) inBlock = true;
+      continue;
+    }
+    count++;
+  }
+  return count;
 }
 
 /**

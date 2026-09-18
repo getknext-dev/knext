@@ -157,24 +157,25 @@ describe('the `test:image` chain actually reaches the suite (both halves)', () =
     expect(files.length, `no *.${PATTERN}.test.ts in examples/bun-exec/test`).toBeGreaterThan(0);
   });
 
-  it('the ROOT vitest run excludes the pattern, so `Lint & Test` cannot collect it', () => {
-    // The example-local exclude only applies when vitest's cwd is that example.
-    // The root run (`pnpm exec vitest run --coverage`, job `Lint & Test`)
-    // collects `examples/**`, and this suite has NO skip path — so without this
-    // entry it runs `./build.sh` on a runner with no bun and reddens the main
-    // gate for an unrelated reason. Verified before the fix: `vitest list
-    // --filesOnly` listed examples/bun-exec/test/alpine-image.docker-e2e.test.ts.
-    const rootCfg = readFileSync(resolve(REPO_ROOT, 'vitest.config.ts'), 'utf8');
-    const exclude = rootCfg.match(/exclude:\s*\[([^\]]*)\]/)?.[1] ?? '';
-    expect(exclude, 'the ROOT vitest config does not exclude the container e2e pattern').toContain(
-      PATTERN,
-    );
-  });
-
-  it('the example fast suite also excludes it, so `bun run test` stays fast', () => {
-    const cfg = readFileSync(resolve(EXAMPLE, 'vitest.config.ts'), 'utf8');
-    const exclude = cfg.match(/exclude:\s*\[([^\]]*)\]/)?.[1] ?? '';
-    expect(exclude).toContain(PATTERN);
+  it('the bun runner excludes the pattern from a sweep, so it only runs when named', () => {
+    // #871: the exclude moved from the two vitest configs into the ONE runner,
+    // `scripts/bun-test.mjs`. It drops any `*.docker-e2e.test.ts` from a sweep
+    // (`Lint & Test`, and the example's own `bun run test`) so the ~100 MB
+    // container build never runs on a runner with no docker/bun — UNLESS the
+    // file itself is named, which is exactly what `test:image` does. Both halves
+    // of the old contract (root sweep + example fast suite) are now this one
+    // filter, because both go through this runner.
+    // Matched against RAW source: the pattern lives inside a REGEX LITERAL
+    // (`/\.docker-e2e\.test\.tsx?$/`), and blanking non-code would erase a regex
+    // body along with a string one. The filter is a single expression that both
+    // drops the pattern AND re-admits an explicitly-named target, so assert both
+    // halves of that one line together.
+    const runner = readFileSync(resolve(REPO_ROOT, 'scripts', 'bun-test.mjs'), 'utf8');
+    expect(
+      runner,
+      'scripts/bun-test.mjs no longer filters the container e2e pattern out of a sweep ' +
+        '(dropping it unless the file is named) — the ~100 MB build would run under Lint & Test',
+    ).toMatch(/docker-e2e\\\.test\\\.tsx\?\$\/\.test\(f\)\s*\|\|\s*targets\.includes\(f\)/);
   });
 });
 

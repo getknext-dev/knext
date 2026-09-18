@@ -63,26 +63,13 @@ function tsFilesUnder(dir: string): string[] {
  *
  * A guard that derives its expectation from its subject cannot notice the
  * subject shrinking: with the expectation read from `include`, dropping
- * `turbo/**\/*.ts` (or the three root `vitest.*.ts` entries) left every
- * assertion green — 34 files became 30, still over any count floor, and three
- * of the four declared scopes were unenforced.
+ * `turbo/**\/*.ts` left every assertion green — still over any count floor, and
+ * the declared scope was unenforced. (#871 removed the three root `vitest.*.ts`
+ * entries this tier list used to carry, along with vitest itself.)
  */
 const COVERED_TIERS: Array<{ label: string; files: () => string[] }> = [
   { label: 'tests/**/*.ts', files: () => tsFilesUnder(join(REPO_ROOT, 'tests')) },
   { label: 'turbo/**/*.ts', files: () => tsFilesUnder(join(REPO_ROOT, 'turbo')) },
-  {
-    // vitest.workspace.ts is the one documented exclusion. NOTE: it is excluded
-    // from TYPECHECK SCOPE, not because it is dead — the older note here claimed
-    // it was dead code and safe to delete, which was measured and is false. On
-    // vitest 4.0.18 it is still loaded and is what puts `apps/**` under happy-dom;
-    // deleting it turns apps/file-manager/child-ports.test.ts red. See the
-    // corrected explanation in tsconfig.typecheck.json.
-    label: 'root vitest.*.ts',
-    files: () =>
-      readdirSync(REPO_ROOT)
-        .filter((f) => /^vitest\..+\.ts$/.test(f) && f !== 'vitest.workspace.ts')
-        .map((f) => join(REPO_ROOT, f)),
-  },
 ];
 
 interface ShownConfig {
@@ -220,11 +207,11 @@ describe('the covered set is real, not an include that matches nothing (#527)', 
 
   it('EVERY include entry contributes at least one file — not just tests/**', () => {
     // A file-count floor only covers the biggest entry: dropping `turbo/**/*.ts`
-    // or the three `vitest.*.ts` entries still leaves 30 files, comfortably over
-    // any floor, so three quarters of the declared scope was unguarded. Assert
-    // per-entry instead: an include the program never reaches is dead scope.
+    // still leaves the tests/** files, comfortably over any floor, so that scope
+    // would be unguarded. Assert per-entry instead: an include the program never
+    // reaches is dead scope. (#871 removed the three `vitest.*.ts` entries.)
     const include = (readJsonc(TSCONFIG_PATH).include ?? []) as string[];
-    expect(include.length).toBeGreaterThanOrEqual(4);
+    expect(include.length).toBeGreaterThanOrEqual(2);
     const files = (showConfig().files ?? []).map((f) =>
       relative(REPO_ROOT, resolve(REPO_ROOT, f)).split(sep).join('/'),
     );
@@ -374,7 +361,9 @@ describe('the root test tree imports only DECLARED root dependencies', () => {
     // file's own header warns about.
     expect(files.length).toBeGreaterThan(20);
     const all = files.flatMap((f) => specifiersIn(readFileSync(f, 'utf8')));
-    expect(all).toContain('vitest');
+    // Every root test imports `bun:test` (#871) — a stable, non-vacuous anchor
+    // that the scanner is actually reading specifiers.
+    expect(all).toContain('bun:test');
     expect(all.some((s) => s.startsWith('node:'))).toBe(true);
     expect(all.some((s) => s.startsWith('.'))).toBe(true);
   });

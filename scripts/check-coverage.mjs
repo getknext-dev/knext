@@ -1,23 +1,37 @@
 #!/usr/bin/env node
+
 /**
- * The coverage gate (#884) — merge both runners' lcov, then enforce the floors.
+ * The coverage gate (#884) — measure the bun suite, then enforce the floors.
  *
  * ## Why this exists as a script
  *
  * The floors used to be `vitest.config.ts`'s. After the `vitest` -> `bun test`
- * migration vitest collects 3 test files out of 338, so it was checking a 77%
- * floor against a 1.37% measurement: the gate was still red-capable, but what it
- * measured had stopped being the suite. Neither runner can take the whole job:
+ * migration (#871) vitest was collecting 3 test files out of 338, so it was
+ * checking a 77% floor against a 1.37% measurement. vitest is now GONE — the
+ * suite runs entirely under `bun test` — but bun's own threshold config has no
+ * per-path form and, run one PROCESS per test file (mock isolation, see
+ * `scripts/bun-test.mjs`), it emits ~338 separate reports. So this script merges
+ * them and enforces the floors from `scripts/lib/coverage-policy.mjs`.
  *
- *   - `scripts/bun-test.mjs` runs the suite but one PROCESS per test file (mock
- *     isolation, see its docstring), so it emits ~338 separate reports and bun's
- *     own threshold config has no per-path form;
- *   - vitest sees almost no tests but enumerates every source file, which is the
- *     only honest denominator available.
+ * ## The honest denominator, without vitest
  *
- * So the gate is the MERGE of the two, and the floors live in
- * `scripts/lib/coverage-policy.mjs` — one definition, read by this script and by
- * `vitest.config.ts`.
+ * vitest's one remaining job was the DENOMINATOR: it enumerated every source
+ * file under `COVERAGE_INCLUDE`, so a source file NO test imports showed up at
+ * 0% and dragged the percentage down. bun reports only files a test actually
+ * loaded, so on its own it would silently drop untested files from the
+ * denominator — the exact "measures less, so it is green" dishonesty this gate
+ * exists to prevent.
+ *
+ * `enumerateSourceFiles()` (the `git ls-files` spawn) + `generateDenominator`
+ * (the pure filter, in `scripts/lib/coverage-denominator.mjs`) restore that
+ * enumeration deterministically and with no second runner: they list the
+ * `COVERAGE_INCLUDE \ COVERAGE_EXCLUDE` files and, for any not already present in
+ * the merged bun report, inject a zero-hit entry over its code lines — SKIPPING
+ * type-only files, which a coverage provider instruments as zero lines. That
+ * over-counts an untested file's lines slightly versus a provider's
+ * executable-line notion, but only ever LOWERS the percentage — the safe
+ * direction for a floor — and keeps the invariant that adding an untested file
+ * cannot raise coverage.
  *
  * ## Fail-closed
  *
@@ -26,14 +40,16 @@
  * defect this replaced.
  *
  * Usage:
- *   node scripts/check-coverage.mjs                 # the standard two inputs
- *   node scripts/check-coverage.mjs --lcov=a.info --lcov=b.info
+ *   node scripts/check-coverage.mjs                 # scan coverage-bun/ + denominator
+ *   node scripts/check-coverage.mjs --lcov=a.info --lcov=b.info   # explicit, no auto-denominator
  *   node scripts/check-coverage.mjs --report-only    # print, never fail
  */
 
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { generateDenominator } from './lib/coverage-denominator.mjs';
 import {
   activeMetricExceptions,
   assertEveryMetricAccountedFor,
@@ -43,7 +59,6 @@ import {
   MERGED_LCOV,
   PER_PATH_THRESHOLDS,
   THRESHOLDS,
-  VITEST_LCOV,
 } from './lib/coverage-policy.mjs';
 import { formatLcov, matchesGlob, mergeLcov, summarize } from './lib/lcov.mjs';
 
@@ -66,10 +81,7 @@ function lcovFilesUnder(dir) {
 
 const inputs = explicit.length
   ? explicit.map((p) => resolve(REPO_ROOT, p))
-  : [
-      ...lcovFilesUnder(resolve(REPO_ROOT, process.env.KNEXT_BUN_COVERAGE_DIR ?? BUN_COVERAGE_DIR)),
-      ...(existsSync(resolve(REPO_ROOT, VITEST_LCOV)) ? [resolve(REPO_ROOT, VITEST_LCOV)] : []),
-    ];
+  : lcovFilesUnder(resolve(REPO_ROOT, process.env.KNEXT_BUN_COVERAGE_DIR ?? BUN_COVERAGE_DIR));
 
 const missing = inputs.filter((p) => !existsSync(p));
 if (missing.length > 0) {
@@ -79,14 +91,46 @@ if (missing.length > 0) {
 if (inputs.length === 0) {
   console.error(
     'coverage: no lcov reports found.\n' +
-      `  expected per-file reports in ./${BUN_COVERAGE_DIR}/ (node scripts/bun-test.mjs --coverage)\n` +
-      `  and ./${VITEST_LCOV} (vitest run --coverage).\n` +
+      `  expected per-file reports in ./${BUN_COVERAGE_DIR}/ (node scripts/bun-test.mjs --coverage).\n` +
       '  Refusing to pass on an absent measurement.',
   );
   process.exit(1);
 }
 
 const merged = mergeLcov(inputs.map((p) => readFileSync(p, 'utf8')));
+
+/**
+ * Enumerate the tracked source files for the denominator. The spawn lives HERE,
+ * in the script, rather than in the `scripts/lib` helper — the prover-lane audit
+ * forbids a shared lib helper from spawning, and keeping `generateDenominator`
+ * pure is also what makes it unit-testable. Fail-closed: an unreachable
+ * enumeration is a FAILURE, never a pass — a shrunken denominator reads as higher
+ * coverage, the exact dishonesty this gate prevents.
+ */
+function enumerateSourceFiles() {
+  try {
+    return execFileSync('git', ['ls-files', '-z', 'packages'], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+    })
+      .split('\0')
+      .filter(Boolean);
+  } catch {
+    console.error('coverage: could not enumerate source files for the denominator (git ls-files).');
+    process.exit(1);
+  }
+}
+
+// Reinstate vitest's old denominator role deterministically (see
+// `scripts/lib/coverage-denominator.mjs`): enumerate the source files and fold
+// in a 0% entry for any the bun suite never loaded. Only in the disk-scan mode —
+// an explicit `--lcov=` run controls its own inputs.
+if (!explicit.length) {
+  for (const [path, cov] of generateDenominator(REPO_ROOT, enumerateSourceFiles(), merged)) {
+    merged.set(path, cov);
+  }
+}
 
 /**
  * Restrict to the policy's file set BEFORE measuring.
