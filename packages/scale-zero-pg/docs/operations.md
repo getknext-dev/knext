@@ -1428,6 +1428,40 @@ or your org CA); swap the Secret contents and clients can then verify.
 `deploy/10-gateway.yaml` and restart. `SSLRequest` then gets `N` again and only
 `sslmode=disable` clients connect.
 
+### Gateway→compute mTLS — cert-manager prerequisite (to be activated later)
+
+The section above is the **front-door** (client→gateway) TLS. The **gateway→compute**
+hop is a separate leg and is still **plaintext today** — SCRAM material and query
+traffic cross the pod network in cleartext, isolated only by the (CNI-conditional)
+default NetworkPolicy. Closing that leg with mutual TLS is rolled out in phases; the
+first phase provisions the certificate infrastructure ahead of the wiring, so it is a
+**prerequisite you can apply now** even though nothing consumes it yet.
+
+**Prerequisite: cert-manager.** `deploy/11-mtls-certs.yaml` provisions, via
+cert-manager, a self-signed Issuer → a CA `Certificate` → a CA `Issuer` → two shared
+leaf certificates:
+
+- `pggw-compute-server-tls` (server auth) — SANs cover the compute Service DNS
+  (`compute.scale-zero-pg.svc`, `compute-ro.scale-zero-pg.svc`, and the
+  `*.scale-zero-pg.svc` wildcard for per-system computes);
+- `pggw-gateway-client-tls` (client auth) — the gateway's client identity.
+
+Both leaves chain to the one CA, which is both the gateway's trust root and the
+compute's client-cert verifier. Finite `duration` + `renewBefore` let cert-manager
+**auto-rotate** across the ephemeral 0↔N compute fleet — the reliability win over the
+manual, never-rotating `gen-tls.sh` path.
+
+A cluster running the unified knext platform already has cert-manager (the knext
+operator depends on it for its webhook cert). If cert-manager is absent, applying
+`11-mtls-certs.yaml` fails on the missing `cert-manager.io` kinds — that is
+deliberate: absent cert infra must never fall through to a later phase that then runs
+plaintext.
+
+**This does not encrypt the gateway→compute hop yet.** Mounting the certs into the
+compute and switching the gateway to a TLS client are later phases. **Until those
+land, keep the plaintext-hop caveat** on any encryption/isolation claim for the
+gateway→compute leg (see "Network isolation caveat" below).
+
 ## Peer-scrape token rotation
 
 The multi-replica idle decision reads each sibling gateway's active connection

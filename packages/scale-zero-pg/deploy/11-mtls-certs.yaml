@@ -1,0 +1,146 @@
+# F5 Phase 1 — cert-manager CA + leaf certs for gateway→compute Postgres mTLS.
+#
+# This manifest is INFRASTRUCTURE ONLY. Nothing consumes these certs yet — the
+# gateway still dials compute in plaintext (ADR-0001 F5 dated exception, still
+# open). It provisions, ahead of the wiring, the one CA and the two role leaf
+# certs that phases 2-4 will mount:
+#
+#   phase 2 (compute serves TLS)  -> mounts pggw-compute-server-tls + the CA
+#   phase 3 (gateway requires TLS) -> mounts pggw-gateway-client-tls + the CA
+#   phase 4 (pg_hba clientcert=verify-full) -> compute verifies the client cert
+#                                              against the shared CA
+#
+# See docs/adr/0003-*.md for the full design + the hard phase-2->3 ordering rule
+# (must not flip the gateway to require-TLS until 100% of the compute fleet —
+# INCLUDING already-awake pre-phase-1 pods — serves TLS, because compute is
+# Recreate + scales 0<->N and a live plaintext compute would otherwise break).
+#
+# DEPENDENCY: cert-manager. The knext operator already depends on cert-manager
+# for its admission-webhook cert, so a cluster running knext + scale-zero-pg
+# already has the cert-manager.io CRDs + controller. This manifest is the first
+# use of cert-manager inside scale-zero-pg's own deploy/. If cert-manager is
+# absent, `kubectl apply -f 11-mtls-certs.yaml` fails (no cert-manager.io/v1
+# kinds) — that is deliberate fail-closed behaviour: absent cert infra must
+# NEVER fall through to a phase that then runs plaintext (see _validate.sh
+# contract "F5 phase-1 mTLS cert infrastructure").
+#
+# ROTATION is the whole reliability win over the manual gen-tls.sh path: finite
+# duration + renewBefore below make cert-manager reissue automatically across
+# the ephemeral 0<->N compute fleet, which a hand-minted CA cannot track.
+---
+# 1) Bootstrap: a self-signed Issuer used ONLY to mint the CA certificate below.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: pggw-selfsigned-bootstrap
+  namespace: scale-zero-pg
+  labels: { app: pggw, "app.kubernetes.io/part-of": scale-zero-pg }
+spec:
+  selfSigned: {}
+---
+# 2) The CA certificate (isCA). Its Secret (pggw-mtls-ca) holds the CA keypair.
+#    This CA is the single trust root for the whole gateway<->compute leg:
+#      * the gateway's RootCAs (verifies the compute server cert), and
+#      * the compute's ssl_ca_file (verifies the gateway client cert in phase 4).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: pggw-mtls-ca
+  namespace: scale-zero-pg
+  labels: { app: pggw, "app.kubernetes.io/part-of": scale-zero-pg }
+spec:
+  isCA: true
+  commonName: scale-zero-pg gateway<->compute mTLS CA
+  secretName: pggw-mtls-ca
+  # Long-lived root; leaves below rotate far more often. renewBefore leaves a
+  # wide margin so cert-manager reissues the CA well ahead of expiry.
+  duration: 87600h # 10y
+  renewBefore: 720h # 30d
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: pggw-selfsigned-bootstrap
+    kind: Issuer
+    group: cert-manager.io
+---
+# 3) The CA Issuer: issues every leaf below from the CA Secret, so all leaves
+#    chain to one root.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: pggw-mtls-ca-issuer
+  namespace: scale-zero-pg
+  labels: { app: pggw, "app.kubernetes.io/part-of": scale-zero-pg }
+spec:
+  ca:
+    secretName: pggw-mtls-ca
+---
+# 4) Compute server leaf (SHARED across the compute fleet, per ADR-0003 D3 —
+#    mirrors the shared pggw-tls front-door pattern; the computes are fungible
+#    replicas of one logical service per system). serverAuth. The dnsNames are
+#    exactly the Service DNS the gateway sets as tls.Config.ServerName when it
+#    dials a backend:
+#      * compute.scale-zero-pg.svc         (GW_TARGET, single-DB write path)
+#      * compute-ro.scale-zero-pg.svc      (GW_RO_TARGET, read-replica pool)
+#      * compute-warm.scale-zero-pg.svc    (warm-tier pool)
+#      * *.scale-zero-pg.svc               (multi-tenant per-system computes:
+#                                           compute-{system} / compute-ro-{system}
+#                                           from GW_TARGET_TEMPLATE in wake.go)
+#    Both the bare `.svc` and the fully-qualified `.svc.cluster.local` forms are
+#    listed so ServerName matches whichever the gateway resolves.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: pggw-compute-server-tls
+  namespace: scale-zero-pg
+  labels: { app: compute, "app.kubernetes.io/part-of": scale-zero-pg }
+spec:
+  secretName: pggw-compute-server-tls
+  commonName: compute.scale-zero-pg.svc
+  duration: 2160h # 90d
+  renewBefore: 360h # 15d — cert-manager reissues + re-mounts across the 0<->N fleet
+  usages:
+    - server auth
+  dnsNames:
+    - compute.scale-zero-pg.svc
+    - compute.scale-zero-pg.svc.cluster.local
+    - compute-ro.scale-zero-pg.svc
+    - compute-ro.scale-zero-pg.svc.cluster.local
+    - compute-warm.scale-zero-pg.svc
+    - compute-warm.scale-zero-pg.svc.cluster.local
+    - "*.scale-zero-pg.svc"
+    - "*.scale-zero-pg.svc.cluster.local"
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: pggw-mtls-ca-issuer
+    kind: Issuer
+    group: cert-manager.io
+---
+# 5) Gateway client leaf (SHARED across the gateway fleet, per ADR-0003 D3).
+#    clientAuth. This is the identity `clientcert=verify-full` will verify on the
+#    compute in phase 4, so the CN is the client identity the compute's pg_hba
+#    will match. No dnsNames needed for a client cert; the CN carries the
+#    identity.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: pggw-gateway-client-tls
+  namespace: scale-zero-pg
+  labels: { app: pggw, "app.kubernetes.io/part-of": scale-zero-pg }
+spec:
+  secretName: pggw-gateway-client-tls
+  commonName: pggw.scale-zero-pg.svc
+  duration: 2160h # 90d
+  renewBefore: 360h # 15d
+  usages:
+    - client auth
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: pggw-mtls-ca-issuer
+    kind: Issuer
+    group: cert-manager.io

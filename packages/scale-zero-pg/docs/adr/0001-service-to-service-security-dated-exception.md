@@ -6,8 +6,15 @@
 - Expiry: this exception lapses at **scale-zero-pg GA / first external-tenant use, whichever comes first** — at which point both gaps must be closed or re-justified, not silently carried.
 - **Amended by ADR-0002 (2026-09-19): the F6 clause is CLOSED** — the peer idle-scrape is now
   bearer-authenticated and fail-closed by construction (`GW_PEER_TOKEN`; `/metrics.json` 401 on
-  mismatch/absent). **F5 (gateway→compute plaintext transport) remains DEFERRED** with the expiry
-  above intact. Read the F6 rows below as historical context for a gap that is now closed.
+  mismatch/absent). Read the F6 rows below as historical context for a gap that is now closed.
+- **Amended by ADR-0003 (2026-09-19): the F5 clause is CLOSING (phased).** The gateway→compute
+  plaintext transport is being closed by **in-protocol Postgres mTLS** (cert-manager CA + shared
+  server/client leaf certs; SSLRequest→`tls.Client` on the gateway, compute `ssl=on` +
+  `hostssl clientcert=verify-full`), rolled out over four independently-safe phases. **Phase 1
+  (cert infrastructure + this design record) has landed**, but F5 is **NOT yet CLOSED** — it stays
+  DEFERRED with the expiry above intact until the phase-3/4 merge (gateway requires TLS + compute
+  enforces the client cert) lands. Until then the plaintext-hop + CNI-conditional-NetworkPolicy
+  caveat still applies. See ADR-0003 for the phases + ordering gate.
 
 ## Context
 
@@ -75,7 +82,9 @@ DBaaS hardening), NOT a judgment that mTLS/auth are unnecessary — they are owe
 - [x] **Founder accepted** this exception 2026-09-08 (Status → Accepted). Risk is now formally accepted, dated, and expiry-bound.
 - [x] **F6 CLOSED by ADR-0002 (2026-09-19)** — peer-scrape bearer auth, fail-closed boot, and the
       C1 reader fix (non-200 → postpone sleep) shipped.
-- [ ] File a tracking issue for F5 (gateway→compute mTLS) tagged to the expiry milestone, so closure
-      is scheduled, not incidental.
+- [~] **F5 CLOSING (phased) via ADR-0003 (2026-09-19)** — gateway→compute mTLS is now scheduled, not
+      incidental: phase 1 (cert-manager CA + shared server/client leaf certs) has landed; phases 2-4
+      (compute serves TLS → gateway requires TLS → pg_hba `clientcert=verify-full`) close it fully.
+      F5 is marked CLOSED only on the phase-3/4 merge.
 - [ ] At GA / first external-tenant use: re-review this ADR; close F5+F6 or re-justify.
 - [ ] Keep the plaintext-hop + CNI-conditional caveat in any user-facing isolation/encryption claim.
