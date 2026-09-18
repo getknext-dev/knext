@@ -97,8 +97,8 @@ const DEFERRALS: Deferral[] = [
   {
     id: 'tls-san-list',
     reason:
-      'gen-tls.sh SANs are certificate DNS names, where a trailing dot is not conventional. Every minted DSN is sslmode=disable today, so no cert-name comparison is in play. FOLLOW-UP, not silently accepted: under verify-full a rooted host would not match these SANs — that mismatch predates this change (it already failed for the 4-dot FQDN) and belongs with whoever owns the TLS story.',
-    match: (f) => /deploy\/gen-tls\.sh$/.test(f),
+      'Certificate DNS names (SANs) in gen-tls.sh (front-door) and 11-mtls-certs.yaml (F5 gateway->compute mTLS, ADR-0003) are TLS IDENTITY assertions, not DNS connection targets — a trailing dot is not conventional in a SAN. The old FOLLOW-UP ("under verify-full a rooted host would not match these SANs") is now OWNED and RESOLVED by F5: Go\'s crypto/tls strips the trailing dot from the ServerName before hostname/SAN matching (verifyHostname), so a rooted dial host (e.g. compute.scale-zero-pg.svc.) matches an UNROOTED SAN. Rooting the SANs would be non-standard and buys nothing; the rooting perf optimisation applies to the dial host, which is rooted independently.',
+    match: (f) => /deploy\/(gen-tls\.sh|11-mtls-certs\.yaml)$/.test(f),
   },
   {
     id: 'platform-internal-dial-targets',

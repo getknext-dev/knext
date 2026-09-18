@@ -106,6 +106,36 @@ for f in [0-9][0-9]-*.yaml; do
   # server dry-run of a comment-only file errors "no objects passed to apply"; that is
   # not a defect, so skip cleanly when the file declares no apiVersion.
   grep -q '^apiVersion:' "$f" || { ok "$f is doc-only (no k8s objects; owned by gen-secrets.sh)"; continue; }
+  # cert-manager manifests (11-mtls-certs.yaml, F5 phase 1): the cert-manager.io/v1
+  # CRDs (Issuer/Certificate) may not be installed on every cluster the validator
+  # runs against — a knext+scale-zero-pg cluster has them (the operator webhook
+  # depends on cert-manager), but a bare cluster does not, and a server dry-run
+  # then errors "no matches for kind ... in version cert-manager.io/v1". That is
+  # NOT a manifest defect, so when the CRD is absent, fall back to an OFFLINE YAML
+  # parse (structure is still validated) instead of failing. When the CRD IS
+  # present, the normal server dry-run below runs and schema-validates for real.
+  if grep -q 'cert-manager\.io/' "$f" \
+     && { [ "$HAVE_KUBECTL" != 1 ] || ! kubectl get crd certificates.cert-manager.io >/dev/null 2>&1; }; then
+    # Offline YAML sanity, degrading with the tooling present (the repo avoids a
+    # pyyaml hard-dep — see prom_config_hash's stdlib parser). Structural
+    # correctness of the objects themselves is asserted by contract 33 below.
+    if python3 -c 'import yaml' 2>/dev/null; then
+      if python3 -c 'import sys,yaml; list(yaml.safe_load_all(open(sys.argv[1])))' "$f" >/dev/null 2>&1; then
+        ok "$f is valid YAML (pyyaml parse; cert-manager CRDs unavailable — server dry-run skipped; F5 phase 1)"
+      else
+        fail "$f is not valid YAML (pyyaml parse; cert-manager CRDs unavailable so no server dry-run)"; blockdone
+      fi
+    elif command -v yamllint >/dev/null 2>&1; then
+      if yamllint -d relaxed "$f" >/dev/null 2>&1; then
+        ok "$f is valid YAML (yamllint; cert-manager CRDs unavailable — server dry-run skipped; F5 phase 1)"
+      else
+        fail "$f fails yamllint (cert-manager CRDs unavailable so no server dry-run)"; blockdone
+      fi
+    else
+      ok "$f: cert-manager CRDs unavailable + no YAML parser present — server dry-run skipped; structural checks in contract 33 cover it (F5 phase 1)"
+    fi
+    continue
+  fi
   # Capture stderr (stdout discarded). On success this is empty and we move on.
   if err="$(kubectl apply --dry-run=server -f "$f" 2>&1 >/dev/null)"; then
     ok "$f validates (server dry-run)"
@@ -821,6 +851,62 @@ grep -q 'job_name: appdb-operator' 60-prometheus.yaml || fail "60-prometheus.yam
 grep -q 'appdb_warm_hold_active' 60-prometheus.yaml || fail "60-prometheus.yaml ComputePhantomKeepalive must subtract appdb_warm_hold_active — a declared warm hold is not a phantom (knext #388)"
 grep -q 'or vector(0)' 60-prometheus.yaml || fail "60-prometheus.yaml phantom-keepalive subtraction must use 'or vector(0)' so the alert is not silenced when nothing is held (knext #388)"
 ok "AppDatabase warmSchedule CRD field shipped; warm = held connection (no deployments/scale); holds scraped + subtracted from phantom-keepalive (knext #388)"
+
+# 33. contract (F5 phase 1, ADR-0003): the gateway→compute mTLS cert
+#     infrastructure must ship as a cert-manager CA bootstrap + two role leaf
+#     certs. INTENT — absent cert infra must FAIL the deploy, never fall through
+#     to a later phase that then runs plaintext. This contract asserts the infra
+#     the later phases mount:
+#       * the manifest exists and wires the self-signed→CA→CA-Issuer bootstrap,
+#       * a compute-server leaf (serverAuth) whose SANs cover the compute Service
+#         DNS the gateway will verify as ServerName,
+#       * a gateway-client leaf (clientAuth) — the identity phase-4
+#         clientcert=verify-full enforces,
+#       * both leaves issue from the ONE CA Issuer (shared trust root).
+#     Phase 1 is manifests+docs only: NO Go code consumes these yet.
+CM=11-mtls-certs.yaml
+[ -f "$CM" ] || fail "deploy/$CM missing — the F5 phase-1 gateway↔compute mTLS cert infrastructure (ADR-0003)"
+grep -q 'kind: Issuer' "$CM"      || fail "$CM missing a cert-manager Issuer (self-signed bootstrap + CA issuer)"
+grep -q 'selfSigned: {}' "$CM"    || fail "$CM missing the self-signed bootstrap Issuer"
+grep -q 'isCA: true' "$CM"        || fail "$CM missing the CA Certificate (isCA: true)"
+grep -q 'name: pggw-mtls-ca-issuer' "$CM" || fail "$CM missing the CA Issuer (issues every leaf from the shared CA)"
+# the two role leaves + their Secrets (what phases 2/3/4 mount)
+grep -q 'secretName: pggw-compute-server-tls' "$CM" || fail "$CM missing the compute-server leaf Secret pggw-compute-server-tls (serverAuth)"
+grep -q 'secretName: pggw-gateway-client-tls' "$CM" || fail "$CM missing the gateway-client leaf Secret pggw-gateway-client-tls (clientAuth)"
+grep -q 'server auth' "$CM" || fail "$CM compute-server leaf must declare usages: [server auth]"
+grep -q 'client auth' "$CM" || fail "$CM gateway-client leaf must declare usages: [client auth]"
+# the compute-server SANs must cover every backend DNS the gateway dials as
+# ServerName: the single-DB write path, the RO pool, and the per-system wildcard.
+grep -q 'compute.scale-zero-pg.svc' "$CM"    || fail "$CM compute-server leaf missing the compute.scale-zero-pg.svc SAN (GW_TARGET write path)"
+grep -q 'compute-ro.scale-zero-pg.svc' "$CM" || fail "$CM compute-server leaf missing the compute-ro.scale-zero-pg.svc SAN (GW_RO_TARGET)"
+grep -q '\*.scale-zero-pg.svc' "$CM"         || fail "$CM compute-server leaf missing the *.scale-zero-pg.svc wildcard SAN (per-system compute-{system} from GW_TARGET_TEMPLATE)"
+# both leaves must chain to the ONE CA issuer (shared trust root: gateway RootCAs
+# + compute ssl_ca_file are the same CA).
+[ "$(grep -c 'name: pggw-mtls-ca-issuer' "$CM")" -ge 3 ] || fail "$CM both leaves + the CA cert must reference issuerRef name pggw-mtls-ca-issuer / the CA (shared root)"
+# finite duration + renewBefore so cert-manager auto-rotates across the fleet
+# (the reliability point vs the manual, never-rotating gen-tls.sh path).
+grep -q 'renewBefore:' "$CM" || fail "$CM leaves must set renewBefore so cert-manager auto-rotates (the F5 reliability win over gen-tls.sh)"
+# Live fail-closed gate, keyed on the CA Issuer being APPLIED. Rationale: this is a
+# manifest-contract validator that also runs pre-apply (fresh cluster / CI), and in
+# PHASE 1 nothing consumes these certs yet, so an un-applied cluster is NOT a defect —
+# reding on "Secret not issued" before anyone applied 11-mtls-certs.yaml would just
+# break the validator. But the DANGEROUS state IS caught: once the CA Issuer is
+# applied (a cert-consuming deploy is imminent), a MISSING leaf Secret means
+# cert-manager half-provisioned the infra, and a later phase that mounts it would run
+# without TLS — that fails closed here. So: Issuer absent -> not-yet-applied (note);
+# Issuer present -> both leaf Secrets MUST be issued.
+if [ "$HAVE_KUBECTL" = 1 ] && kubectl get crd certificates.cert-manager.io >/dev/null 2>&1; then
+  if kubectl -n scale-zero-pg get issuer pggw-mtls-ca-issuer >/dev/null 2>&1; then
+    for s in pggw-compute-server-tls pggw-gateway-client-tls; do
+      kubectl -n scale-zero-pg get secret "$s" >/dev/null 2>&1 \
+        || fail "F5 fail-closed: CA Issuer is applied but leaf Secret $s is NOT issued — cert-manager half-provisioned the mTLS infra; a phase that mounts it would run without TLS. Fix issuance before advancing."
+    done
+    echo "  (F5: CA Issuer applied; both leaf Secrets issued on this cluster)"
+  else
+    echo "  (F5: cert-manager present but deploy/$CM not yet applied — phase-1 infra is optional to apply now; MUST be applied + issued before phase 2 mounts the certs)"
+  fi
+fi
+ok "F5 phase-1 mTLS cert infrastructure ships (cert-manager CA + shared server/client leaves, shared trust root, auto-rotating; fail-closed on missing infra) — ADR-0003"
 
 # ---------------------------------------------------------------------------
 # Summary (#797): every contract above has been EVALUATED — nothing exits early.
