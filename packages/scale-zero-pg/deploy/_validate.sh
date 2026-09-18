@@ -192,6 +192,16 @@ ok "gateway RBAC includes deployments/scale"
 grep -q 'GW_COMPUTE_MODE' 10-gateway.yaml || fail "gateway env GW_COMPUTE_MODE missing"
 ok "gateway wake mode configured"
 
+# 4b. contract (F6): both gateway fronts authenticate the peer idle-scrape with
+#     the shared fleet bearer token, sourced from the pggw-peer-token Secret via
+#     secretKeyRef (never a literal). Fail-closed: absent the Secret the gateway
+#     refuses to boot, so shipping this env is what makes the default config safe.
+for f in 10-gateway.yaml 81-apps-gateway.yaml; do
+  grep -q 'GW_PEER_TOKEN' "$f" || fail "$f: gateway must source GW_PEER_TOKEN (F6 peer-scrape auth)"
+  grep -q 'name: pggw-peer-token' "$f" || fail "$f: GW_PEER_TOKEN must come from the pggw-peer-token Secret via secretKeyRef, not a literal"
+done
+ok "both gateways source GW_PEER_TOKEN from the pggw-peer-token Secret (F6, fail-closed)"
+
 # 5. contract: knext consumes the DB only via a DATABASE_URL secret
 grep -q 'DATABASE_URL' 30-knext-secret.yaml || fail "knext secret lacks DATABASE_URL"
 ok "knext DATABASE_URL secret present"

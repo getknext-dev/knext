@@ -4,6 +4,10 @@
 - Date: 2026-09-08
 - Scope: `packages/scale-zero-pg/` (the scale-to-zero PostgreSQL wake-on-connect gateway). Module-local ADR — does not amend any main-repo ADR.
 - Expiry: this exception lapses at **scale-zero-pg GA / first external-tenant use, whichever comes first** — at which point both gaps must be closed or re-justified, not silently carried.
+- **Amended by ADR-0002 (2026-09-19): the F6 clause is CLOSED** — the peer idle-scrape is now
+  bearer-authenticated and fail-closed by construction (`GW_PEER_TOKEN`; `/metrics.json` 401 on
+  mismatch/absent). **F5 (gateway→compute plaintext transport) remains DEFERRED** with the expiry
+  above intact. Read the F6 rows below as historical context for a gap that is now closed.
 
 ## Context
 
@@ -69,7 +73,9 @@ DBaaS hardening), NOT a judgment that mTLS/auth are unnecessary — they are owe
 ## Action items
 
 - [x] **Founder accepted** this exception 2026-09-08 (Status → Accepted). Risk is now formally accepted, dated, and expiry-bound.
-- [ ] File tracking issues for F5 (gateway→compute mTLS) and F6 (peer-scrape auth) tagged to the
-      expiry milestone, so closure is scheduled, not incidental.
+- [x] **F6 CLOSED by ADR-0002 (2026-09-19)** — peer-scrape bearer auth, fail-closed boot, and the
+      C1 reader fix (non-200 → postpone sleep) shipped.
+- [ ] File a tracking issue for F5 (gateway→compute mTLS) tagged to the expiry milestone, so closure
+      is scheduled, not incidental.
 - [ ] At GA / first external-tenant use: re-review this ADR; close F5+F6 or re-justify.
 - [ ] Keep the plaintext-hop + CNI-conditional caveat in any user-facing isolation/encryption claim.
