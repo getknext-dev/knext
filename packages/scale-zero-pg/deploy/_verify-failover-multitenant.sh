@@ -301,7 +301,12 @@ OP_RESTARTS_BEFORE="$($K get pods -l app="$OPERATOR" --field-selector=status.pha
 # [T4] if the single operator pod is RESCHEDULED (a new pod reports restartCount 0 vs
 # BEFORE=N). [T4] compares uid to tell an in-place restart from a pod replacement.
 OP_UID_BEFORE="$($K get pods -l app="$OPERATOR" --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.uid}' 2>/dev/null || echo '')"
-info "pre-failover: $(echo "$PRE_PODS" | grep -c . ) compute pod(s), operator restartCount=$OP_RESTARTS_BEFORE (pod uid ${OP_UID_BEFORE:-unknown})"
+# An empty baseline uid (no Running operator pod pre-kill) must be a hard setup
+# failure, NOT silently tolerated — otherwise the [T4] uid comparison is disabled
+# for the whole run and a post-recovery restart/reschedule goes unseen. "No operator
+# pod running" is a real failure, never a pass.
+[ -n "$OP_UID_BEFORE" ] || fail "no Running $OPERATOR pod before the kill — cannot baseline the operator for the [T4] restart/reschedule guard; the apps-plane operator is not healthy"
+info "pre-failover: $(echo "$PRE_PODS" | grep -c . ) compute pod(s), operator restartCount=$OP_RESTARTS_BEFORE (pod uid ${OP_UID_BEFORE})"
 
 # ---------------------------------------------------------------------------
 info "STEP 2: KILL the primary pageserver — pswatcher must fail over"
@@ -538,7 +543,13 @@ YAML
     [ -n "$OP_RESTARTS_AFTER" ] || OP_RESTARTS_AFTER=0
     OP_UID_AFTER="$($K get pods -l app="$OPERATOR" --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.uid}' 2>/dev/null || echo '')"
     _restart_ok=1; _restart_why=""
-    if [ -n "$OP_UID_BEFORE" ] && [ -n "$OP_UID_AFTER" ] && [ "$OP_UID_AFTER" != "$OP_UID_BEFORE" ]; then
+    # An EMPTY post-recovery uid = NO Running operator pod (replicas:1 + Recreate can
+    # leave zero Running pods mid-reschedule). That is a real failure, NOT "same pod":
+    # check it FIRST, before the uid-equality and restartCount branches (which would
+    # both be silently skipped by an empty/0 value and wrongly report clean recovery).
+    if [ -z "$OP_UID_AFTER" ]; then
+      _restart_ok=0; _restart_why="no Running $OPERATOR pod at the post-recovery read (operator is down / mid-reschedule)"
+    elif [ "$OP_UID_AFTER" != "$OP_UID_BEFORE" ]; then
       _restart_ok=0; _restart_why="operator pod was RESCHEDULED/replaced during recovery (uid $OP_UID_BEFORE -> $OP_UID_AFTER)"
     elif [ "$OP_RESTARTS_AFTER" != "$OP_RESTARTS_BEFORE" ]; then
       _restart_ok=0; _restart_why="operator restarted IN PLACE (restartCount $OP_RESTARTS_BEFORE -> $OP_RESTARTS_AFTER)"
