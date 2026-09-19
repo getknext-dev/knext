@@ -25,14 +25,20 @@ import (
 // name-list comparison. render.go says of itself it "mirrors the template Deployment
 // exactly"; this asserts that structurally rather than trusting it.
 //
-// The comparison is a canonical FACET projection of the PodSpec: command, args
-// count, envFrom, env refs, volume mounts (name+path+readOnly), volumes
-// (name+source+optional+items), ports, probes, container/pod securityContext, and
-// resource-key PRESENCE. It compares STRUCTURE/keys, deliberately NOT values, with
-// an explicit allowlist of the value classes that legitimately differ between a
-// sed-substituted TEXT template and typed Go objects:
+// The comparison is a canonical FACET projection of the PodSpec. PROJECTED (compared
+// exactly, per container keyed by name): container image, imagePullPolicy, command,
+// args COUNT, envFrom refs, env refs (NAME<-secret|cm:SRC/KEY + Optional flag, or
+// NAME for plain-value env), volume mounts (name+path+readOnly), ports (name+port),
+// readiness/liveness/startup probes (handler+thresholds), container securityContext
+// presence, resource-key PRESENCE; and pod-level: securityContext (seccomp +
+// runAsNonRoot), terminationGracePeriodSeconds, volumes (name+source+optional+items).
 //
-//   ALLOWLIST (value classes intentionally not compared, each legitimate):
+// It compares STRUCTURE/keys, deliberately NOT certain value classes. The list below
+// is EXHAUSTIVE for what is excluded: a field is either projected above or named here
+// with its reason. It is NOT a claim that every conceivable PodSpec field is covered
+// — see class 6, the honestly-stated residual gap.
+//
+//   ALLOWLIST / EXCLUSIONS (each intentional, with reason):
 //     1. Resource QUANTITIES. The template carries __CPU_REQ__/__CPU_LIM__/
 //        __MEM_REQ__/__MEM_LIM__ placeholders (substituted by provision-app.sh);
 //        render.go resolves them from per-app quotas. Only the resource KEY set
@@ -40,18 +46,28 @@ import (
 //        the amounts — pinning amounts would make the guard noise.
 //     2. Per-app SUBSTITUTED names. app-db-__APP__ / compute-config-__APP__ /
 //        compute-__APP__ are templated; the parser substitutes __APP__->parity so
-//        both sides render the same concrete name, then compares.
+//        both sides render the same concrete name, then compares (so these ARE
+//        compared post-substitution — listed only to explain the substitution).
 //     3. Shell SCRIPT text of initContainer args. The template is an indented YAML
 //        block scalar; render.go is a dedented Go raw string — same script, different
 //        leading whitespace. Only the ARG COUNT is compared, plus the exact command
 //        (["/bin/sh","-c"] vs ["/bin/sh","/compute-files/entrypoint.sh"]), which is
-//        what a "wrong entrypoint" mutation would corrupt.
-//     4. Deployment-level fields (replicas, strategy, revisionHistoryLimit) — this
-//        is a POD SPEC projection by construction; those are covered elsewhere and
-//        legitimately differ (e.g. __REPLICAS__ placeholder).
+//        what a "wrong entrypoint" mutation would corrupt. Plain-value env VALUES are
+//        likewise compared by name only (same reasoning); the writer path has none.
+//     4. Deployment-level fields (replicas, strategy, revisionHistoryLimit, selector,
+//        annotations) — this is a POD SPEC projection by construction; those are
+//        covered elsewhere and legitimately differ (e.g. __REPLICAS__ placeholder).
 //     5. resizePolicy — see TestResizePolicyIsKnownUnprojectedTemplateDrift below:
-//        this one is NOT a legitimate difference, it is a REAL discovered drift,
-//        excluded here only so the guard stays green against unchanged production.
+//        this one is NOT a legitimate difference, it is a REAL discovered drift
+//        (tracked separately as the production fix), excluded here only so the guard
+//        stays green against unchanged production.
+//     6. RESIDUAL GAP (honest): PodSpec/Container fields that NEITHER renderer sets
+//        today (lifecycle hooks, workingDir, terminationMessagePath, volumeDevices,
+//        fieldRef/resourceFieldRef env sources, pod affinity/tolerations, etc.) are
+//        not projected. Both sides omit them now, so there is nothing to compare, but
+//        a future addition to ONE side would be a blind spot until projected. This is
+//        the same residual caveat the name-list guards carried — now much smaller, and
+//        stated rather than implied.
 
 // projectPodSpec renders a PodSpec into a sorted, comparable set of structural facet
 // tokens. ONE function serves both the template and the Go renderer — a second
@@ -73,6 +89,10 @@ func projectPodSpec(ps corev1.PodSpec) []string {
 		}
 	}
 
+	if ps.TerminationGracePeriodSeconds != nil {
+		out = append(out, "pod/terminationGracePeriodSeconds="+strconv.FormatInt(*ps.TerminationGracePeriodSeconds, 10))
+	}
+
 	for _, v := range ps.Volumes {
 		out = append(out, "pod/volume="+describeVolume(v))
 	}
@@ -80,6 +100,12 @@ func projectPodSpec(ps corev1.PodSpec) []string {
 	projectContainers := func(kind string, cs []corev1.Container) {
 		for _, c := range cs {
 			key := "c/" + kind + "/" + c.Name
+			// Image: both sides pin the SAME literal (render.go's DefaultRenderConfig
+			// hardcodes exactly the template's "PINNED pair with storage" tags). No
+			// other test covers image parity, so a half-done version bump — the
+			// canonical render<->template drift — would otherwise be silently green.
+			out = append(out, key+"/image="+c.Image)
+			out = append(out, key+"/imagePullPolicy="+string(c.ImagePullPolicy))
 			out = append(out, key+"/command="+strings.Join(c.Command, " "))
 			out = append(out, key+"/args#="+strconv.Itoa(len(c.Args)))
 			for _, ef := range c.EnvFrom {
@@ -90,11 +116,25 @@ func projectPodSpec(ps corev1.PodSpec) []string {
 					out = append(out, key+"/envFrom=secret/"+ef.SecretRef.Name)
 				}
 			}
-			// envRefs (shared with the env-name guard) already encodes NAME<-secret/KEY
-			// for secretKeyRefs and NAME for plain values — one token per env so a
-			// single deleted env ref drops exactly one facet.
-			for _, ref := range envRefs([]corev1.Container{c}) {
-				out = append(out, key+"/env="+ref)
+			// One token per env so a single deleted/renamed env ref drops exactly one
+			// facet. secretKeyRef/configMapKeyRef refs encode NAME<-secret|cm:SRC/KEY
+			// AND the Optional flag (symmetric with describeVolume's opt=) — flipping a
+			// secret ref optional true->false is a real behaviour change, so it is
+			// compared, not allowlisted.
+			for _, e := range c.Env {
+				switch {
+				case e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil:
+					skr := e.ValueFrom.SecretKeyRef
+					out = append(out, key+"/env="+e.Name+"<-secret:"+skr.Name+"/"+skr.Key+"|opt="+optStr(skr.Optional))
+				case e.ValueFrom != nil && e.ValueFrom.ConfigMapKeyRef != nil:
+					cmr := e.ValueFrom.ConfigMapKeyRef
+					out = append(out, key+"/env="+e.Name+"<-cm:"+cmr.Name+"/"+cmr.Key+"|opt="+optStr(cmr.Optional))
+				default:
+					// Plain-value env (e.g. RO_MODE): compare name only, not the value
+					// (value class already covered by the allowlist reasoning); the
+					// writer path this guard compares has no plain-value env today.
+					out = append(out, key+"/env="+e.Name)
+				}
 			}
 			for _, vm := range c.VolumeMounts {
 				out = append(out, key+"/mount="+vm.Name+"|"+vm.MountPath+"|ro="+strconv.FormatBool(vm.ReadOnly))
@@ -166,6 +206,13 @@ func describeProbe(p *corev1.Probe) string {
 		"|ft=" + strconv.Itoa(int(p.FailureThreshold))
 }
 
+func optStr(b *bool) string {
+	if b == nil {
+		return "false" // an unset optional defaults to false (required)
+	}
+	return strconv.FormatBool(*b)
+}
+
 func sortedResourceKeys(rl corev1.ResourceList) string {
 	var keys []string
 	for k := range rl {
@@ -221,6 +268,12 @@ func parseTemplateComputeDeployment(t *testing.T) *appsv1.Deployment {
 		}
 		if head.Kind != "Deployment" {
 			continue
+		}
+		if found != nil {
+			// The per-app compute template carries exactly ONE Deployment (the writer).
+			// If a second appears, the projection would silently compare only the last
+			// one — fail loudly so the guard cannot quietly drop a Deployment.
+			t.Fatalf("the template carries >1 Deployment; the structural guard assumes exactly one (the writer) — extend it to disambiguate")
 		}
 		var dep appsv1.Deployment
 		if err := yaml.Unmarshal([]byte(doc), &dep); err != nil {
@@ -279,6 +332,11 @@ func TestRenderDeploymentStructurallyMatchesTemplate(t *testing.T) {
 		t.Fatal("render projection is empty — the guard would pass vacuously")
 	}
 
+	// NOTE: difference() is a SET diff, so two identical facet tokens collapse to one
+	// — a per-container duplicate (e.g. the same env ref twice) is not detectable. The
+	// tokens are keyed by container name + field, so real drift produces DISTINCT
+	// tokens; exact-duplicate facets are not a drift class render.go can plausibly
+	// introduce here, so a multiset diff would add complexity without signal.
 	if miss := difference(tmplProj, goProj); len(miss) > 0 {
 		t.Errorf("structural facets the TEMPLATE declares but render.go does NOT emit: %v\n"+
 			"render.go claims to mirror deploy/compute-app.template.yaml exactly. Either emit "+
