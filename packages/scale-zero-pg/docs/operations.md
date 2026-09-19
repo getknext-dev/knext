@@ -1053,6 +1053,18 @@ runbook until the watcher is back.
   human acted), the generation ledger advanced 1→2, and the watcher's **post-failover
   truthfulness** (`pswatcher_failed_over=1` and `pswatcher_primary_up` re-anchored onto
   the promoted standby, not a blind latched 1 — #25).
+- **Verify hands-off, MULTI-TENANT:** `sh deploy/_verify-failover-multitenant.sh` — the
+  single-tenant drill above stands up its own one-tenant fixture, so it cannot see a
+  failover that promotes only *one* tenant while the `pageserver` Service routes the
+  rest. This drill runs against the **live plane** (base tenant + the apps plane): it
+  provisions two per-app tenants, wakes them, kills the primary (scales the primary
+  `pageserver` StatefulSet to 0 — recoverable), and asserts that after the flip **every**
+  tenant — base and each per-app — is attached on the promoted pageserver **and reachable
+  through the `pageserver` Service**, that re-attaching at the current generation does not
+  wedge, that every per-app/RO compute was bounced, that the operator recovers with no
+  restart, and that the plane converges with no manual selector-patch. It **skips** cleanly
+  only when the apps plane is entirely absent; a present-but-broken chain **fails**. Run it
+  after any change to the failover or apps-tenant reconcile path.
 - **After a failover:** the standby is now the primary and the ledger holds the new
   generation. To restore redundancy, bring up a fresh warm Secondary (re-seed
   `pageserver-standby` against the now-primary); the watcher adopts the flipped
