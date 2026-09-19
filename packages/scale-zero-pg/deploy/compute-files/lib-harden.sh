@@ -51,26 +51,48 @@
 # spec.cluster.settings), so it takes effect when compute_ctl starts Postgres — the
 # Recreate + 0<->N model satisfies that for free; there is NO post-boot reload path.
 #
-# OFFER-not-require + independently safe: if the phase-1 cert Secret is absent (a bare
-# local cluster without cert-manager; the volume is mounted `optional: true` so the
-# pod still schedules), the mounted key is missing and we STRIP the four ssl GUCs from
-# the rendered spec so Postgres boots PLAINTEXT rather than crash-looping on a missing
-# key file. pg_hba is untouched either way (its TLS-required rewrite is a later
-# phase), so an existing plaintext gateway connection keeps working.
+# OFFER-not-require + independently safe: ssl is enabled ONLY when BOTH the server key
+# AND the CA file are readable + non-empty. The server cert+key co-arrive in ONE Secret
+# (pggw-compute-server-tls), but the CA is a SEPARATE `optional: true` Secret mounted at
+# $SERVER_CA_SRC (ssl_ca_file). If we enabled ssl on the key alone and the CA were
+# absent/empty, Postgres would FATAL in be_tls_init ("could not load root certificate
+# file") and crash-loop that DB. So we gate on ALL required files: everything present ->
+# serve TLS; ANYTHING missing/empty -> STRIP the four ssl GUCs from the rendered spec and
+# boot PLAINTEXT rather than crash-loop (a bare local cluster without cert-manager mounts
+# neither Secret; the volumes are `optional: true` so the pod still schedules). A missing
+# or PARTIAL cert set therefore never crashes. pg_hba is untouched either way (its
+# TLS-required rewrite is a later phase), so an existing plaintext gateway connection
+# keeps working.
 SERVER_KEY_SRC=/etc/pggw-compute-server-tls/tls.key
 SERVER_KEY_DST=/tmp/pggw-server-tls.key
+SERVER_CA_SRC=/etc/pggw-mtls-ca/ca.crt
 stage_tls_key() {
   _spec="${1:?stage_tls_key needs the rendered compute_ctl spec path}"
-  if [ -r "$SERVER_KEY_SRC" ]; then
+  if [ -r "$SERVER_KEY_SRC" ] && [ -s "$SERVER_KEY_SRC" ] && \
+     [ -r "$SERVER_CA_SRC" ]  && [ -s "$SERVER_CA_SRC" ]; then
     cp "$SERVER_KEY_SRC" "$SERVER_KEY_DST"
     chmod 600 "$SERVER_KEY_DST"
-    echo "F5 phase 2: staged compute server TLS key -> $SERVER_KEY_DST (0600, postgres-owned); Postgres serves ssl=on"
+    echo "F5 phase 2: staged compute server TLS key -> $SERVER_KEY_DST (0600, postgres-owned); server cert + CA present; Postgres serves ssl=on"
   else
-    # No cert mounted (bare local run) -> drop the ssl GUCs so Postgres boots plaintext.
-    # The four ssl GUCs are the only settings whose name begins with "ssl"; each is a
-    # single-line JSON object, so a line filter removes exactly them and leaves valid JSON.
-    grep -v '"name": "ssl' "$_spec" > "$_spec.notls" && mv "$_spec.notls" "$_spec"
-    echo "F5 phase 2: no server TLS key at $SERVER_KEY_SRC — removed ssl GUCs; compute boots PLAINTEXT (offer-not-require, independently safe)"
+    # Key or CA missing/empty -> drop the ssl GUCs so Postgres boots plaintext. JSON-aware
+    # and ORDER-INDEPENDENT: remove each single-line ssl-GUC object, then strip any comma
+    # left dangling immediately before an array/object close. A plain `grep -v` was only
+    # valid while the four ssl GUCs were the FIRST array elements — reordering them to the
+    # tail would leave the previous element's trailing comma before `]`, i.e. invalid JSON
+    # and a crash. This awk is correct regardless of the GUCs' position; the compute image
+    # ships no jq/python3, so the removal stays in awk (available) and is self-repairing.
+    awk '
+      /^[[:space:]]*\{[[:space:]]*"name":[[:space:]]*"ssl/ { next }
+      {
+        if (have) {
+          if ($0 ~ /^[[:space:]]*[]}]/ && prev ~ /,[[:space:]]*$/) sub(/,[[:space:]]*$/, "", prev)
+          print prev
+        }
+        prev = $0; have = 1
+      }
+      END { if (have) print prev }
+    ' "$_spec" > "$_spec.notls" && mv "$_spec.notls" "$_spec"
+    echo "F5 phase 2: server TLS key or CA missing/empty ($SERVER_KEY_SRC, $SERVER_CA_SRC) — removed ssl GUCs; compute boots PLAINTEXT (offer-not-require, independently safe)"
   fi
 }
 
