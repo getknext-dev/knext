@@ -19,13 +19,22 @@ postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc.cluster.local.:55432/<
   DSNs keep connecting unchanged; enforcing TLS-only is a future flag. If the gateway
   has no cert configured, it declines TLS (answers `N`) and only `sslmode=disable`
   connects.
-- **The gateway→database hop is mutually authenticated** — whatever `sslmode` you
-  choose at the front door, the internal leg from the gateway to your database is TLS
-  with **both** sides verified: the gateway checks the compute's server certificate
-  and the compute requires the gateway's client certificate (plus the SCRAM password).
-  Nothing on the cluster network can talk to a per-app database without that
-  certificate. It needs no DSN change from you; it does need cert-manager on the
-  cluster — see [operations](operations.md#gatewaycompute-mtls--cert-manager-prerequisite-the-hop-is-mutually-authenticated).
+- **The gateway→database hop is encrypted, and how strongly it is authenticated
+  depends on the tier.** Whatever `sslmode` you choose at the front door, the internal
+  leg from the gateway to your database is TLS and the gateway verifies your
+  database's **server** certificate against the cluster CA.
+  - On the **single database above** (the shared DSN, port `55432` on `pggw`) that is
+    where it stops: the hop is encrypted and server-verified, and **no client
+    certificate is required** of the gateway. That tier is defended by network policy
+    and the operator posture instead — see
+    [operations](operations.md#network-isolation-caveat).
+  - On a **per-application database** (the `pggw-apps` gateway, one database per app)
+    the hop is additionally **mutually** authenticated: the database requires a client
+    certificate issued by the cluster CA — the gateway's — on top of the SCRAM
+    password, so nothing else on the cluster network can talk to it.
+
+  Either way it needs no DSN change from you; the mutual half does need cert-manager on
+  the cluster — see [operations](operations.md#gatewaycompute-mtls--cert-manager-prerequisite-the-hop-is-mutually-authenticated).
 - **Credentials** — `cloud_admin`/`cloud_admin` is the dev default, enforced by the
   compute spec on every boot. Rotation: see [operations](operations.md#password-rotation).
 - **Auth is SCRAM-SHA-256** — per-app roles (`app_<app>`) authenticate over the wire

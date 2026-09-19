@@ -121,9 +121,19 @@ ok "cold connect over TLS (sslmode=require) woke compute 0->1 in $((T1-T0))s, se
 #      (c) the pod's own cloud_admin@localhost:55433 admin ops still work (first-match on
 #          the untouched loopback trust lines) — otherwise every later harden/admin task
 #          on that compute breaks.
+#
+#    LEG (b) IS MANDATORY WHENEVER THIS SECTION RUNS — it is the ONLY positive
+#    gateway-path assertion in the whole drill, and legs (a)/(c) cannot substitute for
+#    it: they pass just as happily when the enforced rule rejects the gateway itself
+#    (e.g. a clientcert option that ties the certificate CN to the username, which the
+#    shared gateway leaf can never satisfy). So a missing app-db-<app> Secret or missing
+#    pggw-apps is a drill FAILURE here, not a quiet per-leg skip. The whole section may
+#    be skipped (no per-app compute at all), but it may not half-run and still claim
+#    enforcement — the closing line below reports only what ACTUALLY ran.
+MTLS_CLAIM="gateway->compute client-cert mTLS NOT verified (no per-app compute on this cluster; set TLS_MTLS_APP=<app> to run that section)"
 APP="${TLS_MTLS_APP:-$($K get deploy -l tier=apps,plane=compute -o jsonpath='{.items[0].metadata.labels.app}' 2>/dev/null | sed 's/^compute-//')}"
 if [ -z "$APP" ]; then
-  echo "note - no per-app compute (compute-<app>) on this cluster; skipping the F5 phase-4 pg_hba enforcement section. Provision one (deploy/provision-app.sh) or set TLS_MTLS_APP=<app> to run it."
+  echo "note - no per-app compute (compute-<app>) on this cluster; skipping the F5 phase-4 pg_hba enforcement section ENTIRELY. Provision one (deploy/provision-app.sh) or set TLS_MTLS_APP=<app> to run it."
 else
   D="deploy/compute-$APP"
   $K scale "$D" --replicas=1 >/dev/null
@@ -133,19 +143,19 @@ else
   SSLON=$($K exec "$D" -- psql -h localhost -p 55433 -U cloud_admin -d postgres -tAc 'SHOW ssl' 2>/dev/null | tr -d '[:space:]')
   [ "$SSLON" = "on" ] || fail "compute-$APP reports ssl=$SSLON — it is NOT serving TLS (cert-manager Secrets not mounted?), so the phase-4 harden deliberately did not enforce client certs. Fix the cert mounts before claiming mTLS."
   HBAPATH='${PGDATA:-/var/db/postgres/compute}/pg_hba.conf'
-  ENFORCED_RE='^hostssl[[:space:]]+all[[:space:]]+all[[:space:]]+all[[:space:]]+scram-sha-256[[:space:]]+clientcert=verify-full'
+  ENFORCED_RE='^hostssl[[:space:]]+all[[:space:]]+all[[:space:]]+all[[:space:]]+scram-sha-256[[:space:]]+clientcert=verify-ca'
   i=0
   while [ $i -lt 120 ]; do
     $K exec "$D" -- sh -c "grep -qE '$ENFORCED_RE' $HBAPATH" >/dev/null 2>&1 && break
     i=$((i+1)); sleep 1
   done
-  [ $i -lt 120 ] || fail "compute-$APP: the enforced rule (hostssl … clientcert=verify-full) never appeared in pg_hba after 120s — the backgrounded harden did not complete; check the compute logs for the 'F5 phase 4' line"
+  [ $i -lt 120 ] || fail "compute-$APP: the enforced rule (hostssl … clientcert=verify-ca) never appeared in pg_hba after 120s — the backgrounded harden did not complete; check the compute logs for the 'F5 phase 4' line"
   # the reload landed (harden reloads immediately after writing); confirm the running
   # server agrees the file is loadable — a parse error would leave the OLD config active.
   $K exec "$D" -- psql -h localhost -p 55433 -U cloud_admin -d postgres -tAc \
     "select count(*) from pg_hba_file_rules where error is not null" 2>/dev/null | tr -d '[:space:]' | grep -qx 0 \
     || fail "compute-$APP: pg_hba has lines with parse ERRORS (pg_hba_file_rules.error) — on SIGHUP Postgres DISCARDS the whole file and keeps the previous config, so nothing below would really be enforced"
-  ok "compute-$APP serves TLS and its pg_hba carries the enforced rule (hostssl … clientcert=verify-full), error-free"
+  ok "compute-$APP serves TLS and its pg_hba carries the enforced rule (hostssl … clientcert=verify-ca), error-free"
 
   # (a) TLS, NO client certificate -> refused, and for the client-certificate reason.
   NOCERT="postgres://app_$APP:wrongpw@compute-$APP.$NS.svc:55433/postgres?sslmode=require&connect_timeout=10"
@@ -164,19 +174,24 @@ else
   ok "TLS without a client certificate is REFUSED by compute-$APP ('connection requires a valid client certificate')"
 
   # (b) the gateway's own identity is accepted: a query through pggw-apps returns.
+  #     MANDATORY (see the section header): without this leg the drill proves only that
+  #     SOMETHING is refused, never that the gateway is still let through — the exact
+  #     failure a wrong clientcert option produces.
   APPPW=$($K get secret "app-db-$APP" -o jsonpath='{.data.PGPASSWORD}' 2>/dev/null | base64 -d 2>/dev/null || true)
-  if [ -n "$APPPW" ] && $K get deploy pggw-apps >/dev/null 2>&1; then
-    [ "$(CLIENT mtlsgw "postgres://app_$APP:$APPPW@pggw-apps:55432/$APP?sslmode=disable" 'select 1' | tail -1)" = "1" ] \
-      || fail "the apps-gateway could no longer reach compute-$APP after enforcement — the gateway's client certificate is not being accepted (check GW_COMPUTE_TLS + the pggw-gateway-client-tls leaf against the compute's ssl_ca_file CA)"
-    ok "the gateway's client identity IS accepted: a query through pggw-apps reaches compute-$APP under enforcement"
-  else
-    echo "note - no app-db-$APP Secret or no pggw-apps; skipped the gateway-identity leg of the mTLS check"
-  fi
+  [ -n "$APPPW" ] \
+    || fail "no app-db-$APP Secret (PGPASSWORD) — the gateway-identity leg CANNOT run, and without it this drill would report 'mTLS enforced' while never once dialing through the gateway. Provision the app (deploy/provision-app.sh) or point TLS_MTLS_APP at an app that has its Secret."
+  $K get deploy pggw-apps >/dev/null 2>&1 \
+    || fail "no pggw-apps deployment — the gateway-identity leg CANNOT run against compute-$APP, and legs (a)/(c) alone cannot show the gateway is still accepted. Deploy the apps-gateway before claiming the hop is mutually authenticated."
+  [ "$(CLIENT mtlsgw "postgres://app_$APP:$APPPW@pggw-apps:55432/$APP?sslmode=disable" 'select 1' | tail -1)" = "1" ] \
+    || fail "the apps-gateway could no longer reach compute-$APP after enforcement — the gateway's client certificate is not being accepted (check GW_COMPUTE_TLS + the pggw-gateway-client-tls leaf against the compute's ssl_ca_file CA, and that the pg_hba option is clientcert=verify-ca: verify-full would reject the shared gateway leaf on a CN-vs-username mismatch)"
+  ok "the gateway's client identity IS accepted: a query through pggw-apps reaches compute-$APP under enforcement"
 
   # (c) the pod's own loopback admin path is unaffected (first-match on the trust lines).
   [ "$($K exec "$D" -- psql -h localhost -p 55433 -U cloud_admin -d postgres -tAc 'select 1' 2>/dev/null | tr -d '[:space:]')" = "1" ] \
     || fail "cloud_admin@localhost:55433 on compute-$APP broke — the harden must leave the loopback trust lines untouched (first-match), or every pod-local admin op fails"
   ok "loopback cloud_admin admin path on compute-$APP still works under enforcement"
+  # Reached only if legs (a), (b) and (c) ALL ran and passed — every failure above exits.
+  MTLS_CLAIM="gateway->compute client-cert mTLS ENFORCED on compute-$APP (no-client-cert TLS dial refused for the client-certificate reason; the gateway's own leaf accepted end to end through pggw-apps; loopback admin path intact)"
 fi
 
-echo "TLS verification: sslmode=require encrypted + confirmed, sslmode=disable intact, wake-over-TLS passed, gateway->compute client-cert mTLS enforced on the per-app compute"
+echo "TLS verification: sslmode=require encrypted + confirmed, sslmode=disable intact, wake-over-TLS passed, $MTLS_CLAIM"

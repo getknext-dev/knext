@@ -1527,7 +1527,7 @@ certificate file the gateway cannot read.
 per-app compute is up, its `pg_hba` network catch-all is rewritten to
 
 ```
-hostssl  all  all  all  scram-sha-256  clientcert=verify-full
+hostssl  all  all  all  scram-sha-256  clientcert=verify-ca
 ```
 
 so a network connection must be **TLS** *and* present a client certificate the
@@ -1536,7 +1536,17 @@ SCRAM password check. A plaintext connection, or a TLS connection with no client
 certificate, is refused with `connection requires a valid client certificate`. The
 hop is therefore mutually authenticated in both directions.
 
-Three properties to know before you debug it:
+Four properties to know before you debug it:
+
+- **The rule checks the certificate's ISSUER, not its subject name.** `verify-ca`
+  requires the client certificate to be issued by the shared CA; the **password**
+  (SCRAM-SHA-256) is what identifies the *user*. That split is deliberate and load-
+  bearing: the gateway holds **one** client certificate, whose name is the gateway's
+  service name, and it connects on behalf of **every** application role. The stricter-
+  looking `verify-full` also demands that the certificate's common name **equal the
+  connecting username**, which one shared gateway certificate can never satisfy — it
+  would refuse every connection as soon as the rule is applied. Using it would first
+  require a per-role certificate for each database user (or a name map).
 
 - **The pod's own loopback path is untouched.** The `127.0.0.1/32` and `::1/128`
   trust lines are listed first and `pg_hba` is first-match, so in-pod admin work
@@ -1547,7 +1557,7 @@ Three properties to know before you debug it:
   runs in the background so it never slows a wake, so there is a brief window on a
   freshly-woken compute where the rule is not yet active. During it the only dialer is
   the gateway, which is already presenting TLS and its client certificate. If you are
-  scripting a check, poll `pg_hba.conf` for the `hostssl … clientcert=verify-full`
+  scripting a check, poll `pg_hba.conf` for the `hostssl … clientcert=verify-ca`
   line before asserting that anything is rejected.
 - **A compute that is not serving TLS is not enforced.** If the certificate Secrets
   are not mounted (a dev/kind cluster with no cert-manager), the compute boots

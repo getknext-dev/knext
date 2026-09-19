@@ -10,9 +10,27 @@
 # editing the awk or either catch-all in either file changes this test's result —
 # that is what makes it mutation-provable.
 #
+# WHY `clientcert=verify-ca` AND NOT `verify-full` (pinned here so it is not "upgraded"
+# back — verify-full LOOKS stronger and is a total outage on this topology):
+#   `clientcert=verify-full` does not merely verify the client certificate chain — it
+#   ADDITIONALLY requires the certificate's Common Name to EQUAL the connecting database
+#   username (or to map to it through a `map=` usermap + pg_ident.conf, neither of which
+#   this deployment has). The gateway presents ONE SHARED client leaf whose CN is a
+#   service name (see the gateway client leaf in deploy/11-mtls-certs.yaml) while it
+#   connects
+#   as the app role `app_<app>` — it replays the app's startup packet. Under verify-full
+#   EVERY gateway→compute connection would therefore be refused for a common-name
+#   mismatch the moment the backgrounded harden reloads pg_hba on a wake: a total,
+#   wake-triggered per-app data-plane outage.
+#   `clientcert=verify-ca` is exactly the intended semantics: the client certificate must
+#   be issued by the shared CA (that is the mTLS identity we want), and SCRAM-SHA-256
+#   still authenticates the USER. Chain identity from the certificate, user identity from
+#   SCRAM. Moving to verify-full would require per-role client certificates (CN ==
+#   app_<app>) or a pg_ident usermap — neither exists; do not make this a one-token edit.
+#
 # ENFORCED mode (the compute is serving TLS, `SHOW ssl` = on) must produce:
 #   (1) a NETWORK catch-all of `hostssl all all all scram-sha-256
-#       clientcert=verify-full` — TLS required AND a CA-verified client certificate,
+#       clientcert=verify-ca` — TLS required AND a CA-verified client certificate,
 #       with the auth-option AFTER the method field (pg_hba's field order);
 #   (2) the cloud_admin reject still BROAD `host` (never hostssl) so cloud_admin is
 #       refused over ANY transport, encrypted or not, inserted BEFORE the catch-all
@@ -58,8 +76,8 @@ catchall_of() { # $1 file, $2 = enforced|fallback
   awk -F"'" -v want="$2" '
     /^[[:space:]]*_catchall=/ {
       v=$2
-      if (want=="enforced" && v ~ /clientcert=verify-full/) { print v; exit }
-      if (want=="fallback" && v !~ /clientcert=verify-full/) { print v; exit }
+      if (want=="enforced" && v ~ /clientcert=verify-ca/) { print v; exit }
+      if (want=="fallback" && v !~ /clientcert=verify-ca/) { print v; exit }
     }
   ' "$1"
 }
@@ -77,7 +95,7 @@ PROG_CM="$(extract_awk "$TMP/inline-lib-harden.sh")"
 
 ENFORCED="$(catchall_of "$LIB" enforced)"
 FALLBACK="$(catchall_of "$LIB" fallback)"
-[ -n "$ENFORCED" ] || fail "$LIB has no _catchall carrying clientcert=verify-full — the compute never enforces client-cert mTLS"
+[ -n "$ENFORCED" ] || fail "$LIB has no _catchall carrying clientcert=verify-ca — the compute never enforces client-cert mTLS"
 [ -n "$FALLBACK" ] || fail "$LIB has no plaintext-mode _catchall — a compute booted without certs would get a hostssl line, whose parse error discards the WHOLE pg_hba reload (#112 reject + #117 SCRAM lost with it)"
 [ "$ENFORCED" = "$(catchall_of "$TMP/inline-lib-harden.sh" enforced)" ] \
   || fail "the enforced catch-all in $CM differs from $LIB — the inline copy is what runs on the compute"
@@ -85,9 +103,27 @@ ok "harden awk + both catch-alls extracted from lib-harden.sh and the inline 54 
 
 # the ENFORCED catch-all must be the one selected when the compute IS serving TLS.
 awk '/^[[:space:]]*if \[ "\$_ssl" = "on" \]/ {g=1; next}
-     g && /^[[:space:]]*_catchall=/ {print; exit}' "$LIB" | grep -q 'clientcert=verify-full' \
-  || fail "the clientcert=verify-full catch-all is not the branch taken when \$_ssl = on — enforcement must be gated on the compute ACTUALLY serving TLS, and must be what that gate selects"
-ok "clientcert=verify-full is the catch-all selected when the compute is serving TLS (\$_ssl = on)"
+     g && /^[[:space:]]*_catchall=/ {print; exit}' "$LIB" | grep -q 'clientcert=verify-ca' \
+  || fail "the clientcert=verify-ca catch-all is not the branch taken when \$_ssl = on — enforcement must be gated on the compute ACTUALLY serving TLS, and must be what that gate selects"
+ok "clientcert=verify-ca is the catch-all selected when the compute is serving TLS (\$_ssl = on)"
+
+# --- the verify-ca-not-verify-full TAXONOMY, pinned (see the header) -----------
+# Two halves, because either alone is decoration:
+#   (i) no EXECUTABLE line in either copy may say verify-full — that option ties the
+#       certificate CN to the connecting username, and the gateway's shared leaf CN is a
+#       service name while it connects as app_<app>, so it would refuse every connection;
+#  (ii) the WHY must be written down in the shipped lib (a comment naming verify-full and
+#       the common-name/username tie), so the next maintainer reads the reason before
+#       "upgrading" the token. A comment-only mention is allowed; code is not.
+for f in "$LIB" "$TMP/inline-lib-harden.sh"; do
+  grep -vE '^[[:space:]]*#' "$f" | grep -q 'verify-full' \
+    && fail "$f: an executable line uses clientcert=verify-full — verify-full ALSO requires the client certificate's CN to equal the connecting username (no map=/pg_ident.conf here). The gateway holds ONE shared leaf (CN = a service name) and connects as app_<app>, so every gateway→compute connection would be refused on a common-name mismatch as soon as the harden reloads pg_hba: a wake-triggered per-app outage. Use verify-ca (CA-verified client identity) + scram-sha-256 (user identity)."
+  grep -qE '^[[:space:]]*#.*verify-full' "$f" \
+    || fail "$f: the WHY-not-verify-full rationale comment is gone — without it the next maintainer reads verify-ca as a weaker verify-full and 'upgrades' it back into a total data-plane outage"
+  grep -qiE '^[[:space:]]*#.*(common name|CN)' "$f" \
+    || fail "$f: the rationale comment must name the actual mechanism (verify-full ties the certificate's common name to the connecting username), not just the conclusion"
+done
+ok "verify-ca taxonomy pinned in both copies: no executable verify-full, and the CN-equals-username rationale is documented in the shipped lib"
 
 # --- representative compute_ctl initdb pg_hba.conf ----------------------------
 cat > "$TMP/pg_hba.conf" <<'HBA'
@@ -137,9 +173,9 @@ $(cat "$TMP/out1")"
 [ "$(printf '%s\n' "$CATCHALL" | grep -c .)" = "1" ] \
   || fail "expected exactly ONE hostssl catch-all, got:
 $CATCHALL"
-printf '%s\n' "$CATCHALL" | awk '$5=="scram-sha-256" && $6=="clientcert=verify-full" {found=1} END{exit !found}' \
-  || fail "the hostssl catch-all must be method scram-sha-256 with clientcert=verify-full AFTER the method (pg_hba puts auth-options after the method field); got: $CATCHALL"
-ok "enforced: catch-all is 'hostssl all all all scram-sha-256 clientcert=verify-full' (TLS + CA-verified client cert required)"
+printf '%s\n' "$CATCHALL" | awk '$5=="scram-sha-256" && $6=="clientcert=verify-ca" {found=1} END{exit !found}' \
+  || fail "the hostssl catch-all must be method scram-sha-256 with clientcert=verify-ca AFTER the method (pg_hba puts auth-options after the method field); got: $CATCHALL"
+ok "enforced: catch-all is 'hostssl all all all scram-sha-256 clientcert=verify-ca' (TLS + CA-verified client cert required)"
 
 # (2) the cloud_admin reject stays BROAD host, and precedes the catch-all.
 cloud_admin_reject_is_broad "$TMP/out1"
@@ -173,5 +209,33 @@ $(cat "$TMP/out3")"
 cloud_admin_reject_is_broad "$TMP/out3"
 loopback_and_local_unchanged "$TMP/out3"
 ok "fallback (compute not serving TLS): no hostssl line, #117 scram catch-all and #112 reject intact, loopback unchanged"
+
+# fallback idempotency — the branch that CAN duplicate. In enforced mode the catch-all
+# becomes `hostssl …`, so a second pass no longer matches $1=="host" and the reject
+# insert cannot fire again. In fallback mode the catch-all STAYS `host all all all …`,
+# so a second pass re-matches it and would append ANOTHER cloud_admin reject on every
+# run — unbounded growth of pg_hba on a compute that hardens repeatedly. First-match
+# makes the duplicates inert, but a rules file that grows every pass is a defect, and
+# pg_hba_file_rules/drills read it. The insert must therefore be guarded on a reject
+# already being present (it always precedes the catch-all, so one pass can see it).
+run_harden "$TMP/out3" "$FALLBACK" > "$TMP/out4" || fail "harden awk errored on its own fallback output"
+diff -u "$TMP/out3" "$TMP/out4" >/dev/null \
+  || fail "the fallback-branch harden is NOT idempotent — a second pass changed the file:
+$(diff -u "$TMP/out3" "$TMP/out4")"
+N_REJ="$(awk '$3=="cloud_admin" && $5=="reject"' "$TMP/out4" | grep -c .)"
+[ "$N_REJ" = "1" ] \
+  || fail "expected EXACTLY ONE cloud_admin reject after two fallback passes, got $N_REJ:
+$(cat "$TMP/out4")"
+N_CA="$(awk '$1=="host" && $2=="all" && $3=="all" && $4=="all" && $5=="scram-sha-256"' "$TMP/out4" | grep -c .)"
+[ "$N_CA" = "1" ] \
+  || fail "expected EXACTLY ONE fallback catch-all after two passes, got $N_CA:
+$(cat "$TMP/out4")"
+cloud_admin_reject_is_broad "$TMP/out4"
+# a THIRD pass too — a guard that merely caps the growth at two is not idempotency.
+run_harden "$TMP/out4" "$FALLBACK" > "$TMP/out5" || fail "harden awk errored on the third fallback pass"
+diff -u "$TMP/out4" "$TMP/out5" >/dev/null \
+  || fail "the fallback harden changed the file on a THIRD pass:
+$(diff -u "$TMP/out4" "$TMP/out5")"
+ok "fallback: harden is idempotent across repeated passes (exactly one cloud_admin reject, one scram catch-all, ordering preserved)"
 
 echo "test_harden_pghba.sh: $pass checks passed"

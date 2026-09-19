@@ -861,7 +861,7 @@ ok "AppDatabase warmSchedule CRD field shipped; warm = held connection (no deplo
 #       * a compute-server leaf (serverAuth) whose SANs cover the compute Service
 #         DNS the gateway will verify as ServerName,
 #       * a gateway-client leaf (clientAuth) — the identity phase-4
-#         clientcert=verify-full enforces,
+#         clientcert=verify-ca enforces,
 #       * both leaves issue from the ONE CA Issuer (shared trust root).
 #     Phase 1 is manifests+docs only: NO Go code consumes these yet.
 CM=11-mtls-certs.yaml
@@ -916,7 +916,7 @@ ok "F5 phase-1 mTLS cert infrastructure ships (cert-manager CA + shared server/c
 #     ("private key file has group or world access"). A path mismatch between a
 #     GUC and its mount = silent no-TLS or a crash-loop, so the paths are asserted
 #     to MATCH. pg_hba is not touched by THIS contract — the enforcement half
-#     (hostssl + clientcert=verify-full) is contract 36 below; this one covers the
+#     (hostssl + clientcert=verify-ca) is contract 36 below; this one covers the
 #     OFFER half (serve TLS, be able to verify a client cert via ssl_ca_file), which
 #     stays independently safe: a compute with no cert mounts boots plaintext rather
 #     than crash-looping.
@@ -1070,7 +1070,7 @@ ok "F5 phase-3 gateway requires TLS on the backend leg (GW_COMPUTE_TLS=true + CA
 # 36. contract (F5 phase 4, ADR-0003): the compute ENFORCES client-cert mTLS in
 #     pg_hba. The phase-2 GUCs only make the compute OFFER TLS and make it ABLE to
 #     verify a client cert (ssl_ca_file); ENFORCEMENT is the harden's rewrite of the
-#     pg_hba NETWORK catch-all to `hostssl … scram-sha-256 clientcert=verify-full`
+#     pg_hba NETWORK catch-all to `hostssl … scram-sha-256 clientcert=verify-ca`
 #     — TLS required AND a CA-verified client certificate, with the auth-option AFTER
 #     the method field (pg_hba puts options after the method; before it is a parse
 #     error). Three things must NOT move with it:
@@ -1087,9 +1087,19 @@ ok "F5 phase-3 gateway requires TLS on the backend leg (GW_COMPUTE_TLS=true + CA
 #           config kept, so an ungated rewrite would silently throw away the #112
 #           cloud_admin reject and the #117 SCRAM catch-all on any cert-less compute
 #           (the phase-2 plaintext fallback). That branch must keep existing.
+#       (d) the option is `clientcert=verify-ca`, NEVER `verify-full`. verify-full
+#           additionally requires the client certificate's COMMON NAME to equal the
+#           connecting username (absent a map=/pg_ident.conf, which this deployment does
+#           not have). The gateway holds ONE shared client leaf whose CN is a service
+#           name and connects as app_<app>, so verify-full would refuse EVERY
+#           gateway→compute connection the moment the harden reloads pg_hba on a wake —
+#           a wake-triggered per-app outage. verify-ca is the intended split: the
+#           certificate proves CA-issued identity, SCRAM authenticates the user.
 for f in compute-files/lib-harden.sh 54-compute-files.yaml; do
-  grep -qF "_catchall='hostssl\\tall\\tall\\tall\\tscram-sha-256\\tclientcert=verify-full'" "$f" \
-    || fail "$f: the pg_hba network catch-all must become 'hostssl all all all scram-sha-256 clientcert=verify-full' (F5 phase 4 — TLS + a CA-verified client cert REQUIRED on the gateway→compute hop)"
+  grep -vE '^[[:space:]]*#' "$f" | grep -q 'verify-full' \
+    && fail "$f: an EXECUTABLE line uses clientcert=verify-full — it ties the certificate CN to the connecting username, and the gateway's shared leaf CN is a service name while it connects as app_<app>, so every connection would be refused on a common-name mismatch. Use verify-ca — see (d) above" || true
+  grep -qF "_catchall='hostssl\\tall\\tall\\tall\\tscram-sha-256\\tclientcert=verify-ca'" "$f" \
+    || fail "$f: the pg_hba network catch-all must become 'hostssl all all all scram-sha-256 clientcert=verify-ca' (F5 phase 4 — TLS + a CA-verified client cert REQUIRED on the gateway→compute hop)"
   grep -qF "_catchall='host\\tall\\tall\\tall\\tscram-sha-256'" "$f" \
     || fail "$f: the not-serving-TLS fallback catch-all ('host all all all scram-sha-256') is gone — a cert-less compute would get a hostssl line, whose parse error discards the ENTIRE pg_hba reload, taking the #112 cloud_admin reject and #117 SCRAM enforcement with it"
   grep -qF 'SHOW ssl' "$f" \
@@ -1113,7 +1123,30 @@ if command -v bash >/dev/null 2>&1; then
 else
   echo "  (no bash on PATH — skipped the test_harden_pghba.sh runtime transform proof; the source contracts above still ran)"
 fi
-ok "F5 phase-4 compute ENFORCES mTLS in pg_hba (hostssl catch-all + clientcert=verify-full + scram-sha-256, gated on SHOW ssl; cloud_admin reject stays broad host; loopback trust untouched) — ADR-0003"
+ok "F5 phase-4 compute ENFORCES mTLS in pg_hba (hostssl catch-all + clientcert=verify-ca + scram-sha-256, gated on SHOW ssl; cloud_admin reject stays broad host; loopback trust untouched) — ADR-0003"
+
+# ---------------------------------------------------------------------------
+# 37. contract (F5 phase 4 drill honesty, ADR-0003): _verify-tls.sh may not claim
+#     "mTLS enforced" for a run that never dialled through the gateway. Its section-4
+#     leg (b) — a query through pggw-apps — is the ONLY positive gateway-path
+#     assertion; legs (a) (a no-client-cert dial is refused) and (c) (the loopback
+#     admin path still works) pass unchanged even when the enforced rule rejects the
+#     GATEWAY too, which is exactly what a CN-tying clientcert option does. So:
+#       (a) when section 4 runs, leg (b) is MANDATORY — a missing app-db-<app> Secret
+#           or missing pggw-apps must FAIL the drill, never print a per-leg "skipped"
+#           note and carry on;
+#       (b) the closing summary must report what ACTUALLY ran (the $MTLS_CLAIM the
+#           section sets), never an unconditional hardcoded enforcement claim.
+_vt=_verify-tls.sh
+grep -q 'MTLS_CLAIM=' "$_vt" \
+  || fail "$_vt must record what section 4 actually proved in \$MTLS_CLAIM and print THAT — an unconditional 'mTLS enforced' closing line reports success for a run whose gateway leg never executed"
+grep -q 'wake-over-TLS passed, \$MTLS_CLAIM' "$_vt" \
+  || fail "$_vt: the closing summary must interpolate \$MTLS_CLAIM instead of hardcoding the enforcement claim (a skipped section-4 would otherwise still print 'mTLS enforced')"
+grep -qiE 'skipped the gateway-identity leg' "$_vt" \
+  && fail "$_vt: the gateway-identity leg (b) is being SKIPPED with a note — it is the only positive gateway-path assertion in the drill and must FAIL when its prerequisites (app-db-<app> Secret, pggw-apps) are missing" || true
+awk '/TLS_MTLS_APP:-/ {s=1} s && /the gateway-identity leg CANNOT run/ {n++} END{exit !(n>=2)}' "$_vt" \
+  || fail "$_vt: section 4 must FAIL (not skip) on a missing app-db-<app> Secret AND on a missing pggw-apps deployment — both are prerequisites of the mandatory gateway-identity leg"
+ok "F5 phase-4 drill honesty: _verify-tls.sh leg (b) is mandatory when section 4 runs, and the closing line reports what actually ran (\$MTLS_CLAIM) — ADR-0003"
 
 # ---------------------------------------------------------------------------
 # Summary (#797): every contract above has been EVALUATED — nothing exits early.
