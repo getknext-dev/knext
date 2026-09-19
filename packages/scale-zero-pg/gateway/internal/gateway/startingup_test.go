@@ -51,6 +51,7 @@ func TestWakeRetriesWhileDatabaseStartingUp(t *testing.T) {
 	}()
 
 	gw, err := New(map[string]string{
+		"GW_COMPUTE_TLS":        "false", // fake backends speak PLAINTEXT Postgres (F5 phase-3 backend TLS is covered in internal/wake + New's wiring test)
 		"GW_COMPUTE_MODE":       "static",
 		"GW_TARGET":             backend.Addr().String(),
 		"GW_CONNECT_TIMEOUT_MS": "200",

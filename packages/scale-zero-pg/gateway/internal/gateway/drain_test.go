@@ -25,6 +25,7 @@ func newDrainGateway(t *testing.T) (*Gateway, string, *fakeCompute) {
 	t.Cleanup(fc.stop)
 
 	env := wake.Env{
+		"GW_COMPUTE_TLS":        "false", // fake backends speak PLAINTEXT Postgres (F5 phase-3 backend TLS is covered in internal/wake + New's wiring test)
 		"GW_COMPUTE_MODE":       "static",
 		"GW_TARGET":             fmt.Sprintf("127.0.0.1:%d", fc.port),
 		"GW_WAKE_TIMEOUT_MS":    "5000",
@@ -129,6 +130,7 @@ func startSlowAuthCompute(t *testing.T, delay time.Duration) *slowAuthCompute {
 func newDrainGatewayTo(t *testing.T, target string) (*Gateway, string) {
 	t.Helper()
 	env := wake.Env{
+		"GW_COMPUTE_TLS":        "false", // fake backends speak PLAINTEXT Postgres (F5 phase-3 backend TLS is covered in internal/wake + New's wiring test)
 		"GW_COMPUTE_MODE":       "static",
 		"GW_TARGET":             target,
 		"GW_WAKE_TIMEOUT_MS":    "5000",

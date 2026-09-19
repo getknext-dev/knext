@@ -126,6 +126,7 @@ func TestIdleCallerPostponesSleepOnPeer401(t *testing.T) {
 	port, _ := strconv.Atoi(portStr)
 
 	env := wake.Env{
+		"GW_COMPUTE_TLS":  "false", // fake backends speak PLAINTEXT Postgres (F5 phase-3 backend TLS is covered in internal/wake + New's wiring test)
 		"GW_COMPUTE_MODE": "exec",
 		"GW_TARGET":       "127.0.0.1:1",
 		"GW_WAKE_CMD":     "true",

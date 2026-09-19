@@ -249,7 +249,8 @@ func TestStatusProbe_ProbeDeadline_CapsToTimeoutButNeverExceedsWake(t *testing.T
 func TestGateColdWake_FiresOnlyOnColdWakePerAppFrontDoor(t *testing.T) {
 	s := newStatusServer(t, alwaysInit) // never ready — would hold to deadline if wrongly fired
 	// base single-DB path (no systemAuthorizer).
-	base, err := New(wake.Env{"GW_COMPUTE_MODE": "static", "GW_TARGET": "127.0.0.1:1"}, func(string) {})
+	base, err := New(wake.Env{"GW_COMPUTE_TLS": "false", // fake backends speak PLAINTEXT Postgres (F5 phase-3 backend TLS is covered in internal/wake + New's wiring test)
+		"GW_COMPUTE_MODE": "static", "GW_TARGET": "127.0.0.1:1"}, func(string) {})
 	if err != nil {
 		t.Fatal(err)
 	}

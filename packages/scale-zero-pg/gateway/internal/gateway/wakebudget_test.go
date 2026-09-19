@@ -40,6 +40,7 @@ func (s *countingScaler) count() int { s.mu.Lock(); defer s.mu.Unlock(); return 
 func TestWakeBudgetCapsChurnAndRefusesCleanly(t *testing.T) {
 	scaler := &countingScaler{}
 	drv, err := wake.MakeDriverWithScaler(wake.Env{
+		"GW_COMPUTE_TLS":             "false", // fake backends speak PLAINTEXT Postgres (F5 phase-3 backend TLS is covered in internal/wake + New's wiring test)
 		"GW_COMPUTE_MODE":            "template",
 		"GW_K8S_DEPLOYMENT_TEMPLATE": "compute-{system}",
 		// Point every app at a black-hole target so TryConnect always fails fast and
@@ -114,6 +115,7 @@ func TestWakeBudgetCapsChurnAndRefusesCleanly(t *testing.T) {
 func TestWakeBudgetPerAppIsolationEndToEnd(t *testing.T) {
 	scaler := &countingScaler{}
 	drv, err := wake.MakeDriverWithScaler(wake.Env{
+		"GW_COMPUTE_TLS":             "false", // fake backends speak PLAINTEXT Postgres (F5 phase-3 backend TLS is covered in internal/wake + New's wiring test)
 		"GW_COMPUTE_MODE":            "template",
 		"GW_K8S_DEPLOYMENT_TEMPLATE": "compute-{system}",
 		"GW_TARGET_TEMPLATE":         "203.0.113.1:55433",

@@ -115,7 +115,8 @@ func TestSettleColdWake_FiresOnlyOnColdWakePerAppFrontDoor(t *testing.T) {
 
 	// Base single-DB path (no systemAuthorizer) MUST NOT hold, even on a cold wake:
 	// cloud_admin's password is not a per-app role compute_ctl re-applies here.
-	base, err := New(wake.Env{"GW_COMPUTE_MODE": "static", "GW_TARGET": "127.0.0.1:1"}, func(string) {})
+	base, err := New(wake.Env{"GW_COMPUTE_TLS": "false", // fake backends speak PLAINTEXT Postgres (F5 phase-3 backend TLS is covered in internal/wake + New's wiring test)
+		"GW_COMPUTE_MODE": "static", "GW_TARGET": "127.0.0.1:1"}, func(string) {})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -253,6 +253,13 @@ func New(env wake.Env, log func(string)) (*Gateway, error) {
 	if err != nil {
 		return nil, err
 	}
+	// F5 phase 3 (ADR-0003): the BACKEND leg (gateway->compute). Default ON —
+	// GW_COMPUTE_TLS=false is the plaintext dev opt-out. Half-configured fails
+	// fast here, exactly like the front-door loadTLS above.
+	backendTLS, err := wake.NewBackendTLSFromEnv(env)
+	if err != nil {
+		return nil, err
+	}
 	g := &Gateway{
 		driver:  driver,
 		metrics: metrics.NewMetrics(),
@@ -266,6 +273,10 @@ func New(env wake.Env, log func(string)) (*Gateway, error) {
 			// the wake deadline (GW_WAKE_TIMEOUT_MS) is the hard ceiling regardless.
 			WakeRetryBaseMs: envInt(env, "GW_WAKE_RETRY_BASE_MS", 200),
 			WakeMaxAttempts: envInt(env, "GW_WAKE_MAX_ATTEMPTS", 8),
+			// Every backend dial (warm fast path AND cold-wake poll) is a TLS
+			// client dial when this is non-nil — the wrap lives inside
+			// TryConnect, so a handshake failure is retried by the wake loop.
+			BackendTLS: backendTLS,
 		},
 		idleMs:            envInt(env, "GW_IDLE_MS", 300000),
 		floorMs:           envInt(env, "GW_AUTH_FAIL_FLOOR_MS", 250),
@@ -792,6 +803,26 @@ func (g *Gateway) proxy(client net.Conn, startupPacket, pendingRest []byte, targ
 			g.wakeBudgetRefused(client, start)
 			return false
 		}
+		// Backend TLS leg (F5 phase 3). Two classes, both metered on the SAME
+		// distinct counter and both still counted as a wake failure (the connection
+		// really did fail, so existing alerting must not go blind) — the point is
+		// DISCRIMINATION: "this compute does not speak TLS yet" / "our own cert
+		// material is unusable" must not read as a generic cold-start timeout while
+		// a fleet is mid-rollout.
+		if errors.Is(err, wake.ErrBackendTLSConfig) {
+			g.metrics.BackendTLSFailure(target.Key)
+			g.metrics.WakeFailure()
+			g.log("[gw] " + target.Key + ": backend TLS MISCONFIGURED (no wake attempted — a local cert/CA problem, not a sleeping compute): " + err.Error())
+			g.computeUnavailable(client, params, start, err)
+			return false
+		}
+		if errors.Is(err, wake.ErrBackendTLSUnavailable) {
+			g.metrics.BackendTLSFailure(target.Key)
+			g.metrics.WakeFailure()
+			g.log("[gw] " + target.Key + ": backend TLS UNAVAILABLE (the compute is not serving TLS yet; refusing to fall back to plaintext): " + err.Error())
+			g.computeUnavailable(client, params, start, err)
+			return false
+		}
 		g.metrics.WakeFailure()
 		g.log("[gw] " + target.Key + ": " + err.Error())
 		g.computeUnavailable(client, params, start, err)
@@ -811,9 +842,9 @@ func (g *Gateway) proxy(client net.Conn, startupPacket, pendingRest []byte, targ
 	// time-settle. No-op on warm connects and the base single-DB path.
 	g.gateColdWake(woke, target, start)
 
-	if tcp, ok := conn.(*net.TCPConn); ok {
-		_ = tcp.SetNoDelay(true)
-	}
+	// (No SetNoDelay here: TryConnectTLS tunes the RAW socket before any TLS wrap,
+	// on both the TLS and the plaintext path. Retrying it on the returned conn was
+	// dead code under TLS — a *tls.Conn never satisfies a *net.TCPConn assert.)
 
 	// Readiness handshake: a freshly started Postgres accepts TCP before it
 	// can serve and FATALs the startup with 57P03 ("the database system is
@@ -926,9 +957,8 @@ func (g *Gateway) handshakeUntilReady(ctx context.Context, reg *connReg, conn ne
 			_ = conn.Close()
 			return nil, nil, ctx.Err()
 		}
-		if tcp, ok := conn.(*net.TCPConn); ok {
-			_ = tcp.SetNoDelay(true)
-		}
+		// Same as in proxy(): the raw socket was already tuned inside TryConnectTLS,
+		// before the TLS wrap.
 	}
 }
 

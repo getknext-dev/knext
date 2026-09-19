@@ -68,6 +68,7 @@ func TestReplicationWakeResolvesPublisherCompute(t *testing.T) {
 // slept, or unsubscribed). This is the core ADR-0007 §4c idle-logic extension.
 func TestReplicationConnectionHoldsPublisherAwake(t *testing.T) {
 	gw, err := New(wake.Env{
+		"GW_COMPUTE_TLS":  "false", // fake backends speak PLAINTEXT Postgres (F5 phase-3 backend TLS is covered in internal/wake + New's wiring test)
 		"GW_COMPUTE_MODE": "exec",
 		"GW_TARGET":       "127.0.0.1:1",
 		"GW_WAKE_CMD":     "true",
@@ -150,6 +151,7 @@ func TestE2EReplicationWakeHoldAndSleep(t *testing.T) {
 	defer close(stopPoller)
 
 	env := wake.Env{
+		"GW_COMPUTE_TLS":        "false", // fake backends speak PLAINTEXT Postgres (F5 phase-3 backend TLS is covered in internal/wake + New's wiring test)
 		"GW_COMPUTE_MODE":       "exec",
 		"GW_TARGET":             fmt.Sprintf("127.0.0.1:%d", fc.port),
 		"GW_WAKE_CMD":           "touch " + flag,

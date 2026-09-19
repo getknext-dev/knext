@@ -35,6 +35,10 @@ behavior, and troubleshooting.
 | `GW_STATUS_TIMEOUT_MS` | 0 (full wake budget) | cap on the deterministic poll before falling back to the bounded settle; `0` = use the whole `GW_WAKE_TIMEOUT_MS`. Set smaller (e.g. `2000`) so a misconfigured/unreachable `/status` degrades to the settle quickly. Never extends past `GW_WAKE_TIMEOUT_MS`. |
 | `GW_POD_NAMESPACE` / `GW_POD_IP` | — | downward API; self-exclusion for the peer check |
 | `GW_TLS_CERT_FILE` / `GW_TLS_KEY_FILE` | — | front-door TLS keypair (PEM paths). Both set + loadable → gateway answers `SSLRequest` with `S` and wraps the wire (TLS 1.2+). Set-but-unloadable or half-set → gateway **fails fast at startup**. Unset → `SSLRequest` gets `N` (plaintext only). Deployed: mounted from Secret `pggw-tls` at `/etc/pggw-tls/`. |
+| `GW_COMPUTE_TLS` | `true` | TLS on the **gateway→compute** dial: send `SSLRequest`, require `S`, verify the compute cert against the CA and present the gateway client cert. `false` = plaintext dial (dev/kind, no cert-manager). See "Gateway→compute mTLS" below — **roll it out only after every compute serves TLS**. |
+| `GW_COMPUTE_CA_FILE` | `/etc/pggw-mtls-ca/ca.crt` | CA that verifies the compute server certificate |
+| `GW_COMPUTE_CLIENT_CERT_FILE` / `GW_COMPUTE_CLIENT_KEY_FILE` | `/etc/pggw-client-tls/tls.crt` / `.key` | the gateway's client certificate + key, re-read on every handshake (rotation without restart) |
+| `GW_COMPUTE_SERVER_NAME` | the dialled compute Service DNS | override for the name verified against the compute certificate's SANs (keep it **unrooted**) |
 | `GW_APP_ROLE_PREFIX` / `GW_REPL_ROLE_PREFIX` | `app_` / `repl_` | `template` mode: the per-app auth role (`app_<db>`, ordinary tenant traffic) and per-zone REPLICATION role (`repl_<db>`, walreceiver) prefixes. **They MUST differ** — equal prefixes merge the two roles into one name so a replication credential could satisfy an ordinary connection (and vice versa), collapsing app/repl separation. An equal-prefix misconfig **fails fast at startup** (mirrors the TLS half-config guard). Defaults are safe. |
 
 Every `GW_*` var passes through verbatim — there is deliberately no whitelist.
@@ -1428,14 +1432,12 @@ or your org CA); swap the Secret contents and clients can then verify.
 `deploy/10-gateway.yaml` and restart. `SSLRequest` then gets `N` again and only
 `sslmode=disable` clients connect.
 
-### Gateway→compute mTLS — cert-manager prerequisite (compute now offers TLS; gateway leg still plaintext)
+### Gateway→compute mTLS — cert-manager prerequisite (compute offers TLS; the gateway now requires it)
 
 The section above is the **front-door** (client→gateway) TLS. The **gateway→compute**
-hop is a separate leg and is still **plaintext today** — SCRAM material and query
-traffic cross the pod network in cleartext, isolated only by the (CNI-conditional)
-default NetworkPolicy. Closing that leg with mutual TLS is rolled out in phases; the
-first phase provisions the certificate infrastructure ahead of the wiring, so it is a
-**prerequisite you can apply now** even though nothing consumes it yet.
+hop is a separate leg, closed with mutual TLS in phases. The certificate
+infrastructure is provisioned first, so it is a **prerequisite you must apply**
+before the gateway that requires TLS rolls out.
 
 **Prerequisite: cert-manager.** `deploy/11-mtls-certs.yaml` provisions, via
 cert-manager, a self-signed Issuer → a CA `Certificate` → a CA `Issuer` → two shared
@@ -1468,17 +1470,69 @@ without cert-manager keeps booting plaintext (the cert mounts are `optional`). T
 is **OFFER, not require** — `pg_hba` is unchanged (`host … scram`), so existing
 plaintext connections keep working and phase 2 is independently safe.
 
-**The gateway→compute hop is still plaintext end-to-end.** The gateway is not yet a
-TLS client (that is the next phase), so even though the compute can serve TLS, the
-always-on gateway still dials it in cleartext — the hop is plaintext until that phase
-lands. **Keep the plaintext-hop caveat** on any encryption/isolation claim for the
-gateway→compute leg (see "Network isolation caveat" below) until then.
+**The gateway is now the TLS client on that hop (rollout phase 3).** Every backend
+dial — the warm fast path and the cold-wake poll alike — sends the Postgres
+`SSLRequest`, requires an `S`, verifies the compute's server certificate against the
+shared CA, and presents the gateway's own client certificate. Knobs (both gateway
+manifests ship them):
+
+| Env var | Default | Meaning |
+| --- | --- | --- |
+| `GW_COMPUTE_TLS` | `true` | TLS on the gateway→compute dial. `false` = plaintext dial (dev/kind clusters with no cert-manager). |
+| `GW_COMPUTE_CA_FILE` | `/etc/pggw-mtls-ca/ca.crt` | CA that verifies the compute server certificate. |
+| `GW_COMPUTE_CLIENT_CERT_FILE` | `/etc/pggw-client-tls/tls.crt` | The gateway's client certificate. |
+| `GW_COMPUTE_CLIENT_KEY_FILE` | `/etc/pggw-client-tls/tls.key` | Its private key. |
+| `GW_COMPUTE_SERVER_NAME` | the dialled compute Service DNS | Override for the name verified against the certificate's SANs. Leave it **unrooted** (no trailing dot). |
+
+**Fail-closed, never downgraded.** A compute that answers `N` to `SSLRequest` — a pod
+that predates the compute-serves-TLS rollout, or a cluster with no certificates — is
+**refused with a clear error**; the gateway never falls back to a plaintext session.
+The refusal is *retryable*: it surfaces inside the existing wake retry loop, so a
+compute that is still mounting its certificate mid-boot is retried rather than failed.
+The client certificate is re-read on **every** handshake, so a cert-manager rotation
+of the mounted Secret needs no gateway restart.
+
+**Rollout order (mandatory).** Because the gateway now requires TLS, **100% of the
+compute fleet must already serve it** before this gateway image rolls out. The compute
+Deployments use the `Recreate` strategy and scale 0↔N, so a compute that was *already
+awake* before the compute-side rollout keeps serving plaintext until it is recreated.
+Drain/recreate every live compute (scale the awake ones to 0 and let them respawn, or
+wait a full idle cycle) and verify no older compute pod remains (`kubectl get pods`
+age vs. the compute rollout time) **before** rolling the gateway. On a cluster where
+that is not yet true — or on a dev/kind cluster with no cert-manager — set
+`GW_COMPUTE_TLS=false` explicitly.
+
+**Missing certificates fail at STARTUP, not per connection.** The certificate mounts
+are `optional`, so a certless cluster still *schedules* the pod — but with
+`GW_COMPUTE_TLS=true` the gateway now **loads and validates the CA and its client
+keypair at boot** and exits non-zero if either is unreadable. The pod therefore
+crash-loops with a message naming the offending file instead of reporting Ready and
+failing 100% of connections. (The boot load is validation only: the CA is still
+re-read per dial and the client certificate per handshake, so cert-manager rotation
+still needs no restart.)
+
+**Telling a TLS problem apart from a sleeping compute.** Failures on this hop are
+counted separately from ordinary cold-start failures:
+`pggw_backend_tls_failures_total` (fleet) and
+`pggw_system_backend_tls_failures_total{system="…"}` (per app) rise when a compute
+refuses TLS, the handshake fails, or the gateway's own certificate material is
+unusable. A rising backend-TLS count against a flat wake-latency picture means the
+computes are healthy and the TLS leg is not — typically a straggler pod that predates
+the compute-side rollout. A gateway-side certificate problem is refused
+**immediately**: it never consumes a wake budget token, never issues a scale-up, and
+never waits out `GW_WAKE_TIMEOUT_MS`, because no amount of waking can fix a
+certificate file the gateway cannot read.
 
 **Live verification (lead-owned).** `deploy/_verify-tls.sh` proves the *front-door*
-(client↔gateway) TLS; the compute's new `sslmode=require` acceptance is proven on the
-OKE/kind cluster (a direct in-cluster `sslmode=require` psql to the compute Service,
-confirming an encrypted session) — it cannot run from a workstation without the
-cluster.
+(client↔gateway) TLS; the compute's `sslmode=require` acceptance and the encrypted
+gateway→compute hop are proven on the OKE/kind cluster (a direct in-cluster
+`sslmode=require` psql to the compute Service, plus a wake through the gateway with
+`GW_COMPUTE_TLS=true`) — they cannot run from a workstation without the cluster.
+
+**Remaining caveat.** The compute still *accepts* plaintext (`pg_hba` is unchanged),
+so this phase encrypts the hop and authenticates the compute to the gateway, but the
+compute does not yet *require* the gateway's client certificate. Keep that caveat on
+any "mutually authenticated" claim until the `pg_hba` enforcement phase lands.
 
 ## Peer-scrape token rotation
 

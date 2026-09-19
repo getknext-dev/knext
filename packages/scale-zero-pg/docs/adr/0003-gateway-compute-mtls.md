@@ -187,12 +187,38 @@ Recorded now so the later PRs implement them, from both gates:
       booting plaintext (`optional` mounts + GUC strip). `_validate.sh` contract 34
       guards GUC↔mount path parity, the key perms, and that pg_hba is untouched. The
       live `sslmode=require` proof is lead-owned OKE/kind verification.
-- [ ] **Phase 2→3 GATE:** drain/recreate every live pre-phase-2 compute (or wait a
-      full idle cycle) so 100% of the fleet serves TLS before any gateway flips.
-- [ ] **Phase 3:** gateway wraps the backend dial in `tls.Client`
+- [ ] **Phase 2→3 GATE (OPERATIONAL, still open):** drain/recreate every live
+      pre-phase-2 compute (or wait a full idle cycle) so 100% of the fleet serves TLS
+      before any gateway flips. **The phase-3 CODE default has flipped to
+      `GW_COMPUTE_TLS=true`; the ROLLOUT has not.** Shipping the secure value as the
+      default is fail-closed by construction (a manifest that forgets the knob is
+      encrypted, not plaintext) — it does NOT license rolling the new gateway image
+      onto a fleet that still has pre-phase-2 computes awake. Before rolling: scale
+      every awake compute to 0 (or wait a full idle cycle) so it respawns with the
+      phase-2 TLS config under the `Recreate` strategy, then verify no compute pod
+      predates the phase-2 rollout (`kubectl get pods` age vs. that rollout time). A
+      compute that predates it answers `'N'` and is REFUSED — that is the control
+      working, and `GW_COMPUTE_TLS=false` is the documented dev/rollback safety valve.
+- [x] **Phase 3:** gateway wraps the backend dial in `tls.Client`
       (`GW_COMPUTE_TLS=true` fail-closed default); `GetClientCertificate`; full
       backend `tls.Config` (MinVersion/RootCAs/ServerName/Certificates); fail-closed
       on `'N'` (mutation-proved); handshake retry verified inside `TryConnect`.
+      **Shipped:** `internal/wake/backendtls.go` — `TryConnectTLS` dials, sets
+      `TCP_NODELAY` on the RAW socket *before* the wrap, sends `proto.BuildSSLRequest()`,
+      and on `'S'` runs the `tls.Client` handshake; `TryConnect` is now the plaintext
+      wrapper over it and `ConnectWithWake` passes `Opts.BackendTLS` on BOTH legs (warm
+      fast path + cold-wake poll), so a handshake failure is retried by the existing
+      wake loop rather than being fatal. Distinct sentinels keep the classes apart
+      (`ErrBackendTLSUnavailable` vs `ErrBackendDialFailed`). The client keypair is
+      read inside `GetClientCertificate` (per handshake, rotation-safe), the CA per
+      dial; `ServerName` defaults to the dialled compute Service DNS and stays
+      UNROOTED (crypto/x509 trims a trailing dot from the candidate name, so an
+      unrooted SAN matches a rooted dial host). Both gateway manifests mount
+      `pggw-gateway-client-tls` + `pggw-mtls-ca` (ca.crt only — the CA private key
+      never reaches a gateway pod) and carry the four env vars; `_validate.sh`
+      contract 35 guards env↔mount path parity and `GW_COMPUTE_TLS=true`. Tests:
+      `internal/wake/backendtls_test.go` + `internal/gateway/backendtls_wiring_test.go`.
+      The live proof (wake over TLS on OKE/kind) is lead-owned.
 - [ ] **Phase 4:** `lib-harden.sh` rewrites the network pg_hba catch-all to `hostssl …
       clientcert=verify-full` (loopback `cloud_admin` plaintext kept above); test +
       document the async cold-wake enforcement window. On merge: mark ADR-0001 F5

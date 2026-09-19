@@ -118,10 +118,28 @@ spec:
               value: "/etc/pggw-tls/tls.crt" # both set+loadable -> TLS on the wire
             - name: GW_TLS_KEY_FILE # sslmode=require works; sslmode=disable still allowed
               value: "/etc/pggw-tls/tls.key" # generate the Secret via deploy/gen-tls.sh
+            # F5 phase 3 (ADR-0003): the BACKEND leg (gateway->compute) is TLS. The
+            # gateway sends SSLRequest, verifies the compute server cert against the
+            # shared CA, and presents its client leaf (re-read every handshake, so a
+            # cert-manager rotation needs no restart). Default ON = fail-closed by
+            # construction: a compute that answers 'N' is REFUSED, never downgraded.
+            # Set GW_COMPUTE_TLS=false only on a certless dev/kind cluster.
+            # ROLLOUT GATE: 100% of the compute fleet must already serve TLS (phase 2,
+            # including pre-phase-2 pods that are still awake) before this rolls out.
+            - name: GW_COMPUTE_TLS
+              value: "true"
+            - name: GW_COMPUTE_CA_FILE
+              value: "/etc/pggw-mtls-ca/ca.crt"
+            - name: GW_COMPUTE_CLIENT_CERT_FILE
+              value: "/etc/pggw-client-tls/tls.crt"
+            - name: GW_COMPUTE_CLIENT_KEY_FILE
+              value: "/etc/pggw-client-tls/tls.key"
           volumeMounts:
             - name: pggw-tls
               mountPath: /etc/pggw-tls
               readOnly: true
+            - { name: pggw-client-tls, mountPath: /etc/pggw-client-tls, readOnly: true }
+            - { name: pggw-mtls-ca, mountPath: /etc/pggw-mtls-ca, readOnly: true }
           ports:
             - { name: pg, containerPort: 55432 }
             - { name: ro-pg, containerPort: 55434 } # read-only pool DSN (issue #66)
@@ -137,6 +155,20 @@ spec:
         - name: pggw-tls # self-signed keypair; create with deploy/gen-tls.sh
           secret:
             secretName: pggw-tls
+        # F5 phase 3 (ADR-0003): the phase-1 mTLS Secrets (11-mtls-certs.yaml).
+        # optional: a certless dev cluster still SCHEDULES — but with
+        # GW_COMPUTE_TLS=true every backend dial then fails CLOSED (no silent
+        # plaintext); such a cluster must set GW_COMPUTE_TLS=false explicitly.
+        - name: pggw-client-tls # the gateway's clientAuth leaf (auto-rotated by cert-manager)
+          secret:
+            secretName: pggw-gateway-client-tls
+            optional: true
+        - name: pggw-mtls-ca # project ca.crt ONLY — the CA private key must NOT reach gateway pods
+          secret:
+            secretName: pggw-mtls-ca
+            optional: true
+            items:
+              - { key: ca.crt, path: ca.crt }
 ---
 # Internal service: the stable in-cluster name every consumer uses —
 # knext apps (DATABASE_URL -> pggw.scale-zero-pg.svc.cluster.local.:55432), peer gateways and

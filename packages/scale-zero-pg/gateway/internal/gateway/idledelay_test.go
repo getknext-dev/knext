@@ -50,6 +50,7 @@ func (d *windowDriver) sleptKeys() []string {
 func newGatewayWithDriver(t *testing.T, idleMs string, d wake.Driver) *Gateway {
 	t.Helper()
 	gw, err := New(wake.Env{
+		"GW_COMPUTE_TLS":  "false", // fake backends speak PLAINTEXT Postgres (F5 phase-3 backend TLS is covered in internal/wake + New's wiring test)
 		"GW_COMPUTE_MODE": "exec",
 		"GW_TARGET":       "127.0.0.1:1",
 		"GW_WAKE_CMD":     "true",
