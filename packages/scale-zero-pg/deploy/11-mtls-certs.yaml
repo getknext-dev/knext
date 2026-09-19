@@ -7,7 +7,7 @@
 #
 #   phase 2 (compute serves TLS)  -> mounts pggw-compute-server-tls + the CA
 #   phase 3 (gateway requires TLS) -> mounts pggw-gateway-client-tls + the CA
-#   phase 4 (pg_hba clientcert=verify-full) -> compute verifies the client cert
+#   phase 4 (pg_hba clientcert=verify-ca) -> compute verifies the client cert
 #                                              against the shared CA
 #
 # See docs/adr/0003-*.md for the full design + the hard phase-2->3 ordering rule
@@ -120,10 +120,11 @@ spec:
     group: cert-manager.io
 ---
 # 5) Gateway client leaf (SHARED across the gateway fleet, per ADR-0003 D3).
-#    clientAuth. This is the identity `clientcert=verify-full` will verify on the
-#    compute in phase 4, so the CN is the client identity the compute's pg_hba
-#    will match. No dnsNames needed for a client cert; the CN carries the
-#    identity.
+#    clientAuth. In phase 4 the compute verifies this leaf's CHAIN against the
+#    shared CA (`clientcert=verify-ca`) — the CN is matched by nothing, so a
+#    single shared leaf serves every app role; SCRAM identifies which app user.
+#    (Do NOT switch to verify-full: it would require CN==DB-username, which one
+#    shared leaf cannot satisfy.) No dnsNames needed for a client cert.
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:

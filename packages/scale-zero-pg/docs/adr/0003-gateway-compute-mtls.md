@@ -8,7 +8,7 @@
   cert-manager CRs + Postgres TLS config, no new gateway cluster-write surface).
 - Amends: **ADR-0001 (scale-zero-pg)** — the **F5 clause moves from DEFERRED to
   CLOSING (phased, this ADR)**. F5 is **not** fully CLOSED until the phase-3/4 merge
-  lands (gateway requires TLS + compute enforces `clientcert=verify-full`); the
+  lands (gateway requires TLS + compute enforces `clientcert=verify-ca`); the
   ADR-0001 expiry text stays intact until then.
 
 ## Context
@@ -39,7 +39,7 @@ Close F5 with **in-protocol Postgres mTLS on the gateway→compute leg**:
   the Postgres `SSLRequest`, requires `'S'`, then `tls.Client(conn, cfg)` and
   proceeds with SCRAM + query proxying over the TLS conn.
 - The compute serves TLS (`ssl=on` + a server cert), and its `pg_hba.conf` tightens
-  to `hostssl … clientcert=verify-full` to **require + verify** the gateway's client
+  to `hostssl … clientcert=verify-ca` to **require + verify** the gateway's client
   cert (the mTLS enforcement).
 - Certificates come from **cert-manager**: a self-signed Issuer → a CA `Certificate`
   (`isCA: true`) → a CA `Issuer` → two **shared** role leaves (a compute-server cert,
@@ -72,7 +72,7 @@ wrong tool for the scale-to-zero compute leg.
 
 | Option | Pro | Con | Verdict |
 |--------|-----|-----|---------|
-| **A. In-protocol Postgres mTLS (this ADR)** — SSLRequest→`tls.Client` on the gateway; compute `ssl=on` + `hostssl clientcert=verify-full`; cert-manager CA + shared server/client leaves | Full `security.md` intent (encrypt + verify both ends); one TLS handshake on an existing dial, **no wake-path tax**; reuses cert-manager the platform already runs; auto-rotation across the 0↔N fleet | Real cert-distribution + proxy SSL-negotiation work; a strict phase ordering to avoid breaking live plaintext computes | **Chosen** |
+| **A. In-protocol Postgres mTLS (this ADR)** — SSLRequest→`tls.Client` on the gateway; compute `ssl=on` + `hostssl clientcert=verify-ca`; cert-manager CA + shared server/client leaves | Full `security.md` intent (encrypt + verify both ends); one TLS handshake on an existing dial, **no wake-path tax**; reuses cert-manager the platform already runs; auto-rotation across the 0↔N fleet | Real cert-distribution + proxy SSL-negotiation work; a strict phase ordering to avoid breaking live plaintext computes | **Chosen** |
 | B. Service-mesh mTLS (Istio/Linkerd) | Transparent to app code; org-standard mTLS; strong per-pod identity | A sidecar on every 0→1 wake **taxes the sub-second cold-start goal** (extra pod + mesh-join + its own TLS on the critical path); heavy new dependency for a pre-GA data layer | Rejected — wrong tool for the scale-to-zero leg (see above) |
 | C. One-way TLS (compute server cert; gateway `sslmode=require`, no CA/client verify) | Closes the *confidentiality* half cheaply (SCRAM + queries no longer cleartext) | Does NOT satisfy "no implicit trust" — any pod could impersonate the compute; the gateway verifies nothing; re-opens the argument at GA | Rejected — would re-owe the work |
 | D. Plaintext status quo (the dated exception) | Zero effort | The gap ADR-0001 dated; SCRAM material + queries cleartext on a CNI-conditionally-isolated network | The expiring exception — replaced by this ADR at GA |
@@ -94,11 +94,27 @@ breaks. Each phase is an independently safe, revertible PR.
 - **Phase 3 — gateway requires TLS.** The gateway wraps the backend dial in
   `tls.Client` (`GW_COMPUTE_TLS=true`, fail-closed default in shipped manifests) and
   verifies the compute server cert against the CA. **HARD ORDERING GATE below.**
-- **Phase 4 — compute enforces `clientcert=verify-full`.** Extend `lib-harden.sh`'s
+- **Phase 4 — compute enforces `clientcert=verify-ca`.** Extend `lib-harden.sh`'s
   pg_hba post-processor to rewrite the network catch-all `host`→`hostssl …
-  clientcert=verify-full`, so the compute REQUIRES + verifies the gateway client
+  clientcert=verify-ca`, so the compute REQUIRES + verifies the gateway client
   cert. This is the mTLS enforcement; on its merge F5 is fully CLOSED and ADR-0001 is
   amended to CLOSED + the main-repo CLAUDE.md §7 dated-exception is updated.
+
+  **Amendment (phase-4 implementation review): `verify-ca`, NOT `verify-full`.** This
+  ADR originally specified `clientcert=verify-full`; that is a defect and is corrected
+  throughout. `verify-full` does not merely verify the client certificate's chain — it
+  ADDITIONALLY requires the certificate's Common Name to equal the connecting database
+  username (absent a `map=` usermap + `pg_ident.conf`, which this deployment does not
+  have). The gateway presents ONE SHARED client leaf whose CN is a service name
+  (the gateway Service name — see the client leaf in `deploy/11-mtls-certs.yaml`)
+  while connecting as the app
+  role `app_<app>` (it replays the app's startup packet), so `verify-full` would refuse
+  EVERY gateway→compute connection on a common-name mismatch the moment the
+  backgrounded harden reloads pg_hba on a wake — a wake-triggered per-app data-plane
+  outage. `verify-ca` is the semantics this ADR always described in prose: the
+  certificate proves "issued by the shared CA" (the mTLS identity) and SCRAM-SHA-256
+  authenticates the user. Moving to `verify-full` later would first require per-role
+  client certificates (CN == `app_<app>`) or a pg_ident usermap.
 
 ### Hard ordering requirement (architect condition) — phase 2 → phase 3 gate
 
@@ -138,7 +154,7 @@ Recorded now so the later PRs implement them, from both gates:
   `ServerName` (the compute Service DNS being dialled) + `Certificates`/
   `GetClientCertificate` — all four, or the verification is incomplete.
 - **pg_hba first-match keeps loopback `cloud_admin` plaintext.** The
-  `clientcert=verify-full` rewrite applies to the **network** catch-all only; the
+  `clientcert=verify-ca` rewrite applies to the **network** catch-all only; the
   existing loopback `cloud_admin` line (pod-local SCRAM material path) must stay a
   plaintext local rule ABOVE it, since pg_hba is first-match.
 - **Cold-wake identity-enforcement window.** `harden_pg_hba` runs **async** after the
@@ -220,6 +236,6 @@ Recorded now so the later PRs implement them, from both gates:
       `internal/wake/backendtls_test.go` + `internal/gateway/backendtls_wiring_test.go`.
       The live proof (wake over TLS on OKE/kind) is lead-owned.
 - [ ] **Phase 4:** `lib-harden.sh` rewrites the network pg_hba catch-all to `hostssl …
-      clientcert=verify-full` (loopback `cloud_admin` plaintext kept above); test +
+      clientcert=verify-ca` (loopback `cloud_admin` plaintext kept above); test +
       document the async cold-wake enforcement window. On merge: mark ADR-0001 F5
       **CLOSED**, update main-repo CLAUDE.md §7.
