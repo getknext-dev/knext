@@ -150,3 +150,33 @@ func TestPageserverClientOpensFreshConnPerRequest(t *testing.T) {
 		t.Fatalf("expected %d fresh front connections (no keep-alive reuse), got %d", n, got)
 	}
 }
+
+// TestIdlePoolGuardHoldsEvenWithKeepAlives proves the SECOND guard is real, not
+// decorative: even if a future caller flips DisableKeepAlives back on,
+// MaxIdleConnsPerHost=-1 disables idle-connection pooling, so nothing is retained to
+// pin across a Service re-point. Mutation-proof: set MaxIdleConnsPerHost=1 (the old
+// value / net/http default shape) and this test reds — the client stays pinned.
+func TestIdlePoolGuardHoldsEvenWithKeepAlives(t *testing.T) {
+	const tl = "tl-guard"
+	backendA := timelineListServer(t, false, tl)
+	backendB := timelineListServer(t, true, tl)
+	proxy := newFlipProxy(t, backendA.Listener.Addr().String())
+
+	tr := nonPinningTransport()
+	tr.DisableKeepAlives = false // a future caller re-enables keep-alives; the idle-pool guard must still hold
+	ps := &HTTPPageserver{BaseURL: "http://" + proxy.addr(), Client: &http.Client{Timeout: 2 * time.Second, Transport: tr}}
+	ctx := context.Background()
+
+	if ok, err := ps.TimelineExists(ctx, "tenant", tl); err != nil || ok {
+		t.Fatalf("pre-flip: want (false,nil), got (%v,%v)", ok, err)
+	}
+	proxy.setUpstream(backendB.Listener.Addr().String())
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if ok, _ := ps.TimelineExists(ctx, "tenant", tl); ok {
+			return // the idle-pool guard alone prevented pinning
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("client stayed pinned despite MaxIdleConnsPerHost=-1 — the idle-pool guard is decorative")
+}

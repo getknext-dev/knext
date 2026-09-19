@@ -40,15 +40,17 @@ func NewHTTPPageserver(baseURL string, timeout time.Duration) *HTTPPageserver {
 
 // nonPinningTransport returns an http.Transport that never pins a pooled connection
 // to a backend across a Service re-point. DisableKeepAlives makes every request dial
-// fresh; IdleConnTimeout/MaxIdleConns are belt-and-suspenders in case a future caller
-// re-enables keep-alives. See NewHTTPPageserver for the #1096 rationale.
+// fresh — it does 100% of the work. The idle-pool settings are a SECOND, independent
+// guard so the property survives even if a future caller flips DisableKeepAlives back
+// on: MaxIdleConnsPerHost=-1 is the value that actually DISABLES idle-connection
+// pooling (0 would mean the default of 2; MaxIdleConns=0 already means unlimited, so it
+// carries no guarantee on its own). See NewHTTPPageserver for the #1096 rationale.
 func nonPinningTransport() *http.Transport {
 	return &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 		DisableKeepAlives:     true,
-		MaxIdleConns:          0,
-		MaxIdleConnsPerHost:   1,
+		MaxIdleConnsPerHost:   -1, // -1 disables idle pooling (1 would pool one idle conn per host — the pinning shape)
 		IdleConnTimeout:       5 * time.Second,
 		TLSHandshakeTimeout:   5 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
