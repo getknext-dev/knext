@@ -160,6 +160,31 @@ explicit `getDb()` (writer) / `getDbRO()` (reader) clients — use the
 [`@getknext/db` Data SDK](/docs/data-sdk). It provisions nothing and mutates no cluster resource; it
 is a plain client over whatever `DATABASE_URL` you supply.
 
+## Securing the database's internal hop (scale-zero-pg)
+
+If your Postgres is a [scale-zero-pg](/docs/learn/scale-to-zero-database)-managed database, your app
+connects through its gateway and the gateway then dials the database compute over an internal hop.
+That hop is encrypted and authenticated **by default** — and none of it changes your DSN.
+
+- **The base, shared database.** The hop is TLS and the gateway verifies the database compute's
+  **server** certificate against the cluster CA. No client certificate is required of the gateway;
+  this tier is additionally defended by network policy.
+- **A per-application database** (one database per app). The hop is **mutually authenticated**: on
+  top of the SCRAM password, the gateway presents a **client certificate** that the database compute
+  verifies against a shared CA. So nothing else on the cluster network can reach an app's database —
+  only the gateway that holds that certificate.
+
+<Callout type="warn">
+**Prerequisite: cert-manager.** The mutual-auth certificates are issued by cert-manager, so it must
+be installed before you apply the certificate manifests. A cluster running the full knext platform
+already has cert-manager (the operator uses it for its own webhook certificate). On a local or dev
+cluster without cert-manager, set `GW_COMPUTE_TLS=false` on the gateway to run the hop in plaintext
+instead — otherwise the gateway fails closed and refuses computes that cannot present a certificate.
+</Callout>
+
+Your DSN is unchanged either way: SCRAM-SHA-256 password authentication works transparently through
+the gateway.
+
 ## Related
 
 - [Data SDK (`@getknext/db`)](/docs/data-sdk) — typed schema, migrations, and read/write clients.
