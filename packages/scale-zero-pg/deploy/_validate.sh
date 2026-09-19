@@ -1166,11 +1166,12 @@ ok "F5 phase-4 drill honesty: _verify-tls.sh leg (b) is mandatory when section 4
 #     floor. This guard fails if the literal creeps back OR if either site loses its
 #     ledger read OR its pageserver read — a revert of any half reds it.
 for _f in 55-storage-init.yaml provision-app.sh; do
-  # Normalise shell backslash-escaping first: the literal reappears as
-  # "generation":1 in the YAML single-quoted form and as \"generation\":1 in the
-  # provision-app.sh double-quoted -d payload — strip backslashes so ONE pattern
-  # catches both.
-  if sed 's/\\//g' "$_f" | grep -qE '"generation" *: *1[,}]'; then
+  # Strip comment lines first (a provenance comment legitimately quotes the live
+  # pageserver JSON `…,"generation":1,…`; the guard targets the ATTACH PAYLOAD, never a
+  # comment), then normalise shell backslash-escaping (the literal reappears as
+  # "generation":1 in the YAML single-quoted form and \"generation\":1 in the
+  # provision-app.sh double-quoted -d payload) so ONE pattern catches both.
+  if grep -v '^[[:space:]]*#' "$_f" | sed 's/\\//g' | grep -qE '"generation" *: *1[,}]'; then
     fail "$_f attaches at a HARDCODED generation:1 — after a pswatcher failover the pageserver has advanced past 1 and REJECTS it (#1095 wedge). Attach at max(ledger, pageserver-view, 1)."
   fi
   # Every attach site must consult the durable ledger (the authority).
@@ -1205,16 +1206,35 @@ grep -q 'genKeyDefault = "generation"' ../gateway/internal/pswatcher/k8s.go \
   || fail "pswatcher ledger key drifted from \"generation\" — the attach paths read data.generation / /ledger/generation; a rename silently degrades every attach (#1095)"
 grep -qE 'name: pageserver-generation' 57-pageserver-standby.yaml \
   || fail "57-pageserver-standby.yaml must ship the pageserver-generation ledger ConfigMap (#1095)"
-# The ledger CM must ship the GENESIS SEED (generation: "1"): the ledger is only WRITTEN
-# on a failover, so without a seed the key is legitimately empty on a never-failed-over
-# plane and the fail-closed readers could not tell "fresh" from "unreadable". The seed
-# makes the ledger always-present-and-numeric on a healthy plane. (kubectl apply is not
-# ledger-safe either way — see the 57 caveat + the operations.md runbook; the readers'
-# max(ledger, pageserver-view) covers a reset except when the pageserver is also blind.)
-if ! grep -A6 'name: pageserver-generation' 57-pageserver-standby.yaml | grep -qE 'generation: *"1"'; then
-  fail "57-pageserver-standby.yaml must seed the pageserver-generation ledger with generation: \"1\" (genesis seed) so the fail-closed readers can distinguish a fresh plane from an unreadable ledger (#1095)"
+# APPLY-SAFETY (#1095 review): the ledger CM must NOT declare a numeric `generation`
+# value. A declared key is reconciled back to its manifest value on every kubectl apply
+# (proven on kind: live 5 -> apply -> 1) and a reset "1" is byte-identical to a genesis
+# "1", so the fail-closed readers cannot tell it apart and silently attach low. The key
+# is seeded CREATE-IF-ABSENT by deploy/seed-ledger.sh instead. So: 57 must ship data:{}
+# (empty), and there must be NO declared generation value on the ledger CM.
+if grep -A5 'name: pageserver-generation' 57-pageserver-standby.yaml | grep -qE 'generation: *"?[0-9]'; then
+  fail "57-pageserver-standby.yaml DECLARES a numeric pageserver-generation value — kubectl apply would RESET a pswatcher-advanced ledger back to it (silent floor-to-1, #1095). Ship data: {} and seed create-if-absent via deploy/seed-ledger.sh."
 fi
-ok "T1 read-before-attach: no literal generation:1; both storage-init and provision-app read the durable ledger + pageserver view (max, never below the ledger), FAIL CLOSED on an unreadable ledger; ledger mounted at /ledger; field/key names + genesis seed pinned (#1095)"
+# The create-if-absent seed must exist, never overwrite a live value, and be WIRED into
+# the deploy path (else a fresh plane's ledger key is never seeded and storage-init
+# fail-closes forever).
+test -f seed-ledger.sh \
+  || fail "deploy/seed-ledger.sh (create-if-absent ledger seed) is missing — the undeclared generation key would never be seeded (#1095)"
+grep -q 'ledger_seed_action' seed-ledger.sh \
+  || fail "seed-ledger.sh must decide create-if-absent via ledger_seed_action (seed|keep|refuse) — never blindly overwrite the ledger (#1095)"
+grep -q 'seed-ledger.sh' ../Makefile \
+  || fail "the Makefile deploy target must run deploy/seed-ledger.sh after apply — otherwise a fresh plane's ledger is never seeded and storage-init fail-closes (#1095)"
+ok "T1 read-before-attach: no literal generation:1; both attach sites read the durable ledger + pageserver view (max, never below the ledger), FAIL CLOSED on an unreadable ledger; ledger mounted at /ledger; field/key names pinned; ledger key UNDECLARED (apply-safe) + create-if-absent seed wired (#1095)"
+
+# Runtime proof of the create-if-absent seed (never overwrites/lowers a live value).
+if command -v bash >/dev/null 2>&1; then
+  if bash ./test_seed-ledger.sh >/dev/null 2>&1; then
+    ok "T1 seed-ledger create-if-absent proof: seeds only when absent, keeps a live value, refuses non-numeric (#1095)"
+  else
+    bash ./test_seed-ledger.sh >&2
+    fail "test_seed-ledger.sh FAILED — the create-if-absent seed does not preserve a live ledger value (output above)"
+  fi
+fi
 
 # Runtime proof of the read-before-attach logic (mirrors the harden_pghba pattern):
 # SOURCE provision-app.sh + EXTRACT the storage-init inline lines and exercise both

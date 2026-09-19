@@ -258,6 +258,9 @@ ensure_tenant() {
   if ! ledger="$(ledger_generation)"; then
     die "refusing to attach $APPS_TENANT: the pageserver-generation ledger is unreadable (kubectl/RBAC error, missing ConfigMap, or empty/non-numeric key). Flooring to a low generation could hide a higher-generation object-store index (silent data loss). Seed/verify the ledger per docs/operations.md and retry."
   fi
+  # GET /v1/tenant/<T> returns a top-level "generation" field — confirmed against a live
+  # GKE pageserver (neon:8464): {"id":"…","state":{"slug":"Active"},…,"generation":1,…}.
+  # The on-cluster failover drill (T7, #1101) asserts the field is present.
   cur="$(PS "http://localhost:9898/v1/tenant/$APPS_TENANT" 2>/dev/null || true)"
   gen="$(resolve_attach_generation "$cur" "$ledger")"
   log "attaching apps tenant $APPS_TENANT at generation $gen (ledger=$ledger)"

@@ -36,32 +36,32 @@ spec:
 # max(ledger, pageserver-view, 1) — never below it. Persisting it here survives a
 # watcher/pageserver restart or a fresh pageserver PVC.
 #
-# The "1" is the GENESIS SEED, not just a default: the ledger is only WRITTEN on a
-# failover, so without a shipped seed the key would be legitimately empty on every
-# never-failed-over plane and the readers could not tell "fresh" from "unreadable".
-# Seeding "1" makes the ledger always-present-and-numeric on a healthy plane, which is
-# what lets the readers FAIL CLOSED (refuse) on an empty/unreadable key instead of
-# silently flooring to 1.
+# The `generation` key is DELIBERATELY NOT DECLARED here (`data: {}`) and is instead
+# seeded CREATE-IF-ABSENT by deploy/seed-ledger.sh (run by `make deploy` after apply).
+# WHY, proven on kind: a declared `generation: "1"` is NOT `kubectl apply`-safe — a
+# re-apply RESETS the live key back to the declared value even when pswatcher had
+# advanced it (client-side apply reconciles a declared field to its manifest value:
+# live 5 -> apply -> 1), and a reset "1" is byte-identical to a genesis "1", so the
+# fail-closed readers cannot tell it apart and would silently attach low. With the key
+# UNDECLARED, apply never resets it and never prunes it (verified: apply data:{} ->
+# patch 5 -> re-apply data:{} leaves it 5), so pswatcher's value and the create-if-
+# absent seed both survive every future `kubectl apply -f deploy/`. This CM object must
+# still exist (pswatcher's merge-patch requires it), hence `data: {}` rather than
+# omitting the ConfigMap.
 #
-# CAVEAT — `kubectl apply` is not ledger-safe (proven on kind): a re-apply of this file
-# RESETS the live key back to "1" even when pswatcher had advanced it (client-side
-# apply reconciles the managed field to its declared value), and an apply that DROPS
-# the key prunes it. This is tolerable because the readers attach at
-# max(ledger, pageserver-view, 1): after a failover the live pageserver is attached at
-# the advanced generation, so a reset ledger is corrected by the pageserver view. The
-# only unguarded window is a reset/pruned ledger AND a pageserver that has ALSO lost
-# its view (fresh PVC) at the same time — the upgrade runbook (docs/operations.md)
-# requires re-seeding/verifying this ledger before any attach, and the robust
-# self-heal (pswatcher re-seeding from the pageserver's current max at startup) is
-# owned by the pswatcher + ledger-authority work, not this change.
+# One-time migration: an install created by a PRE-#1095 deploy carried
+# `generation: "1"` in last-applied-configuration; the first apply of THIS file prunes
+# that key. The upgrade runbook (docs/operations.md) re-seeds/verifies the ledger to
+# the live generation before any attach. The robust self-heal (pswatcher re-seeding
+# from the pageserver's current max at startup) is owned by the pswatcher +
+# ledger-authority work, not this change.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: pageserver-generation
   namespace: scale-zero-pg
   labels: { plane: storage }
-data:
-  generation: "1"
+data: {}
 ---
 # Standby config: identical to the primary's (same broker + bucket) EXCEPT a
 # distinct node identity (id=1235 vs the primary's 1234) — two pageservers must

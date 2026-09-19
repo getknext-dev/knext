@@ -136,4 +136,35 @@ check_si '2' '5' 5 "pageserver ahead (5 vs ledger 2)"
 check_si '3' '2' 3 "ledger ahead (3 vs pageserver 2)"
 check_si '1' '' 1 "genesis ledger 1, pageserver fresh -> 1"
 
+# ---------------------------------------------------------------------------
+# Part 5 (finding 3): the storage-init /ledger FAIL-CLOSED block is BEHAVIORAL, not a
+# text grep. Extract the T1-LEDGER-READ block from 55-storage-init.yaml and run it
+# against fixture files with LEDGER_WAIT_TRIES=0 (fail fast, no 120s wait), asserting a
+# non-zero exit on missing/empty/non-numeric and a correct LEDGER on a numeric value.
+LEDGER_BLOCK="$(awk '/# T1-LEDGER-READ-BEGIN/{f=1;next} /# T1-LEDGER-READ-END/{f=0} f' "$SI" | sed 's/^[[:space:]]*//')"
+[ -n "$LEDGER_BLOCK" ] || fail "could not extract the T1-LEDGER-READ block from $SI (markers moved?)"
+FX="$(mktemp -d)"; trap 'rm -f "$PUT_GEN_FILE"; rm -rf "$FX"' EXIT
+si_ledger_read() { # $1 = ledger file path (may not exist); echoes LEDGER on success
+  TENANT_ID=test LEDGER_FILE="$1" LEDGER_WAIT_TRIES=0 sh -c "$LEDGER_BLOCK"'; printf "%s" "$LEDGER"'
+}
+# numeric value -> exit 0, LEDGER echoed
+printf '5' > "$FX/num"
+out="$(si_ledger_read "$FX/num")"; rc=$?
+[ "$rc" = 0 ] && [ "$out" = 5 ] || fail "storage-init ledger-read numeric: rc=$rc out='$out', want rc0 out5"
+pass=$((pass + 1)); echo "ok - storage-init /ledger read: numeric 5 -> accepted"
+# missing file -> REFUSE (non-zero), no LEDGER
+out="$(si_ledger_read "$FX/does-not-exist" 2>/dev/null)"; rc=$?
+[ "$rc" != 0 ] || fail "storage-init ledger-read missing file: rc=$rc, expected REFUSAL (non-zero)"
+pass=$((pass + 1)); echo "ok - storage-init /ledger read: missing file -> REFUSES (no floor-to-1)"
+# empty file -> REFUSE
+printf '' > "$FX/empty"
+out="$(si_ledger_read "$FX/empty" 2>/dev/null)"; rc=$?
+[ "$rc" != 0 ] || fail "storage-init ledger-read empty file: rc=$rc, expected REFUSAL"
+pass=$((pass + 1)); echo "ok - storage-init /ledger read: empty file -> REFUSES"
+# non-numeric (finding 4: must refuse, not coerce 'v12'->12) -> REFUSE
+printf 'v12' > "$FX/nonnum"
+out="$(si_ledger_read "$FX/nonnum" 2>/dev/null)"; rc=$?
+[ "$rc" != 0 ] || fail "storage-init ledger-read 'v12': rc=$rc, expected REFUSAL — must NOT coerce to 12 (finding 4)"
+pass=$((pass + 1)); echo "ok - storage-init /ledger read: non-numeric 'v12' -> REFUSES (no coercion, finding 4)"
+
 echo "PASS ($pass checks) — read-before-attach honours the durable ledger and FAILS CLOSED on an unreadable one; never a literal generation:1 and never a silent floor below the ledger"

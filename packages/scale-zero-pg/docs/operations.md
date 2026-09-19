@@ -690,28 +690,33 @@ docs/BENCHMARKS.md.
   The paths only **read** the ledger; **advancing it stays pswatcher's job on
   failover**. `storage-init` mounts the ledger read-only at `/ledger` and waits for it;
   `provision-app.sh` reads it with `kubectl`.
-  - **Genesis seed.** The ledger ConfigMap ships with `generation: "1"` (`deploy/57`).
-    It is a genesis seed, not just a default: the ledger is only *written* on a
-    failover, so without the seed the key would be legitimately empty on every
-    never-failed-over plane and the fail-closed readers could not tell "fresh" from
-    "unreadable". The seed makes the ledger always present and numeric on a healthy
-    plane.
-  - **`kubectl apply` is not ledger-safe — re-seed on upgrade/re-apply (runbook).**
-    Client-side `kubectl apply -f deploy/` reconciles the ledger's `generation` field
-    back to its declared `"1"` even when pswatcher had advanced it (verified on kind:
-    live `5` → apply → `1`); an apply that *drops* the key prunes it. This is tolerated
-    because the attach reads `max(ledger, pageserver-view, 1)` — after a failover the
-    live pageserver is attached at the advanced generation, so the pageserver view
-    corrects a reset ledger. **The one unguarded window is a reset/pruned ledger AND a
-    pageserver that has also lost its view (fresh PVC) at the same time.** So on any
-    upgrade or re-`apply`, **verify/re-seed `pageserver-generation` to the current
-    generation before any attach runs**:
+  - **Create-if-absent seed — the ledger key is NOT declared in the manifest.** The
+    `pageserver-generation` ConfigMap ships with `data: {}` (`deploy/57`); the
+    `generation` key is seeded **create-if-absent** by `deploy/seed-ledger.sh`, which
+    `make deploy` runs after `kubectl apply`. Why not declare `generation: "1"` in the
+    manifest: a declared key is **not `kubectl apply`-safe** — apply reconciles it back
+    to the manifest value on every re-apply even when pswatcher had advanced it (verified
+    on kind: live `5` → apply → `1`), and a reset `"1"` is byte-identical to a genesis
+    `"1"`, so the fail-closed readers cannot tell it apart and would silently attach low.
+    With the key **undeclared**, apply never resets or prunes it (verified: apply
+    `data:{}` → patch `5` → re-apply `data:{}` leaves it `5`), and `seed-ledger.sh`
+    **never overwrites or lowers** a live value — it writes `generation=1` only when the
+    key is absent. Deploying with raw `kubectl apply -f deploy/` (no `make`, no GitOps
+    post-sync hook running `seed-ledger.sh`) leaves the key unseeded, and `storage-init`
+    then **fails closed** (waits, then refuses) rather than attaching low — run
+    `sh deploy/seed-ledger.sh` to unblock it.
+  - **Upgrading from a pre-existing install — re-seed once (runbook).** An install
+    created before this change carried `generation: "1"` in the ConfigMap's
+    last-applied-configuration; the first `kubectl apply` of the new `deploy/57` **prunes**
+    that key. If pswatcher had advanced the ledger, re-seed it to the live generation
+    **before any attach runs** (the fail-closed readers will refuse rather than floor, so
+    this is a loud, recoverable stop — not silent loss):
     `kubectl -n scale-zero-pg get cm pageserver-generation -o jsonpath='{.data.generation}'`
-    and, if it is lower than the live attach generation, `kubectl -n scale-zero-pg
-    patch cm pageserver-generation --type=merge -p '{"data":{"generation":"<N>"}}'`.
-    The robust self-heal — pswatcher re-seeding the ledger from the pageserver's current
-    max view at startup — is owned by the pswatcher + ledger-authority work, not this
-    change.
+    and, if it is missing or lower than the live attach generation, `kubectl -n
+    scale-zero-pg patch cm pageserver-generation --type=merge -p
+    '{"data":{"generation":"<N>"}}'`. The robust self-heal — pswatcher re-seeding the
+    ledger from the pageserver's current max view at startup — is owned by the pswatcher +
+    ledger-authority work, not this change.
 
   Contract-guarded in `_validate.sh` and unit-proved off-cluster by
   `deploy/test_ensure-tenant-gen.sh` (issue #1095). The full on-cluster proof
