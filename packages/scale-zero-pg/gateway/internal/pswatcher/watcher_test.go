@@ -71,16 +71,27 @@ func (p *fakePromoter) Promote(_ context.Context, tenant string, gen int) error 
 	return nil
 }
 
-// fakeGenViewer models the pageserver's current generation view for the startup
-// seed/heal path. present[tenant]=false models a tenant the pageserver 404s.
+// fakeGenViewer models the pageserver's current generation view. present[tenant]=false
+// models a tenant the pageserver 404s.
+//
+// okWithErr models a MISBEHAVING viewer: one that returns an error while ALSO claiming
+// ok and a generation (e.g. a partially-decoded response, or a future implementation
+// that reports a cached value alongside a live-read failure). The consumers must treat
+// err as disqualifying on its own — reading the value "because ok was true" would seed
+// or promote from an unverified number. Without this, the err checks are invisibly
+// subsumed by the !ok checks and mutation-prove as decorative.
 type fakeGenViewer struct {
-	gens    map[string]int
-	present map[string]bool
-	err     error
+	gens      map[string]int
+	present   map[string]bool
+	err       error
+	okWithErr bool
 }
 
 func (g *fakeGenViewer) Generation(_ context.Context, tenant string) (int, bool, error) {
 	if g.err != nil {
+		if g.okWithErr {
+			return g.gens[tenant], true, g.err
+		}
 		return 0, false, g.err
 	}
 	if g.present != nil && !g.present[tenant] {
@@ -321,24 +332,40 @@ func TestGenerationRecoveredWhenLedgerAbsent(t *testing.T) {
 // Promoting at 2 on a plane that is really at 7 re-attaches below the object-store
 // index — the exact silent floor-to-1 class #1095 closed.
 func TestFailoverRefusesWhenLedgerAbsentAndUnrecoverable(t *testing.T) {
-	prober := &fakeProber{seq: []bool{false}, last: false}
-	promoter := &fakePromoter{}
-	k8s := &fakeK8s{selectorApp: "pageserver", genSet: false, primaryPresent: true, primaryReady: false}
-	c := newController(prober, promoter, k8s, 1)
-	c.SetGenerationViewer(&fakeGenViewer{err: errors.New("pageserver unreachable")})
+	cases := map[string]GenerationViewer{
+		"view unreachable": &fakeGenViewer{err: errors.New("pageserver unreachable")},
+		"view reports 404": &fakeGenViewer{present: map[string]bool{"f0f0": false}},
+		"no viewer wired":  nil,
+		// An errored read is disqualifying even when the viewer also claims ok:
+		// promoting at 10 off an unverified 9 is still promoting at a guess.
+		"view errored but also claimed ok": &fakeGenViewer{
+			gens: map[string]int{"f0f0": 9}, okWithErr: true, err: errors.New("partial read"),
+		},
+	}
+	for name, viewer := range cases {
+		t.Run(name, func(t *testing.T) {
+			prober := &fakeProber{seq: []bool{false}, last: false}
+			promoter := &fakePromoter{}
+			k8s := &fakeK8s{selectorApp: "pageserver", genSet: false, primaryPresent: true, primaryReady: false}
+			c := newController(prober, promoter, k8s, 1)
+			if viewer != nil {
+				c.SetGenerationViewer(viewer)
+			}
 
-	fo, err := c.Tick(context.Background())
-	if err == nil {
-		t.Fatal("an absent + unrecoverable ledger must surface an error, not silently floor to the base generation")
-	}
-	if fo {
-		t.Fatal("must not report a failover when the generation is unknown")
-	}
-	if len(promoter.calls) != 0 {
-		t.Fatalf("must not promote at an invented generation: %v", promoter.calls)
-	}
-	if len(k8s.flippedTo) != 0 {
-		t.Fatalf("Service must not flip when the generation is unknown: %v", k8s.flippedTo)
+			fo, err := c.Tick(context.Background())
+			if err == nil {
+				t.Fatal("an absent + unrecoverable ledger must surface an error, not silently floor to the base generation")
+			}
+			if fo {
+				t.Fatal("must not report a failover when the generation is unknown")
+			}
+			if len(promoter.calls) != 0 {
+				t.Fatalf("must not promote at an invented generation: %v", promoter.calls)
+			}
+			if len(k8s.flippedTo) != 0 {
+				t.Fatalf("Service must not flip when the generation is unknown: %v", k8s.flippedTo)
+			}
+		})
 	}
 }
 
@@ -1033,6 +1060,12 @@ func TestSeedLedgerRefusesToInventAGeneration(t *testing.T) {
 		"view unreachable": &fakeGenViewer{err: errors.New("pageserver unreachable")},
 		"view reports 404": &fakeGenViewer{present: map[string]bool{"f0f0-base": false}},
 		"no viewer wired":  nil,
+		// An ERRORED read is disqualifying on its own. A viewer that hands back a
+		// generation alongside an error has not verified it, so seeding from it is
+		// still inventing a number — just with extra confidence.
+		"view errored but also claimed ok": &fakeGenViewer{
+			gens: map[string]int{"f0f0-base": 9}, okWithErr: true, err: errors.New("partial read"),
+		},
 	}
 	for name, viewer := range cases {
 		t.Run(name+" + absent ledger ⇒ refuse, no write", func(t *testing.T) {
