@@ -1,6 +1,9 @@
 # ADR-0003 (scale-zero-pg): Gateway→compute mTLS via in-protocol Postgres TLS (F5)
 
-- Status: Accepted — implemented (all four phases merged 2026-09-19; #1088/#1089/#1090/#1091)
+- Status: Accepted — implemented (all four phases merged 2026-09-19; #1088/#1089/#1090/#1091).
+  **Errata (2026-09-19):** the phase-2 cert mounts were missing from the operator's Go
+  render path, so operator-provisioned per-app computes were NOT enforcing until the
+  render fix — see the Consequences errata below.
 - Date: 2026-09-19
 - Scope: `packages/scale-zero-pg/` (the wake-on-connect gateway + the Neon compute
   plane). Module-local ADR. Does **not** amend any main-repo ADR — the operator
@@ -169,6 +172,20 @@ Recorded now so the later PRs implement them, from both gates:
 
 ## Consequences
 
+- **Errata — phase-2 coverage gap on the operator-rendered path (found 2026-09-19 by
+  live GKE verification, fixed same day).** Phases 2-4 added the compute server-cert/CA
+  volume mounts to the STATIC compute manifests and to `compute-app.template.yaml` (the
+  shell `provision-app.sh` path), but NOT to `internal/appdb/render.go` — the Go render
+  the **AppDatabase operator** uses. So every operator-provisioned per-app compute (the
+  primary multi-tenant path, incl. the RO pool) booted `ssl=off` (the entrypoint strips
+  the ssl GUCs when the cert files are absent) and phase-4 `clientcert=verify-ca`
+  enforcement silently never engaged — that leg ran plaintext despite F5 being marked
+  CLOSED. Static checks (`_validate.sh`, `test_harden_pghba.sh`) and the render↔template
+  parity guard all passed because the parity guard compared ENV NAMES ONLY, blind to
+  volume/mount drift. Fixed: `RenderDeployment` + `RenderRODeployment` now mount the two
+  Secrets, and the parity guard is extended to volumes/mounts (`render_tls_parity_test.go`).
+  So "F5 is CLOSED" holds for the operator path only from that render fix forward, not
+  from the phase-4 merge.
 - **ADR-0001 F5 is CLOSED (2026-09-19).** All four phases are merged, so the
   gateway→compute hop is now TLS with a CA-verified client certificate required
   (`hostssl … scram-sha-256 clientcert=verify-ca`). The plaintext-hop caveat is dropped
@@ -233,6 +250,12 @@ Recorded now so the later PRs implement them, from both gates:
       predates the phase-2 rollout (`kubectl get pods` age vs. that rollout time). A
       compute that predates it answers `'N'` and is REFUSED — that is the control
       working, and `GW_COMPUTE_TLS=false` is the documented dev/rollback safety valve.
+      **This gate covers operator-provisioned per-app computes too** — both the per-app
+      writer AND the RO-pool replicas: they were missing the cert mounts until the render
+      fix (errata above). **The fixed operator image must ship FIRST**, then every awake
+      per-app compute is rolled to pick up the new mounts (the writer via its Recreate
+      strategy, the RO replicas via their RollingUpdate), before any gateway flips —
+      recreating a per-app compute under a PRE-fix operator just re-renders it plaintext.
 - [x] **Phase 3:** gateway wraps the backend dial in `tls.Client`
       (`GW_COMPUTE_TLS=true` fail-closed default); `GetClientCertificate`; full
       backend `tls.Config` (MinVersion/RootCAs/ServerName/Certificates); fail-closed
