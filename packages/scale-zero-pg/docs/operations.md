@@ -693,29 +693,51 @@ docs/BENCHMARKS.md.
   - **Create-if-absent seed — the ledger key is NOT declared in the manifest.** The
     `pageserver-generation` ConfigMap ships with `data: {}` (`deploy/57`); the
     `generation` key is seeded **create-if-absent** by `deploy/seed-ledger.sh`, which
-    `make deploy` runs after `kubectl apply`. Why not declare `generation: "1"` in the
-    manifest: a declared key is **not `kubectl apply`-safe** — apply reconciles it back
-    to the manifest value on every re-apply even when pswatcher had advanced it (verified
-    on kind: live `5` → apply → `1`), and a reset `"1"` is byte-identical to a genesis
-    `"1"`, so the fail-closed readers cannot tell it apart and would silently attach low.
-    With the key **undeclared**, apply never resets or prunes it (verified: apply
-    `data:{}` → patch `5` → re-apply `data:{}` leaves it `5`), and `seed-ledger.sh`
-    **never overwrites or lowers** a live value — it writes `generation=1` only when the
-    key is absent. Deploying with raw `kubectl apply -f deploy/` (no `make`, no GitOps
-    post-sync hook running `seed-ledger.sh`) leaves the key unseeded, and `storage-init`
-    then **fails closed** (waits, then refuses) rather than attaching low — run
-    `sh deploy/seed-ledger.sh` to unblock it.
-  - **Upgrading from a pre-existing install — re-seed once (runbook).** An install
-    created before this change carried `generation: "1"` in the ConfigMap's
-    last-applied-configuration; the first `kubectl apply` of the new `deploy/57` **prunes**
-    that key. If pswatcher had advanced the ledger, re-seed it to the live generation
-    **before any attach runs** (the fail-closed readers will refuse rather than floor, so
-    this is a loud, recoverable stop — not silent loss):
-    `kubectl -n scale-zero-pg get cm pageserver-generation -o jsonpath='{.data.generation}'`
-    and, if it is missing or lower than the live attach generation, `kubectl -n
-    scale-zero-pg patch cm pageserver-generation --type=merge -p
-    '{"data":{"generation":"<N>"}}'`. The robust self-heal — pswatcher re-seeding the
-    ledger from the pageserver's current max view at startup — is owned by the pswatcher +
+    `make deploy` runs (with `bash`) after `kubectl apply`. Why not declare
+    `generation: "1"` in the manifest: a declared key is **not `kubectl apply`-safe** —
+    apply reconciles it back to the manifest value on every re-apply even when pswatcher
+    had advanced it (verified on kind: live `5` → apply → `1`), and a reset `"1"` is
+    byte-identical to a genesis `"1"`, so the fail-closed readers cannot tell it apart and
+    would silently attach low. With the key **undeclared**, apply never resets or prunes
+    it (verified: apply `data:{}` → patch `5` → re-apply `data:{}` leaves it `5`), and
+    `seed-ledger.sh` **never overwrites or lowers** a live value — it writes
+    `generation=1` only when the key is absent.
+  - **You MUST run the seed after apply — it is not a shipped manifest.** `make deploy`
+    runs it for you. If you deploy any other way:
+    - **Raw `kubectl apply -f deploy/`** (no `make`): run `bash deploy/seed-ledger.sh`
+      afterwards. (Use `bash`, not `sh` — the script uses `set -o pipefail`, which dash
+      rejects.)
+    - **GitOps (Argo CD / Flux)**: `seed-ledger.sh` is **not** a shipped Job/hook — you
+      MUST wire it yourself as a **post-sync hook** (Argo `PostSync` / Flux post-build or
+      a small Job you own that runs `bash deploy/seed-ledger.sh`). Nothing in `deploy/`
+      creates it for you.
+
+    If the seed never runs, the ledger key stays absent, and `storage-init` **fails
+    closed** (waits, then refuses) rather than attaching low — a loud, recoverable stop,
+    not silent loss.
+  - **Upgrading from a pre-#1095 install — record N first, then re-seed (runbook).** This
+    is a corruption hazard, follow it in order. An install created before this change
+    carried `generation: "1"` in the ConfigMap's last-applied-configuration; the first
+    `kubectl apply` of the new `deploy/57` **prunes** that key, and `make deploy` then
+    runs `seed-ledger.sh`, which writes `1` (it seeds the genesis value; it does **not**
+    consult the pageserver). So a pswatcher-advanced ledger at `N` becomes `1`. The
+    attach-time `max(ledger, pageserver-view)` does **not** cover this: pswatcher's own
+    promote path reads only the ledger, so the next failover promotes at `ledger+1 = 2`,
+    and if `2 < N` a fresh standby accepts it and the gen-`N` object-store index goes
+    invisible. Therefore, on this one-time upgrade:
+    1. **BEFORE the upgrade apply**, record the live generation:
+       `kubectl -n scale-zero-pg get cm pageserver-generation -o jsonpath='{.data.generation}'`
+       → call it `N`.
+    2. Apply the upgrade (`make deploy` or `kubectl apply -f deploy/` + `bash
+       deploy/seed-ledger.sh`). Expect the ledger to read `1` afterwards — that is the
+       prune-then-seed.
+    3. **RE-SEED `N` before re-enabling pswatcher / before any failover:**
+       `kubectl -n scale-zero-pg patch cm pageserver-generation --type=merge -p
+       '{"data":{"generation":"<N>"}}'`. Skipping this loses the gen-`N` index on the next
+       failover.
+
+    The automatic self-heal that removes this manual step — pswatcher seeding/healing the
+    ledger from the pageserver's current max at startup — is owned by the pswatcher +
     ledger-authority work, not this change.
 
   Contract-guarded in `_validate.sh` and unit-proved off-cluster by

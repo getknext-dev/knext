@@ -1222,8 +1222,15 @@ test -f seed-ledger.sh \
   || fail "deploy/seed-ledger.sh (create-if-absent ledger seed) is missing — the undeclared generation key would never be seeded (#1095)"
 grep -q 'ledger_seed_action' seed-ledger.sh \
   || fail "seed-ledger.sh must decide create-if-absent via ledger_seed_action (seed|keep|refuse) — never blindly overwrite the ledger (#1095)"
-grep -q 'seed-ledger.sh' ../Makefile \
+grep -qF 'bash deploy/seed-ledger.sh' ../Makefile \
   || fail "the Makefile deploy target must run deploy/seed-ledger.sh after apply — otherwise a fresh plane's ledger is never seeded and storage-init fail-closes (#1095)"
+# It MUST be invoked with `bash`, not `sh`: seed-ledger.sh uses `set -o pipefail`
+# (bash-only), so under dash (/bin/sh on Debian/Ubuntu) `sh deploy/seed-ledger.sh`
+# aborts with "Illegal option -o pipefail" — the seed silently never runs. The word
+# boundary [^a-z] before `sh` avoids matching the `sh` inside `bash`.
+if grep -qE '(^|[^a-z])sh +deploy/seed-ledger\.sh' ../Makefile; then
+  fail "the Makefile invokes deploy/seed-ledger.sh with bare 'sh' — it uses bash-only 'set -o pipefail' and aborts under dash, so the ledger is never seeded (#1095). Use 'bash deploy/seed-ledger.sh'."
+fi
 ok "T1 read-before-attach: no literal generation:1; both attach sites read the durable ledger + pageserver view (max, never below the ledger), FAIL CLOSED on an unreadable ledger; ledger mounted at /ledger; field/key names pinned; ledger key UNDECLARED (apply-safe) + create-if-absent seed wired (#1095)"
 
 # Runtime proof of the create-if-absent seed (never overwrites/lowers a live value).
