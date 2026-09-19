@@ -30,14 +30,15 @@ import (
 // args COUNT, envFrom refs, env refs (NAME<-secret|cm:SRC/KEY + Optional flag, or
 // NAME for plain-value env), volume mounts (name+path+readOnly), ports (name+port),
 // readiness/liveness/startup probes (handler+thresholds), container securityContext
-// presence, resource-key PRESENCE; and pod-level: securityContext (seccomp +
-// runAsNonRoot), terminationGracePeriodSeconds, volumes (name+source+optional+items,
-// where each item is compared as key->path so a key-to-filename remap is caught).
+// presence, resource-key PRESENCE, resizePolicy (resourceName=restartPolicy per entry,
+// #1108); and pod-level: securityContext (seccomp + runAsNonRoot),
+// terminationGracePeriodSeconds, volumes (name+source+optional+items, where each item
+// is compared as key->path so a key-to-filename remap is caught).
 //
 // It compares STRUCTURE/keys, deliberately NOT certain value classes. The list below
 // is EXHAUSTIVE for what is excluded: a field is either projected above or named here
 // with its reason. It is NOT a claim that every conceivable PodSpec field is covered
-// — see class 6, the honestly-stated residual gap.
+// — see class 5, the honestly-stated residual gap.
 //
 //   ALLOWLIST / EXCLUSIONS (each intentional, with reason):
 //     1. Resource QUANTITIES. The template carries __CPU_REQ__/__CPU_LIM__/
@@ -58,10 +59,11 @@ import (
 //     4. Deployment-level fields (replicas, strategy, revisionHistoryLimit, selector,
 //        annotations) — this is a POD SPEC projection by construction; those are
 //        covered elsewhere and legitimately differ (e.g. __REPLICAS__ placeholder).
-//        (resizePolicy was allowlist class 5 while it was a real render<->template
-//        drift; #1108 fixed RenderDeployment to emit it, so it is now PROJECTED above
-//        — per container, resourceName=restartPolicy — and no longer excluded.)
-//     6. RESIDUAL GAP (honest): PodSpec/Container fields that NEITHER renderer sets
+//        (Historical note: resizePolicy was a class-5 exclusion while it was a real
+//        render<->template drift; #1108 fixed RenderDeployment to emit it, so it is now
+//        PROJECTED above — per container, resourceName=restartPolicy — and no longer an
+//        exclusion, which is why the list below skips from 4 to 5=residual-gap.)
+//     5. RESIDUAL GAP (honest): PodSpec/Container fields that NEITHER renderer sets
 //        today (lifecycle hooks, workingDir, terminationMessagePath, volumeDevices,
 //        fieldRef/resourceFieldRef env sources, pod affinity/tolerations, etc.) are
 //        not projected. Both sides omit them now, so there is nothing to compare, but

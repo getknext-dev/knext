@@ -227,12 +227,14 @@ echo "timeline ready"`
 								corev1.ResourceEphemeralStorage: resource.MustParse("1Gi"),
 							},
 						},
-						// #1108: mirror deploy/compute-app.template.yaml exactly — the
-						// shared writer-autoscaler can grow/shrink a per-app writer's
-						// CPU+memory IN PLACE (NotRequired = no pod restart). Without this
-						// an operator-provisioned per-app writer RESTARTS on a vertical
-						// resize (the compute is single-writer Recreate — a restart drops
-						// the connection), a reliability regression on the primary path.
+						// #1108: mirror deploy/compute-app.template.yaml exactly — declare
+						// NotRequired for cpu+memory so the writer-autoscaler can grow/shrink
+						// a per-app writer's resources IN PLACE (no pod restart). This makes
+						// the NotRequired guarantee explicit and satisfies the writer-
+						// autoscaler prereq, instead of relying on the kubelet's implicit
+						// NotRequired default (an absent resizePolicy already defaults to
+						// NotRequired — this is a parity/explicitness fix, not a fix for a
+						// would-restart regression).
 						ResizePolicy: []corev1.ContainerResizePolicy{
 							{ResourceName: corev1.ResourceCPU, RestartPolicy: corev1.NotRequired},
 							{ResourceName: corev1.ResourceMemory, RestartPolicy: corev1.NotRequired},

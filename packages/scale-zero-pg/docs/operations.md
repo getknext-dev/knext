@@ -3146,6 +3146,12 @@ scale call.
 
 - **Gateway**: build a new image, `rollout restart deploy/pggw` — zero client impact
   beyond dropped in-flight pipes (clients reconnect).
+- **Operator render adds `resizePolicy` to per-app writers (#1108)**: the operator
+  upgrade that adds `resizePolicy` to the writer render changes every per-app writer
+  Deployment's pod template, so the next reconcile rolls each one. Because the writer
+  uses the `Recreate` strategy, expect a **single brief writer bounce** per app at
+  upgrade (idle/scaled-to-zero writers are unaffected). Roll during an idle window if a
+  momentary writer disconnect is disruptive.
 
 ### Releasing an OCIR image — digest pinning (issue #56)
 

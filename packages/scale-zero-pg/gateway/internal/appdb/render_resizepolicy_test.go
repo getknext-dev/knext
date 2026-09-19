@@ -19,10 +19,11 @@ func resizePolicyOf(t *testing.T, ps corev1.PodSpec) map[corev1.ResourceName]cor
 
 // TestRenderDeploymentEmitsResizePolicy is the #1108 fix guard: the per-app WRITER's
 // compute container must declare the cpu+memory NotRequired resizePolicy the template
-// carries (deploy/compute-app.template.yaml), so the writer-autoscaler grows/shrinks a
-// per-app writer's CPU+memory IN PLACE (no restart) instead of restarting it — mirroring
-// the template exactly. Mutation-proof: remove either entry from RenderDeployment and
-// this reds.
+// carries (deploy/compute-app.template.yaml), making the NotRequired guarantee explicit
+// (in-place vertical resize, no restart) and satisfying the writer-autoscaler prereq
+// rather than relying on the kubelet's implicit NotRequired default — a parity/
+// explicitness fix mirroring the template exactly. Mutation-proof: remove either entry
+// from RenderDeployment and this reds.
 func TestRenderDeploymentEmitsResizePolicy(t *testing.T) {
 	c := DefaultRenderConfig("scale-zero-pg")
 	dep := c.RenderDeployment(ComputeSpec{App: "parity", TenantID: "tenant", TimelineID: "timeline"})
