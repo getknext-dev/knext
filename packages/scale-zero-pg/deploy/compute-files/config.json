@@ -17,6 +17,10 @@
             ],
             "databases": [],
             "settings": [
+                { "name": "ssl", "value": "on", "vartype": "bool" },
+                { "name": "ssl_cert_file", "value": "/etc/pggw-compute-server-tls/tls.crt", "vartype": "string" },
+                { "name": "ssl_key_file", "value": "/tmp/pggw-server-tls.key", "vartype": "string" },
+                { "name": "ssl_ca_file", "value": "/etc/pggw-mtls-ca/ca.crt", "vartype": "string" },
                 {
                     "name": "fsync",
                     "value": "off",

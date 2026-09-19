@@ -136,6 +136,9 @@ spec:
             - { name: compute-http, containerPort: 3080 }
           volumeMounts:
             - { name: compute-files, mountPath: /compute-files }
+            # F5 phase 2 (ADR-0003): the per-app compute OFFERS TLS (paths match config.json ssl_* GUCs).
+            - { name: pggw-compute-server-tls, mountPath: /etc/pggw-compute-server-tls, readOnly: true }
+            - { name: pggw-mtls-ca, mountPath: /etc/pggw-mtls-ca, readOnly: true }
           # In-place vertical resize (#67/#103): the writer-autoscaler grows/shrinks
           # this per-app writer's cpu+memory LIVE (no restart) within its configured
           # bounds. NotRequired makes the zero-restart contract explicit. The pod
@@ -162,6 +165,19 @@ spec:
         - name: compute-files
           configMap:
             name: compute-files # shared spec template (54-compute-files.yaml); IDs come from env
+        # F5 phase 2 (ADR-0003): shared phase-1 mTLS Secrets (per ADR-0003 D3 the
+        # server cert is fleet-shared; its SANs cover *.scale-zero-pg.svc). optional ->
+        # certless dev cluster still schedules (entrypoint strips ssl GUCs -> plaintext).
+        - name: pggw-compute-server-tls
+          secret:
+            secretName: pggw-compute-server-tls
+            optional: true
+        - name: pggw-mtls-ca # project ca.crt ONLY — the CA private key must NOT reach compute pods
+          secret:
+            secretName: pggw-mtls-ca
+            optional: true
+            items:
+              - { key: ca.crt, path: ca.crt }
 ---
 apiVersion: v1
 kind: Service

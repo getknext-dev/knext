@@ -33,6 +33,69 @@
 # deliberately SKIPPED there (that single-tenant path is defended by NetworkPolicy +
 # operator posture, docs/operations.md "Network isolation caveat"). This keeps the base
 # DATABASE_URL / DATABASE_URL_RO cloud_admin-over-TCP paths working unchanged.
+# stage_tls_key (F5 phase 2, ADR-0003): make the compute OFFER TLS without Postgres
+# refusing to start on the key's file permissions. Postgres aborts at startup if
+# ssl_key_file is group/world-readable OR not owned by the DB user/root
+# ("private key file has group or world access"). A k8s Secret volume mounts the key
+# root-owned and world-readable (0644), which Postgres rejects — and a root-owned
+# 0600 mount the non-root postgres process could not even READ. So we COPY the
+# mounted key to a private path and chmod 600 it BEFORE compute_ctl starts Postgres:
+# this entrypoint already runs as the image's non-root `postgres` user (the compute
+# sets no runAsUser/fsGroup and PGDATA lives on the container fs, not a mounted
+# volume — so an fsGroup would neither be needed nor touch PGDATA), so the copy is
+# owned by that same postgres user with no group/world bits — Postgres's accepted
+# case — with ZERO securityContext change to the wake-critical boot. The server cert
+# and CA cert are public, so their GUCs point straight at the 0644 mounts.
+#
+# ssl=on is a RESTART-only GUC set via the compute_ctl spec (config.json
+# spec.cluster.settings), so it takes effect when compute_ctl starts Postgres — the
+# Recreate + 0<->N model satisfies that for free; there is NO post-boot reload path.
+#
+# OFFER-not-require + independently safe: ssl is enabled ONLY when BOTH the server key
+# AND the CA file are readable + non-empty. The server cert+key co-arrive in ONE Secret
+# (pggw-compute-server-tls), but the CA is a SEPARATE `optional: true` Secret mounted at
+# $SERVER_CA_SRC (ssl_ca_file). If we enabled ssl on the key alone and the CA were
+# absent/empty, Postgres would FATAL in be_tls_init ("could not load root certificate
+# file") and crash-loop that DB. So we gate on ALL required files: everything present ->
+# serve TLS; ANYTHING missing/empty -> STRIP the four ssl GUCs from the rendered spec and
+# boot PLAINTEXT rather than crash-loop (a bare local cluster without cert-manager mounts
+# neither Secret; the volumes are `optional: true` so the pod still schedules). A missing
+# or PARTIAL cert set therefore never crashes. pg_hba is untouched either way (its
+# TLS-required rewrite is a later phase), so an existing plaintext gateway connection
+# keeps working.
+SERVER_KEY_SRC=/etc/pggw-compute-server-tls/tls.key
+SERVER_KEY_DST=/tmp/pggw-server-tls.key
+SERVER_CA_SRC=/etc/pggw-mtls-ca/ca.crt
+stage_tls_key() {
+  _spec="${1:?stage_tls_key needs the rendered compute_ctl spec path}"
+  if [ -r "$SERVER_KEY_SRC" ] && [ -s "$SERVER_KEY_SRC" ] && \
+     [ -r "$SERVER_CA_SRC" ]  && [ -s "$SERVER_CA_SRC" ]; then
+    cp "$SERVER_KEY_SRC" "$SERVER_KEY_DST"
+    chmod 600 "$SERVER_KEY_DST"
+    echo "F5 phase 2: staged compute server TLS key -> $SERVER_KEY_DST (0600, postgres-owned); server cert + CA present; Postgres serves ssl=on"
+  else
+    # Key or CA missing/empty -> drop the ssl GUCs so Postgres boots plaintext. JSON-aware
+    # and ORDER-INDEPENDENT: remove each single-line ssl-GUC object, then strip any comma
+    # left dangling immediately before an array/object close. A plain `grep -v` was only
+    # valid while the four ssl GUCs were the FIRST array elements — reordering them to the
+    # tail would leave the previous element's trailing comma before `]`, i.e. invalid JSON
+    # and a crash. This awk is correct regardless of the GUCs' position; the compute image
+    # ships no jq/python3, so the removal stays in awk (available) and is self-repairing.
+    awk '
+      /^[[:space:]]*\{[[:space:]]*"name":[[:space:]]*"ssl/ { next }
+      {
+        if (have) {
+          if ($0 ~ /^[[:space:]]*[]}]/ && prev ~ /,[[:space:]]*$/) sub(/,[[:space:]]*$/, "", prev)
+          print prev
+        }
+        prev = $0; have = 1
+      }
+      END { if (have) print prev }
+    ' "$_spec" > "$_spec.notls" && mv "$_spec.notls" "$_spec"
+    echo "F5 phase 2: server TLS key or CA missing/empty ($SERVER_KEY_SRC, $SERVER_CA_SRC) — removed ssl GUCs; compute boots PLAINTEXT (offer-not-require, independently safe)"
+  fi
+}
+
 harden_pg_hba() {
   HBA="${PGDATA:-/var/db/postgres/compute}/pg_hba.conf"
   PSQL="psql -h localhost -p 55433 -U cloud_admin -d postgres -tAc"

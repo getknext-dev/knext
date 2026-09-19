@@ -1428,7 +1428,7 @@ or your org CA); swap the Secret contents and clients can then verify.
 `deploy/10-gateway.yaml` and restart. `SSLRequest` then gets `N` again and only
 `sslmode=disable` clients connect.
 
-### Gateway→compute mTLS — cert-manager prerequisite (to be activated later)
+### Gateway→compute mTLS — cert-manager prerequisite (compute now offers TLS; gateway leg still plaintext)
 
 The section above is the **front-door** (client→gateway) TLS. The **gateway→compute**
 hop is a separate leg and is still **plaintext today** — SCRAM material and query
@@ -1457,10 +1457,28 @@ operator depends on it for its webhook cert). If cert-manager is absent, applyin
 deliberate: absent cert infra must never fall through to a later phase that then runs
 plaintext.
 
-**This does not encrypt the gateway→compute hop yet.** Mounting the certs into the
-compute and switching the gateway to a TLS client are later phases. **Until those
-land, keep the plaintext-hop caveat** on any encryption/isolation claim for the
-gateway→compute leg (see "Network isolation caveat" below).
+**The compute now OFFERS TLS (rollout phase 2).** The compute sets `ssl=on` plus
+`ssl_cert_file`/`ssl_key_file`/`ssl_ca_file` through the `compute_ctl` spec
+(`config.json` `spec.cluster.settings`) and mounts `pggw-compute-server-tls` +
+`pggw-mtls-ca` (CA cert only) at `/etc/pggw-compute-server-tls` and
+`/etc/pggw-mtls-ca`. A `sslmode=require` client can therefore now establish an
+encrypted session to the compute. The server key is copied to a private `0600`
+postgres-owned path at boot (Postgres refuses a group/world-readable key); a cluster
+without cert-manager keeps booting plaintext (the cert mounts are `optional`). This
+is **OFFER, not require** — `pg_hba` is unchanged (`host … scram`), so existing
+plaintext connections keep working and phase 2 is independently safe.
+
+**The gateway→compute hop is still plaintext end-to-end.** The gateway is not yet a
+TLS client (that is the next phase), so even though the compute can serve TLS, the
+always-on gateway still dials it in cleartext — the hop is plaintext until that phase
+lands. **Keep the plaintext-hop caveat** on any encryption/isolation claim for the
+gateway→compute leg (see "Network isolation caveat" below) until then.
+
+**Live verification (lead-owned).** `deploy/_verify-tls.sh` proves the *front-door*
+(client↔gateway) TLS; the compute's new `sslmode=require` acceptance is proven on the
+OKE/kind cluster (a direct in-cluster `sslmode=require` psql to the compute Service,
+confirming an encrypted session) — it cannot run from a workstation without the
+cluster.
 
 ## Peer-scrape token rotation
 

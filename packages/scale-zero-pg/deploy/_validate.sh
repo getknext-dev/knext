@@ -909,6 +909,123 @@ fi
 ok "F5 phase-1 mTLS cert infrastructure ships (cert-manager CA + shared server/client leaves, shared trust root, auto-rotating; fail-closed on missing infra) — ADR-0003"
 
 # ---------------------------------------------------------------------------
+# 34. contract (F5 phase 2, ADR-0003): the compute OFFERS TLS — ssl=on + the
+#     server cert/key/CA wired through the compute_ctl GUC channel, the two
+#     phase-1 Secrets mounted at the paths the GUCs name, and the server key
+#     staged to a private 0600 path so Postgres does not refuse to start
+#     ("private key file has group or world access"). A path mismatch between a
+#     GUC and its mount = silent no-TLS or a crash-loop, so the paths are asserted
+#     to MATCH. pg_hba is deliberately NOT touched here (phase 4 enforces
+#     clientcert=verify-full); plaintext still works (offer-not-require), so
+#     phase 2 is independently safe.
+SRVMNT=/etc/pggw-compute-server-tls
+CAMNT=/etc/pggw-mtls-ca
+KEYDST=/tmp/pggw-server-tls.key
+for cfg in compute-files/config.json 54-compute-files.yaml; do
+  grep -q '"name": "ssl", "value": "on"' "$cfg" || fail "$cfg must set ssl=on in spec.cluster.settings (F5 phase 2 — compute serves TLS; restart-only GUC applied by compute_ctl at boot)"
+  grep -q "\"name\": \"ssl_cert_file\", \"value\": \"$SRVMNT/tls.crt\"" "$cfg" || fail "$cfg ssl_cert_file GUC must equal the pggw-compute-server-tls mount ($SRVMNT/tls.crt) — a path mismatch = silent no-TLS/crash"
+  grep -q "\"name\": \"ssl_key_file\", \"value\": \"$KEYDST\"" "$cfg" || fail "$cfg ssl_key_file GUC must point at the staged 0600 key ($KEYDST) — see lib-harden.sh stage_tls_key"
+  grep -q "\"name\": \"ssl_ca_file\", \"value\": \"$CAMNT/ca.crt\"" "$cfg" || fail "$cfg ssl_ca_file GUC must equal the pggw-mtls-ca mount ($CAMNT/ca.crt)"
+done
+# config.json must remain valid JSON with the ssl GUCs present.
+if command -v python3 >/dev/null 2>&1; then
+  python3 -c 'import json; json.load(open("compute-files/config.json"))' 2>/dev/null || fail "compute-files/config.json is not valid JSON after adding the ssl GUCs (F5 phase 2)"
+fi
+# the server key is staged to a private 0600 path owned by the running postgres
+# user (no securityContext change) — Postgres refuses a group/world-readable key.
+grep -q 'stage_tls_key()' compute-files/lib-harden.sh || fail "lib-harden.sh must define stage_tls_key() (F5 phase 2 key-perms: copy the mounted key to a 0600 postgres-owned path before compute_ctl starts Postgres)"
+grep -q 'stage_tls_key' 54-compute-files.yaml || fail "54-compute-files.yaml (inlined lib-harden) must embed stage_tls_key (F5 phase 2)"
+grep -q 'chmod 600' compute-files/lib-harden.sh || fail "lib-harden.sh stage_tls_key must chmod 600 the staged key (Postgres rejects a group/world-readable ssl_key_file)"
+grep -q "$SRVMNT/tls.key" compute-files/lib-harden.sh || fail "lib-harden.sh stage_tls_key must copy FROM the mounted server key ($SRVMNT/tls.key)"
+grep -q "$KEYDST" compute-files/lib-harden.sh || fail "lib-harden.sh stage_tls_key must stage the key TO $KEYDST (matching the ssl_key_file GUC)"
+# CRASH-LOOP GUARD: ssl must be enabled only when BOTH the server key AND the CA file are
+# present. The CA ($CAMNT/ca.crt) is a SEPARATE optional Secret; ssl=on with a missing
+# ssl_ca_file FATALs in be_tls_init. Assert stage_tls_key gates on the CA source too.
+grep -q "SERVER_CA_SRC=$CAMNT/ca.crt" compute-files/lib-harden.sh || fail "lib-harden.sh stage_tls_key must gate ssl-enable on the CA file ($CAMNT/ca.crt via SERVER_CA_SRC) — ssl=on with a missing ssl_ca_file crash-loops (be_tls_init FATAL)"
+grep -q '\[ -r "\$SERVER_CA_SRC" \]' compute-files/lib-harden.sh || fail "lib-harden.sh stage_tls_key must test the CA file readable (\[ -r \"\$SERVER_CA_SRC\" \]) before enabling ssl — otherwise a present cert + absent CA crash-loops"
+# The plaintext-fallback strip must be JSON-aware/order-independent (awk self-repairing
+# the dangling comma), NOT a position-dependent `grep -v` that breaks if the ssl GUCs are
+# reordered off the head of the array.
+grep -q 'grep -v .*"name": "ssl' compute-files/lib-harden.sh && fail "lib-harden.sh stage_tls_key must NOT strip the ssl GUCs with a position-dependent 'grep -v' — a reorder leaves a dangling comma / invalid JSON. Use the order-independent awk removal." || true
+for e in entrypoint.sh entrypoint-ro.sh entrypoint-warm.sh; do
+  grep -q 'stage_tls_key' "compute-files/$e" || fail "compute-files/$e must call stage_tls_key before exec compute_ctl (F5 phase 2)"
+done
+# INLINE-54 BYTE CONSISTENCY (not just token presence): the ConfigMap 54 ships is the copy
+# that actually runs on the compute; a body drift (wrong perm/path/gate) in the inline copy
+# would pass a mere grep. Extract the inline lib-harden.sh + config.json blocks, strip the
+# 4-space YAML block indent, and assert BYTE-identical to the compute-files/ sources — so
+# the CA gate + chmod 600 + staged path + JSON-safe strip are provably the same in both.
+_il_lh=$(awk 'f && /^kind:/ {exit} f {sub(/^    /,""); print} /^  lib-harden\.sh: \|/ {f=1}' 54-compute-files.yaml)
+if [ "$_il_lh" != "$(cat compute-files/lib-harden.sh)" ]; then
+  fail "54-compute-files.yaml inline lib-harden.sh has DRIFTED from compute-files/lib-harden.sh — regenerate the ConfigMap (see the header comment). The inline copy is what runs; a body drift ships the wrong TLS gate."
+fi
+_il_cfg=$(awk 'f && /^  entrypoint-ro\.sh: \|/ {exit} f {sub(/^    /,""); print} /^  config\.json: \|/ {f=1}' 54-compute-files.yaml)
+if [ "$_il_cfg" != "$(cat compute-files/config.json)" ]; then
+  fail "54-compute-files.yaml inline config.json has DRIFTED from compute-files/config.json — regenerate the ConfigMap; the inline spec (incl. the 4 ssl GUCs) is what compute_ctl renders."
+fi
+# RUNTIME MUTATION-PROOF of the crash-loop fix + the JSON-safe strip. Source stage_tls_key,
+# point its file gates at temp paths, and exercise the two failure classes the review found:
+#   (A) server key PRESENT but CA ABSENT  -> must STRIP the ssl GUCs (plaintext), never leave
+#       a dangling ssl_ca_file (that is the crash-loop). Reverting Fix 1 leaves ssl in -> RED.
+#   (B) ssl GUCs at the TAIL of the array -> the strip must still yield VALID JSON. Reverting
+#       Fix 2 to `grep -v` leaves a dangling comma -> invalid JSON -> RED.
+if command -v python3 >/dev/null 2>&1; then
+  _tdir=$(mktemp -d)
+  ( # subshell: variable overrides do not leak into the rest of _validate.sh
+    . ./compute-files/lib-harden.sh
+    SERVER_KEY_DST="$_tdir/staged.key"
+    # (A) key present + CA absent
+    SERVER_KEY_SRC="$_tdir/tls.key"; printf 'KEY' > "$SERVER_KEY_SRC"
+    SERVER_CA_SRC="$_tdir/ca.crt"   # deliberately not created (absent)
+    cp compute-files/config.json "$_tdir/a.json"
+    stage_tls_key "$_tdir/a.json" >/dev/null
+    if grep -q '"name": "ssl' "$_tdir/a.json"; then
+      echo "FAIL: stage_tls_key left ssl GUCs when the CA is absent (crash-loop: ssl=on + missing ssl_ca_file) — Fix 1 regression" >&2; exit 3
+    fi
+    python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$_tdir/a.json" 2>/dev/null || { echo "FAIL: CA-absent strip produced invalid JSON" >&2; exit 3; }
+    # (B) ssl GUCs moved to the TAIL of settings (single-line form, as the real spec ships
+    # them), both key+CA absent -> the strip must still yield VALID JSON. A `grep -v` here
+    # would leave the previous element's trailing comma dangling before `]`.
+    cat > "$_tdir/tail.json" <<'JSON'
+{
+    "spec": {
+        "cluster": {
+            "settings": [
+                { "name": "fsync", "value": "off", "vartype": "bool" },
+                { "name": "port", "value": "55433", "vartype": "integer" },
+                { "name": "ssl", "value": "on", "vartype": "bool" },
+                { "name": "ssl_cert_file", "value": "/etc/pggw-compute-server-tls/tls.crt", "vartype": "string" },
+                { "name": "ssl_key_file", "value": "/tmp/pggw-server-tls.key", "vartype": "string" },
+                { "name": "ssl_ca_file", "value": "/etc/pggw-mtls-ca/ca.crt", "vartype": "string" }
+            ]
+        }
+    }
+}
+JSON
+    SERVER_KEY_SRC="$_tdir/nokey"   # absent
+    stage_tls_key "$_tdir/tail.json" >/dev/null
+    grep -q '"name": "ssl' "$_tdir/tail.json" && { echo "FAIL: ssl GUCs not removed from tail layout" >&2; exit 3; }
+    python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$_tdir/tail.json" 2>/dev/null || { echo "FAIL: tail-layout strip produced INVALID JSON — order-dependent strip (Fix 2 regression)" >&2; exit 3; }
+  ) || fail "stage_tls_key runtime mutation-proof failed (see FAIL line above) — F5 phase 2 crash-loop / JSON-safe strip"
+  rm -rf "$_tdir"
+fi
+# every compute manifest that runs Postgres mounts both phase-1 Secrets at the
+# GUC paths; the CA Secret projects ONLY ca.crt (the CA private key must NOT be
+# distributed to compute pods).
+for m in 20-compute.yaml 25-compute-warm.yaml 26-compute-ro.yaml compute-app.template.yaml; do
+  grep -q 'secretName: pggw-compute-server-tls' "$m" || fail "$m must mount the pggw-compute-server-tls Secret (server cert/key) — F5 phase 2"
+  grep -q 'secretName: pggw-mtls-ca' "$m" || fail "$m must mount the pggw-mtls-ca Secret (CA) — F5 phase 2"
+  grep -q "mountPath: $SRVMNT" "$m" || fail "$m must mount the server cert at $SRVMNT (matches ssl_cert_file/ssl_key_file GUC dir)"
+  grep -q "mountPath: $CAMNT" "$m" || fail "$m must mount the CA at $CAMNT (matches ssl_ca_file GUC dir)"
+  grep -q 'key: ca.crt' "$m" || fail "$m must project ONLY ca.crt from pggw-mtls-ca (the CA private key must not reach compute pods)"
+done
+# pg_hba enforcement stays PHASE 4: lib-harden must NOT yet REWRITE pg_hba to
+# require TLS. Guard the exact enforcement token clientcert=verify-full (phase 4
+# adds it); phase 2 leaves the pg_hba catch-all as `host … scram` (plaintext allowed).
+grep -q 'clientcert=verify-full' compute-files/lib-harden.sh && fail "lib-harden.sh must NOT add clientcert=verify-full yet — that is phase 4; phase 2 leaves pg_hba as host (plaintext still allowed, independently safe)" || true
+ok "F5 phase-2 compute serves TLS (ssl=on + cert/key/CA via GUCs matching the mounts; key staged 0600; pg_hba untouched → plaintext still works) — ADR-0003"
+
+# ---------------------------------------------------------------------------
 # Summary (#797): every contract above has been EVALUATED — nothing exits early.
 # One aggregated report, one CI-faithful exit code: 0 only if every contract
 # passed, 1 if any failed (the EXIT trap catches anything that dies before here).
