@@ -113,8 +113,39 @@ This is a cluster-operator action on a separate resource, not an app setting, so
 yours to make — but it is the half that is easy to forget. Two things worth knowing: the windows
 are declared **twice and reconciled nowhere**, so if the two drift apart nothing will tell you; and
 the database hold is best-effort and **never gates serving** — if it cannot be established, the app
-falls back to an ordinary cold wake rather than failing. See [Databases](/docs/databases) for the
-always-on alternative when your traffic has no predictable peak to schedule around.
+falls back to an ordinary cold wake rather than failing.
+
+**Two more per-database warmth knobs, for when a schedule is not the right shape.** Beyond
+`warmSchedule`, an `AppDatabase` for a `scale-zero-pg`-managed database exposes two per-app levers:
+
+- **`spec.idleDelay`** — how long *this* database stays awake after its last connection closes
+  before it scales back to zero. It defaults to the cluster-wide idle window (60 s), and you raise
+  it per app to line the database's idle window up with how long the app itself stays warm. If the
+  app is held warm for five minutes after its last request but its database sleeps after sixty
+  seconds, the first query once the app is warm again still pays a database wake — `idleDelay: 5m`
+  closes that gap for this one database instead of lengthening the idle window for every database on
+  the cluster. It only lengthens the *idle* window; the first query after the database has actually
+  slept still pays a cold wake. It takes a Go duration (`30s`, `5m`, `2h`) and is **capped at six
+  hours** — a longer hold is an always-warm intent, so use `alwaysWarm` for that.
+
+- **`spec.alwaysWarm: true`** — hold one database compute awake around the clock, so no query ever
+  pays a cold wake. It is the database-side counterpart of `minScale: 1` on the app: the same
+  always-on trade, symmetric with a warm app pod, and the always-on alternative to a schedule when
+  your traffic has no predictable peak to warm around. It costs one compute's CPU and memory
+  reserved 24/7 (plus one held connection on the shared database gateway), so turn it on only for
+  the apps whose database wake users actually feel.
+
+```yaml
+# on the AppDatabase for a scale-zero-pg-managed database — pick the lever you need
+spec:
+  idleDelay: 5m         # cold tier: keep this database awake 5m after its last connection (default 60s)
+  # alwaysWarm: true    # …or hold one compute awake 24/7 so no query ever pays a cold wake
+```
+
+Like `warmSchedule`, both live on a separate cluster resource and may not be yours to set, and the
+warm hold is best-effort — it **never gates serving**, so a database that cannot be held warm falls
+back to an ordinary cold wake rather than failing. See [Databases](/docs/databases) for how the
+binding and the database connection's own security fit together.
 
 ### 2. Latency-sensitive with unpredictable traffic
 
