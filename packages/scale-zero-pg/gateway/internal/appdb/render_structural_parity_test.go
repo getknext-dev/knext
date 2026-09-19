@@ -31,7 +31,8 @@ import (
 // NAME for plain-value env), volume mounts (name+path+readOnly), ports (name+port),
 // readiness/liveness/startup probes (handler+thresholds), container securityContext
 // presence, resource-key PRESENCE; and pod-level: securityContext (seccomp +
-// runAsNonRoot), terminationGracePeriodSeconds, volumes (name+source+optional+items).
+// runAsNonRoot), terminationGracePeriodSeconds, volumes (name+source+optional+items,
+// where each item is compared as key->path so a key-to-filename remap is caught).
 //
 // It compares STRUCTURE/keys, deliberately NOT certain value classes. The list below
 // is EXHAUSTIVE for what is excluded: a field is either projected above or named here
@@ -175,7 +176,11 @@ func describeVolume(v corev1.Volume) string {
 		}
 		var items []string
 		for _, it := range v.Secret.Items {
-			items = append(items, it.Key)
+			// Project BOTH the source Key and the on-disk Path: for the mTLS CA the
+			// filename is security-relevant (config.json's ssl_* GUCs read ca.crt at a
+			// fixed name), so a key->path remap is exactly the F5 drift class this guard
+			// exists to catch. Projecting Key alone left it invisible.
+			items = append(items, it.Key+"->"+it.Path)
 		}
 		sort.Strings(items)
 		return v.Name + "|secret/" + v.Secret.SecretName + "|opt=" + opt + "|items=" + strings.Join(items, ",")
