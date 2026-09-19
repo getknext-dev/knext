@@ -182,13 +182,8 @@ cluster without cert-manager, set `GW_COMPUTE_TLS=false` on the gateway to run t
 instead — otherwise the gateway fails closed and refuses computes that cannot present a certificate.
 </Callout>
 
-<Callout type="info">
-**Use plain SCRAM through the gateway.** Because the gateway terminates TLS, SCRAM-SHA-256 password
-authentication works transparently, but SCRAM-SHA-256-PLUS **channel binding** does not — the
-binding is measured against the gateway's certificate rather than the database's, so a client that
-insists on channel binding fails across the proxy. Most drivers negotiate this automatically; if
-yours forces channel binding, set `channel_binding=disable` in the DSN.
-</Callout>
+Your DSN is unchanged either way: SCRAM-SHA-256 password authentication works transparently through
+the gateway.
 
 ## Related
 

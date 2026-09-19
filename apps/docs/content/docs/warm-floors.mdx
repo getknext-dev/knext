@@ -125,8 +125,9 @@ falls back to an ordinary cold wake rather than failing.
   seconds, the first query once the app is warm again still pays a database wake — `idleDelay: 5m`
   closes that gap for this one database instead of lengthening the idle window for every database on
   the cluster. It only lengthens the *idle* window; the first query after the database has actually
-  slept still pays a cold wake. It takes a Go duration (`30s`, `5m`, `2h`) and is **capped at six
-  hours** — a longer hold is an always-warm intent, so use `alwaysWarm` for that.
+  slept still pays a cold wake. It takes a Go duration (`30s`, `5m`, `2h`); values over **six hours
+  are rejected** — the database reports an invalid-idle-delay error and stops provisioning, because a
+  longer hold is an always-warm intent, so use `alwaysWarm` for that.
 
 - **`spec.alwaysWarm: true`** — hold one database compute awake around the clock, so no query ever
   pays a cold wake. It is the database-side counterpart of `minScale: 1` on the app: the same
