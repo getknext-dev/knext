@@ -41,6 +41,7 @@ func newAppsGateway(t *testing.T) *Gateway {
 	// GW_TARGET_TEMPLATE is unreachable on purpose: if authz let a startup
 	// through, the wake path would surface a DIFFERENT code (57P03), never 28P01.
 	gw, err := New(wake.Env{
+		"GW_COMPUTE_TLS":             "false", // fake backends speak PLAINTEXT Postgres (F5 phase-3 backend TLS is covered in internal/wake + New's wiring test)
 		"GW_COMPUTE_MODE":            "template",
 		"GW_K8S_DEPLOYMENT_TEMPLATE": "compute-{system}",
 		"GW_TARGET_TEMPLATE":         "127.0.0.1:1",

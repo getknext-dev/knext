@@ -67,6 +67,7 @@ func (erroringPeers) ActiveConnections(context.Context, string) (int, error) {
 // NOT be counted as a success (no double-count / no regression of SleepsTotal).
 func TestSleepFailureIncrementsFailureMetric(t *testing.T) {
 	gw, err := New(wake.Env{
+		"GW_COMPUTE_TLS":  "false", // fake backends speak PLAINTEXT Postgres (F5 phase-3 backend TLS is covered in internal/wake + New's wiring test)
 		"GW_COMPUTE_MODE": "exec",
 		"GW_TARGET":       "127.0.0.1:1",
 		"GW_WAKE_CMD":     "true",
@@ -113,6 +114,7 @@ func TestSleepFailureIncrementsFailureMetric(t *testing.T) {
 // A wake-back failure after the sleep-race must increment its own failure counter.
 func TestWakeBackFailureIncrementsFailureMetric(t *testing.T) {
 	gw, err := New(wake.Env{
+		"GW_COMPUTE_TLS":  "false", // fake backends speak PLAINTEXT Postgres (F5 phase-3 backend TLS is covered in internal/wake + New's wiring test)
 		"GW_COMPUTE_MODE": "exec",
 		"GW_TARGET":       "127.0.0.1:1",
 		"GW_WAKE_CMD":     "true",
@@ -150,6 +152,7 @@ func TestWakeBackFailureIncrementsFailureMetric(t *testing.T) {
 // persistent peer-scrape outage (which pins the whole fleet awake) is alertable.
 func TestPeerCheckFailureIncrementsFailureMetric(t *testing.T) {
 	gw, err := New(wake.Env{
+		"GW_COMPUTE_TLS":  "false", // fake backends speak PLAINTEXT Postgres (F5 phase-3 backend TLS is covered in internal/wake + New's wiring test)
 		"GW_COMPUTE_MODE": "exec",
 		"GW_TARGET":       "127.0.0.1:1",
 		"GW_WAKE_CMD":     "true",

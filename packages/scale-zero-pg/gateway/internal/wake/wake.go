@@ -95,6 +95,14 @@ type Opts struct {
 	// coalesced, and each caller still opens its OWN backend connection after the
 	// shared wake lands.
 	Coalescer *WakeCoalescer
+
+	// BackendTLS, when non-nil, makes every backend dial a TLS-client dial (F5
+	// phase 3, ADR-0003): SSLRequest -> 'S' -> tls.Client, verified against the
+	// shared mTLS CA and presenting the gateway client leaf. nil = plaintext
+	// (the GW_COMPUTE_TLS=false dev opt-out). Applied INSIDE TryConnect, so the
+	// warm fast path and the cold-wake poll below both get it and a handshake
+	// failure is retried by the existing wake loop instead of being fatal.
+	BackendTLS *BackendTLS
 }
 
 // Driver is the mode-agnostic compute interface.
@@ -379,9 +387,11 @@ func MakeDriverWithScaler(env Env, scaler Scaler) (Driver, error) {
 	return nil, fmt.Errorf("unknown GW_COMPUTE_MODE=%s", mode)
 }
 
-// TryConnect opens a TCP connection with a timeout.
+// TryConnect opens a PLAINTEXT TCP connection with a timeout. Production
+// callers go through TryConnectTLS (backendtls.go), which adds the F5 phase-3
+// SSLRequest + TLS-client upgrade when GW_COMPUTE_TLS is on.
 func TryConnect(t Target, timeout time.Duration) (net.Conn, error) {
-	return net.DialTimeout("tcp", fmt.Sprintf("%s:%d", t.Host, t.Port), timeout)
+	return TryConnectTLS(t, timeout, nil)
 }
 
 // ConnectWithWake connects to the target, waking the compute if it is asleep. A
@@ -397,7 +407,7 @@ func ConnectWithWake(ctx context.Context, driver Driver, t Target, opts Opts, on
 	retry := time.Duration(opts.RetryMs) * time.Millisecond
 	deadline := time.Now().Add(time.Duration(opts.WakeTimeoutMs) * time.Millisecond)
 
-	if c, e := TryConnect(t, connectTimeout); e == nil {
+	if c, e := TryConnectTLS(t, connectTimeout, opts.BackendTLS); e == nil {
 		return c, false, 0, nil
 	}
 
@@ -444,7 +454,7 @@ func ConnectWithWake(ctx context.Context, driver Driver, t Target, opts Opts, on
 		return nil, false, 0, wakeErr
 	}
 	for {
-		c, e := TryConnect(t, connectTimeout)
+		c, e := TryConnectTLS(t, connectTimeout, opts.BackendTLS)
 		if e == nil {
 			return c, true, time.Since(wakeStart).Milliseconds(), nil
 		}

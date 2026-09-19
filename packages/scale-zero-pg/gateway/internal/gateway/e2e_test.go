@@ -195,6 +195,7 @@ func TestE2EWakeOnConnectFullLoop(t *testing.T) {
 	defer close(stopPoller)
 
 	env := wake.Env{
+		"GW_COMPUTE_TLS":        "false", // fake backends speak PLAINTEXT Postgres (F5 phase-3 backend TLS is covered in internal/wake + New's wiring test)
 		"GW_COMPUTE_MODE":       "exec",
 		"GW_TARGET":             fmt.Sprintf("127.0.0.1:%d", fc.port),
 		"GW_WAKE_CMD":           "touch " + flag,

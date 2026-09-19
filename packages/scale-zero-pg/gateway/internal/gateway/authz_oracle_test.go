@@ -51,6 +51,7 @@ func (s *notFoundScaler) scaledDeployments() []string {
 func newAppsGatewayScaled(t *testing.T, scaler *notFoundScaler, floorMs string) (*Gateway, string) {
 	t.Helper()
 	env := wake.Env{
+		"GW_COMPUTE_TLS":             "false", // fake backends speak PLAINTEXT Postgres (F5 phase-3 backend TLS is covered in internal/wake + New's wiring test)
 		"GW_COMPUTE_MODE":            "template",
 		"GW_K8S_DEPLOYMENT_TEMPLATE": "compute-{system}",
 		"GW_TARGET_TEMPLATE":         "127.0.0.1:1", // refused -> TryConnect fails fast

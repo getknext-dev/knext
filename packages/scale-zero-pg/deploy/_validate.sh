@@ -1026,6 +1026,31 @@ grep -q 'clientcert=verify-full' compute-files/lib-harden.sh && fail "lib-harden
 ok "F5 phase-2 compute serves TLS (ssl=on + cert/key/CA via GUCs matching the mounts; key staged 0600; pg_hba untouched → plaintext still works) — ADR-0003"
 
 # ---------------------------------------------------------------------------
+# 35. contract (F5 phase 3, ADR-0003): the gateway is the TLS CLIENT on the
+#     backend leg. BOTH gateway manifests must carry GW_COMPUTE_TLS=true (the
+#     shipped fail-closed default — a compute answering 'N' is REFUSED, never
+#     downgraded), name the CA + client keypair, and MOUNT the phase-1 Secrets
+#     at exactly the directories those env vars name. A path mismatch between an
+#     env var and its mount = every backend dial fails closed (an outage), so the
+#     paths are asserted to MATCH, the same way the phase-2 GUC↔mount parity is.
+#     The CA Secret projects ca.crt ONLY — the CA private key must never reach a
+#     gateway pod.
+GWCA=/etc/pggw-mtls-ca
+GWCLI=/etc/pggw-client-tls
+for m in 10-gateway.yaml 81-apps-gateway.yaml; do
+  grep -A1 'name: GW_COMPUTE_TLS' "$m" | grep -q 'value: "true"' || fail "$m must set GW_COMPUTE_TLS=\"true\" (F5 phase 3 — the gateway REQUIRES TLS to the compute; shipping anything else is a silent plaintext data path)"
+  grep -A1 'name: GW_COMPUTE_CA_FILE' "$m" | grep -q "value: \"$GWCA/ca.crt\"" || fail "$m GW_COMPUTE_CA_FILE must equal the pggw-mtls-ca mount ($GWCA/ca.crt)"
+  grep -A1 'name: GW_COMPUTE_CLIENT_CERT_FILE' "$m" | grep -q "value: \"$GWCLI/tls.crt\"" || fail "$m GW_COMPUTE_CLIENT_CERT_FILE must equal the client-leaf mount ($GWCLI/tls.crt)"
+  grep -A1 'name: GW_COMPUTE_CLIENT_KEY_FILE' "$m" | grep -q "value: \"$GWCLI/tls.key\"" || fail "$m GW_COMPUTE_CLIENT_KEY_FILE must equal the client-leaf mount ($GWCLI/tls.key)"
+  grep -q 'secretName: pggw-gateway-client-tls' "$m" || fail "$m must mount the pggw-gateway-client-tls Secret (the gateway clientAuth leaf) — F5 phase 3"
+  grep -q 'secretName: pggw-mtls-ca' "$m" || fail "$m must mount the pggw-mtls-ca Secret (CA that verifies the compute server cert) — F5 phase 3"
+  grep -q "mountPath: $GWCLI" "$m" || fail "$m must mount the client leaf at $GWCLI (matches GW_COMPUTE_CLIENT_CERT_FILE/KEY_FILE)"
+  grep -q "mountPath: $GWCA" "$m" || fail "$m must mount the CA at $GWCA (matches GW_COMPUTE_CA_FILE)"
+  grep -q 'key: ca.crt' "$m" || fail "$m must project ONLY ca.crt from pggw-mtls-ca (the CA private key must not reach gateway pods)"
+done
+ok "F5 phase-3 gateway requires TLS on the backend leg (GW_COMPUTE_TLS=true + CA/client-leaf env matching the mounts, ca.crt-only projection) — ADR-0003"
+
+# ---------------------------------------------------------------------------
 # Summary (#797): every contract above has been EVALUATED — nothing exits early.
 # One aggregated report, one CI-faithful exit code: 0 only if every contract
 # passed, 1 if any failed (the EXIT trap catches anything that dies before here).

@@ -41,6 +41,7 @@ func (d *oracleDriver) Authorize(user, database string) error { return nil }
 func gatewayWithDriver(t *testing.T, d wake.Driver) *Gateway {
 	t.Helper()
 	gw, err := New(wake.Env{
+		"GW_COMPUTE_TLS":        "false", // fake backends speak PLAINTEXT Postgres (F5 phase-3 backend TLS is covered in internal/wake + New's wiring test)
 		"GW_COMPUTE_MODE":       "static",
 		"GW_TARGET":             "127.0.0.1:1",
 		"GW_WAKE_TIMEOUT_MS":    "300",
@@ -146,6 +147,7 @@ func TestAppsGatewayNoExistenceOracle(t *testing.T) {
 // front door and must not regress the primary gateway's operability.
 func TestNonMaskingDriverKeepsDiagnostic(t *testing.T) {
 	gw, err := New(wake.Env{
+		"GW_COMPUTE_TLS":        "false", // fake backends speak PLAINTEXT Postgres (F5 phase-3 backend TLS is covered in internal/wake + New's wiring test)
 		"GW_COMPUTE_MODE":       "exec",
 		"GW_TARGET":             "127.0.0.1:1",
 		"GW_WAKE_CMD":           "false", // wake fails

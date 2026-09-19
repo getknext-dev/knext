@@ -65,6 +65,7 @@ func writeTestCert(t *testing.T) (certFile, keyFile string) {
 func startTLSGateway(t *testing.T, fc *fakeCompute, extra wake.Env) (addr string, gw *Gateway) {
 	t.Helper()
 	env := wake.Env{
+		"GW_COMPUTE_TLS":        "false", // fake backends speak PLAINTEXT Postgres (F5 phase-3 backend TLS is covered in internal/wake + New's wiring test)
 		"GW_COMPUTE_MODE":       "static",
 		"GW_TARGET":             fmt.Sprintf("127.0.0.1:%d", fc.port),
 		"GW_WAKE_TIMEOUT_MS":    "5000",
@@ -205,6 +206,7 @@ func TestHandleTLSUnconfiguredDeclines(t *testing.T) {
 // (fail-fast at startup), and a half-configured pair is rejected too.
 func TestNewTLSFailFast(t *testing.T) {
 	base := wake.Env{
+		"GW_COMPUTE_TLS":  "false", // fake backends speak PLAINTEXT Postgres (F5 phase-3 backend TLS is covered in internal/wake + New's wiring test)
 		"GW_COMPUTE_MODE": "static",
 		"GW_TARGET":       "127.0.0.1:1",
 	}

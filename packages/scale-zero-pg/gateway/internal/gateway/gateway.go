@@ -253,6 +253,13 @@ func New(env wake.Env, log func(string)) (*Gateway, error) {
 	if err != nil {
 		return nil, err
 	}
+	// F5 phase 3 (ADR-0003): the BACKEND leg (gateway->compute). Default ON —
+	// GW_COMPUTE_TLS=false is the plaintext dev opt-out. Half-configured fails
+	// fast here, exactly like the front-door loadTLS above.
+	backendTLS, err := wake.NewBackendTLSFromEnv(env)
+	if err != nil {
+		return nil, err
+	}
 	g := &Gateway{
 		driver:  driver,
 		metrics: metrics.NewMetrics(),
@@ -266,6 +273,10 @@ func New(env wake.Env, log func(string)) (*Gateway, error) {
 			// the wake deadline (GW_WAKE_TIMEOUT_MS) is the hard ceiling regardless.
 			WakeRetryBaseMs: envInt(env, "GW_WAKE_RETRY_BASE_MS", 200),
 			WakeMaxAttempts: envInt(env, "GW_WAKE_MAX_ATTEMPTS", 8),
+			// Every backend dial (warm fast path AND cold-wake poll) is a TLS
+			// client dial when this is non-nil — the wrap lives inside
+			// TryConnect, so a handshake failure is retried by the wake loop.
+			BackendTLS: backendTLS,
 		},
 		idleMs:            envInt(env, "GW_IDLE_MS", 300000),
 		floorMs:           envInt(env, "GW_AUTH_FAIL_FLOOR_MS", 250),
