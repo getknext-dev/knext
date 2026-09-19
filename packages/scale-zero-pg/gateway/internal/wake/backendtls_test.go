@@ -413,6 +413,47 @@ func TestBackendTLS_ClientCertIsReReadPerHandshake(t *testing.T) {
 	}
 }
 
+// A per-handshake client-keypair read failure is the RETRYABLE class
+// (ErrBackendTLSUnavailable), NOT the permanent ErrBackendTLSConfig. The boot
+// load already proved the keypair loadable, so a mid-life read failure is most
+// likely a cert-manager rotation window the next poll clears; classing it as
+// ErrBackendTLSConfig would make ConnectWithWake short-circuit the retry
+// (wake.go tests ErrBackendTLSConfig first) and fail a torn rotation read. This
+// pins the taxonomy the whole classification path depends on — the two sentinels
+// really are disjoint. Mutation-proof: re-wrap loadClientKeypair in
+// ErrBackendTLSConfig -> the last assertion goes RED.
+func TestBackendTLS_PerHandshakeKeypairFailureIsRetryableNotConfig(t *testing.T) {
+	p := newTestPKI(t)
+	f := newFakeCompute(t, p, true, "") // RequireAndVerifyClientCert -> requests the client cert
+	host, port := f.addr()
+	btls, _, key := clientBackendTLS(t, p)
+	tgt := Target{Host: host, Port: port, Key: "orders"}
+
+	// Baseline: a valid keypair dials fine (the boot-load equivalent held).
+	c, err := TryConnectTLS(tgt, time.Second, btls)
+	if err != nil {
+		t.Fatalf("baseline dial with a valid keypair: %v", err)
+	}
+	_ = c.Close()
+
+	// Tear the client key on disk mid-life (rotation window / torn read):
+	// GetClientCertificate re-reads per handshake and now fails to load it.
+	if err := os.WriteFile(key, []byte("-----BEGIN GARBAGE-----\n"), 0o600); err != nil {
+		t.Fatalf("corrupt key: %v", err)
+	}
+
+	_, err = TryConnectTLS(tgt, time.Second, btls)
+	if err == nil {
+		t.Fatal("expected the dial to fail once the client keypair is unloadable")
+	}
+	if !errors.Is(err, ErrBackendTLSUnavailable) {
+		t.Fatalf("a per-handshake keypair failure must be the RETRYABLE class ErrBackendTLSUnavailable, got: %v", err)
+	}
+	if errors.Is(err, ErrBackendTLSConfig) {
+		t.Fatalf("a per-handshake keypair failure must NOT be the permanent ErrBackendTLSConfig (it would short-circuit the wake retry), got: %v", err)
+	}
+}
+
 // C1: TCP_NODELAY is applied to the RAW socket BEFORE the TLS wrap — Nagle must
 // be off on the underlying socket, not on a tls.Conn (which cannot set it).
 // Mutation-proof: move the setNoDelay call below the TLS upgrade -> RED.

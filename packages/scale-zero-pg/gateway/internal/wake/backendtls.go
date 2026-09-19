@@ -103,7 +103,11 @@ func NewBackendTLSFromEnv(env Env) (*BackendTLS, error) {
 		return nil, err
 	}
 	if _, err := b.loadClientKeypair(); err != nil {
-		return nil, err
+		// At BOOT a keypair that will not load is a PERMANENT LOCAL config error
+		// (crashloop until the Secret exists). loadClientKeypair itself returns an
+		// UNclassified error so the per-handshake callback can class the same
+		// failure as retryable instead; the class is assigned here, by the caller.
+		return nil, fmt.Errorf("%w: %w", ErrBackendTLSConfig, err)
 	}
 	return b, nil
 }
@@ -151,13 +155,19 @@ func (b *BackendTLS) loadCAPool() (*x509.CertPool, error) {
 	return pool, nil
 }
 
-// loadClientKeypair reads the gateway's clientAuth leaf. Used at boot (fail-fast
-// validation) and per handshake (rotation pickup, see GetClientCertificate).
+// loadClientKeypair reads the gateway's clientAuth leaf. It returns an
+// UNCLASSIFIED error — the caller assigns the error class, because the same
+// read failure means different things by context: at boot it is a PERMANENT
+// config error (NewBackendTLSFromEnv wraps it in ErrBackendTLSConfig, fail-fast),
+// but inside GetClientCertificate mid-handshake it is most likely a cert-manager
+// rotation window, so it is left to the handshake to wrap in the RETRYABLE
+// ErrBackendTLSUnavailable class. Classifying it here as ErrBackendTLSConfig
+// would make wake.go short-circuit the retry and fail a torn rotation read.
 func (b *BackendTLS) loadClientKeypair() (tls.Certificate, error) {
 	pair, err := tls.LoadX509KeyPair(b.CertFile, b.KeyFile)
 	if err != nil {
-		return tls.Certificate{}, fmt.Errorf("%w: loading the gateway client keypair (GW_COMPUTE_CLIENT_CERT_FILE=%s GW_COMPUTE_CLIENT_KEY_FILE=%s): %w",
-			ErrBackendTLSConfig, b.CertFile, b.KeyFile, err)
+		return tls.Certificate{}, fmt.Errorf("loading the gateway client keypair (GW_COMPUTE_CLIENT_CERT_FILE=%s GW_COMPUTE_CLIENT_KEY_FILE=%s): %w",
+			b.CertFile, b.KeyFile, err)
 	}
 	return pair, nil
 }
