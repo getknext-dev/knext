@@ -7,14 +7,16 @@
 - **Amended by ADR-0002 (2026-09-19): the F6 clause is CLOSED** — the peer idle-scrape is now
   bearer-authenticated and fail-closed by construction (`GW_PEER_TOKEN`; `/metrics.json` 401 on
   mismatch/absent). Read the F6 rows below as historical context for a gap that is now closed.
-- **Amended by ADR-0003 (2026-09-19): the F5 clause is CLOSING (phased).** The gateway→compute
-  plaintext transport is being closed by **in-protocol Postgres mTLS** (cert-manager CA + shared
-  server/client leaf certs; SSLRequest→`tls.Client` on the gateway, compute `ssl=on` +
-  `hostssl clientcert=verify-ca`), rolled out over four independently-safe phases. **Phase 1
-  (cert infrastructure + this design record) has landed**, but F5 is **NOT yet CLOSED** — it stays
-  DEFERRED with the expiry above intact until the phase-3/4 merge (gateway requires TLS + compute
-  enforces the client cert) lands. Until then the plaintext-hop + CNI-conditional-NetworkPolicy
-  caveat still applies. See ADR-0003 for the phases + ordering gate.
+- **CLOSED by ADR-0003 (2026-09-19): F5 is done.** The gateway→compute plaintext transport is
+  closed by **in-protocol Postgres mTLS** (cert-manager CA + shared server/client leaf certs;
+  SSLRequest→`tls.Client` on the gateway, compute `ssl=on` + `hostssl … scram-sha-256
+  clientcert=verify-ca`), delivered over four independently-safe phases, all merged
+  (#1088/#1089/#1090/#1091). The gateway now requires TLS on the backend leg and the compute
+  requires a CA-verified client certificate; the plaintext-hop caveat is dropped. Because this is
+  **in-protocol TLS, not NetworkPolicy**, the guarantee is CNI-independent (unlike F6). Residual,
+  by design: the shared gateway leaf proves "a gateway", not "which app" — per-app isolation rests
+  on the SCRAM secret; per-role certs + a usermap are the named GA upgrade path (ADR-0003
+  Consequences). See ADR-0003 for the phases, the SHOW-ssl gate, and the operational rollout gate.
 
 ## Context
 
@@ -82,9 +84,13 @@ DBaaS hardening), NOT a judgment that mTLS/auth are unnecessary — they are owe
 - [x] **Founder accepted** this exception 2026-09-08 (Status → Accepted). Risk is now formally accepted, dated, and expiry-bound.
 - [x] **F6 CLOSED by ADR-0002 (2026-09-19)** — peer-scrape bearer auth, fail-closed boot, and the
       C1 reader fix (non-200 → postpone sleep) shipped.
-- [~] **F5 CLOSING (phased) via ADR-0003 (2026-09-19)** — gateway→compute mTLS is now scheduled, not
-      incidental: phase 1 (cert-manager CA + shared server/client leaf certs) has landed; phases 2-4
-      (compute serves TLS → gateway requires TLS → pg_hba `clientcert=verify-ca`) close it fully.
-      F5 is marked CLOSED only on the phase-3/4 merge.
-- [ ] At GA / first external-tenant use: re-review this ADR; close F5+F6 or re-justify.
-- [ ] Keep the plaintext-hop + CNI-conditional caveat in any user-facing isolation/encryption claim.
+- [x] **F5 CLOSED via ADR-0003 (2026-09-19)** — gateway→compute mTLS delivered over four phases,
+      all merged (#1088 cert infra → #1089 compute serves TLS → #1090 gateway requires TLS → #1091
+      pg_hba enforces `hostssl … clientcert=verify-ca`). The hop is now mutually authenticated
+      in-protocol (CNI-independent); per-app isolation rests on SCRAM given the shared gateway leaf
+      (per-role certs = named GA upgrade path). This was the last dated security exception; only the
+      GA re-review row below remains.
+- [ ] At GA / first external-tenant use: re-review this ADR; re-justify or retire it (F5+F6 both closed).
+- [ ] **F5 dropped this — no plaintext-hop caveat remains.** Still required: keep the
+      **CNI-conditional NetworkPolicy** caveat on any user-facing isolation claim that rests on
+      the F6 peer-scrape NetworkPolicy (that control is CNI-dependent; the F5 mTLS leg is not).

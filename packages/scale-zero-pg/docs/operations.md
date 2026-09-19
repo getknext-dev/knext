@@ -3112,6 +3112,18 @@ remembering to check:
 | 5 | Justifying capability unused for a quarter | Dated tracked item: issue #65 (due 2026-10-03) |
 | 6 | Reliability floor (read SPOF reached users) | Ruled CLEARED at iteration 4; guarded live by `PswatcherPrimaryDown` / `PswatcherPromotionFired` / `PswatcherDown` + the `Watchdog` dead-man's-switch behind them |
 
+**Backend-mTLS-unenforced tripwire (gateway→compute).** The pg_hba hardening only writes
+the `hostssl … clientcert=verify-ca` catch-all when the compute is actually serving TLS
+(`SHOW ssl = on`); on a compute that boots without its server cert/CA it deliberately keeps
+the plaintext `host … scram-sha-256` catch-all and logs `WARN … client-cert mTLS is NOT
+enforced`. **Today that state is observable only as a pod-log WARN — there is no metric or
+alert for it.** So the standing check is: after any change to the compute cert mounts or the
+`ssl` GUCs, confirm no per-app compute is running unenforced — grep the compute pod logs for
+that WARN, or assert the live pg_hba shows `hostssl … clientcert=verify-ca` (the `_verify-tls.sh`
+drill does the latter). Promoting this to a real metric/alert (e.g. a gateway or compute gauge
+for "backend leg unenforced") is a tracked follow-up; until it exists this criterion detects by
+drill + log, not by alert — the same honest caveat as KC-2's wake-edge gate.
+
 **Janitor-disarm tripwire (issue #142).** The WAL-bound alerts above
 (`WalJanitorJobFailed`, `WalJanitorStale`, `SafekeeperWALGrowth`, `ReplicationSlot*`)
 all key off a **Failed Job** — but a janitor/monitor whose container **never starts**
