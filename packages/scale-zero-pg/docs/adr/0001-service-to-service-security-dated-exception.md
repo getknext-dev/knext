@@ -90,5 +90,7 @@ DBaaS hardening), NOT a judgment that mTLS/auth are unnecessary — they are owe
       in-protocol (CNI-independent); per-app isolation rests on SCRAM given the shared gateway leaf
       (per-role certs = named GA upgrade path). This was the last dated security exception; only the
       GA re-review row below remains.
-- [ ] At GA / first external-tenant use: re-review this ADR; close F5+F6 or re-justify.
-- [ ] Keep the plaintext-hop + CNI-conditional caveat in any user-facing isolation/encryption claim.
+- [ ] At GA / first external-tenant use: re-review this ADR; re-justify or retire it (F5+F6 both closed).
+- [ ] **F5 dropped this — no plaintext-hop caveat remains.** Still required: keep the
+      **CNI-conditional NetworkPolicy** caveat on any user-facing isolation claim that rests on
+      the F6 peer-scrape NetworkPolicy (that control is CNI-dependent; the F5 mTLS leg is not).

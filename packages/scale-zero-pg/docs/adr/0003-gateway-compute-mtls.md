@@ -172,7 +172,9 @@ Recorded now so the later PRs implement them, from both gates:
 - **ADR-0001 F5 is CLOSED (2026-09-19).** All four phases are merged, so the
   gateway→compute hop is now TLS with a CA-verified client certificate required
   (`hostssl … scram-sha-256 clientcert=verify-ca`). The plaintext-hop caveat is dropped
-  from the user docs and the main-repo CLAUDE.md §7 dated-exception is updated. The
+  from the user docs. **No main-repo CLAUDE.md change is needed** — §7 never carried the
+  F5 exception (its only dated exception is the unrelated, still-open ADR-0044 byte cap);
+  F5 is scale-zero-pg's and lives in these ADRs. The
   encryption/authentication of this leg is **in-protocol Postgres TLS, not
   NetworkPolicy**, so it holds regardless of the cluster CNI (unlike the F6 peer-scrape
   NetworkPolicy, which stays CNI-conditional).
@@ -266,7 +268,8 @@ Recorded now so the later PRs implement them, from both gates:
       that drill's gateway-accepted leg is mandatory. `test_harden_pghba.sh` (10 checks,
       both branches idempotent) + `_validate.sh` contracts 36/37 guard it; a `_validate.sh`
       guard FAILS if any executable line reintroduces `verify-full`. **Done:** ADR-0001 F5
-      marked CLOSED; main-repo CLAUDE.md §7 updated.
+      marked CLOSED. No main-repo CLAUDE.md change was needed — §7 never carried the F5
+      exception (its only dated exception is the unrelated ADR-0044 byte cap).
 - **Note (SHOW-ssl unenforced state):** when a compute is not serving TLS the harden
       keeps the plaintext catch-all and mTLS is NOT enforced — today observable only as a
       pod-log WARN. Added to the operations.md kill-criteria tripwire mapping so it is not
