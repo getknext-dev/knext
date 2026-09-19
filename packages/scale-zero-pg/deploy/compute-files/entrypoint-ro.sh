@@ -106,6 +106,10 @@ if [ -n "${APP_ROLE:-}" ]; then
   harden_pg_hba &
 fi
 
+# F5 phase 2 (ADR-0003): stage the server TLS key 0600 before compute_ctl boots
+# Postgres so the RO compute OFFERS TLS too (strips ssl GUCs -> plaintext if absent).
+stage_tls_key "$DST"
+
 echo "Starting compute_ctl (read-only, mode=${RO_MODE})"
 exec /usr/local/bin/compute_ctl --pgdata /var/db/postgres/compute \
      -C "postgresql://cloud_admin@localhost:55433/postgres" \

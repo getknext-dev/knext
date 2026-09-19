@@ -108,6 +108,9 @@ spec:
           volumeMounts:
             - { name: compute-files, mountPath: /compute-files } # config.json + entrypoint-ro.sh
             - { name: ro-lsn, mountPath: /ro-lsn }
+            # F5 phase 2 (ADR-0003): the RO compute OFFERS TLS (paths match config.json ssl_* GUCs).
+            - { name: pggw-compute-server-tls, mountPath: /etc/pggw-compute-server-tls, readOnly: true }
+            - { name: pggw-mtls-ca, mountPath: /etc/pggw-mtls-ca, readOnly: true }
           readinessProbe:
             tcpSocket: { port: pg }
             initialDelaySeconds: 0
@@ -138,6 +141,18 @@ spec:
             name: compute-files # deploy/54: config.json + entrypoint-ro.sh
         - name: ro-lsn
           emptyDir: {}
+        # F5 phase 2 (ADR-0003): phase-1 mTLS Secrets; optional -> certless dev cluster
+        # still schedules (entrypoint strips ssl GUCs -> plaintext, offer-not-require).
+        - name: pggw-compute-server-tls
+          secret:
+            secretName: pggw-compute-server-tls
+            optional: true
+        - name: pggw-mtls-ca # project ca.crt ONLY — the CA private key must NOT reach compute pods
+          secret:
+            secretName: pggw-mtls-ca
+            optional: true
+            items:
+              - { key: ca.crt, path: ca.crt }
 ---
 apiVersion: v1
 kind: Service

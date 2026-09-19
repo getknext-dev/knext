@@ -33,6 +33,47 @@
 # deliberately SKIPPED there (that single-tenant path is defended by NetworkPolicy +
 # operator posture, docs/operations.md "Network isolation caveat"). This keeps the base
 # DATABASE_URL / DATABASE_URL_RO cloud_admin-over-TCP paths working unchanged.
+# stage_tls_key (F5 phase 2, ADR-0003): make the compute OFFER TLS without Postgres
+# refusing to start on the key's file permissions. Postgres aborts at startup if
+# ssl_key_file is group/world-readable OR not owned by the DB user/root
+# ("private key file has group or world access"). A k8s Secret volume mounts the key
+# root-owned and world-readable (0644), which Postgres rejects — and a root-owned
+# 0600 mount the non-root postgres process could not even READ. So we COPY the
+# mounted key to a private path and chmod 600 it BEFORE compute_ctl starts Postgres:
+# this entrypoint already runs as the image's non-root `postgres` user (the compute
+# sets no runAsUser/fsGroup and PGDATA lives on the container fs, not a mounted
+# volume — so an fsGroup would neither be needed nor touch PGDATA), so the copy is
+# owned by that same postgres user with no group/world bits — Postgres's accepted
+# case — with ZERO securityContext change to the wake-critical boot. The server cert
+# and CA cert are public, so their GUCs point straight at the 0644 mounts.
+#
+# ssl=on is a RESTART-only GUC set via the compute_ctl spec (config.json
+# spec.cluster.settings), so it takes effect when compute_ctl starts Postgres — the
+# Recreate + 0<->N model satisfies that for free; there is NO post-boot reload path.
+#
+# OFFER-not-require + independently safe: if the phase-1 cert Secret is absent (a bare
+# local cluster without cert-manager; the volume is mounted `optional: true` so the
+# pod still schedules), the mounted key is missing and we STRIP the four ssl GUCs from
+# the rendered spec so Postgres boots PLAINTEXT rather than crash-looping on a missing
+# key file. pg_hba is untouched either way (its TLS-required rewrite is a later
+# phase), so an existing plaintext gateway connection keeps working.
+SERVER_KEY_SRC=/etc/pggw-compute-server-tls/tls.key
+SERVER_KEY_DST=/tmp/pggw-server-tls.key
+stage_tls_key() {
+  _spec="${1:?stage_tls_key needs the rendered compute_ctl spec path}"
+  if [ -r "$SERVER_KEY_SRC" ]; then
+    cp "$SERVER_KEY_SRC" "$SERVER_KEY_DST"
+    chmod 600 "$SERVER_KEY_DST"
+    echo "F5 phase 2: staged compute server TLS key -> $SERVER_KEY_DST (0600, postgres-owned); Postgres serves ssl=on"
+  else
+    # No cert mounted (bare local run) -> drop the ssl GUCs so Postgres boots plaintext.
+    # The four ssl GUCs are the only settings whose name begins with "ssl"; each is a
+    # single-line JSON object, so a line filter removes exactly them and leaves valid JSON.
+    grep -v '"name": "ssl' "$_spec" > "$_spec.notls" && mv "$_spec.notls" "$_spec"
+    echo "F5 phase 2: no server TLS key at $SERVER_KEY_SRC — removed ssl GUCs; compute boots PLAINTEXT (offer-not-require, independently safe)"
+  fi
+}
+
 harden_pg_hba() {
   HBA="${PGDATA:-/var/db/postgres/compute}/pg_hba.conf"
   PSQL="psql -h localhost -p 55433 -U cloud_admin -d postgres -tAc"

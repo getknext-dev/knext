@@ -67,6 +67,10 @@ if [ -n "${APP_ROLE:-}" ]; then
   harden_pg_hba &
 fi
 
+# F5 phase 2 (ADR-0003): stage the server TLS key 0600 before compute_ctl boots
+# Postgres so the warm compute OFFERS TLS too (strips ssl GUCs -> plaintext if absent).
+stage_tls_key "$DST"
+
 # From here it is identical to the stock entrypoint's exec line.
 exec /usr/local/bin/compute_ctl --pgdata /var/db/postgres/compute \
      -C "postgresql://cloud_admin@localhost:55433/postgres" \

@@ -36,6 +36,10 @@ data:
                 ],
                 "databases": [],
                 "settings": [
+                    { "name": "ssl", "value": "on", "vartype": "bool" },
+                    { "name": "ssl_cert_file", "value": "/etc/pggw-compute-server-tls/tls.crt", "vartype": "string" },
+                    { "name": "ssl_key_file", "value": "/tmp/pggw-server-tls.key", "vartype": "string" },
+                    { "name": "ssl_ca_file", "value": "/etc/pggw-mtls-ca/ca.crt", "vartype": "string" },
                     {
                         "name": "fsync",
                         "value": "off",
@@ -302,6 +306,9 @@ data:
       harden_pg_hba &
     fi
 
+    # F5 phase 2 (ADR-0003): stage the server TLS key 0600 before compute_ctl boots.
+    stage_tls_key "$DST"
+
     echo "Starting compute_ctl (read-only, mode=${RO_MODE})"
     exec /usr/local/bin/compute_ctl --pgdata /var/db/postgres/compute \
          -C "postgresql://cloud_admin@localhost:55433/postgres" \
@@ -377,6 +384,9 @@ data:
     if [ -n "${APP_ROLE:-}" ]; then
       harden_pg_hba &
     fi
+
+    # F5 phase 2 (ADR-0003): stage the server TLS key 0600 before compute_ctl boots.
+    stage_tls_key "$DST"
 
     # From here it is identical to the stock entrypoint's exec line.
     exec /usr/local/bin/compute_ctl --pgdata /var/db/postgres/compute \
@@ -509,6 +519,9 @@ data:
       harden_pg_hba &
     fi
 
+    # F5 phase 2 (ADR-0003): stage the server TLS key 0600 before compute_ctl boots.
+    stage_tls_key "$DST"
+
     echo "Starting compute_ctl"
     exec /usr/local/bin/compute_ctl --pgdata "$PGDATA" \
          -C "postgresql://cloud_admin@localhost:55433/postgres" \
@@ -551,6 +564,24 @@ data:
     # deliberately SKIPPED there (that single-tenant path is defended by NetworkPolicy +
     # operator posture, docs/operations.md "Network isolation caveat"). This keeps the base
     # DATABASE_URL / DATABASE_URL_RO cloud_admin-over-TCP paths working unchanged.
+    # stage_tls_key (F5 phase 2, ADR-0003): copy the mounted server key to a private
+    # 0600 postgres-owned path before compute_ctl starts Postgres (Postgres rejects a
+    # group/world-readable ssl_key_file); strip the ssl GUCs to boot plaintext if the
+    # cert Secret is absent (bare local run, optional mount). No securityContext change.
+    SERVER_KEY_SRC=/etc/pggw-compute-server-tls/tls.key
+    SERVER_KEY_DST=/tmp/pggw-server-tls.key
+    stage_tls_key() {
+      _spec="${1:?stage_tls_key needs the rendered compute_ctl spec path}"
+      if [ -r "$SERVER_KEY_SRC" ]; then
+        cp "$SERVER_KEY_SRC" "$SERVER_KEY_DST"
+        chmod 600 "$SERVER_KEY_DST"
+        echo "F5 phase 2: staged compute server TLS key -> $SERVER_KEY_DST (0600, postgres-owned); Postgres serves ssl=on"
+      else
+        grep -v '"name": "ssl' "$_spec" > "$_spec.notls" && mv "$_spec.notls" "$_spec"
+        echo "F5 phase 2: no server TLS key at $SERVER_KEY_SRC — removed ssl GUCs; compute boots PLAINTEXT (offer-not-require, independently safe)"
+      fi
+    }
+
     harden_pg_hba() {
       HBA="${PGDATA:-/var/db/postgres/compute}/pg_hba.conf"
       PSQL="psql -h localhost -p 55433 -U cloud_admin -d postgres -tAc"

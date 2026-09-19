@@ -909,6 +909,55 @@ fi
 ok "F5 phase-1 mTLS cert infrastructure ships (cert-manager CA + shared server/client leaves, shared trust root, auto-rotating; fail-closed on missing infra) — ADR-0003"
 
 # ---------------------------------------------------------------------------
+# 34. contract (F5 phase 2, ADR-0003): the compute OFFERS TLS — ssl=on + the
+#     server cert/key/CA wired through the compute_ctl GUC channel, the two
+#     phase-1 Secrets mounted at the paths the GUCs name, and the server key
+#     staged to a private 0600 path so Postgres does not refuse to start
+#     ("private key file has group or world access"). A path mismatch between a
+#     GUC and its mount = silent no-TLS or a crash-loop, so the paths are asserted
+#     to MATCH. pg_hba is deliberately NOT touched here (phase 4 enforces
+#     clientcert=verify-full); plaintext still works (offer-not-require), so
+#     phase 2 is independently safe.
+SRVMNT=/etc/pggw-compute-server-tls
+CAMNT=/etc/pggw-mtls-ca
+KEYDST=/tmp/pggw-server-tls.key
+for cfg in compute-files/config.json 54-compute-files.yaml; do
+  grep -q '"name": "ssl", "value": "on"' "$cfg" || fail "$cfg must set ssl=on in spec.cluster.settings (F5 phase 2 — compute serves TLS; restart-only GUC applied by compute_ctl at boot)"
+  grep -q "\"name\": \"ssl_cert_file\", \"value\": \"$SRVMNT/tls.crt\"" "$cfg" || fail "$cfg ssl_cert_file GUC must equal the pggw-compute-server-tls mount ($SRVMNT/tls.crt) — a path mismatch = silent no-TLS/crash"
+  grep -q "\"name\": \"ssl_key_file\", \"value\": \"$KEYDST\"" "$cfg" || fail "$cfg ssl_key_file GUC must point at the staged 0600 key ($KEYDST) — see lib-harden.sh stage_tls_key"
+  grep -q "\"name\": \"ssl_ca_file\", \"value\": \"$CAMNT/ca.crt\"" "$cfg" || fail "$cfg ssl_ca_file GUC must equal the pggw-mtls-ca mount ($CAMNT/ca.crt)"
+done
+# config.json must remain valid JSON with the ssl GUCs present.
+if command -v python3 >/dev/null 2>&1; then
+  python3 -c 'import json; json.load(open("compute-files/config.json"))' 2>/dev/null || fail "compute-files/config.json is not valid JSON after adding the ssl GUCs (F5 phase 2)"
+fi
+# the server key is staged to a private 0600 path owned by the running postgres
+# user (no securityContext change) — Postgres refuses a group/world-readable key.
+grep -q 'stage_tls_key()' compute-files/lib-harden.sh || fail "lib-harden.sh must define stage_tls_key() (F5 phase 2 key-perms: copy the mounted key to a 0600 postgres-owned path before compute_ctl starts Postgres)"
+grep -q 'stage_tls_key' 54-compute-files.yaml || fail "54-compute-files.yaml (inlined lib-harden) must embed stage_tls_key (F5 phase 2)"
+grep -q 'chmod 600' compute-files/lib-harden.sh || fail "lib-harden.sh stage_tls_key must chmod 600 the staged key (Postgres rejects a group/world-readable ssl_key_file)"
+grep -q "$SRVMNT/tls.key" compute-files/lib-harden.sh || fail "lib-harden.sh stage_tls_key must copy FROM the mounted server key ($SRVMNT/tls.key)"
+grep -q "$KEYDST" compute-files/lib-harden.sh || fail "lib-harden.sh stage_tls_key must stage the key TO $KEYDST (matching the ssl_key_file GUC)"
+for e in entrypoint.sh entrypoint-ro.sh entrypoint-warm.sh; do
+  grep -q 'stage_tls_key' "compute-files/$e" || fail "compute-files/$e must call stage_tls_key before exec compute_ctl (F5 phase 2)"
+done
+# every compute manifest that runs Postgres mounts both phase-1 Secrets at the
+# GUC paths; the CA Secret projects ONLY ca.crt (the CA private key must NOT be
+# distributed to compute pods).
+for m in 20-compute.yaml 25-compute-warm.yaml 26-compute-ro.yaml compute-app.template.yaml; do
+  grep -q 'secretName: pggw-compute-server-tls' "$m" || fail "$m must mount the pggw-compute-server-tls Secret (server cert/key) — F5 phase 2"
+  grep -q 'secretName: pggw-mtls-ca' "$m" || fail "$m must mount the pggw-mtls-ca Secret (CA) — F5 phase 2"
+  grep -q "mountPath: $SRVMNT" "$m" || fail "$m must mount the server cert at $SRVMNT (matches ssl_cert_file/ssl_key_file GUC dir)"
+  grep -q "mountPath: $CAMNT" "$m" || fail "$m must mount the CA at $CAMNT (matches ssl_ca_file GUC dir)"
+  grep -q 'key: ca.crt' "$m" || fail "$m must project ONLY ca.crt from pggw-mtls-ca (the CA private key must not reach compute pods)"
+done
+# pg_hba enforcement stays PHASE 4: lib-harden must NOT yet REWRITE pg_hba to
+# require TLS. Guard the exact enforcement token clientcert=verify-full (phase 4
+# adds it); phase 2 leaves the pg_hba catch-all as `host … scram` (plaintext allowed).
+grep -q 'clientcert=verify-full' compute-files/lib-harden.sh && fail "lib-harden.sh must NOT add clientcert=verify-full yet — that is phase 4; phase 2 leaves pg_hba as host (plaintext still allowed, independently safe)" || true
+ok "F5 phase-2 compute serves TLS (ssl=on + cert/key/CA via GUCs matching the mounts; key staged 0600; pg_hba untouched → plaintext still works) — ADR-0003"
+
+# ---------------------------------------------------------------------------
 # Summary (#797): every contract above has been EVALUATED — nothing exits early.
 # One aggregated report, one CI-faithful exit code: 0 only if every contract
 # passed, 1 if any failed (the EXIT trap catches anything that dies before here).

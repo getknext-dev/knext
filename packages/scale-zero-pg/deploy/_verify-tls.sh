@@ -10,6 +10,15 @@
 #   3. the wake path works over TLS -> a cold connect (compute at 0) with
 #      sslmode=require wakes the compute and establishes an encrypted session.
 #
+# F5 phase 2 (ADR-0003) — compute now OFFERS TLS. This drill exercises the
+# CLIENT<->GATEWAY front door; the gateway<->compute backend hop is still plaintext
+# (phase 3 makes the gateway a TLS client). The compute-side proof — that the compute
+# itself accepts sslmode=require (ssl=on + the mounted server cert) — is lead-owned
+# OKE/kind verification: from an in-cluster pod, `psql 'sslmode=require' -h
+# compute.scale-zero-pg.svc -p 55433 ... \conninfo` must report "SSL connection ...".
+# It cannot run from a workstation (needs the cluster + a waked compute), so it is not
+# automated here; run it as part of the phase-2 rollout battery.
+#
 # Client runs in-cluster (kubectl run) with the compute-node image (ships psql +
 # openssl). Bounded + self-cleaning like the other drills. Prereq: the pggw-tls
 # Secret exists (deploy/gen-tls.sh) and 10-gateway.yaml is applied with the TLS

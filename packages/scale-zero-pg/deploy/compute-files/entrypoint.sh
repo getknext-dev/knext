@@ -122,6 +122,12 @@ if [ -n "${APP_ROLE:-}" ]; then
   harden_pg_hba &
 fi
 
+# F5 phase 2 (ADR-0003): make the compute OFFER TLS. Stage the mounted server key
+# to a 0600 postgres-owned path BEFORE compute_ctl starts Postgres (Postgres rejects
+# a group/world-readable ssl_key_file); strips the ssl GUCs to boot plaintext if the
+# cert Secret is absent. pg_hba untouched (phase 4) — plaintext still works.
+stage_tls_key "$DST"
+
 echo "Starting compute_ctl"
 exec /usr/local/bin/compute_ctl --pgdata "$PGDATA" \
      -C "postgresql://cloud_admin@localhost:55433/postgres" \

@@ -174,9 +174,19 @@ Recorded now so the later PRs implement them, from both gates:
 - [x] **Phase 1:** cert-manager CA + shared server/client leaf `Certificate`s
       (`deploy/11-mtls-certs.yaml`); fail-closed `_validate.sh` contract; this ADR;
       operations.md prereq note. **No Go code.**
-- [ ] **Phase 2:** compute `ssl=on` + server cert/CA via the compute_ctl GUC channel;
+- [x] **Phase 2:** compute `ssl=on` + server cert/CA via the compute_ctl GUC channel;
       mount `pggw-compute-server-tls` + the CA; pg_hba stays `host` (plaintext still
-      allowed). Confirm the Neon image has OpenSSL.
+      allowed). Confirm the Neon image has OpenSSL. **Shipped:** four ssl GUCs
+      (`ssl`/`ssl_cert_file`/`ssl_key_file`/`ssl_ca_file`) in `config.json`
+      `spec.cluster.settings`; both Secrets mounted at `/etc/pggw-compute-server-tls`
+      + `/etc/pggw-mtls-ca` (CA projects `ca.crt` only — the CA private key never
+      reaches compute pods) on all four compute manifests (20/25/26/template); the
+      server key is staged to a `0600` postgres-owned path by `lib-harden.sh`
+      `stage_tls_key` before `compute_ctl` boots (Postgres rejects a group/world-
+      readable key), needing NO securityContext change. Certless dev clusters keep
+      booting plaintext (`optional` mounts + GUC strip). `_validate.sh` contract 34
+      guards GUC↔mount path parity, the key perms, and that pg_hba is untouched. The
+      live `sslmode=require` proof is lead-owned OKE/kind verification.
 - [ ] **Phase 2→3 GATE:** drain/recreate every live pre-phase-2 compute (or wait a
       full idle cycle) so 100% of the fleet serves TLS before any gateway flips.
 - [ ] **Phase 3:** gateway wraps the backend dial in `tls.Client`
