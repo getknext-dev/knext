@@ -142,36 +142,41 @@ func templateComputeVolumeNames(t *testing.T) (vols []string, mounts []string) {
 	}
 	raw := strings.ReplaceAll(string(rawBytes), "__APP__", "parity")
 	for _, doc := range strings.Split(raw, "\n---") {
-		var obj struct {
+		type ctr struct {
+			VolumeMounts []struct {
+				Name string `json:"name"`
+			} `json:"volumeMounts"`
+		}
+		var obj2 struct {
 			Kind string `json:"kind"`
 			Spec struct {
 				Template struct {
 					Spec struct {
-						Containers []struct {
-							VolumeMounts []struct {
-								Name string `json:"name"`
-							} `json:"volumeMounts"`
-						} `json:"containers"`
-						Volumes []struct {
+						Containers     []ctr `json:"containers"`
+						InitContainers []ctr `json:"initContainers"`
+						Volumes        []struct {
 							Name string `json:"name"`
 						} `json:"volumes"`
 					} `json:"spec"`
 				} `json:"template"`
 			} `json:"spec"`
 		}
-		if err := yaml.Unmarshal([]byte(doc), &obj); err != nil {
+		if err := yaml.Unmarshal([]byte(doc), &obj2); err != nil {
 			if strings.Contains(doc, "kind: Deployment") {
 				t.Fatalf("the template's Deployment did not parse, so the expected volume set would be silently short: %v", err)
 			}
 			continue
 		}
-		if obj.Kind != "Deployment" {
+		if obj2.Kind != "Deployment" {
 			continue
 		}
-		for _, v := range obj.Spec.Template.Spec.Volumes {
+		for _, v := range obj2.Spec.Template.Spec.Volumes {
 			vols = append(vols, v.Name)
 		}
-		for _, cont := range obj.Spec.Template.Spec.Containers {
+		// BOTH init and app containers — an initContainer volume drift is just as
+		// silent as an app-container one (a wait-timeline init that grows a mount
+		// the operator does not render would be invisible to a containers-only scan).
+		for _, cont := range append(obj2.Spec.Template.Spec.InitContainers, obj2.Spec.Template.Spec.Containers...) {
 			for _, vm := range cont.VolumeMounts {
 				mounts = append(mounts, vm.Name)
 			}
@@ -179,3 +184,14 @@ func templateComputeVolumeNames(t *testing.T) (vols []string, mounts []string) {
 	}
 	return vols, mounts
 }
+
+// KNOWN BLIND SPOT (recorded, not closed): the general volume-parity test above
+// compares RenderDeployment (the per-app WRITER) against compute-app.template.yaml
+// only. RenderRODeployment (the per-app READER) has no dedicated template to diff
+// against — the only RO manifest, deploy/26-compute-ro.yaml, is the BASE tier and
+// legitimately differs (different credential, RO_MODE, ro-lsn), so a strict
+// name-parity there would false-positive. The F5 mount is guarded directly by
+// TestRenderRODeploymentMountsBackendTLS; a FUTURE volume added to the RO static
+// manifest could still skip the operator RO render silently. Closing this needs a
+// curated allowlist of the legitimate base-vs-per-app differences, deferred.
+var _ = "render_tls_parity blind spot: RO render has no template-parity guard (see note above)"
