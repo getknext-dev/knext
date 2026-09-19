@@ -29,18 +29,26 @@ spec:
     - { name: pg, port: 6400, targetPort: pg }
     - { name: http, port: 9898, targetPort: http }
 ---
-# Generation ledger: the last generation the tenant was attached at. storage-init
-# used generation 1, so the ledger seeds at "1"; each auto-failover reads it,
-# promotes at value+1, and writes value+1 back. Persisting it here keeps repeated
-# failovers monotonic and survives a watcher restart.
+# Generation ledger: the last generation the tenant was attached at, the DURABLE
+# AUTHORITY for the attach generation (#1095). Each auto-failover reads it, promotes
+# at value+1, and writes value+1 back (pswatcher); the storage-init Job and
+# provision-app.sh READ it and never attach below it. Persisting it here keeps
+# repeated failovers monotonic and survives a watcher/pageserver restart or a fresh
+# pageserver PVC.
+#
+# NO seed VALUE on purpose (#1095): 1 is already the floor everywhere — pswatcher's
+# PSW_BASE_GENERATION and both attach paths' fallback — so a "1" seed is redundant AND
+# a `kubectl apply` of this file AFTER pswatcher advanced the ledger would DOWNGRADE it
+# below the live value, re-introducing the silent-data-loss this issue fixes. pswatcher
+# creates the key with the real value on the first failover (merge-patch); until then
+# an absent key reads as "fresh -> gen 1".
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: pageserver-generation
   namespace: scale-zero-pg
   labels: { plane: storage }
-data:
-  generation: "1"
+data: {}
 ---
 # Standby config: identical to the primary's (same broker + bucket) EXCEPT a
 # distinct node identity (id=1235 vs the primary's 1234) — two pageservers must

@@ -667,17 +667,32 @@ docs/BENCHMARKS.md.
   generation ≤ its own, so gen 2 reads the gen-1 index and writes forward at gen 2 —
   a clean control-plane-style re-attach. Attaching at the **same** generation risks
   overwriting the index; attaching **lower** would not see the latest index.
-- **Bootstrap attach is read-before-write; it never hardcodes a generation.** The
-  two tenant-attach bootstrap paths — the `storage-init` Job (`deploy/55-storage-init.yaml`)
-  and `provision-app.sh:ensure_tenant` — used to `PUT` a fixed `generation:1` to
-  `location_config`. Because a pswatcher failover advances the tenant's generation
-  (→2, →3…), the pageserver then **rejects** the lower `generation:1`
-  (`Generation 00000001 is less than existing N`) and `storage-init` CrashLoops
-  permanently. Both paths now `GET /v1/tenant/<T>` first, read the **current**
-  `generation`, and re-assert **that** (a fresh/unattached tenant — a 404 — starts at
-  1). They only re-assert the current generation; **advancing it stays pswatcher's
-  job on failover**, never the bootstrap path's. Contract-guarded in `_validate.sh`
-  and unit-proved off-cluster by `deploy/test_ensure-tenant-gen.sh` (issue #1095).
+- **Bootstrap attach is read-before-write; the durable generation ledger is the
+  authority.** The two tenant-attach bootstrap paths — the `storage-init` Job
+  (`deploy/55-storage-init.yaml`) and `provision-app.sh:ensure_tenant` — used to `PUT`
+  a fixed `generation:1` to `location_config`. Because a pswatcher failover advances
+  the tenant's generation (→2, →3…), the pageserver then **rejects** the lower
+  `generation:1` (`Generation 00000001 is less than existing N`) and `storage-init`
+  CrashLoops permanently. Both paths now attach at
+  **`max(ledger, pageserver-current-view, 1)`**, where the durable
+  `pageserver-generation` ConfigMap ledger — the same one pswatcher seeds and advances
+  on failover — is the **authority**. Reading the ledger is what makes this safe: it
+  **survives a pageserver restart or a fresh PVC**, whereas the pageserver's own
+  `GET /v1/tenant/<T>` does not. On a fresh-PVC pageserver the tenant reads back as
+  unattached (404) while its object-store index is still at the ledger generation N;
+  attaching at the pageserver's empty view alone would silently pick 1 (which the
+  pageserver **accepts**, since the rejection only fires when it already knows a higher
+  generation), making the gen-N index invisible — silent data loss, strictly worse than
+  the CrashLoop. So the paths **never attach below the ledger**. A genuinely fresh
+  plane (no ledger key, no local attach) starts at 1. The paths only **read** the
+  ledger; **advancing it stays pswatcher's job on failover**. The seed ConfigMap ships
+  with **no value** (`data: {}`) on purpose: 1 is the floor everywhere, and a static
+  seed would let a `kubectl apply` downgrade the ledger below the live generation.
+  `storage-init` mounts the ledger read-only; `provision-app.sh` reads it with
+  `kubectl`. Contract-guarded in `_validate.sh` and unit-proved off-cluster by
+  `deploy/test_ensure-tenant-gen.sh` (issue #1095). The full on-cluster proof
+  (force gen→2 via a failover, recreate the pageserver PVC, re-run `storage-init` →
+  succeeds) belongs to the pageserver-failover drill.
 - **Read-only is the first, always-safe proof.** The faithful *readability* check is
   a **STATIC read-only compute** pinned to the restored pageserver LSN
   (`spec.mode = {"Static":"<lsn>"}`), which reads pages directly from the pageserver

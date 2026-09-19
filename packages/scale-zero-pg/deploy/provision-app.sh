@@ -207,33 +207,47 @@ ps_last_lsn() { # last_record_lsn of a timeline (the safe branch point)
 }
 tl_exists() { PS "http://localhost:9898/v1/tenant/$APPS_TENANT/timeline" | grep -q "$1"; }
 
-# resolve_attach_generation — read-before-write (T1, #1095): echo the generation
-# to attach a tenant at, given the pageserver's OWN current view of that tenant
-# (the JSON body of GET /v1/tenant/<T>, or "" when the tenant is unattached / the
-# GET 404s). It re-asserts the CURRENT generation (never a hardcoded 1) so that a
-# tenant whose generation has advanced past 1 on a pswatcher failover still
-# re-attaches instead of being rejected ("Generation 00000001 is less than
-# existing N"). A fresh/unattached tenant (empty body, no generation) starts at 1.
-# It NEVER invents a higher generation — advancing the generation is pswatcher's
-# job on failover, not the bootstrap path's.
+# resolve_attach_generation — read-before-write (T1, #1095): echo the generation to
+# attach a tenant at, as max(ledger, pageserver-current-view, 1).
+#   $1 = the JSON body of GET /v1/tenant/<T> ("" when the tenant is unattached / the
+#        GET 404s — e.g. a pageserver on a FRESH PVC that has lost its local attach).
+#   $2 = the value of the durable `pageserver-generation` ledger ConfigMap ("" if the
+#        CM/key is absent — a genuinely fresh plane).
+# The DURABLE LEDGER is the authority. pswatcher seeds/advances it on failover and it
+# survives a pageserver restart or fresh PVC; GET /v1/tenant does NOT (a fresh-PVC
+# pageserver 404s while the object-store index is at the ledger generation). Attaching
+# BELOW the ledger would make that higher-generation index INVISIBLE — silent data
+# loss, strictly worse than the CrashLoop this replaces. So we never attach below the
+# ledger; we also take the pageserver's own view in case it is somehow AHEAD, and 1 is
+# the floor for a truly fresh tenant/plane with no ledger and no local attach. We only
+# READ the ledger — advancing it stays pswatcher's job on failover (T2).
 resolve_attach_generation() {
-  local body="$1" gen
-  gen="$(printf '%s' "$body" | tr ',' '\n' | grep '"generation"' | head -1 | tr -dc '0-9')"
-  case "$gen" in
-    ''|0) echo 1;;
-    *)    echo "$gen";;
-  esac
+  local body="$1" ledger psgen gen
+  psgen="$(printf '%s' "$body" | tr ',' '\n' | grep '"generation"' | head -1 | tr -dc '0-9')"
+  ledger="$(printf '%s' "${2:-}" | tr -dc '0-9')"
+  gen=1
+  [ -n "$ledger" ] && [ "$ledger" -gt "$gen" ] && gen="$ledger"
+  [ -n "$psgen" ] && [ "$psgen" -gt "$gen" ] && gen="$psgen"
+  echo "$gen"
+}
+
+# ledger_generation — the last generation the tenant was attached at, from the durable
+# `pageserver-generation` ConfigMap (key `generation`; seeded/advanced by pswatcher).
+# Empty when the CM/key is absent (a genuinely fresh plane) — the caller floors at 1.
+ledger_generation() {
+  K get configmap pageserver-generation -o jsonpath='{.data.generation}' 2>/dev/null || true
 }
 
 ensure_tenant() {
   log "ensuring apps tenant $APPS_TENANT"
-  # read-before-write: attach at the pageserver's CURRENT generation, never a
-  # literal 1 (which a post-failover pageserver rejects). curl -sf (PS) fails on a
-  # 404 for an unattached tenant, so `|| true` yields an empty body -> generation 1.
-  local cur gen
+  # read-before-write: attach at max(ledger, pageserver-view, 1). Never a literal 1
+  # (a post-failover pageserver rejects it) and never BELOW the durable ledger (that
+  # would hide a higher-generation index — silent data loss on a fresh-PVC pageserver).
+  local ledger cur gen
+  ledger="$(ledger_generation)"
   cur="$(PS "http://localhost:9898/v1/tenant/$APPS_TENANT" 2>/dev/null || true)"
-  gen="$(resolve_attach_generation "$cur")"
-  log "attaching apps tenant $APPS_TENANT at generation $gen"
+  gen="$(resolve_attach_generation "$cur" "$ledger")"
+  log "attaching apps tenant $APPS_TENANT at generation $gen (ledger=${ledger:-none})"
   PS -X PUT -H 'Content-Type: application/json' \
     -d "{\"mode\":\"AttachedSingle\",\"generation\":$gen,\"tenant_conf\":{}}" \
     "http://localhost:9898/v1/tenant/$APPS_TENANT/location_config" >/dev/null

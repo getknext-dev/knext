@@ -1150,43 +1150,73 @@ ok "F5 phase-4 drill honesty: _verify-tls.sh leg (b) is mandatory when section 4
 
 # ---------------------------------------------------------------------------
 # 38. contract (T1 read-before-attach, #1095): NO tenant-attach path may POST a
-#     HARDCODED generation to the pageserver's /v1/tenant/<T>/location_config.
+#     HARDCODED generation to /v1/tenant/<T>/location_config, and every attach path
+#     must consult the DURABLE `pageserver-generation` ledger as the authority —
+#     attach = max(ledger, pageserver-view, 1), never below the ledger.
 #     Both bootstrap attach sites — the storage-init init container
 #     (55-storage-init.yaml) and provision-app.sh:ensure_tenant — used to send
-#     {"mode":"AttachedSingle","generation":1,...}. After ANY pswatcher failover
-#     the pageserver's generation for a tenant advances (->2, ->3...), so a literal
-#     1 is REJECTED ("Generation 00000001 is less than existing N") and the attach
-#     path wedges permanently (storage-init CrashLoops). The fix reads the current
-#     generation (GET /v1/tenant/<T>) and re-asserts THAT. This guard fails if the
-#     literal creeps back, and fails if either site loses its read step — so a
-#     revert of either half reds it (mutation-provable).
+#     {"mode":"AttachedSingle","generation":1,...}. After a pswatcher failover the
+#     tenant's generation advances (->2, ->3...), so a literal 1 is REJECTED
+#     ("Generation 00000001 is less than existing N") and the path wedges
+#     (storage-init CrashLoops). Reading the pageserver ALONE is not enough: a
+#     fresh-PVC pageserver 404s the tenant while the object-store index is at the
+#     ledger generation N, and it ACCEPTS an attach at 1 (the reject only fires when
+#     it already knows a higher gen) — silently hiding the gen-N index (data loss).
+#     The durable ledger (seeded/advanced by pswatcher, survives a fresh PVC) is the
+#     floor. This guard fails if the literal creeps back OR if either site loses its
+#     ledger read OR its pageserver read — a revert of any half reds it.
 for _f in 55-storage-init.yaml provision-app.sh; do
   # Normalise shell backslash-escaping first: the literal reappears as
   # "generation":1 in the YAML single-quoted form and as \"generation\":1 in the
   # provision-app.sh double-quoted -d payload — strip backslashes so ONE pattern
   # catches both.
   if sed 's/\\//g' "$_f" | grep -qE '"generation" *: *1[,}]'; then
-    fail "$_f attaches at a HARDCODED generation:1 — after a pswatcher failover the pageserver has advanced past 1 and REJECTS it (#1095 wedge). Read GET /v1/tenant/<T> and attach at the current generation (read-before-write)."
+    fail "$_f attaches at a HARDCODED generation:1 — after a pswatcher failover the pageserver has advanced past 1 and REJECTS it (#1095 wedge). Attach at max(ledger, pageserver-view, 1)."
   fi
+  # Every attach site must consult the durable ledger (the authority).
+  grep -q 'pageserver-generation' "$_f" \
+    || fail "$_f must consult the durable pageserver-generation ledger before attaching — reading the pageserver alone loses data on a fresh-PVC pageserver (#1095)"
 done
 grep -q 'resolve_attach_generation' provision-app.sh \
-  || fail "provision-app.sh:ensure_tenant must resolve the pageserver's CURRENT generation (resolve_attach_generation) before the location_config PUT — read-before-write (#1095)"
+  || fail "provision-app.sh:ensure_tenant must resolve max(ledger, pageserver-view, 1) (resolve_attach_generation) before the location_config PUT (#1095)"
+grep -q 'ledger_generation' provision-app.sh \
+  || fail "provision-app.sh must read the durable ledger (ledger_generation) — never attach below it (#1095)"
 grep -qF 'curl -sf "${PS}/v1/tenant/${TENANT_ID}"' 55-storage-init.yaml \
-  || fail "55-storage-init.yaml must GET /v1/tenant/<T> to read the current generation before the location_config PUT — read-before-write (#1095)"
+  || fail "55-storage-init.yaml must GET /v1/tenant/<T> for the pageserver's current view (#1095)"
+grep -qF 'cat /ledger/generation' 55-storage-init.yaml \
+  || fail "55-storage-init.yaml must read the mounted durable ledger (/ledger/generation) — the authority that survives a fresh-PVC pageserver (#1095)"
 grep -qF 'generation\":${GEN}' 55-storage-init.yaml \
-  || fail "55-storage-init.yaml must attach at the READ generation \${GEN}, not a literal (#1095)"
-ok "T1 read-before-attach: no attach path emits a literal generation:1; both storage-init and provision-app read the current pageserver generation first (#1095)"
+  || fail "55-storage-init.yaml must attach at the resolved generation \${GEN}, not a literal (#1095)"
+# Response/CM-shape pins: the field/key name the logic depends on. If the pageserver
+# JSON field or the ledger CM key is renamed, every attach silently degrades to the
+# floor and the wedge returns green — so pin BOTH names, cross-file.
+grep -q 'genKeyDefault = "generation"' ../gateway/internal/pswatcher/k8s.go \
+  || fail "pswatcher ledger key drifted from \"generation\" — the attach paths read data.generation / /ledger/generation; a rename silently degrades every attach (#1095)"
+grep -qE 'name: pageserver-generation' 57-pageserver-standby.yaml \
+  || fail "57-pageserver-standby.yaml must ship the pageserver-generation ledger ConfigMap (#1095)"
+# The seed CM must NOT carry a hardcoded numeric generation value: a re-apply of 57
+# after pswatcher advanced the ledger would DOWNGRADE it below the live value,
+# re-introducing the silent-data-loss. 1 is the floor everywhere already.
+if grep -A4 'name: pageserver-generation' 57-pageserver-standby.yaml | grep -qE 'generation: *"?[0-9]'; then
+  fail "57-pageserver-standby.yaml seeds pageserver-generation with a numeric value — a kubectl apply would DOWNGRADE the ledger below the live generation (#1095). Ship data: {} and let pswatcher write the real value."
+fi
+ok "T1 read-before-attach: no literal generation:1; both storage-init and provision-app read the durable ledger + pageserver view (max, never below the ledger); field/key names pinned; seed CM cannot downgrade (#1095)"
 
 # Runtime proof of the read-before-attach logic (mirrors the harden_pghba pattern):
-# extract + exercise ensure_tenant / resolve_attach_generation against fixture
-# pageserver responses so a broken transform is caught here, not only on-cluster.
+# SOURCE provision-app.sh + EXTRACT the storage-init inline lines and exercise both
+# against fixture ledger/pageserver values, so a broken transform is caught here, not
+# only on-cluster. The ok() is INSIDE the ran-branch — on a bash-less host the else
+# prints a skip note and NO green proof (a proof that never ran must not read as ok).
 if command -v bash >/dev/null 2>&1; then
-  bash ./test_ensure-tenant-gen.sh >/dev/null 2>&1 \
-    || { bash ./test_ensure-tenant-gen.sh >&2; fail "test_ensure-tenant-gen.sh FAILED — the shipped read-before-attach logic does not attach at the pageserver's current generation (output above)"; }
+  if bash ./test_ensure-tenant-gen.sh >/dev/null 2>&1; then
+    ok "T1 read-before-attach runtime proof: attaches at max(ledger, pageserver-view, 1) — honours a ledger of 3 over a fresh-PVC pageserver (never 1), for both the provision-app and storage-init copies (#1095)"
+  else
+    bash ./test_ensure-tenant-gen.sh >&2
+    fail "test_ensure-tenant-gen.sh FAILED — the shipped read-before-attach logic does not honour the durable ledger (output above)"
+  fi
 else
   echo "  (no bash on PATH — skipped the test_ensure-tenant-gen.sh runtime proof; the source contracts above still ran)"
 fi
-ok "T1 read-before-attach runtime proof: ensure_tenant attaches at the current generation (2/5) and at 1 for a fresh tenant (#1095)"
 
 # ---------------------------------------------------------------------------
 # Summary (#797): every contract above has been EVALUATED — nothing exits early.

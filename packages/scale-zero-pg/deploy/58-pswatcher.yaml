@@ -105,7 +105,7 @@ spec:
               valueFrom: { configMapKeyRef: { name: compute-config, key: TENANT_ID } }
             - { name: PSW_POLL_MS, value: "2000" } # 2s poll
             - { name: PSW_FAIL_THRESHOLD, value: "3" } # ~6s of misses before failover (don't split-brain a slow primary)
-            - { name: PSW_BASE_GENERATION, value: "1" } # storage-init attached at gen 1
+            - { name: PSW_BASE_GENERATION, value: "1" } # floor when the ledger key is absent (fresh plane); the attach paths (storage-init, provision-app) read max(ledger, pageserver-view, 1) and may attach at N>1 (#1095)
             - { name: PSW_HEALTH_ADDR, value: ":9091" }
           ports:
             - { name: metrics, containerPort: 9091 }

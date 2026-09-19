@@ -55,11 +55,20 @@ spec:
                 echo "bucket '${OBJSTORE_BUCKET}' missing and could not be created — pre-create it on ${OBJSTORE_ENDPOINT}" >&2
                 exit 1
               fi
+      # The durable generation ledger (pageserver-generation ConfigMap, seeded/advanced
+      # by pswatcher) mounted READ-ONLY so the attach step can floor at it (#1095). A
+      # ConfigMap volume costs no RBAC. optional:true — a genuinely fresh plane may not
+      # have the CM yet; then the attach floors at 1, which is correct.
+      volumes:
+        - name: gen-ledger
+          configMap: { name: pageserver-generation, optional: true }
       containers:
         - name: init
           image: neondatabase/neon:8464
           envFrom:
             - configMapRef: { name: compute-config } # TENANT_ID, TIMELINE_ID, PG_VERSION, PAGESERVER_HOST
+          volumeMounts:
+            - { name: gen-ledger, mountPath: /ledger, readOnly: true }
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -68,18 +77,24 @@ spec:
               echo "waiting for pageserver HTTP at ${PS} ..."
               until curl -sf "${PS}/v1/tenant" >/dev/null 2>&1; do sleep 2; done
               echo "ensuring tenant ${TENANT_ID}"
-              # read-before-write (T1, #1095): attach at the pageserver's CURRENT
-              # generation, never a literal 1. After ANY pswatcher failover the
-              # pageserver's generation for this tenant advances (->2, ->3...), so a
-              # hardcoded 1 is REJECTED ("Generation 00000001 is less than existing N")
-              # and this Job CrashLoops forever. GET /v1/tenant/<T> reports the current
-              # generation; curl -sf fails on a 404 (unattached) => empty body => gen 1.
-              # We only RE-ASSERT the current generation; advancing it is pswatcher's
-              # job on failover, never this bootstrap path's.
+              # read-before-write (T1, #1095): attach at max(ledger, pageserver-view, 1),
+              # NEVER a literal 1 and NEVER below the durable ledger. After a pswatcher
+              # failover the tenant's generation advances (->2, ->3...); a hardcoded 1 is
+              # REJECTED ("Generation 00000001 is less than existing N") and this Job
+              # CrashLoops. Worse, a pageserver on a FRESH PVC 404s the tenant while its
+              # object-store index is at the ledger generation N — attaching at the
+              # pageserver's (empty) view alone would silently pick 1, and the pageserver
+              # ACCEPTS it (the reject only fires when it already knows a higher gen),
+              # making the gen-N index INVISIBLE (silent data loss). So the DURABLE LEDGER
+              # (survives a fresh PVC; the pageserver's local view does not) is the floor.
+              # We only READ it; advancing the generation is pswatcher's job on failover.
+              LEDGER="$(cat /ledger/generation 2>/dev/null | tr -dc '0-9')"
               CUR="$(curl -sf "${PS}/v1/tenant/${TENANT_ID}" 2>/dev/null || true)"
-              GEN="$(printf '%s' "$CUR" | tr ',' '\n' | grep '"generation"' | head -1 | tr -dc '0-9')"
-              [ -n "$GEN" ] && [ "$GEN" != 0 ] || GEN=1
-              echo "attaching tenant ${TENANT_ID} at generation ${GEN}"
+              PSGEN="$(printf '%s' "$CUR" | tr ',' '\n' | grep '"generation"' | head -1 | tr -dc '0-9')"
+              GEN=1
+              [ -n "$LEDGER" ] && [ "$LEDGER" -gt "$GEN" ] && GEN="$LEDGER"
+              [ -n "$PSGEN" ] && [ "$PSGEN" -gt "$GEN" ] && GEN="$PSGEN"
+              echo "attaching tenant ${TENANT_ID} at generation ${GEN} (ledger=${LEDGER:-none}, pageserver=${PSGEN:-none})"
               curl -sf -X PUT -H 'Content-Type: application/json' \
                 -d "{\"mode\":\"AttachedSingle\",\"generation\":${GEN},\"tenant_conf\":{}}" \
                 "${PS}/v1/tenant/${TENANT_ID}/location_config" >/dev/null
