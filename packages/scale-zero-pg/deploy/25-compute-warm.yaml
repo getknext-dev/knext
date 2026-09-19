@@ -13,8 +13,12 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: compute-warm
+  # plane: compute marks this a WRITER-plane compute (same tenant/timeline as the
+  # cold `compute`, single-writer). Writer-only selectors keep excluding readers via
+  # plane=compute,role!=ro; on pageserver failover the pswatcher bounce (plane=compute)
+  # now reaches a warm pod so it re-attaches to the promoted pageserver (#1097).
   namespace: scale-zero-pg
-  labels: { app: compute-warm }
+  labels: { app: compute-warm, plane: compute }
 spec:
   replicas: 0 # enable for warm-tier apps; default posture stays cold-zero (ADR-0002)
   revisionHistoryLimit: 2
@@ -24,7 +28,7 @@ spec:
     type: Recreate # single-writer: never two warm computes on one timeline
   template:
     metadata:
-      labels: { app: compute-warm }
+      labels: { app: compute-warm, plane: compute }
     spec:
       securityContext:
         seccompProfile: { type: RuntimeDefault }

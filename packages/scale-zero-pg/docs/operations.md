@@ -1051,8 +1051,15 @@ outage. It is now **automatic**: a standing warm-Secondary standby plus the
      plane.
   3. **Flip** the `pageserver` Service selector to the standby, so the compute's
      unchanged `neon.pageserver_connstring host=pageserver` now resolves to it.
-  4. **Bounce** the compute (delete its pod) so a cold wake basebackups from the
-     promoted standby.
+  4. **Bounce** every compute (delete its pods) so a cold wake basebackups from the
+     promoted standby. The bounce targets the stable `plane=compute` label that EVERY
+     compute carries — the single-DB writer, the warm writer, the read-replica pool,
+     and every per-app writer *and* read replica — not just the base `compute`.
+     Promotion scope == routing scope: because the flipped Service routes every
+     tenant, every compute that resolves through it must reconnect, or a compute left
+     running keeps talking to the demoted pageserver. The trade is a slightly broader
+     bounce (any awake per-app/RO compute takes one cold wake to come back); this is
+     acceptable and deliberate — correctness over a marginally faster next wake.
   The surviving safekeeper carries the WAL, so the standby streams forward and the DB
   stays **read-WRITE** across the failover. The watcher is single-shot per failover
   and idempotent on restart (if the `pageserver` selector already points at the

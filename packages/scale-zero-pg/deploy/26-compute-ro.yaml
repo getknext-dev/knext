@@ -20,8 +20,14 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: compute-ro
+  # plane: compute + role: ro. plane=compute is the STABLE "this is a compute that
+  # attaches to the pageserver" label the failover bounce (pswatcher plane=compute)
+  # targets, so the RO pool re-attaches to the promoted pageserver on failover
+  # (#1097). role: ro keeps the WRITER-only consumers (writer-autoscaler,
+  # slot-janitor, backup) excluding it via plane=compute,role!=ro — this pool is a
+  # reader, never a publisher/writer.
   namespace: scale-zero-pg
-  labels: { app: compute-ro }
+  labels: { app: compute-ro, plane: compute, role: ro }
 spec:
   replicas: 0 # gateway RO driver scales 0<->N; HPA (deploy/27) grows N under load
   revisionHistoryLimit: 2
@@ -34,7 +40,7 @@ spec:
     rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
   template:
     metadata:
-      labels: { app: compute-ro }
+      labels: { app: compute-ro, plane: compute, role: ro }
     spec:
       securityContext:
         seccompProfile: { type: RuntimeDefault }

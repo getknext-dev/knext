@@ -2,9 +2,10 @@
 # axis 1). Watches every WRITER compute's CPU+memory pressure (metrics-server) and
 # applies the proven #67 in-place pod resize (the pods/resize subresource) within
 # operator-configured min/max bounds — growing/shrinking a RUNNING Postgres writer
-# with ZERO restart. Per-app aware: the plane=compute selector covers the primary
-# `compute` and every per-app `compute-<app>` writer; the read-replica pool
-# (app=compute-ro, no plane=compute label) is deliberately excluded.
+# with ZERO restart. Per-app aware: the plane=compute,role!=ro selector covers the
+# primary `compute`, the warm writer, and every per-app `compute-<app>` writer; the
+# read-replica pools (compute-ro + compute-ro-<app>) carry role: ro and so are
+# deliberately excluded (#1097 made plane=compute universal across all computes).
 #
 # Hard invariant (never-bounce-silently): CPU + memory limits actuate live;
 # shared_buffers is boot-fixed, so a writer memory-bound AT its max limit is
@@ -122,9 +123,9 @@ spec:
             capabilities: { drop: ["ALL"] }
           env:
             - { name: WAS_NAMESPACE, value: "scale-zero-pg" }
-            # WRITERS only: plane=compute is shared with per-app read replicas (which
-            # carry role=ro), so exclude them; the base RO pool (app=compute-ro) has no
-            # plane label. This is a writer autoscaler — read scaling is the RO HPA's job.
+            # WRITERS only: every compute carries plane=compute (#1097), so exclude the
+            # read replicas (compute-ro + compute-ro-<app>, which carry role=ro) via
+            # role!=ro. This is a writer autoscaler — read scaling is the RO HPA's job.
             - { name: WAS_SELECTOR, value: "plane=compute,role!=ro" }
             - { name: WAS_CONTAINER, value: "compute" }
             - { name: WAS_POLL_MS, value: "15000" } # 15s poll

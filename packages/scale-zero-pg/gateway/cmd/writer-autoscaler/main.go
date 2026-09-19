@@ -76,10 +76,9 @@ func main() {
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds|log.LUTC)
 
 	namespace := env("WAS_NAMESPACE", "scale-zero-pg")
-	// WRITERS only: plane=compute is shared with per-app read replicas, which carry
-	// role=ro — so exclude them. The base RO pool (app=compute-ro) has no plane label
-	// and is excluded already. This is a WRITER autoscaler; read scaling is the RO
-	// pool's job (HPA on compute-ro).
+	// WRITERS only: every compute carries plane=compute (#1097), so exclude the read
+	// replicas (compute-ro + compute-ro-<app>, which carry role=ro) via role!=ro.
+	// This is a WRITER autoscaler; read scaling is the RO pool's job (HPA on compute-ro).
 	selector := env("WAS_SELECTOR", "plane=compute,role!=ro")
 	container := env("WAS_CONTAINER", "compute")
 	pollMs := envInt("WAS_POLL_MS", 15000)

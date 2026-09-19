@@ -59,7 +59,12 @@ func main() {
 	// scope == routing scope (#1098). Optional: empty on a base-only plane.
 	appsTenant := os.Getenv("PSW_APPS_TENANT_ID")
 	genCM := env("PSW_GEN_CONFIGMAP", "pageserver-generation")
-	computeSel := env("PSW_COMPUTE_SELECTOR", "app=compute")
+	// Bounce EVERY compute that resolves through the flipped Service by the stable
+	// plane label plane=compute (base writer, warm, base RO pool, and the
+	// operator-rendered per-app writer + RO all carry it). The old app=compute
+	// matched only the base writer, leaving per-app computes (app=compute-<app>)
+	// pinned to the dead pageserver (#1097).
+	computeSel := env("PSW_COMPUTE_SELECTOR", "plane=compute")
 	primarySel := env("PSW_PRIMARY_SELECTOR", "app=pageserver")
 	pollMs := envInt("PSW_POLL_MS", 2000)
 	threshold := envInt("PSW_FAIL_THRESHOLD", 3)
