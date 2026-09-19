@@ -667,6 +667,17 @@ docs/BENCHMARKS.md.
   generation ≤ its own, so gen 2 reads the gen-1 index and writes forward at gen 2 —
   a clean control-plane-style re-attach. Attaching at the **same** generation risks
   overwriting the index; attaching **lower** would not see the latest index.
+- **Bootstrap attach is read-before-write; it never hardcodes a generation.** The
+  two tenant-attach bootstrap paths — the `storage-init` Job (`deploy/55-storage-init.yaml`)
+  and `provision-app.sh:ensure_tenant` — used to `PUT` a fixed `generation:1` to
+  `location_config`. Because a pswatcher failover advances the tenant's generation
+  (→2, →3…), the pageserver then **rejects** the lower `generation:1`
+  (`Generation 00000001 is less than existing N`) and `storage-init` CrashLoops
+  permanently. Both paths now `GET /v1/tenant/<T>` first, read the **current**
+  `generation`, and re-assert **that** (a fresh/unattached tenant — a 404 — starts at
+  1). They only re-assert the current generation; **advancing it stays pswatcher's
+  job on failover**, never the bootstrap path's. Contract-guarded in `_validate.sh`
+  and unit-proved off-cluster by `deploy/test_ensure-tenant-gen.sh` (issue #1095).
 - **Read-only is the first, always-safe proof.** The faithful *readability* check is
   a **STATIC read-only compute** pinned to the restored pageserver LSN
   (`spec.mode = {"Static":"<lsn>"}`), which reads pages directly from the pageserver

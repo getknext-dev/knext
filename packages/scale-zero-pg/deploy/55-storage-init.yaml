@@ -68,8 +68,20 @@ spec:
               echo "waiting for pageserver HTTP at ${PS} ..."
               until curl -sf "${PS}/v1/tenant" >/dev/null 2>&1; do sleep 2; done
               echo "ensuring tenant ${TENANT_ID}"
+              # read-before-write (T1, #1095): attach at the pageserver's CURRENT
+              # generation, never a literal 1. After ANY pswatcher failover the
+              # pageserver's generation for this tenant advances (->2, ->3...), so a
+              # hardcoded 1 is REJECTED ("Generation 00000001 is less than existing N")
+              # and this Job CrashLoops forever. GET /v1/tenant/<T> reports the current
+              # generation; curl -sf fails on a 404 (unattached) => empty body => gen 1.
+              # We only RE-ASSERT the current generation; advancing it is pswatcher's
+              # job on failover, never this bootstrap path's.
+              CUR="$(curl -sf "${PS}/v1/tenant/${TENANT_ID}" 2>/dev/null || true)"
+              GEN="$(printf '%s' "$CUR" | tr ',' '\n' | grep '"generation"' | head -1 | tr -dc '0-9')"
+              [ -n "$GEN" ] && [ "$GEN" != 0 ] || GEN=1
+              echo "attaching tenant ${TENANT_ID} at generation ${GEN}"
               curl -sf -X PUT -H 'Content-Type: application/json' \
-                -d '{"mode":"AttachedSingle","generation":1,"tenant_conf":{}}' \
+                -d "{\"mode\":\"AttachedSingle\",\"generation\":${GEN},\"tenant_conf\":{}}" \
                 "${PS}/v1/tenant/${TENANT_ID}/location_config" >/dev/null
               echo "ensuring timeline ${TIMELINE_ID}"
               if curl -sf "${PS}/v1/tenant/${TENANT_ID}/timeline" | grep -q "${TIMELINE_ID}"; then

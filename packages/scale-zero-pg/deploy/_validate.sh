@@ -1149,6 +1149,46 @@ awk '/TLS_MTLS_APP:-/ {s=1} s && /the gateway-identity leg CANNOT run/ {n++} END
 ok "F5 phase-4 drill honesty: _verify-tls.sh leg (b) is mandatory when section 4 runs, and the closing line reports what actually ran (\$MTLS_CLAIM) — ADR-0003"
 
 # ---------------------------------------------------------------------------
+# 38. contract (T1 read-before-attach, #1095): NO tenant-attach path may POST a
+#     HARDCODED generation to the pageserver's /v1/tenant/<T>/location_config.
+#     Both bootstrap attach sites — the storage-init init container
+#     (55-storage-init.yaml) and provision-app.sh:ensure_tenant — used to send
+#     {"mode":"AttachedSingle","generation":1,...}. After ANY pswatcher failover
+#     the pageserver's generation for a tenant advances (->2, ->3...), so a literal
+#     1 is REJECTED ("Generation 00000001 is less than existing N") and the attach
+#     path wedges permanently (storage-init CrashLoops). The fix reads the current
+#     generation (GET /v1/tenant/<T>) and re-asserts THAT. This guard fails if the
+#     literal creeps back, and fails if either site loses its read step — so a
+#     revert of either half reds it (mutation-provable).
+for _f in 55-storage-init.yaml provision-app.sh; do
+  # Normalise shell backslash-escaping first: the literal reappears as
+  # "generation":1 in the YAML single-quoted form and as \"generation\":1 in the
+  # provision-app.sh double-quoted -d payload — strip backslashes so ONE pattern
+  # catches both.
+  if sed 's/\\//g' "$_f" | grep -qE '"generation" *: *1[,}]'; then
+    fail "$_f attaches at a HARDCODED generation:1 — after a pswatcher failover the pageserver has advanced past 1 and REJECTS it (#1095 wedge). Read GET /v1/tenant/<T> and attach at the current generation (read-before-write)."
+  fi
+done
+grep -q 'resolve_attach_generation' provision-app.sh \
+  || fail "provision-app.sh:ensure_tenant must resolve the pageserver's CURRENT generation (resolve_attach_generation) before the location_config PUT — read-before-write (#1095)"
+grep -qF 'curl -sf "${PS}/v1/tenant/${TENANT_ID}"' 55-storage-init.yaml \
+  || fail "55-storage-init.yaml must GET /v1/tenant/<T> to read the current generation before the location_config PUT — read-before-write (#1095)"
+grep -qF 'generation\":${GEN}' 55-storage-init.yaml \
+  || fail "55-storage-init.yaml must attach at the READ generation \${GEN}, not a literal (#1095)"
+ok "T1 read-before-attach: no attach path emits a literal generation:1; both storage-init and provision-app read the current pageserver generation first (#1095)"
+
+# Runtime proof of the read-before-attach logic (mirrors the harden_pghba pattern):
+# extract + exercise ensure_tenant / resolve_attach_generation against fixture
+# pageserver responses so a broken transform is caught here, not only on-cluster.
+if command -v bash >/dev/null 2>&1; then
+  bash ./test_ensure-tenant-gen.sh >/dev/null 2>&1 \
+    || { bash ./test_ensure-tenant-gen.sh >&2; fail "test_ensure-tenant-gen.sh FAILED — the shipped read-before-attach logic does not attach at the pageserver's current generation (output above)"; }
+else
+  echo "  (no bash on PATH — skipped the test_ensure-tenant-gen.sh runtime proof; the source contracts above still ran)"
+fi
+ok "T1 read-before-attach runtime proof: ensure_tenant attaches at the current generation (2/5) and at 1 for a fresh tenant (#1095)"
+
+# ---------------------------------------------------------------------------
 # Summary (#797): every contract above has been EVALUATED — nothing exits early.
 # One aggregated report, one CI-faithful exit code: 0 only if every contract
 # passed, 1 if any failed (the EXIT trap catches anything that dies before here).

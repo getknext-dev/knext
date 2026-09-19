@@ -207,10 +207,35 @@ ps_last_lsn() { # last_record_lsn of a timeline (the safe branch point)
 }
 tl_exists() { PS "http://localhost:9898/v1/tenant/$APPS_TENANT/timeline" | grep -q "$1"; }
 
+# resolve_attach_generation — read-before-write (T1, #1095): echo the generation
+# to attach a tenant at, given the pageserver's OWN current view of that tenant
+# (the JSON body of GET /v1/tenant/<T>, or "" when the tenant is unattached / the
+# GET 404s). It re-asserts the CURRENT generation (never a hardcoded 1) so that a
+# tenant whose generation has advanced past 1 on a pswatcher failover still
+# re-attaches instead of being rejected ("Generation 00000001 is less than
+# existing N"). A fresh/unattached tenant (empty body, no generation) starts at 1.
+# It NEVER invents a higher generation — advancing the generation is pswatcher's
+# job on failover, not the bootstrap path's.
+resolve_attach_generation() {
+  local body="$1" gen
+  gen="$(printf '%s' "$body" | tr ',' '\n' | grep '"generation"' | head -1 | tr -dc '0-9')"
+  case "$gen" in
+    ''|0) echo 1;;
+    *)    echo "$gen";;
+  esac
+}
+
 ensure_tenant() {
   log "ensuring apps tenant $APPS_TENANT"
+  # read-before-write: attach at the pageserver's CURRENT generation, never a
+  # literal 1 (which a post-failover pageserver rejects). curl -sf (PS) fails on a
+  # 404 for an unattached tenant, so `|| true` yields an empty body -> generation 1.
+  local cur gen
+  cur="$(PS "http://localhost:9898/v1/tenant/$APPS_TENANT" 2>/dev/null || true)"
+  gen="$(resolve_attach_generation "$cur")"
+  log "attaching apps tenant $APPS_TENANT at generation $gen"
   PS -X PUT -H 'Content-Type: application/json' \
-    -d '{"mode":"AttachedSingle","generation":1,"tenant_conf":{}}' \
+    -d "{\"mode\":\"AttachedSingle\",\"generation\":$gen,\"tenant_conf\":{}}" \
     "http://localhost:9898/v1/tenant/$APPS_TENANT/location_config" >/dev/null
 }
 
