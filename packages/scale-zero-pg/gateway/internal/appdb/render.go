@@ -81,6 +81,40 @@ func (c RenderConfig) RenderService(s ComputeSpec) *corev1.Service {
 	}
 }
 
+// backendTLSVolumeMounts + backendTLSVolumes mirror the F5 phase-2 wiring in
+// deploy/compute-app.template.yaml: the per-app compute mounts the shared phase-1
+// mTLS Secrets so it can OFFER TLS (paths match config.json's ssl_* GUCs;
+// entrypoint strips ssl -> plaintext when absent). Without these, an
+// operator-provisioned per-app compute boots ssl=off and phase-4
+// clientcert=verify-ca enforcement silently never engages. Shared by the writer
+// and RO renderers so they stay in lockstep with each other and the template
+// (guarded by render_tls_parity_test.go).
+func backendTLSVolumeMounts() []corev1.VolumeMount {
+	return []corev1.VolumeMount{
+		{Name: "pggw-compute-server-tls", MountPath: "/etc/pggw-compute-server-tls", ReadOnly: true},
+		{Name: "pggw-mtls-ca", MountPath: "/etc/pggw-mtls-ca", ReadOnly: true},
+	}
+}
+
+func backendTLSVolumes() []corev1.Volume {
+	optional := true
+	return []corev1.Volume{
+		{
+			Name:         "pggw-compute-server-tls",
+			VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "pggw-compute-server-tls", Optional: &optional}},
+		},
+		{
+			// ca.crt ONLY — the CA private key must never reach a compute pod.
+			Name: "pggw-mtls-ca",
+			VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+				SecretName: "pggw-mtls-ca",
+				Optional:   &optional,
+				Items:      []corev1.KeyToPath{{Key: "ca.crt", Path: "ca.crt"}},
+			}},
+		},
+	}
+}
+
 // RenderDeployment builds compute-<app> (mirrors the template Deployment exactly:
 // wait-timeline initContainer, shared entrypoint, Recreate single-writer strategy,
 // per-app quota resources, APP_ROLE_VERIFIER from the optional per-app Secret).
@@ -176,7 +210,7 @@ echo "timeline ready"`
 							{Name: "pg", ContainerPort: 55433},
 							{Name: "compute-http", ContainerPort: 3080},
 						},
-						VolumeMounts: []corev1.VolumeMount{{Name: "compute-files", MountPath: "/compute-files"}},
+						VolumeMounts: append([]corev1.VolumeMount{{Name: "compute-files", MountPath: "/compute-files"}}, backendTLSVolumeMounts()...),
 						ReadinessProbe: &corev1.Probe{
 							ProbeHandler:        corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromString("pg")}},
 							InitialDelaySeconds: 0, PeriodSeconds: 1, FailureThreshold: 60,
@@ -194,10 +228,10 @@ echo "timeline ready"`
 							},
 						},
 					}},
-					Volumes: []corev1.Volume{{
+					Volumes: append([]corev1.Volume{{
 						Name:         "compute-files",
 						VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "compute-files"}}},
-					}},
+					}}, backendTLSVolumes()...),
 				},
 			},
 		},
@@ -346,10 +380,10 @@ echo "resolved tip LSN = ${LSN:-<none>}"`
 							{Name: "pg", ContainerPort: 55433},
 							{Name: "compute-http", ContainerPort: 3080},
 						},
-						VolumeMounts: []corev1.VolumeMount{
+						VolumeMounts: append([]corev1.VolumeMount{
 							{Name: "compute-files", MountPath: "/compute-files"},
 							{Name: "ro-lsn", MountPath: "/ro-lsn"},
-						},
+						}, backendTLSVolumeMounts()...),
 						ReadinessProbe: &corev1.Probe{
 							ProbeHandler:        corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromString("pg")}},
 							InitialDelaySeconds: 0, PeriodSeconds: 1, FailureThreshold: 60,
@@ -369,13 +403,13 @@ echo "resolved tip LSN = ${LSN:-<none>}"`
 							},
 						},
 					}},
-					Volumes: []corev1.Volume{
+					Volumes: append([]corev1.Volume{
 						{
 							Name:         "compute-files",
 							VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "compute-files"}}},
 						},
 						{Name: "ro-lsn", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-					},
+					}, backendTLSVolumes()...),
 				},
 			},
 		},
