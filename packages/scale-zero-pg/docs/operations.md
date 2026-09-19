@@ -715,30 +715,27 @@ docs/BENCHMARKS.md.
     If the seed never runs, the ledger key stays absent, and `storage-init` **fails
     closed** (waits, then refuses) rather than attaching low — a loud, recoverable stop,
     not silent loss.
-  - **Upgrading from a pre-#1095 install — record N first, then re-seed (runbook).** This
-    is a corruption hazard, follow it in order. An install created before this change
-    carried `generation: "1"` in the ConfigMap's last-applied-configuration; the first
-    `kubectl apply` of the new `deploy/57` **prunes** that key, and `make deploy` then
-    runs `seed-ledger.sh`, which writes `1` (it seeds the genesis value; it does **not**
-    consult the pageserver). So a pswatcher-advanced ledger at `N` becomes `1`. The
-    attach-time `max(ledger, pageserver-view)` does **not** cover this: pswatcher's own
-    promote path reads only the ledger, so the next failover promotes at `ledger+1 = 2`,
-    and if `2 < N` a fresh standby accepts it and the gen-`N` object-store index goes
-    invisible. Therefore, on this one-time upgrade:
-    1. **BEFORE the upgrade apply**, record the live generation:
-       `kubectl -n scale-zero-pg get cm pageserver-generation -o jsonpath='{.data.generation}'`
-       → call it `N`.
-    2. Apply the upgrade (`make deploy` or `kubectl apply -f deploy/` + `bash
-       deploy/seed-ledger.sh`). Expect the ledger to read `1` afterwards — that is the
-       prune-then-seed.
-    3. **RE-SEED `N` before re-enabling pswatcher / before any failover:**
-       `kubectl -n scale-zero-pg patch cm pageserver-generation --type=merge -p
-       '{"data":{"generation":"<N>"}}'`. Skipping this loses the gen-`N` index on the next
-       failover.
+  - **Upgrading from a pre-#1095 install — now SELF-HEALS at pswatcher startup.** An
+    install created before the ledger change carried `generation: "1"` in the ConfigMap's
+    last-applied-configuration; the first `kubectl apply` of the new `deploy/57` **prunes**
+    that key, and `make deploy` then runs `seed-ledger.sh`, which writes `1` (genesis; it
+    does not consult the pageserver). So a pswatcher-advanced ledger at `N` would become
+    `1`. **pswatcher now closes this automatically:** at startup it seeds/heals the ledger
+    to `max(current ledger, the pageserver's live generation view, base)` — reading
+    `GET /v1/tenant/<base>` on the primary — and **never lowers it**. A pruned/`1` ledger
+    is corrected back up to the pageserver's real `N` before any failover, so the previous
+    manual "record N, then re-seed N" runbook step is no longer required for a normal
+    upgrade where pswatcher and the primary are running.
 
-    The automatic self-heal that removes this manual step — pswatcher seeding/healing the
-    ledger from the pageserver's current max at startup — is owned by the pswatcher +
-    ledger-authority work, not this change.
+    Belt-and-braces (only if pswatcher cannot reach the primary during the upgrade, e.g.
+    both are down together): the heal leaves the ledger untouched when the pageserver view
+    is unavailable (it never floors on an unreachable vantage), and the fail-closed readers
+    still refuse an under-seeded ledger rather than attaching low. In that case, record the
+    live generation before the apply
+    (`kubectl -n scale-zero-pg get cm pageserver-generation -o jsonpath='{.data.generation}'`)
+    and re-seed it afterwards
+    (`kubectl -n scale-zero-pg patch cm pageserver-generation --type=merge -p '{"data":{"generation":"<N>"}}'`),
+    then start pswatcher.
 
   Contract-guarded in `_validate.sh` and unit-proved off-cluster by
   `deploy/test_ensure-tenant-gen.sh` (issue #1095). The full on-cluster proof
@@ -1016,14 +1013,21 @@ outage. It is now **automatic**: a standing warm-Secondary standby plus the
 
 - **Standby pageserver (`pageserver-standby`, 57).** A second StatefulSet, distinct
   node identity (`id=1235` vs the primary's `1234`), **same bucket + broker**. Its
-  init Job registers a **warm Secondary** location for the live tenant
+  init Job registers a **warm Secondary** location for the live tenant — **and, best-effort,
+  for the apps tenant** (`APPS_TENANT_ID`, where every per-app database is a timeline) —
   (`location_config` `mode:"Secondary"`, `secondary_conf.warm:true`) so it
   pre-downloads layers from MinIO without serving — a promotion is a fast re-attach,
-  not a cold restore.
+  not a cold restore. The apps-tenant warm is best-effort: promotion still works cold
+  (lazy object-store fetch) if it is not yet provisioned.
 - **Generation ledger (`pageserver-generation` ConfigMap).** Holds the last generation
-  the tenant was attached at (seed `1`, matching `storage-init`). Each failover reads
-  it, promotes at **value+1**, and writes the new value back — so repeated failovers
-  stay monotonic and a restarted watcher never re-uses a stale generation.
+  the plane was attached at (seed `1`, matching `storage-init`). It is the **single,
+  shared authority for every tenant** — both the base tenant and the apps tenant attach
+  at the same generation. Each failover reads it, promotes at **value+1**, and writes the
+  new value back **exactly once** for the whole plane — so repeated failovers stay
+  monotonic and a restarted watcher never re-uses a stale generation. pswatcher is the
+  **sole writer** and, at startup, seeds/heals the ledger to `max(current ledger, the
+  pageserver's live generation view, base)`, **never lowering it** (see the upgrade note
+  under "Bootstrap attach").
 - **Stable liveness handle (`pageserver-primary` Service).** Always selects the primary
   STS, so the watcher probes the *primary's* health even after it flips the
   client-facing `pageserver` Service.
@@ -1034,8 +1038,17 @@ outage. It is now **automatic**: a standing warm-Secondary standby plus the
   runbook the restore drill proved, in order:
   1. **Promote** the standby to `AttachedSingle` at **generation+1** — the higher
      generation fences the dead primary (single-writer is intrinsic to Neon; the
-     pageserver picks the newest `index_part.json-<gen>` ≤ its own).
-  2. **Persist** the advanced generation in the ledger ConfigMap.
+     pageserver picks the newest `index_part.json-<gen>` ≤ its own). **Promotion scope ==
+     routing scope:** the flipped `pageserver` Service routes EVERY tenant the plane holds,
+     so the watcher re-attaches **all of them** — the base tenant (`PSW_TENANT_ID`) *and*
+     the apps tenant (`PSW_APPS_TENANT_ID`, under which every per-app database is a
+     timeline) — before the flip. Promoting only the base tenant would strand every
+     per-app database on the demoted pageserver (split-brain). A tenant the pageserver does
+     not hold (e.g. an unprovisioned apps tenant) is **skipped** and counted
+     (`pswatcher_tenant_absent_total`); any other promotion error **aborts** the failover
+     (retried) so an existing tenant is never stranded.
+  2. **Persist** the advanced generation in the ledger ConfigMap — once, for the whole
+     plane.
   3. **Flip** the `pageserver` Service selector to the standby, so the compute's
      unchanged `neon.pageserver_connstring host=pageserver` now resolves to it.
   4. **Bounce** the compute (delete its pod) so a cold wake basebackups from the
@@ -1051,8 +1064,11 @@ outage. It is now **automatic**: a standing warm-Secondary standby plus the
   stopped watching. The returned old primary is never re-adopted (the selector never
   flips back). It exposes `/healthz` and
   `pswatcher_promotions_total` / `pswatcher_primary_up` / `pswatcher_failed_over` /
-  `pswatcher_suspected_partitions_total` on `:9091`; RBAC is minimal
-  (services get/patch, configmaps get/update/patch, pods list/delete).
+  `pswatcher_suspected_partitions_total` / `pswatcher_tenant_absent_total` on `:9091`;
+  RBAC is minimal and **unchanged** by multi-tenant promotion (services get/patch,
+  configmaps get/update/patch, pods list/delete) — the routed-tenant set is configured,
+  not discovered by listing `AppDatabase` CRs, and the pageserver generation view is an
+  HTTP read.
 
 #### Partition tolerance — the promote decision (#26)
 

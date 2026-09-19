@@ -203,6 +203,14 @@ spec:
           image: neondatabase/neon:8464
           envFrom:
             - configMapRef: { name: compute-config } # TENANT_ID, TIMELINE_ID, PG_VERSION, PAGESERVER_HOST
+          env:
+            # The apps tenant: every per-app AppDatabase is a timeline under it, and
+            # the failover watcher promotes it too (promotion scope == routing scope,
+            # #1098). Register it as a warm Secondary so a promotion is a warm re-attach
+            # rather than a cold object-store fetch. Best-effort: on a base-only plane
+            # the apps tenant may not exist yet, so a failure here must NOT fail the Job.
+            # Kept in lock-step with deploy/83 APPDB_TENANT_ID / 58 PSW_APPS_TENANT_ID.
+            - { name: APPS_TENANT_ID, value: "a0000000000000000000000000000001" }
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -210,10 +218,18 @@ spec:
               SB="http://pageserver-standby:9898"
               echo "waiting for standby HTTP at ${SB} ..."
               until curl -sf "${SB}/v1/tenant" >/dev/null 2>&1; do sleep 2; done
-              echo "registering warm Secondary for tenant ${TENANT_ID} on the standby"
-              curl -sf -X PUT -H 'Content-Type: application/json' \
-                -d '{"mode":"Secondary","secondary_conf":{"warm":true},"tenant_conf":{}}' \
-                "${SB}/v1/tenant/${TENANT_ID}/location_config" >/dev/null
-              echo "kicking a first layer download (best-effort)"
-              curl -sf -X POST "${SB}/v1/tenant/${TENANT_ID}/secondary/download" >/dev/null 2>&1 || true
-              echo "standby warm-Secondary registered"
+              warm_secondary() { # $1 = tenant id; register warm Secondary + kick a download
+                curl -sf -X PUT -H 'Content-Type: application/json' \
+                  -d '{"mode":"Secondary","secondary_conf":{"warm":true},"tenant_conf":{}}' \
+                  "${SB}/v1/tenant/$1/location_config" >/dev/null
+                curl -sf -X POST "${SB}/v1/tenant/$1/secondary/download" >/dev/null 2>&1 || true
+              }
+              echo "registering warm Secondary for BASE tenant ${TENANT_ID} on the standby"
+              warm_secondary "${TENANT_ID}"
+              # Apps tenant is BEST-EFFORT: promotion still works cold (AttachedSingle
+              # lazily fetches from the shared bucket) if it is not yet provisioned.
+              if [ -n "${APPS_TENANT_ID:-}" ]; then
+                echo "registering warm Secondary for APPS tenant ${APPS_TENANT_ID} (best-effort)"
+                warm_secondary "${APPS_TENANT_ID}" || echo "apps tenant not warmable yet (likely unprovisioned) — promotion will cold-attach"
+              fi
+              echo "standby warm-Secondary registration done"

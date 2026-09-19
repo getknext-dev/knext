@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -46,7 +47,15 @@ func main() {
 	clientSvc := env("PSW_CLIENT_SERVICE", "pageserver")
 	standbyApp := env("PSW_STANDBY_SELECTOR_APP", "pageserver-standby")
 	standbyStatusURL := env("PSW_STANDBY_STATUS_URL", standbyBase+"/v1/status")
+	// The primary base URL is the pre-failover authority we read the current
+	// generation view from at startup (seed/heal). Derived from the status URL host.
+	primaryBase := env("PSW_PRIMARY_BASE_URL", strings.TrimSuffix(env("PSW_PRIMARY_STATUS_URL", "http://pageserver-primary:9898/v1/status"), "/v1/status"))
 	tenant := os.Getenv("PSW_TENANT_ID")
+	// The apps tenant (a fixed well-known id, see deploy/83) is where EVERY per-app
+	// AppDatabase lives as a timeline. The flipped `pageserver` Service routes it too,
+	// so pswatcher must promote it alongside the base tenant on failover — promotion
+	// scope == routing scope (#1098). Optional: empty on a base-only plane.
+	appsTenant := os.Getenv("PSW_APPS_TENANT_ID")
 	genCM := env("PSW_GEN_CONFIGMAP", "pageserver-generation")
 	computeSel := env("PSW_COMPUTE_SELECTOR", "app=compute")
 	primarySel := env("PSW_PRIMARY_SELECTOR", "app=pageserver")
@@ -71,8 +80,16 @@ func main() {
 	promoter := pswatcher.NewHTTPPromoter(standbyBase, 10*time.Second)
 	metrics := pswatcher.NewMetrics()
 
+	// Routed-tenant set = base tenant + apps tenant (if configured). The base is
+	// always first (the routed-set floor + seed gen source).
+	tenants := []string{tenant}
+	if appsTenant != "" && appsTenant != tenant {
+		tenants = append(tenants, appsTenant)
+	}
+
 	ctrl := pswatcher.NewController(prober, standbyProber, promoter, k8s, pswatcher.Config{
 		Tenant:          tenant,
+		Tenants:         tenants,
 		ClientService:   clientSvc,
 		StandbyApp:      standbyApp,
 		ComputeSelector: computeSel,
@@ -80,6 +97,9 @@ func main() {
 		FailThreshold:   threshold,
 		BaseGeneration:  baseGen,
 	}, metrics)
+	// Startup seed/heal: recover a pruned/empty ledger from the primary's live
+	// generation view (#1098). Read against the PRIMARY (pre-failover authority).
+	ctrl.SetGenerationViewer(pswatcher.NewHTTPGenerationViewer(primaryBase, probeTimeout))
 
 	// /healthz + /metrics: liveness of the watcher itself + promotion counter.
 	srv := &http.Server{Addr: healthAddr, Handler: metrics.Handler(), ReadHeaderTimeout: 5 * time.Second}
@@ -93,8 +113,15 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	logger.Printf("[pswatcher] watching %s (primary=%s standby=%s tenant=%s threshold=%d poll=%dms)",
-		clientSvc, statusURL, standbyBase, tenant, threshold, pollMs)
+	// Seed/heal the durable ledger before the first tick so any failover reads a
+	// recovered generation (#1098). Non-fatal: a transient error is logged and the
+	// fail-closed readers still refuse an unreadable ledger.
+	if err := ctrl.SeedLedger(ctx); err != nil {
+		logger.Printf("[pswatcher] ledger seed/heal: %v (continuing; readers fail-closed on an unreadable ledger)", err)
+	}
+
+	logger.Printf("[pswatcher] watching %s (primary=%s standby=%s tenants=%v threshold=%d poll=%dms)",
+		clientSvc, statusURL, standbyBase, tenants, threshold, pollMs)
 
 	ticker := time.NewTicker(time.Duration(pollMs) * time.Millisecond)
 	defer ticker.Stop()

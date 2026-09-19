@@ -3,6 +3,7 @@ package pswatcher
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -60,8 +61,62 @@ func (p *HTTPPromoter) Promote(ctx context.Context, tenant string, generation in
 		return err
 	}
 	defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotFound {
+		// The pageserver does not hold this tenant (e.g. an apps tenant that was
+		// never provisioned). Signal SKIP, not a hard failure (#1098).
+		return fmt.Errorf("promote %s: %w", tenant, ErrTenantNotFound)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("promote %s: pageserver returned %s", tenant, resp.Status)
 	}
 	return nil
+}
+
+// HTTPGenerationViewer reads a tenant's current generation from the pageserver
+// (GET <BaseURL>/v1/tenant/<T>, top-level "generation"). Used by the startup
+// seed/heal path. Points at the PRIMARY (the pre-failover authority) by default.
+type HTTPGenerationViewer struct {
+	BaseURL string // e.g. http://pageserver-primary:9898
+	Client  *http.Client
+}
+
+// NewHTTPGenerationViewer builds a viewer with a bounded per-request timeout.
+func NewHTTPGenerationViewer(baseURL string, timeout time.Duration) *HTTPGenerationViewer {
+	return &HTTPGenerationViewer{BaseURL: baseURL, Client: &http.Client{Timeout: timeout}}
+}
+
+// Generation returns the tenant's generation as the pageserver reports it. ok=false
+// when the tenant is absent (404) or the response carries no generation field. A
+// transport/HTTP error is returned so the caller can leave the ledger untouched
+// rather than floor it on an unavailable vantage.
+func (v *HTTPGenerationViewer) Generation(ctx context.Context, tenant string) (int, bool, error) {
+	url := fmt.Sprintf("%s/v1/tenant/%s", v.BaseURL, tenant)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return 0, false, err
+	}
+	resp, err := v.Client.Do(req)
+	if err != nil {
+		return 0, false, err
+	}
+	defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotFound {
+		return 0, false, nil // tenant not attached here — nothing to read
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return 0, false, fmt.Errorf("generation %s: pageserver returned %s", tenant, resp.Status)
+	}
+	// GET /v1/tenant/<T> returns a top-level "generation" — confirmed against a live
+	// GKE pageserver (neon:8464): {"id":…,"state":{"slug":"Active"},…,"generation":N,…}.
+	// The on-cluster failover drill (#1101) asserts the field is present.
+	var body struct {
+		Generation *int `json:"generation"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return 0, false, fmt.Errorf("generation %s: decode: %w", tenant, err)
+	}
+	if body.Generation == nil {
+		return 0, false, nil // no generation field — treat as unknown, not zero
+	}
+	return *body.Generation, true, nil
 }

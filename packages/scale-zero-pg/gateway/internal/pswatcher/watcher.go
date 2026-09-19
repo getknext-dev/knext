@@ -10,7 +10,18 @@
 // watcher never re-uses a stale generation.
 package pswatcher
 
-import "context"
+import (
+	"context"
+	"errors"
+	"fmt"
+)
+
+// ErrTenantNotFound is returned by a Promoter when the pageserver does not hold the
+// tenant being promoted (e.g. an apps tenant that was never provisioned). On
+// failover such a tenant is SKIPPED — there is nothing routed to strand — while any
+// OTHER promotion error aborts the failover so a tenant that DOES exist is never
+// left on the demoted pageserver (#1098).
+var ErrTenantNotFound = errors.New("tenant not found on pageserver")
 
 // Prober reports whether the primary pageserver is alive (its :9898 /v1/status).
 type Prober interface {
@@ -18,9 +29,18 @@ type Prober interface {
 }
 
 // Promoter promotes the standby pageserver to AttachedSingle at a generation
-// (PUT :9898/v1/tenant/<T>/location_config).
+// (PUT :9898/v1/tenant/<T>/location_config). It returns ErrTenantNotFound (wrapped)
+// when the pageserver does not hold the tenant.
 type Promoter interface {
 	Promote(ctx context.Context, tenant string, generation int) error
+}
+
+// GenerationViewer reads a tenant's CURRENT generation as the pageserver reports it
+// (GET :9898/v1/tenant/<T>, top-level "generation"). Used only by the startup
+// seed/heal path to recover a pruned/empty ledger from the pageserver's live view.
+// ok=false when the tenant is absent (404) or carries no generation field.
+type GenerationViewer interface {
+	Generation(ctx context.Context, tenant string) (gen int, ok bool, err error)
 }
 
 // K8sOps is the Kubernetes surface the watcher drives. Kept minimal so the
@@ -45,7 +65,14 @@ type K8sOps interface {
 
 // Config is the watcher's static wiring.
 type Config struct {
-	Tenant          string // tenant id whose read authority we fail over
+	Tenant string // BASE tenant id: seeded gen view + the routed-set floor (always promoted)
+	// Tenants is the FULL routed-tenant set the flipped client Service will serve —
+	// promotion scope must equal routing scope (#1098). The `pageserver` Service
+	// routes EVERY tenant the plane holds: the base tenant AND the apps tenant under
+	// which every per-app AppDatabase is a timeline (Neon attach/generation is
+	// per-tenant, so promoting the apps tenant re-attaches all its per-app timelines
+	// in one call). When empty, defaults to [Tenant] (single-tenant back-compat).
+	Tenants         []string
 	ClientService   string // Service whose selector clients (computes) resolve
 	StandbyApp      string // app label the ClientService flips TO on failover
 	ComputeSelector string // label selector for compute pods to bounce
@@ -60,6 +87,7 @@ type Controller struct {
 	prober        Prober // probes the PRIMARY pageserver (pre-failover authority)
 	standbyProber Prober // probes the STANDBY pageserver (post-failover authority)
 	promoter      Promoter
+	genViewer     GenerationViewer // OPTIONAL: pageserver generation view for startup seed/heal
 	k8s           K8sOps
 	cfg           Config
 	metrics       *Metrics
@@ -93,11 +121,68 @@ func NewController(p, standby Prober, pr Promoter, k K8sOps, cfg Config, m *Metr
 	if cfg.BaseGeneration < 1 {
 		cfg.BaseGeneration = 1
 	}
+	// Default the routed-tenant set to the single base tenant (back-compat) when the
+	// caller did not enumerate it.
+	if len(cfg.Tenants) == 0 && cfg.Tenant != "" {
+		cfg.Tenants = []string{cfg.Tenant}
+	}
 	return &Controller{prober: p, standbyProber: standby, promoter: pr, k8s: k, cfg: cfg, metrics: m}
 }
 
+// SetGenerationViewer wires the OPTIONAL pageserver generation view used by the
+// startup seed/heal path (SeedLedger). Kept off the constructor so existing callers
+// and tests that never exercise seed/heal are unaffected.
+func (c *Controller) SetGenerationViewer(gv GenerationViewer) { c.genViewer = gv }
+
 // Metrics exposes the counter set (promotions, primary_up).
 func (c *Controller) Metrics() *Metrics { return c.metrics }
+
+// routedTenants returns the full set of tenants the flipped client Service serves —
+// the promotion scope (#1098). Always includes the base tenant.
+func (c *Controller) routedTenants() []string {
+	if len(c.cfg.Tenants) > 0 {
+		return c.cfg.Tenants
+	}
+	return []string{c.cfg.Tenant}
+}
+
+// SeedLedger seeds/heals the durable generation ledger to max(ledger, pageserver
+// view, base) at startup. It is the WRITE/HEAL half of the ledger-authority contract
+// (#1098): pswatcher is the sole writer + seeder/healer, and readers take
+// max(ledger, pageserver, 1) fail-closed (T1, #1095). This auto-corrects an
+// upgrade-path prune that emptied/reset the ledger key — the pageserver's live
+// generation view recovers the true value, turning T1's loud fail-closed refusal
+// into automatic recovery.
+//
+// It NEVER lowers the ledger: a ledger ahead of the pageserver's local view (e.g. a
+// fresh-PVC pageserver that reports 1 / 404s while the durable ledger is 5) is left
+// untouched — flooring it down is the silent-data-loss class T1 fenced. The
+// pageserver view is best-effort: if it is unreachable, the ledger is left as-is
+// (never floored on an unavailable vantage).
+func (c *Controller) SeedLedger(ctx context.Context) error {
+	led, ok, err := c.k8s.GetGeneration(ctx)
+	if err != nil {
+		return err
+	}
+	target := c.cfg.BaseGeneration
+	if target < 1 {
+		target = 1
+	}
+	if ok && led > target {
+		target = led
+	}
+	if c.genViewer != nil {
+		if psGen, psOK, verr := c.genViewer.Generation(ctx, c.cfg.Tenant); verr == nil && psOK && psGen > target {
+			target = psGen
+		}
+	}
+	// Write only when the key is absent (seed) or would be RAISED (heal up). Never
+	// re-write an equal-or-leading ledger, and never lower it.
+	if !ok || target > led {
+		return c.k8s.SetGeneration(ctx, target)
+	}
+	return nil
+}
 
 // Tick performs one liveness check and, on sustained failure, one failover.
 // It returns true exactly on the tick that performs the promotion.
@@ -224,11 +309,23 @@ func (c *Controller) ledgerAdvanced(ctx context.Context) (bool, error) {
 	return gen > c.cfg.BaseGeneration, nil
 }
 
-// failover runs the proven runbook, in order: promote (fences the dead primary
-// via gen+1) → persist the advanced generation → flip the client Service →
-// bounce the compute so a cold wake re-attaches to the promoted standby. Any
-// step's error aborts before the selector flip, so reads keep pointing at the
-// (dead) primary rather than a half-promoted standby.
+// failover runs the proven runbook, in order: promote EVERY routed tenant (fences
+// the dead primary via gen+1) → persist the advanced generation ONCE → flip the
+// client Service → bounce the compute so a cold wake re-attaches to the promoted
+// standby.
+//
+// Promotion scope == routing scope (#1098): the flipped `pageserver` Service routes
+// every tenant the plane holds, so ALL of them are re-attached before the flip —
+// otherwise a non-base tenant is stranded on the demoted pageserver (split-brain).
+// The single shared ledger advances exactly once for the whole plane; every tenant
+// is promoted at that one generation (idempotent + generation-guarded — re-running
+// converges and never double-advances or promotes below the ledger).
+//
+// Any step's error aborts BEFORE the selector flip, so reads keep pointing at the
+// (dead) primary rather than a half-promoted plane. A tenant the pageserver does not
+// hold (ErrTenantNotFound — e.g. an unprovisioned apps tenant) is SKIPPED, not
+// stranded; any OTHER promotion error aborts (retry next tick). The flip proceeds
+// only if at least one routed tenant was actually promoted.
 func (c *Controller) failover(ctx context.Context) error {
 	gen, ok, err := c.k8s.GetGeneration(ctx)
 	if err != nil {
@@ -239,9 +336,27 @@ func (c *Controller) failover(ctx context.Context) error {
 	}
 	newGen := gen + 1
 
-	if err := c.promoter.Promote(ctx, c.cfg.Tenant, newGen); err != nil {
-		return err
+	promoted := 0
+	for _, tenant := range c.routedTenants() {
+		if perr := c.promoter.Promote(ctx, tenant, newGen); perr != nil {
+			if errors.Is(perr, ErrTenantNotFound) {
+				// Nothing routed to strand — count it (surfaces a misconfigured
+				// routed set / unprovisioned apps tenant) and move on.
+				c.metrics.TenantSkipped()
+				continue
+			}
+			// A real failure on an existing tenant: abort before the flip so it is
+			// never left on the demoted pageserver. Retried on the next tick; the
+			// ledger has NOT advanced (SetGeneration is below), so re-promotion of
+			// the already-promoted tenants stays at the same generation (idempotent).
+			return perr
+		}
+		promoted++
 	}
+	if promoted == 0 {
+		return fmt.Errorf("failover: no routed tenant could be promoted at generation %d (routed set: %v)", newGen, c.routedTenants())
+	}
+
 	if err := c.k8s.SetGeneration(ctx, newGen); err != nil {
 		return err
 	}
