@@ -227,6 +227,16 @@ echo "timeline ready"`
 								corev1.ResourceEphemeralStorage: resource.MustParse("1Gi"),
 							},
 						},
+						// #1108: mirror deploy/compute-app.template.yaml exactly — the
+						// shared writer-autoscaler can grow/shrink a per-app writer's
+						// CPU+memory IN PLACE (NotRequired = no pod restart). Without this
+						// an operator-provisioned per-app writer RESTARTS on a vertical
+						// resize (the compute is single-writer Recreate — a restart drops
+						// the connection), a reliability regression on the primary path.
+						ResizePolicy: []corev1.ContainerResizePolicy{
+							{ResourceName: corev1.ResourceCPU, RestartPolicy: corev1.NotRequired},
+							{ResourceName: corev1.ResourceMemory, RestartPolicy: corev1.NotRequired},
+						},
 					}},
 					Volumes: append([]corev1.Volume{{
 						Name:         "compute-files",
