@@ -1214,6 +1214,21 @@ runbook until the watcher is back.
   human acted), the generation ledger advanced 1→2, and the watcher's **post-failover
   truthfulness** (`pswatcher_failed_over=1` and `pswatcher_primary_up` re-anchored onto
   the promoted standby, not a blind latched 1 — #25).
+- **Verify hands-off, MULTI-TENANT:** `sh deploy/_verify-failover-multitenant.sh` — the
+  single-tenant drill above stands up its own one-tenant fixture, so it cannot see a
+  failover that promotes only *one* tenant while the `pageserver` Service routes the
+  rest. This drill runs against the **live plane** (base tenant + the apps plane): it
+  provisions two per-app tenants, wakes them, kills the primary (scales the primary
+  `pageserver` StatefulSet to 0 — recoverable), and asserts that after the flip **every**
+  tenant — base and each per-app — is attached on the promoted pageserver **and reachable
+  through the `pageserver` Service**, that re-attaching at the current generation does not
+  wedge, that every per-app/RO compute was bounced, that the operator recovers with no
+  restart, and that the plane converges with no manual selector-patch. To check the operator
+  recovers, it **creates a live throwaway `t4probe*` AppDatabase** on the plane (so the operator
+  reconciles a new tenant post-failover) and **best-effort-deletes it** on exit — set the keep
+  flag to leave it for inspection. It **skips** cleanly only when the apps plane is entirely
+  absent; a present-but-broken chain **fails**. Run it after any change to the failover or
+  apps-tenant reconcile path.
 - **After a failover:** the standby is now the primary and the ledger holds the new
   generation. To restore redundancy, bring up a fresh warm Secondary (re-seed
   `pageserver-standby` against the now-primary); the watcher adopts the flipped
@@ -3230,6 +3245,12 @@ scale call.
 
 - **Gateway**: build a new image, `rollout restart deploy/pggw` — zero client impact
   beyond dropped in-flight pipes (clients reconnect).
+- **Operator render adds `resizePolicy` to per-app writers (#1108)**: the operator
+  upgrade that adds `resizePolicy` to the writer render changes every per-app writer
+  Deployment's pod template, so the next reconcile rolls each one. Because the writer
+  uses the `Recreate` strategy, expect a **single brief writer bounce** per app at
+  upgrade (idle/scaled-to-zero writers are unaffected). Roll during an idle window if a
+  momentary writer disconnect is disruptive.
 
 ### Releasing an OCIR image — digest pinning (issue #56)
 
