@@ -263,12 +263,26 @@ for a in $T7_APPS; do
 done
 # Wake: connect through the apps gateway as the per-app role so the per-app
 # compute scales 0->1 (Active). A wake failure here is a setup failure.
+# The FIRST connection after a cold start races the wake (0->1 scale, page
+# fetch) and the per-app role apply (gateway "cold wake — settling" for #132).
+# On a slow cluster that first `select 1` can lose the race even though the
+# compute is coming up healthy, so retry within the idle window: each attempt
+# resets the idle timer, and a later attempt hits the fully-settled compute.
+# A wake that never succeeds across all attempts is still a hard setup failure.
 for a in $T7_APPS; do
   APPPW="$($K get secret "app-db-$a" -o jsonpath='{.data.PGPASSWORD}' 2>/dev/null | base64 -d 2>/dev/null || echo '')"
   [ -n "$APPPW" ] || fail "no app-db-$a Secret (PGPASSWORD) minted by provision-app — cannot wake app '$a'"
   DSN="postgres://app_$a:$APPPW@$APPS_GW:55432/$a?sslmode=disable"
-  [ "$(PSQL "wake-$a" "$DSN" 'select 1' 2>/dev/null)" = "1" ] \
-    || fail "could not wake per-app compute for '$a' through $APPS_GW — the app is not Active, so a failover assertion would be meaningless"
+  woke=0
+  attempt=1
+  while [ "$attempt" -le 6 ]; do
+    if [ "$(PSQL "wake-$a-$attempt" "$DSN" 'select 1' 2>/dev/null)" = "1" ]; then woke=1; break; fi
+    info "  app '$a' wake attempt $attempt did not return Active yet (cold wake / #132 role-apply settling) — retrying in 5s"
+    attempt=$((attempt + 1))
+    sleep 5
+  done
+  [ "$woke" = "1" ] \
+    || fail "could not wake per-app compute for '$a' through $APPS_GW after 6 attempts — the app is not Active, so a failover assertion would be meaningless"
   ok "app '$a' woke Active (per-app compute up, tenant $APPS_TENANT timeline $TL)"
 done
 # Wake the base tenant too (rely on it + warm/ro as the incident did).

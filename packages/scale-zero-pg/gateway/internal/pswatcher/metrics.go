@@ -18,6 +18,8 @@ type Metrics struct {
 	FailedOverVal            int `json:"failed_over"`                // 1 = a failover has happened; primary_up now tracks the promoted standby
 	SuspectedPartitionsTotal int `json:"suspected_partitions_total"` // times a promotion was WITHHELD because the primary was Ready per the API server (our-vantage partition)
 	PrimaryNeverSeenTotal    int `json:"primary_never_seen_total"`   // times a promotion was WITHHELD because the primary pod was NEVER observed present (selector likely misconfigured — issue #58)
+	TenantAbsentTotal        int `json:"tenant_absent_total"`        // times a routed-set tenant was SKIPPED on failover because BOTH the standby and a second vantage report it absent (e.g. an apps tenant never provisioned) — #1098
+	LedgerHealErrorsTotal    int `json:"ledger_heal_errors_total"`   // times the startup ledger seed/heal could not read the pageserver generation view — a permanently broken vantage makes the heal path dead code, so it must be visible (#1098 review)
 }
 
 // NewMetrics starts with primary assumed up (avoids a spurious 0 before the
@@ -84,6 +86,40 @@ func (m *Metrics) PrimaryNeverSeenCount() int {
 	return m.PrimaryNeverSeenTotal
 }
 
+// TenantSkipped counts one routed-set tenant that was skipped on failover because
+// the pageserver does not hold it (not-found). The failover still completes for the
+// tenants that exist; this surfaces a misconfigured routed set or an unprovisioned
+// apps tenant for alerting (#1098).
+func (m *Metrics) TenantSkipped() {
+	m.mu.Lock()
+	m.TenantAbsentTotal++
+	m.mu.Unlock()
+}
+
+// TenantAbsent returns the skipped-tenant count (tests).
+func (m *Metrics) TenantAbsent() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.TenantAbsentTotal
+}
+
+// LedgerHealError counts one failed read of the pageserver generation view during
+// the startup ledger seed/heal. Discarding it (the pre-review behaviour) made a
+// permanently broken vantage indistinguishable from a healthy one: the heal path
+// would be dead code with nothing to alert on (#1098 review).
+func (m *Metrics) LedgerHealError() {
+	m.mu.Lock()
+	m.LedgerHealErrorsTotal++
+	m.mu.Unlock()
+}
+
+// LedgerHealErrors returns the seed/heal vantage-error count (tests).
+func (m *Metrics) LedgerHealErrors() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.LedgerHealErrorsTotal
+}
+
 // Promotions returns the promotion count (used by tests).
 func (m *Metrics) Promotions() int { m.mu.Lock(); defer m.mu.Unlock(); return m.PromotionsTotal }
 
@@ -110,8 +146,10 @@ func (m *Metrics) PromText() string {
 			"pswatcher_primary_up %d\n"+
 			"pswatcher_failed_over %d\n"+
 			"pswatcher_suspected_partitions_total %d\n"+
-			"pswatcher_primary_never_seen_total %d\n",
-		m.PromotionsTotal, m.ChecksTotal, m.PrimaryUpVal, m.FailedOverVal, m.SuspectedPartitionsTotal, m.PrimaryNeverSeenTotal,
+			"pswatcher_primary_never_seen_total %d\n"+
+			"pswatcher_tenant_absent_total %d\n"+
+			"pswatcher_ledger_heal_errors_total %d\n",
+		m.PromotionsTotal, m.ChecksTotal, m.PrimaryUpVal, m.FailedOverVal, m.SuspectedPartitionsTotal, m.PrimaryNeverSeenTotal, m.TenantAbsentTotal, m.LedgerHealErrorsTotal,
 	)
 }
 

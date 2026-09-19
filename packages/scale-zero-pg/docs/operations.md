@@ -715,30 +715,27 @@ docs/BENCHMARKS.md.
     If the seed never runs, the ledger key stays absent, and `storage-init` **fails
     closed** (waits, then refuses) rather than attaching low — a loud, recoverable stop,
     not silent loss.
-  - **Upgrading from a pre-#1095 install — record N first, then re-seed (runbook).** This
-    is a corruption hazard, follow it in order. An install created before this change
-    carried `generation: "1"` in the ConfigMap's last-applied-configuration; the first
-    `kubectl apply` of the new `deploy/57` **prunes** that key, and `make deploy` then
-    runs `seed-ledger.sh`, which writes `1` (it seeds the genesis value; it does **not**
-    consult the pageserver). So a pswatcher-advanced ledger at `N` becomes `1`. The
-    attach-time `max(ledger, pageserver-view)` does **not** cover this: pswatcher's own
-    promote path reads only the ledger, so the next failover promotes at `ledger+1 = 2`,
-    and if `2 < N` a fresh standby accepts it and the gen-`N` object-store index goes
-    invisible. Therefore, on this one-time upgrade:
-    1. **BEFORE the upgrade apply**, record the live generation:
-       `kubectl -n scale-zero-pg get cm pageserver-generation -o jsonpath='{.data.generation}'`
-       → call it `N`.
-    2. Apply the upgrade (`make deploy` or `kubectl apply -f deploy/` + `bash
-       deploy/seed-ledger.sh`). Expect the ledger to read `1` afterwards — that is the
-       prune-then-seed.
-    3. **RE-SEED `N` before re-enabling pswatcher / before any failover:**
-       `kubectl -n scale-zero-pg patch cm pageserver-generation --type=merge -p
-       '{"data":{"generation":"<N>"}}'`. Skipping this loses the gen-`N` index on the next
-       failover.
+  - **Upgrading from a pre-#1095 install — now SELF-HEALS at pswatcher startup.** An
+    install created before the ledger change carried `generation: "1"` in the ConfigMap's
+    last-applied-configuration; the first `kubectl apply` of the new `deploy/57` **prunes**
+    that key, and `make deploy` then runs `seed-ledger.sh`, which writes `1` (genesis; it
+    does not consult the pageserver). So a pswatcher-advanced ledger at `N` would become
+    `1`. **pswatcher now closes this automatically:** at startup it seeds/heals the ledger
+    to `max(current ledger, the pageserver's live generation view, base)` — reading
+    `GET /v1/tenant/<base>` on the primary — and **never lowers it**. A pruned/`1` ledger
+    is corrected back up to the pageserver's real `N` before any failover, so the previous
+    manual "record N, then re-seed N" runbook step is no longer required for a normal
+    upgrade where pswatcher and the primary are running.
 
-    The automatic self-heal that removes this manual step — pswatcher seeding/healing the
-    ledger from the pageserver's current max at startup — is owned by the pswatcher +
-    ledger-authority work, not this change.
+    Belt-and-braces (only if pswatcher cannot reach the primary during the upgrade, e.g.
+    both are down together): the heal leaves the ledger untouched when the pageserver view
+    is unavailable (it never floors on an unreachable vantage), and the fail-closed readers
+    still refuse an under-seeded ledger rather than attaching low. In that case, record the
+    live generation before the apply
+    (`kubectl -n scale-zero-pg get cm pageserver-generation -o jsonpath='{.data.generation}'`)
+    and re-seed it afterwards
+    (`kubectl -n scale-zero-pg patch cm pageserver-generation --type=merge -p '{"data":{"generation":"<N>"}}'`),
+    then start pswatcher.
 
   Contract-guarded in `_validate.sh` and unit-proved off-cluster by
   `deploy/test_ensure-tenant-gen.sh` (issue #1095). The full on-cluster proof
@@ -1016,14 +1013,21 @@ outage. It is now **automatic**: a standing warm-Secondary standby plus the
 
 - **Standby pageserver (`pageserver-standby`, 57).** A second StatefulSet, distinct
   node identity (`id=1235` vs the primary's `1234`), **same bucket + broker**. Its
-  init Job registers a **warm Secondary** location for the live tenant
+  init Job registers a **warm Secondary** location for the live tenant — **and, best-effort,
+  for the apps tenant** (`APPS_TENANT_ID`, where every per-app database is a timeline) —
   (`location_config` `mode:"Secondary"`, `secondary_conf.warm:true`) so it
   pre-downloads layers from MinIO without serving — a promotion is a fast re-attach,
-  not a cold restore.
+  not a cold restore. The apps-tenant warm is best-effort: promotion still works cold
+  (lazy object-store fetch) if it is not yet provisioned.
 - **Generation ledger (`pageserver-generation` ConfigMap).** Holds the last generation
-  the tenant was attached at (seed `1`, matching `storage-init`). Each failover reads
-  it, promotes at **value+1**, and writes the new value back — so repeated failovers
-  stay monotonic and a restarted watcher never re-uses a stale generation.
+  the plane was attached at (seed `1`, matching `storage-init`). It is the **single,
+  shared authority for every tenant** — both the base tenant and the apps tenant attach
+  at the same generation. Each failover reads it, promotes at **value+1**, and writes the
+  new value back **exactly once** for the whole plane — so repeated failovers stay
+  monotonic and a restarted watcher never re-uses a stale generation. pswatcher is the
+  **sole writer** and, at startup, seeds/heals the ledger to `max(current ledger, the
+  pageserver's live generation view, base)`, **never lowering it** (see the upgrade note
+  under "Bootstrap attach").
 - **Stable liveness handle (`pageserver-primary` Service).** Always selects the primary
   STS, so the watcher probes the *primary's* health even after it flips the
   client-facing `pageserver` Service.
@@ -1034,8 +1038,17 @@ outage. It is now **automatic**: a standing warm-Secondary standby plus the
   runbook the restore drill proved, in order:
   1. **Promote** the standby to `AttachedSingle` at **generation+1** — the higher
      generation fences the dead primary (single-writer is intrinsic to Neon; the
-     pageserver picks the newest `index_part.json-<gen>` ≤ its own).
-  2. **Persist** the advanced generation in the ledger ConfigMap.
+     pageserver picks the newest `index_part.json-<gen>` ≤ its own). **Promotion scope ==
+     routing scope:** the flipped `pageserver` Service routes EVERY tenant the plane holds,
+     so the watcher re-attaches **all of them** — the base tenant (`PSW_TENANT_ID`) *and*
+     the apps tenant (`PSW_APPS_TENANT_ID`, under which every per-app database is a
+     timeline) — before the flip. Promoting only the base tenant would strand every
+     per-app database on the demoted pageserver (split-brain). Any promotion error
+     **aborts** the failover before the flip (retried each tick) so an existing tenant is
+     never stranded — see "When a routed tenant is not on the standby" below for the
+     not-found case specifically.
+  2. **Persist** the advanced generation in the ledger ConfigMap — once, for the whole
+     plane.
   3. **Flip** the `pageserver` Service selector to the standby, so the compute's
      unchanged `neon.pageserver_connstring host=pageserver` now resolves to it.
   4. **Bounce** the compute (delete its pod) so a cold wake basebackups from the
@@ -1051,8 +1064,79 @@ outage. It is now **automatic**: a standing warm-Secondary standby plus the
   stopped watching. The returned old primary is never re-adopted (the selector never
   flips back). It exposes `/healthz` and
   `pswatcher_promotions_total` / `pswatcher_primary_up` / `pswatcher_failed_over` /
-  `pswatcher_suspected_partitions_total` on `:9091`; RBAC is minimal
-  (services get/patch, configmaps get/update/patch, pods list/delete).
+  `pswatcher_suspected_partitions_total` / `pswatcher_tenant_absent_total` /
+  `pswatcher_ledger_heal_errors_total` on `:9091`;
+  RBAC is minimal and **unchanged** by multi-tenant promotion (services get/patch,
+  configmaps get/update/patch, pods list/delete) — the routed-tenant set is configured,
+  not discovered by listing `AppDatabase` CRs, and the pageserver generation view is an
+  HTTP read.
+
+#### Watcher configuration (env on `deploy/58-pswatcher.yaml`)
+
+| Variable | Default | What it controls |
+| --- | --- | --- |
+| `PSW_TENANT_ID` | from `compute-config` `TENANT_ID` | The **base** tenant. First in the routed set, so it is the tenant that may never be skipped, and the one whose generation view seeds/heals the ledger. Required. |
+| `PSW_APPS_TENANT_ID` | `a00…001` | The **apps** tenant, under which every per-app database is a timeline. Promoted alongside the base tenant. Omit only on a base-only plane. Must equal `APPDB_TENANT_ID` (83), `APPS_TENANT_ID` (57) and `APPS_TENANT` (`provision-app.sh`) — `deploy/_validate.sh` asserts this. |
+| `PSW_CLIENT_SERVICE` | `pageserver` | The client Service whose selector a failover flips. |
+| `PSW_ROUTED_BASE_URL` | `http://<PSW_CLIENT_SERVICE>:9898` | The **currently-routed** pageserver's management API. Used for the ledger seed/heal *and* as the second vantage that must corroborate a standby not-found. Deliberately follows routing rather than naming the primary: the primary is down during a failover and demoted after one, so a view read there returns the OLD (lower) generation. |
+| `PSW_STANDBY_BASE_URL` | `http://pageserver-standby:9898` | The promotion target. |
+| `PSW_PRIMARY_SELECTOR` | `app=pageserver` | The primary pod the API-server second vantage reports on. |
+| `PSW_POLL_MS` / `PSW_FAIL_THRESHOLD` | `2000` / `3` | Probe interval and consecutive misses before the promote decision is consulted. |
+| `PSW_BASE_GENERATION` | `1` | The generation floor for a genuinely fresh plane. It is a **floor, never a fallback** — an absent ledger is recovered from the routed view or the operation refuses (see below). |
+
+#### When a routed tenant is not on the standby
+
+`PUT /v1/tenant/<T>/location_config` answering `404` means "**this** pageserver does not
+hold the tenant" — it is **not** evidence the tenant does not exist. Standby warming runs
+once, at deploy, so an app database provisioned afterwards is real and routed while the
+standby still 404s for it. The watcher therefore resolves a not-found by position and
+corroboration:
+
+- **base tenant** → **abort**. Every compute reads through it; flipping would point them
+  at a pageserver without their data. Reads stay on the (dead) primary and the failover
+  retries each tick.
+- **apps tenant, and the routed vantage also reports it absent** → **skip**. Nothing is
+  routed to strand. Counted as `pswatcher_tenant_absent_total`; alert
+  `PswatcherTenantSkipped` fires so a promotion that covered less than the routed scope
+  is never silent.
+- **apps tenant, but the routed vantage holds it** (or the vantage cannot be reached)
+  → **abort**. "We could not check" is never read as "it does not exist".
+
+**Operational consequence — warm the standby for the apps tenant.** On a plane that
+declares `PSW_APPS_TENANT_ID`, warming that tenant on the standby is a **precondition for
+automatic failover**, not an optimisation: during a failover the routed vantage resolves
+to the dead primary, so an un-warmed apps tenant cannot be corroborated and the failover
+blocks. After provisioning the first app database (or if
+`pageserver-standby-init` logged `WARNING: apps tenant … could NOT be registered`),
+re-run the warming Job:
+
+```bash
+kubectl -n scale-zero-pg delete job pageserver-standby-init --ignore-not-found
+kubectl -n scale-zero-pg apply -f deploy/57-pageserver-standby.yaml
+kubectl -n scale-zero-pg logs job/pageserver-standby-init
+```
+
+#### The generation ledger — what the watcher writes
+
+`pswatcher` is the **sole writer** of the `pageserver-generation` ConfigMap: it advances
+it once per failover (for the whole plane, not per tenant) and seeds/heals it at startup
+from the routed pageserver's live view. Two rules, both fail-closed:
+
+- **It never lowers the ledger.** A ledger ahead of the pageserver's local view is left
+  alone. If the view is unreachable the ledger is untouched and
+  `pswatcher_ledger_heal_errors_total` increments (alert `PswatcherLedgerHealBlind`) —
+  a permanently blind vantage means a pruned ledger will not self-recover, so it pages
+  rather than silently doing nothing.
+- **It never invents a generation.** If the ledger key is **absent** and no real
+  generation can be recovered from the routed pageserver, the watcher **refuses** to
+  write and logs `ledger seed: the generation key is ABSENT …`. The key stays absent and
+  the attach paths fail closed. A fabricated `1` on a plane that is really at `7` is
+  byte-identical to a genesis `1`, so the readers could not tell it apart and would
+  attach below the object-store index. The same rule applies during a failover: an absent
+  ledger is recovered or the promotion aborts.
+
+To recover deliberately, seed the key from a known-good generation with
+`bash deploy/seed-ledger.sh` (create-if-absent; it refuses to overwrite a live value).
 
 #### Partition tolerance — the promote decision (#26)
 
