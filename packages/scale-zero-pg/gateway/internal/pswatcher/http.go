@@ -74,9 +74,12 @@ func (p *HTTPPromoter) Promote(ctx context.Context, tenant string, generation in
 
 // HTTPGenerationViewer reads a tenant's current generation from the pageserver
 // (GET <BaseURL>/v1/tenant/<T>, top-level "generation"). Used by the startup
-// seed/heal path. Points at the PRIMARY (the pre-failover authority) by default.
+// seed/heal path and the failover corroboration vantage. Points at the ROUTED
+// pageserver (the client Service whose selector the failover flips), never the
+// fixed primary — pointing it at the pre-failover primary is a demoted, stale
+// vantage after a failover, and is banned by deploy/_validate.sh.
 type HTTPGenerationViewer struct {
-	BaseURL string // e.g. http://pageserver-primary:9898
+	BaseURL string // e.g. http://pageserver:9898 (the routed client Service)
 	Client  *http.Client
 }
 
