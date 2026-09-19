@@ -218,18 +218,32 @@ spec:
               SB="http://pageserver-standby:9898"
               echo "waiting for standby HTTP at ${SB} ..."
               until curl -sf "${SB}/v1/tenant" >/dev/null 2>&1; do sleep 2; done
-              warm_secondary() { # $1 = tenant id; register warm Secondary + kick a download
-                curl -sf -X PUT -H 'Content-Type: application/json' \
+              # $1 = tenant id; register warm Secondary + kick a download.
+              # The REGISTRATION decides the return code. The download kick is advisory
+              # (it can legitimately fail on a cold bucket) so it is swallowed — but it
+              # must NOT become the function's exit status, or `warm_secondary X || …`
+              # is unreachable and a failed registration is silent at deploy time.
+              warm_secondary() {
+                if ! curl -sf -X PUT -H 'Content-Type: application/json' \
                   -d '{"mode":"Secondary","secondary_conf":{"warm":true},"tenant_conf":{}}' \
-                  "${SB}/v1/tenant/$1/location_config" >/dev/null
+                  "${SB}/v1/tenant/$1/location_config" >/dev/null; then
+                  return 1
+                fi
                 curl -sf -X POST "${SB}/v1/tenant/$1/secondary/download" >/dev/null 2>&1 || true
+                return 0
               }
               echo "registering warm Secondary for BASE tenant ${TENANT_ID} on the standby"
               warm_secondary "${TENANT_ID}"
-              # Apps tenant is BEST-EFFORT: promotion still works cold (AttachedSingle
-              # lazily fetches from the shared bucket) if it is not yet provisioned.
+              # Apps tenant: the Job does not FAIL on it (a base-only plane legitimately
+              # has no apps tenant yet), but the failure is LOUD and actionable — an
+              # apps tenant that is provisioned but not warmed here 404s on the standby
+              # at promotion time, and the watcher then ABORTS the failover rather than
+              # stranding its per-app timelines. Re-run this Job after provisioning the
+              # first app. (The `|| echo` branch is reachable only because
+              # warm_secondary returns the REGISTRATION status; see above.)
               if [ -n "${APPS_TENANT_ID:-}" ]; then
-                echo "registering warm Secondary for APPS tenant ${APPS_TENANT_ID} (best-effort)"
-                warm_secondary "${APPS_TENANT_ID}" || echo "apps tenant not warmable yet (likely unprovisioned) — promotion will cold-attach"
+                echo "registering warm Secondary for APPS tenant ${APPS_TENANT_ID}"
+                warm_secondary "${APPS_TENANT_ID}" \
+                  || echo "WARNING: apps tenant ${APPS_TENANT_ID} could NOT be registered as a warm Secondary (likely unprovisioned). If apps exist, automatic failover will ABORT until this Job is re-run — see docs/operations.md#pageserver-failover"
               fi
               echo "standby warm-Secondary registration done"

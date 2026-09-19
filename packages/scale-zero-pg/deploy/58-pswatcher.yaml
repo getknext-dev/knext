@@ -107,15 +107,24 @@ spec:
             # fixed tenant, and the flipped `pageserver` Service routes it too — so the
             # watcher promotes it alongside the base tenant on failover (promotion
             # scope == routing scope, #1098). Neon attach/generation is per-tenant, so
-            # this single re-attach covers all per-app timelines. Kept in lock-step with
-            # deploy/83 APPDB_TENANT_ID / provision-app.sh APPS_TENANT. Omit on a
-            # base-only plane (the watcher then promotes just the base tenant); a tenant
-            # the pageserver does not hold is skipped, never stranding the flip.
+            # this single re-attach covers all per-app timelines. Lock-step with deploy/83
+            # APPDB_TENANT_ID, deploy/57 APPS_TENANT_ID and provision-app.sh APPS_TENANT
+            # is ASSERTED by deploy/_validate.sh, not just requested here. Omit on a
+            # base-only plane (the watcher then promotes just the base tenant). A tenant
+            # the standby does not hold is skipped ONLY when the routed vantage
+            # corroborates the absence; otherwise the failover aborts before the flip.
             - { name: PSW_APPS_TENANT_ID, value: "a0000000000000000000000000000001" }
-            # Pre-failover authority the startup ledger seed/heal reads the current
-            # generation view from (GET /v1/tenant/<base>). Derived from the status URL
-            # host when unset.
-            - { name: PSW_PRIMARY_BASE_URL, value: "http://pageserver-primary:9898" }
+            # The CURRENTLY-ROUTED pageserver — the same client Service the gateway and
+            # computes dial, whose selector a failover flips. Deliberately NOT the
+            # primary: the primary is the node that is down in the very failover this
+            # watcher exists for, and post-failover it is the DEMOTED node holding the
+            # OLD (lower) generation, so a view read there under-writes the ledger.
+            # Two consumers, both fail-closed: (1) the startup ledger seed/heal, which
+            # may only seed a generation actually recovered here — never an invented
+            # floor; (2) the SECOND VANTAGE that must corroborate a standby 404 before a
+            # non-base routed tenant is skipped on failover. Defaults to
+            # http://<PSW_CLIENT_SERVICE>:9898 when unset.
+            - { name: PSW_ROUTED_BASE_URL, value: "http://pageserver:9898" }
             - { name: PSW_POLL_MS, value: "2000" } # 2s poll
             - { name: PSW_FAIL_THRESHOLD, value: "3" } # ~6s of misses before failover (don't split-brain a slow primary)
             - { name: PSW_BASE_GENERATION, value: "1" } # floor when the ledger key is absent (fresh plane); the attach paths (storage-init, provision-app) read max(ledger, pageserver-view, 1) and may attach at N>1 (#1095)

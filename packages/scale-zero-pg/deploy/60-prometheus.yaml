@@ -443,6 +443,27 @@ data:
             annotations:
               summary: "pswatcher reports the primary pageserver unreachable"
               description: "pswatcher_primary_up==0 sustained — the watcher is failing probes and may promote the standby (~6s at default threshold)."
+          # (c) a routed tenant was SKIPPED on failover. Two vantages agreed the
+          # pageserver does not hold it, so nothing was stranded — but it means the
+          # routed-tenant set names a tenant that does not exist (a stale
+          # PSW_APPS_TENANT_ID, or apps that were never provisioned). Every other
+          # pswatcher counter has an alert; this one must too, or a promotion that
+          # quietly covered less than the routed scope is invisible.
+          - alert: PswatcherTenantSkipped
+            expr: increase(pswatcher_tenant_absent_total[10m]) > 0
+            labels: { severity: warning }
+            annotations:
+              summary: "a routed tenant was SKIPPED on pageserver failover"
+              description: "pswatcher promoted the standby but skipped a routed tenant that neither the standby nor the routed vantage holds. Per-app databases under a skipped tenant would be unreachable. Verify the routed-tenant set (PSW_APPS_TENANT_ID in deploy/58) against the provisioned tenants — see docs/operations.md#pageserver-failover."
+          # (c) the startup ledger seed/heal could not read the routed generation
+          # view. The heal path is then DEAD CODE: a pruned/empty ledger will not
+          # self-recover and the fail-closed readers will refuse to attach.
+          - alert: PswatcherLedgerHealBlind
+            expr: increase(pswatcher_ledger_heal_errors_total[30m]) > 0
+            labels: { severity: warning }
+            annotations:
+              summary: "pswatcher cannot read the routed pageserver generation view"
+              description: "The ledger seed/heal vantage (PSW_ROUTED_BASE_URL) is unreachable, so a pruned or empty pageserver-generation ledger cannot self-recover and attaches fail closed. Check the `pageserver` client Service and the watcher's network path — see docs/operations.md#the-generation-ledger."
           # (d) pageserver-standby not ready >5m: the warm standby that failover
           # promotes into is gone. Failover would have nothing to promote.
           - alert: PageserverStandbyNotReady
@@ -656,7 +677,7 @@ spec:
         # (prints the value to paste here). _validate.sh contract 27 fails if this drifts
         # from the ConfigMap data; _verify-drift.sh section E independently asserts every
         # shipped rule is LOADED in the live pod (/api/v1/rules).
-        ks-pg.dev/prometheus-config-sha256: "70d0c529c6ac10f51a479e4bf70681cca0986cc560fbfc435ebd5d2ba9496a14"
+        ks-pg.dev/prometheus-config-sha256: "c128d2c2926e46f8dc9dd8491fb3757e839b28322ac38fbb7a17aed38f88887b"
     spec:
       serviceAccountName: prometheus
       securityContext:

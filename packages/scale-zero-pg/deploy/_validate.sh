@@ -360,6 +360,64 @@ grep -q 'PSW_STANDBY_SELECTOR_APP' 58-pswatcher.yaml || fail "58 watcher missing
 grep -q 'services' 58-pswatcher.yaml || fail "58 watcher RBAC lacks services (selector flip)"
 ok "automated failover ships: warm-Secondary standby (57) + auto-failover watcher (58)"
 
+# 14b. contract (#1098 review, FIX 3): the APPS-TENANT ID LOCK-STEP is ASSERTED, not
+#      commented. The same fixed id appears in 58 (PSW_APPS_TENANT_ID — the watcher's
+#      promotion scope), 83 (APPDB_TENANT_ID — where every per-app AppDatabase is
+#      created as a timeline), 57 (APPS_TENANT_ID — the standby's warm-Secondary
+#      registration) and provision-app.sh (APPS_TENANT — the break-glass path). Four
+#      files, one id, previously joined only by "kept in lock-step" COMMENTS: deleting
+#      PSW_APPS_TENANT_ID from 58 silently reverts promotion scope to base-only and
+#      every test stayed green. Repo convention is to SCAN, not to ask nicely.
+_psw_apps="$(sed -n 's/.*PSW_APPS_TENANT_ID, value: "\([^"]*\)".*/\1/p' 58-pswatcher.yaml | head -1)"
+_appdb_tenant="$(sed -n 's/.*APPDB_TENANT_ID, value: "\([^"]*\)".*/\1/p' 83-appdb-operator.yaml | head -1)"
+_sb_apps="$(sed -n 's/.*APPS_TENANT_ID, value: "\([^"]*\)".*/\1/p' 57-pageserver-standby.yaml | head -1)"
+_prov_apps="$(sed -n 's/^APPS_TENANT="\${APPS_TENANT:-\([^}]*\)}"/\1/p' provision-app.sh | head -1)"
+# The operator (83) is the source of truth: it decides where per-app timelines LIVE.
+if [ -z "$_appdb_tenant" ]; then
+  fail "83-appdb-operator.yaml has no APPDB_TENANT_ID — the apps-tenant lock-step check cannot anchor (#1098)"
+else
+  # 58 MUST carry the key whenever 83 does: without it the watcher's promotion scope
+  # silently shrinks to the base tenant and a failover strands every per-app timeline.
+  [ -n "$_psw_apps" ] \
+    || fail "58-pswatcher.yaml is MISSING PSW_APPS_TENANT_ID while 83 sets APPDB_TENANT_ID=$_appdb_tenant — failover would promote ONLY the base tenant and strand every per-app database on the demoted pageserver (#1098)"
+  for _pair in "58:PSW_APPS_TENANT_ID:$_psw_apps" "57:APPS_TENANT_ID:$_sb_apps" "provision-app.sh:APPS_TENANT:$_prov_apps"; do
+    _f="${_pair%%:*}"; _rest="${_pair#*:}"; _k="${_rest%%:*}"; _v="${_rest#*:}"
+    [ -n "$_v" ] || continue # absence of 58's key is reported above; 57/provision are optional surfaces
+    [ "$_v" = "$_appdb_tenant" ] \
+      || fail "apps-tenant LOCK-STEP BROKEN: $_f $_k=$_v but 83 APPDB_TENANT_ID=$_appdb_tenant — the watcher/standby/provisioner would act on a tenant the operator never writes to (#1098)"
+  done
+  [ -n "$_sb_apps" ] \
+    || fail "57-pageserver-standby.yaml is MISSING APPS_TENANT_ID — the standby is never warmed for the apps tenant, so failover aborts on its 404 (#1098)"
+  ok "apps-tenant lock-step asserted: 58 PSW_APPS_TENANT_ID == 83 APPDB_TENANT_ID == 57 APPS_TENANT_ID == provision-app.sh APPS_TENANT ($_appdb_tenant)"
+fi
+
+# 14c. contract (#1098 review, FIX 1b): the watcher's generation view must resolve
+#      against the CURRENTLY-ROUTED pageserver (the client Service whose selector the
+#      failover flips), never a fixed primary URL. The primary is the node that is
+#      DOWN in the failover this watcher exists for, and post-failover it is the
+#      DEMOTED node holding the OLD (lower) generation — seeding from it under-writes
+#      the ledger, which is the silent floor class #1095 closed.
+grep -q 'PSW_ROUTED_BASE_URL' 58-pswatcher.yaml \
+  || fail "58-pswatcher.yaml must set PSW_ROUTED_BASE_URL (the routed-pageserver generation view: ledger seed/heal + the failover second vantage) (#1098)"
+if grep -q 'PSW_PRIMARY_BASE_URL' 58-pswatcher.yaml; then
+  fail "58-pswatcher.yaml resolves the generation view against the PRIMARY (PSW_PRIMARY_BASE_URL) — that node is down during a failover and demoted after one, so the view under-writes the ledger. Use PSW_ROUTED_BASE_URL (#1098)."
+fi
+_routed_base="$(sed -n 's/.*PSW_ROUTED_BASE_URL, value: "\([^"]*\)".*/\1/p' 58-pswatcher.yaml | head -1)"
+_client_svc="$(sed -n 's/.*PSW_CLIENT_SERVICE, value: "\([^"]*\)".*/\1/p' 58-pswatcher.yaml | head -1)"
+case "$_routed_base" in
+  *"//$_client_svc:"*) : ;;
+  *) fail "58 PSW_ROUTED_BASE_URL=$_routed_base does not point at the flipped client Service ($_client_svc) — the second vantage must follow routing, not a fixed node (#1098)" ;;
+esac
+
+# 14d. contract (#1098 review, FIX 5): the standby warm-Secondary helper must return
+#      the REGISTRATION status. It used to end in `curl … || true`, so it always
+#      returned 0 and the `|| echo` diagnostic was UNREACHABLE — a failed apps-tenant
+#      registration was silent at deploy time, and the failover then aborts on its 404.
+if grep -A6 'warm_secondary() {' 57-pageserver-standby.yaml | grep -qE 'secondary/download.*\|\| true$' \
+   && ! grep -A12 'warm_secondary() {' 57-pageserver-standby.yaml | grep -q 'return 1'; then
+  fail "57 warm_secondary() ends in an always-true download kick, so its failure branch is UNREACHABLE — a failed warm-Secondary registration is silent at deploy time (#1098). Return the registration's status."
+fi
+
 # 15. contract: the backup target is OFF-CLUSTER OCI Object Storage (issue #4),
 #     NOT the retired in-cluster backup-store PVC. The mirror must authenticate
 #     dst from the backup-s3-target Secret and must not reintroduce backup-store.
@@ -474,6 +532,16 @@ grep -q 'kube_cronjob_status_last_successful_time' 60-prometheus.yaml || fail "6
 grep -q 'alert: PswatcherDown' 60-prometheus.yaml || fail "60 missing PswatcherDown alert (#23)"
 grep -q 'alert: PswatcherPromotionFired' 60-prometheus.yaml || fail "60 missing promotion-fired alert (#23)"
 grep -q 'alert: PageserverStandbyNotReady' 60-prometheus.yaml || fail "60 missing standby-not-ready alert"
+# #1098 review (FIX 4): every pswatcher counter must have an alert, else a promotion
+# that silently covered LESS than the routed scope, or a permanently blind ledger-heal
+# vantage, is invisible. Pin the metric name too — a rename would make the rule dead.
+grep -q 'alert: PswatcherTenantSkipped' 60-prometheus.yaml || fail "60 missing PswatcherTenantSkipped alert (#1098) — a routed tenant skipped on failover would be unmonitored"
+grep -q 'pswatcher_tenant_absent_total' 60-prometheus.yaml || fail "60 PswatcherTenantSkipped must fire on pswatcher_tenant_absent_total (#1098)"
+grep -q 'alert: PswatcherLedgerHealBlind' 60-prometheus.yaml || fail "60 missing PswatcherLedgerHealBlind alert (#1098) — an unreadable generation view makes the ledger heal path dead code"
+grep -q 'pswatcher_ledger_heal_errors_total' 60-prometheus.yaml || fail "60 PswatcherLedgerHealBlind must fire on pswatcher_ledger_heal_errors_total (#1098)"
+# cross-file pin: the alert expressions above are only live if the watcher EXPORTS them.
+grep -q 'pswatcher_tenant_absent_total' ../gateway/internal/pswatcher/metrics.go || fail "pswatcher no longer exports pswatcher_tenant_absent_total — PswatcherTenantSkipped would never fire (#1098)"
+grep -q 'pswatcher_ledger_heal_errors_total' ../gateway/internal/pswatcher/metrics.go || fail "pswatcher no longer exports pswatcher_ledger_heal_errors_total — PswatcherLedgerHealBlind would never fire (#1098)"
 grep -q 'alert: ComputeWakeStuck' 60-prometheus.yaml || fail "60 missing wake-path-stuck alert"
 # issue #39: demo end-to-end canary alert — dormant Failed-Job rule joined on the
 # demo-canary CronJob owner_name, same pattern as backup/wal-janitor.

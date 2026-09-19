@@ -296,19 +296,49 @@ func TestGenerationAdvancesFromConfigMap(t *testing.T) {
 	}
 }
 
-// If the ConfigMap has no generation yet, fall back to the base generation the
-// primary was attached at (storage-init used gen 1), so we promote at 2.
-func TestGenerationFallsBackToBase(t *testing.T) {
+// An ABSENT ledger key must never be silently floored to the base generation —
+// that is the #1095 silent-data-loss class. The generation is RECOVERED from the
+// routed pageserver's live view instead, and the failover promotes at view+1.
+func TestGenerationRecoveredWhenLedgerAbsent(t *testing.T) {
 	prober := &fakeProber{seq: []bool{false}, last: false}
 	promoter := &fakePromoter{}
 	k8s := &fakeK8s{selectorApp: "pageserver", genSet: false, primaryPresent: true, primaryReady: false}
 	c := newController(prober, promoter, k8s, 1)
+	// The routed pageserver reports the plane is at generation 4 — promoting at the
+	// base+1 (2) would re-attach BELOW the live plane and be fenced/lose data.
+	c.SetGenerationViewer(&fakeGenViewer{gens: map[string]int{"f0f0": 4}, present: map[string]bool{"f0f0": true}})
 
 	if _, err := c.Tick(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(promoter.calls) != 1 || promoter.calls[0] != 2 {
-		t.Fatalf("promote calls = %v, want [2] (base gen 1 -> 2)", promoter.calls)
+	if len(promoter.calls) != 1 || promoter.calls[0] != 5 {
+		t.Fatalf("promote calls = %v, want [5] (recovered view 4 -> 5), never the base floor", promoter.calls)
+	}
+}
+
+// MUTATION GUARD (code review #5): an absent ledger that ALSO cannot be recovered
+// from the pageserver view must ABORT the failover, not promote at BaseGeneration.
+// Promoting at 2 on a plane that is really at 7 re-attaches below the object-store
+// index — the exact silent floor-to-1 class #1095 closed.
+func TestFailoverRefusesWhenLedgerAbsentAndUnrecoverable(t *testing.T) {
+	prober := &fakeProber{seq: []bool{false}, last: false}
+	promoter := &fakePromoter{}
+	k8s := &fakeK8s{selectorApp: "pageserver", genSet: false, primaryPresent: true, primaryReady: false}
+	c := newController(prober, promoter, k8s, 1)
+	c.SetGenerationViewer(&fakeGenViewer{err: errors.New("pageserver unreachable")})
+
+	fo, err := c.Tick(context.Background())
+	if err == nil {
+		t.Fatal("an absent + unrecoverable ledger must surface an error, not silently floor to the base generation")
+	}
+	if fo {
+		t.Fatal("must not report a failover when the generation is unknown")
+	}
+	if len(promoter.calls) != 0 {
+		t.Fatalf("must not promote at an invented generation: %v", promoter.calls)
+	}
+	if len(k8s.flippedTo) != 0 {
+		t.Fatalf("Service must not flip when the generation is unknown: %v", k8s.flippedTo)
 	}
 }
 
@@ -759,15 +789,22 @@ func TestFailoverPromotesAllRoutedTenants(t *testing.T) {
 	}
 }
 
-// T2 — a routed-set entry the pageserver does not hold (an apps tenant that was
-// never provisioned) must be SKIPPED, and the failover must still complete for the
-// tenants that DO exist. Absent tenants are counted, not fatal.
+// T2 — a NON-BASE routed-set entry the pageserver does not hold (an apps tenant
+// that was never provisioned) may be SKIPPED only when a SECOND vantage corroborates
+// the absence. A standby 404 is node-local ("I don't hold it"), never proof the
+// tenant does not exist. With corroboration the failover still completes for the
+// tenants that DO exist; the skip is counted, not fatal.
 func TestFailoverSkipsAbsentTenant(t *testing.T) {
 	primary := &toggleProber{alive: false}
 	standby := &toggleProber{alive: true}
 	promoter := &fakePromoter{notFound: map[string]bool{"a000-apps": true}}
 	k8s := &fakeK8s{selectorApp: "pageserver", gen: 1, genSet: true, primaryPresent: true, primaryReady: false}
 	c := newControllerRouted(primary, standby, promoter, k8s, 1, []string{"f0f0-base", "a000-apps"})
+	// Second vantage AGREES the apps tenant does not exist ⇒ nothing routed to strand.
+	c.SetGenerationViewer(&fakeGenViewer{
+		gens:    map[string]int{"f0f0-base": 1},
+		present: map[string]bool{"f0f0-base": true, "a000-apps": false},
+	})
 
 	fo, err := c.Tick(context.Background())
 	if err != nil {
@@ -812,6 +849,102 @@ func TestFailoverAbortsOnRealTenantError(t *testing.T) {
 	}
 	if len(k8s.setGenTo) != 0 {
 		t.Fatalf("ledger must NOT advance while the failover is incomplete: %v", k8s.setGenTo)
+	}
+}
+
+// T2 review fix (code #2) — the BASE tenant is NEVER skippable. The "nothing routed
+// to strand" rationale only ever held for an unprovisioned OPTIONAL tenant; the base
+// tenant is what every compute reads through. A base-tenant not-found must ABORT
+// before the flip, leaving reads pointed at the (dead) primary rather than at a
+// standby that does not hold the data.
+func TestFailoverAbortsWhenBaseTenantNotFound(t *testing.T) {
+	primary := &toggleProber{alive: false}
+	standby := &toggleProber{alive: true}
+	promoter := &fakePromoter{notFound: map[string]bool{"f0f0-base": true}}
+	k8s := &fakeK8s{selectorApp: "pageserver", gen: 1, genSet: true, primaryPresent: true, primaryReady: false}
+	c := newControllerRouted(primary, standby, promoter, k8s, 1, []string{"f0f0-base", "a000-apps"})
+	// Even a corroborating vantage must not license skipping the BASE tenant.
+	c.SetGenerationViewer(&fakeGenViewer{present: map[string]bool{"f0f0-base": false, "a000-apps": false}})
+
+	fo, err := c.Tick(context.Background())
+	if err == nil {
+		t.Fatal("a base-tenant not-found must ABORT the failover (surface an error), got nil")
+	}
+	if fo {
+		t.Fatal("must not report a completed failover when the base tenant was not promoted")
+	}
+	if len(k8s.flippedTo) != 0 {
+		t.Fatalf("Service must NOT flip when the base tenant is absent on the standby: %v", k8s.flippedTo)
+	}
+	if len(k8s.setGenTo) != 0 {
+		t.Fatalf("ledger must NOT advance on an aborted failover: %v", k8s.setGenTo)
+	}
+}
+
+// T2 review fix (arch B2) — a standby 404 is NODE-LOCAL. An apps tenant that was
+// provisioned AFTER the one-shot standby warming Job ran 404s on the standby while
+// being very much real, with every per-app timeline routed through it. Skipping it
+// and flipping strands all of them on the demoted pageserver — the split-brain this
+// change exists to close. A second vantage that reports the tenant PRESENT must abort.
+func TestFailoverAbortsWhenAbsentTenantPresentOnSecondVantage(t *testing.T) {
+	primary := &toggleProber{alive: false}
+	standby := &toggleProber{alive: true}
+	promoter := &fakePromoter{notFound: map[string]bool{"a000-apps": true}}
+	k8s := &fakeK8s{selectorApp: "pageserver", gen: 1, genSet: true, primaryPresent: true, primaryReady: false}
+	c := newControllerRouted(primary, standby, promoter, k8s, 1, []string{"f0f0-base", "a000-apps"})
+	// The routed vantage HOLDS the apps tenant ⇒ the standby 404 is node-local only.
+	c.SetGenerationViewer(&fakeGenViewer{
+		gens:    map[string]int{"f0f0-base": 1, "a000-apps": 1},
+		present: map[string]bool{"f0f0-base": true, "a000-apps": true},
+	})
+
+	fo, err := c.Tick(context.Background())
+	if err == nil {
+		t.Fatal("an apps tenant present on a second vantage must ABORT the failover, not be skipped")
+	}
+	if fo {
+		t.Fatal("must not report a completed failover while a real routed tenant is un-promoted")
+	}
+	if len(k8s.flippedTo) != 0 {
+		t.Fatalf("Service must NOT flip while a real routed tenant is un-promoted: %v", k8s.flippedTo)
+	}
+	if len(k8s.setGenTo) != 0 {
+		t.Fatalf("ledger must NOT advance on an aborted failover: %v", k8s.setGenTo)
+	}
+	if c.Metrics().TenantAbsent() != 0 {
+		t.Fatalf("an uncorroborated absence is not a skip; tenant_absent = %d, want 0", c.Metrics().TenantAbsent())
+	}
+}
+
+// T2 review fix — fail CLOSED when the absence cannot be corroborated at all (the
+// second vantage errored, or none is wired). "We could not check" must never read as
+// "it does not exist".
+func TestFailoverAbortsWhenAbsenceCannotBeCorroborated(t *testing.T) {
+	for name, viewer := range map[string]GenerationViewer{
+		"vantage errored": &fakeGenViewer{err: errors.New("pageserver unreachable")},
+		"no vantage":      nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			primary := &toggleProber{alive: false}
+			standby := &toggleProber{alive: true}
+			promoter := &fakePromoter{notFound: map[string]bool{"a000-apps": true}}
+			k8s := &fakeK8s{selectorApp: "pageserver", gen: 1, genSet: true, primaryPresent: true, primaryReady: false}
+			c := newControllerRouted(primary, standby, promoter, k8s, 1, []string{"f0f0-base", "a000-apps"})
+			if viewer != nil {
+				c.SetGenerationViewer(viewer)
+			}
+
+			fo, err := c.Tick(context.Background())
+			if err == nil {
+				t.Fatal("an uncorroboratable absence must ABORT the failover, got nil")
+			}
+			if fo {
+				t.Fatal("must not report a completed failover on an uncorroboratable absence")
+			}
+			if len(k8s.flippedTo) != 0 {
+				t.Fatalf("Service must NOT flip on an uncorroboratable absence: %v", k8s.flippedTo)
+			}
+		})
 	}
 }
 
@@ -879,7 +1012,71 @@ func TestStartupSeedHealsLedger(t *testing.T) {
 		if k8s.gen != 4 || len(k8s.setGenTo) != 0 {
 			t.Fatalf("ledger must be left at 4 when the pageserver view is unavailable, got %d writes=%v", k8s.gen, k8s.setGenTo)
 		}
+		// FIX 4 — a swallowed viewer error makes the heal path dead code silently.
+		// A permanently broken vantage must be COUNTED (and alertable), not discarded.
+		if c.Metrics().LedgerHealErrors() != 1 {
+			t.Fatalf("ledger_heal_errors_total = %d, want 1 (a broken generation view must not be swallowed)", c.Metrics().LedgerHealErrors())
+		}
 	})
+}
+
+// T2 review fix (arch B1 / sysd Q2 / code #1) — SeedLedger must NEVER invent a value.
+// The pre-fix code wrote BaseGeneration (1) whenever the key was ABSENT and the view
+// was unavailable, reopening the silent floor-to-1 / data-loss class #1095 closed and
+// contradicting the ledger contract ("if the view is unavailable it leaves the ledger
+// untouched"; readers fail closed). Only a generation actually RECOVERED from a
+// pageserver may be seeded.
+func TestSeedLedgerRefusesToInventAGeneration(t *testing.T) {
+	ctx := context.Background()
+
+	cases := map[string]GenerationViewer{
+		"view unreachable": &fakeGenViewer{err: errors.New("pageserver unreachable")},
+		"view reports 404": &fakeGenViewer{present: map[string]bool{"f0f0-base": false}},
+		"no viewer wired":  nil,
+	}
+	for name, viewer := range cases {
+		t.Run(name+" + absent ledger ⇒ refuse, no write", func(t *testing.T) {
+			k8s := &fakeK8s{selectorApp: "pageserver", genSet: false} // pruned/empty key
+			c := newControllerRouted(&toggleProber{alive: true}, &toggleProber{alive: true}, &fakePromoter{}, k8s, 1, []string{"f0f0-base"})
+			if viewer != nil {
+				c.SetGenerationViewer(viewer)
+			}
+			err := c.SeedLedger(ctx)
+			if err == nil {
+				t.Fatal("SeedLedger must REFUSE (return an error) rather than seed an invented floor")
+			}
+			if len(k8s.setGenTo) != 0 || k8s.genSet {
+				t.Fatalf("no ledger write may happen on an unrecovered generation: writes=%v set=%v", k8s.setGenTo, k8s.genSet)
+			}
+		})
+	}
+}
+
+// FIX 3 — the routed-tenant set is derived from env in exactly one testable place,
+// so the base-first ordering + apps-tenant de-duplication is asserted, not implied.
+func TestRoutedTenantsFromEnv(t *testing.T) {
+	cases := []struct {
+		name, base, apps string
+		want             []string
+	}{
+		{"base only", "f0f0", "", []string{"f0f0"}},
+		{"base + apps", "f0f0", "a000", []string{"f0f0", "a000"}},
+		{"apps == base is de-duplicated", "f0f0", "f0f0", []string{"f0f0"}},
+		{"blank base yields nothing", "", "a000", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RoutedTenants(tc.base, tc.apps)
+			if len(got) != len(tc.want) {
+				t.Fatalf("RoutedTenants(%q,%q) = %v, want %v", tc.base, tc.apps, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("RoutedTenants(%q,%q) = %v, want %v (base must come FIRST — it is the promotion floor)", tc.base, tc.apps, got, tc.want)
+				}
+			}
+		})
+	}
 }
 
 // T2 — promotion idempotency + generation guard. Re-running the failover lifecycle
