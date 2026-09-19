@@ -22,12 +22,13 @@
 # This drill runs against the LIVE plane (scale-zero-pg + the apps plane), forces
 # a real failover, and asserts every link the incident exposed. Each assertion is
 # mapped to a sprint task [T1..T6]. The chain is CAUSAL, not fully independent:
-# T1/T2/T3/T5 attribute to their own task, but T4 and T6 are DOWNSTREAM of T2 —
-# because the operator reconciles per-app tenants THROUGH the apps tenant and T6's
-# end-state includes apps-tenant reachability, both require T2 (promote-all-tenants).
-# T4 is reported as BLOCKED (not a failure) while T2 is red; T6 legitimately reds
-# with T2 (its own fix IS promote-all-tenants). So a fix greens its task and any
-# downstream task it unblocks — honestly stated rather than claimed independent:
+# T2/T3/T5 and T1's BASE-tenant leg attribute to their own task. Everything that
+# routes THROUGH the apps tenant is DOWNSTREAM of T2 — T4, T6, and T1's apps-tenant
+# leg (a stranded apps tenant NotFounds on re-attach for T2's reason, not a wedge) —
+# so those are reported BLOCKED (not a failure) while T2 is red, EXCEPT T6, which
+# legitimately reds with T2 because its own fix IS promote-all-tenants. So a fix
+# greens its task and any downstream check it unblocks — honestly stated rather than
+# claimed independent:
 #
 #   [T2] no split-brain  — after failover EVERY tenant (base + each per-app) is
 #                          attached on the promoted pageserver AND reachable via
@@ -59,8 +60,9 @@
 # ASSERTION ORDER IS LOAD-BEARING: the tenant-observation checks (T6, T2, T3) and
 # the read-only T5 run BEFORE the single tenant-mutating check (T1 re-attaches
 # location_config), so T1 cannot self-remediate them. T4 provisions its OWN
-# isolated probe AppDatabase (a fresh tenant) — it neither reads nor remediates the
-# other tasks' state — and still runs before T1. T6 is measured first and judged on
+# probe AppDatabase (a fresh TIMELINE under the same apps tenant — the operator has a
+# single APPDB_TENANT_ID) — it neither reads nor remediates the tenants the other
+# checks observe — and still runs before T1. T6 is measured first and judged on
 # its own end-state; reverting T1/T3 does not red it, but reverting T2 does (its
 # end-state includes apps-tenant reachability) — stated, not claimed independent.
 #
@@ -288,12 +290,17 @@ PRE_PODS="$(snapshot_compute_pods)"
 # there MUST be pods here. An empty snapshot would make [T3] vacuously green (no
 # survivors because none were ever recorded), so treat it as a setup failure.
 [ -n "$PRE_PODS" ] || fail "no compute pods matched plane=compute / compute-ro / compute-warm before the kill — the labels this drill snapshots have drifted; [T3] would be vacuously green. Fix the selectors before trusting the drill."
-OP_RESTARTS_BEFORE="$($K get pods -l app="$OPERATOR" -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}' 2>/dev/null || echo 0)"
+# --field-selector=status.phase=Running on EVERY operator-pod read (MED): without it
+# kubectl returns items in NAME order, so a single lingering Evicted/Failed operator
+# pod object that sorts first would be read at both capture points -> uid+restartCount
+# always equal -> the restart/reschedule guard could NEVER go red (decoration) while
+# the live operator actually restarted. The phase filter reads ONLY the live pod.
+OP_RESTARTS_BEFORE="$($K get pods -l app="$OPERATOR" --field-selector=status.phase=Running -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}' 2>/dev/null || echo 0)"
 [ -n "$OP_RESTARTS_BEFORE" ] || OP_RESTARTS_BEFORE=0
 # Capture the operator POD IDENTITY too (LOW): comparing restartCount alone false-REDs
 # [T4] if the single operator pod is RESCHEDULED (a new pod reports restartCount 0 vs
 # BEFORE=N). [T4] compares uid to tell an in-place restart from a pod replacement.
-OP_UID_BEFORE="$($K get pods -l app="$OPERATOR" -o jsonpath='{.items[0].metadata.uid}' 2>/dev/null || echo '')"
+OP_UID_BEFORE="$($K get pods -l app="$OPERATOR" --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.uid}' 2>/dev/null || echo '')"
 info "pre-failover: $(echo "$PRE_PODS" | grep -c . ) compute pod(s), operator restartCount=$OP_RESTARTS_BEFORE (pod uid ${OP_UID_BEFORE:-unknown})"
 
 # ---------------------------------------------------------------------------
@@ -361,9 +368,10 @@ DEADLINE=$(( FAILOVER_AT + T6_BUDGET ))
 # ASSERTION PHASE (collect-all). Each [Tn] fails for its OWN reason on main.
 # ORDERING IS LOAD-BEARING (defect #3): the tenant-observation checks (T6, T2, T3)
 # and read-only T5 run BEFORE the one tenant-mutating check (T1 re-attaches
-# location_config). T4 provisions a SEPARATE probe tenant (does not touch the
-# tenants the other checks observe) and also runs before T1. T1 runs LAST so its
-# PUT cannot self-remediate the others or contradict T6's "no manual intervention".
+# location_config). T4 provisions a fresh TIMELINE under the apps tenant (the
+# operator has a single APPDB_TENANT_ID) — it does not touch the tenants the other
+# checks observe — and also runs before T1. T1 runs LAST so its PUT cannot
+# self-remediate the others or contradict T6's "no manual intervention".
 # ===========================================================================
 echo ""
 info "ASSERTIONS (each maps to a sprint task; red-by-construction on main; observation-only checks run BEFORE the single mutating check so none can remediate another)"
@@ -526,9 +534,9 @@ YAML
     T4_READY=1; t4_probe_ready || T4_READY=0
     # Re-read restartCount AND pod identity AFTER the wait: a restart DURING recovery,
     # or a pod RESCHEDULE, must be visible and must be told apart (LOW).
-    OP_RESTARTS_AFTER="$($K get pods -l app="$OPERATOR" -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}' 2>/dev/null || echo 0)"
+    OP_RESTARTS_AFTER="$($K get pods -l app="$OPERATOR" --field-selector=status.phase=Running -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}' 2>/dev/null || echo 0)"
     [ -n "$OP_RESTARTS_AFTER" ] || OP_RESTARTS_AFTER=0
-    OP_UID_AFTER="$($K get pods -l app="$OPERATOR" -o jsonpath='{.items[0].metadata.uid}' 2>/dev/null || echo '')"
+    OP_UID_AFTER="$($K get pods -l app="$OPERATOR" --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.uid}' 2>/dev/null || echo '')"
     _restart_ok=1; _restart_why=""
     if [ -n "$OP_UID_BEFORE" ] && [ -n "$OP_UID_AFTER" ] && [ "$OP_UID_AFTER" != "$OP_UID_BEFORE" ]; then
       _restart_ok=0; _restart_why="operator pod was RESCHEDULED/replaced during recovery (uid $OP_UID_BEFORE -> $OP_UID_AFTER)"
@@ -610,6 +618,15 @@ gen_wedge_check() { # $1 tenant -> rc 0 iff attach at $CUR_GEN returns 2xx AND n
 }
 for TEN in "$BASE_TENANT" "$APPS_TENANT"; do
   _label="base"; [ "$TEN" = "$APPS_TENANT" ] && _label="apps"
+  # The APPS leg is DOWNSTREAM of T2 (same class as the [T4] gating): while the apps
+  # tenant is stranded, its re-attach 404s as a NotFound — that is T2's split-brain
+  # symptom, not a generation wedge, so blaming [T1] would misattribute and landing
+  # T1's fix alone would not green it. Gate the apps leg on T2_APPS_OK; the BASE leg
+  # stays fully attributable to T1.
+  if [ "$_label" = "apps" ] && [ "$T2_APPS_OK" != 1 ]; then
+    t_blocked T1 "the apps-tenant re-attach is downstream of T2 — while the apps tenant is stranded (T2 red) its attach NotFounds for T2's reason, not a generation wedge; this becomes an attributable [T1] check once T2 is green"
+    continue
+  fi
   GENWEDGE_WHY=""
   if gen_wedge_check "$TEN"; then
     t_ok T1 "re-attach of $_label tenant $TEN at ledger generation $CUR_GEN SUCCEEDS (no gen-wedge)"
@@ -620,6 +637,8 @@ done
 
 # ---------------------------------------------------------------------------
 CONVERGED_AT="$(date +%s)"
+# elapsed from the KILL (includes the flip-wait + every check), not just the
+# assertion phase — labelled accordingly below.
 ELAPSED=$((CONVERGED_AT - FAILOVER_AT))
 echo ""
 echo "=========================================================================="
@@ -631,7 +650,7 @@ if [ "$ASSERT_FAILS" -eq 0 ]; then
 else
   echo " MULTI-TENANT FAILOVER DRILL FAILED — $ASSERT_FAILS task assertion(s) unmet; ${ASSERT_BLOCKED} downstream check(s) BLOCKED (not counted)"
   echo "   (red-by-construction on main; the causal chain is documented — T4/T6 are"
-  echo "    downstream of T2). T6 budget ${T6_BUDGET}s; total assertion phase ${ELAPSED}s."
+  echo "    downstream of T2). T6 budget ${T6_BUDGET}s; total kill->end elapsed ${ELAPSED}s."
   echo "=========================================================================="
   exit 1
 fi
