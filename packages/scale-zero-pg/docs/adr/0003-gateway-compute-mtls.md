@@ -1,6 +1,6 @@
 # ADR-0003 (scale-zero-pg): Gateway→compute mTLS via in-protocol Postgres TLS (F5)
 
-- Status: Accepted (design; phased implementation)
+- Status: Accepted — implemented (all four phases merged 2026-09-19; #1088/#1089/#1090/#1091)
 - Date: 2026-09-19
 - Scope: `packages/scale-zero-pg/` (the wake-on-connect gateway + the Neon compute
   plane). Module-local ADR. Does **not** amend any main-repo ADR — the operator
@@ -169,10 +169,26 @@ Recorded now so the later PRs implement them, from both gates:
 
 ## Consequences
 
-- **ADR-0001 F5 is CLOSING (phased), not yet closed.** Any claim that scale-zero-pg
-  "encrypts" or "isolates" its data path MUST keep the plaintext-hop +
-  CNI-conditional-NetworkPolicy caveat until phase 3/4 merges. The main-repo CLAUDE.md
-  §7 dated-exception update happens then, not now.
+- **ADR-0001 F5 is CLOSED (2026-09-19).** All four phases are merged, so the
+  gateway→compute hop is now TLS with a CA-verified client certificate required
+  (`hostssl … scram-sha-256 clientcert=verify-ca`). The plaintext-hop caveat is dropped
+  from the user docs and the main-repo CLAUDE.md §7 dated-exception is updated. The
+  encryption/authentication of this leg is **in-protocol Postgres TLS, not
+  NetworkPolicy**, so it holds regardless of the cluster CNI (unlike the F6 peer-scrape
+  NetworkPolicy, which stays CNI-conditional).
+- **The shared gateway leaf proves "a gateway", not "which app".** Per ADR-0003 D3 the
+  gateway fleet presents ONE client leaf, so `clientcert=verify-ca` establishes only
+  that the peer is a knext gateway; **per-app isolation therefore rests on the SCRAM
+  secret**, not on the certificate. The named GA upgrade path if per-app certificate
+  identity is ever required is **per-role client leaves (CN = the app role) plus a
+  `map=`/`pg_ident.conf` usermap with `clientcert=verify-full`** — deliberately not done
+  now (it multiplies cert-management across the ephemeral fleet for a property SCRAM
+  already provides). `verify-full` was rejected for the shared leaf precisely because it
+  requires CN==DB-username, which one shared leaf cannot satisfy.
+- **ADR numbering note:** this module-local `docs/adr/` sequence (scale-zero-pg) numbers
+  independently of the root `docs/adr/` sequence, so ADR-0003 here is unrelated to the
+  root ADR-0003. If the two are ever merged, prefix module-local ADRs (e.g. `szpg-0003`)
+  rather than renumber.
 - **cert-manager is a new deploy-time dependency** for scale-zero-pg. A cluster
   without it cannot apply `deploy/11-mtls-certs.yaml`; that is deliberate fail-closed
   behaviour — absent cert infra must never fall through to a phase that runs
@@ -235,7 +251,23 @@ Recorded now so the later PRs implement them, from both gates:
       contract 35 guards env↔mount path parity and `GW_COMPUTE_TLS=true`. Tests:
       `internal/wake/backendtls_test.go` + `internal/gateway/backendtls_wiring_test.go`.
       The live proof (wake over TLS on OKE/kind) is lead-owned.
-- [ ] **Phase 4:** `lib-harden.sh` rewrites the network pg_hba catch-all to `hostssl …
-      clientcert=verify-ca` (loopback `cloud_admin` plaintext kept above); test +
-      document the async cold-wake enforcement window. On merge: mark ADR-0001 F5
-      **CLOSED**, update main-repo CLAUDE.md §7.
+- [x] **Phase 4 (merged #1091):** `lib-harden.sh` rewrites the network pg_hba catch-all
+      to `hostssl all all all scram-sha-256 clientcert=verify-ca`, **gated on `SHOW ssl
+      = on`** — a `hostssl` line on an ssl-off compute makes the whole pg_hba fail to
+      parse, and on SIGHUP Postgres DISCARDS the new file while `pg_reload_conf()` still
+      returns true, which would silently drop the `#112` cloud_admin reject and the
+      `#117` SCRAM catch-all too; the gate keeps the prior `host … scram-sha-256`
+      catch-all and WARNs loudly when the compute is not serving TLS. `cloud_admin`
+      reject stays broad `host` (any transport); loopback trust lines are byte-untouched
+      (the awk keys on the `$4=="all"` catch-all, first-match preserved). **`verify-ca`,
+      not `verify-full`** — see Consequences (shared leaf, CN≠username). The async
+      cold-wake enforcement window (harden runs `&`) is documented and the `_verify-tls.sh`
+      drill POLLS for the rule before asserting a no-client-cert connection is refused;
+      that drill's gateway-accepted leg is mandatory. `test_harden_pghba.sh` (10 checks,
+      both branches idempotent) + `_validate.sh` contracts 36/37 guard it; a `_validate.sh`
+      guard FAILS if any executable line reintroduces `verify-full`. **Done:** ADR-0001 F5
+      marked CLOSED; main-repo CLAUDE.md §7 updated.
+- **Note (SHOW-ssl unenforced state):** when a compute is not serving TLS the harden
+      keeps the plaintext catch-all and mTLS is NOT enforced — today observable only as a
+      pod-log WARN. Added to the operations.md kill-criteria tripwire mapping so it is not
+      silent; a metric/alert for it is a follow-up.
