@@ -66,10 +66,10 @@
 # vanished endpoint via the pageserver-primary liveness Service and fails over on
 # its own — no manual step. Because pswatcher failover is ONE-WAY, the drill first
 # asserts the plane STARTS on the primary selector (fail-back required otherwise)
-# and asserts the primary->standby TRANSITION, never the end state. It also clears
-# any maintenance-freeze signal before the kill so a future T5 death-vs-maintenance
-# discrimination does not misread this deliberate kill as a non-death event and
-# refuse to fail over. NOTE: this drill MAY call `kubectl delete` only for
+# and asserts the primary->standby TRANSITION, never the end state. It does NOT
+# touch any maintenance-freeze signal — none exists in the plane today, and the T5
+# block records that T5 must define how a drill declares an intentional kill.
+# NOTE: this drill MAY call `kubectl delete` only for
 # its OWN throwaway helper pods and to deprovision the apps it created; it never
 # deletes a plane object. Provisioning uses deploy/provision-app.sh (break-glass
 # path) so no operator CR contract is bypassed.
@@ -104,10 +104,11 @@ CONVERGE_BUDGET="${CONVERGE_BUDGET:-180}"
 # [T6] gets its OWN convergence budget (measured from FAILOVER_AT) — the whole
 # failover+converge window — so its verdict is independent of the other tasks.
 T6_BUDGET="${T6_BUDGET:-$((FAILOVER_BUDGET + CONVERGE_BUDGET))}"
-# After [T6] has already spent the full convergence window, the remaining
-# observation-only checks (T2/T3/T4) only need a short re-read, not another full
-# CONVERGE_BUDGET each — otherwise a red run would serially wait minutes per check.
-RECHECK_BUDGET="${RECHECK_BUDGET:-30}"
+# Every timed check shares ONE wall-clock deadline (FAILOVER_AT + T6_BUDGET),
+# computed once after the kill. Bounding the observation re-reads (T2/T3/T4) by the
+# REMAINING window — not a flat few seconds — means that once a fix lands, a
+# compute-bounce or an operator-reconcile that is merely SLOW is still given the
+# real budget, so "not fixed" stays distinguishable from "too slow" (defect C).
 
 PS_SVC=pageserver              # client-facing Service the pswatcher flips a->standby
 PRIMARY_STS=pageserver         # primary pageserver StatefulSet (the kill target)
@@ -252,6 +253,10 @@ snapshot_compute_pods() {
   } | grep -v '^$' | sort -u
 }
 PRE_PODS="$(snapshot_compute_pods)"
+# Guard against label drift (defect F): with the base + two woken per-app writers
+# there MUST be pods here. An empty snapshot would make [T3] vacuously green (no
+# survivors because none were ever recorded), so treat it as a setup failure.
+[ -n "$PRE_PODS" ] || fail "no compute pods matched plane=compute / compute-ro / compute-warm before the kill — the labels this drill snapshots have drifted; [T3] would be vacuously green. Fix the selectors before trusting the drill."
 OP_RESTARTS_BEFORE="$($K get pods -l app="$OPERATOR" -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}' 2>/dev/null || echo 0)"
 [ -n "$OP_RESTARTS_BEFORE" ] || OP_RESTARTS_BEFORE=0
 info "pre-failover: $(echo "$PRE_PODS" | grep -c . ) compute pod(s), operator restartCount=$OP_RESTARTS_BEFORE"
@@ -267,17 +272,27 @@ info "STEP 2: KILL the primary pageserver — pswatcher must fail over"
 # DRILL PASSED without any failover). Require the plane to START on the primary
 # selector, and assert the primary->standby TRANSITION, not the end state.
 PRE_SEL="$($K get svc "$PS_SVC" -o jsonpath='{.spec.selector.app}' 2>/dev/null || echo '?')"
-[ "$PRE_SEL" = "$PRIMARY_STS" ] || fail "the $PS_SVC Service selector is already '$PRE_SEL', not the primary '$PRIMARY_STS' — the plane is ALREADY failed over (pswatcher failover is one-way). Fail back first (re-seed $PRIMARY_STS as primary + flip the selector) before running this drill; otherwise it would exercise no failover and lie."
+case "$PRE_SEL" in
+  ""|"?")
+    fail "could not read the $PS_SVC Service selector (.spec.selector.app is empty/unreadable, got '${PRE_SEL}') — the Service selector shape is unexpected; cannot establish the pre-failover baseline. This is an INFRA error, NOT 'already failed over' (defect G)." ;;
+  "$STANDBY_STS")
+    fail "the $PS_SVC Service selector is already '$PRE_SEL' (the standby) — the plane is ALREADY failed over (pswatcher failover is one-way). Fail back first (re-seed $PRIMARY_STS as primary + flip the selector) before running this drill; otherwise it would exercise no failover and lie." ;;
+  "$PRIMARY_STS")
+    : ;; # expected pre-failover baseline
+  *)
+    fail "the $PS_SVC Service selector is '$PRE_SEL' — neither the primary '$PRIMARY_STS' nor the standby '$STANDBY_STS'. Unexpected topology; refusing to run rather than misattribute the state." ;;
+esac
 
-# Clear any maintenance-freeze signal so a future T5 death-vs-maintenance
-# discrimination cannot misclassify THIS deliberate kill as a non-death event and
-# refuse to fail over — which would red the setup gate for the wrong reason
-# (defect #4). Best-effort; harmless when no such signal exists today.
-$K delete configmap pswatcher-freeze --ignore-not-found >/dev/null 2>&1 || true
-$K annotate statefulset/"$PRIMARY_STS" ks-pg.dev/maintenance- >/dev/null 2>&1 || true
-
+# NOTE (T5): a genuine node-death vs a maintenance/freeze event must be
+# distinguished by the pswatcher ITSELF (task T5). This drill deliberately does NOT
+# pre-clear any maintenance-freeze signal: no such signal exists in the plane today
+# (defect D — clearing a non-existent object is dead code, and deleting a LIVE one
+# the moment T5 ships would defeat the mechanism under test and violate this drill's
+# "never mutate a plane object" stance). When T5 lands it must define how a drill
+# declares an intentional kill (e.g. a drill-scoped opt-out) and update this step.
 info "  killing primary via scale $PRIMARY_STS -> 0 (recoverable; avoids human-gated delete of a durable object; keeps it down long enough to cross the fail threshold)"
 FAILOVER_AT="$(date +%s)"
+FAILOVER_ISO="$(date -u +%Y-%m-%dT%H:%M:%SZ)"  # portable RFC3339-UTC; anchors the [T4] post-failover status-transition proof
 $K scale statefulset/"$PRIMARY_STS" --replicas=0 >/dev/null 2>&1 \
   || fail "could not scale $PRIMARY_STS to 0 (kill step)"
 # Assert the TRANSITION: the selector must be observed to LEAVE the primary and
@@ -299,6 +314,24 @@ fi
 CUR_GEN="$($K get configmap "$GEN_CM" -o jsonpath='{.data.generation}' 2>/dev/null || echo '')"
 [ -n "$CUR_GEN" ] || CUR_GEN=1
 info "post-flip generation ledger = $CUR_GEN"
+
+# ONE shared wall-clock deadline for every timed check below (defects A + C): the
+# whole T6 budget measured from the kill, so time already burned by the flip-wait
+# and by each kubectl round-trip counts against it. A check that cannot satisfy its
+# condition within the REMAINING window fails on real elapsed time, never on a
+# sleep-only counter that ignores round-trip latency.
+now() { date +%s; }
+DEADLINE=$(( FAILOVER_AT + T6_BUDGET ))
+# iso_after <candidate> <baseline> — rc 0 iff the RFC3339-UTC <candidate> is strictly
+# AFTER <baseline>. RFC3339 'Z' timestamps sort lexicographically == chronologically,
+# so this needs no platform-specific date parsing (portable). Empty/equal candidate ->
+# false (fail-closed: an unverifiable or non-advancing time is NOT "after").
+iso_after() {
+  [ -n "$1" ] || return 1
+  [ "$1" = "$2" ] && return 1
+  _late="$(printf '%s\n%s\n' "$1" "$2" | LC_ALL=C sort | tail -n1)"
+  [ "$_late" = "$1" ]
+}
 
 # ===========================================================================
 # ASSERTION PHASE (collect-all). Each [Tn] fails for its OWN reason on main.
@@ -324,27 +357,36 @@ t6_converged() {
   [ "$(SVC_CODE "/v1/tenant/$APPS_TENANT")" = "200" ] || return 1
   return 0
 }
-T6_MTTR=""; _t6s=0
-while [ "$_t6s" -lt "$T6_BUDGET" ]; do
-  if t6_converged; then T6_MTTR=$(( $(date +%s) - FAILOVER_AT )); break; fi
-  _t6s=$((_t6s + 5)); sleep 5
+# Drive the loop off the REAL wall-clock DEADLINE (defect A): the old sleep-only
+# counter ignored the ~3 kubectl round-trips per iteration, so wall time from
+# FAILOVER_AT could reach 2x+ T6_BUDGET while still printing "in 420s (<= 300s)".
+# Probe first (at least once even if the flip-wait ran the clock near the deadline),
+# then check the deadline. T6 IS the MTTR assertion: it must fail when convergence
+# is too slow, so t_ok is additionally GATED on T6_MTTR <= T6_BUDGET.
+T6_MTTR=""
+while : ; do
+  if t6_converged; then T6_MTTR=$(( $(now) - FAILOVER_AT )); break; fi
+  [ "$(now)" -ge "$DEADLINE" ] && break
+  sleep 5
 done
-if [ -n "$T6_MTTR" ]; then
-  t_ok T6 "multi-tenant plane converged to a CORRECT end-state (selector=$STANDBY_STS + base AND apps tenants reachable via the $PS_SVC Service) in ${T6_MTTR}s (<= ${T6_BUDGET}s), with NO manual pswatcher-stop / selector-patch (the drill issued neither)"
+if [ -n "$T6_MTTR" ] && [ "$T6_MTTR" -le "$T6_BUDGET" ]; then
+  t_ok T6 "multi-tenant plane converged to a CORRECT end-state (selector=$STANDBY_STS + base AND apps tenants reachable via the $PS_SVC Service) in ${T6_MTTR}s (<= ${T6_BUDGET}s MTTR budget), with NO manual pswatcher-stop / selector-patch (the drill issued neither)"
+elif [ -n "$T6_MTTR" ]; then
+  t_fail T6 "CONVERGENCE TOO SLOW: the plane reached the correct end-state only after ${T6_MTTR}s, past the ${T6_BUDGET}s MTTR budget — a bounded-MTTR failover is the requirement, so an over-budget convergence FAILS T6. Fix: cut the multi-tenant failover MTTR under budget"
 else
   t_fail T6 "NO AUTONOMOUS CONVERGENCE: the plane did not reach a correct multi-tenant end-state within ${T6_BUDGET}s without manual intervention — the apps tenant stays stranded on the promoted pageserver behind the flipped Service. Fix: promote every tenant so the failover converges on its own"
 fi
 
 # --- [T2] no split-brain: EVERY tenant attached on the promoted pageserver AND
-#     reachable through the `pageserver` Service. T6 already spent the full
-#     convergence window, so these re-reads use the short RECHECK_BUDGET. --------
-tenant_reachable_via_svc() { # $1 tenant -> rc 0 iff GET /v1/tenant/<T> == 200 within RECHECK_BUDGET
-  _t="$1"; _s=0
-  while [ "$_s" -lt "$RECHECK_BUDGET" ]; do
+#     reachable through the `pageserver` Service. Bounded by the SHARED deadline
+#     (defect C), probe-first so it always runs at least once. --------------------
+tenant_reachable_via_svc() { # $1 tenant -> rc 0 iff GET /v1/tenant/<T> == 200 before DEADLINE
+  _t="$1"
+  while : ; do
     [ "$(SVC_CODE "/v1/tenant/$_t")" = "200" ] && return 0
-    _s=$((_s + 3)); sleep 3
+    [ "$(now)" -ge "$DEADLINE" ] && return 1
+    sleep 3
   done
-  return 1
 }
 if tenant_reachable_via_svc "$BASE_TENANT"; then
   t_ok T2 "base tenant $BASE_TENANT attached + reachable through the $PS_SVC Service after failover"
@@ -373,17 +415,16 @@ done
 #     pswatcher bounces only app=compute (base), so every per-app writer pod (and
 #     any RO/warm) that predates the failover is still there. -------------------
 survivors_check() {
-  _s=0
-  while [ "$_s" -lt "$RECHECK_BUDGET" ]; do
+  while : ; do
     _now="$(snapshot_compute_pods)"
     _surv=""
     for p in $PRE_PODS; do
       echo "$_now" | grep -qx "$p" && _surv="$_surv $p"
     done
     [ -z "$_surv" ] && { echo ""; return 0; }
-    _s=$((_s + 5)); sleep 5
+    [ "$(now)" -ge "$DEADLINE" ] && { echo "$_surv"; return 1; }
+    sleep 5
   done
-  echo "$_surv"; return 1
 }
 SURV="$(survivors_check)"
 if [ -z "$SURV" ]; then
@@ -393,33 +434,41 @@ else
 fi
 
 # --- [T4] operator recovers with NO restart: reconciles a per-app tenant through
-#     the Service after the flip, restartCount unchanged. On main the operator
-#     keep-alive is pinned to the stale pageserver, so reconcile fails and/or it
-#     restarts. OBSERVATION-ONLY (runs before T1 mutates). ----------------------
-OP_RESTARTS_AFTER="$($K get pods -l app="$OPERATOR" -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}' 2>/dev/null || echo 0)"
-[ -n "$OP_RESTARTS_AFTER" ] || OP_RESTARTS_AFTER=0
-# reconcile proof: every provisioned AppDatabase must (re)reach phase Ready after
-# the flip, driven through the `pageserver` Service, within RECHECK_BUDGET.
+#     the Service AFTER the flip, restartCount unchanged. OBSERVATION-ONLY (runs
+#     before T1 mutates). ------------------------------------------------------
+# STALE-STATUS GUARD (defect B): every AppDatabase already carries phase=Ready from
+# STEP-1 provisioning, so checking phase==Ready alone would GREEN ON MAIN on
+# iteration 0 even though the wedged operator never reconciled post-flip. So T4
+# requires, per app, phase==Ready AND a status-condition transition NEWER than the
+# failover (its most-recent lastTransitionTime is after FAILOVER_ISO) — i.e. the
+# operator drove the tenant back to Ready THROUGH the Service after the flip. The
+# operator's resync (APPDB_RESYNC_MS) guarantees a reconcile attempt within the
+# window with no poke needed. Bounded by the shared DEADLINE (defect C).
 op_reconciled() {
-  _s=0
-  while [ "$_s" -lt "$RECHECK_BUDGET" ]; do
-    _all_ready=1
+  while : ; do
+    _all_ok=1
     for a in $T7_APPS; do
       _ph="$($K get appdatabase "$a" -o jsonpath='{.status.phase}' 2>/dev/null || echo '')"
-      [ "$_ph" = "Ready" ] || _all_ready=0
+      _ltts="$($K get appdatabase "$a" -o jsonpath='{.status.conditions[*].lastTransitionTime}' 2>/dev/null || echo '')"
+      _ltt="$(printf '%s' "$_ltts" | tr ' ' '\n' | LC_ALL=C sort | tail -n1)"
+      if [ "$_ph" = "Ready" ] && iso_after "$_ltt" "$FAILOVER_ISO"; then : ; else _all_ok=0; fi
     done
-    [ "$_all_ready" = 1 ] && return 0
-    _s=$((_s + 5)); sleep 5
+    [ "$_all_ok" = 1 ] && return 0
+    [ "$(now)" -ge "$DEADLINE" ] && return 1
+    sleep 5
   done
-  return 1
 }
 OP_RECONCILED=1; op_reconciled || OP_RECONCILED=0
+# Re-read restartCount AFTER the reconcile wait (defect B): sampling it before the
+# window would make a restart DURING the window invisible.
+OP_RESTARTS_AFTER="$($K get pods -l app="$OPERATOR" -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}' 2>/dev/null || echo 0)"
+[ -n "$OP_RESTARTS_AFTER" ] || OP_RESTARTS_AFTER=0
 if [ "$OP_RESTARTS_AFTER" = "$OP_RESTARTS_BEFORE" ] && [ "$OP_RECONCILED" = 1 ]; then
-  t_ok T4 "$OPERATOR reconciled every per-app AppDatabase through the Service post-failover with restartCount unchanged ($OP_RESTARTS_AFTER)"
+  t_ok T4 "$OPERATOR reconciled every per-app AppDatabase through the Service post-failover (status transitioned to Ready AFTER the failover) with restartCount unchanged ($OP_RESTARTS_AFTER)"
 else
   _why=""
-  [ "$OP_RESTARTS_AFTER" != "$OP_RESTARTS_BEFORE" ] && _why="restartCount $OP_RESTARTS_BEFORE->$OP_RESTARTS_AFTER"
-  [ "$OP_RECONCILED" != 1 ] && _why="${_why:+$_why; }not every AppDatabase returned to phase Ready within ${RECHECK_BUDGET}s"
+  [ "$OP_RESTARTS_AFTER" != "$OP_RESTARTS_BEFORE" ] && _why="restartCount $OP_RESTARTS_BEFORE->$OP_RESTARTS_AFTER (restarted during recovery)"
+  [ "$OP_RECONCILED" != 1 ] && _why="${_why:+$_why; }not every AppDatabase transitioned back to Ready AFTER the failover within ${T6_BUDGET}s (stale pre-failover Ready does not count)"
   t_fail T4 "OPERATOR DID NOT RECOVER CLEANLY: $_why — its keep-alive/reconcile is pinned to the stale pageserver and cannot follow the Service flip. Fix: reconcile via the $PS_SVC Service so no restart is needed"
 fi
 
@@ -438,17 +487,22 @@ fi
 # VERDICT the fix must expose: after a genuine node-death failover the watcher must
 # publish a death-classification signal (pswatcher_failover_reason) on its metrics.
 # On main no such signal exists -> [T5] red; it greens when T5 adds discrimination.
-# (The drill's kill also clears any freeze signal above so T5's future logic does
-# not misread this deliberate kill as maintenance.)
 PSW_IP="$($K get pod -l app=pswatcher -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || echo '')"
 T5_MET=""
 if [ -n "$PSW_IP" ]; then
   T5_MET="$($K exec sts/"$STANDBY_STS" -- curl -s --max-time 10 "http://$PSW_IP:9091/metrics" 2>/dev/null || echo '')"
 fi
-if printf '%s' "$T5_MET" | grep -q 'pswatcher_failover_reason'; then
-  t_ok T5 "pswatcher exposes a death-vs-maintenance discrimination verdict (pswatcher_failover_reason) — a non-death event can be distinguished and skipped"
+# Require a REAL labeled SAMPLE, not mere name presence (defect E): a `# HELP` line
+# or a registered-but-zero counter must NOT satisfy this. Match a metric line (not a
+# comment) named pswatcher_failover_reason, carrying a non-empty reason="..." label,
+# whose sample value is > 0 — i.e. the watcher actually CLASSIFIED this failover.
+if printf '%s\n' "$T5_MET" | awk '
+    /^[[:space:]]*#/ { next }
+    /^pswatcher_failover_reason\{/ && /reason="[^"]+"/ { if ($NF+0 > 0) { found=1 } }
+    END { exit found?0:1 }'; then
+  t_ok T5 "pswatcher published a death-vs-maintenance classification for this failover (pswatcher_failover_reason{reason=...} > 0) — a non-death event can be distinguished and skipped"
 else
-  t_fail T5 "NO DEATH DISCRIMINATION: pswatcher exposes no failover-reason / death-vs-maintenance signal (pswatcher_failover_reason absent), so it fails over on ANY primary unreachability — a maintenance freeze or graceful drain would trigger a needless multi-tenant failover. Fix: classify node-death vs non-death and expose pswatcher_failover_reason. (Full behavioral non-death scenario deferred — see the [T5] block comment for why.)"
+  t_fail T5 "NO DEATH DISCRIMINATION: pswatcher published no classified failover-reason sample (pswatcher_failover_reason{reason=\"...\"} > 0 absent), so it fails over on ANY primary unreachability — a maintenance freeze or graceful drain would trigger a needless multi-tenant failover. Fix: classify node-death vs non-death and expose pswatcher_failover_reason. (Full behavioral non-death scenario deferred — see the [T5] block comment for why.)"
 fi
 
 # --- [T1] no gen-wedge (MUTATING — RUN LAST) --------------------------------
@@ -469,10 +523,14 @@ gen_wedge_check() { # $1 tenant -> rc 0 iff attach at $CUR_GEN returns 2xx AND n
     2[0-9][0-9]) : ;;
     *) GENWEDGE_WHY="attach returned HTTP '${_code:-<none>}' (unreachable/stranded on the promoted pageserver); body='${_body}'"; return 1 ;;
   esac
+  # The HTTP-status gate above already fails every non-2xx (i.e. every genuine
+  # pageserver error) response, so this body scan is narrowed to the two wedge
+  # shapes that can ride on a 2xx or an error envelope — NOT a broad *Error*
+  # substring, which false-RED on a success body containing e.g. "error_count"
+  # (defect H).
   case "$_body" in
-    *"less than existing"*|*[Gg]eneration*less*) GENWEDGE_WHY="pageserver REJECTED the attach: ${_body}"; return 1 ;;
-    *NotFound*|*"not found"*|*"NotFound"*) GENWEDGE_WHY="tenant not attached on the promoted pageserver (NotFound): ${_body}"; return 1 ;;
-    *[Ee]rror*) GENWEDGE_WHY="pageserver error: ${_body}"; return 1 ;;
+    *"less than existing"*|*[Gg]eneration*less*) GENWEDGE_WHY="pageserver REJECTED the attach (generation wedge): ${_body}"; return 1 ;;
+    *NotFound*|*"not found"*) GENWEDGE_WHY="tenant not attached on the promoted pageserver (NotFound): ${_body}"; return 1 ;;
     *) return 0 ;;
   esac
 }
