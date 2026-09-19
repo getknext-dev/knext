@@ -341,11 +341,13 @@ func TestTryConnect_PlaintextOptOutStillConnects(t *testing.T) {
 }
 
 // The shipped default is ON (fail-closed by construction), with the documented
-// mount paths.
+// mount paths. Asserted on the PATH resolver: NewBackendTLSFromEnv also LOADS
+// the certs (fail-fast at boot), and /etc/pggw-* does not exist off-cluster —
+// that boot load has its own test (backendtls_failclosed_test.go).
 func TestNewBackendTLSFromEnv_DefaultsOnWithMountPaths(t *testing.T) {
-	btls, err := NewBackendTLSFromEnv(Env{})
+	btls, err := backendTLSPathsFromEnv(Env{})
 	if err != nil {
-		t.Fatalf("NewBackendTLSFromEnv: %v", err)
+		t.Fatalf("backendTLSPathsFromEnv: %v", err)
 	}
 	if btls == nil {
 		t.Fatalf("GW_COMPUTE_TLS must default to TRUE (fail-closed by construction)")
@@ -357,14 +359,14 @@ func TestNewBackendTLSFromEnv_DefaultsOnWithMountPaths(t *testing.T) {
 		t.Fatalf("default client keypair paths: %q %q", btls.CertFile, btls.KeyFile)
 	}
 	// Explicit overrides win.
-	btls, err = NewBackendTLSFromEnv(Env{
+	btls, err = backendTLSPathsFromEnv(Env{
 		"GW_COMPUTE_CA_FILE":          "/x/ca.crt",
 		"GW_COMPUTE_CLIENT_CERT_FILE": "/x/tls.crt",
 		"GW_COMPUTE_CLIENT_KEY_FILE":  "/x/tls.key",
 		"GW_COMPUTE_SERVER_NAME":      "compute.other.svc",
 	})
 	if err != nil {
-		t.Fatalf("NewBackendTLSFromEnv overrides: %v", err)
+		t.Fatalf("backendTLSPathsFromEnv overrides: %v", err)
 	}
 	if btls.CAFile != "/x/ca.crt" || btls.CertFile != "/x/tls.crt" || btls.KeyFile != "/x/tls.key" || btls.ServerName != "compute.other.svc" {
 		t.Fatalf("overrides not honoured: %+v", btls)

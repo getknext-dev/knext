@@ -803,6 +803,26 @@ func (g *Gateway) proxy(client net.Conn, startupPacket, pendingRest []byte, targ
 			g.wakeBudgetRefused(client, start)
 			return false
 		}
+		// Backend TLS leg (F5 phase 3). Two classes, both metered on the SAME
+		// distinct counter and both still counted as a wake failure (the connection
+		// really did fail, so existing alerting must not go blind) — the point is
+		// DISCRIMINATION: "this compute does not speak TLS yet" / "our own cert
+		// material is unusable" must not read as a generic cold-start timeout while
+		// a fleet is mid-rollout.
+		if errors.Is(err, wake.ErrBackendTLSConfig) {
+			g.metrics.BackendTLSFailure(target.Key)
+			g.metrics.WakeFailure()
+			g.log("[gw] " + target.Key + ": backend TLS MISCONFIGURED (no wake attempted — a local cert/CA problem, not a sleeping compute): " + err.Error())
+			g.computeUnavailable(client, params, start, err)
+			return false
+		}
+		if errors.Is(err, wake.ErrBackendTLSUnavailable) {
+			g.metrics.BackendTLSFailure(target.Key)
+			g.metrics.WakeFailure()
+			g.log("[gw] " + target.Key + ": backend TLS UNAVAILABLE (the compute is not serving TLS yet; refusing to fall back to plaintext): " + err.Error())
+			g.computeUnavailable(client, params, start, err)
+			return false
+		}
 		g.metrics.WakeFailure()
 		g.log("[gw] " + target.Key + ": " + err.Error())
 		g.computeUnavailable(client, params, start, err)
@@ -822,9 +842,9 @@ func (g *Gateway) proxy(client net.Conn, startupPacket, pendingRest []byte, targ
 	// time-settle. No-op on warm connects and the base single-DB path.
 	g.gateColdWake(woke, target, start)
 
-	if tcp, ok := conn.(*net.TCPConn); ok {
-		_ = tcp.SetNoDelay(true)
-	}
+	// (No SetNoDelay here: TryConnectTLS tunes the RAW socket before any TLS wrap,
+	// on both the TLS and the plaintext path. Retrying it on the returned conn was
+	// dead code under TLS — a *tls.Conn never satisfies a *net.TCPConn assert.)
 
 	// Readiness handshake: a freshly started Postgres accepts TCP before it
 	// can serve and FATALs the startup with 57P03 ("the database system is
@@ -937,9 +957,8 @@ func (g *Gateway) handshakeUntilReady(ctx context.Context, reg *connReg, conn ne
 			_ = conn.Close()
 			return nil, nil, ctx.Err()
 		}
-		if tcp, ok := conn.(*net.TCPConn); ok {
-			_ = tcp.SetNoDelay(true)
-		}
+		// Same as in proxy(): the raw socket was already tuned inside TryConnectTLS,
+		// before the TLS wrap.
 	}
 }
 

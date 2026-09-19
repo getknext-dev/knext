@@ -39,6 +39,12 @@ var (
 	// ErrBackendDialFailed: the raw TCP dial itself failed (compute asleep or
 	// unreachable) — the pre-phase-3 failure mode.
 	ErrBackendDialFailed = errors.New("backend dial failed")
+	// ErrBackendTLSConfig: a PERMANENT LOCAL configuration error — the CA file is
+	// unreadable or holds no certificate, or the client keypair cannot be loaded.
+	// It is deliberately NOT ErrBackendTLSUnavailable: nothing the compute does can
+	// fix it, so it must never be routed into the wake path (no budget token, no
+	// 0->1 scale write, no poll to the wake deadline). Fail-closed and FAST.
+	ErrBackendTLSConfig = errors.New("backend TLS misconfigured")
 )
 
 // Default mount paths for the phase-1 Secrets (deploy/11-mtls-certs.yaml), as
@@ -81,6 +87,31 @@ type BackendTLS struct {
 // including already-awake pre-phase-2 pods, which need a Recreate / 0<->N
 // cycle). A compute that predates phase 2 answers 'N' and is refused.
 func NewBackendTLSFromEnv(env Env) (*BackendTLS, error) {
+	b, err := backendTLSPathsFromEnv(env)
+	if b == nil || err != nil {
+		return nil, err
+	}
+	// A non-blank path is not a MOUNTED path. Both backend cert volumes are
+	// mounted optional:true, so the ordinary missing-Secret case (cert-manager not
+	// installed, or the Certificate not yet issued) would otherwise produce a
+	// READY gateway that fails 100% of its backend dials. Load + validate ONCE
+	// here — exactly as the front-door loadTLS LoadX509KeyPairs — so New() returns
+	// an error, the process exits non-zero, and the pod crashloops VISIBLY until
+	// the Secret exists. This is validation only: the CA is still re-read per DIAL
+	// and the keypair per HANDSHAKE, so cert-manager rotation needs no restart.
+	if _, err := b.loadCAPool(); err != nil {
+		return nil, err
+	}
+	if _, err := b.loadClientKeypair(); err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+// backendTLSPathsFromEnv resolves the knobs to paths (defaults + the blank-path
+// guard) WITHOUT touching the filesystem. Split out so the path contract is
+// testable off-cluster, where /etc/pggw-* does not exist.
+func backendTLSPathsFromEnv(env Env) (*BackendTLS, error) {
 	if !envTruthy(env.get("GW_COMPUTE_TLS", "true")) {
 		return nil, nil
 	}
@@ -105,6 +136,32 @@ func NewBackendTLSFromEnv(env Env) (*BackendTLS, error) {
 	return b, nil
 }
 
+// loadCAPool reads + parses the compute CA. Every failure is the PERMANENT LOCAL
+// class (ErrBackendTLSConfig): no backend byte has moved and no backend action
+// can fix it.
+func (b *BackendTLS) loadCAPool() (*x509.CertPool, error) {
+	pem, err := os.ReadFile(b.CAFile)
+	if err != nil {
+		return nil, fmt.Errorf("%w: reading the compute CA (GW_COMPUTE_CA_FILE=%s): %w", ErrBackendTLSConfig, b.CAFile, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("%w: no certificate found in GW_COMPUTE_CA_FILE=%s", ErrBackendTLSConfig, b.CAFile)
+	}
+	return pool, nil
+}
+
+// loadClientKeypair reads the gateway's clientAuth leaf. Used at boot (fail-fast
+// validation) and per handshake (rotation pickup, see GetClientCertificate).
+func (b *BackendTLS) loadClientKeypair() (tls.Certificate, error) {
+	pair, err := tls.LoadX509KeyPair(b.CertFile, b.KeyFile)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("%w: loading the gateway client keypair (GW_COMPUTE_CLIENT_CERT_FILE=%s GW_COMPUTE_CLIENT_KEY_FILE=%s): %w",
+			ErrBackendTLSConfig, b.CertFile, b.KeyFile, err)
+	}
+	return pair, nil
+}
+
 // envTruthy reads a boolean GW_* knob. Anything other than an explicit false
 // spelling keeps the secure value — a typo must not silently disable TLS.
 func envTruthy(v string) bool {
@@ -119,13 +176,9 @@ func envTruthy(v string) bool {
 // rotation is picked up per connection) and the client keypair is read inside
 // GetClientCertificate (so it is re-read per HANDSHAKE, condition C3).
 func (b *BackendTLS) clientConfig(host string) (*tls.Config, error) {
-	pem, err := os.ReadFile(b.CAFile)
+	pool, err := b.loadCAPool()
 	if err != nil {
-		return nil, fmt.Errorf("%w: reading the compute CA (GW_COMPUTE_CA_FILE=%s): %w", ErrBackendTLSUnavailable, b.CAFile, err)
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(pem) {
-		return nil, fmt.Errorf("%w: no certificate found in GW_COMPUTE_CA_FILE=%s", ErrBackendTLSUnavailable, b.CAFile)
+		return nil, err
 	}
 	name := b.ServerName
 	if name == "" {
@@ -139,10 +192,15 @@ func (b *BackendTLS) clientConfig(host string) (*tls.Config, error) {
 		// the leaf in place on the mounted Secret (renewBefore 15d), and a
 		// read-once gateway would keep presenting the stale/expired cert until
 		// someone restarted it.
+		//
+		// A failure HERE is left in the retryable class (it surfaces wrapped in
+		// ErrBackendTLSUnavailable by the handshake below), deliberately: the boot
+		// load already proved the keypair loadable, so a failure mid-life is most
+		// likely a cert-manager rotation window, which the next attempt clears.
 		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
-			pair, err := tls.LoadX509KeyPair(b.CertFile, b.KeyFile)
+			pair, err := b.loadClientKeypair()
 			if err != nil {
-				return nil, fmt.Errorf("loading the gateway client keypair (%s / %s): %w", b.CertFile, b.KeyFile, err)
+				return nil, err
 			}
 			return &pair, nil
 		},

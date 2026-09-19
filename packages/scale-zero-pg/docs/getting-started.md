@@ -38,6 +38,23 @@ docker build -t scale-zero-pg/gateway:dev gateway/
 
 ## 2. Deploy everything
 
+> **Before you apply: pick a gateway→database transport.** The gateway encrypts its
+> connection to the database by default and **refuses to start without certificates**,
+> so choose one of:
+>
+> - **Encrypted (recommended, and what the cluster manifests assume).** Install
+>   [cert-manager](https://cert-manager.io/docs/installation/), then apply
+>   `deploy/11-mtls-certs.yaml` first — it mints the CA and the two leaf certificates
+>   the gateway and the database use, and rotates them automatically.
+> - **Plaintext (local cluster, no cert-manager).** Set `GW_COMPUTE_TLS=false` in
+>   `deploy/10-gateway.yaml` (and `deploy/81-apps-gateway.yaml` if you use the
+>   multi-app gateway) before applying. Fine on a laptop cluster; do not do it where
+>   the network between pods is not trusted.
+>
+> If you skip both, the gateway pod restarts in a loop with a clear message naming
+> the certificate file it could not read — deliberately, so a cluster never silently
+> falls back to an unencrypted database connection.
+
 ```sh
 kubectl apply -f deploy/
 ```

@@ -14,6 +14,7 @@ package wake
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -407,8 +408,19 @@ func ConnectWithWake(ctx context.Context, driver Driver, t Target, opts Opts, on
 	retry := time.Duration(opts.RetryMs) * time.Millisecond
 	deadline := time.Now().Add(time.Duration(opts.WakeTimeoutMs) * time.Millisecond)
 
-	if c, e := TryConnectTLS(t, connectTimeout, opts.BackendTLS); e == nil {
+	c, e := TryConnectTLS(t, connectTimeout, opts.BackendTLS)
+	if e == nil {
 		return c, false, 0, nil
+	}
+	// A PERMANENT LOCAL config error (unreadable/unparseable CA, unloadable client
+	// keypair) is not a sleeping compute and waking cannot fix it. Returning it
+	// here — before the budget, the 0->1 scale write and the poll — is what stops a
+	// single typo'd cert path from burning a wake-budget token, churning the
+	// apiserver and hanging EVERY client for the full GW_WAKE_TIMEOUT_MS while
+	// blaming a compute that is healthy and awake. Only asleep/network/negotiation
+	// errors fall through to the wake loop below.
+	if errors.Is(e, ErrBackendTLSConfig) {
+		return nil, false, 0, e
 	}
 
 	// The compute is asleep: this connect would trigger a 0->1 scale. The wake step
@@ -458,13 +470,22 @@ func ConnectWithWake(ctx context.Context, driver Driver, t Target, opts Opts, on
 		if e == nil {
 			return c, true, time.Since(wakeStart).Milliseconds(), nil
 		}
+		// Same permanent-local class as above (e.g. the CA Secret was unmounted
+		// mid-wake): polling it to the deadline cannot help.
+		if errors.Is(e, ErrBackendTLSConfig) {
+			return nil, false, 0, e
+		}
 		// A cancelled ctx (e.g. a drain force-close) aborts the wake poll promptly
 		// instead of spinning to the full wake deadline.
 		if ctx.Err() != nil {
 			return nil, false, 0, ctx.Err()
 		}
 		if time.Now().After(deadline) {
-			return nil, false, 0, fmt.Errorf("wake timed out for %s: %v", t.Key, e)
+			// %w, never %v: the last dial error carries the class sentinel
+			// (ErrBackendTLSUnavailable / ErrBackendDialFailed) and the gateway
+			// branches on it to meter a fleet mid-TLS-migration distinctly from a
+			// compute that never came up. %v destroys that at the boundary.
+			return nil, false, 0, fmt.Errorf("wake timed out for %s: %w", t.Key, e)
 		}
 		select {
 		case <-time.After(retry):

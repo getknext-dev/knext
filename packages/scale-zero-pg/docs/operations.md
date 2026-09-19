@@ -1500,9 +1500,28 @@ Drain/recreate every live compute (scale the awake ones to 0 and let them respaw
 wait a full idle cycle) and verify no older compute pod remains (`kubectl get pods`
 age vs. the compute rollout time) **before** rolling the gateway. On a cluster where
 that is not yet true — or on a dev/kind cluster with no cert-manager — set
-`GW_COMPUTE_TLS=false` explicitly; the certificate mounts are `optional`, so such a
-cluster still schedules, but with the default (`true`) every backend dial fails closed
-rather than silently running plaintext.
+`GW_COMPUTE_TLS=false` explicitly.
+
+**Missing certificates fail at STARTUP, not per connection.** The certificate mounts
+are `optional`, so a certless cluster still *schedules* the pod — but with
+`GW_COMPUTE_TLS=true` the gateway now **loads and validates the CA and its client
+keypair at boot** and exits non-zero if either is unreadable. The pod therefore
+crash-loops with a message naming the offending file instead of reporting Ready and
+failing 100% of connections. (The boot load is validation only: the CA is still
+re-read per dial and the client certificate per handshake, so cert-manager rotation
+still needs no restart.)
+
+**Telling a TLS problem apart from a sleeping compute.** Failures on this hop are
+counted separately from ordinary cold-start failures:
+`pggw_backend_tls_failures_total` (fleet) and
+`pggw_system_backend_tls_failures_total{system="…"}` (per app) rise when a compute
+refuses TLS, the handshake fails, or the gateway's own certificate material is
+unusable. A rising backend-TLS count against a flat wake-latency picture means the
+computes are healthy and the TLS leg is not — typically a straggler pod that predates
+the compute-side rollout. A gateway-side certificate problem is refused
+**immediately**: it never consumes a wake budget token, never issues a scale-up, and
+never waits out `GW_WAKE_TIMEOUT_MS`, because no amount of waking can fix a
+certificate file the gateway cannot read.
 
 **Live verification (lead-owned).** `deploy/_verify-tls.sh` proves the *front-door*
 (client↔gateway) TLS; the compute's `sslmode=require` acceptance and the encrypted

@@ -1009,6 +1009,24 @@ JSON
   ) || fail "stage_tls_key runtime mutation-proof failed (see FAIL line above) — F5 phase 2 crash-loop / JSON-safe strip"
   rm -rf "$_tdir"
 fi
+# ca_projection_is_public_only: the pggw-mtls-ca VOLUME must project the CA's
+# public cert and NOTHING else. Asserting only that `key: ca.crt` appears leaves
+# the contract satisfiable by a volume that ALSO projects tls.key — the CA's
+# private key, i.e. the ability to mint a trusted identity for any pod that reads
+# the mount. So extract the volume block and assert BOTH halves:
+#   (a) an `items:` list exists at all — a secret volume with no items projects
+#       EVERY key in the Secret, tls.key included;
+#   (b) it lists ca.crt and lists NO other key.
+# $1 = manifest, $2 = audience (for the message).
+ca_projection_is_public_only() {
+  _m=$1; _who=$2
+  _blk=$(awk '/^[[:space:]]*- name: pggw-mtls-ca([[:space:]]|#|$)/{f=1;print;next} f&&/^[[:space:]]*- name: /{f=0} f{print}' "$_m")
+  echo "$_blk" | grep -q 'items:' || fail "$_m: the pggw-mtls-ca volume has no items: list — a secret volume without items projects EVERY key, so the CA PRIVATE KEY would be mounted into $_who pods"
+  echo "$_blk" | grep -q 'key: ca.crt' || fail "$_m must project ca.crt from pggw-mtls-ca (the CA that verifies the peer cert)"
+  _extra=$(echo "$_blk" | grep -o 'key: [A-Za-z0-9._-]*' | grep -v 'key: ca.crt' || true)
+  [ -z "$_extra" ] || fail "$_m: the pggw-mtls-ca volume projects more than ca.crt ($_extra) — the CA PRIVATE KEY must never reach $_who pods"
+}
+
 # every compute manifest that runs Postgres mounts both phase-1 Secrets at the
 # GUC paths; the CA Secret projects ONLY ca.crt (the CA private key must NOT be
 # distributed to compute pods).
@@ -1017,7 +1035,7 @@ for m in 20-compute.yaml 25-compute-warm.yaml 26-compute-ro.yaml compute-app.tem
   grep -q 'secretName: pggw-mtls-ca' "$m" || fail "$m must mount the pggw-mtls-ca Secret (CA) — F5 phase 2"
   grep -q "mountPath: $SRVMNT" "$m" || fail "$m must mount the server cert at $SRVMNT (matches ssl_cert_file/ssl_key_file GUC dir)"
   grep -q "mountPath: $CAMNT" "$m" || fail "$m must mount the CA at $CAMNT (matches ssl_ca_file GUC dir)"
-  grep -q 'key: ca.crt' "$m" || fail "$m must project ONLY ca.crt from pggw-mtls-ca (the CA private key must not reach compute pods)"
+  ca_projection_is_public_only "$m" compute
 done
 # pg_hba enforcement stays PHASE 4: lib-harden must NOT yet REWRITE pg_hba to
 # require TLS. Guard the exact enforcement token clientcert=verify-full (phase 4
@@ -1046,7 +1064,7 @@ for m in 10-gateway.yaml 81-apps-gateway.yaml; do
   grep -q 'secretName: pggw-mtls-ca' "$m" || fail "$m must mount the pggw-mtls-ca Secret (CA that verifies the compute server cert) — F5 phase 3"
   grep -q "mountPath: $GWCLI" "$m" || fail "$m must mount the client leaf at $GWCLI (matches GW_COMPUTE_CLIENT_CERT_FILE/KEY_FILE)"
   grep -q "mountPath: $GWCA" "$m" || fail "$m must mount the CA at $GWCA (matches GW_COMPUTE_CA_FILE)"
-  grep -q 'key: ca.crt' "$m" || fail "$m must project ONLY ca.crt from pggw-mtls-ca (the CA private key must not reach gateway pods)"
+  ca_projection_is_public_only "$m" gateway
 done
 ok "F5 phase-3 gateway requires TLS on the backend leg (GW_COMPUTE_TLS=true + CA/client-leaf env matching the mounts, ca.crt-only projection) — ADR-0003"
 

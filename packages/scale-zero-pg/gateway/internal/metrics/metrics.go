@@ -65,6 +65,11 @@ type sysMetrics struct {
 	// the gateway declined to scale — a possible unauthenticated wake side-channel /
 	// noisy-neighbour DoS. Per-app so the source tenant is identifiable.
 	WakeBudgetExceeded int `json:"wake_budget_exceeded"`
+	// BackendTLSFailures counts backend dials this app lost on the TLS leg
+	// (gateway->compute): the compute refused TLS ('N' — a pod that predates the
+	// TLS rollout), the handshake failed, or the gateway's own cert material is
+	// unusable. Per-app so a fleet mid-rollout names the stragglers.
+	BackendTLSFailures int `json:"backend_tls_failures"`
 }
 
 // Metrics holds gateway counters, safe for concurrent use.
@@ -106,6 +111,14 @@ type Metrics struct {
 	// It is NOT a wake FAILURE (a real cold-start error, WakeFailuresTotal) — it is a
 	// deliberate refusal to scale, so the two never share an alert.
 	WakeBudgetExceededTotal int `json:"wake_budget_exceeded_total"`
+	// BackendTLSFailuresTotal counts connections that failed on the BACKEND TLS
+	// leg. It is a SUBSET of WakeFailuresTotal by design (the connection genuinely
+	// failed, so existing alerting must still fire) — its value is DISCRIMINATION:
+	// a rising BackendTLSFailuresTotal against a flat one says the computes are
+	// fine and the TLS leg is not, which a generic "wake timed out" hides. The two
+	// causes it covers — a compute that does not serve TLS yet, and gateway cert
+	// material that cannot be loaded — are the mid-rollout failure modes.
+	BackendTLSFailuresTotal int `json:"backend_tls_failures_total"`
 	// ReplicationConnectionsTotal counts REPLICATION (walreceiver) streams the
 	// gateway has mediated — a subscriber connecting through the gateway to wake +
 	// drain a publisher (ADR-0007 §4c). A nonzero value on a publisher's gateway is
@@ -207,6 +220,16 @@ func (m *Metrics) WakeBudgetExceeded(key string) {
 	m.sys(key).WakeBudgetExceeded++
 }
 
+// BackendTLSFailure counts one connection lost on the gateway->compute TLS leg
+// (key = the compute target). Bumps the fleet total and the per-app counter so an
+// operator can name which computes are not serving TLS yet.
+func (m *Metrics) BackendTLSFailure(key string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.BackendTLSFailuresTotal++
+	m.sys(key).BackendTLSFailures++
+}
+
 // ReplicationConn counts a REPLICATION (walreceiver) stream mediated by the
 // gateway — a subscriber waking + draining a publisher through the wake-on-connect
 // path (ADR-0007 §4c).
@@ -273,6 +296,11 @@ func (m *Metrics) WakeBudgetExceededCount() int {
 	defer m.mu.Unlock()
 	return m.WakeBudgetExceededTotal
 }
+func (m *Metrics) BackendTLSFailureCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.BackendTLSFailuresTotal
+}
 func (m *Metrics) ReplicationConns() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -295,6 +323,7 @@ func (m *Metrics) PromText() string {
 		fmt.Sprintf("pggw_peer_check_failures_total %d", m.PeerCheckFailuresTotal),
 		fmt.Sprintf("pggw_rejected_connections_total %d", m.RejectedConnectionsTotal),
 		fmt.Sprintf("pggw_wake_budget_exceeded_total %d", m.WakeBudgetExceededTotal),
+		fmt.Sprintf("pggw_backend_tls_failures_total %d", m.BackendTLSFailuresTotal),
 		fmt.Sprintf("pggw_replication_connections_total %d", m.ReplicationConnectionsTotal),
 		fmt.Sprintf("pggw_wake_latency_ms_last %d", m.WakeLatencyMsLast),
 		fmt.Sprintf("pggw_gate_open %d", m.GateOpen),
@@ -311,6 +340,7 @@ func (m *Metrics) PromText() string {
 			fmt.Sprintf("pggw_system_wakes_total{system=%q} %d", k, s.Wakes),
 			fmt.Sprintf("pggw_system_last_wake_ms{system=%q} %d", k, s.LastWakeMs),
 			fmt.Sprintf("pggw_system_wake_budget_exceeded_total{system=%q} %d", k, s.WakeBudgetExceeded),
+			fmt.Sprintf("pggw_system_backend_tls_failures_total{system=%q} %d", k, s.BackendTLSFailures),
 		)
 	}
 	return strings.Join(lines, "\n") + "\n"
