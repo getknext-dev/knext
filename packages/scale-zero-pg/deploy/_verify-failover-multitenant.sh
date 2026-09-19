@@ -21,7 +21,13 @@
 #
 # This drill runs against the LIVE plane (scale-zero-pg + the apps plane), forces
 # a real failover, and asserts every link the incident exposed. Each assertion is
-# mapped to a sprint task [T1..T6] so a later fix greens exactly one:
+# mapped to a sprint task [T1..T6]. The chain is CAUSAL, not fully independent:
+# T1/T2/T3/T5 attribute to their own task, but T4 and T6 are DOWNSTREAM of T2 —
+# because the operator reconciles per-app tenants THROUGH the apps tenant and T6's
+# end-state includes apps-tenant reachability, both require T2 (promote-all-tenants).
+# T4 is reported as BLOCKED (not a failure) while T2 is red; T6 legitimately reds
+# with T2 (its own fix IS promote-all-tenants). So a fix greens its task and any
+# downstream task it unblocks — honestly stated rather than claimed independent:
 #
 #   [T2] no split-brain  — after failover EVERY tenant (base + each per-app) is
 #                          attached on the promoted pageserver AND reachable via
@@ -33,9 +39,12 @@
 #                          plane=compute / compute-ro) that predate the failover
 #                          survive.
 #   [T4] operator recovers, NO restart — after the flip, a BRAND-NEW AppDatabase
-#                          (operator-driven) reaches phase=Ready through the
-#                          promoted `pageserver` Service, with the operator's
-#                          restartCount unchanged (end-to-end signal, no timestamps).
+#                          (operator-driven) reaches phase=Ready through the promoted
+#                          `pageserver` Service, operator not restarted/rescheduled
+#                          (end-to-end, no timestamps). DOWNSTREAM of T2: reported
+#                          BLOCKED (not a failure) while T2's apps tenant is stranded;
+#                          a genuine [T4] failure needs T2 green (T4's own fix #1096
+#                          is already merged).
 #   [T5] death-vs-maintenance — the pswatcher must classify a genuine node-death
 #                          vs a non-death (maintenance/freeze/drain) event and
 #                          expose that verdict (pswatcher_failover_reason), so a
@@ -52,15 +61,17 @@
 # location_config), so T1 cannot self-remediate them. T4 provisions its OWN
 # isolated probe AppDatabase (a fresh tenant) — it neither reads nor remediates the
 # other tasks' state — and still runs before T1. T6 is measured first and judged on
-# its own end-state so reverting any one of T1..T4 does not blanket-red it.
+# its own end-state; reverting T1/T3 does not red it, but reverting T2 does (its
+# end-state includes apps-tenant reachability) — stated, not claimed independent.
 #
-# RED BY CONSTRUCTION ON MAIN: none of T1..T6 are implemented yet, so on today's
-# plane T2 strands the apps tenant, T1 wedges its re-attach, T3 leaves per-app
-# computes unbounced, T4 fails to reconcile through the Service, T5 exposes no
-# discrimination verdict, and T6 never converges. Each fails with its own [Tn]
-# message; a fix turns exactly one green. The assertion phase COLLECTS all failures
-# (like _validate.sh) and reports every task in one run, so the fix team can see
-# which task greened.
+# RED BY CONSTRUCTION ON MAIN: on today's plane T2 strands the apps tenant, T1 wedges
+# its re-attach, T3 leaves per-app computes unbounced, T5 exposes no discrimination
+# verdict, and T6 never converges — each with its own [Tn] message. T4's own fix
+# (#1096, the operator's non-pinning transport) is ALREADY MERGED, so [T4] is not an
+# independent red here: while T2 is red it reports BLOCKED (its precondition — apps-
+# tenant reachability — is unmet), and it only becomes a genuine attributable failure
+# if it stays red once T2 is green. The assertion phase COLLECTS all verdicts (like
+# _validate.sh) and reports every task in one run, so the fix team sees which greened.
 #
 # KILL MECHANISM (chosen deliberately): the primary pageserver StatefulSet is
 # SCALED TO ZERO (`kubectl scale statefulset/pageserver --replicas=0`), NOT
@@ -73,9 +84,11 @@
 # touch any maintenance-freeze signal — none exists in the plane today, and the T5
 # block records that T5 must define how a drill declares an intentional kill.
 # NOTE: this drill MAY call `kubectl delete` only for
-# its OWN throwaway helper pods and to deprovision the apps it created; it never
-# deletes a plane object. Provisioning uses deploy/provision-app.sh (break-glass
-# path) so no operator CR contract is bypassed.
+# its OWN throwaway helper pods and to deprovision the objects it created; it never
+# deletes a plane object. The two initial per-app tenants are provisioned with
+# deploy/provision-app.sh (break-glass). The [T4] check additionally APPLIES a live
+# AppDatabase CR (t4probe*) so the OPERATOR reconciles it — that is deliberate (it is
+# how T4's operator-reconcile path is exercised) — and reaps it best-effort on exit.
 #
 # Honesty rule (mirrors _verify-tls.sh leg-b): the drill SKIPS cleanly ONLY when
 # the apps plane is entirely absent (nothing multi-tenant to test). A
@@ -90,7 +103,10 @@
 #   APPS_TENANT   apps tenant id (default a0000000000000000000000000000001)
 #   FAILOVER_BUDGET  seconds to wait for the Service to flip (default 120)
 #   CONVERGE_BUDGET  seconds allowed for full multi-tenant convergence (default 180)
-#   T7_KEEP=1     leave the provisioned apps up for inspection (skip deprovision)
+#   T6_BUDGET     [T6] MTTR window in seconds, from the kill (default FAILOVER_BUDGET+CONVERGE_BUDGET)
+#   PER_CHECK_BUDGET  per-check retry window (T2/T3/T4) in seconds, from when each
+#                 check starts (default CONVERGE_BUDGET)
+#   T7_KEEP=1     leave the provisioned apps + probe up for inspection (skip deprovision)
 set -u
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:${PATH:-}"
@@ -136,8 +152,13 @@ fail() { echo "FAIL(setup): $*" >&2; exit 1; }
 # failing task does NOT abort the run, so EVERY [Tn] verdict prints in one pass
 # and the fix team can see which task greened. ------------------------------
 ASSERT_FAILS=0
+ASSERT_BLOCKED=0
 t_fail() { ASSERT_FAILS=$((ASSERT_FAILS + 1)); echo "not ok - [$1] $2" >&2; }
 t_ok()   { echo "ok - [$1] $2"; }
+# t_blocked — a DOWNSTREAM check whose precondition (an upstream task) is unmet, so
+# it is NOT independently attributable and must NOT count as a failure of its own
+# task. Distinct verdict; recorded for the summary but never added to ASSERT_FAILS.
+t_blocked() { ASSERT_BLOCKED=$((ASSERT_BLOCKED + 1)); echo "blocked - [$1] $2 (downstream of an unmet upstream task; NOT counted as a [$1] failure)"; }
 
 command -v "$KUBECTL" >/dev/null 2>&1 || fail "kubectl not found"
 CUR_CTX="$($KUBECTL config current-context 2>/dev/null || echo '')"
@@ -269,7 +290,11 @@ PRE_PODS="$(snapshot_compute_pods)"
 [ -n "$PRE_PODS" ] || fail "no compute pods matched plane=compute / compute-ro / compute-warm before the kill — the labels this drill snapshots have drifted; [T3] would be vacuously green. Fix the selectors before trusting the drill."
 OP_RESTARTS_BEFORE="$($K get pods -l app="$OPERATOR" -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}' 2>/dev/null || echo 0)"
 [ -n "$OP_RESTARTS_BEFORE" ] || OP_RESTARTS_BEFORE=0
-info "pre-failover: $(echo "$PRE_PODS" | grep -c . ) compute pod(s), operator restartCount=$OP_RESTARTS_BEFORE"
+# Capture the operator POD IDENTITY too (LOW): comparing restartCount alone false-REDs
+# [T4] if the single operator pod is RESCHEDULED (a new pod reports restartCount 0 vs
+# BEFORE=N). [T4] compares uid to tell an in-place restart from a pod replacement.
+OP_UID_BEFORE="$($K get pods -l app="$OPERATOR" -o jsonpath='{.items[0].metadata.uid}' 2>/dev/null || echo '')"
+info "pre-failover: $(echo "$PRE_PODS" | grep -c . ) compute pod(s), operator restartCount=$OP_RESTARTS_BEFORE (pod uid ${OP_UID_BEFORE:-unknown})"
 
 # ---------------------------------------------------------------------------
 info "STEP 2: KILL the primary pageserver — pswatcher must fail over"
@@ -343,12 +368,14 @@ DEADLINE=$(( FAILOVER_AT + T6_BUDGET ))
 echo ""
 info "ASSERTIONS (each maps to a sprint task; red-by-construction on main; observation-only checks run BEFORE the single mutating check so none can remediate another)"
 
-# --- [T6] convergence/MTTR (INDEPENDENT, measured FIRST) --------------------
+# --- [T6] convergence/MTTR (measured FIRST) ---------------------------------
 # Asserts its OWN end-state condition — the Service selector on the standby AND
-# both the base and apps tenants reachable through the Service — bounded by its
-# own T6_BUDGET measured from FAILOVER_AT. It is NOT gated on the other tasks'
-# verdicts (defect #5), so reverting T1/T2/T3/T4 does not blanket-red T6; it reds
-# only when the plane genuinely fails to reach a correct multi-tenant end-state
+# both the base and apps tenants reachable through the Service — bounded by its own
+# T6_BUDGET measured from FAILOVER_AT. It is not gated on the OTHER tasks' pass/fail
+# verdicts, so reverting T1/T3 does not blanket-red it. It DOES depend on apps-tenant
+# reachability, so reverting T2 reds T6 too — this is legitimate and stated, not a
+# false coupling: T6's own fix IS promote-all-tenants, the same fix T2 asserts. T6
+# reds when the plane fails to reach a correct multi-tenant end-state within budget
 # without manual intervention (the drill issues no pswatcher-stop / selector-patch).
 t6_converged() {
   _sel="$($K get svc "$PS_SVC" -o jsonpath='{.spec.selector.app}' 2>/dev/null || echo '?')"
@@ -399,15 +426,31 @@ fi
 # The apps tenant owns every per-app timeline. On main the pswatcher only promotes
 # the base tenant, so the apps tenant is unattached on the promoted pageserver
 # while the Service routes to it — the split-brain. This is the load-bearing check.
+# T2_APPS_OK is the apps-tenant reachability verdict — the load-bearing split-brain
+# signal AND the precondition the downstream [T4]/[T6] checks gate on (the operator
+# reconciles per-app tenants THROUGH this apps tenant, so a new app cannot go Ready
+# while the apps tenant is stranded, regardless of the operator's transport).
+T2_APPS_OK=0
 if tenant_reachable_via_svc "$APPS_TENANT"; then
+  T2_APPS_OK=1
   t_ok T2 "apps tenant $APPS_TENANT attached + reachable through the $PS_SVC Service (no split-brain)"
 else
   t_fail T2 "SPLIT-BRAIN: apps tenant $APPS_TENANT is NOT attached/reachable through the $PS_SVC Service after failover — the pswatcher promoted only the base tenant, so every per-app database is stranded. Fix: promote ALL tenants, not just PSW_TENANT_ID"
 fi
-# each per-app timeline must be reachable under the (attached) apps tenant.
+# each per-app timeline must be reachable under the (attached) apps tenant — with the
+# SAME start-relative PER_CHECK_BUDGET retry as the tenant checks, so a tail-of-window
+# reachability does not false-RED T2 on timing (MED).
+timeline_reachable_via_svc() { # $1 tenant  $2 timeline -> rc 0 iff GET .../timeline/<TL> == 200 within budget
+  _t="$1"; _tl="$2"; _cdl=$(( $(now) + PER_CHECK_BUDGET ))
+  while : ; do
+    [ "$(SVC_CODE "/v1/tenant/$_t/timeline/$_tl")" = "200" ] && return 0
+    [ "$(now)" -ge "$_cdl" ] && return 1
+    sleep 3
+  done
+}
 for a in $T7_APPS; do
   TL="$($K get configmap "compute-config-$a" -o jsonpath='{.data.TIMELINE_ID}' 2>/dev/null || echo '')"
-  if [ -n "$TL" ] && [ "$(SVC_CODE "/v1/tenant/$APPS_TENANT/timeline/$TL")" = "200" ]; then
+  if [ -n "$TL" ] && timeline_reachable_via_svc "$APPS_TENANT" "$TL"; then
     t_ok T2 "per-app tenant '$a' (timeline $TL) reachable through the $PS_SVC Service"
   else
     t_fail T2 "per-app tenant '$a' (timeline ${TL:-?}) is NOT reachable through the $PS_SVC Service after failover — stranded because its apps tenant was not promoted"
@@ -437,52 +480,69 @@ else
   t_fail T3 "UNBOUNCED COMPUTES: these compute pods predate the failover and survived:${SURV} — the pswatcher only bounces app=compute (base), leaving per-app/RO computes pointed at the dead pageserver. Fix: bounce every plane=compute + compute-ro pod on failover"
 fi
 
-# --- [T4] operator recovers with NO restart (END-TO-END provisioning signal) ----
-# Round-4 redesign. The round-3 condition-lastTransitionTime check was the WRONG
-# signal both ways: k8s stamps lastTransitionTime ONLY when a condition's value
-# FLIPS, so a SEAMLESS post-flip recovery writes no new timestamp (permanent
-# false-RED), while max() over ALL conditions false-GREENs on the kill-time
-# CondColdRestorable->Unknown flip; and host-clock vs pod-clock skew made any
-# timestamp compare fragile. Replaced with a clean end-to-end signal, NO timestamps:
-# provision a BRAND-NEW AppDatabase (operator-driven — a real CR the operator must
-# reconcile, NOT the break-glass provision-app path) and require the OPERATOR to
-# drive it to phase==Ready. A wedged/pinned operator (pre-T4) cannot reach the
-# promoted pageserver through the flipped `pageserver` Service — the new app's
-# branch 404s and it never goes Ready -> RED on main. Once T4's non-pinning
-# transport lands the operator reaches the promoted pageserver and the probe app
-# reconciles -> GREEN. restartCount-unchanged (re-read AFTER the wait) is a
-# secondary assertion. The probe CR is reaped in cleanup().
-T4PROBE="t4probe$(date +%H%M%S)"
-T4_APPLIED=0
-$K apply -f - >/dev/null 2>&1 <<YAML && T4_APPLIED=1
+# --- [T4] operator recovers with NO restart — DOWNSTREAM E2E CONFIRMATION of T2 ---
+# Round-5 reframe. T4 (#1096) is ALREADY MERGED: the operator uses a non-pinning
+# per-request pageserver client that follows the Service flip via DNS. So the probe
+# below is NOT a transport-pinning test — it is a downstream END-TO-END confirmation
+# that the operator can reconcile a NEW per-app tenant post-failover. Because the
+# operator reconciles per-app tenants THROUGH the apps tenant, this probe CANNOT go
+# green while T2's apps-tenant reachability is RED — it is causally downstream of T2,
+# not independently greenable. Therefore:
+#   * T2 apps RED  -> [T4] is BLOCKED / not-attributable (t_blocked, NOT a failure):
+#                     the split-brain is T2's to fix; blaming T4 would misattribute.
+#   * T2 apps GREEN -> run the probe for real: provision a BRAND-NEW AppDatabase
+#                     (operator-driven CR, not the break-glass provision-app path) and
+#                     require the OPERATOR to drive it to phase==Ready with NO restart.
+#                     A genuine failure HERE (T2 green) means the operator regressed
+#                     its non-pinning transport (#1096) or cannot reconcile for another
+#                     reason. The probe CR is reaped in cleanup().
+# The design is round-4's end-to-end signal (no timestamps — the round-3
+# condition-lastTransitionTime check was wrong both ways: k8s stamps it only on a
+# value flip, so a seamless recovery wrote none, and max() over conditions false-GREENed
+# on the kill-time CondColdRestorable->Unknown; host-vs-pod clock skew made it fragile).
+if [ "$T2_APPS_OK" != 1 ]; then
+  t_blocked T4 "operator reconcile-through-Service is a downstream confirmation of T2, and T2's apps-tenant reachability is RED — a new app cannot reconcile while the apps tenant is stranded on the promoted pageserver. Not attributable to T4 (its non-pinning transport, #1096, is already in main); this greens once T2 (promote-all-tenants) lands"
+else
+  T4PROBE="t4probe$(date +%H%M%S)"
+  T4_APPLIED=0
+  $K apply -f - >/dev/null 2>&1 <<YAML && T4_APPLIED=1
 apiVersion: apps.scale-zero-pg.dev/v1alpha1
 kind: AppDatabase
 metadata: { name: $T4PROBE, namespace: $NS }
 spec: { appName: $T4PROBE, tier: cold }
 YAML
-t4_probe_ready() { # rc 0 iff the probe AppDatabase reaches phase==Ready within PER_CHECK_BUDGET
-  _cdl=$(( $(now) + PER_CHECK_BUDGET ))
-  while : ; do
-    _ph="$($K get appdatabase "$T4PROBE" -o jsonpath='{.status.phase}' 2>/dev/null || echo '')"
-    [ "$_ph" = "Ready" ] && return 0
-    [ "$(now)" -ge "$_cdl" ] && return 1
-    sleep 5
-  done
-}
-if [ "$T4_APPLIED" != 1 ]; then
-  t_fail T4 "could not create the [T4] probe AppDatabase '$T4PROBE' — cannot exercise the operator's reconcile-through-Service path"
-else
-  T4_READY=1; t4_probe_ready || T4_READY=0
-  # Re-read restartCount AFTER the wait (a restart DURING recovery must be visible).
-  OP_RESTARTS_AFTER="$($K get pods -l app="$OPERATOR" -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}' 2>/dev/null || echo 0)"
-  [ -n "$OP_RESTARTS_AFTER" ] || OP_RESTARTS_AFTER=0
-  if [ "$T4_READY" = 1 ] && [ "$OP_RESTARTS_AFTER" = "$OP_RESTARTS_BEFORE" ]; then
-    t_ok T4 "$OPERATOR drove a NEW AppDatabase ('$T4PROBE') to phase=Ready through the promoted $PS_SVC Service, restartCount unchanged ($OP_RESTARTS_AFTER)"
+  t4_probe_ready() { # rc 0 iff the probe AppDatabase reaches phase==Ready within PER_CHECK_BUDGET
+    _cdl=$(( $(now) + PER_CHECK_BUDGET ))
+    while : ; do
+      _ph="$($K get appdatabase "$T4PROBE" -o jsonpath='{.status.phase}' 2>/dev/null || echo '')"
+      [ "$_ph" = "Ready" ] && return 0
+      [ "$(now)" -ge "$_cdl" ] && return 1
+      sleep 5
+    done
+  }
+  if [ "$T4_APPLIED" != 1 ]; then
+    t_fail T4 "could not create the [T4] probe AppDatabase '$T4PROBE' — cannot exercise the operator's reconcile path"
   else
-    _why=""
-    [ "$T4_READY" != 1 ] && _why="the new probe app '$T4PROBE' never reached phase=Ready within ${PER_CHECK_BUDGET}s (the operator cannot reconcile a new tenant through the flipped Service)"
-    [ "$OP_RESTARTS_AFTER" != "$OP_RESTARTS_BEFORE" ] && _why="${_why:+$_why; }operator restartCount $OP_RESTARTS_BEFORE->$OP_RESTARTS_AFTER (restarted during recovery)"
-    t_fail T4 "OPERATOR DID NOT RECOVER CLEANLY: $_why — its reconcile transport is pinned to the stale pageserver and cannot follow the Service flip. Fix: reconcile via the $PS_SVC Service so a new app provisions with no restart"
+    T4_READY=1; t4_probe_ready || T4_READY=0
+    # Re-read restartCount AND pod identity AFTER the wait: a restart DURING recovery,
+    # or a pod RESCHEDULE, must be visible and must be told apart (LOW).
+    OP_RESTARTS_AFTER="$($K get pods -l app="$OPERATOR" -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}' 2>/dev/null || echo 0)"
+    [ -n "$OP_RESTARTS_AFTER" ] || OP_RESTARTS_AFTER=0
+    OP_UID_AFTER="$($K get pods -l app="$OPERATOR" -o jsonpath='{.items[0].metadata.uid}' 2>/dev/null || echo '')"
+    _restart_ok=1; _restart_why=""
+    if [ -n "$OP_UID_BEFORE" ] && [ -n "$OP_UID_AFTER" ] && [ "$OP_UID_AFTER" != "$OP_UID_BEFORE" ]; then
+      _restart_ok=0; _restart_why="operator pod was RESCHEDULED/replaced during recovery (uid $OP_UID_BEFORE -> $OP_UID_AFTER)"
+    elif [ "$OP_RESTARTS_AFTER" != "$OP_RESTARTS_BEFORE" ]; then
+      _restart_ok=0; _restart_why="operator restarted IN PLACE (restartCount $OP_RESTARTS_BEFORE -> $OP_RESTARTS_AFTER)"
+    fi
+    if [ "$T4_READY" = 1 ] && [ "$_restart_ok" = 1 ]; then
+      t_ok T4 "$OPERATOR drove a NEW AppDatabase ('$T4PROBE') to phase=Ready through the promoted $PS_SVC Service, no restart/reschedule (restartCount $OP_RESTARTS_AFTER, same pod)"
+    else
+      _why=""
+      [ "$T4_READY" != 1 ] && _why="the new probe app '$T4PROBE' never reached phase=Ready within ${PER_CHECK_BUDGET}s even though the apps tenant IS reachable (T2 green)"
+      [ "$_restart_ok" != 1 ] && _why="${_why:+$_why; }$_restart_why"
+      t_fail T4 "OPERATOR DID NOT RECOVER CLEANLY (T2 is green, so this IS attributable to the operator): $_why — the operator regressed its non-pinning per-request pageserver transport (#1096) or cannot reconcile a new tenant post-failover for another reason. Fix belongs in the operator, not the pswatcher"
+    fi
   fi
 fi
 
@@ -565,13 +625,13 @@ echo ""
 echo "=========================================================================="
 if [ "$ASSERT_FAILS" -eq 0 ]; then
   echo " MULTI-TENANT FAILOVER DRILL PASSED — every tenant survived the flip"
-  echo "   MTTR (kill -> converged): ${T6_MTTR:-n/a}s"
+  echo "   MTTR (kill -> converged): ${T6_MTTR:-n/a}s; ${ASSERT_BLOCKED} downstream check(s) BLOCKED (precondition unmet)"
   echo "=========================================================================="
   exit 0
 else
-  echo " MULTI-TENANT FAILOVER DRILL FAILED — $ASSERT_FAILS task assertion(s) unmet"
-  echo "   (red-by-construction on main until T1-T6 land; each [Tn] above greens"
-  echo "    independently). T6 budget ${T6_BUDGET}s; total assertion phase ${ELAPSED}s."
+  echo " MULTI-TENANT FAILOVER DRILL FAILED — $ASSERT_FAILS task assertion(s) unmet; ${ASSERT_BLOCKED} downstream check(s) BLOCKED (not counted)"
+  echo "   (red-by-construction on main; the causal chain is documented — T4/T6 are"
+  echo "    downstream of T2). T6 budget ${T6_BUDGET}s; total assertion phase ${ELAPSED}s."
   echo "=========================================================================="
   exit 1
 fi

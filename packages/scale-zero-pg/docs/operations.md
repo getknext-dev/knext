@@ -1062,9 +1062,12 @@ runbook until the watcher is back.
   tenant — base and each per-app — is attached on the promoted pageserver **and reachable
   through the `pageserver` Service**, that re-attaching at the current generation does not
   wedge, that every per-app/RO compute was bounced, that the operator recovers with no
-  restart, and that the plane converges with no manual selector-patch. It **skips** cleanly
-  only when the apps plane is entirely absent; a present-but-broken chain **fails**. Run it
-  after any change to the failover or apps-tenant reconcile path.
+  restart, and that the plane converges with no manual selector-patch. To check the operator
+  recovers, it **creates a live throwaway `t4probe*` AppDatabase** on the plane (so the operator
+  reconciles a new tenant post-failover) and **best-effort-deletes it** on exit — set the keep
+  flag to leave it for inspection. It **skips** cleanly only when the apps plane is entirely
+  absent; a present-but-broken chain **fails**. Run it after any change to the failover or
+  apps-tenant reconcile path.
 - **After a failover:** the standby is now the primary and the ledger holds the new
   generation. To restore redundancy, bring up a fresh warm Secondary (re-seed
   `pageserver-standby` against the now-primary); the watcher adopts the flipped
