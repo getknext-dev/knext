@@ -30,14 +30,15 @@ import (
 // args COUNT, envFrom refs, env refs (NAME<-secret|cm:SRC/KEY + Optional flag, or
 // NAME for plain-value env), volume mounts (name+path+readOnly), ports (name+port),
 // readiness/liveness/startup probes (handler+thresholds), container securityContext
-// presence, resource-key PRESENCE; and pod-level: securityContext (seccomp +
-// runAsNonRoot), terminationGracePeriodSeconds, volumes (name+source+optional+items,
-// where each item is compared as key->path so a key-to-filename remap is caught).
+// presence, resource-key PRESENCE, resizePolicy (resourceName=restartPolicy per entry,
+// #1108); and pod-level: securityContext (seccomp + runAsNonRoot),
+// terminationGracePeriodSeconds, volumes (name+source+optional+items, where each item
+// is compared as key->path so a key-to-filename remap is caught).
 //
 // It compares STRUCTURE/keys, deliberately NOT certain value classes. The list below
 // is EXHAUSTIVE for what is excluded: a field is either projected above or named here
 // with its reason. It is NOT a claim that every conceivable PodSpec field is covered
-// — see class 6, the honestly-stated residual gap.
+// — see class 5, the honestly-stated residual gap.
 //
 //   ALLOWLIST / EXCLUSIONS (each intentional, with reason):
 //     1. Resource QUANTITIES. The template carries __CPU_REQ__/__CPU_LIM__/
@@ -58,11 +59,11 @@ import (
 //     4. Deployment-level fields (replicas, strategy, revisionHistoryLimit, selector,
 //        annotations) — this is a POD SPEC projection by construction; those are
 //        covered elsewhere and legitimately differ (e.g. __REPLICAS__ placeholder).
-//     5. resizePolicy — see TestResizePolicyIsKnownUnprojectedTemplateDrift below:
-//        this one is NOT a legitimate difference, it is a REAL discovered drift
-//        (tracked separately as the production fix), excluded here only so the guard
-//        stays green against unchanged production.
-//     6. RESIDUAL GAP (honest): PodSpec/Container fields that NEITHER renderer sets
+//        (Historical note: resizePolicy was a class-5 exclusion while it was a real
+//        render<->template drift; #1108 fixed RenderDeployment to emit it, so it is now
+//        PROJECTED above — per container, resourceName=restartPolicy — and no longer an
+//        exclusion, which is why the list below skips from 4 to 5=residual-gap.)
+//     5. RESIDUAL GAP (honest): PodSpec/Container fields that NEITHER renderer sets
 //        today (lifecycle hooks, workingDir, terminationMessagePath, volumeDevices,
 //        fieldRef/resourceFieldRef env sources, pod affinity/tolerations, etc.) are
 //        not projected. Both sides omit them now, so there is nothing to compare, but
@@ -158,6 +159,12 @@ func projectPodSpec(ps corev1.PodSpec) []string {
 			// Resource KEY PRESENCE only (values are allowlisted class 1).
 			out = append(out, key+"/resources/req="+sortedResourceKeys(c.Resources.Requests))
 			out = append(out, key+"/resources/lim="+sortedResourceKeys(c.Resources.Limits))
+			// resizePolicy (#1108): one token per entry (resourceName=restartPolicy) so a
+			// dropped or flipped entry reds the diff. Both sides now set it (writer path);
+			// removing it from RenderDeployment mutation-reds this structural guard.
+			for _, rp := range c.ResizePolicy {
+				out = append(out, key+"/resizePolicy="+string(rp.ResourceName)+"="+string(rp.RestartPolicy))
+			}
 		}
 	}
 	projectContainers("init", ps.InitContainers)
@@ -353,45 +360,6 @@ func TestRenderDeploymentStructurallyMatchesTemplate(t *testing.T) {
 		t.Errorf("structural facets render.go emits but the TEMPLATE does NOT declare: %v\n"+
 			"drift in the other direction is equally silent — the documented break-glass path "+
 			"(provision-app.sh renders the template) would miss it.", extra)
-	}
-}
-
-// TestResizePolicyIsKnownUnprojectedTemplateDrift RECORDS a real drift discovered
-// while building the structural guard, rather than silently fixing production (out of
-// scope for a guard-strengthening task) or reddening CI with it.
-//
-// FINDING: the template's compute container declares
-//
-//	resizePolicy:
-//	  - { resourceName: cpu, restartPolicy: NotRequired }
-//	  - { resourceName: memory, restartPolicy: NotRequired }
-//
-// so the shared writer-autoscaler can vertically resize a per-app writer IN PLACE
-// (no restart). render.go's RenderDeployment sets NO resizePolicy, so an
-// operator-provisioned per-app writer would RESTART on a resize instead. That is the
-// same class as the F5 mTLS gap (#1093/#1094): a real render<->template divergence a
-// name-list guard cannot see. It is deliberately EXCLUDED from the structural
-// projection above (allowlist class 5) only so the guard stays green against unchanged
-// production; it is NOT a legitimate difference.
-//
-// This test proves the drift is real (so the report is not speculation) and acts as a
-// tripwire: the day render.go is fixed to add resizePolicy, this test reds with an
-// instruction to fold resizePolicy into the projection and delete this record.
-func TestResizePolicyIsKnownUnprojectedTemplateDrift(t *testing.T) {
-	tmpl := parseTemplateComputeDeployment(t)
-	tmplCompute := computeContainer(t, tmpl.Spec.Template.Spec)
-	if len(tmplCompute.ResizePolicy) == 0 {
-		t.Fatal("expected the template compute container to declare resizePolicy; if it was removed, " +
-			"update the structural-guard allowlist note (class 5) accordingly")
-	}
-
-	c := DefaultRenderConfig("scale-zero-pg")
-	dep := c.RenderDeployment(ComputeSpec{App: "parity", TenantID: "tenant", TimelineID: "timeline"})
-	goCompute := computeContainer(t, dep.Spec.Template.Spec)
-	if len(goCompute.ResizePolicy) != 0 {
-		t.Fatalf("render.go now sets resizePolicy (%v) — the known render<->template drift is FIXED. "+
-			"Add resizePolicy to projectPodSpec's projection (drop allowlist class 5) and delete this "+
-			"characterization test.", goCompute.ResizePolicy)
 	}
 }
 
