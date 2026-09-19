@@ -10,7 +10,7 @@
 - **Amended by ADR-0003 (2026-09-19): the F5 clause is CLOSING (phased).** The gateway→compute
   plaintext transport is being closed by **in-protocol Postgres mTLS** (cert-manager CA + shared
   server/client leaf certs; SSLRequest→`tls.Client` on the gateway, compute `ssl=on` +
-  `hostssl clientcert=verify-full`), rolled out over four independently-safe phases. **Phase 1
+  `hostssl clientcert=verify-ca`), rolled out over four independently-safe phases. **Phase 1
   (cert infrastructure + this design record) has landed**, but F5 is **NOT yet CLOSED** — it stays
   DEFERRED with the expiry above intact until the phase-3/4 merge (gateway requires TLS + compute
   enforces the client cert) lands. Until then the plaintext-hop + CNI-conditional-NetworkPolicy
@@ -84,7 +84,7 @@ DBaaS hardening), NOT a judgment that mTLS/auth are unnecessary — they are owe
       C1 reader fix (non-200 → postpone sleep) shipped.
 - [~] **F5 CLOSING (phased) via ADR-0003 (2026-09-19)** — gateway→compute mTLS is now scheduled, not
       incidental: phase 1 (cert-manager CA + shared server/client leaf certs) has landed; phases 2-4
-      (compute serves TLS → gateway requires TLS → pg_hba `clientcert=verify-full`) close it fully.
+      (compute serves TLS → gateway requires TLS → pg_hba `clientcert=verify-ca`) close it fully.
       F5 is marked CLOSED only on the phase-3/4 merge.
 - [ ] At GA / first external-tenant use: re-review this ADR; close F5+F6 or re-justify.
 - [ ] Keep the plaintext-hop + CNI-conditional caveat in any user-facing isolation/encryption claim.
