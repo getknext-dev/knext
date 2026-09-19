@@ -55,10 +55,11 @@ spec:
                 echo "bucket '${OBJSTORE_BUCKET}' missing and could not be created — pre-create it on ${OBJSTORE_ENDPOINT}" >&2
                 exit 1
               fi
-      # The durable generation ledger (pageserver-generation ConfigMap, seeded/advanced
-      # by pswatcher) mounted READ-ONLY so the attach step can floor at it (#1095). A
-      # ConfigMap volume costs no RBAC. optional:true — a genuinely fresh plane may not
-      # have the CM yet; then the attach floors at 1, which is correct.
+      # The durable generation ledger (pageserver-generation ConfigMap, seeded to 1 by
+      # deploy/57 and advanced by pswatcher) mounted READ-ONLY so the attach step reads
+      # it (#1095). A ConfigMap volume costs no RBAC. optional:true so the pod schedules
+      # even if the CM lags this Job on first apply (55 applies before 57); the script
+      # WAITS for /ledger/generation and FAILS CLOSED if it never appears.
       volumes:
         - name: gen-ledger
           configMap: { name: pageserver-generation, optional: true }
@@ -87,14 +88,22 @@ spec:
               # ACCEPTS it (the reject only fires when it already knows a higher gen),
               # making the gen-N index INVISIBLE (silent data loss). So the DURABLE LEDGER
               # (survives a fresh PVC; the pageserver's local view does not) is the floor.
-              # We only READ it; advancing the generation is pswatcher's job on failover.
-              LEDGER="$(cat /ledger/generation 2>/dev/null | tr -dc '0-9')"
+              # FAIL CLOSED: if the ledger is unreadable (mount missing / never populated /
+              # non-numeric) we REFUSE the attach rather than floor to 1 — a loud, bounded
+              # failure the operator can act on, never a silent low attach. We only READ
+              # the ledger; advancing the generation is pswatcher's job on failover.
+              n=0
+              until [ -s /ledger/generation ]; do
+                n=$((n+1)); [ "$n" -gt 60 ] && { echo "REFUSING to attach ${TENANT_ID}: pageserver-generation ledger not present at /ledger/generation after 120s (missing/unmounted ConfigMap). Flooring to a low generation risks hiding an existing object-store index (silent data loss); seed/verify the ledger per operations.md." >&2; exit 1; }
+                echo "waiting for the generation ledger at /ledger/generation ..."; sleep 2
+              done
+              LEDGER="$(tr -dc '0-9' < /ledger/generation)"
+              [ -n "$LEDGER" ] || { echo "REFUSING to attach ${TENANT_ID}: /ledger/generation is present but not a number — unreadable ledger; refusing to floor to 1 (silent-loss risk)." >&2; exit 1; }
               CUR="$(curl -sf "${PS}/v1/tenant/${TENANT_ID}" 2>/dev/null || true)"
               PSGEN="$(printf '%s' "$CUR" | tr ',' '\n' | grep '"generation"' | head -1 | tr -dc '0-9')"
-              GEN=1
-              [ -n "$LEDGER" ] && [ "$LEDGER" -gt "$GEN" ] && GEN="$LEDGER"
+              GEN="$LEDGER"
               [ -n "$PSGEN" ] && [ "$PSGEN" -gt "$GEN" ] && GEN="$PSGEN"
-              echo "attaching tenant ${TENANT_ID} at generation ${GEN} (ledger=${LEDGER:-none}, pageserver=${PSGEN:-none})"
+              echo "attaching tenant ${TENANT_ID} at generation ${GEN} (ledger=${LEDGER}, pageserver=${PSGEN:-none})"
               curl -sf -X PUT -H 'Content-Type: application/json' \
                 -d "{\"mode\":\"AttachedSingle\",\"generation\":${GEN},\"tenant_conf\":{}}" \
                 "${PS}/v1/tenant/${TENANT_ID}/location_config" >/dev/null

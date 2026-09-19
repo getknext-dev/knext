@@ -683,13 +683,37 @@ docs/BENCHMARKS.md.
   attaching at the pageserver's empty view alone would silently pick 1 (which the
   pageserver **accepts**, since the rejection only fires when it already knows a higher
   generation), making the gen-N index invisible — silent data loss, strictly worse than
-  the CrashLoop. So the paths **never attach below the ledger**. A genuinely fresh
-  plane (no ledger key, no local attach) starts at 1. The paths only **read** the
-  ledger; **advancing it stays pswatcher's job on failover**. The seed ConfigMap ships
-  with **no value** (`data: {}`) on purpose: 1 is the floor everywhere, and a static
-  seed would let a `kubectl apply` downgrade the ledger below the live generation.
-  `storage-init` mounts the ledger read-only; `provision-app.sh` reads it with
-  `kubectl`. Contract-guarded in `_validate.sh` and unit-proved off-cluster by
+  the CrashLoop. So the paths **never attach below the ledger**, and they **fail
+  closed**: an unreadable ledger (kubectl/RBAC error, a missing ConfigMap, an
+  empty/non-numeric key, or an unmounted `/ledger` in the init container) **refuses the
+  attach loudly** rather than silently flooring to 1 — a bounded, recoverable failure.
+  The paths only **read** the ledger; **advancing it stays pswatcher's job on
+  failover**. `storage-init` mounts the ledger read-only at `/ledger` and waits for it;
+  `provision-app.sh` reads it with `kubectl`.
+  - **Genesis seed.** The ledger ConfigMap ships with `generation: "1"` (`deploy/57`).
+    It is a genesis seed, not just a default: the ledger is only *written* on a
+    failover, so without the seed the key would be legitimately empty on every
+    never-failed-over plane and the fail-closed readers could not tell "fresh" from
+    "unreadable". The seed makes the ledger always present and numeric on a healthy
+    plane.
+  - **`kubectl apply` is not ledger-safe — re-seed on upgrade/re-apply (runbook).**
+    Client-side `kubectl apply -f deploy/` reconciles the ledger's `generation` field
+    back to its declared `"1"` even when pswatcher had advanced it (verified on kind:
+    live `5` → apply → `1`); an apply that *drops* the key prunes it. This is tolerated
+    because the attach reads `max(ledger, pageserver-view, 1)` — after a failover the
+    live pageserver is attached at the advanced generation, so the pageserver view
+    corrects a reset ledger. **The one unguarded window is a reset/pruned ledger AND a
+    pageserver that has also lost its view (fresh PVC) at the same time.** So on any
+    upgrade or re-`apply`, **verify/re-seed `pageserver-generation` to the current
+    generation before any attach runs**:
+    `kubectl -n scale-zero-pg get cm pageserver-generation -o jsonpath='{.data.generation}'`
+    and, if it is lower than the live attach generation, `kubectl -n scale-zero-pg
+    patch cm pageserver-generation --type=merge -p '{"data":{"generation":"<N>"}}'`.
+    The robust self-heal — pswatcher re-seeding the ledger from the pageserver's current
+    max view at startup — is owned by the pswatcher + ledger-authority work, not this
+    change.
+
+  Contract-guarded in `_validate.sh` and unit-proved off-cluster by
   `deploy/test_ensure-tenant-gen.sh` (issue #1095). The full on-cluster proof
   (force gen→2 via a failover, recreate the pageserver PVC, re-run `storage-init` →
   succeeds) belongs to the pageserver-failover drill.

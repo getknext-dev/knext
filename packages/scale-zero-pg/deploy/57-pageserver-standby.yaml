@@ -29,26 +29,39 @@ spec:
     - { name: pg, port: 6400, targetPort: pg }
     - { name: http, port: 9898, targetPort: http }
 ---
-# Generation ledger: the last generation the tenant was attached at, the DURABLE
-# AUTHORITY for the attach generation (#1095). Each auto-failover reads it, promotes
-# at value+1, and writes value+1 back (pswatcher); the storage-init Job and
-# provision-app.sh READ it and never attach below it. Persisting it here keeps
-# repeated failovers monotonic and survives a watcher/pageserver restart or a fresh
-# pageserver PVC.
+# Generation ledger: the DURABLE record of the generation the tenant is attached at,
+# and the AUTHORITY the bootstrap attach paths read (#1095). Each auto-failover reads
+# it, promotes at value+1, and writes value+1 back (pswatcher, merge-patch); the
+# storage-init Job and provision-app.sh READ it and attach at
+# max(ledger, pageserver-view, 1) — never below it. Persisting it here survives a
+# watcher/pageserver restart or a fresh pageserver PVC.
 #
-# NO seed VALUE on purpose (#1095): 1 is already the floor everywhere — pswatcher's
-# PSW_BASE_GENERATION and both attach paths' fallback — so a "1" seed is redundant AND
-# a `kubectl apply` of this file AFTER pswatcher advanced the ledger would DOWNGRADE it
-# below the live value, re-introducing the silent-data-loss this issue fixes. pswatcher
-# creates the key with the real value on the first failover (merge-patch); until then
-# an absent key reads as "fresh -> gen 1".
+# The "1" is the GENESIS SEED, not just a default: the ledger is only WRITTEN on a
+# failover, so without a shipped seed the key would be legitimately empty on every
+# never-failed-over plane and the readers could not tell "fresh" from "unreadable".
+# Seeding "1" makes the ledger always-present-and-numeric on a healthy plane, which is
+# what lets the readers FAIL CLOSED (refuse) on an empty/unreadable key instead of
+# silently flooring to 1.
+#
+# CAVEAT — `kubectl apply` is not ledger-safe (proven on kind): a re-apply of this file
+# RESETS the live key back to "1" even when pswatcher had advanced it (client-side
+# apply reconciles the managed field to its declared value), and an apply that DROPS
+# the key prunes it. This is tolerable because the readers attach at
+# max(ledger, pageserver-view, 1): after a failover the live pageserver is attached at
+# the advanced generation, so a reset ledger is corrected by the pageserver view. The
+# only unguarded window is a reset/pruned ledger AND a pageserver that has ALSO lost
+# its view (fresh PVC) at the same time — the upgrade runbook (docs/operations.md)
+# requires re-seeding/verifying this ledger before any attach, and the robust
+# self-heal (pswatcher re-seeding from the pageserver's current max at startup) is
+# owned by the pswatcher + ledger-authority work, not this change.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: pageserver-generation
   namespace: scale-zero-pg
   labels: { plane: storage }
-data: {}
+data:
+  generation: "1"
 ---
 # Standby config: identical to the primary's (same broker + bucket) EXCEPT a
 # distinct node identity (id=1235 vs the primary's 1234) — two pageservers must

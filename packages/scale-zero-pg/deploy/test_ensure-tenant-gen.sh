@@ -3,31 +3,23 @@
 # generation logic (T1, issue #1095). Runs WITHOUT a cluster.
 #
 # The bug it pins: both attach paths (55-storage-init.yaml and
-# provision-app.sh:ensure_tenant) used to POST a HARDCODED
-# {"mode":"AttachedSingle","generation":1,...} to the pageserver's
-# /v1/tenant/<T>/location_config. After ANY pswatcher failover the pageserver's
-# generation for that tenant advances (->2, ->3...), so it REJECTS the lower
-# generation ("Generation 00000001 is less than existing N") and the attach path
-# wedges permanently.
+# provision-app.sh:ensure_tenant) used to POST a HARDCODED generation:1 to the
+# pageserver's /v1/tenant/<T>/location_config. After a pswatcher failover the tenant's
+# generation advances (->2, ->3...), so a literal 1 is REJECTED and the path wedges.
 #
-# The fix (read-before-write): attach at max(ledger, pageserver-current-view, 1),
-# where the DURABLE `pageserver-generation` ConfigMap ledger (seeded/advanced by
-# pswatcher) is the AUTHORITY. Reading the ledger survives a pageserver restart or a
-# fresh PVC; reading the pageserver's own view does not (a fresh-PVC pageserver 404s
-# the tenant while its object-store index is at the ledger generation, so attaching
-# at the pageserver's empty view alone would silently pick 1 and hide the index —
-# data loss). We never attach BELOW the ledger; we only READ it (advancing it is
-# pswatcher's job on failover). A truly fresh tenant/plane (no ledger, no local
-# attach) starts at 1.
+# The fix (read-before-write): attach at max(ledger, pageserver-current-view, 1), where
+# the durable `pageserver-generation` ConfigMap ledger (seeded to 1 by deploy/57,
+# advanced by pswatcher) is the AUTHORITY, and — crucially — FAIL CLOSED: an unreadable
+# ledger (kubectl/RBAC error, missing CM, empty/non-numeric key, or an unmounted
+# /ledger in the init container) REFUSES the attach rather than silently flooring to 1.
+# Flooring below a possible object-store index is the silent-data-loss failure; a loud
+# refusal is recoverable via the runbook.
 #
 # It does NOT re-implement the logic:
-#   - Part 1/2 SOURCE the shipped provision-app.sh (source-guard skips CLI dispatch)
-#     and exercise resolve_attach_generation / ensure_tenant against fixtures.
+#   - Part 1/2/3 SOURCE the shipped provision-app.sh (source-guard skips CLI dispatch)
+#     and exercise resolve_attach_generation / ledger_generation / ensure_tenant.
 #   - Part 4 EXTRACTS the storage-init inline generation-decision lines out of
-#     55-storage-init.yaml and runs THEM, so the init-container copy is covered too
-#     (not kept in sync by grep alone).
-# Editing the logic in either shipped file changes this test's result — that is what
-# makes it mutation-provable.
+#     55-storage-init.yaml and runs THEM, so the init-container copy is covered too.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PROV="$HERE/provision-app.sh"
@@ -37,7 +29,7 @@ pass=0
 
 # shellcheck disable=SC1090
 PROVISION_APP_SOURCED=1 . "$PROV"
-set +e  # ensure_tenant inherits set -e; the harness inspects results directly.
+set +e  # provision-app.sh sets -e; the harness inspects non-zero results directly.
 
 # ---------------------------------------------------------------------------
 # Part 1: resolve_attach_generation(pageserver_body, ledger) = max(psgen, ledger, 1).
@@ -47,81 +39,89 @@ check_resolve() {
   [ "$got" = "$want" ] || fail "$label: resolve_attach_generation('$body','$ledger') gave '$got', want '$want'"
   pass=$((pass + 1)); echo "ok - resolve $label -> $got"
 }
-# floor + fresh cases
-check_resolve '' '' 1 "empty body + no ledger (fresh plane)"
-check_resolve '{"id":"abc","generation":1,"state":"Active"}' '1' 1 "attached at gen 1, ledger 1"
-# pageserver ahead of ledger -> pageserver wins
+check_resolve '{"id":"abc","generation":1}' '1' 1 "attached at gen 1, ledger 1"
 check_resolve '{"generation":5}' '3' 5 "pageserver ahead of ledger (5 vs 3)"
-# ledger ahead of pageserver -> LEDGER wins (the silent-data-loss guard)
 check_resolve '{"generation":2}' '3' 3 "LEDGER ahead of pageserver (3 vs 2)"
-# THE hazard: fresh-PVC pageserver 404s (empty body) but ledger says 3 -> attach at 3, NOT 1
+# THE hazard: fresh-PVC pageserver 404s (empty body) but ledger says 3 -> attach at 3.
 check_resolve '' '3' 3 "fresh-PVC pageserver (404) + ledger 3 -> 3, never 1 (silent-loss guard)"
-# ledger present, pageserver fresh, higher ledger
 check_resolve '' '12' 12 "ledger 12, pageserver fresh -> 12"
-# spaced json still parses the generation field
-check_resolve '{"generation": 7, "id":"abc"}' '' 7 "spaced json, no ledger -> 7"
+# response-shape pin: a RENAMED pageserver field must NOT be read as generation.
+check_resolve '{"gen":9}' '1' 1 "renamed field \"gen\" is NOT read as generation (shape pin)"
+check_resolve '{"generation":4}' '1' 4 "canonical {\"generation\":N} shape resolves (shape pin)"
 
 # ---------------------------------------------------------------------------
-# Part 3 (response-shape pin): the logic depends on the field name `generation` and
-# the ledger being a bare integer. A RENAMED field must NOT be picked up (it would
-# silently degrade every attach to the ledger/1 floor and the wedge would return
-# green). Pin it here, off-cluster.
-check_resolve '{"gen":9}' '' 1 "renamed field \"gen\" is NOT read as generation (shape pin)"
-check_resolve '{"generationX":9}' '' 1 "\"generationX\" is NOT read as generation (shape pin)"
-# The live pageserver DID emit exactly {"generation": N}; the canonical form resolves.
-check_resolve '{"generation":4}' '' 4 "canonical {\"generation\":N} shape resolves (shape pin)"
+# Part 3: ledger_generation FAIL-CLOSED. Stub K() to simulate kubectl outcomes.
+# rc 0 + number = usable; rc 3 = REFUSE (error / missing CM / empty / non-numeric).
+_K_OUT=""; _K_RC=0
+K() { printf '%s' "$_K_OUT"; return "$_K_RC"; }
+check_ledger() {
+  local out="$1" krc="$2" want_echo="$3" want_rc="$4" label="$5" got grc
+  _K_OUT="$out"; _K_RC="$krc"
+  got="$(ledger_generation)"; grc=$?
+  [ "$grc" = "$want_rc" ] || fail "ledger $label: rc=$grc, want $want_rc"
+  [ "$got" = "$want_echo" ] || fail "ledger $label: echo='$got', want '$want_echo'"
+  pass=$((pass + 1)); echo "ok - ledger $label -> echo='$got' rc=$grc"
+}
+check_ledger '5'  0 '5' 0 "present numeric -> use 5"
+check_ledger '1'  0 '1' 0 "present numeric -> use 1"
+check_ledger ''   0 ''  3 "CM present but key EMPTY -> REFUSE (rc 3)"
+check_ledger 'abc' 0 '' 3 "non-numeric key -> REFUSE (rc 3)"
+check_ledger ''   1 ''  3 "kubectl error / CM NotFound -> REFUSE (rc 3)"
 
 # ---------------------------------------------------------------------------
-# Part 2: ensure_tenant end-to-end with a stubbed pageserver + stubbed ledger. The
-# PS stub returns the fixture body on the GET and records the generation on the PUT;
-# ledger_generation is overridden to feed the fixture ledger value.
-PUT_GEN=""; GET_BODY=""; LEDGER_VAL=""
-ledger_generation() { printf '%s' "$LEDGER_VAL"; }
+# Part 2: ensure_tenant end-to-end. PS stub records the PUT generation; the ledger is
+# fed via the K() stub above (ensure_tenant -> ledger_generation -> K).
+PUT_GEN_FILE="$(mktemp)"; GET_BODY=""
+trap 'rm -f "$PUT_GEN_FILE"' EXIT
 PS() {
   case "$*" in
     *"-X PUT"*)
       for a in "$@"; do
         case "$a" in
-          *'"generation"'*) PUT_GEN="$(printf '%s' "$a" | tr ',' '\n' | grep '"generation"' | head -1 | tr -dc '0-9')";;
+          *'"generation"'*) printf '%s' "$a" | tr ',' '\n' | grep '"generation"' | head -1 | tr -dc '0-9' > "$PUT_GEN_FILE";;
         esac
       done
       return 0;;
-    *)
-      printf '%s' "$GET_BODY"; return 0;;
+    *) printf '%s' "$GET_BODY"; return 0;;
   esac
 }
-log() { :; }  # silence
+log() { :; }
 
-run_ensure() {
-  GET_BODY="$1"; LEDGER_VAL="$2"; PUT_GEN=""
-  ensure_tenant >/dev/null 2>&1
-}
+# ensure_tenant may `die` (exit) on refusal, so run it in a subshell; the PUT generation
+# is captured through a file so it survives. Sets globals RC + PUT_GEN (NOT called in a
+# command-substitution, which would discard the assignments).
+RC=""; PUT_GEN=""
+run_ensure() { _K_OUT="$1"; _K_RC="$2"; GET_BODY="$3"; : > "$PUT_GEN_FILE"; ( ensure_tenant ) >/dev/null 2>&1; RC=$?; PUT_GEN="$(cat "$PUT_GEN_FILE")"; }
 
-# Fresh tenant, no ledger -> attach at 1.
-run_ensure '' ''
-[ "$PUT_GEN" = "1" ] || fail "fresh tenant: ensure_tenant attached at '$PUT_GEN', want 1"
-pass=$((pass + 1)); echo "ok - ensure_tenant fresh tenant attaches at generation 1"
-
-# Post-failover: pageserver reports 2, ledger 2 -> attach at 2, NOT 1.
-run_ensure '{"id":"apps","generation":2}' '2'
-[ "$PUT_GEN" = "2" ] || fail "post-failover: ensure_tenant attached at '$PUT_GEN', want 2 (a literal 1 would be rejected)"
+# ledger 2, pageserver 2 -> attach at 2 (post-failover; a literal 1 would be rejected).
+run_ensure '2' 0 '{"generation":2}'
+[ "$RC" = 0 ] && [ "$PUT_GEN" = 2 ] || fail "post-failover: rc=$RC gen='$PUT_GEN', want rc0 gen2"
 pass=$((pass + 1)); echo "ok - ensure_tenant post-failover attaches at 2"
 
-# THE silent-loss guard end-to-end: pageserver on a fresh PVC 404s (empty body) but
-# the durable ledger says 3 -> ensure_tenant MUST attach at 3, never 1.
-run_ensure '' '3'
-[ "$PUT_GEN" = "3" ] || fail "fresh-PVC pageserver + ledger 3: ensure_tenant attached at '$PUT_GEN', want 3 (attaching at 1 would hide the gen-3 index — silent data loss)"
+# ledger 3, fresh-PVC pageserver (404) -> attach at 3, NEVER 1 (silent-loss guard).
+run_ensure '3' 0 ''
+[ "$RC" = 0 ] && [ "$PUT_GEN" = 3 ] || fail "fresh-PVC+ledger3: rc=$RC gen='$PUT_GEN', want rc0 gen3"
 pass=$((pass + 1)); echo "ok - ensure_tenant honours the durable ledger over a fresh-PVC pageserver (3, not 1)"
+
+# FAIL CLOSED: unreadable ledger (kubectl error) -> ensure_tenant REFUSES, no PUT at 1.
+run_ensure '' 1 ''
+[ "$RC" != 0 ] || fail "unreadable ledger (kubectl error): ensure_tenant returned rc=$RC, expected REFUSAL (non-zero)"
+[ "$PUT_GEN" = '' ] || fail "unreadable ledger: ensure_tenant PUT at generation '$PUT_GEN' — it must REFUSE, never floor to 1"
+pass=$((pass + 1)); echo "ok - ensure_tenant REFUSES on an unreadable ledger (no silent floor-to-1)"
+
+# FAIL CLOSED: CM present but key empty -> REFUSE.
+run_ensure '' 0 '{"generation":7}'
+[ "$RC" != 0 ] || fail "empty ledger key: ensure_tenant returned rc=$RC, expected REFUSAL"
+pass=$((pass + 1)); echo "ok - ensure_tenant REFUSES on an empty ledger key even when the pageserver has a view"
 
 # ---------------------------------------------------------------------------
 # Part 4: the storage-init INLINE copy. Extract its generation-decision lines from
-# 55-storage-init.yaml and run them with fixture LEDGER/PSGEN — so the init-container
-# copy is proven equivalent, not merely grep-checked for a literal.
+# 55-storage-init.yaml and run them with fixture LEDGER/PSGEN (LEDGER is numeric — the
+# init container fail-closes before this point if the ledger is unreadable).
 si_gen() {
   local LEDGER="$1" PSGEN="$2" GEN prog
-  prog="$(grep -E 'GEN=1$|-gt "\$GEN" \] && GEN=' "$SI" | sed 's/^[[:space:]]*//')"
-  # 3 lines expected: GEN=1, the LEDGER bump, the PSGEN bump.
-  [ "$(printf '%s\n' "$prog" | grep -c .)" -eq 3 ] || { echo "EXTRACT_FAILED"; return 1; }
+  prog="$(grep -E 'GEN="\$LEDGER"$|-gt "\$GEN" \] && GEN="\$PSGEN"' "$SI" | sed 's/^[[:space:]]*//')"
+  [ "$(printf '%s\n' "$prog" | grep -c .)" -eq 2 ] || { echo "EXTRACT_FAILED"; return 1; }
   eval "$prog"
   echo "$GEN"
 }
@@ -131,9 +131,9 @@ check_si() {
   [ "$got" = "$want" ] || fail "storage-init inline $label: got '$got', want '$want'"
   pass=$((pass + 1)); echo "ok - storage-init inline $label -> $got"
 }
-check_si '' '' 1 "fresh (no ledger, pageserver 404)"
 check_si '3' '' 3 "fresh-PVC pageserver + ledger 3 -> 3 (silent-loss guard)"
 check_si '2' '5' 5 "pageserver ahead (5 vs ledger 2)"
 check_si '3' '2' 3 "ledger ahead (3 vs pageserver 2)"
+check_si '1' '' 1 "genesis ledger 1, pageserver fresh -> 1"
 
-echo "PASS ($pass checks) — read-before-attach honours the durable ledger; no attach path emits a literal generation:1 or attaches below the ledger"
+echo "PASS ($pass checks) — read-before-attach honours the durable ledger and FAILS CLOSED on an unreadable one; never a literal generation:1 and never a silent floor below the ledger"

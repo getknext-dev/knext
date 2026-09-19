@@ -1183,10 +1183,21 @@ grep -q 'ledger_generation' provision-app.sh \
   || fail "provision-app.sh must read the durable ledger (ledger_generation) — never attach below it (#1095)"
 grep -qF 'curl -sf "${PS}/v1/tenant/${TENANT_ID}"' 55-storage-init.yaml \
   || fail "55-storage-init.yaml must GET /v1/tenant/<T> for the pageserver's current view (#1095)"
-grep -qF 'cat /ledger/generation' 55-storage-init.yaml \
+grep -qF '/ledger/generation' 55-storage-init.yaml \
   || fail "55-storage-init.yaml must read the mounted durable ledger (/ledger/generation) — the authority that survives a fresh-PVC pageserver (#1095)"
+# Guard gap (#1095 review): pin the volumeMount that projects the ledger into the pod.
+# Deleting ONLY the mount (keeping the volume, so the pageserver-generation grep above
+# still hits) would leave /ledger empty and the attach flooring at 1 — mutation-proved.
+grep -qF 'mountPath: /ledger' 55-storage-init.yaml \
+  || fail "55-storage-init.yaml must MOUNT the pageserver-generation ledger at /ledger — without the volumeMount the init reads an empty /ledger and attaches at 1 (#1095)"
 grep -qF 'generation\":${GEN}' 55-storage-init.yaml \
   || fail "55-storage-init.yaml must attach at the resolved generation \${GEN}, not a literal (#1095)"
+# Fail-closed pins (#1095 review): neither attach site may silently floor to 1 on an
+# unreadable ledger — provision-app REFUSES (die) and storage-init REFUSES (exit 1).
+grep -q 'refusing to attach' provision-app.sh \
+  || fail "provision-app.sh:ensure_tenant must FAIL CLOSED (die) when the ledger is unreadable — never silently floor to 1 (#1095)"
+grep -q 'REFUSING to attach' 55-storage-init.yaml \
+  || fail "55-storage-init.yaml must FAIL CLOSED (exit 1) when the ledger is missing/non-numeric — never silently floor to 1 (#1095)"
 # Response/CM-shape pins: the field/key name the logic depends on. If the pageserver
 # JSON field or the ledger CM key is renamed, every attach silently degrades to the
 # floor and the wedge returns green — so pin BOTH names, cross-file.
@@ -1194,13 +1205,16 @@ grep -q 'genKeyDefault = "generation"' ../gateway/internal/pswatcher/k8s.go \
   || fail "pswatcher ledger key drifted from \"generation\" — the attach paths read data.generation / /ledger/generation; a rename silently degrades every attach (#1095)"
 grep -qE 'name: pageserver-generation' 57-pageserver-standby.yaml \
   || fail "57-pageserver-standby.yaml must ship the pageserver-generation ledger ConfigMap (#1095)"
-# The seed CM must NOT carry a hardcoded numeric generation value: a re-apply of 57
-# after pswatcher advanced the ledger would DOWNGRADE it below the live value,
-# re-introducing the silent-data-loss. 1 is the floor everywhere already.
-if grep -A4 'name: pageserver-generation' 57-pageserver-standby.yaml | grep -qE 'generation: *"?[0-9]'; then
-  fail "57-pageserver-standby.yaml seeds pageserver-generation with a numeric value — a kubectl apply would DOWNGRADE the ledger below the live generation (#1095). Ship data: {} and let pswatcher write the real value."
+# The ledger CM must ship the GENESIS SEED (generation: "1"): the ledger is only WRITTEN
+# on a failover, so without a seed the key is legitimately empty on a never-failed-over
+# plane and the fail-closed readers could not tell "fresh" from "unreadable". The seed
+# makes the ledger always-present-and-numeric on a healthy plane. (kubectl apply is not
+# ledger-safe either way — see the 57 caveat + the operations.md runbook; the readers'
+# max(ledger, pageserver-view) covers a reset except when the pageserver is also blind.)
+if ! grep -A6 'name: pageserver-generation' 57-pageserver-standby.yaml | grep -qE 'generation: *"1"'; then
+  fail "57-pageserver-standby.yaml must seed the pageserver-generation ledger with generation: \"1\" (genesis seed) so the fail-closed readers can distinguish a fresh plane from an unreadable ledger (#1095)"
 fi
-ok "T1 read-before-attach: no literal generation:1; both storage-init and provision-app read the durable ledger + pageserver view (max, never below the ledger); field/key names pinned; seed CM cannot downgrade (#1095)"
+ok "T1 read-before-attach: no literal generation:1; both storage-init and provision-app read the durable ledger + pageserver view (max, never below the ledger), FAIL CLOSED on an unreadable ledger; ledger mounted at /ledger; field/key names + genesis seed pinned (#1095)"
 
 # Runtime proof of the read-before-attach logic (mirrors the harden_pghba pattern):
 # SOURCE provision-app.sh + EXTRACT the storage-init inline lines and exercise both
