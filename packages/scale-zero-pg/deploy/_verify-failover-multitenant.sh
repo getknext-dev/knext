@@ -32,9 +32,10 @@
 #   [T3] computes bounced— zero compute pods (base + per-app writer + RO,
 #                          plane=compute / compute-ro) that predate the failover
 #                          survive.
-#   [T4] operator recovers, NO restart — appdb-operator reconciles a per-app
-#                          tenant through the Service after the flip with its
-#                          restartCount unchanged.
+#   [T4] operator recovers, NO restart — after the flip, a BRAND-NEW AppDatabase
+#                          (operator-driven) reaches phase=Ready through the
+#                          promoted `pageserver` Service, with the operator's
+#                          restartCount unchanged (end-to-end signal, no timestamps).
 #   [T5] death-vs-maintenance — the pswatcher must classify a genuine node-death
 #                          vs a non-death (maintenance/freeze/drain) event and
 #                          expose that verdict (pswatcher_failover_reason), so a
@@ -46,10 +47,12 @@
 #                          selector-patch. Asserts its OWN end-state, independent of
 #                          T1..T4's verdicts.
 #
-# ASSERTION ORDER IS LOAD-BEARING: every observation-only check (T6, T2, T3, T4,
-# T5) runs BEFORE the single mutating check (T1 re-attaches location_config), so
-# T1 cannot self-remediate T4/T6. T6 is measured first and judged on its own
-# end-state so reverting any one of T1..T4 does not blanket-red it.
+# ASSERTION ORDER IS LOAD-BEARING: the tenant-observation checks (T6, T2, T3) and
+# the read-only T5 run BEFORE the single tenant-mutating check (T1 re-attaches
+# location_config), so T1 cannot self-remediate them. T4 provisions its OWN
+# isolated probe AppDatabase (a fresh tenant) — it neither reads nor remediates the
+# other tasks' state — and still runs before T1. T6 is measured first and judged on
+# its own end-state so reverting any one of T1..T4 does not blanket-red it.
 #
 # RED BY CONSTRUCTION ON MAIN: none of T1..T6 are implemented yet, so on today's
 # plane T2 strands the apps tenant, T1 wedges its re-attach, T3 leaves per-app
@@ -104,11 +107,14 @@ CONVERGE_BUDGET="${CONVERGE_BUDGET:-180}"
 # [T6] gets its OWN convergence budget (measured from FAILOVER_AT) — the whole
 # failover+converge window — so its verdict is independent of the other tasks.
 T6_BUDGET="${T6_BUDGET:-$((FAILOVER_BUDGET + CONVERGE_BUDGET))}"
-# Every timed check shares ONE wall-clock deadline (FAILOVER_AT + T6_BUDGET),
-# computed once after the kill. Bounding the observation re-reads (T2/T3/T4) by the
-# REMAINING window — not a flat few seconds — means that once a fix lands, a
-# compute-bounce or an operator-reconcile that is merely SLOW is still given the
-# real budget, so "not fixed" stays distinguishable from "too slow" (defect C).
+# [T6] owns a wall-clock deadline (FAILOVER_AT + T6_BUDGET) because it is the MTTR
+# assertion. Every OTHER timed check (T2/T3/T4) instead gets its OWN budget measured
+# from the moment that check STARTS (PER_CHECK_BUDGET) — NOT the shared T6 deadline,
+# which T6 fully consumes whenever T6 is red. Without a per-check floor a red T6 would
+# leave T2/T3/T4 a single straddle probe with zero retry, re-creating defect C ("not
+# fixed" vs "too slow") on those checks: landing only the T3 fix while T6 is still red
+# must still give T3 a real window to observe the bounce.
+PER_CHECK_BUDGET="${PER_CHECK_BUDGET:-$CONVERGE_BUDGET}"
 
 PS_SVC=pageserver              # client-facing Service the pswatcher flips a->standby
 PRIMARY_STS=pageserver         # primary pageserver StatefulSet (the kill target)
@@ -140,7 +146,7 @@ $K get ns "$NS" >/dev/null 2>&1 || fail "namespace $NS not found on context $KCT
 
 # ---------------------------------------------------------------------------
 # GATE: apps plane present? (skip cleanly only if ENTIRELY absent). ----------
-HAVE_CRD=0; $KUBECTL get crd appdatabases.ks-pg.dev >/dev/null 2>&1 && HAVE_CRD=1
+HAVE_CRD=0; $KUBECTL get crd appdatabases.apps.scale-zero-pg.dev >/dev/null 2>&1 && HAVE_CRD=1
 HAVE_OP=0;  $K get deploy "$OPERATOR" >/dev/null 2>&1 && HAVE_OP=1
 if [ "$HAVE_CRD" = 0 ] && [ "$HAVE_OP" = 0 ]; then
   skip "apps plane entirely absent (no AppDatabase CRD, no $OPERATOR) — nothing multi-tenant to test on this cluster. Provision the apps plane (deploy/82+83) to run this drill."
@@ -162,6 +168,7 @@ info "apps plane present: base tenant $BASE_TENANT, apps tenant $APPS_TENANT; fa
 # ---------------------------------------------------------------------------
 # Cleanup: restore the primary + deprovision the drill's apps. Best-effort. ---
 PROVISIONED=""
+T4PROBE=""   # the [T4] probe AppDatabase (created later); reaped here, guarded for set -u
 cleanup() {
   code=$?
   info "cleanup: restoring primary pageserver + deprovisioning drill apps"
@@ -170,11 +177,14 @@ cleanup() {
   # this only undoes the scale so the StatefulSet is not left at 0 by the drill.
   $K scale statefulset/"$PRIMARY_STS" --replicas=1 >/dev/null 2>&1 || true
   if [ "${T7_KEEP:-0}" = "1" ]; then
-    info "cleanup: T7_KEEP=1 — leaving provisioned apps [$PROVISIONED] up"
+    info "cleanup: T7_KEEP=1 — leaving provisioned apps [$PROVISIONED] + probe [$T4PROBE] up"
   else
     for a in $PROVISIONED; do
       KCTX="$KCTX" NS="$NS" sh "$DIR/provision-app.sh" destroy "$a" >/dev/null 2>&1 || true
     done
+    # the [T4] probe is an AppDatabase CR — delete the CR and let the operator's
+    # finalizer reclaim its timeline (best-effort; the drill owns this object).
+    [ -n "$T4PROBE" ] && $K delete appdatabase "$T4PROBE" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   fi
   exit $code
 }
@@ -292,7 +302,6 @@ esac
 # declares an intentional kill (e.g. a drill-scoped opt-out) and update this step.
 info "  killing primary via scale $PRIMARY_STS -> 0 (recoverable; avoids human-gated delete of a durable object; keeps it down long enough to cross the fail threshold)"
 FAILOVER_AT="$(date +%s)"
-FAILOVER_ISO="$(date -u +%Y-%m-%dT%H:%M:%SZ)"  # portable RFC3339-UTC; anchors the [T4] post-failover status-transition proof
 $K scale statefulset/"$PRIMARY_STS" --replicas=0 >/dev/null 2>&1 \
   || fail "could not scale $PRIMARY_STS to 0 (kill step)"
 # Assert the TRANSITION: the selector must be observed to LEAVE the primary and
@@ -315,30 +324,21 @@ CUR_GEN="$($K get configmap "$GEN_CM" -o jsonpath='{.data.generation}' 2>/dev/nu
 [ -n "$CUR_GEN" ] || CUR_GEN=1
 info "post-flip generation ledger = $CUR_GEN"
 
-# ONE shared wall-clock deadline for every timed check below (defects A + C): the
-# whole T6 budget measured from the kill, so time already burned by the flip-wait
-# and by each kubectl round-trip counts against it. A check that cannot satisfy its
-# condition within the REMAINING window fails on real elapsed time, never on a
-# sleep-only counter that ignores round-trip latency.
+# now() is wall-clock epoch seconds. [T6] uses the DEADLINE below (its MTTR window,
+# measured from the kill so flip-wait + kubectl round-trip latency count against it).
+# Every other timed check computes its OWN start-relative deadline off PER_CHECK_BUDGET.
+# No timestamp/clock comparison is done anywhere in this drill (the round-3 host-vs-pod
+# clock-skew hazard is gone — [T4] now uses an end-to-end provisioning signal).
 now() { date +%s; }
 DEADLINE=$(( FAILOVER_AT + T6_BUDGET ))
-# iso_after <candidate> <baseline> — rc 0 iff the RFC3339-UTC <candidate> is strictly
-# AFTER <baseline>. RFC3339 'Z' timestamps sort lexicographically == chronologically,
-# so this needs no platform-specific date parsing (portable). Empty/equal candidate ->
-# false (fail-closed: an unverifiable or non-advancing time is NOT "after").
-iso_after() {
-  [ -n "$1" ] || return 1
-  [ "$1" = "$2" ] && return 1
-  _late="$(printf '%s\n%s\n' "$1" "$2" | LC_ALL=C sort | tail -n1)"
-  [ "$_late" = "$1" ]
-}
 
 # ===========================================================================
 # ASSERTION PHASE (collect-all). Each [Tn] fails for its OWN reason on main.
-# ORDERING IS LOAD-BEARING (defect #3): every observation-only check (T6, T2, T3,
-# T4, T5) runs BEFORE the one mutating check (T1 re-attaches location_config), so
-# T1's PUT cannot self-remediate T4/T6 or contradict T6's "no manual intervention"
-# claim. T1 runs LAST.
+# ORDERING IS LOAD-BEARING (defect #3): the tenant-observation checks (T6, T2, T3)
+# and read-only T5 run BEFORE the one tenant-mutating check (T1 re-attaches
+# location_config). T4 provisions a SEPARATE probe tenant (does not touch the
+# tenants the other checks observe) and also runs before T1. T1 runs LAST so its
+# PUT cannot self-remediate the others or contradict T6's "no manual intervention".
 # ===========================================================================
 echo ""
 info "ASSERTIONS (each maps to a sprint task; red-by-construction on main; observation-only checks run BEFORE the single mutating check so none can remediate another)"
@@ -369,6 +369,9 @@ while : ; do
   [ "$(now)" -ge "$DEADLINE" ] && break
   sleep 5
 done
+# One FINAL probe AFTER the deadline break (minor): a convergence that lands late
+# must report TOO SLOW (T6_MTTR set, > budget), not NO CONVERGENCE.
+if [ -z "$T6_MTTR" ] && t6_converged; then T6_MTTR=$(( $(now) - FAILOVER_AT )); fi
 if [ -n "$T6_MTTR" ] && [ "$T6_MTTR" -le "$T6_BUDGET" ]; then
   t_ok T6 "multi-tenant plane converged to a CORRECT end-state (selector=$STANDBY_STS + base AND apps tenants reachable via the $PS_SVC Service) in ${T6_MTTR}s (<= ${T6_BUDGET}s MTTR budget), with NO manual pswatcher-stop / selector-patch (the drill issued neither)"
 elif [ -n "$T6_MTTR" ]; then
@@ -378,13 +381,13 @@ else
 fi
 
 # --- [T2] no split-brain: EVERY tenant attached on the promoted pageserver AND
-#     reachable through the `pageserver` Service. Bounded by the SHARED deadline
-#     (defect C), probe-first so it always runs at least once. --------------------
-tenant_reachable_via_svc() { # $1 tenant -> rc 0 iff GET /v1/tenant/<T> == 200 before DEADLINE
-  _t="$1"
+#     reachable through the `pageserver` Service. Each call gets its OWN
+#     PER_CHECK_BUDGET window from when it starts (defect C), probe-first. ---------
+tenant_reachable_via_svc() { # $1 tenant -> rc 0 iff GET /v1/tenant/<T> == 200 within PER_CHECK_BUDGET
+  _t="$1"; _cdl=$(( $(now) + PER_CHECK_BUDGET ))
   while : ; do
     [ "$(SVC_CODE "/v1/tenant/$_t")" = "200" ] && return 0
-    [ "$(now)" -ge "$DEADLINE" ] && return 1
+    [ "$(now)" -ge "$_cdl" ] && return 1
     sleep 3
   done
 }
@@ -415,6 +418,7 @@ done
 #     pswatcher bounces only app=compute (base), so every per-app writer pod (and
 #     any RO/warm) that predates the failover is still there. -------------------
 survivors_check() {
+  _cdl=$(( $(now) + PER_CHECK_BUDGET ))
   while : ; do
     _now="$(snapshot_compute_pods)"
     _surv=""
@@ -422,7 +426,7 @@ survivors_check() {
       echo "$_now" | grep -qx "$p" && _surv="$_surv $p"
     done
     [ -z "$_surv" ] && { echo ""; return 0; }
-    [ "$(now)" -ge "$DEADLINE" ] && { echo "$_surv"; return 1; }
+    [ "$(now)" -ge "$_cdl" ] && { echo "$_surv"; return 1; }
     sleep 5
   done
 }
@@ -433,43 +437,53 @@ else
   t_fail T3 "UNBOUNCED COMPUTES: these compute pods predate the failover and survived:${SURV} — the pswatcher only bounces app=compute (base), leaving per-app/RO computes pointed at the dead pageserver. Fix: bounce every plane=compute + compute-ro pod on failover"
 fi
 
-# --- [T4] operator recovers with NO restart: reconciles a per-app tenant through
-#     the Service AFTER the flip, restartCount unchanged. OBSERVATION-ONLY (runs
-#     before T1 mutates). ------------------------------------------------------
-# STALE-STATUS GUARD (defect B): every AppDatabase already carries phase=Ready from
-# STEP-1 provisioning, so checking phase==Ready alone would GREEN ON MAIN on
-# iteration 0 even though the wedged operator never reconciled post-flip. So T4
-# requires, per app, phase==Ready AND a status-condition transition NEWER than the
-# failover (its most-recent lastTransitionTime is after FAILOVER_ISO) — i.e. the
-# operator drove the tenant back to Ready THROUGH the Service after the flip. The
-# operator's resync (APPDB_RESYNC_MS) guarantees a reconcile attempt within the
-# window with no poke needed. Bounded by the shared DEADLINE (defect C).
-op_reconciled() {
+# --- [T4] operator recovers with NO restart (END-TO-END provisioning signal) ----
+# Round-4 redesign. The round-3 condition-lastTransitionTime check was the WRONG
+# signal both ways: k8s stamps lastTransitionTime ONLY when a condition's value
+# FLIPS, so a SEAMLESS post-flip recovery writes no new timestamp (permanent
+# false-RED), while max() over ALL conditions false-GREENs on the kill-time
+# CondColdRestorable->Unknown flip; and host-clock vs pod-clock skew made any
+# timestamp compare fragile. Replaced with a clean end-to-end signal, NO timestamps:
+# provision a BRAND-NEW AppDatabase (operator-driven — a real CR the operator must
+# reconcile, NOT the break-glass provision-app path) and require the OPERATOR to
+# drive it to phase==Ready. A wedged/pinned operator (pre-T4) cannot reach the
+# promoted pageserver through the flipped `pageserver` Service — the new app's
+# branch 404s and it never goes Ready -> RED on main. Once T4's non-pinning
+# transport lands the operator reaches the promoted pageserver and the probe app
+# reconciles -> GREEN. restartCount-unchanged (re-read AFTER the wait) is a
+# secondary assertion. The probe CR is reaped in cleanup().
+T4PROBE="t4probe$(date +%H%M%S)"
+T4_APPLIED=0
+$K apply -f - >/dev/null 2>&1 <<YAML && T4_APPLIED=1
+apiVersion: apps.scale-zero-pg.dev/v1alpha1
+kind: AppDatabase
+metadata: { name: $T4PROBE, namespace: $NS }
+spec: { appName: $T4PROBE, tier: cold }
+YAML
+t4_probe_ready() { # rc 0 iff the probe AppDatabase reaches phase==Ready within PER_CHECK_BUDGET
+  _cdl=$(( $(now) + PER_CHECK_BUDGET ))
   while : ; do
-    _all_ok=1
-    for a in $T7_APPS; do
-      _ph="$($K get appdatabase "$a" -o jsonpath='{.status.phase}' 2>/dev/null || echo '')"
-      _ltts="$($K get appdatabase "$a" -o jsonpath='{.status.conditions[*].lastTransitionTime}' 2>/dev/null || echo '')"
-      _ltt="$(printf '%s' "$_ltts" | tr ' ' '\n' | LC_ALL=C sort | tail -n1)"
-      if [ "$_ph" = "Ready" ] && iso_after "$_ltt" "$FAILOVER_ISO"; then : ; else _all_ok=0; fi
-    done
-    [ "$_all_ok" = 1 ] && return 0
-    [ "$(now)" -ge "$DEADLINE" ] && return 1
+    _ph="$($K get appdatabase "$T4PROBE" -o jsonpath='{.status.phase}' 2>/dev/null || echo '')"
+    [ "$_ph" = "Ready" ] && return 0
+    [ "$(now)" -ge "$_cdl" ] && return 1
     sleep 5
   done
 }
-OP_RECONCILED=1; op_reconciled || OP_RECONCILED=0
-# Re-read restartCount AFTER the reconcile wait (defect B): sampling it before the
-# window would make a restart DURING the window invisible.
-OP_RESTARTS_AFTER="$($K get pods -l app="$OPERATOR" -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}' 2>/dev/null || echo 0)"
-[ -n "$OP_RESTARTS_AFTER" ] || OP_RESTARTS_AFTER=0
-if [ "$OP_RESTARTS_AFTER" = "$OP_RESTARTS_BEFORE" ] && [ "$OP_RECONCILED" = 1 ]; then
-  t_ok T4 "$OPERATOR reconciled every per-app AppDatabase through the Service post-failover (status transitioned to Ready AFTER the failover) with restartCount unchanged ($OP_RESTARTS_AFTER)"
+if [ "$T4_APPLIED" != 1 ]; then
+  t_fail T4 "could not create the [T4] probe AppDatabase '$T4PROBE' — cannot exercise the operator's reconcile-through-Service path"
 else
-  _why=""
-  [ "$OP_RESTARTS_AFTER" != "$OP_RESTARTS_BEFORE" ] && _why="restartCount $OP_RESTARTS_BEFORE->$OP_RESTARTS_AFTER (restarted during recovery)"
-  [ "$OP_RECONCILED" != 1 ] && _why="${_why:+$_why; }not every AppDatabase transitioned back to Ready AFTER the failover within ${T6_BUDGET}s (stale pre-failover Ready does not count)"
-  t_fail T4 "OPERATOR DID NOT RECOVER CLEANLY: $_why — its keep-alive/reconcile is pinned to the stale pageserver and cannot follow the Service flip. Fix: reconcile via the $PS_SVC Service so no restart is needed"
+  T4_READY=1; t4_probe_ready || T4_READY=0
+  # Re-read restartCount AFTER the wait (a restart DURING recovery must be visible).
+  OP_RESTARTS_AFTER="$($K get pods -l app="$OPERATOR" -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}' 2>/dev/null || echo 0)"
+  [ -n "$OP_RESTARTS_AFTER" ] || OP_RESTARTS_AFTER=0
+  if [ "$T4_READY" = 1 ] && [ "$OP_RESTARTS_AFTER" = "$OP_RESTARTS_BEFORE" ]; then
+    t_ok T4 "$OPERATOR drove a NEW AppDatabase ('$T4PROBE') to phase=Ready through the promoted $PS_SVC Service, restartCount unchanged ($OP_RESTARTS_AFTER)"
+  else
+    _why=""
+    [ "$T4_READY" != 1 ] && _why="the new probe app '$T4PROBE' never reached phase=Ready within ${PER_CHECK_BUDGET}s (the operator cannot reconcile a new tenant through the flipped Service)"
+    [ "$OP_RESTARTS_AFTER" != "$OP_RESTARTS_BEFORE" ] && _why="${_why:+$_why; }operator restartCount $OP_RESTARTS_BEFORE->$OP_RESTARTS_AFTER (restarted during recovery)"
+    t_fail T4 "OPERATOR DID NOT RECOVER CLEANLY: $_why — its reconcile transport is pinned to the stale pageserver and cannot follow the Service flip. Fix: reconcile via the $PS_SVC Service so a new app provisions with no restart"
+  fi
 fi
 
 # --- [T5] death-vs-maintenance discrimination ------------------------------
