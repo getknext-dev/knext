@@ -119,7 +119,10 @@ func TestRenderDeploymentMatchesTemplateVolumes(t *testing.T) {
 		goVols = append(goVols, n)
 	}
 	goMounts := make([]string, 0)
-	for n := range mountPaths(ps.Containers) {
+	// Compare BOTH init + app containers on the Go side too, symmetric with
+	// templateComputeVolumeNames — otherwise an init-container mount added to both
+	// the template and render.go would false-positive (red a correct change).
+	for n := range mountPaths(append(append([]corev1.Container{}, ps.InitContainers...), ps.Containers...)) {
 		goMounts = append(goMounts, n)
 	}
 	if miss := difference(tmplVols, goVols); len(miss) > 0 {
@@ -194,4 +197,3 @@ func templateComputeVolumeNames(t *testing.T) (vols []string, mounts []string) {
 // TestRenderRODeploymentMountsBackendTLS; a FUTURE volume added to the RO static
 // manifest could still skip the operator RO render silently. Closing this needs a
 // curated allowlist of the legitimate base-vs-per-app differences, deferred.
-var _ = "render_tls_parity blind spot: RO render has no template-parity guard (see note above)"

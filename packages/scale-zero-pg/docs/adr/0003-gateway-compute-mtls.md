@@ -252,9 +252,10 @@ Recorded now so the later PRs implement them, from both gates:
       working, and `GW_COMPUTE_TLS=false` is the documented dev/rollback safety valve.
       **This gate covers operator-provisioned per-app computes too** — both the per-app
       writer AND the RO-pool replicas: they were missing the cert mounts until the render
-      fix (errata above), so every awake per-app writer/reader must be recreated (a
-      Recreate rollout picks up the new mounts) after the operator image carrying the fix
-      ships, before any gateway flips.
+      fix (errata above). **The fixed operator image must ship FIRST**, then every awake
+      per-app compute is rolled to pick up the new mounts (the writer via its Recreate
+      strategy, the RO replicas via their RollingUpdate), before any gateway flips —
+      recreating a per-app compute under a PRE-fix operator just re-renders it plaintext.
 - [x] **Phase 3:** gateway wraps the backend dial in `tls.Client`
       (`GW_COMPUTE_TLS=true` fail-closed default); `GetClientCertificate`; full
       backend `tls.Config` (MinVersion/RootCAs/ServerName/Certificates); fail-closed

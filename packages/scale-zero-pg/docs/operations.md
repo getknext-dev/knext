@@ -1493,14 +1493,25 @@ The client certificate is re-read on **every** handshake, so a cert-manager rota
 of the mounted Secret needs no gateway restart.
 
 **Rollout order (mandatory).** Because the gateway now requires TLS, **100% of the
-compute fleet must already serve it** before this gateway image rolls out. The compute
-Deployments use the `Recreate` strategy and scale 0↔N, so a compute that was *already
-awake* before the compute-side rollout keeps serving plaintext until it is recreated.
-Drain/recreate every live compute (scale the awake ones to 0 and let them respawn, or
-wait a full idle cycle) and verify no older compute pod remains (`kubectl get pods`
-age vs. the compute rollout time) **before** rolling the gateway. On a cluster where
-that is not yet true — or on a dev/kind cluster with no cert-manager — set
-`GW_COMPUTE_TLS=false` explicitly.
+compute fleet must already serve it** before this gateway image rolls out. Two kinds of
+compute must be covered:
+
+1. **Statically-deployed computes** (the base/warm/RO manifests) — a compute that was
+   *already awake* before the compute-side rollout keeps serving plaintext until it is
+   recreated.
+2. **Operator-provisioned per-app computes** (created from an `AppDatabase`) — these are
+   rendered by the operator, so **the operator (`appdb-operator`) must be upgraded to a
+   build that mounts the compute TLS certificates FIRST.** Recreating a per-app compute
+   under an operator that predates that build just re-renders it *without* the certs, so
+   it boots plaintext and the gateway then refuses it. Upgrade the operator, then roll
+   every awake per-app compute (the writer picks up the mounts via its `Recreate`
+   strategy, the read-replica pool via its rolling update).
+
+Then drain/recreate every live compute (scale the awake ones to 0 and let them respawn,
+or wait a full idle cycle) and verify no older compute pod remains (`kubectl get pods`
+age vs. the rollout time) **before** rolling the gateway. On a cluster where that is not
+yet true — or on a dev/kind cluster with no cert-manager — set `GW_COMPUTE_TLS=false`
+explicitly.
 
 **Missing certificates fail at STARTUP, not per connection.** The certificate mounts
 are `optional`, so a certless cluster still *schedules* the pod — but with
