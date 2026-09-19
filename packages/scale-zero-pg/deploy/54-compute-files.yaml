@@ -544,16 +544,35 @@ data:
     # POSIX sh (also valid under bash) — no bashisms; only psql/awk/grep/sleep, all of
     # which the stock compute image (neondatabase/compute-node-v17) ships.
     #
-    # harden_pg_hba (issues #112 + #117): once Postgres is accepting loopback
+    # harden_pg_hba (issues #112 + #117 + F5 phase 4): once Postgres is accepting loopback
     # connections, (1) insert a `host all cloud_admin all reject` line JUST BEFORE the
     # network catch-all (issue #112 — cloud_admin loopback-only), and (2) rewrite that
-    # catch-all's method from md5 to `scram-sha-256` (issue #117 — enforce SCRAM on the
-    # wire; an md5-only client, or any role still carrying an md5 verifier, is refused).
+    # catch-all to `hostssl all all all scram-sha-256 clientcert=verify-full` (issue #117 —
+    # enforce SCRAM on the wire; an md5-only client, or any role still carrying an md5
+    # verifier, is refused — PLUS F5 phase 4: the connection must be TLS *and* present a
+    # client certificate the compute's ssl_ca_file CA verifies, i.e. the gateway's own
+    # leaf. `clientcert=verify-full` is an auth OPTION and therefore sits AFTER the method
+    # field, which is where pg_hba expects options; before it is a parse error that FATALs
+    # the reload). The cloud_admin reject deliberately stays BROAD `host`, never `hostssl`:
+    # it must refuse cloud_admin over ANY transport — narrowing it to hostssl would let a
+    # PLAINTEXT cloud_admin attempt fall past it (only to be refused by the hostssl
+    # catch-all, but on a rule that says nothing about cloud_admin).
     # The app role itself already carries a SCRAM verifier FROM BOOT (its spec
     # encrypted_password is the precomputed APP_ROLE_VERIFIER on the primary writer, and
     # on a READ replica the SAME verifier is REPLICATED from the primary catalog via WAL),
     # so there is NO cold-wake md5 window: even before this reload lands the md5 catch-all
-    # auto-negotiates SCRAM against the SCRAM verifier. Order matters and is safe:
+    # auto-negotiates SCRAM against the SCRAM verifier. The CLIENT-CERT half is NOT
+    # analogous and is stated honestly: harden_pg_hba is invoked BACKGROUNDED (`&`) by the
+    # entrypoints so it never delays the wake path, so between "Postgres accepts
+    # connections" and "the reload has landed" there IS a window in which the catch-all is
+    # still the initdb `host … md5` line — TLS and a client certificate are NOT yet
+    # required on a freshly-woken compute. Enforcement lands at the reload, not at first
+    # accept. What closes that window in practice is the OTHER side of the hop: the
+    # gateway ships GW_COMPUTE_TLS=true (F5 phase 3), so the only dialer of a per-app
+    # compute is already presenting TLS + its client leaf during the window, and the
+    # window itself is reachable only from inside the cluster network. Any drill asserting
+    # enforcement must therefore POLL for the `hostssl … clientcert=verify-full` line
+    # before testing a rejection, or it will race the reload. Order matters and is safe:
     # compute_ctl's initdb pg_hba lists the loopback lines (127.0.0.1/32, ::1/128 -> trust)
     # FIRST, so pg_hba's first-match rule keeps cloud_admin working over loopback (the pod's
     # own admin ops connect cloud_admin@localhost:55433) while rejecting it from every other
@@ -641,25 +660,50 @@ data:
         i=$((i+1)); sleep 0.2
       done
       [ -f "$HBA" ] || { echo "WARN issue #112: $HBA absent; cloud_admin still protected by strong md5"; return 0; }
+      # F5 phase 4 gate — enforce client-cert mTLS ONLY when this compute is ACTUALLY
+      # serving TLS. `SHOW ssl` over loopback is the ground truth (it reflects what the
+      # running postmaster has, including stage_tls_key's GUC-strip plaintext fallback).
+      # This gate is not optional: Postgres REJECTS a `hostssl` line outright when ssl is
+      # off ("hostssl record cannot match because SSL is disabled"), and a single bad line
+      # makes the whole file fail to parse — on SIGHUP the new file is DISCARDED and the
+      # previous configuration kept, while pg_reload_conf() still returns true. Writing an
+      # unconditional hostssl catch-all onto a plaintext-fallback compute would therefore
+      # silently throw away the #112 cloud_admin reject and the #117 SCRAM catch-all too.
+      # So: serving TLS -> enforce; not serving TLS -> keep the pre-phase-4 `host … scram`
+      # catch-all (#112/#117 intact) and say so loudly, since mTLS is then NOT enforced.
+      _ssl=$($PSQL 'SHOW ssl' 2>/dev/null | tr -d '[:space:]')
+      if [ "$_ssl" = "on" ]; then
+        _catchall='hostssl\tall\tall\tall\tscram-sha-256\tclientcert=verify-full'
+        _want='^hostssl[[:space:]]+all[[:space:]]+all[[:space:]]+all[[:space:]]+scram-sha-256[[:space:]]+clientcert=verify-full'
+      else
+        _catchall='host\tall\tall\tall\tscram-sha-256'
+        _want='^host[[:space:]]+all[[:space:]]+all[[:space:]]+all[[:space:]]+scram-sha-256'
+      fi
       # Insert the cloud_admin reject before the first `host all all all <method>`
-      # catch-all AND rewrite that catch-all's method to scram-sha-256 (issue #117).
-      awk '{
+      # catch-all AND replace that catch-all with $_catchall. The reject stays broad
+      # `host` in BOTH modes; only the catch-all can become `hostssl`.
+      awk -v catchall="$_catchall" '{
         if ($1=="host" && $2=="all" && $3=="all" && $4=="all" && !d){
           print "host\tall\tcloud_admin\tall\treject"; d=1
         }
         if ($1=="host" && $2=="all" && $3=="all" && $4=="all"){
-          print "host\tall\tall\tall\tscram-sha-256"; next
+          print catchall; next
         }
         print
       }' "$HBA" > "$HBA.harden" 2>/dev/null && cat "$HBA.harden" > "$HBA" && rm -f "$HBA.harden"
-      if grep -qiE '^host[[:space:]]+all[[:space:]]+cloud_admin[[:space:]]+all[[:space:]]+reject' "$HBA"; then
+      if grep -qiE '^host[[:space:]]+all[[:space:]]+cloud_admin[[:space:]]+all[[:space:]]+reject' "$HBA" && \
+         grep -qiE "$_want" "$HBA"; then
         if $PSQL 'SELECT pg_reload_conf()' >/dev/null 2>&1; then
-          echo "issue #112/#117: cloud_admin loopback-only + wire auth is scram-sha-256; pg_hba reloaded"
+          if [ "$_ssl" = "on" ]; then
+            echo "issue #112/#117 + F5 phase 4: cloud_admin loopback-only, wire auth scram-sha-256, and TLS with a CA-verified client certificate REQUIRED (hostssl … clientcert=verify-full); pg_hba reloaded — enforcement ACTIVE from here (it was NOT enforced in the window between first-accept and this reload)"
+          else
+            echo "WARN issue #112/#117 + F5 phase 4: this compute is NOT serving TLS (ssl=$_ssl — no server cert/CA mounted), so client-cert mTLS is NOT enforced; kept the host/scram-sha-256 catch-all (a hostssl line would make the whole pg_hba fail to parse and silently drop the cloud_admin reject too); pg_hba reloaded"
+          fi
         else
-          echo "WARN issue #112: pg_hba reload failed; cloud_admin still protected by strong random md5"
+          echo "WARN issue #112 + F5 phase 4: pg_hba reload failed — the hardened rules are WRITTEN but NOT ACTIVE until the next reload/restart; cloud_admin still protected by strong random md5"
         fi
       else
-        echo "WARN issue #112: could not locate the network catch-all in pg_hba; cloud_admin still protected by strong random md5"
+        echo "WARN issue #112 + F5 phase 4: could not locate/rewrite the network catch-all in pg_hba — client-cert mTLS is NOT enforced on this compute; cloud_admin still protected by strong random md5"
       fi
     }
 kind: ConfigMap

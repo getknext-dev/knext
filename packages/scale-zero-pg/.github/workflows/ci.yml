@@ -63,6 +63,18 @@ jobs:
       - name: _verify-drift.sh §H set -e RC-capture regression (message + temp-file cleanup)
         run: bash deploy/test_verify-drift-seterr.sh
 
+  # The compute's pg_hba harden is the ENFORCING half of the gateway->compute mTLS
+  # control (TLS + a CA-verified client certificate) and of the cloud_admin/SCRAM
+  # tenant boundary. This job extracts the shipped awk (from lib-harden.sh AND from
+  # the inline ConfigMap copy that actually runs) and proves the rules it produces in
+  # both modes — no cluster needed. The live rejection proof runs in _verify-tls.sh.
+  pghba:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: pg_hba harden transform tests (mTLS enforcement + tenant boundary)
+        run: bash deploy/test_harden_pghba.sh
+
   # provision-app.sh app-name / reserved-name validation (issues #79/#74). No
   # cluster: validate_app_name runs before any kubectl call, so bad names fail
   # fast. Guards the tenant-boundary charset check against a locale-collation

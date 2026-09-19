@@ -915,9 +915,11 @@ ok "F5 phase-1 mTLS cert infrastructure ships (cert-manager CA + shared server/c
 #     staged to a private 0600 path so Postgres does not refuse to start
 #     ("private key file has group or world access"). A path mismatch between a
 #     GUC and its mount = silent no-TLS or a crash-loop, so the paths are asserted
-#     to MATCH. pg_hba is deliberately NOT touched here (phase 4 enforces
-#     clientcert=verify-full); plaintext still works (offer-not-require), so
-#     phase 2 is independently safe.
+#     to MATCH. pg_hba is not touched by THIS contract — the enforcement half
+#     (hostssl + clientcert=verify-full) is contract 36 below; this one covers the
+#     OFFER half (serve TLS, be able to verify a client cert via ssl_ca_file), which
+#     stays independently safe: a compute with no cert mounts boots plaintext rather
+#     than crash-looping.
 SRVMNT=/etc/pggw-compute-server-tls
 CAMNT=/etc/pggw-mtls-ca
 KEYDST=/tmp/pggw-server-tls.key
@@ -1037,11 +1039,7 @@ for m in 20-compute.yaml 25-compute-warm.yaml 26-compute-ro.yaml compute-app.tem
   grep -q "mountPath: $CAMNT" "$m" || fail "$m must mount the CA at $CAMNT (matches ssl_ca_file GUC dir)"
   ca_projection_is_public_only "$m" compute
 done
-# pg_hba enforcement stays PHASE 4: lib-harden must NOT yet REWRITE pg_hba to
-# require TLS. Guard the exact enforcement token clientcert=verify-full (phase 4
-# adds it); phase 2 leaves the pg_hba catch-all as `host … scram` (plaintext allowed).
-grep -q 'clientcert=verify-full' compute-files/lib-harden.sh && fail "lib-harden.sh must NOT add clientcert=verify-full yet — that is phase 4; phase 2 leaves pg_hba as host (plaintext still allowed, independently safe)" || true
-ok "F5 phase-2 compute serves TLS (ssl=on + cert/key/CA via GUCs matching the mounts; key staged 0600; pg_hba untouched → plaintext still works) — ADR-0003"
+ok "F5 phase-2 compute serves TLS (ssl=on + cert/key/CA via GUCs matching the mounts; key staged 0600) — ADR-0003"
 
 # ---------------------------------------------------------------------------
 # 35. contract (F5 phase 3, ADR-0003): the gateway is the TLS CLIENT on the
@@ -1067,6 +1065,55 @@ for m in 10-gateway.yaml 81-apps-gateway.yaml; do
   ca_projection_is_public_only "$m" gateway
 done
 ok "F5 phase-3 gateway requires TLS on the backend leg (GW_COMPUTE_TLS=true + CA/client-leaf env matching the mounts, ca.crt-only projection) — ADR-0003"
+
+# ---------------------------------------------------------------------------
+# 36. contract (F5 phase 4, ADR-0003): the compute ENFORCES client-cert mTLS in
+#     pg_hba. The phase-2 GUCs only make the compute OFFER TLS and make it ABLE to
+#     verify a client cert (ssl_ca_file); ENFORCEMENT is the harden's rewrite of the
+#     pg_hba NETWORK catch-all to `hostssl … scram-sha-256 clientcert=verify-full`
+#     — TLS required AND a CA-verified client certificate, with the auth-option AFTER
+#     the method field (pg_hba puts options after the method; before it is a parse
+#     error). Three things must NOT move with it:
+#       (a) the cloud_admin reject stays BROAD `host`, so cloud_admin is refused over
+#           ANY transport — narrowing it to hostssl lets a PLAINTEXT cloud_admin
+#           attempt fall past the rule that names it;
+#       (b) the rewrite keys on `$4=="all"` (the network catch-all), so the initdb
+#           loopback lines (127.0.0.1/32, ::1/128 -> trust, listed FIRST, first-match
+#           wins) are untouched and the pod's own cloud_admin@localhost:55433 admin
+#           ops keep working;
+#       (c) the enforcement is GATED on the compute actually serving TLS (`SHOW ssl`).
+#           Postgres rejects a hostssl line when ssl is off, and ONE bad line makes the
+#           whole pg_hba fail to parse — on SIGHUP the file is discarded and the old
+#           config kept, so an ungated rewrite would silently throw away the #112
+#           cloud_admin reject and the #117 SCRAM catch-all on any cert-less compute
+#           (the phase-2 plaintext fallback). That branch must keep existing.
+for f in compute-files/lib-harden.sh 54-compute-files.yaml; do
+  grep -qF "_catchall='hostssl\\tall\\tall\\tall\\tscram-sha-256\\tclientcert=verify-full'" "$f" \
+    || fail "$f: the pg_hba network catch-all must become 'hostssl all all all scram-sha-256 clientcert=verify-full' (F5 phase 4 — TLS + a CA-verified client cert REQUIRED on the gateway→compute hop)"
+  grep -qF "_catchall='host\\tall\\tall\\tall\\tscram-sha-256'" "$f" \
+    || fail "$f: the not-serving-TLS fallback catch-all ('host all all all scram-sha-256') is gone — a cert-less compute would get a hostssl line, whose parse error discards the ENTIRE pg_hba reload, taking the #112 cloud_admin reject and #117 SCRAM enforcement with it"
+  grep -qF 'SHOW ssl' "$f" \
+    || fail "$f: the phase-4 enforcement must be gated on what the compute is ACTUALLY serving (SHOW ssl over loopback) — see (c) above"
+  grep -qF 'print "host\tall\tcloud_admin\tall\treject"' "$f" \
+    || fail "$f: the cloud_admin reject must stay BROAD 'host' (issue #112) — it has to reject cloud_admin over ANY transport, so it is never narrowed to hostssl"
+  grep -qF 'print "hostssl\tall\tcloud_admin' "$f" \
+    && fail "$f: the cloud_admin reject was narrowed to hostssl — a PLAINTEXT cloud_admin attempt would then fall past the rule that names it" || true
+  grep -qF '$4=="all"' "$f" \
+    || fail "$f: the pg_hba rewrite must key on \$4==\"all\" (the NETWORK catch-all) — without it the loopback lines (127.0.0.1/32, ::1/128) would be rewritten and the pod's own cloud_admin admin ops would break"
+done
+# RUNTIME proof of the transform, not just its source text: test_harden_pghba.sh
+# EXTRACTS the awk + both catch-alls out of lib-harden.sh AND out of the inline 54
+# copy, runs a representative initdb pg_hba through both modes, and asserts the
+# enforced catch-all, the broad cloud_admin reject and its ordering, byte-unchanged
+# loopback lines, no surviving plaintext catch-all, idempotency, and the cert-less
+# fallback. Editing the awk or either catch-all in either file changes this result.
+if command -v bash >/dev/null 2>&1; then
+  bash ./test_harden_pghba.sh >/dev/null 2>&1 \
+    || { bash ./test_harden_pghba.sh >&2; fail "test_harden_pghba.sh FAILED — the shipped pg_hba harden does not produce the enforced mTLS rules (output above)"; }
+else
+  echo "  (no bash on PATH — skipped the test_harden_pghba.sh runtime transform proof; the source contracts above still ran)"
+fi
+ok "F5 phase-4 compute ENFORCES mTLS in pg_hba (hostssl catch-all + clientcert=verify-full + scram-sha-256, gated on SHOW ssl; cloud_admin reject stays broad host; loopback trust untouched) — ADR-0003"
 
 # ---------------------------------------------------------------------------
 # Summary (#797): every contract above has been EVALUATED — nothing exits early.

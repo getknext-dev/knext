@@ -1432,12 +1432,13 @@ or your org CA); swap the Secret contents and clients can then verify.
 `deploy/10-gateway.yaml` and restart. `SSLRequest` then gets `N` again and only
 `sslmode=disable` clients connect.
 
-### Gateway→compute mTLS — cert-manager prerequisite (compute offers TLS; the gateway now requires it)
+### Gateway→compute mTLS — cert-manager prerequisite (the hop is mutually authenticated)
 
 The section above is the **front-door** (client→gateway) TLS. The **gateway→compute**
-hop is a separate leg, closed with mutual TLS in phases. The certificate
-infrastructure is provisioned first, so it is a **prerequisite you must apply**
-before the gateway that requires TLS rolls out.
+hop is a separate leg, and it is now closed with **mutual TLS**: the gateway verifies
+the compute's server certificate, and the compute verifies the gateway's client
+certificate before it will accept the connection. The certificate infrastructure is
+provisioned first, so it is a **prerequisite you must apply**.
 
 **Prerequisite: cert-manager.** `deploy/11-mtls-certs.yaml` provisions, via
 cert-manager, a self-signed Issuer → a CA `Certificate` → a CA `Issuer` → two shared
@@ -1459,18 +1460,17 @@ operator depends on it for its webhook cert). If cert-manager is absent, applyin
 deliberate: absent cert infra must never fall through to a later phase that then runs
 plaintext.
 
-**The compute now OFFERS TLS (rollout phase 2).** The compute sets `ssl=on` plus
+**The compute serves TLS.** The compute sets `ssl=on` plus
 `ssl_cert_file`/`ssl_key_file`/`ssl_ca_file` through the `compute_ctl` spec
 (`config.json` `spec.cluster.settings`) and mounts `pggw-compute-server-tls` +
 `pggw-mtls-ca` (CA cert only) at `/etc/pggw-compute-server-tls` and
 `/etc/pggw-mtls-ca`. A `sslmode=require` client can therefore now establish an
 encrypted session to the compute. The server key is copied to a private `0600`
 postgres-owned path at boot (Postgres refuses a group/world-readable key); a cluster
-without cert-manager keeps booting plaintext (the cert mounts are `optional`). This
-is **OFFER, not require** — `pg_hba` is unchanged (`host … scram`), so existing
-plaintext connections keep working and phase 2 is independently safe.
+without cert-manager keeps booting plaintext (the cert mounts are `optional`) rather
+than crash-looping.
 
-**The gateway is now the TLS client on that hop (rollout phase 3).** Every backend
+**The gateway is the TLS client on that hop.** Every backend
 dial — the warm fast path and the cold-wake poll alike — sends the Postgres
 `SSLRequest`, requires an `S`, verifies the compute's server certificate against the
 shared CA, and presents the gateway's own client certificate. Knobs (both gateway
@@ -1523,16 +1523,47 @@ the compute-side rollout. A gateway-side certificate problem is refused
 never waits out `GW_WAKE_TIMEOUT_MS`, because no amount of waking can fix a
 certificate file the gateway cannot read.
 
-**Live verification (lead-owned).** `deploy/_verify-tls.sh` proves the *front-door*
-(client↔gateway) TLS; the compute's `sslmode=require` acceptance and the encrypted
-gateway→compute hop are proven on the OKE/kind cluster (a direct in-cluster
-`sslmode=require` psql to the compute Service, plus a wake through the gateway with
-`GW_COMPUTE_TLS=true`) — they cannot run from a workstation without the cluster.
+**The compute REQUIRES the gateway's client certificate (per-app computes).** Once a
+per-app compute is up, its `pg_hba` network catch-all is rewritten to
 
-**Remaining caveat.** The compute still *accepts* plaintext (`pg_hba` is unchanged),
-so this phase encrypts the hop and authenticates the compute to the gateway, but the
-compute does not yet *require* the gateway's client certificate. Keep that caveat on
-any "mutually authenticated" claim until the `pg_hba` enforcement phase lands.
+```
+hostssl  all  all  all  scram-sha-256  clientcert=verify-full
+```
+
+so a network connection must be **TLS** *and* present a client certificate the
+compute verifies against the shared CA — the gateway's leaf — on top of the
+SCRAM password check. A plaintext connection, or a TLS connection with no client
+certificate, is refused with `connection requires a valid client certificate`. The
+hop is therefore mutually authenticated in both directions.
+
+Three properties to know before you debug it:
+
+- **The pod's own loopback path is untouched.** The `127.0.0.1/32` and `::1/128`
+  trust lines are listed first and `pg_hba` is first-match, so in-pod admin work
+  (`psql -h localhost -p 55433 -U cloud_admin`) keeps working. The `cloud_admin`
+  network reject also stays deliberately broad — it refuses `cloud_admin` over **any**
+  transport, encrypted or not.
+- **Enforcement lands a moment after the compute accepts connections.** The harden
+  runs in the background so it never slows a wake, so there is a brief window on a
+  freshly-woken compute where the rule is not yet active. During it the only dialer is
+  the gateway, which is already presenting TLS and its client certificate. If you are
+  scripting a check, poll `pg_hba.conf` for the `hostssl … clientcert=verify-full`
+  line before asserting that anything is rejected.
+- **A compute that is not serving TLS is not enforced.** If the certificate Secrets
+  are not mounted (a dev/kind cluster with no cert-manager), the compute boots
+  plaintext and keeps the previous `host … scram-sha-256` rule. That is intentional:
+  Postgres rejects a `hostssl` rule outright when TLS is off, and one rejected rule
+  makes the whole file fail to load — which would silently drop the `cloud_admin`
+  reject and the SCRAM requirement with it. The compute's startup log says which
+  mode it applied.
+
+**Live verification (lead-owned).** `deploy/_verify-tls.sh` proves the *front-door*
+(client↔gateway) TLS and, on a cluster with a provisioned per-app compute, the
+enforcement above: it waits for the rule to land, then asserts that a TLS connection
+with no client certificate is refused for that reason, that the gateway's identity is
+still accepted end to end, and that the pod-local `cloud_admin` loopback path still
+works. `deploy/test_harden_pghba.sh` checks the rule-generation half with no cluster
+at all.
 
 ## Peer-scrape token rotation
 

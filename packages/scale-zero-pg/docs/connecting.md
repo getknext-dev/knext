@@ -19,6 +19,13 @@ postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc.cluster.local.:55432/<
   DSNs keep connecting unchanged; enforcing TLS-only is a future flag. If the gateway
   has no cert configured, it declines TLS (answers `N`) and only `sslmode=disable`
   connects.
+- **The gateway→database hop is mutually authenticated** — whatever `sslmode` you
+  choose at the front door, the internal leg from the gateway to your database is TLS
+  with **both** sides verified: the gateway checks the compute's server certificate
+  and the compute requires the gateway's client certificate (plus the SCRAM password).
+  Nothing on the cluster network can talk to a per-app database without that
+  certificate. It needs no DSN change from you; it does need cert-manager on the
+  cluster — see [operations](operations.md#gatewaycompute-mtls--cert-manager-prerequisite-the-hop-is-mutually-authenticated).
 - **Credentials** — `cloud_admin`/`cloud_admin` is the dev default, enforced by the
   compute spec on every boot. Rotation: see [operations](operations.md#password-rotation).
 - **Auth is SCRAM-SHA-256** — per-app roles (`app_<app>`) authenticate over the wire
