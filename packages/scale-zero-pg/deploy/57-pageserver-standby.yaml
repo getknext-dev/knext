@@ -29,18 +29,39 @@ spec:
     - { name: pg, port: 6400, targetPort: pg }
     - { name: http, port: 9898, targetPort: http }
 ---
-# Generation ledger: the last generation the tenant was attached at. storage-init
-# used generation 1, so the ledger seeds at "1"; each auto-failover reads it,
-# promotes at value+1, and writes value+1 back. Persisting it here keeps repeated
-# failovers monotonic and survives a watcher restart.
+# Generation ledger: the DURABLE record of the generation the tenant is attached at,
+# and the AUTHORITY the bootstrap attach paths read (#1095). Each auto-failover reads
+# it, promotes at value+1, and writes value+1 back (pswatcher, merge-patch); the
+# storage-init Job and provision-app.sh READ it and attach at
+# max(ledger, pageserver-view, 1) — never below it. Persisting it here survives a
+# watcher/pageserver restart or a fresh pageserver PVC.
+#
+# The `generation` key is DELIBERATELY NOT DECLARED here (`data: {}`) and is instead
+# seeded CREATE-IF-ABSENT by deploy/seed-ledger.sh (run by `make deploy` after apply).
+# WHY, proven on kind: a declared `generation: "1"` is NOT `kubectl apply`-safe — a
+# re-apply RESETS the live key back to the declared value even when pswatcher had
+# advanced it (client-side apply reconciles a declared field to its manifest value:
+# live 5 -> apply -> 1), and a reset "1" is byte-identical to a genesis "1", so the
+# fail-closed readers cannot tell it apart and would silently attach low. With the key
+# UNDECLARED, apply never resets it and never prunes it (verified: apply data:{} ->
+# patch 5 -> re-apply data:{} leaves it 5), so pswatcher's value and the create-if-
+# absent seed both survive every future `kubectl apply -f deploy/`. This CM object must
+# still exist (pswatcher's merge-patch requires it), hence `data: {}` rather than
+# omitting the ConfigMap.
+#
+# One-time migration: an install created by a PRE-#1095 deploy carried
+# `generation: "1"` in last-applied-configuration; the first apply of THIS file prunes
+# that key. The upgrade runbook (docs/operations.md) re-seeds/verifies the ledger to
+# the live generation before any attach. The robust self-heal (pswatcher re-seeding
+# from the pageserver's current max at startup) is owned by the pswatcher +
+# ledger-authority work, not this change.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: pageserver-generation
   namespace: scale-zero-pg
   labels: { plane: storage }
-data:
-  generation: "1"
+data: {}
 ---
 # Standby config: identical to the primary's (same broker + bucket) EXCEPT a
 # distinct node identity (id=1235 vs the primary's 1234) — two pageservers must

@@ -667,6 +667,83 @@ docs/BENCHMARKS.md.
   generation ≤ its own, so gen 2 reads the gen-1 index and writes forward at gen 2 —
   a clean control-plane-style re-attach. Attaching at the **same** generation risks
   overwriting the index; attaching **lower** would not see the latest index.
+- **Bootstrap attach is read-before-write; the durable generation ledger is the
+  authority.** The two tenant-attach bootstrap paths — the `storage-init` Job
+  (`deploy/55-storage-init.yaml`) and `provision-app.sh:ensure_tenant` — used to `PUT`
+  a fixed `generation:1` to `location_config`. Because a pswatcher failover advances
+  the tenant's generation (→2, →3…), the pageserver then **rejects** the lower
+  `generation:1` (`Generation 00000001 is less than existing N`) and `storage-init`
+  CrashLoops permanently. Both paths now attach at
+  **`max(ledger, pageserver-current-view, 1)`**, where the durable
+  `pageserver-generation` ConfigMap ledger — the same one pswatcher seeds and advances
+  on failover — is the **authority**. Reading the ledger is what makes this safe: it
+  **survives a pageserver restart or a fresh PVC**, whereas the pageserver's own
+  `GET /v1/tenant/<T>` does not. On a fresh-PVC pageserver the tenant reads back as
+  unattached (404) while its object-store index is still at the ledger generation N;
+  attaching at the pageserver's empty view alone would silently pick 1 (which the
+  pageserver **accepts**, since the rejection only fires when it already knows a higher
+  generation), making the gen-N index invisible — silent data loss, strictly worse than
+  the CrashLoop. So the paths **never attach below the ledger**, and they **fail
+  closed**: an unreadable ledger (kubectl/RBAC error, a missing ConfigMap, an
+  empty/non-numeric key, or an unmounted `/ledger` in the init container) **refuses the
+  attach loudly** rather than silently flooring to 1 — a bounded, recoverable failure.
+  The paths only **read** the ledger; **advancing it stays pswatcher's job on
+  failover**. `storage-init` mounts the ledger read-only at `/ledger` and waits for it;
+  `provision-app.sh` reads it with `kubectl`.
+  - **Create-if-absent seed — the ledger key is NOT declared in the manifest.** The
+    `pageserver-generation` ConfigMap ships with `data: {}` (`deploy/57`); the
+    `generation` key is seeded **create-if-absent** by `deploy/seed-ledger.sh`, which
+    `make deploy` runs (with `bash`) after `kubectl apply`. Why not declare
+    `generation: "1"` in the manifest: a declared key is **not `kubectl apply`-safe** —
+    apply reconciles it back to the manifest value on every re-apply even when pswatcher
+    had advanced it (verified on kind: live `5` → apply → `1`), and a reset `"1"` is
+    byte-identical to a genesis `"1"`, so the fail-closed readers cannot tell it apart and
+    would silently attach low. With the key **undeclared**, apply never resets or prunes
+    it (verified: apply `data:{}` → patch `5` → re-apply `data:{}` leaves it `5`), and
+    `seed-ledger.sh` **never overwrites or lowers** a live value — it writes
+    `generation=1` only when the key is absent.
+  - **You MUST run the seed after apply — it is not a shipped manifest.** `make deploy`
+    runs it for you. If you deploy any other way:
+    - **Raw `kubectl apply -f deploy/`** (no `make`): run `bash deploy/seed-ledger.sh`
+      afterwards. (Use `bash`, not `sh` — the script uses `set -o pipefail`, which dash
+      rejects.)
+    - **GitOps (Argo CD / Flux)**: `seed-ledger.sh` is **not** a shipped Job/hook — you
+      MUST wire it yourself as a **post-sync hook** (Argo `PostSync` / Flux post-build or
+      a small Job you own that runs `bash deploy/seed-ledger.sh`). Nothing in `deploy/`
+      creates it for you.
+
+    If the seed never runs, the ledger key stays absent, and `storage-init` **fails
+    closed** (waits, then refuses) rather than attaching low — a loud, recoverable stop,
+    not silent loss.
+  - **Upgrading from a pre-#1095 install — record N first, then re-seed (runbook).** This
+    is a corruption hazard, follow it in order. An install created before this change
+    carried `generation: "1"` in the ConfigMap's last-applied-configuration; the first
+    `kubectl apply` of the new `deploy/57` **prunes** that key, and `make deploy` then
+    runs `seed-ledger.sh`, which writes `1` (it seeds the genesis value; it does **not**
+    consult the pageserver). So a pswatcher-advanced ledger at `N` becomes `1`. The
+    attach-time `max(ledger, pageserver-view)` does **not** cover this: pswatcher's own
+    promote path reads only the ledger, so the next failover promotes at `ledger+1 = 2`,
+    and if `2 < N` a fresh standby accepts it and the gen-`N` object-store index goes
+    invisible. Therefore, on this one-time upgrade:
+    1. **BEFORE the upgrade apply**, record the live generation:
+       `kubectl -n scale-zero-pg get cm pageserver-generation -o jsonpath='{.data.generation}'`
+       → call it `N`.
+    2. Apply the upgrade (`make deploy` or `kubectl apply -f deploy/` + `bash
+       deploy/seed-ledger.sh`). Expect the ledger to read `1` afterwards — that is the
+       prune-then-seed.
+    3. **RE-SEED `N` before re-enabling pswatcher / before any failover:**
+       `kubectl -n scale-zero-pg patch cm pageserver-generation --type=merge -p
+       '{"data":{"generation":"<N>"}}'`. Skipping this loses the gen-`N` index on the next
+       failover.
+
+    The automatic self-heal that removes this manual step — pswatcher seeding/healing the
+    ledger from the pageserver's current max at startup — is owned by the pswatcher +
+    ledger-authority work, not this change.
+
+  Contract-guarded in `_validate.sh` and unit-proved off-cluster by
+  `deploy/test_ensure-tenant-gen.sh` (issue #1095). The full on-cluster proof
+  (force gen→2 via a failover, recreate the pageserver PVC, re-run `storage-init` →
+  succeeds) belongs to the pageserver-failover drill.
 - **Read-only is the first, always-safe proof.** The faithful *readability* check is
   a **STATIC read-only compute** pinned to the restored pageserver LSN
   (`spec.mode = {"Static":"<lsn>"}`), which reads pages directly from the pageserver

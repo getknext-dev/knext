@@ -27,3 +27,9 @@ gateway:
 
 deploy:
 	kubectl apply -f deploy/
+	# create-if-absent seed of the generation ledger (#1095) — the `generation` key is
+	# intentionally NOT declared in deploy/57 (a declared key is not apply-safe), so seed
+	# it out of band here. NEVER overwrites a live value; safe to run on every deploy.
+	# MUST be `bash`, not `sh`: the script uses `set -o pipefail` (bash-only); under
+	# dash (/bin/sh on Debian/Ubuntu) `sh` aborts with "Illegal option -o pipefail".
+	bash deploy/seed-ledger.sh

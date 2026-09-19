@@ -55,11 +55,21 @@ spec:
                 echo "bucket '${OBJSTORE_BUCKET}' missing and could not be created — pre-create it on ${OBJSTORE_ENDPOINT}" >&2
                 exit 1
               fi
+      # The durable generation ledger (pageserver-generation ConfigMap, seeded to 1 by
+      # deploy/57 and advanced by pswatcher) mounted READ-ONLY so the attach step reads
+      # it (#1095). A ConfigMap volume costs no RBAC. optional:true so the pod schedules
+      # even if the CM lags this Job on first apply (55 applies before 57); the script
+      # WAITS for /ledger/generation and FAILS CLOSED if it never appears.
+      volumes:
+        - name: gen-ledger
+          configMap: { name: pageserver-generation, optional: true }
       containers:
         - name: init
           image: neondatabase/neon:8464
           envFrom:
             - configMapRef: { name: compute-config } # TENANT_ID, TIMELINE_ID, PG_VERSION, PAGESERVER_HOST
+          volumeMounts:
+            - { name: gen-ledger, mountPath: /ledger, readOnly: true }
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -68,8 +78,44 @@ spec:
               echo "waiting for pageserver HTTP at ${PS} ..."
               until curl -sf "${PS}/v1/tenant" >/dev/null 2>&1; do sleep 2; done
               echo "ensuring tenant ${TENANT_ID}"
+              # read-before-write (T1, #1095): attach at max(ledger, pageserver-view, 1),
+              # NEVER a literal 1 and NEVER below the durable ledger. After a pswatcher
+              # failover the tenant's generation advances (->2, ->3...); a hardcoded 1 is
+              # REJECTED ("Generation 00000001 is less than existing N") and this Job
+              # CrashLoops. Worse, a pageserver on a FRESH PVC 404s the tenant while its
+              # object-store index is at the ledger generation N — attaching at the
+              # pageserver's (empty) view alone would silently pick 1, and the pageserver
+              # ACCEPTS it (the reject only fires when it already knows a higher gen),
+              # making the gen-N index INVISIBLE (silent data loss). So the DURABLE LEDGER
+              # (survives a fresh PVC; the pageserver's local view does not) is the floor.
+              # FAIL CLOSED: if the ledger is unreadable (mount missing / never populated /
+              # non-numeric) we REFUSE the attach rather than floor to 1 — a loud, bounded
+              # failure the operator can act on, never a silent low attach. We only READ
+              # the ledger; advancing the generation is pswatcher's job on failover.
+              # The T1-LEDGER-READ block below is EXTRACTED + unit-tested off-cluster by
+              # deploy/test_ensure-tenant-gen.sh (LEDGER_FILE / LEDGER_WAIT_TRIES let the
+              # test point it at a fixture dir and fail fast); keep the markers.
+              # T1-LEDGER-READ-BEGIN (#1095)
+              n=0
+              until [ -s "${LEDGER_FILE:-/ledger/generation}" ]; do
+                n=$((n+1)); [ "$n" -gt "${LEDGER_WAIT_TRIES:-60}" ] && { echo "REFUSING to attach ${TENANT_ID}: pageserver-generation ledger not present at ${LEDGER_FILE:-/ledger/generation} (missing/unmounted ConfigMap; run deploy/seed-ledger.sh). Refusing to floor to a low generation (silent-loss risk); see operations.md." >&2; exit 1; }
+                echo "waiting for the generation ledger at ${LEDGER_FILE:-/ledger/generation} ..."; sleep 2
+              done
+              LEDGER="$(cat "${LEDGER_FILE:-/ledger/generation}")"
+              case "$LEDGER" in ''|*[!0-9]*) echo "REFUSING to attach ${TENANT_ID}: ledger value '${LEDGER}' is not a number — unreadable ledger; refusing to floor to 1 (silent-loss risk)." >&2; exit 1;; esac
+              # T1-LEDGER-READ-END
+              # The pageserver's current view. GET /v1/tenant/<T> returns a top-level
+              # "generation" field — confirmed against a live GKE pageserver (neon:8464),
+              # which returned {"id":"…","state":{"slug":"Active"},…,"generation":1,…}. The
+              # on-cluster failover drill asserts the field is present (T7, #1101); do not
+              # rely on this parse without that live assertion.
+              CUR="$(curl -sf "${PS}/v1/tenant/${TENANT_ID}" 2>/dev/null || true)"
+              PSGEN="$(printf '%s' "$CUR" | tr ',' '\n' | grep '"generation"' | head -1 | tr -dc '0-9')"
+              GEN="$LEDGER"
+              [ -n "$PSGEN" ] && [ "$PSGEN" -gt "$GEN" ] && GEN="$PSGEN"
+              echo "attaching tenant ${TENANT_ID} at generation ${GEN} (ledger=${LEDGER}, pageserver=${PSGEN:-none})"
               curl -sf -X PUT -H 'Content-Type: application/json' \
-                -d '{"mode":"AttachedSingle","generation":1,"tenant_conf":{}}' \
+                -d "{\"mode\":\"AttachedSingle\",\"generation\":${GEN},\"tenant_conf\":{}}" \
                 "${PS}/v1/tenant/${TENANT_ID}/location_config" >/dev/null
               echo "ensuring timeline ${TIMELINE_ID}"
               if curl -sf "${PS}/v1/tenant/${TENANT_ID}/timeline" | grep -q "${TIMELINE_ID}"; then

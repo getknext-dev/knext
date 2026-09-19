@@ -207,10 +207,65 @@ ps_last_lsn() { # last_record_lsn of a timeline (the safe branch point)
 }
 tl_exists() { PS "http://localhost:9898/v1/tenant/$APPS_TENANT/timeline" | grep -q "$1"; }
 
+# resolve_attach_generation — read-before-write (T1, #1095): echo the generation to
+# attach a tenant at, as max(ledger, pageserver-current-view, 1).
+#   $1 = the JSON body of GET /v1/tenant/<T> ("" when the tenant is unattached / the
+#        GET 404s — e.g. a pageserver on a FRESH PVC that has lost its local attach).
+#   $2 = the ledger generation (a bare integer; the caller has already fail-closed on an
+#        unreadable/empty ledger, so this is always numeric here).
+# The DURABLE LEDGER is the authority. pswatcher seeds/advances it on failover and it
+# survives a pageserver restart or fresh PVC; GET /v1/tenant does NOT (a fresh-PVC
+# pageserver 404s while the object-store index is at the ledger generation). Attaching
+# BELOW the ledger would make that higher-generation index INVISIBLE — silent data
+# loss, strictly worse than the CrashLoop this replaces. So we never attach below the
+# ledger; we also take the pageserver's own view in case it is somehow AHEAD. We only
+# READ the ledger — advancing it stays pswatcher's job on failover (T2).
+resolve_attach_generation() {
+  local body="$1" ledger psgen gen
+  psgen="$(printf '%s' "$body" | tr ',' '\n' | grep '"generation"' | head -1 | tr -dc '0-9')"
+  ledger="$(printf '%s' "${2:-}" | tr -dc '0-9')"
+  gen=1
+  [ -n "$ledger" ] && [ "$ledger" -gt "$gen" ] && gen="$ledger"
+  [ -n "$psgen" ] && [ "$psgen" -gt "$gen" ] && gen="$psgen"
+  echo "$gen"
+}
+
+# ledger_generation — echo the durable `pageserver-generation` ledger value (key
+# `generation`; seeded to 1 by deploy/57, advanced by pswatcher). FAIL CLOSED (#1095):
+#   rc 0 + a bare integer  -> a usable ledger value.
+#   rc 3 (REFUSE)          -> kubectl/RBAC/API error, the CM is missing where it must
+#                             exist (57 ships it), or the key is empty/non-numeric.
+# It must NEVER silently emit "" that a caller floors to 1 on: flooring below a
+# possible object-store index is the silent-loss failure this issue closes. A refusal
+# is loud and actionable; a silent floor is not.
+ledger_generation() {
+  local out rc
+  out="$(K get configmap pageserver-generation -o jsonpath='{.data.generation}' 2>/dev/null)"; rc=$?
+  [ "$rc" -eq 0 ] || return 3            # kubectl/RBAC/API error, or CM NotFound
+  case "$out" in
+    ''|*[!0-9]*) return 3 ;;             # empty or non-numeric key -> unreadable ledger
+    *) echo "$out"; return 0 ;;
+  esac
+}
+
 ensure_tenant() {
   log "ensuring apps tenant $APPS_TENANT"
+  # read-before-write: attach at max(ledger, pageserver-view, 1). Never a literal 1
+  # (a post-failover pageserver rejects it) and never BELOW the durable ledger (that
+  # would hide a higher-generation index — silent data loss on a fresh-PVC pageserver).
+  # Fail closed: an unreadable ledger REFUSES the attach rather than flooring to 1.
+  local ledger cur gen
+  if ! ledger="$(ledger_generation)"; then
+    die "refusing to attach $APPS_TENANT: the pageserver-generation ledger is unreadable (kubectl/RBAC error, missing ConfigMap, or empty/non-numeric key). Flooring to a low generation could hide a higher-generation object-store index (silent data loss). Seed/verify the ledger per docs/operations.md and retry."
+  fi
+  # GET /v1/tenant/<T> returns a top-level "generation" field — confirmed against a live
+  # GKE pageserver (neon:8464): {"id":"…","state":{"slug":"Active"},…,"generation":1,…}.
+  # The on-cluster failover drill (T7, #1101) asserts the field is present.
+  cur="$(PS "http://localhost:9898/v1/tenant/$APPS_TENANT" 2>/dev/null || true)"
+  gen="$(resolve_attach_generation "$cur" "$ledger")"
+  log "attaching apps tenant $APPS_TENANT at generation $gen (ledger=$ledger)"
   PS -X PUT -H 'Content-Type: application/json' \
-    -d '{"mode":"AttachedSingle","generation":1,"tenant_conf":{}}' \
+    -d "{\"mode\":\"AttachedSingle\",\"generation\":$gen,\"tenant_conf\":{}}" \
     "http://localhost:9898/v1/tenant/$APPS_TENANT/location_config" >/dev/null
 }
 
