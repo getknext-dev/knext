@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"time"
 )
@@ -18,8 +19,40 @@ type HTTPPageserver struct {
 }
 
 // NewHTTPPageserver builds a pageserver client with a bounded per-request timeout.
+//
+// Invariant (#1096): a client of a RE-POINTABLE Service must not out-live a backend
+// change. The pageserver Service selector is flipped when pswatcher fails the primary
+// over to the standby; Go's DEFAULT transport keeps TCP connections alive and pools
+// them, so a long-lived operator connection stays pinned to the OLD (demoted) pod and
+// keeps returning "404 NotFound: tenant …" until the process restarts (confirmed live
+// 2026-09-19 — the operator only recovered after a manual restart).
+//
+// The fix is an explicit transport with keep-alives DISABLED: every request opens a
+// fresh connection, so a Service re-point is picked up on the very next call with a
+// zero-length staleness window, no restart required. The cost is a TCP + HTTP setup
+// per request. These are LOW-FREQUENCY control-plane calls (branch/reclaim on app
+// provision/deprovision, and LSN reads on periodic status requeues) against an
+// in-cluster Service, where connection setup is sub-millisecond; recycling every idle
+// connection is therefore cheap and correctness (never serving a demoted pod) wins.
 func NewHTTPPageserver(baseURL string, timeout time.Duration) *HTTPPageserver {
-	return &HTTPPageserver{BaseURL: baseURL, Client: &http.Client{Timeout: timeout}}
+	return &HTTPPageserver{BaseURL: baseURL, Client: &http.Client{Timeout: timeout, Transport: nonPinningTransport()}}
+}
+
+// nonPinningTransport returns an http.Transport that never pins a pooled connection
+// to a backend across a Service re-point. DisableKeepAlives makes every request dial
+// fresh; IdleConnTimeout/MaxIdleConns are belt-and-suspenders in case a future caller
+// re-enables keep-alives. See NewHTTPPageserver for the #1096 rationale.
+func nonPinningTransport() *http.Transport {
+	return &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		DisableKeepAlives:     true,
+		MaxIdleConns:          0,
+		MaxIdleConnsPerHost:   1,
+		IdleConnTimeout:       5 * time.Second,
+		TLSHandshakeTimeout:   5 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
 }
 
 // do issues one JSON request against the pageserver mgmt API and returns the status
