@@ -128,6 +128,25 @@ spec:
             - { name: PSW_POLL_MS, value: "2000" } # 2s poll
             - { name: PSW_FAIL_THRESHOLD, value: "3" } # ~6s of misses before failover (don't split-brain a slow primary)
             - { name: PSW_BASE_GENERATION, value: "1" } # floor when the ledger key is absent (fresh plane); the attach paths (storage-init, provision-app) read max(ledger, pageserver-view, 1) and may attach at N>1 (#1095)
+            # Maintenance freeze (#1099): a ConfigMap an admin/operator sets to PAUSE
+            # failover during a planned op (cred rotation, object-store migration). Its
+            # "until" key is an RFC3339 absolute expiry; absent CM ⇒ no freeze. The freeze
+            # is TTL-bounded — the EFFECTIVE expiry is min(until, createdAt + PSW_MAX_FREEZE_MS)
+            # — so a stuck/fat-fingered freeze can never silently disable HA. While active
+            # it surfaces pswatcher_failover_frozen / _freeze_expiry_seconds for alerting.
+            # An UNREADABLE or malformed freeze is FAIL-SAFE: treated as no freeze (HA
+            # stays ON) and counted on pswatcher_freeze_read_errors_total, never an
+            # aborted tick — aborting is how a fat-fingered `until` used to disable HA
+            # silently and permanently (#1099 review).
+            # Covered by the existing `configmaps get` RBAC above (no new grant).
+            # PSW_MAX_FREEZE_MS is held in LOCKSTEP with the binary's
+            # DefaultMaxFreezeDuration by deploy/_validate.sh — change both or neither.
+            - { name: PSW_FREEZE_CONFIGMAP, value: "pageserver-failover-freeze" }
+            - { name: PSW_MAX_FREEZE_MS, value: "7200000" } # 2h hard bound on any freeze
+            # The container in the primary pod whose Running state is liveness evidence.
+            # Scoped by NAME so a future sidecar's crashloop is not read as the
+            # pageserver dying. Must match the container name in 53-pageserver.yaml.
+            - { name: PSW_PRIMARY_CONTAINER, value: "pageserver" }
             - { name: PSW_HEALTH_ADDR, value: ":9091" }
           ports:
             - { name: metrics, containerPort: 9091 }

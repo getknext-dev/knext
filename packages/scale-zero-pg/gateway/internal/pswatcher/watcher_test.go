@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 )
 
 // fakeProber reports a scripted liveness sequence. Once the script is
@@ -119,13 +120,32 @@ type fakeK8s struct {
 	primaryReady   bool
 	primaryPresent bool
 	podReadyErr    error
+	// #1099 — is the primary pod's container RUNNING (process alive) regardless of the
+	// Ready condition? present + !ready + running ⇒ dependency degraded (HOLD); the
+	// zero value (false) preserves the pre-#1099 "present + NotReady ⇒ death" tests.
+	primaryRunning bool
+
+	// #1099 — maintenance-freeze window. freezePresent models the freeze ConfigMap
+	// existing; freezeUntil is its raw expiry and freezeCreatedAt its creation time
+	// (the Controller applies the TTL clamp). freezeErr models an unreadable CM.
+	freezeUntil     time.Time
+	freezeCreatedAt time.Time
+	freezePresent   bool
+	freezeErr       error
 }
 
-func (k *fakeK8s) PodReady(_ context.Context, _ string) (bool, bool, error) {
+func (k *fakeK8s) PodReady(_ context.Context, _ string) (bool, bool, bool, error) {
 	if k.podReadyErr != nil {
-		return false, false, k.podReadyErr
+		return false, false, false, k.podReadyErr
 	}
-	return k.primaryReady, k.primaryPresent, nil
+	return k.primaryReady, k.primaryPresent, k.primaryRunning, nil
+}
+
+func (k *fakeK8s) FailoverFreeze(_ context.Context) (time.Time, time.Time, bool, error) {
+	if k.freezeErr != nil {
+		return time.Time{}, time.Time{}, false, k.freezeErr
+	}
+	return k.freezeUntil, k.freezeCreatedAt, k.freezePresent, nil
 }
 
 func (k *fakeK8s) ServiceSelectorApp(_ context.Context, _ string) (string, error) {
