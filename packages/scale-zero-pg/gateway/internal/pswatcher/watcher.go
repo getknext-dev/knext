@@ -64,6 +64,16 @@ var ErrTenantShardsUnreadable = errors.New("pageserver reported no tenant_shards
 // wiring), so failing open here would reinstate the phantom-attach split-brain silently.
 var ErrNoStandbyMembership = errors.New("no standby membership oracle wired")
 
+// ErrLedgerConflict is returned by K8sOps.SetGeneration when the ledger write LOST an
+// optimistic-concurrency (resourceVersion) CAS — another writer advanced the ledger
+// between our read and our write (D4, ADR-0010 §4). It is the ONLY safe signal in the
+// two-writers-during-a-partition window (Recreate guarantees single-writer against a
+// ROLLOUT, not against a node partition: a force-deleted Node object lets a new pswatcher
+// start while the old one may still run on the isolated kubelet). The loser MUST abort the
+// tick and MUST NEVER retry at the winner's value — adopting the winner's generation
+// mid-failover is exactly how two writers both come to believe they are current.
+var ErrLedgerConflict = errors.New("generation ledger CAS conflict (a concurrent writer advanced it)")
+
 // Prober reports whether the primary pageserver is alive (its :9898 /v1/status).
 type Prober interface {
 	Alive(ctx context.Context) bool
@@ -156,10 +166,18 @@ type K8sOps interface {
 	FlipServiceSelector(ctx context.Context, service, app string) error
 	// DeletePods deletes pods matching selector; returns the count deleted.
 	DeletePods(ctx context.Context, selector string) (int, error)
-	// GetGeneration reads the persisted generation; ok=false when unset.
-	GetGeneration(ctx context.Context) (gen int, ok bool, err error)
-	// SetGeneration persists the generation.
-	SetGeneration(ctx context.Context, gen int) error
+	// GetGeneration reads the persisted generation; ok=false when unset. rv is the
+	// ledger ConfigMap's resourceVersion at the moment of the read — the token a
+	// subsequent SetGeneration passes back to CAS its write against it (D4). rv is empty
+	// only when the ConfigMap itself is absent (nothing to CAS against yet).
+	GetGeneration(ctx context.Context) (gen int, ok bool, rv string, err error)
+	// SetGeneration persists the generation under an optimistic-concurrency precondition
+	// (D4, ADR-0010 §4): when rv is non-empty the write is a CAS against that
+	// resourceVersion, so a racing writer that advanced the ledger since rv was read makes
+	// this return ErrLedgerConflict rather than silently CLOBBERING the higher write. An
+	// empty rv performs an unconditional write (startup seed, where there is no prior
+	// version to guard).
+	SetGeneration(ctx context.Context, gen int, rv string) error
 	// PodReady is the SECOND vantage on primary liveness (the kubelet's view via the
 	// API server, independent of the watcher's own HTTP path). It reports:
 	//   - ready:   a pod matching selector is Running & Ready;
@@ -269,6 +287,16 @@ type Controller struct {
 	// observed present at least once. Until it has, a PodReady present=false is treated
 	// as "selector matches nothing" (misconfig), NOT as death — we refuse to promote.
 	primarySeenPresent bool
+
+	// reservedGen is the generation THIS instance CAS-reserved in the ledger before
+	// promoting (D4, ADR-0010 §4). It is the crash-resume seam WITHIN one instance: once
+	// reserve-before-promote has advanced the ledger, a failover retried after a PARTIAL
+	// promotion (a later tenant's PUT failed and aborted the tick) must promote at the
+	// SAME reserved generation, not ledger+1 — otherwise a transient promote error would
+	// double-advance the ledger every tick. Zero means "no reservation held by this
+	// instance"; a restarted instance starts at zero and re-derives from the ledger +
+	// selector (the crash-only truth across restarts is convergeFailover, not this field).
+	reservedGen int
 
 	// warmer + warmMembership drive the D1 reconciling standby-warm loop. Both take an
 	// EXPLICIT node URL because the standby swaps after a failover; the loop resolves the
@@ -587,7 +615,7 @@ func (c *Controller) routedTenants() []string {
 //     returns an error; the readers (55-storage-init, provision-app.sh) then stay
 //     fail-closed on the still-absent key, which is the loud, correct outcome.
 func (c *Controller) SeedLedger(ctx context.Context) error {
-	led, ok, err := c.k8s.GetGeneration(ctx)
+	led, ok, rv, err := c.k8s.GetGeneration(ctx)
 	if err != nil {
 		return err
 	}
@@ -616,11 +644,12 @@ func (c *Controller) SeedLedger(ctx context.Context) error {
 		if !psOK {
 			return fmt.Errorf("ledger seed: the generation key is ABSENT and the routed pageserver does not report a generation for tenant %s — refusing to seed generation %d rather than invent a floor (#1095)", c.cfg.Tenant, target)
 		}
-		return c.k8s.SetGeneration(ctx, target)
+		return c.k8s.SetGeneration(ctx, target, rv)
 	}
-	// Present key: heal UP only. Never re-write an equal-or-leading ledger.
+	// Present key: heal UP only. Never re-write an equal-or-leading ledger. The rv read
+	// above CASes the heal so a concurrent failover advancing the ledger is not clobbered.
 	if target > led {
-		return c.k8s.SetGeneration(ctx, target)
+		return c.k8s.SetGeneration(ctx, target, rv)
 	}
 	return nil
 }
@@ -867,7 +896,7 @@ func (c *Controller) Tick(ctx context.Context) (bool, error) {
 // decided failover even when the primary pod is absent and was never locally
 // anchored (an advanced ledger is independent evidence a promotion was warranted).
 func (c *Controller) ledgerAdvanced(ctx context.Context) (bool, error) {
-	gen, ok, err := c.k8s.GetGeneration(ctx)
+	gen, ok, _, err := c.k8s.GetGeneration(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -898,7 +927,7 @@ func (c *Controller) ledgerAdvanced(ctx context.Context) (bool, error) {
 // (or absent) ledger is not a promotion this controller performed, so there is nothing
 // to converge above it — return early.
 func (c *Controller) convergeFailover(ctx context.Context) error {
-	gen, ok, err := c.k8s.GetGeneration(ctx)
+	gen, ok, _, err := c.k8s.GetGeneration(ctx)
 	if err != nil {
 		return err
 	}
@@ -989,10 +1018,13 @@ func (c *Controller) skippable(ctx context.Context, idx int, tenant string) (boo
 	return true, nil
 }
 
-// failover runs the proven runbook, in order: promote EVERY routed tenant (fences
-// the dead primary via gen+1) → persist the advanced generation ONCE → flip the
-// client Service → bounce the compute so a cold wake re-attaches to the promoted
-// standby.
+// failover runs the proven runbook. ORDER INVERTED for D4 (ADR-0010 §4): validate the
+// routed set → CAS-RESERVE the advanced generation in the ledger ONCE (fences the dead
+// primary via gen+1) → promote EVERY routed tenant at the reserved generation → flip the
+// client Service → bounce the compute so a cold wake re-attaches to the promoted standby.
+// The reserve moved BEFORE the promotes so that a loser in the two-writers-during-a-
+// partition window aborts on the CAS conflict before any PUT, rather than PUT-attaching
+// tenants at a generation it then fails to persist.
 //
 // Promotion scope == routing scope (#1098): the flipped `pageserver` Service routes
 // every tenant the plane holds, so ALL of them are re-attached before the flip —
@@ -1027,7 +1059,7 @@ func (c *Controller) skippable(ctx context.Context, idx int, tenant string) (boo
 // really at 7 re-attaches below the object-store index. It is recovered from the
 // routed pageserver view, or the failover aborts.
 func (c *Controller) failover(ctx context.Context) error {
-	gen, ok, err := c.k8s.GetGeneration(ctx)
+	gen, ok, rv, err := c.k8s.GetGeneration(ctx)
 	if err != nil {
 		return err
 	}
@@ -1044,21 +1076,51 @@ func (c *Controller) failover(ctx context.Context) error {
 			gen = c.cfg.BaseGeneration
 		}
 	}
-	newGen := gen + 1
 
+	// D4 (ADR-0010 §4) — the target generation. A FRESH failover reserves gen+1; a
+	// failover RESUMED within this instance (an earlier tick reserved but a later tenant's
+	// PUT failed and aborted before the flip) promotes at the ALREADY-reserved generation,
+	// never gen+1 — otherwise a transient promote error would double-advance the ledger on
+	// every retry. Promotion at an already-reserved generation is idempotent, so this is
+	// safe to re-drive.
+	newGen := gen + 1
+	reserved := c.reservedGen != 0
+	if reserved {
+		newGen = c.reservedGen
+	}
+
+	// MECHANICAL FENCE (D4/BLOCK-2) — never promote BELOW the ledger, whatever newGen was
+	// computed to be. This makes "promotion below the ledger" unparseable-to-violate rather
+	// than relying on the reservedGen bookkeeping being correct. The comparison is `>=`, not
+	// `>`, ON PURPOSE: a FRESH failover has newGen = gen+1 (> gen), but a legitimate RESUME
+	// reads gen == reservedGen (the reserve already advanced the ledger to newGen), so
+	// newGen == gen — and that resume MUST proceed to complete the flip it deferred. What
+	// this catches is a STALE reservedGen: if the reservation were ever carried into a
+	// failover whose ledger has since advanced ABOVE it (newGen < gen), we abort rather than
+	// promote at a fenced-below generation. Combined with clearing reservedGen at the flip
+	// (below) and the `done` latch, the stale case is unreachable in-process today; the
+	// fence is defence-in-depth against a future re-entry path.
+	if newGen < gen {
+		return fmt.Errorf("failover: refusing to promote at generation %d which is BELOW the ledger generation %d (stale reservation %d) — a promotion below the ledger cannot fence a higher-generation holder", newGen, gen, c.reservedGen)
+	}
+
+	// PASS 1 — VALIDATE every routed tenant against the standby membership oracle. This
+	// pass is READS ONLY: no ledger write and no PUT happen here, so any abort keeps reads
+	// on the (dead) primary rather than a half-promoted plane, and — crucially for D4 — the
+	// CAS-reserve below has not run yet, so a validation abort leaves the ledger UNTOUCHED
+	// (the phantom-attach abort tests assert exactly this: no ledger advance, no flip).
+	//
+	// The oracle is the plane-wide /v1/location_config listing (ADR-0010 §5, D2). The two
+	// signals it replaces are both broken on a live plane — the PUT returns 200 and
+	// ATTACHES a phantom empty tenant for a tenant the standby does not hold (never 404s),
+	// and the per-tenant GET 503s for the warm SECONDARY a correctly-warmed standby holds.
+	// An unwired or unreadable oracle ABORTS. A not-held tenant feeds the EXISTING
+	// skippable() logic UNCHANGED (base aborts; a non-base tenant needs routed-vantage
+	// corroboration).
 	routed := c.routedTenants()
-	promoted := 0
+	toPromote := make([]bool, len(routed))
+	promotable := 0
 	for i, tenant := range routed {
-		// STANDBY PRE-FLIGHT (ADR-0010 §5, D2). UNCONDITIONAL: every routed tenant is
-		// checked against the standby membership oracle before its PUT, and an oracle
-		// that is unwired or unreadable ABORTS. The two signals it replaces are both
-		// broken on a live plane — the PUT returns 200 and ATTACHES a phantom empty
-		// tenant for a tenant the standby does not hold (never 404s), and the per-tenant
-		// GET 503s for the warm SECONDARY a correctly-warmed standby actually holds. The
-		// plane-wide /v1/location_config listing is the only vantage that reports the
-		// truth, so it is the only one this consults. A not-held tenant feeds the
-		// EXISTING skippable() logic UNCHANGED (base aborts; a non-base tenant needs
-		// routed-vantage corroboration). The PUT-404 path below is defence-in-depth only.
 		held, verr := c.standbyHoldsTenant(ctx, tenant)
 		if verr != nil {
 			// "We could not check the standby" is never "the standby holds it":
@@ -1082,40 +1144,86 @@ func (c *Controller) failover(ctx context.Context) error {
 			c.metrics.TenantSkipped()
 			continue
 		}
+		toPromote[i] = true
+		promotable++
+	}
+	if promotable == 0 {
+		return fmt.Errorf("failover: no routed tenant could be promoted at generation %d (routed set: %v)", newGen, routed)
+	}
+
+	// RESERVE (D4) — CAS the ledger to newGen BEFORE any Promote PUT. This is the inversion
+	// the two-writers-during-a-partition threat model demands: under the OLD order
+	// (promote-all → SetGeneration) a loser had ALREADY PUT tenants at newGen before it
+	// discovered it lost the ledger write, so both writers promoted. Reserving first means
+	// a lost CAS aborts BEFORE any PUT. The lost-CAS abort is LOUD (counter) and NEVER
+	// retries at the winner's value — adopting the winner's generation mid-failover is how
+	// two writers both come to believe they are current. Reserve-first is also the SAFE
+	// skew direction: a ledger AHEAD of reality self-heals (convergeFailover re-promotes up
+	// to the ledger; readers take max(ledger, view, 1)), whereas reality ahead of the
+	// ledger is the fencing hazard. Skipped when this instance already reserved newGen.
+	if !reserved {
+		if serr := c.k8s.SetGeneration(ctx, newGen, rv); serr != nil {
+			if errors.Is(serr, ErrLedgerConflict) {
+				c.metrics.LedgerCASConflict()
+				return fmt.Errorf("failover: lost the generation-ledger CAS reserving %d — a concurrent writer advanced the ledger; ABORTING without promoting and NOT retrying at the winner's value (two writers must never both believe they are current): %w", newGen, serr)
+			}
+			return serr
+		}
+		c.reservedGen = newGen
+	}
+
+	// PASS 2 — PROMOTE the validated tenants at the reserved generation. Idempotent +
+	// generation-guarded: a re-PUT at an already-held generation is a no-op on the
+	// pageserver, so a retry after a partial failure re-promotes at the SAME newGen and can
+	// never double-advance. A Promote failure here aborts AFTER the reserve: the ledger is
+	// left AHEAD of the plane (the safe skew — convergeFailover heals it), and reservedGen
+	// is RETAINED so the next tick resumes at newGen rather than reserving gen+1 again.
+	promoted := 0
+	for i, tenant := range routed {
+		if !toPromote[i] {
+			continue
+		}
 		if perr := c.promoter.Promote(ctx, tenant, newGen); perr != nil {
 			if errors.Is(perr, ErrTenantNotFound) {
+				// A tenant held per the oracle but 404ing on the PUT (a race with a
+				// detach, or a defence-in-depth 404 a future pageserver restores):
+				// re-run skippable to decide. The base tenant is never skippable.
 				skip, serr := c.skippable(ctx, i, tenant)
 				if serr != nil {
 					return serr
 				}
 				if skip {
-					// Corroborated absent from two vantages — nothing routed to
-					// strand. Count it (surfaces a misconfigured routed set / an
-					// unprovisioned apps tenant) and move on.
 					c.metrics.TenantSkipped()
 					continue
 				}
 			}
-			// A real failure on an existing tenant: abort before the flip so it is
-			// never left on the demoted pageserver. Retried on the next tick; the
-			// ledger has NOT advanced (SetGeneration is below), so re-promotion of
-			// the already-promoted tenants stays at the same generation (idempotent).
+			// A real failure on an existing tenant: abort before the flip so it is never
+			// left on the demoted pageserver. Retried on the next tick at reservedGen.
 			return perr
 		}
 		promoted++
 	}
 	if promoted == 0 {
-		return fmt.Errorf("failover: no routed tenant could be promoted at generation %d (routed set: %v)", newGen, routed)
+		// Every validated tenant 404'd on the PUT in this pass (an extreme race): do NOT
+		// flip onto a standby that holds nothing. The ledger stays reserved AHEAD — the
+		// safe skew — and a later tick re-promotes at reservedGen.
+		return fmt.Errorf("failover: reserved generation %d but no routed tenant could be PUT-promoted (routed set: %v)", newGen, routed)
 	}
 
-	if err := c.k8s.SetGeneration(ctx, newGen); err != nil {
-		return err
-	}
 	if err := c.k8s.FlipServiceSelector(ctx, c.cfg.ClientService, c.cfg.StandbyApp); err != nil {
 		return err
 	}
 	if _, err := c.k8s.DeletePods(ctx, c.cfg.ComputeSelector); err != nil {
 		return err
 	}
+	// Flip + bounce succeeded: the failover is COMPLETE. Clear the reservation so the field
+	// never lingers as a stale value a future re-entry could adopt (D4/BLOCK-2). The `done`
+	// latch already makes failover() unreachable again in-process, so this is belt-and-
+	// braces with the mechanical fence above — but it keeps the invariant "reservedGen is
+	// non-zero ONLY while a reserve is outstanding and unflipped" true, which is what the
+	// fence's stale-detection reasons about. A DeletePods error above returns WITHOUT
+	// clearing, on purpose: the ledger is reserved and the flip has happened, so the next
+	// tick must resume at the SAME reservedGen to re-bounce, not reserve gen+1 afresh.
+	c.reservedGen = 0
 	return nil
 }

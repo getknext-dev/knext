@@ -2,6 +2,7 @@ package pswatcher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -240,27 +241,81 @@ func containersRunning(p *corev1.Pod, primary string) bool {
 	return true
 }
 
-func (k *K8sClient) GetGeneration(ctx context.Context) (int, bool, error) {
+func (k *K8sClient) GetGeneration(ctx context.Context) (int, bool, string, error) {
 	cm, err := k.cs.CoreV1().ConfigMaps(k.namespace).Get(ctx, k.genConfigMap, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return 0, false, nil
+			// The ConfigMap itself is absent: no version to CAS against yet.
+			return 0, false, "", nil
 		}
-		return 0, false, err
+		return 0, false, "", err
 	}
+	// The ConfigMap exists: hand back its resourceVersion even when the key is unset, so a
+	// caller that seeds an absent key still CASes against the object it read (D4).
+	rv := cm.ResourceVersion
 	raw, ok := cm.Data[k.genKey]
 	if !ok || raw == "" {
-		return 0, false, nil
+		return 0, false, rv, nil
 	}
 	n, err := strconv.Atoi(raw)
 	if err != nil {
-		return 0, false, fmt.Errorf("generation ConfigMap %q key %q is not an int: %q", k.genConfigMap, k.genKey, raw)
+		return 0, false, rv, fmt.Errorf("generation ConfigMap %q key %q is not an int: %q", k.genConfigMap, k.genKey, raw)
 	}
-	return n, true, nil
+	return n, true, rv, nil
 }
 
-func (k *K8sClient) SetGeneration(ctx context.Context, gen int) error {
-	patch := []byte(fmt.Sprintf(`{"data":{%q:%q}}`, k.genKey, strconv.Itoa(gen)))
-	_, err := k.cs.CoreV1().ConfigMaps(k.namespace).Patch(ctx, k.genConfigMap, types.MergePatchType, patch, metav1.PatchOptions{})
-	return err
+// SetGeneration persists the generation with an optimistic-concurrency precondition
+// (D4, ADR-0010 §4). A merge-patch carries NO precondition, so a loser in the
+// two-writers-during-a-partition window would clobber a higher write. Instead we read the
+// object (preserving any other keys), set the generation key, and Update at the EXPECTED
+// resourceVersion so the API server rejects the write if a racing writer advanced it
+// since. A stale rv detected before the Update, or a Conflict from the Update itself, is
+// surfaced as ErrLedgerConflict — never a silent overwrite.
+//
+// rv == "" means the ledger did not EXIST at read time (GetGeneration returns rv=="" when
+// the ConfigMap/key is absent — the seed case, and the #1095 absent-ledger failover). We
+// CREATE it rather than Get-then-unconditionally-Update: a Create is itself a compare-and-
+// swap against non-existence, so if a concurrent writer (a second, partitioned pswatcher
+// reserving from the same absent-ledger state) created it first, we get AlreadyExists and
+// surface ErrLedgerConflict — fail CLOSED. The old unconditional-Update path was a
+// fail-OPEN hole: two partitioned watchers both reading rv=="" would both Update and both
+// promote (D4/BLOCK-1). Create closes it so the reserve is CAS-safe from BOTH the
+// ledger-present and ledger-absent states.
+func (k *K8sClient) SetGeneration(ctx context.Context, gen int, rv string) error {
+	if rv == "" {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: k.genConfigMap, Namespace: k.namespace},
+			Data:       map[string]string{k.genKey: strconv.Itoa(gen)},
+		}
+		if _, cerr := k.cs.CoreV1().ConfigMaps(k.namespace).Create(ctx, cm, metav1.CreateOptions{}); cerr != nil {
+			if apierrors.IsAlreadyExists(cerr) {
+				return fmt.Errorf("ledger already established by a concurrent writer while reserving at generation %d: %w", gen, errors.Join(ErrLedgerConflict, cerr))
+			}
+			return cerr
+		}
+		return nil
+	}
+	cm, err := k.cs.CoreV1().ConfigMaps(k.namespace).Get(ctx, k.genConfigMap, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if rv != "" && cm.ResourceVersion != rv {
+		// The ledger moved between our read and now — the caller's rv is stale, so an
+		// Update would either clobber (if we reset rv) or 409. Fail closed, loudly.
+		return fmt.Errorf("ledger at resourceVersion %q, expected %q: %w", cm.ResourceVersion, rv, ErrLedgerConflict)
+	}
+	if cm.Data == nil {
+		cm.Data = map[string]string{}
+	}
+	cm.Data[k.genKey] = strconv.Itoa(gen)
+	// cm.ResourceVersion is the fresh value from Get (== rv when a precondition was
+	// requested); passing it to Update makes the API server enforce the CAS against any
+	// write that lands between our Get and our Update.
+	if _, uerr := k.cs.CoreV1().ConfigMaps(k.namespace).Update(ctx, cm, metav1.UpdateOptions{}); uerr != nil {
+		if apierrors.IsConflict(uerr) {
+			return fmt.Errorf("ledger update conflicted: %w", errors.Join(ErrLedgerConflict, uerr))
+		}
+		return uerr
+	}
+	return nil
 }

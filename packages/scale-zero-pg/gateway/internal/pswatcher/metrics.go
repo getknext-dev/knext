@@ -111,6 +111,13 @@ type Metrics struct {
 	ConvergeErrorsTotal       int `json:"converge_errors_total"`
 	ConvergeTenantAbsentTotal int `json:"converge_tenant_absent_total"`
 
+	// D4 (ADR-0010 §4) — LedgerCASConflictsTotal counts failovers ABORTED because the
+	// reserve-before-promote ledger write LOST a resourceVersion CAS: a concurrent writer
+	// (the two-pswatchers-during-a-partition window) advanced the ledger first. The loser
+	// aborts WITHOUT promoting and never retries at the winner's value, so this rising is
+	// the ONLY signal that two writers contended — alert on it (PswatcherLedgerCASConflict).
+	LedgerCASConflictsTotal int `json:"ledger_cas_conflicts_total"`
+
 	// D1 — the reconciling standby-warm loop (ADR-0010 §5). StandbyWarmReconcilesTotal
 	// counts reconcile passes; StandbyWarmRegistrationsTotal counts warm-Secondary
 	// registrations issued (a rising count with no failover means the loop re-armed a
@@ -386,6 +393,23 @@ func (m *Metrics) ConvergeTenantAbsentCount() int {
 	return m.ConvergeTenantAbsentTotal
 }
 
+// LedgerCASConflict counts one failover aborted because the reserve-before-promote ledger
+// write lost a resourceVersion CAS to a concurrent writer (D4, ADR-0010 §4). The loser
+// never promotes and never retries at the winner's value, so this counter is the sole
+// signal that two writers contended for the ledger.
+func (m *Metrics) LedgerCASConflict() {
+	m.mu.Lock()
+	m.LedgerCASConflictsTotal++
+	m.mu.Unlock()
+}
+
+// LedgerCASConflicts returns the ledger CAS-conflict count (tests).
+func (m *Metrics) LedgerCASConflicts() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.LedgerCASConflictsTotal
+}
+
 // StandbyWarmReconcile counts one standby-warm reconcile pass (D1).
 func (m *Metrics) StandbyWarmReconcile() {
 	m.mu.Lock()
@@ -527,13 +551,14 @@ func (m *Metrics) PromText() string {
 			"pswatcher_converge_blocked_total %d\n"+
 			"pswatcher_converge_errors_total %d\n"+
 			"pswatcher_converge_tenant_absent_total %d\n"+
+			"pswatcher_ledger_cas_conflicts_total %d\n"+
 			"pswatcher_standby_warm_reconciles_total %d\n"+
 			"pswatcher_standby_warm_registrations_total %d\n"+
 			"pswatcher_standby_warm_errors_total %d\n"+
 			"pswatcher_standby_stale_attached_total %d\n",
 		m.PromotionsTotal, m.ChecksTotal, m.PrimaryUpVal, m.FailedOverVal, m.SuspectedPartitionsTotal, m.PrimaryNeverSeenTotal, m.TenantAbsentTotal, m.LedgerHealErrorsTotal,
 		m.DependencyDegradedTotal, m.FailoverFrozenVal, m.FailoverFreezeSuppressed, m.FailoverFreezeExpirySecond, m.FreezeReadErrorsTotal,
-		m.ConvergeRepromotionsTotal, m.ConvergeBlockedTotal, m.ConvergeErrorsTotal, m.ConvergeTenantAbsentTotal,
+		m.ConvergeRepromotionsTotal, m.ConvergeBlockedTotal, m.ConvergeErrorsTotal, m.ConvergeTenantAbsentTotal, m.LedgerCASConflictsTotal,
 		m.StandbyWarmReconcilesTotal, m.StandbyWarmRegistrationsTotal, m.StandbyWarmErrorsTotal, m.StandbyStaleAttachedTotal,
 	)
 	// D1 — the per-tenant loss-of-warmth gauge, one LABELED sample per routed tenant the

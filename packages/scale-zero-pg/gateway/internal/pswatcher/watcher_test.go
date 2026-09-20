@@ -106,11 +106,13 @@ type fakeK8s struct {
 	selectorApp string
 	gen         int
 	genSet      bool
+	genRV       string // ledger ConfigMap resourceVersion handed to callers (D4 CAS token)
 	deletedFor  []string
 	setGenTo    []int
+	setGenRVs   []string // the rv each SetGeneration was CAS'd against (D4)
 	flippedTo   []string
 	getSelErr   error
-	setGenErr   error
+	setGenErr   error // returned by SetGeneration BEFORE recording (e.g. ErrLedgerConflict)
 	flipErr     error
 	deleteErr   error
 
@@ -166,16 +168,17 @@ func (k *fakeK8s) DeletePods(_ context.Context, selector string) (int, error) {
 	k.deletedFor = append(k.deletedFor, selector)
 	return 1, nil
 }
-func (k *fakeK8s) GetGeneration(_ context.Context) (int, bool, error) {
-	return k.gen, k.genSet, nil
+func (k *fakeK8s) GetGeneration(_ context.Context) (int, bool, string, error) {
+	return k.gen, k.genSet, k.genRV, nil
 }
-func (k *fakeK8s) SetGeneration(_ context.Context, gen int) error {
+func (k *fakeK8s) SetGeneration(_ context.Context, gen int, rv string) error {
 	if k.setGenErr != nil {
 		return k.setGenErr
 	}
 	k.gen = gen
 	k.genSet = true
 	k.setGenTo = append(k.setGenTo, gen)
+	k.setGenRVs = append(k.setGenRVs, rv)
 	return nil
 }
 
@@ -773,8 +776,9 @@ func TestMetricsPromText(t *testing.T) {
 	m := NewMetrics()
 	m.SetPrimaryUp(false)
 	m.Promotion()
+	m.LedgerCASConflict()
 	txt := m.PromText()
-	for _, want := range []string{"pswatcher_promotions_total 1", "pswatcher_primary_up 0"} {
+	for _, want := range []string{"pswatcher_promotions_total 1", "pswatcher_primary_up 0", "pswatcher_ledger_cas_conflicts_total 1"} {
 		if !contains(txt, want) {
 			t.Fatalf("PromText missing %q:\n%s", want, txt)
 		}
@@ -904,8 +908,12 @@ func TestFailoverAbortsOnRealTenantError(t *testing.T) {
 	if len(k8s.flippedTo) != 0 {
 		t.Fatalf("Service must NOT flip while a real tenant is un-promoted (split-brain): flips=%v", k8s.flippedTo)
 	}
-	if len(k8s.setGenTo) != 0 {
-		t.Fatalf("ledger must NOT advance while the failover is incomplete: %v", k8s.setGenTo)
+	// D4 (ADR-0010 §4): the ledger is now CAS-RESERVED before the promotes, so a promote
+	// error that aborts AFTER the reserve leaves the ledger AHEAD of the plane — the SAFE
+	// skew convergeFailover heals (readers take max(ledger,view,1)). The load-bearing
+	// safety assertion is the ABSENT FLIP above; reserve-ahead is intended, not a leak.
+	if len(k8s.setGenTo) != 1 || k8s.setGenTo[0] != 2 {
+		t.Fatalf("ledger must be reserved exactly once at 2 (reserve-before-promote): %v", k8s.setGenTo)
 	}
 }
 
@@ -933,8 +941,13 @@ func TestFailoverAbortsWhenBaseTenantNotFound(t *testing.T) {
 	if len(k8s.flippedTo) != 0 {
 		t.Fatalf("Service must NOT flip when the base tenant is absent on the standby: %v", k8s.flippedTo)
 	}
-	if len(k8s.setGenTo) != 0 {
-		t.Fatalf("ledger must NOT advance on an aborted failover: %v", k8s.setGenTo)
+	// D4 (ADR-0010 §4): the standby oracle (allHeld here) validates the base as HELD in
+	// Pass 1, so the ledger is reserved before the defence-in-depth PUT-404 aborts Pass 2.
+	// In production a real membership oracle catches base-not-held in Pass 1 (before the
+	// reserve) — see TestFailoverAbortsWhenStandbyLacksBaseTenantDespitePut200. The safety
+	// assertion here is the ABSENT FLIP; the reserved-ahead ledger is the safe skew.
+	if len(k8s.setGenTo) != 1 || k8s.setGenTo[0] != 2 {
+		t.Fatalf("ledger reserved once at 2 before the PUT-404 abort (reserve-before-promote): %v", k8s.setGenTo)
 	}
 }
 
@@ -965,8 +978,11 @@ func TestFailoverAbortsWhenAbsentTenantPresentOnSecondVantage(t *testing.T) {
 	if len(k8s.flippedTo) != 0 {
 		t.Fatalf("Service must NOT flip while a real routed tenant is un-promoted: %v", k8s.flippedTo)
 	}
-	if len(k8s.setGenTo) != 0 {
-		t.Fatalf("ledger must NOT advance on an aborted failover: %v", k8s.setGenTo)
+	// D4 (ADR-0010 §4): the base is held per the oracle, so the ledger is reserved before
+	// the apps-tenant PUT-404 aborts Pass 2 on the uncorroborated (present-on-2nd-vantage)
+	// absence. Reserve-ahead is the safe skew; the load-bearing assertion is the missing flip.
+	if len(k8s.setGenTo) != 1 || k8s.setGenTo[0] != 2 {
+		t.Fatalf("ledger reserved once at 2 before the abort (reserve-before-promote): %v", k8s.setGenTo)
 	}
 	if c.Metrics().TenantAbsent() != 0 {
 		t.Fatalf("an uncorroborated absence is not a skip; tenant_absent = %d, want 0", c.Metrics().TenantAbsent())

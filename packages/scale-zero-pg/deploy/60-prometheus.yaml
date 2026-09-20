@@ -455,6 +455,18 @@ data:
             annotations:
               summary: "a routed tenant was SKIPPED on pageserver failover"
               description: "pswatcher promoted the standby but skipped a routed tenant that neither the standby nor the routed vantage holds. Per-app databases under a skipped tenant would be unreachable. Verify the routed-tenant set (PSW_APPS_TENANT_ID in deploy/58) against the provisioned tenants — see docs/operations.md#pageserver-failover."
+          # (b2) D4 — a failover aborted because its reserve-before-promote ledger write
+          # LOST a resourceVersion CAS: a concurrent writer advanced the ledger first. The
+          # only way two pswatchers run at once is a node partition (Recreate guards a
+          # rollout, not a partition), so this firing means a second writer is live and must
+          # be investigated — the losing tick aborted without promoting and did not retry at
+          # the winner's value.
+          - alert: PswatcherLedgerCASConflict
+            expr: increase(pswatcher_ledger_cas_conflicts_total[10m]) > 0
+            labels: { severity: warning }
+            annotations:
+              summary: "pswatcher lost a generation-ledger CAS (a second writer is live)"
+              description: "A failover aborted on a resourceVersion conflict writing the pageserver-generation ledger — two pswatchers contended, which only happens during a node partition (a force-deleted Node lets a replacement start while the old watcher may still run on the isolated kubelet). Confirm exactly one pswatcher pod is Running and the partitioned node is fenced/gone — see docs/operations.md#pageserver-failover."
           # (c) the startup ledger seed/heal could not read the routed generation
           # view. The heal path is then DEAD CODE: a pruned/empty ledger will not
           # self-recover and the fail-closed readers will refuse to attach.
@@ -810,7 +822,7 @@ spec:
         # (prints the value to paste here). _validate.sh contract 27 fails if this drifts
         # from the ConfigMap data; _verify-drift.sh section E independently asserts every
         # shipped rule is LOADED in the live pod (/api/v1/rules).
-        ks-pg.dev/prometheus-config-sha256: "345c4ff8c233a95b1f4a2d82d48d4d673c619e7c2bb0d2decc7c5976e304e761"
+        ks-pg.dev/prometheus-config-sha256: "0d103380b9978c7e913cb12a33509abfa17fe436d03ec2694f8dbb5a3e33aa90"
     spec:
       serviceAccountName: prometheus
       securityContext:

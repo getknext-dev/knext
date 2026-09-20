@@ -20,6 +20,18 @@ import (
 const testNS = "scale-zero-pg"
 
 func newTestK8sClient(objs ...runtime.Object) *K8sClient {
+	// A real apiserver assigns a resourceVersion to every stored object; the stock fake
+	// leaves it empty on seeded objects. GetGeneration hands its caller that value as the
+	// D4 CAS token, and SetGeneration branches on rv=="" (ledger ABSENT → Create) vs rv!=""
+	// (ledger PRESENT → optimistic Update). An existing-but-RV-less ConfigMap would be
+	// misread as absent and wrongly Create→AlreadyExists. Stamp seeded ConfigMaps so the
+	// fake models the apiserver: an existing ledger reports a non-empty rv, a genuinely
+	// absent one is simply not seeded (rv stays "").
+	for _, o := range objs {
+		if cm, ok := o.(*corev1.ConfigMap); ok && cm.ResourceVersion == "" {
+			cm.ResourceVersion = "1"
+		}
+	}
 	return &K8sClient{
 		cs:               fake.NewClientset(objs...),
 		namespace:        testNS,

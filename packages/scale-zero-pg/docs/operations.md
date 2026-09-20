@@ -105,6 +105,7 @@ below, and routes via Alertmanager (`61-alertmanager.yaml`) to a receiver.
 | `PswatcherPromotionFired` (crit) | `pswatcher_promotions_total` rose in 10m | A **failover happened** — the promoted standby is now the sole read authority with NO standby behind it. Rebuild a standby. |
 | `PswatcherPrimaryDown` (warn) | `pswatcher_primary_up==0` for 1m | The watcher can't reach the **current read authority**. Pre-failover that's the primary (a promotion may be ~6s away); **post-failover the watcher re-anchors this metric onto the promoted standby** (#25), so it now also covers "the promoted node is the unguarded SPOF and just died." Check the current authority / watcher↔pageserver network. |
 | `PageserverStandbyNotReady` (crit) | `pageserver-standby` <1 ready for 5m | The warm standby that failover promotes into is gone — automated failover has nothing to promote. Rebuild it. |
+| `PswatcherLedgerCASConflict` (warn) | `pswatcher_ledger_cas_conflicts_total` rose in 10m | A failover **aborted on a generation-ledger compare-and-swap** — two watchers contended for the ledger. That only happens during a node partition (a force-deleted `Node` lets a replacement pswatcher start while the old one may still run on the isolated kubelet). The losing tick aborted without promoting and did **not** adopt the winner's generation. Confirm exactly one `pswatcher` pod is `Running` and the partitioned node is fenced/gone. |
 | `ComputeWakeStuck` (crit) | **single-DB plane**: `pggw` (gateway=pggw) connections held but 0 `compute`/`compute-warm` ready for 2m | A single-DB client is connected but the DB never woke — attach error / image pull / storage stall. Clients are hanging. (Connection sum scoped to `gateway="pggw"` so apps traffic can't mask/trip it — #80.) |
 | `ComputeWakeStuckApps` (crit) | **apps plane**: `pggw-apps` connections held but 0 `compute-<app>` ready anywhere for 2m | The whole branch-per-app wake path is down — apps clients are hanging. Aggregate (fires when 0 per-app computes are ready); a single stuck app among healthy peers is caught by `ComputeStuckNotReady`. Check the apps-gateway, the per-app compute events, and the shared storage plane. (#80) |
 | `ComputeRoPoolStuck` (crit) | read-replica pool `compute-ro` desired ≥1 but 0 ready for 2m | The RO pool was woken under read traffic but no replica became ready (crashloop / attach stall / image pull) — `DATABASE_URL_RO` reads are hanging. Check `kubectl -n scale-zero-pg describe deploy compute-ro` + its pod events. Silent when the pool is at rest (spec 0). (#80/#66) |
@@ -1083,12 +1084,15 @@ outage. It is now **automatic**: a standing warm-Secondary standby plus the
 - **Generation ledger (`pageserver-generation` ConfigMap).** Holds the last generation
   the plane was attached at (seed `1`, matching `storage-init`). It is the **single,
   shared authority for every tenant** — both the base tenant and the apps tenant attach
-  at the same generation. Each failover reads it, promotes at **value+1**, and writes the
-  new value back **exactly once** for the whole plane — so repeated failovers stay
-  monotonic and a restarted watcher never re-uses a stale generation. pswatcher is the
-  **sole writer** and, at startup, seeds/heals the ledger to `max(current ledger, the
-  pageserver's live generation view, base)`, **never lowering it** (see the upgrade note
-  under "Bootstrap attach").
+  at the same generation. Each failover **reserves value+1 in the ledger FIRST** (under a
+  `resourceVersion` compare-and-swap), then promotes every tenant at that reserved value —
+  so repeated failovers stay monotonic, the ledger advances **exactly once** per episode
+  even if a promotion is retried, and a restarted watcher never re-uses a stale generation.
+  Every ledger write is a CAS, so a second watcher racing during a node partition cannot
+  clobber a higher value — the loser aborts loudly (`pswatcher_ledger_cas_conflicts_total`).
+  pswatcher is the **sole writer** and, at startup, seeds/heals the ledger to
+  `max(current ledger, the pageserver's live generation view, base)`, **never lowering it**
+  (see the upgrade note under "Bootstrap attach").
 - **Stable liveness handle (`pageserver-primary` Service).** Always selects the primary
   STS, so the watcher probes the *primary's* health even after it flips the
   client-facing `pageserver` Service.
@@ -1097,7 +1101,17 @@ outage. It is now **automatic**: a standing warm-Secondary standby plus the
   (default 3 ≈ 6 s — long enough not to split-brain a slow primary) **and** a
   second-vantage confirmation (see the decision table below) it runs the same
   runbook the restore drill proved, in order:
-  1. **Promote** the standby to `AttachedSingle` at **generation+1** — the higher
+  1. **Validate then RESERVE.** After confirming the standby holds every routed tenant
+     (below), the watcher **reserves generation+1 in the ledger ConfigMap FIRST**, under a
+     `resourceVersion` compare-and-swap, before any attach. Reserving before promoting keeps
+     the failover safe if two watchers ever run at once (a node partition can leave the old
+     watcher alive on an isolated kubelet while a replacement starts): the loser of the CAS
+     **aborts loudly** (`pswatcher_ledger_cas_conflicts_total` /
+     `PswatcherLedgerCASConflict`) and never adopts the winner's generation, so two watchers
+     can never both believe they are the current writer. A ledger reserved one ahead of the
+     plane is the self-healing direction — the reader contract takes
+     `max(ledger, pageserver-view, 1)` and the watcher re-attaches up to the ledger.
+  2. **Promote** the standby to `AttachedSingle` at the **reserved generation** — the higher
      generation fences the dead primary (single-writer is intrinsic to Neon; the
      pageserver picks the newest `index_part.json-<gen>` ≤ its own). **Promotion scope ==
      routing scope:** the flipped `pageserver` Service routes EVERY tenant the plane holds,
@@ -1109,11 +1123,10 @@ outage. It is now **automatic**: a standing warm-Secondary standby plus the
      standby's own listing of held tenants (`GET /v1/location_config`) — the attach call
      cannot tell, since it `200`-attaches a phantom empty tenant instead. Any promotion error —
      or a standby that does not hold a routed tenant the routed vantage still holds —
-     **aborts** the failover before the flip (retried each tick) so an existing tenant is
+     **aborts** the failover before the flip (retried each tick, re-attaching at the SAME
+     reserved generation — the ledger never double-advances) so an existing tenant is
      never stranded — see "When a routed tenant is not on the standby" below for the
      not-held case specifically.
-  2. **Persist** the advanced generation in the ledger ConfigMap — once, for the whole
-     plane.
   3. **Flip** the `pageserver` Service selector to the standby, so the compute's
      unchanged `neon.pageserver_connstring host=pageserver` now resolves to it.
   4. **Bounce** every compute (delete its pods) so a cold wake basebackups from the
