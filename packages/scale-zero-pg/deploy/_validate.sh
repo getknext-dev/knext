@@ -548,7 +548,10 @@ grep -q 'pswatcher_ledger_heal_errors_total' ../gateway/internal/pswatcher/metri
 # HA — could go dormant on a metric rename with CI green. Each row pins BOTH halves:
 # the alert exists in 60-prometheus.yaml AND the watcher still exports the metric.
 for _a in PswatcherFailoverFrozen PswatcherFailoverSuppressedByFreeze PswatcherDependencyDegraded PswatcherFreezeUnreadable; do
-  grep -q "alert: $_a" 60-prometheus.yaml || fail "60 missing $_a alert (#1099) — the failover-trigger/maintenance-freeze family must be monitored"
+  # Anchored at end-of-line: a bare substring grep would accept a RENAMED alert
+  # (PswatcherFreezeUnreadableX matches "alert: PswatcherFreezeUnreadable"), which is how
+  # this guard would have gone quietly decorative.
+  grep -qE "alert: $_a\$" 60-prometheus.yaml || fail "60 missing $_a alert (#1099) — the failover-trigger/maintenance-freeze family must be monitored"
 done
 for _m in pswatcher_failover_frozen pswatcher_failover_freeze_suppressed_total pswatcher_failover_freeze_expiry_seconds pswatcher_dependency_degraded_total pswatcher_freeze_read_errors_total; do
   grep -q "$_m" 60-prometheus.yaml || fail "60 no alert/rule binds $_m (#1099) — an unbound metric is an unmonitored failover-trigger signal"
