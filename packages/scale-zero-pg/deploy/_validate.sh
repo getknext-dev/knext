@@ -586,6 +586,10 @@ for _f in 53-pageserver.yaml 57-pageserver-standby.yaml; do
   grep -q 'node.kubernetes.io/not-ready' "$_f" && fail "$_f must NOT tolerate node.kubernetes.io/not-ready — see #1099 review (permanent-hold trap)"
 done
 grep -q 'Reason == "NodeLost"' ../gateway/internal/pswatcher/k8s.go || fail "pswatcher no longer classifies a NodeLost pod as a DEATH (anchored on the real 'Reason == \"NodeLost\"' comparison, not a doc comment) — a true node death would read as 'dependency degraded' and HOLD, regressing MTTR ~5x (#1099 review)"
+# The impl grep above is coarse (it cannot see a PARTIAL removal of the classification); the
+# AUTHORITATIVE behaviour guard is the unit test, which reds on any nodeLost() breakage. Assert the
+# test itself cannot silently vanish — impl broken => go test reds; test deleted => this reds.
+grep -q 'func TestPodReadyNodeLost' ../gateway/internal/pswatcher/k8s_test.go || fail "the NodeLost-is-a-death unit test (TestPodReadyNodeLost*) is gone — the node-death MTTR guarantee (#1099 review) is now unguarded"
 ok "60 pins the #1099 failover-trigger alert<->metric family, the freeze bound is in lockstep with the binary, and the storage plane stays un-tolerant of an unreachable node"
 grep -q 'alert: ComputeWakeStuck' 60-prometheus.yaml || fail "60 missing wake-path-stuck alert"
 # issue #39: demo end-to-end canary alert — dormant Failed-Job rule joined on the
