@@ -74,6 +74,21 @@ describe('docs content — user-facing language', () => {
   });
 });
 
+describe('docs content — scale-to-zero database upgrade order', () => {
+  const upgrading = readFileSync(join(DOCS_DIR, 'upgrading.mdx'), 'utf-8');
+
+  it('tells operators to roll the failover controller image before its new config', () => {
+    // The scale-to-zero database ships its own failover controller; a manifest that
+    // wires new controller configuration must not be applied ahead of the image that
+    // reads it, or the configuration is inert. This mirrors operator-then-CLI.
+    expect(upgrading).toMatch(/scale-to-zero (database|Postgres)/i);
+    expect(upgrading).toMatch(/failover controller/i);
+    expect(upgrading).toMatch(
+      /before applying|before you apply|roll[^\n]*image[^\n]*(first|before)/i,
+    );
+  });
+});
+
 describe('docs content — install & CLI story', () => {
   const gettingStarted = readFileSync(join(DOCS_DIR, 'getting-started.mdx'), 'utf-8');
 

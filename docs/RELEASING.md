@@ -258,6 +258,20 @@ Stated plainly, because these are the reason the ordering rule matters rather th
 The decision and its measured basis are recorded in
 [ADR-0020](adr/0020-release-channels.md#amendment-2026-07-28--upgrade-order-operatorcrd-first-then-cli).
 
+### The same ordering applies to scale-zero-pg's failover controller
+
+The scale-to-zero database (`packages/scale-zero-pg`) ships its own read-authority watcher
+(`pswatcher`, `deploy/58-pswatcher.yaml`), and it obeys the same "reader upgrades before the
+manifest that writes its contract" rule the operator-then-CLI order above encodes. When a
+scale-zero-pg upgrade adds or changes a `pswatcher` env var — the routed-tenant set
+(`PSW_APPS_TENANT_ID`), the maintenance-freeze ConfigMap name (`PSW_FREEZE_CONFIGMAP`), the freeze
+hard-TTL bound (`PSW_MAX_FREEZE_MS`), the routed pageserver management URL (`PSW_ROUTED_BASE_URL`),
+or any other new `PSW_*` flag — **roll the `pswatcher` image to the new digest first, then apply the
+manifests that wire the new env.** Applying a new env var against an older binary makes it inert: the
+running watcher does not read a variable it was not built to know, so the setting silently does
+nothing — the same failure mode as a CLI running ahead of the CRD. The operational detail lives in
+the package runbook, `packages/scale-zero-pg/docs/operations.md` § "Upgrades".
+
 ## Interim channel — GitHub Packages (`@getknext-dev/*`)
 
 Introduced while the npmjs path was believed to be blocked on auth (issue #53), the maintainer
