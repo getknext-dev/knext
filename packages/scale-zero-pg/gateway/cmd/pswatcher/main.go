@@ -72,6 +72,10 @@ func main() {
 	// pinned to the dead pageserver (#1097).
 	computeSel := env("PSW_COMPUTE_SELECTOR", "plane=compute")
 	primarySel := env("PSW_PRIMARY_SELECTOR", "app=pageserver")
+	// The container INSIDE the primary pod whose Running state is read as liveness
+	// evidence. Scoping by name keeps a future sidecar's crashloop from being misread
+	// as the pageserver process dying (#1099 review).
+	primaryContainer := env("PSW_PRIMARY_CONTAINER", "pageserver")
 	pollMs := envInt("PSW_POLL_MS", 2000)
 	threshold := envInt("PSW_FAIL_THRESHOLD", 3)
 	baseGen := envInt("PSW_BASE_GENERATION", 1)
@@ -82,7 +86,7 @@ func main() {
 		logger.Fatal("[pswatcher] PSW_TENANT_ID is required")
 	}
 
-	k8s, err := pswatcher.NewK8sClient(namespace, genCM, freezeCM)
+	k8s, err := pswatcher.NewK8sClient(namespace, genCM, freezeCM, primaryContainer)
 	if err != nil {
 		logger.Fatalf("[pswatcher] kube client: %v", err)
 	}

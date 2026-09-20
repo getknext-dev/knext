@@ -19,11 +19,23 @@
 #         standby. With a freeze active, kill the primary pageserver and assert the
 #         client `pageserver` Service selector does NOT flip for the hold window and
 #         pswatcher_failover_freeze_suppressed_total rises. Deferred by default.
+#   [FZ3] NATURAL TTL EXPIRY — set a freeze with a ~20s `until` and poll until
+#         pswatcher_failover_frozen returns to 0 WITHOUT deleting the ConfigMap. FZ1
+#         only proves deletion clears the gauge; this proves a FORGOTTEN freeze lapses
+#         on its own, which is the actual safety argument.
 #   [DG1] DEPENDENCY DEGRADATION — OPT-IN (RUN_DEGRADE=1), reversible: degrade the
 #         object store (scale MinIO to 0 on a MinIO-backed plane) so the pageserver
 #         PROCESS stays up (container Running) while its readiness probe fails; assert
-#         the Service selector does NOT flip and pswatcher_dependency_degraded_total
-#         rises; then restore MinIO. Skipped unless the backend is in-cluster MinIO.
+#         the Service selector does NOT flip, pswatcher_dependency_degraded_total rises
+#         (a HARD assertion — a branch never entered proves nothing), then restore MinIO
+#         and assert normal operation resumes. Skipped unless the backend is in-cluster
+#         MinIO.
+#         SCOPE: DG1 proves the discrimination for a degradation SHORTER than the
+#         pageserver's own liveness window (~60s; its livenessProbe also hits
+#         /v1/status). A degradation that outlasts that window crashloops the container
+#         and the watcher correctly promotes. The mitigation for the minutes-long class
+#         (cred rotation, object-store migration) is the maintenance FREEZE (FZ2), not
+#         the discrimination — see ADR-0011.
 #   [DG2] discrimination surface — the metric pswatcher_dependency_degraded_total is
 #         exposed (registered), so alerting can bind to it even before it fires.
 #
@@ -157,28 +169,100 @@ run() {
     bad "[FZ1] freeze deleted but pswatcher_failover_frozen still '${fz2:-<none>}'"
   fi
 
+  # --- [FZ3] NATURAL TTL EXPIRY (no CM deletion) ---------------------------
+  # FZ1 above proves the gauge clears when the ConfigMap is DELETED. That is not the
+  # same claim as "a freeze lapses on its own", which is the entire safety argument for
+  # a forgotten freeze. Set a freeze that expires in FZ3_TTL seconds and poll until the
+  # gauge falls to 0 with the ConfigMap STILL PRESENT.
+  FZ3_TTL="${FZ3_TTL:-20}"
+  UNTIL3="$(date -u -d "+${FZ3_TTL} sec" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+"${FZ3_TTL}"S +%Y-%m-%dT%H:%M:%SZ)"
+  $K create configmap "$FREEZE_CM" \
+     --from-literal=until="$UNTIL3" \
+     --from-literal=reason="drill: T5 natural-expiry verification" >/dev/null
+  info "[FZ3] created $FREEZE_CM until=$UNTIL3 (+${FZ3_TTL}s) — waiting for it to lapse WITHOUT deleting it"
+  fz3=""
+  # Bound: the TTL plus a generous couple of poll intervals.
+  _deadline=$(( $(date +%s) + FZ3_TTL + 2 * POLL_WAIT + 10 ))
+  while [ "$(date +%s)" -lt "$_deadline" ]; do
+    fz3="$(metric_val "$(psw_metrics)" pswatcher_failover_frozen)"
+    [ "${fz3:-x}" = "0" ] && break
+    sleep 3
+  done
+  if [ "${fz3:-x}" = "0" ] && $K get configmap "$FREEZE_CM" >/dev/null 2>&1; then
+    ok "[FZ3] freeze lapsed at its until with the ConfigMap STILL PRESENT ⇒ frozen 0 (a forgotten freeze really does end)"
+  elif ! $K get configmap "$FREEZE_CM" >/dev/null 2>&1; then
+    bad "[FZ3] the freeze ConfigMap vanished mid-test — this scenario must prove NATURAL expiry, not deletion"
+  else
+    bad "[FZ3] freeze did not lapse on its own within ${FZ3_TTL}s+margin (gauge '${fz3:-<none>}') — a forgotten freeze would suppress HA past its until"
+  fi
+  $K delete configmap "$FREEZE_CM" --ignore-not-found >/dev/null 2>&1 || true
+
   # --- [DG1] dependency degradation, process UP (OPT-IN, reversible) --------
+  #
+  # SCOPE — READ THIS BEFORE QUOTING THE RESULT. DG1 proves the discrimination for a
+  # degradation SHORTER than the pageserver's own liveness window only. The pageserver's
+  # livenessProbe also hits /v1/status (deploy/53-pageserver.yaml: failureThreshold 6 x
+  # periodSeconds 10 => ~60s), so an object-store degradation that OUTLASTS that window
+  # restarts the container into a crashloop, and the watcher then correctly promotes —
+  # which is NOT a bug but IS the boundary of what this scenario can assert. The
+  # mitigation for the minutes-long class (a credential rotation, an object-store
+  # migration) is the maintenance FREEZE, exercised by FZ2 — not the discrimination.
+  # The bounded wait below is deliberately kept INSIDE the liveness window.
   if [ "${RUN_DEGRADE:-0}" = "1" ]; then
     if $K get deploy minio >/dev/null 2>&1; then
       before_sel="$(selector_app)"
       deg0="$(metric_val "$(psw_metrics)" pswatcher_dependency_degraded_total)"
-      info "[DG1] scaling MinIO to 0 — object store degraded, pageserver PROCESS stays up"
+      info "[DG1] scaling MinIO to 0 — object store degraded, pageserver PROCESS stays up (sub-liveness-window only)"
       $K scale deploy minio --replicas=0 >/dev/null
-      sleep "$POLL_WAIT"; sleep "$POLL_WAIT"
+      # Bounded wait for readiness to flip and the discrimination branch to be ENTERED.
+      # Capped at DG1_WAIT (default 40s) so we stay inside the ~60s liveness window: past
+      # it the container crashloops and the promote branch legitimately takes over.
+      DG1_WAIT="${DG1_WAIT:-40}"
+      deg1=""
+      _deadline=$(( $(date +%s) + DG1_WAIT ))
+      while [ "$(date +%s)" -lt "$_deadline" ]; do
+        deg1="$(metric_val "$(psw_metrics)" pswatcher_dependency_degraded_total)"
+        [ -n "${deg1:-}" ] && [ "${deg1:-0}" -gt "${deg0:-0}" ] && break
+        sleep 3
+      done
       after_sel="$(selector_app)"
-      deg1="$(metric_val "$(psw_metrics)" pswatcher_dependency_degraded_total)"
       if [ "$after_sel" = "$before_sel" ] && [ "$after_sel" != "$STANDBY_APP" ]; then
-        ok "[DG1] no failover on a dependency degradation (selector stayed '$after_sel')"
+        ok "[DG1] no failover on a sub-liveness-window dependency degradation (selector stayed '$after_sel')"
       else
         bad "[DG1] FAILED OVER on a recoverable degradation (selector '$after_sel') — the split-brain class"
       fi
+      # HARD assertion (was informational): if the counter never rises, the
+      # discrimination branch was never entered and DG1 proved nothing — a silently
+      # decorative drill. Only the PROMOTE path is an acceptable alternative outcome,
+      # and the selector assertion above already covers that.
       if [ -n "${deg1:-}" ] && [ "${deg1:-0}" -gt "${deg0:-0}" ]; then
-        ok "[DG1] pswatcher_dependency_degraded_total rose ($deg0 -> $deg1)"
+        ok "[DG1] pswatcher_dependency_degraded_total rose ($deg0 -> $deg1) — the discrimination branch was entered"
       else
-        info "[DG1] degraded-count did not rise ($deg0 -> ${deg1:-<none>}) — readiness may not have flipped in the window; inspect the pageserver pod"
+        bad "[DG1] degraded-count did not rise within ${DG1_WAIT}s ($deg0 -> ${deg1:-<none>}) — the discrimination branch was NEVER entered, so this scenario asserted nothing. Check that the pageserver readiness probe actually flipped (kubectl describe pod -l app=pageserver)."
       fi
       info "[DG1] restoring MinIO to 1"
       $K scale deploy minio --replicas=1 >/dev/null
+      # POST-RESTORE: "restore creds => normal operation" is an explicit exit criterion
+      # and was previously unchecked. Assert the plane actually recovers: the primary
+      # serves again AND the selector is still the ORIGINAL one (no late flip).
+      up=""
+      _deadline=$(( $(date +%s) + 3 * POLL_WAIT + 30 ))
+      while [ "$(date +%s)" -lt "$_deadline" ]; do
+        up="$(metric_val "$(psw_metrics)" pswatcher_primary_up)"
+        [ "${up:-x}" = "1" ] && break
+        sleep 3
+      done
+      if [ "${up:-x}" = "1" ]; then
+        ok "[DG1] object store restored ⇒ pswatcher_primary_up 1 (normal operation resumed)"
+      else
+        bad "[DG1] object store restored but pswatcher_primary_up is '${up:-<none>}' — the plane did not return to normal operation"
+      fi
+      restored_sel="$(selector_app)"
+      if [ "$restored_sel" = "$before_sel" ]; then
+        ok "[DG1] selector still the original '$restored_sel' after restore — the standby was never consumed"
+      else
+        bad "[DG1] selector is '$restored_sel' (was '$before_sel') — a failover fired during or after the degradation"
+      fi
     else
       info "[DG1] skipped — no in-cluster MinIO Deployment (object store is external); degrade it out-of-band to exercise this path"
     fi

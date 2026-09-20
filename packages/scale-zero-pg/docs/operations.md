@@ -1091,7 +1091,8 @@ outage. It is now **automatic**: a standing warm-Secondary standby plus the
 | `PSW_POLL_MS` / `PSW_FAIL_THRESHOLD` | `2000` / `3` | Probe interval and consecutive misses before the promote decision is consulted. |
 | `PSW_BASE_GENERATION` | `1` | The generation floor for a genuinely fresh plane. It is a **floor, never a fallback** — an absent ledger is recovered from the routed view or the operation refuses (see below). |
 | `PSW_FREEZE_CONFIGMAP` | `pageserver-failover-freeze` | The ConfigMap that, when present with an RFC3339 `until` key, **pauses failover** for a planned op. Absent ⇒ no freeze. See the maintenance-freeze runbook below. |
-| `PSW_MAX_FREEZE_MS` | `7200000` (2 h) | Hard TTL bound on any freeze: the effective expiry is `min(until, createdAt + this)`, so a stuck/fat-fingered freeze cannot silently disable HA indefinitely. |
+| `PSW_MAX_FREEZE_MS` | `7200000` (2 h) | Hard TTL bound on any freeze: the effective expiry is `min(until, createdAt + this)`, so a stuck/fat-fingered freeze cannot silently disable HA indefinitely. A freeze with no creation timestamp cannot be bounded and is refused outright. |
+| `PSW_PRIMARY_CONTAINER` | `pageserver` | The container inside the primary pod whose `Running` state is read as liveness evidence. Scoped by name so a sidecar crashlooping is not misread as the pageserver process dying. If it matches no container in the pod, the watcher reads "not running" (it never fabricates liveness) — which costs the degradation/death discrimination, so keep it in sync with `deploy/53-pageserver.yaml`. |
 
 #### When a routed tenant is not on the standby
 
@@ -1162,6 +1163,7 @@ kubelet's independent view) about the primary pod (`PSW_PRIMARY_SELECTOR`, defau
 | fails ≥ threshold | pod **Running & Ready** | **HOLD** — this is a watcher-side partition, not primary death. No promotion; `pswatcher_suspected_partitions_total` increments; the standby is preserved. |
 | fails ≥ threshold | pod **NotReady**, container **still Running** | **HOLD** — a *dependency* degraded (e.g. object-store creds mid-rotation), the process is alive. No promotion; `pswatcher_dependency_degraded_total` increments; the standby is preserved (#1099, see below). |
 | fails ≥ threshold | pod **NotReady**, container **not Running** (crashed/Terminated/CrashLoopBackOff) | **PROMOTE** — the primary process is genuinely down. |
+| fails ≥ threshold | pod marked **`NodeLost` / `NodeStatusUnknown`** (its node stopped reporting) | **PROMOTE** — the node is dead, so its pod status is frozen at whatever it last was. Neither the Ready condition nor the container state may be trusted; treating the stale `Running` as "degraded" would defer recovery until taint eviction (~5.5 min) or, with an `unreachable` toleration, forever. |
 | fails ≥ threshold | pod **absent**, primary **was** seen present before | **PROMOTE** — a pod we were demonstrably watching has vanished. |
 | fails ≥ threshold | pod **absent**, primary was **never** seen present | **HOLD** — `present=false` here is more likely a mis-typed/drifted `PSW_PRIMARY_SELECTOR` (or an RBAC empty list) than a death. `pswatcher_primary_never_seen_total` increments; the standby is preserved (#58). *Exception:* if the generation ledger already shows a prior promotion (`gen > base`), a restarted watcher **resumes** and promotes — an advanced ledger is independent evidence a failover was warranted. |
 | fails ≥ threshold | **API unreachable** | **HOLD** — can't corroborate; refuse to promote on a single vantage (a `tick error` is logged and retried). |
@@ -1209,6 +1211,14 @@ server — no new probe, no object-store credentials in the watcher):
 - **container not Running** (Terminated / CrashLoopBackOff / pod gone) ⇒ genuine death.
   The watcher promotes and publishes `pswatcher_failover_reason{reason="node_death"}`.
 
+A pod whose node has **died** is a third case, and it is deliberately classified as a
+death rather than a degradation: with no kubelet left to write status, the container
+status stays frozen at `Running` forever, so the watcher keys off the node-lifecycle
+controller's `NodeLost` / `NodeStatusUnknown` marking instead and promotes. (For the
+same reason the pageserver StatefulSets must never carry an infinite
+`node.kubernetes.io/unreachable` toleration — that would keep a dead node's pod object
+alive indefinitely. `deploy/_validate.sh` asserts they do not.)
+
 **Why holding a live-but-degraded process is safe.** A pageserver that is genuinely
 *hung* (process up, serving nothing) is caught by its **own** `livenessProbe`, which
 restarts the container; a restart that does not fix it becomes CrashLoopBackOff — the
@@ -1216,7 +1226,33 @@ container is then **not Running**, and the rule above promotes. So discriminatio
 at most the liveness window (~60 s on the shipped probe) to a true hang, and never a
 permanent miss. See ADR-0011 for the full trade-off.
 
+> **Know the limit of this mechanism.** The watcher's probe, the pageserver's readiness
+> probe and its **liveness** probe all hit the **same `/v1/status`**. So the
+> discrimination only holds for a degradation **shorter than the liveness window (~60 s)**:
+> anything longer restarts the container into a crashloop and the watcher promotes —
+> onto a standby reading the **same object store**, which fails the same way. A
+> credential rotation or an object-store migration lasts **minutes**, so it is outside
+> this window. For those, the **maintenance freeze below is the mitigation, not the
+> discrimination.** Set one first; see the next section.
+
+If a hold persists, it is a read outage, not health: `PswatcherDependencyDegraded` pages
+once the hold has been sustained for 5 minutes. Fix the dependency, or delete the primary
+pageserver pod to convert the hold into a promotable death.
+
 #### Maintenance freeze — pausing failover for a planned op (#1099)
+
+> **A freeze is REQUIRED — not a suggestion — before any of the following.** Set one and
+> confirm it is active *before* you start:
+>
+> - any **object-store** operation: credential rotation, endpoint/bucket change, backend
+>   migration, or taking the object store down;
+> - any **pageserver rollout, restart, image change, or node drain** affecting the primary.
+>
+> The container-state discrimination above does **not** cover these. It expires with the
+> ~60 s liveness window, while these operations run for minutes — and once the primary
+> crashloops, the watcher promotes a standby backed by the **same** object store, which
+> fails identically. The standby is consumed for nothing. The freeze is the only
+> mitigation for this class.
 
 Some planned operations legitimately take the primary offline — a credential rotation
 that restarts the pageserver pod, an object-store migration. During those, even the
@@ -1225,6 +1261,12 @@ you tell the watcher explicitly: set a **maintenance freeze**.
 
 A freeze is a ConfigMap the watcher reads every tick. While active it **suppresses
 failover — even on a confirmed death**.
+
+**Two properties to know before you set one.** A freeze is **plane-wide**: it suppresses
+failover for the base tenant *and* every per-app database on the plane — there is no
+per-app freeze. And it only works on a pswatcher image that supports it: if you apply
+these manifests against an **older** pswatcher, `PSW_FREEZE_CONFIGMAP` is inert and the
+freeze you set is read by nobody. **Roll the pswatcher image first**, then rely on a freeze.
 
 **Set a freeze** (expires automatically at `until`):
 
@@ -1235,7 +1277,34 @@ kubectl -n scale-zero-pg create configmap pageserver-failover-freeze \
   --from-literal=reason="minio->gcs object-store credential rotation"
 ```
 
-`until` is an **RFC3339 absolute timestamp** (UTC). `reason` is free text (logged).
+`until` is an **RFC3339 absolute timestamp** (UTC) — the watcher parses it strictly, so
+`2026-09-20 12:00:00` (a space instead of `T`) is **not** a valid value. `reason` is free
+text the watcher does not read at all; it is there for whoever runs `kubectl get
+configmap pageserver-failover-freeze -o yaml` next, so write it for a human.
+
+**If `until` is malformed, your freeze is NOT in effect.** The watcher fails **safe**: it
+cannot establish the freeze state, so it keeps automatic failover **enabled** and
+increments `pswatcher_freeze_read_errors_total` (alert `PswatcherFreezeUnreadable`).
+It does *not* stop working, and it does *not* silently pause HA. After setting a freeze,
+always confirm it took:
+
+```sh
+# expect: pswatcher_failover_frozen 1
+kubectl -n scale-zero-pg exec sts/pageserver-standby -- \
+  curl -s "http://$(kubectl -n scale-zero-pg get pod -l app=pswatcher \
+    -o jsonpath='{.items[0].status.podIP}'):9091/metrics" | grep pswatcher_failover_frozen
+```
+
+**Extending or re-applying a freeze.** The 2 h clamp is anchored to the ConfigMap's
+**creation timestamp**, which means:
+
+- `kubectl patch`/`edit` to push `until` out keeps the **original** anchor — so the
+  effective expiry may be *earlier* than the `until` you just wrote, and can even be in
+  the past on a freeze older than the clamp.
+- `kubectl delete` + re-create (and a GitOps re-create) starts a **fresh** 2 h budget.
+
+If you need more than the clamp allows, delete and re-create the ConfigMap rather than
+patching it — and treat needing that as a signal the operation should be re-planned.
 
 **Clear a freeze** as soon as the op is done — do not rely on the TTL:
 
@@ -1263,17 +1332,23 @@ three ways:
 3. Confirm the primary is healthy again (`pswatcher_primary_up == 1`).
 4. **Delete the freeze ConfigMap.** Confirm `pswatcher_failover_frozen` returns to `0`.
 
-Note the discrimination above already covers the *common* case where a cred rotation
-degrades the object store **without** restarting the process — you only need a freeze
-when the op will take the pageserver **process** down (a pod restart or replacement).
+Do **not** skip the freeze on the theory that the discrimination covers you. It covers a
+degradation only while it stays under the ~60 s liveness window; a rotation that runs
+longer restarts the pageserver into a crashloop and the watcher promotes regardless of
+whether the process was ever "down". Set the freeze.
 
-**Config:** `PSW_FREEZE_CONFIGMAP` (default `pageserver-failover-freeze`) and
-`PSW_MAX_FREEZE_MS` (default `7200000`, 2 h) on `deploy/58-pswatcher.yaml`. Reading the
-freeze ConfigMap uses the watcher's existing `configmaps get` RBAC — no new grant.
+**Config:** `PSW_FREEZE_CONFIGMAP` (default `pageserver-failover-freeze`),
+`PSW_MAX_FREEZE_MS` (default `7200000`, 2 h) and `PSW_PRIMARY_CONTAINER` (default
+`pageserver` — the container whose Running state is read as liveness evidence) on
+`deploy/58-pswatcher.yaml`. Reading the freeze ConfigMap uses the watcher's existing
+`configmaps get` RBAC — no new grant.
 
-**Drill:** `deploy/_verify-failover-freeze.sh run` exercises the freeze gauge lifecycle
-and the discrimination metric surface non-destructively; `RUN_KILL=1` and `RUN_DEGRADE=1`
-add the (opt-in) behavioral suppression and object-store-degradation scenarios.
+**Drill:** `deploy/_verify-failover-freeze.sh run` exercises the freeze gauge lifecycle,
+its **natural TTL expiry** (the freeze lapses with the ConfigMap still in place) and the
+discrimination metric surface, non-destructively; `RUN_KILL=1` and `RUN_DEGRADE=1` add
+the (opt-in) behavioral suppression and object-store-degradation scenarios. The
+degradation scenario proves the **sub-liveness-window** case only — the freeze scenario
+is what covers the longer class.
 
 #### Availability posture of the authority itself (#23)
 

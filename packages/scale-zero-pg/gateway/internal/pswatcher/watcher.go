@@ -196,6 +196,14 @@ func (c *Controller) nowT() time.Time {
 // expiry is min(until, createdAt+MaxFreeze), so a freeze whose `until` is set far in
 // the future (fat-finger) or never cleared (stuck) still lapses at
 // createdAt+MaxFreeze — a stuck freeze cannot become a silent, unbounded HA outage.
+//
+// Errors returned here are REPORTS, not verdicts: the caller (Tick) treats any error
+// as NO FREEZE and keeps HA on — see the fail-safe rationale at the call site.
+//
+// A freeze with a ZERO createdAt is REFUSED (an error, treated as no freeze) rather
+// than honoured: without a creation anchor the TTL clamp cannot be applied at all, so
+// honouring its raw `until` would be exactly the unbounded, unclampable HA suppression
+// the clamp exists to prevent (#1099 review, FIX 5).
 func (c *Controller) freezeActive(ctx context.Context) (active bool, effectiveUntil time.Time, err error) {
 	until, createdAt, present, ferr := c.k8s.FailoverFreeze(ctx)
 	if ferr != nil {
@@ -204,8 +212,11 @@ func (c *Controller) freezeActive(ctx context.Context) (active bool, effectiveUn
 	if !present {
 		return false, time.Time{}, nil
 	}
+	if createdAt.IsZero() {
+		return false, time.Time{}, fmt.Errorf("maintenance freeze (until %s) has no creation timestamp to clamp against — REFUSING it (treating it as no freeze) rather than honouring an unclampable, unbounded HA suppression", until.Format(time.RFC3339))
+	}
 	eff := until
-	if clampAt := createdAt.Add(c.cfg.MaxFreezeDuration); !createdAt.IsZero() && eff.After(clampAt) {
+	if clampAt := createdAt.Add(c.cfg.MaxFreezeDuration); eff.After(clampAt) {
 		eff = clampAt
 	}
 	return c.nowT().Before(eff), eff, nil
@@ -322,9 +333,28 @@ func (c *Controller) Tick(ctx context.Context) (bool, error) {
 	// alerting can fire while a freeze is active AND notice one that outlives its
 	// planned window (a stuck freeze = silent HA outage). The gauge is refreshed on
 	// EVERY path below; the freeze only SUPPRESSES the promotion itself (further down).
+	//
+	// FAIL-SAFE, not fail-loud (#1099 review, FIX 1). An unreadable freeze ConfigMap,
+	// a malformed `until`, or a freeze with no createdAt to clamp against is treated
+	// as NO FREEZE: HA stays ON and the tick runs to completion. The pre-fix code
+	// ABORTED the tick here, which returned before the prober / PodReady / failover
+	// path — so a PERMANENT error (a fat-fingered `until` is permanent by
+	// construction) silently disabled HA forever, froze pswatcher_primary_up at its
+	// last value, and fired no alert: fail-OPEN to an outage, the exact class the
+	// freeze's TTL clamp exists to bound.
+	//
+	// The trade is deliberate and asymmetric. Skipping a freeze for ONE tick on a
+	// transient API error risks a failover during a planned op (recoverable, and the
+	// freeze is re-read next tick); disabling HA permanently risks an unbounded read
+	// outage with no signal. So the error is COUNTED and alerted
+	// (pswatcher_freeze_read_errors_total → PswatcherFreezeUnreadable) rather than
+	// thrown: the counter is the ONLY way an operator learns their freeze is not
+	// actually in effect.
 	frozen, freezeUntil, ferr := c.freezeActive(ctx)
 	if ferr != nil {
-		return false, fmt.Errorf("failover freeze read: %w", ferr)
+		c.metrics.FreezeReadError()
+		c.logf("[pswatcher] maintenance-freeze state could not be established (%v) — proceeding with failover ENABLED (fail-safe); any freeze you set is NOT in effect", ferr)
+		frozen, freezeUntil = false, time.Time{}
 	}
 	if frozen {
 		c.metrics.SetFailoverFrozen(true, freezeUntil.Unix())

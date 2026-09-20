@@ -542,6 +542,41 @@ grep -q 'pswatcher_ledger_heal_errors_total' 60-prometheus.yaml || fail "60 Pswa
 # cross-file pin: the alert expressions above are only live if the watcher EXPORTS them.
 grep -q 'pswatcher_tenant_absent_total' ../gateway/internal/pswatcher/metrics.go || fail "pswatcher no longer exports pswatcher_tenant_absent_total — PswatcherTenantSkipped would never fire (#1098)"
 grep -q 'pswatcher_ledger_heal_errors_total' ../gateway/internal/pswatcher/metrics.go || fail "pswatcher no longer exports pswatcher_ledger_heal_errors_total — PswatcherLedgerHealBlind would never fire (#1098)"
+# #1099 review (FIX 4): the failover-TRIGGER family (discrimination + maintenance
+# freeze) gets the SAME alert<->metric pin as the #1098 family above. Without it the
+# stuck-freeze alert — ADR-0011's own mitigation for a freeze that silently disables
+# HA — could go dormant on a metric rename with CI green. Each row pins BOTH halves:
+# the alert exists in 60-prometheus.yaml AND the watcher still exports the metric.
+for _a in PswatcherFailoverFrozen PswatcherFailoverSuppressedByFreeze PswatcherDependencyDegraded PswatcherFreezeUnreadable; do
+  grep -q "alert: $_a" 60-prometheus.yaml || fail "60 missing $_a alert (#1099) — the failover-trigger/maintenance-freeze family must be monitored"
+done
+for _m in pswatcher_failover_frozen pswatcher_failover_freeze_suppressed_total pswatcher_failover_freeze_expiry_seconds pswatcher_dependency_degraded_total pswatcher_freeze_read_errors_total; do
+  grep -q "$_m" 60-prometheus.yaml || fail "60 no alert/rule binds $_m (#1099) — an unbound metric is an unmonitored failover-trigger signal"
+  grep -q "$_m" ../gateway/internal/pswatcher/metrics.go || fail "pswatcher no longer exports $_m — the #1099 alert bound to it would never fire"
+done
+# A SUSTAINED degradation-hold is a read outage, not health: it must PAGE, not warn.
+grep -A3 'alert: PswatcherDependencyDegraded' 60-prometheus.yaml | grep -q 'for: 5m' || fail "60 PswatcherDependencyDegraded must only fire when SUSTAINED (for: 5m) so a multi-minute HOLD cannot masquerade as health (#1099 review)"
+grep -A4 'alert: PswatcherDependencyDegraded' 60-prometheus.yaml | grep -q 'severity: critical' || fail "60 a SUSTAINED dependency-degraded hold must PAGE (severity: critical) — reads are down and no failover will fire (#1099 review)"
+# LOCKSTEP: the manifest's freeze bound must equal the binary's default, or the ADR's
+# documented 2h clamp is a claim about code nobody is running (repo precedent:
+# metrics-port-lockstep). 7200000ms == 2h == DefaultMaxFreezeDuration.
+_psw_max_ms="$(grep -o 'PSW_MAX_FREEZE_MS, value: "[0-9][0-9]*"' 58-pswatcher.yaml | grep -o '[0-9][0-9]*' | head -1)"
+[ -n "$_psw_max_ms" ] || fail "58 must set PSW_MAX_FREEZE_MS (the hard bound on a maintenance freeze, #1099)"
+_psw_default_h="$(grep -o 'DefaultMaxFreezeDuration = [0-9]* \* time.Hour' ../gateway/internal/pswatcher/watcher.go | grep -o '[0-9]*' | head -1)"
+[ -n "$_psw_default_h" ] || fail "pswatcher DefaultMaxFreezeDuration is no longer an N*time.Hour literal — the PSW_MAX_FREEZE_MS lockstep check cannot read it (#1099 review)"
+[ "$_psw_max_ms" = "$((_psw_default_h * 3600000))" ] || fail "58 PSW_MAX_FREEZE_MS=${_psw_max_ms}ms != DefaultMaxFreezeDuration=${_psw_default_h}h — the documented freeze bound and the shipped bound have drifted (#1099 review)"
+# #1099 review (FIX 2): a node death freezes containerStatuses at Running (no kubelet),
+# which the discrimination would read as "degraded -> hold". pswatcher classifies
+# NodeLost/NodeStatusUnknown as a DEATH so recovery still fires — but an INFINITE
+# `unreachable`/`not-ready` toleration on the storage plane would keep the dead pod
+# object around forever, and any future regression there becomes a PERMANENT HA
+# outage. Keep the storage plane un-tolerant of an unreachable node.
+for _f in 53-pageserver.yaml 57-pageserver-standby.yaml; do
+  grep -q 'node.kubernetes.io/unreachable' "$_f" && fail "$_f must NOT tolerate node.kubernetes.io/unreachable — a dead node's pod would linger and a failover-hold regression becomes a PERMANENT HA outage (#1099 review)"
+  grep -q 'node.kubernetes.io/not-ready' "$_f" && fail "$_f must NOT tolerate node.kubernetes.io/not-ready — see #1099 review (permanent-hold trap)"
+done
+grep -q 'NodeLost' ../gateway/internal/pswatcher/k8s.go || fail "pswatcher no longer classifies a NodeLost pod as a DEATH — a true node death would read as 'dependency degraded' and HOLD, regressing MTTR ~5x (#1099 review)"
+ok "60 pins the #1099 failover-trigger alert<->metric family, the freeze bound is in lockstep with the binary, and the storage plane stays un-tolerant of an unreachable node"
 grep -q 'alert: ComputeWakeStuck' 60-prometheus.yaml || fail "60 missing wake-path-stuck alert"
 # issue #39: demo end-to-end canary alert — dormant Failed-Job rule joined on the
 # demo-canary CronJob owner_name, same pattern as backup/wal-janitor.

@@ -23,9 +23,17 @@ type K8sClient struct {
 	genConfigMap    string
 	genKey          string
 	freezeConfigMap string
+	// primaryContainer is the container in the primary pageserver pod whose Running
+	// state is the liveness evidence (see containersRunning). Scoping by NAME means a
+	// future sidecar crashlooping is not misread as the pageserver process dying.
+	primaryContainer string
 }
 
 const genKeyDefault = "generation"
+
+// primaryContainerDefault is the pageserver container's name in
+// deploy/53-pageserver.yaml. Overridable via PSW_PRIMARY_CONTAINER.
+const primaryContainerDefault = "pageserver"
 
 // freezeUntilKey is the maintenance-freeze ConfigMap key holding the RFC3339 expiry.
 const freezeUntilKey = "until"
@@ -34,8 +42,13 @@ const freezeUntilKey = "until"
 // (in namespace) that persists the last-used generation under key "generation";
 // freezeConfigMap is the ConfigMap an admin/operator sets to pause failover during a
 // planned op (its "until" key is an RFC3339 expiry). Absence of the freeze CM means
-// "no freeze".
-func NewK8sClient(namespace, genConfigMap, freezeConfigMap string) (*K8sClient, error) {
+// "no freeze". primaryContainer names the pageserver container inside the primary pod
+// whose Running state is read as liveness evidence; empty falls back to
+// primaryContainerDefault.
+func NewK8sClient(namespace, genConfigMap, freezeConfigMap, primaryContainer string) (*K8sClient, error) {
+	if primaryContainer == "" {
+		primaryContainer = primaryContainerDefault
+	}
 	cfg, err := rest.InClusterConfig()
 	if err != nil {
 		loading := clientcmd.NewDefaultClientConfigLoadingRules()
@@ -48,15 +61,17 @@ func NewK8sClient(namespace, genConfigMap, freezeConfigMap string) (*K8sClient, 
 	if err != nil {
 		return nil, err
 	}
-	return &K8sClient{cs: cs, namespace: namespace, genConfigMap: genConfigMap, genKey: genKeyDefault, freezeConfigMap: freezeConfigMap}, nil
+	return &K8sClient{cs: cs, namespace: namespace, genConfigMap: genConfigMap, genKey: genKeyDefault, freezeConfigMap: freezeConfigMap, primaryContainer: primaryContainer}, nil
 }
 
 // FailoverFreeze reads the maintenance-freeze ConfigMap. present=false when the CM is
 // absent or carries no "until" value (no freeze). The returned `until` is the raw
 // RFC3339 expiry the admin/operator set and `createdAt` is the CM's creation time;
 // the Controller applies the TTL clamp so the bound is unit-tested. A malformed
-// "until" is surfaced as an error (loud) rather than silently ignored — a freeze the
-// operator meant to set must not fail open.
+// "until" is surfaced as an ERROR rather than silently ignored — but the error is a
+// REPORT, not a verdict: the Controller treats it as "no freeze" (HA stays ON) and
+// counts it (pswatcher_freeze_read_errors_total), because a permanent parse error
+// aborting every tick would silently disable HA altogether (#1099 review, FIX 1).
 func (k *K8sClient) FailoverFreeze(ctx context.Context) (time.Time, time.Time, bool, error) {
 	cm, err := k.cs.CoreV1().ConfigMaps(k.namespace).Get(ctx, k.freezeConfigMap, metav1.GetOptions{})
 	if err != nil {
@@ -121,6 +136,11 @@ func (k *K8sClient) DeletePods(ctx context.Context, selector string) (int, error
 // /v1/status) is failing because a DEPENDENCY degraded (object-store creds
 // mid-rotation), not a dead node. A container that is Waiting (CrashLoopBackOff) or
 // Terminated reports running=false — a genuine death.
+//
+// A NODE-LOST pod reports BOTH bits false regardless of what its status says: with no
+// kubelet left to write status, `ready` and `containerStatuses` are frozen at whatever
+// they last were, so trusting them would read a dead node as either "healthy" (a
+// suspected partition, forever) or "degraded" (a hold, forever). See nodeLost.
 func (k *K8sClient) PodReady(ctx context.Context, selector string) (bool, bool, bool, error) {
 	list, err := k.cs.CoreV1().Pods(k.namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
 	if err != nil {
@@ -135,7 +155,13 @@ func (k *K8sClient) PodReady(ctx context.Context, selector string) (bool, bool, 
 		if p.DeletionTimestamp != nil || p.Status.Phase != corev1.PodRunning {
 			continue
 		}
-		if containersRunning(p) {
+		if nodeLost(p) {
+			// Stale status from a node with no kubelet: neither bit may be trusted.
+			// Leave running as-is (false unless another pod is genuinely running) and
+			// never return ready=true off a frozen condition.
+			continue
+		}
+		if containersRunning(p, k.primaryContainer) {
 			running = true
 		}
 		for _, cond := range p.Status.Conditions {
@@ -147,14 +173,64 @@ func (k *K8sClient) PodReady(ctx context.Context, selector string) (bool, bool, 
 	return false, true, running, nil // present but not ready
 }
 
-// containersRunning reports whether EVERY container in the pod is in the Running
-// state. A single container that is Waiting (CrashLoopBackOff / ImagePullBackOff) or
+// nodeLost reports whether the pod's status is STALE because its node stopped
+// reporting — a true node death (#1099 FIX 2).
+//
+// This is the failure mode the container-running discrimination would otherwise invert
+// into an outage: when a node dies there is no kubelet to update pod status, so
+// `containerStatuses` stays frozen at `Running` indefinitely. The naive read is
+// "process alive ⇒ dependency degraded ⇒ HOLD", which defers recovery until
+// taint-based eviction (~5.5 min on cluster defaults, versus ~40s before #1099) — and
+// with an `unreachable` toleration on the storage plane, defers it FOREVER: a silent,
+// permanent HA outage. (deploy/_validate.sh asserts the storage plane carries no such
+// toleration so the permanent variant cannot be introduced silently.)
+//
+// The node-lifecycle controller is the vantage: it marks the pods of an unreachable
+// node `Ready=False` with reason `NodeLost` (and the node itself `Ready=Unknown` with
+// reason `NodeStatusUnknown`); some paths stamp `pod.status.reason = NodeLost`. Any of
+// those means the Running status is not evidence of anything, so we classify it as a
+// DEATH — the direction that promotes and restores reads.
+func nodeLost(p *corev1.Pod) bool {
+	if p.Status.Reason == "NodeLost" || p.Status.Reason == "NodeStatusUnknown" {
+		return true
+	}
+	for _, cond := range p.Status.Conditions {
+		if cond.Type != corev1.PodReady || cond.Status != corev1.ConditionFalse {
+			continue
+		}
+		if cond.Reason == "NodeLost" || cond.Reason == "NodeStatusUnknown" {
+			return true
+		}
+	}
+	return false
+}
+
+// containersRunning reports whether the PAGESERVER container (by name) is in the
+// Running state. A container that is Waiting (CrashLoopBackOff / ImagePullBackOff) or
 // Terminated makes the process "not running" — the death signal the failover trigger
-// promotes on. An empty container-status list (status not yet reported) is NOT
-// treated as running: we only assert liveness on positive evidence.
-func containersRunning(p *corev1.Pod) bool {
+// promotes on.
+//
+// Two deliberate fail-to-"not running" cases, both because we only assert liveness on
+// POSITIVE evidence:
+//   - an empty container-status list (status not yet reported);
+//   - a `primary` name that matches nothing in the status list (a renamed container /
+//     misconfigured PSW_PRIMARY_CONTAINER). Failing this way costs the discrimination
+//     — i.e. the pre-#1099 posture of promoting on a degradation — whereas the other
+//     direction would fabricate liveness and could HOLD through a real death forever.
+//
+// Scoping by name means a future SIDECAR crashlooping is not read as the pageserver
+// process dying. `primary` empty falls back to "every container must be Running".
+func containersRunning(p *corev1.Pod, primary string) bool {
 	if len(p.Status.ContainerStatuses) == 0 {
 		return false
+	}
+	if primary != "" {
+		for _, cs := range p.Status.ContainerStatuses {
+			if cs.Name == primary {
+				return cs.State.Running != nil
+			}
+		}
+		return false // the configured container is not in the status list
 	}
 	for _, cs := range p.Status.ContainerStatuses {
 		if cs.State.Running == nil {

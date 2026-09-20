@@ -26,6 +26,12 @@ type Metrics struct {
 	FailoverFrozenVal          int   `json:"failover_frozen"`                  // 1 = a maintenance freeze is ACTIVE (planned op in progress) — failover is deliberately suppressed. Alert on this being 1 for longer than the planned window.
 	FailoverFreezeSuppressed   int   `json:"failover_freeze_suppressed_total"` // times a failover that WOULD have fired was suppressed because a maintenance freeze was active.
 	FailoverFreezeExpirySecond int64 `json:"failover_freeze_expiry_seconds"`   // unix seconds at which the active freeze expires (0 when none) — lets alerting compute time-remaining and notice a freeze that has lapsed or is stuck.
+	// FreezeReadErrorsTotal counts ticks on which the maintenance-freeze state could
+	// NOT be established — the ConfigMap was unreadable, its `until` was not RFC3339,
+	// or it carried no createdAt to clamp against. Each of those is treated as NO
+	// freeze (HA stays ON — fail-SAFE), which means an operator's freeze may silently
+	// not be in effect. That has to be loud, hence a counter with its own alert.
+	FreezeReadErrorsTotal int `json:"freeze_read_errors_total"`
 	// FailoverReasonVal is the classification of the LAST completed failover:
 	// "node_death" once the watcher has confirmed a genuine death and promoted.
 	// Rendered as a labeled sample pswatcher_failover_reason{reason="..."} 1 so a
@@ -189,6 +195,24 @@ func (m *Metrics) FreezeSuppressedCount() int {
 	return m.FailoverFreezeSuppressed
 }
 
+// FreezeReadError counts one tick whose maintenance-freeze state could not be
+// established (unreadable ConfigMap, malformed `until`, or a freeze with no createdAt
+// to clamp against). The watcher then treats it as NO freeze and keeps HA ON — the
+// fail-SAFE direction — so this counter is the ONLY signal that an operator's freeze
+// is not actually in effect. Alert on it (PswatcherFreezeUnreadable).
+func (m *Metrics) FreezeReadError() {
+	m.mu.Lock()
+	m.FreezeReadErrorsTotal++
+	m.mu.Unlock()
+}
+
+// FreezeReadErrors returns the freeze-read-error count (tests).
+func (m *Metrics) FreezeReadErrors() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.FreezeReadErrorsTotal
+}
+
 // SetFailoverReason records the classification of the failover that just completed
 // (e.g. "node_death"), exposed as pswatcher_failover_reason{reason="..."} 1.
 func (m *Metrics) SetFailoverReason(reason string) {
@@ -236,9 +260,10 @@ func (m *Metrics) PromText() string {
 			"pswatcher_dependency_degraded_total %d\n"+
 			"pswatcher_failover_frozen %d\n"+
 			"pswatcher_failover_freeze_suppressed_total %d\n"+
-			"pswatcher_failover_freeze_expiry_seconds %d\n",
+			"pswatcher_failover_freeze_expiry_seconds %d\n"+
+			"pswatcher_freeze_read_errors_total %d\n",
 		m.PromotionsTotal, m.ChecksTotal, m.PrimaryUpVal, m.FailedOverVal, m.SuspectedPartitionsTotal, m.PrimaryNeverSeenTotal, m.TenantAbsentTotal, m.LedgerHealErrorsTotal,
-		m.DependencyDegradedTotal, m.FailoverFrozenVal, m.FailoverFreezeSuppressed, m.FailoverFreezeExpirySecond,
+		m.DependencyDegradedTotal, m.FailoverFrozenVal, m.FailoverFreezeSuppressed, m.FailoverFreezeExpirySecond, m.FreezeReadErrorsTotal,
 	)
 	// The classification of the last failover is a LABELED sample so a scraper can
 	// prove the watcher discriminated node-death from a non-death event. Emitted only

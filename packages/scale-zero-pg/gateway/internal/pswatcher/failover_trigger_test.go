@@ -5,6 +5,9 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // T5 (#1099) — the failover TRIGGER must discriminate a recoverable dependency
@@ -240,21 +243,123 @@ func TestFreshFreezeWithinClampIsActive(t *testing.T) {
 	}
 }
 
-// A freeze-read error must abort the tick (fail loud) rather than silently deciding
-// the freeze state — consistent with how the second-vantage read fails closed.
-func TestFreezeReadErrorAbortsTick(t *testing.T) {
+// (f) FIX 1 — a freeze-read error must be FAIL-SAFE, never fail-open-to-outage.
+//
+// The pre-fix code ABORTED the tick on any freeze-read error, which returned BEFORE
+// the prober / PodReady / failover path ran. A PERMANENT error (the classic being a
+// malformed `until` — see TestMalformedFreezeUntilDoesNotDisableHA) therefore disabled
+// HA forever, froze pswatcher_primary_up at its last value, and fired no alert: the
+// exact fat-finger this feature claims to bound, failing OPEN to an outage.
+//
+// The contract now: an unreadable/invalid freeze is treated as NO freeze — HA stays
+// ON, the tick completes, and the error is COUNTED (pswatcher_freeze_read_errors_total)
+// so the blind freeze read is alertable. A transient error skipping the freeze for one
+// tick is the low-risk direction; a permanent one silently disabling HA is not.
+func TestFreezeReadErrorKeepsHAOnAndCounts(t *testing.T) {
 	k8s := &fakeK8s{
 		selectorApp: "pageserver", gen: 1, genSet: true,
-		primaryPresent: true, primaryReady: false, primaryRunning: false,
+		primaryPresent: true, primaryReady: false, primaryRunning: false, // genuine death
 		freezeErr: errors.New("apiserver unreachable"),
 	}
 	c, promoter := freezeControllerAt(time.Now(), k8s)
 
-	if _, err := c.Tick(context.Background()); err == nil {
-		t.Fatal("an unreadable freeze ConfigMap must surface an error, not be treated as 'no freeze'")
+	fo, err := c.Tick(context.Background())
+	if err != nil {
+		t.Fatalf("an unreadable freeze must NOT abort the tick (that disables HA): %v", err)
 	}
-	if len(promoter.calls) != 0 {
-		t.Fatalf("must not promote while the freeze state is unknown: %v", promoter.calls)
+	if !fo {
+		t.Fatal("HA must stay ON when the freeze state cannot be read — a genuine death still fails over")
+	}
+	if len(promoter.calls) != 1 {
+		t.Fatalf("expected exactly one promotion, got %v", promoter.calls)
+	}
+	if c.Metrics().FreezeReadErrors() == 0 {
+		t.Fatal("pswatcher_freeze_read_errors_total must count an unreadable/invalid freeze so a blind freeze read is alertable")
+	}
+	if c.Metrics().FailoverFrozen() != 0 {
+		t.Fatal("an unreadable freeze must publish frozen=0 (treated as no freeze), never a stale 1")
+	}
+}
+
+// (f') the same fail-safe posture, proven END TO END through the REAL K8sClient: a
+// fat-fingered `until` ("2026-09-20 12:00:00" — space, not `T`) in a real ConfigMap
+// must not disable HA. This is the precise incident shape FIX 1 exists for.
+func TestMalformedFreezeUntilDoesNotDisableHA(t *testing.T) {
+	ns := "scale-zero-pg"
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pageserver-0", Namespace: ns, Labels: map[string]string{"app": "pageserver"}},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			// container CRASHLOOPING ⇒ a genuine death the watcher must act on.
+			ContainerStatuses: []corev1.ContainerStatus{waitingCS("pageserver", "CrashLoopBackOff")},
+			Conditions:        []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}},
+		},
+	}
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "pageserver", Namespace: ns},
+		Spec:       corev1.ServiceSpec{Selector: map[string]string{"app": "pageserver"}},
+	}
+	genCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "pageserver-generation", Namespace: ns},
+		Data:       map[string]string{"generation": "1"},
+	}
+	freezeCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "pageserver-failover-freeze", Namespace: ns},
+		Data:       map[string]string{"until": "2026-09-20 12:00:00"}, // the fat-finger
+	}
+	k := newTestK8sClient(pod, svc, genCM, freezeCM)
+
+	promoter := &fakePromoter{}
+	c := NewController(&toggleProber{alive: false}, &toggleProber{alive: true}, promoter, k, Config{
+		Tenant:          "f0f0",
+		ClientService:   "pageserver",
+		StandbyApp:      "pageserver-standby",
+		ComputeSelector: "plane=compute",
+		PrimarySelector: "app=pageserver",
+		FailThreshold:   1,
+		BaseGeneration:  1,
+	}, NewMetrics())
+
+	fo, err := c.Tick(context.Background())
+	if err != nil {
+		t.Fatalf("a malformed freeze `until` must not abort the tick — that is a permanent, silent HA disable: %v", err)
+	}
+	if !fo {
+		t.Fatal("HA must stay ON despite a malformed freeze `until` — the primary is genuinely dead and must fail over")
+	}
+	if c.Metrics().FreezeReadErrors() == 0 {
+		t.Fatal("a malformed `until` must raise pswatcher_freeze_read_errors_total (the operator's freeze is NOT in effect — that has to be loud)")
+	}
+}
+
+// (g) FIX 5 — a freeze whose createdAt is ZERO cannot be TTL-clamped, so honouring its
+// raw `until` would be an unbounded, unclampable HA suppression (fail-open). Refuse it:
+// treat it as no freeze, count it as a freeze-read error, and keep HA on.
+func TestZeroCreatedAtFreezeIsRefused(t *testing.T) {
+	now := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
+	k8s := &fakeK8s{
+		selectorApp: "pageserver", gen: 1, genSet: true,
+		primaryPresent: true, primaryReady: false, primaryRunning: false, // genuine death
+		freezePresent: true, freezeUntil: now.Add(72 * time.Hour), // far future, unclampable
+		// freezeCreatedAt deliberately left as the zero time.
+	}
+	c, promoter := freezeControllerAt(now, k8s)
+
+	fo, err := c.Tick(context.Background())
+	if err != nil {
+		t.Fatalf("a zero-createdAt freeze must not abort the tick: %v", err)
+	}
+	if !fo {
+		t.Fatal("a freeze with no createdAt anchor cannot be TTL-bounded — it must be REFUSED, not honoured for 72h")
+	}
+	if len(promoter.calls) != 1 {
+		t.Fatalf("expected one promotion after refusing the unclampable freeze, got %v", promoter.calls)
+	}
+	if c.Metrics().FailoverFrozen() != 0 {
+		t.Fatal("a refused freeze must publish pswatcher_failover_frozen 0")
+	}
+	if c.Metrics().FreezeReadErrors() == 0 {
+		t.Fatal("a refused (unclampable) freeze must be counted so the operator learns their freeze is NOT in effect")
 	}
 }
 
