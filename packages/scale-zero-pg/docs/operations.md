@@ -1090,6 +1090,8 @@ outage. It is now **automatic**: a standing warm-Secondary standby plus the
 | `PSW_PRIMARY_SELECTOR` | `app=pageserver` | The primary pod the API-server second vantage reports on. |
 | `PSW_POLL_MS` / `PSW_FAIL_THRESHOLD` | `2000` / `3` | Probe interval and consecutive misses before the promote decision is consulted. |
 | `PSW_BASE_GENERATION` | `1` | The generation floor for a genuinely fresh plane. It is a **floor, never a fallback** — an absent ledger is recovered from the routed view or the operation refuses (see below). |
+| `PSW_FREEZE_CONFIGMAP` | `pageserver-failover-freeze` | The ConfigMap that, when present with an RFC3339 `until` key, **pauses failover** for a planned op. Absent ⇒ no freeze. See the maintenance-freeze runbook below. |
+| `PSW_MAX_FREEZE_MS` | `7200000` (2 h) | Hard TTL bound on any freeze: the effective expiry is `min(until, createdAt + this)`, so a stuck/fat-fingered freeze cannot silently disable HA indefinitely. |
 
 #### When a routed tenant is not on the standby
 
@@ -1158,7 +1160,8 @@ kubelet's independent view) about the primary pod (`PSW_PRIMARY_SELECTOR`, defau
 | Our HTTP probe | API server (kubelet) says | Decision |
 | --- | --- | --- |
 | fails ≥ threshold | pod **Running & Ready** | **HOLD** — this is a watcher-side partition, not primary death. No promotion; `pswatcher_suspected_partitions_total` increments; the standby is preserved. |
-| fails ≥ threshold | pod **NotReady** | **PROMOTE** — the primary is genuinely unhealthy. |
+| fails ≥ threshold | pod **NotReady**, container **still Running** | **HOLD** — a *dependency* degraded (e.g. object-store creds mid-rotation), the process is alive. No promotion; `pswatcher_dependency_degraded_total` increments; the standby is preserved (#1099, see below). |
+| fails ≥ threshold | pod **NotReady**, container **not Running** (crashed/Terminated/CrashLoopBackOff) | **PROMOTE** — the primary process is genuinely down. |
 | fails ≥ threshold | pod **absent**, primary **was** seen present before | **PROMOTE** — a pod we were demonstrably watching has vanished. |
 | fails ≥ threshold | pod **absent**, primary was **never** seen present | **HOLD** — `present=false` here is more likely a mis-typed/drifted `PSW_PRIMARY_SELECTOR` (or an RBAC empty list) than a death. `pswatcher_primary_never_seen_total` increments; the standby is preserved (#58). *Exception:* if the generation ledger already shows a prior promotion (`gen > base`), a restarted watcher **resumes** and promotes — an advanced ledger is independent evidence a failover was warranted. |
 | fails ≥ threshold | **API unreachable** | **HOLD** — can't corroborate; refuse to promote on a single vantage (a `tick error` is logged and retried). |
@@ -1186,6 +1189,91 @@ second-vantage check then absorbs any watcher-only partition of arbitrary durati
 (the standby is never consumed while the kubelet still sees the primary Ready). Raise
 the threshold to trade failover RTO for more blip tolerance on the *primary's own*
 readiness flaps; the second vantage already covers the watcher-side ones.
+
+#### The failover trigger — dependency-degradation vs node-death (#1099)
+
+A failover must fire on a **dead pageserver process**, never on a **recoverable
+dependency degradation**. These looked identical to the pre-#1099 trigger because the
+pageserver's readiness *and* liveness probes both hit `/v1/status`: when object storage
+degrades (for example a MinIO→GCS credential switch mid-rotation), `/v1/status` fails,
+the pod goes **NotReady**, and the watcher's HTTP probe fails — even though the process
+is perfectly alive. Treating that as death caused a needless failover and a split-brain.
+
+The watcher now discriminates using the primary pod's **container state** (from the API
+server — no new probe, no object-store credentials in the watcher):
+
+- **container Running but NotReady** ⇒ the process is up and a *dependency* is degraded.
+  The watcher **holds**, keeps the only standby, and increments
+  `pswatcher_dependency_degraded_total` (alert `PswatcherDependencyDegraded`). The
+  degradation recovers on its own; no failover.
+- **container not Running** (Terminated / CrashLoopBackOff / pod gone) ⇒ genuine death.
+  The watcher promotes and publishes `pswatcher_failover_reason{reason="node_death"}`.
+
+**Why holding a live-but-degraded process is safe.** A pageserver that is genuinely
+*hung* (process up, serving nothing) is caught by its **own** `livenessProbe`, which
+restarts the container; a restart that does not fix it becomes CrashLoopBackOff — the
+container is then **not Running**, and the rule above promotes. So discrimination adds
+at most the liveness window (~60 s on the shipped probe) to a true hang, and never a
+permanent miss. See ADR-0011 for the full trade-off.
+
+#### Maintenance freeze — pausing failover for a planned op (#1099)
+
+Some planned operations legitimately take the primary offline — a credential rotation
+that restarts the pageserver pod, an object-store migration. During those, even the
+container-state discrimination above cannot tell the planned restart from a crash, so
+you tell the watcher explicitly: set a **maintenance freeze**.
+
+A freeze is a ConfigMap the watcher reads every tick. While active it **suppresses
+failover — even on a confirmed death**.
+
+**Set a freeze** (expires automatically at `until`):
+
+```sh
+# freeze failover for the next 30 minutes while rotating object-store creds
+kubectl -n scale-zero-pg create configmap pageserver-failover-freeze \
+  --from-literal=until="$(date -u -d '+30 min' +%Y-%m-%dT%H:%M:%SZ)" \
+  --from-literal=reason="minio->gcs object-store credential rotation"
+```
+
+`until` is an **RFC3339 absolute timestamp** (UTC). `reason` is free text (logged).
+
+**Clear a freeze** as soon as the op is done — do not rely on the TTL:
+
+```sh
+kubectl -n scale-zero-pg delete configmap pageserver-failover-freeze
+```
+
+**Why a freeze is safe (a stuck freeze cannot silently kill HA).** A freeze is bounded
+three ways:
+
+1. **Absolute expiry** — it lapses at `until` on its own; a forgotten freeze still ends.
+2. **Hard TTL clamp** — the *effective* expiry is `min(until, createdAt + PSW_MAX_FREEZE_MS)`
+   (default **2 h**). A fat-fingered far-future `until` cannot disable HA beyond the bound.
+3. **Alerting** — `pswatcher_failover_frozen` is `1` while active (alert
+   `PswatcherFailoverFrozen` after 30 min); `pswatcher_failover_freeze_expiry_seconds`
+   is the effective expiry; and if a primary actually dies during a freeze,
+   `pswatcher_failover_freeze_suppressed_total` rises and `PswatcherFailoverSuppressedByFreeze`
+   pages (HA is now masking a real outage — clear the freeze or accept the read outage
+   until it lapses).
+
+**Using it during a cred rotation / object-store migration.**
+
+1. Set the freeze with a `reason` and a realistic `until` (a few minutes past your ETA).
+2. Perform the rotation/migration. If the pageserver restarts, no failover fires.
+3. Confirm the primary is healthy again (`pswatcher_primary_up == 1`).
+4. **Delete the freeze ConfigMap.** Confirm `pswatcher_failover_frozen` returns to `0`.
+
+Note the discrimination above already covers the *common* case where a cred rotation
+degrades the object store **without** restarting the process — you only need a freeze
+when the op will take the pageserver **process** down (a pod restart or replacement).
+
+**Config:** `PSW_FREEZE_CONFIGMAP` (default `pageserver-failover-freeze`) and
+`PSW_MAX_FREEZE_MS` (default `7200000`, 2 h) on `deploy/58-pswatcher.yaml`. Reading the
+freeze ConfigMap uses the watcher's existing `configmaps get` RBAC — no new grant.
+
+**Drill:** `deploy/_verify-failover-freeze.sh run` exercises the freeze gauge lifecycle
+and the discrimination metric surface non-destructively; `RUN_KILL=1` and `RUN_DEGRADE=1`
+add the (opt-in) behavioral suppression and object-store-degradation scenarios.
 
 #### Availability posture of the authority itself (#23)
 

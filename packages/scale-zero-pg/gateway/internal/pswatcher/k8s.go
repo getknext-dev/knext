@@ -25,10 +25,10 @@ type K8sClient struct {
 	freezeConfigMap string
 }
 
-const (
-	genKeyDefault  = "generation"
-	freezeUntilKey = "until" // RFC3339 absolute expiry of the maintenance freeze
-)
+const genKeyDefault = "generation"
+
+// freezeUntilKey is the maintenance-freeze ConfigMap key holding the RFC3339 expiry.
+const freezeUntilKey = "until"
 
 // NewK8sClient builds a client-go-backed K8sOps. genConfigMap is the ConfigMap
 // (in namespace) that persists the last-used generation under key "generation";

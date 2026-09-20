@@ -596,6 +596,9 @@ fi
 # VERDICT the fix must expose: after a genuine node-death failover the watcher must
 # publish a death-classification signal (pswatcher_failover_reason) on its metrics.
 # On main no such signal exists -> [T5] red; it greens when T5 adds discrimination.
+# The FULL behavioral non-death + freeze scenarios (assert NO failover fires) live in
+# the sibling drill deploy/_verify-failover-freeze.sh, which never kills the plane and
+# so can assert the suppression paths without a fail-back — see that script's header.
 PSW_IP="$($K get pod -l app=pswatcher -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || echo '')"
 T5_MET=""
 if [ -n "$PSW_IP" ]; then

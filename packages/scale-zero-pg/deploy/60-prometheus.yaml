@@ -464,6 +464,36 @@ data:
             annotations:
               summary: "pswatcher cannot read the routed pageserver generation view"
               description: "The ledger seed/heal vantage (PSW_ROUTED_BASE_URL) is unreachable, so a pruned or empty pageserver-generation ledger cannot self-recover and attaches fail closed. Check the `pageserver` client Service and the watcher's network path — see docs/operations.md#the-generation-ledger."
+          # (c2) a maintenance freeze is ACTIVE (#1099). An admin/operator paused
+          # failover for a planned op. This is intentional but SUPPRESSES HA — page-worthy
+          # if it outlives its window. Fires while frozen; the hard bound (PSW_MAX_FREEZE_MS)
+          # guarantees it clears even if the freeze CM is never removed.
+          - alert: PswatcherFailoverFrozen
+            expr: pswatcher_failover_frozen == 1
+            for: 30m
+            labels: { severity: warning }
+            annotations:
+              summary: "pageserver failover is FROZEN (maintenance pause active)"
+              description: "A pageserver-failover-freeze has suppressed automatic failover for >30m. If the planned op is done, clear the freeze (kubectl delete configmap pageserver-failover-freeze). While frozen a genuine primary death will NOT fail over — see docs/operations.md#maintenance-freeze."
+          # (c3) failover was SUPPRESSED by a freeze while the primary was actually
+          # down — the freeze is now masking a real outage. Critical: HA is paused AND
+          # a death occurred inside the window.
+          - alert: PswatcherFailoverSuppressedByFreeze
+            expr: increase(pswatcher_failover_freeze_suppressed_total[10m]) > 0
+            labels: { severity: critical }
+            annotations:
+              summary: "a real pageserver failover was SUPPRESSED by an active maintenance freeze"
+              description: "pswatcher confirmed a primary death but did NOT promote because a maintenance freeze is active. Reads are down until the freeze clears (PSW_MAX_FREEZE_MS bound) or you clear it manually. If this was not a planned kill, clear the freeze now — see docs/operations.md#maintenance-freeze."
+          # (c4) a promotion was WITHHELD because the primary process is alive but a
+          # dependency degraded (object-store creds mid-rotation) — the discrimination
+          # working as intended. Informational: repeated firings mean a flapping
+          # dependency worth investigating, NOT a failover.
+          - alert: PswatcherDependencyDegraded
+            expr: increase(pswatcher_dependency_degraded_total[15m]) > 0
+            labels: { severity: warning }
+            annotations:
+              summary: "pageserver dependency degraded (failover correctly withheld)"
+              description: "The primary pageserver process is running but a dependency (e.g. object storage) is degraded, so pswatcher held rather than failing over. Check the object-store backend and the pageserver logs — see docs/operations.md#the-failover-trigger."
           # (d) pageserver-standby not ready >5m: the warm standby that failover
           # promotes into is gone. Failover would have nothing to promote.
           - alert: PageserverStandbyNotReady
@@ -677,7 +707,7 @@ spec:
         # (prints the value to paste here). _validate.sh contract 27 fails if this drifts
         # from the ConfigMap data; _verify-drift.sh section E independently asserts every
         # shipped rule is LOADED in the live pod (/api/v1/rules).
-        ks-pg.dev/prometheus-config-sha256: "c128d2c2926e46f8dc9dd8491fb3757e839b28322ac38fbb7a17aed38f88887b"
+        ks-pg.dev/prometheus-config-sha256: "86ae2692e8f25cdd2ec38bfd1f6c6f83d31cc6d68bbab6b3f280278e5df6e971"
     spec:
       serviceAccountName: prometheus
       securityContext:
