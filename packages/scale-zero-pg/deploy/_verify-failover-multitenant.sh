@@ -10,8 +10,9 @@
 # only ever observe the single-tenant flip. It structurally cannot see the
 # multi-tenant split-brain that the live GKE run hit 2026-09-19:
 #
-#   The pswatcher (deploy/58) promotes ONLY the base tenant — PSW_TENANT_ID is
-#   compute-config.TENANT_ID and PSW_COMPUTE_SELECTOR is app=compute — then flips
+#   At the time of that run the pswatcher (deploy/58) promoted ONLY the base tenant
+#   (PSW_TENANT_ID = compute-config.TENANT_ID) and bounced only the base writer
+#   (PSW_COMPUTE_SELECTOR was app=compute; it is plane=compute now) — then flipped
 #   the `pageserver` Service selector to the standby. Every OTHER tenant (the
 #   `apps` tenant a0000…001 that owns every per-app timeline, and thus every
 #   per-app database) is NEVER re-attached on the promoted pageserver, yet the
@@ -484,9 +485,10 @@ for a in $T7_APPS; do
   fi
 done
 
-# --- [T3] computes bounced: no pre-failover compute pod survives. On main the
-#     pswatcher bounces only app=compute (base), so every per-app writer pod (and
-#     any RO/warm) that predates the failover is still there. -------------------
+# --- [T3] computes bounced: no pre-failover compute pod survives. Before the
+#     plane=compute selector shipped the pswatcher bounced only app=compute (base),
+#     so every per-app writer pod (and any RO/warm) that predated the failover was
+#     still there; the bounce now targets every compute. --------------------------
 survivors_check() {
   _cdl=$(( $(now) + PER_CHECK_BUDGET ))
   while : ; do
@@ -504,7 +506,7 @@ SURV="$(survivors_check)"
 if [ -z "$SURV" ]; then
   t_ok T3 "all pre-failover compute pods were bounced (base + per-app writers + RO)"
 else
-  t_fail T3 "UNBOUNCED COMPUTES: these compute pods predate the failover and survived:${SURV} — the pswatcher only bounces app=compute (base), leaving per-app/RO computes pointed at the dead pageserver. Fix: bounce every plane=compute + compute-ro pod on failover"
+  t_fail T3 "UNBOUNCED COMPUTES: these compute pods predate the failover and survived:${SURV} — the pswatcher bounce (PSW_COMPUTE_SELECTOR, plane=compute) did not reach them, so they are still pointed at the dead pageserver. Check PSW_COMPUTE_SELECTOR is plane=compute and that every compute stamps plane: compute on its POD TEMPLATE"
 fi
 
 # --- [T4] operator recovers with NO restart — DOWNSTREAM E2E CONFIRMATION of T2 ---

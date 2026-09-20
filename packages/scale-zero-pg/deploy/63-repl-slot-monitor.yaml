@@ -24,8 +24,11 @@
 #      ACTIVE slot's restart_lsn (never breaks live replication) and surfaces
 #      inactive-slot WAL (reclaimable, with the bound as backstop).
 #
-# SCOPE. A slot lives on a PUBLISHER (a writer, plane=compute — the RO pool
-# deliberately lacks that label). WAL only accrues while the publisher is AWAKE,
+# SCOPE. A slot lives on a PUBLISHER (a writer). EVERY compute carries
+# plane=compute — readers included, so the pageserver-failover bounce reaches them
+# — so publishers are selected as plane=compute,role!=ro: the read pools (compute-ro
+# and compute-ro-<app>) carry role: ro and are excluded by that clause, never by the
+# plane label. WAL only accrues while the publisher is AWAKE,
 # so inspecting Running writer pods is complete: a scaled-to-zero publisher
 # accrues no new WAL and holds no ACTIVE slot (active ⟹ a live walsender ⟹ awake).
 # DORMANT by design: on today's slot-free plane the query returns zero slots and

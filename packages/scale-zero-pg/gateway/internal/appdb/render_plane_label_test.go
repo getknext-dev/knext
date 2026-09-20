@@ -16,6 +16,12 @@ func TestRenderComputesCarryPlaneLabel(t *testing.T) {
 	writer := c.RenderDeployment(ComputeSpec{App: "shop", TenantID: "t", TimelineID: "tl"})
 	assertPlaneCompute(t, "per-app writer (RenderDeployment) object", writer.Labels)
 	assertPlaneCompute(t, "per-app writer (RenderDeployment) pod template", writer.Spec.Template.Labels)
+	// ...and the writer must NOT carry role=ro: that label is what the writer-only
+	// consumers (backup slot floor, repl-slot monitor, writer autoscaler) exclude on,
+	// so a writer wearing it drops out of its own WAL/slot protection silently.
+	if role := writer.Spec.Template.Labels["role"]; role == "ro" {
+		t.Errorf("per-app writer pod template carries role=%q — role: ro is the READER marker; a writer wearing it is excluded from the backup slot floor and the replication-slot monitor", role)
+	}
 
 	ro := c.RenderRODeployment(ROComputeSpec{App: "shop", TenantID: "t", TimelineID: "tl", MaxReplicas: 2})
 	assertPlaneCompute(t, "per-app RO (RenderRODeployment) object", ro.Labels)
