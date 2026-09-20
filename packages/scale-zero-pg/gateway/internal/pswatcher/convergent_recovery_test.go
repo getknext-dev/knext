@@ -323,3 +323,68 @@ func TestConvergeFailsSafeWhenViewUnavailable(t *testing.T) {
 		t.Fatal("converge_blocked_total must increment when the vantage cannot verify a routed tenant")
 	}
 }
+
+// T6 (#1100) branch coverage (D6 debt): inside the Promote-failure path, an
+// ErrTenantNotFound is COUNTED as unconverged and the loop CONTINUES with the other
+// tenants — it is never collected into the returned error. This is DISTINCT from the
+// view-reports-absent branch (TestConvergeCountsARoutedTenantTheVantageDoesNotHold): here
+// the routed view says the tenant IS present at the promoted pageserver, but the re-attach
+// PUT then 404s (a race with a detach, or a vantage/target disagreement).
+func TestConvergeCountsPromoteNotFoundAndContinues(t *testing.T) {
+	tenants := []string{"f0f0-base", "a000-apps"}
+	k8s := &fakeK8s{selectorApp: "pageserver-standby", gen: 2, genSet: true}
+	// Both tenants lagging AND present per the routed view — so converge WILL attempt a
+	// re-attach of each (the absent branch is not taken).
+	view := &fakeGenViewer{
+		gens:    map[string]int{"f0f0-base": 1, "a000-apps": 1},
+		present: map[string]bool{"f0f0-base": true, "a000-apps": true},
+	}
+	// The base tenant's re-attach PUT returns ErrTenantNotFound; the apps tenant succeeds.
+	promoter := &convergePromoter{view: view, notFound: map[string]bool{"f0f0-base": true}}
+	c := newControllerRouted(&toggleProber{alive: false}, &toggleProber{alive: true}, promoter, k8s, 1, tenants)
+	c.SetGenerationViewer(view)
+
+	if _, err := c.Tick(context.Background()); err != nil {
+		t.Fatalf("a Promote-time ErrTenantNotFound is COUNTED, not errored — the tick must not error: %v", err)
+	}
+	// The NotFound tenant was counted, never promoted; the other tenant STILL converged.
+	if got := promoter.perTenant["f0f0-base"]; len(got) != 0 {
+		t.Fatalf("the NotFound tenant must not be recorded promoted: %v", got)
+	}
+	if got := promoter.perTenant["a000-apps"]; len(got) != 1 || got[0] != 2 {
+		t.Fatalf("a Promote-NotFound on one tenant must NOT abandon the other — apps must converge at the ledger gen 2: %v", got)
+	}
+	if c.Metrics().ConvergeTenantAbsentCount() == 0 {
+		t.Fatal("a Promote-time ErrTenantNotFound must increment converge_tenant_absent_total (counted, not silent)")
+	}
+}
+
+// T6 (#1100) branch coverage (D6 debt): a per-tenant re-attach failure that is NOT
+// ErrTenantNotFound is COLLECTED and returned, but must never abandon the other routed
+// tenants — a base tenant that CAN converge is not held hostage by a failing sibling. The
+// existing converge-error test fails EVERY tenant; this one fails only the FIRST and proves
+// the SECOND still converges while the failure is surfaced.
+func TestConvergeCollectsPerTenantErrorWithoutAbandoningOthers(t *testing.T) {
+	tenants := []string{"f0f0-base", "a000-apps"}
+	k8s := &fakeK8s{selectorApp: "pageserver-standby", gen: 2, genSet: true}
+	view := &fakeGenViewer{
+		gens:    map[string]int{"f0f0-base": 1, "a000-apps": 1}, // both lagging + present
+		present: map[string]bool{"f0f0-base": true, "a000-apps": true},
+	}
+	// failFor:1 fails only the FIRST Promote call (the base tenant, iterated first) with a
+	// generic (non-NotFound) error; the apps tenant's call then succeeds.
+	promoter := &convergePromoter{view: view, failFor: 1}
+	c := newControllerRouted(&toggleProber{alive: false}, &toggleProber{alive: true}, promoter, k8s, 1, tenants)
+	c.SetGenerationViewer(view)
+
+	_, err := c.Tick(context.Background())
+	if err == nil {
+		t.Fatal("a per-tenant converge failure must be SURFACED (collected + returned), not swallowed")
+	}
+	if got := promoter.perTenant["a000-apps"]; len(got) != 1 || got[0] != 2 {
+		t.Fatalf("the failing base tenant must NOT abandon apps — apps must still converge at gen 2: %v", got)
+	}
+	if got := promoter.perTenant["f0f0-base"]; len(got) != 0 {
+		t.Fatalf("the base tenant's re-attach failed, so it must not be recorded converged: %v", got)
+	}
+}
