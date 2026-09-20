@@ -125,7 +125,7 @@ jobs:
           path: sbom/app-closure.cdx.json
           if-no-files-found: error
 
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       # Reproducible-build inputs: pin SOURCE_DATE_EPOCH to the commit time so
       # buildkit can rewrite layer timestamps deterministically (below). This is a
@@ -145,7 +145,7 @@ jobs:
       # accepts an OCI layout directory but not an OCI tarball.
       - name: Build image (local OCI layout — pushed after the Trivy gate)
         id: build
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: apps/file-manager/Dockerfile
@@ -448,13 +448,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       # Build into a LOCAL OCI-layout directory (never pushed — this job holds no
       # packages:write). Trivy scans this exact built layout below. tar=false
       # because Trivy's --input accepts an OCI layout directory, not a tarball.
       - name: Build the shipped runtime OS layer (local OCI layout)
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: ${{ matrix.file }}
