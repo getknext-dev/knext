@@ -118,6 +118,7 @@ a defect against that ticket). Grouped by theme.
 |---|---|---|
 | `_verify-storage.sh` | Storage plane Ready, compute serves Postgres, one-table data survives a compute pod kill (no volume, no restore). | (core DoD) |
 | `_verify-pageserver-failover.sh` | Two pageservers: kill A, promote B to `AttachedSingle`, marker still reads — measures failover RTO (~8s). | #1 #2 #3 #4 #25 |
+| `_verify-pswatcher-capability.sh` | Scrapes `pswatcher_build_info` off the **running** watcher pod and asserts the deployed binary advertises the required failover capabilities (routed-set, freeze) — a stale image reds instead of passing the source-only manifest checks. | (running-binary vs source) |
 | `_verify-restore.sh` | **Rehearsed DR** for the fixed platform tenant: back up, stand up a fresh plane in a throwaway ns, marker row readable. | (the every-round CRITICAL finding) |
 | `_verify-app-restore.sh` | Per-app (branch-per-app) DR: a **single app's Neon branch** restores end-to-end. | #1 #2 #97 · ADR-0003 |
 | `_verify-backup-portability.sh` | Backup + wal-janitor are **portable to a non-MinIO** OCI bucket (no MinIO split-brain). | #4 #21 #105 #120 |

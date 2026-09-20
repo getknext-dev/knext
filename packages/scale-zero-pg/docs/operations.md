@@ -1080,6 +1080,29 @@ outage. It is now **automatic**: a standing warm-Secondary standby plus the
   not discovered by listing `AppDatabase` CRs, and the pageserver generation view is an
   HTTP read.
 
+#### Verifying the DEPLOYED binary's capabilities (not just the manifest)
+
+The watcher also exposes `pswatcher_build_info{version,features} 1` on `:9091`. Its
+`features` label names the failover capabilities the **running** binary was built with —
+today `routed-set` (multi-tenant routed-set promotion) and `freeze` (the TTL-bounded
+maintenance freeze). This exists because the manifest can be right while the **image is
+stale**: the env-var contract checks in `deploy/_validate.sh` compare the manifest to the
+source tree, so they stay green even when `deploy/58-pswatcher.yaml` pins an old image
+that ignores those env vars. `pswatcher_build_info` lets you ask the pod what it can
+actually do — an image built before a capability existed cannot advertise it.
+
+Assert it against a live cluster with:
+
+```
+deploy/_verify-pswatcher-capability.sh run
+```
+
+It scrapes `/metrics` off the running pswatcher pod and fails if the gauge is absent (a
+pre-capability image) or if any required feature is missing. Override the required set
+with `REQUIRE_FEATURES="routed-set freeze"` and the port with `PSW_METRICS_PORT`. Each
+new capability entry is added to `metrics.go` in the same change that lands the
+capability, so this list tracks the code that ships.
+
 #### Watcher configuration (env on `deploy/58-pswatcher.yaml`)
 
 | Variable | Default | What it controls |

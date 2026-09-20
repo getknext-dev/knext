@@ -40,6 +40,44 @@ ok() {
 # for this block's failures.
 blockdone() { OK_MARK=$FAILURES; }
 
+# ---------------------------------------------------------------------------
+# D5 consolidation — ONE helper for the cross-file LOCKSTEP class.
+#
+# Several contracts assert "a value pulled from file A must equal the value pulled from
+# file B" (apps-tenant id across 58/83/57/provision-app.sh; PSW_MAX_FREEZE_MS in 58 vs
+# DefaultMaxFreezeDuration in watcher.go). They previously open-coded the compare, and
+# each open-coding is a place the both-halves defect can creep back in (a check that
+# passes when one side is EMPTY proves nothing). _lockstep_eq centralises it and fails
+# CLOSED: an empty/unreadable side is a BROKEN lockstep, never a silent pass (#797 class).
+#   $1 label      human name of the invariant
+#   $2 anchor-desc / $3 anchor-val   the source-of-truth side
+#   $4 side-desc  / $5 side-val      the dependent side
+# Records fail() and returns 1 on empty-either-side or mismatch; returns 0 on match.
+_lockstep_eq() {
+  __ls_l="$1"; __ls_ad="$2"; __ls_av="$3"; __ls_sd="$4"; __ls_sv="$5"
+  if [ -z "$__ls_av" ]; then
+    fail "$__ls_l: anchor $__ls_ad is empty/unreadable — lockstep cannot be asserted (fail-closed)"; return 1
+  fi
+  if [ -z "$__ls_sv" ]; then
+    fail "$__ls_l: $__ls_sd is empty/unreadable while anchor $__ls_ad=$__ls_av — lockstep cannot be asserted (fail-closed)"; return 1
+  fi
+  if [ "$__ls_av" != "$__ls_sv" ]; then
+    fail "$__ls_l BROKEN: $__ls_sd=$__ls_sv != $__ls_ad=$__ls_av"; return 1
+  fi
+  return 0
+}
+
+# _container_name_present <manifest> <name> — true iff <name> is a container name under
+# .spec.template.spec.containers[]. SCOPED via yq, deliberately NOT a whole-file grep:
+# the old `grep '- name: <x>'` matched a `- name:` under env: or volumes: too, so a
+# value naming an env var or a volume passed the container-name lockstep. Fails CLOSED
+# when yq is unavailable — the scope is the point, so we never silently fall back to the
+# loose match this replaces.
+_container_name_present() {
+  command -v yq >/dev/null 2>&1 || { fail "yq is required to scope the container-name lockstep to .spec.template.spec.containers[].name (D5); install yq"; return 1; }
+  yq e '.spec.template.spec.containers[].name' "$1" 2>/dev/null | grep -qxF "$2"
+}
+
 COMPLETED=0
 trap 'if [ "$COMPLETED" -ne 1 ]; then
   echo "FAIL: _validate.sh exited BEFORE evaluating all contracts (early death — the #797 class); $FAILURES failure(s) had been recorded up to this point" >&2
@@ -380,12 +418,12 @@ else
   # silently shrinks to the base tenant and a failover strands every per-app timeline.
   [ -n "$_psw_apps" ] \
     || fail "58-pswatcher.yaml is MISSING PSW_APPS_TENANT_ID while 83 sets APPDB_TENANT_ID=$_appdb_tenant — failover would promote ONLY the base tenant and strand every per-app database on the demoted pageserver (#1098)"
-  for _pair in "58:PSW_APPS_TENANT_ID:$_psw_apps" "57:APPS_TENANT_ID:$_sb_apps" "provision-app.sh:APPS_TENANT:$_prov_apps"; do
-    _f="${_pair%%:*}"; _rest="${_pair#*:}"; _k="${_rest%%:*}"; _v="${_rest#*:}"
-    [ -n "$_v" ] || continue # absence of 58's key is reported above; 57/provision are optional surfaces
-    [ "$_v" = "$_appdb_tenant" ] \
-      || fail "apps-tenant LOCK-STEP BROKEN: $_f $_k=$_v but 83 APPDB_TENANT_ID=$_appdb_tenant — the watcher/standby/provisioner would act on a tenant the operator never writes to (#1098)"
-  done
+  # Every PRESENT surface must equal the operator's anchor (83). 57/provision-app are
+  # optional surfaces (absence handled separately below); _lockstep_eq fails CLOSED on a
+  # present-but-empty value, so a corrupted-to-blank env can never pass by omission.
+  [ -n "$_psw_apps" ]  && _lockstep_eq "apps-tenant (58↔83)"        "83 APPDB_TENANT_ID" "$_appdb_tenant" "58 PSW_APPS_TENANT_ID"        "$_psw_apps"
+  [ -n "$_sb_apps" ]   && _lockstep_eq "apps-tenant (57↔83)"        "83 APPDB_TENANT_ID" "$_appdb_tenant" "57 APPS_TENANT_ID"            "$_sb_apps"
+  [ -n "$_prov_apps" ] && _lockstep_eq "apps-tenant (provision↔83)" "83 APPDB_TENANT_ID" "$_appdb_tenant" "provision-app.sh APPS_TENANT" "$_prov_apps"
   [ -n "$_sb_apps" ] \
     || fail "57-pageserver-standby.yaml is MISSING APPS_TENANT_ID — the standby is never warmed for the apps tenant, so failover aborts on its 404 (#1098)"
   ok "apps-tenant lock-step asserted: 58 PSW_APPS_TENANT_ID == 83 APPDB_TENANT_ID == 57 APPS_TENANT_ID == provision-app.sh APPS_TENANT ($_appdb_tenant)"
@@ -583,14 +621,20 @@ _psw_max_ms="$(grep -o 'PSW_MAX_FREEZE_MS, value: "[0-9][0-9]*"' 58-pswatcher.ya
 [ -n "$_psw_max_ms" ] || fail "58 must set PSW_MAX_FREEZE_MS (the hard bound on a maintenance freeze, #1099)"
 _psw_default_h="$(grep -o 'DefaultMaxFreezeDuration = [0-9]* \* time.Hour' ../gateway/internal/pswatcher/watcher.go | grep -o '[0-9]*' | head -1)"
 [ -n "$_psw_default_h" ] || fail "pswatcher DefaultMaxFreezeDuration is no longer an N*time.Hour literal — the PSW_MAX_FREEZE_MS lockstep check cannot read it (#1099 review)"
-[ "$_psw_max_ms" = "$((_psw_default_h * 3600000))" ] || fail "58 PSW_MAX_FREEZE_MS=${_psw_max_ms}ms != DefaultMaxFreezeDuration=${_psw_default_h}h — the documented freeze bound and the shipped bound have drifted (#1099 review)"
+# NOTE (D9): this is the SOURCE-side lockstep — it proves the manifest matches the code
+# in the tree, NOT the code in the DEPLOYED image. The running-binary freeze capability
+# is asserted by _verify-pswatcher-capability.sh, which scrapes pswatcher_build_info off
+# the live pod (a stale image reds there even while this source check stays green).
+[ -n "$_psw_default_h" ] && _lockstep_eq "PSW_MAX_FREEZE_MS↔DefaultMaxFreezeDuration" \
+  "watcher.go DefaultMaxFreezeDuration(ms)" "$((_psw_default_h * 3600000))" \
+  "58 PSW_MAX_FREEZE_MS(ms)" "$_psw_max_ms"
 # LOCKSTEP: PSW_PRIMARY_CONTAINER (58) names the pageserver container whose Running bit drives the
 # #1099 discrimination; it MUST equal a container name in 53-pageserver.yaml, or containersRunning
 # silently reads false forever and the discrimination reverts to the pre-#1099 promote-on-degradation
 # posture (the split-brain class) with green CI. A comment "keep in sync" is decoration; scan it.
 _psw_container="$(grep -o 'PSW_PRIMARY_CONTAINER, value: "[^"]*"' 58-pswatcher.yaml | sed -E 's/.*value: "([^"]*)"/\1/' | head -1)"
 [ -n "$_psw_container" ] || fail "58 must set PSW_PRIMARY_CONTAINER (the pageserver container whose Running bit the #1099 discrimination reads)"
-grep -qE "^[[:space:]]*- name: ${_psw_container}\$" 53-pageserver.yaml || fail "58 PSW_PRIMARY_CONTAINER=${_psw_container} is not a container name in 53-pageserver.yaml — containersRunning would read false forever and the #1099 discrimination silently reverts to promote-on-degradation (#1099 review)"
+_container_name_present 53-pageserver.yaml "$_psw_container" || fail "58 PSW_PRIMARY_CONTAINER=${_psw_container} is not a container name in 53-pageserver.yaml (.spec.template.spec.containers[].name) — containersRunning would read false forever and the #1099 discrimination silently reverts to promote-on-degradation (#1099 review). NB: this is yq-scoped to container names, so a matching env-var/volume name no longer satisfies it (D5)."
 # #1099 review (FIX 2): a node death freezes containerStatuses at Running (no kubelet),
 # which the discrimination would read as "degraded -> hold". pswatcher classifies
 # NodeLost/NodeStatusUnknown as a DEATH so recovery still fires — but an INFINITE
@@ -606,7 +650,16 @@ grep -q 'Reason == "NodeLost"' ../gateway/internal/pswatcher/k8s.go || fail "psw
 # AUTHORITATIVE behaviour guard is the unit test, which reds on any nodeLost() breakage. Assert the
 # test itself cannot silently vanish — impl broken => go test reds; test deleted => this reds.
 grep -q 'func TestPodReadyNodeLost' ../gateway/internal/pswatcher/k8s_test.go || fail "the NodeLost-is-a-death unit test (TestPodReadyNodeLost*) is gone — the node-death MTTR guarantee (#1099 review) is now unguarded"
-ok "60 pins the #1099 failover-trigger alert<->metric family, the freeze bound is in lockstep with the binary, and the storage plane stays un-tolerant of an unreachable node"
+# D9 running-binary capability signal — SOURCE integrity. The scrape-side assertion is
+# _verify-pswatcher-capability.sh (it reads pswatcher_build_info off the live pod); these
+# two lines keep the gauge from vanishing at the BUILD source, so the binary that ships
+# actually carries it. metrics.go must (a) emit the pswatcher_build_info gauge and (b)
+# declare the routed-set + freeze feature constants the drill matches on. Deleting either
+# reds here; the drill reds if a stale image lacks the gauge at runtime.
+grep -q 'pswatcher_build_info{' ../gateway/internal/pswatcher/metrics.go || fail "pswatcher metrics.go no longer emits pswatcher_build_info — the D9 running-binary capability signal is gone, so a stale image scrapes clean and _verify-pswatcher-capability.sh cannot tell it apart from a current one"
+grep -q 'FeatureRoutedSet = "routed-set"' ../gateway/internal/pswatcher/metrics.go || fail "pswatcher metrics.go no longer declares FeatureRoutedSet=\"routed-set\" — _verify-pswatcher-capability.sh matches on that feature label to prove the deployed binary carries #1098 routed-set failover (D9)"
+grep -q 'FeatureFreeze = "freeze"' ../gateway/internal/pswatcher/metrics.go || fail "pswatcher metrics.go no longer declares FeatureFreeze=\"freeze\" — _verify-pswatcher-capability.sh matches on that feature label to prove the deployed binary carries the #1099 maintenance-freeze capability (D9)"
+ok "60 pins the #1099 failover-trigger alert<->metric family, the freeze bound is in lockstep with the binary, the D9 build_info capability gauge is present in metrics.go, and the storage plane stays un-tolerant of an unreachable node"
 # FAILURE-DOMAIN PLACEMENT (sprint-close C3, ADR-0012). The #1099 node-death carve-out
 # assumes the promotion target and the observer SURVIVE the node death. That only holds if
 # the placement is asserted: without anti-affinity the standby can co-schedule with the
