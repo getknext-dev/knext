@@ -606,6 +606,14 @@ grep -q 'Reason == "NodeLost"' ../gateway/internal/pswatcher/k8s.go || fail "psw
 # AUTHORITATIVE behaviour guard is the unit test, which reds on any nodeLost() breakage. Assert the
 # test itself cannot silently vanish — impl broken => go test reds; test deleted => this reds.
 grep -q 'func TestPodReadyNodeLost' ../gateway/internal/pswatcher/k8s_test.go || fail "the NodeLost-is-a-death unit test (TestPodReadyNodeLost*) is gone — the node-death MTTR guarantee (#1099 review) is now unguarded"
+# The failover ABSENCE detector must be the STANDBY GET generation view, not the PUT: the
+# live pageserver's PUT location_config returns 200 and ATTACHES a phantom empty tenant for
+# a tenant it does not hold (never 404s), so failover() must consult the standby view before
+# every attach or an un-warmed standby fails SILENTLY and every per-app DB is served an empty
+# tenant (ADR-0010 §5, D2). Assert the wiring AND the pre-flight, then anchor on the unit test.
+grep -q 'SetStandbyGenerationViewer' ../gateway/cmd/pswatcher/main.go || fail "cmd/pswatcher no longer wires the STANDBY generation view (SetStandbyGenerationViewer) — failover would fall back to the dead PUT-404 detector and PUT a phantom empty tenant onto an un-warmed standby (ADR-0010 §5, D2)"
+grep -q 'c.standbyViewer.Generation' ../gateway/internal/pswatcher/watcher.go || fail "failover() no longer reads the standby generation view before attaching — the phantom-attach split-brain (ADR-0010 §5, D2) is unguarded"
+grep -q 'func TestFailoverAbortsWhenStandbyLacksTenantDespitePut200' ../gateway/internal/pswatcher/phantom_attach_failover_test.go || fail "the phantom-attach abort unit test (D2, ADR-0010 §5) is gone — the standby pre-flight is now unguarded"
 ok "60 pins the #1099 failover-trigger alert<->metric family, the freeze bound is in lockstep with the binary, and the storage plane stays un-tolerant of an unreachable node"
 # FAILURE-DOMAIN PLACEMENT (sprint-close C3, ADR-0012). The #1099 node-death carve-out
 # assumes the promotion target and the observer SURVIVE the node death. That only holds if

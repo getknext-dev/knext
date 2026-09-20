@@ -1043,10 +1043,14 @@ outage. It is now **automatic**: a standing warm-Secondary standby plus the
      so the watcher re-attaches **all of them** — the base tenant (`PSW_TENANT_ID`) *and*
      the apps tenant (`PSW_APPS_TENANT_ID`, under which every per-app database is a
      timeline) — before the flip. Promoting only the base tenant would strand every
-     per-app database on the demoted pageserver (split-brain). Any promotion error
+     per-app database on the demoted pageserver (split-brain). Before each attach the
+     watcher confirms the standby actually holds the tenant (via the standby's `GET`
+     generation view, which `404`s a tenant it does not hold — the attach call cannot
+     tell, since it `200`-attaches a phantom empty tenant instead). Any promotion error —
+     or a standby that does not hold a routed tenant the routed vantage still holds —
      **aborts** the failover before the flip (retried each tick) so an existing tenant is
      never stranded — see "When a routed tenant is not on the standby" below for the
-     not-found case specifically.
+     not-held case specifically.
   2. **Persist** the advanced generation in the ledger ConfigMap — once, for the whole
      plane.
   3. **Flip** the `pageserver` Service selector to the standby, so the compute's
@@ -1088,7 +1092,7 @@ outage. It is now **automatic**: a standing warm-Secondary standby plus the
 | `PSW_APPS_TENANT_ID` | `a00…001` | The **apps** tenant, under which every per-app database is a timeline. Promoted alongside the base tenant. Omit only on a base-only plane. Must equal `APPDB_TENANT_ID` (83), `APPS_TENANT_ID` (57) and `APPS_TENANT` (`provision-app.sh`) — `deploy/_validate.sh` asserts this. |
 | `PSW_CLIENT_SERVICE` | `pageserver` | The client Service whose selector a failover flips. |
 | `PSW_ROUTED_BASE_URL` | `http://<PSW_CLIENT_SERVICE>:9898` | The **currently-routed** pageserver's management API. Used for the ledger seed/heal *and* as the second vantage that must corroborate a standby not-found. Deliberately follows routing rather than naming the primary: the primary is down during a failover and demoted after one, so a view read there returns the OLD (lower) generation. |
-| `PSW_STANDBY_BASE_URL` | `http://pageserver-standby:9898` | The promotion target. |
+| `PSW_STANDBY_BASE_URL` | `http://pageserver-standby:9898` | The promotion target **and** the vantage the watcher reads BEFORE each attach to confirm the standby actually holds a routed tenant. Its `GET /v1/tenant/<T>` answers `404` for a tenant it does not hold, so it — not the attach call — is the absence detector (the attach call returns `200` and attaches a phantom empty tenant even when the tenant is absent). |
 | `PSW_PRIMARY_SELECTOR` | `app=pageserver` | The primary pod the API-server second vantage reports on. |
 | `PSW_POLL_MS` / `PSW_FAIL_THRESHOLD` | `2000` / `3` | Probe interval and consecutive misses before the promote decision is consulted. |
 | `PSW_BASE_GENERATION` | `1` | The generation floor for a genuinely fresh plane. It is a **floor, never a fallback** — an absent ledger is recovered from the routed view or the operation refuses (see below). |
@@ -1098,11 +1102,13 @@ outage. It is now **automatic**: a standing warm-Secondary standby plus the
 
 #### When a routed tenant is not on the standby
 
-`PUT /v1/tenant/<T>/location_config` answering `404` means "**this** pageserver does not
-hold the tenant" — it is **not** evidence the tenant does not exist. Standby warming runs
-once, at deploy, so an app database provisioned afterwards is real and routed while the
-standby still 404s for it. The watcher therefore resolves a not-found by position and
-corroboration:
+Before each attach, the watcher asks the **standby's** `GET /v1/tenant/<T>` whether it
+holds the tenant. That GET answers `404` for a tenant the standby does not hold — it is
+**not** evidence the tenant does not exist. (The attach call itself cannot be used for
+this: it returns `200` and attaches a phantom empty tenant even for a tenant the standby
+does not hold, so it never signals "not held".) Standby warming runs once, at deploy, so
+an app database provisioned afterwards is real and routed while the standby still `404`s
+for it. The watcher therefore resolves a not-held tenant by position and corroboration:
 
 - **base tenant** → **abort**. Every compute reads through it; flipping would point them
   at a pageserver without their data. Reads stay on the (dead) primary and the failover

@@ -168,12 +168,31 @@ an upgrade into a manual runbook step. T1 handed the write/seed/heal side to thi
    goes Broken on use rather than stranding a real timeline, so it degrades legibility, not
    correctness.
 
-   **Follow-up (tech-debt, tracked):** either REMOVE the dead skip/corroborate-on-`404`
-   PUT path, or handle the phantom-attach case directly (detect a `200`-attach of an
-   empty/nonexistent tenant and treat it as a skip). The GET-viewer corroboration is
-   unaffected either way. Any change to the skip logic MUST re-verify against the live v1
-   API — the assumption this section replaced is proof that unit tests, which fake exactly
-   these status codes, cannot close it.
+   **Severity correction (D2).** The "degrades legibility, not correctness" framing above
+   held only for the case where the apps tenant's timelines genuinely exist on the standby.
+   It is WRONG for the case that motivated the automatic-failover safety net in the first
+   place: a plane whose standby was **never warmed** for a routed (apps) tenant. There the
+   PUT `200`-attaches a **phantom EMPTY tenant** on the standby, `SetGeneration` advances,
+   the selector flips, and every per-app DB is then served an empty tenant while the real
+   timelines sit fenced on the demoted pageserver — a silent, all-counters-green
+   correctness failure worse than split-brain. The `404 → ErrTenantNotFound` detector that
+   was supposed to make an un-warmed standby fail LOUDLY is dead against the real
+   pageserver, so nothing aborted.
+
+   **Amendment (D2, 2026-09-20) — RESOLVED.** The absence detector is moved onto the
+   vantage that WORKS: the **GET standby generation view** (which `404`s correctly), not
+   the PUT (which `200`-attaches). `failover()` now consults a standby-pointed
+   `GenerationViewer` BEFORE every `PUT AttachedSingle`; a not-held tenant feeds the
+   EXISTING `skippable()` logic UNCHANGED (base aborts; a non-base tenant is skipped only
+   on a routed-vantage-corroborated absence, else aborts before the flip). This mirrors the
+   pattern `convergeFailover()` already used one function away. The `PUT-404 →
+   ErrTenantNotFound` mapping and `skippable()` are RETAINED as defence-in-depth for a
+   future pageserver image that restores the PUT `404` — the `404` is simply no longer the
+   ONLY detector. The GET-viewer corroboration path is unchanged. Wired in `cmd/pswatcher`
+   (`SetStandbyGenerationViewer`, pointed at `PSW_STANDBY_BASE_URL`) and asserted by
+   `deploy/_validate.sh`. Any future change to the skip logic MUST re-verify against the
+   live v1 API — the assumption this section replaced is proof that unit tests, which fake
+   exactly these status codes, cannot close it.
 
 ## Options considered
 
@@ -290,9 +309,14 @@ honest gap behind §1b's fail-closed default, not an oversight.
 - [x] C1: real `PUT`/`GET location_config` status codes OBSERVED on a live GKE pageserver
       and recorded in §5 — `GET` 404s on an unheld tenant (viewer corroboration valid),
       `PUT` 200-attaches (never 404s; the promoter's 404 skip branch is dead code).
-- [ ] Follow-up (tech-debt, from §5): remove the dead PUT-`404` skip/corroborate path OR
-      detect+skip the 200 phantom-attach of a declared-but-unprovisioned tenant. Any change
-      to the skip logic MUST re-verify against the live v1 API (unit tests fake the codes).
+- [x] Follow-up (tech-debt, from §5) — RESOLVED (D2, see the §5 amendment): the absence
+      detector moved onto the GET standby generation view (404-correct); `failover()`
+      consults it before every PUT and feeds a not-held tenant into the unchanged
+      `skippable()`. The PUT-`404`→`ErrTenantNotFound` path + `skippable()` retained as
+      defence-in-depth. Wired in `cmd/pswatcher` (`SetStandbyGenerationViewer`) + asserted
+      by `deploy/_validate.sh`; unit-tested (phantom-attach abort, base abort, corroborated
+      skip, unreadable-view abort) and mutation-proved. On-cluster re-verify still gated by
+      the C2 drill below.
 - [ ] C2: on-cluster verification via the full multi-tenant failover drill (owned by the
       drill task, #1101) on a recovered/clean plane.
 - [ ] Follow-up: make standby warm-Secondary registration reconciling rather than
