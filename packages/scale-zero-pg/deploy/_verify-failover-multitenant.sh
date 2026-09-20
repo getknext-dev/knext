@@ -238,6 +238,30 @@ PSQL() { # $1 tag  $2 dsn  $3 sql
   echo "$_out" | tail -1
 }
 
+# RETRY <tag> <dsn> <sql> — like PSQL but retries a POSITIVE connect a BOUNDED
+# number of times, the SAME cold-wake handling the sibling drills use
+# (_verify-perapp-ro.sh, _measure-ro-staleness.sh). A cold per-app compute wakes
+# 0->1 on the FIRST connect and compute_ctl applies the per-app role during boot,
+# so that first `select 1` can lose a race with the role-apply and fail transiently
+# even though the compute is coming up healthy (the documented cold-boot role race,
+# #132) — on a slow/ad-hoc cluster that is exactly what stranded this drill at
+# SETUP. Each attempt also resets the compute idle timer, so a later attempt hits
+# the fully-settled compute. A positive read retries; an ALL-attempts failure still
+# returns non-zero, so the caller's fail() keeps setup a hard failure. Distinct pod
+# name per attempt ($1-$_rt): a --restart=Never pod name cannot be reused.
+RETRY() { # $1 tag  $2 dsn  $3 sql -> echoes last output line; rc!=0 iff EVERY try failed
+  _rout=""
+  for _rt in 1 2 3 4 5 6; do
+    if _rout="$(PSQL "$1-$_rt" "$2" "$3" 2>/dev/null)"; then echo "$_rout"; return 0; fi
+    # NOTE: to stderr — RETRY's stdout is consumed via command substitution at the call
+    # site, so an in-loop info() on stdout would poison the captured value and fail the
+    # check on the first retry (the exact case this helper exists to survive).
+    info "  RETRY $1 attempt $_rt did not connect yet (cold wake / #132 role-apply settling) — retrying in 3s" >&2
+    sleep 3
+  done
+  return 1
+}
+
 # curl the pageserver *through the Service* by exec'ing inside the standby pod
 # (neon image ships curl; the pod resolves `pageserver` via cluster DNS, so the
 # request is Service-routed to whichever endpoint the Service currently selects —
@@ -281,27 +305,18 @@ for a in $T7_APPS; do
   [ -n "$TL" ] || fail "app '$a' has no per-app timeline (compute-config-$a) — is the apps plane initialized (provision-app.sh init-plane)?"
 done
 # Wake: connect through the apps gateway as the per-app role so the per-app
-# compute scales 0->1 (Active). A wake failure here is a setup failure.
-# The FIRST connection after a cold start races the wake (0->1 scale, page
-# fetch) and the per-app role apply (gateway "cold wake — settling" for #132).
-# On a slow cluster that first `select 1` can lose the race even though the
-# compute is coming up healthy, so retry within the idle window: each attempt
-# resets the idle timer, and a later attempt hits the fully-settled compute.
-# A wake that never succeeds across all attempts is still a hard setup failure.
+# compute scales 0->1 (Active). A wake failure here is a setup failure. The FIRST
+# connection after a cold start races the wake (0->1 scale, page fetch) and the
+# per-app role apply (the #132 cold-boot role race). RETRY absorbs that race the
+# same bounded way the sibling drills do (_verify-perapp-ro.sh wakes each app's
+# writer with RETRY for exactly this reason); an all-attempts failure is still a
+# hard setup failure.
 for a in $T7_APPS; do
   APPPW="$($K get secret "app-db-$a" -o jsonpath='{.data.PGPASSWORD}' 2>/dev/null | base64 -d 2>/dev/null || echo '')"
   [ -n "$APPPW" ] || fail "no app-db-$a Secret (PGPASSWORD) minted by provision-app — cannot wake app '$a'"
   DSN="postgres://app_$a:$APPPW@$APPS_GW:55432/$a?sslmode=disable"
-  woke=0
-  attempt=1
-  while [ "$attempt" -le 6 ]; do
-    if [ "$(PSQL "wake-$a-$attempt" "$DSN" 'select 1' 2>/dev/null)" = "1" ]; then woke=1; break; fi
-    info "  app '$a' wake attempt $attempt did not return Active yet (cold wake / #132 role-apply settling) — retrying in 5s"
-    attempt=$((attempt + 1))
-    sleep 5
-  done
-  [ "$woke" = "1" ] \
-    || fail "could not wake per-app compute for '$a' through $APPS_GW after 6 attempts — the app is not Active, so a failover assertion would be meaningless"
+  [ "$(RETRY "wake-$a" "$DSN" 'select 1')" = "1" ] \
+    || fail "could not wake per-app compute for '$a' through $APPS_GW after 6 bounded retries — the app is not Active (cold-wake role-apply race did not settle), so a failover assertion would be meaningless"
   ok "app '$a' woke Active (per-app compute up, tenant $APPS_TENANT timeline $TL)"
 done
 # Wake the base tenant too (rely on it + warm/ro as the incident did).
