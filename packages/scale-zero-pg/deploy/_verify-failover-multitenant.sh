@@ -253,7 +253,10 @@ RETRY() { # $1 tag  $2 dsn  $3 sql -> echoes last output line; rc!=0 iff EVERY t
   _rout=""
   for _rt in 1 2 3 4 5 6; do
     if _rout="$(PSQL "$1-$_rt" "$2" "$3" 2>/dev/null)"; then echo "$_rout"; return 0; fi
-    info "  RETRY $1 attempt $_rt did not connect yet (cold wake / #132 role-apply settling) — retrying in 3s"
+    # NOTE: to stderr — RETRY's stdout is consumed via command substitution at the call
+    # site, so an in-loop info() on stdout would poison the captured value and fail the
+    # check on the first retry (the exact case this helper exists to survive).
+    info "  RETRY $1 attempt $_rt did not connect yet (cold wake / #132 role-apply settling) — retrying in 3s" >&2
     sleep 3
   done
   return 1
