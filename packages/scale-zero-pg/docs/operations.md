@@ -1250,6 +1250,17 @@ reconcile rather than guess. Loss of warmth is visible per tenant on
 read the selector, resolve the standby, read membership, or register a Secondary counts on
 `pswatcher_standby_warm_errors_total` (alert `PswatcherStandbyWarmFailing`).
 
+**Is the safety net up? — `pswatcher_failover_armed`.** Rather than read the per-tenant and
+freeze gauges individually, watch the composite `pswatcher_failover_armed` gauge: it is `1`
+only when a primary death right now *would* promote — no maintenance freeze is suppressing
+it **and** the standby holds every routed tenant as a warm Secondary. A sustained `0`
+outside a planned freeze window means HA is not armed (alert `PswatcherFailoverNotArmed`,
+which excludes an intended freeze); the per-tenant `pswatcher_standby_tenant_warm` and the
+`pswatcher_failover_frozen` gauges say *which* precondition is missing. When a failover is
+attempted but aborts before flipping the client Service, `pswatcher_failover_aborted_total`
+counts it by cause (`reason="ledger_cas_lost"` means two writers contended during a
+partition; `reason="aborted"` is any other cause) and raises `PswatcherFailoverAborted`.
+
 **"Listed" is not "warm", and the watcher does not pretend otherwise.** A pageserver's
 listing shows a tenant held in *any* location mode. An ex-primary that restarts with its
 volume intact reloads the **attached** location it had before the failover, at its old
