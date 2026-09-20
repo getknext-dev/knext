@@ -105,10 +105,14 @@ spec:
       # co-scheduled with the primary (53): a node death that takes the primary must
       # leave a promotion target alive on a DIFFERENT node, or the #1099 node-death
       # carve-out has nothing to promote to. HARD (requiredDuringScheduling) — the
-      # promotion target's survival is the reason the standby exists. See ADR-0012.
-      # TRADEOFF (same as 53): a single-node dev cluster leaves this Pending; run ≥2
-      # nodes (GKE szpg-f5 has 3) to exercise HA, or scale this STS to 0 for a
-      # single-node smoke test.
+      # promotion target's survival is the reason the standby exists, and this is
+      # the ONLY hard half of the pair: 53 carries the soft mirror so the primary
+      # is always schedulable (see the comment there). See ADR-0012.
+      # TRADEOFF: on a SINGLE-node dev cluster this standby stays Pending whenever
+      # the primary already holds the node — acceptable, since node-death failover
+      # is meaningless on one node. The primary is never blocked. Run ≥2 nodes
+      # (GKE szpg-f5 has 3) to exercise HA, or scale this STS to 0 to silence the
+      # Pending pod on a single-node smoke test. Documented in README.md.
       affinity:
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:

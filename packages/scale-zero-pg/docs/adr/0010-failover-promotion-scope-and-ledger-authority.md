@@ -253,8 +253,10 @@ honest gap behind §1b's fail-closed default, not an oversight.
   assumes the promotion target and the observer SURVIVE the node death that triggers a
   failover. That assumption is only true if the standby (57) is never co-scheduled with the
   primary (53) and `pswatcher` (58) is not co-resident with the primary it watches. The
-  placement is enforced by anti-affinity on the pageserver plane (HARD) and pswatcher (SOFT),
-  asserted in `deploy/_validate.sh` in the same scan-not-comment style as the
+  placement is enforced by anti-affinity: HARD on the standby (57), SOFT on the primary (53)
+  and pswatcher (58) so neither can be rendered unschedulable — one hard side already makes
+  co-scheduling impossible. Asserted in `deploy/_validate.sh` (term type, `kubernetes.io/hostname`,
+  AND the repelled label value) in the same scan-not-comment style as the
   no-unreachable-toleration contract. See ADR-0012 for the reversible-outcome framing and the
   single-node dev tradeoff.
 

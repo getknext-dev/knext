@@ -612,16 +612,58 @@ ok "60 pins the #1099 failover-trigger alert<->metric family, the freeze bound i
 # the placement is asserted: without anti-affinity the standby can co-schedule with the
 # primary (and die with it), and pswatcher can be co-resident with the primary it watches.
 # Same enforcement stance as the no-unreachable-toleration block above — a comment is
-# decoration, so scan the manifests. pageserver plane (53/57): HARD (required) so the
-# promotion target cannot land on the primary's node; pswatcher (58): SOFT (preferred)
-# so the single-replica watcher stays schedulable on a single-node dev cluster.
-for _f in 53-pageserver.yaml 57-pageserver-standby.yaml; do
-  grep -q 'requiredDuringSchedulingIgnoredDuringExecution' "$_f" || fail "$_f must carry a HARD podAntiAffinity (requiredDuringSchedulingIgnoredDuringExecution) so the pageserver primary and warm standby never co-schedule — a node death would otherwise take the promotion target with the primary and the #1099 node-death failover has nothing to promote to (sprint-close C3 / ADR-0012)"
-  grep -q 'topologyKey: kubernetes.io/hostname' "$_f" || fail "$_f podAntiAffinity must key on kubernetes.io/hostname (per-node spread) — any other topologyKey does not separate the primary/standby by node (sprint-close C3 / ADR-0012)"
-done
-grep -q 'preferredDuringSchedulingIgnoredDuringExecution' 58-pswatcher.yaml || fail "58-pswatcher.yaml must carry a SOFT podAntiAffinity (preferredDuringSchedulingIgnoredDuringExecution) so the watcher prefers a different node from the primary it watches — a co-resident watcher dies with the node it must detect the death of (sprint-close C3 / ADR-0012)"
-grep -q 'topologyKey: kubernetes.io/hostname' 58-pswatcher.yaml || fail "58-pswatcher.yaml podAntiAffinity must key on kubernetes.io/hostname — any other topologyKey does not spread the watcher off the primary's node (sprint-close C3 / ADR-0012)"
-ok "failure-domain placement asserted (C3): 53/57 HARD anti-affinity keeps the primary and warm standby off the same node; 58 SOFT anti-affinity keeps pswatcher off the primary's node"
+# decoration, so scan the manifests. Placement stance, asymmetric ON PURPOSE:
+#   57 (standby)  HARD (required)  — the promotion target can never land on the primary's node;
+#   53 (primary)  SOFT (preferred) — a hard term on BOTH sides turns a single-node cluster into
+#                                    a scheduling race and can strand the primary permanently
+#                                    (IgnoredDuringExecution), so the primary stays schedulable;
+#   58 (watcher)  SOFT (preferred) — single-replica Recreate must stay schedulable on one node.
+# ASSERT THE TARGET, NOT JUST THE SHAPE (#1116 review): a check that only greps for
+# `requiredDuringScheduling…` + `topologyKey:` stays GREEN when the labelSelector is
+# corrupted to a value that matches NOTHING (values: ["pageserver-typo"]) or to the pod's
+# OWN label (self-repel) — i.e. green with zero separation, the repo's guard-both-halves
+# defect. So every check below asserts the matched VALUE, and scans the podAntiAffinity
+# BLOCK (not the whole file) so an unrelated topologySpreadConstraint elsewhere in the
+# manifest cannot satisfy it.
+# _anti_affinity_block <file>: prints the podAntiAffinity: sub-tree (comments stripped, so a
+# comment can never satisfy a contract), bounded by YAML indentation.
+_anti_affinity_block() {
+  awk '
+    /^[[:space:]]*podAntiAffinity:[[:space:]]*$/ && !inb { match($0, /[^ ]/); ind = RSTART; inb = 1; next }
+    inb {
+      if ($0 ~ /^[[:space:]]*$/) next
+      if ($0 ~ /^[[:space:]]*#/) next
+      match($0, /[^ ]/)
+      if (RSTART <= ind) { inb = 0; next }
+      print
+    }
+  ' "$1"
+}
+# <file> <hard|soft> <expected selector value> — one contract per manifest.
+_check_anti_affinity() {
+  _aaf="$1"; _aamode="$2"; _aaval="$3"
+  _aablk="$(_anti_affinity_block "$_aaf")"
+  [ -n "$_aablk" ] || { fail "$_aaf has no podAntiAffinity block at all — the C3 failure-domain separation (primary/standby/watcher never share a node) is unenforced (sprint-close C3 / ADR-0012)"; return; }
+  if [ "$_aamode" = hard ]; then
+    printf '%s\n' "$_aablk" | grep -q 'requiredDuringSchedulingIgnoredDuringExecution' || fail "$_aaf podAntiAffinity must be HARD (requiredDuringSchedulingIgnoredDuringExecution) — a soft preference can silently co-locate the promotion target with the primary under resource pressure, and a node death then has nothing to promote to (sprint-close C3 / ADR-0012)"
+  else
+    printf '%s\n' "$_aablk" | grep -q 'preferredDuringSchedulingIgnoredDuringExecution' || fail "$_aaf podAntiAffinity must be SOFT (preferredDuringSchedulingIgnoredDuringExecution) — a single-replica pod with a HARD term is unschedulable on a single-node dev cluster (sprint-close C3 / ADR-0012)"
+    printf '%s\n' "$_aablk" | grep -q 'requiredDuringSchedulingIgnoredDuringExecution' && fail "$_aaf podAntiAffinity must NOT be HARD — hard terms on BOTH the primary (53) and the standby (57) make a single-node cluster a scheduling race, and IgnoredDuringExecution can strand the primary Pending forever after a reschedule (#1116 review / ADR-0012)"
+    printf '%s\n' "$_aablk" | grep -q 'weight: 100' || fail "$_aaf soft podAntiAffinity must carry weight: 100 — an unweighted/low-weight preference is trivially outvoted by other scheduler priorities (sprint-close C3 / ADR-0012)"
+  fi
+  # THE HALF THAT WAS MISSING: what the term actually repels.
+  printf '%s\n' "$_aablk" | grep -qE "key: app,[[:space:]]*operator: In,[[:space:]]*values: \[\"${_aaval}\"\]" || fail "$_aaf podAntiAffinity must repel exactly app=${_aaval} — a selector naming anything else (a typo, or the pod's own label) matches no peer, so the term is a no-op and the primary/standby/watcher co-schedule with a GREEN validator (#1116 review / ADR-0012)"
+  printf '%s\n' "$_aablk" | grep -q 'topologyKey: kubernetes.io/hostname' || fail "$_aaf podAntiAffinity must key on kubernetes.io/hostname (per-node spread) — any other topologyKey does not separate the pods by NODE, which is the only failure domain the #1099 node-death carve-out is about (sprint-close C3 / ADR-0012)"
+}
+_check_anti_affinity 57-pageserver-standby.yaml hard pageserver
+_check_anti_affinity 53-pageserver.yaml soft pageserver-standby
+_check_anti_affinity 58-pswatcher.yaml soft pageserver
+# LOCKSTEP: the selector values above are only meaningful if they name REAL pod-template
+# labels. Renaming a pod's app label would otherwise leave every selector above matching
+# nothing while this file still reads green.
+grep -q 'labels: { app: pageserver, plane: storage }' 53-pageserver.yaml || fail "53-pageserver.yaml pod template no longer carries app=pageserver — the anti-affinity selectors in 57/58 that repel app=pageserver now match nothing (sprint-close C3 / ADR-0012)"
+grep -q 'labels: { app: pageserver-standby, plane: storage }' 57-pageserver-standby.yaml || fail "57-pageserver-standby.yaml pod template no longer carries app=pageserver-standby — the anti-affinity selector in 53 that repels app=pageserver-standby now matches nothing (sprint-close C3 / ADR-0012)"
+ok "failure-domain placement asserted (C3), target AND shape: 57 HARD-repels app=pageserver (the standby can never share the primary's node), 53/58 SOFT-repel their peers on kubernetes.io/hostname, and the repelled labels are real pod labels"
 grep -q 'alert: ComputeWakeStuck' 60-prometheus.yaml || fail "60 missing wake-path-stuck alert"
 # issue #39: demo end-to-end canary alert — dormant Failed-Job rule joined on the
 # demo-canary CronJob owner_name, same pattern as backup/wal-janitor.

@@ -119,8 +119,16 @@ the aggregate posture legible on a dashboard rather than latent across four coun
 - [x] Record the reversible-outcome invariant and cross-reference ADR-0010 / ADR-0011 (this
       ADR); ADR-0010's Consequences now points here for the placement + tradeoff framing.
 - [x] Failure-domain placement (ADR-0010's precondition, sprint-close C3): HARD anti-affinity
-      on the pageserver plane (53/57), SOFT on pswatcher (58), scanned by
-      `deploy/_validate.sh`.
+      on the standby (57) only, SOFT on the primary (53) and pswatcher (58), with the repelled
+      label VALUE — not just the term's shape — scanned by `deploy/_validate.sh`.
+      The asymmetry is itself an instance of this ADR's invariant: hard terms on BOTH sides of
+      the pair is the IRREVERSIBLE arrangement — on a single-node cluster whichever pod binds
+      first wins the only node, and `IgnoredDuringExecution` can then strand the PRIMARY Pending
+      forever after any reschedule, taking the data plane down to protect a standby that has
+      nothing to fail over to. One hard side gives the identical separation guarantee (the
+      standby can never be placed on the primary's node) while keeping the primary always
+      schedulable, so the failure mode is a Pending standby — visible, and reversible by adding
+      a node. Documented for users in `README.md`'s quickstart.
 - [ ] Follow-up: `pswatcher_failover_armed` composite gauge/alert (0 whenever any
       abort/suppress precondition holds), so the armed posture is legible before an incident.
 - [ ] Adopt the two-edge (code + verification) task-graph format so the drill-needs-recovery

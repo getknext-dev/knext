@@ -50,22 +50,26 @@ spec:
       # FAILURE-DOMAIN PLACEMENT (sprint-close C3). The primary and the warm
       # standby (57) must NOT share a node: on a node death — the exact case the
       # #1099 failover carve-out addresses — a co-scheduled standby dies WITH the
-      # primary and there is nothing to promote to. HARD (requiredDuringScheduling)
-      # because the promotion target's survival is the whole point of the standby;
-      # a soft preference could silently co-locate under resource pressure and
-      # defeat the node-death path with green CI. Symmetric with the same rule on
-      # 57 so whichever pod schedules second is repelled. See ADR-0012.
-      # TRADEOFF: on a SINGLE-node dev cluster (e.g. local orbstack) this leaves the
-      # standby Pending — acceptable, because node-death failover is meaningless on
-      # one node anyway. Run ≥2 nodes to exercise HA (GKE szpg-f5 has 3), or scale
-      # the standby STS to 0 for a single-node smoke test.
+      # primary and there is nothing to promote to.
+      # DELIBERATELY ASYMMETRIC: the HARD (requiredDuringScheduling) half lives on
+      # the STANDBY (57), whose survival is the entire point — it can never be
+      # placed on the primary's node, so the C3 separation guarantee holds from
+      # that one side alone. Here the term is SOFT (preferred, weight 100) so the
+      # PRIMARY is always schedulable. A hard term on BOTH sides makes a
+      # single-node cluster a scheduling race (whichever pod binds first wins the
+      # only node) and, worse, IgnoredDuringExecution would keep a standby parked
+      # on that node while the primary — after any reschedule, image upgrade or
+      # kubelet restart — could never come back, taking the whole dev data plane
+      # down. See ADR-0012.
       affinity:
         podAntiAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchExpressions:
-                  - { key: app, operator: In, values: ["pageserver-standby"] }
-              topologyKey: kubernetes.io/hostname
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - { key: app, operator: In, values: ["pageserver-standby"] }
+                topologyKey: kubernetes.io/hostname
       # neon:8464 runs as uid 1000 (neon). fsGroup 1000 keeps /data writable
       # for both the seed-config initContainer and the pageserver itself.
       securityContext:
