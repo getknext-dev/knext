@@ -14,7 +14,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 )
+
+// DefaultMaxFreezeDuration bounds a maintenance freeze: however far in the future an
+// admin sets the freeze's `until`, the watcher clamps the EFFECTIVE expiry to
+// createdAt+this, so a fat-fingered or forgotten freeze cannot silently disable HA
+// indefinitely. A planned cred rotation / object-store migration fits well inside it.
+const DefaultMaxFreezeDuration = 2 * time.Hour
 
 // ErrTenantNotFound is returned by a Promoter when the pageserver being promoted
 // does not hold the tenant. It is a NODE-LOCAL fact ("this pageserver does not hold
@@ -73,10 +80,27 @@ type K8sOps interface {
 	// SetGeneration persists the generation.
 	SetGeneration(ctx context.Context, gen int) error
 	// PodReady is the SECOND vantage on primary liveness (the kubelet's view via the
-	// API server, independent of the watcher's own HTTP path). It reports whether a
-	// pod matching selector is Running & Ready (ready) and whether any such pod
-	// exists at all (present). {present:false} ⇒ the primary pod is genuinely gone.
-	PodReady(ctx context.Context, selector string) (ready, present bool, err error)
+	// API server, independent of the watcher's own HTTP path). It reports:
+	//   - ready:   a pod matching selector is Running & Ready;
+	//   - present: any such pod exists at all ({present:false} ⇒ the pod is gone);
+	//   - running: the matching pod's container(s) are in the Running state (the
+	//     PROCESS is alive), regardless of the Ready condition.
+	// The `running` bit is what discriminates a dependency degradation from a node
+	// death (#1099): a pod that is present + NotReady + running is a live pageserver
+	// whose readiness probe (also /v1/status) is failing because a DEPENDENCY degraded
+	// — e.g. object-store creds mid-rotation — NOT a dead node. A pod that is present +
+	// NotReady + NOT running (container Terminated/Waiting/CrashLoopBackOff) is a
+	// genuine death. A true hang (process "running" but wedged) is converted into the
+	// latter by the pageserver's own livenessProbe, which restarts it into a crashloop.
+	PodReady(ctx context.Context, selector string) (ready, present, running bool, err error)
+
+	// FailoverFreeze reports the maintenance-freeze window an admin or the operator set
+	// to pause failover during a planned op (cred rotation, object-store migration).
+	// It returns the raw `until` expiry and the freeze's `createdAt`, plus present=false
+	// when no freeze is set. The Controller — not this method — decides "active" so the
+	// TTL clamp (min(until, createdAt+MaxFreeze)) is unit-tested: a stuck or fat-fingered
+	// freeze can never outlive MaxFreeze from when it was created (#1099).
+	FailoverFreeze(ctx context.Context) (until, createdAt time.Time, present bool, err error)
 }
 
 // Config is the watcher's static wiring.
@@ -95,6 +119,9 @@ type Config struct {
 	PrimarySelector string // label selector for the primary pageserver pod (second-vantage check)
 	FailThreshold   int    // consecutive failed probes before promoting
 	BaseGeneration  int    // generation the primary was attached at (storage-init: 1)
+	// MaxFreezeDuration bounds an active maintenance freeze (see DefaultMaxFreezeDuration).
+	// Zero or negative is clamped to DefaultMaxFreezeDuration in NewController.
+	MaxFreezeDuration time.Duration
 }
 
 // Controller runs one Tick per poll interval. It is single-goroutine by design;
@@ -108,6 +135,7 @@ type Controller struct {
 	cfg           Config
 	metrics       *Metrics
 	logger        func(format string, args ...any) // OPTIONAL diagnostics sink
+	now           func() time.Time                 // clock seam; time.Now in prod, fixed in tests
 
 	failures int
 	done     bool // failover already performed (or adopted) — never re-promote
@@ -138,12 +166,49 @@ func NewController(p, standby Prober, pr Promoter, k K8sOps, cfg Config, m *Metr
 	if cfg.BaseGeneration < 1 {
 		cfg.BaseGeneration = 1
 	}
+	if cfg.MaxFreezeDuration <= 0 {
+		cfg.MaxFreezeDuration = DefaultMaxFreezeDuration
+	}
 	// Default the routed-tenant set to the single base tenant (back-compat) when the
 	// caller did not enumerate it.
 	if len(cfg.Tenants) == 0 && cfg.Tenant != "" {
 		cfg.Tenants = []string{cfg.Tenant}
 	}
-	return &Controller{prober: p, standbyProber: standby, promoter: pr, k8s: k, cfg: cfg, metrics: m}
+	return &Controller{prober: p, standbyProber: standby, promoter: pr, k8s: k, cfg: cfg, metrics: m, now: time.Now}
+}
+
+// SetClock overrides the wall clock used to evaluate a maintenance freeze's TTL.
+// Kept off the constructor so existing callers are unaffected; tests inject a fixed
+// clock so the freeze-expiry boundary is deterministic.
+func (c *Controller) SetClock(now func() time.Time) { c.now = now }
+
+// nowT is the nil-safe clock accessor.
+func (c *Controller) nowT() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
+}
+
+// freezeActive reads the maintenance-freeze window and reports whether failover is
+// currently suppressed, along with the EFFECTIVE (clamped) expiry it publishes. The
+// TTL bound is applied HERE, not in K8sOps, so it is unit-tested: the effective
+// expiry is min(until, createdAt+MaxFreeze), so a freeze whose `until` is set far in
+// the future (fat-finger) or never cleared (stuck) still lapses at
+// createdAt+MaxFreeze — a stuck freeze cannot become a silent, unbounded HA outage.
+func (c *Controller) freezeActive(ctx context.Context) (active bool, effectiveUntil time.Time, err error) {
+	until, createdAt, present, ferr := c.k8s.FailoverFreeze(ctx)
+	if ferr != nil {
+		return false, time.Time{}, ferr
+	}
+	if !present {
+		return false, time.Time{}, nil
+	}
+	eff := until
+	if clampAt := createdAt.Add(c.cfg.MaxFreezeDuration); !createdAt.IsZero() && eff.After(clampAt) {
+		eff = clampAt
+	}
+	return c.nowT().Before(eff), eff, nil
 }
 
 // SetGenerationViewer wires the ROUTED-pageserver generation view (see
@@ -253,6 +318,20 @@ func (c *Controller) viewGeneration(ctx context.Context, tenant string) (int, bo
 func (c *Controller) Tick(ctx context.Context) (bool, error) {
 	c.metrics.Check()
 
+	// #1099 — read the maintenance-freeze window every tick and publish the gauge, so
+	// alerting can fire while a freeze is active AND notice one that outlives its
+	// planned window (a stuck freeze = silent HA outage). The gauge is refreshed on
+	// EVERY path below; the freeze only SUPPRESSES the promotion itself (further down).
+	frozen, freezeUntil, ferr := c.freezeActive(ctx)
+	if ferr != nil {
+		return false, fmt.Errorf("failover freeze read: %w", ferr)
+	}
+	if frozen {
+		c.metrics.SetFailoverFrozen(true, freezeUntil.Unix())
+	} else {
+		c.metrics.SetFailoverFrozen(false, 0)
+	}
+
 	// Re-anchor the authority from the CURRENT Service selector every tick. This is
 	// the crash-only truth source: a restarted watcher (and one that already failed
 	// over in-process) learns from the cluster, not stale memory. Once the client
@@ -295,7 +374,7 @@ func (c *Controller) Tick(ctx context.Context) (bool, error) {
 		// matched". Only poll the API server while UNANCHORED (normally just the first
 		// healthy tick); once anchored, the healthy path costs nothing extra.
 		if !c.primarySeenPresent {
-			if _, present, err := c.k8s.PodReady(ctx, c.cfg.PrimarySelector); err == nil && present {
+			if _, present, _, err := c.k8s.PodReady(ctx, c.cfg.PrimarySelector); err == nil && present {
 				c.primarySeenPresent = true
 			}
 		}
@@ -311,12 +390,16 @@ func (c *Controller) Tick(ctx context.Context) (bool, error) {
 	// #26 — second-vantage confirmation before an irreversible, standby-consuming
 	// promotion. Our HTTP probe only reflects OUR network path to the primary. Ask
 	// the API server (the kubelet's independent view):
-	//   probe fails + pod Running&Ready   → a WATCHER-SIDE partition, not primary
-	//                                        death → hold, count it, keep the standby.
-	//   probe fails + pod NotReady/absent  → the primary is genuinely down → promote.
-	//   API unreachable                    → cannot corroborate → refuse to promote
-	//                                        (never burn the only standby on one vantage).
-	ready, present, err := c.k8s.PodReady(ctx, c.cfg.PrimarySelector)
+	//   probe fails + pod Running&Ready       → a WATCHER-SIDE partition, not primary
+	//                                            death → hold, count it, keep the standby.
+	//   probe fails + pod NotReady + RUNNING  → a DEPENDENCY degraded (#1099), not a
+	//                                            death → hold, count it, keep the standby.
+	//   probe fails + pod NotReady + not-run  → container gone/crashing → genuinely down
+	//                                            → promote.
+	//   probe fails + pod absent              → the primary is genuinely gone → promote.
+	//   API unreachable                       → cannot corroborate → refuse to promote
+	//                                            (never burn the only standby on one vantage).
+	ready, present, running, err := c.k8s.PodReady(ctx, c.cfg.PrimarySelector)
 	if err != nil {
 		return false, err
 	}
@@ -325,6 +408,19 @@ func (c *Controller) Tick(ctx context.Context) (bool, error) {
 	}
 	if present && ready {
 		c.metrics.SuspectedPartition()
+		return false, nil
+	}
+
+	// #1099 — dependency-degradation discrimination. The pageserver's readiness probe
+	// is also /v1/status, so an object-store degradation (e.g. creds mid-rotation)
+	// makes the pod NotReady and our HTTP probe fail while the PROCESS is still alive
+	// (its container is Running). Promoting on that is exactly the needless,
+	// standby-consuming failover that caused the live split-brain. Hold and count.
+	// This is not a false-negative on a genuine hang: the pageserver's own
+	// livenessProbe restarts a wedged process, turning it into a CrashLoopBackOff
+	// (container NOT running), at which point the branch below promotes.
+	if present && !ready && running {
+		c.metrics.DependencyDegraded()
 		return false, nil
 	}
 
@@ -344,6 +440,18 @@ func (c *Controller) Tick(ctx context.Context) (bool, error) {
 		}
 	}
 
+	// #1099 — maintenance freeze suppresses even a CONFIRMED death. A planned op (cred
+	// rotation, object-store migration) is EXPECTED to make the primary briefly
+	// unreachable — even to restart its pod — and a failover then needlessly consumes
+	// the standby. The freeze is TTL-bounded (freezeActive clamps to
+	// createdAt+MaxFreezeDuration), so it can never silently disable HA forever; the
+	// active gauge + expiry metric make a stuck freeze alertable. We suppress AFTER the
+	// death is confirmed so the suppressed-count reflects real would-be failovers.
+	if frozen {
+		c.metrics.FreezeSuppressed()
+		return false, nil
+	}
+
 	if err := c.failover(ctx); err != nil {
 		// Leave done=false so the next tick retries; the standby may just be
 		// slow to accept the re-attach.
@@ -354,6 +462,9 @@ func (c *Controller) Tick(ctx context.Context) (bool, error) {
 	c.failures = 0
 	c.metrics.Promotion()
 	c.metrics.SetFailedOver(true)
+	// Classify the failover so a scraper can prove the watcher discriminated a genuine
+	// death from a non-death event (the failover drill asserts this labeled sample).
+	c.metrics.SetFailoverReason("node_death")
 	return true, nil
 }
 

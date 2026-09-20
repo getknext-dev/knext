@@ -20,6 +20,17 @@ type Metrics struct {
 	PrimaryNeverSeenTotal    int `json:"primary_never_seen_total"`   // times a promotion was WITHHELD because the primary pod was NEVER observed present (selector likely misconfigured — issue #58)
 	TenantAbsentTotal        int `json:"tenant_absent_total"`        // times a routed-set tenant was SKIPPED on failover because BOTH the standby and a second vantage report it absent (e.g. an apps tenant never provisioned) — #1098
 	LedgerHealErrorsTotal    int `json:"ledger_heal_errors_total"`   // times the startup ledger seed/heal could not read the pageserver generation view — a permanently broken vantage makes the heal path dead code, so it must be visible (#1098 review)
+
+	// T5 (#1099) — failover-trigger discrimination + maintenance freeze.
+	DependencyDegradedTotal    int   `json:"dependency_degraded_total"`        // times a promotion was WITHHELD because the primary pod is present but NotReady while its container is STILL RUNNING — a dependency degraded (e.g. object-store creds mid-rotation), NOT a node death. Failing over here needlessly consumes the standby (the live split-brain incident).
+	FailoverFrozenVal          int   `json:"failover_frozen"`                  // 1 = a maintenance freeze is ACTIVE (planned op in progress) — failover is deliberately suppressed. Alert on this being 1 for longer than the planned window.
+	FailoverFreezeSuppressed   int   `json:"failover_freeze_suppressed_total"` // times a failover that WOULD have fired was suppressed because a maintenance freeze was active.
+	FailoverFreezeExpirySecond int64 `json:"failover_freeze_expiry_seconds"`   // unix seconds at which the active freeze expires (0 when none) — lets alerting compute time-remaining and notice a freeze that has lapsed or is stuck.
+	// FailoverReasonVal is the classification of the LAST completed failover:
+	// "node_death" once the watcher has confirmed a genuine death and promoted.
+	// Rendered as a labeled sample pswatcher_failover_reason{reason="..."} 1 so a
+	// scraper can prove the watcher DISCRIMINATED (the failover drill asserts it).
+	FailoverReasonVal string `json:"failover_reason,omitempty"`
 }
 
 // NewMetrics starts with primary assumed up (avoids a spurious 0 before the
@@ -120,6 +131,79 @@ func (m *Metrics) LedgerHealErrors() int {
 	return m.LedgerHealErrorsTotal
 }
 
+// DependencyDegraded counts one WITHHELD promotion: the primary pod is present but
+// NotReady while its container is STILL RUNNING, so a dependency has degraded (e.g.
+// object-store creds mid-rotation) rather than the node dying. Promoting here would
+// consume the only standby on a recoverable blip — the live split-brain (#1099).
+func (m *Metrics) DependencyDegraded() {
+	m.mu.Lock()
+	m.DependencyDegradedTotal++
+	m.mu.Unlock()
+}
+
+// DependencyDegradedCount returns the dependency-degraded withheld count (tests).
+func (m *Metrics) DependencyDegradedCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.DependencyDegradedTotal
+}
+
+// SetFailoverFrozen records whether a maintenance freeze is ACTIVE and, if so, the
+// unix expiry of that freeze (0 when none). The gauge lets alerting fire while a
+// freeze is active (and notice one that outlives its planned window); the expiry
+// lets it compute time-remaining and detect a lapsed/stuck freeze (#1099).
+func (m *Metrics) SetFailoverFrozen(active bool, expiryUnix int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if active {
+		m.FailoverFrozenVal = 1
+		m.FailoverFreezeExpirySecond = expiryUnix
+	} else {
+		m.FailoverFrozenVal = 0
+		m.FailoverFreezeExpirySecond = 0
+	}
+}
+
+// FailoverFrozen returns 1 while a maintenance freeze is active (tests).
+func (m *Metrics) FailoverFrozen() int { m.mu.Lock(); defer m.mu.Unlock(); return m.FailoverFrozenVal }
+
+// FreezeExpiry returns the active freeze's unix expiry, 0 when none (tests).
+func (m *Metrics) FreezeExpiry() int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.FailoverFreezeExpirySecond
+}
+
+// FreezeSuppressed counts one failover that WOULD have fired but was suppressed by
+// an active maintenance freeze.
+func (m *Metrics) FreezeSuppressed() {
+	m.mu.Lock()
+	m.FailoverFreezeSuppressed++
+	m.mu.Unlock()
+}
+
+// FreezeSuppressedCount returns the freeze-suppressed failover count (tests).
+func (m *Metrics) FreezeSuppressedCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.FailoverFreezeSuppressed
+}
+
+// SetFailoverReason records the classification of the failover that just completed
+// (e.g. "node_death"), exposed as pswatcher_failover_reason{reason="..."} 1.
+func (m *Metrics) SetFailoverReason(reason string) {
+	m.mu.Lock()
+	m.FailoverReasonVal = reason
+	m.mu.Unlock()
+}
+
+// FailoverReason returns the last recorded failover classification (tests).
+func (m *Metrics) FailoverReason() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.FailoverReasonVal
+}
+
 // Promotions returns the promotion count (used by tests).
 func (m *Metrics) Promotions() int { m.mu.Lock(); defer m.mu.Unlock(); return m.PromotionsTotal }
 
@@ -140,7 +224,7 @@ func (m *Metrics) SuspectedPartitions() int {
 func (m *Metrics) PromText() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return fmt.Sprintf(
+	out := fmt.Sprintf(
 		"pswatcher_promotions_total %d\n"+
 			"pswatcher_checks_total %d\n"+
 			"pswatcher_primary_up %d\n"+
@@ -148,9 +232,21 @@ func (m *Metrics) PromText() string {
 			"pswatcher_suspected_partitions_total %d\n"+
 			"pswatcher_primary_never_seen_total %d\n"+
 			"pswatcher_tenant_absent_total %d\n"+
-			"pswatcher_ledger_heal_errors_total %d\n",
+			"pswatcher_ledger_heal_errors_total %d\n"+
+			"pswatcher_dependency_degraded_total %d\n"+
+			"pswatcher_failover_frozen %d\n"+
+			"pswatcher_failover_freeze_suppressed_total %d\n"+
+			"pswatcher_failover_freeze_expiry_seconds %d\n",
 		m.PromotionsTotal, m.ChecksTotal, m.PrimaryUpVal, m.FailedOverVal, m.SuspectedPartitionsTotal, m.PrimaryNeverSeenTotal, m.TenantAbsentTotal, m.LedgerHealErrorsTotal,
+		m.DependencyDegradedTotal, m.FailoverFrozenVal, m.FailoverFreezeSuppressed, m.FailoverFreezeExpirySecond,
 	)
+	// The classification of the last failover is a LABELED sample so a scraper can
+	// prove the watcher discriminated node-death from a non-death event. Emitted only
+	// once a failover has actually been classified (never a bare zero-value line).
+	if m.FailoverReasonVal != "" {
+		out += fmt.Sprintf("pswatcher_failover_reason{reason=%q} 1\n", m.FailoverReasonVal)
+	}
+	return out
 }
 
 // Handler serves /healthz, /metrics (Prometheus) and /metrics.json.

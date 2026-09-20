@@ -59,6 +59,12 @@ func main() {
 	// scope == routing scope (#1098). Optional: empty on a base-only plane.
 	appsTenant := os.Getenv("PSW_APPS_TENANT_ID")
 	genCM := env("PSW_GEN_CONFIGMAP", "pageserver-generation")
+	// The maintenance-freeze ConfigMap an admin/operator sets to pause failover during
+	// a planned op (cred rotation, object-store migration). Absent ⇒ no freeze. Its
+	// "until" key is an RFC3339 expiry; the freeze is TTL-bounded (PSW_MAX_FREEZE_MS)
+	// so a stuck/forgotten freeze cannot silently disable HA.
+	freezeCM := env("PSW_FREEZE_CONFIGMAP", "pageserver-failover-freeze")
+	maxFreezeMs := envInt("PSW_MAX_FREEZE_MS", int((2*time.Hour)/time.Millisecond))
 	// Bounce EVERY compute that resolves through the flipped Service by the stable
 	// plane label plane=compute (base writer, warm, base RO pool, and the
 	// operator-rendered per-app writer + RO all carry it). The old app=compute
@@ -76,7 +82,7 @@ func main() {
 		logger.Fatal("[pswatcher] PSW_TENANT_ID is required")
 	}
 
-	k8s, err := pswatcher.NewK8sClient(namespace, genCM)
+	k8s, err := pswatcher.NewK8sClient(namespace, genCM, freezeCM)
 	if err != nil {
 		logger.Fatalf("[pswatcher] kube client: %v", err)
 	}
@@ -93,14 +99,15 @@ func main() {
 	tenants := pswatcher.RoutedTenants(tenant, appsTenant)
 
 	ctrl := pswatcher.NewController(prober, standbyProber, promoter, k8s, pswatcher.Config{
-		Tenant:          tenant,
-		Tenants:         tenants,
-		ClientService:   clientSvc,
-		StandbyApp:      standbyApp,
-		ComputeSelector: computeSel,
-		PrimarySelector: primarySel,
-		FailThreshold:   threshold,
-		BaseGeneration:  baseGen,
+		Tenant:            tenant,
+		Tenants:           tenants,
+		ClientService:     clientSvc,
+		StandbyApp:        standbyApp,
+		ComputeSelector:   computeSel,
+		PrimarySelector:   primarySel,
+		FailThreshold:     threshold,
+		BaseGeneration:    baseGen,
+		MaxFreezeDuration: time.Duration(maxFreezeMs) * time.Millisecond,
 	}, metrics)
 	// The routed-pageserver generation view. Two consumers, both fail-closed: the
 	// startup ledger seed/heal (recovers a pruned/empty key) and the SECOND VANTAGE
@@ -130,8 +137,8 @@ func main() {
 		logger.Printf("[pswatcher] ledger seed/heal: %v (continuing; readers fail-closed on an unreadable ledger)", err)
 	}
 
-	logger.Printf("[pswatcher] watching %s (primary=%s standby=%s routed-view=%s tenants=%v threshold=%d poll=%dms)",
-		clientSvc, statusURL, standbyBase, routedBase, tenants, threshold, pollMs)
+	logger.Printf("[pswatcher] watching %s (primary=%s standby=%s routed-view=%s tenants=%v threshold=%d poll=%dms freeze-cm=%s max-freeze=%dms)",
+		clientSvc, statusURL, standbyBase, routedBase, tenants, threshold, pollMs, freezeCM, maxFreezeMs)
 
 	ticker := time.NewTicker(time.Duration(pollMs) * time.Millisecond)
 	defer ticker.Stop()
