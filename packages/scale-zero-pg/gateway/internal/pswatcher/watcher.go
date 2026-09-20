@@ -447,7 +447,13 @@ func (c *Controller) resolveStandby(primaryApp string) (app, url string, err err
 		return "", "", fmt.Errorf("standby-warm: no standby node distinct from the primary %q in %v — refusing to warm the primary", primaryApp, warmTargetApps(c.cfg.WarmTargets))
 	}
 	// Belt-and-suspenders: the resolved standby is NEVER the primary and its URL is NEVER
-	// the primary's URL. Mutation-proved by TestReconcileStandbyWarmNeverWarmsThePrimary.
+	// the primary's URL — two app labels that resolve to the same node URL would
+	// otherwise put a Secondary PUT on the live writer.
+	//
+	// Mutation-proved by TestResolveStandbyAbortsWhenStandbyURLCollidesWithThePrimary.
+	// The earlier comment here credited TestReconcileStandbyWarmNeverWarmsThePrimary,
+	// which never reaches this branch: neutering the check left the suite GREEN, so the
+	// claim was decoration (#1124 review, FIX 3). Cite the test that actually reds.
 	if app == primaryApp || url == c.cfg.WarmTargets[primaryApp] {
 		return "", "", fmt.Errorf("standby-warm: BUG — resolved standby (%s=%s) collides with the live primary (%s) — refusing to warm the writer", app, url, primaryApp)
 	}
