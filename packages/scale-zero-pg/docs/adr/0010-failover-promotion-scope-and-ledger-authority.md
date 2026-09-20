@@ -133,6 +133,46 @@ an upgrade into a manual runbook step. T1 handed the write/seed/heal side to thi
    generation until the flip completes), the ledger never double-advances (advanced once,
    after all tenants promoted), and never promotes below the ledger (`newGen = ledger+1`).
 
+   **Amendment (D4, 2026-09-20) — the ledger write is a CAS, and the reserve moves BEFORE
+   the promotes.** §4 as first written trusted `Recreate` for single-writer safety and
+   advanced the ledger *after* promoting. Both assumptions have a hole the partition threat
+   model exposes:
+
+   - **`Recreate` guards a ROLLOUT, not a PARTITION.** A node going unreachable leaves its
+     `pswatcher` stuck `Terminating`; the standard remediation force-deletes the `Node`
+     object, the API force-deletes the pod, and a NEW `pswatcher` starts **while the old one
+     may still be running on the isolated kubelet**. That is the only window with two live
+     `pswatcher`s — and it is exactly the window in which both decide to fail over. The
+     ledger write was a merge-patch with **no precondition**, so the loser could clobber the
+     winner's higher generation.
+   - **Advancing after promoting is unsafe under two writers.** The loser has ALREADY
+     `PUT` tenants at `newGen` before it discovers it lost — two writers both promoted.
+
+   The fix, two parts:
+
+   1. **resourceVersion CAS on every ledger write.** `GetGeneration` returns the ledger
+      ConfigMap's `resourceVersion`; `SetGeneration(gen, rv)` writes under that precondition.
+      A lost CAS is `ErrLedgerConflict`: the tick **aborts LOUDLY**
+      (`pswatcher_ledger_cas_conflicts_total`, alert `PswatcherLedgerCASConflict`) and
+      **NEVER retries at the winner's value** — adopting the winner's generation mid-failover
+      is how two writers both come to believe they are current.
+   2. **Reserve BEFORE promoting.** The order is now *validate the routed set (reads only) →
+      CAS-reserve `newGen` → promote every tenant at the reserved generation → flip → bounce*.
+      A lost CAS therefore aborts **before any `PUT`**. This is also the SAFE skew direction:
+      a ledger AHEAD of reality self-heals (`convergeFailover` re-promotes up to the ledger;
+      readers take `max(ledger, view, 1)`), whereas reality ahead of the ledger is the
+      fencing hazard. Crash-resume is preserved: an in-instance retry after a PARTIAL
+      promotion (a later tenant's `PUT` failed and aborted the tick) resumes at the SAME
+      reserved generation — promotion at an already-reserved generation is idempotent — so a
+      transient promote error never double-advances the ledger. The consequence for the
+      validation-abort tests: a promote-error abort now leaves the ledger reserved one ahead
+      (converge heals it), rather than untouched; the load-bearing invariant, unchanged, is
+      that the Service never flips onto a half-promoted plane.
+
+   `convergeFailover` is a ledger CONSUMER (it never calls `SetGeneration`), so it does not
+   contend; T2 promote-all contends only through the ordering, which the reserve-first
+   inversion resolves.
+
 5. **Standby warms the apps tenant — non-fatal at deploy, but LOUD.** The standby-init
    Job registers the apps tenant as a warm Secondary alongside the base tenant. A
    base-only plane legitimately has no apps tenant yet, so a failure there does not fail
