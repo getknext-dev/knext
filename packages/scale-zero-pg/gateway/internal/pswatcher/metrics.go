@@ -32,6 +32,29 @@ type Metrics struct {
 	// freeze (HA stays ON — fail-SAFE), which means an operator's freeze may silently
 	// not be in effect. That has to be loud, hence a counter with its own alert.
 	FreezeReadErrorsTotal int `json:"freeze_read_errors_total"`
+	// T6 (#1100) — convergent recovery. ConvergeRepromotionsTotal counts re-promotions
+	// the ADOPT/converge path performed to complete an interrupted or incomplete failover
+	// (a routed tenant observed below the ledger generation on the promoted pageserver was
+	// re-attached at that SAME generation). It is idempotent + generation-guarded: it
+	// NEVER advances the ledger, so this rising while pswatcher_promotions_total /
+	// pswatcher_tenant_absent_total do not means a stranded tenant was healed with no
+	// manual step. ConvergeBlockedTotal counts converge ticks where a routed tenant could
+	// NOT be verified (generation view unwired or erroring) so it was NOT re-promoted —
+	// fail-safe (never promote on an unreadable vantage); a permanently blind vantage over
+	// a stranded tenant is thus visible rather than silent.
+	// ConvergeErrorsTotal counts ticks whose converge pass could not COMPLETE (a
+	// promote or ledger read failed). Converge is BEST-EFFORT: its failure never
+	// aborts the tick's health/bounce path (#1100 review, FIX 1), so this counter —
+	// not a frozen primary_up — is the signal that a plane is not converging.
+	// ConvergeTenantAbsentTotal counts routed tenants the promoted pageserver does not
+	// hold at all (404 from the vantage): converge cannot re-attach them, so a
+	// never-warmed or unprovisioned routed tenant would otherwise stay stranded
+	// forever and invisibly (#1100 review, FIX 2).
+	ConvergeRepromotionsTotal int `json:"converge_repromotions_total"`
+	ConvergeBlockedTotal      int `json:"converge_blocked_total"`
+	ConvergeErrorsTotal       int `json:"converge_errors_total"`
+	ConvergeTenantAbsentTotal int `json:"converge_tenant_absent_total"`
+
 	// FailoverReasonVal is the classification of the LAST completed failover:
 	// "node_death" once the watcher has confirmed a genuine death and promoted.
 	// Rendered as a labeled sample pswatcher_failover_reason{reason="..."} 1 so a
@@ -213,6 +236,76 @@ func (m *Metrics) FreezeReadErrors() int {
 	return m.FreezeReadErrorsTotal
 }
 
+// ConvergeRepromotion counts one re-promotion performed by the adopt/converge path
+// to complete an interrupted/incomplete failover: a routed tenant observed below the
+// ledger generation on the promoted pageserver, re-attached at that SAME generation
+// (idempotent, generation-guarded — the ledger is never advanced on this path).
+func (m *Metrics) ConvergeRepromotion() {
+	m.mu.Lock()
+	m.ConvergeRepromotionsTotal++
+	m.mu.Unlock()
+}
+
+// ConvergeRepromotions returns the converge re-promotion count (tests).
+func (m *Metrics) ConvergeRepromotions() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.ConvergeRepromotionsTotal
+}
+
+// ConvergeBlocked counts one converge tick on which a routed tenant could not be
+// verified (the generation view is unwired or errored), so it was NOT re-promoted.
+// Promoting on an unreadable vantage is exactly the guess this controller refuses;
+// the counter keeps a permanently blind vantage over a stranded tenant visible.
+func (m *Metrics) ConvergeBlocked() {
+	m.mu.Lock()
+	m.ConvergeBlockedTotal++
+	m.mu.Unlock()
+}
+
+// ConvergeBlockedCount returns the converge-blocked count (tests).
+func (m *Metrics) ConvergeBlockedCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.ConvergeBlockedTotal
+}
+
+// ConvergeError counts one tick whose converge pass could not complete (a promote or
+// a ledger read failed). The tick DELIBERATELY continues — it still republishes
+// primary_up and still performs the adopt bounce, because gating those on converge
+// turns a per-tenant promote failure into an unbounded compute outage with a frozen
+// gauge and no alert (#1100 review, FIX 1). This counter is what makes the failure
+// visible; alert on it (PswatcherConvergeFailing).
+func (m *Metrics) ConvergeError() {
+	m.mu.Lock()
+	m.ConvergeErrorsTotal++
+	m.mu.Unlock()
+}
+
+// ConvergeErrors returns the converge-error count (tests).
+func (m *Metrics) ConvergeErrors() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.ConvergeErrorsTotal
+}
+
+// ConvergeTenantAbsent counts one routed tenant the promoted pageserver does not hold
+// (the vantage 404s for it). Converge has nothing to re-attach, so without this
+// counter a routed tenant that was never warmed on the promoted pageserver stays
+// stranded forever and invisibly (#1100 review, FIX 2).
+func (m *Metrics) ConvergeTenantAbsent() {
+	m.mu.Lock()
+	m.ConvergeTenantAbsentTotal++
+	m.mu.Unlock()
+}
+
+// ConvergeTenantAbsentCount returns the converge tenant-absent count (tests).
+func (m *Metrics) ConvergeTenantAbsentCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.ConvergeTenantAbsentTotal
+}
+
 // SetFailoverReason records the classification of the failover that just completed
 // (e.g. "node_death"), exposed as pswatcher_failover_reason{reason="..."} 1.
 func (m *Metrics) SetFailoverReason(reason string) {
@@ -261,9 +354,14 @@ func (m *Metrics) PromText() string {
 			"pswatcher_failover_frozen %d\n"+
 			"pswatcher_failover_freeze_suppressed_total %d\n"+
 			"pswatcher_failover_freeze_expiry_seconds %d\n"+
-			"pswatcher_freeze_read_errors_total %d\n",
+			"pswatcher_freeze_read_errors_total %d\n"+
+			"pswatcher_converge_repromotions_total %d\n"+
+			"pswatcher_converge_blocked_total %d\n"+
+			"pswatcher_converge_errors_total %d\n"+
+			"pswatcher_converge_tenant_absent_total %d\n",
 		m.PromotionsTotal, m.ChecksTotal, m.PrimaryUpVal, m.FailedOverVal, m.SuspectedPartitionsTotal, m.PrimaryNeverSeenTotal, m.TenantAbsentTotal, m.LedgerHealErrorsTotal,
 		m.DependencyDegradedTotal, m.FailoverFrozenVal, m.FailoverFreezeSuppressed, m.FailoverFreezeExpirySecond, m.FreezeReadErrorsTotal,
+		m.ConvergeRepromotionsTotal, m.ConvergeBlockedTotal, m.ConvergeErrorsTotal, m.ConvergeTenantAbsentTotal,
 	)
 	// The classification of the last failover is a LABELED sample so a scraper can
 	// prove the watcher discriminated node-death from a non-death event. Emitted only

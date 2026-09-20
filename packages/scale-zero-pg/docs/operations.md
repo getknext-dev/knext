@@ -1072,7 +1072,9 @@ outage. It is now **automatic**: a standing warm-Secondary standby plus the
   flips back). It exposes `/healthz` and
   `pswatcher_promotions_total` / `pswatcher_primary_up` / `pswatcher_failed_over` /
   `pswatcher_suspected_partitions_total` / `pswatcher_tenant_absent_total` /
-  `pswatcher_ledger_heal_errors_total` on `:9091`;
+  `pswatcher_ledger_heal_errors_total` / `pswatcher_converge_repromotions_total` /
+  `pswatcher_converge_blocked_total` / `pswatcher_converge_errors_total` /
+  `pswatcher_converge_tenant_absent_total` on `:9091`;
   RBAC is minimal and **unchanged** by multi-tenant promotion (services get/patch,
   configmaps get/update/patch, pods list/delete) — the routed-tenant set is configured,
   not discovered by listing `AppDatabase` CRs, and the pageserver generation view is an
@@ -1357,12 +1359,58 @@ one-way action, and two watchers could double-flip. We do **not** add a replica 
 leader-election. Instead the authority is **crash-only**: its entire state lives in the
 cluster (the `pageserver` Service selector + the generation ledger ConfigMap), not in
 memory. A watcher that dies mid-failover **resumes idempotently** on restart —
-- selector already flipped ⇒ it adopts the promoted standby and never re-promotes —
-  **and bounces the compute exactly once on adoption** (#57), so a compute still pinned
-  to the dead primary from a crash in the flip→delete window is re-attached (deleting an
-  already-gone pod is a no-op; retried until it lands);
+- selector already flipped ⇒ it adopts the promoted standby and **converges the plane to
+  completeness** — see "Convergent recovery" below — **and bounces the compute exactly
+  once on adoption** (#57), so a compute still pinned to the dead primary from a crash in
+  the flip→delete window is re-attached (deleting an already-gone pod is a no-op; retried
+  until it lands);
 - ledger advanced but selector not yet flipped ⇒ it drives the failover to completion
   with a **monotonic** generation (still fences the dead primary).
+
+**Convergent recovery — the watcher finishes an interrupted failover on its own.** Every
+tick, once the selector is on the standby, the watcher recomputes what a *complete*
+failover looks like from **observed** state — every routed tenant attached at the ledger
+generation on the promoted pageserver, the compute bounced, the selector correct — and
+**closes any gap it finds** rather than latching "done" and stopping. A failover
+interrupted after the flip but before a tenant was (re)attached, a tenant that was skipped
+as absent and later warmed, or a selector that ended up on the standby by some other means
+all leave a tenant stranded at the old generation; the next tick **re-attaches every
+lagging tenant at the same ledger generation** and the plane converges with no operator
+action. This replaces the earlier manual recovery (stop the watcher, hand-patch the
+`pageserver` selector, promote the missing tenants by hand) with a hands-off convergence.
+
+The re-attach is **idempotent and generation-guarded**, which is the load-bearing
+single-writer property: convergence re-promotes at the **existing** ledger generation and
+**never advances it** (no `SetGeneration` on this path), so a watcher that crashes and
+restarts partway through can never create a second writer or advance the generation twice
+— the ledger advances **exactly once** across an interrupted-then-resumed failover. It is
+observation-driven, so a plane already at the ledger generation is a **silent no-op** (no
+re-promotion, no flap), and it is **fail-safe**: a routed tenant whose generation cannot
+be read (the routed pageserver view is unreachable) is **not** re-promoted on a guess —
+`pswatcher_converge_blocked_total` increments instead, so a permanently blind vantage over
+a stranded tenant is visible rather than silent. Each completed re-attach increments
+`pswatcher_converge_repromotions_total`; that counter rising while
+`pswatcher_promotions_total` stays flat means a stranded tenant was healed automatically.
+
+Convergence is **best-effort, never a gate**. If a re-attach fails, the watcher does *not*
+abandon the rest of the tick: it still republishes the read authority's health
+(`pswatcher_primary_up`) and still bounces a compute that is pinned to the dead primary,
+because holding those back would turn one tenant's failed re-attach into an unbounded
+compute outage with a frozen health gauge and no alert. The failure is recorded on
+`pswatcher_converge_errors_total` and retried on the next tick. A routed tenant the
+promoted pageserver does not hold at all (nothing to re-attach — unprovisioned, or never
+warmed there) is counted on `pswatcher_converge_tenant_absent_total`: convergence cannot
+heal it, so it needs the routed-tenant set checked (`PSW_APPS_TENANT_ID`) and the tenant
+warmed. Each of these counters has an alert — `PswatcherConvergeFailing`,
+`PswatcherConvergeBlocked`, `PswatcherConvergeTenantAbsent`, plus `PswatcherConvergeStorm`
+for re-attaches that keep repeating instead of settling (convergence should go quiet once
+the plane is correct).
+
+**Bounded MTTR.** Detection is `PSW_FAIL_THRESHOLD × PSW_POLL_MS` (~6 s at defaults); a
+lagging tenant is then re-attached in a **single tick**, so autonomous convergence
+completes within one poll interval of the routed generation view becoming readable — the
+recovery is a *known, small, hands-off* window, never an unbounded strand.
+
 `strategy: Recreate` guarantees a rollout never runs two watchers at once; a
 `PodDisruptionBudget` (`maxUnavailable: 1`) makes the single-replica intent explicit
 and lets node drains proceed — we accept the brief gap because recovery is idempotent.
@@ -1398,12 +1446,47 @@ runbook until the watcher is back.
   reconciles a new tenant post-failover) and **best-effort-deletes it** on exit — set the keep
   flag to leave it for inspection. It **skips** cleanly only when the apps plane is entirely
   absent; a present-but-broken chain **fails**. Run it after any change to the failover or
-  apps-tenant reconcile path.
+  apps-tenant reconcile path. Set `RUN_RESTART_IDEMPOTENCY=1` to add the opt-in
+  convergent-recovery scenario: it **stops the watcher, strands the plane** one generation
+  behind the ledger (the interrupted-failover state), then **restarts the watcher** and
+  asserts it re-attaches every routed tenant **at** the ledger generation — checking each
+  tenant's actual generation, not just that it answers — with the ledger **unchanged**
+  (single-advance idempotency: a resumed watcher re-promotes at the same generation, never
+  twice), and with no manual step. It leaves the ledger one generation higher than it found
+  it; the plane is converged to that generation when the check passes.
 - **After a failover:** the standby is now the primary and the ledger holds the new
   generation. To restore redundancy, bring up a fresh warm Secondary (re-seed
   `pageserver-standby` against the now-primary); the watcher adopts the flipped
-  selector and will not re-promote.
-- **Manual fallback** (watcher down): the identical steps run by hand —
+  selector and converges the plane without re-advancing the generation.
+- **One-command recovery from an interrupted / botched failover.** If a failover was
+  interrupted (the watcher was killed mid-promotion, or a tenant is stranded on the
+  demoted pageserver behind a flipped selector), you do **not** stop the watcher or
+  hand-patch the `pageserver` selector any more — that manual runbook is retired.
+  Restart the single controller and let its convergent loop finish the failover:
+
+  ```sh
+  kubectl -n scale-zero-pg rollout restart deploy/pswatcher
+  ```
+
+  On its next ticks it re-attaches every lagging routed tenant at the **existing** ledger
+  generation (idempotent — the generation is **not** advanced again) and drives the plane
+  to a correct end-state. Confirm convergence:
+
+  ```sh
+  # the generation ledger must be UNCHANGED by the restart (single-advance invariant)
+  kubectl -n scale-zero-pg get configmap pageserver-generation -o jsonpath='{.data.generation}'; echo
+  # converge activity + a blind vantage, if any (repromotions rising while
+  # pswatcher_promotions_total stays flat = a stranded tenant healed with no manual step)
+  kubectl -n scale-zero-pg exec sts/pageserver-standby -- \
+    curl -s "http://$(kubectl -n scale-zero-pg get pod -l app=pswatcher \
+      -o jsonpath='{.items[0].status.podIP}'):9091/metrics" \
+    | grep -E 'pswatcher_converge_(repromotions|blocked)_total'
+  ```
+
+  Recovery is bounded (detection `PSW_FAIL_THRESHOLD × PSW_POLL_MS` + one poll interval).
+  Fall back to the by-hand steps below **only** if the watcher image is too old to converge
+  (no `pswatcher_converge_repromotions_total` metric) or the controller cannot be restarted.
+- **Manual fallback** (watcher down / unconvergeable image): the identical steps run by hand —
   `sh deploy/_verify-pageserver-failover.sh --manual` documents the exact commands
   (kill → `PUT location_config AttachedSingle generation+1` → flip the `pageserver`
   selector → `rollout restart deploy/compute`). Failover keeps the same safekeeper,

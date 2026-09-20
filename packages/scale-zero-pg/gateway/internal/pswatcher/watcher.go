@@ -35,6 +35,15 @@ const DefaultMaxFreezeDuration = 2 * time.Hour
 //     so per-app timelines are never stranded on the demoted pageserver.
 var ErrTenantNotFound = errors.New("tenant not found on pageserver")
 
+// ErrGenerationUnreadable is returned by a GenerationViewer when the pageserver
+// ANSWERED for a tenant but its generation could not be read (a 200 whose body
+// carries no `generation` field). It is deliberately an ERROR and never `ok=false`:
+// every caller reads ok=false as ABSENT, and "we could not check" is never "it does
+// not exist" (#1100 review, FIX 2). Conflating the two would let converge skip a
+// stranded tenant silently, let the ledger heal seed off an unknown, and let
+// skippable() read an unverifiable answer as a corroborated absence.
+var ErrGenerationUnreadable = errors.New("pageserver reported no generation for tenant")
+
 // Prober reports whether the primary pageserver is alive (its :9898 /v1/status).
 type Prober interface {
 	Alive(ctx context.Context) bool
@@ -373,6 +382,44 @@ func (c *Controller) Tick(ctx context.Context) (bool, error) {
 	c.done = failedOver
 
 	if failedOver {
+		// #25 — re-anchor FIRST: the promoted standby is now the SOLE read authority,
+		// so probe IT (not the dead old primary) and publish its true health BEFORE any
+		// step below that can fail. Ordering is load-bearing (#1100 review, FIX 1): when
+		// the gauge was published last, ANY error on the converge/bounce path returned
+		// from the tick with pswatcher_primary_up FROZEN at its last value — a read
+		// outage with no alert, the same fail-dangerous class as the T5 freeze-read
+		// abort argued against above. The old primary returning is never re-adopted: we
+		// never flip the selector back.
+		c.metrics.SetFailedOver(true)
+		c.metrics.SetPrimaryUp(c.standbyProber.Alive(ctx))
+
+		// T6 (#1100) — CONVERGE, don't just latch. A flipped selector means the failover
+		// DECISION was made and the ledger committed to a generation; it does NOT prove
+		// every routed tenant actually reached that generation on the promoted pageserver.
+		// A failover killed after the flip but before a tenant was (re)attached, a tenant
+		// skipped-as-absent then later warmed, a hand-patched selector (the live incident),
+		// or a grown routed set all leave a tenant STRANDED at the old generation with no
+		// automatic recovery under the old "adopt = bounce only" path. convergeFailover
+		// re-attaches any lagging routed tenant at the SAME ledger generation — idempotent,
+		// generation-guarded (never advances the ledger, never SetGeneration on this path),
+		// a no-op once the routed view reports every tenant at the ledger gen, and fail-safe
+		// when the vantage cannot verify. Run it BEFORE the bounce so a bounced compute
+		// re-attaches to a fully-promoted plane.
+		//
+		// BEST-EFFORT, never a gate (#1100 review, FIX 1). A failing converge must NOT
+		// abort the rest of this tick: gating the adopt bounce on it means that while a
+		// promote keeps failing, a compute still pinned to the DEAD primary is never
+		// bounced — turning a per-tenant promote failure into an unbounded compute
+		// outage, the exact outage T6 exists to bound. So the error is COUNTED
+		// (converge_errors_total → PswatcherConvergeFailing) and logged, the tick runs
+		// to completion, and the error is returned at the END for the run loop to log.
+		// It is retried on the next tick: converge is observation-driven and idempotent,
+		// so a later tick re-attempts exactly the tenants still below the ledger gen.
+		convErr := c.convergeFailover(ctx)
+		if convErr != nil {
+			c.metrics.ConvergeError()
+			c.logf("[pswatcher] converge: could not complete the adopt-path convergence (%v) — the tick CONTINUES (health + adopt bounce still run); retrying next tick", convErr)
+		}
 		// #57 — adopt-path compute bounce. If this instance did NOT run failover()
 		// itself (which already bounces the compute) but is ADOPTING a flipped selector
 		// from cluster state, a prior watcher may have died in the flip→delete window,
@@ -382,18 +429,14 @@ func (c *Controller) Tick(ctx context.Context) (bool, error) {
 		// latch adoptBounced after a successful delete.
 		if !c.promotedInProcess && !c.adoptBounced {
 			if _, err := c.k8s.DeletePods(ctx, c.cfg.ComputeSelector); err != nil {
-				c.metrics.SetFailedOver(true)
-				return false, err
+				return false, errors.Join(convErr, err)
 			}
 			c.adoptBounced = true
 		}
-		// #25 — re-anchor: the promoted standby is now the SOLE read authority. Probe
-		// IT (not the dead old primary) and report ITS true health, so primary_up
-		// cannot read a false "healthy" after our own action. The old primary
-		// returning is never re-adopted: we never flip the selector back.
-		c.metrics.SetFailedOver(true)
-		c.metrics.SetPrimaryUp(c.standbyProber.Alive(ctx))
-		return false, nil
+		// Report the converge failure LAST — after the health gauge and the bounce have
+		// both already happened — so the run loop logs it without any of them having
+		// been skipped.
+		return false, convErr
 	}
 
 	if c.prober.Alive(ctx) {
@@ -512,6 +555,87 @@ func (c *Controller) ledgerAdvanced(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	return gen > c.cfg.BaseGeneration, nil
+}
+
+// convergeFailover drives an already-flipped (adopted) failover to COMPLETENESS,
+// idempotently. It re-attaches any routed tenant that the currently-routed (promoted)
+// pageserver reports BELOW the ledger generation, at that SAME generation — the
+// airtight generation-guard: it NEVER advances the ledger and NEVER promotes above it,
+// so re-running converges without creating a second writer or a double generation
+// advance. It is OBSERVATION-driven, so a plane the view already reports at the ledger
+// generation is a silent no-op (no flap, no cost beyond the reads), and it self-heals a
+// tenant that reappears un-attached on a later tick (skipped-then-warmed apps tenant,
+// hand-patched selector, grown routed set).
+//
+// Bounds MTTR: each lagging tenant is re-attached in a single tick once the view
+// reports it below the ledger gen, so convergence completes within one poll interval of
+// the vantage becoming readable — no unbounded, hands-off stranding.
+//
+// Fail-safe: an UNWIRED or ERRORING view for a tenant does NOT re-promote it (promoting
+// on an unreadable vantage is exactly the guess this controller refuses everywhere
+// else); the block is counted (ConvergeBlocked → ConvergeBlockedTotal) so a permanently
+// blind vantage over a stranded tenant is visible rather than silent. A base generation
+// (or absent) ledger is not a promotion this controller performed, so there is nothing
+// to converge above it — return early.
+func (c *Controller) convergeFailover(ctx context.Context) error {
+	gen, ok, err := c.k8s.GetGeneration(ctx)
+	if err != nil {
+		return err
+	}
+	if !ok || gen <= c.cfg.BaseGeneration {
+		return nil
+	}
+	var errs []error
+	for _, tenant := range c.routedTenants() {
+		observed, present, verr := c.viewGeneration(ctx, tenant)
+		if verr != nil {
+			// Cannot verify this tenant's generation — refuse to re-promote on an
+			// unreadable vantage (fail-safe); surface it so it is not silent. This
+			// includes a pageserver that ANSWERED without a generation field
+			// (ErrGenerationUnreadable): unverifiable is never "absent" (FIX 2).
+			c.metrics.ConvergeBlocked()
+			c.logf("[pswatcher] converge: generation view unavailable for routed tenant %s (%v) — NOT re-promoting on an unreadable vantage", tenant, verr)
+			continue
+		}
+		if !present {
+			// The promoted pageserver genuinely does not hold this tenant (404):
+			// unprovisioned, or never warmed here. There is nothing to re-attach, and
+			// attaching a tenant this pageserver does not hold is not converge's job —
+			// but it is NOT healthy either, so it is COUNTED rather than silently
+			// skipped (#1100 review, FIX 2): a routed tenant absent from the promoted
+			// pageserver is a routed tenant nobody can reach, and without this counter
+			// it stays stranded forever and invisibly. A tenant that later appears is
+			// converged on the tick after the view reports it.
+			c.metrics.ConvergeTenantAbsent()
+			c.logf("[pswatcher] converge: the promoted pageserver does not hold routed tenant %s — nothing to re-attach; it is UNCONVERGED until it appears (check the routed-tenant set and standby warming)", tenant)
+			continue
+		}
+		if observed >= gen {
+			continue // already at (or beyond) the ledger generation — converged, no-op.
+		}
+		// Lagging: re-attach at the SAME ledger generation. Idempotent (a re-PUT at an
+		// already-held generation is a no-op on the pageserver) and generation-guarded
+		// (never gen+1, never a ledger write here), so this can never double-advance or
+		// create a second writer.
+		if perr := c.promoter.Promote(ctx, tenant, gen); perr != nil {
+			if errors.Is(perr, ErrTenantNotFound) {
+				// The pageserver reports it does not hold the tenant AFTER the routed
+				// view said it did — a race with a detach, or a vantage/promote target
+				// disagreement. Same disposition as an absent tenant: nothing to
+				// re-attach, counted, never a reason to abandon the OTHER tenants.
+				c.metrics.ConvergeTenantAbsent()
+				c.logf("[pswatcher] converge: re-attach of routed tenant %s returned not-found (%v) — counted as unconverged, continuing with the remaining tenants", tenant, perr)
+				continue
+			}
+			// One tenant's failure must never abandon the others (a base tenant that
+			// CAN converge must not be held hostage by a failing apps tenant); collect
+			// and keep going, then report.
+			errs = append(errs, fmt.Errorf("converge %s at generation %d: %w", tenant, gen, perr))
+			continue
+		}
+		c.metrics.ConvergeRepromotion()
+	}
+	return errors.Join(errs...)
 }
 
 // skippable decides whether a routed tenant the STANDBY reports as not-found may be

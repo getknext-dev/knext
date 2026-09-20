@@ -521,6 +521,48 @@ data:
             annotations:
               summary: "pswatcher cannot read the maintenance-freeze state — any freeze you set is NOT in effect"
               description: "The pageserver-failover-freeze ConfigMap could not be read or parsed (a non-RFC3339 `until` is the common cause). pswatcher fails SAFE and keeps automatic failover ENABLED, so a planned op is unprotected and a pod restart during it can trigger a real failover. Fix the ConfigMap (`until` must be RFC3339, e.g. 2026-09-20T12:00:00Z) — see docs/operations.md#maintenance-freeze."
+          # (c6) the adopt/converge path could not COMPLETE. Convergence is what bounds
+          # MTTR after an interrupted failover: it re-attaches routed tenants left below
+          # the ledger generation on the promoted pageserver. It is best-effort by design
+          # (a failure never blocks the compute bounce or the health gauge), so this
+          # counter is the ONLY signal that a tenant is staying stranded.
+          - alert: PswatcherConvergeFailing
+            expr: increase(pswatcher_converge_errors_total[10m]) > 0
+            labels: { severity: warning }
+            annotations:
+              summary: "pswatcher cannot complete convergence after a failover — a routed tenant may be stranded"
+              description: "The adopt/converge pass failed (a re-attach or a ledger read errored), so a routed tenant may still sit BELOW the ledger generation on the promoted pageserver and its databases are unreachable. The watcher retries every tick; if this persists, re-attach the tenant at the ledger generation by hand — see docs/operations.md#pageserver-failover."
+          # (c7) convergence was BLOCKED because the generation vantage could not verify a
+          # routed tenant (unwired, unreachable, or a pageserver answering without a
+          # generation field). The watcher fails SAFE — it never promotes on an unreadable
+          # vantage — which means a stranded tenant is NOT being healed.
+          - alert: PswatcherConvergeBlocked
+            expr: increase(pswatcher_converge_blocked_total[15m]) > 0
+            labels: { severity: warning }
+            annotations:
+              summary: "pswatcher cannot VERIFY a routed tenant's generation — convergence is blocked"
+              description: "The routed generation vantage (PSW_ROUTED_BASE_URL) is unreachable or returns no generation for a routed tenant, so pswatcher refuses to re-attach it (never promote on an unreadable vantage). A tenant left below the ledger generation stays stranded until the vantage recovers. Check the `pageserver` client Service and the watcher's network path — see docs/operations.md#pageserver-failover."
+          # (c8) a routed tenant is ABSENT from the promoted pageserver (the vantage 404s
+          # for it). Converge has nothing to re-attach, so this tenant is unreachable for
+          # every app under it until it is provisioned/warmed there.
+          - alert: PswatcherConvergeTenantAbsent
+            expr: increase(pswatcher_converge_tenant_absent_total[15m]) > 0
+            labels: { severity: warning }
+            annotations:
+              summary: "a routed tenant is NOT held by the promoted pageserver — convergence cannot heal it"
+              description: "pswatcher's routed-tenant set names a tenant the currently-routed pageserver does not hold, so per-app databases under it are unreachable and convergence cannot fix it. Verify the routed-tenant set (PSW_APPS_TENANT_ID in deploy/58) against the provisioned tenants and warm the tenant on the promoted pageserver — see docs/operations.md#pageserver-failover."
+          # (c9) converge STORM: re-promotions are supposed to be a bounded, one-shot heal
+          # (a tenant is re-attached at the ledger generation and the next observation
+          # reports it converged). A sustained stream of them means the plane is NOT
+          # converging — the attach is not sticking, or something else keeps moving the
+          # tenant's generation. That is a flapping write authority, not a heal.
+          - alert: PswatcherConvergeStorm
+            expr: increase(pswatcher_converge_repromotions_total[15m]) > 10
+            for: 15m
+            labels: { severity: critical }
+            annotations:
+              summary: "pswatcher is re-promoting tenants every tick — the plane is NOT converging"
+              description: "pswatcher_converge_repromotions_total keeps rising, so re-attaches at the ledger generation are not sticking (converge should be a one-shot heal that goes quiet). Suspect a second writer moving the tenant's generation, or a pageserver rejecting/dropping the attach. Inspect the watcher log and the tenant's generation on the routed pageserver — see docs/operations.md#pageserver-failover."
           # (d) pageserver-standby not ready >5m: the warm standby that failover
           # promotes into is gone. Failover would have nothing to promote.
           - alert: PageserverStandbyNotReady
@@ -734,7 +776,7 @@ spec:
         # (prints the value to paste here). _validate.sh contract 27 fails if this drifts
         # from the ConfigMap data; _verify-drift.sh section E independently asserts every
         # shipped rule is LOADED in the live pod (/api/v1/rules).
-        ks-pg.dev/prometheus-config-sha256: "0adaadde58850b918d93e6afe90df527b2f1462ad439f6f3b2ed3f54a8612198"
+        ks-pg.dev/prometheus-config-sha256: "a56011a89b9bc1afc02370a031509cf3f116bd5385b131fe2cea25cc3f671a11"
     spec:
       serviceAccountName: prometheus
       securityContext:
