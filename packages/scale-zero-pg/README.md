@@ -67,6 +67,13 @@ sh deploy/_verify-storage.sh                          # data survives a compute 
 sh deploy/_verify-wake.sh                             # the full 0→1→0 wake loop
 ```
 
+**Node count.** Everything above works on a single node except the warm pageserver standby,
+which is pinned off the primary's node so a node death always leaves a promotion target alive.
+On a one-node cluster the `pageserver-standby` pod therefore stays `Pending` — harmless (the
+primary, the gateway and the wake loop are unaffected, and node-death HA is meaningless on one
+node). Silence it with `kubectl -n scale-zero-pg scale sts/pageserver-standby --replicas=0`, or
+run ≥2 nodes to exercise failover.
+
 Connect like any Postgres (`sslmode=disable`; dev creds `cloud_admin`/`cloud_admin`):
 
 ```

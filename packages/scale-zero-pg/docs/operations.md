@@ -3506,6 +3506,14 @@ scale call.
   uses the `Recreate` strategy, expect a **single brief writer bounce** per app at
   upgrade (idle/scaled-to-zero writers are unaffected). Roll during an idle window if a
   momentary writer disconnect is disruptive.
+- **pswatcher — roll the image BEFORE applying manifests that wire new env.** When an
+  upgrade adds or changes a `pswatcher` env var (e.g. a new `PSW_*` behaviour flag),
+  update `58-pswatcher.yaml` to the new digest and roll it **first**, then apply the
+  manifests that depend on the flag. Applying a new env var against an **older** binary
+  makes it inert — the flag is read by nobody — the same failure the freeze runbook
+  warns about for `PSW_FREEZE_CONFIGMAP`. This rhymes with the platform-wide
+  operator-then-CLI ordering rule: the component that *reads* a contract upgrades before
+  the manifest that *writes* it.
 
 ### Releasing an OCIR image — digest pinning (issue #56)
 

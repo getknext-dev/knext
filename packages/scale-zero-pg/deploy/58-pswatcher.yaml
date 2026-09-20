@@ -76,6 +76,22 @@ spec:
       imagePullSecrets:
         - name: ocir-pull
       serviceAccountName: pswatcher
+      # FAILURE-DOMAIN PLACEMENT (sprint-close C3). The observer must survive the
+      # node death it exists to detect: if pswatcher is co-resident with the primary
+      # pageserver it watches, the node death takes the watcher down WITH its subject
+      # and no failover is ever triggered. SOFT (preferred) rather than hard — the
+      # watcher is a single replica (Recreate) and must stay schedulable on a
+      # single-node dev cluster; on a multi-node cluster the scheduler honours the
+      # preference and separates it from the primary. See ADR-0012.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - { key: app, operator: In, values: ["pageserver"] }
+                topologyKey: kubernetes.io/hostname
       # distroless:nonroot ships USER by NAME (nonroot); kubelet cannot verify a
       # non-numeric user against runAsNonRoot, so pin the numeric uid/gid (65532)
       # or the pod fails admission with CreateContainerConfigError.

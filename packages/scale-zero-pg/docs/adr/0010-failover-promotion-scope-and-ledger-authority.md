@@ -1,6 +1,6 @@
 # ADR 0010 — Failover promotion scope == routing scope, and the generation ledger as sole authority
 
-Status: Proposed
+Status: Accepted — C1 resolved (live `PUT`/`GET location_config` status codes observed on GKE, §5); C2 pending (one green end-to-end multi-tenant drill)
 Date: 2026-09-20
 
 > Numbered to continue past BOTH ADR series in this package: the root
@@ -66,13 +66,17 @@ an upgrade into a manual runbook step. T1 handed the write/seed/heal side to thi
    (retried next tick), so a tenant that exists is never stranded. The flip proceeds only
    if at least one routed tenant was actually promoted.
 
-1b. **A standby `404` is node-local evidence, never licence to flip.** `PUT
-   /v1/tenant/<T>/location_config` → 404 means "*this* pageserver does not hold the
-   tenant", NOT "the tenant does not exist". Because standby warming is best-effort and
-   one-shot (§5), an apps tenant provisioned AFTER `pageserver-standby-init` ran is real,
-   routed, and still 404s there — skipping it and flipping would strand every per-app
-   timeline on the demoted pageserver, which is the split-brain this ADR exists to close.
-   So a not-found is resolved by *position and corroboration*:
+1b. **A not-found is node-local evidence, never licence to flip.** A `404` means "*this*
+   pageserver does not hold the tenant", NOT "the tenant does not exist". Because standby
+   warming is best-effort and one-shot (§5), an apps tenant provisioned AFTER
+   `pageserver-standby-init` ran is real, routed, and reads as absent there — skipping it
+   and flipping would strand every per-app timeline on the demoted pageserver, which is the
+   split-brain this ADR exists to close. **OBSERVED-REALITY CORRECTION (C1, §5):** the
+   original design read this "not held" signal off the promotion `PUT`, but the live v1 API
+   `200`-attaches on `PUT` and only `404`s on `GET`. The valid not-held signal is therefore
+   the **GET-viewer** second vantage below, not the PUT — the PUT skip branch is dead code
+   against a real pageserver (§5). The corroboration model is unchanged; only which call
+   produces the `404` moved. A not-found is resolved by *position and corroboration*:
    - the **base tenant** (first in the routed set — every compute reads through it) is
      **never skippable**: a not-found there aborts the failover, keeping reads on the
      dead primary rather than moving them to a node without the data;
@@ -138,15 +142,38 @@ an upgrade into a manual runbook step. T1 handed the write/seed/heal side to thi
    explicit warning, because under §1b an un-warmed but PROVISIONED apps tenant blocks
    automatic failover rather than cold-attaching.
 
-   **Unverified against a live pageserver, and this must be pinned by the on-cluster
-   drill (#1101).** The `PUT location_config` status code for a tenant the node does not
-   hold is taken from the neon `location_config` semantics — a location the pageserver
-   has no record of is addressed as an unknown tenant and answers `404`, versus `5xx` for
-   a real failure and `2xx` for an accepted attach. Nothing in this repo has yet
-   *observed* that code on a live pageserver. If the real behaviour is instead "200 then
-   the tenant goes Broken", §1b's corroboration never runs and a broken attach would read
-   as success. The drill must record the actual status for (a) an unheld tenant, (b) a
-   held tenant, (c) an attach that fails for a real reason, and this ADR updated to match.
+   **OBSERVED on a live neon pageserver (v1 API, via the routed Service, GKE — C1
+   resolved 2026-09-20).** The earlier draft ASSUMED `PUT location_config` answers `404`
+   for a tenant the node does not hold. That assumption was WRONG, and it is the exact
+   "200 then the tenant goes Broken" case this section flagged as the risk. The two API
+   surfaces behave differently and the difference is load-bearing:
+   - **`GET /v1/tenant/<unheld>` → `404`** (`{"msg":"NotFound: tenant …"}`). The
+     GET-based generation **VIEWER** and the corroboration path built on it — §1b's second
+     vantage (`skippable`) and `convergeFailover` — therefore DO see an unheld tenant as
+     absent, correctly. The GET-viewer corroboration remains valid.
+   - **`PUT /v1/tenant/<unheld>/location_config` `{"mode":"AttachedSingle",…}` → `200`,
+     NOT `404`.** The pageserver **ATTACHES**: for a tenant that genuinely exists in the
+     object store it attaches it correctly; for a genuinely-nonexistent tenant it creates a
+     **phantom empty attachment** that then goes Broken/`503` on use. It never `404`s.
+
+   **Implication, recorded honestly.** The promoter's `404 → ErrTenantNotFound` branch
+   (`HTTPPromoter.Promote`) is effectively **dead code against a real pageserver** — the
+   PUT never `404`s — so `failover()`'s skip-on-`ErrTenantNotFound` and T5's `skippable`
+   corroboration-before-skip are unreachable *via the PUT path*. This does **NOT** reopen
+   split-brain: the real routed tenants (base, apps) exist in the object store and attach
+   correctly, so promote-all works — proven by the T2 direct-failover run (both tenants
+   `1→3`). The residual is narrow: on a plane that DECLARES an apps tenant but has zero
+   apps provisioned, a failover PUTs a **phantom empty attach** (`200`) for that apps
+   tenant instead of taking the clean skip the `404` branch intended. That phantom attach
+   goes Broken on use rather than stranding a real timeline, so it degrades legibility, not
+   correctness.
+
+   **Follow-up (tech-debt, tracked):** either REMOVE the dead skip/corroborate-on-`404`
+   PUT path, or handle the phantom-attach case directly (detect a `200`-attach of an
+   empty/nonexistent tenant and treat it as a skip). The GET-viewer corroboration is
+   unaffected either way. Any change to the skip logic MUST re-verify against the live v1
+   API — the assumption this section replaced is proof that unit tests, which fake exactly
+   these status codes, cannot close it.
 
 ## Options considered
 
@@ -185,10 +212,14 @@ honest gap behind §1b's fail-closed default, not an oversight.
   `PSW_APPS_TENANT_ID`-style addition; there is no auto-discovery. This matches the fixed
   two-tenant topology but is a coupling to note if the topology grows.
 - The `GET /v1/tenant/<T>` top-level `generation` field and the `PUT location_config`
-  404-on-unknown-tenant behaviour are pinned to the live pageserver (neon:8464) and
-  asserted on-cluster by the failover drill — off-cluster unit tests fake them. The 404
-  shape in particular is **not yet observed on a live pageserver**; see §5. A future
-  pageserver image change to either shape would need re-verification.
+  status behaviour are pinned to the live pageserver (neon:8464). **Now OBSERVED on live
+  GKE (C1, §5):** `GET` on an unheld tenant `404`s (so the GET-viewer corroboration is
+  valid), but `PUT location_config` **`200`-attaches rather than `404`ing** — the
+  promoter's `404` skip branch is dead code against a real pageserver. This does not
+  reopen split-brain (real tenants attach correctly; T2 proved `1→3` for both), but a
+  declared-but-unprovisioned apps tenant gets a phantom empty attach instead of a clean
+  skip. See §5 for the tech-debt follow-up. A future pageserver image change to either
+  shape would need re-verification.
 - **Apps-tenant warming is now a precondition, not an optimisation, on a plane that
   declares an apps tenant.** One-shot standby-init means an apps tenant provisioned long
   after it ran is un-warmed; because the failover's second vantage (the routed Service)
@@ -208,6 +239,26 @@ honest gap behind §1b's fail-closed default, not an oversight.
   incident.
 - Single-replica crash-only means a brief promotion gap during a watcher restart persists
   (unchanged by this ADR); recovery is idempotent.
+- **Compute-bounce authority (cross-controller write, recorded on purpose).** On a failover
+  `pswatcher` deletes every pod matching `plane=compute` so a cold wake re-attaches to the
+  promoted standby. That selector reaches **operator-owned per-app computes** (the
+  `appdb-operator`'s writer/RO Deployments), not just the base writer — a controller writing
+  to another controller's workload. It is intentional and benign: the owning Deployment
+  recreates the pod immediately, and the delete carries no spec change. `pswatcher` holds
+  compute-bounce authority during a failover; the `appdb-operator` has no failover awareness
+  and needs none, because a recreated compute reads the flipped `pageserver` Service and the
+  ledger like any cold wake. RBAC is `pods: [list, delete]` (namespace-scoped) — no Deployment
+  mutation. Stated here so a future reader does not read the cross-controller delete as a bug.
+- **Failure-domain placement is a precondition, not an implementation detail.** This design
+  assumes the promotion target and the observer SURVIVE the node death that triggers a
+  failover. That assumption is only true if the standby (57) is never co-scheduled with the
+  primary (53) and `pswatcher` (58) is not co-resident with the primary it watches. The
+  placement is enforced by anti-affinity: HARD on the standby (57), SOFT on the primary (53)
+  and pswatcher (58) so neither can be rendered unschedulable — one hard side already makes
+  co-scheduling impossible. Asserted in `deploy/_validate.sh` (term type, `kubernetes.io/hostname`,
+  AND the repelled label value) in the same scan-not-comment style as the
+  no-unreachable-toleration contract. See ADR-0012 for the reversible-outcome framing and the
+  single-node dev tradeoff.
 
 ## Action items
 
@@ -233,7 +284,16 @@ honest gap behind §1b's fail-closed default, not an oversight.
       uncorroborated-absence abort, abort-on-real-error, seed/heal (up + never-down +
       unreachable + refuse-to-invent), absent-ledger recovery + refusal, multi-tenant
       idempotency — each mutation-proved.
-- [ ] On-cluster verification via the failover drill (owned by the drill task, #1101),
-      which must also PIN the real `PUT location_config` status codes per §5.
+- [x] Failure-domain placement: HARD podAntiAffinity keeps the pageserver primary (53) and
+      warm standby (57) off the same node; SOFT podAntiAffinity keeps `pswatcher` (58) off the
+      primary's node — both scanned by `deploy/_validate.sh` (sprint-close C3, ADR-0012).
+- [x] C1: real `PUT`/`GET location_config` status codes OBSERVED on a live GKE pageserver
+      and recorded in §5 — `GET` 404s on an unheld tenant (viewer corroboration valid),
+      `PUT` 200-attaches (never 404s; the promoter's 404 skip branch is dead code).
+- [ ] Follow-up (tech-debt, from §5): remove the dead PUT-`404` skip/corroborate path OR
+      detect+skip the 200 phantom-attach of a declared-but-unprovisioned tenant. Any change
+      to the skip logic MUST re-verify against the live v1 API (unit tests fake the codes).
+- [ ] C2: on-cluster verification via the full multi-tenant failover drill (owned by the
+      drill task, #1101) on a recovered/clean plane.
 - [ ] Follow-up: make standby warm-Secondary registration reconciling rather than
       one-shot, so an apps tenant provisioned after deploy does not block failover.
