@@ -110,6 +110,13 @@
 #   PER_CHECK_BUDGET  per-check retry window (T2/T3/T4) in seconds, from when each
 #                 check starts (default CONVERGE_BUDGET)
 #   T7_KEEP=1     leave the provisioned apps + probe up for inspection (skip deprovision)
+#   RUN_RESTART_IDEMPOTENCY=1  [T6] extra: after the failover converges, RESTART the
+#                 pswatcher (rollout restart) to model an interrupted/resumed watcher,
+#                 then assert it CONVERGES the plane again WITHOUT advancing the
+#                 generation a second time (single-advance idempotency) and WITHOUT any
+#                 manual step. Opt-in — it restarts a live controller, so the default
+#                 lead run leaves it off. Bounded by RESTART_CONVERGE_BUDGET.
+#   RESTART_CONVERGE_BUDGET  seconds for the post-restart re-convergence (default 120)
 set -u
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:${PATH:-}"
@@ -134,6 +141,8 @@ T6_BUDGET="${T6_BUDGET:-$((FAILOVER_BUDGET + CONVERGE_BUDGET))}"
 # fixed" vs "too slow") on those checks: landing only the T3 fix while T6 is still red
 # must still give T3 a real window to observe the bounce.
 PER_CHECK_BUDGET="${PER_CHECK_BUDGET:-$CONVERGE_BUDGET}"
+RUN_RESTART_IDEMPOTENCY="${RUN_RESTART_IDEMPOTENCY:-0}"
+RESTART_CONVERGE_BUDGET="${RESTART_CONVERGE_BUDGET:-120}"
 
 PS_SVC=pageserver              # client-facing Service the pswatcher flips a->standby
 PRIMARY_STS=pageserver         # primary pageserver StatefulSet (the kill target)
@@ -664,6 +673,39 @@ for TEN in "$BASE_TENANT" "$APPS_TENANT"; do
     t_fail T1 "GEN-WEDGE: re-attaching $_label tenant $TEN at ledger generation $CUR_GEN did NOT cleanly succeed — $GENWEDGE_WHY. The bootstrap/attach path does not honor the failover-advanced generation. Fix: attach at the current ledger generation, not a hardcoded 1"
   fi
 done
+
+# --- [T6] restart-idempotency (OPT-IN) --------------------------------------
+# Model an INTERRUPTED-then-resumed watcher: after the plane has converged, restart
+# pswatcher and assert it drives the plane back to a correct end-state WITHOUT
+# advancing the generation a second time and WITHOUT a manual step. This is the
+# single-writer / no-double-advance invariant a converge loop must never break: a
+# restarted watcher that adopts a flipped selector must re-promote at the SAME ledger
+# generation (idempotent), never gen+1. Opt-in (it restarts a live controller).
+if [ "$RUN_RESTART_IDEMPOTENCY" = "1" ]; then
+  echo ""
+  info "[T6] restart-idempotency: recording ledger generation, restarting pswatcher, asserting convergence with NO second generation advance"
+  GEN_BEFORE_RESTART="$($K get configmap "$GEN_CM" -o jsonpath='{.data.generation}' 2>/dev/null || echo '')"
+  [ -n "$GEN_BEFORE_RESTART" ] || GEN_BEFORE_RESTART="$CUR_GEN"
+  if $K rollout restart deploy/pswatcher >/dev/null 2>&1 \
+     && $K rollout status deploy/pswatcher --timeout="${RESTART_CONVERGE_BUDGET}s" >/dev/null 2>&1; then
+    _rdl=$(( $(date +%s) + RESTART_CONVERGE_BUDGET )); RECONVERGED=0
+    while : ; do
+      t6_converged && { RECONVERGED=1; break; }
+      [ "$(date +%s)" -ge "$_rdl" ] && break
+      sleep 5
+    done
+    GEN_AFTER_RESTART="$($K get configmap "$GEN_CM" -o jsonpath='{.data.generation}' 2>/dev/null || echo '')"
+    if [ "$RECONVERGED" != 1 ]; then
+      t_fail T6 "RESTART DID NOT RE-CONVERGE: after a pswatcher restart the plane did not return to a correct end-state within ${RESTART_CONVERGE_BUDGET}s — a resumed watcher must converge idempotently. Fix: make the adopt path converge, not just latch"
+    elif [ "$GEN_AFTER_RESTART" != "$GEN_BEFORE_RESTART" ]; then
+      t_fail T6 "DOUBLE GENERATION ADVANCE: the ledger went $GEN_BEFORE_RESTART -> $GEN_AFTER_RESTART across a pswatcher restart (no new failover occurred) — a resumed watcher must re-promote at the SAME generation, never advance again. Fix: generation-guard the converge/adopt path"
+    else
+      t_ok T6 "restart-idempotency: pswatcher restarted, re-converged the plane (selector=$STANDBY_STS + base AND apps reachable) with the ledger generation UNCHANGED at $GEN_AFTER_RESTART (single-advance, no second writer), NO manual step"
+    fi
+  else
+    t_fail T6 "could not restart pswatcher (rollout restart/status failed) — cannot assert restart-idempotency"
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 CONVERGED_AT="$(date +%s)"
