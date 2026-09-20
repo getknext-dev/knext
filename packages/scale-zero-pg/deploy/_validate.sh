@@ -557,6 +557,22 @@ for _m in pswatcher_failover_frozen pswatcher_failover_freeze_suppressed_total p
   grep -q "$_m" 60-prometheus.yaml || fail "60 no alert/rule binds $_m (#1099) — an unbound metric is an unmonitored failover-trigger signal"
   grep -q "\"$_m %d" ../gateway/internal/pswatcher/metrics.go || fail "pswatcher no longer EXPORTS $_m (anchored on the '\"<name> %d' exposition line so a suffix-rename reds too) — the #1099 alert bound to it would never fire"
 done
+# #1100 review (FIX 3): the CONVERGE family gets the same both-halves pin. Converge is
+# best-effort by design — a failure never blocks the compute bounce or freezes
+# primary_up — so these counters are the ONLY signal that a routed tenant is staying
+# stranded after an interrupted failover. Unpinned, the whole observability story for
+# bounded MTTR could go dormant on a rename with CI green.
+for _a in PswatcherConvergeFailing PswatcherConvergeBlocked PswatcherConvergeTenantAbsent PswatcherConvergeStorm; do
+  grep -qE "alert: $_a\$" 60-prometheus.yaml || fail "60 missing $_a alert (#1100) — a converge failure/block/absence that strands a routed tenant must be alertable, not grep-only"
+done
+for _m in pswatcher_converge_errors_total pswatcher_converge_blocked_total pswatcher_converge_tenant_absent_total pswatcher_converge_repromotions_total; do
+  grep -q "$_m" 60-prometheus.yaml || fail "60 no alert/rule binds $_m (#1100) — an unbound converge counter is an unmonitored stranding signal"
+  grep -q "\"$_m %d" ../gateway/internal/pswatcher/metrics.go || fail "pswatcher no longer EXPORTS $_m (anchored on the '\"<name> %d' exposition line so a suffix-rename reds too) — the #1100 alert bound to it would never fire"
+done
+# A converge STORM is a plane that is not converging (re-attaches not sticking / a
+# second writer), not a heal: it must PAGE, and only when SUSTAINED.
+grep -A3 'alert: PswatcherConvergeStorm$' 60-prometheus.yaml | grep -q 'for: 15m' || fail "60 PswatcherConvergeStorm must only fire when SUSTAINED (for: 15m) — a single bounded heal burst is convergence working (#1100 review)"
+grep -A4 'alert: PswatcherConvergeStorm$' 60-prometheus.yaml | grep -q 'severity: critical' || fail "60 a SUSTAINED converge storm must PAGE (severity: critical) — the plane is not converging and a second writer is possible (#1100 review)"
 # A SUSTAINED degradation-hold is a read outage, not health: it must PAGE, not warn.
 grep -A3 'alert: PswatcherDependencyDegraded' 60-prometheus.yaml | grep -q 'for: 5m' || fail "60 PswatcherDependencyDegraded must only fire when SUSTAINED (for: 5m) so a multi-minute HOLD cannot masquerade as health (#1099 review)"
 grep -A4 'alert: PswatcherDependencyDegraded' 60-prometheus.yaml | grep -q 'severity: critical' || fail "60 a SUSTAINED dependency-degraded hold must PAGE (severity: critical) — reads are down and no failover will fire (#1099 review)"

@@ -42,8 +42,18 @@ type Metrics struct {
 	// NOT be verified (generation view unwired or erroring) so it was NOT re-promoted —
 	// fail-safe (never promote on an unreadable vantage); a permanently blind vantage over
 	// a stranded tenant is thus visible rather than silent.
+	// ConvergeErrorsTotal counts ticks whose converge pass could not COMPLETE (a
+	// promote or ledger read failed). Converge is BEST-EFFORT: its failure never
+	// aborts the tick's health/bounce path (#1100 review, FIX 1), so this counter —
+	// not a frozen primary_up — is the signal that a plane is not converging.
+	// ConvergeTenantAbsentTotal counts routed tenants the promoted pageserver does not
+	// hold at all (404 from the vantage): converge cannot re-attach them, so a
+	// never-warmed or unprovisioned routed tenant would otherwise stay stranded
+	// forever and invisibly (#1100 review, FIX 2).
 	ConvergeRepromotionsTotal int `json:"converge_repromotions_total"`
 	ConvergeBlockedTotal      int `json:"converge_blocked_total"`
+	ConvergeErrorsTotal       int `json:"converge_errors_total"`
+	ConvergeTenantAbsentTotal int `json:"converge_tenant_absent_total"`
 
 	// FailoverReasonVal is the classification of the LAST completed failover:
 	// "node_death" once the watcher has confirmed a genuine death and promoted.
@@ -260,6 +270,42 @@ func (m *Metrics) ConvergeBlockedCount() int {
 	return m.ConvergeBlockedTotal
 }
 
+// ConvergeError counts one tick whose converge pass could not complete (a promote or
+// a ledger read failed). The tick DELIBERATELY continues — it still republishes
+// primary_up and still performs the adopt bounce, because gating those on converge
+// turns a per-tenant promote failure into an unbounded compute outage with a frozen
+// gauge and no alert (#1100 review, FIX 1). This counter is what makes the failure
+// visible; alert on it (PswatcherConvergeFailing).
+func (m *Metrics) ConvergeError() {
+	m.mu.Lock()
+	m.ConvergeErrorsTotal++
+	m.mu.Unlock()
+}
+
+// ConvergeErrors returns the converge-error count (tests).
+func (m *Metrics) ConvergeErrors() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.ConvergeErrorsTotal
+}
+
+// ConvergeTenantAbsent counts one routed tenant the promoted pageserver does not hold
+// (the vantage 404s for it). Converge has nothing to re-attach, so without this
+// counter a routed tenant that was never warmed on the promoted pageserver stays
+// stranded forever and invisibly (#1100 review, FIX 2).
+func (m *Metrics) ConvergeTenantAbsent() {
+	m.mu.Lock()
+	m.ConvergeTenantAbsentTotal++
+	m.mu.Unlock()
+}
+
+// ConvergeTenantAbsentCount returns the converge tenant-absent count (tests).
+func (m *Metrics) ConvergeTenantAbsentCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.ConvergeTenantAbsentTotal
+}
+
 // SetFailoverReason records the classification of the failover that just completed
 // (e.g. "node_death"), exposed as pswatcher_failover_reason{reason="..."} 1.
 func (m *Metrics) SetFailoverReason(reason string) {
@@ -310,10 +356,12 @@ func (m *Metrics) PromText() string {
 			"pswatcher_failover_freeze_expiry_seconds %d\n"+
 			"pswatcher_freeze_read_errors_total %d\n"+
 			"pswatcher_converge_repromotions_total %d\n"+
-			"pswatcher_converge_blocked_total %d\n",
+			"pswatcher_converge_blocked_total %d\n"+
+			"pswatcher_converge_errors_total %d\n"+
+			"pswatcher_converge_tenant_absent_total %d\n",
 		m.PromotionsTotal, m.ChecksTotal, m.PrimaryUpVal, m.FailedOverVal, m.SuspectedPartitionsTotal, m.PrimaryNeverSeenTotal, m.TenantAbsentTotal, m.LedgerHealErrorsTotal,
 		m.DependencyDegradedTotal, m.FailoverFrozenVal, m.FailoverFreezeSuppressed, m.FailoverFreezeExpirySecond, m.FreezeReadErrorsTotal,
-		m.ConvergeRepromotionsTotal, m.ConvergeBlockedTotal,
+		m.ConvergeRepromotionsTotal, m.ConvergeBlockedTotal, m.ConvergeErrorsTotal, m.ConvergeTenantAbsentTotal,
 	)
 	// The classification of the last failover is a LABELED sample so a scraper can
 	// prove the watcher discriminated node-death from a non-death event. Emitted only

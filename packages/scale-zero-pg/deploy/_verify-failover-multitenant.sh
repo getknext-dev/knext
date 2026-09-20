@@ -247,6 +247,15 @@ SVC_CODE() { # $1 = path -> echoes HTTP status code (000 on transport failure)
         --max-time 10 "http://$PS_SVC:9898$1" 2>/dev/null || echo 000)"
   [ -n "$c" ] && echo "$c" || echo 000
 }
+SVC_GEN() { # $1 = tenant -> echoes the tenant's generation as the ROUTED pageserver
+            # reports it, or '' when it is absent/unreadable. This is the same vantage
+            # pswatcher converges against, so it is what proves a tenant actually
+            # reached the ledger generation — reachability alone does not (#1100 review).
+  _b="$($K exec sts/"$STANDBY_STS" -- curl -s --max-time 10 \
+        "http://$PS_SVC:9898/v1/tenant/$1" 2>/dev/null || echo '')"
+  printf '%s' "$_b" | tr ',{}' '\n' | grep '"generation"' | head -1 \
+    | sed -E 's/.*"generation"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/'
+}
 SVC_PUT() { # $1 = path  $2 = json body -> echoes the response body, then a FINAL
             # line carrying the HTTP status code (000 on transport/exec failure).
             # Never swallow the status: an unreachable pageserver, a failed exec,
@@ -675,35 +684,78 @@ for TEN in "$BASE_TENANT" "$APPS_TENANT"; do
 done
 
 # --- [T6] restart-idempotency (OPT-IN) --------------------------------------
-# Model an INTERRUPTED-then-resumed watcher: after the plane has converged, restart
-# pswatcher and assert it drives the plane back to a correct end-state WITHOUT
-# advancing the generation a second time and WITHOUT a manual step. This is the
-# single-writer / no-double-advance invariant a converge loop must never break: a
-# restarted watcher that adopts a flipped selector must re-promote at the SAME ledger
-# generation (idempotent), never gen+1. Opt-in (it restarts a live controller).
+# Model an INTERRUPTED-then-resumed watcher and make the assertion able to FAIL on its
+# own subject (#1100 review, FIX 4). The earlier shape restarted pswatcher on an
+# ALREADY-converged plane and then waited for `t6_converged` — which was already true
+# and stayed true even if convergeFailover were deleted entirely: decorative. So this
+# block now STRANDS the plane first, with the watcher stopped so it cannot heal the
+# strand before the restart:
+#   1. scale pswatcher to 0 (the "killed mid-failover" state);
+#   2. advance the LEDGER one generation without attaching anything — exactly the
+#      interrupted-failover shape: the ledger committed, the tenants did not follow;
+#   3. PROVE the strand is real (a routed tenant observed BELOW the new ledger gen),
+#      else the check cannot assert anything and says so;
+#   4. start pswatcher and require it to RE-CONVERGE: selector on the standby AND both
+#      tenants reachable AND both AT the ledger generation (reachability alone is what
+#      made the old predicate unfalsifiable);
+#   5. and to do it WITHOUT advancing the ledger again (single-writer / no double
+#      advance — the invariant a converge loop must never break).
+# Opt-in (it stops a live controller and moves the ledger).
 if [ "$RUN_RESTART_IDEMPOTENCY" = "1" ]; then
   echo ""
-  info "[T6] restart-idempotency: recording ledger generation, restarting pswatcher, asserting convergence with NO second generation advance"
+  info "[T6] restart-idempotency: stopping pswatcher, STRANDING the plane one generation behind the ledger, then restarting and asserting RE-convergence with NO second generation advance"
   GEN_BEFORE_RESTART="$($K get configmap "$GEN_CM" -o jsonpath='{.data.generation}' 2>/dev/null || echo '')"
   [ -n "$GEN_BEFORE_RESTART" ] || GEN_BEFORE_RESTART="$CUR_GEN"
-  if $K rollout restart deploy/pswatcher >/dev/null 2>&1 \
-     && $K rollout status deploy/pswatcher --timeout="${RESTART_CONVERGE_BUDGET}s" >/dev/null 2>&1; then
-    _rdl=$(( $(date +%s) + RESTART_CONVERGE_BUDGET )); RECONVERGED=0
-    while : ; do
-      t6_converged && { RECONVERGED=1; break; }
-      [ "$(date +%s)" -ge "$_rdl" ] && break
-      sleep 5
+  STRANDED_GEN=$((GEN_BEFORE_RESTART + 1))
+  # t6_reconverged is t6_converged PLUS the generation check the old predicate lacked:
+  # a tenant that answers 200 while sitting at the OLD generation is precisely the
+  # stranded state this drill exists to detect.
+  t6_reconverged() {
+    t6_converged || return 1
+    for _t in "$BASE_TENANT" "$APPS_TENANT"; do
+      _g="$(SVC_GEN "$_t")"
+      [ -n "$_g" ] || return 1
+      [ "$_g" -ge "$STRANDED_GEN" ] || return 1
     done
-    GEN_AFTER_RESTART="$($K get configmap "$GEN_CM" -o jsonpath='{.data.generation}' 2>/dev/null || echo '')"
-    if [ "$RECONVERGED" != 1 ]; then
-      t_fail T6 "RESTART DID NOT RE-CONVERGE: after a pswatcher restart the plane did not return to a correct end-state within ${RESTART_CONVERGE_BUDGET}s — a resumed watcher must converge idempotently. Fix: make the adopt path converge, not just latch"
-    elif [ "$GEN_AFTER_RESTART" != "$GEN_BEFORE_RESTART" ]; then
-      t_fail T6 "DOUBLE GENERATION ADVANCE: the ledger went $GEN_BEFORE_RESTART -> $GEN_AFTER_RESTART across a pswatcher restart (no new failover occurred) — a resumed watcher must re-promote at the SAME generation, never advance again. Fix: generation-guard the converge/adopt path"
-    else
-      t_ok T6 "restart-idempotency: pswatcher restarted, re-converged the plane (selector=$STANDBY_STS + base AND apps reachable) with the ledger generation UNCHANGED at $GEN_AFTER_RESTART (single-advance, no second writer), NO manual step"
-    fi
+    return 0
+  }
+  if ! $K scale deploy/pswatcher --replicas=0 >/dev/null 2>&1 \
+     || ! $K rollout status deploy/pswatcher --timeout=60s >/dev/null 2>&1; then
+    t_fail T6 "could not stop pswatcher (scale to 0) — cannot create the interrupted-watcher precondition, so restart-idempotency is unasserted"
+  elif ! $K patch configmap "$GEN_CM" --type merge \
+        -p "{\"data\":{\"generation\":\"$STRANDED_GEN\"}}" >/dev/null 2>&1; then
+    $K scale deploy/pswatcher --replicas=1 >/dev/null 2>&1 || true
+    t_fail T6 "could not advance the ledger ConfigMap $GEN_CM to $STRANDED_GEN — cannot STRAND the plane, so restart-idempotency is unasserted"
   else
-    t_fail T6 "could not restart pswatcher (rollout restart/status failed) — cannot assert restart-idempotency"
+    # (3) prove the strand: at least one routed tenant must actually be BELOW the
+    # ledger now, or a green result below would prove nothing.
+    STRAND_OK=0
+    for _t in "$BASE_TENANT" "$APPS_TENANT"; do
+      _g="$(SVC_GEN "$_t")"
+      [ -n "$_g" ] && [ "$_g" -lt "$STRANDED_GEN" ] && STRAND_OK=1
+    done
+    if [ "$STRAND_OK" != 1 ]; then
+      $K scale deploy/pswatcher --replicas=1 >/dev/null 2>&1 || true
+      t_fail T6 "could not OBSERVE a stranded tenant after advancing the ledger to $STRANDED_GEN (the routed vantage reports every tenant at or above it) — the restart-idempotency check would have been unfalsifiable, so it is reported as unasserted rather than passed"
+    elif $K scale deploy/pswatcher --replicas=1 >/dev/null 2>&1 \
+         && $K rollout status deploy/pswatcher --timeout="${RESTART_CONVERGE_BUDGET}s" >/dev/null 2>&1; then
+      _rdl=$(( $(date +%s) + RESTART_CONVERGE_BUDGET )); RECONVERGED=0
+      while : ; do
+        t6_reconverged && { RECONVERGED=1; break; }
+        [ "$(date +%s)" -ge "$_rdl" ] && break
+        sleep 5
+      done
+      GEN_AFTER_RESTART="$($K get configmap "$GEN_CM" -o jsonpath='{.data.generation}' 2>/dev/null || echo '')"
+      if [ "$RECONVERGED" != 1 ]; then
+        t_fail T6 "RESTART DID NOT RE-CONVERGE A STRANDED PLANE: with the ledger at $STRANDED_GEN and a routed tenant left behind at $GEN_BEFORE_RESTART, a resumed pswatcher did not re-attach every routed tenant at the ledger generation within ${RESTART_CONVERGE_BUDGET}s (base=$(SVC_GEN "$BASE_TENANT") apps=$(SVC_GEN "$APPS_TENANT")). Fix: make the adopt path CONVERGE (re-attach lagging routed tenants at the ledger generation), not just latch and bounce"
+      elif [ "$GEN_AFTER_RESTART" != "$STRANDED_GEN" ]; then
+        t_fail T6 "DOUBLE GENERATION ADVANCE: the ledger went $STRANDED_GEN -> $GEN_AFTER_RESTART while a restarted watcher converged a stranded plane (no new failover occurred) — converge must re-promote at the SAME generation, never advance the ledger. Fix: generation-guard the converge/adopt path"
+      else
+        t_ok T6 "restart-idempotency: with pswatcher stopped the ledger was advanced to $STRANDED_GEN, stranding a routed tenant at $GEN_BEFORE_RESTART; the restarted watcher RE-CONVERGED the plane with NO manual step (selector=$STANDBY_STS, base AND apps reachable AND at generation $STRANDED_GEN) and left the ledger UNCHANGED at $GEN_AFTER_RESTART (single advance, no second writer)"
+      fi
+    else
+      t_fail T6 "could not restart pswatcher (scale to 1 / rollout status failed) after stranding the plane — the plane is left at ledger $STRANDED_GEN with a lagging tenant; restart the watcher and re-run"
+    fi
   fi
 fi
 

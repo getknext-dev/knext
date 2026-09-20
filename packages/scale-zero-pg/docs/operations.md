@@ -1073,7 +1073,8 @@ outage. It is now **automatic**: a standing warm-Secondary standby plus the
   `pswatcher_promotions_total` / `pswatcher_primary_up` / `pswatcher_failed_over` /
   `pswatcher_suspected_partitions_total` / `pswatcher_tenant_absent_total` /
   `pswatcher_ledger_heal_errors_total` / `pswatcher_converge_repromotions_total` /
-  `pswatcher_converge_blocked_total` on `:9091`;
+  `pswatcher_converge_blocked_total` / `pswatcher_converge_errors_total` /
+  `pswatcher_converge_tenant_absent_total` on `:9091`;
   RBAC is minimal and **unchanged** by multi-tenant promotion (services get/patch,
   configmaps get/update/patch, pods list/delete) — the routed-tenant set is configured,
   not discovered by listing `AppDatabase` CRs, and the pageserver generation view is an
@@ -1391,6 +1392,20 @@ a stranded tenant is visible rather than silent. Each completed re-attach increm
 `pswatcher_converge_repromotions_total`; that counter rising while
 `pswatcher_promotions_total` stays flat means a stranded tenant was healed automatically.
 
+Convergence is **best-effort, never a gate**. If a re-attach fails, the watcher does *not*
+abandon the rest of the tick: it still republishes the read authority's health
+(`pswatcher_primary_up`) and still bounces a compute that is pinned to the dead primary,
+because holding those back would turn one tenant's failed re-attach into an unbounded
+compute outage with a frozen health gauge and no alert. The failure is recorded on
+`pswatcher_converge_errors_total` and retried on the next tick. A routed tenant the
+promoted pageserver does not hold at all (nothing to re-attach — unprovisioned, or never
+warmed there) is counted on `pswatcher_converge_tenant_absent_total`: convergence cannot
+heal it, so it needs the routed-tenant set checked (`PSW_APPS_TENANT_ID`) and the tenant
+warmed. Each of these counters has an alert — `PswatcherConvergeFailing`,
+`PswatcherConvergeBlocked`, `PswatcherConvergeTenantAbsent`, plus `PswatcherConvergeStorm`
+for re-attaches that keep repeating instead of settling (convergence should go quiet once
+the plane is correct).
+
 **Bounded MTTR.** Detection is `PSW_FAIL_THRESHOLD × PSW_POLL_MS` (~6 s at defaults); a
 lagging tenant is then re-attached in a **single tick**, so autonomous convergence
 completes within one poll interval of the routed generation view becoming readable — the
@@ -1432,10 +1447,13 @@ runbook until the watcher is back.
   flag to leave it for inspection. It **skips** cleanly only when the apps plane is entirely
   absent; a present-but-broken chain **fails**. Run it after any change to the failover or
   apps-tenant reconcile path. Set `RUN_RESTART_IDEMPOTENCY=1` to add the opt-in
-  convergent-recovery scenario: after the plane converges it **restarts pswatcher** and
-  asserts the plane re-converges with the generation ledger **unchanged** (single-advance
-  idempotency — a resumed watcher must re-promote at the same generation, never twice),
-  with no manual step.
+  convergent-recovery scenario: it **stops the watcher, strands the plane** one generation
+  behind the ledger (the interrupted-failover state), then **restarts the watcher** and
+  asserts it re-attaches every routed tenant **at** the ledger generation — checking each
+  tenant's actual generation, not just that it answers — with the ledger **unchanged**
+  (single-advance idempotency: a resumed watcher re-promotes at the same generation, never
+  twice), and with no manual step. It leaves the ledger one generation higher than it found
+  it; the plane is converged to that generation when the check passes.
 - **After a failover:** the standby is now the primary and the ledger holds the new
   generation. To restore redundancy, bring up a fresh warm Secondary (re-seed
   `pageserver-standby` against the now-primary); the watcher adopts the flipped

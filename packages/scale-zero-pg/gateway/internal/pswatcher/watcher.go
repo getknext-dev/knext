@@ -35,6 +35,15 @@ const DefaultMaxFreezeDuration = 2 * time.Hour
 //     so per-app timelines are never stranded on the demoted pageserver.
 var ErrTenantNotFound = errors.New("tenant not found on pageserver")
 
+// ErrGenerationUnreadable is returned by a GenerationViewer when the pageserver
+// ANSWERED for a tenant but its generation could not be read (a 200 whose body
+// carries no `generation` field). It is deliberately an ERROR and never `ok=false`:
+// every caller reads ok=false as ABSENT, and "we could not check" is never "it does
+// not exist" (#1100 review, FIX 2). Conflating the two would let converge skip a
+// stranded tenant silently, let the ledger heal seed off an unknown, and let
+// skippable() read an unverifiable answer as a corroborated absence.
+var ErrGenerationUnreadable = errors.New("pageserver reported no generation for tenant")
+
 // Prober reports whether the primary pageserver is alive (its :9898 /v1/status).
 type Prober interface {
 	Alive(ctx context.Context) bool
@@ -373,6 +382,17 @@ func (c *Controller) Tick(ctx context.Context) (bool, error) {
 	c.done = failedOver
 
 	if failedOver {
+		// #25 — re-anchor FIRST: the promoted standby is now the SOLE read authority,
+		// so probe IT (not the dead old primary) and publish its true health BEFORE any
+		// step below that can fail. Ordering is load-bearing (#1100 review, FIX 1): when
+		// the gauge was published last, ANY error on the converge/bounce path returned
+		// from the tick with pswatcher_primary_up FROZEN at its last value — a read
+		// outage with no alert, the same fail-dangerous class as the T5 freeze-read
+		// abort argued against above. The old primary returning is never re-adopted: we
+		// never flip the selector back.
+		c.metrics.SetFailedOver(true)
+		c.metrics.SetPrimaryUp(c.standbyProber.Alive(ctx))
+
 		// T6 (#1100) — CONVERGE, don't just latch. A flipped selector means the failover
 		// DECISION was made and the ledger committed to a generation; it does NOT prove
 		// every routed tenant actually reached that generation on the promoted pageserver.
@@ -384,10 +404,21 @@ func (c *Controller) Tick(ctx context.Context) (bool, error) {
 		// generation-guarded (never advances the ledger, never SetGeneration on this path),
 		// a no-op once the routed view reports every tenant at the ledger gen, and fail-safe
 		// when the vantage cannot verify. Run it BEFORE the bounce so a bounced compute
-		// re-attaches to a fully-promoted plane; on error, retry next tick (don't bounce).
-		if err := c.convergeFailover(ctx); err != nil {
-			c.metrics.SetFailedOver(true)
-			return false, err
+		// re-attaches to a fully-promoted plane.
+		//
+		// BEST-EFFORT, never a gate (#1100 review, FIX 1). A failing converge must NOT
+		// abort the rest of this tick: gating the adopt bounce on it means that while a
+		// promote keeps failing, a compute still pinned to the DEAD primary is never
+		// bounced — turning a per-tenant promote failure into an unbounded compute
+		// outage, the exact outage T6 exists to bound. So the error is COUNTED
+		// (converge_errors_total → PswatcherConvergeFailing) and logged, the tick runs
+		// to completion, and the error is returned at the END for the run loop to log.
+		// It is retried on the next tick: converge is observation-driven and idempotent,
+		// so a later tick re-attempts exactly the tenants still below the ledger gen.
+		convErr := c.convergeFailover(ctx)
+		if convErr != nil {
+			c.metrics.ConvergeError()
+			c.logf("[pswatcher] converge: could not complete the adopt-path convergence (%v) — the tick CONTINUES (health + adopt bounce still run); retrying next tick", convErr)
 		}
 		// #57 — adopt-path compute bounce. If this instance did NOT run failover()
 		// itself (which already bounces the compute) but is ADOPTING a flipped selector
@@ -398,18 +429,14 @@ func (c *Controller) Tick(ctx context.Context) (bool, error) {
 		// latch adoptBounced after a successful delete.
 		if !c.promotedInProcess && !c.adoptBounced {
 			if _, err := c.k8s.DeletePods(ctx, c.cfg.ComputeSelector); err != nil {
-				c.metrics.SetFailedOver(true)
-				return false, err
+				return false, errors.Join(convErr, err)
 			}
 			c.adoptBounced = true
 		}
-		// #25 — re-anchor: the promoted standby is now the SOLE read authority. Probe
-		// IT (not the dead old primary) and report ITS true health, so primary_up
-		// cannot read a false "healthy" after our own action. The old primary
-		// returning is never re-adopted: we never flip the selector back.
-		c.metrics.SetFailedOver(true)
-		c.metrics.SetPrimaryUp(c.standbyProber.Alive(ctx))
-		return false, nil
+		// Report the converge failure LAST — after the health gauge and the bounce have
+		// both already happened — so the run loop logs it without any of them having
+		// been skipped.
+		return false, convErr
 	}
 
 	if c.prober.Alive(ctx) {
@@ -558,19 +585,29 @@ func (c *Controller) convergeFailover(ctx context.Context) error {
 	if !ok || gen <= c.cfg.BaseGeneration {
 		return nil
 	}
+	var errs []error
 	for _, tenant := range c.routedTenants() {
 		observed, present, verr := c.viewGeneration(ctx, tenant)
 		if verr != nil {
 			// Cannot verify this tenant's generation — refuse to re-promote on an
-			// unreadable vantage (fail-safe); surface it so it is not silent.
+			// unreadable vantage (fail-safe); surface it so it is not silent. This
+			// includes a pageserver that ANSWERED without a generation field
+			// (ErrGenerationUnreadable): unverifiable is never "absent" (FIX 2).
 			c.metrics.ConvergeBlocked()
 			c.logf("[pswatcher] converge: generation view unavailable for routed tenant %s (%v) — NOT re-promoting on an unreadable vantage", tenant, verr)
 			continue
 		}
 		if !present {
-			// The promoted pageserver does not hold this tenant yet (unprovisioned or
-			// not yet warmed). Nothing to re-attach now; a real routed tenant that
-			// reappears is converged on a later tick once the view reports it present.
+			// The promoted pageserver genuinely does not hold this tenant (404):
+			// unprovisioned, or never warmed here. There is nothing to re-attach, and
+			// attaching a tenant this pageserver does not hold is not converge's job —
+			// but it is NOT healthy either, so it is COUNTED rather than silently
+			// skipped (#1100 review, FIX 2): a routed tenant absent from the promoted
+			// pageserver is a routed tenant nobody can reach, and without this counter
+			// it stays stranded forever and invisibly. A tenant that later appears is
+			// converged on the tick after the view reports it.
+			c.metrics.ConvergeTenantAbsent()
+			c.logf("[pswatcher] converge: the promoted pageserver does not hold routed tenant %s — nothing to re-attach; it is UNCONVERGED until it appears (check the routed-tenant set and standby warming)", tenant)
 			continue
 		}
 		if observed >= gen {
@@ -581,11 +618,24 @@ func (c *Controller) convergeFailover(ctx context.Context) error {
 		// (never gen+1, never a ledger write here), so this can never double-advance or
 		// create a second writer.
 		if perr := c.promoter.Promote(ctx, tenant, gen); perr != nil {
-			return perr
+			if errors.Is(perr, ErrTenantNotFound) {
+				// The pageserver reports it does not hold the tenant AFTER the routed
+				// view said it did — a race with a detach, or a vantage/promote target
+				// disagreement. Same disposition as an absent tenant: nothing to
+				// re-attach, counted, never a reason to abandon the OTHER tenants.
+				c.metrics.ConvergeTenantAbsent()
+				c.logf("[pswatcher] converge: re-attach of routed tenant %s returned not-found (%v) — counted as unconverged, continuing with the remaining tenants", tenant, perr)
+				continue
+			}
+			// One tenant's failure must never abandon the others (a base tenant that
+			// CAN converge must not be held hostage by a failing apps tenant); collect
+			// and keep going, then report.
+			errs = append(errs, fmt.Errorf("converge %s at generation %d: %w", tenant, gen, perr))
+			continue
 		}
 		c.metrics.ConvergeRepromotion()
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // skippable decides whether a routed tenant the STANDBY reports as not-found may be

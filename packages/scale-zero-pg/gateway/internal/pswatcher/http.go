@@ -89,9 +89,11 @@ func NewHTTPGenerationViewer(baseURL string, timeout time.Duration) *HTTPGenerat
 }
 
 // Generation returns the tenant's generation as the pageserver reports it. ok=false
-// when the tenant is absent (404) or the response carries no generation field. A
-// transport/HTTP error is returned so the caller can leave the ledger untouched
-// rather than floor it on an unavailable vantage.
+// means one thing only: the pageserver does NOT hold this tenant (404). A
+// transport/HTTP error — or a 200 whose body carries no generation field
+// (ErrGenerationUnreadable) — is returned as an ERROR so the caller can leave the
+// ledger untouched, refuse to promote on an unreadable vantage, and never mistake
+// "unverifiable" for "absent".
 func (v *HTTPGenerationViewer) Generation(ctx context.Context, tenant string) (int, bool, error) {
 	url := fmt.Sprintf("%s/v1/tenant/%s", v.BaseURL, tenant)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -119,7 +121,12 @@ func (v *HTTPGenerationViewer) Generation(ctx context.Context, tenant string) (i
 		return 0, false, fmt.Errorf("generation %s: decode: %w", tenant, err)
 	}
 	if body.Generation == nil {
-		return 0, false, nil // no generation field — treat as unknown, not zero
+		// UNKNOWN, and unknown is an ERROR — not ok=false, which every caller reads
+		// as "absent" (#1100 review, FIX 2). The pageserver answered for this tenant,
+		// so it is NOT a corroborated absence; returning ok=false here would let
+		// converge skip a stranded tenant silently and let skippable() treat an
+		// unverifiable answer as proof the tenant does not exist.
+		return 0, false, fmt.Errorf("generation %s: %w", tenant, ErrGenerationUnreadable)
 	}
 	return *body.Generation, true, nil
 }

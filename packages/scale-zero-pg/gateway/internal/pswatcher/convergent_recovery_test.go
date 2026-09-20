@@ -197,6 +197,109 @@ func TestConvergeNoOpWhenAlreadyComplete(t *testing.T) {
 	}
 }
 
+// T6 (#1100 review, FIX 1) — a converge ERROR must NOT starve the tick's health
+// path or the adopt bounce. Converge is BEST-EFFORT reconciliation: while a promote
+// keeps failing, a compute still pinned to the DEAD primary must STILL be bounced
+// (the exact outage T6 exists to bound) and pswatcher_primary_up must STILL be
+// republished (a frozen gauge fires no alert). Pre-fix the error returned from Tick
+// BEFORE both — the same fail-dangerous class as the T5 freeze-read abort.
+func TestConvergeErrorStillBouncesAndRepublishesHealth(t *testing.T) {
+	tenants := []string{"f0f0-base", "a000-apps"}
+	k8s := &fakeK8s{selectorApp: "pageserver-standby", gen: 2, genSet: true}
+	view := &fakeGenViewer{
+		gens:    map[string]int{"f0f0-base": 1, "a000-apps": 1}, // both lagging
+		present: map[string]bool{"f0f0-base": true, "a000-apps": true},
+	}
+	// Every converge promote fails for the whole test.
+	promoter := &convergePromoter{view: view, failFor: 1000}
+	// The promoted standby is DOWN, so an honest primary_up is 0. The gauge starts at
+	// 1, so reading 0 proves SetPrimaryUp actually ran on this tick.
+	c := newControllerRouted(&toggleProber{alive: false}, &toggleProber{alive: false}, promoter, k8s, 1, tenants)
+	c.SetGenerationViewer(view)
+
+	if _, err := c.Tick(context.Background()); err == nil {
+		t.Fatal("a converge failure must still be REPORTED by Tick (counted + returned), not swallowed")
+	}
+	if len(k8s.deletedFor) != 1 {
+		t.Fatalf("adopt bounce must still land while converge is failing, got %v — a compute pinned to the DEAD primary would never be bounced", k8s.deletedFor)
+	}
+	if c.Metrics().PrimaryUp() != 0 {
+		t.Fatalf("primary_up = %d, want 0 — a converge error must not FREEZE the health gauge (no alert would fire)", c.Metrics().PrimaryUp())
+	}
+	if c.Metrics().FailedOver() != 1 {
+		t.Fatalf("failed_over = %d, want 1 even while converge is failing", c.Metrics().FailedOver())
+	}
+	if c.Metrics().ConvergeErrors() == 0 {
+		t.Fatal("converge_errors_total must increment when converge cannot complete — otherwise the stranding is unmetered and unalertable")
+	}
+}
+
+// T6 (#1100 review, FIX 5) — the converge ERROR path: a transient promote failure
+// must RETRY on a later tick, leave no partial bounce (the adopt bounce lands exactly
+// once across the whole episode), never advance the ledger, and converge as soon as
+// the promote succeeds.
+func TestConvergeErrorRetriesNextTickWithoutPartialBounce(t *testing.T) {
+	tenants := []string{"f0f0-base", "a000-apps"}
+	k8s := &fakeK8s{selectorApp: "pageserver-standby", gen: 2, genSet: true}
+	view := &fakeGenViewer{
+		gens:    map[string]int{"f0f0-base": 2, "a000-apps": 1},
+		present: map[string]bool{"f0f0-base": true, "a000-apps": true},
+	}
+	promoter := &convergePromoter{view: view, failFor: 2} // first two promotes fail
+	c := newControllerRouted(&toggleProber{alive: false}, &toggleProber{alive: true}, promoter, k8s, 1, tenants)
+	c.SetGenerationViewer(view)
+
+	var errs int
+	for i := 0; i < 5; i++ {
+		if _, err := c.Tick(context.Background()); err != nil {
+			errs++
+		}
+	}
+	if errs != 2 {
+		t.Fatalf("Tick reported %d converge errors, want 2 (one per failing promote, then a clean convergence)", errs)
+	}
+	if got := promoter.perTenant["a000-apps"]; len(got) != 1 || got[0] != 2 {
+		t.Fatalf("after the transient failures the lagging tenant must converge at the LEDGER gen exactly once, got %v", got)
+	}
+	if len(k8s.deletedFor) != 1 {
+		t.Fatalf("the adopt bounce must land EXACTLY once across the retries, got %v (no partial/repeated bounce)", k8s.deletedFor)
+	}
+	if k8s.gen != 2 || len(k8s.setGenTo) != 0 {
+		t.Fatalf("the converge retry path must never touch the ledger: gen=%d writes=%v", k8s.gen, k8s.setGenTo)
+	}
+	if c.Metrics().ConvergeErrors() != 2 {
+		t.Fatalf("converge_errors_total = %d, want 2", c.Metrics().ConvergeErrors())
+	}
+}
+
+// T6 (#1100 review, FIX 2) — a routed tenant the promoted pageserver does NOT hold
+// must be COUNTED, not silently skipped. Converge cannot re-attach it (promoting a
+// tenant the vantage cannot confirm is the guess this controller refuses), so the
+// counter is the ONLY signal that a routed tenant is stranded/unprovisioned.
+func TestConvergeCountsARoutedTenantTheVantageDoesNotHold(t *testing.T) {
+	tenants := []string{"f0f0-base", "a000-apps"}
+	k8s := &fakeK8s{selectorApp: "pageserver-standby", gen: 2, genSet: true}
+	view := &fakeGenViewer{
+		gens:    map[string]int{"f0f0-base": 2},
+		present: map[string]bool{"f0f0-base": true, "a000-apps": false}, // apps never warmed here
+	}
+	promoter := &convergePromoter{view: view}
+	c := newControllerRouted(&toggleProber{alive: false}, &toggleProber{alive: true}, promoter, k8s, 1, tenants)
+	c.SetGenerationViewer(view)
+
+	for i := 0; i < 3; i++ {
+		if _, err := c.Tick(context.Background()); err != nil {
+			t.Fatalf("tick %d: an absent routed tenant is not an error, just unconverged: %v", i, err)
+		}
+	}
+	if len(promoter.perTenant) != 0 {
+		t.Fatalf("converge must not promote a tenant the vantage does not hold: %v", promoter.perTenant)
+	}
+	if c.Metrics().ConvergeTenantAbsentCount() == 0 {
+		t.Fatal("converge_tenant_absent_total must increment for a routed tenant the promoted pageserver does not hold — otherwise it stays stranded FOREVER and invisibly")
+	}
+}
+
 // T6 (#1100) — converge is FAIL-SAFE: with the generation view unwired (or
 // erroring), a lagging tenant is NOT re-promoted (promoting on an unreadable
 // vantage is exactly the guess this controller refuses). The block is counted so a
