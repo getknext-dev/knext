@@ -567,6 +567,28 @@ data:
             annotations:
               summary: "pswatcher cannot read the maintenance-freeze state — any freeze you set is NOT in effect"
               description: "The pageserver-failover-freeze ConfigMap could not be read or parsed (a non-RFC3339 `until` is the common cause). pswatcher fails SAFE and keeps automatic failover ENABLED, so a planned op is unprotected and a pod restart during it can trigger a real failover. Fix the ConfigMap (`until` must be RFC3339, e.g. 2026-09-20T12:00:00Z) — see docs/operations.md#maintenance-freeze."
+          # (c7) the COMPOSITE HA-readiness gauge is 0: if the primary died right now the
+          # watcher would NOT promote. It rolls up the preconditions — a maintenance freeze
+          # is active, OR the standby does not hold every routed tenant warm. This is the
+          # single "is the safety net up?" signal; the per-tenant/freeze alerts above say
+          # WHICH precondition. A sustained 0 outside a planned freeze window is a real HA
+          # outage in waiting. Excluded during an intended freeze via the frozen gauge.
+          - alert: PswatcherFailoverNotArmed
+            expr: pswatcher_failover_armed == 0 and pswatcher_failover_frozen == 0
+            for: 15m
+            labels: { severity: warning }
+            annotations:
+              summary: "pswatcher HA is not armed — a primary death would not fail over"
+              description: "pswatcher_failover_armed is 0 with no active maintenance freeze, so the standby does not hold every routed tenant as a warm Secondary and an automatic failover would abort or attach a phantom. Check pswatcher_standby_tenant_warm per tenant and the standby node/object-store path — see docs/operations.md#pageserver-failover."
+          # (c8) a failover was ATTEMPTED but aborted before the flip, labeled by cause.
+          # ledger_cas_lost means two writers contended (a partition) — worth investigating;
+          # any abort means the primary went down and the safety net did not complete.
+          - alert: PswatcherFailoverAborted
+            expr: increase(pswatcher_failover_aborted_total[15m]) > 0
+            labels: { severity: warning }
+            annotations:
+              summary: "pswatcher aborted a failover ({{ $labels.reason }})"
+              description: "A failover entered failover() but aborted before flipping the client Service ({{ $labels.reason }}). The primary is likely down and reads are not yet on the standby; a lost ledger CAS (ledger_cas_lost) additionally means a second writer contended. Check the watcher log and pswatcher_primary_up — see docs/operations.md#pageserver-failover."
           # (c6) the adopt/converge path could not COMPLETE. Convergence is what bounds
           # MTTR after an interrupted failover: it re-attaches routed tenants left below
           # the ledger generation on the promoted pageserver. It is best-effort by design
@@ -822,7 +844,7 @@ spec:
         # (prints the value to paste here). _validate.sh contract 27 fails if this drifts
         # from the ConfigMap data; _verify-drift.sh section E independently asserts every
         # shipped rule is LOADED in the live pod (/api/v1/rules).
-        ks-pg.dev/prometheus-config-sha256: "0d103380b9978c7e913cb12a33509abfa17fe436d03ec2694f8dbb5a3e33aa90"
+        ks-pg.dev/prometheus-config-sha256: "f6858471e99ea6348f5abc7b7cb8417c4b3b463c0224c009f8f8043d7e7e658e"
     spec:
       serviceAccountName: prometheus
       securityContext:

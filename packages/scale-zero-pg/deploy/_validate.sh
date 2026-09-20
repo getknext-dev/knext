@@ -689,6 +689,23 @@ for _m in pswatcher_failover_frozen pswatcher_failover_freeze_suppressed_total p
   grep -q "$_m" 60-prometheus.yaml || fail "60 no alert/rule binds $_m (#1099) — an unbound metric is an unmonitored failover-trigger signal"
   grep -q "\"$_m %d" ../gateway/internal/pswatcher/metrics.go || fail "pswatcher no longer EXPORTS $_m (anchored on the '\"<name> %d' exposition line so a suffix-rename reds too) — the #1099 alert bound to it would never fire"
 done
+# D3: the composite HA-readiness gauge + labeled abort counter get the same both-halves
+# pin. The gauge is the single "is the safety net up?" signal and the counter names why a
+# would-be failover did not complete — an unbound or unexported one is an unmonitored HA
+# outage. The gauge is anchored on its EXACT exposition line (trailing space) so a
+# suffix-rename (e.g. _armed → _armed_v2) reds; the counter is anchored on its labeled form.
+for _a in PswatcherFailoverNotArmed PswatcherFailoverAborted; do
+  grep -qE "alert: $_a\$" 60-prometheus.yaml || fail "60 missing $_a alert (D3) — the composite HA-readiness gauge / abort counter must be alertable, not grep-only"
+done
+grep -q 'pswatcher_failover_armed ==' 60-prometheus.yaml || fail "60 PswatcherFailoverNotArmed must fire on pswatcher_failover_armed == 0 (D3)"
+grep -q 'pswatcher_failover_aborted_total\[' 60-prometheus.yaml || fail "60 PswatcherFailoverAborted must fire on increase(pswatcher_failover_aborted_total[...]) (D3)"
+grep -q '"pswatcher_failover_armed %d' ../gateway/internal/pswatcher/metrics.go || fail "pswatcher no longer EXPORTS pswatcher_failover_armed (anchored on the '\"<name> %d' exposition line) — PswatcherFailoverNotArmed would never fire (D3)"
+grep -q 'pswatcher_failover_aborted_total{reason=' ../gateway/internal/pswatcher/metrics.go || fail "pswatcher no longer EXPORTS the labeled pswatcher_failover_aborted_total{reason=...} counter — PswatcherFailoverAborted would never fire (D3)"
+# The armed gauge is a real HA outage only when SUSTAINED outside a planned freeze — a
+# transient 0 during a reconcile interval is normal, and a freeze is an INTENDED disarm.
+grep -A2 'alert: PswatcherFailoverNotArmed$' 60-prometheus.yaml | grep -q 'pswatcher_failover_frozen == 0' || fail "60 PswatcherFailoverNotArmed must EXCLUDE an intended maintenance freeze (and pswatcher_failover_frozen == 0) — else every planned freeze pages (D3)"
+grep -A3 'alert: PswatcherFailoverNotArmed$' 60-prometheus.yaml | grep -q 'for: 15m' || fail "60 PswatcherFailoverNotArmed must only fire when SUSTAINED (for: 15m) — a transient reconcile-interval 0 is not an outage (D3)"
+
 # #1100 review (FIX 3): the CONVERGE family gets the same both-halves pin. Converge is
 # best-effort by design — a failure never blocks the compute bounce or freezes
 # primary_up — so these counters are the ONLY signal that a routed tenant is staying

@@ -702,6 +702,16 @@ func (c *Controller) Tick(ctx context.Context) (bool, error) {
 		c.metrics.SetFailoverFrozen(false, 0)
 	}
 
+	// D3 — publish the composite HA-readiness gauge every tick, computed from
+	// already-gathered state: the freeze read above (fresh) and the per-tenant warmth the
+	// DEFERRED reconcile published on a prior tick. This deliberately adds NO probe to the
+	// hot detection path — the #1124 lesson was that a synchronous standby probe at the top
+	// of the tick stretches primary-death detection, so the gauge reuses the reconcile's
+	// throttled warmth rather than re-checking membership here. failoverArmed is pure.
+	c.metrics.SetFailoverArmed(failoverArmed(frozen, c.routedTenants(), func(t string) bool {
+		return c.metrics.TenantWarm(t) == 1
+	}))
+
 	// D1 — keep the CURRENT standby warm for every routed tenant, so a failover that
 	// leaves the ex-primary an un-armed standby re-arms automatically (ADR-0010 §5).
 	// BEST-EFFORT + throttled + deadline-bounded, and DEFERRED so it runs LAST, after
@@ -875,6 +885,10 @@ func (c *Controller) Tick(ctx context.Context) (bool, error) {
 	}
 
 	if err := c.failover(ctx); err != nil {
+		// D3 — count the abort by cause at the ONE caller site (scan-safe: a new abort
+		// path inside failover() is captured here automatically, rather than needing its
+		// own enumerated counter call that a future edit could forget).
+		c.metrics.FailoverAborted(classifyFailoverAbort(err))
 		// Leave done=false so the next tick retries; the standby may just be
 		// slow to accept the re-attach.
 		return false, err
@@ -1058,6 +1072,37 @@ func (c *Controller) skippable(ctx context.Context, idx int, tenant string) (boo
 // is never floored to BaseGeneration, because promoting at 2 on a plane that is
 // really at 7 re-attaches below the object-store index. It is recovered from the
 // routed pageserver view, or the failover aborts.
+// failoverArmed is the verdict behind pswatcher_failover_armed (D3): HA would promote on a
+// primary death right now iff no maintenance freeze is suppressing it AND the standby holds
+// EVERY routed tenant as a warm Secondary (so failover()'s pre-flight membership oracle
+// would pass). An empty routed set — nothing observed yet — is NOT armed: the safe default
+// is to report the safety net DOWN until it is proven up. Pure (no IO), so the verdict is
+// unit-testable and mutation-provable in isolation from the tick's control flow.
+func failoverArmed(frozen bool, routed []string, warm func(string) bool) bool {
+	if frozen || len(routed) == 0 {
+		return false
+	}
+	for _, t := range routed {
+		if !warm(t) {
+			return false
+		}
+	}
+	return true
+}
+
+// classifyFailoverAbort maps a failover() error to a bounded pswatcher_failover_aborted_total
+// reason label. A lost generation-ledger CAS is the one distinctly-actionable cause (a
+// concurrent writer during a partition); every other abort is "aborted" (its error text
+// carries the detail into the log). A small closed set keeps the label cardinality bounded.
+func classifyFailoverAbort(err error) string {
+	switch {
+	case errors.Is(err, ErrLedgerConflict):
+		return "ledger_cas_lost"
+	default:
+		return "aborted"
+	}
+}
+
 func (c *Controller) failover(ctx context.Context) error {
 	gen, ok, rv, err := c.k8s.GetGeneration(ctx)
 	if err != nil {
