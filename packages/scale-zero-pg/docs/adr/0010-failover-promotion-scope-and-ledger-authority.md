@@ -173,6 +173,26 @@ an upgrade into a manual runbook step. T1 handed the write/seed/heal side to thi
    contend; T2 promote-all contends only through the ordering, which the reserve-first
    inversion resolves.
 
+   **The `reservedGen` lifetime contract (made explicit).** The in-instance reservation is a
+   single `int` field and its whole safety argument rests on three properties, so they are
+   stated rather than assumed:
+   - **It is CLEARED at the flip.** Once the flip+bounce completes, `reservedGen` is reset to
+     0 — the reservation is outstanding ONLY while a reserve has been written but the flip
+     has not yet happened. (A `DeletePods` error after the flip is the one path that retains
+     it: the next tick must resume at the SAME generation to re-bounce, not reserve afresh.)
+   - **`failover()` runs at most once per process.** The `done` latch makes `failover()`
+     unreachable again after a successful completion, so a stale reservation cannot be
+     re-adopted through the normal control flow.
+   - **`newGen >= ledger` is ASSERTED, not assumed.** After computing `newGen`, the code
+     aborts unless it is at least the current ledger generation — a mechanical fence that
+     makes "promote below the ledger" unparseable-to-violate even if a future re-entry path
+     ever carried a stale reservation past the two properties above. The comparison is `>=`,
+     not `>`, because a legitimate crash-resume reads `ledger == reservedGen` (the reserve
+     already advanced the ledger) and MUST proceed; only a reservation strictly below the
+     ledger is fenced. The absent-ledger reserve is CAS-safe too: `SetGeneration` with an
+     empty resourceVersion CREATEs the ledger (a compare-and-swap against non-existence), so
+     two partitioned writers reserving from the same absent state cannot both succeed.
+
 5. **Standby warms the apps tenant — non-fatal at deploy, but LOUD.** The standby-init
    Job registers the apps tenant as a warm Secondary alongside the base tenant. A
    base-only plane legitimately has no apps tenant yet, so a failure there does not fail

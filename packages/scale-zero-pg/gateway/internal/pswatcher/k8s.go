@@ -270,9 +270,31 @@ func (k *K8sClient) GetGeneration(ctx context.Context) (int, bool, string, error
 // object (preserving any other keys), set the generation key, and Update at the EXPECTED
 // resourceVersion so the API server rejects the write if a racing writer advanced it
 // since. A stale rv detected before the Update, or a Conflict from the Update itself, is
-// surfaced as ErrLedgerConflict — never a silent overwrite. rv == "" writes
-// unconditionally (startup seed).
+// surfaced as ErrLedgerConflict — never a silent overwrite.
+//
+// rv == "" means the ledger did not EXIST at read time (GetGeneration returns rv=="" when
+// the ConfigMap/key is absent — the seed case, and the #1095 absent-ledger failover). We
+// CREATE it rather than Get-then-unconditionally-Update: a Create is itself a compare-and-
+// swap against non-existence, so if a concurrent writer (a second, partitioned pswatcher
+// reserving from the same absent-ledger state) created it first, we get AlreadyExists and
+// surface ErrLedgerConflict — fail CLOSED. The old unconditional-Update path was a
+// fail-OPEN hole: two partitioned watchers both reading rv=="" would both Update and both
+// promote (D4/BLOCK-1). Create closes it so the reserve is CAS-safe from BOTH the
+// ledger-present and ledger-absent states.
 func (k *K8sClient) SetGeneration(ctx context.Context, gen int, rv string) error {
+	if rv == "" {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: k.genConfigMap, Namespace: k.namespace},
+			Data:       map[string]string{k.genKey: strconv.Itoa(gen)},
+		}
+		if _, cerr := k.cs.CoreV1().ConfigMaps(k.namespace).Create(ctx, cm, metav1.CreateOptions{}); cerr != nil {
+			if apierrors.IsAlreadyExists(cerr) {
+				return fmt.Errorf("ledger already established by a concurrent writer while reserving at generation %d: %w", gen, errors.Join(ErrLedgerConflict, cerr))
+			}
+			return cerr
+		}
+		return nil
+	}
 	cm, err := k.cs.CoreV1().ConfigMaps(k.namespace).Get(ctx, k.genConfigMap, metav1.GetOptions{})
 	if err != nil {
 		return err

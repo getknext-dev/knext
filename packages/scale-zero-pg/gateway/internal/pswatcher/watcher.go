@@ -1089,6 +1089,21 @@ func (c *Controller) failover(ctx context.Context) error {
 		newGen = c.reservedGen
 	}
 
+	// MECHANICAL FENCE (D4/BLOCK-2) — never promote BELOW the ledger, whatever newGen was
+	// computed to be. This makes "promotion below the ledger" unparseable-to-violate rather
+	// than relying on the reservedGen bookkeeping being correct. The comparison is `>=`, not
+	// `>`, ON PURPOSE: a FRESH failover has newGen = gen+1 (> gen), but a legitimate RESUME
+	// reads gen == reservedGen (the reserve already advanced the ledger to newGen), so
+	// newGen == gen — and that resume MUST proceed to complete the flip it deferred. What
+	// this catches is a STALE reservedGen: if the reservation were ever carried into a
+	// failover whose ledger has since advanced ABOVE it (newGen < gen), we abort rather than
+	// promote at a fenced-below generation. Combined with clearing reservedGen at the flip
+	// (below) and the `done` latch, the stale case is unreachable in-process today; the
+	// fence is defence-in-depth against a future re-entry path.
+	if newGen < gen {
+		return fmt.Errorf("failover: refusing to promote at generation %d which is BELOW the ledger generation %d (stale reservation %d) — a promotion below the ledger cannot fence a higher-generation holder", newGen, gen, c.reservedGen)
+	}
+
 	// PASS 1 — VALIDATE every routed tenant against the standby membership oracle. This
 	// pass is READS ONLY: no ledger write and no PUT happen here, so any abort keeps reads
 	// on the (dead) primary rather than a half-promoted plane, and — crucially for D4 — the
@@ -1201,5 +1216,14 @@ func (c *Controller) failover(ctx context.Context) error {
 	if _, err := c.k8s.DeletePods(ctx, c.cfg.ComputeSelector); err != nil {
 		return err
 	}
+	// Flip + bounce succeeded: the failover is COMPLETE. Clear the reservation so the field
+	// never lingers as a stale value a future re-entry could adopt (D4/BLOCK-2). The `done`
+	// latch already makes failover() unreachable again in-process, so this is belt-and-
+	// braces with the mechanical fence above — but it keeps the invariant "reservedGen is
+	// non-zero ONLY while a reserve is outstanding and unflipped" true, which is what the
+	// fence's stale-detection reasons about. A DeletePods error above returns WITHOUT
+	// clearing, on purpose: the ledger is reserved and the flip has happened, so the next
+	// tick must resume at the SAME reservedGen to re-bounce, not reserve gen+1 afresh.
+	c.reservedGen = 0
 	return nil
 }

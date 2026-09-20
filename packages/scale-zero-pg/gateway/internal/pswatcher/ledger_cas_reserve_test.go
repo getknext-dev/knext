@@ -106,6 +106,72 @@ func TestSetGenerationCASConflictDoesNotClobber(t *testing.T) {
 	}
 }
 
+// (a2/BLOCK-1) The ABSENT-ledger reserve is CAS-safe too. GetGeneration returns rv=="" only
+// when the ConfigMap does not exist (the seed / #1095 absent-ledger failover). SetGeneration
+// must CREATE it rather than blind-Update: a Create is a compare-and-swap against
+// non-existence, so a SECOND partitioned writer reserving from the same absent state loses
+// with ErrLedgerConflict instead of both writers succeeding and both promoting. The old
+// unconditional-Update path was fail-OPEN here.
+func TestSetGenerationCreatesAbsentLedgerAndSecondWriterConflicts(t *testing.T) {
+	k := casK8sClient(fake.NewClientset()) // NO ledger ConfigMap exists
+	ctx := context.Background()
+
+	// Both partitioned writers read the ABSENT ledger identically: ok=false, rv="".
+	gen, ok, rv, err := k.GetGeneration(ctx)
+	if err != nil || ok || rv != "" {
+		t.Fatalf("absent-ledger GetGeneration = (%d,%v,%q,%v), want (0,false,\"\",nil)", gen, ok, rv, err)
+	}
+
+	// WINNER creates the ledger at gen 2 (a reserve out of the absent state).
+	if werr := k.SetGeneration(ctx, 2, ""); werr != nil {
+		t.Fatalf("the first writer must CREATE the absent ledger, got %v", werr)
+	}
+	// LOSER still holds rv=="" from its own absent read and reserves 3. It must NOT clobber
+	// via an unconditional write: the Create races and surfaces ErrLedgerConflict.
+	lerr := k.SetGeneration(ctx, 3, "")
+	if !errors.Is(lerr, ErrLedgerConflict) {
+		t.Fatalf("the second writer reserving from rv=\"\" must return ErrLedgerConflict, got %v", lerr)
+	}
+	final, fok, _, ferr := k.GetGeneration(ctx)
+	if ferr != nil || !fok || final != 2 {
+		t.Fatalf("ledger must hold the winner's 2, not the loser's 3: got (%d,%v,%v)", final, fok, ferr)
+	}
+}
+
+// (BLOCK-2 fence) A reservation BELOW the current ledger must ABORT rather than promote — a
+// promotion below the ledger cannot fence a higher-generation holder. The clear-at-flip
+// bookkeeping keeps this unreachable in-process today; the mechanical `newGen >= ledger`
+// fence is defence-in-depth against a future re-entry that carried a stale reservation. The
+// comparison is `>=`, not `>`, so a legitimate RESUME (reservedGen == ledger) is NOT fenced;
+// only a reservation strictly below the ledger is.
+func TestFailoverFencesStaleReservationBelowLedger(t *testing.T) {
+	primary := &toggleProber{alive: false}
+	standby := &toggleProber{alive: true}
+	promoter := &fakePromoter{}
+	// The ledger has already advanced to gen 5 (a later episode moved it).
+	k8s := &fakeK8s{
+		selectorApp: "pageserver", gen: 5, genSet: true, genRV: "9",
+		primaryPresent: true, primaryReady: false,
+	}
+	c := newControllerRouted(primary, standby, promoter, k8s, 1, []string{"f0f0-base", "a000-apps"})
+	// A STALE reservation from a prior, lower-generation episode still sits on the field.
+	c.reservedGen = 2
+
+	fo, err := c.Tick(context.Background())
+	if err == nil || fo {
+		t.Fatalf("a reservation (2) below the ledger (5) must ABORT, not promote: fo=%v err=%v", fo, err)
+	}
+	if len(promoter.calls) != 0 {
+		t.Fatalf("NO tenant may be promoted at a generation below the ledger: %v", promoter.calls)
+	}
+	if len(k8s.flippedTo) != 0 {
+		t.Fatalf("the Service must NOT flip on a fenced-below promotion: %v", k8s.flippedTo)
+	}
+	if len(k8s.setGenTo) != 0 {
+		t.Fatalf("the ledger must NOT be written on a fenced abort: %v", k8s.setGenTo)
+	}
+}
+
 // (b) reserve-before-promote ordering, negative case: when the CAS-reserve LOSES, the
 // failover aborts WITHOUT promoting any tenant and WITHOUT flipping the Service, and the
 // loss is counted (the loud signal that two writers contended). A loser that had already
@@ -192,6 +258,11 @@ func TestFailoverReservesLedgerBeforeAnyPromote(t *testing.T) {
 	if len(k8s.setGenRVs) != 1 || k8s.setGenRVs[0] != "12" {
 		t.Fatalf("the reserve must CAS against the rv read this tick (12): %v", k8s.setGenRVs)
 	}
+	// BLOCK-2: the reservation is CLEARED once the flip+bounce completes, so the field never
+	// lingers as a stale value a future re-entry could adopt below a since-advanced ledger.
+	if c.reservedGen != 0 {
+		t.Fatalf("reservedGen must be cleared to 0 after a successful flip+bounce, got %d", c.reservedGen)
+	}
 }
 
 // (c/D6) abort-AFTER-partial-promotion, then the primary returns fenced and the plane
@@ -260,5 +331,10 @@ func TestFailoverAbortsMidRoutedSetThenConvergesSingleAdvance(t *testing.T) {
 	}
 	if k8s.selectorApp != "pageserver-standby" || len(k8s.flippedTo) != 1 {
 		t.Fatalf("the plane must converge onto the standby with exactly one flip: sel=%q flips=%v", k8s.selectorApp, k8s.flippedTo)
+	}
+	// BLOCK-2: the resume path also clears the reservation once it finally flips — the field
+	// held gen2 across the aborted tick 1, and is 0 once tick 2 completes the failover.
+	if c.reservedGen != 0 {
+		t.Fatalf("reservedGen must be cleared to 0 after the resume completes the flip, got %d", c.reservedGen)
 	}
 }
