@@ -11,9 +11,12 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: compute
-  # plane: compute is the WRITER selector the writer-autoscaler (#103) watches; the
-  # read-replica pool (app=compute-ro) deliberately does NOT carry it, so a
-  # plane=compute selector targets exactly the writers.
+  # plane: compute is the stable "this is a compute that attaches to the pageserver"
+  # label EVERY compute carries (base+warm writers, base+per-app RO readers, per-app
+  # writers). Writer-only consumers (writer-autoscaler #103, slot-janitor, backup)
+  # select plane=compute,role!=ro to exclude the readers (which carry role: ro); the
+  # pageserver-failover bounce (pswatcher plane=compute) targets ALL of them so every
+  # compute re-attaches to the promoted pageserver (#1097).
   labels: { app: compute, plane: compute }
 spec:
   replicas: 0 # at rest; gateway scales 0<->1

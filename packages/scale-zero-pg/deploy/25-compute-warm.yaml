@@ -13,8 +13,18 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: compute-warm
+  # plane: compute marks this a WRITER-plane compute (same tenant/timeline as the
+  # cold `compute`, single-writer). On pageserver failover the pswatcher bounce
+  # (plane=compute) now reaches a warm pod so it re-attaches to the promoted
+  # pageserver (#1097).
+  # DELIBERATE CONSEQUENCE: carrying plane: compute with no role: ro also ENROLS this
+  # pod in the three writer-only sets that select plane=compute,role!=ro — the writer
+  # autoscaler (deploy/85), the backup WAL-janitor slot floor and the replication-slot
+  # monitor (deploy/62, deploy/63). That is correct: warm is a base-tenant PUBLISHER on
+  # the same timeline as the cold writer, so its WAL and its slots need the same floor
+  # and the same early warning. The read pools stay out of all three via role: ro.
   namespace: scale-zero-pg
-  labels: { app: compute-warm }
+  labels: { app: compute-warm, plane: compute }
 spec:
   replicas: 0 # enable for warm-tier apps; default posture stays cold-zero (ADR-0002)
   revisionHistoryLimit: 2
@@ -24,7 +34,7 @@ spec:
     type: Recreate # single-writer: never two warm computes on one timeline
   template:
     metadata:
-      labels: { app: compute-warm }
+      labels: { app: compute-warm, plane: compute }
     spec:
       securityContext:
         seccompProfile: { type: RuntimeDefault }
@@ -90,6 +100,18 @@ spec:
             # F5 phase 2 (ADR-0003): the compute OFFERS TLS (paths match the config.json ssl_* GUCs).
             - { name: pggw-compute-server-tls, mountPath: /etc/pggw-compute-server-tls, readOnly: true }
             - { name: pggw-mtls-ca, mountPath: /etc/pggw-mtls-ca, readOnly: true }
+          # In-place vertical resize (#67/#103), same explicit contract as the cold
+          # writer (20-compute.yaml) and the per-app writers: this pod carries
+          # plane: compute with no role: ro, so the writer-autoscaler selector
+          # (plane=compute,role!=ro) includes it. NotRequired states the zero-restart
+          # guarantee rather than leaning on the kubelet's implicit default.
+          # NOTE the deliberate asymmetry below: warm declares no CPU *limit*, and
+          # the autoscaler's usage/limit ratio is 0 for a missing limit, so its CPU
+          # never scales while its memory does. That is intentional for a parked
+          # warm pod (burstable CPU, bounded RAM), not an oversight.
+          resizePolicy:
+            - { resourceName: cpu, restartPolicy: NotRequired }
+            - { resourceName: memory, restartPolicy: NotRequired }
           readinessProbe:
             tcpSocket: { port: pg }
             initialDelaySeconds: 0

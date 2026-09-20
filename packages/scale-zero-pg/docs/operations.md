@@ -1051,8 +1051,15 @@ outage. It is now **automatic**: a standing warm-Secondary standby plus the
      plane.
   3. **Flip** the `pageserver` Service selector to the standby, so the compute's
      unchanged `neon.pageserver_connstring host=pageserver` now resolves to it.
-  4. **Bounce** the compute (delete its pod) so a cold wake basebackups from the
-     promoted standby.
+  4. **Bounce** every compute (delete its pods) so a cold wake basebackups from the
+     promoted standby. The bounce targets the stable `plane=compute` label that EVERY
+     compute carries — the single-DB writer, the warm writer, the read-replica pool,
+     and every per-app writer *and* read replica — not just the base `compute`.
+     Promotion scope == routing scope: because the flipped Service routes every
+     tenant, every compute that resolves through it must reconnect, or a compute left
+     running keeps talking to the demoted pageserver. The trade is a slightly broader
+     bounce (any awake per-app/RO compute takes one cold wake to come back); this is
+     acceptable and deliberate — correctness over a marginally faster next wake.
   The surviving safekeeper carries the WAL, so the standby streams forward and the DB
   stays **read-WRITE** across the failover. The watcher is single-shot per failover
   and idempotent on restart (if the `pageserver` selector already points at the
@@ -3105,10 +3112,12 @@ usage via **metrics-server** and, on sustained pressure, patches the `pods/resiz
 subresource within configured min/max bounds — **the running Postgres never
 restarts** (`restartCount` unchanged, `pg_postmaster_start_time()` unchanged).
 
-**Per-app aware.** The `WAS_SELECTOR=plane=compute` label selector matches the
-primary `compute` and every per-app `compute-<app>` writer in one loop. The
-read-replica pool (`app=compute-ro`, no `plane=compute` label) is deliberately
-excluded — this is a *writer* autoscaler; read scaling is the RO pool's job.
+**Per-app aware.** The `WAS_SELECTOR=plane=compute,role!=ro` label selector matches
+the primary `compute`, the warm-tier `compute-warm` and every per-app `compute-<app>`
+writer in one loop. The read-replica pools (`compute-ro` and `compute-ro-<app>`) carry
+`plane=compute` too — every compute does, so a pageserver failover can bounce them all
+— and are excluded by the `role!=ro` clause: this is a *writer* autoscaler; read
+scaling is the RO pool's job.
 
 **Limits, not requests (always actuates).** The autoscaler moves the CPU/memory
 **limit** (the cgroup ceiling — burst headroom) and leaves the **request** at the
@@ -3145,7 +3154,7 @@ maintenance window: raise `WAS_MAX_MEM` + the compute's `shared_buffers` (in
 deliberate, scheduled bounce). Find flagged writers:
 
 ```sh
-kubectl -n scale-zero-pg get pods -l plane=compute \
+kubectl -n scale-zero-pg get pods -l plane=compute,role!=ro \
   -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.annotations.writer-autoscaler\.scale-zero-pg/needs-bounce}{"\n"}{end}'
 ```
 
@@ -3161,7 +3170,7 @@ re-woken writer starts fresh at the manifest baseline and re-scales under load.
 
 | Env | Default | Meaning |
 |---|---|---|
-| `WAS_SELECTOR` | `plane=compute` | writer pods to watch (RO pool excluded) |
+| `WAS_SELECTOR` | `plane=compute,role!=ro` | writer pods to watch (the RO pools carry `role: ro` and are excluded) |
 | `WAS_MIN_CPU` / `WAS_MAX_CPU` | `250m` / `2` | CPU resize envelope |
 | `WAS_CPU_STEP` | `250m` | CPU increment per resize |
 | `WAS_MIN_MEM` / `WAS_MAX_MEM` | `256Mi` / `1Gi` | memory resize envelope |

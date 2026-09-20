@@ -24,8 +24,11 @@
 #      ACTIVE slot's restart_lsn (never breaks live replication) and surfaces
 #      inactive-slot WAL (reclaimable, with the bound as backstop).
 #
-# SCOPE. A slot lives on a PUBLISHER (a writer, plane=compute — the RO pool
-# deliberately lacks that label). WAL only accrues while the publisher is AWAKE,
+# SCOPE. A slot lives on a PUBLISHER (a writer). EVERY compute carries
+# plane=compute — readers included, so the pageserver-failover bounce reaches them
+# — so publishers are selected as plane=compute,role!=ro: the read pools (compute-ro
+# and compute-ro-<app>) carry role: ro and are excluded by that clause, never by the
+# plane label. WAL only accrues while the publisher is AWAKE,
 # so inspecting Running writer pods is complete: a scaled-to-zero publisher
 # accrues no new WAL and holds no ACTIVE slot (active ⟹ a live walsender ⟹ awake).
 # DORMANT by design: on today's slot-free plane the query returns zero slots and
@@ -90,10 +93,11 @@ data:
     INACTIVE_MAX_SECS="${INACTIVE_MAX_SECS:-86400}"       # inactive: a leaked slot older than this (24h)
     echo "repl-slot-monitor CHECK=$CHECK bound=${MAX_SLOT_WAL_KEEP_MB}MB warn_pct=${WARN_PCT} inactive_max_secs=${INACTIVE_MAX_SECS}"
 
-    # Awake WRITER computes (plane=compute = single-DB + per-app publishers; the RO
-    # pool deliberately omits plane=compute so it is excluded). Publishers only accrue
-    # slot WAL while awake, so Running writer pods are the complete inspection set.
-    PODS="$(kubectl get pods -l plane=compute --field-selector=status.phase=Running \
+    # Awake WRITER computes (plane=compute,role!=ro = single-DB + per-app publishers).
+    # Every compute now carries plane=compute so the failover bounce reaches readers
+    # too (#1097); readers carry role=ro, so role!=ro excludes them here — publishers
+    # only accrue slot WAL while awake, so Running writer pods are the complete set.
+    PODS="$(kubectl get pods -l plane=compute,role!=ro --field-selector=status.phase=Running \
             -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)"
     if [ -z "$PODS" ]; then
       echo "no awake writer compute pods — no live replication slots to inspect (clean)"; exit 0

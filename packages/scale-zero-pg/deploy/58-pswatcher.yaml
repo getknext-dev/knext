@@ -99,7 +99,7 @@ spec:
             - { name: PSW_CLIENT_SERVICE, value: "pageserver" } # selector flipped on failover
             - { name: PSW_STANDBY_SELECTOR_APP, value: "pageserver-standby" }
             - { name: PSW_GEN_CONFIGMAP, value: "pageserver-generation" }
-            - { name: PSW_COMPUTE_SELECTOR, value: "app=compute" }
+            - { name: PSW_COMPUTE_SELECTOR, value: "plane=compute" } # bounce EVERY compute (base+warm+ro+per-app writer/RO) on failover, not just the base writer (#1097)
             - { name: PSW_PRIMARY_SELECTOR, value: "app=pageserver" } # #26 second-vantage: the primary pod the API server reports on
             - name: PSW_TENANT_ID
               valueFrom: { configMapKeyRef: { name: compute-config, key: TENANT_ID } }
