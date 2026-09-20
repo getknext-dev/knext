@@ -606,6 +606,19 @@ grep -q 'Reason == "NodeLost"' ../gateway/internal/pswatcher/k8s.go || fail "psw
 # AUTHORITATIVE behaviour guard is the unit test, which reds on any nodeLost() breakage. Assert the
 # test itself cannot silently vanish — impl broken => go test reds; test deleted => this reds.
 grep -q 'func TestPodReadyNodeLost' ../gateway/internal/pswatcher/k8s_test.go || fail "the NodeLost-is-a-death unit test (TestPodReadyNodeLost*) is gone — the node-death MTTR guarantee (#1099 review) is now unguarded"
+# The failover ABSENCE detector must be the STANDBY MEMBERSHIP ORACLE (the plane-wide
+# GET /v1/location_config listing), not the PUT and not the per-tenant GET: the live PUT
+# location_config returns 200 and ATTACHES a phantom empty tenant for a tenant it does not
+# hold (never 404s), and GET /v1/tenant/<T> returns 503 for a tenant held as a warm
+# SECONDARY — which is how a correctly-warmed standby holds every routed tenant, so that
+# endpoint aborts EVERY failover on a real plane (both observed live, ADR-0010 §5, D2).
+# Assert the wiring, the ENDPOINT, and the pre-flight, then anchor on the unit tests.
+grep -q 'SetStandbyMembershipViewer' ../gateway/cmd/pswatcher/main.go || fail "cmd/pswatcher no longer wires the STANDBY membership oracle (SetStandbyMembershipViewer) — failover fails closed on every tick (unwired) or, if that guard also went, PUTs a phantom empty tenant onto an un-warmed standby (ADR-0010 §5, D2)"
+grep -qF 'fmt.Sprintf("%s/v1/location_config", v.BaseURL)' ../gateway/internal/pswatcher/http.go || fail "the standby membership oracle no longer reads the plane-wide /v1/location_config listing — any per-tenant endpoint reports a warm SECONDARY as absent/unreadable (503/404, live-verified), which aborts every failover and leaves HA permanently dead (ADR-0010 §5, D2)"
+grep -q 'c.standbyHoldsTenant(ctx, tenant)' ../gateway/internal/pswatcher/watcher.go || fail "failover() no longer asks the standby membership oracle before attaching — the phantom-attach split-brain (ADR-0010 §5, D2) is unguarded"
+grep -q 'func TestFailoverAbortsWhenStandbyLacksTenantDespitePut200' ../gateway/internal/pswatcher/phantom_attach_failover_test.go || fail "the phantom-attach abort unit test (D2, ADR-0010 §5) is gone — the standby pre-flight is now unguarded"
+grep -q 'func TestFailoverAbortsWhenNoStandbyMembershipOracleWired' ../gateway/internal/pswatcher/phantom_attach_failover_test.go || fail "the UNWIRED-oracle fail-closed unit test is gone — an oracle omitted by a future build/deploy edit could silently fall through to the dead PUT-404 path (ADR-0010 §5, D2)"
+grep -q 'func TestMembershipOracleSeesSecondaryTheGenerationViewRejects' ../gateway/internal/pswatcher/standby_membership_test.go || fail "the Secondary-visibility unit test is gone — nothing then stops the oracle regressing to a per-tenant endpoint that 503s on a warm Secondary and kills automatic failover (ADR-0010 §5, D2)"
 ok "60 pins the #1099 failover-trigger alert<->metric family, the freeze bound is in lockstep with the binary, and the storage plane stays un-tolerant of an unreachable node"
 # FAILURE-DOMAIN PLACEMENT (sprint-close C3, ADR-0012). The #1099 node-death carve-out
 # assumes the promotion target and the observer SURVIVE the node death. That only holds if

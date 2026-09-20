@@ -118,6 +118,17 @@ func main() {
 	// that must corroborate a standby not-found before a non-base routed tenant may
 	// be skipped on failover (#1098).
 	ctrl.SetGenerationViewer(pswatcher.NewHTTPGenerationViewer(routedBase, probeTimeout))
+	// The STANDBY MEMBERSHIP ORACLE (GET pageserver-standby:9898/v1/location_config) is
+	// the failover absence detector, and the only endpoint that can be: the live PUT
+	// location_config returns 200 and ATTACHES a phantom empty tenant for a tenant the
+	// standby does not hold (never 404), and the per-tenant GET /v1/tenant/<T> returns
+	// 503 for a tenant held as a warm SECONDARY — which is how a correctly-warmed
+	// standby holds every routed tenant, so it would abort every failover (ADR-0010 §5).
+	// The plane-wide listing reports Secondaries. failover() asks it before every PUT,
+	// and aborts if it is unwired or unreadable. It points at the STANDBY (the promotion
+	// target), NOT the routed Service — the standby is exactly the node whose tenant
+	// coverage must be confirmed before flipping.
+	ctrl.SetStandbyMembershipViewer(pswatcher.NewHTTPTenantMembershipViewer(standbyBase, probeTimeout))
 	ctrl.SetLogger(logger.Printf)
 
 	// /healthz + /metrics: liveness of the watcher itself + promotion counter.

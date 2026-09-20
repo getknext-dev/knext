@@ -1043,10 +1043,14 @@ outage. It is now **automatic**: a standing warm-Secondary standby plus the
      so the watcher re-attaches **all of them** — the base tenant (`PSW_TENANT_ID`) *and*
      the apps tenant (`PSW_APPS_TENANT_ID`, under which every per-app database is a
      timeline) — before the flip. Promoting only the base tenant would strand every
-     per-app database on the demoted pageserver (split-brain). Any promotion error
+     per-app database on the demoted pageserver (split-brain). Before each attach the
+     watcher confirms the standby actually holds the tenant, by looking it up in the
+     standby's own listing of held tenants (`GET /v1/location_config`) — the attach call
+     cannot tell, since it `200`-attaches a phantom empty tenant instead. Any promotion error —
+     or a standby that does not hold a routed tenant the routed vantage still holds —
      **aborts** the failover before the flip (retried each tick) so an existing tenant is
      never stranded — see "When a routed tenant is not on the standby" below for the
-     not-found case specifically.
+     not-held case specifically.
   2. **Persist** the advanced generation in the ledger ConfigMap — once, for the whole
      plane.
   3. **Flip** the `pageserver` Service selector to the standby, so the compute's
@@ -1088,7 +1092,7 @@ outage. It is now **automatic**: a standing warm-Secondary standby plus the
 | `PSW_APPS_TENANT_ID` | `a00…001` | The **apps** tenant, under which every per-app database is a timeline. Promoted alongside the base tenant. Omit only on a base-only plane. Must equal `APPDB_TENANT_ID` (83), `APPS_TENANT_ID` (57) and `APPS_TENANT` (`provision-app.sh`) — `deploy/_validate.sh` asserts this. |
 | `PSW_CLIENT_SERVICE` | `pageserver` | The client Service whose selector a failover flips. |
 | `PSW_ROUTED_BASE_URL` | `http://<PSW_CLIENT_SERVICE>:9898` | The **currently-routed** pageserver's management API. Used for the ledger seed/heal *and* as the second vantage that must corroborate a standby not-found. Deliberately follows routing rather than naming the primary: the primary is down during a failover and demoted after one, so a view read there returns the OLD (lower) generation. |
-| `PSW_STANDBY_BASE_URL` | `http://pageserver-standby:9898` | The promotion target. |
+| `PSW_STANDBY_BASE_URL` | `http://pageserver-standby:9898` | The promotion target **and** the vantage the watcher reads BEFORE each attach to confirm the standby actually holds a routed tenant. It reads the standby's plane-wide listing, `GET /v1/location_config`, and looks for the tenant among the shards it reports — that listing includes tenants held as warm **Secondaries**, which is how a warmed standby holds them. It is the absence detector because neither alternative can be: the attach call returns `200` and attaches a phantom empty tenant even when the tenant is absent, and the per-tenant `GET /v1/tenant/<T>` answers `503 "Tenant not yet active"` for a Secondary. If the listing cannot be read, the failover aborts rather than guess. |
 | `PSW_PRIMARY_SELECTOR` | `app=pageserver` | The primary pod the API-server second vantage reports on. |
 | `PSW_POLL_MS` / `PSW_FAIL_THRESHOLD` | `2000` / `3` | Probe interval and consecutive misses before the promote decision is consulted. |
 | `PSW_BASE_GENERATION` | `1` | The generation floor for a genuinely fresh plane. It is a **floor, never a fallback** — an absent ledger is recovered from the routed view or the operation refuses (see below). |
@@ -1098,11 +1102,21 @@ outage. It is now **automatic**: a standing warm-Secondary standby plus the
 
 #### When a routed tenant is not on the standby
 
-`PUT /v1/tenant/<T>/location_config` answering `404` means "**this** pageserver does not
-hold the tenant" — it is **not** evidence the tenant does not exist. Standby warming runs
-once, at deploy, so an app database provisioned afterwards is real and routed while the
-standby still 404s for it. The watcher therefore resolves a not-found by position and
-corroboration:
+Before each attach, the watcher asks the **standby's** `GET /v1/location_config` — its
+plane-wide listing of the tenants it holds — whether the routed tenant is among them. A
+tenant missing from that listing is one the standby does not hold; it is **not** evidence
+the tenant does not exist. Two things that look like they could answer this question
+cannot, so do not use them when checking by hand:
+
+- the attach call returns `200` and attaches a phantom empty tenant even for a tenant the
+  standby does not hold, so it never signals "not held";
+- `GET /v1/tenant/<T>` on the standby returns `503 "Tenant not yet active"` for a tenant
+  held as a warm **Secondary** — which is exactly how a correctly-warmed standby holds
+  every routed tenant — so it reports a held tenant as unreadable.
+
+Standby warming runs once, at deploy, so an app database provisioned afterwards is real
+and routed while the standby's listing still omits it. The watcher therefore resolves a
+not-held tenant by position and corroboration:
 
 - **base tenant** → **abort**. Every compute reads through it; flipping would point them
   at a pageserver without their data. Reads stay on the (dead) primary and the failover
@@ -1113,6 +1127,10 @@ corroboration:
   is never silent.
 - **apps tenant, but the routed vantage holds it** (or the vantage cannot be reached)
   → **abort**. "We could not check" is never read as "it does not exist".
+- **the standby's listing itself cannot be read** (unreachable, an error status, or an
+  unparseable body) → **abort**, for every tenant including the base one. The same rule
+  applies to a watcher deployment that was never given `PSW_STANDBY_BASE_URL`: with no way
+  to check the standby, the failover refuses rather than attaching blind.
 
 **Operational consequence — warm the standby for the apps tenant.** On a plane that
 declares `PSW_APPS_TENANT_ID`, warming that tenant on the standby is a **precondition for
