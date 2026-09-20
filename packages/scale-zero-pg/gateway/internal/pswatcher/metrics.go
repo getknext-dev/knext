@@ -142,6 +142,20 @@ type Metrics struct {
 	StandbyStaleAttachedTotal     int            `json:"standby_stale_attached_total"`
 	StandbyTenantWarm             map[string]int `json:"standby_tenant_warm,omitempty"`
 
+	// FailoverArmedVal is the composite HA-readiness gauge (D3): 1 = if the primary died
+	// right now the watcher WOULD promote — no maintenance freeze is suppressing it AND the
+	// standby holds every routed tenant as a warm Secondary (so failover()'s pre-flight
+	// oracle would pass). 0 = a precondition would block/suppress the promotion, so the HA
+	// safety net is NOT in place. Refreshed every tick; alert on a sustained 0.
+	FailoverArmedVal int `json:"failover_armed"`
+
+	// FailoverAbortedByReason counts failovers that were ATTEMPTED (failover() ran) but
+	// aborted before completing the flip, labeled by cause — so an operator sees WHY the
+	// safety net did not fire, not just that primary_up went to 0. A suppressed/withheld
+	// would-be failover (freeze, partition, never-seen) is NOT counted here: those never
+	// enter failover() and carry their own counters.
+	FailoverAbortedByReason map[string]int `json:"failover_aborted_by_reason,omitempty"`
+
 	// FailoverReasonVal is the classification of the LAST completed failover:
 	// "node_death" once the watcher has confirmed a genuine death and promoted.
 	// Rendered as a labeled sample pswatcher_failover_reason{reason="..."} 1 so a
@@ -510,6 +524,45 @@ func (m *Metrics) FailoverReason() string {
 	return m.FailoverReasonVal
 }
 
+// SetFailoverArmed publishes the composite HA-readiness gauge (D3). Called every tick with
+// the verdict of failoverArmed() so alerting can fire on a sustained 0 (the safety net is
+// down) independently of whether the primary is currently healthy.
+func (m *Metrics) SetFailoverArmed(armed bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if armed {
+		m.FailoverArmedVal = 1
+	} else {
+		m.FailoverArmedVal = 0
+	}
+}
+
+// FailoverArmed returns the last published HA-readiness gauge (tests).
+func (m *Metrics) FailoverArmed() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.FailoverArmedVal
+}
+
+// FailoverAborted counts one failover that ran but aborted before the flip, labeled by
+// cause. The reason is a small closed set (see failover()'s abort classification) so the
+// label cardinality stays bounded.
+func (m *Metrics) FailoverAborted(reason string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.FailoverAbortedByReason == nil {
+		m.FailoverAbortedByReason = map[string]int{}
+	}
+	m.FailoverAbortedByReason[reason]++
+}
+
+// FailoverAbortedCount returns the abort count for one reason (tests).
+func (m *Metrics) FailoverAbortedCount(reason string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.FailoverAbortedByReason[reason]
+}
+
 // Promotions returns the promotion count (used by tests).
 func (m *Metrics) Promotions() int { m.mu.Lock(); defer m.mu.Unlock(); return m.PromotionsTotal }
 
@@ -555,12 +608,19 @@ func (m *Metrics) PromText() string {
 			"pswatcher_standby_warm_reconciles_total %d\n"+
 			"pswatcher_standby_warm_registrations_total %d\n"+
 			"pswatcher_standby_warm_errors_total %d\n"+
-			"pswatcher_standby_stale_attached_total %d\n",
+			"pswatcher_standby_stale_attached_total %d\n"+
+			"pswatcher_failover_armed %d\n",
 		m.PromotionsTotal, m.ChecksTotal, m.PrimaryUpVal, m.FailedOverVal, m.SuspectedPartitionsTotal, m.PrimaryNeverSeenTotal, m.TenantAbsentTotal, m.LedgerHealErrorsTotal,
 		m.DependencyDegradedTotal, m.FailoverFrozenVal, m.FailoverFreezeSuppressed, m.FailoverFreezeExpirySecond, m.FreezeReadErrorsTotal,
 		m.ConvergeRepromotionsTotal, m.ConvergeBlockedTotal, m.ConvergeErrorsTotal, m.ConvergeTenantAbsentTotal, m.LedgerCASConflictsTotal,
-		m.StandbyWarmReconcilesTotal, m.StandbyWarmRegistrationsTotal, m.StandbyWarmErrorsTotal, m.StandbyStaleAttachedTotal,
+		m.StandbyWarmReconcilesTotal, m.StandbyWarmRegistrationsTotal, m.StandbyWarmErrorsTotal, m.StandbyStaleAttachedTotal, m.FailoverArmedVal,
 	)
+	// D3 — labeled abort counters, one sample per observed reason in sorted key order so
+	// the exposition is stable. Emitted only for reasons that have actually occurred (no
+	// bare zero-value lines for a reason that never fired).
+	for _, reason := range sortedKeys(m.FailoverAbortedByReason) {
+		out += fmt.Sprintf("pswatcher_failover_aborted_total{reason=%q} %d\n", reason, m.FailoverAbortedByReason[reason])
+	}
 	// D1 — the per-tenant loss-of-warmth gauge, one LABELED sample per routed tenant the
 	// reconcile has observed. Rendered in sorted key order so the exposition is stable.
 	for _, tenant := range sortedKeys(m.StandbyTenantWarm) {
