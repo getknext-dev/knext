@@ -315,7 +315,7 @@ for a in $T7_APPS; do
   APPPW="$($K get secret "app-db-$a" -o jsonpath='{.data.PGPASSWORD}' 2>/dev/null | base64 -d 2>/dev/null || echo '')"
   [ -n "$APPPW" ] || fail "no app-db-$a Secret (PGPASSWORD) minted by provision-app — cannot wake app '$a'"
   DSN="postgres://app_$a:$APPPW@$APPS_GW:55432/$a?sslmode=disable"
-  [ "$(RETRY "wake-$a" "$DSN" 'select 1' 2>/dev/null)" = "1" ] \
+  [ "$(RETRY "wake-$a" "$DSN" 'select 1')" = "1" ] \
     || fail "could not wake per-app compute for '$a' through $APPS_GW after 6 bounded retries — the app is not Active (cold-wake role-apply race did not settle), so a failover assertion would be meaningless"
   ok "app '$a' woke Active (per-app compute up, tenant $APPS_TENANT timeline $TL)"
 done
