@@ -403,7 +403,10 @@ The OKE acceptance suite (`CLAUDE.md` loop step 3). Run before requesting review
   (`_verify-alerting`, `_verify-cronjob-alerting`, `_verify-ksm-down`, `_verify-ha`);
   **ops** (`_verify-drift`, `_verify-base-admin`, `_verify-upgrade`, `_verify-extensions`,
   `_verify-writer-autoscaler`).
-- `deploy/_validate.sh` — manifest server-dry-run + contract checks (also run in CI).
+- `deploy/_validate.sh` — manifest server-dry-run + contract checks. **Operator-local, not
+  run in CI**: it needs a live cluster (server-side dry-run) plus `kubectl` and mikefarah
+  `yq` v4 on PATH — see Prerequisites in `docs/operations.md`. Run it yourself before
+  applying manifests.
 - `deploy/_rehearse-upgrade.sh` — storage-plane upgrade rehearsal (a kill-criterion tripwire).
 
 ---

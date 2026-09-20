@@ -67,15 +67,57 @@ _lockstep_eq() {
   return 0
 }
 
+# --- yq-scoped presence helpers (D5) ---------------------------------------
+# The OTHER half of the consolidation: contracts of the form "value X must name a REAL
+# node of kind K in manifest M". Open-coded as whole-file greps they all share one defect
+# — a DIFFERENT node carrying the same text satisfies them — so each helper below scopes
+# the lookup with yq and fails CLOSED when yq is unavailable. There is deliberately no
+# fallback to the loose match: the scope IS the guarantee.
+#
+# PREREQUISITE: mikefarah yq v4 (https://github.com/mikefarah/yq), i.e. `yq e '<expr>' <file>`.
+# kislyuk/python-yq installs a binary of the SAME NAME with a jq-filter CLI; it errors out
+# here rather than silently passing. Documented under Prerequisites in docs/operations.md.
+#
+# _yq_values <expr> <manifest> <scope-desc> — prints the matched values. On a yq ERROR
+# (unparseable YAML, or the wrong yq) it prints an ATTRIBUTED note to stderr and returns 1,
+# so the caller's contract failure is never misread as "the value is absent from the
+# manifest" — which sent the reader to the wrong file.
+_yq_values() {
+  if ! __yq_out="$(yq e "$1" "$2" 2>&1)"; then
+    printf 'NOTE: yq could not evaluate %s on %s (%s): %s\n' "$1" "$2" "$3" "$__yq_out" >&2
+    printf 'NOTE: that is a YAML-PARSE/yq failure, NOT "the value is missing" — _validate.sh needs mikefarah yq v4 (`yq e <expr> <file>`), not kislyuk/python-yq\n' >&2
+    return 1
+  fi
+  printf '%s\n' "$__yq_out"
+}
+_yq_required() {  # $1 = what the scope is for; records the fail, caller returns 1
+  fail "mikefarah yq v4 is required to scope the $1 (D5) — install it (https://github.com/mikefarah/yq), see Prerequisites in docs/operations.md. Fail-closed on purpose: falling back to a whole-file grep reinstates the defect the scope removes"
+}
+
 # _container_name_present <manifest> <name> — true iff <name> is a container name under
 # .spec.template.spec.containers[]. SCOPED via yq, deliberately NOT a whole-file grep:
 # the old `grep '- name: <x>'` matched a `- name:` under env: or volumes: too, so a
-# value naming an env var or a volume passed the container-name lockstep. Fails CLOSED
-# when yq is unavailable — the scope is the point, so we never silently fall back to the
-# loose match this replaces.
+# value naming an env var or a volume passed the container-name lockstep.
 _container_name_present() {
-  command -v yq >/dev/null 2>&1 || { fail "yq is required to scope the container-name lockstep to .spec.template.spec.containers[].name (D5); install yq"; return 1; }
-  yq e '.spec.template.spec.containers[].name' "$1" 2>/dev/null | grep -qxF "$2"
+  command -v yq >/dev/null 2>&1 || { _yq_required "container-name lockstep to .spec.template.spec.containers[].name"; return 1; }
+  [ -n "$2" ] || { fail "_container_name_present called with an EMPTY name for $1 — an empty needle matches yq's null output and would pass vacuously (fail-closed)"; return 1; }
+  __cn="$(_yq_values '.spec.template.spec.containers[].name' "$1" "container-name lockstep")" || return 1
+  printf '%s\n' "$__cn" | grep -qxF "$2"
+}
+
+# _pod_template_label_present <manifest> <kind> <key> <value> — true iff a document of kind
+# <kind> carries .spec.template.metadata.labels.<key> == <value>, i.e. the label is on the
+# POD TEMPLATE, which is the only thing a podAntiAffinity labelSelector can match. Same
+# class as the container-name case and the same defect: the whole-file
+# `grep 'labels: { app: pageserver, plane: storage }'` it replaces matched that string
+# TWICE in 53-pageserver.yaml — the StatefulSet's own metadata.labels as well as its pod
+# template — so renaming only the pod template left the guard green while every selector
+# repelling that label matched nothing.
+_pod_template_label_present() {
+  command -v yq >/dev/null 2>&1 || { _yq_required "pod-template-label lockstep to .spec.template.metadata.labels"; return 1; }
+  [ -n "$4" ] || { fail "_pod_template_label_present called with an EMPTY value for $1 ($2 .$3) — an empty needle matches yq's null output and would pass vacuously (fail-closed)"; return 1; }
+  __pl="$(_yq_values "select(.kind == \"$2\") | .spec.template.metadata.labels.\"$3\"" "$1" "pod-template-label lockstep")" || return 1
+  printf '%s\n' "$__pl" | grep -qxF "$4"
 }
 
 COMPLETED=0
@@ -714,8 +756,11 @@ _check_anti_affinity 58-pswatcher.yaml soft pageserver
 # LOCKSTEP: the selector values above are only meaningful if they name REAL pod-template
 # labels. Renaming a pod's app label would otherwise leave every selector above matching
 # nothing while this file still reads green.
-grep -q 'labels: { app: pageserver, plane: storage }' 53-pageserver.yaml || fail "53-pageserver.yaml pod template no longer carries app=pageserver — the anti-affinity selectors in 57/58 that repel app=pageserver now match nothing (sprint-close C3 / ADR-0012)"
-grep -q 'labels: { app: pageserver-standby, plane: storage }' 57-pageserver-standby.yaml || fail "57-pageserver-standby.yaml pod template no longer carries app=pageserver-standby — the anti-affinity selector in 53 that repels app=pageserver-standby now matches nothing (sprint-close C3 / ADR-0012)"
+# yq-SCOPED to .spec.template.metadata.labels (D5): the whole-file grep this replaces
+# matched the StatefulSet's OWN metadata.labels too (that string occurs twice in
+# 53-pageserver.yaml), so a rename of the POD TEMPLATE label alone left it green.
+_pod_template_label_present 53-pageserver.yaml StatefulSet app pageserver || fail "53-pageserver.yaml StatefulSet POD TEMPLATE no longer carries app=pageserver (.spec.template.metadata.labels) — the anti-affinity selectors in 57/58 that repel app=pageserver now match nothing (sprint-close C3 / ADR-0012). NB: yq-scoped to the pod template, so the StatefulSet's own metadata.labels no longer satisfies it (D5)."
+_pod_template_label_present 57-pageserver-standby.yaml StatefulSet app pageserver-standby || fail "57-pageserver-standby.yaml StatefulSet POD TEMPLATE no longer carries app=pageserver-standby (.spec.template.metadata.labels) — the anti-affinity selector in 53 that repels app=pageserver-standby now matches nothing (sprint-close C3 / ADR-0012). NB: yq-scoped to the pod template, so neither the StatefulSet's own metadata.labels nor the init Job's pod template satisfies it (D5)."
 ok "failure-domain placement asserted (C3), target AND shape: 57 HARD-repels app=pageserver (the standby can never share the primary's node), 53/58 SOFT-repel their peers on kubernetes.io/hostname, and the repelled labels are real pod labels"
 grep -q 'alert: ComputeWakeStuck' 60-prometheus.yaml || fail "60 missing wake-path-stuck alert"
 # issue #39: demo end-to-end canary alert — dormant Failed-Job rule joined on the
