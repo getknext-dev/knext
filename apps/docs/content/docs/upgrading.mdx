@@ -116,6 +116,26 @@ kubectl exec deploy/<your-scraper> -- wget -qO- http://<pod-ip>:9464/metrics | h
 `kn-next doctor` (the `metrics-port` check) flags any app still pinned onto a queue-proxy-owned
 port and tells you which serving ConfigMap key governs `:9091` on your cluster.
 
+## The scale-to-zero database: roll the failover controller before its new config
+
+The scale-to-zero database ships its own **failover controller** — a small component that watches
+the primary pageserver and promotes the warm standby if it dies. It reads its behaviour from
+environment configuration set on its manifests, and it follows the same ordering rule as the
+operator and CLI, for the same reason: **the piece that *reads* a contract upgrades before the
+manifest that *writes* it.**
+
+When an upgrade adds or changes a failover-controller setting — the tenant set it promotes, the
+routed pageserver URL it reads generations from, the maintenance-freeze ConfigMap name or the
+freeze's hard time bound — **roll the failover-controller image to the new version first, then
+apply the manifests that wire the new configuration.** Apply the new setting against the old image
+and the setting is inert: the running controller does not know the variable exists, so nothing
+reads it and the change silently does nothing — the same failure mode as running the CLI ahead of
+the CRD.
+
+If you deploy the scale-to-zero database from its bundled manifests
+(`kubectl apply -f packages/scale-zero-pg/deploy/`), bump the controller image digest and roll it
+before applying the rest of the directory in the same upgrade.
+
 ## What this does not cover
 
 Deployment tools that apply manifests directly to your cluster — GitOps controllers, for example —

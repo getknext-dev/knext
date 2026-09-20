@@ -1352,6 +1352,35 @@ the (opt-in) behavioral suppression and object-store-degradation scenarios. The
 degradation scenario proves the **sub-liveness-window** case only — the freeze scenario
 is what covers the longer class.
 
+**What a freeze does NOT stop — convergence.** A freeze suppresses **promotion** — the
+fresh, standby-consuming failover decision. It does **not** suppress **convergence**. On a
+plane that has *already* failed over (the client Service selector points at the promoted
+standby), the watcher runs `convergeFailover` every tick regardless of the freeze —
+re-attaching any routed tenant still lagging the ledger generation. That path is
+idempotent and generation-guarded (it never advances the ledger), so it is safe to run
+while frozen; the freeze gate sits only on the fresh-promotion branch, not on the
+already-failed-over adopt/converge branch. The practical consequence for an operator: a
+planned frozen op performed on an already-failed-over plane can make the
+`pswatcher_converge_*` counters (`pswatcher_converge_repromotions_total` and friends)
+rise while `pswatcher_failover_frozen` is `1`. **That is expected, not a fault** — the
+watcher is finishing an interrupted failover, not making a new one, and the freeze was
+never meant to hold it back.
+
+**A freeze does NOT silence the degradation/outage alerts.** A correctly-set freeze
+suppresses failover and raises `pswatcher_failover_frozen`; it does **not** touch the
+health gauges the plane's real state drives. So during a planned frozen op that takes the
+primary offline, `pswatcher_primary_up` still goes to `0` and **`PswatcherPrimaryDown`
+will still fire**; if the op degrades a dependency (object-store creds mid-rotation) while
+the pageserver process stays up, `pswatcher_dependency_degraded_total` still climbs and
+**`PswatcherDependencyDegraded`** can still page. This is correct: the plane really *is*
+degraded for the duration — the freeze changed only whether the watcher *reacts* by
+promoting, not whether the degradation is *reported*. **Do not read those pages as "the
+freeze failed."** The signal that the freeze IS working is `PswatcherFailoverFrozen`
+(active) plus, if a real death lands inside the window, `PswatcherFailoverSuppressedByFreeze`
+(a promotion was withheld) — not the absence of `PswatcherPrimaryDown`. If the pages are
+noise for a *planned* window, silence them for that window in your alertmanager; the
+watcher will not do it for you.
+
 #### Availability posture of the authority itself (#23)
 
 The watcher is a deliberate **single replica** — promotion is the single-writer of a
@@ -3507,13 +3536,15 @@ scale call.
   upgrade (idle/scaled-to-zero writers are unaffected). Roll during an idle window if a
   momentary writer disconnect is disruptive.
 - **pswatcher — roll the image BEFORE applying manifests that wire new env.** When an
-  upgrade adds or changes a `pswatcher` env var (e.g. a new `PSW_*` behaviour flag),
-  update `58-pswatcher.yaml` to the new digest and roll it **first**, then apply the
-  manifests that depend on the flag. Applying a new env var against an **older** binary
-  makes it inert — the flag is read by nobody — the same failure the freeze runbook
-  warns about for `PSW_FREEZE_CONFIGMAP`. This rhymes with the platform-wide
-  operator-then-CLI ordering rule: the component that *reads* a contract upgrades before
-  the manifest that *writes* it.
+  upgrade adds or changes a `pswatcher` env var — the routed-tenant set
+  (`PSW_APPS_TENANT_ID`), the maintenance-freeze ConfigMap name (`PSW_FREEZE_CONFIGMAP`),
+  the freeze hard-TTL bound (`PSW_MAX_FREEZE_MS`), the routed pageserver management URL
+  (`PSW_ROUTED_BASE_URL`), or any other new `PSW_*` behaviour flag — update
+  `58-pswatcher.yaml` to the new digest and roll it **first**, then apply the manifests
+  that wire the new env. Applying a new env var against an **older** binary makes it inert
+  — the flag is read by nobody — the same failure the freeze runbook warns about for
+  `PSW_FREEZE_CONFIGMAP`. This rhymes with the platform-wide operator-then-CLI ordering
+  rule: the component that *reads* a contract upgrades before the manifest that *writes* it.
 
 ### Releasing an OCIR image — digest pinning (issue #56)
 
