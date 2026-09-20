@@ -3,6 +3,24 @@
 Day-2 reference for running the platform: configuration, monitoring, failure
 behavior, and troubleshooting.
 
+## Prerequisites (tooling on your workstation)
+
+The manifest-contract gate `deploy/_validate.sh` and the drill scripts run **from an
+operator workstation against a live cluster** — they are not part of any CI workflow, so
+these tools have to be on *your* PATH:
+
+| Tool | Needed by | Notes |
+|---|---|---|
+| `kubectl` | `deploy/_validate.sh`, every drill | Must point at the target cluster; `_validate.sh` server-side dry-runs every manifest. |
+| `yq` — **mikefarah yq v4** | `deploy/_validate.sh` | Install from <https://github.com/mikefarah/yq>. Some lockstep contracts have to look at a *specific node* (a container name under `.spec.template.spec.containers[]`, a pod-template label under `.spec.template.metadata.labels`) rather than anywhere in the file, and `_validate.sh` **fails closed** without it rather than falling back to a whole-file text match that a same-named env var or a workload's own labels would satisfy. |
+| `psql` | connection + wake drills | Any client ≥ 14. |
+
+`yq` is the one that trips people up: **kislyuk/python-yq installs a binary with the same
+name** but a jq-filter CLI, and it cannot run `yq e '<expr>' <file>`. If you have it,
+`_validate.sh` prints a `NOTE:` naming the parse failure (rather than claiming a value is
+missing from a manifest) and exits non-zero. Check with `yq --version` — you want
+`yq (https://github.com/mikefarah/yq/) version v4.x`.
+
 ## Gateway configuration (env on `deploy/pggw`)
 
 | Variable | Default | Meaning |
@@ -1083,6 +1101,48 @@ outage. It is now **automatic**: a standing warm-Secondary standby plus the
   configmaps get/update/patch, pods list/delete) — the routed-tenant set is configured,
   not discovered by listing `AppDatabase` CRs, and the pageserver generation view is an
   HTTP read.
+
+#### Verifying the DEPLOYED binary's capabilities (not just the manifest)
+
+The watcher also exposes `pswatcher_build_info{version,features} 1` on `:9091`. Its
+`features` label names the failover capabilities the **running** binary was built with —
+today `routed-set` (multi-tenant routed-set promotion) and `freeze` (the TTL-bounded
+maintenance freeze). This exists because the manifest can be right while the **image is
+stale**: the env-var contract checks in `deploy/_validate.sh` compare the manifest to the
+source tree, so they stay green even when `deploy/58-pswatcher.yaml` pins an old image
+that ignores those env vars. `pswatcher_build_info` lets you ask the pod what it can
+actually do — an image built before a capability existed cannot advertise it.
+
+Assert it against a live cluster with:
+
+```
+deploy/_verify-pswatcher-capability.sh run
+```
+
+It scrapes `/metrics` off the running pswatcher pod and fails if the gauge is absent (a
+pre-capability image) or if any required feature is missing. Override the required set
+with `REQUIRE_FEATURES="routed-set freeze"` and the port with `PSW_METRICS_PORT`.
+
+**Know exactly what this proves — and what it does not.** The feature list is a
+**declaration the build makes about itself**, hand-maintained in the watcher's source; it
+is not derived by inspecting the failover code. Three consequences you must operate with:
+
+- **A capability that shipped without its entry is invisible here.** The list only grows
+  when whoever lands a capability also adds its token, so the gauge can under-report. A
+  missing feature therefore means "this binary does not *claim* it", which is weaker than
+  "this binary cannot do it".
+- **A binary can advertise `freeze` while the freeze path is broken.** The token asserts
+  that the build declared the capability, not that the code behind it still works — a
+  reverted or regressed implementation with a surviving declaration advertises a lie. The
+  drill battery and the alert rules, not this gauge, are what tell you a capability
+  *works*.
+- **The signal is one-directional and monotone.** Once a token ships, every later image
+  carries it, so the gauge keeps catching stale images only for capabilities added
+  *after* the image was built.
+
+What it does prove, and what nothing else in the manifest checks: the pod you are looking
+at was built from a tree that knew about these capabilities. Use it to rule a stale image
+in or out, then verify behavior with the drills.
 
 #### Watcher configuration (env on `deploy/58-pswatcher.yaml`)
 

@@ -4,8 +4,48 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 )
+
+// D9 — RUNNING-BINARY capability signal (pswatcher_build_info).
+//
+// The deploy-time lockstep guards all pinned the manifest to a SOURCE constant
+// (PSW_MAX_FREEZE_MS↔DefaultMaxFreezeDuration, PSW_APPS_TENANT_ID↔APPDB_TENANT_ID,
+// PSW_PRIMARY_CONTAINER↔53). They therefore stayed green on a manifest that runs a
+// STALE image which ignores the env — at one sprint close 58-pswatcher.yaml still
+// pinned a pre-capability image and every source check passed. The fix is a signal a
+// scraper reads off the DEPLOYED binary: this gauge names the capabilities COMPILED
+// INTO the binary, so a stale image reds the drill rather than passing.
+//
+// Each entry is added in the SAME change that lands the capability it names. A binary
+// built before an entry existed cannot emit it — that is the whole point: the gauge is
+// the manifest↔running-binary link the source-pinned guards lacked. (Within the
+// package boundary this is a build-capability *declaration*, not cross-package
+// introspection: it asserts the binary was built from a tree that carried the feature,
+// which is exactly what catches a stale image; see docs/operations.md.)
+const (
+	// FeatureRoutedSet — failover promotes the routed apps-tenant SET alongside the
+	// base tenant (PSW_APPS_TENANT_ID), so per-app databases are not stranded on the
+	// demoted pageserver (#1098).
+	FeatureRoutedSet = "routed-set"
+	// FeatureFreeze — a TTL-bounded maintenance FREEZE suppresses failover and is
+	// clamped to DefaultMaxFreezeDuration (PSW_MAX_FREEZE_MS), #1099.
+	FeatureFreeze = "freeze"
+)
+
+// pswatcherFeatures is the capability list this binary ships, in a stable order so the
+// emitted label is deterministic (a scraper matches substrings, not exact strings).
+var pswatcherFeatures = []string{FeatureFreeze, FeatureRoutedSet}
+
+// BuildVersion is the build tag of this binary. It defaults to "dev" so
+// pswatcher_build_info always carries a non-empty version label, and can be stamped at
+// link time (-X '...pswatcher.BuildVersion=vX.Y.Z') without touching this file.
+var BuildVersion = "dev"
+
+// FeaturesLabel returns the comma-joined capability list emitted as the `features`
+// label of pswatcher_build_info.
+func FeaturesLabel() string { return strings.Join(pswatcherFeatures, ",") }
 
 // Metrics holds the watcher's counters, safe for concurrent use (the HTTP
 // server reads while the control loop writes).
@@ -341,7 +381,10 @@ func (m *Metrics) SuspectedPartitions() int {
 func (m *Metrics) PromText() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := fmt.Sprintf(
+	// D9 running-binary capability signal, emitted unconditionally so a scraper can
+	// prove the DEPLOYED binary carries these features (a stale image cannot emit them).
+	out := fmt.Sprintf("pswatcher_build_info{version=%q,features=%q} 1\n", BuildVersion, FeaturesLabel())
+	out += fmt.Sprintf(
 		"pswatcher_promotions_total %d\n"+
 			"pswatcher_checks_total %d\n"+
 			"pswatcher_primary_up %d\n"+
