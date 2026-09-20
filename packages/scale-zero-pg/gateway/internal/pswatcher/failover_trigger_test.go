@@ -319,6 +319,9 @@ func TestMalformedFreezeUntilDoesNotDisableHA(t *testing.T) {
 		FailThreshold:   1,
 		BaseGeneration:  1,
 	}, NewMetrics())
+	// This test is about the freeze window, not tenant coverage: wire the live-accurate
+	// standby (holds every routed tenant) so it runs the same pre-flight production does.
+	c.SetStandbyMembershipViewer(allHeld{})
 
 	fo, err := c.Tick(context.Background())
 	if err != nil {

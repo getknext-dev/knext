@@ -50,6 +50,20 @@ var ErrTenantNotFound = errors.New("tenant not found on pageserver")
 // skippable() read an unverifiable answer as a corroborated absence.
 var ErrGenerationUnreadable = errors.New("pageserver reported no generation for tenant")
 
+// ErrTenantShardsUnreadable is returned by a TenantMembershipViewer when the pageserver
+// answered 200 but its /v1/location_config body carries no usable `tenant_shards` list.
+// Like ErrGenerationUnreadable it is an ERROR and never held=false: an unreadable
+// listing is not proof the standby lacks the tenant.
+var ErrTenantShardsUnreadable = errors.New("pageserver reported no tenant_shards listing")
+
+// ErrNoStandbyMembership is returned when the failover pre-flight has no standby
+// membership oracle wired. It is a HARD failure, never a fall-through: without the
+// oracle the only remaining "does the standby hold it?" signal is the PUT, and the live
+// PUT 200-attaches a phantom EMPTY tenant instead of reporting not-held (ADR-0010 §5).
+// An unwired oracle is reached by OMISSION (a build or deployment that forgot the
+// wiring), so failing open here would reinstate the phantom-attach split-brain silently.
+var ErrNoStandbyMembership = errors.New("no standby membership oracle wired")
+
 // Prober reports whether the primary pageserver is alive (its :9898 /v1/status).
 type Prober interface {
 	Alive(ctx context.Context) bool
@@ -79,6 +93,27 @@ type Promoter interface {
 //     a non-base routed tenant may be skipped.
 type GenerationViewer interface {
 	Generation(ctx context.Context, tenant string) (gen int, ok bool, err error)
+}
+
+// TenantMembershipViewer answers "does this pageserver HOLD this tenant?" in ANY
+// location mode — Attached* or Secondary — from the plane-wide
+// GET :9898/v1/location_config listing (see HTTPTenantMembershipViewer).
+//
+// It exists because no PER-TENANT endpoint can answer that question on a standby:
+// a warm standby holds its routed tenants as SECONDARIES, for which (live-verified)
+// GET /v1/tenant/<T> returns 503 and GET /v1/tenant/<T>/location_config returns 404.
+// Using the generation view as the oracle therefore aborts EVERY failover on a real
+// plane, which is the same HA-dead outcome by a different route.
+//
+// It is pointed at the STANDBY — the promotion target — and it is the failover's
+// held/not-held pre-flight: the PUT cannot be, since the live PUT 200-attaches a
+// phantom empty tenant instead of reporting not-held (ADR-0010 §5).
+//
+// held=false means only "the pageserver answered and the tenant is not in its list".
+// Anything unreadable is an ERROR, so the failover can abort rather than mistake
+// "unverifiable" for "absent".
+type TenantMembershipViewer interface {
+	HoldsTenant(ctx context.Context, tenant string) (held bool, err error)
 }
 
 // K8sOps is the Kubernetes surface the watcher drives. Kept minimal so the
@@ -146,20 +181,22 @@ type Controller struct {
 	standbyProber Prober // probes the STANDBY pageserver (post-failover authority)
 	promoter      Promoter
 	genViewer     GenerationViewer // routed-pageserver generation view (seed/heal + 2nd vantage)
-	// standbyViewer is the GET generation view pointed at the STANDBY (the promotion
-	// TARGET), the vantage that 404s CORRECTLY for a tenant it does not hold. It is the
-	// PRIMARY absence detector on failover: the live pageserver's PUT location_config
-	// returns 200 and ATTACHES a phantom empty tenant for a tenant it does not hold
-	// (never 404), so ErrTenantNotFound-on-PUT is not a reliable "not held" signal
-	// (ADR-0010 §5). failover() asks THIS view before every PUT; a not-held tenant
-	// feeds skippable() UNCHANGED (base aborts; a non-base tenant needs routed-vantage
-	// corroboration). The PUT-404→ErrTenantNotFound path is retained as defence-in-depth.
-	standbyViewer GenerationViewer
-	k8s           K8sOps
-	cfg           Config
-	metrics       *Metrics
-	logger        func(format string, args ...any) // OPTIONAL diagnostics sink
-	now           func() time.Time                 // clock seam; time.Now in prod, fixed in tests
+	// standbyMembership is the held/not-held oracle pointed at the STANDBY (the
+	// promotion TARGET): the plane-wide /v1/location_config listing, the only vantage
+	// that sees a tenant held as a warm SECONDARY. It is the failover's absence
+	// detector, because neither of the alternatives works on a real plane — the PUT
+	// 200-ATTACHES a phantom empty tenant instead of reporting not-held (ADR-0010 §5),
+	// and the per-tenant GET 503s on a Secondary. failover() asks THIS oracle before
+	// every PUT, for every routed tenant, and a not-held tenant feeds skippable()
+	// UNCHANGED (base aborts; a non-base tenant needs routed-vantage corroboration).
+	// UNWIRED IS A HARD ABORT, not a fall-through (see ErrNoStandbyMembership). The
+	// PUT-404→ErrTenantNotFound path is retained as defence-in-depth only.
+	standbyMembership TenantMembershipViewer
+	k8s               K8sOps
+	cfg               Config
+	metrics           *Metrics
+	logger            func(format string, args ...any) // OPTIONAL diagnostics sink
+	now               func() time.Time                 // clock seam; time.Now in prod, fixed in tests
 
 	failures int
 	done     bool // failover already performed (or adopted) — never re-promote
@@ -251,13 +288,28 @@ func (c *Controller) freezeActive(ctx context.Context) (active bool, effectiveUn
 // unaffected; when it is NOT wired, both consumers fail closed rather than guess.
 func (c *Controller) SetGenerationViewer(gv GenerationViewer) { c.genViewer = gv }
 
-// SetStandbyGenerationViewer wires the STANDBY-pageserver generation view — the GET
-// vantage that 404s correctly (see standbyViewer). It is the failover absence
-// detector that the PUT cannot be, because the live pageserver's PUT location_config
-// 200-attaches a phantom tenant rather than 404ing (ADR-0010 §5). Kept off the
-// constructor so existing callers/tests are unaffected; when it is NOT wired,
-// failover() falls back to the PUT-404→ErrTenantNotFound defence-in-depth path.
-func (c *Controller) SetStandbyGenerationViewer(gv GenerationViewer) { c.standbyViewer = gv }
+// SetStandbyMembershipViewer wires the STANDBY held/not-held oracle (see
+// standbyMembership + TenantMembershipViewer): the plane-wide /v1/location_config
+// listing, the only vantage that sees a tenant held as a warm Secondary. It is the
+// failover absence detector that neither the PUT (200-attaches a phantom tenant rather
+// than 404ing) nor the per-tenant GET (503s on a Secondary) can be — ADR-0010 §5.
+// Kept off the constructor so existing callers/tests are unaffected, but when it is NOT
+// wired failover() ABORTS (ErrNoStandbyMembership) — it never falls back to the PUT.
+func (c *Controller) SetStandbyMembershipViewer(mv TenantMembershipViewer) {
+	c.standbyMembership = mv
+}
+
+// standbyHoldsTenant is the failover pre-flight's single entry point to the standby
+// membership oracle. Both fail-closed cases live HERE, not at the call site, so no
+// caller can reach the PUT without an answer: an UNWIRED oracle is an error (never a
+// fall-through to the dead PUT-404 detector), and a read failure is propagated as an
+// error (never "not held", which skippable() could corroborate into a skip).
+func (c *Controller) standbyHoldsTenant(ctx context.Context, tenant string) (bool, error) {
+	if c.standbyMembership == nil {
+		return false, fmt.Errorf("failover: %w — refusing to attach routed tenant %s onto an unverified standby (the PUT 200-attaches a phantom empty tenant when the standby does not hold it, so without this oracle a never-warmed standby fails SILENTLY)", ErrNoStandbyMembership, tenant)
+	}
+	return c.standbyMembership.HoldsTenant(ctx, tenant)
+}
 
 // SetLogger wires an optional log sink so diagnostics that must not be swallowed
 // (a broken generation vantage) reach the operator's logs as well as a counter.
@@ -661,9 +713,9 @@ func (c *Controller) convergeFailover(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// skippable decides whether a routed tenant the STANDBY reports as not-found may be
+// skippable decides whether a routed tenant the STANDBY reports as not-held may be
 // skipped, given its index in the routed set. The standby's not-held report is a
-// node-local fact (from the GET generation view since D2; see failover), so on its own
+// node-local fact (from the membership oracle since D2; see failover), so on its own
 // it is never licence to flip (#1098 review, FIX 2):
 //
 //   - index 0 is the BASE tenant, which every compute reads through. It is NEVER
@@ -711,13 +763,19 @@ func (c *Controller) skippable(ctx context.Context, idx int, tenant string) (boo
 // a corroborated absence. The flip proceeds only if at least one routed tenant was
 // actually promoted.
 //
-// Absence is detected by the STANDBY generation VIEW (the GET vantage), not by the
-// PUT, because the live pageserver's PUT location_config returns 200 and ATTACHES a
-// phantom empty tenant for a tenant it does not hold — it never 404s (ADR-0010 §5).
-// So before every PUT this asks the standby view whether it holds the tenant; a
-// not-held tenant feeds skippable() unchanged. The PUT-404→ErrTenantNotFound mapping
-// is RETAINED below as defence-in-depth (a future pageserver may restore 404), but it
-// is no longer the only detector — the 200-attach case is caught by the pre-flight.
+// Absence is detected by the STANDBY MEMBERSHIP ORACLE (the plane-wide
+// GET /v1/location_config listing), not by the PUT and not by the per-tenant GET:
+//   - the live PUT location_config returns 200 and ATTACHES a phantom empty tenant for
+//     a tenant it does not hold — it never 404s (ADR-0010 §5);
+//   - the per-tenant GET /v1/tenant/<T> returns 503 for a tenant held as a warm
+//     SECONDARY, which is how a correctly-warmed standby holds its routed tenants, so
+//     using it would abort every failover on a real plane.
+//
+// So before every PUT this asks the membership oracle whether the standby holds the
+// tenant; a not-held tenant feeds skippable() unchanged, and an unwired or unreadable
+// oracle aborts. The PUT-404→ErrTenantNotFound mapping is RETAINED below as
+// defence-in-depth (a future pageserver may restore 404), but it is no longer a
+// detector anything relies on — the 200-attach case is caught by the pre-flight.
 //
 // The generation itself is fail-closed (#1098 review, code #5): an ABSENT ledger key
 // is never floored to BaseGeneration, because promoting at 2 on a plane that is
@@ -746,35 +804,38 @@ func (c *Controller) failover(ctx context.Context) error {
 	routed := c.routedTenants()
 	promoted := 0
 	for i, tenant := range routed {
-		// STANDBY PRE-FLIGHT (ADR-0010 §5, D2). The live pageserver's PUT
-		// location_config returns 200 and ATTACHES a phantom empty tenant for a tenant
-		// it does not hold — it never 404s — so ErrTenantNotFound-on-PUT is a dead
-		// detector against the real pageserver. The GET generation view on the standby
-		// DOES 404, so it is the vantage that can tell "not held" before an irreversible
-		// PUT+flip. Ask it first; a not-held tenant feeds the EXISTING skippable() logic
-		// UNCHANGED (base aborts; a non-base tenant needs routed-vantage corroboration).
-		// When no standby view is wired we fall through to the PUT-404 defence-in-depth
-		// path below (a plane that has not adopted the GET vantage keeps its old
-		// behaviour rather than failing every failover closed).
-		if c.standbyViewer != nil {
-			_, held, verr := c.standbyViewer.Generation(ctx, tenant)
-			if verr != nil {
-				// "We could not check the standby" is never "the standby holds it":
-				// promoting+flipping onto a standby we cannot verify holds the tenant is
-				// the phantom-attach split-brain this pre-flight exists to prevent.
-				return fmt.Errorf("failover: could not read the standby generation view for routed tenant %s (%w) — aborting before the flip rather than PUT-attaching onto an unverified standby (a PUT 200s even when the tenant is absent)", tenant, verr)
+		// STANDBY PRE-FLIGHT (ADR-0010 §5, D2). UNCONDITIONAL: every routed tenant is
+		// checked against the standby membership oracle before its PUT, and an oracle
+		// that is unwired or unreadable ABORTS. The two signals it replaces are both
+		// broken on a live plane — the PUT returns 200 and ATTACHES a phantom empty
+		// tenant for a tenant the standby does not hold (never 404s), and the per-tenant
+		// GET 503s for the warm SECONDARY a correctly-warmed standby actually holds. The
+		// plane-wide /v1/location_config listing is the only vantage that reports the
+		// truth, so it is the only one this consults. A not-held tenant feeds the
+		// EXISTING skippable() logic UNCHANGED (base aborts; a non-base tenant needs
+		// routed-vantage corroboration). The PUT-404 path below is defence-in-depth only.
+		held, verr := c.standbyHoldsTenant(ctx, tenant)
+		if verr != nil {
+			// "We could not check the standby" is never "the standby holds it":
+			// promoting+flipping onto a standby we cannot verify holds the tenant is
+			// the phantom-attach split-brain this pre-flight exists to prevent.
+			return fmt.Errorf("failover: could not establish whether the standby holds routed tenant %s (%w) — aborting before the flip rather than PUT-attaching onto an unverified standby (a PUT 200s even when the tenant is absent)", tenant, verr)
+		}
+		if !held {
+			skip, serr := c.skippable(ctx, i, tenant)
+			if serr != nil {
+				return serr
 			}
-			if !held {
-				skip, serr := c.skippable(ctx, i, tenant)
-				if serr != nil {
-					return serr
-				}
-				if skip {
-					// Corroborated absent from both vantages — nothing routed to strand.
-					c.metrics.TenantSkipped()
-					continue
-				}
+			if !skip {
+				// Defensive: skippable() returns (false, nil) for no input today — every
+				// non-skippable case carries its own error above. If a future edit adds
+				// one, it must not silently fall through to the PUT, which would attach a
+				// phantom onto a standby we just established does NOT hold the tenant.
+				return fmt.Errorf("failover: routed tenant %s is not held by the standby and was not cleared to skip — aborting before the flip rather than PUT-attaching a phantom empty tenant", tenant)
 			}
+			// Corroborated absent from both vantages — nothing routed to strand.
+			c.metrics.TenantSkipped()
+			continue
 		}
 		if perr := c.promoter.Promote(ctx, tenant, newGen); perr != nil {
 			if errors.Is(perr, ErrTenantNotFound) {

@@ -74,10 +74,19 @@ func (p *HTTPPromoter) Promote(ctx context.Context, tenant string, generation in
 
 // HTTPGenerationViewer reads a tenant's current generation from the pageserver
 // (GET <BaseURL>/v1/tenant/<T>, top-level "generation"). Used by the startup
-// seed/heal path and the failover corroboration vantage. Points at the ROUTED
-// pageserver (the client Service whose selector the failover flips), never the
-// fixed primary — pointing it at the pre-failover primary is a demoted, stale
-// vantage after a failover, and is banned by deploy/_validate.sh.
+// seed/heal path and the failover corroboration vantage.
+//
+// Its two wired instances point at the ROUTED pageserver (the client Service whose
+// selector the failover flips), never at the fixed primary — pointing it at the
+// pre-failover primary is a demoted, stale vantage after a failover, and is banned by
+// deploy/_validate.sh.
+//
+// It is deliberately NOT the standby's held/not-held oracle. GET /v1/tenant/<T>
+// answers only for a tenant the pageserver holds ATTACHED; on a warm standby, whose
+// routed tenants are held as SECONDARIES, it returns 503 "Tenant not yet active"
+// (observed live on the szpg-f5 standby) — which this type correctly reports as an
+// ERROR, and which would therefore abort every failover if it were used as the
+// pre-flight. The membership oracle is HTTPTenantMembershipViewer below.
 type HTTPGenerationViewer struct {
 	BaseURL string // e.g. http://pageserver:9898 (the routed client Service)
 	Client  *http.Client
@@ -113,7 +122,7 @@ func (v *HTTPGenerationViewer) Generation(ctx context.Context, tenant string) (i
 	}
 	// GET /v1/tenant/<T> returns a top-level "generation" — confirmed against a live
 	// GKE pageserver (neon:8464): {"id":…,"state":{"slug":"Active"},…,"generation":N,…}.
-	// The on-cluster failover drill (#1101) asserts the field is present.
+	// The on-cluster failover drill (#1117) asserts the field is present.
 	var body struct {
 		Generation *int `json:"generation"`
 	}
@@ -129,4 +138,90 @@ func (v *HTTPGenerationViewer) Generation(ctx context.Context, tenant string) (i
 		return 0, false, fmt.Errorf("generation %s: %w", tenant, ErrGenerationUnreadable)
 	}
 	return *body.Generation, true, nil
+}
+
+// HTTPTenantMembershipViewer answers ONE question about one pageserver: does it HOLD
+// this tenant, in any location mode? It reads the plane-wide listing
+// GET <BaseURL>/v1/location_config, whose body is
+//
+//	{"tenant_shards":[["<tenant-shard-id>", <location-config|null>], …]}
+//
+// and reports membership of the tenant id in that list.
+//
+// Why this endpoint and not a per-tenant one — LIVE-VERIFIED on the szpg-f5 standby,
+// whose routed tenants are warm SECONDARIES:
+//
+//	GET /v1/tenant/<T>                 -> 503 "Tenant not yet active"
+//	GET /v1/tenant/<T>/location_config -> 404, even though the tenant IS held
+//	GET /v1/location_config            -> 200, and the tenant IS in tenant_shards
+//
+// Both per-tenant endpoints therefore report a held Secondary as absent/unreadable,
+// which is exactly backwards for the failover pre-flight: a standby warmed correctly
+// would read as "does not hold it" and abort (or, worse, read as absent and be
+// skipped). Only the plane-wide listing sees a Secondary.
+//
+// It is pointed at the STANDBY (the promotion target) — the node whose tenant
+// coverage must be confirmed before an irreversible attach+flip.
+type HTTPTenantMembershipViewer struct {
+	BaseURL string // e.g. http://pageserver-standby:9898
+	Client  *http.Client
+}
+
+// NewHTTPTenantMembershipViewer builds a membership oracle with a bounded per-request
+// timeout.
+func NewHTTPTenantMembershipViewer(baseURL string, timeout time.Duration) *HTTPTenantMembershipViewer {
+	return &HTTPTenantMembershipViewer{BaseURL: baseURL, Client: &http.Client{Timeout: timeout}}
+}
+
+// HoldsTenant reports whether the pageserver lists the tenant among the shards it
+// holds. held=false means ONE thing only: the pageserver answered 200 and the tenant
+// is NOT in that list. Every unreadable answer — transport failure, non-2xx (including
+// 404, which says the endpoint is absent, not the tenant), an unparseable body, or a
+// body with no tenant_shards field — is an ERROR, never held=false, because the caller
+// treats held=false as a corroboratable absence and "we could not check" is not "it is
+// not there".
+//
+// Matching is on the EXACT tenant id. The plane is unsharded (tenant_shards carries
+// bare tenant ids there, verified live), and on a sharded plane the entries would be
+// `<tenant>-<shard>` — which this reports as NOT held, so a failover aborts loudly
+// rather than attaching onto an unverified standby. That is the fail-closed direction;
+// sharded-id parsing is deliberately not invented ahead of a plane that uses it.
+func (v *HTTPTenantMembershipViewer) HoldsTenant(ctx context.Context, tenant string) (bool, error) {
+	url := fmt.Sprintf("%s/v1/location_config", v.BaseURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false, err
+	}
+	resp, err := v.Client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false, fmt.Errorf("membership %s: pageserver returned %s", tenant, resp.Status)
+	}
+	// Each entry is a 2-tuple [shard-id, config]; the config is null for a Secondary
+	// and an object for an attached location, so only the first element is decoded.
+	var body struct {
+		TenantShards *[][]json.RawMessage `json:"tenant_shards"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return false, fmt.Errorf("membership %s: decode: %w", tenant, err)
+	}
+	if body.TenantShards == nil {
+		return false, fmt.Errorf("membership %s: %w", tenant, ErrTenantShardsUnreadable)
+	}
+	for _, entry := range *body.TenantShards {
+		if len(entry) == 0 {
+			return false, fmt.Errorf("membership %s: %w (empty tenant_shards entry)", tenant, ErrTenantShardsUnreadable)
+		}
+		var id string
+		if err := json.Unmarshal(entry[0], &id); err != nil {
+			return false, fmt.Errorf("membership %s: tenant_shards entry id: %w", tenant, err)
+		}
+		if id == tenant {
+			return true, nil
+		}
+	}
+	return false, nil
 }

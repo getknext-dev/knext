@@ -150,7 +150,11 @@ an upgrade into a manual runbook step. T1 handed the write/seed/heal side to thi
    - **`GET /v1/tenant/<unheld>` → `404`** (`{"msg":"NotFound: tenant …"}`). The
      GET-based generation **VIEWER** and the corroboration path built on it — §1b's second
      vantage (`skippable`) and `convergeFailover` — therefore DO see an unheld tenant as
-     absent, correctly. The GET-viewer corroboration remains valid.
+     absent, correctly. The GET-viewer corroboration remains valid. **Scope of this
+     observation (corrected in the D2 amendment below): it was made THROUGH THE ROUTED
+     SERVICE, i.e. against the ATTACHED primary, and it does NOT generalise to the
+     standby** — where a tenant held as a warm Secondary answers `503`, not `404`. Read it
+     as a fact about an attached node, never as a general held/not-held oracle.
    - **`PUT /v1/tenant/<unheld>/location_config` `{"mode":"AttachedSingle",…}` → `200`,
      NOT `404`.** The pageserver **ATTACHES**: for a tenant that genuinely exists in the
      object store it attaches it correctly; for a genuinely-nonexistent tenant it creates a
@@ -179,20 +183,60 @@ an upgrade into a manual runbook step. T1 handed the write/seed/heal side to thi
    was supposed to make an un-warmed standby fail LOUDLY is dead against the real
    pageserver, so nothing aborted.
 
-   **Amendment (D2, 2026-09-20) — RESOLVED.** The absence detector is moved onto the
-   vantage that WORKS: the **GET standby generation view** (which `404`s correctly), not
-   the PUT (which `200`-attaches). `failover()` now consults a standby-pointed
-   `GenerationViewer` BEFORE every `PUT AttachedSingle`; a not-held tenant feeds the
-   EXISTING `skippable()` logic UNCHANGED (base aborts; a non-base tenant is skipped only
-   on a routed-vantage-corroborated absence, else aborts before the flip). This mirrors the
-   pattern `convergeFailover()` already used one function away. The `PUT-404 →
-   ErrTenantNotFound` mapping and `skippable()` are RETAINED as defence-in-depth for a
-   future pageserver image that restores the PUT `404` — the `404` is simply no longer the
-   ONLY detector. The GET-viewer corroboration path is unchanged. Wired in `cmd/pswatcher`
-   (`SetStandbyGenerationViewer`, pointed at `PSW_STANDBY_BASE_URL`) and asserted by
-   `deploy/_validate.sh`. Any future change to the skip logic MUST re-verify against the
-   live v1 API — the assumption this section replaced is proof that unit tests, which fake
+   **Amendment (D2, 2026-09-20) — RESOLVED, and the first attempt at it was WRONG.**
+   The absence detector is moved off the PUT (which `200`-attaches). The first D2 round
+   moved it onto the **standby's `GET /v1/tenant/<T>` generation view**, reasoning from
+   the C1 observation above that that GET `404`s for an unheld tenant. C1 was observed
+   **through the routed Service — i.e. against the PRIMARY**, and it does not generalise
+   to the standby: a correctly-warmed standby holds its routed tenants as warm
+   **Secondaries**, and the per-tenant endpoints do not answer for a Secondary.
+
+   **Re-verified LIVE against the standby (gke `szpg-f5`, `pageserver-standby-0`,
+   2026-09-20) — this is the re-verification this section mandates, actually performed,
+   not asserted from unit tests:**
+
+   | Request (standby, tenant held as a warm Secondary) | Response |
+   | --- | --- |
+   | `GET /v1/tenant/<T>` | **`503`** `"Tenant not yet active"` |
+   | `GET /v1/tenant/<T>/location_config` | **`404`**, though the tenant IS held |
+   | `GET /v1/location_config` | **`200`** `{"tenant_shards":[["<T>",null],…]}` — lists every held shard, Secondaries included |
+
+   So a pre-flight built on the generation view **errors on the first routed tenant of
+   every failover** and aborts it: fail-closed, but HA permanently dead on the real
+   plane — the same outcome as no failover at all, reached by the opposite mistake. Unit
+   fakes modelled only `200`/`404`, so nothing caught it; this is the second time in one
+   ADR that faking status codes hid a live-API fact.
+
+   The detector is therefore the **plane-wide membership listing**: a
+   `TenantMembershipViewer` over `GET /v1/location_config`, pointed at the standby,
+   reporting held = "the tenant id is in `tenant_shards`". `held=false` means only "the
+   standby answered `200` and did not list it"; transport failure, non-2xx, an
+   unparseable body or a missing `tenant_shards` field are ERRORS, never absence.
+   `failover()` consults it BEFORE every `PUT AttachedSingle`, for every routed tenant,
+   and a not-held tenant feeds the EXISTING `skippable()` logic UNCHANGED (base aborts; a
+   non-base tenant is skipped only on a routed-vantage-corroborated absence, else aborts
+   before the flip).
+
+   The pre-flight is **UNCONDITIONAL and fails closed on omission**: an unwired oracle
+   returns `ErrNoStandbyMembership` and aborts rather than falling through to the dead
+   PUT-`404` path, since falling through would reinstate the phantom attach by accident
+   (ADR-0012: fail toward the reversible state). The `PUT-404 → ErrTenantNotFound`
+   mapping and `skippable()` are RETAINED as defence-in-depth for a future pageserver
+   image that restores the PUT `404`. The routed-vantage (`GET /v1/tenant/<T>` through the
+   client Service) corroboration path is unchanged — it reads the ATTACHED primary, where
+   C1's observation does hold. Wired in `cmd/pswatcher`
+   (`SetStandbyMembershipViewer`, pointed at `PSW_STANDBY_BASE_URL`) and asserted by
+   `deploy/_validate.sh`, which now pins the ENDPOINT as well as the wiring. Any future
+   change to the skip logic MUST re-verify against the live v1 API **on the node it will
+   actually query, in the location mode that node will actually be in** — the two wrong
+   assumptions this section has now replaced are both proof that unit tests, which fake
    exactly these status codes, cannot close it.
+
+   **Known limit, stated rather than discovered later:** membership matches the EXACT
+   tenant id. On a sharded plane `tenant_shards` would carry `<tenant>-<shard>` entries,
+   which this reports as not-held — so a failover would abort loudly instead of attaching
+   onto an unverified standby. The plane is unsharded (verified live); shard-id parsing is
+   deliberately not invented ahead of a plane that uses it.
 
 ## Options considered
 
@@ -307,17 +351,30 @@ honest gap behind §1b's fail-closed default, not an oversight.
       warm standby (57) off the same node; SOFT podAntiAffinity keeps `pswatcher` (58) off the
       primary's node — both scanned by `deploy/_validate.sh` (sprint-close C3, ADR-0012).
 - [x] C1: real `PUT`/`GET location_config` status codes OBSERVED on a live GKE pageserver
-      and recorded in §5 — `GET` 404s on an unheld tenant (viewer corroboration valid),
-      `PUT` 200-attaches (never 404s; the promoter's 404 skip branch is dead code).
+      and recorded in §5 — `GET` 404s on an unheld tenant **on the ATTACHED primary, which
+      is where it was observed** (viewer corroboration valid there), `PUT` 200-attaches
+      (never 404s; the promoter's 404 skip branch is dead code). Scope corrected by the
+      standby re-verify below — the same GET answers `503` on a warm Secondary.
+- [x] C1b (D2 round 2): the live API re-verify this ADR mandates was PERFORMED, on the
+      standby this time (`szpg-f5`, `pageserver-standby-0`, tenants held as warm
+      Secondaries): `GET /v1/tenant/<T>` → `503`, `GET /v1/tenant/<T>/location_config` →
+      `404` despite being held, `GET /v1/location_config` → `200` listing every held shard.
+      Recorded as a table in §5.
 - [x] Follow-up (tech-debt, from §5) — RESOLVED (D2, see the §5 amendment): the absence
-      detector moved onto the GET standby generation view (404-correct); `failover()`
-      consults it before every PUT and feeds a not-held tenant into the unchanged
-      `skippable()`. The PUT-`404`→`ErrTenantNotFound` path + `skippable()` retained as
-      defence-in-depth. Wired in `cmd/pswatcher` (`SetStandbyGenerationViewer`) + asserted
-      by `deploy/_validate.sh`; unit-tested (phantom-attach abort, base abort, corroborated
-      skip, unreadable-view abort) and mutation-proved. On-cluster re-verify still gated by
-      the C2 drill below.
+      detector is the STANDBY MEMBERSHIP ORACLE (`GET /v1/location_config` membership in
+      `tenant_shards`) — NOT the per-tenant generation view, which the round-2 live
+      re-verify showed `503`s on a warm Secondary and would therefore abort every failover.
+      `failover()` consults it before every PUT, UNCONDITIONALLY (an unwired oracle aborts
+      with `ErrNoStandbyMembership`; it never falls through to the dead PUT path), and
+      feeds a not-held tenant into the unchanged `skippable()`. The
+      PUT-`404`→`ErrTenantNotFound` path + `skippable()` retained as defence-in-depth.
+      Wired in `cmd/pswatcher` (`SetStandbyMembershipViewer`) + asserted by
+      `deploy/_validate.sh` (wiring AND endpoint); unit-tested (Secondary visible to the
+      membership oracle but not the generation view, held/not-held/unreadable parsing,
+      phantom-attach abort, base abort, corroborated skip, unreadable-oracle abort on a
+      non-base tenant, unwired-oracle abort, all-held promote-all) and mutation-proved.
+      On-cluster re-verify of the FAILOVER itself still gated by the C2 drill below.
 - [ ] C2: on-cluster verification via the full multi-tenant failover drill (owned by the
-      drill task, #1101) on a recovered/clean plane.
+      drill task, #1117) on a recovered/clean plane.
 - [ ] Follow-up: make standby warm-Secondary registration reconciling rather than
       one-shot, so an apps tenant provisioned after deploy does not block failover.

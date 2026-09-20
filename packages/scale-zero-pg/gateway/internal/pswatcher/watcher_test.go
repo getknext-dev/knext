@@ -186,7 +186,7 @@ func newController(p Prober, pr Promoter, k K8sOps, threshold int) *Controller {
 }
 
 func newControllerFull(p, sb Prober, pr Promoter, k K8sOps, threshold int) *Controller {
-	return NewController(p, sb, pr, k, Config{
+	c := NewController(p, sb, pr, k, Config{
 		Tenant:          "f0f0",
 		ClientService:   "pageserver",
 		StandbyApp:      "pageserver-standby",
@@ -195,6 +195,12 @@ func newControllerFull(p, sb Prober, pr Promoter, k K8sOps, threshold int) *Cont
 		FailThreshold:   threshold,
 		BaseGeneration:  1,
 	}, NewMetrics())
+	// Wire the LIVE-ACCURATE default: a standby warmed for every routed tenant. The
+	// failover pre-flight is fail-closed on an unwired oracle, so tests that are not
+	// about tenant coverage must exercise the same path production runs, not the
+	// abort path (#1120). Tests that ARE about coverage override this.
+	c.SetStandbyMembershipViewer(allHeld{})
+	return c
 }
 
 // MANDATORY negative test: a healthy primary must NEVER trigger a promotion,
@@ -783,7 +789,7 @@ func newControllerRouted(p, sb Prober, pr Promoter, k K8sOps, threshold int, ten
 	if len(tenants) > 0 {
 		base = tenants[0]
 	}
-	return NewController(p, sb, pr, k, Config{
+	c := NewController(p, sb, pr, k, Config{
 		Tenant:          base,
 		Tenants:         tenants,
 		ClientService:   "pageserver",
@@ -793,6 +799,10 @@ func newControllerRouted(p, sb Prober, pr Promoter, k K8sOps, threshold int, ten
 		FailThreshold:   threshold,
 		BaseGeneration:  1,
 	}, NewMetrics())
+	// See newControllerFull: the live-accurate default is a standby that holds every
+	// routed tenant; coverage tests override it.
+	c.SetStandbyMembershipViewer(allHeld{})
+	return c
 }
 
 // T2 (#1098) core fix — promotion scope == routing scope. The flipped `pageserver`
