@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -187,7 +188,8 @@ func NewHTTPTenantMembershipViewer(baseURL string, timeout time.Duration) *HTTPT
 // rather than attaching onto an unverified standby. That is the fail-closed direction;
 // sharded-id parsing is deliberately not invented ahead of a plane that uses it.
 func (v *HTTPTenantMembershipViewer) HoldsTenant(ctx context.Context, tenant string) (bool, error) {
-	return holdsTenantAt(ctx, v.Client, v.BaseURL, tenant)
+	held, _, err := holdsTenantAt(ctx, v.Client, v.BaseURL, tenant)
+	return held, err
 }
 
 // holdsTenantAt is the shared plane-wide-listing membership read: GET
@@ -195,44 +197,92 @@ func (v *HTTPTenantMembershipViewer) HoldsTenant(ctx context.Context, tenant str
 // fixed-URL failover oracle (HTTPTenantMembershipViewer) and the D1 reconcile's
 // per-URL prober (HTTPTenantMembershipAt) call it, so the fail-closed parsing —
 // unreadable is an ERROR, never absence — lives in one place.
-func holdsTenantAt(ctx context.Context, client *http.Client, baseURL, tenant string) (bool, error) {
+//
+// It returns the location MODE alongside membership, because "listed" and "held as a
+// warm Secondary" are NOT the same thing and conflating them publishes a FALSE
+// HA-armed signal. Each entry is a 2-tuple `[shard-id, config]`:
+//
+//	["<T>", null]                                 -> a SECONDARY   (attached=false)
+//	["<T>", {"mode":"AttachedSingle","generation":N}] -> an ATTACHED location
+//	["<T>", {"mode":"Secondary", …}]              -> a SECONDARY   (attached=false)
+//
+// The ATTACHED shape is exactly what an ex-primary whose PVC survived a failover
+// reloads on restart — its persisted AttachedSingle at the OLD generation. A read that
+// decoded only entry[0] reports that node as warm, which is how the D1 loop could have
+// published `standby_tenant_warm=1` for a standby that is not armed at all.
+//
+// The mode is fail-closed in the SAME direction as membership: a matching entry whose
+// config element is missing or is neither null nor an object is an ERROR (the mode is
+// unreadable, and unreadable is never "warm"), never a silent Secondary.
+func holdsTenantAt(ctx context.Context, client *http.Client, baseURL, tenant string) (held, attached bool, err error) {
 	url := fmt.Sprintf("%s/v1/location_config", baseURL)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return false, fmt.Errorf("membership %s: pageserver returned %s", tenant, resp.Status)
+		return false, false, fmt.Errorf("membership %s: pageserver returned %s", tenant, resp.Status)
 	}
-	// Each entry is a 2-tuple [shard-id, config]; the config is null for a Secondary
-	// and an object for an attached location, so only the first element is decoded.
 	var body struct {
 		TenantShards *[][]json.RawMessage `json:"tenant_shards"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return false, fmt.Errorf("membership %s: decode: %w", tenant, err)
+		return false, false, fmt.Errorf("membership %s: decode: %w", tenant, err)
 	}
 	if body.TenantShards == nil {
-		return false, fmt.Errorf("membership %s: %w", tenant, ErrTenantShardsUnreadable)
+		return false, false, fmt.Errorf("membership %s: %w", tenant, ErrTenantShardsUnreadable)
 	}
 	for _, entry := range *body.TenantShards {
 		if len(entry) == 0 {
-			return false, fmt.Errorf("membership %s: %w (empty tenant_shards entry)", tenant, ErrTenantShardsUnreadable)
+			return false, false, fmt.Errorf("membership %s: %w (empty tenant_shards entry)", tenant, ErrTenantShardsUnreadable)
 		}
 		var id string
 		if err := json.Unmarshal(entry[0], &id); err != nil {
-			return false, fmt.Errorf("membership %s: tenant_shards entry id: %w", tenant, err)
+			return false, false, fmt.Errorf("membership %s: tenant_shards entry id: %w", tenant, err)
 		}
-		if id == tenant {
-			return true, nil
+		if id != tenant {
+			continue
 		}
+		if len(entry) < 2 {
+			return false, false, fmt.Errorf("membership %s: %w (tenant_shards entry carries no location config, so its mode — Secondary vs Attached — cannot be read; refusing to guess)", tenant, ErrTenantShardsUnreadable)
+		}
+		att, merr := locationIsAttached(entry[1])
+		if merr != nil {
+			return false, false, fmt.Errorf("membership %s: tenant_shards location config: %w", tenant, merr)
+		}
+		return true, att, nil
 	}
-	return false, nil
+	return false, false, nil
+}
+
+// locationIsAttached classifies a tenant_shards location config. `null` is the live
+// shape for a warm Secondary; an object carries an explicit `mode`. Anything that is
+// neither (a number, a string, a truncated value) is an ERROR rather than a guess —
+// the caller turns an unreadable mode into "not warm", never into "warm".
+//
+// An object with an UNRECOGNISED mode is reported as ATTACHED, deliberately: the safe
+// default is "this is not a confirmed warm Secondary". It only ever affects the gauge
+// and a counter — never a write — so the worst case is a loud false alarm, not a
+// demoted writer.
+func locationIsAttached(raw json.RawMessage) (bool, error) {
+	if string(bytes.TrimSpace(raw)) == "null" {
+		return false, nil
+	}
+	var cfg struct {
+		Mode *string `json:"mode"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return false, fmt.Errorf("%w: %v", ErrTenantShardsUnreadable, err)
+	}
+	if cfg.Mode != nil && strings.EqualFold(*cfg.Mode, "secondary") {
+		return false, nil
+	}
+	return true, nil
 }
 
 // HTTPTenantMembershipAt is the D1 reconcile's per-URL membership prober: it answers
@@ -249,8 +299,12 @@ func NewHTTPTenantMembershipAt(timeout time.Duration) *HTTPTenantMembershipAt {
 }
 
 // HoldsTenantAt reports whether the pageserver at baseURL lists the tenant among the
-// shards it holds (Secondaries included). Unreadable is an ERROR, never held=false.
-func (v *HTTPTenantMembershipAt) HoldsTenantAt(ctx context.Context, baseURL, tenant string) (bool, error) {
+// shards it holds (Secondaries included) AND whether it holds it as an ATTACHED
+// location rather than a warm Secondary. Unreadable is an ERROR, never held=false.
+//
+// attached=true is only meaningful when held=true. The warm reconcile treats it as
+// "this node is NOT an armed standby for this tenant" — see reconcileStandbyWarm.
+func (v *HTTPTenantMembershipAt) HoldsTenantAt(ctx context.Context, baseURL, tenant string) (held, attached bool, err error) {
 	return holdsTenantAt(ctx, v.Client, baseURL, tenant)
 }
 

@@ -182,6 +182,13 @@ spec:
             - { name: PSW_PRIMARY_SELECTOR_APP, value: "pageserver" }
             - { name: PSW_PRIMARY_NODE_BASE_URL, value: "http://pageserver-primary:9898" }
             - { name: PSW_WARM_INTERVAL_MS, value: "30000" } # re-warm every 30s
+            # TOTAL bound on ONE warm pass. The pass walks the routed tenants serially
+            # (a membership GET, plus a PUT + download kick for an absent tenant), so an
+            # unbounded pass against a standby wedged on its object store would hold the
+            # watcher's single control goroutine for far longer than the ~6s
+            # PSW_POLL_MS x PSW_FAIL_THRESHOLD primary-death detection window. The pass is
+            # cut short here (counted, never reported as warm) and resumes next interval.
+            - { name: PSW_WARM_DEADLINE_MS, value: "10000" }
             - { name: PSW_HEALTH_ADDR, value: ":9091" }
           ports:
             - { name: metrics, containerPort: 9091 }

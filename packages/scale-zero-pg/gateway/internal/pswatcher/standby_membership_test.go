@@ -175,6 +175,113 @@ func TestMembershipOracleDistinguishesAbsentFromUnreadable(t *testing.T) {
 	}
 }
 
+// FIX 1 — the per-URL prober must decode the location CONFIG (entry[1]), not just the
+// shard id, because "listed" and "warm Secondary" are NOT the same thing.
+//
+// `[["<T>",null]]`                              -> held as a SECONDARY (HA armed)
+// `[["<T>",{"mode":"AttachedSingle",…}]]`       -> held ATTACHED (a stale ex-primary
+//
+//	location, NOT a warm standby)
+//
+// The second shape is exactly what an ex-primary whose PVC survived the failover
+// reloads, at the OLD generation. A membership-only read reports it as warm.
+func TestMembershipAtReportsHoldModeNotJustMembership(t *testing.T) {
+	const tenant = "c000c000c000c000c000c000c000c000"
+	cases := []struct {
+		name                   string
+		body                   string
+		wantHeld, wantAttached bool
+		wantError              bool
+	}{
+		{
+			name:     "null location config -> held as a warm SECONDARY",
+			body:     `{"tenant_shards":[["` + tenant + `",null]]}`,
+			wantHeld: true,
+		},
+		{
+			name:         "AttachedSingle config -> held, but ATTACHED (not warm)",
+			body:         `{"tenant_shards":[["` + tenant + `",{"mode":"AttachedSingle","generation":7}]]}`,
+			wantHeld:     true,
+			wantAttached: true,
+		},
+		{
+			name:         "AttachedMulti config -> held, ATTACHED",
+			body:         `{"tenant_shards":[["` + tenant + `",{"mode":"AttachedMulti","generation":9}]]}`,
+			wantHeld:     true,
+			wantAttached: true,
+		},
+		{
+			name:     "an explicit Secondary config object -> held, NOT attached",
+			body:     `{"tenant_shards":[["` + tenant + `",{"mode":"Secondary","secondary_conf":{"warm":true}}]]}`,
+			wantHeld: true,
+		},
+		{
+			name: "not listed -> not held, not attached",
+			body: `{"tenant_shards":[["b111b111b111b111b111b111b111b111",null]]}`,
+		},
+		{
+			name:      "a matching entry with NO config element -> ERROR (the mode is unreadable, and unreadable is never 'warm')",
+			body:      `{"tenant_shards":[["` + tenant + `"]]}`,
+			wantError: true,
+		},
+		{
+			name:      "a config that is neither null nor an object -> ERROR",
+			body:      `{"tenant_shards":[["` + tenant + `",7]]}`,
+			wantError: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/location_config" {
+					t.Errorf("want the plane-wide /v1/location_config listing, got %s", r.URL.Path)
+				}
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+
+			held, attached, err := NewHTTPTenantMembershipAt(5*time.Second).HoldsTenantAt(context.Background(), srv.URL, tenant)
+			if tc.wantError {
+				if err == nil {
+					t.Fatalf("want ERROR, got held=%v attached=%v err=nil", held, attached)
+				}
+				if held {
+					t.Fatal("an errored read must never report held=true")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if held != tc.wantHeld {
+				t.Fatalf("held=%v, want %v", held, tc.wantHeld)
+			}
+			if attached != tc.wantAttached {
+				t.Fatalf("attached=%v, want %v — an ATTACHED hold reported as a Secondary is a FALSE 'HA armed' signal", attached, tc.wantAttached)
+			}
+		})
+	}
+}
+
+// The failover pre-flight oracle keeps its MEMBERSHIP semantics: it asks "does the
+// standby hold this tenant at all", Secondary or Attached. Mode-awareness is a
+// reporting change in the warm loop, not a change to what aborts a failover.
+func TestFailoverMembershipOracleStillCountsAnAttachedHoldAsHeld(t *testing.T) {
+	const tenant = "d000d000d000d000d000d000d000d000"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"tenant_shards":[["`+tenant+`",{"mode":"AttachedSingle","generation":3}]]}`)
+	}))
+	defer srv.Close()
+
+	held, err := NewHTTPTenantMembershipViewer(srv.URL, 5*time.Second).HoldsTenant(context.Background(), tenant)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !held {
+		t.Fatal("the failover pre-flight asks about MEMBERSHIP in any location mode — narrowing it to Secondaries would abort failovers onto a legitimately attached standby")
+	}
+}
+
 // A transport failure (nothing listening) is an ERROR, not an absence.
 func TestMembershipOracleTransportFailureIsAnError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))

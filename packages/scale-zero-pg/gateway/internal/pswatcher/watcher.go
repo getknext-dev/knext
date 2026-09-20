@@ -114,8 +114,16 @@ type SecondaryWarmer interface {
 // swaps after a failover, so it cannot use the fixed-URL failover oracle
 // (TenantMembershipViewer). Same fail-closed contract: held=false means only "the node
 // answered 200 and did not list it"; every unreadable answer is an ERROR.
+//
+// It reports the location MODE as well, and that is load-bearing rather than
+// informational. After the COMMON failover variant — pod restart with the PVC INTACT
+// (53-pageserver.yaml retains it) — the ex-primary reloads its persisted AttachedSingle
+// at the OLD generation and IS listed. A membership-only answer makes the reconcile
+// skip the warm PUT and publish standby_tenant_warm=1, i.e. "HA armed", for a node that
+// is not an armed standby at all — weaker than the one-shot Job this loop replaces.
+// attached=true is only meaningful when held=true.
 type StandbyMembershipAt interface {
-	HoldsTenantAt(ctx context.Context, baseURL, tenant string) (held bool, err error)
+	HoldsTenantAt(ctx context.Context, baseURL, tenant string) (held, attached bool, err error)
 }
 
 // TenantMembershipViewer answers "does this pageserver HOLD this tenant?" in ANY
@@ -209,6 +217,15 @@ type Config struct {
 	// Zero runs the reconcile every tick (used by tests); the loop is a no-op unless a
 	// SecondaryWarmer + StandbyMembershipAt are wired and WarmTargets is non-empty.
 	WarmInterval time.Duration
+	// WarmDeadline is the TOTAL wall-clock bound on ONE standby-warm pass. A pass is
+	// serial over the routed tenants and each tenant costs a membership GET plus, when
+	// it is absent, a warm PUT and a download kick — so an unbounded pass against a
+	// standby wedged on its object store can occupy the single control goroutine for far
+	// longer than the primary-death detection window. The pass is cut short at this
+	// deadline (counted, never reported as warm) and resumes next interval; it is
+	// idempotent and per-tenant, so partial progress is kept. Zero disables the bound
+	// (tests, and back-compat for callers that do not set it).
+	WarmDeadline time.Duration
 }
 
 // Controller runs one Tick per poll interval. It is single-goroutine by design;
@@ -369,6 +386,20 @@ func (c *Controller) SetStandbyWarmer(w SecondaryWarmer, m StandbyMembershipAt) 
 // maybeReconcileStandbyWarm runs the standby-warm reconcile at most once per
 // WarmInterval. It is BEST-EFFORT: a failure is logged (the reconcile itself counts the
 // metric), never returned, so it can never abort the failover-detection tick around it.
+//
+// It is also DEADLINE-BOUNDED (WarmDeadline). Without a total bound one pass is, per
+// routed tenant and serially, a membership GET (PSW_PROBE_TIMEOUT_MS) plus a warm PUT +
+// download kick on the warmer's own client — so a standby wedged on its object store
+// could hold the single control goroutine for tens of seconds while PSW_POLL_MS ×
+// PSW_FAIL_THRESHOLD promises primary-death detection in about six. The deadline caps
+// the stretch; a pass cut short is COUNTED (never silently "warm"), and because the
+// reconcile is idempotent and per-tenant, partial progress is kept and the remaining
+// tenants are retried next interval.
+//
+// The bound is the second half of the fix, not the whole of it: the caller runs this
+// AFTER the failover-detection path (see Tick), so a slow pass cannot delay the
+// promotion decided on the same tick — at worst it delays the NEXT tick, by at most
+// WarmDeadline, once per WarmInterval.
 func (c *Controller) maybeReconcileStandbyWarm(ctx context.Context) {
 	if c.warmer == nil || c.warmMembership == nil || len(c.cfg.WarmTargets) == 0 {
 		return // loop not wired — no-op (back-compat)
@@ -378,6 +409,11 @@ func (c *Controller) maybeReconcileStandbyWarm(ctx context.Context) {
 	}
 	c.lastWarmAt = c.nowT()
 	c.metrics.StandbyWarmReconcile()
+	if c.cfg.WarmDeadline > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.cfg.WarmDeadline)
+		defer cancel()
+	}
 	if err := c.reconcileStandbyWarm(ctx); err != nil {
 		c.logf("[pswatcher] standby-warm reconcile: %v (retrying next interval)", err)
 	}
@@ -441,13 +477,33 @@ func (c *Controller) reconcileStandbyWarm(ctx context.Context) error {
 	}
 	var errs []error
 	for _, tenant := range c.routedTenants() {
-		held, herr := c.warmMembership.HoldsTenantAt(ctx, standbyURL, tenant)
+		held, attached, herr := c.warmMembership.HoldsTenantAt(ctx, standbyURL, tenant)
 		if herr != nil {
 			// "We could not check" is not "it is warm": count it, drive the gauge to 0
 			// (loss-of-warmth observable), and keep going with the other tenants.
 			c.metrics.StandbyWarmError()
 			c.metrics.SetTenantWarm(tenant, false)
 			errs = append(errs, fmt.Errorf("standby-warm: membership of tenant %s on standby %s (%s) unreadable: %w", tenant, standbyApp, standbyURL, herr))
+			continue
+		}
+		if held && attached {
+			// The node holds the tenant, but ATTACHED — not as a warm Secondary. This is
+			// what an ex-primary whose PVC survived the failover looks like: it reloaded
+			// its persisted AttachedSingle at the OLD generation. It is LISTED, so a
+			// membership-only read would call it warm and publish "HA armed" for a plane
+			// that is not armed. Report it instead: gauge 0, a dedicated counter, a log
+			// line naming the node.
+			//
+			// And still NO PUT — the write stays mode-AGNOSTIC on purpose. In the
+			// promote-BEFORE-flip window the just-promoted new writer is ATTACHED and not
+			// yet selected by the client Service, so resolveStandby resolves IT as the
+			// standby; PUTting a Secondary there would DEMOTE the new writer — precisely
+			// the outage this loop exists to prevent. A misread mode can therefore only
+			// mis-REPORT, never demote. Clearing a stale attached location is an operator
+			// action (docs/operations.md#pageserver-failover), not this loop's.
+			c.metrics.SetTenantWarm(tenant, false)
+			c.metrics.StandbyStaleAttached()
+			c.logf("[pswatcher] standby-warm: standby %s (%s) holds routed tenant %s ATTACHED, not as a warm Secondary — HA is NOT armed for it and this loop will NOT PUT a Secondary onto an attached node (it may be a just-promoted writer mid-flip); detach or rebuild that node's stale location by hand", standbyApp, standbyURL, tenant)
 			continue
 		}
 		if held {
@@ -612,10 +668,22 @@ func (c *Controller) Tick(ctx context.Context) (bool, error) {
 	}
 
 	// D1 — keep the CURRENT standby warm for every routed tenant, so a failover that
-	// rebuilds the ex-primary as an empty standby re-arms automatically (ADR-0010 §5).
-	// BEST-EFFORT + throttled: it never aborts the failover-detection path below, and it
-	// resolves the standby from the LIVE selector so it never warms the primary.
-	c.maybeReconcileStandbyWarm(ctx)
+	// leaves the ex-primary an un-armed standby re-arms automatically (ADR-0010 §5).
+	// BEST-EFFORT + throttled + deadline-bounded, and DEFERRED so it runs LAST, after
+	// every failover-detection and promotion path below has already returned its verdict.
+	//
+	// The ordering is the fix, not a style choice (#1124 review, FIX 2). Run at the TOP
+	// of the tick — where this call used to sit — a standby hung on its object store
+	// holds the single control goroutine for a membership timeout plus a warm PUT per
+	// routed tenant BEFORE the prober ever runs, stretching the ~6s primary-death
+	// detection that PSW_POLL_MS × PSW_FAIL_THRESHOLD promises. Deferred, a slow pass
+	// cannot delay the tick's own detection or promotion at all; it can only delay the
+	// NEXT tick, by at most WarmDeadline, once per WarmInterval.
+	//
+	// A deferred call also cannot touch the tick's return values, which makes
+	// "best-effort" structural rather than a convention: no failure in this loop can
+	// ever become a failover-blocking error.
+	defer c.maybeReconcileStandbyWarm(ctx)
 
 	// Re-anchor the authority from the CURRENT Service selector every tick. This is
 	// the crash-only truth source: a restarted watcher (and one that already failed

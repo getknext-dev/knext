@@ -121,9 +121,18 @@ type Metrics struct {
 	// loud (alert PswatcherStandbyWarmFailing). TenantWarm is the per-tenant loss-of-warmth
 	// GAUGE: 1 = the tenant is held as a Secondary on the current standby, 0 = it is not
 	// (or could not be confirmed). Alert PswatcherStandbyNotWarm fires on a 0.
+	//
+	// StandbyStaleAttachedTotal counts the case that makes the gauge mode-AWARE: the
+	// resolved standby LISTS a routed tenant, but holds it ATTACHED rather than as a warm
+	// Secondary — what an ex-primary whose PVC survived a failover reloads (its persisted
+	// AttachedSingle at the OLD generation). Membership alone reads that as warm, so a
+	// mode-blind gauge publishes "HA armed" for a plane that is not armed. Such a tenant
+	// is reported (gauge 0 + this counter + a log line) and deliberately NOT written to —
+	// see reconcileStandbyWarm for why the write stays mode-agnostic.
 	StandbyWarmReconcilesTotal    int            `json:"standby_warm_reconciles_total"`
 	StandbyWarmRegistrationsTotal int            `json:"standby_warm_registrations_total"`
 	StandbyWarmErrorsTotal        int            `json:"standby_warm_errors_total"`
+	StandbyStaleAttachedTotal     int            `json:"standby_stale_attached_total"`
 	StandbyTenantWarm             map[string]int `json:"standby_tenant_warm,omitempty"`
 
 	// FailoverReasonVal is the classification of the LAST completed failover:
@@ -421,6 +430,24 @@ func (m *Metrics) StandbyWarmErrors() int {
 	return m.StandbyWarmErrorsTotal
 }
 
+// StandbyStaleAttached counts one routed tenant that the resolved standby holds
+// ATTACHED instead of as a warm Secondary — a stale ex-primary location. The loop does
+// NOT write to such a node (that node may be a just-promoted writer mid-flip), so this
+// counter plus the 0 gauge is the ONLY signal that HA is un-armed for that tenant and
+// needs an operator to detach or rebuild the node.
+func (m *Metrics) StandbyStaleAttached() {
+	m.mu.Lock()
+	m.StandbyStaleAttachedTotal++
+	m.mu.Unlock()
+}
+
+// StandbyStaleAttachedCount returns the stale-ATTACHED count (tests).
+func (m *Metrics) StandbyStaleAttachedCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.StandbyStaleAttachedTotal
+}
+
 // SetTenantWarm records the per-tenant loss-of-warmth gauge: warm=true ⇒ the tenant is
 // held as a Secondary on the CURRENT standby, warm=false ⇒ it is not (or could not be
 // confirmed). Alerting fires on a 0.
@@ -502,11 +529,12 @@ func (m *Metrics) PromText() string {
 			"pswatcher_converge_tenant_absent_total %d\n"+
 			"pswatcher_standby_warm_reconciles_total %d\n"+
 			"pswatcher_standby_warm_registrations_total %d\n"+
-			"pswatcher_standby_warm_errors_total %d\n",
+			"pswatcher_standby_warm_errors_total %d\n"+
+			"pswatcher_standby_stale_attached_total %d\n",
 		m.PromotionsTotal, m.ChecksTotal, m.PrimaryUpVal, m.FailedOverVal, m.SuspectedPartitionsTotal, m.PrimaryNeverSeenTotal, m.TenantAbsentTotal, m.LedgerHealErrorsTotal,
 		m.DependencyDegradedTotal, m.FailoverFrozenVal, m.FailoverFreezeSuppressed, m.FailoverFreezeExpirySecond, m.FreezeReadErrorsTotal,
 		m.ConvergeRepromotionsTotal, m.ConvergeBlockedTotal, m.ConvergeErrorsTotal, m.ConvergeTenantAbsentTotal,
-		m.StandbyWarmReconcilesTotal, m.StandbyWarmRegistrationsTotal, m.StandbyWarmErrorsTotal,
+		m.StandbyWarmReconcilesTotal, m.StandbyWarmRegistrationsTotal, m.StandbyWarmErrorsTotal, m.StandbyStaleAttachedTotal,
 	)
 	// D1 — the per-tenant loss-of-warmth gauge, one LABELED sample per routed tenant the
 	// reconcile has observed. Rendered in sorted key order so the exposition is stable.

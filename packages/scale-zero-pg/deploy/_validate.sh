@@ -517,16 +517,36 @@ case "$_primary_node_base" in
   *pageserver-primary*) : ;;
   *) fail "58 PSW_PRIMARY_NODE_BASE_URL=$_primary_node_base is not the stable pageserver-primary per-node Service (D1)" ;;
 esac
+grep -q 'PSW_WARM_DEADLINE_MS' 58-pswatcher.yaml \
+  || fail "58-pswatcher.yaml must set PSW_WARM_DEADLINE_MS — without a TOTAL bound on one warm pass, a standby wedged on its object store holds the watcher's single control goroutine for a membership timeout plus a warm PUT per routed tenant, stretching the PSW_POLL_MS x PSW_FAIL_THRESHOLD primary-death detection window (D1)."
+grep -q 'WarmDeadline: time.Duration(warmDeadlineMs)' ../gateway/cmd/pswatcher/main.go \
+  || fail "cmd/pswatcher no longer passes PSW_WARM_DEADLINE_MS into Config.WarmDeadline — the standby-warm pass would be UNBOUNDED whatever the manifest sets (D1)"
+grep -q 'defer c.maybeReconcileStandbyWarm(ctx)' ../gateway/internal/pswatcher/watcher.go \
+  || fail "the standby-warm reconcile is no longer DEFERRED in Tick — run before the failover-detection path, a slow/hung standby delays primary-death detection, and a non-deferred call can also turn a best-effort warm failure into a failover-blocking error (D1)"
 # The metrics the D1 alerts bind to must EXIST in the exporter, or the alerts never fire.
-for _m in pswatcher_standby_warm_reconciles_total pswatcher_standby_warm_registrations_total pswatcher_standby_warm_errors_total; do
+for _m in pswatcher_standby_warm_reconciles_total pswatcher_standby_warm_registrations_total pswatcher_standby_warm_errors_total pswatcher_standby_stale_attached_total; do
   grep -q "\"$_m %d" ../gateway/internal/pswatcher/metrics.go || fail "pswatcher no longer EXPORTS $_m (anchored on the '\"<name> %d' exposition line) — the D1 standby-warm alert bound to it would never fire (ADR-0010 §5)"
 done
 grep -q 'pswatcher_standby_tenant_warm{tenant=' ../gateway/internal/pswatcher/metrics.go \
   || fail "pswatcher no longer EXPORTS the pswatcher_standby_tenant_warm gauge — PswatcherStandbyNotWarm would never fire (D1, ADR-0010 §5)"
-for _a in PswatcherStandbyNotWarm PswatcherStandbyWarmFailing; do
+for _a in PswatcherStandbyNotWarm PswatcherStandbyWarmFailing PswatcherStandbyStaleAttached; do
   grep -q "alert: $_a" 60-prometheus.yaml || fail "60 missing $_a alert (D1) — loss of standby warmth would be unmonitored (ADR-0010 §5)"
 done
 grep -q 'pswatcher_standby_tenant_warm ==' 60-prometheus.yaml || fail "60 PswatcherStandbyNotWarm must fire on pswatcher_standby_tenant_warm == 0 (D1)"
+# The gauge must stay MODE-AWARE. An ex-primary that restarts with its PVC intact reloads
+# its persisted ATTACHED location at the old generation and IS listed, so a
+# membership-only read publishes standby_tenant_warm=1 — "HA armed" — for a node that is
+# not an armed standby. The decode, the reconcile branch and both unit tests are anchored.
+grep -q 'func locationIsAttached' ../gateway/internal/pswatcher/http.go \
+  || fail "the standby membership read no longer decodes the location CONFIG (locationIsAttached) — a stale ATTACHED hold on the standby would read as a warm Secondary and publish a FALSE 'HA armed' gauge (D1)"
+grep -q 'if held && attached {' ../gateway/internal/pswatcher/watcher.go \
+  || fail "the warm reconcile no longer distinguishes an ATTACHED hold from a warm Secondary — the standby_tenant_warm gauge goes mode-BLIND and reports a stale ex-primary as armed (D1)"
+grep -q 'func TestReconcileStandbyWarmAttachedStandbyIsNotWarm' ../gateway/internal/pswatcher/standby_warm_test.go \
+  || fail "the mode-aware-gauge unit test is gone — the false 'HA armed' signal for an ATTACHED standby would be unguarded (D1)"
+grep -q 'func TestReconcileStandbyWarmNeverPutsSecondaryOntoAnAttachedNode' ../gateway/internal/pswatcher/standby_warm_test.go \
+  || fail "the mode-AGNOSTIC-write guard test is gone — a 'mode-aware write' would PUT a Secondary onto an attached node, which mid-flip is the just-promoted WRITER, demoting it (D1)"
+grep -q 'func TestMembershipAtReportsHoldModeNotJustMembership' ../gateway/internal/pswatcher/standby_membership_test.go \
+  || fail "the location-config mode decode test is gone (D1)"
 grep -q 'pswatcher_standby_warm_errors_total' 60-prometheus.yaml || fail "60 PswatcherStandbyWarmFailing must fire on pswatcher_standby_warm_errors_total (D1)"
 ok "reconciling standby-warm loop wired (D1): pswatcher re-arms the rebuilt ex-primary after a failover + loss-of-warmth is alerted"
 

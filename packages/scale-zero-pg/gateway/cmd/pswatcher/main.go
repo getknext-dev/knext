@@ -57,6 +57,12 @@ func main() {
 	// Re-warm the standby every interval so a failover that rebuilds the ex-primary as an
 	// empty standby re-arms within one interval, without hammering the standby every poll.
 	warmIntervalMs := envInt("PSW_WARM_INTERVAL_MS", 30000)
+	// TOTAL bound on one warm pass. The pass is serial over the routed tenants, so an
+	// unbounded one against a standby wedged on its object store would occupy the single
+	// control goroutine far longer than the primary-death detection window
+	// (PSW_POLL_MS x PSW_FAIL_THRESHOLD). The reconcile also runs AFTER failover
+	// detection in each tick, so this only ever bounds how long the NEXT tick waits.
+	warmDeadlineMs := envInt("PSW_WARM_DEADLINE_MS", 10000)
 	// The generation view is resolved against the CURRENTLY-ROUTED pageserver — the
 	// client Service the gateway and computes actually dial, whose selector a failover
 	// flips — NOT a fixed primary URL. The primary is the node that is down in the very
@@ -130,6 +136,7 @@ func main() {
 			standbyApp: standbyBase,     // the standby node's stable Service (pageserver-standby)
 		},
 		WarmInterval: time.Duration(warmIntervalMs) * time.Millisecond,
+		WarmDeadline: time.Duration(warmDeadlineMs) * time.Millisecond,
 	}, metrics)
 	// The routed-pageserver generation view. Two consumers, both fail-closed: the
 	// startup ledger seed/heal (recovers a pruned/empty key) and the SECOND VANTAGE
