@@ -733,6 +733,49 @@ docs/BENCHMARKS.md.
     If the seed never runs, the ledger key stays absent, and `storage-init` **fails
     closed** (waits, then refuses) rather than attaching low — a loud, recoverable stop,
     not silent loss.
+  - **GitOps has a THIRD-writer hazard the seed alone does not close — you MUST tell the
+    controller to ignore `data.generation`.** The `generation` key is written **out of
+    band** (by `seed-ledger.sh` create-if-absent, then advanced by `pswatcher` on
+    failover), so it is deliberately absent from the manifest. A GitOps controller that
+    reconciles the *whole object* toward the manifest sees the live key as **drift** and
+    prunes it back to the manifest's `data: {}` — silently resetting a pswatcher-advanced
+    ledger and re-arming the floor-to-1 loss the undeclared-key design exists to prevent.
+    Auto-sync with prune makes this automatic. Scope the ignore to that one key:
+    - **Argo CD** — on the `Application`:
+
+      ```yaml
+      spec:
+        ignoreDifferences:
+          - group: ""
+            kind: ConfigMap
+            name: pageserver-generation
+            namespace: scale-zero-pg
+            jsonPointers:
+              - /data/generation
+      ```
+
+    - **Flux** (`Kustomization`) — exclude the key from drift correction:
+
+      ```yaml
+      spec:
+        patches:
+          - target:
+              kind: ConfigMap
+              name: pageserver-generation
+            patch: |
+              - op: add
+                path: /metadata/annotations/kustomize.toolkit.fluxcd.io~1ssa
+                value: ignore
+      ```
+
+      (`kustomize.toolkit.fluxcd.io/ssa: ignore` tells Flux's server-side-apply
+      reconciler to leave the live object — including the seeded `data.generation` —
+      untouched after it is first created.)
+
+    A guard in `deploy/_validate.sh` fails if **any** manifest under `deploy/`
+    re-introduces a declared `generation` key in the `pageserver-generation` ConfigMap, so
+    the undeclared-key invariant cannot silently regress — but that guard cannot see your
+    GitOps controller's reconcile behaviour, so the ignore rule above is **yours to add**.
   - **Upgrading from a pre-#1095 install — now SELF-HEALS at pswatcher startup.** An
     install created before the ledger change carried `generation: "1"` in the ConfigMap's
     last-applied-configuration; the first `kubectl apply` of the new `deploy/57` **prunes**

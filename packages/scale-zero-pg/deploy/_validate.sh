@@ -1613,6 +1613,38 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# D4b GitOps ledger-key guard (own block — do not fold into the #1095 checks above):
+# NO manifest under deploy/ may DECLARE the pageserver-generation ledger's
+# `data.generation` key. The check at "DECLARES a numeric pageserver-generation
+# value" above is scoped to deploy/57 with a 5-line grep window; this BROADENS it
+# to EVERY *.yaml and the WHOLE ConfigMap body, because the ledger has a THIRD
+# writer a resourceVersion CAS cannot see: GitOps. An Argo CD / Flux reconcile of
+# the whole object — or a future edit re-adding `generation:` to ANY manifest —
+# silently resets a pswatcher-advanced ledger back to the declared value
+# (floor-to-1, #1095). The key is set out-of-band CREATE-IF-ABSENT by
+# deploy/seed-ledger.sh (correct); the MANIFEST must never declare it. Per-doc
+# YAML scan (split on `---`): fail only a doc that is BOTH kind: ConfigMap AND
+# named pageserver-generation AND declares a `generation` key in its `data:`.
+_szpg_ledger_declared=""
+for _m in *.yaml; do
+  [ -f "$_m" ] || continue
+  if awk '
+    /^---[[:space:]]*$/ { if (kind=="ConfigMap" && nm==1 && gen==1) f=1; kind=""; nm=0; indata=0; gen=0; next }
+    /^data:/            { indata=1; if ($0 ~ /generation[[:space:]]*:/) gen=1; next }
+    /^[^[:space:]#]/    { indata=0; if ($0 ~ /^kind:[[:space:]]*ConfigMap([[:space:]]|$)/) kind="ConfigMap"; next }
+    /^[[:space:]]+name:[[:space:]]*pageserver-generation([[:space:]]|$)/ { nm=1 }
+    indata && /^[[:space:]]+generation[[:space:]]*:/ { gen=1 }
+    END { if (kind=="ConfigMap" && nm==1 && gen==1) f=1; exit !f }
+  ' "$_m"; then
+    _szpg_ledger_declared="$_szpg_ledger_declared $_m"
+  fi
+done
+if [ -n "$_szpg_ledger_declared" ]; then
+  fail "manifest(s)$_szpg_ledger_declared DECLARE the pageserver-generation ledger's data.generation key — a GitOps reconcile (Argo CD / Flux) or a kubectl apply of the whole object would RESET a pswatcher-advanced ledger back to it (silent floor-to-1, #1095). Ship 'data: {}' and NEVER declare generation in a manifest; the key is seeded CREATE-IF-ABSENT by deploy/seed-ledger.sh. GitOps users must ignoreDifferences on data.generation — see docs/operations.md#the-generation-ledger."
+fi
+ok "D4b: no manifest under deploy/ declares the pageserver-generation ledger data.generation key (GitOps-reconcile floor-to-1 hazard closed; the key is seeded create-if-absent by deploy/seed-ledger.sh)"
+
+# ---------------------------------------------------------------------------
 # Summary (#797): every contract above has been EVALUATED — nothing exits early.
 # One aggregated report, one CI-faithful exit code: 0 only if every contract
 # passed, 1 if any failed (the EXIT trap catches anything that dies before here).
