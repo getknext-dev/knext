@@ -464,6 +464,40 @@ data:
             annotations:
               summary: "pswatcher cannot read the routed pageserver generation view"
               description: "The ledger seed/heal vantage (PSW_ROUTED_BASE_URL) is unreachable, so a pruned or empty pageserver-generation ledger cannot self-recover and attaches fail closed. Check the `pageserver` client Service and the watcher's network path — see docs/operations.md#the-generation-ledger."
+          # (c1) D1 — the CURRENT standby is not holding a routed tenant as a warm
+          # Secondary. After a failover the rebuilt ex-primary is an empty standby that
+          # the reconciling warm loop re-arms; while a tenant reads 0 here, a further
+          # failover would attach a phantom-empty tenant (or abort) for it. SUSTAINED
+          # (for: 10m) so a brief re-arm window after a failover is not paged.
+          - alert: PswatcherStandbyNotWarm
+            expr: pswatcher_standby_tenant_warm == 0
+            for: 10m
+            labels: { severity: warning }
+            annotations:
+              summary: "the pageserver standby is NOT warm for routed tenant {{ $labels.tenant }}"
+              description: "The warm standby does not hold routed tenant {{ $labels.tenant }} as a Secondary. Automatic failover for that tenant would attach an empty phantom (or abort) until the standby is re-warmed. The reconciling warm loop re-arms it within PSW_WARM_INTERVAL_MS once the standby node is reachable; a persistent 0 means the standby (or its object-store path) is unhealthy — see docs/operations.md#pageserver-failover."
+          # (c1b) the standby-warm reconcile itself is FAILING — it could not read the
+          # client selector, resolve the standby, read the standby's membership, or
+          # register a Secondary. The plane may be disarmed with no other signal.
+          - alert: PswatcherStandbyWarmFailing
+            expr: increase(pswatcher_standby_warm_errors_total[15m]) > 0
+            labels: { severity: warning }
+            annotations:
+              summary: "pswatcher cannot keep the standby warm"
+              description: "The reconciling standby-warm loop is erroring (unreadable client Service selector, unresolvable standby node, unreadable standby membership, or a failed warm-Secondary registration). A standby that loses warmth is not re-armed while this fires — check the `pageserver` client Service, the pageserver-primary/pageserver-standby Services, and the standby pod — see docs/operations.md#pageserver-failover."
+          # (c1c) the standby LISTS a routed tenant but holds it ATTACHED, not as a warm
+          # Secondary — what an ex-primary whose PVC survived a failover reloads (its
+          # persisted attached location at the OLD generation). Membership alone reads
+          # that node as warm, so this is the signal that HA is NOT armed even though the
+          # tenant appears in the standby's listing. The watcher deliberately does NOT
+          # write to such a node (mid-flip it can be the just-promoted writer), so this
+          # needs an operator: detach or rebuild the stale location.
+          - alert: PswatcherStandbyStaleAttached
+            expr: increase(pswatcher_standby_stale_attached_total[15m]) > 0
+            labels: { severity: warning }
+            annotations:
+              summary: "the pageserver standby holds a routed tenant ATTACHED, not as a warm Secondary"
+              description: "The node the client Service does not select is holding a routed tenant as an ATTACHED location (typically an ex-primary that restarted with its PVC intact and reloaded a stale attached location at an older generation). It is listed, but it is NOT an armed warm standby, and the watcher will not register a Secondary over an attached location. Detach or rebuild that node's stale location — see docs/operations.md#pageserver-failover."
           # (c2) a maintenance freeze is ACTIVE (#1099). An admin/operator paused
           # failover for a planned op. This is intentional but SUPPRESSES HA — page-worthy
           # if it outlives its window. Fires while frozen; the hard bound (PSW_MAX_FREEZE_MS)
@@ -776,7 +810,7 @@ spec:
         # (prints the value to paste here). _validate.sh contract 27 fails if this drifts
         # from the ConfigMap data; _verify-drift.sh section E independently asserts every
         # shipped rule is LOADED in the live pod (/api/v1/rules).
-        ks-pg.dev/prometheus-config-sha256: "a56011a89b9bc1afc02370a031509cf3f116bd5385b131fe2cea25cc3f671a11"
+        ks-pg.dev/prometheus-config-sha256: "345c4ff8c233a95b1f4a2d82d48d4d673c619e7c2bb0d2decc7c5976e304e761"
     spec:
       serviceAccountName: prometheus
       securityContext:

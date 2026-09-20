@@ -46,6 +46,23 @@ func main() {
 	clientSvc := env("PSW_CLIENT_SERVICE", "pageserver")
 	standbyApp := env("PSW_STANDBY_SELECTOR_APP", "pageserver-standby")
 	standbyStatusURL := env("PSW_STANDBY_STATUS_URL", standbyBase+"/v1/status")
+	// D1 standby-warm loop: the app label the client Service selects at REST (the primary
+	// node) and that node's STABLE per-node Service URL (never the flipped client
+	// Service). The loop resolves the CURRENT standby as the node the client Service does
+	// NOT select — pageserver at rest, the promoted standby after a failover — and warms
+	// only it. NOT named PSW_PRIMARY_BASE_URL: that env was rejected for the generation
+	// view (a demoted, stale vantage) and deploy/_validate.sh fails if it reappears.
+	primaryApp := env("PSW_PRIMARY_SELECTOR_APP", "pageserver")
+	primaryNodeBase := env("PSW_PRIMARY_NODE_BASE_URL", "http://pageserver-primary:9898")
+	// Re-warm the standby every interval so a failover that rebuilds the ex-primary as an
+	// empty standby re-arms within one interval, without hammering the standby every poll.
+	warmIntervalMs := envInt("PSW_WARM_INTERVAL_MS", 30000)
+	// TOTAL bound on one warm pass. The pass is serial over the routed tenants, so an
+	// unbounded one against a standby wedged on its object store would occupy the single
+	// control goroutine far longer than the primary-death detection window
+	// (PSW_POLL_MS x PSW_FAIL_THRESHOLD). The reconcile also runs AFTER failover
+	// detection in each tick, so this only ever bounds how long the NEXT tick waits.
+	warmDeadlineMs := envInt("PSW_WARM_DEADLINE_MS", 10000)
 	// The generation view is resolved against the CURRENTLY-ROUTED pageserver — the
 	// client Service the gateway and computes actually dial, whose selector a failover
 	// flips — NOT a fixed primary URL. The primary is the node that is down in the very
@@ -112,6 +129,14 @@ func main() {
 		FailThreshold:     threshold,
 		BaseGeneration:    baseGen,
 		MaxFreezeDuration: time.Duration(maxFreezeMs) * time.Millisecond,
+		// D1 — the reconciling standby-warm targets: app label -> stable per-node URL.
+		// The loop warms whichever of these the client Service does NOT currently select.
+		WarmTargets: map[string]string{
+			primaryApp: primaryNodeBase, // the primary node's stable Service (pageserver-primary)
+			standbyApp: standbyBase,     // the standby node's stable Service (pageserver-standby)
+		},
+		WarmInterval: time.Duration(warmIntervalMs) * time.Millisecond,
+		WarmDeadline: time.Duration(warmDeadlineMs) * time.Millisecond,
 	}, metrics)
 	// The routed-pageserver generation view. Two consumers, both fail-closed: the
 	// startup ledger seed/heal (recovers a pruned/empty key) and the SECOND VANTAGE
@@ -129,6 +154,16 @@ func main() {
 	// target), NOT the routed Service — the standby is exactly the node whose tenant
 	// coverage must be confirmed before flipping.
 	ctrl.SetStandbyMembershipViewer(pswatcher.NewHTTPTenantMembershipViewer(standbyBase, probeTimeout))
+	// D1 — the reconciling standby-warm loop. Both collaborators take an EXPLICIT node
+	// URL (the standby swaps after a failover): a warmer that PUTs a warm Secondary and a
+	// per-URL membership prober that reads the target node's plane-wide /v1/location_config
+	// listing to decide whether a routed tenant is already warm there. The Controller
+	// resolves the standby from the live client-Service selector before every warm PUT, so
+	// a Secondary is never registered on the live primary (which would demote the writer).
+	ctrl.SetStandbyWarmer(
+		pswatcher.NewHTTPSecondaryWarmer(10*time.Second),
+		pswatcher.NewHTTPTenantMembershipAt(probeTimeout),
+	)
 	ctrl.SetLogger(logger.Printf)
 
 	// /healthz + /metrics: liveness of the watcher itself + promotion counter.

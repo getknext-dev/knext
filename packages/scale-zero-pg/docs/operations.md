@@ -1096,7 +1096,10 @@ outage. It is now **automatic**: a standing warm-Secondary standby plus the
   `pswatcher_suspected_partitions_total` / `pswatcher_tenant_absent_total` /
   `pswatcher_ledger_heal_errors_total` / `pswatcher_converge_repromotions_total` /
   `pswatcher_converge_blocked_total` / `pswatcher_converge_errors_total` /
-  `pswatcher_converge_tenant_absent_total` on `:9091`;
+  `pswatcher_converge_tenant_absent_total` /
+  `pswatcher_standby_warm_reconciles_total` / `pswatcher_standby_warm_registrations_total` /
+  `pswatcher_standby_warm_errors_total` / `pswatcher_standby_stale_attached_total` /
+  `pswatcher_standby_tenant_warm{tenant="…"}` on `:9091`;
   RBAC is minimal and **unchanged** by multi-tenant promotion (services get/patch,
   configmaps get/update/patch, pods list/delete) — the routed-tenant set is configured,
   not discovered by listing `AppDatabase` CRs, and the pageserver generation view is an
@@ -1158,6 +1161,10 @@ in or out, then verify behavior with the drills.
 | `PSW_BASE_GENERATION` | `1` | The generation floor for a genuinely fresh plane. It is a **floor, never a fallback** — an absent ledger is recovered from the routed view or the operation refuses (see below). |
 | `PSW_FREEZE_CONFIGMAP` | `pageserver-failover-freeze` | The ConfigMap that, when present with an RFC3339 `until` key, **pauses failover** for a planned op. Absent ⇒ no freeze. See the maintenance-freeze runbook below. |
 | `PSW_MAX_FREEZE_MS` | `7200000` (2 h) | Hard TTL bound on any freeze: the effective expiry is `min(until, createdAt + this)`, so a stuck/fat-fingered freeze cannot silently disable HA indefinitely. A freeze with no creation timestamp cannot be bounded and is refused outright. |
+| `PSW_PRIMARY_SELECTOR_APP` | `pageserver` | The app label the client Service selects **at rest** (the primary node). With `PSW_STANDBY_SELECTOR_APP` it names the two-node topology the standby-warm loop resolves against: the standby is whichever of the two the client Service does **not** currently select. A selector naming neither aborts the reconcile rather than guess. |
+| `PSW_PRIMARY_NODE_BASE_URL` | `http://pageserver-primary:9898` | The primary node's **stable per-node** Service — never the client Service, whose selector flips. It is the address the warm loop uses once that node becomes the standby (i.e. after a failover). Pointing it at the client Service would let a warm registration land on the live writer and demote it, so `deploy/_validate.sh` refuses that value. |
+| `PSW_WARM_INTERVAL_MS` | `30000` (30 s) | How often the standby-warm reconcile runs. A standby that loses a routed tenant — most often the ex-primary after a failover — is re-registered within one interval. Lower costs more requests against the standby; higher widens the window in which the plane has no armed standby. |
+| `PSW_WARM_DEADLINE_MS` | `10000` (10 s) | Total bound on **one** warm pass. The pass walks the routed tenants serially, so without a bound a standby wedged on its object store would occupy the watcher's single control goroutine for far longer than the `PSW_POLL_MS` × `PSW_FAIL_THRESHOLD` detection window. A pass cut short is counted (never reported as warm) and resumes next interval — it is idempotent and per-tenant, so partial progress is kept. The reconcile also runs *after* failover detection in each tick, so a slow pass can never delay that tick's own promotion. |
 | `PSW_PRIMARY_CONTAINER` | `pageserver` | The container inside the primary pod whose `Running` state is read as liveness evidence. Scoped by name so a sidecar crashlooping is not misread as the pageserver process dying. If it matches no container in the pod, the watcher reads "not running" (it never fabricates liveness) — which costs the degradation/death discrimination, so keep it in sync with `deploy/53-pageserver.yaml`. |
 
 #### When a routed tenant is not on the standby
@@ -1174,8 +1181,37 @@ cannot, so do not use them when checking by hand:
   held as a warm **Secondary** — which is exactly how a correctly-warmed standby holds
   every routed tenant — so it reports a held tenant as unreadable.
 
-Standby warming runs once, at deploy, so an app database provisioned afterwards is real
-and routed while the standby's listing still omits it. The watcher therefore resolves a
+The watcher **keeps the standby warm continuously**: every `PSW_WARM_INTERVAL_MS` it
+resolves which node is currently the standby — the one the client Service does **not**
+select — and registers any routed tenant it does not already hold there as a warm
+Secondary. This is what re-arms the plane after a failover: the promoted standby becomes
+the primary and the rebuilt ex-primary is an empty standby, which the loop re-warms
+automatically within one interval, without an operator re-running any Job. The loop never
+touches the node the client Service currently selects (registering a Secondary on the live
+primary would demote the writer), so a selector that names no known node aborts the
+reconcile rather than guess. Loss of warmth is visible per tenant on
+`pswatcher_standby_tenant_warm` (alert `PswatcherStandbyNotWarm`); a reconcile that cannot
+read the selector, resolve the standby, read membership, or register a Secondary counts on
+`pswatcher_standby_warm_errors_total` (alert `PswatcherStandbyWarmFailing`).
+
+**"Listed" is not "warm", and the watcher does not pretend otherwise.** A pageserver's
+listing shows a tenant held in *any* location mode. An ex-primary that restarts with its
+volume intact reloads the **attached** location it had before the failover, at its old
+generation — it appears in the listing while being no standby at all. The watcher reads the
+location mode, not just membership: a routed tenant held as an attached location reads
+`pswatcher_standby_tenant_warm = 0`, counts `pswatcher_standby_stale_attached_total`
+(alert `PswatcherStandbyStaleAttached`) and is logged with the node name.
+
+It deliberately does **not** write a Secondary over an attached location, and that
+restraint is what keeps the loop safe: during the moment between a promotion and the
+client Service flip, the newly-promoted **writer** is attached and not yet selected, so it
+is exactly what the loop would resolve as "the standby" — registering a Secondary there
+would demote it. Clearing a genuinely stale attached location is therefore an operator
+step: detach that location on the ex-primary (or rebuild the node's volume) and the next
+reconcile registers it as a warm Secondary.
+
+If a routed tenant is nonetheless not yet warm on the standby (e.g. the standby node is
+unhealthy, or an app was provisioned in the last interval), the watcher resolves a
 not-held tenant by position and corroboration:
 
 - **base tenant** → **abort**. Every compute reads through it; flipping would point them
@@ -1192,13 +1228,19 @@ not-held tenant by position and corroboration:
   applies to a watcher deployment that was never given `PSW_STANDBY_BASE_URL`: with no way
   to check the standby, the failover refuses rather than attaching blind.
 
-**Operational consequence — warm the standby for the apps tenant.** On a plane that
-declares `PSW_APPS_TENANT_ID`, warming that tenant on the standby is a **precondition for
-automatic failover**, not an optimisation: during a failover the routed vantage resolves
-to the dead primary, so an un-warmed apps tenant cannot be corroborated and the failover
-blocks. After provisioning the first app database (or if
-`pageserver-standby-init` logged `WARNING: apps tenant … could NOT be registered`),
-re-run the warming Job:
+**Operational consequence — the standby is re-warmed automatically.** On a plane that
+declares `PSW_APPS_TENANT_ID`, a warm standby for that tenant is required for automatic
+failover (during a failover the routed vantage resolves to the dead primary, so an
+un-warmed apps tenant cannot be corroborated and the failover blocks). The watcher now
+keeps it warm on its own reconcile loop, so an app database provisioned after deploy — or a
+standby rebuilt as an empty node after a failover — is re-registered within
+`PSW_WARM_INTERVAL_MS`; there is no longer a manual precondition to re-run after
+provisioning. The one-shot `pageserver-standby-init` Job still warms the standby at deploy
+so it is warm before the first reconcile.
+
+If `PswatcherStandbyNotWarm` persists for a tenant, the standby node (or its object-store
+path) is unhealthy — the reconcile cannot warm a node it cannot reach. As a break-glass
+you can still re-run the one-shot warming Job:
 
 ```bash
 kubectl -n scale-zero-pg delete job pageserver-standby-init --ignore-not-found
@@ -1443,6 +1485,31 @@ planned frozen op performed on an already-failed-over plane can make the
 rise while `pswatcher_failover_frozen` is `1`. **That is expected, not a fault** — the
 watcher is finishing an interrupted failover, not making a new one, and the freeze was
 never meant to hold it back.
+
+**What a freeze does NOT stop — keeping the standby warm.** The standby-warm reconcile
+runs every tick regardless of the freeze, and that is deliberate: a freeze is normally
+taken for a planned op *on the primary*, which is exactly when you want HA armed — the
+freeze is reversible (delete the ConfigMap), an un-armed standby is not. The loop also
+never writes to the node the client Service selects, so it cannot interfere with the
+primary you are working on.
+
+The case it *does* fight is the opposite one: a planned **standby** detach or rebuild. The
+reconcile re-registers the tenants you just detached, every `PSW_WARM_INTERVAL_MS`, and a
+freeze will not hold it back. For that op, pause the loop itself — either scale the
+watcher down for the duration:
+
+```bash
+kubectl -n scale-zero-pg scale deploy/pswatcher --replicas=0
+# … detach / rebuild the standby node …
+kubectl -n scale-zero-pg scale deploy/pswatcher --replicas=1
+```
+
+…or, if you need failover detection to keep running while you work, set
+`PSW_WARM_INTERVAL_MS` to a window longer than the op on `deploy/58-pswatcher.yaml` and
+restore it afterwards. Scaling the watcher down is simpler but **stops failover detection
+too** — treat it as an unprotected window and keep it short. Either way, restore the loop
+before you walk away: with it paused, a standby that loses warmth is never re-armed, and
+the only signal is `PswatcherStandbyNotWarm` firing after 10 minutes.
 
 **A freeze does NOT silence the degradation/outage alerts.** A correctly-set freeze
 suppresses failover and raises `pswatcher_failover_frozen`; it does **not** touch the

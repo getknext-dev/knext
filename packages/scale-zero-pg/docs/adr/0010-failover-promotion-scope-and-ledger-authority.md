@@ -293,7 +293,89 @@ honest gap behind §1b's fail-closed default, not an oversight.
   effect, disabled automatic failover. `_validate.sh` asserts the apps-tenant id is in
   lock-step across the four files that carry it, and the Job now warns loudly on a failed
   registration, but nothing yet *periodically* re-warms. A reconciling (rather than
-  one-shot) warm is the follow-up.
+  one-shot) warm is the follow-up. **RESOLVED (D1) — see the amendment below.**
+
+  **Amendment (D1, 2026-09-20) — the warm is now CONTINUOUS, not one-shot.** The residual
+  above named the wrong trigger. Per-app databases are *timelines* under one apps tenant,
+  so the routed set `{base, apps}` does not grow per app — a "never-warmed new app" is not
+  the real gap. The real trigger is a FAILOVER: once it succeeds the promoted standby is
+  the primary and the ex-primary becomes the standby that **nobody re-warms**, so the
+  plane is disarmed from the first successful failover until an operator re-runs the Job.
+  `pswatcher` now runs a reconciling standby-warm loop (`reconcileStandbyWarm`, driven by
+  `Tick` every `PSW_WARM_INTERVAL_MS`, bounded by `PSW_WARM_DEADLINE_MS`): each pass it
+  resolves the CURRENT standby as the node the client Service does NOT select and
+  registers any **absent** routed tenant there as a warm Secondary. The one-shot Job (57)
+  stays as the deploy-time warm.
+
+  **What the ex-primary comes back as is NOT assumed (correction, #1124 review).** An
+  earlier draft of this amendment asserted it returns an "empty standby". That was never
+  established, and the common variant contradicts it: `53-pageserver.yaml` RETAINS the PVC,
+  so the pod restarts and reloads its **persisted `AttachedSingle` at the OLD generation**.
+  It is then listed in `/v1/location_config` — so a membership-only read calls it warm, the
+  reconcile skips the PUT, and the gauge publishes "HA armed" for a node that is not an
+  armed standby at all: a false green, and weaker than the one-shot Job it replaces. The
+  loop therefore reads the location **mode**, not just membership:
+
+  | what the standby lists for a routed tenant | gauge | write | counter |
+  |---|---|---|---|
+  | absent | 0 until confirmed | PUT warm Secondary | `…_warm_registrations_total` |
+  | held, `null` config (Secondary) | 1 | none | — |
+  | held, attached config | **0** | **none** | `…_standby_stale_attached_total` |
+  | unreadable | 0 | none | `…_warm_errors_total` |
+
+  **The write stays mode-AGNOSTIC on purpose — it PUTs only when the tenant is ABSENT.**
+  Making the write mode-aware ("it is attached, not a Secondary, so register one") would
+  reintroduce the outage this loop exists to prevent: in the promote-**before**-flip window
+  the just-promoted node is attached AND not yet selected by the client Service, so
+  `resolveStandby` resolves IT as the standby, and a Secondary PUT there demotes the new
+  writer. Mode-aware gauge, mode-agnostic write: a misread mode can then only mis-report,
+  never demote. Clearing a genuinely stale attached location is an operator action
+  (`PswatcherStandbyStaleAttached` → `docs/operations.md`), not this loop's.
+
+  **The one way this loop could cause the outage it prevents — the never-demote guard.**
+  Registering a Secondary on the node the client Service currently selects would DEMOTE the
+  live writer. So the standby is resolved from the LIVE selector every reconcile
+  (`resolveStandby`), and the warm PUT targets only the node the client Service does NOT
+  select — `pageserver-standby` at rest, the rebuilt ex-primary (`pageserver-primary`)
+  after a failover. A selector that is empty, names no known node, is ambiguous, or resolves
+  to a standby colliding with the primary ABORTS the reconcile (fail toward NOT warming, the
+  reversible state), counted on `pswatcher_standby_warm_errors_total`.
+
+  Mutation-proved, each against the test that actually reds (#1124 review, FIX 3 — the
+  first draft credited one test for guards it never reaches, and neutering those left the
+  suite green): removing the "skip the primary" branch reds
+  `TestReconcileStandbyWarmNeverWarmsThePrimary`; neutering the URL-collision check reds
+  `TestResolveStandbyAbortsWhenStandbyURLCollidesWithThePrimary`; neutering the
+  >1-candidate abort reds `TestResolveStandbyAbortsOnMoreThanOneCandidate`; making the
+  write mode-aware reds `TestReconcileStandbyWarmNeverPutsSecondaryOntoAnAttachedNode`;
+  making the gauge mode-blind reds `TestReconcileStandbyWarmAttachedStandbyIsNotWarm`.
+
+  **The reconcile cannot slow failover detection.** It is deferred to the END of `Tick`, so
+  it runs after every detection/promotion path has returned its verdict, and one pass is
+  bounded by `PSW_WARM_DEADLINE_MS`. Run at the top of the tick (where it first landed) a
+  standby wedged on its object store would hold the single control goroutine for a
+  membership timeout plus a warm PUT per routed tenant, stretching the ~6 s
+  `PSW_POLL_MS` × `PSW_FAIL_THRESHOLD` detection window. Deferring also makes
+  "best-effort" structural rather than conventional: a deferred call cannot touch the
+  tick's return values, so no warm failure can ever become failover-blocking
+  (`TestStandbyWarmRunsAfterFailoverDetection`,
+  `TestFailingStandbyWarmStillPromotesOnDeadPrimary`,
+  `TestStandbyWarmReconcileIsDeadlineBounded`).
+
+  No new RBAC: the loop reads the client Service selector (existing
+  `services get`) and PUTs over HTTP to the pageservers. Membership uses the same live-
+  verified oracle D2 added — `GET /v1/location_config` `tenant_shards` — pointed at the
+  standby (`HTTPTenantMembershipAt`), never the per-tenant `GET /v1/tenant/<T>` (503s on a
+  Secondary). Loss of warmth is observable per tenant (`pswatcher_standby_tenant_warm`,
+  alert `PswatcherStandbyNotWarm`), and a stale attached hold has its own signal
+  (`pswatcher_standby_stale_attached_total`, alert `PswatcherStandbyStaleAttached`).
+
+  On-cluster proof is the C2/#1117 drill's job, and it now asserts the **mode**, not just
+  membership: after the failover `_verify-failover-multitenant.sh` scales the ex-primary
+  back up and requires it to list every routed tenant with a `null` (Secondary) location
+  config within the re-arm budget. That assertion is what settles the PVC question above
+  empirically — if the ex-primary returns still ATTACHED, the drill reds and says so
+  rather than letting the gauge claim the plane is armed.
 - **`pswatcher` now has more reasons to refuse than to act.** Absent-and-unrecoverable
   ledger, base tenant not held, uncorroborated non-base absence — each aborts. Every one
   is loud (log + counter + alert), but the aggregate posture is that this controller
@@ -376,5 +458,8 @@ honest gap behind §1b's fail-closed default, not an oversight.
       On-cluster re-verify of the FAILOVER itself still gated by the C2 drill below.
 - [ ] C2: on-cluster verification via the full multi-tenant failover drill (owned by the
       drill task, #1117) on a recovered/clean plane.
-- [ ] Follow-up: make standby warm-Secondary registration reconciling rather than
-      one-shot, so an apps tenant provisioned after deploy does not block failover.
+- [x] Follow-up (D1): make standby warm-Secondary registration RECONCILING rather than
+      one-shot — RESOLVED. See the D1 amendment to §5 below. `pswatcher` now keeps the
+      current standby warm continuously; the one-shot Job (57) remains as the deploy-time
+      warm. On-cluster proof (a tenant provisioned/rebuilt after the initial warm is
+      re-registered) is folded into the C2/#1117 drill.

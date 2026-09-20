@@ -163,6 +163,32 @@ spec:
             # Scoped by NAME so a future sidecar's crashloop is not read as the
             # pageserver dying. Must match the container name in 53-pageserver.yaml.
             - { name: PSW_PRIMARY_CONTAINER, value: "pageserver" }
+            # D1 — the reconciling standby-warm loop (ADR-0010 §5). It keeps the CURRENT
+            # standby registered as a warm Secondary for every routed tenant, continuously,
+            # so a failover that rebuilds the ex-primary as an EMPTY standby re-arms
+            # automatically — no operator re-running pageserver-standby-init. The standby
+            # is resolved as the node the client Service does NOT select: at rest that is
+            # PSW_STANDBY_SELECTOR_APP (pageserver-standby); after a failover it is the
+            # PROMOTED node's opposite — the rebuilt ex-primary at PSW_PRIMARY_SELECTOR_APP
+            # (pageserver), reachable at PSW_PRIMARY_NODE_BASE_URL (the STABLE per-node
+            # Service, NOT the flipped client Service). Registering a Secondary on the node
+            # the client Service currently selects would DEMOTE the live writer, so a
+            # selector that resolves to no known node aborts the reconcile rather than
+            # guess. No new RBAC: the loop reads the client Service selector (existing
+            # `services get`) and PUTs over HTTP to the pageservers.
+            # NB: this per-node warm TARGET is DISTINCT from the rejected primary-vantage
+            # env for the generation view (a demoted, stale node, banned by _validate.sh) —
+            # it is resolved against the live selector and only ever warms the STANDBY node.
+            - { name: PSW_PRIMARY_SELECTOR_APP, value: "pageserver" }
+            - { name: PSW_PRIMARY_NODE_BASE_URL, value: "http://pageserver-primary:9898" }
+            - { name: PSW_WARM_INTERVAL_MS, value: "30000" } # re-warm every 30s
+            # TOTAL bound on ONE warm pass. The pass walks the routed tenants serially
+            # (a membership GET, plus a PUT + download kick for an absent tenant), so an
+            # unbounded pass against a standby wedged on its object store would hold the
+            # watcher's single control goroutine for far longer than the ~6s
+            # PSW_POLL_MS x PSW_FAIL_THRESHOLD primary-death detection window. The pass is
+            # cut short here (counted, never reported as warm) and resumes next interval.
+            - { name: PSW_WARM_DEADLINE_MS, value: "10000" }
             - { name: PSW_HEALTH_ADDR, value: ":9091" }
           ports:
             - { name: metrics, containerPort: 9091 }

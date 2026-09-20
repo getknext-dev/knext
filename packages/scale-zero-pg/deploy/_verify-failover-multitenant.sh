@@ -53,6 +53,16 @@
 #                          non-death event does not trigger a needless failover.
 #                          (The full behavioral non-death scenario is deferred with
 #                          a documented reason — see the [T5] assertion block.)
+#   [D1] HA re-armed    — a failover that leaves no armed standby has only MOVED the
+#                          single point of failure. After the flip the ex-primary is
+#                          scaled back up and must be re-warmed by the watcher's
+#                          reconcile loop as a **Secondary** for every routed tenant —
+#                          asserted on the location MODE (a `null` config in
+#                          /v1/location_config), not on membership, because an
+#                          ex-primary that restarts with its PVC intact reloads its old
+#                          ATTACHED location and is LISTED while being no standby at
+#                          all. The watcher's own warmth gauge is then required to AGREE
+#                          with that observation, so a false "HA armed" signal reds here.
 #   [T6] convergence/MTTR — the Service selector + tenant states converge within a
 #                          bounded budget WITHOUT a manual pswatcher-stop or
 #                          selector-patch. Asserts its OWN end-state, independent of
@@ -772,6 +782,82 @@ if [ "$RUN_RESTART_IDEMPOTENCY" = "1" ]; then
       t_fail T6 "could not restart pswatcher (scale to 1 / rollout status failed) after stranding the plane — the plane is left at ledger $STRANDED_GEN with a lagging tenant; restart the watcher and re-run"
     fi
   fi
+fi
+
+# --- [D1] HA RE-ARM: the ex-primary must come back as a warm SECONDARY -------
+# A failover that leaves no armed standby behind has only moved the single point of
+# failure. The watcher's reconciling warm loop is supposed to re-arm the ex-primary
+# automatically, and it publishes pswatcher_standby_tenant_warm to say so — but
+# "listed in /v1/location_config" is NOT "warm". An ex-primary that restarts with its
+# PVC intact (53-pageserver.yaml RETAINS it) reloads its persisted ATTACHED location at
+# the OLD generation and is listed while being no standby at all.
+#
+# So this asserts the MODE, and then asserts the GAUGE AGREES with it. Membership alone
+# would pass on exactly the state the re-arm is supposed to fix.
+#
+# It runs LAST, after every tenant-observing check: it scales the killed primary back up
+# (the cleanup trap would do that anyway) and then waits for the watcher to re-warm it.
+D1_REARM_BUDGET=${D1_REARM_BUDGET:-240}
+PRIMARY_NODE_SVC=${PRIMARY_NODE_SVC:-pageserver-primary}
+# Re-resolve the watcher pod IP: the opt-in [T6] restart above may have replaced the pod,
+# and scraping a dead IP would read as "no sample" instead of the real gauge.
+PSW_IP="$($K get pod -l app=pswatcher -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || echo '')"
+echo ""
+info "STEP D1: scale $PRIMARY_STS back up and require the watcher to RE-ARM it as a warm Secondary"
+ps_hold_mode() { # $1 host  $2 tenant -> secondary | attached | absent | unreadable
+  _body="$($K exec sts/"$STANDBY_STS" -- curl -s --max-time 10 \
+            "http://$1:9898/v1/location_config" 2>/dev/null || echo '')"
+  case "$_body" in *tenant_shards*) : ;; *) echo unreadable; return 0 ;; esac
+  _norm="$(printf '%s' "$_body" | tr -d ' \n')"
+  case "$_norm" in
+    *"\"$2\",null"*)                  echo secondary ;;
+    *"\"$2\",{\"mode\":\"Secondary\""*) echo secondary ;;
+    *"\"$2\","*)                      echo attached ;;
+    *)                                echo absent ;;
+  esac
+}
+if ! $K scale statefulset/"$PRIMARY_STS" --replicas=1 >/dev/null 2>&1; then
+  t_fail D1 "could not scale $PRIMARY_STS back up — the HA re-arm cannot be checked, so a plane left with NO armed standby after a failover would go unnoticed"
+else
+  D1_DEADLINE=$(( $(now) + D1_REARM_BUDGET ))
+  for TEN in "$BASE_TENANT" "$APPS_TENANT"; do
+    [ -n "$TEN" ] || continue
+    D1_MODE=""
+    while : ; do
+      D1_MODE="$(ps_hold_mode "$PRIMARY_NODE_SVC" "$TEN")"
+      [ "$D1_MODE" = secondary ] && break
+      [ "$(now)" -ge "$D1_DEADLINE" ] && break
+      sleep 5
+    done
+    case "$D1_MODE" in
+      secondary)
+        t_ok D1 "ex-primary ($PRIMARY_NODE_SVC) holds routed tenant $TEN as a warm SECONDARY — HA is re-armed after the failover, with no operator step" ;;
+      attached)
+        t_fail D1 "NOT RE-ARMED (stale ATTACHED): the ex-primary lists routed tenant $TEN with an ATTACHED location config, not a Secondary — it restarted with its PVC intact and reloaded its old attached location, so it is LISTED but is not an armed standby. The watcher will not write over an attached location (mid-flip that node can be a just-promoted writer), so this needs an operator: detach or rebuild that location. Fix/track: pswatcher_standby_stale_attached_total + PswatcherStandbyStaleAttached" ;;
+      absent)
+        t_fail D1 "NOT RE-ARMED (absent): the ex-primary does not hold routed tenant $TEN at all after ${D1_REARM_BUDGET}s — the reconciling standby-warm loop did not register it, so the plane has NO warm standby and a second failover would attach a phantom-empty tenant or abort" ;;
+      *)
+        t_fail D1 "the ex-primary's /v1/location_config listing was UNREADABLE within ${D1_REARM_BUDGET}s, so the re-arm cannot be confirmed — unreadable is never 'warm'" ;;
+    esac
+    # The gauge must AGREE with the plane. A gauge that reports 1 while the node is
+    # attached/absent is a FALSE 'HA armed' signal — worse than no signal, because the
+    # alert that would have paged stays silent.
+    if [ -n "$PSW_IP" ]; then
+      D1_MET="$($K exec sts/"$STANDBY_STS" -- curl -s --max-time 10 "http://$PSW_IP:9091/metrics" 2>/dev/null || echo '')"
+      D1_GAUGE="$(printf '%s\n' "$D1_MET" | awk -v t="$TEN" '
+          /^[[:space:]]*#/ { next }
+          $0 ~ ("^pswatcher_standby_tenant_warm\\{tenant=\"" t "\"\\}") { v=$NF }
+          END { print (v=="" ? "none" : v) }')"
+      D1_WANT=0; [ "$D1_MODE" = secondary ] && D1_WANT=1
+      if [ "$D1_GAUGE" = "$D1_WANT" ]; then
+        t_ok D1 "pswatcher_standby_tenant_warm{tenant=$TEN} = $D1_GAUGE, which AGREES with the ex-primary's actual hold mode ($D1_MODE)"
+      elif [ "$D1_GAUGE" = none ] && [ "$D1_WANT" = 0 ]; then
+        t_ok D1 "pswatcher publishes no warmth sample for $TEN yet, and the node is indeed not a warm Secondary ($D1_MODE) — no false 'armed' claim"
+      else
+        t_fail D1 "GAUGE LIES: pswatcher_standby_tenant_warm{tenant=$TEN} = $D1_GAUGE while the ex-primary actually holds that tenant '$D1_MODE' (want $D1_WANT). A warmth gauge that reports armed for a node holding an ATTACHED (or no) location is a false green — the loss-of-warmth alert never fires and the plane looks HA when it is not"
+      fi
+    fi
+  done
 fi
 
 # ---------------------------------------------------------------------------

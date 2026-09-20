@@ -185,6 +185,16 @@ the claim.
   read can no longer disable HA — but it does mean a blind read silently leaves a planned
   op **unprotected**, which is why `pswatcher_freeze_read_errors_total` exists and is
   alerted rather than merely logged.
+- **A freeze gates the PROMOTION only — not convergence, and not keeping the standby
+  warm.** The standby-warm reconcile keeps running while a freeze is active, deliberately:
+  a freeze is normally taken for a planned op on the PRIMARY, which is precisely when the
+  standby must stay armed. The freeze is reversible (ADR-0012 — delete the ConfigMap); an
+  un-armed standby discovered at the moment of a real death is not. The loop also never
+  writes to the node the client Service selects, so it cannot disturb the primary under
+  maintenance. The honest cost: a planned op on the **standby** (a detach or rebuild) is
+  fought by the reconcile every interval and a freeze will not hold it back — that op has
+  to pause the loop itself (scale the watcher down, or widen `PSW_WARM_INTERVAL_MS` past
+  the op), which `operations.md` documents as a runbook step.
 - **A freeze is PLANE-WIDE, never per-tenant.** One freeze suppresses failover for the
   base tenant **and** every per-app timeline on the plane. There is no way to freeze one
   app's database while leaving the rest under HA; the scope is the whole storage plane.
