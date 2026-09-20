@@ -47,6 +47,25 @@ spec:
     metadata:
       labels: { app: pageserver, plane: storage }
     spec:
+      # FAILURE-DOMAIN PLACEMENT (sprint-close C3). The primary and the warm
+      # standby (57) must NOT share a node: on a node death — the exact case the
+      # #1099 failover carve-out addresses — a co-scheduled standby dies WITH the
+      # primary and there is nothing to promote to. HARD (requiredDuringScheduling)
+      # because the promotion target's survival is the whole point of the standby;
+      # a soft preference could silently co-locate under resource pressure and
+      # defeat the node-death path with green CI. Symmetric with the same rule on
+      # 57 so whichever pod schedules second is repelled. See ADR-0012.
+      # TRADEOFF: on a SINGLE-node dev cluster (e.g. local orbstack) this leaves the
+      # standby Pending — acceptable, because node-death failover is meaningless on
+      # one node anyway. Run ≥2 nodes to exercise HA (GKE szpg-f5 has 3), or scale
+      # the standby STS to 0 for a single-node smoke test.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - { key: app, operator: In, values: ["pageserver-standby"] }
+              topologyKey: kubernetes.io/hostname
       # neon:8464 runs as uid 1000 (neon). fsGroup 1000 keeps /data writable
       # for both the seed-config initContainer and the pageserver itself.
       securityContext:

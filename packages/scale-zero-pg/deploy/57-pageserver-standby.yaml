@@ -101,6 +101,21 @@ spec:
     metadata:
       labels: { app: pageserver-standby, plane: storage }
     spec:
+      # FAILURE-DOMAIN PLACEMENT (sprint-close C3). The warm standby must NOT be
+      # co-scheduled with the primary (53): a node death that takes the primary must
+      # leave a promotion target alive on a DIFFERENT node, or the #1099 node-death
+      # carve-out has nothing to promote to. HARD (requiredDuringScheduling) — the
+      # promotion target's survival is the reason the standby exists. See ADR-0012.
+      # TRADEOFF (same as 53): a single-node dev cluster leaves this Pending; run ≥2
+      # nodes (GKE szpg-f5 has 3) to exercise HA, or scale this STS to 0 for a
+      # single-node smoke test.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - { key: app, operator: In, values: ["pageserver"] }
+              topologyKey: kubernetes.io/hostname
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000

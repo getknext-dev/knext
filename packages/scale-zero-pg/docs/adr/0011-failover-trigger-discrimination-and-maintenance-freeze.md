@@ -1,6 +1,6 @@
 # ADR 0011 — Failover trigger discriminates dependency-degradation from node-death, plus a TTL-bounded maintenance freeze
 
-Status: Proposed
+Status: Accepted — on-cluster verification pending (C2: one green end-to-end multi-tenant drill on a recovered/clean plane)
 Date: 2026-09-20
 
 > Numbered to continue the `docs/adr/000N` sub-series (0001–0003, then 0010). The
@@ -267,3 +267,14 @@ the claim.
       **sub-liveness-window** case only — see the scope bound in §1.
 - [ ] Follow-up: a per-op freeze helper in the operator (set/clear with reason) so admins
       do not hand-edit the ConfigMap.
+
+## Cross-note: live-API observation of the corroboration signal (ADR-0010 §5, C1)
+
+The abort/hold posture this ADR builds on assumes the second-vantage read can distinguish a
+tenant this pageserver does not hold. **Observed on live GKE (2026-09-20, ADR-0010 §5 C1):**
+that distinction is valid only via **`GET /v1/tenant/<T>`**, which `404`s on an unheld tenant.
+The promotion **`PUT location_config`** does NOT `404` — it `200`-attaches — so the promoter's
+`404`-skip branch is dead code against a real pageserver. This does not change this ADR's
+fail-safe freeze read or its node-death discrimination; it only clarifies that the corroboration
+this ADR's hold-vs-act logic relies on (ADR-0010 §1b) rides the GET viewer, not the PUT. The
+full reconciling principle is ADR-0012 (fail toward the reversible outcome).

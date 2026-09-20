@@ -607,6 +607,21 @@ grep -q 'Reason == "NodeLost"' ../gateway/internal/pswatcher/k8s.go || fail "psw
 # test itself cannot silently vanish — impl broken => go test reds; test deleted => this reds.
 grep -q 'func TestPodReadyNodeLost' ../gateway/internal/pswatcher/k8s_test.go || fail "the NodeLost-is-a-death unit test (TestPodReadyNodeLost*) is gone — the node-death MTTR guarantee (#1099 review) is now unguarded"
 ok "60 pins the #1099 failover-trigger alert<->metric family, the freeze bound is in lockstep with the binary, and the storage plane stays un-tolerant of an unreachable node"
+# FAILURE-DOMAIN PLACEMENT (sprint-close C3, ADR-0012). The #1099 node-death carve-out
+# assumes the promotion target and the observer SURVIVE the node death. That only holds if
+# the placement is asserted: without anti-affinity the standby can co-schedule with the
+# primary (and die with it), and pswatcher can be co-resident with the primary it watches.
+# Same enforcement stance as the no-unreachable-toleration block above — a comment is
+# decoration, so scan the manifests. pageserver plane (53/57): HARD (required) so the
+# promotion target cannot land on the primary's node; pswatcher (58): SOFT (preferred)
+# so the single-replica watcher stays schedulable on a single-node dev cluster.
+for _f in 53-pageserver.yaml 57-pageserver-standby.yaml; do
+  grep -q 'requiredDuringSchedulingIgnoredDuringExecution' "$_f" || fail "$_f must carry a HARD podAntiAffinity (requiredDuringSchedulingIgnoredDuringExecution) so the pageserver primary and warm standby never co-schedule — a node death would otherwise take the promotion target with the primary and the #1099 node-death failover has nothing to promote to (sprint-close C3 / ADR-0012)"
+  grep -q 'topologyKey: kubernetes.io/hostname' "$_f" || fail "$_f podAntiAffinity must key on kubernetes.io/hostname (per-node spread) — any other topologyKey does not separate the primary/standby by node (sprint-close C3 / ADR-0012)"
+done
+grep -q 'preferredDuringSchedulingIgnoredDuringExecution' 58-pswatcher.yaml || fail "58-pswatcher.yaml must carry a SOFT podAntiAffinity (preferredDuringSchedulingIgnoredDuringExecution) so the watcher prefers a different node from the primary it watches — a co-resident watcher dies with the node it must detect the death of (sprint-close C3 / ADR-0012)"
+grep -q 'topologyKey: kubernetes.io/hostname' 58-pswatcher.yaml || fail "58-pswatcher.yaml podAntiAffinity must key on kubernetes.io/hostname — any other topologyKey does not spread the watcher off the primary's node (sprint-close C3 / ADR-0012)"
+ok "failure-domain placement asserted (C3): 53/57 HARD anti-affinity keeps the primary and warm standby off the same node; 58 SOFT anti-affinity keeps pswatcher off the primary's node"
 grep -q 'alert: ComputeWakeStuck' 60-prometheus.yaml || fail "60 missing wake-path-stuck alert"
 # issue #39: demo end-to-end canary alert — dormant Failed-Job rule joined on the
 # demo-canary CronJob owner_name, same pattern as backup/wal-janitor.
