@@ -5,6 +5,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -87,6 +88,169 @@ func authOkBackend(c net.Conn) {
 	_, _ = c.Read(b) // consume the replayed startup
 	_, _ = c.Write([]byte{0x52, 0, 0, 0, 8, 0, 0, 0, 0, 0x5a, 0, 0, 0, 5, 0x49})
 	time.Sleep(100 * time.Millisecond)
+}
+
+// writeAuthOk sends AuthenticationOk + ReadyForQuery on an accepted backend conn.
+func writeAuthOk(c net.Conn) {
+	_, _ = c.Write([]byte{0x52, 0, 0, 0, 8, 0, 0, 0, 0, 0x5a, 0, 0, 0, 5, 0x49})
+	time.Sleep(50 * time.Millisecond)
+}
+
+// countingHandler returns a per-connection backend handler that records how many
+// startup packets it has served (attempts) and invokes reply(n, c) with the
+// 0-indexed attempt number, so a test can model "28P01 on the first attempt,
+// AuthenticationOk on the second" — the compute_ctl cold-boot role-apply race the
+// D7b bounded retry closes. It reads (and discards) the replayed startup first.
+func countingHandler(attempts *int32, reply func(n int32, c net.Conn)) func(net.Conn) {
+	return func(c net.Conn) {
+		defer c.Close()
+		b := make([]byte, 4096)
+		_, _ = c.Read(b) // consume the replayed startup
+		n := atomic.AddInt32(attempts, 1) - 1
+		reply(n, c)
+	}
+}
+
+// TestColdWake28P01Retry_SucceedsOnSecondAttempt is the D7b happy-path fix: on a
+// genuine cold wake the first proxied auth can transiently 28P01 (compute_ctl
+// applies the per-app role a beat after the socket opens). With NO blind pre-sleep
+// (roleApplySettleMs=0), a single bounded retry after roleApplyRetryMs lets the role
+// land and the client connects — it sees AuthenticationOk, never the transient
+// 28P01. Exactly two backend attempts prove the retry fired once and only once.
+func TestColdWake28P01Retry_SucceedsOnSecondAttempt(t *testing.T) {
+	var attempts int32
+	d := &coldWakeDriver{addr: reserveAddr(t), handler: countingHandler(&attempts, func(n int32, c net.Conn) {
+		if n == 0 {
+			_, _ = c.Write(proto.BuildErrorResponse("28P01", `password authentication failed for user "app_x"`))
+			return
+		}
+		writeAuthOk(c)
+	})}
+	gw := gatewayWithDriver(t, d)
+	gw.roleApplySettleMs = 0 // NO blind pre-sleep — the default hot path
+	gw.roleApplyRetryMs = 80 // short bounded wait before the single retry
+	gw.opts.WakeTimeoutMs = 5000
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go gw.Serve(ln)
+
+	c, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_, _ = c.Write(proto.BuildStartup(map[string]string{"user": "app_x", "database": "x"}))
+	_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	buf := make([]byte, 64)
+	n, _ := c.Read(buf)
+
+	if !d.didWake() {
+		t.Fatal("expected a genuine cold wake (driver.Wake called)")
+	}
+	if n == 0 || buf[0] != 0x52 { // AuthenticationOk
+		t.Fatalf("cold-wake transient 28P01: got %q (code %q), want AuthenticationOk (0x52) after one bounded retry", buf[:n], proto.ErrorCode(buf[:n]))
+	}
+	if got := atomic.LoadInt32(&attempts); got != 2 {
+		t.Fatalf("backend saw %d startup attempts, want exactly 2 (one transient 28P01 + one retry)", got)
+	}
+}
+
+// TestColdWake28P01Retry_WrongPasswordFastFailsBounded is the NON-NEGOTIABLE safety
+// property (D7b property b): a genuinely WRONG password 28P01s on BOTH attempts, so
+// the client must still get 28P01 — the retry must be a SINGLE bounded attempt, not
+// a loop that holds the connection waiting for a role to appear. Exactly two backend
+// attempts (never more) prove the retry is bounded to one, and the whole exchange
+// fast-fails well inside the generous 5s wake budget.
+func TestColdWake28P01Retry_WrongPasswordFastFailsBounded(t *testing.T) {
+	var attempts int32
+	d := &coldWakeDriver{addr: reserveAddr(t), handler: countingHandler(&attempts, func(_ int32, c net.Conn) {
+		_, _ = c.Write(proto.BuildErrorResponse("28P01", `password authentication failed for user "app_x"`))
+	})}
+	gw := gatewayWithDriver(t, d)
+	gw.roleApplySettleMs = 0
+	gw.roleApplyRetryMs = 80
+	gw.opts.WakeTimeoutMs = 5000
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go gw.Serve(ln)
+
+	c, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	t0 := time.Now()
+	_, _ = c.Write(proto.BuildStartup(map[string]string{"user": "app_x", "database": "x"}))
+	_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	buf := make([]byte, 512)
+	n, _ := c.Read(buf)
+	elapsed := time.Since(t0)
+
+	if !d.didWake() {
+		t.Fatal("expected a genuine cold wake (driver.Wake called)")
+	}
+	if code := proto.ErrorCode(buf[:n]); code != "28P01" {
+		t.Fatalf("cold-wake wrong password: SQLSTATE %q, want 28P01 (must not be masked)", code)
+	}
+	if got := atomic.LoadInt32(&attempts); got != 2 {
+		t.Fatalf("backend saw %d startup attempts, want exactly 2 (a wrong password gets ONE bounded retry, not a loop)", got)
+	}
+	if elapsed > 1500*time.Millisecond {
+		t.Fatalf("wrong password took %v — looks like a retry loop; it must fast-fail after one bounded retry", elapsed)
+	}
+}
+
+// TestColdWake28P01Retry_HappyPathPaysNoRetryWait proves property a: when the first
+// auth SUCCEEDS on a cold wake (role already applied), the client is NOT held for
+// the retry wait at all — the retry cost is paid ONLY when a 28P01 is actually seen.
+// A deliberately huge roleApplyRetryMs would dominate the deadline if it were paid
+// blindly; the reply must arrive well before it, and the backend sees one attempt.
+func TestColdWake28P01Retry_HappyPathPaysNoRetryWait(t *testing.T) {
+	var attempts int32
+	d := &coldWakeDriver{addr: reserveAddr(t), handler: countingHandler(&attempts, func(_ int32, c net.Conn) {
+		writeAuthOk(c)
+	})}
+	gw := gatewayWithDriver(t, d)
+	gw.roleApplySettleMs = 0   // no blind pre-sleep
+	gw.roleApplyRetryMs = 5000 // huge — must NOT be paid on the happy path
+	gw.opts.WakeTimeoutMs = 8000
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go gw.Serve(ln)
+
+	c, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	t0 := time.Now()
+	_, _ = c.Write(proto.BuildStartup(map[string]string{"user": "app_x", "database": "x"}))
+	_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	buf := make([]byte, 64)
+	n, _ := c.Read(buf)
+	elapsed := time.Since(t0)
+
+	if n == 0 || buf[0] != 0x52 {
+		t.Fatalf("cold-wake valid creds: got %q, want AuthenticationOk (0x52)", buf[:n])
+	}
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Fatalf("backend saw %d startup attempts, want exactly 1 (no retry when the first auth succeeds)", got)
+	}
+	if elapsed > 1500*time.Millisecond {
+		t.Fatalf("first reply arrived in %v — the retry wait must NOT be paid on the happy path", elapsed)
+	}
 }
 
 // TestSettleColdWake_FiresOnlyOnColdWakePerAppFrontDoor asserts the discriminator:

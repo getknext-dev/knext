@@ -4,9 +4,11 @@
 # compute_ctl opens the Postgres socket a beat BEFORE it (re)applies the per-app
 # spec role on every boot, so the FIRST connection during a 0->1 cold wake could
 # transiently return 28P01 ("password authentication failed") and self-heal on the
-# next request. The gateway now holds the client for a bounded role-apply settle
-# window (GW_ROLE_APPLY_SETTLE_MS) on a GENUINE cold wake of a per-app front door,
-# BEFORE the single auth attempt — so the role is applied by the time auth runs.
+# next request. The gateway now closes this by DEFAULT with a bounded SINGLE retry
+# (GW_ROLE_APPLY_RETRY_MS): on a GENUINE cold wake of a per-app front door it proxies
+# immediately and, ONLY if the first auth attempt gets 28P01, waits and retries the
+# handshake once (the role has just landed). The happy path pays no pre-sleep. The
+# blind pre-sleep (GW_ROLE_APPLY_SETTLE_MS) is now an opt-in fallback, off by default.
 #
 # This drill proves, on the LIVE cluster:
 #   (a) across N repeated cold cycles the FIRST connect with VALID creds NEVER
@@ -86,7 +88,8 @@ PW="$(app_pw "$APP")"
 # 0. apps-gateway ready
 kc rollout -n "$NS" status "deploy/pggw-apps" --timeout=120s >/dev/null || fail "apps-gateway not ready"
 SETTLE=$(kc get -n "$NS" deploy pggw-apps -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="GW_ROLE_APPLY_SETTLE_MS")].value}' 2>/dev/null)
-ok "apps-gateway ready (GW_ROLE_APPLY_SETTLE_MS=${SETTLE:-<default 250>})"
+RETRY=$(kc get -n "$NS" deploy pggw-apps -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="GW_ROLE_APPLY_RETRY_MS")].value}' 2>/dev/null)
+ok "apps-gateway ready (GW_ROLE_APPLY_RETRY_MS=${RETRY:-<default 250>}, GW_ROLE_APPLY_SETTLE_MS=${SETTLE:-<default 0>})"
 
 # 1. seed a tiny table (wakes the app if needed) — establishes valid creds work.
 CLIENT_PW seed "$PW" "drop table if exists cb; create table cb(id int); insert into cb values (1)" >/dev/null ||
@@ -119,8 +122,8 @@ done
 mean=$((tot / CYCLES))
 ok "$CYCLES/$CYCLES cold cycles: VALID creds NEVER saw a transient 28P01 (mean ${mean}ms, max ${max}ms end-to-end)"
 
-# 3. SAFETY: a WRONG password must STILL fast-fail with 28P01 on the cold path —
-# the settle gate holds the connection but must NOT retry auth or mask a bad cred.
+# 3. SAFETY: a WRONG password must STILL fast-fail with 28P01 on the cold path — the
+# bounded retry fires once but must NOT loop or mask a bad cred (28P01 recurs).
 cold
 w0=$(nowms)
 out=$(CLIENT_PW wrong "definitely-wrong-$$" "select 1") && wst=0 || wst=1
@@ -131,4 +134,4 @@ printf '%s' "$out" | grep -qiE "28P01|password authentication failed" ||
   fail "wrong password did not surface 28P01: $(printf '%s' "$out" | tr '\n' ' ')"
 ok "WRONG password fast-failed with 28P01 in ${wms}ms on the cold path (gate did NOT mask it)"
 
-echo "cold-boot role-apply drill: PASS (app=$APP cycles=$CYCLES settle=${SETTLE:-250} mean=${mean}ms max=${max}ms wrong-pw=${wms}ms/28P01)"
+echo "cold-boot role-apply drill: PASS (app=$APP cycles=$CYCLES retry=${RETRY:-250} settle=${SETTLE:-0} mean=${mean}ms max=${max}ms wrong-pw=${wms}ms/28P01)"

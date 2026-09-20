@@ -44,8 +44,9 @@ missing from a manifest) and exits non-zero. Check with `yq --version` — you w
 | `GW_WAKE_MAX_ATTEMPTS` | 8 | belt-and-braces cap on total scale attempts (first try + retries) for the `#190` retry; the wake deadline (`GW_WAKE_TIMEOUT_MS`) is the real ceiling. |
 | `GW_PEER_SELECTOR` | — | label selector for sibling gateways (peer-aware idle); empty disables |
 | `GW_AUTH_FAIL_FLOOR_MS` | 250 | apps-gateway only: constant-floor delay on refusals so unknown-app and wrong-pair are timing-comparable (issue #92); `0` disables |
-| `GW_ROLE_APPLY_SETTLE_MS` | 250 | apps-gateway (per-app) only: on a **genuine cold wake** hold the client this long before the auth attempt so `compute_ctl` applies the per-app role first, absorbing the cold-boot `28P01` role-apply race (issue #132). NOT an auth retry — a wrong password still fast-fails; warm connects + base single-DB path are never delayed; clamped to `GW_WAKE_TIMEOUT_MS`. `0` disables. **When the deterministic `/status` gate (below) is configured this is the bounded fallback**, used only if `/status` is unreachable/rejected. |
-| `GW_STATUS_PORT` | 0 (off) | **opt-in DETERMINISTIC cold-boot gate (issue #174).** `compute_ctl` HTTP port (3080). When set (and a token is provided) the apps-gateway, on a genuine cold wake of a per-app front door, **polls `http://<compute>:<port>/status` until `compute_ctl` reports `running` (spec/role apply DONE)** instead of blindly sleeping `GW_ROLE_APPLY_SETTLE_MS` — race-free, and proceeds the instant the apply is provably complete. Bounded by `GW_WAKE_TIMEOUT_MS`. `0`/unset = gate disabled → the `#132` settle is used (default). **Enabling requires also exposing 3080 on the compute Service + NetworkPolicy — see [Cold-wake role-apply reliability](#cold-wake-role-apply-reliability).** |
+| `GW_ROLE_APPLY_RETRY_MS` | 250 | apps-gateway (per-app) only: **default** closer of the cold-boot `28P01` role-apply race. On a **genuine cold wake** the gateway proxies the startup immediately and, **only if the first auth attempt fails with `28P01`**, waits this long and retries the handshake **once** — the per-app role has almost certainly just been applied. The happy path (role already applied) pays **nothing** (no pre-sleep). A genuinely **wrong password** `28P01`s again on the single retry and fast-fails (one extra round trip — never a hold-until-role-exists poll). Warm connects + base single-DB path never retry; clamped to `GW_WAKE_TIMEOUT_MS`. `0` disables the retry. |
+| `GW_ROLE_APPLY_SETTLE_MS` | 0 (off) | apps-gateway (per-app) only: **opt-in fallback** to the retry above — a **blind pre-sleep** held on **every** genuine cold wake before the auth attempt, so `compute_ctl` applies the per-app role first (issue #132). NOT an auth retry — a wrong password still fast-fails; warm connects + base single-DB path are never delayed; clamped to `GW_WAKE_TIMEOUT_MS`. `0` (the default) leaves the bounded `28P01` retry as the sole closer. Set `>0` to also pay the pre-sleep, or when the deterministic `/status` gate (below) is configured this is its bounded fallback. |
+| `GW_STATUS_PORT` | 0 (off) | **opt-in DETERMINISTIC cold-boot gate (issue #174).** `compute_ctl` HTTP port (3080). When set (and a token is provided) the apps-gateway, on a genuine cold wake of a per-app front door, **polls `http://<compute>:<port>/status` until `compute_ctl` reports `running` (spec/role apply DONE)** instead of blindly sleeping `GW_ROLE_APPLY_SETTLE_MS` — race-free, and proceeds the instant the apply is provably complete. Bounded by `GW_WAKE_TIMEOUT_MS`. `0`/unset = gate disabled → the bounded `28P01` retry (`GW_ROLE_APPLY_RETRY_MS`) is used (default). **Enabling requires also exposing 3080 on the compute Service + NetworkPolicy — see [Cold-wake role-apply reliability](#cold-wake-role-apply-reliability).** |
 | `GW_STATUS_TOKEN` / `GW_STATUS_TOKEN_FILE` | — | the `compute_ctl` JWT for `/status` (Bearer). `/status` is JWT-gated. `_FILE` (a mounted Secret path) is preferred so the JWT never lands in the pod env. **Required** for the gate — `GW_STATUS_PORT` without a token leaves the gate disabled. |
 | `GW_STATUS_READY` | `running` | the `compute_ctl` `/status` value that means "spec applied / ready" |
 | `GW_STATUS_POLL_MS` | 50 | poll interval between `/status` reads |
@@ -1792,19 +1793,27 @@ Cross-referenced in the accepted-risks register below (Kill-criteria tripwires �
 > is (re)applied ~T=.99) means the **very first** connection during a 0→1 cold wake could
 > transiently see `28P01` ("password authentication failed") and self-heal on the next
 > request — a rare, self-healing wart that pooled/retrying clients rode through, but a
-> single non-pooled first request could surface. The **apps-gateway now absorbs it**: on
-> a **genuine cold wake** (it just triggered the 0→1 scale) of a per-app front door it
-> holds the client for a bounded **role-apply settle window** (`GW_ROLE_APPLY_SETTLE_MS`,
-> default **250 ms** — comfortably longer than the ~85 ms apply window observed on OKE)
-> **before** replaying the startup, so `compute_ctl` has applied the role by the time the
-> single auth attempt runs. This is **not** an auth retry: a genuine **wrong password
-> still fails immediately** on that one attempt (never masked or slow-failed), and **warm
-> / steady-state** connects and the **base single-DB** (`cloud_admin`) path are never
-> delayed. The settle is clamped to the remaining `GW_WAKE_TIMEOUT_MS` budget, so it can
-> never push a connection past the wake deadline. This makes the race **negligible**
-> (settle ≫ the apply window), **not deterministically zero**. Drill:
-> `deploy/_verify-coldboot.sh`. Set `GW_ROLE_APPLY_SETTLE_MS=0` to disable the gate
-> (accepts the rare transient).
+> single non-pooled first request could surface. The **apps-gateway now absorbs it with a
+> bounded single retry** (default): on a **genuine cold wake** (it just triggered the 0→1
+> scale) of a per-app front door it proxies the startup **immediately** and, **only if the
+> first auth attempt fails with `28P01`**, waits a bounded `GW_ROLE_APPLY_RETRY_MS`
+> (default **250 ms**) and retries the handshake **once** — the per-app role has almost
+> certainly just been applied, so the retry sees `AuthenticationOk`. The **happy path**
+> (role already applied) pays **nothing** — no pre-sleep on every wake. This is a
+> **single** bounded retry, **not** a poll-until-role-exists loop: a genuine **wrong
+> password `28P01`s again** on the retry and fast-fails (one extra round trip — never
+> held waiting for a role to appear, which would need a standing privileged gateway
+> credential per compute). **Warm / steady-state** connects and the **base single-DB**
+> (`cloud_admin`) path never retry. The wait is clamped to the remaining
+> `GW_WAKE_TIMEOUT_MS` budget, so the retry can never push a connection past the wake
+> deadline. Drill: `deploy/_verify-coldboot.sh`. Set `GW_ROLE_APPLY_RETRY_MS=0` to disable
+> the retry (accepts the rare transient).
+>
+> **Opt-in fallback — the blind pre-sleep (`GW_ROLE_APPLY_SETTLE_MS`, issue #132).** The
+> earlier closer held the client for a fixed **role-apply settle window** on **every** cold
+> wake *before* the auth attempt. It is now **off by default** (`0`); set it `>0` to also
+> pay the blind pre-sleep as a belt-and-suspenders fallback (it too fast-fails a wrong
+> password and never delays warm connects, and is clamped to `GW_WAKE_TIMEOUT_MS`).
 >
 > **Deterministic upgrade — the `compute_ctl` `/status` readiness gate (issue #174, OPT-IN).**
 > The settle above is a *heuristic* time buffer: if the apply window ever exceeds the

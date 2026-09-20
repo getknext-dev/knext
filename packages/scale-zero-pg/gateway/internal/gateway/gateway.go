@@ -87,6 +87,20 @@ type Gateway struct {
 	// NEGLIGIBLE (settle >> the apply window), not deterministically zero — the
 	// deterministic compute_ctl-/status readiness gate is tracked as #174.
 	roleApplySettleMs int
+	// roleApplyRetryMs (GW_ROLE_APPLY_RETRY_MS) is the D7b default closer of the
+	// cold-boot role-apply race. Rather than pay a blind pre-sleep on EVERY cold wake
+	// (the #132 settle, now OFF by default), the gateway proxies the startup
+	// immediately and, ONLY on a genuine 0->1 cold wake of a per-app front door (a
+	// systemAuthorizer driver), retries the handshake ONCE after this bounded wait IF
+	// the first auth attempt failed with SQLSTATE 28P01 — the transient the just-late
+	// role apply produces. The happy path (role already applied) pays nothing: the
+	// wait is incurred only when a 28P01 is actually observed. A genuinely wrong
+	// password 28P01s again on the single retry and fast-fails (one extra round trip,
+	// never a hold-until-role-exists poll — that would need a standing privileged
+	// gateway credential per compute, which ADR-0003's mTLS deliberately narrowed).
+	// Warm connects (woke==false) and the base single-DB path never retry. 0 disables
+	// the retry; clamped to the wake deadline so it can never overrun GW_WAKE_TIMEOUT_MS.
+	roleApplyRetryMs int
 	// statusProbe (issue #174) is the OPT-IN deterministic upgrade to the #132
 	// settle: when configured (GW_STATUS_PORT + a JWT) it polls compute_ctl's
 	// /status endpoint on a cold wake until the compute reports "running" (spec
@@ -278,9 +292,13 @@ func New(env wake.Env, log func(string)) (*Gateway, error) {
 			// TryConnect, so a handshake failure is retried by the wake loop.
 			BackendTLS: backendTLS,
 		},
-		idleMs:            envInt(env, "GW_IDLE_MS", 300000),
-		floorMs:           envInt(env, "GW_AUTH_FAIL_FLOOR_MS", 250),
-		roleApplySettleMs: envInt(env, "GW_ROLE_APPLY_SETTLE_MS", 250),
+		idleMs:  envInt(env, "GW_IDLE_MS", 300000),
+		floorMs: envInt(env, "GW_AUTH_FAIL_FLOOR_MS", 250),
+		// D7b: the blind pre-sleep is OFF by default (0). The default cold-wake race
+		// closer is now the bounded single 28P01 retry (roleApplyRetryMs). Setting
+		// GW_ROLE_APPLY_SETTLE_MS>0 restores the pre-sleep as an opt-in fallback knob.
+		roleApplySettleMs: envInt(env, "GW_ROLE_APPLY_SETTLE_MS", 0),
+		roleApplyRetryMs:  envInt(env, "GW_ROLE_APPLY_RETRY_MS", 250),
 		statusProbe:       newStatusProbeFromEnv(env),
 		tlsConf:           tlsConf,
 		log:               log,
@@ -727,6 +745,58 @@ func (g *Gateway) settleColdWake(woke bool, target wake.Target, start time.Time)
 	time.Sleep(settle)
 }
 
+// retryColdWakeAuth is the D7b default cold-boot role-apply-race closer. compute_ctl
+// opens the Postgres socket a beat BEFORE it (re)applies the per-app spec role, so
+// the very first proxied auth on a genuine 0->1 cold wake can transiently fail with
+// SQLSTATE 28P01 (invalid_password / role-not-found). Rather than pay a blind
+// pre-sleep on every cold wake, the gateway proxies immediately and — ONLY on a cold
+// wake (woke) of a per-app front door (a systemAuthorizer driver), and ONLY when the
+// first backend reply was a 28P01 — waits a bounded roleApplyRetryMs and retries the
+// handshake ONCE. If the role has since landed the retry yields AuthenticationOk; a
+// genuinely WRONG password 28P01s AGAIN on that single retry and is forwarded
+// unchanged (fast-fail, one extra round trip). It is a SINGLE bounded retry, never a
+// poll-until-role-exists loop — that would require the gateway to inspect the
+// compute's catalog with a standing privileged credential per compute, expanding the
+// gateway<->compute trust boundary ADR-0003's mTLS narrowed. The wait is clamped to
+// the remaining wake-deadline budget so a retry can never overrun GW_WAKE_TIMEOUT_MS.
+func (g *Gateway) retryColdWakeAuth(ctx context.Context, reg *connReg, conn net.Conn, firstReply, startupPacket []byte, target wake.Target, woke bool, start time.Time) (net.Conn, []byte, error) {
+	if !woke || g.roleApplyRetryMs <= 0 {
+		return conn, firstReply, nil
+	}
+	if _, ok := g.driver.(systemAuthorizer); !ok {
+		return conn, firstReply, nil
+	}
+	if proto.ErrorCode(firstReply) != wake.AuthFailureCode { // not a transient 28P01
+		return conn, firstReply, nil
+	}
+	wait := time.Duration(g.roleApplyRetryMs) * time.Millisecond
+	rem := time.Duration(g.opts.WakeTimeoutMs)*time.Millisecond - time.Since(start)
+	if rem <= 0 {
+		return conn, firstReply, nil // deadline spent — forward the 28P01 as-is
+	}
+	if rem < wait {
+		wait = rem // clamp so the retry never pushes past the wake deadline
+	}
+	g.log("[gw] " + target.Key + ": cold wake — first auth got 28P01; retrying once after " +
+		strconv.FormatInt(wait.Milliseconds(), 10) + "ms for the per-app role apply (D7b)")
+	_ = conn.Close()
+	time.Sleep(wait)
+	if ctx.Err() != nil {
+		return nil, nil, ctx.Err()
+	}
+	// A single reconnect+replay. Skip the wake budget guard: this belongs to an
+	// already-authorized, already-budgeted wake (the token was spent on the first
+	// wake), exactly like handshakeUntilReady's readiness reconnects.
+	retryOpts := g.opts
+	retryOpts.WakeGuard = nil
+	next, _, _, err := wake.ConnectWithWake(ctx, g.driver, target, retryOpts, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	reg.setBackend(next)
+	return g.handshakeUntilReady(ctx, reg, next, startupPacket, target)
+}
+
 // computeUnavailable writes the client-facing error for a wake/resolve failure.
 // On the apps-gateway (template mode) the real cause is logged server-side only
 // and the client gets the SAME uniform 28P01 password-failure used for authz
@@ -852,6 +922,20 @@ func (g *Gateway) proxy(client net.Conn, startupPacket, pendingRest []byte, targ
 	// answers for real — the client must never see the transient FATAL. The wake
 	// ctx is threaded through so a drain deadline aborts a reconnect mid-handshake.
 	conn, firstReply, err := g.handshakeUntilReady(wakeCtx, reg, conn, startupPacket, target)
+	if err != nil {
+		g.metrics.WakeFailure()
+		g.log("[gw] " + target.Key + ": " + err.Error())
+		g.computeUnavailable(client, params, start, err)
+		return false
+	}
+
+	// Cold-boot role-apply race (#132/D7b): a genuine 0->1 cold wake can transiently
+	// 28P01 because compute_ctl applies the per-app role a beat after opening the
+	// socket. Instead of a blind pre-sleep on every wake, retry the handshake ONCE —
+	// after a bounded wait — ONLY when the first auth attempt failed with 28P01 on a
+	// cold wake of a per-app front door. A wrong password 28P01s again and forwards
+	// (fast-fail); the happy path never enters here.
+	conn, firstReply, err = g.retryColdWakeAuth(wakeCtx, reg, conn, firstReply, startupPacket, target, woke, start)
 	if err != nil {
 		g.metrics.WakeFailure()
 		g.log("[gw] " + target.Key + ": " + err.Error())

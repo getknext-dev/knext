@@ -100,16 +100,23 @@ spec:
               value: "120000"
             - name: GW_RETRY_MS
               value: "100"
-            # Cold-boot role-apply race (#132): compute_ctl opens the socket a beat
+            # Cold-boot role-apply race (#132/D7b): compute_ctl opens the socket a beat
             # before it (re)applies the per-app spec role on every boot, so the FIRST
-            # connect during a 0->1 cold wake could transiently 28P01 and self-heal
-            # next request. On a GENUINE cold wake the gateway holds the client this
-            # long BEFORE the auth attempt so the role is applied first (~85ms apply
-            # window observed on OKE; 250ms gives margin). NOT an auth retry — a wrong
-            # password still fast-fails; warm connects are never delayed; clamped to
+            # connect during a 0->1 cold wake could transiently 28P01 and self-heal next
+            # request. DEFAULT closer = a bounded SINGLE retry: on a GENUINE cold wake the
+            # gateway proxies the startup immediately and, ONLY if the first auth attempt
+            # gets 28P01, waits GW_ROLE_APPLY_RETRY_MS and retries the handshake once (the
+            # role has just landed). The happy path pays NOTHING (no pre-sleep). A wrong
+            # password 28P01s again on the retry and fast-fails (one extra round trip, not
+            # a poll-until-role-exists loop). Warm connects never retry; clamped to
             # GW_WAKE_TIMEOUT_MS. Set to "0" to disable (accept the rare transient).
-            - name: GW_ROLE_APPLY_SETTLE_MS
+            - name: GW_ROLE_APPLY_RETRY_MS
               value: "250"
+            # Opt-in fallback: the blind pre-sleep held on EVERY cold wake (issue #132).
+            # OFF by default now that the bounded retry above is the default closer; set
+            # >0 to also pay the pre-sleep as belt-and-suspenders.
+            - name: GW_ROLE_APPLY_SETTLE_MS
+              value: "0"
             - name: GW_MAX_CONNS
               value: "90" # PROCESS-WIDE (one semaphore per gateway pod, taken in the accept
               # loop before any app is known) — NOT per-app/per-compute; ADR-0003
