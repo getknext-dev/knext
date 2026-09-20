@@ -187,12 +187,21 @@ func NewHTTPTenantMembershipViewer(baseURL string, timeout time.Duration) *HTTPT
 // rather than attaching onto an unverified standby. That is the fail-closed direction;
 // sharded-id parsing is deliberately not invented ahead of a plane that uses it.
 func (v *HTTPTenantMembershipViewer) HoldsTenant(ctx context.Context, tenant string) (bool, error) {
-	url := fmt.Sprintf("%s/v1/location_config", v.BaseURL)
+	return holdsTenantAt(ctx, v.Client, v.BaseURL, tenant)
+}
+
+// holdsTenantAt is the shared plane-wide-listing membership read: GET
+// baseURL/v1/location_config, held = the exact tenant id is in tenant_shards. Both the
+// fixed-URL failover oracle (HTTPTenantMembershipViewer) and the D1 reconcile's
+// per-URL prober (HTTPTenantMembershipAt) call it, so the fail-closed parsing —
+// unreadable is an ERROR, never absence — lives in one place.
+func holdsTenantAt(ctx context.Context, client *http.Client, baseURL, tenant string) (bool, error) {
+	url := fmt.Sprintf("%s/v1/location_config", baseURL)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return false, err
 	}
-	resp, err := v.Client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return false, err
 	}
@@ -224,4 +233,73 @@ func (v *HTTPTenantMembershipViewer) HoldsTenant(ctx context.Context, tenant str
 		}
 	}
 	return false, nil
+}
+
+// HTTPTenantMembershipAt is the D1 reconcile's per-URL membership prober: it answers
+// HoldsTenantAt against an EXPLICIT base URL, because the node that is currently the
+// standby swaps after a failover. Same fail-closed contract as HTTPTenantMembershipViewer
+// (unreadable is an ERROR, never absence); it just takes the URL per call.
+type HTTPTenantMembershipAt struct {
+	Client *http.Client
+}
+
+// NewHTTPTenantMembershipAt builds a per-URL membership prober with a bounded timeout.
+func NewHTTPTenantMembershipAt(timeout time.Duration) *HTTPTenantMembershipAt {
+	return &HTTPTenantMembershipAt{Client: &http.Client{Timeout: timeout}}
+}
+
+// HoldsTenantAt reports whether the pageserver at baseURL lists the tenant among the
+// shards it holds (Secondaries included). Unreadable is an ERROR, never held=false.
+func (v *HTTPTenantMembershipAt) HoldsTenantAt(ctx context.Context, baseURL, tenant string) (bool, error) {
+	return holdsTenantAt(ctx, v.Client, baseURL, tenant)
+}
+
+// HTTPSecondaryWarmer registers a tenant as a WARM Secondary on the pageserver at an
+// explicit base URL — the D1 reconcile's write half. It mirrors the one-shot
+// standby-init Job's registration (PUT location_config mode:Secondary,
+// secondary_conf.warm:true) and then kicks a layer download, best-effort. The
+// REGISTRATION decides the return code; the download kick is advisory (it can
+// legitimately fail on a cold bucket) so its failure is swallowed — exactly as the Job's
+// warm_secondary() helper does (deploy/57).
+type HTTPSecondaryWarmer struct {
+	Client *http.Client
+}
+
+// NewHTTPSecondaryWarmer builds a warmer with a bounded per-request timeout.
+func NewHTTPSecondaryWarmer(timeout time.Duration) *HTTPSecondaryWarmer {
+	return &HTTPSecondaryWarmer{Client: &http.Client{Timeout: timeout}}
+}
+
+// WarmSecondary registers the tenant as a warm Secondary on the pageserver at baseURL,
+// then kicks a download (advisory). NEVER call this against the live primary — the
+// reconcile's resolveStandby guard ensures baseURL is always the standby node.
+func (w *HTTPSecondaryWarmer) WarmSecondary(ctx context.Context, baseURL, tenant string) error {
+	url := fmt.Sprintf("%s/v1/tenant/%s/location_config", baseURL, tenant)
+	body := `{"mode":"Secondary","secondary_conf":{"warm":true},"tenant_conf":{}}`
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader([]byte(body)))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := w.Client.Do(req)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		return fmt.Errorf("warm-secondary %s: pageserver returned %s", tenant, resp.Status)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	// Kick a layer download so the Secondary starts pre-fetching. Advisory: a cold bucket
+	// can legitimately fail this, and it must NOT become the registration's status.
+	dlURL := fmt.Sprintf("%s/v1/tenant/%s/secondary/download", baseURL, tenant)
+	if dlReq, derr := http.NewRequestWithContext(ctx, http.MethodPost, dlURL, nil); derr == nil {
+		if dlResp, derr := w.Client.Do(dlReq); derr == nil {
+			_, _ = io.Copy(io.Discard, dlResp.Body)
+			_ = dlResp.Body.Close()
+		}
+	}
+	return nil
 }

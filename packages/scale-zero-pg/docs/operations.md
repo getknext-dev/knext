@@ -1174,8 +1174,21 @@ cannot, so do not use them when checking by hand:
   held as a warm **Secondary** — which is exactly how a correctly-warmed standby holds
   every routed tenant — so it reports a held tenant as unreadable.
 
-Standby warming runs once, at deploy, so an app database provisioned afterwards is real
-and routed while the standby's listing still omits it. The watcher therefore resolves a
+The watcher **keeps the standby warm continuously**: every `PSW_WARM_INTERVAL_MS` it
+resolves which node is currently the standby — the one the client Service does **not**
+select — and registers any routed tenant it does not already hold there as a warm
+Secondary. This is what re-arms the plane after a failover: the promoted standby becomes
+the primary and the rebuilt ex-primary is an empty standby, which the loop re-warms
+automatically within one interval, without an operator re-running any Job. The loop never
+touches the node the client Service currently selects (registering a Secondary on the live
+primary would demote the writer), so a selector that names no known node aborts the
+reconcile rather than guess. Loss of warmth is visible per tenant on
+`pswatcher_standby_tenant_warm` (alert `PswatcherStandbyNotWarm`); a reconcile that cannot
+read the selector, resolve the standby, read membership, or register a Secondary counts on
+`pswatcher_standby_warm_errors_total` (alert `PswatcherStandbyWarmFailing`).
+
+If a routed tenant is nonetheless not yet warm on the standby (e.g. the standby node is
+unhealthy, or an app was provisioned in the last interval), the watcher resolves a
 not-held tenant by position and corroboration:
 
 - **base tenant** → **abort**. Every compute reads through it; flipping would point them
@@ -1192,13 +1205,19 @@ not-held tenant by position and corroboration:
   applies to a watcher deployment that was never given `PSW_STANDBY_BASE_URL`: with no way
   to check the standby, the failover refuses rather than attaching blind.
 
-**Operational consequence — warm the standby for the apps tenant.** On a plane that
-declares `PSW_APPS_TENANT_ID`, warming that tenant on the standby is a **precondition for
-automatic failover**, not an optimisation: during a failover the routed vantage resolves
-to the dead primary, so an un-warmed apps tenant cannot be corroborated and the failover
-blocks. After provisioning the first app database (or if
-`pageserver-standby-init` logged `WARNING: apps tenant … could NOT be registered`),
-re-run the warming Job:
+**Operational consequence — the standby is re-warmed automatically.** On a plane that
+declares `PSW_APPS_TENANT_ID`, a warm standby for that tenant is required for automatic
+failover (during a failover the routed vantage resolves to the dead primary, so an
+un-warmed apps tenant cannot be corroborated and the failover blocks). The watcher now
+keeps it warm on its own reconcile loop, so an app database provisioned after deploy — or a
+standby rebuilt as an empty node after a failover — is re-registered within
+`PSW_WARM_INTERVAL_MS`; there is no longer a manual precondition to re-run after
+provisioning. The one-shot `pageserver-standby-init` Job still warms the standby at deploy
+so it is warm before the first reconcile.
+
+If `PswatcherStandbyNotWarm` persists for a tenant, the standby node (or its object-store
+path) is unhealthy — the reconcile cannot warm a node it cannot reach. As a break-glass
+you can still re-run the one-shot warming Job:
 
 ```bash
 kubectl -n scale-zero-pg delete job pageserver-standby-init --ignore-not-found

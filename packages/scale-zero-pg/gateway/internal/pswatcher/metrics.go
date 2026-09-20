@@ -4,9 +4,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 )
+
+// sortedKeys returns a map's keys in stable sorted order (deterministic exposition).
+func sortedKeys(m map[string]int) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
 
 // D9 — RUNNING-BINARY capability signal (pswatcher_build_info).
 //
@@ -32,11 +43,16 @@ const (
 	// FeatureFreeze — a TTL-bounded maintenance FREEZE suppresses failover and is
 	// clamped to DefaultMaxFreezeDuration (PSW_MAX_FREEZE_MS), #1099.
 	FeatureFreeze = "freeze"
+	// FeatureStandbyWarm — the standby warm-Secondary registration is a CONTINUOUS
+	// reconcile (D1), not the one-shot Job, so a failover that rebuilds the ex-primary as
+	// an empty standby re-arms automatically (ADR-0010 §5). A pre-D1 image cannot emit
+	// this token, so a stale 58-pswatcher.yaml image reds the capability drill.
+	FeatureStandbyWarm = "standby-warm"
 )
 
 // pswatcherFeatures is the capability list this binary ships, in a stable order so the
 // emitted label is deterministic (a scraper matches substrings, not exact strings).
-var pswatcherFeatures = []string{FeatureFreeze, FeatureRoutedSet}
+var pswatcherFeatures = []string{FeatureFreeze, FeatureRoutedSet, FeatureStandbyWarm}
 
 // BuildVersion is the build tag of this binary. It defaults to "dev" so
 // pswatcher_build_info always carries a non-empty version label, and can be stamped at
@@ -94,6 +110,21 @@ type Metrics struct {
 	ConvergeBlockedTotal      int `json:"converge_blocked_total"`
 	ConvergeErrorsTotal       int `json:"converge_errors_total"`
 	ConvergeTenantAbsentTotal int `json:"converge_tenant_absent_total"`
+
+	// D1 — the reconciling standby-warm loop (ADR-0010 §5). StandbyWarmReconcilesTotal
+	// counts reconcile passes; StandbyWarmRegistrationsTotal counts warm-Secondary
+	// registrations issued (a rising count with no failover means the loop re-armed a
+	// standby that had lost a routed tenant — e.g. the rebuilt ex-primary after a
+	// failover); StandbyWarmErrorsTotal counts a reconcile that could not read the client
+	// selector, could not resolve the standby, could not read the standby's membership, or
+	// failed a registration — each a case where the standby may not be warm, so it must be
+	// loud (alert PswatcherStandbyWarmFailing). TenantWarm is the per-tenant loss-of-warmth
+	// GAUGE: 1 = the tenant is held as a Secondary on the current standby, 0 = it is not
+	// (or could not be confirmed). Alert PswatcherStandbyNotWarm fires on a 0.
+	StandbyWarmReconcilesTotal    int            `json:"standby_warm_reconciles_total"`
+	StandbyWarmRegistrationsTotal int            `json:"standby_warm_registrations_total"`
+	StandbyWarmErrorsTotal        int            `json:"standby_warm_errors_total"`
+	StandbyTenantWarm             map[string]int `json:"standby_tenant_warm,omitempty"`
 
 	// FailoverReasonVal is the classification of the LAST completed failover:
 	// "node_death" once the watcher has confirmed a genuine death and promoted.
@@ -346,6 +377,73 @@ func (m *Metrics) ConvergeTenantAbsentCount() int {
 	return m.ConvergeTenantAbsentTotal
 }
 
+// StandbyWarmReconcile counts one standby-warm reconcile pass (D1).
+func (m *Metrics) StandbyWarmReconcile() {
+	m.mu.Lock()
+	m.StandbyWarmReconcilesTotal++
+	m.mu.Unlock()
+}
+
+// StandbyWarmReconciles returns the reconcile-pass count (tests).
+func (m *Metrics) StandbyWarmReconciles() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.StandbyWarmReconcilesTotal
+}
+
+// StandbyWarmRegistration counts one warm-Secondary registration issued to the standby.
+func (m *Metrics) StandbyWarmRegistration() {
+	m.mu.Lock()
+	m.StandbyWarmRegistrationsTotal++
+	m.mu.Unlock()
+}
+
+// StandbyWarmRegistrations returns the warm-registration count (tests).
+func (m *Metrics) StandbyWarmRegistrations() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.StandbyWarmRegistrationsTotal
+}
+
+// StandbyWarmError counts one standby-warm reconcile failure (unreadable selector,
+// unresolvable standby, unreadable membership, or a failed registration) — any case
+// where the standby may not be warm. Loud so a disarmed HA plane is not silent.
+func (m *Metrics) StandbyWarmError() {
+	m.mu.Lock()
+	m.StandbyWarmErrorsTotal++
+	m.mu.Unlock()
+}
+
+// StandbyWarmErrors returns the standby-warm error count (tests).
+func (m *Metrics) StandbyWarmErrors() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.StandbyWarmErrorsTotal
+}
+
+// SetTenantWarm records the per-tenant loss-of-warmth gauge: warm=true ⇒ the tenant is
+// held as a Secondary on the CURRENT standby, warm=false ⇒ it is not (or could not be
+// confirmed). Alerting fires on a 0.
+func (m *Metrics) SetTenantWarm(tenant string, warm bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.StandbyTenantWarm == nil {
+		m.StandbyTenantWarm = map[string]int{}
+	}
+	if warm {
+		m.StandbyTenantWarm[tenant] = 1
+	} else {
+		m.StandbyTenantWarm[tenant] = 0
+	}
+}
+
+// TenantWarm returns the per-tenant warmth gauge, 0 when never set (tests).
+func (m *Metrics) TenantWarm(tenant string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.StandbyTenantWarm[tenant]
+}
+
 // SetFailoverReason records the classification of the failover that just completed
 // (e.g. "node_death"), exposed as pswatcher_failover_reason{reason="..."} 1.
 func (m *Metrics) SetFailoverReason(reason string) {
@@ -401,11 +499,20 @@ func (m *Metrics) PromText() string {
 			"pswatcher_converge_repromotions_total %d\n"+
 			"pswatcher_converge_blocked_total %d\n"+
 			"pswatcher_converge_errors_total %d\n"+
-			"pswatcher_converge_tenant_absent_total %d\n",
+			"pswatcher_converge_tenant_absent_total %d\n"+
+			"pswatcher_standby_warm_reconciles_total %d\n"+
+			"pswatcher_standby_warm_registrations_total %d\n"+
+			"pswatcher_standby_warm_errors_total %d\n",
 		m.PromotionsTotal, m.ChecksTotal, m.PrimaryUpVal, m.FailedOverVal, m.SuspectedPartitionsTotal, m.PrimaryNeverSeenTotal, m.TenantAbsentTotal, m.LedgerHealErrorsTotal,
 		m.DependencyDegradedTotal, m.FailoverFrozenVal, m.FailoverFreezeSuppressed, m.FailoverFreezeExpirySecond, m.FreezeReadErrorsTotal,
 		m.ConvergeRepromotionsTotal, m.ConvergeBlockedTotal, m.ConvergeErrorsTotal, m.ConvergeTenantAbsentTotal,
+		m.StandbyWarmReconcilesTotal, m.StandbyWarmRegistrationsTotal, m.StandbyWarmErrorsTotal,
 	)
+	// D1 — the per-tenant loss-of-warmth gauge, one LABELED sample per routed tenant the
+	// reconcile has observed. Rendered in sorted key order so the exposition is stable.
+	for _, tenant := range sortedKeys(m.StandbyTenantWarm) {
+		out += fmt.Sprintf("pswatcher_standby_tenant_warm{tenant=%q} %d\n", tenant, m.StandbyTenantWarm[tenant])
+	}
 	// The classification of the last failover is a LABELED sample so a scraper can
 	// prove the watcher discriminated node-death from a non-death event. Emitted only
 	// once a failover has actually been classified (never a bare zero-value line).

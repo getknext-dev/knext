@@ -95,6 +95,29 @@ type GenerationViewer interface {
 	Generation(ctx context.Context, tenant string) (gen int, ok bool, err error)
 }
 
+// SecondaryWarmer registers a tenant as a WARM Secondary on the pageserver at an
+// EXPLICIT baseURL (PUT baseURL/v1/tenant/<T>/location_config, mode Secondary,
+// secondary_conf.warm:true) and kicks a layer download. It is the write half of the D1
+// reconciling standby-warm loop.
+//
+// baseURL is a parameter, not fixed, because the node that is currently the STANDBY
+// swaps after a failover (the rebuilt ex-primary becomes the new standby); the loop
+// resolves that node each reconcile and points the warm PUT at it — NEVER at the live
+// primary, which a Secondary registration would demote.
+type SecondaryWarmer interface {
+	WarmSecondary(ctx context.Context, baseURL, tenant string) error
+}
+
+// StandbyMembershipAt answers HoldsTenant against an EXPLICIT baseURL — the plane-wide
+// GET baseURL/v1/location_config listing (the only vantage that sees a warm Secondary,
+// ADR-0010 §5). The reconcile must probe whichever node is currently the standby, which
+// swaps after a failover, so it cannot use the fixed-URL failover oracle
+// (TenantMembershipViewer). Same fail-closed contract: held=false means only "the node
+// answered 200 and did not list it"; every unreadable answer is an ERROR.
+type StandbyMembershipAt interface {
+	HoldsTenantAt(ctx context.Context, baseURL, tenant string) (held bool, err error)
+}
+
 // TenantMembershipViewer answers "does this pageserver HOLD this tenant?" in ANY
 // location mode — Attached* or Secondary — from the plane-wide
 // GET :9898/v1/location_config listing (see HTTPTenantMembershipViewer).
@@ -172,6 +195,20 @@ type Config struct {
 	// MaxFreezeDuration bounds an active maintenance freeze (see DefaultMaxFreezeDuration).
 	// Zero or negative is clamped to DefaultMaxFreezeDuration in NewController.
 	MaxFreezeDuration time.Duration
+
+	// WarmTargets maps a pageserver app label to the base URL at which THAT node's
+	// pageserver HTTP API is reachable via its STABLE per-node Service (never the flipped
+	// client Service). The D1 reconciling standby-warm loop uses it to resolve which node
+	// is currently the STANDBY — the node the client Service does NOT select — and warm
+	// ONLY it. Registering a Secondary on the live PRIMARY would demote the writer, so a
+	// selector that resolves to no known node (or cannot be read) aborts the reconcile
+	// rather than guess. Empty disables the loop (back-compat).
+	WarmTargets map[string]string
+	// WarmInterval is the minimum spacing between standby-warm reconciles, so the loop
+	// re-arms within one interval of a failover without hammering the standby every poll.
+	// Zero runs the reconcile every tick (used by tests); the loop is a no-op unless a
+	// SecondaryWarmer + StandbyMembershipAt are wired and WarmTargets is non-empty.
+	WarmInterval time.Duration
 }
 
 // Controller runs one Tick per poll interval. It is single-goroutine by design;
@@ -215,6 +252,14 @@ type Controller struct {
 	// observed present at least once. Until it has, a PodReady present=false is treated
 	// as "selector matches nothing" (misconfig), NOT as death — we refuse to promote.
 	primarySeenPresent bool
+
+	// warmer + warmMembership drive the D1 reconciling standby-warm loop. Both take an
+	// EXPLICIT node URL because the standby swaps after a failover; the loop resolves the
+	// standby each interval and points them at it. Unwired ⇒ the loop is a no-op.
+	warmer         SecondaryWarmer
+	warmMembership StandbyMembershipAt
+	// lastWarmAt throttles the reconcile to cfg.WarmInterval (uses the clock seam).
+	lastWarmAt time.Time
 }
 
 // NewController wires a Controller. FailThreshold < 1 is clamped to 1. The standby
@@ -309,6 +354,126 @@ func (c *Controller) standbyHoldsTenant(ctx context.Context, tenant string) (boo
 		return false, fmt.Errorf("failover: %w — refusing to attach routed tenant %s onto an unverified standby (the PUT 200-attaches a phantom empty tenant when the standby does not hold it, so without this oracle a never-warmed standby fails SILENTLY)", ErrNoStandbyMembership, tenant)
 	}
 	return c.standbyMembership.HoldsTenant(ctx, tenant)
+}
+
+// SetStandbyWarmer wires the D1 reconciling standby-warm loop: a SecondaryWarmer that
+// registers warm Secondaries at an explicit node URL, and a StandbyMembershipAt that
+// reads that node's plane-wide listing. Both take an explicit URL because the standby
+// swaps after a failover. Kept off the constructor so existing callers/tests are
+// unaffected; when NOT wired (or WarmTargets is empty) the loop is a no-op.
+func (c *Controller) SetStandbyWarmer(w SecondaryWarmer, m StandbyMembershipAt) {
+	c.warmer = w
+	c.warmMembership = m
+}
+
+// maybeReconcileStandbyWarm runs the standby-warm reconcile at most once per
+// WarmInterval. It is BEST-EFFORT: a failure is logged (the reconcile itself counts the
+// metric), never returned, so it can never abort the failover-detection tick around it.
+func (c *Controller) maybeReconcileStandbyWarm(ctx context.Context) {
+	if c.warmer == nil || c.warmMembership == nil || len(c.cfg.WarmTargets) == 0 {
+		return // loop not wired — no-op (back-compat)
+	}
+	if c.cfg.WarmInterval > 0 && !c.lastWarmAt.IsZero() && c.nowT().Sub(c.lastWarmAt) < c.cfg.WarmInterval {
+		return // throttled
+	}
+	c.lastWarmAt = c.nowT()
+	c.metrics.StandbyWarmReconcile()
+	if err := c.reconcileStandbyWarm(ctx); err != nil {
+		c.logf("[pswatcher] standby-warm reconcile: %v (retrying next interval)", err)
+	}
+}
+
+// resolveStandby returns the app label + stable per-node URL of the node that is
+// currently the STANDBY — the one the client Service does NOT select. This IS the
+// never-demote-primary guard: it refuses (error) unless it can positively identify a
+// standby DISTINCT from the primary, so the warm loop can never register a Secondary on
+// the live writer. An empty selector, a selector naming no known node, an ambiguous
+// topology (>1 candidate standby), or a resolved standby that collides with the primary
+// all abort — fail toward NOT warming (the reversible state), never toward warming the
+// primary.
+func (c *Controller) resolveStandby(primaryApp string) (app, url string, err error) {
+	if primaryApp == "" {
+		return "", "", errors.New("standby-warm: the client Service selector is empty — cannot tell which node is primary; refusing to warm (a Secondary PUT onto the live primary would demote it)")
+	}
+	if _, ok := c.cfg.WarmTargets[primaryApp]; !ok {
+		return "", "", fmt.Errorf("standby-warm: the client Service selects app %q, which is not a known pageserver node %v — refusing to warm rather than risk registering a Secondary on the live primary", primaryApp, warmTargetApps(c.cfg.WarmTargets))
+	}
+	for a, u := range c.cfg.WarmTargets {
+		if a == primaryApp {
+			continue // the live primary — NEVER warm it
+		}
+		if app != "" {
+			return "", "", fmt.Errorf("standby-warm: more than one candidate standby node (%s, %s) for primary %q — the two-node topology is violated; refusing to warm ambiguously", app, a, primaryApp)
+		}
+		app, url = a, u
+	}
+	if app == "" {
+		return "", "", fmt.Errorf("standby-warm: no standby node distinct from the primary %q in %v — refusing to warm the primary", primaryApp, warmTargetApps(c.cfg.WarmTargets))
+	}
+	// Belt-and-suspenders: the resolved standby is NEVER the primary and its URL is NEVER
+	// the primary's URL. Mutation-proved by TestReconcileStandbyWarmNeverWarmsThePrimary.
+	if app == primaryApp || url == c.cfg.WarmTargets[primaryApp] {
+		return "", "", fmt.Errorf("standby-warm: BUG — resolved standby (%s=%s) collides with the live primary (%s) — refusing to warm the writer", app, url, primaryApp)
+	}
+	return app, url, nil
+}
+
+// reconcileStandbyWarm keeps the CURRENT standby registered as a warm Secondary for
+// every routed tenant ({base, apps}), continuously — the D1 re-arm-after-failover loop
+// (ADR-0010 §5). The one-shot warm Job leaves the plane disarmed the moment the first
+// failover rebuilds the ex-primary as an empty standby nobody re-warms; this closes that
+// gap without an operator re-running the Job.
+//
+// The standby is resolved from the LIVE client-Service selector every reconcile (via
+// resolveStandby), so it follows the node roles across a failover flip and the warm PUT
+// never lands on the live primary. Loss of warmth is observable per tenant
+// (standby_tenant_warm gauge) and per failure (standby_warm_errors_total).
+func (c *Controller) reconcileStandbyWarm(ctx context.Context) error {
+	primaryApp, err := c.k8s.ServiceSelectorApp(ctx, c.cfg.ClientService)
+	if err != nil {
+		c.metrics.StandbyWarmError()
+		return fmt.Errorf("standby-warm: cannot read client Service %q selector to identify the primary — refusing to warm any node (a Secondary PUT onto the live primary would demote it): %w", c.cfg.ClientService, err)
+	}
+	standbyApp, standbyURL, rerr := c.resolveStandby(primaryApp)
+	if rerr != nil {
+		c.metrics.StandbyWarmError()
+		return rerr
+	}
+	var errs []error
+	for _, tenant := range c.routedTenants() {
+		held, herr := c.warmMembership.HoldsTenantAt(ctx, standbyURL, tenant)
+		if herr != nil {
+			// "We could not check" is not "it is warm": count it, drive the gauge to 0
+			// (loss-of-warmth observable), and keep going with the other tenants.
+			c.metrics.StandbyWarmError()
+			c.metrics.SetTenantWarm(tenant, false)
+			errs = append(errs, fmt.Errorf("standby-warm: membership of tenant %s on standby %s (%s) unreadable: %w", tenant, standbyApp, standbyURL, herr))
+			continue
+		}
+		if held {
+			c.metrics.SetTenantWarm(tenant, true)
+			continue
+		}
+		// Not warm — register it. The gauge stays 0 until a later reconcile CONFIRMS the
+		// membership, so a registration in flight still reads as not-yet-warm.
+		c.metrics.SetTenantWarm(tenant, false)
+		if werr := c.warmer.WarmSecondary(ctx, standbyURL, tenant); werr != nil {
+			c.metrics.StandbyWarmError()
+			errs = append(errs, fmt.Errorf("standby-warm: register tenant %s as warm Secondary on standby %s (%s): %w", tenant, standbyApp, standbyURL, werr))
+			continue
+		}
+		c.metrics.StandbyWarmRegistration()
+	}
+	return errors.Join(errs...)
+}
+
+// warmTargetApps returns the app labels in a WarmTargets map, for diagnostics.
+func warmTargetApps(m map[string]string) []string {
+	apps := make([]string, 0, len(m))
+	for a := range m {
+		apps = append(apps, a)
+	}
+	return apps
 }
 
 // SetLogger wires an optional log sink so diagnostics that must not be swallowed
@@ -445,6 +610,12 @@ func (c *Controller) Tick(ctx context.Context) (bool, error) {
 	} else {
 		c.metrics.SetFailoverFrozen(false, 0)
 	}
+
+	// D1 — keep the CURRENT standby warm for every routed tenant, so a failover that
+	// rebuilds the ex-primary as an empty standby re-arms automatically (ADR-0010 §5).
+	// BEST-EFFORT + throttled: it never aborts the failover-detection path below, and it
+	// resolves the standby from the LIVE selector so it never warms the primary.
+	c.maybeReconcileStandbyWarm(ctx)
 
 	// Re-anchor the authority from the CURRENT Service selector every tick. This is
 	// the crash-only truth source: a restarted watcher (and one that already failed

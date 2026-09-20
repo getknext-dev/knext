@@ -293,7 +293,35 @@ honest gap behind §1b's fail-closed default, not an oversight.
   effect, disabled automatic failover. `_validate.sh` asserts the apps-tenant id is in
   lock-step across the four files that carry it, and the Job now warns loudly on a failed
   registration, but nothing yet *periodically* re-warms. A reconciling (rather than
-  one-shot) warm is the follow-up.
+  one-shot) warm is the follow-up. **RESOLVED (D1) — see the amendment below.**
+
+  **Amendment (D1, 2026-09-20) — the warm is now CONTINUOUS, not one-shot.** The residual
+  above named the wrong trigger. Per-app databases are *timelines* under one apps tenant,
+  so the routed set `{base, apps}` does not grow per app — a "never-warmed new app" is not
+  the real gap. The real trigger is a FAILOVER: once it succeeds the promoted standby is
+  the primary and the rebuilt ex-primary is an **empty standby nobody re-warms**, so the
+  plane is disarmed from the first successful failover until an operator re-runs the Job.
+  `pswatcher` now runs a reconciling standby-warm loop (`reconcileStandbyWarm`, driven by
+  `Tick` every `PSW_WARM_INTERVAL_MS`): each pass it resolves the CURRENT standby as the
+  node the client Service does NOT select and registers any un-held routed tenant there as
+  a warm Secondary. The one-shot Job (57) stays as the deploy-time warm.
+
+  **The one way this loop could cause the outage it prevents — the never-demote guard.**
+  Registering a Secondary on the node the client Service currently selects would DEMOTE the
+  live writer. So the standby is resolved from the LIVE selector every reconcile
+  (`resolveStandby`), and the warm PUT targets only the node the client Service does NOT
+  select — `pageserver-standby` at rest, the rebuilt ex-primary (`pageserver-primary`)
+  after a failover. A selector that is empty, names no known node, is ambiguous, or resolves
+  to a standby colliding with the primary ABORTS the reconcile (fail toward NOT warming, the
+  reversible state), counted on `pswatcher_standby_warm_errors_total`. Mutation-proved:
+  `TestReconcileStandbyWarmNeverWarmsThePrimary` and
+  `TestReconcileStandbyWarmReArmsRebuiltExPrimaryAfterFailover` red if the loop ever targets
+  the live primary's node. No new RBAC: the loop reads the client Service selector (existing
+  `services get`) and PUTs over HTTP to the pageservers. Membership uses the same live-
+  verified oracle D2 added — `GET /v1/location_config` `tenant_shards` — pointed at the
+  standby (`HTTPTenantMembershipAt`), never the per-tenant `GET /v1/tenant/<T>` (503s on a
+  Secondary). Loss of warmth is observable per tenant (`pswatcher_standby_tenant_warm`,
+  alert `PswatcherStandbyNotWarm`). On-cluster proof is the C2/#1117 drill's job.
 - **`pswatcher` now has more reasons to refuse than to act.** Absent-and-unrecoverable
   ledger, base tenant not held, uncorroborated non-base absence — each aborts. Every one
   is loud (log + counter + alert), but the aggregate posture is that this controller
@@ -376,5 +404,8 @@ honest gap behind §1b's fail-closed default, not an oversight.
       On-cluster re-verify of the FAILOVER itself still gated by the C2 drill below.
 - [ ] C2: on-cluster verification via the full multi-tenant failover drill (owned by the
       drill task, #1117) on a recovered/clean plane.
-- [ ] Follow-up: make standby warm-Secondary registration reconciling rather than
-      one-shot, so an apps tenant provisioned after deploy does not block failover.
+- [x] Follow-up (D1): make standby warm-Secondary registration RECONCILING rather than
+      one-shot — RESOLVED. See the D1 amendment to §5 below. `pswatcher` now keeps the
+      current standby warm continuously; the one-shot Job (57) remains as the deploy-time
+      warm. On-cluster proof (a tenant provisioned/rebuilt after the initial warm is
+      re-registered) is folded into the C2/#1117 drill.

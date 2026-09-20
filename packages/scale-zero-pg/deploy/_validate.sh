@@ -498,6 +498,38 @@ if grep -A6 'warm_secondary() {' 57-pageserver-standby.yaml | grep -qE 'secondar
   fail "57 warm_secondary() ends in an always-true download kick, so its failure branch is UNREACHABLE — a failed warm-Secondary registration is silent at deploy time (#1098). Return the registration's status."
 fi
 
+# 14e. contract (D1, ADR-0010 §5): the standby warm-Secondary registration is a
+#      CONTINUOUS reconcile in pswatcher, not just the one-shot Job (57). Without it a
+#      failover leaves the rebuilt ex-primary an EMPTY standby nobody re-warms, disarming
+#      HA from the first successful failover onward.
+grep -q 'PSW_WARM_INTERVAL_MS' 58-pswatcher.yaml \
+  || fail "58-pswatcher.yaml must set PSW_WARM_INTERVAL_MS — the reconciling standby-warm loop re-arms the rebuilt ex-primary after a failover (ADR-0010 §5, D1). Without it the plane is disarmed once the first failover succeeds."
+grep -q 'PSW_PRIMARY_NODE_BASE_URL' 58-pswatcher.yaml \
+  || fail "58-pswatcher.yaml must set PSW_PRIMARY_NODE_BASE_URL — the stable per-node URL of the primary NODE, one of the two standby-warm targets the loop resolves against the live selector (D1)."
+grep -q 'PSW_PRIMARY_SELECTOR_APP' 58-pswatcher.yaml \
+  || fail "58-pswatcher.yaml must set PSW_PRIMARY_SELECTOR_APP — the app label the client Service selects at rest, so the warm loop can resolve the STANDBY as the other node (D1)."
+# The warm target for the primary node must be its STABLE per-node Service, NEVER the
+# flipped client Service: warming a URL that resolves to the current primary would demote
+# the writer. It must also NOT be the demoted-vantage PSW_PRIMARY_BASE_URL env (banned above).
+_primary_node_base="$(sed -n 's/.*PSW_PRIMARY_NODE_BASE_URL, value: "\([^"]*\)".*/\1/p' 58-pswatcher.yaml | head -1)"
+case "$_primary_node_base" in
+  *"//$_client_svc:"*) fail "58 PSW_PRIMARY_NODE_BASE_URL=$_primary_node_base points at the flipped client Service ($_client_svc) — the warm loop would register a Secondary on the LIVE primary and demote the writer. Use the stable per-node Service (pageserver-primary) (D1)." ;;
+  *pageserver-primary*) : ;;
+  *) fail "58 PSW_PRIMARY_NODE_BASE_URL=$_primary_node_base is not the stable pageserver-primary per-node Service (D1)" ;;
+esac
+# The metrics the D1 alerts bind to must EXIST in the exporter, or the alerts never fire.
+for _m in pswatcher_standby_warm_reconciles_total pswatcher_standby_warm_registrations_total pswatcher_standby_warm_errors_total; do
+  grep -q "\"$_m %d" ../gateway/internal/pswatcher/metrics.go || fail "pswatcher no longer EXPORTS $_m (anchored on the '\"<name> %d' exposition line) — the D1 standby-warm alert bound to it would never fire (ADR-0010 §5)"
+done
+grep -q 'pswatcher_standby_tenant_warm{tenant=' ../gateway/internal/pswatcher/metrics.go \
+  || fail "pswatcher no longer EXPORTS the pswatcher_standby_tenant_warm gauge — PswatcherStandbyNotWarm would never fire (D1, ADR-0010 §5)"
+for _a in PswatcherStandbyNotWarm PswatcherStandbyWarmFailing; do
+  grep -q "alert: $_a" 60-prometheus.yaml || fail "60 missing $_a alert (D1) — loss of standby warmth would be unmonitored (ADR-0010 §5)"
+done
+grep -q 'pswatcher_standby_tenant_warm ==' 60-prometheus.yaml || fail "60 PswatcherStandbyNotWarm must fire on pswatcher_standby_tenant_warm == 0 (D1)"
+grep -q 'pswatcher_standby_warm_errors_total' 60-prometheus.yaml || fail "60 PswatcherStandbyWarmFailing must fire on pswatcher_standby_warm_errors_total (D1)"
+ok "reconciling standby-warm loop wired (D1): pswatcher re-arms the rebuilt ex-primary after a failover + loss-of-warmth is alerted"
+
 # 15. contract: the backup target is OFF-CLUSTER OCI Object Storage (issue #4),
 #     NOT the retired in-cluster backup-store PVC. The mirror must authenticate
 #     dst from the backup-s3-target Secret and must not reintroduce backup-store.
@@ -709,7 +741,7 @@ grep -q 'FeatureFreeze = "freeze"' ../gateway/internal/pswatcher/metrics.go || f
 # endpoint aborts EVERY failover on a real plane (both observed live, ADR-0010 §5, D2).
 # Assert the wiring, the ENDPOINT, and the pre-flight, then anchor on the unit tests.
 grep -q 'SetStandbyMembershipViewer' ../gateway/cmd/pswatcher/main.go || fail "cmd/pswatcher no longer wires the STANDBY membership oracle (SetStandbyMembershipViewer) — failover fails closed on every tick (unwired) or, if that guard also went, PUTs a phantom empty tenant onto an un-warmed standby (ADR-0010 §5, D2)"
-grep -qF 'fmt.Sprintf("%s/v1/location_config", v.BaseURL)' ../gateway/internal/pswatcher/http.go || fail "the standby membership oracle no longer reads the plane-wide /v1/location_config listing — any per-tenant endpoint reports a warm SECONDARY as absent/unreadable (503/404, live-verified), which aborts every failover and leaves HA permanently dead (ADR-0010 §5, D2)"
+grep -qF 'fmt.Sprintf("%s/v1/location_config", baseURL)' ../gateway/internal/pswatcher/http.go || fail "the standby membership oracle no longer reads the plane-wide /v1/location_config listing (holdsTenantAt) — any per-tenant endpoint reports a warm SECONDARY as absent/unreadable (503/404, live-verified), which aborts every failover and leaves HA permanently dead (ADR-0010 §5, D2)"
 grep -q 'c.standbyHoldsTenant(ctx, tenant)' ../gateway/internal/pswatcher/watcher.go || fail "failover() no longer asks the standby membership oracle before attaching — the phantom-attach split-brain (ADR-0010 §5, D2) is unguarded"
 grep -q 'func TestFailoverAbortsWhenStandbyLacksTenantDespitePut200' ../gateway/internal/pswatcher/phantom_attach_failover_test.go || fail "the phantom-attach abort unit test (D2, ADR-0010 §5) is gone — the standby pre-flight is now unguarded"
 grep -q 'func TestFailoverAbortsWhenNoStandbyMembershipOracleWired' ../gateway/internal/pswatcher/phantom_attach_failover_test.go || fail "the UNWIRED-oracle fail-closed unit test is gone — an oracle omitted by a future build/deploy edit could silently fall through to the dead PUT-404 path (ADR-0010 §5, D2)"
