@@ -112,6 +112,7 @@ export function ingressCheck(ctx: CheckContext): CheckResult[] {
                 "Knative ingress-class",
                 "fail",
                 `ingress-class is ${ingressClass} but no Ready net-kourier-controller deployment was found — no reconciler serves this class, routes will never program`,
+                "Install or repair net-kourier (the Knative ingress controller) and confirm its controller pods are Ready, then re-run.",
             ),
         ];
     }

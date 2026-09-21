@@ -45,6 +45,7 @@ export function operatorCheck(ctx: CheckContext): CheckResult[] {
                 "Operator deployment",
                 "fail",
                 `no Deployment found in ${OPERATOR_NAMESPACE} — install the operator bundle`,
+                "Install the knext operator: `kubectl apply --server-side -f <operator install.yaml>`, then re-run.",
             ),
         ];
     }
@@ -69,6 +70,7 @@ export function operatorCheck(ctx: CheckContext): CheckResult[] {
             "Operator deployment",
             "fail",
             `${manager.metadata?.name} is not Ready (readyReplicas=0) — kubectl describe deploy -n ${OPERATOR_NAMESPACE} (ImagePullBackOff? see the image check)`,
+            `Inspect it: \`kubectl describe deploy -n ${OPERATOR_NAMESPACE} ${manager.metadata?.name}\`. A common cause is ImagePullBackOff — see the operator-image check.`,
         ),
     ];
 }

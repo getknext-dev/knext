@@ -189,6 +189,7 @@ describe("kubectlValidationCheck (isolated)", () => {
             }),
         );
         expect(r?.status).toBe("fail");
+        expect(r?.hint?.trim()).toBeTruthy(); // DX4: a FAIL must be actionable — carry a repair hint
     });
 
     it("WARN when the version is unparseable", () => {
@@ -274,6 +275,7 @@ describe("crdCheck (isolated)", () => {
             }),
         );
         expect(r?.status).toBe("fail");
+        expect(r?.hint?.trim()).toBeTruthy(); // DX4: a FAIL must be actionable — carry a repair hint
     });
 
     it("ERROR on an infrastructural (auth) failure", () => {
@@ -286,6 +288,7 @@ describe("crdCheck (isolated)", () => {
             }),
         );
         expect(r?.status).toBe("error");
+        expect(r?.hint?.trim()).toBeTruthy(); // DX4: an ERROR must be actionable — carry a repair hint
     });
 });
 
@@ -355,6 +358,7 @@ describe("operatorCheck (isolated)", () => {
             }),
         );
         expect(r?.status).toBe("fail");
+        expect(r?.hint?.trim()).toBeTruthy(); // DX4: a FAIL must be actionable — carry a repair hint
     });
 });
 
@@ -436,6 +440,7 @@ describe("ingressCheck (isolated)", () => {
             }),
         );
         expect(r?.status).toBe("fail");
+        expect(r?.hint?.trim()).toBeTruthy(); // DX4: a FAIL must be actionable — carry a repair hint
     });
 });
 
@@ -588,6 +593,7 @@ describe("knativeCheck (isolated)", () => {
             }),
         );
         expect(r?.status).toBe("fail");
+        expect(r?.hint?.trim()).toBeTruthy(); // DX4: a FAIL must be actionable — carry a repair hint
     });
 });
 
@@ -639,6 +645,7 @@ describe("metricsCheck (isolated)", () => {
             }),
         );
         expect(r?.status).toBe("fail");
+        expect(r?.hint?.trim()).toBeTruthy(); // DX4: a FAIL must be actionable — carry a repair hint
     });
 });
 

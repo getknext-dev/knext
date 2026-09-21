@@ -35,6 +35,7 @@ export function knativeCheck(ctx: CheckContext): CheckResult[] {
             "Knative Serving",
             "fail",
             `${KSVC_CRD} not found — install Knative Serving + Kourier (see docs/QUICKSTART.md prerequisites)`,
+            "Install Knative Serving + the Kourier ingress, then re-run `kn-next doctor`.",
         ),
     ];
 }
