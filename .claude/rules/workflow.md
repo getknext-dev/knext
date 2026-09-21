@@ -13,6 +13,20 @@ Until now this lived only in session context, which is why its last step kept be
 
 ## Sprint model — the architect and system designer meet ONCE per sprint
 
+> **AMENDMENT (founder-directed, 2026-09-22) — design gates are no longer a merge gate.**
+> A PR merges on **code review + spec review + CI green**. There is **no architect/system-designer
+> sign-off step**, and the escalation triggers below **no longer summon a blocking gate** — a
+> reviewer who spots a trigger-class concern still flags it, but the flag becomes a **tech-debt
+> backlog item raised at sprint close**, not a merge blocker. The architect + system designer
+> **meet once, at sprint close**, and their job there is to **review the sprint's aggregate and add
+> tech debt to the backlog** — not to gate. (Motivation: the per-PR/per-trigger Opus gates did not
+> scale — they were unrunnable under the subagent cap and stalled delivery; code+spec review + CI
+> carry the per-PR bar, and the sprint-close design review catches accumulated architectural debt.)
+> **The honest tradeoff, kept from the text below:** those gates "found a real defect every time",
+> so removing them as a blocker means an architectural mistake can now merge and live until sprint
+> close — accepted deliberately. Everything below is retained as the *rationale and history* of the
+> gate model; where it conflicts with this amendment, the amendment wins.
+
 Running both design gates on every PR does not scale: a single one-file change here consumed six
 Opus gate runs. They found real defects every time, so the answer is not to drop them — it is to
 **move them from per-PR to per-sprint, and keep a trigger that pulls them back in.**
@@ -58,7 +72,10 @@ ADR, config/CLI/CRD and public-API triggers. The remaining two — a discovered 
 contradiction that touches no tracked path — are judgement, and cannot be automated.
 
 **Sprint close (once, both gates).** Review the sprint's aggregate, not each PR: did the task graph
-hold, what did the escalations reveal, which exit criteria are actually met.
+hold, what did the escalations reveal, which exit criteria are actually met — **and (per the 2026-09-22
+amendment) turn what they find into tech-debt backlog items.** This is now the gates' primary role:
+they meet at close to surface accumulated architectural/design debt and file it, rather than to
+block merges (which already happened during the sprint on code+spec review + CI green).
 
 ### Per-PR, always — this is what is NOT reduced
 
@@ -131,11 +148,13 @@ Work the task graph, not the backlog order.
    without its docs is a named condition, not a follow-up.
 6. **Review** — code review *and* spec review, in parallel. The spec reviewer owns the step-5
    docs check above.
-7. **Sign off** — normally the two reviews above are the gate. Summon architect and/or system
-   designer **only** when a trigger fired or a reviewer escalated; the sprint-close review covers
-   the rest. Whatever gates ran, a `BLOCK` or `ISSUES_FOUND` means another round — never a
-   judgement call about whether it matters, and never "the sprint plan already approved this".
-8. **Merge** on clearance.
+7. **Sign off (per the 2026-09-22 amendment): the two reviews ARE the gate — merge on code review +
+   spec review + CI green.** No architect/system-designer sign-off step. An `ISSUES_FOUND` from
+   either reviewer means another round — never a judgement call about whether it matters. If a
+   reviewer spots a trigger-class concern (ADR/hard-rule/security/CRD/boundary), they **file it as a
+   tech-debt backlog item for the sprint-close design review** and note it on the PR; it does not
+   block the merge.
+8. **Merge** on clearance (both reviews clear + CI green).
 9. **Refresh the knowledge graph** — AST only, per merge. See the cadence rule below.
 10. **Clean up** — see below. This step is part of the workflow, not housekeeping after it.
 
