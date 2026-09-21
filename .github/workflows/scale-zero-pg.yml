@@ -57,3 +57,33 @@ jobs:
       # build:image validates the gateway Dockerfile still builds.
       - name: turbo run build lint test build:image (affected, scoped to scale-zero-pg)
         run: bun run turbo run build lint test build:image --affected --filter=scale-zero-pg
+
+  # #797 — run deploy/_validate.sh (the manifest-contract validator) on every PR so the
+  # whole guard set it holds — metric/alert lockstep pins, the prometheus config-hash, the
+  # ledger-key scan, the yq-scoped label lockstep — is ENFORCED, not decoration (by this
+  # repo's own standard, a guard that never runs saved nothing). It runs in STATIC mode
+  # (VALIDATE_STATIC=1): the server-side dry-run needs a live cluster, which CI has none, so
+  # that section is skipped while every static contract runs. This job is UNCONDITIONAL (not
+  # turbo --affected): a guard that only fires "when the package changed" can be sidestepped
+  # by a change the affected-graph misclassifies, and the static run is a few seconds anyway.
+  validate-manifests:
+    name: deploy manifest contracts (static — no cluster)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # _validate.sh REQUIRES mikefarah yq v4 and fails CLOSED without it. The kislyuk
+      # python-yq ships a binary of the SAME NAME with a jq-filter CLI that errors on the
+      # mikefarah expressions — so install mikefarah explicitly and ASSERT the build, or the
+      # yq-scoped lockstep checks would silently degrade to the fail-closed path.
+      - name: Install mikefarah yq v4
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          yq --version | grep -q 'mikefarah' || { echo "installed yq is not the mikefarah build (need v4)"; exit 1; }
+
+      - name: Static manifest-contract validation (VALIDATE_STATIC=1, no cluster)
+        working-directory: packages/scale-zero-pg
+        run: VALIDATE_STATIC=1 bash deploy/_validate.sh
