@@ -23,7 +23,8 @@ premises:
 1. **A decisive cold-start win** — its table showed 61 ms cold median vs node's 884 ms.
 2. **Build-weight** — vinext's single-executable was expected to be the lighter artifact.
 
-Both have since been measured away, and a third axis has been verified that ADR-0048 never weighed:
+Both have since been undercut by measurement — cold-start decisively, build-weight conditionally —
+and a third axis has been verified that ADR-0048 never weighed:
 
 - **Cold-start is TIED on a real cluster.** OKE, N=7 paired cold cycles, two operator-reconciled
   `NextApp` CRs (`.claude/oke-coldstart-bench.md`): node-standalone **3610 ms** (3143–3948) vs
@@ -32,9 +33,18 @@ Both have since been measured away, and a third axis has been verified that ADR-
   **61 ms was a local warm-binary process-boot micro-bench** (`examples/bun-exec`, n=10, binary
   already page-cached) that excluded the cluster path — ADR-0048's own **Amendment 5** concedes
   this. A truly-cold local spawn is ~1.8 s. So cold-start **does not differentiate the axes**.
-- **Build-weight favours node, not vinext.** #605 V2 measured the vinext artifact **31% larger** at
-  capability parity (`@vercel/og` alone ≈ 39% of it) — the premise is inverted. *(Re-verified this
-  sprint: sprint task T6.)*
+- **Build-weight is not the vinext win ADR-0048 assumed — measured honestly, it depends how you
+  count.** #605 V2 (`docs/wayfinder/v2-build-weight.md`, dated 2026-08-03, commands in its §9):
+  in **raw bytes vinext ships *less*** — 37.14 MB vs the Turbopack `next build`'s 44.22 MB (−16%)
+  and the `--webpack` build's 52.05 MB (−29%). But that raw win is bought by **omitting image
+  optimisation**: hold capability constant (subtract `sharp`, which vinext has no equivalent of)
+  and vinext is **+31% vs the Turbopack build (37.14 vs 28.36 MB)** and ≈tied with webpack (+2.6%).
+  vinext also ships `@vercel/og` + stack unconditionally — 14.50 MB, 39% of its artifact — for apps
+  that use no OG images. **So for a capability-complete knext app (image optimisation is ADR-0006
+  core), vinext is not the lighter artifact.** The premise "vinext builds lighter" holds only for
+  apps that forgo image optimisation. *(T6 this sprint audited the V2 method — sound, dated,
+  reproducible; a full re-measure was deferred (jev 0.87) as toolchain drift would add noise to an
+  already-conditional claim, not signal.)*
 - **Two verified 778/0 axes exist.** node-standalone is 778/0 (the official-suite credential — the
   verified-adapter north star) but ADR-0048 made it un-selectable. **bun-standalone** (`next build`,
   boot on Bun 1.4.0) is **778/0, corroborated this session** across two green runs
