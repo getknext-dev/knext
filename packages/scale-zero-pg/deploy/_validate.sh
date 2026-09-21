@@ -169,8 +169,22 @@ if [ "${1:-}" = "prom-config-hash" ]; then
 fi
 
 HAVE_KUBECTL=1
-command -v kubectl >/dev/null \
-  || { HAVE_KUBECTL=0; fail "kubectl not found — section 1 (server dry-run of every manifest) and the 2c HPA dry-run NOT evaluated"; blockdone; }
+if [ "${VALIDATE_STATIC:-0}" = 1 ]; then
+  # CI static mode (#797): no cluster/context is available, so the server dry-run (section 1)
+  # and the 2c HPA dry-run — a CLUSTER gate, not a static contract — are intentionally
+  # SKIPPED, never failed. Every static contract check below (metric/alert lockstep pins,
+  # the prom-config-hash, the D4b ledger-key scan, the yq-scoped label lockstep, …) still
+  # runs, and the EXIT-trap tripwire still catches a mid-run abort. Forcing HAVE_KUBECTL=0
+  # even when the kubectl BINARY is present is deliberate: a binary with no reachable cluster
+  # would make the dry-run fail on connect, validating nothing. So this mode enforces the
+  # WHOLE static guard set on every PR without a cluster — while a local run (no
+  # VALIDATE_STATIC) still fails closed if kubectl is missing, keeping the full dry-run the
+  # default there.
+  HAVE_KUBECTL=0
+  ok "VALIDATE_STATIC=1 — server dry-run + 2c HPA dry-run SKIPPED (no cluster); static contract checks run in full (#797)"
+elif ! command -v kubectl >/dev/null; then
+  HAVE_KUBECTL=0; fail "kubectl not found — section 1 (server dry-run of every manifest) and the 2c HPA dry-run NOT evaluated"; blockdone
+fi
 
 # 1. every manifest must dry-run apply cleanly (server-side validation).
 # The namespace is applied for real first: namespaced dry-runs need it to
