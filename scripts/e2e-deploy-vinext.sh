@@ -80,7 +80,7 @@ fi
 # (apps/file-manager/package.json). A floating install would make a red file
 # attributable to a vinext release rather than to knext, which is the same
 # mistake the bun lane made with `bun-version: latest` and had to undo.
-VINEXT_VERSION="${KNEXT_VINEXT_VERSION:-1.0.0-beta.9}"
+VINEXT_VERSION="${KNEXT_VINEXT_VERSION:-1.0.0-beta.11}"
 VITE_VERSION="${KNEXT_VITE_VERSION:-8.2.2}"
 NITRO_VERSION="${KNEXT_NITRO_VERSION:-3.0.260610-beta}"
 # vinext@1.0.0-beta.9 declares `@vitejs/plugin-rsc@^0.5.34` as an (optional) peer.
@@ -339,20 +339,34 @@ fi
 # exactly once — a vinext version bump that moves the anchor reds THIS lane rather
 # than silently reverting to the #3197 bug. It is idempotent and does not touch
 # the node/cloudflare targets (the re-point is gated on `hasNitroPlugin`).
-PATCH_SCRIPT="${KNEXT_REPO_ROOT:-}/scripts/patch-vinext-3197.mjs"
-if [ ! -f "${PATCH_SCRIPT}" ]; then
-  # Resolve relative to this script when KNEXT_REPO_ROOT is unset (harness runs
-  # with cwd = the fixture dir, so the script cannot assume its own location).
-  PATCH_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/patch-vinext-3197.mjs"
-fi
-if [ ! -f "${PATCH_SCRIPT}" ]; then
-  log "ERROR: cannot locate scripts/patch-vinext-3197.mjs (the #3197 overlay) — refusing to build the vinext lane with dynamic routes broken"
-  exit 1
-fi
-log "applying TEMPORARY cloudflare/vinext#3197 overlay to the installed vinext dist (fail-closed)"
-if ! node "${PATCH_SCRIPT}" "${APP_DIR}" >&2; then
-  log "ERROR: the vinext#3197 overlay could not be applied — its anchor moved (vinext version bump?). This lane will not build a #3197-fixed artifact until the overlay is re-derived."
-  exit 1
+# #3197 shipped natively in vinext 1.0.0-beta.11 (its release notes list
+# "Pages: serve dynamic Pages Router routes under the Nitro preset (#3197)
+# (#3204)"), and that restructure removed the dist symbols the overlay re-points
+# (VIRTUAL_SERVER_ENTRY / hasNitroPlugin are gone). So for beta.11+ the overlay is
+# obsolete AND would fail-closed on its missing anchor — skip it. Older pins still
+# apply it (fail-closed) below.
+# APPLY only for the betas that carry the bug: 1.0.0-beta.1 … beta.10. beta.11+
+# and any non-beta (stable 1.0.0, 1.x) ship the native fix, so SKIP — applying the
+# overlay there fail-closes on its now-absent anchor.
+VINEXT_BETA_NUM="$(printf '%s' "${VINEXT_VERSION}" | sed -nE 's/^1\.0\.0-beta\.([0-9]+)$/\1/p')"
+if [ -n "${VINEXT_BETA_NUM}" ] && [ "${VINEXT_BETA_NUM}" -lt 11 ]; then
+  PATCH_SCRIPT="${KNEXT_REPO_ROOT:-}/scripts/patch-vinext-3197.mjs"
+  if [ ! -f "${PATCH_SCRIPT}" ]; then
+    # Resolve relative to this script when KNEXT_REPO_ROOT is unset (harness runs
+    # with cwd = the fixture dir, so the script cannot assume its own location).
+    PATCH_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/patch-vinext-3197.mjs"
+  fi
+  if [ ! -f "${PATCH_SCRIPT}" ]; then
+    log "ERROR: cannot locate scripts/patch-vinext-3197.mjs (the #3197 overlay) — refusing to build the vinext lane with dynamic routes broken"
+    exit 1
+  fi
+  log "applying TEMPORARY cloudflare/vinext#3197 overlay to the installed vinext dist (fail-closed)"
+  if ! node "${PATCH_SCRIPT}" "${APP_DIR}" >&2; then
+    log "ERROR: the vinext#3197 overlay could not be applied — its anchor moved (vinext version bump?). This lane will not build a #3197-fixed artifact until the overlay is re-derived."
+    exit 1
+  fi
+else
+  log "skipping the cloudflare/vinext#3197 overlay — vinext ${VINEXT_VERSION} carries the fix natively (#3204 shipped in 1.0.0-beta.11); the overlay's dist anchor no longer exists"
 fi
 
 # The deployment identity the harness's skew/asset tests key on. Generated
