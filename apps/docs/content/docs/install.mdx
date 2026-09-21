@@ -14,6 +14,16 @@ The per-cloud guides — [GKE](/docs/gke), [EKS](/docs/eks), [AKS](/docs/aks), [
 `NextApp` resources — see [Operator & the NextApp CRD](/docs/operator).
 </Callout>
 
+{/* REMOVE the Callout below once the operator image on ghcr.io is publicly pullable and has a
+    multi-arch (amd64 + arm64) build. */}
+<Callout type="warn">
+**A known gap on our side, for now.** The operator image is not yet publicly pullable and has no
+arm64 build yet — so today step 4 applies the bundle but the operator pod sits in
+`ImagePullBackOff`. That is our release gap, **not a mistake in your setup**, and `kn-next doctor`
+names this exact cause. We're closing both gaps; until then the steps below still leave you with a
+cluster that is otherwise ready to deploy.
+</Callout>
+
 ## Install order
 
 | # | Prerequisite | Why |
