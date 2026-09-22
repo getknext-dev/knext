@@ -53,6 +53,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { stageStandaloneBuildContext } from "../cli/runtime-image";
 
 // packages/kn-next/src/__tests__ -> package root (../..)
 const PKG_ROOT = resolve(__dirname, "..", "..");
@@ -222,7 +223,12 @@ beforeAll(async () => {
     }
 
     // 3b. Assemble the Docker build CONTEXT exactly as the Dockerfile's COPY lines
-    //     name it (mirrors cli/runtime-image.ts stageStandaloneBuildContext).
+    //     name it. The Dockerfile/entry-shim/.dockerignore trio below is staged
+    //     via the SHIPPED `stageStandaloneBuildContext()`, not a hand-rolled copy
+    //     (#1186) — only the rest of the closure (`.next/standalone`,
+    //     `.next/static`, `public`, `node_modules/@getknext/core`), which is
+    //     produced by `next build`/`npm install` rather than staged by that
+    //     function, is assembled here.
     const ctx = join(workDir, "ctx");
     mkdirSync(ctx, { recursive: true });
     cpSync(
@@ -249,15 +255,17 @@ beforeAll(async () => {
     cpSync(TEMPLATE_DIR, join(coreDst, "templates", "runtime-standalone"), {
         recursive: true,
     });
-    // The supervisor shim + Dockerfile, staged verbatim from the template.
-    cpSync(
-        join(TEMPLATE_DIR, "knext-standalone-entry.mjs.hbs"),
-        join(ctx, "knext-standalone-entry.mjs"),
-    );
-    cpSync(
-        join(TEMPLATE_DIR, "Dockerfile.standalone.hbs"),
-        join(ctx, "Dockerfile.standalone"),
-    );
+    // The supervisor shim + Dockerfile + .dockerignore, staged via the SHIPPED
+    // `stageStandaloneBuildContext()` (#1186) — the exact function `deploy.ts`/
+    // `preview.ts` call. This is what makes this suite a gate on the real
+    // staging path (Dockerfile + entry shim + .dockerignore keep-list) rather
+    // than a hand-rolled copy of it: a regression in that function or its
+    // `.dockerignore` keep-list (the #1177 class) now reds THIS e2e.
+    const staged = stageStandaloneBuildContext({
+        cwd: ctx,
+        buildContext: ctx,
+        templateDir: TEMPLATE_DIR,
+    });
 
     // 4. Build the shipped image, --target standalone-bun (the operator's bun runtime).
     const image = run(
@@ -269,7 +277,7 @@ beforeAll(async () => {
             "--target",
             "standalone-bun",
             "--file",
-            join(ctx, "Dockerfile.standalone"),
+            staged.dockerfile,
             "--label",
             LABEL,
             "--label",
