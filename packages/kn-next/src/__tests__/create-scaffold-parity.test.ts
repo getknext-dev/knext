@@ -98,6 +98,16 @@ const CLI_ONLY: Record<string, string> = {
         "keeps the generated Dockerfile's `COPY … public` layer resolvable before the app has assets",
 };
 
+// `Dockerfile.standalone.hbs` and `knext-standalone-entry.mjs.hbs` (the
+// ADR-0055 standalone runtime image recipe) used to be classified CLI_ONLY
+// here. They have since moved OUT of `templates/app` entirely — to
+// `templates/runtime-standalone/`, which `templateFiles(CLI_TEMPLATE)` below
+// never walks — because `loadTemplates()` renders EVERY `.hbs` under
+// `templates/app` into every scaffolded app with no allowlist, and this
+// recipe is not yet buildable (its own dependency closure and the
+// CLI-selection wiring are a separate increment). No entry is needed for a
+// file this test never sees.
+
 /**
  * The SAFETY-CRITICAL files: the #342 fence pair, the adapter wiring, and the
  * two graduated guards. **Their bucket is frozen.**

@@ -1,0 +1,34 @@
+/**
+ * NOT YET EMITTED by either scaffolder — staged under
+ * `templates/runtime-standalone/` (paired with `Dockerfile.standalone.hbs`)
+ * until the CLI-selection increment renders it.
+ *
+ * knext STANDALONE supervisor entry (ADR-0055).
+ *
+ * This is the image's ENTRYPOINT for the node/bun STANDALONE runtime shape. Per
+ * ADR-0055 the image declares how to start itself: the operator selects image +
+ * env + probes and leaves the container Command `nil`, so THIS file — not a
+ * command string the operator invents — is what boots the app.
+ *
+ * All it does is hand off to the runtime-agnostic supervisor
+ * (`@getknext/core/internal/node-server`), which owns everything the operator's
+ * forced `bun run server.js` command used to silently discard: SIGTERM
+ * forwarding + awaited DB-pool drain + the grace hardcap, the eagerly-bound
+ * `:9464` metrics endpoint the NetworkPolicy/PodMonitor assume, the compat-gated
+ * Cache-Control preload, the Bun keep-alive guard, and the compile-cache
+ * diagnostics. The supervisor spawns the REAL Next standalone `server.js`
+ * (STANDALONE_SERVER_PATH, default `.next/standalone/server.js`) as a child so
+ * SIGTERM can drain it before the pod goes away.
+ *
+ * DEPENDENCY-FREE ON PURPOSE. The Dockerfile copies this SAME file to BOTH
+ * `/app/knext-entry.mjs` (the ENTRYPOINT target) AND `/app/server.js` (the R3
+ * compat shim the CURRENT operator command — `bun run server.js` — names, so an
+ * old-operator × new-image upgrade still reaches the supervisor). A relative
+ * `import './x'` would resolve differently from those two paths, so the only
+ * import here is the bare `@getknext/core` subpath, resolved from
+ * `/app/node_modules`.
+ *
+ * Do not rename it. The Dockerfile's ENTRYPOINT and the compat-shim COPY both
+ * point at this exact path.
+ */
+await import("@getknext/core/internal/node-server");
