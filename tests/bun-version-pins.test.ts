@@ -97,7 +97,11 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // (#885 — no webpack layers under the vinext single-graph build),
       // taking its setup-bun step with it. Deliberate edit, per the rule
       // above that a dropping count is a decision, not drift.
-      'ci.yml': 10,
+      // 11, was 10 (#1156): the standalone-drain-bun-image job builds the
+      // shipped standalone-on-bun image and runs the docker e2e via
+      // `bun:test`, so it needs its own pinned setup-bun — a count RISING is
+      // a decision too, per the rule above.
+      'ci.yml': 11,
       'docs-closure-nightly.yml': 1,
       'mutation-prover-nightly.yml': 1,
       'operator-e2e-nightly.yml': 3,
