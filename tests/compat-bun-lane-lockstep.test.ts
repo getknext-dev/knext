@@ -22,6 +22,17 @@ import { LANE_MARKER_PREFIX } from '../scripts/compat-window-audit.mjs';
  * they do not restate one literal, they assert that two places which must move
  * together CANNOT diverge. Mutation proof: changing either bun-lane
  * `bun-version:` expression alone must red this file.
+ *
+ * WHAT THIS DOES NOT GUARANTEE, stated rather than implied. Identical SPECS are
+ * identical BUILDS only for a fixed spec. A floating spec — `canary`, `latest` —
+ * can resolve to different builds in the two jobs, which start at different
+ * times, so the frozen revision could differ from the served one. That is out of
+ * scope for the credential rather than unhandled: only SCHEDULED runs are graded
+ * nights, and the schedule always takes the pinned fallback (the floating spec is
+ * reachable only through `workflow_dispatch`, whose runs are not nights). A
+ * future change that lets a schedule carry a floating spec would reopen this,
+ * and would have to close it by threading the OBSERVED revision from the shard
+ * instead of the install spec.
  */
 
 const REPO_ROOT = resolve(import.meta.dir, '..');
