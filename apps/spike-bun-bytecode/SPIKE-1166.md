@@ -47,3 +47,31 @@ the compiled resolver.
 The decision structure holds: **ship UNCOMPILED bun-standalone as v1.0 (proven 200s here), make the
 bytecode-exec packaging the fast-follow.** The compile is feasible up to Next's externalRequire
 runtime layer; solving that (paths above) is real but bounded R&D, not a v1.0 blocker.
+
+## Update: the nft-barrel approach does NOT work (jev flagged it 0.43)
+
+Tried: a barrel that statically `require()`s the `next/dist/compiled/*` modules the disk server
+chunks pull at runtime (source-map, the turbo `*.runtime.prod.js`, etc.), wrapped so bun embeds them
+into the compiled bundle without executing at startup (lazy thunks — eager require broke the turbo
+runtime with `Invariant: AsyncLocalStorage accessed in runtime where it is not available`).
+
+Result: server boots READY, but the SAME `Cannot find module 'next/dist/compiled/source-map'` returns
+— thrown from disk-loaded `next/dist/server/patch-error-inspect.js`. **Embedding the module in the
+bundle does not help**, because the failing `require()` executes inside Next's DISK-loaded server code,
+which has its own resolution context that never consults the compiled bundle. jev pre-scored the
+approach 0.43 (lean-no) and was right.
+
+**Root cause (final):** Next's server runtime runs from disk (not embedded — too dynamic to fully
+bundle), and **bun's compiled binary does not do disk `node_modules` resolution for bare specifiers
+inside disk-loaded code** (symlink + NODE_PATH + bundle-embed all fail). This is a bun-compiled-binary
+limitation, not a knext/Next config knob.
+
+**Remaining real options (both heavier):**
+1. **Full pre-bundle** — bundle server.js + ALL of Next's server runtime into one statically-analyzable
+   file (defeating Next's disk-loading + externalRequire entirely), THEN `--compile`. Large, and fights
+   Next's architecture.
+2. **A bun-side fix** — make the compiled binary resolve disk `node_modules` for externalRequire'd code
+   (upstream bun, or a documented runtime resolver shim installed by the entry). Needs bun knowledge.
+
+**Verdict unchanged and now firmly evidence-backed:** ship UNCOMPILED bun-standalone as v1.0 (serves
+all routes 200), treat bytecode-exec as a fast-follow gated on option 1 or 2 — not a v1.0 blocker.
