@@ -37,20 +37,20 @@ describe('bun-lane credentialed bar (issue #1158)', () => {
     expect(existsSync(BAR_DOC)).toBe(true);
   });
 
-  it('states N = 14 consecutive nights — the same contract class as the node lane', () => {
-    const md = read(BAR_DOC).toLowerCase();
-    // "14 consecutive" — the count. Same class as window-node-lane.md rule set.
-    expect(md).toMatch(/14\s+consecutive/);
-  });
-
-  // De-decoration: a prose "14" is decoration if it can drift from the number
-  // the grader actually enforces. Tie the two together — the doc names the
-  // constant, and the constant IS 14 in the grader — so a change to either side
-  // reds this test instead of letting the doc lie about the enforced N.
-  it('the bar N is the SAME constant the grader enforces, not free prose', () => {
+  // De-decoration (nit): a prose N is decoration if it can drift from the number
+  // the grader actually enforces. So PARSE the enforced constant and COMPARE the
+  // doc's stated N against it — a legitimate change to the constant is *compared*
+  // (doc must move with it), not silently red by a hardcoded literal. A drift on
+  // either side reds this test.
+  it('the bar states N consecutive nights EQUAL to the grader-enforced constant', () => {
     const audit = read(AUDIT);
-    expect(audit).toMatch(/WINDOW_REQUIRED_NIGHTS\s*=\s*14/);
-    // The doc pins its "14" to that constant by name.
+    const m = audit.match(/WINDOW_REQUIRED_NIGHTS\s*=\s*(\d+)/);
+    expect(m, 'grader must define WINDOW_REQUIRED_NIGHTS = <n>').not.toBeNull();
+    const n = m![1];
+    const md = read(BAR_DOC).toLowerCase();
+    // the doc's consecutive-night count is exactly that n (not a hardcoded 14).
+    expect(md).toMatch(new RegExp(`${n}\\s+consecutive`));
+    // and it pins that count to the constant by name, so the two cannot drift.
     expect(read(BAR_DOC)).toContain('WINDOW_REQUIRED_NIGHTS');
   });
 
@@ -84,17 +84,47 @@ describe('bun-lane credentialed bar (issue #1158)', () => {
     expect(md).toMatch(/fingerprint\s+unchanged|unchanged\s+.*fingerprint/);
   });
 
-  it('BUN-SPECIFIC: the observed Bun version is part of the frozen fingerprint — a Bun bump resets the streak', () => {
-    const md = read(BAR_DOC).toLowerCase();
-    // The clause that makes this bar honest for a lane whose result depends on
-    // the runtime version. It must name the recorded field (runtimeVersion /
-    // `bun --version`) AND say a version move resets the count.
-    expect(md).toMatch(/bun\s+version|runtimeversion|bun\s+--version/);
-    expect(md).toMatch(/reset|restart/);
+  // F1 (both-halves): this is the bar's ONLY novel clause vs the node lane, so
+  // it must be guarded so it cannot be deleted OR INVERTED while staying green.
+  // The previous version matched its two halves independently over the whole
+  // doc, so "Bun version" (headline) + "restart" (rule 1) satisfied it even with
+  // rule 4 removed or reversed. Fix: extract the rule-4 BLOCK and assert, inside
+  // it, that it names the recorded build identity AND states the reset DIRECTION,
+  // AND does not contain the inversion.
+  it('BUN-SPECIFIC (rule 4): the Bun-build freeze is stated with the correct direction, inside its own block', () => {
+    // rule 4 is one list item: from "4. **The observed Bun" up to the first blank line.
+    const rule4 = read(BAR_DOC).match(/^4\.\s+\*\*The observed Bun[\s\S]*?(?=\n\n)/m)?.[0] ?? '';
+    expect(rule4, 'rule 4 (Bun-build freeze) is missing from the bar doc').not.toBe('');
+    // names the recorded build identity, not just a bare version string.
+    expect(rule4).toMatch(/runtimeVersion|bun --revision/);
+    // states the DIRECTION: a Bun build move RESETS the streak (not merely pauses,
+    // not "may drift"). The header phrase carries the direction inside rule 4.
+    expect(rule4.toLowerCase()).toMatch(/bun build move resets the streak/);
+    // and does NOT contain the inversion (may drift / does not reset / maintainer waiver).
+    expect(rule4.toLowerCase()).not.toMatch(
+      /may drift|does\s+\*{0,2}not\s+\*{0,2}reset|may\s+\*{0,2}waive/,
+    );
   });
 
-  it('the compat matrix bun row references the bar doc (verified-once → the defined bar)', () => {
-    const md = read(MATRIX);
-    expect(md).toContain(BAR_DOC_REL);
+  // F2: assert the reference is ON THE BUN ROW, not merely somewhere in the 60 KB
+  // file. A bare document-wide substring passes even if the path is in an
+  // unrelated row or an HTML comment — the "verified-once → the defined bar"
+  // linkage this test's name claims would then be unguarded.
+  it('the compat matrix BUN ROW references the bar doc (verified-once → the defined bar)', () => {
+    const bunRow = read(MATRIX)
+      .split('\n')
+      .find((l) => l.includes('Bun runtime axis (`KNEXT_RUNTIME=bun`)'));
+    expect(bunRow, 'compat-matrix.md must have the Bun runtime-axis row').toBeDefined();
+    expect(bunRow).toContain(BAR_DOC_REL);
+  });
+
+  // F4: "same contract class as the node lane" includes the three stricter rules
+  // the audit script applies (re-attempt / short-ledger / unobtainable-ledger).
+  // Without stating the re-attempt rule, someone implementing #1147 against this
+  // doc could conclude a re-run green counts — the #545 "re-run until green"
+  // vector. Guard that the doc carries it.
+  it('states the stricter audit rules — a re-attempted run does not qualify (#545 vector closed)', () => {
+    const md = read(BAR_DOC).toLowerCase();
+    expect(md).toMatch(/re-attempt|re-run|runattempt/);
   });
 });

@@ -26,7 +26,7 @@ record table below is empty by construction.
 |---|---|
 | lane | bun (`KNEXT_RUNTIME=bun`, standalone `server.js` on Bun) |
 | required nights | **14** consecutive qualifying (`WINDOW_REQUIRED_NIGHTS`, `scripts/compat-window-audit.mjs`) |
-| grader | `node scripts/compat-window-audit.mjs --fetch --lane bun` — the lane is read from each run's `compat-run-ledger`, already lane-attributed |
+| grader | `node scripts/compat-window-audit.mjs --fetch --lane bun` — the lane is read from each run's `compat-run-ledger`, already lane-attributed. Grades rules 1–3 (and the three stricter audit rules) **today**; **rule 4 (Bun-build freeze) lands with #1147**, which must fold `bun --revision` into the fingerprint. |
 | window opened | — (blocked on #1147; not yet scheduled) |
 | current streak | 0 / 14 — no scheduled nights exist |
 
@@ -45,17 +45,29 @@ semantics as the node lane.
    converts the gate into a pass-count — the failure mode the ledger exists to prevent. As on the
    node lane this is subsumed by rule 1 (the manifest lives inside the frozen harness set) but is
    stated because it names the intent the fingerprint enforces.
-4. **The observed Bun version is unchanged across the window — and is part of the frozen
-   fingerprint.** This is the clause the node lane does not need. The bun lane's result is
-   *version-dependent*: Bun ≤1.3.14 is **deterministically red** on three documented edge-`fetch()`
-   / not-found-`invariant` files, and Bun 1.4.0 is **green** on the same corpus. A bar that let the
-   runtime version drift would credential a moving target — a green streak assembled across a
-   1.3.14→1.4.0 bump would be meaningless. So a Bun version move **resets** the streak the same way
-   a harness move does. The lane already records the observed `bun --version` as `runtimeVersion` on
-   every `compat-suite-summary-*.json` artifact (absent on the node lane), so this rule is
-   mechanically gradable today; #1147 must fold `runtimeVersion` into the bun lane's frozen
-   fingerprint (or treat any change in it as a rule-1 restart) so the audit script enforces it
-   rather than a human eyeballing it.
+4. **The observed Bun build is unchanged across the window — and is part of the frozen
+   fingerprint. Any Bun build move resets the streak.** This is the clause the node lane does not
+   need, because the bun lane's result is *build-dependent*: Bun ≤1.3.14 is **deterministically red**
+   on three documented edge-`fetch()` / not-found-`invariant` files, while **stable Bun 1.4.0 is
+   green** on the same corpus (runs 35652804130 / 35659440363, 778/0). The version *string* alone is
+   not a sufficient freeze key: a **canary that also reported `1.4.0`** (run 28622051531) was **red**
+   on those files, so two builds carrying an identical `bun --version` produced opposite outcomes —
+   freezing only the version string would still credential a moving target. So the frozen key is the
+   **`bun-version` workflow input together with `bun --revision`** (the build hash), not just
+   `bun --version`, and any change in it **resets** the streak the same way a harness move does. The
+   lane already records the observed `bun --version` as `runtimeVersion` on every
+   `compat-suite-summary-*.json` artifact (absent on the node lane); #1147 must additionally record
+   `bun --revision` and fold both into the bun lane's frozen fingerprint (or treat any change as a
+   rule-1 restart), so the audit script enforces this rather than a human eyeballing it. A Bun build
+   move **resets** the streak; it never merely pauses it, and a maintainer may **not** waive it.
+
+**Plus the three stricter rules the audit script applies that this list does not restate**, exactly
+as [`window-node-lane.md`](window-node-lane.md) enumerates them under "Three rules the audit script
+applies that this list did not state": a **re-attempted run** (`runAttempt !== '1'`,
+`scripts/compat-window-audit.mjs`) is **not** a qualifying night — a re-run green does not bank, so
+the #545 "re-run until green" vector cannot operate here; a **short ledger** (fewer shards than
+expected) is not a green night; and an **unobtainable ledger** is disqualified, never treated as
+absent. "Same contract class as the node lane" means these too, not only rules 1–4.
 
 ## What credentialing this lane does and does not claim
 
