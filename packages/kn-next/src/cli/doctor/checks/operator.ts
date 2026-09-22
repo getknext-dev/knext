@@ -45,7 +45,7 @@ export function operatorCheck(ctx: CheckContext): CheckResult[] {
                 "Operator deployment",
                 "fail",
                 `no Deployment found in ${OPERATOR_NAMESPACE} — install the operator bundle`,
-                "Install the knext operator: `kubectl apply --server-side -f <operator install.yaml>`, then re-run.",
+                "Install the knext operator: `kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-latest/install.yaml`, then re-run.",
             ),
         ];
     }

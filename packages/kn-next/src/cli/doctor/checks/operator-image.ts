@@ -50,6 +50,7 @@ export async function operatorImageCheck(
                     "Operator image pullable",
                     "fail",
                     `${ctx.operatorImage} does not exist on the registry — the running pods hold a cached image that new nodes cannot pull`,
+                    "rebuild and republish the operator image, or repoint the CR to a tag/digest that exists on the registry",
                 ),
             ];
         default:

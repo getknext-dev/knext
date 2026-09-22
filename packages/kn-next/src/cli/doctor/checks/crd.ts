@@ -32,7 +32,7 @@ export function crdCheck(ctx: CheckContext): CheckResult[] {
                 "NextApp CRD",
                 "fail",
                 `${NEXTAPP_CRD} not found — install the operator bundle (kubectl apply --server-side -f install.yaml)`,
-                "Install the knext operator bundle (it ships the NextApp CRD): `kubectl apply --server-side -f <operator install.yaml>`, then re-run.",
+                "Install the knext operator bundle (it ships the NextApp CRD): `kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-latest/install.yaml`, then re-run.",
             ),
         ];
     }

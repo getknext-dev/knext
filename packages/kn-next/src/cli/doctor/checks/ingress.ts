@@ -50,6 +50,7 @@ export function ingressCheck(ctx: CheckContext): CheckResult[] {
                 "Knative ingress-class",
                 "fail",
                 "configmap config-network not found in knative-serving — is Knative Serving installed?",
+                "install Knative Serving (the config-network ConfigMap ships with it): https://knative.dev/docs/install/",
             ),
         ];
     }
