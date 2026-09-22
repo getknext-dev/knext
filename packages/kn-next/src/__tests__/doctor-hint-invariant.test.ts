@@ -15,7 +15,12 @@ import { fileURLToPath } from "node:url";
  *
  * All doctor results are built via `mk(id, title, status, detail, hint?)`
  * (report.ts); there is no direct CheckResult construction in checks/, so
- * scanning `mk()` calls is complete.
+ * scanning `mk()` calls covers every result — with one assumption: `mk` is
+ * imported UNALIASED (all check files today `import { mk } from "../report"`).
+ * This is a text scanner, not an AST pass, so a file that aliased the import
+ * (`import { mk as x }`) would hide its calls; a rename that conspicuous would
+ * stand out in review. Fail-closed on non-literal status closes the dynamic-arg
+ * hole; the alias hole is the residual limit of grep-based scanning.
  */
 
 const HERE = dirname(fileURLToPath(import.meta.url));
