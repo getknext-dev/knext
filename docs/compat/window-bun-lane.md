@@ -16,20 +16,20 @@ not a discounted version of it.
 
 ## Status
 
-**NOT OPEN.** The bar cannot start until a **scheduled** bun-1.4.0 lane exists to produce nights;
-today the bun lane is `workflow_dispatch`-only, so its 778/0 is **verified-once** (two dispatch
-runs, 2026-09-22), not **credentialed**. Standing up that scheduled lane is issue #1147; this
-file is its acceptance target. Until #1147 lands there is no window to grade and no streak to
-count — the compat-matrix Bun row stays ✅-verified-once, never credentialed, and this file's
-record table below is empty by construction.
+**SCHEDULED — window not yet banked.** The scheduled bun-1.4.0 lane now exists (#1147: cron
+`47 4 * * *` in `test-e2e-deploy.yml`), so the bar can start counting on its first qualifying
+night. Until **14** consecutive scheduled bun nights bank on one unchanged harness **and one
+unchanged Bun build**, its 778/0 stays **verified-once** (two dispatch runs, 2026-09-22), not
+**credentialed** — the compat-matrix Bun row stays ✅-verified-once, and this file's record table
+below fills as scheduled nights land.
 
 | | |
 |---|---|
 | lane | bun (`KNEXT_RUNTIME=bun`, standalone `server.js` on Bun) |
 | required nights | **14** consecutive qualifying (`WINDOW_REQUIRED_NIGHTS`, `scripts/compat-window-audit.mjs`) |
-| grader | `node scripts/compat-window-audit.mjs --fetch --lane bun` — the lane is read from each run's `compat-run-ledger`, already lane-attributed. Grades rules 1–3 (and the three stricter audit rules) **today**; **rule 4 (Bun-build freeze) lands with #1147**, which must fold `bun --revision` into the fingerprint. |
-| window opened | — (blocked on #1147; not yet scheduled) |
-| current streak | 0 / 14 — no scheduled nights exist |
+| grader | `node scripts/compat-window-audit.mjs --fetch --lane bun` — the lane is read from each run's `compat-run-ledger`, already lane-attributed. Grades rules 1–3 (and the three stricter audit rules); **rule 4 (Bun-build freeze) landed with #1147** — the fingerprint folds the observed `bun --version` + `bun --revision` on the bun lane. |
+| window opened | on the first scheduled bun night (lane landed #1147, cron `47 4 * * *`); none banked yet |
+| current streak | 0 / 14 — lane scheduled, awaiting first qualifying night |
 
 ## The rules a night must satisfy to qualify
 
@@ -74,7 +74,7 @@ absent. "Same contract class as the node lane" means these too, not only rules 1
 
 - **Does:** that the bun axis holds 778/0 across the official deploy-suite corpus for 14 straight
   scheduled nights on one unchanged harness **and one unchanged Bun**, with revocation teeth (a red
-  scheduled bun run opens its own "Compat nightly RED (bun lane)" issue — never the node
+  scheduled bun run opens its own "Compat nightly RED (bun credentialing)" issue — never the node
   credential's — and flips the matrix row back).
 - **Does not:** extend to the compiled **vinext single-executable** axis (a separate row / lane,
   ADR-0048/0051), nor to any Bun build other than the one the streak was measured on. A later Bun
