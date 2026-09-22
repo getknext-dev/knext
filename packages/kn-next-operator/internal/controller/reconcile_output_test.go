@@ -419,6 +419,42 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 			By("being owner-referenced by the NextApp")
 			Expect(ownedBy(sa.OwnerReferences, nn.Name)).To(BeTrue())
 		})
+
+		It("writes spec.imagePullSecrets onto <app>-sa — the SA the revision runs under (#794, #952)", func() {
+			nn := reconcileOnce("sa-pull-secrets", appsv1alpha1.NextAppSpec{
+				Image:            validImage,
+				ImagePullSecrets: []corev1.LocalObjectReference{{Name: "ocir-secret"}},
+			})
+
+			// The revision→SA link (ksvc ServiceAccountName == <app>-sa) is proven by
+			// the ksvc context above; this proves the pull secret lands on that SA, so
+			// the revision's pods pull with it instead of ImagePullBackOff.
+			sa := &corev1.ServiceAccount{}
+			saName := types.NamespacedName{Name: nn.Name + "-sa", Namespace: namespace}
+			Expect(k8sClient.Get(ctx, saName, sa)).To(Succeed())
+			Expect(sa.ImagePullSecrets).To(ContainElement(corev1.LocalObjectReference{Name: "ocir-secret"}))
+		})
+
+		It("OWNS the SA pull secrets — out-of-band drift is re-set from spec, not tolerated (ADR-0001)", func() {
+			nn := reconcileOnce("sa-pull-owns", appsv1alpha1.NextAppSpec{
+				Image:            validImage,
+				ImagePullSecrets: []corev1.LocalObjectReference{{Name: "ocir-secret"}},
+			})
+			saName := types.NamespacedName{Name: nn.Name + "-sa", Namespace: namespace}
+
+			By("an out-of-band actor clearing the pull secrets off the SA")
+			sa := &corev1.ServiceAccount{}
+			Expect(k8sClient.Get(ctx, saName, sa)).To(Succeed())
+			sa.ImagePullSecrets = nil
+			Expect(k8sClient.Update(ctx, sa)).To(Succeed())
+
+			By("a reconcile restoring them from spec")
+			reconciler := &NextAppReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, saName, sa)).To(Succeed())
+			Expect(sa.ImagePullSecrets).To(ContainElement(corev1.LocalObjectReference{Name: "ocir-secret"}))
+		})
 	})
 
 	// The PVC-backed bytecode cache was REMOVED: the V8 compile cache is baked into

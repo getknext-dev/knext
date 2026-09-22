@@ -212,6 +212,34 @@ spec:
               image:
                 description: The OpenNext bundled Next.js image
                 type: string
+              imagePullSecrets:
+                description: |-
+                  ImagePullSecrets names Secrets in the app's namespace that hold registry
+                  pull credentials. The operator writes them onto the app's ServiceAccount
+                  (`<app>-sa`) and OWNS the field — drift is re-set on every reconcile
+                  (ADR-0001: the operator is the single source of truth). Without this a
+                  private-registry image (OCIR, private GHCR, ECR) is stuck in
+                  ImagePullBackOff, recoverable today only by an out-of-band `kubectl patch
+                  sa` the operator merely tolerates (#794, #952). Same shape as core
+                  PodSpec.ImagePullSecrets; the image-prewarm DaemonSet inherits these from
+                  the same SA (ADR-0037).
+                items:
+                  description: |-
+                    LocalObjectReference contains enough information to let you locate the
+                    referenced object inside the same namespace.
+                  properties:
+                    name:
+                      default: ""
+                      description: |-
+                        Name of the referent.
+                        This field is effectively required, but due to backwards compatibility is
+                        allowed to be empty. Instances of this type with an empty value here are
+                        almost certainly wrong.
+                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                      type: string
+                  type: object
+                  x-kubernetes-map-type: atomic
+                type: array
               observability:
                 description: Observability — Prometheus metrics
                 properties:

@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -41,6 +42,18 @@ type NextAppSpec struct {
 	// The OpenNext bundled Next.js image
 	// +kubebuilder:validation:Required
 	Image string `json:"image"`
+
+	// ImagePullSecrets names Secrets in the app's namespace that hold registry
+	// pull credentials. The operator writes them onto the app's ServiceAccount
+	// (`<app>-sa`) and OWNS the field — drift is re-set on every reconcile
+	// (ADR-0001: the operator is the single source of truth). Without this a
+	// private-registry image (OCIR, private GHCR, ECR) is stuck in
+	// ImagePullBackOff, recoverable today only by an out-of-band `kubectl patch
+	// sa` the operator merely tolerates (#794, #952). Same shape as core
+	// PodSpec.ImagePullSecrets; the image-prewarm DaemonSet inherits these from
+	// the same SA (ADR-0037).
+	// +optional
+	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
 
 	// How many concurrent Next.js pods should be active
 	// +optional
