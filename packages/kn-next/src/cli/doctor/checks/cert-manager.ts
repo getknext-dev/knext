@@ -67,6 +67,7 @@ export function certManagerCheck(ctx: CheckContext): CheckResult[] {
             "cert-manager webhook",
             "fail",
             "cert-manager-webhook exists but is not Ready",
+            "wait for it to come up (`kubectl -n cert-manager rollout status deploy/cert-manager-webhook`); if it stays down, reinstall cert-manager",
         ),
     ];
 }

@@ -260,18 +260,22 @@ export async function appImageCheck(ctx: CheckContext): Promise<CheckResult[]> {
         noCreds.length > 0 ||
         unattached.length > 0 ||
         credsUnknown.length > 0;
-    const status = hasWarn
-        ? "warn"
-        : unreachable.length > 0 || unprobed.length > 0
-          ? "skip"
-          : "pass";
-    const hint =
-        noCreds.length > 0 || credsUnknown.length > 0
-            ? `create the registry credential and attach it to the app ServiceAccount, then redeploy — pull secrets are resolved at pod creation, so patching the SA alone does not rescue a running revision: kubectl create secret docker-registry <name> -n <namespace> --docker-server=… --docker-username=… --docker-password=…; full walkthrough: ${PRIVATE_REGISTRY_DOCS_URL}`
-            : unattached.length > 0
-              ? `attach the existing Secret to the app ServiceAccount and redeploy — pull secrets are resolved at pod creation: kubectl patch serviceaccount <app>-sa -n <namespace> --patch '{"imagePullSecrets":[{"name":"<secret>"}]}' (the patch REPLACES the whole imagePullSecrets list — include every entry); full walkthrough: ${PRIVATE_REGISTRY_DOCS_URL}`
-              : undefined;
-    return [
-        mk("app-image", "App image pullable", status, parts.join("; "), hint),
-    ];
+    // Literal statuses per branch (not a computed `status` variable) so the
+    // doctor-hint-invariant scanning guard can statically verify this call — a
+    // dynamic status arg is invisible to that guard (a false-negative it flags).
+    // Behaviour is unchanged: same status + hint + detail as the prior ternary.
+    const detail = parts.join("; ");
+    if (hasWarn) {
+        const hint =
+            noCreds.length > 0 || credsUnknown.length > 0
+                ? `create the registry credential and attach it to the app ServiceAccount, then redeploy — pull secrets are resolved at pod creation, so patching the SA alone does not rescue a running revision: kubectl create secret docker-registry <name> -n <namespace> --docker-server=… --docker-username=… --docker-password=…; full walkthrough: ${PRIVATE_REGISTRY_DOCS_URL}`
+                : unattached.length > 0
+                  ? `attach the existing Secret to the app ServiceAccount and redeploy — pull secrets are resolved at pod creation: kubectl patch serviceaccount <app>-sa -n <namespace> --patch '{"imagePullSecrets":[{"name":"<secret>"}]}' (the patch REPLACES the whole imagePullSecrets list — include every entry); full walkthrough: ${PRIVATE_REGISTRY_DOCS_URL}`
+                  : undefined;
+        return [mk("app-image", "App image pullable", "warn", detail, hint)];
+    }
+    if (unreachable.length > 0 || unprobed.length > 0) {
+        return [mk("app-image", "App image pullable", "skip", detail)];
+    }
+    return [mk("app-image", "App image pullable", "pass", detail)];
 }
