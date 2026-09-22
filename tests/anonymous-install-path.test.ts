@@ -897,6 +897,66 @@ describe('findFileCredentialLeaks — the on-disk auth stores', () => {
       [],
     );
   });
+
+  // #707: docker semantics are REPLACEMENT, not addition — when DOCKER_CONFIG is
+  // set, no docker tool ever reads the default `~/.docker/config.json`. Checking
+  // it anyway audits the runner's own leftover profile, not anything the
+  // anonymous install path could have inherited.
+  it('drops the default `~/.docker/config.json` from candidates when DOCKER_CONFIG is set', () => {
+    const leaks = findFileCredentialLeaks({
+      env: { DOCKER_CONFIG: '/opt/auth' },
+      home: '/home/runner',
+      // Only the DEFAULT path exists on disk — the DOCKER_CONFIG target does not.
+      exists: exists(['/home/runner/.docker/config.json']),
+      read: () => '{"auths":{"ghcr.io":{"auth":"eA=="}}}',
+    });
+    expect(leaks).toEqual([]);
+  });
+
+  it('still checks the default `~/.docker/config.json` when DOCKER_CONFIG is NOT set', () => {
+    const leaks = findFileCredentialLeaks({
+      env: {},
+      home: '/home/runner',
+      exists: exists(['/home/runner/.docker/config.json']),
+      read: () => '{"auths":{"ghcr.io":{"auth":"eA=="}}}',
+    });
+    expect(leaks.map((f) => f.path)).toContain('/home/runner/.docker/config.json');
+  });
+
+  it('treats an empty DOCKER_CONFIG value as unset — the default path is still checked', () => {
+    const leaks = findFileCredentialLeaks({
+      env: { DOCKER_CONFIG: '' },
+      home: '/home/runner',
+      exists: exists(['/home/runner/.docker/config.json']),
+      read: () => '{"auths":{"ghcr.io":{"auth":"eA=="}}}',
+    });
+    expect(leaks.map((f) => f.path)).toContain('/home/runner/.docker/config.json');
+  });
+
+  // #707: the finding's `detail` classifies WHICH key tripped it — key class
+  // only, never a credential value — so the finding is triageable instead of
+  // just naming a path.
+  it.each([
+    ['{"auths":{"ghcr.io":{"auth":"eA=="}}}', 'auths'],
+    ['{"credsStore":"desktop"}', 'credsStore'],
+    ['{"credHelpers":{"ghcr.io":"gh"}}', 'credHelpers'],
+    ['not json at all', 'unparseable'],
+    // `as const` narrows each row to a literal tuple, so `detailClass` types
+    // as the SAME `'auths' | 'credsStore' | 'credHelpers' | 'unparseable'`
+    // union `CredentialFinding['detail']` carries — not a cast that widens or
+    // bypasses the assertion below, just typing the fixture correctly so
+    // `expect(leaks[0].detail).toBe(detailClass)` stays a real comparison
+    // between two values of the finding's actual detail type.
+  ] as const)('classifies the auth-store-present finding detail for %s as %s', (text, detailClass) => {
+    const leaks = findFileCredentialLeaks({
+      env: {},
+      home: '/home/runner',
+      exists: exists(['/home/runner/.docker/config.json']),
+      read: () => text,
+    });
+    expect(leaks).toHaveLength(1);
+    expect(leaks[0].detail).toBe(detailClass);
+  });
 });
 
 describe('findRequestCredentialLeaks — an ALLOWLIST over what went on the wire', () => {
@@ -1295,6 +1355,113 @@ describe('anonymous-install-nightly.yml — the runner must have no credential',
       '          persist-credentials: false',
       '      - run: node scripts/verify-anonymous-install.mjs',
       '        env: { GH_TOKEN: aLiteralToken }',
+    ].join('\n');
+    expect(auditAnonymousWorkflowJob(synthetic(steps)).findings.join(' ')).toMatch(/env/i);
+  });
+
+  // ── #707: step-level `env:` is allowlisted to exactly ONE literal variable ──
+  //
+  // `DOCKER_CONFIG: /home/runner/.anon-docker` relocates the docker auth store
+  // to a directory that never has a `config.json` in it, so the nightly's own
+  // `findFileCredentialLeaks` stops tripping on the runner's leftover default
+  // profile. Anything else at step level — a different name, a different
+  // value, more than one entry — is still a finding: `env:` staying UNPOLICED
+  // would widen the very hole this audit exists to close.
+
+  it('accepts the step-level `env: DOCKER_CONFIG: /home/runner/.anon-docker` exactly', () => {
+    const steps = [
+      ...GOOD_STEPS.split('\n'),
+      '        env:',
+      '          DOCKER_CONFIG: /home/runner/.anon-docker',
+    ].join('\n');
+    expect(auditAnonymousWorkflowJob(synthetic(steps)).findings).toEqual([]);
+  });
+
+  it('rejects a different env NAME at step level, even with the allowlisted value', () => {
+    const steps = [
+      ...GOOD_STEPS.split('\n'),
+      '        env:',
+      '          OTHER_VAR: /home/runner/.anon-docker',
+    ].join('\n');
+    expect(auditAnonymousWorkflowJob(synthetic(steps)).findings.join(' ')).toMatch(/env/i);
+  });
+
+  it('rejects a different literal VALUE at step level, even with the allowlisted name', () => {
+    const steps = [
+      ...GOOD_STEPS.split('\n'),
+      '        env:',
+      '          DOCKER_CONFIG: /tmp/somewhere-else',
+    ].join('\n');
+    expect(auditAnonymousWorkflowJob(synthetic(steps)).findings.join(' ')).toMatch(/env/i);
+  });
+
+  it('rejects a `${{ }}` expression value for DOCKER_CONFIG at step level', () => {
+    const steps = [
+      ...GOOD_STEPS.split('\n'),
+      '        env:',
+      '          DOCKER_CONFIG: ${{ github.workspace }}',
+    ].join('\n');
+    const findings = auditAnonymousWorkflowJob(synthetic(steps)).findings.join(' ');
+    expect(findings).toMatch(/interpolat|expression/i);
+  });
+
+  it('rejects a SECOND step-level env entry alongside the allowlisted one', () => {
+    const steps = [
+      ...GOOD_STEPS.split('\n'),
+      '        env:',
+      '          DOCKER_CONFIG: /home/runner/.anon-docker',
+      '          EXTRA: x',
+    ].join('\n');
+    expect(auditAnonymousWorkflowJob(synthetic(steps)).findings.join(' ')).toMatch(/env/i);
+  });
+
+  it('still rejects a job-level `env:` block — only step-level is allowlisted', () => {
+    const mutated = synthetic(GOOD_STEPS).replace(
+      '    permissions: {}\n    steps:',
+      '    permissions: {}\n    env:\n      DOCKER_CONFIG: /home/runner/.anon-docker\n    steps:',
+    );
+    expect(auditAnonymousWorkflowJob(mutated).findings.join(' ')).toMatch(/env/i);
+  });
+
+  // ── cr-1196: YAML mapping order is free — `env:` AFTER `steps:` is legal ────
+  //
+  // Rule 5 used to scope its scan to the text BEFORE `steps:`, so a job-level
+  // `env:` written AFTER the sequence slipped past everything: not in the
+  // pre-`steps:` scan (rule 5), not in any step's own text (`parseJobSteps`
+  // stops collecting the moment it sees a line at or left of the item indent —
+  // which is exactly what a trailing job-level key is), and not caught by the
+  // expression allowlist (rule 4) when the value is a literal. Proven exploit:
+  // a `GH_TOKEN` job-level env after `steps:` scored ZERO findings.
+
+  it('rejects a job-level `env:` BLOCK written AFTER `steps:` (cr-1196 exploit)', () => {
+    const steps = [
+      ...GOOD_STEPS.split('\n'),
+      '    env:',
+      '      GH_TOKEN: aLiteralTokenValue',
+    ].join('\n');
+    expect(auditAnonymousWorkflowJob(synthetic(steps)).findings.join(' ')).toMatch(/env/i);
+  });
+
+  it('rejects a job-level `env:` INLINE-FLOW form written AFTER `steps:` (cr-1196 exploit)', () => {
+    const steps = [...GOOD_STEPS.split('\n'), '    env: { GH_TOKEN: aLiteralTokenValue }'].join(
+      '\n',
+    );
+    expect(auditAnonymousWorkflowJob(synthetic(steps)).findings.join(' ')).toMatch(/env/i);
+  });
+
+  // ── cr-1196 re-review: a FLOW-STYLE `steps:` value leaves `itemIndent` null ──
+  //
+  // `jobConfigWithoutSteps` found the `steps:` header line but no `- ` sequence
+  // item ever followed it — a flow-style `steps: [{...}]` on the line AFTER the
+  // bare `steps:` header. `itemIndent` stayed `null`, `sequenceEnd` stayed
+  // `lines.length`, so EVERYTHING after `steps:` — including a job-level `env:`
+  // — was excised from rule 5's view. Proven exploit (valid YAML, GitHub
+  // Actions accepts a flow-style `steps:` value): scored ZERO findings.
+  it('rejects a job-level `env:` after a FLOW-STYLE `steps:` value (cr-1196 re-review exploit)', () => {
+    const steps = [
+      '      [{name: a, run: node scripts/verify-anonymous-install.mjs}]',
+      '    env:',
+      '      GH_TOKEN: lit',
     ].join('\n');
     expect(auditAnonymousWorkflowJob(synthetic(steps)).findings.join(' ')).toMatch(/env/i);
   });

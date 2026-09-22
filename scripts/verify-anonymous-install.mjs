@@ -815,24 +815,50 @@ const RELOCATED_STORE_SUFFIX = { DOCKER_CONFIG: '/config.json', REGISTRY_AUTH_FI
  * as a finding: a malformed store could hide credentials, and a check that goes
  * green because it could not read the file is the false-green this gate refuses.
  */
-export function dockerAuthStoreHasCredential(text) {
+/**
+ * WHICH key class tripped `dockerAuthStoreHasCredential` — key class only,
+ * NEVER a credential value, so the finding stays safe to print (#707). One of
+ * `'auths' | 'credsStore' | 'credHelpers' | 'unparseable'`, or `null` when the
+ * store parses and holds no credential.
+ */
+export function classifyAuthStoreCredential(text) {
   let cfg;
   try {
     cfg = JSON.parse(text);
   } catch {
-    return true;
+    return 'unparseable';
   }
-  if (!cfg || typeof cfg !== 'object') return false;
-  if (cfg.auths && typeof cfg.auths === 'object' && Object.keys(cfg.auths).length > 0) return true;
-  if (typeof cfg.credsStore === 'string' && cfg.credsStore !== '') return true;
+  if (!cfg || typeof cfg !== 'object') return null;
+  if (cfg.auths && typeof cfg.auths === 'object' && Object.keys(cfg.auths).length > 0)
+    return 'auths';
+  if (typeof cfg.credsStore === 'string' && cfg.credsStore !== '') return 'credsStore';
   if (
     cfg.credHelpers &&
     typeof cfg.credHelpers === 'object' &&
     Object.keys(cfg.credHelpers).length > 0
   )
-    return true;
-  return false;
+    return 'credHelpers';
+  return null;
 }
+
+export function dockerAuthStoreHasCredential(text) {
+  return classifyAuthStoreCredential(text) !== null;
+}
+
+/**
+ * A `findFileCredentialLeaks` finding.
+ *
+ * `detail` is OPTIONAL, not just absent-in-practice on some branches: the
+ * `.netrc`/`gh/hosts.yml` existence-only findings never carry one (existence
+ * IS the finding, there is no key class to name), while the JSON-store
+ * findings always do. Stated explicitly here — rather than left to structural
+ * inference over the two `findings.push({...})` call sites below — because
+ * `checkJs: false` (see `tsconfig.typecheck.json`) means a consumer's `tsc`
+ * cannot be relied on to infer the same union from this file's body that a
+ * reader would; `#707` shipped a test asserting `leaks[0].detail` against an
+ * un-annotated return type for exactly this reason.
+ * @typedef {{ reason: 'auth-store-present', path: string, detail?: 'auths'|'credsStore'|'credHelpers'|'unparseable' }} CredentialFinding
+ */
 
 /**
  * On-disk auth stores that exist.
@@ -852,6 +878,7 @@ export function dockerAuthStoreHasCredential(text) {
  *    weakening of the gate: an empty store carries no credential, so a pull made
  *    with it on disk is genuinely anonymous — which is the exact thing this check
  *    is asserting.
+ * @returns {CredentialFinding[]}
  */
 export function findFileCredentialLeaks({
   env = {},
@@ -863,8 +890,15 @@ export function findFileCredentialLeaks({
     `${home}/.docker/config.json`,
     `${home}/.config/containers/auth.json`,
   ]);
+  // #707: docker semantics are REPLACEMENT, not addition — when `DOCKER_CONFIG`
+  // is set, no docker tool ever reads the default `~/.docker/config.json`.
+  // Keeping the default path in `candidates` unconditionally audited the
+  // RUNNER'S own leftover profile rather than anything the anonymous install
+  // path could actually inherit, which is exactly the false-positive that made
+  // the nightly red while the front door itself worked.
+  const dockerConfigRelocated = typeof env.DOCKER_CONFIG === 'string' && env.DOCKER_CONFIG !== '';
   const candidates = [
-    `${home}/.docker/config.json`,
+    ...(dockerConfigRelocated ? [] : [`${home}/.docker/config.json`]),
     `${home}/.config/gh/hosts.yml`,
     `${home}/.config/containers/auth.json`,
     `${home}/.netrc`,
@@ -885,13 +919,13 @@ export function findFileCredentialLeaks({
       findings.push({ reason: 'auth-store-present', path });
       continue;
     }
-    let hasCred;
+    let detail;
     try {
-      hasCred = dockerAuthStoreHasCredential(read(path));
+      detail = classifyAuthStoreCredential(read(path));
     } catch {
-      hasCred = true; // could not read a store that exists → conservative finding
+      detail = 'unparseable'; // could not read a store that exists → conservative finding
     }
-    if (hasCred) findings.push({ reason: 'auth-store-present', path });
+    if (detail) findings.push({ reason: 'auth-store-present', path, detail });
   }
   return findings;
 }
@@ -1042,6 +1076,59 @@ function blankYamlComments(text) {
 }
 
 /**
+ * The job block's config text with the `steps:` SEQUENCE removed — everything
+ * that is job-level, whether it sits BEFORE or AFTER the sequence, with the
+ * step items themselves excluded.
+ *
+ * cr-1196: YAML mapping order is free, so a job-level `env:` legally follows
+ * `steps:` in the same job. Rule 5 used to scan only the text before
+ * `steps:`, so that placement slipped past everything — not in the
+ * before-`steps:` scan, not in any step's own text (the step-level env
+ * allowlist in 2c only ever sees step TEXT, and the sequence itself stops
+ * collecting the moment it sees a line at or left of the item indent — which
+ * is exactly what a trailing job-level key is), and not caught by the
+ * expression allowlist (rule 4) when the value is a literal. Proven exploit:
+ * a job-level `GH_TOKEN` after `steps:` scored zero findings.
+ *
+ * Mirrors `parseJobSteps`'s own indent discovery so the two agree on exactly
+ * where the sequence ends — the suffix returned here starts at the same line
+ * `parseJobSteps` would have broken out of its loop on.
+ */
+function jobConfigWithoutSteps(block) {
+  const lines = block.split('\n');
+  const stepsRe = new RegExp(`^\\s*${yamlKey('steps')}\\s*$`);
+  const stepsAt = lines.findIndex((line) => stepsRe.test(line));
+  if (stepsAt === -1) return block;
+
+  let itemIndent = null;
+  let sequenceEnd = lines.length;
+  for (let i = stepsAt + 1; i < lines.length; i++) {
+    const line = lines[i];
+    const item = line.match(/^(\s*)-\s/);
+    if (item && (itemIndent === null || item[1].length === itemIndent)) {
+      itemIndent = item[1].length;
+      continue;
+    }
+    if (itemIndent === null) continue; // still hasn't seen the first item
+    // A non-blank line at or left of the item indent ends the sequence —
+    // same rule `parseJobSteps` uses to stop collecting.
+    if (line.trim() !== '' && line.match(/^(\s*)/)[1].length <= itemIndent) {
+      sequenceEnd = i;
+      break;
+    }
+  }
+  // cr-1196 re-review: fail CLOSED when no `- ` sequence item was ever found —
+  // a flow-style (`steps: [{...}]`) or mapping-shaped `steps:` value leaves
+  // `itemIndent` `null`. Without this, `sequenceEnd` stayed `lines.length` and
+  // EVERYTHING after `steps:` (including a job-level `env:`) was excised from
+  // rule 5's view. Returning the whole, unmodified block means rule 5 scans it
+  // regardless of what shape `steps:` turned out to be — worst case a
+  // redundant scan, never a blind spot.
+  if (itemIndent === null) return block;
+  return [...lines.slice(0, stepsAt + 1), ...lines.slice(sequenceEnd)].join('\n');
+}
+
+/**
  * Split a job block into its `steps:` sequence items.
  *
  * Structural rather than indent-coupled. The first version of the `with:` scan
@@ -1152,6 +1239,67 @@ export function parseWithEntries(stepText) {
   }
   return entries;
 }
+
+/**
+ * A step's own `env:` entries — same shape as `parseWithEntries`, kept as a
+ * separate function (rather than a shared parameter) so a change to one
+ * cannot silently retarget the other.
+ */
+export function parseEnvEntries(stepText) {
+  const lines = stepText.split('\n');
+  const envRe = new RegExp(`^\\s*${yamlKey('env')}`);
+  const index = lines.findIndex((line) => envRe.test(line));
+  if (index === -1) return [];
+
+  const line = lines[index];
+  const inline = line.replace(envRe, '').trim();
+  if (inline !== '') {
+    return inline
+      .replace(/^\{/, '')
+      .replace(/\}$/, '')
+      .split(',')
+      .map((pair) => {
+        const at = pair.indexOf(':');
+        if (at === -1) return undefined;
+        return {
+          key: pair
+            .slice(0, at)
+            .trim()
+            .replace(/^["']|["']$/g, ''),
+          value: pair.slice(at + 1).trim(),
+        };
+      })
+      .filter(Boolean);
+  }
+
+  const envIndent = line.match(/^(\s*)/)[1].length;
+  const entries = [];
+  for (const next of lines.slice(index + 1)) {
+    if (next.trim() === '') continue;
+    if (next.match(/^(\s*)/)[1].length <= envIndent) break;
+    const entry = next.match(/^\s*["']?([\w.-]+)["']?\s*:\s*(.*)$/);
+    if (entry) entries.push({ key: entry[1], value: entry[2].trim() });
+  }
+  return entries;
+}
+
+/**
+ * The ONE step-level env var this job may set, and its ONE allowed literal
+ * value (#707).
+ *
+ * `DOCKER_CONFIG` relocates the docker auth store to a directory that never
+ * holds a `config.json` — real docker semantics are REPLACEMENT, so once this
+ * is set no docker tool reads the runner's default `~/.docker/config.json`
+ * (see `findFileCredentialLeaks`). Restricted to exactly this name AND this
+ * literal value: `env:` at step level is otherwise completely unpoliced
+ * (rule 5 below), so allowlisting anything looser would widen the very hole
+ * this audit exists to close. A `${{ … }}` value is caught separately by the
+ * expression allowlist (rule 4), which stays empty.
+ */
+export const ALLOWED_STEP_ENV = Object.freeze({
+  name: 'DOCKER_CONFIG',
+  value: '/home/runner/.anon-docker',
+});
 
 export function auditAnonymousWorkflowJob(workflowText) {
   const findings = [];
@@ -1320,6 +1468,26 @@ export function auditAnonymousWorkflowJob(workflowText) {
         );
       }
     }
+
+    // 2c. step-level `env:` — allowlisted to exactly ONE literal variable
+    //     (#707: `DOCKER_CONFIG`, relocating the docker auth store so this
+    //     audit stops tripping on the runner's own leftover profile). A
+    //     `${{ … }}` value is caught separately by the expression allowlist
+    //     below (rule 4), which stays empty regardless of this allowlist.
+    const envEntries = parseEnvEntries(stepText);
+    if (envEntries.length > 0) {
+      const isAllowlisted =
+        envEntries.length === 1 &&
+        envEntries[0].key === ALLOWED_STEP_ENV.name &&
+        unquote(withoutTrailingComment(envEntries[0].value).trim()) === ALLOWED_STEP_ENV.value;
+      if (!isAllowlisted) {
+        findings.push(
+          `${where} declares an \`env:\` entry that is not the sole allowlisted ` +
+            `\`${ALLOWED_STEP_ENV.name}: ${ALLOWED_STEP_ENV.value}\` — the anonymous check ` +
+            'inherits nothing on purpose, so any other variable it is given is a finding',
+        );
+      }
+    }
   }
 
   // 3. run commands — allowlist. A block scalar (`run: |`) is not on it.
@@ -1345,17 +1513,31 @@ export function auditAnonymousWorkflowJob(workflowText) {
     }
   }
 
-  // 5. env — the job sets none, so a variable that is not a credential today
-  //    cannot quietly become one later.
+  // 5. job-level env — the JOB itself sets none, so a variable that is not a
+  //    credential today cannot quietly become one later by way of a job-wide
+  //    `env:` every step would inherit. Step-level `env:` is handled per step
+  //    above (2c), where it is allowlisted to exactly one literal variable —
+  //    this rule is scoped to `jobConfigWithoutSteps(block)` (everything
+  //    OUTSIDE the parsed `steps:` sequence, whether before OR after it)
+  //    precisely so it does not re-flag that allowlisted step-level entry
+  //    while STILL catching a job-level `env:` written after `steps:`.
+  //
+  //    cr-1196: scoping this to the text BEFORE `steps:` was the bug, not the
+  //    fix — YAML mapping order is free, so `env:` legally follows `steps:`
+  //    in the same job, and that placement scored ZERO findings under the
+  //    prefix-only scan: invisible here, invisible to the step-level env
+  //    allowlist (2c only sees step TEXT), and invisible to the expression
+  //    allowlist (rule 4) for a literal value.
   //
   //    NOT anchored to end-of-line. `env:\s*$` missed the inline flow form
   //    `env: { GH_TOKEN: aLiteralToken }`, which interpolates nothing and so is
   //    not covered by the expression allowlist either — the same "only the
   //    spelling that exists today" shape as the `persist-credentials` defect.
-  if (/^\s*["']?env["']?\s*:/m.test(block)) {
+  const jobLevelBlock = jobConfigWithoutSteps(block);
+  if (/^\s*["']?env["']?\s*:/m.test(jobLevelBlock)) {
     findings.push(
-      `job \`${jobId}\` declares an \`env:\` block — the anonymous check inherits nothing on ` +
-        'purpose, so any variable it is given is a finding',
+      `job \`${jobId}\` declares a job-level \`env:\` block — the anonymous check inherits ` +
+        'nothing on purpose, so any variable it is given is a finding',
     );
   }
 

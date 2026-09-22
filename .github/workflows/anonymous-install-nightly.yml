@@ -89,7 +89,21 @@ jobs:
       # shell would otherwise make a local run permanently red; using it here
       # would let CI remove the very credentials whose absence is the finding.
       # The run command is pinned by an allowlist so it cannot be added quietly.
+      #
+      # #707: `DOCKER_CONFIG` here is gate hygiene, not a weakening of the
+      # check. GitHub-hosted runners ship a default `~/.docker/config.json`
+      # carrying a `credsStore`/`credHelpers` entry for the runner's own image
+      # cache — nothing the anonymous install path could have inherited. Real
+      # docker semantics are REPLACEMENT: once `DOCKER_CONFIG` is set, no
+      # docker tool reads the default path, and this directory never has a
+      # `config.json` in it. `auditAnonymousWorkflowJob` allowlists exactly
+      # this NAME and this LITERAL value at step level and rejects everything
+      # else (a different name, a different value, or an expression) — see
+      # `ALLOWED_STEP_ENV` and `findFileCredentialLeaks` in
+      # `scripts/verify-anonymous-install.mjs`.
       - name: Walk the documented install path with no credentials
+        env:
+          DOCKER_CONFIG: /home/runner/.anon-docker
         run: node scripts/verify-anonymous-install.mjs
 
   nightly-red-alert:
