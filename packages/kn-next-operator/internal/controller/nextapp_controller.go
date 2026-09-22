@@ -408,6 +408,13 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, sa, func() error {
 		sa.AutomountServiceAccountToken = ptr.To(false)
+		// Own the pull secrets: set them from spec on every reconcile so an
+		// out-of-band `kubectl patch sa` is no longer required for a private
+		// registry, and drift is corrected rather than tolerated (#794, #952;
+		// ADR-0001). The image-prewarm DaemonSet reads them back off this SA
+		// (ADR-0037, appImagePullSecrets), so wiring here covers both the app
+		// revision and the prewarm path.
+		sa.ImagePullSecrets = nextApp.Spec.ImagePullSecrets
 		return ctrl.SetControllerReference(&nextApp, sa, r.Scheme)
 	})
 	if err != nil {

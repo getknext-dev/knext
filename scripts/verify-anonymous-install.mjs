@@ -804,6 +804,37 @@ export const CREDENTIAL_FILE_ENV_VARS = ['DOCKER_CONFIG', 'REGISTRY_AUTH_FILE'];
 const RELOCATED_STORE_SUFFIX = { DOCKER_CONFIG: '/config.json', REGISTRY_AUTH_FILE: '' };
 
 /**
+ * Does a Docker/containers JSON auth store actually HOLD a credential?
+ *
+ * `~/.docker/config.json` legitimately exists EMPTY — GitHub-hosted runners ship
+ * a default one (`{"auths":{}}` or a bare `{}`), and so does `docker` after any
+ * no-login operation. Existence alone is therefore NOT a credential (that
+ * false-positive is exactly what made #707's nightly red without the front door
+ * being broken). A credential is real `auths`, a `credsStore` (an external helper
+ * that returns credentials), or `credHelpers`. Unreadable/unparseable → treated
+ * as a finding: a malformed store could hide credentials, and a check that goes
+ * green because it could not read the file is the false-green this gate refuses.
+ */
+export function dockerAuthStoreHasCredential(text) {
+  let cfg;
+  try {
+    cfg = JSON.parse(text);
+  } catch {
+    return true;
+  }
+  if (!cfg || typeof cfg !== 'object') return false;
+  if (cfg.auths && typeof cfg.auths === 'object' && Object.keys(cfg.auths).length > 0) return true;
+  if (typeof cfg.credsStore === 'string' && cfg.credsStore !== '') return true;
+  if (
+    cfg.credHelpers &&
+    typeof cfg.credHelpers === 'object' &&
+    Object.keys(cfg.credHelpers).length > 0
+  )
+    return true;
+  return false;
+}
+
+/**
  * On-disk auth stores that exist.
  *
  * Scope is registry and GitHub-API credentials — the two this check could
@@ -811,8 +842,27 @@ const RELOCATED_STORE_SUFFIX = { DOCKER_CONFIG: '/config.json', REGISTRY_AUTH_FI
  * credential, irrelevant to an OCI pull or a release-asset download, and
  * including it would make every developer's local run red for a reason that is
  * not a finding.
+ *
+ * Two classes of store, treated differently ON PURPOSE:
+ *  - `.netrc` and `gh/hosts.yml` only exist when configured, so EXISTENCE is the
+ *    finding.
+ *  - Docker/containers JSON stores (`.docker/config.json`, `containers/auth.json`,
+ *    and their `DOCKER_CONFIG`/`REGISTRY_AUTH_FILE` relocations) can exist empty,
+ *    so they are content-checked via `dockerAuthStoreHasCredential`. This is not a
+ *    weakening of the gate: an empty store carries no credential, so a pull made
+ *    with it on disk is genuinely anonymous — which is the exact thing this check
+ *    is asserting.
  */
-export function findFileCredentialLeaks({ env = {}, home = homedir(), exists = existsSync } = {}) {
+export function findFileCredentialLeaks({
+  env = {},
+  home = homedir(),
+  exists = existsSync,
+  read = (p) => readFileSync(p, 'utf8'),
+} = {}) {
+  const jsonStores = new Set([
+    `${home}/.docker/config.json`,
+    `${home}/.config/containers/auth.json`,
+  ]);
   const candidates = [
     `${home}/.docker/config.json`,
     `${home}/.config/gh/hosts.yml`,
@@ -822,12 +872,28 @@ export function findFileCredentialLeaks({ env = {}, home = homedir(), exists = e
   for (const name of CREDENTIAL_FILE_ENV_VARS) {
     const value = env[name];
     if (typeof value === 'string' && value !== '') {
-      candidates.push(`${value}${RELOCATED_STORE_SUFFIX[name] ?? ''}`);
+      const path = `${value}${RELOCATED_STORE_SUFFIX[name] ?? ''}`;
+      candidates.push(path);
+      // A relocated docker/registry store is the same JSON schema — content-check it.
+      if (name === 'DOCKER_CONFIG' || name === 'REGISTRY_AUTH_FILE') jsonStores.add(path);
     }
   }
-  return [...new Set(candidates)]
-    .filter((path) => exists(path))
-    .map((path) => ({ reason: 'auth-store-present', path }));
+  const findings = [];
+  for (const path of new Set(candidates)) {
+    if (!exists(path)) continue;
+    if (!jsonStores.has(path)) {
+      findings.push({ reason: 'auth-store-present', path });
+      continue;
+    }
+    let hasCred;
+    try {
+      hasCred = dockerAuthStoreHasCredential(read(path));
+    } catch {
+      hasCred = true; // could not read a store that exists → conservative finding
+    }
+    if (hasCred) findings.push({ reason: 'auth-store-present', path });
+  }
+  return findings;
 }
 
 /**

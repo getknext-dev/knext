@@ -72,6 +72,29 @@ and `publicUrl`.
 fail — deliberately, rather than appearing to work against something that is not yours.
 </Callout>
 
+## Private registries
+
+Most registries need credentials to pull from — private GHCR, OCIR, ECR and private Docker Hub all
+do. Name the Kubernetes Secret that holds them:
+
+```ts
+imagePullSecrets: ['acme-registry'],
+```
+
+Create that Secret once, in the namespace you deploy into:
+
+```bash
+kubectl create secret docker-registry acme-registry \
+  --docker-server=registry.example.com \
+  --docker-username='<user>' \
+  --docker-password='<token>'
+```
+
+knext writes it onto the app's service account, so every revision — and the node-local image
+pre-pull, if you enable it — pulls with the same credentials. Leave it out and a private image
+leaves the first pods stuck in `ImagePullBackOff`; adding the secret afterwards does not rescue the
+running revision, so you would have to deploy again. Naming it here is the whole fix.
+
 ## The one line that matters most
 
 ```ts

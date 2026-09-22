@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
@@ -230,8 +231,9 @@ func maximalWarmScheduleSpec() appsv1alpha1.NextAppSpec {
 	provisionKafka := true
 	networkPolicy := true
 	return appsv1alpha1.NextAppSpec{
-		Image:   guardFixtureImage,
-		Scaling: maximalScalingSpec(),
+		Image:            guardFixtureImage,
+		ImagePullSecrets: []corev1.LocalObjectReference{{Name: "ocir-secret"}},
+		Scaling:          maximalScalingSpec(),
 		Resources: &appsv1alpha1.ResourcesSpec{
 			CPURequest: "100m", MemoryRequest: "256Mi", CPULimit: "1", MemoryLimit: "1Gi",
 		},

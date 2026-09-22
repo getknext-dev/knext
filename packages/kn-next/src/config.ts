@@ -266,6 +266,15 @@ export interface KnativeNextConfig {
     cache?: CacheConfig;
     queue?: QueueConfig; // For ISR revalidation (Kafka for Knative Eventing)
     registry: string;
+    // Names of Kubernetes Secrets (in the app's namespace) holding registry pull
+    // credentials, for when `registry` is private (OCIR, private GHCR, ECR — the
+    // normal case). The operator writes them onto the app's ServiceAccount and
+    // owns the field, so the app's pods pull the image instead of sitting in
+    // ImagePullBackOff (#794/#952). Each entry is a Secret NAME; the CLI maps
+    // them to the CR's `spec.imagePullSecrets` ([{name}]). knext does not create
+    // the Secret — create it once with `kubectl create secret docker-registry`
+    // and name it here.
+    imagePullSecrets?: string[];
     // Runtime for the standalone (turbopack) shape only: 'bun' or 'node'
     // (default). Irrelevant to the vinext single executable, where the runtime
     // is compiled into the binary.

@@ -36,10 +36,16 @@ meta() { # <KEY> → value of the KEY=... line in the metadata file (empty if ab
 BUILD_ID="$(meta BUILD_ID)"
 DEPLOYMENT_ID="$(meta DEPLOYMENT_ID)"
 if [ -n "${BUILD_ID}" ] && [ -n "${DEPLOYMENT_ID}" ]; then
-  echo "==== harness-parseable deployment ids (next-deploy.ts@v16.2.0 contract) ===="
+  echo "==== harness-parseable deployment ids (next-deploy.ts contract, v16.2.x + v16.3.x) ===="
   echo "BUILD_ID: ${BUILD_ID}"
   echo "DEPLOYMENT_ID: ${DEPLOYMENT_ID}"
+  # v16.2.x harness parses IMMUTABLE_ASSET_TOKEN; v16.3.x replaced it with
+  # NEXT_SUPPORTS_IMMUTABLE_ASSETS (0|1) and THROWS if absent. Emit both so one
+  # log hook serves both Next versions. Value 0: knext's targets do not implement
+  # Next's immutable content-addressed assets (`/_next/static/immutable/*`), so
+  # advertising 1 would run immutable-asset tests the deployment cannot satisfy.
   echo "IMMUTABLE_ASSET_TOKEN: undefined"
+  echo "NEXT_SUPPORTS_IMMUTABLE_ASSETS: 0"
 else
   # HONESTY: no fake parseable ids. Without metadata the deploy did not persist
   # (or never ran) — let the harness's own "Failed to get buildId from logs"

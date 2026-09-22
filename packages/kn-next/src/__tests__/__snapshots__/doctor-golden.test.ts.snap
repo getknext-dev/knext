@@ -5,7 +5,7 @@ exports[`doctor golden output (#1055 byte-identical pin) reachable — all check
 PASS  kubectl strict validation                   client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)
 PASS  Static asset mode                           object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys
 PASS  NextApp CRD                                 served version: v1alpha1
-PASS  NextApp CRD schema coverage                 all 69 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
+PASS  NextApp CRD schema coverage                 all 71 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
 PASS  Operator deployment                         kn-next-operator-controller-manager Ready in kn-next-operator-system
 PASS  cert-manager webhook                        cert-manager-webhook Ready
 PASS  Knative ingress-class                       ingress-class kourier.ingress.networking.knative.dev is served by net-kourier-controller
@@ -44,7 +44,7 @@ exports[`doctor golden output (#1055 byte-identical pin) reachable — all check
     "title": "NextApp CRD",
   },
   {
-    "detail": "all 69 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)",
+    "detail": "all 71 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)",
     "id": "crd-schema",
     "status": "pass",
     "title": "NextApp CRD schema coverage",
@@ -419,7 +419,7 @@ exports[`doctor golden output (#1055 byte-identical pin) budget-exhausted — th
 PASS  kubectl strict validation                   client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)
 PASS  Static asset mode                           object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys
 PASS  NextApp CRD                                 served version: v1alpha1
-PASS  NextApp CRD schema coverage                 all 69 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
+PASS  NextApp CRD schema coverage                 all 71 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
 PASS  Operator deployment                         kn-next-operator-controller-manager Ready in kn-next-operator-system
 PASS  cert-manager webhook                        cert-manager-webhook Ready
 PASS  Knative ingress-class                       ingress-class kourier.ingress.networking.knative.dev is served by net-kourier-controller
@@ -458,7 +458,7 @@ exports[`doctor golden output (#1055 byte-identical pin) budget-exhausted — th
     "title": "NextApp CRD",
   },
   {
-    "detail": "all 69 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)",
+    "detail": "all 71 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)",
     "id": "crd-schema",
     "status": "pass",
     "title": "NextApp CRD schema coverage",

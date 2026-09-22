@@ -819,12 +819,11 @@ describe('findFileCredentialLeaks — the on-disk auth stores', () => {
   // so (TS2322 — `Buffer` is not assignable to `string`).
   const exists = (paths: string[]) => (p: PathLike) => paths.includes(String(p));
 
+  // `.netrc` and `gh/hosts.yml` only exist when configured → existence IS the finding.
   it.each([
-    ['/home/runner/.docker/config.json'],
     ['/home/runner/.config/gh/hosts.yml'],
-    ['/home/runner/.config/containers/auth.json'],
     ['/home/runner/.netrc'],
-  ])('flags %s', (path) => {
+  ])('flags %s on existence', (path) => {
     const leaks = findFileCredentialLeaks({
       env: {},
       home: '/home/runner',
@@ -833,15 +832,58 @@ describe('findFileCredentialLeaks — the on-disk auth stores', () => {
     expect(leaks.map((f) => f.path)).toContain(path);
   });
 
-  it('follows the env vars that RELOCATE an auth store', () => {
+  // #707: a Docker/containers JSON store can exist EMPTY (GitHub runners ship a
+  // default `~/.docker/config.json`), so an empty store is NOT a credential.
+  it.each([
+    ['/home/runner/.docker/config.json'],
+    ['/home/runner/.config/containers/auth.json'],
+  ])('does NOT flag an EMPTY %s (the runner-default false-positive)', (path) => {
+    const leaks = findFileCredentialLeaks({
+      env: {},
+      home: '/home/runner',
+      exists: exists([path]),
+      read: () => '{"auths":{}}',
+    });
+    expect(leaks).toEqual([]);
+  });
+
+  // …but a store that actually HOLDS a credential (or is unreadable) is flagged.
+  it.each([
+    ['/home/runner/.docker/config.json', '{"auths":{"ghcr.io":{"auth":"eA=="}}}'],
+    ['/home/runner/.docker/config.json', '{"credsStore":"desktop"}'],
+    ['/home/runner/.config/containers/auth.json', '{"credHelpers":{"ghcr.io":"gh"}}'],
+    ['/home/runner/.docker/config.json', 'not json at all'],
+  ])('FLAGS %s when it holds a credential (or is unparseable)', (path, text) => {
+    const leaks = findFileCredentialLeaks({
+      env: {},
+      home: '/home/runner',
+      exists: exists([path]),
+      read: () => text,
+    });
+    expect(leaks.map((f) => f.path)).toContain(path);
+  });
+
+  it('follows the env vars that RELOCATE an auth store (content-checked)', () => {
     // Scrubbing `~/.docker/config.json` proves nothing if DOCKER_CONFIG points
-    // somewhere else — checking the default path only is the half-guard.
+    // somewhere else — checking the default path only is the half-guard. A
+    // relocated store holding real `auths` is still a finding.
     const leaks = findFileCredentialLeaks({
       env: { DOCKER_CONFIG: '/opt/auth' },
       home: '/home/runner',
       exists: exists(['/opt/auth/config.json']),
+      read: () => '{"auths":{"ghcr.io":{"auth":"eA=="}}}',
     });
     expect(leaks.map((f) => f.path)).toContain('/opt/auth/config.json');
+  });
+
+  it('does NOT flag a relocated store that is empty', () => {
+    const leaks = findFileCredentialLeaks({
+      env: { DOCKER_CONFIG: '/opt/auth' },
+      home: '/home/runner',
+      exists: exists(['/opt/auth/config.json']),
+      read: () => '{}',
+    });
+    expect(leaks).toEqual([]);
   });
 
   it('names every relocating env var it honours', () => {
