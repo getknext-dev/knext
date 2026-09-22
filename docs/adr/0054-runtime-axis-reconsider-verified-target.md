@@ -188,9 +188,13 @@ packaging is v1.0 or a fast-follow.**
    at runtime. This is the exact failure that broke vinext's compile once (bun-exec README, root cause
    1: a runtime-chunked server). The spike stands or falls on solving it. Candidate directions to
    evaluate (not yet decided):
-   - **Generated static-barrel entry** — read the manifests at build time and emit a wrapper that
-     statically `import`s every route/chunk module, so bun's bundler sees the whole graph and inlines
-     it. Preferred if it holds parity.
+   - **nft-trace-driven embed (founder-directed, leading candidate).** @vercel/nft already enumerates
+     the full runtime file set of a dynamically-loading server — that trace IS the `.next/standalone`
+     tree — so drive the embed from it rather than from bun's static analysis: parse the standalone
+     tree / `.next/server/**/*.nft.json` into an explicit include set, then emit a generated barrel
+     that statically `import`s every traced module (or hand bun the explicit set). This reuses Next's
+     own dependency truth and builds on `adapters/standalone-bun-exports.ts`, which already reads and
+     heals that trace for the bun path. Preferred if it holds parity.
    - **Pre-bundle then compile** — `bun build` (or the app's own bundler) into one
      statically-analyzable entry first, then `--compile` that.
    - **Embed-as-file + runtime path load** — `Bun.embeddedFiles` / `with { type: "file" }` for chunks
