@@ -96,11 +96,17 @@ const CLI_ONLY: Record<string, string> = {
         "paired with Dockerfile.hbs — it bounds THAT image recipe's build context, so it is CLI-only for the same reason",
     "public/.gitkeep.hbs":
         "keeps the generated Dockerfile's `COPY … public` layer resolvable before the app has assets",
-    "Dockerfile.standalone.hbs":
-        "the ADR-0055 node/bun standalone runtime image recipe; the zone app is imaged by this repo's own pipeline and needs no standalone recipe",
-    "knext-standalone-entry.mjs.hbs":
-        "the ADR-0055 supervisor ENTRYPOINT shim paired with Dockerfile.standalone.hbs — CLI-only for the same reason",
 };
+
+// `Dockerfile.standalone.hbs` and `knext-standalone-entry.mjs.hbs` (the
+// ADR-0055 standalone runtime image recipe) used to be classified CLI_ONLY
+// here. They have since moved OUT of `templates/app` entirely — to
+// `templates/runtime-standalone/`, which `templateFiles(CLI_TEMPLATE)` below
+// never walks — because `loadTemplates()` renders EVERY `.hbs` under
+// `templates/app` into every scaffolded app with no allowlist, and this
+// recipe is not yet buildable (its own dependency closure and the
+// CLI-selection wiring are a separate increment). No entry is needed for a
+// file this test never sees.
 
 /**
  * The SAFETY-CRITICAL files: the #342 fence pair, the adapter wiring, and the

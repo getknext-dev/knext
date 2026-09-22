@@ -1026,6 +1026,35 @@ describe("#867 the scaffold ships a .dockerignore", () => {
     });
 });
 
+describe("#1155 does NOT scaffold the ADR-0055 standalone runtime image template yet", () => {
+    /**
+     * `loadTemplates()` walks EVERY `.hbs` under `templates/app` with no
+     * allowlist, so a template placed there ships into every new app the
+     * moment it exists — regardless of whether it can actually build.
+     * `Dockerfile.standalone.hbs` + `knext-standalone-entry.mjs.hbs` (the
+     * ADR-0055 standalone image recipe) were briefly placed there and shipped
+     * a non-bootable Dockerfile into every scaffolded app. They now live
+     * outside `templates/app` (`templates/runtime-standalone/`), pending the
+     * CLI-selection increment that will actually render and build them — so
+     * this test pins the ABSENCE, not the presence.
+     */
+    it("scaffold output carries neither Dockerfile.standalone nor knext-standalone-entry.mjs", () => {
+        const { files } = scaffoldApp("std1155");
+        expect([...files.keys()]).not.toContain("Dockerfile.standalone");
+        expect([...files.keys()]).not.toContain("knext-standalone-entry.mjs");
+    });
+
+    it("templates/app itself carries neither .hbs file (loadTemplates has no allowlist, so absence from the tree is what keeps them out)", () => {
+        const cliTemplateDir = resolve(
+            dirname(fileURLToPath(import.meta.url)),
+            "../../templates/app",
+        );
+        const templates = loadTemplates(cliTemplateDir);
+        expect(templates.has("Dockerfile.standalone")).toBe(false);
+        expect(templates.has("knext-standalone-entry.mjs")).toBe(false);
+    });
+});
+
 describe("#910 the scaffold ships the shallow health route the operator probes", () => {
     /**
      * Until this landed, a scaffolded app could never become Ready.
