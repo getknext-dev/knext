@@ -21,6 +21,7 @@ import { createLogger } from "../utils/logger";
 import { bootTrace } from "./boot-trace";
 import { warnOnDegradedCompileCache } from "./compile-cache-health";
 import { warnOnCompileCacheShadow } from "./compile-cache-shadow";
+import { warnIfDbClientsUnavailable } from "./db-clients-probe";
 import { registerDbPoolDrain } from "./db-drain";
 import {
     probeIntervalMs,
@@ -251,6 +252,14 @@ if (process.versions.bun) {
 // (@cerbos/grpc + minio + pg — the supervisor's heaviest graph, needed solely to
 // close two pools) is loaded lazily, inside the drain. That closes no safety
 // window: the handler exists from this point on.
+//
+// #1178: the lean STANDALONE image (ADR-0055) intentionally omits that heavy
+// closure, so on it the drain (and image-cache sync) fail open and no-op
+// SILENTLY. Probe availability once at boot — RESOLVING the specifier, not
+// importing it, so the heavy graph stays off the cold-start path (#441) — and
+// emit ONE loud WARNING if it is absent, naming the #245 scale-to-zero
+// consequence instead of degrading in silence.
+warnIfDbClientsUnavailable({ log });
 registerDbPoolDrain();
 
 // ── Graceful shutdown ─────────────────────────────────────────────────────────

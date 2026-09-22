@@ -506,6 +506,22 @@ describe("@getknext/core's runtime closure actually resolves under what the Dock
             ).resolves.toBeUndefined();
         });
 
+        it("the gap is SURFACED, not silent: the supervisor entry eagerly probes @getknext/lib/clients and warns on absence (#1178)", () => {
+            // ADR-0055 Amendment 1: shipping the heavy closure is deferred, but
+            // the degradation must not degrade in silence. node-server.ts wires
+            // the boot-time probe; the probe's behaviour is proved in
+            // db-clients-probe.test.ts. This asserts the WIRING so a regression
+            // that drops the surfacing reds here (mutation-proved).
+            const nodeServer = readFileSync(
+                join(PKG_ROOT, "src", "adapters", "node-server.ts"),
+                "utf8",
+            );
+            expect(nodeServer).toMatch(
+                /import\s+\{\s*warnIfDbClientsUnavailable\s*\}\s+from\s+["']\.\/db-clients-probe["']/,
+            );
+            expect(nodeServer).toMatch(/warnIfDbClientsUnavailable\s*\(/);
+        });
+
         it("startImageCacheSync returns a no-op stop() without ever loading the object-store client when STORAGE_BUCKET is unset", async () => {
             // Type-level cast (matches image-cache-sync.test.ts's #261 idiom):
             // Next augments ProcessEnv with a REQUIRED NODE_ENV; this env

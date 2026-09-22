@@ -132,6 +132,22 @@ those TCP + TLS + auth handshakes on the request path. Two mitigations:
 knext does not provision the database or the pooler; it owns the zone's
 scaling knobs and wires `DATABASE_URL` from a K8s Secret.
 
+#### Pool drain on scale-down, and the standalone-image caveat (#1178)
+
+On `SIGTERM` the supervisor drains both Postgres pools (writer + read-only) after HTTP
+drains, so in-flight transactions commit-or-rollback and a scaling-down replica releases its
+connections cleanly — **no leaked sockets holding a scale-to-zero compute awake** (#245).
+
+That drain — and the object-store image-cache sync — depend on `@getknext/lib/clients`
+(`pg` + `minio`, the heaviest native closure). The **lean standalone runtime image**
+(ADR-0055) deliberately does **not** ship that closure. On such an image the drain and
+image-cache sync **fail open and no-op**, and the supervisor logs a single loud startup
+`WARN` saying so — it does not crash-loop, and it does not degrade silently. If a zone
+deployed on the standalone axis uses knext's DB pools or object-store image caching, either
+keep it warm (`minScale: 1`, so no scale-down drain is needed) or rebuild the runtime image
+with the clients closure included. The vinext single-executable image carries the closure and
+is unaffected.
+
 ## Keep latency/write-critical zones warm
 
 For a zone where a cold start on the request path is unacceptable — a ledger /

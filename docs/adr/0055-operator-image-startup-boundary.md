@@ -115,6 +115,43 @@ compiled in or wrap the binary — the entry **file** changes, the **invariant h
   bearer-guarded mutating routes regain a drain that lets in-flight mutations settle. Non-root,
   digest-pinned, npm-free runtime layer.
 
+## Amendment 1 (2026-09-23, #1178) — the standalone image's `@getknext/lib/clients` gap is DOCUMENTED-as-degraded, not shipped; the degradation is SURFACED, not silent
+
+The standalone image (action item 1) copies the supervisor's own runtime closure
+(`@getknext/core` dist + pino/prom-client/@opentelemetry) but **deliberately omits**
+`@getknext/lib/clients`' native closure (`@cerbos/grpc`, `minio`, `pg` — by far the heaviest
+graph either supervisor call site can reach, and the biggest CVE surface). Both call sites fail
+open when it is absent (`db-drain.ts` catch→warn→return; `image-cache-sync.ts` never imports the
+store client unless `STORAGE_BUCKET` is set), so the ENTRYPOINT does not crash-loop — but the
+**DB-pool drain (writer + read-only) and image-cache sync then no-op**. The read-only-pool drain
+loss is the load-bearing one: un-drained DB sockets can hold a scale-to-zero compute awake (the
+#245 loss), defeating the axis's own differentiator.
+
+**Decision: DOCUMENT-as-degraded now + SURFACE loudly; defer the closure/opt-in to the CLI-wiring
+increment.** We do **not** ship the heavy closure into the lean supervisor image in this
+increment, because:
+
+1. A lean supervisor is this ADR's design intent; `@cerbos/grpc + minio + pg` is the heaviest
+   graph and the largest CVE surface, against an image whose whole point is to stay small.
+2. The template is **not yet emitted or built by any scaffolder** — there is no build context to
+   ship a closure *into*. Installing it belongs to the CLI-selection increment that actually
+   renders and builds this file and controls its `.dockerignore` (see the Dockerfile header).
+3. Naively copying the closure into the supervisor's `/app/node_modules` may not even restore
+   drain: `@getknext/lib` is **bundled** into the app's standalone output (webpack; it must stay
+   bundled per `architecture.md` §4 / the #352 rule), so the supervisor's separate copy is a
+   different module instance with empty pool state. Restoring drain correctly is a design question
+   the opt-in increment must answer, not a COPY line.
+
+**But the honest floor ships now, regardless of ship-vs-document:** the degradation is no longer
+silent. `db-clients-probe.ts`'s `warnIfDbClientsUnavailable` runs once, eagerly, in the supervisor
+entry (`node-server.ts`, beside `registerDbPoolDrain`). It **resolves** the `@getknext/lib/clients`
+specifier — `import.meta.resolve`, never `import()`, so the heavy graph stays off the cold-start
+path (#441) — and emits ONE loud WARNING naming the disabled capabilities and the scale-to-zero
+consequence when the module is absent. The future path is **opt-in**: an app that needs
+drain/image-cache on the standalone axis rebuilds the runtime image with the clients closure
+included; wiring that selection is left to the CLI increment (#1155's later increments) that owns
+the build context. *(jev cross-check of document-vs-ship: 0.88 for this call.)*
+
 ## Action items
 
 1. New template `Dockerfile.standalone.hbs` + `knext-standalone-entry.mjs.hbs`; image-contract test
