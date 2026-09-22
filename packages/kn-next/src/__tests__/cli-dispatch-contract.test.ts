@@ -223,6 +223,13 @@ describe("usage mistakes are UsageErrors, so they render as messages", () => {
         "runtime-image.ts": [
             "standalone runtime image template not found",
             "contains an unsubstituted",
+            // Internal invariant of an exported function (unreachable from
+            // argv today: `validate.ts` rejects every `build` value except
+            // `vinext` before a deploy/build ever reaches this selector, so
+            // there is no CLI flag whose removal fixes it). The fix, if this
+            // ever DOES trigger, is a `kn-next.config.ts` edit selecting a
+            // known builder id — not a different command line. cr-1181 #3.
+            "unrecognised build id",
         ],
     };
 

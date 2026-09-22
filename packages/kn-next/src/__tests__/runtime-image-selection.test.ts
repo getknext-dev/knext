@@ -19,12 +19,19 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
+import {
+    existsSync,
+    mkdirSync,
+    mkdtempSync,
+    readFileSync,
+    writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
     dockerBuildxArgs,
     dockerignoreExcludes,
+    type RuntimeImageConfig,
     runtimeStandaloneTemplateDir,
     selectRuntimeImage,
     stageStandaloneBuildContext,
@@ -83,6 +90,23 @@ describe("selectRuntimeImage — target selection by (build, runtime)", () => {
         const sel = selectRuntimeImage({ build: "turbopack" }, "/app");
         expect(sel.kind).toBe("standalone");
         expect(sel.target).toBe("standalone-node");
+    });
+
+    it("an unrecognised build id THROWS rather than silently building the standalone recipe (cr-1181 #3, fail-closed)", () => {
+        // A caller reading `kn-next.config.ts` at runtime is not TS-checked
+        // against `BuilderId` — a config file can carry any string. A future
+        // builder id (e.g. a compiled `+exec` shape) must not silently select
+        // the `.next/standalone` recipe just because it isn't literally
+        // "vinext"; it must be recognised by the artifact contract or refused.
+        // `config.build` is read from `kn-next.config.ts` at runtime, so it
+        // is not TS-checked against `BuilderId` there — simulate that with
+        // `unknown`, not `any`.
+        const unrecognisedConfig = {
+            build: "bun-exec",
+        } as unknown as RuntimeImageConfig;
+        expect(() => selectRuntimeImage(unrecognisedConfig, "/app")).toThrow(
+            /unrecognised|unknown/i,
+        );
     });
 });
 
@@ -187,6 +211,38 @@ describe("stageStandaloneBuildContext — stages a BOOTABLE standalone build con
         });
         expect(dockerfile).toBe(join(cwd, "Dockerfile.standalone"));
         expect(existsSync(join(ctx, "knext-standalone-entry.mjs"))).toBe(true);
+    });
+
+    it("aborts on an unsubstituted {{ }} placeholder left in the ENTRY SHIM, not just the Dockerfile (cr-1181 #4, both-halves guard)", () => {
+        // The Dockerfile text gets the `{{`-placeholder assertion; the entry
+        // shim was `copyFileSync`'d unchecked. A leftover mustache in the
+        // shim must abort staging exactly like a leftover mustache in the
+        // Dockerfile does — not ship a broken entry silently.
+        const templateDir = tmp();
+        const dockerfileText = readFileSync(
+            join(runtimeStandaloneTemplateDir(), "Dockerfile.standalone.hbs"),
+            "utf8",
+        );
+        writeFileSync(
+            join(templateDir, "Dockerfile.standalone.hbs"),
+            dockerfileText,
+            "utf8",
+        );
+        writeFileSync(
+            join(templateDir, "knext-standalone-entry.mjs.hbs"),
+            "import('@getknext/core/internal/node-server')({{ broken }});\n",
+            "utf8",
+        );
+        const ctx = tmp();
+        expect(() =>
+            stageStandaloneBuildContext({
+                cwd: ctx,
+                buildContext: ctx,
+                templateDir,
+            }),
+        ).toThrow(/\{\{/);
+        // And it must not have written a broken entry into the context.
+        expect(existsSync(join(ctx, "knext-standalone-entry.mjs"))).toBe(false);
     });
 
     it("writes a per-Dockerfile .dockerignore that keeps the standalone closure IN the context", () => {

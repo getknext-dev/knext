@@ -31,9 +31,9 @@
  * touches the cluster.
  */
 
-import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { DEFAULT_BUILDER_ID } from "../adapters/artifact-contract";
+import { BUILDERS, DEFAULT_BUILDER_ID } from "../adapters/artifact-contract";
 import { packageRoot } from "./create";
 
 /** The Docker build `--target` for each standalone runtime. */
@@ -81,16 +81,34 @@ export const STANDALONE_DOCKERFILE_NAME = "Dockerfile.standalone";
  * irrelevant there (the compiled binary is the server). The standalone shape
  * (`build: turbopack`) uses the staged multi-stage template with the
  * `--target` matching `config.runtime` (`node` is the runtime default).
+ *
+ * Selection is keyed off the artifact contract's `emits` shape
+ * (`artifact-contract.ts`), NOT off "anything that isn't literally 'vinext'".
+ * `config.build` is read from `kn-next.config.ts` at runtime, so it is not
+ * TS-checked against `BuilderId` — an unrecognised id (e.g. a future
+ * compiled `+exec` builder that emits a shape this module has never staged
+ * a recipe for) THROWS here rather than silently building the
+ * `.next/standalone` recipe for it. Fail-closed, per cr-1181 finding #3.
  */
 export function selectRuntimeImage(
     config: RuntimeImageConfig,
     cwd: string,
 ): RuntimeImageSelection {
     const build = config.build ?? DEFAULT_BUILDER_ID;
-    if (build === "vinext") {
+    const builder = BUILDERS.find((b) => b.id === build);
+    if (!builder) {
+        throw new Error(
+            `selectRuntimeImage: unrecognised build id '${build}' — known ` +
+                `builders are ${BUILDERS.map((b) => b.id).join(", ")}. Refusing ` +
+                "to guess a runtime image recipe for it.",
+        );
+    }
+    if (builder.emits !== "next-standalone") {
+        // vinext (emits a nitro output, run in-process) uses the scaffolded
+        // single-stage `Dockerfile` — the compiled binary IS the server.
         return { kind: "app-dockerfile", dockerfile: join(cwd, "Dockerfile") };
     }
-    // Standalone shape. `runtime` defaults to node (config.ts).
+    // Standalone shape (`next-standalone`). `runtime` defaults to node (config.ts).
     const target: StandaloneTarget =
         config.runtime === "bun" ? "standalone-bun" : "standalone-node";
     return {
@@ -148,10 +166,17 @@ export function dockerBuildxArgs(opts: {
  * `.next/static`, `public`, `node_modules/@getknext/core`, the staged entry
  * shim) while still excluding secrets and VCS — the same secret-first ordering
  * as the app `.dockerignore`. It does NOT exclude `node_modules` or `.next`
- * wholesale: Docker cannot re-include a path whose parent directory was
- * excluded, so a `node_modules` + `!node_modules/@getknext/core` pair would
- * silently drop the COPY source and yield an unbuildable image. Correctness
- * over context size here — trimming is a follow-up, an unbuildable image is not.
+ * wholesale. NOTE this is a safety choice, not a BuildKit limitation: BuildKit
+ * CAN re-include a child under an excluded parent via a `!` negation (this
+ * module's own test below proves `.next` + `!.next/standalone` re-includes the
+ * child) — an earlier version of this comment claimed otherwise, which is
+ * false. The reason to still exclude neither wholesale is that a
+ * `node_modules` + `!node_modules/@getknext/core` pair here has NOT been
+ * proven against a real `docker buildx build` (only against the evaluator
+ * below), and a wrong proof would silently drop the COPY source and yield an
+ * unbuildable image. Correctness over context size here — trimming to just the
+ * needed subtrees is a follow-up, gated on a real buildx proof, not the
+ * evaluator alone.
  */
 export function standaloneDockerignore(): string {
     return `# knext standalone runtime build context (ADR-0055) — per-Dockerfile ignore.
@@ -160,8 +185,9 @@ export function standaloneDockerignore(): string {
 # ignore to the standalone build only. It deliberately does NOT exclude
 # node_modules or .next wholesale (the app .dockerignore does): the standalone
 # image COPYs .next/standalone, .next/static, public and node_modules/@getknext/core
-# straight out of the context, and Docker cannot re-include a path whose parent
-# directory was excluded. Secrets and VCS are still excluded.
+# straight out of the context, and a targeted exclude+re-include pair for those
+# has not yet been proven against a real docker buildx build. Secrets and VCS
+# are still excluded.
 
 # Secrets and local credentials.
 .env
@@ -243,20 +269,31 @@ export function stageStandaloneBuildContext(opts: {
     }
 
     const dockerfileText = readFileSync(dockerfileSrc, "utf8");
-    // The template carries no mustache; assert it so a future variable is not
-    // shipped raw (renderScaffold's own discipline).
+    const entryText = readFileSync(entrySrc, "utf8");
+    // Neither template carries mustache; assert BOTH halves of the staged
+    // context so a future variable is not shipped raw (renderScaffold's own
+    // discipline). This used to only cover the Dockerfile — the entry shim
+    // was `copyFileSync`'d unchecked (cr-1181 finding #4) — so check it with
+    // the same assertion, not a bare copy.
     if (dockerfileText.includes("{{")) {
         throw new Error(
             "Dockerfile.standalone.hbs contains an unsubstituted {{ }} " +
                 "placeholder — the standalone image recipe must be literal",
         );
     }
+    if (entryText.includes("{{")) {
+        throw new Error(
+            "knext-standalone-entry.mjs.hbs contains an unsubstituted {{ }} " +
+                "placeholder — the standalone supervisor shim must be literal",
+        );
+    }
 
     const dockerfile = join(opts.cwd, STANDALONE_DOCKERFILE_NAME);
     writeFileSync(dockerfile, dockerfileText, "utf8");
-    copyFileSync(
-        entrySrc,
+    writeFileSync(
         join(opts.buildContext, "knext-standalone-entry.mjs"),
+        entryText,
+        "utf8",
     );
     writeFileSync(
         `${dockerfile}.dockerignore`,

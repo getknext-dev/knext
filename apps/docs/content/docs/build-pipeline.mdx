@@ -27,23 +27,12 @@ const config: KnativeNextConfig = {
 };
 ```
 
-The other target emits a `next build` **standalone** folder instead of the compiled executable. Set
-it explicitly when you want it:
-
-```ts title="kn-next.config.ts"
-const config: KnativeNextConfig = {
-  name: 'acme',
-  registry: 'registry.example.com/acme',
-  build: 'turbopack', // next build → .next/standalone
-  runtime: 'node',    // 'node' (default) or 'bun' — selects the standalone image base
-};
-```
-
-On this target `kn-next build`/`kn-next deploy` produce a bootable standalone runtime image whose
-entrypoint is a small supervisor: it spawns the Next.js server, exposes metrics, and drains
-in-flight requests on shutdown. The `runtime` field selects the image base — a `bun` or a `node`
-runtime — and is only meaningful here; for the default compiled build the runtime is baked into the
-binary and there is nothing to select.
+A second build shape — a `next build` **standalone** folder, run by a small supervisor instead of
+the compiled executable — exists internally as the runtime image knext will offer as a second,
+explicitly-selected target once it is exposed through `kn-next.config.ts`. It is **not yet
+selectable**: there is no supported `build` value that turns it on today, and the compiled
+executable above remains the only build your config can choose. Don't set anything expecting this
+shape — the CLI will reject a `build` value other than the default.
 
 ## The pipeline
 
