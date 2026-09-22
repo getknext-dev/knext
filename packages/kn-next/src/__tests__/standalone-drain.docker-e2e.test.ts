@@ -1,7 +1,9 @@
 // @vitest-environment node
 //
 // standalone-drain.docker-e2e — SIGTERM drain under the SHIPPED standalone-on-bun
-// image, driven by the OPERATOR'S OWN command (#1156).
+// image, driven by the OPERATOR'S OWN command (#1156), PLUS a behavioural probe
+// that the supervisor injects the compat-gated Cache-Control normalization (#175)
+// into the standalone child on BOTH the bun- and node-standalone images (#1172).
 //
 // ── What this proves, and why nothing else did ──────────────────────────────
 //
@@ -68,6 +70,21 @@ const PLATFORM = "linux/amd64";
 const RUN_ID = randomBytes(4).toString("hex");
 const CONTAINER = `knext-standalone-drain-e2e-${RUN_ID}`;
 const IMAGE = `knext-standalone-drain-e2e:${RUN_ID}`;
+// The node-standalone target — same supervisor, same shim, node ENTRYPOINT — so
+// the compat-gated Cache-Control normalization (#1172 / #175) is proved on BOTH
+// runtimes the operator forces, not just bun. It boots for the header probe only
+// (the SIGTERM drain contract is already proved on bun below and the supervisor
+// injection code is byte-identical across targets).
+const NODE_CONTAINER = `knext-standalone-drain-e2e-node-${RUN_ID}`;
+const NODE_IMAGE = `knext-standalone-drain-e2e-node:${RUN_ID}`;
+
+// The origin ISR Cache-Control the fixture's /api/cache-probe route emits, and
+// the deployed client-facing form the compat-gated preload (#175) rewrites it
+// to. If the supervisor injects `--require cache-control-normalize.cjs` into the
+// standalone child, a client sees NORMALIZED; if the injection is bypassed, the
+// client sees the raw s-maxage ORIGIN value.
+const ORIGIN_CACHE_CONTROL = "s-maxage=2, stale-while-revalidate=31535998";
+const NORMALIZED_CACHE_CONTROL = "public, max-age=0, must-revalidate";
 
 // Labels make ABORTED runs' leftovers findable + reapable (a hard Ctrl-C skips
 // afterAll). Same scheme as the bun-exec sibling.
@@ -160,6 +177,7 @@ function sweepLeakedArtifacts() {
 
 let appPort = 0;
 let metricsPort = 0;
+let nodeAppPort = 0;
 
 beforeAll(async () => {
     // 1. Prerequisites are REQUIRED, never skipped around.
@@ -294,10 +312,39 @@ beforeAll(async () => {
         );
     }
 
+    // 4b. Build the SAME shipped image at --target standalone-node (the operator's
+    //     node runtime). Same supervisor + shim; only the ENTRYPOINT runtime differs.
+    //     Used solely for the cross-runtime Cache-Control normalization probe (#1172).
+    const nodeImage = run(
+        "docker",
+        [
+            "build",
+            "--platform",
+            PLATFORM,
+            "--target",
+            "standalone-node",
+            "--file",
+            join(ctx, "Dockerfile.standalone"),
+            "--label",
+            LABEL,
+            "--label",
+            EPOCH_LABEL,
+            "--tag",
+            NODE_IMAGE,
+            ctx,
+        ],
+        { timeout: 600_000 },
+    );
+    if (nodeImage.status !== 0) {
+        throw new Error(
+            `docker build (node target) failed:\n${nodeImage.stdout}\n${nodeImage.stderr}`,
+        );
+    }
+
     // 5. Run it with the OPERATOR'S command: `bun run server.js`. ENTRYPOINT is
     //    overridden to `bun` and args are `run server.js`, reproducing exactly what
     //    the operator forces — so `/app/server.js` (the R3 shim) boots the supervisor.
-    [appPort, metricsPort] = await freePorts(2);
+    [appPort, metricsPort, nodeAppPort] = await freePorts(3);
     const started = run(
         "docker",
         [
@@ -329,44 +376,126 @@ beforeAll(async () => {
         );
     }
 
-    // 6. Wait for the app to serve. A died container never listens, so surface its
-    //    logs + exit code rather than waiting out the deadline.
+    // 5b. Run the node-target image with NO entrypoint override: for
+    //     `runtime: node` the operator leaves Command nil
+    //     (nextapp_controller.go:1017-1020 only forces a command for
+    //     `runtime: bun`), so the shipped node boot path is the image's own
+    //     `ENTRYPOINT ["node","/app/knext-entry.mjs"]`
+    //     (Dockerfile.standalone.hbs:172). Run it as-is so this proves the
+    //     path the operator actually leaves in place, not the R3 shim.
+    const startedNode = run(
+        "docker",
+        [
+            "run",
+            "--detach",
+            "--name",
+            NODE_CONTAINER,
+            "--label",
+            LABEL,
+            "--label",
+            EPOCH_LABEL,
+            "--platform",
+            PLATFORM,
+            "--publish",
+            `${nodeAppPort}:3000`,
+            NODE_IMAGE,
+        ],
+        { timeout: 120_000 },
+    );
+    if (startedNode.status !== 0) {
+        throw new Error(
+            `docker run (node target) failed:\n${startedNode.stdout}\n${startedNode.stderr}`,
+        );
+    }
+
+    // 6. Wait for BOTH apps to serve. A died container never listens, so surface
+    //    its logs + exit code rather than waiting out the deadline.
+    await waitForHealth(CONTAINER, appPort);
+    await waitForHealth(NODE_CONTAINER, nodeAppPort);
+}, 1_200_000);
+
+async function waitForHealth(container: string, port: number) {
     const deadline = Date.now() + 120_000;
     for (;;) {
         try {
-            const res = await fetch(`http://127.0.0.1:${appPort}/api/health`);
+            const res = await fetch(`http://127.0.0.1:${port}/api/health`);
             if (res.ok) break;
         } catch {
             // not listening yet
         }
         const running = run(
             "docker",
-            ["inspect", CONTAINER, "--format", "{{.State.Running}}"],
+            ["inspect", container, "--format", "{{.State.Running}}"],
             { timeout: 60_000 },
         );
         const died = running.status === 0 && running.stdout.trim() === "false";
         if (died || Date.now() > deadline) {
-            const logs = run("docker", ["logs", CONTAINER], {
+            const logs = run("docker", ["logs", container], {
                 timeout: 60_000,
             });
             const code = run(
                 "docker",
-                ["inspect", CONTAINER, "--format", "{{.State.ExitCode}}"],
+                ["inspect", container, "--format", "{{.State.ExitCode}}"],
                 { timeout: 60_000 },
             );
             throw new Error(
-                `the container never served /api/health (${died ? "it exited" : "timed out"}).\n` +
+                `${container} never served /api/health (${died ? "it exited" : "timed out"}).\n` +
                     `exit code: ${code.stdout.trim()}\nlogs:\n${logs.stdout}\n${logs.stderr}`,
             );
         }
         await new Promise((r) => setTimeout(r, 250));
     }
-}, 1_200_000);
+}
 
 afterAll(() => {
     run("docker", ["rm", "--force", CONTAINER], { timeout: 60_000 });
+    run("docker", ["rm", "--force", NODE_CONTAINER], { timeout: 60_000 });
     run("docker", ["rmi", "--force", IMAGE], { timeout: 60_000 });
+    run("docker", ["rmi", "--force", NODE_IMAGE], { timeout: 60_000 });
     if (workDir) rmSync(workDir, { recursive: true, force: true });
+});
+
+// ── Compat-gated Cache-Control normalization THROUGH the supervisor (#1172) ──
+// The 778/0 official-suite credential is earned by `scripts/e2e-deploy.sh`, which
+// boots the RAW Next standalone `server.js` with the #175 preload applied
+// DIRECTLY (`-r cache-control-normalize.cjs`). It has NEVER booted through the
+// supervisor (`node-server.ts`), which injects the SAME preload at
+// `--require cache-control-normalize.cjs`. So the credential certifies the
+// preloaded raw server.js, not the supervisor-wrapped entrypoint knext ships.
+// This probe closes that gap BEHAVIOURALLY: it requests a route whose origin
+// Cache-Control is the ISR `s-maxage=…` shape and asserts the CLIENT sees the
+// deployed normalized form — i.e. the preload ran THROUGH the supervisor's own
+// injection point, on the shipped image, on both runtimes: the bun target via
+// the operator's forced `bun run server.js` (the R3 shim), the node target via
+// the image's own `ENTRYPOINT ["node","/app/knext-entry.mjs"]` that the
+// operator leaves in place for `runtime: node` (nextapp_controller.go:1017-1020
+// only forces a command for `runtime: bun`) — both entries are byte-identical
+// copies of the same supervisor (`Dockerfile.standalone.hbs:158-159`).
+describe("the supervisor injects the compat-gated Cache-Control normalization into the standalone child (#1172)", () => {
+    it("normalizes an origin `s-maxage=` Cache-Control to the deployed client form on the bun-standalone image", async () => {
+        const res = await fetch(`http://127.0.0.1:${appPort}/api/cache-probe`);
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ ok: true, probe: "cache-control" });
+        // The supervisor spawned the child WITH `--require cache-control-normalize.cjs`,
+        // so the origin `s-maxage=…` value is rewritten to the deployed form. A raw
+        // (un-injected) child would leak the ORIGIN value straight to the client.
+        expect(
+            res.headers.get("cache-control"),
+            `expected the supervisor-injected preload to normalize Cache-Control; got the origin value ${ORIGIN_CACHE_CONTROL}, which means the supervisor did not inject the preload`,
+        ).toBe(NORMALIZED_CACHE_CONTROL);
+    });
+
+    it("normalizes the same origin Cache-Control on the node-standalone image (same supervisor, node ENTRYPOINT)", async () => {
+        const res = await fetch(
+            `http://127.0.0.1:${nodeAppPort}/api/cache-probe`,
+        );
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ ok: true, probe: "cache-control" });
+        expect(
+            res.headers.get("cache-control"),
+            `expected the supervisor-injected preload to normalize Cache-Control on node; got the origin value ${ORIGIN_CACHE_CONTROL}`,
+        ).toBe(NORMALIZED_CACHE_CONTROL);
+    });
 });
 
 describe("the shipped standalone-on-bun image boots the supervisor via `bun run server.js`", () => {
