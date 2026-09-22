@@ -1,0 +1,154 @@
+import { describe, expect, it } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { parse } from 'yaml';
+
+/**
+ * cr-1179 findings 1 + 2 — the compat-window fingerprint must freeze the Bun
+ * the lane ACTUALLY SERVED ON, and must never freeze a constant.
+ *
+ * `docs/compat/window-bun-lane.md` rule 4 makes the freeze key "the
+ * `bun-version` workflow INPUT together with `bun --revision`". The fingerprint
+ * step runs in `build-next`, but the Bun the suite runs against is installed in
+ * `deploy-tests` from `${{ github.event.inputs.bun-version || '1.4.0' }}`. If
+ * those two Bun installs can differ, the fold freezes the WRONG Bun: a
+ * `bun-version=canary` dispatch records stable, and the documented bump
+ * procedure (edit the deploy-tests pin) moves the tested Bun WITHOUT moving the
+ * fingerprint — so the 14-night streak does not restart, which is the entire
+ * point of rule 4.
+ *
+ * These are LOCKSTEP assertions in the sense of `metrics-port-lockstep.test.ts`:
+ * they do not restate one literal, they assert that two places which must move
+ * together CANNOT diverge. Mutation proof: changing either bun-lane
+ * `bun-version:` expression alone must red this file.
+ */
+
+const REPO_ROOT = resolve(import.meta.dir, '..');
+const WORKFLOW_PATH = resolve(REPO_ROOT, '.github/workflows/test-e2e-deploy.yml');
+
+type Step = {
+  name?: string;
+  uses?: string;
+  if?: string;
+  run?: string;
+  with?: Record<string, unknown>;
+};
+type Job = { steps?: Step[] };
+
+function workflow(): { jobs: Record<string, Job> } {
+  return parse(readFileSync(WORKFLOW_PATH, 'utf8'));
+}
+
+/** Is this step gated on the Bun credentialing lane? */
+function isBunLaneGated(step: Step): boolean {
+  return /KNEXT_RUNTIME\s*==\s*'bun'/.test(String(step.if ?? ''));
+}
+
+function isSetupBun(step: Step): boolean {
+  return String(step.uses ?? '').startsWith('oven-sh/setup-bun@');
+}
+
+/** Every setup-bun in the workflow that installs the LANE's Bun. */
+function bunLaneSetupSteps(): Array<{ job: string; step: Step }> {
+  const out: Array<{ job: string; step: Step }> = [];
+  for (const [job, def] of Object.entries(workflow().jobs)) {
+    for (const step of def.steps ?? []) {
+      if (isSetupBun(step) && isBunLaneGated(step)) out.push({ job, step });
+    }
+  }
+  return out;
+}
+
+function fingerprintStep(): { job: string; index: number; steps: Step[] } {
+  for (const [job, def] of Object.entries(workflow().jobs)) {
+    const steps = def.steps ?? [];
+    const index = steps.findIndex((s) =>
+      /Fingerprint the frozen compat-window set/.test(s.name ?? ''),
+    );
+    if (index >= 0) return { job, index, steps };
+  }
+  throw new Error('no step named "Fingerprint the frozen compat-window set" exists');
+}
+
+describe('cr-1179 #1 — the fingerprint freezes the Bun the lane served on', () => {
+  it('the bun-lane setup-bun steps all install ONE version expression (they cannot drift apart)', () => {
+    const lane = bunLaneSetupSteps();
+    // Scanning, not enumerating: a third lane-gated setup-bun added later is
+    // covered by construction.
+    expect(lane.length).toBeGreaterThanOrEqual(2);
+    const expressions = new Set(lane.map(({ step }) => String(step.with?.['bun-version'] ?? '')));
+    expect(
+      [...expressions],
+      `every bun-lane setup-bun must resolve the SAME bun-version; found ${JSON.stringify(
+        lane.map(({ job, step }) => [job, step.with?.['bun-version']]),
+      )}`,
+    ).toHaveLength(1);
+    // And that one expression must be the lane's dispatchable input, not a bare
+    // literal — otherwise a `bun-version=canary` dispatch is unattributable.
+    expect([...expressions][0]).toMatch(/github\.event\.inputs\.bun-version/);
+  });
+
+  it('the Bun on PATH at the fingerprint step is the LANE Bun, not the workspace pin', () => {
+    const { steps, index, job } = fingerprintStep();
+    const priorBunSetups = steps.slice(0, index).filter(isSetupBun);
+    const priorSetupBun = priorBunSetups[priorBunSetups.length - 1];
+    expect(priorSetupBun, `no setup-bun precedes the fingerprint step in ${job}`).toBeDefined();
+    expect(
+      isBunLaneGated(priorSetupBun as Step),
+      'the LAST setup-bun before the fingerprint step must be the bun-lane one, or the fold ' +
+        'observes the hardcoded workspace pin instead of the Bun under test',
+    ).toBe(true);
+    const laneExpressions = new Set(
+      bunLaneSetupSteps().map(({ step }) => String(step.with?.['bun-version'] ?? '')),
+    );
+    expect(laneExpressions.has(String((priorSetupBun as Step).with?.['bun-version'] ?? ''))).toBe(
+      true,
+    );
+  });
+
+  it('the workspace (ungated) setup-bun is NOT what the fold reads', () => {
+    // The knext-workspace Bun is a build-tool pin and is deliberately free to
+    // differ from the served Bun; the guard above is what keeps the fold off it.
+    const ungated = Object.values(workflow().jobs)
+      .flatMap((j) => j.steps ?? [])
+      .filter((s) => isSetupBun(s) && !isBunLaneGated(s));
+    expect(ungated.length).toBeGreaterThanOrEqual(1);
+    const { steps, index } = fingerprintStep();
+    const priorBunSetups = steps.slice(0, index).filter(isSetupBun);
+    const last = priorBunSetups[priorBunSetups.length - 1];
+    expect(ungated.includes(last as Step)).toBe(false);
+  });
+});
+
+describe('cr-1179 #2 — the fold must not swallow a missing Bun into a constant', () => {
+  const foldScript = () => String(fingerprintStep().steps[fingerprintStep().index].run ?? '');
+
+  it('bun --version / --revision are observed without a fallback constant', () => {
+    const run = foldScript();
+    expect(run).toMatch(/bun --version/);
+    expect(run).toMatch(/bun --revision/);
+    // A `|| echo unknown` freezes the literal `unknown` on EVERY night: the
+    // digest still reads as frozen while the fold has stopped discriminating
+    // Bun builds at all — green when its subject is gone.
+    const bunObservations = run
+      .split('\n')
+      .filter((l) => /bun --(version|revision)/.test(l) && !l.trimStart().startsWith('#'));
+    expect(bunObservations.length).toBeGreaterThanOrEqual(2);
+    for (const line of bunObservations) {
+      expect(line, `fail-open fallback in: ${line.trim()}`).not.toMatch(/\|\|/);
+      expect(line, `suppressed stderr in: ${line.trim()}`).not.toMatch(/2>\s*\/dev\/null/);
+    }
+  });
+
+  it('the step is set -e and refuses an EMPTY observation', () => {
+    const run = foldScript();
+    expect(run).toMatch(/set -euo pipefail/);
+    // An empty string is folded as "absent" by computeFingerprint (node-lane
+    // shape), so an empty `bun --version` would silently degrade the bun digest
+    // to the node formula. It must fail the step instead.
+    expect(run, 'the fold must assert both observations are non-empty').toMatch(
+      /\[\s*-n\s*"\$\{?BUN_VERSION\}?"\s*\]/,
+    );
+    expect(run).toMatch(/\[\s*-n\s*"\$\{?BUN_REVISION\}?"\s*\]/);
+  });
+});

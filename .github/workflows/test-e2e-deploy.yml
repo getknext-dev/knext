@@ -317,6 +317,29 @@ jobs:
       # the `next` tarball digest are therefore RECORDED into the artifact and
       # deliberately kept OUT of the digest: a legitimate suite bump must be a
       # visible decision, not a silent window reset.
+
+      # cr-1179 #1 — install the LANE's Bun before the fold reads it.
+      # The `Setup Bun (knext workspace)` step above is a BUILD-TOOL pin (it runs
+      # `bun install` for knext's own workspace) and is hardcoded; the Bun the
+      # compat suite actually SERVES on is installed in `deploy-tests` from the
+      # dispatchable input below. Freezing the workspace pin meant a
+      # `bun-version=canary` dispatch recorded stable, and — worse — bumping the
+      # lane pin moved the Bun under test WITHOUT moving the fingerprint, so the
+      # 14-night streak never restarted. This step makes the observed Bun the
+      # lane's Bun BY CONSTRUCTION: it carries a byte-identical `bun-version:`
+      # expression to the deploy-tests one, which
+      # `tests/compat-bun-lane-lockstep.test.ts` enforces (scanning every
+      # lane-gated setup-bun, so a third one cannot drift in unnoticed).
+      # It runs LAST among build-next's bun setups — after `bun install` and the
+      # tarball pack — so the workspace build keeps its own pin.
+      - name: Setup Bun (bun lane — the Bun the fingerprint freezes)
+        if: env.KNEXT_RUNTIME == 'bun'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          # LOCKSTEP: keep byte-identical to the deploy-tests `Setup Bun (bun
+          # lane only)` step. Bumping one alone reds compat-bun-lane-lockstep.
+          bun-version: ${{ github.event.inputs.bun-version || '1.4.0' }}
+
       - name: Fingerprint the frozen compat-window set
         run: |
           set -euo pipefail
@@ -328,12 +351,34 @@ jobs:
           # digest so a Bun build move restarts the bun streak via the audit's
           # rule-1 (fingerprint-identical) check. On the NODE lane no runtime
           # identity is passed, so the digest is byte-identical to the pre-#1147
-          # formula — the live node streak is never reset. bun is on PATH here via
-          # the build-next "Setup Bun (knext workspace)" step.
+          # formula — the live node streak is never reset.
+          #
+          # cr-1179 #1: the Bun read here is the LANE's Bun, installed by the
+          # step immediately above from the SAME `inputs.bun-version || '1.4.0'`
+          # expression the deploy-tests shards install from — not the hardcoded
+          # workspace pin. `tests/compat-bun-lane-lockstep.test.ts` reds if those
+          # two expressions ever diverge, so bumping the lane pin cannot move the
+          # Bun under test without moving the fingerprint (and restarting the
+          # streak, which is the whole point of rule 4).
+          #
+          # cr-1179 #2: no `|| echo unknown`. A fallback constant freezes the
+          # literal `unknown` on every night — the digest still reads as frozen
+          # while the fold has stopped discriminating Bun builds at all. An empty
+          # observation is equally fatal: computeFingerprint treats '' as ABSENT,
+          # silently degrading the bun digest to the node formula. Both fail the
+          # step instead, under `set -euo pipefail`.
           RUNTIME_ARGS=()
           if [ "${KNEXT_RUNTIME}" = "bun" ]; then
-            RUNTIME_ARGS+=(--runtime-version "$(bun --version 2>/dev/null || echo unknown)")
-            RUNTIME_ARGS+=(--runtime-revision "$(bun --revision 2>/dev/null || echo unknown)")
+            BUN_VERSION="$(bun --version)"
+            BUN_REVISION="$(bun --revision)"
+            if [ -n "${BUN_VERSION}" ] && [ -n "${BUN_REVISION}" ]; then
+              :
+            else
+              echo "::error::the bun lane observed an EMPTY bun --version/--revision; refusing to freeze a non-discriminating fingerprint" >&2
+              exit 1
+            fi
+            RUNTIME_ARGS+=(--runtime-version "${BUN_VERSION}")
+            RUNTIME_ARGS+=(--runtime-revision "${BUN_REVISION}")
           fi
           node knext/scripts/compat-window-fingerprint.mjs \
             --repo-root knext \
