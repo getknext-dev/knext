@@ -18,7 +18,7 @@
  * Exits 0 when the tree resolves, 1 on the crash / any resolve failure.
  */
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -42,10 +42,21 @@ const rendered = readFileSync(TEMPLATE, 'utf8')
 const dir = mkdtempSync(join(tmpdir(), 'knext-scaffold-npm10-'));
 try {
   writeFileSync(join(dir, 'package.json'), rendered);
-  console.log(`resolving the repo scaffold template (pinned @getknext/* = ${version}) on npm ${NPM_MAJOR}.x …`);
+  console.log(
+    `resolving the repo scaffold template (pinned @getknext/* = ${version}) on npm ${NPM_MAJOR}.x …`,
+  );
   const r = spawnSync(
     'npx',
-    ['-y', '-p', `npm@${NPM_MAJOR}`, 'npm', 'install', '--package-lock-only', '--no-audit', '--no-fund'],
+    [
+      '-y',
+      '-p',
+      `npm@${NPM_MAJOR}`,
+      'npm',
+      'install',
+      '--package-lock-only',
+      '--no-audit',
+      '--no-fund',
+    ],
     { cwd: dir, encoding: 'utf8', timeout: 300_000 },
   );
   const out = `${r.stdout || ''}${r.stderr || ''}`;
@@ -59,9 +70,13 @@ try {
     );
   }
   if (r.status !== 0) {
-    fail(`npm ${NPM_MAJOR} install --package-lock-only exited ${r.status}:\n${out.trim().slice(0, 600)}`);
+    fail(
+      `npm ${NPM_MAJOR} install --package-lock-only exited ${r.status}:\n${out.trim().slice(0, 600)}`,
+    );
   }
   console.log(`ok — the repo scaffold template resolves cleanly on npm ${NPM_MAJOR}.x`);
 } finally {
-  try { rmSync(dir, { recursive: true, force: true }); } catch {}
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {}
 }
