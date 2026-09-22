@@ -11,10 +11,12 @@ import { join } from 'node:path';
  * `verified → credentialed` had nothing to clear. This test pins that
  * definition down so it cannot silently soften: the bar is stated, it is the
  * SAME contract class as the node lane's 14-night gate, AND it carries the one
- * bun-specific clause the node lane does not need — the observed Bun version is
- * part of the frozen fingerprint, so a Bun bump resets the streak (1.3.14 is
- * deterministically red, 1.4.0 is green; a bar that let the version drift would
- * credential a moving target).
+ * bun-specific clause the node lane does not need — the observed Bun BUILD (the
+ * `bun-version` input + `bun --revision`, not just the version string) is part of
+ * the frozen fingerprint, so a Bun build move resets the streak. The version
+ * string alone is insufficient: 1.3.14 is deterministically red, stable 1.4.0 is
+ * green, yet a canary also reporting 1.4.0 was red — same string, opposite
+ * outcome — so a bar frozen on the string would credential a moving target.
  *
  * Every assertion below is mutation-proved: delete the clause it guards from
  * `docs/compat/window-bun-lane.md` (or the matrix reference) and this test goes
@@ -49,7 +51,8 @@ describe('bun-lane credentialed bar (issue #1158)', () => {
     const n = m![1];
     const md = read(BAR_DOC).toLowerCase();
     // the doc's consecutive-night count is exactly that n (not a hardcoded 14).
-    expect(md).toMatch(new RegExp(`${n}\\s+consecutive`));
+    // \b so a weakened constant ("4") does NOT false-pass against doc "14" (R3).
+    expect(md).toMatch(new RegExp(`\\b${n}\\s+consecutive`));
     // and it pins that count to the constant by name, so the two cannot drift.
     expect(read(BAR_DOC)).toContain('WINDOW_REQUIRED_NIGHTS');
   });
@@ -100,9 +103,13 @@ describe('bun-lane credentialed bar (issue #1158)', () => {
     // states the DIRECTION: a Bun build move RESETS the streak (not merely pauses,
     // not "may drift"). The header phrase carries the direction inside rule 4.
     expect(rule4.toLowerCase()).toMatch(/bun build move resets the streak/);
-    // and does NOT contain the inversion (may drift / does not reset / maintainer waiver).
+    // and does NOT contain the inversion. A blocklist is incomplete by
+    // construction (a novel phrasing dodges it), but the doc stays
+    // self-contradictory if it does — the header sentence still says "resets" —
+    // so a dodge is visible, not silent. Bans the known dodges: may-drift,
+    // does-not-reset/restart, maintainer waiver, and an "Exception:" carve-out.
     expect(rule4.toLowerCase()).not.toMatch(
-      /may drift|does\s+\*{0,2}not\s+\*{0,2}reset|may\s+\*{0,2}waive/,
+      /may drift|does\s+\*{0,2}not\s+\*{0,2}(reset|restart)|may\s+\*{0,2}waive|\bexception:/,
     );
   });
 
@@ -118,13 +125,20 @@ describe('bun-lane credentialed bar (issue #1158)', () => {
     expect(bunRow).toContain(BAR_DOC_REL);
   });
 
-  // F4: "same contract class as the node lane" includes the three stricter rules
-  // the audit script applies (re-attempt / short-ledger / unobtainable-ledger).
-  // Without stating the re-attempt rule, someone implementing #1147 against this
-  // doc could conclude a re-run green counts — the #545 "re-run until green"
-  // vector. Guard that the doc carries it.
-  it('states the stricter audit rules — a re-attempted run does not qualify (#545 vector closed)', () => {
-    const md = read(BAR_DOC).toLowerCase();
-    expect(md).toMatch(/re-attempt|re-run|runattempt/);
+  // F4 (both-halves, R1): "same contract class" includes the three stricter
+  // audit rules (re-attempt / short-ledger / unobtainable-ledger). A bare
+  // document-wide token match reintroduces the exact defect F1 fixed — an
+  // inverted "a re-attempted run IS a qualifying night" keeps the token and
+  // stays green. So scope to the "Plus the three stricter rules" BLOCK, assert
+  // the mechanism (runAttempt !== '1') AND the direction (NOT a qualifying
+  // night), and reject the inversion.
+  it('states the stricter audit rules with direction — a re-attempted run does NOT qualify (#545 vector closed)', () => {
+    const block =
+      read(BAR_DOC).match(/\*\*Plus the three stricter rules[\s\S]*?(?=\n\n)/m)?.[0] ?? '';
+    expect(block, 'the stricter-audit-rules paragraph is missing from the bar doc').not.toBe('');
+    expect(block).toMatch(/runAttempt !== '1'/);
+    expect(block.toLowerCase()).toMatch(/is \*\*not\*\* a qualifying night/);
+    // reject the inversion: "is a qualifying night" / "banks normally".
+    expect(block.toLowerCase()).not.toMatch(/is \*{0,2}a qualifying night|banks normally/);
   });
 });

@@ -6,7 +6,8 @@ defines what "credentialed" means for the bun lane and (once the scheduled lane 
 
 **The bar: 14 consecutive scheduled bun-lane runs, every shard `failed:0`/`notRun:0`, zero
 net new quarantine entries, the harness fingerprint unchanged across all of them, and the
-observed Bun version unchanged across all of them.**
+observed Bun build (the `bun-version` input + `bun --revision`, not just the version string)
+unchanged across all of them.**
 
 That is the **same contract class** as the node lane's 14-night gate, plus one bun-specific
 clause (rule 4 below). It is deliberately not a weaker bar: the bun axis is the v1.0 default
@@ -76,7 +77,7 @@ absent. "Same contract class as the node lane" means these too, not only rules 1
   scheduled bun run opens its own "Compat nightly RED (bun lane)" issue — never the node
   credential's — and flips the matrix row back).
 - **Does not:** extend to the compiled **vinext single-executable** axis (a separate row / lane,
-  ADR-0048/0051), nor to any Bun version other than the one the streak was measured on. A later Bun
+  ADR-0048/0051), nor to any Bun build other than the one the streak was measured on. A later Bun
   bump is a fresh streak, not an inherited credential.
 
 ## What this log does not yet do
