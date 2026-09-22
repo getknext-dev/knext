@@ -1,6 +1,6 @@
+import { describe, expect, it } from 'bun:test';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'bun:test';
 
 /**
  * Guard for the bun-lane "credentialed" bar (issue #1158).
