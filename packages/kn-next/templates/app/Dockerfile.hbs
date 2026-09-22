@@ -5,11 +5,14 @@
 # This is the image for the ONLY supported target: `build: vinext` +
 # `runtime: bun`, compiled with `bun build --compile --minify --bytecode`.
 #
-# Why it looks nothing like the retired node/standalone Dockerfile: there is no
+# Why it looks nothing like a node/standalone Dockerfile: there is no
 # node_modules to copy, no `server.js` to spawn, and no supervisor. The binary
-# IS the server — every route, the nitro runtime and V8 bytecode are baked in.
-# That is what buys the measured 61 ms cold start against node-standalone's
-# 884 ms (docs/benchmarks/vinext-bun14-single-exec-2026-08-27.md).
+# IS the server — every route, the runtime and V8 bytecode are baked in. Its
+# measured edges are a smaller image and faster warm-request throughput. On a
+# real Knative cluster, cold-start is dominated by pod scheduling (a few
+# seconds) rather than runtime boot, so the single-executable's fast local
+# process-start does not translate into a materially faster scale-to-zero
+# cold-start than a standalone image.
 #
 # Build context is the app root, so `.output/public` resolves. The binary is
 # built OUTSIDE this file — by `kn-next build`, which pins the target triple to
