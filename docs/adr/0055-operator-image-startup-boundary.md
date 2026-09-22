@@ -47,7 +47,10 @@ command.**
    `computeStatusVerdict` (never silently, never a new `Reconcile` branch — `architecture.md` §4).
    When engaged, `computeStatusVerdict` emits an honest-status condition: *drain and `:9464` metrics
    are not active on this container command.* An annotation (not a spec field) is deliberate — it
-   needs **no CRD roll**, so there is no operator-first upgrade-order hazard (#548).
+   needs **no CRD roll**, so there is no *schema* upgrade-order hazard (#548) — an older operator
+   cannot reject a field a newer CLI emits. The distinct *behavioural* #548 hazard — a pre-template
+   user-built bun-standalone image flipping Bun→Node when the operator retires its command — is real
+   and handled by the annotation + the caveat below, not by the CRD.
 4. **Upgrade-order safety via a compat shim.** The same supervisor entry is copied to
    `/app/server.js` — the path the *current* operator command names — so all four upgrade
    directions behave: old-operator × new-image (`bun run server.js` hits the shim → supervisor),
@@ -64,7 +67,8 @@ command.**
    workload from **Bun to Node** (or leaves it with no command) — a behaviour change with no crash
    to announce it. The `legacy-bun-command` annotation covers it, but it is opt-in per-CR: such an
    operator **must set the annotation before upgrading the operator**, and keep it until they
-   rebuild on the shipped template. This is the operator-first ordering story (#548), and the
+   rebuild on the shipped template. This is the **behavioural** operator-first ordering story (#548
+   — distinct from the absent *schema* hazard in Decision item 3), and the
    #1155 implementation ships the upgrade note to `docs/RELEASING.md` (action item 6).
 
 **This ADR records the invariant, not the entry-file shape (C6).** If the `--compile --bytecode`
