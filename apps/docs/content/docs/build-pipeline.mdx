@@ -27,10 +27,23 @@ const config: KnativeNextConfig = {
 };
 ```
 
-The earlier target that emitted a `next build` standalone folder is **legacy**: existing standalone
-deployments keep working, but new builds produce the compiled executable. The `runtime` config
-field (`'bun'` / `'node'`) only affects that legacy standalone shape — for the compiled build the
-runtime is baked into the binary and there is nothing to select.
+The other target emits a `next build` **standalone** folder instead of the compiled executable. Set
+it explicitly when you want it:
+
+```ts title="kn-next.config.ts"
+const config: KnativeNextConfig = {
+  name: 'acme',
+  registry: 'registry.example.com/acme',
+  build: 'turbopack', // next build → .next/standalone
+  runtime: 'node',    // 'node' (default) or 'bun' — selects the standalone image base
+};
+```
+
+On this target `kn-next build`/`kn-next deploy` produce a bootable standalone runtime image whose
+entrypoint is a small supervisor: it spawns the Next.js server, exposes metrics, and drains
+in-flight requests on shutdown. The `runtime` field selects the image base — a `bun` or a `node`
+runtime — and is only meaningful here; for the default compiled build the runtime is baked into the
+binary and there is nothing to select.
 
 ## The pipeline
 

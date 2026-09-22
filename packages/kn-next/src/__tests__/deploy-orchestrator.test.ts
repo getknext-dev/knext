@@ -112,6 +112,47 @@ mock.module("../cli/cr-builder", () => ({
     validateCRImageRef: (...a: unknown[]) => validateCRImageRef(...a),
 }));
 
+// ADR-0055 runtime-image seam: `deploy` selects the runtime image and, for the
+// standalone shape, STAGES it (writes Dockerfile.standalone + entry + ignore into
+// the build context). That is a real fs side effect this hermetic suite must
+// stub — the same treatment as ./exec and ./cr-builder. selectRuntimeImage and
+// dockerBuildxArgs are pure and covered by runtime-image-selection.test.ts; here
+// they are re-declared thinly so the docker-build order tag ("docker") still
+// fires, and stageStandaloneBuildContext is a no-op so no template is read.
+mock.module("../cli/runtime-image", () => ({
+    selectRuntimeImage: (
+        config: { build?: string; runtime?: string },
+        cwd: string,
+    ) =>
+        (config.build ?? "vinext") === "vinext"
+            ? { kind: "app-dockerfile", dockerfile: `${cwd}/Dockerfile` }
+            : {
+                  kind: "standalone",
+                  dockerfile: `${cwd}/Dockerfile.standalone`,
+                  target:
+                      config.runtime === "bun"
+                          ? "standalone-bun"
+                          : "standalone-node",
+              },
+    stageStandaloneBuildContext: () => ({ dockerfile: "" }),
+    dockerBuildxArgs: (o: {
+        taggedRef: string;
+        buildContext: string;
+        dockerfile: string;
+        target?: string;
+    }) => [
+        "docker",
+        "buildx",
+        "build",
+        "-f",
+        o.dockerfile,
+        ...(o.target ? ["--target", o.target] : []),
+        "-t",
+        o.taggedRef,
+        o.buildContext,
+    ],
+}));
+
 const runAssetGC = mock<AnyFn>(() => ({ pruned: true }));
 
 // #314: deploy runs a server-side dry-run prune preflight BEFORE any side

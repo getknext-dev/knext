@@ -218,6 +218,12 @@ describe("usage mistakes are UsageErrors, so they render as messages", () => {
             "buildNextAppCRObject not found",
             "buildNextAppCRObject has no return statement",
         ],
+        // Install/repo integrity — the standalone runtime image template is a
+        // shipped package artifact, not something the user types (ADR-0055).
+        "runtime-image.ts": [
+            "standalone runtime image template not found",
+            "contains an unsubstituted",
+        ],
     };
 
     /** Every .ts under src/cli, including subdirectories (schema/). */
