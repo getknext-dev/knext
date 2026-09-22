@@ -1076,6 +1076,51 @@ function blankYamlComments(text) {
 }
 
 /**
+ * The job block's config text with the `steps:` SEQUENCE removed — everything
+ * that is job-level, whether it sits BEFORE or AFTER the sequence, with the
+ * step items themselves excluded.
+ *
+ * cr-1196: YAML mapping order is free, so a job-level `env:` legally follows
+ * `steps:` in the same job. Rule 5 used to scan only the text before
+ * `steps:`, so that placement slipped past everything — not in the
+ * before-`steps:` scan, not in any step's own text (the step-level env
+ * allowlist in 2c only ever sees step TEXT, and the sequence itself stops
+ * collecting the moment it sees a line at or left of the item indent — which
+ * is exactly what a trailing job-level key is), and not caught by the
+ * expression allowlist (rule 4) when the value is a literal. Proven exploit:
+ * a job-level `GH_TOKEN` after `steps:` scored zero findings.
+ *
+ * Mirrors `parseJobSteps`'s own indent discovery so the two agree on exactly
+ * where the sequence ends — the suffix returned here starts at the same line
+ * `parseJobSteps` would have broken out of its loop on.
+ */
+function jobConfigWithoutSteps(block) {
+  const lines = block.split('\n');
+  const stepsRe = new RegExp(`^\\s*${yamlKey('steps')}\\s*$`);
+  const stepsAt = lines.findIndex((line) => stepsRe.test(line));
+  if (stepsAt === -1) return block;
+
+  let itemIndent = null;
+  let sequenceEnd = lines.length;
+  for (let i = stepsAt + 1; i < lines.length; i++) {
+    const line = lines[i];
+    const item = line.match(/^(\s*)-\s/);
+    if (item && (itemIndent === null || item[1].length === itemIndent)) {
+      itemIndent = item[1].length;
+      continue;
+    }
+    if (itemIndent === null) continue; // still hasn't seen the first item
+    // A non-blank line at or left of the item indent ends the sequence —
+    // same rule `parseJobSteps` uses to stop collecting.
+    if (line.trim() !== '' && line.match(/^(\s*)/)[1].length <= itemIndent) {
+      sequenceEnd = i;
+      break;
+    }
+  }
+  return [...lines.slice(0, stepsAt + 1), ...lines.slice(sequenceEnd)].join('\n');
+}
+
+/**
  * Split a job block into its `steps:` sequence items.
  *
  * Structural rather than indent-coupled. The first version of the `with:` scan
@@ -1464,15 +1509,23 @@ export function auditAnonymousWorkflowJob(workflowText) {
   //    credential today cannot quietly become one later by way of a job-wide
   //    `env:` every step would inherit. Step-level `env:` is handled per step
   //    above (2c), where it is allowlisted to exactly one literal variable —
-  //    this rule is scoped to the text BEFORE `steps:` precisely so it does
-  //    not re-flag that allowlisted step-level entry.
+  //    this rule is scoped to `jobConfigWithoutSteps(block)` (everything
+  //    OUTSIDE the parsed `steps:` sequence, whether before OR after it)
+  //    precisely so it does not re-flag that allowlisted step-level entry
+  //    while STILL catching a job-level `env:` written after `steps:`.
+  //
+  //    cr-1196: scoping this to the text BEFORE `steps:` was the bug, not the
+  //    fix — YAML mapping order is free, so `env:` legally follows `steps:`
+  //    in the same job, and that placement scored ZERO findings under the
+  //    prefix-only scan: invisible here, invisible to the step-level env
+  //    allowlist (2c only sees step TEXT), and invisible to the expression
+  //    allowlist (rule 4) for a literal value.
   //
   //    NOT anchored to end-of-line. `env:\s*$` missed the inline flow form
   //    `env: { GH_TOKEN: aLiteralToken }`, which interpolates nothing and so is
   //    not covered by the expression allowlist either — the same "only the
   //    spelling that exists today" shape as the `persist-credentials` defect.
-  const stepsHeaderMatch = block.match(new RegExp(`^\\s*${yamlKey('steps')}\\s*$`, 'm'));
-  const jobLevelBlock = stepsHeaderMatch ? block.slice(0, stepsHeaderMatch.index) : block;
+  const jobLevelBlock = jobConfigWithoutSteps(block);
   if (/^\s*["']?env["']?\s*:/m.test(jobLevelBlock)) {
     findings.push(
       `job \`${jobId}\` declares a job-level \`env:\` block — the anonymous check inherits ` +

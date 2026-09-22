@@ -1423,6 +1423,32 @@ describe('anonymous-install-nightly.yml — the runner must have no credential',
     expect(auditAnonymousWorkflowJob(mutated).findings.join(' ')).toMatch(/env/i);
   });
 
+  // ── cr-1196: YAML mapping order is free — `env:` AFTER `steps:` is legal ────
+  //
+  // Rule 5 used to scope its scan to the text BEFORE `steps:`, so a job-level
+  // `env:` written AFTER the sequence slipped past everything: not in the
+  // pre-`steps:` scan (rule 5), not in any step's own text (`parseJobSteps`
+  // stops collecting the moment it sees a line at or left of the item indent —
+  // which is exactly what a trailing job-level key is), and not caught by the
+  // expression allowlist (rule 4) when the value is a literal. Proven exploit:
+  // a `GH_TOKEN` job-level env after `steps:` scored ZERO findings.
+
+  it('rejects a job-level `env:` BLOCK written AFTER `steps:` (cr-1196 exploit)', () => {
+    const steps = [
+      ...GOOD_STEPS.split('\n'),
+      '    env:',
+      '      GH_TOKEN: aLiteralTokenValue',
+    ].join('\n');
+    expect(auditAnonymousWorkflowJob(synthetic(steps)).findings.join(' ')).toMatch(/env/i);
+  });
+
+  it('rejects a job-level `env:` INLINE-FLOW form written AFTER `steps:` (cr-1196 exploit)', () => {
+    const steps = [...GOOD_STEPS.split('\n'), '    env: { GH_TOKEN: aLiteralTokenValue }'].join(
+      '\n',
+    );
+    expect(auditAnonymousWorkflowJob(synthetic(steps)).findings.join(' ')).toMatch(/env/i);
+  });
+
   // ── R4: does each rule hold at every SPELLING, not just every site? ─────────
 
   it.each([
