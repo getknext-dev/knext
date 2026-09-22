@@ -82,6 +82,26 @@ function mkCallArgs(src: string): string[][] {
     return out;
 }
 
+// The status literals the doctor uses. A status arg that is NOT one of these is
+// a VARIABLE/expression the scanner cannot evaluate — so it cannot prove the call
+// is not a hint-less fail/error. The guard FAILS CLOSED on those: use a literal
+// status (or the invariant is unverifiable). This closes the false-negative where
+// a dynamic-status `mk(..., status, ...)` slips past a literal-only check.
+const STATUS_LITERALS = new Set([
+    '"fail"',
+    "'fail'",
+    '"error"',
+    "'error'",
+    '"warn"',
+    "'warn'",
+    '"skip"',
+    "'skip'",
+    '"pass"',
+    "'pass'",
+    '"info"',
+    "'info'",
+]);
+
 const isFailOrError = (statusArg: string | undefined) =>
     statusArg === '"fail"' ||
     statusArg === "'fail'" ||
@@ -104,9 +124,19 @@ describe("doctor — every FAIL/ERROR result carries a repair hint (scanning gua
         for (const f of files) {
             const src = readFileSync(join(CHECKS_DIR, f), "utf8");
             for (const args of mkCallArgs(src)) {
-                if (isFailOrError(args[2]) && emptyHint(args[4])) {
+                const status = args[2];
+                if (status === undefined) continue;
+                if (!STATUS_LITERALS.has(status)) {
+                    // Fail closed: a non-literal status is unverifiable, so it
+                    // could be a hint-less fail/error. Use a literal status.
                     offenders.push(
-                        `${f}: mk(${args[0]}, ${args[2]}) has no repair hint`,
+                        `${f}: mk(${args[0]}) has a NON-LITERAL status (${status}) — the hint invariant is only checkable with a literal status; split the call per status`,
+                    );
+                    continue;
+                }
+                if (isFailOrError(status) && emptyHint(args[4])) {
+                    offenders.push(
+                        `${f}: mk(${args[0]}, ${status}) has no repair hint`,
                     );
                 }
             }
