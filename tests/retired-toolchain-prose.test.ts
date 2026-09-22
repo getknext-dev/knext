@@ -19,17 +19,24 @@ import { codeStringLiterals } from '../scripts/lib/prover-lane.mjs';
  *      gets `command not found`, and the real fix (`bun run --filter`) is
  *      nowhere on screen.
  *
- *   2. `packages/kn-next/src/cli/validate.ts` justifies `checkPairing` being
- *      exported-but-unreachable with "with only `turbopack` available today".
- *      `turbopack` is `available: false` (ADR-0048) and `vinext` is the default,
- *      so the justification is exactly inverted — and the pairing it calls
- *      inexpressible (`vinext` + `node`) is expressible and reached from
- *      `validateConfig`.
+ *   2. Source prose that pins the build axis to ONE builder. Originally
+ *      `packages/kn-next/src/cli/validate.ts` justifying `checkPairing` being
+ *      exported-but-unreachable "with only `turbopack` available today" — the
+ *      inverse of the contract at the time.
  *
- * SCANNED, NOT ENUMERATED, in both halves. A list of the two known sites is how
- * the third one gets missed: (1) globs every tracked workspace script, and (2)
- * derives the expected builder id from the contract's own `available` flags, so
- * the day a second builder ships the prose has to move or this reds.
+ *      THE PREMISE HAS SINCE MOVED, and the guard moved with it rather than
+ *      being retuned to the new value: `turbopack` is `available: true` again
+ *      (ADR-0054 item 6), so TWO builders are selectable and `vinext` is merely
+ *      the DEFAULT. With two available builders no "only one builder/target"
+ *      claim can be true at all, which is what §4.2's third block now asserts —
+ *      see the long note there for why widening the old one-id comparison would
+ *      have left it vacuous instead of current.
+ *
+ * SCANNED, NOT ENUMERATED, in both halves. A list of the known sites is how the
+ * next one gets missed: (1) globs every tracked workspace script, and (2) globs
+ * the CLI/adapter/config sources and derives the builder ids from the contract —
+ * which is how it caught a fourth stale claim (`cli/vinext-build.ts`) that the
+ * review of the re-opening PR had not found.
  */
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
@@ -216,19 +223,69 @@ describe("§4.2 compat-smoke's default artifact is the one CI actually runs", ()
   });
 });
 
-describe('§4.2 an "only X available today" claim names the builder that IS available', () => {
+describe('§4.2 no source prose claims one builder is the only selectable one', () => {
   /**
-   * Any prose in the CLI/adapter sources that pins itself to the one available
-   * builder. The id is CAPTURED, never assumed, so the assertion below compares
-   * what the prose says against what the contract does.
+   * REWORKED for the two-builder contract, and the rework is the point.
+   *
+   * The first version of this guard compared a captured id against the one
+   * available builder: "an `only X available` claim must name the builder that
+   * IS available". That worked while exactly one was available, and its
+   * non-vacuity premise said so — `AVAILABLE_BUILDERS` is exactly `['vinext']`.
+   *
+   * Both builders are selectable now (ADR-0054 item 6 re-opened `turbopack`),
+   * and merely widening that premise to `['turbopack','vinext']` would have
+   * made the scan VACUOUS rather than current: with two available builders,
+   * prose saying "only vinext is available" still passes the old check, because
+   * vinext *is* available. The claim the guard exists to catch becomes
+   * unreachable by it.
+   *
+   * So the rule is stated over the contract instead of over one id: **while more
+   * than one builder is available, NO "only one builder/target" claim can be
+   * true**, whoever it names and however it is worded. Two live examples this
+   * rework caught that the old regex's word order could not —
+   * `artifact-contract.ts` called vinext "the ONLY available builder" and "the
+   * ONLY supported target", both false the moment turbopack re-opened, both in a
+   * file the activating PR edited.
+   *
+   * SCANNED, NOT ENUMERATED: the file set comes from `git ls-files`, and the
+   * builder ids come from the contract, so a third builder is in scope for free.
    */
-  const AVAILABILITY_CLAIM = /only\s+`?([a-z][a-z0-9-]*)`?\s+(?:is\s+)?available\b/gi;
-  const files = tracked('packages/kn-next/src/cli/*.ts', 'packages/kn-next/src/adapters/*.ts');
+  const files = tracked(
+    'packages/kn-next/src/cli/*.ts',
+    'packages/kn-next/src/adapters/*.ts',
+    // `config.ts` (the `build` key's own documentation) is in scope too: it is
+    // where a reader looks up what they may select, so it is the likeliest place
+    // for a stale exclusivity claim to sit. Zero findings there today, which is
+    // the only useful time to widen a scan.
+    ':(glob)packages/kn-next/src/*.ts',
+  );
   const builderIds = new Set(BUILDERS.map((b) => b.id as string));
 
-  it('the contract has exactly one available builder (the claim shape is meaningful)', () => {
-    expect(AVAILABLE_BUILDERS.map((b) => b.id)).toEqual(['vinext']);
-  });
+  /**
+   * "…is the only <adjectives> builder/target" — the ONE-OF-A-KIND form.
+   *
+   * `the only` rather than a bare `only`, and that ordering is what makes the
+   * scan usable rather than something that has to be weakened until it finds
+   * nothing. The sources are full of legitimate SCOPING statements — "only the
+   * vinext target runs the ESM preflight", "(vinext target only)", "only when
+   * the standalone target is selected" — which say where a behaviour applies,
+   * not that one target is all there is. `only the` is scoping; `the only` is
+   * exclusivity. The precision test below pins both directions.
+   *
+   * The noun is `builder`/`target` specifically: "the only spelling", "the only
+   * mode", "the only cache provider" are other axes and none of this guard's
+   * business.
+   */
+  const ONE_OF_A_KIND = /\bthe\s+only\s+(?:[\w.'-]+\s+){0,3}(?:builders?|targets?)\b/gi;
+
+  /**
+   * "only `turbopack` is available" — the NAMED-BUILDER form the first version
+   * of this guard scanned for, kept because it is a real wording and the one
+   * that was actually in the tree. The id is CAPTURED and checked against the
+   * contract, so "only bun available" (a runtime) stays out of scope.
+   */
+  const NAMED_BUILDER_CLAIM =
+    /\bonly\s+`?([a-z][a-z0-9-]*)`?\s+(?:is\s+|are\s+)?(?:available|supported|selectable)\b/gi;
 
   /**
    * A JSDoc block wraps, and the continuation marker is ` * `. Stripping it is
@@ -240,21 +297,83 @@ describe('§4.2 an "only X available today" claim names the builder that IS avai
   const unwrapComments = (source: string) =>
     source.replace(/\n[ \t]*\*[ \t]?/g, '\n').replace(/\s*\n\s*/g, ' ');
 
-  it('every availability claim in the sources names it', () => {
-    const available = AVAILABLE_BUILDERS.map((b) => b.id as string);
+  const exclusivityClaims = (source: string): string[] => {
+    const text = unwrapComments(source);
+    const claims = [...text.matchAll(ONE_OF_A_KIND)].map((m) => m[0]);
+    for (const match of text.matchAll(NAMED_BUILDER_CLAIM)) {
+      // Builder ids only — a runtime or an unrelated word is not this axis.
+      if (builderIds.has((match[1] ?? '').toLowerCase())) claims.push(match[0]);
+    }
+    return claims;
+  };
+
+  it('more than one builder is available (the premise that makes the claim FALSE)', () => {
+    // The antecedent of the rule below, asserted rather than assumed. If a
+    // release ever narrows back to one available builder, an "only X" claim
+    // becomes true again and this scan must be REWRITTEN, not silently kept
+    // green — so this fails loudly instead of the scan quietly degrading, which
+    // is precisely what the widen-the-array fix would have done.
+    expect(AVAILABLE_BUILDERS.length).toBeGreaterThan(1);
+  });
+
+  it('there are sources to scan at all (non-vacuity)', () => {
+    expect(files.length).toBeGreaterThan(10);
+  });
+
+  it('no source prose claims a single builder or target is all there is', () => {
     const findings: string[] = [];
     for (const relPath of files) {
-      const source = unwrapComments(read(relPath));
-      for (const match of source.matchAll(AVAILABILITY_CLAIM)) {
-        const claimed = (match[1] ?? '').toLowerCase();
-        // Only builder ids are in scope; "only bun available" is about runtimes.
-        if (!builderIds.has(claimed)) continue;
-        if (!available.includes(claimed)) {
-          findings.push(`${relPath}: claims "${match[0]}" but ${claimed} is available: false`);
-        }
+      for (const claim of exclusivityClaims(read(relPath))) {
+        findings.push(
+          `${relPath}: "${claim}" — but ${AVAILABLE_BUILDERS.length} builders are available ` +
+            `(${AVAILABLE_BUILDERS.map((b) => b.id).join(', ')})`,
+        );
       }
     }
-    expect(findings, findings.join('\n  ')).toEqual([]);
+    expect(
+      findings,
+      `two builders are selectable; these still say one is all there is:\n  ${findings.join('\n  ')}`,
+    ).toEqual([]);
+  });
+
+  it('BOTH word orders are caught (the pair the old regex missed)', () => {
+    // The two live comments this rework found. `/only X available/` matched
+    // neither: the builder id is not adjacent to the availability word in
+    // either, which is how they shipped through a guard written for exactly
+    // this class.
+    expect(exclusivityClaims('// `available: true` — the ONLY available builder')).toHaveLength(1);
+    expect(exclusivityClaims('// ADR-0048: the ONLY supported target.')).toHaveLength(1);
+    // …a wrapped JSDoc spelling of the same claim, since that is what a
+    // formatter does to it unprompted.
+    expect(
+      exclusivityClaims(' * vinext is the only\n * target this release can build.'),
+    ).toHaveLength(1);
+    // …and the named form the first version scanned for still reds.
+    expect(exclusivityClaims('// with only `turbopack` available today')).toHaveLength(1);
+    // A NEGATED form is flagged too, and that is DELIBERATE rather than a gap:
+    // this repo's sibling prose guard (the compat-smoke skip scan below) was
+    // decoration for a whole round precisely because it tried to excuse
+    // absence-phrasing — "no" matched "no-bucket" and laundered the claim. The
+    // rule here is the cheaper one: do not write the phrase at all, write "one
+    // of two selectable builders". It caught this very rework's own first
+    // wording of the vinext docstring ("not the only selectable builder").
+    expect(exclusivityClaims('// vinext is not the only selectable builder')).toHaveLength(1);
+  });
+
+  it('SCOPING prose is not an exclusivity claim (the guard stays usable)', () => {
+    // The other half. A scan that flagged these would be turned off within a
+    // day, because every one of them is a true and useful statement about WHERE
+    // a behaviour applies. `only the` vs `the only` is the whole distinction.
+    expect(exclusivityClaims('// requireEsm gates the preflight: only the vinext target')).toEqual(
+      [],
+    );
+    expect(exclusivityClaims('// staged only when the standalone target is selected')).toEqual([]);
+    expect(exclusivityClaims('// the vinext ESM preflight (vinext target only).')).toEqual([]);
+    // Other axes keep their own "the only": this guard is about builders.
+    expect(exclusivityClaims('// Redis is the ONLY cache provider')).toEqual([]);
+    expect(exclusivityClaims('// the only spelling an older operator understands')).toEqual([]);
+    // A runtime id is not a builder id, so the named form ignores it.
+    expect(exclusivityClaims('// only `bun` is available for this shape')).toEqual([]);
   });
 });
 

@@ -109,17 +109,21 @@ describe("#B2 the `build` axis", () => {
 /**
  * The pairing check (NEW-1 from the round-2 design gate).
  *
- * `checkPairing` is tested DIRECTLY rather than through `validateConfig`,
- * because — measured — no reachable config can currently express an
- * incompatible pairing: only `turbopack` is available, and both runtimes accept
- * `next-standalone`. A mutation proved the consequence: deleting the call from
- * `validateConfig` broke no test.
+ * `checkPairing` is tested DIRECTLY as well as through `validateConfig`. The
+ * direct tests date from when — measured — no reachable config could express an
+ * incompatible pairing, because one builder was available and both runtimes
+ * accept `next-standalone`; a mutation proved the consequence, deleting the call
+ * from `validateConfig` broke no test.
+ *
+ * THAT ERA IS OVER: both builders are selectable, so `build: 'vinext'` +
+ * `runtime: 'node'` is an expressible, incompatible config and `validateConfig`
+ * genuinely refuses it (the `nitro-output-bun` cases above). The direct tests
+ * stay, because they cover the contract exhaustively rather than through the one
+ * config shape that happens to reach it.
  *
  * The gate's objection to the contract was "a contract nobody calls is an
- * enumerated table with better typing". Wiring in a call that nothing can reach
- * would have reproduced that objection one level down. Exercising the function
- * itself covers the incompatible case config cannot yet reach, so the seam is
- * already live for the day a second builder ships.
+ * enumerated table with better typing". Exercising the function itself, plus the
+ * reachable refusal above, answers it at both levels.
  */
 describe("#B2 checkPairing — the contract's production caller", () => {
     it("passes the two pairings a config can actually express today", () => {

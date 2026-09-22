@@ -352,7 +352,10 @@ retired. Full record: `docs/adr/0048-vinext-single-exec-as-the-only-target.md`.
 halves the win (121 ms) and cannot serve a Next standalone tree at all.
 
 **Done (knext side):** `AVAILABLE_BUILDERS` returns exactly `vinext`; turbopack rejected with a
-migration message; `runtime: node` rejected against the measured artifact shape; Bun 1.4.0 floor
+migration message — **superseded 2026-09-22 by ADR-0054 item 6 (#1167): `turbopack` is
+`available: true` again and BOTH builders are selectable, with `vinext` still the default. The
+sentence is kept as the dated record of what ADR-0048 shipped; it is no longer current
+behaviour.** `runtime: node` rejected against the measured artifact shape; Bun 1.4.0 floor
 enforced in `cli/vinext-build.ts` (13 tests); `templates/app/Dockerfile.vinext.hbs` ships the
 binary; 18 validator tests green; `apps/file-manager` ported and **building and serving the vinext
 artifact** (HTTP 200).

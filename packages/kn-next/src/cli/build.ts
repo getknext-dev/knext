@@ -12,9 +12,12 @@
  *   3. Upload static assets to storage (GCS/S3/MinIO)
  *
  * NOTE: the project's own `npm run build` produces the bundle (vinext's
- * `vite build` on the default target, `next build` + output:'standalone' on
- * the retired turbopack shape); for the vinext shape this command then
- * compiles the single executable (ADR-0048 — see step 2c).
+ * `vite build` on the default target, `next build` + output:'standalone' on the
+ * selectable turbopack/standalone target — ADR-0054 item 6); for the vinext
+ * shape this command then compiles the single executable (ADR-0048 — see step
+ * 2c). Since the project owns that script, selecting `build: 'turbopack'` on an
+ * app whose script still runs `vite build` produces no `.next/standalone` — the
+ * missing-artifact warning below is the only signal today (#1184).
  *
  * ADR-0001: build does NOT emit raw Knative/infrastructure manifests. The
  * operator is the single source of truth for cluster desired-state and
@@ -324,9 +327,10 @@ Options:
 
 /**
  * The flags `kn-next build` accepts. Exported so a guard can hold reference-app
- * and template `package.json` scripts to the real parser (`--target` was
- * removed with ADR-0048 — vinext is the only target — and a script still
- * passing it fails with `unknown flag`). `-h`/`--help` are handled separately
+ * and template `package.json` scripts to the real parser (`--target` was removed
+ * with ADR-0048, and a script still passing it fails with `unknown flag`; the
+ * two selectable targets are chosen by the `build` config key, never by a flag).
+ * `-h`/`--help` are handled separately
  * above, so they are not in this set.
  */
 export const ACCEPTED_BUILD_FLAGS: ReadonlySet<string> = new Set([

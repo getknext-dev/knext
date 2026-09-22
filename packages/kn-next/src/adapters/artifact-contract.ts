@@ -168,9 +168,10 @@ export function explainIncompatibility(
 /**
  * `next build` → `.next/standalone/server.js`, spawned by the supervisor.
  *
- * The default and the only all-apps-verified path. `node-server.ts` is its
- * runtime half; `STANDALONE_SERVER_PATH` overrides the entry there, and the
- * default below is that same value so the two cannot drift apart silently.
+ * The all-apps-verified path, and SELECTABLE but not the default — `vinext`
+ * holds that (see `DEFAULT_BUILDER_ID`). `node-server.ts` is its runtime half;
+ * `STANDALONE_SERVER_PATH` overrides the entry there, and the default below is
+ * that same value so the two cannot drift apart silently.
  */
 export const turbopackBuilder: BuilderAdapter = {
     id: "turbopack",
@@ -200,8 +201,10 @@ export const turbopackBuilder: BuilderAdapter = {
  * vinext (the Vite/rolldown Next reimplementation) → a nitro `.output`, run
  * **in-process**.
  *
- * `available: true` — the ONLY available builder (ADR-0048). Both halves of
- * the pipeline exist: `cli/vinext-build.ts` produces the executable and the
+ * `available: true`, and the DEFAULT — one of TWO selectable builders, since
+ * ADR-0054 item 6 re-opened `turbopack`/`next-standalone` alongside it, so
+ * `DEFAULT_BUILDER_ID` is what distinguishes them. Both halves
+ * of the pipeline exist: `cli/vinext-build.ts` produces the executable and the
  * scaffolded Dockerfile ships it. (An earlier revision of this docstring said
  * `available: false` because vinext was not yet a dependency; that era ended
  * when the toolchain landed, and `kn-next build` now compiles the binary
@@ -226,7 +229,8 @@ export const turbopackBuilder: BuilderAdapter = {
 export const vinextBuilder: BuilderAdapter = {
     id: "vinext",
     emits: "nitro-output-bun",
-    // ADR-0048: the ONLY supported target. Available because both halves now
+    // ADR-0048 made this the default target; ADR-0054 item 6 keeps it default
+    // while making `turbopack` selectable too. Available because both halves now
     // exist — `cli/vinext-build.ts` produces the executable (vite build ->
     // nitro bun preset -> `bun build --compile --minify --bytecode`, floored at
     // Bun 1.4.0), and `templates/app/Dockerfile.vinext.hbs` ships it.

@@ -30,8 +30,9 @@ const config: KnativeNextConfig = {
 ```
 
 The second target is `next build`'s **standalone** output, run by a small supervisor that spawns
-Next's own `server.js` and drains it gracefully on shutdown. It is the target that passes the
-official Next.js compatibility suite. Select it with `build: 'turbopack'`, and pick which runtime
+Next's own `server.js` and drains it gracefully on shutdown. The official Next.js compatibility
+suite number was earned on this target's standalone output; the supervisor knext wraps it in has
+not itself been run through the suite. Select it with `build: 'turbopack'`, and pick which runtime
 executes it with `runtime`:
 
 ```ts title="kn-next.config.ts"
@@ -42,6 +43,12 @@ const config: KnativeNextConfig = {
   runtime: 'bun',       // or 'node' (the default runtime for this target)
 };
 ```
+
+This target has a prerequisite in your project, not just in the config: `kn-next build` runs your
+app's own build script, so that script must run `next build` with `output: 'standalone'` in
+`next.config.ts` — otherwise there is no standalone server for the image to copy. Apps created by
+`kn-next create` are vinext apps whose build script runs `vite build` and whose `next.config.ts`
+deliberately omits `output`, so switching such an app to this target means changing both first.
 
 `kn-next` stages and builds the matching standalone runtime image for you; `runtime` has no effect
 on the vinext single-executable target, where the runtime is compiled into the binary. Today the
@@ -110,7 +117,9 @@ on anyone deploying an already-built image.
 knext's official-suite credential — [778/778, re-verified nightly](/docs/compat-suite) — was earned
 on the **standalone** target (the `build: 'turbopack'` shape above), which is a *different artifact*
 from the compiled vinext executable. If suite-verified compatibility is what you need, that target
-is selectable today. The suite lane for the compiled vinext executable is being stood up; until it
+is selectable today — with one caveat stated plainly: the suite runs against the standalone server
+directly, so the credential covers that output rather than the supervisor knext boots it with. The
+suite lane for the compiled vinext executable is being stood up; until it
 publishes a green run, treat the compiled build's compatibility as **measured per feature rather
 than suite-verified**, and read the per-feature status on the
 [compatibility matrix](/docs/compat-matrix) rather than assuming the standalone number carries over.
