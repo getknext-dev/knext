@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse } from 'yaml';
+import { LANE_MARKER_PREFIX } from '../scripts/compat-window-audit.mjs';
 
 /**
  * cr-1179 findings 1 + 2 — the compat-window fingerprint must freeze the Bun
@@ -150,5 +151,50 @@ describe('cr-1179 #2 — the fold must not swallow a missing Bun into a constant
       /\[\s*-n\s*"\$\{?BUN_VERSION\}?"\s*\]/,
     );
     expect(run).toMatch(/\[\s*-n\s*"\$\{?BUN_REVISION\}?"\s*\]/);
+  });
+});
+
+/**
+ * cr-1179 #3 — the lane-marker artifact. `compat-window-audit` reads the lane
+ * from this artifact's NAME (out of the artifacts listing, never downloaded) so
+ * a night whose ledger is lost is still attributed to ONE lane. Without it, a
+ * bun night that loses its runner disqualifies a night in the NODE window and
+ * restarts the v1.0 credential streak for a failure on the other lane.
+ */
+describe('cr-1179 #3 — the run publishes its lane independently of the ledger', () => {
+  function markerStep(): { job: string; index: number; steps: Step[]; step: Step } {
+    for (const [job, def] of Object.entries(workflow().jobs)) {
+      const steps = def.steps ?? [];
+      const index = steps.findIndex((s) =>
+        String(s.with?.name ?? '').startsWith(LANE_MARKER_PREFIX),
+      );
+      if (index >= 0) return { job, index, steps, step: steps[index] };
+    }
+    throw new Error(`no step uploads an artifact named ${LANE_MARKER_PREFIX}<lane>`);
+  }
+
+  it('an artifact names the lane, locksteped to the prefix the audit reads', () => {
+    const { step } = markerStep();
+    expect(String(step.uses ?? '')).toMatch(/^actions\/upload-artifact@/);
+    // The lane comes from the SAME env the ledger and the alert title read, so
+    // the marker cannot disagree with the lane the run actually ran.
+    expect(step.with?.name).toBe(`${LANE_MARKER_PREFIX}\${{ env.KNEXT_RUNTIME }}`);
+  });
+
+  it('it is published for EVERY lane, not just the bun one', () => {
+    // A node-only or bun-only marker would leave the other lane's lost nights
+    // unattributed — i.e. back in both windows.
+    const { step } = markerStep();
+    expect(step.if ?? null, 'the lane marker must be unconditional').toBeNull();
+  });
+
+  it('it is published BEFORE any step that can lose the night', () => {
+    // Attribution has to outlive the failure it attributes. A marker uploaded
+    // after the install/pack/fingerprint work would be missing from exactly the
+    // runs that need it.
+    const { steps, index } = markerStep();
+    const firstWork = steps.findIndex((s) => /Install knext deps/.test(s.name ?? ''));
+    expect(firstWork).toBeGreaterThanOrEqual(0);
+    expect(index).toBeLessThan(firstWork);
   });
 });

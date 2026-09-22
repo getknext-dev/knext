@@ -196,6 +196,31 @@ jobs:
         with:
           path: knext
 
+      # cr-1179 #3 — publish which LANE this run is, independently of the ledger.
+      # `compat-window-audit` reads the lane from an artifact NAME in the
+      # artifacts LISTING (never downloading it), so a night whose ledger is
+      # lost — runner disconnect, expiry, a failed download — is still
+      # attributable. Before this, the lane was read only FROM the ledger, so an
+      # unreadable BUN night disqualified a night in the NODE window too and
+      # restarted the v1.0 credential streak for a failure on the other lane.
+      # It runs here, before any step that can lose the night: attribution has
+      # to outlive the failure it attributes. Unconditional — a marker on one
+      # lane only would leave the other lane's lost nights unattributed, which
+      # is the bug. `tests/compat-bun-lane-lockstep.test.ts` locksteps the name
+      # to the prefix the audit reads.
+      - name: Record the lane marker
+        run: |
+          set -euo pipefail
+          printf '%s\n' "${KNEXT_RUNTIME}" > "${RUNNER_TEMP}/compat-lane.txt"
+      - name: Publish the lane marker
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: compat-lane-${{ env.KNEXT_RUNTIME }}
+          path: ${{ runner.temp }}/compat-lane.txt
+          # The NAME is the evidence and the listing keeps it after expiry, so
+          # retention here only needs to cover the audit's own window.
+          retention-days: 90
+
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:

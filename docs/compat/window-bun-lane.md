@@ -27,7 +27,7 @@ below fills as scheduled nights land.
 |---|---|
 | lane | bun (`KNEXT_RUNTIME=bun`, standalone `server.js` on Bun) |
 | required nights | **14** consecutive qualifying (`WINDOW_REQUIRED_NIGHTS`, `scripts/compat-window-audit.mjs`) |
-| grader | `node scripts/compat-window-audit.mjs --fetch --lane bun` — the lane is read from each run's `compat-run-ledger`, already lane-attributed. Grades rules 1–3 (and the three stricter audit rules); **rule 4 (Bun-build freeze) landed with #1147** — the fingerprint folds the observed `bun --version` + `bun --revision` on the bun lane. |
+| grader | `node scripts/compat-window-audit.mjs --fetch --lane bun` — the lane is read from each run's `compat-run-ledger`, already lane-attributed, and from a `compat-lane-<lane>` marker artifact when the ledger cannot be read, so a night lost on one lane does not restart the other. Grades rules 1–3 (and the three stricter audit rules); **rule 4 (Bun-build freeze) landed with #1147** — the fingerprint folds the observed `bun --version` + `bun --revision` on the bun lane. |
 | window opened | on the first scheduled bun night (lane landed #1147, cron `47 4 * * *`); none banked yet |
 | current streak | 0 / 14 — lane scheduled, awaiting first qualifying night |
 
@@ -61,6 +61,13 @@ semantics as the node lane.
    `bun --revision` and fold both into the bun lane's frozen fingerprint (or treat any change as a
    rule-1 restart), so the audit script enforces this rather than a human eyeballing it. A Bun build
    move **resets** the streak; it never merely pauses it, and a maintainer may **not** waive it.
+
+   The Bun that is frozen is the Bun the lane **served on**, not whichever Bun happened to be on
+   PATH where the fingerprint is computed. The fingerprint job installs it from the *same*
+   `bun-version` expression the suite shards install from, so bumping the lane's pin necessarily
+   moves the fingerprint and restarts the streak — which is what this rule exists to force.
+   `tests/compat-bun-lane-lockstep.test.ts` fails if those two ever diverge, and an unreadable or
+   empty `bun --version`/`bun --revision` fails the run rather than freezing a placeholder.
 
 **Plus the three stricter rules the audit script applies that this list does not restate**, exactly
 as [`window-node-lane.md`](window-node-lane.md) enumerates them under "Three rules the audit script

@@ -131,11 +131,19 @@ the above, added when the window was first audited end-to-end (2026-08-24):
   shard count is DECLARED … and NEVER inferred from what arrived" — applied one level up to
   *nights*: the run list is the denominator, not the set of artifacts that happened to download.
 
-  It fails closed, with a consequence worth knowing: the lane of an unresolved night is unknowable
-  (the lane is read from the ledger, which is the thing that could not be fetched), so an unresolved
-  night restarts **every** lane's count. A bun weekly that fails to download will break the node
-  streak. That is the safe direction and it is the one taken — the worst case is a reported streak
-  shorter than the truth.
+  It fails closed. That used to carry a consequence worth knowing — the lane of an unresolved night
+  was unknowable, because the lane was read from the ledger, which is the thing that could not be
+  fetched, so an unresolved night restarted **every** lane's count and a lost bun night broke the
+  node streak. That was free while one lane was scheduled; with a second nightly lane it is not.
+
+  The lane is now knowable **without** the ledger: every run publishes a lane-marker artifact named
+  `compat-lane-<lane>`, and the audit reads that name out of the artifacts *listing* — never
+  downloading it, so attribution survives the artifact's own expiry. An unresolved night whose
+  marker is readable restarts **only its own** lane's count; one whose marker is not (the artifacts
+  API itself unreachable, or two markers disagreeing) falls back to the original rule and restarts
+  every lane's. A night attributed to this lane still restarts this lane — the marker buys
+  cross-lane independence, not amnesty. The safe direction is unchanged: the worst case is a
+  reported streak shorter than the truth.
 
 ## Nights
 
@@ -213,7 +221,7 @@ Stated plainly because the gap is the reason this file is not self-certifying:
   A stale table here is not detectable from inside the repo — re-run the audit before quoting it.
 - **Artifact retention bounds how far back the audit can see, and it says so rather than trimming
   the window silently.** Scheduled runs before 2026-07-28 predate the `compat-run-ledger` artifact
-  entirely, so `--fetch --limit 40` reports each of them as an unresolved `no-ledger` night. Those
+  entirely, so a `--fetch` pass reports each of them as an unresolved `no-ledger` night. Those
   rows are noise for *this* window — it opened later — but they are the honest form of the limit:
   the audit is telling you which runs it could not grade. Retention will eventually do the same to
   nights that *are* in the window, and when it does, the streak will read shorter, not longer.

@@ -65,16 +65,33 @@
  *      flatters us. Failing closed costs nothing: the worst case is a reported
  *      streak shorter than the truth.
  *
- *      Fail-closed has a deliberate consequence worth stating: the lane of an
- *      unresolved night is UNKNOWABLE (the lane is read from the ledger, which
- *      is the thing we could not get), so an unresolved night disqualifies a
- *      night in EVERY lane's window. A bun weekly that fails to download will
- *      break the node streak. That is the safe direction and it is the one we
- *      take.
+ *      Fail-closed used to carry a consequence that only looked free while
+ *      there was ONE scheduled lane: the lane of an unresolved night was read
+ *      from the ledger — the very thing we could not get — so the night was
+ *      admitted to EVERY lane's window, and a lost bun night broke the NODE
+ *      streak. #1147 activated a second nightly cron, which put a real price on
+ *      that: a runner loss on the bun lane would restart the v1.0 credential
+ *      streak for a failure on the other lane.
+ *
+ *      So the lane is now knowable WITHOUT the ledger. Every run uploads a
+ *      LANE MARKER artifact named `compat-lane-<lane>`; `fetchLedgers` reads
+ *      that name out of the artifacts LISTING and never downloads it. Two
+ *      properties make this sound rather than a softening of rule 5:
+ *
+ *        * the listing names EXPIRED artifacts too (it is how `artifact-expired`
+ *          is already told apart from `no-ledger`), so attribution outlives the
+ *          90-day retention the ledger itself does not;
+ *        * when the marker cannot be read — the artifacts API is unreachable, or
+ *          two markers disagree — the lane stays `null` and the ORIGINAL
+ *          fail-closed rule applies unchanged: the night is admitted to every
+ *          lane's window.
+ *
+ *      A night attributed to a lane still disqualifies THAT lane. This buys
+ *      cross-lane independence, never a lane laundering its own lost nights.
  *
  * USAGE
  *   node scripts/compat-window-audit.mjs --dir <dir-of-ledger-json>
- *   node scripts/compat-window-audit.mjs --fetch --limit 40   # needs `gh`
+ *   node scripts/compat-window-audit.mjs --fetch --limit 100  # needs `gh`
  *   node scripts/compat-window-audit.mjs --fetch --lane bun --json
  */
 
@@ -87,6 +104,45 @@ export const WINDOW_REQUIRED_NIGHTS = 14;
 
 /** The lane whose streak is the compat-matrix credential. */
 export const CREDENTIAL_LANE = 'node';
+
+/**
+ * How many runs `--fetch` asks `gh run list` for by default.
+ *
+ * `gh run list` spans ALL events, not just schedules, so this is not a count of
+ * nights. It was 40 while there was one scheduled lane; #1147 added a second
+ * nightly cron, which roughly halves the per-lane horizon a given limit buys —
+ * a 14-night node window could fall off the end of the list and read as shorter
+ * than it is. Sized for both lanes' full windows with headroom for pushes, PRs
+ * and dispatches; `tests/compat-window-audit.test.ts` pins the relation rather
+ * than the number.
+ */
+export const DEFAULT_FETCH_LIMIT = 100;
+
+/**
+ * Prefix of the per-run artifact whose NAME carries the lane.
+ *
+ * Read from the artifacts listing, never downloaded — so it attributes a night
+ * whose ledger is gone (rule 5). The workflow uploads `compat-lane-${KNEXT_RUNTIME}`;
+ * `tests/compat-bun-lane-lockstep.test.ts` locksteps that name to this prefix.
+ */
+export const LANE_MARKER_PREFIX = 'compat-lane-';
+
+/**
+ * The lane a run declares through its marker artifact, or `null` when the
+ * markers are absent or disagree (fail closed — see rule 5).
+ *
+ * @param {Array<{name?: string}>} artifacts
+ */
+export function laneFromArtifacts(artifacts) {
+  const lanes = new Set(
+    (Array.isArray(artifacts) ? artifacts : [])
+      .map((a) => (typeof a?.name === 'string' ? a.name : ''))
+      .filter((name) => name.startsWith(LANE_MARKER_PREFIX))
+      .map((name) => name.slice(LANE_MARKER_PREFIX.length))
+      .filter((lane) => lane.length > 0),
+  );
+  return lanes.size === 1 ? [...lanes][0] : null;
+}
 
 const REPO = 'getknext-dev/knext';
 const WORKFLOW = 'test-e2e-deploy.yml';
@@ -128,18 +184,26 @@ export const UNRESOLVED_REASONS = Object.freeze([
 /**
  * A stand-in for a scheduled run whose ledger could not be obtained.
  *
- * The `lane` is deliberately `null`: the lane is read FROM the ledger, so an
- * unresolved run has no knowable lane. `selectLaneNights` therefore admits it
- * into every lane's window (see rule 5 in the header) — fail closed.
+ * `lane` is what the run's MARKER artifact declared, or `null` when even that
+ * could not be read. A `null` lane keeps the original fail-closed behaviour —
+ * `selectLaneNights` admits the night into every lane's window (rule 5) — while
+ * a known lane confines the damage to the lane that actually lost the night.
  *
  * @param {string|number} runId
  * @param {typeof UNRESOLVED_REASONS[number]} reason
+ * @param {string|null} [lane] the lane declared by the marker artifact
  */
-export function unresolvedNight(runId, reason) {
+export function unresolvedNight(runId, reason, lane = null) {
   if (!UNRESOLVED_REASONS.includes(reason)) {
     throw new Error(`compat-window-audit: unknown unresolved reason ${reason}`);
   }
-  return { runId: String(runId), event: 'schedule', lane: null, unresolved: reason, shards: [] };
+  return {
+    runId: String(runId),
+    event: 'schedule',
+    lane: typeof lane === 'string' && lane.length > 0 ? lane : null,
+    unresolved: reason,
+    shards: [],
+  };
 }
 
 /** Is this entry a stand-in for a run whose ledger we never got? */
@@ -280,14 +344,21 @@ export function gradeNight(ledger, opts = {}) {
  * grading is what keeps a red bun weekly from resetting the node credential's
  * streak, which is the lane separation ADR-0007 §g draws in the ledger.
  *
- * UNRESOLVED runs (rule 5) are the one exception and are admitted into EVERY
- * lane, because their lane is exactly what we failed to read. Excluding them
- * "because they are probably the other lane" is the inference the ledger
- * forbids, and it is the inference that merges two streaks into one.
+ * UNRESOLVED runs (rule 5) are the one exception, and they split in two:
+ *
+ *   * one whose MARKER artifact named its lane belongs to that lane only. It
+ *     still disqualifies a night THERE — the marker buys cross-lane
+ *     independence, not amnesty.
+ *   * one with NO knowable lane is admitted into EVERY lane, because its lane
+ *     is exactly what we failed to read. Excluding it "because it is probably
+ *     the other lane" is the inference the ledger forbids, and it is the
+ *     inference that merges two streaks into one.
  */
 export function selectLaneNights(ledgers, lane = CREDENTIAL_LANE) {
   return ledgers
-    .filter((l) => l?.event === 'schedule' && (l?.lane === lane || isUnresolved(l)))
+    .filter(
+      (l) => l?.event === 'schedule' && (l?.lane === lane || (isUnresolved(l) && l?.lane == null)),
+    )
     .sort((a, b) => Number(a.runId) - Number(b.runId));
 }
 
@@ -624,7 +695,12 @@ export function fetchLedgers(limit, deps = {}) {
     // missing, so it needs no placeholder.
     if (run.event !== 'schedule') continue;
 
-    const unresolved = (reason) => out.push(unresolvedNight(run.databaseId, reason));
+    // The lane a night is attributed to when its ledger cannot be read. It is
+    // resolved from the artifacts LISTING below, so it stays `null` for the one
+    // reason that precedes the listing — an unreachable API — and that null is
+    // what keeps rule 5's fail-closed behaviour for genuinely unknowable nights.
+    let markerLane = null;
+    const unresolved = (reason) => out.push(unresolvedNight(run.databaseId, reason, markerLane));
 
     let artifacts;
     try {
@@ -635,6 +711,9 @@ export function fetchLedgers(limit, deps = {}) {
       unresolved('artifact-api-unreachable');
       continue;
     }
+    // Read from the NAME in the listing — never downloaded, so it survives the
+    // artifact's own expiry (an expired artifact is still listed).
+    markerLane = laneFromArtifacts(artifacts);
     const named = artifacts.filter((a) => a.name === LEDGER_ARTIFACT);
     const art = named.find((a) => !a.expired);
     if (!art) {
@@ -692,7 +771,7 @@ function main(argv) {
     // reintroduce exactly the silent skip rule 5 forbids.
     ledgers = readLedgerDir(dir);
   } else if (argv.includes('--fetch')) {
-    ledgers = fetchLedgers(Number(arg('--limit', '40')));
+    ledgers = fetchLedgers(Number(arg('--limit', String(DEFAULT_FETCH_LIMIT))));
   } else {
     console.error('compat-window-audit: pass --dir <dir> or --fetch [--limit N]');
     process.exit(2);
