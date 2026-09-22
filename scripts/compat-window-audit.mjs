@@ -702,12 +702,37 @@ export function fetchLedgers(limit, deps = {}) {
     let markerLane = null;
     const unresolved = (reason) => out.push(unresolvedNight(run.databaseId, reason, markerLane));
 
-    let artifacts;
+    let artifactsResponse;
     try {
-      artifacts = withRetry(() =>
-        JSON.parse(gh(['api', `repos/${REPO}/actions/runs/${run.databaseId}/artifacts`])),
-      ).artifacts;
+      // `per_page=100`: the REST default is 30, and this listing carries no
+      // pagination otherwise. Measured (2026-09-22): the latest scheduled run
+      // had total_count 19, +1 for the #1147 lane marker = 20 — the shard
+      // matrix already went 4→16 once, so crossing 30 is not hypothetical.
+      // 100 matches DEFAULT_FETCH_LIMIT's own headroom rationale (>= 2 lanes
+      // x 14 nights).
+      artifactsResponse = withRetry(() =>
+        JSON.parse(
+          gh(['api', `repos/${REPO}/actions/runs/${run.databaseId}/artifacts?per_page=100`]),
+        ),
+      );
     } catch {
+      unresolved('artifact-api-unreachable');
+      continue;
+    }
+    const artifacts = Array.isArray(artifactsResponse?.artifacts)
+      ? artifactsResponse.artifacts
+      : [];
+    // `total_count` is GitHub's own count of the FULL set this run has. If it
+    // disagrees with what this page actually returned, the listing was
+    // truncated (or otherwise incomplete) — treat that the same as an
+    // unreachable API: an unresolved, fail-closed-lane night. Proceeding as
+    // if a truncated page were complete is exactly how #3's fix (attribute an
+    // unresolved night to ONE lane) silently reverts: `laneFromArtifacts`
+    // would read a partial listing and could come back `null` or wrong.
+    if (
+      typeof artifactsResponse?.total_count === 'number' &&
+      artifactsResponse.total_count !== artifacts.length
+    ) {
       unresolved('artifact-api-unreachable');
       continue;
     }

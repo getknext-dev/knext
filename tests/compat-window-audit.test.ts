@@ -559,6 +559,8 @@ describe('compat-window-audit — the v1.0 node-lane window, computed not recall
       artifactsThrow?: boolean;
       downloadThrow?: boolean;
       ledgers?: unknown[];
+      /** Override `total_count`; defaults to the listing's own length. */
+      totalCount?: number;
     };
 
     function fakeGh(runs: Array<Record<string, unknown>>, cases: Record<string, GhCase>) {
@@ -571,7 +573,9 @@ describe('compat-window-audit — the v1.0 node-lane window, computed not recall
         if (args[0] === 'api') {
           const id = /runs\/(\d+)\/artifacts/.exec(args[1])?.[1] ?? '';
           if (cases[id]?.artifactsThrow) throw new Error('gh api failed');
-          return JSON.stringify({ artifacts: cases[id]?.artifacts ?? [] });
+          const artifacts = cases[id]?.artifacts ?? [];
+          const total_count = cases[id]?.totalCount ?? artifacts.length;
+          return JSON.stringify({ artifacts, total_count });
         }
         if (args[0] === 'run' && args[1] === 'download') {
           if (cases[args[2]]?.downloadThrow) throw new Error('gh run download failed');
@@ -803,6 +807,66 @@ describe('compat-window-audit — the v1.0 node-lane window, computed not recall
               artifacts: [{ name: 'compat-run-ledger', expired: false }, marker('bun')],
               ledgers: [night({ runId: '1', lane: 'node' })],
             },
+          }),
+        );
+        expect(out[0]).toMatchObject({ runId: '1', lane: 'node' });
+        expect(out[0]).not.toHaveProperty('unresolved');
+      });
+    });
+
+    /**
+     * cr-1179b #1 — the artifacts LISTING itself must not silently truncate.
+     * `gh api …/artifacts` carries no pagination by default, so the REST
+     * `per_page=30` default applies. Measured on the latest scheduled run:
+     * total_count 19, +1 for the lane marker = 20 — the shard matrix already
+     * went 4→16 once, so crossing 30 is not hypothetical. A truncated page
+     * would make `laneFromArtifacts` return `null` and silently fall an
+     * unresolved night back into BOTH lanes' windows — reverting cr-1179 #3.
+     */
+    describe('the artifacts listing must not silently truncate (cr-1179b #1)', () => {
+      it('requests the artifacts listing with per_page=100, not the truncating REST default', () => {
+        const seenApiArgs: string[][] = [];
+        const gh = (args: string[]) => {
+          if (args[0] === 'run' && args[1] === 'list') {
+            return JSON.stringify([{ databaseId: 1, status: 'completed', event: 'schedule' }]);
+          }
+          if (args[0] === 'api') {
+            seenApiArgs.push(args);
+            return JSON.stringify({ artifacts: live, total_count: live.length });
+          }
+          if (args[0] === 'run' && args[1] === 'download') return '';
+          throw new Error(`unexpected gh ${args.join(' ')}`);
+        };
+        fetchLedgers(10, { gh, readDir: () => [night({ runId: '1' })] });
+        expect(seenApiArgs).toHaveLength(1);
+        // Anchor-assert: the URL must literally carry per_page=100. A mutation
+        // that drops the query param (reverting to the REST default of 30)
+        // fails this exact assertion.
+        expect(seenApiArgs[0][1]).toMatch(/\/artifacts\?per_page=100$/);
+      });
+
+      it('a total_count that disagrees with the listing length is an incomplete listing, never a complete one', () => {
+        // GitHub's own count of the FULL set disagrees with what this page
+        // returned (29 more exist than the 1 that came back) — exactly the
+        // shape a per_page truncation produces. This must NOT be treated as a
+        // complete listing (which would resolve the lane / find the ledger
+        // from a partial page); it must be treated the same as an unreachable
+        // API — an unresolved night, fail-closed lane.
+        const out = fetchLedgers(
+          10,
+          fakeGh([{ databaseId: 1, status: 'completed', event: 'schedule' }], {
+            '1': { artifacts: live, totalCount: live.length + 29 },
+          }),
+        );
+        expect(out[0]).toMatchObject({ unresolved: 'artifact-api-unreachable', lane: null });
+      });
+
+      it('a total_count that AGREES with the listing length still resolves normally', () => {
+        // Guards against the fix overshooting into "always unresolved".
+        const out = fetchLedgers(
+          10,
+          fakeGh([{ databaseId: 1, status: 'completed', event: 'schedule' }], {
+            '1': { artifacts: live, totalCount: live.length, ledgers: [night({ runId: '1' })] },
           }),
         );
         expect(out[0]).toMatchObject({ runId: '1', lane: 'node' });

@@ -2,7 +2,8 @@
 
 The credentialing bar for the **Bun runtime axis** (`KNEXT_RUNTIME=bun`, `next build`
 standalone booted on Bun). Sibling of [`window-node-lane.md`](window-node-lane.md); this file
-defines what "credentialed" means for the bun lane and (once the scheduled lane exists) records it.
+defines what "credentialed" means for the bun lane and records the scheduled lane's progress
+against it.
 
 **The bar: 14 consecutive scheduled bun-lane runs, every shard `failed:0`/`notRun:0`, zero
 net new quarantine entries, the harness fingerprint unchanged across all of them, and the
@@ -56,10 +57,10 @@ semantics as the node lane.
    freezing only the version string would still credential a moving target. So the frozen key is the
    **`bun-version` workflow input together with `bun --revision`** (the build hash), not just
    `bun --version`, and any change in it **resets** the streak the same way a harness move does. The
-   lane already records the observed `bun --version` as `runtimeVersion` on every
-   `compat-suite-summary-*.json` artifact (absent on the node lane); #1147 must additionally record
-   `bun --revision` and fold both into the bun lane's frozen fingerprint (or treat any change as a
-   rule-1 restart), so the audit script enforces this rather than a human eyeballing it. A Bun build
+   lane records the observed `bun --version` as `runtimeVersion` on every
+   `compat-suite-summary-*.json` artifact (absent on the node lane), and **also records
+   `bun --revision` and folds both into the bun lane's frozen fingerprint** — so a Bun build move
+   is a rule-1 restart the audit script enforces, not something a human eyeballs. A Bun build
    move **resets** the streak; it never merely pauses it, and a maintainer may **not** waive it.
 
    The Bun that is frozen is the Bun the lane **served on**, not whichever Bun happened to be on
@@ -90,6 +91,7 @@ absent. "Same contract class as the node lane" means these too, not only rules 1
 ## What this log does not yet do
 
 Same honest limit as the node lane: this file's record table is transcribed by hand from the
-`scripts/compat-window-audit.mjs --lane bun` output; it is not auto-generated. When #1147 opens the
-window, whoever updates this file runs the audit script and copies its summary block rather than
-eyeballing a run list — the script's grading, not the prose here, is authoritative.
+`scripts/compat-window-audit.mjs --lane bun` output; it is not auto-generated. The scheduled lane
+banks nights against this bar, so whoever updates this file runs the audit script and copies its
+summary block rather than eyeballing a run list — the script's grading, not the prose here, is
+authoritative.
