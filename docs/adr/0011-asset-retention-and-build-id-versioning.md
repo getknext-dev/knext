@@ -2,8 +2,9 @@
 
 - Status: Accepted (amended 2026-07-13: marker-object inversion + pin-with-empty-status fail-safe, #264;
   amended v3-P4b: §TOCTOU — pre-delete re-read narrows the plan/delete window, `traffic-drift-during-plan`;
-  amended 2026-08-21 by ADR-0047: the Context §1 premise is now conditional on a `storage` block —
-  see the amendment at the end of this file)
+  amended 2026-08-21 by ADR-0047: the Context §1 premise is now conditional on a `storage` block;
+  amended 2026-09-21 (#1070): the pre-built-image (`--image`) deploy path implies `--skip-upload` —
+  see the amendments at the end of this file)
 - Date: 2026-06-22
 - Deciders: knext architect
 - Related: ADR-0001 (operator = single source of truth), ADR-0006 (object-store data plane),
@@ -273,3 +274,52 @@ configs. For a storage-less config the result is two-way, and it is NOT "in-pod 
   configured — nothing to reap" and exits 0.
 
 Everything else in this ADR is unchanged and applies whenever a `storage` block is present.
+
+## Amendment (2026-09-21, #1070): the pre-built-image (`--image`) deploy path implies `--skip-upload`
+
+### Context
+
+`kn-next deploy --image <digest-ref>` deploys an image that was built OUTSIDE this CLI invocation
+(CI, another machine). PR #1069 made `--image` imply BOTH `--skip-build` and `--skip-upload`. The
+architect gate signed the behaviour off but asked for a citable decision record rather than only a
+code comment — this amendment is that record.
+
+### Decision
+
+**Under `--image`, the CLI uploads NO static assets, unconditionally.** The rationale is the
+build-id lock-step this ADR establishes, run in reverse:
+
+- This ADR's whole scheme places assets at `_next/static/<build-id>/` and forces the runtime to
+  serve from the SAME id (`generateBuildId: () => NEXT_DEPLOYMENT_ID`, the `.next/BUILD_ID` deploy
+  guard). Upload prefix and served prefix MUST match or the browser 404s on every chunk.
+- A pre-built image serves `_next/static/<its-own-BAKED-build-id>/`. **That baked id is OPAQUE to
+  the CLI** — the CLI never ran `next build` for this image and cannot read the id out of the
+  image. So the CLI has no id to upload assets under that the image's server would ever reference.
+- If the CLI uploaded at ITS notion of a build-id (a fabricated `--tag`/timestamp), those assets
+  would land at `_next/static/<fabricated-id>/` — a prefix the deployed server never serves — and
+  every static request would 404. Uploading is therefore not merely redundant; it is actively
+  wrong. So `--image` MUST skip the upload.
+
+This is a forward-compatibility commitment on the **public CLI surface**: `--image` implies
+`--skip-upload` and always will, so long as an image's baked BUILD_ID stays opaque to a CLI that
+did not build it. A future ability to READ the baked id out of an image (and thus upload at the
+matching prefix) would be a new, separately-decided capability — it does not silently relax this.
+
+### Confirmation: `spec.buildId` under `--image` is a marker/GC label, NOT an asset prefix
+
+The `NextApp` CR's `spec.buildId` under `--image` is a fabricated `--tag` (or a timestamp fallback),
+unrelated to the image's baked BUILD_ID. It drives only the per-deploy `NEXT_DEPLOYMENT_ID` marker
+(the `?dpl=` skew signal) and the retention-GC labels — it is **never** used as a static-asset
+prefix, because under `--image` no upload happens at all. This is enforced by test, not just
+asserted here: `packages/kn-next/src/__tests__/deploy-image-flag.test.ts` deploys `--image
+<digest-ref>` and asserts `uploadAssets` is **never called** ("--image implies --skip-upload, so no
+assets are uploaded"), so no code path can turn `spec.buildId` into an `_next/static/<id>/` prefix
+on this path. The implementation is `deploy.ts` (`options.skipUpload = true` on the `--image`
+branch, with the baked-id rationale in-line).
+
+### Consequences
+
+- A consumer deploying a CI-built, digest-pinned image gets a clean deploy with no spurious upload
+  and no runtime 404 risk from a mismatched prefix.
+- The skew-protection half of this ADR still applies via the image's own baked build-id + the
+  `?dpl=` marker; only the CLI-side UPLOAD is skipped, not the versioning contract.
