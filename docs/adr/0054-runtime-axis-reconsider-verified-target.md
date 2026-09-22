@@ -53,7 +53,16 @@ and a third axis has been verified that ADR-0048 never weighed:
   asset-path 404s, React-internals skew, vite-build failures), an ESM-only app contract (ADR-0051,
   excludes CommonJS apps), and a high-complexity build path (vite→nitro→compile).
 
-vinext's **only** surviving measured advantage is **image size** (42.9 vs 66.6 MiB).
+vinext's surviving measured advantages — per ADR-0048's **Amendment 5**, stated here in full so this
+demotion is not made off a one-sided list — are a **smaller image** (42.9 vs 66.6 MiB), **faster
+warm-request latency/throughput** (ADR-0048 §benchmark: vinext single-exec **1103 req/s** vs
+bun+turbopack **714** / node **630**, i.e. bun-standalone is **~35% slower warm** than the vinext
+incumbent it would demote — *local `examples/bun-exec` measurement, same micro-bench family as the
+61 ms cold number, so treat it as a warm-serving indicator, not a cluster figure*), a
+**single-artifact operational story**, and a faster **process boot** that pays off only off the
+Knative path (image prewarming / non-Knative hosts). None of these outweighs the north-star gap
+(778/0 vs ~87%) or survives the tied cluster cold-start — but the decision must weigh them, not
+delete them.
 
 ## Decision (recommended, for founder + gate ratification)
 
@@ -70,38 +79,84 @@ default, not the only option. Demote its weekly lane from shipped-artifact gate 
 
 ## Options considered
 
-| Option | Compat | Cluster cold-start | Build | Image | Verdict |
-|---|---|---|---|---|---|
-| **node-standalone** | **778/0** (credential) | ~3.6 s | `next build`, simple | 66.6 MiB | Strong; retired by ADR-0048. Re-selectable is the fallback. |
-| **bun-standalone** | **778/0**, corroborated (Bun 1.4.0) | ~3.4 s (tied) | `next build` on Bun, simple | ~= node | **RECOMMENDED** — verified + Bun-native + simple. |
-| **vinext single-exec** (ADR-0048 status quo) | ~87% @16.3.5, 84-file residue | 3401 ms (tied) | vite→nitro→compile, complex, ESM-only | **42.9 MiB** | Both premises collapsed; keep opt-in for image size only. |
-| **Fork vinext to be Bun-native** | unknown | — | core rewrite; Bun's bundler can't do RSC graph separation | — | **Rejected** — bun-standalone already delivers Bun-native at 778/0 with no fork. |
+Warm-throughput column added per the sprint-close architect gate (evidence symmetry — price the axis
+where the recommendation *loses*, not only where it wins). Throughput is a **local `examples/bun-exec`
+warm measurement** (ADR-0048 §benchmark), not a cluster figure.
+
+| Option | Compat | Cluster cold-start | Warm throughput (local) | Build | Image | Verdict |
+|---|---|---|---|---|---|---|
+| **node-standalone** | **778/0** (credential) | ~3.6 s | 630 req/s (1.00×) | `next build`, simple | 66.6 MiB | Strong; retired by ADR-0048. Re-selectable is the fallback. |
+| **bun-standalone** | **778/0**, corroborated (Bun 1.4.0) | ~3.4 s (tied) | ~714 req/s (1.13×) — **~35% below vinext** | `next build` on Bun, simple | **not measured** (reintroduces `node_modules`; not assumed = node) | **RECOMMENDED** — verified + Bun-native + simple; the throughput cost is the acknowledged trade. |
+| **vinext single-exec** (ADR-0048 status quo) | ~87% @16.3.5, 84-file residue | 3401 ms (tied) | **1103 req/s (1.75×)** | vite→nitro→compile, complex, ESM-only | **42.9 MiB** | Cold-start + build-weight premises collapsed; but keeps a real warm-throughput + image edge → opt-in, not dropped. |
+| **Fork vinext to be Bun-native** | unknown | — | — | core rewrite; Bun's bundler can't do RSC graph separation | — | **Rejected** — bun-standalone already delivers Bun-native at 778/0 with no fork. |
+
+**Why the recommendation still stands despite losing the throughput column:** the north-star axis is
+*verified compat* (778/0 vs ~87%), and cold-start — what a scale-to-zero user actually pays — is
+tied. A ~35% warm-throughput edge does not buy back a forfeited verified-adapter credential. But it
+is a real cost of the recommendation and is why vinext stays a supported opt-in, not dropped.
 
 ## Consequences
 
 - **Restores the north star.** A 778/0 axis becomes user-selectable again, so verified-adapter
   status (official-suite pass, listed in the Next.js docs) is reachable for the shipped artifact —
   which vinext-only forfeited for a ~87% target.
-- **Public surface changes.** If node/bun-standalone becomes selectable, the CLI `build` target
-  surface and `kn-next.config.ts` schema change (a public-API + CRD-adjacent consequence) — sprint
-  task, needs the config/CLI trigger handled.
+- **Public surface changes — CLI + config, NOT the CRD** (corrected per the sprint-close
+  system-designer gate). If node/bun-standalone becomes selectable, the CLI `build` target surface
+  and `kn-next.config.ts` schema change (public-API trigger, mechanically detectable). It does **not**
+  need a CRD roll: `nextapp_types.go` already carries `Runtime: bun|node` **independent** of `Build`
+  (no CEL cross-field rule), and the operator reconciles it — so this hits **no #548 operator-first
+  upgrade-order hazard**. The earlier "CRD-adjacent" wording overstated it.
+- **No shipped packaging path yet — a hard prerequisite, not a flag flip.** The app template
+  (`templates/app/Dockerfile.hbs`) is vinext-single-exec only; there is no standalone runtime image
+  in the tree. Adopting bun-standalone means authoring a new image + entrypoint that carries the
+  drain supervisor + metrics sidecar (see next point). Tracked as tech debt (standalone image
+  template; SIGTERM-drain e2e; :9464 metrics parity).
+- **Drain + metrics are bypassed on the bun-standalone container path** (system-designer gate). The
+  operator forces `["bun","run","server.js"]` for `build!=vinext && runtime=bun`
+  (`nextapp_controller.go`), which drops knext's `node-server.ts` supervisor (SIGTERM drain, `:9464`
+  metrics, `NODE_COMPILE_CACHE`). The standalone drain has never been exercised under Bun — a
+  load-bearing scale-to-zero failure mode. Must be closed before this axis ships (tracked).
+- **HTTP transport + keep-alive guard (correctness, architect gate).** bun-standalone serves `next
+  build` output over **`node:http`**, whose `Bun.serve` sibling reset was fixed at Bun 1.4.0 (why the
+  node-lane keep-alive guard self-disables ≥1.4.0). So bun-standalone likely does **not** need the
+  always-on `Connection: close` guard that ADR-0048 Amendment 4 calls load-bearing for the compiled
+  target — but this must be **measured on linux-x64** (the platform the reset reproduces on), not
+  assumed (tracked).
+- **Multi-target coherence must be decided, not assumed (architect gate — "don't rewrite the runtime
+  twice").** This ADR implies up to three targets (bun-standalone default, node-standalone fallback,
+  vinext opt-in). ADR-0048 rejected dual-target on cost grounds (two matrices, two supply-chain
+  surfaces). This is only acceptable if all targets keep **one shared config/CRD/operator/
+  `RuntimeContract`** (ADR-0036's answer). The accepted ADR must reaffirm that shared contract
+  explicitly or state an N-target policy pricing the lane/SBOM/docs cost (tracked).
 - **vinext demoted to opt-in.** Its compat lane becomes experimental; its 16.3.x residue support
   effort is no longer on the v1.0 critical path.
-- **bun-standalone needs a scheduled lane.** Its 778/0 is *verified-once* (two dispatch runs on
-  1.4.0), not *credentialed* — a scheduled Bun-1.4.0 lane moves it verified→credentialed (sprint
-  task T3).
-- **Rules must be reconciled** (maintainer): `architecture.md §4` + `CLAUDE.md §3`.
+- **bun-standalone needs a scheduled lane — the load-bearing gap under this whole recommendation.**
+  Its 778/0 is *verified-once* (two dispatch runs on 1.4.0), not *credentialed*; a scheduled
+  Bun-1.4.0 lane with a written N-consecutive-nights bar (the node lane's contract class) moves it
+  verified→credentialed. The recommendation rests on this; it is not a chore.
+- **Rules + downstream ADRs must be reconciled** (maintainer): `architecture.md §4` + `CLAUDE.md §3`,
+  **and** the Accepted ADRs that also encode vinext — **ADR-0042** (vinext default runtime),
+  **ADR-0051** (ESM-only vinext contract), **ADR-0050** (vinext ISR-Redis), **ADR-0036** — else four
+  Accepted ADRs contradict this one.
+- **Decision-churn bar.** This is the 4th runtime-axis decision in ~4 months (0036→0042→0048→0054).
+  The accepted axis must carry an explicit "what measurement would reopen this" clause.
 - **Honest about the trade this reverses:** ADR-0048 chose the stronger form (only, not default) on
   a cold-start premise that a real cluster has since tied. This ADR does not paper over that — it
   is the "discovered fact that invalidated the prior plan" escalation trigger, realized.
 
 ## Action items
 
-1. Founder + sprint-close gates ratify or revise this recommendation. *(blocks the rest)*
-2. Maintainer reconciles `architecture.md §4` + `CLAUDE.md §3` to the chosen axis. *(sprint T2)*
-3. Compat-lane consolidation: the chosen axis gets a scheduled red-on-fail lane; matrix rows reflect
-   real axis roles. *(sprint T3)*
-4. If vinext is demoted, re-scope the replacement compat bar (PR #1137) to the chosen axis.
-   *(sprint T4)*
-5. Re-measure build-weight locally to firm the inherited "31% larger" claim. *(sprint T6,
-   agent-doable)*
+1. Founder ratifies or revises this recommendation. *(blocks the rest)* The sprint-close gates
+   (architect + system-designer) have reviewed this ADR — **SIGN-OFF/ISSUES, non-blocking**; their
+   findings are folded in above and tracked as issues below.
+2. Maintainer reconciles `architecture.md §4` + `CLAUDE.md §3` **and** the downstream Accepted ADRs
+   (0042/0050/0051/0036) to the chosen axis. *(#1149, #1151)*
+3. Before this axis can ship: standalone runtime image template (#1155), SIGTERM-drain e2e under
+   `bun run server.js` (#1156), `:9464` metrics parity on `runtime=bun` (#1157), keep-alive guard
+   verification on linux-x64 (#1153).
+4. Scheduled Bun-1.4.0 lane with a written "credentialed" bar (#1147, #1158) — moves the recommended
+   axis verified-once → credentialed.
+5. Price the N-target cost / reaffirm the shared `RuntimeContract` (#1152); add the reopen bar (#1154).
+6. If vinext is demoted, re-scope the replacement compat bar (PR #1137) to the chosen axis.
+
+**Gate review record:** `.claude/close-verdict-architect.md`, `.claude/close-verdict-sysdesigner.md`.
