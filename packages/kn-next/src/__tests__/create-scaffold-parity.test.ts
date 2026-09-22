@@ -96,6 +96,10 @@ const CLI_ONLY: Record<string, string> = {
         "paired with Dockerfile.hbs — it bounds THAT image recipe's build context, so it is CLI-only for the same reason",
     "public/.gitkeep.hbs":
         "keeps the generated Dockerfile's `COPY … public` layer resolvable before the app has assets",
+    "Dockerfile.standalone.hbs":
+        "the ADR-0055 node/bun standalone runtime image recipe; the zone app is imaged by this repo's own pipeline and needs no standalone recipe",
+    "knext-standalone-entry.mjs.hbs":
+        "the ADR-0055 supervisor ENTRYPOINT shim paired with Dockerfile.standalone.hbs — CLI-only for the same reason",
 };
 
 /**
