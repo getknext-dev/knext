@@ -119,7 +119,9 @@ compiled in or wrap the binary — the entry **file** changes, the **invariant h
    condition in `computeStatusVerdict`; controller tests. *(#1155)*
 3. Both affordances are removed on a **reachable** anchor — a standing sprint-close review item
    (not the unreachable "Tier-A exit / v1.0" milestone; see the anchor caveat above and ADR-0044
-   Am. 2), tracked as an issue, revisited each sprint until it lands. *(#1155)*
+   Am. 2), owned by a dedicated issue that stays OPEN until the removal ships, revisited each sprint
+   until it lands. *(**#1175** — deliberately NOT #1155, which closes when the image + operator work
+   merges, long before every deployment has rebuilt; the removal must outlive it.)*
 4. The 778/0 credential covers the harness boot path (raw `server.js` + preloads), **not** the
    supervisor-wrapped entrypoint this ADR ships — close via the target-agnostic conformance suite.
    *(#1172)*
