@@ -18,12 +18,13 @@
  * for the standalone target, leaving the vinext scaffold coherent.
  */
 
-import { describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
 import {
     existsSync,
     mkdirSync,
     mkdtempSync,
     readFileSync,
+    rmSync,
     writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -37,9 +38,16 @@ import {
     stageStandaloneBuildContext,
 } from "../cli/runtime-image";
 
+const _tmpDirs: string[] = [];
 function tmp(): string {
-    return mkdtempSync(join(tmpdir(), "knext-runtime-image-"));
+    const dir = mkdtempSync(join(tmpdir(), "knext-runtime-image-"));
+    _tmpDirs.push(dir);
+    return dir;
 }
+// D9 (#880): a mkdtemp with no paired removal leaks a directory per run.
+afterAll(() => {
+    for (const dir of _tmpDirs) rmSync(dir, { recursive: true, force: true });
+});
 
 describe("selectRuntimeImage — target selection by (build, runtime)", () => {
     it("vinext (build absent) -> the scaffolded app Dockerfile, no --target", () => {
