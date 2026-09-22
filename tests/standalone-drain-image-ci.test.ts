@@ -43,9 +43,15 @@ function jobBlock(): string {
 
 describe('standalone-on-bun drain gate is wired into CI (#1156)', () => {
   it('runs the container e2e by its explicit path, not the fast suite', () => {
+    const block = jobBlock();
+    // Scope to the actual `run:` commands, not the whole block — the job's
+    // leading comment also names E2E_PATH in prose (#1188), so asserting over
+    // the whole block stays green even if a `run:` line is renamed away from
+    // the real path while the comment still mentions it.
+    const runCommands = [...block.matchAll(/run:\s*([^\n]*)/g)].map((m) => m[1]).join('\n');
     expect(
-      jobBlock(),
-      'the job never runs the standalone-drain docker e2e, so it is unreachable',
+      runCommands,
+      'the job never invokes the standalone-drain docker e2e by its explicit path, so it is unreachable',
     ).toContain(E2E_PATH);
   });
 
