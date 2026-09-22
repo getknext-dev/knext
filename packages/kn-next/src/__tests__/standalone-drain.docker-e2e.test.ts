@@ -376,9 +376,13 @@ beforeAll(async () => {
         );
     }
 
-    // 5b. Run the node-target image with the operator's node command:
-    //     `node server.js` (ENTRYPOINT overridden to `node`, arg `server.js` — the
-    //     R3 shim), so `/app/server.js` boots the supervisor under node.
+    // 5b. Run the node-target image with NO entrypoint override: for
+    //     `runtime: node` the operator leaves Command nil
+    //     (nextapp_controller.go:1017-1020 only forces a command for
+    //     `runtime: bun`), so the shipped node boot path is the image's own
+    //     `ENTRYPOINT ["node","/app/knext-entry.mjs"]`
+    //     (Dockerfile.standalone.hbs:172). Run it as-is so this proves the
+    //     path the operator actually leaves in place, not the R3 shim.
     const startedNode = run(
         "docker",
         [
@@ -392,12 +396,9 @@ beforeAll(async () => {
             EPOCH_LABEL,
             "--platform",
             PLATFORM,
-            "--entrypoint",
-            "node",
             "--publish",
             `${nodeAppPort}:3000`,
             NODE_IMAGE,
-            "server.js",
         ],
         { timeout: 120_000 },
     );
@@ -464,7 +465,12 @@ afterAll(() => {
 // This probe closes that gap BEHAVIOURALLY: it requests a route whose origin
 // Cache-Control is the ISR `s-maxage=…` shape and asserts the CLIENT sees the
 // deployed normalized form — i.e. the preload ran THROUGH the supervisor's own
-// injection point, on the shipped image, on both runtimes the operator forces.
+// injection point, on the shipped image, on both runtimes: the bun target via
+// the operator's forced `bun run server.js` (the R3 shim), the node target via
+// the image's own `ENTRYPOINT ["node","/app/knext-entry.mjs"]` that the
+// operator leaves in place for `runtime: node` (nextapp_controller.go:1017-1020
+// only forces a command for `runtime: bun`) — both entries are byte-identical
+// copies of the same supervisor (`Dockerfile.standalone.hbs:158-159`).
 describe("the supervisor injects the compat-gated Cache-Control normalization into the standalone child (#1172)", () => {
     it("normalizes an origin `s-maxage=` Cache-Control to the deployed client form on the bun-standalone image", async () => {
         const res = await fetch(`http://127.0.0.1:${appPort}/api/cache-probe`);
