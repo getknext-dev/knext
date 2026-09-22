@@ -483,6 +483,61 @@ jobs:
           apps/file-manager/sigterm-drain-e2e.test.ts
           apps/file-manager/sigterm-hardcap-e2e.test.ts
 
+  standalone-drain-bun-image:
+    # Per-PR GATE (#1156): SIGTERM drain under the SHIPPED standalone-on-bun
+    # IMAGE, driven by the operator's OWN forced command `bun run server.js` via
+    # the ADR-0055 R3 shim (the entry copied to BOTH /app/knext-entry.mjs and
+    # /app/server.js). No other gate drives THAT command against THAT image:
+    # `sigterm-drain-shipped` above boots node-server directly (not via
+    # `bun run server.js`, not in the shipped image); `bun-exec-alpine-image`
+    # below exercises the vinext single-executable — a different runtime shape.
+    # The suite (packages/kn-next/src/__tests__/standalone-drain.docker-e2e.test.ts)
+    # has NO skip path — a missing docker or bun is a FAILURE — and is excluded
+    # from the fast `Lint & Test` lane by its `.docker-e2e.test.ts` suffix
+    # (scripts/bun-test.mjs / vitest.config.ts), so this job is the ONLY thing
+    # that runs it. tests/standalone-drain-image-ci.test.ts asserts this job
+    # exists and invokes that file, so deleting the job reds that guard.
+    name: SIGTERM drain (shipped standalone-on-bun image)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # The image COPYs @getknext/core's whole built dist/ as the supervisor, so
+      # it must be built first. @getknext/core type-imports @getknext/db, which
+      # depends on @getknext/lib — hence the lib -> db -> core order (identical to
+      # the sigterm-drain-shipped job above).
+      - name: Build @getknext/lib
+        run: bun run --filter @getknext/lib build
+
+      - name: Build @getknext/db
+        run: bun run --filter @getknext/db build
+
+      - name: Build @getknext/core
+        run: bun run --filter @getknext/core build
+
+      # The suite builds the fixture's `.next/standalone`, assembles the shipped
+      # image (--target standalone-bun), runs it with the operator command, and
+      # sends a real SIGTERM. bun, not vitest: the file imports `bun:test`.
+      # `scripts/bun-test.mjs` exits 1 on an empty selection, so a renamed file
+      # fails loudly rather than skipping — the "must NOT skip" contract.
+      - name: SIGTERM drain e2e under the operator `bun run server.js` command
+        run: node scripts/bun-test.mjs packages/kn-next/src/__tests__/standalone-drain.docker-e2e.test.ts
+
   # seam-alive gates: RETIRED (#885, stability sprint). The #352 defect class —
   # webpack layers duplicating @getknext/lib module state across the
   # instrumentation and app-server chunks — cannot occur under the vinext
