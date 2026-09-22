@@ -1,18 +1,42 @@
 # ADR-0054: Reconsider the vinext-only target — adopt a verified 778/0 runtime axis for v1.0
 
-- **Status:** **Proposed (2026-09-22).** Awaiting founder decision + the sprint-close design-gate
-  review. This is a planning artifact opening the Runtime-Axis Resolution sprint, **not** a merge
-  gate — per the 2026-09-22 workflow amendment the architect/system-designer gates convene at sprint
-  close, and ADR-0048 was itself a founder decision, so its reconsideration is founder territory.
-- **Reconsiders:** ADR-0048 (vinext + Bun 1.4 single-executable as the ONLY target, Accepted
-  2026-08-27). Does **not** yet supersede it — records that both premises ADR-0048 rested on have
-  since been measured away, and recommends a decision.
-- **Relates to:** ADR-0036 (optional vinext build target), ADR-0042 (vinext default runtime),
-  ADR-0048 Amendment 4/5 (the cold-start-premise correction, in-flight PR #1036), the #605
-  runtime-axis go/no-go.
-- **Amends a hard rule (if Accepted).** `.claude/rules/architecture.md §4` and `CLAUDE.md §3` both
-  encode ADR-0048's vinext-only stance. Accepting this ADR requires the maintainer to reconcile
-  those rules. `.claude/rules/` is not an agent's file to edit — recorded here, not left implicit.
+- **Status:** **Accepted (2026-09-22) — founder decision.** (Was Proposed; the sprint-close gates
+  reviewed it SIGN-OFF/ISSUES non-blocking, findings folded in.)
+- **Supersedes** ADR-0048's *vinext-ONLY* mandate: vinext is no longer the only target. **Amends**
+  ADR-0042 (default runtime), ADR-0036 (target matrix); the maintainer must reconcile ADR-0042/0050/
+  0051 status lines + `.claude/rules/architecture.md §4` + `CLAUDE.md §3` (not an agent's to edit).
+- **Relates to:** ADR-0048 Amendment 4/5, the #605 runtime-axis go/no-go, the compiled-path gate
+  concerns (#1153/#1155/#1156/#1157).
+
+## Verdict (Accepted 2026-09-22 — founder decision)
+
+**Adopt `bun-standalone` as the v1.0 default runtime axis, packaged as a Bun bytecode
+single-executable** (`bun build --compile --bytecode`), and **keep `vinext` as a supported opt-in
+option.**
+
+- **Default = bun-standalone + bytecode exec.** The runtime is Next's own `next build` standalone
+  output (778/0 on the official suite, corroborated on Bun 1.4.0), compiled to a single bytecode
+  executable to recover the fast process-boot, single-artifact-ops and smaller-image benefits that
+  motivated the compiled path — now on a **full-parity** base instead of vinext's ~87%.
+- **vinext stays an option** (founder-directed) — compat-gated, for the apps/edge cases where its
+  own artifact shape is wanted. Not removed.
+- **node-standalone is the uncompiled fallback.** 778/0 and simplest; re-selectable.
+
+**HONEST FEASIBILITY CAVEAT — the compile step is unproven for standalone (jev 0.83 to record it
+this way).** The `bun build --compile --bytecode` path in the tree today (`examples/bun-exec`,
+`vinext-compile.mjs`) compiles **vinext's** nitro `.output` — **not** the Next.js standalone
+`server.js` + `node_modules`. Compiling the standalone output is **net-new**: it may hit the
+runtime-chunking failure mode that already broke vinext's compile once (bun-exec README, root cause
+1), and **778/0 retention through the compile is unverified**. So the FIRST action is a feasibility
+spike; if the compile cannot hold 778/0, the axis **ships uncompiled bun-standalone** (already
+778/0) and the bytecode-exec packaging becomes a fast-follow, not a v1.0 blocker. The verified-parity
+credential must not be forfeited for an unproven compile — that was ADR-0048's mistake, not to be
+repeated inverted.
+
+**The compiled path inherits the gate concerns** (system-designer/architect sprint-close review):
+SIGTERM-drain + `:9464` metrics are bypassed when the operator runs a compiled binary (#1156/#1157);
+the keep-alive guard's applicability must be measured on linux-x64 (#1153); there is no standalone
+runtime-image template yet (#1155). These gate the default before it ships.
 
 ## Context
 
@@ -64,15 +88,20 @@ Knative path (image prewarming / non-Knative hosts). None of these outweighs the
 (778/0 vs ~87%) or survives the tied cluster cold-start — but the decision must weigh them, not
 delete them.
 
-## Decision (recommended, for founder + gate ratification)
+## Decision (as accepted — see the Verdict above)
 
-**Stop making the compiled vinext single-executable the *only* target.** Adopt a verified **778/0**
-axis as the v1.0 selectable/default runtime, restoring the verified-adapter credential path.
+**Stop making the compiled vinext single-executable the *only* target.** The v1.0 default is a
+verified **778/0** axis, restoring the verified-adapter credential path — specifically
+**bun-standalone (`next build` → Bun 1.4.0) packaged as a bytecode single-executable**, with
+**vinext kept as an opt-in option** and node-standalone as the uncompiled fallback.
 
-**Recommend bun-standalone** as that axis: `next build` → boot on Bun 1.4.0. It delivers full
-node-parity compat (778/0), the same cold-start as everything else, `next build` simplicity (no
-vite→nitro→compile path, no ESM-only contract), and is Bun-native — which is what the "fork vinext
-to run on Bun" idea was reaching for, at full compat and zero fork.
+bun-standalone delivers full node-parity compat (778/0), the same cluster cold-start as everything
+else, `next build` simplicity (no vite→nitro→compile authoring path, no ESM-only contract), and is
+Bun-native — what the "fork vinext to run on Bun" idea was reaching for, at full compat and zero
+fork. The **bytecode-exec packaging** (founder-directed) then aims to recover the boot / single-
+artifact / image-size wins on top of that full-parity base — **subject to the feasibility spike in
+the Verdict**: the warm-throughput gap (vinext 1103 vs ~714 req/s) is a steady-state property the
+compile does not erase, which is itself part of why vinext stays a selectable option.
 
 **Keep vinext as an opt-in, compat-gated target** for its one real edge (image size) — not the
 default, not the only option. Demote its weekly lane from shipped-artifact gate to experimental.
@@ -146,16 +175,47 @@ is a real cost of the recommendation and is why vinext stays a supported opt-in,
 
 ## Action items
 
-1. Founder ratifies or revises this recommendation. *(blocks the rest)* The sprint-close gates
-   (architect + system-designer) have reviewed this ADR — **SIGN-OFF/ISSUES, non-blocking**; their
-   findings are folded in above and tracked as issues below.
-2. Maintainer reconciles `architecture.md §4` + `CLAUDE.md §3` **and** the downstream Accepted ADRs
-   (0042/0050/0051/0036) to the chosen axis. *(#1149, #1151)*
-3. Before this axis can ship: standalone runtime image template (#1155), SIGTERM-drain e2e under
-   `bun run server.js` (#1156), `:9464` metrics parity on `runtime=bun` (#1157), keep-alive guard
-   verification on linux-x64 (#1153).
-4. Scheduled Bun-1.4.0 lane with a written "credentialed" bar (#1147, #1158) — moves the recommended
-   axis verified-once → credentialed.
+**Accepted 2026-09-22 (founder). Sequenced — the feasibility spike gates whether the bytecode-exec
+packaging is v1.0 or a fast-follow.**
+
+1. **FEASIBILITY SPIKE (first, blocks the packaging decision).** Can the Next.js **standalone**
+   output (`server.js` + `node_modules`) be `bun build --compile --bytecode`-compiled to a single
+   executable that **still passes 778/0**?
+   **THE crux (founder-flagged): dynamic imports.** Next's standalone server resolves routes at
+   runtime via its manifests (`pages-manifest.json`, `app-paths-manifest.json`, `middleware-manifest`,
+   the flight/font/next-image chunks) with dynamic `require()`/`import()` whose specifiers `bun build
+   --compile` cannot see statically — so the chunks are simply **not embedded** in the binary and 404
+   at runtime. This is the exact failure that broke vinext's compile once (bun-exec README, root cause
+   1: a runtime-chunked server). The spike stands or falls on solving it. Candidate directions to
+   evaluate (not yet decided):
+   - **Generated static-barrel entry** — read the manifests at build time and emit a wrapper that
+     statically `import`s every route/chunk module, so bun's bundler sees the whole graph and inlines
+     it. Preferred if it holds parity.
+   - **Pre-bundle then compile** — `bun build` (or the app's own bundler) into one
+     statically-analyzable entry first, then `--compile` that.
+   - **Embed-as-file + runtime path load** — `Bun.embeddedFiles` / `with { type: "file" }` for chunks
+     the server loads by path, keeping the manifest's runtime resolution but from embedded bytes.
+   - **Emit a non-chunked server** — a Next/adapter build flag that inlines routes (what pinning a
+     vinext version did as a stopgap).
+   Deliverable: a compiled standalone binary that passes the 778-test suite, or a documented
+   dead-end. **If it holds → bun-standalone-bytecode is the v1.0 default. If it does not → ship
+   uncompiled bun-standalone (already 778/0) as v1.0** and make bytecode-exec a fast-follow; the
+   verified credential is never forfeited for an unproven compile. *(new issue — spike/prototype)*
+2. **Compiled-path gate fixes (gate the default before it ships):** standalone runtime-image
+   template (#1155), SIGTERM-drain e2e under the compiled/`bun run server.js` path (#1156), `:9464`
+   metrics parity on `runtime=bun` (#1157), keep-alive guard verification on linux-x64 (#1153).
+3. **Credential the axis:** scheduled Bun-1.4.0 lane with a written "credentialed" bar (#1147, #1158)
+   — moves verified-once → credentialed. The v1.0 verified-adapter claim rests on this.
+4. **Maintainer reconciles** `architecture.md §4` + `CLAUDE.md §3` **and** the downstream Accepted
+   ADRs — **ADR-0042** (default runtime → now bun-standalone), **ADR-0048** (was vinext-ONLY →
+   superseded, vinext is an option), **ADR-0051/0050/0036** — so nothing contradicts this ADR.
+   *(#1149, #1151)*
+5. **vinext stays a supported option** (founder-directed) — its lane stays live (not deleted), and
+   the 84-file 16.3.x residue (#1148) is worked at option-priority, not v1.0-critical.
+6. **CLI `build` surface:** add the bun-standalone(+exec) target to `kn-next.config.ts` `build` and
+   the validator; keep `vinext` accepted. *(new issue; public-API trigger)*
+7. **Reopen bar** (#1154): record in this ADR what measurement reopens the decision — e.g. a
+   sustained compat regression on the chosen axis, or the spike disproving the compile.
 5. Price the N-target cost / reaffirm the shared `RuntimeContract` (#1152); add the reopen bar (#1154).
 6. If vinext is demoted, re-scope the replacement compat bar (PR #1137) to the chosen axis.
 
