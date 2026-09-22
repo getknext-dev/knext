@@ -224,3 +224,41 @@ packaging is v1.0 or a fast-follow.**
 6. If vinext is demoted, re-scope the replacement compat bar (PR #1137) to the chosen axis.
 
 **Gate review record:** `.claude/close-verdict-architect.md`, `.claude/close-verdict-sysdesigner.md`.
+
+## Amendment 6 — the standalone packaging path, and the supervisor as the standalone RuntimeContract (2026-09-22)
+
+Design-gated on issue #1155 (system-designer design + architect co-sign, both ratified). This
+Amendment records the **axis-local** consequences of that design; the durable operator↔image
+**boundary invariant** it rests on lives in its own document, **[ADR-0055](0055-operator-image-startup-boundary.md)**,
+because that invariant governs every target and outlives this axis line (this is the 4th
+runtime-axis decision in ~4 months, and this ADR carries its own reopen bar — a durable invariant
+does not belong inside a document designed to be superseded).
+
+Two things this ADR left open are now answered:
+
+1. **The "no shipped packaging path yet" gap is closing.** This ADR made bun-standalone the v1.0
+   default but consequence-noted that `next build` standalone output had no runtime image in the
+   tree (`templates/app/Dockerfile.hbs` is vinext-single-exec only). #1155 authors that image +
+   supervisor entrypoint per ADR-0055. **No CRD roll** — bun-standalone is the existing
+   `build:turbopack` + `runtime:bun` pair; the `Build` enum (`turbopack;vinext`) and `Runtime` enum
+   (`bun;node`) are unchanged, so there is no #548 operator-first hazard.
+
+2. **Multi-target coherence (the "must be decided, not assumed" consequence; #1152) is answered:
+   the supervisor (`node-server.ts`) IS the standalone `RuntimeContract` implementation.** It is the
+   standalone-target implementation of the same contract `templates/app/runtime-contract.mjs.hbs`
+   provides in-process for vinext — one shared contract, three implementations (bun-standalone /
+   node-standalone / vinext), not three runtimes. The acceptance suite is written **target-agnostic**
+   and run against all three, which is what keeps *"don't rewrite the runtime twice"* true rather
+   than merely asserted.
+
+**One honest correction folded in (architect condition C2):** the earlier concern that the
+compat-gated `--require` preload silently no-ops under Bun is **falsified** — `bun --require` runs
+the preload, and `scripts/e2e-deploy.sh:489` applies it unconditionally for both runtimes, so the
+778/0 runs **were** preloaded. The real, narrower gap is that the suite boots the **raw**
+`server.js`+preloads, never the `node-server.ts` supervisor this design ships — so 778/0 certifies
+the harness boot path, not the supervisor-wrapped entrypoint, on **both** runtimes. Tracked as
+**#1172**, closed by the target-agnostic conformance suite above; do **not** swap `--require`→`--preload`.
+
+The bytecode-`--compile` feasibility spike (action item 1) is **independent** of #1155: the image +
+supervisor are needed whether the axis ships compiled or uncompiled. ADR-0055 §C6 records that only
+the entry-file **shape** differs if the spike succeeds; the invariant holds regardless.
