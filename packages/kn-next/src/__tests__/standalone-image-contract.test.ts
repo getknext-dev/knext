@@ -33,6 +33,8 @@
 import { describe, expect, it } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { drainDbPools } from "../adapters/db-drain";
+import { startImageCacheSync } from "../adapters/image-cache-sync";
 
 // packages/kn-next/src/__tests__ -> package root (../..)
 const PKG_ROOT = resolve(__dirname, "..", "..");
@@ -78,6 +80,48 @@ const dockerfile = readJoined(DOCKERFILE);
 const stageMap = stages(dockerfile);
 const BUN_STAGE = "standalone-bun";
 const NODE_STAGE = "standalone-node";
+
+/**
+ * @getknext/core's own package.json — the source of truth `standalone-deps`
+ * claims (in prose, Dockerfile.standalone.hbs:66-68) to track. Read once so
+ * both the lockstep test and its self-test share one extraction routine.
+ */
+const packageJsonText = readFileSync(join(PKG_ROOT, "package.json"), "utf8");
+
+/** Escape a package name for use inside a RegExp (handles the `@scope/name` case). */
+function escapeForRegExp(literal: string): string {
+    return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** `"pino": "^9.6.0"` -> `^9.6.0`, read from a package.json's `dependencies`. */
+function extractPackageJsonDepRange(pkgJson: string, name: string): string {
+    const m = pkgJson.match(
+        new RegExp(`"${escapeForRegExp(name)}"\\s*:\\s*"([^"]+)"`),
+    );
+    if (!m) {
+        throw new Error(
+            `Could not find "${name}" in packages/kn-next/package.json's dependencies. ` +
+                `The version-lockstep guard cannot run — fix the regex or the source.`,
+        );
+    }
+    return m[1];
+}
+
+/** `pino@^9.6.0` -> `^9.6.0`, read from the standalone-deps stage's npm-install line. */
+function extractDockerfileInstallRange(
+    depsStage: string,
+    name: string,
+): string {
+    const m = depsStage.match(new RegExp(`${escapeForRegExp(name)}@(\\S+)`));
+    if (!m) {
+        throw new Error(
+            `Could not find "${name}@<range>" in the standalone-deps npm install line ` +
+                `of Dockerfile.standalone.hbs. The version-lockstep guard cannot run — ` +
+                `fix the regex or the source.`,
+        );
+    }
+    return m[1];
+}
 
 describe("Dockerfile.standalone.hbs — ADR-0055 image-owned start contract", () => {
     it("defines both runtime target stages", () => {
@@ -365,23 +409,114 @@ describe("@getknext/core's runtime closure actually resolves under what the Dock
         });
     });
 
-    it("@getknext/lib/clients is a DOCUMENTED, deferred gap, not silently missing — both call sites fail open per their own source", () => {
+    /**
+     * Version lockstep (cr-1177b, jev 0.80): the header comment at
+     * Dockerfile.standalone.hbs:66-68 CLAIMS the standalone-deps npm-install
+     * ranges "match @getknext/core's own package.json ranges", but until now
+     * nothing asserted more than the package NAMES — a range bump on one side
+     * (e.g. pino ^9 -> ^10) without the other would install a silently stale
+     * major and nothing here would red. Follows the metrics-port-lockstep.test.ts
+     * idiom: extract both sides as text, compare, fail loudly if either side
+     * cannot be located.
+     */
+    describe("standalone-deps npm-install versions ↔ @getknext/core package.json (Dockerfile.standalone.hbs:66-68's claim, enforced)", () => {
+        const depsStage = stageMap.get("standalone-deps") ?? "";
+        const LOCKSTEP_DEPS = ["pino", "prom-client", "@opentelemetry/api"];
+
+        it.each(
+            LOCKSTEP_DEPS,
+        )("%s: the Dockerfile's installed range is EXACTLY package.json's dependency range", (name) => {
+            const wantRange = extractPackageJsonDepRange(packageJsonText, name);
+            const gotRange = extractDockerfileInstallRange(depsStage, name);
+            expect(
+                gotRange,
+                `Dockerfile.standalone.hbs installs ${name}@${gotRange} but ` +
+                    `packages/kn-next/package.json depends on ${name}@${wantRange} — ` +
+                    `they must move together or the image silently ships a stale major.`,
+            ).toBe(wantRange);
+        });
+
+        // Self-test of the extraction logic (mutation-proof without touching
+        // the real Dockerfile): proves a hypothetical divergence WOULD be
+        // caught, the same discipline as metrics-port-lockstep.test.ts.
+        it("self-test: detects a divergence between the two extracted ranges", () => {
+            const pkgJson = '"dependencies": { "pino": "^9.6.0" }';
+            const matchingDockerfile = "RUN npm install pino@^9.6.0";
+            const divergedDockerfile = "RUN npm install pino@^10.0.0";
+            expect(extractPackageJsonDepRange(pkgJson, "pino")).toBe("^9.6.0");
+            expect(
+                extractDockerfileInstallRange(matchingDockerfile, "pino"),
+            ).toBe("^9.6.0");
+            expect(
+                extractDockerfileInstallRange(divergedDockerfile, "pino"),
+            ).toBe("^10.0.0");
+            expect(
+                extractDockerfileInstallRange(divergedDockerfile, "pino"),
+            ).not.toBe(extractPackageJsonDepRange(pkgJson, "pino"));
+            // @scope/name form (the tricky one — two '@'s in the specifier).
+            const scopedPkgJson =
+                '"dependencies": { "@opentelemetry/api": "^1.9.0" }';
+            const scopedDockerfile =
+                "RUN npm install @opentelemetry/api@^1.9.0";
+            expect(
+                extractPackageJsonDepRange(scopedPkgJson, "@opentelemetry/api"),
+            ).toBe("^1.9.0");
+            expect(
+                extractDockerfileInstallRange(
+                    scopedDockerfile,
+                    "@opentelemetry/api",
+                ),
+            ).toBe("^1.9.0");
+        });
+    });
+
+    describe("@getknext/lib/clients is a DOCUMENTED, deferred gap, not silently missing — both call sites fail open, BEHAVIOURALLY", () => {
         // The one dependency this template intentionally leaves unresolved
         // (see the deps-stage comment in Dockerfile.standalone.hbs for why:
         // @cerbos/grpc + minio + pg is real, disproportionate scope for a
-        // template-only increment). Ties the deferral to the SOURCE behaviour
-        // it relies on, not just Dockerfile prose — if either call site ever
-        // stops failing open, this canary should be revisited.
-        const dbDrainSrc = readFileSync(
-            join(PKG_ROOT, "src", "adapters", "db-drain.ts"),
-            "utf8",
-        );
-        expect(dbDrainSrc).toMatch(/draining must not throw/i);
-        const imageCacheSyncSrc = readFileSync(
-            join(PKG_ROOT, "src", "adapters", "image-cache-sync.ts"),
-            "utf8",
-        );
-        expect(imageCacheSyncSrc).toMatch(/STORAGE_BUCKET/);
+        // template-only increment). This exercises the REAL fail-open
+        // behaviour each call site relies on — not Dockerfile/comment prose —
+        // so a rethrow regression in either function reds this suite
+        // (cr-1177b, jev 0.75: the prior comment-only version stayed green
+        // after a rethrow was injected into db-drain.ts's catch).
+
+        it("drainDbPools RESOLVES, not rejects, when the @getknext/lib/clients loader itself fails (the absent-dependency case)", async () => {
+            // Mirrors the real failure this template's absent standalone-deps
+            // install produces: the dynamic import() of @getknext/lib/clients
+            // rejects because the package isn't resolvable in this image.
+            await expect(
+                drainDbPools({
+                    loadClients: () =>
+                        Promise.reject(new Error("absent in this image")),
+                }),
+            ).resolves.toBeUndefined();
+        });
+
+        it("drainDbPools RESOLVES, not rejects, when the loaded pool closers themselves reject (a live-but-failing DB)", async () => {
+            await expect(
+                drainDbPools({
+                    loadClients: () =>
+                        Promise.resolve({
+                            closeDbPool: () =>
+                                Promise.reject(new Error("writer pool wedged")),
+                            closeDbPoolRO: () =>
+                                Promise.reject(new Error("ro pool wedged")),
+                        }),
+                }),
+            ).resolves.toBeUndefined();
+        });
+
+        it("startImageCacheSync returns a no-op stop() without ever loading the object-store client when STORAGE_BUCKET is unset", async () => {
+            // Type-level cast (matches image-cache-sync.test.ts's #261 idiom):
+            // Next augments ProcessEnv with a REQUIRED NODE_ENV; this env
+            // double deliberately carries no STORAGE_BUCKET.
+            const env = {} as Partial<NodeJS.ProcessEnv> as NodeJS.ProcessEnv;
+            const result = await startImageCacheSync(env, {});
+            expect(typeof result.stop).toBe("function");
+            // Calling stop() must not throw — proves it's the real no-op
+            // handle, not a half-initialized watcher.
+            expect(() => result.stop()).not.toThrow();
+        });
     });
 });
 
