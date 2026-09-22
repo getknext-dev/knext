@@ -59,13 +59,13 @@ const SUPPORTED_RUNTIMES = ["bun", "node"] as const;
  * WHAT THIS COMMENT USED TO SAY, AND WHY IT WAS WRONG (sprint-2 §4.2). It named
  * `turbopack` as the sole selectable builder and concluded that NO reachable
  * config could produce an incompatible pairing, so the direct unit test was the
- * only way to exercise the seam. Both halves inverted under ADR-0048:
- * `turbopack` is `available: false`, `vinext` is `available: true` AND the
- * default, and the pairing the old text called inexpressible — `vinext` +
- * `node` — is exactly
- * what a user writes when they keep a `runtime: "node"` from before the
- * migration. It is reachable from `validateConfig` (see the `checkPairing` call
- * below), so the production caller a design gate asked for is real.
+ * only way to exercise the seam. That inverted under ADR-0048, and #1167
+ * (ADR-0054) moved it again: as of #1167 BOTH `turbopack` and `vinext` are
+ * `available: true`, `vinext` is still the default, and the incompatible pairing
+ * — `vinext` + `node` — is exactly what a user writes when they keep a
+ * `runtime: "node"` from before the migration. It is reachable from
+ * `validateConfig` (see the `checkPairing` call below), so the production caller
+ * a design gate asked for is real.
  *
  * The direct unit test stays anyway. A check reachable through one caller is
  * one refactor away from being reachable through none, and that is the state
@@ -332,22 +332,25 @@ export function validateConfig(config: KnativeNextConfig): void {
         !(AVAILABLE_BUILDERS as readonly string[]).includes(config.build)
     ) {
         // KNOWN but not AVAILABLE. Kept as a separate branch from "unknown" on
-        // purpose: telling someone `vinext` is "not supported" reads as a typo
-        // and sends them to the spelling, when the truth is that the builder is
-        // real and this build of knext cannot run it.
+        // purpose: telling someone about a real builder that this release cannot
+        // run reads as a typo and sends them to the spelling, when the truth is
+        // that the builder is real and this build of knext cannot run it.
         //
-        // Rejecting here rather than at build time is the whole point. vinext
-        // is not a dependency of this repo, so accepting the key would emit an
-        // image with no build output and surface it at `docker run` on a
-        // cluster — the #857 ordering, where `next build` exited 0 the whole
-        // way while producing a server nothing could find.
-        // ADR-0048 retired every target except vinext + bun. A retired builder is
-        // not a typo, so the message is a MIGRATION, not a spelling correction.
+        // Rejecting here rather than at build time is the whole point: a builder
+        // whose toolchain is not a dependency of this release would emit an image
+        // with no build output and surface it at `docker run` on a cluster — the
+        // #857 ordering, where `next build` exited 0 the whole way while producing
+        // a server nothing could find.
+        //
+        // As of #1167 (ADR-0054 item 6) BOTH shipped builders — `turbopack`
+        // (`next build` -> `.next/standalone`) and `vinext` — are available, so
+        // this branch guards a FUTURE known-but-unavailable builder rather than
+        // any current one. The message is therefore generic (no ADR-0048 "only
+        // vinext" wording, which #1167 reversed): it names what IS selectable
+        // instead of prescribing a single migration target.
         errors.push(
-            `Build '${config.build}' was retired by ADR-0048. The only supported target is ` +
-                `${AVAILABLE_BUILDERS.join(", ")} (single executable, Bun 1.4.0+).\n\n` +
-                `Set \`build: "vinext", runtime: "bun"\` in kn-next.config.ts. Measured on an identical app: ` +
-                `61ms cold start vs 884ms, and 1.75x the requests/sec.`,
+            `Build '${config.build}' is a known builder but is not available in this ` +
+                `release of knext. Selectable builders: ${AVAILABLE_BUILDERS.join(", ")}.`,
         );
     }
 

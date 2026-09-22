@@ -35,15 +35,13 @@ describe("#B2 the `build` axis", () => {
         expect(() => validateConfig(cfg())).not.toThrow();
     });
 
-    it("REJECTS an explicit turbopack — ADR-0048 retired it", () => {
-        // The message is a MIGRATION, not a spelling correction: turbopack is a
-        // real builder that this release no longer supports.
-        expect(() => validateConfig(cfg({ build: "turbopack" }))).toThrow(
-            /turbopack.*retired by ADR-0048/i,
-        );
+    it("ACCEPTS an explicit turbopack — #1167 re-opened the standalone target", () => {
+        // ADR-0054 item 6 reverses ADR-0048's retirement: `next build` ->
+        // `.next/standalone` is selectable again (the verified 778/0 axis).
+        expect(() => validateConfig(cfg({ build: "turbopack" }))).not.toThrow();
     });
 
-    it("ACCEPTS vinext — it is the only supported target now", () => {
+    it("ACCEPTS vinext — it stays a supported target alongside turbopack", () => {
         expect(() => validateConfig(cfg({ build: "vinext" }))).not.toThrow();
     });
 
@@ -73,12 +71,13 @@ describe("#B2 the `build` axis", () => {
         it.each([
             "node",
             "bun",
-        ] as const)("rejects runtime=%s with the retired turbopack build", (runtime) => {
-            // The builder is retired regardless of runtime — asserting only
-            // one would let the other quietly stay valid.
+        ] as const)("ACCEPTS runtime=%s with the (now selectable) turbopack build", (runtime) => {
+            // #1167: turbopack emits `next-standalone`, which BOTH runtimes
+            // accept — so both pairings validate, unlike vinext+node. Asserting
+            // both halves so a regression on either is caught.
             expect(() =>
                 validateConfig(cfg({ runtime, build: "turbopack" })),
-            ).toThrow(/retired by ADR-0048/i);
+            ).not.toThrow();
         });
 
         it("does not invent a bun⇒vinext rule: runtime=bun alone never mentions vinext", () => {
@@ -184,18 +183,15 @@ describe("#B2 validateConfig enforces the pairing, observably", () => {
         ).toThrow(/nitro-output-bun/);
     });
 
-    it("reports the retirement AND the pairing, as independent problems", () => {
-        // Both halves, on the config that has BOTH faults: a retired builder
-        // and a runtime that cannot execute what it emits. A naive `toThrow()`
-        // would pass on either alone, hiding the loss of the other — which is
-        // exactly how an earlier version of this enforcement stayed green.
-        let retired = "";
-        try {
-            validateConfig(cfg({ build: "turbopack", runtime: "node" }));
-        } catch (e) {
-            retired = (e as Error).message;
-        }
-        expect(retired).toMatch(/retired by ADR-0048/i);
+    it("accepts turbopack+node (no fault) while still rejecting vinext+node (pairing) — both halves", () => {
+        // #1167 removed the turbopack retirement, so turbopack+node is now a
+        // clean config — node CAN run the `next-standalone` shape. The pairing
+        // enforcement is unchanged and stays observable on vinext+node, which
+        // genuinely cannot execute. Asserting BOTH halves so neither the
+        // reversal nor the surviving pairing check can silently regress.
+        expect(() =>
+            validateConfig(cfg({ build: "turbopack", runtime: "node" })),
+        ).not.toThrow();
 
         let pairing = "";
         try {
@@ -214,10 +210,11 @@ describe("#B2 validateConfig enforces the pairing, observably", () => {
         ).not.toThrow();
     });
 
-    it("stays silent for the ONE config a user can ship today", () => {
-        // ADR-0048 leaves exactly one valid combination. Absence of `build`
-        // means vinext, so both spellings of it must pass — if the default and
-        // the explicit value ever diverged, one of these would catch it.
+    it("stays silent for the default vinext config (bare and explicit)", () => {
+        // Absence of `build` means vinext, so both spellings of it must pass —
+        // if the default and the explicit value ever diverged, one of these
+        // would catch it. (turbopack is now ALSO shippable, #1167; this test
+        // pins the default path specifically.)
         expect(() => validateConfig(cfg({ runtime: "bun" }))).not.toThrow();
         expect(() =>
             validateConfig(cfg({ runtime: "bun", build: "vinext" })),

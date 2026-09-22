@@ -276,25 +276,28 @@ export interface KnativeNextConfig {
     // and name it here.
     imagePullSecrets?: string[];
     // Runtime for the standalone (turbopack) shape only: 'bun' or 'node'
-    // (default). Irrelevant to the vinext single executable, where the runtime
-    // is compiled into the binary.
+    // (default 'node'). It selects which standalone runtime image `kn-next`
+    // stages and boots (`--target standalone-bun`/`standalone-node`).
+    // Irrelevant to the vinext single executable, where the runtime is compiled
+    // into the binary and this field is dropped from the emitted CR.
     runtime?: "bun" | "node";
     /**
      * Which build system produces the app (Track B2 of the build/runtime
      * separation; see `src/adapters/artifact-contract.ts`).
      *
-     * - `vinext` (**default** — ADR-0048) — the Vite/rolldown Next
-     *   reimplementation. Its nitro `.output` is compiled WHOLE into a single
-     *   executable (`bun build --compile --minify --bytecode`, Bun 1.4.0+):
-     *   measured 61 ms cold start and 1103 req/s against the node standalone's
-     *   884 ms / 630 req/s on an identical app. This is the only builder the
-     *   validator accepts, and the only shape that gets bytecode — the
-     *   per-file standalone bytecode pass is retired (it traded throughput
-     *   for cold start; the whole-bundle compile wins both).
-     * - `turbopack` — Next's own `next build`, emitting `.next/standalone`.
-     *   RETIRED as user-selectable by ADR-0048; still described in the
-     *   artifact contract so existing CRs and the migration message stay
-     *   coherent.
+     * Both builders below are SELECTABLE (ADR-0054). `vinext` is still the
+     * DEFAULT (an absent `build` means vinext); the ADR-0054 flip to
+     * bun-standalone is deferred until that axis is credentialed.
+     *
+     * - `vinext` (**default**) — the Vite/rolldown Next reimplementation. Its
+     *   nitro `.output` is compiled WHOLE into a single executable
+     *   (`bun build --compile --minify --bytecode`, Bun 1.4.0+). `runtime` is
+     *   irrelevant here (the runtime is compiled into the binary).
+     * - `turbopack` — Next's own `next build`, emitting `.next/standalone`, run
+     *   by a small supervisor. SELECTABLE again (ADR-0054): pair it with
+     *   `runtime: "bun"` or `runtime: "node"` and `kn-next` stages and boots the
+     *   matching standalone runtime image. This is the uncompiled standalone
+     *   shape — the verified 778/0 official-suite axis.
      *
      * On the WIRE the meanings differ from the config: CR absence permanently
      * means `turbopack` (ADR-0017), so the CLI resolves this default and

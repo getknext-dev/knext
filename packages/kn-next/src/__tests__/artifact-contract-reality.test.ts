@@ -187,7 +187,7 @@ describe("#B3 availability is an honest claim about the CORE cli", () => {
             "utf8",
         );
 
-        expect(turbopackBuilder.available).toBe(false);
+        expect(turbopackBuilder.available).toBe(true);
         expect(vinextBuild).toMatch(/--compile/);
         expect(vinextBuild).toMatch(/--bytecode/);
         expect(vinextBuild).toMatch(/vite/);

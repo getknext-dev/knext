@@ -96,14 +96,13 @@ const savedCwd = process.cwd();
  * `build: "turbopack"` is explicit here, and it is not incidental.
  *
  * The bun-exports heal walks a `.next/standalone` tree, so it only runs for an
- * artifact of that SHAPE. Since ADR-0048 the default build is vinext, whose
- * artifact is a nitro output — meaning a config that omits `build` correctly
- * skips the heal and instead compiles the single executable.
+ * artifact of that SHAPE. The default build is vinext, whose artifact is a nitro
+ * output — meaning a config that omits `build` correctly skips the heal and
+ * instead compiles the single executable.
  *
- * turbopack is retired (`available: false`) but still described, because
- * `apps/docs` has not migrated yet. The turbopack tests therefore cover
- * machinery that is alive but scheduled for deletion: when the last standalone
- * consumer moves, the heal and those tests go together.
+ * turbopack is a SELECTABLE builder again (#1167, ADR-0054) that emits the
+ * `.next/standalone` shape, so these tests cover the standalone-build machinery
+ * on the path a user reaches by choosing `build: "turbopack"`.
  */
 const cfg = (over: Record<string, unknown> = {}) => ({
     name: "my-app",

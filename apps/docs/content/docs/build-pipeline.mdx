@@ -15,9 +15,11 @@ see [the adapter and the compiled build](/docs/official-adapter).
 
 ## The build target
 
-The default — and only user-selectable — build target compiles your app with
-[**vinext**](https://vinext.dev), an open-source, Vite-based implementation of the Next.js
-framework, into a single executable. You do not have to configure anything to get it:
+knext offers **two** build targets, and you choose between them with the `build` field.
+
+The **default** target compiles your app with [**vinext**](https://vinext.dev), an open-source,
+Vite-based implementation of the Next.js framework, into a single executable. You do not have to
+configure anything to get it:
 
 ```ts title="kn-next.config.ts"
 const config: KnativeNextConfig = {
@@ -27,12 +29,24 @@ const config: KnativeNextConfig = {
 };
 ```
 
-A second build shape — a `next build` **standalone** folder, run by a small supervisor instead of
-the compiled executable — exists internally as the runtime image knext will offer as a second,
-explicitly-selected target once it is exposed through `kn-next.config.ts`. It is **not yet
-selectable**: there is no supported `build` value that turns it on today, and the compiled
-executable above remains the only build your config can choose. Don't set anything expecting this
-shape — the CLI will reject a `build` value other than the default.
+The second target is `next build`'s **standalone** output, run by a small supervisor that spawns
+Next's own `server.js` and drains it gracefully on shutdown. It is the target that passes the
+official Next.js compatibility suite. Select it with `build: 'turbopack'`, and pick which runtime
+executes it with `runtime`:
+
+```ts title="kn-next.config.ts"
+const config: KnativeNextConfig = {
+  name: 'acme',
+  registry: 'registry.example.com/acme',
+  build: 'turbopack',   // next build -> .next/standalone, run by a supervisor
+  runtime: 'bun',       // or 'node' (the default runtime for this target)
+};
+```
+
+`kn-next` stages and builds the matching standalone runtime image for you; `runtime` has no effect
+on the vinext single-executable target, where the runtime is compiled into the binary. Today the
+standalone target runs uncompiled (the supervisor spawns `server.js` directly); packaging it as a
+single bytecode executable is planned but not yet available.
 
 ## The pipeline
 
@@ -94,11 +108,12 @@ on anyone deploying an already-built image.
 ## Compatibility, stated honestly
 
 knext's official-suite credential — [778/778, re-verified nightly](/docs/compat-suite) — was earned
-on the **Node standalone** lane, which is a *different artifact* from the compiled executable that
-ships today. The suite lane for the compiled executable is being stood up; until it publishes a
-green run, treat the compiled build's compatibility as **measured per feature rather than
-suite-verified**, and read the per-feature status on the
-[compatibility matrix](/docs/compat-matrix) rather than assuming the Node number carries over.
+on the **standalone** target (the `build: 'turbopack'` shape above), which is a *different artifact*
+from the compiled vinext executable. If suite-verified compatibility is what you need, that target
+is selectable today. The suite lane for the compiled vinext executable is being stood up; until it
+publishes a green run, treat the compiled build's compatibility as **measured per feature rather
+than suite-verified**, and read the per-feature status on the
+[compatibility matrix](/docs/compat-matrix) rather than assuming the standalone number carries over.
 
 The remaining gaps are largely a function of how far the underlying vinext framework has matured on
 areas such as streaming/Suspense flushing, Partial Prerendering, Cache Components (`'use cache'`),

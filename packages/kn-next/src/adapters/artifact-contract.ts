@@ -31,14 +31,15 @@
  *
  * ## Scope
  *
- * This is the seam only. It deliberately does NOT add a `build` config key or
- * CRD field — that is B2, and it changes the public schema and the CRD, so it
- * needs the design gates. Adding the key before the seam existed is what would
- * reproduce the coupled-target problem with extra config.
+ * This is the seam. The `build` config key it feeds is now live (B2), and BOTH
+ * builders are selectable: `turbopack` (`next build` -> `.next/standalone`) and
+ * `vinext` (nitro single executable). ADR-0048 had retired turbopack; ADR-0054
+ * item 6 (#1167) re-opened it as the verified 778/0 standalone axis, keeping
+ * vinext the default until the bun-standalone lane is credentialed.
  *
- * Only ONE builder exists today (`turbopack`); vinext is not yet a dependency.
- * The contract is written for two so that adding the second is an implementation
- * of an existing interface rather than a redesign.
+ * The contract was written for two builders so that the second was an
+ * implementation of an existing interface rather than a redesign — which is why
+ * flipping turbopack back to `available` is a one-line change here, not a rework.
  */
 
 /**
@@ -174,11 +175,17 @@ export function explainIncompatibility(
 export const turbopackBuilder: BuilderAdapter = {
     id: "turbopack",
     emits: "next-standalone",
-    // RETIRED by ADR-0048. Kept described, not available: existing apps and CRs
-    // still carry `build: turbopack`, and the validator needs to tell them what
-    // to do rather than report an unknown builder. Removing the descriptor
-    // would turn a migration message into a spelling error.
-    available: false,
+    // AVAILABLE again (ADR-0054 item 6, #1167). ADR-0048 had retired this as
+    // user-selectable; ADR-0054 reverses that — the `next build` ->
+    // `.next/standalone` shape is the verified 778/0 axis (the verified-adapter
+    // credential), so it is re-opened as a selectable target. What ships here is
+    // the UNCOMPILED bun/node-standalone image (the compiled bytecode-exec of
+    // this shape is feasibility-blocked, #1166); the standalone runtime image +
+    // supervisor entrypoint that packages it are staged by `cli/runtime-image.ts`
+    // (#1177/#1181, ADR-0055). vinext stays available too (founder-directed) —
+    // both are selectable. NOT yet the default: vinext keeps that until the
+    // bun-standalone lane is credentialed (#1147); DEFAULT_BUILDER_ID below.
+    available: true,
     describeArtifact(root: string): BuildArtifact {
         return {
             shape: "next-standalone",
@@ -290,12 +297,21 @@ export const BUILDERS: readonly BuilderAdapter[] = [
 ];
 
 /**
- * What an ABSENT `config.build` means (ADR-0048): the vinext single
- * executable. One constant, because the default is load-bearing in three
- * places that must never disagree — artifact resolution (`build-artifact.ts`),
- * the CR the CLI emits (`cr-builder.ts`, where the resolved value is written
- * explicitly since wire-absence permanently means turbopack), and the asset
- * staging path (`asset-upload.ts`, which sources a different tree per shape).
+ * What an ABSENT `config.build` means: the vinext single executable. One
+ * constant, because the default is load-bearing in three places that must never
+ * disagree — artifact resolution (`build-artifact.ts`), the CR the CLI emits
+ * (`cr-builder.ts`, where the resolved value is written explicitly since
+ * wire-absence permanently means turbopack), and the asset staging path
+ * (`asset-upload.ts`, which sources a different tree per shape).
+ *
+ * STILL `vinext`, deliberately, even though ADR-0054 names bun-standalone the
+ * v1.0 default (#1167). The flip is CREDENTIAL-GATED, not automatic: the
+ * bun-standalone axis is verified-once (two 1.4.0 dispatch runs), NOT yet
+ * credentialed — the scheduled 14-night lane (#1147) has not banked — and the
+ * compiled bytecode-exec of the standalone shape is feasibility-blocked (#1166).
+ * Shipping an un-credentialed default would forfeit exactly the verified-adapter
+ * credential ADR-0054 is protecting. So #1167 makes turbopack/standalone
+ * SELECTABLE; changing this constant is a separate follow-up once the lane banks.
  */
 export const DEFAULT_BUILDER_ID = "vinext";
 
