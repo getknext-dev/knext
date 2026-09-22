@@ -1,4 +1,4 @@
-# ADR-0055: The image declares how to start itself; the operator selects image + env, never a command
+# ADR-0055: The image declares how to start itself; the operator selects image + env + probes, never a command
 
 - **Status:** **Accepted (2026-09-22).** Design-gated: system-designer design + architect co-sign,
   both ratified on issue #1155 (SIGN-OFF under conditions C1–C6). This ADR is condition **C1**.
@@ -36,8 +36,9 @@ command.**
    importing `@getknext/core/internal/node-server`, the runtime-agnostic supervisor). The operator
    leaves `Command`/`Args` **`nil`** for the standalone shape; kubelet runs the image's ENTRYPOINT.
 2. **The running shape stays fully CR-determined** — because the CR names the image **by digest**
-   (`:latest` rejected in `validate_image.go:29` `validateImageRef`, surfaced as
-   `ReasonInvalidImage`) and a digest is immutable. Determination moves
+   (`:latest` rejected in `internal/validation/validate.go:117` `ValidateImageRef` — the single
+   source of truth shared by the admission webhook and the reconciler, which reaches it via the
+   `controller/validate_image.go` wrapper) and a digest is immutable. Determination moves
    from a command string the operator *invents* to an artifact the CR *pins*. The operator's
    cluster-write surface **shrinks by one field**.
 3. **Legacy command retirement is behind a strictly-parsed escape hatch.** The forced command
@@ -89,7 +90,13 @@ compiled in or wrap the binary — the entry **file** changes, the **invariant h
 - **Both back-compat affordances carry a dated expiry (C3, ADR-0044 precedent):** the
   `legacy-bun-command` annotation **and** the `/app/server.js` shim expire at **Tier-A exit / v1.0**.
   Without an expiry the invariant erodes into a permanent dual-path and the operator keeps its
-  image-layout knowledge forever.
+  image-layout knowledge forever. **Anchor caveat, learned from the cited precedent:** ADR-0044
+  **Amendment 2** ("the expiry is re-anchored — its old anchor became unreachable") records that
+  *this exact* "Tier-A exit / v1.0" phrasing is **unreachable by construction** — no event fires to
+  trigger it (#742). So the named milestone is the *intent*, and the *mechanism* is a reachable,
+  owned one: the removal of both affordances is a **standing sprint-close review item** (the gate
+  that already meets at each sprint boundary owns it), revisited every sprint until it lands — not
+  left waiting on an undefined milestone. Action item 3 tracks it as an issue, not comment lore.
 - **Annotation vs spec field (C4, ADR-0040 exception):** ADR-0040 validates deploy-affecting inputs
   as spec fields with a CLI mirror. This hatch is a deliberate exception — a transient,
   expiring back-compat lever, not a durable input — so it is an annotation validated **in
@@ -110,7 +117,9 @@ compiled in or wrap the binary — the entry **file** changes, the **invariant h
    asserting the C5 path algebra (mutation-proved). *(#1155)*
 2. Operator: leave `Command` `nil` for the standalone shape; strict annotation parse + honest-status
    condition in `computeStatusVerdict`; controller tests. *(#1155)*
-3. Both affordances expire at Tier-A exit / v1.0 — tracked, not comment lore. *(#1155)*
+3. Both affordances are removed on a **reachable** anchor — a standing sprint-close review item
+   (not the unreachable "Tier-A exit / v1.0" milestone; see the anchor caveat above and ADR-0044
+   Am. 2), tracked as an issue, revisited each sprint until it lands. *(#1155)*
 4. The 778/0 credential covers the harness boot path (raw `server.js` + preloads), **not** the
    supervisor-wrapped entrypoint this ADR ships — close via the target-agnostic conformance suite.
    *(#1172)*
