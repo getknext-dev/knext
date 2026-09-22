@@ -69,7 +69,10 @@ export interface DbClientsProbeOptions {
  * scale-to-zero consequence. Returns `true` iff the module resolves. Never
  * throws — a probe must not wedge boot.
  *
- * Call ONCE, eagerly, from the supervisor entry (before the child is spawned).
+ * Call ONCE from the supervisor entry, AFTER the child is spawned — it is a
+ * diagnostic, not shutdown-safety work, so it must run post-spawn (calling it
+ * before the spawn drops pino's lazy first-emit onto the cold-start critical
+ * path, #441). A source-order guard in standalone-image-contract.test.ts pins this.
  */
 export function warnIfDbClientsUnavailable(
     options: DbClientsProbeOptions = {},

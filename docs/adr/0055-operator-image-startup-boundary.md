@@ -143,8 +143,10 @@ increment, because:
    the opt-in increment must answer, not a COPY line.
 
 **But the honest floor ships now, regardless of ship-vs-document:** the degradation is no longer
-silent. `db-clients-probe.ts`'s `warnIfDbClientsUnavailable` runs once, eagerly, in the supervisor
-entry (`node-server.ts`, beside `registerDbPoolDrain`). It **resolves** the `@getknext/lib/clients`
+silent. `db-clients-probe.ts`'s `warnIfDbClientsUnavailable` runs once in the supervisor
+entry (`node-server.ts`), AFTER the child spawn — not beside `registerDbPoolDrain` (which stays
+eager pre-spawn) — keeping pino's lazy first-emit off the cold-start critical path (#441). It
+**resolves** the `@getknext/lib/clients`
 specifier — `import.meta.resolve`, never `import()`, so the heavy graph stays off the cold-start
 path (#441) — and emits ONE loud WARNING naming the disabled capabilities and the scale-to-zero
 consequence when the module is absent. The future path is **opt-in**: an app that needs
