@@ -45,6 +45,8 @@ Every field the CLI can emit is defined by the bundled CRD.
 | `spec.env` | yes |
 | `spec.healthCheckPath` | yes |
 | `spec.image` | yes |
+| `spec.imagePullSecrets` | yes |
+| `spec.imagePullSecrets.*.name` | yes |
 | `spec.observability` | yes |
 | `spec.observability.enabled` | yes |
 | `spec.observability.rum` | yes |
