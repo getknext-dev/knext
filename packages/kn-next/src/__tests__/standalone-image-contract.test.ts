@@ -506,6 +506,44 @@ describe("@getknext/core's runtime closure actually resolves under what the Dock
             ).resolves.toBeUndefined();
         });
 
+        it("the gap is SURFACED, not silent: the supervisor entry eagerly probes @getknext/lib/clients and warns on absence (#1178)", () => {
+            // ADR-0055 Amendment 1: shipping the heavy closure is deferred, but
+            // the degradation must not degrade in silence. node-server.ts wires
+            // the boot-time probe; the probe's behaviour is proved in
+            // db-clients-probe.test.ts. This asserts the WIRING so a regression
+            // that drops the surfacing reds here (mutation-proved).
+            const nodeServer = readFileSync(
+                join(PKG_ROOT, "src", "adapters", "node-server.ts"),
+                "utf8",
+            );
+            expect(nodeServer).toMatch(
+                /import\s+\{\s*warnIfDbClientsUnavailable\s*\}\s+from\s+["']\.\/db-clients-probe["']/,
+            );
+            expect(nodeServer).toMatch(/warnIfDbClientsUnavailable\s*\(/);
+        });
+
+        it("the probe call is wired AFTER the child spawn, never before it (sr-1194 B1: an eager pre-spawn probe drops pino's ~13.5ms first-emit cost onto the cold-start critical path on every boot, since the standalone image ALWAYS lacks the closure)", () => {
+            // node-server.ts:88-95 documents the #441 invariant: nothing may
+            // emit before `spawn(...)` on the normal path, because the first
+            // log emit lazily loads pino. The probe call itself calls
+            // `l.warn(...)` on the (always-true, on this image) absent case,
+            // so it must be wired strictly AFTER the spawn — never restored
+            // to the eager "shutdown safety" block above it.
+            const nodeServer = readFileSync(
+                join(PKG_ROOT, "src", "adapters", "node-server.ts"),
+                "utf8",
+            );
+            const spawnIndex = nodeServer.search(
+                /spawn\s*\(\s*process\.execPath\s*,/,
+            );
+            const probeCallIndex = nodeServer.search(
+                /warnIfDbClientsUnavailable\s*\(/,
+            );
+            expect(spawnIndex).toBeGreaterThanOrEqual(0);
+            expect(probeCallIndex).toBeGreaterThanOrEqual(0);
+            expect(spawnIndex).toBeLessThan(probeCallIndex);
+        });
+
         it("startImageCacheSync returns a no-op stop() without ever loading the object-store client when STORAGE_BUCKET is unset", async () => {
             // Type-level cast (matches image-cache-sync.test.ts's #261 idiom):
             // Next augments ProcessEnv with a REQUIRED NODE_ENV; this env

@@ -21,6 +21,7 @@ import { createLogger } from "../utils/logger";
 import { bootTrace } from "./boot-trace";
 import { warnOnDegradedCompileCache } from "./compile-cache-health";
 import { warnOnCompileCacheShadow } from "./compile-cache-shadow";
+import { warnIfDbClientsUnavailable } from "./db-clients-probe";
 import { registerDbPoolDrain } from "./db-drain";
 import {
     probeIntervalMs,
@@ -251,6 +252,14 @@ if (process.versions.bun) {
 // (@cerbos/grpc + minio + pg — the supervisor's heaviest graph, needed solely to
 // close two pools) is loaded lazily, inside the drain. That closes no safety
 // window: the handler exists from this point on.
+//
+// #1178 / sr-1194 B1: the availability PROBE (warnIfDbClientsUnavailable) is
+// NOT eager, unlike the hook above. It is a diagnostic, not a shutdown-safety
+// concern, and on the lean STANDALONE image (ADR-0055) it is ALWAYS absent —
+// so an eager call here would emit a WARN on every single cold start, which
+// (per #441 above) forces pino's ~13.5ms first-emit load onto the cold-start
+// critical path of the very axis this image exists to optimize. It is called
+// post-spawn instead, alongside the other post-spawn diagnostics (see below).
 registerDbPoolDrain();
 
 // ── Graceful shutdown ─────────────────────────────────────────────────────────
@@ -318,6 +327,13 @@ bootTrace.mark("spawn-issued", { pid: nextProc.pid });
 // Startup log emitted AFTER spawn (#441): the child is already booting, so the
 // first-emit lazy pino load lands off the cold-start critical path.
 log.info({ serverJs }, "Starting Next.js standalone server");
+
+// #1178 / sr-1194 B1: probe `@getknext/lib/clients` availability AFTER the
+// spawn (see the comment beside `registerDbPoolDrain()` above for why it must
+// not be eager). RESOLVING the specifier, not importing it, so the heavy
+// closure still never loads (#441) — only the WARN, if absent, pays pino's
+// first-emit cost, and now off the critical path.
+warnIfDbClientsUnavailable({ log });
 
 nextProc.on("error", (err) => {
     log.fatal({ err }, "Failed to start Next.js standalone server");
