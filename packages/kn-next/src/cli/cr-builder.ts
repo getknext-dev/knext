@@ -341,6 +341,17 @@ export function buildNextAppCRObject(
 
     const spec: Record<string, unknown> = {
         image,
+        // #794/#952 private-registry pull secrets: config names Secrets, the CRD
+        // takes core LocalObjectReference ([{name}]). Emitted only when set, so a
+        // public-registry app carries no empty field. The operator writes these
+        // onto <app>-sa and owns the field.
+        ...(config.imagePullSecrets?.length
+            ? {
+                  imagePullSecrets: config.imagePullSecrets.map((name) => ({
+                      name,
+                  })),
+              }
+            : {}),
         scaling,
         ...(resources ? { resources } : {}),
         ...(storage ? { storage } : {}),

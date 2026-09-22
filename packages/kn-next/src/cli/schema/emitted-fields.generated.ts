@@ -34,6 +34,8 @@ export const EMITTED_CR_FIELD_PATHS: readonly string[] = [
     "spec.env",
     "spec.healthCheckPath",
     "spec.image",
+    "spec.imagePullSecrets",
+    "spec.imagePullSecrets.*.name",
     "spec.observability",
     "spec.observability.enabled",
     "spec.observability.rum",

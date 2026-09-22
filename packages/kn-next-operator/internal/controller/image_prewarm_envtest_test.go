@@ -175,31 +175,30 @@ var _ = Describe("Image-prewarm DaemonSet (ADR-0037)", func() {
 		Expect(errors.IsNotFound(err)).To(BeTrue(), "prewarm is opt-in; no DaemonSet by default")
 	})
 
-	It("threads the app ServiceAccount's imagePullSecrets onto the DaemonSet", func() {
+	It("threads spec.imagePullSecrets (via the app SA) onto the DaemonSet", func() {
 		nn := types.NamespacedName{Name: "prewarm-pull", Namespace: "default"}
 		app := &appsv1alpha1.NextApp{
 			ObjectMeta: metav1.ObjectMeta{Name: nn.Name, Namespace: nn.Namespace},
 			Spec: appsv1alpha1.NextAppSpec{
-				Image:   image,
-				Scaling: &appsv1alpha1.ScalingSpec{ImagePrewarm: true},
+				Image:            image,
+				Scaling:          &appsv1alpha1.ScalingSpec{ImagePrewarm: true},
+				ImagePullSecrets: []corev1.LocalObjectReference{{Name: "ocir-creds"}},
 			},
 		}
 		Expect(k8sClient.Create(ctx, app)).To(Succeed())
 		defer deleteAndFinalize(ctx, nn)
 
+		// One reconcile: the operator writes spec.imagePullSecrets onto <app>-sa
+		// (#794), and the prewarmer reads them back off that SA (ADR-0037) later
+		// in the same pass, so the DaemonSet pulls with the same credentials as
+		// the app revision — no out-of-band SA patch.
 		r := newReconciler()
-		// First reconcile creates the app SA; stamp a pull secret on it, then
-		// reconcile again so the prewarmer inherits it.
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
 		sa := &corev1.ServiceAccount{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nn.Name + "-sa", Namespace: nn.Namespace}, sa)).To(Succeed())
-		sa.ImagePullSecrets = []corev1.LocalObjectReference{{Name: "ocir-creds"}}
-		Expect(k8sClient.Update(ctx, sa)).To(Succeed())
-
-		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
-		Expect(err).NotTo(HaveOccurred())
+		Expect(sa.ImagePullSecrets).To(ContainElement(corev1.LocalObjectReference{Name: "ocir-creds"}))
 
 		ds := &appsv1.DaemonSet{}
 		Expect(k8sClient.Get(ctx, dsKey(nn), ds)).To(Succeed())
