@@ -2395,7 +2395,7 @@ describe('compat-suite fail-on-red gate — revocation teeth (test-e2e-deploy.ym
   // conjunct keyed on the CONSTANT instead of on `undefined` —
   // `s.ref === "v16.2.1" && …`, `s.runtime === "node" && …` — survived, and two
   // of those fail open on routine changes: the pinned Next.js ref is bumped
-  // every cycle, and the same `deploy-tests` job runs the Bun weekly lane. The
+  // every cycle, and the same `deploy-tests` job runs the Bun credentialing lane. The
   // fix is a PROPERTY, not more values: every case is evaluated under two
   // metadata assignments and the verdict must be IDENTICAL. That takes the
   // constant-ceiling family with it, since a `< 46` bound fires on a 45-test
@@ -2586,7 +2586,7 @@ describe('compat-suite fail-on-red gate — revocation teeth (test-e2e-deploy.ym
   });
 
   it('#700 the polarity probes cover BOTH runtime lanes', () => {
-    // The step guards the node nightly and the Bun weekly through one
+    // The step guards the node nightly and the Bun credentialing nightly through one
     // `deploy-tests` job (`KNEXT_RUNTIME`), so a probe set that only ever
     // describes one lane cannot notice a condition keyed on the other. Asserted
     // on the exported variants rather than inside the audit, so it stays true
@@ -2653,14 +2653,15 @@ describe('compat-suite fail-on-red gate — revocation teeth (test-e2e-deploy.ym
 // for Bun would be pure cost with no extra credibility. The Bun axis is instead
 // a separate lane inside the SAME workflow (no copy-paste second workflow):
 //   • a `runtime` workflow_dispatch input (choice node|bun, default node), and
-//   • a WEEKLY (Sunday) schedule that runs the bun lane,
+//   • a nightly BUN CREDENTIALING schedule ('47 4 * * *', #1147) that runs the
+//     bun lane, distinct from the node credential nightly ('17 3 * * *'),
 // both funneled through ONE workflow-level `KNEXT_RUNTIME` env that the shard
 // run step plumbs into scripts/e2e-deploy.sh (which already boots the standalone
 // server.js with `bun` when KNEXT_RUNTIME=bun). HONESTY: the compat-matrix Node
-// ✅ (run 28602886003) is a NODE claim — the Bun row stays ❌ until a green Bun
-// run exists (tests/compat-matrix.test.ts holds that row to the same evidence
-// contract), and a red BUN weekly must alert under its OWN lane-named issue,
-// never implying the Node credential went red.
+// ✅ (run 28602886003) is a NODE claim; the Bun row is credentialing-in-progress
+// (verified-once until 14 scheduled bun nights bank against
+// docs/compat/window-bun-lane.md), and a red BUN night must alert under its OWN
+// lane-named issue, never implying the Node credential went red.
 
 describe('compat-suite Bun runtime axis (test-e2e-deploy.yml, #147 item 4)', () => {
   const src = workflowText();
@@ -2701,37 +2702,138 @@ describe('compat-suite Bun runtime axis (test-e2e-deploy.yml, #147 item 4)', () 
     expect(/^\s*-\s*'?bun'?\s*$/m.test(input), 'options must include bun').toBe(true);
   });
 
-  it('keeps ONLY the nightly cron — the weekly bun schedule is retired, not replaced', () => {
-    // The weekly bun cron retired with the standalone-under-bun artifact
-    // (ADR-0048/#710); its recurring compute moved to compat-vinext.yml. Both
-    // halves: the credential nightly survives, and NO extra schedule may
-    // return — a resurrected weekly would burn compute on an artifact users
-    // cannot build while reading as coverage.
+  it('has EXACTLY two nightly crons — the node credential (17 3) and the bun credentialing (47 4) lanes (#1147)', () => {
+    // #1147 stands up a SECOND nightly: the bun credentialing lane. Both halves:
+    // the node credential nightly survives UNTOUCHED, and the bun lane is a
+    // DISTINCT off-peak cron — not a resurrection of the retired weekly Sunday
+    // artifact lane (#710), but a fresh credentialing lane graded against
+    // docs/compat/window-bun-lane.md. No THIRD schedule may appear.
     const all = crons();
     expect(all, 'the nightly Node cron must stay untouched (the credential lane)').toContain(
       '17 3 * * *',
     );
+    expect(all, 'the bun credentialing cron must exist (#1147)').toContain('47 4 * * *');
+    // The two lanes must fire at DISTINCT times so they never contend for the
+    // same runner window, and there must be no other schedule.
+    expect(new Set(all).size, 'the two crons must be distinct').toBe(2);
     expect(
-      all.filter((c) => c !== '17 3 * * *'),
-      'no schedule beyond the nightly — the bun lane is dispatch-only now',
+      all.filter((c) => c !== '17 3 * * *' && c !== '47 4 * * *'),
+      'exactly two schedules: the node credential nightly and the bun credentialing nightly',
     ).toEqual([]);
   });
 
-  it('derives KNEXT_RUNTIME at the workflow level: dispatch input > default node — no schedule branch', () => {
+  it('derives KNEXT_RUNTIME at the workflow level: dispatch input > bun cron (47 4) → bun > default node (#1147)', () => {
     const envLine = src.split('\n').find((l) => /^\s*KNEXT_RUNTIME:\s*\$\{\{/.test(l));
     expect(envLine, 'a workflow-level KNEXT_RUNTIME env expression must exist').toBeTruthy();
     expect(
       /inputs\.runtime/.test(envLine ?? ''),
-      'the lane must honor the workflow_dispatch runtime input',
+      'the lane must honor the workflow_dispatch runtime input (dispatch wins)',
     ).toBe(true);
-    // With the weekly retired there is exactly one schedule, so a
-    // github.event.schedule comparison is dead code that reads as a second
-    // lane — it must NOT exist.
+    // The bun lane is SELECTED by the bun cron via a github.event.schedule
+    // comparison against the '47 4 * * *' literal — and ONLY that literal, so
+    // the node cron cannot leak into the bun lane.
     expect(
-      /github\.event\.schedule/.test(envLine ?? ''),
-      'no schedule branch: the bun lane is dispatch-only',
-    ).toBe(false);
+      /github\.event\.schedule\s*==\s*'47 4 \* \* \*'/.test(envLine ?? ''),
+      'the bun lane must be selected by github.event.schedule == the bun cron literal',
+    ).toBe(true);
+    expect(/'bun'/.test(envLine ?? ''), 'the bun cron must map to bun').toBe(true);
     expect(/'node'/.test(envLine ?? ''), 'the fallback must be node').toBe(true);
+    // The node cron literal must NOT appear in the runtime expression — mapping
+    // the node credential cron to bun is exactly the delicate mistake #1147
+    // warns against.
+    expect(
+      /'17 3 \* \* \*'/.test(envLine ?? ''),
+      'the node cron literal must never appear in the KNEXT_RUNTIME mapping',
+    ).toBe(false);
+  });
+
+  // ── #1147 the crux: MUTATION-PROVE the cron↔runtime mapping ───────────────
+  // Not a string grep — a real evaluator that PARSES the KNEXT_RUNTIME
+  // GitHub-Actions expression and EVALUATES it against event contexts. A mutant
+  // that swaps the cron literal, or maps the node cron to bun, changes the
+  // evaluated result and reds the assertions below. The node cron staying node
+  // and the bun cron mapping to bun is the whole safety property.
+  describe('cron↔runtime mapping is evaluated, not grepped (#1147)', () => {
+    /** Extract the `${{ … }}` body of the workflow-level KNEXT_RUNTIME env. */
+    function runtimeExpr(): string {
+      const line = src.split('\n').find((l) => /^\s*KNEXT_RUNTIME:\s*\$\{\{/.test(l)) ?? '';
+      const m = line.match(/\$\{\{\s*([\s\S]*?)\s*\}\}/);
+      expect(m, 'KNEXT_RUNTIME must be a ${{ … }} expression').not.toBeNull();
+      return (m as RegExpMatchArray)[1];
+    }
+
+    /** Split an expression on top-level `||`, respecting parentheses. */
+    function splitTopLevelOr(expr: string): string[] {
+      const parts: string[] = [];
+      let depth = 0;
+      let start = 0;
+      for (let i = 0; i < expr.length; i++) {
+        const ch = expr[i];
+        if (ch === '(') depth++;
+        else if (ch === ')') depth--;
+        else if (depth === 0 && expr.startsWith('||', i)) {
+          parts.push(expr.slice(start, i));
+          i += 1;
+          start = i + 1;
+        }
+      }
+      parts.push(expr.slice(start));
+      return parts.map((p) => p.trim());
+    }
+
+    /**
+     * Evaluate a single operand against a GHA-like context. Handles exactly the
+     * shapes this expression uses: a string literal, `github.event.inputs.runtime`,
+     * and a parenthesised `(github.event.schedule == '<lit>' && '<val>')`.
+     * Returns the resolved string, or '' (falsy) when the operand is not truthy.
+     */
+    function evalOperand(
+      op: string,
+      ctx: { inputs?: { runtime?: string }; schedule?: string },
+    ): string {
+      const trimmed = op.trim();
+      const lit = trimmed.match(/^'([^']*)'$/);
+      if (lit) return lit[1];
+      if (trimmed === 'github.event.inputs.runtime') return ctx.inputs?.runtime ?? '';
+      const paren = trimmed.match(/^\(([\s\S]*)\)$/);
+      if (paren) {
+        // `github.event.schedule == '<lit>' && '<val>'`
+        const m = paren[1].match(/github\.event\.schedule\s*==\s*'([^']*)'\s*&&\s*'([^']*)'/);
+        expect(m, `unrecognised parenthesised operand: ${trimmed}`).not.toBeNull();
+        const [, cronLit, value] = m as RegExpMatchArray;
+        return ctx.schedule === cronLit ? value : '';
+      }
+      throw new Error(`unrecognised operand in KNEXT_RUNTIME expression: "${trimmed}"`);
+    }
+
+    /** The full lane resolver: first truthy `||` operand wins. */
+    function resolveLane(ctx: { inputs?: { runtime?: string }; schedule?: string }): string {
+      for (const op of splitTopLevelOr(runtimeExpr())) {
+        const v = evalOperand(op, ctx);
+        if (v) return v;
+      }
+      return '';
+    }
+
+    it('the NODE credential cron (17 3) resolves to node — never leaks into bun', () => {
+      expect(resolveLane({ schedule: '17 3 * * *' })).toBe('node');
+    });
+
+    it('the BUN credentialing cron (47 4) resolves to bun', () => {
+      expect(resolveLane({ schedule: '47 4 * * *' })).toBe('bun');
+    });
+
+    it('a dispatch runtime input WINS over any schedule', () => {
+      expect(resolveLane({ inputs: { runtime: 'bun' } })).toBe('bun');
+      expect(resolveLane({ inputs: { runtime: 'node' } })).toBe('node');
+      // Even if (implausibly) both were present, the dispatch input takes precedence.
+      expect(resolveLane({ inputs: { runtime: 'node' }, schedule: '47 4 * * *' })).toBe('node');
+    });
+
+    it('an unrecognised schedule falls back to node (the safe default)', () => {
+      expect(resolveLane({ schedule: '0 0 * * *' })).toBe('node');
+      expect(resolveLane({})).toBe('node');
+    });
   });
 
   it('plumbs the lane into the shard run step (KNEXT_RUNTIME is no longer hardcoded to node)', () => {
@@ -2850,13 +2952,16 @@ describe('compat-suite Bun runtime axis (test-e2e-deploy.yml, #147 item 4)', () 
     ).toBe(false);
   });
 
-  it('plumbs the bun-version input into setup-bun with a PINNED stable fallback (#187 follow-up: the weekly lane must not float)', () => {
+  it('plumbs the bun-version input into setup-bun with a PINNED stable fallback (#187 follow-up: the scheduled bun lane must not float)', () => {
     // #187 review follow-up: the schedule fallback used to be `latest`, which
-    // FLOATS — a red weekly after a new Bun release could be a brand-new-Bun
+    // FLOATS — a red night after a new Bun release could be a brand-new-Bun
     // regression misattributed to knext (the whole lane exists to attribute
-    // red files to Bun versions). The fallback (what the WEEKLY schedule runs,
-    // since github.event.inputs is empty on schedule events) must be a pinned
-    // stable semver; the dispatch input stays a free string so canary/pinned
+    // red files to Bun versions). Doubly load-bearing since #1147: the scheduled
+    // bun CREDENTIALING lane installs exactly this fallback (github.event.inputs
+    // is empty on schedule events), and its observed build is FROZEN into the
+    // fingerprint — a floating fallback would move the build (and reset the
+    // streak) for reasons that are not code. The fallback must be a pinned stable
+    // semver; the dispatch input stays a free string so canary/pinned
     // experiments need no workflow edit.
     const bunStep = setupBunStep();
     expect(bunStep, 'expected the oven-sh/setup-bun step').not.toBe('');
@@ -2872,7 +2977,7 @@ describe('compat-suite Bun runtime axis (test-e2e-deploy.yml, #147 item 4)', () 
     const fallback = (m as RegExpMatchArray)[1];
     expect(
       /^\d+\.\d+\.\d+$/.test(fallback),
-      `the weekly-lane fallback must be a PINNED stable semver (never 'latest'/'canary' — those float), got: "${fallback}"`,
+      `the scheduled bun-lane fallback must be a PINNED stable semver (never 'latest'/'canary' — those float), got: "${fallback}"`,
     ).toBe(true);
   });
 
@@ -2924,7 +3029,7 @@ describe('compat-suite Bun runtime axis (test-e2e-deploy.yml, #147 item 4)', () 
     ).toBe(true);
   });
 
-  it('the red alert NAMES the lane: a red bun weekly gets its own title and never implies the Node credential is red', () => {
+  it('the red alert NAMES the lane: a red bun credentialing night gets its own title and never implies the Node credential is red (#1147)', () => {
     const alertMatch = src.match(
       /^ {2}nightly-red-alert:\n[\s\S]*?(?=^ {2}[a-z][\w-]*:|\n*$(?![\s\S]))/m,
     );
@@ -2937,15 +3042,21 @@ describe('compat-suite Bun runtime axis (test-e2e-deploy.yml, #147 item 4)', () 
     ).toBe(true);
     // The Node credential title is unchanged (idempotency key for the Node lane).
     expect(job).toContain('Compat nightly RED');
-    // The bun lane gets a DISTINCT title that names bun — a red bun weekly must
-    // never comment on (or be mistaken for) the Node credential issue.
+    // The bun credentialing lane gets a DISTINCT title that names bun — a red bun
+    // night must never comment on (or be mistaken for) the Node credential issue.
     const titles = [...job.matchAll(/title=(['"])(.*?)\1/g)].map((m) => m[2]);
     const bunTitle = titles.find((t) => /bun/i.test(t));
     expect(
       bunTitle,
-      'the alert must assign a bun-lane title (e.g. "Compat weekly RED (bun lane)")',
+      'the alert must assign a bun-lane title (e.g. "Compat nightly RED (bun credentialing)")',
     ).toBeTruthy();
+    // Distinct from the Node credential's idempotency key, so the bun red files
+    // its own issue and never comments on the node credential's.
     expect(bunTitle).not.toBe('Compat nightly RED');
+    expect(
+      titles.some((t) => t === 'Compat nightly RED'),
+      'the Node credential title must remain exactly "Compat nightly RED" (its idempotency key)',
+    ).toBe(true);
     // And the body must say the Node credential is NOT implicated.
     expect(
       /does NOT imply[^\n]*Node/i.test(job) || /Node credential[^\n]*not/i.test(job),
@@ -2959,9 +3070,9 @@ describe('compat-suite Bun runtime axis (test-e2e-deploy.yml, #147 item 4)', () 
 // already-open alert issue. gh's default --limit is 30: with >30 open issues in
 // the repo, the pinned alert can fall off the first page, the lookup returns
 // empty, and every red night files a NEW issue — the exact spam the dedup
-// exists to prevent. Both lane titles ('Compat nightly RED' and 'Compat weekly
-// RED (bun lane)') go through the SAME parameterized lookup, so hardening that
-// one invocation covers both lanes (#187 item 6).
+// exists to prevent. Both lane titles ('Compat nightly RED' and 'Compat nightly
+// RED (bun credentialing)') go through the SAME parameterized lookup, so
+// hardening that one invocation covers both lanes (#187 item 6).
 
 describe('compat-suite red-alert dedup lookup limits (test-e2e-deploy.yml, #187 follow-up)', () => {
   const src = workflowText();
@@ -3009,7 +3120,7 @@ describe('compat-suite red-alert dedup lookup limits (test-e2e-deploy.yml, #187 
     const lookups = ghIssueListInvocations();
     // The job selects on the shell `title` variable (set per lane above the
     // lookup) — one hardened invocation serving both 'Compat nightly RED' and
-    // 'Compat weekly RED (bun lane)'. #194 gate follow-up: the old assertion
+    // 'Compat nightly RED (bun credentialing)'. #194 gate follow-up: the old assertion
     // (`some(...) || ${title} anywhere in the job`) was near-tautological — an
     // unparameterized SECOND lookup could slip past it. Now every single
     // gh issue list invocation must itself select on ${title}.
@@ -3031,8 +3142,9 @@ describe('compat-suite red-alert dedup lookup limits (test-e2e-deploy.yml, #187 
 // scripts/e2e-deploy.sh preload a diagnostics_channel subscriber (the sandbox's
 // bundled undici publishes undici:* through the HOST diagnostics_channel — verified
 // under bun) and export BUN_CONFIG_VERBOSE_FETCH on the bun lane. These guards pin
-// the knob to OPT-IN ONLY: schedules (the credential nightly + the weekly bun lane)
-// must never enable it, and the scripts' debug paths must be env-gated.
+// the knob to OPT-IN ONLY: BOTH scheduled lanes (the node credential nightly
+// '17 3 * * *' + the bun credentialing nightly '47 4 * * *') must never enable
+// it, and the scripts' debug paths must be env-gated.
 describe('compat-suite sandbox-fetch debug knob (test-e2e-deploy.yml, #188 path 2)', () => {
   const src = workflowText();
 

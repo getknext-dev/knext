@@ -269,19 +269,66 @@ function collectSuiteProvenance({ nextJsDir, nextTarball, nextRef }) {
 }
 
 /**
- * @param {{ repoRoot: string, tarballsDir: string, nextJsDir?: string | null, nextTarball?: string | null, nextRef?: string | null }} options
+ * The observed-runtime component (#1147, window-bun-lane.md rule 4).
+ *
+ * The bun lane's result is BUILD-DEPENDENT: Bun ≤1.3.14 is deterministically red
+ * on the documented edge-fetch / not-found-invariant files, stable 1.4.0 is
+ * green, and a canary that ALSO reported `1.4.0` was red — so the version STRING
+ * is not a sufficient freeze key. The frozen key is the observed `bun --version`
+ * TOGETHER WITH `bun --revision` (the build hash). Folding it into the digest
+ * makes any Bun build move restart the streak via the audit's rule-1
+ * (fingerprint-identical) check, rather than a human eyeballing it.
+ *
+ * CRITICAL: this is STRICTLY ADDITIVE. The node lane passes no runtime identity,
+ * so `runtimeVersion` and `runtimeRevision` are both absent there, `runtime` is
+ * `null`, and the digest string is byte-identical to the pre-#1147 formula — the
+ * live node streak is never reset by this code path.
+ *
+ * @param {{ runtimeVersion?: string | null, runtimeRevision?: string | null }} options
+ * @returns {string | null} a `sha256:…` component, or null when no identity was supplied
  */
-export function computeFingerprint({ repoRoot, tarballsDir, nextJsDir, nextTarball, nextRef }) {
+function collectRuntimeComponent({ runtimeVersion, runtimeRevision }) {
+  const version = runtimeVersion == null || runtimeVersion === '' ? null : runtimeVersion;
+  const revision = runtimeRevision == null || runtimeRevision === '' ? null : runtimeRevision;
+  if (version === null && revision === null) return null;
+  // Both halves in the digested line, each labelled, so the identity is legible
+  // in the artifact and neither half can be silently dropped.
+  return `sha256:${sha256(`version\t${version ?? ''}\nrevision\t${revision ?? ''}`)}`;
+}
+
+/**
+ * @param {{ repoRoot: string, tarballsDir: string, nextJsDir?: string | null, nextTarball?: string | null, nextRef?: string | null, runtimeVersion?: string | null, runtimeRevision?: string | null }} options
+ */
+export function computeFingerprint({
+  repoRoot,
+  tarballsDir,
+  nextJsDir,
+  nextTarball,
+  nextRef,
+  runtimeVersion,
+  runtimeRevision,
+}) {
   const harness = collectHarness(repoRoot);
   const { entries: packed, packages } = collectPacked(tarballsDir);
 
   const harnessLines = harness.map((e) => e.line).sort();
   const packedLines = packed.map((e) => e.line).sort();
+  /** @type {{ harness: string, packed: string, runtime?: string }} */
   const components = {
     harness: `sha256:${sha256(harnessLines.join('\n'))}`,
     packed: `sha256:${sha256(packedLines.join('\n'))}`,
   };
-  const fingerprint = `sha256:${sha256(`${SCHEMA}\n${components.harness}\n${components.packed}\n`)}`;
+
+  // The digest string. The `runtime` line is APPENDED only when an identity was
+  // supplied (the bun lane), so the node lane's digest is unchanged from the
+  // original `${SCHEMA}\n${harness}\n${packed}\n` formula — byte for byte.
+  const runtimeComponent = collectRuntimeComponent({ runtimeVersion, runtimeRevision });
+  let digestInput = `${SCHEMA}\n${components.harness}\n${components.packed}\n`;
+  if (runtimeComponent !== null) {
+    components.runtime = runtimeComponent;
+    digestInput += `runtime\t${runtimeComponent}\n`;
+  }
+  const fingerprint = `sha256:${sha256(digestInput)}`;
 
   return {
     schema: SCHEMA,
@@ -289,7 +336,17 @@ export function computeFingerprint({ repoRoot, tarballsDir, nextJsDir, nextTarba
     components,
     // Outside `fingerprint` by construction: it is derived from `components`
     // only, so nothing under `recorded` can move the digest.
-    recorded: { suite: collectSuiteProvenance({ nextJsDir, nextTarball, nextRef }) },
+    recorded: {
+      suite: collectSuiteProvenance({ nextJsDir, nextTarball, nextRef }),
+      // Recorded verbatim (as well as folded) so the observed build is legible
+      // in the artifact without re-deriving it from the opaque component hash.
+      // On the node lane both are null and nothing is folded.
+      runtime: {
+        version: runtimeVersion == null || runtimeVersion === '' ? null : runtimeVersion,
+        revision: runtimeRevision == null || runtimeRevision === '' ? null : runtimeRevision,
+        frozen: runtimeComponent !== null,
+      },
+    },
     counts: { harness: harness.length, packed: packed.length },
     packages,
     files: [...harness, ...packed].map((e) => ({ component: e.component, path: e.path })),
@@ -323,6 +380,10 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       nextJsDir: arg('next-js-dir', null),
       nextTarball: arg('next-tarball', null),
       nextRef: arg('next-ref', null),
+      // #1147 (window-bun-lane.md rule 4): the OBSERVED Bun build. Absent on the
+      // node lane → nothing folded, node digest unchanged.
+      runtimeVersion: arg('runtime-version', null),
+      runtimeRevision: arg('runtime-revision', null),
     });
   } catch (error) {
     console.error(`::error::${error instanceof Error ? error.message : String(error)}`);
@@ -350,6 +411,14 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     console.log(`    next ref            ${suite.nextRef ?? 'n/a'}`);
     console.log(`    next.js checkout    ${suite.nextJsCommit ?? 'n/a'}`);
     console.log(`    next tarball sha256 ${suite.nextTarballSha256 ?? 'n/a'}`);
+    const runtime = result.recorded.runtime;
+    if (runtime.frozen) {
+      console.log('  observed Bun build (FROZEN — folded into the digest, #1147 rule 4):');
+      console.log(`    bun --version   ${runtime.version ?? 'n/a'}`);
+      console.log(`    bun --revision  ${runtime.revision ?? 'n/a'}`);
+    } else {
+      console.log('  runtime identity: none (node lane — nothing folded)');
+    }
     if (out) console.log(`  written to ${relative(process.cwd(), resolve(out))}`);
   }
 }
