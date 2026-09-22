@@ -43,6 +43,11 @@ import {
 } from "./cr-builder";
 import { isEntrypoint, runCapture, runInherit, runQuiet } from "./exec";
 import { runProjectBuild } from "./project-build";
+import {
+    dockerBuildxArgs,
+    selectRuntimeImage,
+    stageStandaloneBuildContext,
+} from "./runtime-image";
 import { captureKubectl } from "./schema/kubectl-capture";
 import {
     assertCRSchemaCompatible,
@@ -379,21 +384,25 @@ async function defaultBuildAndPush(
         ".output",
         "buildx-metadata.json",
     );
-    runInherit([
-        "docker",
-        "buildx",
-        "build",
-        "--platform",
-        "linux/amd64",
-        "-f",
-        `${process.cwd()}/Dockerfile`,
-        "-t",
-        taggedRef,
-        "--push",
-        "--metadata-file",
-        metadataFilePath,
-        repoRoot,
-    ]);
+    // ADR-0055: same runtime-image selection as `deploy`. vinext keeps the
+    // scaffolded single-stage Dockerfile (argv unchanged); the standalone shape
+    // stages the multi-stage template and picks a `--target`.
+    const selection = selectRuntimeImage(config, process.cwd());
+    if (selection.kind === "standalone") {
+        stageStandaloneBuildContext({
+            cwd: process.cwd(),
+            buildContext: repoRoot,
+        });
+    }
+    runInherit(
+        dockerBuildxArgs({
+            taggedRef,
+            metadataFilePath,
+            buildContext: repoRoot,
+            dockerfile: selection.dockerfile,
+            target: selection.target,
+        }),
+    );
 
     const execFn = async (argv: string[]): Promise<string> => runCapture(argv);
     const readFileFn = (p: string) => readFileSync(p, "utf-8");

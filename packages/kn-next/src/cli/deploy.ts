@@ -46,6 +46,11 @@ import { runAssetGC } from "./gc";
 import { CLI_HELP } from "./help";
 import { assertNoPlaceholders } from "./placeholder-preflight";
 import { runProjectBuild } from "./project-build";
+import {
+    dockerBuildxArgs,
+    selectRuntimeImage,
+    stageStandaloneBuildContext,
+} from "./runtime-image";
 import { captureKubectl } from "./schema/kubectl-capture";
 import {
     formatPreflightFailure,
@@ -690,23 +695,32 @@ export async function deploy() {
                     // project for a flat repo, which is what `kn-next create`
                     // produces. Nothing is inferred at this point.
                     const repoRoot = buildContext;
+                    // ADR-0055: select the runtime image by (build, runtime). The
+                    // vinext default uses the scaffolded single-stage Dockerfile
+                    // (argv unchanged); the standalone shape stages the ADR-0055
+                    // multi-stage template into the context and picks a `--target`.
+                    const selection = selectRuntimeImage(config, process.cwd());
+                    if (selection.kind === "standalone") {
+                        stageStandaloneBuildContext({
+                            cwd: process.cwd(),
+                            buildContext: repoRoot,
+                        });
+                        log.info(
+                            { target: selection.target },
+                            "Staged the standalone runtime image (ADR-0055)",
+                        );
+                    }
                     // --metadata-file writes the buildx result JSON (includes containerimage.digest).
                     // ARGV array, no shell — taggedRef etc. arrive as single tokens.
-                    runInherit([
-                        "docker",
-                        "buildx",
-                        "build",
-                        "--platform",
-                        "linux/amd64",
-                        "-f",
-                        `${process.cwd()}/Dockerfile`,
-                        "-t",
-                        taggedRef,
-                        "--push",
-                        "--metadata-file",
-                        metadataFilePath,
-                        repoRoot,
-                    ]);
+                    runInherit(
+                        dockerBuildxArgs({
+                            taggedRef,
+                            metadataFilePath,
+                            buildContext: repoRoot,
+                            dockerfile: selection.dockerfile,
+                            target: selection.target,
+                        }),
+                    );
                     log.info("Docker image built and pushed");
                 })(),
             );

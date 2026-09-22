@@ -27,10 +27,12 @@ const config: KnativeNextConfig = {
 };
 ```
 
-The earlier target that emitted a `next build` standalone folder is **legacy**: existing standalone
-deployments keep working, but new builds produce the compiled executable. The `runtime` config
-field (`'bun'` / `'node'`) only affects that legacy standalone shape — for the compiled build the
-runtime is baked into the binary and there is nothing to select.
+A second build shape — a `next build` **standalone** folder, run by a small supervisor instead of
+the compiled executable — exists internally as the runtime image knext will offer as a second,
+explicitly-selected target once it is exposed through `kn-next.config.ts`. It is **not yet
+selectable**: there is no supported `build` value that turns it on today, and the compiled
+executable above remains the only build your config can choose. Don't set anything expecting this
+shape — the CLI will reject a `build` value other than the default.
 
 ## The pipeline
 
