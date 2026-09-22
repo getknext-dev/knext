@@ -2,9 +2,12 @@
  * {{ name }} — vinext build config.
  *
  * knext builds your app with vinext and compiles it into a single Bun
- * executable. That is what gives you a ~61ms cold start instead of ~884ms, which
- * is the whole point of scaling to zero: nobody waits a second for the first
- * request after an idle period.
+ * executable — a smaller image and fast warm-request throughput, with the whole
+ * server precompiled to bytecode so the process itself starts in tens of
+ * milliseconds. (Note: on a scale-to-zero Knative cluster the first request
+ * after an idle period is dominated by pod scheduling — a few seconds — not by
+ * that process start, so treat the fast boot as an efficiency win, not a
+ * sub-second cold-start guarantee.)
  *
  * This file is deliberately small. If you have used `create-vinext-app`, the
  * shape is the same minus the Cloudflare Workers pieces — no `wrangler`, no
