@@ -1449,6 +1449,23 @@ describe('anonymous-install-nightly.yml — the runner must have no credential',
     expect(auditAnonymousWorkflowJob(synthetic(steps)).findings.join(' ')).toMatch(/env/i);
   });
 
+  // ── cr-1196 re-review: a FLOW-STYLE `steps:` value leaves `itemIndent` null ──
+  //
+  // `jobConfigWithoutSteps` found the `steps:` header line but no `- ` sequence
+  // item ever followed it — a flow-style `steps: [{...}]` on the line AFTER the
+  // bare `steps:` header. `itemIndent` stayed `null`, `sequenceEnd` stayed
+  // `lines.length`, so EVERYTHING after `steps:` — including a job-level `env:`
+  // — was excised from rule 5's view. Proven exploit (valid YAML, GitHub
+  // Actions accepts a flow-style `steps:` value): scored ZERO findings.
+  it('rejects a job-level `env:` after a FLOW-STYLE `steps:` value (cr-1196 re-review exploit)', () => {
+    const steps = [
+      '      [{name: a, run: node scripts/verify-anonymous-install.mjs}]',
+      '    env:',
+      '      GH_TOKEN: lit',
+    ].join('\n');
+    expect(auditAnonymousWorkflowJob(synthetic(steps)).findings.join(' ')).toMatch(/env/i);
+  });
+
   // ── R4: does each rule hold at every SPELLING, not just every site? ─────────
 
   it.each([

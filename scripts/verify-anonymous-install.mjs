@@ -1117,6 +1117,14 @@ function jobConfigWithoutSteps(block) {
       break;
     }
   }
+  // cr-1196 re-review: fail CLOSED when no `- ` sequence item was ever found —
+  // a flow-style (`steps: [{...}]`) or mapping-shaped `steps:` value leaves
+  // `itemIndent` `null`. Without this, `sequenceEnd` stayed `lines.length` and
+  // EVERYTHING after `steps:` (including a job-level `env:`) was excised from
+  // rule 5's view. Returning the whole, unmodified block means rule 5 scans it
+  // regardless of what shape `steps:` turned out to be — worst case a
+  // redundant scan, never a blind spot.
+  if (itemIndent === null) return block;
   return [...lines.slice(0, stepsAt + 1), ...lines.slice(sequenceEnd)].join('\n');
 }
 
