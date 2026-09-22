@@ -34,6 +34,7 @@ import {
     dockerignoreExcludes,
     type RuntimeImageConfig,
     runtimeStandaloneTemplateDir,
+    STANDALONE_DOCKERFILE_NAME,
     selectRuntimeImage,
     stageStandaloneBuildContext,
 } from "../cli/runtime-image";
@@ -251,6 +252,73 @@ describe("stageStandaloneBuildContext — stages a BOOTABLE standalone build con
         ).toThrow(/\{\{/);
         // And it must not have written a broken entry into the context.
         expect(existsSync(join(ctx, "knext-standalone-entry.mjs"))).toBe(false);
+    });
+
+    it("throws when the installed package is missing templates/runtime-standalone/ (no Dockerfile.standalone.hbs or entry shim)", () => {
+        // A broken/partial install (or a templateDir override pointed at the
+        // wrong package root) must abort staging with a clear message, not
+        // silently write nothing or throw an unrelated ENOENT from readFileSync.
+        const emptyTemplateDir = tmp();
+        const ctx = tmp();
+        expect(() =>
+            stageStandaloneBuildContext({
+                cwd: ctx,
+                buildContext: ctx,
+                templateDir: emptyTemplateDir,
+            }),
+        ).toThrow(/template not found/);
+        // Nothing must have been staged into the context.
+        expect(existsSync(join(ctx, STANDALONE_DOCKERFILE_NAME))).toBe(false);
+    });
+
+    it("throws when only the Dockerfile.standalone.hbs exists but the entry shim is missing", () => {
+        // Both files are required; a half-present template dir must still be
+        // treated as broken, not staged with a missing COPY source.
+        const templateDir = tmp();
+        writeFileSync(
+            join(templateDir, "Dockerfile.standalone.hbs"),
+            "FROM scratch\n",
+            "utf8",
+        );
+        const ctx = tmp();
+        expect(() =>
+            stageStandaloneBuildContext({
+                cwd: ctx,
+                buildContext: ctx,
+                templateDir,
+            }),
+        ).toThrow(/template not found/);
+    });
+
+    it("aborts on an unsubstituted {{ }} placeholder left in the DOCKERFILE itself, not just the entry shim", () => {
+        // The entry-shim {{ }} guard is covered above (cr-1181 #4); this pins
+        // the ORIGINAL Dockerfile-side assertion the comment describes — a
+        // leftover mustache in Dockerfile.standalone.hbs must also abort, and
+        // must not silently ship a Dockerfile with a raw template variable in
+        // it (which would fail the docker build with a confusing error, not
+        // this one).
+        const templateDir = tmp();
+        writeFileSync(
+            join(templateDir, "Dockerfile.standalone.hbs"),
+            "FROM {{ base }} AS standalone-node\n",
+            "utf8",
+        );
+        writeFileSync(
+            join(templateDir, "knext-standalone-entry.mjs.hbs"),
+            "import('@getknext/core/internal/node-server')();\n",
+            "utf8",
+        );
+        const ctx = tmp();
+        expect(() =>
+            stageStandaloneBuildContext({
+                cwd: ctx,
+                buildContext: ctx,
+                templateDir,
+            }),
+        ).toThrow(/Dockerfile\.standalone\.hbs contains an unsubstituted/);
+        // Nothing must have been written into the context on failure.
+        expect(existsSync(join(ctx, "knext-standalone-entry.mjs"))).toBe(false);
+        expect(existsSync(join(ctx, "Dockerfile.standalone"))).toBe(false);
     });
 
     it("writes a per-Dockerfile .dockerignore that keeps the standalone closure IN the context", () => {
