@@ -87,8 +87,9 @@ describe("#B2 spec.build on the emitted CR", () => {
     it("carries an explicit turbopack when the user asked for it", () => {
         // Explicit is preserved rather than normalised away: the user said it,
         // and round-tripping their config faithfully is what makes `--dry-run`
-        // output trustworthy. (validateConfig rejects retired builders before
-        // a deploy gets here; the CR builder itself does not police.)
+        // output trustworthy. Since #1167 turbopack is a SELECTABLE target
+        // (ADR-0054), so this is now a first-class deploy path, not just a
+        // preserved legacy value — the CR round-trips it into `spec.build`.
         expect(specOf(baseConfig({ build: "turbopack" })).build).toBe(
             "turbopack",
         );

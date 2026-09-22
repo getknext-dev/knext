@@ -57,23 +57,25 @@ const key = (b: BuilderId, r: RuntimeId) => `${b}+${r}`;
  */
 const DISPOSITIONS: Record<string, Disposition> = {
     "turbopack+node": {
-        state: "not-buildable",
-        why:
-            "retired by ADR-0048. `kn-next build` no longer targets turbopack and the scaffolded image " +
-            "ships a compiled binary, so this combination is not producible.",
+        state: "covered",
+        evidence:
+            "SELECTABLE again (#1167, ADR-0054). build-target-selectable.test.ts drives the config " +
+            "end-to-end (loadConfig -> validateConfig -> selectRuntimeImage) and asserts the standalone-node " +
+            "stage; runtime-image-selection.test.ts pins `turbopack`+`node` -> `--target standalone-node`",
     },
     "turbopack+bun": {
-        state: "not-buildable",
-        why:
-            "retired by ADR-0048 along with turbopack itself. Bun 1.3.5 could not serve this tree at all " +
-            "(HTTP 500), and 1.4 serving it is moot now the target is retired.",
+        state: "covered",
+        evidence:
+            "SELECTABLE again (#1167, ADR-0054). build-target-selectable.test.ts drives the config " +
+            "end-to-end and asserts the standalone-bun stage; runtime-image-selection.test.ts pins " +
+            "`turbopack`+`bun` -> `--target standalone-bun`",
     },
     "vinext+bun": {
         state: "covered",
         evidence:
-            "the ONLY supported target (ADR-0048). vinext-build.test.ts asserts the compile flags and the " +
-            "Bun 1.4.0 floor; artifact-contract-reality.test.ts binds the descriptor to the real built " +
-            "artifact in examples/bun-exec",
+            "the default target. vinext-build.test.ts asserts the compile flags and the Bun 1.4.0 floor; " +
+            "artifact-contract-reality.test.ts binds the descriptor to the real built artifact in " +
+            "examples/bun-exec",
     },
 };
 

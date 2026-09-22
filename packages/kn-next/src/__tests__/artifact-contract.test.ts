@@ -142,22 +142,23 @@ describe("isCompatible replaces the enumerated matrix", () => {
 });
 
 describe("availability is separate from being described (B3)", () => {
-    it("vinext is available; turbopack is described but RETIRED", () => {
-        // Inverted by ADR-0048. Both halves still asserted: checking only that
-        // turbopack is retired would pass on a contract where nothing is
-        // available at all, which is the state that ships a broken product.
+    it("BOTH vinext and turbopack are available (#1167, ADR-0054)", () => {
+        // ADR-0048 had inverted this (turbopack retired); ADR-0054 item 6
+        // re-opened the standalone target. Both halves asserted: checking only
+        // one would pass on a contract where the other silently regressed.
         expect(vinextBuilder.available).toBe(true);
-        expect(turbopackBuilder.available).toBe(false);
+        expect(turbopackBuilder.available).toBe(true);
     });
 
     it("AVAILABLE_BUILDERS is derived, not restated", () => {
         expect(AVAILABLE_BUILDERS.map((b) => b.id)).toEqual(
             BUILDERS.filter((b) => b.available).map((b) => b.id),
         );
-        // And it is a strict subset today — if this ever equals BUILDERS, the
-        // "known but unavailable" branch in the validator has become dead code
-        // and its message can no longer be reached.
-        expect(AVAILABLE_BUILDERS.length).toBeLessThan(BUILDERS.length);
+        // Since #1167 every KNOWN builder is also AVAILABLE, so the validator's
+        // "known but unavailable" branch guards a FUTURE builder rather than a
+        // current one. The derivation invariant is what matters here — that the
+        // available set is computed from `.available`, never hand-listed.
+        expect(AVAILABLE_BUILDERS.length).toBe(BUILDERS.length);
     });
 
     it("an unavailable builder still describes a runnable-shaped artifact", () => {

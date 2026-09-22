@@ -2,9 +2,11 @@
  * The vinext → single-executable build path (ADR-0048).
  *
  * `kn-next build` previously ran only the app's `npm run build` and looked for
- * `.next/standalone`. ADR-0048 makes `build: vinext` + `runtime: bun` the only
- * supported target, so the CLI has to be able to PRODUCE that artifact rather
- * than merely describe where it lands.
+ * `.next/standalone`. ADR-0048 made `build: vinext` + `runtime: bun` the default
+ * target, so the CLI has to be able to PRODUCE that artifact rather than merely
+ * describe where it lands. (ADR-0054 item 6 re-opened the `next build` ->
+ * `.next/standalone` target alongside it — two targets are selectable, and
+ * `vinext` remains the default. This file owns the vinext one.)
  *
  * Two steps, mirroring `examples/bun-exec/build.sh`, which is the recipe this
  * was measured against:

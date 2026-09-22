@@ -23,10 +23,11 @@ const cfg = (over: Partial<KnativeNextConfig> = {}): KnativeNextConfig =>
     ({ name: "app", registry: "r", ...over }) as KnativeNextConfig;
 
 describe("#B3 resolveBuildArtifact", () => {
-    it("defaults to VINEXT — ADR-0048 made it the only supported target", () => {
-        // Absence used to mean turbopack. ADR-0048 retired that target, so the
-        // default moved with it: an app that sets nothing gets the single
-        // executable, which is the only artifact knext can now build and ship.
+    it("defaults to VINEXT — still the default builder (#1167 keeps the flip gated)", () => {
+        // Absence used to mean turbopack; ADR-0048 moved the default to vinext.
+        // #1167 (ADR-0054) makes turbopack SELECTABLE again but leaves vinext
+        // the default until the bun-standalone axis is credentialed — so an app
+        // that sets nothing still gets the single executable.
         const r = resolveBuildArtifact(cfg(), "/app");
 
         expect(r.builder.id).toBe("vinext");
@@ -40,15 +41,13 @@ describe("#B3 resolveBuildArtifact", () => {
         );
     });
 
-    it("still RESOLVES retired turbopack — describing is not offering", () => {
-        // The descriptor has to survive its own retirement. Existing configs
-        // and stored CRs carry the retired value, and the validator needs to
-        // recognise it to emit a MIGRATION message rather than reporting an
-        // unknown builder, which would read as a typo.
+    it("RESOLVES turbopack to the standalone shape — selectable again (#1167)", () => {
+        // ADR-0054 item 6 re-opened turbopack. It resolves to the
+        // `next-standalone` shape and is now an AVAILABLE builder.
         const r = resolveBuildArtifact(cfg({ build: "turbopack" }), "/app");
 
         expect(r.builder.id).toBe("turbopack");
-        expect(r.builder.available).toBe(false);
+        expect(r.builder.available).toBe(true);
         expect(r.artifact.shape).toBe("next-standalone");
     });
 
