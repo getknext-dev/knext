@@ -941,7 +941,13 @@ describe('findFileCredentialLeaks — the on-disk auth stores', () => {
     ['{"credsStore":"desktop"}', 'credsStore'],
     ['{"credHelpers":{"ghcr.io":"gh"}}', 'credHelpers'],
     ['not json at all', 'unparseable'],
-  ])('classifies the auth-store-present finding detail for %s as %s', (text, detailClass) => {
+    // `as const` narrows each row to a literal tuple, so `detailClass` types
+    // as the SAME `'auths' | 'credsStore' | 'credHelpers' | 'unparseable'`
+    // union `CredentialFinding['detail']` carries — not a cast that widens or
+    // bypasses the assertion below, just typing the fixture correctly so
+    // `expect(leaks[0].detail).toBe(detailClass)` stays a real comparison
+    // between two values of the finding's actual detail type.
+  ] as const)('classifies the auth-store-present finding detail for %s as %s', (text, detailClass) => {
     const leaks = findFileCredentialLeaks({
       env: {},
       home: '/home/runner',

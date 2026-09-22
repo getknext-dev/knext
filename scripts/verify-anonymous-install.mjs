@@ -846,6 +846,21 @@ export function dockerAuthStoreHasCredential(text) {
 }
 
 /**
+ * A `findFileCredentialLeaks` finding.
+ *
+ * `detail` is OPTIONAL, not just absent-in-practice on some branches: the
+ * `.netrc`/`gh/hosts.yml` existence-only findings never carry one (existence
+ * IS the finding, there is no key class to name), while the JSON-store
+ * findings always do. Stated explicitly here — rather than left to structural
+ * inference over the two `findings.push({...})` call sites below — because
+ * `checkJs: false` (see `tsconfig.typecheck.json`) means a consumer's `tsc`
+ * cannot be relied on to infer the same union from this file's body that a
+ * reader would; `#707` shipped a test asserting `leaks[0].detail` against an
+ * un-annotated return type for exactly this reason.
+ * @typedef {{ reason: 'auth-store-present', path: string, detail?: 'auths'|'credsStore'|'credHelpers'|'unparseable' }} CredentialFinding
+ */
+
+/**
  * On-disk auth stores that exist.
  *
  * Scope is registry and GitHub-API credentials — the two this check could
@@ -863,6 +878,7 @@ export function dockerAuthStoreHasCredential(text) {
  *    weakening of the gate: an empty store carries no credential, so a pull made
  *    with it on disk is genuinely anonymous — which is the exact thing this check
  *    is asserting.
+ * @returns {CredentialFinding[]}
  */
 export function findFileCredentialLeaks({
   env = {},
