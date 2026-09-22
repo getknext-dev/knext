@@ -1,0 +1,37 @@
+# Guard for the #985 class: the scaffolded app must `npm install` on npm 10.x — the version a
+# stranger runs (ubuntu-24.04 runners ship it; LTS-adjacent elsewhere). npm 10's arborist
+# ABORTS on an unsatisfiable peer with an internal `edgesOut` crash instead of a clean error,
+# so a peer misalignment in the template (e.g. vitest peering below the pinned vite) is
+# invisible on a dev's npm 11 and only bites the stranger. This runs on the REPO template at
+# PR time — so a bad bump reds BEFORE merge, not only in the nightly against the published
+# artifact (which is how #985 shipped: the fix was committed but unreleased, so the nightly
+# stayed red on the old published template while the repo was already fixed).
+#
+# Path-filtered to the scaffold's dependency sources: a change elsewhere cannot alter the
+# resolved tree, so running it only when those files move keeps it cheap without a gameable
+# gap.
+name: Scaffold resolves on npm 10
+
+on:
+  pull_request:
+    paths:
+      - 'packages/kn-next/templates/app/package.json.hbs'
+      - 'packages/kn-next/package.json'
+      - 'scripts/verify-scaffold-resolves-npm10.mjs'
+      - '.github/workflows/scaffold-resolve-check.yml'
+  push:
+    branches: [main]
+
+jobs:
+  resolve:
+    name: repo scaffold template resolves on npm 10
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Uses the runner's built-in Node + `npx npm@10` (network required for registry
+      # metadata). Resolve-only — no tarball downloads.
+      - name: Resolve the scaffold template on npm 10
+        run: node scripts/verify-scaffold-resolves-npm10.mjs
