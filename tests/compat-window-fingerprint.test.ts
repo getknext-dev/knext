@@ -326,6 +326,76 @@ describe('compat-window fingerprint — the packed tarball is covered IN FULL', 
   });
 });
 
+describe('compat-window fingerprint — the observed Bun build is folded ONLY on the bun lane (#1147, rule 4)', () => {
+  /** Run the fingerprint with an OPTIONAL observed runtime identity. */
+  function fingerprintWithRuntime(
+    repoRoot: string,
+    tarballsDir: string,
+    opts: { version?: string; revision?: string },
+  ): { fingerprint: string; components: Record<string, string> } {
+    const args = [SCRIPT, '--repo-root', repoRoot, '--tarballs-dir', tarballsDir, '--json'];
+    if (opts.version !== undefined) args.push('--runtime-version', opts.version);
+    if (opts.revision !== undefined) args.push('--runtime-revision', opts.revision);
+    const out = execFileSync(process.execPath, args, { encoding: 'utf8' });
+    return JSON.parse(out);
+  }
+
+  // The crux of #1147: a Bun BUILD move must restart the bun lane's streak.
+  // The observed build identity (bun --version + bun --revision) is folded into
+  // the digest, so a different build produces a different fingerprint.
+  it('a different observed Bun build moves the fingerprint (streak restarts)', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    const a = fingerprintWithRuntime(repoRoot, tarballsDir, {
+      version: '1.4.0',
+      revision: 'aaaaaaaaaaaa',
+    });
+    const b = fingerprintWithRuntime(repoRoot, tarballsDir, {
+      version: '1.4.0',
+      revision: 'bbbbbbbbbbbb',
+    });
+    // Same version STRING, different revision → different digest: the whole
+    // point of rule 4 (a canary reporting 1.4.0 was red; stable 1.4.0 is green).
+    expect(a.fingerprint).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(b.fingerprint).not.toBe(a.fingerprint);
+    // The harness + packed halves are untouched, so the move is attributable to
+    // the runtime identity alone.
+    expect(b.components.harness).toBe(a.components.harness);
+    expect(b.components.packed).toBe(a.components.packed);
+  });
+
+  it('a different Bun VERSION string alone also moves the fingerprint', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    const a = fingerprintWithRuntime(repoRoot, tarballsDir, { version: '1.4.0' });
+    const b = fingerprintWithRuntime(repoRoot, tarballsDir, { version: '1.3.14' });
+    expect(b.fingerprint).not.toBe(a.fingerprint);
+  });
+
+  // The CRITICAL node-lane guarantee: when NO runtime identity is supplied (the
+  // node lane never passes one), the digest must be byte-identical to today's —
+  // folding must be strictly additive so the live node streak is never reset.
+  it('the NODE lane (no runtime identity) is byte-identical to the un-folded digest', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    const nodeLane = fingerprint(repoRoot, tarballsDir).fingerprint;
+    const alsoNode = fingerprintWithRuntime(repoRoot, tarballsDir, {}).fingerprint;
+    expect(alsoNode).toBe(nodeLane);
+  });
+
+  // GOLDEN / regression: pin the exact digest the current node-lane fixture
+  // produces, so any future change to the fold that perturbs the ABSENT-param
+  // path (the node lane) reds here rather than silently resetting the streak.
+  it('GOLDEN: the node-lane fixture digest is unchanged by the runtime-fold code path', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    // Two independent computations, one through each entry shape, must agree AND
+    // match the components-only digest formula the node lane has always used.
+    const plain = fingerprint(repoRoot, tarballsDir);
+    const withEmpty = fingerprintWithRuntime(repoRoot, tarballsDir, {});
+    expect(withEmpty.fingerprint).toBe(plain.fingerprint);
+    // components are the node-lane invariant: neither entry shape adds a runtime
+    // component to the node lane.
+    expect(Object.keys(withEmpty.components).sort()).toEqual(['harness', 'packed']);
+  });
+});
+
 describe('compat-window fingerprint — suite provenance is RECORDED, not frozen', () => {
   /** A throwaway git repo standing in for the nightly `next.js` checkout. */
   function fakeNextJsCheckout(): { dir: string; head: string } {

@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   auditWindow,
+  DEFAULT_FETCH_LIMIT,
   fetchLedgers,
   formatReport,
   gradeNight,
@@ -428,6 +429,78 @@ describe('compat-window-audit — the v1.0 node-lane window, computed not recall
       ]);
     });
 
+    /**
+     * cr-1179 #3. The rule above is fail-closed and correct when the lane is
+     * genuinely unknowable — but #1147 activated a SECOND scheduled lane, so
+     * "unknowable" now has a price it did not have when there was only one:
+     * a bun night that loses its ledger (runner loss — the class that produced
+     * node run 30790778590) would disqualify a night in the NODE window and
+     * restart the v1.0 credential streak for a failure on the other lane.
+     *
+     * The fix is not to soften fail-closed; it is to make the lane knowable
+     * WITHOUT the ledger, via a lane-marker artifact whose NAME carries the
+     * lane. When that marker is readable the night is attributed to exactly one
+     * lane; when it is not, the old fail-closed rule stands unchanged (the test
+     * above still passes, and must).
+     */
+    it('an unresolved night whose lane IS known does not reset the other lane', () => {
+      const ledgers = [
+        night({ runId: '40000000000' }),
+        unresolvedNight('40000000001', 'no-ledger', 'bun'),
+        night({ runId: '40000000002' }),
+      ];
+      // The node window never sees the bun casualty...
+      expect(selectLaneNights(ledgers, 'node').map((l: { runId: string }) => l.runId)).toEqual([
+        '40000000000',
+        '40000000002',
+      ]);
+      // ...and the bun window still carries it, disqualified.
+      expect(selectLaneNights(ledgers, 'bun').map((l: { runId: string }) => l.runId)).toEqual([
+        '40000000001',
+      ]);
+    });
+
+    it('a lost BUN night does not break a 14-night NODE streak', () => {
+      // The end-to-end consequence, stated as the gate reads it.
+      const nights = [
+        ...streakOf(7, 'sha256:aaaa', 40000000000),
+        unresolvedNight('40006500000', 'artifact-download-failed', 'bun'),
+        ...streakOf(7, 'sha256:aaaa', 40007000000),
+      ];
+      const a = auditWindow(nights, { lane: 'node' });
+      expect(a.longest.nights).toBe(WINDOW_REQUIRED_NIGHTS);
+      expect(a.met).toBe(true);
+      expect(a.unresolvedNights).toEqual([]);
+      // ...while the bun lane owns the casualty.
+      expect(auditWindow(nights, { lane: 'bun' }).unresolvedNights).toEqual([
+        { runId: '40006500000', reason: 'artifact-download-failed' },
+      ]);
+    });
+
+    it('an unresolved night attributed to THIS lane still breaks THIS lane`s streak', () => {
+      // The fix must not become a way to launder a lane`s own lost nights.
+      const nights = [
+        ...streakOf(7, 'sha256:aaaa', 40000000000),
+        unresolvedNight('40006500000', 'artifact-download-failed', 'node'),
+        ...streakOf(7, 'sha256:aaaa', 40007000000),
+      ];
+      const a = auditWindow(nights, { lane: 'node' });
+      expect(a.longest.nights).toBe(7);
+      expect(a.met).toBe(false);
+      expect(a.unresolvedNights).toEqual([
+        { runId: '40006500000', reason: 'artifact-download-failed' },
+      ]);
+    });
+
+    it('an unknown lane is still admitted to a lane it is not named for — fail closed', () => {
+      // Restated as a property so the fix above cannot quietly become
+      // "attribute unresolved nights to the bun lane by default".
+      expect(unresolvedNight('1', 'no-ledger').lane).toBeNull();
+      expect(unresolvedNight('1', 'no-ledger', null).lane).toBeNull();
+      expect(selectLaneNights([unresolvedNight('1', 'no-ledger')], 'node')).toHaveLength(1);
+      expect(selectLaneNights([unresolvedNight('1', 'no-ledger')], 'bun')).toHaveLength(1);
+    });
+
     it('the audit surfaces every unresolved night by run id and reason, and prints them', () => {
       const a = auditWindow([
         ...streakOf(2, 'sha256:aaaa', 40000000000),
@@ -486,6 +559,8 @@ describe('compat-window-audit — the v1.0 node-lane window, computed not recall
       artifactsThrow?: boolean;
       downloadThrow?: boolean;
       ledgers?: unknown[];
+      /** Override `total_count`; defaults to the listing's own length. */
+      totalCount?: number;
     };
 
     function fakeGh(runs: Array<Record<string, unknown>>, cases: Record<string, GhCase>) {
@@ -498,7 +573,9 @@ describe('compat-window-audit — the v1.0 node-lane window, computed not recall
         if (args[0] === 'api') {
           const id = /runs\/(\d+)\/artifacts/.exec(args[1])?.[1] ?? '';
           if (cases[id]?.artifactsThrow) throw new Error('gh api failed');
-          return JSON.stringify({ artifacts: cases[id]?.artifacts ?? [] });
+          const artifacts = cases[id]?.artifacts ?? [];
+          const total_count = cases[id]?.totalCount ?? artifacts.length;
+          return JSON.stringify({ artifacts, total_count });
         }
         if (args[0] === 'run' && args[1] === 'download') {
           if (cases[args[2]]?.downloadThrow) throw new Error('gh run download failed');
@@ -635,6 +712,186 @@ describe('compat-window-audit — the v1.0 node-lane window, computed not recall
         ),
       );
       expect(out).toEqual([]);
+    });
+
+    /**
+     * cr-1179 #3 — the lane must be knowable WITHOUT the ledger, or a lost bun
+     * night resets the node credential streak. The marker is read from the
+     * artifacts LISTING, never downloaded: an expired artifact is still NAMED
+     * in that listing (which is exactly how `artifact-expired` is already
+     * distinguished from `no-ledger`), so attribution survives expiry.
+     */
+    describe('lane attribution from the marker artifact (cr-1179 #3)', () => {
+      const marker = (lane: string) => ({ name: `compat-lane-${lane}`, expired: false });
+
+      it('a night with NO ledger is still attributed to its lane by the marker', () => {
+        const out = fetchLedgers(
+          10,
+          fakeGh([{ databaseId: 1, status: 'completed', event: 'schedule' }], {
+            '1': { artifacts: [marker('bun')] },
+          }),
+        );
+        expect(out[0]).toMatchObject({ unresolved: 'no-ledger', lane: 'bun' });
+      });
+
+      it('an EXPIRED ledger keeps its lane — the marker name survives in the listing', () => {
+        const out = fetchLedgers(
+          10,
+          fakeGh([{ databaseId: 1, status: 'completed', event: 'schedule' }], {
+            '1': {
+              artifacts: [
+                { name: 'compat-run-ledger', expired: true },
+                { name: 'compat-lane-bun', expired: true },
+              ],
+            },
+          }),
+        );
+        expect(out[0]).toMatchObject({ unresolved: 'artifact-expired', lane: 'bun' });
+      });
+
+      it('a FAILED download keeps its lane', () => {
+        const out = fetchLedgers(
+          10,
+          fakeGh([{ databaseId: 1, status: 'completed', event: 'schedule' }], {
+            '1': {
+              artifacts: [{ name: 'compat-run-ledger', expired: false }, marker('bun')],
+              downloadThrow: true,
+            },
+          }),
+        );
+        expect(out[0]).toMatchObject({ unresolved: 'artifact-download-failed', lane: 'bun' });
+      });
+
+      it('an UNREADABLE ledger keeps its lane', () => {
+        const out = fetchLedgers(
+          10,
+          fakeGh([{ databaseId: 1, status: 'completed', event: 'schedule' }], {
+            '1': {
+              artifacts: [{ name: 'compat-run-ledger', expired: false }, marker('bun')],
+              ledgers: [],
+            },
+          }),
+        );
+        expect(out[0]).toMatchObject({ unresolved: 'ledger-unreadable', lane: 'bun' });
+      });
+
+      it('an UNREACHABLE artifacts API leaves the lane unknown — the marker is unreadable too', () => {
+        // Fail closed where we genuinely cannot know: this night still enters
+        // every lane's window.
+        const out = fetchLedgers(
+          10,
+          fakeGh([{ databaseId: 1, status: 'completed', event: 'schedule' }], {
+            '1': { artifactsThrow: true },
+          }),
+        );
+        expect(out[0]).toMatchObject({ unresolved: 'artifact-api-unreachable', lane: null });
+      });
+
+      it('AMBIGUOUS markers fail closed to an unknown lane rather than picking one', () => {
+        const out = fetchLedgers(
+          10,
+          fakeGh([{ databaseId: 1, status: 'completed', event: 'schedule' }], {
+            '1': { artifacts: [marker('bun'), marker('node')] },
+          }),
+        );
+        expect(out[0]).toMatchObject({ unresolved: 'no-ledger', lane: null });
+      });
+
+      it('a marker never overrides a ledger that DID resolve', () => {
+        // The ledger stays the source of truth when it is readable; the marker
+        // is a fallback, not a second opinion.
+        const out = fetchLedgers(
+          10,
+          fakeGh([{ databaseId: 1, status: 'completed', event: 'schedule' }], {
+            '1': {
+              artifacts: [{ name: 'compat-run-ledger', expired: false }, marker('bun')],
+              ledgers: [night({ runId: '1', lane: 'node' })],
+            },
+          }),
+        );
+        expect(out[0]).toMatchObject({ runId: '1', lane: 'node' });
+        expect(out[0]).not.toHaveProperty('unresolved');
+      });
+    });
+
+    /**
+     * cr-1179b #1 — the artifacts LISTING itself must not silently truncate.
+     * `gh api …/artifacts` carries no pagination by default, so the REST
+     * `per_page=30` default applies. Measured on the latest scheduled run:
+     * total_count 19, +1 for the lane marker = 20 — the shard matrix already
+     * went 4→16 once, so crossing 30 is not hypothetical. A truncated page
+     * would make `laneFromArtifacts` return `null` and silently fall an
+     * unresolved night back into BOTH lanes' windows — reverting cr-1179 #3.
+     */
+    describe('the artifacts listing must not silently truncate (cr-1179b #1)', () => {
+      it('requests the artifacts listing with per_page=100, not the truncating REST default', () => {
+        const seenApiArgs: string[][] = [];
+        const gh = (args: string[]) => {
+          if (args[0] === 'run' && args[1] === 'list') {
+            return JSON.stringify([{ databaseId: 1, status: 'completed', event: 'schedule' }]);
+          }
+          if (args[0] === 'api') {
+            seenApiArgs.push(args);
+            return JSON.stringify({ artifacts: live, total_count: live.length });
+          }
+          if (args[0] === 'run' && args[1] === 'download') return '';
+          throw new Error(`unexpected gh ${args.join(' ')}`);
+        };
+        fetchLedgers(10, { gh, readDir: () => [night({ runId: '1' })] });
+        expect(seenApiArgs).toHaveLength(1);
+        // Anchor-assert: the URL must literally carry per_page=100. A mutation
+        // that drops the query param (reverting to the REST default of 30)
+        // fails this exact assertion.
+        expect(seenApiArgs[0][1]).toMatch(/\/artifacts\?per_page=100$/);
+      });
+
+      it('a total_count that disagrees with the listing length is an incomplete listing, never a complete one', () => {
+        // GitHub's own count of the FULL set disagrees with what this page
+        // returned (29 more exist than the 1 that came back) — exactly the
+        // shape a per_page truncation produces. This must NOT be treated as a
+        // complete listing (which would resolve the lane / find the ledger
+        // from a partial page); it must be treated the same as an unreachable
+        // API — an unresolved night, fail-closed lane.
+        const out = fetchLedgers(
+          10,
+          fakeGh([{ databaseId: 1, status: 'completed', event: 'schedule' }], {
+            '1': { artifacts: live, totalCount: live.length + 29 },
+          }),
+        );
+        expect(out[0]).toMatchObject({ unresolved: 'artifact-api-unreachable', lane: null });
+      });
+
+      it('a total_count that AGREES with the listing length still resolves normally', () => {
+        // Guards against the fix overshooting into "always unresolved".
+        const out = fetchLedgers(
+          10,
+          fakeGh([{ databaseId: 1, status: 'completed', event: 'schedule' }], {
+            '1': { artifacts: live, totalCount: live.length, ledgers: [night({ runId: '1' })] },
+          }),
+        );
+        expect(out[0]).toMatchObject({ runId: '1', lane: 'node' });
+        expect(out[0]).not.toHaveProperty('unresolved');
+      });
+    });
+  });
+
+  describe('the fetch horizon must hold a full window of EVERY lane (cr-1179 #3)', () => {
+    it('the default --limit accommodates two scheduled lanes plus non-schedule events', () => {
+      // #1147 activated a second nightly cron, so a `--limit` sized for one
+      // lane silently halves the observable node horizon: the 14-night window
+      // would fall off the end of the list and read as shorter than it is.
+      // `gh run list` spans ALL events (push/PR/dispatch included), so the
+      // denominator is not 2×14 either.
+      expect(DEFAULT_FETCH_LIMIT).toBeGreaterThanOrEqual(2 * WINDOW_REQUIRED_NIGHTS * 2);
+    });
+
+    it('the CLI default and the documented default are the same number', () => {
+      const src = readFileSync(
+        join(import.meta.dir, '..', 'scripts', 'compat-window-audit.mjs'),
+        'utf8',
+      );
+      expect(src).toContain(`--limit ${DEFAULT_FETCH_LIMIT}`);
+      expect(src).toMatch(/arg\('--limit',\s*String\(DEFAULT_FETCH_LIMIT\)\)/);
     });
   });
 });

@@ -194,23 +194,33 @@ describe('the official compat lane exists (the positive half)', () => {
     expect(text()).toMatch(/^name:\s*Compat suite \(official Next\.js deploy harness\)\s*$/m);
   });
 
-  it('runs ONLY the node nightly — the bun weekly is retired, not replaced by a second nightly', () => {
+  it('runs the node nightly PLUS the bun credentialing nightly — never the retired bun weekly (#1147)', () => {
     // Named, not counted. The weekly bun cron ('17 5 * * 0') retired with the
-    // standalone-under-bun artifact (ADR-0048/#710); its recurring compute
-    // moved to compat-vinext.yml, which has its own cron guard
-    // (tests/compat-vinext-lane.test.ts). BOTH halves asserted: the nightly
-    // survives, and the retired cron must not quietly return — a resurrected
-    // schedule would burn weekly compute exercising an artifact users cannot
-    // build, while reading as coverage.
+    // standalone-under-bun ARTIFACT (ADR-0048/#710); its recurring compute moved
+    // to compat-vinext.yml, which has its own cron guard
+    // (tests/compat-vinext-lane.test.ts). #1147 stands up a fresh bun
+    // CREDENTIALING nightly ('47 4 * * *') — a different lane against the bar,
+    // NOT the retired weekly artifact lane. All three halves asserted: the node
+    // nightly survives, the bun credentialing nightly exists, and the retired
+    // weekly cron must not quietly return.
     expect(text(), 'the node nightly cron is gone').toMatch(/^\s*-\s*cron:\s*'17 3 \* \* \*'/m);
+    expect(text(), 'the bun credentialing nightly cron is missing').toMatch(
+      /^\s*-\s*cron:\s*'47 4 \* \* \*'/m,
+    );
     expect(text(), 'the retired bun weekly cron came back').not.toMatch(/17 5 \* \* 0/);
   });
 
-  it('the lane selection no longer consults a schedule — dispatch input or node', () => {
-    // With one cron left, a schedule comparison is dead code that reads as a
-    // second lane. The expression must be input-or-node, nothing else.
-    expect(text()).toMatch(/KNEXT_RUNTIME:.*github\.event\.inputs\.runtime \|\| 'node'/);
-    expect(text()).not.toMatch(/github\.event\.schedule ==/);
+  it('the lane selection maps the bun credentialing cron to bun, node otherwise (#1147)', () => {
+    // The bun credentialing nightly ('47 4 * * *') is SELECTED via a
+    // github.event.schedule comparison; the dispatch input still wins, and
+    // everything else (including the node cron) falls back to node.
+    expect(text()).toMatch(/KNEXT_RUNTIME:.*github\.event\.inputs\.runtime/);
+    expect(text()).toMatch(/github\.event\.schedule == '47 4 \* \* \*' && 'bun'/);
+    expect(text()).toMatch(/\|\| 'node'/);
+    // The node credential cron must NEVER appear in the runtime mapping.
+    expect(text(), 'the node cron must not select a lane').not.toMatch(
+      /schedule == '17 3 \* \* \*'/,
+    );
   });
 });
 

@@ -2,7 +2,8 @@
 
 The credentialing bar for the **Bun runtime axis** (`KNEXT_RUNTIME=bun`, `next build`
 standalone booted on Bun). Sibling of [`window-node-lane.md`](window-node-lane.md); this file
-defines what "credentialed" means for the bun lane and (once the scheduled lane exists) records it.
+defines what "credentialed" means for the bun lane and records the scheduled lane's progress
+against it.
 
 **The bar: 14 consecutive scheduled bun-lane runs, every shard `failed:0`/`notRun:0`, zero
 net new quarantine entries, the harness fingerprint unchanged across all of them, and the
@@ -16,20 +17,20 @@ not a discounted version of it.
 
 ## Status
 
-**NOT OPEN.** The bar cannot start until a **scheduled** bun-1.4.0 lane exists to produce nights;
-today the bun lane is `workflow_dispatch`-only, so its 778/0 is **verified-once** (two dispatch
-runs, 2026-09-22), not **credentialed**. Standing up that scheduled lane is issue #1147; this
-file is its acceptance target. Until #1147 lands there is no window to grade and no streak to
-count — the compat-matrix Bun row stays ✅-verified-once, never credentialed, and this file's
-record table below is empty by construction.
+**SCHEDULED — window not yet banked.** The scheduled bun-1.4.0 lane now exists (#1147: cron
+`47 4 * * *` in `test-e2e-deploy.yml`), so the bar can start counting on its first qualifying
+night. Until **14** consecutive scheduled bun nights bank on one unchanged harness **and one
+unchanged Bun build**, its 778/0 stays **verified-once** (two dispatch runs, 2026-09-22), not
+**credentialed** — the compat-matrix Bun row stays ✅-verified-once, and this file's record table
+below fills as scheduled nights land.
 
 | | |
 |---|---|
 | lane | bun (`KNEXT_RUNTIME=bun`, standalone `server.js` on Bun) |
 | required nights | **14** consecutive qualifying (`WINDOW_REQUIRED_NIGHTS`, `scripts/compat-window-audit.mjs`) |
-| grader | `node scripts/compat-window-audit.mjs --fetch --lane bun` — the lane is read from each run's `compat-run-ledger`, already lane-attributed. Grades rules 1–3 (and the three stricter audit rules) **today**; **rule 4 (Bun-build freeze) lands with #1147**, which must fold `bun --revision` into the fingerprint. |
-| window opened | — (blocked on #1147; not yet scheduled) |
-| current streak | 0 / 14 — no scheduled nights exist |
+| grader | `node scripts/compat-window-audit.mjs --fetch --lane bun` — the lane is read from each run's `compat-run-ledger`, already lane-attributed, and from a `compat-lane-<lane>` marker artifact when the ledger cannot be read, so a night lost on one lane does not restart the other. Grades rules 1–3 (and the three stricter audit rules); **rule 4 (Bun-build freeze) landed with #1147** — the fingerprint folds the observed `bun --version` + `bun --revision` on the bun lane. |
+| window opened | on the first scheduled bun night (lane landed #1147, cron `47 4 * * *`); none banked yet |
+| current streak | 0 / 14 — lane scheduled, awaiting first qualifying night |
 
 ## The rules a night must satisfy to qualify
 
@@ -56,11 +57,18 @@ semantics as the node lane.
    freezing only the version string would still credential a moving target. So the frozen key is the
    **`bun-version` workflow input together with `bun --revision`** (the build hash), not just
    `bun --version`, and any change in it **resets** the streak the same way a harness move does. The
-   lane already records the observed `bun --version` as `runtimeVersion` on every
-   `compat-suite-summary-*.json` artifact (absent on the node lane); #1147 must additionally record
-   `bun --revision` and fold both into the bun lane's frozen fingerprint (or treat any change as a
-   rule-1 restart), so the audit script enforces this rather than a human eyeballing it. A Bun build
+   lane records the observed `bun --version` as `runtimeVersion` on every
+   `compat-suite-summary-*.json` artifact (absent on the node lane), and **also records
+   `bun --revision` and folds both into the bun lane's frozen fingerprint** — so a Bun build move
+   is a rule-1 restart the audit script enforces, not something a human eyeballs. A Bun build
    move **resets** the streak; it never merely pauses it, and a maintainer may **not** waive it.
+
+   The Bun that is frozen is the Bun the lane **served on**, not whichever Bun happened to be on
+   PATH where the fingerprint is computed. The fingerprint job installs it from the *same*
+   `bun-version` expression the suite shards install from, so bumping the lane's pin necessarily
+   moves the fingerprint and restarts the streak — which is what this rule exists to force.
+   `tests/compat-bun-lane-lockstep.test.ts` fails if those two ever diverge, and an unreadable or
+   empty `bun --version`/`bun --revision` fails the run rather than freezing a placeholder.
 
 **Plus the three stricter rules the audit script applies that this list does not restate**, exactly
 as [`window-node-lane.md`](window-node-lane.md) enumerates them under "Three rules the audit script
@@ -74,7 +82,7 @@ absent. "Same contract class as the node lane" means these too, not only rules 1
 
 - **Does:** that the bun axis holds 778/0 across the official deploy-suite corpus for 14 straight
   scheduled nights on one unchanged harness **and one unchanged Bun**, with revocation teeth (a red
-  scheduled bun run opens its own "Compat nightly RED (bun lane)" issue — never the node
+  scheduled bun run opens its own "Compat nightly RED (bun credentialing)" issue — never the node
   credential's — and flips the matrix row back).
 - **Does not:** extend to the compiled **vinext single-executable** axis (a separate row / lane,
   ADR-0048/0051), nor to any Bun build other than the one the streak was measured on. A later Bun
@@ -83,6 +91,7 @@ absent. "Same contract class as the node lane" means these too, not only rules 1
 ## What this log does not yet do
 
 Same honest limit as the node lane: this file's record table is transcribed by hand from the
-`scripts/compat-window-audit.mjs --lane bun` output; it is not auto-generated. When #1147 opens the
-window, whoever updates this file runs the audit script and copies its summary block rather than
-eyeballing a run list — the script's grading, not the prose here, is authoritative.
+`scripts/compat-window-audit.mjs --lane bun` output; it is not auto-generated. The scheduled lane
+banks nights against this bar, so whoever updates this file runs the audit script and copies its
+summary block rather than eyeballing a run list — the script's grading, not the prose here, is
+authoritative.

@@ -113,7 +113,14 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // bun-pinned workspace ("This project is configured to use bun"), which
       // would have reddened the nightly credential lane on its first
       // post-merge run. Deliberate edit per the rule above.
-      'test-e2e-deploy.yml': 2,
+      // 3, was 2: cr-1179 #1 — the compat-window fingerprint used to observe the
+      // WORKSPACE bun (a hardcoded build-tool pin) while the suite served on the
+      // bun installed in deploy-tests from the dispatchable input, so bumping
+      // the lane pin moved the Bun under test without moving the fingerprint and
+      // the bun streak never restarted. build-next now installs the LANE's bun
+      // (same expression, lane-gated) immediately before the fold. A count
+      // RISING is a decision; this one is it.
+      'test-e2e-deploy.yml': 3,
       // #608 — the vinext-axis compat lane. Its one setup-bun is UNCONDITIONAL
       // (the compiled artifact has no node arm) and carries the same
       // `inputs.bun-version || '<pin>'` fallback form, so the pin assertion
