@@ -36,7 +36,8 @@ command.**
    importing `@getknext/core/internal/node-server`, the runtime-agnostic supervisor). The operator
    leaves `Command`/`Args` **`nil`** for the standalone shape; kubelet runs the image's ENTRYPOINT.
 2. **The running shape stays fully CR-determined** — because the CR names the image **by digest**
-   (`:latest` rejected, `nextapp_controller.go:66`) and a digest is immutable. Determination moves
+   (`:latest` rejected in `validate_image.go:29` `validateImageRef`, surfaced as
+   `ReasonInvalidImage`) and a digest is immutable. Determination moves
    from a command string the operator *invents* to an artifact the CR *pins*. The operator's
    cluster-write surface **shrinks by one field**.
 3. **Legacy command retirement is behind a strictly-parsed escape hatch.** The forced command
@@ -51,6 +52,19 @@ command.**
    directions behave: old-operator × new-image (`bun run server.js` hits the shim → supervisor),
    new-operator × new-image (ENTRYPOINT → supervisor), new-operator × old-image (image's own CMD,
    unchanged), old × old (today).
+
+   **Caveat on the `new-operator × old-image` direction — the one that is asserted, not argued.**
+   "Image's own CMD, unchanged" is safe only when that CMD is correct for the workload, which holds
+   for a knext-built **vinext** image (the operator already leaves `Command` nil there). It does
+   **not** hold for a **user-built bun-standalone** image from *before* this ADR ships a template:
+   no bun-standalone image template exists today, so those images were built by hand and relied on
+   the operator to force `bun run server.js`. A conventional `next build` standalone image carries
+   `CMD ["node","server.js"]` (or none), so retiring the forced command silently flips that
+   workload from **Bun to Node** (or leaves it with no command) — a behaviour change with no crash
+   to announce it. The `legacy-bun-command` annotation covers it, but it is opt-in per-CR: such an
+   operator **must set the annotation before upgrading the operator**, and keep it until they
+   rebuild on the shipped template. This is the operator-first ordering story (#548), and the
+   #1155 implementation ships the upgrade note to `docs/RELEASING.md` (action item 6).
 
 **This ADR records the invariant, not the entry-file shape (C6).** If the `--compile --bytecode`
 path (ADR-0054 action item 1) lands, *which process is PID 1* changes and the supervisor must be
@@ -102,3 +116,9 @@ compiled in or wrap the binary — the entry **file** changes, the **invariant h
    *(#1172)*
 5. ADR-0054 Amendment 6 records the axis-local consequences (the standalone image exists; the
    supervisor is the standalone `RuntimeContract` implementation, #1152).
+6. The #1155 implementation PR ships the **operator-first upgrade note** to `docs/RELEASING.md`
+   (which already owns the operator-first ordering story): an operator running `runtime: bun` on a
+   **user-built** image from before the shipped template must set
+   `apps.kn-next.dev/legacy-bun-command: "true"` before upgrading the operator, until they rebuild
+   on `Dockerfile.standalone.hbs`. Without it, the `new-operator × old-image` direction silently
+   flips such a workload Bun→Node. *(#1155)*
