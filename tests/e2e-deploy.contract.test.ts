@@ -340,7 +340,7 @@ describe('scripts/e2e-deploy.sh — official deploy-script contract (#89)', () =
     expect(log).toMatch(/PID=\d+/);
   });
 
-  it("e2e-logs.sh output parses with the harness's REAL id regexes (next-deploy.ts@v16.2.0)", () => {
+  it("e2e-logs.sh output parses with the harness's REAL id regexes (next-deploy.ts v16.2.x + v16.3.x)", () => {
     // GROUND TRUTH (vercel/next.js@v16.2.0, test/lib/next-modes/next-deploy.ts,
     // parseIdsFromCliOuput(), lines 159-182): after fetching logs the harness
     // combines stdout+stderr (line 123) and REQUIRES all three of
@@ -377,6 +377,19 @@ describe('scripts/e2e-deploy.sh — official deploy-script contract (#89)', () =
     // knext has no immutable-asset token — the harness's documented escape is
     // the literal string "undefined".
     expect(immutableAssetToken).toBe('undefined');
+    // v16.3.x renamed the third marker: parseIdsFromCliOutput now matches
+    // /NEXT_SUPPORTS_IMMUTABLE_ASSETS: (.+)/ and THROWS "Failed to get
+    // supportsImmutableAssets from logs" if absent (this is what reddened EVERY
+    // fixture on the vinext lane against Next v16.3.5). Emit it alongside the
+    // v16.2.x IMMUTABLE_ASSET_TOKEN so one hook serves both Next versions.
+    const supportsImmutable = cliOutput.match(/NEXT_SUPPORTS_IMMUTABLE_ASSETS: (.+)/)?.[1]?.trim();
+    expect(
+      supportsImmutable,
+      'harness (v16.3.x) would throw: Failed to get supportsImmutableAssets from logs',
+    ).toBeTruthy();
+    // knext's targets don't implement Next's immutable content-addressed assets
+    // (`/_next/static/immutable/*`) → 0 (mapped to false by the harness).
+    expect(supportsImmutable).toBe('0');
     // The parsed ids must equal what the deploy persisted, not decoration.
     const meta = readFileSync(join(appDir, '.adapter-build.log'), 'utf8');
     expect(meta).toContain(`BUILD_ID=${buildId}`);
