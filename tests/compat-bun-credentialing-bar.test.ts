@@ -25,6 +25,7 @@ import { join } from 'node:path';
 const REPO_ROOT = join(import.meta.dir, '..');
 const BAR_DOC = join(REPO_ROOT, 'docs/compat/window-bun-lane.md');
 const MATRIX = join(REPO_ROOT, 'docs/compat-matrix.md');
+const AUDIT = join(REPO_ROOT, 'scripts/compat-window-audit.mjs');
 const BAR_DOC_REL = 'compat/window-bun-lane.md';
 
 function read(path: string): string {
@@ -40,6 +41,31 @@ describe('bun-lane credentialed bar (issue #1158)', () => {
     const md = read(BAR_DOC).toLowerCase();
     // "14 consecutive" — the count. Same class as window-node-lane.md rule set.
     expect(md).toMatch(/14\s+consecutive/);
+  });
+
+  // De-decoration: a prose "14" is decoration if it can drift from the number
+  // the grader actually enforces. Tie the two together — the doc names the
+  // constant, and the constant IS 14 in the grader — so a change to either side
+  // reds this test instead of letting the doc lie about the enforced N.
+  it('the bar N is the SAME constant the grader enforces, not free prose', () => {
+    const audit = read(AUDIT);
+    expect(audit).toMatch(/WINDOW_REQUIRED_NIGHTS\s*=\s*14/);
+    // The doc pins its "14" to that constant by name.
+    expect(read(BAR_DOC)).toContain('WINDOW_REQUIRED_NIGHTS');
+  });
+
+  // AC2 ("#1147's scheduled lane is measured against it") made concrete: the
+  // grader must actually be able to grade the BUN lane, else "measured against
+  // it" is a hand-wave. Prove the real infra — `--lane` is a CLI arg and the
+  // night filter keys on the ledger's lane, so `--lane bun` grades bun nights.
+  it('AC2: the grader can actually grade the bun lane (measured-against-it is real infra)', () => {
+    const audit = read(AUDIT);
+    expect(audit).toContain('--lane');
+    expect(audit).toMatch(/l\?\.lane\s*===\s*lane/);
+    // and the doc points at exactly this grader + invocation.
+    const md = read(BAR_DOC);
+    expect(md).toContain('compat-window-audit.mjs');
+    expect(md).toContain('--lane bun');
   });
 
   it('states every shard must be failed:0 and notRun:0 (a shard that enumerated no test is not a pass)', () => {
