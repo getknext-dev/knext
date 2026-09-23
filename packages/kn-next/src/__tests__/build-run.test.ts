@@ -22,7 +22,7 @@ import {
     jest,
     mock,
 } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { requireIsolatedProcess } from "../../../../tests/helpers/require-isolated-process";
@@ -129,6 +129,17 @@ afterEach(() => {
 const shipCompiles = () =>
     buildVinextExecutable.mock.calls.filter((c) => c[0]?.arch === "linux-x64");
 
+/**
+ * The turbopack artifact CHECK (#1184) keys on the entry FILE
+ * (`.next/standalone/server.js`), not on the directory existing — so a test
+ * proving the check is satisfied must write the file, not just `mkdirSync`
+ * the tree.
+ */
+const writeStandaloneServer = () => {
+    mkdirSync(join(dir, ".next", "standalone"), { recursive: true });
+    writeFileSync(join(dir, ".next", "standalone", "server.js"), "");
+};
+
 describe("build()", () => {
     it("skips the heal and uploads assets when no standalone dir exists (turbopack)", async () => {
         loadConfig.mockResolvedValue(cfg());
@@ -143,6 +154,10 @@ describe("build()", () => {
 
     it("runs the project build when not skipped", async () => {
         loadConfig.mockResolvedValue(cfg());
+        // The artifact must exist so the #1184 fail-fast check (below) does
+        // not trip — this test is about the project-build invocation, not
+        // about that check.
+        writeStandaloneServer();
         await build({});
         expect(runQuiet).toHaveBeenCalledWith(["npm", "run", "build"]);
     });
@@ -181,6 +196,50 @@ describe("build()", () => {
                 skipViteBuild: true,
             }),
         );
+        expect(uploadAssets).toHaveBeenCalledTimes(1);
+    });
+
+    it("fails fast with an actionable message when turbopack produces no .next/standalone (#1184)", async () => {
+        // The project build itself is mocked (runQuiet), so this reproduces
+        // the real #1184 shape: the app's OWN build script ran (e.g. still
+        // `vite build`, unmodified from `kn-next create`) and exited 0, but
+        // never emitted `.next/standalone` — this must be a HARD failure, not
+        // a warning, and it must happen before assets are uploaded or an
+        // image is built.
+        loadConfig.mockResolvedValue(cfg());
+
+        await expect(build({})).rejects.toThrow(
+            /next-standalone|standalone\/server\.js|is not there/i,
+        );
+
+        expect(uploadAssets).not.toHaveBeenCalled();
+    });
+
+    it("proceeds past the missing-artifact check when turbopack's .next/standalone IS present", async () => {
+        loadConfig.mockResolvedValue(cfg());
+        writeStandaloneServer();
+
+        await expect(build({})).resolves.toBeUndefined();
+
+        expect(uploadAssets).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not fail fast on the default (vinext) build when its own artifact is missing", async () => {
+        // vinext's artifact is `.output/server/index.mjs`, produced by
+        // `buildVinextExecutable` — which is mocked out here, so the
+        // artifact never actually lands on disk. #1184 scopes the hard
+        // failure to the next-standalone shape only; vinext must be
+        // completely unaffected and still resolve. A `package.json` is
+        // needed here (unlike the turbopack cases above) because the
+        // vinext path preflights it as an ESM app before this check runs.
+        writeFileSync(
+            join(dir, "package.json"),
+            JSON.stringify({ name: "my-app", type: "module" }),
+        );
+        loadConfig.mockResolvedValue(cfg({ build: undefined }));
+
+        await expect(build({})).resolves.toBeUndefined();
+
         expect(uploadAssets).toHaveBeenCalledTimes(1);
     });
 

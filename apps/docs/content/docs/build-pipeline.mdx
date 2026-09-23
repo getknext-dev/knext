@@ -50,6 +50,13 @@ app's own build script, so that script must run `next build` with `output: 'stan
 `kn-next create` are vinext apps whose build script runs `vite build` and whose `next.config.ts`
 deliberately omits `output`, so switching such an app to this target means changing both first.
 
+If you select `build: 'turbopack'` and your build script still doesn't produce
+`.next/standalone` (for example, the build script wasn't updated), `kn-next build` fails
+immediately with an actionable error telling you to set `output: 'standalone'` in
+`next.config.ts` and make sure your build script runs `next build`. This is a hard failure on
+purpose: without it, the first sign of the missing artifact used to be an opaque error deep
+inside the Docker image build at deploy time.
+
 `kn-next` stages and builds the matching standalone runtime image for you; `runtime` has no effect
 on the vinext single-executable target, where the runtime is compiled into the binary. Today the
 standalone target runs uncompiled (the supervisor spawns `server.js` directly); packaging it as a

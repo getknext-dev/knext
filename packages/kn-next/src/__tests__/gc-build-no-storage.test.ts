@@ -257,20 +257,45 @@ describe("kn-next build without storage (ADR-0047 conditions 1 + 3)", () => {
         });
         process.env.ASSET_PREFIX = "https://stale-bucket.example.com/app";
         let prefixDuringBuild: string | undefined = "unset-sentinel";
+        // #1184: `build: "turbopack"` now HARD-fails when `npm run build`
+        // finishes without producing `.next/standalone/server.js`. The mocked
+        // `runQuiet` stands in for the real build command, so it must also
+        // produce that artifact as a side effect — same as a real `next build`
+        // would — or this test would trip the new fail-fast check instead of
+        // reaching its own ASSET_PREFIX assertions. Written into (and cleaned
+        // up from) the real checkout cwd on purpose, matching this test's
+        // existing "runs in the checkout cwd" design (see the note above).
+        const artifactDir = ".next/standalone";
+        const artifactFile = `${artifactDir}/server.js`;
+        // Only ever remove the subtree THIS test creates below — never the
+        // whole `.next` — in case a real local build already left one there.
+        const nextDirPreexisted = __knextRealFs.existsSync(".next");
         runQuiet.mockImplementation((...args: unknown[]) => {
             const argv = args[0] as string[];
             if (argv?.[0] === "npm" && argv?.[2] === "build") {
                 prefixDuringBuild = process.env.ASSET_PREFIX;
+                __knextRealFs.mkdirSync(artifactDir, { recursive: true });
+                __knextRealFs.writeFileSync(artifactFile, "");
             }
         });
-        const { build } = await import("../cli/build");
-        await build({});
+        try {
+            const { build } = await import("../cli/build");
+            await build({});
 
-        // The mode's guarantee is relative asset paths; a stale bucket URL
-        // inherited from the shell must not reach the build.
-        expect(prefixDuringBuild).toBeUndefined();
-        expect(process.env.ASSET_PREFIX).toBeUndefined();
-        delete process.env.ASSET_PREFIX;
+            // The mode's guarantee is relative asset paths; a stale bucket URL
+            // inherited from the shell must not reach the build.
+            expect(prefixDuringBuild).toBeUndefined();
+            expect(process.env.ASSET_PREFIX).toBeUndefined();
+        } finally {
+            delete process.env.ASSET_PREFIX;
+            __knextRealFs.rmSync(artifactDir, { recursive: true, force: true });
+            if (!nextDirPreexisted) {
+                __knextRealFs.rmSync(".next", {
+                    recursive: true,
+                    force: true,
+                });
+            }
+        }
     });
 
     it("with storage configured the upload still runs (regression pin)", async () => {
