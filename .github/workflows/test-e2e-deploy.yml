@@ -503,6 +503,7 @@ jobs:
             --next-js-dir "${GITHUB_WORKSPACE}/next.js" \
             --next-tarball "${GITHUB_WORKSPACE}/next-prebuilt/next.tgz" \
             --next-ref "${NEXTJS_REF}" \
+            --lane "${KNEXT_RUNTIME}" \
             --workflow-file "${GITHUB_WORKSPACE}/knext-executing/.github/workflows/test-e2e-deploy.yml" \
             --out "${GITHUB_WORKSPACE}/compat-window-fingerprint.json" \
             ${RUNTIME_ARGS[@]+"${RUNTIME_ARGS[@]}"} \

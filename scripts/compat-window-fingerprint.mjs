@@ -51,9 +51,22 @@
  * gate, PR-time and app-side. Confusing the two is the likeliest way to widen
  * this scope by accident.
  *
+ * PER-CELL WORKFLOW ENTRY (#1294). The harness has exactly one `harness` file
+ * entry — the workflow that EXECUTED — but which *file* that is depends on the
+ * lane: the node and bun (turbopack) cells run from `test-e2e-deploy.yml`, the
+ * vinext cells from `compat-vinext.yml`. Before this, the entry was hardcoded
+ * to `test-e2e-deploy.yml` for every lane, so an edit to `compat-vinext.yml`
+ * never moved the vinext cells' fingerprint — the changed harness could carry
+ * a 14-night window, which violates ADR-0056 D3. `--lane` selects the entry
+ * from the ONE declared table (`CREDENTIAL_CELLS.workflowFile`,
+ * `scripts/compat-window-audit.mjs`), so a new cell or a moved workflow file
+ * cannot silently keep hashing the wrong bytes. Unset, `--lane` defaults to
+ * `node` (`CREDENTIAL_LANE`) — the pre-#1294 behaviour, byte-identical.
+ *
  * Usage:
  *   node scripts/compat-window-fingerprint.mjs \
  *     --repo-root . --tarballs-dir "$GITHUB_WORKSPACE/knext-tarballs" \
+ *     [--lane node|bun|bun-vinext|...] \
  *     [--next-js-dir next.js] [--next-tarball next-prebuilt/next.tgz] \
  *     [--next-ref v16.2.0] \
  *     [--workflow-file knext-executing/.github/workflows/test-e2e-deploy.yml] \
@@ -73,26 +86,62 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
+import { CREDENTIAL_CELLS, CREDENTIAL_LANE } from './compat-window-audit.mjs';
 
 export const SCHEMA = 'knext.compat-window-fingerprint/v1';
 
 /**
- * The frozen HARNESS roots. Each `dir` root is SCANNED (recursively) and
- * filtered by `match`, so the set grows with the tree rather than with edits
- * to this file.
+ * The frozen HARNESS roots that are the SAME for every cell — the shared half
+ * of the digest (ADR-0056 D2 note: narrowing this per cell is an ADR-0039
+ * scope change, left to the founder, not decided here). Each `dir` root is
+ * SCANNED (recursively) and filtered by `match`, so the set grows with the
+ * tree rather than with edits to this file. The per-lane WORKFLOW entry is
+ * NOT here — see `workflowRootForLane` below (#1294).
  *
  * @type {{ kind: 'file' | 'dir', path: string, match?: RegExp }[]}
  */
 export const HARNESS_ROOTS = [
-  { kind: 'file', path: '.github/workflows/test-e2e-deploy.yml' },
   // The lifecycle scripts the reference harness invokes
   // (NEXT_TEST_DEPLOY_SCRIPT_PATH and friends) plus the preflight/summary/ledger
   // helpers the workflow runs around them.
   { kind: 'dir', path: 'scripts', match: /^e2e-[^/]*\.(sh|mjs|cjs|js)$/ },
+  // #1294: the same lifecycle scripts source shared helpers out of
+  // `scripts/lib/` (e.g. `e2e-deploy.sh` sources `lib/e2e-state-snapshot.sh`,
+  // #1280) — those were invisible to the frozen set because the `scripts` root
+  // above only matches TOP-LEVEL `e2e-*` files, not nested ones. Scanned the
+  // same way, one directory over: still `e2e-*`-prefixed, still additive.
+  { kind: 'dir', path: 'scripts/lib', match: /^e2e-[^/]*\.(sh|mjs|cjs|js)$/ },
   // The deploy-tests manifest(s): the exclude ledger that decides what the
   // night actually selected. A second lane manifest is picked up automatically.
   { kind: 'dir', path: 'test', match: /^deploy-tests-manifest\.[^/]*\.json$/ },
 ];
+
+/**
+ * The lane's frozen WORKFLOW file, `.github/workflows/<basename>` — the one
+ * `harness` entry whose SOURCE is per-cell (#1294). Reads the single declared
+ * table (`CREDENTIAL_CELLS`, `scripts/compat-window-audit.mjs`) rather than
+ * re-declaring the mapping here, so a cell added there cannot be forgotten
+ * here. An unknown lane, or a known lane with no workflow wired yet
+ * (`workflowFile: null` — the webpack cells today), is a hard error: silently
+ * falling back to SOME workflow would fingerprint bytes that did not run.
+ *
+ * @param {string} lane
+ * @returns {{ kind: 'file', path: string }}
+ */
+export function workflowRootForLane(lane) {
+  const cell = CREDENTIAL_CELLS.find((c) => c.lane === lane);
+  if (!cell) {
+    throw new Error(
+      `compat-window fingerprint: unknown lane "${lane}". Known lanes: ${CREDENTIAL_CELLS.map((c) => c.lane).join(', ')}.`,
+    );
+  }
+  if (!cell.workflowFile) {
+    throw new Error(
+      `compat-window fingerprint: lane "${lane}" has no workflowFile wired in CREDENTIAL_CELLS yet — it cannot be fingerprinted until its credential workflow lands.`,
+    );
+  }
+  return { kind: 'file', path: `.github/workflows/${cell.workflowFile}` };
+}
 
 function sha256(buffer) {
   return createHash('sha256').update(buffer).digest('hex');
@@ -125,11 +174,23 @@ function line(component, path, absolute) {
   return `${component}\t${path}\t${mode}\t${sha256(readFileSync(absolute))}`;
 }
 
-/** The harness entry whose bytes come from the EXECUTING commit (ADR-0039 Amendment 1). */
-export const EXECUTING_WORKFLOW = '.github/workflows/test-e2e-deploy.yml';
+/**
+ * `scripts/lib` (#1294) is OPTIONAL at the root level: a minimal fixture (or,
+ * historically, this checkout before #1280) may have no `scripts/lib/` at
+ * all, and an absent optional root contributes nothing rather than erroring.
+ * It is NOT optional once present — an existing `scripts/lib/` that matches
+ * zero `e2e-*` files still fails loud, same as every other root, because that
+ * shape (dir exists, sweep finds nothing) is what an accidental mass-delete
+ * looks like.
+ *
+ * @type {Set<string>}
+ */
+const OPTIONAL_ROOTS = new Set(['scripts/lib']);
 
 /**
  * @param {string} repoRoot
+ * @param {string} lane — selects the per-cell workflow entry (#1294),
+ *   `workflowRootForLane`.
  * @param {{ workflowFile?: string | null }} [opts]
  *   `workflowFile` — ADR-0039 Amendment 1 (ADR-0056). A credential night checks
  *   out an RC tag, but GitHub runs the DEFAULT BRANCH's workflow file. The
@@ -138,14 +199,12 @@ export const EXECUTING_WORKFLOW = '.github/workflows/test-e2e-deploy.yml';
  *   unchanged, so identical bytes give a byte-identical digest. A given but
  *   missing file is a hard error, never a fallback to the checkout's copy.
  */
-function collectHarness(repoRoot, opts = {}) {
+function collectHarness(repoRoot, lane, opts = {}) {
+  const roots = [workflowRootForLane(lane), ...HARNESS_ROOTS];
   /** @type {{ component: string, path: string, line: string }[]} */
   const entries = [];
-  for (const root of HARNESS_ROOTS) {
-    const override =
-      root.kind === 'file' && root.path === EXECUTING_WORKFLOW && opts.workflowFile
-        ? resolve(opts.workflowFile)
-        : null;
+  for (const root of roots) {
+    const override = root.kind === 'file' && opts.workflowFile ? resolve(opts.workflowFile) : null;
     const abs = override ?? resolve(repoRoot, root.path);
     if (root.kind === 'file') {
       if (!existsSync(abs)) {
@@ -163,6 +222,7 @@ function collectHarness(repoRoot, opts = {}) {
       continue;
     }
     if (!existsSync(abs)) {
+      if (OPTIONAL_ROOTS.has(root.path)) continue;
       throw new Error(`compat-window fingerprint: frozen harness root ${root.path}/ is missing`);
     }
     const matched = walk(abs).filter((rel) => (root.match ? root.match.test(rel) : true));
@@ -317,7 +377,7 @@ function collectRuntimeComponent({ runtimeVersion, runtimeRevision }) {
 }
 
 /**
- * @param {{ repoRoot: string, tarballsDir: string, nextJsDir?: string | null, nextTarball?: string | null, nextRef?: string | null, runtimeVersion?: string | null, runtimeRevision?: string | null, workflowFile?: string | null }} options
+ * @param {{ repoRoot: string, tarballsDir: string, nextJsDir?: string | null, nextTarball?: string | null, nextRef?: string | null, runtimeVersion?: string | null, runtimeRevision?: string | null, workflowFile?: string | null, lane?: string }} options
  */
 export function computeFingerprint({
   repoRoot,
@@ -328,8 +388,13 @@ export function computeFingerprint({
   runtimeVersion,
   runtimeRevision,
   workflowFile,
+  // #1294: which cell's workflow entry to hash. Defaults to `CREDENTIAL_LANE`
+  // ('node') — the pre-#1294 caller never passed this, and 'node' resolves to
+  // the same `test-e2e-deploy.yml` entry the un-lane-aware formula always used,
+  // so an un-migrated caller's digest is byte-identical.
+  lane = CREDENTIAL_LANE,
 }) {
-  const harness = collectHarness(repoRoot, { workflowFile });
+  const harness = collectHarness(repoRoot, lane, { workflowFile });
   const { entries: packed, packages } = collectPacked(tarballsDir);
 
   const harnessLines = harness.map((e) => e.line).sort();
@@ -407,6 +472,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       runtimeRevision: arg('runtime-revision', null),
       // ADR-0039 Amendment 1: the workflow file that EXECUTED (github.workflow_sha).
       workflowFile: arg('workflow-file', null),
+      // #1294: which cell's workflow entry to hash — defaults to CREDENTIAL_LANE.
+      lane: arg('lane', CREDENTIAL_LANE),
     });
   } catch (error) {
     console.error(`::error::${error instanceof Error ? error.message : String(error)}`);

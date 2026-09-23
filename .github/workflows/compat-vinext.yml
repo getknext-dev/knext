@@ -90,6 +90,22 @@ jobs:
         with:
           path: knext
 
+      # ADR-0039 Amendment 1 / #1294 — the workflow file that EXECUTED. This
+      # lane checks out `main` for both `knext` above and this sparse checkout,
+      # so today the two are the same commit and the digest is unchanged by
+      # this step. It is here so the fingerprint step below reads the same
+      # sparse-checkout shape the node/bun lane already uses (`knext-executing`),
+      # rather than a lane-specific one-off — the day this lane gains an RC-tag
+      # credential mode (ADR-0056), the `knext` checkout above moves to the tag
+      # and this one keeps pointing at `github.workflow_sha` with no further edit.
+      - name: Checkout the executing workflow file (frozen-set workflow entry)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: knext-executing
+          ref: ${{ github.workflow_sha }}
+          sparse-checkout: .github/workflows/compat-vinext.yml
+          sparse-checkout-cone-mode: false
+
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -203,12 +219,18 @@ jobs:
       - name: Fingerprint the frozen compat-window set
         run: |
           set -euo pipefail
+          # --lane bun-vinext (#1294): this lane's `harness` entry is
+          # compat-vinext.yml, not test-e2e-deploy.yml — see CREDENTIAL_CELLS
+          # in scripts/compat-window-audit.mjs, the one declared table both
+          # lanes read from.
           node knext/scripts/compat-window-fingerprint.mjs \
             --repo-root knext \
             --tarballs-dir "${GITHUB_WORKSPACE}/knext-tarballs" \
             --next-js-dir "${GITHUB_WORKSPACE}/next.js" \
             --next-tarball "${GITHUB_WORKSPACE}/next-prebuilt/next.tgz" \
             --next-ref "${NEXTJS_REF}" \
+            --lane bun-vinext \
+            --workflow-file "${GITHUB_WORKSPACE}/knext-executing/.github/workflows/compat-vinext.yml" \
             --out "${GITHUB_WORKSPACE}/compat-window-fingerprint.json" \
             | tee "${RUNNER_TEMP}/fingerprint.txt"
           {

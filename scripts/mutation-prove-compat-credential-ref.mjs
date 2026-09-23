@@ -161,8 +161,8 @@ const MUTATIONS = [
   {
     label: 'amendment 1: ignore --workflow-file and hash the checkout copy',
     subject: 'fingerprint',
-    anchor: "      root.kind === 'file' && root.path === EXECUTING_WORKFLOW && opts.workflowFile",
-    replacement: '      false',
+    anchor: 'opts.workflowFile ? resolve(opts.workflowFile) : null;',
+    replacement: 'null;',
   },
 ];
 

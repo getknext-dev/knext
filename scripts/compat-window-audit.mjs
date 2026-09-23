@@ -148,14 +148,61 @@ export const CREDENTIAL_LANE = 'node';
  * take `<runtime>-<builder>`. `wired` says whether a credential cron produces
  * nights for the cell yet. An unwired cell simply has no nights, so it is NOT
  * met — `auditCredentialMatrix` never treats it as vacuously passing.
+ *
+ * `workflowFile` (#1294) is the `.github/workflows/*.yml` BASENAME that
+ * actually EXECUTES the cell's run — the single declared table
+ * `scripts/compat-window-fingerprint.mjs` reads to pick which workflow's bytes
+ * are the frozen-set `harness` entry for a given `--lane`. Before this field
+ * existed, that entry was hardcoded to `test-e2e-deploy.yml` for every lane, so
+ * editing `compat-vinext.yml` never moved the vinext cells' fingerprint — a
+ * changed harness there could carry a 14-night window (ADR-0056 D3). The
+ * webpack cells are not wired to a workflow yet (#1219); their entry is `null`
+ * on purpose so a caller that tries to fingerprint one fails loudly rather than
+ * guessing a file that does not exist.
  */
 export const CREDENTIAL_CELLS = Object.freeze([
-  Object.freeze({ runtime: 'node', builder: 'turbopack', lane: 'node', wired: true }),
-  Object.freeze({ runtime: 'bun', builder: 'turbopack', lane: 'bun', wired: true }),
-  Object.freeze({ runtime: 'node', builder: 'webpack', lane: 'node-webpack', wired: false }),
-  Object.freeze({ runtime: 'bun', builder: 'webpack', lane: 'bun-webpack', wired: false }),
-  Object.freeze({ runtime: 'node', builder: 'vinext', lane: 'node-vinext', wired: false }),
-  Object.freeze({ runtime: 'bun', builder: 'vinext', lane: 'bun-vinext', wired: false }),
+  Object.freeze({
+    runtime: 'node',
+    builder: 'turbopack',
+    lane: 'node',
+    wired: true,
+    workflowFile: 'test-e2e-deploy.yml',
+  }),
+  Object.freeze({
+    runtime: 'bun',
+    builder: 'turbopack',
+    lane: 'bun',
+    wired: true,
+    workflowFile: 'test-e2e-deploy.yml',
+  }),
+  Object.freeze({
+    runtime: 'node',
+    builder: 'webpack',
+    lane: 'node-webpack',
+    wired: false,
+    workflowFile: null,
+  }),
+  Object.freeze({
+    runtime: 'bun',
+    builder: 'webpack',
+    lane: 'bun-webpack',
+    wired: false,
+    workflowFile: null,
+  }),
+  Object.freeze({
+    runtime: 'node',
+    builder: 'vinext',
+    lane: 'node-vinext',
+    wired: false,
+    workflowFile: 'compat-vinext.yml',
+  }),
+  Object.freeze({
+    runtime: 'bun',
+    builder: 'vinext',
+    lane: 'bun-vinext',
+    wired: false,
+    workflowFile: 'compat-vinext.yml',
+  }),
 ]);
 
 /** Which nights a window is built from. `credential` is the v1.0 gate. */

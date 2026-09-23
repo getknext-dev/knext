@@ -566,3 +566,258 @@ describe('compat-window fingerprint — wired into the scheduled run', () => {
     expect(ledger).toContain('windowFingerprint');
   });
 });
+
+/**
+ * #1294 — PER-CELL WORKFLOW ENTRY.
+ *
+ * Before this, the `harness` workflow-file entry was hardcoded to
+ * `.github/workflows/test-e2e-deploy.yml` for every lane. The vinext cells
+ * actually run from `.github/workflows/compat-vinext.yml`, so an edit there
+ * NEVER moved the vinext cells' fingerprint — a changed harness could carry a
+ * 14-night window, which violates ADR-0056 D3.
+ */
+describe('compat-window fingerprint — each cell hashes the workflow that actually executes it (#1294)', () => {
+  const VINEXT_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/compat-vinext.yml');
+
+  function fingerprintLane(
+    repoRoot: string,
+    tarballsDir: string,
+    lane: string,
+  ): { fingerprint: string; components: Record<string, string>; files: { path: string }[] } {
+    const out = execFileSync(
+      process.execPath,
+      [
+        SCRIPT,
+        '--repo-root',
+        repoRoot,
+        '--tarballs-dir',
+        tarballsDir,
+        '--lane',
+        lane,
+        '--json',
+        '--files',
+      ],
+      { encoding: 'utf8' },
+    );
+    return JSON.parse(out);
+  }
+
+  /** A fixture carrying BOTH real-world workflow files, so a lane's harness set is attributable. */
+  function makeMultiWorkflowFixture(): { repoRoot: string; tarballsDir: string } {
+    const { repoRoot, tarballsDir } = makeFixture();
+    writeFileSync(
+      join(repoRoot, '.github/workflows/compat-vinext.yml'),
+      'name: Compat suite — vinext single-executable axis\n',
+    );
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-deploy-vinext.sh'),
+      '#!/usr/bin/env bash\necho vinext-deploy\n',
+    );
+    chmodSync(join(repoRoot, 'scripts/e2e-deploy-vinext.sh'), 0o755);
+    return { repoRoot, tarballsDir };
+  }
+
+  it('names the real repo files: node/bun cells hash test-e2e-deploy.yml, the vinext cells hash compat-vinext.yml', () => {
+    for (const lane of ['node', 'bun']) {
+      const tarballsDir = tempDir('knext-fp-cellreal-');
+      packFixtureTarball(tarballsDir, 'core', '0.3.0');
+      const result = fingerprintLane(REPO_ROOT, tarballsDir, lane);
+      const workflows = result.files.filter((f) => f.path.startsWith('.github/workflows/'));
+      expect(workflows.map((f) => f.path)).toEqual(['.github/workflows/test-e2e-deploy.yml']);
+    }
+    for (const lane of ['bun-vinext']) {
+      const tarballsDir = tempDir('knext-fp-cellreal-');
+      packFixtureTarball(tarballsDir, 'core', '0.3.0');
+      const result = fingerprintLane(REPO_ROOT, tarballsDir, lane);
+      const workflows = result.files.filter((f) => f.path.startsWith('.github/workflows/'));
+      expect(workflows.map((f) => f.path)).toEqual(['.github/workflows/compat-vinext.yml']);
+    }
+  });
+
+  it('an unknown lane is a hard error, never a silent fallback to some workflow', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    expect(() => fingerprintLane(repoRoot, tarballsDir, 'not-a-real-lane')).toThrow();
+  });
+
+  it('a lane with no workflow wired yet (node-webpack) is a hard error, not a guess', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    expect(() => fingerprintLane(repoRoot, tarballsDir, 'node-webpack')).toThrow();
+  });
+
+  // THE mutation named in the exit criteria: editing `compat-vinext.yml` moves
+  // the vinext cells' fingerprint and NOT the turbopack (node/bun) cells', and
+  // vice versa for `test-e2e-deploy.yml`.
+  it('editing compat-vinext.yml moves the vinext-lane fingerprint and NOT the turbopack lanes', () => {
+    const { repoRoot, tarballsDir } = makeMultiWorkflowFixture();
+    const before = {
+      node: fingerprintLane(repoRoot, tarballsDir, 'node').fingerprint,
+      bun: fingerprintLane(repoRoot, tarballsDir, 'bun').fingerprint,
+      vinext: fingerprintLane(repoRoot, tarballsDir, 'bun-vinext').fingerprint,
+    };
+
+    writeFileSync(
+      join(repoRoot, '.github/workflows/compat-vinext.yml'),
+      'name: Compat suite — vinext single-executable axis\n# edited\n',
+    );
+
+    const after = {
+      node: fingerprintLane(repoRoot, tarballsDir, 'node').fingerprint,
+      bun: fingerprintLane(repoRoot, tarballsDir, 'bun').fingerprint,
+      vinext: fingerprintLane(repoRoot, tarballsDir, 'bun-vinext').fingerprint,
+    };
+
+    expect(after.vinext).not.toBe(before.vinext);
+    expect(after.node).toBe(before.node);
+    expect(after.bun).toBe(before.bun);
+  });
+
+  it('and vice versa: editing test-e2e-deploy.yml moves the turbopack lanes and NOT the vinext lane', () => {
+    const { repoRoot, tarballsDir } = makeMultiWorkflowFixture();
+    const before = {
+      node: fingerprintLane(repoRoot, tarballsDir, 'node').fingerprint,
+      bun: fingerprintLane(repoRoot, tarballsDir, 'bun').fingerprint,
+      vinext: fingerprintLane(repoRoot, tarballsDir, 'bun-vinext').fingerprint,
+    };
+
+    writeFileSync(
+      join(repoRoot, '.github/workflows/test-e2e-deploy.yml'),
+      'name: Compat suite\n# edited\n',
+    );
+
+    const after = {
+      node: fingerprintLane(repoRoot, tarballsDir, 'node').fingerprint,
+      bun: fingerprintLane(repoRoot, tarballsDir, 'bun').fingerprint,
+      vinext: fingerprintLane(repoRoot, tarballsDir, 'bun-vinext').fingerprint,
+    };
+
+    expect(after.node).not.toBe(before.node);
+    expect(after.bun).not.toBe(before.bun);
+    expect(after.vinext).toBe(before.vinext);
+  });
+
+  it('sanity: the two real workflow files in this checkout are not byte-identical', () => {
+    // If they ever became identical, the test above would pass for the wrong
+    // reason — pin this so that regression is visible here first.
+    expect(readFileSync(WORKFLOW, 'utf8')).not.toBe(readFileSync(VINEXT_WORKFLOW, 'utf8'));
+  });
+});
+
+/**
+ * #1294 / #1280 — `scripts/lib/*` that a lifecycle script SOURCES is part of
+ * the frozen harness set. `scripts/e2e-deploy.sh` sources
+ * `scripts/lib/e2e-state-snapshot.sh`; before this, the frozen `scripts` dir
+ * root only matched TOP-LEVEL `e2e-*` files, so the sourced helper was
+ * invisible to the digest — a change there would not restart the window.
+ */
+describe('compat-window fingerprint — scripts/lib/e2e-* is part of the frozen harness (#1280 pieces)', () => {
+  it('SCANS scripts/lib: a newly-added scripts/lib/e2e-* file moves the digest with no script edit', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+    writeFileSync(join(repoRoot, 'scripts/lib/e2e-state-snapshot.sh'), '#!/usr/bin/env bash\n');
+    const before = fingerprint(repoRoot, tarballsDir);
+    writeFileSync(join(repoRoot, 'scripts/lib/e2e-newly-added.sh'), '#!/usr/bin/env bash\n');
+    const after = fingerprint(repoRoot, tarballsDir);
+    expect(after.fingerprint).not.toBe(before.fingerprint);
+    expect(after.counts.harness).toBe(before.counts.harness + 1);
+  });
+
+  it('a fixture with no scripts/lib/ at all still fingerprints (the root is optional when absent)', () => {
+    // Every OTHER makeFixture()-based test in this file relies on this: none of
+    // them create scripts/lib/, and none of them may start failing because of
+    // an unrelated root that has nothing to do with what they test.
+    const { repoRoot, tarballsDir } = makeFixture();
+    expect(() => fingerprint(repoRoot, tarballsDir)).not.toThrow();
+  });
+
+  it('an EXISTING but EMPTY scripts/lib/ still fails loud (present-but-swept-clean looks like a mass delete)', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+    writeFileSync(join(repoRoot, 'scripts/lib/not-e2e-prefixed.sh'), '#!/usr/bin/env bash\n');
+    expect(() => fingerprint(repoRoot, tarballsDir)).toThrow();
+  });
+
+  it('names scripts/lib/e2e-state-snapshot.sh in the real repo harness (node lane)', () => {
+    const tarballsDir = tempDir('knext-fp-lib-real-');
+    packFixtureTarball(tarballsDir, 'core', '0.3.0');
+    const result = execFileSync(
+      process.execPath,
+      [SCRIPT, '--repo-root', REPO_ROOT, '--tarballs-dir', tarballsDir, '--json', '--files'],
+      { encoding: 'utf8' },
+    );
+    const parsed = JSON.parse(result) as { files: { component: string; path: string }[] };
+    const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+    expect(harness).toContain('scripts/lib/e2e-state-snapshot.sh');
+  });
+});
+
+/**
+ * #1294 — SCANNING TEST: a script a lane's deploy entrypoint sources (via
+ * `source`/`. `) must be present in that lane's frozen harness set. This is
+ * the guard that would have caught the #1280 gap directly, and catches the
+ * next one: it reads the REAL `scripts/e2e-deploy*.sh` sources, extracts every
+ * `scripts/lib/*` file they source, and cross-checks each against what
+ * `computeFingerprint` actually swept in for that lane's real harness. A
+ * sourced file that does not match the frozen set's patterns (e.g. a future
+ * `scripts/lib/helper.sh`, no `e2e-` prefix) goes RED here — never silently
+ * excluded.
+ */
+describe('compat-window fingerprint — scanning: every scripts/lib file a deploy script sources is in the harness', () => {
+  /** `source "${SCRIPT_DIR}/lib/X"` / `. "${SCRIPT_DIR}/lib/X"` → `scripts/lib/X`. */
+  function sourcedLibFiles(deployScriptAbsPath: string): string[] {
+    const src = readFileSync(deployScriptAbsPath, 'utf8');
+    const found = new Set<string>();
+    for (const m of src.matchAll(/^\.\s+"\$\{[A-Z_]+\}\/lib\/([^"]+)"/gm)) {
+      found.add(`scripts/lib/${m[1]}`);
+    }
+    for (const m of src.matchAll(/^source\s+"\$\{[A-Z_]+\}\/lib\/([^"]+)"/gm)) {
+      found.add(`scripts/lib/${m[1]}`);
+    }
+    return [...found].sort();
+  }
+
+  const CELL_DEPLOY_SCRIPTS: Record<string, string> = {
+    node: 'scripts/e2e-deploy.sh',
+    bun: 'scripts/e2e-deploy.sh',
+    'bun-vinext': 'scripts/e2e-deploy-vinext.sh',
+  };
+
+  it('scripts/e2e-deploy.sh sources at least one scripts/lib/ file, so this scan is not vacuous', () => {
+    const sourced = sourcedLibFiles(resolve(REPO_ROOT, 'scripts/e2e-deploy.sh'));
+    expect(sourced.length).toBeGreaterThan(0);
+  });
+
+  for (const [lane, deployScript] of Object.entries(CELL_DEPLOY_SCRIPTS)) {
+    it(`lane "${lane}": every scripts/lib/ file ${deployScript} sources is in the frozen harness`, () => {
+      const sourced = sourcedLibFiles(resolve(REPO_ROOT, deployScript));
+
+      const tarballsDir = tempDir('knext-fp-scan-');
+      packFixtureTarball(tarballsDir, 'core', '0.3.0');
+      const out = execFileSync(
+        process.execPath,
+        [
+          SCRIPT,
+          '--repo-root',
+          REPO_ROOT,
+          '--tarballs-dir',
+          tarballsDir,
+          '--lane',
+          lane,
+          '--json',
+          '--files',
+        ],
+        { encoding: 'utf8' },
+      );
+      const parsed = JSON.parse(out) as { files: { component: string; path: string }[] };
+      const harness = new Set(
+        parsed.files.filter((f) => f.component === 'harness').map((f) => f.path),
+      );
+
+      for (const path of sourced) {
+        expect(
+          harness.has(path),
+          `${deployScript} sources ${path}, missing from lane "${lane}"'s harness`,
+        ).toBe(true);
+      }
+    });
+  }
+});
