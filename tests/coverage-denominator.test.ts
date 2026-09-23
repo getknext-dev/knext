@@ -21,7 +21,13 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { generateDenominator } from '../scripts/lib/coverage-denominator.mjs';
-import { countCodeLines, isTypeOnly, mergeLcov, summarize } from '../scripts/lib/lcov.mjs';
+import {
+  codeLineNumbers,
+  countCodeLines,
+  isTypeOnly,
+  mergeLcov,
+  summarize,
+} from '../scripts/lib/lcov.mjs';
 
 /** A runtime source file: it transpiles to real JS, so a provider instruments it. */
 const RUNTIME_SRC = [
@@ -102,6 +108,26 @@ describe('countCodeLines', () => {
 
   it('is non-zero for real runtime code', () => {
     expect(countCodeLines(RUNTIME_SRC)).toBeGreaterThan(0);
+  });
+});
+
+describe('codeLineNumbers (#1248)', () => {
+  it('returns the REAL 1-based line numbers countCodeLines counts', () => {
+    const src = ['// header', '', 'const a = 1;', '/* x', ' */', 'const b = 2;'].join('\n');
+    expect(codeLineNumbers(src)).toEqual([3, 6]);
+    expect(codeLineNumbers(src).length).toBe(countCodeLines(src));
+  });
+
+  it('the generated 0% entry is keyed by those real line numbers', () => {
+    const src = ['// header', 'export const x = f();', '', 'export const y = g();'].join('\n');
+    const { root, paths, cleanup } = makeTree({ 'packages/z/src/u.ts': src });
+    try {
+      const entry = new Map(generateDenominator(root, paths, new Map())).get('packages/z/src/u.ts');
+      // Keyed 1..N, the classifier would read line 1 (a comment) for the first record.
+      expect([...(entry?.lines.keys() ?? [])]).toEqual([2, 4]);
+    } finally {
+      cleanup();
+    }
   });
 });
 
