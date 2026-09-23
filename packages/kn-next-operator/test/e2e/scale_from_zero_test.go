@@ -75,11 +75,14 @@ const (
 	// @sha256:<64 hex> reference at all (#659; it used to skip, which meant the
 	// whole lane reported success having executed nothing).
 	// #670: the preflight RESOLVES the newest cosign-signed file-manager digest
-	// from GHCR at run time (the image supply-chain.yml pushes + signs), confirms
-	// it is pullable, and the scale job `kind load`s it so the private-image pod
-	// can start — so the nightly runs a real image with no repo variable and no
-	// standing write credential. Shape is no longer the only check: pullability
-	// is proven too.
+	// from GHCR at run time (the image supply-chain.yml pushes + signs) and
+	// confirms it is pullable + signed. Because that digest is an OCI *index*
+	// (provenance mode=max) that `kind load` cannot make addressable, the scale
+	// job `crane copy`s it — digest preserved — into an in-cluster registry and
+	// deploys the localhost ref the node resolves via certs.d, proving
+	// addressability with `crictl inspecti` before the suite runs. So the nightly
+	// runs a real image with no repo variable, no standing write credential, and
+	// no pod-level imagePullSecret. Shape is no longer the only check.
 	scaleFromZeroImageDefault = "dev.local/file-manager@sha256:0000000000000000000000000000000000000000000000000000000000000000"
 )
 

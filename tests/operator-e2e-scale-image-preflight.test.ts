@@ -293,9 +293,21 @@ describe('nothing silently opts the precondition out (#659 / #661)', () => {
       (s: any) => typeof s.run === 'string' && s.run.includes('test-e2e-scale'),
     );
     expect(runStep, 'no step runs `make test-e2e-scale`').toBeTruthy();
+    // The suite deploys the IN-CLUSTER ref (remedy A, #670 cr#3) — the same
+    // signed digest the preflight resolved, crane-copied into the local registry.
+    // So the suite consumes the copy step's output, and that step's INPUT is the
+    // preflight's resolved image: the suite never re-resolves (nor re-skips).
     expect(
       runStep.env?.SCALE_TEST_IMAGE,
-      'the suite must consume the preflight output, not re-resolve (and re-skip) the image itself',
+      'the suite must consume the addressable in-cluster ref produced from the preflight output',
+    ).toContain('steps.localimg.outputs.image');
+    const copyStep = (scale.steps ?? []).find(
+      // biome-ignore lint/suspicious/noExplicitAny: see above.
+      (s: any) => typeof s.run === 'string' && s.run.includes('crane copy'),
+    );
+    expect(
+      copyStep?.env?.RESOLVED_IMAGE,
+      'the in-cluster ref must derive from the preflight output, not a re-resolve',
     ).toContain(`needs.${PREFLIGHT_JOB}.outputs.image`);
     expect(
       'if' in runStep,
@@ -427,40 +439,52 @@ describe('the private image is authenticated end to end, no false-green (#670 cr
     ).toContain('${{ github.repository }}');
   });
 
-  it('loads the resolved image INTO kind so the private pod can pull it (#3)', () => {
+  it('copies the signed digest into an in-cluster registry so the pod can pull it (#3, remedy A)', () => {
     // The consumer (`scale-to-zero-cache`) deploys to a kind cluster with NO
-    // imagePullSecret. For a private image the pod would ErrImagePull. The
-    // self-contained fix: pull on the runner (authenticated) and `kind load` it
-    // into the node store, so the pod pulls locally (IfNotPresent) with no creds.
+    // imagePullSecret, and `docker pull` + `kind load` CANNOT make the resolver's
+    // OCI-index digest addressable (docker save drops the index digest + repo
+    // name). Remedy A: stand up an in-cluster registry, `crane copy` the signed
+    // digest into it (crane preserves the digest), and deploy the localhost ref
+    // the node resolves via certs.d — authenticated on the runner, no pod creds.
     const login = steps(SCALE_JOB).find((s) => usesAction(s, 'docker/login-action'));
-    const pull = runStep(SCALE_JOB, 'docker pull');
-    const load = runStep(SCALE_JOB, 'kind load docker-image');
+    const registry = runStep(SCALE_JOB, 'docker run -d --restart=always -p 127.0.0.1:5001:5000');
+    const certsd = runStep(SCALE_JOB, '/etc/containerd/certs.d');
+    const craneInstall = steps(SCALE_JOB).find(
+      // biome-ignore lint/suspicious/noExplicitAny: see above.
+      (s: any) => typeof s.name === 'string' && s.name.includes('Install crane'),
+    );
+    const copy = runStep(SCALE_JOB, 'crane copy');
+    expect(login, 'the scale job must authenticate to READ the private source digest').toBeTruthy();
+    expect(craneInstall, 'the scale job must install crane (checksum-pinned)').toBeTruthy();
+    expect(registry, 'the scale job must stand up an in-cluster registry').toBeTruthy();
+    expect(certsd, 'the node must be wired to the registry via certs.d config_path').toBeTruthy();
+    expect(copy, 'the scale job must crane-copy the signed digest into the registry').toBeTruthy();
+    // Assert the REAL command, not a log line: `crane copy <src> <local_ref>`.
+    // (A `runStep` needle of "crane copy" alone also matches an echo, so a removed
+    // command would not red — this asserts the invocation itself.)
     expect(
-      login,
-      'the scale job must authenticate to pull the private image on the runner',
-    ).toBeTruthy();
-    expect(pull, 'the scale job must pull the resolved image on the runner').toBeTruthy();
-    expect(
-      load,
-      'the scale job must kind-load the image so the pod pulls from the node',
-    ).toBeTruthy();
+      copy.run,
+      'the scale job must actually invoke crane copy of the resolved image',
+    ).toContain('crane copy "${RESOLVED_IMAGE}" "${local_ref}"');
+    // crane copy PRESERVES the digest — the copied ref must be the SAME digest.
+    expect(copy.run, 'the in-cluster ref must reuse the resolved digest, not a re-tag').toContain(
+      'digest="${RESOLVED_IMAGE##*@}"',
+    );
   });
 
-  it('makes the image pull/load FAIL-LOUD — no continue-on-error swallows it (#3)', () => {
+  it('makes the image copy/pull FAIL-LOUD — no continue-on-error swallows it (#3)', () => {
     // The #659 defect is a deterministic infra failure swallowed into a green.
-    // A missing image load is NOT Knative scale-timing flake, so it must fail the
-    // job. continue-on-error is therefore scoped to the flaky SUITE step only,
-    // never the job — a job-level tolerance would swallow login/pull/load too.
+    // A failed crane copy / crictl pull is NOT Knative scale-timing flake, so it
+    // must fail the job. continue-on-error is therefore scoped to the flaky SUITE
+    // step only, never the job — a job-level tolerance would swallow it too.
     const job = workflow.jobs[SCALE_JOB];
     expect(
       'continue-on-error' in job,
-      'a job-level continue-on-error would swallow the image load/pull failure into a false green',
+      'a job-level continue-on-error would swallow the image copy/pull failure into a false green',
     ).toBe(false);
 
-    const load = runStep(SCALE_JOB, 'kind load docker-image');
-    expect('continue-on-error' in load, 'the kind-load step must fail loud').toBe(false);
-    const pull = runStep(SCALE_JOB, 'docker pull');
-    expect('continue-on-error' in pull, 'the pull step must fail loud').toBe(false);
+    const copy = runStep(SCALE_JOB, 'crane copy');
+    expect('continue-on-error' in copy, 'the copy/addressability step must fail loud').toBe(false);
 
     const suite = runStep(SCALE_JOB, 'test-e2e-scale');
     expect(
@@ -469,17 +493,24 @@ describe('the private image is authenticated end to end, no false-green (#670 cr
     ).toBe(true);
   });
 
-  it('verifies the image actually landed in the node store, not just kind-load exit 0 (#3)', () => {
-    // `kind load` can exit 0 while leaving the image un-addressable by the
-    // kubelet — the pod then ErrImagePulls inside the TOLERATED suite step and
-    // reads as a false green. The load step must PROVE the image is in the CRI
-    // store (crictl) and fail loud otherwise, so the fail-loud guarantee is real.
-    const load = runStep(SCALE_JOB, 'kind load docker-image');
+  it('proves the EXACT deployed ref is addressable via crictl inspecti, not a substring (#3)', () => {
+    // A `crictl images | grep file-manager` substring can pass while the
+    // requested `@sha256:<digest>` ref is unresolvable (the kind-load failure
+    // mode) — the pod then ErrImagePulls inside the TOLERATED suite step and
+    // reads as a false green. The guard must assert the ACTUAL ref is addressable
+    // with `crictl inspecti "<ref>"` (exit code), and fail loud otherwise.
+    const copy = runStep(SCALE_JOB, 'crane copy');
     expect(
-      load.run,
-      'the load step must verify presence via crictl, not trust the exit code',
-    ).toContain('crictl images');
-    expect(load.run, 'a missing image must fail loud (exit 1), not be swallowed').toMatch(/exit 1/);
+      copy.run,
+      'the guard must inspecti the exact deployed ref, not grep the image list',
+    ).toContain('crictl inspecti "${local_ref}"');
+    expect(copy.run, 'an un-addressable ref must fail loud (exit 1), not be swallowed').toMatch(
+      /exit 1/,
+    );
+    // The ref inspected must be the one the suite deploys.
+    expect(copy.run, 'the deployed ref is the localhost in-cluster ref (same digest)').toContain(
+      'localhost:5001/file-manager@${digest}',
+    );
   });
 });
 

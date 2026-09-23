@@ -208,17 +208,17 @@ jobs:
     # A missing image is NOT a flake, so it is decided in scale-image-preflight
     # (no continue-on-error) before this job starts.
     needs: scale-image-preflight
-    # `packages: read` lets this job pull the PRIVATE file-manager image on the
-    # runner so it can `kind load` it into the node store (#670 cr#3).
+    # `packages: read` lets this job READ the PRIVATE file-manager source digest
+    # (crane copy) to relay it into the in-cluster registry (#670 cr#3, remedy A).
     permissions:
       contents: read
       packages: read
     # continue-on-error is NOT set at the JOB level (deliberately): a job-level
     # tolerance would swallow a deterministic infra failure — a failed GHCR
-    # login, docker pull, or `kind load` — into a green, which is #659's defect
-    # by another door. It is scoped to the flaky SUITE step alone (real Knative
-    # scale-timing flake on shared runners), so infra breakage fails LOUD while a
-    # scale hiccup stays non-paging (#670 cr#3).
+    # login, crane copy, node crictl pull, or the addressability check — into a
+    # green, which is #659's defect by another door. It is scoped to the flaky
+    # SUITE step alone (real Knative scale-timing flake on shared runners), so
+    # infra breakage fails LOUD while a scale hiccup stays non-paging (#670 cr#3).
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -234,8 +234,43 @@ jobs:
         with:
           install_only: true
 
-      - name: Create kind cluster
-        run: kind create cluster --name kn-next-operator-test-e2e --wait 120s
+      # config_path enables a per-registry certs.d override, which is how the node
+      # is pointed at the in-cluster registry below (#670 cr#3 / remedy A).
+      - name: Create kind cluster (with registry certs.d config_path)
+        run: |
+          set -euo pipefail
+          cat <<'EOF' | kind create cluster --name kn-next-operator-test-e2e --wait 120s --config=-
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          containerdConfigPatches:
+          - |-
+            [plugins."io.containerd.grpc.v1.cri".registry]
+              config_path = "/etc/containerd/certs.d"
+          EOF
+
+      # REMEDY A (#670 cr#3): stand up an in-cluster registry the kind node can
+      # reach, so the operator can deploy a DIGEST-PINNED ref that the kubelet
+      # actually resolves. `docker pull` + `kind load` CANNOT do this for the
+      # image the resolver picks: supply-chain.yml builds with provenance
+      # mode=max + the OCI exporter, so the GHCR digest is an OCI *index*; `docker
+      # save`/`kind load` drop the index digest and the repo name, leaving the
+      # requested `@sha256:<index>` ref un-addressable (ErrImagePull). `crane
+      # copy` preserves the digest byte-for-byte into a registry the node pulls
+      # from. Proven locally (crane copy + node `crictl pull`/`inspecti` exit 0;
+      # kind-load `crictl inspecti` exit 1).
+      - name: Start in-cluster registry + wire the kind node to it
+        run: |
+          set -euo pipefail
+          reg=kind-registry
+          docker run -d --restart=always -p 127.0.0.1:5001:5000 --name "$reg" registry:2
+          # Join the kind network so the node can resolve the registry by name.
+          docker network connect kind "$reg"
+          # certs.d: the node rewrites `localhost:5001/...` (the ref the operator
+          # deploys) to the in-network registry endpoint.
+          node=kn-next-operator-test-e2e-control-plane
+          docker exec "$node" mkdir -p /etc/containerd/certs.d/localhost:5001
+          printf '[host."http://%s:5000"]\n' "$reg" \
+            | docker exec -i "$node" cp /dev/stdin /etc/containerd/certs.d/localhost:5001/hosts.toml
 
       - name: Install Knative Serving (scale-to-zero)
         # The config-autoscaler patch below (scale-to-zero-pod-retention-period:0s,
@@ -260,18 +295,24 @@ jobs:
           kubectl wait --for=condition=Available --timeout=300s \
             -n knative-serving deployment/controller deployment/webhook deployment/autoscaler
 
-      # THE CONSUMER PULL (#670 cr#3). file-manager is a PRIVATE GHCR package and
-      # this kind cluster has NO imagePullSecret, so the woken pod would
-      # ErrImagePull against the registry. Instead: authenticate on the runner,
-      # pull the resolved digest, and `kind load` it into the node's image store.
-      # The pod then pulls from the node locally (Knative sets imagePullPolicy for
-      # a digest ref to IfNotPresent), needing no pod-level registry credentials.
-      #
-      # These three steps are FAIL-LOUD: a login/pull/load failure is
-      # deterministic infra breakage, not Knative scale-timing flake, and this
-      # job carries NO job-level continue-on-error — so it reds the job (and the
-      # workflow), rather than being swallowed into a green that proves nothing
-      # (#659's defect by another door). Only the suite step below is tolerated.
+      - name: Install crane (version + checksum pinned)
+        env:
+          CRANE_VERSION: v0.21.7
+          # sha256 of go-containerregistry_Linux_x86_64.tar.gz from the v0.21.7
+          # release's checksums.txt (github.com/google/go-containerregistry).
+          CRANE_SHA256: 1a57bc98207fa1c0d04bf760699099e26f8383499bfd55b99c1b919a928a7230
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/crane.tar.gz \
+            "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
+          echo "${CRANE_SHA256}  /tmp/crane.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/crane.tar.gz -C /tmp crane
+          sudo install -m 0755 /tmp/crane /usr/local/bin/crane
+          crane version
+
+      # file-manager is a PRIVATE GHCR package: crane copy needs credentials to
+      # READ the source digest. The docker keychain this login writes is what
+      # crane authenticates with.
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -279,51 +320,70 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull + kind-load the resolved file-manager image (fail-loud)
+      # THE CONSUMER PULL (#670 cr#3, remedy A). Copy the resolved, cosign-verified
+      # GHCR digest into the in-cluster registry with `crane copy` (which PRESERVES
+      # the digest, index and all — unlike `docker save`/`kind load`), then have
+      # the node pull that same digest and PROVE it is addressable with
+      # `crictl inspecti` on the EXACT ref the operator will deploy. The suite then
+      # deploys the localhost:5001 ref, so the kubelet resolves it via certs.d to
+      # the in-cluster registry — no pod-level imagePullSecret, and no dependence
+      # on the private GHCR package being reachable from the pod.
+      #
+      # FAIL-LOUD: crane copy / crictl pull / the inspecti addressability check are
+      # deterministic infra, NOT Knative scale-timing flake, and this job carries
+      # no job-level continue-on-error — so a failure reds the job (and workflow)
+      # rather than being swallowed into a green that proves nothing (#659's defect
+      # by another door). Only the suite step below is tolerated.
+      - name: Copy the signed digest to the in-cluster registry + prove it is addressable (fail-loud)
+        id: localimg
         env:
-          SCALE_TEST_IMAGE: ${{ needs.scale-image-preflight.outputs.image }}
+          RESOLVED_IMAGE: ${{ needs.scale-image-preflight.outputs.image }}
         run: |
           set -euo pipefail
-          echo "Pulling resolved image on the runner: ${SCALE_TEST_IMAGE}"
-          docker pull "${SCALE_TEST_IMAGE}"
-          echo "Loading it into the kind node store so the private-image pod pulls locally"
-          kind load docker-image "${SCALE_TEST_IMAGE}" --name kn-next-operator-test-e2e
-          # VERIFY the load actually populated the node's container store, don't
-          # trust the exit code alone: `kind load` can succeed while leaving the
-          # image un-addressable by the kubelet (IfNotPresent), which would
-          # ErrImagePull inside the tolerated suite step and read as a false
-          # green. Assert the image is present in the node's CRI store; fail loud
-          # if not (#670 cr#3).
+          # Same digest, in-cluster ref the node can resolve via certs.d.
+          digest="${RESOLVED_IMAGE##*@}"
+          local_ref="localhost:5001/file-manager@${digest}"
+          echo "crane copy ${RESOLVED_IMAGE} -> ${local_ref} (digest preserved)"
+          crane copy "${RESOLVED_IMAGE}" "${local_ref}"
+
           node="kn-next-operator-test-e2e-control-plane"
-          echo "Verifying the image is present in the kind node's container store"
-          if ! docker exec "$node" crictl images | grep -F "file-manager"; then
-            echo "::error::kind load reported success but file-manager is NOT in the node image store — the pod would ErrImagePull. Failing loud rather than letting the tolerated suite step swallow it." >&2
+          echo "Pulling the exact deployed ref on the node from the in-cluster registry"
+          docker exec "$node" crictl pull "${local_ref}"
+          # ADDRESSABILITY is the property that matters, not a substring of the
+          # image list: assert the node can resolve the EXACT ref the operator
+          # deploys. A `crictl pull` that appeared to work but left the digest ref
+          # unresolvable (the kind-load failure mode) fails loud here instead of
+          # ErrImagePulling inside the tolerated suite step.
+          echo "Asserting the deployed ref is addressable in the node CRI store"
+          if ! docker exec "$node" crictl inspecti "${local_ref}" >/dev/null; then
+            echo "::error::${local_ref} is NOT addressable in the node CRI store — the pod would ErrImagePull. Failing loud rather than letting the tolerated suite step swallow it." >&2
             exit 1
           fi
+          echo "image=${local_ref}" >> "$GITHUB_OUTPUT"
 
-      # SCALE_TEST_IMAGE is a real, signed, pullable, digest-pinned file-manager
-      # image that serves /api/health (the #39 activation spec asserts an HTTP 200
-      # from a woken pod), resolved — and its absence FAILED, never skipped — in
-      # the scale-image-preflight job (#659/#670), and pre-loaded into the node
-      # store above so the private-image pod can start without pod creds.
+      # SCALE_TEST_IMAGE is the in-cluster ref (SAME signed digest as the GHCR
+      # image the preflight resolved + verified), proven addressable on the node
+      # above, so the operator deploys a ref the kubelet actually resolves.
       #
       # continue-on-error lives HERE, on the flaky suite step alone: the real
       # Knative install + scale-timing invariant can hiccup on shared runners and
-      # must not page. Infra failures (login/pull/load) are NOT tolerated — they
-      # fail the job loud (no job-level continue-on-error), so this tolerance
-      # cannot swallow them (#670 cr#3).
+      # must not page. Infra failures (crane copy / pull / addressability) are NOT
+      # tolerated — they fail the job loud (no job-level continue-on-error), so
+      # this tolerance cannot swallow them (#670 cr#3).
       - name: Run scale-to-zero e2e suite (activation #39)
         continue-on-error: true
         working-directory: packages/kn-next-operator
         env:
           KIND_CLUSTER: kn-next-operator-test-e2e
           CERT_MANAGER_INSTALL_SKIP: 'true'
-          SCALE_TEST_IMAGE: ${{ needs.scale-image-preflight.outputs.image }}
+          SCALE_TEST_IMAGE: ${{ steps.localimg.outputs.image }}
         run: make test-e2e-scale
 
-      - name: Tear down kind cluster
+      - name: Tear down kind cluster + registry
         if: always()
-        run: kind delete cluster --name kn-next-operator-test-e2e || true
+        run: |
+          kind delete cluster --name kn-next-operator-test-e2e || true
+          docker rm -f kind-registry || true
 
   # CLI e2e (build tag `e2e_cli`): the REAL built kn-next CLI (plain Node — no
   # Bun) runs `doctor`, `db bind`, and `status` against a live kind + Knative +
