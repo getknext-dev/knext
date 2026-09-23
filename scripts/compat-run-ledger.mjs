@@ -75,6 +75,7 @@
 
 import { appendFileSync, existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { COMPAT_MODES, isRcRef } from './compat-credential-ref.mjs';
 
 /** The artifact filename. Exported so the workflow's upload path is one fact. */
 export const DEFAULT_OUT_FILE = 'compat-run-ledger.json';
@@ -110,6 +111,11 @@ export const DEFAULT_FINGERPRINT_FILE = 'fingerprint/compat-window-fingerprint.j
  * @property {string|undefined} event
  * @property {string} lane
  * @property {string|null} ref
+ * @property {string|null} compatMode   credential | early-warning | null (a workflow with no mode)
+ * @property {boolean} credential      true only for a credential-mode night (ADR-0056)
+ * @property {string|null} knextRef     the knext ref under test (refs/tags/vX.Y.Z-rc.N, or main's ref)
+ * @property {string|null} knextSha     the knext commit actually checked out
+ * @property {string|null} workflowSha  the commit whose workflow file EXECUTED
  * @property {string|null} windowFingerprint
  * @property {unknown} windowFingerprintComponents
  * @property {unknown} windowFingerprintPackages
@@ -173,6 +179,10 @@ const missingRow = (shard) => ({
  * @param {string} [input.runId]
  * @param {string} [input.runAttempt]
  * @param {string} [input.event]
+ * @param {string} [input.compatMode]   KNEXT_COMPAT_MODE (ADR-0056)
+ * @param {string} [input.knextRef]     the resolved knext ref under test
+ * @param {string} [input.knextSha]     the resolved knext commit under test
+ * @param {string} [input.workflowSha]  github.workflow_sha
  * @returns {{ledger:Ledger, errors:string[], redDetail:string, table:string}}
  */
 export function buildLedger({
@@ -183,6 +193,10 @@ export function buildLedger({
   runId,
   runAttempt,
   event,
+  compatMode,
+  knextRef,
+  knextSha,
+  workflowSha,
 }) {
   /** @type {string[]} */
   const errors = [];
@@ -301,6 +315,15 @@ export function buildLedger({
     event,
     lane,
     ref: reported[0]?.ref ?? null,
+    // #850 / ADR-0056 — WHICH knext ref this night ran against. `ref` above is
+    // the next.js SUITE ref; these are knext's. A night with no recorded mode
+    // (a workflow that predates ADR-0056, or another lane) is non-credential:
+    // that is the direction that cannot flatter a count.
+    compatMode: COMPAT_MODES.includes(compatMode) ? compatMode : null,
+    credential: compatMode === 'credential',
+    knextRef: knextRef || null,
+    knextSha: knextSha || null,
+    workflowSha: workflowSha || null,
     windowFingerprint: fingerprint?.fingerprint ?? null,
     windowFingerprintComponents: fingerprint?.components ?? null,
     windowFingerprintPackages: fingerprint?.packages ?? null,
@@ -333,6 +356,21 @@ export function buildLedger({
   // would see three successes. `tests/compat-shard-flake-attribution.test.ts`
   // guards that step's presence and its `if:` for exactly this reason; do not
   // "simplify" either without reading that guard first.
+  // ADR-0056 — a credential night must have run on a frozen RC tag. The
+  // credential-ref job refuses before any of this runs, so reaching here with a
+  // non-RC ref means the wiring broke; fail the job rather than bank a ledger
+  // that claims a credential it cannot back. The audit re-checks independently.
+  if (compatMode === 'credential' && !isRcRef(knextRef)) {
+    errors.push(
+      `credential-mode night ran against ${JSON.stringify(knextRef ?? null)}, not an RC tag ` +
+        '(refs/tags/vX.Y.Z-rc.N) — a credential night on any other ref cannot count (ADR-0056).',
+    );
+  }
+  if (compatMode === 'credential' && !/^[0-9a-f]{40}$/.test(String(knextSha ?? ''))) {
+    errors.push(
+      'credential-mode night recorded no knext commit sha — the RC under test is unprovable.',
+    );
+  }
   if (seen === 0) {
     errors.push('no shard summaries at all — the run produced no ledger; that is NOT green');
   }
@@ -392,6 +430,9 @@ export function renderTable(ledger) {
     '',
     `shards: ${ledger.shardsSeen} reported of ${ledger.shardsExpected ?? 'UNDECLARED'} expected — ` +
       `${ledger.complete ? 'COMPLETE' : `INCOMPLETE (missing ${ledger.missingShards.join(', ') || 'n/a'})`}`,
+    '',
+    `knext under test: \`${ledger.knextRef ?? 'n/a'}\` @ \`${ledger.knextSha ?? 'n/a'}\` — ` +
+      `${ledger.credential ? 'CREDENTIAL night (RC tag)' : `NON-credentialing (${ledger.compatMode ?? 'no mode recorded'})`}`,
     '',
     `frozen-set fingerprint: \`${ledger.windowFingerprint ?? 'MISSING'}\``,
     '',
@@ -516,6 +557,10 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     runId: process.env.RUN_ID,
     runAttempt: process.env.RUN_ATTEMPT,
     event: process.env.EVENT_NAME,
+    compatMode: process.env.KNEXT_COMPAT_MODE,
+    knextRef: process.env.KNEXT_CHECKOUT_REF,
+    knextSha: process.env.KNEXT_CHECKOUT_SHA,
+    workflowSha: process.env.WORKFLOW_SHA,
   });
 
   // WRITE FIRST, ALWAYS. The upload step is `if: always()`, so an INCOMPLETE

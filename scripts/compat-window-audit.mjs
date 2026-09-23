@@ -89,21 +89,64 @@
  *      A night attributed to a lane still disqualifies THAT lane. This buys
  *      cross-lane independence, never a lane laundering its own lost nights.
  *
+ *   6. A CREDENTIAL NIGHT RAN ON A FROZEN RC TAG (#850, ADR-0056). The v1.0
+ *      credential is earned against a release-candidate tag, not `main`. A
+ *      `main` (early-warning) night is EXCLUDED from a credential window the
+ *      way a bun night is excluded from the node window — it neither extends a
+ *      streak nor restarts one. A night that CLAIMS credential by any one
+ *      signal (`credential`, `compatMode`, or an RC-shaped `knextRef`) is
+ *      selected and must satisfy all of them, so a forged or half-wired claim
+ *      is disqualified (and restarts the count) rather than banked. Streak
+ *      continuity stays keyed on the FINGERPRINT, not the ref: cutting rc.N+1
+ *      restarts only the cells whose fingerprint moved.
+ *
+ *      Unresolved nights follow rule 5's shape one axis over: every run also
+ *      publishes a `compat-mode-<mode>` marker, so a lost early-warning night
+ *      cannot restart a credential window, while a lost night of UNKNOWN mode
+ *      is admitted (fail closed).
+ *
+ *      `--scope early-warning` reports the `main` streak instead. It is a
+ *      report about `main`, never a credential: its `met` is always false.
+ *
  * USAGE
  *   node scripts/compat-window-audit.mjs --dir <dir-of-ledger-json>
  *   node scripts/compat-window-audit.mjs --fetch --limit 100  # needs `gh`
  *   node scripts/compat-window-audit.mjs --fetch --lane bun --json
+ *   node scripts/compat-window-audit.mjs --fetch --scope early-warning
+ *   node scripts/compat-window-audit.mjs --fetch --matrix   # every supported cell
  */
 
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { COMPAT_MODES, isRcRef } from './compat-credential-ref.mjs';
 
 /** The v1.0 gate: fourteen consecutive qualifying nights. */
 export const WINDOW_REQUIRED_NIGHTS = 14;
 
-/** The lane whose streak is the compat-matrix credential. */
+/** The default lane for a single-lane audit (the node × turbopack cell). */
 export const CREDENTIAL_LANE = 'node';
+
+/**
+ * The v1.0 credential matrix (#1218, ADR-0056): every SUPPORTED runtime×builder
+ * cell earns its own 14-night window. `lane` is the cell's window key — the id
+ * its runs publish as `compat-lane-<lane>` and record in the ledger. The two
+ * lanes that exist today keep their historical ids (`node`, `bun`); new cells
+ * take `<runtime>-<builder>`. `wired` says whether a credential cron produces
+ * nights for the cell yet. An unwired cell simply has no nights, so it is NOT
+ * met — `auditCredentialMatrix` never treats it as vacuously passing.
+ */
+export const CREDENTIAL_CELLS = Object.freeze([
+  Object.freeze({ runtime: 'node', builder: 'turbopack', lane: 'node', wired: true }),
+  Object.freeze({ runtime: 'bun', builder: 'turbopack', lane: 'bun', wired: true }),
+  Object.freeze({ runtime: 'node', builder: 'webpack', lane: 'node-webpack', wired: false }),
+  Object.freeze({ runtime: 'bun', builder: 'webpack', lane: 'bun-webpack', wired: false }),
+  Object.freeze({ runtime: 'node', builder: 'vinext', lane: 'node-vinext', wired: false }),
+  Object.freeze({ runtime: 'bun', builder: 'vinext', lane: 'bun-vinext', wired: false }),
+]);
+
+/** Which nights a window is built from. `credential` is the v1.0 gate. */
+export const AUDIT_SCOPES = Object.freeze(['credential', 'early-warning']);
 
 /**
  * How many runs `--fetch` asks `gh run list` for by default.
@@ -142,6 +185,44 @@ export function laneFromArtifacts(artifacts) {
       .filter((lane) => lane.length > 0),
   );
   return lanes.size === 1 ? [...lanes][0] : null;
+}
+
+/**
+ * Prefix of the per-run artifact whose NAME carries the run's mode
+ * (credential | early-warning). Same contract as the lane marker: read from the
+ * listing, never downloaded, so it attributes a night whose ledger is gone.
+ */
+export const MODE_MARKER_PREFIX = 'compat-mode-';
+
+/**
+ * The mode a run declares through its marker artifact, or `null` when absent,
+ * unknown or conflicting (fail closed: the night is admitted to credential
+ * windows).
+ *
+ * @param {Array<{name?: string}>} artifacts
+ */
+export function modeFromArtifacts(artifacts) {
+  const modes = new Set(
+    (Array.isArray(artifacts) ? artifacts : [])
+      .map((a) => (typeof a?.name === 'string' ? a.name : ''))
+      .filter((name) => name.startsWith(MODE_MARKER_PREFIX))
+      .map((name) => name.slice(MODE_MARKER_PREFIX.length)),
+  );
+  if (modes.size !== 1) return null;
+  const [mode] = [...modes];
+  return COMPAT_MODES.includes(mode) ? mode : null;
+}
+
+/**
+ * Does this ledger CLAIM to be a credential night, by ANY signal? Deliberately
+ * a union: a night that says so by one signal is selected into the credential
+ * window and then graded on all of them, so a half-wired claim is disqualified
+ * rather than silently dropped or silently banked.
+ */
+export function claimsCredential(ledger) {
+  return (
+    ledger?.credential === true || ledger?.compatMode === 'credential' || isRcRef(ledger?.knextRef)
+  );
 }
 
 const REPO = 'getknext-dev/knext';
@@ -192,8 +273,9 @@ export const UNRESOLVED_REASONS = Object.freeze([
  * @param {string|number} runId
  * @param {typeof UNRESOLVED_REASONS[number]} reason
  * @param {string|null} [lane] the lane declared by the marker artifact
+ * @param {string|null} [mode] the mode declared by the mode marker artifact
  */
-export function unresolvedNight(runId, reason, lane = null) {
+export function unresolvedNight(runId, reason, lane = null, mode = null) {
   if (!UNRESOLVED_REASONS.includes(reason)) {
     throw new Error(`compat-window-audit: unknown unresolved reason ${reason}`);
   }
@@ -201,6 +283,7 @@ export function unresolvedNight(runId, reason, lane = null) {
     runId: String(runId),
     event: 'schedule',
     lane: typeof lane === 'string' && lane.length > 0 ? lane : null,
+    compatMode: COMPAT_MODES.includes(mode) ? mode : null,
     unresolved: reason,
     shards: [],
   };
@@ -216,10 +299,11 @@ export function isUnresolved(ledger) {
  * alone (rule 1 is cross-night and lives in `auditWindow`).
  *
  * @param {Record<string, any>} ledger a parsed `compat-run-ledger` artifact
- * @param {{lane?: string}} [opts]
+ * @param {{lane?: string, scope?: string}} [opts]
  */
 export function gradeNight(ledger, opts = {}) {
   const lane = opts.lane ?? CREDENTIAL_LANE;
+  const scope = opts.scope ?? 'credential';
   // A night we could not read is disqualified on that fact alone. Grading it
   // against the other rules would be theatre — every field it would be judged
   // on is missing precisely because the ledger is.
@@ -230,6 +314,9 @@ export function gradeNight(ledger, opts = {}) {
       event: ledger.event ?? null,
       runAttempt: null,
       ref: null,
+      knextRef: null,
+      knextSha: null,
+      compatMode: ledger.compatMode ?? null,
       fingerprint: null,
       fingerprintComponents: null,
       shardsExpected: null,
@@ -278,6 +365,22 @@ export function gradeNight(ledger, opts = {}) {
   if (typeof ledger?.windowFingerprint !== 'string' || ledger.windowFingerprint.length === 0) {
     disqualifiers.push('no-fingerprint');
   }
+  // Rule 6 (ADR-0056): a credential night ran on a frozen RC tag, says so, and
+  // names the commit. All three, because a claim by any one of them is what
+  // selected the night — anything less is a half-wired claim.
+  if (scope === 'credential') {
+    if (!isRcRef(ledger?.knextRef)) {
+      disqualifiers.push(
+        `non-credential-ref: ${String(ledger?.knextRef ?? null)} is not an RC tag`,
+      );
+    }
+    if (ledger?.credential !== true || ledger?.compatMode !== 'credential') {
+      disqualifiers.push('not-a-credential-run');
+    }
+    if (!/^[0-9a-f]{40}$/.test(String(ledger?.knextSha ?? ''))) {
+      disqualifiers.push('no-knext-sha');
+    }
+  }
 
   // The shard-COUNT assertion. `shardsExpected` is what the run intended to
   // produce; `shardsSeen` and the actual row count are what it did. Any
@@ -314,6 +417,9 @@ export function gradeNight(ledger, opts = {}) {
     event: ledger?.event ?? null,
     runAttempt: String(ledger?.runAttempt ?? '1'),
     ref: ledger?.ref ?? null,
+    knextRef: ledger?.knextRef ?? null,
+    knextSha: ledger?.knextSha ?? null,
+    compatMode: ledger?.compatMode ?? null,
     fingerprint: ledger?.windowFingerprint ?? null,
     // ADR-0039's two halves — `harness` (the workflow, scripts/e2e-*, the deploy
     // manifest) and `packed` (the built @getknext/* closure). Kept because
@@ -354,12 +460,35 @@ export function gradeNight(ledger, opts = {}) {
  *     the other lane" is the inference the ledger forbids, and it is the
  *     inference that merges two streaks into one.
  */
-export function selectLaneNights(ledgers, lane = CREDENTIAL_LANE) {
+export function selectLaneNights(ledgers, lane = CREDENTIAL_LANE, scope = 'credential') {
+  if (!AUDIT_SCOPES.includes(scope)) {
+    throw new Error(`compat-window-audit: unknown scope ${scope}`);
+  }
   return ledgers
     .filter(
       (l) => l?.event === 'schedule' && (l?.lane === lane || (isUnresolved(l) && l?.lane == null)),
     )
+    .filter((l) => inScope(l, scope))
     .sort((a, b) => Number(a.runId) - Number(b.runId));
+}
+
+/**
+ * Rule 6's selection half. A `main` night is NOT a failed credential night — it
+ * is not a credential night at all — so it is filtered out BEFORE grading,
+ * exactly as a bun night is filtered out of the node window. Were it graded
+ * instead, a red `main` night would restart the credential count; were it
+ * counted, `main` would advance it. Neither may happen.
+ *
+ * An unresolved night is placed by its MODE marker; with no readable mode it is
+ * admitted to BOTH scopes, because its mode is exactly what we failed to read.
+ */
+function inScope(ledger, scope) {
+  if (isUnresolved(ledger)) {
+    const mode = ledger?.compatMode ?? null;
+    if (mode === null) return true;
+    return scope === 'credential' ? mode === 'credential' : mode === 'early-warning';
+  }
+  return scope === 'credential' ? claimsCredential(ledger) : !claimsCredential(ledger);
 }
 
 /**
@@ -367,13 +496,16 @@ export function selectLaneNights(ledgers, lane = CREDENTIAL_LANE) {
  * streaks of qualifying nights.
  *
  * @param {Array<Record<string, any>>} ledgers
- * @param {{lane?: string, requiredNights?: number}} [opts]
+ * @param {{lane?: string, requiredNights?: number, scope?: string}} [opts]
  */
 export function auditWindow(ledgers, opts = {}) {
   const lane = opts.lane ?? CREDENTIAL_LANE;
   const requiredNights = opts.requiredNights ?? WINDOW_REQUIRED_NIGHTS;
+  const scope = opts.scope ?? 'credential';
 
-  const nights = selectLaneNights(ledgers ?? [], lane).map((l) => gradeNight(l, { lane }));
+  const nights = selectLaneNights(ledgers ?? [], lane, scope).map((l) =>
+    gradeNight(l, { lane, scope }),
+  );
 
   /** @type {Array<{fingerprint: string, nights: number, runIds: string[], startRunId: string, endRunId: string, restartCause: string|null}>} */
   const streaks = [];
@@ -485,6 +617,7 @@ export function auditWindow(ledgers, opts = {}) {
   // line can never be read as "we are fourteen nights green right now".
   return {
     lane,
+    scope,
     requiredNights,
     nights,
     streaks,
@@ -503,15 +636,49 @@ export function auditWindow(ledgers, opts = {}) {
         runId: n.runId,
         reason: n.unresolved,
       })),
-    met: longest.nights >= requiredNights,
+    // Only a CREDENTIAL window can meet the gate. An early-warning streak on
+    // `main` is a forecast, however long it runs.
+    met: scope === 'credential' && longest.nights >= requiredNights,
     shortfall: Math.max(0, requiredNights - current.nights),
+  };
+}
+
+/**
+ * The v1.0 verdict over the whole matrix: one independent credential window per
+ * cell (ADR-0056 D2). Cells never share a streak — each is audited from its own
+ * lane's nights, so a fingerprint move in one cannot touch another.
+ *
+ * `cells` defaults to EVERY supported cell, wired or not, so an unwired cell
+ * holds `allMet` false rather than being left out of the question.
+ *
+ * @param {Array<Record<string, any>>} ledgers
+ * @param {{cells?: string[], requiredNights?: number}} [opts]
+ */
+export function auditCredentialMatrix(ledgers, opts = {}) {
+  const cells = opts.cells ?? CREDENTIAL_CELLS.map((c) => c.lane);
+  /** @type {Record<string, ReturnType<typeof auditWindow>>} */
+  const out = {};
+  for (const lane of cells) {
+    out[lane] = auditWindow(ledgers, {
+      lane,
+      scope: 'credential',
+      requiredNights: opts.requiredNights,
+    });
+  }
+  return {
+    cells: out,
+    allMet: cells.length > 0 && cells.every((lane) => out[lane].met),
   };
 }
 
 /** Human-readable report. The CLI's default output. */
 export function formatReport(audit) {
   const lines = [];
-  lines.push(`compat window — ${audit.lane} lane, gate = ${audit.requiredNights} nights`);
+  lines.push(
+    audit.scope === 'early-warning'
+      ? `compat window — ${audit.lane} lane, EARLY WARNING scope (main nightlies — never a credential)`
+      : `compat window — ${audit.lane} lane, CREDENTIAL scope (RC-tag nights only), gate = ${audit.requiredNights} nights`,
+  );
   lines.push('');
   lines.push('run          fingerprint  shards  passed/failed/notRun  verdict');
   for (const n of audit.nights) {
@@ -586,6 +753,12 @@ export function formatReport(audit) {
   // `met` reads `longest` and `shortfall` reads `current` on purpose (see the
   // comment in `auditWindow`). Print both whenever they disagree, so "GATE MET"
   // can never be misread as "the lane is fourteen nights green right now".
+  if (audit.scope === 'early-warning') {
+    lines.push(
+      `EARLY WARNING — non-credentialing. ${audit.current.nights} consecutive qualifying main night(s); main nights never advance the v1.0 credential (ADR-0056).`,
+    );
+    return lines.join('\n');
+  }
   lines.push(
     audit.met
       ? audit.shortfall > 0
@@ -700,7 +873,9 @@ export function fetchLedgers(limit, deps = {}) {
     // reason that precedes the listing — an unreachable API — and that null is
     // what keeps rule 5's fail-closed behaviour for genuinely unknowable nights.
     let markerLane = null;
-    const unresolved = (reason) => out.push(unresolvedNight(run.databaseId, reason, markerLane));
+    let markerMode = null;
+    const unresolved = (reason) =>
+      out.push(unresolvedNight(run.databaseId, reason, markerLane, markerMode));
 
     let artifactsResponse;
     try {
@@ -739,6 +914,7 @@ export function fetchLedgers(limit, deps = {}) {
     // Read from the NAME in the listing — never downloaded, so it survives the
     // artifact's own expiry (an expired artifact is still listed).
     markerLane = laneFromArtifacts(artifacts);
+    markerMode = modeFromArtifacts(artifacts);
     const named = artifacts.filter((a) => a.name === LEDGER_ARTIFACT);
     const art = named.find((a) => !a.expired);
     if (!art) {
@@ -801,7 +977,32 @@ function main(argv) {
     console.error('compat-window-audit: pass --dir <dir> or --fetch [--limit N]');
     process.exit(2);
   }
-  const audit = auditWindow(ledgers, { lane });
+  const scope = arg('--scope', 'credential');
+  if (!AUDIT_SCOPES.includes(scope)) {
+    console.error(`compat-window-audit: --scope must be one of ${AUDIT_SCOPES.join(', ')}`);
+    process.exit(2);
+  }
+  if (argv.includes('--matrix')) {
+    const matrix = auditCredentialMatrix(ledgers);
+    if (argv.includes('--json')) {
+      console.log(JSON.stringify(matrix, null, 2));
+    } else {
+      for (const cell of CREDENTIAL_CELLS) {
+        const a = matrix.cells[cell.lane];
+        console.log(
+          `${cell.runtime}×${cell.builder}`.padEnd(18) +
+            ` lane=${cell.lane.padEnd(13)} ${cell.wired ? 'wired  ' : 'UNWIRED'} current ${a.current.nights}/${a.requiredNights}  ${a.met ? 'MET' : 'not met'}`,
+        );
+      }
+      console.log(
+        matrix.allMet
+          ? 'v1.0 CREDENTIAL MET — every supported cell banked its window on an RC tag.'
+          : 'v1.0 credential NOT met — every supported cell needs its own 14 RC-tag nights.',
+      );
+    }
+    return;
+  }
+  const audit = auditWindow(ledgers, { lane, scope });
   console.log(argv.includes('--json') ? JSON.stringify(audit, null, 2) : formatReport(audit));
   // Exit 0 always: this is a REPORT, not a gate. Making it fail CI would give
   // someone a reason to want it green, which is how a scoreboard becomes a

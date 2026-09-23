@@ -449,7 +449,13 @@ const ADMISSIBLE_IF = SHARED_ADMISSIBLE_IF;
  * by `ledgerStep()`, so "the audited step" and "the step the allowlist checks"
  * cannot drift into being two different steps.
  */
-const LEDGER_RUN_ALLOWLIST = [/^node knext\/scripts\/compat-run-ledger\.mjs$/];
+const LEDGER_RUN_ALLOWLIST = [
+  /^node knext\/scripts\/compat-run-ledger\.mjs$/,
+  // #850 / ADR-0056 — the precondition that stops an unresolved knext ref from
+  // becoming a checkout of the DEFAULT branch. It can only fail the job, never
+  // produce or relocate evidence; matched literally so nothing can ride along.
+  /^test -n "\$\{CHECKOUT_SHA\}"$/,
+];
 
 /** Job keys the ledger job may carry. Anything else is reported, not ignored. */
 const LEDGER_JOB_KEYS = new Set([
@@ -480,7 +486,19 @@ const LEDGER_STEP_KEYS = new Set(['name', 'id', 'env', 'run']);
  * inputs; they are excluded by being absent, not by being named, so a fourth
  * such knob added to the script is reported here too.
  */
-const LEDGER_STEP_ENV_KEYS = new Set(['RUN_ID', 'RUN_ATTEMPT', 'EVENT_NAME']);
+const LEDGER_STEP_ENV_KEYS = new Set([
+  'RUN_ID',
+  'RUN_ATTEMPT',
+  'EVENT_NAME',
+  // #850 / ADR-0056 — PROVENANCE, not paths: which knext ref the night ran
+  // against. None of them can relocate the ledger or its inputs; a wrong value
+  // is caught twice (the ledger fails a credential claim on a non-RC ref, and
+  // the audit re-grades every credential night on all three signals).
+  'KNEXT_COMPAT_MODE',
+  'KNEXT_CHECKOUT_REF',
+  'KNEXT_CHECKOUT_SHA',
+  'WORKFLOW_SHA',
+]);
 
 /**
  * Env inputs the audited step must actually SET, not merely be permitted to.
@@ -489,7 +507,18 @@ const LEDGER_STEP_ENV_KEYS = new Set(['RUN_ID', 'RUN_ATTEMPT', 'EVENT_NAME']);
  * gone. Delete `EVENT_NAME` and the ledger records `event: undefined` — evidence
  * without provenance, and nothing red anywhere.
  */
-const REQUIRED_STEP_ENV_KEYS = ['RUN_ID', 'RUN_ATTEMPT', 'EVENT_NAME'];
+const REQUIRED_STEP_ENV_KEYS = [
+  'RUN_ID',
+  'RUN_ATTEMPT',
+  'EVENT_NAME',
+  // #850: delete one of these and the ledger records a night with no knext ref
+  // — which the audit then refuses to count as credential. Required, not just
+  // permitted, so that loss reds here instead of silently zeroing a window.
+  'KNEXT_COMPAT_MODE',
+  'KNEXT_CHECKOUT_REF',
+  'KNEXT_CHECKOUT_SHA',
+  'WORKFLOW_SHA',
+];
 
 /** The ledger script's source — the authority for which env knobs exist. */
 const LEDGER_SCRIPT_SRC = readFileSync(
@@ -512,12 +541,21 @@ const SCRIPT_ENV_KNOBS = new Set(
  * The ONE knob the workflow may set at workflow level, where it is inherited by
  * every step: the declared shard total, which is the point of #695.
  */
-const SANCTIONED_INHERITED_ENV = new Set(['COMPAT_SHARD_TOTAL']);
+const SANCTIONED_INHERITED_ENV = new Set([
+  'COMPAT_SHARD_TOTAL',
+  // #850 / ADR-0056 — the ONE mode decision, made at workflow level from the
+  // cron literal (every job needs it: markers, resolver, alert). It is a
+  // provenance label, not a path, so it cannot point the evidence anywhere; the
+  // audited step also sets it explicitly.
+  'KNEXT_COMPAT_MODE',
+]);
 
 /** The audited step: the one whose `run:` is the sanctioned ledger command. */
 function ledgerStep(): WorkflowStep {
+  // The LEDGER command specifically (allowlist entry 0) — not any sanctioned
+  // command, or the #850 precondition step would be mistaken for it.
   const step = (job('shard-ledger').steps ?? []).find((s) =>
-    LEDGER_RUN_ALLOWLIST.some((rx) => rx.test(String(s.run ?? '').trim())),
+    LEDGER_RUN_ALLOWLIST[0].test(String(s.run ?? '').trim()),
   );
   if (!step) throw new Error('no step in shard-ledger runs the sanctioned ledger command');
   return step;

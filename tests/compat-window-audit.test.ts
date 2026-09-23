@@ -60,6 +60,14 @@ function night(over: Record<string, unknown> = {}) {
     event: 'schedule',
     lane: 'node',
     ref: 'v16.2.0',
+    // #850 / ADR-0056 — a CREDENTIAL night on a frozen RC tag, because that is
+    // the only kind the credential window grades. Every rule below is asserted
+    // on the nights that can actually count; `main` (early-warning) nights are
+    // covered in tests/compat-credential-ref.test.ts.
+    compatMode: 'credential',
+    credential: true,
+    knextRef: 'refs/tags/v1.0.0-rc.1',
+    knextSha: 'a'.repeat(40),
     complete: true,
     shardsExpected: 16,
     shardsSeen: 16,
