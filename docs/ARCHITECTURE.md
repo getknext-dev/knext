@@ -370,6 +370,8 @@ Knative scale-to-zero services incur a cold start cost each time a pod is create
 - **Bun (`runtime: bun`), run time:** `BUN_RUNTIME_TRANSPILER_CACHE_PATH` — Bun persists the *transpiled source* of large modules (≥ ~50KB) to the same volume. Alone: **~20% faster** time-to-first-response warm (287ms → 231ms); composes with the bytecode pass (145ms). Fail-open if the directory is missing or unwritable.
 
 > **Rejected with evidence — compile-to-binary (`bun build --compile --bytecode` on the whole app):** an earlier prototype shipped the app as a single Bun binary with embedded bytecode. Re-tested against the current standalone output, the **bundling** build **hard-fails**: the standalone server dynamically `require()`s dev-only modules pruned from the output and loads route chunks via runtime-computed paths a static bundle cannot capture. The per-file pass above is what survived measurement. See `docs/spikes/0001-bun-bytecode-pipeline.md` (superseded) — do not resurrect the bundle pipeline.
+>
+> **Update (2026-09-23, ADR-0054 Amendment 7):** this rejection is itself superseded. The standalone server on Bun now ships as a `bun build --compile --bytecode` executable (#1225): the missing piece was `compile.autoloadPackageJson`, dev-only modules are stubbed, and route chunks plus Next's `*.external` singletons stay on disk beside the executable rather than being bundled. Bytecode caching is mandatory for every supported runtime × builder cell, so the uncompiled `bun server.js` shape is not a supported configuration. The official suite has not yet been run on the compiled executable.
 
 ### Architecture: 2-Stage Docker Build
 

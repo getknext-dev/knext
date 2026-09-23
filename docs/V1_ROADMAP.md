@@ -164,7 +164,8 @@ What that means operationally:
   only cell-specific changes (e.g. the Bun build) restart one cell alone.
 - **No resolvable RC tag → the credential lane refuses.** It does not fall back to `main`.
 - **rc.1 is cut only once every cell's prerequisites have landed:** the webpack builder (#1219),
-  compiled bytecode bun-standalone (#1166), the bytecode-live check (#1221), and vinext × node
+  compiled bytecode bun-standalone (#1166 — the executable ships since #1225, but the official suite
+  has not yet run on it; ADR-0054 Amendment 7 retires the uncompiled path), the bytecode-live check (#1221), and vinext × node
   compile-cache wiring. Cutting it is a founder action.
 - `node scripts/compat-window-audit.mjs --fetch --matrix` prints every cell's credential window;
   v1.0 is met when all of them are. A cell with no credential lane wired yet is *not met*.
