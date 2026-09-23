@@ -164,14 +164,60 @@ export const PER_PATH_THRESHOLDS = {
  * type-only 309, template-literal continuation 64. Floors sit at the measured
  * value rounded DOWN to 0.5, per the ratchet convention. Raise them as coverage
  * lands; never lower one to get green.
+ *
+ * ## Ratchet: coverage batch B2 (#1233) — cr-builder.ts / deploy.ts / rollback.ts / db-bind.ts
+ *
+ * The cluster-write path (ADR-0001). New tests closed real honest-uncovered gaps:
+ * cr-builder.ts's spec.resources/revalidation/secrets.envMap/preview emission branches
+ * and the validateTaggedRef/validateCRImageRef/resolveDigest error messages;
+ * deploy.ts's parseCliArgs early-exit paths (--help, --version incl. getCliVersion's
+ * try/catch, an unknown flag, the ADR-0046 stray-positional check), applyOverrides'
+ * --bucket-without-storage UsageError, and describeFailedCRApply's two kubectl-apply
+ * diagnoses (pre-1.25 client vs. generic, incl. the probe-itself-throws leg);
+ * rollback.ts's --context flag; db-bind.ts's --context flag, buildDbBindPatch's
+ * required-secret guard, extractDsnFromSecretManifest's base64-decode-throws fallback,
+ * the local kn-next.config.ts load branch, and dbMain's non-dry-run confirmation log.
+ * rollback.ts and db-bind.ts are now honest-100% on their own files.
+ *
+ * Full local suite (433 test files; 3 pre-existing environment-only failures unrelated
+ * to this batch — apps/file-manager/next-adapter.test.ts, tests/bun-exec-example-suite-
+ * collection.test.ts, tests/scaffold-pack-contents.test.ts — none touch cr-builder.ts /
+ * deploy.ts / rollback.ts / db-bind.ts or their tests), measured with `dist/` built for
+ * kn-next + lib + db (their DTS build depends on each other; an unbuilt `dist/` starves
+ * public-api-surface.test.ts / publish-surface.test.ts / validate-public-export.test.ts /
+ * cli-node-runtime.test.ts of the artifacts they assert on and silently drops their
+ * coverage contribution — this is a LOCAL-measurement precondition, not a code change):
+ *
+ *   - global:                  raw 79.29% (11035/13917) → honest **92.92% (9225/9928)**
+ *   - packages/kn-next/src/**: raw 79.23% (10020/12647) → honest **92.89% (8345/8984)**
+ *
+ * Floors move to 92.5 (both), the measured value rounded DOWN to 0.5, per the ratchet
+ * convention. Raw floors are left unchanged (79 / 79.0) — both measure above their raw
+ * floor already; raising them is not this batch's target and the margin is kept.
+ * A residual, non-actionable gap remains in both cr-builder.ts and deploy.ts: the
+ * `isEntrypoint` self-entry dispatcher block in deploy.ts (lines 975-1063) is left
+ * deliberately untested in-process, matching the B3 precedent above (covered by
+ * cli-node-runtime.test.ts's built-binary spawn suite, not unit tests); and a handful of
+ * lines in both files are the 2nd+ physical line of a `+`-joined multi-line string
+ * literal inside an already-executed throw/return. Verified directly against the
+ * per-process lcov (`coverage-bun/*.info`), not assumed: in the report from a test that
+ * ACTUALLY executes the branch (e.g. deploy-apply-diagnostics.test.ts, cr-apply-strict-
+ * validation.test.ts), bun emits NO `DA` record at all for these continuation lines —
+ * only for the statement's first physical line. They still appear as `DA:<n>,0` in the
+ * MERGED report the gate reads, but that 0 is contributed by OTHER, unrelated test files
+ * that import the module without ever executing that branch (their per-file static scan
+ * covers the whole source, so it emits a `DA` for every line, none of them reachable from
+ * that file). Net effect either way: no test that exercises the branch can raise these
+ * lines' hit count, because the report that would carry the hit never emits a record for
+ * them to begin with.
  */
 export const HONEST_THRESHOLDS = {
-  lines: 92,
+  lines: 92.5,
 };
 
 export const HONEST_PER_PATH_THRESHOLDS = {
   'packages/kn-next/src/**': {
-    lines: 92,
+    lines: 92.5,
   },
 };
 

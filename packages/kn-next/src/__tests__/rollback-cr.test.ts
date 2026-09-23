@@ -183,4 +183,23 @@ describe("parseRollbackArgs hardening (PR #232 review — no silent opposite-int
             namespace: "default",
         });
     });
+
+    // #1233 — --context had no test: parseRollbackArgs accepted it, but
+    // nothing asserted the parsed value made it into the result.
+    it("--context is accepted and carried into the parsed result", () => {
+        expect(
+            parseRollbackArgs([
+                "my-app",
+                "--to",
+                "rev-1",
+                "--context",
+                "kind-dev",
+            ]),
+        ).toEqual({
+            app: "my-app",
+            namespace: "default",
+            toRevision: "rev-1",
+            context: "kind-dev",
+        });
+    });
 });
