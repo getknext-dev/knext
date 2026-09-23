@@ -38,6 +38,7 @@ import { resolveBuildArtifact, standaloneStepsApply } from "./build-artifact";
 import { isEntrypoint } from "./exec";
 import { runPostCompileSmoke } from "./postcompile-smoke";
 import { runProjectBuild } from "./project-build";
+import { stageVinextNodeDockerfile } from "./runtime-image";
 import {
     handleConfigNotFound,
     handleUsageError,
@@ -50,6 +51,7 @@ import {
     hostSmokeArch,
     smokeBinaryPlan,
 } from "./vinext-build";
+import { assertNodePresetOutput } from "./vinext-node-build";
 
 const log = createLogger({ module: "build" });
 
@@ -332,6 +334,26 @@ export async function build(options: BuildOptions = {}) {
         //     boots the binary and checks all three HERE, before the assets are
         //     uploaded and long before a cluster sees it.
         await smokeCompiledBinary(config, options.skipSmoke === true);
+    }
+
+    // 2c'. vinext × node (#1260). Nothing to compile: node runs `.output`
+    //      directly, and this cell's bytecode caching is the V8 compile cache
+    //      the IMAGE bakes (ADR-0035, `Dockerfile.vinext-node`). What the build
+    //      owes it is proof that `.output` is really the node preset — an older
+    //      scaffold's vite.config hardcodes the bun one, which exits 1 under
+    //      node — and the image recipe in the build context. BEFORE the upload,
+    //      so a wrong preset ships nothing.
+    if (artifact.shape === "nitro-output-node") {
+        assertNodePresetOutput(process.cwd());
+        const { dockerfile, staged } = stageVinextNodeDockerfile({
+            cwd: process.cwd(),
+        });
+        log.info(
+            { dockerfile, staged },
+            staged
+                ? "Staged the vinext-node image recipe (bakes the V8 compile cache at docker build)"
+                : "Using the app's existing vinext-node image recipe",
+        );
     }
 
     // 3. Upload static assets — only when a storage block is configured.

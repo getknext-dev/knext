@@ -1415,6 +1415,62 @@ jobs:
         run: node scripts/bun-test.mjs packages/kn-next/src/__tests__/artifact-contract-reality.test.ts
 
   # ---------------------------------------------------------------------------
+  # The vinext × node image gate (#1260).
+  #
+  # vinext × node runs nitro's node-preset `.output` uncompiled, and its bytecode
+  # caching is the V8 compile cache BAKED into the image (ADR-0035). The suite
+  # renders the shipped scaffold templates over a fixture app, runs its real
+  # `vite build`, builds `Dockerfile.vinext-node`, and asserts GET / 200, a
+  # populated /app/.compile-cache, and that V8 ACCEPTED the baked cache for the
+  # server entry on boot (a hit, not just a file). It has NO skip path; its
+  # `.docker-e2e.test.ts` suffix keeps it out of `Lint & Test`, so this job is
+  # the only thing that runs it — tests/vinext-node-image-ci.test.ts asserts the
+  # job exists and invokes it.
+  #
+  # A job of its own rather than a step on `standalone-drain-bun-image` (the
+  # other job with docker + bun + a built @getknext/core): that one gates the
+  # standalone shape, and a vinext failure should name itself.
+  vinext-node-image:
+    name: vinext × node image — baked V8 compile cache (#1260)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # ADR-0042 C6 / #764: no vinext image is built in CI before the pre-compile
+    # closure has an SBOM and a clean HIGH/CRITICAL scan. Flow-sequence form on
+    # purpose: the bun-exec-alpine-image disarm proof anchors on that job's
+    # scalar `needs:` line, which must stay unique in this file.
+    needs: [vinext-precompile-closure]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # The fixture links @getknext/core to this checkout, so its dist must
+      # exist. core type-imports db, which depends on lib: lib -> db -> core.
+      - name: Build @getknext/lib
+        run: bun run --filter @getknext/lib build
+
+      - name: Build @getknext/db
+        run: bun run --filter @getknext/db build
+
+      - name: Build @getknext/core
+        run: bun run --filter @getknext/core build
+
+      - name: vinext × node e2e — build, boot, GET 200, compile cache baked and accepted
+        run: node scripts/bun-test.mjs packages/kn-next/src/__tests__/vinext-node-image.docker-e2e.test.ts
+
+  # ---------------------------------------------------------------------------
   # The compile-cache diagnostic's Bun probe (#309).
   #
   # WHY A SEPARATE JOB: the `Lint & Test` runner has no `bun`, so the Bun half of

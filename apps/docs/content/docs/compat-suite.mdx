@@ -35,8 +35,9 @@ compatibility cell, tracked with its own evidence:
   produces when the standalone builder targets Bun.
 - **`vinext` build, Bun runtime.** knext's own build pipeline, compiled into a bytecode single
   executable on Bun. This is the **default** build today.
-- **`vinext` build, Node runtime.** Supported as a target; the build pipeline for it is not fully
-  wired up yet, so there is nothing to verify on this cell until it ships.
+- **`vinext` build, Node runtime.** The same vinext build, emitted for Node instead of compiled for
+  Bun, and run with a V8 compile cache baked into the image. It builds and boots today; the suite
+  has not been run against it yet.
 
 ## How knext runs the suite
 
@@ -84,7 +85,7 @@ today, not as a completed v1.0 credential.
 | Standalone build, **Node** runtime | 778 tests passed, 0 failed, against Next.js v16.2.0 | Nightly (main), early warning |
 | Standalone build, **Bun** runtime, compiled executable | Not yet run through the official suite — the suite lane still boots the uncompiled server and does not exercise the shipped compiled artifact | — |
 | `vinext` build, **Bun** runtime (default) | Below the Node cell's pass rate; tracked on its own bar, see [Bun & the compiled executable](/docs/bun-runtime) | Weekly |
-| `vinext` build, **Node** runtime | Not yet buildable — this cell's build pipeline isn't wired up yet | — |
+| `vinext` build, **Node** runtime | Buildable and booted on every PR (GET 200, compile cache baked and accepted); not yet run through the official suite | — |
 
 ## What the claim covers — and what it doesn't
 

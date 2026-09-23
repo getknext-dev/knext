@@ -1,0 +1,79 @@
+# syntax=docker/dockerfile:1
+#
+# knext — vinext on NODE (`build: 'vinext'` + `runtime: 'node'`).
+#
+# The default vinext target compiles the server into one Bun executable
+# (`Dockerfile`). With `runtime: 'node'`, `vite build` emits nitro's `node`
+# preset instead, and this image runs that `.output` directly under node:
+#
+#   CMD node /app/.output/server/index.mjs
+#
+# Bytecode caching on this target is the V8 COMPILE CACHE, baked into the image
+# at build time: the RUN step below boots the server once, warms it, and lets
+# node write its compiled code to /app/.compile-cache, which ships as a layer.
+# Every pod — the very first one after scale-to-zero included — starts with a
+# populated cache, with no volume, no mount and no cluster feature flag.
+#
+# Selected by `kn-next build` / `kn-next deploy` when kn-next.config.ts says
+# `runtime: 'node'`; unused otherwise. Its own ignore file,
+# `Dockerfile.vinext-node.dockerignore`, keeps `.output/server` in the build
+# context (the app's `.dockerignore` excludes it — the Bun image never needs it).
+#
+# Pinned by digest, never by tag. The tag it was resolved from:
+# node:22-alpine
+FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
+
+# Whole-base upgrade: pulls every base-layer package up to the branch's current
+# patch, so the next base-layer CVE clears without a bespoke edit. The digest
+# fixes the starting point; this fixes the lag since it.
+RUN apk upgrade --no-cache
+
+# Strip the base image's bundled npm + corepack. Their vendored JavaScript
+# carries HIGH/CRITICAL CVEs that `apk upgrade` cannot patch, and this image
+# only ever runs `node` — never a package manager.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+    /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
+
+WORKDIR /app
+
+# The whole nitro output: `server/` (the entry, every route bundled in) and
+# `public/` (static assets served from the image when no bucket is configured).
+COPY .output /app/.output
+
+# The cache directory must belong to the RUNTIME user before the bake runs.
+RUN mkdir -p /app/.compile-cache && chown 65532:65532 /app/.compile-cache
+
+# Non-root, matching the distroless convention used across knext images.
+USER 65532:65532
+
+ENV PORT=3000 \
+    HOSTNAME=0.0.0.0 \
+    NODE_ENV=production \
+    NODE_COMPILE_CACHE=/app/.compile-cache
+
+# The smallest cache a healthy bake has produced is ~3x this (about 197 KB for
+# a minimal app on linux/amd64, measured). A smaller one means the flush was
+# truncated or never happened — the cache would look present and do nothing —
+# so the build fails instead of shipping it.
+ARG KNEXT_COMPILE_CACHE_MIN_BYTES=65536
+
+# THE BAKE. It runs AS 65532, after the USER line above, and that ordering is
+# load-bearing: node keys the cache subdirectory by the uid that wrote it, so a
+# cache baked as root is never read by the non-root runtime — present on disk,
+# 0% hit rate. The entry's bake mode warms KNEXT_WARM_PATH (default the shallow
+# `/api/health`, which needs no database), flushes the cache, drains and exits
+# 0; a warm path that does not answer 2xx exits 1 and fails this build.
+RUN KNEXT_COMPILE_CACHE_BAKE=1 PORT=0 METRICS_PORT=0 \
+      node /app/.output/server/index.mjs \
+ && bytes=$(find /app/.compile-cache -type f -exec cat {} + | wc -c) \
+ && echo "compile cache baked: ${bytes} bytes in $(find /app/.compile-cache -type f | wc -l) file(s)" \
+ && if [ "${bytes}" -lt "${KNEXT_COMPILE_CACHE_MIN_BYTES}" ]; then \
+      echo "compile-cache bake produced ${bytes} bytes, below the floor of ${KNEXT_COMPILE_CACHE_MIN_BYTES}" >&2; \
+      exit 1; \
+    fi
+
+EXPOSE 3000
+
+# One process, no shell, no supervisor: SIGTERM reaches the entry directly and
+# its drain owns the exit.
+CMD ["node", "/app/.output/server/index.mjs"]

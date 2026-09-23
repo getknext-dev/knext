@@ -94,6 +94,12 @@ const CLI_ONLY: Record<string, string> = {
         "the zone app is built by this repo's pipeline; a created app needs its own image recipe",
     ".dockerignore.hbs":
         "paired with Dockerfile.hbs — it bounds THAT image recipe's build context, so it is CLI-only for the same reason",
+    "Dockerfile.vinext-node.hbs":
+        "the vinext × node image recipe (baked V8 compile cache); the zone app is imaged by this repo's pipeline",
+    "Dockerfile.vinext-node.dockerignore.hbs":
+        "paired with Dockerfile.vinext-node.hbs — bounds THAT recipe's context, so CLI-only for the same reason",
+    "knext-node-entry.mjs.hbs":
+        "the node twin of knext-bun-entry.mjs for runtime: 'node'; the zone app builds only the bun target",
     "public/.gitkeep.hbs":
         "keeps the generated Dockerfile's `COPY … public` layer resolvable before the app has assets",
 };
