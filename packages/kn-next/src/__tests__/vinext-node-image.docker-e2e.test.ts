@@ -64,6 +64,7 @@ const RUN_ID = randomBytes(4).toString("hex");
 const CONTAINER = `knext-vinext-node-e2e-${RUN_ID}`;
 const DEBUG_CONTAINER = `knext-vinext-node-e2e-debug-${RUN_ID}`;
 const AFTER_CONTAINER = `knext-vinext-node-e2e-after-${RUN_ID}`;
+const NESTED_CONTAINER = `knext-vinext-node-e2e-nested-${RUN_ID}`;
 const CAP_CONTAINER = `knext-vinext-node-e2e-cap-${RUN_ID}`;
 /** The hardcap container's grace: short, so the force path is observable. */
 const CAP_GRACE_MS = 3000;
@@ -100,6 +101,7 @@ let appDir = "";
 let port = 0;
 let debugPort = 0;
 let afterPort = 0;
+let nestedPort = 0;
 let capPort = 0;
 let nitroPreset = "";
 let dockerBuildLog = "";
@@ -385,18 +387,20 @@ beforeAll(async () => {
     // 6. Run it twice: once as shipped, once with node's compile-cache
     //    diagnostics on (debug output is noisy, so it gets its own container).
     //    Plus one container per SIGTERM case, since each one ends its container.
-    [port, debugPort, afterPort, capPort] = await freePorts(4);
+    [port, debugPort, afterPort, nestedPort, capPort] = await freePorts(5);
     startContainer(CONTAINER, port);
     startContainer(DEBUG_CONTAINER, debugPort, [
         "NODE_DEBUG_NATIVE=COMPILE_CACHE",
     ]);
     startContainer(AFTER_CONTAINER, afterPort);
+    startContainer(NESTED_CONTAINER, nestedPort);
     startContainer(CAP_CONTAINER, capPort, [
         `SHUTDOWN_GRACE_MS=${CAP_GRACE_MS}`,
     ]);
     await waitForHealth(CONTAINER, port);
     await waitForHealth(DEBUG_CONTAINER, debugPort);
     await waitForHealth(AFTER_CONTAINER, afterPort);
+    await waitForHealth(NESTED_CONTAINER, nestedPort);
     await waitForHealth(CAP_CONTAINER, capPort);
 }, 1_800_000);
 
@@ -404,10 +408,14 @@ afterAll(() => {
     run("docker", ["rm", "--force", CONTAINER], { timeout: 60_000 });
     run("docker", ["rm", "--force", DEBUG_CONTAINER], { timeout: 60_000 });
     run("docker", ["rm", "--force", AFTER_CONTAINER], { timeout: 60_000 });
+    run("docker", ["rm", "--force", NESTED_CONTAINER], { timeout: 60_000 });
     run("docker", ["rm", "--force", CAP_CONTAINER], { timeout: 60_000 });
     run("docker", ["rmi", "--force", IMAGE], { timeout: 60_000 });
     if (workDir) rmSync(workDir, { recursive: true, force: true });
-});
+    // Five containers and an image take longer to remove than bun's 5s hook
+    // default on a loaded host — measured: the hook timed out and failed a
+    // run whose every test had passed.
+}, 300_000);
 
 describe("vinext × node builds the node preset from the shipped templates", () => {
     it(".output/nitro.json says node-server — not the bun preset that crashes under node", () => {
@@ -532,6 +540,45 @@ describe("SIGTERM — the node entry drains in the shipped image", () => {
             `after() work was dropped on SIGTERM:\n${out}`,
         ).toBeGreaterThan(sig);
         expect(drained, out).toBeGreaterThan(ran);
+    }, 60_000);
+
+    it("nested after(): work an after() callback registers DURING the drain still runs before exit", async () => {
+        // The outer callback sleeps NESTED_MS (the signal lands inside it),
+        // then hands a further NESTED_MS of work to `after(promise)` — vinext's
+        // `waitUntil` — and returns. A drain that awaited only the tasks pending
+        // when it started reports DRAINED as soon as the outer callback returns.
+        // 4s, not 2s: `docker kill` on a loaded host was measured landing >2s
+        // after the response, which would let the outer work finish first.
+        const NESTED_MS = 4000;
+        const res = await fetch(
+            `http://127.0.0.1:${nestedPort}/api/after-nested?ms=${NESTED_MS}`,
+        );
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({
+            scheduled: true,
+            nested: true,
+            ms: NESTED_MS,
+        });
+
+        const { code } = termAndWait(NESTED_CONTAINER);
+        const out = logsOf(NESTED_CONTAINER);
+        expect(code, `not the graceful exit-0 path:\n${out}`).toBe("0");
+        const sig = out.indexOf("SIGNAL:SIGTERM");
+        const outer = out.indexOf(`OUTER-RAN ms=${NESTED_MS}`);
+        const nested = out.indexOf(`NESTED-RAN ms=${NESTED_MS}`);
+        const drained = out.indexOf("DRAINED cleanly");
+        expect(sig, out).toBeGreaterThan(-1);
+        // The outer callback must still be running when the signal lands, or
+        // the nested registration happens BEFORE the drain and proves nothing.
+        expect(
+            outer,
+            `the outer after() did not span the signal:\n${out}`,
+        ).toBeGreaterThan(sig);
+        expect(
+            nested,
+            `nested after()/waitUntil work was dropped on SIGTERM:\n${out}`,
+        ).toBeGreaterThan(outer);
+        expect(drained, out).toBeGreaterThan(nested);
     }, 60_000);
 
     it("hardcap: a request that outlives SHUTDOWN_GRACE_MS is force-stopped, exit 1, at ~the grace", async () => {

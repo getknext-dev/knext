@@ -152,10 +152,17 @@ it passes the scan, and signing happens on the digest that was actually pushed.
   UID `65532`; the app image runs as a non-root `node` user.
 - **No token automount.** knext sets `AutomountServiceAccountToken: false` on the app's
   ServiceAccount.
-- **Graceful shutdown.** On `SIGTERM` the server forwards the signal to Next.js so it **drains
-  in-flight requests and runs `after()` callbacks** before exit, then closes the metrics server —
-  no dropped requests on scale-down. The drain has a hard cap kept below the pod's
-  `terminationGracePeriodSeconds`.
+- **Graceful shutdown.** On `SIGTERM` the server **drains in-flight requests and runs `after()`
+  callbacks** before exit, then closes the metrics server — no dropped requests on scale-down. On
+  the standalone targets the supervisor forwards the signal to Next.js; on the vinext targets (the
+  Bun executable and the Node server) the app's server entry does the drain itself. It waits for
+  every `after()` callback, including work that an `after()` callback schedules while the drain
+  is already running. The drain has a hard cap (`SHUTDOWN_GRACE_MS`) kept below the pod's
+  `terminationGracePeriodSeconds`; on the vinext targets, work still running at the cap is cut off
+  and the process exits with code 1.
+  Apps created before this behaviour shipped carry an older `knext-bun-entry.mjs` that exits
+  without waiting for `after()` work. Copy `knext-bun-entry.mjs` and `runtime-contract.mjs` from a
+  freshly created app into yours to pick it up.
 
 ## Secrets
 

@@ -573,10 +573,19 @@ export function waitUntil(promise) {
   return promise;
 }
 
+// Loops until the set is EMPTY, not over one snapshot: a pending task can
+// register another while the drain is awaiting it — an `after()` callback that
+// itself calls `after(promise)` / `waitUntil` does exactly that — and a single
+// `Promise.all([...set])` resolves without it, so the process exits with the
+// nested work unrun. Every tracked promise removes itself when it settles, so
+// each pass only awaits work still in flight. A task that never settles is the
+// hardcap's to end (createGracefulShutdown exits 1 at the grace), not this loop's.
 export async function drainPending() {
   const set = globalThis[PENDING_KEY];
-  if (!set || set.size === 0) return;
-  await Promise.all([...set]);
+  if (!set) return;
+  while (set.size > 0) {
+    await Promise.all([...set]);
+  }
 }
 
 // ── (3) SIGTERM graceful drain ──────────────────────────────────────────────

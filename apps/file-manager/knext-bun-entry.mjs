@@ -75,6 +75,16 @@ import '#nitro/virtual/polyfills';
 import { existsSync } from 'node:fs';
 import { useNitroApp } from 'nitro/app';
 import { serve } from 'srvx/bun';
+// vinext's `after()` hands its work to the request's EXECUTION CONTEXT
+// (`ctx.waitUntil`). On Cloudflare the platform supplies one; under nitro's bun
+// server nothing does, so without this an `after()` callback is fire-and-forget
+// — measured: a SIGTERM right after the response logged `DRAINED cleanly` and
+// exited 0 with the callback never run. Each request below runs inside a
+// context whose `waitUntil` is the runtime contract's, so the SIGTERM drain
+// awaits it. The lookup is an AsyncLocalStorage vinext keys on globalThis, which
+// is what lets it survive `bun build --compile --bytecode`; the alpine image
+// e2e proves that against the compiled binary.
+import { runWithExecutionContext } from 'vinext/shims/request-context';
 import {
   createGracefulShutdown,
   createMetricsState,
@@ -87,6 +97,7 @@ import {
   resolveAssetAnchor,
   resolveBindHost,
   resolveMaxRequestBytes,
+  waitUntil,
 } from './runtime-contract.mjs';
 
 // ── #460 bug 3: static assets resolved against the BUILD MACHINE's path ─────
@@ -161,6 +172,7 @@ const REQUEST_CAP = resolveMaxRequestBytes(process.env);
 // biome-ignore lint/correctness/useHookAtTopLevel: useNitroApp() is Nitro's server-app accessor, not a React hook — the "use" prefix is coincidental.
 const nitro = useNitroApp();
 const metrics = createMetricsState();
+const EXECUTION_CONTEXT = { waitUntil };
 
 // ── App listener — Nitro's REAL request pipeline via srvx/bun (#460 bug 2) ───
 // `serve` is the exact code path the default bun preset entry uses; it wraps
@@ -195,7 +207,9 @@ const appSrvx = serve({
       const startedNs = process.hrtime.bigint();
       const elapsed = () => Number(process.hrtime.bigint() - startedNs) / 1e9;
       try {
-        const res = await next();
+        // `after()`/waitUntil work is registered with the drain (see the
+        // import note). One shared context object: it only carries waitUntil.
+        const res = await runWithExecutionContext(EXECUTION_CONTEXT, () => next());
         observeRequest(metrics, res?.status ?? 200, elapsed());
         return res;
       } catch (err) {
@@ -223,7 +237,9 @@ const appSrvx = serve({
 });
 // Adapt srvx's BunServer to the { port, stop(force) } shape the metrics log and
 // the shared drain orchestrator (runtime-contract.mjs) expect. srvx `close()`
-// also awaits its own waitUntil() tasks, so vinext `after()`/waitUntil drains.
+// awaits only srvx's OWN waitUntil() tasks — vinext's `after()` never reaches
+// them. It drains because the middleware above runs every request inside the
+// runtime contract's execution context, and `drainPending` awaits that set.
 //
 // Prefer the PORT we passed to serve() over srvx's internal `.bun.server.port`
 // (#467): the internal shape is a transitive-dep implementation detail. We only
