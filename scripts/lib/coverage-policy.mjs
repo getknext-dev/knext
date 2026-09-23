@@ -107,10 +107,38 @@ export const THRESHOLDS = {
  * 0% covered) raised the local merged measurement to
  * **lines 78.92% (9939/12593)**. The floor moves to 78.5 — just below the
  * measured number, per the ratchet convention, rounded down to 0.5.
+ *
+ * ## Ratchet: coverage batch B3 (#1234) — preview.ts / validate.ts
+ *
+ * The plan (`.claude/research/coverage-95-plan.md`) estimated ~316 uncovered
+ * lines across `cli/preview.ts` + `cli/validate.ts`. Measuring the ACTUAL
+ * uncovered EXECUTABLE lines (not bun's raw `DA` count, which per #1248 also
+ * instruments comments, blank lines, lone braces, and — newly confirmed here —
+ * the continuation line of a multi-line template literal or chained call)
+ * found the real gap was far smaller than the plan's estimate: `validate.ts`
+ * had ZERO genuine uncovered executable lines (every "uncovered" DA line was
+ * noise, verified line-by-line against the source and cross-checked against
+ * existing tests for the branches those lines sit in) — its raw 61.9% is
+ * entirely a denominator artifact of its unusually large comment-to-code
+ * ratio. `preview.ts` had exactly two real gaps: `defaultPreflight` (the
+ * production `PreviewPreflight` wired when a caller omits `deps.preflight` —
+ * every existing preview test injects a no-op) and `extractTag`'s
+ * no-tag-found fallback (`Date.now()` buildId for a digest-only image ref).
+ * Both closed, mutation-proved. The dispatcher (`preview()` + its
+ * `isEntrypoint` self-entry block) and `defaultBuildAndPush`'s docker/npm
+ * shell-outs are deliberately left uncovered — same repo-wide pattern as
+ * `deploy()` in `deploy.ts` (its own dispatcher is equally untested
+ * in-process; real coverage of that class comes from `cli-node-runtime.test.ts`
+ * spawning the BUILT bin, which is opaque to V8/bun coverage by design, per
+ * `cli-usage-surface.test.ts`'s own docblock). Full-suite local measurement
+ * (244 of 245 per-package `src` test files; `coverage-margin.test.ts`
+ * excluded, a known separate hang, #1248-adjacent) raised
+ * **`packages/kn-next/src/**` lines to 79.01% (9955/12600)**. The floor moves
+ * to 79.0 — just below the measured number, rounded down to 0.5.
  */
 export const PER_PATH_THRESHOLDS = {
   'packages/kn-next/src/**': {
-    lines: 78.5,
+    lines: 79.0,
     functions: 76,
   },
 };
