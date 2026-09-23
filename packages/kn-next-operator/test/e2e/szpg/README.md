@@ -46,18 +46,24 @@ operator never reads or writes AppDatabase."*
   mutation-proved by [`../szpg_boundary_test.go`](../szpg_boundary_test.go). It is
   a **fail-closed allowlist**: `metadata.managedFields` may carry ONLY known
   legitimate writers — the szpg `appdb-operator` / `zone-operator` and `kubectl-*`
-  — and anything else is a violation. This is deliberate: the knext operator's
-  binary is `/manager` and it sets no explicit field owner, so a real knext write
-  appears as field manager `manager`, which a knext-name rejectlist would miss.
-  The `ownerReferences` leg (no `NextApp` / `apps.kn-next.dev` owner) is secondary,
-  and — to avoid a vacuous pass — the check also confirms szpg IS a writer.
+  — and anything else is a violation. This is deliberate, and stays deliberate
+  after #1215: the knext operator's binary is `/manager`, and until #1215 it set
+  no explicit field owner, so a real knext write appeared as field manager
+  `manager`, which a knext-name rejectlist would miss. The operator now sets an
+  explicit identity (`rest.Config.UserAgent` = `kn-next-operator`,
+  `internal/controller.OperatorFieldManager`), so a **current** build's write
+  lands under that name instead — still not allowlisted, so still caught. The
+  allowlist keeps the bare `manager` name flagged too, for AppDatabase objects
+  an older operator build may have touched. The `ownerReferences` leg (no
+  `NextApp` / `apps.kn-next.dev` owner) is secondary, and — to avoid a vacuous
+  pass — the check also confirms szpg IS a writer.
 - The **live driver** is [`../szpg_profile_b_test.go`](../szpg_profile_b_test.go),
   behind the `e2e_szpg` build tag (invisible to PR CI). It reads the running
   AppDatabase via `kubectl get -o json` and applies the assertion.
 
 **Scope: this guard is OPERATOR-scope.** It detects the knext **operator** (field
-manager `manager`, since its binary is `/manager` with no explicit FieldOwner)
-writing an AppDatabase — the ADR-0001 boundary that matters, because the operator
+manager `kn-next-operator` since #1215 — `manager` for pre-#1215 builds, still
+flagged for backward compatibility) writing an AppDatabase — the ADR-0001 boundary that matters, because the operator
 is the single source of truth for cluster state. A knext **CLI** write via
 `kubectl` would be allowlisted under the `kubectl` prefix; that is deliberate and
 harmless here — `kn-next db bind` patches the **NextApp**, never the AppDatabase,

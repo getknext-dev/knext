@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -28,7 +29,10 @@ import (
 	"time"
 
 	admissionv1 "k8s.io/api/admission/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -36,6 +40,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	"github.com/AhmedElBanna80/knext/packages/kn-next-operator/internal/controller"
 	webhookv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/internal/webhook/v1alpha1"
 )
 
@@ -264,6 +269,75 @@ func firstEnvTestBinaryDir() string {
 		}
 	}
 	return ""
+}
+
+// --- Self-identifying writes (#1215) -----------------------------------------
+//
+// The operator binary is built as `/manager` (Dockerfile), so without an
+// explicit identity every write it makes lands in managedFields under the
+// bare, anonymous "manager" — client-go's os.Args[0]-derived default. This
+// makes an operator write to an out-of-boundary object indistinguishable from
+// any other client-go tool sharing that binary name (the exact gap the
+// AppDatabase data-sovereignty check, test/e2e/szpg_boundary.go, had to
+// allowlist around). configuredRestConfig fixes this by setting UserAgent to
+// controller.OperatorFieldManager ("kn-next-operator") on every client built
+// from the manager's config.
+//
+// This test proves it end-to-end against envtest's REAL API server (not a
+// fake/mock client, which would not exercise the server-side field-manager
+// derivation at all): a client built via configuredRestConfig writes an
+// object, and the object's managedFields must carry the new identity — not
+// the bare "manager" default. Mutation-prove: drop the `cfg.UserAgent = ...`
+// line in configuredRestConfig and this reds (the recorded manager reverts to
+// the test binary's own os.Args[0]-derived default, never
+// "kn-next-operator").
+func TestOperatorWritesCarryFieldManagerIdentity(t *testing.T) {
+	cfg := configuredRestConfig(testCfg)
+	c, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		t.Fatalf("new client with configuredRestConfig: %v", err)
+	}
+
+	// A cluster-scoped object (Namespace) sidesteps the envtest limitation
+	// that no controller-manager runs to bootstrap a "default" namespace.
+	probe := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: "fieldmanager-identity-probe"},
+	}
+	ctx := t.Context()
+	if err := c.Create(ctx, probe); err != nil {
+		t.Fatalf("create probe namespace: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = c.Delete(context.Background(), probe)
+	})
+
+	got := &corev1.Namespace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(probe), got); err != nil {
+		t.Fatalf("get probe namespace: %v", err)
+	}
+
+	if len(got.ManagedFields) == 0 {
+		t.Fatal("probe namespace carries no managedFields at all")
+	}
+	var managers []string
+	found := false
+	for _, mf := range got.ManagedFields {
+		managers = append(managers, mf.Manager)
+		if mf.Manager == controller.OperatorFieldManager {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no managedFields entry carries manager %q, got: %v",
+			controller.OperatorFieldManager, managers)
+	}
+	for _, m := range managers {
+		if m == "manager" {
+			t.Fatalf("managedFields still contains the anonymous default \"manager\" "+
+				"alongside %q — configuredRestConfig did not fully replace the identity: %v",
+				controller.OperatorFieldManager, managers)
+		}
+	}
 }
 
 // --- HA leader-election unit coverage (issue #307) --------------------------

@@ -40,6 +40,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -170,7 +171,7 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(),
+	mgr, err := ctrl.NewManager(configuredRestConfig(ctrl.GetConfigOrDie()),
 		buildManagerOptions(enableLeaderElection, metricsServerOptions, webhookServer, probeAddr))
 	if err != nil {
 		setupLog.Error(err, "Failed to start manager")
@@ -212,6 +213,23 @@ func main() {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
 	}
+}
+
+// configuredRestConfig returns a copy of base with the operator's
+// self-identifying UserAgent set (#1215, controller.OperatorFieldManager). It
+// copies rather than mutates so the caller's *rest.Config (in tests, a shared
+// envtest config) is never altered out from under it.
+//
+// Every client built from the returned config — mgr.GetClient(), its cache,
+// and any REST client derived from it — inherits this UserAgent, so it
+// becomes the literal managedFields "manager" the API server records for
+// every Create/Update/Patch/status write the operator makes. See
+// internal/controller/identity.go for why this exists and why it is
+// deliberately unversioned.
+func configuredRestConfig(base *rest.Config) *rest.Config {
+	cfg := *base
+	cfg.UserAgent = controller.OperatorFieldManager
+	return &cfg
 }
 
 // leaderElectionID is the coordination.k8s.io Lease name the operator contends

@@ -22,16 +22,28 @@ limitations under the License.
 // data sovereignty a hard rule. This file is the machine-checkable form of that
 // invariant.
 //
-// WHY AN ALLOWLIST, NOT A REJECTLIST (cr-1214, jev 0.91). The knext operator
-// binary is `/manager` and sets NO explicit FieldOwner/FieldManager/UserAgent
-// anywhere, so a real knext write to an AppDatabase lands with field manager ==
-// the bare "manager" (client-go's default, derived from os.Args[0]). A rejectlist
-// keyed on "nextapp"/"kn-next" MISSES that entirely — proven live: an AppDatabase
-// with managedFields {appdb-operator, manager} false-passed. "nextapp-controller"
-// is only the operator's EVENT RECORDER name (cmd/main.go:183), never a field
-// manager. So the check inverts: only KNOWN-LEGITIMATE writers of an AppDatabase
-// are allowed, and anything else — "manager" included — is a violation. FAIL
-// CLOSED: an unrecognised writer is a violation, not a pass.
+// WHY AN ALLOWLIST, NOT A REJECTLIST (cr-1214, jev 0.91). Originally, the knext
+// operator binary (`/manager`) set NO explicit FieldOwner/FieldManager/
+// UserAgent anywhere, so a real knext write to an AppDatabase landed with
+// field manager == the bare "manager" (client-go's default, derived from
+// os.Args[0]). A rejectlist keyed on "nextapp"/"kn-next" MISSES that entirely —
+// proven live: an AppDatabase with managedFields {appdb-operator, manager}
+// false-passed. "nextapp-controller" is only the operator's EVENT RECORDER
+// name (cmd/main.go), never a field manager. So the check inverts: only
+// KNOWN-LEGITIMATE writers of an AppDatabase are allowed, and anything else is
+// a violation. FAIL CLOSED: an unrecognised writer is a violation, not a pass.
+//
+// (#1215 UPDATE.) The operator now DOES set an explicit identity —
+// cmd/main.go sets rest.Config.UserAgent to
+// internal/controller.OperatorFieldManager ("kn-next-operator"), so a current
+// build's write lands with field manager == "kn-next-operator", not the bare
+// "manager". That name was never allowlisted (it does not match
+// AllowedAppDatabaseManagersExact or the kubectl/scale-zero-pg prefixes), so
+// the fail-closed allowlist already catches it with NO code change — this
+// comment, and the dedicated test below, exist to make that explicit and
+// mutation-proved rather than incidental. The bare "manager" name is kept
+// flagged too (older operator builds still in the field carry it), and stays
+// DELIBERATELY ABSENT from the allowlist below for the same reason.
 //
 // Kept UNTAGGED (no e2e_szpg build tag) and free of cluster/k8s imports so it
 // compiles and is mutation-proved by szpg_boundary_test.go under a plain
