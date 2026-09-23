@@ -140,11 +140,11 @@ describe('continuationAnchors — what IS attributable', () => {
     expectAttributed(REPRO, '// C3', '// ANCHOR');
   });
 
-  test('a parenthesised `return (` chain, after a leading `${identifier}` line', () => {
+  test('a parenthesised `return (` chain, after a leading literal-only template line', () => {
     const src = [
-      'export function g(name: string): string {',
+      'export function g(): string {',
       '  return ( // RET',
-      '    `hello ${name}, ` + // SUBST',
+      '    `hello, ` + // LEAD',
       "    'pure one ' + // P1",
       '    `pure two` // P2',
       '  );',
@@ -154,19 +154,50 @@ describe('continuationAnchors — what IS attributable', () => {
     expectAttributed(src, '// P2', '// RET');
   });
 
-  test('a `const` initializer', () => {
-    const src = ['const msg = // DECL', "  'a' +", "  'b'; // TAIL"].join('\n');
+  test('a `const` initializer, first statement of a function', () => {
+    const src = [
+      'function m(): string {',
+      '  const msg = // DECL',
+      "    'a' +",
+      "    'b'; // TAIL",
+      '  return msg;',
+      '}',
+    ].join('\n');
     expectAttributed(src, '// TAIL', '// DECL');
+  });
+
+  test('rule 5: after an `if` / loop / `switch` / `try` boundary, or a literal-only `const`', () => {
+    for (const [lead, extra] of [
+      ['  if (x) return;', ''],
+      ['  for (const c of "ab") if (c === "z") return;', ''],
+      ['  switch (x) {', '  }'],
+      ['  try {', '  } finally {}'],
+      ["  const k = 'lit';", ''],
+    ]) {
+      const src = [
+        'function m(x: boolean): void {',
+        lead,
+        extra,
+        '  throw new Error( // ANCHOR5',
+        "    'a ' +",
+        "      'b', // AFTER5",
+        '  );',
+        '}',
+      ].join('\n');
+      expectAttributed(src, '// AFTER5', '// ANCHOR5');
+    }
   });
 
   test('a string passed to a function (identifier callee) spanning lines', () => {
     const src = [
       'declare function report(a: string, b: string): void;',
-      'report( // CALL',
-      "  'part one ' + // ARG1",
-      "    'part two', // ARG2",
-      "  'second argument', // ARG3",
-      ');',
+      'function m(): void {',
+      '  report( // CALL',
+      "    'part one ' + // ARG1",
+      "      'part two', // ARG2",
+      "    'second argument', // ARG3",
+      '  );',
+      '}',
     ].join('\n');
     expectAttributed(src, '// ARG1', '// CALL');
     expectAttributed(src, '// ARG2', '// CALL');
@@ -174,7 +205,94 @@ describe('continuationAnchors — what IS attributable', () => {
   });
 });
 
+describe('continuationAnchors — rule 5: the first line may be hit on an UNRELATED path', () => {
+  test("the review's repro: a throwing call earlier in the SAME basic block", () => {
+    const src = [
+      'declare function boom(): never;',
+      'function h(): void {',
+      '  boom();',
+      "  throw new Error('first ' +",
+      "    'second ' + // BLK2",
+      "    'third'); // BLK3",
+      '}',
+    ].join('\n');
+    expectNotAttributed(src, '// BLK2');
+    expectNotAttributed(src, '// BLK3');
+  });
+
+  test('a bare nested `{ }` block does not start a basic block (measured)', () => {
+    const src = [
+      'declare function boom(): never;',
+      'function h(): void {',
+      '  boom();',
+      '  {',
+      '    throw new Error(',
+      "      'a ' +",
+      "        'b', // NESTED",
+      '    );',
+      '  }',
+      '}',
+    ].join('\n');
+    expectNotAttributed(src, '// NESTED');
+  });
+
+  test('a non-inert statement between the boundary and the anchor', () => {
+    const src = [
+      'declare function note(): void;',
+      'function h(x: boolean): void {',
+      '  if (x) return;',
+      '  note();',
+      "  const k = 'lit';",
+      '  throw new Error(',
+      "    'a ' +",
+      "      'b', // AFTERNOTE",
+      '  );',
+      '}',
+    ].join('\n');
+    expectNotAttributed(src, '// AFTERNOTE');
+  });
+
+  test('unmeasured block entries are refused: a `case` clause and module top level', () => {
+    const src = [
+      'function h(n: number): void {',
+      '  switch (n) {',
+      '    case 1:',
+      '      throw new Error(',
+      "        'a ' +",
+      "          'b', // INCASE",
+      '      );',
+      '  }',
+      '}',
+      'throw new Error(',
+      "  'top ' +",
+      "    'level', // TOPLEVEL",
+      ');',
+    ].join('\n');
+    expectNotAttributed(src, '// INCASE');
+    expectNotAttributed(src, '// TOPLEVEL');
+  });
+});
+
 describe('continuationAnchors — the HARD INVARIANT: never attribute what could fail to run', () => {
+  test('a string-converted identifier before the literal (`${name}`, `name +`) blocks it', () => {
+    const src = [
+      'function h(name: string): string {',
+      '  if (name === "") {',
+      '    return (',
+      '      `hello ${name}, ` +',
+      "      'after substitution' // AFTERSUBST",
+      '    );',
+      '  }',
+      '  return (',
+      '    name +',
+      "    'after operand' // AFTEROPERAND",
+      '  );',
+      '}',
+    ].join('\n');
+    expectNotAttributed(src, '// AFTERSUBST');
+    expectNotAttributed(src, '// AFTEROPERAND');
+  });
+
   test('a continuation carrying a `${expr}` substitution keeps its own record', () => {
     const src = [
       'function h(v: string) {',
@@ -399,12 +517,14 @@ describe('attributeContinuations — the map-level contract', () => {
   });
 });
 
-// ── Repo-wide: an INDEPENDENT oracle over every attributed line ───────────────
+// ── Repo-wide: a re-check of RULE 1 ONLY over every attributed line ───────────
 
-describe('repo-wide: every attributed line holds ONLY literal / `+` / closer tokens', () => {
-  // The oracle is TypeScript's SCANNER over the line's own text — independent of
-  // the AST walk the module uses. A template substitution scans as TemplateHead,
-  // a call as Identifier + `(`: any of those on an attributed line is a defect.
+describe('repo-wide rule-1 re-check: every attributed line holds ONLY literal / `+` / closer tokens', () => {
+  // SCOPE, stated honestly: this re-derives RULE 1 (what may start on the line)
+  // with TypeScript's SCANNER over the line's own text, instead of the AST walk
+  // the module uses. It says NOTHING about rules 2-5 — the climb, the anchor's
+  // line, what runs before the literal, basic-block entry. Those are covered by
+  // the fixtures above and by the real-bun ground-truth check below.
   const ALLOWED = new Set([
     ts.SyntaxKind.StringLiteral,
     ts.SyntaxKind.NoSubstitutionTemplateLiteral,
@@ -420,13 +540,13 @@ describe('repo-wide: every attributed line holds ONLY literal / `+` / closer tok
     .split('\n')
     .filter((f) => f && !f.endsWith('.d.ts'));
 
-  test('the scan is meaningful: it finds attributed lines in the tree', () => {
+  test('the scan is meaningful: it finds attributable lines in the tree', () => {
     let total = 0;
     for (const f of files) {
       const res = continuationAnchors(readFileSync(join(REPO_ROOT, f), 'utf8'), f);
       if (res.ok) total += res.anchors.size;
     }
-    expect(total).toBeGreaterThan(20);
+    expect(total).toBeGreaterThan(10);
   });
 
   test('no attributed line carries any other token, and every anchor precedes its line', () => {
@@ -456,23 +576,171 @@ describe('repo-wide: every attributed line holds ONLY literal / `+` / closer tok
   });
 });
 
+// ── Real bun, ground truth by construction (rules 3 and 5) ────────────────────
+
+describe('real bun lcov from two processes: attribution never outruns ground truth', () => {
+  // INDEPENDENT of the module: each shape's outcome is fixed by construction, and
+  // the runner process ASSERTS it (a chain that runs throws its full message; one
+  // that does not throws 'boom' or returns). Then two real bun processes (an
+  // importer that runs nothing, a runner) produce lcov exactly as the gate sees
+  // it, and the claim checked is: a line is raised ONLY if its chain really ran —
+  // and the chains that did run in a sound shape ARE raised (so it is not vacuous).
+  /** One fixture shape; the optional flags select its layout. */
+  type Shape = {
+    name: string;
+    lead: string[];
+    call: string;
+    runs: boolean;
+    exact?: boolean;
+    sameLine?: boolean;
+    close?: string;
+  };
+  const shape = (name: string, lead: string[], call: string) => ({ name, lead, call });
+  const chain = (name: string, ind: string) => [
+    `${ind}throw new Error(`,
+    `${ind}  '${name} first ' +`,
+    `${ind}    '${name} second ' + // ${name}-C2`,
+    `${ind}    '${name} third', // ${name}-C3`,
+    `${ind});`,
+  ];
+  const SHAPES: Shape[] = [
+    // The review's repro, VERBATIM: `boom()` shares the throw's basic block and
+    // always throws, yet the throw's first line reads hit.
+    { ...shape('REVIEW', [], 'review()'), runs: false, exact: true },
+    // The same, with the chain opening on its own line.
+    { ...shape('BLOCKSIB', ['  boom();'], 'blocksib()'), runs: false },
+    { ...shape('NESTED', ['  boom();', '  {'], 'nested()'), runs: false, close: '  }' },
+    { ...shape('SAMELINE', [], 'sameline(false)'), runs: false, sameLine: true },
+    { ...shape('AFTERIFUNRUN', ['  if (x) return;'], 'afterifunrun(true)'), runs: false },
+    { ...shape('IFFIRST', ['  if (x) {'], 'iffirst(true)'), runs: true, close: '  }' },
+    { ...shape('AFTERIF', ['  if (x) return;'], 'afterif(false)'), runs: true },
+    { ...shape('AFTERCONST', ["  const k = 'lit';"], 'afterconst()'), runs: true },
+  ];
+
+  const lines: string[] = ['export function boom(): never {', "  throw new Error('boom');", '}'];
+  for (const s of SHAPES) {
+    lines.push(`export function ${s.name.toLowerCase()}(x = false): void {`);
+    if (s.exact) {
+      lines.push(
+        '  boom();',
+        "  throw new Error('first ' +",
+        `    'second ' + // ${s.name}-C2`,
+        `    'third'); // ${s.name}-C3`,
+      );
+    } else if (s.sameLine) {
+      // `if (x) throw new Error(` — the `if` test runs, the throw does not.
+      lines.push('  if (x) throw new Error(');
+      lines.push(...chain(s.name, '  ').slice(1));
+    } else {
+      lines.push(...s.lead);
+      lines.push(...chain(s.name, s.close ? '    ' : '  '));
+      if (s.close) lines.push(s.close);
+    }
+    lines.push('  void x;', '}');
+  }
+  const FIXTURE = `${lines.join('\n')}\n`;
+  const names = SHAPES.map((s) => s.name.toLowerCase()).join(', ');
+  const RUNNER = [
+    "import { expect, test } from 'bun:test';",
+    `import { ${names} } from './shapes';`,
+    "test('ground truth', () => {",
+    ...SHAPES.map((s) =>
+      s.runs
+        ? `  expect(() => ${s.call}).toThrow('${s.name} first ${s.name} second ${s.name} third');`
+        : `  try { ${s.call}; } catch (e) { expect((e as Error).message).toBe('boom'); }`,
+    ),
+    '});',
+    '',
+  ].join('\n');
+  const IMPORTER = [
+    "import { expect, test } from 'bun:test';",
+    `import { ${names} } from './shapes';`,
+    `test('import only', () => { expect([${names}].length).toBe(${SHAPES.length}); });`,
+    '',
+  ].join('\n');
+
+  function bunLcov(dir: string, testFile: string, out: string): string {
+    const res = spawnSync(
+      process.execPath,
+      ['test', '--coverage', '--coverage-reporter=lcov', `--coverage-dir=${out}`, testFile],
+      { cwd: dir, encoding: 'utf8', timeout: 60_000 },
+    );
+    // Exit code only: a non-zero runner means the GROUND TRUTH itself failed.
+    expect({ testFile, status: res.status }).toEqual({ testFile, status: 0 });
+    return readFileSync(join(dir, out, 'lcov.info'), 'utf8');
+  }
+
+  test('the fixture shapes, run for real', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'knext-cont-bun-'));
+    try {
+      writeFileSync(join(dir, 'shapes.ts'), FIXTURE);
+      writeFileSync(join(dir, 'runner.test.ts'), RUNNER);
+      writeFileSync(join(dir, 'importer.test.ts'), IMPORTER);
+      const merged = mergeLcov([
+        bunLcov(dir, 'importer.test.ts', 'cov-importer'),
+        bunLcov(dir, 'runner.test.ts', 'cov-runner'),
+      ]);
+      const read = (p: string) => (p.endsWith('shapes.ts') ? FIXTURE : null);
+      const honest = honestCoverage(merged, read);
+      const before = [...honest.files.values()][0]?.lines;
+      const after = [...attributeContinuations(honest.files, read).files.values()][0]?.lines;
+      expect(before && after).toBeTruthy();
+      const verdicts = SHAPES.map((s) => {
+        // The continuation lines the MERGE left at 0. bun itself sometimes puts a
+        // positive raw count on the line after the anchor even when the chain
+        // never ran (the REVIEW shape's `'second '` line) — that is bun's, not
+        // attribution's, so only the lines at 0 are judged.
+        const zeros = [`// ${s.name}-C2`, `// ${s.name}-C3`]
+          .map((m) => lineOf(FIXTURE, m))
+          .filter((l) => before?.get(l) === 0);
+        return {
+          shape: s.name,
+          // The artifact is present in every shape: the merge holds a 0.
+          mergedZero: zeros.length > 0,
+          // Attribution's own effect: did it raise any of those zeros?
+          raised: zeros.some((l) => (after?.get(l) ?? 0) > 0),
+        };
+      });
+      expect(verdicts).toEqual(
+        SHAPES.map((s) => ({ shape: s.name, mergedZero: true, raised: s.runs })),
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
+});
+
 // ── (end to end) the gate, fed the two-report merge, at the floor boundary ────
 
 describe('scripts/check-coverage.mjs — attribution decides the honest floor', () => {
-  /** A REAL tracked source, read by the checker from disk. */
-  const REAL = 'packages/kn-next/src/cli/cr-builder.ts';
+  /** REAL tracked sources, read by the checker from disk. */
+  const DEPLOY = 'packages/kn-next/src/cli/deploy.ts';
+  const CR = 'packages/kn-next/src/cli/cr-builder.ts';
   /** Not on disk: unclassifiable, so every record is kept as given. */
   const FAKE = 'packages/kn-next/src/zz-continuation-gate-fixture.ts';
-  const src = readFileSync(join(REPO_ROOT, REAL), 'utf8');
-  const subst = lineOf(src, 'is not digest-pinned. ');
-  const throwLine = subst - 1;
-  const pure = [subst + 1, subst + 2, subst + 3];
-  const close = subst + 4;
 
   const floor = Math.max(HONEST_THRESHOLDS.lines, HONEST_PER_PATH_THRESHOLDS[CORE_GLOB].lines);
   const T = 2003;
   const hitNeeded = Math.ceil((floor * T) / 100);
-  const realFound = 5; // throw + substitution + 3 pure continuations (the `);` is punctuation)
+  const realFound = 5; // statement line + lead line + 3 continuations (the `);` is punctuation)
+
+  /** A block: `<statement>(` / lead literal line / 3 continuations / `);`. */
+  function block(file: string, leadMarker: string) {
+    const src = readFileSync(join(REPO_ROOT, file), 'utf8');
+    const lead = lineOf(src, leadMarker);
+    return {
+      file,
+      src,
+      stmt: lead - 1,
+      lead,
+      pure: [lead + 1, lead + 2, lead + 3],
+      close: lead + 4,
+    };
+  }
+  // `throw new UsageError(` whose lead line is a plain literal — attributable.
+  const OK = block(DEPLOY, '"--bucket overrides storage.bucket, but kn-next.config.ts has " +');
+  // `throw new Error(` whose lead line converts `${image}` — NOT attributable.
+  const SUBST = block(CR, 'is not digest-pinned. ');
 
   function runChecker(reports: string[]): number {
     const dir = mkdtempSync(join(tmpdir(), 'knext-cont-'));
@@ -502,39 +770,47 @@ describe('scripts/check-coverage.mjs — attribution decides the honest floor', 
     );
   }
 
-  // The importer: every line of the block at 0.
-  const importer = record(
-    REAL,
-    [throwLine, subst, ...pure, close].map((l) => [l, 0] as [number, number]),
-  );
+  /** The importer (every line at 0) and the runner (statement + lead hit, NO record after). */
+  function twoReports(b: ReturnType<typeof block>): string[] {
+    return [
+      record(
+        b.file,
+        [b.stmt, b.lead, ...b.pure, b.close].map((l) => [l, 0] as [number, number]),
+      ),
+      record(b.file, [
+        [b.stmt, 1],
+        [b.lead, 1],
+      ]),
+    ];
+  }
 
-  test('the fixture is what it claims: the block shape and its anchors', () => {
-    const lines = src.split('\n');
-    expect(lines[throwLine - 1]).toContain('throw new Error(');
-    expect(lines[close - 1]?.trim()).toBe(');');
-    const res = continuationAnchors(src, REAL);
-    expect(res.ok).toBe(true);
-    expect(pure.map((l) => res.anchors.get(l))).toEqual([throwLine, throwLine, throwLine]);
-    expect(res.anchors.get(subst)).toBeUndefined();
+  test('the fixtures are what they claim: block shapes and their anchors', () => {
+    for (const b of [OK, SUBST]) {
+      const lines = b.src.split('\n');
+      expect(lines[b.stmt - 1]).toMatch(/throw new (Usage)?Error\($/);
+      expect(lines[b.close - 1]?.trim()).toBe(');');
+    }
+    const ok = continuationAnchors(OK.src, OK.file);
+    expect(OK.pure.map((l) => ok.anchors.get(l))).toEqual([OK.stmt, OK.stmt, OK.stmt]);
+    const subst = continuationAnchors(SUBST.src, SUBST.file);
+    expect([SUBST.lead, ...SUBST.pure].map((l) => subst.anchors.get(l))).toEqual([
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ]);
   });
 
   test('two-report merge, statement ran: the pure lines count as hit — GREEN at the floor', () => {
-    // The runner: the statement line and the substitution line hit, NO record
-    // for the three pure continuations — exactly what bun emits.
-    const runner = record(REAL, [
-      [throwLine, 1],
-      [subst, 1],
-    ]);
     // With attribution the real file is 5/5, so the total sits exactly at the floor.
     // Without it the file is 2/5 and the total is three hits short — RED.
-    expect(runChecker([importer, runner, fake(hitNeeded - realFound)])).toBe(0);
+    expect(runChecker([...twoReports(OK), fake(hitNeeded - realFound)])).toBe(0);
   });
 
-  test('the `${image}` line is NEVER attributed: its own 0 still counts — RED one below', () => {
-    // Same, but the substitution line is not hit by anyone. Correct attribution
-    // gives 4/5, one hit below the floor. Attributing the substitution line too
-    // would lift it to the floor and hide an uncovered expression — so this must be RED.
-    const runner = record(REAL, [[throwLine, 1]]);
-    expect(runChecker([importer, runner, fake(hitNeeded - realFound)])).not.toBe(0);
+  test('after a `${image}` conversion the pure lines stay 0 — RED at the same boundary', () => {
+    // Same numbers, but the lead line string-converts an identifier, which could
+    // throw before the literals run. Attributing them would lift the file to 5/5
+    // and hide three possibly-unrun lines — so this must be RED.
+    expect(runChecker([...twoReports(SUBST), fake(hitNeeded - realFound)])).not.toBe(0);
   });
 });

@@ -9,7 +9,11 @@
  *      nothing risky before it. Loosening any one check — a call-carrying line,
  *      a ternary branch, a short-circuit, a statement sharing its line with an
  *      `if`, a record the reports never carried, a `${…}` line — must turn a
- *      spec red.
+ *      spec red. So must every way the first line can read hit on a path that
+ *      never runs the statement (rule 5, #1268 review): a throwing call earlier
+ *      in the same basic block, a bare nested `{ }`, a `case` clause, an
+ *      expression statement treated as a block boundary. And so must letting a
+ *      string-converted identifier (`${name}`, `name +`) precede the literal.
  *   2. UNDER-attribution is caught. Removing the attribution (in the lib, or its
  *      wiring in the gate) must put the two-report-merge fixture back to
  *      uncovered — red.
@@ -80,7 +84,7 @@ function prove(id, description, snap, edits, expected) {
   assertTreeClean(`after ${id}`);
 }
 
-declareMutations(12);
+declareMutations(18);
 
 console.log('── baseline: the spec is green unmutated');
 assertTreeClean('baseline');
@@ -206,7 +210,7 @@ prove(
 
 prove(
   'M9',
-  'a `${…}` line treated as a pure continuation must red the gate-level fixture',
+  'a `${…}` line treated as a pure continuation must red',
   libSnap,
   [
     [
@@ -220,6 +224,73 @@ prove(
     [
       '    if (isPlusBinary(parent) || ts.isParenthesizedExpression(parent)) {',
       '    if (isPlusBinary(parent) || ts.isParenthesizedExpression(parent) || ts.isTemplateExpression(parent)) {',
+    ],
+  ],
+  1,
+);
+
+// ── Direction 1, rule 5: the first line hit on a path that never runs the statement ──
+
+prove(
+  'M13',
+  "rule 5 disabled (the review's `boom(); throw new Error('first ' +` repro) must red",
+  libSnap,
+  [['      if (!startsItsBasicBlock(stmt)) {', '      if (false) {']],
+  1,
+);
+
+prove(
+  'M14',
+  'a bare nested `{ }` block accepted as a basic-block entry must red',
+  libSnap,
+  [
+    [
+      '  return owner !== undefined && (FUNCTION_LIKE.has(owner.kind) || isIfBranch(owner, parent));',
+      '  return owner !== undefined;',
+    ],
+  ],
+  1,
+);
+
+prove(
+  'M15',
+  'every earlier statement in the block treated as unable to throw must red',
+  libSnap,
+  [['    if (!cannotThrow(prev)) return false;', '    // every statement treated as inert']],
+  1,
+);
+
+prove(
+  'M16',
+  'an expression statement (`boom();`) treated as a block boundary must red',
+  libSnap,
+  [['  K.TryStatement,\n]);', '  K.TryStatement,\n  K.ExpressionStatement,\n]);']],
+  1,
+);
+
+prove(
+  'M17',
+  'a `case` clause / module top level accepted as a block entry must red',
+  libSnap,
+  [
+    [
+      '  if (!parent || !ts.isBlock(parent)) return false; // module top level, `case`, …',
+      '  if (!parent || !ts.isBlock(parent)) return true;',
+    ],
+  ],
+  1,
+);
+
+// ── Direction 1, rule 4: a string-converted identifier before the literal ──
+
+prove(
+  'M18',
+  'a string-converted identifier (`${name}`, `name +`) allowed before the literal must red',
+  libSnap,
+  [
+    [
+      '    if (n.kind === K.Identifier && !isCallee(n) && !isDeclaredName(n)) return false;',
+      '    // identifiers allowed',
     ],
   ],
   1,
@@ -270,4 +341,4 @@ if (failures.length) {
   for (const f of failures) console.error(`  - ${f}`);
   process.exit(1);
 }
-console.log('\n12 mutation(s) behaved as required (11 red, 1 negative control green), 0 survived.');
+console.log('\n18 mutation(s) behaved as required (17 red, 1 negative control green), 0 survived.');

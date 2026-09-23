@@ -32,12 +32,26 @@
  *   3. The statement is the first thing on its own line — so that line's hit
  *      count is the statement's, not some earlier `if (x)` sharing the line.
  *   4. Everything the statement evaluates BEFORE the literal is from an
- *      allowlist that cannot skip it: literals, identifiers, template
- *      substitutions of those, `+`, grouping parens, and the keywords that open
- *      the statement. A call, a property access, an optional chain, a
- *      conditional or a short-circuit before it could throw or branch away
- *      from the literal while the first line still counts as hit — so any of
- *      them blocks attribution.
+ *      allowlist that cannot skip it: literals, `+`, grouping parens, the
+ *      keywords that open the statement, and an identifier ONLY as the callee
+ *      of a call / `new` (`new Error(`). A call, a property access, an optional
+ *      chain, a conditional, a short-circuit, or an identifier that gets
+ *      string-converted (`name + 'a'`, `${name}` — a Symbol or a throwing
+ *      toString throws there) could skip the literal while the first line still
+ *      counts as hit — so any of them blocks attribution.
+ *   5. The statement STARTS ITS OWN BASIC BLOCK (#1268 review). JSC's count on a
+ *      line is the count of ENTERING the basic block that holds it, not of
+ *      running the statement: in `boom(); throw new Error('a' +\n 'b')` the
+ *      throw's line reads hit although `boom()` always throws first. So the
+ *      statement must be the first statement of a function body or of an
+ *      `if`/`else` branch (or a braceless branch), or every statement between it
+ *      and the nearest preceding `if` / `for` / `for…of` / `while` / `switch` /
+ *      `try` must be one that cannot throw (a literal-only `const`, a function /
+ *      type declaration, an empty statement). Those boundaries were each
+ *      MEASURED on bun 1.4.2 to start a fresh block (the unreached statement
+ *      after them reads 0); a bare nested `{ }` block was measured NOT to, so it
+ *      is refused, as is anything unmeasured (a `case` clause, module top level,
+ *      `for…in`, `do…while`, a loop body).
  *
  * ## The invariant (load-bearing)
  *
@@ -48,8 +62,10 @@
  * analysed at all — every record is carried over unchanged.
  *
  * `tests/coverage-continuation-attribution.test.ts` holds the tricky fixtures,
- * the two-report-merge reproduction, and a repo-wide scan against an independent
- * oracle (TypeScript's scanner over each attributed line's text).
+ * the two-report-merge reproduction, a REAL-bun ground-truth check (fixture
+ * shapes run in separate bun processes whose outcome is known by construction —
+ * independent of this module, it covers rules 3 and 5), and a repo-wide re-check
+ * of rule 1 only, with TypeScript's scanner over each attributed line's text.
  */
 
 import ts from 'typescript';
@@ -108,6 +124,106 @@ const PRECEDING_OK = new Set([
   K.VariableDeclarationList,
   K.VariableDeclaration,
 ]);
+
+/**
+ * Statements after which JSC starts a fresh basic block — each MEASURED on bun
+ * 1.4.2 (an unreached statement right after it reads 0). Nothing unmeasured.
+ */
+const BLOCK_BOUNDARIES = new Set([
+  K.IfStatement,
+  K.ForStatement,
+  K.ForOfStatement,
+  K.WhileStatement,
+  K.SwitchStatement,
+  K.TryStatement,
+]);
+
+/** Owners whose body block is entered as a fresh basic block (function entry). */
+const FUNCTION_LIKE = new Set([
+  K.FunctionDeclaration,
+  K.FunctionExpression,
+  K.ArrowFunction,
+  K.MethodDeclaration,
+  K.Constructor,
+  K.GetAccessor,
+  K.SetAccessor,
+]);
+
+/** Initializers that cannot throw: a literal, and nothing else. */
+const INERT_INITIALIZERS = new Set([
+  K.StringLiteral,
+  K.NoSubstitutionTemplateLiteral,
+  K.NumericLiteral,
+  K.TrueKeyword,
+  K.FalseKeyword,
+  K.NullKeyword,
+]);
+
+/**
+ * Can this statement NOT throw? Allowlist — anything unrecognised can.
+ *
+ * @param {ts.Statement} s
+ */
+function cannotThrow(s) {
+  if (ts.isEmptyStatement(s) || ts.isInterfaceDeclaration(s) || ts.isTypeAliasDeclaration(s)) {
+    return true;
+  }
+  if (ts.isFunctionDeclaration(s)) return s.body !== undefined; // hoisted; nothing runs here
+  if (ts.isVariableStatement(s)) {
+    return s.declarationList.declarations.every(
+      (d) =>
+        ts.isIdentifier(d.name) &&
+        (d.initializer === undefined || INERT_INITIALIZERS.has(d.initializer.kind)),
+    );
+  }
+  return false;
+}
+
+/**
+ * Is `ifStmt` a branch owner of `node` (its then- or else-statement)?
+ *
+ * @param {ts.Node} ifStmt @param {ts.Node} node
+ */
+function isIfBranch(ifStmt, node) {
+  return (
+    ts.isIfStatement(ifStmt) && (ifStmt.thenStatement === node || ifStmt.elseStatement === node)
+  );
+}
+
+/**
+ * Rule 5: does `stmt` begin a basic block of its own, so that its first line's
+ * count is the count of `stmt` starting to run — not of some earlier statement
+ * in the same block that may have thrown?
+ *
+ * @param {ts.Statement} stmt
+ */
+function startsItsBasicBlock(stmt) {
+  const parent = stmt.parent;
+  if (isIfBranch(parent, stmt)) return true; // a braceless branch
+  if (!parent || !ts.isBlock(parent)) return false; // module top level, `case`, …
+  const idx = parent.statements.indexOf(stmt);
+  for (let i = idx - 1; i >= 0; i--) {
+    const prev = parent.statements[i];
+    if (BLOCK_BOUNDARIES.has(prev.kind)) return true;
+    if (!cannotThrow(prev)) return false;
+  }
+  // First runnable statement of its block: sound only where entering the block
+  // is itself a block entry. A bare nested `{ }` is measured NOT to be one.
+  const owner = parent.parent;
+  return owner !== undefined && (FUNCTION_LIKE.has(owner.kind) || isIfBranch(owner, parent));
+}
+
+/** @param {ts.Node} n  is `n` the callee of a call or `new`? */
+function isCallee(n) {
+  const p = n.parent;
+  return p !== undefined && (ts.isCallExpression(p) || ts.isNewExpression(p)) && p.expression === n;
+}
+
+/** @param {ts.Node} n  is `n` a declared binding name (`const msg =`) — not a read? */
+function isDeclaredName(n) {
+  const p = n.parent;
+  return p !== undefined && ts.isVariableDeclaration(p) && p.name === n;
+}
 
 /** @param {ts.Node} n */
 function isPlusBinary(n) {
@@ -171,6 +287,10 @@ function nothingRiskyBefore(stmt, lit, sf) {
     // Entirely BEFORE the literal. A BinaryExpression passes the kind check, but
     // its operator token is vetted like every other token: only `+` is allowed.
     if (!PRECEDING_OK.has(n.kind)) return false;
+    // An identifier only as a call / `new` CALLEE (`new Error(`). As an operand
+    // it is string-converted — `sym + 'a'`, `${obj}` — and that conversion can
+    // throw (a Symbol; a throwing toString/valueOf), skipping the literal.
+    if (n.kind === K.Identifier && !isCallee(n) && !isDeclaredName(n)) return false;
     // `=` only as a declaration's initializer — never an assignment expression.
     if (n.kind === K.EqualsToken && !ts.isVariableDeclaration(n.parent)) return false;
     return n.getChildren(sf).every(ok);
@@ -250,6 +370,10 @@ export function continuationAnchors(src, fileName) {
         break;
       }
       anchorLine = sLine;
+      if (!startsItsBasicBlock(stmt)) {
+        good = false; // rule 5
+        break;
+      }
       if (!nothingRiskyBefore(stmt, lit, sf)) {
         good = false; // rule 4
         break;
