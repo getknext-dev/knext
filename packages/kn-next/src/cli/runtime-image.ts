@@ -201,6 +201,18 @@ export function dockerBuildxArgs(opts: {
     buildContext: string;
     dockerfile: string;
     target?: StandaloneTarget;
+    /**
+     * `config.healthCheckPath`. Only meaningful for `target ===
+     * "standalone-node"`: that stage's compile-cache BAKE (#1264) boots the
+     * app and warms this path before flushing the cache, so an app with a
+     * custom health route and no `/api/health` route would otherwise fail
+     * the docker BUILD, not just its Knative probe. Threaded through as
+     * `--build-arg KNEXT_HEALTH_CHECK_PATH` — the Dockerfile's own `ARG`
+     * default (`/api/health`) applies when this is absent. Ignored for
+     * `standalone-bun` (the bun stage compiles bytecode; it never boots or
+     * warms the server) and for the vinext single-stage image (no bake here).
+     */
+    healthCheckPath?: string;
 }): string[] {
     const argv = [
         "docker",
@@ -213,6 +225,12 @@ export function dockerBuildxArgs(opts: {
     ];
     if (opts.target) {
         argv.push("--target", opts.target);
+    }
+    if (opts.target === "standalone-node" && opts.healthCheckPath) {
+        argv.push(
+            "--build-arg",
+            `KNEXT_HEALTH_CHECK_PATH=${opts.healthCheckPath}`,
+        );
     }
     argv.push(
         "-t",

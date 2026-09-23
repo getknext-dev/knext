@@ -516,7 +516,12 @@ afterAll(() => {
     run("docker", ["rmi", "--force", NODE_IMAGE], { timeout: 60_000 });
     run("docker", ["rmi", "--force", BUN_IMAGE], { timeout: 60_000 });
     if (workDir) rmSync(workDir, { recursive: true, force: true });
-});
+    // Explicit — bun:test's default hook timeout (5s) is too tight for 3
+    // container removals + 2 image removals in series on a loaded docker
+    // daemon (observed locally: this exact hook timed out once). Each
+    // `run()` call above already carries its own 60s spawnSync timeout; this
+    // just gives the HOOK itself room to run them all before bun kills it.
+}, 300_000);
 
 function logsOf(container: string): string {
     const logs = run("docker", ["logs", container], { timeout: 60_000 });
@@ -614,7 +619,7 @@ describe("the V8 compile cache is baked into the standalone-node image and LIVE 
         );
         expect(bytes.status, bytes.stderr).toBe(0);
         // The recipe's own floor (ARG KNEXT_COMPILE_CACHE_MIN_BYTES).
-        expect(Number(bytes.stdout.trim())).toBeGreaterThanOrEqual(65_536);
+        expect(Number(bytes.stdout.trim())).toBeGreaterThanOrEqual(262_144);
     }, 60_000);
 
     it("V8 ACCEPTED the baked code cache for the standalone server on boot — a hit, not just a file", () => {
@@ -629,5 +634,31 @@ describe("the V8 compile cache is baked into the standalone-node image and LIVE 
             // loads as CommonJS — the plain-path log form, never the ESM file:// form.
             /cache for \/app\/\.next\/standalone\/server\.js was accepted/,
         );
+    });
+
+    it("V8 ACCEPTED the cache for Next's OWN framework internals (node_modules/next/dist), not just the entry file", () => {
+        // Measured on a real build: 522 accepted entries total, 388 of them
+        // under node_modules/next/dist. Checking only server.js cannot
+        // distinguish "the bake genuinely warmed the app" from "the bake
+        // warmed nothing beyond the one file its own driver imports" — a
+        // narrower bake that still boots server.js (which V8 always compiles
+        // as the entry, cache or not) would pass the previous assertion alone.
+        const logs = logsOf(NODE_DEBUG_CONTAINER);
+        expect(logs).toMatch(
+            /cache for \/app\/\.next\/standalone\/node_modules\/next\/dist\/[^\s]+ was accepted/,
+        );
+    });
+
+    it("a real minimum COUNT of entries were accepted, not just one or two", () => {
+        // Measured minimum on this recipe's own fixture (7 routes): 522. A
+        // floor of 50 is generous headroom under that for a smaller real app
+        // while still failing hard if the bake regresses to warming almost
+        // nothing (e.g. only its own entry file).
+        const logs = logsOf(NODE_DEBUG_CONTAINER);
+        const acceptedCount = (logs.match(/ was accepted,/g) ?? []).length;
+        expect(
+            acceptedCount,
+            `expected at least 50 accepted compile-cache entries, got ${acceptedCount}`,
+        ).toBeGreaterThanOrEqual(50);
     });
 });

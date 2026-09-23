@@ -206,6 +206,49 @@ describe("dockerBuildxArgs — the buildx argv the CLI runs", () => {
         });
         expect(argv[argv.indexOf("--target") + 1]).toBe("standalone-node");
     });
+
+    it("standalone-node with a custom healthCheckPath passes it as --build-arg KNEXT_HEALTH_CHECK_PATH (#1264 follow-up)", () => {
+        // The bake warms a hardcoded /api/health unless the app's configured
+        // healthCheckPath is threaded through as a build-arg — an app with a
+        // custom path and no /api/health route would otherwise fail the BUILD.
+        const argv = dockerBuildxArgs({
+            ...base,
+            dockerfile: "/app/Dockerfile.standalone",
+            target: "standalone-node",
+            healthCheckPath: "/healthz",
+        });
+        const i = argv.indexOf("--build-arg");
+        expect(i).toBeGreaterThan(-1);
+        expect(argv[i + 1]).toBe("KNEXT_HEALTH_CHECK_PATH=/healthz");
+    });
+
+    it("no healthCheckPath configured -> no --build-arg (the Dockerfile's own /api/health default applies)", () => {
+        const argv = dockerBuildxArgs({
+            ...base,
+            dockerfile: "/app/Dockerfile.standalone",
+            target: "standalone-node",
+        });
+        expect(argv).not.toContain("--build-arg");
+    });
+
+    it("standalone-bun target ignores healthCheckPath — the bun stage never boots/warms the server to bake a cache", () => {
+        const argv = dockerBuildxArgs({
+            ...base,
+            dockerfile: "/app/Dockerfile.standalone",
+            target: "standalone-bun",
+            healthCheckPath: "/healthz",
+        });
+        expect(argv).not.toContain("--build-arg");
+    });
+
+    it("vinext (no target) ignores healthCheckPath — no bake in that image build", () => {
+        const argv = dockerBuildxArgs({
+            ...base,
+            dockerfile: "/app/Dockerfile",
+            healthCheckPath: "/healthz",
+        });
+        expect(argv).not.toContain("--build-arg");
+    });
 });
 
 describe("stageStandaloneBuildContext — stages a BOOTABLE standalone build context", () => {

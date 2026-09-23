@@ -719,6 +719,7 @@ export async function deploy() {
                             buildContext: repoRoot,
                             dockerfile: selection.dockerfile,
                             target: selection.target,
+                            healthCheckPath: config.healthCheckPath,
                         }),
                     );
                     log.info("Docker image built and pushed");

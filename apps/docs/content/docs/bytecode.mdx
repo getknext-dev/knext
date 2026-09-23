@@ -14,9 +14,27 @@ built, so it is present from the very first pod, on any cluster.
 
 ## How it works (Node)
 
-During the image build, knext boots your server once and lets V8 serialize its compiled bytecode to
-a cache directory inside the image. At runtime the server reads that cache instead of parsing and
-compiling your application's JavaScript again.
+During the image build, knext boots your server exactly once — the same server.js that runs in
+production, so if you have an `instrumentation.ts` with a `register()` hook, it runs during this
+build-time boot too — and lets V8 serialize its compiled bytecode to a cache directory inside the
+image. At runtime the server reads that cache instead of parsing and compiling your application's
+JavaScript again.
+
+That one boot needs to prove the server actually works before the build can trust the cache it
+produced:
+
+- It sends a request to your configured **health check path** (`healthCheckPath` in
+  `kn-next.config.ts`, default `/api/health`) and requires a **2xx response within 30 seconds**. A
+  custom health route works automatically — nothing extra to configure — but if your app has *no*
+  route at the configured path, this step, and the image build with it, fails.
+- It checks the cache that came out the other side against a **minimum size**. A cache that is
+  present but implausibly small looks exactly like a healthy one — same configuration, same startup
+  path, no error — while doing nothing at runtime, so the build refuses to ship it.
+- It runs as the same **non-root user the container runs as in production**. The cache directory is
+  keyed by the user that wrote it, so if your own image customisations (a custom base image, an
+  added build stage) end up running this step as a different user — root, most commonly — the cache
+  is written but the runtime, back on its normal user, never reads it: present on disk, silently
+  unused, no error at build time or at runtime.
 
 Because the cache lives in the image layer:
 
@@ -37,6 +55,24 @@ looks exactly like one that works — same configuration, same startup path, no 
 delivering nothing. The build checks that the cache was actually written rather than trusting that
 it was.
 </Callout>
+
+### Diagnosing a failed bake (Node)
+
+If the image build fails at this step, the log names which of the three checks above tripped:
+
+- **"a warm path did not answer 2xx"** — the health-check request failed or timed out. Most often
+  this means `healthCheckPath` in `kn-next.config.ts` points at a route your app does not have, or
+  the route depends on something (a database, an external service) that is not reachable *during
+  the image build* — the health route your production pods answer at runtime and the one this
+  build-time boot warms must both work without that dependency, or must fail open when it is
+  absent.
+- **"below the floor"** — the cache came out smaller than expected. This usually means the boot
+  above failed silently in some other way (check the rest of the build log for warnings from your
+  own `instrumentation.ts`), or the server exited before the warm-up request completed.
+- **No explicit error, but slower cold starts than expected in production** — check that nothing in
+  your own image customisation changes which user runs the build steps around this one; the cache
+  is written and read by the same fixed non-root user, and a mismatch there produces no build error
+  at all, only a cache the runtime silently never reads.
 
 This is independent of your **data cache**. Bytecode caching governs how fast the server *boots*;
 the cache provider (`redis`, and friends) governs where *ISR and data* are cached. The two are

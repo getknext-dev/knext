@@ -1,7 +1,10 @@
 /**
- * NOT YET EMITTED by either scaffolder — staged under
- * `templates/runtime-standalone/` (paired with `Dockerfile.standalone.hbs`)
- * until the CLI-selection increment renders it.
+ * NOT emitted by `kn-next create` — the scaffolder only walks
+ * `templates/app/`. Staged into the build context at `kn-next build` /
+ * `deploy` / `preview` time instead, only when the standalone shape is
+ * selected (`stageStandaloneBuildContext`, `templates/runtime-standalone/`,
+ * paired with `Dockerfile.standalone.hbs`) — that CLI-selection wiring has
+ * landed and is exercised by the docker-e2e suites in this package.
  *
  * knext STANDALONE supervisor entry (ADR-0055).
  *

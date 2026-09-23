@@ -401,6 +401,7 @@ async function defaultBuildAndPush(
             buildContext: repoRoot,
             dockerfile: selection.dockerfile,
             target: selection.target,
+            healthCheckPath: config.healthCheckPath,
         }),
     );
 

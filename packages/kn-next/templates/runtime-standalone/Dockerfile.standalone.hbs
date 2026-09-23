@@ -2,10 +2,11 @@
 #
 # knext — node/bun STANDALONE runtime image (ADR-0055).
 #
-# NOT YET EMITTED by either scaffolder. This is the ADR-0055 image recipe,
-# staged under `templates/runtime-standalone/` (not `templates/app/`) until the
-# CLI-selection increment renders and builds it — see the BUILD-CONTEXT
-# REQUIREMENT note below for why that matters.
+# NOT emitted by `kn-next create` — the scaffolder only walks `templates/app/`.
+# This is the ADR-0055 image recipe, staged under `templates/runtime-standalone/`
+# into the build context at `kn-next build` / `deploy` / `preview` time instead
+# (`stageStandaloneBuildContext`) — see the BUILD-CONTEXT REQUIREMENT note below
+# for why that split matters.
 #
 # This is the image for the STANDALONE shape (`next build` with
 # output:'standalone'), as opposed to the vinext single-executable image
@@ -32,16 +33,18 @@
 # the branch's current patch (same rationale as Dockerfile.hbs); package versions
 # are deliberately NOT pinned — a pinned version goes stale like the digest.
 #
-# BUILD-CONTEXT REQUIREMENT, owed to the CLI-wiring increment that will
-# actually render and build this file: whichever `.dockerignore` bounds that
-# context must NOT exclude `.next/standalone`, `.next/static` or
-# `node_modules/@getknext/core` — the CLI-shipped `templates/app/.dockerignore.hbs`
-# (paired with the OTHER, vinext `Dockerfile.hbs`) excludes all three today.
-# This template lives OUTSIDE `templates/app` (`templates/runtime-standalone/`)
-# precisely so `kn-next create` does not emit it — and so does not build it —
-# before that CLI-selection wiring exists: `templates/app` is walked and
-# rendered into EVERY scaffolded app with no allowlist, so a template that
-# cannot yet be built has no business living there (#1155).
+# BUILD-CONTEXT REQUIREMENT, owed to the CLI-wiring that renders and builds
+# this file (`stageStandaloneBuildContext` + `dockerBuildxArgs`): whichever
+# `.dockerignore` bounds that context must NOT exclude `.next/standalone`,
+# `.next/static` or `node_modules/@getknext/core` — the CLI-shipped
+# `templates/app/.dockerignore.hbs` (paired with the OTHER, vinext
+# `Dockerfile.hbs`) excludes all three, which is why the staging function
+# writes its OWN per-Dockerfile `.dockerignore` (`standaloneDockerignore()`)
+# rather than reusing the app's. This template lives OUTSIDE `templates/app`
+# (`templates/runtime-standalone/`) so `kn-next create` does not emit it:
+# `templates/app` is walked and rendered into EVERY scaffolded app with no
+# allowlist, and this recipe is selected by build/deploy-time config
+# (`config.build`/`config.runtime`), not by scaffold-time choice.
 
 # ---------------------------------------------------------------------------
 # deps — resolves the supervisor's OWN runtime dependency closure (pino,
@@ -196,11 +199,22 @@ ENV PORT=3000 \
 # that never ships (only the cache directory it wrote does).
 #
 # Measured against this recipe's own real build (linux/amd64, the minimal
-# fixture standalone-drain-app, node:22-alpine): a healthy bake produces
-# ~1.35 MB across 476 files. The floor below is well under that — a smaller
-# result means the flush was truncated or never happened — the cache would
-# look present and do nothing — so the build fails instead of shipping it.
-ARG KNEXT_COMPILE_CACHE_MIN_BYTES=65536
+# fixture standalone-drain-app — 7 routes, node:22-alpine): a healthy bake
+# produces ~1.35 MB across 476 files, and NODE_DEBUG_NATIVE=COMPILE_CACHE
+# shows 522 accepted entries at boot (388 under node_modules/next/dist alone
+# — Next's own framework internals, present regardless of app size — plus the
+# app's own route chunks under .next/server). The floor below (256 KiB) stays
+# well under that measured minimum while catching a truncated/empty flush far
+# earlier than the previous 64 KiB floor did — the cache would look present
+# and do nothing, so the build fails instead of shipping it.
+ARG KNEXT_COMPILE_CACHE_MIN_BYTES=262144
+
+# The path the bake warms — MUST match `kn-next.config.ts`'s `healthCheckPath`
+# (default `/api/health`). `kn-next build`/`deploy`/`preview` pass this as a
+# `--build-arg` when the app configures a custom path; an app with no
+# `/api/health` route and no custom `healthCheckPath` would otherwise fail
+# THIS BUILD, not just its Knative probe.
+ARG KNEXT_HEALTH_CHECK_PATH=/api/health
 
 # THE BAKE. It runs AS 65532, after the USER line above, and that ordering is
 # load-bearing: node keys the cache subdirectory by the uid that wrote it, so
@@ -209,7 +223,7 @@ ARG KNEXT_COMPILE_CACHE_MIN_BYTES=65536
 # loopback address the driver's own warm-up requests reach directly; the
 # ENV defaults above (0.0.0.0:3000) are what the shipped container actually
 # binds at runtime.
-RUN PORT=8901 HOSTNAME=127.0.0.1 node /app/knext-compile-cache-bake.mjs \
+RUN PORT=8901 HOSTNAME=127.0.0.1 KNEXT_WARM_PATH="${KNEXT_HEALTH_CHECK_PATH}" node /app/knext-compile-cache-bake.mjs \
  && bytes=$(find /app/.next/standalone/.next/compile-cache -type f -exec cat {} + | wc -c) \
  && echo "compile cache baked: ${bytes} bytes in $(find /app/.next/standalone/.next/compile-cache -type f | wc -l) file(s)" \
  && if [ "${bytes}" -lt "${KNEXT_COMPILE_CACHE_MIN_BYTES}" ]; then \

@@ -1,8 +1,9 @@
 /**
- * NOT YET EMITTED by either scaffolder — staged under
- * `templates/runtime-standalone/` (paired with `Dockerfile.standalone.hbs`)
- * until the CLI-selection increment renders it. See that file's header for
- * the ADR-0055 image shape this belongs to.
+ * NOT emitted by `kn-next create` — the scaffolder only walks
+ * `templates/app/`. Staged into the build context at `kn-next build` /
+ * `deploy` / `preview` time instead (`stageStandaloneBuildContext`,
+ * `templates/runtime-standalone/`, paired with `Dockerfile.standalone.hbs`).
+ * See that file's header for the ADR-0055 image shape this belongs to.
  *
  * knext STANDALONE-NODE compile-cache BAKE driver.
  *
