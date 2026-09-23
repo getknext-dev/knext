@@ -1,7 +1,9 @@
 # ADR-0054: Reconsider the vinext-only target — adopt a verified 778/0 runtime axis for v1.0
 
 - **Status:** **Accepted (2026-09-22) — founder decision.** (Was Proposed; the sprint-close gates
-  reviewed it SIGN-OFF/ISSUES non-blocking, findings folded in.)
+  reviewed it SIGN-OFF/ISSUES non-blocking, findings folded in.) **Amended** by Amendment 6
+  (2026-09-22) and **Amendment 7 (2026-09-23)** — Amendment 7 retires the uncompiled bun-standalone
+  fallback below and makes the v1.0 surface the full bytecode-cached cell matrix.
 - **Supersedes** ADR-0048's *vinext-ONLY* mandate: vinext is no longer the only target. **Amends**
   ADR-0042 (default runtime), ADR-0036 (target matrix); the maintainer must reconcile ADR-0042/0050/
   0051 status lines + `.claude/rules/architecture.md §4` + `CLAUDE.md §3` (not an agent's to edit).
@@ -32,6 +34,10 @@ spike; if the compile cannot hold 778/0, the axis **ships uncompiled bun-standal
 778/0) and the bytecode-exec packaging becomes a fast-follow, not a v1.0 blocker. The verified-parity
 credential must not be forfeited for an unproven compile — that was ADR-0048's mistake, not to be
 repeated inverted.
+
+> **Superseded by Amendment 7 (2026-09-23):** the uncompiled fallback in this paragraph no longer
+> holds. Bytecode caching is mandatory for every supported cell, and the compile now works (#1225),
+> so bun-standalone ships only as the compiled `--bytecode` executable. Text kept as history.
 
 **The compiled path inherits the gate concerns** (system-designer/architect sprint-close review):
 SIGTERM-drain + `:9464` metrics are bypassed when the operator runs a compiled binary (#1156/#1157);
@@ -205,6 +211,8 @@ packaging is v1.0 or a fast-follow.**
    dead-end. **If it holds → bun-standalone-bytecode is the v1.0 default. If it does not → ship
    uncompiled bun-standalone (already 778/0) as v1.0** and make bytecode-exec a fast-follow; the
    verified credential is never forfeited for an unproven compile. *(new issue — spike/prototype)*
+   **→ Superseded by Amendment 7:** the "ship uncompiled" branch is retired; the compiled exec is a
+   hard prerequisite, and 778/0 on it is still to be run.
 2. **Compiled-path gate fixes (gate the default before it ships):** standalone runtime-image
    template (#1155), SIGTERM-drain e2e under the compiled/`bun run server.js` path (#1156), `:9464`
    metrics parity on `runtime=bun` (#1157), keep-alive guard verification on linux-x64 (#1153).
@@ -262,3 +270,135 @@ the harness boot path, not the supervisor-wrapped entrypoint, on **both** runtim
 The bytecode-`--compile` feasibility spike (action item 1) is **independent** of #1155: the image +
 supervisor are needed whether the axis ships compiled or uncompiled. ADR-0055 §C6 records that only
 the entry-file **shape** differs if the spike succeeds; the invariant holds regardless.
+
+## Amendment 7 — bun-standalone ships compiled; the v1.0 surface is the full bytecode-cached cell matrix (2026-09-23)
+
+- **Status:** Accepted (2026-09-23) — founder decisions recorded on #1218 (the matrix, then the
+  mandatory-bytecode addendum). Records a decision already made; it does not reopen the axis.
+- **Supersedes, within this ADR:** the Verdict's feasibility-caveat fallback ("ships uncompiled
+  bun-standalone … bytecode-exec packaging becomes a fast-follow") and action item 1's "if it does
+  not → ship uncompiled bun-standalone as v1.0". Both are kept above, unedited, as the decision
+  history; this Amendment is what now holds where they conflict.
+- **Relates to:** ADR-0056 (the per-cell credential against a frozen RC ref), ADR-0039 (the frozen
+  set), ADR-0055 (the operator↔image boundary the compiled entry sits behind), #1166, #1225.
+
+### Context
+
+This ADR accepted bun-standalone as the v1.0 default *on the condition* that the
+`bun build --compile --bytecode` step was proven for Next's standalone output, and wrote an explicit
+escape hatch: if the compile could not hold, ship **uncompiled** bun-standalone (`bun server.js`) as
+v1.0 and make the bytecode executable a fast-follow. The #1166 spike reached exactly that verdict
+several times over, on a wrong diagnosis: that Bun's compiled binary could not resolve bare /
+exports-mapped specifiers from Next's disk-loaded server runtime.
+
+Two things changed on 2026-09-23:
+
+1. **The founder widened and hardened the v1.0 bar (#1218).** v1.0 is credentialed on **every
+   supported runtime × builder cell** — node/bun × vinext/turbopack/webpack — and **bytecode
+   caching is mandatory for every cell**. Bun cells ship as a `bun build --compile --bytecode`
+   single executable; node cells ship with the V8 compile cache (`NODE_COMPILE_CACHE`) persisted
+   through an image-baked layer or a mounted volume. **A cell without live bytecode caching is not
+   a supported cell.** **vinext × node is a supported cell** (the open question on #1218 is closed
+   that way). Under this bar the uncompiled fallback stopped satisfying the supported-cell
+   definition at all, independently of whether the compile worked.
+2. **The compile works (#1225, merged).** The "wall" was not a Bun limitation. A
+   `bun build --compile` executable does not read `package.json` at runtime by default, so
+   disk-loaded code could not resolve exports-mapped specifiers; `compile.autoloadPackageJson: true`
+   restores it. turbopack × bun now builds as a compiled `--bytecode` executable with: a disk
+   closure that keeps Next's `*.external` singletons and every module literally required from
+   `.next/server/**` on disk (one instance each — this fixed a 500-vs-404 `NoFallbackError` split
+   found in review); a **fail-closed** bytecode verifier (the build refuses an executable that was
+   not compiled to bytecode, and the CLI re-verifies it); `STANDALONE_SERVER_EXEC` so the ADR-0055
+   supervisor spawns the executable, keeping SIGTERM drain, `after()` and `:9464` metrics
+   (`standalone-drain` docker e2e 6/6 on linux/amd64).
+
+### Decision
+
+1. **The uncompiled bun-standalone path is retired as a v1.0 ship and is not a supported cell.**
+   bun-standalone ships as the compiled `--bytecode` executable (#1225). "A dead end is a success"
+   no longer applies to #1166: the compiled executable is a hard prerequisite for every Bun
+   standalone cell. The uncompiled `bun server.js` shape may still exist as a harness boot path
+   (see "not yet true" below), but nothing may claim it as a supported, shippable or credentialed
+   configuration.
+2. **The supported v1.0 surface is the full matrix**, each cell with bytecode caching **live** (not
+   merely configured) and each credentialed per ADR-0056 — 14 consecutive scheduled credential
+   nights on the official suite against a frozen RC tag, per-cell window keyed on the cell's own
+   fingerprint:
+
+   | cell | bytecode mechanism | builder exists | status today |
+   |---|---|---|---|
+   | turbopack × bun | compiled `--bytecode` exec | yes | exec ships (#1225); official suite **not yet run on the exec** |
+   | turbopack × node | V8 compile cache | yes | 778/0 verified on the raw `server.js` harness boot; compile cache liveness unasserted (#1221) |
+   | vinext × bun | compiled `--bytecode` exec | yes | current default; weekly lane, below node-parity (bar: `docs/compat/bar-vinext-axis.md`) |
+   | vinext × node | V8 compile cache | yes | **supported by decision; compile-cache wiring not built** |
+   | webpack × bun | compiled `--bytecode` exec | **no** (#1219) | not buildable yet |
+   | webpack × node | V8 compile cache | **no** (#1219) | not buildable yet |
+
+3. **The default is unchanged by this Amendment.** This ADR's Verdict makes bun-standalone the v1.0
+   default; the code default is still **vinext** (`DEFAULT_BUILDER_ID = "vinext"`,
+   `artifact-contract.ts`). The flip (#1183) waits on the credential, as before. The default is one
+   credentialed cell among several, not a different bar.
+
+**Trade-off note.** The alternative the founder rejected was to keep the uncompiled escape hatch:
+bun-standalone would then have been credentialable today (the raw-`server.js` Bun lane already ran
+778/0 twice on Bun 1.4.0), at the cost of a Bun cell with no bytecode caching — i.e. shipping the
+Bun axis without the cold-start mechanism that motivated it. Mandatory bytecode buys a uniform
+promise ("every supported cell is bytecode-cached, and that is checked") and pays for it in
+schedule: the Bun cells' 778/0 evidence was earned on the uncompiled artifact and **does not
+transfer** to the compiled one, so their credential restarts from zero on the exec, and one more
+artifact shape (the compiled standalone exec) joins the supply-chain surface. The compile also
+moves some work onto the disk: `app-page(-turbo).runtime.prod.js` now loads from disk **without**
+bytecode to preserve single-instance identity, so the cold-start gain is smaller than a full embed
+would give and is not yet measured on a cluster (#1226).
+
+### What is NOT yet true (stated so nobody reads this Amendment as a credential)
+
+- **The official compat suite has not been run on the compiled executable.** The Bun axis of
+  `scripts/e2e-deploy.sh` still boots raw `server.js`, so the Bun 778/0 on record certifies the
+  uncompiled shape this Amendment retires. The compiled exec's evidence today is compat-smoke 11/11
+  on `apps/file-manager`, 18/18 fixture probes and the drain e2e — smoke, not the suite.
+  Computed-path requires in Next's server core are only catchable by the suite.
+- **The webpack builder does not exist** (#1219), so two of the six cells cannot be built.
+- **vinext × node has no compile-cache wiring**, and **no cell has an assertion that bytecode
+  caching is live** — the fail-closed verifier checks the Bun executable at build time, not that a
+  running pod uses it, and nothing checks node cells at all (#1221). The standalone template's node
+  stage bakes no compile cache; node cells rely on the operator-injected `NODE_COMPILE_CACHE`
+  consumed by `node-server.ts`.
+- **Known follow-ups on the compiled exec:** #1226 (Pages Router require-hook aliasing and custom
+  `cacheHandler` files are outside the disk-closure scan; cluster cold-start of the compiled exec vs
+  the pre-fix build is unmeasured), #1227 (Bun 1.4.0 compiled executables are SIGKILLed on
+  darwin-arm64 for an invalid code signature — local dev on Mac). Not verified on OKE or kind yet.
+- **No credential exists for any cell.** ADR-0056's pin is `null`; rc.1 is a founder action gated
+  on every cell's prerequisites.
+- **Downstream text still encodes the old bar** in maintainer-owned files (`.claude/rules/
+  architecture.md §4`, `CLAUDE.md §3`) — listed on the PR that lands this Amendment, not edited by
+  it.
+
+### Consequences
+
+- The Bun cells' credential clock starts on the compiled exec, not on the uncompiled evidence. Until
+  the Bun credential lane boots the executable, a green Bun night says nothing about what ships.
+- #1166 closes on the suite result, not on #1225 alone; its "formal recommendation" deliverable is
+  this Amendment.
+- Six cells × one shared contract: the N-target cost that #1152 was opened to price is now a
+  six-cell matrix (two bytecode mechanisms, three builders), all behind the one `RuntimeContract`
+  and operator of Amendment 6 / ADR-0055. #1152 prices it against this table.
+- Reopen bar (#1154), extended: this Amendment is reopened if the compiled exec cannot reach 778/0
+  on the suite after the disk-closure follow-ups, or if a cell's bytecode mechanism is shown to be
+  dead in a running pod and cannot be made live — in either case the founder decides whether that
+  cell leaves the supported set; the fallback is **not** silently to ship it uncompiled.
+
+### Action items
+
+1. Point the Bun compat lane (early-warning first, then the Bun credential cron) at the compiled
+   executable instead of raw `server.js`; run the official suite on it. *(#1166)*
+2. Build the webpack builder on node + bun. *(#1219)*
+3. Wire the node compile cache for vinext × node, and assert bytecode caching is **live** in every
+   cell's running artifact, fail-closed. *(#1221)*
+4. Close the disk-closure blind spots and measure the compiled exec's cluster cold start. *(#1226)*
+5. Resolve compiled-exec code signing on darwin-arm64 for local dev. *(#1227)*
+6. Wire each remaining cell to a credential cron with a `<runtime>-<builder>` lane id (ADR-0056
+   action item); only then is rc.1 cuttable. *(founder: cut rc.1)*
+7. Flip `DEFAULT_BUILDER_ID` to bun-standalone once that cell is credentialed. *(#1183)*
+8. **Maintainer:** reconcile `.claude/rules/architecture.md §4` and `CLAUDE.md §3` with this
+   Amendment (see the PR body for the exact lines).
