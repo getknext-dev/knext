@@ -575,19 +575,28 @@ export async function checkStaticAssets(request) {
   const evidence = [];
   /** @type {string[]} */
   const pending = [...refs];
-  const enqueue = (/** @type {string} */ u) => {
+  /** @type {Map<string, string>} */
+  const origin = new Map(refs.map((r) => [r, 'GET /']));
+  const enqueue = (/** @type {string} */ u, /** @type {string} */ from) => {
     if (all.has(u)) return;
     all.add(u);
+    origin.set(u, from);
     pending.push(u);
   };
   for (const m of home.text.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/g)) {
-    for (const u of extractCssUrls(m[1], '/')) enqueue(u);
+    for (const u of extractCssUrls(m[1], '/')) enqueue(u, 'inline <style> on /');
   }
   while (pending.length) {
     const p = /** @type {string} */ (pending.shift());
     const res = await request(p);
-    evidence.push(`${p}: ${assertAsset(p, res)}`);
-    if (extensionOf(p) === '.css') for (const u of extractCssUrls(res.text, p)) enqueue(u);
+    try {
+      evidence.push(`${p}: ${assertAsset(p, res)}`);
+    } catch (err) {
+      throw new Error(
+        `${err instanceof Error ? err.message : err} (referenced by ${origin.get(p) ?? 'unknown'})`,
+      );
+    }
+    if (extensionOf(p) === '.css') for (const u of extractCssUrls(res.text, p)) enqueue(u, p);
   }
   return { summary: assertAssetCoverage([...all]), evidence };
 }
