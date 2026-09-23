@@ -108,11 +108,15 @@ Nothing is compiled into an executable on this target. Instead:
   `kn-next build`, `kn-next deploy` and a plain `npm run build` all agree.
 - **Bytecode caching is the V8 compile cache, baked into the image.** The image
   (`Dockerfile.vinext-node`, next to your `Dockerfile`) boots the server once during
-  `docker build`, warms `/api/health`, and ships the compiled code as a layer. Every pod starts
-  with it, including the first one after scaling to zero. The image build **fails** if the warm-up
-  request does not succeed or the cache comes out too small, rather than shipping an empty cache.
-  To see the cache being used, start a container with `NODE_DEBUG_NATIVE=COMPILE_CACHE`: the log
-  says the cache for `/app/.output/server/index.mjs` **was accepted**.
+  `docker build` and warms your configured **health check path** (`healthCheckPath` in
+  `kn-next.config.ts`, default `/api/health`) before shipping the compiled code as a layer. `kn-next
+  build`/`deploy`/`preview` thread a custom `healthCheckPath` through automatically, so a custom
+  health route works with nothing extra to configure. Every pod starts with the cache, including the
+  first one after scaling to zero. The image build **fails** if the warm-up request does not succeed
+  or the cache comes out too small, rather than shipping an empty cache — see
+  [diagnosing a failed bake](/docs/bytecode#diagnosing-a-failed-bake-node). To see the cache being
+  used, start a container with `NODE_DEBUG_NATIVE=COMPILE_CACHE`: the log says the cache for
+  `/app/.output/server/index.mjs` **was accepted**.
 - **Bun is not needed to build it.** Only the Bun executable target requires Bun 1.4 on the build
   machine.
 - **`kn-next build` checks the preset.** If the build produced the Bun preset (see below), it

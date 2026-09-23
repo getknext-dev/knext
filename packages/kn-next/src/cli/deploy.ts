@@ -720,6 +720,7 @@ export async function deploy() {
                             dockerfile: selection.dockerfile,
                             target: selection.target,
                             healthCheckPath: config.healthCheckPath,
+                            bakesCompileCache: selection.bakesCompileCache,
                         }),
                     );
                     log.info("Docker image built and pushed");

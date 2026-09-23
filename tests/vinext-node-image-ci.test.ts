@@ -97,3 +97,38 @@ describe('the CI path actually reaches the suite (both halves)', () => {
     );
   });
 });
+
+// #1273 — the vinext-node compile-cache bake's ONLY proof that the Dockerfile's
+// ARG KNEXT_HEALTH_CHECK_PATH build-arg actually reaches the bake (rather than
+// always falling back to /api/health) is this e2e: it rides in the same job
+// (same docker + bun + @getknext/core setup) and has the same no-skip
+// contract, so it needs the same wiring guard — mirrors the standalone-node
+// #1264 follow-up wiring in tests/standalone-drain-image-ci.test.ts.
+const CUSTOM_HEALTH_PATH_E2E_PATH =
+  'packages/kn-next/src/__tests__/vinext-node-custom-health-path.docker-e2e.test.ts';
+
+describe('the vinext-node custom-healthCheckPath bake e2e is wired into CI (#1273)', () => {
+  it('a `run:` in the job invokes it by its explicit path, as a blocking step', () => {
+    const runCommands = [...jobBlock().matchAll(/run:\s*([^\n]*)/g)].map((m) => m[1]).join('\n');
+    expect(
+      runCommands,
+      'the job never runs the vinext-node-custom-health-path docker e2e',
+    ).toContain(CUSTOM_HEALTH_PATH_E2E_PATH);
+    const audit = auditBlockingGate({
+      workflowPath: CI_YML,
+      jobId: JOB_ID,
+      gateCommand: new RegExp(CUSTOM_HEALTH_PATH_E2E_PATH.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')),
+    });
+    expect(audit.gateStepsSeen, 'the audit never found the step that runs the e2e').toBe(1);
+    expect(audit.problems, audit.problems.join('\n')).toEqual([]);
+  });
+
+  it('the file exists, is a container e2e, and imports bun:test', () => {
+    const full = resolve(REPO_ROOT, CUSTOM_HEALTH_PATH_E2E_PATH);
+    expect(existsSync(full), `${CUSTOM_HEALTH_PATH_E2E_PATH} does not exist`).toBe(true);
+    expect(CUSTOM_HEALTH_PATH_E2E_PATH).toMatch(/\.docker-e2e\.test\.ts$/);
+    expect(readFileSync(full, 'utf8'), 'the e2e must import bun:test').toMatch(
+      /from ['"]bun:test['"]/,
+    );
+  });
+});

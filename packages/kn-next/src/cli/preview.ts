@@ -402,6 +402,7 @@ async function defaultBuildAndPush(
             dockerfile: selection.dockerfile,
             target: selection.target,
             healthCheckPath: config.healthCheckPath,
+            bakesCompileCache: selection.bakesCompileCache,
         }),
     );
 

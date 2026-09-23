@@ -57,13 +57,21 @@ ENV PORT=3000 \
 # so the build fails instead of shipping it.
 ARG KNEXT_COMPILE_CACHE_MIN_BYTES=65536
 
+# The path the bake warms — MUST match `kn-next.config.ts`'s `healthCheckPath`
+# (default `/api/health`). `kn-next build`/`deploy`/`preview` pass this as a
+# `--build-arg` when the app configures a custom path; an app with no
+# `/api/health` route and no custom `healthCheckPath` would otherwise fail
+# THIS BUILD, not just its Knative probe (#1273 — the same regression class
+# fixed for the standalone-node image's own bake by #1264).
+ARG KNEXT_HEALTH_CHECK_PATH=/api/health
+
 # THE BAKE. It runs AS 65532, after the USER line above, and that ordering is
 # load-bearing: node keys the cache subdirectory by the uid that wrote it, so a
 # cache baked as root is never read by the non-root runtime — present on disk,
 # 0% hit rate. The entry's bake mode warms KNEXT_WARM_PATH (default the shallow
 # `/api/health`, which needs no database), flushes the cache, drains and exits
 # 0; a warm path that does not answer 2xx exits 1 and fails this build.
-RUN KNEXT_COMPILE_CACHE_BAKE=1 PORT=0 METRICS_PORT=0 \
+RUN KNEXT_COMPILE_CACHE_BAKE=1 PORT=0 METRICS_PORT=0 KNEXT_WARM_PATH="${KNEXT_HEALTH_CHECK_PATH}" \
       node /app/.output/server/index.mjs \
  && bytes=$(find /app/.compile-cache -type f -exec cat {} + | wc -c) \
  && echo "compile cache baked: ${bytes} bytes in $(find /app/.compile-cache -type f | wc -l) file(s)" \

@@ -59,6 +59,16 @@ export interface RuntimeImageSelection {
      * for the single-stage vinext `Dockerfile`.
      */
     target?: StandaloneTarget;
+    /**
+     * True when this recipe's `docker build` boots the app and bakes a V8
+     * compile cache into the image (#1264, #1273) — `standalone-node` and
+     * `Dockerfile.vinext-node` both do; `standalone-bun` (compiles bytecode,
+     * never boots) and the single-exec vinext `Dockerfile` (no bake stage) do
+     * not. `dockerBuildxArgs` gates `--build-arg KNEXT_HEALTH_CHECK_PATH` on
+     * this flag rather than inferring it from `target`, because the
+     * vinext-node recipe has no `--target` to key off at all.
+     */
+    bakesCompileCache?: boolean;
 }
 
 /** `<package>/templates/runtime-standalone` — the ADR-0055 image recipe. */
@@ -171,12 +181,13 @@ export function selectRuntimeImage(
         return {
             kind: "app-dockerfile",
             dockerfile: join(cwd, VINEXT_NODE_DOCKERFILE_NAME),
+            bakesCompileCache: true,
         };
     }
     if (shape !== "next-standalone") {
         // vinext × bun (a nitro bun-preset output, run in-process) uses the
         // scaffolded single-stage `Dockerfile` — the compiled binary IS the
-        // server.
+        // server, and there is no separate bake stage to warm.
         return { kind: "app-dockerfile", dockerfile: join(cwd, "Dockerfile") };
     }
     // Standalone shape (`next-standalone`). `runtime` defaults to node (config.ts).
@@ -186,6 +197,9 @@ export function selectRuntimeImage(
         kind: "standalone",
         dockerfile: join(cwd, STANDALONE_DOCKERFILE_NAME),
         target,
+        // Only standalone-node bakes; standalone-bun compiles bytecode and
+        // never boots the server to warm a health route.
+        bakesCompileCache: target === "standalone-node",
     };
 }
 
@@ -202,17 +216,20 @@ export function dockerBuildxArgs(opts: {
     dockerfile: string;
     target?: StandaloneTarget;
     /**
-     * `config.healthCheckPath`. Only meaningful for `target ===
-     * "standalone-node"`: that stage's compile-cache BAKE (#1264) boots the
-     * app and warms this path before flushing the cache, so an app with a
-     * custom health route and no `/api/health` route would otherwise fail
-     * the docker BUILD, not just its Knative probe. Threaded through as
-     * `--build-arg KNEXT_HEALTH_CHECK_PATH` — the Dockerfile's own `ARG`
-     * default (`/api/health`) applies when this is absent. Ignored for
-     * `standalone-bun` (the bun stage compiles bytecode; it never boots or
-     * warms the server) and for the vinext single-stage image (no bake here).
+     * `config.healthCheckPath`. Only meaningful when `bakesCompileCache` is
+     * true (`standalone-node`, or the vinext-node `app-dockerfile`, #1273):
+     * that recipe's compile-cache BAKE boots the app and warms this path
+     * before flushing the cache, so an app with a custom health route and no
+     * `/api/health` route would otherwise fail the docker BUILD, not just its
+     * Knative probe. Threaded through as `--build-arg
+     * KNEXT_HEALTH_CHECK_PATH` — the Dockerfile's own `ARG` default
+     * (`/api/health`) applies when this is absent. Ignored whenever
+     * `bakesCompileCache` is falsy (`standalone-bun` compiles bytecode and
+     * never boots; the single-exec vinext `Dockerfile` has no bake stage).
      */
     healthCheckPath?: string;
+    /** See `RuntimeImageSelection.bakesCompileCache`. Gates the build-arg above. */
+    bakesCompileCache?: boolean;
 }): string[] {
     const argv = [
         "docker",
@@ -226,7 +243,7 @@ export function dockerBuildxArgs(opts: {
     if (opts.target) {
         argv.push("--target", opts.target);
     }
-    if (opts.target === "standalone-node" && opts.healthCheckPath) {
+    if (opts.bakesCompileCache && opts.healthCheckPath) {
         argv.push(
             "--build-arg",
             `KNEXT_HEALTH_CHECK_PATH=${opts.healthCheckPath}`,
