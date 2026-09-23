@@ -127,7 +127,13 @@ jobs:
         run: |
           set -euo pipefail
           IMG=example.com/kn-next-operator:e2e
-          make docker-build IMG="$IMG"
+          # `go mod download` inside the image build hits proxy.golang.org, which
+          # occasionally drops a stream. Retry the BUILD only (bounded), never a check.
+          for attempt in 1 2 3; do
+            make docker-build IMG="$IMG" && break
+            [ "$attempt" = 3 ] && { echo "::error::operator image build failed 3x"; exit 1; }
+            echo "docker-build attempt $attempt failed; retrying"; sleep 10
+          done
           kind load docker-image "$IMG" --name "$CLUSTER"
           make install
           make deploy IMG="$IMG"
