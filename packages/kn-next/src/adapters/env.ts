@@ -61,7 +61,9 @@ export function deriveBunTranspilerCachePath(
  * All process.env vars (including NODE_COMPILE_CACHE) are inherited via spread.
  * The operator may inject NODE_COMPILE_CACHE pointing at a shared PVC for
  * cross-cold-start bytecode caching — we MUST NOT hardcode or override it here.
- * The Dockerfile CMD supplies a fallback when the env var is unset at runtime.
+ * The standalone-node image's ENV supplies the image-baked default when the
+ * var is unset at runtime (#1264); an operator-injected value overrides it via
+ * ordinary Docker/k8s env precedence, before this function ever runs.
  *
  * HOSTNAME is the one exception — it is SANITIZED, not inherited (#178).
  * next@16.2.x standalone treats HOSTNAME as the bind address AND bakes it

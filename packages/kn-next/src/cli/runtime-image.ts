@@ -331,7 +331,12 @@ export function stageStandaloneBuildContext(opts: {
     const templateDir = opts.templateDir ?? runtimeStandaloneTemplateDir();
     const dockerfileSrc = join(templateDir, "Dockerfile.standalone.hbs");
     const entrySrc = join(templateDir, "knext-standalone-entry.mjs.hbs");
-    if (!existsSync(dockerfileSrc) || !existsSync(entrySrc)) {
+    const bakeSrc = join(templateDir, "knext-compile-cache-bake.mjs.hbs");
+    if (
+        !existsSync(dockerfileSrc) ||
+        !existsSync(entrySrc) ||
+        !existsSync(bakeSrc)
+    ) {
         throw new Error(
             `standalone runtime image template not found at ${templateDir} — ` +
                 "the installed @getknext/core package is missing its " +
@@ -341,11 +346,12 @@ export function stageStandaloneBuildContext(opts: {
 
     const dockerfileText = readFileSync(dockerfileSrc, "utf8");
     const entryText = readFileSync(entrySrc, "utf8");
-    // Neither template carries mustache; assert BOTH halves of the staged
-    // context so a future variable is not shipped raw (renderScaffold's own
-    // discipline). This used to only cover the Dockerfile — the entry shim
-    // was `copyFileSync`'d unchecked (cr-1181 finding #4) — so check it with
-    // the same assertion, not a bare copy.
+    const bakeText = readFileSync(bakeSrc, "utf8");
+    // Neither template carries mustache; assert every staged half so a future
+    // variable is not shipped raw (renderScaffold's own discipline). This
+    // used to only cover the Dockerfile — the entry shim was `copyFileSync`'d
+    // unchecked (cr-1181 finding #4) — so check every COPY source with the
+    // same assertion, not a bare copy.
     if (dockerfileText.includes("{{")) {
         throw new Error(
             "Dockerfile.standalone.hbs contains an unsubstituted {{ }} " +
@@ -358,12 +364,23 @@ export function stageStandaloneBuildContext(opts: {
                 "placeholder — the standalone supervisor shim must be literal",
         );
     }
+    if (bakeText.includes("{{")) {
+        throw new Error(
+            "knext-compile-cache-bake.mjs.hbs contains an unsubstituted {{ }} " +
+                "placeholder — the standalone-node compile-cache bake driver must be literal",
+        );
+    }
 
     const dockerfile = join(opts.cwd, STANDALONE_DOCKERFILE_NAME);
     writeFileSync(dockerfile, dockerfileText, "utf8");
     writeFileSync(
         join(opts.buildContext, "knext-standalone-entry.mjs"),
         entryText,
+        "utf8",
+    );
+    writeFileSync(
+        join(opts.buildContext, "knext-compile-cache-bake.mjs"),
+        bakeText,
         "utf8",
     );
     writeFileSync(

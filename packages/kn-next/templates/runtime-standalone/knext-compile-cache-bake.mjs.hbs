@@ -1,0 +1,132 @@
+/**
+ * NOT YET EMITTED by either scaffolder — staged under
+ * `templates/runtime-standalone/` (paired with `Dockerfile.standalone.hbs`)
+ * until the CLI-selection increment renders it. See that file's header for
+ * the ADR-0055 image shape this belongs to.
+ *
+ * knext STANDALONE-NODE compile-cache BAKE driver.
+ *
+ * Bytecode caching is mandatory for every runtime cell (founder rule). On the
+ * standalone-node target the process that matters is Next's OWN generated
+ * `server.js` — code this repo does not own and cannot add a bake mode to the
+ * way the vinext node entry (`knext-node-entry.mjs`) does for itself. This
+ * file is the analog for that shape: a throwaway driver the Dockerfile RUNs
+ * once, at `docker build`, that BECOMES the server process (imports it
+ * in-process rather than spawning a child) so warming it and flushing its V8
+ * compile cache both happen in the ONE process V8 actually compiled into.
+ *
+ * Why in-process, not spawn-then-signal: Node only flushes
+ * `NODE_COMPILE_CACHE` reliably on an EXPLICIT `process.exit()` call (or a
+ * natural, empty-event-loop exit) — the 'exit' event that the flush hook
+ * hangs off. A raw SIGTERM/SIGINT with no handler installed terminates the
+ * process via the OS default disposition, without ever reaching that event,
+ * so a spawn-then-kill bake would silently ship an EMPTY cache. Importing
+ * `server.js` here means this driver's own `process.exit()`, after warming,
+ * is what flushes it — no signal races, nothing to get wrong.
+ *
+ * Ordering (mirrors the Dockerfile comment): this RUN step executes AFTER
+ * `USER 65532:65532`, and that is load-bearing — Node keys the compile-cache
+ * subdirectory by the uid that wrote it, so a bake run as root produces a
+ * cache the non-root runtime uid never reads (present on disk, 0% hit rate).
+ *
+ * Env this driver reads (all supplied by the Dockerfile's RUN step):
+ *   STANDALONE_SERVER_PATH  the standalone server.js to import and warm
+ *                            (same var the supervisor spawns at runtime).
+ *   PORT / HOSTNAME          bound during the bake only; a loopback address
+ *                            picked to avoid colliding with anything else in
+ *                            the build sandbox.
+ *   KNEXT_WARM_PATH          comma-separated paths to fetch before flushing
+ *                            (default the shallow `/api/health`, which needs
+ *                            no database).
+ *
+ * Exit 0 only once every warm path answered 2xx and the cache was flushed;
+ * exit 1 otherwise, which fails the `docker build` — the same fail-closed
+ * contract `Dockerfile.vinext-node.hbs`'s bake enforces.
+ */
+
+import { flushCompileCache, getCompileCacheDir } from "node:module";
+
+const serverPath = process.env.STANDALONE_SERVER_PATH;
+if (!serverPath) {
+    console.error(
+        "[knext] compile-cache bake FAILED: STANDALONE_SERVER_PATH is not set",
+    );
+    process.exit(1);
+}
+
+const PORT = process.env.PORT ?? "3000";
+const HOST = process.env.HOSTNAME ?? "127.0.0.1";
+const WARM_PATHS = (process.env.KNEXT_WARM_PATH ?? "/api/health")
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean);
+
+function warmUrl(path) {
+    // HOSTNAME may be a bind address like 0.0.0.0; loopback is always
+    // reachable from the same process regardless of what the server bound.
+    const host = HOST === "0.0.0.0" || HOST === "::" ? "127.0.0.1" : HOST;
+    return `http://${host}:${PORT}${path}`;
+}
+
+async function waitForServer(deadlineMs) {
+    const deadline = Date.now() + deadlineMs;
+    for (;;) {
+        try {
+            const res = await fetch(warmUrl(WARM_PATHS[0] ?? "/"));
+            if (res.status) return;
+        } catch {
+            // not listening yet
+        }
+        if (Date.now() > deadline) {
+            throw new Error(
+                `standalone server did not answer within ${deadlineMs}ms`,
+            );
+        }
+        await new Promise((r) => setTimeout(r, 100));
+    }
+}
+
+async function main() {
+    // Importing this CJS entry executes its top-level side effects (binding
+    // $PORT) exactly as running it directly would — the same code path the
+    // supervisor spawns at runtime, just in THIS process instead of a child.
+    await import(serverPath);
+
+    await waitForServer(30_000);
+
+    let allOk = true;
+    for (const path of WARM_PATHS) {
+        const t0 = Date.now();
+        try {
+            const res = await fetch(warmUrl(path));
+            allOk &&= res.status >= 200 && res.status < 300;
+            console.log(`WARMED:${path} status=${res.status} ms=${Date.now() - t0}`);
+        } catch (err) {
+            allOk = false;
+            console.log(
+                `WARMED:${path} status=error ms=${Date.now() - t0} (${err?.message ?? err})`,
+            );
+        }
+    }
+
+    console.log(`COMPILE_CACHE:${getCompileCacheDir?.() ?? "none"}`);
+
+    if (!allOk) {
+        console.error(
+            "[knext] compile-cache bake FAILED: a warm path did not answer 2xx",
+        );
+        flushCompileCache?.();
+        process.exit(1);
+    }
+
+    // The explicit flush, and the process.exit() that follows it, are what
+    // this driver exists for — see the header comment.
+    flushCompileCache?.();
+    process.exit(0);
+}
+
+main().catch((err) => {
+    console.error("[knext] compile-cache bake FAILED:", err);
+    flushCompileCache?.();
+    process.exit(1);
+});

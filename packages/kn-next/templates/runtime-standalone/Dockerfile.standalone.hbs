@@ -170,12 +170,52 @@ COPY node_modules/@getknext/core /app/node_modules/@getknext/core
 COPY knext-standalone-entry.mjs /app/knext-entry.mjs
 COPY knext-standalone-entry.mjs /app/server.js
 
+# The bake driver (see its own header for why this shape is in-process, not
+# spawn-then-signal): it IMPORTS the standalone server.js itself, so warming
+# it and flushing its V8 compile cache happen in the one process that
+# actually compiled it.
+COPY knext-compile-cache-bake.mjs /app/knext-compile-cache-bake.mjs
+
+# The cache directory must belong to the RUNTIME user before the bake runs —
+# see the ordering note beside the bake RUN step below.
+RUN mkdir -p /app/.next/standalone/.next/compile-cache \
+ && chown 65532:65532 /app/.next/standalone/.next/compile-cache
+
 USER 65532:65532
 
 ENV PORT=3000 \
     HOSTNAME=0.0.0.0 \
     NODE_ENV=production \
-    STANDALONE_SERVER_PATH=/app/.next/standalone/server.js
+    STANDALONE_SERVER_PATH=/app/.next/standalone/server.js \
+    NODE_COMPILE_CACHE=/app/.next/standalone/.next/compile-cache
+
+# Bytecode caching is MANDATORY on every runtime cell (founder rule). Next's
+# generated server.js is not code this repo owns, so there is no entry-level
+# BAKE flag to set the way `Dockerfile.vinext-node.hbs` does for its own
+# entry — instead the driver above stands in for it, in a THROWAWAY process
+# that never ships (only the cache directory it wrote does).
+#
+# Measured against this recipe's own real build (linux/amd64, the minimal
+# fixture standalone-drain-app, node:22-alpine): a healthy bake produces
+# ~1.35 MB across 476 files. The floor below is well under that — a smaller
+# result means the flush was truncated or never happened — the cache would
+# look present and do nothing — so the build fails instead of shipping it.
+ARG KNEXT_COMPILE_CACHE_MIN_BYTES=65536
+
+# THE BAKE. It runs AS 65532, after the USER line above, and that ordering is
+# load-bearing: node keys the cache subdirectory by the uid that wrote it, so
+# a cache baked as root is never read by the non-root runtime — present on
+# disk, 0% hit rate. PORT/HOSTNAME are overridden for this step only, to a
+# loopback address the driver's own warm-up requests reach directly; the
+# ENV defaults above (0.0.0.0:3000) are what the shipped container actually
+# binds at runtime.
+RUN PORT=8901 HOSTNAME=127.0.0.1 node /app/knext-compile-cache-bake.mjs \
+ && bytes=$(find /app/.next/standalone/.next/compile-cache -type f -exec cat {} + | wc -c) \
+ && echo "compile cache baked: ${bytes} bytes in $(find /app/.next/standalone/.next/compile-cache -type f | wc -l) file(s)" \
+ && if [ "${bytes}" -lt "${KNEXT_COMPILE_CACHE_MIN_BYTES}" ]; then \
+      echo "compile-cache bake produced ${bytes} bytes, below the floor of ${KNEXT_COMPILE_CACHE_MIN_BYTES}" >&2; \
+      exit 1; \
+    fi
 
 EXPOSE 3000
 

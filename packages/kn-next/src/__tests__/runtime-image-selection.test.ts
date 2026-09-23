@@ -241,6 +241,18 @@ describe("stageStandaloneBuildContext — stages a BOOTABLE standalone build con
         );
     });
 
+    it("writes knext-compile-cache-bake.mjs into the build context root — the COPY source the standalone-node bake RUN step needs (#1264)", () => {
+        const ctx = tmp();
+        stageStandaloneBuildContext({ cwd: ctx, buildContext: ctx });
+        const bake = join(ctx, "knext-compile-cache-bake.mjs");
+        expect(existsSync(bake)).toBe(true);
+        // Not a spawn-then-signal driver: it imports the standalone server
+        // itself, so the process that compiled it is the one that flushes.
+        expect(readFileSync(bake, "utf8")).toContain(
+            "process.env.STANDALONE_SERVER_PATH",
+        );
+    });
+
     it("stages the entry at the build-context root even when it differs from cwd", () => {
         // COPY sources resolve against the build CONTEXT, not cwd, so the entry
         // must land in the context — otherwise `COPY knext-standalone-entry.mjs`
@@ -274,6 +286,11 @@ describe("stageStandaloneBuildContext — stages a BOOTABLE standalone build con
         writeFileSync(
             join(templateDir, "knext-standalone-entry.mjs.hbs"),
             "import('@getknext/core/internal/node-server')({{ broken }});\n",
+            "utf8",
+        );
+        writeFileSync(
+            join(templateDir, "knext-compile-cache-bake.mjs.hbs"),
+            "process.env.STANDALONE_SERVER_PATH;\n",
             "utf8",
         );
         const ctx = tmp();
@@ -340,6 +357,11 @@ describe("stageStandaloneBuildContext — stages a BOOTABLE standalone build con
         writeFileSync(
             join(templateDir, "knext-standalone-entry.mjs.hbs"),
             "import('@getknext/core/internal/node-server')();\n",
+            "utf8",
+        );
+        writeFileSync(
+            join(templateDir, "knext-compile-cache-bake.mjs.hbs"),
+            "process.env.STANDALONE_SERVER_PATH;\n",
             "utf8",
         );
         const ctx = tmp();

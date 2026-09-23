@@ -28,9 +28,10 @@
 //    green under that mutation; this one does not.
 // 3. It boots, on BOTH runtime cells the artifact contract says accept the
 //    `next-standalone` shape:
-//      - **node** — the shipped standalone-node image, whose Dockerfile CMD
-//        points `NODE_COMPILE_CACHE` at the image-baked compile-cache dir by
-//        default (ADR-0035); no extra env needed to exercise that path.
+//      - **node** — the shipped standalone-node image, whose Dockerfile bakes
+//        a V8 compile cache at `docker build` (as the runtime uid) and sets
+//        `NODE_COMPILE_CACHE` to the baked dir by default (#1264); no extra
+//        env needed to exercise that path.
 //      - **bun** — via the shipped `buildStandaloneExecutable()`, the exact
 //        function `kn-next build` runs for `runtime: 'bun'` on the standalone
 //        shape. That function is fail-closed on the bytecode check (it throws
@@ -80,6 +81,10 @@ const PLATFORM = "linux/amd64";
 const RUN_ID = randomBytes(4).toString("hex");
 const NODE_CONTAINER = `knext-webpack-build-e2e-node-${RUN_ID}`;
 const NODE_IMAGE = `knext-webpack-build-e2e-node:${RUN_ID}`;
+// A second node container, started with NODE_DEBUG_NATIVE=COMPILE_CACHE so
+// V8's own diagnostics report whether the baked cache was ACCEPTED on boot —
+// same discipline as vinext-node-image.docker-e2e's DEBUG_CONTAINER (#1264).
+const NODE_DEBUG_CONTAINER = `knext-webpack-build-e2e-node-debug-${RUN_ID}`;
 const BUN_CONTAINER = `knext-webpack-build-e2e-bun-${RUN_ID}`;
 const BUN_IMAGE = `knext-webpack-build-e2e-bun:${RUN_ID}`;
 
@@ -167,12 +172,15 @@ function sweepLeakedArtifacts() {
 
 let nodePort = 0;
 let bunPort = 0;
+let nodeDebugPort = 0;
 /** Whether the WEBPACK-only marker was found in the fixture's real build output. */
 let hasWebpackRuntimeMarker = false;
 /** Whether the build's own banner reported using webpack. */
 let buildBannerSaysWebpack = false;
 /** The bun-target compiled executable path, once produced. */
 let bunExecPath = "";
+/** The `docker build --target standalone-node` output — asserts the bake ran (#1264). */
+let nodeDockerBuildLog = "";
 
 async function waitForHealth(container: string, port: number) {
     const deadline = Date.now() + 120_000;
@@ -367,9 +375,10 @@ beforeAll(async () => {
         ],
         { timeout: 600_000 },
     );
+    nodeDockerBuildLog = `${nodeImage.stdout}\n${nodeImage.stderr}`;
     if (nodeImage.status !== 0) {
         throw new Error(
-            `docker build (node target) failed:\n${nodeImage.stdout}\n${nodeImage.stderr}`,
+            `docker build (node target) failed:\n${nodeDockerBuildLog}`,
         );
     }
 
@@ -401,14 +410,15 @@ beforeAll(async () => {
 
     // 5. Run both. Node: the image's own ENTRYPOINT (the operator leaves
     //    Command nil for runtime: node — nextapp_controller.go:1018 only
-    //    forces a command for runtime: bun), whose Dockerfile CMD points
-    //    NODE_COMPILE_CACHE at the image-baked compile-cache dir by default
-    //    (ADR-0035) — no extra env needed to exercise that path. Bun: the
-    //    operator's forced `bun run server.js` (the R3 shim), which the
-    //    supervisor answers by spawning the COMPILED executable, not the
-    //    script (standalone-drain.docker-e2e pins that exec-mode contract
-    //    directly; this suite only needs it to serve).
-    [nodePort, bunPort] = await freePorts(2);
+    //    forces a command for runtime: bun), whose Dockerfile bakes a V8
+    //    compile cache at `docker build` (as the runtime uid) and sets
+    //    NODE_COMPILE_CACHE at the baked dir by default (#1264) — no extra
+    //    env needed to exercise that path. Bun: the operator's forced
+    //    `bun run server.js` (the R3 shim), which the supervisor answers by
+    //    spawning the COMPILED executable, not the script (standalone-drain
+    //    .docker-e2e pins that exec-mode contract directly; this suite only
+    //    needs it to serve).
+    [nodePort, bunPort, nodeDebugPort] = await freePorts(3);
 
     const startedNode = run(
         "docker",
@@ -464,17 +474,54 @@ beforeAll(async () => {
         );
     }
 
+    // 5b. A second node container, identical apart from NODE_DEBUG_NATIVE, so
+    //     V8's own diagnostics say whether the baked cache was ACCEPTED — not
+    //     merely present on disk (#1264).
+    const startedNodeDebug = run(
+        "docker",
+        [
+            "run",
+            "--detach",
+            "--name",
+            NODE_DEBUG_CONTAINER,
+            "--label",
+            LABEL,
+            "--label",
+            EPOCH_LABEL,
+            "--platform",
+            PLATFORM,
+            "--env",
+            "NODE_DEBUG_NATIVE=COMPILE_CACHE",
+            "--publish",
+            `${nodeDebugPort}:3000`,
+            NODE_IMAGE,
+        ],
+        { timeout: 120_000 },
+    );
+    if (startedNodeDebug.status !== 0) {
+        throw new Error(
+            `docker run (node debug target) failed:\n${startedNodeDebug.stdout}\n${startedNodeDebug.stderr}`,
+        );
+    }
+
     await waitForHealth(NODE_CONTAINER, nodePort);
     await waitForHealth(BUN_CONTAINER, bunPort);
+    await waitForHealth(NODE_DEBUG_CONTAINER, nodeDebugPort);
 }, 1_200_000);
 
 afterAll(() => {
     run("docker", ["rm", "--force", NODE_CONTAINER], { timeout: 60_000 });
+    run("docker", ["rm", "--force", NODE_DEBUG_CONTAINER], { timeout: 60_000 });
     run("docker", ["rm", "--force", BUN_CONTAINER], { timeout: 60_000 });
     run("docker", ["rmi", "--force", NODE_IMAGE], { timeout: 60_000 });
     run("docker", ["rmi", "--force", BUN_IMAGE], { timeout: 60_000 });
     if (workDir) rmSync(workDir, { recursive: true, force: true });
 });
+
+function logsOf(container: string): string {
+    const logs = run("docker", ["logs", container], { timeout: 60_000 });
+    return `${logs.stdout}\n${logs.stderr}`;
+}
 
 // ── MUTATION-PROOF TARGET ────────────────────────────────────────────────
 // Delete the `--webpack` override in beforeAll (or anywhere upstream that
@@ -516,7 +563,7 @@ describe("the compiled bun executable exists (bytecode-verifier passed in before
 });
 
 describe("both runtime cells boot the webpack-built standalone shape and serve a real page", () => {
-    it("node: GET / is 200 and serves the fixture's page (NODE_COMPILE_CACHE is the image default)", async () => {
+    it("node: GET / is 200 and serves the fixture's page (NODE_COMPILE_CACHE defaults to the image-baked dir, #1264)", async () => {
         const res = await fetch(`http://127.0.0.1:${nodePort}/`);
         expect(res.status).toBe(200);
         expect(await res.text()).toContain("knext standalone drain fixture");
@@ -541,5 +588,46 @@ describe("both runtime cells boot the webpack-built standalone shape and serve a
             "the supervisor never logged the child start",
         ).toBeTruthy();
         expect(start).toContain('"mode":"exec"');
+    });
+});
+
+// ── The V8 compile cache is baked into the standalone-node image and LIVE ───
+// on the webpack×node cell (#1264). The turbopack×node counterpart of this
+// same assertion lives in standalone-drain.docker-e2e.test.ts, whose fixture
+// build script (`next build`, no `--webpack`) is a turbopack build.
+describe("the V8 compile cache is baked into the standalone-node image and LIVE (#1264)", () => {
+    it("the bake ran at docker build and reported its size", () => {
+        expect(nodeDockerBuildLog).toMatch(/compile cache baked: \d+ bytes/);
+    });
+
+    it("the compile-cache dir is populated in the running container, above the recipe's floor", () => {
+        const bytes = run(
+            "docker",
+            [
+                "exec",
+                NODE_CONTAINER,
+                "sh",
+                "-c",
+                "find /app/.next/standalone/.next/compile-cache -type f -exec cat {} + | wc -c",
+            ],
+            { timeout: 60_000 },
+        );
+        expect(bytes.status, bytes.stderr).toBe(0);
+        // The recipe's own floor (ARG KNEXT_COMPILE_CACHE_MIN_BYTES).
+        expect(Number(bytes.stdout.trim())).toBeGreaterThanOrEqual(65_536);
+    }, 60_000);
+
+    it("V8 ACCEPTED the baked code cache for the standalone server on boot — a hit, not just a file", () => {
+        const logs = logsOf(NODE_DEBUG_CONTAINER);
+        expect(
+            logs,
+            "node did not accept the baked cache for the standalone server. If " +
+                "the cache is populated but not accepted, the bake most likely ran " +
+                `as a different uid than the runtime (the cache subdirectory is keyed by uid).\n${logs.slice(-3000)}`,
+        ).toMatch(
+            // server.js is spawned as `node server.js` (plain CLI arg), so it
+            // loads as CommonJS — the plain-path log form, never the ESM file:// form.
+            /cache for \/app\/\.next\/standalone\/server\.js was accepted/,
+        );
     });
 });

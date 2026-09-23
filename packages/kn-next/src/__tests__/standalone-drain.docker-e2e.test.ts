@@ -92,6 +92,10 @@ const IMAGE = `knext-standalone-drain-e2e:${RUN_ID}`;
 // injection code is byte-identical across targets).
 const NODE_CONTAINER = `knext-standalone-drain-e2e-node-${RUN_ID}`;
 const NODE_IMAGE = `knext-standalone-drain-e2e-node:${RUN_ID}`;
+// A second node container, started with NODE_DEBUG_NATIVE=COMPILE_CACHE so
+// V8's own diagnostics report whether the baked cache was ACCEPTED on boot —
+// same discipline as vinext-node-image.docker-e2e's DEBUG_CONTAINER (#1264).
+const NODE_DEBUG_CONTAINER = `knext-standalone-drain-e2e-node-debug-${RUN_ID}`;
 
 // The origin ISR Cache-Control the fixture's /api/cache-probe route emits, and
 // the deployed client-facing form the compat-gated preload (#175) rewrites it
@@ -193,8 +197,11 @@ function sweepLeakedArtifacts() {
 let appPort = 0;
 let metricsPort = 0;
 let nodeAppPort = 0;
+let nodeDebugPort = 0;
 /** The fixture's built `.next/standalone` (for the host-arch compile checks). */
 let fixtureStandalone = "";
+/** The `docker build --target standalone-node` output — asserts the bake ran (#1264). */
+let nodeDockerBuildLog = "";
 
 beforeAll(async () => {
     // 1. Prerequisites are REQUIRED, never skipped around.
@@ -364,16 +371,17 @@ beforeAll(async () => {
         ],
         { timeout: 600_000 },
     );
+    nodeDockerBuildLog = `${nodeImage.stdout}\n${nodeImage.stderr}`;
     if (nodeImage.status !== 0) {
         throw new Error(
-            `docker build (node target) failed:\n${nodeImage.stdout}\n${nodeImage.stderr}`,
+            `docker build (node target) failed:\n${nodeDockerBuildLog}`,
         );
     }
 
     // 5. Run it with the OPERATOR'S command: `bun run server.js`. ENTRYPOINT is
     //    overridden to `bun` and args are `run server.js`, reproducing exactly what
     //    the operator forces — so `/app/server.js` (the R3 shim) boots the supervisor.
-    [appPort, metricsPort, nodeAppPort] = await freePorts(3);
+    [appPort, metricsPort, nodeAppPort, nodeDebugPort] = await freePorts(4);
     const started = run(
         "docker",
         [
@@ -437,10 +445,41 @@ beforeAll(async () => {
         );
     }
 
-    // 6. Wait for BOTH apps to serve. A died container never listens, so surface
+    // 5c. A second node container, identical apart from NODE_DEBUG_NATIVE, so
+    //     V8's own diagnostics say whether the baked cache was ACCEPTED — not
+    //     merely present on disk (#1264).
+    const startedNodeDebug = run(
+        "docker",
+        [
+            "run",
+            "--detach",
+            "--name",
+            NODE_DEBUG_CONTAINER,
+            "--label",
+            LABEL,
+            "--label",
+            EPOCH_LABEL,
+            "--platform",
+            PLATFORM,
+            "--env",
+            "NODE_DEBUG_NATIVE=COMPILE_CACHE",
+            "--publish",
+            `${nodeDebugPort}:3000`,
+            NODE_IMAGE,
+        ],
+        { timeout: 120_000 },
+    );
+    if (startedNodeDebug.status !== 0) {
+        throw new Error(
+            `docker run (node debug target) failed:\n${startedNodeDebug.stdout}\n${startedNodeDebug.stderr}`,
+        );
+    }
+
+    // 6. Wait for all apps to serve. A died container never listens, so surface
     //    its logs + exit code rather than waiting out the deadline.
     await waitForHealth(CONTAINER, appPort);
     await waitForHealth(NODE_CONTAINER, nodeAppPort);
+    await waitForHealth(NODE_DEBUG_CONTAINER, nodeDebugPort);
 }, 1_200_000);
 
 async function waitForHealth(container: string, port: number) {
@@ -479,9 +518,59 @@ async function waitForHealth(container: string, port: number) {
 afterAll(() => {
     run("docker", ["rm", "--force", CONTAINER], { timeout: 60_000 });
     run("docker", ["rm", "--force", NODE_CONTAINER], { timeout: 60_000 });
+    run("docker", ["rm", "--force", NODE_DEBUG_CONTAINER], { timeout: 60_000 });
     run("docker", ["rmi", "--force", IMAGE], { timeout: 60_000 });
     run("docker", ["rmi", "--force", NODE_IMAGE], { timeout: 60_000 });
     if (workDir) rmSync(workDir, { recursive: true, force: true });
+});
+
+function logsOf(container: string): string {
+    const logs = run("docker", ["logs", container], { timeout: 60_000 });
+    return `${logs.stdout}\n${logs.stderr}`;
+}
+
+// ── The V8 compile cache is baked into the standalone-node image and LIVE ───
+// (#1264). Covers BOTH the turbopack×node and webpack×node cells: this stage
+// (Dockerfile.standalone.hbs's `standalone-node` target) does not depend on
+// which bundler produced `.next/standalone` — only the earlier `next build`
+// step does, and THIS fixture's build script (`next build`, no `--webpack`)
+// is a turbopack build. The webpack×node counterpart of this same assertion
+// lives in standalone-webpack-build.docker-e2e.test.ts.
+describe("the V8 compile cache is baked into the standalone-node image and LIVE (#1264)", () => {
+    it("the bake ran at docker build and reported its size", () => {
+        expect(nodeDockerBuildLog).toMatch(/compile cache baked: \d+ bytes/);
+    });
+
+    it("the compile-cache dir is populated in the running container, above the recipe's floor", () => {
+        const bytes = run(
+            "docker",
+            [
+                "exec",
+                NODE_CONTAINER,
+                "sh",
+                "-c",
+                "find /app/.next/standalone/.next/compile-cache -type f -exec cat {} + | wc -c",
+            ],
+            { timeout: 60_000 },
+        );
+        expect(bytes.status, bytes.stderr).toBe(0);
+        // The recipe's own floor (ARG KNEXT_COMPILE_CACHE_MIN_BYTES).
+        expect(Number(bytes.stdout.trim())).toBeGreaterThanOrEqual(65_536);
+    }, 60_000);
+
+    it("V8 ACCEPTED the baked code cache for the standalone server on boot — a hit, not just a file", () => {
+        const logs = logsOf(NODE_DEBUG_CONTAINER);
+        expect(
+            logs,
+            "node did not accept the baked cache for the standalone server. If " +
+                "the cache is populated but not accepted, the bake most likely ran " +
+                `as a different uid than the runtime (the cache subdirectory is keyed by uid).\n${logs.slice(-3000)}`,
+        ).toMatch(
+            // server.js is spawned as `node server.js` (plain CLI arg), so it
+            // loads as CommonJS — the plain-path log form, never the ESM file:// form.
+            /cache for \/app\/\.next\/standalone\/server\.js was accepted/,
+        );
+    });
 });
 
 // ── Compat-gated Cache-Control normalization THROUGH the supervisor (#1172) ──

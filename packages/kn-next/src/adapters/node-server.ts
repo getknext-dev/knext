@@ -112,13 +112,16 @@ const imageCacheDir =
 let stopImageCacheSync: () => void = () => {};
 
 // ── Baked compile-cache shadow diagnostic (#440) ──────────────────────────────
-// The image bakes the V8 compile cache into the standalone `.next/compile-cache`
-// dir (ADR-0035 / #437/#438) and the Dockerfile CMD points NODE_COMPILE_CACHE at
-// it via `${NODE_COMPILE_CACHE:-…}`, so an operator-injected value WINS (intended,
-// bake-test-asserted). The gap: if the injected value points at a DIFFERENT path
-// (e.g. an empty PVC), the baked layer is bypassed silently — cold starts lose the
-// bytecode benefit with no signal. Derive the baked-default the way the runtime
-// does (`.next/compile-cache` next to the standalone server) and WARN when a
+// The standalone-node image bakes the V8 compile cache into the standalone
+// `.next/compile-cache` dir at `docker build` (#1264 — Next's own generated
+// server.js is code this repo does not own, so the bake is a dedicated driver
+// that imports it, not an entry-level bake flag) and sets NODE_COMPILE_CACHE
+// to that dir as the image ENV default, so an operator-INJECTED env var wins
+// over it (ordinary Docker/k8s env precedence — intended, bake-test-asserted).
+// The gap: if the injected value points at a DIFFERENT path (e.g. an empty
+// PVC), the baked layer is bypassed silently — cold starts lose the bytecode
+// benefit with no signal. Derive the baked-default the way the runtime does
+// (`.next/compile-cache` next to the standalone server) and WARN when a
 // populated bake is being shadowed. Diagnostics only — fail-open, off the child's
 // critical path (deferred step below), never a behaviour change.
 const bakedCompileCacheDir = resolve(
