@@ -106,17 +106,41 @@ function isErasedSubtree(node) {
   if (hasModifier(node, K.DeclareKeyword)) return true;
   if (node.kind === K.PropertyDeclaration && hasModifier(node, K.AbstractKeyword)) return true;
   if (node.kind === K.ExpressionWithTypeArguments) {
-    // `class A extends B` — B is a RUNTIME expression. Everything else
-    // (`implements`, interface `extends`) is erased.
+    // Erased ONLY inside a heritage clause that is itself type-only
+    // (`implements`, an interface's `extends`). Two runtime shapes share this
+    // node kind and must stay: a class `extends B` expression, and a TS 4.7+
+    // instantiation expression used as a value (`box<string>;`, `[box<number>]`)
+    // — TypeScript emits `box` for both. Only the type ARGUMENTS are erased,
+    // and they are TypeNodes of their own.
     const clause = node.parent;
+    if (!clause || !ts.isHeritageClause(clause)) return false;
     return !(
-      clause &&
-      ts.isHeritageClause(clause) &&
       clause.token === K.ExtendsKeyword &&
       (ts.isClassDeclaration(clause.parent) || ts.isClassExpression(clause.parent))
     );
   }
+  if (node.kind >= K.FirstToken && node.kind <= K.LastToken) {
+    // A keyword LEAF (`string`, `void`, …) is a type only in a TYPE SLOT. The
+    // same token kind can be a runtime operator: `void p` is a VoidExpression
+    // whose `void` keyword `ts.isTypeNode` also answers true for.
+    return ts.isTypeNode(node) && inTypeSlot(node);
+  }
   return ts.isTypeNode(node);
+}
+
+/**
+ * Does `node` occupy a TYPE position of its parent — the parent is itself a
+ * type, or holds `node` as its `.type`, a type argument, or a type parameter?
+ *
+ * @param {ts.Node} node
+ */
+function inTypeSlot(node) {
+  const parent = /** @type {any} */ (node.parent);
+  if (!parent) return false;
+  if (ts.isTypeNode(parent) && parent.kind !== K.ExpressionWithTypeArguments) return true;
+  if (parent.type === node) return true;
+  if (parent.typeArguments?.includes(node)) return true;
+  return parent.typeParameters?.includes(node) === true;
 }
 
 /** @param {ts.Node} node @param {ts.SyntaxKind} kind */

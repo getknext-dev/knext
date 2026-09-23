@@ -242,6 +242,31 @@ describe('classifyLines — tricky executable lines are NEVER noise', () => {
     ].join('\n');
     expectExecutable(src, ['<div>', 'Hello there', '{name}'], 'fixture.tsx');
   });
+
+  test('the runtime `void` operator is not the `void` type (review round 2)', () => {
+    const src = [
+      'function f(p: Promise<void>) {',
+      '  void ( // VOIDPAREN',
+      '    p',
+      '  );',
+      '  void // LONEVOID',
+      '    p;',
+      '}',
+    ].join('\n');
+    expectExecutable(src, ['VOIDPAREN', 'LONEVOID']);
+  });
+
+  test('instantiation expressions used as values are runtime (review round 2)', () => {
+    const src = [
+      'const b = [',
+      '  box<number>, // INSTELEM',
+      '];',
+      'use(box<string>); // INSTARG',
+    ].join('\n');
+    expectExecutable(src, ['INSTELEM', 'INSTARG']);
+    const stmt = ['declare const box: <T>(x: T) => T;', 'box<string>; // INSTEXPRSTMT'].join('\n');
+    expectExecutable(stmt, ['INSTEXPRSTMT']);
+  });
 });
 
 describe('classifyLines — the noise it does remove', () => {
@@ -411,11 +436,17 @@ describe('honestCoverage — filtering DA records', () => {
         cov([
           [1, 0],
           [2, 0],
+          [3, 0],
         ]),
       ],
     ]);
-    const { files, unclassified } = honestCoverage(merged, () => 'function (\n{{{ ===');
-    expect(files.get('p/bad.ts')?.lines.size).toBe(2);
+    // Line 1 is a comment: were the parse errors ignored, the classifier would
+    // call it noise and drop it. A broken tree must not be trusted at all.
+    const { files, unclassified } = honestCoverage(
+      merged,
+      () => '// a comment\nfunction (\n{{{ ===',
+    );
+    expect(files.get('p/bad.ts')?.lines.size).toBe(3);
     expect(unclassified).toEqual(['p/bad.ts']);
   });
 

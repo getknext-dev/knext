@@ -80,7 +80,7 @@ function prove(id, description, snap, edits, spec, expected) {
   assertTreeClean(`after ${id}`);
 }
 
-declareMutations(8);
+declareMutations(13);
 
 console.log('── baseline: both specs are green unmutated');
 assertTreeClean('baseline');
@@ -199,6 +199,70 @@ prove(
   1,
 );
 
+// ── Review round 2: the two latent erasures, re-opened ──
+
+prove(
+  'M9',
+  'the runtime `void` operator erased as the `void` type must red',
+  classifierSnap,
+  [['    return ts.isTypeNode(node) && inTypeSlot(node);', '    return ts.isTypeNode(node);']],
+  CLASSIFIER_SPEC,
+  1,
+);
+
+prove(
+  'M10',
+  'an instantiation expression used as a value erased as a type must red',
+  classifierSnap,
+  [
+    [
+      '    if (!clause || !ts.isHeritageClause(clause)) return false;',
+      '    if (!clause) return true;',
+    ],
+  ],
+  CLASSIFIER_SPEC,
+  1,
+);
+
+// ── Fail-closed: an unclassifiable source keeps EVERY record ──
+
+prove(
+  'M11',
+  'a source with parse errors classified anyway (trusting a broken tree) must red',
+  classifierSnap,
+  [
+    [
+      '  if (diagnostics && diagnostics.length > 0) return { ok: false, classes: [] };',
+      '  // parse errors ignored',
+    ],
+  ],
+  CLASSIFIER_SPEC,
+  1,
+);
+
+prove(
+  'M12',
+  'a DA line with no classification (past EOF) dropped instead of kept must red',
+  classifierSnap,
+  [
+    [
+      '      if (cls === undefined || isExecutableClass(cls)) {',
+      '      if (cls !== undefined && isExecutableClass(cls)) {',
+    ],
+  ],
+  CLASSIFIER_SPEC,
+  1,
+);
+
+prove(
+  'M13',
+  'the gate reading a MISSING source as empty (so its records get classified) must red',
+  checkerSnap,
+  [['  } catch {\n    return null;\n  }', "  } catch {\n    return '';\n  }"]],
+  GATE_SPEC,
+  1,
+);
+
 prove(
   'M8',
   'NEGATIVE control: rewording a comment must stay GREEN',
@@ -222,4 +286,4 @@ if (failures.length) {
   for (const f of failures) console.error(`  - ${f}`);
   process.exit(1);
 }
-console.log('\n8 mutation(s) behaved as required (7 red, 1 negative control green), 0 survived.');
+console.log('\n13 mutation(s) behaved as required (12 red, 1 negative control green), 0 survived.');
