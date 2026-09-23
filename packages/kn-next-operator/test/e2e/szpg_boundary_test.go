@@ -41,6 +41,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/AhmedElBanna80/knext/packages/kn-next-operator/internal/controller"
 )
 
 // A realistic AppDatabase metadata payload as `kubectl get appdatabase -o json`
@@ -126,6 +128,40 @@ func TestKnextBoundaryViolations_FlagsKnextNamedManager(t *testing.T) {
 		if len(got) != 1 {
 			t.Fatalf("knext-named manager %q must yield 1 violation, got %d: %v", mgr, len(got), got)
 		}
+	}
+}
+
+// THE #1215 REGRESSION TEST. cmd/main.go now sets rest.Config.UserAgent to
+// controller.OperatorFieldManager ("kn-next-operator") on every write the
+// operator makes, so a CURRENT operator build's breach lands with THAT field
+// manager, not the bare "manager" checked above (which only older builds
+// still emit). It must be caught exactly the same way: the allowlist is
+// fail-closed, so "kn-next-operator" is a violation purely because it is
+// absent from AllowedAppDatabaseManagersExact/Prefixes. Mutation-prove: add
+// "kn-next-operator" (or controller.OperatorFieldManager) to either allowlist
+// and this reds.
+func TestKnextBoundaryViolations_FlagsCurrentOperatorIdentity(t *testing.T) {
+	meta := parseMeta(t, cleanAppDatabaseJSON)
+	meta.ManagedFields = append(meta.ManagedFields, ManagedFieldsEntry{
+		Manager:    controller.OperatorFieldManager,
+		Operation:  "Update",
+		APIVersion: "apps.scale-zero-pg.dev/v1alpha1",
+	})
+	got := KnextBoundaryViolations(meta)
+	if len(got) != 1 {
+		t.Fatalf("a write under the operator's current self-identity (%q) must yield exactly 1 violation, got %d: %v",
+			controller.OperatorFieldManager, len(got), got)
+	}
+	if !strings.Contains(got[0], controller.OperatorFieldManager) {
+		t.Fatalf("violation must name the offending manager %q, got: %q", controller.OperatorFieldManager, got[0])
+	}
+	if !strings.Contains(strings.ToLower(got[0]), "knext") {
+		t.Fatalf("a %q write should be attributed to the knext operator, got: %q", controller.OperatorFieldManager, got[0])
+	}
+	// Guard the allowlist itself: kn-next-operator must never be allowed,
+	// exactly like the bare "manager" default is deliberately absent above.
+	if isAllowedAppDatabaseManager(controller.OperatorFieldManager) {
+		t.Fatalf("%q must NEVER be an allowed AppDatabase writer", controller.OperatorFieldManager)
 	}
 }
 
