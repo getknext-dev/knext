@@ -36,20 +36,40 @@
  * is swallowed. So pullability is proven HERE, in the preflight, where there is
  * no `continue-on-error`.
  *
+ * PULLABILITY IS PROVEN BY `crane`, NOT BY HAND-ROLLED HTTP (#670c)
+ * -----------------------------------------------------------------
+ * This program used to implement the OCI distribution auth flow itself against
+ * `ghcr.io/v2/...`. That hand-rolled dance failed the live nightly TWICE, and the
+ * second fix (#670b, Basic base64(user:token) at the token realm) was correct but
+ * UNREACHABLE. Measured against the real registry:
+ *
+ *   anonymous GET manifest                 -> 401 + WWW-Authenticate challenge
+ *   GET with `Bearer <raw github token>`   -> 403, NO challenge header
+ *   anon -> Basic realm exchange -> retry  -> 200
+ *
+ * The 403 reproduces on a PUBLIC package too, so it was never about access: it is
+ * GHCR rejecting a raw (non-base64) bearer credential outright. Because the
+ * realm exchange was gated on `status === 401`, the pre-emptive raw Bearer on the
+ * FIRST request skipped it entirely and threw "NOT pullable (HTTP 403)".
+ *
+ * The lesson is not "send a different header". It is that a bespoke registry-auth
+ * client cannot be exercised against a real private package from a fake
+ * transport, so a fake-transport test can be green and mutation-proved while the
+ * live path is broken — which is exactly what happened. So pullability now goes
+ * through `crane manifest`, the same binary+credential path `supply-chain.yml`
+ * already uses successfully against this very package, reading the docker
+ * credential store that `docker/login-action` populates. Do not reintroduce a
+ * hand-rolled token exchange here.
+ *
  * TESTABILITY
  * -----------
- * The HTTP transport is injected (`{ http }`) so tests/resolve-scale-test-image
- * .test.ts can run every path against fake GHCR responses. The CLI entrypoint at
- * the bottom runs only when invoked directly.
+ * The HTTP transport is injected (`{ http }`) for the GitHub packages API, and
+ * the crane invocation is injected (`{ exec }`), so
+ * tests/resolve-scale-test-image.test.ts can run every path against doubles. The
+ * CLI entrypoint at the bottom runs only when invoked directly.
  */
 
 const GITHUB_API = 'https://api.github.com';
-const MANIFEST_ACCEPT = [
-  'application/vnd.oci.image.index.v1+json',
-  'application/vnd.oci.image.manifest.v1+json',
-  'application/vnd.docker.distribution.manifest.list.v2+json',
-  'application/vnd.docker.distribution.manifest.v2+json',
-].join(', ');
 
 /** A cosign signature/attestation tag: `sha256-<64 hex>.sig` or `.att`. */
 const COSIGN_TAG_RE = /^sha256-([0-9a-f]{64})\.(sig|att)$/;
@@ -195,69 +215,77 @@ export async function listPackageVersions({
   return fetchAll('users');
 }
 
+/** Default `crane` invocation, shaped so tests can inject a double. */
+async function defaultExec(command, args) {
+  const { execFile } = await import('node:child_process');
+  return new Promise((resolve) => {
+    execFile(command, args, { maxBuffer: 32 * 1024 * 1024 }, (error, stdout, stderr) => {
+      resolve({
+        // `error.code` is the exit status for a completed process and a string
+        // (e.g. 'ENOENT') when the binary is missing — both are non-zero-ish, so
+        // normalise to a number that is never 0 unless the process truly exited 0.
+        status: error ? (typeof error.code === 'number' ? error.code : 127) : 0,
+        stdout: String(stdout ?? ''),
+        stderr: String(stderr ?? (error ? error.message : '')),
+      });
+    });
+  });
+}
+
 /**
  * Confirm the resolved digest ref is actually PULLABLE from the registry — shape
- * is not pullability. Follows the OCI distribution auth flow: an anonymous GET
- * gets a 401 with a Bearer challenge; fetch a token and retry. A non-200 final
- * status (e.g. 404 for a never-pushed image) or a throwing transport is a
- * FAILURE (fail closed). Returns the served digest on success.
+ * is not pullability.
+ *
+ * Delegates to `crane manifest <ref>`, the SAME mechanism `supply-chain.yml`
+ * already uses against this exact private package: crane reads the docker
+ * credential store that `docker/login-action` writes, so the workflow's
+ * `packages: read` GITHUB_TOKEN is applied through a battle-tested client rather
+ * than a bespoke OCI auth dance (see the header — that dance reddened the live
+ * nightly twice while its fake-transport tests stayed green, #670c).
+ *
+ * A non-zero exit — a never-pushed digest (404/MANIFEST_UNKNOWN), a credential
+ * failure, or a missing `crane` binary — is a FAILURE (fail closed), never a
+ * pass. Returns the digest on success.
  *
  * @param {string} ref
- * @param {{ token?: string, username?: string, http?: (url: string, headers: Record<string, string>) => Promise<any> }} [options]
+ * @param {{ exec?: (command: string, args: string[]) => Promise<{status: number, stdout: string, stderr: string}>, crane?: string }} [options]
  */
-export async function checkPullable(
-  ref,
-  { token, username = process.env.GITHUB_ACTOR || 'x-access-token', http = defaultHttp } = {},
-) {
+export async function checkPullable(ref, { exec = defaultExec, crane = 'crane' } = {}) {
   const at = ref.lastIndexOf('@');
   if (at < 0) throw new Error(`not a digest-pinned reference: ${ref}`);
   const digest = ref.slice(at + 1);
-  const withoutDigest = ref.slice(0, at);
-  const firstSlash = withoutDigest.indexOf('/');
-  const registry = withoutDigest.slice(0, firstSlash);
-  const repository = withoutDigest.slice(firstSlash + 1);
 
-  const url = `https://${registry}/v2/${repository}/manifests/${encodeURIComponent(digest)}`;
-  const base = { accept: MANIFEST_ACCEPT, 'user-agent': 'knext-resolve-scale-test-image' };
-  const authed = token ? { ...base, authorization: `Bearer ${token}` } : base;
-
-  let response = await http(url, authed);
-  if (response.status === 401) {
-    const challenge = response.headers?.['www-authenticate'] ?? '';
-    const field = (name) => challenge.match(new RegExp(`${name}="([^"]+)"`))?.[1];
-    const realm = field('realm');
-    if (realm) {
-      const params = new URLSearchParams();
-      if (field('service')) params.set('service', field('service'));
-      params.set('scope', field('scope') ?? `repository:${repository}:pull`);
-      // GHCR's token realm speaks the OCI distribution auth spec: it expects
-      // `Authorization: Basic base64(username:token)` — the SAME credential
-      // docker/login-action sends (username = github.actor; GHCR keys on the
-      // token, so the username need only be non-empty). A `Bearer
-      // base64(token-alone)` is NOT a valid scheme here — GHCR reads it as
-      // anonymous and issues an UNSCOPED token that cannot read a PRIVATE package,
-      // so the retried manifest GET 403s (the #670b nightly failure). Send Basic.
-      const tokenHeaders = token
-        ? {
-            accept: 'application/json',
-            authorization: `Basic ${Buffer.from(`${username}:${token}`).toString('base64')}`,
-          }
-        : { accept: 'application/json' };
-      const auth = await http(`${realm}?${params}`, tokenHeaders);
-      const realmToken = auth.status === 200 ? (await auth.json())?.token : undefined;
-      if (realmToken)
-        response = await http(url, { ...base, authorization: `Bearer ${realmToken}` });
-    }
-  }
-
-  if (response.status !== 200) {
+  let result;
+  try {
+    result = await exec(crane, ['manifest', ref]);
+  } catch (error) {
+    // A THROWING exec is a failure, never a pass — the fail-closed rule applies
+    // to the transport itself, not only to what it reports.
+    const message = error instanceof Error ? error.message : String(error);
     throw new Error(
-      `resolved image ${ref} is NOT pullable (registry returned HTTP ${response.status}). ` +
-        'Shape is not pullability: a well-formed digest for a never-pushed image would ErrImagePull ' +
-        'inside the continue-on-error scale job where the failure is swallowed (#659). Failing here instead.',
+      `could not run \`${crane} manifest ${ref}\` to prove pullability: ${message}. ` +
+        'Refusing to proceed: a pullability check that goes green when it cannot run is worse than none.',
     );
   }
-  return response.headers?.['docker-content-digest'] ?? digest;
+
+  if (!result || result.status !== 0) {
+    const detail = String(result?.stderr ?? '').trim() || `exit status ${result?.status}`;
+    throw new Error(
+      `resolved image ${ref} is NOT pullable (\`${crane} manifest\` failed: ${detail}). ` +
+        'Shape is not pullability: a well-formed digest for a never-pushed image would ErrImagePull ' +
+        'inside the continue-on-error scale job where the failure is swallowed (#659). Failing here instead. ' +
+        'If this is an auth failure, the GHCR login step must run BEFORE the resolver so crane sees the credential.',
+    );
+  }
+  // crane prints the manifest JSON on success. An EMPTY stdout with a zero exit
+  // would mean the binary answered without serving a manifest — treat it as a
+  // failure rather than inferring pullability from an exit code alone.
+  if (String(result.stdout ?? '').trim() === '') {
+    throw new Error(
+      `\`${crane} manifest ${ref}\` exited 0 but served no manifest body — refusing to call that pullable.`,
+    );
+  }
+  return digest;
 }
 
 /**
@@ -273,8 +301,9 @@ export async function resolveScaleTestImage({
   owner,
   repo = 'file-manager',
   token,
-  username = undefined,
   http = defaultHttp,
+  exec = defaultExec,
+  crane = 'crane',
 }) {
   const override = (input ?? '').trim();
   if (override) return override;
@@ -282,7 +311,7 @@ export async function resolveScaleTestImage({
   const versions = await listPackageVersions({ owner, repo, token, http });
   const { digest } = selectNewestSignedDigest(versions);
   const ref = buildRef({ registry, owner, repo, digest });
-  await checkPullable(ref, { token, username, http });
+  await checkPullable(ref, { exec, crane });
   return ref;
 }
 
@@ -295,11 +324,11 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const owner = process.env.IMAGE_OWNER || process.env.GITHUB_REPOSITORY_OWNER;
   const repo = process.env.IMAGE_NAME || 'file-manager';
   const registry = process.env.IMAGE_REGISTRY || 'ghcr.io';
+  // The token authenticates the GitHub PACKAGES API (api.github.com), which does
+  // take a raw `Bearer <token>`. The REGISTRY leg is crane's job and is
+  // authenticated by the docker credential store `docker/login-action` writes —
+  // the resolver never speaks registry auth itself any more (#670c).
   const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
-  // Username for the GHCR token-realm Basic exchange — matches docker/login-action
-  // (`github.actor`). GHCR authenticates on the token; the username need only be
-  // non-empty, so fall back to a placeholder when GITHUB_ACTOR is unset.
-  const username = process.env.GITHUB_ACTOR || 'x-access-token';
   const input = process.env.SCALE_TEST_IMAGE_INPUT || '';
 
   if (!owner) {
@@ -310,7 +339,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   }
 
   try {
-    const ref = await resolveScaleTestImage({ input, registry, owner, repo, token, username });
+    const ref = await resolveScaleTestImage({ input, registry, owner, repo, token });
     console.log(`Resolved SCALE_TEST_IMAGE candidate: ${ref}`);
     const out = process.env.GITHUB_OUTPUT;
     if (out) {

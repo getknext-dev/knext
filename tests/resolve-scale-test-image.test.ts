@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import {
   buildRef,
   checkPullable,
@@ -268,114 +269,117 @@ describe('listPackageVersions — fail-closed on an unreachable / erroring API',
   });
 });
 
-describe('checkPullable — shape is not pullability', () => {
-  const ref = `ghcr.io/${OWNER}/${REPO}@sha256:${HEX('a')}`;
+describe('checkPullable — pullability is proven by crane, never hand-rolled HTTP (#670c)', () => {
+  // WHY THIS SUITE LOOKS LIKE THIS.
+  //
+  // The previous implementation spoke the OCI distribution auth flow itself and
+  // was tested against a fake HTTP transport. It shipped broken TWICE and the
+  // fake stayed green both times, because the fake could not reproduce what the
+  // real registry does. Measured against ghcr.io:
+  //
+  //   anonymous manifest GET               -> 401 + WWW-Authenticate challenge
+  //   manifest GET w/ `Bearer <raw token>` -> 403, NO challenge header
+  //
+  // The realm exchange was gated on `status === 401`, so the pre-emptive raw
+  // Bearer on the FIRST request skipped it entirely — #670b fixed unreachable
+  // code. The fix is not another header: it is to stop hand-rolling registry
+  // auth and delegate to `crane manifest`, the client supply-chain.yml already
+  // uses successfully against this same private package. So these tests assert
+  // the DELEGATION and the fail-closed behaviour, not a bespoke wire protocol.
+  const ref = `ghcr.io/${OWNER.toLowerCase()}/${REPO}@sha256:${HEX('a')}`;
+  const DIGEST = `sha256:${HEX('a')}`;
+  const MANIFEST = JSON.stringify({ schemaVersion: 2, config: {}, layers: [] });
 
-  it('resolves when the registry serves the manifest (200)', async () => {
-    const http = async () => ({
-      status: 200,
-      headers: { 'docker-content-digest': `sha256:${HEX('a')}` },
-      json: async () => ({}),
-    });
-    await expect(checkPullable(ref, { token: 't', http })).resolves.toBeTruthy();
-  });
-
-  it('THROWS on an unpullable digest (404 — never pushed)', async () => {
-    const http = async () => ({ status: 404, headers: {}, json: async () => ({}) });
-    await expect(checkPullable(ref, { token: 't', http })).rejects.toThrow();
-  });
-
-  it('THROWS when the registry is unreachable (transport rejects)', async () => {
-    const http = async () => {
-      throw new Error('socket hang up');
+  it('invokes `crane manifest <ref>` and returns the digest on success', async () => {
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const exec = async (command: string, args: string[]) => {
+      calls.push({ command, args });
+      return { status: 0, stdout: MANIFEST, stderr: '' };
     };
-    await expect(checkPullable(ref, { token: 't', http })).rejects.toThrow();
+    await expect(checkPullable(ref, { exec })).resolves.toBe(DIGEST);
+    // The load-bearing assertion: the proof goes through crane, with the exact
+    // digest-pinned ref. No bespoke registry HTTP is performed.
+    expect(calls).toHaveLength(1);
+    expect(calls[0].command).toBe('crane');
+    expect(calls[0].args).toEqual(['manifest', ref]);
+  });
+
+  it('THROWS on an unpullable digest (crane exits non-zero — never pushed)', async () => {
+    const exec = async () => ({
+      status: 1,
+      stdout: '',
+      stderr: 'MANIFEST_UNKNOWN: manifest unknown',
+    });
+    await expect(checkPullable(ref, { exec })).rejects.toThrow(/NOT pullable/);
+  });
+
+  it('surfaces crane stderr so an AUTH failure is distinguishable from a missing image', async () => {
+    const exec = async () => ({
+      status: 1,
+      stdout: '',
+      stderr: 'UNAUTHORIZED: authentication required',
+    });
+    await expect(checkPullable(ref, { exec })).rejects.toThrow(/UNAUTHORIZED/);
+  });
+
+  it('FAILS CLOSED when the crane binary is missing (exec throws)', async () => {
+    // A checker that goes green when it cannot run is worse than none
+    // (security.md's nightly-pin precedent).
+    const exec = async () => {
+      throw new Error('spawn crane ENOENT');
+    };
+    await expect(checkPullable(ref, { exec })).rejects.toThrow(/ENOENT|could not run/);
+  });
+
+  it('FAILS CLOSED on a zero exit that served NO manifest body', async () => {
+    // Pullability must not be inferred from an exit code alone.
+    const exec = async () => ({ status: 0, stdout: '   \n', stderr: '' });
+    await expect(checkPullable(ref, { exec })).rejects.toThrow();
+  });
+
+  it('rejects a ref that is not digest-pinned', async () => {
+    const exec = async () => ({ status: 0, stdout: MANIFEST, stderr: '' });
+    await expect(checkPullable(`ghcr.io/${OWNER}/${REPO}:latest`, { exec })).rejects.toThrow(
+      /not a digest-pinned reference/,
+    );
   });
 });
 
-describe('checkPullable — OCI token-realm exchange (the private-package 401 path, #670b)', () => {
-  // The branch that shipped broken and slipped four review rounds: on the
-  // anonymous 401 + WWW-Authenticate realm challenge, the code must exchange the
-  // GITHUB_TOKEN for a SCOPED registry token. GHCR's token realm speaks the OCI
-  // auth spec: `Authorization: Basic base64(user:token)`, NOT
-  // `Bearer base64(token-alone)` — the latter reads as anonymous and yields an
-  // unscoped token that cannot read the PRIVATE file-manager package (HTTP 403 on
-  // the retried manifest GET). The nightly (run 35812236281) 403'd for exactly
-  // this reason. These tests exercise the 401→realm→retry branch the old suite
-  // never touched.
-  const OWNER_L = OWNER.toLowerCase();
-  const ref = `ghcr.io/${OWNER_L}/${REPO}@sha256:${HEX('a')}`;
-  const USER = 'getknext-ci';
-  const TOKEN = 'ghs_supersecrettoken';
-  const REALM = 'https://ghcr.io/token';
-  const DIGEST = `sha256:${HEX('a')}`;
-  const challenge = `Bearer realm="${REALM}",service="ghcr.io",scope="repository:${OWNER_L}/${REPO}:pull"`;
-  const basicExpected = `Basic ${Buffer.from(`${USER}:${TOKEN}`).toString('base64')}`;
+describe('the resolver never speaks registry auth itself (#670c regression guard)', () => {
+  // A SCAN, not an enumeration: reintroducing a hand-rolled OCI token exchange
+  // is the defect that reddened this lane twice, so make it FAIL here rather
+  // than rely on a reviewer noticing. Anchored on the source text because the
+  // defect is the PRESENCE of the code, not its behaviour on a fake transport
+  // (a fake transport is exactly what stayed green while the live path was
+  // broken). Comments are stripped first so the header's explanation of the bug
+  // — which necessarily names /v2/, the realm and www-authenticate — does not
+  // trip the guard on its own prose.
+  const raw = readFileSync(
+    new URL('../scripts/resolve-scale-test-image.mjs', import.meta.url),
+    'utf8',
+  );
+  const code = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 
-  /**
-   * A faithful PRIVATE-package GHCR double. The token realm issues a SCOPED token
-   * ONLY when handed the correct `Basic base64(user:token)` credential; any other
-   * scheme (e.g. the old `Bearer base64(token)`) is treated as anonymous and gets
-   * an unscoped token, which the private manifest endpoint then 403s. So a green
-   * result here PROVES the Basic scheme is used.
-   */
-  function privateGhcr() {
-    const seen: { realmAuth: string | undefined } = { realmAuth: undefined };
-    const http = async (url: string, headers: Record<string, string>) => {
-      if (url.startsWith(REALM)) {
-        seen.realmAuth = headers.authorization;
-        if (headers.authorization === basicExpected) {
-          return { status: 200, headers: {}, json: async () => ({ token: 'scoped-ok' }) };
-        }
-        // Wrong scheme → anonymous → unscoped token (GHCR does not 401 here).
-        return { status: 200, headers: {}, json: async () => ({ token: 'anon-unscoped' }) };
-      }
-      // Manifest endpoint.
-      if (headers.authorization === 'Bearer scoped-ok') {
-        return {
-          status: 200,
-          headers: { 'docker-content-digest': DIGEST },
-          json: async () => ({}),
-        };
-      }
-      if (headers.authorization === 'Bearer anon-unscoped') {
-        return { status: 403, headers: {}, json: async () => ({}) }; // private, insufficient scope
-      }
-      // First hit (raw token / base creds) → 401 with the realm challenge.
-      return {
-        status: 401,
-        headers: { 'www-authenticate': challenge },
-        json: async () => ({}),
-      };
-    };
-    return { http, seen };
-  }
-
-  it('exchanges the realm challenge with Basic base64(user:token) and pulls the private manifest', async () => {
-    const { http, seen } = privateGhcr();
-    await expect(checkPullable(ref, { token: TOKEN, username: USER, http })).resolves.toBe(DIGEST);
-    // The load-bearing assertion: the realm request carried Basic base64(user:token),
-    // NOT Bearer base64(token). This is the exact bug that 403'd the nightly.
-    expect(seen.realmAuth).toBe(basicExpected);
-    expect(seen.realmAuth?.startsWith('Bearer ')).toBe(false);
-    // And specifically NOT the old malformed scheme.
-    expect(seen.realmAuth).not.toBe(`Bearer ${Buffer.from(TOKEN).toString('base64')}`);
+  it('strips comments without stripping the program (guard self-check)', () => {
+    // If the stripper ate the code, every assertion below would pass vacuously.
+    expect(code).toContain('export async function checkPullable');
+    expect(code).toContain('export async function listPackageVersions');
+    expect(code).not.toContain('PULLABILITY IS PROVEN BY');
   });
 
-  it('FAILS CLOSED when the realm-issued token cannot read the private package (403 on retry)', async () => {
-    // Private package + a token realm that always returns an insufficiently-scoped
-    // token → the retried manifest GET is 403. Shape is not pullability; this must
-    // throw, not silently pass.
-    const http = async (url: string, headers: Record<string, string>) => {
-      if (url.startsWith(REALM)) {
-        return { status: 200, headers: {}, json: async () => ({ token: 'weak' }) };
-      }
-      if (headers.authorization === 'Bearer weak') {
-        return { status: 403, headers: {}, json: async () => ({}) };
-      }
-      return { status: 401, headers: { 'www-authenticate': challenge }, json: async () => ({}) };
-    };
-    await expect(checkPullable(ref, { token: TOKEN, username: USER, http })).rejects.toThrow();
+  it('issues no registry /v2/ manifest request and handles no auth challenge', () => {
+    expect(code).not.toMatch(/\/v2\//);
+    expect(code.toLowerCase()).not.toContain('www-authenticate');
+    expect(code.toLowerCase()).not.toContain('realm');
+  });
+
+  it('builds no Basic credential — the docker credential store owns registry auth', () => {
+    expect(code).not.toMatch(/Basic\s/);
+    expect(code).not.toContain("toString('base64')");
+  });
+
+  it('proves pullability by invoking crane', () => {
+    expect(code).toContain("exec(crane, ['manifest', ref])");
   });
 });
 
@@ -397,16 +401,20 @@ describe('resolveScaleTestImage — end to end (injected transport)', () => {
     }),
   ];
 
-  function http(pullable: boolean) {
-    return async (url: string) => {
-      if (url.includes('api.github.com')) {
-        return { status: 200, headers: {}, json: async () => versions };
-      }
-      // registry manifest (pullability probe)
-      return pullable
-        ? { status: 200, headers: { 'docker-content-digest': newer }, json: async () => ({}) }
-        : { status: 404, headers: {}, json: async () => ({}) };
-    };
+  // The packages API leg (HTTP) and the pullability leg (crane) are now separate
+  // collaborators, so the end-to-end test injects both.
+  const http = async (url: string) => {
+    if (url.includes('api.github.com')) {
+      return { status: 200, headers: {}, json: async () => versions };
+    }
+    throw new Error(`the resolver must not issue registry HTTP any more: ${url}`);
+  };
+
+  function exec(pullable: boolean) {
+    return async () =>
+      pullable
+        ? { status: 0, stdout: '{"schemaVersion":2}', stderr: '' }
+        : { status: 1, stdout: '', stderr: 'MANIFEST_UNKNOWN: manifest unknown' };
   }
 
   it('resolves the newest signed digest and confirms it is pullable', async () => {
@@ -415,7 +423,8 @@ describe('resolveScaleTestImage — end to end (injected transport)', () => {
       owner: OWNER,
       repo: REPO,
       token: 't',
-      http: http(true),
+      http,
+      exec: exec(true),
     });
     expect(ref).toBe(`ghcr.io/${OWNER}/${REPO}@${newer}`);
   });
@@ -427,7 +436,8 @@ describe('resolveScaleTestImage — end to end (injected transport)', () => {
         owner: OWNER,
         repo: REPO,
         token: 't',
-        http: http(false),
+        http,
+        exec: exec(false),
       }),
     ).rejects.toThrow();
   });

@@ -430,6 +430,42 @@ describe('the private image is authenticated end to end, no false-green (#670 cr
     expect(loginIdx, 'GHCR login must come BEFORE cosign verify').toBeLessThan(verifyIdx);
   });
 
+  it('logs in to GHCR and installs crane BEFORE the resolver runs (#670c)', () => {
+    // THE DEFECT THIS GUARDS. The resolver proves pullability with
+    // `crane manifest`, and crane reads the docker credential store
+    // `docker/login-action` writes. The login used to sit AFTER the resolver,
+    // which was survivable only while the resolver hand-rolled its own OCI auth
+    // — and that hand-rolled client 403'd the live nightly twice (the raw
+    // `Bearer <token>` GHCR answers 403 WITHOUT a WWW-Authenticate challenge, so
+    // the 401-gated realm exchange never ran). With the crane delegation, step
+    // ORDER is load-bearing: a login after the resolver leaves it anonymous
+    // against a private package. Ordering cannot be asserted from inside the
+    // resolver's unit tests, so it is asserted here, on the workflow.
+    const s = steps(PREFLIGHT_JOB);
+    const loginIdx = s.findIndex((step) => usesAction(step, 'docker/login-action'));
+    const craneIdx = s.findIndex(
+      // biome-ignore lint/suspicious/noExplicitAny: see above.
+      (step: any) => typeof step.name === 'string' && step.name.includes('Install crane'),
+    );
+    const resolveIdx = s.findIndex(
+      // biome-ignore lint/suspicious/noExplicitAny: see above.
+      (step: any) =>
+        typeof step.run === 'string' && step.run.includes('resolve-scale-test-image.mjs'),
+    );
+    expect(loginIdx, 'the preflight must log in to GHCR').toBeGreaterThanOrEqual(0);
+    expect(craneIdx, 'the preflight must install crane for the pullability proof').toBeGreaterThan(
+      -1,
+    );
+    expect(resolveIdx, 'the preflight must run the resolver').toBeGreaterThanOrEqual(0);
+    expect(
+      loginIdx,
+      'GHCR login must come BEFORE the resolver (crane needs the credential)',
+    ).toBeLessThan(resolveIdx);
+    expect(craneIdx, 'crane must be installed BEFORE the resolver invokes it').toBeLessThan(
+      resolveIdx,
+    );
+  });
+
   it('parameterizes the cosign identity regexp to this repository (#4)', () => {
     const verifyStep = runStep(PREFLIGHT_JOB, 'cosign-verify.sh');
     const identity = verifyStep?.env?.IDENTITY_REGEXP ?? '';
