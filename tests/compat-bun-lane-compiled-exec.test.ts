@@ -179,10 +179,34 @@ describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec 
     const rebuildSrc = readFileSync(NATIVE_REBUILD_SH_PATH, 'utf8');
     expect(/^set -eu$/m.test(rebuildSrc)).toBe(true);
     expect(
-      /if ! \(cd "\$\{d\}" && npm_config_build_from_source=true npm run install --if-present 2>&1\); then/.test(
+      /if ! \(cd "\$\{PKG_SCRATCH\}" && npm install --no-save --no-audit --no-fund "\$\{NAME\}@\$\{VERSION\}"/.test(
         rebuildSrc,
       ),
-      'a per-package rebuild failure must be caught (the `if !` guard), not let a failing `npm run install` kill the whole script under set -e',
+      'a per-package fresh-install failure must be caught (the `if !` guard), not let a failing `npm install` kill the whole script under set -e',
+    ).toBe(true);
+  });
+
+  it('e2e-native-rebuild-musl.sh fresh-installs the package (not an in-place rebuild) — the traced tree lacks install-time tooling like node-pre-gyp (round-2 regression, #1230)', () => {
+    const rebuildSrc = readFileSync(NATIVE_REBUILD_SH_PATH, 'utf8');
+    // The round-1 shape (`npm run install --if-present` INSIDE the traced
+    // package dir) must be gone — that is exactly what died with
+    // `sh: node-pre-gyp: not found` on a real traced tree.
+    expect(rebuildSrc.includes('npm run install --if-present')).toBe(false);
+    expect(
+      /NAME="\$\(node -e/.test(rebuildSrc) && /VERSION="\$\(node -e/.test(rebuildSrc),
+      'must read {name, version} from the TRACED package.json to resolve the exact fresh-install spec',
+    ).toBe(true);
+  });
+
+  it("e2e-native-rebuild-musl.sh carries along the fresh install's OTHER node_modules entries, not just the named package (sqlite3 requires node-pre-gyp at RUNTIME, traced but without its .bin shim)", () => {
+    const rebuildSrc = readFileSync(NATIVE_REBUILD_SH_PATH, 'utf8');
+    expect(
+      /for sibling in "\$\{PKG_SCRATCH\}\/node_modules"\/\*; do/.test(rebuildSrc),
+      'must iterate every sibling the fresh install produced (e.g. node-pre-gyp), not copy only ${NAME}',
+    ).toBe(true);
+    expect(
+      /cp -a "\$\{sibling\}" "\$\{ROOT\}\/node_modules\/\$\{sibling_name\}"/.test(rebuildSrc),
+      'siblings must land at ROOT/node_modules (where node module resolution walks up to from inside the package dir), not be silently dropped',
     ).toBe(true);
   });
 
