@@ -105,6 +105,7 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // and runs its docker e2e via `bun:test` — its own pinned setup-bun.
       'ci.yml': 12,
       'docs-closure-nightly.yml': 1,
+      'file-manager-platform-e2e-nightly.yml': 1,
       'mutation-prover-nightly.yml': 1,
       'operator-e2e-nightly.yml': 3,
       'preview.yml': 2,
