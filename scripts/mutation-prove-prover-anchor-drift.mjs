@@ -1,21 +1,35 @@
 #!/usr/bin/env node
 /**
- * Mutation proof for the fleet-wide anchor-drift guard (#1223).
+ * Mutation proof for the fleet-wide anchor-drift guard (#1223), direction 1
+ * of 2 — the guard notices a REAL prover's anchor going stale.
  *
  * `tests/mutation-prover-anchor-drift.test.ts` exists to catch a mutation
  * prover whose hardcoded text anchor no longer occurs in its subject —
  * `scripts/mutation-prove-compat-window-audit.mjs` mutation #4 did exactly
  * that and the prover ABORTED silently until a human ran it by hand. This
- * script proves the GUARD, not the prover it discovers: it plants the SAME
- * failure mode directly (delete a real, currently-resolved anchor from its
- * real subject file) and requires the drift test to go RED, then restores and
- * requires it to go GREEN again.
+ * script plants the SAME failure mode directly: delete a real, currently-
+ * resolved anchor from its real subject file, and require the guard to go
+ * RED, then restore and require GREEN again.
  *
- * The subject mutated is `scripts/compat-window-audit.mjs` itself — the exact
- * file #1223 was filed against — via the shared byte-snapshot harness
+ * Direction 2 — the scanner's own wrapper-function resolution tier breaking
+ * — is proved separately in
+ * `scripts/mutation-prove-prover-anchor-scanner-tier.mjs`, a single-target
+ * script rather than folded into this one. `scripts/lib/prover-lane.mjs`'s
+ * own PR-time anchor-liveness audit pairs each literal anchor with the
+ * NEAREST preceding `resolve(...)`-bound target in the file — sound for the
+ * repo's overwhelming one-target-per-prover convention, but it mis-paired
+ * this file's second target when both lived here, misreporting an anchor
+ * against the wrong subject. Splitting rather than reshaping the shared
+ * heuristic follows the same convention every other prover in this repo
+ * already uses.
+ *
+ * Mutates via the shared byte-snapshot harness
  * (`scripts/lib/mutation-harness.mjs`), so restoration is content-addressed
  * and a stall between mutate and restore is findable by
- * `scripts/scan-mutation-residue.mjs` rather than by luck.
+ * `scripts/scan-mutation-residue.mjs` rather than by luck. Never `perl` for
+ * the substitution — a silently-failed one yields a green run that proves
+ * nothing; `mutate()` asserts the anchor occurs exactly once and aborts
+ * otherwise.
  *
  * Usage:  node scripts/mutation-prove-prover-anchor-drift.mjs
  */
@@ -57,8 +71,8 @@ console.log('   ok baseline green\n');
 // Break the EXACT anchor mutation #4 of mutation-prove-compat-window-audit.mjs
 // covers — the anchor #1223's fix re-pointed at the current
 // `selectLaneNights` shape. Deleting it from the real subject file is
-// precisely the drift scenario the guard exists to catch: an anchor a prover
-// declares that no longer occurs, exactly once, in its subject.
+// precisely the drift scenario the guard exists to catch: an anchor a
+// prover declares that no longer occurs, exactly once, in its subject.
 console.log('── mutation: delete the merged-streak anchor from compat-window-audit.mjs');
 const snap = snapshot(TARGET);
 try {

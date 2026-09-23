@@ -33,25 +33,59 @@ import {
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 
+/**
+ * RATCHET FLOORS, not a "some coverage exists" smoke check (review feedback on
+ * #1250). Measured on this tree: 66 resolved (anchor, file) pairs across 13
+ * provers. A `toBeGreaterThan(10)`-style floor would stay green if the
+ * scanner regressed and lost most of the fleet — e.g. if the wrapper-function
+ * resolution tier (`findAnchorParamFunctions`/`scanWrapperCallSites`, the
+ * shape `mutation-prove-compat-window-audit.mjs` itself uses) silently broke,
+ * dropping straight to whatever the direct-literal tier alone still catches
+ * (measured: 30 pairs across 7 provers with that tier disabled — still
+ * comfortably above a low "some coverage" bar, and exactly what these floors
+ * exist to catch instead).
+ * `scripts/mutation-prove-prover-anchor-scanner-tier.mjs` mutation-proves
+ * exactly that: disable the wrapper-function tier, watch these floors go
+ * red, restore, watch them go green again.
+ *
+ * RAISE these when the fleet's resolvable coverage grows (a new prover in the
+ * wrapper-function or table-driven shape, or a resolution tier gaining
+ * ground). NEVER LOWER them — a lowered floor is exactly the silent
+ * regression this ratchet exists to make loud.
+ */
+const MIN_RESOLVED_PAIRS = 66;
+const MIN_RESOLVED_PROVERS = 13;
+
 describe("every mutation prover's STATICALLY-resolvable anchors still match the current tree", () => {
   it('discovers a non-vacuous set of provers (the scan is not silently matching nothing)', () => {
     const files = findProverFiles(REPO_ROOT);
     // Enumerated once, in a comment, so a collapse to near-zero is loud: at
-    // the time this guard was written there were 38.
+    // the time this guard was written there were 40.
     expect(files.length, 'the mutation-prove-*.mjs glob matched almost nothing').toBeGreaterThan(
       20,
     );
     expect(files).toContain('scripts/mutation-prove-compat-window-audit.mjs');
   });
 
-  it('resolves a non-vacuous number of (anchor, file) pairs fleet-wide (the extraction is not dead)', () => {
+  it('resolves at least the ratcheted floor of (anchor, file) pairs and provers fleet-wide', () => {
     const files = findProverFiles(REPO_ROOT);
-    const totalPairs = files.reduce((sum, f) => sum + scanProverFile(REPO_ROOT, f).pairs.length, 0);
+    let resolvedPairs = 0;
+    let resolvedProvers = 0;
+    for (const f of files) {
+      const n = scanProverFile(REPO_ROOT, f).pairs.length;
+      resolvedPairs += n;
+      if (n > 0) resolvedProvers += 1;
+    }
     expect(
-      totalPairs,
-      'zero statically-resolvable anchors were found across the whole fleet — the extraction ' +
-        'itself has regressed, not just this one guard',
-    ).toBeGreaterThan(10);
+      resolvedPairs,
+      `resolved pairs dropped below the ${MIN_RESOLVED_PAIRS}-pair ratchet floor — a resolution ` +
+        'tier likely regressed (see the floor comment above this describe block)',
+    ).toBeGreaterThanOrEqual(MIN_RESOLVED_PAIRS);
+    expect(
+      resolvedProvers,
+      `resolved-prover count dropped below the ${MIN_RESOLVED_PROVERS}-prover ratchet floor — a ` +
+        'resolution tier likely regressed (see the floor comment above this describe block)',
+    ).toBeGreaterThanOrEqual(MIN_RESOLVED_PROVERS);
   });
 
   it('#1223: compat-window-audit.mjs resolves ALL FIVE of its anchors, all clean', () => {
