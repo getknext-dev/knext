@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'bun:test';
+import { afterAll, describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
@@ -35,9 +35,9 @@ const SCRIPT = resolve(import.meta.dir, '../scripts/e2e-bytecode-liveness.mjs');
 const BUN_LIVE =
   'mode=compiled-exec runtime=bun image=oven/bun:1.4.0-alpine@sha256:abc bytecode_verified=true';
 const NODE_LIVE =
-  'mode=server-js runtime=node image=- bytecode_verified=- compile_cache_accepted=416 compile_cache_missed=9 compile_cache_rejected=0';
+  'mode=server-js runtime=node image=- bytecode_verified=- compile_cache_bake=ok compile_cache_accepted=416 compile_cache_missed=9 compile_cache_rejected=0';
 const NODE_COLD =
-  'mode=server-js runtime=node image=- bytecode_verified=- compile_cache_accepted=0 compile_cache_missed=426 compile_cache_rejected=0';
+  'mode=server-js runtime=node image=- bytecode_verified=- compile_cache_bake=ok compile_cache_accepted=0 compile_cache_missed=426 compile_cache_rejected=0';
 
 /** Real node 24 debug lines, shortened paths. */
 const DEBUG_LOG = [
@@ -118,7 +118,7 @@ describe('deployIsLive — one deploy', () => {
     const missed = Math.ceil(accepted / NODE_CACHE_HIT_RATIO_FLOOR); // ratio < floor
     const r = deployIsLive(
       parseBootLine(
-        `mode=server-js runtime=node compile_cache_accepted=${accepted} compile_cache_missed=${missed} compile_cache_rejected=0`,
+        `mode=server-js runtime=node compile_cache_bake=ok compile_cache_accepted=${accepted} compile_cache_missed=${missed} compile_cache_rejected=0`,
       ),
     );
     expect(r.live).toBe(false);
@@ -127,7 +127,7 @@ describe('deployIsLive — one deploy', () => {
 
   it('node: one accepted entry below the count floor is NOT live, at the floor it is', () => {
     const line = (n: number) =>
-      `mode=server-js runtime=node compile_cache_accepted=${n} compile_cache_missed=0 compile_cache_rejected=0`;
+      `mode=server-js runtime=node compile_cache_bake=ok compile_cache_accepted=${n} compile_cache_missed=0 compile_cache_rejected=0`;
     expect(deployIsLive(parseBootLine(line(NODE_CACHE_ACCEPTED_FLOOR - 1))).live).toBe(false);
     expect(deployIsLive(parseBootLine(line(NODE_CACHE_ACCEPTED_FLOOR))).live).toBe(true);
   });
@@ -207,6 +207,7 @@ describe('isShardBytecodeLive — the audit rule, fail closed', () => {
 
 describe('CLI — the workflow check and the harness counter share this module', () => {
   const dir = mkdtempSync(join(tmpdir(), 'bytecode-liveness-'));
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
   it('--check exits 0 on a fully live ledger and 1 on a cold one', () => {
     const ok = join(dir, 'ok.log');
@@ -250,5 +251,74 @@ describe('CLI — the workflow check and the harness counter share this module',
     expect(r.stdout.trim()).toBe(
       'compile_cache_accepted=0 compile_cache_missed=0 compile_cache_rejected=0',
     );
+  });
+});
+
+// ── Round 2: the node evidence grades KNEXT's own cache path ─────────────────
+describe('node evidence is scoped to the standalone child and requires the shipped bake', () => {
+  it('a failed shipped bake is NOT live, even with accepted entries (the driver flushes before exit 1)', () => {
+    const r = deployIsLive(
+      parseBootLine(
+        'mode=server-js runtime=node compile_cache_bake=failed compile_cache_accepted=416 compile_cache_missed=9 compile_cache_rejected=0',
+      ),
+    );
+    expect(r.live).toBe(false);
+    expect(r.reason).toMatch(/bake/);
+  });
+
+  it('a node line with no bake status is NOT live (fail closed)', () => {
+    expect(
+      deployIsLive(
+        parseBootLine(
+          'mode=server-js runtime=node compile_cache_accepted=416 compile_cache_missed=9 compile_cache_rejected=0',
+        ),
+      ).live,
+    ).toBe(false);
+  });
+
+  it('counts ONLY modules under the given root — the supervisor (outside the standalone tree) is excluded', () => {
+    const log = [
+      '[compile cache] V8 code cache for CommonJS /app/.next/standalone/node_modules/next/dist/a.js was accepted, keeping the in-memory entry',
+      '[compile cache] V8 code cache for ESM file:///app/.next/standalone/server.js was accepted, keeping the in-memory entry',
+      '[compile cache] V8 code cache for ESM file:///app/node_modules/@getknext/core/dist/adapters/node-server.js was not initialized, initializing the in-memory entry',
+      '[compile cache] V8 code cache for CommonJS /app/.next/standalone-other/x.js was accepted, keeping the in-memory entry',
+    ].join('\n');
+    expect(countNodeCompileCache(log, { under: '/app/.next/standalone' })).toEqual({
+      accepted: 2,
+      missed: 0,
+      rejected: 0,
+    });
+    // Unscoped, everything counts (the pre-scoping behaviour).
+    expect(countNodeCompileCache(log)).toEqual({ accepted: 3, missed: 1, rejected: 0 });
+  });
+
+  it('a path with spaces is still attributed (it is not silently dropped)', () => {
+    const log =
+      '[compile cache] V8 code cache for CommonJS /tmp/a b/.next/standalone/x.js was accepted, keeping the in-memory entry';
+    expect(countNodeCompileCache(log, { under: '/tmp/a b/.next/standalone' }).accepted).toBe(1);
+  });
+
+  it('--count-node-log --under scopes the CLI count the deploy script records', () => {
+    const d = mkdtempSync(join(tmpdir(), 'bytecode-under-'));
+    try {
+      const log = join(d, 'debug.log');
+      writeFileSync(
+        log,
+        [
+          '[compile cache] V8 code cache for CommonJS /s/.next/standalone/a.js was accepted, keeping the in-memory entry',
+          '[compile cache] V8 code cache for CommonJS /s/node_modules/sup.js was not initialized, initializing the in-memory entry',
+        ].join('\n'),
+      );
+      const r = spawnSync(
+        'node',
+        [SCRIPT, '--count-node-log', log, '--under', '/s/.next/standalone'],
+        { encoding: 'utf8' },
+      );
+      expect(r.stdout.trim()).toBe(
+        'compile_cache_accepted=1 compile_cache_missed=0 compile_cache_rejected=0',
+      );
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
   });
 });

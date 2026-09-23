@@ -42,6 +42,12 @@ const LIVENESS = resolve(REPO_ROOT, 'scripts/e2e-bytecode-liveness.mjs');
 const DEPLOY = resolve(REPO_ROOT, 'scripts/e2e-deploy.sh');
 const SUMMARY = resolve(REPO_ROOT, 'scripts/e2e-summary.mjs');
 const AUDIT = resolve(REPO_ROOT, 'scripts/compat-window-audit.mjs');
+// knext's OWN compile-cache path — what the standalone-node image ships.
+const SHIPPED_BAKE = resolve(
+  REPO_ROOT,
+  'packages/kn-next/templates/runtime-standalone/knext-compile-cache-bake.mjs.hbs',
+);
+const CHILD_ENV = resolve(REPO_ROOT, 'packages/kn-next/src/adapters/env.ts');
 
 const SPEC_RULE = 'tests/bytecode-liveness.test.ts';
 const SPEC_CHAIN = 'tests/bytecode-liveness-chain.test.ts';
@@ -63,11 +69,50 @@ const MUTATIONS = [
     replacement: '',
   },
   {
-    label: 'node: skip the compile-cache bake',
+    label: "node: skip knext's shipped bake driver",
     target: DEPLOY,
     spec: SPEC_WIRING,
-    anchor: '      node "${SCRIPT_DIR}/e2e-compile-cache-bake.mjs" "${SERVER_JS}" >&2',
-    replacement: '      true',
+    anchor: '          node "${KNEXT_BAKE_DRIVER}" >&2',
+    replacement: '          true',
+  },
+  {
+    label: "node: boot server.js directly instead of through knext's shipped supervisor",
+    target: DEPLOY,
+    spec: SPEC_WIRING,
+    anchor: '      exec node "${KNEXT_NODE_SUPERVISOR}" \\',
+    replacement:
+      '      exec "${SERVER_CMD}" "${SERVER_PRELOAD_ARGS[@]}" "${SERVER_BOOT_TARGET}" \\',
+  },
+  // ── Break KNEXT's own cache path — the node night must go red ────────────
+  {
+    label: 'knext: the shipped bake driver stops importing server.js (bakes nothing of the app)',
+    target: SHIPPED_BAKE,
+    spec: SPEC_WIRING,
+    anchor: '    await import(serverPath);',
+    replacement: '    void serverPath;',
+  },
+  {
+    label: 'knext: the shipped supervisor stops handing the child NODE_COMPILE_CACHE',
+    target: CHILD_ENV,
+    spec: SPEC_WIRING,
+    anchor: '        ...process.env,',
+    replacement:
+      "        ...Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'NODE_COMPILE_CACHE')),",
+  },
+  {
+    label: 'node: accept a FAILED shipped bake as live',
+    target: LIVENESS,
+    spec: SPEC_RULE,
+    anchor: "    if (fields.compile_cache_bake !== 'ok') {",
+    replacement: '    if (false) {',
+  },
+  {
+    label:
+      "node: stop scoping the count to the standalone child (the supervisor's modules leak in)",
+    target: LIVENESS,
+    spec: SPEC_RULE,
+    anchor: '    if (under && !path.startsWith(under)) continue;',
+    replacement: '    void under;',
   },
   {
     label: 'node: stop judging the accepted-entry floor (a cold boot must still be refused)',
@@ -171,7 +216,15 @@ console.log('   ok baseline green\n');
 // Byte snapshots of every subject, taken before the first mutation: each must
 // exist (a prover pointed at a deleted file proves nothing), and each must be
 // byte-identical again once every mutation has been restored.
-const SUBJECTS = [snapshot(LIVENESS), snapshot(DEPLOY), snapshot(SUMMARY), snapshot(AUDIT)];
+// Each named literally, so the static prover audit can see every subject is read.
+const SUBJECTS = [
+  snapshot(LIVENESS),
+  snapshot(DEPLOY),
+  snapshot(SUMMARY),
+  snapshot(AUDIT),
+  snapshot(SHIPPED_BAKE),
+  snapshot(CHILD_ENV),
+];
 
 for (const m of MUTATIONS) prove(m);
 

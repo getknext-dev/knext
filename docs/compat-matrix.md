@@ -90,17 +90,26 @@ gate, not the official suite — the official suite has its own row, own workflo
   is not enough.
   - **Bun cells:** the deploy booted the compiled `--bytecode` executable, and the fail-closed
     build-time verifier passed on it.
-  - **Node cells:** the harness bakes a V8 compile cache from Next's framework modules and never from
-    fixture code. It then boots `server.js` with that cache, and V8's own
-    `NODE_DEBUG_NATIVE=COMPILE_CACHE` output must show at least 100 accepted entries and a hit ratio
-    of at least 0.5.
+  - **Node cells:** the harness runs **knext's own** compile-cache path, resolved from the installed
+    tarball. It bakes with the standalone-node image's shipped bake driver
+    (`knext-compile-cache-bake`) and then boots through the shipped `node-server` supervisor, which
+    hands the Next child `NODE_COMPILE_CACHE`. The bake's warm request goes to a framework-served
+    static chunk, so no app route runs before the test. A deploy is live only when two things hold:
+    - the bake reported `ok`;
+    - V8's own `NODE_DEBUG_NATIVE=COMPILE_CACHE` output shows at least 100 accepted entries and a
+      hit ratio of at least 0.5.
 
-    Measured on a real Next 16.2 standalone server:
+    **What is graded:** modules under the standalone tree (the Next child) up to readiness. The
+    supervisor's own modules are excluded, because the bake never covers them. App route chunks
+    loaded on a later request are not graded.
+
+    Measured on a real Next 16.2 standalone server with the shipped bake and supervisor:
 
     | Boot | Accepted | Missed |
     |---|---|---|
-    | Baked | 416 | ~9 |
-    | Cold | 0 | 426 |
+    | Baked | 424 | 0 |
+    | Unbaked | 0 | 425 |
+
 
   How the evidence travels:
   1. `scripts/e2e-deploy.sh` appends one line per deploy to the boot ledger.
@@ -117,9 +126,15 @@ gate, not the official suite — the official suite has its own row, own workflo
   `scripts/e2e-bytecode-liveness.mjs`. It sits in the frozen harness set, so lowering a floor moves
   the fingerprint and restarts the window. `scripts/mutation-prove-bytecode-liveness.mjs` proves the
   guards are not decoration:
-  - disabling the node cache (no `NODE_COMPILE_CACHE` at boot, a skipped bake, or no accepted-entry
-    floor) reds a spec;
+  - disabling the node cache (no `NODE_COMPILE_CACHE` at boot, a skipped bake, a direct `server.js`
+    boot that bypasses the supervisor, or no accepted-entry floor) reds a spec;
+  - breaking knext's own path (the shipped bake driver no longer importing the server, or the
+    supervisor no longer handing the child `NODE_COMPILE_CACHE`) reds a spec;
   - accepting a non-bytecode bun boot reds a spec.
+  - **Boot-path change:** the node lane now boots through the shipped supervisor rather than a raw
+    `server.js`. That narrows the supervisor-vs-harness caveat on the Node row above: the suite now
+    exercises the supervisor's spawn and env wiring. The only differences are a per-deploy metrics
+    port and a shorter shutdown grace.
 
 ## Lane-scoped ledger (#281 / #282)
 

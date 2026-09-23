@@ -15,17 +15,25 @@
  *            target IS the verified file: the compile step deletes the artifact
  *            and exits 1 when verification fails, so no other binary can be
  *            booted under that mode.
- *   * node — the booted server's V8 ACCEPTED cached code. Counted from the
- *            server's OWN `NODE_DEBUG_NATIVE=COMPILE_CACHE` output at
- *            readiness: at least NODE_CACHE_ACCEPTED_FLOOR accepted entries AND
- *            a hit ratio accepted/(accepted+missed+rejected) of at least
- *            NODE_CACHE_HIT_RATIO_FLOOR. A populated cache directory proves
+ *   * node — KNEXT's own compile-cache path is live: the SHIPPED bake driver
+ *            (the standalone-node image's `knext-compile-cache-bake`) succeeded
+ *            (`compile_cache_bake=ok`), and the Next child that the SHIPPED
+ *            supervisor (`node-server`) spawned ACCEPTED cached code — counted
+ *            from V8's own `NODE_DEBUG_NATIVE=COMPILE_CACHE` output, scoped to
+ *            modules under the standalone tree (the supervisor's own modules
+ *            are excluded; the bake never covers them), up to readiness: at
+ *            least NODE_CACHE_ACCEPTED_FLOOR accepted entries AND a hit ratio
+ *            accepted/(accepted+missed+rejected) of at least
+ *            NODE_CACHE_HIT_RATIO_FLOOR. App route chunks loaded on a later
+ *            request are NOT graded. A populated cache directory proves
  *            nothing — Node writes it on exit, so a cold boot leaves one too.
  *
- * MEASURED (real Next 16.2 standalone server, node 24): harness-baked boot =
- * 416 accepted / ~9 missed / 0 rejected; cold boot = 0 accepted / 426 missed.
- * The floors sit far from both, so neither a fixture-size difference nor a
- * Next.js refactor that moves a few modules flips a live deploy to not-live.
+ * MEASURED (real Next 16.2 standalone server, node 24, shipped bake driver +
+ * shipped supervisor, standalone-scoped): baked = 424 accepted / 0 missed /
+ * 0 rejected; unbaked = 0 accepted / 425 missed. (Unscoped, the supervisor
+ * adds ~112 misses of its own — why the count is scoped.) The floors sit far
+ * from both, so neither a fixture-size difference nor a Next.js refactor that
+ * moves a few modules flips a live deploy to not-live.
  *
  * EVIDENCE SHAPE. The deploy script appends one `key=value …` line per deploy
  * to the boot ledger; `summarizeBootLedger` folds a shard's lines into
@@ -66,21 +74,41 @@ const MAX_REASONS = 10;
 
 const DEBUG_PREFIX = '[compile cache] ';
 
+const OUTCOME_LINE =
+  /^\[compile cache\] V8 code cache for (?:CommonJS|ESM) (.+?) was (accepted|not initialized|rejected)\b/;
+
 /**
  * Count V8 compile-cache outcomes in NODE_DEBUG_NATIVE=COMPILE_CACHE output.
- * Only lines carrying Node's own `[compile cache]` prefix count, so an app that
- * happens to log the phrase cannot manufacture a hit.
+ *
+ * TRUST ASSUMPTION, stated rather than implied: only lines that START with
+ * Node's own `[compile cache]` prefix count, so an app logging the phrase
+ * mid-line cannot manufacture a hit — but a process that writes a whole
+ * line beginning with that prefix to stderr CAN. The code under test is the
+ * pinned upstream Next.js fixtures plus knext's own packed tarballs, neither of
+ * which writes such lines; the evidence is a check against knext regressing,
+ * not against a hostile fixture.
+ *
+ * `under` scopes the count to modules whose path lies beneath a directory. The
+ * deploy script passes the standalone tree, so the grade covers the Next child
+ * the supervisor spawned and excludes the supervisor's own modules (which the
+ * shipped bake never covers, by design — it bakes the server, not the entry).
  *
  * @param {string} text
+ * @param {{under?: string}} [opts]
  * @returns {{accepted: number, missed: number, rejected: number}}
  */
-export function countNodeCompileCache(text) {
+export function countNodeCompileCache(text, opts = {}) {
+  const under = opts.under ? `${String(opts.under).replace(/\/+$/, '')}/` : null;
   const out = { accepted: 0, missed: 0, rejected: 0 };
   for (const line of String(text ?? '').split('\n')) {
-    if (!line.startsWith(DEBUG_PREFIX) || !line.includes('V8 code cache for ')) continue;
-    if (/ was accepted\b/.test(line)) out.accepted += 1;
-    else if (/ was not initialized\b/.test(line)) out.missed += 1;
-    else if (/ was rejected\b/.test(line)) out.rejected += 1;
+    if (!line.startsWith(DEBUG_PREFIX)) continue;
+    const m = OUTCOME_LINE.exec(line);
+    if (!m) continue;
+    const path = m[1].replace(/^file:\/\//, '');
+    if (under && !path.startsWith(under)) continue;
+    if (m[2] === 'accepted') out.accepted += 1;
+    else if (m[2] === 'not initialized') out.missed += 1;
+    else out.rejected += 1;
   }
   return out;
 }
@@ -139,6 +167,15 @@ export function deployIsLive(fields) {
       return {
         live: false,
         reason: `booted ${String(fields.mode)} on node — the node cell boots server.js with a V8 compile cache`,
+      };
+    }
+    // The SHIPPED bake driver must have succeeded. It flushes before exiting 1
+    // on a failed warm, so a failed bake can still leave accepted entries — the
+    // counts alone would read a broken bake as live.
+    if (fields.compile_cache_bake !== 'ok') {
+      return {
+        live: false,
+        reason: `the shipped compile-cache bake reported ${String(fields.compile_cache_bake)} (need ok)`,
       };
     }
     const accepted = intField(fields.compile_cache_accepted);
@@ -250,9 +287,10 @@ function readOrEmpty(path) {
 }
 
 function main(argv) {
+  const under = arg(argv, '--under');
   const debugLog = arg(argv, '--count-node-log');
   if (debugLog !== undefined) {
-    const c = countNodeCompileCache(readOrEmpty(debugLog));
+    const c = countNodeCompileCache(readOrEmpty(debugLog), { under });
     console.log(
       `compile_cache_accepted=${c.accepted} compile_cache_missed=${c.missed} compile_cache_rejected=${c.rejected}`,
     );
@@ -261,10 +299,11 @@ function main(argv) {
   const liveLog = arg(argv, '--live-node-log');
   if (liveLog !== undefined) {
     // The deploy script's settle loop: are the counts SO FAR already live?
-    const c = countNodeCompileCache(readOrEmpty(liveLog));
+    const c = countNodeCompileCache(readOrEmpty(liveLog), { under });
     const verdict = deployIsLive({
       mode: 'server-js',
       runtime: 'node',
+      compile_cache_bake: 'ok', // settle only; the recorded line carries the real status
       compile_cache_accepted: String(c.accepted),
       compile_cache_missed: String(c.missed),
       compile_cache_rejected: String(c.rejected),

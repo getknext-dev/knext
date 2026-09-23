@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'bun:test';
+import { afterAll, describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { buildLedger } from '../scripts/compat-run-ledger.mjs';
@@ -19,13 +19,14 @@ import { gradeNight } from '../scripts/compat-window-audit.mjs';
 
 const SUMMARY = resolve(import.meta.dir, '../scripts/e2e-summary.mjs');
 const dir = mkdtempSync(join(tmpdir(), 'bytecode-chain-'));
+afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 const BUN_LIVE =
   'mode=compiled-exec runtime=bun image=oven/bun:1.4.0-alpine@sha256:abc bytecode_verified=true';
 const NODE_LIVE =
-  'mode=server-js runtime=node image=- bytecode_verified=- compile_cache_accepted=416 compile_cache_missed=9 compile_cache_rejected=0';
+  'mode=server-js runtime=node image=- bytecode_verified=- compile_cache_bake=ok compile_cache_accepted=416 compile_cache_missed=9 compile_cache_rejected=0';
 const NODE_COLD =
-  'mode=server-js runtime=node image=- bytecode_verified=- compile_cache_accepted=0 compile_cache_missed=426 compile_cache_rejected=0';
+  'mode=server-js runtime=node image=- bytecode_verified=- compile_cache_bake=ok compile_cache_accepted=0 compile_cache_missed=426 compile_cache_rejected=0';
 
 let n = 0;
 function summarizeShard(runtime: 'node' | 'bun', bootLedgerText: string | null) {

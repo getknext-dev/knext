@@ -525,36 +525,91 @@ if [ "${RUNTIME}" = "bun" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" != "1" ]; the
   fi
 fi
 
-# ── 3d. bake the V8 compile cache (node runtime only) ─────────────────────────
+# ── 3d. bake the V8 compile cache with KNEXT'S OWN driver (node runtime) ──────
 # Bytecode caching is mandatory in every runtime×builder cell, and a cell may
-# only credential on nights where it is proven LIVE at runtime — for node, that
-# the booted server's V8 ACCEPTED cached code. A first boot against an empty
-# cache accepts nothing by definition, so the harness bakes one first, the
-# analog of the shipped images' docker-build bake. The bake driver loads Next's
-# FRAMEWORK modules only — never server.js, which would start the fixture (its
-# instrumentation, and possibly its ISR/data cache) outside the test's view.
-# `set -e` makes a failed bake (cache refused, required module missing) fail
-# the deploy: a node deploy never silently boots uncached. Same uid as the
-# boot below — Node keys the cache subdirectory by uid. Inside APP_DIR so the
-# harness's own fixture teardown removes it.
+# only credential on nights where KNEXT's caching is proven LIVE at runtime —
+# not merely that Node can accept a cache. So the node lane exercises the two
+# shipped halves of the standalone-node image's compile-cache path, resolved
+# from the SAME installed tarball the deploy already uses:
+#
+#   * the BAKE: `templates/runtime-standalone/knext-compile-cache-bake.mjs.hbs`
+#     — the exact driver Dockerfile.standalone.hbs RUNs at docker build. It
+#     imports server.js in-process, waits for it, fetches KNEXT_WARM_PATH
+#     (must answer 2xx) and flushes. The template has no Handlebars tokens, so
+#     the staged copy is byte-identical to what the image runs;
+#   * the BOOT (step 4): the shipped `node-server` supervisor entry — what the
+#     image's ENTRYPOINT imports — which spawns server.js with the inherited
+#     NODE_COMPILE_CACHE (buildChildEnv).
+#
+# The cache lives where the image puts it and where the supervisor's own
+# diagnostics expect it: `<dir of server.js>/.next/compile-cache`.
+#
+# WARM PATH. The image warms the app's health route; the upstream fixtures have
+# none, and a request to an app route before the test would change its state
+# (ISR entries, counters, after() logs). So the harness warms a FRAMEWORK-served
+# static chunk (`<basePath>/_next/static/…`): it proves the booted server
+# answers, and no app route runs. Middleware may still see that request (as it
+# would any static request), which is the one fixture-visible side effect.
+#
+# A failed bake does NOT fail the deploy — the fixture's own tests are a
+# separate verdict — it is RECORDED (compile_cache_bake=failed in the evidence
+# line) and graded NOT live, which reds the shard and refuses the night.
 NODE_CC_DIR=""
 NODE_CC_DEBUG_LOG=""
-NODE_CC_BAKED=0
+NODE_CC_BAKE="skipped"
+KNEXT_NODE_SUPERVISOR=""
 if [ "${RUNTIME}" != "bun" ]; then
-  NODE_CC_DIR="${APP_DIR}/.knext-compile-cache"
+  NODE_CC_DIR="${STANDALONE_APP_DIR}/.next/compile-cache"
   NODE_CC_DEBUG_LOG="${APP_DIR}/.adapter-compile-cache.log"
   mkdir -p "${NODE_CC_DIR}"
   : >"${NODE_CC_DEBUG_LOG}"
   if [ "${KNEXT_E2E_SKIP_PACK:-0}" = "1" ]; then
-    # Contract-test mode: the fixture's fake `next` has no framework graph to
-    # bake. Skipping is fail-SAFE, never a bypass — an unbaked boot accepts
-    # nothing, so its evidence line grades NOT live. No workflow sets this.
-    log "KNEXT_E2E_SKIP_PACK=1 — compile-cache bake skipped (contract-test mode; this deploy will record NOT-live bytecode evidence)"
+    # Contract-test mode: no installed tarball, so neither shipped half exists.
+    # Fail-SAFE, never a bypass — the evidence line records bake=skipped, which
+    # grades NOT live. No workflow sets this.
+    log "KNEXT_E2E_SKIP_PACK=1 — shipped compile-cache bake + supervisor skipped (contract-test mode; this deploy records NOT-live bytecode evidence)"
   else
-    log "baking the V8 compile cache for ${SERVER_JS} into ${NODE_CC_DIR}"
-    NODE_COMPILE_CACHE="${NODE_CC_DIR}" NODE_ENV=production \
-      node "${SCRIPT_DIR}/e2e-compile-cache-bake.mjs" "${SERVER_JS}" >&2
-    NODE_CC_BAKED=1
+    # Tolerant resolve, fail-SAFE: a tarball without the supervisor export (or
+    # the bake template) records compile_cache_bake=failed and boots server.js
+    # directly — graded NOT live — instead of failing the fixture's deploy.
+    KNEXT_NODE_SUPERVISOR="$(node -e 'process.stdout.write(require.resolve("@getknext/core/internal/node-server"))' 2>/dev/null || true)"
+    KNEXT_CORE_ROOT="$(dirname "$(dirname "$(dirname "${KNEXT_NODE_SUPERVISOR:-/x/x/x/x}")")")"
+    KNEXT_BAKE_TEMPLATE="${KNEXT_CORE_ROOT}/templates/runtime-standalone/knext-compile-cache-bake.mjs.hbs"
+    KNEXT_BAKE_DRIVER="${APP_DIR}/.knext-compile-cache-bake.mjs"
+    if [ -z "${KNEXT_NODE_SUPERVISOR}" ] || [ ! -f "${KNEXT_BAKE_TEMPLATE}" ]; then
+      log "ERROR: the installed tarball lacks knext's shipped node supervisor or compile-cache bake driver (supervisor=${KNEXT_NODE_SUPERVISOR:-<unresolved>}, bake=${KNEXT_BAKE_TEMPLATE}) — recorded as compile_cache_bake=failed (NOT live)"
+      KNEXT_NODE_SUPERVISOR=""
+      NODE_CC_BAKE="failed"
+    else
+      cp "${KNEXT_BAKE_TEMPLATE}" "${KNEXT_BAKE_DRIVER}"
+      WARM_PATH="$(node -e '
+        const fs = require("node:fs"), path = require("node:path");
+        const [appDir] = process.argv.slice(1);
+        let basePath = "";
+        try { basePath = JSON.parse(fs.readFileSync(path.join(appDir, ".next/required-server-files.json"), "utf8")).config.basePath || ""; } catch {}
+        const root = path.join(appDir, ".next/static");
+        const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).sort((a, b) => a.name < b.name ? -1 : 1)
+          .flatMap((e) => e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)]);
+        const file = (fs.existsSync(root) ? walk(root) : []).find((f) => f.endsWith(".js"));
+        if (file) process.stdout.write(`${basePath}/_next/static/${path.relative(root, file).split(path.sep).join("/")}`);
+      ' "${STANDALONE_APP_DIR}")"
+      BAKE_PORT="$(free_port)"
+      log "baking the V8 compile cache with the SHIPPED driver (warm ${WARM_PATH:-<none>}) into ${NODE_CC_DIR}"
+      if [ -n "${WARM_PATH}" ] && (
+        cd "${STANDALONE_APP_DIR}"
+        PORT="${BAKE_PORT}" HOSTNAME=127.0.0.1 NODE_ENV=production \
+          NEXT_DEPLOYMENT_ID="${DEPLOYMENT_ID}" \
+          STANDALONE_SERVER_PATH="${SERVER_JS}" \
+          NODE_COMPILE_CACHE="${NODE_CC_DIR}" \
+          KNEXT_WARM_PATH="${WARM_PATH}" \
+          node "${KNEXT_BAKE_DRIVER}" >&2
+      ); then
+        NODE_CC_BAKE="ok"
+      else
+        log "WARNING: the shipped compile-cache bake FAILED — recorded as compile_cache_bake=failed (NOT live); the deploy proceeds so the fixture's own tests still run"
+        NODE_CC_BAKE="failed"
+      fi
+    fi
   fi
 fi
 
@@ -730,6 +785,9 @@ if [ -n "${STANDALONE_EXEC}" ]; then
   CONTAINER_WORKDIR="${CONTAINER_ROOT}${REL_SUBPATH:+/${REL_SUBPATH}}"
   CONTAINER_NAME="knext-e2e-${DEPLOYMENT_ID}"
   log "booting the compiled standalone-on-Bun executable ${SERVER_BOOT_TARGET} inside ${STANDALONE_BUN_IMAGE} (container ${CONTAINER_NAME}) on 0.0.0.0:${PORT} (HOSTNAME emptied — see B7a note; preloads baked in)"
+elif [ -n "${KNEXT_NODE_SUPERVISOR}" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" != "1" ]; then
+  SUPERVISOR_METRICS_PORT="$(free_port)"
+  log "booting (node) ${SERVER_JS} THROUGH the shipped supervisor ${KNEXT_NODE_SUPERVISOR} on 0.0.0.0:${PORT} (metrics :${SUPERVISOR_METRICS_PORT}; V8 compile cache ${NODE_CC_DIR})"
 else
   log "booting (${RUNTIME}) ${SERVER_BOOT_TARGET} on 0.0.0.0:${PORT} (HOSTNAME emptied — see B7a note; preloads ${SERVER_PRELOAD_ARGS[*]})"
 fi
@@ -745,17 +803,29 @@ fi
       -w "${CONTAINER_WORKDIR}" \
       "${STANDALONE_BUN_IMAGE}" \
       "./$(basename "${SERVER_BOOT_TARGET}")"
-  elif [ -n "${NODE_CC_DIR}" ]; then
-    # Node: boot WITH the baked cache, and with V8's own compile-cache debug on
-    # — the only signal that says whether cached code was ACCEPTED. Its
-    # `[compile cache] …` lines go to a side log, never the server log: the
-    # server log is next.cliOutput in deploy mode, which tests assert on. Every
-    # other stderr line passes through unchanged. `exec` keeps SERVER_PID the
-    # node process (the port-ownership check depends on it).
+  elif [ -n "${KNEXT_NODE_SUPERVISOR}" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" != "1" ]; then
+    # Node: boot through KNEXT's shipped supervisor — what the standalone-node
+    # image's ENTRYPOINT runs. It spawns server.js with the cache-control
+    # preload (the same shipped file the uncompiled boot passes with -r) and
+    # hands the child NODE_COMPILE_CACHE through buildChildEnv, so a
+    # regression in that wiring shows up here as a cold child.
+    #   - NODE_COMPILE_CACHE is the image's default location (step 3d).
+    #   - NODE_DEBUG_NATIVE=COMPILE_CACHE is V8's own accepted/rejected signal;
+    #     its `[compile cache] …` lines go to a side log, never the server log
+    #     (the server log is next.cliOutput in deploy mode, which tests assert
+    #     on). Every other stderr line passes through unchanged.
+    #   - METRICS_PORT is per deploy: two deploys run concurrently, and the
+    #     supervisor's :9464 default would collide.
+    #   - SHUTDOWN_GRACE_MS stays under e2e-cleanup.sh's 6s SIGTERM wait, so
+    #     teardown drains through the supervisor instead of SIGKILLing it.
+    #   - LOG_LEVEL=warn keeps the supervisor's info lines out of cliOutput;
+    #     its warnings (a refused or shadowed cache among them) still appear.
     PORT="${PORT}" HOSTNAME="" NODE_ENV="production" \
       NEXT_DEPLOYMENT_ID="${DEPLOYMENT_ID}" \
+      STANDALONE_SERVER_PATH="${SERVER_JS}" \
       NODE_COMPILE_CACHE="${NODE_CC_DIR}" NODE_DEBUG_NATIVE=COMPILE_CACHE \
-      exec "${SERVER_CMD}" "${SERVER_PRELOAD_ARGS[@]}" "${SERVER_BOOT_TARGET}" \
+      METRICS_PORT="${SUPERVISOR_METRICS_PORT}" SHUTDOWN_GRACE_MS=5000 LOG_LEVEL=warn \
+      exec node "${KNEXT_NODE_SUPERVISOR}" \
       2> >(exec awk -v cc="${NODE_CC_DEBUG_LOG}" 'index($0, "[compile cache] ") == 1 { print >> cc; fflush(cc); next } { print; fflush() }')
   else
     PORT="${PORT}" HOSTNAME="" NODE_ENV="production" \
@@ -938,6 +1008,26 @@ if [ -n "${STANDALONE_EXEC}" ]; then
     OWNER_PID="${INSPECTED_PID}"
   fi
 fi
+# Supervisor-booted node: SERVER_PID is the supervisor, and the listening
+# socket belongs to the Next child it spawned. Resolve that child (its only
+# other child is the stderr-filter awk) so ownership is checked against the
+# real listener, and record it so e2e-cleanup.sh can reap it if the
+# supervisor ever has to be SIGKILLed (which would orphan the child).
+if [ -n "${KNEXT_NODE_SUPERVISOR}" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" != "1" ]; then
+  CHILD_PID=""
+  for p in $(pgrep -P "${SERVER_PID}" 2>/dev/null || true); do
+    case "$(ps -o comm= -p "${p}" 2>/dev/null || true)" in
+      *awk*) ;;
+      *) CHILD_PID="${p}" ;;
+    esac
+  done
+  if [ -n "${CHILD_PID}" ]; then
+    OWNER_PID="${CHILD_PID}"
+    echo "CHILD_PID=${CHILD_PID}" >>"${LOG_FILE}"
+  else
+    log "WARNING: could not resolve the supervisor's Next child pid — port ownership is checked against the supervisor"
+  fi
+fi
 set +e
 port_owned_by_server
 OWNS=$?
@@ -954,25 +1044,34 @@ fi
 log "deployment ready: build=${BUILD_ID} deployment=${DEPLOYMENT_ID} pid=${SERVER_PID}"
 
 # ── 6b. node bytecode-liveness evidence (the node half of step 5b) ────────────
-# Count what V8 accepted from the baked cache while this server booted, and
-# append it as this deploy's boot-ledger line. The settle loop (≤5s) only
-# covers the tail of boot-time module loading after the port opened; a live
-# deploy exits it on the first pass, and an unbaked one (contract-test mode)
-# cannot become live so it does not wait. This RECORDS, it never fails the
-# deploy — scripts/e2e-bytecode-liveness.mjs grades the line (the shard check fails
-# the job, the credential audit refuses the night).
+# Count what V8 accepted from the shipped bake while the supervisor's Next
+# child booted, and append it — with the bake's own status — as this deploy's
+# boot-ledger line.
+#
+# WHAT IS GRADED, precisely: modules under the standalone tree (the Next child:
+# server.js, Next's framework internals, and whatever app code it loads at
+# boot) up to readiness. The supervisor's own modules are EXCLUDED (--under):
+# the shipped bake bakes the server, never the entry. App route chunks that
+# load on a request are NOT graded — warming them would mean requesting an app
+# route before the test does.
+#
+# The settle loop (≤5s) covers the tail of boot-time loading after the port
+# opened; a live deploy exits it on the first pass, and a deploy whose bake did
+# not succeed cannot become live, so it does not wait. This RECORDS, it never
+# fails the deploy — scripts/e2e-bytecode-liveness.mjs grades the line (the
+# shard check fails the job, the credential audit refuses the night).
 if [ -n "${NODE_CC_DIR}" ]; then
-  if [ "${NODE_CC_BAKED}" = "1" ]; then
+  if [ "${NODE_CC_BAKE}" = "ok" ]; then
     for _ in $(seq 1 20); do
-      if node "${SCRIPT_DIR}/e2e-bytecode-liveness.mjs" --live-node-log "${NODE_CC_DEBUG_LOG}" >/dev/null 2>&1; then
+      if node "${SCRIPT_DIR}/e2e-bytecode-liveness.mjs" --live-node-log "${NODE_CC_DEBUG_LOG}" --under "${STANDALONE_ROOT}" >/dev/null 2>&1; then
         break
       fi
       sleep 0.25
     done
   fi
-  CC_COUNTS="$(node "${SCRIPT_DIR}/e2e-bytecode-liveness.mjs" --count-node-log "${NODE_CC_DEBUG_LOG}")"
-  echo "mode=server-js runtime=${RUNTIME} image=- bytecode_verified=- ${CC_COUNTS}" >>"${BOOT_MODE_LEDGER}"
-  log "bytecode liveness (node V8 compile cache): ${CC_COUNTS}"
+  CC_COUNTS="$(node "${SCRIPT_DIR}/e2e-bytecode-liveness.mjs" --count-node-log "${NODE_CC_DEBUG_LOG}" --under "${STANDALONE_ROOT}")"
+  echo "mode=server-js runtime=${RUNTIME} image=- bytecode_verified=- compile_cache_bake=${NODE_CC_BAKE} ${CC_COUNTS}" >>"${BOOT_MODE_LEDGER}"
+  log "bytecode liveness (node, shipped bake + supervisor): compile_cache_bake=${NODE_CC_BAKE} ${CC_COUNTS}"
 fi
 
 # ── 7. the ONLY stdout line: the deployment URL ───────────────────────────────

@@ -1,33 +1,39 @@
-import { describe, expect, it } from 'bun:test';
+import { afterAll, afterEach, describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { buildChildEnv } from '../packages/kn-next/src/adapters/env';
 import { countNodeCompileCache } from '../scripts/e2e-bytecode-liveness.mjs';
 
 /**
- * Bytecode caching proven LIVE per cell — the HARNESS half.
+ * Bytecode caching proven LIVE per cell — the HARNESS half, on KNEXT's own path.
  *
  * tests/bytecode-liveness.test.ts pins the rule and
  * tests/bytecode-liveness-chain.test.ts pins the evidence reaching the audit.
- * This file pins the two places the evidence is PRODUCED:
+ * This file pins that the node evidence exercises what knext SHIPS, so a
+ * regression in knext's compile-cache path reds the night:
  *
- *   1. scripts/e2e-deploy.sh — the node boot is a CACHED boot (baked from
- *      framework modules only, then booted with NODE_COMPILE_CACHE), V8's own
- *      debug output is diverted out of the server log (it is next.cliOutput in
- *      deploy mode, and tests assert on it), and one evidence line per deploy
- *      carries the accepted/missed/rejected counts;
- *   2. the workflow — the summarize step folds the boot ledger into the shard
- *      summary, and the shard check runs for EVERY runtime, not bun only.
- *
- * Plus the bake driver's own behaviour, against a real node: a cache it bakes
- * is accepted by a later process, and every way it cannot bake exits 1.
+ *   1. the shipped BAKE DRIVER (templates/runtime-standalone/
+ *      knext-compile-cache-bake.mjs.hbs — what Dockerfile.standalone.hbs RUNs),
+ *      exercised against a real node: its cache is accepted by a later process;
+ *   2. the shipped SUPERVISOR's env wiring (buildChildEnv) hands the child
+ *      NODE_COMPILE_CACHE — drop it and the child boots cold;
+ *   3. scripts/e2e-deploy.sh resolves BOTH from the installed tarball, bakes
+ *      with the driver, boots through the supervisor, grades only the
+ *      standalone child, and records the bake's status per deploy;
+ *   4. the workflow folds that evidence into the shard summary and checks it on
+ *      every runtime.
  */
 
 const ROOT = resolve(import.meta.dir, '..');
 const DEPLOY = readFileSync(join(ROOT, 'scripts/e2e-deploy.sh'), 'utf8');
+const CLEANUP = readFileSync(join(ROOT, 'scripts/e2e-cleanup.sh'), 'utf8');
 const WORKFLOW = readFileSync(join(ROOT, '.github/workflows/test-e2e-deploy.yml'), 'utf8');
-const BAKE = join(ROOT, 'scripts/e2e-compile-cache-bake.mjs');
+const SHIPPED_BAKE = join(
+  ROOT,
+  'packages/kn-next/templates/runtime-standalone/knext-compile-cache-bake.mjs.hbs',
+);
 const LEDGER_PATH = '${RUNNER_TEMP:-/tmp}/knext-e2e-boot-modes.log';
 
 /** Exactly-once occurrence — an anchor that appears twice is ambiguous. */
@@ -35,114 +41,158 @@ function once(haystack: string, needle: string) {
   return haystack.split(needle).length - 1;
 }
 
-/** A fake standalone tree: server.js + a `next` package with the two required modules. */
-function fakeStandalone(opts: { withStartServer?: boolean } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'cc-bake-'));
-  const next = join(dir, 'node_modules/next');
-  mkdirSync(join(next, 'dist/server/lib'), { recursive: true });
-  writeFileSync(join(next, 'package.json'), JSON.stringify({ name: 'next', main: 'index.js' }));
-  // Enough source for V8 to bother caching (tiny functions may be skipped).
-  const body = Array.from(
-    { length: 200 },
-    (_, i) => `exports.f${i} = function f${i}(a) { return a * ${i} + ${i}; };`,
-  ).join('\n');
-  writeFileSync(join(next, 'index.js'), body);
-  if (opts.withStartServer !== false) {
-    writeFileSync(join(next, 'dist/server/lib/start-server.js'), body);
-  }
-  const server = join(dir, 'server.js');
-  writeFileSync(server, "require('next');require('next/dist/server/lib/start-server');\n");
-  return { dir, server, next };
+/** Every temp dir a test creates, removed once the file finishes (D9). */
+const temps: string[] = [];
+afterAll(() => {
+  for (const d of temps) rmSync(d, { recursive: true, force: true });
+});
+
+/** Enough source for V8 to bother caching (tiny functions may be skipped). */
+const BIG_MODULE = Array.from(
+  { length: 200 },
+  (_, i) => `exports.f${i} = function f${i}(a) { return a * ${i} + ${i}; };`,
+).join('\n');
+
+/**
+ * A fake standalone tree whose server.js behaves like Next's: it loads a
+ * framework module and listens on $PORT, answering the warm path with 200.
+ */
+function fakeStandalone() {
+  const dir = mkdtempSync(join(tmpdir(), 'cc-shipped-bake-'));
+  temps.push(dir);
+  mkdirSync(join(dir, 'node_modules/next'), { recursive: true });
+  writeFileSync(join(dir, 'node_modules/next/index.js'), BIG_MODULE);
+  writeFileSync(
+    join(dir, 'server.js'),
+    [
+      "require('./node_modules/next/index.js');",
+      "require('node:http').createServer((req, res) => {",
+      "  res.writeHead(req.url === '/_next/static/chunk.js' ? 200 : 404); res.end('ok');",
+      '}).listen(Number(process.env.PORT), process.env.HOSTNAME);',
+    ].join('\n'),
+  );
+  // The template has no Handlebars tokens; the image stages it byte-for-byte.
+  const driver = join(dir, 'knext-compile-cache-bake.mjs');
+  copyFileSync(SHIPPED_BAKE, driver);
+  return { dir, driver, server: join(dir, 'server.js') };
 }
 
-function bake(server: string, env: Record<string, string | undefined>) {
-  const e: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (v !== undefined && !k.startsWith('NODE_')) e[k] = v;
-  }
-  for (const [k, v] of Object.entries(env)) if (v !== undefined) e[k] = v;
-  return spawnSync('node', [BAKE, server], { encoding: 'utf8', env: e });
+let port = 38_900 + Math.floor(Math.random() * 500);
+function runShippedBake(dir: string, driver: string, server: string, cache: string) {
+  port += 1;
+  return spawnSync('node', [driver], {
+    encoding: 'utf8',
+    timeout: 60_000,
+    env: {
+      PATH: process.env.PATH ?? '',
+      PORT: String(port),
+      HOSTNAME: '127.0.0.1',
+      NODE_ENV: 'production',
+      STANDALONE_SERVER_PATH: server,
+      NODE_COMPILE_CACHE: cache,
+      KNEXT_WARM_PATH: '/_next/static/chunk.js',
+    },
+    cwd: dir,
+  });
 }
 
-describe('e2e-compile-cache-bake — the harness bake, against a real node', () => {
-  it('bakes a cache that a LATER process accepts (the node cell is a cached boot)', () => {
-    const { dir, next } = fakeStandalone();
-    const cache = join(dir, '.cc');
-    const r = bake(join(dir, 'server.js'), { NODE_COMPILE_CACHE: cache, NODE_ENV: 'production' });
-    expect(r.status, r.stderr).toBe(0);
-    // Load the same modules in a fresh process with V8's debug output on.
-    const probe = spawnSync(
-      'node',
-      ['-e', `require(${JSON.stringify(join(next, 'dist/server/lib/start-server.js'))})`],
-      {
-        encoding: 'utf8',
-        env: {
-          PATH: process.env.PATH ?? '',
-          NODE_COMPILE_CACHE: cache,
-          NODE_DEBUG_NATIVE: 'COMPILE_CACHE',
-        },
+/** Load the framework module in a fresh process and count what V8 accepted. */
+function acceptedOnReload(dir: string, cache: string) {
+  const probe = spawnSync('node', ['-e', "require('./node_modules/next/index.js')"], {
+    encoding: 'utf8',
+    cwd: dir,
+    env: {
+      PATH: process.env.PATH ?? '',
+      NODE_COMPILE_CACHE: cache,
+      NODE_DEBUG_NATIVE: 'COMPILE_CACHE',
+    },
+  });
+  return countNodeCompileCache(probe.stderr).accepted;
+}
+
+describe("the SHIPPED bake driver (the standalone-node image's own), against a real node", () => {
+  it('bakes a cache that a later process ACCEPTS', () => {
+    const { dir, driver, server } = fakeStandalone();
+    const cache = join(dir, '.next/compile-cache');
+    const r = runShippedBake(dir, driver, server, cache);
+    expect(r.status, `${r.stdout}\n${r.stderr}`).toBe(0);
+    expect(acceptedOnReload(dir, cache)).toBeGreaterThanOrEqual(1);
+  }, 90_000);
+
+  it('the other half: with no bake, the same load accepts nothing', () => {
+    const { dir } = fakeStandalone();
+    expect(acceptedOnReload(dir, join(dir, '.next/compile-cache-empty'))).toBe(0);
+  });
+
+  it('exits non-zero when the warm path does not answer 2xx (the harness records bake=failed)', () => {
+    const { dir, driver, server } = fakeStandalone();
+    port += 1;
+    const r = spawnSync('node', [driver], {
+      encoding: 'utf8',
+      timeout: 60_000,
+      cwd: dir,
+      env: {
+        PATH: process.env.PATH ?? '',
+        PORT: String(port),
+        HOSTNAME: '127.0.0.1',
+        STANDALONE_SERVER_PATH: server,
+        NODE_COMPILE_CACHE: join(dir, '.cc'),
+        KNEXT_WARM_PATH: '/not-there',
       },
-    );
-    expect(countNodeCompileCache(probe.stderr).accepted).toBeGreaterThanOrEqual(1);
-  });
-
-  it('the other half: WITHOUT the bake the same load accepts nothing', () => {
-    const { dir, next } = fakeStandalone();
-    const probe = spawnSync(
-      'node',
-      ['-e', `require(${JSON.stringify(join(next, 'dist/server/lib/start-server.js'))})`],
-      {
-        encoding: 'utf8',
-        env: {
-          PATH: process.env.PATH ?? '',
-          NODE_COMPILE_CACHE: join(dir, '.cc-empty'),
-          NODE_DEBUG_NATIVE: 'COMPILE_CACHE',
-        },
-      },
-    );
-    expect(countNodeCompileCache(probe.stderr).accepted).toBe(0);
-  });
-
-  it('exits 1 when NODE_COMPILE_CACHE is not set', () => {
-    const { server } = fakeStandalone();
-    expect(bake(server, {}).status).toBe(1);
-  });
-
-  it('exits 1 when the runtime refuses the cache (NODE_DISABLE_COMPILE_CACHE)', () => {
-    const { dir, server } = fakeStandalone();
-    const r = bake(server, {
-      NODE_COMPILE_CACHE: join(dir, '.cc'),
-      NODE_DISABLE_COMPILE_CACHE: '1',
     });
-    expect(r.status).toBe(1);
+    expect(r.status).not.toBe(0);
+  }, 90_000);
+});
+
+describe('the SHIPPED supervisor hands the child NODE_COMPILE_CACHE (buildChildEnv)', () => {
+  const saved = process.env.NODE_COMPILE_CACHE;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.NODE_COMPILE_CACHE;
+    else process.env.NODE_COMPILE_CACHE = saved;
   });
 
-  it('exits 1 when a module server.js requires cannot load (fail closed)', () => {
-    const { dir, server } = fakeStandalone({ withStartServer: false });
-    expect(bake(server, { NODE_COMPILE_CACHE: join(dir, '.cc') }).status).toBe(1);
-  });
-
-  it('never requires server.js itself (that would start the fixture outside the test)', () => {
-    const src = readFileSync(BAKE, 'utf8');
-    expect(/req\(serverJs\)|require\(serverJs\)|import\(serverJs\)/.test(src)).toBe(false);
+  it('the child env carries the parent NODE_COMPILE_CACHE unchanged', () => {
+    process.env.NODE_COMPILE_CACHE = '/app/.next/standalone/.next/compile-cache';
+    expect(buildChildEnv().NODE_COMPILE_CACHE).toBe('/app/.next/standalone/.next/compile-cache');
   });
 });
 
-describe('e2e-deploy.sh — the node boot is a cached boot, and says so per deploy', () => {
-  it('bakes the cache for the node runtime with the bake driver, before boot', () => {
-    expect(once(DEPLOY, 'NODE_COMPILE_CACHE="${NODE_CC_DIR}" NODE_ENV=production \\')).toBe(1);
-    expect(once(DEPLOY, 'node "${SCRIPT_DIR}/e2e-compile-cache-bake.mjs" "${SERVER_JS}" >&2')).toBe(
-      1,
-    );
-    expect(DEPLOY.indexOf('e2e-compile-cache-bake.mjs')).toBeLessThan(
-      DEPLOY.indexOf('# ── 4. boot the standalone server'),
-    );
-    expect(/if \[ "\$\{RUNTIME\}" != "bun" \]; then\n\s+NODE_CC_DIR=/.test(DEPLOY)).toBe(true);
+describe("e2e-deploy.sh — the node lane runs KNEXT's own bake + supervisor, and says so per deploy", () => {
+  it('resolves the supervisor and the bake driver from the INSTALLED tarball', () => {
+    expect(
+      once(
+        DEPLOY,
+        `KNEXT_NODE_SUPERVISOR="$(node -e 'process.stdout.write(require.resolve("@getknext/core/internal/node-server"))' 2>/dev/null || true)"`,
+      ),
+    ).toBe(1);
+    expect(
+      once(
+        DEPLOY,
+        'KNEXT_BAKE_TEMPLATE="${KNEXT_CORE_ROOT}/templates/runtime-standalone/knext-compile-cache-bake.mjs.hbs"',
+      ),
+    ).toBe(1);
+    // No harness-private bake survives.
+    expect(DEPLOY).not.toContain('e2e-compile-cache-bake.mjs');
   });
 
-  it('boots node WITH the baked cache and V8 compile-cache debug on', () => {
+  it("bakes with the shipped driver into the image's cache location, before boot", () => {
+    expect(once(DEPLOY, 'NODE_CC_DIR="${STANDALONE_APP_DIR}/.next/compile-cache"')).toBe(1);
+    expect(once(DEPLOY, '          node "${KNEXT_BAKE_DRIVER}" >&2')).toBe(1);
+    expect(DEPLOY.indexOf('node "${KNEXT_BAKE_DRIVER}"')).toBeLessThan(
+      DEPLOY.indexOf('# ── 4. boot the standalone server'),
+    );
+  });
+
+  it('boots node THROUGH the shipped supervisor with the cache and V8 debug on', () => {
+    expect(once(DEPLOY, '      exec node "${KNEXT_NODE_SUPERVISOR}" \\')).toBe(1);
     expect(
-      once(DEPLOY, 'NODE_COMPILE_CACHE="${NODE_CC_DIR}" NODE_DEBUG_NATIVE=COMPILE_CACHE \\'),
+      once(DEPLOY, '      NODE_COMPILE_CACHE="${NODE_CC_DIR}" NODE_DEBUG_NATIVE=COMPILE_CACHE \\'),
+    ).toBe(1);
+    expect(
+      once(
+        DEPLOY,
+        '      STANDALONE_SERVER_PATH="${SERVER_JS}" \\\n      NODE_COMPILE_CACHE="${NODE_CC_DIR}" NODE_DEBUG_NATIVE=COMPILE_CACHE \\',
+      ),
     ).toBe(1);
   });
 
@@ -151,19 +201,25 @@ describe('e2e-deploy.sh — the node boot is a cached boot, and says so per depl
     expect(DEPLOY).toContain('index($0, "[compile cache] ") == 1');
   });
 
-  it('appends the node evidence line AFTER readiness and before the URL is printed', () => {
+  it('grades ONLY the standalone child and records the bake status, after readiness', () => {
     const line =
-      'echo "mode=server-js runtime=${RUNTIME} image=- bytecode_verified=- ${CC_COUNTS}" >>"${BOOT_MODE_LEDGER}"';
+      'echo "mode=server-js runtime=${RUNTIME} image=- bytecode_verified=- compile_cache_bake=${NODE_CC_BAKE} ${CC_COUNTS}" >>"${BOOT_MODE_LEDGER}"';
     expect(once(DEPLOY, line)).toBe(1);
     expect(
       once(
         DEPLOY,
-        'node "${SCRIPT_DIR}/e2e-bytecode-liveness.mjs" --count-node-log "${NODE_CC_DEBUG_LOG}"',
+        'CC_COUNTS="$(node "${SCRIPT_DIR}/e2e-bytecode-liveness.mjs" --count-node-log "${NODE_CC_DEBUG_LOG}" --under "${STANDALONE_ROOT}")"',
       ),
     ).toBe(1);
     const at = DEPLOY.indexOf(line);
     expect(at).toBeGreaterThan(DEPLOY.indexOf('log "deployment ready:'));
     expect(at).toBeLessThan(DEPLOY.indexOf('echo "http://localhost:${PORT}"'));
+  });
+
+  it("checks port ownership against the supervisor's child, and cleanup reaps it", () => {
+    expect(once(DEPLOY, '    OWNER_PID="${CHILD_PID}"')).toBe(1);
+    expect(once(DEPLOY, '    echo "CHILD_PID=${CHILD_PID}" >>"${LOG_FILE}"')).toBe(1);
+    expect(CLEANUP).toContain('CHILD_PID="$(grep -E \'^CHILD_PID=\' "${LOG_FILE}"');
   });
 
   it('the bun compiled-exec evidence line is unchanged', () => {
@@ -200,12 +256,11 @@ describe('workflow — every shard proves liveness, and the proof reaches the le
 describe('the liveness definition is part of the frozen harness set', () => {
   // Lowering a floor mid-window must move the night's fingerprint (and so
   // restart the count), exactly like editing any other harness script.
-  it('both new harness scripts are matched by the fingerprint HARNESS_ROOTS', async () => {
+  it('the liveness definition is matched by the fingerprint HARNESS_ROOTS', async () => {
     const { HARNESS_ROOTS } = await import('../scripts/compat-window-fingerprint.mjs');
     const scriptsRoot = HARNESS_ROOTS.find(
       (r: { kind: string; path: string }) => r.kind === 'dir' && r.path === 'scripts',
     ) as { match: RegExp };
     expect(scriptsRoot.match.test('e2e-bytecode-liveness.mjs')).toBe(true);
-    expect(scriptsRoot.match.test('e2e-compile-cache-bake.mjs')).toBe(true);
   });
 });
