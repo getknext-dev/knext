@@ -1466,6 +1466,60 @@ describe('anonymous-install-nightly.yml — the runner must have no credential',
     expect(auditAnonymousWorkflowJob(synthetic(steps)).findings.join(' ')).toMatch(/env/i);
   });
 
+  // ── #1199: the per-step rules must not go VACUOUS on a flow-style/mapping ──
+  //         `steps:` shape ──────────────────────────────────────────────────
+  //
+  // `parseJobSteps` only recognises BLOCK-SEQUENCE items (`- ` entries). When a
+  // job's `steps:` is written FLOW-STYLE (`steps: [ {..} ]`) or as a mapping,
+  // it yields ZERO steps, so EVERY per-step rule (the `with:` allowlist, the
+  // `persist-credentials` rule, the step-level `env:` allowlist, the `uses`
+  // allowlist) inspects NOTHING and passes vacuously — an author could smuggle a
+  // step-level violation past the audit by choosing a shape the parser cannot
+  // read. This is pre-existing (cr-1196 fixed only the job-level-`env:`-after-
+  // `steps:` case). Option A fix: a `steps:` present but unparseable as a block
+  // sequence is a FINDING, not a pass — the audit's job is to be fail-closed.
+  it('FAILS CLOSED on a FLOW-STYLE `steps:` value smuggling a step-level env credential (#1199)', () => {
+    // Valid YAML (GitHub Actions accepts a flow-style `steps:` sequence). The
+    // step carries a credential-shaped `env:` inside the flow mapping, where
+    // `parseEnvEntries`/the per-step env allowlist never sees it, and where the
+    // `run:`/expression/job-env rules cannot reach it either. Before the fix
+    // this scored ZERO findings.
+    const steps =
+      '      [{name: a, run: node scripts/verify-anonymous-install.mjs, env: {SECRET_TOKEN: aLiteralTokenValue}}]';
+    expect(auditAnonymousWorkflowJob(synthetic(steps)).findings.join(' ')).toMatch(
+      /steps|inspect|vacuous|parse/i,
+    );
+  });
+
+  it('FAILS CLOSED on a FLOW-STYLE `steps:` value smuggling `persist-credentials: true` (#1199)', () => {
+    const steps =
+      '      [{uses: actions/checkout@abc, with: {persist-credentials: true}}, {run: node scripts/verify-anonymous-install.mjs}]';
+    expect(auditAnonymousWorkflowJob(synthetic(steps)).findings.join(' ')).toMatch(
+      /steps|inspect|vacuous|parse|persist-credentials/i,
+    );
+  });
+
+  it('FAILS CLOSED on a MAPPING-shaped `steps:` value (#1199)', () => {
+    // A `steps:` written as a mapping rather than a sequence — the per-step
+    // parser yields nothing, so the per-step rules would inspect nothing.
+    const steps = [
+      '      name: a',
+      '      run: node scripts/verify-anonymous-install.mjs',
+      '      env:',
+      '        SECRET_TOKEN: aLiteralTokenValue',
+    ].join('\n');
+    expect(auditAnonymousWorkflowJob(synthetic(steps)).findings.join(' ')).toMatch(
+      /steps|inspect|vacuous|parse/i,
+    );
+  });
+
+  it('the legit block-sequence `steps:` still passes — the fix is fail-closed, not red-on-everything (#1199)', () => {
+    // Both the synthetic block-sequence baseline and the real committed workflow
+    // must stay green: the fix must not false-fail a parseable block sequence.
+    expect(auditAnonymousWorkflowJob(synthetic(GOOD_STEPS)).findings).toEqual([]);
+    expect(auditAnonymousWorkflowJob(read(WORKFLOW)).findings).toEqual([]);
+  });
+
   // ── R4: does each rule hold at every SPELLING, not just every site? ─────────
 
   it.each([
