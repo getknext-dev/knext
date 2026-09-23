@@ -80,12 +80,27 @@ afterEach(() => {
     process.exit = savedExit;
 });
 
+/** Run `deploy()` to completion and return the `ProcessExitCalled` it must throw. */
+async function expectProcessExit(
+    deploy: () => Promise<void>,
+): Promise<ProcessExitCalled> {
+    let thrown: unknown;
+    try {
+        await deploy();
+    } catch (e) {
+        thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(ProcessExitCalled);
+    return thrown as ProcessExitCalled;
+}
+
 describe("deploy — --version (getCliVersion + exit 0)", () => {
     it("prints the real package.json version to fd 1 and exits 0", async () => {
         setArgv(["deploy", "--version"]);
         const deploy = await importDeploy();
 
-        await expect(deploy()).rejects.toThrow(ProcessExitCalled);
+        const exit = await expectProcessExit(deploy);
+        expect(exit.code).toBe(0);
 
         expect(writeSyncCalls.length).toBe(1);
         const [fd, text] = writeSyncCalls[0];
@@ -101,7 +116,8 @@ describe("deploy — --version (getCliVersion + exit 0)", () => {
         setArgv(["deploy", "--version"]);
         const deploy = await importDeploy();
 
-        await expect(deploy()).rejects.toThrow(ProcessExitCalled);
+        const exit = await expectProcessExit(deploy);
+        expect(exit.code).toBe(0);
 
         expect(writeSyncCalls.length).toBe(1);
         expect(writeSyncCalls[0][1].trim()).toBe("0.0.0");
@@ -112,7 +128,8 @@ describe("deploy — --version (getCliVersion + exit 0)", () => {
         setArgv(["deploy", "--version"]);
         const deploy = await importDeploy();
 
-        await expect(deploy()).rejects.toThrow(ProcessExitCalled);
+        const exit = await expectProcessExit(deploy);
+        expect(exit.code).toBe(0);
 
         expect(writeSyncCalls[0][1].trim()).toBe("0.0.0");
     });
@@ -123,7 +140,8 @@ describe("deploy — --help (exit 0)", () => {
         setArgv(["deploy", "--help"]);
         const deploy = await importDeploy();
 
-        await expect(deploy()).rejects.toThrow(ProcessExitCalled);
+        const exit = await expectProcessExit(deploy);
+        expect(exit.code).toBe(0);
 
         expect(writeSyncCalls.length).toBe(1);
         const [fd, text] = writeSyncCalls[0];

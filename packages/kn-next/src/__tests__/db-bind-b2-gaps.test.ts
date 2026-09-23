@@ -96,6 +96,7 @@ describe("dbMain — local kn-next.config.ts is loaded when present", () => {
     beforeEach(() => {
         dir = mkdtempSync(join(tmpdir(), "knext-dbmain-cfg-"));
         process.chdir(dir);
+        logInfo.mockClear();
     });
 
     afterEach(() => {
@@ -116,6 +117,18 @@ describe("dbMain — local kn-next.config.ts is loaded when present", () => {
         await expect(
             dbMain(["bind", "--secret", "shop-db", "--dry-run"]),
         ).resolves.toBeUndefined();
+
+        // The resolved app name is what dbMain announces BEFORE running the
+        // bind — asserting resolution merely didn't throw would also pass if
+        // dbMain read a wholly different field off localConfig (e.g. its own
+        // `registry`) as long as that field happened to be truthy.
+        const announced = logInfo.mock.calls.find(
+            (c) =>
+                typeof c[0] === "object" &&
+                c[0] !== null &&
+                (c[0] as { app?: unknown }).app === "from-config",
+        );
+        expect(announced).toBeDefined();
     });
 });
 

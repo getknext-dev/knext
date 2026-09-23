@@ -199,9 +199,17 @@ export const PER_PATH_THRESHOLDS = {
  * deliberately untested in-process, matching the B3 precedent above (covered by
  * cli-node-runtime.test.ts's built-binary spawn suite, not unit tests); and a handful of
  * lines in both files are the 2nd+ physical line of a `+`-joined multi-line string
- * literal inside an already-executed throw/return — a bun lcov instrumentation artifact
- * that stayed at 0 hits across every test permutation tried, so no amount of additional
- * testing moves those specific line numbers.
+ * literal inside an already-executed throw/return. Verified directly against the
+ * per-process lcov (`coverage-bun/*.info`), not assumed: in the report from a test that
+ * ACTUALLY executes the branch (e.g. deploy-apply-diagnostics.test.ts, cr-apply-strict-
+ * validation.test.ts), bun emits NO `DA` record at all for these continuation lines —
+ * only for the statement's first physical line. They still appear as `DA:<n>,0` in the
+ * MERGED report the gate reads, but that 0 is contributed by OTHER, unrelated test files
+ * that import the module without ever executing that branch (their per-file static scan
+ * covers the whole source, so it emits a `DA` for every line, none of them reachable from
+ * that file). Net effect either way: no test that exercises the branch can raise these
+ * lines' hit count, because the report that would carry the hit never emits a record for
+ * them to begin with.
  */
 export const HONEST_THRESHOLDS = {
   lines: 92.5,
