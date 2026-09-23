@@ -203,9 +203,12 @@ export async function listPackageVersions({
  * FAILURE (fail closed). Returns the served digest on success.
  *
  * @param {string} ref
- * @param {{ token?: string, http?: (url: string, headers: Record<string, string>) => Promise<any> }} [options]
+ * @param {{ token?: string, username?: string, http?: (url: string, headers: Record<string, string>) => Promise<any> }} [options]
  */
-export async function checkPullable(ref, { token, http = defaultHttp } = {}) {
+export async function checkPullable(
+  ref,
+  { token, username = process.env.GITHUB_ACTOR || 'x-access-token', http = defaultHttp } = {},
+) {
   const at = ref.lastIndexOf('@');
   if (at < 0) throw new Error(`not a digest-pinned reference: ${ref}`);
   const digest = ref.slice(at + 1);
@@ -227,11 +230,17 @@ export async function checkPullable(ref, { token, http = defaultHttp } = {}) {
       const params = new URLSearchParams();
       if (field('service')) params.set('service', field('service'));
       params.set('scope', field('scope') ?? `repository:${repository}:pull`);
-      // GHCR accepts a base64 GITHUB_TOKEN as the bearer for its token realm.
+      // GHCR's token realm speaks the OCI distribution auth spec: it expects
+      // `Authorization: Basic base64(username:token)` — the SAME credential
+      // docker/login-action sends (username = github.actor; GHCR keys on the
+      // token, so the username need only be non-empty). A `Bearer
+      // base64(token-alone)` is NOT a valid scheme here — GHCR reads it as
+      // anonymous and issues an UNSCOPED token that cannot read a PRIVATE package,
+      // so the retried manifest GET 403s (the #670b nightly failure). Send Basic.
       const tokenHeaders = token
         ? {
             accept: 'application/json',
-            authorization: `Bearer ${Buffer.from(token).toString('base64')}`,
+            authorization: `Basic ${Buffer.from(`${username}:${token}`).toString('base64')}`,
           }
         : { accept: 'application/json' };
       const auth = await http(`${realm}?${params}`, tokenHeaders);
@@ -264,6 +273,7 @@ export async function resolveScaleTestImage({
   owner,
   repo = 'file-manager',
   token,
+  username = undefined,
   http = defaultHttp,
 }) {
   const override = (input ?? '').trim();
@@ -272,7 +282,7 @@ export async function resolveScaleTestImage({
   const versions = await listPackageVersions({ owner, repo, token, http });
   const { digest } = selectNewestSignedDigest(versions);
   const ref = buildRef({ registry, owner, repo, digest });
-  await checkPullable(ref, { token, http });
+  await checkPullable(ref, { token, username, http });
   return ref;
 }
 
@@ -286,6 +296,10 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const repo = process.env.IMAGE_NAME || 'file-manager';
   const registry = process.env.IMAGE_REGISTRY || 'ghcr.io';
   const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
+  // Username for the GHCR token-realm Basic exchange — matches docker/login-action
+  // (`github.actor`). GHCR authenticates on the token; the username need only be
+  // non-empty, so fall back to a placeholder when GITHUB_ACTOR is unset.
+  const username = process.env.GITHUB_ACTOR || 'x-access-token';
   const input = process.env.SCALE_TEST_IMAGE_INPUT || '';
 
   if (!owner) {
@@ -296,7 +310,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   }
 
   try {
-    const ref = await resolveScaleTestImage({ input, registry, owner, repo, token });
+    const ref = await resolveScaleTestImage({ input, registry, owner, repo, token, username });
     console.log(`Resolved SCALE_TEST_IMAGE candidate: ${ref}`);
     const out = process.env.GITHUB_OUTPUT;
     if (out) {

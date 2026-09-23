@@ -293,6 +293,92 @@ describe('checkPullable — shape is not pullability', () => {
   });
 });
 
+describe('checkPullable — OCI token-realm exchange (the private-package 401 path, #670b)', () => {
+  // The branch that shipped broken and slipped four review rounds: on the
+  // anonymous 401 + WWW-Authenticate realm challenge, the code must exchange the
+  // GITHUB_TOKEN for a SCOPED registry token. GHCR's token realm speaks the OCI
+  // auth spec: `Authorization: Basic base64(user:token)`, NOT
+  // `Bearer base64(token-alone)` — the latter reads as anonymous and yields an
+  // unscoped token that cannot read the PRIVATE file-manager package (HTTP 403 on
+  // the retried manifest GET). The nightly (run 35812236281) 403'd for exactly
+  // this reason. These tests exercise the 401→realm→retry branch the old suite
+  // never touched.
+  const OWNER_L = OWNER.toLowerCase();
+  const ref = `ghcr.io/${OWNER_L}/${REPO}@sha256:${HEX('a')}`;
+  const USER = 'getknext-ci';
+  const TOKEN = 'ghs_supersecrettoken';
+  const REALM = 'https://ghcr.io/token';
+  const DIGEST = `sha256:${HEX('a')}`;
+  const challenge = `Bearer realm="${REALM}",service="ghcr.io",scope="repository:${OWNER_L}/${REPO}:pull"`;
+  const basicExpected = `Basic ${Buffer.from(`${USER}:${TOKEN}`).toString('base64')}`;
+
+  /**
+   * A faithful PRIVATE-package GHCR double. The token realm issues a SCOPED token
+   * ONLY when handed the correct `Basic base64(user:token)` credential; any other
+   * scheme (e.g. the old `Bearer base64(token)`) is treated as anonymous and gets
+   * an unscoped token, which the private manifest endpoint then 403s. So a green
+   * result here PROVES the Basic scheme is used.
+   */
+  function privateGhcr() {
+    const seen: { realmAuth: string | undefined } = { realmAuth: undefined };
+    const http = async (url: string, headers: Record<string, string>) => {
+      if (url.startsWith(REALM)) {
+        seen.realmAuth = headers.authorization;
+        if (headers.authorization === basicExpected) {
+          return { status: 200, headers: {}, json: async () => ({ token: 'scoped-ok' }) };
+        }
+        // Wrong scheme → anonymous → unscoped token (GHCR does not 401 here).
+        return { status: 200, headers: {}, json: async () => ({ token: 'anon-unscoped' }) };
+      }
+      // Manifest endpoint.
+      if (headers.authorization === 'Bearer scoped-ok') {
+        return {
+          status: 200,
+          headers: { 'docker-content-digest': DIGEST },
+          json: async () => ({}),
+        };
+      }
+      if (headers.authorization === 'Bearer anon-unscoped') {
+        return { status: 403, headers: {}, json: async () => ({}) }; // private, insufficient scope
+      }
+      // First hit (raw token / base creds) → 401 with the realm challenge.
+      return {
+        status: 401,
+        headers: { 'www-authenticate': challenge },
+        json: async () => ({}),
+      };
+    };
+    return { http, seen };
+  }
+
+  it('exchanges the realm challenge with Basic base64(user:token) and pulls the private manifest', async () => {
+    const { http, seen } = privateGhcr();
+    await expect(checkPullable(ref, { token: TOKEN, username: USER, http })).resolves.toBe(DIGEST);
+    // The load-bearing assertion: the realm request carried Basic base64(user:token),
+    // NOT Bearer base64(token). This is the exact bug that 403'd the nightly.
+    expect(seen.realmAuth).toBe(basicExpected);
+    expect(seen.realmAuth?.startsWith('Bearer ')).toBe(false);
+    // And specifically NOT the old malformed scheme.
+    expect(seen.realmAuth).not.toBe(`Bearer ${Buffer.from(TOKEN).toString('base64')}`);
+  });
+
+  it('FAILS CLOSED when the realm-issued token cannot read the private package (403 on retry)', async () => {
+    // Private package + a token realm that always returns an insufficiently-scoped
+    // token → the retried manifest GET is 403. Shape is not pullability; this must
+    // throw, not silently pass.
+    const http = async (url: string, headers: Record<string, string>) => {
+      if (url.startsWith(REALM)) {
+        return { status: 200, headers: {}, json: async () => ({ token: 'weak' }) };
+      }
+      if (headers.authorization === 'Bearer weak') {
+        return { status: 403, headers: {}, json: async () => ({}) };
+      }
+      return { status: 401, headers: { 'www-authenticate': challenge }, json: async () => ({}) };
+    };
+    await expect(checkPullable(ref, { token: TOKEN, username: USER, http })).rejects.toThrow();
+  });
+});
+
 describe('resolveScaleTestImage — end to end (injected transport)', () => {
   const newer = `sha256:${HEX('2')}`;
   const older = `sha256:${HEX('1')}`;
