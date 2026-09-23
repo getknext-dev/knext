@@ -118,9 +118,10 @@ type NextAppSpec struct {
 	// Runtime selects the process that executes the Next.js standalone server.js.
 	// Valid values: "bun" or "node" (default "node").
 	// Maps from KnativeNextConfig.runtime.
-	// Only meaningful for the standalone shape (Build absent / "turbopack");
-	// for Build "vinext" the runtime is compiled into the executable and this
-	// field does not affect how the container starts.
+	// Only meaningful for the standalone shape (Build absent / "turbopack" /
+	// "webpack" — #1219, both emit the same shape); for Build "vinext" the
+	// runtime is compiled into the executable and this field does not affect
+	// how the container starts.
 	// (Historical: images built by the retired per-file Bun bytecode pass were
 	// Bun-only and needed a rebuild to flip back to "node". ADR-0048 replaced
 	// that pass with the vinext single executable, where the question cannot
@@ -130,7 +131,7 @@ type NextAppSpec struct {
 	Runtime string `json:"runtime,omitempty"`
 
 	// Build selects the build system that produced the image.
-	// Valid values: "turbopack" and "vinext" (ADR-0048).
+	// Valid values: "turbopack", "vinext", and "webpack" (ADR-0048, #1219).
 	// Maps from KnativeNextConfig.build.
 	//
 	// "vinext" is the compiled single-executable artifact — the app is one
@@ -142,6 +143,14 @@ type NextAppSpec struct {
 	// contract, and publishing a value the controller cannot reconcile would
 	// let a GitOps controller, which does not assert strict validation, store
 	// a CR the operator then mis-runs with no condition, event, or refusal).
+	//
+	// "webpack" (#1219) is a SECOND spelling of the standalone shape, not a
+	// third code path: `next build --webpack` emits the identical
+	// `.next/standalone` tree as `next build` (turbopack). The controller
+	// branch above tests `!= "vinext"`, not `== "turbopack"`, so it already
+	// covers "webpack" with no change — the same reasoning that let the CLI
+	// artifact contract add it as a pure registry entry (see
+	// `artifact-contract.ts`).
 	//
 	// INDEPENDENT of Runtime. The two axes are connected by the artifact SHAPE a
 	// builder emits and a runtime must accept — never by a rule pairing the two
@@ -165,7 +174,7 @@ type NextAppSpec struct {
 	// rejects such a CR under --validate=strict, which the CLI always passes —
 	// a loud stop, not a silent mis-run. Upgrade the operator/CRD first.
 	// +optional
-	// +kubebuilder:validation:Enum=turbopack;vinext
+	// +kubebuilder:validation:Enum=turbopack;vinext;webpack
 	Build string `json:"build,omitempty"`
 
 	// TimeoutSeconds is the maximum number of seconds a request can take before
