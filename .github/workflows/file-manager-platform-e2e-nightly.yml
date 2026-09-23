@@ -1,0 +1,255 @@
+name: File-manager platform e2e (nightly / dispatch)
+
+# Deploys apps/file-manager THROUGH the platform on an ephemeral kind cluster and
+# tests it (#1282): `kn-next deploy` -> NextApp CR -> the operator built from HEAD
+# -> Knative. Three areas, every check fail-closed (no skip path):
+#   A. app functionality  - upload (server action), list, bytes-identical read-back
+#                           from object storage, users/audit/dashboard, 404
+#   B. platform features  - scale-to-zero + wake, ISR + authenticated invalidation,
+#                           image optimization, health, metrics, NetworkPolicy,
+#                           graceful rollout under load
+#   C. deployment basics  - asset content-types + cache headers, RSC streaming
+#
+# NOT covered, by design (each is its own follow-up, never a skip):
+#   - browser-driven UI (the upload form is a client component; no Playwright dep)
+#   - object-storage asset prefix (file-manager Dockerfile builds without
+#     ASSET_PREFIX - tracked in #1283)
+#   - rename / delete / download flows: the app has none (upload + list only)
+#
+# BUDGET: one ubuntu-latest job, timeout 75 min, expected ~40 min
+# (cluster+Knative ~5, operator ~3, install+build ~5, deploy ~15, checks ~10).
+# Runs once a night, ~45 runner-minutes. Cluster-setup steps run under
+# `set -euo pipefail` with `kubectl wait --timeout`, so a broken cluster fails fast.
+#
+# Ephemeral kind on the runner only - never OKE/GKE. Triggers: schedule + dispatch.
+
+on:
+  schedule:
+    - cron: '37 4 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  CLUSTER: fm-platform-e2e
+  APP_NS: fm-e2e
+  SCRAPE_NS: fm-e2e-scrape
+  CURL_IMAGE: curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69
+
+jobs:
+  platform-e2e:
+    name: file-manager through kn-next deploy on kind (nightly)
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/kn-next-operator/go.mod
+          cache-dependency-path: packages/kn-next-operator/go.sum
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
+
+      - name: Install kind
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
+        with:
+          install_only: true
+
+      - name: Install workspace dependencies
+        run: bun install --frozen-lockfile
+
+      # The harness must be able to see red BEFORE its verdict on the cluster counts.
+      - name: Self-test - the checks go red on deliberate defects
+        run: node apps/file-manager/scripts/platform-e2e.selftest.mjs
+
+      - name: Create kind cluster (registry certs.d config_path)
+        run: |
+          set -euo pipefail
+          cat <<'YAML' | kind create cluster --name "$CLUSTER" --wait 120s --config=-
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          containerdConfigPatches:
+          - |-
+            [plugins."io.containerd.grpc.v1.cri".registry]
+              config_path = "/etc/containerd/certs.d"
+          YAML
+
+      - name: Start in-cluster registry + wire the kind node to it
+        run: |
+          set -euo pipefail
+          reg=kind-registry
+          docker run -d --restart=always -p 127.0.0.1:5001:5000 --name "$reg" \
+            registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+          docker network connect kind "$reg"
+          node="${CLUSTER}-control-plane"
+          docker exec "$node" mkdir -p /etc/containerd/certs.d/localhost:5001
+          printf '[host."http://%s:5000"]\n' "$reg" \
+            | docker exec -i "$node" cp /dev/stdin /etc/containerd/certs.d/localhost:5001/hosts.toml
+
+      - name: Install cert-manager
+        run: |
+          set -euo pipefail
+          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n cert-manager deployment/cert-manager deployment/cert-manager-webhook deployment/cert-manager-cainjector
+
+      - name: Install Knative Serving + Kourier (scale-to-zero tuned)
+        run: |
+          set -euo pipefail
+          V="knative-v1.16.0"
+          kubectl apply -f "https://github.com/knative/serving/releases/download/${V}/serving-crds.yaml"
+          kubectl apply -f "https://github.com/knative/serving/releases/download/${V}/serving-core.yaml"
+          kubectl apply -f "https://github.com/knative/net-kourier/releases/download/${V}/kourier.yaml"
+          kubectl patch configmap/config-network -n knative-serving --type merge \
+            --patch '{"data":{"ingress-class":"kourier.ingress.networking.knative.dev"}}'
+          kubectl patch configmap/config-autoscaler -n knative-serving --type merge \
+            --patch '{"data":{"scale-to-zero-pod-retention-period":"0s","stable-window":"6s"}}'
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n knative-serving deployment/controller deployment/webhook deployment/autoscaler deployment/net-kourier-controller
+
+      # The operator is built from HEAD, so a runtime or operator regression
+      # lands in the same night as the app change that exposes it.
+      - name: Build + deploy the operator from HEAD
+        working-directory: packages/kn-next-operator
+        run: |
+          set -euo pipefail
+          IMG=example.com/kn-next-operator:e2e
+          make docker-build IMG="$IMG"
+          kind load docker-image "$IMG" --name "$CLUSTER"
+          make install
+          make deploy IMG="$IMG"
+          kubectl rollout status deployment/kn-next-operator-controller-manager \
+            -n kn-next-operator-system --timeout=180s
+
+      - name: Build the workspace packages + the kn-next CLI
+        run: |
+          set -euo pipefail
+          bun run --filter "@getknext/lib" build
+          bun run --filter "@getknext/db" build
+          bun run --filter "@getknext/core" build
+          test -f packages/kn-next/dist/cli/kn-next.js
+
+      - name: Data plane (redis, postgres, minio) + Secrets
+        run: |
+          set -euo pipefail
+          kubectl create namespace "$APP_NS"
+          kubectl create namespace "$SCRAPE_NS"
+          kubectl label namespace "$SCRAPE_NS" knext.dev/metrics-scrape=true
+          rnd() { openssl rand -hex 16; }
+          PG_PW="$(rnd)"; MINIO_KEY="$(rnd)"; MINIO_SECRET="$(rnd)"
+          CACHE_TOKEN="$(rnd)"; OBS_TOKEN="$(rnd)"; API_TOKEN="$(rnd)"
+          for v in "$PG_PW" "$MINIO_KEY" "$MINIO_SECRET" "$CACHE_TOKEN" "$OBS_TOKEN" "$API_TOKEN"; do echo "::add-mask::$v"; done
+          kubectl -n "$APP_NS" create secret generic fm-e2e-pg --from-literal=password="$PG_PW"
+          kubectl -n "$APP_NS" create secret generic fm-e2e-minio --from-literal=access="$MINIO_KEY" --from-literal=secret="$MINIO_SECRET"
+          kubectl -n "$APP_NS" create secret generic fm-e2e-db \
+            --from-literal=DATABASE_URL="postgres://postgres:${PG_PW}@postgres.${APP_NS}.svc.cluster.local:5432/filemanager"
+          kubectl -n "$APP_NS" create secret generic file-manager-credentials \
+            --from-literal=CACHE_INVALIDATE_TOKEN="$CACHE_TOKEN" \
+            --from-literal=OBSERVABILITY_TOKEN="$OBS_TOKEN" \
+            --from-literal=MINIO_ENDPOINT="minio.${APP_NS}.svc.cluster.local" \
+            --from-literal=MINIO_PORT=9000 \
+            --from-literal=MINIO_ACCESS_KEY="$MINIO_KEY" \
+            --from-literal=MINIO_SECRET_KEY="$MINIO_SECRET"
+          kubectl -n "$APP_NS" create secret generic global-tokens --from-literal=file_manager_token="$API_TOKEN"
+          {
+            echo "CACHE_INVALIDATE_TOKEN=$CACHE_TOKEN"
+            echo "OBSERVABILITY_TOKEN=$OBS_TOKEN"
+            echo "MINIO_ACCESS_KEY=$MINIO_KEY"
+            echo "MINIO_SECRET_KEY=$MINIO_SECRET"
+          } >> "$GITHUB_ENV"
+          kubectl apply -f apps/file-manager/platform-e2e/data-plane.yaml
+          kubectl -n "$APP_NS" rollout status deploy/redis deploy/postgres deploy/minio --timeout=180s
+
+      # Through the product: the real CLI builds, pushes the app's own Dockerfile,
+      # resolves the digest and applies the NextApp CR. The operator does the rest.
+      - name: kn-next deploy (config profile for kind)
+        run: |
+          set -euo pipefail
+          cp apps/file-manager/platform-e2e/kn-next.config.e2e.ts apps/file-manager/kn-next.config.ts
+          cd apps/file-manager
+          node ../../packages/kn-next/dist/cli/kn-next.js deploy \
+            --registry localhost:5001 --namespace "$APP_NS" --tag "${GITHUB_RUN_ID}"
+          kubectl -n "$APP_NS" wait --for=condition=Ready --timeout=300s nextapp/file-manager \
+            || (kubectl -n "$APP_NS" get nextapp,ksvc,pods -o wide; kubectl -n "$APP_NS" describe nextapp file-manager; exit 1)
+
+      - name: Reach the cluster (Kourier + MinIO port-forwards)
+        run: |
+          set -euo pipefail
+          kubectl -n kourier-system port-forward svc/kourier 8080:80 >/tmp/pf-kourier.log 2>&1 &
+          kubectl -n "$APP_NS" port-forward svc/minio 9000:9000 >/tmp/pf-minio.log 2>&1 &
+          for i in $(seq 1 30); do
+            if (exec 3<>/dev/tcp/127.0.0.1/8080) 2>/dev/null && (exec 3<>/dev/tcp/127.0.0.1/9000) 2>/dev/null; then exit 0; fi
+            sleep 1
+          done
+          echo "::error::port-forwards never came up"; cat /tmp/pf-*.log; exit 1
+
+      - name: Platform e2e (A app / B platform / C basics)
+        env:
+          PLATFORM_E2E_BASE_URL: http://127.0.0.1:8080
+          PLATFORM_E2E_NAMESPACE: ${{ env.APP_NS }}
+          PLATFORM_E2E_SCRAPE_NAMESPACE: ${{ env.SCRAPE_NS }}
+          KN_NEXT_CLI: ${{ github.workspace }}/packages/kn-next/dist/cli/kn-next.js
+          APP_DIR: ${{ github.workspace }}/apps/file-manager
+          MINIO_LOCAL_ENDPOINT: http://127.0.0.1:9000
+        run: |
+          export PLATFORM_E2E_SUMMARY="$GITHUB_STEP_SUMMARY"
+          node apps/file-manager/scripts/platform-e2e.mjs
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          kubectl get nextapp,ksvc,pods,events -A -o wide 2>&1 | tail -150 || true
+          kubectl -n "$APP_NS" logs -l serving.knative.dev/service=file-manager -c user-container --tail=100 2>&1 || true
+          kubectl -n kn-next-operator-system logs deploy/kn-next-operator-controller-manager --tail=100 2>&1 || true
+
+      - name: Tear down
+        if: always()
+        run: |
+          kind delete cluster --name "$CLUSTER" || true
+          docker rm -f kind-registry || true
+
+  # One pinned issue, comment-don't-spam. A dispatch experiment never files.
+  nightly-red-alert:
+    name: Nightly red alert (pinned issue)
+    needs: [platform-e2e]
+    if: >-
+      always() &&
+      github.event_name == 'schedule' &&
+      needs.platform-e2e.result == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Create or update the "File-manager platform e2e nightly RED" issue (idempotent)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title='File-manager platform e2e nightly RED'
+          body="The nightly file-manager platform e2e FAILED.
+
+          - Run: ${RUN_URL}
+
+          It deploys file-manager through \`kn-next deploy\` -> operator -> Knative on kind and checks app flows, platform features and deployment basics. Open the run's job summary for the per-check table. Fix the regression, re-run via workflow_dispatch to confirm green, then close this issue."
+          existing="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 100 \
+            --json number,title \
+            --jq "[.[] | select(.title == \"${title}\")][0].number // empty")"
+          if [ -n "${existing}" ]; then
+            gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
+          else
+            new_url="$(gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}")"
+            gh issue pin "${new_url##*/}" --repo "${GITHUB_REPOSITORY}" || echo "::warning::could not pin (non-fatal)"
+          fi

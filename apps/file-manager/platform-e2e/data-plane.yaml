@@ -1,0 +1,83 @@
+# Throwaway data plane for the nightly platform e2e (#1282). Every image is
+# digest-pinned. Credentials are NOT here: the workflow creates the Secrets
+# (`fm-e2e-pg`, `fm-e2e-minio`) with `kubectl create secret` from per-run random
+# values.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: redis, namespace: fm-e2e }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: redis } }
+  template:
+    metadata: { labels: { app: redis } }
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+          ports: [{ containerPort: 6379 }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: redis, namespace: fm-e2e }
+spec:
+  selector: { app: redis }
+  ports: [{ port: 6379 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: postgres, namespace: fm-e2e }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: postgres } }
+  template:
+    metadata: { labels: { app: postgres } }
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+          env:
+            - name: POSTGRES_DB
+              value: filemanager
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: fm-e2e-pg, key: password } }
+          ports: [{ containerPort: 5432 }]
+          readinessProbe:
+            exec: { command: [pg_isready, -U, postgres, -d, filemanager] }
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata: { name: postgres, namespace: fm-e2e }
+spec:
+  selector: { app: postgres }
+  ports: [{ port: 5432 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: minio, namespace: fm-e2e }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: minio } }
+  template:
+    metadata: { labels: { app: minio } }
+    spec:
+      containers:
+        - name: minio
+          image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
+          args: [server, /data]
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom: { secretKeyRef: { name: fm-e2e-minio, key: access } }
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: fm-e2e-minio, key: secret } }
+          ports: [{ containerPort: 9000 }]
+          readinessProbe:
+            httpGet: { path: /minio/health/ready, port: 9000 }
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata: { name: minio, namespace: fm-e2e }
+spec:
+  selector: { app: minio }
+  ports: [{ port: 9000 }]
