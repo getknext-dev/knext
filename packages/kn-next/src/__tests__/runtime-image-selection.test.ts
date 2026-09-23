@@ -29,9 +29,11 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { packageRoot } from "../cli/create";
 import {
     dockerBuildxArgs,
     dockerignoreExcludes,
+    isKnownGoodTemplateDockerfile,
     type RuntimeImageConfig,
     runtimeStandaloneTemplateDir,
     STANDALONE_DOCKERFILE_NAME,
@@ -608,5 +610,64 @@ describe("dockerignoreExcludes — the evaluator the staging guard relies on", (
         const content = ".env.*\n";
         expect(dockerignoreExcludes(content, ".env.local")).toBe(true);
         expect(dockerignoreExcludes(content, ".environment")).toBe(false);
+    });
+});
+
+describe("isKnownGoodTemplateDockerfile — scopes verifyBuiltImageLockstep to Dockerfiles that might rebuild in-image (#1283 round 2)", () => {
+    const templateDir = join(packageRoot(), "templates", "app");
+
+    it("the UNMODIFIED scaffolded vinext Dockerfile is known-good (COPIES host artifacts)", () => {
+        const ctx = tmp();
+        const dockerfile = join(ctx, "Dockerfile");
+        writeFileSync(
+            dockerfile,
+            readFileSync(join(templateDir, "Dockerfile.hbs")),
+        );
+        expect(isKnownGoodTemplateDockerfile(dockerfile)).toBe(true);
+    });
+
+    it("the UNMODIFIED Dockerfile.vinext-node template is known-good", () => {
+        const ctx = tmp();
+        const dockerfile = join(ctx, "Dockerfile.vinext-node");
+        writeFileSync(
+            dockerfile,
+            readFileSync(
+                join(templateDir, `${VINEXT_NODE_DOCKERFILE_NAME}.hbs`),
+            ),
+        );
+        expect(isKnownGoodTemplateDockerfile(dockerfile)).toBe(true);
+    });
+
+    it("apps/file-manager/Dockerfile (rebuilds in-image) is NOT known-good", () => {
+        // Anchored on the real file — this is precisely the Dockerfile the bug
+        // was found on, and it must never silently start skipping the guard.
+        const realFileManagerDockerfile = join(
+            packageRoot(),
+            "..",
+            "..",
+            "apps",
+            "file-manager",
+            "Dockerfile",
+        );
+        expect(isKnownGoodTemplateDockerfile(realFileManagerDockerfile)).toBe(
+            false,
+        );
+    });
+
+    it("a single-byte edit of the template is NOT known-good — conservative, not fuzzy-matched", () => {
+        const ctx = tmp();
+        const dockerfile = join(ctx, "Dockerfile");
+        const template = readFileSync(
+            join(templateDir, "Dockerfile.hbs"),
+            "utf8",
+        );
+        writeFileSync(dockerfile, `${template}\n# a user comment\n`);
+        expect(isKnownGoodTemplateDockerfile(dockerfile)).toBe(false);
+    });
+
+    it("a nonexistent Dockerfile is NOT known-good (never throws)", () => {
+        expect(
+            isKnownGoodTemplateDockerfile(join(tmp(), "does-not-exist")),
+        ).toBe(false);
     });
 });

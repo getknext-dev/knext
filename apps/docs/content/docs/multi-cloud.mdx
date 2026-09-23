@@ -98,5 +98,23 @@ add the two lines above. Without them:
 - the image's build id diverges from the deploy tag, breaking [skew protection](/docs/skew-protection)
   and the asset-retention cleanup that key off it.
 
-`kn-next deploy` checks the built image for this after every in-image build that uploads assets, and
-fails the deploy with a clear message before touching the cluster if the two are out of lock-step.
+### The post-build check, its scope, and the opt-out
+
+For a Dockerfile that rebuilds in-image and uploads assets, `kn-next deploy` checks the ACTUAL
+pushed image after the build — not just your Dockerfile's `ARG` declarations, which can be present
+and unused. It briefly extracts the image's server artifact and static output (`docker create` /
+`docker cp`, no traffic ever served) and confirms the static build namespace matches the deploy
+tag, and — in storage mode — that the server artifact really does reference your configured
+`ASSET_PREFIX`. A mismatch fails the deploy with a clear message before touching the cluster.
+
+This check runs **only** for a Dockerfile that both rebuilds in-image and differs from the
+scaffolded template — the unmodified scaffolded `Dockerfile`/`Dockerfile.vinext-node` (which copy
+already-built host output, so there is nothing to catch) are skipped automatically, at no extra
+cost to every other deploy.
+
+The check assumes your custom Dockerfile follows the same layout the scaffolded templates use — the
+compiled server at `/app/server`, or the uncompiled entry at `/app/.output/server/index.mjs`. If
+your image's layout genuinely differs and the check reports a false failure, pass
+`--skip-image-lockstep-check` to `kn-next deploy` to opt out. Understand the tradeoff before you
+do: skipping it means the CLI can no longer catch a broken `ASSET_PREFIX`/build-id lock-step before
+it reaches your cluster.

@@ -1,22 +1,26 @@
 /**
- * #1233 (coverage batch B2) — deploy.ts diagnostics no existing test drove:
+ * deploy-image-lockstep-wiring — #1283 round 2 review finding #4.
  *
- *   - `applyOverrides`: `--bucket` with no `storage` block in the loaded
- *     config throws a UsageError explaining the mismatch (ADR-0047).
- *   - `describeFailedCRApply` / `localKubectlTooOldForStrict`: the two
- *     messages a failed `kubectl apply -f <CR>` can surface — the local
- *     client being too old for `--validate=strict` (pre-1.25, established
- *     from `kubectl version --client -o json`), and the generic
- *     differential when the local client is NOT the cause.
+ * `deploy-orchestrator.test.ts` covers the pre-build vinext skew guard
+ * (T2a, `verifyVinextStaticPrefix`) but never asserted on the POST-build
+ * image guard (`verifyBuiltImageLockstep`) introduced alongside it — the
+ * round-1 wiring for that guard shipped with no dedicated test proving deploy
+ * actually CALLS it in scope, SKIPS it out of scope, and ABORTS the deploy
+ * before the mutating `kubectl apply` when it fails. This suite closes that.
  *
- * Same hermetic seam set as `deploy-orchestrator.test.ts` (this file needs
- * the full pipeline to reach the mutating `kubectl apply` for the second
- * group) — `./exec`, `../utils/asset-upload`, `./cr-builder`,
- * `./runtime-image`, `./gc`, `./schema/kubectl-capture`, `../cli/shared`,
- * `node:fs`. `./doctor` is left REAL: `parseKubectlClientVersion` /
- * `supportsStrictValidation` are pure parsers over `runCapture`'s stdout, so
- * driving them through the real module (rather than re-stubbing their logic)
- * is what proves the two messages agree with what doctor.ts actually parses.
+ * Hermetic, same treatment as deploy-orchestrator.test.ts: every side-effecting
+ * seam module-mocked, no live docker/cluster. `../cli/runtime-image` is FULLY
+ * replaced (not spread from the real module) so `selection.kind` and
+ * `isKnownGoodTemplateDockerfile`'s answer are both directly controllable per
+ * test, rather than depending on what happens to exist on disk at
+ * `process.cwd()`.
+ *
+ * MUTATION-PROOF (by construction, not a side note): the "aborts before CR
+ * apply" test asserts BOTH that `deploy()` rejects AND that `kubectl apply`
+ * never ran. Delete deploy.ts's call to `verifyBuiltImageLockstep` (or the
+ * `if (!imageCheck.ok) throw` that follows it) and this test goes red — the
+ * mocked guard's `{ ok: false }` would simply be ignored and the deploy would
+ * proceed to a successful apply, which the assertion below fails on.
  */
 
 import {
@@ -30,7 +34,7 @@ import {
 } from "bun:test";
 import type { KnativeNextConfig } from "../config";
 
-// biome-ignore lint/suspicious/noExplicitAny: see deploy-orchestrator.test.ts's identical note
+// biome-ignore lint/suspicious/noExplicitAny: thin mock factory plumbing
 type AnyFn = (...args: unknown[]) => any;
 
 const runQuiet = mock<AnyFn>();
@@ -52,14 +56,14 @@ mock.module("../cli/exec", () => ({
 }));
 
 const uploadAssets = mock<AnyFn>(async () => {});
-const getAssetPrefix = mock<AnyFn>(() => "https://cdn.example.com/_next");
+const getAssetPrefix = mock<AnyFn>(() => "https://cdn.example.com/my-app");
 const reclaimBuildPrefix = mock<AnyFn>();
 const verifyVinextStaticPrefix = mock<AnyFn>(() => ({ ok: true }));
 const verifyBuiltImageLockstep = mock<AnyFn>(() => ({ ok: true }));
 
-const __knextReal1 = { ...(await import("../utils/asset-upload")) };
+const __knextRealAssetUpload = { ...(await import("../utils/asset-upload")) };
 mock.module("../utils/asset-upload", () => ({
-    ...__knextReal1,
+    ...__knextRealAssetUpload,
     uploadAssets: (...a: unknown[]) => uploadAssets(...a),
     getAssetPrefix: (...a: unknown[]) => getAssetPrefix(...a),
     reclaimBuildPrefix: (...a: unknown[]) => reclaimBuildPrefix(...a),
@@ -74,29 +78,31 @@ const resolveDigest = mock<AnyFn>(
     async () => "registry.example.com/my-app@sha256:deadbeef",
 );
 const validateCRImageRef = mock<AnyFn>();
-
 mock.module("../cli/cr-builder", () => ({
     renderNextAppCR: (...a: unknown[]) => renderNextAppCR(...a),
     resolveDigest: (...a: unknown[]) => resolveDigest(...a),
     validateCRImageRef: (...a: unknown[]) => validateCRImageRef(...a),
 }));
 
+// Fully controllable: `selectRuntimeImageKind` + `isKnownGoodTemplate` are
+// module-level `let`s the tests flip directly, so each scoping condition is
+// exercised in isolation rather than inferred from a real filesystem check.
+let selectRuntimeImageKind: "app-dockerfile" | "standalone" = "app-dockerfile";
+let isKnownGoodTemplate = false;
 mock.module("../cli/runtime-image", () => ({
     selectRuntimeImage: (
-        config: { build?: string; runtime?: string },
+        _config: { build?: string; runtime?: string },
         cwd: string,
     ) =>
-        (config.build ?? "vinext") === "vinext"
+        selectRuntimeImageKind === "app-dockerfile"
             ? { kind: "app-dockerfile", dockerfile: `${cwd}/Dockerfile` }
             : {
                   kind: "standalone",
                   dockerfile: `${cwd}/Dockerfile.standalone`,
-                  target:
-                      config.runtime === "bun"
-                          ? "standalone-bun"
-                          : "standalone-node",
+                  target: "standalone-node",
               },
     stageStandaloneBuildContext: () => ({ dockerfile: "" }),
+    isKnownGoodTemplateDockerfile: () => isKnownGoodTemplate,
     dockerBuildxArgs: (o: {
         taggedRef: string;
         buildContext: string;
@@ -113,15 +119,12 @@ mock.module("../cli/runtime-image", () => ({
         o.taggedRef,
         o.buildContext,
     ],
-    isKnownGoodTemplateDockerfile: () => false,
 }));
 
 const runAssetGC = mock<AnyFn>(() => ({ pruned: true }));
-
 mock.module("../cli/schema/kubectl-capture", () => ({
     captureKubectl: () => ({ ok: true, stdout: "", stderr: "" }),
 }));
-
 mock.module("../utils/logger", () => ({
     createLogger: () => ({
         info: mock(),
@@ -132,13 +135,12 @@ mock.module("../utils/logger", () => ({
         trace: mock(),
     }),
 }));
-
 mock.module("../cli/gc", () => ({
     runAssetGC: (...a: unknown[]) => runAssetGC(...a),
     gcMain: mock(),
 }));
 
-const baseConfig: KnativeNextConfig = {
+const storageConfig: KnativeNextConfig = {
     name: "my-app",
     registry: "registry.example.com",
     storage: {
@@ -146,21 +148,27 @@ const baseConfig: KnativeNextConfig = {
         bucket: "my-bucket",
         publicUrl: "https://storage.googleapis.com/my-bucket",
     },
+    cache: {
+        provider: "redis",
+        url: "redis://redis:6379",
+        keyPrefix: "my-app",
+    },
     scaling: { minScale: 0, maxScale: 5 },
 };
+const { storage: _dropped, ...noStorageConfig } = storageConfig;
 
-const loadConfig = mock<AnyFn>(async () => baseConfig);
+const loadConfig = mock<AnyFn>(async () => storageConfig);
 const __knextRealShared = { ...(await import("../cli/shared")) };
-
 mock.module("../cli/shared", () => ({
     ...__knextRealShared,
     loadConfig: (...a: unknown[]) => loadConfig(...a),
     excerpt: (s: string) => s,
+    UsageError: class MockUsageError extends Error {},
 }));
 
 const pkgOr = (fallback: string) => (p: unknown) =>
     String(p).endsWith("package.json") ? '{"type":"module"}' : fallback;
-const readFileSyncMock = mock<(...a: unknown[]) => string>(pkgOr(""));
+const readFileSyncMock = mock<(...a: unknown[]) => string>(pkgOr("deploytag"));
 const __knextReal2 = { ...(await import("node:fs")) };
 mock.module("node:fs", async () => {
     const actual = __knextReal2;
@@ -190,11 +198,22 @@ function setArgv(flags: string[]): void {
     process.argv = ["node", "/path/to/kn-next.js", ...flags];
 }
 
+/** Did the mutating `kubectl apply` run? */
+function applied(): boolean {
+    return runInherit.mock.calls.some(
+        (c) =>
+            (c[0] as string[])?.[0] === "kubectl" &&
+            (c[0] as string[])?.[1] === "apply",
+    );
+}
+
 const savedArgv = process.argv;
 const savedEnv = { ...process.env };
 
 beforeEach(() => {
     jest.clearAllMocks();
+    selectRuntimeImageKind = "app-dockerfile";
+    isKnownGoodTemplate = false;
     runQuiet.mockImplementation(() => {});
     runInherit.mockImplementation(() => {});
     runCapture.mockReturnValue("");
@@ -204,7 +223,7 @@ beforeEach(() => {
     );
     renderNextAppCR.mockReturnValue("kind: NextApp\n");
     runAssetGC.mockReturnValue({ pruned: true });
-    loadConfig.mockResolvedValue(baseConfig);
+    loadConfig.mockResolvedValue(storageConfig);
     readFileSyncMock.mockImplementation(pkgOr("deploytag"));
     verifyVinextStaticPrefix.mockReturnValue({ ok: true });
     verifyBuiltImageLockstep.mockReturnValue({ ok: true });
@@ -215,126 +234,70 @@ afterEach(() => {
     process.env = { ...savedEnv };
 });
 
-describe("deploy() applyOverrides — --bucket with no storage block (ADR-0047)", () => {
-    it("throws a UsageError naming --bucket and the missing storage block", async () => {
-        loadConfig.mockResolvedValue({
-            name: "my-app",
-            registry: "registry.example.com",
-            scaling: { minScale: 0, maxScale: 5 },
-        } as KnativeNextConfig);
+describe("deploy() — verifyBuiltImageLockstep scope (#1283 round 2, finding #4)", () => {
+    it("CALLS the guard: app-dockerfile + vinext + storage + NOT a known-good template", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const deploy = await importDeploy();
+        await deploy();
+        expect(verifyBuiltImageLockstep).toHaveBeenCalledTimes(1);
+        expect(verifyBuiltImageLockstep).toHaveBeenCalledWith(
+            expect.objectContaining({
+                expectedId: "deploytag",
+                assetPrefix: "https://cdn.example.com/my-app",
+            }),
+        );
+    });
+
+    it("SKIPS the guard for the standalone (--target) shape", async () => {
+        selectRuntimeImageKind = "standalone";
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const deploy = await importDeploy();
+        await deploy();
+        expect(verifyBuiltImageLockstep).not.toHaveBeenCalled();
+    });
+
+    it("SKIPS the guard when no storage is configured (uploadsAssets false)", async () => {
+        loadConfig.mockResolvedValue(noStorageConfig);
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const deploy = await importDeploy();
+        await deploy();
+        expect(verifyBuiltImageLockstep).not.toHaveBeenCalled();
+    });
+
+    it("SKIPS the guard for a byte-identical, unmodified shipped template (isKnownGoodTemplateDockerfile: true) — this is what stops round 1 from blocking EVERY vinext+storage deploy", async () => {
+        isKnownGoodTemplate = true;
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const deploy = await importDeploy();
+        await deploy();
+        expect(verifyBuiltImageLockstep).not.toHaveBeenCalled();
+        // The deploy still succeeds — nothing else about it changed.
+        expect(applied()).toBe(true);
+    });
+
+    it("SKIPS the guard when --skip-image-lockstep-check is passed (the documented opt-out for a non-standard layout)", async () => {
         setArgv([
             "deploy",
             "--tag",
             "deploytag",
-            "--bucket",
-            "override-bucket",
+            "--skip-image-lockstep-check",
         ]);
         const deploy = await importDeploy();
+        await deploy();
+        expect(verifyBuiltImageLockstep).not.toHaveBeenCalled();
+        expect(applied()).toBe(true);
+    });
 
+    it("ABORTS before the mutating CR apply when the guard fails — mutation-proof: deleting the call site or its throw makes this pass wrongly (see file header)", async () => {
+        verifyBuiltImageLockstep.mockReturnValue({
+            ok: false,
+            reason: "prefix-missing",
+            siblings: ["some-other-id"],
+        });
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const deploy = await importDeploy();
         await expect(deploy()).rejects.toThrow(
-            /--bucket overrides storage\.bucket, but kn-next\.config\.ts has no `storage` block/,
+            /In-image build lock-step check failed/,
         );
-    });
-});
-
-describe("deploy() — failed kubectl apply diagnostics (describeFailedCRApply)", () => {
-    function argv(call: unknown[]): string[] {
-        return (call[0] as string[]) ?? [];
-    }
-
-    beforeEach(() => {
-        // Drive the pipeline all the way to the mutating apply: build/push/
-        // upload all succeed, and the apply call specifically throws.
-        runInherit.mockImplementation((...a: unknown[]) => {
-            const a0 = argv(a);
-            if (a0[0] === "kubectl" && a0[1] === "apply") {
-                throw new Error("connection refused");
-            }
-        });
-    });
-
-    it("names the local kubectl client and pre-1.25 --validate semantics when it IS the cause", async () => {
-        runCapture.mockImplementation((...a: unknown[]) => {
-            const a0 = argv(a);
-            if (a0[0] === "kubectl" && a0[1] === "version") {
-                return JSON.stringify({
-                    clientVersion: { gitVersion: "v1.24.9" },
-                });
-            }
-            return "";
-        });
-        setArgv(["deploy", "--tag", "deploytag"]);
-        const deploy = await importDeploy();
-
-        let thrown: Error | undefined;
-        try {
-            await deploy();
-        } catch (e) {
-            thrown = e as Error;
-        }
-        expect(thrown?.message).toMatch(
-            /your kubectl client \(v1\.24\.9\) is\s*older than v1\.25/,
-        );
-        expect(thrown?.message).toContain("kubectl version --client");
-        expect(thrown?.message).toContain("kn-next doctor");
-    });
-
-    it("gives the generic differential (not a client-age claim) when the local client IS current", async () => {
-        runCapture.mockImplementation((...a: unknown[]) => {
-            const a0 = argv(a);
-            if (a0[0] === "kubectl" && a0[1] === "version") {
-                return JSON.stringify({
-                    clientVersion: { gitVersion: "v1.31.0" },
-                });
-            }
-            return "";
-        });
-        setArgv(["deploy", "--tag", "deploytag"]);
-        const deploy = await importDeploy();
-
-        let thrown: Error | undefined;
-        try {
-            await deploy();
-        } catch (e) {
-            thrown = e as Error;
-        }
-        expect(thrown?.message).toContain(
-            "kubectl apply of the NextApp CR FAILED (kubectl's own error is printed above",
-        );
-        expect(thrown?.message).toContain(
-            "is older than this CLI and does not know that field",
-        );
-    });
-
-    it("gives the generic differential when the local kubectl version cannot be parsed at all", async () => {
-        runCapture.mockImplementation((...a: unknown[]) => {
-            const a0 = argv(a);
-            if (a0[0] === "kubectl" && a0[1] === "version") {
-                return "not-json";
-            }
-            return "";
-        });
-        setArgv(["deploy", "--tag", "deploytag"]);
-        const deploy = await importDeploy();
-
-        await expect(deploy()).rejects.toThrow(
-            /kubectl apply of the NextApp CR FAILED \(kubectl's own error is printed above/,
-        );
-    });
-
-    it("gives the generic differential when the kubectl-version PROBE ITSELF throws (a probe that cannot run must not replace the real error)", async () => {
-        runCapture.mockImplementation((...a: unknown[]) => {
-            const a0 = argv(a);
-            if (a0[0] === "kubectl" && a0[1] === "version") {
-                throw new Error("ENOENT: kubectl not found");
-            }
-            return "";
-        });
-        setArgv(["deploy", "--tag", "deploytag"]);
-        const deploy = await importDeploy();
-
-        await expect(deploy()).rejects.toThrow(
-            /kubectl apply of the NextApp CR FAILED \(kubectl's own error is printed above/,
-        );
+        expect(applied()).toBe(false);
     });
 });

@@ -142,6 +142,51 @@ function stageLiteralTemplate(src: string, dest: string): boolean {
 }
 
 /**
+ * True when `dockerfilePath`'s content is BYTE-IDENTICAL to one of the two
+ * shipped `app-dockerfile` templates (the scaffolded single-stage vinext
+ * `Dockerfile`, or `Dockerfile.vinext-node`) — i.e. it `COPY`s host-built
+ * artifacts rather than rebuilding the app inside the image (#1283). Both
+ * templates are staged LITERALLY (`stageLiteralTemplate` throws on an
+ * unsubstituted `{{ }}`, see above), so an exact match is a real invariant,
+ * not a heuristic.
+ *
+ * Used to SCOPE the post-build image lock-step check
+ * (`verifyBuiltImageLockstep`) to Dockerfiles that might actually need it: the
+ * host build already had `ASSET_PREFIX`/`NEXT_DEPLOYMENT_ID` in its env before
+ * either template's build step ran (a host `next build`/`vite build`) or its
+ * artifacts were compiled/copied, so there is nothing for that check to catch
+ * on an unmodified template — paying its cost (a docker extract) on every
+ * such deploy would be pure overhead. ANY deviation from either template byte
+ * — a user's own Dockerfile, or an edited copy — returns `false`: the
+ * conservative default is "might rebuild in-image, might need the check", not
+ * "looks close enough to skip it".
+ *
+ * Never throws: a Dockerfile that cannot be read (or a missing/relocated
+ * template — this only runs from an installed `@getknext/core`, so the
+ * template ships beside this code) is NOT "known good" either.
+ */
+export function isKnownGoodTemplateDockerfile(dockerfilePath: string): boolean {
+    let userContent: string;
+    try {
+        userContent = readFileSync(dockerfilePath, "utf-8");
+    } catch {
+        return false;
+    }
+    const templateDir = join(packageRoot(), "templates", "app");
+    const candidates = [
+        join(templateDir, "Dockerfile.hbs"),
+        join(templateDir, `${VINEXT_NODE_DOCKERFILE_NAME}.hbs`),
+    ];
+    return candidates.some((tpl) => {
+        try {
+            return readFileSync(tpl, "utf-8") === userContent;
+        } catch {
+            return false;
+        }
+    });
+}
+
+/**
  * Select the runtime image for a build.
  *
  * vinext (the ADR-0048 default — an absent `build` means vinext) uses the

@@ -821,29 +821,21 @@ export function verifyVinextStaticPrefix(
 }
 
 /**
- * True when at least one file under `dir` contains `needle` as a literal
- * substring. Used to prove `ASSET_PREFIX` actually reached the in-image build
- * (#1283) rather than trusting a Dockerfile's `ARG` declaration, which can be
- * present and unused (declared but never exported into the build step's env,
- * set in the wrong stage, or overwritten). Recurses depth-first; skips
- * anything it cannot read as UTF-8 (binary assets — fonts, images — cannot
- * embed a URL string usefully anyway, and a read error there must not abort
- * the scan).
+ * True when `file`'s BYTES contain `needle` (an ASCII/UTF-8 literal, e.g. a
+ * configured URL) as a substring. Buffer-based, not a UTF-8 string decode:
+ * the compiled vinext SERVER binary this now reads (see
+ * {@link verifyBuiltImageLockstep}) is a `bun build --compile` executable —
+ * mostly non-text bytes — and a plain ASCII run inside otherwise-binary data
+ * still decodes correctly even where surrounding bytes do not, but comparing
+ * raw bytes avoids relying on that. Returns `false` (never throws) on a read
+ * failure — an unreadable/missing candidate is not a match.
  */
-function treeContainsLiteral(dir: string, needle: string): boolean {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        const full = join(dir, entry.name);
-        if (entry.isDirectory()) {
-            if (treeContainsLiteral(full, needle)) return true;
-            continue;
-        }
-        try {
-            if (readFileSync(full, "utf-8").includes(needle)) return true;
-        } catch {
-            // Unreadable / non-UTF-8 file — not a match, not a failure.
-        }
+function fileContainsLiteral(file: string, needle: string): boolean {
+    try {
+        return readFileSync(file).includes(Buffer.from(needle, "utf-8"));
+    } catch {
+        return false;
     }
-    return false;
 }
 
 export type ImageLockstepCheck =
@@ -862,22 +854,56 @@ export type ImageLockstepCheck =
  * Proves the ADR-0011 build-id/asset-prefix lock-step against the ACTUAL
  * pushed image, not the Dockerfile's source text (#1283). A text-only check
  * ("does the Dockerfile declare `ARG ASSET_PREFIX`?") is satisfiable while
- * still wrong — the ARG can be declared and never passed into the build step,
- * set in the wrong stage, or clobbered — so this extracts the image's own
- * `/app/.output/public` (the convention every knext `app-dockerfile` recipe
- * ships to — the scaffolded vinext `Dockerfile`, `Dockerfile.vinext-node`, and
- * `apps/file-manager/Dockerfile` alike) via `docker create` + `docker cp`,
- * exactly the way {@link verifyVinextStaticPrefix} checks the host build:
+ * still wrong — the ARG can be declared and never passed into the build
+ * step's env, set in the wrong stage, or clobbered.
  *
- *   1. the static namespace `_next/static/<expectedId>/` must exist — proves
- *      `NEXT_DEPLOYMENT_ID` reached the in-image `next build`/nitro build;
- *   2. when `assetPrefix` is configured (storage mode), at least one built
- *      file must literally contain it — proves `ASSET_PREFIX` was baked in,
- *      not silently dropped.
+ * **Where each value actually lands, and why the check reads two different
+ * artifacts for the two halves (round 2, #1283 review).** Round 1 grepped
+ * `.output/public` for the configured `assetPrefix` and would have FAILED
+ * EVERY real vinext deploy, storage-mode or not: reading vinext
+ * 1.0.0-beta.8's own compiled server-entry source
+ * (`vinext/dist/entries/app-rsc-entry.js`) shows `assetPrefix` baked as
+ * `export const __assetPrefix = ${JSON.stringify(assetPrefix)}` into the
+ * SERVER entry (`.output/server/index.mjs`, then embedded whole into the
+ * `bun build --compile` binary) — never into the client-served
+ * `.output/public` tree the round-1 check inspected. Proven against a REAL
+ * vinext build (not a hand-made fixture): `examples/bun-exec` built with
+ * `ASSET_PREFIX`/`NEXT_DEPLOYMENT_ID` set embeds the literal in
+ * `.output/server/_ssr/{ssr,rsc}.mjs` and, after `bun build --compile`, in
+ * the compiled binary's own bytes (`grep -a` finds it directly). The
+ * build-id/static-prefix half is UNAFFECTED by this — `_next/static/<id>/`
+ * is real static output the build tool writes under `.output/public`, not
+ * something the server embeds, so it stays checked there, matching the HOST
+ * leg (`verifyVinextStaticPrefix`) exactly.
  *
- * Runs AFTER the `docker buildx build --push`, BEFORE the CR apply — a failure
- * here aborts the deploy exactly where `verifyVinextStaticPrefix` aborts it for
- * the host leg, never after the cluster write (ADR-0001).
+ * So: `docker create --platform linux/amd64` (OKE is amd64; without the
+ * platform flag this fails outright on an arm64 Docker host — "no matching
+ * manifest for linux/arm64/v8") + `docker cp` extracts the whole `/app` tree
+ * once, then:
+ *
+ *   1. `_next/static/<expectedId>/` must exist under `app/.output/public` —
+ *      proves `NEXT_DEPLOYMENT_ID` reached the in-image build;
+ *   2. when `assetPrefix` is configured (storage mode), the SERVER artifact's
+ *      bytes must contain it literally — `app/server` (the compiled
+ *      single-executable, the vinext×bun `app-dockerfile` shape) if present,
+ *      else `app/.output/server/index.mjs` (the vinext×node shape, run
+ *      uncompiled by `node`) — proving `ASSET_PREFIX` was baked in, not
+ *      silently dropped. Neither present is `image-extract-failed`: an
+ *      unrecognised server layout is exactly the case
+ *      `--skip-image-lockstep-check` (deploy.ts) exists for.
+ *
+ * Runs AFTER the `docker buildx build --push`, BEFORE the CR apply — a
+ * failure here aborts the deploy exactly where `verifyVinextStaticPrefix`
+ * aborts it for the host leg, never after the cluster write (ADR-0001).
+ *
+ * SCOPE (deploy.ts): only called for a Dockerfile that is NOT
+ * byte-identical to a shipped template (`isKnownGoodTemplateDockerfile`,
+ * runtime-image.ts) — the scaffolded `Dockerfile`/`Dockerfile.vinext-node`
+ * `COPY` host-built artifacts, so the host build already had both env vars
+ * before either compiled or was copied; there is nothing for this check to
+ * catch there, and paying a `docker cp` on every such deploy is pure
+ * overhead this function itself has no way to avoid — the caller must skip
+ * it.
  */
 export function verifyBuiltImageLockstep(opts: {
     taggedRef: string;
@@ -888,35 +914,46 @@ export function verifyBuiltImageLockstep(opts: {
     let containerId: string | undefined;
     try {
         try {
-            containerId = runCapture(["docker", "create", opts.taggedRef]);
-        } catch {
-            return { ok: false, reason: "image-extract-failed", siblings: [] };
-        }
-        const publicDir = join(workDir, "public");
-        try {
-            runQuiet([
+            containerId = runCapture([
                 "docker",
-                "cp",
-                `${containerId}:/app/.output/public`,
-                publicDir,
+                "create",
+                "--platform",
+                "linux/amd64",
+                opts.taggedRef,
             ]);
         } catch {
             return { ok: false, reason: "image-extract-failed", siblings: [] };
         }
+        const appDir = join(workDir, "app");
+        try {
+            runQuiet(["docker", "cp", `${containerId}:/app`, appDir]);
+        } catch {
+            return { ok: false, reason: "image-extract-failed", siblings: [] };
+        }
         const staticCheck = checkStaticPrefixDir(
-            join(publicDir, "_next", "static"),
+            join(appDir, ".output", "public", "_next", "static"),
             opts.expectedId,
         );
         if (!staticCheck.ok) return staticCheck;
-        if (
-            opts.assetPrefix &&
-            !treeContainsLiteral(publicDir, opts.assetPrefix)
-        ) {
-            return {
-                ok: false,
-                reason: "asset-prefix-not-embedded",
-                siblings: [],
-            };
+        if (opts.assetPrefix) {
+            // vinext×bun: the compiled single executable. vinext×node: the
+            // uncompiled server entry `node` runs directly. Try both — the
+            // convention every FIRST-PARTY app-dockerfile recipe ships to —
+            // rather than assume one.
+            const serverCandidates = [
+                join(appDir, "server"),
+                join(appDir, ".output", "server", "index.mjs"),
+            ];
+            const found = serverCandidates.some((f) =>
+                fileContainsLiteral(f, opts.assetPrefix as string),
+            );
+            if (!found) {
+                return {
+                    ok: false,
+                    reason: "asset-prefix-not-embedded",
+                    siblings: [],
+                };
+            }
         }
         return { ok: true };
     } finally {

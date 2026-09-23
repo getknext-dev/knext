@@ -115,6 +115,12 @@ mock.module("../cli/cr-builder", () => ({
     validateCRImageRef: (...a: unknown[]) => validateCRImageRef(...a),
 }));
 
+// #1283 round 2: whether `selection.dockerfile` is a byte-identical,
+// unmodified shipped template — gates the post-build image-lockstep guard.
+// Defaults to `false` (not known-good) so the guard stays reachable/testable
+// by default; individual tests override it to prove the SKIP branch.
+const isKnownGoodTemplateDockerfile = mock<AnyFn>(() => false);
+
 // ADR-0055 runtime-image seam: `deploy` selects the runtime image and, for the
 // standalone shape, STAGES it (writes Dockerfile.standalone + entry + ignore into
 // the build context). That is a real fs side effect this hermetic suite must
@@ -154,6 +160,13 @@ mock.module("../cli/runtime-image", () => ({
         o.taggedRef,
         o.buildContext,
     ],
+    // #1283 round 2: NOT known-good by default — this suite's `Dockerfile`
+    // paths are fake (`${cwd}/Dockerfile`), so the real function would read
+    // nothing there anyway; defaulting to `false` keeps the image-lockstep
+    // guard REACHABLE (and thus verifyBuiltImageLockstep-mockable) exactly
+    // where it already was before this scoping landed.
+    isKnownGoodTemplateDockerfile: (...a: unknown[]) =>
+        isKnownGoodTemplateDockerfile(...a),
 }));
 
 const runAssetGC = mock<AnyFn>(() => ({ pruned: true }));
@@ -323,6 +336,7 @@ beforeEach(() => {
     // ...and on the vinext leg, the built prefix — default: it is there.
     verifyVinextStaticPrefix.mockReturnValue({ ok: true });
     verifyBuiltImageLockstep.mockReturnValue({ ok: true });
+    isKnownGoodTemplateDockerfile.mockReturnValue(false);
 });
 
 afterEach(() => {
