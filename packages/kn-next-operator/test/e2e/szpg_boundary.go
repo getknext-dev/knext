@@ -68,8 +68,12 @@ var AllowedAppDatabaseManagersExact = []string{
 // AllowedAppDatabaseManagerPrefixes are legitimate field-manager prefixes,
 // matched case-insensitively. "kubectl" covers the human/CI setup family
 // (kubectl-client-side-apply / kubectl-create / kubectl-edit / kubectl-patch /
-// kubectl for server-side apply). "scale-zero-pg" is defensive headroom for any
-// szpg component that identifies with the platform name.
+// kubectl for server-side apply) — this is the real work alongside the exact
+// appdb-operator/zone-operator entries. "scale-zero-pg" is INTENTIONAL,
+// currently-INERT headroom: no szpg binary emits it today (their field managers
+// are the base names appdb-operator/zone-operator/gateway/...), so it matches
+// nothing now; it is kept so a future szpg component that identifies with the
+// platform name is not misflagged. It never widens the hole for `manager`.
 var AllowedAppDatabaseManagerPrefixes = []string{
 	"kubectl",
 	"scale-zero-pg",

@@ -55,6 +55,15 @@ operator never reads or writes AppDatabase."*
   behind the `e2e_szpg` build tag (invisible to PR CI). It reads the running
   AppDatabase via `kubectl get -o json` and applies the assertion.
 
+**Scope: this guard is OPERATOR-scope.** It detects the knext **operator** (field
+manager `manager`, since its binary is `/manager` with no explicit FieldOwner)
+writing an AppDatabase — the ADR-0001 boundary that matters, because the operator
+is the single source of truth for cluster state. A knext **CLI** write via
+`kubectl` would be allowlisted under the `kubectl` prefix; that is deliberate and
+harmless here — `kn-next db bind` patches the **NextApp**, never the AppDatabase,
+so no CLI path writes an AppDatabase to begin with. The guard covers the operator
+boundary, not a hypothetical CLI-to-AppDatabase write.
+
 ```sh
 setup-profile-b.sh boundary     # runs the e2e_szpg driver against the live plane
 ```

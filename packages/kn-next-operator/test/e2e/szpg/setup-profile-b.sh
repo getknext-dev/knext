@@ -239,8 +239,10 @@ YAML
   # ASSERT the bind actually took effect on the CR, and the operator reconciled it
   # onto the ksvc as a DATABASE_URL env from the bound secret — proof the knext
   # path ran end to end, not just that the CLI exited 0.
+  # spec.database.secretRef is an OBJECT {name,key} (DatabaseSecretRef), so read
+  # .name — comparing the whole object to a bare secret name would never match.
   local ref
-  ref="$($K -n "$APPDB_NAMESPACE" get nextapp "$APPDB_NAME" -o jsonpath='{.spec.database.secretRef}' 2>/dev/null || true)"
+  ref="$($K -n "$APPDB_NAMESPACE" get nextapp "$APPDB_NAME" -o jsonpath='{.spec.database.secretRef.name}' 2>/dev/null || true)"
   [ "$ref" = "$APPDB_SECRET" ] \
     || die "bind did not set spec.database.secretRef (got '$ref', want '$APPDB_SECRET')"
   log "spec.database.secretRef == $ref (bind took effect)"
