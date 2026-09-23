@@ -155,12 +155,12 @@ export const PER_PATH_THRESHOLDS = {
  * is always still counted here.
  *
  * Measured 2026-09-23 on the merged per-process report plus the generated 0%
- * denominator (the same input the raw floors judge), after coverage batch B1:
+ * denominator (the same input the raw floors judge), after coverage batches B1 and B3:
  *
- *   - global:                  raw 79.03% (10960/13868) → honest **92.42% (9160/9911)**
- *   - packages/kn-next/src/**: raw 78.94% (9945/12598)  → honest **92.34% (8280/8967)**
+ *   - global:                  raw 79.16% (10989/13882) → honest **92.54% (9183/9923)**
+ *   - packages/kn-next/src/**: raw 79.08% (9974/12612)  → honest **92.47% (8303/8979)**
  *
- * 3957 DA records were excluded: punctuation 1933, comment 1334, blank 317,
+ * 3959 DA records were excluded: punctuation 1935, comment 1334, blank 317,
  * type-only 309, template-literal continuation 64. Floors sit at the measured
  * value rounded DOWN to 0.5, per the ratchet convention. Raise them as coverage
  * lands; never lower one to get green.
