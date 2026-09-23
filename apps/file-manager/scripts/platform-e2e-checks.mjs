@@ -189,18 +189,24 @@ export function assertAsset(path, res) {
  * the root layout uses `next/font`, at least one self-hosted `.woff2`.
  * @param {string[]} paths every asset path that was checked
  */
-export function assertAssetCoverage(paths) {
+export function assertAssetCoverage(paths, { quarantinedFonts = 0 } = {}) {
   const exts = new Set(paths.map(extensionOf));
   assert.ok(
     exts.has('.js') || exts.has('.mjs'),
     `no JavaScript asset referenced (saw: ${[...exts].join(', ') || 'none'})`,
   );
   assert.ok(exts.has('.css'), `no stylesheet referenced (saw: ${[...exts].join(', ') || 'none'})`);
+  const fonts = exts.has('.woff2');
   assert.ok(
-    exts.has('.woff2'),
+    fonts || quarantinedFonts > 0,
     `no .woff2 font reached from the page or its CSS — the layout uses next/font (saw: ${[...exts].join(', ')})`,
   );
-  return `${paths.length} assets, types: ${[...exts].sort().join(' ')}`;
+  // A quarantined font is NOT a verified one: it is only counted here as
+  // "unverified", never as coverage.
+  const fontNote = fonts
+    ? ''
+    : `; FONTS UNVERIFIED — all ${quarantinedFonts} font reference(s) are quarantined (#1284), none was verified as served`;
+  return `${paths.length} assets, types: ${[...exts].sort().join(' ')}${fontNote}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -373,6 +379,27 @@ export function assertIsrKeysInRedis({ keys, ttls }) {
     );
   }
   return `${keys.length} ISR key(s), TTLs ${ttls.join(',')}`;
+}
+
+/**
+ * `/observability` is gated by OBSERVABILITY_TOKEN: 401 with no token and with a
+ * wrong one, and the real Overview page with the right one. The positive half
+ * matters: a route that always answered 401 would pass a negative-only check.
+ * @param {{ none: { status: number }, wrong: { status: number }, right: { status: number, text: string, body: Buffer } }} obs
+ */
+export function assertObservabilityAuth({ none, wrong, right }) {
+  assert.equal(none.status, 401, `/observability without a token returned ${none.status}`);
+  assert.equal(wrong.status, 401, `/observability with a wrong token returned ${wrong.status}`);
+  assert.equal(
+    right.status,
+    200,
+    `/observability with the RIGHT token returned ${right.status}, expected 200`,
+  );
+  assert.ok(
+    /<h1[^>]*>\s*Overview\s*<\/h1>/.test(right.text),
+    '/observability with the right token is 200 but is not the Overview page',
+  );
+  return `401 / 401 / 200 (${right.body.length}B Overview page)`;
 }
 
 /**
@@ -584,6 +611,8 @@ export async function checkStaticAssets(request) {
   /** @type {string[]} */
   const evidence = [];
   /** @type {string[]} */
+  const quarantined = [];
+  /** @type {string[]} */
   const pending = [...refs];
   /** @type {Map<string, string>} */
   const origin = new Map(refs.map((r) => [r, 'GET /']));
@@ -606,6 +635,8 @@ export async function checkStaticAssets(request) {
         `${p} now returns HTTP ${res.status}: known defect #1284 (build path leaked into the font URL) looks FIXED. Delete KNOWN_DEFECT_FONT_PATH from platform-e2e-checks.mjs so this asset is checked normally.`,
       );
       evidence.push(`${p}: KNOWN DEFECT #1284 still 404 (build path leaked into the font URL)`);
+      quarantined.push(p);
+      all.delete(p); // quarantined is not verified: it must not count toward coverage
       continue;
     }
     try {
@@ -617,7 +648,17 @@ export async function checkStaticAssets(request) {
     }
     if (extensionOf(p) === '.css') for (const u of extractCssUrls(res.text, p)) enqueue(u, p);
   }
-  return { summary: assertAssetCoverage([...all]), evidence };
+  // The exemption must not outlive its trigger: if NO reference matches the
+  // leaked-path pattern any more (e.g. the URL was rewritten), the exemption is
+  // dead code and must be deleted so fonts are verified normally.
+  assert.ok(
+    quarantined.length > 0,
+    'known defect #1284 exemption is dead: no font reference matches the leaked build-path pattern any more. Delete KNOWN_DEFECT_FONT_PATH from platform-e2e-checks.mjs so fonts are verified normally.',
+  );
+  return {
+    summary: assertAssetCoverage([...all], { quarantinedFonts: quarantined.length }),
+    evidence,
+  };
 }
 
 /** @param {RequestFn} request @param {readonly string[]} [paths] */

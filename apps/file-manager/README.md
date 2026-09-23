@@ -188,8 +188,9 @@ against deliberately broken servers and needs no cluster, so you can run it loca
 A red scheduled run files one pinned issue.
 
 One finding is quarantined rather than skipped: the build leaks the build machine's path into the
-font URL (tracked as an open issue). The check tolerates exactly that URL staying broken and goes red the moment it is
-fixed, so the exemption cannot outlive the bug.
+font URL (tracked as an open issue). **While it is open, fonts are unverified** - the check tolerates
+exactly those URLs being broken, does not count them as covered (the result says `FONTS UNVERIFIED`),
+and goes red if they start being served or stop appearing, so the exemption cannot outlive the bug.
 
 ## Deployment Files
 

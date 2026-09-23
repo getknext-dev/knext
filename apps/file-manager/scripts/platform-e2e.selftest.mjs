@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import {
   assertIsr,
+  assertObservabilityAuth,
   assertRolloutClean,
   assertUploadStored,
   checkImageOptimization,
@@ -26,7 +27,7 @@ import { createClient } from './platform-e2e-http.mjs';
 const TOKEN = 'selftest-token';
 const IMMUTABLE = 'public, max-age=31536000, immutable';
 
-/** @typedef {{ cssType?: string, immutable?: boolean, buffered?: boolean, openInvalidate?: boolean, deadOptimizer?: boolean, bigImage?: boolean, fontLeak?: 'broken' | 'fixed', notChunked?: boolean, jsCache?: string }} Defects */
+/** @typedef {{ cssType?: string, immutable?: boolean, buffered?: boolean, openInvalidate?: boolean, deadOptimizer?: boolean, bigImage?: boolean, fontLeak?: 'broken' | 'fixed' | 'none', noCssFont?: boolean, notChunked?: boolean, jsCache?: string }} Defects */
 
 /** @param {Defects} d */
 function makeServer(d) {
@@ -44,7 +45,7 @@ function makeServer(d) {
       return send(
         200,
         { 'content-type': 'text/html' },
-        `<html><head><link rel="stylesheet" href="/_next/static/a.css">${d.fontLeak ? '<link rel="preload" as="font" href="/home/x/app/.vinext/fonts/h/f.woff2">' : ''}<script src="/_next/static/a.js"></script></head><body>ok</body></html>`,
+        `<html><head><link rel="stylesheet" href="/_next/static/a.css">${d.fontLeak !== 'none' ? '<link rel="preload" as="font" href="/home/x/app/.vinext/fonts/h/f.woff2">' : ''}<script src="/_next/static/a.js"></script></head><body>ok</body></html>`,
       );
     }
     if (url === '/_next/static/a.css') {
@@ -54,7 +55,7 @@ function makeServer(d) {
           'content-type': d.cssType ?? 'text/css',
           'cache-control': d.immutable === false ? 'public, max-age=0' : IMMUTABLE,
         },
-        '@font-face{src:url(/_next/static/f.woff2)}',
+        d.noCssFont ? 'body{}' : '@font-face{src:url(/_next/static/f.woff2)}',
       );
     }
     if (url === '/_next/static/a.js') {
@@ -129,7 +130,7 @@ function makeServer(d) {
 
 /** @param {Defects} d @param {(request: import('./platform-e2e-checks.mjs').RequestFn) => Promise<unknown>} fn */
 async function against(d, fn) {
-  const server = makeServer(d);
+  const server = makeServer({ fontLeak: 'broken', ...d });
   await new Promise((r) => server.listen(0, '127.0.0.1', () => r(undefined)));
   const { port } = /** @type {import('node:net').AddressInfo} */ (server.address());
   const { request } = createClient({ baseUrl: `http://127.0.0.1:${port}`, host: 'app.selftest' });
@@ -186,7 +187,31 @@ try {
 } catch (e) {
   report('known defect #1284 tolerated', false, String(e instanceof Error ? e.message : e));
 }
+// The only woff2 files are quarantined ones: passes, but must say fonts are
+// UNVERIFIED and must not count them as coverage.
+try {
+  const seen = [];
+  await against({ noCssFont: true }, async (r) => seen.push(await checkStaticAssets(r)));
+  const ok = /FONTS UNVERIFIED/.test(seen[0].summary) && !/woff2/.test(seen[0].summary);
+  report(
+    'only-quarantined fonts: reported UNVERIFIED, not counted as covered',
+    ok,
+    seen[0].summary,
+  );
+} catch (e) {
+  report('only-quarantined fonts pass', false, String(e instanceof Error ? e.message : e));
+}
 defects.push(
+  [
+    'exemption dead: no leaked font reference left, fonts served normally',
+    { fontLeak: 'none' },
+    'static',
+  ],
+  [
+    'no font at all (nothing quarantined, none served)',
+    { fontLeak: 'none', noCssFont: true },
+    'static',
+  ],
   ['#1284 fixed but exemption not removed', { fontLeak: 'fixed' }, 'static'],
   [
     'broken CSS while #1284 exemption is active',
@@ -215,6 +240,24 @@ function mustThrow(label, fn) {
   report(`RED on: ${label}`, caught, caught ? '' : 'stayed green');
 }
 
+const OVERVIEW = { status: 200, text: '<h1>Overview</h1>', body: Buffer.from('<h1>Overview</h1>') };
+mustThrow('/observability always 401 (right token refused)', () =>
+  assertObservabilityAuth({
+    none: { status: 401 },
+    wrong: { status: 401 },
+    right: { ...OVERVIEW, status: 401 },
+  }),
+);
+mustThrow('/observability open without a token', () =>
+  assertObservabilityAuth({ none: OVERVIEW, wrong: { status: 401 }, right: OVERVIEW }),
+);
+mustThrow('/observability 200 but not the Overview page', () =>
+  assertObservabilityAuth({
+    none: { status: 401 },
+    wrong: { status: 401 },
+    right: { status: 200, text: 'ok', body: Buffer.from('ok') },
+  }),
+);
 mustThrow('ISR read is always a MISS', () =>
   assertIsr({
     reads: [{ cacheState: 'MISS' }, { cacheState: 'MISS' }],

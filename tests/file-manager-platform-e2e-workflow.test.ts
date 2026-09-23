@@ -80,10 +80,22 @@ describe('file-manager platform e2e nightly - wiring', () => {
     expect(text).toMatch(/registry:2\.8\.3@sha256:[0-9a-f]{64}/);
   });
 
+  it('every downloaded cluster manifest is sha256-verified before it is applied', () => {
+    const downloads = [...text.matchAll(/releases\/download\/[^\s"]+\.yaml/g)];
+    expect(downloads.length).toBe(4);
+    // each is fetched into a file and checked with `sha256sum -c` (4 pinned hashes)
+    const hashes = [...text.matchAll(/\b[0-9a-f]{64}\b(?=\s+\/tmp\/[\w-]+\.yaml)/g)];
+    expect(hashes.length).toBe(4);
+    expect(text).not.toMatch(/kubectl apply -f https?:/);
+    expect(text.match(/sha256sum -c/g)?.length).toBeGreaterThanOrEqual(2);
+  });
+
   it('the red alert is schedule-only and keyed on the check job FAILING', () => {
     expect(alert.needs).toEqual(['platform-e2e']);
     expect(String(alert.if)).toContain("github.event_name == 'schedule'");
     expect(String(alert.if)).toContain("needs.platform-e2e.result == 'failure'");
+    // A hung run hits the job timeout and reports `cancelled`, not `failure`.
+    expect(String(alert.if)).toContain("needs.platform-e2e.result == 'cancelled'");
   });
 
   it('secrets are created per run from random values and masked, never committed', () => {

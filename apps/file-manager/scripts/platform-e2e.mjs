@@ -44,6 +44,7 @@ import {
   assertImageOptimized,
   assertIsr,
   assertIsrKeysInRedis,
+  assertObservabilityAuth,
   assertPrometheusText,
   assertRolloutClean,
   assertRscFlight,
@@ -71,6 +72,11 @@ const APP = 'file-manager';
 const WAKE_CEILING_MS = 60000;
 const SCALE_TO_ZERO_DEADLINE_MS = 240000;
 const ROLLOUT_DEADLINE_MS = 300000;
+// Every child process has a bound, so a hang fails fast with a NAMED command
+// instead of surfacing as the job's 45-minute cancellation.
+const KUBECTL_TIMEOUT_MS = 120000;
+const AWS_TIMEOUT_MS = 60000;
+const DEPLOY_TIMEOUT_MS = 600000;
 
 // ---------------------------------------------------------------------------
 // Preconditions: refuse, never skip.
@@ -91,7 +97,7 @@ function requireEnv(name) {
 /** @param {string} bin @param {string[]} args */
 function requireBinary(bin, args) {
   try {
-    execFileSync(bin, args, { stdio: 'ignore' });
+    execFileSync(bin, args, { stdio: 'ignore', timeout: 30000 });
   } catch {
     throw new Error(
       `platform-e2e: required binary "${bin}" is not runnable (${bin} ${args.join(' ')})`,
@@ -110,6 +116,8 @@ function kubectl(args, opts = {}) {
     input: opts.input,
     stdio: ['pipe', 'pipe', 'pipe'],
     maxBuffer: 64 * 1024 * 1024,
+    timeout: KUBECTL_TIMEOUT_MS,
+    killSignal: 'SIGKILL',
   }).trim();
 }
 
@@ -394,6 +402,8 @@ async function main() {
             AWS_RESPONSE_CHECKSUM_VALIDATION: 'when_required',
           },
           maxBuffer: 16 * 1024 * 1024,
+          timeout: AWS_TIMEOUT_MS,
+          killSignal: 'SIGKILL',
         },
       );
       const storedEv = assertUploadStored({
@@ -466,15 +476,12 @@ async function main() {
 
   await check(
     'A. app',
-    'Auth interrupt: /observability is 401 without and with a wrong token',
+    'Auth: /observability is 401 without/with a wrong token and 200 with the right one',
     async () => {
       const none = await get('/observability');
       const wrong = await get('/observability', { authorization: `Bearer ${obsToken}-wrong` });
-      if (none.status !== 401)
-        throw new Error(`/observability without a token returned ${none.status}`);
-      if (wrong.status !== 401)
-        throw new Error(`/observability with a wrong token returned ${wrong.status}`);
-      return '401 / 401';
+      const right = await get('/observability', { authorization: `Bearer ${obsToken}` });
+      return assertObservabilityAuth({ none, wrong, right });
     },
   );
 
@@ -796,69 +803,81 @@ async function main() {
         }
       };
       const workers = Array.from({ length: 4 }, worker);
-      await sleep(2000);
-      const tag = `${process.env.GITHUB_RUN_ID ?? Date.now()}-rollout`;
-      await new Promise((resolve, reject) => {
-        const child = spawn(
-          'node',
-          [cli, 'deploy', '--image', image, '--tag', tag, '--namespace', ns],
-          {
-            cwd: appDir,
-            stdio: 'inherit',
-          },
-        );
-        child.on('error', reject);
-        child.on('exit', (code) =>
-          code === 0
-            ? resolve(undefined)
-            : reject(new Error(`kn-next deploy --image exited ${code}`)),
-        );
-      });
-      const t0 = Date.now();
-      let after = before;
-      let oldPods = -1;
-      while (Date.now() - t0 < ROLLOUT_DEADLINE_MS) {
-        after = kubectl([
-          'get',
-          'ksvc',
-          APP,
-          '-n',
-          ns,
-          '-o',
-          'jsonpath={.status.latestReadyRevisionName}',
-        ]);
-        const traffic = kubectl([
-          'get',
-          'ksvc',
-          APP,
-          '-n',
-          ns,
-          '-o',
-          'jsonpath={.status.traffic[0].revisionName}',
-        ]);
-        oldPods = kubectl([
-          'get',
-          'pods',
-          '-n',
-          ns,
-          '-l',
-          `serving.knative.dev/revision=${before}`,
-          '-o',
-          'name',
-        ])
-          .split('\n')
-          .filter(Boolean).length;
-        if (after !== before && traffic === after && oldPods === 0) break;
+      try {
         await sleep(2000);
+        const tag = `${process.env.GITHUB_RUN_ID ?? Date.now()}-rollout`;
+        await new Promise((resolve, reject) => {
+          const child = spawn(
+            'node',
+            [cli, 'deploy', '--image', image, '--tag', tag, '--namespace', ns],
+            {
+              cwd: appDir,
+              stdio: 'inherit',
+            },
+          );
+          const killer = setTimeout(() => {
+            child.kill('SIGKILL');
+            reject(
+              new Error(`kn-next deploy --image did not finish within ${DEPLOY_TIMEOUT_MS}ms`),
+            );
+          }, DEPLOY_TIMEOUT_MS);
+          child.on('error', reject);
+          child.on('exit', (code) => {
+            clearTimeout(killer);
+            return code === 0
+              ? resolve(undefined)
+              : reject(new Error(`kn-next deploy --image exited ${code}`));
+          });
+        });
+        const t0 = Date.now();
+        let after = before;
+        let oldPods = -1;
+        while (Date.now() - t0 < ROLLOUT_DEADLINE_MS) {
+          after = kubectl([
+            'get',
+            'ksvc',
+            APP,
+            '-n',
+            ns,
+            '-o',
+            'jsonpath={.status.latestReadyRevisionName}',
+          ]);
+          const traffic = kubectl([
+            'get',
+            'ksvc',
+            APP,
+            '-n',
+            ns,
+            '-o',
+            'jsonpath={.status.traffic[0].revisionName}',
+          ]);
+          oldPods = kubectl([
+            'get',
+            'pods',
+            '-n',
+            ns,
+            '-l',
+            `serving.knative.dev/revision=${before}`,
+            '-o',
+            'name',
+          ])
+            .split('\n')
+            .filter(Boolean).length;
+          if (after !== before && traffic === after && oldPods === 0) break;
+          await sleep(2000);
+        }
+        await sleep(3000); // keep load on the new revision briefly
+        stop = true;
+        await Promise.all(workers);
+        if (oldPods !== 0)
+          throw new Error(
+            `old revision ${before} still has ${oldPods} pod(s) after ${ROLLOUT_DEADLINE_MS}ms`,
+          );
+        return assertRolloutClean({ results: loadResults, before, after, minRequests: 20 });
+      } finally {
+        // Whatever happens (deploy failed, kubectl hung), the load loop must end.
+        stop = true;
       }
-      await sleep(3000); // keep load on the new revision briefly
-      stop = true;
-      await Promise.all(workers);
-      if (oldPods !== 0)
-        throw new Error(
-          `old revision ${before} still has ${oldPods} pod(s) after ${ROLLOUT_DEADLINE_MS}ms`,
-        );
-      return assertRolloutClean({ results: loadResults, before, after, minRequests: 20 });
     },
   );
 
