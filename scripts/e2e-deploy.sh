@@ -679,6 +679,19 @@ if [ -n "${STANDALONE_EXEC}" ]; then
   # exec's own root resolution (relative to its own directory) lands on the
   # mounted root inside the container exactly as it would beside server.js
   # on disk.
+  #
+  # --user "$(id -u):$(id -g)" (review finding): with no --user, the compiled
+  # exec runs as the image's default UID (root). The runner user calling
+  # `ss` below to attribute the LISTEN socket (#171 TOCTOU guard) is NOT
+  # root, and the kernel's sock_diag permission model only lets an
+  # unprivileged caller see PID/process detail for sockets owned by ITS OWN
+  # uid — a root-owned socket is invisible to it (confirmed live: shard 7,
+  # job 107207528866, "WARNING: cannot verify pid ... proceeding" on every
+  # deploy). Running the container as the SAME uid:gid as the host runner
+  # user makes the socket visible to `ss` under that user, closing the gap
+  # AND matching the mounted volume's ownership (no root-owned files left
+  # behind on the host either). The compiled exec itself needs no root
+  # privilege to bind a port or serve requests.
   REL_SUBPATH="$(node -e 'const {relative}=require("node:path");process.stdout.write(relative(process.argv[1],process.argv[2]))' "${STANDALONE_ROOT}" "${STANDALONE_APP_DIR}")"
   CONTAINER_ROOT="/knext-standalone-root"
   CONTAINER_WORKDIR="${CONTAINER_ROOT}${REL_SUBPATH:+/${REL_SUBPATH}}"
@@ -692,6 +705,7 @@ fi
   if [ -n "${STANDALONE_EXEC}" ]; then
     exec docker run --rm --name "${CONTAINER_NAME}" \
       --network host \
+      --user "$(id -u):$(id -g)" \
       -e PORT="${PORT}" -e HOSTNAME="" -e NODE_ENV="production" \
       -e NEXT_DEPLOYMENT_ID="${DEPLOYMENT_ID}" \
       -v "${STANDALONE_ROOT}:${CONTAINER_ROOT}" \

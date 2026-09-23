@@ -58,6 +58,47 @@
 # continues — it must not brick the whole bun lane for fixtures unrelated to
 # the addon that failed. The original dlopen error simply resurfaces for
 # that one fixture, same as before this script existed; nothing is masked.
+#
+# ROUND 6 (adversarial re-review on a 16/16-green run, four defects, all
+# confirmed from live CI logs — run 35868561131):
+#
+#   1. apk's stderr was being swallowed (`>/dev/null 2>&1`), so a real apk
+#      failure under `set -eu` aborted with no diagnostic at all. FIX: only
+#      stdout is silenced now (`>/dev/null`); apk's own error output flows.
+#
+#   2. `@img/sharp-linux-<arch>` (the glibc-only platform package Next's
+#      output tracer keeps for a next/image fixture) has NO source fallback —
+#      sharp is a prebuilt-binary-only distribution, unlike sqlite3. A fresh
+#      install of that exact name under musl fails EBADPLATFORM outright.
+#      FIX: `musl_install_sibling()` fresh-installs the MUSL counterpart
+#      (`@img/sharp-linuxmusl-<arch>`) as a NEW sibling instead of trying to
+#      rebuild the glibc one — sharp's own require() picks whichever platform
+#      package is present at runtime. sharp also needs its libvips shared
+#      library, packaged SEPARATELY as `@img/sharp-libvips-linux(musl)-<arch>`
+#      with its OWN, DIFFERENT version number (sharp 0.34.5 pins libvips
+#      1.2.4) — read from the traced package's own optionalDependencies and
+#      installed the same way.
+#
+#   3. The walk-up to find an owning package.json for a *.node hit could land
+#      on ROOT's own manifest (Next's tracer emits one at the standalone
+#      root) or on any directory NOT nested under node_modules/, and then run
+#      `npm install <name>@<version>` from the public registry AS ROOT — a
+#      dependency-confusion risk, and on a *.node hit at the tree's own root
+#      the subsequent unconditional replace could delete ROOT itself. FIX: a
+#      package is only ever treated as an addon if its owning dir is (a) not
+#      ROOT and (b) matches `*/node_modules/*` — anything else WARNS and is
+#      skipped, never installed against.
+#
+#   4. The pid-attribution guard in scripts/e2e-deploy.sh
+#      (`port_owned_by_server`) is silently defeated for compiled deploys:
+#      `docker run` (no `--user`) boots the container as root, and an
+#      unprivileged CI runner user calling `ss -ltnp` cannot see PID detail
+#      for a different-uid socket (kernel sock_diag same-uid visibility) —
+#      the check always fell back to "cannot verify" and only warned. This
+#      lives in scripts/e2e-deploy.sh, not here, but is recorded in this
+#      round-6 note because it was found and fixed alongside the three
+#      defects above: `docker run` now passes `--user "$(id -u):$(id -g)"`,
+#      which also stops the container leaving root-owned files behind.
 set -eu
 
 ROOT="${1:?usage: e2e-native-rebuild-musl.sh <standalone-root>}"
@@ -71,14 +112,58 @@ fi
 echo "[native-rebuild] found native addon(s):"
 echo "${HITS}"
 
+# Ownership restore (review finding): this container runs as root (`apk add`
+# needs it — see the toolchain tradeoff note below), so every file it
+# creates or copies under the bind-mounted ROOT from here on is root-owned
+# on the HOST when the container exits. ROOT itself is owned by the
+# invoking runner user (it is a bind mount of the host's own checkout/
+# scratch dir), so `stat`-ing it NOW, before any writes, captures the
+# correct uid:gid to restore — done unconditionally at exit via a trap, so
+# a mid-loop failure still leaves the tree owned by the runner, not root.
+ROOT_OWNER="$(stat -c '%u:%g' "${ROOT}")"
+restore_ownership() {
+  chown -R "${ROOT_OWNER}" "${ROOT}" 2>/dev/null || true
+}
+trap restore_ownership EXIT
+
 # python3/make/g++: the node-gyp toolchain a from-source rebuild needs (see
 # the header's toolchain tradeoff note). npm: the pinned alpine base ships
 # bun only (no npm) — see Dockerfile.standalone.hbs's "oven/bun ships bun
-# ONLY" note.
-apk add --no-cache python3 make g++ npm >/dev/null 2>&1
+# ONLY" note. stdout only is suppressed — an apk failure under `set -eu`
+# must not abort with zero diagnostic output (review finding): stderr
+# reaches the caller's log.
+apk add --no-cache python3 make g++ npm >/dev/null
 
 SCRATCH_ROOT="$(mktemp -d)"
 DONE=""
+
+# Install <spec> (name@version) for musl and copy the resulting
+# node_modules/<dest-name> in at ${ROOT}/node_modules/<dest-name> — used by
+# the sharp special-case below, where the destination name (the musl
+# package) differs from nothing else in scope but must be threaded through
+# explicitly. Best-effort: a failure WARNs and returns non-zero, never
+# aborts the script (the caller decides whether that's fatal for it).
+musl_install_sibling() { # <spec> <dest-name>
+  _spec="$1"
+  _dest_name="$2"
+  _pkg_scratch="$(mktemp -d "${SCRATCH_ROOT}/pkg.XXXXXX")"
+  if ! (cd "${_pkg_scratch}" && npm_config_build_from_source=true npm install --no-save --no-audit --no-fund "${_spec}" >"${_pkg_scratch}.log" 2>&1); then
+    echo "[native-rebuild] WARNING: fresh musl install of ${_spec} failed"
+    tail -c 4096 "${_pkg_scratch}.log" 2>/dev/null || true
+    return 1
+  fi
+  _fresh_dir="${_pkg_scratch}/node_modules/${_dest_name}"
+  if [ ! -d "${_fresh_dir}" ]; then
+    echo "[native-rebuild] WARNING: fresh install of ${_spec} produced no node_modules/${_dest_name}"
+    return 1
+  fi
+  _dest="${ROOT}/node_modules/${_dest_name}"
+  mkdir -p "$(dirname "${_dest}")"
+  rm -rf "${_dest}"
+  cp -a "${_fresh_dir}" "${_dest}"
+  echo "[native-rebuild] added ${_dest_name} (from ${_spec}) at ${_dest}"
+  return 0
+}
 
 echo "${HITS}" | while IFS= read -r f; do
   [ -z "${f}" ] && continue
@@ -88,6 +173,27 @@ echo "${HITS}" | while IFS= read -r f; do
   while [ "${d}" != "/" ] && [ "${d}" != "${ROOT}" ] && [ ! -f "${d}/package.json" ]; do
     d="$(dirname "${d}")"
   done
+  # Review finding: the loop above stops walking the instant `d` reaches
+  # ROOT, WHETHER OR NOT ROOT itself has a package.json — and Next's own
+  # output tracing DOES emit one at the standalone root. Without this guard,
+  # a .node file the walk-up cannot pin to a node_modules-nested package
+  # would fall through to ROOT's OWN manifest: NAME/VERSION below would
+  # become the fixture app's own name (a real dependency-confusion risk —
+  # `npm install <appname>@<version>` from the public registry, as root),
+  # and the destructive `rm -rf "${d}"` further down would target ROOT
+  # itself. Refuse BOTH failure shapes explicitly: `d` must be ROOT-nested
+  # under a real `node_modules/` segment, never ROOT itself.
+  if [ "${d}" = "${ROOT}" ]; then
+    echo "[native-rebuild] WARNING: walked up to ROOT (${ROOT}) looking for a package.json above ${f} — refusing to treat ROOT's own manifest as an addon package; skipping"
+    continue
+  fi
+  case "${d}" in
+  */node_modules/*) : ;;
+  *)
+    echo "[native-rebuild] WARNING: ${d} is not nested under node_modules/ — refusing to treat it as an addon package; skipping ${f}"
+    continue
+    ;;
+  esac
   if [ ! -f "${d}/package.json" ]; then
     echo "[native-rebuild] WARNING: no package.json found above ${f} — skipping"
     continue
@@ -115,6 +221,59 @@ echo "${HITS}" | while IFS= read -r f; do
     echo "[native-rebuild] WARNING: could not read name/version from ${d}/package.json — skipping"
     continue
   fi
+
+  # sharp (review finding): `@img/sharp-linux-<arch>` is a GLIBC-ONLY
+  # prebuilt-only package — there is no source to fall back to, and
+  # `npm install @img/sharp-linux-x64@<ver>` under musl fails outright with
+  # EBADPLATFORM (npm's own os/cpu/libc engine check refuses it before any
+  # network call). The generic fresh-install-and-replace path below cannot
+  # fix this package. sharp instead ships a SEPARATE package per libc
+  # (`@img/sharp-linuxmusl-<arch>`, same version lockstep) and its OWN
+  # runtime code tries each platform package by name at require() time — so
+  # the fix is not to replace ${d} at all, but to ADD the missing musl
+  # sibling under ITS OWN correct name; sharp's runtime then finds it. The
+  # generic sibling-carry loop below cannot do this either: it globs
+  # top-level node_modules/* entries by basename, and `@img` (the SCOPE
+  # directory, not the package) already exists in ${ROOT} — its
+  # already-present check would skip the whole @img scope and silently
+  # drop the needed sibling.
+  case "${NAME}" in
+  @img/sharp-linux-*)
+    MUSL_NAME="@img/sharp-linuxmusl-${NAME#@img/sharp-linux-}"
+    echo "[native-rebuild] ${NAME} is glibc-only (no source fallback) — installing the musl counterpart ${MUSL_NAME}@${VERSION} as a NEW sibling instead (${d} is left as-is; sharp's own require() picks whichever platform package is present)"
+    if musl_install_sibling "${MUSL_NAME}@${VERSION}" "${MUSL_NAME}"; then
+      if [ -z "$(find "${ROOT}/node_modules/${MUSL_NAME}" -name '*.node' -type f 2>/dev/null)" ]; then
+        echo "[native-rebuild] WARNING: ${MUSL_NAME}@${VERSION} produced no *.node file — sharp will still fail to load under musl at runtime"
+      fi
+    else
+      echo "[native-rebuild] sharp will still fail to load under musl at runtime (original error will resurface, not masked)"
+    fi
+    # sharp's platform package dlopens a SEPARATE shared-library package at
+    # runtime (measured: "Error loading shared library libvips-cpp.so...")
+    # — @img/sharp-libvips-linux-<arch>, independently versioned from sharp
+    # itself (e.g. sharp 0.34.5 pins sharp-libvips 1.2.4), so its exact spec
+    # is read from THIS package's own optionalDependencies rather than
+    # assumed to share ${VERSION}.
+    LIBVIPS_INFO="$(node -e '
+      try {
+        const deps = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).optionalDependencies || {};
+        for (const [k, v] of Object.entries(deps)) {
+          if (/^@img\/sharp-libvips-linux-[a-z0-9]+$/.test(k)) { process.stdout.write(k + " " + v); break; }
+        }
+      } catch { /* leave empty */ }
+    ' "${d}/package.json" 2>/dev/null || true)"
+    if [ -n "${LIBVIPS_INFO}" ]; then
+      LIBVIPS_NAME="${LIBVIPS_INFO%% *}"
+      LIBVIPS_VERSION="${LIBVIPS_INFO#* }"
+      LIBVIPS_MUSL_NAME="@img/sharp-libvips-linuxmusl-${LIBVIPS_NAME#@img/sharp-libvips-linux-}"
+      echo "[native-rebuild] ${NAME} also needs its libvips shared-library sibling — installing ${LIBVIPS_MUSL_NAME}@${LIBVIPS_VERSION}"
+      musl_install_sibling "${LIBVIPS_MUSL_NAME}@${LIBVIPS_VERSION}" "${LIBVIPS_MUSL_NAME}" || echo "[native-rebuild] sharp will still fail to load its libvips dependency under musl at runtime (original error will resurface, not masked)"
+    else
+      echo "[native-rebuild] WARNING: no @img/sharp-libvips-linux-* entry found in ${d}/package.json's optionalDependencies — sharp may still fail to load its libvips dependency under musl"
+    fi
+    continue
+    ;;
+  esac
 
   echo "[native-rebuild] fresh-installing ${NAME}@${VERSION} for musl (the traced tree at ${d} lacks install-time tooling like node-pre-gyp — a rebuild IN PLACE cannot run its own install script)"
   PKG_SCRATCH="$(mktemp -d "${SCRATCH_ROOT}/pkg.XXXXXX")"

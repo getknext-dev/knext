@@ -240,6 +240,70 @@ describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec 
     ).toBe(false);
   });
 
+  it('boots the exec as the invoking (non-root) user, not root — otherwise the pid-attribution check cannot see the socket owner (round-6 review finding, live CI evidence run 35868561131, shard 7)', () => {
+    // `docker run` with no `--user` boots as root; the CI runner user calling
+    // `ss -ltnp` then cannot see PID/process detail for a different-uid
+    // socket (kernel sock_diag same-uid visibility), so
+    // `port_owned_by_server` silently degraded to "cannot verify" on every
+    // compiled-exec deploy. `--user "$(id -u):$(id -g)"` also prevents the
+    // container from leaving root-owned files on the runner's filesystem.
+    const bootBlock = src.slice(src.indexOf('if [ -n "${STANDALONE_EXEC}" ]; then'));
+    expect(
+      /--network host \\\s*\n\s*--user "\$\(id -u\):\$\(id -g\)" \\/.test(bootBlock),
+      'the boot docker run must pass --user "$(id -u):$(id -g)" so the containerized process runs under the invoking uid, not root',
+    ).toBe(true);
+  });
+
+  it('e2e-native-rebuild-musl.sh sends apk output to stderr, not /dev/null (round-6 review finding — set -eu gave an opaque abort on an apk failure)', () => {
+    const rebuildSrc = readFileSync(NATIVE_REBUILD_SH_PATH, 'utf8');
+    expect(
+      /apk add --no-cache python3 make g\+\+ npm >\/dev\/null$/m.test(rebuildSrc),
+      'apk stdout may still be silenced, but stderr must flow (no trailing 2>&1 redirecting it into /dev/null too) so a failure under set -eu is diagnosable',
+    ).toBe(true);
+    expect(
+      rebuildSrc.includes('apk add --no-cache python3 make g++ npm >/dev/null 2>&1'),
+      'the old shape swallowed BOTH streams — must be gone',
+    ).toBe(false);
+  });
+
+  it('e2e-native-rebuild-musl.sh refuses to treat ROOT (or anything outside node_modules) as an addon package (round-6 review finding — dependency-confusion / destructive rm -rf on a walk-up that lands on the standalone root)', () => {
+    const rebuildSrc = readFileSync(NATIVE_REBUILD_SH_PATH, 'utf8');
+    expect(
+      rebuildSrc.includes('if [ "${d}" = "${ROOT}" ]; then'),
+      "must refuse to walk up past ROOT and treat ROOT's own package.json (Next's tracer emits one) as an addon package",
+    ).toBe(true);
+    expect(
+      /\*\)\s*\n\s*echo "\[native-rebuild\] WARNING: \$\{d\} is not nested under node_modules\/ /.test(
+        rebuildSrc,
+      ),
+      'must also refuse any owning dir NOT nested under node_modules/ — a case-pattern guard, not just the ROOT-equality check',
+    ).toBe(true);
+    expect(
+      /\*\/node_modules\/\*\)\s*:\s*;;/.test(rebuildSrc),
+      'the accept branch must explicitly match */node_modules/*',
+    ).toBe(true);
+  });
+
+  it('e2e-native-rebuild-musl.sh maps the glibc-only @img/sharp-linux-* platform package to its musl counterpart, plus the separately-versioned libvips sibling (round-6 review finding — sharp/next-image fixtures ran with a sharp that could not load under musl)', () => {
+    const rebuildSrc = readFileSync(NATIVE_REBUILD_SH_PATH, 'utf8');
+    expect(
+      rebuildSrc.includes('musl_install_sibling()'),
+      'must define a reusable helper to fresh-install a NEW sibling package (sharp has no from-source fallback, unlike sqlite3)',
+    ).toBe(true);
+    expect(
+      /@img\/sharp-linux-\*\)/.test(rebuildSrc),
+      'must special-case the @img/sharp-linux-* platform package name',
+    ).toBe(true);
+    expect(
+      rebuildSrc.includes('MUSL_NAME="@img/sharp-linuxmusl-${NAME#@img/sharp-linux-}"'),
+      'must derive the musl counterpart name from the glibc name, not hardcode one arch',
+    ).toBe(true);
+    expect(
+      rebuildSrc.includes('@img/sharp-libvips-linuxmusl-'),
+      'must also install the libvips shared-library sibling — sharp 0.34.x pins a DIFFERENT version number for libvips than for itself, so it cannot be derived from ${VERSION}',
+    ).toBe(true);
+  });
+
   it('appends a boot-mode ledger line per deploy — the positive proof the compiled exec booted (#1230 review finding)', () => {
     expect(src.includes('BOOT_MODE_LEDGER="${RUNNER_TEMP:-/tmp}/knext-e2e-boot-modes.log"')).toBe(
       true,

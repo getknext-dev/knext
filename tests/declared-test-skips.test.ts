@@ -110,6 +110,16 @@ const DECLARED: Record<string, { skips: Record<string, number>; reason: string }
       'Needs the tsup-built dist/ bundle to exercise node/bun parity on the shipped artifact. ' +
       'CI builds before running; a source-only checkout has nothing to run.',
   },
+  'tests/e2e-native-rebuild-musl.docker.test.ts': {
+    skips: { 'describe.skipIf': 1 },
+    reason:
+      'ENVIRONMENT-availability gate (docker daemon reachable), not artifact-gated — same class ' +
+      'as the bunAvailable pattern this scanner already treats as non-artifact. Executes ' +
+      'scripts/e2e-native-rebuild-musl.sh for real inside the pinned oven/bun:1.4.0-alpine image ' +
+      '(#1230 round 6: ROOT-escape guard, sharp musl sibling load, --user pid-attribution); needs ' +
+      'a working docker on the machine, which every CI runner that boots the bun lane already ' +
+      'requires (scripts/e2e-deploy.sh itself refuses to run without docker once RUNTIME=bun).',
+  },
   'packages/kn-next/src/__tests__/compile-cache-health-bun.test.ts': {
     skips: { 'it.skipIf': 3 },
     reason:
