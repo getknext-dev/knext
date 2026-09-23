@@ -27,7 +27,7 @@ const NATIVE_REBUILD_SH = resolve(REPO_ROOT, 'scripts/e2e-native-rebuild-musl.sh
 const STANDALONE_BUN_IMAGE =
   'oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb';
 
-const SUITE_TIMEOUT_MS = 180_000; // real `docker pull`/`apk add`/`npm install` under emulation
+const SUITE_TIMEOUT_MS = 240_000; // real `docker pull`/`apk add`/`npm install` under emulation
 setDefaultTimeout(SUITE_TIMEOUT_MS);
 
 function dockerAvailable(): boolean {
@@ -38,12 +38,24 @@ function dockerAvailable(): boolean {
   return r.status === 0;
 }
 
-function runRebuild(mountDir: string): { status: number; stdout: string; stderr: string } {
+function runRebuild(
+  mountDir: string,
+  timeoutMs: number = SUITE_TIMEOUT_MS,
+): { status: number; stdout: string; stderr: string } {
   const r = spawnSync(
     'docker',
     [
       'run',
       '--rm',
+      // The pinned image publishes a multi-arch manifest; the compat harness
+      // always runs on amd64 CI runners, and the sharp/libvips packages below
+      // are fetched by an explicit x64 spec. Without pinning the platform, a
+      // local arm64 host (OrbStack/Docker Desktop on Apple Silicon) silently
+      // resolves the arm64 variant instead, and an x64-targeted musl install
+      // then fails EBADPLATFORM for an arch reason unrelated to what this
+      // test is proving — reproduced directly on this machine.
+      '--platform',
+      'linux/amd64',
       '-v',
       `${mountDir}:/mnt`,
       '-v',
@@ -53,7 +65,7 @@ function runRebuild(mountDir: string): { status: number; stdout: string; stderr:
       '/rebuild.sh',
       '/mnt',
     ],
-    { encoding: 'utf8', timeout: SUITE_TIMEOUT_MS },
+    { encoding: 'utf8', timeout: timeoutMs },
   );
   return { status: r.status ?? -1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
@@ -98,79 +110,60 @@ describe.skipIf(!dockerAvailable())(
     it('installs the musl sharp + sharp-libvips siblings and the resulting native addon LOADS under musl bun (EBADPLATFORM on the glibc name is worked around, not fatal)', () => {
       // Build a REAL traced-tree fixture: fetch the actual glibc-only sharp
       // platform packages (as the compat harness's fixture install on the
-      // glibc ubuntu-latest runner would have produced) via a throwaway
-      // glibc container, exactly mirroring what Next's output tracing keeps.
-      const glibcContainer = `knext-sharp-fixture-${process.pid}`;
-      execFileSync('docker', ['rm', '-f', glibcContainer], { stdio: 'ignore' });
-      execFileSync(
+      // glibc ubuntu-latest runner would have produced, and exactly what
+      // Next's output tracing keeps) directly from the registry via `npm
+      // pack --force` on the HOST — no throwaway container needed just to
+      // fetch two tarballs, and no host-platform dependency since `--force`
+      // bypasses npm's own os/cpu/libc engine check (the same check that
+      // makes an UNFORCED install of these exact packages fail).
+      const packDir = mkdtempSync(join(workDir, 'sharp-pack-'));
+      for (const spec of ['@img/sharp-linux-x64@0.34.5', '@img/sharp-libvips-linux-x64@1.2.4']) {
+        execFileSync('npm', ['pack', spec, '--force'], { cwd: packDir, timeout: 60_000 });
+      }
+      const sharpDir = mkdtempSync(join(workDir, 'sharp-'));
+      mkdirSync(join(sharpDir, 'node_modules', '@img'), { recursive: true });
+      for (const [tarball, pkg] of [
+        ['img-sharp-linux-x64-0.34.5.tgz', 'sharp-linux-x64'],
+        ['img-sharp-libvips-linux-x64-1.2.4.tgz', 'sharp-libvips-linux-x64'],
+      ]) {
+        const extractDir = mkdtempSync(join(workDir, 'extract-'));
+        execFileSync('tar', ['xzf', join(packDir, tarball), '-C', extractDir]);
+        execFileSync('cp', [
+          '-a',
+          join(extractDir, 'package'),
+          join(sharpDir, 'node_modules', '@img', pkg),
+        ]);
+      }
+
+      const { status, stdout } = runRebuild(sharpDir, 340_000);
+      expect(status, `expected exit 0; stdout:\n${stdout}`).toBe(0);
+      expect(stdout).toContain('added @img/sharp-linuxmusl-x64');
+      expect(stdout).toContain('added @img/sharp-libvips-linuxmusl-x64');
+
+      // The behavioural claim: the produced musl .node file actually LOADS
+      // under the pinned musl bun runtime (not just "a file exists at the
+      // right path").
+      const loadCheck = spawnSync(
         'docker',
         [
           'run',
-          '-d',
+          '--rm',
           '--platform',
           'linux/amd64',
-          '--name',
-          glibcContainer,
-          'node:22',
-          'sleep',
-          '600',
+          '-v',
+          `${sharpDir}:/mnt`,
+          STANDALONE_BUN_IMAGE,
+          'sh',
+          '-c',
+          "cd /mnt && bun -e \"try{const m=require('./node_modules/@img/sharp-linuxmusl-x64/lib/sharp-linuxmusl-x64.node');console.log('LOADED OK:'+typeof m)}catch(e){console.log('ERR:'+e.message)}\"",
         ],
-        { timeout: 120_000 },
+        { encoding: 'utf8', timeout: 60_000 },
       );
-      try {
-        execFileSync(
-          'docker',
-          [
-            'exec',
-            glibcContainer,
-            'sh',
-            '-c',
-            'mkdir /work && cd /work && npm init -y >/dev/null 2>&1 && npm install sharp@0.34.5 --force >/dev/null 2>&1',
-          ],
-          { timeout: 120_000 },
-        );
-        const sharpDir = mkdtempSync(join(workDir, 'sharp-'));
-        mkdirSync(join(sharpDir, 'node_modules', '@img'), { recursive: true });
-        for (const pkg of ['sharp-linux-x64', 'sharp-libvips-linux-x64']) {
-          execFileSync('docker', [
-            'cp',
-            `${glibcContainer}:/work/node_modules/@img/${pkg}`,
-            join(sharpDir, 'node_modules', '@img', pkg),
-          ]);
-        }
-
-        const { status, stdout } = runRebuild(sharpDir);
-        expect(status, `expected exit 0; stdout:\n${stdout}`).toBe(0);
-        expect(stdout).toContain('added @img/sharp-linuxmusl-x64');
-        expect(stdout).toContain('added @img/sharp-libvips-linuxmusl-x64');
-
-        // The behavioural claim: the produced musl .node file actually
-        // LOADS under the pinned musl bun runtime (not just "a file exists
-        // at the right path").
-        const loadCheck = spawnSync(
-          'docker',
-          [
-            'run',
-            '--rm',
-            '--platform',
-            'linux/amd64',
-            '-v',
-            `${sharpDir}:/mnt`,
-            STANDALONE_BUN_IMAGE,
-            'sh',
-            '-c',
-            "cd /mnt && bun -e \"try{const m=require('./node_modules/@img/sharp-linuxmusl-x64/lib/sharp-linuxmusl-x64.node');console.log('LOADED OK:'+typeof m)}catch(e){console.log('ERR:'+e.message)}\"",
-          ],
-          { encoding: 'utf8', timeout: 60_000 },
-        );
-        expect(
-          loadCheck.stdout,
-          `sharp's musl native addon must load cleanly:\n${loadCheck.stdout}\n${loadCheck.stderr}`,
-        ).toContain('LOADED OK:object');
-      } finally {
-        execFileSync('docker', ['rm', '-f', glibcContainer], { stdio: 'ignore' });
-      }
-    });
+      expect(
+        loadCheck.stdout,
+        `sharp's musl native addon must load cleanly:\n${loadCheck.stdout}\n${loadCheck.stderr}`,
+      ).toContain('LOADED OK:object');
+    }, 360_000);
 
     it('--user "$(id -u):$(id -g)" on the boot docker run makes the containerized process run as the INVOKING user, not root (the pid-attribution fix)', () => {
       // Extracted from scripts/e2e-deploy.sh's own boot invocation rather
