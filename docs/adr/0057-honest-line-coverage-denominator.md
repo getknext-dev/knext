@@ -287,8 +287,9 @@ jev (calibrated second opinion) scores:
 
 - [x] Attribution module, gate wiring, tests and prover (#1262, #1268). Honest % re-measured at
   93.03 / 93.01. Floors are held at 92.5.
-- [ ] Next coverage batch: raise the honest floors to the measured value rounded down to 0.5
-  (93.0 or above) once core has real headroom.
+- [x] Next coverage batch: raise the honest floors to the measured value rounded down to 0.5
+  (93.0 or above) once core has real headroom. Done in coverage batch B4 (#1235, #1276): measured
+  93.22% both scopes, floors raised to 93.0 (`scripts/lib/coverage-policy.mjs`).
 - [ ] Sprint-close design review (#1259): accept or reject this amendment.
 - [ ] Re-run the real-bun ground-truth test on every bun upgrade (it runs in CI with the pinned
   bun). If a boundary stops holding, remove it from `BLOCK_BOUNDARIES`. Do not relax the test.

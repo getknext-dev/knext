@@ -233,14 +233,61 @@ export const PER_PATH_THRESHOLDS = {
  *   - packages/kn-next/src/**: raw 79.23% (10020/12647) → honest **93.01% (8356/8984)**
  *
  * Measured 93.03 / 93.01, but floors stay at 92.5: at 93.0 core would have 0 lines of headroom (reds in-flight #1264/#1266), so the ratchet waits for the next coverage batch.
+ *
+ * ## Ratchet: coverage batch B4 (#1235) — build/publish pipeline
+ *
+ * `cli/vinext-build.ts`'s real gaps, first round: `clearStagedNative`'s
+ * manifest-unreadable catch (corrupt `.integrity.json`),
+ * `readResolvedSharpManifest`'s unreadable-candidate catch, and
+ * `detectBunVersion`'s two failure branches (bun missing from PATH vs. a bun
+ * that spawned but failed) — none previously exercised. `vinext-build.ts`'s
+ * `fetchImgPackage` npm-pack shell-out (lines 650-677) is left deliberately
+ * uncovered — genuine subprocess/network, class c, out of scope for this
+ * batch. `cli/postcompile-smoke.ts` and `cli/standalone-exec-build.ts` have no
+ * real gaps: their honest-uncovered lines are entirely string-literal
+ * continuations after a `${…}` substitution earlier in the same statement
+ * (per the #1262 amendment above).
+ *
+ * Second round (#1276 review): `cli/build.ts`'s `isEntrypoint` self-entry
+ * dispatcher (lines 455-471) was FIRST claimed as the same non-actionable
+ * class as `deploy.ts`'s dispatcher — that claim was wrong, and a reviewer
+ * proved it: `isEntrypoint` only compares `realpathSync(process.argv[1])`
+ * against `realpathSync(fileURLToPath(import.meta.url))`, both settable from
+ * a test, so the dispatcher IS reachable in-process (set `argv[1]`, mock
+ * `process.exit` to throw a sentinel rather than return, cache-bust a dynamic
+ * `import("../cli/build?bust=N")` so the top-level `if` block re-evaluates).
+ * `build-entrypoint-dispatch.test.ts` now covers all four paths — success,
+ * usage-error exit, config-not-found, and the `log.fatal` fallback — with
+ * assertions on exit codes and rendered messages, mutation-proved. The same
+ * technique applies to `deploy.ts` (975-1063) and `preview.ts`'s dispatchers;
+ * tracked as a follow-up (#1279) rather than done here, since `#1271`/`#1273`
+ * are mid-flight on those two files.
+ *
+ * Full local suite (445 test files after this round; the same 2 pre-existing
+ * environment-only failures as B2/B3 — `tests/bun-exec-example-suite-
+ * collection.test.ts`, `tests/scaffold-pack-contents.test.ts`), measured with
+ * `dist/` built for kn-next + lib + db:
+ *
+ *   - global:                  raw 79.44% (11157/14044) → honest **93.22% (9334/10013)**
+ *   - packages/kn-next/src/**: raw 79.40% (10142/12774) → honest **93.22% (8454/9069)**
+ *
+ * Floors move to 93.0 (both) — the measured value rounded DOWN to 0.5, per
+ * the ratchet convention this file states everywhere else (see the B1/B2/B3
+ * paragraphs above). The B4-round-1 text here previously invented a
+ * "~0.3-point headroom margin" requirement with no basis elsewhere in this
+ * file and used it to keep the floor at 92.5 despite 93.14 rounding cleanly
+ * to 93.0 — that was a reviewer instruction repeated without checking it
+ * against the actual convention, and it does not appear again. Raw floors
+ * are left unchanged (77 / 79.0): both measure comfortably above them
+ * already, and raising them is not this batch's target.
  */
 export const HONEST_THRESHOLDS = {
-  lines: 92.5,
+  lines: 93.0,
 };
 
 export const HONEST_PER_PATH_THRESHOLDS = {
   'packages/kn-next/src/**': {
-    lines: 92.5,
+    lines: 93.0,
   },
 };
 
