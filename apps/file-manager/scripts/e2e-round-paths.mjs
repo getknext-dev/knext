@@ -17,14 +17,21 @@
 export const APP_AFFECTING = Object.freeze([
   // the runtime adapters + the build/generator surface the app compiles through
   (p) => p.startsWith('packages/kn-next/src/adapters/'),
-  (p) => p.startsWith('packages/kn-next/src/cli/build'),
+  // any CLI build module — `*build*` catches build.ts, project-build.ts AND the
+  // bun single-executable ship target vinext-build.ts. A `startsWith('.../build')`
+  // predicate missed vinext-build.ts, falsely reporting N/A for the ship target.
+  (p) => /^packages\/kn-next\/src\/cli\/[^/]*build/.test(p),
   (p) => p.startsWith('packages/kn-next/src/generators/'),
   (p) => p === 'packages/kn-next/src/config.ts',
+  (p) => p === 'packages/kn-next/src/loader.ts',
+  // libs bundled INTO the app (leg 1: "lib → db → core → file-manager").
+  (p) => p.startsWith('packages/lib/src/'),
+  (p) => p.startsWith('packages/db/src/'),
   // the operator that reconciles the running system
   (p) => p.startsWith('packages/kn-next-operator/'),
-  // the reference app itself + the app template
+  // the reference app itself + the app scaffolding template
   (p) => p.startsWith('apps/file-manager/'),
-  (p) => p.startsWith('templates/app/'),
+  (p) => p.startsWith('packages/kn-next/templates/app/'),
   // any Dockerfile (prod image leg) — matches `Dockerfile`, `Dockerfile.foo`,
   // and nested `foo/Dockerfile`
   (p) => /(^|\/)Dockerfile[^/]*$/.test(p),

@@ -105,6 +105,22 @@ describe('#1197 aggregator is fail-closed (if: always + explicit needs.*.result)
     expect(decide({ results: missing, changedFiles: ['apps/file-manager/x.ts'] }).code).toBe(1);
   });
 
+  it('a scoped-out (N/A) diff STILL fails closed if an upstream leg is red', () => {
+    // Latent false-green: a docs-only diff must not green over a red leg. The
+    // N/A short-circuit must not return before the results are checked.
+    const results = Object.fromEntries(AGGREGATOR_NEEDS.map((j) => [j, 'failure']));
+    const out = decide({ results, changedFiles: ['docs/x.md', 'README.md'] });
+    expect(out.code).toBe(1);
+    expect(out.status).toBe('fail');
+  });
+
+  it('a scoped-out (N/A) diff with all legs green is N/A green', () => {
+    const results = Object.fromEntries(AGGREGATOR_NEEDS.map((j) => [j, 'success']));
+    const out = decide({ results, changedFiles: ['docs/x.md', 'README.md'] });
+    expect(out.code).toBe(0);
+    expect(out.status).toBe('n/a');
+  });
+
   it('decide() PASSES only when every gated need is success', () => {
     const results = Object.fromEntries(AGGREGATOR_NEEDS.map((j) => [j, 'success']));
     const out = decide({ results, changedFiles: ['apps/file-manager/src/app/page.tsx'] });
@@ -120,6 +136,20 @@ describe('#1197 path scope cannot swallow everything', () => {
     expect(isAppAffecting('packages/kn-next-operator/internal/controller/x.go')).toBe(true);
     expect(isAppAffecting('apps/file-manager/Dockerfile')).toBe(true);
     expect(isAppAffecting('packages/kn-next/src/config.ts')).toBe(true);
+  });
+
+  it('the SHIP TARGET + bundled libs + loader ARE app-affecting (not N/A)', () => {
+    // The bun single-executable ship target and the project build glue — the
+    // `startsWith('.../cli/build')` predicate misses vinext-build.ts, so the
+    // aggregator falsely reported N/A for a change to the ship target.
+    expect(isAppAffecting('packages/kn-next/src/cli/vinext-build.ts')).toBe(true);
+    expect(isAppAffecting('packages/kn-next/src/cli/project-build.ts')).toBe(true);
+    expect(isAppAffecting('packages/kn-next/src/cli/build.ts')).toBe(true);
+    // libs bundled INTO the app (leg 1: "lib → db → core → file-manager").
+    expect(isAppAffecting('packages/lib/src/cache-handler.ts')).toBe(true);
+    expect(isAppAffecting('packages/db/src/pool.ts')).toBe(true);
+    // the runtime loader.
+    expect(isAppAffecting('packages/kn-next/src/loader.ts')).toBe(true);
   });
 
   it('a docs/CI/script-only path is NOT app-affecting (N/A)', () => {

@@ -36,7 +36,25 @@ export function decide({ results, changedFiles, needs = AGGREGATOR_NEEDS }) {
   const lines = [];
   const affecting = appAffectingFiles(changedFiles);
 
+  // Evaluate the leg results FIRST — BEFORE the N/A short-circuit. A scoped-out
+  // diff must never green over a red leg: if an upstream leg failed, fail closed
+  // regardless of the path scope. (The N/A branch used to return before this
+  // loop, so a docs-only diff with all legs red returned exit 0.)
+  const failures = [];
+  for (const job of needs) {
+    // Missing/empty is treated as NOT success — a job that never reported cannot
+    // certify anything. Only the literal 'success' passes.
+    const r = results[job] ?? '(no result)';
+    if (r !== 'success') failures.push(`${job}=${r}`);
+  }
+
   if (affecting.length === 0) {
+    if (failures.length > 0) {
+      lines.push(`file-manager e2e round FAILED: ${failures.join(', ')}`);
+      lines.push('  Diff scoped N/A (no app-affecting paths) but an upstream leg was RED —');
+      lines.push('  failing closed. A scoped-out diff must not green over a failed leg.');
+      return { code: 1, status: 'fail', lines };
+    }
     lines.push('file-manager e2e round: N/A — no app-affecting paths in this diff.');
     lines.push(
       '  (scoped at the aggregator via merge-base diff; never via paths: on ci.yml — #673)',
@@ -47,15 +65,9 @@ export function decide({ results, changedFiles, needs = AGGREGATOR_NEEDS }) {
   lines.push(`file-manager e2e round: ${affecting.length} app-affecting path(s) — asserting.`);
   for (const p of affecting.slice(0, 8)) lines.push(`    ${p}`);
   if (affecting.length > 8) lines.push(`    …and ${affecting.length - 8} more`);
-
-  const failures = [];
   for (const job of needs) {
-    // Missing/empty is treated as NOT success — a job that never reported cannot
-    // certify anything. Only the literal 'success' passes.
     const r = results[job] ?? '(no result)';
-    const ok = r === 'success';
-    lines.push(`  ${ok ? 'OK ' : 'RED'}  ${job}: ${r}`);
-    if (!ok) failures.push(`${job}=${r}`);
+    lines.push(`  ${r === 'success' ? 'OK ' : 'RED'}  ${job}: ${r}`);
   }
 
   if (failures.length > 0) {

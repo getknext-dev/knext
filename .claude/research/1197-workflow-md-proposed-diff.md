@@ -29,12 +29,18 @@ In `## The pipeline (per task)`, insert a new stage between step 3 (kind integra
 +    took stacked PRs to zero jobs). The app-affecting path classes are:
 +
 +    ```
-+    packages/kn-next/src/adapters/**        packages/kn-next/src/cli/build*
++    packages/kn-next/src/adapters/**        packages/kn-next/src/cli/*build*
 +    packages/kn-next/src/generators/**      packages/kn-next/src/config.ts
-+    packages/kn-next-operator/**            apps/file-manager/**
-+    templates/app/**                        **/Dockerfile*
++    packages/kn-next/src/loader.ts          packages/lib/src/**
++    packages/db/src/**                      packages/kn-next-operator/**
++    apps/file-manager/**                    packages/kn-next/templates/app/**
++    **/Dockerfile*
 +    *-entry.mjs   runtime-contract.mjs   node-server.ts   vinext-compile*
 +    ```
++
++    (The CLI-build glob is `*build*`, not `build*` — it must catch the bun
++    single-executable ship target `vinext-build.ts` and `project-build.ts`, and
++    `packages/lib` + `packages/db` are bundled INTO the app.)
 +
 +    A diff touching none of these reports **"N/A" green with the reason** (a docs/CI/script-only
 +    PR). The scope list is the single source of truth in
