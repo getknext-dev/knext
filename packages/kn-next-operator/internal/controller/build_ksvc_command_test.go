@@ -48,6 +48,22 @@ func TestBuildDesiredKsvcCommandByArtifactShape(t *testing.T) {
 		{"standalone under node defers to the image", "", "node", nil},
 		{"vinext defers to the image CMD even with runtime bun", "vinext", "bun", nil},
 		{"vinext with runtime unset defers to the image CMD", "vinext", "", nil},
+		// #1219: webpack is a SECOND spelling of the standalone shape (same
+		// `.next/standalone` artifact turbopack emits, just a different `next
+		// build` bundler flag). Nothing distinguishes it from "turbopack" in
+		// this decision — the branch tests `!= "vinext"`, not `== "turbopack"`
+		// — so these two rows exist to catch the regression where someone
+		// narrows that to an enumerated allow-list.
+		//
+		// Mutation-proved SURGICALLY, not just broadly: narrowing the branch
+		// to `(Build == "turbopack" || Build == "") && Runtime == "bun"` keeps
+		// EVERY pre-existing row in this table green — including the
+		// `standalone under bun` (build="") row, which a cruder `== "turbopack"`
+		// mutation also breaks, hiding whether these two rows add anything.
+		// With the allow-list mutation, only `webpack under bun` reds. That is
+		// the row these two exist for.
+		{"webpack under bun execs server.js", "webpack", "bun", []string{"bun", "run", "server.js"}},
+		{"webpack under node defers to the image", "webpack", "node", nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

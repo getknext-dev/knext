@@ -77,6 +77,22 @@ const DISPOSITIONS: Record<string, Disposition> = {
             "artifact-contract-reality.test.ts binds the descriptor to the real built artifact in " +
             "examples/bun-exec",
     },
+    "webpack+node": {
+        state: "covered",
+        evidence:
+            "SELECTABLE (#1219) — the same next-standalone shape as turbopack, reused rather than " +
+            "reimplemented. artifact-contract.test.ts pins the descriptor as identical to turbopack's; " +
+            "build-target-selectable.test.ts and validate-build-axis.test.ts drive validateConfig; " +
+            "runtime-image-selection.test.ts pins `webpack`+`node` -> `--target standalone-node`",
+    },
+    "webpack+bun": {
+        state: "covered",
+        evidence:
+            "SELECTABLE (#1219) — same shape as turbopack. artifact-contract.test.ts pins the descriptor " +
+            "as identical to turbopack's and asserts bun compatibility; validate-build-axis.test.ts " +
+            "drives validateConfig; runtime-image-selection.test.ts pins `webpack`+`bun` -> " +
+            "`--target standalone-bun`",
+    },
 };
 
 /** Every combination the contract admits, derived — never restated. */

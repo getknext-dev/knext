@@ -45,10 +45,16 @@ describe("#B2 the `build` axis", () => {
         expect(() => validateConfig(cfg({ build: "vinext" }))).not.toThrow();
     });
 
+    it("ACCEPTS webpack — next build --webpack -> .next/standalone (#1219)", () => {
+        // webpack emits the same next-standalone shape as turbopack, so it is
+        // selectable the same way — no new toolchain, no new pairing rules.
+        expect(() => validateConfig(cfg({ build: "webpack" }))).not.toThrow();
+    });
+
     it("rejects an unknown builder, listing what is supported", () => {
         expect(() =>
-            validateConfig(cfg({ build: "webpack" as unknown as "turbopack" })),
-        ).toThrow(/webpack.*not supported/i);
+            validateConfig(cfg({ build: "rollup" as unknown as "turbopack" })),
+        ).toThrow(/rollup.*not supported/i);
     });
 
     describe("independence from `runtime`", () => {
@@ -77,6 +83,15 @@ describe("#B2 the `build` axis", () => {
             // both halves so a regression on either is caught.
             expect(() =>
                 validateConfig(cfg({ runtime, build: "turbopack" })),
+            ).not.toThrow();
+        });
+
+        it.each([
+            "node",
+            "bun",
+        ] as const)("ACCEPTS runtime=%s with the webpack build (#1219) — same shape as turbopack", (runtime) => {
+            expect(() =>
+                validateConfig(cfg({ runtime, build: "webpack" })),
             ).not.toThrow();
         });
 
@@ -151,9 +166,16 @@ describe("#B2 checkPairing — the contract's production caller", () => {
 
     it("stays silent for an unknown id — that error belongs to the enum check", () => {
         // Two errors for one mistake is worse than one. The builder/runtime
-        // enum branches above already report it.
-        expect(checkPairing("webpack", "node")).toBeNull();
+        // enum branches above already report it. `webpack` is now a KNOWN
+        // builder (#1219), so it can no longer stand in for "unrecognised" —
+        // `rollup` is genuinely unknown instead.
+        expect(checkPairing("rollup", "node")).toBeNull();
         expect(checkPairing("turbopack", "deno")).toBeNull();
+    });
+
+    it("passes webpack + either runtime — same shape as turbopack (#1219)", () => {
+        expect(checkPairing("webpack", "node")).toBeNull();
+        expect(checkPairing("webpack", "bun")).toBeNull();
     });
 });
 
