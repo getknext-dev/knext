@@ -83,3 +83,45 @@ export function resolveSmokeMode({ serverCmd, serverPath, smokeMode }) {
 
   return { singleExec: derived, resolvedCmd, resolvedPath };
 }
+
+/**
+ * The HTTP transports a single-exec run can serve over. Two compiled
+ * executables exist and their Bun keep-alive fixes diverged (check (h)):
+ *
+ *   bun-serve  — the vinext executable (Bun.serve). The DEFAULT: every
+ *                single-exec run before the compiled standalone existed is
+ *                this one, so an unset variable keeps its contract.
+ *   node-http  — the compiled standalone executable: Next's own server, i.e.
+ *                node:http, the same transport as the uncompiled `bun
+ *                server.js` lane.
+ */
+export const SMOKE_EXEC_TRANSPORTS = Object.freeze(['bun-serve', 'node-http']);
+
+/**
+ * Decide the transport of a run (`SMOKE_EXEC_TRANSPORT`).
+ *
+ * @param {object} opts
+ * @param {boolean} opts.singleExec what `resolveSmokeMode` decided
+ * @param {string} [opts.transport] optional explicit transport
+ * @returns {'bun-serve' | 'node-http' | null} null for a standalone (script) run
+ */
+export function resolveExecTransport({ singleExec, transport }) {
+  const stated = transport !== undefined && transport !== null && transport !== '';
+  if (stated && !SMOKE_EXEC_TRANSPORTS.includes(transport)) {
+    throw new Error(
+      `compat-smoke: SMOKE_EXEC_TRANSPORT=${JSON.stringify(transport)} is not a transport — ` +
+        `expected one of ${SMOKE_EXEC_TRANSPORTS.join(' | ')}`,
+    );
+  }
+  if (!singleExec) {
+    if (stated) {
+      throw new Error(
+        `compat-smoke: SMOKE_EXEC_TRANSPORT=${transport} only applies to a single-exec run, ` +
+          'but SERVER_CMD and SERVER_PATH resolve to a standalone (runtime + script) run. ' +
+          'Unset it, or point both at the compiled executable.',
+      );
+    }
+    return null;
+  }
+  return stated ? transport : 'bun-serve';
+}

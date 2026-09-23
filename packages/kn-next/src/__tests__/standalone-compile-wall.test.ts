@@ -82,9 +82,15 @@ if (process.env.KNEXT_TEST_NEVER === 'set') {
 }
 exports.startServer = async ({ dir, port }) => {
   http.createServer((req, res) => {
-    const chunk = require(path.join(dir, '.next', 'server', 'chunk.js'))
-    res.setHeader('content-type', 'application/json')
-    res.end(JSON.stringify({ chunk: chunk(), rds: rds.tag, dir, cwd: process.cwd() }))
+    try {
+      const chunk = require(path.join(dir, '.next', 'server', 'chunk.js'))
+      const body = JSON.stringify({ chunk: chunk(), rds: rds.tag, dir, cwd: process.cwd() })
+      res.setHeader('content-type', 'application/json')
+      res.end(body)
+    } catch (err) {
+      res.statusCode = 500
+      res.end(String(err && err.message))
+    }
   }).listen(port, '127.0.0.1', () => console.log('READY ' + port))
 }
 `;
@@ -181,15 +187,19 @@ async function getJson(port: number): Promise<Record<string, string>> {
     const deadline = Date.now() + 20_000;
     let last: unknown;
     while (Date.now() < deadline) {
+        let r: Response;
         try {
-            const r = await fetch(`http://127.0.0.1:${port}/`);
-            if (r.status === 200)
-                return (await r.json()) as Record<string, string>;
-            last = `status ${r.status}: ${await r.text()}`;
+            r = await fetch(`http://127.0.0.1:${port}/`);
         } catch (e) {
+            // not listening yet
             last = e;
+            await new Promise((res) => setTimeout(res, 100));
+            continue;
         }
-        await new Promise((r) => setTimeout(r, 100));
+        if (r.status === 200) return (await r.json()) as Record<string, string>;
+        // Any other status is the server answering with the failure (e.g. the
+        // wall's `Cannot find module`) — report it now, not after the deadline.
+        throw new Error(`status ${r.status}: ${await r.text()}`);
     }
     throw new Error(`binary never answered 200: ${String(last)}`);
 }
