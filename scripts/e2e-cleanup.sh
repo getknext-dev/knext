@@ -37,6 +37,15 @@ if [ -n "${PID:-}" ] && kill -0 "${PID}" 2>/dev/null; then
   fi
 fi
 
+# The node lane boots through knext's supervisor, whose Next child holds the
+# port. A drained supervisor takes the child with it; a SIGKILLed one orphans
+# it, so reap the recorded child too (a no-op when it already exited).
+CHILD_PID="$(grep -E '^CHILD_PID=' "${LOG_FILE}" | head -n1 | cut -d= -f2- || true)"
+if [ -n "${CHILD_PID:-}" ] && kill -0 "${CHILD_PID}" 2>/dev/null; then
+  echo "[e2e-cleanup] reaping the supervisor's Next child pid=${CHILD_PID}" >&2
+  kill -KILL "${CHILD_PID}" 2>/dev/null || true
+fi
+
 # ── #1166/#1225 (the compiled bun exec's docker boot) — reap the container ───
 # `docker run --rm` only removes the container on ITS OWN exit; a hard
 # SIGKILL of the `docker run` CLIENT above (PID) kills the CLIENT, not the

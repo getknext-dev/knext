@@ -45,14 +45,21 @@ import {
 
 type ShardRow = Record<string, unknown> & { shard: string };
 
+/** Live bytecode-caching evidence for one shard (tests/bytecode-liveness.test.ts). */
+function liveBytecode(runtime: string) {
+  return { runtime, deploys: 3, live: 3, notLive: 0, reasons: [] };
+}
+
 /** A green 16-shard node night, as the real ledgers shape it. */
 function night(over: Record<string, unknown> = {}) {
+  const lane = (over.lane as string) ?? 'node';
   const shards: ShardRow[] = Array.from({ length: 16 }, (_, i) => ({
     shard: `${i + 1}/16`,
     passed: 49,
     failed: 0,
     notRun: 0,
     runtime: 'node',
+    bytecode: liveBytecode(lane.startsWith('bun') ? 'bun' : 'node'),
   }));
   return {
     runId: '31149348286',
@@ -901,5 +908,89 @@ describe('compat-window-audit — the v1.0 node-lane window, computed not recall
       expect(src).toContain(`--limit ${DEFAULT_FETCH_LIMIT}`);
       expect(src).toMatch(/arg\('--limit',\s*String\(DEFAULT_FETCH_LIMIT\)\)/);
     });
+  });
+});
+
+// ── Bytecode caching must be LIVE for a night to credential ───────────────────
+// Founder rule: bytecode caching is mandatory in every runtime×builder cell,
+// and a cell must not credential unless caching is proven LIVE at runtime, not
+// merely configured. The evidence travels shard summary → run ledger; the audit
+// refuses a credential night any of whose shards lacks it. The rule is keyed on
+// the cell's RUNTIME (CREDENTIAL_CELLS), so a lane wired later inherits it.
+describe('rule 7 — bytecode caching proven LIVE on every shard of a credential night', () => {
+  it('a night whose every shard carries live evidence of the cell runtime is eligible', () => {
+    expect(gradeNight(night()).eligible).toBe(true);
+    expect(gradeNight(night({ lane: 'bun' }), { lane: 'bun' }).eligible).toBe(true);
+  });
+
+  it('ONE shard with a cold (not-live) deploy disqualifies the night, naming the shard', () => {
+    const n = night();
+    n.shards[6] = {
+      ...n.shards[6],
+      bytecode: { runtime: 'node', deploys: 3, live: 2, notLive: 1, reasons: ['deploy 2: cold'] },
+    };
+    const g = gradeNight(n);
+    expect(g.eligible).toBe(false);
+    expect(hasReason(g, 'bytecode-not-live')).toBe(true);
+    expect(g.disqualifiers.join(' ')).toContain('7/16');
+  });
+
+  it('a shard with NO evidence at all disqualifies (fail closed — absence is not liveness)', () => {
+    const n = night();
+    const { bytecode: _dropped, ...rest } = n.shards[0];
+    n.shards[0] = rest as ShardRow;
+    const g = gradeNight(n);
+    expect(g.eligible).toBe(false);
+    expect(hasReason(g, 'bytecode-not-live')).toBe(true);
+  });
+
+  it('a bun night whose shards booted a NON-bytecode server (node-runtime evidence) disqualifies', () => {
+    const g = gradeNight(
+      night({
+        lane: 'bun',
+        shards: night().shards.map((s) => ({ ...s, bytecode: liveBytecode('node') })),
+      }),
+      { lane: 'bun' },
+    );
+    expect(g.eligible).toBe(false);
+    expect(hasReason(g, 'bytecode-not-live')).toBe(true);
+  });
+
+  it('a lane that is not a known credential cell cannot prove its runtime, so it disqualifies', () => {
+    const g = gradeNight(night({ lane: 'deno' }), { lane: 'deno' });
+    expect(hasReason(g, 'bytecode-not-live')).toBe(true);
+  });
+
+  it('a non-live night RESTARTS the credential streak (it is disqualified, not skipped)', () => {
+    // streakOf(13) spans run ids 40000000000..40000012000; the cold night sits
+    // right after it and the resumed streak after that (the audit sorts by id).
+    const cold = night({ runId: '40000012500' });
+    cold.shards = cold.shards.map((s) => ({
+      ...s,
+      bytecode: { runtime: 'node', deploys: 3, live: 0, notLive: 3, reasons: [] },
+    }));
+    const a = auditWindow([
+      ...streakOf(13, 'sha256:aaaa'),
+      cold,
+      ...streakOf(2, 'sha256:aaaa', 40000020000),
+    ]);
+    expect(a.longest.nights).toBe(13);
+    expect(a.current.nights).toBe(2);
+    expect(a.met).toBe(false);
+  });
+
+  it('the other half: fourteen live nights meet the gate', () => {
+    expect(auditWindow(streakOf(14, 'sha256:aaaa')).met).toBe(true);
+  });
+
+  it('early-warning (main) nights are NOT graded on it — that scope stays a comparable report', () => {
+    const n = night({
+      compatMode: 'early-warning',
+      credential: false,
+      knextRef: 'refs/heads/main',
+    });
+    n.shards = n.shards.map(({ bytecode: _b, ...s }) => s as ShardRow);
+    const g = gradeNight(n, { scope: 'early-warning' });
+    expect(hasReason(g, 'bytecode-not-live')).toBe(false);
   });
 });

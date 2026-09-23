@@ -2684,23 +2684,31 @@ describe('compat-suite boot-mode ledger — positive proof of what booted (test-
     expect(ledgerCheck, 'ledger check must come AFTER the fail-on-red gate').toBeGreaterThan(gate);
   });
 
-  it('is a no-op on the node lane, and fails when the bun-lane ledger is missing, empty, or non-compiled-exec', () => {
+  it('runs on EVERY lane (bytecode caching must be proven live in every cell), and fails when the ledger is missing, empty, or not live', () => {
     const step =
       src.match(
         /-\s+name:[^\n]*Verify boot-mode ledger[\s\S]*?(?=\n\s*-\s+name:|\n {2}[a-z])/,
       )?.[0] ?? '';
     expect(step).not.toBe('');
+    // #1221 — no node-lane exemption any more: the node cells must prove their
+    // V8 compile cache live exactly as the bun cells prove the compiled exec.
     expect(
       /if \[ "\$\{KNEXT_RUNTIME\}" != "bun" \]/.test(step),
-      'must no-op on the node lane — the ledger contract is bun-lane only',
-    ).toBe(true);
+      'must NOT no-op on the node lane — every cell proves bytecode caching live',
+    ).toBe(false);
     expect(
       /! -f "\$\{LEDGER\}"|! -s "\$\{LEDGER\}"/.test(step),
       'must fail on a missing OR empty ledger — no lines is NOT proof of anything',
     ).toBe(true);
     expect(
-      /grep -vc '\^mode=compiled-exec /.test(step),
-      'must count lines that are NOT mode=compiled-exec and fail on any',
+      step.includes(
+        'node scripts/e2e-bytecode-liveness.mjs --check --runtime "${KNEXT_RUNTIME}" --ledger "${LEDGER}"',
+      ),
+      'must grade the ledger with the shared liveness rule (bun: compiled exec; node: V8 cache accepted)',
+    ).toBe(true);
+    expect(
+      /if \[ "\$\{LIVE_EXIT\}" != "0" \]; then[\s\S]*?exit 1/.test(step),
+      'must fail the job when the liveness check is not green',
     ).toBe(true);
     expect(
       /GITHUB_STEP_SUMMARY/.test(step),
