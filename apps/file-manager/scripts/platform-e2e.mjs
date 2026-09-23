@@ -548,11 +548,21 @@ async function main() {
       if (later === r1.value) await sleep(500);
     }
     const isr = assertIsr({ reads: [r1, r2], first: r1.value, later });
-    const keys = redisCli(ns, ['--scan', '--pattern', '*knext-smoke/isr*'])
+    const all = redisCli(ns, ['--scan', '--pattern', '*knext-smoke/isr*'])
       .split('\n')
       .filter(Boolean);
+    // `<prefix>:tag:<tag>` is the tag -> paths INDEX (a persistent set), not the
+    // page entry. The entry is every other matching key, and it carries the TTL.
+    const keys = all.filter((k) => !k.includes(':tag:'));
     const ttls = keys.map((k) => Number(redisCli(ns, ['TTL', k])));
-    return `${isr}; ${assertIsrKeysInRedis({ keys, ttls })}`;
+    try {
+      return `${isr}; ${assertIsrKeysInRedis({ keys, ttls })}`;
+    } catch (err) {
+      const seen = all.map((k) => `${k} (TTL ${redisCli(ns, ['TTL', k])})`).join(', ');
+      throw new Error(
+        `${err instanceof Error ? err.message : err} [redis keys: ${seen || 'none'}]`,
+      );
+    }
   });
 
   await check(

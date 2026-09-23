@@ -223,6 +223,13 @@ jobs:
           kubectl -n "$APP_NS" get nextapp file-manager -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}' 2>&1 || true
           kubectl -n "$APP_NS" get revision -o jsonpath='{range .items[*]}{.metadata.name}{": "}{range .status.conditions[*]}{.type}={.status} {.reason} {.message}{" | "}{end}{"\n"}{end}' 2>&1 || true
           kubectl -n "$APP_NS" get events --sort-by=.lastTimestamp 2>&1 | tail -30 || true
+          revs="$(kubectl -n "$APP_NS" get revision -o name --sort-by=.metadata.creationTimestamp)"
+          echo "revision count: $(echo "$revs" | wc -l)"
+          r1="$(echo "$revs" | sed -n 3p)"; r2="$(echo "$revs" | sed -n 4p)"
+          echo "--- diff of $r1 vs $r2 (spec + annotations)"
+          diff <(kubectl -n "$APP_NS" get "$r1" -o json | jq -S '{spec:.spec,ann:.metadata.annotations,lbl:.metadata.labels}') \
+               <(kubectl -n "$APP_NS" get "$r2" -o json | jq -S '{spec:.spec,ann:.metadata.annotations,lbl:.metadata.labels}') || true
+          kubectl -n kn-next-operator-system logs deploy/kn-next-operator-controller-manager --tail=40 2>&1 | cut -c1-400 || true
           for p in $(kubectl -n "$APP_NS" get pods -l serving.knative.dev/service=file-manager -o name 2>/dev/null); do
             kubectl -n "$APP_NS" logs "$p" --all-containers --tail=60 2>&1 || true
           done
