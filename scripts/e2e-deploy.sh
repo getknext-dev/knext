@@ -747,6 +747,30 @@ OWNER_PID="${SERVER_PID}"
   echo "BUILD_LOG=${BUILD_LOG}"
 } >"${LOG_FILE}"
 
+# ── 5b. boot-mode ledger (#1230 review finding) — POSITIVE proof of what
+# actually booted, independent of the harness's own log capture. A passing
+# Next.js test never echoes THIS script's stderr, so a fully-green bun-lane
+# shard carries not one line proving the compiled exec (vs. bun server.js)
+# ever ran — a red-then-fixed lane could go green by silently falling back
+# to the uncompiled script, and nothing in the harness's own summary would
+# say so. One line per deploy, appended (not overwritten — a shard runs many
+# deploys), machine-checkable by the workflow's own step (`if: always()`,
+# runs after the tests, fails the job on any non-compiled-exec line when
+# KNEXT_RUNTIME=bun). RUNNER_TEMP is the GitHub Actions per-job scratch dir;
+# /tmp is the local/off-CI fallback. Every deploy appends (node lane
+# included) so the ledger is a complete audit trail, not just a bun-lane one
+# — the workflow step decides what it requires, this script only records.
+BOOT_MODE_LEDGER="${RUNNER_TEMP:-/tmp}/knext-e2e-boot-modes.log"
+if [ -n "${STANDALONE_EXEC}" ]; then
+  # Reaching this line means standalone-compile.mjs's own bytecode-pragma
+  # check already passed (a failure there is `exit 1` inside the compile
+  # step, well before boot) — bytecode_verified=true is therefore a fact
+  # already proven above, not merely asserted here.
+  echo "mode=compiled-exec runtime=${RUNTIME} image=${STANDALONE_BUN_IMAGE} bytecode_verified=true" >>"${BOOT_MODE_LEDGER}"
+else
+  echo "mode=server-js runtime=${RUNTIME} image=- bytecode_verified=-" >>"${BOOT_MODE_LEDGER}"
+fi
+
 # ── 6. readiness: pid-liveness FIRST, TCP-probe second, port-ownership last ──
 # #171 sys-design follow-up (the free_port TOCTOU): free_port() binds :0 and
 # CLOSES it, and the server re-binds the number — at run-tests.js concurrency 2

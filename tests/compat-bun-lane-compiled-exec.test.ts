@@ -240,6 +240,24 @@ describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec 
     ).toBe(false);
   });
 
+  it('appends a boot-mode ledger line per deploy — the positive proof the compiled exec booted (#1230 review finding)', () => {
+    expect(src.includes('BOOT_MODE_LEDGER="${RUNNER_TEMP:-/tmp}/knext-e2e-boot-modes.log"')).toBe(
+      true,
+    );
+    expect(
+      /echo "mode=compiled-exec runtime=\$\{RUNTIME\} image=\$\{STANDALONE_BUN_IMAGE\} bytecode_verified=true" >>"\$\{BOOT_MODE_LEDGER\}"/.test(
+        src,
+      ),
+      'a compiled-exec deploy must append a compiled-exec line to the ledger',
+    ).toBe(true);
+    expect(
+      /echo "mode=server-js runtime=\$\{RUNTIME\} image=- bytecode_verified=-" >>"\$\{BOOT_MODE_LEDGER\}"/.test(
+        src,
+      ),
+      'an uncompiled (server.js) deploy must append a server-js line to the ledger — so the workflow check can positively tell the two apart',
+    ).toBe(true);
+  });
+
   it('mutation proof: reverting the compile/boot/ownership anchors reds the suite above', () => {
     const mutated = src
       .replace('bun run "${STANDALONE_COMPILE_JS}"', 'bun run "${SOMETHING_ELSE}"')
