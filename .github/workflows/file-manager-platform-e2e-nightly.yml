@@ -191,10 +191,12 @@ jobs:
           kubectl -n "$APP_NS" wait --for=condition=Ready --timeout=300s nextapp/file-manager \
             || (kubectl -n "$APP_NS" get nextapp,ksvc,pods -o wide; kubectl -n "$APP_NS" describe nextapp file-manager; exit 1)
 
-      - name: Reach the cluster (Kourier + MinIO port-forwards)
+      - name: Reach the cluster (kourier-internal + MinIO port-forwards)
         run: |
           set -euo pipefail
-          kubectl -n kourier-system port-forward svc/kourier 8080:80 >/tmp/pf-kourier.log 2>&1 &
+          # The operator serves apps cluster-local (status.url is *.svc.cluster.local),
+          # and Knative programs cluster-local hosts on kourier-internal only.
+          kubectl -n kourier-system port-forward svc/kourier-internal 8080:80 >/tmp/pf-kourier.log 2>&1 &
           kubectl -n "$APP_NS" port-forward svc/minio 9000:9000 >/tmp/pf-minio.log 2>&1 &
           for i in $(seq 1 30); do
             if (exec 3<>/dev/tcp/127.0.0.1/8080) 2>/dev/null && (exec 3<>/dev/tcp/127.0.0.1/9000) 2>/dev/null; then exit 0; fi

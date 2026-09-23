@@ -213,7 +213,7 @@ async function main() {
       ]);
       if (ready !== 'True') throw new Error(`NextApp Ready=${ready || '(absent)'}`);
       const specImage = kubectl(['get', 'nextapp', APP, '-n', ns, '-o', 'jsonpath={.spec.image}']);
-      if (!/^localhost:5001\/file-manager@sha256:[0-9a-f]{64}$/.test(specImage)) {
+      if (!/^localhost:5001\/file-manager(:[\w.-]+)?@sha256:[0-9a-f]{64}$/.test(specImage)) {
         throw new Error(
           `NextApp spec.image "${specImage}" is not the digest-pinned in-cluster push`,
         );
