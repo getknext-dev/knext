@@ -1423,12 +1423,34 @@ export function auditAnonymousWorkflowJob(workflowText) {
   // zero findings. Adding a second checkout is the most ordinary edit this
   // workflow will ever receive.
   const steps = parseJobSteps(block);
-  if (steps.length === 0 && new RegExp(yamlKey('uses')).test(block)) {
-    // Fail closed at the JOB level: the parse yielded nothing at all while the
-    // job clearly has steps, so every per-step rule below would be vacuous.
+  // #1199: fail closed on a `steps:` SHAPE the per-step rules cannot inspect.
+  //
+  // `parseJobSteps` recognises only BLOCK-SEQUENCE items (`- ` entries). A
+  // flow-style `steps: [ {..} ]` or a mapping-shaped `steps:` yields ZERO steps,
+  // so EVERY per-step rule below (the `with:` allowlist, `persist-credentials`,
+  // the step-level `env:` allowlist, the `uses` allowlist) would inspect
+  // nothing and pass VACUOUSLY — an author could smuggle a step-level violation
+  // (a credential-shaped step `env:`, a `persist-credentials: true`) past the
+  // audit purely by choosing a shape the parser cannot read. The earlier net
+  // fired only when the block contained `uses:`, so a flow-style step carrying
+  // just a `run:` + a credential `env:` slipped through with zero findings.
+  // GENUINELY WIDENED here, as an OR of both conditions: the finding fires when
+  // no step parsed AND EITHER a `steps:` key is present (the new coverage: a
+  // flow-style/mapping shape, whatever it carries) OR the block still contains a
+  // `uses:` (the old coverage, kept: a job whose `steps:` key is itself
+  // misspelled — e.g. a typo'd `step:` — but which clearly runs an action).
+  // Replacing rather than OR-ing would have dropped that second case, a coverage
+  // LOSS in a fail-closed guard. The audit's job is to be fail-closed, and a
+  // shape it cannot inspect is a violation, not a pass. The real anonymous-install
+  // workflow uses a block sequence, so it stays green; worst case here is a
+  // parseable shape wrongly rejected, never a smuggled credential admitted.
+  const hasStepsKey = new RegExp(`^\\s*${yamlKey('steps')}`, 'm').test(block);
+  if (steps.length === 0 && (hasStepsKey || new RegExp(yamlKey('uses')).test(block))) {
     findings.push(
-      `job \`${jobId}\` has \`uses:\` steps that could not be parsed as a \`steps:\` sequence — ` +
-        'the per-step credential rules would pass vacuously',
+      `job \`${jobId}\` has steps the parser could not read as a \`- \` block sequence ` +
+        '(a flow-style `steps: [ … ]` value, a mapping, a misspelled `steps:` key, or otherwise ' +
+        'unparseable) — the per-step credential rules cannot inspect it, so it fails closed ' +
+        'rather than passing vacuously',
     );
   }
   for (const [index, stepText] of steps.entries()) {
