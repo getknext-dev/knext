@@ -595,9 +595,9 @@ if [ "${RUNTIME}" != "bun" ]; then
         const basePath = readJson(".next/required-server-files.json").config?.basePath || "";
         const routes = [
           ...Object.keys(readJson(".next/server/pages-manifest.json")),
-          ...Object.keys(readJson(".next/server/app-paths-manifest.json")).map((r) => r.replace(/\/page$/, "") || "/"),
+          ...Object.keys(readJson(".next/server/app-paths-manifest.json")).filter((r) => !r.includes("@")).map((r) => r.replace(/\/(page|route)$/, "").replace(/\/\([^/]+\)/g, "") || "/"),
         ];
-        const ok = (r) => r.startsWith("/") && !r.includes("[") && !r.startsWith("/api") && !r.startsWith("/_") && !/\.[a-z0-9]+$/i.test(r);
+        const ok = (r) => r.startsWith("/") && !r.includes("[") && !r.startsWith("/api") && !r.startsWith("/_") && r !== "/404" && r !== "/500" && !/\.[a-z0-9]+$/i.test(r);
         const pick = routes.includes("/") ? "/" : (routes.filter(ok).sort()[0] ?? "/");
         process.stdout.write(`${basePath}${pick}`);
       ' "${STANDALONE_APP_DIR}")"
