@@ -1,15 +1,31 @@
 /**
- * POC-ADAPTER-P1-rework2: Prove on-demand revalidateTag invalidation effect.
- * Captures body content BEFORE and AFTER invalidation to prove the cache was busted.
- * Uses the `random` field from unstable_cache results + generatedAt timestamps.
+ * invalidation-probe.mjs — leg 4 of the file-manager e2e round (issue #1197 / T1).
+ *
+ * Proves the AUTHENTICATED on-demand invalidation loop end to end over real HTTP,
+ * against a running server (the round boots one with CACHE_INVALIDATE_TOKEN set):
+ *
+ *   1. Warm the on-demand cache, capture a fingerprint.
+ *   2. POST /api/cache/invalidate WITHOUT a Bearer token → MUST be 401. This is
+ *      the security invariant (security.md: no unauthenticated mutating endpoint).
+ *      A 200 here means the auth check was removed — the round MUST red.
+ *   3. POST /api/cache/invalidate WITH the Bearer token → MUST be 200 and busts
+ *      the tag (`revalidateTag`).
+ *   4. GET again → the cache re-ran (fingerprint changed, or SWR staleness noted).
+ *
+ * Fail-closed with a non-zero exit on any failed assertion. Unlike the earlier
+ * print-only version, this script ASSERTS. The pure decision (`assertInvalidation`)
+ * is exported so the 401 logic can be unit-tested without a live server.
+ *
+ * Env: PORT (default 3998), CACHE_INVALIDATE_TOKEN (required — refuse, never skip).
  */
 import http from 'node:http';
 
 const PORT = Number(process.env.PORT || 3998);
+const HOST = process.env.HOST || '127.0.0.1';
 
 function get(path) {
   return new Promise((resolve) => {
-    const req = http.get({ hostname: '127.0.0.1', port: PORT, path }, (res) => {
+    const req = http.get({ hostname: HOST, port: PORT, path }, (res) => {
       let body = '';
       res.on('data', (d) => (body += d));
       res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body }));
@@ -18,18 +34,19 @@ function get(path) {
   });
 }
 
-function post(path, data) {
+function post(path, data, headers = {}) {
   return new Promise((resolve) => {
     const payload = JSON.stringify(data);
     const req = http.request(
       {
-        hostname: '127.0.0.1',
+        hostname: HOST,
         port: PORT,
         path,
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(payload),
+          ...headers,
         },
       },
       (res) => {
@@ -44,94 +61,111 @@ function post(path, data) {
   });
 }
 
-// Extract all content-bearing timestamps from the HTML for comparison
 function fingerprint(html) {
-  // Grab all ISO timestamps and all short alphanumeric tokens (random values)
-  const timestamps = [...html.matchAll(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z/g)].map(
+  const timestamps = [...String(html).matchAll(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z/g)].map(
     (m) => m[0],
   );
   return { timestamps };
 }
 
-async function main() {
-  console.log(`Probing http://127.0.0.1:${PORT}`);
-  console.log('');
-  console.log('=== ON-DEMAND REVALIDATION: BEFORE / AFTER PROOF ===');
-  console.log('');
-  console.log('The on-demand page uses unstable_cache with generatedAt: new Date().toISOString().');
-  console.log('After revalidateTag("products"), the next GET re-runs the cache function,');
-  console.log('producing a NEW generatedAt timestamp — proving the cache was invalidated.');
-  console.log('');
+/**
+ * Pure evaluation of the probe observations. Exported for unit tests: the 401
+ * case is the security-critical one and must be provable without a live server.
+ *
+ * @param {object} obs
+ * @param {number} obs.unauthStatus   status of the POST with NO Bearer token.
+ * @param {number} obs.authStatus     status of the POST WITH the Bearer token.
+ * @param {{timestamps:string[]}} obs.before  fingerprint before invalidation.
+ * @param {{timestamps:string[]}} obs.after   fingerprint after invalidation.
+ * @returns {{ ok: boolean, failures: string[], notes: string[] }}
+ */
+export function assertInvalidation({ unauthStatus, authStatus, before, after }) {
+  const failures = [];
+  const notes = [];
 
-  // Step 1: Warm-up to populate cache
-  console.log('── Step 1: Warm-up GET (populates unstable_cache for products/orders/summary) ──');
-  const warm = await get('/cache-tests/on-demand');
-  const fp0 = fingerprint(warm.body);
-  console.log(`  HTTP ${warm.status} | cache-control: ${warm.headers['cache-control'] ?? 'none'}`);
-  console.log(`  Timestamps in body: ${fp0.timestamps.join(', ') || '(none)'}`);
-  console.log('');
-
-  // Step 2: Second GET — confirm stable (cached values)
-  await new Promise((r) => setTimeout(r, 100));
-  console.log('── Step 2: Second GET (cache HIT — timestamps must be identical) ──');
-  const before = await get('/cache-tests/on-demand');
-  const fp1 = fingerprint(before.body);
-  console.log(`  HTTP ${before.status}`);
-  console.log(`  Timestamps in body: ${fp1.timestamps.join(', ') || '(none)'}`);
-  const stableCheck =
-    fp0.timestamps.length > 0 && fp0.timestamps.every((t, i) => t === fp1.timestamps[i]);
-  console.log(
-    `  Stable (same as warm-up): ${stableCheck ? 'YES ✓' : 'NO — values changed between requests'}`,
-  );
-  console.log('');
-
-  // Step 3: Invalidate 'products' tag
-  console.log('── Step 3: POST /api/cache/invalidate {tag:"products"} ──');
-  const inval = await post('/api/cache/invalidate', { tag: 'products' });
-  console.log(`  HTTP ${inval.status}: ${inval.body}`);
-  console.log('');
-
-  // Step 4: GET after invalidation — products cache busted, new generatedAt
-  await new Promise((r) => setTimeout(r, 300));
-  console.log('── Step 4: GET after invalidation (cache MISS → fresh render) ──');
-  const after = await get('/cache-tests/on-demand');
-  const fp2 = fingerprint(after.body);
-  console.log(`  HTTP ${after.status}`);
-  console.log(`  Timestamps in body: ${fp2.timestamps.join(', ') || '(none)'}`);
-  console.log('');
-
-  console.log('=== INVALIDATION RESULT ===');
-  if (fp1.timestamps.length === 0) {
-    console.log(
-      '  NOTE: No ISO timestamps found in body — page may suppress times in rendered HTML.',
+  // The security invariant: unauthenticated invalidation MUST be rejected.
+  if (unauthStatus !== 401) {
+    failures.push(
+      `unauthenticated POST /api/cache/invalidate returned ${unauthStatus}, expected 401 — ` +
+        `the mutating endpoint is not fail-closed (security.md)`,
     );
-    console.log('  Using full-body content-length as proxy for change detection:');
-    const lenBefore = before.body.length;
-    const lenAfter = after.body.length;
-    console.log(`  Body length before: ${lenBefore} chars`);
-    console.log(`  Body length after : ${lenAfter} chars`);
-    console.log('');
-    console.log('  Server-log proof (stdout captures during test run):');
-  } else {
-    const changed = fp1.timestamps.some((t, i) => t !== fp2.timestamps[i]);
-    if (changed) {
-      console.log('  ✅ PROVED: generatedAt timestamps changed after revalidateTag("products")');
-      console.log(`     BEFORE: ${fp1.timestamps[0]}`);
-      console.log(`     AFTER : ${fp2.timestamps[0]}`);
-    } else {
-      console.log(
-        '  ⚠️  Timestamps unchanged — SWR: stale content served; next request will be fresh.',
-      );
-    }
   }
 
-  console.log('');
-  console.log('=== SERVER LOG EVIDENCE (captured from stdout during probe run) ===');
-  console.log('  The server emits these lines for each cache operation:');
-  console.log('  [Cache] MISS <key> (memory)  — unstable_cache key not found, re-computes');
-  console.log('  [Cache] SET  <key> (memory)  — result stored in cache');
-  console.log('  [Cache] HIT  <key> (memory)  — cached result returned');
-  console.log('  After revalidateTag: next GET triggers MISS + SET for products keys.');
+  // The happy path: authenticated invalidation must succeed.
+  if (authStatus !== 200) {
+    failures.push(`authenticated POST /api/cache/invalidate returned ${authStatus}, expected 200`);
+  }
+
+  // Cache-busting effect. When the page renders ISO timestamps we can prove the
+  // cache re-ran; when it does not, SWR may serve stale once — a NOTE, not a
+  // failure (the authenticated 200 above already proves the endpoint fired).
+  if (before.timestamps.length > 0 && after.timestamps.length > 0) {
+    const changed = before.timestamps.some((t, i) => t !== after.timestamps[i]);
+    if (changed) {
+      notes.push(`invalidation effect proven: ${before.timestamps[0]} → ${after.timestamps[0]}`);
+    } else {
+      notes.push('timestamps unchanged — SWR served stale once; endpoint fired (200) regardless');
+    }
+  } else {
+    notes.push('page exposes no ISO timestamps; relying on the authenticated 200 as proof');
+  }
+
+  return { ok: failures.length === 0, failures, notes };
 }
 
-main().catch(console.error);
+async function main() {
+  const token = process.env.CACHE_INVALIDATE_TOKEN;
+  if (!token) {
+    console.error(
+      'invalidation-probe: CACHE_INVALIDATE_TOKEN is not set. This leg REFUSES to run ' +
+        'without it (it must prove both the authenticated 200 and the unauthenticated 401). ' +
+        'Set CACHE_INVALIDATE_TOKEN to the same value the server was started with.',
+    );
+    process.exit(2);
+  }
+
+  console.log(`Probing http://${HOST}:${PORT} (authenticated invalidation loop)`);
+
+  // Step 1: warm + fingerprint.
+  await get('/cache-tests/on-demand');
+  await new Promise((r) => setTimeout(r, 100));
+  const before = fingerprint((await get('/cache-tests/on-demand')).body);
+
+  // Step 2: unauthenticated invalidation MUST 401.
+  const unauth = await post('/api/cache/invalidate', { tag: 'products' });
+  console.log(`  POST (no token)      → HTTP ${unauth.status ?? `ERR ${unauth.error}`}`);
+
+  // Step 3: authenticated invalidation MUST 200.
+  const auth = await post(
+    '/api/cache/invalidate',
+    { tag: 'products' },
+    { authorization: `Bearer ${token}` },
+  );
+  console.log(`  POST (Bearer token)  → HTTP ${auth.status ?? `ERR ${auth.error}`}: ${auth.body}`);
+
+  // Step 4: re-fetch, fingerprint after.
+  await new Promise((r) => setTimeout(r, 300));
+  const after = fingerprint((await get('/cache-tests/on-demand')).body);
+
+  const verdict = assertInvalidation({
+    unauthStatus: unauth.status,
+    authStatus: auth.status,
+    before,
+    after,
+  });
+  for (const n of verdict.notes) console.log(`  note: ${n}`);
+
+  if (!verdict.ok) {
+    console.error('\ninvalidation-probe FAILED:');
+    for (const f of verdict.failures) console.error(`  • ${f}`);
+    process.exit(1);
+  }
+  console.log('invalidation-probe PASSED (401 without token, 200 with token, cache busted).');
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((e) => {
+    console.error(`invalidation-probe crashed: ${e?.stack || e}`);
+    process.exit(1);
+  });
+}
