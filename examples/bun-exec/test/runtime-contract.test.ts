@@ -497,18 +497,30 @@ describe('drainPending — awaits work registered DURING the drain', () => {
     expect(depth).toBe(5);
   });
 
-  it('returns at once when nothing is pending, and a rejected task does not abort the drain', async () => {
-    await drainPending();
-    let ran = false;
-    waitUntil(Promise.reject(new Error('boom')));
+  it('a task that REJECTS mid-drain does not end the drain before later nested work', async () => {
+    // Guards two things at once, each mutation-proved:
+    //  - the loop: the rejecting task and the nested task are both registered
+    //    WHILE the drain is awaiting the outer task, so a one-snapshot drain
+    //    returns without either;
+    //  - rejection isolation: the rejection settles FIRST. If `waitUntil`
+    //    stopped swallowing rejections, `Promise.all` in the drain would reject
+    //    on it and the drain would end (by throwing) with the nested task
+    //    still pending.
+    let nestedRan = false;
     waitUntil(
       (async () => {
         await sleep(10);
-        ran = true;
+        waitUntil(Promise.reject(new Error('boom')));
+        waitUntil(
+          (async () => {
+            await sleep(40);
+            nestedRan = true;
+          })(),
+        );
       })(),
     );
     await drainPending();
-    expect(ran).toBe(true);
+    expect(nestedRan).toBe(true);
   });
 });
 
