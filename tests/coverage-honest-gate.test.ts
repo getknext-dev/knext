@@ -123,4 +123,19 @@ describe('scripts/check-coverage.mjs — the honest floor, at its exact boundary
   test('negative control: one uncovered NOISE line moves nothing — still GREEN', () => {
     expect(runChecker(lcov({ uncoverNoise: noiseLines[0] }))).toBe(0);
   });
+
+  test('FAIL-CLOSED: a source the gate cannot read keeps every record — its one miss still reds', () => {
+    // Only the missing FAKE file, one hit below the floor, and the miss is line 1.
+    // Were a missing source read as empty, line 1 would classify as blank and be
+    // dropped — and the file would clear the floor with that miss hidden.
+    const hits = hitNeeded - 1;
+    const da: Array<[number, number]> = Array.from({ length: T }, (_, i) => [
+      i + 1,
+      i === 0 ? 0 : i <= hits ? 1 : 0,
+    ]);
+    // Precondition: the file is below the floor, and dropping line 1 would lift it over.
+    expect((100 * hits) / T).toBeLessThan(floor);
+    expect((100 * hits) / (T - 1)).toBeGreaterThanOrEqual(floor);
+    expect(runChecker(record(FAKE, da, 10))).not.toBe(0);
+  });
 });
