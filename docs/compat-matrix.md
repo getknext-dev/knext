@@ -84,6 +84,42 @@ gate, not the official suite — the official suite has its own row, own workflo
   Policy: the alert issue opens → triage the shard logs → if the red persists, **flip this row
   back to ❌ citing the red run**. The matrix guard enforces evidence only in the ✅ direction
   (evidence IFF ✅), so the honest flip-back is always free.
+- **A credential night requires bytecode caching proven LIVE, in every cell.** Bytecode caching is
+  mandatory in every supported runtime×builder cell. A night counts toward a cell's 14-night window
+  only if **every shard** proves that **every deploy** had live caching at runtime. Being configured
+  is not enough.
+  - **Bun cells:** the deploy booted the compiled `--bytecode` executable, and the fail-closed
+    build-time verifier passed on it.
+  - **Node cells:** the harness bakes a V8 compile cache from Next's framework modules and never from
+    fixture code. It then boots `server.js` with that cache, and V8's own
+    `NODE_DEBUG_NATIVE=COMPILE_CACHE` output must show at least 100 accepted entries and a hit ratio
+    of at least 0.5.
+
+    Measured on a real Next 16.2 standalone server:
+
+    | Boot | Accepted | Missed |
+    |---|---|---|
+    | Baked | 416 | ~9 |
+    | Cold | 0 | 426 |
+
+  How the evidence travels:
+  1. `scripts/e2e-deploy.sh` appends one line per deploy to the boot ledger.
+  2. `scripts/e2e-summary.mjs --boot-ledger` folds those lines into each shard summary's `bytecode`
+     block.
+  3. The block rides unchanged into `compat-run-ledger`.
+  4. `scripts/compat-window-audit.mjs` (rule 7) disqualifies a credential night where any shard's
+     block is missing, is for the wrong runtime, or has `live < deploys`. Missing evidence
+     disqualifies too (fail closed).
+
+  The per-shard "Verify boot-mode ledger" step fails the job loudly on every lane. The rule is keyed
+  on the cell's **runtime** through `CREDENTIAL_CELLS`, so a runtime×builder lane wired later inherits
+  it by writing the same evidence lines. The single definition of "live" is
+  `scripts/e2e-bytecode-liveness.mjs`. It sits in the frozen harness set, so lowering a floor moves
+  the fingerprint and restarts the window. `scripts/mutation-prove-bytecode-liveness.mjs` proves the
+  guards are not decoration:
+  - disabling the node cache (no `NODE_COMPILE_CACHE` at boot, a skipped bake, or no accepted-entry
+    floor) reds a spec;
+  - accepting a non-bytecode bun boot reds a spec.
 
 ## Lane-scoped ledger (#281 / #282)
 

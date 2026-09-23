@@ -88,6 +88,29 @@ compilation is a smaller slice of the total than on a fast, warm-image cluster.
 Treat it as a real but **environment-dependent** improvement, not a guaranteed number. Measure your
 own cold start if it matters to your service-level objectives.
 
+## Verified live, not just configured
+
+Bytecode caching is on in every supported runtime and builder combination. knext's compatibility
+results count only when caching is shown to be **working at runtime**. Configuring it isn't enough.
+Every deployment in a compatibility run records evidence, and a run without that evidence can't
+count toward the published credential:
+
+| Runtime | What counts as live |
+|---|---|
+| **Node** | The server boots with a compile cache that was built ahead of time. Node's own diagnostics must then report that it **accepted** cached code for at least 100 modules, and for at least half of everything it looked up. A cache directory that merely exists on disk proves nothing, because Node writes one on every exit, including a cold boot. |
+| **Bun** | The server that boots is the compiled executable, and its bytecode was verified when it was built. A deployment that boots the uncompiled server script doesn't count. |
+
+You can run the same check against your own image on Node. Start one container with
+`NODE_DEBUG_NATIVE=COMPILE_CACHE` and count the lines that say `was accepted`:
+
+```sh
+docker run --rm -e NODE_DEBUG_NATIVE=COMPILE_CACHE <your-image> 2>&1 | grep -c 'was accepted'
+```
+
+A healthy image reports hundreds of accepted entries. Zero means the cache is not being read. The
+most common cause is a bake that ran as a different user than the one the server runs as, because
+Node stores the cache per user.
+
 ## If the cache directory is unavailable
 
 Bytecode caching is an **optimisation, never a dependency**: if the cache directory cannot be used,
