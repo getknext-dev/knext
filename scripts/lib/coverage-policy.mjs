@@ -124,13 +124,19 @@ export const THRESHOLDS = {
  * production `PreviewPreflight` wired when a caller omits `deps.preflight` —
  * every existing preview test injects a no-op) and `extractTag`'s
  * no-tag-found fallback (`Date.now()` buildId for a digest-only image ref).
- * Both closed, mutation-proved. The dispatcher (`preview()` + its
- * `isEntrypoint` self-entry block) and `defaultBuildAndPush`'s docker/npm
- * shell-outs are deliberately left uncovered — same repo-wide pattern as
- * `deploy()` in `deploy.ts` (its own dispatcher is equally untested
- * in-process; real coverage of that class comes from `cli-node-runtime.test.ts`
- * spawning the BUILT bin, which is opaque to V8/bun coverage by design, per
- * `cli-usage-surface.test.ts`'s own docblock). Full-suite local measurement
+ * Both closed, mutation-proved. At the time, the dispatcher (`preview()` +
+ * its `isEntrypoint` self-entry block) and `deploy.ts`'s equivalent were left
+ * deliberately uncovered on the assumption that in-process coverage of a
+ * self-entry block was unreachable — real coverage of that class was said to
+ * come only from `cli-node-runtime.test.ts` spawning the BUILT bin, opaque to
+ * V8/bun coverage by design. That assumption was WRONG (see the B4 and #1279
+ * paragraphs below): `isEntrypoint` compares two `realpathSync`-resolved
+ * paths, both settable from a test, so both dispatchers ARE reachable
+ * in-process and are now covered by `build-entrypoint-dispatch.test.ts`,
+ * `deploy-entrypoint-dispatch.test.ts`, and `preview-entrypoint-dispatch.test.ts`.
+ * `defaultBuildAndPush`'s docker/npm shell-outs remain deliberately
+ * uncovered — genuine subprocess/network, out of scope for any of these
+ * batches. Full-suite local measurement
  * (244 of 245 per-package `src` test files; `coverage-margin.test.ts`
  * excluded, a known separate hang, #1248-adjacent) raised
  * **`packages/kn-next/src/**` lines to 79.01% (9955/12600)**. The floor moves
@@ -194,11 +200,13 @@ export const PER_PATH_THRESHOLDS = {
  * Floors move to 92.5 (both), the measured value rounded DOWN to 0.5, per the ratchet
  * convention. Raw floors are left unchanged (79 / 79.0) — both measure above their raw
  * floor already; raising them is not this batch's target and the margin is kept.
- * A residual, non-actionable gap remains in both cr-builder.ts and deploy.ts: the
- * `isEntrypoint` self-entry dispatcher block in deploy.ts (lines 975-1063) is left
- * deliberately untested in-process, matching the B3 precedent above (covered by
- * cli-node-runtime.test.ts's built-binary spawn suite, not unit tests); and a handful of
- * lines in both files are the 2nd+ physical line of a `+`-joined multi-line string
+ * A residual gap remained in both cr-builder.ts and deploy.ts: the `isEntrypoint`
+ * self-entry dispatcher block in deploy.ts (lines 975-1063) was left untested in-process,
+ * matching the B3 precedent above (covered by cli-node-runtime.test.ts's built-binary
+ * spawn suite, not unit tests) — that claim, like B3's, turned out to be WRONG rather
+ * than a permanent limit; see the #1279 paragraph below, which closes it the same way
+ * `build.ts`'s dispatcher was closed in B4. The remaining, still-accurate residual is a
+ * handful of lines in both files that are the 2nd+ physical line of a `+`-joined multi-line string
  * literal inside an already-executed throw/return. Verified directly against the
  * per-process lcov (`coverage-bun/*.info`), not assumed: in the report from a test that
  * ACTUALLY executes the branch (e.g. deploy-apply-diagnostics.test.ts, cr-apply-strict-
@@ -280,14 +288,61 @@ export const PER_PATH_THRESHOLDS = {
  * against the actual convention, and it does not appear again. Raw floors
  * are left unchanged (77 / 79.0): both measure comfortably above them
  * already, and raising them is not this batch's target.
+ *
+ * ## Ratchet: #1279 — deploy.ts / preview.ts dispatcher coverage
+ *
+ * Closes the follow-up the B4 paragraph above named: applies the same
+ * in-process `isEntrypoint` technique to `deploy.ts`'s dispatcher (lines
+ * 971-1067 — verb routing for create/init-ci/doctor/status/db/rollback/gc/
+ * build/cleanup/validate, the ADR-0046 unknown-command rejection, and the
+ * usage-error/config-not-found/fatal-fallback exit contract, including the
+ * per-verb `label` ternary in the fatal fallback) and `preview.ts`'s simpler
+ * single-function dispatcher (the same error-handling tail, plus its
+ * `process.exit`-free success path). Both were previously assumed to be the
+ * same non-actionable class as `build.ts`'s dispatcher (B2/B3 paragraphs
+ * above) — that assumption was already disproven for `build.ts` in B4, and
+ * the same proof applies unchanged: `isEntrypoint` only compares two
+ * `realpathSync`-resolved paths, both settable from a test. New test files:
+ * `deploy-entrypoint-dispatch.test.ts` (25 tests) and
+ * `preview-entrypoint-dispatch.test.ts` (6 tests), both mutation-proved.
+ * `deploy()`'s own body (the historical deploy flow beyond `loadConfig()`)
+ * and `defaultBuildAndPush`'s docker/npm shell-outs remain out of scope —
+ * covered elsewhere (`deploy-orchestrator.test.ts` and friends) or genuinely
+ * subprocess/network.
+ *
+ * Full local suite (443 test files; the same pre-existing environment-only
+ * failures as B2/B3/B4 — `tests/bun-exec-example-suite-collection.test.ts`,
+ * `tests/scaffold-pack-contents.test.ts` — plus `tests/kn-next-alias.test.ts`,
+ * which needs `@getknext/core` npm-installed rather than workspace-linked and
+ * is unrelated to this batch), measured with `dist/` built for kn-next + lib
+ * + db:
+ *
+ *   - global:                  honest 93.53% → **93.74% (9408/10036)**, raw 79.84% (11250/14090)  (CI, job 107327422828)
+ *   - packages/kn-next/src/**: honest 93.57% → **93.80% (8528/9092)**, raw 79.84% (10235/12820)  (CI, job 107327422828)
+ *
+ * RAW-denominator hazard found while landing this (bun 1.4): when NO function
+ * in a file executed under its canonical module instance, bun's lcov reports
+ * EVERY line of the file (interface fields and type declarations included) as
+ * coverable — `deploy.ts` went 524 -> 849 lines. The `?bust=N` instances a
+ * dispatcher test loads are separate module instances, so a test that only
+ * drives the dispatcher leaves the canonical file at FNH=0. The fix is in the
+ * test, not the gate: `deploy-entrypoint-dispatch.test.ts` also calls the
+ * exported `deploy()` once via the canonical import (a real behavioural check),
+ * which restores the normal 553-line report. Nothing is excluded and no floor
+ * is lowered; deleting that call re-inflates the file to 849 lines.
+ *
+ * Floors move to 93.5 (both) — the measured value rounded DOWN to 0.5, per
+ * the ratchet convention. Raw floors are left unchanged (77 / 79.0): both
+ * measure comfortably above them already, and raising them is not this
+ * batch's target.
  */
 export const HONEST_THRESHOLDS = {
-  lines: 93.0,
+  lines: 93.5,
 };
 
 export const HONEST_PER_PATH_THRESHOLDS = {
   'packages/kn-next/src/**': {
-    lines: 93.0,
+    lines: 93.5,
   },
 };
 
