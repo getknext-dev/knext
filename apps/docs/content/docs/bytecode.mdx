@@ -25,8 +25,13 @@ produced:
 
 - It sends a request to your configured **health check path** (`healthCheckPath` in
   `kn-next.config.ts`, default `/api/health`) and requires a **2xx response within 30 seconds**. A
-  custom health route works automatically — nothing extra to configure — but if your app has *no*
-  route at the configured path, this step, and the image build with it, fails.
+  custom health route works automatically through `kn-next deploy` and `kn-next preview` — the two
+  commands that actually run `docker build` — which thread it through as a `--build-arg`
+  automatically, nothing extra to configure. A manual `docker build` of a staged Dockerfile (this
+  page's Node image, or the vinext-on-Node image — see [vinext on
+  Node](/docs/build-pipeline#vinext-on-node)) needs `--build-arg
+  KNEXT_HEALTH_CHECK_PATH=<your path>` passed by hand. Either way, if your app has *no* route at
+  the configured path, this step, and the image build with it, fails.
 - It checks the cache that came out the other side against a **minimum size**. A cache that is
   present but implausibly small looks exactly like a healthy one — same configuration, same startup
   path, no error — while doing nothing at runtime, so the build refuses to ship it.

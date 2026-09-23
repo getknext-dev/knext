@@ -346,8 +346,15 @@ function extractTag(imageRef: string): string | undefined {
  * Default production buildAndPush: mirrors deploy.ts's build → push → resolveDigest
  * path, but with the config already overridden to the preview name. Runs the real
  * `npm run build` + `docker buildx build --push` and resolves the @sha256: digest.
+ *
+ * Exported (rather than kept module-private) so
+ * preview-buildarg-passthrough.test.ts can call it directly against the REAL
+ * `selectRuntimeImage`/`dockerBuildxArgs` (#1273 round 2) — asserting the
+ * `bakesCompileCache`/`healthCheckPath` passthrough on this actual code path,
+ * not a stand-in mock of `dockerBuildxArgs` that would stay green if either
+ * line above were deleted.
  */
-async function defaultBuildAndPush(
+export async function defaultBuildAndPush(
     previewName: string,
     config: KnativeNextConfig,
     branch: string,
