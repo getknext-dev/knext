@@ -83,6 +83,35 @@ describe('#1284 findAbsoluteFsPathLeaks', () => {
   it('finds nothing in text with no leaked path', () => {
     expect(findAbsoluteFsPathLeaks(HTML_SERVED)).toEqual([]);
   });
+
+  // The check must not assume a fixed set of build-root names: it has to
+  // catch WHATEVER absolute path the build machine happens to use, not just
+  // `/home/`, `/Users/` or `/root/`. `/repo` is this repo's own Docker
+  // builder stage (apps/file-manager/Dockerfile: `WORKDIR /repo`) — the
+  // exact shape #1284's real root cause (a stale host .vinext cache riding
+  // into that build) would have produced if the container's own path had
+  // leaked instead of the host's.
+  it.each([
+    [
+      '/repo/apps/file-manager/.vinext/fonts/geist-x/geist-y.woff2',
+      'a Docker builder stage (/repo)',
+    ],
+    [
+      '/workspace/apps/file-manager/.vinext/fonts/geist-x/geist-y.woff2',
+      'a devcontainer (/workspace)',
+    ],
+    [
+      '/__w/knext/knext/apps/file-manager/.vinext/fonts/geist-x/geist-y.woff2',
+      'a GitHub container-mode runner (/__w)',
+    ],
+    [
+      '/builds/org/knext/apps/file-manager/.vinext/fonts/geist-x/geist-y.woff2',
+      'a GitLab runner (/builds)',
+    ],
+  ])('finds a leaked path under %s (%s), not only the /home|Users|root prefixes', (url) => {
+    const text = `<link rel="preload" href="${url}" as="font">`;
+    expect(findAbsoluteFsPathLeaks(text)).toEqual([url]);
+  });
 });
 
 describe('#1284 checkFontsServed — RED on the leaked shape, GREEN on the served shape', () => {

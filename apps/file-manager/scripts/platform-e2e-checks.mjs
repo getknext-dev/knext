@@ -594,11 +594,23 @@ export const PUBLIC_FILES = Object.freeze([
  *
  * #1284 used to quarantine the font reference here: the vinext build leaked
  * the build machine's absolute filesystem path into the font URL, so it
- * 404'd by construction and could never be a real asset check. That defect
- * is fixed upstream (vinext's `createGoogleFontsPlugin` now rewrites the
- * cached font CSS to a served, content-hashed `/_next/static/_vinext_fonts/…`
- * URL before embedding it), so the font reference is checked exactly like
- * every other asset — no exemption.
+ * 404'd by construction and could never be a real asset check. Root cause:
+ * `kn-next deploy`/`kn-next build` run the app's own `vite build` on the HOST
+ * before the Docker build, which caches a self-hosted Google Font's CSS at
+ * `.vinext/fonts/<hash>/style.css` with the HOST's absolute path baked in;
+ * the repo-root `.dockerignore` (the file Docker actually reads for this
+ * app's build — see `apps/file-manager/Dockerfile` + `requireBuildContext`)
+ * excluded `.vinext` with a BARE pattern, which only matches at the context
+ * ROOT and never matched the nested `apps/file-manager/.vinext` — so that
+ * stale, host-path-tainted cache rode `COPY . .` into the image, the in-image
+ * `vite build` hit a cache HIT on it, and vinext's rewrite-to-a-served-URL
+ * step no-op'd because the image's own cache directory didn't match the path
+ * already baked into the cached CSS. Fixed by making the pattern recursive
+ * (`**\/.vinext`, `**\/.output` in the root `.dockerignore`) — proved with a
+ * real `docker build` of the unmodified Dockerfile: every font reference now
+ * resolves to a served, content-hashed `/_next/static/_vinext_fonts/…` URL,
+ * so the font reference is checked exactly like every other asset — no
+ * exemption.
  * @param {RequestFn} request
  */
 export async function checkStaticAssets(request) {

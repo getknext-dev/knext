@@ -72,6 +72,19 @@ export function isLeakedFsPath(url) {
  * that could only have come from the machine that ran the build — never a
  * legitimate served URL. Returns every match found (empty = clean).
  *
+ * Matches on the literal `.vinext/fonts/` segment rather than a fixed list of
+ * known build-root names — the earlier shape of this check required a
+ * `/home/`, `/Users/` or `/root/` prefix, which misses every OTHER build
+ * root: `/repo` (this repo's own Docker builder stage, WORKDIR /repo — see
+ * apps/file-manager/Dockerfile), `/workspace`, `/__w` (GitHub-hosted runners
+ * in container mode), `/builds` (GitLab), or anything else a CI vendor or a
+ * developer's own layout happens to use. `.vinext/fonts/` is the unambiguous
+ * signal instead: the FIXED, SERVED shape a correctly-built page emits is
+ * `_next/static/_vinext_fonts/` — one flattened segment, no dot, no literal
+ * `fonts/` after `.vinext` — so a string containing `.vinext/fonts/` is, by
+ * construction, the PRE-REWRITE on-disk cache path, never a URL the server
+ * would legitimately emit, regardless of what precedes it.
+ *
  * Deliberately broader than `isLeakedFsPath`: this also catches a leak that
  * lands somewhere OTHER than a `<link>`/`<style>` tag (e.g. inlined into a
  * JSON payload or a JS string), which is exactly how #1284 was first missed —
@@ -79,7 +92,7 @@ export function isLeakedFsPath(url) {
  * reached by crawling `<link>`/`<style>`, never a raw text scan.
  */
 export function findAbsoluteFsPathLeaks(text) {
-  const re = /\/(?:home|Users|root)\/[^\s"'<>)]*\.vinext\/fonts\/[^\s"'<>)]*/g;
+  const re = /[^\s"'<>)]*\.vinext\/fonts\/[^\s"'<>)]*/g;
   return [...new Set(text.match(re) ?? [])];
 }
 
