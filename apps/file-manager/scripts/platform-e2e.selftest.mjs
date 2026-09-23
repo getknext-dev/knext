@@ -26,7 +26,7 @@ import { createClient } from './platform-e2e-http.mjs';
 const TOKEN = 'selftest-token';
 const IMMUTABLE = 'public, max-age=31536000, immutable';
 
-/** @typedef {{ cssType?: string, immutable?: boolean, buffered?: boolean, openInvalidate?: boolean, deadOptimizer?: boolean, jsCache?: string }} Defects */
+/** @typedef {{ cssType?: string, immutable?: boolean, buffered?: boolean, openInvalidate?: boolean, deadOptimizer?: boolean, bigImage?: boolean, notChunked?: boolean, jsCache?: string }} Defects */
 
 /** @param {Defects} d */
 function makeServer(d) {
@@ -89,7 +89,13 @@ function makeServer(d) {
       );
     }
     if (url === '/knext-smoke/stream') {
-      res.writeHead(200, { 'content-type': 'text/html' });
+      if (d.notChunked) {
+        // Same chunk order, but delimited by connection close - never `chunked`.
+        res.useChunkedEncodingByDefault = false;
+        res.writeHead(200, { 'content-type': 'text/html', connection: 'close' });
+      } else {
+        res.writeHead(200, { 'content-type': 'text/html' });
+      }
       if (d.buffered) {
         setTimeout(
           () => res.end('knext-stream-shell knext-stream-fallback knext-stream-late'),
@@ -104,7 +110,7 @@ function makeServer(d) {
     }
     if (url.startsWith('/_next/image')) {
       if (d.deadOptimizer) return send(500, { 'content-type': 'text/plain' }, 'sharp missing');
-      return send(200, { 'content-type': 'image/webp' }, Buffer.alloc(500, 3));
+      return send(200, { 'content-type': 'image/webp' }, Buffer.alloc(d.bigImage ? 8192 : 500, 3));
     }
     if (url === '/api/cache/invalidate' && req.method === 'POST') {
       const ok = req.headers.authorization === `Bearer ${TOKEN}`;
@@ -163,6 +169,8 @@ const defects = [
   ['stream page buffered (no early chunks)', { buffered: true }, 'stream'],
   ['invalidate endpoint open without a token', { openInvalidate: true }, 'invalidate'],
   ['image optimizer dead (500)', { deadOptimizer: true }, 'image'],
+  ['optimizer output not smaller than the source', { bigImage: true }, 'image'],
+  ['stream delimited by connection close, not chunked', { notChunked: true }, 'stream'],
 ];
 for (const [label, defect, name] of defects) {
   let caught = false;
