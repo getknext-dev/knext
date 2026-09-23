@@ -90,6 +90,8 @@ const MUTATIONS = [
     spec: SPEC_WIRING,
     anchor: '    await import(serverPath);',
     replacement: '    void serverPath;',
+    // `.mjs.hbs` has no extension-derived comment syntax; it is plain JS.
+    commentPrefix: '//',
   },
   {
     label: 'knext: the shipped supervisor stops handing the child NODE_COMPILE_CACHE',
@@ -182,11 +184,11 @@ function specPasses(spec) {
 let pass = 0;
 let fail = 0;
 
-function prove({ label, target, spec, anchor, replacement }) {
+function prove({ label, target, spec, anchor, replacement, commentPrefix }) {
   console.log(`── mutation: ${label}`);
   const snap = snapshot(target);
   try {
-    mutate(snap, anchor, replacement);
+    mutate(snap, anchor, replacement, commentPrefix ? { commentPrefix } : {});
     if (specPasses(spec)) {
       console.log(`   x DECORATION: ${spec} stayed GREEN with the behaviour removed`);
       fail += 1;
