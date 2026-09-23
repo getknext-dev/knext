@@ -101,6 +101,24 @@ describe("selectRuntimeImage — target selection by (build, runtime)", () => {
         expect(sel.target).toBe("standalone-node");
     });
 
+    it("webpack + runtime bun -> staged standalone Dockerfile, --target standalone-bun (#1219)", () => {
+        // webpack reuses the turbopack selection path entirely — it is
+        // selected by artifact SHAPE (next-standalone), not by builder id.
+        const sel = selectRuntimeImage(
+            { build: "webpack", runtime: "bun" },
+            "/app",
+        );
+        expect(sel.kind).toBe("standalone");
+        expect(sel.dockerfile).toBe(join("/app", "Dockerfile.standalone"));
+        expect(sel.target).toBe("standalone-bun");
+    });
+
+    it("webpack + runtime absent -> standalone-node (#1219)", () => {
+        const sel = selectRuntimeImage({ build: "webpack" }, "/app");
+        expect(sel.kind).toBe("standalone");
+        expect(sel.target).toBe("standalone-node");
+    });
+
     it("an unrecognised build id THROWS rather than silently building the standalone recipe (cr-1181 #3, fail-closed)", () => {
         // A caller reading `kn-next.config.ts` at runtime is not TS-checked
         // against `BuilderId` — a config file can carry any string. A future

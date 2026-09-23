@@ -545,6 +545,18 @@ jobs:
       - name: Compiled standalone exec — Pages Router + custom cacheHandler identity e2e
         run: node scripts/bun-test.mjs packages/kn-next/src/__tests__/standalone-pages.docker-e2e.test.ts
 
+      # #1219 round 2 (spec review): the webpack builder was only SHAPE-verified
+      # before this — no real `next build --webpack` had run, nothing had booted.
+      # This runs a REAL `next build --webpack` on the pinned Next version,
+      # verifies the on-disk webpack-only marker (`.next/server/webpack-runtime.js`,
+      # which a Turbopack build never emits), and boots the result on BOTH runtime
+      # cells (node with the image-baked NODE_COMPILE_CACHE default, bun as the
+      # compiled bytecode executable) with a real GET. Same toolchain this job
+      # already set up above (docker + bun + a built @getknext/core), so it fits
+      # here rather than duplicating a whole new job.
+      - name: webpack builder e2e — real build, webpack-marker check, boot on node + bun
+        run: node scripts/bun-test.mjs packages/kn-next/src/__tests__/standalone-webpack-build.docker-e2e.test.ts
+
   # seam-alive gates: RETIRED (#885, stability sprint). The #352 defect class —
   # webpack layers duplicating @getknext/lib module state across the
   # instrumentation and app-server chunks — cannot occur under the vinext

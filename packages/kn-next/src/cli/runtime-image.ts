@@ -41,7 +41,7 @@ export type StandaloneTarget = "standalone-bun" | "standalone-node";
 
 /** The minimal config surface the selection reads. */
 export interface RuntimeImageConfig {
-    build?: "turbopack" | "vinext";
+    build?: "turbopack" | "vinext" | "webpack";
     runtime?: "bun" | "node";
 }
 

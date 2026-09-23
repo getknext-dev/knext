@@ -133,7 +133,7 @@ prove(
 //    dropped one into a single longer streak.
 prove(
   'merged streak: filter unresolved nights out of the lane, so the streak joins across them',
-  "l?.event === 'schedule' && (l?.lane === lane || isUnresolved(l))",
+  "l?.event === 'schedule' && (l?.lane === lane || (isUnresolved(l) && l?.lane == null))",
   "l?.event === 'schedule' && l?.lane === lane",
 );
 

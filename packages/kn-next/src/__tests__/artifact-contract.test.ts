@@ -25,6 +25,7 @@ import {
     RUNTIMES,
     turbopackBuilder,
     vinextBuilder,
+    webpackBuilder,
 } from "../adapters/artifact-contract";
 
 const ALL_SHAPES: readonly ArtifactShape[] = [
@@ -150,6 +151,10 @@ describe("availability is separate from being described (B3)", () => {
         expect(turbopackBuilder.available).toBe(true);
     });
 
+    it("webpack is available too (#1219) — no new toolchain to gate it on", () => {
+        expect(webpackBuilder.available).toBe(true);
+    });
+
     it("AVAILABLE_BUILDERS is derived, not restated", () => {
         expect(AVAILABLE_BUILDERS.map((b) => b.id)).toEqual(
             BUILDERS.filter((b) => b.available).map((b) => b.id),
@@ -218,5 +223,27 @@ describe("the turbopack builder matches the shipped runtime half", () => {
         expect(turbopackBuilder.describeArtifact("/app").execution).toBe(
             "spawn",
         );
+    });
+});
+
+describe("the webpack builder reuses the turbopack artifact shape (#1219)", () => {
+    it("emits the exact same descriptor as turbopack, except the builder identity", () => {
+        // `next build --webpack` and `next build` produce the same
+        // `.next/standalone` tree — one builder id, two ways to spell the
+        // same artifact. The describeArtifact() OUTPUT must be identical so
+        // every shape-keyed downstream step (standaloneStepsApply, the
+        // runtime-image selection, the Bun bytecode compile) treats them the
+        // same without a new branch anywhere.
+        expect(webpackBuilder.describeArtifact("/app")).toEqual(
+            turbopackBuilder.describeArtifact("/app"),
+        );
+        expect(webpackBuilder.id).toBe("webpack");
+        expect(webpackBuilder.id).not.toBe(turbopackBuilder.id);
+    });
+
+    it("both runtimes accept it — same shape as turbopack, so same compatibility", () => {
+        const artifact = webpackBuilder.describeArtifact("/app");
+        expect(isCompatible(nodeRuntime, artifact)).toBe(true);
+        expect(isCompatible(bunRuntime, artifact)).toBe(true);
     });
 });

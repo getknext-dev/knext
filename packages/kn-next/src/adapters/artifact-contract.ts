@@ -71,7 +71,7 @@ export type ArtifactShape = "next-standalone" | "nitro-output-bun";
  */
 
 /** Which builder produced an artifact. */
-export type BuilderId = "turbopack" | "vinext";
+export type BuilderId = "turbopack" | "vinext" | "webpack";
 
 /** Which process executes it. Mirrors the shipped `runtime` config key. */
 export type RuntimeId = "node" | "bun";
@@ -199,6 +199,41 @@ export const turbopackBuilder: BuilderAdapter = {
 };
 
 /**
+ * `next build --webpack` → `.next/standalone/server.js`, spawned by the same
+ * supervisor as `turbopackBuilder` (#1219).
+ *
+ * webpack emits the IDENTICAL artifact shape as the turbopack builder —
+ * `next-standalone`, same entry, same execution mode — because both are the
+ * same `next build` command with a different bundler flag, and the standalone
+ * output the adapter produces does not vary by bundler. That identity is the
+ * whole point of the shape-keyed contract (see the module docstring): a second
+ * builder that emits a shape the contract already knows inherits every
+ * downstream step (`standaloneStepsApply`, the runtime-image selection in
+ * `runtime-image.ts`, the Bun bytecode compile in `build.ts`) for free, with
+ * no new branch anywhere keyed on the builder id. Only `describeArtifact`
+ * exists as its own object so `BUILDERS` can enumerate a real, distinct
+ * `BuilderAdapter` per id — the object identity is what the CLI reports back
+ * (`kn-next.config.ts`'s `build` value), not a difference in what gets built.
+ *
+ * AVAILABLE from the start: nothing about running `next build --webpack`
+ * needs new toolchain — it is the same `next` binary the turbopack target
+ * already depends on.
+ */
+export const webpackBuilder: BuilderAdapter = {
+    id: "webpack",
+    emits: "next-standalone",
+    available: true,
+    describeArtifact(root: string): BuildArtifact {
+        return {
+            shape: "next-standalone",
+            root,
+            entry: ".next/standalone/server.js",
+            execution: "spawn",
+        };
+    },
+};
+
+/**
  * vinext (the Vite/rolldown Next reimplementation) → a nitro `.output`, run
  * **in-process**.
  *
@@ -299,6 +334,7 @@ export const bunRuntime: RuntimeAdapter = {
 export const BUILDERS: readonly BuilderAdapter[] = [
     turbopackBuilder,
     vinextBuilder,
+    webpackBuilder,
 ];
 
 /**
