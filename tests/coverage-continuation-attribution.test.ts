@@ -376,11 +376,14 @@ describe('continuationAnchors — the HARD INVARIANT: never attribute what could
   });
 
   test('a short-circuit or an assignment BEFORE the chain (in a group) blocks attribution', () => {
+    // Each fixture fails ONE rule only (every other rule passes), so the guard
+    // it names is observed on its own: `'' ||` holds no identifier, and the
+    // function has nothing before its first statement.
     const src = [
       'let y = "";',
-      'function h(x: string | undefined): string {',
+      'function h(): string {',
       '  return (',
-      "    (x || 'dflt') +",
+      "    ('' || 'dflt') +",
       "    'after or' // AFTEROR",
       '  );',
       '}',
@@ -396,17 +399,26 @@ describe('continuationAnchors — the HARD INVARIANT: never attribute what could
   });
 
   test('a property-access callee (`console.log(`) blocks attribution', () => {
-    const src = ['console.log( // CALL', "  'a ' +", "    'b', // PROPCALL", ');'].join('\n');
+    const src = [
+      'function h(): void {',
+      '  console.log( // CALL',
+      "    'a ' +",
+      "      'b', // PROPCALL",
+      '  );',
+      '}',
+    ].join('\n');
     expectNotAttributed(src, '// PROPCALL');
   });
 
   test('an OPTIONAL call (`fn?.(`) blocks attribution — its args may never evaluate', () => {
     const src = [
       'declare const fn: ((s: string) => void) | undefined;',
-      'fn?.(',
-      "  'a ' +",
-      "    'b', // OPTCALL",
-      ');',
+      'function h(): void {',
+      '  fn?.(',
+      "    'a ' +",
+      "      'b', // OPTCALL",
+      '  );',
+      '}',
     ].join('\n');
     expectNotAttributed(src, '// OPTCALL');
   });
@@ -439,6 +451,21 @@ describe('continuationAnchors — the HARD INVARIANT: never attribute what could
     expectNotAttributed(src, '// ARROWTAIL');
     expectNotAttributed(src, '// PLUSEQ');
     expectNotAttributed(src, '// INSUBST');
+  });
+
+  test('the climb alone refuses a literal inside a `${…}` body (every other rule passes)', () => {
+    // First statement of a function (rule 5), nothing but `const t =` and a
+    // TemplateHead before the literal (rule 4), a pure line (rule 1): only the
+    // climb (rule 2) stops at the TemplateSpan. Isolates that guard.
+    const src = [
+      'function h(): string {',
+      '  const t = `${',
+      "    'inner' // CLIMBONLY",
+      '  }`;',
+      '  return t;',
+      '}',
+    ].join('\n');
+    expectNotAttributed(src, '// CLIMBONLY');
   });
 
   test('a source with parse errors is not analysed at all', () => {

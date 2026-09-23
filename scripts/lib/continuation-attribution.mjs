@@ -290,9 +290,11 @@ function nothingRiskyBefore(stmt, lit, sf) {
     // An identifier only as a call / `new` CALLEE (`new Error(`). As an operand
     // it is string-converted — `sym + 'a'`, `${obj}` — and that conversion can
     // throw (a Symbol; a throwing toString/valueOf), skipping the literal.
+    // This also refuses every ASSIGNMENT before the literal: its target is an
+    // identifier (refused here) or a property / element access or a destructuring
+    // pattern (none in PRECEDING_OK) — so `=` needs no check of its own. A separate
+    // one was removed in the #1268 review because no fixture could observe it.
     if (n.kind === K.Identifier && !isCallee(n) && !isDeclaredName(n)) return false;
-    // `=` only as a declaration's initializer — never an assignment expression.
-    if (n.kind === K.EqualsToken && !ts.isVariableDeclaration(n.parent)) return false;
     return n.getChildren(sf).every(ok);
   };
   // The statement itself is an ancestor — start from its children.

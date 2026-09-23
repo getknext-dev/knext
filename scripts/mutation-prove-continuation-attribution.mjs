@@ -84,7 +84,7 @@ function prove(id, description, snap, edits, expected) {
   assertTreeClean(`after ${id}`);
 }
 
-declareMutations(18);
+declareMutations(17);
 
 console.log('── baseline: the spec is green unmutated');
 assertTreeClean('baseline');
@@ -169,18 +169,11 @@ prove(
   1,
 );
 
-prove(
-  'M6',
-  'an assignment `=` allowed ahead of the literal must red',
-  libSnap,
-  [
-    [
-      '    if (n.kind === K.EqualsToken && !ts.isVariableDeclaration(n.parent)) return false;',
-      '    // assignment allowed',
-    ],
-  ],
-  1,
-);
+// M6 (an assignment `=` allowed ahead of the literal) is RETIRED, not skipped: the
+// separate `=` check it mutated was unobservable — every assignment target is an
+// identifier (refused by the rule M18 mutates) or an access / pattern outside the
+// allowlist — so the check was removed in the #1268 review rather than kept as
+// decoration. The assignment fixture now reds under M18.
 
 prove(
   'M7',
@@ -341,4 +334,4 @@ if (failures.length) {
   for (const f of failures) console.error(`  - ${f}`);
   process.exit(1);
 }
-console.log('\n18 mutation(s) behaved as required (17 red, 1 negative control green), 0 survived.');
+console.log('\n17 mutation(s) behaved as required (16 red, 1 negative control green), 0 survived.');

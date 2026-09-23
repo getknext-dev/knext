@@ -223,11 +223,16 @@ jev (calibrated second opinion) scores:
   - **An end-to-end run of the gate** at the floor boundary, in both directions.
   - **A repo-wide re-check of rule 1 only.** TypeScript's scanner reads each attributed line's
     own text. It says nothing about rules 2-5.
-- Also guarded by `scripts/mutation-prove-continuation-attribution.mjs`: 17 red mutations and 1
-  negative control.
+- Also guarded by `scripts/mutation-prove-continuation-attribution.mjs`: 16 red mutations and 1
+  negative control. Every fixture a mutation relies on fails exactly one rule, so each guard is
+  observed on its own and not masked by another rule.
   - Over-attribution cases: a call-carrying line, the before-the-literal scan, the climb, the
-    first-on-line check, a short-circuit, an assignment, a record the reports never carried,
-    parse errors, a `${…}` line, and a string-converted identifier.
+    first-on-line check, a short-circuit, a record the reports never carried, parse errors, a
+    `${…}` line, and a string-converted identifier.
+  - A separate check on assignment `=` was **removed**, not left in as decoration. Every
+    assignment target is an identifier or an access/pattern, and the string-converted-identifier
+    rule and the allowlist already refuse both. No fixture could make that check go red on its
+    own.
   - The first line hit on an unrelated path, in five forms: rule 5 disabled, a bare nested
     block accepted, every earlier statement treated as inert, an expression statement treated as
     a block boundary, and a `case` clause or module top level accepted.
