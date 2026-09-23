@@ -501,6 +501,24 @@ if [ "${RUNTIME}" = "bun" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" != "1" ]; the
       --target bun-linux-x64-musl \
       --marker "${MARKER}" >&2
     log "compiled + bytecode-verified: ${STANDALONE_EXEC}"
+
+    # ── 3c. rebuild native (*.node) addons for musl, inside the same pinned
+    # image (review finding on this PR, hypothesis A confirmed by
+    # reproduction) ──────────────────────────────────────────────────────
+    # The harness installs every fixture's deps ONCE, on the glibc
+    # ubuntu-latest runner — a fixture with a native module (e.g. sqlite3)
+    # gets a GLIBC-linked prebuilt .node there. Booting inside the pinned
+    # musl alpine image (this PR) then fails to dlopen that binary
+    # ([ERR_DLOPEN_FAILED] "linked against glibc ... but this Bun build uses
+    # musl"). The SHIPPED image does not hit this — its Dockerfile installs
+    # deps INSIDE the alpine stage. Match that here: best-effort, so a
+    # rebuild failure for one fixture's addon does not brick the whole bun
+    # lane (see scripts/e2e-native-rebuild-musl.sh's header).
+    docker run --rm \
+      -v "${STANDALONE_ROOT}:${STANDALONE_ROOT}" \
+      -v "${SCRIPT_DIR}/e2e-native-rebuild-musl.sh:/e2e-native-rebuild-musl.sh:ro" \
+      "${STANDALONE_BUN_IMAGE}" \
+      sh /e2e-native-rebuild-musl.sh "${STANDALONE_ROOT}" >&2
   else
     log "ERROR: KNEXT_E2E_SKIP_PACK=1 has no installed adapter to resolve the compile script from, but RUNTIME=bun was requested — refusing to silently fall back to server.js (contract-test mode is not expected to combine these)"
     exit 1

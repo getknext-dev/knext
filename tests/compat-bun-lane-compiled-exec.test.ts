@@ -36,6 +36,7 @@ const DOCKERFILE_PATH = resolve(
   REPO_ROOT,
   'packages/kn-next/templates/runtime-standalone/Dockerfile.standalone.hbs',
 );
+const NATIVE_REBUILD_SH_PATH = resolve(REPO_ROOT, 'scripts/e2e-native-rebuild-musl.sh');
 const src = readFileSync(DEPLOY_SH_PATH, 'utf8');
 
 describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec (#1166/#1225)', () => {
@@ -143,6 +144,46 @@ describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec 
     expect(src.includes('docker inspect -f \'{{.State.Pid}}\' "${CONTAINER_NAME}"')).toBe(true);
     expect(/pid=\$\{OWNER_PID\},/.test(src)).toBe(true);
     expect(/-a -p "\$\{OWNER_PID\}"/.test(src)).toBe(true);
+  });
+
+  it('rebuilds native (*.node) addons for musl inside the pinned image before boot (review finding, hypothesis A — glibc-installed addons cannot dlopen under musl)', () => {
+    const compileBlock = src.slice(
+      src.indexOf('# ── 3b. compile the standalone-on-Bun bytecode executable'),
+      src.indexOf('# ── 4. boot the standalone server on a free port'),
+    );
+    expect(
+      /docker run --rm \\\s*\n\s*-v "\$\{STANDALONE_ROOT\}:\$\{STANDALONE_ROOT\}" \\\s*\n\s*-v "\$\{SCRIPT_DIR\}\/e2e-native-rebuild-musl\.sh/.test(
+        compileBlock,
+      ),
+      'must run e2e-native-rebuild-musl.sh inside STANDALONE_BUN_IMAGE against the STANDALONE_ROOT before boot',
+    ).toBe(true);
+    expect(
+      /"\$\{STANDALONE_BUN_IMAGE\}"\s*\\\s*\n\s*sh \/e2e-native-rebuild-musl\.sh "\$\{STANDALONE_ROOT\}"/.test(
+        compileBlock,
+      ),
+    ).toBe(true);
+  });
+
+  it('e2e-native-rebuild-musl.sh is a fast no-op when the standalone tree has no native addons', () => {
+    const rebuildSrc = readFileSync(NATIVE_REBUILD_SH_PATH, 'utf8');
+    expect(/find "\$\{ROOT\}" -name '\*\.node' -type f/.test(rebuildSrc)).toBe(true);
+    expect(
+      /if \[ -z "\$\{HITS\}" \]; then\s*\n\s*echo[\s\S]{0,80}nothing to rebuild[\s\S]{0,20}exit 0/.test(
+        rebuildSrc,
+      ),
+      'an empty scan must exit 0 immediately, before apk add (the fast path for the overwhelming majority of fixtures)',
+    ).toBe(true);
+  });
+
+  it('e2e-native-rebuild-musl.sh is best-effort per package (a rebuild failure warns, never aborts the whole script)', () => {
+    const rebuildSrc = readFileSync(NATIVE_REBUILD_SH_PATH, 'utf8');
+    expect(/^set -eu$/m.test(rebuildSrc)).toBe(true);
+    expect(
+      /if ! \(cd "\$\{d\}" && npm_config_build_from_source=true npm run install --if-present 2>&1\); then/.test(
+        rebuildSrc,
+      ),
+      'a per-package rebuild failure must be caught (the `if !` guard), not let a failing `npm run install` kill the whole script under set -e',
+    ).toBe(true);
   });
 
   it('mutation proof: reverting the compile/boot/ownership anchors reds the suite above', () => {
