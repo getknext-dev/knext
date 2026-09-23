@@ -434,6 +434,61 @@ if [ "${RUNTIME}" = "bun" ]; then
   fi
 fi
 
+# ── 3b. compile the standalone-on-Bun bytecode executable (bun lane only) ─────
+# #1166/#1225 shipped `turbopack × bun` as a `bun build --compile --bytecode`
+# executable of the standalone server (adapters/standalone-compile.mjs), not
+# `bun server.js` — that is what the image actually boots
+# (Dockerfile.standalone.hbs COPYs `knext-standalone-exec-linux-x64`). Until
+# now the official compat suite's bun lane still boot-tested the UNCOMPILED
+# script, so the 778-test suite had never run against the artifact that ships.
+# Compile it here, from the SAME installed-tarball script the CLI's own
+# `kn-next build` runs (standaloneCompileArgv in standalone-exec-build.ts) —
+# resolved as the file sitting beside the already-resolved adapter entry, not
+# reimplemented. The compile script self-verifies the bytecode pragma
+# (bytecode-exec-verify.mjs) and exits non-zero (deleting the artifact first)
+# if the check fails — `set -euo pipefail` (top of file) then fails THIS
+# script, so a bytecode regression fails the deploy rather than silently
+# shipping an uncompiled fallback.
+#
+# Skipped (falls back to booting `bun server.js`, the pre-#1166 shape) when:
+#   - KNEXT_E2E_SKIP_PACK=1 (contract-test mode — no installed tarball, so no
+#     compile script to resolve; those runs never set RUNTIME=bun today);
+#   - KNEXT_SANDBOX_FETCH_DEBUG=1 (#188 path 2/3) — that instrumentation
+#     chain-requires server.js AS TEXT and patches the fixture's own sandbox
+#     context.js on disk; a compiled executable is a single self-contained
+#     binary with no separate context.js to patch, so the two are mutually
+#     exclusive. The debug lane stays on the uncompiled script on purpose.
+STANDALONE_EXEC=""
+if [ "${RUNTIME}" = "bun" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" != "1" ]; then
+  if [ -n "${NEXT_ADAPTER_PATH:-}" ]; then
+    STANDALONE_COMPILE_JS="$(dirname "${NEXT_ADAPTER_PATH}")/standalone-compile.js"
+    if [ -f "${STANDALONE_COMPILE_JS}" ]; then
+      STANDALONE_EXEC="${STANDALONE_APP_DIR}/knext-standalone-exec-linux-x64"
+      # unique per-build marker — a stale/foreign binary must never pass the
+      # compile script's own bytecode-pragma proof.
+      MARKER="knext-standalone-exec:$(node -e 'process.stdout.write(require("node:crypto").randomBytes(12).toString("hex"))')"
+      # bun-linux-x64-musl: the SAME target key `linux-x64` maps to in
+      # vinext-build.ts's COMPILE_TARGETS (shared by both compiled build
+      # targets) and the one Dockerfile.standalone.hbs ships in the alpine
+      # image — matching the shipped artifact, not the runner's native glibc
+      # build. A musl static binary runs on this glibc ubuntu-latest runner
+      # (no system libc dependency), so no cross-arch step is needed to boot it.
+      log "compiling the standalone-on-Bun bytecode executable (${STANDALONE_COMPILE_JS})"
+      bun run "${STANDALONE_COMPILE_JS}" \
+        --server "${SERVER_JS}" \
+        --root "${APP_DIR}/.next/standalone" \
+        --outfile "${STANDALONE_EXEC}" \
+        --target bun-linux-x64-musl \
+        --marker "${MARKER}" >&2
+      log "compiled + bytecode-verified: ${STANDALONE_EXEC}"
+    else
+      log "WARNING: standalone-compile script not found beside the adapter (${STANDALONE_COMPILE_JS}) — booting the uncompiled server.js instead"
+    fi
+  else
+    log "KNEXT_E2E_SKIP_PACK=1 (no installed adapter) — booting the uncompiled server.js instead of the compiled exec"
+  fi
+fi
+
 # ── 4. boot the standalone server on a free port ──────────────────────────────
 PORT="$(free_port)"
 BUILD_ID="$(cat "${APP_DIR}/.next/BUILD_ID" 2>/dev/null || echo "unknown")"
@@ -520,6 +575,13 @@ fi
 #       request actually traversed.
 # e2e-cleanup.sh ships the [sandbox-fetch-debug] server-log lines at teardown.
 SERVER_BOOT_TARGET="${SERVER_JS}"
+# 3b's compiled exec (bun lane, mutually exclusive with sandbox-fetch-debug —
+# see the block above) takes over the boot target here. It is a self-contained
+# binary: no interpreter, no `-r` preload flags (baked into the entry — see
+# standalone-compile.mjs's "Baked-in preloads" section), no argv at all.
+if [ -n "${STANDALONE_EXEC}" ]; then
+  SERVER_BOOT_TARGET="${STANDALONE_EXEC}"
+fi
 if [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" = "1" ]; then
   if [ -n "${KNEXT_SANDBOX_FETCH_DEBUG_PRELOAD:-}" ] && [ -f "${KNEXT_SANDBOX_FETCH_DEBUG_PRELOAD}" ]; then
     log "KNEXT_SANDBOX_FETCH_DEBUG=1 — chain-booting through sandbox-fetch instrumentation (${KNEXT_SANDBOX_FETCH_DEBUG_PRELOAD})"
@@ -558,12 +620,22 @@ if [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" = "1" ]; then
     log "WARNING: KNEXT_SANDBOX_FETCH_DEBUG=1 but the realm-debug module is unavailable (${KNEXT_SANDBOX_FETCH_REALM_DEBUG_PRELOAD:-unset}) — no in-realm instrumentation"
   fi
 fi
-log "booting (${RUNTIME}) ${SERVER_BOOT_TARGET} on 0.0.0.0:${PORT} (HOSTNAME emptied — see B7a note; preloads ${SERVER_PRELOAD_ARGS[*]})"
+if [ -n "${STANDALONE_EXEC}" ]; then
+  log "booting the compiled standalone-on-Bun executable ${SERVER_BOOT_TARGET} on 0.0.0.0:${PORT} (HOSTNAME emptied — see B7a note; preloads baked in)"
+else
+  log "booting (${RUNTIME}) ${SERVER_BOOT_TARGET} on 0.0.0.0:${PORT} (HOSTNAME emptied — see B7a note; preloads ${SERVER_PRELOAD_ARGS[*]})"
+fi
 (
   cd "${STANDALONE_APP_DIR}"
-  PORT="${PORT}" HOSTNAME="" NODE_ENV="production" \
-    NEXT_DEPLOYMENT_ID="${DEPLOYMENT_ID}" \
-    exec "${SERVER_CMD}" "${SERVER_PRELOAD_ARGS[@]}" "${SERVER_BOOT_TARGET}"
+  if [ -n "${STANDALONE_EXEC}" ]; then
+    PORT="${PORT}" HOSTNAME="" NODE_ENV="production" \
+      NEXT_DEPLOYMENT_ID="${DEPLOYMENT_ID}" \
+      exec "${SERVER_BOOT_TARGET}"
+  else
+    PORT="${PORT}" HOSTNAME="" NODE_ENV="production" \
+      NEXT_DEPLOYMENT_ID="${DEPLOYMENT_ID}" \
+      exec "${SERVER_CMD}" "${SERVER_PRELOAD_ARGS[@]}" "${SERVER_BOOT_TARGET}"
+  fi
 ) >"${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!
 
@@ -581,6 +653,14 @@ SERVER_PID=$!
   # pinned by CI's setup-node, and existing consumers key on the stable shape).
   if [ "${RUNTIME}" = "bun" ]; then
     echo "RUNTIME_VERSION=$(bun --version 2>/dev/null || echo unknown)"
+    # #1166/#1225 — which artifact actually booted. bun lane only, same
+    # gating rationale as RUNTIME_VERSION above (node metadata stays
+    # byte-identical).
+    if [ -n "${STANDALONE_EXEC}" ]; then
+      echo "SERVING_MODE=compiled-exec"
+    else
+      echo "SERVING_MODE=server.js"
+    fi
   fi
   echo "SERVER_JS=${SERVER_JS}"
   echo "SERVER_LOG=${SERVER_LOG}"

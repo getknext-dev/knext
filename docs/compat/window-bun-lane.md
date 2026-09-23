@@ -1,9 +1,9 @@
 # Compat window — bun lane
 
 The credentialing bar for the **Bun runtime axis** (`KNEXT_RUNTIME=bun`, `next build`
-standalone booted on Bun). Sibling of [`window-node-lane.md`](window-node-lane.md); this file
-defines what "credentialed" means for the bun lane and records the scheduled lane's progress
-against it.
+standalone booted on Bun — as the compiled bytecode executable, see "What the bun lane boots"
+below). Sibling of [`window-node-lane.md`](window-node-lane.md); this file defines what
+"credentialed" means for the bun lane and records the scheduled lane's progress against it.
 
 **The bar: 14 consecutive scheduled bun-lane runs, every shard `failed:0`/`notRun:0`, zero
 net new quarantine entries, the harness fingerprint unchanged across all of them, and the
@@ -35,6 +35,36 @@ release-candidate tag, never `main`:
 
 Full mechanism: [`window-node-lane.md` → The RC-ref model](window-node-lane.md#the-rc-ref-model-adr-0056).
 
+## What the bun lane boots (#1166/#1225)
+
+`turbopack × bun` ships as a `bun build --compile --bytecode` executable of the standalone
+server, not `bun server.js` — that is what the production image actually boots
+(`Dockerfile.standalone.hbs` COPYs `knext-standalone-exec-linux-x64` and the runtime supervisor
+spawns it). Until this landed, `scripts/e2e-deploy.sh`'s bun lane still boot-tested the
+*uncompiled* script, so the official 778-test suite had never run against the artifact that ships
+— a gap the "credentialable only once it ships as the compiled bytecode single-executable"
+sentence above pointed at directly.
+
+The bun lane now compiles the standalone server through the same `standalone-compile.mjs` script
+`kn-next build` runs (`standalone-exec-build.ts`), verifies the bytecode pragma at build time
+(fail-closed — a binary compiled without `--bytecode`, or a stale/foreign binary, deletes itself
+and fails the deploy rather than falling back), and boots that executable directly instead of
+`bun server.js`. This applies on **both** the early-warning and credential bun crons — the
+credential lane must test what ships, and now does: since credential nights run against a frozen
+RC tag (ADR-0056), this makes an RC's credential run test the compiled artifact for that RC, not a
+proxy for it. The compiled exec's inputs (`adapters/standalone-compile.mjs`,
+`adapters/bytecode-exec-verify.mjs`, `adapters/standalone-exec-entry.mjs`,
+`cli/standalone-exec-build.ts`) already sit inside the packed `@getknext/core` tarball the
+compat-window fingerprint covers *in full* (`compat-window-fingerprint.mjs`'s "packed" half, which
+is deliberately not path-filtered) — so a change to the compiled-exec pipeline itself already
+restarted the fingerprint before this change, and continues to.
+
+One exception: the `KNEXT_SANDBOX_FETCH_DEBUG=1` opt-in instrumentation lane (#188 paths 2/3)
+chain-requires `server.js` as text and patches the fixture's own on-disk sandbox `context.js` — a
+compiled executable is a single self-contained binary with no separate `context.js` to patch, so
+that debug lane stays on the uncompiled script on purpose. It is dispatch-only and never runs on a
+scheduled (credential or early-warning) night, so it never affects the streak.
+
 ## Status
 
 **Credential window: NOT OPEN — no release candidate has been cut.** The scheduled bun-1.4.0
@@ -47,7 +77,7 @@ land.
 
 | | |
 |---|---|
-| lane | bun (`KNEXT_RUNTIME=bun`, standalone `server.js` on Bun) |
+| lane | bun (`KNEXT_RUNTIME=bun`, the compiled standalone-on-Bun bytecode executable — see "What the bun lane boots" above) |
 | required nights | **14** consecutive qualifying (`WINDOW_REQUIRED_NIGHTS`, `scripts/compat-window-audit.mjs`) |
 | grader | `node scripts/compat-window-audit.mjs --fetch --lane bun` — the lane is read from each run's `compat-run-ledger`, already lane-attributed, and from a `compat-lane-<lane>` marker artifact when the ledger cannot be read, so a night lost on one lane does not restart the other. Grades rules 1–3 (and the three stricter audit rules); **rule 4 (Bun-build freeze) landed with #1147** — the fingerprint folds the observed `bun --version` + `bun --revision` on the bun lane. |
 | window opened | on the first scheduled bun **credential** night (cron `47 5 * * *`, RC tag) — none yet: no RC cut |

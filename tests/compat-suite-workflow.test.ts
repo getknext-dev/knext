@@ -2656,8 +2656,10 @@ describe('compat-suite fail-on-red gate — revocation teeth (test-e2e-deploy.ym
 //   • a nightly BUN CREDENTIALING schedule ('47 4 * * *', #1147) that runs the
 //     bun lane, distinct from the node credential nightly ('17 3 * * *'),
 // both funneled through ONE workflow-level `KNEXT_RUNTIME` env that the shard
-// run step plumbs into scripts/e2e-deploy.sh (which already boots the standalone
-// server.js with `bun` when KNEXT_RUNTIME=bun). HONESTY: the compat-matrix Node
+// run step plumbs into scripts/e2e-deploy.sh (which, on KNEXT_RUNTIME=bun, compiles
+// and boots the standalone-on-Bun bytecode executable — #1166/#1225 — rather
+// than `bun server.js`; see docs/compat/window-bun-lane.md "What the bun lane
+// boots"). HONESTY: the compat-matrix Node
 // ✅ (run 28602886003) is a NODE claim; the Bun row is credentialing-in-progress
 // (verified-once until 14 scheduled bun nights bank against
 // docs/compat/window-bun-lane.md), and a red BUN night must alert under its OWN
