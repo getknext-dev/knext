@@ -7,7 +7,7 @@
  * startup log would pull pino's ~13.5ms onto the cold-start critical path — the
  * exact CPU-contention window the #441 deferral work protects.
  *
- * Source guard: in `node-server.ts` the `spawn(process.execPath, ...)` call must
+ * Source guard: in `node-server.ts` the `spawn(spawnPlan.command, ...)` call must
  * appear BEFORE the "Starting Next.js standalone server" `log.info`, so the
  * NORMAL path emits nothing (and loads no pino) before the child is spawned.
  * Comments are stripped first so a comment mention can't false-match.
@@ -30,7 +30,7 @@ describe("node-server startup log ordering (#441)", () => {
     const src = stripComments(readFileSync(NODE_SERVER_SRC, "utf8"));
 
     it("emits nothing before spawn: startup log.info comes AFTER spawn()", () => {
-        const spawnAt = src.indexOf("spawn(process.execPath");
+        const spawnAt = src.indexOf("spawn(spawnPlan.command");
         const startupLogAt = src.indexOf(
             '"Starting Next.js standalone server"',
         );

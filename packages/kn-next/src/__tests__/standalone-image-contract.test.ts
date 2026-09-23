@@ -241,6 +241,37 @@ describe("Dockerfile.standalone.hbs — ADR-0055 image-owned start contract", ()
         expect(body).toMatch(/^FROM\s+oven\/bun:/m);
     });
 
+    // ---- compiled standalone-on-Bun: bytecode is mandatory on the bun cell ----
+
+    it("the bun stage ships the compiled bytecode executable INSIDE the standalone tree (it anchors on its own directory)", () => {
+        const body = stageMap.get(BUN_STAGE) ?? "";
+        expect(body).toMatch(
+            /^COPY\s+knext-standalone-exec-linux-x64\s+\/app\/\.next\/standalone\/knext-standalone-exec\s*$/m,
+        );
+    });
+
+    it("the bun stage points the supervisor at that executable (STANDALONE_SERVER_EXEC), so it never runs `bun server.js`", () => {
+        const body = stageMap.get(BUN_STAGE) ?? "";
+        expect(body).toMatch(
+            /\bSTANDALONE_SERVER_EXEC=\/app\/\.next\/standalone\/knext-standalone-exec\b/,
+        );
+    });
+
+    it("the NODE stage never ships or selects the bun executable (its bytecode caching is the V8 compile cache)", () => {
+        const body = stageMap.get(NODE_STAGE) ?? "";
+        expect(body).not.toMatch(/knext-standalone-exec/);
+        expect(body).not.toMatch(/STANDALONE_SERVER_EXEC/);
+    });
+
+    it("the executable's COPY source is the name `kn-next build` writes", async () => {
+        const { standaloneExecFileName } = await import(
+            "../cli/standalone-exec-build"
+        );
+        expect(stageMap.get(BUN_STAGE) ?? "").toContain(
+            `COPY ${standaloneExecFileName("linux-x64")} `,
+        );
+    });
+
     it("the node runtime stage's ENTRYPOINT invokes node (not `node run`, which is not a file runner)", () => {
         const body = stageMap.get(NODE_STAGE) ?? "";
         const m = body.match(/^ENTRYPOINT\s+(\[.*\])\s*$/m);
@@ -534,7 +565,7 @@ describe("@getknext/core's runtime closure actually resolves under what the Dock
                 "utf8",
             );
             const spawnIndex = nodeServer.search(
-                /spawn\s*\(\s*process\.execPath\s*,/,
+                /spawn\s*\(\s*spawnPlan\.command\s*,/,
             );
             const probeCallIndex = nodeServer.search(
                 /warnIfDbClientsUnavailable\s*\(/,

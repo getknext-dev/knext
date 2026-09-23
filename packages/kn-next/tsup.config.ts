@@ -87,6 +87,12 @@ export default defineConfig([
       // `kn-next build`, not imported, because it needs `Bun.build` plugins and
       // the published CLI runs under node.
       'adapters/vinext-compile': 'src/adapters/vinext-compile.mjs',
+      // The compiled standalone-on-Bun build (`build: turbopack` + `runtime:
+      // bun`): `next build`'s server.js -> a bytecode single executable.
+      // Spawned as a SCRIPT (`bun run …`) like vinext-compile, for the same
+      // reason; it resolves its two preloads (the .cjs entries below) beside
+      // itself in dist/adapters.
+      'adapters/standalone-compile': 'src/adapters/standalone-compile.mjs',
       // The Bun.serve keep-alive guard (the vinext-lane sibling of the node
       // #188 guard). vinext-compile injects an `import` of this as the compiled
       // entry's first statement, and the uncompiled diagnostic boot `bun

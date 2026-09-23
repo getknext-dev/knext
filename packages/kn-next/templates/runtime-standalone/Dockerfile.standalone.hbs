@@ -109,6 +109,17 @@ COPY .next/standalone /app/.next/standalone
 COPY .next/static /app/.next/standalone/.next/static
 COPY public /app/.next/standalone/public
 
+# The Next server, COMPILED: `kn-next build` (build: turbopack + runtime: bun)
+# compiles .next/standalone/server.js into a Bun single executable WITH
+# bytecode and verifies the bytecode is really there. Bytecode caching is
+# mandatory for every runtime cell; on Bun this executable is how the cell
+# gets it. It sits INSIDE the standalone tree because it anchors on its own
+# directory (it replaces `bun server.js`, not the tree — Next still loads the
+# route chunks from .next/server by path). The supervisor spawns it via
+# STANDALONE_SERVER_EXEC below; there is no silent fallback to `bun server.js`:
+# a build that did not produce it fails this COPY.
+COPY knext-standalone-exec-linux-x64 /app/.next/standalone/knext-standalone-exec
+
 # The runtime-agnostic supervisor the ENTRYPOINT shim imports, PLUS its own
 # resolved dependency closure. The WHOLE package (not just dist/adapters) —
 # tsup's ESM chunk-splitting puts shared code the entry statically imports
@@ -128,7 +139,8 @@ USER 65532:65532
 ENV PORT=3000 \
     HOSTNAME=0.0.0.0 \
     NODE_ENV=production \
-    STANDALONE_SERVER_PATH=/app/.next/standalone/server.js
+    STANDALONE_SERVER_PATH=/app/.next/standalone/server.js \
+    STANDALONE_SERVER_EXEC=/app/.next/standalone/knext-standalone-exec
 
 EXPOSE 3000
 

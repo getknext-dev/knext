@@ -247,7 +247,7 @@ describe("node-server.ts wiring (source guard)", () => {
         // the socket BEFORE the spawn, while the heavy load stays deferred.
         expect(src).not.toContain("metricsServer.listen(");
         const createAt = src.indexOf("createLazyMetricsEndpoint({");
-        const spawnAt = src.indexOf("spawn(process.execPath");
+        const spawnAt = src.indexOf("spawn(spawnPlan.command");
         const listenAt = src.indexOf('metricsEndpoint.ensureListening("');
         expect(createAt).toBeGreaterThan(-1);
         expect(listenAt).toBeGreaterThan(-1);

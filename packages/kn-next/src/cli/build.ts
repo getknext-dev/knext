@@ -43,6 +43,7 @@ import {
     loadConfig,
     UsageError,
 } from "./shared";
+import { buildStandaloneExecutable } from "./standalone-exec-build";
 import {
     buildVinextExecutable,
     hostSmokeArch,
@@ -244,6 +245,37 @@ export async function build(options: BuildOptions = {}) {
         log.warn(
             { standaloneDir },
             "No standalone output found — skipping bun-exports heal (is output:'standalone' set?)",
+        );
+    }
+
+    // 2b'. Compiled standalone-on-Bun (turbopack × bun). Bytecode caching is
+    //      mandatory for every runtime cell; on Bun that means the standalone
+    //      server ships as a `bun build --compile --bytecode` executable
+    //      (standalone-exec-build.ts), which the bun image runs in place of
+    //      `bun server.js`. AFTER the heal: the heal adds traced files the
+    //      compile resolves against. turbopack × node is untouched — its
+    //      bytecode caching is the V8 compile cache.
+    //      Fails the build when there is no tree to compile: the bun image
+    //      COPYs the executable, so skipping it would fail `docker build` or,
+    //      worse, ship a stale binary from an earlier build.
+    if (standaloneStepsApply(artifact) && config.runtime === "bun") {
+        if (!existsSync(join(standaloneDir, "server.js"))) {
+            throw new UsageError(
+                `No standalone server at ${join(standaloneDir, "server.js")} to compile.\n\n` +
+                    "The standalone-on-Bun image runs a compiled executable of that server. " +
+                    "Check that next.config sets output: 'standalone' and that the project build ran.",
+            );
+        }
+        log.info(
+            "Compiling the standalone server into a Bun executable (bytecode)...",
+        );
+        const binary = buildStandaloneExecutable({
+            cwd: process.cwd(),
+            arch: SHIP_ARCH,
+        });
+        log.info(
+            { binary },
+            "Standalone executable compiled (bytecode verified)",
         );
     }
 

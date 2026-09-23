@@ -35,6 +35,7 @@ import {
 } from "./deferred-supervisor-init";
 import { buildChildEnv } from "./env";
 import { type ChildLike, gracefulShutdown, isShuttingDown } from "./shutdown";
+import { childSpawnPlan } from "./standalone-exec";
 
 // ── Boot phase trace (#441/#592 — opt-in, off in production) ─────────────────
 // The FIRST statement of the module body, which in ESM means every static import
@@ -317,7 +318,18 @@ void metricsEndpoint.ensureListening("startup").then(
 );
 
 // ═══ Spawn the child — the cold-start critical path ═══════════════════════════
-const nextProc = spawn(process.execPath, [...preloadArgs, serverJs], {
+// Uncompiled: `<this runtime> [--require preloads…] server.js`. Compiled
+// standalone-on-Bun: STANDALONE_SERVER_EXEC names the bytecode executable,
+// spawned with no arguments (its preloads are compiled in). See
+// ./standalone-exec.
+const spawnPlan = childSpawnPlan({
+    env: process.env,
+    cwd: process.cwd(),
+    execPath: process.execPath,
+    serverJs,
+    preloadArgs,
+});
+const nextProc = spawn(spawnPlan.command, spawnPlan.args, {
     stdio: "inherit",
     env: buildChildEnv(),
 });
@@ -326,7 +338,10 @@ bootTrace.mark("spawn-issued", { pid: nextProc.pid });
 
 // Startup log emitted AFTER spawn (#441): the child is already booting, so the
 // first-emit lazy pino load lands off the cold-start critical path.
-log.info({ serverJs }, "Starting Next.js standalone server");
+log.info(
+    { serverJs, mode: spawnPlan.mode, command: spawnPlan.command },
+    "Starting Next.js standalone server",
+);
 
 // #1178 / sr-1194 B1: probe `@getknext/lib/clients` availability AFTER the
 // spawn (see the comment beside `registerDbPoolDrain()` above for why it must
