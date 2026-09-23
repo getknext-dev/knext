@@ -72,7 +72,7 @@ const MUTATIONS = [
     label: "node: skip knext's shipped bake driver",
     target: DEPLOY,
     spec: SPEC_WIRING,
-    anchor: '          node "${KNEXT_BAKE_DRIVER}" >&2',
+    anchor: '          node "${KNEXT_BAKE_DRIVER}" 2>&1 | tee "${APP_DIR}/.knext-bake.out" >&2',
     replacement: '          true',
   },
   {

@@ -602,12 +602,14 @@ if [ "${RUNTIME}" != "bun" ]; then
           STANDALONE_SERVER_PATH="${SERVER_JS}" \
           NODE_COMPILE_CACHE="${NODE_CC_DIR}" \
           KNEXT_WARM_PATH="${WARM_PATH}" \
-          node "${KNEXT_BAKE_DRIVER}" >&2
+          node "${KNEXT_BAKE_DRIVER}" 2>&1 | tee "${APP_DIR}/.knext-bake.out" >&2
       ); then
         NODE_CC_BAKE="ok"
       else
         log "WARNING: the shipped compile-cache bake FAILED — recorded as compile_cache_bake=failed (NOT live); the deploy proceeds so the fixture's own tests still run"
         NODE_CC_BAKE="failed"
+        # Diagnostic sidecar (NOT graded): which fixture, which warm path, why.
+        { echo "--- bake FAILED: ${APP_DIR} warm=${WARM_PATH:-<none>}"; tail -n 15 "${APP_DIR}/.knext-bake.out" 2>/dev/null || true; } >>"${RUNNER_TEMP:-/tmp}/knext-e2e-bake-failures.log"
       fi
     fi
   fi

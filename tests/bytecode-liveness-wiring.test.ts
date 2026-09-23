@@ -177,7 +177,12 @@ describe("e2e-deploy.sh — the node lane runs KNEXT's own bake + supervisor, an
 
   it("bakes with the shipped driver into the image's cache location, before boot", () => {
     expect(once(DEPLOY, 'NODE_CC_DIR="${STANDALONE_APP_DIR}/.next/compile-cache"')).toBe(1);
-    expect(once(DEPLOY, '          node "${KNEXT_BAKE_DRIVER}" >&2')).toBe(1);
+    expect(
+      once(
+        DEPLOY,
+        '          node "${KNEXT_BAKE_DRIVER}" 2>&1 | tee "${APP_DIR}/.knext-bake.out" >&2',
+      ),
+    ).toBe(1);
     expect(DEPLOY.indexOf('node "${KNEXT_BAKE_DRIVER}"')).toBeLessThan(
       DEPLOY.indexOf('# ── 4. boot the standalone server'),
     );

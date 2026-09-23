@@ -1741,6 +1741,11 @@ jobs:
           set +e
           VERDICT="$(node scripts/e2e-bytecode-liveness.mjs --check --runtime "${KNEXT_RUNTIME}" --ledger "${LEDGER}")"
           LIVE_EXIT=$?
+          if [ -s "${RUNNER_TEMP:-/tmp}/knext-e2e-bake-failures.log" ]; then
+            echo "::group::shipped compile-cache bake failures (diagnostic)"
+            cat "${RUNNER_TEMP:-/tmp}/knext-e2e-bake-failures.log"
+            echo "::endgroup::"
+          fi
           set -e
           {
             echo "### Boot-mode ledger (${KNEXT_RUNTIME} lane, shard ${{ matrix.shard }})"
