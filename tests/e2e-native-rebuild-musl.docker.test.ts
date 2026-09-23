@@ -73,18 +73,31 @@ function runRebuild(
 describe.skipIf(!dockerAvailable())(
   'scripts/e2e-native-rebuild-musl.sh — real execution inside the pinned image (#1230 round 6)',
   () => {
-    let workDir = '';
+    let tmpDir = '';
+    // Registry pattern (D9, tests/temp-dirs-outside-the-repo.test.ts): every
+    // NESTED mkdtempSync below is pushed here and drained in afterAll, rather
+    // than relying on the top-level tmpDir's own recursive removal to cover
+    // them implicitly — the D9 guard pairs removals per call SITE, not per
+    // directory tree, so an only-covered-transitively nested mkdtempSync
+    // reads as an unpaired leak. Kept as two literal statements (mkdtempSync
+    // call, then a separate push) rather than a wrapper function — a wrapper
+    // breaks the D9 guard's OTHER check, which requires each mkdtempSync
+    // call's own argument to be traceably rooted at tmpdir()/join(tmpDir,
+    // ...) at the call site, not behind a parameter.
+    const temps: string[] = [];
 
     beforeAll(() => {
-      workDir = mkdtempSync(join(tmpdir(), 'knext-native-rebuild-docker-'));
+      tmpDir = mkdtempSync(join(tmpdir(), 'knext-native-rebuild-docker-'));
     });
 
     afterAll(() => {
-      if (workDir) rmSync(workDir, { recursive: true, force: true });
+      for (const dir of temps) rmSync(dir, { recursive: true, force: true });
+      if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
     });
 
     it('refuses to treat ROOT itself as an addon package — a stray .node file with no node_modules-nested package.json does NOT delete or npm-install against ROOT', () => {
-      const rootDir = mkdtempSync(join(workDir, 'rootguard-'));
+      const rootDir = mkdtempSync(join(tmpDir, 'rootguard-'));
+      temps.push(rootDir);
       writeFileSync(
         join(rootDir, 'package.json'),
         JSON.stringify({ name: 'knext-fixture-app', version: '1.0.0' }),
@@ -126,7 +139,8 @@ describe.skipIf(!dockerAvailable())(
       // fetch two tarballs, and no host-platform dependency since `--force`
       // bypasses npm's own os/cpu/libc engine check (the same check that
       // makes an UNFORCED install of these exact packages fail).
-      const packDir = mkdtempSync(join(workDir, 'sharp-pack-'));
+      const packDir = mkdtempSync(join(tmpDir, 'sharp-pack-'));
+      temps.push(packDir);
       for (const spec of ['@img/sharp-linux-x64@0.34.5', '@img/sharp-libvips-linux-x64@1.2.4']) {
         // --loglevel=error / stdio: 'ignore': the runner's failure-tail
         // (scripts/bun-test.mjs) captures the LAST 40 lines of the WHOLE
@@ -142,13 +156,15 @@ describe.skipIf(!dockerAvailable())(
           stdio: ['ignore', 'ignore', 'ignore'],
         });
       }
-      const sharpDir = mkdtempSync(join(workDir, 'sharp-'));
+      const sharpDir = mkdtempSync(join(tmpDir, 'sharp-'));
+      temps.push(sharpDir);
       mkdirSync(join(sharpDir, 'node_modules', '@img'), { recursive: true });
       for (const [tarball, pkg] of [
         ['img-sharp-linux-x64-0.34.5.tgz', 'sharp-linux-x64'],
         ['img-sharp-libvips-linux-x64-1.2.4.tgz', 'sharp-libvips-linux-x64'],
       ]) {
-        const extractDir = mkdtempSync(join(workDir, 'extract-'));
+        const extractDir = mkdtempSync(join(tmpDir, 'extract-'));
+        temps.push(extractDir);
         execFileSync('tar', ['xzf', join(packDir, tarball), '-C', extractDir]);
         execFileSync('cp', [
           '-a',
