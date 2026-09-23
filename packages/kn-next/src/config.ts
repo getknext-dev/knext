@@ -285,8 +285,8 @@ export interface KnativeNextConfig {
      * Which build system produces the app (Track B2 of the build/runtime
      * separation; see `src/adapters/artifact-contract.ts`).
      *
-     * Both builders below are SELECTABLE (ADR-0054). `vinext` is still the
-     * DEFAULT (an absent `build` means vinext); the ADR-0054 flip to
+     * All three builders below are SELECTABLE (ADR-0054, #1219). `vinext` is
+     * still the DEFAULT (an absent `build` means vinext); the ADR-0054 flip to
      * bun-standalone is deferred until that axis is credentialed.
      *
      * - `vinext` (**default**) — the Vite/rolldown Next reimplementation. Its
@@ -301,6 +301,11 @@ export interface KnativeNextConfig {
      *   build fails if the bytecode is missing); on `runtime: "node"` it runs
      *   uncompiled with the V8 compile cache. `next build`'s standalone output
      *   is the verified 778/0 official-suite axis.
+     * - `webpack` — `next build --webpack`, emitting the IDENTICAL
+     *   `.next/standalone` shape as `turbopack` (#1219): same entry, same
+     *   supervisor, same `runtime: "bun"|"node"` choice, same Bun bytecode
+     *   compile / V8 compile-cache behaviour. The only difference is the
+     *   bundler `next build` uses to produce that tree.
      *
      * On the WIRE the meanings differ from the config: CR absence permanently
      * means `turbopack` (ADR-0017), so the CLI resolves this default and
@@ -310,7 +315,7 @@ export interface KnativeNextConfig {
      * and `build` does not select a runtime — what connects them is the artifact
      * shape the builder emits and the runtime must accept.
      */
-    build?: "turbopack" | "vinext";
+    build?: "turbopack" | "vinext" | "webpack";
     infrastructure?: InfrastructureConfig; // Deploy PostgreSQL, Redis, MinIO as Knative services
     scaling?: ScalingConfig; // Knative autoscaling options
     // #417 — bring-your-own database binding (ADR-0019/ADR-0025): binds an

@@ -54,13 +54,14 @@ function cfg(overrides: Partial<KnativeNextConfig> = {}): KnativeNextConfig {
 }
 
 describe("#1167 the standalone target is selectable", () => {
-    it("marks BOTH turbopack and vinext available in the contract", () => {
-        // Both halves: the whole point is that the two are selectable together,
-        // not that one replaced the other (founder-directed: vinext stays).
+    it("marks turbopack, vinext, AND webpack available in the contract", () => {
+        // All halves: the whole point is that they are selectable together,
+        // not that one replaced another (founder-directed: vinext stays;
+        // webpack joins turbopack as a second standalone-shape spelling, #1219).
         expect(turbopackBuilder.available).toBe(true);
         expect(vinextBuilder.available).toBe(true);
         const ids = AVAILABLE_BUILDERS.map((b) => b.id).sort();
-        expect(ids).toEqual(["turbopack", "vinext"]);
+        expect(ids).toEqual(["turbopack", "vinext", "webpack"]);
     });
 
     it("keeps vinext as the default builder — the flip to bun-standalone is credential-gated, not this issue", () => {

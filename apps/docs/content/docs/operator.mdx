@@ -56,7 +56,7 @@ status:
 | `env` | Plain, **non-secret** env vars (name → value). Reserved names are rejected at admission (see below). |
 | `secrets` | `envFrom`, `envMap` (Kubernetes Secret refs) — see [Binding secrets](#binding-secrets-envmap--database_url). |
 | `database` | Bind a **bring-your-own** Postgres by referencing an existing Secret (`secretRef` / optional `roSecretRef`). knext does not provision databases. See [Databases](#databases-specdatabase). |
-| `build` | `vinext` (the compiled single executable — the default the CLI writes) or `turbopack` (the legacy standalone shape, also what absence means). Drives how the operator starts the container. See [Bun & the compiled executable](/docs/bun-runtime). |
+| `build` | `vinext` (the compiled single executable — the default the CLI writes), `turbopack`, or `webpack` (both the standalone shape — `next build` with different bundlers; `turbopack` is also what absence means). Drives how the operator starts the container. See [Bun & the compiled executable](/docs/bun-runtime). |
 | `runtime` | `bun` or `node` (default `node`). Standalone shape only — for `build: "vinext"` the runtime ships inside the binary and this field has no effect on startup. |
 | `security` | `networkPolicy` — pod-level L3/L4 isolation, default-on. |
 | `traffic` | `revisionName`, `canaryPercent` (rollback / canary). |
