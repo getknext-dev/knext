@@ -232,17 +232,15 @@ export const PER_PATH_THRESHOLDS = {
  *   - global:                  raw 79.29% (11035/13917) → honest **93.03% (9236/9928)**
  *   - packages/kn-next/src/**: raw 79.23% (10020/12647) → honest **93.01% (8356/8984)**
  *
- * Floors move 92.5 → 93.0 (both), the measured value rounded DOWN to 0.5. Raw floors
- * unchanged. HEADROOM IS THIN: global clears 93.0 by 2 lines, core by 0 lines — one
- * newly-uncovered executable line under packages/kn-next/src reds the core floor.
+ * Measured 93.03 / 93.01, but floors stay at 92.5: at 93.0 core would have 0 lines of headroom (reds in-flight #1264/#1266), so the ratchet waits for the next coverage batch.
  */
 export const HONEST_THRESHOLDS = {
-  lines: 93.0,
+  lines: 92.5,
 };
 
 export const HONEST_PER_PATH_THRESHOLDS = {
   'packages/kn-next/src/**': {
-    lines: 93.0,
+    lines: 92.5,
   },
 };
 

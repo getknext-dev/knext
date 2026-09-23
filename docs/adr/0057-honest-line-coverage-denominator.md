@@ -188,8 +188,8 @@ line reads hit. When in doubt, the 0 stays.
 
 For rule 4, keeping string-converted identifiers and documenting the risk was also considered.
 It would attribute 41 lines instead of 11 (honest 93.33% / 93.34% instead of 93.03% / 93.01%).
-Both options round down to the same 93.0 floor. Refusing them is the stricter reading of the
-invariant.
+Both options would round down to the same 93.0 floor. Refusing them is the stricter reading of
+the invariant.
 
 jev (calibrated second opinion) scores:
 - Overall option: A, confidence 0.68 (A 0.76, C 0.19, B 0.03, D 0.02).
@@ -202,8 +202,10 @@ jev (calibrated second opinion) scores:
   - Global honest: 92.92% → **93.03%** (9236/9928).
   - Core honest: 92.89% → **93.01%** (8356/8984).
   - The denominator is unchanged and nothing is excluded.
-  - The honest floors move 92.5 → **93.0**. Raw floors are unchanged.
-  - **Headroom is thin:** global clears 93.0 by 2 lines, core by 0 lines.
+  - The honest floors **stay at 92.5** (main's value). Raw floors are unchanged. Rounding the
+    measured value down would give 93.0, but at 93.0 core would clear the floor by 0 lines
+    (global by 2). That would red PRs that are adding runtime code now. The ratchet to 93.0
+    waits for the next coverage batch. jev scored keep-92.5 at 0.57 against 93.0 at 0.43.
 - The first version of this amendment attributed 60 lines. It violated the invariant (see
   rule 5) and also credited lines after `${identifier}` conversions. Those lines are
   `deploy.ts` 287-295, `cr-builder.ts` 453-454 / 480-482 / 579, and 41 more that followed a
@@ -244,10 +246,11 @@ jev (calibrated second opinion) scores:
 
 ### Action items
 
-- [x] Attribution module, gate wiring, tests, prover, honest floors re-measured to 93.0 (#1262,
-  #1268).
-- [ ] Sprint-close design review (#1259): accept or reject this amendment, and decide whether
-  the 0-line core headroom needs a batch of real coverage before the next floor raise.
+- [x] Attribution module, gate wiring, tests and prover (#1262, #1268). Honest % re-measured at
+  93.03 / 93.01. Floors are held at 92.5.
+- [ ] Next coverage batch: raise the honest floors to the measured value rounded down to 0.5
+  (93.0 or above) once core has real headroom.
+- [ ] Sprint-close design review (#1259): accept or reject this amendment.
 - [ ] Re-run the real-bun ground-truth test on every bun upgrade (it runs in CI with the pinned
   bun). If a boundary stops holding, remove it from `BLOCK_BOUNDARIES`. Do not relax the test.
 - [ ] Separately from this amendment, investigate bun's raw over-count: a positive count on an
