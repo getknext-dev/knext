@@ -93,12 +93,22 @@ describe.skipIf(!dockerAvailable())(
       mkdirSync(join(rootDir, 'stray'));
       writeFileSync(join(rootDir, 'stray', 'mystery.node'), '');
 
-      const { status, stderr } = runRebuild(rootDir);
+      const { status, stdout, stderr } = runRebuild(rootDir);
 
       expect(status, `expected exit 0 (skip, not crash); stderr:\n${stderr}`).toBe(0);
-      expect(stderr, 'must WARN and refuse rather than silently proceed').toContain(
-        'walked up to ROOT',
-      );
+      // The script's own WARNING is an `echo` inside the container — that is
+      // the container's STDOUT, which `docker run` forwards to the docker
+      // CLI's own stdout. `stderr` here only ever carries DOCKER's own
+      // noise (image-pull progress, the base image's ICU notice) — checking
+      // it for the script's warning is a real bug found live on CI (job
+      // 107269307255): a well-formed `docker run` never wrote the warning to
+      // stderr, so the assertion always failed regardless of whether the
+      // guard actually fired, which local manual replays never caught since
+      // a terminal interleaves both streams.
+      expect(
+        stdout,
+        `must WARN and refuse rather than silently proceed; stdout:\n${stdout}`,
+      ).toContain('walked up to ROOT');
       // ROOT survives intact — the canary and its own package.json are both
       // still there (a defeated guard would have `rm -rf`'d the walked-up
       // dir, which in this case IS root, or run `npm install
