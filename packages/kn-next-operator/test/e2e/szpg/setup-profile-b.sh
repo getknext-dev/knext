@@ -8,8 +8,10 @@
 # image itself because scale-zero-pg has NO image publish pipeline (design §4.5).
 #
 # What it stands up, in order:
-#   1. a kind cluster (UNIQUE name, own local registry on a FREE port — cluster work is
-#      a queue of one; unique names so a concurrent agent's cluster is never clobbered)
+#   1. a kind cluster (UNIQUE name + own throwaway kubeconfig — cluster work is a
+#      queue of one; unique names so a concurrent agent's cluster is never clobbered).
+#      Images reach the node via `kind load docker-image` (gateway + db-demo); there
+#      is NO in-cluster registry.
 #   2. cert-manager + Knative Serving + Kourier, config-autoscaler patched for a REAL
 #      cold start (scale-to-zero-pod-retention-period: 0s, stable-window: 6s)
 #   3. the scale-zero-pg plane (Neon-OSS pageserver/safekeepers/broker/minio/pswatcher
@@ -42,7 +44,8 @@
 #     all       up, then boundary, then down (default)
 #
 # Env overrides: CLUSTER_NAME, APPDB_NAMESPACE (default my-apps), APPDB_NAME
-# (default db-demo), REGISTRY_PORT (default: an ephemeral free port), KEEP=1 (skip
+# (default db-demo), DB_DEMO_IMAGE (a real, pullable — or locally-built + kind-loaded
+# — db-demo image; the default placeholder is unpullable by design), KEEP=1 (skip
 # teardown on exit for post-mortem).
 set -euo pipefail
 
@@ -75,17 +78,10 @@ log()  { printf '\033[1;34m[p4a]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[p4a][warn]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[p4a][FAIL]\033[0m %s\n' "$*" >&2; exit 1; }
 
-free_port() { # print an OS-assigned free TCP port
-  python3 - <<'PY'
-import socket
-s = socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()
-PY
-}
-
 need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
 
 preflight() {
-  for t in kind kubectl docker python3; do need "$t"; done
+  for t in kind kubectl docker go; do need "$t"; done
   # kn-next CLI: prefer the built bin, fall back to `bun run` from source.
   if command -v kn-next >/dev/null 2>&1; then KN_NEXT="kn-next";
   elif [ -x "$REPO_ROOT/packages/kn-next/dist/cli/kn-next.js" ]; then KN_NEXT="node $REPO_ROOT/packages/kn-next/dist/cli/kn-next.js";
@@ -194,11 +190,18 @@ spec:
   tier: cold
 YAML
   log "waiting for AppDatabase to reconcile (Ready)"
+  # FAIL, not warn: a not-Ready AppDatabase means the szpg reconcile never ran, so
+  # everything downstream (bind, boundary) would prove nothing (cr-1214 #2).
   $K -n "$APPDB_NAMESPACE" wait --for=condition=Ready "appdatabase/${APPDB_NAME}" --timeout=180s \
-    || warn "AppDatabase not Ready in time — inspect: $K -n $APPDB_NAMESPACE describe appdatabase/$APPDB_NAME"
+    || die "AppDatabase not Ready — inspect: $K -n $APPDB_NAMESPACE describe appdatabase/$APPDB_NAME"
+  # No silent fallback: the DATABASE_URL secret name MUST come from the szpg
+  # operator's status. A guessed name would let the drill 'pass' over a Secret the
+  # reconcile never produced.
   APPDB_SECRET="$($K -n "$APPDB_NAMESPACE" get appdatabase "$APPDB_NAME" -o jsonpath='{.status.secretName}' 2>/dev/null || true)"
-  [ -n "$APPDB_SECRET" ] || { APPDB_SECRET="${APPDB_NAME}-db"; warn "status.secretName empty; assuming $APPDB_SECRET"; }
-  log "AppDatabase DATABASE_URL secret: $APPDB_SECRET"
+  [ -n "$APPDB_SECRET" ] || die "AppDatabase.status.secretName is empty — szpg did not provision the DATABASE_URL Secret; no fallback"
+  $K -n "$APPDB_NAMESPACE" get secret "$APPDB_SECRET" >/dev/null 2>&1 \
+    || die "AppDatabase secret $APPDB_SECRET does not exist — szpg reconcile incomplete"
+  log "AppDatabase DATABASE_URL secret: $APPDB_SECRET (from status.secretName)"
 }
 
 bind_and_deploy_db_demo() {
@@ -217,10 +220,42 @@ spec:
     minScale: 0
     maxScale: 2
 YAML
+  # If DB_DEMO_IMAGE is a locally-built image, load it into the kind node so the
+  # ksvc can start without an external registry (mirrors the gateway load; this is
+  # how the image reaches the node — there is no in-cluster registry).
+  if [ -n "${DB_DEMO_IMAGE:-}" ] && docker image inspect "$DB_DEMO_IMAGE" >/dev/null 2>&1; then
+    log "kind load db-demo image $DB_DEMO_IMAGE"
+    kind load docker-image "$DB_DEMO_IMAGE" --name "$CLUSTER_NAME" || warn "kind load db-demo image failed"
+  fi
+
+  # 5. bind — the ONE knext cluster write for the DB: `kubectl patch nextapp`.
+  # FAIL, not warn (cr-1214 #2): a failed bind means the knext bind/reconcile path
+  # never ran, so a later 'boundary PASSED' would be vacuous.
   log "kn-next db bind $APPDB_NAME --secret $APPDB_SECRET"
   # shellcheck disable=SC2086
   $KN_NEXT db bind "$APPDB_NAME" --secret "$APPDB_SECRET" -n "$APPDB_NAMESPACE" \
-    || warn "db bind returned non-zero (the operator may need to reconcile first)"
+    || die "kn-next db bind FAILED — the knext bind path did not run"
+
+  # ASSERT the bind actually took effect on the CR, and the operator reconciled it
+  # onto the ksvc as a DATABASE_URL env from the bound secret — proof the knext
+  # path ran end to end, not just that the CLI exited 0.
+  local ref
+  ref="$($K -n "$APPDB_NAMESPACE" get nextapp "$APPDB_NAME" -o jsonpath='{.spec.database.secretRef}' 2>/dev/null || true)"
+  [ "$ref" = "$APPDB_SECRET" ] \
+    || die "bind did not set spec.database.secretRef (got '$ref', want '$APPDB_SECRET')"
+  log "spec.database.secretRef == $ref (bind took effect)"
+  log "waiting for the operator to project DATABASE_URL onto the db-demo ksvc"
+  local i=0 env_src=""
+  while [ "$i" -lt 60 ]; do
+    env_src="$($K -n "$APPDB_NAMESPACE" get ksvc "$APPDB_NAME" \
+      -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="DATABASE_URL")].valueFrom.secretKeyRef.name}' 2>/dev/null || true)"
+    [ -n "$env_src" ] && break
+    i=$((i + 1)); sleep 2
+  done
+  [ "$env_src" = "$APPDB_SECRET" ] \
+    || die "operator did not project DATABASE_URL from $APPDB_SECRET onto the ksvc (got '$env_src') — reconcile did not take effect"
+  log "ksvc db-demo has DATABASE_URL <- secret $env_src (reconcile took effect)"
+
   log "NOTE: seeding + serving needs a real, pullable db-demo image (set DB_DEMO_IMAGE);"
   log "      the placeholder digest above is UNPULLABLE by design (mirrors the scale suite)."
   log "      Seed via: $K -n $APPDB_NAMESPACE apply -f apps/db-demo/migrate-job.yaml"

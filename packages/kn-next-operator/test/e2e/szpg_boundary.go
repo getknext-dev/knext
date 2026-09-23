@@ -16,10 +16,22 @@ limitations under the License.
 
 // Pure Profile-B (P4a, #1203) boundary logic: given an AppDatabase custom
 // resource's metadata (as `kubectl get appdatabase -o json` emits it), decide
-// whether the KNEXT operator wrote to it. It must NOT: nextapp_types.go:531
-// states "knext's operator never reads or writes AppDatabase (ADR-0001
-// boundary)", and scs-zones.md makes zone data sovereignty a hard rule. This
-// file is the machine-checkable form of that invariant.
+// whether ANY non-legitimate writer — the KNEXT operator above all — wrote to /
+// owns it. It must NOT: nextapp_types.go:531 states "knext's operator never
+// reads or writes AppDatabase (ADR-0001 boundary)", and scs-zones.md makes zone
+// data sovereignty a hard rule. This file is the machine-checkable form of that
+// invariant.
+//
+// WHY AN ALLOWLIST, NOT A REJECTLIST (cr-1214, jev 0.91). The knext operator
+// binary is `/manager` and sets NO explicit FieldOwner/FieldManager/UserAgent
+// anywhere, so a real knext write to an AppDatabase lands with field manager ==
+// the bare "manager" (client-go's default, derived from os.Args[0]). A rejectlist
+// keyed on "nextapp"/"kn-next" MISSES that entirely — proven live: an AppDatabase
+// with managedFields {appdb-operator, manager} false-passed. "nextapp-controller"
+// is only the operator's EVENT RECORDER name (cmd/main.go:183), never a field
+// manager. So the check inverts: only KNOWN-LEGITIMATE writers of an AppDatabase
+// are allowed, and anything else — "manager" included — is a violation. FAIL
+// CLOSED: an unrecognised writer is a violation, not a pass.
 //
 // Kept UNTAGGED (no e2e_szpg build tag) and free of cluster/k8s imports so it
 // compiles and is mutation-proved by szpg_boundary_test.go under a plain
@@ -34,21 +46,45 @@ import (
 	"strings"
 )
 
-// KnextManagerIdentifiers are case-insensitive substrings that mark a
-// managedFields entry's `manager` as the KNEXT operator (a controller-runtime
-// field manager or the operator binary). If any appears on an AppDatabase, knext
-// wrote to a resource it must never touch.
+// AllowedAppDatabaseManagersExact are the field managers that may LEGITIMATELY
+// write an AppDatabase, matched case-insensitively and in FULL. These are the
+// szpg control-plane binaries whose client-go default field manager is the
+// binary base name:
 //
-// These are KNEXT-specific on purpose. The szpg writers — "appdb-operator",
-// "kubectl-*", "pggw"/"scale-zero-pg-gateway" — do not contain any of these
-// substrings, so the guard cannot false-positive on the legitimate owners
-// (proven by TestKnextBoundaryViolations_DoesNotFlagSzpgManagers). "manager"
-// alone is deliberately NOT listed: it is the generic controller-runtime
-// default and would also match szpg's own controllers.
-var KnextManagerIdentifiers = []string{
-	"nextapp",          // nextapp-controller (mgr.GetEventRecorderFor / client field manager)
-	"kn-next-operator", // the operator binary / user-agent
-	"knext-operator",
+//   - "appdb-operator" — the szpg operator that reconciles AppDatabase
+//     (deploy/83-appdb-operator.yaml, gateway/cmd/appdb-operator).
+//   - "zone-operator"  — ALSO creates/owns AppDatabase for zones
+//     (gateway/internal/zone/appdbclient.go: "The Zone operator OWNS the
+//     AppDatabase it creates").
+//
+// The bare generic "manager" is DELIBERATELY ABSENT — that is the knext
+// operator's default field manager and the exact breach this guard exists to
+// catch. Do NOT add it.
+var AllowedAppDatabaseManagersExact = []string{
+	"appdb-operator",
+	"zone-operator",
+}
+
+// AllowedAppDatabaseManagerPrefixes are legitimate field-manager prefixes,
+// matched case-insensitively. "kubectl" covers the human/CI setup family
+// (kubectl-client-side-apply / kubectl-create / kubectl-edit / kubectl-patch /
+// kubectl for server-side apply). "scale-zero-pg" is defensive headroom for any
+// szpg component that identifies with the platform name.
+var AllowedAppDatabaseManagerPrefixes = []string{
+	"kubectl",
+	"scale-zero-pg",
+}
+
+// KnextManagerHints are case-insensitive substrings/exact tokens that let a
+// violation MESSAGE attribute an unrecognised write to the knext operator rather
+// than to a generic third party. They do NOT drive detection (the allowlist
+// does) — they only improve the human-readable reason. "manager" is matched
+// exactly (it is the knext binary's default field manager); the others catch a
+// knext-named manager should one ever appear.
+var KnextManagerHints = []string{
+	"nextapp",
+	"kn-next",
+	"knext",
 }
 
 // KnextOwnerAPIGroups are apiVersion group substrings whose presence in an
@@ -65,15 +101,14 @@ var KnextOwnerKinds = []string{
 	"NextApp",
 }
 
-// SzpgManagerIdentifiers are case-insensitive substrings that mark a
-// managedFields entry as belonging to the szpg (scale-zero-pg) control plane —
-// the LEGITIMATE owner of an AppDatabase. Used to reject the vacuous-pass
-// failure mode: an AppDatabase with NO knext writer AND no szpg writer either
-// (e.g. an empty/half-provisioned object) would pass KnextBoundaryViolations
-// while proving nothing. The Profile-B driver asserts BOTH "knext wrote nothing"
-// AND "szpg did provision it".
-var SzpgManagerIdentifiers = []string{
+// SzpgManagerTokens identify the szpg control-plane writers of an AppDatabase —
+// the LEGITIMATE provisioners. Used by SzpgManagedAppDatabase to reject the
+// vacuous-pass failure mode: an AppDatabase managed only by kubectl or by
+// nothing at all is NOT proof the szpg operator provisioned it, so the driver
+// must not report "boundary PASSED" over it.
+var SzpgManagerTokens = []string{
 	"appdb-operator",
+	"zone-operator",
 	"scale-zero-pg",
 }
 
@@ -117,20 +152,54 @@ func matchIdentifier(s string, identifiers []string) (string, bool) {
 	return "", false
 }
 
+// isAllowedAppDatabaseManager reports whether a field manager is a
+// known-legitimate writer of an AppDatabase (szpg control plane + human/CI
+// kubectl). Everything else — the bare "manager" of the knext operator
+// included — is NOT allowed. Matching is case-insensitive; exact for the szpg
+// binaries, prefix for the kubectl/szpg families.
+func isAllowedAppDatabaseManager(manager string) bool {
+	m := strings.ToLower(strings.TrimSpace(manager))
+	if m == "" {
+		return false // an empty manager is never legitimate — fail closed
+	}
+	for _, a := range AllowedAppDatabaseManagersExact {
+		if m == strings.ToLower(a) {
+			return true
+		}
+	}
+	for _, p := range AllowedAppDatabaseManagerPrefixes {
+		if strings.HasPrefix(m, strings.ToLower(p)) {
+			return true
+		}
+	}
+	return false
+}
+
 // KnextBoundaryViolations inspects an AppDatabase's metadata and returns a list
-// of human-readable violations proving the knext operator wrote to / owns it. An
-// EMPTY slice means the ADR-0001 boundary held: knext touched nothing, and the
-// AppDatabase is managed solely by szpg (+ kubectl). A NON-empty slice must fail
-// the Profile-B drill loudly — it is a data-sovereignty breach, not a flake.
+// of human-readable violations. An EMPTY slice means the ADR-0001 boundary held:
+// EVERY writer is a known-legitimate one (szpg / kubectl) and no knext owner ref
+// is present. A NON-empty slice must fail the Profile-B drill loudly — it is a
+// data-sovereignty breach, not a flake.
+//
+// The managedFields leg is an ALLOWLIST (fail-closed): any manager NOT in the
+// allowlist is a violation, which is what actually catches a knext write
+// (manager == "manager"). The ownerReference leg is secondary — a knext CREATE
+// would set a NextApp owner ref, which a patch/update would not show, so both
+// legs are needed.
 func KnextBoundaryViolations(meta ObjectMeta) []string {
 	var violations []string
 
 	for _, mf := range meta.ManagedFields {
-		if id, ok := matchIdentifier(mf.Manager, KnextManagerIdentifiers); ok {
-			violations = append(violations, fmt.Sprintf(
-				"managedFields manager %q matches knext identifier %q (operation %s) — knext wrote to AppDatabase",
-				mf.Manager, id, mf.Operation))
+		if isAllowedAppDatabaseManager(mf.Manager) {
+			continue
 		}
+		who := "an unrecognised writer"
+		if _, ok := matchIdentifier(mf.Manager, KnextManagerHints); ok || strings.EqualFold(strings.TrimSpace(mf.Manager), "manager") {
+			who = "the knext operator (its binary is /manager, no explicit FieldOwner)"
+		}
+		violations = append(violations, fmt.Sprintf(
+			"managedFields manager %q is not an allowed AppDatabase writer — %s (operation %s); only szpg (appdb-operator/zone-operator) and kubectl may write AppDatabase",
+			mf.Manager, who, mf.Operation))
 	}
 
 	for _, or := range meta.OwnerReferences {
@@ -152,13 +221,16 @@ func KnextBoundaryViolations(meta ObjectMeta) []string {
 	return violations
 }
 
-// SzpgManagedAppDatabase reports whether the szpg control plane appears as a
-// managedFields writer on the object — i.e. it really did provision it. The
-// Profile-B assertion pairs this with an empty KnextBoundaryViolations: szpg
-// owns the AppDatabase, knext owns nothing on it.
+// SzpgManagedAppDatabase reports whether the szpg control plane (appdb-operator
+// or zone-operator) appears as a managedFields writer on the object — i.e. it
+// really did provision it. The Profile-B assertion pairs this with an empty
+// KnextBoundaryViolations: szpg owns the AppDatabase, knext owns nothing on it.
+// A kubectl-only or empty object is NOT szpg-managed — that is the vacuous-pass
+// guard, so a "boundary PASSED" is never reported over an object the szpg
+// operator never touched.
 func SzpgManagedAppDatabase(meta ObjectMeta) bool {
 	for _, mf := range meta.ManagedFields {
-		if _, ok := matchIdentifier(mf.Manager, SzpgManagerIdentifiers); ok {
+		if _, ok := matchIdentifier(mf.Manager, SzpgManagerTokens); ok {
 			return true
 		}
 	}

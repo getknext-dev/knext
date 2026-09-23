@@ -43,10 +43,14 @@ operator never reads or writes AppDatabase."*
 
 - The **detection logic** lives in [`../szpg_boundary.go`](../szpg_boundary.go),
   is **untagged** (runs under a plain `go test ./...`), and is unit-tested +
-  mutation-proved by [`../szpg_boundary_test.go`](../szpg_boundary_test.go). It
-  inspects the AppDatabase's `metadata.managedFields` (no knext field manager) and
-  `metadata.ownerReferences` (no `NextApp` / `apps.kn-next.dev` owner), and — to
-  avoid a vacuous pass — also confirms szpg IS a writer.
+  mutation-proved by [`../szpg_boundary_test.go`](../szpg_boundary_test.go). It is
+  a **fail-closed allowlist**: `metadata.managedFields` may carry ONLY known
+  legitimate writers — the szpg `appdb-operator` / `zone-operator` and `kubectl-*`
+  — and anything else is a violation. This is deliberate: the knext operator's
+  binary is `/manager` and it sets no explicit field owner, so a real knext write
+  appears as field manager `manager`, which a knext-name rejectlist would miss.
+  The `ownerReferences` leg (no `NextApp` / `apps.kn-next.dev` owner) is secondary,
+  and — to avoid a vacuous pass — the check also confirms szpg IS a writer.
 - The **live driver** is [`../szpg_profile_b_test.go`](../szpg_profile_b_test.go),
   behind the `e2e_szpg` build tag (invisible to PR CI). It reads the running
   AppDatabase via `kubectl get -o json` and applies the assertion.
@@ -84,6 +88,7 @@ serve/seed steps; the default is the deliberately-unpullable placeholder), `KEEP
 
 | Piece | Validated |
 |---|---|
-| Boundary **detection logic** (managedFields / ownerReferences) | **Unit-tested + mutation-proved off-cluster** — `go test ./test/e2e/` on every PR |
+| Boundary **detection logic** (allowlist over managedFields / ownerReferences) | **Unit-tested + mutation-proved off-cluster** — `go test ./test/e2e/` on every PR, including the real breach (field manager `manager`) |
+| Live **driver detection** against a real apiserver | Validated on a tiny throwaway kind cluster (AppDatabase CRD only): a szpg-managed object PASSES; a write applied as **`--field-manager=manager`** (what a real knext write looks like) FAILS with the breach message |
 | `e2e_szpg` driver compiles / vets | `go vet -tags e2e_szpg` (locally green) |
 | Full szpg plane stand-up + double-zero wake | **Lead-local only** (~100 GB kind; requires the reproducible run of this script) — see P4b for the timed drill |

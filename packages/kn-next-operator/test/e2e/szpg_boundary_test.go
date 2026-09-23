@@ -22,11 +22,18 @@ limitations under the License.
 //
 // The invariant under test: after the knext operator reconciles a NextApp that
 // binds an szpg-provisioned database, the AppDatabase custom resource
-// (apps.scale-zero-pg.dev) must be owned/managed ONLY by the szpg appdb-operator
-// (and kubectl / whatever provisioned it). The knext operator NEVER reads or
-// writes AppDatabase (nextapp_types.go:531, ADR-0001 boundary / data
-// sovereignty). This file proves the DETECTION logic; szpg_profile_b_test.go
-// drives it against a live AppDatabase's `kubectl get -o json`.
+// (apps.scale-zero-pg.dev) must be owned/managed ONLY by the szpg control plane
+// (the appdb-operator / zone-operator) and human/CI kubectl. The knext operator
+// NEVER reads or writes AppDatabase (nextapp_types.go:531, ADR-0001 boundary /
+// data sovereignty).
+//
+// The check is an ALLOWLIST, deliberately (cr-1214 finding): the knext operator
+// binary is `/manager` and sets NO explicit FieldOwner, so a real knext write to
+// an AppDatabase lands with field manager == the bare "manager" (client-go's
+// default from os.Args[0]) — a name a knext-substring rejectlist would MISS.
+// Fail-closed: any managedFields manager that is NOT a known-legitimate writer
+// (appdb-operator / zone-operator / kubectl-*) is a violation, "manager"
+// included.
 
 package e2e
 
@@ -76,7 +83,7 @@ func parseMeta(t *testing.T, raw string) ObjectMeta {
 	return obj.Metadata
 }
 
-// The happy path: a legitimately-provisioned AppDatabase has ZERO knext
+// The happy path: a legitimately-provisioned AppDatabase has ONLY allowlisted
 // writers, so the boundary holds and no violations are returned.
 func TestKnextBoundaryViolations_CleanIsEmpty(t *testing.T) {
 	got := KnextBoundaryViolations(parseMeta(t, cleanAppDatabaseJSON))
@@ -85,35 +92,70 @@ func TestKnextBoundaryViolations_CleanIsEmpty(t *testing.T) {
 	}
 }
 
-// A managedFields entry whose manager identifies the knext operator is a
-// boundary breach — knext wrote to a resource it must never touch.
-func TestKnextBoundaryViolations_FlagsKnextManager(t *testing.T) {
+// THE cr-1214 REGRESSION TEST. The realistic breach: the knext operator PATCHES
+// an existing szpg AppDatabase. Its binary is /manager with no explicit
+// FieldOwner, so the write shows manager == "manager". The rejectlist missed
+// this; the allowlist MUST catch it, and the message must name it as knext.
+func TestKnextBoundaryViolations_FlagsBareManager(t *testing.T) {
 	meta := parseMeta(t, cleanAppDatabaseJSON)
 	meta.ManagedFields = append(meta.ManagedFields, ManagedFieldsEntry{
-		Manager:    "nextapp-controller",
+		Manager:    "manager", // <- the knext operator's real, default field manager
 		Operation:  "Update",
 		APIVersion: "apps.scale-zero-pg.dev/v1alpha1",
 	})
 	got := KnextBoundaryViolations(meta)
 	if len(got) != 1 {
-		t.Fatalf("a knext field manager must yield exactly 1 violation, got %d: %v", len(got), got)
+		t.Fatalf("a bare `manager` write (the real knext breach) must yield exactly 1 violation, got %d: %v", len(got), got)
 	}
-	if !strings.Contains(got[0], "nextapp-controller") {
+	if !strings.Contains(got[0], `"manager"`) {
 		t.Fatalf("violation must name the offending manager, got: %q", got[0])
+	}
+	if !strings.Contains(strings.ToLower(got[0]), "knext") {
+		t.Fatalf("a bare `manager` write should be attributed to the knext operator, got: %q", got[0])
 	}
 }
 
-// The generic controller-runtime binary field manager ("kn-next-operator")
-// must also be caught — it is the same operator by another name.
-func TestKnextBoundaryViolations_FlagsOperatorBinaryManager(t *testing.T) {
+// An explicitly knext-named field manager (should the operator ever set a
+// FieldOwner, or a controller-runtime SSA manager appear) must also be caught —
+// it is not in the allowlist.
+func TestKnextBoundaryViolations_FlagsKnextNamedManager(t *testing.T) {
+	for _, mgr := range []string{"nextapp-controller", "kn-next-operator"} {
+		meta := parseMeta(t, cleanAppDatabaseJSON)
+		meta.ManagedFields = append(meta.ManagedFields, ManagedFieldsEntry{Manager: mgr, Operation: "Update"})
+		got := KnextBoundaryViolations(meta)
+		if len(got) != 1 {
+			t.Fatalf("knext-named manager %q must yield 1 violation, got %d: %v", mgr, len(got), got)
+		}
+	}
+}
+
+// FAIL CLOSED: any UNRECOGNISED writer — not just a knext one — is a violation.
+// AppDatabase is szpg's resource; an unexpected controller writing it is a
+// boundary breach regardless of who it is.
+func TestKnextBoundaryViolations_FailsClosedOnUnknownWriter(t *testing.T) {
 	meta := parseMeta(t, cleanAppDatabaseJSON)
-	meta.ManagedFields = append(meta.ManagedFields, ManagedFieldsEntry{
-		Manager:   "kn-next-operator",
-		Operation: "Apply",
-	})
+	meta.ManagedFields = append(meta.ManagedFields, ManagedFieldsEntry{Manager: "some-random-operator", Operation: "Update"})
 	got := KnextBoundaryViolations(meta)
 	if len(got) != 1 {
-		t.Fatalf("the operator binary manager must yield 1 violation, got %d: %v", len(got), got)
+		t.Fatalf("an unrecognised writer must yield 1 violation (fail-closed), got %d: %v", len(got), got)
+	}
+}
+
+// The legitimate szpg + kubectl writers must NEVER be flagged, or the guard
+// cries wolf and gets ignored. zone-operator ALSO legitimately creates/owns
+// AppDatabase (scale-zero-pg internal/zone/appdbclient.go), so it is allowlisted.
+func TestKnextBoundaryViolations_DoesNotFlagLegitWriters(t *testing.T) {
+	for _, mgr := range []string{
+		"appdb-operator", "zone-operator",
+		"kubectl-client-side-apply", "kubectl-create", "kubectl-edit", "kubectl-patch", "kubectl",
+	} {
+		meta := ObjectMeta{
+			Name:          "db-demo",
+			ManagedFields: []ManagedFieldsEntry{{Manager: mgr, Operation: "Update"}},
+		}
+		if got := KnextBoundaryViolations(meta); len(got) != 0 {
+			t.Fatalf("legit writer %q must NOT be flagged, got: %v", mgr, got)
+		}
 	}
 }
 
@@ -151,45 +193,22 @@ func TestKnextBoundaryViolations_FlagsKnextOwnerGroup(t *testing.T) {
 	}
 }
 
-// szpg's OWN managers (appdb-operator, kubectl, client-go) must NEVER be
-// flagged — the guard must not false-positive on the legitimate writers, or the
-// whole harness cries wolf and gets ignored.
-func TestKnextBoundaryViolations_DoesNotFlagSzpgManagers(t *testing.T) {
-	for _, mgr := range []string{"appdb-operator", "kubectl-client-side-apply", "kubectl-edit", "scale-zero-pg-gateway", "pggw"} {
-		meta := ObjectMeta{
-			Name:          "db-demo",
-			ManagedFields: []ManagedFieldsEntry{{Manager: mgr, Operation: "Update"}},
-		}
-		if got := KnextBoundaryViolations(meta); len(got) != 0 {
-			t.Fatalf("szpg manager %q must NOT be flagged, got: %v", mgr, got)
-		}
-	}
-}
-
-// Case-insensitivity: apiserver casing / mixed-case managers must not let a
-// knext write slip through.
-func TestKnextBoundaryViolations_CaseInsensitive(t *testing.T) {
-	meta := ObjectMeta{
-		Name:          "db-demo",
-		ManagedFields: []ManagedFieldsEntry{{Manager: "NextApp-Controller", Operation: "Update"}},
-	}
-	if got := KnextBoundaryViolations(meta); len(got) != 1 {
-		t.Fatalf("mixed-case knext manager must be flagged, got %d: %v", len(got), got)
-	}
-}
-
-// SzpgManagedAppDatabase must recognise the legitimate szpg writer so the
+// SzpgManagedAppDatabase must recognise the legitimate szpg writers so the
 // driver can reject a vacuous pass (an AppDatabase nobody provisioned).
 func TestSzpgManagedAppDatabase(t *testing.T) {
 	if !SzpgManagedAppDatabase(parseMeta(t, cleanAppDatabaseJSON)) {
 		t.Fatal("appdb-operator-managed AppDatabase must be recognised as szpg-managed")
 	}
-	// An object with only a knext writer (and no szpg writer) is NOT szpg-managed.
-	knextOnly := ObjectMeta{
-		Name:          "db-demo",
-		ManagedFields: []ManagedFieldsEntry{{Manager: "nextapp-controller", Operation: "Update"}},
+	// zone-operator is also an szpg writer of AppDatabase.
+	if !SzpgManagedAppDatabase(ObjectMeta{ManagedFields: []ManagedFieldsEntry{{Manager: "zone-operator"}}}) {
+		t.Fatal("zone-operator-managed AppDatabase must be recognised as szpg-managed")
 	}
-	if SzpgManagedAppDatabase(knextOnly) {
+	// A kubectl-only object is NOT proof szpg provisioned it.
+	if SzpgManagedAppDatabase(ObjectMeta{ManagedFields: []ManagedFieldsEntry{{Manager: "kubectl-client-side-apply"}}}) {
+		t.Fatal("a kubectl-only object must NOT count as szpg-managed (vacuous-pass guard)")
+	}
+	// An object with only a knext writer is NOT szpg-managed.
+	if SzpgManagedAppDatabase(ObjectMeta{ManagedFields: []ManagedFieldsEntry{{Manager: "manager"}}}) {
 		t.Fatal("a knext-only-managed object must NOT count as szpg-managed")
 	}
 	// An empty object is not szpg-managed (the vacuous-pass case).
