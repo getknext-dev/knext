@@ -17,6 +17,7 @@
 
 import { describe, expect, it } from "bun:test";
 import {
+    DEV_ONLY_STUB_SOURCE,
     STANDALONE_DIR_BINDING,
     splitBareSpecifier,
     standaloneExecEntrySource,
@@ -148,6 +149,33 @@ describe("standaloneExecEntrySource — an unknown shape fails closed", () => {
                 [],
             ),
         ).toThrow(/__dirname/);
+    });
+});
+
+describe("DEV_ONLY_STUB_SOURCE — dev-only modules fail loudly if production ever reaches them", () => {
+    const load = () => {
+        const module = { exports: {} as Record<string, unknown> };
+        new Function("module", DEV_ONLY_STUB_SOURCE)(module);
+        return module.exports;
+    };
+
+    it("loads without throwing (a require in a dead branch costs nothing)", () => {
+        expect(load).not.toThrow();
+    });
+
+    it("stays benign for bundler interop and promise probing", () => {
+        const stub = load();
+        expect(stub.__esModule).toBeUndefined();
+        expect(stub.then).toBeUndefined();
+        expect(
+            (stub as Record<symbol, unknown>)[Symbol.toStringTag],
+        ).toBeUndefined();
+    });
+
+    it("THROWS on any real use, naming the property — never returns undefined", () => {
+        const stub = load();
+        expect(() => stub.default).toThrow(/dev-only Next module.*default/);
+        expect(() => stub.createHotReloader).toThrow(/createHotReloader/);
     });
 });
 

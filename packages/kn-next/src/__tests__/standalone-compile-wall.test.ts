@@ -76,12 +76,24 @@ startServer({ dir, isDev: false, config: nextConfig, port: currentPort }).catch(
 const START_SERVER = `const http = require('http')
 const path = require('path')
 const rds = require('react-dom/server')
+const { NoFallbackError } = require('next/dist/shared/lib/no-fallback-error.external.js')
 if (process.env.KNEXT_TEST_NEVER === 'set') {
   require('./next-dev-server')
   require('outside-only')
 }
 exports.startServer = async ({ dir, port }) => {
   http.createServer((req, res) => {
+    if (req.url === '/no-fallback') {
+      // base-server's shape: a disk chunk throws the SHARED error class and the
+      // server core maps it by identity (instanceof) to a 404.
+      try {
+        require(path.join(dir, '.next', 'server', 'no-fallback-chunk.js'))()
+      } catch (err) {
+        res.statusCode = err instanceof NoFallbackError ? 404 : 500
+        res.end(res.statusCode === 404 ? 'not found' : 'identity split: ' + String(err && err.message))
+        return
+      }
+    }
     try {
       const chunk = require(path.join(dir, '.next', 'server', 'chunk.js'))
       const body = JSON.stringify({ chunk: chunk(), rds: rds.tag, dir, cwd: process.cwd() })
@@ -120,6 +132,19 @@ function syntheticProject(): { project: string; standalone: string } {
         '{"name":"next","version":"0.0.0","main":"index.js"}',
     );
     write(join(s, "node_modules/next/index.js"), "module.exports = {};");
+    // (6) a module whose IDENTITY the bundled server and a disk chunk share —
+    // Next's `*.external` singletons. Bundling a second copy splits the class.
+    write(
+        join(
+            s,
+            "node_modules/next/dist/shared/lib/no-fallback-error.external.js",
+        ),
+        "class NoFallbackError extends Error {}\nexports.NoFallbackError = NoFallbackError;",
+    );
+    write(
+        join(s, ".next/server/no-fallback-chunk.js"),
+        "const { NoFallbackError } = require('next/dist/shared/lib/no-fallback-error.external.js');\nmodule.exports = () => { throw new NoFallbackError('no fallback'); };",
+    );
     write(
         join(s, "node_modules/next/dist/server/lib/start-server.js"),
         START_SERVER,
@@ -261,6 +286,13 @@ describe("compiled standalone executable — the synthetic wall", () => {
             // (2) anchored on the executable's directory, not __dirname / cwd
             expect(body.dir).toBe(realpathSync(standalone));
             expect(body.cwd).toBe(realpathSync(standalone));
+
+            // (6) ONE module instance shared by the bundled server and the
+            // disk chunk: the server's `instanceof` recognises the chunk's
+            // error. A second, bundled copy answers 500 (the real-app
+            // `dynamicParams = false` -> "Internal: NoFallbackError" defect).
+            const nf = await fetch(`http://127.0.0.1:${port}/no-fallback`);
+            expect(`${nf.status} ${await nf.text()}`).toBe("404 not found");
 
             // the chunk is read from disk at request time, not frozen in
             write(

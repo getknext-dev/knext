@@ -15,6 +15,9 @@ export declare function standaloneExecEntrySource(
     preloads: readonly string[],
 ): string;
 
+/** Source of the throw-on-use stub Next's dev-only modules compile against. */
+export declare const DEV_ONLY_STUB_SOURCE: string;
+
 /** `name` + `./subpath` of a bare specifier. */
 export declare function splitBareSpecifier(spec: string): {
     name: string;

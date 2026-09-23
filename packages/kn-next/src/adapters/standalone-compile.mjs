@@ -73,12 +73,20 @@
  * that boots fine and is merely slow.
  */
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+    existsSync,
+    readdirSync,
+    readFileSync,
+    realpathSync,
+    rmSync,
+    writeFileSync,
+} from "node:fs";
 import { isBuiltin } from "node:module";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { verifyBytecodeExec } from "./bytecode-exec-verify.mjs";
 import {
+    DEV_ONLY_STUB_SOURCE,
     resolveExportsUnderNode,
     splitBareSpecifier,
     standaloneExecEntrySource,
@@ -145,9 +153,16 @@ if (!/^knext-standalone-exec:[0-9a-f]{24}$/.test(MARKER)) {
     fail(`--marker must be knext-standalone-exec:<24 hex chars>, got ${JSON.stringify(MARKER)}`);
 }
 
+// Test-only: compile WITHOUT bytecode to prove the verifier below rejects it on
+// a real app. It can never yield an artifact — the verifier deletes the file
+// and the script exits 1 — so it is not a way to ship an unverified binary.
+const NO_BYTECODE_FOR_VERIFIER_TEST =
+    process.env.KNEXT_STANDALONE_COMPILE_NO_BYTECODE_FOR_VERIFIER_TEST === "1";
+
 // ── Plugins ──────────────────────────────────────────────────────────────────
 const EMPTY = join(dirname(SERVER), ".knext-standalone-exec-empty.cjs");
-writeFileSync(EMPTY, "module.exports = {};\n");
+// Throws on USE (see DEV_ONLY_STUB_SOURCE in standalone-exec-entry.mjs).
+writeFileSync(EMPTY, DEV_ONLY_STUB_SOURCE);
 
 /** Dev-only modules production `server.js` (isDev: false) never executes. */
 const DEV_ONLY = [
@@ -211,6 +226,78 @@ function nodeConditionTarget(spec, fromDir) {
     return existsSync(abs) ? abs : undefined;
 }
 
+// ── The disk closure: modules the bundled server must SHARE with disk code ──
+// Next loads each route's compiled chunk from `.next/server/**` by path at
+// request time, and those chunks `require` Next modules from disk — most
+// importantly the `*.external` singletons (`no-fallback-error.external`, the
+// work/action/after async-storage instances, …) whose IDENTITY must be shared
+// with the server core: `err instanceof NoFallbackError` in base-server, and
+// every AsyncLocalStorage lookup, compare against ONE module instance. If the
+// compile ALSO bundles such a module into the executable, the process holds
+// two copies — measured: a `dynamicParams = false` miss answers 500
+// ("Internal: NoFallbackError") instead of 404.
+//
+// So: every module reachable (through literal require/import specifiers) from
+// the disk-loaded tree is kept OUT of the bundle and required at runtime from
+// its real on-disk path — the same file, and so the same module instance, the
+// chunks get. Everything else the server reaches is bundled and compiled to
+// bytecode. The scan is conservative by construction: it over-approximates
+// what disk code can load (any literal specifier counts, reached or not), and
+// over-externalizing only costs bytecode coverage, never correctness.
+const DISK_SPECIFIER =
+    /\brequire\(\s*["'`]([^"'`$]+)["'`]\s*\)|\bimport\(\s*["'`]([^"'`$]+)["'`]\s*\)|\bfrom\s*["']([^"']+)["']/g;
+
+function listJs(dir, out = []) {
+    let entries;
+    try {
+        entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+        return out;
+    }
+    for (const e of entries) {
+        const p = join(dir, e.name);
+        if (e.isDirectory()) listJs(p, out);
+        else if (/\.(c|m)?js$/.test(e.name)) out.push(p);
+    }
+    return out;
+}
+
+function computeDiskClosure() {
+    const seen = new Set();
+    const queue = listJs(join(dirname(SERVER), ".next", "server")).map((f) => realpathSync(f));
+    while (queue.length > 0) {
+        const file = queue.pop();
+        if (seen.has(file)) continue;
+        seen.add(file);
+        let src;
+        try {
+            src = readFileSync(file, "utf8");
+        } catch {
+            continue;
+        }
+        for (const m of src.matchAll(DISK_SPECIFIER)) {
+            const spec = m[1] ?? m[2] ?? m[3];
+            if (!spec || isBuiltin(spec) || spec.startsWith("node:") || spec.startsWith("bun:")) continue;
+            let resolved;
+            try {
+                resolved = Bun.resolveSync(spec, dirname(file));
+            } catch {
+                continue;
+            }
+            if (!isAbsolute(resolved)) continue;
+            const real = realpathSync(resolved);
+            if (isInside(real, ROOT) && !seen.has(real)) queue.push(real);
+        }
+    }
+    return seen;
+}
+const DISK_CLOSURE = computeDiskClosure();
+
+// Where the standalone ROOT sits relative to the executable at runtime: the
+// executable lives beside server.js, which in a monorepo is below the root.
+const RUNTIME_ROOT_FROM_EXEC_DIR = relative(realpathSync(dirname(SERVER)), ROOT);
+const DISK_NAMESPACE = "knext-disk";
+
 /**
  * One resolver for the whole graph:
  *
@@ -222,11 +309,30 @@ function nodeConditionTarget(spec, fromDir) {
  *      `pages.runtime.prod.js`, which drags in `critters`. The image has only
  *      the traced tree, so bundling from outside it would compile code the
  *      uncompiled server could never have loaded;
- *   3. a bare specifier Bun cannot resolve -> retried under Node's conditions.
+ *   3. a bare specifier Bun cannot resolve -> retried under Node's conditions;
+ *   4. anything in the DISK CLOSURE (above) -> required at runtime from its
+ *      real on-disk path, never bundled, so disk chunks and the bundled server
+ *      share one module instance.
  */
+const keptOnDisk = new Set();
+
+/** A module in the disk closure resolves to its on-disk twin, not the bundle. */
+function onDisk(real) {
+    if (!DISK_CLOSURE.has(real)) return undefined;
+    keptOnDisk.add(real);
+    return { path: relative(ROOT, real), namespace: DISK_NAMESPACE };
+}
+
 const standaloneResolver = {
     name: "knext-standalone-resolver",
     setup(build) {
+        build.onLoad({ filter: /.*/, namespace: DISK_NAMESPACE }, (a) => ({
+            // Resolved at RUNTIME against the standalone root beside the
+            // executable (banner below). realpath so the module-cache key is
+            // the one a disk chunk's own resolution produces.
+            contents: `module.exports = require(require("node:fs").realpathSync(require("node:path").join(globalThis.__knextStandaloneRoot, ${JSON.stringify(a.path)})));`,
+            loader: "js",
+        }));
         build.onResolve({ filter: /.*/ }, (a) => {
             if (DEV_ONLY.some((p) => p.test(a.path))) return { path: EMPTY };
             if (!a.importer || PRELOAD_SET.has(a.path) || isBuiltin(a.path)) return undefined;
@@ -239,13 +345,13 @@ const standaloneResolver = {
             }
             if (resolved !== undefined) {
                 if (!isAbsolute(resolved)) return undefined;
-                return isInside(realpathSync(resolved), ROOT)
-                    ? undefined
-                    : { path: a.path, external: true };
+                const real = realpathSync(resolved);
+                if (!isInside(real, ROOT)) return { path: a.path, external: true };
+                return onDisk(real) ?? undefined;
             }
             if (isBareSpecifier(a.path)) {
                 const fallback = nodeConditionTarget(a.path, dirname(a.importer));
-                if (fallback) return { path: fallback };
+                if (fallback) return onDisk(realpathSync(fallback)) ?? { path: fallback };
                 // Not in the traced tree at all (e.g. `critters`, required only
                 // when `optimizeCss` is on). The uncompiled server would throw
                 // at that require if it were ever reached; a runtime require
@@ -265,12 +371,14 @@ try {
         target: "bun",
         // --bytecode emits CommonJS; server.js and next/dist/server are CJS.
         format: "cjs",
-        bytecode: true,
+        bytecode: !NO_BYTECODE_FOR_VERIFIER_TEST,
         minify: true,
         // The bytecode-proof marker, as a BANNER so it sits directly under the
         // module's `// @bun …` pragma rather than after megabytes of bundled
         // Next source (where a stray "// @bun" string could sit in between).
-        banner: `globalThis.__knextStandaloneExecMarker=${JSON.stringify(MARKER)};`,
+        banner:
+            `globalThis.__knextStandaloneExecMarker=${JSON.stringify(MARKER)};` +
+            `globalThis.__knextStandaloneRoot=require("node:path").resolve(process.env.KNEXT_STANDALONE_DIR||require("node:path").dirname(process.execPath),${JSON.stringify(RUNTIME_ROOT_FROM_EXEC_DIR)});`,
         plugins: [standaloneResolver],
         // Production branches only: react/next pick their `.production` code
         // at build time and the dev branches are dead-code-eliminated.
@@ -300,6 +408,12 @@ const verdict = verifyBytecodeExec(readFileSync(OUTFILE), MARKER);
 if (!verdict.ok) {
     rmSync(OUTFILE, { force: true });
     fail(`the compiled executable failed the bytecode check: ${verdict.reason}`);
+}
+console.log(
+    `[knext standalone-compile] ${keptOnDisk.size} module(s) shared with disk-loaded chunks kept on disk (disk closure: ${DISK_CLOSURE.size})`,
+);
+if (process.env.KNEXT_STANDALONE_COMPILE_VERBOSE === "1") {
+    for (const f of [...keptOnDisk].sort()) console.log(`  kept on disk: ${relative(ROOT, f)}`);
 }
 console.log(
     `[knext standalone-compile] wrote ${OUTFILE} (bytecode: verified${TARGET ? `, target: ${TARGET}` : ""})`,

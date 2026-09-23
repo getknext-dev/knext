@@ -23,11 +23,21 @@ afterAll(() => {
 
 const MARKER = "knext-standalone-exec:feedfacecafebeef00112233";
 
-async function compile(bytecode: boolean): Promise<Buffer> {
+async function compile(bytecode: boolean, nonLatin1 = false): Promise<Buffer> {
     const dir = mkdtempSync(join(tmpdir(), "knext-bytecode-verify-"));
     tempDirs.push(dir);
     const entry = join(dir, "entry.cjs");
-    writeFileSync(entry, 'console.log(require("node:path").sep);\n');
+    // A real Next server bundle keeps a LEGAL comment (`/*! … */`, a license
+    // notice) holding a non-Latin-1 character — measured: `s’adagia`, U+2019,
+    // in a vendored package's notice. Bun escapes non-ASCII in code but keeps
+    // legal comments verbatim, so the embedded module SOURCE is then stored as
+    // UTF-16LE — the layout a Latin-1-only scan missed on every real app.
+    writeFileSync(
+        entry,
+        nonLatin1
+            ? '/*! batte col remo qualunque s’adagia */\nconsole.log(require("node:path").sep);\n'
+            : 'console.log(require("node:path").sep);\n',
+    );
     const outfile = join(dir, bytecode ? "with-bytecode" : "without-bytecode");
     const result = await Bun.build({
         entrypoints: [entry],
@@ -65,6 +75,30 @@ describe("verifyBytecodeExec — real bun --compile output", () => {
         expect(verdict.ok).toBe(false);
         expect((verdict as { reason: string }).reason).toMatch(
             /marker is not in the executable/,
+        );
+    }, 60_000);
+});
+
+describe("verifyBytecodeExec — real output whose source Bun stores as UTF-16 (the real-Next-app layout)", () => {
+    it("the source really is UTF-16 here (non-vacuity: a Latin-1 scan finds only the pool copy)", async () => {
+        const bytes = await compile(true, true);
+        const latin1 = bytes.toString("latin1").split(MARKER).length - 1;
+        const utf16 = bytes.indexOf(Buffer.from(MARKER, "utf16le"));
+        expect(latin1).toBe(1);
+        expect(utf16).toBeGreaterThan(-1);
+    }, 60_000);
+
+    it("PASSES the bytecode build", async () => {
+        expect(verifyBytecodeExec(await compile(true, true), MARKER)).toEqual({
+            ok: true,
+        });
+    }, 60_000);
+
+    it("FAILS the same entry compiled WITHOUT bytecode", async () => {
+        const verdict = verifyBytecodeExec(await compile(false, true), MARKER);
+        expect(verdict.ok).toBe(false);
+        expect((verdict as { reason: string }).reason).toMatch(
+            /WITHOUT --bytecode/,
         );
     }, 60_000);
 });

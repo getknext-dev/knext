@@ -81,6 +81,17 @@ export function standaloneExecEntrySource(serverSrc, preloads) {
     ].join("\n");
 }
 
+/**
+ * The module Next's dev-only requires are compiled against. Production never
+ * takes those branches (`server.js` hard-codes `isDev: false`), so the stub
+ * THROWS on use rather than handing back `undefined`: a future Next that does
+ * reach one in production fails loudly, naming the property, instead of
+ * misbehaving quietly. `__esModule`, `then` and symbol keys stay benign so
+ * bundler interop and promise-probing a module never trip it on load.
+ */
+export const DEV_ONLY_STUB_SOURCE =
+    'module.exports = new Proxy({}, { get(_t, k) { if (typeof k === "symbol" || k === "__esModule" || k === "then") return undefined; throw new Error("knext: a dev-only Next module was reached in a production standalone executable (property " + String(k) + ")"); } });\n';
+
 /** `name` + `./subpath` of a bare specifier (`@scope/pkg/deep` included). */
 export function splitBareSpecifier(spec) {
     const parts = spec.split("/");
