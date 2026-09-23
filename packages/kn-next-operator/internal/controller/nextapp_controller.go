@@ -1238,16 +1238,7 @@ func (r *NextAppReconciler) buildKsvcEnv(nextApp *appsv1alpha1.NextApp) ([]corev
 			})
 		}
 		// envMap: map specific secret keys to env var names — aligned with CLI
-		// Iterate in sorted key order: ranging the map directly reorders the env
-		// list on every reconcile, which changes the revision template and makes
-		// Knative cut a new revision each time.
-		envNames := make([]string, 0, len(nextApp.Spec.Secrets.EnvMap))
-		for envName := range nextApp.Spec.Secrets.EnvMap {
-			envNames = append(envNames, envName)
-		}
-		sort.Strings(envNames)
-		for _, envName := range envNames {
-			entry := nextApp.Spec.Secrets.EnvMap[envName]
+		for envName, entry := range nextApp.Spec.Secrets.EnvMap {
 			envVars = append(envVars, corev1.EnvVar{
 				Name: envName,
 				ValueFrom: &corev1.EnvVarSource{
