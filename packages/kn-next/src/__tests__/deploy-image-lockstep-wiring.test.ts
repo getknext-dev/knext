@@ -125,10 +125,13 @@ const runAssetGC = mock<AnyFn>(() => ({ pruned: true }));
 mock.module("../cli/schema/kubectl-capture", () => ({
     captureKubectl: () => ({ ok: true, stdout: "", stderr: "" }),
 }));
+// `warn` is hoisted out (not a fresh `mock()` per call) so tests can assert on
+// it — the #1283 round 3 opt-out announcement.
+const logWarn = mock<AnyFn>();
 mock.module("../utils/logger", () => ({
     createLogger: () => ({
         info: mock(),
-        warn: mock(),
+        warn: (...a: unknown[]) => logWarn(...a),
         error: mock(),
         debug: mock(),
         fatal: mock(),
@@ -285,6 +288,32 @@ describe("deploy() — verifyBuiltImageLockstep scope (#1283 round 2, finding #4
         await deploy();
         expect(verifyBuiltImageLockstep).not.toHaveBeenCalled();
         expect(applied()).toBe(true);
+    });
+
+    it("--skip-image-lockstep-check logs a warn naming what is skipped and the risk (#1283 round 3) — never silent", async () => {
+        setArgv([
+            "deploy",
+            "--tag",
+            "deploytag",
+            "--skip-image-lockstep-check",
+        ]);
+        const deploy = await importDeploy();
+        await deploy();
+        expect(logWarn).toHaveBeenCalledWith(
+            expect.stringContaining("--skip-image-lockstep-check"),
+        );
+        expect(logWarn).toHaveBeenCalledWith(
+            expect.stringMatching(/lock-step|ASSET_PREFIX|skew|asset GC/i),
+        );
+    });
+
+    it("does NOT warn when --skip-image-lockstep-check is absent", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const deploy = await importDeploy();
+        await deploy();
+        expect(logWarn).not.toHaveBeenCalledWith(
+            expect.stringContaining("--skip-image-lockstep-check"),
+        );
     });
 
     it("ABORTS before the mutating CR apply when the guard fails — mutation-proof: deleting the call site or its throw makes this pass wrongly (see file header)", async () => {

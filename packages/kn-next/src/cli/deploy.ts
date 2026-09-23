@@ -417,6 +417,19 @@ export async function deploy() {
 
     log.info({ dryRun: options.dryRun }, "kn-next deploy");
 
+    // #1283 round 3: announce the opt-out at warn on every deploy that uses
+    // it — same discipline as ADR-0047's NO_STORAGE_MODE_NOTICE — so skipping
+    // the lock-step check is never silent.
+    if (options.skipImageLockstepCheck) {
+        log.warn(
+            "--skip-image-lockstep-check: skipping the post-build ASSET_PREFIX/" +
+                "build-id lock-step check against the pushed image. If this " +
+                "deploy's Dockerfile rebuilds in-image and the lock-step is " +
+                "actually broken (ADR-0011 — skew protection, asset GC), this " +
+                "deploy will NOT catch it before the cluster write.",
+        );
+    }
+
     const config = applyOverrides(baseConfig, options);
 
     // UX ledger row 4 (4b): fail fast on `<...>` placeholder values BEFORE any
