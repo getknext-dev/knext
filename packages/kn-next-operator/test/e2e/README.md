@@ -93,6 +93,39 @@ not these Go suites.)
 | `e2e_gc` | `operator-e2e-nightly.yml` → job `gc-e2e` | nightly cron + `workflow_dispatch` |
 | `e2e_bundle` | `operator-bundle-e2e.yml` | PRs touching `packages/kn-next-operator/**`, push to `main`, `workflow_dispatch` |
 
+## The platform-e2e round (two profiles)
+
+The file-manager end-to-end effort splits into a per-PR **process round** and a
+cluster-bound **platform round**. Only the first gates PRs.
+
+- **Per-PR gate — the T1 process round.** The `file-manager-e2e-round` aggregator
+  on `ci.yml` (build → single-exec compile → compat-smoke serve/routes/ISR over
+  real HTTP → prod-image), path-scoped at the aggregator via a merge-base diff.
+  It runs no cluster. This is and remains the only per-PR e2e gate.
+- **Profile A — compute scale-to-zero (nightly, proven).** The `e2e_scale` suite
+  above (`scale_from_zero_test.go`), run by `operator-e2e-nightly.yml` job
+  `scale-to-zero-cache`: the operator deploys the signed file-manager image to
+  Knative on kind, the app scales to zero, wakes on a request, and the **woken**
+  pod serves the real app — GET `/` (200 + real-render marker), a force-dynamic
+  route (200, SSR per request), and authenticated ISR invalidation
+  (`POST /api/cache/invalidate` → 401 without the Bearer token, 200 with it,
+  content revalidated, with a pod-recycle-proof control) (#1202).
+  Run it locally: `make test-e2e-scale` (kind-only; needs `SCALE_TEST_IMAGE`, a
+  digest-pinned file-manager image — CI resolves it from the supply-chain lane).
+  Run it on demand in CI: `gh workflow run operator-e2e-nightly.yml` (optionally
+  passing `scale_test_image` as a dispatch input). A nightly red blocks no PR —
+  it is a triage signal, so a PR-green tree can still be nightly-red.
+- **Profile B — DB scale-to-zero (lead-local, PLANNED — not shipped).** Deploy
+  `db-demo` with a scale-zero-pg Postgres, idle BOTH compute and DB to zero, and
+  verify a wake-from-zero serves a DB-backed read (#1203 harness, #1204
+  double-zero drill). Lead-owned, run against local kind / OKE serialized (one
+  cluster job at a time), **not CI**. Until those issues close, the honest status
+  is: compute-zero wake proven nightly, double-zero wake planned.
+
+Adjacent honesty note: the nightly workflow's `cli-e2e` / `gc-e2e` /
+`rollback-e2e` jobs have pre-existing failures tracked in #1208 — Profile A's
+green is a claim about the `scale-to-zero-cache` job, not the whole workflow.
+
 ## Safety model
 
 These suites are explicitly designed to be runnable against shared clusters, so
