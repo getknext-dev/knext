@@ -37,6 +37,17 @@ if [ -n "${PID:-}" ] && kill -0 "${PID}" 2>/dev/null; then
   fi
 fi
 
+# ── #1166/#1225 (the compiled bun exec's docker boot) — reap the container ───
+# `docker run --rm` only removes the container on ITS OWN exit; a hard
+# SIGKILL of the `docker run` CLIENT above (PID) kills the CLIENT, not the
+# container it was attached to, so a client that had to be force-killed can
+# leave the container running. Best-effort, non-fatal on every other boot
+# path (CONTAINER_NAME is absent — `docker rm` is simply skipped).
+CONTAINER_NAME="$(grep -E '^CONTAINER_NAME=' "${LOG_FILE}" | head -n1 | cut -d= -f2- || true)"
+if [ -n "${CONTAINER_NAME:-}" ] && command -v docker >/dev/null 2>&1; then
+  docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+fi
+
 # ── #188 (bun-lane fix round 1) — surface the server log at teardown ──────────
 # Triage's #1 finding (run 28607626868): every Bucket-1 "socket hang up"
 # failure's real cause sat in .adapter-server.log and CI discarded it —

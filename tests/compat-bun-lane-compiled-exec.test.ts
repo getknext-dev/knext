@@ -11,18 +11,31 @@ import { resolve } from 'node:path';
  * so the official 778-test suite had never run against the artifact that
  * ships.
  *
+ * `bun-linux-x64-musl` is dynamically linked against musl — it CANNOT execute
+ * on the bare glibc `ubuntu-latest` runner at all (see
+ * `packages/kn-next/src/cli/vinext-build.ts`'s `LinuxLibc` note, and #894's
+ * post-compile smoke, which compiles a SEPARATE glibc twin for exactly this
+ * reason). So the exec must be booted inside the SAME musl base image the
+ * product ships (`Dockerfile.standalone.hbs`'s `standalone-bun` stage), never
+ * bare on the runner and never against a glibc-target twin (that would
+ * certify a binary nothing ships).
+ *
  * Source-contract test (same style as `compat-bun-lane-lockstep.test.ts`):
  * asserts the deploy script's bun-lane boot path compiles the standalone
- * executable via the shipped compile script and boots THAT artifact, with no
- * fallback path left silently wired to the old uncompiled boot. Mutation
- * proof: reverting the compile-and-boot block to a bare
- * `exec "${SERVER_CMD}" ... "${SERVER_JS}"` for the bun lane must red this
- * file (verified below by literally deleting the anchors and checking the
- * assertions fail).
+ * executable via the shipped compile script and boots it inside the pinned
+ * alpine image, with no fallback path silently wired to a boot that would
+ * either crash (bare exec on the runner) or certify the wrong artifact (a
+ * glibc twin). Mutation-proved on the REAL `scripts/e2e-deploy.sh` (not a
+ * scratch copy): each assertion below was verified to fail after reverting
+ * its anchor and to pass again after restoring the file.
  */
 
 const REPO_ROOT = resolve(import.meta.dir, '..');
 const DEPLOY_SH_PATH = resolve(REPO_ROOT, 'scripts/e2e-deploy.sh');
+const DOCKERFILE_PATH = resolve(
+  REPO_ROOT,
+  'packages/kn-next/templates/runtime-standalone/Dockerfile.standalone.hbs',
+);
 const src = readFileSync(DEPLOY_SH_PATH, 'utf8');
 
 describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec (#1166/#1225)', () => {
@@ -46,28 +59,60 @@ describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec 
     expect(/--marker "\$\{MARKER\}"/.test(src)).toBe(true);
   });
 
-  it('records STANDALONE_EXEC and overrides SERVER_BOOT_TARGET with it', () => {
+  it('records STANDALONE_EXEC', () => {
     expect(
       src.includes('STANDALONE_EXEC="${STANDALONE_APP_DIR}/knext-standalone-exec-linux-x64"'),
     ).toBe(true);
+  });
+
+  it('requires docker on PATH before compiling — a musl exec with no runnable base FAILS LOUD, never falls back to server.js', () => {
+    const compileBlock = src.slice(
+      src.indexOf('# ── 3b. compile the standalone-on-Bun bytecode executable'),
+      src.indexOf('# ── 4. boot the standalone server on a free port'),
+    );
     expect(
-      /if \[ -n "\$\{STANDALONE_EXEC\}" \]; then\s*\n\s*SERVER_BOOT_TARGET="\$\{STANDALONE_EXEC\}"/.test(
-        src,
-      ),
-      'SERVER_BOOT_TARGET must be overridden to the compiled exec when STANDALONE_EXEC is set',
+      /command -v docker >\/dev\/null 2>&1/.test(compileBlock),
+      'the compile step must check for docker (the musl exec cannot boot bare on this glibc runner)',
+    ).toBe(true);
+    // The docker-missing AND compile-script-missing branches must each `exit
+    // 1` — no path through this block may leave STANDALONE_EXEC empty while
+    // RUNTIME=bun and the debug lane is off (that would silently boot
+    // server.js instead of failing loud).
+    const dockerMissingBranch = compileBlock.slice(compileBlock.indexOf('if ! command -v docker'));
+    expect(/exit 1/.test(dockerMissingBranch.split('\n').slice(0, 4).join('\n'))).toBe(true);
+    expect(
+      /standalone-compile script not found[\s\S]{0,300}exit 1/.test(compileBlock),
+      'a missing compile script must exit 1, not warn-and-fallback',
     ).toBe(true);
   });
 
-  it('boots the compiled exec DIRECTLY — no interpreter prefix, no -r preload flags (baked in)', () => {
+  it('boots the exec INSIDE the pinned musl image via docker run --network host, not bare on the runner', () => {
     const bootBlock = src.slice(src.indexOf('if [ -n "${STANDALONE_EXEC}" ]; then'));
-    const execLine = bootBlock.match(/exec "\$\{SERVER_BOOT_TARGET\}"\s*\n/);
+    expect(/exec docker run --rm --name "\$\{CONTAINER_NAME\}"/.test(bootBlock)).toBe(true);
+    expect(/--network host/.test(bootBlock)).toBe(true);
     expect(
-      execLine,
-      'the compiled-exec branch must `exec "${SERVER_BOOT_TARGET}"` with no SERVER_CMD/preload-args prefix',
-    ).not.toBeNull();
+      /"\$\{STANDALONE_BUN_IMAGE\}"/.test(bootBlock),
+      'must boot inside STANDALONE_BUN_IMAGE, the pinned alpine base — not the bare runner',
+    ).toBe(true);
+    // No `-r` preload flags, no SERVER_CMD interpreter prefix — baked into
+    // the compiled entry (unlike the uncompiled server.js boot below it).
+    expect(
+      /-r "\$\{KNEXT_CC_PRELOAD\}"[\s\S]{0,400}"\$\{STANDALONE_BUN_IMAGE\}"/.test(bootBlock),
+    ).toBe(false);
   });
 
-  it('skips the compile (falls back to the uncompiled server.js) under the sandbox-fetch-debug instrumentation lane', () => {
+  it("the image pin is BYTE-IDENTICAL to Dockerfile.standalone.hbs's standalone-bun FROM line (lockstep)", () => {
+    const pinMatch = src.match(/STANDALONE_BUN_IMAGE="([^"]+)"/);
+    expect(pinMatch, 'scripts/e2e-deploy.sh must define STANDALONE_BUN_IMAGE').not.toBeNull();
+    const pin = (pinMatch as RegExpMatchArray)[1];
+    const dockerfile = readFileSync(DOCKERFILE_PATH, 'utf8');
+    expect(
+      dockerfile.includes(`FROM ${pin} AS standalone-bun`),
+      `Dockerfile.standalone.hbs's standalone-bun stage must FROM the exact same pin (${pin}) — a bump to either alone silently diverges what CI credentials from what ships`,
+    ).toBe(true);
+  });
+
+  it('skips the compile (boots the uncompiled server.js on purpose) under the sandbox-fetch-debug instrumentation lane', () => {
     const compileBlock = src.slice(
       src.indexOf('# ── 3b. compile the standalone-on-Bun bytecode executable'),
       src.indexOf('# ── 4. boot the standalone server on a free port'),
@@ -81,10 +126,6 @@ describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec 
   });
 
   it('the node lane never sets STANDALONE_EXEC (metadata + boot command stay byte-identical)', () => {
-    // The compile block's outer guard is `RUNTIME = bun`; nothing outside
-    // that guard may reference STANDALONE_EXEC as anything but the
-    // already-declared empty-string default and the boot-time override
-    // check, both of which are runtime-neutral no-ops when RUNTIME=node.
     const compileGuardLine = src
       .split('\n')
       .find((l) =>
@@ -93,18 +134,34 @@ describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec 
     expect(compileGuardLine).toBeDefined();
   });
 
-  it('mutation proof: deleting the compile-and-boot anchors reds the suite above', () => {
+  it('the port-ownership check uses OWNER_PID (resolved via docker inspect for the compiled exec), not the docker CLIENT pid', () => {
+    // `--network host` means the docker CLIENT process (SERVER_PID) never
+    // itself holds the listening socket — the containerized process does,
+    // under a DIFFERENT host pid. Without this the #171 TOCTOU guard would
+    // refuse every healthy bun-lane deployment (SERVER_PID would never match
+    // the real listener).
+    expect(src.includes('docker inspect -f \'{{.State.Pid}}\' "${CONTAINER_NAME}"')).toBe(true);
+    expect(/pid=\$\{OWNER_PID\},/.test(src)).toBe(true);
+    expect(/-a -p "\$\{OWNER_PID\}"/.test(src)).toBe(true);
+  });
+
+  it('mutation proof: reverting the compile/boot/ownership anchors reds the suite above', () => {
     const mutated = src
       .replace('bun run "${STANDALONE_COMPILE_JS}"', 'bun run "${SOMETHING_ELSE}"')
       .replace('--target bun-linux-x64-musl', '--target host')
       .replace(
         'STANDALONE_EXEC="${STANDALONE_APP_DIR}/knext-standalone-exec-linux-x64"',
         'STANDALONE_EXEC=""',
+      )
+      .replace(
+        'exec docker run --rm --name "${CONTAINER_NAME}" \\\n      --network host \\',
+        'exec "${SERVER_BOOT_TARGET}" # mutated: bare boot, no container',
       );
     expect(/bun run "\$\{STANDALONE_COMPILE_JS\}"/.test(mutated)).toBe(false);
     expect(/--target bun-linux-x64-musl/.test(mutated)).toBe(false);
     expect(
       mutated.includes('STANDALONE_EXEC="${STANDALONE_APP_DIR}/knext-standalone-exec-linux-x64"'),
     ).toBe(false);
+    expect(/exec docker run --rm --name "\$\{CONTAINER_NAME\}"/.test(mutated)).toBe(false);
   });
 });
