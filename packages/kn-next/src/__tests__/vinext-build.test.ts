@@ -572,12 +572,78 @@ describe("#949 stageSharpNative stages the image target's platform, not the host
         expect(writes.join("")).toMatch(/two versions|multiple versions/i);
     });
 
-    it("falls back with a warning when the candidate sharp manifest is UNREADABLE (corrupt JSON) — same as absent", () => {
-        // readResolvedSharpManifest's candidate walk must not throw on a
-        // corrupt node_modules/sharp/package.json — it keeps walking and, with
-        // nothing left to disambiguate, the caller takes the same loud
-        // first-entry fallback as when no manifest is findable at all.
+    it("keeps walking past an UNREADABLE candidate (corrupt JSON) to a REAL second one — never falls back while one still resolves", () => {
+        // The claim under test is "keeps walking", not merely "does not
+        // throw" — so this fixture makes the FIRST candidate
+        // (node_modules/sharp/package.json) corrupt JSON, and the SECOND
+        // (bun's isolated store, node_modules/.bun/node_modules/sharp/…) a
+        // real, resolvable manifest whose pins are DISTINCT from the
+        // lockfile's bare-key ([0]) fallback entries. If the walk stopped at
+        // the corrupt candidate instead of continuing, the caller would take
+        // the loud [0] fallback (`sha512-imgnext==`/`sha512-vnext==`,
+        // WITH a warning) — proven wrong below by asserting the fetch used
+        // the SECOND candidate's matched pins instead, with NO warning
+        // (a resolved manifest is not a guess).
         const cwd = tempDir("knext-954-corrupt-");
+        writeFileSync(join(cwd, "bun.lock"), twoVersionLock());
+        mkdirSync(join(cwd, "node_modules", "sharp"), { recursive: true });
+        writeFileSync(
+            join(cwd, "node_modules", "sharp", "package.json"),
+            "{ not json",
+        );
+        const bunStoreSharpDir = join(
+            cwd,
+            "node_modules",
+            ".bun",
+            "node_modules",
+            "sharp",
+        );
+        mkdirSync(bunStoreSharpDir, { recursive: true });
+        writeFileSync(
+            join(bunStoreSharpDir, "package.json"),
+            JSON.stringify({
+                name: "sharp",
+                version: SHARP_V,
+                optionalDependencies: {
+                    "@img/sharp-linuxmusl-x64": SHARP_V,
+                    "@img/sharp-libvips-linuxmusl-x64": VIPS_V,
+                },
+            }),
+        );
+        const { calls, fetch } = recordingFetch();
+
+        const writes: string[] = [];
+        const original = process.stderr.write.bind(process.stderr);
+        process.stderr.write = ((chunk: unknown) => {
+            writes.push(String(chunk));
+            return true;
+        }) as typeof process.stderr.write;
+        try {
+            stageSharpNative(cwd, { arch: "linux-x64", fetchPackage: fetch });
+        } finally {
+            process.stderr.write = original;
+        }
+
+        // The SECOND candidate's matched (nested-key) pins — not the [0]
+        // bare-key fallback the corrupt-only walk would have used.
+        expect(calls.map((c) => `${c.name}@${c.version}`).sort()).toEqual([
+            `@img/sharp-libvips-linuxmusl-x64@${VIPS_V}`,
+            `@img/sharp-linuxmusl-x64@${SHARP_V}`,
+        ]);
+        expect(calls.map((c) => c.integrity).sort()).toEqual([
+            "sha512-imgapp==",
+            "sha512-vapp==",
+        ]);
+        // A RESOLVED manifest is not a guess — no "multiple versions"
+        // warning, unlike the true-fallback case above.
+        expect(writes.join("")).not.toMatch(/two versions|multiple versions/i);
+    });
+
+    it("falls back to the first lockfile entry WITH A WARNING when the ONLY candidate sharp manifest is unreadable (corrupt JSON) — same as absent", () => {
+        // The absence-equivalent case: with no OTHER candidate to walk to,
+        // an unreadable manifest must degrade to the same loud fallback as
+        // no manifest at all — never a silent throw out of stageSharpNative.
+        const cwd = tempDir("knext-954-corrupt-only-");
         writeFileSync(join(cwd, "bun.lock"), twoVersionLock());
         mkdirSync(join(cwd, "node_modules", "sharp"), { recursive: true });
         writeFileSync(

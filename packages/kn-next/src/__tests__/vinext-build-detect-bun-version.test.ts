@@ -52,7 +52,14 @@ describe("#1235 detectBunVersion — bun missing from PATH (ENOENT)", () => {
         } catch (e) {
             thrown = e;
         }
-        expect(String(thrown)).toMatch(/bun\.sh/);
+        // Tight to the ENOENT-specific sentence, not merely "the message
+        // mentions bun.sh somewhere" — this message itself links bun.sh
+        // TWICE (the install page here, plus the docs-install URL two
+        // sentences later), so a loose `/bun\.sh/` match is satisfied by
+        // either one and would not actually pin down which sentence fired.
+        expect(String(thrown)).toMatch(
+            /needs `bun` on PATH \(https:\/\/bun\.sh\), and it was not found/,
+        );
         expect(String(thrown)).not.toMatch(/did not return a version/);
     });
 });
