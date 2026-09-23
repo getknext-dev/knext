@@ -1504,6 +1504,13 @@ jobs:
       - name: vinext × node e2e — build, boot, GET 200, compile cache baked and accepted
         run: node scripts/bun-test.mjs packages/kn-next/src/__tests__/vinext-node-image.docker-e2e.test.ts
 
+      # #1273 — the bake used to warm a hardcoded /api/health, failing the
+      # docker BUILD for an app with a custom healthCheckPath and no
+      # /api/health route. Same regression class as #1264's standalone-node
+      # follow-up, in the sibling image.
+      - name: vinext × node e2e — custom healthCheckPath build-arg (#1273)
+        run: node scripts/bun-test.mjs packages/kn-next/src/__tests__/vinext-node-custom-health-path.docker-e2e.test.ts
+
   # ---------------------------------------------------------------------------
   # The compile-cache diagnostic's Bun probe (#309).
   #

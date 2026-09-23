@@ -92,6 +92,38 @@ describe("selectRuntimeImage — target selection by (build, runtime)", () => {
         expect(sel.target).toBeUndefined();
     });
 
+    it("vinext + runtime node -> bakesCompileCache: true (#1273) — the vinext-node bake needs config.healthCheckPath threaded through", () => {
+        const sel = selectRuntimeImage(
+            { build: "vinext", runtime: "node" },
+            "/app",
+        );
+        expect(sel.bakesCompileCache).toBe(true);
+    });
+
+    it("vinext + runtime bun (the single-exec image) -> bakesCompileCache is falsy — no bake in that build", () => {
+        const sel = selectRuntimeImage(
+            { build: "vinext", runtime: "bun" },
+            "/app",
+        );
+        expect(sel.bakesCompileCache).toBeFalsy();
+    });
+
+    it("standalone-node target -> bakesCompileCache: true (#1264/#1273 shared flag)", () => {
+        const sel = selectRuntimeImage(
+            { build: "turbopack", runtime: "node" },
+            "/app",
+        );
+        expect(sel.bakesCompileCache).toBe(true);
+    });
+
+    it("standalone-bun target -> bakesCompileCache is falsy — the bun stage never boots/warms", () => {
+        const sel = selectRuntimeImage(
+            { build: "turbopack", runtime: "bun" },
+            "/app",
+        );
+        expect(sel.bakesCompileCache).toBeFalsy();
+    });
+
     it("turbopack + runtime bun -> staged standalone Dockerfile, --target standalone-bun", () => {
         const sel = selectRuntimeImage(
             { build: "turbopack", runtime: "bun" },
@@ -207,7 +239,7 @@ describe("dockerBuildxArgs — the buildx argv the CLI runs", () => {
         expect(argv[argv.indexOf("--target") + 1]).toBe("standalone-node");
     });
 
-    it("standalone-node with a custom healthCheckPath passes it as --build-arg KNEXT_HEALTH_CHECK_PATH (#1264 follow-up)", () => {
+    it("standalone-node (bakesCompileCache) with a custom healthCheckPath passes it as --build-arg KNEXT_HEALTH_CHECK_PATH (#1264 follow-up)", () => {
         // The bake warms a hardcoded /api/health unless the app's configured
         // healthCheckPath is threaded through as a build-arg — an app with a
         // custom path and no /api/health route would otherwise fail the BUILD.
@@ -215,6 +247,7 @@ describe("dockerBuildxArgs — the buildx argv the CLI runs", () => {
             ...base,
             dockerfile: "/app/Dockerfile.standalone",
             target: "standalone-node",
+            bakesCompileCache: true,
             healthCheckPath: "/healthz",
         });
         const i = argv.indexOf("--build-arg");
@@ -227,6 +260,7 @@ describe("dockerBuildxArgs — the buildx argv the CLI runs", () => {
             ...base,
             dockerfile: "/app/Dockerfile.standalone",
             target: "standalone-node",
+            bakesCompileCache: true,
         });
         expect(argv).not.toContain("--build-arg");
     });
@@ -236,16 +270,44 @@ describe("dockerBuildxArgs — the buildx argv the CLI runs", () => {
             ...base,
             dockerfile: "/app/Dockerfile.standalone",
             target: "standalone-bun",
+            bakesCompileCache: false,
             healthCheckPath: "/healthz",
         });
         expect(argv).not.toContain("--build-arg");
     });
 
-    it("vinext (no target) ignores healthCheckPath — no bake in that image build", () => {
+    it("vinext (no target, bakesCompileCache false) ignores healthCheckPath — no bake in that image build", () => {
         const argv = dockerBuildxArgs({
             ...base,
             dockerfile: "/app/Dockerfile",
             healthCheckPath: "/healthz",
+        });
+        expect(argv).not.toContain("--build-arg");
+    });
+
+    it("vinext-node (bakesCompileCache: true, no --target) passes healthCheckPath as --build-arg (#1273)", () => {
+        // The vinext-node image (Dockerfile.vinext-node, `kind:'app-dockerfile'`,
+        // NO --target) has its own compile-cache bake (#1260) that also warms a
+        // hardcoded /api/health today — the same regression class as #1264, in
+        // the sibling image. There is no `target` to key off here at all, which
+        // is exactly why the flag is `bakesCompileCache`, not a target check.
+        const argv = dockerBuildxArgs({
+            ...base,
+            dockerfile: "/app/Dockerfile.vinext-node",
+            bakesCompileCache: true,
+            healthCheckPath: "/healthz",
+        });
+        const i = argv.indexOf("--build-arg");
+        expect(i).toBeGreaterThan(-1);
+        expect(argv[i + 1]).toBe("KNEXT_HEALTH_CHECK_PATH=/healthz");
+        expect(argv).not.toContain("--target");
+    });
+
+    it("vinext-node without healthCheckPath configured -> no --build-arg even though bakesCompileCache is true", () => {
+        const argv = dockerBuildxArgs({
+            ...base,
+            dockerfile: "/app/Dockerfile.vinext-node",
+            bakesCompileCache: true,
         });
         expect(argv).not.toContain("--build-arg");
     });
