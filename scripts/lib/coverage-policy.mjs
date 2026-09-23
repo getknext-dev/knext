@@ -143,6 +143,38 @@ export const PER_PATH_THRESHOLDS = {
   },
 };
 
+/**
+ * HONEST line floors (#1248, ADR-0057) — gated IN ADDITION to the raw floors
+ * above, never instead of them.
+ *
+ * The raw line % counts every `DA` record bun emits, and bun emits them on blank
+ * lines, comments, lone braces and type-only syntax inside any function a given
+ * test process never ran; the per-process merge keeps them. The honest % drops
+ * only those records, classified by the TypeScript parser with EXECUTABLE as the
+ * default (`scripts/lib/executable-lines.mjs`), so an uncovered executable line
+ * is always still counted here.
+ *
+ * Measured 2026-09-23 on the merged per-process report plus the generated 0%
+ * denominator (the same input the raw floors judge), after coverage batches B1 and B3:
+ *
+ *   - global:                  raw 79.16% (10989/13882) → honest **92.54% (9183/9923)**
+ *   - packages/kn-next/src/**: raw 79.08% (9974/12612)  → honest **92.47% (8303/8979)**
+ *
+ * 3959 DA records were excluded: punctuation 1935, comment 1334, blank 317,
+ * type-only 309, template-literal continuation 64. Floors sit at the measured
+ * value rounded DOWN to 0.5, per the ratchet convention. Raise them as coverage
+ * lands; never lower one to get green.
+ */
+export const HONEST_THRESHOLDS = {
+  lines: 92,
+};
+
+export const HONEST_PER_PATH_THRESHOLDS = {
+  'packages/kn-next/src/**': {
+    lines: 92,
+  },
+};
+
 /* ────────────────────────────────────────────────────────────────────────────
  * DATED EXCEPTIONS for the metrics this shape cannot measure (sprint 2, lane G)
  *

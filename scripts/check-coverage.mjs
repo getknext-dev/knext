@@ -56,10 +56,13 @@ import {
   BUN_COVERAGE_DIR,
   COVERAGE_EXCLUDE,
   COVERAGE_INCLUDE,
+  HONEST_PER_PATH_THRESHOLDS,
+  HONEST_THRESHOLDS,
   MERGED_LCOV,
   PER_PATH_THRESHOLDS,
   THRESHOLDS,
 } from './lib/coverage-policy.mjs';
+import { honestCoverage } from './lib/executable-lines.mjs';
 import { formatLcov, matchesGlob, mergeLcov, summarize } from './lib/lcov.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -200,6 +203,64 @@ assertEveryMetricAccountedFor(THRESHOLDS, activeMetricExceptions());
 check('global', summarize(scoped), THRESHOLDS);
 for (const [glob, floors] of Object.entries(PER_PATH_THRESHOLDS)) {
   check(glob, summarize(scoped, glob), floors);
+}
+
+/**
+ * The HONEST line number (#1248, ADR-0057), gated alongside the raw one — never
+ * instead of it.
+ *
+ * bun emits `DA` records on blank lines, comments, lone braces and type-only
+ * syntax (in practice: inside any function a given test process never ran, and
+ * the per-process union keeps them). `honestCoverage` drops only those records,
+ * classified by the TypeScript parser with executable as the default, so an
+ * uncovered executable line always stays in this denominator. A file whose
+ * source cannot be read or parsed is kept WHOLE — it can only lower this number.
+ */
+function readSource(path) {
+  try {
+    return readFileSync(resolve(REPO_ROOT, path), 'utf8');
+  } catch {
+    return null;
+  }
+}
+const honest = honestCoverage(scoped, readSource);
+const noiseTotal = Object.values(honest.noise).reduce((a, b) => a + b, 0);
+console.log(
+  `\n  honest line denominator — ${noiseTotal} non-executable DA record(s) excluded ` +
+    `(${
+      Object.entries(honest.noise)
+        .sort((a, b) => b[1] - a[1])
+        .map(([cls, n]) => `${cls} ${n}`)
+        .join(', ') || 'none'
+    })` +
+    (honest.unclassified.length
+      ? `; ${honest.unclassified.length} file(s) unreadable/unparseable, kept whole`
+      : ''),
+);
+check('global (honest lines)', summarize(honest.files), HONEST_THRESHOLDS);
+for (const [glob, floors] of Object.entries(HONEST_PER_PATH_THRESHOLDS)) {
+  check(`${glob} (honest lines)`, summarize(honest.files, glob), floors);
+}
+
+// `--per-file`: the honest uncovered-line count per file, largest first — the
+// input for sizing a coverage batch by real reachable gain, not by noise.
+if (argv.includes('--per-file')) {
+  const rows = [];
+  for (const [path, cov] of honest.files) {
+    const raw = /** @type {import('./lib/lcov.mjs').FileCoverage} */ (scoped.get(path));
+    let rawMiss = 0;
+    for (const h of raw.lines.values()) if (h === 0) rawMiss++;
+    let miss = 0;
+    for (const h of cov.lines.values()) if (h === 0) miss++;
+    rows.push({ path, miss, found: cov.lines.size, rawMiss, rawFound: raw.lines.size });
+  }
+  rows.sort((a, b) => b.miss - a.miss);
+  console.log('\n  per-file (honest uncovered / honest lines | raw uncovered / raw lines):');
+  for (const r of rows.filter((x) => x.rawMiss > 0)) {
+    console.log(
+      `    ${String(r.miss).padStart(5)}/${r.found} | ${r.rawMiss}/${r.rawFound}  ${r.path}`,
+    );
+  }
 }
 
 // The merged report is written out as a real artifact: codecov uploads it, and a

@@ -279,10 +279,24 @@ export function isTypeOnly(src) {
  * @returns {number}
  */
 export function countCodeLines(src) {
-  let count = 0;
+  return codeLineNumbers(src).length;
+}
+
+/**
+ * The 1-based line NUMBERS `countCodeLines` counts (#1248). The generated
+ * zero-hit denominator entry is keyed by these real line numbers — not by
+ * `1..count` — so the honest-denominator classifier
+ * (`./executable-lines.mjs`) reads the actual source line behind every record.
+ *
+ * @param {string} src
+ * @returns {number[]}
+ */
+export function codeLineNumbers(src) {
+  const out = [];
   let inBlock = false;
-  for (const raw of src.split('\n')) {
-    const line = raw.trim();
+  const rawLines = src.split('\n');
+  for (let i = 0; i < rawLines.length; i++) {
+    const line = rawLines[i].trim();
     if (line === '') continue;
     if (inBlock) {
       if (line.includes('*/')) inBlock = false;
@@ -293,9 +307,9 @@ export function countCodeLines(src) {
       if (!line.includes('*/')) inBlock = true;
       continue;
     }
-    count++;
+    out.push(i + 1);
   }
-  return count;
+  return out;
 }
 
 /**

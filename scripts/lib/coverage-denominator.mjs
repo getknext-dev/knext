@@ -30,7 +30,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { COVERAGE_EXCLUDE, COVERAGE_INCLUDE } from './coverage-policy.mjs';
-import { countCodeLines, isTypeOnly, matchesGlob } from './lcov.mjs';
+import { codeLineNumbers, isTypeOnly, matchesGlob } from './lcov.mjs';
 
 /**
  * Zero-hit denominator entries for every enumerable source file not in `have`.
@@ -56,12 +56,15 @@ export function generateDenominator(repoRoot, files, have) {
     // them is the load-bearing direction (#884): a RUNTIME file must NEVER be
     // dropped, or it silently escapes the denominator and coverage rises.
     if (isTypeOnly(src)) continue;
-    const found = countCodeLines(src);
-    if (found === 0) continue;
+    // Keyed by the REAL line numbers (#1248), so the honest-denominator
+    // classifier reads the source line behind each record. The count is
+    // unchanged, so the raw percentage is too.
+    const lineNos = codeLineNumbers(src);
+    if (lineNos.length === 0) continue;
     entries.push([
       path,
       {
-        lines: new Map(Array.from({ length: found }, (_, i) => [i + 1, 0])),
+        lines: new Map(lineNos.map((n) => [n, 0])),
         fnFound: 0,
         fnHit: 0,
         fnNames: new Map(),
