@@ -211,8 +211,13 @@ jobs:
       - name: Diagnostics on failure
         if: failure()
         run: |
-          kubectl get nextapp,ksvc,pods,events -A -o wide 2>&1 | tail -150 || true
-          kubectl -n "$APP_NS" logs -l serving.knative.dev/service=file-manager -c user-container --tail=100 2>&1 || true
+          kubectl -n "$APP_NS" get nextapp,ksvc,configuration,revision,pods 2>&1 || true
+          kubectl -n "$APP_NS" get nextapp file-manager -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}' 2>&1 || true
+          kubectl -n "$APP_NS" get revision -o jsonpath='{range .items[*]}{.metadata.name}{": "}{range .status.conditions[*]}{.type}={.status} {.reason} {.message}{" | "}{end}{"\n"}{end}' 2>&1 || true
+          kubectl -n "$APP_NS" get events --sort-by=.lastTimestamp 2>&1 | tail -30 || true
+          for p in $(kubectl -n "$APP_NS" get pods -l serving.knative.dev/service=file-manager -o name 2>/dev/null); do
+            kubectl -n "$APP_NS" logs "$p" --all-containers --tail=60 2>&1 || true
+          done
           kubectl -n kn-next-operator-system logs deploy/kn-next-operator-controller-manager --tail=100 2>&1 || true
 
       - name: Tear down
