@@ -105,6 +105,19 @@ describe('file-manager platform e2e nightly - wiring', () => {
   });
 });
 
+describe('platform e2e runner - no unbounded child process', () => {
+  const runner = readFileSync(resolve(ROOT, 'apps/file-manager/scripts/platform-e2e.mjs'), 'utf8');
+  it('every execFileSync call carries a timeout', () => {
+    const calls = [...runner.matchAll(/execFileSync\(/g)].length;
+    const bounded = [...runner.matchAll(/\btimeout:\s*\w+/g)].length;
+    expect(calls).toBeGreaterThanOrEqual(3);
+    expect(bounded).toBeGreaterThanOrEqual(calls);
+  });
+  it('the rollout deploy spawn is killed on a deadline', () => {
+    expect(runner).toMatch(/spawn\([\s\S]*?setTimeout\([\s\S]*?kill\('SIGKILL'\)/);
+  });
+});
+
 describe('platform e2e config profile', () => {
   const norm = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
   const keys = (src: string) =>
