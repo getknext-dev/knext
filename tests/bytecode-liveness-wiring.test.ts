@@ -175,6 +175,16 @@ describe("e2e-deploy.sh — the node lane runs KNEXT's own bake + supervisor, an
     expect(DEPLOY).not.toContain('e2e-compile-cache-bake.mjs');
   });
 
+  it('warms a SERVER route, never a /_next/static asset (a file compiles no server code)', () => {
+    const start = DEPLOY.indexOf('WARM_PATH="$(node -e');
+    const end = DEPLOY.indexOf('BAKE_PORT="$(free_port)"');
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    const block = DEPLOY.slice(start, end);
+    expect(block).not.toContain('_next/static');
+    expect(block).toContain('process.stdout.write(`${basePath}/`)');
+  });
+
   it("bakes with the shipped driver into the image's cache location, before boot", () => {
     expect(once(DEPLOY, 'NODE_CC_DIR="${STANDALONE_APP_DIR}/.next/compile-cache"')).toBe(1);
     expect(

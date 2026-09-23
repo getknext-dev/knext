@@ -60,6 +60,13 @@ const SPECS = [SPEC_RULE, SPEC_CHAIN, SPEC_WIRING, SPEC_AUDIT];
  * scan (scripts/lib/prover-anchor-scan.mjs) can check every anchor at PR time.
  */
 const MUTATIONS = [
+  {
+    label: 'node: warm a /_next/static asset instead of a server route',
+    target: DEPLOY,
+    spec: SPEC_WIRING,
+    anchor: 'process.stdout.write(`${basePath}/`);',
+    replacement: 'process.stdout.write(`${basePath}/_next/static/x.js`);',
+  },
   // ── Disable the node cache ───────────────────────────────────────────────
   {
     label: 'node: boot server.js WITHOUT the baked compile cache',
