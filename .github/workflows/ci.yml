@@ -538,6 +538,13 @@ jobs:
       - name: SIGTERM drain e2e under the operator `bun run server.js` command
         run: node scripts/bun-test.mjs packages/kn-next/src/__tests__/standalone-drain.docker-e2e.test.ts
 
+      # Module identity on the compiled executable for a Pages Router app and a
+      # custom cacheHandler importing a Next internal (#1226), against an
+      # uncompiled `node server.js` control on the same tree. Same no-skip
+      # contract; guarded by tests/standalone-drain-image-ci.test.ts.
+      - name: Compiled standalone exec — Pages Router + custom cacheHandler identity e2e
+        run: node scripts/bun-test.mjs packages/kn-next/src/__tests__/standalone-pages.docker-e2e.test.ts
+
   # seam-alive gates: RETIRED (#885, stability sprint). The #352 defect class —
   # webpack layers duplicating @getknext/lib module state across the
   # instrumentation and app-server chunks — cannot occur under the vinext

@@ -15,6 +15,17 @@ export declare function standaloneExecEntrySource(
     preloads: readonly string[],
 ): string;
 
+/**
+ * Every cache handler Next loads by computed path (`cacheHandler`, each
+ * `cacheHandlers` entry, `experimental.incrementalCacheHandlerPath`), as
+ * absolute paths resolved the way Next resolves them. Throws when `server.js`
+ * carries no inlined `nextConfig`.
+ */
+export declare function standaloneCacheHandlerFiles(
+    serverSrc: string,
+    serverDir: string,
+): string[];
+
 /** Source of the throw-on-use stub Next's dev-only modules compile against. */
 export declare const DEV_ONLY_STUB_SOURCE: string;
 

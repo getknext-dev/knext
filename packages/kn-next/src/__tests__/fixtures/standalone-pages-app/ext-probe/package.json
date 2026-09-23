@@ -1,0 +1,10 @@
+{
+  "name": "knext-ext-probe",
+  "version": "0.0.0",
+  "private": true,
+  "main": "index.js",
+  "peerDependencies": {
+    "next": "*",
+    "react": "*"
+  }
+}
