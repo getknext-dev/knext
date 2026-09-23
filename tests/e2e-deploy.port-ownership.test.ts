@@ -142,6 +142,10 @@ function runOwnershipCheck(stubs: Stubs): number {
     '#!/bin/bash',
     `export PATH="${bin}"`,
     `SERVER_PID=${SERVER_PID}`,
+    // #1166/#1225: the real script checks OWNER_PID (equal to SERVER_PID
+    // except for the docker-booted compiled bun exec) — mirror that calling
+    // convention exactly rather than the pre-OWNER_PID one.
+    'OWNER_PID="${SERVER_PID}"',
     `PORT=${PORT}`,
     extractFunction(),
     'port_owned_by_server',

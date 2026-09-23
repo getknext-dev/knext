@@ -2648,6 +2648,67 @@ describe('compat-suite fail-on-red gate — revocation teeth (test-e2e-deploy.ym
   });
 });
 
+// ── Boot-mode ledger — POSITIVE proof the compiled exec booted (#1230) ────────
+// A passing Next.js test never echoes scripts/e2e-deploy.sh's own stderr, so a
+// fully green bun-lane shard carries, on its own, ZERO lines of evidence that
+// the compiled standalone-on-Bun exec (#1166/#1225) ever booted rather than a
+// silent fallback to `bun server.js`. Run 35865067344 (16/16 green, including
+// the sqlite3 shard) has no `booting the compiled` occurrence anywhere in the
+// job logs — jev's read on merging that as proof scored 0.37 no. This step
+// closes the gap: e2e-deploy.sh appends a `mode=compiled-exec|server-js …`
+// line per deploy to a ledger file, and this step fails the job (bun lane
+// only) unless EVERY line says compiled-exec.
+describe('compat-suite boot-mode ledger — positive proof of what booted (test-e2e-deploy.yml, #1230)', () => {
+  const src = readFileSync(WORKFLOW_PATH, 'utf8');
+
+  it('has a boot-mode ledger verification step in the deploy-tests job', () => {
+    expect(
+      /-\s+name:[^\n]*Verify boot-mode ledger/.test(src),
+      'expected a "Verify boot-mode ledger" step — without it a green bun-lane shard proves nothing about what actually booted',
+    ).toBe(true);
+  });
+
+  it('is part of the reporting tail (if: always(), runs even after the fail-on-red gate)', () => {
+    const { tailLabels } = auditReportingTail(WORKFLOW_PATH);
+    expect(
+      tailLabels.some((l) => l.includes('Verify boot-mode ledger')),
+      `the boot-mode ledger step must be in the unconditional reporting tail (found: ${tailLabels.join(', ')})`,
+    ).toBe(true);
+  });
+
+  it('orders the ledger check AFTER "Fail shard on red results" (a red shard\'s own error is not masked)', () => {
+    const gate = src.search(/-\s+name:[^\n]*Fail shard on red results/);
+    const ledgerCheck = src.search(/-\s+name:[^\n]*Verify boot-mode ledger/);
+    expect(gate, 'fail-on-red gate must exist').toBeGreaterThan(-1);
+    expect(ledgerCheck, 'boot-mode ledger step must exist').toBeGreaterThan(-1);
+    expect(ledgerCheck, 'ledger check must come AFTER the fail-on-red gate').toBeGreaterThan(gate);
+  });
+
+  it('is a no-op on the node lane, and fails when the bun-lane ledger is missing, empty, or non-compiled-exec', () => {
+    const step =
+      src.match(
+        /-\s+name:[^\n]*Verify boot-mode ledger[\s\S]*?(?=\n\s*-\s+name:|\n {2}[a-z])/,
+      )?.[0] ?? '';
+    expect(step).not.toBe('');
+    expect(
+      /if \[ "\$\{KNEXT_RUNTIME\}" != "bun" \]/.test(step),
+      'must no-op on the node lane — the ledger contract is bun-lane only',
+    ).toBe(true);
+    expect(
+      /! -f "\$\{LEDGER\}"|! -s "\$\{LEDGER\}"/.test(step),
+      'must fail on a missing OR empty ledger — no lines is NOT proof of anything',
+    ).toBe(true);
+    expect(
+      /grep -vc '\^mode=compiled-exec /.test(step),
+      'must count lines that are NOT mode=compiled-exec and fail on any',
+    ).toBe(true);
+    expect(
+      /GITHUB_STEP_SUMMARY/.test(step),
+      'must print the ledger + counts to the step summary — the positive proof must be visible, not just enforced',
+    ).toBe(true);
+  });
+});
+
 // ── #147 item 4: the Bun runtime axis — a SEPARATE, cheaper lane ───────────────
 // The Node nightly (16 shards) is the CREDENTIAL lane; doubling it every night
 // for Bun would be pure cost with no extra credibility. The Bun axis is instead
@@ -2656,8 +2717,10 @@ describe('compat-suite fail-on-red gate — revocation teeth (test-e2e-deploy.ym
 //   • a nightly BUN CREDENTIALING schedule ('47 4 * * *', #1147) that runs the
 //     bun lane, distinct from the node credential nightly ('17 3 * * *'),
 // both funneled through ONE workflow-level `KNEXT_RUNTIME` env that the shard
-// run step plumbs into scripts/e2e-deploy.sh (which already boots the standalone
-// server.js with `bun` when KNEXT_RUNTIME=bun). HONESTY: the compat-matrix Node
+// run step plumbs into scripts/e2e-deploy.sh (which, on KNEXT_RUNTIME=bun, compiles
+// and boots the standalone-on-Bun bytecode executable — #1166/#1225 — rather
+// than `bun server.js`; see docs/compat/window-bun-lane.md "What the bun lane
+// boots"). HONESTY: the compat-matrix Node
 // ✅ (run 28602886003) is a NODE claim; the Bun row is credentialing-in-progress
 // (verified-once until 14 scheduled bun nights bank against
 // docs/compat/window-bun-lane.md), and a red BUN night must alert under its OWN

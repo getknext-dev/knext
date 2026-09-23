@@ -411,7 +411,7 @@ jobs:
     # if the standalone build is missing.
     name: SIGTERM drain (legacy standalone supervisor)
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 20
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -482,6 +482,23 @@ jobs:
           node scripts/bun-test.mjs
           apps/file-manager/sigterm-drain-e2e.test.ts
           apps/file-manager/sigterm-hardcap-e2e.test.ts
+
+      # #1230 round 6: the ONLY thing that proves scripts/e2e-native-rebuild-musl.sh
+      # actually fixes what it claims to (musl sharp/libvips siblings, the
+      # ROOT-escape guard) is running it for real, inside the SAME pinned
+      # oven/bun:1.4.0-alpine image the compat harness's bun lane boots — a
+      # source-contract text scan cannot prove any of these three defects are
+      # fixed, only that the anchor strings exist. This job already has docker
+      # (every GitHub-hosted ubuntu-latest runner does) and Node+bun already set
+      # up above, so it hosts the real-execution suite rather than adding a new
+      # job. Deliberately NOT `standalone-drain-bun-image` (other PRs are
+      # actively editing that job). `tests/e2e-native-rebuild-musl.docker-e2e.test.ts`
+      # has NO skip path other than `describe.skipIf(!dockerAvailable())` — an
+      # ENVIRONMENT-availability gate, not an artifact one (declared as such in
+      # tests/declared-test-skips.test.ts) — and every ubuntu-latest runner has a
+      # working docker daemon, so on THIS job it never actually skips.
+      - name: Native musl rebuild — real execution inside the pinned image (#1230 round 6)
+        run: node scripts/bun-test.mjs tests/e2e-native-rebuild-musl.docker-e2e.test.ts
 
   standalone-drain-bun-image:
     # Per-PR GATE (#1156): SIGTERM drain under the SHIPPED standalone-on-bun

@@ -434,6 +434,97 @@ if [ "${RUNTIME}" = "bun" ]; then
   fi
 fi
 
+# ── 3b. compile the standalone-on-Bun bytecode executable (bun lane only) ─────
+# #1166/#1225 shipped `turbopack × bun` as a `bun build --compile --bytecode`
+# executable of the standalone server (adapters/standalone-compile.mjs), not
+# `bun server.js` — that is what the image actually boots
+# (Dockerfile.standalone.hbs COPYs `knext-standalone-exec-linux-x64`). Until
+# now the official compat suite's bun lane still boot-tested the UNCOMPILED
+# script, so the 778-test suite had never run against the artifact that ships.
+# Compile it here, from the SAME installed-tarball script the CLI's own
+# `kn-next build` runs (standaloneCompileArgv in standalone-exec-build.ts) —
+# resolved as the file sitting beside the already-resolved adapter entry, not
+# reimplemented. The compile script self-verifies the bytecode pragma
+# (bytecode-exec-verify.mjs) and exits non-zero (deleting the artifact first)
+# if the check fails — `set -euo pipefail` (top of file) then fails THIS
+# script, so a bytecode regression fails the deploy rather than silently
+# shipping an uncompiled fallback.
+#
+# FAIL-CLOSED, not a soft fallback (review finding on this PR): once this
+# branch decides a compile is due, every downstream failure — the compile
+# script missing, docker unavailable, the container never becoming ready —
+# is a hard `exit 1`, never a silent boot of `bun server.js`. A silent
+# fallback would mean a real regression (the compiled artifact regressing)
+# reads as a pass, on the pre-#1166 shape, exactly the failure mode #1166
+# exists to catch.
+#
+# Not entered at all (server.js is the correct, intended boot target, not a
+# fallback) when:
+#   - KNEXT_E2E_SKIP_PACK=1 (contract-test mode — no installed tarball, so no
+#     compile script to resolve; those runs never set RUNTIME=bun today);
+#   - KNEXT_SANDBOX_FETCH_DEBUG=1 (#188 path 2/3) — that instrumentation
+#     chain-requires server.js AS TEXT and patches the fixture's own sandbox
+#     context.js on disk; a compiled executable is a single self-contained
+#     binary with no separate context.js to patch, so the two are mutually
+#     exclusive. The debug lane stays on the uncompiled script on purpose.
+STANDALONE_EXEC=""
+STANDALONE_ROOT="${APP_DIR}/.next/standalone"
+# The alpine base the compiled exec is booted inside — BYTE-IDENTICAL to
+# Dockerfile.standalone.hbs's `standalone-bun` stage FROM line (lockstep
+# guard: tests/compat-bun-lane-compiled-exec.test.ts). Booting it bare on the
+# ubuntu-latest runner is not an option: `bun-linux-x64-musl` is dynamically
+# linked against musl (see vinext-build.ts's LinuxLibc note — "a glibc host
+# cannot execute them at all"), so this MUST run inside the same musl base the
+# image ships, never a glibc-target twin (that would certify a binary nothing
+# ships).
+STANDALONE_BUN_IMAGE="oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb"
+if [ "${RUNTIME}" = "bun" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" != "1" ]; then
+  if [ -n "${NEXT_ADAPTER_PATH:-}" ]; then
+    STANDALONE_COMPILE_JS="$(dirname "${NEXT_ADAPTER_PATH}")/standalone-compile.js"
+    if [ ! -f "${STANDALONE_COMPILE_JS}" ]; then
+      log "ERROR: standalone-compile script not found beside the adapter (${STANDALONE_COMPILE_JS}) — the bun lane must boot the compiled exec, refusing to silently fall back to server.js"
+      exit 1
+    fi
+    if ! command -v docker >/dev/null 2>&1; then
+      log "ERROR: docker is required to boot the compiled standalone-on-Bun exec (a musl binary cannot run on this glibc host) — refusing to silently fall back to server.js"
+      exit 1
+    fi
+    STANDALONE_EXEC="${STANDALONE_APP_DIR}/knext-standalone-exec-linux-x64"
+    # unique per-build marker — a stale/foreign binary must never pass the
+    # compile script's own bytecode-pragma proof.
+    MARKER="knext-standalone-exec:$(node -e 'process.stdout.write(require("node:crypto").randomBytes(12).toString("hex"))')"
+    log "compiling the standalone-on-Bun bytecode executable (${STANDALONE_COMPILE_JS})"
+    bun run "${STANDALONE_COMPILE_JS}" \
+      --server "${SERVER_JS}" \
+      --root "${STANDALONE_ROOT}" \
+      --outfile "${STANDALONE_EXEC}" \
+      --target bun-linux-x64-musl \
+      --marker "${MARKER}" >&2
+    log "compiled + bytecode-verified: ${STANDALONE_EXEC}"
+
+    # ── 3c. rebuild native (*.node) addons for musl, inside the same pinned
+    # image (review finding on this PR, hypothesis A confirmed by
+    # reproduction) ──────────────────────────────────────────────────────
+    # The harness installs every fixture's deps ONCE, on the glibc
+    # ubuntu-latest runner — a fixture with a native module (e.g. sqlite3)
+    # gets a GLIBC-linked prebuilt .node there. Booting inside the pinned
+    # musl alpine image (this PR) then fails to dlopen that binary
+    # ([ERR_DLOPEN_FAILED] "linked against glibc ... but this Bun build uses
+    # musl"). The SHIPPED image does not hit this — its Dockerfile installs
+    # deps INSIDE the alpine stage. Match that here: best-effort, so a
+    # rebuild failure for one fixture's addon does not brick the whole bun
+    # lane (see scripts/e2e-native-rebuild-musl.sh's header).
+    docker run --rm \
+      -v "${STANDALONE_ROOT}:${STANDALONE_ROOT}" \
+      -v "${SCRIPT_DIR}/e2e-native-rebuild-musl.sh:/e2e-native-rebuild-musl.sh:ro" \
+      "${STANDALONE_BUN_IMAGE}" \
+      sh /e2e-native-rebuild-musl.sh "${STANDALONE_ROOT}" >&2
+  else
+    log "ERROR: KNEXT_E2E_SKIP_PACK=1 has no installed adapter to resolve the compile script from, but RUNTIME=bun was requested — refusing to silently fall back to server.js (contract-test mode is not expected to combine these)"
+    exit 1
+  fi
+fi
+
 # ── 4. boot the standalone server on a free port ──────────────────────────────
 PORT="$(free_port)"
 BUILD_ID="$(cat "${APP_DIR}/.next/BUILD_ID" 2>/dev/null || echo "unknown")"
@@ -520,6 +611,13 @@ fi
 #       request actually traversed.
 # e2e-cleanup.sh ships the [sandbox-fetch-debug] server-log lines at teardown.
 SERVER_BOOT_TARGET="${SERVER_JS}"
+# 3b's compiled exec (bun lane, mutually exclusive with sandbox-fetch-debug —
+# see the block above) takes over the boot target here. It is a self-contained
+# binary: no interpreter, no `-r` preload flags (baked into the entry — see
+# standalone-compile.mjs's "Baked-in preloads" section), no argv at all.
+if [ -n "${STANDALONE_EXEC}" ]; then
+  SERVER_BOOT_TARGET="${STANDALONE_EXEC}"
+fi
 if [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" = "1" ]; then
   if [ -n "${KNEXT_SANDBOX_FETCH_DEBUG_PRELOAD:-}" ] && [ -f "${KNEXT_SANDBOX_FETCH_DEBUG_PRELOAD}" ]; then
     log "KNEXT_SANDBOX_FETCH_DEBUG=1 — chain-booting through sandbox-fetch instrumentation (${KNEXT_SANDBOX_FETCH_DEBUG_PRELOAD})"
@@ -558,14 +656,77 @@ if [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" = "1" ]; then
     log "WARNING: KNEXT_SANDBOX_FETCH_DEBUG=1 but the realm-debug module is unavailable (${KNEXT_SANDBOX_FETCH_REALM_DEBUG_PRELOAD:-unset}) — no in-realm instrumentation"
   fi
 fi
-log "booting (${RUNTIME}) ${SERVER_BOOT_TARGET} on 0.0.0.0:${PORT} (HOSTNAME emptied — see B7a note; preloads ${SERVER_PRELOAD_ARGS[*]})"
+if [ -n "${STANDALONE_EXEC}" ]; then
+  # The exec is `bun-linux-x64-musl` — booted inside STANDALONE_BUN_IMAGE
+  # (the SAME alpine base the image ships), never bare on the runner (review
+  # finding: a musl binary does not execute on a glibc host at all — this is
+  # not a portability nicety, it is the difference between every scheduled
+  # bun night booting or crash-looping on every fixture).
+  #
+  # --network host: the container shares the runner's network namespace, so
+  # PORT binds exactly like the uncompiled boot does — no NAT/port-publish
+  # layer, no docker-proxy process sitting between the harness's TCP probe
+  # and the compiled server. Linux-only, which is exactly what this lane
+  # runs on (ubuntu-latest); this script never targets `--network host` on
+  # any other boot path.
+  #
+  # -v mounts the FULL .next/standalone root read-write (Next's filesystem
+  # cache handler writes into `.next/cache` under it at request time — a
+  # read-only mount would silently break ISR/data-cache tests), at a
+  # container path preserving the exec's position relative to that root
+  # (REL_SUBPATH) — the SAME relative offset `standalone-compile.mjs` baked
+  # into the binary at compile time (RUNTIME_ROOT_FROM_EXEC_DIR), so the
+  # exec's own root resolution (relative to its own directory) lands on the
+  # mounted root inside the container exactly as it would beside server.js
+  # on disk.
+  #
+  # --user "$(id -u):$(id -g)" (review finding): with no --user, the compiled
+  # exec runs as the image's default UID (root). The runner user calling
+  # `ss` below to attribute the LISTEN socket (#171 TOCTOU guard) is NOT
+  # root, and the kernel's sock_diag permission model only lets an
+  # unprivileged caller see PID/process detail for sockets owned by ITS OWN
+  # uid — a root-owned socket is invisible to it (confirmed live: shard 7,
+  # job 107207528866, "WARNING: cannot verify pid ... proceeding" on every
+  # deploy). Running the container as the SAME uid:gid as the host runner
+  # user makes the socket visible to `ss` under that user, closing the gap
+  # AND matching the mounted volume's ownership (no root-owned files left
+  # behind on the host either). The compiled exec itself needs no root
+  # privilege to bind a port or serve requests.
+  REL_SUBPATH="$(node -e 'const {relative}=require("node:path");process.stdout.write(relative(process.argv[1],process.argv[2]))' "${STANDALONE_ROOT}" "${STANDALONE_APP_DIR}")"
+  CONTAINER_ROOT="/knext-standalone-root"
+  CONTAINER_WORKDIR="${CONTAINER_ROOT}${REL_SUBPATH:+/${REL_SUBPATH}}"
+  CONTAINER_NAME="knext-e2e-${DEPLOYMENT_ID}"
+  log "booting the compiled standalone-on-Bun executable ${SERVER_BOOT_TARGET} inside ${STANDALONE_BUN_IMAGE} (container ${CONTAINER_NAME}) on 0.0.0.0:${PORT} (HOSTNAME emptied — see B7a note; preloads baked in)"
+else
+  log "booting (${RUNTIME}) ${SERVER_BOOT_TARGET} on 0.0.0.0:${PORT} (HOSTNAME emptied — see B7a note; preloads ${SERVER_PRELOAD_ARGS[*]})"
+fi
 (
   cd "${STANDALONE_APP_DIR}"
-  PORT="${PORT}" HOSTNAME="" NODE_ENV="production" \
-    NEXT_DEPLOYMENT_ID="${DEPLOYMENT_ID}" \
-    exec "${SERVER_CMD}" "${SERVER_PRELOAD_ARGS[@]}" "${SERVER_BOOT_TARGET}"
+  if [ -n "${STANDALONE_EXEC}" ]; then
+    exec docker run --rm --name "${CONTAINER_NAME}" \
+      --network host \
+      --user "$(id -u):$(id -g)" \
+      -e PORT="${PORT}" -e HOSTNAME="" -e NODE_ENV="production" \
+      -e NEXT_DEPLOYMENT_ID="${DEPLOYMENT_ID}" \
+      -v "${STANDALONE_ROOT}:${CONTAINER_ROOT}" \
+      -w "${CONTAINER_WORKDIR}" \
+      "${STANDALONE_BUN_IMAGE}" \
+      "./$(basename "${SERVER_BOOT_TARGET}")"
+  else
+    PORT="${PORT}" HOSTNAME="" NODE_ENV="production" \
+      NEXT_DEPLOYMENT_ID="${DEPLOYMENT_ID}" \
+      exec "${SERVER_CMD}" "${SERVER_PRELOAD_ARGS[@]}" "${SERVER_BOOT_TARGET}"
+  fi
 ) >"${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!
+# The pid used for port-ownership attribution (#171 guard below). For the
+# docker-booted exec, SERVER_PID is the `docker run` CLIENT process — it
+# never itself holds the listening socket, `--network host` or not — so
+# ownership must be checked against the CONTAINERIZED process's real
+# host-visible pid instead. Liveness (`kill -0`) stays on SERVER_PID: a
+# foreground, non-detached `docker run` exits when the container exits,
+# so SERVER_PID dying still means "the deployment is dead" correctly.
+OWNER_PID="${SERVER_PID}"
 
 # ── 5. persist deployment metadata BEFORE probing (so cleanup can always find it) ─
 {
@@ -581,11 +742,48 @@ SERVER_PID=$!
   # pinned by CI's setup-node, and existing consumers key on the stable shape).
   if [ "${RUNTIME}" = "bun" ]; then
     echo "RUNTIME_VERSION=$(bun --version 2>/dev/null || echo unknown)"
+    # #1166/#1225 — which artifact actually booted. bun lane only, same
+    # gating rationale as RUNTIME_VERSION above (node metadata stays
+    # byte-identical).
+    if [ -n "${STANDALONE_EXEC}" ]; then
+      echo "SERVING_MODE=compiled-exec"
+      # so e2e-cleanup.sh can `docker rm -f` it as a belt-and-suspenders
+      # step: `docker run --rm` only removes the container on ITS OWN exit,
+      # and a hard SIGKILL of the `docker run` CLIENT (the timeout fallback
+      # below) does not kill the container the client was attached to.
+      echo "CONTAINER_NAME=${CONTAINER_NAME}"
+    else
+      echo "SERVING_MODE=server.js"
+    fi
   fi
   echo "SERVER_JS=${SERVER_JS}"
   echo "SERVER_LOG=${SERVER_LOG}"
   echo "BUILD_LOG=${BUILD_LOG}"
 } >"${LOG_FILE}"
+
+# ── 5b. boot-mode ledger (#1230 review finding) — POSITIVE proof of what
+# actually booted, independent of the harness's own log capture. A passing
+# Next.js test never echoes THIS script's stderr, so a fully-green bun-lane
+# shard carries not one line proving the compiled exec (vs. bun server.js)
+# ever ran — a red-then-fixed lane could go green by silently falling back
+# to the uncompiled script, and nothing in the harness's own summary would
+# say so. One line per deploy, appended (not overwritten — a shard runs many
+# deploys), machine-checkable by the workflow's own step (`if: always()`,
+# runs after the tests, fails the job on any non-compiled-exec line when
+# KNEXT_RUNTIME=bun). RUNNER_TEMP is the GitHub Actions per-job scratch dir;
+# /tmp is the local/off-CI fallback. Every deploy appends (node lane
+# included) so the ledger is a complete audit trail, not just a bun-lane one
+# — the workflow step decides what it requires, this script only records.
+BOOT_MODE_LEDGER="${RUNNER_TEMP:-/tmp}/knext-e2e-boot-modes.log"
+if [ -n "${STANDALONE_EXEC}" ]; then
+  # Reaching this line means standalone-compile.mjs's own bytecode-pragma
+  # check already passed (a failure there is `exit 1` inside the compile
+  # step, well before boot) — bytecode_verified=true is therefore a fact
+  # already proven above, not merely asserted here.
+  echo "mode=compiled-exec runtime=${RUNTIME} image=${STANDALONE_BUN_IMAGE} bytecode_verified=true" >>"${BOOT_MODE_LEDGER}"
+else
+  echo "mode=server-js runtime=${RUNTIME} image=- bytecode_verified=-" >>"${BOOT_MODE_LEDGER}"
+fi
 
 # ── 6. readiness: pid-liveness FIRST, TCP-probe second, port-ownership last ──
 # #171 sys-design follow-up (the free_port TOCTOU): free_port() binds :0 and
@@ -605,8 +803,10 @@ server_died() { # surface the server log and abort (single exit path)
   exit 1
 }
 
-# Returns 0 when SERVER_PID owns a LISTEN socket on PORT, 1 when the port is
+# Returns 0 when OWNER_PID owns a LISTEN socket on PORT, 1 when the port is
 # PROVABLY owned by a different pid, 2 when ownership cannot be determined.
+# OWNER_PID equals SERVER_PID except for the docker-booted compiled exec,
+# where it is the CONTAINERIZED process's real host pid (see the boot step).
 #
 # #210 (nightly run 28697744187, 477 RED): ss must be consulted FIRST, and a
 # bare lsof negative is NEVER proof of foreign ownership. Next.js retitles the
@@ -627,7 +827,7 @@ port_owned_by_server() {
   if command -v ss >/dev/null 2>&1; then
     listeners="$(ss -ltnp 2>/dev/null | grep -F ":${PORT} " || true)"
     if [ -n "${listeners}" ]; then
-      if printf '%s\n' "${listeners}" | grep -q "pid=${SERVER_PID},"; then
+      if printf '%s\n' "${listeners}" | grep -q "pid=${OWNER_PID},"; then
         return 0
       fi
       if printf '%s\n' "${listeners}" | grep -q "pid="; then
@@ -638,13 +838,13 @@ port_owned_by_server() {
     return 2 # no LISTEN row despite an accepted probe — a snapshot race, not proof
   fi
   if command -v lsof >/dev/null 2>&1; then
-    if lsof -nP -a -p "${SERVER_PID}" -iTCP:"${PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
+    if lsof -nP -a -p "${OWNER_PID}" -iTCP:"${PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
       return 0
     fi
     # Only trust the negative when the GLOBAL port query positively names a
     # different owner (lsof may be blind to our pid entirely — see above).
     listeners="$(lsof -nP -iTCP:"${PORT}" -sTCP:LISTEN -Fp 2>/dev/null | grep '^p' || true)"
-    if [ -n "${listeners}" ] && ! printf '%s\n' "${listeners}" | grep -qx "p${SERVER_PID}"; then
+    if [ -n "${listeners}" ] && ! printf '%s\n' "${listeners}" | grep -qx "p${OWNER_PID}"; then
       return 1
     fi
     return 2
@@ -677,17 +877,27 @@ fi
 if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
   server_died
 fi
+# For the docker-booted compiled exec, OWNER_PID is the CONTAINERIZED
+# process's real host pid — SERVER_PID (the `docker run` client) never holds
+# the listening socket itself. Resolve it now: the TCP probe above already
+# succeeded, so the container is up and `docker inspect` has a State.Pid.
+if [ -n "${STANDALONE_EXEC}" ]; then
+  INSPECTED_PID="$(docker inspect -f '{{.State.Pid}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
+  if [ -n "${INSPECTED_PID}" ] && [ "${INSPECTED_PID}" != "0" ]; then
+    OWNER_PID="${INSPECTED_PID}"
+  fi
+fi
 set +e
 port_owned_by_server
 OWNS=$?
 set -e
 if [ "${OWNS}" = "1" ]; then
-  log "ERROR: port ${PORT} answers but is NOT owned by server pid ${SERVER_PID} — a sibling process grabbed the freed port (free_port TOCTOU); refusing to advertise it"
+  log "ERROR: port ${PORT} answers but is NOT owned by server pid ${OWNER_PID} — a sibling process grabbed the freed port (free_port TOCTOU); refusing to advertise it"
   log "---- server log ----"
   cat "${SERVER_LOG}" >&2 || true
   exit 1
 elif [ "${OWNS}" = "2" ]; then
-  log "WARNING: cannot verify pid ${SERVER_PID} owns port ${PORT} (no tooling, or no positive attribution either way) — proceeding; pid-liveness checks still applied"
+  log "WARNING: cannot verify pid ${OWNER_PID} owns port ${PORT} (no tooling, or no positive attribution either way) — proceeding; pid-liveness checks still applied"
 fi
 
 log "deployment ready: build=${BUILD_ID} deployment=${DEPLOYMENT_ID} pid=${SERVER_PID}"

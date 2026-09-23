@@ -1699,6 +1699,55 @@ jobs:
             }
           ' "${SUMMARY}"
 
+      # ── Boot-mode ledger check (#1230 review finding) ──────────────────────
+      # A PASSING Next.js test never echoes scripts/e2e-deploy.sh's own log
+      # output — so a fully green bun-lane shard, on its own, carries ZERO
+      # lines of evidence that the compiled standalone-on-Bun exec (#1166/
+      # #1225) actually booted, as opposed to a silent fallback to
+      # `bun server.js`. jev's read of "merge on the tests being green" alone
+      # came back 0.37 no; this step is the positive proof that closes the
+      # gap. scripts/e2e-deploy.sh appends one `mode=compiled-exec|server-js
+      # runtime=… image=… bytecode_verified=…` line per deploy to
+      # ${RUNNER_TEMP}/knext-e2e-boot-modes.log (RUNNER_TEMP is the same
+      # per-job scratch dir every shard step already runs in). `if: always()`
+      # so a shard that failed earlier still reports what it booted, and
+      # placed AFTER the fail-on-red gate so a red shard's own error is not
+      # masked by this one.
+      - name: Verify boot-mode ledger — bun lane must show every deploy booted the compiled exec (#1230)
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ "${KNEXT_RUNTIME}" != "bun" ]; then
+            echo "node lane — boot-mode ledger check not applicable, nothing to verify"
+            exit 0
+          fi
+          LEDGER="${RUNNER_TEMP:-/tmp}/knext-e2e-boot-modes.log"
+          if [ ! -f "${LEDGER}" ] || [ ! -s "${LEDGER}" ]; then
+            echo "::error::${LEDGER} is missing or empty — the bun lane must record at least one boot-mode line proving what booted; no lines is NOT proof of the compiled exec"
+            {
+              echo "### Boot-mode ledger (bun lane, shard ${{ matrix.shard }})"
+              echo
+              echo "**MISSING or EMPTY** — no deploy in this shard recorded a boot mode."
+            } >>"$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          TOTAL="$(wc -l <"${LEDGER}" | tr -d ' ')"
+          BAD="$(grep -vc '^mode=compiled-exec ' "${LEDGER}" || true)"
+          {
+            echo "### Boot-mode ledger (bun lane, shard ${{ matrix.shard }})"
+            echo
+            echo '```'
+            cat "${LEDGER}"
+            echo '```'
+            echo
+            echo "total deploys: ${TOTAL}, non-compiled-exec: ${BAD}"
+          } >>"$GITHUB_STEP_SUMMARY"
+          if [ "${BAD}" != "0" ]; then
+            echo "::error::${BAD} of ${TOTAL} bun-lane deploy(s) in shard ${{ matrix.shard }} did NOT boot the compiled exec (mode=server-js) — see the ledger in the step summary. The debug-only KNEXT_SANDBOX_FETCH_DEBUG lane is the one legitimate reason for a server-js line, and that lane is dispatch-only and never runs on a scheduled/default early-warning or credential night."
+            exit 1
+          fi
+          echo "boot-mode ledger: ${TOTAL}/${TOTAL} bun-lane deploy(s) in shard ${{ matrix.shard }} booted the compiled exec"
+
   # ── Per-shard ledger (#545, sprint-1 T1) ───────────────────────────────────
   # The flake-attribution record. Before this, a run's per-shard outcome lived
   # only in 16 separate artifacts and 16 job conclusions, so "is the failing
