@@ -118,7 +118,21 @@ echo "${HITS}" | while IFS= read -r f; do
 
   echo "[native-rebuild] fresh-installing ${NAME}@${VERSION} for musl (the traced tree at ${d} lacks install-time tooling like node-pre-gyp — a rebuild IN PLACE cannot run its own install script)"
   PKG_SCRATCH="$(mktemp -d "${SCRATCH_ROOT}/pkg.XXXXXX")"
-  if ! (cd "${PKG_SCRATCH}" && npm install --no-save --no-audit --no-fund "${NAME}@${VERSION}" >"${PKG_SCRATCH}.log" 2>&1); then
+  # npm_config_build_from_source=true (review finding, round 4 — live CI
+  # evidence, run 35862123588): WITHOUT this, `npm install` runs sqlite3's
+  # own `node-pre-gyp install --fallback-to-build`, which tries a PREBUILT
+  # download FIRST. That old node-pre-gyp does not check libc at all when
+  # picking a prebuilt — it only matches platform+arch (e.g.
+  # "linux-x64") — so on a network-connected runner it happily downloads
+  # the (only ever published) GLIBC prebuilt, "succeeds" with no warning,
+  # and the exact same ERR_DLOPEN_FAILED resurfaces. `--fallback-to-build`
+  # only triggers when the prebuilt fetch itself FAILS, which is what
+  # happened in every local repro here (this sandbox's network could not
+  # reach the prebuilt host) — that let round 2/3's local proof pass while
+  # the identical fix still failed on CI's well-connected runner. Forcing
+  # build-from-source removes the prebuilt-fetch path entirely, so the
+  # result is never network-dependent.
+  if ! (cd "${PKG_SCRATCH}" && npm_config_build_from_source=true npm install --no-save --no-audit --no-fund "${NAME}@${VERSION}" >"${PKG_SCRATCH}.log" 2>&1); then
     echo "[native-rebuild] WARNING: fresh musl install of ${NAME}@${VERSION} failed — this addon may still fail to dlopen under musl at runtime (original error will resurface, not masked)"
     tail -c 4096 "${PKG_SCRATCH}.log" 2>/dev/null || true
     continue
@@ -146,16 +160,29 @@ echo "${HITS}" | while IFS= read -r f; do
   # ${NAME} alone therefore is not enough: a fresh install's OTHER
   # node_modules entries (node-pre-gyp and ITS transitive deps) must land
   # too, or a require() chain like this one 404s on the very dependency
-  # `npm install` just proved musl-installable. Copy every sibling the fresh
-  # install produced into ROOT's node_modules — node's own resolution walks
-  # up from ${d} through ${ROOT}/node_modules, exactly where a real flat
-  # `npm install` on a musl host would have hoisted them.
+  # `npm install` just proved musl-installable.
+  #
+  # ONLY if ABSENT from the traced tree (review finding, round 3): a bare
+  # unconditional overwrite would replace whatever version the APP actually
+  # built with — semver, tar, rc, minimist and friends are common hoisted
+  # deps a real fixture ships too, at whatever version ITS OWN dependency
+  # resolution chose. Overwriting those would test a dependency tree the app
+  # never built, so a pass or fail would no longer reflect the product. A
+  # sibling already present in ${ROOT}/node_modules is the app's own choice
+  # and is left untouched; it is pure JS (no *.node file of its own, or the
+  # outer loop already handles it on its own iteration) and needs no musl
+  # rebuild regardless of version. Only a sibling genuinely ABSENT from the
+  # traced tree (like node-pre-gyp usually is, being install-time-only from
+  # the tracer's point of view) gets copied in.
   for sibling in "${PKG_SCRATCH}/node_modules"/*; do
     [ -e "${sibling}" ] || continue
     sibling_name="$(basename "${sibling}")"
     [ "${sibling_name}" = "${NAME}" ] && continue
-    echo "[native-rebuild]   + carrying along runtime dependency ${sibling_name} (needed by ${NAME}'s require() graph)"
-    rm -rf "${ROOT}/node_modules/${sibling_name}"
+    if [ -e "${ROOT}/node_modules/${sibling_name}" ]; then
+      echo "[native-rebuild]   - keeping the traced copy of ${sibling_name} (already present — that is the app's own resolved version, not overwritten)"
+      continue
+    fi
+    echo "[native-rebuild]   + carrying along runtime dependency ${sibling_name} (needed by ${NAME}'s require() graph, absent from the traced tree)"
     cp -a "${sibling}" "${ROOT}/node_modules/${sibling_name}"
   done
 done

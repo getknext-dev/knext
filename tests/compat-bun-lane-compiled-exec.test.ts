@@ -179,10 +179,18 @@ describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec 
     const rebuildSrc = readFileSync(NATIVE_REBUILD_SH_PATH, 'utf8');
     expect(/^set -eu$/m.test(rebuildSrc)).toBe(true);
     expect(
-      /if ! \(cd "\$\{PKG_SCRATCH\}" && npm install --no-save --no-audit --no-fund "\$\{NAME\}@\$\{VERSION\}"/.test(
+      /if ! \(cd "\$\{PKG_SCRATCH\}" && npm_config_build_from_source=true npm install --no-save --no-audit --no-fund "\$\{NAME\}@\$\{VERSION\}"/.test(
         rebuildSrc,
       ),
       'a per-package fresh-install failure must be caught (the `if !` guard), not let a failing `npm install` kill the whole script under set -e',
+    ).toBe(true);
+  });
+
+  it('e2e-native-rebuild-musl.sh forces build-from-source (round-4 review finding, live CI evidence run 35862123588 — an unforced install can silently fetch a GLIBC prebuilt and reproduce the exact dlopen error)', () => {
+    const rebuildSrc = readFileSync(NATIVE_REBUILD_SH_PATH, 'utf8');
+    expect(
+      /npm_config_build_from_source=true npm install/.test(rebuildSrc),
+      'the fresh install must force build-from-source — sqlite3\'s node-pre-gyp does not check libc when picking a prebuilt, so an unforced install can "succeed" with a glibc binary on a well-connected runner even though it fails-over to source on a network-restricted one',
     ).toBe(true);
   });
 
@@ -208,6 +216,28 @@ describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec 
       /cp -a "\$\{sibling\}" "\$\{ROOT\}\/node_modules\/\$\{sibling_name\}"/.test(rebuildSrc),
       'siblings must land at ROOT/node_modules (where node module resolution walks up to from inside the package dir), not be silently dropped',
     ).toBe(true);
+  });
+
+  it("e2e-native-rebuild-musl.sh does NOT overwrite a sibling already present in the traced tree (round-3 review finding — the app's own resolved version, e.g. semver/tar/rc/minimist, must survive)", () => {
+    const rebuildSrc = readFileSync(NATIVE_REBUILD_SH_PATH, 'utf8');
+    // The copy must be gated on the sibling being ABSENT from
+    // ${ROOT}/node_modules — an unconditional overwrite would silently
+    // replace whatever version the app itself built with.
+    expect(
+      /if \[ -e "\$\{ROOT\}\/node_modules\/\$\{sibling_name\}" \]; then/.test(rebuildSrc),
+      "the sibling copy must be guarded by an existence check against ROOT/node_modules — present siblings are the app's own resolved dependency tree and must not be overwritten",
+    ).toBe(true);
+    // The unconditional `rm -rf ... ; cp -a` shape from round 2 must be
+    // gone from this loop — `cp -a` alone (no `rm -rf` immediately before
+    // it inside the sibling loop) confirms nothing pre-emptively deletes an
+    // existing traced sibling before checking whether to keep it.
+    const siblingLoop = rebuildSrc.slice(
+      rebuildSrc.indexOf('for sibling in "${PKG_SCRATCH}/node_modules"/*; do'),
+    );
+    expect(
+      /rm -rf "\$\{ROOT\}\/node_modules\/\$\{sibling_name\}"/.test(siblingLoop),
+      'the sibling loop must never rm -rf a traced sibling unconditionally — only skip-if-present, never delete-then-maybe-restore',
+    ).toBe(false);
   });
 
   it('mutation proof: reverting the compile/boot/ownership anchors reds the suite above', () => {
