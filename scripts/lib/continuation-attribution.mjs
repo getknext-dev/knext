@@ -43,15 +43,19 @@
  *      line is the count of ENTERING the basic block that holds it, not of
  *      running the statement: in `boom(); throw new Error('a' +\n 'b')` the
  *      throw's line reads hit although `boom()` always throws first. So the
- *      statement must be the first statement of a function body or of an
- *      `if`/`else` branch (or a braceless branch), or every statement between it
- *      and the nearest preceding `if` / `for` / `for…of` / `while` / `switch` /
- *      `try` must be one that cannot throw (a literal-only `const`, a function /
- *      type declaration, an empty statement). Those boundaries were each
- *      MEASURED on bun 1.4.2 to start a fresh block (the unreached statement
- *      after them reads 0); a bare nested `{ }` block was measured NOT to, so it
- *      is refused, as is anything unmeasured (a `case` clause, module top level,
- *      `for…in`, `do…while`, a loop body).
+ *      statement must be the first statement of a function / arrow / method /
+ *      accessor body, of a constructor whose entry runs nothing (no instance or
+ *      `accessor` fields, `#private` members, parameter properties or
+ *      decorators — those run at entry in the SAME block), or of an `if`/`else`
+ *      branch (or a braceless branch); or every statement between it and the
+ *      nearest preceding `if` / `for` / `for…of` / `while` / `switch` / `try` must
+ *      be one that cannot throw (a literal-only `const`/`let`/`var` — never
+ *      `using`, whose disposability check throws — a function / type declaration,
+ *      an empty statement). Each accepted owner and boundary is MEASURED on bun
+ *      1.4.2 by the real-bun ground-truth test, one file per shape; a bare nested
+ *      `{ }`, `using`, and a field-initializing constructor were measured NOT to
+ *      be safe, so they are refused, as is anything unmeasured (a `case` clause,
+ *      module top level, `for…in`, `do…while`, a loop body).
  *
  * ## The invariant (load-bearing)
  *
@@ -138,16 +142,49 @@ const BLOCK_BOUNDARIES = new Set([
   K.TryStatement,
 ]);
 
-/** Owners whose body block is entered as a fresh basic block (function entry). */
+/**
+ * Owners whose body block is entered as a fresh basic block (function entry),
+ * each MEASURED on bun 1.4.2 in the real-bun ground-truth test. Parameter
+ * defaults and destructuring were measured NOT to share the body's block (an
+ * unrun body reads 0). A `Constructor` is NOT here: instance field initializers
+ * and parameter properties run at constructor entry IN THE SAME block (measured:
+ * `f = boom()` then a first-statement throw reads hit) — see `cleanConstructor`.
+ */
 const FUNCTION_LIKE = new Set([
   K.FunctionDeclaration,
   K.FunctionExpression,
   K.ArrowFunction,
   K.MethodDeclaration,
-  K.Constructor,
   K.GetAccessor,
   K.SetAccessor,
 ]);
+
+/**
+ * A constructor whose entry runs NOTHING before its body: no parameter
+ * properties or parameter decorators, and every class member inert at
+ * construction — a public method / accessor, a static member, a type-only
+ * member, a `;`. Allowlist: an instance field (with or without initializer), an
+ * `accessor` field, a `#private` member (brand install) or any decorator refuses.
+ *
+ * @param {ts.ConstructorDeclaration} ctor
+ */
+function cleanConstructor(ctor) {
+  if (ctor.parameters.some((p) => (ts.getModifiers(p)?.length ?? 0) > 0 || ts.getDecorators(p))) {
+    return false;
+  }
+  const cls = ctor.parent;
+  if (!cls || !(ts.isClassDeclaration(cls) || ts.isClassExpression(cls))) return false;
+  if (ts.getDecorators(cls)) return false;
+  return cls.members.every((m) => {
+    if (ts.canHaveDecorators(m) && ts.getDecorators(m)) return false;
+    if (ts.isConstructorDeclaration(m) || ts.isSemicolonClassElement(m)) return true;
+    if (ts.isIndexSignatureDeclaration(m)) return true;
+    const mods = ts.canHaveModifiers(m) ? (ts.getModifiers(m) ?? []) : [];
+    if (mods.some((x) => x.kind === K.StaticKeyword)) return true; // runs at definition
+    if (m.name && ts.isPrivateIdentifier(m.name)) return false; // brand install at entry
+    return ts.isMethodDeclaration(m) || ts.isGetAccessor(m) || ts.isSetAccessor(m);
+  });
+}
 
 /** Initializers that cannot throw: a literal, and nothing else. */
 const INERT_INITIALIZERS = new Set([
@@ -170,6 +207,11 @@ function cannotThrow(s) {
   }
   if (ts.isFunctionDeclaration(s)) return s.body !== undefined; // hoisted; nothing runs here
   if (ts.isVariableStatement(s)) {
+    // `using` / `await using` run a disposability check on the value, which THROWS
+    // for a non-disposable (measured: `using u = 'str'` then a throw reads hit).
+    // `NodeFlags.AwaitUsing` is `Const | Using`, so test the `Using` bit alone —
+    // masking with `Using | AwaitUsing` would also refuse every `const`.
+    if ((s.declarationList.flags & ts.NodeFlags.Using) !== 0) return false;
     return s.declarationList.declarations.every(
       (d) =>
         ts.isIdentifier(d.name) &&
@@ -210,6 +252,7 @@ function startsItsBasicBlock(stmt) {
   // First runnable statement of its block: sound only where entering the block
   // is itself a block entry. A bare nested `{ }` is measured NOT to be one.
   const owner = parent.parent;
+  if (owner !== undefined && ts.isConstructorDeclaration(owner)) return cleanConstructor(owner);
   return owner !== undefined && (FUNCTION_LIKE.has(owner.kind) || isIfBranch(owner, parent));
 }
 

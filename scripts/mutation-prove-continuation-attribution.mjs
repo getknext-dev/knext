@@ -84,7 +84,7 @@ function prove(id, description, snap, edits, expected) {
   assertTreeClean(`after ${id}`);
 }
 
-declareMutations(17);
+declareMutations(23);
 
 console.log('── baseline: the spec is green unmutated');
 assertTreeClean('baseline');
@@ -261,6 +261,86 @@ prove(
   1,
 );
 
+// ── Round 3 (#1268 re-review): entry-time work that shares the anchor's block ──
+
+prove(
+  'M19',
+  'a `using` / `await using` declaration treated as unable to throw must red',
+  libSnap,
+  [
+    [
+      '    if ((s.declarationList.flags & ts.NodeFlags.Using) !== 0) return false;',
+      '    // using declarations treated as inert',
+    ],
+  ],
+  1,
+);
+
+prove(
+  'M20',
+  'masking with `Using | AwaitUsing` (AwaitUsing = Const | Using) — refuses every `const` — must red',
+  libSnap,
+  [
+    [
+      '    if ((s.declarationList.flags & ts.NodeFlags.Using) !== 0) return false;',
+      '    if ((s.declarationList.flags & (ts.NodeFlags.Using | ts.NodeFlags.AwaitUsing)) !== 0) return false;',
+    ],
+  ],
+  1,
+);
+
+prove(
+  'M21',
+  'every constructor accepted as a block entry (field initializers run first) must red',
+  libSnap,
+  [
+    [
+      '  if (owner !== undefined && ts.isConstructorDeclaration(owner)) return cleanConstructor(owner);',
+      '  if (owner !== undefined && ts.isConstructorDeclaration(owner)) return true;',
+    ],
+  ],
+  1,
+);
+
+prove(
+  'M22',
+  'a constructor with parameter properties accepted must red',
+  libSnap,
+  [
+    [
+      '  if (ctor.parameters.some((p) => (ts.getModifiers(p)?.length ?? 0) > 0 || ts.getDecorators(p))) {',
+      '  if (ctor.parameters.some((p) => ts.getDecorators(p))) {',
+    ],
+  ],
+  1,
+);
+
+prove(
+  'M23',
+  'instance fields / `accessor` fields accepted as inert class members must red',
+  libSnap,
+  [
+    [
+      '    return ts.isMethodDeclaration(m) || ts.isGetAccessor(m) || ts.isSetAccessor(m);',
+      '    return true;',
+    ],
+  ],
+  1,
+);
+
+prove(
+  'M24',
+  'a `#private` member (brand installed at entry) accepted must red',
+  libSnap,
+  [
+    [
+      '    if (m.name && ts.isPrivateIdentifier(m.name)) return false; // brand install at entry',
+      '    // private members treated as inert',
+    ],
+  ],
+  1,
+);
+
 prove(
   'M17',
   'a `case` clause / module top level accepted as a block entry must red',
@@ -334,4 +414,4 @@ if (failures.length) {
   for (const f of failures) console.error(`  - ${f}`);
   process.exit(1);
 }
-console.log('\n17 mutation(s) behaved as required (16 red, 1 negative control green), 0 survived.');
+console.log('\n23 mutation(s) behaved as required (22 red, 1 negative control green), 0 survived.');

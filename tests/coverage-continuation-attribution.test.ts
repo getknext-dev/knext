@@ -19,7 +19,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import ts from 'typescript';
@@ -218,6 +218,63 @@ describe('continuationAnchors — rule 5: the first line may be hit on an UNRELA
     ].join('\n');
     expectNotAttributed(src, '// BLK2');
     expectNotAttributed(src, '// BLK3');
+  });
+
+  test('`using` / `await using` before the anchor can throw (measured) — `const` still passes', () => {
+    for (const decl of ['using', 'await using']) {
+      const src = [
+        'async function h(): Promise<void> {',
+        `  ${decl} u = 'str' as unknown as Disposable;`,
+        '  throw new Error(',
+        "    'a ' +",
+        "      'b', // AFTERUSING",
+        '  );',
+        '}',
+      ].join('\n');
+      expectNotAttributed(src, '// AFTERUSING');
+    }
+    const ok = [
+      'function h(): void {',
+      "  const u = 'str'; // INERT-DECL",
+      '  throw new Error( // ANCHORC',
+      "    'a ' +",
+      "      'b', // AFTERCONSTDECL",
+      '  );',
+      '}',
+    ].join('\n');
+    expectAttributed(ok, '// AFTERCONSTDECL', '// ANCHORC');
+  });
+
+  test('a constructor is a block entry ONLY when its entry runs nothing (measured)', () => {
+    const body = [
+      '  constructor() {',
+      '    throw new Error( // CTORANCHOR',
+      "      'a ' +",
+      "        'b', // CTORCONT",
+      '    );',
+      '  }',
+    ];
+    const clean = ['class C {', '  static s = 1;', '  m(): void {}', ...body, '}'].join('\n');
+    expectAttributed(clean, '// CTORCONT', '// CTORANCHOR');
+    for (const member of [
+      '  f = 1;', // instance field initializer — runs at entry
+      '  f: string;', // a field with no initializer is still defined at entry
+      '  accessor a = 1;',
+      '  #p(): void {}', // private brand installed at entry
+    ]) {
+      expectNotAttributed(['class C {', member, ...body, '}'].join('\n'), '// CTORCONT');
+    }
+    const paramProp = [
+      'class C {',
+      '  constructor(private readonly x: string) {',
+      '    throw new Error(',
+      "      'a ' +",
+      "        'b', // PARAMPROP",
+      '    );',
+      '  }',
+      '}',
+    ].join('\n');
+    expectNotAttributed(paramProp, '// PARAMPROP');
   });
 
   test('a bare nested `{ }` block does not start a basic block (measured)', () => {
@@ -607,84 +664,277 @@ describe('repo-wide rule-1 re-check: every attributed line holds ONLY literal / 
 
 describe('real bun lcov from two processes: attribution never outruns ground truth', () => {
   // INDEPENDENT of the module: each shape's outcome is fixed by construction, and
-  // the runner process ASSERTS it (a chain that runs throws its full message; one
-  // that does not throws 'boom' or returns). Then two real bun processes (an
-  // importer that runs nothing, a runner) produce lcov exactly as the gate sees
-  // it, and the claim checked is: a line is raised ONLY if its chain really ran —
-  // and the chains that did run in a sound shape ARE raised (so it is not vacuous).
-  /** One fixture shape; the optional flags select its layout. */
-  type Shape = {
-    name: string;
-    lead: string[];
-    call: string;
-    runs: boolean;
-    exact?: boolean;
-    sameLine?: boolean;
-    close?: string;
-  };
-  const shape = (name: string, lead: string[], call: string) => ({ name, lead, call });
-  const chain = (name: string, ind: string) => [
+  // the runner process ASSERTS it (a chain that runs throws 'first second third';
+  // one that does not throws 'boom' or returns). Then two real bun processes (an
+  // importer that runs nothing, a runner) produce lcov exactly as the gate sees it.
+  //
+  // ONE FILE PER SHAPE, each in its own directory with its own two processes: the
+  // #1268 re-review found that mixing shapes in one source file perturbs bun's line
+  // mapping, so a multi-shape fixture can pass or fail for the wrong reason.
+  //
+  // Checked per shape: `raised` (did attribution lift any of the continuation lines
+  // the merge left at 0?) equals the expected value, and NO shape whose chain did
+  // not run is ever raised. Shapes marked `raised: false, runs: true` are ones the
+  // rule conservatively refuses.
+  const BOOM = 'function boom(): never { throw new Error("boom"); }';
+  const chain = (ind: string) => [
     `${ind}throw new Error(`,
-    `${ind}  '${name} first ' +`,
-    `${ind}    '${name} second ' + // ${name}-C2`,
-    `${ind}    '${name} third', // ${name}-C3`,
+    `${ind}  'first ' +`,
+    `${ind}    'second ' + // C2`,
+    `${ind}    'third', // C3`,
     `${ind});`,
   ];
+  type Shape = { name: string; src: string[]; runs: boolean; raised: boolean };
   const SHAPES: Shape[] = [
-    // The review's repro, VERBATIM: `boom()` shares the throw's basic block and
-    // always throws, yet the throw's first line reads hit.
-    { ...shape('REVIEW', [], 'review()'), runs: false, exact: true },
-    // The same, with the chain opening on its own line.
-    { ...shape('BLOCKSIB', ['  boom();'], 'blocksib()'), runs: false },
-    { ...shape('NESTED', ['  boom();', '  {'], 'nested()'), runs: false, close: '  }' },
-    { ...shape('SAMELINE', [], 'sameline(false)'), runs: false, sameLine: true },
-    { ...shape('AFTERIFUNRUN', ['  if (x) return;'], 'afterifunrun(true)'), runs: false },
-    { ...shape('IFFIRST', ['  if (x) {'], 'iffirst(true)'), runs: true, close: '  }' },
-    { ...shape('AFTERIF', ['  if (x) return;'], 'afterif(false)'), runs: true },
-    { ...shape('AFTERCONST', ["  const k = 'lit';"], 'afterconst()'), runs: true },
-  ];
-
-  const lines: string[] = ['export function boom(): never {', "  throw new Error('boom');", '}'];
-  for (const s of SHAPES) {
-    lines.push(`export function ${s.name.toLowerCase()}(x = false): void {`);
-    if (s.exact) {
-      lines.push(
+    // ── the chain NEVER runs: nothing may be raised ──
+    {
+      // The #1268 review's repro, VERBATIM.
+      name: 'REVIEW',
+      src: [
+        BOOM,
+        'export function f(): void {',
         '  boom();',
         "  throw new Error('first ' +",
-        `    'second ' + // ${s.name}-C2`,
-        `    'third'); // ${s.name}-C3`,
-      );
-    } else if (s.sameLine) {
-      // `if (x) throw new Error(` — the `if` test runs, the throw does not.
-      lines.push('  if (x) throw new Error(');
-      lines.push(...chain(s.name, '  ').slice(1));
-    } else {
-      lines.push(...s.lead);
-      lines.push(...chain(s.name, s.close ? '    ' : '  '));
-      if (s.close) lines.push(s.close);
-    }
-    lines.push('  void x;', '}');
-  }
-  const FIXTURE = `${lines.join('\n')}\n`;
-  const names = SHAPES.map((s) => s.name.toLowerCase()).join(', ');
-  const RUNNER = [
-    "import { expect, test } from 'bun:test';",
-    `import { ${names} } from './shapes';`,
-    "test('ground truth', () => {",
-    ...SHAPES.map((s) =>
-      s.runs
-        ? `  expect(() => ${s.call}).toThrow('${s.name} first ${s.name} second ${s.name} third');`
-        : `  try { ${s.call}; } catch (e) { expect((e as Error).message).toBe('boom'); }`,
+        "    'second ' + // C2",
+        "    'third'); // C3",
+        '}',
+      ],
+      runs: false,
+      raised: false,
+    },
+    {
+      name: 'BLOCKSIB',
+      src: [BOOM, 'export function f(): void {', '  boom();', ...chain('  '), '}'],
+      runs: false,
+      raised: false,
+    },
+    {
+      name: 'NESTED',
+      src: [BOOM, 'export function f(): void {', '  boom();', '  {', ...chain('    '), '  }', '}'],
+      runs: false,
+      raised: false,
+    },
+    {
+      name: 'SAMELINE',
+      src: [
+        'function g(x: boolean): void {',
+        '  if (x) throw new Error(',
+        "    'first ' +",
+        "      'second ' + // C2",
+        "      'third', // C3",
+        '  );',
+        '}',
+        'export function f(): void { g(false); }',
+      ],
+      runs: false,
+      raised: false,
+    },
+    {
+      name: 'AFTERIFUNRUN',
+      src: [
+        'function g(x: boolean): void {',
+        '  if (x) return;',
+        ...chain('  '),
+        '}',
+        'export function f(): void { g(true); }',
+      ],
+      runs: false,
+      raised: false,
+    },
+    {
+      // #1268 round 3: `using` throws a TypeError for a non-disposable value.
+      name: 'USING',
+      src: [
+        'export function f(): void {',
+        "  using u = 'str' as unknown as Disposable;",
+        ...chain('  '),
+        '}',
+      ],
+      runs: false,
+      raised: false,
+    },
+    {
+      // #1268 round 3: an instance field initializer runs at constructor entry.
+      name: 'CTORFIELD',
+      src: [
+        BOOM,
+        'class T {',
+        '  f = boom();',
+        '  constructor() {',
+        ...chain('    '),
+        '  }',
+        '}',
+        'export function f(): void { new T(); }',
+      ],
+      runs: false,
+      raised: false,
+    },
+    {
+      // A throwing parameter default: measured NOT to share the body's block, so
+      // the body's first line reads 0 and nothing is raised.
+      name: 'DEFAULTPARAMTHROW',
+      src: [
+        BOOM,
+        'function g(a: string = boom()): void {',
+        ...chain('  '),
+        '}',
+        'export function f(): void { g(); }',
+      ],
+      runs: false,
+      raised: false,
+    },
+    // ── the chain runs in a sound shape: it IS raised (not vacuous) ──
+    {
+      name: 'IFFIRST',
+      src: [
+        'function g(x: boolean): void {',
+        '  if (x) {',
+        ...chain('    '),
+        '  }',
+        '}',
+        'export function f(): void { g(true); }',
+      ],
+      runs: true,
+      raised: true,
+    },
+    {
+      name: 'AFTERIF',
+      src: [
+        'function g(x: boolean): void {',
+        '  if (x) return;',
+        ...chain('  '),
+        '}',
+        'export function f(): void { g(false); }',
+      ],
+      runs: true,
+      raised: true,
+    },
+    {
+      name: 'AFTERCONST',
+      src: ['export function f(): void {', "  const k = 'lit';", ...chain('  '), '}'],
+      runs: true,
+      raised: true,
+    },
+    {
+      name: 'FNEXPR',
+      src: ['export const f = function (): void {', ...chain('  '), '};'],
+      runs: true,
+      raised: true,
+    },
+    {
+      name: 'ARROW',
+      src: ['export const f = (): void => {', ...chain('  '), '};'],
+      runs: true,
+      raised: true,
+    },
+    {
+      name: 'METHOD',
+      src: [
+        'class M {',
+        '  m(): void {',
+        ...chain('    '),
+        '  }',
+        '}',
+        'export function f(): void { new M().m(); }',
+      ],
+      runs: true,
+      raised: true,
+    },
+    {
+      name: 'GETTER',
+      src: [
+        'class G {',
+        '  get v(): string {',
+        ...chain('    '),
+        '  }',
+        '}',
+        'export function f(): void { void new G().v; }',
+      ],
+      runs: true,
+      raised: true,
+    },
+    {
+      name: 'SETTER',
+      src: [
+        'class S {',
+        '  set v(_x: string) {',
+        ...chain('    '),
+        '  }',
+        '}',
+        "export function f(): void { new S().v = 'x'; }",
+      ],
+      runs: true,
+      raised: true,
+    },
+    // ── every accepted BOUNDARY, both ways: reached after it → raised; the code
+    //    before it throws so the statement after it never runs → not raised ──
+    ...(
+      [
+        ['FOR', '  for (let i = 0; i < 1; i++) {', '  }'],
+        ['FOROF', "  for (const c of 'a') {", '  }'],
+        ['WHILE', '  let n = 1;\n  while (n > 0) {\n    n--;', '  }'],
+        ['SWITCH', '  switch (1 as number) {\n    case 1:', '  }'],
+        ['TRY', '  try {', '  } finally {\n  }'],
+      ] as const
+    ).flatMap(([name, open, close]): Shape[] => [
+      {
+        name: `${name}_RUN`,
+        src: [BOOM, 'export function f(): void {', open, close, ...chain('  '), '}'],
+        runs: true,
+        raised: true,
+      },
+      {
+        name: `${name}_UNRUN`,
+        src: [BOOM, 'export function f(): void {', open, '    boom();', close, ...chain('  '), '}'],
+        runs: false,
+        raised: false,
+      },
+    ]),
+    ...[true, false].map(
+      (runs): Shape => ({
+        name: runs ? 'ELSE_RUN' : 'ELSE_UNRUN',
+        src: [
+          'function g(x: boolean): void {',
+          '  if (x) {',
+          '    return;',
+          '  } else {',
+          ...chain('    '),
+          '  }',
+          '}',
+          `export function f(): void { g(${!runs}); }`,
+        ],
+        runs,
+        raised: runs,
+      }),
     ),
-    '});',
-    '',
-  ].join('\n');
-  const IMPORTER = [
-    "import { expect, test } from 'bun:test';",
-    `import { ${names} } from './shapes';`,
-    `test('import only', () => { expect([${names}].length).toBe(${SHAPES.length}); });`,
-    '',
-  ].join('\n');
+    {
+      name: 'CTORCLEAN',
+      src: [
+        'class C {',
+        '  m(): void {}',
+        '  constructor() {',
+        ...chain('    '),
+        '  }',
+        '}',
+        'export function f(): void { new C(); }',
+      ],
+      runs: true,
+      raised: true,
+    },
+    {
+      name: 'DEFAULTPARAM',
+      src: [
+        "function g(a: string = 'x'): void {",
+        '  void a;',
+        ...chain('  '),
+        '}',
+        'export function f(): void { g(); }',
+      ],
+      // `void a;` is an expression statement, so rule 5 conservatively refuses.
+      runs: true,
+      raised: false,
+    },
+  ];
 
   function bunLcov(dir: string, testFile: string, out: string): string {
     const res = spawnSync(
@@ -693,50 +943,72 @@ describe('real bun lcov from two processes: attribution never outruns ground tru
       { cwd: dir, encoding: 'utf8', timeout: 60_000 },
     );
     // Exit code only: a non-zero runner means the GROUND TRUTH itself failed.
-    expect({ testFile, status: res.status }).toEqual({ testFile, status: 0 });
+    expect({ dir, testFile, status: res.status }).toEqual({ dir, testFile, status: 0 });
     return readFileSync(join(dir, out, 'lcov.info'), 'utf8');
   }
 
-  test('the fixture shapes, run for real', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'knext-cont-bun-'));
+  test('each fixture shape, in its own file and its own two bun processes', () => {
+    const root = mkdtempSync(join(tmpdir(), 'knext-cont-bun-'));
     try {
-      writeFileSync(join(dir, 'shapes.ts'), FIXTURE);
-      writeFileSync(join(dir, 'runner.test.ts'), RUNNER);
-      writeFileSync(join(dir, 'importer.test.ts'), IMPORTER);
-      const merged = mergeLcov([
-        bunLcov(dir, 'importer.test.ts', 'cov-importer'),
-        bunLcov(dir, 'runner.test.ts', 'cov-runner'),
-      ]);
-      const read = (p: string) => (p.endsWith('shapes.ts') ? FIXTURE : null);
-      const honest = honestCoverage(merged, read);
-      const before = [...honest.files.values()][0]?.lines;
-      const after = [...attributeContinuations(honest.files, read).files.values()][0]?.lines;
-      expect(before && after).toBeTruthy();
       const verdicts = SHAPES.map((s) => {
+        const dir = join(root, s.name.toLowerCase());
+        mkdirSync(dir);
+        const src = `${s.src.join('\n')}\n`;
+        writeFileSync(join(dir, 'shape.ts'), src);
+        writeFileSync(
+          join(dir, 'runner.test.ts'),
+          [
+            "import { expect, test } from 'bun:test';",
+            "import { f } from './shape';",
+            "test('ground truth', () => {",
+            s.runs
+              ? "  expect(() => f()).toThrow('first second third');"
+              : "  let m = ''; try { f(); } catch (e) { m = (e as Error).message; } expect(m).not.toContain('first');",
+            '});',
+            '',
+          ].join('\n'),
+        );
+        writeFileSync(
+          join(dir, 'importer.test.ts'),
+          [
+            "import { expect, test } from 'bun:test';",
+            "import { f } from './shape';",
+            "test('import only', () => { expect(typeof f).toBe('function'); });",
+            '',
+          ].join('\n'),
+        );
+        const merged = mergeLcov([
+          bunLcov(dir, 'importer.test.ts', 'cov-importer'),
+          bunLcov(dir, 'runner.test.ts', 'cov-runner'),
+        ]);
+        const read = (p: string) => (p.endsWith('shape.ts') ? src : null);
+        const honest = honestCoverage(merged, read);
+        const before = [...honest.files.values()][0]?.lines;
+        const after = [...attributeContinuations(honest.files, read).files.values()][0]?.lines;
         // The continuation lines the MERGE left at 0. bun itself sometimes puts a
-        // positive raw count on the line after the anchor even when the chain
-        // never ran (the REVIEW shape's `'second '` line) — that is bun's, not
+        // positive raw count on a continuation line whose chain never ran (the REVIEW
+        // shape's last line, measured in its own file) — that is bun's, not
         // attribution's, so only the lines at 0 are judged.
-        const zeros = [`// ${s.name}-C2`, `// ${s.name}-C3`]
-          .map((m) => lineOf(FIXTURE, m))
+        const zeros = ['// C2', '// C3']
+          .map((m) => lineOf(src, m))
           .filter((l) => before?.get(l) === 0);
         return {
           shape: s.name,
-          // The artifact is present in every shape: the merge holds a 0.
           mergedZero: zeros.length > 0,
-          // Attribution's own effect: did it raise any of those zeros?
           raised: zeros.some((l) => (after?.get(l) ?? 0) > 0),
         };
       });
       expect(verdicts).toEqual(
-        SHAPES.map((s) => ({ shape: s.name, mergedZero: true, raised: s.runs })),
+        SHAPES.map((s) => ({ shape: s.name, mergedZero: true, raised: s.raised })),
       );
+      // The invariant, stated on its own: a chain that did not run is never raised.
+      const outran = SHAPES.filter((s, i) => !s.runs && verdicts[i]?.raised).map((s) => s.name);
+      expect(outran).toEqual([]);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true });
     }
-  }, 120_000);
+  }, 180_000);
 });
-
 // ── (end to end) the gate, fed the two-report merge, at the floor boundary ────
 
 describe('scripts/check-coverage.mjs — attribution decides the honest floor', () => {

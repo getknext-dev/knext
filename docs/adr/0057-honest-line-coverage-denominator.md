@@ -134,12 +134,22 @@ The classifier is right to keep these lines. They are expressions. What was wron
 profiler. A line's count is the count of *entering the basic block* that covers it, not of
 running the statement on it. Measured on bun 1.4.2: in `boom(); throw new Error('first ' +` /
 `'second ' +` / `'third');`, where `boom()` always throws, the throw's line reads hit even though
-the throw never runs. The same holds inside a bare nested `{ }` block. After an `if`, `for`,
-`for…of`, `while`, `switch` or `try` (and in an `if`/`else` branch or a function body), the
-next statement starts a fresh block. When that statement is not reached, its line reads 0.
-Bun's raw data can itself be wrong the same way: in the case above it put a positive count on
-the unrun `'second '` line. That affects the raw and honest numbers equally and is outside this
-amendment, which only ever raises a 0.
+the throw never runs. Other constructs behave the same way:
+- a bare nested `{ }` block;
+- a preceding `using u = 'str';`, whose disposability check throws;
+- a constructor whose class has an instance field initializer (`f = boom()`). Field
+  initializers and parameter properties run at constructor entry in the same block as the
+  first statement.
+
+After an `if`, `for`, `for…of`, `while`, `switch` or `try`, and at the start of an `if`/`else`
+branch or a function / arrow / method / accessor body, the next statement starts a fresh block.
+When that statement is not reached, its line reads 0. A throwing parameter default does not
+share the body's block either: the body's first line reads 0.
+
+Bun's raw data can itself be wrong the same way. In the case above it put a positive count on
+an unrun continuation line, and it still does when the shape is measured alone in its own file.
+That affects the raw and honest numbers equally and is outside this amendment, which only ever
+raises a 0.
 
 ### Decision
 
@@ -162,13 +172,31 @@ below are allowlists, so an unrecognised construct keeps the 0:
    string-converted (`name + 'a'`, `${name}`) blocks attribution. A Symbol, or an object with a
    throwing `toString`/`valueOf`, throws during that conversion, so the literal after it may
    never run.
-5. **The statement starts its own basic block.** It must be the first statement of a function
-   body or of an `if`/`else` branch (braced or not), or every statement between it and the
-   nearest preceding `if` / `for` / `for…of` / `while` / `switch` / `try` must be unable to
-   throw. The only such statements allowed are a `const`/`let` whose initializers are literals,
-   a function or type declaration, and an empty statement. Each accepted boundary was measured
-   on bun 1.4.2. Anything unmeasured is refused: a bare `{ }` (measured *not* to start a block),
-   a `case` clause, module top level, `for…in`, `do…while`, and a loop body.
+5. **The statement starts its own basic block.** It must meet one of these:
+   - It is the first statement of a function, arrow, method or accessor body.
+   - It is the first statement of a constructor whose entry runs **nothing**. That rules out
+     instance or `accessor` fields (with or without an initializer), `#private` members,
+     parameter properties and decorators. Only public methods and accessors, static members and
+     type-only members are allowed.
+   - It is the first statement of an `if`/`else` branch, braced or not.
+   - Every statement between it and the nearest preceding `if` / `for` / `for…of` / `while` /
+     `switch` / `try` is unable to throw.
+
+   The only statements treated as unable to throw are a `const`/`let`/`var` whose initializers
+   are literals (never `using` or `await using`), a function or type declaration, and an empty
+   statement.
+
+   **What "measured" covers:** every accepted owner and boundary is re-measured on every test
+   run by the real-bun ground-truth test, one file per shape with its own two bun processes.
+   - **Owners:** a function declaration, a function expression, an arrow, a method, a getter, a
+     setter, a clean constructor, and an `if`/`else` branch.
+   - **Boundaries:** `if`, `for`, `for…of`, `while`, `switch` and `try`. Each one is tested both
+     ways: reached after the boundary, it is raised; unreached because the code before it
+     throws, it is not.
+
+   Refused because they were measured unsafe: a bare `{ }`, `using`, and a constructor that runs
+   field initializers. Refused because they are unmeasured: a `case` clause, module top level,
+   `for…in`, `do…while`, and a loop body.
 
 It never adds a record, never lowers a count, and never touches a file it cannot read or parse.
 The raw number is unchanged.
@@ -215,19 +243,26 @@ jev (calibrated second opinion) scores:
     `boom(); throw new Error('first ' +` case verbatim, a bare nested block, a `case` clause, module
     top level, `${name}` and `name +` before the literal, a `${expr}` continuation, `foo() +`, a
     split ternary, a string passed to a function, `?.`, `||`/`??`/`&&`, `if (x) throw`, arrow
-    bodies and `+=`.
-  - **A real-bun ground-truth check.** Fixture shapes run in two real bun processes, one that
-    only imports and one that runs. Each shape's outcome is fixed by construction, and the
-    runner process asserts it. The check requires that a 0 is raised **only** when its chain
-    really ran, and that the chains that did run in a sound shape **are** raised. This check is
-    independent of the module, but it covers only the shapes in the fixture. It is not a
-    repo-wide proof of rules 3 and 5.
+    bodies, `+=`, `using`/`await using`, and constructors: clean, with instance fields, with
+    `accessor` fields, with `#private` members, and with parameter properties.
+  - **A real-bun ground-truth check.** 30 shapes, each in **its own file** with its own two
+    real bun processes: one that only imports and one that runs. A multi-shape file was found
+    to perturb bun's line mapping, so shapes are never mixed. Each shape's outcome is fixed by
+    construction, and the runner process asserts it. The check requires that a 0 is raised
+    **only** when its chain really ran, and that the chains that did run in a sound shape
+    **are** raised. This check is independent of the module, but it covers only the shapes in
+    the fixture. It is not a repo-wide proof of rules 3 and 5.
   - **An end-to-end run of the gate** at the floor boundary, in both directions.
   - **A repo-wide re-check of rule 1 only.** TypeScript's scanner reads each attributed line's
     own text. It says nothing about rules 2-5.
-- Also guarded by `scripts/mutation-prove-continuation-attribution.mjs`: 16 red mutations and 1
+- Also guarded by `scripts/mutation-prove-continuation-attribution.mjs`: 22 red mutations and 1
   negative control. Every fixture a mutation relies on fails exactly one rule, so each guard is
   observed on its own and not masked by another rule.
+  - Entry-time work sharing the anchor's block (#1268 round 3): `using` treated as inert,
+    every constructor accepted, parameter properties accepted, instance/`accessor` fields
+    accepted, and `#private` members accepted. One more mutation masks `using` with
+    `Using | AwaitUsing`. `AwaitUsing` is `Const | Using` in TypeScript, so that mask refuses
+    every `const`, and the mutation goes red on the `const` positive control.
   - Over-attribution cases: a call-carrying line, the before-the-literal scan, the climb, the
     first-on-line check, a short-circuit, a record the reports never carried, parse errors, a
     `${…}` line, and a string-converted identifier.
@@ -239,6 +274,10 @@ jev (calibrated second opinion) scores:
     block accepted, every earlier statement treated as inert, an expression statement treated as
     a block boundary, and a `case` clause or module top level accepted.
   - Under-attribution cases: the lib no longer attributing, and the gate no longer wiring it in.
+- **The constructor choice.** Dropping `Constructor` entirely was the simpler fix, and no
+  attributed line in the tree today sits in a constructor. jev picked the allowlist refinement
+  instead, at confidence 0.69 (refine 0.84, drop 0.16). The refinement accepts a constructor
+  only when its class runs nothing at construction entry.
 - **Residual trust points.** Rule 5's boundary list rests on measurements of bun 1.4.2. A bun or
   JSC upgrade that changes basic-block splitting could invalidate it. The real-bun
   ground-truth test re-measures on every run with whatever bun is installed, so such a change
