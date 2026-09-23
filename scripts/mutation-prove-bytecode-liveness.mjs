@@ -67,6 +67,29 @@ const MUTATIONS = [
     anchor: 'process.stdout.write((cands.length ? cands : ["/"]).map((r) => `${basePath}${r}`).join(" "));',
     replacement: 'process.stdout.write(`${basePath}/_next/static/x.js`);',
   },
+  {
+    label: 'knext: the shipped bake driver accepts a connection reset under the harness knob',
+    target: SHIPPED_BAKE,
+    spec: SPEC_WIRING,
+    anchor: '            allOk = false;',
+    replacement: '            allOk = allOk && ACCEPT_ANY_STATUS;',
+    commentPrefix: '//',
+  },
+  {
+    label: 'knext: the PRODUCT default loosens to accept non-2xx (strict-by-default lost)',
+    target: SHIPPED_BAKE,
+    spec: SPEC_WIRING,
+    anchor: 'process.env.KNEXT_WARM_ACCEPT_ANY_STATUS === "1"',
+    replacement: 'process.env.KNEXT_WARM_ACCEPT_ANY_STATUS !== "0"',
+    commentPrefix: '//',
+  },
+  {
+    label: 'node: the harness stops setting the accept-any-status knob (404/500 fixtures fail again)',
+    target: DEPLOY,
+    spec: SPEC_WIRING,
+    anchor: '            KNEXT_WARM_ACCEPT_ANY_STATUS=1 \\\n',
+    replacement: '',
+  },
   // ── Disable the node cache ───────────────────────────────────────────────
   {
     label: 'node: boot server.js WITHOUT the baked compile cache',

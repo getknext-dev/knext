@@ -67,7 +67,8 @@ function fakeStandalone() {
     [
       "require('./node_modules/next/index.js');",
       "require('node:http').createServer((req, res) => {",
-      "  res.writeHead(req.url === '/_next/static/chunk.js' ? 200 : 404); res.end('ok');",
+      "  if (req.url === '/reset') { req.socket.destroy(); return; }",
+      "  res.writeHead(req.url === '/_next/static/chunk.js' || req.url === '/ok' ? 200 : req.url === '/boom' ? 500 : 404); res.end('ok');",
       '}).listen(Number(process.env.PORT), process.env.HOSTNAME);',
     ].join('\n'),
   );
@@ -142,6 +143,59 @@ describe("the SHIPPED bake driver (the standalone-node image's own), against a r
     });
     expect(r.status).not.toBe(0);
   }, 90_000);
+});
+
+function bakeWith(warm: string, knob?: string) {
+  const { dir, driver, server } = fakeStandalone();
+  port += 1;
+  return spawnSync('node', [driver], {
+    encoding: 'utf8',
+    timeout: 60_000,
+    cwd: dir,
+    env: {
+      PATH: process.env.PATH ?? '',
+      PORT: String(port),
+      HOSTNAME: '127.0.0.1',
+      STANDALONE_SERVER_PATH: server,
+      NODE_COMPILE_CACHE: join(dir, '.cc'),
+      KNEXT_WARM_PATH: warm,
+      ...(knob === undefined ? {} : { KNEXT_WARM_ACCEPT_ANY_STATUS: knob }),
+    },
+  });
+}
+
+describe('the shipped bake driver: strict 2xx by default, accept-any-status only by the internal knob', () => {
+  it('PRODUCT DEFAULT: a 404 and a 500 both fail the bake', () => {
+    expect(bakeWith('/not-there').status).not.toBe(0);
+    expect(bakeWith('/boom').status).not.toBe(0);
+  }, 90_000);
+
+  it('the knob unset-equivalent values stay strict (only "1" loosens)', () => {
+    expect(bakeWith('/not-there', '0').status).not.toBe(0);
+    expect(bakeWith('/not-there', 'true').status).not.toBe(0);
+  }, 90_000);
+
+  it('with the knob, a 404 or 500 render is a complete response and the bake succeeds', () => {
+    expect(bakeWith('/not-there', '1').status).toBe(0);
+    expect(bakeWith('/boom', '1').status).toBe(0);
+  }, 90_000);
+
+  it('with the knob, a connection reset STILL fails the bake', () => {
+    // /ok first so the server-ready probe passes; the reset is then a warm-path failure.
+    expect(bakeWith('/ok,/reset', '1').status).not.toBe(0);
+    expect(bakeWith('/ok,/not-there', '1').status).toBe(0);
+  }, 90_000);
+
+  it('only the harness sets the knob — the image build never does', () => {
+    expect(once(DEPLOY, 'KNEXT_WARM_ACCEPT_ANY_STATUS=1')).toBe(1);
+    const dockerfile = readFileSync(
+      join(ROOT, 'packages/kn-next/templates/runtime-standalone/Dockerfile.standalone.hbs'),
+      'utf8',
+    );
+    expect(dockerfile).not.toContain('KNEXT_WARM_ACCEPT_ANY_STATUS');
+    const docs = readFileSync(join(ROOT, 'apps/docs/content/docs/bytecode.mdx'), 'utf8');
+    expect(docs).not.toContain('KNEXT_WARM_ACCEPT_ANY_STATUS');
+  });
 });
 
 describe('the SHIPPED supervisor hands the child NODE_COMPILE_CACHE (buildChildEnv)', () => {
