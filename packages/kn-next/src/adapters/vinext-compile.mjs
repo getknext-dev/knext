@@ -49,6 +49,7 @@
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { staticizeEntryRequires } from "./entry-require-staticize.mjs";
 
 /** `--flag value` pairs; no positional arguments. */
 function parseArgs(argv) {
@@ -97,26 +98,6 @@ if (!GUARD_FILE) {
     process.exit(1);
 }
 
-// The `@opentelemetry/api` require shim (#1309) — see otel-api-compile-shim.mjs
-// for the full root cause. vinext 1.0.0-beta.11's built-in tracing resolves
-// `@opentelemetry/api` via `globalThis.require`, which `Bun.build` cannot see
-// statically, so the compiled binary throws `Cannot find module
-// '@opentelemetry/api'` on every request unless this shim installs first.
-// Optional, unlike the keep-alive guard: an app whose vinext dist never
-// reaches that code path just gets an unused shim, so absence is a WARNING,
-// not a fail-closed abort.
-const OTEL_SHIM_FILE = [
-    join(compileHere, "otel-api-compile-shim.js"),
-    join(compileHere, "otel-api-compile-shim.mjs"),
-].find((c) => existsSync(c));
-if (!OTEL_SHIM_FILE) {
-    console.error(
-        "[knext compile] WARNING: otel-api-compile-shim.{js,mjs} not found beside vinext-compile " +
-            `(looked in ${compileHere}) — if the vinext dist's built-in tracing reaches a ` +
-            "globalThis.require('@opentelemetry/api') call, the compiled binary will 500 on every request",
-    );
-}
-
 /**
  * Injects the keep-alive guard import into the nitro entry AND rewrites
  * `import.meta.*` so `--bytecode`'s CommonJS output can hold it. Both act on the
@@ -131,19 +112,37 @@ const importMetaToCjs = {
             const raw = await Bun.file(args.path).text();
             // Prepend the guard imports FIRST, always — independent of whether the
             // entry uses import.meta. `import "<abs>";` is bundled + evaluated
-            // before the rest of the entry's imports, patching Bun.serve (and
-            // installing the otel require shim) in time.
-            const preamble = [
-                `import ${JSON.stringify(GUARD_FILE)};`,
-                OTEL_SHIM_FILE ? `import ${JSON.stringify(OTEL_SHIM_FILE)};` : "",
-            ]
-                .filter(Boolean)
-                .join("\n");
-            const src = `${preamble}\n${raw}`;
+            // before the rest of the entry's imports, patching Bun.serve in time.
+            //
+            // Then turn the entry's `createRequire(import.meta.url)` calls for
+            // EXTERNAL packages into static requires so Bun.build bundles them
+            // (#1309 — see entry-require-staticize.mjs). This must run BEFORE the
+            // import.meta rewrite below, which erases the anchor it matches on.
+            const entryDir = dirname(args.path);
+            const staticized = staticizeEntryRequires(raw, (spec) => {
+                try {
+                    Bun.resolveSync(spec, entryDir);
+                    return true;
+                } catch {
+                    return false;
+                }
+            });
+            if (staticized.rewritten.length > 0) {
+                console.log(
+                    `[knext compile] bundling ${staticized.rewritten.length} package(s) the entry ` +
+                        `loads via createRequire(import.meta.url): ${staticized.rewritten.join(", ")}`,
+                );
+            }
+            if (staticized.unresolved.length > 0) {
+                console.warn(
+                    "[knext compile] WARNING: the entry runtime-requires package(s) that do not " +
+                        `resolve from ${entryDir} and cannot be bundled: ` +
+                        `${staticized.unresolved.join(", ")} — the binary throws if that code path runs`,
+                );
+            }
+            const src = `import ${JSON.stringify(GUARD_FILE)};\n${staticized.contents}`;
             console.log(
-                "[knext compile] injected the Bun.serve keep-alive guard" +
-                    (OTEL_SHIM_FILE ? " and the @opentelemetry/api require shim" : "") +
-                    " as the entry's first import(s)",
+                "[knext compile] injected the Bun.serve keep-alive guard as the entry's first import",
             );
             const before = (src.match(/import\.meta\.(url|filename|dirname)/g) ?? [])
                 .length;
