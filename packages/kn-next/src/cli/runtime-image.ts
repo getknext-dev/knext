@@ -142,6 +142,51 @@ function stageLiteralTemplate(src: string, dest: string): boolean {
 }
 
 /**
+ * True when `dockerfilePath`'s content is BYTE-IDENTICAL to one of the two
+ * shipped `app-dockerfile` templates (the scaffolded single-stage vinext
+ * `Dockerfile`, or `Dockerfile.vinext-node`) — i.e. it `COPY`s host-built
+ * artifacts rather than rebuilding the app inside the image (#1283). Both
+ * templates are staged LITERALLY (`stageLiteralTemplate` throws on an
+ * unsubstituted `{{ }}`, see above), so an exact match is a real invariant,
+ * not a heuristic.
+ *
+ * Used to SCOPE the post-build image lock-step check
+ * (`verifyBuiltImageLockstep`) to Dockerfiles that might actually need it: the
+ * host build already had `ASSET_PREFIX`/`NEXT_DEPLOYMENT_ID` in its env before
+ * either template's build step ran (a host `next build`/`vite build`) or its
+ * artifacts were compiled/copied, so there is nothing for that check to catch
+ * on an unmodified template — paying its cost (a docker extract) on every
+ * such deploy would be pure overhead. ANY deviation from either template byte
+ * — a user's own Dockerfile, or an edited copy — returns `false`: the
+ * conservative default is "might rebuild in-image, might need the check", not
+ * "looks close enough to skip it".
+ *
+ * Never throws: a Dockerfile that cannot be read (or a missing/relocated
+ * template — this only runs from an installed `@getknext/core`, so the
+ * template ships beside this code) is NOT "known good" either.
+ */
+export function isKnownGoodTemplateDockerfile(dockerfilePath: string): boolean {
+    let userContent: string;
+    try {
+        userContent = readFileSync(dockerfilePath, "utf-8");
+    } catch {
+        return false;
+    }
+    const templateDir = join(packageRoot(), "templates", "app");
+    const candidates = [
+        join(templateDir, "Dockerfile.hbs"),
+        join(templateDir, `${VINEXT_NODE_DOCKERFILE_NAME}.hbs`),
+    ];
+    return candidates.some((tpl) => {
+        try {
+            return readFileSync(tpl, "utf-8") === userContent;
+        } catch {
+            return false;
+        }
+    });
+}
+
+/**
  * Select the runtime image for a build.
  *
  * vinext (the ADR-0048 default — an absent `build` means vinext) uses the
@@ -230,6 +275,32 @@ export function dockerBuildxArgs(opts: {
     healthCheckPath?: string;
     /** See `RuntimeImageSelection.bakesCompileCache`. Gates the build-arg above. */
     bakesCompileCache?: boolean;
+    /**
+     * This deploy's build id (`NEXT_DEPLOYMENT_ID`), threaded as
+     * `--build-arg NEXT_DEPLOYMENT_ID` (#1283). ONLY for an `app-dockerfile`
+     * selection (`opts.target` absent) — a `standalone` build's Dockerfile
+     * `COPY`s the HOST-built `.next/standalone`, which already had the env
+     * var when `next build` ran, so passing it again would be a no-op at
+     * best and a footgun (a Dockerfile that happens to read the arg) at
+     * worst. An `app-dockerfile` recipe (the scaffolded vinext `Dockerfile`,
+     * `Dockerfile.vinext-node`, or a user's own in-image-build Dockerfile)
+     * runs `next build`/nitro's build INSIDE the image, where the host's
+     * `process.env.NEXT_DEPLOYMENT_ID` never reaches — without this, the
+     * image's static namespace and `BUILD_ID` diverge from the deploy tag,
+     * breaking ADR-0011's build-id lock-step (skew protection, asset GC).
+     * Ignored unless the Dockerfile declares `ARG NEXT_DEPLOYMENT_ID` and
+     * exports it into its build step's env — `docker buildx` does not fail
+     * on an unused build-arg, it warns.
+     */
+    buildId?: string;
+    /**
+     * This deploy's resolved `ASSET_PREFIX` (storage mode only — absent in
+     * no-storage mode, same as the host build never setting the env var),
+     * threaded as `--build-arg ASSET_PREFIX` (#1283). Same `app-dockerfile`-
+     * only scope and the same "ignored unless the Dockerfile declares and
+     * uses the ARG" caveat as {@link buildId} above.
+     */
+    assetPrefix?: string;
 }): string[] {
     const argv = [
         "docker",
@@ -248,6 +319,17 @@ export function dockerBuildxArgs(opts: {
             "--build-arg",
             `KNEXT_HEALTH_CHECK_PATH=${opts.healthCheckPath}`,
         );
+    }
+    // #1283: in-image builds get neither var from the host env — pass them
+    // explicitly. `standalone` recipes never need this (see the doc comments
+    // on `buildId`/`assetPrefix` above); scope to `app-dockerfile` (no target).
+    if (!opts.target) {
+        if (opts.buildId) {
+            argv.push("--build-arg", `NEXT_DEPLOYMENT_ID=${opts.buildId}`);
+        }
+        if (opts.assetPrefix) {
+            argv.push("--build-arg", `ASSET_PREFIX=${opts.assetPrefix}`);
+        }
     }
     argv.push(
         "-t",

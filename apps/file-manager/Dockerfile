@@ -46,6 +46,19 @@ RUN bun run --filter "@getknext/core" build
 
 WORKDIR /repo/apps/file-manager
 
+# This build runs INSIDE the image, so it never sees `kn-next deploy`'s HOST
+# process env — `NEXT_DEPLOYMENT_ID` (build-id/skew-protection lock-step,
+# ADR-0011) and `ASSET_PREFIX` (storage-mode asset URLs) must be threaded in
+# explicitly as build-args. `kn-next deploy`/`preview` pass both automatically
+# for any Dockerfile that rebuilds in-image (the `app-dockerfile` shape,
+# `dockerBuildxArgs` in `runtime-image.ts`); a manual `docker build` must pass
+# them too, or the served HTML references image-local relative assets and the
+# uploaded bucket objects go unreferenced.
+ARG NEXT_DEPLOYMENT_ID
+ARG ASSET_PREFIX
+ENV NEXT_DEPLOYMENT_ID=${NEXT_DEPLOYMENT_ID}
+ENV ASSET_PREFIX=${ASSET_PREFIX}
+
 # vinext -> nitro bun-preset .output/server/index.mjs
 RUN ./node_modules/.bin/vite build
 

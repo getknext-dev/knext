@@ -29,9 +29,11 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { packageRoot } from "../cli/create";
 import {
     dockerBuildxArgs,
     dockerignoreExcludes,
+    isKnownGoodTemplateDockerfile,
     type RuntimeImageConfig,
     runtimeStandaloneTemplateDir,
     STANDALONE_DOCKERFILE_NAME,
@@ -311,6 +313,73 @@ describe("dockerBuildxArgs — the buildx argv the CLI runs", () => {
         });
         expect(argv).not.toContain("--build-arg");
     });
+
+    // #1283: app-dockerfile (in-image-build) recipes get neither ASSET_PREFIX
+    // nor NEXT_DEPLOYMENT_ID from the host env — pass them as build-args so
+    // the Dockerfile's own `next build`/nitro build can see them.
+    describe("#1283 — ASSET_PREFIX / NEXT_DEPLOYMENT_ID build-args", () => {
+        it("app-dockerfile (no --target): passes both as --build-arg", () => {
+            const argv = dockerBuildxArgs({
+                ...base,
+                dockerfile: "/app/Dockerfile",
+                buildId: "deploytag-7",
+                assetPrefix: "https://cdn.example.com/my-app",
+            });
+            expect(argv).toContain("--build-arg");
+            expect(argv).toContain("NEXT_DEPLOYMENT_ID=deploytag-7");
+            expect(argv).toContain(
+                "ASSET_PREFIX=https://cdn.example.com/my-app",
+            );
+        });
+
+        it("app-dockerfile with no storage configured: passes buildId but NOT assetPrefix", () => {
+            const argv = dockerBuildxArgs({
+                ...base,
+                dockerfile: "/app/Dockerfile",
+                buildId: "deploytag-7",
+            });
+            expect(argv).toContain("NEXT_DEPLOYMENT_ID=deploytag-7");
+            expect(argv.some((a) => a.startsWith("ASSET_PREFIX="))).toBe(false);
+        });
+
+        it("standalone (--target present): NEITHER build-arg is passed — the host build already set both before `next build`", () => {
+            const argv = dockerBuildxArgs({
+                ...base,
+                dockerfile: "/app/Dockerfile.standalone",
+                target: "standalone-node",
+                buildId: "deploytag-7",
+                assetPrefix: "https://cdn.example.com/my-app",
+            });
+            expect(argv.some((a) => a.startsWith("NEXT_DEPLOYMENT_ID="))).toBe(
+                false,
+            );
+            expect(argv.some((a) => a.startsWith("ASSET_PREFIX="))).toBe(false);
+        });
+
+        it("Dockerfile.vinext-node (app-dockerfile, bakesCompileCache) ALSO gets both build-args, alongside KNEXT_HEALTH_CHECK_PATH", () => {
+            const argv = dockerBuildxArgs({
+                ...base,
+                dockerfile: "/app/Dockerfile.vinext-node",
+                bakesCompileCache: true,
+                healthCheckPath: "/healthz",
+                buildId: "deploytag-7",
+                assetPrefix: "https://cdn.example.com/my-app",
+            });
+            expect(argv).toContain("KNEXT_HEALTH_CHECK_PATH=/healthz");
+            expect(argv).toContain("NEXT_DEPLOYMENT_ID=deploytag-7");
+            expect(argv).toContain(
+                "ASSET_PREFIX=https://cdn.example.com/my-app",
+            );
+        });
+
+        it("neither buildId nor assetPrefix supplied -> no new build-args (byte-identical to pre-#1283 argv)", () => {
+            const argv = dockerBuildxArgs({
+                ...base,
+                dockerfile: "/app/Dockerfile",
+            });
+            expect(argv).not.toContain("--build-arg");
+        });
+    });
 });
 
 describe("stageStandaloneBuildContext — stages a BOOTABLE standalone build context", () => {
@@ -541,5 +610,64 @@ describe("dockerignoreExcludes — the evaluator the staging guard relies on", (
         const content = ".env.*\n";
         expect(dockerignoreExcludes(content, ".env.local")).toBe(true);
         expect(dockerignoreExcludes(content, ".environment")).toBe(false);
+    });
+});
+
+describe("isKnownGoodTemplateDockerfile — scopes verifyBuiltImageLockstep to Dockerfiles that might rebuild in-image (#1283 round 2)", () => {
+    const templateDir = join(packageRoot(), "templates", "app");
+
+    it("the UNMODIFIED scaffolded vinext Dockerfile is known-good (COPIES host artifacts)", () => {
+        const ctx = tmp();
+        const dockerfile = join(ctx, "Dockerfile");
+        writeFileSync(
+            dockerfile,
+            readFileSync(join(templateDir, "Dockerfile.hbs")),
+        );
+        expect(isKnownGoodTemplateDockerfile(dockerfile)).toBe(true);
+    });
+
+    it("the UNMODIFIED Dockerfile.vinext-node template is known-good", () => {
+        const ctx = tmp();
+        const dockerfile = join(ctx, "Dockerfile.vinext-node");
+        writeFileSync(
+            dockerfile,
+            readFileSync(
+                join(templateDir, `${VINEXT_NODE_DOCKERFILE_NAME}.hbs`),
+            ),
+        );
+        expect(isKnownGoodTemplateDockerfile(dockerfile)).toBe(true);
+    });
+
+    it("apps/file-manager/Dockerfile (rebuilds in-image) is NOT known-good", () => {
+        // Anchored on the real file — this is precisely the Dockerfile the bug
+        // was found on, and it must never silently start skipping the guard.
+        const realFileManagerDockerfile = join(
+            packageRoot(),
+            "..",
+            "..",
+            "apps",
+            "file-manager",
+            "Dockerfile",
+        );
+        expect(isKnownGoodTemplateDockerfile(realFileManagerDockerfile)).toBe(
+            false,
+        );
+    });
+
+    it("a single-byte edit of the template is NOT known-good — conservative, not fuzzy-matched", () => {
+        const ctx = tmp();
+        const dockerfile = join(ctx, "Dockerfile");
+        const template = readFileSync(
+            join(templateDir, "Dockerfile.hbs"),
+            "utf8",
+        );
+        writeFileSync(dockerfile, `${template}\n# a user comment\n`);
+        expect(isKnownGoodTemplateDockerfile(dockerfile)).toBe(false);
+    });
+
+    it("a nonexistent Dockerfile is NOT known-good (never throws)", () => {
+        expect(
+            isKnownGoodTemplateDockerfile(join(tmp(), "does-not-exist")),
+        ).toBe(false);
     });
 });

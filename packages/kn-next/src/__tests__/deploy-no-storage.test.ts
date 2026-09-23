@@ -65,6 +65,7 @@ const verifyVinextStaticPrefix = mock<AnyFn>(() => ({
     reason: "no-static-root",
     siblings: [],
 }));
+const verifyBuiltImageLockstep = mock<AnyFn>(() => ({ ok: true }));
 const __knextReal1 = { ...(await import("../utils/asset-upload")) };
 mock.module("../utils/asset-upload", async () => {
     const actual = __knextReal1;
@@ -83,6 +84,11 @@ mock.module("../utils/asset-upload", async () => {
         // said yes; the storage-backed cases opt in explicitly below.
         verifyVinextStaticPrefix: (...a: unknown[]) =>
             verifyVinextStaticPrefix(...a),
+        // #1283: the post-build image lock-step. Defaults to ok (no-storage
+        // mode never reaches it; storage-backed cases below opt in the same
+        // way they opt verifyVinextStaticPrefix into ok).
+        verifyBuiltImageLockstep: (...a: unknown[]) =>
+            verifyBuiltImageLockstep(...a),
     };
 });
 
@@ -220,6 +226,7 @@ beforeEach(() => {
         reason: "no-static-root",
         siblings: [],
     });
+    verifyBuiltImageLockstep.mockReturnValue({ ok: true });
     delete process.env.ASSET_PREFIX;
 });
 
@@ -322,6 +329,8 @@ describe("deploy WITH storage — unchanged (regression pins)", () => {
         // tag. The opt-in is per-describe, so the no-storage cases above can
         // never inherit it.
         verifyVinextStaticPrefix.mockReturnValue({ ok: true });
+
+        verifyBuiltImageLockstep.mockReturnValue({ ok: true });
     });
 
     it("uploads, sets ASSET_PREFIX, runs the retention GC, prints no mode notice", async () => {

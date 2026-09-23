@@ -88,6 +88,7 @@ const reclaimBuildPrefix = mock<AnyFn>();
 // marker write asks). Stubbed so the branches are drivable without a real
 // `.output` tree.
 const verifyVinextStaticPrefix = mock<AnyFn>(() => ({ ok: true }));
+const verifyBuiltImageLockstep = mock<AnyFn>(() => ({ ok: true }));
 
 const __knextReal1 = { ...(await import("../utils/asset-upload")) };
 mock.module("../utils/asset-upload", () => ({
@@ -98,6 +99,8 @@ mock.module("../utils/asset-upload", () => ({
     reclaimBuildPrefix: (...a: unknown[]) => reclaimBuildPrefix(...a),
     verifyVinextStaticPrefix: (...a: unknown[]) =>
         verifyVinextStaticPrefix(...a),
+    verifyBuiltImageLockstep: (...a: unknown[]) =>
+        verifyBuiltImageLockstep(...a),
 }));
 
 const renderNextAppCR = mock<AnyFn>(() => "kind: NextApp\n");
@@ -111,6 +114,12 @@ mock.module("../cli/cr-builder", () => ({
     resolveDigest: (...a: unknown[]) => resolveDigest(...a),
     validateCRImageRef: (...a: unknown[]) => validateCRImageRef(...a),
 }));
+
+// #1283 round 2: whether `selection.dockerfile` is a byte-identical,
+// unmodified shipped template — gates the post-build image-lockstep guard.
+// Defaults to `false` (not known-good) so the guard stays reachable/testable
+// by default; individual tests override it to prove the SKIP branch.
+const isKnownGoodTemplateDockerfile = mock<AnyFn>(() => false);
 
 // ADR-0055 runtime-image seam: `deploy` selects the runtime image and, for the
 // standalone shape, STAGES it (writes Dockerfile.standalone + entry + ignore into
@@ -151,6 +160,13 @@ mock.module("../cli/runtime-image", () => ({
         o.taggedRef,
         o.buildContext,
     ],
+    // #1283 round 2: NOT known-good by default — this suite's `Dockerfile`
+    // paths are fake (`${cwd}/Dockerfile`), so the real function would read
+    // nothing there anyway; defaulting to `false` keeps the image-lockstep
+    // guard REACHABLE (and thus verifyBuiltImageLockstep-mockable) exactly
+    // where it already was before this scoping landed.
+    isKnownGoodTemplateDockerfile: (...a: unknown[]) =>
+        isKnownGoodTemplateDockerfile(...a),
 }));
 
 const runAssetGC = mock<AnyFn>(() => ({ pruned: true }));
@@ -319,6 +335,8 @@ beforeEach(() => {
     readFileSyncMock.mockImplementation(pkgOr("deploytag"));
     // ...and on the vinext leg, the built prefix — default: it is there.
     verifyVinextStaticPrefix.mockReturnValue({ ok: true });
+    verifyBuiltImageLockstep.mockReturnValue({ ok: true });
+    isKnownGoodTemplateDockerfile.mockReturnValue(false);
 });
 
 afterEach(() => {
@@ -417,6 +435,7 @@ describe("deploy() skew guard — vinext leg (T2a)", () => {
     it("PROCEEDS to apply when the built prefix IS the deploy tag", async () => {
         setArgv(["deploy", "--tag", "deploytag"]);
         verifyVinextStaticPrefix.mockReturnValue({ ok: true });
+        verifyBuiltImageLockstep.mockReturnValue({ ok: true });
 
         const deploy = await importDeploy();
         await expect(deploy()).resolves.toBeUndefined();
