@@ -234,19 +234,22 @@ beforeAll(async () => {
         recursive: true,
         verbatimSymlinks: true,
     });
+    // No PORT env: Next's generated server.js (and so the exec compiled from it)
+    // listens on its own container-internal default, which the `--publish
+    // <freePort>:3000` mapping below exposes on an OS-assigned host port.
     writeFileSync(
         join(ctx, "Dockerfile"),
         [
             `FROM ${shippedBase("standalone-bun")} AS exec`,
             "WORKDIR /app",
             "COPY standalone/ /app/",
-            "ENV NODE_ENV=production PORT=3000 HOSTNAME=0.0.0.0",
+            "ENV NODE_ENV=production HOSTNAME=0.0.0.0",
             'ENTRYPOINT ["/app/knext-standalone-exec"]',
             "",
             `FROM ${shippedBase("standalone-node")} AS node`,
             "WORKDIR /app",
             "COPY standalone/ /app/",
-            "ENV NODE_ENV=production PORT=3000 HOSTNAME=0.0.0.0",
+            "ENV NODE_ENV=production HOSTNAME=0.0.0.0",
             'ENTRYPOINT ["node", "/app/server.js"]',
             "",
         ].join("\n"),
