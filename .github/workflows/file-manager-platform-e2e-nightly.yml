@@ -178,7 +178,7 @@ jobs:
           kubectl -n "$APP_NS" create secret generic fm-e2e-pg --from-literal=password="$PG_PW"
           kubectl -n "$APP_NS" create secret generic fm-e2e-minio --from-literal=access="$MINIO_KEY" --from-literal=secret="$MINIO_SECRET"
           kubectl -n "$APP_NS" create secret generic fm-e2e-db \
-            --from-literal=DATABASE_URL="postgres://postgres:${PG_PW}@postgres.${APP_NS}.svc.cluster.local:5432/filemanager"
+            --from-literal=DATABASE_URL="postgres://postgres:${PG_PW}@postgres.${APP_NS}.svc.cluster.local.:5432/filemanager"
           kubectl -n "$APP_NS" create secret generic file-manager-credentials \
             --from-literal=CACHE_INVALIDATE_TOKEN="$CACHE_TOKEN" \
             --from-literal=OBSERVABILITY_TOKEN="$OBS_TOKEN" \

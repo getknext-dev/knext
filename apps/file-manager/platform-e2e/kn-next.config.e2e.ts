@@ -23,7 +23,7 @@ const config: KnativeNextConfig = {
 
   cache: {
     provider: 'redis',
-    url: process.env.KN_REDIS_URL || 'redis://redis.fm-e2e.svc.cluster.local:6379',
+    url: process.env.KN_REDIS_URL || 'redis://redis.fm-e2e.svc.cluster.local.:6379',
     keyPrefix: 'file-manager',
   },
 
