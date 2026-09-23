@@ -525,6 +525,39 @@ if [ "${RUNTIME}" = "bun" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" != "1" ]; the
   fi
 fi
 
+# ── 3d. bake the V8 compile cache (node runtime only) ─────────────────────────
+# Bytecode caching is mandatory in every runtime×builder cell, and a cell may
+# only credential on nights where it is proven LIVE at runtime — for node, that
+# the booted server's V8 ACCEPTED cached code. A first boot against an empty
+# cache accepts nothing by definition, so the harness bakes one first, the
+# analog of the shipped images' docker-build bake. The bake driver loads Next's
+# FRAMEWORK modules only — never server.js, which would start the fixture (its
+# instrumentation, and possibly its ISR/data cache) outside the test's view.
+# `set -e` makes a failed bake (cache refused, required module missing) fail
+# the deploy: a node deploy never silently boots uncached. Same uid as the
+# boot below — Node keys the cache subdirectory by uid. Inside APP_DIR so the
+# harness's own fixture teardown removes it.
+NODE_CC_DIR=""
+NODE_CC_DEBUG_LOG=""
+NODE_CC_BAKED=0
+if [ "${RUNTIME}" != "bun" ]; then
+  NODE_CC_DIR="${APP_DIR}/.knext-compile-cache"
+  NODE_CC_DEBUG_LOG="${APP_DIR}/.adapter-compile-cache.log"
+  mkdir -p "${NODE_CC_DIR}"
+  : >"${NODE_CC_DEBUG_LOG}"
+  if [ "${KNEXT_E2E_SKIP_PACK:-0}" = "1" ]; then
+    # Contract-test mode: the fixture's fake `next` has no framework graph to
+    # bake. Skipping is fail-SAFE, never a bypass — an unbaked boot accepts
+    # nothing, so its evidence line grades NOT live. No workflow sets this.
+    log "KNEXT_E2E_SKIP_PACK=1 — compile-cache bake skipped (contract-test mode; this deploy will record NOT-live bytecode evidence)"
+  else
+    log "baking the V8 compile cache for ${SERVER_JS} into ${NODE_CC_DIR}"
+    NODE_COMPILE_CACHE="${NODE_CC_DIR}" NODE_ENV=production \
+      node "${SCRIPT_DIR}/e2e-compile-cache-bake.mjs" "${SERVER_JS}" >&2
+    NODE_CC_BAKED=1
+  fi
+fi
+
 # ── 4. boot the standalone server on a free port ──────────────────────────────
 PORT="$(free_port)"
 BUILD_ID="$(cat "${APP_DIR}/.next/BUILD_ID" 2>/dev/null || echo "unknown")"
@@ -712,6 +745,18 @@ fi
       -w "${CONTAINER_WORKDIR}" \
       "${STANDALONE_BUN_IMAGE}" \
       "./$(basename "${SERVER_BOOT_TARGET}")"
+  elif [ -n "${NODE_CC_DIR}" ]; then
+    # Node: boot WITH the baked cache, and with V8's own compile-cache debug on
+    # — the only signal that says whether cached code was ACCEPTED. Its
+    # `[compile cache] …` lines go to a side log, never the server log: the
+    # server log is next.cliOutput in deploy mode, which tests assert on. Every
+    # other stderr line passes through unchanged. `exec` keeps SERVER_PID the
+    # node process (the port-ownership check depends on it).
+    PORT="${PORT}" HOSTNAME="" NODE_ENV="production" \
+      NEXT_DEPLOYMENT_ID="${DEPLOYMENT_ID}" \
+      NODE_COMPILE_CACHE="${NODE_CC_DIR}" NODE_DEBUG_NATIVE=COMPILE_CACHE \
+      exec "${SERVER_CMD}" "${SERVER_PRELOAD_ARGS[@]}" "${SERVER_BOOT_TARGET}" \
+      2> >(exec awk -v cc="${NODE_CC_DEBUG_LOG}" 'index($0, "[compile cache] ") == 1 { print >> cc; fflush(cc); next } { print; fflush() }')
   else
     PORT="${PORT}" HOSTNAME="" NODE_ENV="production" \
       NEXT_DEPLOYMENT_ID="${DEPLOYMENT_ID}" \
@@ -781,9 +826,15 @@ if [ -n "${STANDALONE_EXEC}" ]; then
   # step, well before boot) — bytecode_verified=true is therefore a fact
   # already proven above, not merely asserted here.
   echo "mode=compiled-exec runtime=${RUNTIME} image=${STANDALONE_BUN_IMAGE} bytecode_verified=true" >>"${BOOT_MODE_LEDGER}"
-else
+elif [ -z "${NODE_CC_DIR}" ]; then
+  # bun booting server.js (the dispatch-only sandbox-fetch-debug lane): a
+  # non-bytecode boot, recorded as such — scripts/e2e-bytecode-liveness.mjs grades
+  # it NOT live.
   echo "mode=server-js runtime=${RUNTIME} image=- bytecode_verified=-" >>"${BOOT_MODE_LEDGER}"
 fi
+# The node line is appended AFTER readiness (step 6b below): its liveness is a
+# count of what V8 actually accepted while the server booted, which only
+# exists once it has.
 
 # ── 6. readiness: pid-liveness FIRST, TCP-probe second, port-ownership last ──
 # #171 sys-design follow-up (the free_port TOCTOU): free_port() binds :0 and
@@ -901,6 +952,28 @@ elif [ "${OWNS}" = "2" ]; then
 fi
 
 log "deployment ready: build=${BUILD_ID} deployment=${DEPLOYMENT_ID} pid=${SERVER_PID}"
+
+# ── 6b. node bytecode-liveness evidence (the node half of step 5b) ────────────
+# Count what V8 accepted from the baked cache while this server booted, and
+# append it as this deploy's boot-ledger line. The settle loop (≤5s) only
+# covers the tail of boot-time module loading after the port opened; a live
+# deploy exits it on the first pass, and an unbaked one (contract-test mode)
+# cannot become live so it does not wait. This RECORDS, it never fails the
+# deploy — scripts/e2e-bytecode-liveness.mjs grades the line (the shard check fails
+# the job, the credential audit refuses the night).
+if [ -n "${NODE_CC_DIR}" ]; then
+  if [ "${NODE_CC_BAKED}" = "1" ]; then
+    for _ in $(seq 1 20); do
+      if node "${SCRIPT_DIR}/e2e-bytecode-liveness.mjs" --live-node-log "${NODE_CC_DEBUG_LOG}" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 0.25
+    done
+  fi
+  CC_COUNTS="$(node "${SCRIPT_DIR}/e2e-bytecode-liveness.mjs" --count-node-log "${NODE_CC_DEBUG_LOG}")"
+  echo "mode=server-js runtime=${RUNTIME} image=- bytecode_verified=- ${CC_COUNTS}" >>"${BOOT_MODE_LEDGER}"
+  log "bytecode liveness (node V8 compile cache): ${CC_COUNTS}"
+fi
 
 # ── 7. the ONLY stdout line: the deployment URL ───────────────────────────────
 echo "http://localhost:${PORT}"

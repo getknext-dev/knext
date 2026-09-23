@@ -108,6 +108,18 @@
  *      `--scope early-warning` reports the `main` streak instead. It is a
  *      report about `main`, never a credential: its `met` is always false.
  *
+ *   7. BYTECODE CACHING PROVEN LIVE (founder rule, #1221). Bytecode caching
+ *      is mandatory in every runtime×builder cell, and a credential night
+ *      counts only if EVERY shard carries evidence that every deploy's
+ *      caching was live at runtime — bun: the verified compiled exec booted;
+ *      node: V8 accepted the compile cache above a floor
+ *      (scripts/e2e-bytecode-liveness.mjs holds the one definition). Absent
+ *      evidence disqualifies: a ledger from before the rule, or a shard that
+ *      dropped the field, cannot credential. Keyed on the cell's RUNTIME, so a
+ *      lane wired later inherits it. Credential scope only — the early-warning
+ *      report stays comparable across the rule's introduction; its shard jobs
+ *      still go red through the workflow's own liveness check.
+ *
  * USAGE
  *   node scripts/compat-window-audit.mjs --dir <dir-of-ledger-json>
  *   node scripts/compat-window-audit.mjs --fetch --limit 100  # needs `gh`
@@ -119,6 +131,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { isShardBytecodeLive } from './e2e-bytecode-liveness.mjs';
 import { COMPAT_MODES, isRcRef } from './compat-credential-ref.mjs';
 
 /** The v1.0 gate: fourteen consecutive qualifying nights. */
@@ -379,6 +392,20 @@ export function gradeNight(ledger, opts = {}) {
     }
     if (!/^[0-9a-f]{40}$/.test(String(ledger?.knextSha ?? ''))) {
       disqualifiers.push('no-knext-sha');
+    }
+    // Rule 7: bytecode caching proven LIVE on every shard, for the CELL's
+    // runtime. Keyed on the runtime (not the lane or builder) so a cell wired
+    // later inherits it. A lane that is not a credential cell has no runtime to
+    // prove against, and fails closed like missing evidence does.
+    const cellRuntime = CREDENTIAL_CELLS.find((c) => c.lane === lane)?.runtime ?? null;
+    for (const shard of shards) {
+      if (shard?.status === 'missing') continue; // already disqualified above
+      const verdict = isShardBytecodeLive(shard?.bytecode, cellRuntime);
+      if (!verdict.live) {
+        disqualifiers.push(
+          `bytecode-not-live: shard ${shard?.shard ?? '(unnamed shard)'} — ${verdict.reason}`,
+        );
+      }
     }
   }
 

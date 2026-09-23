@@ -53,6 +53,14 @@ fs.mkdirSync(path.join(nextDir, 'static'), { recursive: true });
 fs.mkdirSync(standalone, { recursive: true });
 fs.writeFileSync(path.join(nextDir, 'BUILD_ID'), 'fixture-build-' + Date.now());
 fs.writeFileSync(path.join(standalone, 'server.js'), ${JSON.stringify(FAKE_SERVER_JS)});
+// A real standalone build traces \`next\` into the tree; the node-lane
+// compile-cache bake requires the two modules server.js loads, so the fake
+// traces stubs of them too.
+const tracedNext = path.join(standalone, 'node_modules', 'next');
+fs.mkdirSync(path.join(tracedNext, 'dist', 'server', 'lib'), { recursive: true });
+fs.writeFileSync(path.join(tracedNext, 'package.json'), '{"name":"next","main":"index.js"}');
+fs.writeFileSync(path.join(tracedNext, 'index.js'), 'module.exports = {};');
+fs.writeFileSync(path.join(tracedNext, 'dist', 'server', 'lib', 'start-server.js'), 'module.exports = {};');
 console.log('[fake-next] build complete (fixture)');
 `;
 }

@@ -58,12 +58,16 @@ let seq = 40_000_000_000;
 function night(over: Record<string, unknown> = {}) {
   seq += 1;
   const lane = (over.lane as string) ?? 'node';
+  // Every shard proves bytecode caching LIVE for the cell's runtime — the
+  // shape a credential night must carry (tests/bytecode-liveness.test.ts).
+  const runtime = lane.startsWith('bun') ? 'bun' : 'node';
   const shards: ShardRow[] = Array.from({ length: 16 }, (_, i) => ({
     shard: `${i + 1}/16`,
     passed: 49,
     failed: 0,
     notRun: 0,
     runtime: lane,
+    bytecode: { runtime, deploys: 3, live: 3, notLive: 0, reasons: [] },
   }));
   return {
     runId: String(seq),

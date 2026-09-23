@@ -50,6 +50,7 @@
  */
 
 import { readFileSync, writeFileSync } from 'node:fs';
+import { summarizeBootLedger } from './e2e-bytecode-liveness.mjs';
 
 // The run-tests.js test-FILE key token, shared by every marker/boundary regex so
 // all of them resolve the SAME key universe (pass, fail, group open/close).
@@ -410,6 +411,20 @@ function main() {
     expectedTotal:
       args['expected-total'] !== undefined ? Number(args['expected-total']) : undefined,
   });
+  // Bytecode caching must be proven LIVE (scripts/e2e-bytecode-liveness.mjs): fold
+  // the deploys' boot-ledger lines into the shard's evidence block. It rides
+  // unchanged into the run ledger, where the credential audit grades it. With
+  // no --boot-ledger the key is ABSENT, and the audit reads absence as "not
+  // live" (fail closed) — it is never defaulted to a pass here.
+  if (args['boot-ledger'] !== undefined) {
+    let bootLedger = '';
+    try {
+      bootLedger = readFileSync(args['boot-ledger'], 'utf8');
+    } catch {
+      // A missing ledger is zero deploys — summarized as such, i.e. not live.
+    }
+    summary.bytecode = summarizeBootLedger(bootLedger, summary.runtime);
+  }
   writeFileSync(out, `${JSON.stringify(summary, null, 2)}\n`);
   console.log(`[e2e-summary] wrote ${out}: ${JSON.stringify(summary)}`);
 }
