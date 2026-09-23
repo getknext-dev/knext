@@ -95,6 +95,16 @@ describe("#B2 spec.build on the emitted CR", () => {
         );
     });
 
+    it("emits runtime for the standalone (webpack) shape too — same shape as turbopack (#1219)", () => {
+        const spec = specOf(baseConfig({ build: "webpack", runtime: "bun" }));
+        expect(spec.runtime).toBe("bun");
+        expect(spec.build).toBe("webpack");
+    });
+
+    it("carries an explicit webpack through, round-tripping the user's choice (#1219)", () => {
+        expect(specOf(baseConfig({ build: "webpack" })).build).toBe("webpack");
+    });
+
     it("carries vinext through when set, without inventing a runtime", () => {
         const spec = specOf(baseConfig({ build: "vinext" }));
 

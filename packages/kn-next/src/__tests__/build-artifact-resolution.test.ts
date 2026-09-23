@@ -57,16 +57,28 @@ describe("#B3 resolveBuildArtifact", () => {
         );
     });
 
+    it("RESOLVES webpack to the standalone shape — same as turbopack (#1219)", () => {
+        // webpack (`next build --webpack`) emits the identical
+        // `.next/standalone` shape as turbopack.
+        const r = resolveBuildArtifact(cfg({ build: "webpack" }), "/app");
+
+        expect(r.builder.id).toBe("webpack");
+        expect(r.builder.available).toBe(true);
+        expect(r.artifact.shape).toBe("next-standalone");
+        expect(r.artifact.entry).toBe(".next/standalone/server.js");
+    });
+
     it("throws for a builder the contract does not know", () => {
         // Reached only if validation is bypassed, but it must not silently
         // fall back to turbopack — that would build the wrong thing and say
-        // nothing, which is the #857 failure shape.
+        // nothing, which is the #857 failure shape. `webpack` is now KNOWN
+        // (#1219), so `rollup` stands in for "unrecognised" instead.
         expect(() =>
             resolveBuildArtifact(
-                cfg({ build: "webpack" as unknown as "vinext" }),
+                cfg({ build: "rollup" as unknown as "vinext" }),
                 "/app",
             ),
-        ).toThrow(/webpack/);
+        ).toThrow(/rollup/);
     });
 });
 
@@ -88,5 +100,14 @@ describe("#B3 standaloneStepsApply", () => {
         expect(
             standaloneStepsApply(resolveBuildArtifact(cfg(), "/app").artifact),
         ).toBe(false);
+    });
+
+    it("is true for webpack too — same shape as turbopack (#1219)", () => {
+        expect(
+            standaloneStepsApply(
+                resolveBuildArtifact(cfg({ build: "webpack" }), "/app")
+                    .artifact,
+            ),
+        ).toBe(true);
     });
 });

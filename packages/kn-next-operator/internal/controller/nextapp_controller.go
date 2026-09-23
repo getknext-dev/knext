@@ -1012,8 +1012,10 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 	//     CrashLoop, because that file does not exist in a single-exec image.
 	//     Runtime is irrelevant to startup for this shape (bun is baked into
 	//     the binary).
-	//   - absent / "turbopack": the Next standalone tree. Runtime "bun" execs
-	//     `bun run server.js`; "node"/absent uses the image default.
+	//   - absent / "turbopack" / "webpack": the Next standalone tree (#1219:
+	//     "webpack" is a second spelling of the same shape, not a new branch —
+	//     the check below is `!= "vinext"`, not `== "turbopack"`). Runtime
+	//     "bun" execs `bun run server.js`; "node"/absent uses the image default.
 	var containerCommand []string
 	if nextApp.Spec.Build != "vinext" && nextApp.Spec.Runtime == "bun" {
 		containerCommand = []string{"bun", "run", "server.js"}

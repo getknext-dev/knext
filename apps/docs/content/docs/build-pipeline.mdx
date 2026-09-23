@@ -15,7 +15,7 @@ see [the adapter and the compiled build](/docs/official-adapter).
 
 ## The build target
 
-knext offers **two** build targets, and you choose between them with the `build` field.
+knext offers **three** build targets, and you choose between them with the `build` field.
 
 The **default** target compiles your app with [**vinext**](https://vinext.dev), an open-source,
 Vite-based implementation of the Next.js framework, into a single executable. You do not have to
@@ -44,22 +44,38 @@ const config: KnativeNextConfig = {
 };
 ```
 
-This target has a prerequisite in your project, not just in the config: `kn-next build` runs your
-app's own build script, so that script must run `next build` with `output: 'standalone'` in
-`next.config.ts` — otherwise there is no standalone server for the image to copy. Apps created by
-`kn-next create` are vinext apps whose build script runs `vite build` and whose `next.config.ts`
-deliberately omits `output`, so switching such an app to this target means changing both first.
+The third target is the same standalone output, produced with webpack instead of Turbopack as the
+bundler. Select it with `build: 'webpack'`; everything else about it — the entry, the supervisor,
+the `runtime` choice, the bytecode caching — is identical to the `turbopack` target, because both
+are `next build` with a different bundler flag, and the standalone output they produce is the same
+shape:
 
-If you select `build: 'turbopack'` and your build script still doesn't produce
-`.next/standalone` (for example, the build script wasn't updated), `kn-next build` fails
+```ts title="kn-next.config.ts"
+const config: KnativeNextConfig = {
+  name: 'acme',
+  registry: 'registry.example.com/acme',
+  build: 'webpack',     // next build --webpack -> .next/standalone, run by a supervisor
+  runtime: 'bun',       // or 'node' (the default runtime for this target)
+};
+```
+
+Both the `turbopack` and `webpack` targets have a prerequisite in your project, not just in the
+config: `kn-next build` runs your app's own build script, so that script must run `next build`
+(with `--webpack` for the webpack target) and `output: 'standalone'` set in `next.config.ts` —
+otherwise there is no standalone server for the image to copy. Apps created by `kn-next create` are
+vinext apps whose build script runs `vite build` and whose `next.config.ts` deliberately omits
+`output`, so switching such an app to either of these targets means changing both first.
+
+If you select `build: 'turbopack'` or `build: 'webpack'` and your build script still doesn't
+produce `.next/standalone` (for example, the build script wasn't updated), `kn-next build` fails
 immediately with an actionable error telling you to set `output: 'standalone'` in
 `next.config.ts` and make sure your build script runs `next build`. This is a hard failure on
 purpose: without it, the first sign of the missing artifact used to be an opaque error deep
 inside the Docker image build at deploy time.
 
 `kn-next` stages and builds the matching standalone runtime image for you; `runtime` has no effect
-on the vinext single-executable target, where the runtime is compiled into the binary. On this
-target it decides how the server is packaged:
+on the vinext single-executable target, where the runtime is compiled into the binary. On the
+standalone targets (`turbopack` and `webpack`, identically) it decides how the server is packaged:
 
 - **`runtime: 'bun'`** — `kn-next build` compiles the standalone `server.js` into a Bun single
   executable with bytecode, verifies the bytecode is actually there (the build fails otherwise), and
