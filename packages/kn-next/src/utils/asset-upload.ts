@@ -789,11 +789,16 @@ export type VinextPrefixCheck =
           siblings: string[];
       };
 
-export function verifyVinextStaticPrefix(
-    cwd: string,
+/**
+ * The shared question both {@link verifyVinextStaticPrefix} (the HOST
+ * `.output`) and {@link verifyBuiltImageLockstep} (the pushed IMAGE, #1283)
+ * ask: does `<staticDir>/<expectedId>/` exist? Extracted so the two checks
+ * can never drift into asking it two different ways.
+ */
+function checkStaticPrefixDir(
+    staticDir: string,
     expectedId: string,
 ): VinextPrefixCheck {
-    const staticDir = join(cwd, ".output", "public", "_next", "static");
     if (!existsSync(staticDir)) {
         return { ok: false, reason: "no-static-root", siblings: [] };
     }
@@ -805,6 +810,121 @@ export function verifyVinextStaticPrefix(
     // `siblings.includes("")` is false anyway; this is the explicit form.
     if (expectedId && siblings.includes(expectedId)) return { ok: true };
     return { ok: false, reason: "prefix-missing", siblings };
+}
+
+export function verifyVinextStaticPrefix(
+    cwd: string,
+    expectedId: string,
+): VinextPrefixCheck {
+    const staticDir = join(cwd, ".output", "public", "_next", "static");
+    return checkStaticPrefixDir(staticDir, expectedId);
+}
+
+/**
+ * True when at least one file under `dir` contains `needle` as a literal
+ * substring. Used to prove `ASSET_PREFIX` actually reached the in-image build
+ * (#1283) rather than trusting a Dockerfile's `ARG` declaration, which can be
+ * present and unused (declared but never exported into the build step's env,
+ * set in the wrong stage, or overwritten). Recurses depth-first; skips
+ * anything it cannot read as UTF-8 (binary assets — fonts, images — cannot
+ * embed a URL string usefully anyway, and a read error there must not abort
+ * the scan).
+ */
+function treeContainsLiteral(dir: string, needle: string): boolean {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) {
+            if (treeContainsLiteral(full, needle)) return true;
+            continue;
+        }
+        try {
+            if (readFileSync(full, "utf-8").includes(needle)) return true;
+        } catch {
+            // Unreadable / non-UTF-8 file — not a match, not a failure.
+        }
+    }
+    return false;
+}
+
+export type ImageLockstepCheck =
+    | { ok: true }
+    | {
+          ok: false;
+          reason:
+              | "no-static-root"
+              | "prefix-missing"
+              | "image-extract-failed"
+              | "asset-prefix-not-embedded";
+          siblings: string[];
+      };
+
+/**
+ * Proves the ADR-0011 build-id/asset-prefix lock-step against the ACTUAL
+ * pushed image, not the Dockerfile's source text (#1283). A text-only check
+ * ("does the Dockerfile declare `ARG ASSET_PREFIX`?") is satisfiable while
+ * still wrong — the ARG can be declared and never passed into the build step,
+ * set in the wrong stage, or clobbered — so this extracts the image's own
+ * `/app/.output/public` (the convention every knext `app-dockerfile` recipe
+ * ships to — the scaffolded vinext `Dockerfile`, `Dockerfile.vinext-node`, and
+ * `apps/file-manager/Dockerfile` alike) via `docker create` + `docker cp`,
+ * exactly the way {@link verifyVinextStaticPrefix} checks the host build:
+ *
+ *   1. the static namespace `_next/static/<expectedId>/` must exist — proves
+ *      `NEXT_DEPLOYMENT_ID` reached the in-image `next build`/nitro build;
+ *   2. when `assetPrefix` is configured (storage mode), at least one built
+ *      file must literally contain it — proves `ASSET_PREFIX` was baked in,
+ *      not silently dropped.
+ *
+ * Runs AFTER the `docker buildx build --push`, BEFORE the CR apply — a failure
+ * here aborts the deploy exactly where `verifyVinextStaticPrefix` aborts it for
+ * the host leg, never after the cluster write (ADR-0001).
+ */
+export function verifyBuiltImageLockstep(opts: {
+    taggedRef: string;
+    expectedId: string;
+    assetPrefix?: string;
+}): ImageLockstepCheck {
+    const workDir = mkdtempSync(join(tmpdir(), "knext-image-lockstep-"));
+    let containerId: string | undefined;
+    try {
+        try {
+            containerId = runCapture(["docker", "create", opts.taggedRef]);
+        } catch {
+            return { ok: false, reason: "image-extract-failed", siblings: [] };
+        }
+        const publicDir = join(workDir, "public");
+        try {
+            runQuiet([
+                "docker",
+                "cp",
+                `${containerId}:/app/.output/public`,
+                publicDir,
+            ]);
+        } catch {
+            return { ok: false, reason: "image-extract-failed", siblings: [] };
+        }
+        const staticCheck = checkStaticPrefixDir(
+            join(publicDir, "_next", "static"),
+            opts.expectedId,
+        );
+        if (!staticCheck.ok) return staticCheck;
+        if (
+            opts.assetPrefix &&
+            !treeContainsLiteral(publicDir, opts.assetPrefix)
+        ) {
+            return {
+                ok: false,
+                reason: "asset-prefix-not-embedded",
+                siblings: [],
+            };
+        }
+        return { ok: true };
+    } finally {
+        if (containerId) {
+            runQuietAllowFail(["docker", "rm", "-f", containerId]);
+        }
+        rmSync(workDir, { recursive: true, force: true });
+    }
 }
 
 /**

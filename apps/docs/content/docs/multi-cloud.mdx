@@ -68,3 +68,35 @@ image, so they can never be cleaned up out from under it.
 Add the `storage` block when static delivery speed matters, or when your traffic holds long-lived
 sessions open across deploys — pick a provider from the table above and redeploy. `kn-next doctor`
 reports which mode your app is in.
+
+## Custom Dockerfiles that rebuild in-image
+
+The scaffolded `Dockerfile` copies your app's already-built output into the image — `next
+build`/`vite build` runs once, on the host, where `kn-next deploy` has already set `ASSET_PREFIX`
+and the deploy's build id in the environment. If you maintain your own `Dockerfile` that instead
+runs the build a second time **inside** the image (for example a monorepo image that does `bun
+install` + `vite build` in a builder stage), that in-image build never sees those two values unless
+you wire them through explicitly:
+
+```dockerfile
+# Declare the ARGs...
+ARG NEXT_DEPLOYMENT_ID
+ARG ASSET_PREFIX
+# ...and export them into the build step's env BEFORE running your build command.
+ENV NEXT_DEPLOYMENT_ID=${NEXT_DEPLOYMENT_ID}
+ENV ASSET_PREFIX=${ASSET_PREFIX}
+
+RUN ./node_modules/.bin/vite build
+```
+
+`kn-next deploy`/`kn-next preview` pass both automatically as `--build-arg`s to any Dockerfile that
+rebuilds in-image — an unused build-arg is silently ignored by Docker, so nothing breaks until you
+add the two lines above. Without them:
+
+- static assets are served from the image at relative paths instead of your configured bucket, so
+  the uploaded objects go unreferenced;
+- the image's build id diverges from the deploy tag, breaking [skew protection](/docs/skew-protection)
+  and the asset-retention cleanup that key off it.
+
+`kn-next deploy` checks the built image for this after every in-image build that uploads assets, and
+fails the deploy with a clear message before touching the cluster if the two are out of lock-step.

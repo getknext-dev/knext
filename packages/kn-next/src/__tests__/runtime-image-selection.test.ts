@@ -311,6 +311,73 @@ describe("dockerBuildxArgs — the buildx argv the CLI runs", () => {
         });
         expect(argv).not.toContain("--build-arg");
     });
+
+    // #1283: app-dockerfile (in-image-build) recipes get neither ASSET_PREFIX
+    // nor NEXT_DEPLOYMENT_ID from the host env — pass them as build-args so
+    // the Dockerfile's own `next build`/nitro build can see them.
+    describe("#1283 — ASSET_PREFIX / NEXT_DEPLOYMENT_ID build-args", () => {
+        it("app-dockerfile (no --target): passes both as --build-arg", () => {
+            const argv = dockerBuildxArgs({
+                ...base,
+                dockerfile: "/app/Dockerfile",
+                buildId: "deploytag-7",
+                assetPrefix: "https://cdn.example.com/my-app",
+            });
+            expect(argv).toContain("--build-arg");
+            expect(argv).toContain("NEXT_DEPLOYMENT_ID=deploytag-7");
+            expect(argv).toContain(
+                "ASSET_PREFIX=https://cdn.example.com/my-app",
+            );
+        });
+
+        it("app-dockerfile with no storage configured: passes buildId but NOT assetPrefix", () => {
+            const argv = dockerBuildxArgs({
+                ...base,
+                dockerfile: "/app/Dockerfile",
+                buildId: "deploytag-7",
+            });
+            expect(argv).toContain("NEXT_DEPLOYMENT_ID=deploytag-7");
+            expect(argv.some((a) => a.startsWith("ASSET_PREFIX="))).toBe(false);
+        });
+
+        it("standalone (--target present): NEITHER build-arg is passed — the host build already set both before `next build`", () => {
+            const argv = dockerBuildxArgs({
+                ...base,
+                dockerfile: "/app/Dockerfile.standalone",
+                target: "standalone-node",
+                buildId: "deploytag-7",
+                assetPrefix: "https://cdn.example.com/my-app",
+            });
+            expect(argv.some((a) => a.startsWith("NEXT_DEPLOYMENT_ID="))).toBe(
+                false,
+            );
+            expect(argv.some((a) => a.startsWith("ASSET_PREFIX="))).toBe(false);
+        });
+
+        it("Dockerfile.vinext-node (app-dockerfile, bakesCompileCache) ALSO gets both build-args, alongside KNEXT_HEALTH_CHECK_PATH", () => {
+            const argv = dockerBuildxArgs({
+                ...base,
+                dockerfile: "/app/Dockerfile.vinext-node",
+                bakesCompileCache: true,
+                healthCheckPath: "/healthz",
+                buildId: "deploytag-7",
+                assetPrefix: "https://cdn.example.com/my-app",
+            });
+            expect(argv).toContain("KNEXT_HEALTH_CHECK_PATH=/healthz");
+            expect(argv).toContain("NEXT_DEPLOYMENT_ID=deploytag-7");
+            expect(argv).toContain(
+                "ASSET_PREFIX=https://cdn.example.com/my-app",
+            );
+        });
+
+        it("neither buildId nor assetPrefix supplied -> no new build-args (byte-identical to pre-#1283 argv)", () => {
+            const argv = dockerBuildxArgs({
+                ...base,
+                dockerfile: "/app/Dockerfile",
+            });
+            expect(argv).not.toContain("--build-arg");
+        });
+    });
 });
 
 describe("stageStandaloneBuildContext — stages a BOOTABLE standalone build context", () => {

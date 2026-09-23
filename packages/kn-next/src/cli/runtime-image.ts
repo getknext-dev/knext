@@ -230,6 +230,32 @@ export function dockerBuildxArgs(opts: {
     healthCheckPath?: string;
     /** See `RuntimeImageSelection.bakesCompileCache`. Gates the build-arg above. */
     bakesCompileCache?: boolean;
+    /**
+     * This deploy's build id (`NEXT_DEPLOYMENT_ID`), threaded as
+     * `--build-arg NEXT_DEPLOYMENT_ID` (#1283). ONLY for an `app-dockerfile`
+     * selection (`opts.target` absent) — a `standalone` build's Dockerfile
+     * `COPY`s the HOST-built `.next/standalone`, which already had the env
+     * var when `next build` ran, so passing it again would be a no-op at
+     * best and a footgun (a Dockerfile that happens to read the arg) at
+     * worst. An `app-dockerfile` recipe (the scaffolded vinext `Dockerfile`,
+     * `Dockerfile.vinext-node`, or a user's own in-image-build Dockerfile)
+     * runs `next build`/nitro's build INSIDE the image, where the host's
+     * `process.env.NEXT_DEPLOYMENT_ID` never reaches — without this, the
+     * image's static namespace and `BUILD_ID` diverge from the deploy tag,
+     * breaking ADR-0011's build-id lock-step (skew protection, asset GC).
+     * Ignored unless the Dockerfile declares `ARG NEXT_DEPLOYMENT_ID` and
+     * exports it into its build step's env — `docker buildx` does not fail
+     * on an unused build-arg, it warns.
+     */
+    buildId?: string;
+    /**
+     * This deploy's resolved `ASSET_PREFIX` (storage mode only — absent in
+     * no-storage mode, same as the host build never setting the env var),
+     * threaded as `--build-arg ASSET_PREFIX` (#1283). Same `app-dockerfile`-
+     * only scope and the same "ignored unless the Dockerfile declares and
+     * uses the ARG" caveat as {@link buildId} above.
+     */
+    assetPrefix?: string;
 }): string[] {
     const argv = [
         "docker",
@@ -248,6 +274,17 @@ export function dockerBuildxArgs(opts: {
             "--build-arg",
             `KNEXT_HEALTH_CHECK_PATH=${opts.healthCheckPath}`,
         );
+    }
+    // #1283: in-image builds get neither var from the host env — pass them
+    // explicitly. `standalone` recipes never need this (see the doc comments
+    // on `buildId`/`assetPrefix` above); scope to `app-dockerfile` (no target).
+    if (!opts.target) {
+        if (opts.buildId) {
+            argv.push("--build-arg", `NEXT_DEPLOYMENT_ID=${opts.buildId}`);
+        }
+        if (opts.assetPrefix) {
+            argv.push("--build-arg", `ASSET_PREFIX=${opts.assetPrefix}`);
+        }
     }
     argv.push(
         "-t",

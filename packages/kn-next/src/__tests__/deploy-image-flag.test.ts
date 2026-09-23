@@ -61,6 +61,7 @@ const uploadAssets = mock<AnyFn>(async () => {});
 const getAssetPrefix = mock<AnyFn>(() => "https://cdn.example.com/_next");
 const reclaimBuildPrefix = mock<AnyFn>();
 const verifyVinextStaticPrefix = mock<AnyFn>(() => ({ ok: true }));
+const verifyBuiltImageLockstep = mock<AnyFn>(() => ({ ok: true }));
 
 const __knextRealAssets = { ...(await import("../utils/asset-upload")) };
 mock.module("../utils/asset-upload", () => ({
@@ -70,6 +71,8 @@ mock.module("../utils/asset-upload", () => ({
     reclaimBuildPrefix: (...a: unknown[]) => reclaimBuildPrefix(...a),
     verifyVinextStaticPrefix: (...a: unknown[]) =>
         verifyVinextStaticPrefix(...a),
+    verifyBuiltImageLockstep: (...a: unknown[]) =>
+        verifyBuiltImageLockstep(...a),
 }));
 
 // Only render/resolve are stubbed — validateCRImageRef stays REAL so the
@@ -198,6 +201,7 @@ beforeEach(() => {
     loadConfig.mockResolvedValue(baseConfig);
     readFileSyncMock.mockReturnValue("deploytag");
     verifyVinextStaticPrefix.mockReturnValue({ ok: true });
+    verifyBuiltImageLockstep.mockReturnValue({ ok: true });
     // A pre-built-image deploy never has KN_REGISTRY/KN_IMAGE in scope unless a
     // test sets it.
     delete process.env.KN_REGISTRY;

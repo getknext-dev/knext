@@ -88,6 +88,7 @@ const reclaimBuildPrefix = mock<AnyFn>();
 // marker write asks). Stubbed so the branches are drivable without a real
 // `.output` tree.
 const verifyVinextStaticPrefix = mock<AnyFn>(() => ({ ok: true }));
+const verifyBuiltImageLockstep = mock<AnyFn>(() => ({ ok: true }));
 
 const __knextReal1 = { ...(await import("../utils/asset-upload")) };
 mock.module("../utils/asset-upload", () => ({
@@ -98,6 +99,8 @@ mock.module("../utils/asset-upload", () => ({
     reclaimBuildPrefix: (...a: unknown[]) => reclaimBuildPrefix(...a),
     verifyVinextStaticPrefix: (...a: unknown[]) =>
         verifyVinextStaticPrefix(...a),
+    verifyBuiltImageLockstep: (...a: unknown[]) =>
+        verifyBuiltImageLockstep(...a),
 }));
 
 const renderNextAppCR = mock<AnyFn>(() => "kind: NextApp\n");
@@ -319,6 +322,7 @@ beforeEach(() => {
     readFileSyncMock.mockImplementation(pkgOr("deploytag"));
     // ...and on the vinext leg, the built prefix — default: it is there.
     verifyVinextStaticPrefix.mockReturnValue({ ok: true });
+    verifyBuiltImageLockstep.mockReturnValue({ ok: true });
 });
 
 afterEach(() => {
@@ -417,6 +421,7 @@ describe("deploy() skew guard — vinext leg (T2a)", () => {
     it("PROCEEDS to apply when the built prefix IS the deploy tag", async () => {
         setArgv(["deploy", "--tag", "deploytag"]);
         verifyVinextStaticPrefix.mockReturnValue({ ok: true });
+        verifyBuiltImageLockstep.mockReturnValue({ ok: true });
 
         const deploy = await importDeploy();
         await expect(deploy()).resolves.toBeUndefined();

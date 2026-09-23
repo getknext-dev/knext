@@ -28,6 +28,7 @@ import {
     NO_STORAGE_MODE_NOTICE,
     reclaimBuildPrefix,
     uploadAssets,
+    verifyBuiltImageLockstep,
     verifyVinextStaticPrefix,
 } from "../utils/asset-upload";
 import { createLogger } from "../utils/logger";
@@ -721,9 +722,76 @@ export async function deploy() {
                             target: selection.target,
                             healthCheckPath: config.healthCheckPath,
                             bakesCompileCache: selection.bakesCompileCache,
+                            // #1283: app-dockerfile (in-image-build) recipes
+                            // never see the host env's NEXT_DEPLOYMENT_ID /
+                            // ASSET_PREFIX — pass them as build-args.
+                            // `dockerBuildxArgs` itself scopes both to
+                            // `!target` (app-dockerfile), so passing them
+                            // unconditionally here is a no-op for standalone.
+                            buildId,
+                            assetPrefix: hasStorage(config)
+                                ? getAssetPrefix(config)
+                                : undefined,
                         }),
                     );
                     log.info("Docker image built and pushed");
+
+                    // #1283: prove the lock-step against the ACTUAL pushed
+                    // image, not the Dockerfile's source text — a Dockerfile
+                    // can declare `ARG NEXT_DEPLOYMENT_ID`/`ARG ASSET_PREFIX`
+                    // and still never pass them into its build step. Scoped
+                    // EXACTLY like the host-leg guard above
+                    // (`resolvedBuild === "vinext" && uploadsAssets`): an
+                    // app-dockerfile recipe that neither uploads nor is vinext
+                    // has no lock-step to break (no remote prefix exists, or
+                    // the shape has its own — standalone's — guard already).
+                    if (
+                        selection.kind === "app-dockerfile" &&
+                        resolvedBuild === "vinext" &&
+                        uploadsAssets
+                    ) {
+                        const imageCheck = verifyBuiltImageLockstep({
+                            taggedRef,
+                            expectedId: buildId,
+                            assetPrefix: hasStorage(config)
+                                ? getAssetPrefix(config)
+                                : undefined,
+                        });
+                        if (!imageCheck.ok) {
+                            const detail =
+                                imageCheck.reason ===
+                                "asset-prefix-not-embedded"
+                                    ? "the pushed image's static output does not " +
+                                      "reference the configured ASSET_PREFIX — " +
+                                      "the Dockerfile did not pass the build-arg " +
+                                      "into its build step"
+                                    : imageCheck.reason ===
+                                        "image-extract-failed"
+                                      ? "could not extract /app/.output/public " +
+                                        "from the pushed image (docker create/cp " +
+                                        "failed) — a non-standard app-dockerfile " +
+                                        "recipe layout, or the image was not " +
+                                        "pushed/pullable"
+                                      : `the pushed image's static namespace does ` +
+                                        `not match this deploy's tag "${buildId}" ` +
+                                        `(${imageCheck.reason}${
+                                            imageCheck.reason ===
+                                                "prefix-missing" &&
+                                            imageCheck.siblings.length
+                                                ? `; found: ${imageCheck.siblings.join(", ")}`
+                                                : ""
+                                        })`;
+                            throw new Error(
+                                `In-image build lock-step check failed: ${detail}. ` +
+                                    "The Dockerfile must declare `ARG NEXT_DEPLOYMENT_ID` " +
+                                    "/ `ARG ASSET_PREFIX` and pass both into its build " +
+                                    "step's env (see apps/file-manager/Dockerfile for a " +
+                                    "worked example) — ADR-0011's build-id lock-step " +
+                                    "(skew protection, asset GC) requires the image's " +
+                                    "baked static prefix to BE the deploy tag.",
+                            );
+                        }
+                    }
                 })(),
             );
         }

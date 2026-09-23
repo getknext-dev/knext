@@ -208,6 +208,13 @@ describe("usage mistakes are UsageErrors, so they render as messages", () => {
             // `detail` — an allowlist entry that grants itself scope it was
             // never reviewed for.
             "Skew-protection asset retention requires the",
+            // #1283 — the SAME lock-step guarantee, checked against the
+            // pushed IMAGE (an app-dockerfile recipe rebuilds in-image, so the
+            // host `.output` check above cannot see it). Non-usage for the
+            // same reason: the docker build already ran; the fix is in the
+            // Dockerfile (wire the ARGs into the build step), not the CLI
+            // invocation.
+            "In-image build lock-step check failed:",
         ],
         // Derived name validity: composed from the config's app name + PR id.
         "preview.ts": ["exceeds the 63-char", "is not a valid DNS-1123 label"],
