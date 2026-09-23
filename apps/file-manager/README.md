@@ -184,8 +184,12 @@ Every check fails closed: a missing prerequisite throws, there is no skip. The k
 `platform-e2e/kn-next.config.e2e.ts` (a guard test fails if it drifts from `kn-next.config.ts`
 beyond storage/registry/cache/database). `scripts/platform-e2e.selftest.mjs` runs the same checks
 against deliberately broken servers and needs no cluster, so you can run it locally:
-`node scripts/platform-e2e.selftest.mjs`. The job budget is 75 minutes (about 40 expected).
+`node scripts/platform-e2e.selftest.mjs`. The job budget is 45 minutes (about 10 measured).
 A red scheduled run files one pinned issue.
+
+One finding is quarantined rather than skipped: the build leaks the build machine's path into the
+font URL (tracked as an open issue). The check tolerates exactly that URL staying broken and goes red the moment it is
+fixed, so the exemption cannot outlive the bug.
 
 ## Deployment Files
 

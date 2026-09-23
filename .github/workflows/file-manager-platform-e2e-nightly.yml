@@ -19,16 +19,13 @@ name: File-manager platform e2e (nightly / dispatch)
 # KNOWN DEFECT (not a skip): the font URL leaks the build path (#1284). The check
 # tolerates exactly that URL staying broken and goes RED when it is fixed.
 #
-# BUDGET: one ubuntu-latest job, timeout 75 min, expected ~40 min
-# (cluster+Knative ~5, operator ~3, install+build ~5, deploy ~15, checks ~10).
-# Runs once a night, ~45 runner-minutes. Cluster-setup steps run under
+# BUDGET: one ubuntu-latest job, timeout 45 min, measured ~8-10 min wall (dispatch
+# run 35911200144: 8m, 27/27 checks). Runs once a night, ~10 runner-minutes. Cluster-setup steps run under
 # `set -euo pipefail` with `kubectl wait --timeout`, so a broken cluster fails fast.
 #
 # Ephemeral kind on the runner only - never OKE/GKE. Triggers: schedule + dispatch.
 
 on:
-  push:
-    branches: [feat/1282-file-manager-platform-nightly] # TEMP-1282: remove before merge
   schedule:
     - cron: '37 4 * * *'
   workflow_dispatch: {}
@@ -46,7 +43,7 @@ jobs:
   platform-e2e:
     name: file-manager through kn-next deploy on kind (nightly)
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
