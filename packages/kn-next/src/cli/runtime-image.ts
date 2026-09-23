@@ -47,7 +47,8 @@ export interface RuntimeImageConfig {
 
 export interface RuntimeImageSelection {
     /**
-     * `app-dockerfile` — the scaffolded vinext `Dockerfile` (single stage).
+     * `app-dockerfile` — a single-stage recipe in the app: the vinext × bun
+     *                    `Dockerfile`, or `Dockerfile.vinext-node` (#1260).
      * `standalone`      — the staged ADR-0055 standalone template.
      */
     kind: "app-dockerfile" | "standalone";
@@ -72,6 +73,63 @@ export function runtimeStandaloneTemplateDir(): string {
  * name also lets BuildKit pick up the per-Dockerfile `.dockerignore` below.
  */
 export const STANDALONE_DOCKERFILE_NAME = "Dockerfile.standalone";
+
+/**
+ * The vinext × node image recipe's name in the app (#1260). Scaffolded by
+ * `kn-next create` beside the bun `Dockerfile` (inert unless `runtime: 'node'`
+ * selects it), and staged by `kn-next build` into apps scaffolded before it
+ * existed — never over an existing one.
+ */
+export const VINEXT_NODE_DOCKERFILE_NAME = "Dockerfile.vinext-node";
+
+/**
+ * Stage `Dockerfile.vinext-node` and its per-Dockerfile ignore file
+ * (`Dockerfile.vinext-node.dockerignore`, which keeps `.output/server` in the
+ * context — the app `.dockerignore` excludes it) into `cwd`, each when — and
+ * only when — it is absent. An existing file may carry the user's edits (extra
+ * `apk add`s, a different warm path), so it is never overwritten. Reports
+ * whether the Dockerfile itself was written.
+ *
+ * Writes into the local build context only (ADR-0001).
+ */
+export function stageVinextNodeDockerfile(opts: {
+    cwd: string;
+    templateDir?: string;
+}): { dockerfile: string; staged: boolean } {
+    const templateDir =
+        opts.templateDir ?? join(packageRoot(), "templates", "app");
+    const dockerfile = join(opts.cwd, VINEXT_NODE_DOCKERFILE_NAME);
+    const staged = stageLiteralTemplate(
+        join(templateDir, `${VINEXT_NODE_DOCKERFILE_NAME}.hbs`),
+        dockerfile,
+    );
+    stageLiteralTemplate(
+        join(templateDir, `${VINEXT_NODE_DOCKERFILE_NAME}.dockerignore.hbs`),
+        `${dockerfile}.dockerignore`,
+    );
+    return { dockerfile, staged };
+}
+
+/** Copy a literal (placeholder-free) template to `dest` unless `dest` exists. */
+function stageLiteralTemplate(src: string, dest: string): boolean {
+    if (existsSync(dest)) return false;
+    if (!existsSync(src)) {
+        throw new Error(
+            `vinext-node image template not found at ${src} — the installed ` +
+                "@getknext/core package is missing part of templates/app/",
+        );
+    }
+    const text = readFileSync(src, "utf8");
+    // Same discipline as the standalone staging: the recipe is literal, so a
+    // placeholder here would ship raw.
+    if (text.includes("{{")) {
+        throw new Error(
+            `${src} contains an unsubstituted {{ }} placeholder — the vinext-node image recipe must be literal`,
+        );
+    }
+    writeFileSync(dest, text, "utf8");
+    return true;
+}
 
 /**
  * Select the runtime image for a build.
@@ -103,9 +161,22 @@ export function selectRuntimeImage(
                 "to guess a runtime image recipe for it.",
         );
     }
-    if (builder.emits !== "next-standalone") {
-        // vinext (emits a nitro output, run in-process) uses the scaffolded
-        // single-stage `Dockerfile` — the compiled binary IS the server.
+    // Keyed on the shape THIS runtime gets, not on `builder.emits` (the
+    // builder's default): vinext emits a different nitro preset per runtime
+    // (#1260), and each needs its own image.
+    const shape = builder.describeArtifact(cwd, config.runtime).shape;
+    if (shape === "nitro-output-node") {
+        // vinext × node: `.output` run by node, with the V8 compile cache
+        // baked into the image. Single-stage, no `--target`.
+        return {
+            kind: "app-dockerfile",
+            dockerfile: join(cwd, VINEXT_NODE_DOCKERFILE_NAME),
+        };
+    }
+    if (shape !== "next-standalone") {
+        // vinext × bun (a nitro bun-preset output, run in-process) uses the
+        // scaffolded single-stage `Dockerfile` — the compiled binary IS the
+        // server.
         return { kind: "app-dockerfile", dockerfile: join(cwd, "Dockerfile") };
     }
     // Standalone shape (`next-standalone`). `runtime` defaults to node (config.ts).

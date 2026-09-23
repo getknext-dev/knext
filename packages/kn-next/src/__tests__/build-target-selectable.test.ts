@@ -90,15 +90,16 @@ describe("#1167 the standalone target is selectable", () => {
         expect(() => validateConfig(cfg({ build: "turbopack" }))).not.toThrow();
     });
 
-    it("still ACCEPTS vinext+bun and still REJECTS vinext+node — vinext unchanged", () => {
-        // Both halves: activating turbopack must not disturb the vinext pairing
-        // rules. vinext+node still crashes (bun-preset nitro output under node).
+    it("ACCEPTS vinext+bun and vinext+node — each builds the preset its runtime runs (#1260)", () => {
+        // vinext+node was refused while the only vinext artifact was the
+        // bun-preset nitro output (it crashes under node). #1260 builds the
+        // node-server preset for runtime: node, so both pairings validate.
         expect(() =>
             validateConfig(cfg({ build: "vinext", runtime: "bun" })),
         ).not.toThrow();
         expect(() =>
             validateConfig(cfg({ build: "vinext", runtime: "node" })),
-        ).toThrow(/nitro-output-bun/);
+        ).not.toThrow();
     });
 
     it("no error message mentions the ADR-0048 retirement for turbopack any more", () => {
@@ -178,6 +179,26 @@ describe("#1167 end-to-end reachability: loadConfig -> validateConfig -> selectR
         expect(() => validateConfig(config)).not.toThrow();
         const sel = selectRuntimeImage(config, "/app");
         expect(sel.kind).toBe("app-dockerfile");
+        expect(sel.target).toBeUndefined();
+        expect(sel.dockerfile).toBe(join("/app", "Dockerfile"));
+    });
+
+    it("a vinext+node config loads, validates, and routes to the vinext-node Dockerfile (#1260)", async () => {
+        const config = await loadFixture(
+            `export default {
+                name: "e2e-vinext-node",
+                registry: "example.io/team",
+                build: "vinext",
+                runtime: "node",
+            };`,
+        );
+        expect(() => validateConfig(config)).not.toThrow();
+        const sel = selectRuntimeImage(config, "/app");
+        // Both halves: NOT the bun single-exec Dockerfile (its CMD is a
+        // compiled binary this cell never builds), and NOT the standalone
+        // recipe (there is no `.next/standalone`).
+        expect(sel.kind).toBe("app-dockerfile");
+        expect(sel.dockerfile).toBe(join("/app", "Dockerfile.vinext-node"));
         expect(sel.target).toBeUndefined();
     });
 });

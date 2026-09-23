@@ -56,7 +56,13 @@ export function resolveBuildArtifact(
             `Unknown build system '${id}' in kn-next.config.ts. Known: ${BUILDERS.map((b) => b.id).join(", ")}.`,
         );
     }
-    return { builder, artifact: builder.describeArtifact(root) };
+    // The runtime is threaded through because vinext's shape depends on it
+    // (#1260: the nitro preset IS the runtime choice). Builders whose shape
+    // does not vary ignore it.
+    return {
+        builder,
+        artifact: builder.describeArtifact(root, config.runtime),
+    };
 }
 
 /**

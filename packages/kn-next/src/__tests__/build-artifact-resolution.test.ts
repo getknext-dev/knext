@@ -51,6 +51,29 @@ describe("#B3 resolveBuildArtifact", () => {
         expect(r.artifact.shape).toBe("next-standalone");
     });
 
+    it("RESOLVES vinext + runtime node to the node-preset shape (#1260)", () => {
+        // The runtime is threaded into the contract: `kn-next build` must not
+        // look for (and compile) a bun-preset artifact for a node app.
+        const r = resolveBuildArtifact(
+            cfg({ build: "vinext", runtime: "node" }),
+            "/app",
+        );
+        expect(r.builder.id).toBe("vinext");
+        expect(r.artifact.shape).toBe("nitro-output-node");
+        expect(r.artifact.entry).toBe(".output/server/index.mjs");
+        // Both halves: bun keeps the compiled shape.
+        expect(
+            resolveBuildArtifact(
+                cfg({ build: "vinext", runtime: "bun" }),
+                "/app",
+            ).artifact.shape,
+        ).toBe("nitro-output-bun");
+        expect(
+            standaloneStepsApply(r.artifact),
+            "the node-preset nitro output has no .next/standalone tree",
+        ).toBe(false);
+    });
+
     it("threads the root through rather than assuming cwd", () => {
         expect(resolveBuildArtifact(cfg(), "/srv/other").artifact.root).toBe(
             "/srv/other",

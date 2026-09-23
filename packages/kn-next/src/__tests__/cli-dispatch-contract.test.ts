@@ -222,6 +222,9 @@ describe("usage mistakes are UsageErrors, so they render as messages", () => {
         // shipped package artifact, not something the user types (ADR-0055).
         "runtime-image.ts": [
             "standalone runtime image template not found",
+            // Same class for the vinext × node recipe (#1260): a template the
+            // installed package failed to ship, not a user mistake.
+            "vinext-node image template not found",
             "contains an unsubstituted",
             // Internal invariant of an exported function (unreachable from
             // argv today: `validate.ts` rejects every `build` value except

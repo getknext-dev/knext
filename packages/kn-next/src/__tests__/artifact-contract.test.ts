@@ -31,6 +31,7 @@ import {
 const ALL_SHAPES: readonly ArtifactShape[] = [
     "next-standalone",
     "nitro-output-bun",
+    "nitro-output-node",
 ];
 
 describe("every builder satisfies the contract", () => {
@@ -245,5 +246,73 @@ describe("the webpack builder reuses the turbopack artifact shape (#1219)", () =
         const artifact = webpackBuilder.describeArtifact("/app");
         expect(isCompatible(nodeRuntime, artifact)).toBe(true);
         expect(isCompatible(bunRuntime, artifact)).toBe(true);
+    });
+});
+
+describe("vinext × node — the node-preset nitro shape (#1260)", () => {
+    // Measured before this shape was added: nitro's `node` preset emits a
+    // `.output/server/index.mjs` whose `nitro.json` says `"preset":
+    // "node-server"`, contains no `Bun.` reference, and serves GET / 200 under
+    // `node`. That is a DIFFERENT artifact from the bun-preset one, so it is a
+    // different shape — which is exactly what the contract's NOTE on presets
+    // said would happen "when something builds one".
+    it("vinext describes the node-preset shape when the runtime is node", () => {
+        const artifact = vinextBuilder.describeArtifact("/app", "node");
+        expect(artifact.shape).toBe("nitro-output-node");
+        expect(artifact.entry).toBe(".output/server/index.mjs");
+        expect(artifact.execution).toBe("in-process");
+        expect(artifact.root).toBe("/app");
+    });
+
+    it("vinext still describes the bun-preset shape for bun and for an absent runtime", () => {
+        // Both halves: the absent runtime is the shipped default cell
+        // (vinext × bun, compiled). Flipping it to node would silently move
+        // every existing app off its compiled binary.
+        expect(vinextBuilder.describeArtifact("/app", "bun").shape).toBe(
+            "nitro-output-bun",
+        );
+        expect(vinextBuilder.describeArtifact("/app").shape).toBe(
+            "nitro-output-bun",
+        );
+    });
+
+    it("node accepts the node-preset shape and STILL refuses the bun-preset one", () => {
+        const nodeShape = vinextBuilder.describeArtifact("/app", "node");
+        const bunShape = vinextBuilder.describeArtifact("/app", "bun");
+        expect(isCompatible(nodeRuntime, nodeShape)).toBe(true);
+        expect(
+            isCompatible(nodeRuntime, bunShape),
+            "the measured fact is unchanged: a bun-preset entry crashes under node",
+        ).toBe(false);
+    });
+
+    it("bun does NOT claim the node-preset shape — nothing measured it there", () => {
+        // A node-server entry probably runs on bun too, but the contract
+        // records what was measured, not what is plausible.
+        const nodeShape = vinextBuilder.describeArtifact("/app", "node");
+        expect(isCompatible(bunRuntime, nodeShape)).toBe(false);
+    });
+
+    it("the standalone builders ignore the runtime — one shape either way", () => {
+        for (const builder of [turbopackBuilder, webpackBuilder]) {
+            expect(builder.describeArtifact("/app", "node")).toEqual(
+                builder.describeArtifact("/app", "bun"),
+            );
+        }
+    });
+
+    it("every runtime × builder cell (#1218) pairs compatibly", () => {
+        // The founder's full matrix: node/bun × vinext/turbopack/webpack are
+        // all supported cells. Asked of the contract for EACH runtime, so a
+        // builder that describes a shape its own runtime cannot run fails here.
+        for (const builder of BUILDERS) {
+            for (const runtime of RUNTIMES) {
+                const artifact = builder.describeArtifact("/app", runtime.id);
+                expect(
+                    explainIncompatibility(runtime, artifact),
+                    `${runtime.id} × ${builder.id} described '${artifact.shape}', which ${runtime.id} cannot run`,
+                ).toBeNull();
+            }
+        }
     });
 });

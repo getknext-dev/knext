@@ -1,0 +1,52 @@
+# Build-context ignore for Dockerfile.vinext-node ONLY.
+#
+# Docker reads `<Dockerfile>.dockerignore` in preference to `.dockerignore`, so
+# this scopes the node image's context without touching the one the Bun
+# `Dockerfile` uses. The difference that matters: the Bun image ships a
+# compiled binary plus `.output/public` and excludes `.output/server`; this
+# image RUNS `.output/server`, so the whole `.output` must stay in the context.
+
+# Secrets and local credentials.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+.npmrc
+.netrc
+kubeconfig
+.kube/
+
+# Version control and CI.
+.git
+.gitignore
+.github
+.gitlab-ci.yml
+
+# Dependencies and other targets' build output — the node image copies only
+# `.output`, which bundles everything the server needs.
+node_modules
+.next
+.vinext
+dist
+build
+*.tsbuildinfo
+knext-exec*
+knext-smoke-*
+native
+server
+
+# Test, coverage and editor noise.
+coverage
+.nyc_output
+*.log
+.DS_Store
+.idea
+.vscode
+*.swp
+
+# Docker's own files.
+Dockerfile*
+.dockerignore
+docker-compose*.yml

@@ -26,7 +26,14 @@ import {
     jest,
     mock,
 } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+    existsSync,
+    mkdirSync,
+    mkdtempSync,
+    readFileSync,
+    rmSync,
+    writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { requireIsolatedProcess } from "../../../../tests/helpers/require-isolated-process";
@@ -335,5 +342,102 @@ describe("build()", () => {
         expect(healBunExportTargets).not.toHaveBeenCalled();
         expect(shipCompiles()).toHaveLength(1);
         expect(uploadAssets).toHaveBeenCalledTimes(1);
+    });
+});
+
+/**
+ * vinext × node (#1260). The node-preset nitro output runs uncompiled under
+ * node; its bytecode caching is the V8 compile cache the IMAGE bakes. So the
+ * build must NOT bun-compile it (there is nothing for bun to compile into a
+ * node image), must refuse a bun-preset `.output` (it crashes under node), and
+ * must leave the vinext-node image recipe in the build context.
+ */
+describe("build() — vinext × node", () => {
+    const nodeCfg = () => cfg({ build: "vinext", runtime: "node" });
+
+    function nitroOutput(preset: string): void {
+        mkdirSync(join(dir, ".output", "server"), { recursive: true });
+        writeFileSync(
+            join(dir, ".output", "server", "index.mjs"),
+            "// entry\n",
+        );
+        writeFileSync(
+            join(dir, ".output", "nitro.json"),
+            JSON.stringify({ preset, serverEntry: "server/index.mjs" }),
+        );
+    }
+
+    it("compiles NOTHING with bun and boots no binary smoke — the image bakes the cache", async () => {
+        loadConfig.mockResolvedValue(nodeCfg());
+        nitroOutput("node-server");
+
+        await build({ skipNextBuild: true });
+
+        expect(buildVinextExecutable).not.toHaveBeenCalled();
+        expect(buildStandaloneExecutable).not.toHaveBeenCalled();
+        expect(runPostCompileSmoke).not.toHaveBeenCalled();
+        expect(healBunExportTargets).not.toHaveBeenCalled();
+        expect(uploadAssets).toHaveBeenCalledTimes(1);
+    });
+
+    it("stages Dockerfile.vinext-node into the app when it is absent", async () => {
+        loadConfig.mockResolvedValue(nodeCfg());
+        nitroOutput("node-server");
+
+        await build({ skipNextBuild: true });
+
+        const staged = join(dir, "Dockerfile.vinext-node");
+        expect(existsSync(staged)).toBe(true);
+        const text = readFileSync(staged, "utf8");
+        expect(text).toContain("NODE_COMPILE_CACHE");
+        expect(text).not.toContain("{{");
+        // Its own ignore file, which keeps `.output/server` in the context —
+        // the app's .dockerignore excludes it, and the image COPYs it.
+        const ignore = readFileSync(`${staged}.dockerignore`, "utf8");
+        expect(ignore.split("\n")).not.toContain(".output");
+        expect(ignore.split("\n")).toContain("node_modules");
+    });
+
+    it("never clobbers an existing Dockerfile.vinext-node — it may carry the user's edits", async () => {
+        loadConfig.mockResolvedValue(nodeCfg());
+        nitroOutput("node-server");
+        writeFileSync(join(dir, "Dockerfile.vinext-node"), "# mine\n");
+
+        await build({ skipNextBuild: true });
+
+        expect(readFileSync(join(dir, "Dockerfile.vinext-node"), "utf8")).toBe(
+            "# mine\n",
+        );
+    });
+
+    it("REFUSES a bun-preset .output — it would crash under node — before any upload", async () => {
+        // The realistic shape: an app scaffolded before #1260 whose
+        // vite.config.ts hardcodes `preset: 'bun'`, switched to runtime: node.
+        loadConfig.mockResolvedValue(nodeCfg());
+        nitroOutput("bun");
+
+        let message = "";
+        try {
+            await build({ skipNextBuild: true });
+        } catch (e) {
+            message = (e as Error).message;
+        }
+        expect(message).toMatch(/node-server[\s\S]*bun|bun[\s\S]*node-server/);
+        // Actionable in place, not only a docs pointer: the three edits an
+        // older app needs — the entry file, the vite preset, the srvx dep.
+        expect(message).toContain("copy knext-node-entry.mjs");
+        expect(message).toContain("preset: 'node'");
+        expect(message).toContain("declare `srvx`");
+        expect(uploadAssets).not.toHaveBeenCalled();
+        expect(buildVinextExecutable).not.toHaveBeenCalled();
+    });
+
+    it("REFUSES when there is no .output at all — nothing for the image to ship", async () => {
+        loadConfig.mockResolvedValue(nodeCfg());
+
+        await expect(build({ skipNextBuild: true })).rejects.toThrow(
+            /nitro\.json/,
+        );
+        expect(uploadAssets).not.toHaveBeenCalled();
     });
 });

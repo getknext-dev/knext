@@ -89,6 +89,17 @@ export const GATES = [
   },
   { jobId: 'vinext-precompile-closure', spec: 'tests/precompile-closure-gate-ci.test.ts' },
   {
+    jobId: 'vinext-node-image',
+    spec: 'tests/vinext-node-image-ci.test.ts',
+    // Same #764 `needs:` as bun-exec-alpine-image, in flow-sequence form so the
+    // two anchors stay distinct; the disarm REPLACES it for the same reason.
+    needsDisarm: {
+      anchor: '    needs: [vinext-precompile-closure]\n',
+      define: '',
+      inject: `    needs: ${CI_SKIPPABLE_JOB}`,
+    },
+  },
+  {
     jobId: 'resolve-image-pins',
     spec: 'tests/operator-image-pin-resolution.test.ts',
     workflow: '.github/workflows/image-pin-resolution-nightly.yml',

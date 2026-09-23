@@ -13,11 +13,22 @@
  * shape is the same minus the Cloudflare Workers pieces — no `wrangler`, no
  * `@cloudflare/vite-plugin`, no KV/CDN adapters. knext targets Knative on
  * Kubernetes instead, so the server is a Bun binary rather than a Worker.
+ *
+ * Set `runtime: 'node'` in kn-next.config.ts and the same app builds for Node
+ * instead: nitro's `node` preset, served by `knext-node-entry.mjs`, run
+ * uncompiled with a V8 compile cache baked into the image
+ * (`Dockerfile.vinext-node`). The runtime is read from kn-next.config.ts —
+ * the same file `kn-next build` and `kn-next deploy` read — so the preset can
+ * never disagree with the image the CLI builds.
  */
 
 import { nitro } from 'nitro/vite';
 import vinext from 'vinext';
 import { defineConfig } from 'vite';
+import knext from './kn-next.config';
+
+// 'node' only when asked for; anything else is the default Bun target.
+const onNode = knext.runtime === 'node';
 
 export default defineConfig({
   plugins: [
@@ -36,17 +47,18 @@ export default defineConfig({
       },
     }),
     nitro({
-      // Bun, because the artifact is compiled with `bun build --compile`.
-      // Not interchangeable with the node preset: the emitted entry calls Bun's
-      // global `serve()` at module top level, so `node .output/server/index.mjs`
-      // exits 1. There is no node fallback for this build.
-      preset: 'bun',
+      // Bun by default, because that artifact is compiled with
+      // `bun build --compile`. The two presets are NOT interchangeable: the bun
+      // entry calls Bun's global `serve()` at module top level, so a bun build
+      // exits 1 under node — which is why the preset follows `runtime`.
+      preset: onNode ? 'node' : 'bun',
 
-      // knext's own Nitro server entry. vinext is Vite/rolldown and cannot see
-      // knext's adapter hooks, so this wrapper re-provides what the platform
-      // needs: the health endpoint, `:9464` metrics, and draining in-flight
-      // requests on SIGTERM before the pod goes away.
-      entry: './knext-bun-entry.mjs',
+      // knext's own Nitro server entry, one per runtime. vinext is
+      // Vite/rolldown and cannot see knext's adapter hooks, so this wrapper
+      // re-provides what the platform needs: the health endpoint, `:9464`
+      // metrics, and draining in-flight requests on SIGTERM before the pod
+      // goes away.
+      entry: onNode ? './knext-node-entry.mjs' : './knext-bun-entry.mjs',
 
       // REQUIRED — do not remove without reading this.
       //

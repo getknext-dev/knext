@@ -359,7 +359,82 @@ describe("kn-next create — the generated package.json is runnable OUTSIDE this
         const vite = readFileSync(join(appDir, "vite.config.ts"), "utf8");
         // Both halves: the entry is wired AND the preset it requires is set.
         expect(vite).toContain("./knext-bun-entry.mjs");
-        expect(vite).toContain("preset: 'bun'");
+        expect(vite).toContain("'bun'");
+    });
+
+    it("ships the vinext × node cell too: a node entry, a node-preset arm, and its image (#1260)", () => {
+        // runtime: 'node' in kn-next.config.ts must produce a node-runnable
+        // artifact with no hand edits. The vite config reads the runtime from
+        // kn-next.config.ts (the one source `kn-next build` and `kn-next
+        // deploy` also read), so both halves of the preset choice live there.
+        const { appDir } = scaffoldApp();
+
+        const entry = readFileSync(
+            join(appDir, "knext-node-entry.mjs"),
+            "utf8",
+        );
+        // The node entry must not touch Bun — that is the whole reason the
+        // bun entry cannot be reused (it exits 1 under node).
+        expect(entry).not.toMatch(/\bBun\./);
+        expect(entry).not.toContain("srvx/bun");
+        expect(entry).toContain("srvx/node");
+
+        const vite = readFileSync(join(appDir, "vite.config.ts"), "utf8");
+        expect(vite).toContain("./kn-next.config");
+        expect(vite).toContain("./knext-node-entry.mjs");
+        expect(vite).toContain("'node'");
+
+        const dockerfile = readFileSync(
+            join(appDir, "Dockerfile.vinext-node"),
+            "utf8",
+        );
+        expect(dockerfile).toContain(
+            'CMD ["node", "/app/.output/server/index.mjs"]',
+        );
+    });
+
+    it("every package the server entries and vite config import is DECLARED in package.json", () => {
+        // An undeclared import resolves only by accident of hoisting: under
+        // pnpm or bun's isolated linker it does not resolve at all, and under
+        // npm the version is whatever a transitive dep dragged in (`srvx` was
+        // undeclared, reachable only as nitro's dependency — ^0.11 vs ^0.12).
+        // SCANNED, not enumerated: every bare specifier in every file below.
+        const { appDir } = scaffoldApp();
+        const pkg = JSON.parse(
+            readFileSync(join(appDir, "package.json"), "utf8"),
+        ) as {
+            dependencies?: Record<string, string>;
+            devDependencies?: Record<string, string>;
+        };
+        const declared = new Set([
+            ...Object.keys(pkg.dependencies ?? {}),
+            ...Object.keys(pkg.devDependencies ?? {}),
+        ]);
+        const scanned = [
+            "knext-node-entry.mjs",
+            "knext-bun-entry.mjs",
+            "runtime-contract.mjs",
+            "vite.config.ts",
+        ];
+        const undeclared: string[] = [];
+        let bareSeen = 0;
+        for (const file of scanned) {
+            const src = readFileSync(join(appDir, file), "utf8");
+            for (const m of src.matchAll(
+                /^\s*import\s+(?:[^'";]*?\s+from\s+)?['"]([^'"]+)['"]/gm,
+            )) {
+                const spec = m[1];
+                if (/^(node:|\.|#)/.test(spec)) continue;
+                bareSeen++;
+                const name = spec.startsWith("@")
+                    ? spec.split("/").slice(0, 2).join("/")
+                    : spec.split("/")[0];
+                if (!declared.has(name)) undeclared.push(`${file}: ${spec}`);
+            }
+        }
+        // Liveness: the scan must actually see the imports it guards.
+        expect(bareSeen).toBeGreaterThan(8);
+        expect(undeclared).toEqual([]);
     });
 
     it("disables code splitting — without it the server bundle does not run", () => {
@@ -382,11 +457,21 @@ describe("kn-next create — the generated package.json is runnable OUTSIDE this
         const dockerfile = readFileSync(join(appDir, "Dockerfile"), "utf8");
         const vite = readFileSync(join(appDir, "vite.config.ts"), "utf8");
 
-        expect(vite).toContain("preset: 'bun'");
+        // The bun arm of the runtime-keyed preset (#1260 added the node arm,
+        // which pairs with Dockerfile.vinext-node — asserted below).
+        expect(vite).toContain("preset: onNode ? 'node' : 'bun'");
         expect(dockerfile).toContain(".output/public");
         expect(dockerfile).toContain("/app/server");
         // And the retired path appears in neither.
         expect(dockerfile).not.toContain(".next/standalone");
+
+        // The node arm: its image runs the node-preset `.output` it builds.
+        const nodeDockerfile = readFileSync(
+            join(appDir, "Dockerfile.vinext-node"),
+            "utf8",
+        );
+        expect(nodeDockerfile).toContain("COPY .output /app/.output");
+        expect(nodeDockerfile).not.toContain(".next/standalone");
     });
 });
 

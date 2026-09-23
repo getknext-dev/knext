@@ -73,9 +73,10 @@ immediately with an actionable error telling you to set `output: 'standalone'` i
 purpose: without it, the first sign of the missing artifact used to be an opaque error deep
 inside the Docker image build at deploy time.
 
-`kn-next` stages and builds the matching standalone runtime image for you; `runtime` has no effect
-on the vinext single-executable target, where the runtime is compiled into the binary. On the
-standalone targets (`turbopack` and `webpack`, identically) it decides how the server is packaged:
+`kn-next` stages and builds the matching standalone runtime image for you. On the vinext target,
+`runtime: 'node'` switches from the Bun executable to a Node server — see
+[vinext on Node](#vinext-on-node) below. On the standalone targets (`turbopack` and `webpack`,
+identically) it decides how the server is packaged:
 
 - **`runtime: 'bun'`** — `kn-next build` compiles the standalone `server.js` into a Bun single
   executable with bytecode, verifies the bytecode is actually there (the build fails otherwise), and
@@ -84,6 +85,69 @@ standalone targets (`turbopack` and `webpack`, identically) it decides how the s
   page.
 - **`runtime: 'node'`** — the supervisor spawns `server.js` under Node, and bytecode caching comes
   from the V8 compile cache in the image (see [bytecode caching](/docs/bytecode)).
+
+### vinext on Node
+
+The vinext target also runs on **Node**. Set `runtime: 'node'` and keep `build` at its default:
+
+```ts title="kn-next.config.ts"
+const config: KnativeNextConfig = {
+  name: 'acme',
+  registry: 'registry.example.com/acme',
+  build: 'vinext',      // the default
+  runtime: 'node',      // a Node server instead of the Bun executable
+};
+```
+
+Nothing is compiled into an executable on this target. Instead:
+
+- **The build emits a Node server.** `vite build` produces nitro's **Node** preset rather than the
+  Bun one, with `knext-node-entry.mjs` as the server entry. That entry provides what the Bun entry
+  does: the health route, the `:9464` metrics endpoint, and draining in-flight requests on
+  `SIGTERM`. `vite.config.ts` picks the preset from the `runtime` in `kn-next.config.ts`, so
+  `kn-next build`, `kn-next deploy` and a plain `npm run build` all agree.
+- **Bytecode caching is the V8 compile cache, baked into the image.** The image
+  (`Dockerfile.vinext-node`, next to your `Dockerfile`) boots the server once during
+  `docker build`, warms `/api/health`, and ships the compiled code as a layer. Every pod starts
+  with it, including the first one after scaling to zero. The image build **fails** if the warm-up
+  request does not succeed or the cache comes out too small, rather than shipping an empty cache.
+  To see the cache being used, start a container with `NODE_DEBUG_NATIVE=COMPILE_CACHE`: the log
+  says the cache for `/app/.output/server/index.mjs` **was accepted**.
+- **Bun is not needed to build it.** Only the Bun executable target requires Bun 1.4 on the build
+  machine.
+- **`kn-next build` checks the preset.** If the build produced the Bun preset (see below), it
+  stops before uploading anything and tells you what to change. Running a Bun-preset server under
+  Node would crash on startup.
+
+**Apps created before this target existed** need two changes. `kn-next build` adds
+`Dockerfile.vinext-node` and its ignore file to your app if they are missing, and it never
+overwrites your own copies. It does **not** edit your `vite.config.ts`, which may still hardcode
+`preset: 'bun'`. Make the nitro plugin follow the runtime:
+
+```ts title="vite.config.ts"
+import knext from './kn-next.config';
+
+const onNode = knext.runtime === 'node';
+
+// inside plugins: [...]
+nitro({
+  preset: onNode ? 'node' : 'bun',
+  entry: onNode ? './knext-node-entry.mjs' : './knext-bun-entry.mjs',
+  rollupConfig: { output: { inlineDynamicImports: true } },
+}),
+```
+
+Then copy `knext-node-entry.mjs` from a freshly created app into yours, and declare the server
+package it imports in your `package.json`: `"srvx": "0.11.22"`. The entry drains in-flight
+requests and waits for `after()` work before exiting on `SIGTERM`.
+
+Two differences from the Bun executable, stated plainly:
+
+- **Image optimization serves originals unless sharp can load.** The Node image does not ship
+  sharp's native addon. `/_next/image` then serves the source image unoptimized and logs one
+  warning. It never fails a request.
+- **The request body cap is enforced as the body is read**, not before your handler runs. The limit
+  is the same `KNEXT_MAX_REQUEST_BYTES`.
 
 ## The pipeline
 

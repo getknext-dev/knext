@@ -4,9 +4,11 @@
 
 import {
     BUILDERS,
+    type BuilderAdapter,
     AVAILABLE_BUILDERS as CONTRACT_AVAILABLE,
     explainIncompatibility,
     RUNTIMES,
+    type RuntimeAdapter,
 } from "../adapters/artifact-contract";
 import type { KnativeNextConfig } from "../config";
 
@@ -70,17 +72,38 @@ const SUPPORTED_RUNTIMES = ["bun", "node"] as const;
  * The direct unit test stays anyway. A check reachable through one caller is
  * one refactor away from being reachable through none, and that is the state
  * this comment spent a sprint describing.
+ *
+ * #1260 moved it once more. vinext now describes a node-preset shape for
+ * `runtime: node`, so every shipped runtime × builder cell is compatible and
+ * NO shipped config reaches a refusal — the pre-ADR-0048 state again. The
+ * contract is therefore injectable (`contract`, defaulting to the shipped
+ * registry): the tests hand in a registry whose runtime cannot run the shape
+ * and assert the refusal through `validateConfig`, so deleting or muting the
+ * call below still fails a test about OUTPUT.
  */
 export function checkPairing(
     build: string | undefined,
     runtime: string | undefined,
+    contract: PairingContract = SHIPPED_CONTRACT,
 ): string | null {
-    const builder = BUILDERS.find((b) => b.id === (build ?? "vinext"));
-    const rt = RUNTIMES.find((r) => r.id === (runtime ?? "bun"));
+    const builder = contract.builders.find((b) => b.id === (build ?? "vinext"));
+    const rt = contract.runtimes.find((r) => r.id === (runtime ?? "bun"));
     if (!builder || !rt) return null; // shape/enum errors are reported elsewhere
-    // Root is irrelevant to shape compatibility; "." keeps it pure.
-    return explainIncompatibility(rt, builder.describeArtifact("."));
+    // Root is irrelevant to shape compatibility; "." keeps it pure. The runtime
+    // IS relevant: vinext's shape depends on it (#1260).
+    return explainIncompatibility(rt, builder.describeArtifact(".", rt.id));
 }
+
+/** The registry `checkPairing` consults. Injectable only so tests can reach a refusal. */
+export interface PairingContract {
+    readonly builders: readonly BuilderAdapter[];
+    readonly runtimes: readonly RuntimeAdapter[];
+}
+
+const SHIPPED_CONTRACT: PairingContract = {
+    builders: BUILDERS,
+    runtimes: RUNTIMES,
+};
 
 const KNOWN_BUILDERS = BUILDERS.map((b) => b.id);
 const AVAILABLE_BUILDERS = CONTRACT_AVAILABLE.map((b) => b.id);
@@ -206,7 +229,11 @@ const REMOVED_CONFIG_KEYS: Record<string, string> = {
         "caching: the cache in your image is always active.)",
 };
 
-export function validateConfig(config: KnativeNextConfig): void {
+export function validateConfig(
+    config: KnativeNextConfig,
+    /** Test seam for the pairing check — see `checkPairing`. */
+    contract: PairingContract = SHIPPED_CONTRACT,
+): void {
     const errors: string[] = [];
 
     // Removed keys first: if the author is working from a stale config, say so before
@@ -371,17 +398,13 @@ export function validateConfig(config: KnativeNextConfig): void {
     //     leaving a TODO comment containing its text, which a raw-source regex
     //     happily matches.
     //
-    // Running it for known builders makes `build: vinext` + `runtime: node`
-    // REACHABLE — the pairing genuinely cannot execute (a bun-preset nitro
-    // output crashes under node), so `validateConfig` now rejects it with a
-    // real error a behavioural test can assert on. That is what closes the
-    // hole: neutering the enforcement now fails a test about OUTPUT, not a
-    // test about the shape of the source.
-    //
-    // Such a config collects two errors — "not available" and the pairing
-    // refusal — and that is correct rather than noisy: they are independent
-    // facts, and the pairing one stays true after vinext becomes available.
-    const pairingProblem = checkPairing(config.build, config.runtime);
+    // Running it for known builders made `build: vinext` + `runtime: node`
+    // REACHABLE while the only vinext artifact was bun-preset (it crashes under
+    // node). #1260 gave vinext a node-preset shape for node, so every shipped
+    // cell now passes — the behavioural guard reaches a refusal through the
+    // injectable `contract` instead (validate-build-axis.test.ts). Neutering
+    // the enforcement still fails a test about OUTPUT, not about source shape.
+    const pairingProblem = checkPairing(config.build, config.runtime, contract);
     if (pairingProblem) errors.push(pairingProblem);
 
     // Scaling validation

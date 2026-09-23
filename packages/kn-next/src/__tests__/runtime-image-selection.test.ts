@@ -37,6 +37,7 @@ import {
     STANDALONE_DOCKERFILE_NAME,
     selectRuntimeImage,
     stageStandaloneBuildContext,
+    VINEXT_NODE_DOCKERFILE_NAME,
 } from "../cli/runtime-image";
 
 const _tmpDirs: string[] = [];
@@ -73,6 +74,21 @@ describe("selectRuntimeImage — target selection by (build, runtime)", () => {
             "/app",
         );
         expect(sel.kind).toBe("app-dockerfile");
+        expect(sel.dockerfile).toBe(join("/app", "Dockerfile"));
+        expect(sel.target).toBeUndefined();
+    });
+
+    it("vinext + runtime node -> the vinext-node Dockerfile, no --target (#1260)", () => {
+        // The node cell ships `.output` under node with a baked V8 compile
+        // cache — NOT the single-exec Dockerfile, whose CMD is a compiled
+        // binary this cell never builds.
+        const sel = selectRuntimeImage(
+            { build: "vinext", runtime: "node" },
+            "/app",
+        );
+        expect(sel.kind).toBe("app-dockerfile");
+        expect(sel.dockerfile).toBe(join("/app", VINEXT_NODE_DOCKERFILE_NAME));
+        expect(VINEXT_NODE_DOCKERFILE_NAME).toBe("Dockerfile.vinext-node");
         expect(sel.target).toBeUndefined();
     });
 

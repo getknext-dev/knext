@@ -15,7 +15,12 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { checkPairing, validateConfig } from "../cli/validate";
+import { type ArtifactShape, BUILDERS } from "../adapters/artifact-contract";
+import {
+    checkPairing,
+    type PairingContract,
+    validateConfig,
+} from "../cli/validate";
 import type { KnativeNextConfig } from "../config";
 
 /** Minimal config that validates clean, so each test varies exactly one thing. */
@@ -66,12 +71,14 @@ describe("#B2 the `build` axis", () => {
             expect(() => validateConfig(cfg({ runtime: "bun" }))).not.toThrow();
         });
 
-        it("REJECTS runtime=node with the default build — node cannot run the artifact", () => {
-            // Not a policy rule: measured. The vinext artifact is a bun-preset
-            // nitro output and exits 1 under node with a missing-global error.
-            expect(() => validateConfig(cfg({ runtime: "node" }))).toThrow(
-                /nitro-output-bun/,
-            );
+        it("ACCEPTS runtime=node with the default build — vinext × node is a supported cell (#1260)", () => {
+            // It used to be rejected, and correctly: the only vinext artifact
+            // was a bun-preset nitro output, which exits 1 under node. #1260
+            // added the node-preset shape (`nitro-output-node`), so vinext on
+            // node now describes an artifact node can run.
+            expect(() =>
+                validateConfig(cfg({ runtime: "node" })),
+            ).not.toThrow();
         });
 
         it.each([
@@ -108,15 +115,13 @@ describe("#B2 the `build` axis", () => {
             expect(thrown).toBeUndefined();
         });
 
-        it("accepts vinext+bun and rejects vinext+node — the PAIRING, not the builder", () => {
-            // Both halves. vinext itself is fine; only the node pairing fails,
-            // and it fails on the measured shape rather than on a name.
+        it("accepts vinext+bun AND vinext+node — each runtime gets the preset it can run (#1260)", () => {
             expect(() =>
                 validateConfig(cfg({ runtime: "bun", build: "vinext" })),
             ).not.toThrow();
             expect(() =>
                 validateConfig(cfg({ runtime: "node", build: "vinext" })),
-            ).toThrow(/nitro-output-bun/);
+            ).not.toThrow();
         });
     });
 });
@@ -124,44 +129,51 @@ describe("#B2 the `build` axis", () => {
 /**
  * The pairing check (NEW-1 from the round-2 design gate).
  *
- * `checkPairing` is tested DIRECTLY as well as through `validateConfig`. The
- * direct tests date from when — measured — no reachable config could express an
- * incompatible pairing, because one builder was available and both runtimes
- * accept `next-standalone`; a mutation proved the consequence, deleting the call
- * from `validateConfig` broke no test.
+ * `checkPairing` is tested DIRECTLY as well as through `validateConfig`.
  *
- * THAT ERA IS OVER: both builders are selectable, so `build: 'vinext'` +
- * `runtime: 'node'` is an expressible, incompatible config and `validateConfig`
- * genuinely refuses it (the `nitro-output-bun` cases above). The direct tests
- * stay, because they cover the contract exhaustively rather than through the one
- * config shape that happens to reach it.
+ * #1260 changed what a real config can reach. `build: 'vinext'` +
+ * `runtime: 'node'` used to be the one expressible, incompatible pairing: the
+ * only vinext artifact was a bun-preset nitro output, which crashes under node.
+ * vinext now describes a node-preset shape for node, so EVERY runtime × builder
+ * cell (#1218) is compatible — and no shipped config can reach a refusal any
+ * more.
  *
- * The gate's objection to the contract was "a contract nobody calls is an
- * enumerated table with better typing". Exercising the function itself, plus the
- * reachable refusal above, answers it at both levels.
+ * That is the state that once let deleting the call break nothing (see the
+ * next block's history). So the contract is now INJECTABLE: these tests hand
+ * `checkPairing` / `validateConfig` a registry whose node runtime accepts
+ * nothing, and assert the refusal on OUTPUT. The shipped registry's own
+ * refusal — node × the bun-preset shape — is pinned in artifact-contract.test.ts.
  */
+const NODE_ACCEPTS_NOTHING: PairingContract = {
+    builders: BUILDERS,
+    runtimes: [
+        { id: "node", accepts: [] as ArtifactShape[] },
+        { id: "bun", accepts: ["next-standalone", "nitro-output-bun"] },
+    ],
+};
+
 describe("#B2 checkPairing — the contract's production caller", () => {
-    it("passes the two pairings a config can actually express today", () => {
+    it("passes every pairing a shipped config can express (#1218 full matrix)", () => {
         expect(checkPairing(undefined, undefined)).toBeNull();
-        expect(checkPairing("turbopack", "node")).toBeNull();
-        expect(checkPairing("turbopack", "bun")).toBeNull();
+        for (const build of ["turbopack", "webpack", "vinext"]) {
+            for (const runtime of ["node", "bun"]) {
+                expect(checkPairing(build, runtime)).toBeNull();
+            }
+        }
     });
 
-    it("REFUSES vinext + node, naming the shape and what node accepts", () => {
-        // The case config cannot reach (vinext is unavailable) and the whole
-        // reason the check exists. node cannot execute a bun-preset nitro
-        // output — measured: `node .output/server/index.mjs` exits 1.
-        const why = checkPairing("vinext", "node");
-
+    it("REFUSES a pairing the contract says cannot run, naming the shape", () => {
+        // vinext × node under a registry whose node accepts nothing: the
+        // check must consult the runtime it was given, with the runtime's own
+        // shape — `nitro-output-node`, not the bun one.
+        const why = checkPairing("vinext", "node", NODE_ACCEPTS_NOTHING);
         expect(why).not.toBeNull();
-        expect(why).toContain("nitro-output-bun");
-        expect(why).toContain("node");
+        expect(why).toContain("nitro-output-node");
+        expect(why).toContain("accepts: nothing");
     });
 
-    it("allows vinext + bun — the pairing that does work", () => {
-        // Both halves. Asserting only the refusal would stay green if the check
-        // rejected every vinext pairing indiscriminately.
-        expect(checkPairing("vinext", "bun")).toBeNull();
+    it("still allows the runtime the injected contract does accept — both halves", () => {
+        expect(checkPairing("vinext", "bun", NODE_ACCEPTS_NOTHING)).toBeNull();
     });
 
     it("stays silent for an unknown id — that error belongs to the enum check", () => {
@@ -171,11 +183,6 @@ describe("#B2 checkPairing — the contract's production caller", () => {
         // `rollup` is genuinely unknown instead.
         expect(checkPairing("rollup", "node")).toBeNull();
         expect(checkPairing("turbopack", "deno")).toBeNull();
-    });
-
-    it("passes webpack + either runtime — same shape as turbopack (#1219)", () => {
-        expect(checkPairing("webpack", "node")).toBeNull();
-        expect(checkPairing("webpack", "bun")).toBeNull();
     });
 });
 
@@ -196,36 +203,35 @@ describe("#B2 checkPairing — the contract's production caller", () => {
  *     guard was better at catching carelessness than care.
  *
  * The lesson is that a test about the SHAPE OF THE SOURCE cannot guard
- * behaviour. Running the pairing check for any KNOWN builder makes
- * `vinext + node` reachable, so these assert on OUTPUT. Dropping the reporting,
- * deleting the call, or gutting `checkPairing` all now fail here.
+ * behaviour. Since #1260 no shipped config is incompatible, so these assert on
+ * OUTPUT through an injected contract. Dropping the reporting, deleting the
+ * call, or not threading the contract through all fail here.
  */
 describe("#B2 validateConfig enforces the pairing, observably", () => {
-    it("REJECTS vinext + node — the pairing that genuinely cannot execute", () => {
-        // node cannot run a bun-preset nitro output: measured,
-        // `node .output/server/index.mjs` exits 1 with a missing-global error.
+    it("REJECTS a pairing the (injected) contract cannot execute", () => {
         expect(() =>
-            validateConfig(cfg({ build: "vinext", runtime: "node" })),
-        ).toThrow(/nitro-output-bun/);
+            validateConfig(
+                cfg({ build: "vinext", runtime: "node" }),
+                NODE_ACCEPTS_NOTHING,
+            ),
+        ).toThrow(/nitro-output-node/);
     });
 
-    it("accepts turbopack+node (no fault) while still rejecting vinext+node (pairing) — both halves", () => {
-        // #1167 removed the turbopack retirement, so turbopack+node is now a
-        // clean config — node CAN run the `next-standalone` shape. The pairing
-        // enforcement is unchanged and stays observable on vinext+node, which
-        // genuinely cannot execute. Asserting BOTH halves so neither the
-        // reversal nor the surviving pairing check can silently regress.
+    it("accepts vinext+node under the SHIPPED contract while refusing it under the injected one — both halves", () => {
         expect(() =>
-            validateConfig(cfg({ build: "turbopack", runtime: "node" })),
+            validateConfig(cfg({ build: "vinext", runtime: "node" })),
         ).not.toThrow();
 
         let pairing = "";
         try {
-            validateConfig(cfg({ build: "vinext", runtime: "node" }));
+            validateConfig(
+                cfg({ build: "turbopack", runtime: "node" }),
+                NODE_ACCEPTS_NOTHING,
+            );
         } catch (e) {
             pairing = (e as Error).message;
         }
-        expect(pairing).toMatch(/nitro-output-bun/);
+        expect(pairing).toMatch(/next-standalone/);
     });
 
     it("reports NOTHING for vinext + bun — the supported combination", () => {

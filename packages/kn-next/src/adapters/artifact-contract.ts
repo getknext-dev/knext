@@ -49,7 +49,10 @@
  * exhaustively, and an unknown shape has to be a compile error rather than a
  * silent `false`.
  */
-export type ArtifactShape = "next-standalone" | "nitro-output-bun";
+export type ArtifactShape =
+    | "next-standalone"
+    | "nitro-output-bun"
+    | "nitro-output-node";
 
 /**
  * NOTE on why the nitro shape carries its PRESET.
@@ -68,6 +71,12 @@ export type ArtifactShape = "next-standalone" | "nitro-output-bun";
  * shape per preset, and the preset decides which runtimes can execute it.
  * Encoding the preset in the shape is what keeps `isCompatible` honest; a
  * node-preset build would be a DIFFERENT shape, added when something builds one.
+ *
+ * Something now does (#1260): vinext × node builds nitro's `node` preset.
+ * Measured — `.output/nitro.json` says `"preset": "node-server"`, the entry
+ * carries no `Bun.` reference, and `node .output/server/index.mjs` serves
+ * GET / 200. That artifact is `nitro-output-node`. The bun-preset measurement
+ * above is unchanged and node still refuses `nitro-output-bun`.
  */
 
 /** Which builder produced an artifact. */
@@ -122,8 +131,13 @@ export interface BuilderAdapter {
     /**
      * Where this builder's output lands for an app rooted at `root`.
      * Pure — it describes the artifact, it does not run the build.
+     *
+     * `runtime` is the runtime the build targets. Most builders emit one
+     * shape whatever runs it (and ignore the argument); vinext does not — its
+     * nitro preset IS the runtime choice, so it emits a different shape per
+     * runtime (#1260). Absent means the builder's default (`emits`).
      */
-    describeArtifact(root: string): BuildArtifact;
+    describeArtifact(root: string, runtime?: RuntimeId): BuildArtifact;
 }
 
 /** Executes artifacts of the shapes it accepts. */
@@ -246,16 +260,22 @@ export const webpackBuilder: BuilderAdapter = {
  * when the toolchain landed, and `kn-next build` now compiles the binary
  * itself for the nitro shape.)
  *
- * The entry is nitro's **bun** preset output — `.output/nitro.json` carries
- * `"preset": "bun"` and the entry calls that runtime's global `serve()` at
- * module top level. It is therefore executable by bun and NOT by node.
+ * The shape depends on the runtime, because the nitro PRESET is the runtime
+ * choice (#1260):
  *
- * ADR-0036 says the opposite — that both vinext cells share one entry, `node
- * .output/server/index.mjs` for node and the `--compile`d binary for bun. That
- * is **false for the artifact this repo builds**, and it was the source of an
- * incorrect `nodeRuntime.accepts` entry until a design gate ran the file. The
- * claim is contradicted here rather than repeated, because it is exactly the
- * kind of confident prose that produced the defect.
+ *   - bun (and an absent runtime — the default cell): nitro's **bun** preset.
+ *     `.output/nitro.json` carries `"preset": "bun"` and the entry calls that
+ *     runtime's global `serve()` at module top level, so it is executable by
+ *     bun and NOT by node. `kn-next build` compiles it into the single
+ *     executable.
+ *   - node: nitro's **node** preset (`"preset": "node-server"`), entry
+ *     `knext-node-entry.mjs`. Run uncompiled — `node .output/server/index.mjs`
+ *     — with the V8 compile cache baked into the image (ADR-0035).
+ *
+ * ADR-0036 once claimed the two cells share ONE entry. That was false for the
+ * bun-preset artifact (a design gate ran it: `Bun is not defined`), and it is
+ * still false: they are two artifacts from one builder, which is exactly why
+ * the preset is part of the shape.
  *
  * `execution: "in-process"` rather than `"spawn"`: unlike the standalone
  * server, there is no child to supervise, so SIGTERM draining has to be handled
@@ -269,11 +289,13 @@ export const vinextBuilder: BuilderAdapter = {
     // while making `turbopack` selectable too. Available because both halves now
     // exist — `cli/vinext-build.ts` produces the executable (vite build ->
     // nitro bun preset -> `bun build --compile --minify --bytecode`, floored at
-    // Bun 1.4.0), and `templates/app/Dockerfile.vinext.hbs` ships it.
+    // Bun 1.4.0), and `templates/app/Dockerfile.hbs` ships it. The node cell's
+    // image is `templates/app/Dockerfile.vinext-node.hbs` (#1260).
     available: true,
-    describeArtifact(root: string): BuildArtifact {
+    describeArtifact(root: string, runtime?: RuntimeId): BuildArtifact {
         return {
-            shape: "nitro-output-bun",
+            shape:
+                runtime === "node" ? "nitro-output-node" : "nitro-output-bun",
             root,
             entry: ".output/server/index.mjs",
             execution: "in-process",
@@ -282,9 +304,10 @@ export const vinextBuilder: BuilderAdapter = {
 };
 
 /**
- * Node executes the standalone shape, which it spawns as a child. That is the
- * whole list.
+ * Node executes the standalone shape (spawned as a child) and the node-preset
+ * nitro output (in-process). NOT the bun-preset nitro output.
  *
+ * History, kept because the reasoning is what protects the list:
  * This docstring previously said "Node executes both shapes", citing ADR-0036,
  * and argued that ADR-0042 Decision 2's exclusion of `node + vinext` was policy
  * rather than capability. **Measured, the cell is not capable at all**: the
@@ -295,6 +318,10 @@ export const vinextBuilder: BuilderAdapter = {
  * later emits a node-preset nitro output, that is a NEW shape, and ADR-0042's
  * policy question revives at that point rather than having been quietly
  * retired — see `docs/adr/drafts/0048-draft-build-runtime-separation.md`.
+ *
+ * #1260 is that point, and the policy question was answered by the founder on
+ * #1218 (ADR-0054 Amendment 7): vinext × node is a supported cell. The shape
+ * was added on MEASUREMENT (GET / 200 under node), not on prose.
  */
 export const nodeRuntime: RuntimeAdapter = {
     id: "node",
@@ -308,7 +335,10 @@ export const nodeRuntime: RuntimeAdapter = {
     // tree builds a node-preset output. Re-add a node-executable nitro shape
     // when something actually emits one; until then this would have made
     // `isCompatible` certify a pairing that crashes on boot.
-    accepts: ["next-standalone"],
+    //
+    // #1260 emits one: `nitro-output-node`, measured serving under node. The
+    // bun-preset shape stays OFF this list — that measurement has not changed.
+    accepts: ["next-standalone", "nitro-output-node"],
 };
 
 /**
