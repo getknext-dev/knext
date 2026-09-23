@@ -57,7 +57,7 @@ At a raw 79%, 95% is not reachable honestly: most of the remaining gap is format
 
 | Option | Honest? | Hides code? | Cost | Verdict |
 |---|---|---|---|---|
-| **A. Parser-classified denominator, both numbers gated** | yes | no. Proved by a fixture, a repo-wide differential scan, and 8 mutations | one module, no new runner | **chosen** |
+| **A. Parser-classified denominator, both numbers gated** | yes | no. Proved by a fixture, a repo-wide differential scan, and 13 mutations | one module, no new runner | **chosen** |
 | B. Intersection merge (keep a line only if every report that loaded the file has it) | reads 95.02% | **yes.** It drops 219 lines the parser calls executable. Example: `asset-upload.ts:1080`, an uncovered `throw`, is missing from 41 of its 44 reports | trivial | rejected |
 | C. V8-based tool (c8, `node --test --experimental-test-coverage`) | yes | no | a second runner. The suite uses `bun:test` and `mock.module`, and removing the second runner was the whole of #871 | rejected for now |
 | D. bun's function/branch data | n/a | n/a | bun gives no function identity and emits no branch records | not usable |
@@ -86,8 +86,18 @@ jev (calibrated second opinion), run on the evidence above: picked A with confid
   `tests/coverage-executable-lines.test.ts`, which holds the tricky-case fixture and a
   differential scan. The scan checks every noise line in `packages/*/src` against TypeScript's
   own emitted JS and source map, and requires that the line emit no runtime JS. It is also
-  guarded by `scripts/mutation-prove-honest-coverage.mjs`, which runs 7 red mutations and 1
-  negative control.
+  guarded by `scripts/mutation-prove-honest-coverage.mjs`, which runs 12 red mutations and 1
+  negative control. The red mutations cover both directions and the fail-closed paths.
+- **The differential scan is not a proof of the invariant.** It only sees constructs that already
+  occur in this tree. The PR's review found two latent erasures that no current source
+  exercised:
+  - `ts.isTypeNode` answers true for the runtime `void` operator's keyword;
+  - TypeScript 4.7+ instantiation expressions used as values (`box<string>`) share a node kind
+    with `implements` clauses.
+
+  Both are fixed and pinned by fixtures and mutations. The lesson is that `ts.isTypeNode`
+  identifies a node's *kind*, not its *position*. Any new erasure rule must check the type slot,
+  not the kind alone.
 
 ## Action items
 
