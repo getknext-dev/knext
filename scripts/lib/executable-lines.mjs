@@ -211,6 +211,9 @@ export function classifyLines(src, fileName) {
     if (tok.kind === K.EndOfFileToken) return;
     let start = tok.getStart(sf);
     const end = tok.getEnd();
+    // A zero-width leaf (an EMPTY SyntaxList, e.g. the members of `{}`) holds no
+    // source text, so there is nothing on any line for it to carry.
+    if (end <= start) return;
     if (tok.kind === K.JsxText) {
       // JSX text has no trivia; its meaningful start is its first non-space.
       const text = src.slice(start, end);
