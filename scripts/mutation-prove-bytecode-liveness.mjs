@@ -43,20 +43,20 @@ const DEPLOY = resolve(REPO_ROOT, 'scripts/e2e-deploy.sh');
 const SUMMARY = resolve(REPO_ROOT, 'scripts/e2e-summary.mjs');
 const AUDIT = resolve(REPO_ROOT, 'scripts/compat-window-audit.mjs');
 // knext's OWN compile-cache path — what the standalone-node image ships.
-const SHIPPED_BAKE = resolve(
-  REPO_ROOT,
-  'packages/kn-next/templates/runtime-standalone/knext-compile-cache-bake.mjs.hbs',
-);
+// biome-ignore format: the anchor scan needs the resolve() call on ONE line
+const SHIPPED_BAKE = resolve(REPO_ROOT, 'packages/kn-next/templates/runtime-standalone/knext-compile-cache-bake.mjs.hbs');
 const CHILD_ENV = resolve(REPO_ROOT, 'packages/kn-next/src/adapters/env.ts');
 
 const SPEC_RULE = 'tests/bytecode-liveness.test.ts';
 const SPEC_CHAIN = 'tests/bytecode-liveness-chain.test.ts';
 const SPEC_WIRING = 'tests/bytecode-liveness-wiring.test.ts';
 const SPEC_AUDIT = 'tests/compat-window-audit.test.ts';
-const SPECS = [SPEC_RULE, SPEC_CHAIN, SPEC_WIRING, SPEC_AUDIT];
+const SPEC_STATE = 'tests/e2e-state-snapshot.test.ts';
+const SNAPSHOT = resolve(REPO_ROOT, 'scripts/lib/e2e-state-snapshot.sh');
+const SPECS = [SPEC_RULE, SPEC_CHAIN, SPEC_WIRING, SPEC_AUDIT, SPEC_STATE];
 
 /**
- * Table-driven, with literal `anchor:` properties, so the static anchor-drift
+ * Table-driven, with literal anchor properties, so the static anchor-drift
  * scan (scripts/lib/prover-anchor-scan.mjs) can check every anchor at PR time.
  */
 const MUTATIONS = [
@@ -64,7 +64,8 @@ const MUTATIONS = [
     label: 'node: warm a /_next/static asset instead of a server route',
     target: DEPLOY,
     spec: SPEC_WIRING,
-    anchor: 'process.stdout.write((cands.length ? cands : ["/"]).map((r) => `${basePath}${r}`).join(" "));',
+    anchor:
+      'process.stdout.write((cands.length ? cands : ["/"]).map((r) => `${basePath}${r}`).join(" "));',
     replacement: 'process.stdout.write(`${basePath}/_next/static/x.js`);',
   },
   {
@@ -84,11 +85,28 @@ const MUTATIONS = [
     commentPrefix: '//',
   },
   {
-    label: 'node: the harness stops setting the accept-any-status knob (404/500 fixtures fail again)',
+    label:
+      'node: the harness stops setting the accept-any-status knob (404/500 fixtures fail again)',
     target: DEPLOY,
     spec: SPEC_WIRING,
     anchor: '            KNEXT_WARM_ACCEPT_ANY_STATUS=1 \\\n',
     replacement: '',
+  },
+  {
+    label:
+      'node: skip restoring the fixture tree after the bake (bake-time state leaks into the fixture)',
+    target: DEPLOY,
+    spec: SPEC_STATE,
+    anchor:
+      '      restore_state "${STANDALONE_APP_DIR}" "${BAKE_STATE_SNAPSHOT}" ".next/compile-cache"',
+    replacement: '      true',
+  },
+  {
+    label: 'node: the restore helper stops unpacking the pristine snapshot',
+    target: SNAPSHOT,
+    spec: SPEC_STATE,
+    anchor: '  tar -C "${dir}" -xf "${tarfile}"',
+    replacement: '  true',
   },
   // ── Disable the node cache ───────────────────────────────────────────────
   {

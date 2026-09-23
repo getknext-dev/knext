@@ -30,6 +30,8 @@ SERVER_LOG="${APP_DIR}/.adapter-server.log"
 RUNTIME="${KNEXT_RUNTIME:-node}"   # node (default) | bun  (bun = fast-follow target)
 
 log() { echo "[e2e-deploy] $*" >&2; }
+# shellcheck source=lib/e2e-state-snapshot.sh
+. "${SCRIPT_DIR}/lib/e2e-state-snapshot.sh"
 
 # ── pick a free TCP port ──────────────────────────────────────────────────────
 free_port() {
@@ -535,7 +537,8 @@ fi
 #   * the BAKE: `templates/runtime-standalone/knext-compile-cache-bake.mjs.hbs`
 #     — the exact driver Dockerfile.standalone.hbs RUNs at docker build. It
 #     imports server.js in-process, waits for it, fetches KNEXT_WARM_PATH
-#     (must answer 2xx) and flushes. The template has no Handlebars tokens, so
+#     (2xx in the image; the harness sets the internal accept-any-status knob)
+#     and flushes. The template has no Handlebars tokens, so
 #     the staged copy is byte-identical to what the image runs;
 #   * the BOOT (step 4): the shipped `node-server` supervisor entry — what the
 #     image's ENTRYPOINT imports — which spawns server.js with the inherited
@@ -545,11 +548,14 @@ fi
 # diagnostics expect it: `<dir of server.js>/.next/compile-cache`.
 #
 # WARM PATH. The image warms the app's health route; the upstream fixtures have
-# none, and a request to an app route before the test would change its state
-# (ISR entries, counters, after() logs). So the harness warms a FRAMEWORK-served
-# static chunk (`<basePath>/_next/static/…`): it proves the booted server
-# answers, and no app route runs. Middleware may still see that request (as it
-# would any static request), which is the one fixture-visible side effect.
+# none, so the harness renders a SERVER route (`/`, else a static page route from
+# the build manifests — never a static asset: a file compiles no server code) and
+# accepts any complete HTTP response (an error page still loads the runtime).
+# That render runs in the very tree the fixture boots from, so the tree is
+# SNAPSHOT before the bake and RESTORED after it (scripts/lib/e2e-state-snapshot.sh):
+# the fixture starts from pristine state (no ISR entries, counters, after() logs),
+# and only the compile cache survives. The cache must be baked at the SAME path —
+# it is keyed by module path — so a copy elsewhere would not help.
 #
 # A failed bake does NOT fail the deploy — the fixture's own tests are a
 # separate verdict — it is RECORDED (compile_cache_bake=failed in the evidence
@@ -608,6 +614,10 @@ if [ "${RUNTIME}" != "bun" ]; then
       # a page that throws), so try each candidate server route in turn: the bake
       # counts as ok when the SHIPPED driver succeeds (2xx) on ANY of them.
       NODE_CC_BAKE="failed"
+      # The bake renders a route in the tree the fixture boots from: snapshot it
+      # first and restore it after, keeping only the compile cache.
+      BAKE_STATE_SNAPSHOT="${APP_DIR}/.knext-pre-bake-state.tar"
+      snapshot_state "${STANDALONE_APP_DIR}" "${BAKE_STATE_SNAPSHOT}" ".next/compile-cache"
       for WARM_TRY in ${WARM_PATH}; do
         if (
           cd "${STANDALONE_APP_DIR}"
@@ -624,6 +634,8 @@ if [ "${RUNTIME}" != "bun" ]; then
         fi
         BAKE_PORT="$(free_port)"
       done
+      restore_state "${STANDALONE_APP_DIR}" "${BAKE_STATE_SNAPSHOT}" ".next/compile-cache"
+      rm -f "${BAKE_STATE_SNAPSHOT}"
       if [ "${NODE_CC_BAKE}" != "ok" ]; then
         log "WARNING: the shipped compile-cache bake FAILED — recorded as compile_cache_bake=failed (NOT live); the deploy proceeds so the fixture's own tests still run"
         # Diagnostic sidecar (NOT graded): which fixture, which warm path, why.
@@ -1071,9 +1083,9 @@ log "deployment ready: build=${BUILD_ID} deployment=${DEPLOYMENT_ID} pid=${SERVE
 # WHAT IS GRADED, precisely: modules under the standalone tree (the Next child:
 # server.js, Next's framework internals, and whatever app code it loads at
 # boot) up to readiness. The supervisor's own modules are EXCLUDED (--under):
-# the shipped bake bakes the server, never the entry. App route chunks that
-# load on a request are NOT graded — warming them would mean requesting an app
-# route before the test does.
+# the shipped bake bakes the server, never the entry. Code that first loads on a
+# later request is NOT graded (only what the server loads by readiness). The bake
+# itself did render a server route, but its side effects were rolled back.
 #
 # The settle loop (≤5s) covers the tail of boot-time loading after the port
 # opened; a live deploy exits it on the first pass, and a deploy whose bake did

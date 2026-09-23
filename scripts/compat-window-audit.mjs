@@ -131,8 +131,8 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { isShardBytecodeLive } from './e2e-bytecode-liveness.mjs';
 import { COMPAT_MODES, isRcRef } from './compat-credential-ref.mjs';
+import { isShardBytecodeLive } from './e2e-bytecode-liveness.mjs';
 
 /** The v1.0 gate: fourteen consecutive qualifying nights. */
 export const WINDOW_REQUIRED_NIGHTS = 14;
