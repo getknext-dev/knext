@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it } from 'bun:test';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
   auditWindow,
+  CREDENTIAL_CELLS,
   DEFAULT_FETCH_LIMIT,
   fetchLedgers,
   formatReport,
@@ -993,4 +994,41 @@ describe('rule 7 — bytecode caching proven LIVE on every shard of a credential
     const g = gradeNight(n, { scope: 'early-warning' });
     expect(hasReason(g, 'bytecode-not-live')).toBe(false);
   });
+});
+
+/**
+ * #1294 round 2 (low finding, jev 0.55) — `CREDENTIAL_CELLS.workflowFile` must
+ * name a workflow that actually RUNS the cell's own runtime. `compat-vinext.yml`
+ * hardcodes `KNEXT_RUNTIME: bun` (the nitro bun-preset entry calls that
+ * runtime's global `serve()`; there is no node arm to select), so mapping
+ * `node-vinext` to it would fingerprint bytes that never execute as `node`.
+ */
+describe('CREDENTIAL_CELLS.workflowFile names a workflow that runs the cell’s OWN runtime (#1294 round 2)', () => {
+  const REPO_ROOT = resolve(import.meta.dirname, '..');
+
+  /** A workflow's STATIC `KNEXT_RUNTIME: <literal>` env line, or null if templated/absent. */
+  function staticRuntime(workflowFile: string): string | null {
+    const src = readFileSync(resolve(REPO_ROOT, '.github/workflows', workflowFile), 'utf8');
+    const m = src.match(/^\s*KNEXT_RUNTIME:\s*(\S+)\s*$/m);
+    if (!m) return null;
+    // A templated value (`${{ ... }}`) is not "static" — that workflow selects
+    // its runtime per-run (e.g. test-e2e-deploy.yml, which the caller already
+    // pins with `--lane "${KNEXT_RUNTIME}"`, so lane and runtime self-agree by
+    // construction there).
+    return m[1].startsWith('${{') ? null : m[1];
+  }
+
+  it('node-vinext has NO workflow wired (compat-vinext.yml is bun-only) — never guessed', () => {
+    const cell = CREDENTIAL_CELLS.find((c) => c.lane === 'node-vinext');
+    expect(cell?.workflowFile).toBeNull();
+  });
+
+  for (const cell of CREDENTIAL_CELLS) {
+    if (!cell.workflowFile) continue;
+    const runtime = staticRuntime(cell.workflowFile);
+    if (runtime === null) continue; // templated — the workflow selects its own runtime per run
+    it(`lane "${cell.lane}": ${cell.workflowFile}'s static KNEXT_RUNTIME (${runtime}) matches the cell's runtime (${cell.runtime})`, () => {
+      expect(runtime).toBe(cell.runtime);
+    });
+  }
 });

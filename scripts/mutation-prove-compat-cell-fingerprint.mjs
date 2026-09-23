@@ -9,12 +9,20 @@
  *      `test-e2e-deploy.yml`. This is the mutation named in the exit
  *      criteria: DROP `compat-vinext.yml` from the inputs by reverting to the
  *      pre-#1294 hardcode, and the spec must go RED.
- *   2. SCRIPTS/LIB SCAN — `scripts/lib/e2e-*` must be part of the frozen
- *      harness (#1280 pieces, e.g. `e2e-state-snapshot.sh`), not silently
- *      invisible to the digest.
- *   3. `--lane` MUST ACTUALLY SELECT — a lane argument that gets computed but
+ *   2. `--lane` MUST ACTUALLY SELECT — a lane argument that gets computed but
  *      then discarded (falling back to the default lane always) is
  *      indistinguishable from no lane support at all.
+ *   3. THE IMPORT/SOURCE CLOSURE MUST ACTUALLY RUN — round 1's directory-
+ *      pattern `scripts/lib` root only saw `e2e-*`-prefixed files, so
+ *      `scripts/e2e-preflight.mjs`'s imports of `./lib/knext-closure.mjs` and
+ *      `./lib/workspace-protocol.mjs` (neither `e2e-`-prefixed) stayed
+ *      invisible to the digest — round 2's exact finding. Disarming the
+ *      closure loop must remove EVERYTHING it swept in (shell-sourced
+ *      `e2e-state-snapshot.sh` included).
+ *   4. THE JS `from` IMPORT PATTERN SPECIFICALLY MUST BE DETECTED — the
+ *      mutation named in round 2's review comment: remove `knext-closure.mjs`
+ *      from the computed closure (by disabling the ES-module `from` pattern
+ *      that is its only detection path) and the spec must go RED.
  *
  * A guard that stays green when the behaviour it protects is removed is
  * decoration. Each mutation below deletes one piece of behaviour and requires
@@ -25,8 +33,8 @@
  * Shared harness, for the reasons this repo has already paid for:
  *   * `mutate` asserts the anchor occurs exactly once and aborts otherwise —
  *     a silently-failed substitution would certify a decorative guard green;
- *   * `declareMutations`/`recordMutation` — the lane can tell 2-of-3 from
- *     3-of-3;
+ *   * `declareMutations`/`recordMutation` — the lane can tell 3-of-4 from
+ *     4-of-4;
  *   * judged on EXIT CODES, never on grepped output — vitest/bun:test write
  *     ANSI, and a pass/fail grep over it once certified fourteen decorative
  *     mutations green.
@@ -45,7 +53,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const TARGET = resolve(REPO_ROOT, 'scripts/compat-window-fingerprint.mjs');
 const SPECS = ['tests/compat-window-fingerprint.test.ts', 'tests/compat-vinext-lane.test.ts'];
 
-declareMutations(3);
+declareMutations(4);
 
 const RUNNERS = SPECS.map((spec) => ({ spec, runner: resolveSpecRunner(REPO_ROOT, spec) }));
 
@@ -105,20 +113,33 @@ prove(
   "  return { kind: 'file', path: '.github/workflows/test-e2e-deploy.yml' };",
 );
 
-// 2. Stop scanning scripts/lib/e2e-* — the #1280 pieces (e.g.
-//    e2e-state-snapshot.sh) become invisible to the digest again.
-prove(
-  'scripts/lib scan: remove the scripts/lib/e2e-* harness root',
-  "  { kind: 'dir', path: 'scripts/lib', match: /^e2e-[^/]*\\.(sh|mjs|cjs|js)$/ },\n",
-  '',
-);
-
-// 3. Stop actually USING the caller's `lane` — every call fingerprints the
+// 2. Stop actually USING the caller's `lane` — every call fingerprints the
 //    default lane regardless of what was requested.
 prove(
   '--lane is computed but discarded: collectHarness always uses CREDENTIAL_LANE',
   'const harness = collectHarness(repoRoot, lane, { workflowFile });',
   'const harness = collectHarness(repoRoot, CREDENTIAL_LANE, { workflowFile });',
+);
+
+// 3. Stop running the import/source closure at all — everything it swept in
+//    (shell-sourced `e2e-state-snapshot.sh` AND every JS import) vanishes
+//    from the frozen set, reopening the #1280 gap wholesale.
+prove(
+  'closure loop disarmed: entry scripts stop reaching anything beyond themselves',
+  'for (const abs of closureFrom(closureEntries)) {',
+  'for (const abs of []) {',
+);
+
+// 4. THE mutation named in round 2's review comment: remove `knext-closure.mjs`
+//    from the computed closure. It is reached ONLY via the ES-module `from`
+//    pattern (`import { … } from './lib/knext-closure.mjs'` in
+//    `scripts/e2e-preflight.mjs`), so disabling that one pattern — while
+//    leaving `require()`, dynamic `import()` and shell `source` intact —
+//    removes exactly that dependency and nothing else.
+prove(
+  "remove knext-closure.mjs from the computed closure: disable the JS 'from' import pattern",
+  '/\\bfrom\\s+[\'"](\\.\\.?\\/[^\'"]+)[\'"]/g,',
+  '/(?!)/g,',
 );
 
 console.log(`\n${pass} caught, ${fail} undetected.`);

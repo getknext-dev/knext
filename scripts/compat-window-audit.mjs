@@ -194,7 +194,13 @@ export const CREDENTIAL_CELLS = Object.freeze([
     builder: 'vinext',
     lane: 'node-vinext',
     wired: false,
-    workflowFile: 'compat-vinext.yml',
+    // #1294 round 2: `compat-vinext.yml` hardcodes `KNEXT_RUNTIME: bun` — the
+    // nitro bun-preset entry calls that runtime's global `serve()`, so there
+    // is no node arm to select (see the workflow's own header comment). It is
+    // NOT this cell's workflow, and mapping it here would fingerprint a file
+    // that runs the WRONG runtime for the cell. `null` until #1260 wires a
+    // real node×vinext workflow.
+    workflowFile: null,
   }),
   Object.freeze({
     runtime: 'bun',

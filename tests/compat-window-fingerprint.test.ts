@@ -2,15 +2,17 @@ import { afterAll, describe, expect, it } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 
 /**
  * S1 / #545 — the COMPAT-WINDOW FINGERPRINT.
@@ -703,40 +705,84 @@ describe('compat-window fingerprint — each cell hashes the workflow that actua
 });
 
 /**
- * #1294 / #1280 — `scripts/lib/*` that a lifecycle script SOURCES is part of
- * the frozen harness set. `scripts/e2e-deploy.sh` sources
- * `scripts/lib/e2e-state-snapshot.sh`; before this, the frozen `scripts` dir
- * root only matched TOP-LEVEL `e2e-*` files, so the sourced helper was
- * invisible to the digest — a change there would not restart the window.
+ * #1294 round 2 — a lifecycle script's LOCAL dependency closure (imports,
+ * requires, dynamic import()s, and shell `source`/`.`) is part of the frozen
+ * harness set, followed TRANSITIVELY and regardless of filename convention.
+ *
+ * Round 1 fixed this for shell (`scripts/e2e-deploy.sh` sources
+ * `scripts/lib/e2e-state-snapshot.sh`) with a directory-pattern root scoped to
+ * `e2e-*`-prefixed files. That pattern went blind the moment a REAL sourced
+ * file broke the naming convention: `scripts/e2e-preflight.mjs` imports
+ * `./lib/knext-closure.mjs` and `./lib/workspace-protocol.mjs`, neither
+ * `e2e-`-prefixed, so the pattern-based root never saw them — the same gap
+ * class, one level less naming-dependent. The closure fixes the CLASS: it
+ * reaches every file an entry script actually imports or sources, however
+ * it is named.
  */
-describe('compat-window fingerprint — scripts/lib/e2e-* is part of the frozen harness (#1280 pieces)', () => {
-  it('SCANS scripts/lib: a newly-added scripts/lib/e2e-* file moves the digest with no script edit', () => {
+describe('compat-window fingerprint — the entry scripts’ import/source closure is part of the frozen harness (#1294 round 2, #1280)', () => {
+  it('a newly-SOURCED scripts/lib/*.sh file moves the digest with no script edit to the entry point itself', () => {
     const { repoRoot, tarballsDir } = makeFixture();
     mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
-    writeFileSync(join(repoRoot, 'scripts/lib/e2e-state-snapshot.sh'), '#!/usr/bin/env bash\n');
+    writeFileSync(join(repoRoot, 'scripts/lib/helper.sh'), '#!/usr/bin/env bash\necho v1\n');
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-deploy.sh'),
+      '#!/usr/bin/env bash\nSCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n. "${SCRIPT_DIR}/lib/helper.sh"\necho deploy\n',
+    );
     const before = fingerprint(repoRoot, tarballsDir);
-    writeFileSync(join(repoRoot, 'scripts/lib/e2e-newly-added.sh'), '#!/usr/bin/env bash\n');
+    writeFileSync(join(repoRoot, 'scripts/lib/helper.sh'), '#!/usr/bin/env bash\necho v2\n');
     const after = fingerprint(repoRoot, tarballsDir);
     expect(after.fingerprint).not.toBe(before.fingerprint);
-    expect(after.counts.harness).toBe(before.counts.harness + 1);
+    // Attributable: the closure adds exactly the one sourced file, no matter
+    // that its name carries no `e2e-` prefix.
+    expect(after.counts.harness).toBe(before.counts.harness);
   });
 
-  it('a fixture with no scripts/lib/ at all still fingerprints (the root is optional when absent)', () => {
+  it('a newly-IMPORTED scripts/lib/*.mjs file (no e2e- prefix) moves the digest — the exact #1294 round-2 gap', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+    writeFileSync(join(repoRoot, 'scripts/lib/knext-closure.mjs'), 'export const x = 1;\n');
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-summary.mjs'),
+      "import { x } from './lib/knext-closure.mjs';\nexport const y = x;\n",
+    );
+    const before = fingerprint(repoRoot, tarballsDir);
+    writeFileSync(join(repoRoot, 'scripts/lib/knext-closure.mjs'), 'export const x = 2;\n');
+    const after = fingerprint(repoRoot, tarballsDir);
+    expect(after.fingerprint).not.toBe(before.fingerprint);
+    expect(after.counts.harness).toBe(before.counts.harness);
+  });
+
+  it('a scripts/lib/ file that NOTHING references is not swept in (the closure follows references, not a directory pattern)', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+    writeFileSync(join(repoRoot, 'scripts/lib/unreferenced.sh'), '#!/usr/bin/env bash\n');
+    const before = fingerprint(repoRoot, tarballsDir);
+    writeFileSync(
+      join(repoRoot, 'scripts/lib/unreferenced.sh'),
+      '#!/usr/bin/env bash\necho changed\n',
+    );
+    const after = fingerprint(repoRoot, tarballsDir);
+    expect(after.fingerprint).toBe(before.fingerprint);
+  });
+
+  it('a fixture with no scripts/lib/ at all still fingerprints (no entry references it)', () => {
     // Every OTHER makeFixture()-based test in this file relies on this: none of
     // them create scripts/lib/, and none of them may start failing because of
-    // an unrelated root that has nothing to do with what they test.
+    // an unrelated closure that has nothing to do with what they test.
     const { repoRoot, tarballsDir } = makeFixture();
     expect(() => fingerprint(repoRoot, tarballsDir)).not.toThrow();
   });
 
-  it('an EXISTING but EMPTY scripts/lib/ still fails loud (present-but-swept-clean looks like a mass delete)', () => {
+  it('a REFERENCED-but-missing file is a hard error, never a silently shrunk closure', () => {
     const { repoRoot, tarballsDir } = makeFixture();
-    mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
-    writeFileSync(join(repoRoot, 'scripts/lib/not-e2e-prefixed.sh'), '#!/usr/bin/env bash\n');
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-summary.mjs'),
+      "import { x } from './lib/does-not-exist.mjs';\nexport const y = x;\n",
+    );
     expect(() => fingerprint(repoRoot, tarballsDir)).toThrow();
   });
 
-  it('names scripts/lib/e2e-state-snapshot.sh in the real repo harness (node lane)', () => {
+  it('names BOTH scripts/lib/e2e-state-snapshot.sh (sourced) and scripts/lib/knext-closure.mjs (imported, no e2e- prefix) in the real repo harness (node lane)', () => {
     const tarballsDir = tempDir('knext-fp-lib-real-');
     packFixtureTarball(tarballsDir, 'core', '0.3.0');
     const result = execFileSync(
@@ -747,48 +793,101 @@ describe('compat-window fingerprint — scripts/lib/e2e-* is part of the frozen 
     const parsed = JSON.parse(result) as { files: { component: string; path: string }[] };
     const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
     expect(harness).toContain('scripts/lib/e2e-state-snapshot.sh');
+    expect(harness).toContain('scripts/lib/knext-closure.mjs');
+    expect(harness).toContain('scripts/lib/workspace-protocol.mjs');
   });
 });
 
 /**
- * #1294 — SCANNING TEST: a script a lane's deploy entrypoint sources (via
- * `source`/`. `) must be present in that lane's frozen harness set. This is
- * the guard that would have caught the #1280 gap directly, and catches the
- * next one: it reads the REAL `scripts/e2e-deploy*.sh` sources, extracts every
- * `scripts/lib/*` file they source, and cross-checks each against what
- * `computeFingerprint` actually swept in for that lane's real harness. A
- * sourced file that does not match the frozen set's patterns (e.g. a future
- * `scripts/lib/helper.sh`, no `e2e-` prefix) goes RED here — never silently
- * excluded.
+ * #1294 round 2 — SCANNING TEST, INDEPENDENTLY REIMPLEMENTED: every file a
+ * top-level `scripts/e2e-*` entry script reaches via shell `source`/`. ` OR a
+ * JS `import`/`require`/`import()`, TRANSITIVELY, must be present in the
+ * frozen harness set. Deliberately does NOT call into
+ * `directLocalDeps`/`closureFrom` from `compat-window-fingerprint.mjs` — a
+ * scan that shares its own implementation with the thing it is checking would
+ * go green the same way the thing it checks is wrong. It reads the REAL
+ * `scripts/e2e-*` sources with its own parser and cross-checks the reachable
+ * set against what `computeFingerprint` actually swept in, for BOTH lane
+ * families (node/bun → test-e2e-deploy.yml, bun-vinext → compat-vinext.yml —
+ * the entry-point set itself does not vary by lane, only the workflow entry
+ * does). A referenced file the closure misses — a shell `source`, OR a `.mjs`
+ * `import` with no `e2e-` prefix, at any depth — goes RED here.
  */
-describe('compat-window fingerprint — scanning: every scripts/lib file a deploy script sources is in the harness', () => {
-  /** `source "${SCRIPT_DIR}/lib/X"` / `. "${SCRIPT_DIR}/lib/X"` → `scripts/lib/X`. */
-  function sourcedLibFiles(deployScriptAbsPath: string): string[] {
-    const src = readFileSync(deployScriptAbsPath, 'utf8');
-    const found = new Set<string>();
-    for (const m of src.matchAll(/^\.\s+"\$\{[A-Z_]+\}\/lib\/([^"]+)"/gm)) {
-      found.add(`scripts/lib/${m[1]}`);
+describe('compat-window fingerprint — scanning: every file an e2e-* entry script reaches (source OR import) is in the harness', () => {
+  /** Direct local (`./…`) dependencies of one file — shell `source`/`.` and JS import/require/import(). */
+  function directDeps(absPath: string): string[] {
+    const src = readFileSync(absPath, 'utf8');
+    const dir = dirname(absPath);
+    const specs = new Set<string>();
+    if (/\.(mjs|cjs|js)$/.test(absPath)) {
+      for (const re of [
+        /\bfrom\s+['"](\.\.?\/[^'"]+)['"]/g,
+        /\brequire\(\s*['"](\.\.?\/[^'"]+)['"]\s*\)/g,
+        /\bimport\(\s*['"](\.\.?\/[^'"]+)['"]\s*\)/g,
+        /^\s*import\s+['"](\.\.?\/[^'"]+)['"]/gm,
+      ]) {
+        for (const m of src.matchAll(re)) specs.add(m[1]);
+      }
+    } else {
+      for (const re of [
+        /^\s*\.\s+"\$\{[A-Z_]+\}\/([^"]+)"/gm,
+        /^\s*source\s+"\$\{[A-Z_]+\}\/([^"]+)"/gm,
+      ]) {
+        for (const m of src.matchAll(re)) specs.add(`./${m[1]}`);
+      }
     }
-    for (const m of src.matchAll(/^source\s+"\$\{[A-Z_]+\}\/lib\/([^"]+)"/gm)) {
-      found.add(`scripts/lib/${m[1]}`);
+    const resolved: string[] = [];
+    for (const spec of specs) {
+      const base = resolve(dir, spec);
+      const candidates = /\.[a-z]+$/.test(spec)
+        ? [base]
+        : [base, `${base}.mjs`, `${base}.js`, `${base}.cjs`];
+      const hit = candidates.find((c) => existsSync(c));
+      if (hit) resolved.push(hit);
     }
-    return [...found].sort();
+    return resolved;
   }
 
-  const CELL_DEPLOY_SCRIPTS: Record<string, string> = {
-    node: 'scripts/e2e-deploy.sh',
-    bun: 'scripts/e2e-deploy.sh',
-    'bun-vinext': 'scripts/e2e-deploy-vinext.sh',
-  };
+  /** Full transitive closure, repo-relative paths, of the given entry files. */
+  function closure(entryAbsPaths: string[]): string[] {
+    const seen = new Set(entryAbsPaths);
+    const queue = [...entryAbsPaths];
+    while (queue.length > 0) {
+      // biome-ignore lint/style/noNonNullAssertion: queue.length checked above
+      const current = queue.shift()!;
+      for (const dep of directDeps(current)) {
+        if (!seen.has(dep)) {
+          seen.add(dep);
+          queue.push(dep);
+        }
+      }
+    }
+    return [...seen].map((abs) => relative(REPO_ROOT, abs)).sort();
+  }
 
-  it('scripts/e2e-deploy.sh sources at least one scripts/lib/ file, so this scan is not vacuous', () => {
-    const sourced = sourcedLibFiles(resolve(REPO_ROOT, 'scripts/e2e-deploy.sh'));
-    expect(sourced.length).toBeGreaterThan(0);
+  const ENTRY_SCRIPTS = readdirSync(resolve(REPO_ROOT, 'scripts')).filter((f) =>
+    /^e2e-[^/]*\.(sh|mjs|cjs|js)$/.test(f),
+  );
+
+  it('the real scripts/e2e-* entry set is non-empty and reaches at least one file outside itself, so this scan is not vacuous', () => {
+    expect(ENTRY_SCRIPTS.length).toBeGreaterThan(0);
+    const reached = closure(ENTRY_SCRIPTS.map((f) => resolve(REPO_ROOT, 'scripts', f)));
+    expect(reached.length).toBeGreaterThan(ENTRY_SCRIPTS.length);
   });
 
-  for (const [lane, deployScript] of Object.entries(CELL_DEPLOY_SCRIPTS)) {
-    it(`lane "${lane}": every scripts/lib/ file ${deployScript} sources is in the frozen harness`, () => {
-      const sourced = sourcedLibFiles(resolve(REPO_ROOT, deployScript));
+  it('the reachable closure includes a SOURCED shell helper AND an IMPORTED .mjs helper with no e2e- prefix', () => {
+    const reached = closure(ENTRY_SCRIPTS.map((f) => resolve(REPO_ROOT, 'scripts', f)));
+    expect(reached).toContain('scripts/lib/e2e-state-snapshot.sh');
+    expect(reached).toContain('scripts/lib/knext-closure.mjs');
+  });
+
+  for (const [lane, workflowFile] of [
+    ['node', 'test-e2e-deploy.yml'],
+    ['bun', 'test-e2e-deploy.yml'],
+    ['bun-vinext', 'compat-vinext.yml'],
+  ] as const) {
+    it(`lane "${lane}" (${workflowFile}): every file reachable from the entry scripts is in the frozen harness`, () => {
+      const reached = closure(ENTRY_SCRIPTS.map((f) => resolve(REPO_ROOT, 'scripts', f)));
 
       const tarballsDir = tempDir('knext-fp-scan-');
       packFixtureTarball(tarballsDir, 'core', '0.3.0');
@@ -812,10 +911,10 @@ describe('compat-window fingerprint — scanning: every scripts/lib file a deplo
         parsed.files.filter((f) => f.component === 'harness').map((f) => f.path),
       );
 
-      for (const path of sourced) {
+      for (const path of reached) {
         expect(
           harness.has(path),
-          `${deployScript} sources ${path}, missing from lane "${lane}"'s harness`,
+          `reachable from an e2e-* entry script, missing from lane "${lane}"'s harness: ${path}`,
         ).toBe(true);
       }
     });

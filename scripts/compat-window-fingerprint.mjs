@@ -85,7 +85,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, relative, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { CREDENTIAL_CELLS, CREDENTIAL_LANE } from './compat-window-audit.mjs';
 
 export const SCHEMA = 'knext.compat-window-fingerprint/v1';
@@ -103,18 +103,102 @@ export const SCHEMA = 'knext.compat-window-fingerprint/v1';
 export const HARNESS_ROOTS = [
   // The lifecycle scripts the reference harness invokes
   // (NEXT_TEST_DEPLOY_SCRIPT_PATH and friends) plus the preflight/summary/ledger
-  // helpers the workflow runs around them.
-  { kind: 'dir', path: 'scripts', match: /^e2e-[^/]*\.(sh|mjs|cjs|js)$/ },
-  // #1294: the same lifecycle scripts source shared helpers out of
-  // `scripts/lib/` (e.g. `e2e-deploy.sh` sources `lib/e2e-state-snapshot.sh`,
-  // #1280) — those were invisible to the frozen set because the `scripts` root
-  // above only matches TOP-LEVEL `e2e-*` files, not nested ones. Scanned the
-  // same way, one directory over: still `e2e-*`-prefixed, still additive.
-  { kind: 'dir', path: 'scripts/lib', match: /^e2e-[^/]*\.(sh|mjs|cjs|js)$/ },
+  // helpers the workflow runs around them. These are the ENTRY POINTS for the
+  // import/source closure below (#1294 round 2) — not the whole frozen set by
+  // themselves.
+  { kind: 'dir', path: 'scripts', match: /^e2e-[^/]*\.(sh|mjs|cjs|js)$/, isClosureEntry: true },
   // The deploy-tests manifest(s): the exclude ledger that decides what the
   // night actually selected. A second lane manifest is picked up automatically.
   { kind: 'dir', path: 'test', match: /^deploy-tests-manifest\.[^/]*\.json$/ },
 ];
+
+/**
+ * Extract this file's DIRECT local dependencies — never third-party or
+ * `node:`/bare-specifier imports, only files inside the repo (#1294 round 2).
+ *
+ * WHY A CLOSURE, NOT A DIRECTORY PATTERN: `scripts/e2e-preflight.mjs` imports
+ * `./lib/knext-closure.mjs` and `./lib/workspace-protocol.mjs` — neither
+ * carries the `e2e-` prefix a directory-pattern root (`scripts/lib` matched
+ * only `e2e-*`) would need to see them, so editing either left the fingerprint
+ * unchanged: the same gap class the original #1294 fix closed for
+ * `e2e-state-snapshot.sh`, just one level less naming-convention-dependent.
+ * SCANNING is only honest when it reaches everything a script actually
+ * executes, not everything that happens to be named like it does.
+ *
+ * @param {string} absPath
+ * @returns {string[]} resolved absolute paths of files this one directly
+ *   `import`s / `require`s / dynamic-`import()`s (JS) or `source`s / `.`s (sh)
+ */
+function directLocalDeps(absPath) {
+  const src = readFileSync(absPath, 'utf8');
+  const dir = dirname(absPath);
+  /** @type {string[]} */
+  const specs = [];
+
+  if (/\.(mjs|cjs|js)$/.test(absPath)) {
+    const jsPatterns = [
+      /\bfrom\s+['"](\.\.?\/[^'"]+)['"]/g,
+      /\brequire\(\s*['"](\.\.?\/[^'"]+)['"]\s*\)/g,
+      /\bimport\(\s*['"](\.\.?\/[^'"]+)['"]\s*\)/g,
+      // Bare `import './x.mjs';` — side-effect only, no `from`.
+      /^\s*import\s+['"](\.\.?\/[^'"]+)['"]/gm,
+    ];
+    for (const re of jsPatterns) {
+      for (const m of src.matchAll(re)) specs.push(m[1]);
+    }
+  } else {
+    // Shell: `. "${SCRIPT_DIR}/lib/x.sh"` / `source "${SCRIPT_DIR}/lib/x.sh"`.
+    // The `${VAR}/` prefix is always the SCRIPT'S OWN directory by convention
+    // here (`SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"`), so
+    // it resolves the same as a relative import — strip it, resolve from `dir`.
+    const shPatterns = [
+      /^\s*\.\s+"\$\{[A-Z_]+\}\/([^"]+)"/gm,
+      /^\s*source\s+"\$\{[A-Z_]+\}\/([^"]+)"/gm,
+    ];
+    for (const re of shPatterns) {
+      for (const m of src.matchAll(re)) specs.push(`./${m[1]}`);
+    }
+  }
+
+  /** @type {string[]} */
+  const resolved = [];
+  for (const spec of specs) {
+    const base = join(dir, spec);
+    const candidates = /\.[a-z]+$/.test(spec)
+      ? [base]
+      : [base, `${base}.mjs`, `${base}.js`, `${base}.cjs`];
+    const hit = candidates.find((c) => existsSync(c));
+    if (!hit) {
+      throw new Error(
+        `compat-window fingerprint: ${relative(process.cwd(), absPath)} references "${spec}", which does not resolve to a real file. A dependency the frozen set cannot see is a hole in the freeze scope (#1294).`,
+      );
+    }
+    resolved.push(resolve(hit));
+  }
+  return resolved;
+}
+
+/**
+ * BFS the import/source closure from a set of entry files (#1294 round 2).
+ * Returns every file TRANSITIVELY reached, entries included, deduplicated.
+ *
+ * @param {string[]} entryAbsPaths
+ * @returns {string[]} absolute paths, entries + everything they reach
+ */
+function closureFrom(entryAbsPaths) {
+  const seen = new Set(entryAbsPaths);
+  const queue = [...entryAbsPaths];
+  while (queue.length > 0) {
+    const current = queue.shift();
+    for (const dep of directLocalDeps(current)) {
+      if (!seen.has(dep)) {
+        seen.add(dep);
+        queue.push(dep);
+      }
+    }
+  }
+  return [...seen];
+}
 
 /**
  * The lane's frozen WORKFLOW file, `.github/workflows/<basename>` — the one
@@ -175,19 +259,6 @@ function line(component, path, absolute) {
 }
 
 /**
- * `scripts/lib` (#1294) is OPTIONAL at the root level: a minimal fixture (or,
- * historically, this checkout before #1280) may have no `scripts/lib/` at
- * all, and an absent optional root contributes nothing rather than erroring.
- * It is NOT optional once present — an existing `scripts/lib/` that matches
- * zero `e2e-*` files still fails loud, same as every other root, because that
- * shape (dir exists, sweep finds nothing) is what an accidental mass-delete
- * looks like.
- *
- * @type {Set<string>}
- */
-const OPTIONAL_ROOTS = new Set(['scripts/lib']);
-
-/**
  * @param {string} repoRoot
  * @param {string} lane — selects the per-cell workflow entry (#1294),
  *   `workflowRootForLane`.
@@ -203,6 +274,16 @@ function collectHarness(repoRoot, lane, opts = {}) {
   const roots = [workflowRootForLane(lane), ...HARNESS_ROOTS];
   /** @type {{ component: string, path: string, line: string }[]} */
   const entries = [];
+  const addedAbs = new Set();
+  /** @type {string[]} entry points for the import/source closure (#1294 round 2) */
+  const closureEntries = [];
+
+  const addEntry = (path, abs) => {
+    if (addedAbs.has(abs)) return;
+    addedAbs.add(abs);
+    entries.push({ component: 'harness', path, line: line('harness', path, abs) });
+  };
+
   for (const root of roots) {
     const override = root.kind === 'file' && opts.workflowFile ? resolve(opts.workflowFile) : null;
     const abs = override ?? resolve(repoRoot, root.path);
@@ -214,15 +295,10 @@ function collectHarness(repoRoot, lane, opts = {}) {
             : `compat-window fingerprint: frozen harness file ${root.path} is missing. A root that resolves to nothing silently shrinks the frozen set — fix the path or amend the freeze scope (docs/adr/0039).`,
         );
       }
-      entries.push({
-        component: 'harness',
-        path: root.path,
-        line: line('harness', root.path, abs),
-      });
+      addEntry(root.path, abs);
       continue;
     }
     if (!existsSync(abs)) {
-      if (OPTIONAL_ROOTS.has(root.path)) continue;
       throw new Error(`compat-window fingerprint: frozen harness root ${root.path}/ is missing`);
     }
     const matched = walk(abs).filter((rel) => (root.match ? root.match.test(rel) : true));
@@ -232,10 +308,23 @@ function collectHarness(repoRoot, lane, opts = {}) {
       );
     }
     for (const rel of matched) {
-      const path = `${root.path}/${rel}`;
-      entries.push({ component: 'harness', path, line: line('harness', path, join(abs, rel)) });
+      const fileAbs = resolve(join(abs, rel));
+      addEntry(`${root.path}/${rel}`, fileAbs);
+      if (root.isClosureEntry) closureEntries.push(fileAbs);
     }
   }
+
+  // #1294 round 2: follow every entry point's LOCAL import/require/import()
+  // (JS) and source/`.` (sh) chain, transitively, and freeze whatever it
+  // reaches — regardless of filename convention. A directory-pattern root
+  // only sees files whose NAME matches; a closure sees everything a script
+  // actually EXECUTES, which is the honest claim "the harness is frozen"
+  // requires. `scripts/e2e-preflight.mjs` importing `./lib/knext-closure.mjs`
+  // (no `e2e-` prefix) is exactly the shape this closes.
+  for (const abs of closureFrom(closureEntries)) {
+    addEntry(relative(repoRoot, abs), abs);
+  }
+
   return entries;
 }
 
