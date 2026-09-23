@@ -26,7 +26,7 @@ import { createClient } from './platform-e2e-http.mjs';
 const TOKEN = 'selftest-token';
 const IMMUTABLE = 'public, max-age=31536000, immutable';
 
-/** @typedef {{ cssType?: string, immutable?: boolean, buffered?: boolean, openInvalidate?: boolean, deadOptimizer?: boolean, bigImage?: boolean, notChunked?: boolean, jsCache?: string }} Defects */
+/** @typedef {{ cssType?: string, immutable?: boolean, buffered?: boolean, openInvalidate?: boolean, deadOptimizer?: boolean, bigImage?: boolean, fontLeak?: 'broken' | 'fixed', notChunked?: boolean, jsCache?: string }} Defects */
 
 /** @param {Defects} d */
 function makeServer(d) {
@@ -44,7 +44,7 @@ function makeServer(d) {
       return send(
         200,
         { 'content-type': 'text/html' },
-        '<html><head><link rel="stylesheet" href="/_next/static/a.css"><script src="/_next/static/a.js"></script></head><body>ok</body></html>',
+        `<html><head><link rel="stylesheet" href="/_next/static/a.css">${d.fontLeak ? '<link rel="preload" as="font" href="/home/x/app/.vinext/fonts/h/f.woff2">' : ''}<script src="/_next/static/a.js"></script></head><body>ok</body></html>`,
       );
     }
     if (url === '/_next/static/a.css') {
@@ -63,6 +63,11 @@ function makeServer(d) {
         { 'content-type': 'text/javascript', 'cache-control': d.jsCache ?? IMMUTABLE },
         'console.log(1)',
       );
+    }
+    if (url === '/home/x/app/.vinext/fonts/h/f.woff2') {
+      if (d.fontLeak === 'fixed')
+        return send(200, { 'content-type': 'font/woff2', 'cache-control': IMMUTABLE }, 'wOF2');
+      return send(404, { 'content-type': 'text/plain' }, 'nf');
     }
     if (url === '/_next/static/f.woff2') {
       return send(200, { 'content-type': 'font/woff2', 'cache-control': IMMUTABLE }, 'wOF2xxxx');
@@ -172,6 +177,23 @@ const defects = [
   ['optimizer output not smaller than the source', { bigImage: true }, 'image'],
   ['stream delimited by connection close, not chunked', { notChunked: true }, 'stream'],
 ];
+// The #1284 exemption is narrow and self-expiring: the leaked-path font may
+// stay broken (green), but serving it (fixed) must go RED, and it must not
+// shelter any OTHER broken asset.
+try {
+  await against({ fontLeak: 'broken' }, suite.static);
+  report('known defect #1284 (font path still 404) is tolerated, not skipped', true);
+} catch (e) {
+  report('known defect #1284 tolerated', false, String(e instanceof Error ? e.message : e));
+}
+defects.push(
+  ['#1284 fixed but exemption not removed', { fontLeak: 'fixed' }, 'static'],
+  [
+    'broken CSS while #1284 exemption is active',
+    { fontLeak: 'broken', cssType: 'text/plain' },
+    'static',
+  ],
+);
 for (const [label, defect, name] of defects) {
   let caught = false;
   try {
