@@ -118,7 +118,19 @@ describe.skipIf(!dockerAvailable())(
       // makes an UNFORCED install of these exact packages fail).
       const packDir = mkdtempSync(join(workDir, 'sharp-pack-'));
       for (const spec of ['@img/sharp-linux-x64@0.34.5', '@img/sharp-libvips-linux-x64@1.2.4']) {
-        execFileSync('npm', ['pack', spec, '--force'], { cwd: packDir, timeout: 60_000 });
+        // --loglevel=error / stdio: 'ignore': the runner's failure-tail
+        // (scripts/bun-test.mjs) captures the LAST 40 lines of the WHOLE
+        // process's output, shared across every test in this describe block
+        // — npm's verbose "npm notice" pack-manifest dump here can push an
+        // EARLIER test's own failure message out of that window entirely
+        // (observed live on CI: this test's own tarball fetch is what buried
+        // the ROOT-guard test's real error). Silenced since we only care
+        // about the tarball landing on disk, not npm's report about it.
+        execFileSync('npm', ['pack', spec, '--force', '--loglevel=error'], {
+          cwd: packDir,
+          timeout: 60_000,
+          stdio: ['ignore', 'ignore', 'ignore'],
+        });
       }
       const sharpDir = mkdtempSync(join(workDir, 'sharp-'));
       mkdirSync(join(sharpDir, 'node_modules', '@img'), { recursive: true });
