@@ -4,12 +4,13 @@
  *
  * ## The gap
  *
- * knext bakes the V8 compile cache into the image at build time (ADR-0035 /
- * #437/#438). The Dockerfile CMD points NODE_COMPILE_CACHE at the baked default
- * (the standalone `.next/compile-cache` dir) via `${NODE_COMPILE_CACHE:-…}`, so
- * an operator-injected NODE_COMPILE_CACHE WINS over the baked default — that is
- * intentional and asserted by the bake test
- * (`apps/file-manager/dockerfile-compile-cache-bake.test.ts:149`).
+ * knext bakes the V8 compile cache into the standalone-node image at
+ * `docker build` time (#1264), into the standalone `.next/compile-cache` dir,
+ * and the image ENV sets NODE_COMPILE_CACHE to that dir as its default. An
+ * operator-INJECTED NODE_COMPILE_CACHE WINS over the baked default — ordinary
+ * Docker/k8s env precedence, not a shell fallback — and that is intentional,
+ * asserted by the standalone-node docker-e2e bake coverage
+ * (`standalone-drain.docker-e2e.test.ts` / `standalone-webpack-build.docker-e2e.test.ts`).
  *
  * But if the injected value points at a DIFFERENT path (e.g. an empty PVC), the
  * baked cache layer is silently bypassed: it fails OPEN and invisible, and every

@@ -206,6 +206,49 @@ describe("dockerBuildxArgs — the buildx argv the CLI runs", () => {
         });
         expect(argv[argv.indexOf("--target") + 1]).toBe("standalone-node");
     });
+
+    it("standalone-node with a custom healthCheckPath passes it as --build-arg KNEXT_HEALTH_CHECK_PATH (#1264 follow-up)", () => {
+        // The bake warms a hardcoded /api/health unless the app's configured
+        // healthCheckPath is threaded through as a build-arg — an app with a
+        // custom path and no /api/health route would otherwise fail the BUILD.
+        const argv = dockerBuildxArgs({
+            ...base,
+            dockerfile: "/app/Dockerfile.standalone",
+            target: "standalone-node",
+            healthCheckPath: "/healthz",
+        });
+        const i = argv.indexOf("--build-arg");
+        expect(i).toBeGreaterThan(-1);
+        expect(argv[i + 1]).toBe("KNEXT_HEALTH_CHECK_PATH=/healthz");
+    });
+
+    it("no healthCheckPath configured -> no --build-arg (the Dockerfile's own /api/health default applies)", () => {
+        const argv = dockerBuildxArgs({
+            ...base,
+            dockerfile: "/app/Dockerfile.standalone",
+            target: "standalone-node",
+        });
+        expect(argv).not.toContain("--build-arg");
+    });
+
+    it("standalone-bun target ignores healthCheckPath — the bun stage never boots/warms the server to bake a cache", () => {
+        const argv = dockerBuildxArgs({
+            ...base,
+            dockerfile: "/app/Dockerfile.standalone",
+            target: "standalone-bun",
+            healthCheckPath: "/healthz",
+        });
+        expect(argv).not.toContain("--build-arg");
+    });
+
+    it("vinext (no target) ignores healthCheckPath — no bake in that image build", () => {
+        const argv = dockerBuildxArgs({
+            ...base,
+            dockerfile: "/app/Dockerfile",
+            healthCheckPath: "/healthz",
+        });
+        expect(argv).not.toContain("--build-arg");
+    });
 });
 
 describe("stageStandaloneBuildContext — stages a BOOTABLE standalone build context", () => {
@@ -238,6 +281,18 @@ describe("stageStandaloneBuildContext — stages a BOOTABLE standalone build con
         expect(existsSync(entry)).toBe(true);
         expect(readFileSync(entry, "utf8")).toMatch(
             /import\(\s*["']@getknext\/core\/internal\/node-server["']\s*\)/,
+        );
+    });
+
+    it("writes knext-compile-cache-bake.mjs into the build context root — the COPY source the standalone-node bake RUN step needs (#1264)", () => {
+        const ctx = tmp();
+        stageStandaloneBuildContext({ cwd: ctx, buildContext: ctx });
+        const bake = join(ctx, "knext-compile-cache-bake.mjs");
+        expect(existsSync(bake)).toBe(true);
+        // Not a spawn-then-signal driver: it imports the standalone server
+        // itself, so the process that compiled it is the one that flushes.
+        expect(readFileSync(bake, "utf8")).toContain(
+            "process.env.STANDALONE_SERVER_PATH",
         );
     });
 
@@ -274,6 +329,11 @@ describe("stageStandaloneBuildContext — stages a BOOTABLE standalone build con
         writeFileSync(
             join(templateDir, "knext-standalone-entry.mjs.hbs"),
             "import('@getknext/core/internal/node-server')({{ broken }});\n",
+            "utf8",
+        );
+        writeFileSync(
+            join(templateDir, "knext-compile-cache-bake.mjs.hbs"),
+            "process.env.STANDALONE_SERVER_PATH;\n",
             "utf8",
         );
         const ctx = tmp();
@@ -340,6 +400,11 @@ describe("stageStandaloneBuildContext — stages a BOOTABLE standalone build con
         writeFileSync(
             join(templateDir, "knext-standalone-entry.mjs.hbs"),
             "import('@getknext/core/internal/node-server')();\n",
+            "utf8",
+        );
+        writeFileSync(
+            join(templateDir, "knext-compile-cache-bake.mjs.hbs"),
+            "process.env.STANDALONE_SERVER_PATH;\n",
             "utf8",
         );
         const ctx = tmp();
