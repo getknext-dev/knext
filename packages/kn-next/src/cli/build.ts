@@ -16,8 +16,9 @@
  * selectable turbopack/standalone target — ADR-0054 item 6); for the vinext
  * shape this command then compiles the single executable (ADR-0048 — see step
  * 2c). Since the project owns that script, selecting `build: 'turbopack'` on an
- * app whose script still runs `vite build` produces no `.next/standalone` — the
- * missing-artifact warning below is the only signal today (#1184).
+ * app whose script still runs `vite build` produces no `.next/standalone` —
+ * that is a hard, fail-fast error below rather than a warning, for the
+ * next-standalone shape only (#1184).
  *
  * ADR-0001: build does NOT emit raw Knative/infrastructure manifests. The
  * operator is the single source of truth for cluster desired-state and
@@ -211,9 +212,28 @@ export async function build(options: BuildOptions = {}) {
     const { builder, artifact } = resolveBuildArtifact(config, process.cwd());
     const artifactPath = join(artifact.root, artifact.entry);
     if (!options.skipNextBuild && !existsSync(artifactPath)) {
-        // Loud, and BEFORE the upload/image steps. #857 is the precedent: a
-        // build that exits 0 while emitting a server nothing can find is
-        // discovered at `docker run` on a cluster otherwise.
+        // #857 is the precedent for catching this here, BEFORE the
+        // upload/image steps, rather than letting it surface at `docker run`
+        // on a cluster.
+        if (standaloneStepsApply(artifact)) {
+            // HARD fail-fast (#1184), next-standalone shape ONLY: a
+            // `build: 'turbopack'` app whose own build script still runs
+            // something other than `next build` (e.g. a `kn-next create`
+            // app's default `vite build`) emits no `.next/standalone` at all,
+            // and used to only `log.warn` here — the first HARD failure was an
+            // opaque `COPY .next/standalone` error inside `docker buildx` at
+            // deploy time. UsageError (not a bare warn): this is a config
+            // mistake the user can act on immediately, same family as
+            // `resolveBuildArtifact`'s unknown-builder throw above.
+            throw new UsageError(
+                `The ${builder.id} build finished but '${artifact.entry}' is not there — the image ` +
+                    "would start a server that does not exist. `build: 'turbopack'` requires this " +
+                    "app's build script to run `next build` with `output: 'standalone'` set in " +
+                    "next.config — check both before deploying.",
+            );
+        }
+        // Any other shape (e.g. vinext/nitro): still loud, but not fail-fast
+        // yet — #1184 scopes the hard failure to the next-standalone shape.
         log.warn(
             { builder: builder.id, expected: artifactPath },
             `The ${builder.id} build finished but '${artifact.entry}' is not there — the image would start a server that does not exist.`,
