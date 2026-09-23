@@ -64,7 +64,7 @@ const MUTATIONS = [
     label: 'node: warm a /_next/static asset instead of a server route',
     target: DEPLOY,
     spec: SPEC_WIRING,
-    anchor: 'process.stdout.write(`${basePath}/`);',
+    anchor: 'process.stdout.write(`${basePath}${pick}`);',
     replacement: 'process.stdout.write(`${basePath}/_next/static/x.js`);',
   },
   // ── Disable the node cache ───────────────────────────────────────────────

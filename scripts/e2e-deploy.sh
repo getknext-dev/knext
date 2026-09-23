@@ -582,14 +582,24 @@ if [ "${RUNTIME}" != "bun" ]; then
       NODE_CC_BAKE="failed"
     else
       cp "${KNEXT_BAKE_TEMPLATE}" "${KNEXT_BAKE_DRIVER}"
-      # Warm a SERVER route (the app's root, under its basePath), never a
-      # static asset: serving a file compiles no server code, so it is the wrong
-      # target for a compile-cache bake. The shipped driver still requires 2xx.
+      # Warm a SERVER route, never a static asset: serving a file compiles no
+      # server code, so it is the wrong target for a compile-cache bake. Most
+      # fixtures have no `/` page (404), so pick from the build's own route
+      # manifests: `/` when it is a page, else the first STATIC page route (no
+      # dynamic segment, no api route, no framework-internal `/_x` route). The
+      # shipped driver still requires 2xx.
       WARM_PATH="$(node -e '
         const fs = require("node:fs"), path = require("node:path");
-        let basePath = "";
-        try { basePath = JSON.parse(fs.readFileSync(path.join(process.argv[1], ".next/required-server-files.json"), "utf8")).config.basePath || ""; } catch {}
-        process.stdout.write(`${basePath}/`);
+        const dir = process.argv[1];
+        const readJson = (f) => { try { return JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")); } catch { return {}; } };
+        const basePath = readJson(".next/required-server-files.json").config?.basePath || "";
+        const routes = [
+          ...Object.keys(readJson(".next/server/pages-manifest.json")),
+          ...Object.keys(readJson(".next/server/app-paths-manifest.json")).map((r) => r.replace(/\/page$/, "") || "/"),
+        ];
+        const ok = (r) => r.startsWith("/") && !r.includes("[") && !r.startsWith("/api") && !r.startsWith("/_") && !/\.[a-z0-9]+$/i.test(r);
+        const pick = routes.includes("/") ? "/" : (routes.filter(ok).sort()[0] ?? "/");
+        process.stdout.write(`${basePath}${pick}`);
       ' "${STANDALONE_APP_DIR}")"
       BAKE_PORT="$(free_port)"
       log "baking the V8 compile cache with the SHIPPED driver (warm ${WARM_PATH:-<none>}) into ${NODE_CC_DIR}"
