@@ -97,10 +97,20 @@ export const THRESHOLDS = {
  * `docs/benchmarks/coverage-baseline.md` with the provider they were measured
  * under. What was lost when vitest stopped collecting the suite was the
  * measurement, not the coverage.
+ *
+ * ## Ratchet: coverage batch B1 (#1232)
+ *
+ * New tests for `utils/asset-upload.ts` (`hasStorage`, `pruneOldBuilds`'s
+ * remote-listing-failure fallback), `adapters/image-cache-sync.ts` (watch
+ * attach failure, reconcile's own store-list failure, `defaultCacheDir()`),
+ * and a first test file for `adapters/vinext-image-optimizer.ts` (previously
+ * 0% covered) raised the local merged measurement to
+ * **lines 78.92% (9939/12593)**. The floor moves to 78.5 — just below the
+ * measured number, per the ratchet convention, rounded down to 0.5.
  */
 export const PER_PATH_THRESHOLDS = {
   'packages/kn-next/src/**': {
-    lines: 78,
+    lines: 78.5,
     functions: 76,
   },
 };
