@@ -162,6 +162,31 @@ whose config carries no `storage` block (knext then skips the upload and serves
 assets from the image). A `kn-next build` upload-skip affordance is tracked
 separately — do not add a CLI flag here to work around it.
 
+### The nightly platform e2e
+
+A separate nightly workflow (`.github/workflows/file-manager-platform-e2e-nightly.yml`, also
+runnable with `workflow_dispatch`) deploys this app **through the product** on an ephemeral kind
+cluster: `kn-next deploy` applies the `NextApp` CR and the operator (built from the same commit)
+reconciles the Knative Service. It never touches a real cluster. It then checks, over real HTTP
+through the ingress:
+
+- **App flows** - upload (the client server action, driven at the HTTP level), the file listed on
+  `/` and `/dashboard`, the object read back from storage byte for byte, users, audit, 404.
+  The app has no rename, delete or download route today, and the browser-driven upload form is not
+  covered (it needs a browser runtime).
+- **Platform** - scale-to-zero then a timed wake, ISR served from Redis plus authenticated cache
+  invalidation (401 without a token), image optimization, health, metrics, the operator's
+  NetworkPolicy, and a graceful rollout under load.
+- **Deployment basics** - content type and cache headers for every asset the page references
+  and for `public/` files, and RSC streaming (fallback arrives before the resolved content).
+
+Every check fails closed: a missing prerequisite throws, there is no skip. The kind profile lives in
+`platform-e2e/kn-next.config.e2e.ts` (a guard test fails if it drifts from `kn-next.config.ts`
+beyond storage/registry/cache/database). `scripts/platform-e2e.selftest.mjs` runs the same checks
+against deliberately broken servers and needs no cluster, so you can run it locally:
+`node scripts/platform-e2e.selftest.mjs`. The job budget is 75 minutes (about 40 expected).
+A red scheduled run files one pinned issue.
+
 ## Deployment Files
 
 | File | Purpose |
