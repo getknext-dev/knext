@@ -200,7 +200,9 @@ describe('classifyLines — tricky executable lines are NEVER noise', () => {
     const src = [
       'const x: Foo = bar(); // TYPEDINIT',
       'class A',
-      '  extends Base { // EXTENDS',
+      '  extends Base { // EXTCLAUSE',
+      '  inner = class extends',
+      '    mixin(Base) {}; // EXTENDSEXPR — the heritage expression alone on its line',
       '  private n = 1; // FIELDINIT',
       '  get g() { return 1; } // GETTER',
       '  constructor(private readonly dep: Dep) { super(); } // CTOR',
@@ -215,7 +217,8 @@ describe('classifyLines — tricky executable lines are NEVER noise', () => {
     ].join('\n');
     expectExecutable(src, [
       'TYPEDINIT',
-      'EXTENDS',
+      'EXTCLAUSE',
+      'EXTENDSEXPR',
       'FIELDINIT',
       'GETTER',
       'CTOR',
