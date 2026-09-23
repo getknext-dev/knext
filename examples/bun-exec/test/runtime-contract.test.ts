@@ -25,6 +25,7 @@ import {
   checkBearer,
   createGracefulShutdown,
   createMetricsState,
+  drainPending,
   METRICS_CONTENT_TYPE,
   observeRequest,
   recordStartupComplete,
@@ -32,6 +33,7 @@ import {
   resolveAssetAnchor,
   resolveBindHost,
   statusClass,
+  waitUntil,
 } from '../runtime-contract.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -452,6 +454,61 @@ describe('createGracefulShutdown — drain ordering + hardcap', () => {
     await Promise.race([shutdown('SIGTERM'), new Promise((r) => setTimeout(r, 400))]);
     expect(exitCode).toBe(1);
     expect(app.stopped).toContain(true); // stop(true) force path fired
+  });
+});
+
+describe('drainPending — awaits work registered DURING the drain', () => {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it('awaits a waitUntil that an already-pending task registers mid-drain', async () => {
+    // The shape an `after()` that itself calls `waitUntil` produces: the outer
+    // task is pending when the drain starts, and registers the inner one only
+    // while the drain is already awaiting. A single snapshot misses it.
+    const order: string[] = [];
+    waitUntil(
+      (async () => {
+        await sleep(20);
+        waitUntil(
+          (async () => {
+            await sleep(40);
+            order.push('inner');
+          })(),
+        );
+        order.push('outer');
+      })(),
+    );
+    await drainPending();
+    order.push('drained');
+    expect(order).toEqual(['outer', 'inner', 'drained']);
+  });
+
+  it('follows a chain of registrations, not just one level', async () => {
+    let depth = 0;
+    const register = (n: number) =>
+      waitUntil(
+        (async () => {
+          await sleep(5);
+          depth = n;
+          if (n < 5) register(n + 1);
+        })(),
+      );
+    register(1);
+    await drainPending();
+    expect(depth).toBe(5);
+  });
+
+  it('returns at once when nothing is pending, and a rejected task does not abort the drain', async () => {
+    await drainPending();
+    let ran = false;
+    waitUntil(Promise.reject(new Error('boom')));
+    waitUntil(
+      (async () => {
+        await sleep(10);
+        ran = true;
+      })(),
+    );
+    await drainPending();
+    expect(ran).toBe(true);
   });
 });
 

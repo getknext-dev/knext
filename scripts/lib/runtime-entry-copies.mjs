@@ -106,8 +106,14 @@ export const DIVERGENT = {
       'wrapped to name the port + point at `kn-next doctor` on bind failure), lifted from the ' +
       'template VERBATIM. NOTE this hash pin alone cannot stop a port drift smuggled in via a ' +
       'routine re-pin — that hole is closed by metrics-port-lockstep.test.ts, which reads this ' +
-      "copy's METRICS_PORT default directly.",
-    sha256: '16751da55e93f5efac8952ea7e050fe24c31af5df6b302d9cc8f7d662677e277',
+      "copy's METRICS_PORT default directly.\n\n" +
+      'HASH UPDATED for #1266 (run each request inside the runtime contract execution context ' +
+      'so vinext `after()` work reaches the SIGTERM drain): the import, the context object, the ' +
+      'middleware wrap and the corrected srvx-close comment were applied to the template and to ' +
+      'this copy by one script from the same hunks. The recorded divergence is still ONLY the ' +
+      'image intercept; leaving the wrap out here would have kept the one entry the alpine e2e ' +
+      'compiles dropping `after()` work on shutdown.',
+    sha256: 'd504869f2cbaa4e7a3e2c50f707123791b630ddb7e479bddcc824906cb024d6f',
   },
   'examples/bun-exec/runtime-contract.mjs': {
     reason:
@@ -118,8 +124,11 @@ export const DIVERGENT = {
       'otherwise would be the stale-doc class §9 exists to kill. Code is byte-identical to the ' +
       'template; only the honesty differs. EXPIRY: bumping the example’s vinext past beta.4 ' +
       'reds the beta.4 pin assertion in vinext-isr-redis-wiring.test.ts — wire cache.data ' +
-      'there, restore the template text, and delete this entry in the same change.',
-    sha256: '5a9389c8eaf094ea6ada32138c8220ee68b454aa7659f0e201485a360ed68626',
+      'there, restore the template text, and delete this entry in the same change.\n\n' +
+      'HASH UPDATED for #1266 (drainPending loops until the pending set is empty, so work ' +
+      'registered DURING the drain is awaited): applied to the template and this copy from the ' +
+      'same hunk by one script. The recorded divergence is still ONLY the item-4 comment block.',
+    sha256: 'bbf38416192f41cd30d177eefb2804aab0bab667694814ec5c8f46cc462c8f6d',
   },
 };
 

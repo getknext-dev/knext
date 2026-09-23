@@ -42,6 +42,9 @@ const TOKEN = 'alpine-e2e-token';
 // failure. The container is removed in afterAll, so unique names do not leak.
 const RUN_ID = randomBytes(4).toString('hex');
 const CONTAINER = `knext-bunexec-alpine-e2e-${RUN_ID}`;
+// One container per after() SIGTERM case: each case ends its container.
+const AFTER_CONTAINER = `knext-bunexec-alpine-e2e-after-${RUN_ID}`;
+const NESTED_CONTAINER = `knext-bunexec-alpine-e2e-nested-${RUN_ID}`;
 
 /** Build for the host's own architecture — emulation is minutes, native is seconds. */
 const ARCH = process.arch === 'arm64' ? 'linux-arm64' : 'linux-x64';
@@ -132,6 +135,67 @@ function run(cmd: string, args: string[], opts: { timeout?: number } = {}) {
 
 let appPort = 0;
 let metricsPort = 0;
+let afterPort = 0;
+let nestedPort = 0;
+
+function logsOf(container: string): string {
+  const logs = run('docker', ['logs', container], { timeout: 60_000 });
+  return `${logs.stdout}\n${logs.stderr}`;
+}
+
+/** A second (third…) container of the SAME image, for a case that ends it. */
+async function startAndAwaitHealthy(name: string, hostPort: number) {
+  const started = run(
+    'docker',
+    [
+      'run',
+      '--detach',
+      '--name',
+      name,
+      '--label',
+      LABEL,
+      '--label',
+      EPOCH_LABEL,
+      '--platform',
+      PLATFORM,
+      '--publish',
+      `${hostPort}:3000`,
+      IMAGE,
+    ],
+    { timeout: 120_000 },
+  );
+  if (started.status !== 0) {
+    throw new Error(`docker run ${name} failed:\n${started.stdout}\n${started.stderr}`);
+  }
+  const deadline = Date.now() + 120_000;
+  for (;;) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${hostPort}/api/health`);
+      if (res.ok) return;
+    } catch {
+      // not listening yet
+    }
+    const running = run('docker', ['inspect', name, '--format', '{{.State.Running}}'], {
+      timeout: 60_000,
+    });
+    const died = running.status === 0 && running.stdout.trim() === 'false';
+    if (died || Date.now() > deadline) {
+      throw new Error(
+        `${name} never served /api/health (${died ? 'it exited' : 'timed out'}).\nlogs:\n${logsOf(name)}`,
+      );
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+}
+
+/** `docker kill --signal=TERM`, then `docker wait`: the container's exit code. */
+function termAndWait(container: string): string {
+  const killed = run('docker', ['kill', '--signal=TERM', container], { timeout: 60_000 });
+  expect(killed.status, `docker kill failed:\n${killed.stderr}`).toBe(0);
+  const waited = run('docker', ['wait', container], { timeout: 60_000 });
+  expect(waited.status, `docker wait failed:\n${waited.stderr}`).toBe(0);
+  return waited.stdout.trim();
+}
 
 beforeAll(async () => {
   // 1. Prerequisites are REQUIRED, never skipped around.
@@ -195,7 +259,7 @@ beforeAll(async () => {
   //    drain e2e, still alive here. Holding both sockets in LISTEN until both
   //    numbers are known makes a repeat impossible, not merely improbable
   //    (`test/ports.test.ts` asserts the hold directly).
-  [appPort, metricsPort] = await freePorts(2);
+  [appPort, metricsPort, afterPort, nestedPort] = await freePorts(4);
   const started = run(
     'docker',
     [
@@ -230,7 +294,7 @@ beforeAll(async () => {
   for (;;) {
     try {
       const res = await fetch(`http://127.0.0.1:${appPort}/api/health`);
-      if (res.ok) return;
+      if (res.ok) break;
     } catch {
       // not listening yet
     }
@@ -253,14 +317,22 @@ beforeAll(async () => {
     }
     await new Promise((r) => setTimeout(r, 250));
   }
+
+  // 6. One more container per after() SIGTERM case (each case ends its own).
+  await startAndAwaitHealthy(AFTER_CONTAINER, afterPort);
+  await startAndAwaitHealthy(NESTED_CONTAINER, nestedPort);
 }, 900_000);
 
 afterAll(() => {
   // The container first — an image cannot be removed while a container of it
   // exists. Both are per-run unique, so neither removal can reap another run's.
   run('docker', ['rm', '--force', CONTAINER], { timeout: 60_000 });
+  run('docker', ['rm', '--force', AFTER_CONTAINER], { timeout: 60_000 });
+  run('docker', ['rm', '--force', NESTED_CONTAINER], { timeout: 60_000 });
   run('docker', ['rmi', '--force', IMAGE], { timeout: 60_000 });
-});
+  // Three containers and an image can outlast bun's 5s hook default on a
+  // loaded host — measured on the sibling node-image suite.
+}, 240_000);
 
 describe('A9 — the compiled binary runs from a clean alpine image', () => {
   it('is still running, with no dynamic-linker failure in its logs', () => {
@@ -604,6 +676,68 @@ describe('A1 — self-contained on the current vinext/vite pins', () => {
 // covered by test/sigterm-hardcap-e2e.test.ts against the entry — here we
 // prove the REAL binary in the REAL container takes the graceful path.
 describe('SIGTERM — the shipped binary drains in-flight work and exits 0 (#887)', () => {
+  // after() in the COMPILED binary (#1266). vinext's after() hands its work to
+  // the request's execution context, looked up through an AsyncLocalStorage
+  // that vinext keys on globalThis. The entry supplies that context; these two
+  // cases are what proves the lookup survives `bun build --compile --bytecode`
+  // — a claim nothing else measures, since every other drain test runs the
+  // uncompiled entry or a harness.
+  //
+  // AFTER_MS is how long each piece of after() work sleeps. The signal has to
+  // land INSIDE that window or the case proves nothing, and `docker kill` on a
+  // loaded host was measured arriving >2s after the response — so 2s let the
+  // work finish before the signal and read as a failure of the drain.
+  const AFTER_MS = 5000;
+
+  it('after(): work scheduled by a finished request runs BEFORE the binary exits 0', async () => {
+    const res = await fetch(`http://127.0.0.1:${afterPort}/api/after?ms=${AFTER_MS}`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ scheduled: true, ms: AFTER_MS });
+
+    const code = termAndWait(AFTER_CONTAINER);
+    const out = logsOf(AFTER_CONTAINER);
+    expect(code, `not the graceful exit-0 path:\n${out}`).toBe('0');
+    // Order is the claim: the signal, THEN the after() work, THEN the drain
+    // concluding. `AFTER-RAN` missing means shutdown did not wait for it.
+    const sig = out.indexOf('SIGNAL:SIGTERM');
+    const ran = out.indexOf(`AFTER-RAN ms=${AFTER_MS}`);
+    const drained = out.indexOf('DRAINED cleanly');
+    expect(sig, out).toBeGreaterThan(-1);
+    expect(ran, `after() work was dropped on SIGTERM:\n${out}`).toBeGreaterThan(-1);
+    expect(
+      ran,
+      `the after() work finished BEFORE the signal landed, so this run proves nothing — raise AFTER_MS:\n${out}`,
+    ).toBeGreaterThan(sig);
+    expect(drained, out).toBeGreaterThan(ran);
+  }, 60_000);
+
+  it('nested after(): work an after() callback registers DURING the drain still runs before exit', async () => {
+    // The outer callback sleeps AFTER_MS (the signal lands inside it), then
+    // hands a further AFTER_MS of work to `after(promise)` — vinext's
+    // `waitUntil` — and returns. A drain that awaited only the tasks pending
+    // when it started reports DRAINED as soon as the outer callback returns.
+    const res = await fetch(`http://127.0.0.1:${nestedPort}/api/after-nested?ms=${AFTER_MS}`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ scheduled: true, nested: true, ms: AFTER_MS });
+
+    const code = termAndWait(NESTED_CONTAINER);
+    const out = logsOf(NESTED_CONTAINER);
+    expect(code, `not the graceful exit-0 path:\n${out}`).toBe('0');
+    const sig = out.indexOf('SIGNAL:SIGTERM');
+    const outer = out.indexOf(`OUTER-RAN ms=${AFTER_MS}`);
+    const nested = out.indexOf(`NESTED-RAN ms=${AFTER_MS}`);
+    const drained = out.indexOf('DRAINED cleanly');
+    expect(sig, out).toBeGreaterThan(-1);
+    // The outer callback must still be running when the signal lands, or the
+    // nested registration happens BEFORE the drain and proves nothing.
+    expect(outer, `the outer after() did not span the signal:\n${out}`).toBeGreaterThan(sig);
+    expect(nested, `nested after()/waitUntil work was dropped on SIGTERM:\n${out}`).toBeGreaterThan(
+      outer,
+    );
+    expect(drained, out).toBeGreaterThan(nested);
+  }, 60_000);
+
+  // MUST BE LAST: it terminates the main container.
   it('completes an in-flight request across the TERM, then exits 0 with the drain markers logged', async () => {
     // 1. Put a request genuinely in flight (the /api/slow fixture sleeps
     //    server-side; 4s leaves room for signal delivery + drain well inside
