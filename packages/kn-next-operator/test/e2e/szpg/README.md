@@ -1,0 +1,89 @@
+# Profile-B — unified app-zero + database-zero harness (P4a)
+
+The **lead-local** platform-e2e leg: prove that a Next.js app on Knative and its
+scale-to-zero Postgres (scale-zero-pg / szpg) compose — the app's HTTP activation
+and the database's TCP wake-on-connect are independent mechanisms joined only by a
+`DATABASE_URL` Secret. This directory is **P4a: the environment + the boundary
+assertion**. The timed double-zero-wake drill is **P4b** (separate, builds on this).
+
+> **This never gates a PR.** The szpg plane was last proven on a fresh ~100 GB /
+> 4-node kind cluster; it does not fit a hosted CI runner, and scale-zero-pg has no
+> image publish pipeline, so this harness builds + `kind load`s the gateway itself.
+> It is lead-owned and on-demand, the same class as the standing OKE-verify stage.
+> Design: [`.claude/research/platform-e2e-design.md`](../../../../../.claude/research/platform-e2e-design.md) §4.
+
+## What it stands up
+
+`setup-profile-b.sh up` creates, on a **uniquely-named** kind cluster with its own
+throwaway kubeconfig (cluster work is a queue of one — unique names so a concurrent
+drill is never clobbered):
+
+1. **Knative Serving + Kourier + cert-manager**, `config-autoscaler` patched for a
+   real cold start (`scale-to-zero-pod-retention-period: 0s`, `stable-window: 6s`).
+2. **The szpg plane** in namespace `scale-zero-pg`: Neon-OSS pageserver /
+   safekeepers / storage-broker / minio / pswatcher (always-on) + the **`pggw`**
+   wake-on-connect gateway scaling the **`compute`** Deployment 0↔1. The gateway
+   image is built from `packages/scale-zero-pg/gateway` and `kind load`ed;
+   `GW_COMPUTE_TLS` is set to `false` for a laptop cluster.
+3. **An `AppDatabase` CR** (`apps.scale-zero-pg.dev`) for `db-demo`, reconciled by
+   the szpg appdb-operator into a `DATABASE_URL` Secret.
+4. **`kn-next db bind db-demo --secret <appdb-secret>`** — the ONE knext cluster
+   write for the DB: a single `kubectl patch nextapp` setting
+   `spec.database.secretRef` (ADR-0019 BYO). The knext operator injects
+   `DATABASE_URL` into the ksvc.
+5. **db-demo as a `NextApp` CR** deployed to Knative (scale-to-zero).
+
+## The boundary assertion (the core of P4a)
+
+After the knext operator reconciles the NextApp and `db bind`, the harness asserts
+that **the knext operator wrote NOTHING to the `AppDatabase`** — it is
+owned/managed only by the szpg control plane. This proves the ADR-0001 /
+data-sovereignty boundary that `nextapp_types.go:531` states in prose: *"knext's
+operator never reads or writes AppDatabase."*
+
+- The **detection logic** lives in [`../szpg_boundary.go`](../szpg_boundary.go),
+  is **untagged** (runs under a plain `go test ./...`), and is unit-tested +
+  mutation-proved by [`../szpg_boundary_test.go`](../szpg_boundary_test.go). It
+  inspects the AppDatabase's `metadata.managedFields` (no knext field manager) and
+  `metadata.ownerReferences` (no `NextApp` / `apps.kn-next.dev` owner), and — to
+  avoid a vacuous pass — also confirms szpg IS a writer.
+- The **live driver** is [`../szpg_profile_b_test.go`](../szpg_profile_b_test.go),
+  behind the `e2e_szpg` build tag (invisible to PR CI). It reads the running
+  AppDatabase via `kubectl get -o json` and applies the assertion.
+
+```sh
+setup-profile-b.sh boundary     # runs the e2e_szpg driver against the live plane
+```
+
+## Usage
+
+```sh
+# up + wake oracle + boundary + teardown (default):
+packages/kn-next-operator/test/e2e/szpg/setup-profile-b.sh all
+# or step by step:
+packages/kn-next-operator/test/e2e/szpg/setup-profile-b.sh up
+packages/kn-next-operator/test/e2e/szpg/setup-profile-b.sh wake      # deploy/_verify-wake.sh
+packages/kn-next-operator/test/e2e/szpg/setup-profile-b.sh boundary
+packages/kn-next-operator/test/e2e/szpg/setup-profile-b.sh down
+```
+
+Env: `CLUSTER_NAME`, `APPDB_NAMESPACE` (default `my-apps`), `APPDB_NAME` (default
+`db-demo`), `DB_DEMO_IMAGE` (a real, pullable db-demo digest — required for the
+serve/seed steps; the default is the deliberately-unpullable placeholder), `KEEP=1`
+(skip teardown for post-mortem).
+
+## Known drill gotchas (baked in)
+
+- `docker.io/minio/mc` is **access-denied**; the harness retags `quay.io/minio/mc`
+  and `kind load`s it so the storage-init bucket step never blocks.
+- Several `deploy/_verify-*.sh` default `KCTX` / `KSPG_CONTEXT` to the **OKE
+  production** context. The harness exports both to the kind context and uses a
+  throwaway `KUBECONFIG`, so a "local" drill can never touch a real cluster.
+
+## What is validated where
+
+| Piece | Validated |
+|---|---|
+| Boundary **detection logic** (managedFields / ownerReferences) | **Unit-tested + mutation-proved off-cluster** — `go test ./test/e2e/` on every PR |
+| `e2e_szpg` driver compiles / vets | `go vet -tags e2e_szpg` (locally green) |
+| Full szpg plane stand-up + double-zero wake | **Lead-local only** (~100 GB kind; requires the reproducible run of this script) — see P4b for the timed drill |
