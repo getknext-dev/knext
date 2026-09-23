@@ -100,6 +100,11 @@ export default defineConfig([
       // Bun-only ESM, dependency-free like cache-handler; no `.d.ts`.
       'adapters/bun-serve-keepalive-guard':
         'src/adapters/bun-serve-keepalive-guard.mjs',
+      // The `@opentelemetry/api` require shim for the compiled single exec
+      // (#1309) — vinext-compile injects an `import` of this beside the
+      // keep-alive guard. Bun-only-safe ESM (a plain `globalThis.require`
+      // wrapper), no `.d.ts`, same reasoning as the guard above.
+      'adapters/otel-api-compile-shim': 'src/adapters/otel-api-compile-shim.mjs',
       // The vinext data-cache adapter FACTORY (#953) — the scaffold's
       // vite.config hands this subpath to `vinext({ cache: { data } })`, and
       // vinext's generated registration module imports it at the app's build

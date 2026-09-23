@@ -97,6 +97,26 @@ if (!GUARD_FILE) {
     process.exit(1);
 }
 
+// The `@opentelemetry/api` require shim (#1309) — see otel-api-compile-shim.mjs
+// for the full root cause. vinext 1.0.0-beta.11's built-in tracing resolves
+// `@opentelemetry/api` via `globalThis.require`, which `Bun.build` cannot see
+// statically, so the compiled binary throws `Cannot find module
+// '@opentelemetry/api'` on every request unless this shim installs first.
+// Optional, unlike the keep-alive guard: an app whose vinext dist never
+// reaches that code path just gets an unused shim, so absence is a WARNING,
+// not a fail-closed abort.
+const OTEL_SHIM_FILE = [
+    join(compileHere, "otel-api-compile-shim.js"),
+    join(compileHere, "otel-api-compile-shim.mjs"),
+].find((c) => existsSync(c));
+if (!OTEL_SHIM_FILE) {
+    console.error(
+        "[knext compile] WARNING: otel-api-compile-shim.{js,mjs} not found beside vinext-compile " +
+            `(looked in ${compileHere}) — if the vinext dist's built-in tracing reaches a ` +
+            "globalThis.require('@opentelemetry/api') call, the compiled binary will 500 on every request",
+    );
+}
+
 /**
  * Injects the keep-alive guard import into the nitro entry AND rewrites
  * `import.meta.*` so `--bytecode`'s CommonJS output can hold it. Both act on the
@@ -109,12 +129,21 @@ const importMetaToCjs = {
         build.onLoad({ filter: /\.m?js$/ }, async (args) => {
             if (resolve(args.path) !== ENTRY) return undefined;
             const raw = await Bun.file(args.path).text();
-            // Prepend the guard import FIRST, always — independent of whether the
+            // Prepend the guard imports FIRST, always — independent of whether the
             // entry uses import.meta. `import "<abs>";` is bundled + evaluated
-            // before the rest of the entry's imports, patching Bun.serve in time.
-            const src = `import ${JSON.stringify(GUARD_FILE)};\n${raw}`;
+            // before the rest of the entry's imports, patching Bun.serve (and
+            // installing the otel require shim) in time.
+            const preamble = [
+                `import ${JSON.stringify(GUARD_FILE)};`,
+                OTEL_SHIM_FILE ? `import ${JSON.stringify(OTEL_SHIM_FILE)};` : "",
+            ]
+                .filter(Boolean)
+                .join("\n");
+            const src = `${preamble}\n${raw}`;
             console.log(
-                "[knext compile] injected the Bun.serve keep-alive guard as the entry's first import",
+                "[knext compile] injected the Bun.serve keep-alive guard" +
+                    (OTEL_SHIM_FILE ? " and the @opentelemetry/api require shim" : "") +
+                    " as the entry's first import(s)",
             );
             const before = (src.match(/import\.meta\.(url|filename|dirname)/g) ?? [])
                 .length;
