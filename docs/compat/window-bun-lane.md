@@ -15,22 +15,43 @@ clause (rule 4 below). It is deliberately not a weaker bar: the bun axis is the 
 target under ADR-0054, so "credentialed" for it must clear the same height "green" clears for node,
 not a discounted version of it.
 
+## Credential nights run on a frozen RC tag (ADR-0056)
+
+Since 2026-09-23 the bar is banked **only by credential nights**, which run against a frozen
+release-candidate tag, never `main`:
+
+- The **credential** cron is `47 5 * * *`. It checks out the RC tag pinned in
+  `.github/compat-credential-ref.json`, resolved to its peeled commit by the `credential-ref` job.
+- The original `47 4 * * *` cron still runs `main` as **early warning**. It alerts as before but
+  **never advances this count**.
+- No resolvable RC tag, including the declared `rcTag: null` "not cut yet" state, means the
+  credential run **refuses**. It never falls back to `main`.
+- This lane is the **bun × turbopack cell** of the v1.0 matrix, and its window is independent of
+  every other cell's. It restarts only when **its own** fingerprint changes, and the Bun build is
+  part of that fingerprint (rule 4 below). Cutting a new RC with an unchanged bun fingerprint does
+  not restart it.
+- Per the bytecode-caching requirement, this cell is credentialable only once it ships as the
+  compiled bytecode single-executable (#1166). The first RC is not cut before that lands.
+
+Full mechanism: [`window-node-lane.md` → The RC-ref model](window-node-lane.md#the-rc-ref-model-adr-0056).
+
 ## Status
 
-**SCHEDULED — window not yet banked.** The scheduled bun-1.4.0 lane now exists (#1147: cron
-`47 4 * * *` in `test-e2e-deploy.yml`), so the bar can start counting on its first qualifying
-night. Until **14** consecutive scheduled bun nights bank on one unchanged harness **and one
-unchanged Bun build**, its 778/0 stays **verified-once** (two dispatch runs, 2026-09-22), not
-**credentialed** — the compat-matrix Bun row stays ✅-verified-once, and this file's record table
-below fills as scheduled nights land.
+**Credential window: NOT OPEN — no release candidate has been cut.** The scheduled bun-1.4.0
+lane exists (#1147) and, since ADR-0056, runs `main` as early warning (`47 4 * * *`). The
+credential cron (`47 5 * * *`) refuses until an RC is pinned. Until **14** consecutive scheduled
+bun **credential** nights bank on one unchanged harness **and one unchanged Bun build**, its 778/0
+stays **verified-once** (two dispatch runs, 2026-09-22), not **credentialed**. The compat-matrix
+Bun row stays ✅-verified-once, and this file's record table below fills as credential nights
+land.
 
 | | |
 |---|---|
 | lane | bun (`KNEXT_RUNTIME=bun`, standalone `server.js` on Bun) |
 | required nights | **14** consecutive qualifying (`WINDOW_REQUIRED_NIGHTS`, `scripts/compat-window-audit.mjs`) |
 | grader | `node scripts/compat-window-audit.mjs --fetch --lane bun` — the lane is read from each run's `compat-run-ledger`, already lane-attributed, and from a `compat-lane-<lane>` marker artifact when the ledger cannot be read, so a night lost on one lane does not restart the other. Grades rules 1–3 (and the three stricter audit rules); **rule 4 (Bun-build freeze) landed with #1147** — the fingerprint folds the observed `bun --version` + `bun --revision` on the bun lane. |
-| window opened | on the first scheduled bun night (lane landed #1147, cron `47 4 * * *`); none banked yet |
-| current streak | 0 / 14 — lane scheduled, awaiting first qualifying night |
+| window opened | on the first scheduled bun **credential** night (cron `47 5 * * *`, RC tag) — none yet: no RC cut |
+| current streak | 0 / 14 — credential window not open; `47 4 * * *` runs `main` as early warning only |
 
 ## The rules a night must satisfy to qualify
 

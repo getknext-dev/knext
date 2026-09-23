@@ -1,7 +1,55 @@
 # Compat window — node lane
 
-The v1.0 gate. **14 consecutive scheduled node-lane runs, every shard `failed:0`/`notRun:0`, zero
-net new quarantine entries, and the harness fingerprint unchanged across all of them.**
+The v1.0 gate for the **node × turbopack cell**. **14 consecutive scheduled node-lane
+*credential* nights — run against a frozen release-candidate tag, never `main` — every shard
+`failed:0`/`notRun:0`, zero net new quarantine entries, and the fingerprint unchanged across all of
+them.** Since ADR-0056 (2026-09-23) this is one cell of the per-cell v1.0 matrix; see
+[The RC-ref model](#the-rc-ref-model-adr-0056) below.
+
+> **Read this first.** The window history further down (2026-07-29 → 2026-08-24) was banked on
+> `main`, before the RC-ref model. Under ADR-0056 those are **early-warning** nights. They are
+> kept as the measurement that motivated the change, but **none of them counts toward the v1.0
+> credential**, and the credential window has not opened: no release candidate has been cut.
+
+## The RC-ref model (ADR-0056)
+
+`test-e2e-deploy.yml` now runs each lane in one of two modes, chosen only by the cron that fired:
+
+| cron (UTC) | lane | mode | knext ref under test | counts toward v1.0? |
+|---|---|---|---|---|
+| `17 1 * * *` | node | **credential** | the RC tag pinned in `.github/compat-credential-ref.json` | **yes** |
+| `47 5 * * *` | bun | **credential** | the same RC tag | **yes** (bun cell) |
+| `17 3 * * *` | node | early-warning | `main` | **never** |
+| `47 4 * * *` | bun | early-warning | `main` | **never** |
+
+- **Resolution.** The root `credential-ref` job reads the pin on `main` and resolves the tag with
+  `git ls-remote` to its peeled commit. Every knext checkout in the run uses **that sha**. A missing,
+  unreadable, malformed or unresolvable pin **refuses the run**. So does `rcTag: null`, the declared
+  "no RC cut yet" state. There is no fallback to `main`. The not-cut refusal is the only one that
+  does not open a red-alert issue.
+- **Recording.** Each run ledger carries `compatMode`, `credential`, `knextRef`, `knextSha` and
+  `workflowSha`. The ledger job fails a credential-mode night whose ref is not an RC tag.
+- **Counting.** `scripts/compat-window-audit.mjs` grades the **credential** window by default:
+  - early-warning nights are **excluded**. A `main` night neither extends the RC streak nor breaks
+    it.
+  - a night that claims credential on any other ref is **disqualified**, and that restarts the
+    count.
+  - `--scope early-warning` reports the `main` streak and never prints "GATE MET".
+  - `--matrix` prints every supported cell.
+- **Restarts.** A window restarts when **this cell's** fingerprint changes, not when the ref does.
+  Cutting rc.N+1 with an unchanged node fingerprint does not restart the node window. The
+  fingerprint is still tarball-inclusive (ADR-0039, not narrowed), so in practice a change to
+  shipped `@getknext/*` bytes restarts every cell.
+- **The workflow file is `main`'s.** GitHub runs a scheduled workflow from the default branch, so
+  on a credential night the scripts, manifest and tarballs come from the RC tag but
+  `test-e2e-deploy.yml` itself is `main`'s. The fingerprint hashes that executing copy (ADR-0039
+  Amendment 1). **An edit to `test-e2e-deploy.yml` on `main` therefore restarts the credential
+  windows** even though the RC did not move.
+- **Unresolved nights.** Every run publishes `compat-mode-<mode>` next to `compat-lane-<lane>`,
+  before anything can fail. A lost early-warning night cannot restart a credential window. A lost
+  night of unknown mode is admitted to it (fail closed).
+- **Cutting an RC is a founder action:** push the `vX.Y.Z-rc.N` tag, then bump `rcTag` in a
+  reviewed PR. rc.1 waits until every cell's prerequisites have landed.
 
 This file is the record. Its numbers are now **computed** — `scripts/compat-window-audit.mjs` grades
 the nights out of the run ledgers — but the file itself is still transcribed by hand; see
@@ -9,6 +57,13 @@ the nights out of the run ledgers — but the file itself is still transcribed b
 reason a follow-up exists.
 
 ## Status
+
+**Credential window: NOT OPEN.** No release candidate has been cut (`rcTag: null`), so the
+credential cron refuses nightly by design.
+
+**The history below is the pre-ADR-0056 `main` window, now early warning.** Reproduce its current
+state with `node scripts/compat-window-audit.mjs --fetch --scope early-warning`. Without
+`--scope`, the audit grades the credential window, which is empty.
 
 **OPEN since 2026-07-29 — and it has never reached 14.** The clock started on the first scheduled
 node-lane run after `scripts/compat-window-fingerprint.mjs` landed (#574, merged 2026-07-28) —
@@ -234,7 +289,9 @@ Stated plainly because the gap is the reason this file is not self-certifying:
 ## How to record a night
 
 **The short way, and the one to prefer:** `node scripts/compat-window-audit.mjs --fetch --limit 40`
-grades every scheduled night in one pass and prints the streaks and what restarted each. Transcribe
+grades every scheduled **credential** night in one pass and prints the streaks and what restarted
+each. Add `--scope early-warning` for the `main` nights; since ADR-0056 the command without it is
+the credential window. Transcribe
 its output into the table above. The long way below is what it automates — keep it, because a
 transcription you cannot check by hand is not a record.
 

@@ -143,19 +143,42 @@ Today: node lane green, bun lane red, **6 of the last 8 scheduled runs green** �
 level. A flaky north-star gate is worse than a red one, because the natural response is to re-run
 until green.
 
-**Definition adopted:**
+**Definition adopted — amended 2026-09-23 by ADR-0056** (founder decisions on #850 and #1218;
+this replaces the node-lane-only wording, which contradicted ADR-0054's bun-standalone default):
 
-> 14 consecutive scheduled **node-lane** runs, every shard `failed:0` and `notRun:0`, with **zero
-> net new entries in the quarantine ledger** during the window.
+> **Every supported runtime × builder cell** (node/bun × vinext/turbopack/webpack) banks its **own**
+> 14 consecutive scheduled **credential nights** on the official suite: every shard `failed:0` and
+> `notRun:0`, **zero net new entries in the quarantine ledger**, and the cell's frozen-set
+> fingerprint unchanged across the window. A credential night runs against a **frozen
+> release-candidate tag** (`vX.Y.Z-rc.N`, pinned in `.github/compat-credential-ref.json`), never
+> `main`. Each cell must also have bytecode caching live (#1218 addendum).
+
+What that means operationally:
+
+- **`main` nightlies are early warning only.** They keep running and alerting, but they can never
+  advance a credential count. `scripts/compat-window-audit.mjs` excludes them from every credential
+  window, and a night that claims credential on a non-RC ref is disqualified.
+- **A window restarts only when its own cell's fingerprint changes.** Cutting rc.N+1 restarts only
+  the cells whose fingerprint moved. The fingerprint stays tarball-inclusive (ADR-0039, not
+  narrowed), so in practice any change to the shipped `@getknext/*` bytes restarts every cell, and
+  only cell-specific changes (e.g. the Bun build) restart one cell alone.
+- **No resolvable RC tag → the credential lane refuses.** It does not fall back to `main`.
+- **rc.1 is cut only once every cell's prerequisites have landed:** the webpack builder (#1219),
+  compiled bytecode bun-standalone (#1166), the bytecode-live check (#1221), and vinext × node
+  compile-cache wiring. Cutting it is a founder action.
+- `node scripts/compat-window-audit.mjs --fetch --matrix` prints every cell's credential window;
+  v1.0 is met when all of them are. A cell with no credential lane wired yet is *not met*.
 
 The quarantine clause is the load-bearing half: a pass-count-only gate is **purchasable** by moving
 failures into the ledger. Measuring ledger *growth* is what makes green mean "the adapter is
 correct" rather than "its known failures are catalogued." This is why **#512** is on the 1.0 path —
 it is gate integrity, not polish.
 
-**Bun is out of the 1.0 verified surface.** ADR-0036 ships `bun-exec` only on a distribution-
-separated win; Run 24 found none. A target with no measured win and no green lane has no place
-inside a stability promise. Bun lane red does **not** block 1.0.
+~~**Bun is out of the 1.0 verified surface.**~~ **Superseded (2026-09-23, ADR-0054 + ADR-0056).**
+This paragraph said a Bun lane red does not block 1.0. It no longer holds: bun-standalone is the
+v1.0 default (ADR-0054), and every supported cell, the Bun cells included, is part of the
+credential. The original reasoning (ADR-0036 shipped `bun-exec` only on a distribution-separated
+win, and Run 24 found none) is kept here as history.
 
 ### The honesty gap in the matrix
 Four capability rows are not backed by hard checks, verified directly:

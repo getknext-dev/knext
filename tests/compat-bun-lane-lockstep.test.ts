@@ -45,7 +45,7 @@ type Step = {
   run?: string;
   with?: Record<string, unknown>;
 };
-type Job = { steps?: Step[] };
+type Job = { steps?: Step[]; needs?: string | string[] };
 
 function workflow(): { jobs: Record<string, Job> } {
   return parse(readFileSync(WORKFLOW_PATH, 'utf8'));
@@ -203,8 +203,31 @@ describe('cr-1179 #3 — the run publishes its lane independently of the ledger'
     // Attribution has to outlive the failure it attributes. A marker uploaded
     // after the install/pack/fingerprint work would be missing from exactly the
     // runs that need it.
-    const { steps, index } = markerStep();
-    const firstWork = steps.findIndex((s) => /Install knext deps/.test(s.name ?? ''));
+    //
+    // #850 / ADR-0056 moved it into the ROOT job (`credential-ref`), ahead of
+    // the RC resolution — a REFUSED credential night must still be attributed
+    // to its own lane, or it would restart every lane's credential window. So
+    // the property is now asserted structurally: the marker's job needs
+    // nothing, every other job waits on it (transitively), and within that job
+    // only marker steps precede it.
+    const { job, steps, index } = markerStep();
+    const jobs = workflow().jobs;
+    const needsOf = (name: string) => {
+      const n = jobs[name]?.needs;
+      return Array.isArray(n) ? n : n ? [n] : [];
+    };
+    expect(needsOf(job), 'the marker job must be a root job').toEqual([]);
+    const reaches = (name: string, seen = new Set<string>()): boolean =>
+      needsOf(name).some((n) => {
+        if (n === job) return true;
+        if (seen.has(n)) return false;
+        seen.add(n);
+        return reaches(n, seen);
+      });
+    for (const other of Object.keys(jobs).filter((j) => j !== job)) {
+      expect(reaches(other), `job ${other} must wait on the marker job ${job}`).toBe(true);
+    }
+    const firstWork = steps.findIndex((s) => !/marker/i.test(s.name ?? ''));
     expect(firstWork).toBeGreaterThanOrEqual(0);
     expect(index).toBeLessThan(firstWork);
   });

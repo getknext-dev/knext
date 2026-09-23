@@ -3,7 +3,9 @@
 - **Status:** Accepted (2026-07-28; sprint-2 decision D-1, `docs/SPRINT_2.md`). **Amends D-1's
   `dist/cli/**` exclusion, which is not implementable as written** — see the Decision. Implemented by
   `scripts/compat-window-fingerprint.mjs` + `scripts/adapter-import-closure.mjs` and wired into
-  `.github/workflows/test-e2e-deploy.yml` (#545, task S1).
+  `.github/workflows/test-e2e-deploy.yml` (#545, task S1). **Amended by ADR-0056** (Amendment 1
+  below): scope unchanged and not narrowed, but the workflow entry is read from the commit that
+  executed.
 - **Depends on:** ADR-0007 (the official-suite compat gate), `docs/V1_ROADMAP.md` (which makes the
   window a 1.0 release gate), `.claude/rules/workflow.md` (design gates, mutation-proof discipline)
 - **Governs:** the north-star hard rule "gate every parity claim on the official compatibility
@@ -161,3 +163,23 @@ matches **zero** files is a hard error rather than a quietly-empty component.
       precondition for the guarantee (see Consequences).
 - [ ] Consider recording the runner image identity if an environment-skew incident ever makes that
       residual gap concrete.
+
+## Amendment 1 (2026-09-23, ADR-0056) — the workflow entry is the workflow that ran
+
+**The scope of the frozen set is unchanged.** It still covers the harness plus every packed
+`@getknext/*` tarball in full, and it is **not narrowed**. The window problem #850 raised is solved
+by *where* nights are counted (a frozen release-candidate tag, ADR-0056), not by what is hashed.
+
+One entry's **source** changes. ADR-0056 runs credential nights on a scheduled workflow from `main`
+that checks out an RC tag. The scripts, manifest and tarballs therefore come from the tag, but
+GitHub executes the **default branch's** `test-e2e-deploy.yml`. Hashing the checkout's copy of that
+file would fingerprint a workflow that did not run, which is the exact silent failure this ADR
+exists to prevent. So `compat-window-fingerprint.mjs --workflow-file` reads the
+`.github/workflows/test-e2e-deploy.yml` entry's bytes from a sparse checkout of
+`github.workflow_sha`. The entry's *path label* is unchanged, so on a `main` night (checkout ==
+executing commit) the digest is byte-identical to the pre-amendment formula and no live streak is
+reset.
+
+Consequence: during a credential window, an edit to `test-e2e-deploy.yml` on `main` restarts every
+credential cell, even though the RC tag did not move. That is correct, because the harness that ran
+did change.

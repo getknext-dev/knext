@@ -56,6 +56,7 @@
  *     --repo-root . --tarballs-dir "$GITHUB_WORKSPACE/knext-tarballs" \
  *     [--next-js-dir next.js] [--next-tarball next-prebuilt/next.tgz] \
  *     [--next-ref v16.2.0] \
+ *     [--workflow-file knext-executing/.github/workflows/test-e2e-deploy.yml] \
  *     [--out compat-window-fingerprint.json] [--json] [--files]
  */
 
@@ -124,15 +125,34 @@ function line(component, path, absolute) {
   return `${component}\t${path}\t${mode}\t${sha256(readFileSync(absolute))}`;
 }
 
-function collectHarness(repoRoot) {
+/** The harness entry whose bytes come from the EXECUTING commit (ADR-0039 Amendment 1). */
+export const EXECUTING_WORKFLOW = '.github/workflows/test-e2e-deploy.yml';
+
+/**
+ * @param {string} repoRoot
+ * @param {{ workflowFile?: string | null }} [opts]
+ *   `workflowFile` — ADR-0039 Amendment 1 (ADR-0056). A credential night checks
+ *   out an RC tag, but GitHub runs the DEFAULT BRANCH's workflow file. The
+ *   workflow entry must hash the bytes that ran, so they are read from here (a
+ *   sparse checkout of `github.workflow_sha`). The entry's path LABEL is
+ *   unchanged, so identical bytes give a byte-identical digest. A given but
+ *   missing file is a hard error, never a fallback to the checkout's copy.
+ */
+function collectHarness(repoRoot, opts = {}) {
   /** @type {{ component: string, path: string, line: string }[]} */
   const entries = [];
   for (const root of HARNESS_ROOTS) {
-    const abs = resolve(repoRoot, root.path);
+    const override =
+      root.kind === 'file' && root.path === EXECUTING_WORKFLOW && opts.workflowFile
+        ? resolve(opts.workflowFile)
+        : null;
+    const abs = override ?? resolve(repoRoot, root.path);
     if (root.kind === 'file') {
       if (!existsSync(abs)) {
         throw new Error(
-          `compat-window fingerprint: frozen harness file ${root.path} is missing. A root that resolves to nothing silently shrinks the frozen set — fix the path or amend the freeze scope (docs/adr/0039).`,
+          override
+            ? `compat-window fingerprint: --workflow-file ${override} is missing. The executing workflow is part of the frozen set; refusing to fall back to the checkout's copy, which did not run (docs/adr/0039 Amendment 1).`
+            : `compat-window fingerprint: frozen harness file ${root.path} is missing. A root that resolves to nothing silently shrinks the frozen set — fix the path or amend the freeze scope (docs/adr/0039).`,
         );
       }
       entries.push({
@@ -297,7 +317,7 @@ function collectRuntimeComponent({ runtimeVersion, runtimeRevision }) {
 }
 
 /**
- * @param {{ repoRoot: string, tarballsDir: string, nextJsDir?: string | null, nextTarball?: string | null, nextRef?: string | null, runtimeVersion?: string | null, runtimeRevision?: string | null }} options
+ * @param {{ repoRoot: string, tarballsDir: string, nextJsDir?: string | null, nextTarball?: string | null, nextRef?: string | null, runtimeVersion?: string | null, runtimeRevision?: string | null, workflowFile?: string | null }} options
  */
 export function computeFingerprint({
   repoRoot,
@@ -307,8 +327,9 @@ export function computeFingerprint({
   nextRef,
   runtimeVersion,
   runtimeRevision,
+  workflowFile,
 }) {
-  const harness = collectHarness(repoRoot);
+  const harness = collectHarness(repoRoot, { workflowFile });
   const { entries: packed, packages } = collectPacked(tarballsDir);
 
   const harnessLines = harness.map((e) => e.line).sort();
@@ -384,6 +405,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       // node lane → nothing folded, node digest unchanged.
       runtimeVersion: arg('runtime-version', null),
       runtimeRevision: arg('runtime-revision', null),
+      // ADR-0039 Amendment 1: the workflow file that EXECUTED (github.workflow_sha).
+      workflowFile: arg('workflow-file', null),
     });
   } catch (error) {
     console.error(`::error::${error instanceof Error ? error.message : String(error)}`);

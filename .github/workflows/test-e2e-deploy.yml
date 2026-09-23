@@ -27,6 +27,17 @@ name: Compat suite (official Next.js deploy harness)
 # to the shipped artifact's lane, compat-vinext.yml. The bun lane is still
 # dispatchable (`runtime=bun`) on demand. Until 14 bun nights bank, the
 # compat-matrix Bun row stays verified-once, not credentialed.
+#
+# MODES (#850 / ADR-0056): every lane runs in one of two modes, decided ONLY by
+# the cron literal that fired (KNEXT_COMPAT_MODE below — a dispatch is always
+# early-warning):
+#   * early-warning — '17 3 * * *' (node) and '47 4 * * *' (bun). They test
+#     `main`, alert as before, and NEVER advance a v1.0 credential count.
+#   * credential    — '17 1 * * *' (node) and '47 5 * * *' (bun). They test the
+#     frozen release-candidate tag pinned in .github/compat-credential-ref.json,
+#     resolved by the `credential-ref` job. No resolvable RC tag → the run
+#     REFUSES (never falls back to `main`). Only these nights count toward the
+#     per-cell 14-night windows (scripts/compat-window-audit.mjs).
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
@@ -99,7 +110,15 @@ on:
     # unchanged harness AND one unchanged Bun build). The weekly Sunday bun cron
     # this REPLACES was retired with the standalone-under-bun ARTIFACT lane
     # (#710); this is a fresh CREDENTIALING lane against the bar, not its return.
+    # Since ADR-0056 both crons above test `main` as EARLY WARNING; the bar is
+    # banked by the two credential crons below, on the frozen RC tag.
     - cron: '47 4 * * *'
+    # 01:17 UTC nightly — the NODE CREDENTIAL night (#850, ADR-0056): runs the
+    # pinned RC tag, not `main`. Refuses while no RC is cut.
+    - cron: '17 1 * * *'
+    # 05:47 UTC nightly — the BUN CREDENTIAL night (#850, ADR-0056). Maps to the
+    # bun lane in KNEXT_RUNTIME and to credential in KNEXT_COMPAT_MODE.
+    - cron: '47 5 * * *'
 
 # Pin the Next.js ref so a failure is attributable to knext, not upstream churn.
 # NEXTJS_REF is the git TAG (kept for the source checkout that supplies the
@@ -148,7 +167,13 @@ env:
   # literal in sync with the schedule block above — the cron↔runtime mapping is
   # mutation-proved (an expression evaluator, not a grep) in
   # tests/compat-suite-workflow.test.ts.
-  KNEXT_RUNTIME: ${{ github.event.inputs.runtime || (github.event.schedule == '47 4 * * *' && 'bun') || 'node' }}
+  # #850: the bun CREDENTIAL cron ('47 5 * * *') is the bun lane too.
+  KNEXT_RUNTIME: ${{ github.event.inputs.runtime || (github.event.schedule == '47 4 * * *' && 'bun') || (github.event.schedule == '47 5 * * *' && 'bun') || 'node' }}
+  # #850 / ADR-0056 — the ONE mode decision. Only the two credential cron
+  # literals map to `credential`; every other trigger, INCLUDING any dispatch,
+  # is `early-warning`, so no dispatch input can produce a credential night.
+  # Evaluated (not grepped) by tests/compat-credential-ref.test.ts.
+  KNEXT_COMPAT_MODE: ${{ (github.event.schedule == '17 1 * * *' && 'credential') || (github.event.schedule == '47 5 * * *' && 'credential') || 'early-warning' }}
   # #188 path 2 — dispatch input ONLY, never a schedule branch: on schedule
   # events github.event.inputs is empty, so this is '' (off) on the nightly
   # AND the weekly bun lane. '1' is the exact value scripts/e2e-deploy.sh
@@ -156,8 +181,83 @@ env:
   KNEXT_SANDBOX_FETCH_DEBUG: ${{ github.event.inputs.sandboxFetchDebug == 'true' && '1' || '' }}
 
 jobs:
+  # ── #850 / ADR-0056: which knext commit does this night test? ──────────────
+  # The ROOT job: every other job needs it, directly or transitively. On a
+  # credential cron it resolves the RC tag pinned in
+  # .github/compat-credential-ref.json (read from `main`, the executing ref) to
+  # its peeled commit and hands THAT sha to every knext checkout. Any failure to
+  # resolve REFUSES the run — there is no fallback to `main`, because a
+  # credential night that quietly tested `main` would bank a night against a ref
+  # nobody froze. On an early-warning trigger it hands back the executing sha.
+  credential-ref:
+    name: Resolve the knext ref under test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      state: ${{ steps.resolve.outputs.state }}
+      checkout_ref: ${{ steps.resolve.outputs.checkout_ref }}
+      checkout_sha: ${{ steps.resolve.outputs.checkout_sha }}
+    steps:
+      # cr-1179 #3 — publish which LANE this run is, independently of the ledger.
+      # `compat-window-audit` reads the lane from an artifact NAME in the
+      # artifacts LISTING (never downloading it), so a night whose ledger is
+      # lost — runner disconnect, expiry, a failed download — is still
+      # attributable. Before this, the lane was read only FROM the ledger, so an
+      # unreadable BUN night disqualified a night in the NODE window too and
+      # restarted the v1.0 credential streak for a failure on the other lane.
+      # It runs FIRST, in the root job, before any step that can lose the night
+      # — including the RC resolution below, so a REFUSED credential night is
+      # still attributed to its own lane and mode: attribution has to outlive
+      # the failure it attributes. Unconditional — a marker on one lane only
+      # would leave the other lane's lost nights unattributed, which is the bug.
+      # `tests/compat-bun-lane-lockstep.test.ts` locksteps the name to the
+      # prefix the audit reads.
+      - name: Record the lane + mode markers
+        run: |
+          set -euo pipefail
+          printf '%s\n' "${KNEXT_RUNTIME}" > "${RUNNER_TEMP}/compat-lane.txt"
+          printf '%s\n' "${KNEXT_COMPAT_MODE}" > "${RUNNER_TEMP}/compat-mode.txt"
+      - name: Publish the lane marker
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: compat-lane-${{ env.KNEXT_RUNTIME }}
+          path: ${{ runner.temp }}/compat-lane.txt
+          # The NAME is the evidence and the listing keeps it after expiry, so
+          # retention here only needs to cover the audit's own window.
+          retention-days: 90
+      # #850 — the MODE marker, same contract as the lane marker: a lost
+      # early-warning night must not restart a credential window, and the audit
+      # can only know which it was from a name that outlives the ledger.
+      - name: Publish the mode marker
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: compat-mode-${{ env.KNEXT_COMPAT_MODE }}
+          path: ${{ runner.temp }}/compat-mode.txt
+          retention-days: 90
+
+      # The pin file and the resolver come from the EXECUTING ref (`main` on a
+      # schedule). `git ls-remote` against origin resolves the tag, so no tag
+      # history is fetched here.
+      - name: Checkout knext (the pin + the resolver)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: knext
+
+      # NO continue-on-error and no `if:`: a refusal must fail this job, and
+      # with it every job that needs it. The script writes `state` before it
+      # exits so the alert can tell the declared not-cut state from a broken pin.
+      - name: Resolve the knext ref (RC tag on credential nights; refuses, never falls back)
+        id: resolve
+        run: |
+          set -euo pipefail
+          node knext/scripts/compat-credential-ref.mjs \
+            --mode "${KNEXT_COMPAT_MODE}" \
+            --pin knext/.github/compat-credential-ref.json \
+            --remote-dir knext
+
   build-next:
     name: Prepare prebuilt next + harness
+    needs: credential-ref
     runs-on: ubuntu-latest
     # #147 step 1 (round 4 — the PREBUILT pivot). Rounds 1–3 tried to make this
     # job COMPILE next.js v16.0.3 from source within the runner window (timeout
@@ -191,35 +291,27 @@ jobs:
     # (now-removed) UNbounded hanging download.
     timeout-minutes: 90
     steps:
+      # #850 — the RESOLVED sha from the root job: the RC tag's peeled commit on
+      # a credential night, the executing commit otherwise. By sha, not by tag
+      # name, so a tag moved mid-run cannot switch what gets built.
       - name: Checkout knext
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: knext
+          ref: ${{ needs.credential-ref.outputs.checkout_sha }}
 
-      # cr-1179 #3 — publish which LANE this run is, independently of the ledger.
-      # `compat-window-audit` reads the lane from an artifact NAME in the
-      # artifacts LISTING (never downloading it), so a night whose ledger is
-      # lost — runner disconnect, expiry, a failed download — is still
-      # attributable. Before this, the lane was read only FROM the ledger, so an
-      # unreadable BUN night disqualified a night in the NODE window too and
-      # restarted the v1.0 credential streak for a failure on the other lane.
-      # It runs here, before any step that can lose the night: attribution has
-      # to outlive the failure it attributes. Unconditional — a marker on one
-      # lane only would leave the other lane's lost nights unattributed, which
-      # is the bug. `tests/compat-bun-lane-lockstep.test.ts` locksteps the name
-      # to the prefix the audit reads.
-      - name: Record the lane marker
-        run: |
-          set -euo pipefail
-          printf '%s\n' "${KNEXT_RUNTIME}" > "${RUNNER_TEMP}/compat-lane.txt"
-      - name: Publish the lane marker
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      # ADR-0039 Amendment 1 — the workflow file that EXECUTED. GitHub runs a
+      # scheduled workflow from the default branch, so on a credential night the
+      # checkout above holds the RC's copy of this file, which did NOT run. The
+      # fingerprint reads the workflow entry from here instead. On an
+      # early-warning night both are the same commit and the digest is unchanged.
+      - name: Checkout the executing workflow file (frozen-set workflow entry)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          name: compat-lane-${{ env.KNEXT_RUNTIME }}
-          path: ${{ runner.temp }}/compat-lane.txt
-          # The NAME is the evidence and the listing keeps it after expiry, so
-          # retention here only needs to cover the audit's own window.
-          retention-days: 90
+          path: knext-executing
+          ref: ${{ github.workflow_sha }}
+          sparse-checkout: .github/workflows/test-e2e-deploy.yml
+          sparse-checkout-cone-mode: false
 
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -411,6 +503,7 @@ jobs:
             --next-js-dir "${GITHUB_WORKSPACE}/next.js" \
             --next-tarball "${GITHUB_WORKSPACE}/next-prebuilt/next.tgz" \
             --next-ref "${NEXTJS_REF}" \
+            --workflow-file "${GITHUB_WORKSPACE}/knext-executing/.github/workflows/test-e2e-deploy.yml" \
             --out "${GITHUB_WORKSPACE}/compat-window-fingerprint.json" \
             ${RUNTIME_ARGS[@]+"${RUNTIME_ARGS[@]}"} \
             | tee "${RUNNER_TEMP}/fingerprint.txt"
@@ -1625,7 +1718,13 @@ jobs:
   # end: a shard whose selection was empty in the first place.
   shard-ledger:
     name: Per-shard ledger (flake attribution)
-    needs: deploy-tests
+    # #850: needs credential-ref for the resolved ref/sha it records. `if:`
+    # stays a bare always() (#703: a skipped spine job fails nothing). On a
+    # REFUSED credential night the first step below fails this job loudly —
+    # nothing was built, so there is no ledger to write; the lane + mode markers
+    # (published before the refusal) are the evidence, and the audit books the
+    # night as unresolved for that lane and mode.
+    needs: [credential-ref, deploy-tests]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -1639,10 +1738,23 @@ jobs:
       # and tests/compat-run-ledger-completeness.test.ts exercises the real
       # function. Checked out under `knext/` so the artifact downloads below
       # keep their own top-level directories.
+      # #850 — never check out a DEFAULT ref in place of an unresolved one: an
+      # empty `ref:` makes actions/checkout fall back to the default branch. On a
+      # refused credential night credential-ref resolved no commit, nothing was
+      # tested, and no ledger is written (ADR-0056). One exact command, so the
+      # #695 run-allowlist can sanction it literally.
+      - name: Refuse when credential-ref resolved no knext commit (nothing was tested)
+        env:
+          CHECKOUT_SHA: ${{ needs.credential-ref.outputs.checkout_sha }}
+        run: test -n "${CHECKOUT_SHA}"
+
+      # #850 — the same resolved sha build-next tested: the ledger script is part
+      # of the frozen tooling of the ref under test, not of whatever `main` holds.
       - name: Checkout knext (the ledger script + its guards)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: knext
+          ref: ${{ needs.credential-ref.outputs.checkout_sha }}
 
       - name: Download every shard summary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -1703,6 +1815,14 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           EVENT_NAME: ${{ github.event_name }}
+          # #850 / ADR-0056 — WHICH knext ref this night ran against. The audit
+          # counts a night toward a credential window only when it ran in
+          # credential mode on an RC tag; the ledger fails a credential claim on
+          # any other ref.
+          KNEXT_COMPAT_MODE: ${{ env.KNEXT_COMPAT_MODE }}
+          KNEXT_CHECKOUT_REF: ${{ needs.credential-ref.outputs.checkout_ref }}
+          KNEXT_CHECKOUT_SHA: ${{ needs.credential-ref.outputs.checkout_sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
         run: node knext/scripts/compat-run-ledger.mjs
 
       - name: Upload the run ledger
@@ -1727,7 +1847,16 @@ jobs:
   # only the ✅ direction needs run evidence.
   nightly-red-alert:
     name: Nightly red alert (pinned issue)
-    needs: [build-next, deploy-tests, shard-ledger]
+    needs: [credential-ref, build-next, deploy-tests, shard-ledger]
+    # #850: a REFUSED credential night (credential-ref failed) alerts too — a
+    # broken pin or a missing tag must not go quiet. The ONE exception is the
+    # declared `not-cut` state (the pin says rcTag: null): that refusal is the
+    # reviewed "no RC yet" status, and alerting on it every night before rc.1
+    # would bury real reds. In that state nothing was built or tested (the
+    # shard-ledger's own refusal is a consequence, not a separate red), so the
+    # suppression covers the whole night. `state` is only ever `not-cut` on a
+    # credential cron with a null pin; if it is unreadable it is '' and the
+    # alert fires.
     # always() so this job is not skipped when a needed job fails; the
     # needs-result checks make it fire ONLY on failure; the event check scopes
     # it to the nightly schedule.
@@ -1743,7 +1872,9 @@ jobs:
     if: >-
       always() &&
       github.event_name == 'schedule' &&
-      (needs.build-next.result == 'failure' || needs.deploy-tests.result == 'failure' ||
+      needs.credential-ref.outputs.state != 'not-cut' &&
+      (needs.credential-ref.result == 'failure' || needs.credential-ref.result == 'cancelled' ||
+       needs.build-next.result == 'failure' || needs.deploy-tests.result == 'failure' ||
        needs.shard-ledger.result == 'failure' || needs.shard-ledger.result == 'cancelled' ||
        needs.deploy-tests.result == 'cancelled')
     runs-on: ubuntu-latest
@@ -1755,6 +1886,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REF_RESULT: ${{ needs.credential-ref.result }}
+          REF_STATE: ${{ needs.credential-ref.outputs.state }}
+          CHECKOUT_REF: ${{ needs.credential-ref.outputs.checkout_ref }}
           BUILD_RESULT: ${{ needs.build-next.result }}
           SHARDS_RESULT: ${{ needs.deploy-tests.result }}
           NEXTJS_REF_TESTED: ${{ env.NEXTJS_REF }}
@@ -1766,23 +1900,34 @@ jobs:
           LEDGER_RESULT: ${{ needs.shard-ledger.result }}
         run: |
           set -euo pipefail
-          # #147 item 4 / #1147 — NAME the lane. Two nightly schedules share this
-          # workflow: the '17 3 * * *' Node run is the credential lane; the
-          # '47 4 * * *' Bun run is the credentialing lane for the bun axis. A red
-          # BUN night must alert under its OWN title — distinct titles also keep
-          # the idempotency keys separate, so a bun red never comments on (or is
-          # mistaken for) the Node credential issue.
+          # #147 item 4 / #1147 — NAME the lane. A red BUN night must alert under
+          # its OWN title — distinct titles also keep the idempotency keys
+          # separate, so a bun red never comments on (or is mistaken for) the
+          # Node issue. Since ADR-0056 the '17 3' / '47 4' crons test `main` as
+          # EARLY WARNING: their titles are kept (the dedup keys of the issues
+          # already open), but their text says plainly that they are
+          # non-credentialing. Credential nights are worded below.
           if [ "${KNEXT_RUNTIME}" = "bun" ]; then
             title='Compat nightly RED (bun credentialing)'
-            lane_note="This is the **Bun credentialing lane** (nightly, \`KNEXT_RUNTIME=bun\`, #1147). A red here does NOT imply the Node credential lane (the '17 3 * * *' nightly, the compat-matrix ✅) is red — the Node lane alerts under its own 'Compat nightly RED' issue. A red night RESTARTS the bun lane's 14-night streak (docs/compat/window-bun-lane.md); flip-back policy applies to the BUN matrix row only."
+            lane_note="This is the **bun lane, EARLY WARNING on main** (\`KNEXT_RUNTIME=bun\`, the '47 4 * * *' nightly). It is NON-credentialing: it does not affect any v1.0 credential streak — credential nights run only on the frozen RC tag (ADR-0056). A red here does NOT imply the Node lane is red — the Node lane alerts under its own 'Compat nightly RED' issue. Treat it as a forecast: fix on main before the next RC is cut."
           else
             title='Compat nightly RED'
-            lane_note="This is the **Node credential lane** (nightly, \`KNEXT_RUNTIME=node\`) — the lane backing the compat-matrix official-suite ✅."
+            lane_note="This is the **node lane, EARLY WARNING on main** (\`KNEXT_RUNTIME=node\`, the '17 3 * * *' nightly). It is NON-credentialing: it does not affect any v1.0 credential streak — credential nights run only on the frozen RC tag (ADR-0056). Treat it as a forecast: fix on main before the next RC is cut."
+          fi
+          # #850 / ADR-0056 — a CREDENTIAL night (RC tag) alerts under its own
+          # per-lane title, so a red on the frozen RC is never folded into the
+          # main early-warning thread above (and vice versa). The early-warning
+          # titles are unchanged, so their open issues keep their dedup keys.
+          if [ "${KNEXT_COMPAT_MODE}" = "credential" ]; then
+            title="Compat CREDENTIAL RED (${KNEXT_RUNTIME}, RC tag)"
+            lane_note="This is the **${KNEXT_RUNTIME} CREDENTIAL night** — it ran against the frozen release-candidate tag pinned in \`.github/compat-credential-ref.json\` (ref: \`${CHECKOUT_REF:-unresolved}\`), not main. A red here RESTARTS this cell's v1.0 14-night window; the fix lands on main and ships in the next RC. If credential-ref is the failed job, the RC ref could not be resolved (resolution state: \`${REF_STATE:-unknown}\`) and nothing was tested — the lane refuses rather than fall back to main."
           fi
           body="The scheduled official Next.js deploy-suite run FAILED.
 
           - Run: ${RUN_URL}
           - Runtime lane: ${KNEXT_RUNTIME}
+          - Mode: ${KNEXT_COMPAT_MODE}
+          - credential-ref (resolve the knext ref): ${REF_RESULT} (state: ${REF_STATE:-n/a})
           - build-next (Prepare): ${BUILD_RESULT}
           - deploy-tests shards: ${SHARDS_RESULT}
           - shard-ledger (attribution + test-count floor): ${LEDGER_RESULT}

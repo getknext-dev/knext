@@ -2702,12 +2702,16 @@ describe('compat-suite Bun runtime axis (test-e2e-deploy.yml, #147 item 4)', () 
     expect(/^\s*-\s*'?bun'?\s*$/m.test(input), 'options must include bun').toBe(true);
   });
 
-  it('has EXACTLY two nightly crons — the node credential (17 3) and the bun credentialing (47 4) lanes (#1147)', () => {
+  it('has EXACTLY four nightly crons — node/bun on main (17 3, 47 4) plus node/bun on the RC tag (17 1, 47 5) (#1147, #850)', () => {
     // #1147 stands up a SECOND nightly: the bun credentialing lane. Both halves:
     // the node credential nightly survives UNTOUCHED, and the bun lane is a
     // DISTINCT off-peak cron — not a resurrection of the retired weekly Sunday
     // artifact lane (#710), but a fresh credentialing lane graded against
-    // docs/compat/window-bun-lane.md. No THIRD schedule may appear.
+    // docs/compat/window-bun-lane.md.
+    //
+    // #850 / ADR-0056 adds the two CREDENTIAL crons ('17 1' node, '47 5' bun),
+    // which run the frozen RC tag; the two above keep running `main` as early
+    // warning. No FIFTH schedule may appear.
     const all = crons();
     expect(all, 'the nightly Node cron must stay untouched (the credential lane)').toContain(
       '17 3 * * *',
@@ -2715,10 +2719,12 @@ describe('compat-suite Bun runtime axis (test-e2e-deploy.yml, #147 item 4)', () 
     expect(all, 'the bun credentialing cron must exist (#1147)').toContain('47 4 * * *');
     // The two lanes must fire at DISTINCT times so they never contend for the
     // same runner window, and there must be no other schedule.
-    expect(new Set(all).size, 'the two crons must be distinct').toBe(2);
+    expect(all, 'the node RC credential cron must exist (#850)').toContain('17 1 * * *');
+    expect(all, 'the bun RC credential cron must exist (#850)').toContain('47 5 * * *');
+    expect(new Set(all).size, 'the four crons must be distinct').toBe(4);
     expect(
-      all.filter((c) => c !== '17 3 * * *' && c !== '47 4 * * *'),
-      'exactly two schedules: the node credential nightly and the bun credentialing nightly',
+      all.filter((c) => !['17 3 * * *', '47 4 * * *', '17 1 * * *', '47 5 * * *'].includes(c)),
+      'exactly four schedules: node + bun on main, node + bun on the RC tag',
     ).toEqual([]);
   });
 
@@ -2821,6 +2827,11 @@ describe('compat-suite Bun runtime axis (test-e2e-deploy.yml, #147 item 4)', () 
 
     it('the BUN credentialing cron (47 4) resolves to bun', () => {
       expect(resolveLane({ schedule: '47 4 * * *' })).toBe('bun');
+    });
+
+    it('the RC credential crons keep their lanes: 47 5 → bun, 17 1 → node (#850)', () => {
+      expect(resolveLane({ schedule: '47 5 * * *' })).toBe('bun');
+      expect(resolveLane({ schedule: '17 1 * * *' })).toBe('node');
     });
 
     it('a dispatch runtime input WINS over any schedule', () => {
