@@ -14,15 +14,7 @@
  *      `${Date.now()}` for `spec.buildId` rather than the parsed tag.
  */
 
-import {
-    afterEach,
-    beforeEach,
-    describe,
-    expect,
-    it,
-    jest,
-    mock,
-} from "bun:test";
+import { beforeEach, describe, expect, it, jest, mock } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import YAML from "yaml";
@@ -97,6 +89,33 @@ describe("runPreviewDeploy — default preflight (deps.preflight NOT injected, #
         expect(apply).toHaveBeenCalledTimes(1);
     });
 
+    it("binds the target kube context into the dry-run preflight argv (#978) — a regression here would silently dry-run against the AMBIENT cluster", async () => {
+        const apply = mock((_argv: readonly string[]) => {});
+        const capture = mock(
+            (_argv: readonly string[]) =>
+                "https://my-app-pr-42.previews.example.com",
+        );
+        const buildAndPush = mock(async (_name: string) => digestImage);
+
+        await runPreviewDeploy(
+            baseConfig,
+            {
+                prId: "42",
+                branch: "feat/x",
+                namespace: "previews",
+                context: "staging-cluster",
+            },
+            // preflight intentionally OMITTED — exercises defaultPreflight's
+            // OWN withKubeContext wiring, not a caller-supplied stub's.
+            { apply, capture, buildAndPush },
+        );
+
+        expect(captureKubectl).toHaveBeenCalledTimes(1);
+        const argv = captureKubectl.mock.calls[0]?.[0] as string[];
+        expect(argv).toContain("--context");
+        expect(argv[argv.indexOf("--context") + 1]).toBe("staging-cluster");
+    });
+
     it("NEGATIVE: throws before build/apply when the real preflight reports an incompatible CRD", async () => {
         captureKubectl.mockImplementation(() => ({
             ok: false,
@@ -123,11 +142,6 @@ describe("runPreviewDeploy — default preflight (deps.preflight NOT injected, #
 });
 
 describe("runPreviewDeploy — buildId falls back to a timestamp when the image ref carries no tag (#1234)", () => {
-    afterEach(() => {
-        // Real fs write (like every other preview test); nothing to assert
-        // needs the file to survive past its own test.
-    });
-
     it("renders spec.buildId as a plain numeric timestamp, not the (absent) tag", async () => {
         // Digest-only ref: no ":tag" between the repo path and "@sha256:", so
         // `extractTag` returns undefined and the caller falls back to
