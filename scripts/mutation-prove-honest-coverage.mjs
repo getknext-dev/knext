@@ -173,8 +173,8 @@ prove(
   checkerSnap,
   [
     [
-      'const honest = honestCoverage(scoped, readSource);',
-      'const honest = { files: scoped, noise: {}, unclassified: [] };',
+      'const classified = honestCoverage(scoped, readSource);',
+      'const classified = { files: scoped, noise: {}, unclassified: [] };',
     ],
   ],
   GATE_SPEC,

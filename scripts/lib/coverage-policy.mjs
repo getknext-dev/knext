@@ -210,6 +210,29 @@ export const PER_PATH_THRESHOLDS = {
  * that file). Net effect either way: no test that exercises the branch can raise these
  * lines' hit count, because the report that would carry the hit never emits a record for
  * them to begin with.
+ *
+ * ## Ratchet: continuation-line attribution (#1262, ADR-0057 Amendment 1)
+ *
+ * Part of that residual is now attributed rather than left permanently uncovered:
+ * `scripts/lib/continuation-attribution.mjs` gives a line that is PURELY a string-
+ * literal / `+` continuation the merged hit count of its statement's first line —
+ * never a line carrying a call, an identifier, a `${…}` substitution, a conditional
+ * or a short-circuit; never one whose statement evaluates a call, a short-circuit or
+ * a string-converted identifier before it; and never one whose statement does not
+ * start its own basic block (JSC counts block ENTRY, so `boom(); throw new Error('a'
+ * +` reads hit on the throw line although it never runs). Honest number only; the
+ * raw number is untouched. No test changed and nothing was excluded: the same
+ * 9928 / 8984 honest lines are counted, 11 of them attributed (deploy.ts 229-231 /
+ * 300 / 304-306, preflight.ts 345 / 355-356, next-adapter.ts 118). Lines after a
+ * `${…}` conversion — deploy.ts 287-295, cr-builder.ts 453-454 / 480-482 / 579 —
+ * deliberately stay uncovered. Re-measured on the full suite with `dist/` built as
+ * above (2 pre-existing environment-only failures:
+ * tests/bun-exec-example-suite-collection.test.ts, tests/scaffold-pack-contents.test.ts):
+ *
+ *   - global:                  raw 79.29% (11035/13917) → honest **93.03% (9236/9928)**
+ *   - packages/kn-next/src/**: raw 79.23% (10020/12647) → honest **93.01% (8356/8984)**
+ *
+ * Measured 93.03 / 93.01, but floors stay at 92.5: at 93.0 core would have 0 lines of headroom (reds in-flight #1264/#1266), so the ratchet waits for the next coverage batch.
  */
 export const HONEST_THRESHOLDS = {
   lines: 92.5,
