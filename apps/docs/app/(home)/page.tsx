@@ -21,8 +21,9 @@ export default function HomePage() {
           </h1>
           <p className={styles.lede}>
             knext deploys Next.js apps as <b>compiled single executables</b> with true{' '}
-            <b>scale-to-zero</b> — pods drop to nothing when idle and wake on the first request in{' '}
-            <b>~61&nbsp;ms</b>, bytecode baked into the binary. One operator. Any cloud. No lock-in.
+            <b>scale-to-zero</b> — pods drop to nothing when idle and wake on the first request; the
+            bytecode-baked binary itself boots in <b>~61&nbsp;ms</b>. One operator. Any cloud. No
+            lock-in.
           </p>
           <div className={styles.cta}>
             <Link className={`${styles.btn} ${styles.btnPrimary}`} href="/docs/learn">
