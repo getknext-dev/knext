@@ -1487,15 +1487,20 @@ describe('anonymous-install-nightly.yml — the runner must have no credential',
     const steps =
       '      [{name: a, run: node scripts/verify-anonymous-install.mjs, env: {SECRET_TOKEN: aLiteralTokenValue}}]';
     expect(auditAnonymousWorkflowJob(synthetic(steps)).findings.join(' ')).toMatch(
-      /steps|inspect|vacuous|parse/i,
+      /cannot inspect it, so it fails closed/i,
     );
   });
 
   it('FAILS CLOSED on a FLOW-STYLE `steps:` value smuggling `persist-credentials: true` (#1199)', () => {
+    // Failing-first on the OLD `uses:`-only net: the fixture carries NO `uses:`,
+    // so a `persist-credentials: true` inside a flow-style `with:` is reachable
+    // by NOTHING (no per-step parse, no expression, no job-env) — it scored ZERO
+    // findings before the fix. It is caught now only because a `steps:` present
+    // but unparseable as a block sequence fails closed.
     const steps =
-      '      [{uses: actions/checkout@abc, with: {persist-credentials: true}}, {run: node scripts/verify-anonymous-install.mjs}]';
+      '      [{with: {persist-credentials: true}, run: node scripts/verify-anonymous-install.mjs}]';
     expect(auditAnonymousWorkflowJob(synthetic(steps)).findings.join(' ')).toMatch(
-      /steps|inspect|vacuous|parse|persist-credentials/i,
+      /cannot inspect it, so it fails closed/i,
     );
   });
 
@@ -1509,7 +1514,36 @@ describe('anonymous-install-nightly.yml — the runner must have no credential',
       '        SECRET_TOKEN: aLiteralTokenValue',
     ].join('\n');
     expect(auditAnonymousWorkflowJob(synthetic(steps)).findings.join(' ')).toMatch(
-      /steps|inspect|vacuous|parse/i,
+      /cannot inspect it, so it fails closed/i,
+    );
+  });
+
+  it('FAILS CLOSED on 0 parsed steps + a `uses:` present + NO `steps:` key — the OR keeps the old coverage (#1199)', () => {
+    // cr-1216 ITEM 1: the net is `steps.length === 0 && (hasStepsKey || uses)`,
+    // an OR — not a replacement of the old `uses:`-only condition. This job's
+    // `steps:` key is MISSPELLED (`step:`), so `parseJobSteps` finds no sequence
+    // AND `hasStepsKey` is false, yet it clearly runs a checkout with
+    // `persist-credentials: true`. On `main` this scored 1 finding; dropping the
+    // `uses:` arm would silently regress it to 0. This guards the OR so it cannot
+    // be swapped back to a single condition.
+    const workflow = [
+      'name: x',
+      'on:',
+      '  workflow_dispatch: {}',
+      'permissions: {}',
+      'jobs:',
+      '  anonymous-install:',
+      '    runs-on: ubuntu-latest',
+      '    permissions: {}',
+      '    step:', // typo'd key — NOT `steps:`, so `hasStepsKey` is false
+      '      - uses: actions/checkout@abc',
+      '        with:',
+      '          persist-credentials: true',
+      '      - run: node scripts/verify-anonymous-install.mjs',
+      '',
+    ].join('\n');
+    expect(auditAnonymousWorkflowJob(workflow).findings.join(' ')).toMatch(
+      /cannot inspect it, so it fails closed/i,
     );
   });
 
