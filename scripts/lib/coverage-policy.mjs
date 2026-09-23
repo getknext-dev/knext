@@ -210,14 +210,33 @@ export const PER_PATH_THRESHOLDS = {
  * that file). Net effect either way: no test that exercises the branch can raise these
  * lines' hit count, because the report that would carry the hit never emits a record for
  * them to begin with.
+ *
+ * ## Ratchet: continuation-line attribution (#1262, ADR-0057 Amendment 1)
+ *
+ * That residual is now attributed rather than left permanently uncovered:
+ * `scripts/lib/continuation-attribution.mjs` gives a line that is PURELY a string-
+ * literal / `+` continuation the merged hit count of its statement's first line —
+ * never a line carrying a call, an identifier, a `${…}` substitution, a conditional
+ * or a short-circuit, and never one whose statement evaluates any of those before
+ * it. Honest number only; the raw number is untouched. No test changed and nothing
+ * was excluded: the same 9928 / 8984 honest lines are counted, 60 of them
+ * attributed (cr-builder.ts 453-454 / 480-482 / 579, deploy.ts 229-231 / 287-295 /
+ * 300 / 304-306, and 40 more in 13 other files). Re-measured on the full suite with
+ * `dist/` built as above (2 pre-existing environment-only failures:
+ * tests/bun-exec-example-suite-collection.test.ts, tests/scaffold-pack-contents.test.ts):
+ *
+ *   - global:                  raw 79.29% (11035/13917) → honest **93.52% (9285/9928)**
+ *   - packages/kn-next/src/**: raw 79.23% (10020/12647) → honest **93.52% (8402/8984)**
+ *
+ * Floors move to 93.5 (both), the measured value rounded DOWN to 0.5. Raw floors unchanged.
  */
 export const HONEST_THRESHOLDS = {
-  lines: 92.5,
+  lines: 93.5,
 };
 
 export const HONEST_PER_PATH_THRESHOLDS = {
   'packages/kn-next/src/**': {
-    lines: 92.5,
+    lines: 93.5,
   },
 };
 

@@ -49,6 +49,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { attributeContinuations } from './lib/continuation-attribution.mjs';
 import { generateDenominator } from './lib/coverage-denominator.mjs';
 import {
   activeMetricExceptions,
@@ -223,7 +224,16 @@ function readSource(path) {
     return null;
   }
 }
-const honest = honestCoverage(scoped, readSource);
+const classified = honestCoverage(scoped, readSource);
+/**
+ * Continuation attribution (#1262, ADR-0057 Amendment 1): a line that is PURELY a
+ * string-literal / `+` continuation takes its hit from its statement's first line,
+ * because a bun process that runs the statement emits no record for it while one
+ * that only imports the module emits a 0 the merge keeps. Honest number only; a
+ * line carrying anything that could independently fail to run is never touched.
+ */
+const continuation = attributeContinuations(classified.files, readSource);
+const honest = { ...classified, files: continuation.files };
 const noiseTotal = Object.values(honest.noise).reduce((a, b) => a + b, 0);
 console.log(
   `\n  honest line denominator — ${noiseTotal} non-executable DA record(s) excluded ` +
@@ -235,7 +245,8 @@ console.log(
     })` +
     (honest.unclassified.length
       ? `; ${honest.unclassified.length} file(s) unreadable/unparseable, kept whole`
-      : ''),
+      : '') +
+    `; ${continuation.attributed} pure string-continuation line(s) attributed from their statement`,
 );
 check('global (honest lines)', summarize(honest.files), HONEST_THRESHOLDS);
 for (const [glob, floors] of Object.entries(HONEST_PER_PATH_THRESHOLDS)) {
