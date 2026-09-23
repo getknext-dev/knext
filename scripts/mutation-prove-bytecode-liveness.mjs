@@ -64,7 +64,7 @@ const MUTATIONS = [
     label: 'node: warm a /_next/static asset instead of a server route',
     target: DEPLOY,
     spec: SPEC_WIRING,
-    anchor: 'process.stdout.write(`${basePath}${pick}`);',
+    anchor: 'process.stdout.write((cands.length ? cands : ["/"]).map((r) => `${basePath}${r}`).join(" "));',
     replacement: 'process.stdout.write(`${basePath}/_next/static/x.js`);',
   },
   // ── Disable the node cache ───────────────────────────────────────────────
@@ -79,7 +79,7 @@ const MUTATIONS = [
     label: "node: skip knext's shipped bake driver",
     target: DEPLOY,
     spec: SPEC_WIRING,
-    anchor: '          node "${KNEXT_BAKE_DRIVER}" 2>&1 | tee "${APP_DIR}/.knext-bake.out" >&2',
+    anchor: '          node "${KNEXT_BAKE_DRIVER}" 2>&1 | tee -a "${APP_DIR}/.knext-bake.out" >&2',
     replacement: '          true',
   },
   {

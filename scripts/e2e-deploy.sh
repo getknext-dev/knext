@@ -598,26 +598,34 @@ if [ "${RUNTIME}" != "bun" ]; then
           ...Object.keys(readJson(".next/server/app-paths-manifest.json")).filter((r) => !r.includes("@")).map((r) => r.replace(/\/(page|route)$/, "").replace(/\/\([^/]+\)/g, "") || "/"),
         ];
         const ok = (r) => r.startsWith("/") && !r.includes("[") && !r.startsWith("/api") && !r.startsWith("/_") && r !== "/404" && r !== "/500" && !/\.[a-z0-9]+$/i.test(r);
-        const pick = routes.includes("/") ? "/" : (routes.filter(ok).sort()[0] ?? "/");
-        process.stdout.write(`${basePath}${pick}`);
+        const cands = [...(routes.includes("/") ? ["/"] : []), ...routes.filter(ok).sort()].slice(0, 6);
+        process.stdout.write((cands.length ? cands : ["/"]).map((r) => `${basePath}${r}`).join(" "));
       ' "${STANDALONE_APP_DIR}")"
       BAKE_PORT="$(free_port)"
       log "baking the V8 compile cache with the SHIPPED driver (warm ${WARM_PATH:-<none>}) into ${NODE_CC_DIR}"
-      if [ -n "${WARM_PATH}" ] && (
-        cd "${STANDALONE_APP_DIR}"
-        PORT="${BAKE_PORT}" HOSTNAME=127.0.0.1 NODE_ENV=production \
-          NEXT_DEPLOYMENT_ID="${DEPLOYMENT_ID}" \
-          STANDALONE_SERVER_PATH="${SERVER_JS}" \
-          NODE_COMPILE_CACHE="${NODE_CC_DIR}" \
-          KNEXT_WARM_PATH="${WARM_PATH}" \
-          node "${KNEXT_BAKE_DRIVER}" 2>&1 | tee "${APP_DIR}/.knext-bake.out" >&2
-      ); then
-        NODE_CC_BAKE="ok"
-      else
+      # Fixtures are built to exercise odd routing (no `/` page, a 404 root,
+      # a page that throws), so try each candidate server route in turn: the bake
+      # counts as ok when the SHIPPED driver succeeds (2xx) on ANY of them.
+      NODE_CC_BAKE="failed"
+      for WARM_TRY in ${WARM_PATH}; do
+        if (
+          cd "${STANDALONE_APP_DIR}"
+          PORT="${BAKE_PORT}" HOSTNAME=127.0.0.1 NODE_ENV=production \
+            NEXT_DEPLOYMENT_ID="${DEPLOYMENT_ID}" \
+            STANDALONE_SERVER_PATH="${SERVER_JS}" \
+            NODE_COMPILE_CACHE="${NODE_CC_DIR}" \
+            KNEXT_WARM_PATH="${WARM_TRY}" \
+          node "${KNEXT_BAKE_DRIVER}" 2>&1 | tee -a "${APP_DIR}/.knext-bake.out" >&2
+        ); then
+          NODE_CC_BAKE="ok"
+          break
+        fi
+        BAKE_PORT="$(free_port)"
+      done
+      if [ "${NODE_CC_BAKE}" != "ok" ]; then
         log "WARNING: the shipped compile-cache bake FAILED — recorded as compile_cache_bake=failed (NOT live); the deploy proceeds so the fixture's own tests still run"
-        NODE_CC_BAKE="failed"
         # Diagnostic sidecar (NOT graded): which fixture, which warm path, why.
-        { echo "--- bake FAILED: ${APP_DIR} warm=${WARM_PATH:-<none>} pkg=$(node -p 'require(process.argv[1]).name' "${APP_DIR}/package.json" 2>/dev/null || echo '?') files=$(ls "${APP_DIR}" | head -20 | tr '\n' ' ')"; tail -n 15 "${APP_DIR}/.knext-bake.out" 2>/dev/null || true; } >>"${RUNNER_TEMP:-/tmp}/knext-e2e-bake-failures.log"
+        { echo "--- bake FAILED: ${APP_DIR} warm=${WARM_PATH:-<none>} pkg=$(node -p 'require(process.argv[1]).name' "${APP_DIR}/package.json" 2>/dev/null || echo '?') files=$(ls "${APP_DIR}" | head -20 | tr '\n' ' ')"; tail -n 30 "${APP_DIR}/.knext-bake.out" 2>/dev/null || true; } >>"${RUNNER_TEMP:-/tmp}/knext-e2e-bake-failures.log"
       fi
     fi
   fi

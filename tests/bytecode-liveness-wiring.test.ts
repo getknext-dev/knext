@@ -182,7 +182,7 @@ describe("e2e-deploy.sh — the node lane runs KNEXT's own bake + supervisor, an
     expect(end).toBeGreaterThan(start);
     const block = DEPLOY.slice(start, end);
     expect(block).not.toContain('_next/static');
-    expect(block).toContain('process.stdout.write(`${basePath}${pick}`)');
+    expect(block).toContain('process.stdout.write((cands.length ? cands : ["/"]).map((r) => `${basePath}${r}`).join(" "))');
   });
 
   it("bakes with the shipped driver into the image's cache location, before boot", () => {
@@ -190,7 +190,7 @@ describe("e2e-deploy.sh — the node lane runs KNEXT's own bake + supervisor, an
     expect(
       once(
         DEPLOY,
-        '          node "${KNEXT_BAKE_DRIVER}" 2>&1 | tee "${APP_DIR}/.knext-bake.out" >&2',
+        '          node "${KNEXT_BAKE_DRIVER}" 2>&1 | tee -a "${APP_DIR}/.knext-bake.out" >&2',
       ),
     ).toBe(1);
     expect(DEPLOY.indexOf('node "${KNEXT_BAKE_DRIVER}"')).toBeLessThan(
