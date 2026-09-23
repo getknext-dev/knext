@@ -288,6 +288,18 @@ jobs:
           docker pull "${SCALE_TEST_IMAGE}"
           echo "Loading it into the kind node store so the private-image pod pulls locally"
           kind load docker-image "${SCALE_TEST_IMAGE}" --name kn-next-operator-test-e2e
+          # VERIFY the load actually populated the node's container store, don't
+          # trust the exit code alone: `kind load` can succeed while leaving the
+          # image un-addressable by the kubelet (IfNotPresent), which would
+          # ErrImagePull inside the tolerated suite step and read as a false
+          # green. Assert the image is present in the node's CRI store; fail loud
+          # if not (#670 cr#3).
+          node="kn-next-operator-test-e2e-control-plane"
+          echo "Verifying the image is present in the kind node's container store"
+          if ! docker exec "$node" crictl images | grep -F "file-manager"; then
+            echo "::error::kind load reported success but file-manager is NOT in the node image store — the pod would ErrImagePull. Failing loud rather than letting the tolerated suite step swallow it." >&2
+            exit 1
+          fi
 
       # SCALE_TEST_IMAGE is a real, signed, pullable, digest-pinned file-manager
       # image that serves /api/health (the #39 activation spec asserts an HTTP 200

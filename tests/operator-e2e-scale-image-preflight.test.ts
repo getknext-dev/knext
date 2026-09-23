@@ -468,6 +468,19 @@ describe('the private image is authenticated end to end, no false-green (#670 cr
       'only the flaky Knative suite step stays tolerated (real scale-timing flake)',
     ).toBe(true);
   });
+
+  it('verifies the image actually landed in the node store, not just kind-load exit 0 (#3)', () => {
+    // `kind load` can exit 0 while leaving the image un-addressable by the
+    // kubelet — the pod then ErrImagePulls inside the TOLERATED suite step and
+    // reads as a false green. The load step must PROVE the image is in the CRI
+    // store (crictl) and fail loud otherwise, so the fail-loud guarantee is real.
+    const load = runStep(SCALE_JOB, 'kind load docker-image');
+    expect(
+      load.run,
+      'the load step must verify presence via crictl, not trust the exit code',
+    ).toContain('crictl images');
+    expect(load.run, 'a missing image must fail loud (exit 1), not be swallowed').toMatch(/exit 1/);
+  });
 });
 
 describe('the lane is scheduled where it can run, and only there (#659)', () => {
