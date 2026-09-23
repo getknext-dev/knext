@@ -105,7 +105,12 @@ const (
 	// observed time is RECORDED to the Ginkgo log on every run. DO NOT RATCHET
 	// this down toward observed values — doing so turns the nightly lane into a
 	// flake generator (see #1202, and the cold-start scheduling findings).
-	generousWakeCeiling = 4 * time.Minute
+	//
+	// It MUST stay >= the suite's SetDefaultEventuallyTimeout (5m) below: the
+	// wake GETs poll inside an Eventually with that timeout, so a legitimate but
+	// slow wake that the Eventually still accepts (4–5m) must not then be failed
+	// by this ceiling. Kept one minute above the Eventually window for headroom.
+	generousWakeCeiling = 6 * time.Minute
 )
 
 // cacheInvalidateToken is the per-run Bearer token for the file-manager
@@ -244,62 +249,74 @@ var _ = Describe("ScaleFromZero activation (A2-3 / #39)", Ordered, func() {
 		// 1. Unauthenticated POST MUST be rejected — the security invariant
 		//    (security.md: no unauthenticated mutating endpoint). A 200 here
 		//    means the auth check was removed; the lane MUST red.
+		//    The status assertion lives INSIDE the Eventually so a transient
+		//    activator 503 retries rather than hard-failing on the first hit.
 		By("POST /api/cache/invalidate WITHOUT a Bearer token — expect 401")
-		var unauthStatus int
 		Eventually(func(g Gomega) {
-			var err error
-			unauthStatus, _, err = utils.HTTPPostInCluster(
+			status, _, err := utils.HTTPPostInCluster(
 				scaleFromZeroNamespace, scaleFromZeroAppName,
 				"/api/cache/invalidate", `{"tag":"products"}`, nil, "")
 			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(status).To(Equal(401),
+				"unauthenticated POST /api/cache/invalidate returned %d, expected 401 — endpoint is not fail-closed", status)
 		}).Should(Succeed())
-		Expect(unauthStatus).To(Equal(401),
-			"unauthenticated POST /api/cache/invalidate returned %d, expected 401 — endpoint is not fail-closed", unauthStatus)
 
-		// 2. Capture the PRODUCTS generatedAt (tag-cached) before invalidation.
-		By("reading the products generatedAt before invalidation")
-		var before string
+		// 2. Capture the PRODUCTS generatedAt (busted by the invalidation) AND
+		//    the ORDERS generatedAt (the control — tagged `orders` only, so a
+		//    products invalidation must leave it unchanged) in the SAME read.
+		By("reading the products + orders generatedAt before invalidation")
+		var before, ordersBefore string
 		Eventually(func(g Gomega) {
 			_, body, err := utils.ActivateAndGet(scaleFromZeroNamespace, scaleFromZeroAppName, "/cache-tests/on-demand")
 			g.Expect(err).NotTo(HaveOccurred())
 			ts, ok := extractGeneratedAt(body, productsGeneratedAtClass)
 			g.Expect(ok).To(BeTrue(), "no products generatedAt to fingerprint")
-			before = ts
+			ots, ook := extractGeneratedAt(body, ordersGeneratedAtClass)
+			g.Expect(ook).To(BeTrue(), "no orders generatedAt to fingerprint (control)")
+			before, ordersBefore = ts, ots
 		}).Should(Succeed())
 
-		// 3. Authenticated POST MUST be 200. The token is redacted from the log
-		//    by HTTPPostInCluster.
+		// 3. Authenticated POST MUST be 200 (asserted inside Eventually so a
+		//    transient failure retries). The token is redacted from the log by
+		//    HTTPPostInCluster.
 		By("POST /api/cache/invalidate WITH the Bearer token — expect 200")
-		var authStatus int
 		Eventually(func(g Gomega) {
-			var err error
-			authStatus, _, err = utils.HTTPPostInCluster(
+			status, _, err := utils.HTTPPostInCluster(
 				scaleFromZeroNamespace, scaleFromZeroAppName,
 				"/api/cache/invalidate", `{"tag":"products"}`,
 				[]string{"Authorization: Bearer " + cacheInvalidateToken}, cacheInvalidateToken)
 			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(status).To(Equal(200),
+				"authenticated POST /api/cache/invalidate returned %d, expected 200", status)
 		}).Should(Succeed())
-		Expect(authStatus).To(Equal(200),
-			"authenticated POST /api/cache/invalidate returned %d, expected 200", authStatus)
 
-		// 4. The revalidation took effect: products generatedAt changes on a
-		//    subsequent read. SWR ('max') may serve stale once, so poll
-		//    generously rather than asserting on the first read. (Honest caveat:
-		//    a pod restart between reads would also change generatedAt; the
-		//    401/200 pair above is the load-bearing proof of the endpoint's
-		//    behaviour, this corroborates the revalidation effect.)
-		By("re-reading until products generatedAt changes (revalidation effect)")
-		var after string
+		// 4. The revalidation took effect — and it was the INVALIDATION, not a
+		//    pod recycle. This CR has no shared cache handler, so unstable_cache
+		//    is pod-process memory: if the pod idled to zero between reads, a
+		//    fresh pod would refresh EVERY card's generatedAt, falsely "proving"
+		//    revalidation even if revalidateTag were broken. The orders control
+		//    closes that hole: revalidateTag('products') must change products
+		//    (green) while leaving orders (blue, tagged `orders` only) UNCHANGED.
+		//    A pod recycle would change both; products-changed + orders-unchanged
+		//    can only come from the tag invalidation. SWR ('max') may serve stale
+		//    once, so poll generously rather than asserting on the first read.
+		By("re-reading until products changes AND orders is unchanged (invalidation, not recycle)")
+		var after, ordersAfter string
 		Eventually(func(g Gomega) {
 			_, body, err := utils.ActivateAndGet(scaleFromZeroNamespace, scaleFromZeroAppName, "/cache-tests/on-demand")
 			g.Expect(err).NotTo(HaveOccurred())
 			ts, ok := extractGeneratedAt(body, productsGeneratedAtClass)
 			g.Expect(ok).To(BeTrue())
+			ots, ook := extractGeneratedAt(body, ordersGeneratedAtClass)
+			g.Expect(ook).To(BeTrue())
 			g.Expect(ts).NotTo(Equal(before), "products generatedAt did not change after invalidation")
-			after = ts
+			g.Expect(ots).To(Equal(ordersBefore),
+				"orders generatedAt CHANGED — the products change came from a pod recycle, not revalidateTag('products')")
+			after, ordersAfter = ts, ots
 		}).Should(Succeed())
 		_, _ = fmt.Fprintf(GinkgoWriter,
-			"[isr] products generatedAt %s -> %s after authenticated invalidation\n", before, after)
+			"[isr] products %s -> %s (busted); orders %s -> %s (control, unchanged) after authenticated invalidation\n",
+			before, after, ordersBefore, ordersAfter)
 	})
 })
 

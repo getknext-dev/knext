@@ -50,6 +50,16 @@ const onDemandPageMarker = "On-Demand Revalidation"
 // invalidation took effect rather than merely that the page re-rendered.
 const productsGeneratedAtClass = "text-green-300"
 
+// ordersGeneratedAtClass is the Tailwind class on the ORDERS card's generatedAt
+// span. Orders is cached under the `orders` tag ONLY (never `products`), so an
+// invalidation of the `products` tag must leave it UNCHANGED. It is the control
+// in the ISR assertion: a pod recycle would refresh every card's generatedAt,
+// so orders-unchanged is what distinguishes "revalidateTag('products') worked"
+// from "the pod idled to zero and a fresh pod re-rendered everything". Do NOT
+// use the summary card (text-purple-300) for this — summary carries BOTH tags,
+// so a products invalidation legitimately changes it and it cannot be a control.
+const ordersGeneratedAtClass = "text-blue-300"
+
 // bodyServesHomePage reports whether an HTTP response body is the rendered
 // file-manager home page (carries homePageMarker). An error page — a 502 body,
 // an activator timeout page — will not.

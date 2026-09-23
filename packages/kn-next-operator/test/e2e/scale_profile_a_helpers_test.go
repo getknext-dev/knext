@@ -63,6 +63,25 @@ func TestExtractGeneratedAtPicksProductsNotRenderTime(t *testing.T) {
 	}
 }
 
+func TestExtractGeneratedAtPicksOrdersControl(t *testing.T) {
+	// The ISR assertion's CONTROL: the orders (blue) timestamp must be extracted
+	// distinctly from products (green). If ordersGeneratedAtClass ever pointed at
+	// the wrong span, the "orders unchanged" control would compare the wrong value
+	// and stop distinguishing invalidation from a pod recycle.
+	got, ok := extractGeneratedAt(onDemandSampleHTML, ordersGeneratedAtClass)
+	if !ok {
+		t.Fatalf("expected to extract the orders generatedAt timestamp")
+	}
+	if got != "2026-09-23T10:00:00.222Z" {
+		t.Fatalf("extracted wrong timestamp: got %q, want the orders (blue) timestamp", got)
+	}
+	// The control MUST be a different value from products, or it proves nothing.
+	products, _ := extractGeneratedAt(onDemandSampleHTML, productsGeneratedAtClass)
+	if got == products {
+		t.Fatalf("orders control and products timestamps must be distinct spans; both were %q", got)
+	}
+}
+
 func TestExtractGeneratedAtMissing(t *testing.T) {
 	if _, ok := extractGeneratedAt("<p>no timestamps here</p>", productsGeneratedAtClass); ok {
 		t.Fatalf("expected ok=false when the target span is absent")
