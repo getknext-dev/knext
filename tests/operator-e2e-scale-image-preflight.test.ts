@@ -448,7 +448,6 @@ describe('the private image is authenticated end to end, no false-green (#670 cr
     // the node resolves via certs.d — authenticated on the runner, no pod creds.
     const login = steps(SCALE_JOB).find((s) => usesAction(s, 'docker/login-action'));
     const registry = runStep(SCALE_JOB, 'docker run -d --restart=always -p 127.0.0.1:5001:5000');
-    const certsd = runStep(SCALE_JOB, '/etc/containerd/certs.d');
     const craneInstall = steps(SCALE_JOB).find(
       // biome-ignore lint/suspicious/noExplicitAny: see above.
       (s: any) => typeof s.name === 'string' && s.name.includes('Install crane'),
@@ -457,8 +456,55 @@ describe('the private image is authenticated end to end, no false-green (#670 cr
     expect(login, 'the scale job must authenticate to READ the private source digest').toBeTruthy();
     expect(craneInstall, 'the scale job must install crane (checksum-pinned)').toBeTruthy();
     expect(registry, 'the scale job must stand up an in-cluster registry').toBeTruthy();
-    expect(certsd, 'the node must be wired to the registry via certs.d config_path').toBeTruthy();
     expect(copy, 'the scale job must crane-copy the signed digest into the registry').toBeTruthy();
+
+    // EACH distinct wiring step gets its OWN unique-anchor guard, because the
+    // whole addressability mechanism rests on them and the previous single
+    // `/etc/containerd/certs.d` substring matched TWO steps (kind-create's
+    // config_path AND the node-wiring mkdir/hosts.toml) — so deleting either left
+    // the guard green (cr-1206c). These anchors each occur in exactly one step.
+
+    // (a) kind-create must enable the certs.d override (containerdConfigPatches +
+    // config_path). Located by `containerdConfigPatches`, unique to that step.
+    const kindCreate = runStep(SCALE_JOB, 'containerdConfigPatches');
+    expect(kindCreate, 'the kind cluster must be created with a certs.d config_path').toBeTruthy();
+    expect(
+      kindCreate.run,
+      'the config_path override is what lets the node resolve the in-cluster registry',
+    ).toContain('config_path = "/etc/containerd/certs.d"');
+
+    // (b) the registry must JOIN the kind network, or the node cannot resolve it.
+    const networkJoin = runStep(SCALE_JOB, 'docker network connect kind');
+    expect(
+      networkJoin,
+      'the registry must join the kind network so the node can reach it by name',
+    ).toBeTruthy();
+    expect(networkJoin.run, 'the registry joins the kind network').toContain(
+      'docker network connect kind "$reg"',
+    );
+
+    // (c) the NODE-WIRING hosts.toml must point localhost:5001 -> the registry.
+    // Anchored on `hosts.toml`, which is unique to the node-wiring step (NOT the
+    // generic certs.d substring that also matches kind-create's config_path).
+    const hostsToml = runStep(SCALE_JOB, 'hosts.toml');
+    expect(
+      hostsToml,
+      'the node must be wired to the registry via a certs.d hosts.toml override',
+    ).toBeTruthy();
+    expect(
+      hostsToml.run,
+      'hosts.toml must write the localhost:5001 -> in-cluster registry redirect on the node',
+    ).toContain('/etc/containerd/certs.d/localhost:5001/hosts.toml');
+    expect(hostsToml.run, 'the redirect target is the in-cluster registry endpoint').toContain(
+      'printf \'[host."http://%s:5000"]',
+    );
+
+    // (d) the node must PRE-PULL the exact deployed ref from the in-cluster
+    // registry (warms it + is the input to the addressability check below).
+    expect(
+      copy.run,
+      'the node must pull the exact deployed ref from the in-cluster registry',
+    ).toContain('crictl pull "${local_ref}"');
     // Assert the REAL command, not a log line: `crane copy <src> <local_ref>`.
     // (A `runStep` needle of "crane copy" alone also matches an echo, so a removed
     // command would not red — this asserts the invocation itself.)
