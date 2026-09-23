@@ -224,7 +224,9 @@ describe('continuationAnchors — rule 5: the first line may be hit on an UNRELA
     for (const decl of ['using', 'await using']) {
       const src = [
         'async function h(): Promise<void> {',
-        `  ${decl} u = 'str' as unknown as Disposable;`,
+        // A LITERAL initializer, exactly the review's shape: the inert-initializer
+        // check passes it, so only the `using` check can refuse (else M19 is masked).
+        `  ${decl} u = 'str';`,
         '  throw new Error(',
         "    'a ' +",
         "      'b', // AFTERUSING",
@@ -742,14 +744,10 @@ describe('real bun lcov from two processes: attribution never outruns ground tru
       raised: false,
     },
     {
-      // #1268 round 3: `using` throws a TypeError for a non-disposable value.
+      // #1268 round 3: `using` throws a TypeError for a non-disposable value. A
+      // LITERAL initializer (the review's shape), so only the `using` check refuses.
       name: 'USING',
-      src: [
-        'export function f(): void {',
-        "  using u = 'str' as unknown as Disposable;",
-        ...chain('  '),
-        '}',
-      ],
+      src: ['export function f(): void {', "  using u = 'str';", ...chain('  '), '}'],
       runs: false,
       raised: false,
     },
