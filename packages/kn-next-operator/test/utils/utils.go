@@ -267,7 +267,6 @@ func ActivateAndGet(namespace, ksvc, path string) (int, string, error) {
 	// as the HTTP code. Instead, curl's `-w` wraps the code in unique sentinels
 	// (KNHTTP<code>KNEND) that we extract by marker, ignoring any surrounding
 	// kubectl noise — the same robustness ScrapeAppMetricValue relies on.
-	const codePrefix, codeSuffix = "KNHTTP", "KNEND"
 	out, err := Kubectl("run", podName,
 		"-n", namespace,
 		"--restart=Never",
@@ -275,17 +274,35 @@ func ActivateAndGet(namespace, ksvc, path string) (int, string, error) {
 		"--image="+CurlImage(),
 		"--command", "--",
 		"curl", "-sS", "--max-time", "120",
-		"-w", fmt.Sprintf("\\n%s%%{http_code}%s", codePrefix, codeSuffix), url,
+		"-w", fmt.Sprintf("\\n%s%%{http_code}%s", curlCodePrefix, curlCodeSuffix), url,
 	)
 	if err != nil {
 		return 0, out, err
 	}
-	start := strings.LastIndex(out, codePrefix)
+	return ParseCurlStatusMarker(out, url)
+}
+
+// curlCodePrefix/curlCodeSuffix bracket the HTTP status written by the
+// in-cluster curl probes' `-w '\nKNHTTP%{http_code}KNEND'`. They are unique
+// sentinels so the code survives kubectl's `--rm` merging its own
+// `pod "..." deleted` notice (stderr) into the captured output.
+const (
+	curlCodePrefix = "KNHTTP"
+	curlCodeSuffix = "KNEND"
+)
+
+// ParseCurlStatusMarker extracts the HTTP status code and response body from the
+// combined output of an in-cluster curl run that used the KNHTTP<code>KNEND
+// status marker. Shared by ActivateAndGet (GET) and HTTPPostInCluster (POST) so
+// both survive kubectl's merged `pod deleted` stderr noise identically. The body
+// is everything before the newline that precedes the status marker.
+func ParseCurlStatusMarker(out, url string) (int, string, error) {
+	start := strings.LastIndex(out, curlCodePrefix)
 	if start < 0 {
 		return 0, out, fmt.Errorf("no HTTP status marker in response from %s: %q", url, out)
 	}
-	rest := out[start+len(codePrefix):]
-	end := strings.Index(rest, codeSuffix)
+	rest := out[start+len(curlCodePrefix):]
+	end := strings.Index(rest, curlCodeSuffix)
 	if end < 0 {
 		return 0, out, fmt.Errorf("truncated HTTP status marker in response from %s: %q", url, out)
 	}
@@ -294,9 +311,78 @@ func ActivateAndGet(namespace, ksvc, path string) (int, string, error) {
 	if convErr != nil {
 		return 0, out, fmt.Errorf("could not parse HTTP status %q from response: %w", codeStr, convErr)
 	}
-	// The body is everything before the `\n` that precedes the status marker.
 	body := strings.TrimRight(out[:start], "\n")
 	return code, body, nil
+}
+
+// HTTPPostInCluster POSTs a JSON body to a cluster-local Knative service path
+// from an ephemeral in-cluster curl pod, returning the HTTP status and body. It
+// wakes a scaled-to-zero pod exactly as ActivateAndGet's GET does. Optional
+// header lines (e.g. "Authorization: Bearer <token>") are passed as curl -H
+// args; when secretValue is non-empty it is REDACTED from the command echoed to
+// the Ginkgo log so a Bearer token never lands in CI output (security.md:
+// "Do not echo secrets into logs"). Used by the Profile-A scale suite to prove
+// the /api/cache/invalidate auth boundary (401 without token, 200 with) and the
+// on-demand revalidation on the woken pod.
+func HTTPPostInCluster(namespace, ksvc, path, jsonBody string, headerLines []string, secretValue string) (int, string, error) {
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	url := fmt.Sprintf("http://%s.%s.svc.cluster.local%s", ksvc, namespace, path)
+	podName := fmt.Sprintf("post-%s", ksvc)
+	// Best-effort cleanup of any prior POST pod so `kubectl run` does not collide.
+	_, _ = Kubectl("delete", "pod", podName, "-n", namespace, "--ignore-not-found")
+
+	args := []string{"run", podName,
+		"-n", namespace,
+		"--restart=Never",
+		"--rm", "-i",
+		"--image=" + CurlImage(),
+		"--command", "--",
+		"curl", "-sS", "--max-time", "120",
+		"-X", "POST",
+		"-H", "Content-Type: application/json",
+	}
+	for _, h := range headerLines {
+		args = append(args, "-H", h)
+	}
+	args = append(args,
+		"-d", jsonBody,
+		"-w", fmt.Sprintf("\\n%s%%{http_code}%s", curlCodePrefix, curlCodeSuffix),
+		url,
+	)
+	out, err := runKubectlRedacted(args, secretValue)
+	if err != nil {
+		return 0, out, err
+	}
+	return ParseCurlStatusMarker(out, url)
+}
+
+// runKubectlRedacted runs `kubectl <args>` like Run/Kubectl but replaces every
+// occurrence of secretValue with "***" in the command line echoed to the Ginkgo
+// log, so a Bearer token passed as a curl -H arg is not leaked into CI output.
+// The pod's own spec still carries the arg (unavoidable for an in-cluster curl),
+// but the ephemeral `--rm` pod is torn down immediately and the token is a
+// per-run, e2e-generated value — never a production secret.
+func runKubectlRedacted(args []string, secretValue string) (string, error) {
+	cmd := exec.Command("kubectl", args...)
+	dir, _ := GetProjectDir()
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GO111MODULE=on")
+	shown := strings.Join(cmd.Args, " ")
+	if secretValue != "" {
+		shown = strings.ReplaceAll(shown, secretValue, "***")
+	}
+	_, _ = fmt.Fprintf(GinkgoWriter, "running: %q\n", shown)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		redacted := string(output)
+		if secretValue != "" {
+			redacted = strings.ReplaceAll(redacted, secretValue, "***")
+		}
+		return string(output), fmt.Errorf("%q failed with error %q", shown, redacted)
+	}
+	return string(output), nil
 }
 
 // ScrapeAppMetrics curls the app's own `/api/metrics` route (port 3000 inside
