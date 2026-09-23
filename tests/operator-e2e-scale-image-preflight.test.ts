@@ -31,11 +31,13 @@ import { parse as parseYaml } from 'yaml';
  * and a later trigger addition must be a deliberate, visible decision.
  *
  * BOTH HALVES. Converting the skip into an `exit 1` is not sufficient on its own:
- * the scale job carries `continue-on-error: true` (real Knative scale-timing
- * flake on shared runners), which would swallow that failure and report success
- * exactly as the skip did. So the precondition lives in its OWN job that carries
- * no `continue-on-error` and no `if:`, and the scale job `needs:` it. These tests
- * assert the failure happens AND that nothing silently opts it out.
+ * the scale job tolerates real Knative scale-timing flake (a `continue-on-error`
+ * scoped to its suite STEP — #670 cr#3 moved it off the job so it cannot swallow
+ * image login/pull/load failures), which would swallow the precondition failure
+ * and report success exactly as the skip did. So the precondition lives in its
+ * OWN job that carries no `continue-on-error` and no `if:`, and the scale job
+ * `needs:` it. These tests assert the failure happens AND that nothing silently
+ * opts it out.
  *
  * The behavioural half EXECUTES the workflow's own `run:` script rather than
  * grepping it, which is why the script must be free of `${{ }}` expressions (the
@@ -381,6 +383,90 @@ describe('the run-time signed-digest resolver is wired in, fail-closed (#670)', 
       cosignStep,
       'the preflight must cryptographically verify the resolved signature',
     ).toBeTruthy();
+  });
+});
+
+describe('the private image is authenticated end to end, no false-green (#670 cr#2/#3)', () => {
+  // biome-ignore lint/suspicious/noExplicitAny: workflow YAML has no schema type here.
+  function steps(jobId: string): any[] {
+    return workflow.jobs[jobId].steps ?? [];
+  }
+  // biome-ignore lint/suspicious/noExplicitAny: see above.
+  function usesAction(step: any, name: string): boolean {
+    return typeof step.uses === 'string' && step.uses.includes(name);
+  }
+  // biome-ignore lint/suspicious/noExplicitAny: see above.
+  function runStep(jobId: string, needle: string): any {
+    return steps(jobId).find((s) => typeof s.run === 'string' && s.run.includes(needle));
+  }
+
+  it('logs in to GHCR before cosign-verifying the PRIVATE file-manager package (#2)', () => {
+    // file-manager is a private GHCR package: an anonymous `crane manifest`
+    // UNAUTHORIZEDs, so cosign verify would fail without credentials — the
+    // nightly would just move from red-at-variable-read to red-at-cosign.
+    const s = steps(PREFLIGHT_JOB);
+    const loginIdx = s.findIndex((step) => usesAction(step, 'docker/login-action'));
+    const verifyIdx = s.findIndex(
+      // biome-ignore lint/suspicious/noExplicitAny: see above.
+      (step: any) => typeof step.run === 'string' && step.run.includes('cosign-verify.sh'),
+    );
+    expect(
+      loginIdx,
+      'the preflight must log in to GHCR before verifying a private image',
+    ).toBeGreaterThanOrEqual(0);
+    expect(verifyIdx, 'the preflight must cosign-verify').toBeGreaterThanOrEqual(0);
+    expect(loginIdx, 'GHCR login must come BEFORE cosign verify').toBeLessThan(verifyIdx);
+  });
+
+  it('parameterizes the cosign identity regexp to this repository (#4)', () => {
+    const verifyStep = runStep(PREFLIGHT_JOB, 'cosign-verify.sh');
+    const identity = verifyStep?.env?.IDENTITY_REGEXP ?? '';
+    expect(
+      identity,
+      'the identity regexp must derive from github.repository, not a hardcoded owner/repo',
+    ).toContain('${{ github.repository }}');
+  });
+
+  it('loads the resolved image INTO kind so the private pod can pull it (#3)', () => {
+    // The consumer (`scale-to-zero-cache`) deploys to a kind cluster with NO
+    // imagePullSecret. For a private image the pod would ErrImagePull. The
+    // self-contained fix: pull on the runner (authenticated) and `kind load` it
+    // into the node store, so the pod pulls locally (IfNotPresent) with no creds.
+    const login = steps(SCALE_JOB).find((s) => usesAction(s, 'docker/login-action'));
+    const pull = runStep(SCALE_JOB, 'docker pull');
+    const load = runStep(SCALE_JOB, 'kind load docker-image');
+    expect(
+      login,
+      'the scale job must authenticate to pull the private image on the runner',
+    ).toBeTruthy();
+    expect(pull, 'the scale job must pull the resolved image on the runner').toBeTruthy();
+    expect(
+      load,
+      'the scale job must kind-load the image so the pod pulls from the node',
+    ).toBeTruthy();
+  });
+
+  it('makes the image pull/load FAIL-LOUD — no continue-on-error swallows it (#3)', () => {
+    // The #659 defect is a deterministic infra failure swallowed into a green.
+    // A missing image load is NOT Knative scale-timing flake, so it must fail the
+    // job. continue-on-error is therefore scoped to the flaky SUITE step only,
+    // never the job — a job-level tolerance would swallow login/pull/load too.
+    const job = workflow.jobs[SCALE_JOB];
+    expect(
+      'continue-on-error' in job,
+      'a job-level continue-on-error would swallow the image load/pull failure into a false green',
+    ).toBe(false);
+
+    const load = runStep(SCALE_JOB, 'kind load docker-image');
+    expect('continue-on-error' in load, 'the kind-load step must fail loud').toBe(false);
+    const pull = runStep(SCALE_JOB, 'docker pull');
+    expect('continue-on-error' in pull, 'the pull step must fail loud').toBe(false);
+
+    const suite = runStep(SCALE_JOB, 'test-e2e-scale');
+    expect(
+      suite['continue-on-error'],
+      'only the flaky Knative suite step stays tolerated (real scale-timing flake)',
+    ).toBe(true);
   });
 });
 

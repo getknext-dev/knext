@@ -166,7 +166,12 @@ export async function listPackageVersions({
     for (let page = 1; page <= 100; page++) {
       const url = `${GITHUB_API}/${ownerType}/${owner}/packages/container/${repo}/versions?per_page=${perPage}&page=${page}`;
       const res = await http(url, headers);
-      if (ownerType === 'orgs' && res.status === 404) return null; // signal fallback
+      // Fall back to the /users/ path ONLY on a FIRST-PAGE 404 ("this owner is a
+      // user, not an org"). A 404 that appears after page 1 has already returned
+      // data is a mid-pagination anomaly, not a wrong-owner-type signal —
+      // diverting on it would discard the fetched pages and silently re-list a
+      // different resource, so it must fall through to the fail-closed throw.
+      if (ownerType === 'orgs' && res.status === 404 && page === 1) return null; // signal fallback
       if (res.status < 200 || res.status >= 300) {
         throw new Error(
           `GHCR packages API returned HTTP ${res.status} for ${ownerType}/${owner}/${repo}. ` +
@@ -196,6 +201,9 @@ export async function listPackageVersions({
  * gets a 401 with a Bearer challenge; fetch a token and retry. A non-200 final
  * status (e.g. 404 for a never-pushed image) or a throwing transport is a
  * FAILURE (fail closed). Returns the served digest on success.
+ *
+ * @param {string} ref
+ * @param {{ token?: string, http?: (url: string, headers: Record<string, string>) => Promise<any> }} [options]
  */
 export async function checkPullable(ref, { token, http = defaultHttp } = {}) {
   const at = ref.lastIndexOf('@');
@@ -251,7 +259,7 @@ export async function checkPullable(ref, { token, http = defaultHttp } = {}) {
  * Any failure throws (fail closed).
  */
 export async function resolveScaleTestImage({
-  input,
+  input = '',
   registry = 'ghcr.io',
   owner,
   repo = 'file-manager',

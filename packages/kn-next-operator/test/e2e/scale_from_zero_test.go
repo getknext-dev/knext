@@ -66,18 +66,20 @@ const (
 	scaleFromZeroAppName = "scale-from-zero-app"
 	// scaleFromZeroImageDefault is an all-zeros placeholder digest that is
 	// DELIBERATELY UNPULLABLE. The activation spec needs a real file-manager image
-	// that serves /api/health, so the nightly workflow MUST set SCALE_TEST_IMAGE to
-	// a freshly built+pushed, digest-pinned image. If this default is ever used the
+	// that serves /api/health, so the nightly workflow injects SCALE_TEST_IMAGE
+	// with a real, signed, digest-pinned image. If this default is ever used the
 	// ksvc ErrImagePulls and the spec fails at "ksvc not Ready" — the
 	// operator-e2e-nightly workflow's `scale-image-preflight` job guards against
-	// that by FAILING the lane when no SCALE_TEST_IMAGE is provided, or when the
-	// provided value is this placeholder, or when it is not a digest-pinned
+	// that by FAILING the lane when no SCALE_TEST_IMAGE resolves, or when the
+	// resolved value is this placeholder, or when it is not a digest-pinned
 	// @sha256:<64 hex> reference at all (#659; it used to skip, which meant the
 	// whole lane reported success having executed nothing).
-	// TODO(#670): wire a publish job that sets vars.SCALE_TEST_IMAGE to the latest
-	// file-manager digest so the nightly schedule always has a real image. Until
-	// then the nightly is deliberately RED, and #670 is the owner of that red —
-	// the preflight checks shape, which is not pullability.
+	// #670: the preflight RESOLVES the newest cosign-signed file-manager digest
+	// from GHCR at run time (the image supply-chain.yml pushes + signs), confirms
+	// it is pullable, and the scale job `kind load`s it so the private-image pod
+	// can start — so the nightly runs a real image with no repo variable and no
+	// standing write credential. Shape is no longer the only check: pullability
+	// is proven too.
 	scaleFromZeroImageDefault = "dev.local/file-manager@sha256:0000000000000000000000000000000000000000000000000000000000000000"
 )
 

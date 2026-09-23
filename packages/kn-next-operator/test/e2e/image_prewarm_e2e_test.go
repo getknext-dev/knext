@@ -55,11 +55,12 @@ limitations under the License.
 //     works — a green that proves nothing. That measurement needs a multi-node
 //     cluster pulling from a real registry (OKE).
 //
-// AND KNOW WHERE IT RUNS: `make test-e2e-scale` on the nightly needs
-// `vars.SCALE_TEST_IMAGE`, which is UNSET on this repo
-// (`gh api repos/getknext-dev/knext/actions/variables` → total_count 0). That
-// used to make the nightly log a `::warning::` and SKIP, so this spec had never
-// executed — the exact "a spec that cannot run is not a guard" hole ADR-0037's
+// AND KNOW WHERE IT RUNS: `make test-e2e-scale` on the nightly needs a real
+// SCALE_TEST_IMAGE. #670 makes the preflight RESOLVE the newest cosign-signed
+// file-manager digest from GHCR at run time (no repo variable), so this spec now
+// executes against a real image. It used to gate on the UNSET
+// `vars.SCALE_TEST_IMAGE`, logging a `::warning::` and SKIPPING, so this spec had
+// never executed — the exact "a spec that cannot run is not a guard" hole ADR-0037's
 // amendment names. Since #659 the unset value FAILS the lane instead: the
 // `scale-image-preflight` job in .github/workflows/operator-e2e-nightly.yml
 // exits non-zero, carries no `continue-on-error`/`if:`, and the scale job

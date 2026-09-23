@@ -223,6 +223,49 @@ describe('listPackageVersions — fail-closed on an unreachable / erroring API',
       listPackageVersions({ owner: OWNER, repo: REPO, token: 't', http }),
     ).rejects.toThrow();
   });
+
+  it('falls back to the /users path ONLY on a first-page 404 (the org is a user)', async () => {
+    const versions = [
+      version({
+        digest: `sha256:${HEX('a')}`,
+        created_at: '2026-01-01T00:00:00Z',
+        tags: ['a'.repeat(40)],
+      }),
+    ];
+    const http = async (url: string) => {
+      if (url.includes('/orgs/')) return { status: 404, headers: {}, json: async () => ({}) };
+      return { status: 200, headers: {}, json: async () => versions };
+    };
+    const got = await listPackageVersions({ owner: OWNER, repo: REPO, token: 't', http });
+    expect(got).toHaveLength(1);
+  });
+
+  it('does NOT swallow a 404 that appears MID-pagination (page 2+) — it fails closed', async () => {
+    // A first-page 404 means "not an org, try users". A 404 AFTER page 1 has
+    // already returned a full page is an anomaly, not a "wrong owner type" —
+    // treating it as the fallback signal would discard fetched pages and
+    // silently re-list a different resource. It must fail closed instead.
+    const fullPage = Array.from({ length: 100 }, (_, i) =>
+      version({
+        digest: `sha256:${(i % 10).toString().repeat(64)}`,
+        created_at: '2026-01-01T00:00:00Z',
+        tags: ['a'.repeat(40)],
+      }),
+    );
+    // The /users/ path RESOLVES here on purpose: with the bug (fallback fires on
+    // ANY-page 404) the mid-pagination 404 diverts to /users/ and the call
+    // succeeds — so this test only passes when the code fails CLOSED on the
+    // mid-pagination 404 instead of diverting. `.rejects` distinguishes the two.
+    const http = async (url: string) => {
+      if (url.includes('/users/')) return { status: 200, headers: {}, json: async () => [] };
+      // endsWith, not includes: `per_page=100` also contains `page=1`.
+      if (url.endsWith('page=1')) return { status: 200, headers: {}, json: async () => fullPage };
+      return { status: 404, headers: {}, json: async () => ({}) };
+    };
+    await expect(
+      listPackageVersions({ owner: OWNER, repo: REPO, token: 't', http }),
+    ).rejects.toThrow();
+  });
 });
 
 describe('checkPullable — shape is not pullability', () => {
