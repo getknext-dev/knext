@@ -221,7 +221,7 @@ describe("#1279 preview.ts's isEntrypoint dispatcher — the usage-error path", 
         expect(capturedWrites.join("")).toContain("--pr <n> is required");
     });
 
-    it("exits 1 and renders the missing --branch guidance for 'preview deploy', never reaching loadConfig", async () => {
+    it("exits 1 and renders the missing --branch guidance for 'preview deploy', after loadConfig has run once", async () => {
         loadConfig.mockResolvedValue({ name: "my-app", registry: "reg" });
 
         const { exitCode } = await runEntrypointExpectingExit([

@@ -512,3 +512,25 @@ describe("#1279 deploy.ts's isEntrypoint dispatcher — fatal-fallback label sel
         expect(String(message)).toBe("Deployment failed");
     });
 });
+
+/**
+ * Coverage-accounting anchor (#1279). bun's lcov reporter falls back to
+ * reporting EVERY line of a file — interface fields and type declarations
+ * included — as coverable when no function in that file executed under the
+ * canonical module instance. The `?bust=N` instances above are separate module
+ * instances, so on their own they leave the canonical `deploy.ts` with FNH=0
+ * and inflate the RAW denominator by ~325 non-executable lines (524 -> 849).
+ * Calling the exported `deploy()` once through the canonical import is also a
+ * real behavioural check: a config-load failure must propagate, not be
+ * swallowed, when `deploy()` is called directly (not via the dispatcher).
+ */
+describe("#1279 deploy() via the canonical import", () => {
+    it("propagates a loadConfig failure to its caller", async () => {
+        loadConfig.mockRejectedValue(new Error("config exploded"));
+
+        const { deploy } = await import("../cli/deploy");
+
+        await expect(deploy()).rejects.toThrow("config exploded");
+        expect(loadConfig).toHaveBeenCalledTimes(1);
+    });
+});

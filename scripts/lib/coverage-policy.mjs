@@ -304,7 +304,7 @@ export const PER_PATH_THRESHOLDS = {
  * the same proof applies unchanged: `isEntrypoint` only compares two
  * `realpathSync`-resolved paths, both settable from a test. New test files:
  * `deploy-entrypoint-dispatch.test.ts` (25 tests) and
- * `preview-entrypoint-dispatch.test.ts` (8 tests), both mutation-proved.
+ * `preview-entrypoint-dispatch.test.ts` (6 tests), both mutation-proved.
  * `deploy()`'s own body (the historical deploy flow beyond `loadConfig()`)
  * and `defaultBuildAndPush`'s docker/npm shell-outs remain out of scope —
  * covered elsewhere (`deploy-orchestrator.test.ts` and friends) or genuinely
@@ -317,8 +317,19 @@ export const PER_PATH_THRESHOLDS = {
  * is unrelated to this batch), measured with `dist/` built for kn-next + lib
  * + db:
  *
- *   - global:                  raw 79.65% (11223/14090) → honest **93.52% (9386/10036)**
- *   - packages/kn-next/src/**: raw 79.63% (10208/12820) → honest **93.55% (8506/9092)**
+ *   - global:                  honest 93.53% → **93.97%**  (main → this PR, CI-measured)
+ *   - packages/kn-next/src/**: honest 93.57% → **94.05%**  (main → this PR, CI-measured)
+ *
+ * RAW-denominator hazard found while landing this (bun 1.4): when NO function
+ * in a file executed under its canonical module instance, bun's lcov reports
+ * EVERY line of the file (interface fields and type declarations included) as
+ * coverable — `deploy.ts` went 524 -> 849 lines. The `?bust=N` instances a
+ * dispatcher test loads are separate module instances, so a test that only
+ * drives the dispatcher leaves the canonical file at FNH=0. The fix is in the
+ * test, not the gate: `deploy-entrypoint-dispatch.test.ts` also calls the
+ * exported `deploy()` once via the canonical import (a real behavioural check),
+ * which restores the normal 553-line report. Nothing is excluded and no floor
+ * is lowered; deleting that call re-inflates the file to 849 lines.
  *
  * Floors move to 93.5 (both) — the measured value rounded DOWN to 0.5, per
  * the ratchet convention. Raw floors are left unchanged (77 / 79.0): both
