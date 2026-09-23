@@ -106,6 +106,44 @@ bun run dev
 bun run build
 ```
 
+### `e2e` — the end-to-end round
+
+```bash
+bun run --filter file-manager e2e
+```
+
+`e2e` is the named end-to-end round for this reference app: one command that
+chains the app-level legs which otherwise have to be transcribed out of CI by
+hand. It is a **name and an entry point** over checks that already run — not a
+separate test suite. The legs, in order, each **fail-closed** (the round exits
+non-zero on the first failure and **never silently skips** — a missing
+precondition is an error that names the fix):
+
+1. **build** — `lib → db → core → file-manager` (`--no-build` reuses artifacts).
+2. **compile** — the single executable (`build:exec`); needs `bun` on `PATH`.
+3. **serve + routes + ISR** — `scripts/compat-smoke.mjs` boots the built server
+   and asserts over real HTTP (App Router, RSC, route handlers, `next/image`,
+   Server Actions, streaming, and ISR revalidation against a **real Redis**).
+   Requires `REDIS_URL` — it is never defaulted to empty, which would make the
+   ISR check meaningless. Pass `--allow-docker` to have the round start a
+   `redis:7-alpine` itself.
+4. **ISR invalidate over HTTP** — `scripts/invalidation-probe.mjs` proves the
+   authenticated on-demand loop end to end: an **unauthenticated** invalidation
+   is rejected `401`, an **authenticated** one returns `200` and busts the tag.
+   Requires `CACHE_INVALIDATE_TOKEN`.
+5. **prod image** — builds the production `Dockerfile`, runs the container, and
+   probes `next/image` transcoding. Requires a Docker daemon; `--no-docker`
+   opts out (printed as **NOT RUN**, never as a pass).
+
+Flags: `--only <leg>` (iterate on one leg), `--no-build`, `--no-docker`,
+`--allow-docker`. A full local round needs Docker and a Redis; on Apple Silicon
+the image leg needs the Rosetta/registry setup used elsewhere for local kind
+serving.
+
+**What this round does NOT prove:** graceful-shutdown drain for this app. Since
+the app emits no standalone tree, its drain and clean-image proofs run as their
+own containerised CI jobs rather than as legs here.
+
 ### `build:exec` — the knext build + asset upload
 
 ```bash

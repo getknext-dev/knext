@@ -1443,3 +1443,59 @@ jobs:
         # bun, not vitest — same reason as the seam-alive gate: the file imports
         # `bun:test`, so vitest collected nothing and exited 1.
         run: node scripts/bun-test.mjs packages/kn-next/src/__tests__/compile-cache-health-bun.test.ts
+
+  # ── file-manager e2e round (#1197 / T1) ──────────────────────────────────────
+  # A NAME + a scoping rule over the app-level e2e legs that ALREADY gate every PR
+  # fail-closed — NOT new fidelity. It asserts that the underlying jobs all went
+  # green, so a single "e2e round" context can be made required.
+  #
+  # `if: always()` is load-bearing: it runs even when an upstream `needs:` job
+  # FAILS. Bare `needs:` semantics would SKIP this dependent, and a skipped
+  # required check can read as neutral — the exact false-green hazard. So this job
+  # asserts EXPLICITLY on `needs.*.result` (threaded via env, read as data) and
+  # reds unless every gated leg is `success`.
+  #
+  # Path scoping is done HERE, at the aggregator, via a merge-base diff — NEVER a
+  # `paths:` filter on ci.yml (#673 took stacked PRs to zero jobs). A docs/CI/
+  # script-only diff reports "N/A" green with the reason. Guarded by
+  # apps/file-manager/e2e-round.test.ts.
+  file-manager-e2e-round:
+    name: file-manager e2e round
+    needs: [compat-smoke, prod-image-optimization, standalone-drain-bun-image, bun-exec-alpine-image]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # On merge_group there is no PR diff base and the legs were already gated at
+      # PR time; this no-op posts the required context green so the queue is not
+      # frozen by a check that cannot meaningfully re-run here.
+      - name: Acknowledge on merge_group (no-op — gated at PR time)
+        if: github.event_name == 'merge_group'
+        run: echo "merge_group event - the e2e-round legs were gated at PR time; nothing to re-assert on the merged ref."
+
+      - name: Checkout (full history — the aggregator diffs against the merge base)
+        if: github.event_name != 'merge_group'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        if: github.event_name != 'merge_group'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      # needs.*.result arrive via env (never interpolated into the shell) and are
+      # read as data by the aggregator. On `push` there is no PR base; use the
+      # before-SHA of the push. The aggregator refuses to scope-out on an
+      # uncomputable diff (exits non-zero), so it is fail-closed there too.
+      - name: Assert every e2e-round leg concluded success (path-scoped)
+        if: github.event_name != 'merge_group'
+        env:
+          E2E_RESULT_COMPAT_SMOKE: ${{ needs.compat-smoke.result }}
+          E2E_RESULT_PROD_IMAGE_OPTIMIZATION: ${{ needs.prod-image-optimization.result }}
+          E2E_RESULT_STANDALONE_DRAIN_BUN_IMAGE: ${{ needs.standalone-drain-bun-image.result }}
+          E2E_RESULT_BUN_EXEC_ALPINE_IMAGE: ${{ needs.bun-exec-alpine-image.result }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: node apps/file-manager/scripts/e2e-round-aggregate.mjs
