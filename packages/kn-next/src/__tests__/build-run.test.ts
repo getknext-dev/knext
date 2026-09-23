@@ -416,9 +416,18 @@ describe("build() — vinext × node", () => {
         loadConfig.mockResolvedValue(nodeCfg());
         nitroOutput("bun");
 
-        await expect(build({ skipNextBuild: true })).rejects.toThrow(
-            /node-server[\s\S]*bun|bun[\s\S]*node-server/,
-        );
+        let message = "";
+        try {
+            await build({ skipNextBuild: true });
+        } catch (e) {
+            message = (e as Error).message;
+        }
+        expect(message).toMatch(/node-server[\s\S]*bun|bun[\s\S]*node-server/);
+        // Actionable in place, not only a docs pointer: the three edits an
+        // older app needs — the entry file, the vite preset, the srvx dep.
+        expect(message).toContain("copy knext-node-entry.mjs");
+        expect(message).toContain("preset: 'node'");
+        expect(message).toContain("declare `srvx`");
         expect(uploadAssets).not.toHaveBeenCalled();
         expect(buildVinextExecutable).not.toHaveBeenCalled();
     });

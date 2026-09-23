@@ -63,6 +63,10 @@ const PLATFORM = "linux/amd64";
 const RUN_ID = randomBytes(4).toString("hex");
 const CONTAINER = `knext-vinext-node-e2e-${RUN_ID}`;
 const DEBUG_CONTAINER = `knext-vinext-node-e2e-debug-${RUN_ID}`;
+const AFTER_CONTAINER = `knext-vinext-node-e2e-after-${RUN_ID}`;
+const CAP_CONTAINER = `knext-vinext-node-e2e-cap-${RUN_ID}`;
+/** The hardcap container's grace: short, so the force path is observable. */
+const CAP_GRACE_MS = 3000;
 const IMAGE = `knext-vinext-node-e2e:${RUN_ID}`;
 
 const LABEL_KEY = "dev.knext.test";
@@ -85,10 +89,18 @@ const RENDERED_TEMPLATES = [
     ".dockerignore",
 ] as const;
 
+/**
+ * Packages the node server entry imports that the fixture does NOT declare
+ * itself: taken from the rendered template package.json (see 2b).
+ */
+const ENTRY_RUNTIME_DEPS = ["srvx"] as const;
+
 let workDir = "";
 let appDir = "";
 let port = 0;
 let debugPort = 0;
+let afterPort = 0;
+let capPort = 0;
 let nitroPreset = "";
 let dockerBuildLog = "";
 
@@ -282,9 +294,34 @@ beforeAll(async () => {
         );
     }
 
-    // 3. Install, then link @getknext/core to THIS checkout (the published
-    //    version would test someone else's code).
-    const install = run("bun", ["install"], { cwd: appDir, timeout: 300_000 });
+    // 2b. The runtime dependencies the SERVER ENTRY imports come from the
+    //     rendered `kn-next create` package.json — never from the fixture — so
+    //     a template that forgets to declare one fails here, not in a user's
+    //     repo. (The fixture deliberately omits srvx.) Only the packages the
+    //     entry needs: the rest of the template's deps (@getknext/lib, otel…)
+    //     are published packages this offline fixture does not build.
+    const templatePkg = JSON.parse(rendered.get("package.json") ?? "{}") as {
+        dependencies?: Record<string, string>;
+    };
+    const fixturePkgPath = join(appDir, "package.json");
+    const fixturePkg = JSON.parse(readFileSync(fixturePkgPath, "utf8")) as {
+        dependencies: Record<string, string>;
+    };
+    for (const name of ENTRY_RUNTIME_DEPS) {
+        const version = templatePkg.dependencies?.[name];
+        // Absent → NOT injected; the isolated install below then leaves the
+        // import unresolvable and the build fails, which is the point.
+        if (version !== undefined) fixturePkg.dependencies[name] = version;
+    }
+    writeFileSync(fixturePkgPath, `${JSON.stringify(fixturePkg, null, 2)}\n`);
+
+    // 3. Install with an ISOLATED linker (pnpm-like: only declared packages
+    //    are resolvable from the app), then link @getknext/core to THIS
+    //    checkout (the published version would test someone else's code).
+    const install = run("bun", ["install", "--linker", "isolated"], {
+        cwd: appDir,
+        timeout: 300_000,
+    });
     if (install.status !== 0) {
         throw new Error(
             `fixture bun install failed:\n${install.stdout}\n${install.stderr}`,
@@ -347,18 +384,27 @@ beforeAll(async () => {
 
     // 6. Run it twice: once as shipped, once with node's compile-cache
     //    diagnostics on (debug output is noisy, so it gets its own container).
-    [port, debugPort] = await freePorts(2);
+    //    Plus one container per SIGTERM case, since each one ends its container.
+    [port, debugPort, afterPort, capPort] = await freePorts(4);
     startContainer(CONTAINER, port);
     startContainer(DEBUG_CONTAINER, debugPort, [
         "NODE_DEBUG_NATIVE=COMPILE_CACHE",
     ]);
+    startContainer(AFTER_CONTAINER, afterPort);
+    startContainer(CAP_CONTAINER, capPort, [
+        `SHUTDOWN_GRACE_MS=${CAP_GRACE_MS}`,
+    ]);
     await waitForHealth(CONTAINER, port);
     await waitForHealth(DEBUG_CONTAINER, debugPort);
+    await waitForHealth(AFTER_CONTAINER, afterPort);
+    await waitForHealth(CAP_CONTAINER, capPort);
 }, 1_800_000);
 
 afterAll(() => {
     run("docker", ["rm", "--force", CONTAINER], { timeout: 60_000 });
     run("docker", ["rm", "--force", DEBUG_CONTAINER], { timeout: 60_000 });
+    run("docker", ["rm", "--force", AFTER_CONTAINER], { timeout: 60_000 });
+    run("docker", ["rm", "--force", CAP_CONTAINER], { timeout: 60_000 });
     run("docker", ["rmi", "--force", IMAGE], { timeout: 60_000 });
     if (workDir) rmSync(workDir, { recursive: true, force: true });
 });
@@ -397,7 +443,9 @@ describe("the vinext × node image serves", () => {
             { timeout: 60_000 },
         );
         expect(scrape.status, `${scrape.stdout}\n${scrape.stderr}`).toBe(0);
-    });
+        // `docker exec` + a node boot under linux/amd64 emulation outlives
+        // bun's 5s default on a loaded host — measured, with four containers up.
+    }, 60_000);
 });
 
 describe("the V8 compile cache is baked into the image and LIVE (ADR-0035)", () => {
@@ -420,7 +468,7 @@ describe("the V8 compile cache is baked into the image and LIVE (ADR-0035)", () 
         expect(bytes.status, bytes.stderr).toBe(0);
         // The recipe's own floor (ARG KNEXT_COMPILE_CACHE_MIN_BYTES).
         expect(Number(bytes.stdout.trim())).toBeGreaterThanOrEqual(65_536);
-    });
+    }, 60_000);
 
     it("the entry reports the baked directory as the cache it is using", () => {
         expect(logsOf(CONTAINER)).toMatch(
@@ -440,4 +488,91 @@ describe("the V8 compile cache is baked into the image and LIVE (ADR-0035)", () 
             /cache for (ESM )?file:\/\/\/app\/\.output\/server\/index\.mjs was accepted/,
         );
     });
+});
+// ── SIGTERM (security.md: drain in-flight work and run after() before exit) ──
+//
+// Every scale-to-zero scale-down is a SIGTERM, so these are the shutdown
+// guarantees the node entry owes, proved against the REAL image over REAL
+// sockets — the same shape as the bun image's drain gate (alpine-image e2e)
+// and the bun entry's hardcap e2e. Each case owns its container, because each
+// one ends it. The in-flight case uses the main container, so it runs LAST.
+
+/** `docker kill --signal=TERM`, then `docker wait`: the exit code and how long it took. */
+function termAndWait(container: string): { code: string; ms: number } {
+    const t0 = Date.now();
+    const killed = run("docker", ["kill", "--signal=TERM", container], {
+        timeout: 60_000,
+    });
+    expect(killed.status, `docker kill failed:\n${killed.stderr}`).toBe(0);
+    const waited = run("docker", ["wait", container], { timeout: 60_000 });
+    expect(waited.status, `docker wait failed:\n${waited.stderr}`).toBe(0);
+    return { code: waited.stdout.trim(), ms: Date.now() - t0 };
+}
+
+describe("SIGTERM — the node entry drains in the shipped image", () => {
+    it("after(): background work scheduled by a finished request runs BEFORE the process exits", async () => {
+        // The response returns at once; the after() callback finishes 3s later.
+        const res = await fetch(
+            `http://127.0.0.1:${afterPort}/api/after?ms=3000`,
+        );
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ scheduled: true, ms: 3000 });
+
+        const { code } = termAndWait(AFTER_CONTAINER);
+        const out = logsOf(AFTER_CONTAINER);
+        expect(code, `not the graceful exit-0 path:\n${out}`).toBe("0");
+        // Order is the claim: the signal, THEN the after() work, THEN the drain
+        // concluding. `AFTER-RAN` missing means shutdown did not wait for it.
+        const sig = out.indexOf("SIGNAL:SIGTERM");
+        const ran = out.indexOf("AFTER-RAN ms=3000");
+        const drained = out.indexOf("DRAINED cleanly");
+        expect(sig, out).toBeGreaterThan(-1);
+        expect(
+            ran,
+            `after() work was dropped on SIGTERM:\n${out}`,
+        ).toBeGreaterThan(sig);
+        expect(drained, out).toBeGreaterThan(ran);
+    }, 60_000);
+
+    it("hardcap: a request that outlives SHUTDOWN_GRACE_MS is force-stopped, exit 1, at ~the grace", async () => {
+        // Sleeps far past the 3s grace; the connection is expected to be cut.
+        const hung = fetch(
+            `http://127.0.0.1:${capPort}/api/slow?ms=30000`,
+        ).catch(() => null);
+        await new Promise((r) => setTimeout(r, 750));
+
+        const { code, ms } = termAndWait(CAP_CONTAINER);
+        const out = logsOf(CAP_CONTAINER);
+        expect(code, `the hardcap path exits 1:\n${out}`).toBe("1");
+        expect(out).toContain("HARDCAP: drain exceeded grace, forcing stop");
+        // NOT before the grace (something other than the cap released it) and
+        // NOT near the request's own 30s (the cap never fired).
+        expect(ms).toBeGreaterThanOrEqual(CAP_GRACE_MS - 250);
+        expect(ms).toBeLessThan(CAP_GRACE_MS + 12_000);
+        await hung;
+    }, 60_000);
+
+    // MUST BE LAST: it terminates the main container.
+    it("in-flight: a request mid-handler when SIGTERM lands COMPLETES, then the process exits 0", async () => {
+        const inFlight = fetch(`http://127.0.0.1:${port}/api/slow?ms=4000`);
+        // Let the request reach the handler before the signal.
+        await new Promise((r) => setTimeout(r, 750));
+
+        const { code } = termAndWait(CONTAINER);
+        // A dropped connection here is the user-visible failure the drain
+        // exists to prevent.
+        const res = await inFlight;
+        expect(
+            res.status,
+            "the in-flight request was dropped by the drain",
+        ).toBe(200);
+        expect(await res.json()).toEqual({ ok: true, sleptMs: 4000 });
+
+        const out = logsOf(CONTAINER);
+        expect(code, `not the graceful exit-0 path:\n${out}`).toBe("0");
+        expect(out.indexOf("SIGNAL:SIGTERM")).toBeGreaterThan(-1);
+        expect(out.indexOf("DRAINED cleanly")).toBeGreaterThan(
+            out.indexOf("SIGNAL:SIGTERM"),
+        );
+    }, 60_000);
 });

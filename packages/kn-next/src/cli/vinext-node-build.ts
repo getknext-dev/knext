@@ -53,9 +53,13 @@ export function assertNodePresetOutput(cwd: string): void {
                     ? "A bun-preset server calls Bun's own APIs at startup and exits 1 under node.\n"
                     : "") +
                 "Your vite.config.ts chooses the preset. Apps created by current `kn-next create` read it\n" +
-                "from kn-next.config.ts's `runtime`; an older app hardcodes `preset: 'bun'`. Make the\n" +
-                "nitro plugin use `preset: 'node'` with `entry: './knext-node-entry.mjs'` for runtime\n" +
-                "node (see the build-pipeline docs), then rebuild.",
+                "from kn-next.config.ts's `runtime`; an older app hardcodes `preset: 'bun'`. To fix:\n" +
+                "  1. copy knext-node-entry.mjs into this app (from a freshly created app —\n" +
+                "     `npx kn-next create` — it sits next to knext-bun-entry.mjs);\n" +
+                "  2. make the nitro plugin in vite.config.ts use `preset: 'node'` with\n" +
+                "     `entry: './knext-node-entry.mjs'` when runtime is node;\n" +
+                "  3. declare `srvx` in package.json (the node entry imports srvx/node).\n" +
+                'Then rebuild. The build-pipeline docs ("vinext on Node") show the full vite.config.ts.',
         );
     }
     const entry = join(cwd, ".output", "server", "index.mjs");

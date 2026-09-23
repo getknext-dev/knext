@@ -36,6 +36,13 @@ import { flushCompileCache, getCompileCacheDir } from 'node:module';
 import { handleImageRequest } from '@getknext/core/internal/vinext-image-optimizer';
 import { useNitroApp } from 'nitro/app';
 import { serve } from 'srvx/node';
+// vinext's `after()` hands its work to the request's EXECUTION CONTEXT
+// (`ctx.waitUntil`). On Cloudflare the platform supplies one; under nitro's
+// node server nothing does, so without this an `after()` callback is
+// fire-and-forget — measured: a SIGTERM right after the response exited 0 with
+// the callback never run. Each request below runs inside a context whose
+// `waitUntil` is the runtime contract's, so the SIGTERM drain awaits it.
+import { runWithExecutionContext } from 'vinext/shims/request-context';
 import {
   createGracefulShutdown,
   createMetricsState,
@@ -47,6 +54,7 @@ import {
   renderMetrics,
   resolveBindHost,
   resolveMaxRequestBytes,
+  waitUntil,
 } from './runtime-contract.mjs';
 
 const PORT = Number(process.env.PORT ?? 3000);
@@ -61,6 +69,7 @@ const BAKE = process.env.KNEXT_COMPILE_CACHE_BAKE === '1';
 // biome-ignore lint/correctness/useHookAtTopLevel: useNitroApp() is Nitro's server-app accessor, not a React hook — the "use" prefix is coincidental.
 const nitro = useNitroApp();
 const metrics = createMetricsState();
+const EXECUTION_CONTEXT = { waitUntil };
 
 // ── App listener — Nitro's real request pipeline via srvx/node ──────────────
 // The same `serve` path nitro's default node entry uses, so requests get the
@@ -84,7 +93,9 @@ const appSrvx = serve({
       const startedNs = process.hrtime.bigint();
       const elapsed = () => Number(process.hrtime.bigint() - startedNs) / 1e9;
       try {
-        const res = await next();
+        // `after()`/waitUntil work is registered with the drain (see the
+        // import note). One shared context object: it only carries waitUntil.
+        const res = await runWithExecutionContext(EXECUTION_CONTEXT, () => next());
         observeRequest(metrics, res?.status ?? 200, elapsed());
         return res;
       } catch (err) {

@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Minimal vinext app used ONLY by vinext-node-image.docker-e2e.test.ts. The suite renders the SHIPPED scaffold templates (vite.config.ts, knext-node-entry.mjs, runtime-contract.mjs, Dockerfile.vinext-node) over it, so what is proved is the template, not a copy. NOT a workspace member; its deps are installed into a throwaway build dir by the e2e, and @getknext/core is linked to this checkout's built package there.",
+  "description": "Minimal vinext app used ONLY by vinext-node-image.docker-e2e.test.ts. The suite renders the SHIPPED scaffold templates (vite.config.ts, knext-node-entry.mjs, runtime-contract.mjs, Dockerfile.vinext-node) over it, so what is proved is the template, not a copy. srvx is deliberately NOT declared here: the e2e copies it from the rendered kn-next create package.json and installs with an isolated linker, so an undeclared template dependency fails the build. NOT a workspace member; its deps are installed into a throwaway build dir by the e2e, and @getknext/core is linked to this checkout's built package there.",
   "scripts": {
     "build": "vite build"
   },
@@ -11,7 +11,6 @@
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "react-server-dom-webpack": "^19.2.6",
-    "srvx": "0.11.22",
     "vinext": "1.0.0-beta.8"
   },
   "devDependencies": {

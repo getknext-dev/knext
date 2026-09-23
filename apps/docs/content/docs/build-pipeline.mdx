@@ -137,7 +137,9 @@ nitro({
 }),
 ```
 
-Then copy `knext-node-entry.mjs` from a freshly created app into yours.
+Then copy `knext-node-entry.mjs` from a freshly created app into yours, and declare the server
+package it imports in your `package.json`: `"srvx": "0.11.22"`. The entry drains in-flight
+requests and waits for `after()` work before exiting on `SIGTERM`.
 
 Two differences from the Bun executable, stated plainly:
 

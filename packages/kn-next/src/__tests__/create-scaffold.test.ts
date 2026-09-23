@@ -393,6 +393,50 @@ describe("kn-next create — the generated package.json is runnable OUTSIDE this
         );
     });
 
+    it("every package the server entries and vite config import is DECLARED in package.json", () => {
+        // An undeclared import resolves only by accident of hoisting: under
+        // pnpm or bun's isolated linker it does not resolve at all, and under
+        // npm the version is whatever a transitive dep dragged in (`srvx` was
+        // undeclared, reachable only as nitro's dependency — ^0.11 vs ^0.12).
+        // SCANNED, not enumerated: every bare specifier in every file below.
+        const { appDir } = scaffoldApp();
+        const pkg = JSON.parse(
+            readFileSync(join(appDir, "package.json"), "utf8"),
+        ) as {
+            dependencies?: Record<string, string>;
+            devDependencies?: Record<string, string>;
+        };
+        const declared = new Set([
+            ...Object.keys(pkg.dependencies ?? {}),
+            ...Object.keys(pkg.devDependencies ?? {}),
+        ]);
+        const scanned = [
+            "knext-node-entry.mjs",
+            "knext-bun-entry.mjs",
+            "runtime-contract.mjs",
+            "vite.config.ts",
+        ];
+        const undeclared: string[] = [];
+        let bareSeen = 0;
+        for (const file of scanned) {
+            const src = readFileSync(join(appDir, file), "utf8");
+            for (const m of src.matchAll(
+                /^\s*import\s+(?:[^'";]*?\s+from\s+)?['"]([^'"]+)['"]/gm,
+            )) {
+                const spec = m[1];
+                if (/^(node:|\.|#)/.test(spec)) continue;
+                bareSeen++;
+                const name = spec.startsWith("@")
+                    ? spec.split("/").slice(0, 2).join("/")
+                    : spec.split("/")[0];
+                if (!declared.has(name)) undeclared.push(`${file}: ${spec}`);
+            }
+        }
+        // Liveness: the scan must actually see the imports it guards.
+        expect(bareSeen).toBeGreaterThan(8);
+        expect(undeclared).toEqual([]);
+    });
+
     it("disables code splitting — without it the server bundle does not run", () => {
         // Not a tuning knob. When the bundle splits, vinext's Next-compat shims
         // land in a second chunk re-exporting a symbol declared in no emitted
