@@ -296,8 +296,11 @@ export interface KnativeNextConfig {
      * - `turbopack` — Next's own `next build`, emitting `.next/standalone`, run
      *   by a small supervisor. SELECTABLE again (ADR-0054): pair it with
      *   `runtime: "bun"` or `runtime: "node"` and `kn-next` stages and boots the
-     *   matching standalone runtime image. This is the uncompiled standalone
-     *   shape — the verified 778/0 official-suite axis.
+     *   matching standalone runtime image. On `runtime: "bun"` the standalone
+     *   server is compiled into a Bun single executable with bytecode (the
+     *   build fails if the bytecode is missing); on `runtime: "node"` it runs
+     *   uncompiled with the V8 compile cache. `next build`'s standalone output
+     *   is the verified 778/0 official-suite axis.
      *
      * On the WIRE the meanings differ from the config: CR absence permanently
      * means `turbopack` (ADR-0017), so the CLI resolves this default and

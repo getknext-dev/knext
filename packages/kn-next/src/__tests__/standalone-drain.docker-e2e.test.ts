@@ -37,6 +37,16 @@
 // graceful contract, the eager :9464 metrics sidecar, and the drain log markers.
 // The mutation proof below reds on exactly those (see MUTATION-PROOF).
 //
+// ── The bun image's child is a COMPILED bytecode executable ─────────────────
+//
+// Bytecode caching is mandatory for every runtime cell, so the bun image no
+// longer runs `bun server.js`: `kn-next build` compiles the standalone server
+// into a Bun single executable with bytecode, and the supervisor spawns it via
+// STANDALONE_SERVER_EXEC. This suite builds that executable through the SHIPPED
+// `buildStandaloneExecutable()` and asserts the supervisor ran it (exec mode),
+// so the drain, metrics and Cache-Control assertions below are all made
+// against the compiled child. The node image is unchanged (script mode).
+//
 // ── Discipline mirrored from examples/bun-exec/test/alpine-image.docker-e2e ──
 //
 //   - NO SKIP PATH. Missing docker or bun is a FAILURE, never a skip. A suite
@@ -56,6 +66,11 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { stageStandaloneBuildContext } from "../cli/runtime-image";
+import {
+    buildStandaloneExecutable,
+    standaloneCompileScriptPath,
+    standaloneExecFileName,
+} from "../cli/standalone-exec-build";
 
 // packages/kn-next/src/__tests__ -> package root (../..)
 const PKG_ROOT = resolve(__dirname, "..", "..");
@@ -178,6 +193,8 @@ function sweepLeakedArtifacts() {
 let appPort = 0;
 let metricsPort = 0;
 let nodeAppPort = 0;
+/** The fixture's built `.next/standalone` (for the host-arch compile checks). */
+let fixtureStandalone = "";
 
 beforeAll(async () => {
     // 1. Prerequisites are REQUIRED, never skipped around.
@@ -234,6 +251,7 @@ beforeAll(async () => {
         );
     }
     const standalone = join(appDir, ".next", "standalone");
+    fixtureStandalone = standalone;
     if (!existsSync(join(standalone, "server.js"))) {
         throw new Error(
             `fixture did not emit .next/standalone/server.js:\n${build.stdout}`,
@@ -283,6 +301,17 @@ beforeAll(async () => {
         cwd: ctx,
         buildContext: ctx,
         templateDir: TEMPLATE_DIR,
+    });
+
+    // 3c. The bun image runs the Next server as a COMPILED bytecode executable
+    //     (bytecode is mandatory on every runtime cell). Produced by the SHIPPED
+    //     `buildStandaloneExecutable()` — the exact step `kn-next build` runs for
+    //     build: turbopack + runtime: bun, including its fail-closed bytecode
+    //     check — for the image's arch (linux/amd64 -> bun-linux-x64-musl).
+    buildStandaloneExecutable({
+        cwd: appDir,
+        arch: "linux-x64",
+        outFile: join(ctx, standaloneExecFileName("linux-x64")),
     });
 
     // 4. Build the shipped image, --target standalone-bun (the operator's bun runtime).
@@ -476,9 +505,12 @@ describe("the supervisor injects the compat-gated Cache-Control normalization in
         const res = await fetch(`http://127.0.0.1:${appPort}/api/cache-probe`);
         expect(res.status).toBe(200);
         expect(await res.json()).toEqual({ ok: true, probe: "cache-control" });
-        // The supervisor spawned the child WITH `--require cache-control-normalize.cjs`,
-        // so the origin `s-maxage=…` value is rewritten to the deployed form. A raw
-        // (un-injected) child would leak the ORIGIN value straight to the client.
+        // On the bun image the child is the COMPILED executable, which takes no
+        // `--require`: the preload is compiled into its entry instead
+        // (standalone-compile.mjs). Either way the origin `s-maxage=…` value must be
+        // rewritten to the deployed form — a child without the preload would leak
+        // the ORIGIN value straight to the client. So this case now also proves
+        // the baked-in preload survives the compile.
         expect(
             res.headers.get("cache-control"),
             `expected the supervisor-injected preload to normalize Cache-Control; got the origin value ${ORIGIN_CACHE_CONTROL}, which means the supervisor did not inject the preload`,
@@ -495,6 +527,101 @@ describe("the supervisor injects the compat-gated Cache-Control normalization in
             res.headers.get("cache-control"),
             `expected the supervisor-injected preload to normalize Cache-Control on node; got the origin value ${ORIGIN_CACHE_CONTROL}`,
         ).toBe(NORMALIZED_CACHE_CONTROL);
+    });
+});
+
+// ── Real-app regression coverage for the compiled executable ────────────────
+// Both defects a review found in the first cut slipped past synthetic tests and
+// only showed on a REAL Next app, so they are pinned here, on the real fixture:
+//
+//   1. module identity: a `dynamicParams = false` miss answered 500 ("Internal:
+//      NoFallbackError") because the executable bundled a second copy of a
+//      `*.external` module the disk-loaded route chunk also loads. The status
+//      codes below are asserted on the SHIPPED bun image (compiled executable)
+//      and, as the control, on the node image (uncompiled server.js);
+//   2. the bytecode verifier false-failed real executables. It is run here
+//      through the shipped compile script, on this real app, in BOTH directions.
+describe("real-app regression: the compiled executable matches uncompiled Next on 404s", () => {
+    for (const [label, port] of [
+        ["bun image (compiled executable)", () => appPort],
+        ["node image (uncompiled control)", () => nodeAppPort],
+    ] as const) {
+        it(`${label}: a dynamicParams=false miss is 404, a generated param is 200, notFound() is 404`, async () => {
+            const miss = await fetch(`http://127.0.0.1:${port()}/p/zzz`);
+            expect(miss.status, "dynamicParams=false unknown slug").toBe(404);
+            const hit = await fetch(`http://127.0.0.1:${port()}/p/a`);
+            expect(hit.status).toBe(200);
+            expect(await hit.text()).toContain("p-");
+            const nf = await fetch(`http://127.0.0.1:${port()}/nf`);
+            expect(nf.status, "notFound() route").toBe(404);
+        });
+    }
+});
+
+describe("real-app regression: the bytecode verifier on this real app, both directions", () => {
+    const compile = (env: Record<string, string>) => {
+        const out = join(workDir, `verify-${randomBytes(3).toString("hex")}`);
+        const r = spawnSync(
+            "bun",
+            [
+                "run",
+                standaloneCompileScriptPath(),
+                "--server",
+                join(fixtureStandalone, "server.js"),
+                "--outfile",
+                out,
+            ],
+            {
+                encoding: "utf8",
+                timeout: 600_000,
+                env: { ...process.env, ...env },
+            },
+        );
+        return { status: r.status, text: `${r.stdout}\n${r.stderr}`, out };
+    };
+
+    it("PASSES the real app compiled with bytecode (host arch)", () => {
+        const r = compile({});
+        expect(r.status, r.text).toBe(0);
+        expect(r.text).toContain("bytecode: verified");
+        expect(existsSync(r.out)).toBe(true);
+    }, 600_000);
+
+    it("FAILS the SAME real app compiled without bytecode — and leaves no artifact behind", () => {
+        const r = compile({
+            KNEXT_STANDALONE_COMPILE_NO_BYTECODE_FOR_VERIFIER_TEST: "1",
+        });
+        expect(r.status, r.text).not.toBe(0);
+        expect(r.text).toMatch(
+            /failed the bytecode check: .*WITHOUT --bytecode/,
+        );
+        expect(existsSync(r.out)).toBe(false);
+    }, 600_000);
+});
+
+describe("the bun image serves through the COMPILED bytecode executable, not `bun server.js`", () => {
+    it("the supervisor spawned the compiled executable (exec mode), with no script argument", () => {
+        const logs = run("docker", ["logs", CONTAINER], { timeout: 60_000 });
+        const out = `${logs.stdout}\n${logs.stderr}`;
+        const start = out
+            .split("\n")
+            .find((l) => l.includes("Starting Next.js standalone server"));
+        expect(
+            start,
+            "the supervisor never logged the child start",
+        ).toBeTruthy();
+        expect(start).toContain('"mode":"exec"');
+        expect(start).toContain("/app/.next/standalone/knext-standalone-exec");
+    });
+
+    it("the node image still runs server.js under node (script mode) — the bun executable is bun-only", () => {
+        const logs = run("docker", ["logs", NODE_CONTAINER], {
+            timeout: 60_000,
+        });
+        const start = `${logs.stdout}\n${logs.stderr}`
+            .split("\n")
+            .find((l) => l.includes("Starting Next.js standalone server"));
+        expect(start).toContain('"mode":"script"');
     });
 });
 

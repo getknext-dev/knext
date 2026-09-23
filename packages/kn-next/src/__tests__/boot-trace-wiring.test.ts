@@ -65,7 +65,7 @@ describe("node-server boot trace wiring (#441/#592)", () => {
     });
 
     it("marks spawn-issued after the spawn call, not before it", () => {
-        const spawnAt = src.indexOf("spawn(process.execPath");
+        const spawnAt = src.indexOf("spawn(spawnPlan.command");
         const markAt = src.indexOf('bootTrace.mark("spawn-issued"');
 
         expect(spawnAt).toBeGreaterThan(-1);

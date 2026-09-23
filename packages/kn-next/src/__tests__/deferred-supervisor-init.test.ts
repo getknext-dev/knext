@@ -100,7 +100,7 @@ describe("pre-spawn module graph (the actual ~1 CPU-second)", () => {
 
 describe("safety is NOT deferred (regression guard)", () => {
     const src = readFileSync(NODE_SERVER_SRC, "utf8");
-    const spawnAt = src.indexOf("spawn(process.execPath");
+    const spawnAt = src.indexOf("spawn(spawnPlan.command");
 
     it("spawns the child (anchor for the ordering assertions)", () => {
         expect(spawnAt).toBeGreaterThan(-1);

@@ -398,10 +398,10 @@ describe("#309 node-server.ts wiring (source guard)", () => {
         const stepsAt = src.indexOf("steps: [");
         const callAt = src.indexOf("warnOnDegradedCompileCache(");
         // A search literal describing the PRODUCTION source, not code that runs
-        // here — so it stays `process.execPath`. A blanket rename to NODE_BIN
+        // here — so it stays the literal spawn call. A blanket rename to NODE_BIN
         // rewrote this string too and the scan stopped matching, which is the
         // same class of mistake as editing prose that merely mentions code.
-        const spawnAt = src.indexOf("spawn(process.execPath");
+        const spawnAt = src.indexOf("spawn(spawnPlan.command");
         expect(stepsAt).toBeGreaterThan(-1);
         expect(callAt).toBeGreaterThan(-1);
         expect(spawnAt).toBeGreaterThan(-1);

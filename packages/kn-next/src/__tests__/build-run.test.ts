@@ -4,13 +4,17 @@
  * helper, the single-exec compile):
  *  - default (vinext) build → the single-executable compile runs, the
  *    standalone-tree steps do not,
- *  - turbopack shape → the heal runs, the compile does not,
+ *  - turbopack shape → the heal runs and the vinext compile does not; on Bun
+ *    the standalone executable compile runs after the heal,
  *  - assets are always uploaded last.
  *
  * The per-file Bun bytecode pass that used to be asserted here is RETIRED
- * (ADR-0048 Amendment 3): bytecode now exists only inside the whole-bundle
- * single-executable compile. `standalone-bun-bytecode` is gone; these tests
- * are the guard that nothing standalone-shaped re-grows a bytecode step.
+ * (ADR-0048 Amendment 3): bytecode exists only inside a WHOLE-BUNDLE
+ * single-executable compile. `standalone-bun-bytecode` is gone and stays gone.
+ * Since bytecode became mandatory for every runtime cell, the standalone
+ * shape on Bun gets the whole-bundle compile too (`standalone-exec-build.ts`)
+ * — these tests pin that it runs for turbopack × bun ONLY: never for
+ * turbopack × node, never for vinext, and never as a per-file pass.
  */
 
 import {
@@ -26,6 +30,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { requireIsolatedProcess } from "../../../../tests/helpers/require-isolated-process";
+import type { StandaloneExecBuildOptions } from "../cli/standalone-exec-build";
 import type { VinextBuildOptions } from "../cli/vinext-build";
 
 // #965: installs process-global `mock.module` fakes of shared CLI modules that
@@ -81,6 +86,19 @@ const runPostCompileSmoke = (() =>
         bootMs: 1,
         termMs: 1,
     })))();
+const buildStandaloneExecutable = (() =>
+    mock(
+        (_opts: StandaloneExecBuildOptions): string =>
+            "knext-standalone-exec-linux-x64",
+    ))();
+const __knextRealStandaloneExec = {
+    ...(await import("../cli/standalone-exec-build")),
+};
+mock.module("../cli/standalone-exec-build", () => ({
+    ...__knextRealStandaloneExec,
+    buildStandaloneExecutable,
+}));
+
 const __knextRealSmoke = { ...(await import("../cli/postcompile-smoke")) };
 mock.module("../cli/postcompile-smoke", () => ({
     ...__knextRealSmoke,
@@ -125,6 +143,12 @@ afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
 });
 
+/** A `.next/standalone` tree with the `server.js` the bun compile needs. */
+function standaloneTree(): void {
+    mkdirSync(join(dir, ".next", "standalone"), { recursive: true });
+    writeFileSync(join(dir, ".next", "standalone", "server.js"), "// server\n");
+}
+
 /** The compiles that target the SHIPPED arch, ignoring any host-arch smoke one. */
 const shipCompiles = () =>
     buildVinextExecutable.mock.calls.filter((c) => c[0]?.arch === "linux-x64");
@@ -162,15 +186,71 @@ describe("build()", () => {
         expect(runQuiet).toHaveBeenCalledWith(["npm", "run", "build"]);
     });
 
-    it("runs the heal (not the compile) when a standalone dir exists on the turbopack shape", async () => {
+    it("runs the heal (not the vinext compile) when a standalone dir exists on the turbopack shape", async () => {
         loadConfig.mockResolvedValue(cfg({ runtime: "bun" }));
-        mkdirSync(join(dir, ".next", "standalone"), { recursive: true });
+        standaloneTree();
 
         await build({ skipNextBuild: true });
 
         expect(healBunExportTargets).toHaveBeenCalledTimes(1);
         expect(buildVinextExecutable).not.toHaveBeenCalled();
         expect(uploadAssets).toHaveBeenCalledTimes(1);
+    });
+
+    it("compiles the standalone bytecode executable for turbopack × bun, AFTER the heal", async () => {
+        loadConfig.mockResolvedValue(cfg({ runtime: "bun" }));
+        standaloneTree();
+
+        await build({ skipNextBuild: true });
+
+        expect(buildStandaloneExecutable).toHaveBeenCalledTimes(1);
+        expect(buildStandaloneExecutable).toHaveBeenCalledWith(
+            expect.objectContaining({ arch: "linux-x64" }),
+        );
+        // The heal adds files the compile must see, so it must come first.
+        const healOrder = healBunExportTargets.mock.invocationCallOrder[0];
+        const compileOrder =
+            buildStandaloneExecutable.mock.invocationCallOrder[0];
+        expect(compileOrder).toBeGreaterThan(healOrder);
+    });
+
+    it("never compiles the standalone executable for turbopack × node", async () => {
+        loadConfig.mockResolvedValue(cfg({ runtime: "node" }));
+        standaloneTree();
+
+        await build({ skipNextBuild: true });
+
+        expect(buildStandaloneExecutable).not.toHaveBeenCalled();
+    });
+
+    it("never compiles the standalone executable when runtime is unset (node is the default)", async () => {
+        loadConfig.mockResolvedValue(cfg());
+        standaloneTree();
+
+        await build({ skipNextBuild: true });
+
+        expect(buildStandaloneExecutable).not.toHaveBeenCalled();
+    });
+
+    it("never compiles the standalone executable on the vinext build, even with runtime bun", async () => {
+        loadConfig.mockResolvedValue(cfg({ runtime: "bun", build: undefined }));
+        standaloneTree();
+
+        await build({ skipNextBuild: true });
+
+        expect(buildStandaloneExecutable).not.toHaveBeenCalled();
+    });
+
+    it("FAILS the build for turbopack × bun when there is no standalone tree to compile", async () => {
+        // The bun image requires the executable; a build that skipped it would
+        // fail at `docker build` (or ship a stale one), so the build fails here.
+        loadConfig.mockResolvedValue(cfg({ runtime: "bun" }));
+
+        await expect(build({ skipNextBuild: true })).rejects.toThrow(
+            /standalone/,
+        );
+        expect(buildStandaloneExecutable).not.toHaveBeenCalled();
+        expect(uploadAssets).not.toHaveBeenCalled();
     });
 
     it("compiles the single executable on the default (vinext) build", async () => {
@@ -248,7 +328,7 @@ describe("build()", () => {
         // artifact SHAPE, not on whether a stale standalone tree happens to be
         // lying around from an earlier build.
         loadConfig.mockResolvedValue(cfg({ runtime: "bun", build: undefined }));
-        mkdirSync(join(dir, ".next", "standalone"), { recursive: true });
+        standaloneTree();
 
         await build({ skipNextBuild: true });
 

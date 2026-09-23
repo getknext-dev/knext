@@ -127,19 +127,7 @@ export function compileArgv(
     entry: string,
     outFile: string,
 ): string[] {
-    const target = COMPILE_TARGETS[arch];
-    if (!target) {
-        // The two lists are kept APART on purpose. Advertising the `-gnu` keys
-        // as buildable invites someone to compile one and put it in the image,
-        // where the alpine base has no glibc and it cannot run at all — the
-        // exact class of failure the alpine e2e exists to catch. They are
-        // reachable only through `hostSmokeArch()`.
-        throw new UsageError(
-            `Unknown build arch '${arch}'. Shippable targets: ${SHIPPABLE_ARCHES.join(", ")}.\n\n` +
-                `(${SMOKE_ONLY_ARCHES.join(", ")} also compile, but exist ONLY for the post-compile smoke's\n` +
-                "host-arch binary — they are glibc-linked and the shipped alpine image cannot run them.)",
-        );
-    }
+    const target = bunCompileTarget(arch);
     // `bun run <script>`, not `bun build`. The compile needs BUILD PLUGINS and
     // the CLI has no `--plugin`:
     //
@@ -164,6 +152,28 @@ export function compileArgv(
         "--target",
         target,
     ];
+}
+
+/**
+ * The `bun build --compile` target triple for a SHIPPABLE-or-smoke arch key.
+ * Shared by both compiled targets (vinext here, the compiled standalone in
+ * `standalone-exec-build.ts`) so a new arch is one map entry, not two.
+ */
+export function bunCompileTarget(arch: string): string {
+    const target = COMPILE_TARGETS[arch];
+    if (!target) {
+        // The two lists are kept APART on purpose. Advertising the `-gnu` keys
+        // as buildable invites someone to compile one and put it in the image,
+        // where the alpine base has no glibc and it cannot run at all — the
+        // exact class of failure the alpine e2e exists to catch. They are
+        // reachable only through `hostSmokeArch()`.
+        throw new UsageError(
+            `Unknown build arch '${arch}'. Shippable targets: ${SHIPPABLE_ARCHES.join(", ")}.\n\n` +
+                `(${SMOKE_ONLY_ARCHES.join(", ")} also compile, but exist ONLY for the post-compile smoke's\n` +
+                "host-arch binary — they are glibc-linked and the shipped alpine image cannot run them.)",
+        );
+    }
+    return target;
 }
 
 /**
@@ -831,7 +841,9 @@ function pickFetchVersion(
  * bun present or not (#948, S3-V Finding B-1). The static import spawns
  * nothing by itself, so tests that inject `bunVersion` still never spawn.
  */
-function detectBunVersion(run: (argv: readonly string[]) => void): string {
+export function detectBunVersion(
+    run: (argv: readonly string[]) => void,
+): string {
     // `runQuiet` does not capture stdout, so the version is read via
     // execFileSync directly. The unused seam parameter stays so the injection
     // point remains explicit rather than pretending.

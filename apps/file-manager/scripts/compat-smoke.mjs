@@ -41,7 +41,7 @@ import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveSmokeMode } from './compat-smoke-mode.mjs';
+import { resolveExecTransport, resolveSmokeMode } from './compat-smoke-mode.mjs';
 import { formatLaneSummary, loadQuarantineLedger } from './compat-smoke-quarantines.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -83,6 +83,13 @@ const { singleExec } = resolveSmokeMode({
   serverCmd: SERVER_CMD,
   serverPath: SERVER_PATH,
   smokeMode: process.env.SMOKE_MODE,
+});
+// Which transport a single-exec run serves over (check (h)): the vinext
+// executable is Bun.serve (the default), the compiled standalone executable is
+// Next's own node:http server — `SMOKE_EXEC_TRANSPORT=node-http`.
+const EXEC_TRANSPORT = resolveExecTransport({
+  singleExec,
+  transport: process.env.SMOKE_EXEC_TRANSPORT,
 });
 
 // #188 — Bun ≤1.3.x keep-alive mitigation preload (bun runtime only; the Node
@@ -613,6 +620,33 @@ async function main() {
         req.setTimeout(15000, () => req.destroy(new Error('request timeout')));
       });
       if (RUNTIME === 'bun') {
+        if (singleExec && EXEC_TRANSPORT === 'node-http') {
+          // The COMPILED STANDALONE executable: Next's own server, so node:http
+          // — the same transport, and the same self-disabling guard (compiled
+          // into its entry), as the uncompiled `bun server.js` lane below. Its
+          // embedded Bun version is read with BUN_BE_BUN=1, which makes a
+          // compiled executable act as the bun CLI; a bare `--version` would
+          // reach the app and boot a second server.
+          if (!BUN_GUARD_PRELOAD) {
+            throw new Error('bun-keepalive-guard preload not found in the workspace');
+          }
+          const { createRequire } = await import('node:module');
+          const { shouldInstall } = createRequire(import.meta.url)(BUN_GUARD_PRELOAD);
+          const bunVersion = execFileSync(SERVER_CMD, ['--version'], {
+            env: { ...process.env, BUN_BE_BUN: '1' },
+          })
+            .toString()
+            .trim();
+          if (shouldInstall({}, { bun: bunVersion })) {
+            assert.strictEqual(
+              res.connection,
+              'close',
+              `guard active on embedded bun ${bunVersion} but Connection header is ${JSON.stringify(res.connection)}`,
+            );
+            return `compiled standalone, embedded bun ${bunVersion}: guard active, Connection: close`;
+          }
+          return `compiled standalone, embedded bun ${bunVersion}: fixed version, guard self-disabled`;
+        }
         if (singleExec) {
           // The compiled binary serves over the Bun.serve transport, whose
           // keep-alive reuse-reset is MEASURED still-present at Bun 1.4.2 on

@@ -58,9 +58,16 @@ purpose: without it, the first sign of the missing artifact used to be an opaque
 inside the Docker image build at deploy time.
 
 `kn-next` stages and builds the matching standalone runtime image for you; `runtime` has no effect
-on the vinext single-executable target, where the runtime is compiled into the binary. Today the
-standalone target runs uncompiled (the supervisor spawns `server.js` directly); packaging it as a
-single bytecode executable is planned but not yet available.
+on the vinext single-executable target, where the runtime is compiled into the binary. On this
+target it decides how the server is packaged:
+
+- **`runtime: 'bun'`** — `kn-next build` compiles the standalone `server.js` into a Bun single
+  executable with bytecode, verifies the bytecode is actually there (the build fails otherwise), and
+  the image runs that executable inside the standalone folder. Needs Bun 1.4 or newer where you
+  build. Details on the [Bun runtime](/docs/bun-runtime#the-standalone-target-on-bun-is-compiled-too)
+  page.
+- **`runtime: 'node'`** — the supervisor spawns `server.js` under Node, and bytecode caching comes
+  from the V8 compile cache in the image (see [bytecode caching](/docs/bytecode)).
 
 ## The pipeline
 
