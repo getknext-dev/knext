@@ -572,6 +572,39 @@ describe("#949 stageSharpNative stages the image target's platform, not the host
         expect(writes.join("")).toMatch(/two versions|multiple versions/i);
     });
 
+    it("falls back with a warning when the candidate sharp manifest is UNREADABLE (corrupt JSON) — same as absent", () => {
+        // readResolvedSharpManifest's candidate walk must not throw on a
+        // corrupt node_modules/sharp/package.json — it keeps walking and, with
+        // nothing left to disambiguate, the caller takes the same loud
+        // first-entry fallback as when no manifest is findable at all.
+        const cwd = tempDir("knext-954-corrupt-");
+        writeFileSync(join(cwd, "bun.lock"), twoVersionLock());
+        mkdirSync(join(cwd, "node_modules", "sharp"), { recursive: true });
+        writeFileSync(
+            join(cwd, "node_modules", "sharp", "package.json"),
+            "{ not json",
+        );
+        const { calls, fetch } = recordingFetch();
+
+        const writes: string[] = [];
+        const original = process.stderr.write.bind(process.stderr);
+        process.stderr.write = ((chunk: unknown) => {
+            writes.push(String(chunk));
+            return true;
+        }) as typeof process.stderr.write;
+        try {
+            stageSharpNative(cwd, { arch: "linux-x64", fetchPackage: fetch });
+        } finally {
+            process.stderr.write = original;
+        }
+
+        expect(calls.map((c) => `${c.name}@${c.version}`).sort()).toEqual([
+            "@img/sharp-libvips-linuxmusl-x64@1.2.9",
+            "@img/sharp-linuxmusl-x64@0.34.5",
+        ]);
+        expect(writes.join("")).toMatch(/two versions|multiple versions/i);
+    });
+
     it("copies the target set from the host install when it IS there — no fetch", () => {
         // A linux-x64 host building the default image: bun installed the musl
         // packages, so staging is a local copy exactly as before.
@@ -674,6 +707,31 @@ describe("#949 stageSharpNative stages the image target's platform, not the host
         expect(readFileSync(join(cwd, "native", "my-addon.node"), "utf8")).toBe(
             "USER BYTES",
         );
+    });
+
+    it("REFUSES to clear a native/ whose manifest IS present but UNREADABLE — corrupt JSON is not proof of ownership", () => {
+        // A truncated write (killed mid-flush) or hand-edit can leave
+        // `.integrity.json` present but not valid JSON. That is
+        // indistinguishable from "someone else wrote this tree" — the same
+        // refusal as the missing-manifest case above, not a silent delete.
+        const cwd = darwinAppTree(FULL_LOCK, {
+            "sharp-linuxmusl-x64": SHARP_V,
+            "sharp-libvips-linuxmusl-x64": VIPS_V,
+        });
+        mkdirSync(join(cwd, "native"), { recursive: true });
+        writeFileSync(join(cwd, "native", "my-addon.node"), "USER BYTES");
+        writeFileSync(join(cwd, "native", ".integrity.json"), "{ not json");
+
+        expect(() => stageSharpNative(cwd, { arch: "linux-x64" })).toThrow(
+            /unreadable/,
+        );
+        // And nothing was deleted on the way to the refusal.
+        expect(readFileSync(join(cwd, "native", "my-addon.node"), "utf8")).toBe(
+            "USER BYTES",
+        );
+        expect(
+            readFileSync(join(cwd, "native", ".integrity.json"), "utf8"),
+        ).toBe("{ not json");
     });
 
     it("prunes ONLY what the previous manifest lists — a user extra beside it survives", () => {
