@@ -43,6 +43,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveExecTransport, resolveSmokeMode } from './compat-smoke-mode.mjs';
 import { formatLaneSummary, loadQuarantineLedger } from './compat-smoke-quarantines.mjs';
+import { checkFontsServed } from './font-url-check.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const APP_DIR = path.resolve(__dirname, '..');
@@ -902,6 +903,20 @@ async function main() {
       `cached ${firstRead.cacheState}/${secondRead.cacheState} ${first} → revalidated ${current}; ` +
       `redis keys=${keys}, isr keys=${isrKeys.length} (ttl>${1}s each), no fallback warn`
     );
+  });
+
+  // (l) #1284: the layout's next/font/google (Geist) fonts must be referenced
+  // by a served, content-hashed URL — never the build machine's absolute
+  // filesystem path — and that URL must actually 200 with a font/* content
+  // type. See font-url-check.mjs for the full contract and its hermetic
+  // (no-network) unit tests.
+  await check('l. next/font/google fonts served at a real URL (#1284)', async () => {
+    const res = await request('/');
+    assert.strictEqual(res.status, 200, `expected 200, got ${res.status}`);
+    const result = await checkFontsServed(res.body, {
+      request: async (url) => request(url),
+    });
+    return `${result.checked} font URL(s) served, none leaked`;
   });
 
   // ── report ──────────────────────────────────────────────────────────────

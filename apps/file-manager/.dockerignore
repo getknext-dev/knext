@@ -7,3 +7,17 @@ dist
 *.log
 coverage
 docs
+
+# #1284 (see the repo-root .dockerignore for the full writeup — THAT file,
+# not this one, is what `docker build` actually reads for this app, since
+# `requireBuildContext` widens the context to the monorepo root. Kept here
+# too, bare, for the hypothetical case this app is ever built with its own
+# directory as context): `.vinext/fonts/<hash>/style.css` caches a self-hosted
+# Google Font by an ABSOLUTE FILESYSTEM PATH computed at fetch time, and a
+# stale, HOST-path-tainted copy silently defeats vinext's URL rewrite if it
+# rides a Docker build's context into the image.
+.vinext
+
+# Same staleness class as `.vinext` above: `.output` is the HOST build's
+# output tree the in-image `vite build` fully regenerates.
+.output

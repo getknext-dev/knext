@@ -27,7 +27,7 @@ import { createClient } from './platform-e2e-http.mjs';
 const TOKEN = 'selftest-token';
 const IMMUTABLE = 'public, max-age=31536000, immutable';
 
-/** @typedef {{ cssType?: string, immutable?: boolean, buffered?: boolean, openInvalidate?: boolean, deadOptimizer?: boolean, bigImage?: boolean, fontLeak?: 'broken' | 'fixed' | 'none', noCssFont?: boolean, notChunked?: boolean, jsCache?: string }} Defects */
+/** @typedef {{ cssType?: string, immutable?: boolean, buffered?: boolean, openInvalidate?: boolean, deadOptimizer?: boolean, bigImage?: boolean, noFontRef?: boolean, fontMissing?: boolean, noCssFont?: boolean, notChunked?: boolean, jsCache?: string }} Defects */
 
 /** @param {Defects} d */
 function makeServer(d) {
@@ -45,7 +45,7 @@ function makeServer(d) {
       return send(
         200,
         { 'content-type': 'text/html' },
-        `<html><head><link rel="stylesheet" href="/_next/static/a.css">${d.fontLeak !== 'none' ? '<link rel="preload" as="font" href="/home/x/app/.vinext/fonts/h/f.woff2">' : ''}<script src="/_next/static/a.js"></script></head><body>ok</body></html>`,
+        `<html><head><link rel="stylesheet" href="/_next/static/a.css">${d.noFontRef ? '' : '<link rel="preload" as="font" href="/_next/static/f.woff2">'}<script src="/_next/static/a.js"></script></head><body>ok</body></html>`,
       );
     }
     if (url === '/_next/static/a.css') {
@@ -65,12 +65,8 @@ function makeServer(d) {
         'console.log(1)',
       );
     }
-    if (url === '/home/x/app/.vinext/fonts/h/f.woff2') {
-      if (d.fontLeak === 'fixed')
-        return send(200, { 'content-type': 'font/woff2', 'cache-control': IMMUTABLE }, 'wOF2');
-      return send(404, { 'content-type': 'text/plain' }, 'nf');
-    }
     if (url === '/_next/static/f.woff2') {
+      if (d.fontMissing) return send(404, { 'content-type': 'text/plain' }, 'nf');
       return send(200, { 'content-type': 'font/woff2', 'cache-control': IMMUTABLE }, 'wOF2xxxx');
     }
     if (/^\/(file|globe|next)\.svg$/.test(url)) {
@@ -130,7 +126,7 @@ function makeServer(d) {
 
 /** @param {Defects} d @param {(request: import('./platform-e2e-checks.mjs').RequestFn) => Promise<unknown>} fn */
 async function against(d, fn) {
-  const server = makeServer({ fontLeak: 'broken', ...d });
+  const server = makeServer({ ...d });
   await new Promise((r) => server.listen(0, '127.0.0.1', () => r(undefined)));
   const { port } = /** @type {import('node:net').AddressInfo} */ (server.address());
   const { request } = createClient({ baseUrl: `http://127.0.0.1:${port}`, host: 'app.selftest' });
@@ -177,48 +173,14 @@ const defects = [
   ['image optimizer dead (500)', { deadOptimizer: true }, 'image'],
   ['optimizer output not smaller than the source', { bigImage: true }, 'image'],
   ['stream delimited by connection close, not chunked', { notChunked: true }, 'stream'],
+  // #1284 (fixed): a font reference is an ORDINARY asset now, with no
+  // exemption. Its own 404 must fail, exactly like any other missing asset —
+  // proving the old quarantine path is fully gone, not merely unreachable.
+  ['font asset 404s (no exemption tolerates this any more)', { fontMissing: true }, 'static'],
+  // No font referenced at all (the layout uses next/font, so this must never
+  // silently pass).
+  ['no font referenced', { noFontRef: true, noCssFont: true }, 'static'],
 ];
-// The #1284 exemption is narrow and self-expiring: the leaked-path font may
-// stay broken (green), but serving it (fixed) must go RED, and it must not
-// shelter any OTHER broken asset.
-try {
-  await against({ fontLeak: 'broken' }, suite.static);
-  report('known defect #1284 (font path still 404) is tolerated, not skipped', true);
-} catch (e) {
-  report('known defect #1284 tolerated', false, String(e instanceof Error ? e.message : e));
-}
-// The only woff2 files are quarantined ones: passes, but must say fonts are
-// UNVERIFIED and must not count them as coverage.
-try {
-  const seen = [];
-  await against({ noCssFont: true }, async (r) => seen.push(await checkStaticAssets(r)));
-  const ok = /FONTS UNVERIFIED/.test(seen[0].summary) && !/woff2/.test(seen[0].summary);
-  report(
-    'only-quarantined fonts: reported UNVERIFIED, not counted as covered',
-    ok,
-    seen[0].summary,
-  );
-} catch (e) {
-  report('only-quarantined fonts pass', false, String(e instanceof Error ? e.message : e));
-}
-defects.push(
-  [
-    'exemption dead: no leaked font reference left, fonts served normally',
-    { fontLeak: 'none' },
-    'static',
-  ],
-  [
-    'no font at all (nothing quarantined, none served)',
-    { fontLeak: 'none', noCssFont: true },
-    'static',
-  ],
-  ['#1284 fixed but exemption not removed', { fontLeak: 'fixed' }, 'static'],
-  [
-    'broken CSS while #1284 exemption is active',
-    { fontLeak: 'broken', cssType: 'text/plain' },
-    'static',
-  ],
-);
 for (const [label, defect, name] of defects) {
   let caught = false;
   try {
