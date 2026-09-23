@@ -317,8 +317,8 @@ export const PER_PATH_THRESHOLDS = {
  * is unrelated to this batch), measured with `dist/` built for kn-next + lib
  * + db:
  *
- *   - global:                  honest 93.53% → **93.97%**  (main → this PR, CI-measured)
- *   - packages/kn-next/src/**: honest 93.57% → **94.05%**  (main → this PR, CI-measured)
+ *   - global:                  honest 93.53% → **93.74% (9408/10036)**, raw 79.84% (11250/14090)  (CI, job 107327422828)
+ *   - packages/kn-next/src/**: honest 93.57% → **93.80% (8528/9092)**, raw 79.84% (10235/12820)  (CI, job 107327422828)
  *
  * RAW-denominator hazard found while landing this (bun 1.4): when NO function
  * in a file executed under its canonical module instance, bun's lcov reports
