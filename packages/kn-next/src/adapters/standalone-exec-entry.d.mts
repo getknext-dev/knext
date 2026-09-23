@@ -16,9 +16,10 @@ export declare function standaloneExecEntrySource(
 ): string;
 
 /**
- * Every cache handler Next loads by computed path (`cacheHandler`, each
- * `cacheHandlers` entry, `experimental.incrementalCacheHandlerPath`), as
- * absolute paths resolved the way Next resolves them. Throws when `server.js`
+ * Every cache handler Next loads by computed path (`cacheHandler` and each
+ * `cacheHandlers` entry; never the Next-16-removed
+ * `experimental.incrementalCacheHandlerPath`), as absolute paths resolved the
+ * way Next resolves them. Throws when `server.js`
  * carries no inlined `nextConfig`.
  */
 export declare function standaloneCacheHandlerFiles(

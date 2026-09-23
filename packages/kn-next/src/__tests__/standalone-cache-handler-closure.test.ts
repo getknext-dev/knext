@@ -83,7 +83,7 @@ describe("standaloneCacheHandlerFiles — the handlers Next loads by computed pa
         ).toEqual(["/opt/handler.js", "/opt/remote.mjs"]);
     });
 
-    it("includes every `cacheHandlers` entry ('use cache' handlers) and the legacy experimental.incrementalCacheHandlerPath, deduplicated", () => {
+    it("includes every `cacheHandlers` entry ('use cache' handlers), deduplicated", () => {
         expect(
             standaloneCacheHandlerFiles(
                 serverWith({
@@ -93,18 +93,46 @@ describe("standaloneCacheHandlerFiles — the handlers Next loads by computed pa
                         default: "../use-cache.js",
                         remote: "../isr.js",
                     },
-                    experimental: {
-                        incrementalCacheHandlerPath: "../legacy.js",
-                    },
                 }),
                 SERVER_DIR,
             ),
         ).toEqual([
             "/srv/app/.next/standalone/isr.js",
             "/srv/app/.next/standalone/use-cache.js",
-            "/srv/app/.next/standalone/legacy.js",
         ]);
     });
+
+    // Next 16 dropped `experimental.incrementalCacheHandlerPath`: it never
+    // relativizes, traces or loads it, and an unknown key only warns — so a
+    // leftover value still reaches the inlined nextConfig. Treating it as a
+    // root would make the compile fail closed ("not inside the standalone
+    // tree") on an app that runs fine uncompiled. It must be ignored.
+    for (const [shape, legacy] of [
+        ["absolute", "/home/dev/old-project/legacy-handler.js"],
+        ["relative", "../legacy-handler.js"],
+    ] as const) {
+        it(`ignores a leftover ${shape} experimental.incrementalCacheHandlerPath (Next 16 never loads it)`, () => {
+            expect(
+                standaloneCacheHandlerFiles(
+                    serverWith({
+                        distDir: "./.next",
+                        experimental: { incrementalCacheHandlerPath: legacy },
+                    }),
+                    SERVER_DIR,
+                ),
+            ).toEqual([]);
+            expect(
+                standaloneCacheHandlerFiles(
+                    serverWith({
+                        distDir: "./.next",
+                        cacheHandler: "../isr.js",
+                        experimental: { incrementalCacheHandlerPath: legacy },
+                    }),
+                    SERVER_DIR,
+                ),
+            ).toEqual(["/srv/app/.next/standalone/isr.js"]);
+        });
+    }
 
     it("fails closed on a server.js with no inlined nextConfig — never guesses that no handler exists", () => {
         expect(() =>

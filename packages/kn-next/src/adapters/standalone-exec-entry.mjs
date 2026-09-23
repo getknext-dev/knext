@@ -106,8 +106,12 @@ const NEXT_CONFIG_LINE = /^const nextConfig = (.*)$/m;
  * joined onto `<server dir>/<distDir>`):
  *
  *   - `cacheHandler` — the ISR / data cache handler;
- *   - every `cacheHandlers` entry — the `'use cache'` handlers;
- *   - `experimental.incrementalCacheHandlerPath` — the pre-15 name.
+ *   - every `cacheHandlers` entry — the `'use cache'` handlers.
+ *
+ * NOT `experimental.incrementalCacheHandlerPath`: Next 16 (the supported
+ * floor) dropped it — it never relativizes, traces or loads it, and an unknown
+ * key only warns, so a leftover value still reaches the inlined config. Taking
+ * it as a root would fail the compile on an app that runs fine uncompiled.
  *
  * These are disk-loaded code outside `.next/server`, so the compile scans them
  * as extra roots of the disk closure. Throws when `server.js` carries no
@@ -135,7 +139,6 @@ export function standaloneCacheHandlerFiles(serverSrc, serverDir) {
     const configured = [
         config.cacheHandler,
         ...Object.values(config.cacheHandlers ?? {}),
-        config.experimental?.incrementalCacheHandlerPath,
     ].filter((p) => typeof p === "string" && p.length > 0);
 
     const distDir = join(serverDir, typeof config.distDir === "string" ? config.distDir : ".next");
