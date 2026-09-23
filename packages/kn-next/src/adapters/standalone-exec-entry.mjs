@@ -1,8 +1,12 @@
 /**
  * Pure helpers for compiling a Next.js standalone server into a Bun single
- * executable (`standalone-compile.mjs`). Dependency-free and side-effect free,
- * so the compile script bundles them and the tests import them directly.
+ * executable (`standalone-compile.mjs`). Dependency-free (Node builtins only)
+ * and side-effect free, so the compile script bundles them and the tests
+ * import them directly.
  */
+
+import { isAbsolute, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 /** The binding the re-anchored entry uses in place of `__dirname`. */
 export const STANDALONE_DIR_BINDING = "__knextStandaloneDir";
@@ -91,6 +95,61 @@ export function standaloneExecEntrySource(serverSrc, preloads) {
  */
 export const DEV_ONLY_STUB_SOURCE =
     'module.exports = new Proxy({}, { get(_t, k) { if (typeof k === "symbol" || k === "__esModule" || k === "then") return undefined; throw new Error("knext: a dev-only Next module was reached in a production standalone executable (property " + String(k) + ")"); } });\n';
+
+/** The config line every `server.js` shape carries (one JSON literal). */
+const NEXT_CONFIG_LINE = /^const nextConfig = (.*)$/m;
+
+/**
+ * Every cache handler Next can load by COMPUTED path at runtime, as absolute
+ * paths resolved exactly as Next resolves them (`formatDynamicImportPath`:
+ * a `file://` URL is converted, an absolute path is kept, anything else is
+ * joined onto `<server dir>/<distDir>`):
+ *
+ *   - `cacheHandler` — the ISR / data cache handler;
+ *   - every `cacheHandlers` entry — the `'use cache'` handlers.
+ *
+ * NOT `experimental.incrementalCacheHandlerPath`: Next 16 (the supported
+ * floor) dropped it — it never relativizes, traces or loads it, and an unknown
+ * key only warns, so a leftover value still reaches the inlined config. Taking
+ * it as a root would fail the compile on an app that runs fine uncompiled.
+ *
+ * These are disk-loaded code outside `.next/server`, so the compile scans them
+ * as extra roots of the disk closure. Throws when `server.js` carries no
+ * inlined config — it never guesses that no handler is configured.
+ *
+ * @param {string} serverSrc the generated server.js
+ * @param {string} serverDir the directory server.js sits in
+ * @returns {string[]} absolute paths, deduplicated, in config order
+ */
+export function standaloneCacheHandlerFiles(serverSrc, serverDir) {
+    const m = serverSrc.match(NEXT_CONFIG_LINE);
+    if (!m) {
+        throw new Error(
+            "server.js has no `const nextConfig = …` line — cannot tell which cache handlers Next will load from disk, so refusing to compile",
+        );
+    }
+    let config;
+    try {
+        config = JSON.parse(m[1]);
+    } catch (err) {
+        throw new Error(
+            `server.js's inlined nextConfig is not JSON (${err instanceof Error ? err.message : String(err)}) — refusing to compile`,
+        );
+    }
+    const configured = [
+        config.cacheHandler,
+        ...Object.values(config.cacheHandlers ?? {}),
+    ].filter((p) => typeof p === "string" && p.length > 0);
+
+    const distDir = join(serverDir, typeof config.distDir === "string" ? config.distDir : ".next");
+    const out = [];
+    for (const p of configured) {
+        const file = p.startsWith("file://") ? fileURLToPath(p) : p;
+        const abs = isAbsolute(file) ? file : join(distDir, file);
+        if (!out.includes(abs)) out.push(abs);
+    }
+    return out;
+}
 
 /** `name` + `./subpath` of a bare specifier (`@scope/pkg/deep` included). */
 export function splitBareSpecifier(spec) {

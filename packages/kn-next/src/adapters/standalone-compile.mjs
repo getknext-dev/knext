@@ -89,6 +89,7 @@ import {
     DEV_ONLY_STUB_SOURCE,
     resolveExportsUnderNode,
     splitBareSpecifier,
+    standaloneCacheHandlerFiles,
     standaloneExecEntrySource,
 } from "./standalone-exec-entry.mjs";
 
@@ -244,6 +245,16 @@ function nodeConditionTarget(spec, fromDir) {
 // bytecode. The scan is conservative by construction: it over-approximates
 // what disk code can load (any literal specifier counts, reached or not), and
 // over-externalizing only costs bytecode coverage, never correctness.
+//
+// Next's require-hook is the one COMPUTED redirect disk code goes through: it
+// rewrites every `*.shared-runtime` request to
+// `route-modules/pages/vendored/contexts/<name>`. Those targets are one-line
+// re-exports of the pages runtime (`module.compiled` ->
+// `pages(-turbo).runtime.prod.js`), which the chunks require literally, so the
+// runtime — and the React contexts it owns — is already in the closure and on
+// disk. Measured on a Pages Router app, including a server-external package's
+// `useRouter` through that redirect (standalone-pages.docker-e2e.test.ts); the
+// scan therefore does not model the hook itself.
 const DISK_SPECIFIER =
     /\brequire\(\s*["'`]([^"'`$]+)["'`]\s*\)|\bimport\(\s*["'`]([^"'`$]+)["'`]\s*\)|\bfrom\s*["']([^"']+)["']/g;
 
@@ -262,9 +273,48 @@ function listJs(dir, out = []) {
     return out;
 }
 
+// ── Extra roots: the cache handlers Next loads by path from OUTSIDE .next/server
+// A custom `cacheHandler` (and each `cacheHandlers` entry) is disk-loaded code
+// too, and nothing under `.next/server` requires it — Next imports it by the
+// configured path at runtime. A handler that requires a Next internal no route
+// chunk references would otherwise get a SECOND instance of it: the compile
+// bundles the core's copy. Measured on a Pages Router app: a handler importing
+// `after-task-async-storage.external` got its own AsyncLocalStorage. So every
+// configured handler is a root of the scan below. One that is not inside the
+// traced tree cannot be scanned — and the image could not load it either — so
+// the compile fails rather than ship a closure it knows is incomplete.
+function cacheHandlerRoots() {
+    let files;
+    try {
+        files = standaloneCacheHandlerFiles(readFileSync(SERVER, "utf8"), dirname(SERVER));
+    } catch (err) {
+        fail(err instanceof Error ? err.message : String(err));
+    }
+    return files.map((file) => {
+        let real;
+        try {
+            real = realpathSync(file);
+        } catch {
+            real = undefined;
+        }
+        if (!real || !isInside(real, ROOT)) {
+            fail(
+                `the configured cache handler ${file} is not inside the standalone tree ${ROOT} — ` +
+                    "its module closure cannot be scanned, so a Next internal it imports could load twice. " +
+                    "Configure the handler as a file inside the project so `next build` traces it into .next/standalone.",
+            );
+        }
+        return real;
+    });
+}
+const CACHE_HANDLER_ROOTS = cacheHandlerRoots();
+
 function computeDiskClosure() {
     const seen = new Set();
-    const queue = listJs(join(dirname(SERVER), ".next", "server")).map((f) => realpathSync(f));
+    const queue = [
+        ...listJs(join(dirname(SERVER), ".next", "server")).map((f) => realpathSync(f)),
+        ...CACHE_HANDLER_ROOTS,
+    ];
     while (queue.length > 0) {
         const file = queue.pop();
         if (seen.has(file)) continue;

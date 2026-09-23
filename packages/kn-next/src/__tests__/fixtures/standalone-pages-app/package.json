@@ -1,0 +1,21 @@
+{
+  "name": "knext-standalone-pages-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Minimal Pages Router output:'standalone' app used ONLY by standalone-pages.docker-e2e.test.ts to prove the compiled bytecode bun-standalone executable keeps module identity for the Pages Router and for a custom cacheHandler. NOT a workspace member (its deps are installed into a throwaway build dir by the e2e), so it never inherits or pollutes the root lockfile.",
+  "scripts": {
+    "build": "next build"
+  },
+  "dependencies": {
+    "knext-ext-probe": "file:./ext-probe",
+    "next": "16.3.3",
+    "react": "19.2.0",
+    "react-dom": "19.2.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "@types/node": "^22",
+    "@types/react": "^19",
+    "@types/react-dom": "^19"
+  }
+}

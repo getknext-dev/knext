@@ -155,6 +155,15 @@ own server. With `runtime: 'bun'`, `kn-next build` compiles that server into a B
 - **What stays beside it.** The standalone folder itself. Next loads each route's compiled chunk
   from `.next/server` by path when the route is first requested, so the executable sits inside that
   folder in the image and serves the tree next to it.
+- **One copy of every shared module.** Any module that both the executable and the files beside
+  it load — Next's internal singletons, React, the Pages Router runtime — is left on disk and
+  loaded from there by both, so each exists exactly once in the process. That includes the modules
+  your custom `cacheHandler` (and any `cacheHandlers` entry) imports, so a handler may use Next
+  internals safely. Write those imports as plain string literals (`require('next/dist/…')`): a
+  module path computed at runtime cannot be seen at build time.
+- **The cache handler must ship with the app.** Configure `cacheHandler` as a file inside your
+  project so `next build` copies it into the standalone folder. If the configured handler is not
+  there, `kn-next build` fails and names the file, because it cannot check what that handler imports.
 - **Bytecode is checked, not assumed.** After compiling, `kn-next build` inspects the executable and
   **fails the build** if the server was not compiled to bytecode. A binary without it would boot and
   serve — just slower on every cold start — so it is refused rather than shipped.

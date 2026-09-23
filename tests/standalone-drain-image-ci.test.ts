@@ -92,6 +92,36 @@ describe('standalone-on-bun drain gate is wired into CI (#1156)', () => {
   });
 });
 
+// #1226 — the Pages Router + custom-cacheHandler identity e2e for the compiled
+// executable rides in the same job (it needs the same docker + bun) and has
+// the same no-skip contract, so it needs the same wiring guard.
+const PAGES_E2E_PATH = 'packages/kn-next/src/__tests__/standalone-pages.docker-e2e.test.ts';
+
+describe('the compiled-exec Pages Router / cacheHandler identity e2e is wired into CI (#1226)', () => {
+  it('a `run:` in the job invokes it by its explicit path, as a blocking step', () => {
+    const runCommands = [...jobBlock().matchAll(/run:\s*([^\n]*)/g)].map((m) => m[1]).join('\n');
+    expect(runCommands, 'the job never runs the standalone-pages docker e2e').toContain(
+      PAGES_E2E_PATH,
+    );
+    const audit = auditBlockingGate({
+      workflowPath: CI_YML,
+      jobId: 'standalone-drain-bun-image',
+      gateCommand: new RegExp(PAGES_E2E_PATH.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')),
+    });
+    expect(audit.gateStepsSeen, 'the audit never found the step that runs the e2e').toBe(1);
+    expect(audit.problems, audit.problems.join('\n')).toEqual([]);
+  });
+
+  it('the file exists, is a container e2e, and imports bun:test', () => {
+    const full = resolve(REPO_ROOT, PAGES_E2E_PATH);
+    expect(existsSync(full), `${PAGES_E2E_PATH} does not exist`).toBe(true);
+    expect(PAGES_E2E_PATH).toMatch(/\.docker-e2e\.test\.ts$/);
+    expect(readFileSync(full, 'utf8'), 'the e2e must import bun:test').toMatch(
+      /from ['"]bun:test['"]/,
+    );
+  });
+});
+
 describe('the CI path actually reaches the suite (both halves)', () => {
   it('the file the job names exists and is a container e2e', () => {
     const full = resolve(REPO_ROOT, E2E_PATH);
