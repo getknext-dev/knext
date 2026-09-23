@@ -58,29 +58,79 @@ jobs:
   # Asserted, with the rest of the above, by
   # tests/operator-e2e-scale-image-preflight.test.ts.
   #
-  # TO MAKE THE LANE GREEN, set `vars.SCALE_TEST_IMAGE` on the repository to a
-  # freshly built + pushed, digest-pinned file-manager image that serves
-  # /api/health — or pass one to a dispatch.
+  # HOW THE LANE RUNS (#670): the job below RESOLVES the newest cosign-signed
+  # file-manager digest from GHCR at run time — the same image supply-chain.yml
+  # pushes + Trivy-gates + signs — confirms it is PULLABLE, and cosign-verifies
+  # its signature, all fail-closed. This closed #659's starvation (an unset
+  # `vars.SCALE_TEST_IMAGE` that reported green having run nothing) WITHOUT
+  # granting the signing lane a standing variables:write. A workflow_dispatch
+  # input still overrides the resolved image (escape hatch).
   #
-  # UNTIL THEN THIS NIGHTLY IS RED, DELIBERATELY, AND #670 OWNS THAT RED. A
-  # permanently-red nightly with no owner and no close condition is how a gate
-  # becomes background noise, so the red has a name: #670 wires a publish job to
-  # set the variable from an image it just pushed (and adds the pinned-issue
-  # alert job this workflow, unlike image-pin-resolution-nightly.yml, lacks).
+  # If GHCR holds no signed file-manager image (nothing published yet), or the
+  # API/registry is unreachable, this job reds — deliberately: a resolver that
+  # goes green when it cannot reach upstream is worse than none.
   scale-image-preflight:
     name: e2e_scale precondition — a real SCALE_TEST_IMAGE (#659)
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # `packages: read` is the ONLY standing scope this job holds — enough to LIST
+    # the file-manager package versions and PULL a manifest. Deliberately NOT
+    # `variables: write`: #670 resolves the signed digest at run time rather than
+    # writing `vars.SCALE_TEST_IMAGE` from the signing lane, so no more standing
+    # write scope lands on the most sensitive workflow (design option (b)).
+    permissions:
+      contents: read
+      packages: read
     outputs:
       image: ${{ steps.scale_image.outputs.image }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # #670: resolve the NEWEST cosign-signed file-manager digest from GHCR at
+      # run time — the same image supply-chain.yml pushes + Trivy-gates + signs —
+      # and confirm it is PULLABLE, all fail-closed. This replaces the read of the
+      # unset `vars.SCALE_TEST_IMAGE` that starved this lane (#659). The resolver
+      # is a standalone program so it is unit-testable against fake GHCR responses
+      # (tests/resolve-scale-test-image.test.ts); no `${{ }}` inline, values via
+      # env. A workflow_dispatch input still overrides it (escape hatch).
+      - name: Resolve signed file-manager digest from GHCR (fail-closed)
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_OWNER: ${{ github.repository_owner }}
+          IMAGE_NAME: file-manager
+          IMAGE_REGISTRY: ghcr.io
+          SCALE_TEST_IMAGE_INPUT: ${{ inputs.scale_test_image }}
+        run: node scripts/resolve-scale-test-image.mjs
+
+      # Defense-in-depth beyond the `.sig`-tag presence the resolver keys on:
+      # cryptographically VERIFY the keyless signature on the resolved digest
+      # against this repo's signer, so the lane deploys only what supply-chain.yml
+      # actually vouched for — and doubles as a live check that signing still
+      # works. Skipped for a dispatch override (a human-supplied ref may be from
+      # any registry); fail-closed for the auto-resolved path via `set -e`.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Verify signature on the resolved digest (cosign)
+        env:
+          RESOLVED_IMAGE: ${{ steps.resolve.outputs.resolved }}
+          DISPATCH_INPUT: ${{ inputs.scale_test_image }}
+        run: |
+          set -euo pipefail
+          if [ -n "${DISPATCH_INPUT//[[:space:]]/}" ]; then
+            echo "Dispatch override supplied — skipping GHCR signature verification for the human-supplied ref."
+            exit 0
+          fi
+          bash apps/file-manager/hack/cosign-verify.sh "$RESOLVED_IMAGE"
+
       # No `${{ }}` in the script: the values arrive via env, so the guard test
-      # can execute this exact program rather than grep it.
-      - name: Resolve SCALE_TEST_IMAGE (fail-closed)
+      # can execute this exact program rather than grep it. The value now comes
+      # from the run-time resolver above (#670) instead of vars.SCALE_TEST_IMAGE.
+      - name: Validate & export resolved SCALE_TEST_IMAGE (fail-closed)
         id: scale_image
         env:
           SCALE_TEST_IMAGE_INPUT: ${{ inputs.scale_test_image }}
-          SCALE_TEST_IMAGE_VAR: ${{ vars.SCALE_TEST_IMAGE }}
+          SCALE_TEST_IMAGE_VAR: ${{ steps.resolve.outputs.resolved }}
         run: |
           set -euo pipefail
           # An all-zeros digest is the in-code default in
@@ -101,9 +151,9 @@ jobs:
           img="${img%"${img##*[![:space:]]}"}"
 
           if [ -z "$img" ]; then
-            echo "::error::No SCALE_TEST_IMAGE resolved (dispatch input empty and vars.SCALE_TEST_IMAGE unset)." >&2
+            echo "::error::No SCALE_TEST_IMAGE resolved (dispatch input empty and the GHCR resolver returned nothing)." >&2
             echo "The e2e_scale lane needs a real, pullable, digest-pinned file-manager image that serves /api/health." >&2
-            echo "Set the repository variable SCALE_TEST_IMAGE, or pass scale_test_image to a workflow_dispatch." >&2
+            echo "supply-chain.yml must have pushed + signed a file-manager image, or pass scale_test_image to a workflow_dispatch." >&2
             echo "Failing rather than skipping: the image-prewarm e2e is the only end-to-end guard on #471, and a spec that cannot run is not a guard (#659)." >&2
             exit 1
           fi
@@ -197,9 +247,9 @@ jobs:
       #
       # SHAPE IS NOT PULLABILITY, and the difference matters here: a well-formed
       # digest for an image that was never pushed still ErrImagePulls in this job,
-      # where `continue-on-error: true` swallows it. The preflight cannot close
-      # that — only a publish job that sets vars.SCALE_TEST_IMAGE from an image it
-      # just pushed can (#670).
+      # where `continue-on-error: true` swallows it. The preflight NOW closes that
+      # gap (#670): it resolves the digest from GHCR and confirms it is pullable
+      # (and signed) before this job starts, where there is no continue-on-error.
       - name: Run scale-to-zero e2e suite (activation #39)
         working-directory: packages/kn-next-operator
         env:

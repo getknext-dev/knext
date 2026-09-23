@@ -53,13 +53,24 @@ const workflowText = readFileSync(WORKFLOW_PATH, 'utf8');
 // biome-ignore lint/suspicious/noExplicitAny: workflow YAML has no schema type here.
 const workflow = parseYaml(workflowText) as any;
 
-/** The preflight job's single `run:` step, located by the script it carries. */
+/**
+ * The preflight job's SHAPE-GUARD `run:` step — the verbatim bash that validates
+ * the resolved reference (`@sha256:<64 hex>`, not the all-zeros placeholder, no
+ * embedded newline) and exports `image=`. Located by the unique `placeholder_digest`
+ * anchor rather than by position, because #670 added sibling run steps to the job
+ * (the GHCR resolver and the cosign verify). This is the program the behavioural
+ * tests below execute, so it must stay expression-free.
+ */
 // biome-ignore lint/suspicious/noExplicitAny: see above.
 function preflightRunSteps(): any[] {
   const job = workflow.jobs?.[PREFLIGHT_JOB];
   expect(job, `workflow has no \`${PREFLIGHT_JOB}\` job`).toBeTruthy();
-  // biome-ignore lint/suspicious/noExplicitAny: see above.
-  return (job.steps ?? []).filter((s: any) => typeof s.run === 'string');
+  const guard = (job.steps ?? []).filter(
+    // biome-ignore lint/suspicious/noExplicitAny: see above.
+    (s: any) => typeof s.run === 'string' && s.run.includes('placeholder_digest'),
+  );
+  expect(guard.length, 'exactly one preflight step carries the shape-guard script').toBe(1);
+  return guard;
 }
 
 /**
@@ -106,9 +117,12 @@ function preflightEnvNames(): { input: string; variable: string } {
   const env = (preflightRunSteps()[0].env ?? {}) as Record<string, string>;
   const entries = Object.entries(env);
   const input = entries.find(([, v]) => v.includes('inputs.scale_test_image'))?.[0];
-  const variable = entries.find(([, v]) => v.includes('vars.SCALE_TEST_IMAGE'))?.[0];
+  // #670: the guard step now reads its candidate from the run-time GHCR resolver
+  // step (`steps.resolve.outputs.resolved`) instead of the unset repo variable
+  // `vars.SCALE_TEST_IMAGE` that starved the lane (#659).
+  const variable = entries.find(([, v]) => v.includes('steps.resolve.outputs.resolved'))?.[0];
   expect(input, 'preflight must read the workflow_dispatch input via env:').toBeTruthy();
-  expect(variable, 'preflight must read vars.SCALE_TEST_IMAGE via env:').toBeTruthy();
+  expect(variable, 'preflight guard must read the resolved image via env:').toBeTruthy();
   return { input: input as string, variable: variable as string };
 }
 
@@ -322,6 +336,51 @@ describe('nothing silently opts the precondition out (#659 / #661)', () => {
         ).not.toContain('::warning::');
       }
     }
+  });
+});
+
+describe('the run-time signed-digest resolver is wired in, fail-closed (#670)', () => {
+  // biome-ignore lint/suspicious/noExplicitAny: workflow YAML has no schema type here.
+  function stepRunning(job: any, needle: string): any {
+    // biome-ignore lint/suspicious/noExplicitAny: see above.
+    return (job.steps ?? []).find((s: any) => typeof s.run === 'string' && s.run.includes(needle));
+  }
+
+  it('resolves the image at run time instead of reading vars.SCALE_TEST_IMAGE', () => {
+    const job = workflow.jobs[PREFLIGHT_JOB];
+    const resolveStep = stepRunning(job, 'resolve-scale-test-image.mjs');
+    expect(resolveStep, 'the preflight must invoke the run-time GHCR resolver').toBeTruthy();
+    // The starvation source (#659) must be GONE: no job may READ the unset repo
+    // variable that produced a permanently-red nightly. Asserted on the read
+    // EXPRESSION, not on prose — comments may still name it to explain what
+    // replaced it.
+    expect(
+      workflowText,
+      'no job may read the unset vars.SCALE_TEST_IMAGE that starved the lane',
+    ).not.toContain('${{ vars.SCALE_TEST_IMAGE }}');
+  });
+
+  it('holds packages:read to resolve/pull, but NOT variables:write', () => {
+    const job = workflow.jobs[PREFLIGHT_JOB];
+    const perms = job.permissions ?? {};
+    expect(perms.packages, 'the resolver needs packages:read to list + pull the GHCR image').toBe(
+      'read',
+    );
+    // Design option (b): resolve at run time rather than granting the signing
+    // lane a standing variables:write to set the repo variable.
+    expect('variables' in perms, 'no standing variables:write belongs on this lane').toBe(false);
+  });
+
+  it('confirms pullability + verifies the signature before handing off to the scale job', () => {
+    const job = workflow.jobs[PREFLIGHT_JOB];
+    // Pullability is proven inside the resolver program (checkPullable); the
+    // cosign verify step is the cryptographic half. Both live here, where there
+    // is no continue-on-error to swallow a failure — unlike the scale job.
+    const cosignStep = stepRunning(job, 'cosign-verify.sh');
+    expect(
+      cosignStep,
+      'the preflight must cryptographically verify the resolved signature',
+    ).toBeTruthy();
   });
 });
 
