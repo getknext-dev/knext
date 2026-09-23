@@ -17,8 +17,8 @@
  * Shared harness, for the reasons this repo has already paid for:
  *   * `mutate` asserts the anchor occurs exactly once and aborts otherwise —
  *     a silently-failed substitution would certify a decorative guard green;
- *   * `declareMutations`/`recordMutation` — the lane can tell 12-of-13 from
- *     13-of-13;
+ *   * `declareMutations`/`recordMutation` — the lane can tell 15-of-16 from
+ *     16-of-16;
  *   * the `{ subject, anchor }` table shape, which the prover lane's static
  *     anchor-liveness audit reads (scripts/lib/prover-lane.mjs), so a stale
  *     anchor is a PR-time finding, not a nightly surprise;
@@ -82,6 +82,23 @@ const MUTATIONS = [
     replacement: "|| (github.event.schedule == '47 5 * * *' && 'credential') || 'credential' }}",
   },
 
+  {
+    // Review round 1 (PR #1222): the realistic false credential. A credential
+    // night that RAN but left no ledger must restart the streak; dropping it
+    // would join the nights either side into a longer streak than reality.
+    label: 'guard 1: drop a LOST credential night instead of restarting on it',
+    subject: 'audit',
+    anchor: "    return scope === 'credential' ? mode === 'credential' : mode === 'early-warning';",
+    replacement: "    return scope !== 'credential';",
+  },
+  {
+    label: 'guard 1: the ledger stops refusing a credential night with no knext sha',
+    subject: 'ledger',
+    anchor:
+      "  if (compatMode === 'credential' && !/^[0-9a-f]{40}$/.test(String(knextSha ?? ''))) {",
+    replacement: '  if (false) {',
+  },
+
   // ── Guard 2: one window per cell, keyed on the cell's own fingerprint ─────
   {
     label: 'guard 2: stop restarting a streak on a fingerprint change',
@@ -132,6 +149,14 @@ const MUTATIONS = [
     replacement: '          path: knext\n\n      # ADR-0039 Amendment 1',
   },
 
+  {
+    label:
+      'guard 3: shard-ledger stops refusing an unresolved sha (would check out the default branch)',
+    subject: 'workflow',
+    anchor: '        run: test -n "${CHECKOUT_SHA}"',
+    replacement: "        run: 'true'",
+  },
+
   // ── ADR-0039 Amendment 1: the workflow entry is the workflow that ran ─────
   {
     label: 'amendment 1: ignore --workflow-file and hash the checkout copy',
@@ -141,7 +166,7 @@ const MUTATIONS = [
   },
 ];
 
-declareMutations(13);
+declareMutations(16);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPEC);
 
@@ -154,8 +179,8 @@ function specPasses() {
   return r.status === 0;
 }
 
-if (MUTATIONS.length !== 13) {
-  console.error(`FATAL: declared 13 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 16) {
+  console.error(`FATAL: declared 16 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 

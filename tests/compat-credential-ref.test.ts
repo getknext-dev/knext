@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'bun:test';
+import { afterAll, describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -575,8 +575,13 @@ describe('the run ledger records the ref, and refuses a credential claim on a no
 // ── ADR-0039 Amendment 1: the workflow entry is the workflow that ran ────────
 
 describe('the fingerprint hashes the EXECUTING workflow file (ADR-0039 Amendment 1)', () => {
+  const temps: string[] = [];
+  afterAll(() => {
+    for (const d of temps) rmSync(d, { recursive: true, force: true });
+  });
   function fixture() {
     const root = mkdtempSync(join(tmpdir(), 'fp-exec-'));
+    temps.push(root);
     mkdirSync(join(root, '.github/workflows'), { recursive: true });
     mkdirSync(join(root, 'scripts'), { recursive: true });
     mkdirSync(join(root, 'test'), { recursive: true });
@@ -785,4 +790,148 @@ describe('test-e2e-deploy.yml wires the RC ref into the credential lanes', () =>
     expect(alert.if ?? '').toMatch(/needs\.credential-ref\.result == 'failure'/);
     expect(alert.if ?? '').toMatch(/needs\.credential-ref\.outputs\.state != 'not-cut'/);
   });
+});
+
+// ── Review round 1 (PR #1222): lost credential nights, and each guard proven alone ──
+
+describe('a credential night that RAN but left no ledger restarts its own window', () => {
+  // The realistic false credential: a crashed runner / expired artifact /
+  // refused night carries the `compat-mode-credential` marker but no ledger. If
+  // it were DROPPED instead of graded, the streak would join the nights either
+  // side of it — reporting a longer streak than reality.
+  for (const lane of ['node', 'bun']) {
+    it(`${lane}: [green, green, LOST credential night, green] → current streak 1`, () => {
+      const ledgers = [night({ lane }), night({ lane }), lost(lane, 'credential'), night({ lane })];
+      const a = auditWindow(ledgers, { lane });
+      expect(a.nights).toHaveLength(4);
+      expect(a.current.nights).toBe(1);
+      expect(a.unresolvedNights).toHaveLength(1);
+    });
+  }
+
+  it("…and it does not touch the OTHER cell's window", () => {
+    const ledgers = [
+      night({ lane: 'node' }),
+      night({ lane: 'bun' }),
+      lost('bun', 'credential'),
+      night({ lane: 'node' }),
+      night({ lane: 'bun' }),
+    ];
+    const m = auditCredentialMatrix(ledgers, { cells: ['node', 'bun'] });
+    expect(m.cells.node.current.nights).toBe(2);
+    expect(m.cells.bun.current.nights).toBe(1);
+  });
+});
+
+describe('the ledger refuses a credential night that recorded no knext sha (alone)', () => {
+  const shards = [
+    { shard: '1/1', passed: 3, failed: 0, notRun: 0, runtime: 'node', ref: 'v16.2.0' },
+  ];
+  const base = {
+    shards,
+    shardTotal: '1',
+    fingerprint: { fingerprint: 'sha256:ffff', components: {} },
+    runId: '1',
+    runAttempt: '1',
+    event: 'schedule',
+    compatMode: 'credential',
+    knextRef: 'refs/tags/v1.0.0-rc.1',
+    workflowSha: MAIN_SHA,
+  };
+
+  it('RC ref but no sha → the ledger job fails, naming the missing sha', () => {
+    const { errors } = buildLedger({ ...base, knextSha: undefined });
+    expect(errors.some((e) => /no knext commit sha/.test(e))).toBe(true);
+  });
+
+  it('RC ref but a malformed sha → fails too', () => {
+    const { errors } = buildLedger({ ...base, knextSha: 'main' });
+    expect(errors.some((e) => /no knext commit sha/.test(e))).toBe(true);
+  });
+
+  it('the other half: RC ref + a real sha → no error', () => {
+    expect(buildLedger({ ...base, knextSha: SHA_A }).errors).toEqual([]);
+  });
+});
+
+describe('shard-ledger refuses an unresolved knext ref BEFORE it checks anything out (alone)', () => {
+  // biome-ignore lint/suspicious/noExplicitAny: parsed workflow YAML
+  const wf = parse(readFileSync(WORKFLOW_PATH, 'utf8')) as any;
+  // biome-ignore lint/suspicious/noExplicitAny: parsed workflow YAML
+  const steps: any[] = wf.jobs['shard-ledger'].steps ?? [];
+  const idx = steps.findIndex((s) => /CHECKOUT_SHA/.test(String(s.run ?? '')));
+  const step = steps[idx] ?? {};
+
+  /** Execute the step's own `run:` under bash, exactly as the runner would. */
+  function runStep(sha: string) {
+    return spawnSync('bash', ['-euo', 'pipefail', '-c', String(step.run ?? '')], {
+      env: { PATH: process.env.PATH ?? '', CHECKOUT_SHA: sha },
+      encoding: 'utf8',
+    });
+  }
+
+  it('the precondition exists, reads the resolved sha, and precedes the knext checkout', () => {
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(step.env?.CHECKOUT_SHA).toBe('${{ needs.credential-ref.outputs.checkout_sha }}');
+    const checkout = steps.findIndex(
+      (s) => /actions\/checkout@/.test(String(s.uses ?? '')) && s.with?.path === 'knext',
+    );
+    expect(idx).toBeLessThan(checkout);
+    expect(step.if ?? null).toBeNull();
+  });
+
+  it('EXECUTED with an empty sha it fails (exit != 0) — the default branch is never checked out', () => {
+    expect(runStep('').status).not.toBe(0);
+  });
+
+  it('the other half: EXECUTED with a resolved sha it passes', () => {
+    expect(runStep(SHA_A).status).toBe(0);
+  });
+});
+
+describe('early-warning alerts say they are non-credentialing', () => {
+  // biome-ignore lint/suspicious/noExplicitAny: parsed workflow YAML
+  const wf = parse(readFileSync(WORKFLOW_PATH, 'utf8')) as any;
+  const alertRun = String(
+    // biome-ignore lint/suspicious/noExplicitAny: parsed workflow YAML
+    (wf.jobs['nightly-red-alert'].steps ?? []).find((s: any) => /lane_note=/.test(String(s.run)))
+      ?.run ?? '',
+  );
+
+  /** Run the alert's own title/lane-note logic under bash and read the result. */
+  function noteFor(runtime: string, mode: string) {
+    const head = alertRun.slice(0, alertRun.indexOf('body="'));
+    expect(head.length).toBeGreaterThan(0);
+    const r = spawnSync('bash', ['-c', `${head}\nprintf '%s\\n%s' "$title" "$lane_note"`], {
+      env: {
+        PATH: process.env.PATH ?? '',
+        KNEXT_RUNTIME: runtime,
+        KNEXT_COMPAT_MODE: mode,
+        CHECKOUT_REF: 'refs/tags/v1.0.0-rc.1',
+        REF_STATE: 'resolved',
+      },
+      encoding: 'utf8',
+    });
+    expect(r.status).toBe(0);
+    const [title, ...rest] = r.stdout.split('\n');
+    return { title, note: rest.join('\n') };
+  }
+
+  for (const runtime of ['node', 'bun']) {
+    it(`${runtime} early-warning: non-credentialing, affects no streak, claims no credential`, () => {
+      const { note } = noteFor(runtime, 'early-warning');
+      expect(note).toMatch(/NON-credentialing/);
+      expect(note).toMatch(/does not affect any v1\.0 credential streak/);
+      expect(note).not.toMatch(
+        /credential lane|credentialing lane|backing the compat-matrix|RESTARTS/i,
+      );
+    });
+
+    it(`${runtime} credential: names the RC night and the restart, under its own title`, () => {
+      const { title, note } = noteFor(runtime, 'credential');
+      expect(title).toBe(`Compat CREDENTIAL RED (${runtime}, RC tag)`);
+      expect(note).toMatch(/CREDENTIAL night/);
+      expect(note).toMatch(/RESTARTS this cell's v1\.0 14-night window/);
+    });
+  }
 });

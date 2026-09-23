@@ -1900,18 +1900,19 @@ jobs:
           LEDGER_RESULT: ${{ needs.shard-ledger.result }}
         run: |
           set -euo pipefail
-          # #147 item 4 / #1147 — NAME the lane. Two nightly schedules share this
-          # workflow: the '17 3 * * *' Node run is the credential lane; the
-          # '47 4 * * *' Bun run is the credentialing lane for the bun axis. A red
-          # BUN night must alert under its OWN title — distinct titles also keep
-          # the idempotency keys separate, so a bun red never comments on (or is
-          # mistaken for) the Node credential issue.
+          # #147 item 4 / #1147 — NAME the lane. A red BUN night must alert under
+          # its OWN title — distinct titles also keep the idempotency keys
+          # separate, so a bun red never comments on (or is mistaken for) the
+          # Node issue. Since ADR-0056 the '17 3' / '47 4' crons test `main` as
+          # EARLY WARNING: their titles are kept (the dedup keys of the issues
+          # already open), but their text says plainly that they are
+          # non-credentialing. Credential nights are worded below.
           if [ "${KNEXT_RUNTIME}" = "bun" ]; then
             title='Compat nightly RED (bun credentialing)'
-            lane_note="This is the **Bun credentialing lane** (nightly, \`KNEXT_RUNTIME=bun\`, #1147). A red here does NOT imply the Node credential lane (the '17 3 * * *' nightly, the compat-matrix ✅) is red — the Node lane alerts under its own 'Compat nightly RED' issue. A red night RESTARTS the bun lane's 14-night streak (docs/compat/window-bun-lane.md); flip-back policy applies to the BUN matrix row only."
+            lane_note="This is the **bun lane, EARLY WARNING on main** (\`KNEXT_RUNTIME=bun\`, the '47 4 * * *' nightly). It is NON-credentialing: it does not affect any v1.0 credential streak — credential nights run only on the frozen RC tag (ADR-0056). A red here does NOT imply the Node lane is red — the Node lane alerts under its own 'Compat nightly RED' issue. Treat it as a forecast: fix on main before the next RC is cut."
           else
             title='Compat nightly RED'
-            lane_note="This is the **Node credential lane** (nightly, \`KNEXT_RUNTIME=node\`) — the lane backing the compat-matrix official-suite ✅."
+            lane_note="This is the **node lane, EARLY WARNING on main** (\`KNEXT_RUNTIME=node\`, the '17 3 * * *' nightly). It is NON-credentialing: it does not affect any v1.0 credential streak — credential nights run only on the frozen RC tag (ADR-0056). Treat it as a forecast: fix on main before the next RC is cut."
           fi
           # #850 / ADR-0056 — a CREDENTIAL night (RC tag) alerts under its own
           # per-lane title, so a red on the frozen RC is never folded into the
@@ -1920,8 +1921,6 @@ jobs:
           if [ "${KNEXT_COMPAT_MODE}" = "credential" ]; then
             title="Compat CREDENTIAL RED (${KNEXT_RUNTIME}, RC tag)"
             lane_note="This is the **${KNEXT_RUNTIME} CREDENTIAL night** — it ran against the frozen release-candidate tag pinned in \`.github/compat-credential-ref.json\` (ref: \`${CHECKOUT_REF:-unresolved}\`), not main. A red here RESTARTS this cell's v1.0 14-night window; the fix lands on main and ships in the next RC. If credential-ref is the failed job, the RC ref could not be resolved (resolution state: \`${REF_STATE:-unknown}\`) and nothing was tested — the lane refuses rather than fall back to main."
-          else
-            lane_note="${lane_note} **Early warning (main) — this night never advances a v1.0 credential count** (ADR-0056)."
           fi
           body="The scheduled official Next.js deploy-suite run FAILED.
 
