@@ -4,9 +4,11 @@
 #
 # NOT emitted by `kn-next create` — the scaffolder only walks `templates/app/`.
 # This is the ADR-0055 image recipe, staged under `templates/runtime-standalone/`
-# into the build context at `kn-next build` / `deploy` / `preview` time instead
-# (`stageStandaloneBuildContext`) — see the BUILD-CONTEXT REQUIREMENT note below
-# for why that split matters.
+# into the build context at `kn-next deploy` / `preview` time instead
+# (`stageStandaloneBuildContext`) — `kn-next build` does NOT stage or build this
+# recipe; only `deploy.ts`/`preview.ts` call `stageStandaloneBuildContext` and
+# `dockerBuildxArgs`. See the BUILD-CONTEXT REQUIREMENT note below for why that
+# split matters.
 #
 # This is the image for the STANDALONE shape (`next build` with
 # output:'standalone'), as opposed to the vinext single-executable image
@@ -210,9 +212,10 @@ ENV PORT=3000 \
 ARG KNEXT_COMPILE_CACHE_MIN_BYTES=262144
 
 # The path the bake warms — MUST match `kn-next.config.ts`'s `healthCheckPath`
-# (default `/api/health`). `kn-next build`/`deploy`/`preview` pass this as a
-# `--build-arg` when the app configures a custom path; an app with no
-# `/api/health` route and no custom `healthCheckPath` would otherwise fail
+# (default `/api/health`). `kn-next deploy`/`preview` pass this as a
+# `--build-arg` when the app configures a custom path (`kn-next build` does
+# NOT stage or build this recipe at all — see the file header); an app with
+# no `/api/health` route and no custom `healthCheckPath` would otherwise fail
 # THIS BUILD, not just its Knative probe.
 ARG KNEXT_HEALTH_CHECK_PATH=/api/health
 

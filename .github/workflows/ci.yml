@@ -557,6 +557,16 @@ jobs:
       - name: webpack builder e2e — real build, webpack-marker check, boot on node + bun
         run: node scripts/bun-test.mjs packages/kn-next/src/__tests__/standalone-webpack-build.docker-e2e.test.ts
 
+      # The standalone-node compile-cache bake warms config.healthCheckPath, not a
+      # hardcoded /api/health. This is the ONLY proof that the Dockerfile's ARG
+      # KNEXT_HEALTH_CHECK_PATH build-arg actually reaches the bake driver: it
+      # builds a fixture with NO /api/health route twice, once WITH the build-arg
+      # (must succeed) and once WITHOUT it (must fail on the same fixture) — the
+      # committed mutation proof for that regression. Same no-skip contract;
+      # guarded by tests/standalone-drain-image-ci.test.ts.
+      - name: standalone-node bake honors config.healthCheckPath e2e
+        run: node scripts/bun-test.mjs packages/kn-next/src/__tests__/standalone-node-custom-health-path.docker-e2e.test.ts
+
   # seam-alive gates: RETIRED (#885, stability sprint). The #352 defect class —
   # webpack layers duplicating @getknext/lib module state across the
   # instrumentation and app-server chunks — cannot occur under the vinext
