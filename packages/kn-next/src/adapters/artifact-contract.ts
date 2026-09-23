@@ -180,8 +180,9 @@ export const turbopackBuilder: BuilderAdapter = {
     // user-selectable; ADR-0054 reverses that — the `next build` ->
     // `.next/standalone` shape is the verified 778/0 axis (the verified-adapter
     // credential), so it is re-opened as a selectable target. What ships here is
-    // the UNCOMPILED bun/node-standalone image (the compiled bytecode-exec of
-    // this shape is feasibility-blocked, #1166); the standalone runtime image +
+    // the bun/node-standalone image — on Bun, `next build`'s server compiled
+    // into a bytecode single executable (#1166, `cli/standalone-exec-build.ts`);
+    // on Node, uncompiled with the V8 compile cache; the standalone runtime image +
     // supervisor entrypoint that packages it are staged by `cli/runtime-image.ts`
     // (#1177/#1181, ADR-0055). vinext stays available too (founder-directed) —
     // both are selectable. NOT yet the default: vinext keeps that until the
@@ -312,7 +313,8 @@ export const BUILDERS: readonly BuilderAdapter[] = [
  * v1.0 default (#1167). The flip is CREDENTIAL-GATED, not automatic: the
  * bun-standalone axis is verified-once (two 1.4.0 dispatch runs), NOT yet
  * credentialed — the scheduled 14-night lane (#1147) has not banked — and the
- * compiled bytecode-exec of the standalone shape is feasibility-blocked (#1166).
+ * compiled bytecode-exec of the standalone shape on Bun has only just landed
+ * (#1166) and is not yet credentialed either.
  * Shipping an un-credentialed default would forfeit exactly the verified-adapter
  * credential ADR-0054 is protecting. So #1167 makes turbopack/standalone
  * SELECTABLE; changing this constant is a separate follow-up once the lane banks.

@@ -4,7 +4,8 @@
  * helper, the single-exec compile):
  *  - default (vinext) build → the single-executable compile runs, the
  *    standalone-tree steps do not,
- *  - turbopack shape → the heal runs, the compile does not,
+ *  - turbopack shape → the heal runs and the vinext compile does not; on Bun
+ *    the standalone executable compile runs after the heal,
  *  - assets are always uploaded last.
  *
  * The per-file Bun bytecode pass that used to be asserted here is RETIRED

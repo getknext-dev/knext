@@ -14,9 +14,9 @@
  * The default is DELIBERATELY UNCHANGED: vinext stays `DEFAULT_BUILDER_ID`.
  * ADR-0054 makes bun-standalone the v1.0 default, but its 778/0 is
  * verified-once, not credentialed (#1147 lane has not banked), and the compiled
- * bytecode-exec is feasibility-blocked (#1166) — so the SELECTABLE target here
- * is the UNCOMPILED bun/node-standalone. The default-flip is a follow-up gated
- * on credentialing, not this issue.
+ * bytecode-exec of bun-standalone (#1166) is new and not yet credentialed — so
+ * the SELECTABLE target here is the bun/node-standalone. The default-flip is a
+ * follow-up gated on credentialing, not this issue.
  */
 
 import { afterAll, describe, expect, it } from "bun:test";
