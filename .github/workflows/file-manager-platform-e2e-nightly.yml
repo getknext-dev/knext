@@ -29,6 +29,8 @@ name: File-manager platform e2e (nightly / dispatch)
 # Ephemeral kind on the runner only - never OKE/GKE. Triggers: schedule + dispatch.
 
 on:
+  push:
+    branches: [feat/1282-file-manager-platform-nightly] # TEMP-1282: remove before merge
   schedule:
     - cron: '37 4 * * *'
   workflow_dispatch: {}
