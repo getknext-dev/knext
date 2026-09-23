@@ -75,6 +75,10 @@ const LEAK_AGE_MS = 2 * 60 * 60 * 1000;
 const RENDERED_TEMPLATES = [
     "vite.config.ts",
     "knext-node-entry.mjs",
+    // A scaffolded app carries BOTH entries. Rendering the bun one too means
+    // a vite config that ignored `runtime` would still BUILD (the bun preset)
+    // and be caught by the preset check, not by a missing file.
+    "knext-bun-entry.mjs",
     "runtime-contract.mjs",
     // The app's own ignore file, which EXCLUDES `.output/server`: rendered on
     // purpose, so a green build proves the per-Dockerfile ignore wins over it.
