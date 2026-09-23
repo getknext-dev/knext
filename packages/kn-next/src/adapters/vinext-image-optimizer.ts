@@ -261,6 +261,14 @@ export function isImageRequest(url: URL): boolean {
 }
 
 /**
+ * A fixed, unresolvable origin used ONLY to resolve a candidate `src` and
+ * inspect where it actually points (see the same-origin guard in
+ * {@link handleImageRequest}). Never fetched, never returned to a caller —
+ * purely a probe for `new URL(src, SAME_ORIGIN_PROBE).origin`.
+ */
+const SAME_ORIGIN_PROBE = "http://knext-image-same-origin.invalid";
+
+/**
  * Handle one `/_next/image` request, or return `null` to mean "not mine, let
  * the app have it". `null` rather than a thrown error keeps every miss — bad
  * params, absolute URL, missing source, absent sharp — on the same pass-through
@@ -274,10 +282,38 @@ export async function handleImageRequest(
     if (!isImageRequest(url)) return null;
 
     const src = url.searchParams.get("url");
-    // `//host` is protocol-relative and therefore NOT same-origin, despite
-    // starting with a slash. Rejecting it here is the difference between a
-    // same-origin fetch and an outbound one.
-    if (!src || !src.startsWith("/") || src.startsWith("//")) return null;
+    // `startsWith("/")` alone is not a same-origin check — it is a SPELLING
+    // check, and WHATWG URL parsing accepts spellings that spelling check
+    // misses (review finding on #1247, latent — no caller reachable at the
+    // time, still a same-origin invariant this layer owns):
+    //   - `//host` is protocol-relative — starts with a slash, resolves
+    //     off-origin.
+    //   - `/\host` or `\\host` — URL parsing normalizes `\` to `/` for
+    //     special schemes (http/https), so these resolve EXACTLY like
+    //     `//host` once actually parsed, even though neither literal string
+    //     starts with `//`.
+    //   - `/\t/host` (or any ASCII tab/newline placed before the host) —
+    //     URL parsing strips those characters before host parsing runs, so
+    //     the string that "looks" like a same-origin path collapses to the
+    //     `\host` case above.
+    //   - percent-encoded forms of any of the above (`%5C`, `%2F%2F`) are
+    //     already decoded to their literal form by `URLSearchParams.get()`
+    //     above, so they fall into one of the cases here rather than needing
+    //     separate handling.
+    // Resolving against a fixed, unresolvable placeholder origin and
+    // requiring the ACTUAL parsed origin to still be the placeholder catches
+    // every one of these by construction — it asks "where does this really
+    // point", not "does this spelling match a known-bad pattern" (this repo's
+    // own "prefer scanning to enumerating" rule: enumerating spellings is how
+    // the next one gets missed).
+    if (!src || !src.startsWith("/")) return null;
+    let resolvedSrc: URL;
+    try {
+        resolvedSrc = new URL(src, SAME_ORIGIN_PROBE);
+    } catch {
+        return null;
+    }
+    if (resolvedSrc.origin !== SAME_ORIGIN_PROBE) return null;
 
     const width = Number(url.searchParams.get("w"));
     const quality = Number(url.searchParams.get("q") ?? 75);

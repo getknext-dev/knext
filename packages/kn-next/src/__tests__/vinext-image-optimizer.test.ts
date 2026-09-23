@@ -182,6 +182,67 @@ describe("handleImageRequest — routing + SSRF guard", () => {
         expect(res).toBeNull();
     });
 
+    /**
+     * Backslash-as-slash smuggling (review finding on #1247): WHATWG URL
+     * parsing normalizes `\` to `/` for special schemes, so a naive
+     * `startsWith("//")` check misses `/\host/...` and `\\host/...` — both
+     * resolve to `evil.example` as the host once actually parsed. Same for a
+     * control character (tab) interrupting the slashes: URL parsing strips
+     * ASCII tab/newline before host parsing runs. These fetchSource calls
+     * MUST NEVER be reached — a same-origin miss must be caught before the
+     * outbound-looking path is ever handed to the caller's fetchSource.
+     */
+    it("rejects a backslash-smuggled protocol-relative source url (/\\host)", async () => {
+        const fetchSource = async () => new Response("x");
+        const res = await handleImageRequest(
+            req(
+                `http://h/_next/image?url=${encodeURIComponent("/\\evil.example/x.png")}&w=100`,
+            ),
+            { fetchSource },
+        );
+        expect(res).toBeNull();
+    });
+
+    it("rejects a double-backslash-smuggled protocol-relative source url (\\\\host)", async () => {
+        const res = await handleImageRequest(
+            req(
+                `http://h/_next/image?url=${encodeURIComponent("\\\\evil.example/x.png")}&w=100`,
+            ),
+            { fetchSource: async () => new Response("x") },
+        );
+        expect(res).toBeNull();
+    });
+
+    it("rejects a tab-interrupted backslash-smuggled source url (/\\t/host)", async () => {
+        const res = await handleImageRequest(
+            req(
+                `http://h/_next/image?url=${encodeURIComponent("/\t/evil.example/x.png")}&w=100`,
+            ),
+            { fetchSource: async () => new Response("x") },
+        );
+        expect(res).toBeNull();
+    });
+
+    it("rejects a percent-encoded backslash smuggle (%5C) once URLSearchParams decodes it", async () => {
+        // The whole request URL is built raw here (not via encodeURIComponent
+        // on the query value) to prove the %5C survives transport as literal
+        // percent-encoding and is decoded by url.searchParams.get(), exactly
+        // as a real browser/fetch request would deliver it.
+        const res = await handleImageRequest(
+            req("http://h/_next/image?url=%2F%5Cevil.example%2Fx.png&w=100"),
+            { fetchSource: async () => new Response("x") },
+        );
+        expect(res).toBeNull();
+    });
+
+    it("rejects a percent-encoded protocol-relative smuggle (%2F%2F)", async () => {
+        const res = await handleImageRequest(
+            req("http://h/_next/image?url=%2F%2Fevil.example%2Fx.png&w=100"),
+            { fetchSource: async () => new Response("x") },
+        );
+        expect(res).toBeNull();
+    });
+
     it("returns null when width is missing/non-finite/non-positive", async () => {
         for (const w of ["", "0", "-5", "abc"]) {
             const res = await handleImageRequest(
