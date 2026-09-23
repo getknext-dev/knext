@@ -492,13 +492,13 @@ jobs:
       # (every GitHub-hosted ubuntu-latest runner does) and Node+bun already set
       # up above, so it hosts the real-execution suite rather than adding a new
       # job. Deliberately NOT `standalone-drain-bun-image` (other PRs are
-      # actively editing that job). `tests/e2e-native-rebuild-musl.docker.test.ts`
+      # actively editing that job). `tests/e2e-native-rebuild-musl.docker-e2e.test.ts`
       # has NO skip path other than `describe.skipIf(!dockerAvailable())` — an
       # ENVIRONMENT-availability gate, not an artifact one (declared as such in
       # tests/declared-test-skips.test.ts) — and every ubuntu-latest runner has a
       # working docker daemon, so on THIS job it never actually skips.
       - name: Native musl rebuild — real execution inside the pinned image (#1230 round 6)
-        run: node scripts/bun-test.mjs tests/e2e-native-rebuild-musl.docker.test.ts
+        run: node scripts/bun-test.mjs tests/e2e-native-rebuild-musl.docker-e2e.test.ts
 
   standalone-drain-bun-image:
     # Per-PR GATE (#1156): SIGTERM drain under the SHIPPED standalone-on-bun

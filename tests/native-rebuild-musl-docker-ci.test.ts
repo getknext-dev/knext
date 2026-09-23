@@ -8,7 +8,7 @@ import { auditBlockingGate } from './helpers/blocking-gate';
  * (sharp musl mapping, the ROOT-escape guard) needs a job somewhere; this
  * asserts it has one, and that the wiring actually reaches it.
  *
- * `tests/e2e-native-rebuild-musl.docker.test.ts` executes the real script
+ * `tests/e2e-native-rebuild-musl.docker-e2e.test.ts` executes the real script
  * inside the pinned `oven/bun:1.4.0-alpine` image — a source-contract scan
  * (`tests/compat-bun-lane-compiled-exec.test.ts`) can only prove the anchor
  * strings exist, not that the behaviour they describe actually happens. It is
@@ -22,7 +22,7 @@ import { auditBlockingGate } from './helpers/blocking-gate';
  *
  * Same split as that sibling guard: WIRING here (this file), CONTENT in
  * `tests/compat-bun-lane-compiled-exec.test.ts` (the anchor strings) and in
- * `tests/e2e-native-rebuild-musl.docker.test.ts` itself (the real execution).
+ * `tests/e2e-native-rebuild-musl.docker-e2e.test.ts` itself (the real execution).
  * The "is this job actually blocking?" half is PARSED via
  * tests/helpers/blocking-gate.ts, not text-matched — a bare `if:` scan misses
  * quoted-key and skippable-`needs:` disarms (#661).
@@ -31,7 +31,7 @@ import { auditBlockingGate } from './helpers/blocking-gate';
 const REPO_ROOT = resolve(__dirname, '..');
 const CI_YML = resolve(REPO_ROOT, '.github/workflows/ci.yml');
 const JOB_KEY = 'sigterm-drain-shipped:';
-const DOCKER_TEST_PATH = 'tests/e2e-native-rebuild-musl.docker.test.ts';
+const DOCKER_TEST_PATH = 'tests/e2e-native-rebuild-musl.docker-e2e.test.ts';
 
 /** The job's own lines, bounded by the next top-level job key. */
 function jobBlock(): string {

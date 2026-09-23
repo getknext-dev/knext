@@ -110,7 +110,7 @@ const DECLARED: Record<string, { skips: Record<string, number>; reason: string }
       'Needs the tsup-built dist/ bundle to exercise node/bun parity on the shipped artifact. ' +
       'CI builds before running; a source-only checkout has nothing to run.',
   },
-  'tests/e2e-native-rebuild-musl.docker.test.ts': {
+  'tests/e2e-native-rebuild-musl.docker-e2e.test.ts': {
     skips: { 'describe.skipIf': 1 },
     reason:
       'ENVIRONMENT-availability gate (docker daemon reachable), not artifact-gated — same class ' +

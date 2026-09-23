@@ -263,7 +263,10 @@ describe.skipIf(!dockerAvailable())(
           '--rm',
           '--pid',
           'host',
-          'alpine',
+          // Digest-pinned (security.md: pin by digest, reject :latest) — reuse
+          // the same image already in scope rather than pulling a second,
+          // unpinned one just to run `cat` + `grep`.
+          STANDALONE_BUN_IMAGE,
           'sh',
           '-c',
           `cat /proc/${hostPid}/status | grep -i '^Uid:'`,
