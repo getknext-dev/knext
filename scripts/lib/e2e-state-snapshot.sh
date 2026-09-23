@@ -18,9 +18,22 @@ snapshot_state() {
 
 restore_state() {
   local dir="$1" tarfile="$2" keep="$3"
-  # Remove everything except the kept dir (and its ancestors' other children),
-  # then unpack the pristine snapshot over the top.
-  find "${dir}" -mindepth 1 ! -path "${dir}/${keep}" ! -path "${dir}/${keep}/*" \
-    ! -path "$(dirname "${dir}/${keep}")" -depth -delete 2>/dev/null || true
+  local keepabs="${dir}/${keep}" keepparent
+  keepparent="$(dirname "${keepabs}")"
+  # FAIL CLOSED: nothing here is silenced. A leftover dirty file would let the
+  # fixture boot from state the bake created, which is what this guard prevents.
+  # A dir the bake made read-only (or that was read-only in the snapshot) must
+  # be writable before it can be deleted; symlinks are not followed.
+  find "${dir}" -mindepth 1 ! -path "${keepabs}" ! -path "${keepabs}/*" \( -type f -o -type d \) -exec chmod u+w {} +
+  find "${dir}" -mindepth 1 ! -path "${keepabs}" ! -path "${keepabs}/*" ! -path "${keepparent}" -depth -delete
   tar -C "${dir}" -xf "${tarfile}"
+  # Verify: the set of paths equals the snapshot's (minus the kept dir).
+  local want have
+  want="$(tar -tf "${tarfile}" | sed -e 's#^\./##' -e 's#/$##' | grep -v '^\.\?$' | sort)"
+  have="$(cd "${dir}" && find . -mindepth 1 ! -path "./${keep}" ! -path "./${keep}/*" | sed -e 's#^\./##' | sort)"
+  if [ "${want}" != "${have}" ]; then
+    echo "restore_state: tree does not match the pre-bake snapshot after restore (extra/missing paths):" >&2
+    diff <(printf '%s\n' "${want}") <(printf '%s\n' "${have}") >&2
+    return 1
+  fi
 }

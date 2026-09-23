@@ -108,6 +108,20 @@ const MUTATIONS = [
     anchor: '  tar -C "${dir}" -xf "${tarfile}"',
     replacement: '  true',
   },
+  {
+    label: 'restore helper: re-add `|| true` to the delete (fails open again)',
+    target: SNAPSHOT,
+    spec: SPEC_STATE,
+    anchor: '! -path "${keepparent}" -depth -delete',
+    replacement: '! -path "${keepparent}" -depth -delete 2>/dev/null || true',
+  },
+  {
+    label: 'restore helper: fail open entirely (no chmod, silent delete, no verification)',
+    target: SNAPSHOT,
+    spec: SPEC_STATE,
+    anchor: '  if [ "${want}" != "${have}" ]; then',
+    replacement: '  if false; then',
+  },
   // ── Disable the node cache ───────────────────────────────────────────────
   {
     label: 'node: boot server.js WITHOUT the baked compile cache',

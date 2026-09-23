@@ -2,12 +2,16 @@ import { describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -32,11 +36,14 @@ function tree(dir: string, skip: string): string[] {
       const p = join(d, e.name);
       const rel = relative(dir, p);
       if (rel === skip) continue;
-      if (e.isDirectory()) {
-        out.push(`d ${rel}`);
+      const mode = (lstatSync(p).mode & 0o777).toString(8);
+      if (e.isSymbolicLink()) {
+        out.push(`l ${rel} -> ${readlinkSync(p)}`);
+      } else if (e.isDirectory()) {
+        out.push(`d ${rel} ${mode}`);
         walk(p);
       } else {
-        out.push(`f ${rel} ${createHash('sha256').update(readFileSync(p)).digest('hex')}`);
+        out.push(`f ${rel} ${mode} ${createHash('sha256').update(readFileSync(p)).digest('hex')}`);
       }
     }
   };
@@ -58,6 +65,10 @@ function fixtureTree() {
   writeFileSync(join(dir, 'server.js'), 'x');
   writeFileSync(join(dir, '.next/server/app/index.html'), '<p>pristine</p>');
   writeFileSync(join(dir, 'node_modules/next/index.js'), 'm');
+  symlinkSync('../server.js', join(dir, '.next/link-to-server'));
+  symlinkSync('node_modules', join(dir, 'dirlink'));
+  writeFileSync(join(dir, 'bin.sh'), '#!/bin/sh');
+  chmodSync(join(dir, 'bin.sh'), 0o755);
   mkdirSync(join(dir, KEEP), { recursive: true });
   return dir;
 }
@@ -86,6 +97,46 @@ describe('e2e-state-snapshot: the fixture tree after the bake equals the tree be
     expect(statSync(join(dir, '.next/compile-cache')).isDirectory()).toBe(true);
     rmSync(dir, { recursive: true, force: true });
     rmSync(tar, { force: true });
+  });
+
+  it('a READ-ONLY dirty dir left by the bake is cleaned (or restore fails loudly — never silent)', () => {
+    const dir = fixtureTree();
+    const tar = `${dir}.tar`;
+    const before = tree(dir, KEEP);
+    expect(sh(`snapshot_state "${dir}" "${tar}" "${KEEP}"`).status).toBe(0);
+    mkdirSync(join(dir, '.next/ro-dirty'));
+    writeFileSync(join(dir, '.next/ro-dirty/seeded'), 'x');
+    chmodSync(join(dir, '.next/ro-dirty'), 0o555);
+    const r = sh(`restore_state "${dir}" "${tar}" "${KEEP}"`);
+    if (r.status === 0) {
+      expect(tree(dir, KEEP)).toEqual(before);
+    } else {
+      expect(r.stderr.length).toBeGreaterThan(0);
+    }
+    try {
+      chmodSync(join(dir, '.next/ro-dirty'), 0o755);
+    } catch {}
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(tar, { force: true });
+  });
+
+  it('a leftover the restore cannot remove FAILS the restore (verification, not silence)', () => {
+    const dir = fixtureTree();
+    const tar = `${dir}.tar`;
+    expect(sh(`snapshot_state "${dir}" "${tar}" "${KEEP}"`).status).toBe(0);
+    writeFileSync(join(dir, '.next/leftover'), 'x');
+    // Simulate a delete that silently did nothing: restore with a no-op find.
+    const r = sh(`find() { :; }; restore_state "${dir}" "${tar}" "${KEEP}"`);
+    expect(r.status).not.toBe(0);
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(tar, { force: true });
+  });
+
+  it('restore_state never silences a failure (no `|| true`, no stderr discard)', () => {
+    const src = readFileSync(HELPER, 'utf8');
+    const body = src.slice(src.indexOf('restore_state() {'));
+    expect(body).not.toContain('|| true');
+    expect(body).not.toContain('2>/dev/null');
   });
 
   it('e2e-deploy.sh snapshots before the bake loop and restores after it', () => {
