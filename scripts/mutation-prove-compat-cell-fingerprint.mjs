@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
- * Mutation proof for the #1294 guards in `tests/compat-window-fingerprint.test.ts`
- * and `tests/compat-vinext-lane.test.ts`:
+ * Mutation proof for the #1294 guards in `tests/compat-window-fingerprint.test.ts`,
+ * `tests/compat-vinext-lane.test.ts` and `tests/compat-window-audit.test.ts`:
  *
  *   1. PER-CELL WORKFLOW ENTRY — `workflowRootForLane` must resolve each lane's
  *      OWN executing workflow (`compat-vinext.yml` for the vinext cells) from
  *      the ONE declared table (`CREDENTIAL_CELLS`), not a hardcoded
- *      `test-e2e-deploy.yml`. This is the mutation named in the exit
+ *      `test-e2e-deploy.yml`. This is the mutation named in round 1's exit
  *      criteria: DROP `compat-vinext.yml` from the inputs by reverting to the
  *      pre-#1294 hardcode, and the spec must go RED.
  *   2. `--lane` MUST ACTUALLY SELECT — a lane argument that gets computed but
@@ -19,10 +19,20 @@
  *      invisible to the digest — round 2's exact finding. Disarming the
  *      closure loop must remove EVERYTHING it swept in (shell-sourced
  *      `e2e-state-snapshot.sh` included).
- *   4. THE JS `from` IMPORT PATTERN SPECIFICALLY MUST BE DETECTED — the
- *      mutation named in round 2's review comment: remove `knext-closure.mjs`
- *      from the computed closure (by disabling the ES-module `from` pattern
- *      that is its only detection path) and the spec must go RED.
+ *   4. THE JS `from` IMPORT MUST STILL BE DETECTED post-tokenizer (round 2's
+ *      review comment, re-anchored on the round-3 tokenizer rewrite): remove
+ *      `knext-closure.mjs` from the computed closure by disabling the
+ *      token-stream `from` context check, and the spec must go RED.
+ *   5. THE TOKENIZER MUST ACTUALLY STRIP COMMENTS (round 3, jev 0.90) — a
+ *      regex over RAW source hard-errors the WHOLE fingerprint on a comment
+ *      that merely MENTIONS an import-like path to a file that does not
+ *      exist. Reverting `jsImportSpecifiers` to scan raw, untokenized source
+ *      must bring that false hard-error back.
+ *   6. THE DECLARED `extraFiles` (round 3) MUST ACTUALLY BE APPLIED — THE
+ *      mutation named in round 3's exit criteria: remove
+ *      `compat-credential-ref.mjs` (and its `extraFiles` siblings) from the
+ *      computed closure by disarming the loop that adds them, and the spec
+ *      must go RED.
  *
  * A guard that stays green when the behaviour it protects is removed is
  * decoration. Each mutation below deletes one piece of behaviour and requires
@@ -33,8 +43,8 @@
  * Shared harness, for the reasons this repo has already paid for:
  *   * `mutate` asserts the anchor occurs exactly once and aborts otherwise —
  *     a silently-failed substitution would certify a decorative guard green;
- *   * `declareMutations`/`recordMutation` — the lane can tell 3-of-4 from
- *     4-of-4;
+ *   * `declareMutations`/`recordMutation` — the lane can tell 5-of-6 from
+ *     6-of-6;
  *   * judged on EXIT CODES, never on grepped output — vitest/bun:test write
  *     ANSI, and a pass/fail grep over it once certified fourteen decorative
  *     mutations green.
@@ -50,10 +60,15 @@ import { mutate, restore, snapshot } from './lib/mutation-harness.mjs';
 import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const TARGET = resolve(REPO_ROOT, 'scripts/compat-window-fingerprint.mjs');
-const SPECS = ['tests/compat-window-fingerprint.test.ts', 'tests/compat-vinext-lane.test.ts'];
+const FINGERPRINT = resolve(REPO_ROOT, 'scripts/compat-window-fingerprint.mjs');
+const SPECS = [
+  'tests/compat-window-fingerprint.test.ts',
+  'tests/compat-vinext-lane.test.ts',
+  'tests/compat-window-audit.test.ts',
+  'tests/compat-credential-ref.test.ts',
+];
 
-declareMutations(4);
+declareMutations(6);
 
 const RUNNERS = SPECS.map((spec) => ({ spec, runner: resolveSpecRunner(REPO_ROOT, spec) }));
 
@@ -72,9 +87,16 @@ function specsPass() {
 let pass = 0;
 let fail = 0;
 
+// Every mutation below lands in FINGERPRINT — the module-level const bound to
+// a literal repo-relative path above, which the static prover-anchor audit
+// (`scripts/lib/prover-lane.mjs`) recognises. Do not thread a `target`
+// parameter through this wrapper: the audit resolves `mutate(snap, …)`'s
+// subject by tracing `snap = snapshot(<ident>)` back to a directly-bound
+// path const, not through an intermediate function parameter — a `target`
+// parameter would make every mutation here invisible to that audit.
 function prove(label, anchor, replacement) {
   console.log(`── mutation: ${label}`);
-  const snap = snapshot(TARGET);
+  const snap = snapshot(FINGERPRINT);
   try {
     mutate(snap, anchor, replacement);
     if (specsPass()) {
@@ -103,9 +125,9 @@ if (!specsPass()) {
 }
 console.log('   ok baseline green\n');
 
-// 1. THE mutation named in the exit criteria: drop compat-vinext.yml from a
-//    vinext cell's inputs by reverting `workflowRootForLane` to the pre-#1294
-//    hardcode. Every lane, including bun-vinext, would fingerprint
+// 1. THE mutation named in round 1's exit criteria: drop compat-vinext.yml
+//    from a vinext cell's inputs by reverting `workflowRootForLane` to the
+//    pre-#1294 hardcode. Every lane, including bun-vinext, would fingerprint
 //    test-e2e-deploy.yml again — exactly the bug #1294 exists to close.
 prove(
   'per-cell workflow entry: hardcode every lane back to test-e2e-deploy.yml',
@@ -130,16 +152,38 @@ prove(
   'for (const abs of []) {',
 );
 
-// 4. THE mutation named in round 2's review comment: remove `knext-closure.mjs`
-//    from the computed closure. It is reached ONLY via the ES-module `from`
-//    pattern (`import { … } from './lib/knext-closure.mjs'` in
-//    `scripts/e2e-preflight.mjs`), so disabling that one pattern — while
-//    leaving `require()`, dynamic `import()` and shell `source` intact —
-//    removes exactly that dependency and nothing else.
+// 4. Round 2's named mutation, re-anchored on the round-3 tokenizer: remove
+//    `knext-closure.mjs` from the computed closure by disabling the
+//    token-stream `from` context check — while leaving `require()`, dynamic
+//    `import()` and the bare-`import` check intact — removes exactly that
+//    one dependency (its only detection path) and nothing else.
 prove(
-  "remove knext-closure.mjs from the computed closure: disable the JS 'from' import pattern",
-  '/\\bfrom\\s+[\'"](\\.\\.?\\/[^\'"]+)[\'"]/g,',
-  '/(?!)/g,',
+  "remove knext-closure.mjs from the computed closure: disable the 'from' context check",
+  '/\\bfrom\\s*$/.test(tail) ||',
+  'false ||',
+);
+
+// 5. THE round-3 main finding, reproduced EXACTLY: short-circuit
+//    `jsImportSpecifiers` to the pre-round-3 raw regex (a `from '…'` match
+//    over untokenized source, comments included) instead of the token
+//    stream. The rest of the real function becomes dead code inside a stub
+//    (still syntactically valid — same closing brace), so a decoy comment
+//    hard-errors the whole fingerprint again, exactly as it did before this
+//    fix.
+prove(
+  'tokenizer bypassed: jsImportSpecifiers scans raw source (comments included), so a decoy comment hard-errors',
+  'function jsImportSpecifiers(src) {\n  const tokens = tokenizeJs(src);',
+  'function jsImportSpecifiers(src) {\n  const specs = [];\n  for (const m of src.matchAll(/\\bfrom\\s+[\'\\"](\\.\\.?\\/[^\'\\"]+)[\'\\"]/g)) specs.push(m[1]);\n  return specs;\n}\nfunction unusedPreRound3Tokenizer(src) {\n  const tokens = tokenizeJs(src);',
+);
+
+// 6. THE round-3 exit-criterion mutation: remove `compat-credential-ref.mjs`
+//    (and its `extraFiles` siblings — `compat-run-ledger.mjs`,
+//    `.github/compat-credential-ref.json`) from the computed closure by
+//    disarming the loop that applies `CREDENTIAL_CELLS[lane].extraFiles`.
+prove(
+  'remove compat-credential-ref.mjs from the closure: disarm the extraFiles loop',
+  'for (const relPath of cell?.extraFiles ?? []) {',
+  'for (const relPath of []) {',
 );
 
 console.log(`\n${pass} caught, ${fail} undetected.`);

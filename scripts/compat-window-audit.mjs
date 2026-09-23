@@ -159,6 +159,19 @@ export const CREDENTIAL_LANE = 'node';
  * webpack cells are not wired to a workflow yet (#1219); their entry is `null`
  * on purpose so a caller that tries to fingerprint one fails loudly rather than
  * guessing a file that does not exist.
+ *
+ * `extraFiles` (#1294 round 3) is the DECLARED source of truth for files a
+ * cell's run EXECUTES via subprocess (a workflow `run:` step invoking
+ * `node knext/scripts/X.mjs`) or READS directly (a JSON pin file), rather than
+ * `import`ing/`source`ing them from a closure-entry script — the import/source
+ * closure (`compat-window-fingerprint.mjs`) cannot discover these on its own,
+ * because nothing in the harness scripts references them as a module or a
+ * shell source. `tests/compat-window-fingerprint-execution-scan.test.ts`
+ * independently scans the real workflow `run:` steps and every harness
+ * script for `node`/`bash`/`${SCRIPT_DIR}`/`${KNEXT_REPO_ROOT}` references and
+ * fails if any repo-relative reference it finds is missing from here (or from
+ * its own small, reasoned exceptions list) — so a future one of these left
+ * undeclared goes red instead of silently unfrozen.
  */
 export const CREDENTIAL_CELLS = Object.freeze([
   Object.freeze({
@@ -167,6 +180,14 @@ export const CREDENTIAL_CELLS = Object.freeze([
     lane: 'node',
     wired: true,
     workflowFile: 'test-e2e-deploy.yml',
+    // test-e2e-deploy.yml's credential-ref job runs compat-credential-ref.mjs
+    // (reads the RC pin) on EVERY night of this lane; compat-run-ledger.mjs
+    // runs at the end of every night, credential or early-warning.
+    extraFiles: Object.freeze([
+      'scripts/compat-credential-ref.mjs',
+      'scripts/compat-run-ledger.mjs',
+      '.github/compat-credential-ref.json',
+    ]),
   }),
   Object.freeze({
     runtime: 'bun',
@@ -174,6 +195,11 @@ export const CREDENTIAL_CELLS = Object.freeze([
     lane: 'bun',
     wired: true,
     workflowFile: 'test-e2e-deploy.yml',
+    extraFiles: Object.freeze([
+      'scripts/compat-credential-ref.mjs',
+      'scripts/compat-run-ledger.mjs',
+      '.github/compat-credential-ref.json',
+    ]),
   }),
   Object.freeze({
     runtime: 'node',
@@ -181,6 +207,7 @@ export const CREDENTIAL_CELLS = Object.freeze([
     lane: 'node-webpack',
     wired: false,
     workflowFile: null,
+    extraFiles: Object.freeze([]),
   }),
   Object.freeze({
     runtime: 'bun',
@@ -188,6 +215,7 @@ export const CREDENTIAL_CELLS = Object.freeze([
     lane: 'bun-webpack',
     wired: false,
     workflowFile: null,
+    extraFiles: Object.freeze([]),
   }),
   Object.freeze({
     runtime: 'node',
@@ -201,6 +229,7 @@ export const CREDENTIAL_CELLS = Object.freeze([
     // that runs the WRONG runtime for the cell. `null` until #1260 wires a
     // real node×vinext workflow.
     workflowFile: null,
+    extraFiles: Object.freeze([]),
   }),
   Object.freeze({
     runtime: 'bun',
@@ -208,6 +237,9 @@ export const CREDENTIAL_CELLS = Object.freeze([
     lane: 'bun-vinext',
     wired: false,
     workflowFile: 'compat-vinext.yml',
+    // compat-vinext.yml has no credential mode yet (#1294 round 2 note), so it
+    // runs compat-run-ledger.mjs but never compat-credential-ref.mjs.
+    extraFiles: Object.freeze(['scripts/compat-run-ledger.mjs']),
   }),
 ]);
 

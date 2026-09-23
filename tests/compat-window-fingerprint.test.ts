@@ -70,6 +70,7 @@ afterAll(() => {
 function makeFixture(): { repoRoot: string; tarballsDir: string } {
   const root = tempDir('knext-fp-repo-');
   mkdirSync(join(root, '.github/workflows'), { recursive: true });
+  mkdirSync(join(root, '.github'), { recursive: true });
   mkdirSync(join(root, 'scripts'), { recursive: true });
   mkdirSync(join(root, 'test'), { recursive: true });
   writeFileSync(join(root, '.github/workflows/test-e2e-deploy.yml'), 'name: Compat suite\n');
@@ -82,6 +83,12 @@ function makeFixture(): { repoRoot: string; tarballsDir: string } {
     join(root, 'test/deploy-tests-manifest.knext.json'),
     `${JSON.stringify({ version: 2, rules: { exclude: [] } }, null, 2)}\n`,
   );
+  // #1294 round 3: the default lane ('node') declares these in
+  // CREDENTIAL_CELLS.extraFiles — a declared-but-missing entry is a hard
+  // error, so every fixture used against the default lane needs them present.
+  writeFileSync(join(root, 'scripts/compat-credential-ref.mjs'), 'export const noop = 1;\n');
+  writeFileSync(join(root, 'scripts/compat-run-ledger.mjs'), 'export const noop = 1;\n');
+  writeFileSync(join(root, '.github/compat-credential-ref.json'), '{"rcTag":null}\n');
 
   const tarballsDir = tempDir('knext-fp-tarballs-');
   for (const [name, version] of [
@@ -782,6 +789,52 @@ describe('compat-window fingerprint — the entry scripts’ import/source closu
     expect(() => fingerprint(repoRoot, tarballsDir)).toThrow();
   });
 
+  // #1294 round 3 (jev 0.90) — a regex over RAW source cannot tell a comment
+  // or an unrelated string from genuine import syntax. Either makes the WHOLE
+  // fingerprint hard-error on a file that imports nothing missing at all,
+  // which would break the entire nightly window on one spurious failure.
+  it('a COMMENT mentioning an import-like path to a nonexistent file neither errors nor adds a dependency', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-summary.mjs'),
+      "// see: import x from './nonexistent-thing'\n/* also require('./nonexistent-thing-2') */\nexport const y = 1;\n",
+    );
+    const before = fingerprint(repoRoot, tarballsDir);
+    expect(() => fingerprint(repoRoot, tarballsDir)).not.toThrow();
+    // The comment text moves the DIGESTED file's own bytes (it's still part of
+    // e2e-summary.mjs, which is frozen), but harness COUNT must not grow — no
+    // phantom dependency was added.
+    expect(fingerprint(repoRoot, tarballsDir).counts.harness).toBe(before.counts.harness);
+  });
+
+  it('a STRING LITERAL whose body looks like import syntax neither errors nor adds a dependency', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-summary.mjs'),
+      'const msg = "from \'./nonexistent-thing\'";\nconst msg2 = "require(\'./nonexistent-thing-2\')";\nexport const y = msg + msg2;\n',
+    );
+    const before = fingerprint(repoRoot, tarballsDir);
+    expect(before.counts.harness).toBeGreaterThan(0);
+  });
+
+  it('a GENUINE import right after a decoy comment is still caught (comment-stripping does not eat real syntax)', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+    writeFileSync(join(repoRoot, 'scripts/lib/real.mjs'), 'export const real = 1;\n');
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-summary.mjs'),
+      "// import x from './nonexistent-thing'\nimport { real } from './lib/real.mjs';\nexport const y = real;\n",
+    );
+    const result = execFileSync(
+      process.execPath,
+      [SCRIPT, '--repo-root', repoRoot, '--tarballs-dir', tarballsDir, '--json', '--files'],
+      { encoding: 'utf8' },
+    );
+    const parsed = JSON.parse(result) as { files: { component: string; path: string }[] };
+    const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+    expect(harness).toContain('scripts/lib/real.mjs');
+  });
+
   it('names BOTH scripts/lib/e2e-state-snapshot.sh (sourced) and scripts/lib/knext-closure.mjs (imported, no e2e- prefix) in the real repo harness (node lane)', () => {
     const tarballsDir = tempDir('knext-fp-lib-real-');
     packFixtureTarball(tarballsDir, 'core', '0.3.0');
@@ -795,6 +848,71 @@ describe('compat-window fingerprint — the entry scripts’ import/source closu
     expect(harness).toContain('scripts/lib/e2e-state-snapshot.sh');
     expect(harness).toContain('scripts/lib/knext-closure.mjs');
     expect(harness).toContain('scripts/lib/workspace-protocol.mjs');
+  });
+});
+
+/**
+ * #1294 round 3 — the DECLARED `extraFiles` (files a lane EXECUTES via
+ * subprocess or READS directly, not `import`ed/`source`d) must actually land
+ * in the frozen harness. `scripts/compat-credential-ref.mjs` and
+ * `.github/compat-credential-ref.json` run/are-read only on the node/bun
+ * (turbopack) lanes' credential-ref job; `scripts/compat-run-ledger.mjs` runs
+ * on every lane that has a workflow wired at all.
+ */
+describe('compat-window fingerprint — declared credential-run extraFiles land in the harness (#1294 round 3)', () => {
+  function harnessFor(lane: string): string[] {
+    const tarballsDir = tempDir('knext-fp-extra-');
+    packFixtureTarball(tarballsDir, 'core', '0.3.0');
+    const out = execFileSync(
+      process.execPath,
+      [
+        SCRIPT,
+        '--repo-root',
+        REPO_ROOT,
+        '--tarballs-dir',
+        tarballsDir,
+        '--lane',
+        lane,
+        '--json',
+        '--files',
+      ],
+      { encoding: 'utf8' },
+    );
+    const parsed = JSON.parse(out) as { files: { component: string; path: string }[] };
+    return parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+  }
+
+  it('node lane: compat-credential-ref.mjs, the RC pin JSON, and compat-run-ledger.mjs are all in the harness', () => {
+    const harness = harnessFor('node');
+    expect(harness).toContain('scripts/compat-credential-ref.mjs');
+    expect(harness).toContain('scripts/compat-run-ledger.mjs');
+    expect(harness).toContain('.github/compat-credential-ref.json');
+  });
+
+  it('bun lane: same declared extras as node (both run the credential-ref job)', () => {
+    const harness = harnessFor('bun');
+    expect(harness).toContain('scripts/compat-credential-ref.mjs');
+    expect(harness).toContain('.github/compat-credential-ref.json');
+  });
+
+  it('bun-vinext lane: compat-run-ledger.mjs is frozen, but compat-credential-ref.mjs is NOT (no credential mode wired yet)', () => {
+    const harness = harnessFor('bun-vinext');
+    expect(harness).toContain('scripts/compat-run-ledger.mjs');
+    expect(harness).not.toContain('scripts/compat-credential-ref.mjs');
+    expect(harness).not.toContain('.github/compat-credential-ref.json');
+  });
+
+  it('editing compat-credential-ref.mjs moves the node-lane fingerprint (it is genuinely frozen, not just listed)', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    const before = fingerprint(repoRoot, tarballsDir).fingerprint;
+    writeFileSync(join(repoRoot, 'scripts/compat-credential-ref.mjs'), 'export const noop = 2;\n');
+    expect(fingerprint(repoRoot, tarballsDir).fingerprint).not.toBe(before);
+  });
+
+  it('a lane whose declared extraFiles entry is missing from disk is a hard error', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    rmSync(join(repoRoot, 'scripts/compat-credential-ref.mjs'));
+    expect(() => fingerprint(repoRoot, tarballsDir)).toThrow();
   });
 });
 

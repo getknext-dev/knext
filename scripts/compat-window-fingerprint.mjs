@@ -113,6 +113,123 @@ export const HARNESS_ROOTS = [
 ];
 
 /**
+ * Tokenize JS source into `code` / `string` / `comment` runs (#1294 round 3,
+ * jev 0.90). A regex over RAW source cannot tell a comment
+ * (`// see: import x from './nonexistent-thing'`) or an unrelated string
+ * literal whose BODY happens to look like import syntax
+ * (`"from './nonexistent-thing'"`) from the real thing — either makes the
+ * whole credential-window fingerprint hard-error on a file that never
+ * actually imports anything, and one spurious failure aborts the run this
+ * exists to protect. This is a deliberately MINIMAL tokenizer — comments and
+ * string/template literals only, no real JS grammar — sufficient to answer
+ * "is this quote a genuine top-level string token, and if so what code runs
+ * immediately before it", which is all dependency extraction needs.
+ *
+ * @param {string} src
+ * @returns {{ type: 'code' | 'comment' | 'string', value: string }[]}
+ */
+function tokenizeJs(src) {
+  /** @type {{ type: 'code' | 'comment' | 'string', value: string }[]} */
+  const tokens = [];
+  const n = src.length;
+  let i = 0;
+  let codeStart = 0;
+  const flushCode = (end) => {
+    if (end > codeStart) tokens.push({ type: 'code', value: src.slice(codeStart, end) });
+  };
+  while (i < n) {
+    const two = src.slice(i, i + 2);
+    if (two === '//') {
+      flushCode(i);
+      const nl = src.indexOf('\n', i);
+      const stop = nl === -1 ? n : nl;
+      tokens.push({ type: 'comment', value: src.slice(i, stop) });
+      i = stop;
+      codeStart = i;
+      continue;
+    }
+    if (two === '/*') {
+      flushCode(i);
+      const close = src.indexOf('*/', i + 2);
+      const stop = close === -1 ? n : close + 2;
+      tokens.push({ type: 'comment', value: src.slice(i, stop) });
+      i = stop;
+      codeStart = i;
+      continue;
+    }
+    const ch = src[i];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      flushCode(i);
+      let j = i + 1;
+      while (j < n) {
+        if (src[j] === '\\') {
+          j += 2;
+          continue;
+        }
+        if (src[j] === ch) {
+          j += 1;
+          break;
+        }
+        j += 1;
+      }
+      tokens.push({ type: 'string', value: src.slice(i, j) });
+      i = j;
+      codeStart = i;
+      continue;
+    }
+    i += 1;
+  }
+  flushCode(n);
+  return tokens;
+}
+
+/**
+ * Local (`./…`/`../…`) import specifiers this JS source ACTUALLY imports —
+ * `import … from '…'`, bare `import '…'`, `require('…')`, dynamic
+ * `import('…')` — never a comment or an unrelated string (#1294 round 3).
+ *
+ * Works on the TOKEN STREAM, never raw text: a string token is only counted
+ * as a dependency when (a) its own content starts with `./` or `../` — a
+ * string like `"from './x'"` fails this immediately, its content is
+ * `from './x'`, not a relative path — AND (b) the `code` text immediately
+ * preceding it (no comment or other string in between) ends in `from`,
+ * `require(`, `import(`, or a bare statement-starting `import`. A comment
+ * never produces a `string` token at all (the whole comment, quotes
+ * included, is swallowed into one `comment` token), so it can never satisfy
+ * either condition.
+ *
+ * @param {string} src
+ * @returns {string[]}
+ */
+function jsImportSpecifiers(src) {
+  const tokens = tokenizeJs(src);
+  /** @type {string[]} */
+  const specs = [];
+  for (let idx = 0; idx < tokens.length; idx++) {
+    const t = tokens[idx];
+    if (t.type !== 'string') continue;
+    const raw = t.value.slice(1, -1);
+    if (!/^\.\.?\//.test(raw)) continue;
+    let context = '';
+    for (let k = idx - 1; k >= 0; k--) {
+      if (tokens[k].type !== 'code') break;
+      context = tokens[k].value + context;
+      if (context.length > 200) break;
+    }
+    const tail = context.slice(-200);
+    if (
+      /\bfrom\s*$/.test(tail) ||
+      /\brequire\s*\(\s*$/.test(tail) ||
+      /\bimport\s*\(\s*$/.test(tail) ||
+      /(^|[;\n{}])\s*import\s*$/.test(tail)
+    ) {
+      specs.push(raw);
+    }
+  }
+  return specs;
+}
+
+/**
  * Extract this file's DIRECT local dependencies — never third-party or
  * `node:`/bare-specifier imports, only files inside the repo (#1294 round 2).
  *
@@ -136,16 +253,7 @@ function directLocalDeps(absPath) {
   const specs = [];
 
   if (/\.(mjs|cjs|js)$/.test(absPath)) {
-    const jsPatterns = [
-      /\bfrom\s+['"](\.\.?\/[^'"]+)['"]/g,
-      /\brequire\(\s*['"](\.\.?\/[^'"]+)['"]\s*\)/g,
-      /\bimport\(\s*['"](\.\.?\/[^'"]+)['"]\s*\)/g,
-      // Bare `import './x.mjs';` — side-effect only, no `from`.
-      /^\s*import\s+['"](\.\.?\/[^'"]+)['"]/gm,
-    ];
-    for (const re of jsPatterns) {
-      for (const m of src.matchAll(re)) specs.push(m[1]);
-    }
+    specs.push(...jsImportSpecifiers(src));
   } else {
     // Shell: `. "${SCRIPT_DIR}/lib/x.sh"` / `source "${SCRIPT_DIR}/lib/x.sh"`.
     // The `${VAR}/` prefix is always the SCRIPT'S OWN directory by convention
@@ -323,6 +431,22 @@ function collectHarness(repoRoot, lane, opts = {}) {
   // (no `e2e-` prefix) is exactly the shape this closes.
   for (const abs of closureFrom(closureEntries)) {
     addEntry(relative(repoRoot, abs), abs);
+  }
+
+  // #1294 round 3: the DECLARED extras — files the lane's workflow EXECUTES
+  // via subprocess (`node knext/scripts/X.mjs` in a `run:` step) or READS
+  // directly (a JSON pin), which the import/source closure above cannot
+  // discover because nothing in the closure-entry scripts references them.
+  // `CREDENTIAL_CELLS[lane].extraFiles` is the one declared table this reads.
+  const cell = CREDENTIAL_CELLS.find((c) => c.lane === lane);
+  for (const relPath of cell?.extraFiles ?? []) {
+    const abs = resolve(repoRoot, relPath);
+    if (!existsSync(abs)) {
+      throw new Error(
+        `compat-window fingerprint: lane "${lane}" declares extraFiles entry "${relPath}" (CREDENTIAL_CELLS, scripts/compat-window-audit.mjs), which does not exist. A declared-but-missing file is a hole in the freeze scope (#1294).`,
+      );
+    }
+    addEntry(relPath, abs);
   }
 
   return entries;
