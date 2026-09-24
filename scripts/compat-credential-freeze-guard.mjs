@@ -139,8 +139,11 @@ export function markerValidity(pin, now) {
  * answers, not "which cells currently bank a streak".
  *
  * @param {string} repoRoot
- * @param {{ cells?: typeof CREDENTIAL_CELLS, collectHarnessFn?: typeof collectHarness }} [deps]
- *   DI seam for tests — never used outside them.
+ * @param {{ cells?: readonly { lane: string, workflowFile: string | null }[], collectHarnessFn?: (repoRoot: string, lane: string) => { component: string, path: string, line: string }[] }} [deps]
+ *   DI seam for tests — a STRUCTURAL shape (not `typeof CREDENTIAL_CELLS`),
+ *   so a test fixture only needs `lane`/`workflowFile`, not every other
+ *   CREDENTIAL_CELLS field (`runtime`, `builder`, `wired`, `extraFiles`).
+ *   Never used outside tests; production always calls with `deps` omitted.
  * @returns {Set<string>}
  */
 export function frozenFileSet(repoRoot, deps = {}) {
