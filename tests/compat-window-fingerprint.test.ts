@@ -626,9 +626,18 @@ describe('compat-window fingerprint — wired into the scheduled run', () => {
   // "scan, don't enumerate" discipline `compat-window-fingerprint.mjs`
   // itself uses for the frozen set.
   it('every wired lane workflow in CREDENTIAL_CELLS runs "Install knext deps" BEFORE its fingerprint step', () => {
+    // CREDENTIAL_CELLS is inferred from literal values in a plain .mjs
+    // module, so `workflowFile` narrows to a LITERAL union (e.g.
+    // `"test-e2e-deploy.yml" | "compat-vinext.yml" | null`), not `string |
+    // null` — a `(f): f is string =>` predicate widens past that literal
+    // union and TS correctly rejects it as unsound. `NonNullable<...>` keeps
+    // the predicate's output type assignable to the real element type.
+    const rawWorkflowFiles = CREDENTIAL_CELLS.map((c) => c.workflowFile);
     const workflowFiles = [
       ...new Set(
-        CREDENTIAL_CELLS.map((c) => c.workflowFile).filter((f): f is string => f !== null),
+        rawWorkflowFiles.filter(
+          (f): f is NonNullable<(typeof rawWorkflowFiles)[number]> => f !== null,
+        ),
       ),
     ];
     expect(workflowFiles.length).toBeGreaterThan(1);
@@ -1156,7 +1165,7 @@ describe('compat-window fingerprint — the entry scripts’ import/source closu
         "import { createRequire } from 'node:module';\nconst { real } = createRequire(import.meta.url)('./lib/real.cjs');\nexport const y = real;\n",
       );
       expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
-        /calls createRequire\(\) without binding it to a tracked local/,
+        /calls createRequire\(\).*without binding it to a tracked local/,
       );
     });
 
@@ -1218,6 +1227,148 @@ describe('compat-window fingerprint — the entry scripts’ import/source closu
         "const dynamicPath = './lib/real.cjs';\nconst { real } = module.require(dynamicPath);\nexport const y = real;\n",
       );
       expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(/NON-LITERAL specifier/);
+    });
+
+    // #1388 review round — four shapes that still returned [] silently.
+    it('an ALIASED createRequire import (`import { createRequire as cr }`) reaching a relative path is a hard error', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import { createRequire as cr } from 'node:module';\nconst req = cr(import.meta.url);\nconst { real } = req('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /createRequire\(\)-derived function with the relative-looking specifier/,
+      );
+    });
+
+    it('a TWO-LEVEL plain alias (`const a = require; const b = a;`) resolves the relative path it reaches — tracked, not dropped', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+      writeFileSync(join(repoRoot, 'scripts/lib/real.cjs'), 'module.exports = { real: 1 };\n');
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const a = require;\nconst b = a;\nconst { real } = b('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      const result = execFileSync(
+        process.execPath,
+        [SCRIPT, '--repo-root', repoRoot, '--tarballs-dir', tarballsDir, '--json', '--files'],
+        { encoding: 'utf8' },
+      );
+      const parsed = JSON.parse(result) as { files: { component: string; path: string }[] };
+      const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+      // A two-hop plain alias still resolves relative to the FILE's OWN
+      // directory (same base as bare `require()`) — no ambiguity, so it is
+      // TRACKED, not a hard error, and the real dependency lands in the
+      // harness rather than silently vanishing.
+      expect(harness).toContain('scripts/lib/real.cjs');
+    });
+
+    // A single top-to-bottom AST walk happens to resolve a two-hop chain
+    // DECLARED IN DEPENDENCY ORDER on its own (by the time `const b = a` is
+    // visited, `a` was already added while visiting `const a = require`
+    // earlier in the same walk) — so that shape alone does not prove the
+    // FIXPOINT loop is load-bearing. A chain three hops deep, declared in
+    // REVERSE dependency order, does: a single pass can only add `a` (the
+    // one whose RHS is already tracked); `b`'s RHS (`a`) and `c`'s RHS (`b`)
+    // are not yet tracked when the walk reaches them, so only a SECOND and
+    // THIRD pass (the `while (grew)` loop) tracks `b` then `c`.
+    it('a THREE-level alias chain declared in REVERSE order is still tracked (the fixpoint, not a single pass)', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+      writeFileSync(join(repoRoot, 'scripts/lib/real.cjs'), 'module.exports = { real: 1 };\n');
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const c = b;\nconst b = a;\nconst a = require;\nconst { real } = c('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      const result = execFileSync(
+        process.execPath,
+        [SCRIPT, '--repo-root', repoRoot, '--tarballs-dir', tarballsDir, '--json', '--files'],
+        { encoding: 'utf8' },
+      );
+      const parsed = JSON.parse(result) as { files: { component: string; path: string }[] };
+      const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+      expect(harness).toContain('scripts/lib/real.cjs');
+    });
+
+    it('a TWO-LEVEL alias where the second hop escapes tracking (`const a = require; const b = wrap(a);`) is a hard error', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "function wrap(fn) { return fn; }\nconst a = require;\nconst b = wrap(a);\nconst { real } = b('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      // `a` is passed to a function call, not aliased by a plain
+      // `const X = <tracked-name>` reference — the fixpoint pass correctly
+      // does NOT track `b`, so referencing `a` this way must itself fail
+      // closed (an untracked way to get at a tracked name).
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /references `a` in a form this scanner does not track/,
+      );
+    });
+
+    it('a two-level createRequire alias chain (`const a = cr; const b = a(u); b(x)`) with a relative-looking literal is a hard error', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import { createRequire } from 'node:module';\nconst a = createRequire;\nconst req = a(import.meta.url);\nconst { real } = req('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /createRequire\(\)-derived function with the relative-looking specifier/,
+      );
+    });
+
+    it('require.call(null, "./x") — a property access other than .resolve/.cache — is a hard error', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const { real } = require.call(null, './lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /references `require` in a form this scanner does not track/,
+      );
+    });
+
+    it('an aliased require.call (`req.call(null, "./x")`) is a hard error', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const req = require;\nconst { real } = req.call(null, './lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /references `req` in a form this scanner does not track/,
+      );
+    });
+
+    it('require.apply(null, ["./x"]) is a hard error too (not just .call)', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const { real } = require.apply(null, ['./lib/real.cjs']);\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /references `require` in a form this scanner does not track/,
+      );
+    });
+
+    it('import.meta.require("./x") (Bun-specific) is UNCONDITIONALLY a hard error, even with a bare specifier', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const { real } = import.meta.require('node:path');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /import\.meta\.require\(\), a Bun-specific form/,
+      );
+    });
+
+    it('import.meta.require("./x") with a relative-looking literal is also a hard error (same unconditional rule)', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const { real } = import.meta.require('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /import\.meta\.require\(\), a Bun-specific form/,
+      );
     });
   });
 

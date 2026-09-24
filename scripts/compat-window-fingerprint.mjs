@@ -209,105 +209,181 @@ function jsLocalImportSpecifiers(src, absPath) {
   /** @type {string[]} */
   const specs = [];
 
-  const isBareRequireCall = (node) =>
-    ts.isCallExpression(node) &&
-    ts.isIdentifier(node.expression) &&
-    node.expression.text === 'require';
   const isDynamicImportCall = (node) =>
     ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword;
 
-  // ── aliased require / createRequire / module.require (#1316) ────────────
-  // The walk above only ever recognises a call whose callee is LITERALLY the
-  // identifier `require`. Three real JS idioms defeat that on purpose or by
-  // accident, and all three previously returned [] SILENTLY — a closure file
-  // reaching a relative path through any of them dropped straight out of the
-  // frozen set with no error at all, the same "silently unfrozen dependency"
-  // failure mode #1294 round 5 closed for non-literal specifiers:
+  // ── aliased require / createRequire / module.require / import.meta.require
+  // (#1316, hardened #1388 review) ─────────────────────────────────────────
+  // A call whose callee is LITERALLY the identifier `require` is not the
+  // only way to reach a relative path. Real JS idioms defeat a literal-name
+  // check on purpose or by accident, and every one previously returned []
+  // SILENTLY — a closure file reaching a relative path through any of them
+  // dropped straight out of the frozen set with no error at all, the same
+  // "silently unfrozen dependency" failure mode #1294 round 5 closed for
+  // non-literal specifiers:
   //
-  //   const req = createRequire(import.meta.url); req('./x');
-  //   const r = require; r('./x');
+  //   const r = require; r('./x');                          // plain alias
+  //   import { createRequire as cr } from 'node:module';     // ALIASED import
+  //   const req = cr(import.meta.url); req('./x');
+  //   const a = require; const b = a; b('./x');               // TWO-LEVEL alias
+  //   require.call(null, './x'); req.call(null, './x');       // .call/.apply/.bind
   //   module.require('./x');
+  //   import.meta.require('./x');                             // Bun-specific
   //
-  // `require`/`module.require` resolve against the FILE'S OWN directory —
-  // same base this scanner already assumes — so a plain alias or
-  // `module.require` is handled exactly like a bare `require()` call once
-  // spotted. `createRequire(...)`, however, binds a NEW require function
-  // resolved against WHATEVER BASE URL its caller supplied — almost always
-  // NOT this file's directory — so this scanner cannot safely resolve a
-  // relative literal reached through it at all; it fails closed rather than
-  // guess wrong. A `createRequire`-derived function used only for `.resolve()`
-  // calls (the one real-corpus case today, scripts/e2e-preflight.mjs) is left
-  // alone — `.resolve()` was never treated as a module load even for plain
-  // `require`, see the note above.
+  // `require`/`module.require` (and any NAME transitively aliased to one of
+  // them) resolve against the FILE'S OWN directory — same base this scanner
+  // already assumes — so calling one directly is handled exactly like a bare
+  // `require()` call once spotted. `createRequire(...)` (or any name
+  // transitively aliased to `createRequire` ITSELF, e.g. an import alias),
+  // however, binds a NEW require function resolved against WHATEVER BASE URL
+  // its caller supplied — almost always NOT this file's directory — so a
+  // relative-looking literal reached through a createRequire-DERIVED name
+  // cannot be safely resolved; it fails closed rather than guess wrong. A
+  // createRequire-derived function used only for `.resolve()` calls (the one
+  // real-corpus case today, scripts/e2e-preflight.mjs) is left alone —
+  // `.resolve()`/`.cache` were never treated as a module load even for plain
+  // `require`. ANY OTHER property access on a tracked name — `.call`,
+  // `.apply`, `.bind`, or anything else — fails closed: none of those are
+  // resolvable as "not a module load" the way `.resolve`/`.cache` are, and
+  // guessing they're harmless is exactly the failure mode this exists to
+  // close. `import.meta.require(...)` (Bun) is Bun-specific and its
+  // resolution base is not this scanner's file-relative model either — it
+  // ALWAYS fails closed, unconditionally, never tracked as an alias target.
   //
-  // First pass: collect local bindings `const X = require` (plain alias) and
-  // `const X = createRequire(...)` (foreign-base alias) so the main walk can
-  // tell a governed alias from a stray, untracked reference.
-  /** @type {Set<string>} */
-  const plainRequireAliases = new Set();
-  /** @type {Set<string>} */
-  const createRequireAliases = new Set();
-  const collectAliases = (node) => {
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
-      const init = node.initializer;
-      if (ts.isIdentifier(init) && init.text === 'require') {
-        plainRequireAliases.add(node.name.text);
-      } else if (
-        ts.isCallExpression(init) &&
-        ts.isIdentifier(init.expression) &&
-        init.expression.text === 'createRequire'
-      ) {
-        createRequireAliases.add(node.name.text);
-      }
+  // First pass: three Sets of tracked NAMES, resolved to a FIXPOINT so a
+  // chain of plain aliases (`const a = require; const b = a;`) is followed
+  // however deep it goes, not just one hop.
+  //   requireLikeNames         — calling this resolves relative to the FILE'S
+  //                               OWN directory (seeded with 'require').
+  //   createRequireFnNames     — this IS the createRequire factory itself,
+  //                               under whatever local name (seeded with
+  //                               'createRequire'; import aliasing adds more).
+  //   createRequireDerivedNames — the RESULT of calling a createRequireFnNames
+  //                               member — resolves against a caller-supplied,
+  //                               untrusted-by-this-scanner base.
+  const requireLikeNames = new Set(['require']);
+  const createRequireFnNames = new Set(['createRequire']);
+  const createRequireDerivedNames = new Set();
+
+  // Import aliasing (`import { createRequire as cr } from 'node:module'`):
+  // one pass — an import specifier's local name is a fresh binding, never
+  // itself the RHS of another import, so this never needs to iterate.
+  const collectImportAliases = (node) => {
+    if (ts.isImportSpecifier(node)) {
+      const importedName = (node.propertyName ?? node.name).text;
+      if (importedName === 'createRequire') createRequireFnNames.add(node.name.text);
     }
-    ts.forEachChild(node, collectAliases);
+    ts.forEachChild(node, collectImportAliases);
   };
-  collectAliases(sourceFile);
+  collectImportAliases(sourceFile);
+
+  // Alias-chain fixpoint: `const X = <tracked-name>` (plain reference) or
+  // `const X = <createRequireFnNames-member>(...)` (a fresh createRequire
+  // call) grows the tracked sets; repeat until a full pass adds nothing, so
+  // `const a = require; const b = a; const c = b;` tracks all three, not
+  // just `a`.
+  let grew = true;
+  while (grew) {
+    grew = false;
+    const pass = (node) => {
+      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+        const name = node.name.text;
+        const init = node.initializer;
+        if (ts.isIdentifier(init)) {
+          const initName = init.text;
+          if (requireLikeNames.has(initName) && !requireLikeNames.has(name)) {
+            requireLikeNames.add(name);
+            grew = true;
+          }
+          if (createRequireFnNames.has(initName) && !createRequireFnNames.has(name)) {
+            createRequireFnNames.add(name);
+            grew = true;
+          }
+          if (createRequireDerivedNames.has(initName) && !createRequireDerivedNames.has(name)) {
+            createRequireDerivedNames.add(name);
+            grew = true;
+          }
+        } else if (
+          ts.isCallExpression(init) &&
+          ts.isIdentifier(init.expression) &&
+          createRequireFnNames.has(init.expression.text) &&
+          !createRequireDerivedNames.has(name)
+        ) {
+          createRequireDerivedNames.add(name);
+          grew = true;
+        }
+      }
+      ts.forEachChild(node, pass);
+    };
+    pass(sourceFile);
+  }
 
   const failClosed = (node, reason) => {
     const { line: lineNumber } = sourceFile.getLineAndCharacterOfPosition(
       node.getStart(sourceFile),
     );
     throw new Error(
-      `compat-window fingerprint: ${absPath}:${lineNumber + 1} ${reason} — refusing to guess whether it reaches a relative path (#1316).`,
+      `compat-window fingerprint: ${absPath}:${lineNumber + 1} ${reason} — refusing to guess whether it reaches a relative path (#1316/#1388).`,
     );
   };
 
-  const isResolveCallOn = (node, names) =>
+  /** `<tracked-name>.resolve(...)` — a RESOLVE, never a module load. */
+  const isResolveCall = (node) =>
     ts.isCallExpression(node) &&
     ts.isPropertyAccessExpression(node.expression) &&
     ts.isIdentifier(node.expression.expression) &&
-    names.has(node.expression.expression.text) &&
+    (requireLikeNames.has(node.expression.expression.text) ||
+      createRequireFnNames.has(node.expression.expression.text) ||
+      createRequireDerivedNames.has(node.expression.expression.text)) &&
     node.expression.name.text === 'resolve';
+  /** The ONLY two property names a tracked identifier may be accessed by without failing closed. */
+  const isAllowedPropertyAccessBase = (node) =>
+    !!node.parent &&
+    ts.isPropertyAccessExpression(node.parent) &&
+    node.parent.expression === node &&
+    (node.parent.name.text === 'resolve' || node.parent.name.text === 'cache');
   const isModuleDotRequireCall = (node) =>
     ts.isCallExpression(node) &&
     ts.isPropertyAccessExpression(node.expression) &&
     ts.isIdentifier(node.expression.expression) &&
     node.expression.expression.text === 'module' &&
     node.expression.name.text === 'require';
-  const isPlainAliasCall = (node) =>
+  /** `import.meta.require(...)` — Bun-specific; ALWAYS fails closed. */
+  const isImportMetaRequireCall = (node) =>
+    ts.isCallExpression(node) &&
+    ts.isPropertyAccessExpression(node.expression) &&
+    ts.isMetaProperty(node.expression.expression) &&
+    node.expression.expression.keywordToken === ts.SyntaxKind.ImportKeyword &&
+    node.expression.expression.name.text === 'meta' &&
+    node.expression.name.text === 'require';
+  const isRequireLikeCall = (node) =>
     ts.isCallExpression(node) &&
     ts.isIdentifier(node.expression) &&
-    plainRequireAliases.has(node.expression.text);
-  const isCreateRequireAliasCall = (node) =>
+    requireLikeNames.has(node.expression.text);
+  const isCreateRequireDerivedCall = (node) =>
     ts.isCallExpression(node) &&
     ts.isIdentifier(node.expression) &&
-    createRequireAliases.has(node.expression.text);
-  const isBareCreateRequireCall = (node) =>
+    createRequireDerivedNames.has(node.expression.text);
+  const isCreateRequireFnCall = (node) =>
     ts.isCallExpression(node) &&
     ts.isIdentifier(node.expression) &&
-    node.expression.text === 'createRequire';
-  // `import { createRequire } from 'node:module'` (and the default/namespace
-  // forms) bind the NAME `createRequire`, but the binding site itself never
-  // reaches a relative path — only a later CALL can. Only the import
-  // SPECIFIER's name is exempt here; every other reference is still governed
-  // by the checks below.
+    createRequireFnNames.has(node.expression.text);
+  // `import { createRequire } from 'node:module'` (and the default/namespace/
+  // aliased forms) bind a NAME, but the binding site itself never reaches a
+  // relative path — only a later CALL can. Only the import SPECIFIER's name
+  // is exempt here; every other reference is still governed by the checks
+  // below.
   const isImportBindingName = (node) =>
     !!node.parent &&
     ((ts.isImportSpecifier(node.parent) &&
       (node.parent.name === node || node.parent.propertyName === node)) ||
       (ts.isImportClause(node.parent) && node.parent.name === node) ||
       (ts.isNamespaceImport(node.parent) && node.parent.name === node));
+  /** The RHS of `const Y = X` (a plain reference alias) or the LHS binding name of `const X = require`/`createRequire(...)` — both exempt; tracked by the fixpoint pass above. */
+  const isAliasDeclarationSite = (node) =>
+    !!node.parent &&
+    ts.isVariableDeclaration(node.parent) &&
+    (node.parent.initializer === node || node.parent.name === node);
 
   /** @param {ts.Node} node @param {ts.Node} callOrDeclNode */
   const addSpecifier = (node, callOrDeclNode) => {
@@ -325,17 +401,19 @@ function jsLocalImportSpecifiers(src, absPath) {
 
   /** @param {ts.Node} node */
   const visit = (node) => {
-    const requireLikeResolveCall = isResolveCallOn(
-      node,
-      new Set(['require', ...plainRequireAliases, ...createRequireAliases]),
-    );
     if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier) {
       addSpecifier(node.moduleSpecifier, node);
-    } else if (requireLikeResolveCall) {
-      // `<require-like>.resolve(...)` is a RESOLVE, not a module load — never
-      // treated as a dependency, matching the pre-#1316 behaviour for plain
-      // `require.resolve`. Do not descend into its argument as a require call.
-    } else if (isModuleDotRequireCall(node) || isPlainAliasCall(node)) {
+    } else if (isImportMetaRequireCall(node)) {
+      // Bun-specific; its resolution base is not this scanner's file-relative
+      // model. Unconditional — never resolved, never tracked as an alias
+      // target, regardless of the argument.
+      failClosed(
+        node,
+        'calls import.meta.require(), a Bun-specific form this scanner never resolves',
+      );
+    } else if (isResolveCall(node)) {
+      // Never treated as a dependency — do not descend into its argument.
+    } else if (isModuleDotRequireCall(node) || isRequireLikeCall(node)) {
       // Same resolution base as a bare `require()` — handle identically.
       const arg = /** @type {ts.CallExpression} */ (node).arguments[0];
       if (arg) {
@@ -343,10 +421,10 @@ function jsLocalImportSpecifiers(src, absPath) {
       } else {
         failClosed(
           node,
-          `calls ${isModuleDotRequireCall(node) ? 'module.require()' : 'an aliased require()'} with no argument`,
+          `calls ${isModuleDotRequireCall(node) ? 'module.require()' : 'a require-like function'} with no argument`,
         );
       }
-    } else if (isCreateRequireAliasCall(node)) {
+    } else if (isCreateRequireDerivedCall(node)) {
       // A createRequire()-derived function resolves against a DIFFERENT base
       // than this file's own directory (whatever base its caller supplied).
       // A relative-looking literal reached through it cannot be safely
@@ -364,69 +442,48 @@ function jsLocalImportSpecifiers(src, absPath) {
           `calls a createRequire()-derived function with the relative-looking specifier '${arg.text}', whose resolution base is NOT this file's own directory`,
         );
       }
-      // else: a bare specifier via a createRequire alias — no ambiguity, skip.
-    } else if (isBareCreateRequireCall(node) && !ts.isVariableDeclaration(node.parent)) {
-      // `createRequire(...)` invoked inline / chained / passed around rather
-      // than bound to a tracked local — e.g. `createRequire(u)('./x')`. There
-      // is no name to have collected in the alias pass, so this can only be
-      // caught here, at the call site itself.
+      // else: a bare specifier via a createRequire-derived name — no ambiguity, skip.
+    } else if (isCreateRequireFnCall(node) && !ts.isVariableDeclaration(node.parent)) {
+      // `createRequire(...)` (or an aliased import of it) invoked inline /
+      // chained / passed around rather than bound to a tracked local — e.g.
+      // `createRequire(u)('./x')`. There is no name to have collected in the
+      // alias pass, so this can only be caught here, at the call site itself.
       failClosed(
         node,
-        'calls createRequire() without binding it to a tracked local (e.g. chained or passed directly)',
+        'calls createRequire() (or an alias of it) without binding it to a tracked local (e.g. chained or passed directly)',
       );
     } else if (
       ts.isIdentifier(node) &&
-      node.text === 'require' &&
+      (requireLikeNames.has(node.text) ||
+        createRequireFnNames.has(node.text) ||
+        createRequireDerivedNames.has(node.text)) &&
       !isImportBindingName(node) &&
+      !isAliasDeclarationSite(node) &&
+      !isAllowedPropertyAccessBase(node) &&
       !(node.parent && ts.isCallExpression(node.parent) && node.parent.expression === node) &&
-      !(
-        node.parent &&
-        ts.isPropertyAccessExpression(node.parent) &&
-        node.parent.expression === node
-      ) &&
       // `module.require` — `require` as the PROPERTY NAME, not the base. The
       // call site itself is handled by isModuleDotRequireCall; this is just
       // the generic child-walk revisiting the same identifier node.
-      !(node.parent && ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) &&
-      !(node.parent && ts.isVariableDeclaration(node.parent) && node.parent.initializer === node) &&
-      !(node.parent && ts.isVariableDeclaration(node.parent) && node.parent.name === node)
+      !(node.parent && ts.isPropertyAccessExpression(node.parent) && node.parent.name === node)
     ) {
-      // A reference to the bare `require` identifier that is none of: the
-      // direct callee of a call (handled above), the base of a property
-      // access like `require.resolve`/`require.cache` (left alone, as
-      // before), the RHS of a tracked `const x = require` alias (handled
-      // above via plainRequireAliases), or a DECLARATION binding a new local
-      // named `require` (e.g. `const require = createRequire(...)`,
-      // tracked above via createRequireAliases — the binding site itself
-      // reaches nothing; only a later call would). Anything else — passed as
-      // an argument, assigned to an object property, used in a ternary, etc.
-      // — is an untracked way to get at `require` this scanner cannot follow.
+      // A reference to a tracked require-like/createRequire name that is none
+      // of: the direct callee of a call (handled above), the base of a
+      // `.resolve`/`.cache` property access (left alone, as before), the RHS
+      // of a tracked plain-alias declaration or the LHS binding name of one
+      // (both tracked by the fixpoint pass above), or an import specifier's
+      // binding site. Anything else — `.call`/`.apply`/`.bind`, passed as an
+      // argument, assigned to an object property, used in a ternary, etc. —
+      // is an untracked way to get at it this scanner cannot follow.
       failClosed(
         node,
-        'references `require` in a form this scanner does not track (not a direct call, `.resolve`/`.cache` access, or a plain `const x = require` alias)',
+        `references \`${node.text}\` in a form this scanner does not track (not a direct call, \`.resolve\`/\`.cache\` access, or a plain alias declaration)`,
       );
-    } else if (
-      ts.isIdentifier(node) &&
-      node.text === 'createRequire' &&
-      !isImportBindingName(node) &&
-      !(node.parent && ts.isCallExpression(node.parent) && node.parent.expression === node)
-    ) {
-      // `createRequire` referenced but not itself the callee of a call (e.g.
-      // imported and reassigned, passed as a higher-order argument). The
-      // call-site cases are handled by isBareCreateRequireCall /
-      // createRequireAliases above; anything else is untracked.
-      failClosed(node, 'references `createRequire` in a form this scanner does not track');
-    } else if (isBareRequireCall(node) || isDynamicImportCall(node)) {
+    } else if (isDynamicImportCall(node)) {
       const arg = /** @type {ts.CallExpression} */ (node).arguments[0];
       if (arg) {
         addSpecifier(arg, node);
       } else {
-        const { line: lineNumber } = sourceFile.getLineAndCharacterOfPosition(
-          node.getStart(sourceFile),
-        );
-        throw new Error(
-          `compat-window fingerprint: ${absPath}:${lineNumber + 1} calls ${isBareRequireCall(node) ? 'require()' : 'import()'} with no argument — refusing to guess (#1294 round 5).`,
-        );
+        failClosed(node, 'calls import() with no argument');
       }
     }
     ts.forEachChild(node, visit);
