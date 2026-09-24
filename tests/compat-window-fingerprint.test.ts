@@ -89,6 +89,12 @@ function makeFixture(): { repoRoot: string; tarballsDir: string } {
   writeFileSync(join(root, 'scripts/compat-credential-ref.mjs'), 'export const noop = 1;\n');
   writeFileSync(join(root, 'scripts/compat-run-ledger.mjs'), 'export const noop = 1;\n');
   writeFileSync(join(root, '.github/compat-credential-ref.json'), '{"rcTag":null}\n');
+  // #1321: the bun-vinext cell declares its quarantine ledger + script.
+  writeFileSync(join(root, 'scripts/compat-vinext-ledger.mjs'), 'export const noop = 1;\n');
+  writeFileSync(
+    join(root, 'test/compat-vinext-ledger.json'),
+    '{"lane":"bun-vinext","entries":[]}\n',
+  );
 
   const tarballsDir = tempDir('knext-fp-tarballs-');
   for (const [name, version] of [
@@ -1102,6 +1108,10 @@ describe('compat-window fingerprint — declared credential-run extraFiles land 
     expect(harness).toContain('scripts/compat-credential-ref.mjs');
     expect(harness).toContain('scripts/compat-run-ledger.mjs');
     expect(harness).toContain('.github/compat-credential-ref.json');
+    // … and NOT here: the vinext quarantine ledger (#1321) must never move
+    // the node lanes' fingerprints (it would reset their 14-night windows).
+    expect(harness).not.toContain('scripts/compat-vinext-ledger.mjs');
+    expect(harness).not.toContain('test/compat-vinext-ledger.json');
   });
 
   it('bun lane: same declared extras as node (both run the credential-ref job)', () => {
@@ -1123,6 +1133,10 @@ describe('compat-window fingerprint — declared credential-run extraFiles land 
     // The RC pin JSON is read only by the resolve step this lane never runs,
     // and nothing imports a JSON file, so it stays correctly absent.
     expect(harness).not.toContain('.github/compat-credential-ref.json');
+    // #1321: the quarantine ledger reclassifies THIS cell's results, so the
+    // script and the ledger it reads are frozen here …
+    expect(harness).toContain('scripts/compat-vinext-ledger.mjs');
+    expect(harness).toContain('test/compat-vinext-ledger.json');
   });
 
   it('editing compat-credential-ref.mjs moves the node-lane fingerprint (it is genuinely frozen, not just listed)', () => {
