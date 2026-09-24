@@ -171,9 +171,14 @@ beforeAll(() => {
         );
     }
 
+    // #1342/ADR-0058: `kn-next create`'s DEFAULT builder no longer renders
+    // these vinext-shaped files — request `--builder vinext` explicitly,
+    // matching what this suite actually exercises (the vinext × node runtime
+    // image with a custom health path).
     const rendered = renderScaffold({
         name: "vinext-node-custom-health-fixture",
         version: "0.0.0",
+        builder: "vinext",
     });
     for (const rel of RENDERED_TEMPLATES) {
         const text = rendered.get(rel);
