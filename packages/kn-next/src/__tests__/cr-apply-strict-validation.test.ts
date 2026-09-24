@@ -133,6 +133,14 @@ mock.module("../cli/cr-builder", () => ({
     validateCRImageRef: (...a: unknown[]) => validateCRImageRef(...a),
 }));
 
+// #1339 review finding #1: deploy() now compiles the standalone-bun/vinext
+// executable via this shared step — stub it, same treatment as every other
+// side-effecting seam here.
+mock.module("../cli/build-artifact", () => ({
+    compileArtifactForDeploy: () => ({ compiled: false }),
+    assertCompiledArtifactFresh: () => {},
+}));
+
 // #314: deploy now runs a server-side dry-run preflight BEFORE any side effect.
 // Stub the kubectl boundary it uses so this suite stays hermetic and keeps
 // asserting the real APPLY argv; the preflight itself is covered by

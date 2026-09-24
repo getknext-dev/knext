@@ -76,6 +76,18 @@ mock.module("../cli/cr-builder", () => ({
     validateCRImageRef: mock(),
 }));
 
+// #1339 review finding #1: `defaultBuildAndPush` now compiles the
+// standalone-bun/vinext executable via this shared step — stub it, same
+// treatment as every other side-effecting seam here, so this suite stays
+// about `dockerBuildxArgs`'s real build-arg passthrough. Named (not inline)
+// so the wiring test below can assert it was actually called.
+const compileArtifactForDeploy = mock<AnyFn>(() => ({ compiled: false }));
+mock.module("../cli/build-artifact", () => ({
+    compileArtifactForDeploy: (...a: unknown[]) =>
+        compileArtifactForDeploy(...a),
+    assertCompiledArtifactFresh: () => {},
+}));
+
 // The ONLY runtime-image seam stubbed is the file-writing one
 // (`stageStandaloneBuildContext`). `selectRuntimeImage` and `dockerBuildxArgs`
 // are left REAL — that is the entire point of this suite.
@@ -168,5 +180,29 @@ describe("preview.ts defaultBuildAndPush — the real dockerBuildxArgs call, bot
         const argv = dockerArgv();
         expect(argv, "no `docker` argv captured by runInherit").toBeDefined();
         expect(argv).not.toContain("--build-arg");
+    });
+});
+
+describe("preview.ts defaultBuildAndPush compiles the exec via the shared build-artifact step (#1339 finding #1)", () => {
+    it("invokes compileArtifactForDeploy exactly once, after the project build", async () => {
+        const { defaultBuildAndPush } = await import("../cli/preview");
+        await defaultBuildAndPush("acme-pr-1", baseConfig, "feature/x");
+
+        expect(compileArtifactForDeploy).toHaveBeenCalledTimes(1);
+        expect(runProjectBuild.mock.invocationCallOrder[0]).toBeLessThan(
+            compileArtifactForDeploy.mock.invocationCallOrder[0],
+        );
+    });
+
+    it("MUTATION-PROOF: a compile failure aborts before the docker build", async () => {
+        const { defaultBuildAndPush } = await import("../cli/preview");
+        compileArtifactForDeploy.mockImplementationOnce(() => {
+            throw new Error("compile boom");
+        });
+
+        await expect(
+            defaultBuildAndPush("acme-pr-1", baseConfig, "feature/x"),
+        ).rejects.toThrow(/compile boom/);
+        expect(dockerArgv()).toBeUndefined();
     });
 });

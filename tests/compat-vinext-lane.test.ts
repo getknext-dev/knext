@@ -144,13 +144,23 @@ describe('the vinext-axis compat lane exists and is wired to the corpus', () => 
     expect(existsSync(resolve(repoRoot, LANE))).toBe(true);
   });
 
-  it('runs knext’s own manifest — the SAME selection the node lane runs', () => {
+  it('runs knext’s own manifest — the SAME selection the node lane runs by default (#1301)', () => {
     const mine = harnessStep(parse(LANE)).env?.NEXT_EXTERNAL_TESTS_FILTERS ?? '';
-    const theirs = harnessStep(parse(NODE_LANE)).env?.NEXT_EXTERNAL_TESTS_FILTERS ?? '';
     const manifest = 'test/deploy-tests-manifest.knext.json';
     expect(mine).toContain(manifest);
-    // Not just "a manifest": the same one, so the two numbers are comparable.
-    expect(mine.replace(/\$\{\{[^}]*\}\}/g, '')).toEqual(theirs.replace(/\$\{\{[^}]*\}\}/g, ''));
+    // #1301 — the node lane's filename now flows through the
+    // KNEXT_DEPLOY_MANIFEST decision (smoke-vs-credential) rather than being
+    // a literal here, so a byte comparison after stripping `${{ }}`
+    // expressions no longer applies. What still has to hold — the vinext
+    // lane's own manifest matches the NODE LANE'S DEFAULT (non-smoke)
+    // resolution — is asserted directly against the workflow source: the node
+    // lane's KNEXT_DEPLOY_MANIFEST decision must resolve to this exact
+    // filename outside the smoke branch.
+    const nodeLaneSrc = read(NODE_LANE);
+    expect(
+      new RegExp(`KNEXT_DEPLOY_MANIFEST:.*'${manifest.replace('test/', '')}'`).test(nodeLaneSrc),
+      "the node lane's KNEXT_DEPLOY_MANIFEST default must resolve to the same manifest the vinext lane runs",
+    ).toBe(true);
   });
 
   it('declares the same shard total as the node lane, and its matrix agrees', () => {

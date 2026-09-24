@@ -123,7 +123,17 @@ export const HARNESS_ROOTS = [
   { kind: 'dir', path: 'scripts', match: /^e2e-[^/]*\.(sh|mjs|cjs|js)$/, isClosureEntry: true },
   // The deploy-tests manifest(s): the exclude ledger that decides what the
   // night actually selected. A second lane manifest is picked up automatically.
-  { kind: 'dir', path: 'test', match: /^deploy-tests-manifest\.[^/]*\.json$/ },
+  //
+  // #1301 review round 1: EXCLUDES `deploy-tests-manifest.smoke.knext.json`
+  // (the negative lookahead) — that manifest is read ONLY on a
+  // workflow_dispatch `smoke=true` run (test-e2e-deploy.yml's
+  // KNEXT_DEPLOY_MANIFEST decision), which by construction can never be a
+  // credential or early-warning night (github.event.inputs is empty on every
+  // `schedule` event). Before this exclusion, an edit to the smoke manifest —
+  // which no credential night ever reads — moved every cell's fingerprint and
+  // could spuriously "unfreeze" a banked window over a file with zero effect
+  // on what a credential night actually selects.
+  { kind: 'dir', path: 'test', match: /^deploy-tests-manifest\.(?!smoke\.)[^/]*\.json$/ },
 ];
 
 /**

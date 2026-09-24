@@ -10,7 +10,10 @@
  */
 
 import YAML from "yaml";
-import { DEFAULT_BUILDER_ID } from "../adapters/artifact-contract";
+import {
+    DEFAULT_BUILDER_ID,
+    DEFAULT_RUNTIME_ID,
+} from "../adapters/artifact-contract";
 import type { KnativeNextConfig } from "../config";
 
 /**
@@ -283,9 +286,19 @@ export function buildNextAppCRObject(
     // single-exec image until the pod rolls. No runtime on the wire, no
     // window. (Round-trip fidelity yields here to the safer wire contract;
     // --dry-run output documents the omission via this comment's test.)
+    //
+    // For the standalone shape, resolved and ALWAYS written explicitly
+    // (#1183 PR review finding #3) — never left to fall back on the wire's
+    // own "node" default (`nextapp_types.go`'s `Runtime` doc comment). The
+    // local build now compiles/stages the Bun bytecode executable by default
+    // (DEFAULT_RUNTIME_ID, `build.ts`/`runtime-image.ts`), so the CR must say
+    // the same thing the pushed image actually is — the same discipline
+    // `resolvedBuild` below already follows for `build`.
     const resolvedBuild = config.build ?? DEFAULT_BUILDER_ID;
     const runtime =
-        resolvedBuild === "vinext" ? undefined : (config.runtime ?? undefined);
+        resolvedBuild === "vinext"
+            ? undefined
+            : (config.runtime ?? DEFAULT_RUNTIME_ID);
 
     // Build (B2/ADR-0048). ALWAYS emitted, resolved to the CLI's default when
     // the config is silent. The two absences mean different things and must

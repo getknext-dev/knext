@@ -209,11 +209,55 @@ describe('webpack credential crons (#1245)', () => {
     }
   });
 
-  it('no concurrency group anywhere in the credential workflow — a cancelled pending run would reset a window', () => {
-    expect(wf.concurrency, 'workflow-level concurrency').toBeUndefined();
+  it('no JOB-level concurrency anywhere in the credential workflow — a cancelled pending run would reset a window', () => {
     for (const [name, job] of Object.entries(wf.jobs)) {
       expect(job.concurrency, `job ${name} concurrency`).toBeUndefined();
     }
+  });
+
+  it('the #1301 workflow-level concurrency group can NEVER share a group across scheduled runs', () => {
+    // #1301 added a workflow-level concurrency group for BRANCH DISPATCHES
+    // ONLY — full coverage, including the mutation proof (swapping
+    // github.ref <-> github.run_id in the real expression), lives in
+    // tests/ci-capacity-budget.test.ts. What this file's own premise ("a
+    // cancelled pending run would reset a window") requires is narrower and
+    // re-asserted here: every `schedule` trigger (every credential AND
+    // early-warning cron, including the two webpack ones this file is
+    // about) must EVALUATE to a group keyed on github.run_id — checked by
+    // evaluating the real expression under a schedule context, not by
+    // checking `github.run_id` merely appears in the text (a text-presence
+    // check stays green if the schedule branch were ref-scoped instead).
+    const concurrency = wf.concurrency as
+      | { group?: unknown; 'cancel-in-progress'?: unknown }
+      | undefined;
+    expect(concurrency, 'workflow-level concurrency block').toBeDefined();
+    const groupExpr = exprBody(concurrency?.group);
+    const scheduleResult = String(
+      evaluate(groupExpr, {
+        github: {
+          event_name: 'schedule',
+          workflow: 'test-e2e-deploy.yml',
+          ref: 'refs/heads/sentinel-schedule-ref',
+          run_id: 987654,
+        },
+      }) ?? '',
+    );
+    expect(scheduleResult, 'the schedule branch must evaluate to a run_id-scoped group').toContain(
+      '987654',
+    );
+    expect(
+      scheduleResult,
+      'the schedule branch must NOT evaluate to a ref-scoped group — that is the "schedules keyed on ref, sharing one group on main" defect',
+    ).not.toContain('sentinel-schedule-ref');
+
+    const cancelExpr =
+      typeof concurrency?.['cancel-in-progress'] === 'string'
+        ? (concurrency['cancel-in-progress'] as string).replace(/\s+/g, ' ').trim()
+        : concurrency?.['cancel-in-progress'];
+    expect(
+      cancelExpr,
+      'cancel-in-progress must be gated on workflow_dispatch — an unconditional cancel could reset a credential window',
+    ).toBe("${{ github.event_name == 'workflow_dispatch' }}");
   });
 });
 

@@ -84,6 +84,14 @@ mock.module("../cli/cr-builder", () => ({
     validateCRImageRef: (...a: unknown[]) => validateCRImageRef(...a),
 }));
 
+// #1339 review finding #1: `deploy()` now compiles the standalone-bun/vinext
+// executable via this shared step — stub it the same way as every other
+// side-effecting seam here, so this suite stays about the LOCKSTEP guard.
+mock.module("../cli/build-artifact", () => ({
+    compileArtifactForDeploy: () => ({ compiled: false }),
+    assertCompiledArtifactFresh: () => {},
+}));
+
 // Fully controllable: `selectRuntimeImageKind` + `isKnownGoodTemplate` are
 // module-level `let`s the tests flip directly, so each scoping condition is
 // exercised in isolation rather than inferred from a real filesystem check.
@@ -146,6 +154,10 @@ mock.module("../cli/gc", () => ({
 const storageConfig: KnativeNextConfig = {
     name: "my-app",
     registry: "registry.example.com",
+    // build: "vinext" EXPLICIT — #1183/ADR-0058 flipped the ambient default
+    // to turbopack, and this suite's whole scenario name is "app-dockerfile +
+    // vinext + storage".
+    build: "vinext",
     storage: {
         provider: "gcs",
         bucket: "my-bucket",

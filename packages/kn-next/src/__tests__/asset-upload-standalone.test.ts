@@ -133,7 +133,7 @@ describe("uploadAssets reads the standalone build output (not .output/public)", 
         expect(singleFileRetries).toHaveLength(0);
     });
 
-    it("routes a DEFAULT (vinext) config to the nitro staging — .knext-upload, sourced from .output/public", async () => {
+    it("routes an explicit vinext config to the nitro staging — .knext-upload, sourced from .output/public", async () => {
         // The other half of this suite's shape pin, and the dispatch guard:
         // deleting the shape dispatch in uploadAssets would leave every
         // turbopack-pinned test green while the default path silently staged
@@ -173,7 +173,7 @@ describe("uploadAssets reads the standalone build output (not .output/public)", 
         runCaptureMock.mockReturnValue(gcsListing(nitroKeys));
 
         const config = { ...makeConfig() };
-        delete (config as Record<string, unknown>).build;
+        (config as Record<string, unknown>).build = "vinext"; // #1183/ADR-0058 flipped the ambient default to turbopack
         await expect(uploadAssets(config)).resolves.toBeUndefined();
 
         // The bulk upload must read the staging dir, never the artifact root.
@@ -199,7 +199,7 @@ describe("uploadAssets reads the standalone build output (not .output/public)", 
         await seed();
         runCaptureMock.mockReturnValue(gcsListing(["a.js"]));
         const config = { ...makeConfig() };
-        delete (config as Record<string, unknown>).build;
+        (config as Record<string, unknown>).build = "vinext"; // #1183/ADR-0058 flipped the ambient default to turbopack
 
         await uploadAssets(config);
         const bulk = runQuietMock.mock.calls

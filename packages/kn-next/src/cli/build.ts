@@ -11,13 +11,14 @@
  *   2. Run `next build` (output:'standalone' set in the app's next.config.ts)
  *   3. Upload static assets to storage (GCS/S3/MinIO)
  *
- * NOTE: the project's own `npm run build` produces the bundle (vinext's
- * `vite build` on the default target, `next build` + output:'standalone' on the
- * selectable turbopack/standalone target — ADR-0054 item 6); for the vinext
- * shape this command then compiles the single executable (ADR-0048 — see step
- * 2c). Since the project owns that script, selecting `build: 'turbopack'` on an
- * app whose script still runs `vite build` produces no `.next/standalone` —
- * that is a hard, fail-fast error below rather than a warning, for the
+ * NOTE: the project's own `npm run build` produces the bundle (`next build`
+ * + output:'standalone' on the default turbopack/standalone target since
+ * #1183 (ADR-0058); vinext's `vite build` on the selectable `build: 'vinext'`
+ * target — ADR-0054 item 6); for the vinext shape this command then compiles
+ * the single executable (ADR-0048 — see step 2c). Since the project owns that
+ * script, selecting `build: 'turbopack'` (or leaving it absent) on an app
+ * whose script still runs `vite build` produces no `.next/standalone` — that
+ * is a hard, fail-fast error below rather than a warning, for the
  * next-standalone shape only (#1184).
  *
  * ADR-0001: build does NOT emit raw Knative/infrastructure manifests. The
@@ -27,14 +28,21 @@
 
 import { existsSync, rmSync, writeSync } from "node:fs";
 import { join } from "node:path";
-import { healBunExportTargets } from "../adapters/standalone-bun-exports";
+import {
+    DEFAULT_BUILDER_ID,
+    DEFAULT_RUNTIME_ID,
+} from "../adapters/artifact-contract";
 import {
     hasStorage,
     NO_STORAGE_MODE_NOTICE,
     uploadAssets,
 } from "../utils/asset-upload";
 import { createLogger } from "../utils/logger";
-import { resolveBuildArtifact, standaloneStepsApply } from "./build-artifact";
+import {
+    compileArtifactForDeploy,
+    resolveBuildArtifact,
+    standaloneStepsApply,
+} from "./build-artifact";
 import { isEntrypoint } from "./exec";
 import { runPostCompileSmoke } from "./postcompile-smoke";
 import { runProjectBuild } from "./project-build";
@@ -45,7 +53,6 @@ import {
     loadConfig,
     UsageError,
 } from "./shared";
-import { buildStandaloneExecutable } from "./standalone-exec-build";
 import {
     buildVinextExecutable,
     hostSmokeArch,
@@ -165,7 +172,7 @@ export async function build(options: BuildOptions = {}) {
                 ? `${config.storage.provider} (${config.storage.bucket})`
                 : "none — assets served from the image",
             cache: config.cache?.provider ?? "none",
-            runtime: config.runtime ?? "node",
+            runtime: config.runtime ?? DEFAULT_RUNTIME_ID,
         },
         "Configuration loaded",
     );
@@ -182,15 +189,17 @@ export async function build(options: BuildOptions = {}) {
     //    The app's next.config.ts must set output:'standalone'.
     if (!options.skipNextBuild) {
         log.info(
-            { builder: config.build ?? "vinext" },
+            { builder: config.build ?? DEFAULT_BUILDER_ID },
             "Running the project build...",
         );
         // UX ledger row 4 (4c): the seam translates a deps-not-installed failure
         // (`next: command not found`, exit 127) into plain npm-install guidance.
         // requireEsm gates the vinext ESM preflight: only the vinext target
-        // (the default) needs `"type":"module"`; a node app builds CommonJS fine.
+        // needs `"type":"module"`; a node app builds CommonJS fine. Resolved
+        // against DEFAULT_BUILDER_ID, not hardcoded — an absent `build` no
+        // longer means vinext (#1183).
         runProjectBuild({
-            requireEsm: (config.build ?? "vinext") === "vinext",
+            requireEsm: (config.build ?? DEFAULT_BUILDER_ID) === "vinext",
         });
         log.info("Project build complete");
     }
@@ -253,77 +262,69 @@ export async function build(options: BuildOptions = {}) {
             { builder: builder.id, shape: artifact.shape },
             "Skipping the standalone-tree post-build steps — they do not apply to this artifact shape",
         );
-    } else if (existsSync(standaloneDir)) {
-        const healed = healBunExportTargets({
-            projectDir: process.cwd(),
-            standaloneDir,
-            log: (message) => log.info(message),
-        });
-        log.info(
-            { copied: healed.copied, skipped: healed.skipped.length },
-            "Bun-condition export heal (standalone output)",
-        );
-    } else {
-        log.warn(
-            { standaloneDir },
-            "No standalone output found — skipping bun-exports heal (is output:'standalone' set?)",
-        );
     }
 
-    // 2b'. Compiled standalone-on-Bun (turbopack × bun). Bytecode caching is
-    //      mandatory for every runtime cell; on Bun that means the standalone
-    //      server ships as a `bun build --compile --bytecode` executable
-    //      (standalone-exec-build.ts), which the bun image runs in place of
-    //      `bun server.js`. AFTER the heal: the heal adds traced files the
-    //      compile resolves against. turbopack × node is untouched — its
-    //      bytecode caching is the V8 compile cache.
-    //      Fails the build when there is no tree to compile: the bun image
-    //      COPYs the executable, so skipping it would fail `docker build` or,
-    //      worse, ship a stale binary from an earlier build.
-    if (standaloneStepsApply(artifact) && config.runtime === "bun") {
-        if (!existsSync(join(standaloneDir, "server.js"))) {
-            throw new UsageError(
-                `No standalone server at ${join(standaloneDir, "server.js")} to compile.\n\n` +
-                    "The standalone-on-Bun image runs a compiled executable of that server. " +
-                    "Check that next.config sets output: 'standalone' and that the project build ran.",
+    // 2b/2b'/2c: heal + compile, via the SAME shared step `kn-next deploy`/
+    // `preview` now call (#1339 review finding #1, build-artifact.ts) — this
+    // is the one place that logic lives; build.ts only adds its own logging
+    // around the returned result.
+    //
+    //   - Heal (#188): bun-condition export targets in `.next/standalone`.
+    //     UNCONDITIONAL on the shape (not gated on `config.runtime`) — it is
+    //     additive-only, version-checked, and never throws.
+    //   - Standalone-on-Bun compile (turbopack × bun): bytecode caching is
+    //     mandatory for every runtime cell; on Bun that means the standalone
+    //     server ships as a `bun build --compile --bytecode` executable, which
+    //     the bun image runs in place of `bun server.js`. Resolved against
+    //     DEFAULT_RUNTIME_ID ("bun", #1183) — an unset runtime means bun too,
+    //     the actual ADR-0054 default cell. `buildStandaloneExecutable` itself
+    //     throws when there is no tree to compile (no separate check needed).
+    //   - vinext single-executable compile (ADR-0048): the vinext bundle
+    //     compiled whole (`bun build --compile --minify --bytecode`) into the
+    //     binary the Dockerfile ships. `skipViteBuild: true` inside the shared
+    //     step — step 2 above (the project's own `vite build`) already
+    //     produced `.output`.
+    const compileResult = compileArtifactForDeploy(config, process.cwd(), {
+        arch: SHIP_ARCH,
+    });
+
+    if (standaloneStepsApply(artifact)) {
+        if (compileResult.healed) {
+            log.info(
+                {
+                    copied: compileResult.healed.copied,
+                    skipped: compileResult.healed.skipped.length,
+                },
+                "Bun-condition export heal (standalone output)",
+            );
+        } else {
+            log.warn(
+                { standaloneDir },
+                "No standalone output found — skipping bun-exports heal (is output:'standalone' set?)",
             );
         }
-        log.info(
-            "Compiling the standalone server into a Bun executable (bytecode)...",
-        );
-        const binary = buildStandaloneExecutable({
-            cwd: process.cwd(),
-            arch: SHIP_ARCH,
-        });
-        log.info(
-            { binary },
-            "Standalone executable compiled (bytecode verified)",
-        );
+        if (compileResult.compiled) {
+            log.info(
+                { binary: compileResult.binaryPath },
+                "Standalone executable compiled (bytecode verified)",
+            );
+        }
     }
 
-    // 2c. Single-executable compile (the vinext shape — ADR-0048).
-    //     Bytecode belongs to ONE builder: the vinext bundle is compiled
-    //     whole (`bun build --compile --minify --bytecode`) into the binary
-    //     the Dockerfile ships. The retired per-file bytecode pass that used
-    //     to sit here transformed the standalone tree file-by-file — it bought
-    //     cold start (554ms vs 703ms) but COST throughput (537 vs 714 req/s,
-    //     the per-module CJS conversion taxing every module boundary), while
-    //     the whole-bundle compile wins both axes at once (61ms, 1103 req/s).
-    //     Keyed on the artifact SHAPE, not on config.runtime: the shape is
-    //     what says "this app's server is one compiled binary".
-    //     Compiles for linux-x64 regardless of the host — `kn-next deploy`
-    //     builds a linux/amd64 image whose Dockerfile expects
-    //     `knext-exec-linux-x64` in the build context.
+    // 2c. Single-executable compile (the vinext shape — ADR-0048). The
+    //     retired per-file bytecode pass that used to sit here transformed the
+    //     standalone tree file-by-file — it bought cold start (554ms vs
+    //     703ms) but COST throughput (537 vs 714 req/s, the per-module CJS
+    //     conversion taxing every module boundary), while the whole-bundle
+    //     compile wins both axes at once (61ms, 1103 req/s). Compiles for
+    //     linux-x64 regardless of the host — `kn-next deploy` builds a
+    //     linux/amd64 image whose Dockerfile expects `knext-exec-linux-x64`
+    //     in the build context.
     if (artifact.shape === "nitro-output-bun") {
         log.info(
-            "Compiling the single executable (bun, bytecode, minified)...",
+            { binary: compileResult.binaryPath },
+            "Single executable compiled",
         );
-        const binary = buildVinextExecutable({
-            cwd: process.cwd(),
-            arch: SHIP_ARCH,
-            skipViteBuild: true, // step 2 (the project's own `vite build`) already produced .output
-        });
-        log.info({ binary }, "Single executable compiled");
 
         // 2d. Post-compile RuntimeContract smoke (#894).
         //     The compile bakes `.output/server/index.mjs` WHATEVER it contains,

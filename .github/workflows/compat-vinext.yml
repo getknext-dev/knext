@@ -65,6 +65,15 @@ on:
     # (03:17 daily, 05:17 Sunday) so the three never contend for runners.
     - cron: '17 7 * * 0'
 
+# #1301 — same per-branch dispatch-only concurrency policy as
+# test-e2e-deploy.yml (see there for the full rationale and
+# docs/ci/capacity-budget.md): a workflow_dispatch run groups and cancels by
+# ref; the weekly schedule gets a run_id-unique group so it can never be
+# grouped with, or cancelled by, anything else.
+concurrency:
+  group: ${{ github.event_name == 'workflow_dispatch' && format('{0}-dispatch-{1}', github.workflow, github.ref) || format('{0}-run-{1}', github.workflow, github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
+
 env:
   NEXTJS_REF: ${{ github.event.inputs.nextjsRef || 'v16.2.0' }}
   # DECLARED, not inferred from the artifacts that arrived — inference is the
@@ -166,7 +175,13 @@ jobs:
       - name: Preflight — the packed @getknext/core ships the compile script
         run: |
           set -euo pipefail
-          CORE_TGZ="$(ls -1 "${GITHUB_WORKSPACE}"/knext-tarballs/getknext-core-*.tgz | sort | tail -n1)"
+          # find, not ls, for the same reason every other listing in this repo's
+          # workflows uses it: ls's output is meant for humans and mishandles
+          # filenames containing whitespace/newlines/glob metacharacters
+          # (shellcheck SC2012). `-maxdepth 1` keeps the match set identical to
+          # the shell glob `ls` was expanding (this dir is flat); `sort | tail
+          # -n1` is UNCHANGED — same "most recent by name" selection as before.
+          CORE_TGZ="$(find "${GITHUB_WORKSPACE}/knext-tarballs" -maxdepth 1 -name 'getknext-core-*.tgz' -print | sort | tail -n1)"
           # Materialise the listing ONCE, then search the string — never
           # `tar tzf … | grep -q …`. `grep -q` exits on its first match, closes
           # the pipe, and `tar` dies with SIGPIPE (exit 141); under the `pipefail`
@@ -376,6 +391,9 @@ jobs:
     timeout-minutes: 120
     strategy:
       fail-fast: false
+      # #1301 — same cap as test-e2e-deploy.yml's deploy-tests job; see
+      # docs/ci/capacity-budget.md.
+      max-parallel: 8
       matrix:
         # Keep in sync with COMPAT_SHARD_TOTAL — cross-checked in both directions
         # by tests/compat-vinext-lane.test.ts.

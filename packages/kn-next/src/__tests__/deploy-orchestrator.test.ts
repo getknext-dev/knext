@@ -115,6 +115,19 @@ mock.module("../cli/cr-builder", () => ({
     validateCRImageRef: (...a: unknown[]) => validateCRImageRef(...a),
 }));
 
+// #1339 review finding #1: `deploy()` now compiles the standalone-bun/vinext
+// executable via this shared step. A real call would shell out to `bun build`
+// against a `.next/standalone`/`.output` this hermetic suite never stages —
+// stub it the same way as every other side-effecting seam above.
+const compileArtifactForDeploy = mock<AnyFn>(() => ({ compiled: false }));
+const assertCompiledArtifactFresh = mock<AnyFn>(() => {});
+mock.module("../cli/build-artifact", () => ({
+    compileArtifactForDeploy: (...a: unknown[]) =>
+        compileArtifactForDeploy(...a),
+    assertCompiledArtifactFresh: (...a: unknown[]) =>
+        assertCompiledArtifactFresh(...a),
+}));
+
 // #1283 round 2: whether `selection.dockerfile` is a byte-identical,
 // unmodified shipped template — gates the post-build image-lockstep guard.
 // Defaults to `false` (not known-good) so the guard stays reachable/testable
@@ -378,6 +391,43 @@ describe("deploy() happy-path ordering", () => {
     });
 });
 
+/**
+ * #1339 review finding #1 (jev 0.90, BLOCKER) — `deploy()` must compile the
+ * standalone-bun/vinext executable itself; it used to stop after the
+ * project's own build, so a bare-config deploy shipped either no binary
+ * (docker COPY failure) or a STALE one from an earlier `kn-next build`.
+ */
+describe("deploy() compiles the exec via the shared build-artifact step (#1339 finding #1)", () => {
+    it("a bare-config (fresh-build) deploy invokes compileArtifactForDeploy exactly once", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const deploy = await importDeploy();
+        await deploy();
+
+        expect(compileArtifactForDeploy).toHaveBeenCalledTimes(1);
+        expect(assertCompiledArtifactFresh).not.toHaveBeenCalled();
+    });
+
+    it("--skip-build calls assertCompiledArtifactFresh instead — nothing recompiles under --skip-build", async () => {
+        setArgv(["deploy", "--tag", "deploytag", "--skip-build"]);
+        const deploy = await importDeploy();
+        await deploy();
+
+        expect(assertCompiledArtifactFresh).toHaveBeenCalledTimes(1);
+        expect(compileArtifactForDeploy).not.toHaveBeenCalled();
+    });
+
+    it("MUTATION-PROOF: a compile failure aborts the deploy before the mutating apply", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        compileArtifactForDeploy.mockImplementationOnce(() => {
+            throw new Error("compile boom");
+        });
+        const deploy = await importDeploy();
+
+        await expect(deploy()).rejects.toThrow(/compile boom/);
+        expect(applied()).toBe(false);
+    });
+});
+
 /** Did the mutating `kubectl apply` run? */
 function applied(): boolean {
     return runInherit.mock.calls.some(
@@ -429,8 +479,13 @@ describe("deploy() skew guard — standalone leg (ADR-0011 / #93)", () => {
  * check FAILS LOUDLY in every branch — including the one that used to skip.
  */
 describe("deploy() skew guard — vinext leg (T2a)", () => {
-    // baseConfig sets no `build`, which resolves to vinext (ADR-0048), and it
-    // HAS a storage block — so the guard's subject exists.
+    // baseConfig sets no `build`, which resolves to turbopack since #1183
+    // (ADR-0058) — this leg needs `build: "vinext"` EXPLICITLY now to reach
+    // the vinext guard rather than the standalone one. It HAS a storage
+    // block — so the guard's subject exists.
+    beforeEach(() =>
+        loadConfig.mockResolvedValue({ ...baseConfig, build: "vinext" }),
+    );
 
     it("PROCEEDS to apply when the built prefix IS the deploy tag", async () => {
         setArgv(["deploy", "--tag", "deploytag"]);

@@ -5,18 +5,15 @@ import type { KnativeNextConfig } from "../config";
 /**
  * Track B2 / ADR-0048 Amendment 3 — `spec.build` on the emitted NextApp CR.
  *
- * The load-bearing assertion FLIPPED when vinext became the default builder.
- * It used to be the omission one: absence is the wire spelling of "turbopack"
- * (ADR-0017), so a default config had to omit the field to stay valid against
- * older CRDs. But once the CLI's default BUILD is vinext, that same omission
- * becomes a lie on the wire: the image contains one compiled executable, and a
- * CR without `build` tells the operator to run the standalone shape — it would
- * exec `bun run server.js` into an image that has no server.js and CrashLoop.
- *
- * So the builder now RESOLVES the default and always writes it. The #548
- * upgrade-order hazard (an older CRD's enum has no "vinext") is accepted and
- * loud: --validate=strict rejects the apply and deploy's preflight names the
- * unknown value before the cluster is touched. Operator/CRD first, then CLI.
+ * #1183 (ADR-0058) flipped `DEFAULT_BUILDER_ID` from `"vinext"` to
+ * `"turbopack"`. `spec.build` is still ALWAYS resolved and explicitly
+ * written (never omitted) — that half of the B2 contract is unchanged, only
+ * which value a silent config now resolves to. Wire absence still
+ * permanently means "turbopack" (ADR-0017), which now coincides with the
+ * resolved config default, but the CR builder does not rely on that
+ * coincidence: it still emits the field explicitly either way, so an older
+ * operator that predates the enum widening reads the same value a newer one
+ * does.
  */
 
 const IMG = "registry/app:tag@sha256:deadbeef";
@@ -43,14 +40,13 @@ const specOf = (config: KnativeNextConfig): Record<string, unknown> =>
         .spec;
 
 describe("#B2 spec.build on the emitted CR", () => {
-    it("resolves an unset build to an explicit vinext — absence would mis-run the image", () => {
+    it("resolves an unset build to an explicit turbopack (#1183) — the default is still always written", () => {
         const spec = specOf(baseConfig());
 
-        // Explicit, not absent: absence permanently means "turbopack" on the
-        // wire (ADR-0017), and the default build no longer produces that
-        // artifact. An omitted field here is how a single-exec image gets a
-        // `bun run server.js` command it cannot serve.
-        expect(spec.build).toBe("vinext");
+        // Explicit, not absent: the CR builder always resolves and writes
+        // `build`, unaffected by which value DEFAULT_BUILDER_ID currently
+        // names. Since #1183 that value is "turbopack".
+        expect(spec.build).toBe("turbopack");
     });
 
     it("resolves the default independently of runtime — the axes do not imply each other", () => {
@@ -59,8 +55,34 @@ describe("#B2 spec.build on the emitted CR", () => {
         // default.
         for (const runtime of ["node", "bun"] as const) {
             const spec = specOf(baseConfig({ runtime }));
-            expect(spec.build).toBe("vinext");
+            expect(spec.build).toBe("turbopack");
         }
+    });
+
+    it("EMITS runtime on the default (turbopack) shape — even when unset it round-trips undefined", () => {
+        // The omission rule is shape-scoped to vinext, not global (see the
+        // "OMITS runtime on the vinext shape" case below) — the standalone
+        // shape genuinely needs the field, and the default builder is now
+        // that shape.
+        for (const runtime of ["node", "bun"] as const) {
+            const spec = specOf(baseConfig({ runtime }));
+            expect(spec.runtime).toBe(runtime);
+        }
+    });
+
+    it("resolves an UNSET runtime to an explicit 'bun' on the default (turbopack) shape (#1183 PR review finding #3)", () => {
+        // `kn-next build`/`selectRuntimeImage` both now compile and stage the
+        // Bun bytecode executable by default (DEFAULT_RUNTIME_ID,
+        // build.ts/runtime-image.ts) — a bare config's local build produces
+        // the bun-standalone artifact, not node-standalone. The CR must
+        // resolve and write the SAME default the local build resolved,
+        // rather than relying on the coincidence that the operator's ONE
+        // `Spec.Runtime` read site (the legacy `Runtime=="bun"` compat-shim
+        // command override) happens to be harmless either way today — the
+        // same explicit-write discipline `spec.build` already follows here,
+        // now extended to `spec.runtime`.
+        const spec = specOf(baseConfig());
+        expect(spec.runtime).toBe("bun");
     });
 
     it("OMITS runtime on the vinext shape — even when the config sets it", () => {
@@ -71,7 +93,7 @@ describe("#B2 spec.build on the emitted CR", () => {
         // regardless of build — CrashLooping the binary image until the pod
         // rolls. No runtime on the wire, no window.
         for (const runtime of ["node", "bun"] as const) {
-            const spec = specOf(baseConfig({ runtime }));
+            const spec = specOf(baseConfig({ build: "vinext", runtime }));
             expect("runtime" in spec).toBe(false);
         }
     });
@@ -119,6 +141,6 @@ describe("#B2 spec.build on the emitted CR", () => {
         const after = specOf(baseConfig({ runtime: "node" }));
 
         expect(after).toEqual(before);
-        expect(after.build).toBe("vinext");
+        expect(after.build).toBe("turbopack");
     });
 });
