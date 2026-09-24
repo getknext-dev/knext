@@ -87,9 +87,9 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: '1.4.0'
+          bun-version: '1.4.2'
           # PINNED to the version the Dockerfile's builder stage uses
-          # (oven/bun:1.4.0-alpine). The closure this scans must be the closure
+          # (oven/bun:1.4.2-alpine). The closure this scans must be the closure
           # that image installs, and a different bun can resolve differently.
 
       # The SAME command the Dockerfile's builder runs, so the scanned tree is
@@ -381,7 +381,7 @@ jobs:
       matrix:
         include:
           # apps/docs/Dockerfile runtime base.
-          - image: oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb
+          - image: oven/bun:1.4.2-alpine@sha256:d888c0ae6c86d7866ff10c5aafdd9077b36aee6455b33dd270fb93c0dd5cef6f
           # examples/bun-exec/Dockerfile.node base.
           - image: node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
     steps:

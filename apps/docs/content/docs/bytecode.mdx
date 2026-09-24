@@ -32,6 +32,12 @@ produced:
   Node](/docs/build-pipeline#vinext-on-node)) needs `--build-arg
   KNEXT_HEALTH_CHECK_PATH=<your path>` passed by hand. Either way, if your app has *no* route at
   the configured path, this step, and the image build with it, fails.
+
+  `healthCheckPath` must start with a leading slash (e.g. `/api/health`), and must not contain a
+  comma or any whitespace — `kn-next deploy`/`preview`/`build` validate this up front and refuse to
+  run rather than fail deep inside the image build. A comma is rejected because the value is joined
+  into a comma-separated list of paths to warm before this step; a comma in a single path would
+  silently split it into two.
 - It checks the cache that came out the other side against a **minimum size**. A cache that is
   present but implausibly small looks exactly like a healthy one — same configuration, same startup
   path, no error — while doing nothing at runtime, so the build refuses to ship it.

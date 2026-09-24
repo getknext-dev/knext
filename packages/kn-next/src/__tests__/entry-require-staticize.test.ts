@@ -154,10 +154,16 @@ describe("vinext-compile bundles the entry's createRequire(import.meta.url) pack
             encoding: "utf8",
             timeout: 30_000,
         });
-        if (process.platform === "darwin" && run.signal === "SIGKILL") {
+        if (
+            process.platform === "darwin" &&
+            run.signal === "SIGKILL" &&
+            Bun.version === "1.4.0"
+        ) {
             // Bun 1.4.0's freshly-built ad-hoc-signed macOS executables are
             // SIGKILLed by the OS before running (#1227) — an environment fault,
             // not this fix's. CI (linux) always runs the behavioural half.
+            // Scoped to 1.4.0 only: 1.4.2 (the pin since #1310) signs validly
+            // on darwin-arm64, so a SIGKILL there is a real failure.
             return;
         }
         expect(run.stdout, `${run.stdout}\n${run.stderr}`).toContain(

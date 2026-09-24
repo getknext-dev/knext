@@ -28,8 +28,8 @@
  *
  * ## What shipped
  *
- * The platform now runs bun 1.4 everywhere: every `setup-bun` pin is 1.4.0, all
- * three container images are already `oven/bun:1.4.0-alpine`, and the redundant
+ * The platform now runs bun 1.4 everywhere: every `setup-bun` pin is 1.4.2, all
+ * three container images are already `oven/bun:1.4.2-alpine`, and the redundant
  * second setup steps are gone. The `<=1.3` branch of the #309 compile-cache
  * diagnostic still exists in the code but is no longer exercised by a CI lane —
  * a deliberate trade, recorded here rather than left to be discovered.

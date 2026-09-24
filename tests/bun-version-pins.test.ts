@@ -160,3 +160,99 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
     ).toEqual([]);
   });
 });
+/**
+ * Lockstep (#1310): the Bun VERSION is part of the compat credential
+ * fingerprint, so a partial bump is not a smaller bump — it is two Buns under
+ * one credential. Every site that SELECTS a Bun must name the same one:
+ * `packageManager`, every setup-bun pin (and every dispatch-input default
+ * behind a `||` fallback), the off-PATH npm install in install-smoke.yml, and
+ * every `oven/bun` image in a Dockerfile / template / workflow / script — the
+ * latter also pinned BY DIGEST, to the one digest for that tag.
+ *
+ * Bumping Bun means editing PINNED_BUN and PINNED_BUN_IMAGE_DIGEST below, on
+ * purpose. The digest is the multi-arch INDEX digest (`crane digest
+ * oven/bun:<v>-alpine`), not a per-platform manifest.
+ *
+ * Deliberately NOT scanned: prose. "Measured on bun 1.4.0" in a comment or
+ * doc is history, and the Bun FLOOR (`bunMeetsFloor`, the compat-vinext.yml
+ * floor check, BUN_COUNTED_BODY_FLOOR) is a minimum, not a selection.
+ */
+const PINNED_BUN = '1.4.2';
+const PINNED_BUN_IMAGE_DIGEST =
+  'sha256:d888c0ae6c86d7866ff10c5aafdd9077b36aee6455b33dd270fb93c0dd5cef6f';
+
+function trackedFiles(): string[] {
+  const r = Bun.spawnSync(['git', 'ls-files'], { cwd: REPO_ROOT });
+  if (r.exitCode !== 0) throw new Error(`git ls-files failed: ${r.stderr.toString()}`);
+  return r.stdout.toString().split('\n').filter(Boolean);
+}
+
+/** Files that SELECT an image — never prose (`.md`/`.mdx`) or test fixtures. */
+function imageBearingFiles(): string[] {
+  return trackedFiles().filter(
+    (f) =>
+      !f.startsWith('.claude/') &&
+      (/(^|\/)Dockerfile[^/]*$/.test(f) ||
+        f.endsWith('.hbs') ||
+        /^\.github\/workflows\/[^/]+\.ya?ml$/.test(f) ||
+        /^scripts\/.*\.sh$/.test(f)),
+  );
+}
+
+describe(`bun lockstep (#1310) — one Bun (${PINNED_BUN}) everywhere it is selected`, () => {
+  it('packageManager pins the lockstep Bun', () => {
+    const pkg = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8'));
+    expect(pkg.packageManager).toBe(`bun@${PINNED_BUN}`);
+  });
+
+  it('every setup-bun pin, and every dispatch-input default behind a fallback, is the lockstep Bun', () => {
+    const steps = setupBunSteps();
+    expect(steps.length).toBeGreaterThan(0);
+    const off = steps.flatMap((s) => {
+      const out: string[] = [];
+      const pinned =
+        s.version && PIN_RE.test(s.version) ? s.version : s.version?.match(FALLBACK_RE)?.[1];
+      if (pinned !== PINNED_BUN) out.push(`${s.file}:${s.line} setup-bun -> ${s.version}`);
+      if (s.version && FALLBACK_RE.test(s.version) && s.inputDefault !== PINNED_BUN) {
+        out.push(`${s.file} inputs.bun-version.default -> ${s.inputDefault}`);
+      }
+      return out;
+    });
+    expect(off).toEqual([]);
+  });
+
+  it('the off-PATH npm bun in install-smoke.yml is the lockstep Bun', () => {
+    const text = readFileSync(join(REPO_ROOT, '.github/workflows/install-smoke.yml'), 'utf8');
+    const pins = [...text.matchAll(/\bbun@(\d+\.\d+\.\d+)\b/g)].map((m) => m[1]);
+    expect(pins.length).toBeGreaterThan(0);
+    expect([...new Set(pins)]).toEqual([PINNED_BUN]);
+  });
+
+  it('every oven/bun image reference is the lockstep tag, pinned by the one digest', () => {
+    const tag = `oven/bun:${PINNED_BUN}-alpine`;
+    const pinned = `${tag}@${PINNED_BUN_IMAGE_DIGEST}`;
+    let selecting = 0;
+    const off: string[] = [];
+    for (const f of imageBearingFiles()) {
+      readFileSync(join(REPO_ROOT, f), 'utf8')
+        .split('\n')
+        .forEach((line, i) => {
+          // A concrete reference: `oven/bun:<tag>` and/or `@sha256:`. The
+          // `oven/bun:*-alpine` wildcard and a bare `oven/bun` ("oven/bun ships
+          // bun") are prose. A tag never ends in `.` (sentence punctuation).
+          const isComment = /^\s*#/.test(line);
+          for (const m of line.matchAll(/oven\/bun(?::\w(?:[\w.-]*\w)?)?(?:@sha256:[0-9a-f]+)?/g)) {
+            if (m[0] === 'oven/bun') continue;
+            // A comment may NAME the image without its digest, but must name
+            // the lockstep tag; anything that is not a comment SELECTS the
+            // image and must carry the one digest.
+            const ok = isComment ? m[0] === tag || m[0] === pinned : m[0] === pinned;
+            if (!isComment) selecting++;
+            if (!ok) off.push(`${f}:${i + 1}: ${m[0]}`);
+          }
+        });
+    }
+    expect(selecting).toBeGreaterThan(0);
+    expect(off).toEqual([]);
+  });
+});
