@@ -109,6 +109,24 @@ export const GUARD_SELF_FILES = Object.freeze([
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
+ * Is `s` (already known to match `DATE_RE`'s digit-shape) a REAL calendar
+ * date? `Date.parse` alone is not enough (#1370 review round 3): an
+ * out-of-range month/day like `9999-99-99` or `2026-10-99` parses to NaN,
+ * but an out-of-range DAY-OF-MONTH like `2026-02-30` does not — V8 silently
+ * rolls it forward to `2026-03-02` instead of refusing it. Round-tripping
+ * through `toISOString` and requiring the EXACT string back catches both
+ * failure shapes with one check.
+ *
+ * @param {string} s a string already matching `DATE_RE`
+ * @returns {boolean}
+ */
+function isValidCalendarDate(s) {
+  const d = new Date(`${s}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return false;
+  return d.toISOString().slice(0, 10) === s;
+}
+
+/**
  * Is a credential window currently live? Mirrors ADR-0056's own language
  * ("null = no RC cut yet"): ANY non-null `rcTag` counts, even a malformed
  * one — a malformed-but-truthy tag is still a state someone is actively
@@ -146,11 +164,23 @@ export function markerValidity(pin, now) {
     return { valid: false, reason: 'rcBumpMarker is not an object' };
   }
   const { date, expires, reason } = marker;
-  if (typeof date !== 'string' || !DATE_RE.test(date)) {
-    return { valid: false, reason: 'rcBumpMarker.date is missing or not YYYY-MM-DD' };
+  // The regex only checks SHAPE (digit-digit-digit) — `9999-99-99` and
+  // `2026-10-99` match it, and `Date.parse` on the former is NaN while the
+  // latter is ALSO NaN, but `2026-02-30` (no such day) is neither malformed
+  // NOR NaN: V8 silently rolls it forward to 2026-03-02. `isValidCalendarDate`
+  // below catches all three the same way — round-tripping through
+  // `toISOString` and requiring the exact string back (#1370 review round 3).
+  if (typeof date !== 'string' || !DATE_RE.test(date) || !isValidCalendarDate(date)) {
+    return {
+      valid: false,
+      reason: 'rcBumpMarker.date is missing, not YYYY-MM-DD, or not a real calendar date',
+    };
   }
-  if (typeof expires !== 'string' || !DATE_RE.test(expires)) {
-    return { valid: false, reason: 'rcBumpMarker.expires is missing or not YYYY-MM-DD' };
+  if (typeof expires !== 'string' || !DATE_RE.test(expires) || !isValidCalendarDate(expires)) {
+    return {
+      valid: false,
+      reason: 'rcBumpMarker.expires is missing, not YYYY-MM-DD, or not a real calendar date',
+    };
   }
   if (typeof reason !== 'string' || reason.trim() === '') {
     return { valid: false, reason: 'rcBumpMarker.reason is missing or empty' };
@@ -185,21 +215,28 @@ export function markerValidity(pin, now) {
     };
   }
   // Cap the window a single marker can authorize, measured from TODAY, not
-  // from `date` (#1370 review round 2). NOTE, for honesty: given the two
-  // checks directly above (date <= today, today <= expires), this bound is
-  // PROVABLY equivalent in outcome to the original `expires - date` cap —
-  // algebraically, `expires - today <= expires - date` whenever
-  // `today >= date`, so nothing currently reachable can make the two
-  // formulas disagree. It is kept measured from `today` anyway because that
-  // is the invariant actually meant ("how far does this authorization reach
-  // from NOW") and because it stays correct on its own if a future edit ever
-  // touches the date<=today check above without touching this line — the
-  // `expires - date` form only stayed safe by riding on that other check.
-  // 14 days matches ADR-0056's own credential-night cadence unit.
+  // from `date` (#1370 review round 2). CORRECTED WORDING (#1370 review
+  // round 3 — the earlier comment here claimed this was "provably
+  // equivalent" to the original `expires - date` cap; that was wrong, not
+  // just imprecise). It is NOT equivalent: a backdated `date` (allowed by
+  // the date <= today check above) with `expires` within 14 days of TODAY
+  // can have `expires - date` far exceed 14 days, and this check still
+  // passes it — deliberately, because the invariant this cap actually
+  // enforces is "an exemption reaches at most 14 days past the run time",
+  // not "the marker's own span is at most 14 days". Measuring from `today`
+  // is what makes that the literal thing being checked, regardless of how
+  // old `date` is. 14 days matches ADR-0056's own credential-night cadence
+  // unit.
   const MAX_MARKER_SPAN_DAYS = 14;
   const spanFromTodayMs = Date.parse(`${expires}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`);
   const spanFromTodayDays = spanFromTodayMs / (24 * 60 * 60 * 1000);
-  if (spanFromTodayDays > MAX_MARKER_SPAN_DAYS) {
+  // Fail CLOSED on the comparison itself (#1370 review round 3): `date` and
+  // `expires` are now calendar-validated above, so Date.parse here should
+  // never be NaN — but a `> MAX` comparison silently ADMITS a NaN span
+  // (NaN > 14 is false), while `!(<= MAX)` REJECTS it. Belt and suspenders:
+  // this is the guard's last line of defense if the calendar validation
+  // above is ever weakened without this line being touched too.
+  if (!(spanFromTodayDays <= MAX_MARKER_SPAN_DAYS)) {
     return {
       valid: false,
       reason: `rcBumpMarker.expires (${expires}) is ${spanFromTodayDays} days from today (${today}), which exceeds the ${MAX_MARKER_SPAN_DAYS}-day cap`,

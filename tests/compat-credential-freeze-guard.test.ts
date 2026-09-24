@@ -109,6 +109,65 @@ describe('markerValidity (#1302)', () => {
     ).toBe(false);
   });
 
+  describe('the impossible-date exploit (#1370 review round 3)', () => {
+    // The reviewer's repro: `expires: "9999-99-99"` (or "2026-10-99") makes
+    // `Date.parse` NaN. A `spanFromTodayDays > 14` comparison is FALSE for
+    // NaN (NaN is never > or <= anything), so a naive cap check silently
+    // ADMITS it — a permanent exemption. `DATE_RE` alone does not catch
+    // these: it only checks digit SHAPE, and all three inputs below are
+    // shape-valid.
+
+    it('REJECTS expires: "9999-99-99" (NaN-producing, not shape-invalid)', () => {
+      const result = markerValidity(
+        { rcBumpMarker: { date: '2026-09-24', expires: '9999-99-99', reason: 'nan exploit' } },
+        NOW,
+      );
+      expect(result.valid).toBe(false);
+      expect(result.reason).toMatch(/not a real calendar date/);
+    });
+
+    it('REJECTS expires: "2026-10-99" (invalid day-of-month, NaN-producing)', () => {
+      const result = markerValidity(
+        { rcBumpMarker: { date: '2026-09-24', expires: '2026-10-99', reason: 'nan exploit 2' } },
+        NOW,
+      );
+      expect(result.valid).toBe(false);
+      expect(result.reason).toMatch(/not a real calendar date/);
+    });
+
+    it('REJECTS date: "2026-02-30" (no such day — silently rolls to 2026-03-02, NOT NaN)', () => {
+      // This is the sharper case: `new Date('2026-02-30T00:00:00Z')` is a
+      // VALID (non-NaN) Date in V8 — it normalizes to March 2 — so only a
+      // round-trip-through-toISOString check catches it, not a NaN check
+      // alone.
+      const result = markerValidity(
+        { rcBumpMarker: { date: '2026-02-30', expires: '2026-03-05', reason: 'rollover exploit' } },
+        NOW,
+      );
+      expect(result.valid).toBe(false);
+      expect(result.reason).toMatch(/not a real calendar date/);
+    });
+
+    it('REJECTS expires: "2026-02-30" too (the rollover check applies to both fields)', () => {
+      const result = markerValidity(
+        {
+          rcBumpMarker: { date: '2026-01-01', expires: '2026-02-30', reason: 'rollover exploit 2' },
+        },
+        NOW,
+      );
+      expect(result.valid).toBe(false);
+      expect(result.reason).toMatch(/not a real calendar date/);
+    });
+
+    it('a well-formed, real calendar date still validates fine (no regression)', () => {
+      const result = markerValidity(
+        { rcBumpMarker: { date: '2026-09-24', expires: '2026-10-08', reason: 'normal' } },
+        NOW,
+      );
+      expect(result.valid).toBe(true);
+    });
+  });
+
   it('rejects an empty or missing reason', () => {
     expect(
       markerValidity(
@@ -201,16 +260,10 @@ describe('markerValidity (#1302)', () => {
 
   it('an OLD date with an expires that is >14 days from TODAY is still capped', () => {
     // date is safely in the past (passes the future-date check and the
-    // expires>date check), and expires is >14 days from TODAY.
-    //
-    // Honesty note (not a claim this test alone discriminates the
-    // today-vs-date formula): given the date<=today and today<=expires
-    // checks directly above this one in markerValidity, `expires - today`
-    // and `expires - date` are PROVABLY equal outcomes here and in general
-    // (expires - today <= expires - date whenever today >= date) — see the
-    // comment on spanFromTodayMs. This test pins the cap's real BEHAVIOUR
-    // (an old-but-valid marker with a too-far expiry is rejected), not the
-    // specific arithmetic baseline used to compute it.
+    // expires>date check), and expires is >14 days from TODAY. Both the
+    // today-relative and date-relative formulas reject this one (span from
+    // either baseline exceeds 14 days) — see the NEXT test for the case
+    // that actually tells the two formulas apart.
     const result = markerValidity(
       {
         rcBumpMarker: { date: '2026-01-01', expires: '2026-10-20', reason: 'old date, far expiry' },
@@ -219,6 +272,29 @@ describe('markerValidity (#1302)', () => {
     );
     expect(result.valid).toBe(false);
     expect(result.reason).toMatch(/exceeds the 14-day cap/);
+  });
+
+  it('a BACKDATED marker with expires within 14 days of TODAY is VALID — the cap is today-relative, not date-relative (#1370 review round 3)', () => {
+    // Corrects an earlier (wrong) comment here that called the two formulas
+    // "provably equivalent" — they are not. `date` is far in the past
+    // (2026-01-01), but `expires` (2026-10-05) is only 11 days from TODAY
+    // (2026-09-24). spanFromToday = 11 <= 14 -> valid. The OLD `expires -
+    // date` formula would have measured ~277 days and rejected this same
+    // marker. The invariant this cap actually enforces is "an exemption
+    // reaches at most 14 days past the run time" — not "the marker's own
+    // date-to-expires span is at most 14 days" — and this is the case that
+    // proves it, not merely asserts it.
+    const result = markerValidity(
+      {
+        rcBumpMarker: {
+          date: '2026-01-01',
+          expires: '2026-10-05',
+          reason: 'old date, still-near expiry',
+        },
+      },
+      NOW,
+    );
+    expect(result.valid).toBe(true);
   });
 
   it('an expired marker reports "expired", never "exceeds the cap" (ordering)', () => {

@@ -49,7 +49,20 @@ only defense.
 }
 ```
 
-- `date` / `expires` — `YYYY-MM-DD`. `expires` must be strictly after `date`.
+- `date` / `expires` — `YYYY-MM-DD`, and both must be REAL calendar dates,
+  not merely digit-shaped. **(#1370 review round 3)** `Date.parse` alone is
+  not enough: `9999-99-99` and `2026-10-99` parse to `NaN`, but
+  `2026-02-30` (no such day) does not — V8 silently rolls it forward to
+  `2026-03-02` instead of refusing it. The guard round-trips both fields
+  through `toISOString` and requires the exact string back, which catches
+  every one of these. This matters because the span-cap comparison below
+  would otherwise silently ADMIT a `NaN`-producing date: `NaN > 14` is
+  `false`, so a naive `>` check treats an impossible date as "under the
+  cap" — a PERMANENT exemption (`{expires: "9999-99-99"}` would read
+  "valid through 9999-99-99" and never expire). The comparison itself is
+  also written fail-closed (`!(span <= MAX)`, not `span > MAX`) as a second
+  line of defense against the same `NaN` failure mode.
+- `expires` must be strictly after `date`.
 - `date` must not be later than **today** — a marker records when it was
   actually added, so it cannot be post-dated into the future. **(#1370
   review round 2)** This is required, not optional: an `expires - date` cap
@@ -57,12 +70,16 @@ only defense.
   expires: "2099-12-31"}` is an 11-day span, under a naive 14-day cap, yet
   authorizes nothing today and everything the instant the clock reaches
   2099.
-- `expires - today` is capped at **14 days**, evaluated at guard run time —
-  a single reviewed PR cannot license months of future frozen-file edits,
-  and (given the `date <= today` check above) this is the correct baseline:
-  an `expires - date` cap on an old-but-valid `date` with a far-future
-  `expires` is not actually bounded by 14 days from when the marker is
-  relied on.
+- `expires - today` is capped at **14 days**, evaluated at guard run time.
+  **Correction (#1370 review round 3):** an earlier version of this doc
+  claimed this was "provably equivalent" to an `expires - date` cap — that
+  was wrong. It is not equivalent: a BACKDATED `date` (allowed by the
+  `date <= today` check above) with `expires` within 14 days of today can
+  have `expires - date` far exceed 14 days, and the guard still accepts it
+  — deliberately. The actual invariant enforced is **"an exemption reaches
+  at most 14 days past the run time"**, not "the marker's own span is at
+  most 14 days"; measuring from `today` is what makes that literally what
+  gets checked, independent of how old `date` is.
 - `reason` — free text, non-empty.
 - Validity is `today <= expires` (inclusive), evaluated at guard run time.
 
