@@ -86,6 +86,13 @@ const VALID = [
 // The template is plain JS behind a .hbs extension; import a .mjs copy.
 const tmp = mkdtempSync(join(tmpdir(), "knext-malformed-url-"));
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
+/** A new directory under `tmp` (removed with it in afterAll). */
+let freshDirs = 0;
+const freshDir = (prefix: string) => {
+    const d = join(tmp, `${prefix}-${++freshDirs}`);
+    mkdirSync(d);
+    return d;
+};
 const CONTRACT = join(tmp, "runtime-contract.mjs");
 copyFileSync(join(REPO_ROOT, CONTRACTS[0]), CONTRACT);
 const contract = await import(CONTRACT);
@@ -241,10 +248,7 @@ describe("the guard survives the production minifier", () => {
         });
         // A fresh directory: Bun caches a directory's entries once a module in it
         // resolved, so a file written later beside CONTRACT is not found.
-        const minified = join(
-            mkdtempSync(join(tmp, "min-")),
-            "runtime-contract.min.mjs",
-        );
+        const minified = join(freshDir("min"), "runtime-contract.min.mjs");
         writeFileSync(minified, output[0].code);
         const built = await import(minified);
         const next = () => new Response("next");
@@ -358,65 +362,56 @@ function rawGet(
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-const bunOnPath =
-    spawnSync("bun", ["--version"], { encoding: "utf8" }).status === 0;
-if (!bunOnPath && process.env.KNEXT_REQUIRE_BUN === "1") {
-    throw new Error(
-        "KNEXT_REQUIRE_BUN=1 but `bun` is not on PATH — the bun half cannot run",
-    );
-}
-
+// This suite runs under bun, so bun is always available: the bun half runs
+// unconditionally, with the running binary.
 const RUNTIMES = [
-    { name: "node", bin: "node", srvx: SRVX_NODE, available: true },
-    { name: "bun", bin: "bun", srvx: SRVX_BUN, available: bunOnPath },
+    { name: "node", bin: "node", srvx: SRVX_NODE },
+    { name: "bun", bin: process.execPath, srvx: SRVX_BUN },
 ];
 
 for (const rt of RUNTIMES) {
-    describe.skipIf(!rt.available)(
-        `live srvx/${rt.name} + h3 under ${rt.name}`,
-        () => {
-            it("answers 400 for every malformed path and keeps serving", async () => {
-                const srv = await boot(rt.bin, rt.srvx);
-                try {
+    describe(`live srvx/${rt.name} + h3 under ${rt.name}`, () => {
+        it("answers 400 for every malformed path and keeps serving", async () => {
+            const srv = await boot(rt.bin, rt.srvx);
+            try {
+                expect((await rawGet(srv.port, "/")).status).toBe(200);
+                for (const path of MALFORMED) {
+                    const res = await rawGet(srv.port, path);
+                    expect({
+                        path: path.slice(0, 24),
+                        status: res.status,
+                    }).toEqual({
+                        path: path.slice(0, 24),
+                        status: 400,
+                    });
+                    expect(res.body).not.toContain("URIError");
+                    expect(srv.exited()).toBeNull();
                     expect((await rawGet(srv.port, "/")).status).toBe(200);
-                    for (const path of MALFORMED) {
-                        const res = await rawGet(srv.port, path);
-                        expect({
-                            path: path.slice(0, 24),
-                            status: res.status,
-                        }).toEqual({
-                            path: path.slice(0, 24),
-                            status: 400,
-                        });
-                        expect(res.body).not.toContain("URIError");
-                        expect(srv.exited()).toBeNull();
-                        expect((await rawGet(srv.port, "/")).status).toBe(200);
-                    }
-                } finally {
-                    srv.stop();
                 }
-            }, 60_000);
+            } finally {
+                srv.stop();
+            }
+        }, 60_000);
 
-            it("a handler that fails after the guard answers 500, leaks nothing, and the server keeps serving", async () => {
-                const srv = await boot(rt.bin, rt.srvx);
-                try {
-                    for (const path of ["/boom-sync", "/boom-async"]) {
-                        const res = await rawGet(srv.port, path);
-                        expect({ path, status: res.status }).toEqual({
-                            path,
-                            status: 500,
-                        });
-                        expect(res.body).not.toContain("handler");
-                        await sleep(200);
-                        expect(srv.exited()).toBeNull();
-                        expect((await rawGet(srv.port, "/")).status).toBe(200);
-                    }
-                } finally {
-                    srv.stop();
+        it("a handler that fails after the guard answers 500, leaks nothing, and the server keeps serving", async () => {
+            const srv = await boot(rt.bin, rt.srvx);
+            try {
+                for (const path of ["/boom-sync", "/boom-async"]) {
+                    const res = await rawGet(srv.port, path);
+                    expect({ path, status: res.status }).toEqual({
+                        path,
+                        status: 500,
+                    });
+                    expect(res.body).not.toContain("handler");
+                    await sleep(200);
+                    expect(srv.exited()).toBeNull();
+                    expect((await rawGet(srv.port, "/")).status).toBe(200);
                 }
-            }, 60_000);
-        },
-    );
+            } finally {
+                srv.stop();
+            }
+        }, 60_000);
+    });
 }
 
 // CONTROL: the same server without the wiring. Proves the live tests above can
@@ -576,7 +571,7 @@ describe("metricsRequestListener (the node entry's :9464 listener)", () => {
 // @getknext/core internals that are no-ops for this purpose — while srvx is
 // the real package. So the entry's OWN wiring of both listeners is what runs.
 function writeEntryApp(): string {
-    const dir = mkdtempSync(join(tmp, "entry-"));
+    const dir = freshDir("entry");
     const w = (rel: string, text: string) => {
         mkdirSync(dirname(join(dir, rel)), { recursive: true });
         writeFileSync(join(dir, rel), text);
