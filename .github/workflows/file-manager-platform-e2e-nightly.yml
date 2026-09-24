@@ -78,6 +78,19 @@ jobs:
       - name: Install workspace dependencies
         run: bun install --frozen-lockfile
 
+      # Moved ahead of the self-tests (was after cluster/operator setup):
+      # storage-mode-e2e.selftest.mjs imports the REAL RESERVED_STATIC_DIRS
+      # from the built @getknext/core dist rather than re-declaring it
+      # (#1292 round 2), so the dist must exist before the self-test runs.
+      - name: Build the workspace packages + the kn-next CLI
+        run: |
+          set -euo pipefail
+          bun run --filter "@getknext/lib" build
+          bun run --filter "@getknext/db" build
+          bun run --filter "@getknext/core" build
+          test -f packages/kn-next/dist/cli/kn-next.js
+          test -f packages/kn-next/dist/utils/reserved-static-dirs.js
+
       # The harness must be able to see red BEFORE its verdict on the cluster counts.
       - name: Self-test - the checks go red on deliberate defects
         run: node apps/file-manager/scripts/platform-e2e.selftest.mjs
@@ -164,14 +177,6 @@ jobs:
           kubectl rollout status deployment/kn-next-operator-controller-manager \
             -n kn-next-operator-system --timeout=180s
 
-      - name: Build the workspace packages + the kn-next CLI
-        run: |
-          set -euo pipefail
-          bun run --filter "@getknext/lib" build
-          bun run --filter "@getknext/db" build
-          bun run --filter "@getknext/core" build
-          test -f packages/kn-next/dist/cli/kn-next.js
-
       - name: Data plane (redis, postgres, minio) + Secrets
         run: |
           set -euo pipefail
@@ -245,11 +250,32 @@ jobs:
       # uses. Reuses the standing cluster/operator/registry/MinIO rather than
       # a second cluster, so the added cost is one more build+deploy+check,
       # not another ~8-10min of cluster bring-up.
-      - name: Storage-mode - create the MinIO bucket for the leg
+      # `aws s3 mb` creates a PRIVATE bucket. The served HTML links assets
+      # straight at MinIO with no signing (a real browser can't sign a
+      # request), so without an explicit anonymous-read policy every GET the
+      # live-check step makes would 403 — a real failure mode, not a test
+      # artifact, so it needs a real fix here rather than a workaround in the
+      # checker.
+      - name: Storage-mode - create the MinIO bucket for the leg (anonymous-read)
         run: |
           set -euo pipefail
-          AWS_ACCESS_KEY_ID="$MINIO_ACCESS_KEY" AWS_SECRET_ACCESS_KEY="$MINIO_SECRET_KEY" \
-            aws s3 mb s3://fm-e2e-storage-assets --endpoint-url http://127.0.0.1:9000 --region us-east-1
+          export AWS_ACCESS_KEY_ID="$MINIO_ACCESS_KEY" AWS_SECRET_ACCESS_KEY="$MINIO_SECRET_KEY"
+          aws s3 mb s3://fm-e2e-storage-assets --endpoint-url http://127.0.0.1:9000 --region us-east-1
+          cat > /tmp/fm-e2e-storage-assets-policy.json <<'JSON'
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": "*",
+                "Action": "s3:GetObject",
+                "Resource": "arn:aws:s3:::fm-e2e-storage-assets/*"
+              }
+            ]
+          }
+          JSON
+          aws s3api put-bucket-policy --bucket fm-e2e-storage-assets \
+            --policy file:///tmp/fm-e2e-storage-assets-policy.json --endpoint-url http://127.0.0.1:9000
 
       - name: Storage-mode - kn-next deploy (object storage against in-cluster MinIO)
         env:
@@ -259,7 +285,14 @@ jobs:
           set -euo pipefail
           cp apps/file-manager/platform-e2e/kn-next.config.storage-e2e.ts apps/file-manager/kn-next.config.ts
           cd apps/file-manager
-          AWS_ENDPOINT_URL="http://minio.${APP_NS}.svc.cluster.local:9000" \
+          # `kn-next deploy` runs `aws s3` ON THE RUNNER (not in-cluster), so
+          # AWS_ENDPOINT_URL must be the port-forward the runner can actually
+          # resolve — NOT the cluster-internal DNS name, which only resolves
+          # inside the cluster. `publicUrl` in the profile stays on cluster
+          # DNS deliberately: that is what the SERVED HTML embeds, and it is
+          # correct there because a real request to it comes from inside (or
+          # in front of) the cluster, not from this runner.
+          AWS_ENDPOINT_URL="http://127.0.0.1:9000" \
           AWS_ACCESS_KEY_ID="$MINIO_ACCESS_KEY" AWS_SECRET_ACCESS_KEY="$MINIO_SECRET_KEY" \
           AWS_DEFAULT_REGION=us-east-1 \
             node ../../packages/kn-next/dist/cli/kn-next.js deploy \

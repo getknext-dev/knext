@@ -135,13 +135,45 @@ describe('storage-mode checks - mutation proof (the assertions themselves, not j
   });
 
   it('an image built WITHOUT NEXT_DEPLOYMENT_ID (build id != deploy tag) turns the leg RED', () => {
-    const wrongIdHtml = `<html><head><script src="${BUCKET_URL}/${NAME}/_next/static/development/chunk.js"></script></head></html>`;
+    // A stale/placeholder build id, NOT a RESERVED_STATIC_DIRS entry — this
+    // exercises "wrong build id", the sibling test below exercises "no
+    // build id at all because every ref was a reserved sibling".
+    const wrongIdHtml = `<html><head><script src="${BUCKET_URL}/${NAME}/_next/static/stale-build-id/chunk.js"></script></head></html>`;
     const { refs } = assertAssetPrefixReferenced({
       html: wrongIdHtml,
       bucketUrl: BUCKET_URL,
       name: NAME,
     });
     expect(() => assertBuildIdMatchesTag({ refs, tag: TAG })).toThrow(/!= deploy tag/);
+  });
+
+  it('a next/font preload under the RESERVED _vinext_fonts sibling is NOT misread as the build id', () => {
+    // #1292 round 2 (reviewer-caught): vinext writes font preloads to
+    // `_next/static/_vinext_fonts/`, a sibling of the build-id prefix, not
+    // inside it. A naive first-segment read misidentifies it as the build id
+    // and throws on a perfectly healthy deploy.
+    const htmlWithFont =
+      `<html><head><script src="${BUCKET_URL}/${NAME}/_next/static/${TAG}/chunk.js"></script>` +
+      `<link rel="preload" as="font" href="${BUCKET_URL}/${NAME}/_next/static/_vinext_fonts/geist.woff2"></head></html>`;
+    const { refs } = assertAssetPrefixReferenced({
+      html: htmlWithFont,
+      bucketUrl: BUCKET_URL,
+      name: NAME,
+    });
+    expect(refs.some((r) => r.includes('_vinext_fonts'))).toBe(true);
+    expect(assertBuildIdMatchesTag({ refs, tag: TAG })).toContain(TAG);
+  });
+
+  it('a font-only reference set (no real build-id segment) still turns the leg RED', () => {
+    const fontOnlyHtml = `<html><head><link rel="preload" as="font" href="${BUCKET_URL}/${NAME}/_next/static/_vinext_fonts/geist.woff2"></head></html>`;
+    const { refs } = assertAssetPrefixReferenced({
+      html: fontOnlyHtml,
+      bucketUrl: BUCKET_URL,
+      name: NAME,
+    });
+    expect(() => assertBuildIdMatchesTag({ refs, tag: TAG })).toThrow(
+      /none of the referenced asset URLs carry/,
+    );
   });
 
   it('a healthy image passes both assertions', () => {

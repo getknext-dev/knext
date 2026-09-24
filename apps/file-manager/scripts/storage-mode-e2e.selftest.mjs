@@ -57,12 +57,37 @@ function noAssetPrefixHtml() {
   );
 }
 
-/** HTML built WITH ASSET_PREFIX but WITHOUT NEXT_DEPLOYMENT_ID: bucket prefix present, wrong/default build id. */
+/**
+ * Healthy HTML PLUS a `next/font` preload — vinext's `createGoogleFontsPlugin`
+ * writes fonts to the RESERVED sibling `_next/static/_vinext_fonts/`, a
+ * first-level directory beside the build-id prefix, not inside it. Round 2 of
+ * the PR review proved this makes a naive "first segment after
+ * `_next/static/`" read misidentify `_vinext_fonts` as the build id and throw
+ * on a perfectly healthy deploy (#1292).
+ */
+function healthyHtmlWithFontPreload() {
+  return (
+    '<html><head>' +
+    `<link rel="stylesheet" href="${PREFIX}_next/static/${TAG}/css/a.css">` +
+    `<script src="${PREFIX}_next/static/${TAG}/chunk.js"></script>` +
+    `<link rel="preload" as="font" crossorigin="anonymous" type="font/woff2" href="${PREFIX}_next/static/_vinext_fonts/geist-abc123.woff2">` +
+    '</head><body>ok</body></html>'
+  );
+}
+
+/**
+ * HTML built WITH ASSET_PREFIX but WITHOUT NEXT_DEPLOYMENT_ID: bucket prefix
+ * present, wrong/stale build id. Deliberately NOT a RESERVED_STATIC_DIRS
+ * entry (e.g. NOT `development`) — this fixture must exercise "the build id
+ * segment disagrees with the deploy tag", not "every ref was a reserved
+ * sibling and there is no build-id segment at all" (a different, separately
+ * covered failure mode below).
+ */
 function wrongBuildIdHtml() {
   return (
     '<html><head>' +
-    `<link rel="stylesheet" href="${PREFIX}_next/static/css/a.css">` +
-    `<script src="${PREFIX}_next/static/development/chunk.js"></script>` +
+    `<link rel="stylesheet" href="${PREFIX}_next/static/stale-build-id/a.css">` +
+    `<script src="${PREFIX}_next/static/stale-build-id/chunk.js"></script>` +
     '</head><body>ok</body></html>'
   );
 }
@@ -129,6 +154,23 @@ await (async () => {
   }
 })();
 
+// A font preload under the RESERVED `_vinext_fonts/` sibling must NOT be
+// misread as the build id — mutation-proved: before the RESERVED_STATIC_DIRS
+// fix this fixture made assertBuildIdMatchesTag throw on a healthy deploy.
+mustPass('healthy HTML with a next/font preload: build id still matches the deploy tag', () => {
+  const { refs } = assertAssetPrefixReferenced({
+    html: healthyHtmlWithFontPreload(),
+    bucketUrl: BUCKET_URL,
+    name: NAME,
+  });
+  assert.ok(
+    refs.some((r) => r.includes('_vinext_fonts')),
+    'expected the font preload to be among the extracted bucket refs',
+  );
+  const result = assertBuildIdMatchesTag({ refs, tag: TAG });
+  assert.ok(result.includes(TAG), `expected the real build id in the result, got: ${result}`);
+});
+
 // ── defects: each must make its check throw ─────────────────────────────────
 mustThrow('image built without ASSET_PREFIX (relative asset paths served)', () => {
   assertAssetPrefixReferenced({ html: noAssetPrefixHtml(), bucketUrl: BUCKET_URL, name: NAME });
@@ -137,6 +179,19 @@ mustThrow('image built without ASSET_PREFIX (relative asset paths served)', () =
 mustThrow('image built without NEXT_DEPLOYMENT_ID (build id != deploy tag)', () => {
   const { refs } = assertAssetPrefixReferenced({
     html: wrongBuildIdHtml(),
+    bucketUrl: BUCKET_URL,
+    name: NAME,
+  });
+  assertBuildIdMatchesTag({ refs, tag: TAG });
+});
+
+mustThrow('every referenced asset is a reserved sibling (no real build-id segment)', () => {
+  const fontOnlyHtml =
+    '<html><head>' +
+    `<link rel="preload" as="font" href="${PREFIX}_next/static/_vinext_fonts/geist.woff2">` +
+    '</head><body>ok</body></html>';
+  const { refs } = assertAssetPrefixReferenced({
+    html: fontOnlyHtml,
     bucketUrl: BUCKET_URL,
     name: NAME,
   });

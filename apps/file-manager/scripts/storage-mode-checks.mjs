@@ -16,6 +16,14 @@
  * in the runner and is passed in as data, never performed here.
  */
 
+// The relative-dist import (not a package-specifier import) is deliberate: it
+// reaches the SAME RESERVED_STATIC_DIRS `asset-upload.ts` uses, built to its
+// own stable tsup entry (`packages/kn-next/tsup.config.ts`), rather than
+// re-declaring the list here and risking drift (round-2 PR review, #1292).
+// `apps/file-manager/scripts/compat-smoke.mjs` already reaches into this
+// same dist tree the same way.
+import { RESERVED_STATIC_DIRS } from '../../../packages/kn-next/dist/utils/reserved-static-dirs.js';
+
 /**
  * Same-origin-style extraction, but for asset references that point at an
  * ABSOLUTE bucket URL (storage mode) rather than a same-origin path. Scans by
@@ -141,16 +149,28 @@ export async function assertAssetUrlsServeOk({ urls, fetchOne }) {
  * prefix) — `verifyBuiltImageLockstep` (#1291) proves this against the BUILT
  * image before it ships; this proves it against what a browser actually gets.
  *
+ * The first path segment after `_next/static/` is NOT always the build id:
+ * vinext writes shared, cross-build siblings at that SAME level — most
+ * concretely `_vinext_fonts/`, where `next/font` preloads land
+ * (`createGoogleFontsPlugin`'s `writeBundle` hook,
+ * `packages/kn-next/src/utils/asset-upload.ts`'s doc comment has the detail).
+ * A naive first-segment read misreads a font preload as "the build id" and
+ * throws on a perfectly healthy deploy (#1292 round 2, reviewer-caught).
+ * `RESERVED_STATIC_DIRS` is imported (not re-declared) from
+ * `asset-upload.ts`'s own single source of truth, so this can never drift
+ * from what the real GC/marker logic already excludes.
+ *
  * @param {{ refs: string[], tag: string }} args
  * @returns {string}
  */
 export function assertBuildIdMatchesTag({ refs, tag }) {
   const withBuildId = refs
     .map((u) => /\/_next\/static\/([^/]+)\//.exec(u)?.[1])
-    .filter((v) => Boolean(v));
+    .filter((v) => Boolean(v) && !RESERVED_STATIC_DIRS.has(v));
   if (withBuildId.length === 0) {
     throw new Error(
-      `none of the referenced asset URLs carry a "/_next/static/<buildId>/" segment: ${JSON.stringify(refs)}`,
+      `none of the referenced asset URLs carry a "/_next/static/<buildId>/" segment ` +
+        `(reserved siblings excluded: ${[...RESERVED_STATIC_DIRS].sort().join(', ')}): ${JSON.stringify(refs)}`,
     );
   }
   const distinct = [...new Set(withBuildId)];

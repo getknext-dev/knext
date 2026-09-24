@@ -127,6 +127,11 @@ export default defineConfig([
       'adapters/metrics': 'src/adapters/metrics.ts',
       'adapters/correlation-response': 'src/adapters/correlation-response.ts',
       'utils/logger': 'src/utils/logger.ts',
+      // #1292 round 2: given its own entry so a plain-`node` script outside
+      // this build (a nightly CI check) can import the SAME
+      // RESERVED_STATIC_DIRS asset-upload.ts uses, instead of re-declaring
+      // it and risking drift.
+      'utils/reserved-static-dirs': 'src/utils/reserved-static-dirs.ts',
     },
     // Emit `.d.ts` declarations for the TS library entries so typed consumers
     // (e.g. `import type { KnativeNextConfig } from '@getknext/core'`) work. The
@@ -161,6 +166,7 @@ export default defineConfig([
         'adapters/metrics': 'src/adapters/metrics.ts',
         'adapters/correlation-response': 'src/adapters/correlation-response.ts',
         'utils/logger': 'src/utils/logger.ts',
+        'utils/reserved-static-dirs': 'src/utils/reserved-static-dirs.ts',
       },
     },
     format: ['esm'],
