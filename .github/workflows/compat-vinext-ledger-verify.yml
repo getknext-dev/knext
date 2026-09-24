@@ -1,0 +1,38 @@
+# Re-derives every vinext quarantine-ledger entry from the runs it lists.
+#
+# The ledger records, per entry, the compat-vinext runs its snapshot came from
+# (`evidence.fail` with each run's failing cases, and `evidence.pass` for a
+# flaky entry). Validation alone cannot tell whether those runs exist or say
+# what the entry claims, so an unsupported entry could be relabelled flaky with
+# an invented "passing" run and escape the stale rule. This job downloads every
+# listed run's shard summaries and re-runs `refresh` on them: any difference, a
+# run that cannot be fetched, or a run from another lane fails the check.
+name: compat-vinext ledger evidence
+
+on:
+  pull_request:
+    paths:
+      - test/compat-vinext-ledger.json
+      - scripts/compat-vinext-ledger.mjs
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: compat-vinext-ledger-verify-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Ledger evidence re-derives from its listed runs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Re-derive every entry from the runs it lists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/compat-vinext-ledger.mjs verify --ledger test/compat-vinext-ledger.json

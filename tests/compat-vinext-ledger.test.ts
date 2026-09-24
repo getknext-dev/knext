@@ -32,18 +32,25 @@ import { buildLedger, renderTable } from '../scripts/compat-run-ledger.mjs';
 import {
   applyLedger,
   CLASSES,
+  downloadRun,
+  FLAKY_FILE_CAP,
+  FLAKY_MAX_EXPIRY_DAYS,
+  flakyWindow,
   LEDGER_FILE_CAP,
   MAX_EXPIRY_DAYS,
+  previousRuns,
   publishedNumber,
   refreshSnapshots,
   skippedWarnings,
   staleEntries,
   validateLedger,
+  verifyEvidence,
 } from '../scripts/compat-vinext-ledger.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const LEDGER_PATH = 'test/compat-vinext-ledger.json';
 const WORKFLOW = '.github/workflows/compat-vinext.yml';
+const VERIFY_WORKFLOW = '.github/workflows/compat-vinext-ledger-verify.yml';
 const read = (rel: string) => readFileSync(resolve(repoRoot, rel), 'utf8');
 
 const TODAY = '2026-09-24';
@@ -132,7 +139,8 @@ describe('validateLedger: the approved constraints', () => {
       feature: undefined,
       upstream: undefined,
       cases: ['hash'],
-      evidence: { fail: [{ run: '1', cases: ['hash'] }], pass: ['2'] },
+      evidence: { fail: [{ run: '1', cases: ['hash'] }], pass: ['2', '3'] },
+      expires: '2026-10-08',
     });
     expect(errs(ledger([flaky]))).toEqual([]);
     const failOnly = { fail: [{ run: '1', cases: ['hash'] }] };
@@ -140,6 +148,26 @@ describe('validateLedger: the approved constraints', () => {
     expect(errs(ledger([{ ...flaky, evidence: { pass: ['2'] } }])).join()).toMatch(/mixed/);
     const same = { fail: [{ run: '1', cases: ['hash'] }], pass: ['1'] };
     expect(errs(ledger([{ ...flaky, evidence: same }])).join()).toMatch(/both passed and failed/);
+  });
+
+  it('a flaky entry needs at least three evidence runs, expires within 14 days, and at most 5 are ledgered', () => {
+    const flaky = navEntry(['hash']);
+    expect(errs(ledger([flaky]))).toEqual([]);
+    const two = { fail: [{ run: '1', cases: ['hash'] }], pass: ['2'] };
+    expect(errs(ledger([{ ...flaky, evidence: two }])).join()).toMatch(
+      /at least three evidence runs/,
+    );
+    expect(FLAKY_MAX_EXPIRY_DAYS).toBe(14);
+    expect(errs(ledger([{ ...flaky, expires: '2026-10-09' }])).join()).toMatch(/14 days/);
+    // an unsupported entry keeps the 30-day window
+    expect(errs(ledger([entry({ expires: '2026-10-24' })]))).toEqual([]);
+    expect(FLAKY_FILE_CAP).toBe(5);
+    const flakies = Array.from({ length: 6 }, (_, i) => ({
+      ...flaky,
+      test: `test/e2e/flaky${i}/x.test.ts`,
+    }));
+    expect(errs(ledger(flakies)).join()).toMatch(/6 flaky files .* at most 5/);
+    expect(errs(ledger(flakies.slice(0, 5)))).toEqual([]);
   });
 
   it('every entry needs failing-run evidence recorded per run, with that run’s cases', () => {
@@ -219,7 +247,8 @@ const navEntry = (cases: string[]) =>
     feature: undefined,
     upstream: undefined,
     cases,
-    evidence: { fail: [{ run: '1', cases }], pass: ['2'] },
+    evidence: { fail: [{ run: '1', cases }], pass: ['2', '3'] },
+    expires: '2026-10-08',
   });
 
 describe('applyLedger: case-level reclassification, never narrowing', () => {
@@ -455,12 +484,194 @@ describe('refreshSnapshots: the snapshot is generated from evidence', () => {
     const { ledger: next, errors } = refresh(ledger([flaky]), [
       nav('61', ['hash']),
       nav('62', null),
+      nav('63', null),
     ]);
     expect(errors).toEqual([]);
     expect(next.entries[0].evidence).toEqual({
       fail: [{ run: '61', cases: ['hash'] }],
-      pass: ['62'],
+      pass: ['62', '63'],
     });
+    const short = refresh(ledger([flaky]), [nav('61', ['hash']), nav('62', null)]);
+    expect(short.errors.join()).toMatch(/at least three/);
+  });
+});
+
+describe('flakyWindow: a flaky entry is judged over the last three runs', () => {
+  const failRun = () => [applyLedger(summary(), [navEntry(['hash'])])];
+  const passRun = () => {
+    const s = summary({ failed: 2 });
+    s.failures = s.failures.filter((f: Any) => f.file !== NAV);
+    return [s];
+  };
+  const notRunRun = () => {
+    const s = summary({ failed: 2, notRun: 1, notRunFiles: [NAV] });
+    s.failures = s.failures.filter((f: Any) => f.file !== NAV);
+    return [s];
+  };
+  const flaky = navEntry(['hash']);
+
+  it('three failures in a row is broken, not flaky', () => {
+    const v = flakyWindow([flaky], [failRun(), failRun(), failRun()]);
+    expect(v.broken).toEqual([{ test: NAV, runs: 3 }]);
+    expect(v.stale).toEqual([]);
+  });
+
+  it('three passes in a row is stale', () => {
+    const v = flakyWindow([flaky], [passRun(), passRun(), passRun()]);
+    expect(v.stale).toEqual([{ test: NAV, runs: 3 }]);
+    expect(v.broken).toEqual([]);
+  });
+
+  it('a mixed window is neither; only the LAST three informative runs count', () => {
+    expect(flakyWindow([flaky], [failRun(), passRun(), failRun()])).toEqual({
+      broken: [],
+      stale: [],
+    });
+    expect(flakyWindow([flaky], [failRun(), failRun(), failRun(), passRun()])).toEqual({
+      broken: [],
+      stale: [],
+    });
+  });
+
+  it('a run where the file did not run is skipped, not counted', () => {
+    const v = flakyWindow([flaky], [failRun(), notRunRun(), failRun(), failRun()]);
+    expect(v.broken).toEqual([{ test: NAV, runs: 3 }]);
+  });
+
+  it('fewer than three informative runs gives no verdict', () => {
+    expect(flakyWindow([flaky], [failRun(), failRun()])).toEqual({ broken: [], stale: [] });
+  });
+
+  it('reads unapplied summaries (history from before the ledger) as well as applied ones', () => {
+    const raw = () => [summary()]; // NAV fails with 'hash' in failures, no quarantined field
+    expect(flakyWindow([flaky], [raw(), raw(), failRun()]).broken).toEqual([
+      { test: NAV, runs: 3 },
+    ]);
+  });
+
+  it('ignores unsupported entries (their stale rule is per run)', () => {
+    const unsupported = entry({ test: NAV, cases: ['hash'] });
+    expect(flakyWindow([unsupported], [failRun(), failRun(), failRun()])).toEqual({
+      broken: [],
+      stale: [],
+    });
+  });
+});
+
+describe('previousRuns / downloadRun: history from the lane’s own earlier runs', () => {
+  it('lists completed runs of this workflow on main, newest first, excluding the current run', () => {
+    const calls: string[][] = [];
+    const exec = (args: string[]) => {
+      calls.push(args);
+      return JSON.stringify([
+        { databaseId: 30, status: 'completed' },
+        { databaseId: 29, status: 'in_progress' },
+        { databaseId: 28, status: 'completed' },
+        { databaseId: 27, status: 'completed' },
+        { databaseId: 26, status: 'completed' },
+      ]);
+    };
+    expect(previousRuns(exec, { repo: 'o/r', currentRunId: '30', limit: 2 })).toEqual(['28', '27']);
+    expect(calls[0]).toEqual(
+      expect.arrayContaining(['run', 'list', '--workflow', 'compat-vinext.yml']),
+    );
+    expect(calls[0]).toEqual(expect.arrayContaining(['--branch', 'main', '--repo', 'o/r']));
+  });
+
+  it('downloads only the lane’s shard summaries for a run', () => {
+    const calls: string[][] = [];
+    downloadRun(
+      (a: string[]) => {
+        calls.push(a);
+        return '';
+      },
+      { repo: 'o/r', runId: '28', dir: '/tmp/x' },
+    );
+    expect(calls[0]).toEqual([
+      'run',
+      'download',
+      '28',
+      '--repo',
+      'o/r',
+      '--pattern',
+      'compat-vinext-summary-*',
+      '--dir',
+      '/tmp/x',
+    ]);
+  });
+});
+
+describe('verifyEvidence: every entry re-derives from the runs it lists', () => {
+  const vinext = (failures: Any[], over: Record<string, unknown> = {}) => [
+    summary({ builder: 'vinext', failures, failed: failures.length, ...over }),
+  ];
+  const RUNS: Record<string, Any[]> = {
+    '101': vinext([{ file: SHELLS, kind: 'assertion', cases: ['a', 'b', 'c'] }]),
+    '102': vinext([{ file: SHELLS, kind: 'assertion', cases: ['a', 'b'] }]),
+    '103': vinext([]),
+    '104': vinext([{ file: NAV, kind: 'timeout', cases: ['hash'] }]),
+    '105': vinext([]),
+    '106': vinext([]),
+    '107': vinext([{ file: NAV, kind: 'timeout', cases: ['hash'] }], { builder: 'turbopack' }),
+  };
+  const fetchRun = (id: string) => {
+    if (!RUNS[id]) throw new Error(`run ${id} not found`);
+    return RUNS[id];
+  };
+  const shells = entry({
+    evidence: {
+      fail: [
+        { run: '101', cases: ['a', 'b', 'c'] },
+        { run: '102', cases: ['a', 'b'] },
+      ],
+    },
+  });
+  const nav = navEntry(['hash']);
+  nav.evidence = { fail: [{ run: '104', cases: ['hash'] }], pass: ['105', '106'] };
+
+  it('a ledger generated by refresh from its listed runs verifies clean', () => {
+    expect(verifyEvidence(ledger([shells, nav]), fetchRun)).toEqual([]);
+  });
+
+  it('an unsupported entry relabelled flaky with an INVENTED pass run is caught', () => {
+    const relabel = {
+      ...shells,
+      class: 'flaky',
+      evidence: { fail: shells.evidence.fail, pass: ['999'] },
+    };
+    expect(verifyEvidence(ledger([relabel]), fetchRun).join()).toMatch(/999/);
+  });
+
+  it('relabelled flaky citing a REAL run where the file failed as a pass is caught', () => {
+    const relabel = {
+      ...shells,
+      class: 'flaky',
+      evidence: { fail: [shells.evidence.fail[0]], pass: ['102', '103'] },
+    };
+    expect(verifyEvidence(ledger([relabel]), fetchRun).join()).toMatch(/does not match/);
+  });
+
+  it('a hand-edited snapshot or evidence list is caught', () => {
+    expect(verifyEvidence(ledger([{ ...shells, cases: ['a'] }]), fetchRun).join()).toMatch(
+      /does not match/,
+    );
+  });
+
+  it('fetches each run once even when several entries cite it', () => {
+    const seen: string[] = [];
+    const counting = (id: string) => {
+      seen.push(id);
+      return fetchRun(id);
+    };
+    const shells2 = { ...shells, test: 'test/e2e/other/other.test.ts' };
+    verifyEvidence(ledger([shells, shells2]), counting);
+    expect(seen.sort()).toEqual(['101', '102']);
+  });
+
+  it('a run from another lane cannot be cited', () => {
+    const other = navEntry(['hash']);
+    other.evidence = { fail: [{ run: '107', cases: ['hash'] }], pass: ['105', '106'] };
+    expect(verifyEvidence(ledger([other]), fetchRun).join()).toMatch(/not a vinext-lane run/);
   });
 });
 
@@ -550,5 +761,26 @@ describe('workflow wiring', () => {
     expect(rec).toBeDefined();
     expect(rec.run).toContain('scripts/compat-vinext-ledger.mjs report');
     expect(rec['continue-on-error']).toBeUndefined();
+  });
+
+  it('the reconcile step reads the lane’s previous runs (flaky window) with a read-only token', () => {
+    const rec = steps('shard-ledger').find((st) => /quarantine ledger/i.test(st.name ?? ''));
+    expect(rec.run).toMatch(/--history-runs \d+/);
+    expect(rec.env?.GH_TOKEN).toBe('${{ github.token }}');
+    expect(wf.jobs['shard-ledger'].permissions).toEqual({ contents: 'read', actions: 'read' });
+  });
+
+  it('a PR that touches the ledger re-derives every entry from its listed runs', () => {
+    const verify = (Bun as Any).YAML.parse(read(VERIFY_WORKFLOW)) as Any;
+    const paths = verify.on.pull_request.paths as string[];
+    expect(paths).toContain('test/compat-vinext-ledger.json');
+    expect(paths).toContain('scripts/compat-vinext-ledger.mjs');
+    expect(verify.permissions).toEqual({ contents: 'read', actions: 'read' });
+    const job = Object.values(verify.jobs)[0] as Any;
+    const step = job.steps.find((st: Any) => /compat-vinext-ledger\.mjs verify/.test(st.run ?? ''));
+    expect(step).toBeDefined();
+    expect(step.run).toContain('--ledger test/compat-vinext-ledger.json');
+    expect(step.env?.GH_TOKEN).toBe('${{ github.token }}');
+    expect(JSON.stringify(verify)).not.toContain('continue-on-error');
   });
 });
