@@ -10,14 +10,23 @@
  * citations (and the plain-language divergence explanation) added in round
  * 2, and requires every one to turn the spec red.
  *
- * Round 3: the round-2 scan only recognised the trusted env-fallback
- * EXPRESSION, so a job/step-level `env: NEXTJS_REF: ...` override, an
- * `export NEXTJS_REF=`, or a `$GITHUB_ENV` write all stayed green. This
- * proof also (a) adds each of those three forms to a real workflow and
- * requires red, (b) mutates the scaffold pin + manifest together to a
- * version the docs' divergence paragraph does NOT cite, and requires red
- * (the docs check must be DERIVED, not hardcoded), and (c) adds a
- * `lockstepExceptions` entry with an empty `reason` and requires red.
+ * Round 3 (first pass): the round-2 scan only recognised the trusted
+ * env-fallback EXPRESSION, so a job/step-level `env: NEXTJS_REF: ...`
+ * override, an `export NEXTJS_REF=`, or a `$GITHUB_ENV` write all stayed
+ * green. This proof also (a) adds each of those three forms to a real
+ * workflow and requires red, (b) mutates the scaffold pin + manifest
+ * together to a version the docs' divergence paragraph does NOT cite, and
+ * requires red (the docs check must be DERIVED, not hardcoded), and (c)
+ * adds a `lockstepExceptions` entry with an empty `reason` and requires red.
+ *
+ * Round 3 (second pass): three more gaps. (d) `DEFAULT_NEXTJS_REF` in
+ * `scripts/compat-vinext-ledger.mjs` used to be a hardcoded THIRD copy —
+ * reverting it to a literal (rather than reading the manifest) must red;
+ * (e) the YAML-key scan anchored to a line's start, missing flow-style
+ * (`env: { NEXTJS_REF: ... } `) and quoted-key (`"NEXTJS_REF": ...`) forms —
+ * adding either to a real workflow must red; (f) the
+ * `NEXT_NPM_VERSION="${NEXTJS_REF#v}"` derivation count (6) must catch a
+ * literal replacement of just ONE of the six sites.
  *
  * Shared harness, for the reasons this repo has already paid for:
  *   * `mutate` asserts the anchor occurs exactly once and aborts otherwise —
@@ -48,6 +57,7 @@ const PROOF = {
     docsMatrixMdx: 'apps/docs/content/docs/compat-matrix.mdx',
     manifest: '.github/compat-credentialed-next-version.json',
     scaffoldPkg: 'packages/kn-next/templates/app/package.json.hbs',
+    ledger: 'scripts/compat-vinext-ledger.mjs',
   },
 };
 
@@ -174,9 +184,47 @@ const MUTATIONS = [
     replacement:
       '"lockstepExceptions": [{"file": "x", "kind": "export", "value": "v1", "reason": ""}]',
   },
+
+  // ── Round 3, second pass, finding 1: the ledger's THIRD copy of the ref ──
+  {
+    label: 'compat-vinext-ledger.mjs: revert DEFAULT_NEXTJS_REF to a hardcoded (drifted) literal',
+    subject: 'ledger',
+    anchor:
+      "export const DEFAULT_NEXTJS_REF = JSON.parse(\n  readFileSync(CREDENTIAL_MANIFEST_PATH, 'utf8'),\n).credentialedNextRef;",
+    replacement: "export const DEFAULT_NEXTJS_REF = 'v16.3.3';",
+  },
+
+  // ── Round 3, second pass, finding 2: flow-style / quoted-key forms ───────
+  {
+    label: 'test-e2e-deploy.yml: add a FLOW-STYLE `env: { NEXTJS_REF: v16.3.3 }` override',
+    subject: 'testE2eDeploy',
+    anchor:
+      '  build-next:\n    name: Prepare prebuilt next + harness\n    needs: credential-ref\n    runs-on: ubuntu-latest\n',
+    replacement:
+      '  build-next:\n    name: Prepare prebuilt next + harness\n    needs: credential-ref\n    runs-on: ubuntu-latest\n    env: { NEXTJS_REF: v16.3.3 }\n',
+  },
+  {
+    label: 'test-e2e-deploy.yml: add a QUOTED-KEY `"NEXTJS_REF": v16.3.3` override',
+    subject: 'testE2eDeploy',
+    anchor:
+      '  build-next:\n    name: Prepare prebuilt next + harness\n    needs: credential-ref\n    runs-on: ubuntu-latest\n',
+    replacement:
+      '  build-next:\n    name: Prepare prebuilt next + harness\n    needs: credential-ref\n    runs-on: ubuntu-latest\n    env:\n      "NEXTJS_REF": v16.3.3\n',
+  },
+
+  // ── Round 3, second pass, finding 3: the NEXT_NPM_VERSION exact count ───
+  {
+    label:
+      'test-e2e-deploy.yml: replace ONE of the six NEXT_NPM_VERSION derivations with a literal',
+    subject: 'testE2eDeploy',
+    anchor:
+      '      - name: Acquire prebuilt next (npm pack)\n        id: prebuilt\n        run: |\n          NEXT_NPM_VERSION="${NEXTJS_REF#v}"\n',
+    replacement:
+      '      - name: Acquire prebuilt next (npm pack)\n        id: prebuilt\n        run: |\n          NEXT_NPM_VERSION="16.2.0"\n',
+  },
 ];
 
-declareMutations(12);
+declareMutations(16);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPEC);
 
@@ -189,8 +237,8 @@ function specPasses() {
   return r.status === 0;
 }
 
-if (MUTATIONS.length !== 12) {
-  console.error(`FATAL: declared 12 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 16) {
+  console.error(`FATAL: declared 16 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 
