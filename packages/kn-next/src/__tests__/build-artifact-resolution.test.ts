@@ -23,22 +23,22 @@ const cfg = (over: Partial<KnativeNextConfig> = {}): KnativeNextConfig =>
     ({ name: "app", registry: "r", ...over }) as KnativeNextConfig;
 
 describe("#B3 resolveBuildArtifact", () => {
-    it("defaults to VINEXT — still the default builder (#1167 keeps the flip gated)", () => {
-        // Absence used to mean turbopack; ADR-0048 moved the default to vinext.
-        // #1167 (ADR-0054) makes turbopack SELECTABLE again but leaves vinext
-        // the default until the bun-standalone axis is credentialed — so an app
-        // that sets nothing still gets the single executable.
+    it("defaults to TURBOPACK — the v1.0 default since #1183 (ADR-0058)", () => {
+        // Absence used to mean vinext (ADR-0048). #1183 (ADR-0058, founder
+        // decision 2026-09-24) flips it to turbopack (the standalone shape,
+        // the bun-standalone family ADR-0054 names default) once node/bun ×
+        // turbopack banked their v1.0 credential.
         const r = resolveBuildArtifact(cfg(), "/app");
 
-        expect(r.builder.id).toBe("vinext");
-        expect(r.artifact.entry).toBe(".output/server/index.mjs");
-        expect(r.artifact.shape).toBe("nitro-output-bun");
+        expect(r.builder.id).toBe("turbopack");
+        expect(r.artifact.entry).toBe(".next/standalone/server.js");
+        expect(r.artifact.shape).toBe("next-standalone");
     });
 
-    it("resolves an explicit vinext identically to the default", () => {
-        expect(resolveBuildArtifact(cfg({ build: "vinext" }), "/app")).toEqual(
-            resolveBuildArtifact(cfg(), "/app"),
-        );
+    it("resolves an explicit turbopack identically to the default", () => {
+        expect(
+            resolveBuildArtifact(cfg({ build: "turbopack" }), "/app"),
+        ).toEqual(resolveBuildArtifact(cfg(), "/app"));
     });
 
     it("RESOLVES turbopack to the standalone shape — selectable again (#1167)", () => {
@@ -119,9 +119,17 @@ describe("#B3 standaloneStepsApply", () => {
         ).toBe(true);
     });
 
-    it("is false for the nitro shape — which is now the DEFAULT", () => {
+    it("is true for the DEFAULT (turbopack, standalone) config since #1183", () => {
         expect(
             standaloneStepsApply(resolveBuildArtifact(cfg(), "/app").artifact),
+        ).toBe(true);
+    });
+
+    it("is false for the nitro (vinext) shape — still selectable, no longer default", () => {
+        expect(
+            standaloneStepsApply(
+                resolveBuildArtifact(cfg({ build: "vinext" }), "/app").artifact,
+            ),
         ).toBe(false);
     });
 

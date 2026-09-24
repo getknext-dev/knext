@@ -3,6 +3,12 @@ import type { KnativeNextConfig } from '@getknext/core';
 const config: KnativeNextConfig = {
   name: 'file-manager',
 
+  // build: 'vinext' EXPLICIT — this app's build script runs `vite build` and
+  // ships the vinext single-exec Dockerfile, so it does not want knext's
+  // default builder (`turbopack`/`next build`, since #1183/ADR-0058). Do not
+  // remove this without also migrating next.config.ts + the Dockerfile.
+  build: 'vinext',
+
   // Object storage for static assets
   storage: {
     provider: 'gcs',

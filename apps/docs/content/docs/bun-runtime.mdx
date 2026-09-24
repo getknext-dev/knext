@@ -179,5 +179,5 @@ compile cache baked into the image (see [bytecode caching](/docs/bytecode)).
 Earlier knext versions offered an optional per-file bytecode pass for the standalone folder under
 `runtime: 'bun'`. That pass is retired: it improved boot (554 ms vs 703 ms) but *reduced* throughput
 (537 req/s against Node's 630), because converting each module individually taxes every module
-boundary on every request. Whole-bundle compilation — of the vinext build by default, and of the
-standalone server on Bun as described above — replaced it.
+boundary on every request. Whole-bundle compilation — of the vinext build, and of the standalone
+server on Bun as described above — replaced it.

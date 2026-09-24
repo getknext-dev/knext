@@ -33,6 +33,10 @@ import {
 } from "../utils/asset-upload";
 import { createLogger } from "../utils/logger";
 import {
+    assertCompiledArtifactFresh,
+    compileArtifactForDeploy,
+} from "./build-artifact";
+import {
     renderNextAppCR,
     resolveDigest,
     validateCRImageRef,
@@ -513,9 +517,10 @@ export async function deploy() {
         );
     }
 
-    // The resolved build target (ADR-0048: an absent `build` means vinext).
-    // Resolved once here because the lock-step guard below reads a DIFFERENT
-    // artifact per target — `.next/BUILD_ID` for standalone, the
+    // The resolved build target (#1183/ADR-0058: an absent `build` means
+    // turbopack — the standalone shape — since v1.0; ADR-0048 originally made
+    // it vinext). Resolved once here because the lock-step guard below reads
+    // a DIFFERENT artifact per target — `.next/BUILD_ID` for standalone, the
     // `.output/public/_next/static/<id>/` prefix for vinext.
     const resolvedBuild = config.build ?? DEFAULT_BUILDER_ID;
 
@@ -556,8 +561,10 @@ export async function deploy() {
         // UX ledger row 4 (4c): the seam translates a deps-not-installed failure
         // (`next: command not found`, exit 127) into plain npm-install guidance.
         // requireEsm gates the vinext ESM preflight (vinext target only).
+        // Reads `resolvedBuild`, not a hardcoded fallback — an absent `build`
+        // no longer means vinext (#1183, DEFAULT_BUILDER_ID is "turbopack").
         runProjectBuild({
-            requireEsm: (config.build ?? "vinext") === "vinext",
+            requireEsm: resolvedBuild === "vinext",
         });
         log.info(
             "Next.js build complete — standalone output in .next/standalone/",
@@ -597,6 +604,27 @@ export async function deploy() {
                 );
             }
         }
+
+        // #1339 review finding #1 (jev 0.90, BLOCKER): the staged Dockerfile
+        // for the standalone-bun target (the DEFAULT since #1183) and for
+        // vinext both do an UNCONDITIONAL `COPY` of a compiled executable
+        // that only `kn-next build` used to produce — `deploy` ran the
+        // project build above and stopped there, so its docker build either
+        // failed the COPY (no such file) or ran a STALE binary left over
+        // from an earlier `kn-next build` in this checkout. Shares the EXACT
+        // compile step `kn-next build` uses (build-artifact.ts). Runs here,
+        // UNCONDITIONALLY, only on the fresh-build leg — never gated on
+        // "does a binary already exist" — so it always recompiles from the
+        // tree the project build just produced and staleness cannot occur on
+        // THIS path by construction. The `--skip-build` leg below instead
+        // fails closed via `assertCompiledArtifactFresh`, since nothing
+        // rebuilds anything there.
+        compileArtifactForDeploy(config, process.cwd());
+    } else {
+        // `--skip-build`: nothing above ran, so nothing recompiled the exec
+        // either. Fail closed rather than silently shipping whatever happens
+        // to be sitting in the checkout — missing or stale, both loud.
+        assertCompiledArtifactFresh(config, process.cwd());
     }
 
     // T2a — the SAME lock-step guarantee on the vinext leg, where the built id
@@ -728,9 +756,10 @@ export async function deploy() {
                     // produces. Nothing is inferred at this point.
                     const repoRoot = buildContext;
                     // ADR-0055: select the runtime image by (build, runtime). The
-                    // vinext default uses the scaffolded single-stage Dockerfile
-                    // (argv unchanged); the standalone shape stages the ADR-0055
-                    // multi-stage template into the context and picks a `--target`.
+                    // vinext shape uses the scaffolded single-stage Dockerfile
+                    // (argv unchanged); the standalone shape (the default since
+                    // #1183) stages the ADR-0055 multi-stage template into the
+                    // context and picks a `--target`.
                     const selection = selectRuntimeImage(config, process.cwd());
                     if (selection.kind === "standalone") {
                         stageStandaloneBuildContext({

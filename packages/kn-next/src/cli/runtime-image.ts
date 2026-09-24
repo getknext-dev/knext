@@ -16,16 +16,19 @@
  *
  * WHY THE SELECTION LIVES HERE (build/deploy time), NOT AT `create` time.
  *
- * The runtime axis is decided by `config.build` (`turbopack` -> standalone;
- * absent/`vinext` -> single executable) and, for the standalone shape,
- * `config.runtime` (`bun`/`node`). Both are read from `kn-next.config.ts` and
- * can change AFTER an app is scaffolded, while `deploy` builds from a fixed
- * build context. The #1177 increment deliberately kept the standalone template
- * OUT of `templates/app/` (which `kn-next create` walks with no allowlist)
- * precisely so a not-yet-selectable recipe is never emitted into — and never
- * built by — a vinext-default app. So the standalone Dockerfile is STAGED into
- * the build context here, only when the standalone target is selected, leaving
- * the scaffolded vinext app coherent.
+ * The runtime axis is decided by `config.build` (absent/`turbopack`/`webpack`
+ * -> standalone, the default since #1183/ADR-0058; `vinext` -> single
+ * executable) and, for the standalone shape, `config.runtime` (`bun`/`node`,
+ * default `bun`). Both are read from `kn-next.config.ts` and can change AFTER
+ * an app is scaffolded, while `deploy` builds from a fixed build context. The
+ * #1177 increment deliberately kept the standalone template OUT of
+ * `templates/app/` (which `kn-next create` walks with no allowlist) precisely
+ * so a not-yet-selectable recipe is never emitted into — and never built by —
+ * a scaffolded app (which pins `build: 'vinext'` explicitly, since its
+ * scaffolded `next.config.ts`/`Dockerfile` are vinext-shaped, not the ambient
+ * default). So the standalone Dockerfile is STAGED into the build context
+ * here, only when the standalone target is selected, leaving the scaffolded
+ * vinext app coherent.
  *
  * ADR-0001: this module writes files into the local build context only. It never
  * touches the cluster.
@@ -33,7 +36,11 @@
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { BUILDERS, DEFAULT_BUILDER_ID } from "../adapters/artifact-contract";
+import {
+    BUILDERS,
+    DEFAULT_BUILDER_ID,
+    DEFAULT_RUNTIME_ID,
+} from "../adapters/artifact-contract";
 import { packageRoot } from "./create";
 
 /** The Docker build `--target` for each standalone runtime. */
@@ -189,11 +196,13 @@ export function isKnownGoodTemplateDockerfile(dockerfilePath: string): boolean {
 /**
  * Select the runtime image for a build.
  *
- * vinext (the ADR-0048 default — an absent `build` means vinext) uses the
- * scaffolded single-stage `Dockerfile` and NO `--target`; `config.runtime` is
- * irrelevant there (the compiled binary is the server). The standalone shape
- * (`build: turbopack`) uses the staged multi-stage template with the
- * `--target` matching `config.runtime` (`node` is the runtime default).
+ * vinext (`build: "vinext"`, explicit since #1183 — an absent `build` now
+ * means turbopack, ADR-0058) uses the scaffolded single-stage `Dockerfile`
+ * and NO `--target`; `config.runtime` is irrelevant there (the compiled
+ * binary is the server). The standalone shape (`build` absent or
+ * `"turbopack"`/`"webpack"`) uses the staged multi-stage template with the
+ * `--target` matching `config.runtime` (`"bun"` is the runtime default,
+ * #1183 — the compiled bytecode exec, ADR-0054's actual default cell).
  *
  * Selection is keyed off the artifact contract's `emits` shape
  * (`artifact-contract.ts`), NOT off "anything that isn't literally 'vinext'".
@@ -235,9 +244,14 @@ export function selectRuntimeImage(
         // server, and there is no separate bake stage to warm.
         return { kind: "app-dockerfile", dockerfile: join(cwd, "Dockerfile") };
     }
-    // Standalone shape (`next-standalone`). `runtime` defaults to node (config.ts).
+    // Standalone shape (`next-standalone`). `runtime` defaults to
+    // DEFAULT_RUNTIME_ID ("bun", #1183) — the actual ADR-0054 bun-standalone
+    // cell (compiled bytecode exec), not node. Explicit `runtime: "node"` is
+    // never overridden.
     const target: StandaloneTarget =
-        config.runtime === "bun" ? "standalone-bun" : "standalone-node";
+        (config.runtime ?? DEFAULT_RUNTIME_ID) === "bun"
+            ? "standalone-bun"
+            : "standalone-node";
     return {
         kind: "standalone",
         dockerfile: join(cwd, STANDALONE_DOCKERFILE_NAME),

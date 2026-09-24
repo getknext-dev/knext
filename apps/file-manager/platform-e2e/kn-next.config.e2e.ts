@@ -21,6 +21,11 @@ import type { KnativeNextConfig } from '@getknext/core';
 const config: KnativeNextConfig = {
   name: 'file-manager',
 
+  // build: 'vinext' EXPLICIT — shared with the real config (not a drift key);
+  // this profile builds+deploys the same vinext-shaped app. See the real
+  // config's comment for why.
+  build: 'vinext',
+
   cache: {
     provider: 'redis',
     url: process.env.KN_REDIS_URL || 'redis://redis.fm-e2e.svc.cluster.local.:6379',

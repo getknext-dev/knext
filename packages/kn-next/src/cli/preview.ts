@@ -29,6 +29,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
+import { DEFAULT_BUILDER_ID } from "../adapters/artifact-contract";
 import type { KnativeNextConfig } from "../config";
 import {
     getAssetPrefix,
@@ -36,6 +37,7 @@ import {
     NO_STORAGE_MODE_NOTICE,
 } from "../utils/asset-upload";
 import { createLogger } from "../utils/logger";
+import { compileArtifactForDeploy } from "./build-artifact";
 import {
     renderNextAppCR,
     resolveDigest,
@@ -380,10 +382,23 @@ export async function defaultBuildAndPush(
     );
     // UX ledger row 4 (4c): the seam translates a deps-not-installed failure
     // (`next: command not found`, exit 127) into plain npm-install guidance.
-    // requireEsm gates the vinext ESM preflight (vinext target only).
+    // requireEsm gates the vinext ESM preflight (vinext target only). Resolved
+    // against DEFAULT_BUILDER_ID, not hardcoded — an absent `build` no longer
+    // means vinext (#1183).
     runProjectBuild({
-        requireEsm: (config.build ?? "vinext") === "vinext",
+        requireEsm: (config.build ?? DEFAULT_BUILDER_ID) === "vinext",
     });
+
+    // #1339 review finding #1 (jev 0.90, BLOCKER): the staged Dockerfile for
+    // the standalone-bun target (the DEFAULT since #1183) and for vinext both
+    // do an UNCONDITIONAL `COPY` of a compiled executable that only
+    // `kn-next build` used to produce — `preview` ran the project build above
+    // and stopped there, so its docker build either failed the COPY or ran a
+    // stale binary already sitting in this checkout. Shares the EXACT compile
+    // step `kn-next build` uses (build-artifact.ts) — preview has no
+    // `--skip-build` flag, so this always runs fresh here, right after the
+    // project build that just produced what it compiles from.
+    compileArtifactForDeploy(config, process.cwd());
 
     const taggedRef = `${config.registry}/${previewName}:${tag}`;
     const metadataFilePath = join(

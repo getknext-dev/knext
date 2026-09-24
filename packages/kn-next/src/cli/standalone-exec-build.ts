@@ -20,9 +20,9 @@
 
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { verifyBytecodeExec } from "../adapters/bytecode-exec-verify.mjs";
+import { packageRoot } from "./create";
 import { runQuiet } from "./exec";
 import { UsageError } from "./shared";
 import {
@@ -46,20 +46,27 @@ export function standaloneExecFileName(arch: string): string {
 }
 
 /**
- * The shipped compile script, resolved from THIS module (dist/cli -> dist/adapters),
- * never by package name — see `compileScriptPath` in vinext-build.ts. In dist it
- * is the tsup-built `.js`; running from the source tree (the docker e2e drives
- * this real path) it is the `.mjs` original.
+ * The shipped compile script, resolved from the PACKAGE ROOT (`packageRoot()`,
+ * shared with `create.ts`'s template resolution and `compileScriptPath` in
+ * `vinext-build.ts`) — NOT from `dirname(import.meta.url)/..` (#1339 round-3,
+ * jev 0.92 BLOCKER, proven with tsup + npm pack). See `compileScriptPath`'s
+ * doc comment for the full failure mechanism: this module is now shared by
+ * `build-artifact.ts` across build.ts/deploy.ts/preview.ts, so tsup hoists it
+ * into a ROOT-level `dist/chunk-<hash>.js` rather than a `dist/cli/`-nested
+ * one, and a depth-relative walk resolves one level too shallow — a path
+ * that is never in the published tarball at all.
+ *
+ * Prefers the BUILT `dist/adapters/standalone-compile.js`; falls back to the
+ * SOURCE `src/adapters/standalone-compile.mjs` when dist has not been built
+ * (running from a source checkout — the docker e2e drives this real path).
  */
 export function standaloneCompileScriptPath(): string {
-    const adapters = join(
-        dirname(fileURLToPath(import.meta.url)),
-        "..",
-        "adapters",
-    );
-    const built = join(adapters, "standalone-compile.js");
-    const source = join(adapters, "standalone-compile.mjs");
-    return !existsSync(built) && existsSync(source) ? source : built;
+    const root = packageRoot();
+    const built = join(root, "dist", "adapters", "standalone-compile.js");
+    if (existsSync(built)) return built;
+    const source = join(root, "src", "adapters", "standalone-compile.mjs");
+    if (existsSync(source)) return source;
+    return built;
 }
 
 export interface StandaloneCompileArgs {
