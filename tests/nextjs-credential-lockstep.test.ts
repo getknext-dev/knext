@@ -284,21 +284,36 @@ export function scanNextjsRefOccurrences(workflowsDir: string): NextjsRefOccurre
 }
 
 /**
- * Every `NEXT_NPM_VERSION="${NEXTJS_REF#v}"` derivation line across
- * `.github/workflows/**` — the shell-side counterpart to `NEXTJS_REF` itself
- * (strips the leading `v` to get the bare npm version). Counted, not just
- * matched-or-not, so a REPLACEMENT with a hardcoded literal (e.g.
- * `NEXT_NPM_VERSION="16.2.0"`) is caught by the count dropping, not just by
- * an existence check that a single surviving line would still satisfy.
+ * Every `NEXT_NPM_VERSION=` ASSIGNMENT across `.github/workflows/**` — the
+ * shell-side counterpart to `NEXTJS_REF` itself (strips the leading `v` to
+ * get the bare npm version). Round 3 (rev-1379, round 4 non-blocking nit):
+ * an EXACT COUNT (6) was too brittle — it would refuse a legitimate new
+ * derivation site (e.g. the early-warning lane's own npm-pack step) as
+ * loudly as an actual literal replacement, and a maintainer's routine fix
+ * is "bump the hardcoded 6", which is how an exact-count guard rots into
+ * decoration. A SCAN is robust to new lanes instead: every
+ * `NEXT_NPM_VERSION=` site must use the trusted `"${NEXTJS_REF#v}"` form —
+ * any other form (a hardcoded literal, a different derivation) is flagged
+ * by NAME, not by a shifted total.
  */
-export function countNextNpmVersionDerivations(workflowsDir: string): number {
-  let total = 0;
+export function scanNextNpmVersionAssignments(
+  workflowsDir: string,
+): { file: string; line: string; trusted: boolean }[] {
+  const out: { file: string; line: string; trusted: boolean }[] = [];
   for (const entry of readdirSync(workflowsDir, { withFileTypes: true })) {
     if (!entry.isFile() || !/\.ya?ml$/.test(entry.name)) continue;
+    const file = `.github/workflows/${entry.name}`;
     const text = readFileSync(resolve(workflowsDir, entry.name), 'utf8');
-    total += [...text.matchAll(/NEXT_NPM_VERSION="\$\{NEXTJS_REF#v\}"/g)].length;
+    for (const match of text.matchAll(/^[ \t]*NEXT_NPM_VERSION=.*$/gm)) {
+      const line = match[0];
+      out.push({
+        file,
+        line: line.trim(),
+        trusted: /^[ \t]*NEXT_NPM_VERSION="\$\{NEXTJS_REF#v\}"[ \t]*$/.test(line),
+      });
+    }
   }
-  return total;
+  return out;
 }
 
 /** The `vercel/next.js` version `docs/compat-matrix.md`'s intro claims. */
@@ -597,12 +612,17 @@ describe('NEXTJS_REF <-> scaffold next pin lockstep (#1376)', () => {
       expect(LEDGER_DEFAULT_NEXTJS_REF).toBe(manifest.credentialedNextRef);
     });
 
-    it('the NEXT_NPM_VERSION="${NEXTJS_REF#v}" derivation appears exactly 6 times across .github/workflows/**', () => {
-      // An EXACT count, not "at least one": a literal replacement (e.g.
-      // `NEXT_NPM_VERSION="16.2.0"`) would still leave the other 5 derivation
-      // lines matching, so an existence-only check would miss it. A count
-      // that drops below the known-real total is the signal.
-      expect(countNextNpmVersionDerivations(WORKFLOWS_DIR)).toBe(6);
+    it('every NEXT_NPM_VERSION= assignment across .github/workflows/** uses the trusted "${NEXTJS_REF#v}" form', () => {
+      const sites = scanNextNpmVersionAssignments(WORKFLOWS_DIR);
+      // Non-vacuity floor — a scan that finds nothing is decorative. Grows,
+      // never shrinks, as new lanes add their own derivation site (unlike
+      // the round-3-first-pass exact-count-6 check this replaced).
+      expect(sites.length).toBeGreaterThanOrEqual(6);
+      const untrusted = sites.filter((s) => !s.trusted);
+      expect(
+        untrusted,
+        `NEXT_NPM_VERSION= site(s) not using the trusted form: ${JSON.stringify(untrusted)}`,
+      ).toEqual([]);
     });
   });
 });
