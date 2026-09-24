@@ -1,0 +1,86 @@
+name: actionlint (changed workflows)
+
+# ── #1300 review round 3, finding 1 ─────────────────────────────────────────
+# A job-level `if:` using the `env` context (`env.KNEXT_COMPAT_MODE`) is
+# INVALID — GitHub rejects the WHOLE workflow at parse time, which would have
+# killed every scheduled compat nightly, not just the one job. Nothing in this
+# repo caught that before a live `actionlint` run did. This workflow is the
+# gate: it runs the REAL `actionlint` binary against every workflow file this
+# PR/push actually CHANGED (not the whole repo — three pre-existing files
+# outside this PR's scope carry unrelated shellcheck notes that would
+# otherwise turn every future PR red on day one; see #1347 for the pinning
+# tech-debt this deliberately does not expand into).
+#
+# The binary is pinned by SHA256 checksum, the same immutability standard
+# `.claude/rules/security.md` sets for third-party Actions — a version tag
+# alone is not enough, the checksum is what makes the download verifiable.
+
+on:
+  pull_request:
+    branches: ['**']
+    paths:
+      - '.github/workflows/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: actionlint every workflow file changed in this diff
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code (full history for the diff below)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Install actionlint (pinned by version + sha256 checksum)
+        env:
+          ACTIONLINT_VERSION: '1.7.12'
+          ACTIONLINT_SHA256: '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8'
+        run: |
+          set -euo pipefail
+          url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o actionlint.tar.gz "${url}"
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum -c -
+          tar -xzf actionlint.tar.gz actionlint
+          chmod +x actionlint
+          ./actionlint -version
+
+      - name: Compute the workflow files this diff actually changed
+        id: diff
+        run: |
+          set -euo pipefail
+          base="${{ github.event.pull_request.base.sha || github.event.before }}"
+          head="${{ github.event.pull_request.head.sha || github.sha }}"
+          # A push with no prior commit (`before` all-zeros, first push to a
+          # new branch) has nothing to diff against — fall back to lint every
+          # workflow file rather than silently linting nothing.
+          if [ -z "${base}" ] || [ "${base}" = "0000000000000000000000000000000000000000" ]; then
+            files="$(git -C . ls-files '.github/workflows/*.yml' '.github/workflows/*.yaml')"
+          else
+            files="$(git diff --name-only "${base}" "${head}" -- '.github/workflows/*.yml' '.github/workflows/*.yaml' || true)"
+          fi
+          if [ -z "${files}" ]; then
+            echo "no workflow files changed in this diff — nothing to lint"
+            echo "files=" >>"$GITHUB_OUTPUT"
+          else
+            echo "changed workflow files:"
+            echo "${files}"
+            {
+              echo "files<<ACTIONLINT_FILES_EOF"
+              echo "${files}"
+              echo "ACTIONLINT_FILES_EOF"
+            } >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: Run actionlint on the changed workflow files (fails on any finding)
+        if: steps.diff.outputs.files != ''
+        run: |
+          set -euo pipefail
+          echo "${{ steps.diff.outputs.files }}" | xargs ./actionlint

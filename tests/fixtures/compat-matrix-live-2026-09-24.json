@@ -1,0 +1,235 @@
+{
+  "cells": {
+    "node": {
+      "lane": "node",
+      "scope": "credential",
+      "requiredNights": 14,
+      "nights": [
+        {
+          "runId": "35963495992",
+          "lane": null,
+          "event": "schedule",
+          "runAttempt": null,
+          "ref": null,
+          "knextRef": null,
+          "knextSha": null,
+          "compatMode": "credential",
+          "fingerprint": null,
+          "fingerprintComponents": null,
+          "shardsExpected": null,
+          "shardsSeen": 0,
+          "passed": 0,
+          "failed": 0,
+          "notRun": 0,
+          "disqualifiers": [
+            "no-ledger"
+          ],
+          "eligible": false,
+          "unresolved": "no-ledger"
+        }
+      ],
+      "streaks": [],
+      "longest": {
+        "fingerprint": null,
+        "nights": 0,
+        "runIds": [],
+        "startRunId": null,
+        "endRunId": null
+      },
+      "current": {
+        "fingerprint": null,
+        "nights": 0,
+        "runIds": [],
+        "startRunId": null,
+        "endRunId": null
+      },
+      "restartsByCause": {},
+      "fingerprintsRecorded": 0,
+      "distinctFingerprints": 0,
+      "fingerprintMoves": [],
+      "movesByComponent": {},
+      "unresolvedNights": [
+        {
+          "runId": "35963495992",
+          "reason": "no-ledger"
+        }
+      ],
+      "met": false,
+      "shortfall": 14
+    },
+    "bun": {
+      "lane": "bun",
+      "scope": "credential",
+      "requiredNights": 14,
+      "nights": [
+        {
+          "runId": "35987736924",
+          "lane": null,
+          "event": "schedule",
+          "runAttempt": null,
+          "ref": null,
+          "knextRef": null,
+          "knextSha": null,
+          "compatMode": "credential",
+          "fingerprint": null,
+          "fingerprintComponents": null,
+          "shardsExpected": null,
+          "shardsSeen": 0,
+          "passed": 0,
+          "failed": 0,
+          "notRun": 0,
+          "disqualifiers": [
+            "no-ledger"
+          ],
+          "eligible": false,
+          "unresolved": "no-ledger"
+        }
+      ],
+      "streaks": [],
+      "longest": {
+        "fingerprint": null,
+        "nights": 0,
+        "runIds": [],
+        "startRunId": null,
+        "endRunId": null
+      },
+      "current": {
+        "fingerprint": null,
+        "nights": 0,
+        "runIds": [],
+        "startRunId": null,
+        "endRunId": null
+      },
+      "restartsByCause": {},
+      "fingerprintsRecorded": 0,
+      "distinctFingerprints": 0,
+      "fingerprintMoves": [],
+      "movesByComponent": {},
+      "unresolvedNights": [
+        {
+          "runId": "35987736924",
+          "reason": "no-ledger"
+        }
+      ],
+      "met": false,
+      "shortfall": 14
+    },
+    "node-webpack": {
+      "lane": "node-webpack",
+      "scope": "credential",
+      "requiredNights": 14,
+      "nights": [],
+      "streaks": [],
+      "longest": {
+        "fingerprint": null,
+        "nights": 0,
+        "runIds": [],
+        "startRunId": null,
+        "endRunId": null
+      },
+      "current": {
+        "fingerprint": null,
+        "nights": 0,
+        "runIds": [],
+        "startRunId": null,
+        "endRunId": null
+      },
+      "restartsByCause": {},
+      "fingerprintsRecorded": 0,
+      "distinctFingerprints": 0,
+      "fingerprintMoves": [],
+      "movesByComponent": {},
+      "unresolvedNights": [],
+      "met": false,
+      "shortfall": 14
+    },
+    "bun-webpack": {
+      "lane": "bun-webpack",
+      "scope": "credential",
+      "requiredNights": 14,
+      "nights": [],
+      "streaks": [],
+      "longest": {
+        "fingerprint": null,
+        "nights": 0,
+        "runIds": [],
+        "startRunId": null,
+        "endRunId": null
+      },
+      "current": {
+        "fingerprint": null,
+        "nights": 0,
+        "runIds": [],
+        "startRunId": null,
+        "endRunId": null
+      },
+      "restartsByCause": {},
+      "fingerprintsRecorded": 0,
+      "distinctFingerprints": 0,
+      "fingerprintMoves": [],
+      "movesByComponent": {},
+      "unresolvedNights": [],
+      "met": false,
+      "shortfall": 14
+    },
+    "node-vinext": {
+      "lane": "node-vinext",
+      "scope": "credential",
+      "requiredNights": 14,
+      "nights": [],
+      "streaks": [],
+      "longest": {
+        "fingerprint": null,
+        "nights": 0,
+        "runIds": [],
+        "startRunId": null,
+        "endRunId": null
+      },
+      "current": {
+        "fingerprint": null,
+        "nights": 0,
+        "runIds": [],
+        "startRunId": null,
+        "endRunId": null
+      },
+      "restartsByCause": {},
+      "fingerprintsRecorded": 0,
+      "distinctFingerprints": 0,
+      "fingerprintMoves": [],
+      "movesByComponent": {},
+      "unresolvedNights": [],
+      "met": false,
+      "shortfall": 14
+    },
+    "bun-vinext": {
+      "lane": "bun-vinext",
+      "scope": "credential",
+      "requiredNights": 14,
+      "nights": [],
+      "streaks": [],
+      "longest": {
+        "fingerprint": null,
+        "nights": 0,
+        "runIds": [],
+        "startRunId": null,
+        "endRunId": null
+      },
+      "current": {
+        "fingerprint": null,
+        "nights": 0,
+        "runIds": [],
+        "startRunId": null,
+        "endRunId": null
+      },
+      "restartsByCause": {},
+      "fingerprintsRecorded": 0,
+      "distinctFingerprints": 0,
+      "fingerprintMoves": [],
+      "movesByComponent": {},
+      "unresolvedNights": [],
+      "met": false,
+      "shortfall": 14
+    }
+  },
+  "allMet": false
+}

@@ -121,23 +121,44 @@ Open credential-reset issues: search \`is:issue is:open label:${CREDENTIAL_RESET
 }
 
 /**
- * REVIEW FINDING 3 — does this matrix look like a FETCH failure (permissions,
- * `gh run list`/`gh run download` degraded) rather than a genuine "every wired
- * cell has zero credentialed history" state?
+ * REVIEW ROUND 3 (finding 3) — the round-2 heuristic ("every wired cell has
+ * zero nights, or every night is `unresolved`") TRIPS ON THE REAL, CURRENT
+ * state of getknext-dev/knext: a live `--fetch --limit 12 --matrix --json`
+ * run (2026-09-24, no RC cut yet) shows node/bun each with exactly one
+ * `unresolved: "no-ledger"` night and node-webpack/bun-webpack with ZERO
+ * nights in the fetched window — the round-2 check reads BOTH as "fetch
+ * failure" and would have refused to publish EVERY single night, forever,
+ * until an RC is cut. That is not a fetch failure; it is the CORRECT, honest
+ * pre-RC state: ADR-0056's credential crons refuse to run while
+ * `.github/compat-credential-ref.json` has no pinned RC, so the
+ * credential-ref job never reaches the step that would upload a
+ * `compat-run-ledger` artifact — exactly what `unresolved: "no-ledger"`
+ * means (`compat-window-audit.mjs`'s own comment: "the run uploaded no
+ * `compat-run-ledger` artifact at all"), and a genuinely empty `nights` array
+ * just means no run in the queried window matched that lane's cron yet.
  *
- * Scoped to WIRED cells only: an unwired cell (node-vinext today) has no
- * workflow at all, so it legitimately shows zero nights forever — that is not
- * evidence of anything breaking. Among wired cells, the credential program
- * runs on dedicated nightly crons (docs/compat-matrix.md), so it is not
- * plausible for EVERY wired cell to have graded zero nights or have every
- * graded night come back `unresolved` unless the fetch itself is degraded
- * (most commonly: `actions: read` missing from the job's permissions, so `gh
- * run list`/`gh run download` fail and every night reads as
- * `artifact-api-unreachable`/`artifact-download-failed`).
+ * Neither is a signal the FETCH MECHANISM is broken. The two reasons that
+ * actually ARE (`compat-window-audit.mjs`'s own `UNRESOLVED_REASONS`
+ * comments): `artifact-api-unreachable` ("the artifacts API call failed" —
+ * this is what a missing `actions: read` on the job produces, since it is
+ * the `gh api`/`gh run list` call itself that fails) and
+ * `artifact-download-failed` ("listed as live, but the download failed").
+ * `no-ledger` by construction means the artifacts API call SUCCEEDED (it
+ * listed the run's artifacts and found no ledger among them) — proof
+ * `actions: read` was fine, not evidence it was missing.
+ *
+ * So this is keyed on those two reasons ONLY, and an empty `nights` array
+ * (no runs in the window) is no longer treated as a failure signal at all —
+ * it carries no unresolved reason to check.
  *
  * @param {{cells: Record<string, any>}} matrix
  * @param {typeof CREDENTIAL_CELLS} [cells]
  */
+export const FETCH_FAILURE_REASONS = Object.freeze([
+  'artifact-api-unreachable',
+  'artifact-download-failed',
+]);
+
 export function looksLikeFetchFailure(matrix, cells = CREDENTIAL_CELLS) {
   const wired = cells.filter((c) => c.wired);
   if (wired.length === 0) return false;
@@ -145,7 +166,12 @@ export function looksLikeFetchFailure(matrix, cells = CREDENTIAL_CELLS) {
     const entry = matrix?.cells?.[c.lane];
     if (!entry) return true; // a wired cell missing from the matrix entirely is its own red flag
     const nights = Array.isArray(entry.nights) ? entry.nights : [];
-    return nights.length === 0 || nights.every((n) => Boolean(n?.unresolved));
+    const unresolvedNights = nights.filter((n) => n?.unresolved);
+    // No unresolved nights at all (whether because nights=[] — nothing in the
+    // fetched window — or because every graded night resolved cleanly) is
+    // NOT a fetch-failure signal for this cell.
+    if (unresolvedNights.length === 0) return false;
+    return unresolvedNights.every((n) => FETCH_FAILURE_REASONS.includes(n.unresolved));
   });
 }
 
@@ -182,48 +208,86 @@ export function findTrackerIssue(gh, repo) {
 }
 
 /**
- * REVIEW FINDING 1 — pin `issueNumber`, unpinning any CLOSED pinned issue
- * first (never an OPEN one — that could be someone else's legitimate pin),
- * and FAIL LOUDLY (throw) if the tracker still isn't pinned afterward. The
- * old code only warned on a failed pin, which is exactly how "3 pin slots
- * held by closed issues" went unnoticed — the job stayed green while the one
- * thing this feature promises (a pinned, always-visible tracker) silently
- * didn't happen.
+ * REVIEW ROUND 3 (finding 2) — `gh issue list --search "is:pinned"` is NOT a
+ * real GitHub search qualifier. Live-verified against getknext-dev/knext: it
+ * returns `[]` unconditionally, silently, no error — so round 2's
+ * `ensurePinned` (which used exactly that call) could NEVER find a pinned
+ * issue to unpin, on ANY repo, and its own unit tests never caught it because
+ * the fake `gh` encoded the same wrong assumption the real code made. Pinned
+ * issues are only reachable via the GraphQL `Repository.pinnedIssues`
+ * connection; pin/unpin are the `pinIssue`/`unpinIssue` mutations, both
+ * `{issueId: ID!}` (confirmed via GraphQL schema introspection AND a live,
+ * cleaned-up round-trip: unpinned a real stale CLOSED pinned issue, pinned a
+ * scratch issue into the freed slot, unpinned and closed the scratch issue).
+ * `gh issue view --json id` resolves an issue NUMBER to the GraphQL node ID
+ * these mutations need.
+ */
+export const PINNED_ISSUES_QUERY =
+  'query($owner:String!,$name:String!){repository(owner:$owner,name:$name){pinnedIssues(first:3){nodes{issue{id number state}}}}}';
+export const UNPIN_ISSUE_MUTATION =
+  'mutation($id:ID!){unpinIssue(input:{issueId:$id}){clientMutationId}}';
+export const PIN_ISSUE_MUTATION =
+  'mutation($id:ID!){pinIssue(input:{issueId:$id}){clientMutationId}}';
+
+/**
+ * Pin `issueNumber`, unpinning any CLOSED pinned issue first (never an OPEN
+ * one — that could be someone else's legitimate pin), and FAIL LOUDLY (throw)
+ * if the tracker still isn't pinned afterward. Round 2's warn-and-continue is
+ * exactly how "3 pin slots held by closed issues" went unnoticed — the job
+ * stayed green while the one thing this feature promises (a pinned,
+ * always-visible tracker) silently didn't happen; round 2's OWN fix for that
+ * used a search qualifier that doesn't exist (see the comment above), so it
+ * never actually found anything to unpin either.
  *
  * @param {(args: string[]) => string} gh
  * @param {string} repo
  * @param {number} issueNumber
  */
 export function ensurePinned(gh, repo, issueNumber) {
-  const raw = gh([
+  const [owner, name] = repo.split('/');
+  const pinnedRaw = gh([
+    'api',
+    'graphql',
+    '-f',
+    `query=${PINNED_ISSUES_QUERY}`,
+    '-f',
+    `owner=${owner}`,
+    '-f',
+    `name=${name}`,
+  ]);
+  /** @type {Array<{id: string, number: number, state: string}>} */
+  const pinned = JSON.parse(pinnedRaw).data.repository.pinnedIssues.nodes.map((n) => n.issue);
+
+  const targetRaw = gh([
     'issue',
-    'list',
+    'view',
+    String(issueNumber),
     '--repo',
     repo,
-    '--state',
-    'all',
-    '--search',
-    'is:pinned',
-    '--limit',
-    '10',
     '--json',
-    'number,state',
+    'id,isPinned',
   ]);
-  /** @type {Array<{number: number, state: string}>} */
-  const pinned = JSON.parse(raw);
+  const target = JSON.parse(targetRaw);
+
+  if (target.isPinned === true) {
+    return; // already pinned — nothing to do
+  }
+
   for (const p of pinned) {
-    if (p.number === issueNumber) {
-      return; // already pinned — nothing to do
-    }
     if (String(p.state).toUpperCase() === 'CLOSED') {
-      gh(['issue', 'unpin', String(p.number), '--repo', repo]);
+      gh(['api', 'graphql', '-f', `query=${UNPIN_ISSUE_MUTATION}`, '-f', `id=${p.id}`]);
     }
     // An OPEN pinned issue is left alone even if it fills the last slot — the
-    // caller's `gh issue pin` below will throw, and that throw is the loud
-    // failure this function exists to guarantee. Unpinning someone else's
-    // live pinned issue to make room is not this feature's call to make.
+    // pin mutation below will throw on GitHub's "Maximum 3 pinned issues per
+    // repository" error (live-confirmed: `gh api graphql` exits non-zero
+    // when the response carries a top-level `errors` array), and that throw
+    // is the loud failure this function exists to guarantee. Unpinning
+    // someone else's live pinned issue to make room is not this feature's
+    // call to make.
   }
-  gh(['issue', 'pin', String(issueNumber), '--repo', repo]);
+
+  gh(['api', 'graphql', '-f', `query=${PIN_ISSUE_MUTATION}`, '-f', `id=${target.id}`]);
+
   // Verify against the REAL field (`isPinned`, confirmed present on
   // `gh issue view --json`) — the pin call throwing on failure is the first
   // line of defense, but a verify-after-write closes the gap where `gh`

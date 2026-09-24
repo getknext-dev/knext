@@ -312,9 +312,23 @@ describe('#1300 review round 2, finding 5: credential-recovery (close on green)'
     const job = alertParsed.jobs['credential-recovery'];
     expect(job).toBeTruthy();
     expect(job.if).toContain("github.event_name == 'schedule'");
-    expect(job.if).toContain("env.KNEXT_COMPAT_MODE == 'credential'");
     for (const jobName of ['credential-ref', 'build-next', 'deploy-tests', 'shard-ledger']) {
       expect(job.if).toContain(`needs.${jobName}.result == 'success'`);
+    }
+  });
+
+  it('review round 3 (finding 1): the CREDENTIAL-mode test is inlined via github.event.schedule, NEVER env.* (job-level if: does not allow the env context)', () => {
+    // Live-proven with actionlint: a job-level `if:` referencing `env.*`
+    // makes GitHub reject the WHOLE workflow at parse time — not just this
+    // job, every scheduled compat nightly. The four cron strings this
+    // condition inlines are the SAME four `KNEXT_COMPAT_MODE` itself tests
+    // against in the workflow's top-level `env:` block (kept in lockstep by
+    // eye — both read from the one list of credential crons in
+    // docs/compat-matrix.md).
+    const job = alertParsed.jobs['credential-recovery'];
+    expect(job.if).not.toMatch(/env\./);
+    for (const cron of ['17 1 * * *', '47 5 * * *', '17 22 * * *', '47 23 * * *']) {
+      expect(job.if).toContain(`github.event.schedule == '${cron}'`);
     }
   });
 
@@ -342,4 +356,25 @@ describe('#1300 review round 2, finding 5: credential-recovery (close on green)'
     const jobText = alertText.slice(alertText.indexOf('credential-recovery:\n'));
     expect(jobText).toMatch(/if \[ -z "\$\{existing\}" \][\s\S]{0,200}exit 0/);
   });
+});
+
+describe('#1300 review round 3, finding 1: no job-level if: in either workflow ever references env.*', () => {
+  // GENERALIZED beyond the one job that broke: a job-level `if:` cannot use
+  // the `env` context at all (actionlint, confirmed live) — GitHub rejects
+  // the WHOLE workflow at parse time. This scans every job in both files, so
+  // a future job added the same (natural, since step-level `if:`/`run:` DOES
+  // allow `env.*`) mistake is caught here too, not only for
+  // credential-recovery.
+  for (const path of [ALERT_WORKFLOW_PATH, TRACKER_WORKFLOW_PATH]) {
+    it(`${path.split('/').at(-1)}: every job.if is env.*-free`, () => {
+      const parsed = parse(readFileSync(path, 'utf8')) as {
+        jobs: Record<string, { if?: string }>;
+      };
+      for (const [name, job] of Object.entries(parsed.jobs)) {
+        if (typeof job.if === 'string') {
+          expect(job.if, `job "${name}"'s if: must not reference env.*`).not.toMatch(/env\./);
+        }
+      }
+    });
+  }
 });

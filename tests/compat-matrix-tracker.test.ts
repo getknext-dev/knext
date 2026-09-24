@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   buildTrackerBody,
   CREDENTIAL_RESET_LABEL,
@@ -6,10 +9,15 @@ import {
   findTrackerIssue,
   formatCellRow,
   looksLikeFetchFailure,
+  PIN_ISSUE_MUTATION,
+  PINNED_ISSUES_QUERY,
   TRACKER_LABEL,
   TRACKER_TITLE,
+  UNPIN_ISSUE_MUTATION,
 } from '../scripts/compat-matrix-tracker.mjs';
 import { CREDENTIAL_CELLS } from '../scripts/compat-window-audit.mjs';
+
+const REPO_ROOT = resolve(fileURLToPath(import.meta.url), '..', '..');
 
 /**
  * A scripted fake `gh` — records every call and returns a canned response
@@ -158,85 +166,157 @@ describe('compat-matrix-tracker: findTrackerIssue (review finding 2)', () => {
   });
 });
 
-describe('compat-matrix-tracker: ensurePinned (review finding 1)', () => {
-  const pinnedListKey = `issue list --repo ${REPO} --state all --search is:pinned --limit 10 --json number,state`;
+describe('compat-matrix-tracker: ensurePinned (review round 3, finding 2 — GraphQL, live-validated)', () => {
+  // Every response shape below is the REAL shape returned live against
+  // getknext-dev/knext (2026-09-24): `gh issue list --search is:pinned`
+  // itself was proven to ALWAYS return `[]` (not a real qualifier — the round
+  // 2 bug), so this round replaces it with the GraphQL `pinnedIssues`
+  // connection, live-verified to return exactly this node shape, and the
+  // `pinIssue`/`unpinIssue` mutations, live round-tripped (unpinned a real
+  // stale CLOSED pinned issue, pinned a scratch issue into the freed slot,
+  // unpinned + closed the scratch issue) — see the commit message for the
+  // issue numbers.
+  const pinnedListKey = `api graphql -f query=${PINNED_ISSUES_QUERY} -f owner=getknext-dev -f name=knext`;
+  const targetViewKey = `issue view 999 --repo ${REPO} --json id,isPinned`;
+  const verifyViewKey = `issue view 999 --repo ${REPO} --json isPinned`;
+
+  function pinnedIssuesResponse(nodes: Array<{ id: string; number: number; state: string }>) {
+    return JSON.stringify({
+      data: { repository: { pinnedIssues: { nodes: nodes.map((issue) => ({ issue })) } } },
+    });
+  }
 
   it('unpins CLOSED pinned issues to make room, then pins the tracker, then verifies', () => {
     const { gh, calls } = fakeGh({
-      [pinnedListKey]: JSON.stringify([
-        { number: 210, state: 'CLOSED' },
-        { number: 220, state: 'CLOSED' },
-        { number: 255, state: 'CLOSED' },
+      [pinnedListKey]: pinnedIssuesResponse([
+        { id: 'I_210', number: 210, state: 'CLOSED' },
+        { id: 'I_220', number: 220, state: 'CLOSED' },
+        { id: 'I_255', number: 255, state: 'CLOSED' },
       ]),
-      [`issue unpin 210 --repo ${REPO}`]: '',
-      [`issue unpin 220 --repo ${REPO}`]: '',
-      [`issue unpin 255 --repo ${REPO}`]: '',
-      [`issue pin 999 --repo ${REPO}`]: '',
-      [`issue view 999 --repo ${REPO} --json isPinned`]: JSON.stringify({ isPinned: true }),
+      [targetViewKey]: JSON.stringify({ id: 'I_999', isPinned: false }),
+      [`api graphql -f query=${UNPIN_ISSUE_MUTATION} -f id=I_210`]: '{}',
+      [`api graphql -f query=${UNPIN_ISSUE_MUTATION} -f id=I_220`]: '{}',
+      [`api graphql -f query=${UNPIN_ISSUE_MUTATION} -f id=I_255`]: '{}',
+      [`api graphql -f query=${PIN_ISSUE_MUTATION} -f id=I_999`]: '{}',
+      [verifyViewKey]: JSON.stringify({ isPinned: true }),
     });
     expect(() => ensurePinned(gh, REPO, 999)).not.toThrow();
     const joined = calls.map((c) => c.join(' '));
-    expect(joined).toContain(`issue unpin 210 --repo ${REPO}`);
-    expect(joined).toContain(`issue unpin 220 --repo ${REPO}`);
-    expect(joined).toContain(`issue unpin 255 --repo ${REPO}`);
-    expect(joined).toContain(`issue pin 999 --repo ${REPO}`);
+    expect(joined).toContain(`api graphql -f query=${UNPIN_ISSUE_MUTATION} -f id=I_210`);
+    expect(joined).toContain(`api graphql -f query=${UNPIN_ISSUE_MUTATION} -f id=I_220`);
+    expect(joined).toContain(`api graphql -f query=${UNPIN_ISSUE_MUTATION} -f id=I_255`);
+    expect(joined).toContain(`api graphql -f query=${PIN_ISSUE_MUTATION} -f id=I_999`);
   });
 
   it('NEVER unpins an OPEN pinned issue, even to make room for the tracker', () => {
     const { gh, calls } = fakeGh({
-      [pinnedListKey]: JSON.stringify([{ number: 300, state: 'OPEN' }]),
-      [`issue pin 999 --repo ${REPO}`]: '',
-      [`issue view 999 --repo ${REPO} --json isPinned`]: JSON.stringify({ isPinned: true }),
+      [pinnedListKey]: pinnedIssuesResponse([{ id: 'I_300', number: 300, state: 'OPEN' }]),
+      [targetViewKey]: JSON.stringify({ id: 'I_999', isPinned: false }),
+      [`api graphql -f query=${PIN_ISSUE_MUTATION} -f id=I_999`]: '{}',
+      [verifyViewKey]: JSON.stringify({ isPinned: true }),
     });
     ensurePinned(gh, REPO, 999);
     const joined = calls.map((c) => c.join(' '));
-    expect(joined.some((c) => c.startsWith('issue unpin 300'))).toBe(false);
+    expect(joined.some((c) => c.includes('unpinIssue') && c.some((a) => a.includes('I_300')))).toBe(
+      false,
+    );
   });
 
-  it('is a no-op when the target issue is already pinned', () => {
+  it('is a no-op when the target issue is already pinned (checked via gh issue view, not the pinnedIssues list)', () => {
     const { gh, calls } = fakeGh({
-      [pinnedListKey]: JSON.stringify([{ number: 999, state: 'OPEN' }]),
+      [pinnedListKey]: pinnedIssuesResponse([{ id: 'I_999', number: 999, state: 'OPEN' }]),
+      [targetViewKey]: JSON.stringify({ id: 'I_999', isPinned: true }),
     });
     ensurePinned(gh, REPO, 999);
-    // Only the lookup ran — no pin/view calls, because it was already pinned.
-    expect(calls).toHaveLength(1);
+    // The pinnedIssues lookup + the target's own isPinned check both ran —
+    // but no unpin/pin/verify calls, because it was already pinned.
+    expect(calls).toHaveLength(2);
   });
 
   it('FAILS LOUDLY (throws) when the pin verify comes back false — never a silent warning', () => {
     const { gh } = fakeGh({
-      [pinnedListKey]: '[]',
-      [`issue pin 999 --repo ${REPO}`]: '',
-      [`issue view 999 --repo ${REPO} --json isPinned`]: JSON.stringify({ isPinned: false }),
+      [pinnedListKey]: pinnedIssuesResponse([]),
+      [targetViewKey]: JSON.stringify({ id: 'I_999', isPinned: false }),
+      [`api graphql -f query=${PIN_ISSUE_MUTATION} -f id=I_999`]: '{}',
+      [verifyViewKey]: JSON.stringify({ isPinned: false }),
     });
     expect(() => ensurePinned(gh, REPO, 999)).toThrow(/NOT pinned/);
   });
 
-  it('propagates a throw from `gh issue pin` itself (3 slots held by OPEN issues)', () => {
-    const { gh } = fakeGh({ [pinnedListKey]: JSON.stringify([{ number: 1, state: 'OPEN' }]) });
-    // No scripted response for `issue pin 999 ...` — fakeGh throws, simulating
-    // execFileSync throwing on a real `gh` non-zero exit.
+  it('propagates a throw from the pinIssue mutation itself (3 slots held by OPEN issues — live-confirmed error: "Maximum 3 pinned issues per repository")', () => {
+    const { gh } = fakeGh({
+      [pinnedListKey]: pinnedIssuesResponse([{ id: 'I_1', number: 1, state: 'OPEN' }]),
+      [targetViewKey]: JSON.stringify({ id: 'I_999', isPinned: false }),
+    });
+    // No scripted response for the pinIssue mutation call — fakeGh throws,
+    // simulating `gh api graphql` exiting non-zero on GitHub's real
+    // "Maximum 3 pinned issues per repository" GraphQL error (live-confirmed:
+    // `gh api graphql` exits 1 when the response body carries an `errors`
+    // array, even though it also returns a 200-shaped JSON body).
     expect(() => ensurePinned(gh, REPO, 999)).toThrow();
   });
 });
 
-describe('compat-matrix-tracker: looksLikeFetchFailure (review finding 3)', () => {
+describe('compat-matrix-tracker: looksLikeFetchFailure (review round 3, finding 3)', () => {
   const wiredLane = CREDENTIAL_CELLS.find((c) => c.wired)!.lane;
   const unwiredLane = CREDENTIAL_CELLS.find((c) => !c.wired)!.lane;
 
-  it('is true when every WIRED cell has zero graded nights', () => {
-    const cells: Record<string, unknown> = {};
-    for (const cell of CREDENTIAL_CELLS) cells[cell.lane] = { nights: [] };
-    expect(looksLikeFetchFailure({ cells })).toBe(true);
+  it('LIVE FIXTURE (2026-09-24, no RC cut): does NOT trip on the real pre-RC state', () => {
+    // tests/fixtures/compat-matrix-live-2026-09-24.json is the UNMODIFIED
+    // output of `node scripts/compat-window-audit.mjs --fetch --limit 12
+    // --matrix --json` against getknext-dev/knext, captured live (#1300
+    // review round 3, finding 3). node/bun each carry one `unresolved:
+    // "no-ledger"` night (the credential-ref job legitimately refusing —
+    // ADR-0056, no RC pinned yet); node-webpack/bun-webpack have an empty
+    // `nights` array (no run in the 12-run window matched their cron). The
+    // round-2 heuristic classified BOTH as a fetch failure and would have
+    // refused to publish forever, pre-RC. This is the regression test.
+    const liveMatrix = JSON.parse(
+      readFileSync(resolve(REPO_ROOT, 'tests/fixtures/compat-matrix-live-2026-09-24.json'), 'utf8'),
+    );
+    expect(looksLikeFetchFailure(liveMatrix)).toBe(false);
   });
 
-  it('is true when every WIRED cell graded only unresolved nights', () => {
+  it('is FALSE when every WIRED cell simply has zero graded nights (no run in the window — not a failure)', () => {
+    const cells: Record<string, unknown> = {};
+    for (const cell of CREDENTIAL_CELLS) cells[cell.lane] = { nights: [] };
+    expect(looksLikeFetchFailure({ cells })).toBe(false);
+  });
+
+  it('is FALSE for the legitimate no-ledger/artifact-expired/ledger-unreadable reasons (not fetch-mechanism failures)', () => {
     const cells: Record<string, unknown> = {};
     for (const cell of CREDENTIAL_CELLS) {
       cells[cell.lane] = {
-        nights: [{ unresolved: 'artifact-api-unreachable' }, { unresolved: 'no-ledger' }],
+        nights: [
+          { unresolved: 'no-ledger' },
+          { unresolved: 'artifact-expired' },
+          { unresolved: 'ledger-unreadable' },
+        ],
+      };
+    }
+    expect(looksLikeFetchFailure({ cells })).toBe(false);
+  });
+
+  it('is TRUE only when every WIRED cell is unresolved for a FETCH-MECHANISM reason', () => {
+    const cells: Record<string, unknown> = {};
+    for (const cell of CREDENTIAL_CELLS) {
+      cells[cell.lane] = {
+        nights: [
+          { unresolved: 'artifact-api-unreachable' },
+          { unresolved: 'artifact-download-failed' },
+        ],
       };
     }
     expect(looksLikeFetchFailure({ cells })).toBe(true);
+  });
+
+  it('is FALSE if even one wired cell mixes a fetch-failure reason with a legitimate one (only PURE fetch-failure cells count)', () => {
+    const cells: Record<string, unknown> = {};
+    for (const cell of CREDENTIAL_CELLS) {
+      cells[cell.lane] = { nights: [{ unresolved: 'artifact-api-unreachable' }] };
+    }
+    cells[wiredLane] = { nights: [{ unresolved: 'no-ledger' }] };
+    expect(looksLikeFetchFailure({ cells })).toBe(false);
   });
 
   it('is FALSE the moment even one wired cell has a real resolved night (the honest half)', () => {
@@ -249,9 +329,11 @@ describe('compat-matrix-tracker: looksLikeFetchFailure (review finding 3)', () =
   it('ignores UNWIRED cells entirely — they legitimately have zero nights forever', () => {
     const cells: Record<string, unknown> = {};
     for (const cell of CREDENTIAL_CELLS) {
-      cells[cell.lane] = cell.wired ? { nights: [{ unresolved: false }] } : { nights: [] };
+      cells[cell.lane] = cell.wired
+        ? { nights: [{ unresolved: 'artifact-api-unreachable' }] }
+        : { nights: [] };
     }
     expect(cells[unwiredLane]).toBeTruthy();
-    expect(looksLikeFetchFailure({ cells })).toBe(false);
+    expect(looksLikeFetchFailure({ cells })).toBe(true);
   });
 });

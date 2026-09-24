@@ -1721,6 +1721,12 @@ jobs:
             echo "::error::${SUMMARY} is missing — no results is NOT green; the summarize step failed upstream"
             exit 1
           fi
+          # Deliberately single-quoted: this is an embedded `node -e` script,
+          # and its JS string concatenation ("..." + s.shard + ...) is what
+          # the shell linter's heuristic misreads as shell $-interpolation.
+          # Single-quoting is CORRECT here (#1300 review round 3, finding 1:
+          # actionlint installed live surfaced this).
+          # shellcheck disable=SC2016
           node -e '
             const s = require("./" + process.argv[1]);
             console.log(
@@ -2220,10 +2226,19 @@ jobs:
   credential-recovery:
     name: Close the credential-reset issue on recovery (green credential night)
     needs: [credential-ref, build-next, deploy-tests, shard-ledger]
+    # #1300 review round 3 (finding 1) — `env` is NOT an allowed context for a
+    # job-level `if:` (actionlint: available contexts are github/inputs/needs/
+    # vars — confirmed live: this exact line rejected the WHOLE workflow at
+    # parse time before the fix, which would have killed every compat
+    # nightly, not just this job). `env.KNEXT_COMPAT_MODE` is itself computed
+    # from `github.event.schedule` (see the workflow's top-level `env:`
+    # block), so the four credential-cron strings are inlined here instead —
+    # same four crons, same 'credential' classification, no `env` context.
     if: >-
       always() &&
       github.event_name == 'schedule' &&
-      env.KNEXT_COMPAT_MODE == 'credential' &&
+      (github.event.schedule == '17 1 * * *' || github.event.schedule == '47 5 * * *' ||
+       github.event.schedule == '17 22 * * *' || github.event.schedule == '47 23 * * *') &&
       needs.credential-ref.outputs.state != 'not-cut' &&
       needs.credential-ref.result == 'success' &&
       needs.build-next.result == 'success' &&
