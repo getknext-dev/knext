@@ -167,11 +167,12 @@ describe("#1167 end-to-end reachability: loadConfig -> validateConfig -> selectR
         expect(sel.target).toBe("standalone-node");
     });
 
-    it("the default (bare) config now routes to the standalone Dockerfile end-to-end (#1183)", async () => {
+    it("the default (bare) config now routes to the standalone-bun Dockerfile end-to-end (#1183)", async () => {
         // Post-flip: an absent build/runtime resolves to DEFAULT_BUILDER_ID
-        // ("turbopack") and the config.ts-documented default runtime ("node"),
-        // so a bare config reaches the standalone-node stage, not the vinext
-        // single-stage Dockerfile.
+        // ("turbopack") and DEFAULT_RUNTIME_ID ("bun", PR review finding #3
+        // — the actual ADR-0054 bun-standalone default cell, the compiled
+        // bytecode executable), so a bare config reaches the standalone-bun
+        // stage, not the vinext single-stage Dockerfile and not node.
         const config = await loadFixture(
             `export default {
                 name: "e2e-default",
@@ -181,7 +182,7 @@ describe("#1167 end-to-end reachability: loadConfig -> validateConfig -> selectR
         expect(() => validateConfig(config)).not.toThrow();
         const sel = selectRuntimeImage(config, "/app");
         expect(sel.kind).toBe("standalone");
-        expect(sel.target).toBe("standalone-node");
+        expect(sel.target).toBe("standalone-bun");
         expect(sel.dockerfile).toBe(join("/app", "Dockerfile.standalone"));
     });
 

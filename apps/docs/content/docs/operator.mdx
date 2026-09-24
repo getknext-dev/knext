@@ -57,7 +57,7 @@ status:
 | `secrets` | `envFrom`, `envMap` (Kubernetes Secret refs) — see [Binding secrets](#binding-secrets-envmap--database_url). |
 | `database` | Bind a **bring-your-own** Postgres by referencing an existing Secret (`secretRef` / optional `roSecretRef`). knext does not provision databases. See [Databases](#databases-specdatabase). |
 | `build` | `turbopack` (the standalone shape — `next build`, the default the CLI writes and what absence means), `webpack` (the same standalone shape with a different bundler), or `vinext` (the compiled single executable, selectable). Drives how the operator starts the container. See [Bun & the compiled executable](/docs/bun-runtime). |
-| `runtime` | `bun` or `node` (default `node`). Standalone shape only — for `build: "vinext"` the runtime ships inside the binary and this field has no effect on startup. |
+| `runtime` | `bun` (default) or `node`. Standalone shape only — for `build: "vinext"` the runtime ships inside the binary and this field has no effect on startup. |
 | `security` | `networkPolicy` — pod-level L3/L4 isolation, default-on. |
 | `traffic` | `revisionName`, `canaryPercent` (rollback / canary). |
 | `buildId` | Next.js BUILD_ID, stamped as label `apps.kn-next.dev/build-id` (skew protection). |

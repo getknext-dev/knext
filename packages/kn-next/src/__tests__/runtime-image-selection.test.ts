@@ -11,7 +11,9 @@
  *     no `--target` (single-stage).
  *   - turbopack (build absent or "turbopack" — the default since #1183/
  *     ADR-0058) -> the staged standalone template, `--target standalone-bun`
- *     (runtime bun) or `standalone-node` (default runtime).
+ *     (runtime bun, ALSO absent-runtime's default since #1183 — the actual
+ *     ADR-0054 bun-standalone cell) or `standalone-node` (runtime explicitly
+ *     "node").
  *
  * The selection lives at BUILD/DEPLOY time, not create time: `config.build` is
  * authoritative there, it can change after `create`, and `deploy` reads a fixed
@@ -55,10 +57,20 @@ afterAll(() => {
 });
 
 describe("selectRuntimeImage — target selection by (build, runtime)", () => {
-    it("build absent -> the standalone shape (default since #1183/ADR-0058), --target standalone-node", () => {
+    it("build AND runtime absent -> the bun-standalone default cell (ADR-0054/0058), --target standalone-bun", () => {
+        // Both axes resolve to their defaults: build -> "turbopack"
+        // (DEFAULT_BUILDER_ID), runtime -> "bun" (DEFAULT_RUNTIME_ID) — the
+        // compiled bytecode executable ADR-0054 names the actual v1.0
+        // default, not the uncompiled node-standalone fallback.
         const sel = selectRuntimeImage({}, "/app");
         expect(sel.kind).toBe("standalone");
         expect(sel.dockerfile).toBe(join("/app", STANDALONE_DOCKERFILE_NAME));
+        expect(sel.target).toBe("standalone-bun");
+    });
+
+    it("build absent, runtime EXPLICIT node -> --target standalone-node (explicit runtime is never overridden)", () => {
+        const sel = selectRuntimeImage({ runtime: "node" }, "/app");
+        expect(sel.kind).toBe("standalone");
         expect(sel.target).toBe("standalone-node");
     });
 
@@ -146,10 +158,10 @@ describe("selectRuntimeImage — target selection by (build, runtime)", () => {
         expect(sel.target).toBe("standalone-node");
     });
 
-    it("turbopack + runtime absent -> standalone-node (node is the runtime default)", () => {
+    it("turbopack + runtime absent -> standalone-bun (bun is the runtime default, #1183)", () => {
         const sel = selectRuntimeImage({ build: "turbopack" }, "/app");
         expect(sel.kind).toBe("standalone");
-        expect(sel.target).toBe("standalone-node");
+        expect(sel.target).toBe("standalone-bun");
     });
 
     it("webpack + runtime bun -> staged standalone Dockerfile, --target standalone-bun (#1219)", () => {
@@ -164,10 +176,10 @@ describe("selectRuntimeImage — target selection by (build, runtime)", () => {
         expect(sel.target).toBe("standalone-bun");
     });
 
-    it("webpack + runtime absent -> standalone-node (#1219)", () => {
+    it("webpack + runtime absent -> standalone-bun (bun is the runtime default, #1219/#1183)", () => {
         const sel = selectRuntimeImage({ build: "webpack" }, "/app");
         expect(sel.kind).toBe("standalone");
-        expect(sel.target).toBe("standalone-node");
+        expect(sel.target).toBe("standalone-bun");
     });
 
     it("an unrecognised build id THROWS rather than silently building the standalone recipe (cr-1181 #3, fail-closed)", () => {

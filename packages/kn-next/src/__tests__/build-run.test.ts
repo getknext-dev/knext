@@ -172,8 +172,11 @@ const writeStandaloneServer = () => {
 };
 
 describe("build()", () => {
-    it("skips the heal and uploads assets when no standalone dir exists (turbopack)", async () => {
-        loadConfig.mockResolvedValue(cfg());
+    it("skips the heal and uploads assets when no standalone dir exists (turbopack × node)", async () => {
+        // runtime: "node" EXPLICIT — bun is now the default (#1183), and bun
+        // hard-fails with no tree to compile (see the FAILS test below); this
+        // test is about the node leg's soft-warn heal-skip path.
+        loadConfig.mockResolvedValue(cfg({ runtime: "node" }));
         await build({ skipNextBuild: true });
 
         expect(healBunExportTargets).not.toHaveBeenCalled();
@@ -230,13 +233,13 @@ describe("build()", () => {
         expect(buildStandaloneExecutable).not.toHaveBeenCalled();
     });
 
-    it("never compiles the standalone executable when runtime is unset (node is the default)", async () => {
+    it("COMPILES the standalone executable when runtime is unset (bun is the default, #1183)", async () => {
         loadConfig.mockResolvedValue(cfg());
         standaloneTree();
 
         await build({ skipNextBuild: true });
 
-        expect(buildStandaloneExecutable).not.toHaveBeenCalled();
+        expect(buildStandaloneExecutable).toHaveBeenCalledTimes(1);
     });
 
     it("never compiles the standalone executable on the vinext build, even with runtime bun", async () => {

@@ -13,7 +13,7 @@ const config: KnativeNextConfig = {
   // knext's CLI default flipped to "turbopack" (`next build` -> a standalone
   // runtime image) in v1.0 (ADR-0058), but this scaffold's next.config.ts and
   // Dockerfile are still vinext-shaped, so `build` is pinned explicitly here
-  // rather than left to inherit the ambient default. TODO(#1183): a
+  // rather than left to inherit the ambient default. TODO(#1342): a
   // standalone-by-default `kn-next create` scaffold is tracked as separate,
   // design-gated follow-up work (it changes the CLI template surface).
   // Delete this line — or set it to "turbopack"/"webpack" — once you switch

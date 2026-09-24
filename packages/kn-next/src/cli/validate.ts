@@ -7,6 +7,7 @@ import {
     type BuilderAdapter,
     AVAILABLE_BUILDERS as CONTRACT_AVAILABLE,
     DEFAULT_BUILDER_ID,
+    DEFAULT_RUNTIME_ID,
     explainIncompatibility,
     RUNTIMES,
     type RuntimeAdapter,
@@ -90,7 +91,9 @@ export function checkPairing(
     const builder = contract.builders.find(
         (b) => b.id === (build ?? DEFAULT_BUILDER_ID),
     );
-    const rt = contract.runtimes.find((r) => r.id === (runtime ?? "bun"));
+    const rt = contract.runtimes.find(
+        (r) => r.id === (runtime ?? DEFAULT_RUNTIME_ID),
+    );
     if (!builder || !rt) return null; // shape/enum errors are reported elsewhere
     // Root is irrelevant to shape compatibility; "." keeps it pure. The runtime
     // IS relevant: vinext's shape depends on it (#1260).

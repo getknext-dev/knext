@@ -225,6 +225,11 @@ describe("kn-next gc without storage (ADR-0047 condition 3)", () => {
 
 describe("kn-next build without storage (ADR-0047 conditions 1 + 3)", () => {
     it("skips the upload with the announced-mode notice", async () => {
+        // runtime: "node" EXPLICIT — bun is the default since #1183, which
+        // would hit the bytecode-compile branch against a `.next/standalone`
+        // this test never stages. Irrelevant to what this test checks (the
+        // no-storage notice), so pin the leg that skips it.
+        loadConfig.mockResolvedValue({ ...storagelessConfig, runtime: "node" });
         const { build } = await import("../cli/build");
         await build({ skipNextBuild: true });
 
@@ -237,6 +242,12 @@ describe("kn-next build without storage (ADR-0047 conditions 1 + 3)", () => {
     });
 
     it("the configuration log names the mode instead of crashing on storage.provider", async () => {
+        // runtime: "node" EXPLICIT — bun is the default since #1183, which
+        // would hit the new bytecode-compile branch and need a real
+        // `.next/standalone/server.js` this test never stages. Irrelevant to
+        // what this test actually checks (the "Configuration loaded" log
+        // line), so pin the leg that skips it.
+        loadConfig.mockResolvedValue({ ...storagelessConfig, runtime: "node" });
         const { build } = await import("../cli/build");
         await build({ skipNextBuild: true });
 
@@ -254,6 +265,11 @@ describe("kn-next build without storage (ADR-0047 conditions 1 + 3)", () => {
         loadConfig.mockResolvedValue({
             ...storagelessConfig,
             build: "turbopack",
+            // runtime: "node" EXPLICIT — bun is the default since #1183; this
+            // test is about ASSET_PREFIX handling and does not mock the
+            // bytecode-compile step (`buildStandaloneExecutable`), so it must
+            // avoid the bun leg entirely.
+            runtime: "node",
         });
         process.env.ASSET_PREFIX = "https://stale-bucket.example.com/app";
         let prefixDuringBuild: string | undefined = "unset-sentinel";
@@ -299,7 +315,14 @@ describe("kn-next build without storage (ADR-0047 conditions 1 + 3)", () => {
     });
 
     it("with storage configured the upload still runs (regression pin)", async () => {
-        loadConfig.mockResolvedValue(storageBackedConfig);
+        // runtime: "node" EXPLICIT — bun is the default since #1183, which
+        // would hit the bytecode-compile branch against a `.next/standalone`
+        // this test never stages. Irrelevant to what this test checks (the
+        // upload path), so pin the leg that skips it.
+        loadConfig.mockResolvedValue({
+            ...storageBackedConfig,
+            runtime: "node",
+        });
         const { build } = await import("../cli/build");
         await build({ skipNextBuild: true });
 

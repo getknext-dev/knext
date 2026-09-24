@@ -28,7 +28,10 @@
 
 import { existsSync, rmSync, writeSync } from "node:fs";
 import { join } from "node:path";
-import { DEFAULT_BUILDER_ID } from "../adapters/artifact-contract";
+import {
+    DEFAULT_BUILDER_ID,
+    DEFAULT_RUNTIME_ID,
+} from "../adapters/artifact-contract";
 import { healBunExportTargets } from "../adapters/standalone-bun-exports";
 import {
     hasStorage,
@@ -167,7 +170,7 @@ export async function build(options: BuildOptions = {}) {
                 ? `${config.storage.provider} (${config.storage.bucket})`
                 : "none — assets served from the image",
             cache: config.cache?.provider ?? "none",
-            runtime: config.runtime ?? "node",
+            runtime: config.runtime ?? DEFAULT_RUNTIME_ID,
         },
         "Configuration loaded",
     );
@@ -284,7 +287,14 @@ export async function build(options: BuildOptions = {}) {
     //      Fails the build when there is no tree to compile: the bun image
     //      COPYs the executable, so skipping it would fail `docker build` or,
     //      worse, ship a stale binary from an earlier build.
-    if (standaloneStepsApply(artifact) && config.runtime === "bun") {
+    //      Resolved against DEFAULT_RUNTIME_ID ("bun", #1183), not a bare
+    //      `=== "bun"` check: an unset runtime now means bun too — the actual
+    //      ADR-0054 bun-standalone default cell. Explicit `runtime: "node"`
+    //      still skips this branch.
+    if (
+        standaloneStepsApply(artifact) &&
+        (config.runtime ?? DEFAULT_RUNTIME_ID) === "bun"
+    ) {
         if (!existsSync(join(standaloneDir, "server.js"))) {
             throw new UsageError(
                 `No standalone server at ${join(standaloneDir, "server.js")} to compile.\n\n` +

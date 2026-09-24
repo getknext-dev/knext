@@ -15,6 +15,10 @@ import type { KnativeNextConfig } from '@getknext/core';
  */
 const config: KnativeNextConfig = {
   name: 'knext-docs',
+  // build: 'vinext' EXPLICIT — this site's build script runs `vite build` and
+  // ships the vinext single-exec Dockerfile, so it does not want knext's
+  // default builder (`turbopack`/`next build`, since #1183/ADR-0058).
+  build: 'vinext',
   registry: 'registry.example.com/knext-docs',
   storage: {
     provider: 'gcs',

@@ -70,6 +70,21 @@ describe("#B2 spec.build on the emitted CR", () => {
         }
     });
 
+    it("resolves an UNSET runtime to an explicit 'bun' on the default (turbopack) shape (#1183 PR review finding #3)", () => {
+        // `kn-next build`/`selectRuntimeImage` both now compile and stage the
+        // Bun bytecode executable by default (DEFAULT_RUNTIME_ID,
+        // build.ts/runtime-image.ts) — a bare config's local build produces
+        // the bun-standalone artifact, not node-standalone. The CR must
+        // resolve and write the SAME default the local build resolved,
+        // rather than relying on the coincidence that the operator's ONE
+        // `Spec.Runtime` read site (the legacy `Runtime=="bun"` compat-shim
+        // command override) happens to be harmless either way today — the
+        // same explicit-write discipline `spec.build` already follows here,
+        // now extended to `spec.runtime`.
+        const spec = specOf(baseConfig());
+        expect(spec.runtime).toBe("bun");
+    });
+
     it("OMITS runtime on the vinext shape — even when the config sets it", () => {
         // Two reasons, both wire-level (design-gate finding on PR #890):
         // the field is meaningless for a single-exec image (the runtime is

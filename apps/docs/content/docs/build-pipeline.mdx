@@ -25,8 +25,8 @@ const config: KnativeNextConfig = {
   name: 'acme',
   registry: 'registry.example.com/acme',
   // build: 'turbopack' is the default — you can state it explicitly, but you don't need to
-  // runtime: 'node' is the default runtime for this target; set runtime: 'bun' for the
-  // compiled Bun single-executable variant.
+  // runtime: 'bun' is ALSO the default: the standalone server compiles into a Bun
+  // bytecode single executable. Set runtime: 'node' for the uncompiled fallback.
 };
 ```
 
@@ -37,7 +37,7 @@ const config: KnativeNextConfig = {
   name: 'acme',
   registry: 'registry.example.com/acme',
   build: 'turbopack',   // next build -> .next/standalone, run by a supervisor (the default)
-  runtime: 'bun',       // or 'node' (the default runtime for this target)
+  runtime: 'bun',       // the default runtime for this target — or 'node' for the uncompiled fallback
 };
 ```
 
@@ -64,7 +64,7 @@ const config: KnativeNextConfig = {
   name: 'acme',
   registry: 'registry.example.com/acme',
   build: 'webpack',     // next build --webpack -> .next/standalone, run by a supervisor
-  runtime: 'bun',       // or 'node' (the default runtime for this target)
+  runtime: 'bun',       // the default runtime for this target too — or 'node' for the uncompiled fallback
 };
 ```
 
@@ -87,11 +87,11 @@ inside the Docker image build at deploy time.
 [vinext on Node](#vinext-on-node) below. On the standalone targets (`turbopack` and `webpack`,
 identically) it decides how the server is packaged:
 
-- **`runtime: 'bun'`** — `kn-next build` compiles the standalone `server.js` into a Bun single
-  executable with bytecode, verifies the bytecode is actually there (the build fails otherwise), and
-  the image runs that executable inside the standalone folder. Needs Bun 1.4 or newer where you
-  build. Details on the [Bun runtime](/docs/bun-runtime#the-standalone-target-on-bun-is-compiled-too)
-  page.
+- **`runtime: 'bun'`** (the default) — `kn-next build` compiles the standalone `server.js` into a
+  Bun single executable with bytecode, verifies the bytecode is actually there (the build fails
+  otherwise), and the image runs that executable inside the standalone folder. Needs Bun 1.4 or
+  newer where you build. Details on the
+  [Bun runtime](/docs/bun-runtime#the-standalone-target-on-bun-is-compiled-too) page.
 - **`runtime: 'node'`** — the supervisor spawns `server.js` under Node, and bytecode caching comes
   from the V8 compile cache in the image (see [bytecode caching](/docs/bytecode)).
 

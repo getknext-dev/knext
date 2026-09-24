@@ -126,6 +126,11 @@ const savedCwd = process.cwd();
 const cfg = (over: Record<string, unknown> = {}) => ({
     name: "my-app",
     registry: "reg",
+    // build: "vinext" EXPLICIT — #1183/ADR-0058 flipped the ambient default
+    // to turbopack. This suite's bare `cfg()` calls simulate a real (ESM)
+    // vinext app and exercise `buildVinextExecutable`'s compile+smoke wiring;
+    // the one turbopack-leg test overrides this explicitly below.
+    build: "vinext",
     storage: { provider: "gcs", bucket: "b" },
     ...over,
 });
@@ -180,8 +185,13 @@ describe("#894 build() runs the smoke", () => {
         expect(smokeArg().healthPath).toBe("/healthz");
     });
 
-    it("does NOT smoke the turbopack shape — there is no binary to boot", async () => {
-        loadConfig.mockResolvedValue(cfg({ build: "turbopack" }));
+    it("does NOT smoke the turbopack × node shape — there is no binary to boot", async () => {
+        // runtime: "node" EXPLICIT — bun is the default since #1183 (this
+        // test is specifically about the leg that produces NO binary at
+        // all, so it must not fall into the new bun default).
+        loadConfig.mockResolvedValue(
+            cfg({ build: "turbopack", runtime: "node" }),
+        );
         mkdirSync(join(dir, ".next", "standalone"), { recursive: true });
         await build({ skipNextBuild: true });
         expect(buildVinextExecutable).not.toHaveBeenCalled();
