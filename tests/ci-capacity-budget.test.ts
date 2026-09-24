@@ -48,9 +48,38 @@ function readWorkflowDoc(file: string): Record<string, unknown> {
   return parse(readWorkflowText(file)) as Record<string, unknown>;
 }
 
-/** All `cron: '...'` literals in a workflow file's `schedule:` trigger. */
-function crons(text: string): string[] {
-  return [...text.matchAll(/cron:\s*'([^']+)'/g)].map((m) => m[1] as string);
+/**
+ * All cron literals in a workflow file's `on.schedule` trigger — read from
+ * the PARSED YAML (`readWorkflowDoc`), never a regex over the raw text.
+ *
+ * #1362 review round 2: a `/cron:\s*'([^']+)'/` regex silently skips any
+ * double-quoted or unquoted cron (`cron: "17 3 * * *"` is valid YAML and
+ * collides exactly like the single-quoted form, but the regex's `'...'`
+ * literal never matches it) — a colliding cron written with the "wrong"
+ * quote style would pass this guard with no signal at all. The YAML parser
+ * doesn't care which quote style a scalar uses; reading `on.schedule[].cron`
+ * from the parsed document removes the quote-style dependency entirely
+ * rather than widening the regex to a second (or third) quote form.
+ */
+/** The pure extraction, factored out so it can be exercised against a synthetic doc in tests. */
+function cronsFromDoc(doc: Record<string, unknown>, label: string): string[] {
+  const on = doc.on as { schedule?: unknown } | undefined;
+  const schedule = on?.schedule;
+  if (schedule === undefined) return [];
+  if (!Array.isArray(schedule)) {
+    throw new Error(`${label}: on.schedule is not an array`);
+  }
+  return schedule.map((entry, i) => {
+    const cron = (entry as { cron?: unknown } | null)?.cron;
+    if (typeof cron !== 'string') {
+      throw new Error(`${label}: on.schedule[${i}] has no string "cron" field`);
+    }
+    return cron;
+  });
+}
+
+function crons(file: string): string[] {
+  return cronsFromDoc(readWorkflowDoc(file), file);
 }
 
 describe('cron staggering — no overlapping UTC minute-of-day across any workflow (#1301)', () => {
@@ -58,7 +87,7 @@ describe('cron staggering — no overlapping UTC minute-of-day across any workfl
   function allCronEntries(): { file: string; cron: string }[] {
     const out: { file: string; cron: string }[] = [];
     for (const file of workflowFiles()) {
-      for (const cron of crons(readWorkflowText(file))) out.push({ file, cron });
+      for (const cron of crons(file)) out.push({ file, cron });
     }
     return out;
   }
@@ -132,14 +161,89 @@ describe('cron staggering — no overlapping UTC minute-of-day across any workfl
     });
   });
 
+  // ── MUTATION-PROOF (#1362 review round 2): the extractor itself, not just
+  // the overlap function. Constructs a SYNTHETIC workflow doc whose two
+  // colliding crons are declared with DIFFERENT quote styles
+  // (single-quoted and double-quoted) — the exact shape the review's named
+  // regex (`/cron:\s*'([^']+)'/`) silently drops the second of, because its
+  // `'...'` literal never matches a double-quoted scalar. `cronsFromDoc`
+  // reads from the PARSED document, so quote style cannot hide a cron from
+  // it — that's the property under test, proven against the regex's own
+  // behaviour on the identical YAML text, not merely asserted.
+  describe('crons()/cronsFromDoc reads on.schedule from parsed YAML — quote-style cannot hide a cron (#1362 round 2)', () => {
+    const DOUBLE_QUOTED_COLLISION_YAML = `
+on:
+  schedule:
+    - cron: '17 3 * * *'
+    - cron: "17 3 * * *"
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+`;
+
+    /**
+     * The REGRESSION under test, reproduced exactly as the review cited it
+     * (`/cron:\s*'([^']+)'/`) — kept here ONLY as a comparison fixture, never
+     * reintroduced as the production extractor. A named function, not an
+     * inline `.match`, so the "before" and "after" behaviours are each one
+     * call and the diff between them is the whole point of this test.
+     */
+    function cronsViaSingleQuoteRegex(text: string): string[] {
+      return [...text.matchAll(/cron:\s*'([^']+)'/g)].map((m) => m[1] as string);
+    }
+
+    it('the single-quote regex silently DROPS the double-quoted collision (the defect, reproduced)', () => {
+      const found = cronsViaSingleQuoteRegex(DOUBLE_QUOTED_COLLISION_YAML);
+      // Two crons are declared; the regex sees only the single-quoted one.
+      expect(
+        found,
+        'if this ever finds both crons, the fixture no longer reproduces the review-cited defect',
+      ).toEqual(['17 3 * * *']);
+      // So a collision check built on the regex's output never has a second
+      // entry to compare against — the collision is invisible, not just
+      // unreported.
+      expect(findOverlappingPairs(found.map((cron) => ({ file: 'synthetic', cron })))).toEqual([]);
+    });
+
+    it('cronsFromDoc (parsed YAML) finds BOTH crons regardless of quote style, and the collision is caught', () => {
+      const doc = parse(DOUBLE_QUOTED_COLLISION_YAML) as Record<string, unknown>;
+      const found = cronsFromDoc(doc, 'synthetic');
+      expect(found).toEqual(['17 3 * * *', '17 3 * * *']);
+      const overlaps = findOverlappingPairs(
+        found.map((cron, i) => ({ file: `synthetic-${i}`, cron })),
+      );
+      expect(
+        overlaps.length,
+        'the double-quoted collision must be detected once both entries are visible',
+      ).toBe(1);
+    });
+
+    it('cronsFromDoc fails closed on a non-array on.schedule and a non-string cron field', () => {
+      expect(() =>
+        cronsFromDoc(parse('on:\n  schedule: "not an array"\n') as Record<string, unknown>, 'x'),
+      ).toThrow(/not an array/);
+      expect(() =>
+        cronsFromDoc(parse('on:\n  schedule:\n    - cron: 17\n') as Record<string, unknown>, 'x'),
+      ).toThrow(/no string "cron" field/);
+    });
+
+    it('an absent on.schedule (dispatch-only workflows) yields an empty array, not an error', () => {
+      expect(
+        cronsFromDoc(parse('on:\n  workflow_dispatch: {}\n') as Record<string, unknown>, 'x'),
+      ).toEqual([]);
+    });
+  });
+
   it('the two historically-colliding literals now resolve to their documented new times', () => {
     // The two REAL collisions docs/ci/capacity-budget.md records, pinned so a
     // regression is a named diff rather than a silent re-collision.
-    const operatorE2e = crons(readWorkflowText('operator-e2e-nightly.yml'));
-    const secretScan = crons(readWorkflowText('secret-scan-nightly.yml'));
-    const retractedFigure = crons(readWorkflowText('retracted-figure-resolution-nightly.yml'));
-    const imagePin = crons(readWorkflowText('image-pin-resolution-nightly.yml'));
-    const testE2eDeploy = crons(readWorkflowText('test-e2e-deploy.yml'));
+    const operatorE2e = crons('operator-e2e-nightly.yml');
+    const secretScan = crons('secret-scan-nightly.yml');
+    const retractedFigure = crons('retracted-figure-resolution-nightly.yml');
+    const imagePin = crons('image-pin-resolution-nightly.yml');
+    const testE2eDeploy = crons('test-e2e-deploy.yml');
 
     expect(operatorE2e, 'operator-e2e-nightly.yml must move off 17 3 * * *').not.toContain(
       '17 3 * * *',
