@@ -2,22 +2,32 @@ import { describe, expect, it } from 'bun:test';
 import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse } from 'yaml';
+import { cronsOverlap, findOverlappingPairs, parseCron } from '../scripts/lib/cron-overlap.mjs';
 import { deriveSmokeManifest } from '../scripts/lib/smoke-manifest.mjs';
+import { evaluate, exprBody } from './helpers/gha-expr';
 
 /**
  * GUARD TESTS for #1301 — CI capacity for the 6 credential cells.
  *
  * Four independent decisions, each with its own describe block so a failure
  * names exactly which half of the budget broke:
- *   1. no two scheduled crons across ALL workflows share a UTC minute
- *      (mechanical — the literal collision measured in docs/ci/capacity-budget.md);
+ *   1. no two (file, cron) entries — including two in the SAME file —
+ *      overlap on the real UTC minute-of-day + day-of-week they fire on
+ *      (scripts/lib/cron-overlap.mjs NORMALISES rather than string-compares:
+ *      a plain `crons.includes(x)` check misses a Sunday-only cron
+ *      overlapping a daily one, a leading-zero hour literal, and a duplicate
+ *      declared twice in one file — all three are mutation-proved below);
  *   2. `max-parallel: 8` on both credential shard matrices;
  *   3. the branch smoke manifest is DERIVED from (never drifts from) the real
  *      credential manifest, and the dispatch-only `smoke` input wires it in;
- *   4. workflow-level concurrency groups branch dispatches by ref (cancelling
- *      a superseded one) while giving every scheduled run a run-id-unique
- *      group — so no credential/early-warning cron can ever share a group
- *      with anything, following tests/ci-concurrency-group.test.ts's pattern.
+ *   4. workflow-level concurrency groups EVALUATE ref-scoped on dispatch and
+ *      run_id-scoped on schedule (tests/helpers/gha-expr's real evaluator,
+ *      not a text-presence check — a text check stays green if `github.ref`
+ *      and `github.run_id` are swapped between branches; mutation-proved
+ *      below by performing exactly that swap on the real expression and
+ *      confirming the property reds), so no credential/early-warning cron
+ *      can ever share a group with anything, following
+ *      tests/ci-concurrency-group.test.ts's pattern.
  */
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
@@ -43,23 +53,83 @@ function crons(text: string): string[] {
   return [...text.matchAll(/cron:\s*'([^']+)'/g)].map((m) => m[1] as string);
 }
 
-describe('cron staggering — no exact UTC-minute collision across any workflow (#1301)', () => {
-  it('every scheduled cron literal maps to a UNIQUE (file, cron) — collisions are grouped by minute', () => {
-    const byMinute = new Map<string, string[]>();
+describe('cron staggering — no overlapping UTC minute-of-day across any workflow (#1301)', () => {
+  /** Every (file, cron) entry across the whole workflow directory. */
+  function allCronEntries(): { file: string; cron: string }[] {
+    const out: { file: string; cron: string }[] = [];
     for (const file of workflowFiles()) {
-      for (const cron of crons(readWorkflowText(file))) {
-        const list = byMinute.get(cron) ?? [];
-        list.push(file);
-        byMinute.set(cron, list);
-      }
+      for (const cron of crons(readWorkflowText(file))) out.push({ file, cron });
     }
-    const collisions = [...byMinute.entries()].filter(([, files]) => new Set(files).size > 1);
+    return out;
+  }
+
+  it('no two (file, cron) entries — including two in the SAME file — overlap on minute+hour+day-of-week', () => {
+    // findOverlappingPairs compares EVERY pair, so two identical crons
+    // declared twice in one file collide with each other too, not just
+    // across files.
+    const overlaps = findOverlappingPairs(allCronEntries());
     expect(
-      collisions,
-      `these cron literals are shared by more than one workflow file: ${collisions
-        .map(([cron, files]) => `${cron} -> ${files.join(', ')}`)
+      overlaps,
+      `these cron entries overlap on UTC minute-of-day: ${overlaps
+        .map((o) => `${o.a.file}:${o.a.cron} <-> ${o.b.file}:${o.b.cron}`)
         .join('; ')}`,
     ).toEqual([]);
+  });
+
+  it('parseCron normalises minute/hour as integers and day-of-week "*" to all 7 days', () => {
+    expect(parseCron('17 3 * * *')).toEqual({
+      minute: 17,
+      hour: 3,
+      daysOfWeek: new Set([0, 1, 2, 3, 4, 5, 6]),
+    });
+    // Leading zero on the hour is the SAME integer hour.
+    expect(parseCron('17 03 * * *').hour).toBe(3);
+    expect(parseCron('17 3 * * 0').daysOfWeek).toEqual(new Set([0]));
+  });
+
+  it('parseCron fails closed on a shape this repo never uses (day-of-month/month set)', () => {
+    expect(() => parseCron('17 3 1 * *')).toThrow(/day-of-month/);
+    expect(() => parseCron('17 3 * 6 *')).toThrow(/day-of-month/);
+    expect(() => parseCron('not a cron')).toThrow();
+  });
+
+  // ── MUTATION-PROOF: cronsOverlap discriminates every shape a string
+  // comparison misses. Each case is a real gap a `crons.includes(x)` check
+  // has — Sunday-overlap, a leading-zero literal, and same-file duplicates —
+  // asserted directly against the pure function, not against the real
+  // workflow directory (which, having been fixed, has none of these left to
+  // exercise).
+  describe('cronsOverlap catches what exact-string comparison misses', () => {
+    it('a Sunday-only cron OVERLAPS a daily cron at the same minute+hour ("*" includes Sunday)', () => {
+      expect(cronsOverlap('17 3 * * 0', '17 3 * * *')).toBe(true);
+    });
+
+    it('a leading-zero hour literal is the SAME hour, not a different one', () => {
+      expect(cronsOverlap('17 03 * * *', '17 3 * * *')).toBe(true);
+    });
+
+    it('two IDENTICAL crons overlap (catches a duplicate within one file)', () => {
+      expect(cronsOverlap('41 5 * * *', '41 5 * * *')).toBe(true);
+    });
+
+    it('NEGATIVE CONTROL: different minute or hour never overlaps', () => {
+      expect(cronsOverlap('17 3 * * *', '18 3 * * *')).toBe(false);
+      expect(cronsOverlap('17 3 * * *', '17 4 * * *')).toBe(false);
+    });
+
+    it('NEGATIVE CONTROL: same minute+hour but disjoint days-of-week does not overlap', () => {
+      expect(cronsOverlap('17 3 * * 0', '17 3 * * 1')).toBe(false);
+    });
+
+    it('a string-identity check would have missed the Sunday case — proven directly', () => {
+      // The exact defect the review named: `['17 3 * * 0'].includes('17 3 * * *')`
+      // is false even though the two crons DO fire in the same window. This
+      // pins the gap so nobody re-introduces a plain string-Set collision
+      // check believing it is equivalent to cronsOverlap.
+      const stringCollision = ['17 3 * * 0'].includes('17 3 * * *');
+      expect(stringCollision, 'string comparison must NOT see this as a collision').toBe(false);
+      expect(cronsOverlap('17 3 * * 0', '17 3 * * *'), 'cronsOverlap MUST see it').toBe(true);
+    });
   });
 
   it('the two historically-colliding literals now resolve to their documented new times', () => {
@@ -191,6 +261,58 @@ describe('the branch smoke manifest never drifts from the credential manifest (#
 describe('per-branch concurrency: dispatches cancel each other, credential crons never share a group (#1301)', () => {
   type Concurrency = { group?: unknown; 'cancel-in-progress'?: unknown } | string | undefined;
 
+  // Distinct, unmistakable sentinel values per trigger context, so a
+  // substring match can only succeed for the RIGHT reason.
+  const DISPATCH_REF = 'refs/heads/sentinel-dispatch-ref';
+  const DISPATCH_RUN_ID = 111111;
+  const SCHEDULE_REF = 'refs/heads/sentinel-schedule-ref';
+  const SCHEDULE_RUN_ID = 222222;
+
+  function dispatchCtx(workflow: string) {
+    return {
+      github: {
+        event_name: 'workflow_dispatch',
+        workflow,
+        ref: DISPATCH_REF,
+        run_id: DISPATCH_RUN_ID,
+      },
+    };
+  }
+  function scheduleCtx(workflow: string) {
+    return {
+      github: {
+        event_name: 'schedule',
+        workflow,
+        ref: SCHEDULE_REF,
+        run_id: SCHEDULE_RUN_ID,
+      },
+    };
+  }
+
+  /**
+   * The #1301 review round-1 mutation: swap every `github.ref` <-> every
+   * `github.run_id` in the REAL extracted expression — the exact "schedules
+   * keyed on ref, sharing one group on main" defect named in review. Fails
+   * closed (throws) unless BOTH identifiers appear at least once, so a
+   * future rewrite of the expression that drops one of them cannot make
+   * this swap silently a no-op.
+   */
+  function swapRefAndRunId(expr: string): string {
+    const refCount = (expr.match(/github\.ref\b/g) ?? []).length;
+    const runIdCount = (expr.match(/github\.run_id\b/g) ?? []).length;
+    if (refCount === 0 || runIdCount === 0) {
+      throw new Error(
+        `swapRefAndRunId: expected both github.ref and github.run_id in the expression, found ref=${refCount} run_id=${runIdCount} in: ${expr}`,
+      );
+    }
+    const PLACEHOLDER = '\u0000SWAP_RUN_ID\u0000';
+    return expr
+      .replace(/github\.run_id\b/g, PLACEHOLDER)
+      .replace(/github\.ref\b/g, 'github.run_id')
+      .split(PLACEHOLDER)
+      .join('github.ref');
+  }
+
   for (const file of CREDENTIAL_WORKFLOWS) {
     it(`${file} carries a workflow-level concurrency group`, () => {
       const doc = readWorkflowDoc(file);
@@ -201,28 +323,36 @@ describe('per-branch concurrency: dispatches cancel each other, credential crons
       expect(group, `${file}'s concurrency block has no group`).toBeTypeOf('string');
     });
 
-    it(`${file}'s concurrency group scopes cancellation to workflow_dispatch only`, () => {
+    // #1301 review round 1: EVALUATE the group expression per trigger (the
+    // real gha-expr evaluator, the same one tests/compat-webpack-credential-lanes.test.ts
+    // uses) instead of checking that `github.ref` and `github.run_id` merely
+    // APPEAR somewhere in the text. A text-presence check stays green if the
+    // two identifiers are swapped between branches; evaluating the real
+    // expression under a dispatch context and a schedule context cannot.
+    it(`${file}'s concurrency group EVALUATES ref-scoped on dispatch, run_id-scoped on schedule`, () => {
       const doc = readWorkflowDoc(file);
       const concurrency = doc.concurrency as { group?: unknown; 'cancel-in-progress'?: unknown };
-      const group = String(concurrency.group ?? '');
+      const groupExpr = exprBody(concurrency.group);
 
-      // The group must branch on event_name so a workflow_dispatch run's group
-      // key differs in SHAPE from a scheduled run's (ref-scoped vs run_id-scoped).
-      expect(group, `${file} concurrency group does not branch on github.event_name`).toMatch(
-        /github\.event_name\s*==\s*'workflow_dispatch'/,
+      const dispatchResult = String(evaluate(groupExpr, dispatchCtx(file)) ?? '');
+      const scheduleResult = String(evaluate(groupExpr, scheduleCtx(file)) ?? '');
+
+      expect(dispatchResult, `${file}: dispatch trigger must produce a ref-scoped group`).toContain(
+        DISPATCH_REF,
       );
-      // The dispatch branch must be scoped to the ref (so only the SAME branch's
-      // dispatches collide).
-      expect(group, `${file} concurrency group's dispatch branch is not ref-scoped`).toMatch(
-        /github\.ref/,
-      );
-      // The non-dispatch (schedule) branch must be scoped to run_id, which no
-      // other run can ever share — this is what makes "never share a group"
-      // true for credential crons rather than merely low-probability.
       expect(
-        group,
-        `${file} concurrency group's non-dispatch branch is not run_id-scoped — a scheduled run could collide with another run`,
-      ).toMatch(/github\.run_id/);
+        dispatchResult,
+        `${file}: dispatch trigger's group must not carry a run_id`,
+      ).not.toContain(String(DISPATCH_RUN_ID));
+
+      expect(
+        scheduleResult,
+        `${file}: schedule (credential/early-warning) trigger must produce a run_id-scoped group — a ref-scoped schedule group means every scheduled run on the same ref (e.g. every credential cron on main) shares ONE group`,
+      ).toContain(String(SCHEDULE_RUN_ID));
+      expect(
+        scheduleResult,
+        `${file}: schedule trigger's group must not carry the ref — that is the exact "schedules keyed on ref, sharing one group on main" defect`,
+      ).not.toContain(SCHEDULE_REF);
 
       const cancelExpr =
         typeof concurrency['cancel-in-progress'] === 'string'
@@ -233,22 +363,49 @@ describe('per-branch concurrency: dispatches cancel each other, credential crons
         `${file}'s cancel-in-progress must be gated on workflow_dispatch, not unconditional — an unconditional cancel could cancel a credential night`,
       ).toBe("${{ github.event_name == 'workflow_dispatch' }}");
     });
+
+    // ── MUTATION-PROOF, against the REAL extracted expression ──────────────
+    // Swap github.ref <-> github.run_id in the ACTUAL workflow's group
+    // expression and re-evaluate. If the assertions above only checked that
+    // both identifiers appear somewhere in the text, this swap would leave
+    // them green — proving that would be decoration. Evaluating per trigger
+    // catches it: the swapped expression must now FAIL the schedule
+    // assertion (its schedule branch is ref-scoped) and FAIL the dispatch
+    // assertion (its dispatch branch is run_id-scoped).
+    it(`MUTATION-PROOF (${file}): swapping github.ref <-> github.run_id reds the property above`, () => {
+      const doc = readWorkflowDoc(file);
+      const concurrency = doc.concurrency as { group?: unknown };
+      const realExpr = exprBody(concurrency.group);
+      const swapped = swapRefAndRunId(realExpr);
+      // The swap must actually change something, or it isn't exercising the
+      // mutation at all.
+      expect(swapped, 'swapRefAndRunId produced no change — nothing was proven').not.toBe(realExpr);
+
+      const scheduleResultSwapped = String(evaluate(swapped, scheduleCtx(file)) ?? '');
+      const dispatchResultSwapped = String(evaluate(swapped, dispatchCtx(file)) ?? '');
+
+      // Under the swap, the schedule branch is now ref-scoped — the exact
+      // "schedules keyed on ref, sharing one group on main" defect.
+      expect(
+        scheduleResultSwapped,
+        'the swap must make the schedule branch ref-scoped (proving the un-swapped assertion actually discriminates this)',
+      ).toContain(SCHEDULE_REF);
+      expect(scheduleResultSwapped).not.toContain(String(SCHEDULE_RUN_ID));
+
+      // And the dispatch branch is now run_id-scoped instead of ref-scoped.
+      expect(dispatchResultSwapped).toContain(String(DISPATCH_RUN_ID));
+      expect(dispatchResultSwapped).not.toContain(DISPATCH_REF);
+    });
   }
 
-  it('MUTATION-PROOF: a run_id-unscoped fallback would let two scheduled runs collide (documents the property, not just asserts the text)', () => {
-    // If the non-dispatch branch of the group expression were a FIXED string
-    // (e.g. just github.workflow) instead of run_id-scoped, two scheduled runs
-    // of the SAME workflow (e.g. the node and bun credential crons both firing
-    // in test-e2e-deploy.yml) would share one group and one would cancel the
-    // other — exactly the failure mode #1301 forbids ("Do NOT put credential
-    // crons in a shared concurrency group"). Asserted here as a positive
-    // control so the regex above is proven to discriminate the two shapes.
-    const safe =
-      "${{ github.event_name == 'workflow_dispatch' && format('x-{0}', github.ref) || format('x-{0}', github.run_id) }}";
-    const unsafe =
-      "${{ github.event_name == 'workflow_dispatch' && format('x-{0}', github.ref) || 'x-schedule' }}";
-    expect(safe).toMatch(/github\.run_id/);
-    expect(unsafe).not.toMatch(/github\.run_id/);
+  it('swapRefAndRunId fails closed when the expression carries only one of the two identifiers', () => {
+    expect(() => swapRefAndRunId("${{ format('x-{0}', github.ref) }}")).toThrow(/expected both/);
+    expect(() => swapRefAndRunId("${{ format('x-{0}', github.run_id) }}")).toThrow(/expected both/);
+  });
+
+  it('swapRefAndRunId is its own inverse (sanity: the swap is a true swap, not a one-way collapse)', () => {
+    const expr = "github.event_name == 'workflow_dispatch' && github.ref || github.run_id";
+    expect(swapRefAndRunId(swapRefAndRunId(expr))).toBe(expr);
   });
 });
 

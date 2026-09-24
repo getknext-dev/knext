@@ -298,6 +298,20 @@ describe('compat-window fingerprint — the frozen set is digestible and complet
     expect(harness).toContain('.github/workflows/test-e2e-deploy.yml');
     expect(harness).toContain('test/deploy-tests-manifest.knext.json');
     expect(harness.filter((p) => p.startsWith('scripts/e2e-')).length).toBeGreaterThanOrEqual(3);
+    // #1301 review round 1: test/deploy-tests-manifest.smoke.knext.json is
+    // read ONLY on a dispatch-only `smoke=true` run — never a credential or
+    // early-warning night — so it must NOT be part of the frozen harness set.
+    // Non-vacuous: the smoke manifest genuinely exists in this checkout
+    // (added by #1301), so this assertion exercises the real exclusion rather
+    // than passing by the file's absence.
+    expect(
+      existsSync(resolve(REPO_ROOT, 'test/deploy-tests-manifest.smoke.knext.json')),
+      'the smoke manifest fixture this test depends on is missing from the checkout',
+    ).toBe(true);
+    expect(
+      harness,
+      'the dispatch-only smoke manifest must be excluded from the credential-night harness fingerprint',
+    ).not.toContain('test/deploy-tests-manifest.smoke.knext.json');
   });
 });
 

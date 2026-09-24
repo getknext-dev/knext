@@ -10,9 +10,16 @@ fact, not a paragraph someone has to keep believing.
 - Scheduled crons fire roughly **5 hours late** and bunch up around **08:30
   UTC**, regardless of how evenly the literal cron times are spread across the
   day.
-- The **6 credential cells** (node, bun, node-webpack, bun-webpack — all in
-  `test-e2e-deploy.yml` — plus bun-vinext in `compat-vinext.yml`; node-vinext
-  is `wired: false`) together cost **about 1.2–1.3k job-minutes a night**, on
+- **5 named cells** exist in `CREDENTIAL_CELLS` (`scripts/compat-window-audit.mjs`):
+  node, bun, node-webpack, bun-webpack — all in `test-e2e-deploy.yml` — plus
+  bun-vinext in `compat-vinext.yml`. `node-vinext` is `wired: false` (not yet
+  a credential workflow). Of the 5, **4 are actively credentialing** (node,
+  bun, node-webpack, bun-webpack — each has its own `credential` cron per
+  ADR-0056); **bun-vinext is not yet credentialed** — it runs weekly on
+  `compat-vinext.yml`'s single schedule with no early-warning/credential mode
+  split of its own. (The issue title says "6 credential cells" — that count
+  is stale against the current `CREDENTIAL_CELLS` table; this doc uses the
+  live number.) Together these cost **about 1.2–1.3k job-minutes a night**, on
   top of **about 0.5k** for early-warning + the other nightlies. That
   saturates the 20-job cap for roughly **90 minutes**.
 - One feature branch ran **12 full `workflow_dispatch` runs of
@@ -28,7 +35,7 @@ by-design lanes):
 
 | Cron (UTC) | Before | After |
 |---|---|---|
-| `17 3 * * *` | `test-e2e-deploy.yml` (node early-warning credential lane — **left untouched**, it is cross-referenced by `docs/compat/window-node-lane.md`, `docs/release/compat-honesty-gate.md`, `docs/wayfinder/w6-compat-flakiness.md`, and several tests), `operator-e2e-nightly.yml`, `secret-scan-nightly.yml` — **three workflows on one minute** | `operator-e2e-nightly.yml` → `29 3 * * *`; `secret-scan-nightly.yml` → `53 3 * * *` |
+| `17 3 * * *` | `test-e2e-deploy.yml` (the node lane's **EARLY-WARNING** cron — it tests `main`, never a credential night; ADR-0056's `KNEXT_COMPAT_MODE` decision maps only `17 1 * * *` to `credential` for the node lane — **left untouched**, it is cross-referenced by `docs/compat/window-node-lane.md`, `docs/release/compat-honesty-gate.md`, `docs/wayfinder/w6-compat-flakiness.md`, and several tests), `operator-e2e-nightly.yml`, `secret-scan-nightly.yml` — **three workflows on one minute** | `operator-e2e-nightly.yml` → `29 3 * * *`; `secret-scan-nightly.yml` → `53 3 * * *` |
 | `41 5 * * *` | `image-pin-resolution-nightly.yml` (**left untouched**), `retracted-figure-resolution-nightly.yml` — **two workflows on one minute** | `retracted-figure-resolution-nightly.yml` → `53 5 * * *` |
 
 `test-e2e-deploy.yml`'s own 6 credential/early-warning crons were already
@@ -53,13 +60,37 @@ Both 16-way shard matrices (`test-e2e-deploy.yml`'s `deploy-tests` job,
 so GitHub would schedule as many of the 16 shard jobs concurrently as the
 20-job cap allowed — leaving almost no headroom for anything else running in
 the same window. Capping each credential run to **8 concurrent shard jobs**
-means one full run's peak footprint is `8 (shards) + 2 (credential-ref +
-build-next, serialized ahead of the shards) ≈ 10` jobs, leaving room for a
-second lane (or another nightly) to run in the same window without exhausting
-the cap.
+means one full run's peak footprint during the shard phase is **exactly 8**
+jobs, not `8 + 2`: `credential-ref` and `build-next` are `needs:`-serialized
+strictly *before* `deploy-tests` (`credential-ref` → `build-next` →
+`deploy-tests`), so by the time the 8 shard jobs are running, both earlier
+jobs have already completed — they are never concurrent with the shards.
+Each of those two earlier jobs contributes its own separate 1-job peak, at
+its own (earlier) point in the run, not an addition to the shard-phase peak.
+8 concurrent jobs out of a 20-job cap leaves room for a second lane (or
+another nightly) to run in the same window without exhausting the cap.
 
 Enforced by `tests/ci-capacity-budget.test.ts` (`deploy-tests` strategy
 carries `max-parallel: 8` in both files).
+
+**A cron-literal gap this doesn't close, stated rather than left implicit:**
+the bun early-warning cron (`47 4 * * *`, 04:47 UTC) and the bun credential
+cron (`47 5 * * *`, 05:47 UTC) are exactly 60 minutes apart, but a full
+`deploy-tests` shard job carries a 120-minute timeout and the *build-next*
+prep step before it is not instant either — so the 04:47 run can still be
+mid-shard when 05:47 fires. This is **not** a cron collision (staggering
+already fixes those, see §1) and `cronsOverlap` correctly reports no overlap
+between these two literals — it is a **runtime duration overlap**: two
+DIFFERENT scheduled runs of the same workflow legitimately executing at the
+same wall-clock time. Because each gets its own `run_id`-scoped concurrency
+group (§4), neither cancels or queues behind the other at the *group* level —
+but they DO compete for the shared 20-job cap, and `max-parallel: 8` on each
+is what keeps that competition from exhausting it outright (worst case, two
+concurrent credential-class runs at `max-parallel: 8` each is 16 of the 20
+slots, still under the cap, though leaving little headroom for anything
+else). This is a **queueing** effect (GitHub schedules what it can within the
+cap and queues the rest), not a failure — no run is cancelled or reset — but
+it is real added latency this issue does not eliminate.
 
 ### 3. A branch 16-shard smoke mode
 
