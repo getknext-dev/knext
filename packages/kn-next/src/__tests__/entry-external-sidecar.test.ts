@@ -131,16 +131,18 @@ const PURE_LIVE = "KNEXT_1320_PURE_LIVE_SIDECAR_e81a";
 
 function buildApp(): { work: string; exe: string; sidecar: string } {
     const work = temp("knext-1320-");
-    // The binary sits in the app dir, beside the app's package.json (the compat
-    // lane boots it from the app dir). That package.json is load-bearing:
-    // measured, without `autoloadPackageJson` a binary next to one cannot
-    // resolve anything from the sidecar.
+    // The binary sits in the app dir, beside the app's package.json, as in the
+    // compat lane.
     write(
         join(work, "package.json"),
         JSON.stringify({ name: "app", private: true, type: "module" }),
     );
     const server = join(work, ".output", "server");
     const nm = join(server, "node_modules");
+    // Entries are NOT a default `index.*` on purpose: without `autoloadPackageJson`
+    // the compiled resolver never reads package.json, so only an `index.js` /
+    // `index.mjs` resolves (measured). Real packages point `main`/`exports`
+    // elsewhere (typescript: `./lib/typescript.js`).
     // nitro writes this manifest beside the traced node_modules (the exact
     // shape, from a real build); the resolver reads it.
     write(
@@ -164,13 +166,18 @@ function buildApp(): { work: string; exe: string; sidecar: string } {
             name: "fake-esm",
             version: "1.0.0",
             type: "module",
-            // index.cjs is deliberately NOT written: nitro traces only the
+            // dist/entry.cjs is deliberately NOT written: nitro traces only the
             // `import` target, so a `require`-condition resolve must not be used.
-            exports: { ".": { import: "./index.mjs", require: "./index.cjs" } },
+            exports: {
+                ".": {
+                    import: "./dist/entry.mjs",
+                    require: "./dist/entry.cjs",
+                },
+            },
         }),
     );
     write(
-        join(nm, "fake-esm", "index.mjs"),
+        join(nm, "fake-esm", "dist", "entry.mjs"),
         'import reader from "fake-lib-reader";\nexport const kind = "esm";\nexport const lib = () => reader.lib();\n',
     );
     write(
@@ -178,11 +185,11 @@ function buildApp(): { work: string; exe: string; sidecar: string } {
         JSON.stringify({
             name: "fake-lib-reader",
             version: "1.0.0",
-            main: "index.js",
+            main: "lib/reader.js",
         }),
     );
     write(
-        join(nm, "fake-lib-reader", "index.js"),
+        join(nm, "fake-lib-reader", "lib", "reader.js"),
         "const path = require('path');\n" +
             "module.exports.lib = () => {\n" +
             "  const name = ['fake', 'data'].join('-');\n" + // non-literal: a RUNTIME resolve, like @typescript/vfs
@@ -200,11 +207,11 @@ function buildApp(): { work: string; exe: string; sidecar: string } {
         JSON.stringify({
             name: "fake-pure",
             version: "1.0.0",
-            main: "index.js",
+            main: "lib/pure.js",
         }),
     );
     write(
-        join(nm, "fake-pure", "index.js"),
+        join(nm, "fake-pure", "lib", "pure.js"),
         `module.exports = { marker: ${JSON.stringify(PURE)} };\n`,
     );
     write(
@@ -227,7 +234,7 @@ function buildApp(): { work: string; exe: string; sidecar: string } {
     // instead: the live marker can only come from the real file on disk,
     // the original marker only from the bundle.
     write(
-        join(nm, "fake-pure", "index.js"),
+        join(nm, "fake-pure", "lib", "pure.js"),
         `module.exports = { marker: ${JSON.stringify(PURE_LIVE)} };\n`,
     );
     return { work, exe, sidecar: nm };
