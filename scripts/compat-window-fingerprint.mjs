@@ -86,6 +86,20 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
+// A REAL parser, not a hand-rolled tokenizer (#1294 round 5). Three
+// successive rounds each found a new hole in a hand-written JS tokenizer
+// (round 3: raw regex over untokenized source; round 4: no regex-literal
+// state, then a staleness bug in the FIX for that; round 5: keywords like
+// `return` treated as operands, and no template-literal awareness) — the
+// review named it directly as the successive-round regression class this
+// repo's own workflow docs warn about. `typescript` is already a root
+// devDependency (used the same way by scripts/lib/parse-validity.mjs,
+// executable-lines.mjs, continuation-attribution.mjs) and is resolved the
+// same way here: a plain static import, so a missing package fails the
+// whole module load loudly (Node's own `ERR_MODULE_NOT_FOUND`) rather than
+// silently guessing — the workflow install step order is verified in
+// tests/compat-window-fingerprint.test.ts and this file's own header notes.
+import ts from 'typescript';
 import { CREDENTIAL_CELLS, CREDENTIAL_LANE } from './compat-window-audit.mjs';
 
 export const SCHEMA = 'knext.compat-window-fingerprint/v1';
@@ -113,220 +127,121 @@ export const HARNESS_ROOTS = [
 ];
 
 /**
- * Tokenize JS source into `code` / `string` / `comment` runs (#1294 round 3,
- * jev 0.90). A regex over RAW source cannot tell a comment
- * (`// see: import x from './nonexistent-thing'`) or an unrelated string
- * literal whose BODY happens to look like import syntax
- * (`"from './nonexistent-thing'"`) from the real thing — either makes the
- * whole credential-window fingerprint hard-error on a file that never
- * actually imports anything, and one spurious failure aborts the run this
- * exists to protect. This is a deliberately MINIMAL tokenizer — comments and
- * string/template literals only, no real JS grammar — sufficient to answer
- * "is this quote a genuine top-level string token, and if so what code runs
- * immediately before it", which is all dependency extraction needs.
+ * Local (`./…`/`../…`) import specifiers a JS file ACTUALLY imports, via a
+ * REAL parser — never a hand-rolled tokenizer (#1294 round 5).
+ *
+ * Rounds 3 and 4 each found a new hole in a hand-written JS tokenizer: round
+ * 3, a raw regex over UNtokenized source (a comment mentioning import-like
+ * text hard-errored the whole fingerprint); round 4, no regex-literal state
+ * at all (a regex containing a quote character got misread as a string
+ * start), then a staleness bug in the FIX for that. Round 5's review named
+ * the pattern directly — "each round has found a new hole in the hand-rolled
+ * tokenizer, which is the successive-round regression class" — and found two
+ * more: `isRegexPosition` treated JS KEYWORDS (`return`, `typeof`, …) as
+ * operands (so `return /'/.test(s)` mis-scanned exactly like the round-4
+ * bug), and nested TEMPLATE LITERAL interpolation (`` `${a ? `'` : ""}` ``)
+ * was never modelled at all. A hand tokenizer cannot be patched into
+ * soundness one review at a time; a REAL parser handles all of this by
+ * construction, because it is not guessing.
+ *
+ * Extracts specifiers from: `import … from '…'`, `export … from '…'`, bare
+ * `import '…'`, `require('…')`, and dynamic `import('…')` — anywhere in the
+ * file, at any nesting depth, via a full AST walk (`ts.forEachChild`).
+ *
+ * FAILS CLOSED on a NON-LITERAL specifier (round 5: "fail closed on
+ * non-literal specifiers that could be relative"): `require(x)`,
+ * `import(\`./${x}\`)`, `require(cond ? './a' : './b')` are all hard errors.
+ * A computed specifier MIGHT be relative — silently skipping it (as
+ * `ts.isStringLiteralLike` naturally would, by just finding no specs there)
+ * would reopen exactly the "silently unfrozen dependency" failure mode this
+ * whole mechanism exists to close, just moved one layer up. Deliberately
+ * scoped to bare `require(`/`import(` — `require.resolve(x)` is a RESOLVE
+ * call, not a module load that adds a dependency to this closure (and the
+ * real corpus already has one: `scripts/e2e-preflight.mjs`'s
+ * `require.resolve(ADAPTER_SUBPATH)`, a non-literal argument that must NOT
+ * trip this check).
  *
  * @param {string} src
- * @returns {{ type: 'code' | 'comment' | 'string', value: string }[]}
+ * @param {string} absPath used for the parser's `fileName` and error text
+ * @returns {string[]} every relative (`./…`/`../…`) specifier found
  */
-/**
- * Does a bare `/` at the CURRENT position start a REGEX LITERAL, or is it a
- * division/`/=` operator? A tokenizer that never asks this question (#1294
- * round 4, jev 0.69) mistakes a regex body's quote characters for a STRING
- * START — `/'/;` (a regex matching one `'`) reads its `'` as opening an
- * unterminated string that then swallows everything after it, silently
- * hiding any real `import()`/`require()` later in the file. The standard
- * lexer heuristic: `/` is DIVISION only when the last significant character
- * emitted looks like the END of an operand — an identifier/keyword
- * character, a digit, `)`, or `]`. Anywhere else (start of file, after an
- * operator, after `(`, `,`, `;`, `:`, `{`, `return`, …) a `/` starts a
- * regex. `}` is treated as operand-like (favouring division after a
- * bare-block/object-literal position) — a known, documented approximation;
- * the genuinely ambiguous residual is caught by the fail-closed check below,
- * not silently guessed.
- *
- * @param {string} lastSignificant the last non-comment, non-whitespace code
- *   character emitted so far, or `''` at the start of the file
- */
-function isRegexPosition(lastSignificant) {
-  if (lastSignificant === '') return true;
-  return !/[A-Za-z0-9_$)\]]/.test(lastSignificant);
-}
-
-function tokenizeJs(src) {
-  /** @type {{ type: 'code' | 'comment' | 'string' | 'regex', value: string }[]} */
-  const tokens = [];
-  const n = src.length;
-  let i = 0;
-  let codeStart = 0;
-  let lastSignificant = '';
-  // The regex/division decision below must reflect the character IMMEDIATELY
-  // preceding the current `/`, including any code not yet flushed (`const
-  // hint = /…/` — the `=` is still pending in `src.slice(codeStart, i)` at
-  // the point of decision, since ordinary code characters advance `i` without
-  // calling `flushCode`). Using the STALE `lastSignificant` from the last
-  // flushed token — as an earlier draft of this function did — reads the
-  // character from the PREVIOUS token instead, and got exactly this file's
-  // own `const hint = /EUNSUPPORTEDPROTOCOL|…"workspace:/.test(out)` wrong:
-  // stale state said "operand position" (division), so the regex's own
-  // embedded `"` was mistaken for a fresh string start, which then consumed
-  // over 1500 characters of real code searching for a closing quote that was
-  // never coming (#1294 round 4).
-  const currentLastSignificant = () => {
-    const pending = src.slice(codeStart, i).trimEnd();
-    return pending.length > 0 ? pending[pending.length - 1] : lastSignificant;
-  };
-  const flushCode = (end) => {
-    if (end > codeStart) {
-      const chunk = src.slice(codeStart, end);
-      tokens.push({ type: 'code', value: chunk });
-      const trimmed = chunk.trimEnd();
-      if (trimmed.length > 0) lastSignificant = trimmed[trimmed.length - 1];
-    }
-  };
-  while (i < n) {
-    const two = src.slice(i, i + 2);
-    if (two === '//') {
-      flushCode(i);
-      const nl = src.indexOf('\n', i);
-      const stop = nl === -1 ? n : nl;
-      tokens.push({ type: 'comment', value: src.slice(i, stop) });
-      i = stop;
-      codeStart = i;
-      continue;
-    }
-    if (two === '/*') {
-      flushCode(i);
-      const close = src.indexOf('*/', i + 2);
-      if (close === -1) {
-        throw new Error(
-          `compat-window fingerprint: unterminated /* block comment (no matching */). A silently-mis-scanned file can hide a real dependency — refusing to guess (#1294 round 4).`,
-        );
-      }
-      const stop = close + 2;
-      tokens.push({ type: 'comment', value: src.slice(i, stop) });
-      i = stop;
-      codeStart = i;
-      continue;
-    }
-    const ch = src[i];
-    if (ch === "'" || ch === '"' || ch === '`') {
-      flushCode(i);
-      let j = i + 1;
-      let closed = false;
-      while (j < n) {
-        if (src[j] === '\\') {
-          j += 2;
-          continue;
-        }
-        if (src[j] === ch) {
-          j += 1;
-          closed = true;
-          break;
-        }
-        j += 1;
-      }
-      if (!closed) {
-        throw new Error(
-          `compat-window fingerprint: unterminated ${ch} string literal (started at offset ${i}). A silently-mis-scanned file can hide a real dependency — refusing to guess (#1294 round 4).`,
-        );
-      }
-      tokens.push({ type: 'string', value: src.slice(i, j) });
-      i = j;
-      codeStart = i;
-      lastSignificant = ')'; // operand-like: a following `/` is division, not a regex
-      continue;
-    }
-    if (ch === '/' && isRegexPosition(currentLastSignificant())) {
-      flushCode(i);
-      let j = i + 1;
-      let inClass = false;
-      let closed = false;
-      while (j < n) {
-        const c = src[j];
-        if (c === '\n') break; // a regex literal cannot contain a literal newline
-        if (c === '\\') {
-          j += 2;
-          continue;
-        }
-        if (c === '[') {
-          inClass = true;
-          j += 1;
-          continue;
-        }
-        if (c === ']') {
-          inClass = false;
-          j += 1;
-          continue;
-        }
-        if (c === '/' && !inClass) {
-          j += 1;
-          closed = true;
-          break;
-        }
-        j += 1;
-      }
-      if (!closed) {
-        throw new Error(
-          `compat-window fingerprint: a '/' at offset ${i} looks like a regex-literal start (operand position) but never finds a closing '/' on the same line. Refusing to guess whether it is a regex or a division operator — reclassify by hand, or rewrite the code around it (#1294 round 4).`,
-        );
-      }
-      while (j < n && /[a-zA-Z]/.test(src[j])) j += 1; // regex flags
-      tokens.push({ type: 'regex', value: src.slice(i, j) });
-      i = j;
-      codeStart = i;
-      lastSignificant = ')'; // operand-like
-      continue;
-    }
-    i += 1;
+function jsLocalImportSpecifiers(src, absPath) {
+  // `ts.createSourceFile` is ERROR-TOLERANT by design (it powers editor
+  // tooling, which must produce SOME AST for a file mid-edit) — an
+  // unterminated string or regex does not throw, it recovers a best-effort
+  // parse. That is the right behaviour for an editor and the wrong one here:
+  // silently walking a recovered-but-wrong AST is exactly the "guess instead
+  // of refusing" failure mode this whole mechanism exists to close. So parse
+  // TWICE: once via `transpileModule` (the same syntax-only check
+  // `scripts/lib/parse-validity.mjs` already uses elsewhere in this repo)
+  // purely to FAIL CLOSED on any syntax error, then the real walk below.
+  const syntaxErrors = ts
+    .transpileModule(src, {
+      reportDiagnostics: true,
+      compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ESNext },
+    })
+    .diagnostics.filter((d) => d.category === ts.DiagnosticCategory.Error);
+  if (syntaxErrors.length > 0) {
+    const first = ts.flattenDiagnosticMessageText(syntaxErrors[0].messageText, ' ');
+    throw new Error(
+      `compat-window fingerprint: ${absPath} does not parse as JavaScript: ${first}. A file that cannot be parsed cannot be scanned for dependencies — refusing to guess (#1294 round 5).`,
+    );
   }
-  flushCode(n);
-  return tokens;
-}
 
-/**
- * Local (`./…`/`../…`) import specifiers this JS source ACTUALLY imports —
- * `import … from '…'`, bare `import '…'`, `require('…')`, dynamic
- * `import('…')` — never a comment or an unrelated string (#1294 round 3).
- *
- * Works on the TOKEN STREAM, never raw text: a string token is only counted
- * as a dependency when (a) its own content starts with `./` or `../` — a
- * string like `"from './x'"` fails this immediately, its content is
- * `from './x'`, not a relative path — AND (b) the `code` text immediately
- * preceding it (no comment or other string in between) ends in `from`,
- * `require(`, `import(`, or a bare statement-starting `import`. A comment
- * never produces a `string` token at all (the whole comment, quotes
- * included, is swallowed into one `comment` token), so it can never satisfy
- * either condition.
- *
- * @param {string} src
- * @returns {string[]}
- */
-function jsImportSpecifiers(src) {
-  const tokens = tokenizeJs(src);
+  const sourceFile = ts.createSourceFile(
+    absPath,
+    src,
+    ts.ScriptTarget.Latest,
+    /* setParentNodes */ true,
+    ts.ScriptKind.JS,
+  );
+
   /** @type {string[]} */
   const specs = [];
-  for (let idx = 0; idx < tokens.length; idx++) {
-    const t = tokens[idx];
-    if (t.type !== 'string') continue;
-    const raw = t.value.slice(1, -1);
-    if (!/^\.\.?\//.test(raw)) continue;
-    let context = '';
-    for (let k = idx - 1; k >= 0; k--) {
-      if (tokens[k].type !== 'code') break;
-      context = tokens[k].value + context;
-      if (context.length > 200) break;
+
+  const isBareRequireCall = (node) =>
+    ts.isCallExpression(node) &&
+    ts.isIdentifier(node.expression) &&
+    node.expression.text === 'require';
+  const isDynamicImportCall = (node) =>
+    ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword;
+
+  /** @param {ts.Node} node @param {ts.Node} callOrDeclNode */
+  const addSpecifier = (node, callOrDeclNode) => {
+    if (ts.isStringLiteralLike(node)) {
+      specs.push(node.text);
+      return;
     }
-    const tail = context.slice(-200);
-    if (
-      /\bfrom\s*$/.test(tail) ||
-      /\brequire\s*\(\s*$/.test(tail) ||
-      /\bimport\s*\(\s*$/.test(tail) ||
-      /(^|[;\n{}])\s*import\s*$/.test(tail)
-    ) {
-      specs.push(raw);
+    const { line: lineNumber } = sourceFile.getLineAndCharacterOfPosition(
+      callOrDeclNode.getStart(sourceFile),
+    );
+    throw new Error(
+      `compat-window fingerprint: ${absPath}:${lineNumber + 1} references a module with a NON-LITERAL specifier. It might be a relative path, and guessing whether it is one is exactly what this refuses to do — rewrite it as a literal string, or hand-declare the dependency (CREDENTIAL_CELLS.extraFiles) (#1294 round 5).`,
+    );
+  };
+
+  /** @param {ts.Node} node */
+  const visit = (node) => {
+    if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier) {
+      addSpecifier(node.moduleSpecifier, node);
+    } else if (isBareRequireCall(node) || isDynamicImportCall(node)) {
+      const arg = /** @type {ts.CallExpression} */ (node).arguments[0];
+      if (arg) {
+        addSpecifier(arg, node);
+      } else {
+        const { line: lineNumber } = sourceFile.getLineAndCharacterOfPosition(
+          node.getStart(sourceFile),
+        );
+        throw new Error(
+          `compat-window fingerprint: ${absPath}:${lineNumber + 1} calls ${isBareRequireCall(node) ? 'require()' : 'import()'} with no argument — refusing to guess (#1294 round 5).`,
+        );
+      }
     }
-  }
-  return specs;
+    ts.forEachChild(node, visit);
+  };
+
+  visit(sourceFile);
+  return specs.filter((raw) => /^\.\.?\//.test(raw));
 }
 
 /**
@@ -353,7 +268,7 @@ function directLocalDeps(absPath) {
   const specs = [];
 
   if (/\.(mjs|cjs|js)$/.test(absPath)) {
-    specs.push(...jsImportSpecifiers(src));
+    specs.push(...jsLocalImportSpecifiers(src, absPath));
   } else {
     // Shell: `. "${SCRIPT_DIR}/lib/x.sh"` / `source "${SCRIPT_DIR}/lib/x.sh"`.
     // The `${VAR}/` prefix is always the SCRIPT'S OWN directory by convention

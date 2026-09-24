@@ -130,11 +130,33 @@ function entryScripts(): string[] {
  */
 function workflowSubprocessRefs(workflowText: string): string[] {
   const found = new Set<string>();
-  const nodeRe =
-    /\bnode\s+"?(?:\$\{?GITHUB_WORKSPACE\}?\/)?(?:\.\/)?(?:knext\/)?(scripts\/[\w./-]+\.(?:mjs|cjs|js))"?\b/g;
+  // #1294 round 5 (jev 0.87): widened past a bare `node`/`bash` invoker with
+  // no flags and only the `${VAR}`/`./`/`knext/` shell-side path forms.
+  // Three more shapes now match, none of which appeared in either real
+  // workflow at the time this was written — the scan's job is to survive
+  // the NEXT edit, not just describe the current one:
+  //   - `bun` as the invoker, not just `node` (both run .mjs/.cjs/.js here);
+  //   - one or more `--flag`/`--flag=value` tokens between the invoker and
+  //     the path (e.g. `node --experimental-foo knext/scripts/x.mjs`);
+  //   - the GITHUB ACTIONS EXPRESSION form `${{ github.workspace }}/…`
+  //     (double-curly, dotted, optional inner spaces) — distinct from the
+  //     shell `${GITHUB_WORKSPACE}`/`$GITHUB_WORKSPACE` forms already
+  //     handled, and evaluated by the Actions runner BEFORE the shell ever
+  //     sees the `run:` step, so it is a real, different-looking way to
+  //     reference the same path.
+  const invoker = '(?:node|bun)';
+  const flags = '(?:--?[\\w.:=-]+\\s+)*';
+  const workspacePrefix =
+    '(?:\\$\\{?GITHUB_WORKSPACE\\}?\\/|\\$\\{\\{\\s*github\\.workspace\\s*\\}\\}\\/)?';
+  const nodeRe = new RegExp(
+    `\\b${invoker}\\s+${flags}"?${workspacePrefix}(?:\\.\\/)?(?:knext\\/)?(scripts\\/[\\w./-]+\\.(?:mjs|cjs|js))"?\\b`,
+    'g',
+  );
   for (const m of workflowText.matchAll(nodeRe)) found.add(m[1]);
-  const bashRe =
-    /\bbash\s+"?(?:\$\{?GITHUB_WORKSPACE\}?\/)?(?:\.\/)?(?:knext\/)?(scripts\/[\w./-]+\.sh)"?\b/g;
+  const bashRe = new RegExp(
+    `\\bbash\\s+${flags}"?${workspacePrefix}(?:\\.\\/)?(?:knext\\/)?(scripts\\/[\\w./-]+\\.sh)"?\\b`,
+    'g',
+  );
   for (const m of workflowText.matchAll(bashRe)) found.add(m[1]);
   for (const m of workflowText.matchAll(/--pin\s+(?:knext\/)?(\.github\/[\w./-]+\.json)/g)) {
     found.add(m[1]);
@@ -407,5 +429,24 @@ describe('compat-window fingerprint — execution scan: every node/bash/import/$
 
   it('entryScripts() is non-vacuous (sanity for the helper other tests build on)', () => {
     expect(entryScripts().length).toBeGreaterThan(0);
+  });
+
+  // #1294 round 5 (jev 0.87) — the workflow subprocess regex previously
+  // missed three real shapes: none appeared in either real workflow when
+  // this was written, so these are direct unit tests of the scanner
+  // function rather than assertions against the current tree (which the
+  // "not vacuous" test above already covers for the shapes that DO occur
+  // today).
+  it('workflowSubprocessRefs matches node/bun with flags, and the ${{ github.workspace }} Actions-expression form', () => {
+    expect(
+      workflowSubprocessRefs('run: node "${{ github.workspace }}/knext/scripts/x.mjs"'),
+    ).toEqual(['scripts/x.mjs']);
+    expect(workflowSubprocessRefs('run: node --experimental-foo knext/scripts/x.mjs')).toEqual([
+      'scripts/x.mjs',
+    ]);
+    expect(workflowSubprocessRefs('run: bun knext/scripts/x.mjs')).toEqual(['scripts/x.mjs']);
+    expect(
+      workflowSubprocessRefs('run: bash --posix "${{ github.workspace }}/knext/scripts/x.sh"'),
+    ).toEqual(['scripts/x.sh']);
   });
 });

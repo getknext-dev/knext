@@ -222,6 +222,19 @@ describe("the lane fingerprints ITS OWN workflow file, not the node lane's (#129
     const step = workflow.slice(idx, idx + 900);
     expect(step).not.toContain('knext-executing/.github/workflows/test-e2e-deploy.yml');
   });
+
+  // #1294 round 5 — same regression guard as the node lane
+  // (tests/compat-window-fingerprint.test.ts): the fingerprint script
+  // imports `typescript` (a root devDependency), so the workspace install
+  // must run before the fingerprint step or the import fails closed with
+  // Node's own module-not-found error.
+  it('"Install knext deps" (the bun install that provides typescript) runs BEFORE the fingerprint step', () => {
+    const installIdx = workflow.indexOf('name: Install knext deps');
+    const fingerprintIdx = workflow.indexOf('name: Fingerprint the frozen compat-window set');
+    expect(installIdx, 'Install knext deps step not found').toBeGreaterThan(-1);
+    expect(fingerprintIdx, 'Fingerprint step not found').toBeGreaterThan(-1);
+    expect(installIdx).toBeLessThan(fingerprintIdx);
+  });
 });
 
 describe('the lane is red-on-fail — no skip, no swallow', () => {

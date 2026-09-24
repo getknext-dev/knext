@@ -574,6 +574,23 @@ describe('compat-window fingerprint — wired into the scheduled run', () => {
     const ledger = workflow.slice(workflow.indexOf('shard-ledger:'));
     expect(ledger).toContain('windowFingerprint');
   });
+
+  // #1294 round 5 — the fingerprint script now imports `typescript` to parse
+  // JS (a REAL parser, not a hand tokenizer). `typescript` is a root
+  // devDependency, installed by the workspace `bun install`, so that install
+  // step must run BEFORE the fingerprint step or the import fails closed
+  // with Node's own module-not-found error — a real but unfriendly failure
+  // this test exists to make unnecessary by verifying the step ORDER, not
+  // just that an install step exists somewhere in the file. This is a
+  // regression guard: a future reorder (e.g. moving the fingerprint step
+  // earlier to shave a few seconds) would silently reintroduce the failure.
+  it('"Install knext deps" (the bun install that provides typescript) runs BEFORE the fingerprint step', () => {
+    const installIdx = workflow.indexOf('name: Install knext deps');
+    const fingerprintIdx = workflow.indexOf('name: Fingerprint the frozen compat-window set');
+    expect(installIdx, 'Install knext deps step not found').toBeGreaterThan(-1);
+    expect(fingerprintIdx, 'Fingerprint step not found').toBeGreaterThan(-1);
+    expect(installIdx).toBeLessThan(fingerprintIdx);
+  });
 });
 
 /**
@@ -835,16 +852,18 @@ describe('compat-window fingerprint — the entry scripts’ import/source closu
     expect(harness).toContain('scripts/lib/real.mjs');
   });
 
-  // #1294 round 4 (jev 0.69) — the tokenizer had no REGEX-LITERAL state, so
-  // a regex containing a quote character (`/'/`, or `/[\"']/g`) got its quote
-  // misread as a fresh STRING START, which then hunts for a closing quote
-  // that may not exist for a long stretch — silently mis-scanning the file
-  // and potentially swallowing a REAL import()/require() into the phantom
-  // "string", i.e. dropping a genuine dependency with no error at all. Found
-  // on the real repo: `scripts/e2e-preflight.mjs`'s own
+  // #1294 round 4 (jev 0.69, the hand-tokenizer's ORIGINAL regex-literal
+  // hole) — a regex containing a quote character (`/'/`, or `/[\"']/g`) got
+  // its quote misread as a fresh STRING START by round 4's hand-rolled
+  // regex-tracking. Found on the real repo:
+  // `scripts/e2e-preflight.mjs`'s own
   // `/EUNSUPPORTEDPROTOCOL|…"workspace:/.test(out)` regex, whose embedded `"`
   // was misread as a string start that then consumed 1500+ real characters
-  // hunting for a closing quote.
+  // hunting for a closing quote. Round 5 replaced the hand tokenizer
+  // entirely with `ts.createSourceFile` — a REAL parser handles a regex
+  // literal's contents correctly by construction, so these fixtures are now
+  // regression tests for the OLD bug class rather than exercises of hand-
+  // rolled regex-tracking logic that no longer exists.
   it('a regex literal containing a quote character does not corrupt scanning, and a genuine import right after it is still caught', () => {
     const { repoRoot, tarballsDir } = makeFixture();
     mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
@@ -903,49 +922,121 @@ describe('compat-window fingerprint — the entry scripts’ import/source closu
     expect(harness).toContain('scripts/lib/real.mjs');
   });
 
-  // Fail CLOSED: a '/' in operand position that never finds a same-line
-  // closing '/' is a hard error, never a silent guess that could hide a
-  // dependency behind an unterminated "regex".
-  it('an unterminated regex-looking construct (never closes on its own line) is a hard error, not a silent guess', () => {
+  // #1294 round 5 (jev 0.90, THE main finding) — `isRegexPosition` (the hand
+  // tokenizer's regex/division heuristic) treated JS KEYWORDS the same as
+  // identifiers/operands, so `return /'/.test(s)` misread the regex's `'` as
+  // a STRING START exactly like the round-4 bug it was supposed to fix — a
+  // `require()` right after it silently vanished, `directLocalDeps`
+  // returning `[]` with NO error at all. A real parser has no such
+  // ambiguity: `return` is a `ReturnStatement`, `/'/`  is unambiguously a
+  // `RegularExpressionLiteral` regardless of what token precedes it.
+  it('a regex after a KEYWORD (e.g. `return`) is not misread as a string, and the following require() is still caught', () => {
     const { repoRoot, tarballsDir } = makeFixture();
-    // A regex scan is BOUNDED to one line by construction (a regex literal
-    // cannot contain a literal newline), so an incomplete one can only ever
-    // consume up to end-of-line — it can never reach into a LATER line's
-    // real import, which is why this asserts the SPECIFIC error message
-    // rather than a bare `toThrow()`. Disabling the fail-closed throw does
-    // not make this fixture silently succeed (the truncated "regex" still
-    // safely stops at the newline, and the untouched import on the next line
-    // still gets evaluated normally) — it makes the fingerprint throw a
-    // DIFFERENT error instead (the import target does not resolve), which a
-    // bare `toThrow()` cannot distinguish from the guard actually firing. A
-    // message-specific matcher is what makes the mutation-prover's version
-    // of this test non-decorative.
+    mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+    writeFileSync(join(repoRoot, 'scripts/lib/real.cjs'), 'module.exports = { real: 1 };\n');
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-summary.mjs'),
+      "function checkIt(s) {\n  return /'/.test(s);\n}\nconst { real } = require('./lib/real.cjs');\nexport const y = real + checkIt('x');\n",
+    );
+    const result = execFileSync(
+      process.execPath,
+      [SCRIPT, '--repo-root', repoRoot, '--tarballs-dir', tarballsDir, '--json', '--files'],
+      { encoding: 'utf8' },
+    );
+    const parsed = JSON.parse(result) as { files: { component: string; path: string }[] };
+    const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+    expect(harness).toContain('scripts/lib/real.cjs');
+  });
+
+  // #1294 round 5 (jev 0.90) — a NESTED template literal
+  // (`` `${a ? `'` : ""}` ``) was never modelled by the hand tokenizer at
+  // all: its inner backtick either terminated the outer template early or
+  // confused the quote-tracking state, either way risking the SAME
+  // silently-dropped-dependency failure for whatever followed. A real
+  // parser treats the whole thing as one `TemplateExpression` node whose
+  // substitution is itself a `ConditionalExpression` containing two nested
+  // template literals — nesting depth is not special-cased, it falls out of
+  // the grammar.
+  it('a NESTED template literal does not corrupt scanning, and a following import() is still caught', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+    writeFileSync(join(repoRoot, 'scripts/lib/real.mjs'), 'export const real = 1;\n');
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-summary.mjs'),
+      'const nested = `${true ? `\'` : ""}`;\n' +
+        "export async function load() {\n  const { real } = await import('./lib/real.mjs');\n  return real + nested;\n}\n",
+    );
+    const result = execFileSync(
+      process.execPath,
+      [SCRIPT, '--repo-root', repoRoot, '--tarballs-dir', tarballsDir, '--json', '--files'],
+      { encoding: 'utf8' },
+    );
+    const parsed = JSON.parse(result) as { files: { component: string; path: string }[] };
+    const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+    expect(harness).toContain('scripts/lib/real.mjs');
+  });
+
+  // #1294 round 5 — a require()/import() whose specifier is NOT a string
+  // literal (a computed path) might be relative, and there is no static way
+  // to know. Silently finding zero specs there — which `ts.isStringLiteralLike`
+  // naturally would, by construction, if this weren't checked explicitly —
+  // would reopen the "silently unfrozen dependency" failure mode one layer
+  // up. This is a HARD ERROR, never a guess.
+  it('require()/import() with a NON-LITERAL specifier is a hard error, not a silent skip', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-summary.mjs'),
+      "const dynamicPath = './lib/real.cjs';\nconst { real } = require(dynamicPath);\nexport const y = real;\n",
+    );
+    expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(/NON-LITERAL specifier/);
+  });
+
+  // The residual half of the above: `require.resolve(x)` is a RESOLVE call,
+  // never a module load that adds a dependency to this closure, so a
+  // non-literal argument to IT must NOT trip the fail-closed check —
+  // `scripts/e2e-preflight.mjs`'s real `require.resolve(ADAPTER_SUBPATH)`
+  // depends on this being true.
+  it('require.resolve(x) with a non-literal argument does NOT trip the fail-closed check (it is not a module load)', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+    writeFileSync(join(repoRoot, 'scripts/lib/real.cjs'), 'module.exports = { real: 1 };\n');
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-summary.mjs'),
+      "const SUBPATH = '@getknext/core/adapter';\nconst adapterPath = require.resolve(SUBPATH);\nconst { real } = require('./lib/real.cjs');\nexport const y = real + adapterPath;\n",
+    );
+    const result = execFileSync(
+      process.execPath,
+      [SCRIPT, '--repo-root', repoRoot, '--tarballs-dir', tarballsDir, '--json', '--files'],
+      { encoding: 'utf8' },
+    );
+    const parsed = JSON.parse(result) as { files: { component: string; path: string }[] };
+    const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+    expect(harness).toContain('scripts/lib/real.cjs');
+  });
+
+  // Fail CLOSED: a file that does not PARSE at all (an unterminated regex or
+  // string literal, among other syntax errors) is a hard error — refusing
+  // to scan a recovered-but-possibly-wrong best-effort AST — rather than a
+  // silent guess. `ts.createSourceFile` is deliberately ERROR-TOLERANT (it
+  // powers editor tooling, which must produce SOME AST for a file mid-edit),
+  // so this checks `ts.transpileModule`'s syntax diagnostics FIRST and
+  // throws before ever walking the recovered tree.
+  it('an unterminated regex-looking construct is a hard error (the file does not parse)', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
     writeFileSync(
       join(repoRoot, 'scripts/e2e-summary.mjs'),
       "const bad = /unterminated\nimport { x } from './does-not-matter.mjs';\n",
     );
-    expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(/regex-literal start/);
+    expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(/does not parse as JavaScript/);
   });
 
-  // Fail CLOSED: an unterminated string/template literal is ALSO a hard
-  // error rather than a scan that silently runs to end-of-file (or far past
-  // where it should stop) absorbing real code — including real imports —
-  // into a phantom string token.
-  it('an unterminated string literal is a hard error, not a silent guess', () => {
+  it('an unterminated string literal is a hard error (the file does not parse)', () => {
     const { repoRoot, tarballsDir } = makeFixture();
-    // Double-quoted, deliberately with NO other `"` anywhere later in the
-    // file: an earlier draft of this test used a single-quoted opener
-    // (`'unterminated`) with a real `import … from '…'` right after it, and
-    // that import's OWN opening `'` "closed" the bad string by accident —
-    // the test passed even with the fail-closed throw disabled, because
-    // nothing about the fixture actually LEFT the string unterminated once
-    // tokenized. This shape has no candidate closing quote anywhere in the
-    // file, so it is genuinely unterminated regardless of what comes after.
     writeFileSync(
       join(repoRoot, 'scripts/e2e-summary.mjs'),
       'const bad = "unterminated\nexport const y = 1;\n',
     );
-    expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(/unterminated .* string literal/);
+    expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(/does not parse as JavaScript/);
   });
 
   it('names BOTH scripts/lib/e2e-state-snapshot.sh (sourced) and scripts/lib/knext-closure.mjs (imported, no e2e- prefix) in the real repo harness (node lane)', () => {

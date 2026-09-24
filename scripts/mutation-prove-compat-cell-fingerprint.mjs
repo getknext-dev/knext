@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
  * Mutation proof for the #1294 guards in `tests/compat-window-fingerprint.test.ts`,
- * `tests/compat-vinext-lane.test.ts`, `tests/compat-window-audit.test.ts` and
- * `tests/compat-credential-ref.test.ts`:
+ * `tests/compat-vinext-lane.test.ts`, `tests/compat-window-audit.test.ts`,
+ * `tests/compat-credential-ref.test.ts` and
+ * `tests/compat-window-fingerprint-execution-scan.test.ts`:
  *
  *   1. PER-CELL WORKFLOW ENTRY — `workflowRootForLane` must resolve each lane's
  *      OWN executing workflow (`compat-vinext.yml` for the vinext cells) from
@@ -20,15 +21,17 @@
  *      invisible to the digest — round 2's exact finding. Disarming the
  *      closure loop must remove EVERYTHING it swept in (shell-sourced
  *      `e2e-state-snapshot.sh` included).
- *   4. THE JS `from` IMPORT MUST STILL BE DETECTED post-tokenizer (round 2's
- *      review comment, re-anchored on the round-3 tokenizer rewrite): remove
- *      `knext-closure.mjs` from the computed closure by disabling the
- *      token-stream `from` context check, and the spec must go RED.
- *   5. THE TOKENIZER MUST ACTUALLY STRIP COMMENTS (round 3, jev 0.90) — a
- *      regex over RAW source hard-errors the WHOLE fingerprint on a comment
- *      that merely MENTIONS an import-like path to a file that does not
- *      exist. Reverting `jsImportSpecifiers` to scan raw, untokenized source
- *      must bring that false hard-error back.
+ *   4. IMPORT/EXPORT *DECLARATIONS* MUST STILL BE DETECTED (round 5's parser
+ *      rewrite, re-anchored from round 2's original finding): disabling the
+ *      `ts.isImportDeclaration`/`ts.isExportDeclaration` branch — leaving
+ *      `require()`/dynamic `import()` call detection intact — must remove
+ *      `knext-closure.mjs` (a plain `import { … } from '…'`) from the
+ *      closure and nothing else.
+ *   5. THE PARSER MUST ACTUALLY RUN, NOT A STUB — disarming the whole AST
+ *      walk (`jsLocalImportSpecifiers` returns `[]` unconditionally) must
+ *      remove EVERY JS-detected dependency: round 5's own regression tests
+ *      (a regex after a keyword, a nested template literal) as well as the
+ *      real-repo `knext-closure.mjs`/`workspace-protocol.mjs` imports.
  *   6. THE DECLARED `extraFiles` (round 3) MUST ACTUALLY BE APPLIED — THE
  *      mutation named in round 3's exit criteria: remove
  *      `compat-credential-ref.mjs` (and its `extraFiles` siblings) from the
@@ -39,13 +42,16 @@
  *      `./compat-credential-ref.mjs`, and extras are now fed into the SAME
  *      closure walk as every other entry point — disarming just that feed
  *      (not the direct `addEntry` for the extra itself) must reopen the gap.
- *   8. THE REGEX/DIVISION DECISION MUST USE THE CURRENT, NOT STALE, LAST
- *      SIGNIFICANT CHARACTER (round 4, jev 0.69, THE actual tokenizer bug —
- *      found live in `scripts/e2e-preflight.mjs`'s own
- *      `const hint = /EUNSUPPORTEDPROTOCOL|…"workspace:/.test(out)`).
- *   9–10. FAIL-CLOSED on an unterminated string OR an unterminated
- *      regex-looking construct — either must be a hard error, never a silent
- *      guess that could hide a dependency behind a mis-scanned file.
+ *   8. FAIL-CLOSED on a NON-LITERAL require()/import() specifier (round 5,
+ *      jev 0.90's fix, not its finding): a computed specifier MIGHT be
+ *      relative, and skipping it silently (which a broken `addSpecifier`
+ *      that stops throwing and just returns would do) reopens the "silently
+ *      unfrozen dependency" failure mode one layer up.
+ *   9. FAIL-CLOSED on a file that does not PARSE AT ALL (round 5): disarming
+ *      the `ts.transpileModule` syntax-diagnostics check — which runs
+ *      BEFORE the (deliberately error-tolerant) AST walk — must let an
+ *      unterminated string/regex silently fall through to a best-effort,
+ *      possibly-wrong parse instead of refusing outright.
  *
  * A guard that stays green when the behaviour it protects is removed is
  * decoration. Each mutation below deletes one piece of behaviour and requires
@@ -56,8 +62,8 @@
  * Shared harness, for the reasons this repo has already paid for:
  *   * `mutate` asserts the anchor occurs exactly once and aborts otherwise —
  *     a silently-failed substitution would certify a decorative guard green;
- *   * `declareMutations`/`recordMutation` — the lane can tell 9-of-10 from
- *     10-of-10;
+ *   * `declareMutations`/`recordMutation` — the lane can tell 8-of-9 from
+ *     9-of-9;
  *   * judged on EXIT CODES, never on grepped output — vitest/bun:test write
  *     ANSI, and a pass/fail grep over it once certified fourteen decorative
  *     mutations green.
@@ -82,7 +88,7 @@ const SPECS = [
   'tests/compat-window-fingerprint-execution-scan.test.ts',
 ];
 
-declareMutations(10);
+declareMutations(9);
 
 const RUNNERS = SPECS.map((spec) => ({ spec, runner: resolveSpecRunner(REPO_ROOT, spec) }));
 
@@ -166,28 +172,25 @@ prove(
   'for (const abs of []) {',
 );
 
-// 4. Round 2's named mutation, re-anchored on the round-3 tokenizer: remove
-//    `knext-closure.mjs` from the computed closure by disabling the
-//    token-stream `from` context check — while leaving `require()`, dynamic
-//    `import()` and the bare-`import` check intact — removes exactly that
-//    one dependency (its only detection path) and nothing else.
+// 4. Round 5's parser rewrite, round 2's original finding re-anchored:
+//    disable import/export DECLARATION detection specifically (leaving
+//    require()/dynamic import() intact) — `knext-closure.mjs` is reached via
+//    a plain `import { … } from '…'`, so this removes exactly that
+//    dependency's only detection path.
 prove(
-  "remove knext-closure.mjs from the computed closure: disable the 'from' context check",
-  '/\\bfrom\\s*$/.test(tail) ||',
-  'false ||',
+  'import/export DECLARATIONS stop being detected: disable the ts.isImportDeclaration/isExportDeclaration branch',
+  'if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier) {',
+  'if (false) {',
 );
 
-// 5. THE round-3 main finding, reproduced EXACTLY: short-circuit
-//    `jsImportSpecifiers` to the pre-round-3 raw regex (a `from '…'` match
-//    over untokenized source, comments included) instead of the token
-//    stream. The rest of the real function becomes dead code inside a stub
-//    (still syntactically valid — same closing brace), so a decoy comment
-//    hard-errors the whole fingerprint again, exactly as it did before this
-//    fix.
+// 5. THE round-5 exit criterion: stop running the parser at all.
+//    `jsLocalImportSpecifiers` becomes a stub that finds nothing, so every
+//    JS-detected dependency vanishes — the real-repo imports AND round 5's
+//    own keyword-regex / nested-template regression tests.
 prove(
-  'tokenizer bypassed: jsImportSpecifiers scans raw source (comments included), so a decoy comment hard-errors',
-  'function jsImportSpecifiers(src) {\n  const tokens = tokenizeJs(src);',
-  'function jsImportSpecifiers(src) {\n  const specs = [];\n  for (const m of src.matchAll(/\\bfrom\\s+[\'\\"](\\.\\.?\\/[^\'\\"]+)[\'\\"]/g)) specs.push(m[1]);\n  return specs;\n}\nfunction unusedPreRound3Tokenizer(src) {\n  const tokens = tokenizeJs(src);',
+  'the AST walk is disarmed: jsLocalImportSpecifiers returns [] unconditionally',
+  'function jsLocalImportSpecifiers(src, absPath) {',
+  'function jsLocalImportSpecifiers(src, absPath) {\n  return [];\n}\nfunction unusedRound5Walk(src, absPath) {',
 );
 
 // 6. THE round-3 exit-criterion mutation: remove `compat-credential-ref.mjs`
@@ -214,38 +217,28 @@ prove(
   'addEntry(relPath, abs);',
 );
 
-// 8. THE round-4 tokenizer fix's core bug, reproduced EXACTLY: revert the
-//    regex/division decision to the STALE `lastSignificant` (set only when a
-//    string/comment/regex token closes) instead of `currentLastSignificant()`
-//    (which also accounts for PENDING code not yet flushed). This is the
-//    precise defect that misread `scripts/e2e-preflight.mjs`'s own
-//    `const hint = /EUNSUPPORTEDPROTOCOL|…"workspace:/.test(out)` — the `=`
-//    making it a regex position was still pending, unflushed, so the stale
-//    read saw the PREVIOUS token's operand-like state instead and treated
-//    the regex's embedded `"` as a fresh string start.
+// 8. THE round-5 fail-closed fix: a require()/import() whose specifier is
+//    NOT a string literal must be a hard error. Disarming `addSpecifier`'s
+//    literal check makes it silently push nothing for a non-literal
+//    specifier instead of throwing — a computed relative path would then be
+//    silently invisible to the closure, exactly the failure mode this
+//    exists to close.
 prove(
-  "regex/division decision reverts to STALE lastSignificant (round-4's actual bug)",
-  'isRegexPosition(currentLastSignificant())',
-  'isRegexPosition(lastSignificant)',
+  'non-literal require()/import() specifier stops being a hard error: silently skip it instead',
+  'specs.push(node.text);\n      return;\n    }\n    const { line: lineNumber } = sourceFile.getLineAndCharacterOfPosition(\n      callOrDeclNode.getStart(sourceFile),\n    );\n    throw new Error(\n      `compat-window fingerprint: ${absPath}:${lineNumber + 1} references a module with a NON-LITERAL specifier.',
+  'specs.push(node.text);\n      return;\n    }\n    return;\n    const { line: lineNumber } = sourceFile.getLineAndCharacterOfPosition(\n      callOrDeclNode.getStart(sourceFile),\n    );\n    throw new Error(\n      `compat-window fingerprint: ${absPath}:${lineNumber + 1} references a module with a NON-LITERAL specifier.',
 );
 
-// 9. Fail-CLOSED guard: an unterminated string/template literal must be a
-//    hard error, not a scan that silently runs to end-of-file (or far past
-//    where it should stop) absorbing real code — including real imports —
-//    into a phantom string token.
+// 9. THE round-5 fail-closed fix, the syntax-error half: a file that does
+//    not parse at all (unterminated string/regex, among other syntax
+//    errors) must be a hard error BEFORE the error-tolerant
+//    `ts.createSourceFile` walk ever runs. Disarming the diagnostics check
+//    lets a malformed file fall through to a silent, possibly-wrong
+//    best-effort parse.
 prove(
-  'unterminated string literal stops being a hard error: silently accept it as closed',
-  'if (!closed) {\n        throw new Error(\n          `compat-window fingerprint: unterminated ${ch} string literal',
-  'if (false) {\n        throw new Error(\n          `compat-window fingerprint: unterminated ${ch} string literal',
-);
-
-// 10. Fail-CLOSED guard, the regex-literal half: a '/' in operand position
-//     that never finds a same-line closing '/' must be a hard error, never a
-//     silent guess about whether it was a regex or a division operator.
-prove(
-  'unterminated regex-looking construct stops being a hard error: silently accept it as closed',
-  "if (!closed) {\n        throw new Error(\n          `compat-window fingerprint: a '/' at offset",
-  "if (false) {\n        throw new Error(\n          `compat-window fingerprint: a '/' at offset",
+  'the syntax-error fail-closed check is disarmed: a file that does not parse is walked anyway',
+  'if (syntaxErrors.length > 0) {',
+  'if (false) {',
 );
 
 console.log(`\n${pass} caught, ${fail} undetected.`);
