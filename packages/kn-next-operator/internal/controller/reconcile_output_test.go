@@ -488,9 +488,23 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 			ksvc := &servingv1.Service{}
 			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
 
-			By("mounting no volumes into the app container")
-			Expect(ksvc.Spec.Template.Spec.Volumes).To(BeEmpty())
-			Expect(ksvc.Spec.Template.Spec.Containers[0].VolumeMounts).To(BeEmpty())
+			By("mounting no PVC-backed volume, and no mount path naming the bytecode cache")
+			// #1332 gave every app container a DIFFERENT, unrelated writable
+			// emptyDir by default (readOnlyRootFilesystem's /tmp + image-cache
+			// scratch space) — the invariant this block guards is narrower than
+			// "no volumes at all": no PERSISTENT volume, and no mount pointing at
+			// a bytecode/compile-cache path. Assert that precisely rather than
+			// widening (or deleting) the guard to fit the new unrelated volume.
+			for _, v := range ksvc.Spec.Template.Spec.Volumes {
+				Expect(v.PersistentVolumeClaim).To(BeNil(),
+					"the PVC-backed bytecode cache is removed; no volume may reference a PVC")
+			}
+			for _, m := range ksvc.Spec.Template.Spec.Containers[0].VolumeMounts {
+				Expect(m.MountPath).NotTo(ContainSubstring("compile-cache"),
+					"no mount may target a bytecode/compile-cache path")
+				Expect(m.MountPath).NotTo(ContainSubstring("bytecode"),
+					"no mount may target a bytecode/compile-cache path")
+			}
 
 			By("injecting neither NODE_COMPILE_CACHE nor BUN_RUNTIME_TRANSPILER_CACHE_PATH")
 			env := ksvc.Spec.Template.Spec.Containers[0].Env

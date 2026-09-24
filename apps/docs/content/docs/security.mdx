@@ -115,6 +115,41 @@ a detector that guessed "enforced" would be worse than none. `kn-next doctor` ru
 read-only detection as a preflight check. Note that flannel is what OrbStack and stock OKE clusters
 run — on those, treat network isolation as absent unless you install a policy-capable CNI.
 
+## Read-only root filesystem
+
+Defense in depth against in-container tampering: knext renders your app's container with a
+**read-only root filesystem** by default.
+
+- **Toggle:** `spec.security.readOnlyRootFilesystem` (`*bool`). `nil` (unset) or `true` renders
+  `readOnlyRootFilesystem: true` on the container (**default-on**); `false` keeps a writable root,
+  the pre-existing behavior.
+- **Your app keeps working.** The paths a knext runtime writes to at request time are provisioned
+  as explicit, writable scratch volumes rather than left on the (now read-only) image filesystem:
+  - `/tmp` — a general scratch directory.
+  - Next's own cache directory, for the standalone (Node/Bun) build target — this covers both the
+    image optimizer's on-disk variant cache and, for an app with no `cacheHandler` configured,
+    Next's default ISR/fetch-cache writes. The vinext single-executable build target needs no
+    second volume — its image optimizer never writes to local disk.
+- **What this does not affect:** the baked, build-time code cache your runtime warms into the image
+  stays fully readable; a read-only root only removes the (already rare) ability to add a *new*
+  entry to it at request time, never the ability to read what shipped.
+
+<Callout type="warn">
+**Known gap: an app with no `cacheHandler` configured** also has Next flush revalidated page HTML
+back onto a build-output path this cannot make writable without deleting your app's prebuilt pages
+— that specific write is rejected under a read-only root. It degrades gracefully (Next logs the
+failure and keeps serving from its in-memory cache; the page still returns successfully — ISR just
+falls back to memory-only instead of persisting across pods/restarts), but if you rely on
+Redis-backed ISR, configure a `cacheHandler` — `kn-next create` and the reference app do this by
+default — to avoid it entirely.
+</Callout>
+
+<Callout type="warn">
+**If your own code writes to a path under the app's working directory at runtime** (outside the
+paths above), a read-only root filesystem will reject that write. Either move the write under
+`/tmp`, or set `spec.security.readOnlyRootFilesystem: false` to opt out.
+</Callout>
+
 ## Digest pinning
 
 knext rejects mutable image tags everywhere.

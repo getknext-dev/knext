@@ -230,6 +230,7 @@ func maximalScalingSpec() *appsv1alpha1.ScalingSpec {
 func maximalWarmScheduleSpec() appsv1alpha1.NextAppSpec {
 	provisionKafka := true
 	networkPolicy := true
+	readOnlyRootFS := true
 	return appsv1alpha1.NextAppSpec{
 		Image:            guardFixtureImage,
 		ImagePullSecrets: []corev1.LocalObjectReference{{Name: "ocir-secret"}},
@@ -273,7 +274,7 @@ func maximalWarmScheduleSpec() appsv1alpha1.NextAppSpec {
 		// code has always allowed.
 		Build:          "turbopack",
 		TimeoutSeconds: 111,
-		Security:       &appsv1alpha1.SecuritySpec{NetworkPolicy: &networkPolicy},
+		Security:       &appsv1alpha1.SecuritySpec{NetworkPolicy: &networkPolicy, ReadOnlyRootFilesystem: &readOnlyRootFS},
 		BuildID:        "build-1",
 	}
 }

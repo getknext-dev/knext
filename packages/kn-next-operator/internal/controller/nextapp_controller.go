@@ -779,6 +779,82 @@ func deepHealthPath(nextApp *appsv1alpha1.NextApp) string {
 	return readinessProbePath(nextApp) + "/deep"
 }
 
+// buildWritableVolumes renders the emptyDir volumes + mounts the app
+// container needs to keep working under readOnlyRootFilesystem (#1332).
+// Returns (nil, nil) when the root stays writable — the pre-#1332 rendering,
+// byte-identical.
+//
+// Two writable paths are provisioned, both audited against the ACTUAL
+// runtime write behaviour rather than assumed:
+//
+//   - /tmp: a universal scratch dir. Standard defense-in-depth practice, and
+//     cheap insurance against any as-yet-uncatalogued temp-file write (e.g. a
+//     native addon spilling to disk) in either build shape.
+//   - `.next/standalone/.next/cache`, STANDALONE SHAPE ONLY (build != "vinext"
+//     — turbopack/webpack/unset all emit that same tree, mirroring the
+//     containerCommand branch above): Next's own built-in image optimizer
+//     writes optimized variants under `.next/cache/images` at request time
+//     (image-cache-sync.ts / ADR-0006 then syncs them to the object store).
+//     The WHOLE `.next/cache` dir is mounted, not just `images` — an app with
+//     no `cacheHandler` configured also has Next's default FileSystemCache
+//     write ISR/fetch-cache entries under `.next/cache/fetch-cache`, and
+//     mounting only the `images` subdir left that write EROFS (verified live
+//     on OKE, #1332 review round 2). It lives at
+//     `/app/.next/standalone/.next/cache` per the shipped recipe
+//     (Dockerfile.standalone.hbs, WORKDIR /app). The vinext single-executable
+//     shape's own image optimizer (vinext-image-optimizer.ts) never touches
+//     local disk, so it needs no second mount.
+//
+// Deliberately NOT mounted, and NOT fully fixed by the above:
+//
+//   - The baked V8/Node compile-cache directory
+//     (`.next/standalone/.next/compile-cache`, NODE_COMPILE_CACHE) — a SIBLING
+//     of `.next/cache`, not nested inside it, so the mount above does not
+//     touch it. V8's handling of an unwritable cache dir is fail-open
+//     (compile-cache-health.ts, __tests__/compile-cache-volume-fallback.test.ts)
+//     — it silently falls back to serving the baked, already-populated
+//     entries read-only rather than erroring, so a read-only root costs no
+//     correctness there, only the (already rare) chance of caching a NEW
+//     entry discovered at runtime.
+//   - `.next/standalone/.next/server/app/**` — Next's default FileSystemCache
+//     (active only on an app with NO `cacheHandler` configured) also
+//     flushes REVALIDATED page HTML back onto this BUILD-OUTPUT path, not
+//     just `.next/cache`. That path cannot be made writable without an
+//     emptyDir SHADOWING it — which would delete the prebuilt pages every
+//     other route depends on to serve at all, a strictly worse outage. This
+//     write therefore stays EROFS under a read-only root: verified live on
+//     OKE to be NON-FATAL (Next logs "Failed to update prerender cache" and
+//     keeps serving from its in-memory cache; the request that triggered the
+//     revalidation still returns 200) — degraded to memory-only ISR, not a
+//     crash. Every knext-authored app (the `kn-next create` scaffold and the
+//     `file-manager` reference app) configures a `cacheHandler` unconditionally
+//     in its `next.config.ts`, which makes Next skip FileSystemCache entirely
+//     (`IncrementalCache`'s constructor only instantiates it when NO custom
+//     handler is registered) — so this residual EROFS is reachable only by an
+//     app that has removed or never had that wiring. Configuring a
+//     `cacheHandler` (Redis or otherwise) is the fix; see the operator docs.
+func buildWritableVolumes(nextApp *appsv1alpha1.NextApp, readOnlyRootFS bool) ([]corev1.Volume, []corev1.VolumeMount) {
+	if !readOnlyRootFS {
+		return nil, nil
+	}
+
+	const writableVolumeName = "knext-writable"
+	volumes := []corev1.Volume{
+		{Name: writableVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+	}
+	volumeMounts := []corev1.VolumeMount{
+		{Name: writableVolumeName, MountPath: "/tmp", SubPath: "tmp"},
+	}
+	if nextApp.Spec.Build != "vinext" {
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      writableVolumeName,
+			MountPath: "/app/.next/standalone/.next/cache",
+			SubPath:   "next-cache",
+		})
+	}
+	return volumes, volumeMounts
+}
+
 func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc *servingv1.Service) error {
 	// Determine the SHALLOW readiness/liveness probe path (#338).
 	healthPath := readinessProbePath(nextApp)
@@ -928,13 +1004,12 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 
 	envVars, envFrom := r.buildKsvcEnv(nextApp)
 
-	// No volumes are mounted into the app container. The PVC-backed bytecode cache
-	// that used to live here is gone — the V8 compile cache is baked into the image
-	// at build time (ADR-0035), so there is nothing to persist across cold starts.
-	// Kept as declared-empty rather than deleted so a future volume has an obvious
-	// seam, and so the ksvc build reads the same on both paths.
-	var volumes []corev1.Volume
-	var volumeMounts []corev1.VolumeMount
+	// readOnlyRootFilesystem (#1332): default-on, same posture as the
+	// image-prewarm job container (image_prewarm.go) and the same
+	// nil-means-true convention as the sibling NetworkPolicy field above.
+	readOnlyRootFS := nextApp.Spec.Security == nil || nextApp.Spec.Security.ReadOnlyRootFilesystem == nil ||
+		*nextApp.Spec.Security.ReadOnlyRootFilesystem
+	volumes, volumeMounts := buildWritableVolumes(nextApp, readOnlyRootFS)
 
 	// ContainerConcurrency default (#377, ADR-0028). Lowered from 100 → 20: a
 	// pod absorbing 100 concurrent requests before Knative added a 2nd replica
@@ -1044,6 +1119,9 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 			Env:          envVars,
 			EnvFrom:      envFrom,
 			VolumeMounts: volumeMounts,
+			SecurityContext: &corev1.SecurityContext{
+				ReadOnlyRootFilesystem: ptr.To(readOnlyRootFS),
+			},
 			Ports: []corev1.ContainerPort{
 				{ContainerPort: 3000},
 			},

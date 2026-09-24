@@ -246,6 +246,38 @@ type SecuritySpec struct {
 	// false => the policy is not reconciled and any previously-created one is deleted.
 	// +optional
 	NetworkPolicy *bool `json:"networkPolicy,omitempty"`
+
+	// ReadOnlyRootFilesystem toggles `readOnlyRootFilesystem: true` on the
+	// rendered APP (serving) container's SecurityContext — defense in depth
+	// against in-container tampering/persistence, matching the image-prewarm
+	// job container's existing posture (image_prewarm.go). The runtime's few
+	// writable paths (a scratch dir at /tmp, and — for the standalone build
+	// shape only — Next's own `.next/standalone/.next/cache`, which holds
+	// both the optimized-image variant cache and, for an app with no
+	// `cacheHandler` configured, its default ISR/fetch-cache writes) are
+	// provisioned as explicit emptyDir mounts so the app keeps working with a
+	// read-only root; the vinext single-executable shape needs neither, so it
+	// renders with no extra mounts. The V8/Node compile-cache directory baked
+	// into the standalone image needs no mount: Node's compile cache is
+	// fail-open on an unwritable directory (falls back to the baked,
+	// read-only entries).
+	//
+	// KNOWN RESIDUAL GAP: an app with no `cacheHandler` configured (every
+	// knext-scaffolded app and the file-manager reference app configure one
+	// unconditionally) ALSO has Next's default cache flush REVALIDATED page
+	// HTML onto `.next/standalone/.next/server/app/**` — a build-output path
+	// this cannot mount without shadowing the prebuilt pages every route
+	// depends on. That write stays read-only-rejected; verified non-fatal on
+	// a live cluster (Next logs the failure and keeps serving from memory —
+	// ISR degrades to memory-only, it does not crash). Configure a
+	// `cacheHandler` to avoid it.
+	//
+	// Semantics: nil (unset) or true => read-only root is rendered
+	// (DEFAULT-ON); false => the container keeps a writable root filesystem
+	// (the pre-existing behavior), for an app with its own untracked runtime
+	// write path this default does not yet cover.
+	// +optional
+	ReadOnlyRootFilesystem *bool `json:"readOnlyRootFilesystem,omitempty"`
 }
 
 // DatabaseSpec is the author-facing surface of the app's database. knext is
