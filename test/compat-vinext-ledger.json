@@ -1,0 +1,162 @@
+{
+  "$comment": "vinext x bun compiled-exec quarantine ledger. Entries are RECLASSIFIED after each run (scripts/compat-vinext-ledger.mjs), never removed from the corpus: the denominator stays the node lane's. Founder constraints: at most 15 files, dated with at most 30 days to expiry, whole-file entries name the feature and link the upstream issue, flaky entries are per-case with mixed evidence, and a ledgered failure that stops failing reds the run.",
+  "lane": "bun-vinext",
+  "entries": [
+    {
+      "test": "test/e2e/app-dir/worker/worker.test.ts",
+      "scope": "file",
+      "class": "unsupported",
+      "feature": "Deployment-id query on native-ESM worker chunk URLs (vinext keeps module identity, by design)",
+      "upstream": "https://github.com/cloudflare/vinext/issues/3437",
+      "evidence": {
+        "fail": ["35940993605", "35986509462", "35995001855"]
+      },
+      "added": "2026-09-24",
+      "expires": "2026-10-24"
+    },
+    {
+      "test": "test/e2e/app-dir/next-dynamic-csp-nonce/next-dynamic-csp-nonce.test.ts",
+      "scope": "file",
+      "class": "unsupported",
+      "feature": "next/dynamic JS chunk hints are rel=modulepreload (native ES modules), not rel=preload",
+      "upstream": "https://github.com/cloudflare/vinext/issues/3438",
+      "evidence": {
+        "fail": ["35940993605", "35986509462", "35995001855"]
+      },
+      "added": "2026-09-24",
+      "expires": "2026-10-24"
+    },
+    {
+      "test": "test/e2e/esm-externals/esm-externals.test.ts",
+      "scope": "file",
+      "class": "unsupported",
+      "feature": "Runtime server externals in the nitro-bundled server (the bundle is closed by design)",
+      "upstream": "https://github.com/cloudflare/vinext/issues/3439",
+      "evidence": {
+        "fail": ["35940993605", "35986509462", "35995001855"]
+      },
+      "added": "2026-09-24",
+      "expires": "2026-10-24"
+    },
+    {
+      "test": "test/e2e/babel/index.test.ts",
+      "scope": "file",
+      "class": "unsupported",
+      "feature": "Flow syntax via a custom Babel config (Vite/rolldown has no Babel Flow transform)",
+      "upstream": "https://github.com/cloudflare/vinext/issues/1506",
+      "evidence": {
+        "fail": ["35940993605", "35986509462", "35995001855"]
+      },
+      "added": "2026-09-24",
+      "expires": "2026-10-24"
+    },
+    {
+      "test": "test/e2e/app-dir/webpack-loader-set-environment-variable/webpack-loader-set-environment-variable.test.ts",
+      "scope": "file",
+      "class": "unsupported",
+      "feature": "Webpack loaders (no Vite equivalent)",
+      "upstream": "https://github.com/cloudflare/vinext/issues/1500",
+      "evidence": {
+        "fail": ["35940993605", "35986509462", "35995001855"]
+      },
+      "added": "2026-09-24",
+      "expires": "2026-10-24"
+    },
+    {
+      "test": "test/e2e/app-dir/sub-shell-generation/sub-shell-generation.test.ts",
+      "scope": "file",
+      "class": "unsupported",
+      "feature": "Partial Prerendering fallback shells (build-time prerender)",
+      "upstream": "https://github.com/cloudflare/vinext/issues/1359",
+      "evidence": {
+        "fail": ["35940993605", "35986509462", "35995001855"]
+      },
+      "added": "2026-09-24",
+      "expires": "2026-10-24"
+    },
+    {
+      "test": "test/e2e/app-dir/fallback-shells/fallback-shells.test.ts",
+      "scope": "file",
+      "class": "unsupported",
+      "feature": "Partial Prerendering fallback shells (build-time prerender)",
+      "upstream": "https://github.com/cloudflare/vinext/issues/1359",
+      "evidence": {
+        "fail": ["35940993605", "35986509462", "35995001855"]
+      },
+      "added": "2026-09-24",
+      "expires": "2026-10-24"
+    },
+    {
+      "test": "test/e2e/app-dir/partial-fallback-root-blocking/partial-fallback-root-blocking.test.ts",
+      "scope": "file",
+      "class": "unsupported",
+      "feature": "Partial Prerendering fallback shells (build-time prerender)",
+      "upstream": "https://github.com/cloudflare/vinext/issues/1359",
+      "evidence": {
+        "fail": ["35940993605", "35986509462", "35995001855"]
+      },
+      "added": "2026-09-24",
+      "expires": "2026-10-24"
+    },
+    {
+      "test": "test/e2e/app-dir/partial-fallback-shell-upgrade/partial-fallback-shell-upgrade.test.ts",
+      "scope": "file",
+      "class": "unsupported",
+      "feature": "Partial Prerendering fallback shells (build-time prerender)",
+      "upstream": "https://github.com/cloudflare/vinext/issues/1359",
+      "evidence": {
+        "fail": ["35940993605", "35986509462", "35995001855"]
+      },
+      "added": "2026-09-24",
+      "expires": "2026-10-24"
+    },
+    {
+      "test": "test/e2e/app-dir/resume-data-cache/resume-data-cache.test.ts",
+      "scope": "file",
+      "class": "unsupported",
+      "feature": "Partial Prerendering resume data cache (build-time prerender)",
+      "upstream": "https://github.com/cloudflare/vinext/issues/1359",
+      "evidence": {
+        "fail": ["35940993605", "35986509462", "35995001855"]
+      },
+      "added": "2026-09-24",
+      "expires": "2026-10-24"
+    },
+    {
+      "test": "test/e2e/app-dir/cache-components/cache-components.server-action.test.ts",
+      "scope": "file",
+      "class": "unsupported",
+      "feature": "Cache Components build-time prerendering",
+      "upstream": "https://github.com/cloudflare/vinext/issues/3431",
+      "evidence": {
+        "fail": ["35940993605", "35986509462", "35995001855"]
+      },
+      "added": "2026-09-24",
+      "expires": "2026-10-24"
+    },
+    {
+      "test": "test/e2e/app-dir/cache-components-allow-otel-spans/cache-components-allow-otel-spans.test.ts",
+      "scope": "file",
+      "class": "unsupported",
+      "feature": "Cache Components build-time prerendering",
+      "upstream": "https://github.com/cloudflare/vinext/issues/3431",
+      "evidence": {
+        "fail": ["35940993605", "35986509462", "35995001855"]
+      },
+      "added": "2026-09-24",
+      "expires": "2026-10-24"
+    },
+    {
+      "test": "test/e2e/app-dir/use-cache-metadata-route-handler/use-cache-metadata-route-handler.test.ts",
+      "scope": "file",
+      "class": "unsupported",
+      "feature": "Cache Components (use cache) build-time prerendering of metadata routes",
+      "upstream": "https://github.com/cloudflare/vinext/issues/3431",
+      "evidence": {
+        "fail": ["35940993605", "35986509462", "35995001855"]
+      },
+      "added": "2026-09-24",
+      "expires": "2026-10-24"
+    }
+  ]
+}

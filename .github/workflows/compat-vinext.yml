@@ -749,6 +749,25 @@ jobs:
             --builder vinext \
             --out "compat-suite-summary-${SAFE_SHARD}.json"
 
+      # The quarantine ledger (#1321): RECLASSIFIES failures matching a live,
+      # dated, bounded entry as `quarantined` in this shard's summary. It never
+      # removes a test from the run and never touches passed/notRun/expectedTotal,
+      # so the denominator stays the node lane's. An invalid or expired ledger
+      # fails the shard. A missing summary is left for the red gate below.
+      - name: Apply the vinext quarantine ledger
+        if: always()
+        working-directory: knext
+        run: |
+          set -euo pipefail
+          SAFE_SHARD="${{ matrix.shard }}"
+          SAFE_SHARD="${SAFE_SHARD/\//-}"
+          SUMMARY="compat-suite-summary-${SAFE_SHARD}.json"
+          if [ -f "${SUMMARY}" ]; then
+            node scripts/compat-vinext-ledger.mjs apply \
+              --ledger test/compat-vinext-ledger.json \
+              --summary "${SUMMARY}"
+          fi
+
       - name: Upload summary artifact (vinext axis)
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -855,6 +874,14 @@ jobs:
           RUN_ATTEMPT: ${{ github.run_attempt }}
           EVENT_NAME: ${{ github.event_name }}
         run: node knext/scripts/compat-run-ledger.mjs
+
+      # Reconcile the quarantine ledger over the WHOLE run: publish passed /
+      # failed / quarantined over the unchanged total, and fail if any ledgered
+      # failure did not fail anywhere (a stale entry must be removed), so the
+      # ledger only ever shrinks on evidence.
+      - name: Reconcile the vinext quarantine ledger
+        if: always()
+        run: node knext/scripts/compat-vinext-ledger.mjs report --ledger knext/test/compat-vinext-ledger.json --summaries summaries
 
       - name: Upload the run ledger (vinext axis)
         if: always()
