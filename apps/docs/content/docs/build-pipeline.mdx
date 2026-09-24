@@ -203,9 +203,10 @@ cannot be bundled: <package> (chunks/<file>.mjs) — the binary throws if that c
 ```
 
 Install the named package as a dependency of your app and rebuild. Otherwise, any request that
-reaches code using that package fails with `Cannot find module '<package>'`. To make this a build
-failure instead of a warning (for example in CI), set `KNEXT_COMPILE_STRICT_REQUIRES=1` when you run
-`kn-next build`.
+reaches code using that package fails with `Cannot find module '<package>'`. The build also warns if
+it finds a runtime `require` it cannot analyse, because it cannot then tell whether every package that
+`require` loads was bundled. To make either case a build failure instead of a warning (for example in
+CI), set `KNEXT_COMPILE_STRICT_REQUIRES=1` when you run `kn-next build`.
 
 The same applies to packages you list in `serverExternalPackages` and to the packages Next.js keeps
 external by default (for example `typescript`, `sqlite3`, `prisma`). The binary carries a bundled
