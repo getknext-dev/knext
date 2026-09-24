@@ -665,9 +665,20 @@ describe('compat-window fingerprint — each cell hashes the workflow that actua
     expect(() => fingerprintLane(repoRoot, tarballsDir, 'not-a-real-lane')).toThrow();
   });
 
-  it('a lane with no workflow wired yet (node-webpack) is a hard error, not a guess', () => {
+  it('a lane with no workflow wired yet (node-vinext) is a hard error, not a guess', () => {
     const { repoRoot, tarballsDir } = makeFixture();
-    expect(() => fingerprintLane(repoRoot, tarballsDir, 'node-webpack')).toThrow();
+    expect(() => fingerprintLane(repoRoot, tarballsDir, 'node-vinext')).toThrow();
+  });
+
+  it('#1245: the webpack lanes resolve to the shared test-e2e-deploy.yml, same harness bytes as their turbopack sibling', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    const node = fingerprintLane(repoRoot, tarballsDir, 'node');
+    expect(fingerprintLane(repoRoot, tarballsDir, 'node-webpack').components.harness).toEqual(
+      node.components.harness,
+    );
+    expect(fingerprintLane(repoRoot, tarballsDir, 'bun-webpack').components.harness).toEqual(
+      node.components.harness,
+    );
   });
 
   // THE mutation named in the exit criteria: editing `compat-vinext.yml` moves

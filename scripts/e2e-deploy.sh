@@ -385,6 +385,18 @@ set -f
 "${NEXT_BIN}" build ${NEXT_BUILD_ARGS} 2>&1 | tee "${BUILD_LOG}" >&2
 set +f
 
+# ── #1245: a webpack credential cell PROVES its build was webpack ─────────────
+# The bundler is chosen by `next build` reading IS_WEBPACK_TEST from the env it
+# inherits (workflow → run-tests.js → jest → next-deploy.ts → this script). If
+# that env were dropped anywhere on the way, `next build` silently defaults to
+# Turbopack and the webpack cell would bank nights for turbopack output. So on
+# KNEXT_BUILDER=webpack refuse a build without webpack's server runtime, which
+# Turbopack never emits. turbopack/unset: untouched.
+if [ "${KNEXT_BUILDER:-}" = "webpack" ] && [ ! -f "${APP_DIR}/.next/server/webpack-runtime.js" ]; then
+  log "ERROR: KNEXT_BUILDER=webpack but the build emitted no .next/server/webpack-runtime.js — this is not a webpack build (did IS_WEBPACK_TEST reach next build?); refusing to deploy it on the webpack lane"
+  exit 1
+fi
+
 # ── 3. locate + stage the standalone server tree ──────────────────────────────
 # output:'standalone' emits server.js under .next/standalone (monorepo fixtures may
 # nest it under .next/standalone/<app-path>/server.js); find the first one.

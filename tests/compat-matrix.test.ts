@@ -848,12 +848,29 @@ async function main() {
           /official/i.test(r.feature) &&
           !/official next\.js compatibility suite/i.test(r.feature) &&
           !/bun runtime axis/i.test(r.feature) &&
-          !/vinext single-executable axis/i.test(r.feature),
+          !/vinext single-executable axis/i.test(r.feature) &&
+          !/webpack builder axis/i.test(r.feature),
       );
       expect(
         unknown.map((r) => r.feature),
         'unexpected extra official-claiming row(s)',
       ).toEqual([]);
+    });
+
+    // #1245 — the two webpack credential cells each get their OWN row, so a
+    // turbopack number can never be read as a webpack one (or vice versa).
+    it('one webpack-builder-axis row per runtime (node, bun), each naming its cell lane', () => {
+      const webpackRows = rows.filter((r) => /webpack builder axis/i.test(r.feature));
+      expect(webpackRows.length).toBe(2);
+      const lanes = webpackRows
+        .map((r) => r.feature.match(/`KNEXT_LANE=(node-webpack|bun-webpack)`/)?.[1] ?? null)
+        .sort();
+      expect(lanes).toEqual(['bun-webpack', 'node-webpack']);
+      for (const r of webpackRows) {
+        // Never credentialed by this PR: a ✅ here would need the full evidence
+        // contract below AND 14 banked credential nights, neither of which exists.
+        expect(r.evidence).toMatch(/\.github\/workflows\/test-e2e-deploy\.yml/);
+      }
     });
 
     it('the vinext-axis row exists — the shipped artifact has a lane row, not a blind spot', () => {

@@ -187,9 +187,11 @@ describe('cr-1179 #3 — the run publishes its lane independently of the ledger'
   it('an artifact names the lane, locksteped to the prefix the audit reads', () => {
     const { step } = markerStep();
     expect(String(step.uses ?? '')).toMatch(/^actions\/upload-artifact@/);
-    // The lane comes from the SAME env the ledger and the alert title read, so
-    // the marker cannot disagree with the lane the run actually ran.
-    expect(step.with?.name).toBe(`${LANE_MARKER_PREFIX}\${{ env.KNEXT_RUNTIME }}`);
+    // The lane comes from the SAME env the alert title reads, so the marker
+    // cannot disagree with the lane the run actually ran. #1245: that is
+    // KNEXT_LANE (the cell window key — `node-webpack` on a webpack night),
+    // not the bare runtime, which a webpack cell shares with a turbopack one.
+    expect(step.with?.name).toBe(`${LANE_MARKER_PREFIX}\${{ env.KNEXT_LANE }}`);
   });
 
   it('it is published for EVERY lane, not just the bun one', () => {
