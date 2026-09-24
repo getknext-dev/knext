@@ -531,6 +531,42 @@ export function validateConfig(
         }
     }
 
+    // healthCheckPath validation — this value flows into the image-build
+    // compile-cache bake as `KNEXT_WARM_PATH`, a COMMA-SEPARATED list of paths
+    // (see `knext-compile-cache-bake.mjs.hbs` and the standalone-node/
+    // vinext-node entry templates, which split on ","). A comma or whitespace
+    // in the configured path corrupts that list, and a value with no leading
+    // slash is not a valid path at all — so both are rejected here, before
+    // either the CLI's own build-arg passthrough (`runtime-image.ts`) or the
+    // bake itself see it. Checked via `!== undefined` (not truthiness) so an
+    // explicit empty string is also caught, rather than silently treated the
+    // same as "unset".
+    if (config.healthCheckPath !== undefined) {
+        if (typeof config.healthCheckPath !== "string") {
+            errors.push(
+                `'healthCheckPath' must be a string (e.g. "/api/health"), got ${typeof config.healthCheckPath}.`,
+            );
+        } else {
+            const path = config.healthCheckPath;
+            if (!path.startsWith("/")) {
+                errors.push(
+                    `'healthCheckPath' ("${path}") must start with a leading slash (e.g. "/api/health").`,
+                );
+            }
+            if (path.includes(",")) {
+                errors.push(
+                    `'healthCheckPath' ("${path}") must not contain a comma — it is joined into a ` +
+                        "comma-separated KNEXT_WARM_PATH list at build time and a comma would split it into two paths.",
+                );
+            }
+            if (/\s/.test(path)) {
+                errors.push(
+                    `'healthCheckPath' ("${path}") must not contain whitespace (e.g. "/api/health", not "/api health").`,
+                );
+            }
+        }
+    }
+
     // Database binding validation (#417) — the ONE cheap check mirroring the
     // operator's CRD XValidation on DatabaseSpec (nextapp_types.go):
     // `!has(self.roSecretRef) || has(self.secretRef)`. Everything else
