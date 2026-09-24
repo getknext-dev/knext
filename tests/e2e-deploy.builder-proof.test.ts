@@ -34,7 +34,7 @@ http.createServer((req, res) => {
 `;
 
 /** A fake `next` that emits a standalone tree, with or without webpack's server runtime. */
-function fakeNextScript(appDir: string, emitWebpackRuntime: boolean): string {
+function fakeNextScript(appDir: string, emitWebpackRuntime: boolean, appSubdir = ''): string {
   return `#!/usr/bin/env node
 const fs = require('node:fs');
 const path = require('node:path');
@@ -45,7 +45,20 @@ fs.mkdirSync(path.join(nextDir, 'static'), { recursive: true });
 fs.mkdirSync(path.join(nextDir, 'standalone'), { recursive: true });
 fs.mkdirSync(path.join(nextDir, 'server'), { recursive: true });
 fs.writeFileSync(path.join(nextDir, 'BUILD_ID'), 'fixture-build-' + Date.now());
-fs.writeFileSync(path.join(nextDir, 'standalone', 'server.js'), ${JSON.stringify(FAKE_SERVER_JS)});
+const appRoot = path.join(nextDir, 'standalone', ${JSON.stringify(appSubdir)});
+fs.mkdirSync(appRoot, { recursive: true });
+fs.writeFileSync(path.join(appRoot, 'server.js'), ${JSON.stringify(FAKE_SERVER_JS)});
+// webpack traces react-dom into the standalone tree, so DECOY server.js files
+// sit under node_modules — at the standalone root AND nested under the app
+// root (monorepo) and deeper in a package; booting one serves nothing.
+for (const d of [
+  path.join(nextDir, 'standalone', 'node_modules', 'react-dom'),
+  path.join(appRoot, 'node_modules', 'react-dom'),
+  path.join(nextDir, 'standalone', 'node_modules', 'next', 'dist'),
+]) {
+  fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(path.join(d, 'server.js'), 'process.exit(1);');
+}
 if (${emitWebpackRuntime}) fs.writeFileSync(path.join(nextDir, 'server', 'webpack-runtime.js'), '// webpack');
 console.log('[fake-next] build complete');
 `;
@@ -53,7 +66,26 @@ console.log('[fake-next] build complete');
 
 const madeDirs: string[] = [];
 
-function deploy(builder: string | undefined, emitWebpackRuntime: boolean) {
+/**
+ * A `find` shim that returns real results SORTED, which lists
+ * `.next/standalone/node_modules/…/server.js` before `.next/standalone/server.js`
+ * — the order ext4 produced on a CI runner (a whole bun×webpack shard booted
+ * react-dom's server.js). Makes that adverse order deterministic here.
+ */
+function sortedFindDir(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'knext-find-shim-'));
+  madeDirs.push(dir);
+  const realFind = spawnSync('bash', ['-c', 'command -v find'], { encoding: 'utf8' }).stdout.trim();
+  writeFileSync(join(dir, 'find'), `#!/usr/bin/env bash\n"${realFind}" "$@" | LC_ALL=C sort\n`);
+  chmodSync(join(dir, 'find'), 0o755);
+  return dir;
+}
+
+function deploy(
+  builder: string | undefined,
+  emitWebpackRuntime: boolean,
+  opts: { appSubdir?: string; adverseFind?: boolean } = {},
+) {
   const appDir = mkdtempSync(join(tmpdir(), 'knext-e2e-builder-'));
   madeDirs.push(appDir);
   writeFileSync(
@@ -63,7 +95,7 @@ function deploy(builder: string | undefined, emitWebpackRuntime: boolean) {
   writeFileSync(join(appDir, 'next.config.js'), "module.exports = { output: 'standalone' }\n");
   mkdirSync(join(appDir, 'node_modules', '.bin'), { recursive: true });
   const nextBin = join(appDir, 'node_modules', '.bin', 'next');
-  writeFileSync(nextBin, fakeNextScript(appDir, emitWebpackRuntime));
+  writeFileSync(nextBin, fakeNextScript(appDir, emitWebpackRuntime, opts.appSubdir ?? ''));
   chmodSync(nextBin, 0o755);
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
@@ -72,6 +104,7 @@ function deploy(builder: string | undefined, emitWebpackRuntime: boolean) {
   };
   delete env.KNEXT_BUILDER;
   if (builder !== undefined) env.KNEXT_BUILDER = builder;
+  if (opts.adverseFind) env.PATH = `${sortedFindDir()}:${env.PATH}`;
   const r = spawnSync('bash', [DEPLOY_SH], { cwd: appDir, env, encoding: 'utf8', timeout: 60000 });
   return { status: r.status, stdout: r.stdout, stderr: r.stderr };
 }
@@ -98,6 +131,19 @@ describe('scripts/e2e-deploy.sh — a webpack cell proves its build was webpack 
     const r = deploy('webpack', true);
     expect(r.status, r.stderr).toBe(0);
     expect(r.stdout.trim()).toMatch(/^http:\/\//);
+  });
+
+  it('boots the APP server.js, never a node_modules/**/server.js listed before it', () => {
+    const r = deploy('webpack', true, { adverseFind: true });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stderr).toMatch(/standalone server: \S*\/\.next\/standalone\/server\.js\n/);
+    expect(r.stderr).not.toMatch(/standalone server: \S*node_modules/);
+  });
+
+  it('…including a monorepo standalone tree (the app nested under its workspace path)', () => {
+    const r = deploy('webpack', true, { adverseFind: true, appSubdir: 'apps/web' });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stderr).toMatch(/standalone server: \S*\/\.next\/standalone\/apps\/web\/server\.js\n/);
   });
 
   it('turbopack (and an unset builder) is unaffected — no webpack runtime required', () => {

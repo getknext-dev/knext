@@ -399,8 +399,15 @@ fi
 
 # ── 3. locate + stage the standalone server tree ──────────────────────────────
 # output:'standalone' emits server.js under .next/standalone (monorepo fixtures may
-# nest it under .next/standalone/<app-path>/server.js); find the first one.
-SERVER_JS="$(find "${APP_DIR}/.next/standalone" -maxdepth 4 -name server.js 2>/dev/null | head -n1 || true)"
+# nest it under .next/standalone/<app-path>/server.js).
+# #1245: NEVER a node_modules/**/server.js, and the SHALLOWEST match wins. A
+# webpack build traces react-dom into the standalone tree, so
+# `.next/standalone/node_modules/react-dom/server.js` sits within maxdepth; with
+# a bare `find | head -n1` the pick followed directory order, and on a CI
+# runner a whole bun×webpack shard booted react-dom's server.js (every deploy
+# failed). Filtering node_modules + depth-sorting makes the pick deterministic.
+SERVER_JS="$(find "${APP_DIR}/.next/standalone" -maxdepth 4 -name server.js -not -path '*/node_modules/*' 2>/dev/null \
+  | awk -F/ '{ print NF "\t" $0 }' | sort -n -k1,1 | head -n1 | cut -f2- || true)"
 if [ -z "${SERVER_JS}" ]; then
   log "ERROR: standalone server.js not found under .next/standalone"
   exit 1
