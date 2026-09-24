@@ -15,4 +15,7 @@ release).
 
 CLI help/usage text, error messages, and the docs site (getting-started, CLI
 reference, examples) were updated to say `knext` throughout, with a short note
-in the getting-started guide about the `kn-next` alias.
+in the getting-started guide about the `kn-next` alias, plus a warning not to
+run bare `npx knext` on its own — the unscoped `knext` name on the public npm
+registry belongs to an unrelated package. Always use `npx @getknext/core ...`
+or a locally installed `knext`.

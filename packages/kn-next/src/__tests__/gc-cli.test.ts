@@ -90,7 +90,7 @@ describe("runAssetGC", () => {
             "-n",
             "prod",
             "-o",
-            "jsonpath={.metadata.labels.apps\\.knext\\.dev/build-id}",
+            "jsonpath={.metadata.labels.apps\\.kn-next\\.dev/build-id}",
         ]);
         // v3-P4b TOCTOU re-read: immediately before the prune, the pin +
         // status.currentTraffic are RE-READ ONCE more (a second observation).
@@ -297,7 +297,7 @@ describe("runAssetGC", () => {
             "-n",
             "prod",
             "-o",
-            "jsonpath={.metadata.labels.apps\\.knext\\.dev/build-id}",
+            "jsonpath={.metadata.labels.apps\\.kn-next\\.dev/build-id}",
         ]);
         expect(prune).toHaveBeenCalledWith(
             expect.anything(),

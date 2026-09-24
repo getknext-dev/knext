@@ -7,7 +7,7 @@
   "module": "./dist/config.js",
   "types": "./dist/config.d.ts",
   "bin": {
-    "knext": "./dist/cli/knext.js",
+    "knext": "./dist/cli/kn-next.js",
     "kn-next": "./dist/cli/kn-next.js"
   },
   "exports": {

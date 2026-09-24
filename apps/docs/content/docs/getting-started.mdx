@@ -25,8 +25,17 @@ configuration, no auth token — a plain `npm i` is all it takes.
 
 ```bash title="shell"
 npm i @getknext/core        # the adapter, the config type, and the CLI (bin: knext)
-npx knext --version       # the CLI is on your PATH via node_modules/.bin
+npx @getknext/core --version       # the CLI is on your PATH via node_modules/.bin
 ```
+
+<Callout type="warn">
+  Always run the CLI as `npx @getknext/core ...` (or a locally installed
+  `knext`, after `npm i @getknext/core`), as shown throughout this page.
+  **Never run bare `npx knext` on its own** — the unscoped name `knext` on
+  the public npm registry belongs to an unrelated package, so outside a
+  project where `@getknext/core` is already installed, `npx knext` downloads
+  and runs someone else's code instead of this CLI.
+</Callout>
 
 <Callout type="info">
   The CLI command was renamed from `kn-next` to `knext`. `kn-next` still works
@@ -154,27 +163,27 @@ volume, and rejecting any image that is not digest-pinned. See
 
 ## The whole CLI at a glance
 
-Every command below is `npx knext <verb>`. Anything that is **not** one of these words runs the
+Every command below is `npx @getknext/core <verb>`. Anything that is **not** one of these words runs the
 default `deploy` flow. Full flag tables are on the [CLI reference](/docs/cli).
 
 | Command | What it does | What it writes |
 |---|---|---|
-| `npx knext deploy` | Build → push → apply the digest-pinned `NextApp` CR. The default. | Applies the `NextApp` CR; with object storage configured, also uploads static assets to your bucket. |
-| `npx knext doctor` | Cluster-prereq preflight: CRD, operator, admission webhook, ingress class, Knative Serving. | Nothing — read-only. |
-| `npx knext status` | The operator's honest `Ready` / `Degraded` / `Reconciling` / `DatabaseReady` conditions. | Nothing — read-only. |
-| `npx knext rollback` | Pin serving traffic to a prior Knative Revision (or clear the pin). | One merge-patch of `spec.traffic` on the `NextApp` CR. |
-| `npx knext db bind` | Bind an existing Postgres Secret as `DATABASE_URL`. | One merge-patch of `spec.database.secretRef` on the `NextApp` CR. |
-| `npx knext db migrate` | Apply pending drizzle migrations against the **writer**, once. | Your database only — no cluster write. |
-| `npx knext gc` | Reap superseded `_next/static/<build-id>/` prefixes (over-keep, never over-delete). | With object storage configured, deletes old asset prefixes from your bucket (reads the CR only); with none, reports there is nothing to reap. |
+| `npx @getknext/core deploy` | Build → push → apply the digest-pinned `NextApp` CR. The default. | Applies the `NextApp` CR; with object storage configured, also uploads static assets to your bucket. |
+| `npx @getknext/core doctor` | Cluster-prereq preflight: CRD, operator, admission webhook, ingress class, Knative Serving. | Nothing — read-only. |
+| `npx @getknext/core status` | The operator's honest `Ready` / `Degraded` / `Reconciling` / `DatabaseReady` conditions. | Nothing — read-only. |
+| `npx @getknext/core rollback` | Pin serving traffic to a prior Knative Revision (or clear the pin). | One merge-patch of `spec.traffic` on the `NextApp` CR. |
+| `npx @getknext/core db bind` | Bind an existing Postgres Secret as `DATABASE_URL`. | One merge-patch of `spec.database.secretRef` on the `NextApp` CR. |
+| `npx @getknext/core db migrate` | Apply pending drizzle migrations against the **writer**, once. | Your database only — no cluster write. |
+| `npx @getknext/core gc` | Reap superseded `_next/static/<build-id>/` prefixes (over-keep, never over-delete). | With object storage configured, deletes old asset prefixes from your bucket (reads the CR only); with none, reports there is nothing to reap. |
 
 ```bash title="shell"
-npx knext doctor                                             # before your first deploy
-npx knext deploy -r registry.example.com/acme          # build → push → apply
-npx knext status acme --watch                          # poll until Ready=True
-npx knext rollback acme --to acme-00002          # pin 100% to a prior revision
-npx knext db bind acme --secret acme-db          # DATABASE_URL from a Secret
-npx knext db migrate --dir ./drizzle                         # writer-only, idempotent
-npx knext gc --dry-run                                       # print the reap/keep plan only
+npx @getknext/core doctor                                             # before your first deploy
+npx @getknext/core deploy -r registry.example.com/acme          # build → push → apply
+npx @getknext/core status acme --watch                          # poll until Ready=True
+npx @getknext/core rollback acme --to acme-00002          # pin 100% to a prior revision
+npx @getknext/core db bind acme --secret acme-db          # DATABASE_URL from a Secret
+npx @getknext/core db migrate --dir ./drizzle                         # writer-only, idempotent
+npx @getknext/core gc --dry-run                                       # print the reap/keep plan only
 ```
 
 `build`, `cleanup`, `preview`, and `loadtest` are **not** `knext` subcommands — they ship as

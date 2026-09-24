@@ -9,7 +9,7 @@ From here you need a cluster. If `kubectl get ksvc` fails, fix that first — se
 ## Preflight
 
 ```bash title="shell"
-npx knext doctor
+npx @getknext/core doctor
 ```
 
 `doctor` is **read-only**. It never changes anything. It checks the things that make a first deploy
@@ -33,7 +33,7 @@ individual component looked healthy. `doctor` now catches it in seconds.
 ## Deploy
 
 ```bash title="shell"
-npx knext
+npx @getknext/core
 ```
 
 One command. It builds the image, pushes it, uploads static assets to your bucket, and applies a
@@ -48,7 +48,7 @@ in practice, and it is why nothing drifts behind your back.
 ## Check what the cluster says
 
 ```bash title="shell"
-npx knext status
+npx @getknext/core status
 ```
 
 This prints ACME's conditions and its URL.
@@ -71,6 +71,6 @@ curl -sSf <the-URL-status-printed>/ > /dev/null && echo OK
 | `Ready=False`, app logs look fine | The health route from chapter 3. This is the most common cause by a distance. |
 | Apply rejected, unknown field | Your operator is older than your CLI — see [Upgrading](/docs/upgrading) |
 | Assets 404 in the browser | `storage.publicUrl` does not match where the bucket actually serves, or the provider CLI was not authenticated during the build |
-| Deploy failed before building | Re-run `npx knext doctor` |
+| Deploy failed before building | Re-run `npx @getknext/core doctor` |
 
 **[Chapter 5: Scale to zero →](/docs/learn/scale-to-zero)**

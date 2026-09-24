@@ -53,8 +53,8 @@ describe("runLoadTest", () => {
             false,
         );
 
-        // A manifest file was written under .knext/loadtest/<app>/.
-        expect(manifestPath).toContain(join(".knext", "loadtest", "my-app"));
+        // A manifest file was written under .kn-next/loadtest/<app>/.
+        expect(manifestPath).toContain(join(".kn-next", "loadtest", "my-app"));
         const yaml = readFileSync(manifestPath, "utf-8");
         expect(yaml).toContain("kind: Job");
 

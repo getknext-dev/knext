@@ -9,7 +9,7 @@
  */
 
 import { existsSync, writeSync } from "node:fs";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import type { KnativeNextConfig } from "../config";
 import { DOCS_URL } from "./help";
 import { validateConfig } from "./validate";
@@ -232,35 +232,49 @@ export async function loadConfig(): Promise<KnativeNextConfig> {
 }
 
 /**
- * `kn-next` → `knext` rename (#1369). `deploy.ts`'s dispatcher (the ONLY
- * sanctioned self-entry — see its SELF-ENTRY HAZARD note) is still built as
- * a SINGLE tsup entry, `dist/cli/kn-next.js`
- * — a second tsup entry pointing at the same source shares a chunk with it,
- * which breaks `isEntrypoint` for BOTH (measured live in this round: the
- * dispatcher silently never fired for either bin). `dist/cli/knext.js` is
- * therefore a separate, tiny RUNTIME proxy (src/cli/knext.ts) that re-execs
- * `kn-next.js` in-process, so from `deploy.ts`'s own perspective it is
- * ALWAYS "running as kn-next.js" — this env var is how the proxy tells it
- * "but don't call it that": set before the proxy's dynamic import, so it is
- * in scope before `deploy.ts`'s top level runs.
+ * `kn-next` → `knext` rename (#1369, rev-1380 round). `package.json` declares
+ * BOTH `bin.knext` and `bin.kn-next` pointing at the SAME dist file
+ * (`dist/cli/kn-next.js`) — a second file (even a thin runtime proxy) broke
+ * `npx @getknext/core` for every consumer: npm's default-bin picker only
+ * auto-resolves when every declared bin targets ONE file, proven against
+ * real npm 11.12.1. Since there is only one file, `deploy.ts` cannot tell
+ * `knext` and `kn-next` apart from ITS OWN `import.meta.url` (always the
+ * same) or from an env marker set by a proxy (there is no proxy). It CAN
+ * tell them apart from `process.argv[1]`: npm creates two differently-named
+ * symlinks (`node_modules/.bin/knext`, `node_modules/.bin/kn-next`) to this
+ * one file, and when Node is invoked through a symlink, `process.argv[1]` is
+ * the symlink path AS INVOKED — the literal name the user (or their
+ * `package.json` script) typed — NOT the realpath-resolved target (see
+ * `isEntrypoint` in exec.ts, which relies on the same fact for the opposite
+ * comparison). `basename(argv1)` is therefore checked BEFORE any realpath
+ * resolution.
+ *
+ * The one case this cannot observe cleanly is `npx @getknext/core <verb>`
+ * with no bin name given at all — which symlink npm's default-bin picker
+ * resolves through, and therefore what `argv[1]`'s basename is in that path,
+ * is npm-internal and not something this CLI controls. Defaulting to "no
+ * notice" when the basename matches neither known alias is deliberate: a
+ * silent no-notice is a strictly smaller failure than falsely telling an
+ * `npx @getknext/core` user their command is deprecated when it is the
+ * historically-advertised front door.
  */
-export const KNEXT_CANONICAL_BIN_ENV = "KNEXT_CANONICAL_BIN";
+export function isDeprecatedAliasInvocation(
+    argv1: string | undefined = process.argv[1],
+): boolean {
+    return argv1 !== undefined && basename(argv1) === "kn-next";
+}
 
 const DEPRECATED_KN_NEXT_NOTICE =
     "`kn-next` is deprecated and will be removed in a future minor release — use `knext` instead (same command, same flags).\n";
 
 /**
- * Print the one-line deprecation notice to stderr, UNLESS the canonical
- * `knext` proxy marked this invocation via {@link KNEXT_CANONICAL_BIN_ENV}.
- * Reads `process.env` by default; the parameter exists so this stays a pure,
- * directly-testable function rather than one more thing a test has to mutate
- * global `process.env` to exercise.
+ * Print the one-line deprecation notice to stderr when invoked as `kn-next`
+ * (see {@link isDeprecatedAliasInvocation}).
  */
 export function printDeprecatedKnNextNoticeIfNeeded(
-    env: NodeJS.ProcessEnv = process.env,
+    argv1: string | undefined = process.argv[1],
 ): void {
-    if (env[KNEXT_CANONICAL_BIN_ENV] === "1") {
-        return;
+    if (isDeprecatedAliasInvocation(argv1)) {
+        writeSync(2, DEPRECATED_KN_NEXT_NOTICE);
     }
-    writeSync(2, DEPRECATED_KN_NEXT_NOTICE);
 }

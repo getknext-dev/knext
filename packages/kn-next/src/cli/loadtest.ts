@@ -56,7 +56,7 @@ export async function runLoadTest(
     context?: string,
     exec: LoadTestExec = defaultLoadTestExec,
 ): Promise<string> {
-    const outputDir = join(process.cwd(), ".knext", "loadtest", appName);
+    const outputDir = join(process.cwd(), ".kn-next", "loadtest", appName);
     if (!existsSync(outputDir)) {
         mkdirSync(outputDir, { recursive: true });
     }

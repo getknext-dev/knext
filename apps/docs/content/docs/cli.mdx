@@ -4,10 +4,15 @@ description: The knext CLI — create, validate, deploy, build, doctor, status, 
 ---
 
 The `knext` binary ships in **`@getknext/core`** (`npm i @getknext/core`), so it is available as
-`npx knext` in any project that depends on it. It is a small dispatcher around one job:
+`npx @getknext/core` in any project that depends on it. It is a small dispatcher around one job:
 **build → push → apply the `NextApp` CR**. Everything on the cluster is reconciled by the operator;
 the CLI's cluster writes are limited to applying or patching the CR, and its diagnostic commands
 are strictly read-only.
+
+Use `npx @getknext/core <command>` (or a locally installed `knext`, once `@getknext/core` is a
+project dependency) — never bare `npx knext` on its own. The unscoped name `knext` on the public
+npm registry belongs to an unrelated package, so outside a project with `@getknext/core` already
+installed, `npx knext` runs someone else's code instead of this CLI.
 
 ```bash
 knext create         # scaffold a new knext-ready app (writes files, no cluster changes)

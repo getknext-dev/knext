@@ -412,6 +412,33 @@ try {
     );
   }
 
+  // --- 3a-npx. rev-1380 blocker #1: `npx @getknext/core <cmd>` with NO bin
+  // name given — the historically-advertised front door (help.ts, README,
+  // the docs site). npm's default-bin picker only resolves automatically
+  // when every declared bin points at ONE file; a prior round shipped a
+  // SECOND file for `knext` (a thin runtime proxy) and broke this exact
+  // invocation for every consumer, proven against real npm 11.12.1. Both
+  // `bin.knext` and `bin.kn-next` now point at the same dist file — assert
+  // the front door actually works, not just that the two named bins do.
+  console.log('[install-smoke] running `npx @getknext/core --help` (no bin name given) ...');
+  const npxHelp = run('npx', ['--yes', '--offline', '@getknext/core', '--help'], {
+    cwd: workDir,
+  });
+  const npxHelpOut = `${npxHelp.stdout || ''}${npxHelp.stderr || ''}`;
+  console.log('----- npx @getknext/core --help (begin) -----');
+  console.log(npxHelpOut.trim());
+  console.log('----- npx @getknext/core --help (end) -------');
+  if (npxHelp.status !== 0) {
+    finish(
+      FAIL,
+      `npx @getknext/core --help exited ${npxHelp.status} (expected 0) — the advertised front ` +
+        'door is broken for every consumer',
+    );
+  }
+  if (!/knext|Usage|Options/i.test(npxHelpOut)) {
+    finish(FAIL, "npx @getknext/core --help: exit 0 but output lacked 'knext'/'Usage'/'Options'");
+  }
+
   // --- 3a-alias. the alias's OWN shim, which step 3a never touches -----------
   // The check above runs node_modules/.bin/kn-next. Both @getknext/core and the alias
   // declare that bin name, and the first cut of this comment called the outcome npm's

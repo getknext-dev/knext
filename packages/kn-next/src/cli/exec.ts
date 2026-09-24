@@ -22,13 +22,17 @@ import { fileURLToPath } from "node:url";
  * process entry (i.e. `node <thisfile>`), false when it was imported (e.g. by a
  * test). Node-correct replacement for Bun's `import.meta.main`.
  *
- * CRITICAL: npm installs the CLI bins as SYMLINKS (node_modules/.bin/knext →
- * .../dist/cli/knext.js, and the deprecated node_modules/.bin/kn-next →
- * .../dist/cli/kn-next.js). When run via one of those symlinks,
- * `process.argv[1]` is the symlink path while `import.meta.url` resolves to
- * the REAL file. Both sides are therefore passed through realpathSync so the
- * comparison holds for symlinked bins — without this, the entry guard never
- * fires and the CLI silently no-ops.
+ * CRITICAL: npm installs the CLI bins as SYMLINKS — both node_modules/.bin/
+ * knext AND node_modules/.bin/kn-next point at the SAME real file,
+ * .../dist/cli/kn-next.js (#1369, rev-1380: a second dist file broke `npx
+ * @getknext/core`'s bin auto-pick for every consumer). When run via either
+ * symlink, `process.argv[1]` is the symlink path while `import.meta.url`
+ * resolves to the REAL file. Both sides are therefore passed through
+ * realpathSync so the comparison holds for symlinked bins — without this,
+ * the entry guard never fires and the CLI silently no-ops. (The deprecation
+ * notice in shared.ts relies on the OPPOSITE fact — that `argv[1]` is the
+ * symlink path, NOT yet realpath-resolved — to tell `knext` and `kn-next`
+ * apart; it deliberately does not call this function.)
  */
 export function isEntrypoint(importMetaUrl: string): boolean {
     const argv1 = process.argv[1];

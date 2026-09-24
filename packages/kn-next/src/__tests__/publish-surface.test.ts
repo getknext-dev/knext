@@ -113,9 +113,15 @@ describe("PK1: @getknext/core publish surface", () => {
         expect(pkg.files).not.toContain("src");
     });
 
-    it("keeps both CLI bins pointed at their bundled dist entries (#1369)", () => {
-        expect(pkg.bin.knext).toBe("./dist/cli/knext.js");
+    it("keeps both `knext` and `kn-next` bin keys pointed at the SAME dist entry (#1369, rev-1380)", () => {
+        // Both keys MUST resolve to one file: npm's default-bin picker for
+        // `npx @getknext/core` only auto-resolves when every declared bin
+        // targets ONE file (proven against real npm 11.12.1 — a second file
+        // made `npx @getknext/core --help` exit 1 with "could not determine
+        // executable to run" for every consumer).
+        expect(pkg.bin.knext).toBe("./dist/cli/kn-next.js");
         expect(pkg.bin["kn-next"]).toBe("./dist/cli/kn-next.js");
+        expect(pkg.bin.knext).toBe(pkg.bin["kn-next"]);
     });
 
     // --- Build-output resolution (requires `tsup` to have run) -------------

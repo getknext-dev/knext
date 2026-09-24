@@ -21,20 +21,17 @@ export default defineConfig([
   {
     entry: {
       // --- CLI entries -----------------------------------------------------
-      // dist/cli/kn-next.js — the dispatcher bin (deploy entry). #1369: kept
-      // as the ONLY tsup entry pointing at deploy.ts — see the SELF-ENTRY
-      // HAZARD note atop deploy.ts's `isEntrypoint` block for why a second
-      // entry sharing that source file is unsafe (tsup hoists the shared
-      // top-level side effect into a common chunk, where `import.meta.url`
-      // no longer equals either bin's own URL, and the dispatcher silently
-      // never fires for EITHER bin — caught by a live build in this round).
-      // `dist/cli/knext.js` (below, its own tiny source file) is a RUNTIME
-      // proxy onto this file instead of a build-time alias.
+      // dist/cli/kn-next.js — the dispatcher bin (deploy entry). #1369: BOTH
+      // `bin.knext` and `bin.kn-next` in package.json point at this SAME
+      // file (rev-1380: a second tsup entry — even a thin runtime proxy —
+      // broke `npx @getknext/core` for every consumer; npm's default-bin
+      // picker only resolves automatically when every declared bin points at
+      // one file, proven against real npm 11.12.1). The two bin NAMES still
+      // read differently at the shell (`knext` vs `kn-next`) because npm
+      // creates two differently-named symlinks to this one file — see
+      // `isDeprecatedAliasInvocation` in shared.ts for how the deprecation
+      // notice tells them apart post-hoc, from argv, not from a second build.
       'cli/kn-next': 'src/cli/deploy.ts',
-      // dist/cli/knext.js — the canonical bin name (#1369). A thin proxy
-      // (src/cli/knext.ts) that re-execs dist/cli/kn-next.js in-process; see
-      // that file's header for why.
-      'cli/knext': 'src/cli/knext.ts',
       // also ship the DOCUMENTED directly-runnable build/cleanup entries
       // (docs-site cli.mdx "Directly runnable entries")
       'cli/build': 'src/cli/build.ts',
