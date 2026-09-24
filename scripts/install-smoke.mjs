@@ -711,11 +711,15 @@ try {
   }
 
   // THE regression this block exists to catch: `next build` (ambient Turbopack
-  // default) + `adapterPath` + `output:'standalone'` throws ENOENT on
-  // `.next/next-server.js.nft.json` at next@16.3.3 (getknext-dev/knext#1372, an
-  // upstream Next.js gap, not a knext defect) — the scaffold's `build` script pins
-  // `next build --webpack` to route around it. Mutation-proved: reverting that one
-  // script line to `next build` reproduces this exact failure.
+  // default) + `adapterPath` + `output:'standalone'` threw ENOENT on
+  // `.next/next-server.js.nft.json` on Next 16.3.0-canary.20 through 16.3.4
+  // (getknext-dev/knext#1372, an upstream Next.js gap, not a knext defect) —
+  // the scaffold pinned `next build --webpack` to route around it for that
+  // window. Fixed upstream in 16.3.5 (the scaffold's pin as of the #1372
+  // close-out, confirmed by a live local repro of this exact config), so the
+  // scaffold's `build` script is plain `next build` again — this step is the
+  // real, live proof that combination still builds clean on whatever Next
+  // version the scaffold currently pins.
   const defaultBuild = run('npm', ['run', 'build'], {
     cwd: defaultScaffoldDir,
     stdio: ['ignore', 'inherit', 'inherit'],

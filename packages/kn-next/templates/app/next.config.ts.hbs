@@ -3,14 +3,14 @@ import type { NextConfig } from "next";
 /**
  * {{ name }} — Next.js options.
  *
- * Standalone-by-default: knext builds this app with `next build --webpack`
- * (see the `build` script in package.json). `output: 'standalone'` is what
- * makes that build emit a self-contained `.next/standalone/server.js` — the
- * knext runtime
- * image's supervisor (`knext-standalone-entry.mjs`) spawns that server and
- * drains it on SIGTERM. Deleting `output: 'standalone'` does not fail the
- * build locally, but `kn-next deploy` has nothing to COPY into the runtime
- * image and fails loudly instead.
+ * Standalone-by-default: knext builds this app with plain `next build`
+ * (Turbopack, the ambient Next 16.2+ default — see the `build` script in
+ * package.json). `output: 'standalone'` is what makes that build emit a
+ * self-contained `.next/standalone/server.js` — the knext runtime image's
+ * supervisor (`knext-standalone-entry.mjs`) spawns that server and drains it
+ * on SIGTERM. Deleting `output: 'standalone'` does not fail the build
+ * locally, but `kn-next deploy` has nothing to COPY into the runtime image
+ * and fails loudly instead.
  *
  * `adapterPath` wires the official Next.js Deployment Adapter
  * (`./next-adapter.ts` → `@getknext/core/adapter`) — this is what injects the
@@ -19,23 +19,19 @@ import type { NextConfig } from "next";
  * `next build` and NOT wiring this adapter is a silent correctness gap, not a
  * build failure — don't delete it.
  *
- * Why `package.json`'s `build` script pins `next build --webpack` instead of
- * the ambient Turbopack default (Next 16.2+): combining `adapterPath` with
- * `output: 'standalone'` under Turbopack throws
- * `ENOENT: .next/next-server.js.nft.json` at `next build` time — a CONFIRMED
- * Next.js REGRESSION, bisected between 16.2.0 (builds this exact combination
- * fine) and 16.3.0 (already broken); 16.3.3 (pinned below) inherits it. Not a
- * knext defect, and not (as first suspected) a permanent Turbopack/adapter
- * architecture gap. See
+ * A HISTORICAL NOTE, since it is easy to reintroduce by accident: combining
+ * `adapterPath` with `output: 'standalone'` under Turbopack threw `ENOENT:
+ * .next/next-server.js.nft.json` at `next build` time on Next 16.3.0
+ * (canary.20) through 16.3.4 — a confirmed upstream regression, not a knext
+ * defect and not a permanent Turbopack/adapter architecture gap. Fixed
+ * upstream in 16.3.5 (pinned below), confirmed by a live local repro of
+ * this exact config. See
  * https://github.com/getknext-dev/knext/issues/1372 for the full trace and
- * the bisection. `--webpack` is not a stopgap hack: node/bun × webpack is an
- * already-verified knext build target, so this pins the scaffold to a path
- * knext verifies end-to-end. `kn-next build`/`deploy` carry the same check
- * for apps that did NOT go through this scaffold
+ * bisection. `kn-next build`/`deploy` still carry a pre-build guard for the
+ * confirmed-affected range
  * (`checkTurbopackAdapterStandaloneRegression`, `project-build.ts`) — it
- * fails fast with this same explanation rather than the raw ENOENT. Do not
- * "fix" this by dropping `--webpack` without first confirming the linked
- * issue is resolved upstream at whatever Next version you are bumping to.
+ * only fires below 16.3.5, so it does not gate this app's pinned version; it
+ * exists for apps that pin an OLDER Next this scaffold did not generate.
  */
 const nextConfig: NextConfig = {
     // Asset prefix is injected by `kn-next deploy` from `kn-next.config.ts`
