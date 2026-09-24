@@ -72,25 +72,42 @@
  * backfill.
  *
  * LISTING candidates in the first place is different from fetching one:
- * `collectHistory` only ever runs when there is a flaky entry to judge, so an
- * auth/API error (`isAuthOrApiError`) listing is FATAL — throws immediately,
- * NEVER retried (round-3 finding 2; round-2's fix made a listing failure ONE
- * soft skip with zero candidates, which meant it could never reach the
- * threshold and every such run silently warned and exited 0, i.e. the window
- * was effectively disabled the moment the token broke). An auth/API failure
- * is not transient — retrying it just delays the same failure by the backoff
- * window, so it fails closed on the FIRST attempt.
+ * `collectHistory` only ever runs when there is a flaky entry to judge, so
+ * classifying that failure correctly matters more here than anywhere else
+ * (`classifyListingError`, #1400 review — the FIRST version of this bucket
+ * used the coarser `isAuthOrApiError`, which put 401/a plain 403 in the SAME
+ * bucket as 5xx/429/a rate-limited 403, so the retry added for #1365 fired
+ * on exactly the wrong errors: fatal ones got retried, transient ones did
+ * not, and a JSON.parse failure — no HTTP status at all — fell into "retry"
+ * purely by not matching anything):
  *
- * A NON-auth listing error (#1365 follow-up, e.g. a transient network blip:
- * DNS, a connection reset, a `gh` timeout) is different again: this one IS
- * plausibly transient, so it gets `LISTING_RETRY_ATTEMPTS` total attempts
- * with exponential backoff (`LISTING_RETRY_BASE_MS * 2^n`) before failing
- * closed. Still fail-closed at the end — a listing failure that PERSISTS
- * across every attempt is exactly as fatal as before, just no longer on the
- * very first blip. Each retry is logged to `warnings` so a run that limped
- * through a flaky network window is visible, not silently equal to a clean
- * one. Fetching one CANDIDATE's summaries, once listing succeeded, still
- * uses the softer per-run budget:
+ *   - 'fatal' (401, "authenticat…", a plain non-rate-limit 403) throws
+ *     immediately, NEVER retried (round-3 finding 2; round-2's fix made a
+ *     listing failure ONE soft skip with zero candidates, which meant it
+ *     could never reach the threshold and every such run silently warned
+ *     and exited 0, i.e. the window was effectively disabled the moment the
+ *     token broke). Not transient — retrying just delays the same failure.
+ *   - 'local' (e.g. a JSON.parse failure on gh's own output) ALSO throws
+ *     immediately, never retried, but for a different reason: a
+ *     deterministic local error cannot change on a second attempt.
+ *   - 'retryable' (5xx, 429, a RATE-LIMITED 403, DNS "could not resolve", a
+ *     connection reset, a timeout) is plausibly transient, so it gets
+ *     `LISTING_RETRY_ATTEMPTS` total attempts with exponential backoff
+ *     (`LISTING_RETRY_BASE_MS * 2^n`), or the server's own `Retry-After`
+ *     hint when `gh` surfaces one (`retryAfterMs`), before failing closed.
+ *     Still fail-closed at the end — a listing failure that PERSISTS across
+ *     every attempt is exactly as fatal as before, just no longer on the
+ *     very first blip. Each retry is logged to `warnings` so a run that
+ *     limped through a flaky network window is visible, not silently equal
+ *     to a clean one.
+ *
+ * Fetching one CANDIDATE's summaries, once listing succeeded, still
+ * uses the softer per-run budget (unchanged, still keyed on the coarser
+ * `isAuthOrApiError` — that budget's failure mode, an endless string of
+ * per-run skips, is bounded by `MAX_CONSECUTIVE_HISTORY_SKIPS` regardless of
+ * which sub-class of error caused each skip, so the fatal/retryable/local
+ * split that matters for the ONE listing call does not carry the same
+ * weight there):
  * an auth/API error there is a WARNING (that run is skipped), and
  * `MAX_CONSECUTIVE_HISTORY_SKIPS` such errors IN A ROW fail closed, rather
  * than silently returning an ever-smaller window; a successful fetch
@@ -556,6 +573,64 @@ export function isAuthOrApiError(err) {
 }
 
 /**
+ * Three-way classification for a LISTING (`gh run list`) failure — #1400
+ * review. `isAuthOrApiError` above answers a coarser, different question
+ * ("does this look like it came from gh's API layer at all", used by the
+ * per-RUN fetch budget) and conflating it with the LISTING retry added for
+ * #1365 retried exactly the errors that should fail fast (401/a plain
+ * permission 403) and failed fast on exactly the ones a bounded retry
+ * exists for (5xx/429/a RATE-LIMIT 403/DNS/connection reset/timeout) —
+ * because a plain 403 and a rate-limited 403 both matched the SAME `\b403\b`
+ * branch, and a JSON parse failure (a deterministic LOCAL bug, no HTTP
+ * status at all) matched NEITHER branch and fell into "retry" by default.
+ *
+ *   'fatal'     — 401, any "authenticat…" wording, or a 403 that is NOT
+ *                 itself a rate-limit response. Never retried: retrying an
+ *                 invalid/expired token just delays the identical failure.
+ *   'retryable' — 5xx, 429, a RATE-LIMIT 403, "could not resolve" (DNS),
+ *                 a connection reset, or a timeout. Plausibly transient —
+ *                 the bounded retry applies.
+ *   'local'     — everything else, e.g. a JSON.parse failure on `gh`'s own
+ *                 output. Also never retried (a deterministic local bug
+ *                 cannot change on a second attempt), but for a DIFFERENT
+ *                 reason than 'fatal' — kept as its own bucket so a caller
+ *                 can report "the API said no" and "we could not even read
+ *                 what it said" with distinct, honest messages.
+ * @param {unknown} err
+ * @returns {'fatal' | 'retryable' | 'local'}
+ */
+export function classifyListingError(err) {
+  const msg = String(err?.message ?? err ?? '');
+  const isRateLimited403 = /\b403\b/.test(msg) && /rate.?limit/i.test(msg);
+  if (/\b401\b|authenticat/i.test(msg)) return 'fatal';
+  if (/\b403\b/.test(msg) && !isRateLimited403) return 'fatal';
+  if (
+    /\b(429|5\d\d)\b/.test(msg) ||
+    isRateLimited403 ||
+    /could not resolve/i.test(msg) ||
+    /connection reset|ECONNRESET/i.test(msg) ||
+    /\btimeout\b|timed out|ETIMEDOUT/i.test(msg)
+  ) {
+    return 'retryable';
+  }
+  return 'local';
+}
+
+/**
+ * A `Retry-After: <seconds>`-shaped hint in an error's own text, when `gh`
+ * surfaces one (secondary rate-limit responses sometimes do). Honoured in
+ * PREFERENCE to the exponential backoff for that one attempt — the server
+ * told us exactly how long to wait, so guessing shorter just re-triggers
+ * the same limit, and guessing longer wastes the window needlessly.
+ * @param {string} msg
+ * @returns {number | null} milliseconds, or null if no hint was found
+ */
+export function retryAfterMs(msg) {
+  const m = /retry.?after[:\s]+(\d+)/i.exec(msg);
+  return m ? Number(m[1]) * 1000 : null;
+}
+
+/**
  * True when `gh run download` failed because the run simply has no matching
  * artifact — never uploaded (artifactless), aged past GitHub's 90-day
  * retention, or the run had zero artifacts at all. `gh` uses at least TWO
@@ -728,21 +803,34 @@ export function collectHistory(deps, { repo, currentRunId, want, since }) {
       listErr = undefined;
       break;
     } catch (err) {
-      if (isAuthOrApiError(err)) {
-        // Never retried: an expired/invalid token is not transient, and
-        // retrying it would just delay the same failure by the backoff
-        // window instead of surfacing it promptly.
+      const msg = String(err?.message ?? err ?? '');
+      const kind = classifyListingError(err);
+      if (kind === 'fatal') {
+        // Never retried: an expired/invalid token or a plain permission
+        // denial is not transient, and retrying it just delays the
+        // identical failure instead of surfacing it promptly.
         throw new Error(
-          `could not list the lane's history runs (${err?.message ?? err}); failing closed — ` +
+          `could not list the lane's history runs (${msg}); failing closed — ` +
             'there is nothing to backfill from and the flaky window cannot be judged',
+        );
+      }
+      if (kind === 'local') {
+        // Also never retried, but for a different reason: a deterministic
+        // local error (e.g. a JSON.parse failure on gh's own output) cannot
+        // change on a second attempt — retrying it only wastes the backoff
+        // window on a failure that was never going to clear.
+        throw new Error(
+          `could not list the lane's history runs (${msg}); failing closed — this does not look ` +
+            'like a transient API/network error, so it is not retried; there is nothing to ' +
+            'backfill from and the flaky window cannot be judged',
         );
       }
       listErr = err;
       if (attempt >= LISTING_RETRY_ATTEMPTS) break;
-      const delayMs = LISTING_RETRY_BASE_MS * 2 ** (attempt - 1);
+      const delayMs = retryAfterMs(msg) ?? LISTING_RETRY_BASE_MS * 2 ** (attempt - 1);
       warnings.push(
         `listing the lane's history runs failed on attempt ${attempt}/${LISTING_RETRY_ATTEMPTS} ` +
-          `(${err?.message ?? err}); retrying after ${delayMs}ms`,
+          `(${msg}); retrying after ${delayMs}ms`,
       );
       sleep(delayMs);
     }
