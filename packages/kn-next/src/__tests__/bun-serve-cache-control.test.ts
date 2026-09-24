@@ -61,6 +61,13 @@ const temps: string[] = [];
 afterAll(() => {
     for (const d of temps) rmSync(d, { recursive: true, force: true });
 });
+function temp(prefix: string): string {
+    // realpath: macOS tmpdir is a /var -> /private/var symlink, and
+    // vinext-compile matches its entry by resolved path.
+    const d = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+    temps.push(d);
+    return d;
+}
 
 function res(headers: Record<string, string>): Response {
     return new Response("x", { headers });
@@ -221,8 +228,7 @@ describe("wiring", () => {
 });
 
 describe("vinext-compile bakes it into the executable", () => {
-    const work = realpathSync(mkdtempSync(join(tmpdir(), "knext-1322-cc-")));
-    temps.push(work);
+    const work = temp("knext-1322-cc-");
     const server = join(work, ".output", "server");
     mkdirSync(server, { recursive: true });
     writeFileSync(
@@ -279,10 +285,7 @@ describe("vinext-compile bakes it into the executable", () => {
     it("refuses to compile (fail closed) when the normalization module is missing beside it", () => {
         // A copy of the compile script with every sibling it needs EXCEPT the
         // install module: the script must exit non-zero, naming what is missing.
-        const alone = realpathSync(
-            mkdtempSync(join(tmpdir(), "knext-1322-cc-missing-")),
-        );
-        temps.push(alone);
+        const alone = temp("knext-1322-cc-missing-");
         const here = resolve(import.meta.dir, "../adapters");
         for (const f of [
             "vinext-compile.mjs",
@@ -331,8 +334,7 @@ describe("the executable turns vinext's deploy switch on by default (lazy fallba
     // deploy header only when VINEXT_NEXT_DEPLOY_CACHE_CONTROL=1 is in the
     // process env (exactly how vinext's cache-control.js reads it), and no
     // Cache-Control at all otherwise, as measured on a real fallback: true page.
-    const work = realpathSync(mkdtempSync(join(tmpdir(), "knext-1322-vx-")));
-    temps.push(work);
+    const work = temp("knext-1322-vx-");
     const server = join(work, ".output", "server");
     mkdirSync(server, { recursive: true });
     writeFileSync(
