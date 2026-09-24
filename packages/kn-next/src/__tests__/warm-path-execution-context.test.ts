@@ -68,25 +68,40 @@ function writeApp(entryTemplate: string, contractPath: string): string {
             "import { AsyncLocalStorage } from 'node:async_hooks';",
             "const als = new AsyncLocalStorage();",
             "export const runWithExecutionContext = (ctx, fn) => als.run(ctx, fn);",
-            "export const after = (task) => {",
-            "  const p = new Promise((r) => setTimeout(r, 0)).then(task);",
-            "  const ctx = als.getStore();",
-            "  if (ctx && ctx.waitUntil) ctx.waitUntil(p);",
-            "};",
+            "export const currentExecutionContext = () => als.getStore();",
         ].join("\n"),
     );
     pkg("nitro", { "./app": "./app.mjs" });
+    // Faithful to vinext's function-form after(): its completion is tied to
+    // the RESPONSE BODY closing (the body is piped through a passthrough, and
+    // only its end settles the promise handed to waitUntil). A caller that
+    // never reads the body leaves that promise pending forever — so the drain
+    // hangs to its hard cap. The body stream pulls lazily (highWaterMark 0),
+    // so nothing closes it except a reader.
     w(
         "node_modules/nitro/app.mjs",
         [
             "import { writeFileSync } from 'node:fs';",
-            "import { after } from 'vinext/shims/request-context';",
+            "import { currentExecutionContext } from 'vinext/shims/request-context';",
             "export const useNitroApp = () => ({",
             "  fetch: async (req) => {",
+            "    let bodyClosed;",
+            "    const closed = new Promise((r) => { bodyClosed = r; });",
+            "    let sent = false;",
+            "    const body = new ReadableStream({",
+            "      pull(c) {",
+            "        if (!sent) { sent = true; c.enqueue(new TextEncoder().encode('ok')); return; }",
+            "        c.close();",
+            "        bodyClosed();",
+            "      },",
+            "      cancel() { bodyClosed(); },",
+            "    }, { highWaterMark: 0 });",
             "    if (new URL(req.url).pathname === '/warm-after') {",
-            `      after(() => new Promise((r) => setTimeout(() => { writeFileSync(process.env.KNEXT_TEST_MARKER, 'done'); r(); }, ${AFTER_MS})));`,
+            `      const task = closed.then(() => new Promise((r) => setTimeout(() => { writeFileSync(process.env.KNEXT_TEST_MARKER, 'done'); r(); }, ${AFTER_MS})));`,
+            "      const ctx = currentExecutionContext();",
+            "      if (ctx && ctx.waitUntil) ctx.waitUntil(task);",
             "    }",
-            "    return new Response('ok');",
+            "    return new Response(body);",
             "  },",
             "});",
         ].join("\n"),
@@ -134,6 +149,7 @@ function run(
                 NODE_ENV: "production",
                 KNEXT_WARM_PATH: "/warm-after",
                 KNEXT_TEST_MARKER: marker,
+                SHUTDOWN_GRACE_MS: "4000",
                 ...env,
             },
             stdio: ["ignore", "pipe", "pipe"],
