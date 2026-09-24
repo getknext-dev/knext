@@ -178,11 +178,17 @@ const MUTATIONS = [
     ],
   },
   {
-    label: "manifest: empty out the existing lockstepExceptions entry's reason",
+    // #1382 review: the real lockstepExceptions array is now empty (the one
+    // former entry, for compat-shipped-pin-early-warning.yml, excused a
+    // literal that file never actually carries — dropped as stale, see
+    // tests/nextjs-credential-lockstep.test.ts's "no unused/stale entries"
+    // guard). So this mutation ADDS a fresh empty-reason entry rather than
+    // gutting an existing one — same guard, still exercised.
+    label: 'manifest: add a lockstepExceptions entry with an empty reason',
     subject: 'manifest',
-    anchor:
-      '"reason": "The #1376 option-(b) shipped-pin early-warning lane (founder-approved 2026-09-25): a non-credential, informational-only lane that tests the SHIPPED pin (currently v16.3.3), not the credentialed v16.2.0 — by design, since its whole point is forecasting what the shipped pin looks like on the real compat suite. It reads shippedNextPin from THIS manifest at dispatch time (scripts/lib/dispatch-poll.mjs\'s shippedPinRef, never a hardcoded literal in the workflow), so this entry documents the intended divergence rather than excusing a static drift the round-3 scan would otherwise catch — tests/compat-shipped-pin-early-warning.test.ts proves the tie directly. Every dispatched run runs via workflow_dispatch (never schedule), so KNEXT_COMPAT_MODE in test-e2e-deploy.yml is unconditionally early-warning and this lane can never advance a v1.0 credential count."',
-    replacement: '"reason": ""',
+    anchor: '"lockstepExceptions": []',
+    replacement:
+      '"lockstepExceptions": [{"file": "probe.yml", "kind": "export", "value": "v0.0.0", "reason": ""}]',
   },
 
   // ── Round 3, second pass, finding 1: the ledger's THIRD copy of the ref ──

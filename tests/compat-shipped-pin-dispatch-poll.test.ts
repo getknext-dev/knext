@@ -82,6 +82,128 @@ describe('pickDispatchedRun', () => {
     ];
     expect(pickDispatchedRun(before, after, { headBranch })).toBeNull();
   });
+
+  // ── rev-1382 finding 2: 4 legs dispatched within seconds must never latch
+  // onto the SAME run. With a dispatchId, matching is by EXACT displayTitle
+  // equality — no recency heuristic at all, even among multiple real
+  // candidates.
+  describe('with dispatchId — exact displayTitle match, no recency heuristic', () => {
+    it('picks the run whose displayTitle equals dispatchId, among 4 concurrent legs', () => {
+      const before = [];
+      const after = [
+        {
+          databaseId: 101,
+          event: 'workflow_dispatch',
+          headBranch,
+          displayTitle: '104-node-turbopack',
+          createdAt: '2026-01-01T00:00:01Z',
+        },
+        {
+          databaseId: 102,
+          event: 'workflow_dispatch',
+          headBranch,
+          displayTitle: '104-node-webpack',
+          createdAt: '2026-01-01T00:00:02Z',
+        },
+        {
+          databaseId: 103,
+          event: 'workflow_dispatch',
+          headBranch,
+          displayTitle: '104-bun-turbopack',
+          createdAt: '2026-01-01T00:00:03Z',
+        },
+        {
+          databaseId: 104,
+          event: 'workflow_dispatch',
+          headBranch,
+          displayTitle: '104-bun-webpack',
+          createdAt: '2026-01-01T00:00:04Z',
+        },
+      ];
+      expect(
+        pickDispatchedRun(before, after, { headBranch, dispatchId: '104-node-turbopack' })
+          ?.databaseId,
+      ).toBe(101);
+      expect(
+        pickDispatchedRun(before, after, { headBranch, dispatchId: '104-bun-webpack' })?.databaseId,
+      ).toBe(104);
+    });
+
+    it('ignores a NEWER run with a different dispatchId — no "newest wins" fallback', () => {
+      const before = [];
+      const after = [
+        {
+          databaseId: 1,
+          event: 'workflow_dispatch',
+          headBranch,
+          displayTitle: '104-node-turbopack',
+          createdAt: '2026-01-01T00:00:01Z',
+        },
+        {
+          databaseId: 2,
+          event: 'workflow_dispatch',
+          headBranch,
+          displayTitle: 'some other manual dispatch',
+          createdAt: '2026-01-01T00:00:99Z',
+        },
+      ];
+      expect(
+        pickDispatchedRun(before, after, { headBranch, dispatchId: '104-node-turbopack' })
+          ?.databaseId,
+      ).toBe(1);
+    });
+
+    it("matching is EXACT equality, not substring — a dispatchId that is a PREFIX of another run's displayTitle must not match it", () => {
+      const before = [];
+      const after = [
+        {
+          databaseId: 1,
+          event: 'workflow_dispatch',
+          headBranch,
+          displayTitle: '104-node-turbopack',
+          createdAt: '2026-01-01T00:00:01Z',
+        },
+      ];
+      // '104-node' is a PREFIX of '104-node-turbopack' — an includes()-based
+      // matcher would wrongly pick run 1 for a leg that never dispatched it.
+      expect(pickDispatchedRun(before, after, { headBranch, dispatchId: '104-node' })).toBeNull();
+    });
+
+    it('fails closed (null) when no run carries the exact dispatchId, even with other candidates present', () => {
+      const before = [];
+      const after = [
+        {
+          databaseId: 1,
+          event: 'workflow_dispatch',
+          headBranch,
+          displayTitle: 'some other manual dispatch',
+          createdAt: '2026-01-01T00:00:01Z',
+        },
+      ];
+      expect(
+        pickDispatchedRun(before, after, { headBranch, dispatchId: '104-node-turbopack' }),
+      ).toBeNull();
+    });
+
+    it('an EMPTY dispatchId falls back to the old recency heuristic (backward compat)', () => {
+      const before = [{ databaseId: 1 }];
+      const after = [
+        {
+          databaseId: 1,
+          event: 'workflow_dispatch',
+          headBranch,
+          createdAt: '2026-01-01T00:00:00Z',
+        },
+        {
+          databaseId: 2,
+          event: 'workflow_dispatch',
+          headBranch,
+          createdAt: '2026-01-01T00:01:00Z',
+        },
+      ];
+      expect(pickDispatchedRun(before, after, { headBranch, dispatchId: '' })?.databaseId).toBe(2);
+    });
+  });
 });
 
 describe('isTerminalStatus / isRedConclusion', () => {

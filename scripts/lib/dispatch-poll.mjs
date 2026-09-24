@@ -18,26 +18,52 @@
  * documented limitation. The standard workaround: snapshot the workflow's
  * recent runs BEFORE dispatching, dispatch, then poll the recent-runs list
  * AFTER until a `workflow_dispatch` run appears that was not in the
- * snapshot, on the same branch. Ties are broken by newest `createdAt` —
- * GitHub Actions run ids are not guaranteed monotonic across concurrent
- * dispatches, but createdAt is what humans reading a run list would use.
+ * snapshot, on the same branch.
+ *
+ * rev-1382 finding 2: with NO dispatchId, "newest workflow_dispatch not seen
+ * before" is a HEURISTIC — every leg of a fast fan-out (4 legs dispatched
+ * within seconds, as `compat-shipped-pin-early-warning.yml` does) can latch
+ * onto the SAME newest run, giving a false green/red for every leg but one.
+ * Reproduced directly: with 4 concurrent candidates the heuristic picks
+ * whichever is newest regardless of which leg is asking.
+ *
+ * When `opts.dispatchId` is a non-empty string, matching is EXACT and has NO
+ * heuristic at all: the caller is expected to have set the dispatched
+ * workflow's own `run-name:` to that exact dispatchId (see
+ * `test-e2e-deploy.yml`'s `run-name:` and
+ * `compat-shipped-pin-dispatch-and-wait.mjs`'s `DISPATCH_ID`), so the run
+ * list's `displayTitle` is the ONLY signal consulted — `createdAt`/recency
+ * plays no role, and a run that does not carry that exact title is never a
+ * candidate, however new. No match -> null (fail closed), never a
+ * best-effort fallback to the newest run.
+ *
+ * An EMPTY/absent dispatchId preserves the old recency-heuristic behaviour,
+ * for callers (and the pre-existing test suite) that never adopted a
+ * dispatchId.
  *
  * @param {{databaseId:number}[]} runsBefore
- * @param {{databaseId:number,event:string,headBranch:string,createdAt:string}[]} runsAfter
- * @param {{headBranch:string}} opts
+ * @param {{databaseId:number,event:string,headBranch:string,createdAt:string,displayTitle?:string}[]} runsAfter
+ * @param {{headBranch:string, dispatchId?:string}} opts
  * @returns {{databaseId:number}|null}
  */
 export function pickDispatchedRun(runsBefore, runsAfter, opts) {
   const beforeIds = new Set(runsBefore.map((r) => r.databaseId));
-  const candidates = runsAfter
-    .filter(
-      (r) =>
-        !beforeIds.has(r.databaseId) &&
-        r.event === 'workflow_dispatch' &&
-        r.headBranch === opts.headBranch,
-    )
-    .slice()
-    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+  const base = runsAfter.filter(
+    (r) =>
+      !beforeIds.has(r.databaseId) &&
+      r.event === 'workflow_dispatch' &&
+      r.headBranch === opts.headBranch,
+  );
+
+  if (opts.dispatchId) {
+    const exact = base
+      .filter((r) => r.displayTitle === opts.dispatchId)
+      .slice()
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+    return exact[0] ?? null;
+  }
+
+  const candidates = base.slice().sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
   return candidates[0] ?? null;
 }
 

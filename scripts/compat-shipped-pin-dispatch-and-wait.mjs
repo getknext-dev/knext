@@ -13,10 +13,19 @@
  * `workflow_dispatch` — which is the ONLY trigger this script ever uses.
  *
  * Required env: GH_TOKEN (or gh's own auth), GITHUB_REPOSITORY,
- * KNEXT_RUNTIME (node|bun), KNEXT_BUILDER (turbopack|webpack).
+ * KNEXT_RUNTIME (node|bun), KNEXT_BUILDER (turbopack|webpack), DISPATCH_ID
+ * (rev-1382 — a per-leg identifier this script sends as `test-e2e-deploy.yml`'s
+ * own `dispatchId` input, which that workflow's `run-name:` echoes verbatim;
+ * `pickDispatchedRun` then matches the polled run list's `displayTitle`
+ * EXACTLY against it, never a "newest run" guess — see
+ * `scripts/lib/dispatch-poll.mjs`'s header for why that heuristic broke
+ * under this lane's own 4-leg fan-out).
  * Optional: DISPATCH_REF (default 'main'), POLL_INTERVAL_MS (default
- * 30000), MAX_WAIT_MS (default 90 * 60_000 — 90 minutes, matching the
- * workflow job's own timeout-minutes).
+ * 30000), MAX_WAIT_MS (default 90 * 60_000 — 90 minutes; the CALLING job's
+ * `timeout-minutes` must be set strictly higher than this so GitHub's hard
+ * job-kill never races this script's own deadline — a job killed by its own
+ * timeout reports step status `cancelled`, not `failure`, which
+ * `if: failure()` never observes).
  *
  * Usage: node scripts/compat-shipped-pin-dispatch-and-wait.mjs
  */
@@ -53,7 +62,7 @@ function listRecentRuns(repo) {
     '--workflow',
     TARGET_WORKFLOW,
     '--json',
-    'databaseId,event,headBranch,createdAt,status,conclusion',
+    'databaseId,event,headBranch,createdAt,status,conclusion,displayTitle',
     '--limit',
     '30',
   ]);
@@ -73,12 +82,15 @@ async function main() {
   const repo = process.env.GITHUB_REPOSITORY;
   const runtime = process.env.KNEXT_RUNTIME;
   const builder = process.env.KNEXT_BUILDER;
+  const dispatchId = process.env.DISPATCH_ID;
   const ref = process.env.DISPATCH_REF ?? 'main';
   const pollIntervalMs = Number(process.env.POLL_INTERVAL_MS ?? 30_000);
   const maxWaitMs = Number(process.env.MAX_WAIT_MS ?? 90 * 60_000);
 
-  if (!repo || !runtime || !builder) {
-    console.error('FATAL: GITHUB_REPOSITORY, KNEXT_RUNTIME, KNEXT_BUILDER are required');
+  if (!repo || !runtime || !builder || !dispatchId) {
+    console.error(
+      'FATAL: GITHUB_REPOSITORY, KNEXT_RUNTIME, KNEXT_BUILDER, DISPATCH_ID are required',
+    );
     process.exit(1);
   }
 
@@ -104,16 +116,20 @@ async function main() {
     `builder=${builder}`,
     '-f',
     'smoke=true',
+    '-f',
+    `dispatchId=${dispatchId}`,
   ]);
 
   const deadline = Date.now() + maxWaitMs;
   let run = null;
   while (Date.now() < deadline && !run) {
     await sleep(pollIntervalMs);
-    run = pickDispatchedRun(runsBefore, listRecentRuns(repo), { headBranch: ref });
+    run = pickDispatchedRun(runsBefore, listRecentRuns(repo), { headBranch: ref, dispatchId });
   }
   if (!run) {
-    console.error('FATAL: could not identify the dispatched run within the wait window');
+    console.error(
+      `FATAL: no run with displayTitle "${dispatchId}" appeared within the wait window — no fallback to a "newest run" guess (rev-1382 finding 2)`,
+    );
     process.exit(1);
   }
   console.log(`Found dispatched run ${run.databaseId}, polling for completion...`);

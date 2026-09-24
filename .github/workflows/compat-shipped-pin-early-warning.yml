@@ -39,7 +39,11 @@
 # test-e2e-deploy.yml's own `nightly-red-alert` job uses (search by title,
 # comment if open, create if not) — under its OWN, distinct title, and
 # deliberately NEVER pinned (#1347: pin-slot competition among several
-# per-lane titles already starves the third-plus pinned issue).
+# per-lane titles already starves the third-plus pinned issue). rev-1382
+# finding 3: this now lives in its OWN job, `needs:` the matrix job — NOT a
+# step inside it — so a red night files exactly ONE issue/comment
+# regardless of how many of the 4 legs went red, mirroring
+# test-e2e-deploy.yml's `nightly-red-alert` shape exactly.
 name: Compat shipped-pin early-warning (informational, non-credential)
 
 on:
@@ -65,12 +69,23 @@ jobs:
         runtime: [node, bun]
         builder: [turbopack, webpack]
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # rev-1382 finding 4: strictly greater than the dispatch script's own
+    # MAX_WAIT_MS default (90 min — tests/compat-shipped-pin-dispatch-isolation.test.ts
+    # enforces this stays true). Equal or less lets GitHub's hard job-kill
+    # race the script's own deadline: a job killed by ITS OWN timeout reports
+    # step status `cancelled`, never `failure`, so the alert job's
+    # `result == 'failure'` condition below would silently never fire on a
+    # hang — the exact way a timeout used to go unalerted.
+    timeout-minutes: 100
     permissions:
       actions: write # to dispatch test-e2e-deploy.yml and read its runs
-      issues: write # per-leg alert on red (idempotent, see below)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # rev-1382 finding 2: a fixed per-leg id, unique to THIS workflow run
+      # (github.run_id) and THIS matrix cell, so 4 legs dispatched within
+      # seconds of each other never share an identity to latch onto — the
+      # dispatched test-e2e-deploy.yml run's own `run-name:` becomes this
+      # exact string, and the poll below matches it exactly.
       - name: Dispatch test-e2e-deploy.yml and wait for its conclusion
         id: dispatch
         env:
@@ -79,24 +94,37 @@ jobs:
           KNEXT_RUNTIME: ${{ matrix.runtime }}
           KNEXT_BUILDER: ${{ matrix.builder }}
           DISPATCH_REF: ${{ github.ref_name }}
+          DISPATCH_ID: ${{ github.run_id }}-${{ matrix.runtime }}-${{ matrix.builder }}
         run: node scripts/compat-shipped-pin-dispatch-and-wait.mjs
-      # Idempotent single-tracking-issue alert — same pattern as
-      # test-e2e-deploy.yml's nightly-red-alert, under its own title, never
-      # pinned (#1347). Runs per-leg (never on a plain dispatch of THIS
-      # workflow, only the real weekly schedule) so a red cell always
-      # surfaces even if a sibling cell in the matrix is green.
-      - name: Create or update the tracking issue (idempotent, never pinned)
-        if: failure() && github.event_name == 'schedule'
+
+  # rev-1382 finding 3: ONE job, run once after the whole matrix, never a
+  # per-leg step — so a red night files/updates exactly one tracking issue no
+  # matter how many of the 4 legs went red. `always()` so this job is not
+  # itself skipped by a sibling matrix-instance failure; the `needs`-result
+  # check scopes it to an actual failure and the event check scopes it to the
+  # real weekly schedule, mirroring test-e2e-deploy.yml's own
+  # `nightly-red-alert` job exactly.
+  alert:
+    name: Create or update the tracking issue (idempotent, never pinned)
+    needs: [dispatch-and-wait]
+    if: >-
+      always() &&
+      github.event_name == 'schedule' &&
+      needs.dispatch-and-wait.result == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Create or update the "Compat shipped-pin early-warning RED" issue
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          KNEXT_RUNTIME: ${{ matrix.runtime }}
-          KNEXT_BUILDER: ${{ matrix.builder }}
         run: |
           set -euo pipefail
           title='Compat shipped-pin early-warning RED'
-          body="**${KNEXT_RUNTIME} x ${KNEXT_BUILDER}** went red on the shipped-pin early-warning lane (#1376 option b). This is NON-credentialing — it tests the SCAFFOLD's shipped Next.js pin, not the v16.2.0 credential, and cannot affect any v1.0 credential streak. Run: ${RUN_URL}"
+          body="At least one leg (node/bun x turbopack/webpack) went red on the shipped-pin early-warning lane (#1376 option b). This is NON-credentialing — it tests the SCAFFOLD's shipped Next.js pin, not the v16.2.0 credential, and cannot affect any v1.0 credential streak. Open the run to see which leg(s) failed: ${RUN_URL}"
           existing="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 100 \
             --json number,title \
             --jq "[.[] | select(.title == \"${title}\")][0].number // empty")"
