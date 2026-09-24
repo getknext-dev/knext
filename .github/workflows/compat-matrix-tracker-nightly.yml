@@ -1,0 +1,85 @@
+name: Compat v1.0 credential matrix tracker
+
+# ── #1300 (system-designer gate TD2) ────────────────────────────────────────
+# One pinned issue for the AGGREGATE v1.0 credential matrix, refreshed daily.
+#
+# The per-cell "Compat CREDENTIAL RED (<lane>, RC tag)" issue
+# (test-e2e-deploy.yml's `nightly-red-alert` job) is labelled `credential-reset`
+# and deliberately NOT pinned. With 5+ credentialing lanes racing for GitHub's
+# hard 3-pin cap, and a failed `gh issue pin` call being only a warning (not a
+# failure), a red on the fourth-or-later lane to open its own issue would
+# silently fail to pin and go unseen. This workflow is the fix: exactly ONE
+# issue is pinned — this tracker — and it carries the full matrix (every cell,
+# wired or not, current streak length, restart cause) via a daily comment, so
+# the aggregate state is visible independent of last night's result.
+#
+# Runs independently of whether last night was red: a quiet night still gets
+# today's comment, so silence in the matrix is never mistaken for "nothing to
+# report" vs. "the tracker itself stopped running".
+
+on:
+  # 05:10 UTC — after both credential crons (03:17 node, 22:17/23:47 webpack,
+  # 04:47 bun) have had time to land their ledgers, offset from the
+  # docs-closure nightly (04:23) and the mutation-prover nightly.
+  schedule:
+    - cron: '10 5 * * *'
+  workflow_dispatch:
+    inputs:
+      # Review round 2 (#1300, finding 4) — a manual dispatch is the live
+      # acceptance path (create → pin → comment on run 1, comment-on-the-
+      # same-issue on run 2), so this input exists to make that intent
+      # explicit in the run log/UI rather than an unlabelled manual trigger.
+      # It has no effect on the logic below — every dispatch runs the SAME
+      # real create-or-update-and-pin flow the schedule runs, never a fake.
+      dispatch_reason:
+        description: 'Why this is being run manually (e.g. "acceptance check for #1300")'
+        required: false
+        type: string
+        default: 'manual verification run'
+
+# Top-level `permissions:` is OVERRIDDEN, not merged, by a job-level block
+# (review round 2 finding 3) — declared here for clarity but the job below
+# restates every scope it needs rather than relying on inheritance.
+permissions:
+  contents: read
+
+jobs:
+  matrix-tracker:
+    name: Refresh the pinned v1.0 credential matrix tracker
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Finding 3: a job-level `permissions:` block REPLACES the top-level one
+    # wholesale — it does not merge. The original `{issues: write}` silently
+    # dropped `contents: read` (checkout still worked off ambient defaults on
+    # public repos, but is not something to rely on) and, more seriously,
+    # `actions: read`, which `gh run list`/`gh run download` (inside
+    # compat-window-audit.mjs's `--fetch`) need to read OTHER workflows' runs
+    # and artifacts. Missing it doesn't error loudly — every night just reads
+    # back empty/unresolved, which `looksLikeFetchFailure` in
+    # compat-matrix-tracker.mjs now catches and fails the job on.
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Compute the full credential matrix
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/compat-window-audit.mjs --fetch --matrix --json > matrix.json
+
+      - name: Create or update the pinned tracker issue (idempotent)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          node scripts/compat-matrix-tracker.mjs \
+            --matrix-file matrix.json \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

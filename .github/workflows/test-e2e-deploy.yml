@@ -38,6 +38,15 @@ name: Compat suite (official Next.js deploy harness)
 #     resolved by the `credential-ref` job. No resolvable RC tag → the run
 #     REFUSES (never falls back to `main`). Only these nights count toward the
 #     per-cell 14-night windows (scripts/compat-window-audit.mjs).
+#
+# BUILDERS (#1245): the webpack cells (webpack×node, webpack×bun) share this
+# workflow. The BUILDER is decided like the runtime — dispatch input > the
+# webpack credential crons ('17 22 * * *' node, '47 23 * * *' bun) > turbopack
+# — and the LANE (the cell's window key) is `<runtime>` for turbopack and
+# `<runtime>-webpack` for webpack. Only the two webpack CREDENTIAL crons exist:
+# no early-warning webpack crons, because the audit counts credential nights
+# only and CI concurrency is capped (#1301); dispatch `builder=webpack` for an
+# on-demand early-warning run.
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
@@ -60,6 +69,17 @@ on:
           - node
           - bun
         default: node
+      # #1245 — the BUILD axis of the v1.0 matrix (node/bun × turbopack/webpack).
+      # Selects IS_TURBOPACK_TEST vs IS_WEBPACK_TEST on the harness (exactly one,
+      # never both — bundler.ts exits on multiple bundler flags) and the lane id.
+      builder:
+        description: 'Fixture bundler (turbopack | webpack) — selects the credential cell with runtime'
+        required: false
+        type: choice
+        options:
+          - turbopack
+          - webpack
+        default: turbopack
       # #188 — the Bun-VERSION experimentation knob. The bun lane's 3 remaining
       # red files (the edge-sandbox fetch gap + the not-found invariant pair)
       # are documented Bun ≤1.3.x runtime gaps believed fixed in 1.4.0-canary
@@ -96,6 +116,20 @@ on:
         required: false
         type: boolean
         default: false
+      # #1300 review round 2 (finding 4) — a dispatch-only, self-contained
+      # simulation of the credential-reset alert mechanics: creates a real,
+      # clearly `[alert-test]`-prefixed issue with the real `credential-reset`
+      # label (proving the label-ensure + create path works live), then
+      # closes it in the SAME run. Never runs on a schedule (guarded by the
+      # `alert-test-dispatch` job's own `if:`, independent of this default),
+      # so it can never fire as a side effect of a real credential night, and
+      # it is a SEPARATE job from `nightly-red-alert` — it does not touch, and
+      # cannot be mistaken for, a real per-cell alert.
+      simulate_red:
+        description: '#1300 — dispatch-only: create + self-close a real, clearly test-labelled [alert-test] credential-reset issue, proving the alert mechanics live. Never runs on schedule.'
+        required: false
+        type: boolean
+        default: false
   schedule:
     # 03:17 UTC nightly — off-peak; the run takes the better part of an hour.
     # This is the NODE lane: the compat-matrix credential (docs/compat-matrix.md).
@@ -119,6 +153,15 @@ on:
     # 05:47 UTC nightly — the BUN CREDENTIAL night (#850, ADR-0056). Maps to the
     # bun lane in KNEXT_RUNTIME and to credential in KNEXT_COMPAT_MODE.
     - cron: '47 5 * * *'
+    # 22:17 UTC nightly — the WEBPACK × NODE CREDENTIAL night (#1245). Staggered
+    # ≥60 min from every other compat cron and far from the ~08:30 UTC pile-up:
+    # each run is ~19 jobs against the Free plan's 20-concurrent-job cap (#1301).
+    # Maps to builder=webpack in KNEXT_BUILDER, lane node-webpack in KNEXT_LANE,
+    # credential in KNEXT_COMPAT_MODE. Refuses while no RC is cut.
+    - cron: '17 22 * * *'
+    # 23:47 UTC nightly — the WEBPACK × BUN CREDENTIAL night (#1245). 90 min after
+    # the node-webpack night and 90 min before the 01:17 node credential night.
+    - cron: '47 23 * * *'
 
 # Pin the Next.js ref so a failure is attributable to knext, not upstream churn.
 # NEXTJS_REF is the git TAG (kept for the source checkout that supplies the
@@ -168,12 +211,25 @@ env:
   # mutation-proved (an expression evaluator, not a grep) in
   # tests/compat-suite-workflow.test.ts.
   # #850: the bun CREDENTIAL cron ('47 5 * * *') is the bun lane too.
-  KNEXT_RUNTIME: ${{ github.event.inputs.runtime || (github.event.schedule == '47 4 * * *' && 'bun') || (github.event.schedule == '47 5 * * *' && 'bun') || 'node' }}
+  # #1245: the webpack × bun CREDENTIAL cron ('47 23 * * *') is the bun lane too.
+  KNEXT_RUNTIME: ${{ github.event.inputs.runtime || (github.event.schedule == '47 4 * * *' && 'bun') || (github.event.schedule == '47 5 * * *' && 'bun') || (github.event.schedule == '47 23 * * *' && 'bun') || 'node' }}
+  # #1245 — the ONE builder decision: dispatch input > the two webpack credential
+  # crons → webpack > default turbopack (every pre-existing cron stays turbopack).
+  KNEXT_BUILDER: ${{ github.event.inputs.builder || (github.event.schedule == '17 22 * * *' && 'webpack') || (github.event.schedule == '47 23 * * *' && 'webpack') || 'turbopack' }}
+  # #1245 — the LANE, i.e. the credential cell's window key
+  # (CREDENTIAL_CELLS.lane): `<runtime>` for turbopack (the historical ids, so
+  # their history stays attributable) and `<runtime>-webpack` for webpack. A
+  # workflow-level env cannot read `env`, so this re-derives from the event;
+  # tests/compat-webpack-credential-lanes.test.ts EVALUATES it against every
+  # cron and dispatch combination and reds unless it equals the lane composed
+  # from KNEXT_RUNTIME × KNEXT_BUILDER and names a real credential cell.
+  KNEXT_LANE: ${{ (github.event.inputs.builder == 'webpack' && format('{0}-webpack', github.event.inputs.runtime)) || github.event.inputs.runtime || (github.event.schedule == '17 22 * * *' && 'node-webpack') || (github.event.schedule == '47 23 * * *' && 'bun-webpack') || (github.event.schedule == '47 4 * * *' && 'bun') || (github.event.schedule == '47 5 * * *' && 'bun') || 'node' }}
   # #850 / ADR-0056 — the ONE mode decision. Only the two credential cron
   # literals map to `credential`; every other trigger, INCLUDING any dispatch,
   # is `early-warning`, so no dispatch input can produce a credential night.
   # Evaluated (not grepped) by tests/compat-credential-ref.test.ts.
-  KNEXT_COMPAT_MODE: ${{ (github.event.schedule == '17 1 * * *' && 'credential') || (github.event.schedule == '47 5 * * *' && 'credential') || 'early-warning' }}
+  # #1245: the two webpack credential crons are credential nights too.
+  KNEXT_COMPAT_MODE: ${{ (github.event.schedule == '17 1 * * *' && 'credential') || (github.event.schedule == '47 5 * * *' && 'credential') || (github.event.schedule == '17 22 * * *' && 'credential') || (github.event.schedule == '47 23 * * *' && 'credential') || 'early-warning' }}
   # #188 path 2 — dispatch input ONLY, never a schedule branch: on schedule
   # events github.event.inputs is empty, so this is '' (off) on the nightly
   # AND the weekly bun lane. '1' is the exact value scripts/e2e-deploy.sh
@@ -215,12 +271,14 @@ jobs:
       - name: Record the lane + mode markers
         run: |
           set -euo pipefail
-          printf '%s\n' "${KNEXT_RUNTIME}" > "${RUNNER_TEMP}/compat-lane.txt"
+          printf '%s\n' "${KNEXT_LANE}" > "${RUNNER_TEMP}/compat-lane.txt"
           printf '%s\n' "${KNEXT_COMPAT_MODE}" > "${RUNNER_TEMP}/compat-mode.txt"
       - name: Publish the lane marker
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: compat-lane-${{ env.KNEXT_RUNTIME }}
+          # #1245: the LANE (cell window key), not the bare runtime — a webpack
+          # night must never be attributed to the turbopack cell sharing its runtime.
+          name: compat-lane-${{ env.KNEXT_LANE }}
           path: ${{ runner.temp }}/compat-lane.txt
           # The NAME is the evidence and the listing keeps it after expiry, so
           # retention here only needs to cover the audit's own window.
@@ -503,7 +561,7 @@ jobs:
             --next-js-dir "${GITHUB_WORKSPACE}/next.js" \
             --next-tarball "${GITHUB_WORKSPACE}/next-prebuilt/next.tgz" \
             --next-ref "${NEXTJS_REF}" \
-            --lane "${KNEXT_RUNTIME}" \
+            --lane "${KNEXT_LANE}" \
             --workflow-file "${GITHUB_WORKSPACE}/knext-executing/.github/workflows/test-e2e-deploy.yml" \
             --out "${GITHUB_WORKSPACE}/compat-window-fingerprint.json" \
             ${RUNTIME_ARGS[@]+"${RUNTIME_ARGS[@]}"} \
@@ -1470,7 +1528,16 @@ jobs:
           # flag reaches the tests AND the fixture `next build` in
           # scripts/e2e-deploy.sh. Never set IS_WEBPACK_TEST alongside it —
           # bundler.ts exits(1) on multiple bundler flags.
-          IS_TURBOPACK_TEST: '1'
+          #
+          # #1245: the BUILDER axis. Exactly one of the two flags is '1' (the
+          # other is '' — falsy both to bundler.ts and to test/lib/turbo.ts), so
+          # the webpack cells mirror upstream's webpack lane (IS_WEBPACK_TEST)
+          # and the turbopack cells are byte-for-byte what they were.
+          IS_TURBOPACK_TEST: ${{ env.KNEXT_BUILDER == 'turbopack' && '1' || '' }}
+          IS_WEBPACK_TEST: ${{ env.KNEXT_BUILDER == 'webpack' && '1' || '' }}
+          # #1245: scripts/e2e-deploy.sh refuses a KNEXT_BUILDER=webpack deploy
+          # whose build lacks webpack's server runtime (proof the env arrived).
+          KNEXT_BUILDER: ${{ env.KNEXT_BUILDER }}
           # #147 A3-3 round 5 (code-gate advisory on the first all-green run,
           # 28599745695) — the FOURTH mirror from the same upstream afterBuild
           # line (test_e2e_deploy_release.yml:209-218, test-deploy-adapter):
@@ -1609,6 +1676,7 @@ jobs:
             --excluded "${{ steps.excl.outputs.count }}" \
             --runtime "${KNEXT_RUNTIME}" \
             --runtime-version "${RUNTIME_VERSION}" \
+            --builder "${KNEXT_BUILDER}" \
             --boot-ledger "${RUNNER_TEMP:-/tmp}/knext-e2e-boot-modes.log" \
             --out "compat-suite-summary-${SAFE_SHARD}.json"
 
@@ -1653,6 +1721,12 @@ jobs:
             echo "::error::${SUMMARY} is missing — no results is NOT green; the summarize step failed upstream"
             exit 1
           fi
+          # Deliberately single-quoted: this is an embedded `node -e` script,
+          # and its JS string concatenation ("..." + s.shard + ...) is what
+          # the shell linter's heuristic misreads as shell $-interpolation.
+          # Single-quoting is CORRECT here (#1300 review round 3, finding 1:
+          # actionlint installed live surfaced this).
+          # shellcheck disable=SC2016
           node -e '
             const s = require("./" + process.argv[1]);
             console.log(
@@ -1984,14 +2058,47 @@ jobs:
           # per-lane title, so a red on the frozen RC is never folded into the
           # main early-warning thread above (and vice versa). The early-warning
           # titles are unchanged, so their open issues keep their dedup keys.
+          # #1300 (TD2) — name the RESTART CAUSE directly from the signals this
+          # step already has, rather than a generic "it went red". The taxonomy
+          # mirrors compat-window-audit.mjs's own restart-cause vocabulary
+          # (night-unresolved / fingerprint-changed / night-disqualified) so the
+          # reason printed here is never invented independently of the auditor
+          # that actually books the restart.
+          restart_cause='unknown'
+          if [ "${REF_RESULT:-}" = "failure" ] || [ "${REF_RESULT:-}" = "cancelled" ]; then
+            restart_cause="credential-ref resolution ${REF_RESULT:-} (state: ${REF_STATE:-unknown}) — no RC ref could be pinned, so the night is unresolved"
+          elif [ "${BUILD_RESULT:-}" = "failure" ]; then
+            restart_cause="build-next (Prepare) failed — the adapter tarball never reached the shards"
+          elif [ "${SHARDS_RESULT:-}" = "failure" ] || [ "${SHARDS_RESULT:-}" = "cancelled" ]; then
+            # #1300 review round 2 (finding 5) — a shard can fail with ZERO
+            # named test failures: the "Verify boot-mode ledger" step
+            # (scripts/e2e-bytecode-liveness.mjs) fails the shard JOB directly
+            # when bytecode caching wasn't proven live, independent of any
+            # test outcome, so RED_SHARD_DETAIL (sourced from per-CASE test
+            # failures only) is blank on that class of red. Distinguishing it
+            # here means the restart-cause line never claims "see the named
+            # failures below" when there are none to see.
+            if [ -z "$(printf '%s' "${RED_SHARD_DETAIL:-}" | tr -d '[:space:]')" ]; then
+              restart_cause="deploy-tests shards ${SHARDS_RESULT:-} with NO named test failures in the ledger — almost certainly a bytecode-caching-liveness failure (scripts/e2e-bytecode-liveness.mjs: bytecode caching not proven LIVE on every deploy) or another non-test shard-step failure, not a failing test; check the shard job logs, not the ledger"
+            else
+              restart_cause="deploy-tests shards ${SHARDS_RESULT:-} — see the named failures below"
+            fi
+          elif [ "${LEDGER_RESULT:-}" = "failure" ] || [ "${LEDGER_RESULT:-}" = "cancelled" ]; then
+            restart_cause="shard-ledger ${LEDGER_RESULT:-} — attribution/test-count floor tripped (a shard likely went silent, not red)"
+          fi
           if [ "${KNEXT_COMPAT_MODE}" = "credential" ]; then
-            title="Compat CREDENTIAL RED (${KNEXT_RUNTIME}, RC tag)"
-            lane_note="This is the **${KNEXT_RUNTIME} CREDENTIAL night** — it ran against the frozen release-candidate tag pinned in \`.github/compat-credential-ref.json\` (ref: \`${CHECKOUT_REF:-unresolved}\`), not main. A red here RESTARTS this cell's v1.0 14-night window; the fix lands on main and ships in the next RC. If credential-ref is the failed job, the RC ref could not be resolved (resolution state: \`${REF_STATE:-unknown}\`) and nothing was tested — the lane refuses rather than fall back to main."
+            title="Compat CREDENTIAL RED (${KNEXT_LANE}, RC tag)"
+            lane_note="This is the **${KNEXT_LANE} CREDENTIAL night** — it ran against the frozen release-candidate tag pinned in \`.github/compat-credential-ref.json\` (ref: \`${CHECKOUT_REF:-unresolved}\`), not main. A red here RESTARTS this cell's v1.0 14-night window; the fix lands on main and ships in the next RC. If credential-ref is the failed job, the RC ref could not be resolved (resolution state: \`${REF_STATE:-unknown}\`) and nothing was tested — the lane refuses rather than fall back to main.
+
+          **Restart cause:** ${restart_cause}
+
+          This per-cell issue is labelled \`credential-reset\`. It is intentionally NOT pinned — with 5+ credentialing lanes, GitHub's 3-pin cap means per-cell pins silently lose visibility past the third. The single aggregate view is the pinned **Compat v1.0 credential matrix tracker** issue, refreshed daily by \`compat-matrix-tracker-nightly.yml\`."
           fi
           body="The scheduled official Next.js deploy-suite run FAILED.
 
           - Run: ${RUN_URL}
           - Runtime lane: ${KNEXT_RUNTIME}
+          - Builder: ${KNEXT_BUILDER} (cell lane: ${KNEXT_LANE})
           - Mode: ${KNEXT_COMPAT_MODE}
           - credential-ref (resolve the knext ref): ${REF_RESULT} (state: ${REF_STATE:-n/a})
           - build-next (Prepare): ${BUILD_RESULT}
@@ -2015,6 +2122,17 @@ jobs:
           touching the quarantine ledger (ADR-0007 graduation addendum, §c: quarantines
           need a final-post-retry failure plus an env-parity audit, never a red-nightly
           reflex)."
+          # #1300 — the credential-reset label. Ensure-first (idempotent,
+          # `--force` never fails if it already exists) rather than assuming a
+          # human pre-created it; a missing label would otherwise make every
+          # `gh issue create --label` call below fail closed on the first
+          # credential red.
+          if [ "${KNEXT_COMPAT_MODE}" = "credential" ]; then
+            gh label create "credential-reset" --repo "${GITHUB_REPOSITORY}" \
+              --color d93f0b \
+              --description "A credential night restarted this cell's v1.0 14-night window" \
+              --force
+          fi
           # Idempotency: exactly-one open alert issue. Comment on it if present,
           # create (+ pin, best-effort) only when absent. #187 follow-up:
           # --limit 100 explicitly — gh defaults to 30, and with >30 open
@@ -2028,9 +2146,124 @@ jobs:
           if [ -n "${existing}" ]; then
             echo "updating existing alert issue #${existing}"
             gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
+            if [ "${KNEXT_COMPAT_MODE}" = "credential" ]; then
+              gh issue edit "${existing}" --repo "${GITHUB_REPOSITORY}" --add-label "credential-reset"
+            fi
           else
             echo "creating the alert issue"
-            new_url="$(gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}")"
-            new_num="${new_url##*/}"
-            gh issue pin "${new_num}" --repo "${GITHUB_REPOSITORY}" || echo "::warning::could not pin issue #${new_num} (non-fatal)"
+            if [ "${KNEXT_COMPAT_MODE}" = "credential" ]; then
+              gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}" \
+                --label "credential-reset" >/dev/null
+            else
+              gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}" >/dev/null
+            fi
+            # #1300 (TD2) — deliberately NOT pinned. Every per-cell/per-lane red
+            # title (up to 5+ across node/bun/node-webpack/bun-webpack/bun-vinext,
+            # plus the two early-warning titles) used to race for GitHub's 3-pin
+            # cap; a failed `gh issue pin` is only a warning, so a red beyond the
+            # third pinned lane went unseen. The ONE pinned surface is now the
+            # aggregate "Compat v1.0 credential matrix tracker" issue
+            # (compat-matrix-tracker-nightly.yml), which every open credential-
+            # reset issue is discoverable from via the `credential-reset` label.
           fi
+
+  # ── #1300 review round 2, finding 4 — dispatch-only alert simulation ───────
+  # Proves the credential-reset alert mechanics (label ensure-create, issue
+  # create, NEVER pin) live, without spamming a real per-cell issue and
+  # without faking anything: every `gh` call below is real, against a real,
+  # unambiguously test-labelled issue that closes itself at the end of this
+  # SAME run. A completely SEPARATE job from `nightly-red-alert` — it shares
+  # no state with it and can never fire on a real credential night (its `if:`
+  # requires BOTH `workflow_dispatch` AND the `simulate_red` input).
+  alert-test-dispatch:
+    name: '[alert-test] dispatch-only credential-reset simulation (#1300)'
+    # `needs: [credential-ref]` — not for its output, but because every job in
+    # this workflow must transitively wait on the lane-attribution marker
+    # published by credential-ref (tests/compat-bun-lane-lockstep.test.ts
+    # "it is published BEFORE any step that can lose the night"). `always()`
+    # so this still runs even if credential-ref itself failed/was cancelled —
+    # the simulation's whole point is to be reachable on demand.
+    needs: [credential-ref]
+    if: >-
+      always() &&
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.simulate_red == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Create a real, clearly test-labelled credential-reset issue, then close it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="[alert-test] Compat CREDENTIAL RED (node, RC tag) — dispatch acceptance check"
+          body="This is a SELF-CLOSING TEST issue, created by a manual \`simulate_red\` dispatch of test-e2e-deploy.yml (#1300 review round 2, finding 4). It proves the credential-reset alert mechanics — label ensure-create, issue create, and (deliberately) never pinning the per-cell issue — work against the real GitHub API, without asserting anything about the actual credential state of any lane.
+
+          Run: ${RUN_URL}
+
+          This issue closes itself at the end of the same run that created it."
+          gh label create "credential-reset" --repo "${GITHUB_REPOSITORY}" \
+            --color d93f0b \
+            --description "A credential night restarted this cell's v1.0 14-night window" \
+            --force
+          new_url="$(gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}" --label "credential-reset")"
+          new_num="${new_url##*/}"
+          echo "created test issue #${new_num}"
+          gh issue close "${new_num}" --repo "${GITHUB_REPOSITORY}" \
+            --comment "Simulation complete — closing automatically (#1300 review round 2, finding 4). This never was, and is not meant to represent, a real credential red."
+          echo "::notice::[alert-test] created and closed #${new_num} — see ${RUN_URL}"
+
+  # ── #1300 review round 2, finding 5 — recovery: close what was opened ──────
+  # A credential-reset issue for a lane that has since gone GREEN is a false
+  # positive left standing. On a fully green SCHEDULED credential night, find
+  # this lane's own open credential-reset issue (if any), comment "recovered"
+  # with the green run's link, and close it — symmetric with how
+  # nightly-red-alert opens it.
+  credential-recovery:
+    name: Close the credential-reset issue on recovery (green credential night)
+    needs: [credential-ref, build-next, deploy-tests, shard-ledger]
+    # #1300 review round 3 (finding 1) — `env` is NOT an allowed context for a
+    # job-level `if:` (actionlint: available contexts are github/inputs/needs/
+    # vars — confirmed live: this exact line rejected the WHOLE workflow at
+    # parse time before the fix, which would have killed every compat
+    # nightly, not just this job). `env.KNEXT_COMPAT_MODE` is itself computed
+    # from `github.event.schedule` (see the workflow's top-level `env:`
+    # block), so the four credential-cron strings are inlined here instead —
+    # same four crons, same 'credential' classification, no `env` context.
+    if: >-
+      always() &&
+      github.event_name == 'schedule' &&
+      (github.event.schedule == '17 1 * * *' || github.event.schedule == '47 5 * * *' ||
+       github.event.schedule == '17 22 * * *' || github.event.schedule == '47 23 * * *') &&
+      needs.credential-ref.outputs.state != 'not-cut' &&
+      needs.credential-ref.result == 'success' &&
+      needs.build-next.result == 'success' &&
+      needs.deploy-tests.result == 'success' &&
+      needs.shard-ledger.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Comment "recovered" and close this lane's open credential-reset issue, if any
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Compat CREDENTIAL RED (${KNEXT_LANE}, RC tag)"
+          existing="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --label "credential-reset" --limit 100 \
+            --json number,title \
+            --jq "[.[] | select(.title == \"${title}\")][0].number // empty")"
+          if [ -z "${existing}" ]; then
+            echo "no open credential-reset issue for lane ${KNEXT_LANE} — nothing to recover"
+            exit 0
+          fi
+          echo "recovering issue #${existing} for lane ${KNEXT_LANE}"
+          gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" \
+            --body "**Recovered.** This credential night ran green end to end (credential-ref, build-next, all deploy-tests shards, shard-ledger all \`success\`): ${RUN_URL}. Closing — the current streak is what \`docs/compat-matrix.md\`/the pinned matrix tracker now report; re-opens automatically on the next red for this lane."
+          gh issue close "${existing}" --repo "${GITHUB_REPOSITORY}"

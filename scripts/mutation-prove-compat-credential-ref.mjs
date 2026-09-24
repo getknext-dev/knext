@@ -78,8 +78,8 @@ const MUTATIONS = [
   {
     label: 'guard 1: map every non-credential trigger (dispatch included) to credential mode',
     subject: 'workflow',
-    anchor: "|| (github.event.schedule == '47 5 * * *' && 'credential') || 'early-warning' }}",
-    replacement: "|| (github.event.schedule == '47 5 * * *' && 'credential') || 'credential' }}",
+    anchor: "|| (github.event.schedule == '47 23 * * *' && 'credential') || 'early-warning' }}",
+    replacement: "|| (github.event.schedule == '47 23 * * *' && 'credential') || 'credential' }}",
   },
 
   {

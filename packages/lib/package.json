@@ -1,6 +1,6 @@
 {
   "name": "@getknext/lib",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Shared runtime library for knext (logging, clients, health).",
   "license": "Apache-2.0",
   "repository": {

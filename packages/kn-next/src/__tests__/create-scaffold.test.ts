@@ -378,6 +378,17 @@ describe("kn-next create — the generated package.json is runnable OUTSIDE this
         expect(entry).not.toMatch(/\bBun\./);
         expect(entry).not.toContain("srvx/bun");
         expect(entry).toContain("srvx/node");
+        // The deployed Cache-Control rule, applied to the Response before srvx
+        // writes it (srvx/node writes a flat header array the node:http preload
+        // does not rewrite), and vinext's own deploy switch defaulted on. The
+        // middleware is the OUTERMOST one, so every response passes through it.
+        expect(entry).toContain(
+            "from '@getknext/core/internal/response-cache-control'",
+        );
+        expect(entry).toMatch(/^applyVinextDeployDefault\(process\.env\);$/m);
+        expect(entry).toMatch(
+            /middleware:\s*\[\s*(\/\/[^\n]*\n\s*)*cacheControlMiddleware\(process\.env\),/,
+        );
 
         const vite = readFileSync(join(appDir, "vite.config.ts"), "utf8");
         expect(vite).toContain("./kn-next.config");

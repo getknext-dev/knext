@@ -555,6 +555,19 @@ jobs:
       - name: SIGTERM drain e2e under the operator `bun run server.js` command
         run: node scripts/bun-test.mjs packages/kn-next/src/__tests__/standalone-drain.docker-e2e.test.ts
 
+      # #1327: a real `next build` (output:'standalone') copies the app's own
+      # .env.production into .next/standalone/, and Dockerfile.standalone.hbs
+      # COPYs that directory wholesale — so a regression in
+      # standaloneDockerignore()'s secret patterns (bare vs `**/`) ships an
+      # app's .env file inside the image. The fast unit guard
+      # (standalone-dockerignore-coverage.test.ts, in the normal Lint & Test
+      # lane) covers the pattern text; THIS is the real proof against an
+      # actual built image, so it lives alongside the other standalone
+      # docker-e2e steps in this job. No skip path, same contract as the
+      # sibling steps above; guarded by tests/standalone-drain-image-ci.test.ts.
+      - name: .env* never ships inside the standalone image e2e
+        run: node scripts/bun-test.mjs packages/kn-next/src/__tests__/standalone-env-not-in-image.docker-e2e.test.ts
+
       # Module identity on the compiled executable for a Pages Router app and a
       # custom cacheHandler importing a Next internal (#1226), against an
       # uncompiled `node server.js` control on the same tree. Same no-skip

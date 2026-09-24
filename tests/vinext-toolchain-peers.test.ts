@@ -58,15 +58,16 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const DEPLOY_SCRIPT = 'scripts/e2e-deploy-vinext.sh';
 
 /**
- * vinext@1.0.0-beta.11's declared `peerDependencies` (from `npm view vinext@…`),
+ * vinext@1.0.0-beta.12's declared `peerDependencies` (from `npm view vinext@…`),
  * restricted to the packages `e2e-deploy-vinext.sh` installs. When VINEXT_VERSION
  * bumps, re-run `npm view vinext@<v> peerDependencies` and update BOTH the ranges
  * and PEER_VINEXT_VERSION below.
  *
- * Re-verified for beta.11 (#1309): the ranges below are UNCHANGED from beta.9 —
- * `npm view vinext@1.0.0-beta.11 peerDependencies` returns the identical set.
+ * Re-verified for beta.11 (#1309) and beta.12 (#1324): the ranges below are
+ * UNCHANGED from beta.9 — `npm view vinext@1.0.0-beta.12 peerDependencies`
+ * returns the identical set.
  */
-const PEER_VINEXT_VERSION = '1.0.0-beta.11';
+const PEER_VINEXT_VERSION = '1.0.0-beta.12';
 const VINEXT_PEER_RANGES: Record<string, string> = {
   vite: '^8.0.0',
   react: '^19.2.6',

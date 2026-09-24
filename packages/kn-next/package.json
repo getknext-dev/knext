@@ -1,6 +1,6 @@
 {
   "name": "@getknext/core",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Knative Next.js configuration and CLI",
   "type": "module",
   "main": "./dist/config.js",
@@ -51,6 +51,7 @@
     "./internal/cache-control-normalize": "./dist/adapters/cache-control-normalize.cjs",
     "./internal/bun-keepalive-guard": "./dist/adapters/bun-keepalive-guard.cjs",
     "./internal/bun-serve-keepalive-guard": "./dist/adapters/bun-serve-keepalive-guard.js",
+    "./internal/response-cache-control": "./dist/adapters/response-cache-control.js",
     "./internal/sandbox-fetch-debug": "./dist/adapters/sandbox-fetch-debug.cjs",
     "./internal/sandbox-fetch-realm-debug": "./dist/adapters/sandbox-fetch-realm-debug.cjs",
     "./internal/standalone-bun-exports": {
@@ -170,7 +171,7 @@
     "next": "16.3.3",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "vinext": "1.0.0-beta.11"
+    "vinext": "1.0.0-beta.12"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.18.0",

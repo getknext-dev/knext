@@ -103,3 +103,71 @@ describe("#1190 — standaloneDockerignore() keeps every Dockerfile.standalone.h
         }
     });
 });
+
+/**
+ * #1327 — a FAST, CI-running guard on standaloneDockerignore()'s secret
+ * patterns, so reverting `**\/.env`/`**\/.env.*`/`**\/*.pem`/etc. back to
+ * their bare (root-only) form goes red HERE, not only in the slow
+ * docker-e2e suite (which is not wired into `ci.yml` by this PR's sibling
+ * work item — this unit test is the fast backstop for the same bug class).
+ *
+ * Every assertion below also exercises the `**\/` branch added to the local
+ * `matchesDockerignore()` evaluator (~runtime-image.ts:560): without it,
+ * NONE of the nested-path assertions here could pass no matter what
+ * `standaloneDockerignore()` returns, which is exactly the false-negative
+ * the #1327 review caught.
+ */
+describe("#1327 — standaloneDockerignore() secret patterns cover the standalone-output nesting depth", () => {
+    const ignoreContent = standaloneDockerignore();
+
+    it("excludes the .env.production Next itself copies into .next/standalone/", () => {
+        expect(
+            dockerignoreExcludes(
+                ignoreContent,
+                ".next/standalone/.env.production",
+            ),
+            "a bare .env.* pattern is root-only and misses this nested path — the exact #1327 leak",
+        ).toBe(true);
+    });
+
+    it("still excludes a root-level .env (the original, pre-#1327 case)", () => {
+        expect(dockerignoreExcludes(ignoreContent, ".env")).toBe(true);
+    });
+
+    it("keeps .env.example — the documented negation, at any depth", () => {
+        expect(dockerignoreExcludes(ignoreContent, ".env.example")).toBe(false);
+        expect(
+            dockerignoreExcludes(
+                ignoreContent,
+                ".next/standalone/.env.example",
+            ),
+        ).toBe(false);
+    });
+
+    it("excludes a nested .pem key and a nested .npmrc, not just root-level ones", () => {
+        for (const nested of [
+            "config/secrets/id.pem",
+            ".next/standalone/.npmrc",
+        ]) {
+            expect(
+                dockerignoreExcludes(ignoreContent, nested),
+                `standaloneDockerignore() must exclude nested credential file "${nested}"`,
+            ).toBe(true);
+        }
+    });
+
+    it("excludes every other secret pattern (.key, .p12, .netrc, kubeconfig, .kube/) at a nested path too", () => {
+        for (const nested of [
+            "a/b/id.key",
+            "a/b/bundle.p12",
+            "a/b/.netrc",
+            "a/b/kubeconfig",
+            "a/b/.kube/config",
+        ]) {
+            expect(
+                dockerignoreExcludes(ignoreContent, nested),
+                `standaloneDockerignore() must exclude nested credential path "${nested}"`,
+            ).toBe(true);
+        }
+    });
+});

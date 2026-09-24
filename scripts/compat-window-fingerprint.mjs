@@ -329,7 +329,7 @@ function closureFrom(entryAbsPaths) {
  * table (`CREDENTIAL_CELLS`, `scripts/compat-window-audit.mjs`) rather than
  * re-declaring the mapping here, so a cell added there cannot be forgotten
  * here. An unknown lane, or a known lane with no workflow wired yet
- * (`workflowFile: null` — the webpack cells today), is a hard error: silently
+ * (`workflowFile: null` — node×vinext today), is a hard error: silently
  * falling back to SOME workflow would fingerprint bytes that did not run.
  *
  * @param {string} lane

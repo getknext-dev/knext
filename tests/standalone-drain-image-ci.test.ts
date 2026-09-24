@@ -156,6 +156,38 @@ describe('the standalone-node custom-healthCheckPath bake e2e is wired into CI (
   });
 });
 
+// #1327 — the ONLY proof that an app's own .env/.env.production never ships
+// inside the standalone runtime image is this e2e: it rides in the same job
+// (same docker + bun + @getknext/core setup) and has the same no-skip
+// contract, so it needs the same wiring guard as its siblings above.
+const ENV_NOT_IN_IMAGE_E2E_PATH =
+  'packages/kn-next/src/__tests__/standalone-env-not-in-image.docker-e2e.test.ts';
+
+describe('the .env-not-in-image e2e is wired into CI (#1327)', () => {
+  it('a `run:` in the job invokes it by its explicit path, as a blocking step', () => {
+    const runCommands = [...jobBlock().matchAll(/run:\s*([^\n]*)/g)].map((m) => m[1]).join('\n');
+    expect(runCommands, 'the job never runs the standalone-env-not-in-image docker e2e').toContain(
+      ENV_NOT_IN_IMAGE_E2E_PATH,
+    );
+    const audit = auditBlockingGate({
+      workflowPath: CI_YML,
+      jobId: 'standalone-drain-bun-image',
+      gateCommand: new RegExp(ENV_NOT_IN_IMAGE_E2E_PATH.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')),
+    });
+    expect(audit.gateStepsSeen, 'the audit never found the step that runs the e2e').toBe(1);
+    expect(audit.problems, audit.problems.join('\n')).toEqual([]);
+  });
+
+  it('the file exists, is a container e2e, and imports bun:test', () => {
+    const full = resolve(REPO_ROOT, ENV_NOT_IN_IMAGE_E2E_PATH);
+    expect(existsSync(full), `${ENV_NOT_IN_IMAGE_E2E_PATH} does not exist`).toBe(true);
+    expect(ENV_NOT_IN_IMAGE_E2E_PATH).toMatch(/\.docker-e2e\.test\.ts$/);
+    expect(readFileSync(full, 'utf8'), 'the e2e must import bun:test').toMatch(
+      /from ['"]bun:test['"]/,
+    );
+  });
+});
+
 describe('the CI path actually reaches the suite (both halves)', () => {
   it('the file the job names exists and is a container e2e', () => {
     const full = resolve(REPO_ROOT, E2E_PATH);

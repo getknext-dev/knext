@@ -1,5 +1,21 @@
 # @getknext/core
 
+## 0.4.3
+
+### Patch Changes
+
+- 445059f: The Bun executable now runs `after()` work before it exits on `SIGTERM`. The scaffolded `knext-bun-entry.mjs` did not give vinext's `after()` an execution context, so its callbacks were fire-and-forget: a scale-down right after a response logged a clean drain and exited 0 with the callback never run. Each request now runs inside the runtime contract's context, and the shutdown drain waits for that work. The drain in `runtime-contract.mjs` (shared with the Node server entry) also keeps waiting while in-flight work schedules more, so an `after()` callback that calls `after(promise)` during shutdown is no longer cut off. Existing apps pick this up by copying `knext-bun-entry.mjs` and `runtime-contract.mjs` from a freshly created app.
+- 6a94212: The compiled Bun single executable now works for apps that depend on `@opentelemetry/*` packages. vinext keeps those packages external to the server bundle, which loads them at runtime from `.output/server/node_modules`. The compiled executable has no such directory next to it, so every request failed with `Cannot find module '@opentelemetry/api'`. `kn-next build` now bundles every package the server entry loads that way into the executable. A package that cannot be resolved at build time is left as a runtime load, and the build prints a warning naming it.
+- ff1c6a8: The compiled Bun single executable now loads your server's CommonJS external packages (those in `serverExternalPackages` and Next.js's default external list) from `.output/server/node_modules` when that directory is deployed next to the executable, and a runtime `require.resolve()` finds packages there too. When the directory is absent, the copy bundled into the executable is used. Packages that need their own files at runtime, such as `typescript` or native addons such as `sqlite3`, used to fail inside the executable with `Cannot find module` or `Could not find module root`. The executable loads these packages only from that directory. `kn-next build` names the packages it loads from the directory, and warns when one ships a native addon.
+- e7f33dc: Security: the standalone runtime image no longer includes the app's `.env*` files or other secret files (`*.pem`, `*.key`, `*.p12`, `.npmrc`, `.netrc`, `kubeconfig`, `.kube/`; `.env.example` is still kept) copied by `next build` into `.next/standalone/`. Previously the generated ignore rules only excluded these at the build-context root.
+  
+  If you built images with the standalone target and kept secrets in `.env*` files, rebuild your images with this release and rotate those secrets. Supply secrets through `env` / `secrets` in `kn-next.config.ts` (Kubernetes Secrets) instead of `.env*` files.
+- deaaa5a: `healthCheckPath` in `kn-next.config.ts` is now validated: it must start with a leading slash and must not contain a comma or whitespace. This value is joined into a comma-separated list of warm-up paths at image-build time, so a missing slash or an embedded comma or space used to corrupt that list silently instead of failing at `kn-next deploy`/`preview`/`build` time.
+- 15dcdc1: New apps scaffolded by `kn-next` now pin vinext `1.0.0-beta.12` (was `1.0.0-beta.11`). The peer ranges vinext declares are unchanged, so existing apps need no other change to upgrade.
+- 3a84e65: The compiled Bun executable now sends `public, max-age=0, must-revalidate` in place of Next.js's shared-cache directives (`s-maxage=…, stale-while-revalidate=…`), matching knext's standalone server and what a deployed Next.js app returns to browsers. It turns on vinext's own deploy mode (`VINEXT_NEXT_DEPLOY_CACHE_CONTROL=1`) for the responses vinext builds, including the first request for a `fallback: true` page, and rewrites `s-maxage` headers your own code sets. Set `KNEXT_CACHE_CONTROL_NORMALIZE=0` to keep the original headers, for example when your own CDN sits in front of the app; that also leaves vinext's deploy mode off.
+- @getknext/db@0.4.3
+  - @getknext/lib@0.4.3
+
 ## 0.4.2
 
 ### Patch Changes

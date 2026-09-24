@@ -390,18 +390,35 @@ export function standaloneDockerignore(): string {
 # straight out of the context, and a targeted exclude+re-include pair for those
 # has not yet been proven against a real docker buildx build. Secrets and VCS
 # are still excluded.
+#
+# #1327: .env/.env.* MUST carry the **/ prefix, not the bare form. A bare
+# dockerignore pattern matches ONLY at the context root — it does not recurse
+# into subdirectories (the same recursion bug #1284 already fixed for
+# .vinext/.output). next build (output:'standalone') copies the app's OWN
+# .env/.env.production file straight into .next/standalone/ as part of the
+# standalone output tree, so the file this must exclude lives at
+# .next/standalone/.env.production — two directories below the context root,
+# not at the root itself. Proved end-to-end with a real
+# docker build --target standalone-node: with the bare .env.* pattern a
+# canary planted in .env.production before next build landed verbatim in the
+# shipped image at that path; with **/.env.* it does not enter the build
+# context at all, so the COPY never sees it.
 
-# Secrets and local credentials.
-.env
-.env.*
-!.env.example
-*.pem
-*.key
-*.p12
-.npmrc
-.netrc
-kubeconfig
-.kube/
+# Secrets and local credentials. Every pattern below carries the same **/
+# prefix, for the same reason: a bare pattern is root-only, and none of
+# these files are guaranteed to sit at the context root (a private key or
+# .npmrc nested under the app directory is exactly as reachable by a
+# wholesale COPY as a nested .env).
+**/.env
+**/.env.*
+!**/.env.example
+**/*.pem
+**/*.key
+**/*.p12
+**/.npmrc
+**/.netrc
+**/kubeconfig
+**/.kube/
 
 # Version control and CI.
 .git
@@ -552,13 +569,25 @@ function matchesDockerignore(pattern: string, path: string): boolean {
     // A directory pattern excludes everything under it.
     if (path.startsWith(`${pattern}/`)) return true;
     if (pattern.includes("*")) {
+        // #1327: a leading `**/` matches "at any depth, including the
+        // context root" — real BuildKit's own semantics (proved against a
+        // real `docker build`, not assumed). Without this, `**/.env` would
+        // only ever match a path with at least one directory segment above
+        // it, silently failing to cover a bare root-level `.env` — the
+        // opposite gap from the bare-pattern bug this fixes (#1284/#1327).
+        const hasDoubleStarPrefix = pattern.startsWith("**/");
+        const body = hasDoubleStarPrefix ? pattern.slice(3) : pattern;
+        const prefix = hasDoubleStarPrefix ? "(?:.*/)?" : "";
         // Segment-wise glob: `.env.*` matches `.env.local`, not `.environment`.
-        const re = new RegExp(
-            `^${pattern
-                .split("*")
-                .map((s) => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
-                .join("[^/]*")}$`,
-        );
+        const core = body
+            .split("*")
+            .map((s) => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
+            .join("[^/]*");
+        // Match the pattern itself, OR anything nested under something it
+        // matches — the same "a directory excludes its children" rule the
+        // literal-pattern branch above already applies, extended to a glob
+        // pattern (e.g. `**/.kube` must also exclude `foo/.kube/config`).
+        const re = new RegExp(`^${prefix}${core}(?:/.*)?$`);
         return re.test(path);
     }
     return false;

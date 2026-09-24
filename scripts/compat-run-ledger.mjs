@@ -102,6 +102,10 @@ export const DEFAULT_FINGERPRINT_FILE = 'fingerprint/compat-window-fingerprint.j
  * @property {string} [note]
  * @property {Array<{file:string,kind:string,timeoutMs?:number,cases?:string[]}>} [failures]
  * @property {string[]} [notRunFiles]
+ * @property {Array<{file:string,cases:string[],class:string,upstream?:string}>} [quarantined]
+ *   Present only on lanes with a quarantine ledger (#1321, the vinext lane):
+ *   failing cases reclassified after the run, persisted here so the per-night
+ *   record keeps them. Absent on every other lane, which renders unchanged.
  */
 
 /**
@@ -297,8 +301,14 @@ export function buildLedger({
   // timing (#545: the two schedules are 90 minutes apart on the same ref, so a
   // timing heuristic would launder a bun red into the node credential lane's
   // flake rate).
+  //
+  // #1245: a shard that records a non-default `builder` belongs to that
+  // builder's cell lane (`node-webpack`, `bun-webpack` — CREDENTIAL_CELLS),
+  // never to the turbopack cell sharing its runtime. Only webpack is mapped:
+  // the vinext axis runs from its own workflow and its lane wiring is #1260's.
   const reported = rows.filter((r) => r.status === 'reported');
-  const lanes = [...new Set(reported.map((s) => s.runtime))];
+  const laneOf = (s) => (s.builder === 'webpack' ? `${s.runtime}-webpack` : s.runtime);
+  const lanes = [...new Set(reported.map(laneOf))];
   const lane = lanes.length === 1 ? String(lanes[0]) : `mixed(${lanes.join('+')})`;
 
   // `complete` is the SHARD-SET verdict, and it is cleared by every structural
@@ -425,6 +435,24 @@ export function renderTable(ledger) {
       .join('<br>');
     return `| ${s.shard} | ${s.runtime}${s.runtimeVersion ? ` ${s.runtimeVersion}` : ''} | ${s.passed} | ${s.failed} | ${s.notRun} | ${s.expectedTotal ?? 'n/a'} | ${named || '—'} |`;
   });
+  // Additive (#1321): only a lane whose summaries carry `quarantined` gets this
+  // section; every other lane's table is byte-for-byte what it was.
+  const quarantined = ledger.shards.flatMap((s) =>
+    (s.quarantined ?? []).map(
+      (q) =>
+        `| ${s.shard} | ${q.file} | ${q.class} | ${q.cases.join('<br>')} | ${q.upstream ?? '—'} |`,
+    ),
+  );
+  const quarantinedSection = quarantined.length
+    ? [
+        '',
+        `quarantined (reclassified after the run, still executed): ${quarantined.length} file entr${quarantined.length === 1 ? 'y' : 'ies'}`,
+        '',
+        '| shard | file | class | cases | upstream |',
+        '|---|---|---|---|---|',
+        ...quarantined,
+      ]
+    : [];
   return [
     `### Compat per-shard ledger — lane \`${ledger.lane}\`, ref \`${ledger.ref}\``,
     '',
@@ -441,6 +469,7 @@ export function renderTable(ledger) {
     '| shard | lane | passed | failed | notRun | expected | named failures |',
     '|---|---|---|---|---|---|---|',
     ...rows,
+    ...quarantinedSection,
   ].join('\n');
 }
 
