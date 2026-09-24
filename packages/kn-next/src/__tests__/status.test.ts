@@ -128,6 +128,25 @@ function databaseBoundCr() {
     return cr;
 }
 
+/** A grandfathered spec.secrets.envMap collision (#1391): EnvMapCollision=True. */
+const ENVMAP_COLLISION_MESSAGE =
+    "spec.secrets.envMap collides with operator-managed system env — NODE_ENV: this " +
+    "NextApp predates admission validation for this collision (new/updated CRs are " +
+    "rejected) — the spec.secrets.envMap value is used INSTEAD of the operator's own " +
+    "default for these name(s); remove the envMap entry to fall back to the operator's " +
+    "default.";
+function envMapCollisionCr() {
+    const cr = healthyCr();
+    (cr.status.conditions as Record<string, unknown>[]).push({
+        type: "EnvMapCollision",
+        status: "True",
+        reason: "EnvMapReservedGrandfathered",
+        message: ENVMAP_COLLISION_MESSAGE,
+        lastTransitionTime: T_3M_AGO,
+    });
+    return cr;
+}
+
 /** Old operator: only status.url is populated — no conditions at all. */
 function sparseCr() {
     const cr = baseCr();
@@ -308,6 +327,13 @@ describe("extractStatus", () => {
         expect(m.databaseReady?.reason).toBe("Bound");
     });
 
+    it("envMap collision: reason + message surfaced (#1391)", () => {
+        const m = extractStatus(envMapCollisionCr());
+        expect(m.envMapCollision?.status).toBe("True");
+        expect(m.envMapCollision?.reason).toBe("EnvMapReservedGrandfathered");
+        expect(m.envMapCollision?.message).toBe(ENVMAP_COLLISION_MESSAGE);
+    });
+
     it("old-operator sparse status: conditions absent → undefined views", () => {
         const m = extractStatus(sparseCr());
         expect(m.url).toBe("https://web.default.example.com");
@@ -315,6 +341,7 @@ describe("extractStatus", () => {
         expect(m.degraded).toBeUndefined();
         expect(m.databaseReady).toBeUndefined();
         expect(m.reconciling).toBeUndefined();
+        expect(m.envMapCollision).toBeUndefined();
     });
 
     it("malformed non-array conditions → undefined views, never a crash", () => {
@@ -374,22 +401,40 @@ describe("renderStatusHuman", () => {
         expect(text).toContain("my-db-secret");
     });
 
-    it("label columns align on the max label width (incl. DatabaseReady)", () => {
+    it("envMap collision: True is the ALARM polarity, reason + message render (#1391)", () => {
+        const text = renderStatusHuman(extractStatus(envMapCollisionCr()), NOW);
+        expect(text).toMatch(
+            /EnvMapCollision\s+True.*EnvMapReservedGrandfathered/,
+        );
+        expect(text).toContain(ENVMAP_COLLISION_MESSAGE);
+    });
+
+    it("no envMap collision: healthy CR (no EnvMapCollision condition) renders 'not reported'", () => {
+        const text = renderStatusHuman(extractStatus(healthyCr()), NOW);
+        expect(text).toMatch(/EnvMapCollision\s+not reported/);
+    });
+
+    it("label columns align on the max label width (incl. EnvMapCollision)", () => {
         const text = renderStatusHuman(extractStatus(databaseBoundCr()), NOW);
         const lines = text.split("\n");
         const columns = new Set(
-            ["Ready", "Degraded", "Reconciling", "DatabaseReady", "Image"].map(
-                (label) => {
-                    const line = lines.find((l) =>
-                        new RegExp(`^${label}\\s`).test(l),
-                    );
-                    expect(line, label).toBeDefined();
-                    return (
-                        (line as string).slice(label.length).search(/\S/) +
-                        label.length
-                    );
-                },
-            ),
+            [
+                "Ready",
+                "Degraded",
+                "Reconciling",
+                "DatabaseReady",
+                "EnvMapCollision",
+                "Image",
+            ].map((label) => {
+                const line = lines.find((l) =>
+                    new RegExp(`^${label}\\s`).test(l),
+                );
+                expect(line, label).toBeDefined();
+                return (
+                    (line as string).slice(label.length).search(/\S/) +
+                    label.length
+                );
+            }),
         );
         expect([...columns]).toHaveLength(1);
     });
@@ -521,6 +566,15 @@ describe("--json contract", () => {
         expect(json.degraded).toBeNull();
         expect(json.databaseReady).toBeNull();
         expect(json.reconciling).toBeNull();
+        expect(json.envMapCollision).toBeNull();
+    });
+
+    it("envMap collision surfaces in JSON (#1391)", () => {
+        const json = JSON.parse(
+            statusModelToJson(extractStatus(envMapCollisionCr())),
+        );
+        expect(json.envMapCollision.status).toBe("True");
+        expect(json.envMapCollision.reason).toBe("EnvMapReservedGrandfathered");
     });
 });
 

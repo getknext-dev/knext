@@ -26,17 +26,29 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// Issue #1288: a spec.secrets.envMap entry whose name collides with an
+// Issue #1288/#1391: a spec.secrets.envMap entry whose name collides with an
 // operator-injected system env var (HOSTNAME, NODE_ENV, STORAGE_PROVIDER,
 // ...) used to be APPENDED as a SECOND env entry with the same name — never
-// dropped, never warned. Kubernetes/kubelet's duplicate-env semantics are
-// last-wins, so which value actually reached the container depended on
-// append order, an implementation detail the reconciler never surfaced.
+// resolved deterministically, never warned. Kubernetes/kubelet's
+// duplicate-env semantics are last-wins, so which value actually reached the
+// container depended on APPEND ORDER: the operator built its own entries
+// FIRST, so the later-appended envMap entry actually WON under kubelet's real
+// semantics.
 //
-// buildKsvcEnv now drops the colliding envMap entry (the operator's own
-// value always wins) and reports the dropped name so computeStatusVerdict
-// can surface it as a real, honest status condition + event — never a new
-// branch in Reconcile (architecture.md).
+// #1288 first shipped this as "the operator always wins", which review (#1391)
+// found to be a silent BREAKING change for any CR already relying on the old
+// (envMap-wins) behavior — e.g. a bound REDIS_URL Secret silently replaced by
+// an empty operator default. The fix:
+//   - Admission (validation.EnvMapReservedCollisions, wired into
+//     ValidateNextAppSpecCreate/Update) now REJECTS any NEW such collision —
+//     unratcheted on create, ratcheted (added-only) on update — so no new CR
+//     can ever reach the reconciler with one.
+//   - A CR that predates that rule (grandfathered) is resolved LOUDLY by the
+//     reconciler: for validation.OperatorAlwaysWinsEnvNames (HOSTNAME only —
+//     correctness, not just precedence, depends on it: #178/#184) the
+//     operator's value wins and the envMap entry is dropped; for every OTHER
+//     reserved name the envMap value WINS instead, preserving the value the
+//     app was actually getting pre-#1288.
 
 func envMapCollisionApp(envMap map[string]appsv1alpha1.EnvMapEntry) *appsv1alpha1.NextApp {
 	return &appsv1alpha1.NextApp{
@@ -58,88 +70,129 @@ func countNamed(vs []corev1.EnvVar, name string) int {
 	return n
 }
 
-func TestBuildKsvcEnv_EnvMapCollisionWithAlwaysInjectedSystemEnv_IsDropped(t *testing.T) {
+// TestBuildKsvcEnv_HostnameCollision_OperatorAlwaysWins proves the ONE
+// exception: HOSTNAME is dropped from envMap and the operator's own
+// HOSTNAME=0.0.0.0 always survives, even for a grandfathered CR — correctness
+// (queue-proxy routing, #178/#184), not just precedence, depends on it.
+func TestBuildKsvcEnv_HostnameCollision_OperatorAlwaysWins(t *testing.T) {
 	app := envMapCollisionApp(map[string]appsv1alpha1.EnvMapEntry{
-		// HOSTNAME and NODE_ENV are injected UNCONDITIONALLY by buildKsvcEnv.
-		"NODE_ENV":  {SecretName: "s", SecretKey: "k"},
+		"HOSTNAME":  {SecretName: "s", SecretKey: "k"},
 		"UNRELATED": {SecretName: "s", SecretKey: "k2"},
 	})
 	r := &NextAppReconciler{}
-	env, _, dropped := r.buildKsvcEnv(app)
+	env, _, report := r.buildKsvcEnv(app)
 
-	if got := countNamed(env, "NODE_ENV"); got != 1 {
-		t.Fatalf("NODE_ENV appears %d times in the rendered env, want exactly 1 (the operator's own) — "+
-			"a second entry means the envMap value was silently appended alongside it, the #1288 bug", got)
+	if got := countNamed(env, "HOSTNAME"); got != 1 {
+		t.Fatalf("HOSTNAME appears %d times in the rendered env, want exactly 1 (the operator's own)", got)
 	}
-	// The surviving NODE_ENV entry must be the operator's plain Value, NOT
-	// a SecretKeyRef from the dropped envMap entry — the operator's own
-	// value must win, not merely be present alongside it.
 	for _, e := range env {
-		if e.Name == "NODE_ENV" {
+		if e.Name == "HOSTNAME" {
 			if e.ValueFrom != nil {
-				t.Fatalf("NODE_ENV is a SecretKeyRef (the dropped envMap entry survived instead of the operator's own plain value): %+v", e)
+				t.Fatalf("HOSTNAME is a SecretKeyRef (the dropped envMap entry survived instead of the operator's own plain value): %+v", e)
 			}
-			if e.Value != "production" {
-				t.Fatalf("NODE_ENV = %q, want the operator's own %q", e.Value, "production")
+			if e.Value != "0.0.0.0" {
+				t.Fatalf("HOSTNAME = %q, want the operator's own %q", e.Value, "0.0.0.0")
 			}
 		}
 	}
-	if len(dropped) != 1 || dropped[0] != "NODE_ENV" {
-		t.Fatalf("dropped envMap names: got %v, want [NODE_ENV]", dropped)
+	if len(report.operatorWins) != 1 || report.operatorWins[0] != "HOSTNAME" {
+		t.Fatalf("report.operatorWins: got %v, want [HOSTNAME]", report.operatorWins)
+	}
+	if len(report.userWins) != 0 {
+		t.Fatalf("report.userWins: got %v, want none", report.userWins)
 	}
 	if got := countNamed(env, "UNRELATED"); got != 1 {
 		t.Fatalf("UNRELATED (no collision) appears %d times, want exactly 1 — it must still be wired", got)
 	}
 }
 
-func TestBuildKsvcEnv_EnvMapCollisionWithConditionalSystemEnv_IsDropped(t *testing.T) {
+// TestBuildKsvcEnv_UnconditionalReservedNameCollision_UserWins proves NODE_ENV
+// — reserved but NOT in OperatorAlwaysWinsEnvNames — resolves with the
+// envMap's Secret-backed value REPLACING the operator's plain entry, matching
+// the pre-#1288 kubelet last-wins outcome for a grandfathered CR.
+func TestBuildKsvcEnv_UnconditionalReservedNameCollision_UserWins(t *testing.T) {
 	app := envMapCollisionApp(map[string]appsv1alpha1.EnvMapEntry{
-		// STORAGE_PROVIDER is injected only when spec.storage is configured —
-		// proves the collision guard checks the ACTUAL rendered env, not a
-		// static list, so a conditional operator var is caught too.
+		"NODE_ENV":  {SecretName: "s", SecretKey: "k"},
+		"UNRELATED": {SecretName: "s", SecretKey: "k2"},
+	})
+	r := &NextAppReconciler{}
+	env, _, report := r.buildKsvcEnv(app)
+
+	if got := countNamed(env, "NODE_ENV"); got != 1 {
+		t.Fatalf("NODE_ENV appears %d times in the rendered env, want exactly 1 — a second entry means "+
+			"the collision resolution left a duplicate instead of replacing in place", got)
+	}
+	for _, e := range env {
+		if e.Name == "NODE_ENV" {
+			if e.ValueFrom == nil {
+				t.Fatalf("NODE_ENV has no ValueFrom (the operator's own plain value survived instead of the envMap Secret ref): %+v", e)
+			}
+			if e.ValueFrom.SecretKeyRef.Name != "s" || e.ValueFrom.SecretKeyRef.Key != "k" {
+				t.Fatalf("NODE_ENV ValueFrom = %+v, want SecretKeyRef{s, k}", e.ValueFrom)
+			}
+		}
+	}
+	if len(report.userWins) != 1 || report.userWins[0] != "NODE_ENV" {
+		t.Fatalf("report.userWins: got %v, want [NODE_ENV]", report.userWins)
+	}
+	if len(report.operatorWins) != 0 {
+		t.Fatalf("report.operatorWins: got %v, want none", report.operatorWins)
+	}
+	if got := countNamed(env, "UNRELATED"); got != 1 {
+		t.Fatalf("UNRELATED (no collision) appears %d times, want exactly 1 — it must still be wired", got)
+	}
+}
+
+// TestBuildKsvcEnv_ConditionalReservedNameCollision_UserWins proves the
+// collision guard checks the ACTUAL rendered env (conditional on spec.storage
+// being set), not a static list, AND that a conditional reserved name also
+// resolves user-wins (it is not HOSTNAME).
+func TestBuildKsvcEnv_ConditionalReservedNameCollision_UserWins(t *testing.T) {
+	app := envMapCollisionApp(map[string]appsv1alpha1.EnvMapEntry{
 		"STORAGE_PROVIDER": {SecretName: "s", SecretKey: "k"},
 	})
 	app.Spec.Storage = &appsv1alpha1.StorageSpec{Provider: "s3", Bucket: "b"}
 	r := &NextAppReconciler{}
-	env, _, dropped := r.buildKsvcEnv(app)
+	env, _, report := r.buildKsvcEnv(app)
 
 	if got := countNamed(env, "STORAGE_PROVIDER"); got != 1 {
 		t.Fatalf("STORAGE_PROVIDER appears %d times, want exactly 1", got)
 	}
 	for _, e := range env {
-		if e.Name == "STORAGE_PROVIDER" && e.Value != "s3" {
-			t.Fatalf("STORAGE_PROVIDER = %q, want the operator's own %q", e.Value, "s3")
+		if e.Name == "STORAGE_PROVIDER" && e.ValueFrom == nil {
+			t.Fatalf("STORAGE_PROVIDER = %+v, want the envMap Secret ref (user-wins), not the operator's plain value", e)
 		}
 	}
-	if len(dropped) != 1 || dropped[0] != "STORAGE_PROVIDER" {
-		t.Fatalf("dropped envMap names: got %v, want [STORAGE_PROVIDER]", dropped)
+	if len(report.userWins) != 1 || report.userWins[0] != "STORAGE_PROVIDER" {
+		t.Fatalf("report.userWins: got %v, want [STORAGE_PROVIDER]", report.userWins)
 	}
 }
 
-func TestBuildKsvcEnv_NoCollision_NothingDropped(t *testing.T) {
+func TestBuildKsvcEnv_NoCollision_ReportEmpty(t *testing.T) {
 	app := envMapCollisionApp(map[string]appsv1alpha1.EnvMapEntry{
 		"API_TOKEN": {SecretName: "s", SecretKey: "k"},
 	})
 	r := &NextAppReconciler{}
-	_, _, dropped := r.buildKsvcEnv(app)
-	if len(dropped) != 0 {
-		t.Fatalf("dropped envMap names: got %v, want none", dropped)
+	_, _, report := r.buildKsvcEnv(app)
+	if !report.empty() {
+		t.Fatalf("report: got %+v, want empty", report)
 	}
 }
 
-func TestComputeStatusVerdict_EnvMapCollision_ConditionAndEvent(t *testing.T) {
+func TestComputeStatusVerdict_EnvMapCollision_OperatorWins_ConditionAndEvent(t *testing.T) {
 	now := time.Now()
 	app := verdictApp()
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, []string{"NODE_ENV"}, now)
+		revisionCheck{}, imageCacheState{}, netpolEnforcementState{},
+		envMapCollisionReport{operatorWins: []string{"HOSTNAME"}}, now)
 
 	c := findVerdictCondition(t, v, ConditionEnvMapCollision)
 	if c.Status != metav1.ConditionTrue || c.Reason != ReasonEnvVarIgnored {
 		t.Fatalf("EnvMapCollision: got %+v, want True/%s", c, ReasonEnvVarIgnored)
 	}
-	if !strings.Contains(c.Message, "NODE_ENV") {
-		t.Fatalf("EnvMapCollision message %q does not name the dropped var", c.Message)
+	if !strings.Contains(c.Message, "HOSTNAME") {
+		t.Fatalf("EnvMapCollision message %q does not name the collision", c.Message)
 	}
 	found := false
 	for _, e := range v.events {
@@ -152,12 +205,41 @@ func TestComputeStatusVerdict_EnvMapCollision_ConditionAndEvent(t *testing.T) {
 	}
 }
 
+func TestComputeStatusVerdict_EnvMapCollision_UserWins_ConditionAndEvent(t *testing.T) {
+	now := time.Now()
+	app := verdictApp()
+
+	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{}, netpolEnforcementState{},
+		envMapCollisionReport{userWins: []string{"NODE_ENV"}}, now)
+
+	c := findVerdictCondition(t, v, ConditionEnvMapCollision)
+	if c.Status != metav1.ConditionTrue || c.Reason != ReasonEnvMapReservedGrandfathered {
+		t.Fatalf("EnvMapCollision: got %+v, want True/%s", c, ReasonEnvMapReservedGrandfathered)
+	}
+	if !strings.Contains(c.Message, "NODE_ENV") {
+		t.Fatalf("EnvMapCollision message %q does not name the collision", c.Message)
+	}
+	if !strings.Contains(c.Message, "predates admission validation") {
+		t.Fatalf("EnvMapCollision message %q does not explain the grandfathering, want a mention of admission validation", c.Message)
+	}
+	found := false
+	for _, e := range v.events {
+		if e.reason == ReasonEnvMapReservedGrandfathered && e.eventType == corev1.EventTypeWarning {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no Warning/%s event emitted: got %+v", ReasonEnvMapReservedGrandfathered, v.events)
+	}
+}
+
 func TestComputeStatusVerdict_NoEnvMapCollision_ConditionFalse(t *testing.T) {
 	now := time.Now()
 	app := verdictApp()
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, nil, now)
+		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, envMapCollisionReport{}, now)
 
 	c := findVerdictCondition(t, v, ConditionEnvMapCollision)
 	if c.Status != metav1.ConditionFalse {
@@ -169,7 +251,7 @@ func TestComputeStatusVerdict_NoEnvMapCollision_ConditionFalse(t *testing.T) {
 }
 
 // TestComputeStatusVerdict_EnvMapCollision_TransitionGated proves the event
-// fires only when the dropped set CHANGES (the #98 no-op contract) — not on
+// fires only when the collision set CHANGES (the #98 no-op contract) — not on
 // every converged reconcile of an unchanged collision.
 func TestComputeStatusVerdict_EnvMapCollision_TransitionGated(t *testing.T) {
 	now := time.Now()
@@ -177,14 +259,17 @@ func TestComputeStatusVerdict_EnvMapCollision_TransitionGated(t *testing.T) {
 	app.Status.Conditions = []metav1.Condition{{
 		Type:   ConditionEnvMapCollision,
 		Status: metav1.ConditionTrue,
-		Reason: ReasonEnvVarIgnored,
-		Message: "spec.secrets.envMap defines the following name(s), already managed by " +
-			"operator-injected system env (which always wins): NODE_ENV. Ignored — no action " +
-			"needed unless the operator's own value is not what you intended.",
+		Reason: ReasonEnvMapReservedGrandfathered,
+		Message: "spec.secrets.envMap collides with operator-managed system env — NODE_ENV: this " +
+			"NextApp predates admission validation for this collision (new/updated CRs are " +
+			"rejected) — the spec.secrets.envMap value is used INSTEAD of the operator's own " +
+			"default for these name(s); remove the envMap entry to fall back to the operator's " +
+			"default.",
 	}}
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, []string{"NODE_ENV"}, now)
+		revisionCheck{}, imageCacheState{}, netpolEnforcementState{},
+		envMapCollisionReport{userWins: []string{"NODE_ENV"}}, now)
 
 	if len(v.events) != 0 {
 		t.Fatalf("events: got %+v, want none — the collision set is UNCHANGED from the prior reconcile", v.events)

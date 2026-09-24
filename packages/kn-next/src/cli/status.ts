@@ -143,6 +143,7 @@ export interface StatusModel {
     degraded?: ConditionView;
     databaseReady?: ConditionView;
     reconciling?: ConditionView;
+    envMapCollision?: ConditionView;
     database: { mode: DatabaseMode; secretName?: string };
 }
 
@@ -207,6 +208,7 @@ export function extractStatus(cr: unknown): StatusModel {
         degraded: byType("Degraded"),
         databaseReady: byType("DatabaseReady"),
         reconciling: byType("Reconciling"),
+        envMapCollision: byType("EnvMapCollision"),
         database: {
             mode,
             secretName:
@@ -241,6 +243,7 @@ const LABELS = [
     "Reconciling",
     "Database",
     "DatabaseReady",
+    "EnvMapCollision",
     "Image",
 ] as const;
 const LABEL_WIDTH = Math.max(...LABELS.map((l) => l.length));
@@ -294,6 +297,9 @@ export function renderStatusHuman(model: StatusModel, now: Date): string {
     lines.push(conditionLine("Ready", model.ready, now, "False"));
     lines.push(conditionLine("Degraded", model.degraded, now, "True"));
     lines.push(conditionLine("Reconciling", model.reconciling, now, "True"));
+    lines.push(
+        conditionLine("EnvMapCollision", model.envMapCollision, now, "True"),
+    );
     const dbLabel =
         model.database.mode === "none"
             ? "none"
@@ -320,6 +326,7 @@ export function statusModelToJson(model: StatusModel): string {
             degraded: model.degraded ?? null,
             databaseReady: model.databaseReady ?? null,
             reconciling: model.reconciling ?? null,
+            envMapCollision: model.envMapCollision ?? null,
             database: {
                 mode: model.database.mode,
                 ...(model.database.secretName !== undefined

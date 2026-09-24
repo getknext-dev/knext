@@ -255,14 +255,33 @@ ignored `envMap` entry.
 
 An `envMap` name can also collide with a **platform-managed system variable**
 (e.g. `HOSTNAME`, `NODE_ENV`, or a conditionally-injected one like
-`STORAGE_PROVIDER` when `spec.storage` is set). The platform's own value
-always wins — the colliding `envMap` entry is ignored, never appended
-alongside it. This is surfaced two ways: a Warning event
-(`kubectl describe nextapp <name>`) and an `EnvMapCollision` status condition
-naming every ignored entry (`True` while a collision exists, `False`
-otherwise) — check either with `kubectl get nextapp <name> -o
-jsonpath='{.status.conditions[?(@.type=="EnvMapCollision")]}'`. Every
+`STORAGE_PROVIDER` when `spec.storage` is set). The validating webhook
+**rejects** this on create, and on any update that introduces the conflict —
+same no-silent-precedence rule as the `spec.database` case above. Every
 non-colliding env var is fair game.
+
+CRs that already carried the conflict before this rule are grandfathered
+(ratcheted): they keep reconciling, and the resolution depends on which name
+collided:
+
+- **`HOSTNAME` always loses to the platform's own value.** Request routing
+  depends on the platform's `HOSTNAME=0.0.0.0`, so this is the one name where
+  the platform's value wins even for a grandfathered CR — the `envMap` entry
+  is ignored.
+- **Every other name — your `envMap` value wins.** This preserves the value
+  the app was actually receiving before this rule existed (Kubernetes'
+  duplicate-env resolution used to favor the later-appended `envMap` entry),
+  so upgrading the platform does not silently swap a working value (e.g. a
+  bound `REDIS_URL` Secret) for the platform's own default.
+
+Either outcome is surfaced two ways: a Warning event
+(`kubectl describe nextapp <name>`) and an `EnvMapCollision` status condition
+naming the affected entries and which side won (`True` while a collision
+exists, `False` otherwise) — check either with `kubectl get nextapp <name> -o
+jsonpath='{.status.conditions[?(@.type=="EnvMapCollision")]}'`. To resolve a
+grandfathered collision (and stop the condition/event), remove the `envMap`
+entry — the app then falls back to the platform's own default (or, for
+`HOSTNAME`, already was).
 
 ### `database` (Optional)
 Binds the app's Postgres. The only mode is **binding** (`secretRef`): bring

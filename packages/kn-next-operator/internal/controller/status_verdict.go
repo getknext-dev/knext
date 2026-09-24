@@ -145,7 +145,7 @@ func computeStatusVerdict(
 	rev revisionCheck,
 	ic imageCacheState,
 	np netpolEnforcementState,
-	droppedEnvMapNames []string,
+	envMapCollision envMapCollisionReport,
 	now time.Time,
 ) statusVerdict {
 	var v statusVerdict
@@ -364,32 +364,51 @@ func computeStatusVerdict(
 		})
 	}
 
-	// EnvMapCollision (#1288): non-fatal surface of spec.secrets.envMap
-	// entries buildKsvcEnv DROPPED because their name collides with an
-	// operator-injected system env var. Before this, the collision was
+	// EnvMapCollision (#1288/#1391): non-fatal surface of a GRANDFATHERED
+	// spec.secrets.envMap entry colliding with an operator-injected system
+	// env var — admission rejects any NEW such collision, so reaching here
+	// means the CR predates that rule. Before #1288 the collision was
 	// resolved by kubelet's last-wins duplicate-env semantics with NO signal
 	// anywhere that it happened — a Ready=True app silently running on
-	// whichever value append-order happened to put last. droppedEnvMapNames
-	// is already sorted (buildKsvcEnv iterates envMap in sorted key order).
-	if len(droppedEnvMapNames) > 0 {
+	// whichever value append-order happened to put last. Both lists in
+	// envMapCollision are already sorted (buildKsvcEnv iterates envMap in
+	// sorted key order).
+	if !envMapCollision.empty() {
+		var parts []string
+		reason := ReasonEnvVarIgnored
+		if len(envMapCollision.operatorWins) > 0 {
+			parts = append(parts, fmt.Sprintf(
+				"%s: always managed by the operator, envMap ignored (no action needed unless "+
+					"the operator's own value is not what you intended)",
+				strings.Join(envMapCollision.operatorWins, ", "),
+			))
+		}
+		if len(envMapCollision.userWins) > 0 {
+			parts = append(parts, fmt.Sprintf(
+				"%s: this NextApp predates admission validation for this collision (new/updated "+
+					"CRs are rejected) — the spec.secrets.envMap value is used INSTEAD of the "+
+					"operator's own default for these name(s); remove the envMap entry to fall back "+
+					"to the operator's default",
+				strings.Join(envMapCollision.userWins, ", "),
+			))
+			reason = ReasonEnvMapReservedGrandfathered
+		}
 		message := fmt.Sprintf(
-			"spec.secrets.envMap defines the following name(s), already managed by "+
-				"operator-injected system env (which always wins): %s. Ignored — no action "+
-				"needed unless the operator's own value is not what you intended.",
-			strings.Join(droppedEnvMapNames, ", "),
+			"spec.secrets.envMap collides with operator-managed system env — %s.",
+			strings.Join(parts, "; "),
 		)
 		v.conditions = append(v.conditions, metav1.Condition{
 			Type:               ConditionEnvMapCollision,
 			Status:             metav1.ConditionTrue,
 			ObservedGeneration: app.Generation,
-			Reason:             ReasonEnvVarIgnored,
+			Reason:             reason,
 			Message:            message,
 		})
 		// Transition-gated (the #98 no-op contract): fire only when the
-		// dropped set actually CHANGES, never on every converged reconcile.
+		// collision set actually CHANGES, never on every converged reconcile.
 		prev := apimeta.FindStatusCondition(app.Status.Conditions, ConditionEnvMapCollision)
 		if prev == nil || prev.Message != message {
-			v.events = append(v.events, verdictEvent{corev1.EventTypeWarning, ReasonEnvVarIgnored, message})
+			v.events = append(v.events, verdictEvent{corev1.EventTypeWarning, reason, message})
 		}
 	} else {
 		v.conditions = append(v.conditions, metav1.Condition{

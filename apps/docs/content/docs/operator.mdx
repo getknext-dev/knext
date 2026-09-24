@@ -103,6 +103,16 @@ database), or a managed/serverless provider with a scale-to-zero gateway. Swappi
 Secret change, zero app or CR schema change. knext binds the Secret; it does not create it or
 provision the database.
 
+An `envMap` name can also collide with a **platform-managed system variable** — `HOSTNAME`,
+`NODE_ENV`, or a conditionally-injected one like `STORAGE_PROVIDER` when `spec.storage` is set.
+Applying the resource **rejects** this collision (same no-silent-precedence rule as the
+`DATABASE_URL` case below), so a new or updated CR can never carry one. A CR that already had the
+collision before this rule existed keeps reconciling (grandfathered): for `HOSTNAME` the
+platform's own value always wins (request routing depends on it), but for every other name your
+`envMap` value wins instead, preserving what the app was already receiving. Either way it is
+surfaced by a Warning event and the `EnvMapCollision` condition — remove the `envMap` entry to
+resolve it.
+
 ### Databases: `spec.database`
 
 knext is **engine-agnostic** — it does **not** provision or manage a database. `spec.database` is
@@ -137,7 +147,7 @@ URLs. `spec.env` values are stored verbatim in the CR and visible to anyone who 
 | Field | Notes |
 |---|---|
 | `url` | The resolved Knative Service URL. |
-| `conditions` | `Ready`, `Degraded`, `Reconciling`, `DatabaseReady` — see below. |
+| `conditions` | `Ready`, `Degraded`, `Reconciling`, `DatabaseReady`, `EnvMapCollision` — see below. |
 | `currentTraffic` | Mirror of the ksvc traffic split. |
 
 The operator reports **honest readiness**: `Ready` mirrors the underlying Knative Service's own
