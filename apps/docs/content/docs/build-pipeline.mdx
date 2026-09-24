@@ -194,6 +194,38 @@ cannot be bundled: <package> — the binary throws if that code path runs
 Install the named package as a dependency of your app and rebuild. Otherwise, any request that
 reaches code using that package fails with `Cannot find module '<package>'`.
 
+The same applies to packages you list in `serverExternalPackages` and to the packages Next.js keeps
+external by default (for example `typescript`, `sqlite3`, `prisma`). The binary carries a bundled
+copy of each one. When `.output/server/node_modules` is deployed **next to the executable**, the
+binary loads the CommonJS ones from there instead, just as `next start` would, and a runtime
+`require.resolve()` for a package finds it there too. That matters for packages that need their own
+files at runtime: a package that looks up files next to itself (as `typescript` does for its
+`lib.*.d.ts` files), or one with a native addon. The build names these packages:
+
+```text
+[knext compile] 1 server external(s) load from …/.output/server/node_modules when it is beside
+the binary, else from the bundle: typescript
+[knext compile] 1 ES-module server external(s) stay bundled (their own imports cannot reach the
+sidecar): twoslash
+```
+
+The executable loads these packages **only** from the `.output/server/node_modules` directory next
+to it.
+
+A package with a native addon (a compiled `.node` file, such as `sqlite3`) can **only** load from
+that directory, and the build warns about it:
+
+```text
+[knext compile] WARNING: sqlite3 ship(s) a native addon, which cannot load from inside the binary.
+The binary loads it from .output/server/node_modules, so that directory must be deployed next to
+the binary (built for the target platform).
+```
+
+The generated Dockerfile does not copy `.output/server/node_modules` yet. If your app depends on a
+native addon, copy that directory into the image next to the binary (as `/app/.output/server/node_modules`),
+and build it on the platform the image runs on, because a native addon only loads on the operating
+system and CPU it was compiled for.
+
 ## Requirements
 
 ### Your app must be an ES module
