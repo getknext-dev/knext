@@ -23,8 +23,23 @@ on:
   # docs-closure nightly (04:23) and the mutation-prover nightly.
   schedule:
     - cron: '10 5 * * *'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      # Review round 2 (#1300, finding 4) — a manual dispatch is the live
+      # acceptance path (create → pin → comment on run 1, comment-on-the-
+      # same-issue on run 2), so this input exists to make that intent
+      # explicit in the run log/UI rather than an unlabelled manual trigger.
+      # It has no effect on the logic below — every dispatch runs the SAME
+      # real create-or-update-and-pin flow the schedule runs, never a fake.
+      dispatch_reason:
+        description: 'Why this is being run manually (e.g. "acceptance check for #1300")'
+        required: false
+        type: string
+        default: 'manual verification run'
 
+# Top-level `permissions:` is OVERRIDDEN, not merged, by a job-level block
+# (review round 2 finding 3) — declared here for clarity but the job below
+# restates every scope it needs rather than relying on inheritance.
 permissions:
   contents: read
 
@@ -33,7 +48,18 @@ jobs:
     name: Refresh the pinned v1.0 credential matrix tracker
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Finding 3: a job-level `permissions:` block REPLACES the top-level one
+    # wholesale — it does not merge. The original `{issues: write}` silently
+    # dropped `contents: read` (checkout still worked off ambient defaults on
+    # public repos, but is not something to rely on) and, more seriously,
+    # `actions: read`, which `gh run list`/`gh run download` (inside
+    # compat-window-audit.mjs's `--fetch`) need to read OTHER workflows' runs
+    # and artifacts. Missing it doesn't error loudly — every night just reads
+    # back empty/unresolved, which `looksLikeFetchFailure` in
+    # compat-matrix-tracker.mjs now catches and fails the job on.
     permissions:
+      contents: read
+      actions: read
       issues: write
     steps:
       - name: Checkout code

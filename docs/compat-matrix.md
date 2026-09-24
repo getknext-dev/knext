@@ -95,7 +95,19 @@ gate, not the official suite — the official suite has its own row, own workflo
   pinned; the ONE pinned issue is the aggregate **"Compat v1.0 credential matrix tracker"**,
   refreshed daily (`compat-matrix-tracker-nightly.yml`, `scripts/compat-matrix-tracker.mjs`)
   regardless of whether last night was red, listing every cell's current streak length and, if it
-  most recently restarted, why.
+  most recently restarted, why. **The tracker actively defends its own pin slot**: before pinning
+  it unpins any CLOSED issue already holding one of GitHub's 3 slots (never an OPEN one — that
+  could be someone else's legitimate pin), then FAILS THE JOB if it still can't get pinned, rather
+  than the silent warn-and-continue an earlier round shipped. It also refuses to publish a matrix
+  that looks like a fetch failure (every wired cell reading 0 nights / all-unresolved) rather than
+  a real credential-program state — that shape is far more likely a permissions regression on the
+  tracker job itself (`actions: read` missing) than every lane's window actually collapsing.
+  **Recovery is symmetric with alerting**: a fully green scheduled credential night closes that
+  lane's own open `credential-reset` issue with a "recovered" comment, so a false positive doesn't
+  sit open forever. A `simulate_red` `workflow_dispatch` input on `test-e2e-deploy.yml` proves the
+  alert mechanics (label + create, never pin) live, against a real, clearly `[alert-test]`-prefixed
+  issue that closes itself in the same run — never a fake/dry-run code path, and never runs on a
+  schedule.
 - **A credential night requires bytecode caching proven LIVE, in every cell.** Bytecode caching is
   mandatory in every supported runtime×builder cell. A night counts toward a cell's 14-night window
   only if **every shard** proves that **every deploy** had live caching at runtime. Being configured

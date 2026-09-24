@@ -81,6 +81,15 @@ describe('#1300: per-cell credential alert (test-e2e-deploy.yml)', () => {
     expect(body).toContain('**Restart cause:**');
   });
 
+  it('review finding 5: distinguishes a bytecode-liveness shard failure from a generic one by the ledger being empty', () => {
+    // A shard can fail with zero named test failures (the boot-mode-ledger
+    // step fails the JOB directly, independent of test results) — the
+    // restart cause must not claim "see the named failures below" when there
+    // are none, or the reader goes looking for something that isn't there.
+    expect(body).toContain('bytecode-caching-liveness');
+    expect(body).toMatch(/RED_SHARD_DETAIL.*tr -d/);
+  });
+
   it('does NOT pin the per-cell issue (the thing that lost visibility past the 3-pin cap)', () => {
     expect(stripComments(body)).not.toMatch(/gh issue pin/);
   });
@@ -127,6 +136,21 @@ describe('#1300: pinned matrix tracker workflow', () => {
     expect(jobPerms.some((p) => p?.issues === 'write')).toBe(true);
   });
 
+  it('review finding 3: the EFFECTIVE (job-level) permissions carry actions+contents, not just the top-level block', () => {
+    // A job-level `permissions:` block REPLACES the top-level one wholesale in
+    // GitHub Actions — it does not merge. Asserting only the top-level block
+    // (as the round-1 test did) would stay green even if the job silently
+    // dropped `actions: read`/`contents: read`, exactly the regression that
+    // starved `gh run list`/`gh run download` inside `--fetch` and produced an
+    // all-unresolved matrix. So this checks the JOB's own permissions map,
+    // which is what actually governs the token the step runs with.
+    const jobs = parsed.jobs as Record<string, { permissions?: Record<string, string> }>;
+    const jobWithIssuesWrite = Object.values(jobs).find((j) => j.permissions?.issues === 'write');
+    expect(jobWithIssuesWrite).toBeTruthy();
+    expect(jobWithIssuesWrite?.permissions?.actions).toBe('read');
+    expect(jobWithIssuesWrite?.permissions?.contents).toBe('read');
+  });
+
   it('delegates issue create/comment/pin to compat-matrix-tracker.mjs, not inline gh calls', () => {
     // The workflow itself never shells `gh issue`/`gh label` directly — that
     // logic lives in the one script below, so it is unit-testable without a
@@ -139,16 +163,180 @@ describe('#1300: pinned matrix tracker workflow', () => {
 describe('#1300: compat-matrix-tracker.mjs owns pinning, on both its branches', () => {
   const scriptText = readFileSync(resolve(REPO_ROOT, 'scripts/compat-matrix-tracker.mjs'), 'utf8');
 
-  it('pins on the create-new-issue branch', () => {
-    const createBranch = scriptText.slice(scriptText.indexOf('creating the tracker issue'));
-    expect(createBranch).toMatch(/gh\(\[\s*'issue',\s*\n?\s*'pin'/);
+  it('main() calls ensurePinned UNCONDITIONALLY, after the create/update branches join back up', () => {
+    // Review round 2: pinning moved OUT of each branch and into one shared
+    // `ensurePinned` call reached by both — the tests below prove the branches
+    // join back up on `issueNumber` before that one call, rather than each
+    // branch having (and being able to drift on) its own pin logic.
+    const main = scriptText.slice(scriptText.indexOf('function main('));
+    const ensurePinnedCalls = main.match(/ensurePinned\(/g) ?? [];
+    expect(ensurePinnedCalls.length).toBe(1);
   });
 
-  it('re-asserts the pin on the update-existing-issue branch (a human could have unpinned it)', () => {
+  it('the create branch sets `issueNumber` (not a bare local used only inside the branch)', () => {
+    const createBranch = scriptText.slice(scriptText.indexOf('creating the tracker issue'));
+    expect(createBranch).toMatch(/issueNumber\s*=\s*Number\(/);
+  });
+
+  it('the update branch reuses the EXISTING issue number, not a fresh lookup per branch', () => {
     const updateBranch = scriptText.slice(
       scriptText.indexOf('updating existing tracker issue'),
       scriptText.indexOf('creating the tracker issue'),
     );
-    expect(updateBranch).toMatch(/gh\(\[\s*'issue',\s*\n?\s*'pin'/);
+    expect(updateBranch).toContain('existing');
+  });
+
+  it('ensurePinned itself never warns-and-continues on a failed pin — it throws (review finding 1)', () => {
+    const fn = scriptText.slice(
+      scriptText.indexOf('export function ensurePinned'),
+      scriptText.indexOf('// ── CLI'),
+    );
+    expect(fn).not.toMatch(/catch\s*\(/);
+    expect(fn).toMatch(/throw new Error/);
+  });
+
+  it('ensurePinned only unpins CLOSED issues, never OPEN ones (review finding 1)', () => {
+    const fn = scriptText.slice(
+      scriptText.indexOf('export function ensurePinned'),
+      scriptText.indexOf('export function ensurePinned') + 2000,
+    );
+    expect(fn).toContain("'CLOSED'");
+    expect(fn).not.toMatch(/'OPEN'\s*\)\s*{[^}]*unpin/s);
+  });
+});
+
+describe('#1300: compat-matrix-tracker.mjs refuses to publish a fetch-failure matrix (review finding 3)', () => {
+  const scriptText = readFileSync(resolve(REPO_ROOT, 'scripts/compat-matrix-tracker.mjs'), 'utf8');
+
+  it('main() checks looksLikeFetchFailure BEFORE any gh issue/label call', () => {
+    const main = scriptText.slice(scriptText.indexOf('function main('));
+    const checkIdx = main.indexOf('looksLikeFetchFailure(');
+    const firstGhCallIdx = main.indexOf("gh([\n    'label'");
+    expect(checkIdx).toBeGreaterThan(-1);
+    expect(firstGhCallIdx).toBeGreaterThan(-1);
+    expect(checkIdx).toBeLessThan(firstGhCallIdx);
+  });
+
+  it('exits non-zero (never continues) when the fetch-failure check trips', () => {
+    const main = scriptText.slice(scriptText.indexOf('function main('));
+    const checkBlock = main.slice(
+      main.indexOf('looksLikeFetchFailure('),
+      main.indexOf('looksLikeFetchFailure(') + 400,
+    );
+    expect(checkBlock).toMatch(/process\.exit\(1\)/);
+  });
+});
+
+describe('#1300: tracker workflow — manual dispatch input (review finding 4)', () => {
+  const trackerText = readFileSync(TRACKER_WORKFLOW_PATH, 'utf8');
+  const trackerParsed = parse(trackerText) as Record<string, unknown>;
+
+  it('exposes a workflow_dispatch input documenting a manual/acceptance run', () => {
+    const on = trackerParsed.on as Record<string, unknown>;
+    const dispatch = on.workflow_dispatch as { inputs?: Record<string, unknown> } | undefined;
+    expect(dispatch?.inputs).toBeTruthy();
+    expect(Object.keys(dispatch?.inputs ?? {}).length).toBeGreaterThan(0);
+  });
+
+  it('a manual dispatch runs the SAME real create/pin/comment flow — never a faked/dry path', () => {
+    // The input is documentation-only: nothing in the workflow branches
+    // dispatch-vs-schedule before calling compat-matrix-tracker.mjs, so this
+    // proves there is no separate "fake" code path a dispatch could exercise
+    // instead of the real one.
+    expect(trackerText).not.toMatch(/if:\s*.*github\.event_name\s*==\s*'workflow_dispatch'/);
+  });
+});
+
+describe('#1300 review round 2, finding 4: alert-test-dispatch (dispatch-only simulation)', () => {
+  const alertText = readFileSync(ALERT_WORKFLOW_PATH, 'utf8');
+  const alertParsed = parse(alertText) as {
+    on: { workflow_dispatch?: { inputs?: Record<string, unknown> } };
+    jobs: Record<string, { if?: string; needs?: string | string[]; name?: string }>;
+  };
+
+  it('exposes a simulate_red workflow_dispatch input, default false', () => {
+    const input = alertParsed.on.workflow_dispatch?.inputs?.simulate_red as
+      | { default?: boolean }
+      | undefined;
+    expect(input).toBeTruthy();
+    expect(input?.default).toBe(false);
+  });
+
+  it('the job only fires on workflow_dispatch WITH simulate_red — never on a schedule', () => {
+    const job = alertParsed.jobs['alert-test-dispatch'];
+    expect(job).toBeTruthy();
+    expect(job.if).toContain("github.event_name == 'workflow_dispatch'");
+    expect(job.if).toContain('simulate_red');
+    expect(job.if).not.toContain("github.event_name == 'schedule'");
+  });
+
+  it('is transitively gated on the lane-attribution marker job (credential-ref), like every other job', () => {
+    const job = alertParsed.jobs['alert-test-dispatch'];
+    const needs = Array.isArray(job.needs) ? job.needs : job.needs ? [job.needs] : [];
+    expect(needs).toContain('credential-ref');
+  });
+
+  it('the test issue title is unambiguously prefixed [alert-test]', () => {
+    const jobText = alertText.slice(alertText.indexOf('alert-test-dispatch:\n'));
+    expect(jobText).toContain('title="[alert-test]');
+  });
+
+  it('closes the issue it creates, in the SAME job (never leaves a lingering test issue)', () => {
+    const jobText = alertText.slice(
+      alertText.indexOf('alert-test-dispatch:\n'),
+      alertText.indexOf('credential-recovery:\n'),
+    );
+    expect(jobText).toContain('gh issue create');
+    expect(jobText).toContain('gh issue close');
+  });
+
+  it('uses the real credential-reset label (proves the SAME label path the real alert uses)', () => {
+    const jobText = alertText.slice(
+      alertText.indexOf('alert-test-dispatch:\n'),
+      alertText.indexOf('credential-recovery:\n'),
+    );
+    expect(jobText).toContain('gh label create "credential-reset"');
+  });
+});
+
+describe('#1300 review round 2, finding 5: credential-recovery (close on green)', () => {
+  const alertText = readFileSync(ALERT_WORKFLOW_PATH, 'utf8');
+  const alertParsed = parse(alertText) as {
+    jobs: Record<string, { if?: string; needs?: string | string[] }>;
+  };
+
+  it('only fires on a scheduled, fully-green CREDENTIAL night', () => {
+    const job = alertParsed.jobs['credential-recovery'];
+    expect(job).toBeTruthy();
+    expect(job.if).toContain("github.event_name == 'schedule'");
+    expect(job.if).toContain("env.KNEXT_COMPAT_MODE == 'credential'");
+    for (const jobName of ['credential-ref', 'build-next', 'deploy-tests', 'shard-ledger']) {
+      expect(job.if).toContain(`needs.${jobName}.result == 'success'`);
+    }
+  });
+
+  it('is a root-reachable job (needs credential-ref transitively)', () => {
+    const job = alertParsed.jobs['credential-recovery'];
+    const needs = Array.isArray(job.needs) ? job.needs : job.needs ? [job.needs] : [];
+    expect(needs).toContain('credential-ref');
+  });
+
+  it('looks up the issue by the SAME title the red alert uses, so recovery finds what red opened', () => {
+    const jobText = alertText.slice(alertText.indexOf('credential-recovery:\n'));
+    expect(jobText).toContain('title="Compat CREDENTIAL RED (${KNEXT_LANE}, RC tag)"');
+  });
+
+  it('comments "recovered" before closing (never closes silently)', () => {
+    const jobText = alertText.slice(alertText.indexOf('credential-recovery:\n'));
+    const commentIdx = jobText.indexOf('gh issue comment');
+    const closeIdx = jobText.indexOf('gh issue close');
+    expect(jobText).toMatch(/Recovered/i);
+    expect(commentIdx).toBeGreaterThan(-1);
+    expect(closeIdx).toBeGreaterThan(commentIdx);
+  });
+
+  it('degrades to a no-op (exit 0), never an error, when there is nothing open to recover', () => {
+    const jobText = alertText.slice(alertText.indexOf('credential-recovery:\n'));
+    expect(jobText).toMatch(/if \[ -z "\$\{existing\}" \][\s\S]{0,200}exit 0/);
   });
 });

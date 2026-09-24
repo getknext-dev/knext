@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 /**
  * compat-matrix-tracker — the ONE pinned issue for the v1.0 credential matrix
- * (#1300, system-designer gate TD2).
+ * (#1300, system-designer gate TD2; review round 2 fixed three defects the
+ * first pass missed — see the inline notes below, each keyed to the review
+ * finding it closes).
  *
  * WHY THIS EXISTS
  * ----------------
@@ -22,10 +24,33 @@
  * opens one pinned issue; a reader who wants one cell's detail follows the
  * `credential-reset` label to that cell's own thread.
  *
- * Body-building is exported as a PURE function (`buildTrackerBody`) precisely
- * so it is unit-testable without `gh` or the network — `tests/compat-matrix-
- * tracker.test.ts` asserts its shape directly. The CLI at the bottom is the
- * thin, unavoidably-`gh`-shelling half.
+ * REVIEW FINDING 1 (jev 0.75, blocker) — GitHub's 3-pin cap can ALREADY be
+ * fully held by unrelated closed issues (observed: #210/#220/#255 in this
+ * repo), in which case `gh issue pin` on the tracker throws outright. This
+ * module now (a) unpins any CLOSED pinned issue before pinning the tracker —
+ * never an OPEN one, which could be someone else's legitimate pin — and (b)
+ * FAILS LOUDLY (throws, non-zero exit) if the tracker still isn't pinned
+ * after that, rather than the old warn-and-continue.
+ *
+ * REVIEW FINDING 2 (0.87) — the old dedup lookup searched the newest 100 OPEN
+ * issues by title. This repo alone has 136+ open issues, so a long-lived
+ * tracker can fall off that page and get re-created. The lookup now filters
+ * by the `credential-matrix-tracker` LABEL first (a handful of issues, ever)
+ * and re-checks the title as a defensive tie-breaker.
+ *
+ * REVIEW FINDING 3 (0.78) — a permissions regression (job-level `permissions:`
+ * silently DROPS `actions: read`) can make every `gh run list`/`gh run
+ * download` in compat-window-audit.mjs's `--fetch` fail closed, producing a
+ * matrix where every wired cell shows 0 nights / all-unresolved — which reads
+ * exactly like "the credential program collapsed" when it actually means
+ * "this job couldn't read Actions". `looksLikeFetchFailure` distinguishes the
+ * two and the CLI refuses to publish on the former.
+ *
+ * Every `gh`-calling function below takes its `gh` callable as a PARAMETER
+ * (never imports `execFileSync` itself), so `tests/compat-matrix-tracker.
+ * test.ts` exercises the real branch logic against a scripted fake — no
+ * network, no `gh` binary required to prove the pin/dedup/fail-closed
+ * behaviour.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -95,6 +120,126 @@ ${rows.join('\n')}
 Open credential-reset issues: search \`is:issue is:open label:${CREDENTIAL_RESET_LABEL}\`.`;
 }
 
+/**
+ * REVIEW FINDING 3 — does this matrix look like a FETCH failure (permissions,
+ * `gh run list`/`gh run download` degraded) rather than a genuine "every wired
+ * cell has zero credentialed history" state?
+ *
+ * Scoped to WIRED cells only: an unwired cell (node-vinext today) has no
+ * workflow at all, so it legitimately shows zero nights forever — that is not
+ * evidence of anything breaking. Among wired cells, the credential program
+ * runs on dedicated nightly crons (docs/compat-matrix.md), so it is not
+ * plausible for EVERY wired cell to have graded zero nights or have every
+ * graded night come back `unresolved` unless the fetch itself is degraded
+ * (most commonly: `actions: read` missing from the job's permissions, so `gh
+ * run list`/`gh run download` fail and every night reads as
+ * `artifact-api-unreachable`/`artifact-download-failed`).
+ *
+ * @param {{cells: Record<string, any>}} matrix
+ * @param {typeof CREDENTIAL_CELLS} [cells]
+ */
+export function looksLikeFetchFailure(matrix, cells = CREDENTIAL_CELLS) {
+  const wired = cells.filter((c) => c.wired);
+  if (wired.length === 0) return false;
+  return wired.every((c) => {
+    const entry = matrix?.cells?.[c.lane];
+    if (!entry) return true; // a wired cell missing from the matrix entirely is its own red flag
+    const nights = Array.isArray(entry.nights) ? entry.nights : [];
+    return nights.length === 0 || nights.every((n) => Boolean(n?.unresolved));
+  });
+}
+
+/**
+ * REVIEW FINDING 2 — find the tracker issue by LABEL first (a handful of
+ * issues, ever — immune to the "falls off page 1 of 100" failure the old
+ * title-only, `--state open --limit 100` lookup had), then defensively
+ * confirm the title too, so a label collision can never silently adopt the
+ * wrong issue as the tracker.
+ *
+ * @param {(args: string[]) => string} gh
+ * @param {string} repo
+ * @returns {number|null}
+ */
+export function findTrackerIssue(gh, repo) {
+  const raw = gh([
+    'issue',
+    'list',
+    '--repo',
+    repo,
+    '--state',
+    'all',
+    '--label',
+    TRACKER_LABEL,
+    '--limit',
+    '20',
+    '--json',
+    'number,title',
+  ]);
+  /** @type {Array<{number: number, title: string}>} */
+  const issues = JSON.parse(raw);
+  const match = issues.find((i) => i.title === TRACKER_TITLE);
+  return match ? match.number : null;
+}
+
+/**
+ * REVIEW FINDING 1 — pin `issueNumber`, unpinning any CLOSED pinned issue
+ * first (never an OPEN one — that could be someone else's legitimate pin),
+ * and FAIL LOUDLY (throw) if the tracker still isn't pinned afterward. The
+ * old code only warned on a failed pin, which is exactly how "3 pin slots
+ * held by closed issues" went unnoticed — the job stayed green while the one
+ * thing this feature promises (a pinned, always-visible tracker) silently
+ * didn't happen.
+ *
+ * @param {(args: string[]) => string} gh
+ * @param {string} repo
+ * @param {number} issueNumber
+ */
+export function ensurePinned(gh, repo, issueNumber) {
+  const raw = gh([
+    'issue',
+    'list',
+    '--repo',
+    repo,
+    '--state',
+    'all',
+    '--search',
+    'is:pinned',
+    '--limit',
+    '10',
+    '--json',
+    'number,state',
+  ]);
+  /** @type {Array<{number: number, state: string}>} */
+  const pinned = JSON.parse(raw);
+  for (const p of pinned) {
+    if (p.number === issueNumber) {
+      return; // already pinned — nothing to do
+    }
+    if (String(p.state).toUpperCase() === 'CLOSED') {
+      gh(['issue', 'unpin', String(p.number), '--repo', repo]);
+    }
+    // An OPEN pinned issue is left alone even if it fills the last slot — the
+    // caller's `gh issue pin` below will throw, and that throw is the loud
+    // failure this function exists to guarantee. Unpinning someone else's
+    // live pinned issue to make room is not this feature's call to make.
+  }
+  gh(['issue', 'pin', String(issueNumber), '--repo', repo]);
+  // Verify against the REAL field (`isPinned`, confirmed present on
+  // `gh issue view --json`) — the pin call throwing on failure is the first
+  // line of defense, but a verify-after-write closes the gap where `gh`
+  // exits 0 without the pin actually having taken (e.g. a stale cache read).
+  const verify = JSON.parse(
+    gh(['issue', 'view', String(issueNumber), '--repo', repo, '--json', 'isPinned']),
+  );
+  if (verify.isPinned !== true) {
+    throw new Error(
+      `compat-matrix-tracker: issue #${issueNumber} is NOT pinned after the pin call ` +
+        `(repo: ${repo}) — GitHub's 3-pin cap may still be held by other OPEN pinned issues; ` +
+        'this tracker never unpins an open issue automatically. Unpin one manually.',
+    );
+  }
+}
+
 // ── CLI ──────────────────────────────────────────────────────────────────
 
 function gh(args) {
@@ -117,6 +262,19 @@ function main(argv) {
     process.exit(2);
   }
   const matrix = JSON.parse(readFileSync(matrixFile, 'utf8'));
+
+  // REVIEW FINDING 3 — refuse to publish a fetch-failure matrix. Publishing it
+  // would read as "the credential program collapsed to zero" when the real
+  // fault is more likely a permissions regression on THIS job.
+  if (looksLikeFetchFailure(matrix)) {
+    console.error(
+      '::error::compat-matrix-tracker: every WIRED cell has zero graded nights or all-unresolved ' +
+        'nights — this looks like a FETCH failure (e.g. missing `actions: read` on the job), not a ' +
+        'real credential-program state. Refusing to publish a misleading tracker comment.',
+    );
+    process.exit(1);
+  }
+
   const runUrl = arg('--run-url', undefined);
   const body = buildTrackerBody(matrix, { runUrl });
 
@@ -135,31 +293,12 @@ function main(argv) {
     '--force',
   ]);
 
-  const existing = gh([
-    'issue',
-    'list',
-    '--repo',
-    repo,
-    '--state',
-    'open',
-    '--limit',
-    '100',
-    '--json',
-    'number,title',
-    '--jq',
-    `[.[] | select(.title == "${TRACKER_TITLE}")][0].number // empty`,
-  ]).trim();
+  const existing = findTrackerIssue(gh, repo);
 
+  let issueNumber = existing;
   if (existing) {
     console.log(`updating existing tracker issue #${existing}`);
-    gh(['issue', 'comment', existing, '--repo', repo, '--body', body]);
-    // Re-assert the pin every run: a human could have accidentally unpinned
-    // it, and a pin call on an already-pinned issue is a harmless no-op.
-    try {
-      gh(['issue', 'pin', existing, '--repo', repo]);
-    } catch (err) {
-      console.error(`::warning::could not (re)pin tracker issue #${existing}: ${err.message}`);
-    }
+    gh(['issue', 'comment', String(existing), '--repo', repo, '--body', body]);
   } else {
     console.log('creating the tracker issue');
     const newUrl = gh([
@@ -174,9 +313,13 @@ function main(argv) {
       '--label',
       TRACKER_LABEL,
     ]).trim();
-    const newNum = newUrl.split('/').at(-1);
-    gh(['issue', 'pin', newNum, '--repo', repo]);
+    issueNumber = Number(newUrl.split('/').at(-1));
   }
+
+  // Re-assert the pin every run, on BOTH branches: a human could have
+  // accidentally unpinned it, and (finding 1) the pin slots could be held by
+  // stale closed issues — this now fails the job rather than warning.
+  ensurePinned(gh, repo, issueNumber);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
