@@ -719,19 +719,29 @@ describe('collectHistory: backfill past uninformative runs, fail closed on repea
     expect(sawReset).toBe(true);
   });
 
-  it('a listing failure counts toward the SAME skip budget as a per-run fetch failure', () => {
+  it('a listing auth/API failure is FATAL, not a soft skip — there is nothing to fall back to (#1363 round-3 finding 2)', () => {
     const list = () => {
       throw new Error('HTTP 401: Bad credentials');
     };
     const fetchSummaries = () => fullRun({ shard: '1/16', failed: 0, failures: [] });
-    const { history, warnings } = collectHistory(
-      { list, fetchSummaries },
-      { repo: 'o/r', currentRunId: '11', want: 1 },
-    );
-    // A single listing failure alone is below the threshold: soft-skip, empty
-    // history (there is nothing to backfill from — the list itself failed).
-    expect(history).toEqual([]);
-    expect(warnings.join()).toMatch(/run list.*401/);
+    // collectHistory is only ever called when there's a flaky entry to judge,
+    // so a listing failure means the window CANNOT be judged at all — this
+    // must throw (reddening the run), never warn-and-exit-0. A prior version
+    // treated this as one soft skip with zero candidates, so it could never
+    // reach the 3-consecutive threshold and every such run silently passed.
+    expect(() =>
+      collectHistory({ list, fetchSummaries }, { repo: 'o/r', currentRunId: '11', want: 1 }),
+    ).toThrow(/could not list.*401/);
+  });
+
+  it('a non-auth listing error is never swallowed either', () => {
+    const list = () => {
+      throw new Error('unexpected: JSON.parse failed');
+    };
+    const fetchSummaries = () => fullRun({ shard: '1/16', failed: 0, failures: [] });
+    expect(() =>
+      collectHistory({ list, fetchSummaries }, { repo: 'o/r', currentRunId: '11', want: 1 }),
+    ).toThrow(/unexpected/);
   });
 
   it('a "no artifact" failure downloading a run is NOT an auth/API error: skipped, not warned, not a fail-closed contributor', () => {
@@ -812,6 +822,20 @@ describe('isNoArtifactError: distinguishes "nothing to see here" from a real gh 
     ).toBe(true);
   });
 
+  it('recognizes the SECOND real gh CLI message (a 0-artifact run, live from gh run download 33965643199)', () => {
+    expect(
+      isNoArtifactError(
+        new Error(
+          'Command failed: gh run download 33965643199 --repo o/r --pattern compat-vinext-summary-* --dir /tmp/x\nno valid artifacts found to download',
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it('catches an unseen-but-same-shaped variant, not just the two literal strings (whack-a-mole resistance)', () => {
+    expect(isNoArtifactError(new Error('no artifacts available for download'))).toBe(true);
+  });
+
   it('does not treat an auth/API error as a no-artifact error', () => {
     expect(isNoArtifactError(new Error('HTTP 401: Bad credentials'))).toBe(false);
   });
@@ -829,13 +853,15 @@ describe('downloadRun against a REAL gh failure (a fake gh binary, not a mocked 
   // `gh run download` failure gets classified, not in any mocked stand-in for
   // it. This drives the real `downloadRun` + `readSummaries` through a fake
   // `gh` EXECUTABLE that reproduces gh's actual exit code and stderr text.
-  const fakeGh = (behavior: 'no-artifact' | 'ok') => {
+  const fakeGh = (behavior: 'no-artifact' | 'no-valid-artifact' | 'ok') => {
     const dir = mkdtempSync(join(tmpdir(), 'knext-fake-gh-'));
     const script = join(dir, 'gh');
     const body =
       behavior === 'no-artifact'
         ? '#!/bin/sh\necho "no artifact matches any of the names or patterns provided" 1>&2\nexit 1\n'
-        : '#!/bin/sh\n# args: run download <id> --repo <r> --pattern <p> --dir <dir> ($9)\nmkdir -p "$9"\necho "{}" > "$9/compat-suite-summary-1.json"\nexit 0\n';
+        : behavior === 'no-valid-artifact'
+          ? '#!/bin/sh\necho "no valid artifacts found to download" 1>&2\nexit 1\n'
+          : '#!/bin/sh\n# args: run download <id> --repo <r> --pattern <p> --dir <dir> ($9)\nmkdir -p "$9"\necho "{}" > "$9/compat-suite-summary-1.json"\nexit 0\n';
     writeFileSync(script, body);
     chmodSync(script, 0o755);
     return { dir, script };
@@ -858,6 +884,47 @@ describe('downloadRun against a REAL gh failure (a fake gh binary, not a mocked 
       expect(isAuthOrApiError(threw)).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('the SECOND real "no valid artifacts found to download" gh failure (a 0-artifact run) is also classified, not swallowed', () => {
+    const { dir, script } = fakeGh('no-valid-artifact');
+    const outDir = join(dir, 'out');
+    try {
+      let threw: unknown;
+      try {
+        downloadRun(realExec(script), { repo: 'o/r', runId: '33965643199', dir: outDir });
+      } catch (err) {
+        threw = err;
+      }
+      expect(threw).toBeDefined();
+      expect(isNoArtifactError(threw)).toBe(true);
+      expect(isAuthOrApiError(threw)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('collectHistory, wired to the REAL downloadRun + readSummaries, backfills past a real "no valid artifacts" run too', () => {
+    const { dir: noValidDir, script: noValidScript } = fakeGh('no-valid-artifact');
+    const { dir: okDir, script: okScript } = fakeGh('ok');
+    try {
+      const list = () => [
+        { id: '10', status: 'completed' }, // 0-artifact run: the SECOND gh wording
+        { id: '9', status: 'completed' },
+      ];
+      const fetchSummaries = (id: string) => {
+        const outDir = mkdtempSync(join(tmpdir(), 'knext-fake-gh-run-'));
+        const script = id === '10' ? noValidScript : okScript;
+        downloadRun(realExec(script), { repo: 'o/r', runId: id, dir: outDir });
+        return readSummaries(outDir);
+      };
+      expect(() =>
+        collectHistory({ list, fetchSummaries }, { repo: 'o/r', currentRunId: '11', want: 1 }),
+      ).not.toThrow();
+    } finally {
+      rmSync(noValidDir, { recursive: true, force: true });
+      rmSync(okDir, { recursive: true, force: true });
     }
   });
 
