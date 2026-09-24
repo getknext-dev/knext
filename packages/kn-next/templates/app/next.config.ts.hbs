@@ -21,15 +21,19 @@ import type { NextConfig } from "next";
  * Why `package.json`'s `build` script pins `next build --webpack` instead of
  * the ambient Turbopack default (Next 16.2+): combining `adapterPath` with
  * `output: 'standalone'` under Turbopack throws
- * `ENOENT: .next/next-server.js.nft.json` at `next build` time — Next 16.3.3
- * never writes that trace file on the Turbopack path when an adapter is
- * present (its own `server/config.js` says `output:'standalone'` "is
- * currently using a non-adapter codepath" — a real, still-open upstream gap,
- * tracked at getknext-dev/knext#1372, not a knext defect). `--webpack` is not
- * a stopgap hack: node/bun × webpack is an already-credentialed knext build
- * target (ADR-0058), so this pins the scaffold to a path knext verifies
- * end-to-end. Do not "fix" this by dropping `--webpack` without first
- * confirming #1372 is resolved upstream.
+ * `ENOENT: .next/next-server.js.nft.json` at `next build` time — a CONFIRMED
+ * Next.js REGRESSION, bisected between 16.2.0 (builds this exact combination
+ * fine) and 16.3.0 (already broken); 16.3.3 (pinned below) inherits it. Not a
+ * knext defect, and not (as first suspected) a permanent Turbopack/adapter
+ * architecture gap — see getknext-dev/knext#1372 for the full trace and the
+ * bisection. `--webpack` is not a stopgap hack: node/bun × webpack is an
+ * already-credentialed knext build target (ADR-0058), so this pins the
+ * scaffold to a path knext verifies end-to-end. `kn-next build`/`deploy`
+ * carry the same check for apps that did NOT go through this scaffold
+ * (`checkTurbopackAdapterStandaloneRegression`, `project-build.ts`) — it
+ * fails fast with this same explanation rather than the raw ENOENT. Do not
+ * "fix" this by dropping `--webpack` without first confirming #1372 is
+ * resolved upstream at whatever Next version you are bumping to.
  */
 const nextConfig: NextConfig = {
     // Asset prefix is injected by `kn-next deploy` from `kn-next.config.ts`

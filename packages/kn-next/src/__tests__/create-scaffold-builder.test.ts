@@ -66,18 +66,22 @@ describe("kn-next create — default target is standalone (#1342/ADR-0058)", () 
     });
 
     it("package.json builds with `next build --webpack`, not vite/vinext", () => {
-        // #1368 round 2 — `next build` ALONE (ambient Turbopack default,
+        // #1368 round 3 — `next build` ALONE (ambient Turbopack default,
         // ADR-0058/#1183) is broken for this exact combination: Turbopack +
-        // `adapterPath` + `output:'standalone'`. Next 16.3.3 never writes
-        // `.next/next-server.js.nft.json` on that path (its own
-        // `server/config.js` comment admits `output:'standalone'` "is
-        // currently using a non-adapter codepath" under Turbopack), so
-        // `writeStandaloneDirectory` throws ENOENT — see the next.config.ts
-        // comment and the tracked upstream note (#1372) for the full
-        // root-cause trace. `--webpack` is not a workaround bolted on top:
-        // node/bun × webpack is already a CREDENTIALED matrix cell
-        // (ADR-0058), so this pins the scaffold to a build path knext
-        // already verifies end-to-end.
+        // `adapterPath` + `output:'standalone'`. A CONFIRMED Next.js
+        // REGRESSION, bisected between 16.2.0 (builds fine — it's what the
+        // credentialed compat lane pins, which is why 778/0 never caught
+        // this) and 16.3.0 (already broken); 16.3.3 inherits it. Next never
+        // writes `.next/next-server.js.nft.json` on the Turbopack path once
+        // an adapter is present, so `writeStandaloneDirectory` throws ENOENT
+        // — see the next.config.ts comment and getknext-dev/knext#1372 for
+        // the full trace and bisection. `--webpack` is not a workaround
+        // bolted on top: node/bun × webpack is already a CREDENTIALED matrix
+        // cell (ADR-0058), so this pins the scaffold to a build path knext
+        // already verifies end-to-end. `kn-next build`/`deploy` carry the
+        // same protection for non-scaffolded apps too — see
+        // `project-build.test.ts`'s `checkTurbopackAdapterStandaloneRegression`
+        // coverage.
         const { appDir } = scaffold("std-pkg");
         const pkg = JSON.parse(
             readFileSync(join(appDir, "package.json"), "utf8"),

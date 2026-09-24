@@ -387,6 +387,7 @@ export async function defaultBuildAndPush(
     // means vinext (#1183).
     runProjectBuild({
         requireEsm: (config.build ?? DEFAULT_BUILDER_ID) === "vinext",
+        builderId: config.build ?? DEFAULT_BUILDER_ID,
     });
 
     // #1339 review finding #1 (jev 0.90, BLOCKER): the staged Dockerfile for
