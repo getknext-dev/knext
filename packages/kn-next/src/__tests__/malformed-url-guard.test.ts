@@ -23,17 +23,19 @@ import { afterAll, describe, expect, it } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
 import {
     copyFileSync,
+    mkdirSync,
     mkdtempSync,
     readFileSync,
     realpathSync,
     rmSync,
+    symlinkSync,
     writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "../../../..");
@@ -498,9 +500,11 @@ describe("metricsRequestListener (the node entry's :9464 listener)", () => {
             expect((await rawGet(srv.port, "/metrics")).status).toBe(200);
             for (const target of ODD_TARGETS) {
                 const res = await rawGet(srv.port, target);
-                expect({ target, answered: res.status > 0 }).toEqual({
+                // 404, not merely "answered": a URL-parser throw that the
+                // listener's try/catch absorbs would show up as a 500.
+                expect({ target, status: res.status }).toEqual({
                     target,
-                    answered: true,
+                    status: 404,
                 });
                 await sleep(100);
                 expect(srv.exited()).toBeNull();
@@ -530,15 +534,17 @@ describe("metricsRequestListener (the node entry's :9464 listener)", () => {
     }, 60_000);
 
     it("no shipped node:http handler parses the request target with new URL", () => {
-        // Scanned, not enumerated: every tracked file that creates a node:http
-        // server in shipped code (templates, the in-repo apps, the core
-        // adapters) must not hand req.url to the URL parser.
+        // Scanned, not enumerated: every tracked file in shipped code that
+        // creates a node:http server OR defines a (req, res) listener
+        // (templates, the in-repo apps, the core adapters) must not hand
+        // req.url to the URL parser. Aliased forms are the behavioural tests'
+        // job (the listener must answer 404, and the real entry is booted).
         const out = spawnSync(
             "git",
             [
                 "grep",
                 "-lE",
-                "createServer\\(",
+                "createServer\\(|\\([[:space:]]*req[[:space:]]*,[[:space:]]*res[[:space:]]*\\)",
                 "--",
                 "packages/kn-next/templates",
                 "packages/kn-next/src/adapters",
@@ -551,12 +557,185 @@ describe("metricsRequestListener (the node entry's :9464 listener)", () => {
         );
         const files = out.stdout.split("\n").filter(Boolean);
         expect(files.length).toBeGreaterThan(0);
+        expect(files).toContain(
+            "packages/kn-next/templates/app/runtime-contract.mjs.hbs",
+        );
         const offenders = files.filter((f) =>
-            /new URL\(\s*req\.url/.test(
+            /new\s+(?:globalThis\.)?URL\(\s*req\.url/.test(
                 readFileSync(join(REPO_ROOT, f), "utf8"),
             ),
         );
         expect(offenders).toEqual([]);
+    });
+});
+
+// ── the REAL node entry, booted ─────────────────────────────────────────────
+// The scaffolded knext-node-entry.mjs, unmodified, beside the scaffolded
+// runtime contract. Only its build-time imports are stood in for — nitro's
+// virtual polyfills and app (a real h3 app), vinext's request context, and two
+// @getknext/core internals that are no-ops for this purpose — while srvx is
+// the real package. So the entry's OWN wiring of both listeners is what runs.
+function writeEntryApp(): string {
+    const dir = mkdtempSync(join(tmp, "entry-"));
+    const w = (rel: string, text: string) => {
+        mkdirSync(dirname(join(dir, rel)), { recursive: true });
+        writeFileSync(join(dir, rel), text);
+    };
+    copyFileSync(
+        join(
+            REPO_ROOT,
+            "packages/kn-next/templates/app/knext-node-entry.mjs.hbs",
+        ),
+        join(dir, "knext-node-entry.mjs"),
+    );
+    copyFileSync(
+        join(REPO_ROOT, CONTRACTS[0]),
+        join(dir, "runtime-contract.mjs"),
+    );
+    w(
+        "package.json",
+        JSON.stringify({
+            type: "module",
+            imports: { "#nitro/virtual/polyfills": "./stub-polyfills.mjs" },
+        }),
+    );
+    w("stub-polyfills.mjs", "");
+    const pkg = (name: string, exportsMap: Record<string, string>) =>
+        w(
+            `node_modules/${name}/package.json`,
+            JSON.stringify({ name, type: "module", exports: exportsMap }),
+        );
+    pkg("nitro", { "./app": "./app.mjs" });
+    w(
+        "node_modules/nitro/app.mjs",
+        `import { H3 } from ${JSON.stringify(pathToFileURL(H3_PATH).href)};\n` +
+            "const app = new H3().get('/**', () => 'ok');\n" +
+            "export const useNitroApp = () => ({ fetch: app.fetch });\n",
+    );
+    pkg("vinext", { "./shims/request-context": "./request-context.mjs" });
+    w(
+        "node_modules/vinext/request-context.mjs",
+        "export const runWithExecutionContext = (_ctx, fn) => fn();\n",
+    );
+    pkg("@getknext/core", {
+        "./internal/vinext-image-optimizer": "./image.mjs",
+        "./internal/response-cache-control": "./cache-control.mjs",
+    });
+    w(
+        "node_modules/@getknext/core/image.mjs",
+        "export const handleImageRequest = async () => null;\n",
+    );
+    w(
+        "node_modules/@getknext/core/cache-control.mjs",
+        "export const applyVinextDeployDefault = () => {};\n" +
+            "export const cacheControlMiddleware = () => (_req, next) => next();\n",
+    );
+    symlinkSync(
+        realpathSync(join(REPO_ROOT, "apps/file-manager/node_modules/srvx")),
+        join(dir, "node_modules/srvx"),
+    );
+    return dir;
+}
+
+type EntryBooted = {
+    app: number;
+    metrics: number;
+    exited: () => string | null;
+    stop: () => void;
+    out: () => string;
+};
+
+function bootEntry(dir: string): Promise<EntryBooted> {
+    return new Promise((resolveBoot, rejectBoot) => {
+        const child = spawn("node", [join(dir, "knext-node-entry.mjs")], {
+            cwd: dir,
+            env: {
+                ...process.env,
+                PORT: "0",
+                METRICS_PORT: "0",
+                HOSTNAME: "127.0.0.1",
+                KNEXT_EAGER_WARM: "0",
+                NODE_ENV: "production",
+            },
+            stdio: ["ignore", "pipe", "pipe"],
+        });
+        let out = "";
+        let exited: string | null = null;
+        child.on("exit", (code, signal) => {
+            exited = `exit ${code ?? signal}`;
+        });
+        const onData = (d: Buffer) => {
+            out += d.toString();
+            const m = out.match(/LISTENING:(\d+) METRICS:(\d+)/);
+            if (m) {
+                resolveBoot({
+                    app: Number(m[1]),
+                    metrics: Number(m[2]),
+                    exited: () => exited,
+                    stop: () => child.kill("SIGKILL"),
+                    out: () => out,
+                });
+            }
+        };
+        child.stdout.on("data", onData);
+        child.stderr.on("data", onData);
+        setTimeout(
+            () => rejectBoot(new Error(`the node entry did not boot: ${out}`)),
+            20_000,
+        );
+    });
+}
+
+describe("the scaffolded node entry, booted", () => {
+    it("its metrics port answers odd request targets with 404 and keeps serving; its app port answers malformed paths with 400", async () => {
+        const srv = await bootEntry(writeEntryApp());
+        try {
+            expect((await rawGet(srv.metrics, "/metrics")).status).toBe(200);
+            for (const target of ODD_TARGETS) {
+                const res = await rawGet(srv.metrics, target);
+                expect({ target, status: res.status }).toEqual({
+                    target,
+                    status: 404,
+                });
+                await sleep(100);
+                expect({ target, exited: srv.exited() }).toEqual({
+                    target,
+                    exited: null,
+                });
+                expect((await rawGet(srv.metrics, "/metrics")).status).toBe(
+                    200,
+                );
+            }
+            expect((await rawGet(srv.app, "/")).status).toBe(200);
+            for (const path of MALFORMED) {
+                const res = await rawGet(srv.app, path);
+                expect({ path: path.slice(0, 24), status: res.status }).toEqual(
+                    {
+                        path: path.slice(0, 24),
+                        status: 400,
+                    },
+                );
+            }
+            expect(srv.exited()).toBeNull();
+            expect((await rawGet(srv.app, "/")).status).toBe(200);
+        } finally {
+            srv.stop();
+        }
+    }, 60_000);
+
+    it("wires the metrics port through the contract's listener (the only createServer call)", () => {
+        const src = readFileSync(
+            join(
+                REPO_ROOT,
+                "packages/kn-next/templates/app/knext-node-entry.mjs.hbs",
+            ),
+            "utf8",
+        );
+        const calls = [
+            ...src.matchAll(/createServer\(\s*([A-Za-z_$][\w$]*)\(/g),
+        ].map((m) => m[1]);
+        expect(src.split("createServer(").length - 1).toBe(1);
+        expect(calls).toEqual(["metricsRequestListener"]);
     });
 });
 
