@@ -110,18 +110,23 @@ const AFFECTED_16_3_0_CANARY_FLOOR = 20;
 /**
  * The 16.3.x PATCH that carries the upstream fix (confirmed release, #1372
  * close-out) — 16.3.0 through 16.3.4 (stable or any canary/prerelease of
- * those) are affected; 16.3.5+ is fixed.
+ * those) are affected; 16.3.5+ is fixed. Does NOT apply uniformly to patch 1
+ * — see {@link FIXED_16_3_1_CANARY}.
  */
 const FIXED_16_3_PATCH = 5;
 
 /**
- * The earliest 16.4.0 canary confirmed to carry the fix (#97287, merged
- * upstream 2026-08-14). 16.4.0-canary.0 was cut 2026-08-21 — AFTER that
- * merge — so in practice every published 16.4.0 canary already has it; this
- * constant exists so the boundary is named and provable rather than assumed,
- * the same way the 16.3.0 floor above is.
+ * The earliest 16.3.1 CANARY confirmed to carry the upstream fix (commit
+ * c7b87c23, #97287, merged 2026-08-14): rev-1386's review measured that
+ * commit as an ancestor of `16.3.1-canary.17` but NOT of `16.3.1-canary.16`
+ * — so, UNLIKE every other patch in the affected range, 16.3.1's OWN canary
+ * line straddles the fix mid-patch rather than being wholly affected or
+ * wholly fixed by its patch number alone. `16.3.1-canary.16` and below (and
+ * the `16.3.1` STABLE release, which shipped before any of its canaries
+ * reached this floor) are affected; `16.3.1-canary.17` and above are fixed,
+ * even though `1 < FIXED_16_3_PATCH` would otherwise say "affected".
  */
-const FIXED_16_4_0_CANARY = 0;
+const FIXED_16_3_1_CANARY = 17;
 
 /** A parsed `major.minor.patch[-canary.N]` Next.js version. */
 interface ParsedNextVersion {
@@ -147,12 +152,16 @@ function parseNextVersion(version: string): ParsedNextVersion | undefined {
  * Whether a parsed Next.js version falls inside the CONFIRMED #1372 window:
  * `16.3.0-canary.20` through `16.3.4` inclusive on the 16.3.x line (16.2.x
  * was never affected — the credentialed compat lane's 16.2.0 pin proves it
- * builds this exact combination fine), fixed from `16.3.5` onward; the
- * 16.4.0 canary line is fixed from its very first published canary (see
- * {@link FIXED_16_4_0_CANARY}). A version this function cannot place in the
- * 16.x line (any other major) is treated as unaffected — this is a CLOSED,
- * bisected range now, not an open-ended "anything new might be broken"
- * guess.
+ * builds this exact combination fine), fixed from `16.3.5` onward, with ONE
+ * documented exception inside that range (16.3.1's own canary straddle, see
+ * {@link FIXED_16_3_1_CANARY}). The 16.4.0 line needs no floor at all: its
+ * very first published canary (`16.4.0-canary.0`, cut 2026-08-21) already
+ * postdates the upstream fix commit (merged 2026-08-14), so every 16.4.x
+ * version this function can see falls through to the final `return false` —
+ * there is no boundary to encode, unlike 16.3.0's. A version this function
+ * cannot place in the 16.x line (any other major) is also unaffected — this
+ * is a CLOSED, bisected range now, not an open-ended "anything new might be
+ * broken" guess.
  */
 function isAffectedNextVersion(v: ParsedNextVersion): boolean {
     if (v.major !== 16) return false;
@@ -167,12 +176,13 @@ function isAffectedNextVersion(v: ParsedNextVersion): boolean {
                 v.canary >= AFFECTED_16_3_0_CANARY_FLOOR
             );
         }
+        if (v.patch === 1) {
+            // The one patch whose OWN canary line straddles the fix commit
+            // (see FIXED_16_3_1_CANARY's doc comment) — `v.patch <
+            // FIXED_16_3_PATCH` alone is not enough here, unlike patches 2-4.
+            return v.canary === undefined || v.canary < FIXED_16_3_1_CANARY;
+        }
         return v.patch < FIXED_16_3_PATCH;
-    }
-    if (v.minor === 4 && v.patch === 0) {
-        // Only relevant for a 16.4.0 CANARY — 16.4.0 stable (no canary
-        // suffix) ships well after the fix landed, so it is never affected.
-        return v.canary !== undefined && v.canary < FIXED_16_4_0_CANARY;
     }
     return false;
 }
