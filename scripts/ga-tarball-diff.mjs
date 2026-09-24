@@ -13,14 +13,25 @@
  * wired into any release workflow (a release-workflow change is trigger-class
  * per `.claude/rules/workflow.md` — see the PR for the deferral note).
  *
- * WHAT'S ALLOWED between an rc tree and its GA counterpart (`scripts/lib/ga-tarball-diff.mjs`
- * has the precise rules): the top-level `version` field in each package's
- * `package.json`; a `@getknext/*` sibling dependency RANGE moving with the
- * lockstep bump; and the exact rc version string substituted for the exact GA
- * version string wherever it is embedded in a built file's bytes — nowhere
- * else. Anything else (an extra/missing file, a non-version manifest field
- * drifting, a partial substitution, unexplained binary drift) is a failure,
- * printed with a precise diff.
+ * WHAT'S ALLOWED between an rc tree and its GA counterpart
+ * (`scripts/lib/ga-tarball-diff.mjs` has the precise rules): the top-level
+ * `version` field in each package's `package.json`; a `@getknext/*` sibling
+ * dependency RANGE that equals the rc range with the version substituted
+ * (nothing looser); and the exact rc version string substituted for the
+ * exact GA version string, boundary-aware, at EVERY site it is embedded in a
+ * built file's bytes. Anything else — an extra/missing/reordered manifest
+ * key, a type/mode/symlink-target change on ANY tar entry, an entry outside
+ * `package/`, a partial substitution, unexplained binary drift — is a
+ * failure, printed with a precise diff.
+ *
+ * This reads tar streams directly (`scripts/lib/tar-inventory.mjs`) rather
+ * than extracting to disk and walking the result — a disk walk cannot see a
+ * symlink's target or a file's mode, and a walk rooted at `<dest>/package`
+ * never even looks at an entry the tarball placed OUTSIDE `package/`. Every
+ * entry, from every tarball, is validated safe (`assertEntrySafe`, in
+ * `scripts/lib/ga-tarball-diff.mjs`) before any comparison runs, so an unsafe
+ * entry — an absolute path, a `..` traversal, or a symlink/hardlink target
+ * that escapes `package/` — is REJECTED outright, not merely diffed.
  *
  * USAGE
  * -----
@@ -33,16 +44,17 @@
  *   node scripts/ga-tarball-diff.mjs --rc-ref v1.0.0-rc.3 --ga-ref v1.0.0
  *
  * Exits 0 on a clean diff (only version-field deltas found), 1 otherwise. An
- * unreadable tarball, a missing/extra package, or an extra/missing file is a
- * failure, never a skip.
+ * unreadable/unsafe tarball entry, a missing/extra package, a non-lockstep
+ * version pair, or an extra/missing tar entry is a failure, never a skip.
  */
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { compareTrees } from './lib/ga-tarball-diff.mjs';
+import { compareTarEntries, validateVersionPair } from './lib/ga-tarball-diff.mjs';
+import { readTarEntries } from './lib/tar-inventory.mjs';
 import { publishablePackages, readWorkspaceManifests } from './publish-preflight.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -77,42 +89,28 @@ function cleanup() {
   }
 }
 
-/** Walk a directory recursively into a Map<relPath, absPath>, POSIX-separated. */
-function walkTree(root) {
-  const files = new Map();
-  const stack = [root];
-  while (stack.length > 0) {
-    const dir = stack.pop();
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const abs = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        stack.push(abs);
-      } else if (entry.isFile()) {
-        files.set(relative(root, abs).split('\\').join('/'), abs);
-      }
-    }
+/**
+ * Read a .tgz's full tar-entry inventory PLUS its package name/version, all
+ * in memory — no `tar` binary, no filesystem extraction. Every entry is
+ * `assertEntrySafe`-validated later, inside `compareTarEntries`; this only
+ * needs the one legitimate `package/package.json` entry to identify the
+ * package.
+ */
+function loadTarball(tgzPath) {
+  const entries = readTarEntries(readFileSync(tgzPath));
+  const pkgEntry = entries.find((e) => e.name === 'package/package.json' && e.type === 'file');
+  if (!pkgEntry) {
+    throw new Error(`${tgzPath}: no "package/package.json" entry found`);
   }
-  return files;
-}
-
-/** Extract a .tgz (an `npm`/`bun pm pack` tarball, root dir `package/`) into `dest`. */
-function extractTarball(tgz, dest) {
-  execFileSync('tar', ['-xzf', tgz, '-C', dest]);
-  const packageDir = join(dest, 'package');
-  if (!existsSync(packageDir)) {
-    throw new Error(
-      `${tgz}: extracted with no top-level "package/" directory — not an npm tarball`,
-    );
+  let pkg;
+  try {
+    pkg = JSON.parse(pkgEntry.data.toString('utf8'));
+  } catch (err) {
+    throw new Error(`${tgzPath}: unreadable package.json: ${err.message}`);
   }
-  return packageDir;
-}
-
-/** Read a package's name out of a not-yet-extracted tarball. */
-function tarballPackageName(tgz) {
-  const out = execFileSync('tar', ['-xzOf', tgz, 'package/package.json'], { encoding: 'utf8' });
-  const pkg = JSON.parse(out);
-  if (typeof pkg.name !== 'string') throw new Error(`${tgz}: package.json has no "name"`);
-  return pkg.name;
+  if (typeof pkg.name !== 'string') throw new Error(`${tgzPath}: package.json has no "name"`);
+  if (typeof pkg.version !== 'string') throw new Error(`${tgzPath}: package.json has no "version"`);
+  return { name: pkg.name, version: pkg.version, entries };
 }
 
 /** Group every .tgz in `dir` by the package name read from inside it. */
@@ -125,11 +123,11 @@ function loadTarballDir(dir, label) {
 
   const byName = new Map();
   for (const tgz of tgzFiles) {
-    const name = tarballPackageName(tgz);
-    if (byName.has(name)) {
-      throw new Error(`${label}: more than one tarball claims package "${name}" (${dir})`);
+    const loaded = loadTarball(tgz);
+    if (byName.has(loaded.name)) {
+      throw new Error(`${label}: more than one tarball claims package "${loaded.name}" (${dir})`);
     }
-    byName.set(name, tgz);
+    byName.set(loaded.name, loaded);
   }
   return byName;
 }
@@ -171,17 +169,12 @@ function packRef(ref, label) {
         .sort()
         .at(-1);
       if (!tgz) throw new Error(`bun pm pack produced no .tgz for ${name} (${label})`);
-      byName.set(name, tgz);
+      byName.set(name, loadTarball(tgz));
     }
     return byName;
   } finally {
     execFileSync('git', ['worktree', 'remove', '--force', worktreeDir], { cwd: repoRoot });
   }
-}
-
-function readVersionOf(tgz) {
-  const out = execFileSync('tar', ['-xzOf', tgz, 'package/package.json'], { encoding: 'utf8' });
-  return JSON.parse(out).version;
 }
 
 function parseArgs(argv) {
@@ -240,30 +233,51 @@ function runInner(argv, log) {
   }
 
   const siblingNames = new Set(expected);
+
+  // Lockstep (#1306 review item 6): every package's rc/GA version must itself
+  // be well-formed ("X.Y.Z-rc.N" -> "X.Y.Z"), and every package in the set
+  // must carry the SAME pair — otherwise "compared as one release" is false,
+  // and the sibling-range substitution rule above has no fixed point.
+  const versionPairs = new Map();
+  for (const name of expected) {
+    const rcVersion = rcByName.get(name).version;
+    const gaVersion = gaByName.get(name).version;
+    const err = validateVersionPair(rcVersion, gaVersion);
+    if (err) {
+      allViolations.push(`${name}: ${err}`);
+      continue;
+    }
+    versionPairs.set(name, { rcVersion, gaVersion });
+  }
+  if (allViolations.length > 0) {
+    for (const v of allViolations) log(`[ga-tarball-diff] FAIL: ${v}`);
+    return 1;
+  }
+  const distinctPairs = new Set(
+    [...versionPairs.values()].map((p) => `${p.rcVersion}=>${p.gaVersion}`),
+  );
+  if (distinctPairs.size > 1) {
+    log(
+      `[ga-tarball-diff] FAIL: packages are not moving in lockstep: ${[...distinctPairs].join(', ')}`,
+    );
+    return 1;
+  }
+
   let anyEmbedded = 0;
 
   for (const name of expected) {
-    const rcTgz = rcByName.get(name);
-    const gaTgz = gaByName.get(name);
-    const rcVersion = readVersionOf(rcTgz);
-    const gaVersion = readVersionOf(gaTgz);
+    const { rcVersion, gaVersion } = versionPairs.get(name);
+    const rcEntries = rcByName.get(name).entries;
+    const gaEntries = gaByName.get(name).entries;
 
-    const rcExtractDest = mkdtempSync(join(tmpdir(), 'knext-ga-diff-rc-'));
-    registry.push(rcExtractDest);
-    const gaExtractDest = mkdtempSync(join(tmpdir(), 'knext-ga-diff-ga-'));
-    registry.push(gaExtractDest);
-    const rcPackageDir = extractTarball(rcTgz, rcExtractDest);
-    const gaPackageDir = extractTarball(gaTgz, gaExtractDest);
-
-    const rcFiles = walkTree(rcPackageDir);
-    const gaFiles = walkTree(gaPackageDir);
-
-    const result = compareTrees(rcFiles, gaFiles, {
-      rcVersion,
-      gaVersion,
-      siblingNames,
-      readFile: (p) => readFileSync(p),
-    });
+    let result;
+    try {
+      result = compareTarEntries(rcEntries, gaEntries, { rcVersion, gaVersion, siblingNames });
+    } catch (err) {
+      log(`[ga-tarball-diff] FAIL: ${name}: ${err.message}`);
+      allViolations.push(`${name}: ${err.message}`);
+      continue;
+    }
 
     if (!result.ok) {
       log(`[ga-tarball-diff] FAIL: ${name} (rc ${rcVersion} -> GA ${gaVersion})`);
