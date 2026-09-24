@@ -123,6 +123,10 @@ describe("computedRequireSites — what counts as a computed specifier", () => {
             });
         }
         // An identifier that merely ends in a keyword is still a division.
+        // ...and so is a PROPERTY named like a keyword.
+        expect(
+            count(`const n = o.return / 2; const s = "q"; require(y);`),
+        ).toBe(1);
         expect(count(`const n = xreturn / 2; const s = "q"; require(y);`)).toBe(
             1,
         );

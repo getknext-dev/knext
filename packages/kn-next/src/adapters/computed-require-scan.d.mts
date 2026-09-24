@@ -8,3 +8,8 @@ export declare function computedRequireInventory(
     files: Iterable<string>,
     baseDir: string,
 ): Record<string, number>;
+
+export declare function moduleDisposition(
+    path: string,
+    ctx: { root: string; diskClosure: Set<string> },
+): { real: string; where: "external" | "disk" | "bundle" };
