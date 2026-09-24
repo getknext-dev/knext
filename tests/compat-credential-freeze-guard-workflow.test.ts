@@ -259,6 +259,82 @@ describe('the guard runs from a base-commit checkout of its OWN code (#1370 revi
   });
 });
 
+describe('bootstrap: base-checkout has no guard script (#1370 review round 4)', () => {
+  // The guard is NEW in the PR that first adds it — base-checkout, pinned
+  // to BASE_SHA, has no compat-credential-freeze-guard.mjs at all in that
+  // PR (and in any future PR whose base predates the guard). These tests
+  // execute the EXACT "Run the freeze guard" step script — the real text
+  // that ships in the workflow, not a re-derivation of it — against a temp
+  // directory standing in for the runner's workspace, so a change to the
+  // step's own bash is what these tests are pinned against.
+  function runStepScript(fixture: {
+    /** Create base-checkout/scripts/compat-credential-freeze-guard.mjs? */
+    guardScriptPresent: boolean;
+    basePinRcTag: unknown;
+  }): { status: number | null; stdout: string; stderr: string } {
+    const { wf } = load();
+    const step = wf.jobs['freeze-guard'].steps.find((s) =>
+      /Run the freeze guard/.test(s.name ?? ''),
+    );
+    if (!step?.run) throw new Error('guard-invocation step not found');
+
+    const dir = mkdtempSync(join(tmpdir(), 'knext-freeze-bootstrap-'));
+    try {
+      writeFileSync(join(dir, 'base-pin.json'), JSON.stringify({ rcTag: fixture.basePinRcTag }));
+      writeFileSync(join(dir, 'head-pin.json'), JSON.stringify({ rcTag: null }));
+      writeFileSync(join(dir, 'changed-files.txt'), '');
+      if (fixture.guardScriptPresent) {
+        mkdirSync(join(dir, 'base-checkout/scripts'), { recursive: true });
+        // A minimal stand-in that always exits 0 — these tests are about
+        // the BOOTSTRAP branch (script absent), not the guard's own logic
+        // (covered exhaustively by tests/compat-credential-freeze-guard.test.ts).
+        writeFileSync(
+          join(dir, 'base-checkout/scripts/compat-credential-freeze-guard.mjs'),
+          '#!/usr/bin/env node\nconsole.log("stand-in guard ran"); process.exit(0);\n',
+        );
+      }
+      try {
+        const stdout = execFileSync('bash', ['-c', step.run], {
+          cwd: dir,
+          encoding: 'utf8',
+          timeout: EXEC_TIMEOUT_MS,
+        });
+        return { status: 0, stdout, stderr: '' };
+      } catch (err) {
+        const e = err as { status: number | null; stdout?: string; stderr?: string };
+        return { status: e.status, stdout: e.stdout ?? '', stderr: e.stderr ?? '' };
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('EXIT 0: no guard script at base, base rcTag is null (unfrozen) — logs and passes', () => {
+    const r = runStepScript({ guardScriptPresent: false, basePinRcTag: null });
+    expect(r.status).toBe(0);
+    const out = r.stdout + r.stderr;
+    expect(out).toMatch(/no .*compat-credential-freeze-guard\.mjs.* at the base commit/);
+    expect(out).toMatch(/base is unfrozen/);
+  });
+
+  it('EXIT 1: no guard script at base, base rcTag is non-null (frozen) — fails closed', () => {
+    const r = runStepScript({ guardScriptPresent: false, basePinRcTag: 'v1.0.0-rc.1' });
+    expect(r.status).not.toBe(0);
+    const out = r.stdout + r.stderr;
+    expect(out).toMatch(/ERROR/);
+    expect(out).toMatch(/FROZEN/);
+    expect(out).toMatch(/failing closed/);
+    // The explicit non-negotiable, both in behaviour and in the message.
+    expect(out).toMatch(/[Nn]ever falling back to the PR's own head copy/);
+  });
+
+  it('the guard script IS still invoked normally when base-checkout has it (no regression)', () => {
+    const r = runStepScript({ guardScriptPresent: true, basePinRcTag: null });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('stand-in guard ran');
+  });
+});
+
 describe('the guard script runs with no hardcoded frozen-file list in the workflow itself (#1302)', () => {
   it('the "Run the freeze guard" step passes no --files/--frozen-set flag — derivation lives in the script', () => {
     const { wf } = load();

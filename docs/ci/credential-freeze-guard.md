@@ -174,6 +174,42 @@ issue can add on its own behalf:
   base-ref-scoped credentials while still being triggerable by an untrusted
   PR), which needs its own careful design before adopting it here.
 
+## The bootstrap case — base-checkout has no guard script at all
+
+**(#1370 review round 4.)** The base-checkout indirection above assumes
+`base-checkout/scripts/compat-credential-freeze-guard.mjs` EXISTS at
+`BASE_SHA`. It does not, in two real situations: the PR that first
+introduces this guard (its own base predates the file entirely), and any
+later PR whose base for some reason predates the guard too. Without a
+special case, `node base-checkout/scripts/compat-credential-freeze-guard.mjs
+...` throws `Cannot find module`, failing every such PR's check outright —
+this is exactly what happened on #1370 itself.
+
+The "Run the freeze guard" step checks for the script first. If it is
+missing:
+- it reads `base-pin.json` (already computed by the earlier "Read the pin
+  file at the PR's base commit" step) for `rcTag`;
+- `rcTag: null` at base means the tree was UNFROZEN before this PR — there
+  is nothing a guard would have protected at that commit, so this logs the
+  reason and **passes** (`exit 0`);
+- a non-null `rcTag` at base means a window WAS live with no guard able to
+  enforce it — this **fails closed** (`exit 1`) rather than silently
+  treating a guardless-but-frozen base as safe.
+
+**It NEVER falls back to running the PR's own head copy of the script** in
+either branch — doing so would reopen the exact self-rewrite hole the
+base-checkout indirection exists to close, for the sake of covering a case
+that, once this guard has existed for one PR, will not recur for ordinary
+PRs (their base is the current tip, which already has the script).
+
+`tests/compat-credential-freeze-guard-workflow.test.ts`'s "bootstrap"
+describe block executes the EXACT `run:` script from the parsed workflow
+YAML — not a re-derivation of it — against a temp directory with and
+without the script present, both `rcTag` states, and mutation-proves all
+three failure modes: removing the fail-closed exit, removing the pass-open
+exit, and removing the bootstrap-detection branch entirely (which
+reproduces the original crash verbatim).
+
 ## merge_group
 
 This workflow also triggers on `merge_group`, even though it is not a
