@@ -604,11 +604,13 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         expect(r.stdout).toContain("kn-next create");
         expect(r.stdout).toContain("--dry-run");
         expect(r.stdout).toContain("guarded instrumentation");
-        // The help must tell the truth about the retirement (#885): the seam
-        // guard may appear only in its "retired" sentence, never as a shipped
-        // deliverable — and instrumentation-edge-safe IS still shipped.
+        // #1342/ADR-0058: the DEFAULT target wires the official adapter and
+        // the platform-owned edge fence again (it is no longer retired — that
+        // was true only for the vinext-default era, #885). The help text
+        // names both the adapter wiring and the --builder flag.
         expect(r.stdout).toContain("instrumentation-edge-safe");
-        expect(r.stdout).toContain("retired");
+        expect(r.stdout).toContain("adapterPath");
+        expect(r.stdout).toContain("--builder");
     });
 
     it("`node kn-next.js create` scaffolds through the BUNDLED bin (templates ship with the package)", () => {
@@ -630,18 +632,18 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
                 /create failed/,
             );
             expect(r.status).toBe(0);
-            // The vinext shape (ADR-0048). `next-adapter.ts` and
-            // `standalone-seam-alive.test.ts` are deliberately NOT here: the
-            // official adapter hooks are a webpack/turbopack mechanism that
-            // vinext never calls, and the seam guard existed to catch webpack
-            // layering duplicating `@getknext/lib` module state — there are no
-            // webpack layers on this path.
+            // #1342/ADR-0058: the DEFAULT (standalone) shape — plain `next
+            // build`, `output:'standalone'`, `adapterPath` wired to
+            // `next-adapter.ts`. `vite.config.ts`/`knext-bun-entry.mjs`/
+            // `runtime-contract.mjs` are the `--builder vinext` shape and are
+            // deliberately NOT here by default; `standalone-seam-alive.test.ts`
+            // stays retired (ADR-0048) — it guarded webpack-layer module-state
+            // duplication that the standalone target does not reintroduce.
             for (const rel of [
                 "src/instrumentation.ts",
                 "src/instrumentation-node.ts",
-                "vite.config.ts",
-                "knext-bun-entry.mjs",
-                "runtime-contract.mjs",
+                "next-adapter.ts",
+                "next.config.ts",
                 "instrumentation-edge-safe.test.ts",
             ]) {
                 expect(
@@ -650,16 +652,20 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
                 ).toBe(true);
             }
 
-            // Both halves: the vinext files are present AND the retired ones
-            // are gone. Asserting only presence would pass on a scaffold that
-            // still shipped a dead adapter file for every new app.
+            // Both halves: the default-target files are present AND the
+            // vinext-only / retired ones are gone. Asserting only presence
+            // would pass on a scaffold that still shipped a dead Dockerfile
+            // for every new app.
             for (const rel of [
-                "next-adapter.ts",
+                "vite.config.ts",
+                "knext-bun-entry.mjs",
+                "runtime-contract.mjs",
+                "Dockerfile",
                 "standalone-seam-alive.test.ts",
             ]) {
                 expect(
                     existsSync(join(dir, rel)),
-                    `${rel} is retired and must not be scaffolded`,
+                    `${rel} must not be scaffolded by the default builder`,
                 ).toBe(false);
             }
         } finally {

@@ -39,7 +39,12 @@ const TEMPLATE_DIR = join(WT, 'packages', 'kn-next', 'templates', 'app');
 // (#912): the vinext template deliberately carries no `output` key and the
 // adapter hooks are a mechanism vinext never calls, so neither file holds a
 // subject this prover can mutate any more.
-const APP_PKG_TPL = join(TEMPLATE_DIR, 'package.json.hbs');
+// #1342/ADR-0058: the vinext-shaped `start` script moved from `package.json.hbs`
+// (now the DEFAULT/standalone target's content, `node .next/standalone/server.js`)
+// to `package.json.vinext.hbs` (the `--builder vinext` content override) — install-
+// smoke.mjs's vinext-target block still observes exactly this file (it now passes
+// `--builder vinext` to `kn-next create`).
+const APP_PKG_TPL = join(TEMPLATE_DIR, 'package.json.vinext.hbs');
 const DOCKERFILE_TPL = join(TEMPLATE_DIR, 'Dockerfile.hbs');
 const STASH = join(tmpdir(), 'knext-alias-shim-stash.js');
 /**

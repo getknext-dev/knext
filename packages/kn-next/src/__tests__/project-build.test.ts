@@ -11,10 +11,13 @@
  */
 
 import { describe, expect, it, mock } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runProjectBuild } from "../cli/project-build";
+import {
+    checkTurbopackAdapterStandaloneRegression,
+    runProjectBuild,
+} from "../cli/project-build";
 import { handleUsageError, USAGE_ERROR_CODE } from "../cli/shared";
 
 /** What execFileSync throws when the spawned script exits non-zero. */
@@ -155,6 +158,231 @@ describe("runProjectBuild ESM preflight (vinext target only)", () => {
             expect(caught).toMatchObject({ code: USAGE_ERROR_CODE });
             expect((caught as Error).constructor.name).not.toBe("TypeError");
             expect(run).not.toHaveBeenCalledWith(["npm", "run", "build"]);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+});
+
+/** A throwaway app dir with a package.json AND an installed-looking next version. */
+function tmpAppWithNext(
+    buildScript: string,
+    nextVersion: string | undefined,
+): string {
+    const dir = mkdtempSync(join(tmpdir(), "knext-turbo-regr-"));
+    writeFileSync(
+        join(dir, "package.json"),
+        JSON.stringify({ scripts: { build: buildScript } }),
+    );
+    if (nextVersion !== undefined) {
+        mkdirSync(join(dir, "node_modules", "next"), { recursive: true });
+        writeFileSync(
+            join(dir, "node_modules", "next", "package.json"),
+            JSON.stringify({ version: nextVersion }),
+        );
+    }
+    return dir;
+}
+
+/**
+ * A workspace layout where `next` is HOISTED to the workspace root's
+ * `node_modules`, not present under the app dir's own `node_modules` — the
+ * common shape for npm/bun workspaces. Returns the APP dir (what a caller
+ * would pass as `cwd`); the workspace root is a temp parent directory the
+ * caller is responsible for cleaning up (removing the app dir alone would
+ * leave the root behind).
+ */
+function tmpHoistedWorkspaceApp(
+    buildScript: string,
+    nextVersion: string,
+): { workspaceRoot: string; appDir: string } {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "knext-turbo-hoist-"));
+    mkdirSync(join(workspaceRoot, "node_modules", "next"), {
+        recursive: true,
+    });
+    writeFileSync(
+        join(workspaceRoot, "node_modules", "next", "package.json"),
+        JSON.stringify({ version: nextVersion }),
+    );
+    const appDir = join(workspaceRoot, "apps", "web");
+    mkdirSync(appDir, { recursive: true });
+    writeFileSync(
+        join(appDir, "package.json"),
+        JSON.stringify({ scripts: { build: buildScript } }),
+    );
+    return { workspaceRoot, appDir };
+}
+
+describe("checkTurbopackAdapterStandaloneRegression (#1372)", () => {
+    it("next@16.3.0 + turbopack + a bare `next build` script throws, naming the fix", () => {
+        const dir = tmpAppWithNext("next build", "16.3.0");
+        try {
+            let caught: unknown;
+            try {
+                checkTurbopackAdapterStandaloneRegression(dir, "turbopack");
+            } catch (err) {
+                caught = err;
+            }
+            expect(caught).toMatchObject({ code: USAGE_ERROR_CODE });
+            const message = (caught as Error).message;
+            expect(message).toContain("16.3.0");
+            expect(message).toContain("--webpack");
+            expect(message).toContain("1372");
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("next@16.2.0 (confirmed good) does NOT throw", () => {
+        const dir = tmpAppWithNext("next build", "16.2.0");
+        try {
+            expect(() =>
+                checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),
+            ).not.toThrow();
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("next@17.0.0 (future major) also throws — the affected range is open-ended", () => {
+        const dir = tmpAppWithNext("next build", "17.0.0");
+        try {
+            expect(() =>
+                checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),
+            ).toThrow();
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("the webpack builder is never gated, even on an affected next version", () => {
+        const dir = tmpAppWithNext("next build --webpack", "16.3.3");
+        try {
+            expect(() =>
+                checkTurbopackAdapterStandaloneRegression(dir, "webpack"),
+            ).not.toThrow();
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("the vinext builder is never gated, even on an affected next version", () => {
+        const dir = tmpAppWithNext("vite build", "16.3.3");
+        try {
+            expect(() =>
+                checkTurbopackAdapterStandaloneRegression(dir, "vinext"),
+            ).not.toThrow();
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("an app whose OWN build script already passes --webpack is never blocked (escape hatch 1)", () => {
+        const dir = tmpAppWithNext("next build --webpack", "16.3.3");
+        try {
+            expect(() =>
+                checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),
+            ).not.toThrow();
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("an app whose OWN build script explicitly passes --turbopack still throws (NOT an escape hatch — it's the broken config)", () => {
+        const dir = tmpAppWithNext("next build --turbopack", "16.3.3");
+        try {
+            let caught: unknown;
+            try {
+                checkTurbopackAdapterStandaloneRegression(dir, "turbopack");
+            } catch (err) {
+                caught = err;
+            }
+            expect(caught).toMatchObject({ code: USAGE_ERROR_CODE });
+            expect((caught as Error).message).toContain("--webpack");
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("a HOISTED next (npm/bun workspace, no node_modules/next under the app dir) still resolves and throws", () => {
+        const { workspaceRoot, appDir } = tmpHoistedWorkspaceApp(
+            "next build",
+            "16.3.3",
+        );
+        try {
+            let caught: unknown;
+            try {
+                checkTurbopackAdapterStandaloneRegression(appDir, "turbopack");
+            } catch (err) {
+                caught = err;
+            }
+            expect(caught).toMatchObject({ code: USAGE_ERROR_CODE });
+            expect((caught as Error).message).toContain("16.3.3");
+        } finally {
+            rmSync(workspaceRoot, { recursive: true, force: true });
+        }
+    });
+
+    it("a HOISTED next on the confirmed-good version does not throw", () => {
+        const { workspaceRoot, appDir } = tmpHoistedWorkspaceApp(
+            "next build",
+            "16.2.0",
+        );
+        try {
+            expect(() =>
+                checkTurbopackAdapterStandaloneRegression(appDir, "turbopack"),
+            ).not.toThrow();
+        } finally {
+            rmSync(workspaceRoot, { recursive: true, force: true });
+        }
+    });
+
+    it("a missing node_modules/next (not installed yet) does not throw — best-effort, not a guard failure", () => {
+        const dir = tmpAppWithNext("next build", undefined);
+        try {
+            expect(() =>
+                checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),
+            ).not.toThrow();
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("a missing package.json does not throw — best-effort, not a guard failure", () => {
+        const dir = mkdtempSync(join(tmpdir(), "knext-turbo-regr-nopkg-"));
+        try {
+            expect(() =>
+                checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),
+            ).not.toThrow();
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("runProjectBuild wires the check in and fails BEFORE the build runs (mutation half)", () => {
+        const dir = tmpAppWithNext("next build", "16.3.3");
+        const run = mock();
+        try {
+            expect(() =>
+                runProjectBuild({
+                    requireEsm: false,
+                    cwd: dir,
+                    run,
+                    builderId: "turbopack",
+                }),
+            ).toThrow();
+            expect(run).not.toHaveBeenCalled();
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("runProjectBuild with no builderId skips the check entirely (opt-in, not silently mandatory)", () => {
+        const dir = tmpAppWithNext("next build", "16.3.3");
+        const run = mock();
+        try {
+            runProjectBuild({ requireEsm: false, cwd: dir, run });
+            expect(run).toHaveBeenCalledWith(["npm", "run", "build"]);
         } finally {
             rmSync(dir, { recursive: true, force: true });
         }
