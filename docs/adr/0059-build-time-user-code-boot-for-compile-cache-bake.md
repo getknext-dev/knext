@@ -69,9 +69,13 @@ tree:
 6. **Nothing tells user code it is inside a bake.** The vinext × node bake sets
    `KNEXT_COMPILE_CACHE_BAKE=1`, but the standalone bake sets only `PORT`, `HOSTNAME` and
    `KNEXT_WARM_PATH` (`Dockerfile.standalone.hbs:229`). There is **no opt-out** in either recipe.
-7. **A harness-only knob lives in the shipped template.** `KNEXT_WARM_ACCEPT_ANY_STATUS=1`
-   (`knext-compile-cache-bake.mjs.hbs:66-70`) relaxes the 2xx rule. Only the compat harness sets
-   it (`scripts/e2e-deploy.sh:629`), but every image carries the code (#1299).
+7. **RESOLVED (#1299).** A harness-only knob used to live in the shipped template —
+   `KNEXT_WARM_ACCEPT_ANY_STATUS=1` relaxed the 2xx rule inside `knext-compile-cache-bake.mjs.hbs`
+   itself, so every image carried the code even though only the compat harness ever set it
+   (`scripts/e2e-deploy.sh:629`). The template now reads no such variable and is unconditionally
+   strict; the tolerance moved to `scripts/e2e-bake-accept.mjs`, a harness-owned wrapper that
+   spawns the (unmodified) shipped driver as a child and re-derives the tolerant verdict from its
+   stdout + exit code, never from anything the driver itself interprets.
 
 ## Decision
 
@@ -185,7 +189,8 @@ liveness floors, and 0.68 that the network restriction and the marker should lan
       Next's source only). *(security #1327)* Then strip `.env*` from the staged
       `.next/standalone/` in `stageStandaloneBuildContext`, and add a guard that reds if any
       `.env*` file is staged.
-- [ ] Move `KNEXT_WARM_ACCEPT_ANY_STATUS` out of the shipped template. *(#1299)*
+- [x] Move `KNEXT_WARM_ACCEPT_ANY_STATUS` out of the shipped template. *(#1299,
+      `scripts/e2e-bake-accept.mjs`)*
 - [x] Validate `healthCheckPath`. *(#1297, done in PR #1319, `validate.ts:534-564`)*
 - [ ] Add the `compileCache.bake: 'framework'` opt-out and the framework-only driver, and
       measure its liveness counts on the reference app before documenting it.
