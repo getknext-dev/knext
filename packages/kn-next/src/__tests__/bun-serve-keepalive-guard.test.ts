@@ -238,23 +238,49 @@ describe("wiring 1/2 — the COMPILED binary bakes the guard in (vinext-compile.
     });
 
     it("injects the guard as the entry’s FIRST import (mutation anchor)", () => {
-        // The exact injection statement. Removing it — the mutation — deletes this
-        // substring and reds the test. It must PREPEND to the entry source (the
-        // #1309-staticized `raw`, after it), so the guard evaluates before srvx/bun
-        // calls Bun.serve.
-        // Since #1322 a second injected import (the Bun.serve Cache-Control
-        // normalization) follows it; the guard must stay FIRST.
+        // The compiled entry's source is built as a list of injected imports
+        // followed by the #1309-staticized entry: `const src = \`import
+        // ${JSON.stringify(A)};\n\` + … + staticized.contents;`. The guard must be
+        // the FIRST injected import so it patches Bun.serve before srvx/bun calls
+        // it; later injections (the sidecar resolver, the Cache-Control
+        // normalization) run after it, in that order.
         const s = src();
-        const guard =
-            // biome-ignore lint/suspicious/noTemplateCurlyInString: the LITERAL source substring being asserted, not a template
-            "`import ${JSON.stringify(GUARD_FILE)};\\n` +";
-        const next =
-            // biome-ignore lint/suspicious/noTemplateCurlyInString: the LITERAL source substring being asserted, not a template
-            "`import ${JSON.stringify(CACHE_CONTROL_FILE)};\\n` +";
-        expect(s.split(guard).length - 1).toBe(1);
-        expect(s.indexOf(guard)).toBeLessThan(s.indexOf(next));
-        // and the entry's own (staticized) source comes after both injections
-        expect(s.indexOf(next)).toBeLessThan(s.indexOf("staticized.contents;"));
+        const block = s.match(/const src =([\s\S]*?)staticized\.contents;/);
+        expect(
+            block,
+            "the entry-source construction was not found",
+        ).not.toBeNull();
+        const injected = [
+            ...(block?.[1] ?? "").matchAll(
+                /import \$\{JSON\.stringify\((\w+)\)\};/g,
+            ),
+        ].map((m) => m[1]);
+        // mutation anchor: the guard is first, exactly once
+        expect(injected[0]).toBe("GUARD_FILE");
+        expect(injected.filter((x) => x === "GUARD_FILE")).toHaveLength(1);
+        expect(new Set(injected).size).toBe(injected.length);
+        // known later injections keep their relative order
+        const order = [
+            "GUARD_FILE",
+            "SIDECAR_INSTALL_FILE",
+            "CACHE_CONTROL_FILE",
+        ];
+        const known = injected.filter((x) => order.includes(x));
+        expect(known).toEqual(
+            [...known].sort((a, b) => order.indexOf(a) - order.indexOf(b)),
+        );
+        // every injected module is resolved beside vinext-compile and fails closed
+        for (const name of injected) {
+            expect(s, `${name} must fail closed when missing`).toMatch(
+                new RegExp(
+                    `if \\(!${name}\\) \\{[\\s\\S]*?process\\.exit\\(1\\);`,
+                ),
+            );
+        }
+        // nothing may be prepended outside the list: the injections come first
+        expect(s).toMatch(
+            /const src =\s*`import \$\{JSON\.stringify\(GUARD_FILE\)\};\\n`/,
+        );
     });
 
     it("the guard-resolution block actually points at THIS guard file", () => {

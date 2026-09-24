@@ -180,6 +180,12 @@ export default defineConfig([
       'prom-client',
       'kafkajs',
       '@google-cloud/storage',
+      // bun-serve-cache-control.mjs imports the Cache-Control rule from the CJS
+      // preload, which the CJS pass below ships as its own file. Inlining it here
+      // would turn its lazy `require('node:http')` into an ESM `__require("http")`
+      // that throws under ESM Node (the #948 dist guard); kept as a relative
+      // import, it resolves to the shipped .cjs beside it.
+      /\.\/cache-control-normalize\.cjs$/,
     ],
   },
   // #175 — the deployed-platform Cache-Control preload. It is loaded with
