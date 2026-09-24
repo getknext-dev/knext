@@ -79,4 +79,26 @@ describe("validateConfig healthCheckPath checks", () => {
     it("names the offending value in the error message", () => {
         expect(() => validateConfig(baseConfig("health"))).toThrow(/health/);
     });
+
+    it("rejects a non-string value (null) with a ConfigValidationError, not a raw TypeError", () => {
+        const config = baseConfig() as unknown as Record<string, unknown>;
+        config.healthCheckPath = null;
+        expect(() =>
+            validateConfig(config as unknown as KnativeNextConfig),
+        ).toThrow(ConfigValidationError);
+        expect(() =>
+            validateConfig(config as unknown as KnativeNextConfig),
+        ).toThrow(/healthCheckPath/);
+    });
+
+    it("rejects a non-string value (number) with a ConfigValidationError, not a raw TypeError", () => {
+        const config = baseConfig() as unknown as Record<string, unknown>;
+        config.healthCheckPath = 123;
+        expect(() =>
+            validateConfig(config as unknown as KnativeNextConfig),
+        ).toThrow(ConfigValidationError);
+        expect(() =>
+            validateConfig(config as unknown as KnativeNextConfig),
+        ).toThrow(/healthCheckPath/);
+    });
 });

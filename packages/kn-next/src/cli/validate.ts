@@ -542,22 +542,28 @@ export function validateConfig(
     // explicit empty string is also caught, rather than silently treated the
     // same as "unset".
     if (config.healthCheckPath !== undefined) {
-        const path = config.healthCheckPath;
-        if (!path.startsWith("/")) {
+        if (typeof config.healthCheckPath !== "string") {
             errors.push(
-                `'healthCheckPath' ("${path}") must start with a leading slash (e.g. "/api/health").`,
+                `'healthCheckPath' must be a string (e.g. "/api/health"), got ${typeof config.healthCheckPath}.`,
             );
-        }
-        if (path.includes(",")) {
-            errors.push(
-                `'healthCheckPath' ("${path}") must not contain a comma — it is joined into a ` +
-                    "comma-separated KNEXT_WARM_PATH list at build time and a comma would split it into two paths.",
-            );
-        }
-        if (/\s/.test(path)) {
-            errors.push(
-                `'healthCheckPath' ("${path}") must not contain whitespace (e.g. "/api/health", not "/api health").`,
-            );
+        } else {
+            const path = config.healthCheckPath;
+            if (!path.startsWith("/")) {
+                errors.push(
+                    `'healthCheckPath' ("${path}") must start with a leading slash (e.g. "/api/health").`,
+                );
+            }
+            if (path.includes(",")) {
+                errors.push(
+                    `'healthCheckPath' ("${path}") must not contain a comma — it is joined into a ` +
+                        "comma-separated KNEXT_WARM_PATH list at build time and a comma would split it into two paths.",
+                );
+            }
+            if (/\s/.test(path)) {
+                errors.push(
+                    `'healthCheckPath' ("${path}") must not contain whitespace (e.g. "/api/health", not "/api health").`,
+                );
+            }
         }
     }
 
