@@ -9,6 +9,8 @@
  * from the one users scaffold. This guard SCANS every tracked `package.json` /
  * `package.json.hbs` rather than enumerating them, so a new manifest that pins
  * vinext is covered the day it lands.
+ * It also scans every tracked `bun.lock`: a lock left resolving an older vinext
+ * installs that version wherever it is used with a frozen or re-used lockfile.
  *
  * Deliberate exceptions, both frozen historical artifacts rather than shipped
  * code: `examples/bun-exec`, the ADR-0042 A1 benchmark recipe pinned at vinext
@@ -85,5 +87,34 @@ describe('vinext pin lockstep', () => {
     expect(pinned).toContain('packages/kn-next/templates/app/package.json.hbs');
     expect(pinned.length).toBeGreaterThanOrEqual(6);
     expect(drift, 'vinext pins out of lockstep with the compat lane').toEqual([]);
+  });
+
+  it('every tracked bun.lock resolves vinext at the lane version (a stale lock installs the old one)', () => {
+    const lane = laneVinextVersion(readFileSync(resolve(repoRoot, DEPLOY_SCRIPT), 'utf8'));
+    const out = execFileSync('git', ['ls-files', '--', '*bun.lock'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    });
+    const locks = out
+      .split('\n')
+      .filter(Boolean)
+      .filter((f) => !EXEMPT_PREFIXES.some((p) => f.startsWith(p)));
+    const resolving: string[] = [];
+    const drift: string[] = [];
+    for (const file of locks) {
+      const text = readFileSync(resolve(repoRoot, file), 'utf8');
+      // `"vinext": ["vinext@<v>", …` is the lock's resolution entry.
+      const resolved = [...text.matchAll(/"vinext": \["vinext@([^"]+)"/g)].map((m) => m[1]);
+      if (resolved.length === 0) continue;
+      resolving.push(file);
+      // Workspace dependency specs only: the lock's `bin` map also has a
+      // `"vinext": "dist/cli.js"` entry, which is not a version.
+      const specs = vinextPins(text).filter((v) => /^[~^]?\d/.test(v));
+      const stale = [...resolved, ...specs].filter((v) => v !== lane);
+      if (stale.length > 0) drift.push(`${file}: ${stale.join(', ')} (lane: ${lane})`);
+    }
+    expect(resolving).toContain('bun.lock');
+    expect(resolving).toContain('packages/kn-next/src/__tests__/fixtures/vinext-node-app/bun.lock');
+    expect(drift, 'bun.lock files resolving a different vinext than the lane').toEqual([]);
   });
 });
