@@ -957,10 +957,25 @@ describe('ga-tarball-diff CLI (--rc-ref/--ga-ref)', () => {
   it('exercises the real git worktree add/remove lifecycle for an empty-tree ref (does not pack — see comment)', () => {
     const repoRoot = resolve(import.meta.dir, '..');
     const emptyTreeSha = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'; // the well-known empty-tree hash
+    // `git commit-tree` needs an author/committer identity, and a CI runner
+    // has no reason to carry a global `user.name`/`user.email` (ours doesn't
+    // — that is how this failed in CI while passing locally). Pass the
+    // identity explicitly on this spawn rather than depending on ANY git
+    // config, global or repo-local.
     const commitSha = execFileSync(
       'git',
       ['commit-tree', emptyTreeSha, '-m', 'ga-tarball-diff test fixture: empty tree'],
-      { cwd: repoRoot, encoding: 'utf8' },
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: 'ga-tarball-diff-test',
+          GIT_AUTHOR_EMAIL: 'ga-tarball-diff-test@example.invalid',
+          GIT_COMMITTER_NAME: 'ga-tarball-diff-test',
+          GIT_COMMITTER_EMAIL: 'ga-tarball-diff-test@example.invalid',
+        },
+      },
     ).trim();
 
     const before = execFileSync('git', ['worktree', 'list', '--porcelain'], {
