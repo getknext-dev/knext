@@ -39,6 +39,7 @@ import {
   isTerminalStatus,
   pickDispatchedRun,
   shippedPinRef,
+  withRetry,
 } from './lib/dispatch-poll.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -53,25 +54,39 @@ function loadManifest() {
   return JSON.parse(readFileSync(path, 'utf8'));
 }
 
+/**
+ * Both wrapped in `withRetry` (rev-1382 review, optional item): these run
+ * repeatedly across the 90-minute poll loop, so a transient `gh` error
+ * (rate limit, a network blip) used to crash the whole script immediately —
+ * indistinguishable in the alert from an ACTUAL credential/early-warning
+ * red. The dispatch call itself (`gh workflow run`, below) is deliberately
+ * NOT retried: retrying a dispatch that may have actually succeeded risks a
+ * duplicate dispatch, a different failure mode than "wait longer to read a
+ * result".
+ */
 function listRecentRuns(repo) {
-  const out = gh([
-    'run',
-    'list',
-    '--repo',
-    repo,
-    '--workflow',
-    TARGET_WORKFLOW,
-    '--json',
-    'databaseId,event,headBranch,createdAt,status,conclusion,displayTitle',
-    '--limit',
-    '30',
-  ]);
-  return JSON.parse(out);
+  return withRetry(async () => {
+    const out = gh([
+      'run',
+      'list',
+      '--repo',
+      repo,
+      '--workflow',
+      TARGET_WORKFLOW,
+      '--json',
+      'databaseId,event,headBranch,createdAt,status,conclusion,displayTitle',
+      '--limit',
+      '30',
+    ]);
+    return JSON.parse(out);
+  });
 }
 
 function viewRun(repo, id) {
-  const out = gh(['run', 'view', String(id), '--repo', repo, '--json', 'status,conclusion,url']);
-  return JSON.parse(out);
+  return withRetry(async () => {
+    const out = gh(['run', 'view', String(id), '--repo', repo, '--json', 'status,conclusion,url']);
+    return JSON.parse(out);
+  });
 }
 
 async function sleep(ms) {
@@ -99,7 +114,7 @@ async function main() {
     `Dispatching ${TARGET_WORKFLOW} — runtime=${runtime} builder=${builder} nextjsRef=${nextjsRef} (smoke=true, ref=${ref})`,
   );
 
-  const runsBefore = listRecentRuns(repo);
+  const runsBefore = await listRecentRuns(repo);
   gh([
     'workflow',
     'run',
@@ -124,7 +139,10 @@ async function main() {
   let run = null;
   while (Date.now() < deadline && !run) {
     await sleep(pollIntervalMs);
-    run = pickDispatchedRun(runsBefore, listRecentRuns(repo), { headBranch: ref, dispatchId });
+    run = pickDispatchedRun(runsBefore, await listRecentRuns(repo), {
+      headBranch: ref,
+      dispatchId,
+    });
   }
   if (!run) {
     console.error(
@@ -139,7 +157,7 @@ async function main() {
   let url = '';
   while (Date.now() < deadline && !isTerminalStatus(status)) {
     await sleep(pollIntervalMs);
-    const info = viewRun(repo, run.databaseId);
+    const info = await viewRun(repo, run.databaseId);
     status = info.status;
     conclusion = info.conclusion;
     url = info.url;

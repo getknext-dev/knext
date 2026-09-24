@@ -212,19 +212,34 @@ describe('the dispatch script computes and passes a per-leg dispatchId, and the 
   });
 
   it('the pickDispatchedRun call in the script passes dispatchId through, matching what it dispatched', () => {
-    // A per-LINE match, not a `(...);`-bounded capture: the mutation harness's
-    // residue marker can land between a mutated call's closing `)` and the
-    // ORIGINAL `;` that followed it in source, swallowing the semicolon into
-    // the comment and pushing a naive `\);`-terminated regex past this call
-    // entirely, to whatever `);` happens to appear next in the file —
-    // silently certifying a mutation that removed `dispatchId` as caught.
-    // Anchoring on the call's own LINE, which the harness's markerComment()
-    // always keeps intact, does not have that failure mode.
+    // Paren-BALANCED extraction, not a `(...);`-bounded regex: the mutation
+    // harness's residue marker can land between a mutated call's closing `)`
+    // and the ORIGINAL `;` that followed it in source, swallowing the
+    // semicolon into the comment and pushing a naive `\);`-terminated regex
+    // past this call entirely, to whatever `);` happens to appear next in
+    // the file — silently certifying a mutation that removed `dispatchId`
+    // as caught. Balancing parens char-by-char from the call's own `(` is
+    // immune to that: it never looks for a closing `;` at all, and it
+    // handles the call spanning multiple lines (as it does once `await
+    // listRecentRuns(repo)` is inlined as an argument).
     const scriptText = readFileSync(DISPATCH_SCRIPT_PATH, 'utf8');
-    const callLine = scriptText
-      .split('\n')
-      .find((l) => l.includes('pickDispatchedRun(') && l.includes('run ='));
-    expect(callLine, 'could not find the pickDispatchedRun(...) call site line').toBeTruthy();
-    expect(callLine).toContain('dispatchId');
+    const sigIdx = scriptText.indexOf('pickDispatchedRun(');
+    expect(sigIdx, 'could not find a pickDispatchedRun( call site').toBeGreaterThan(-1);
+    const openIdx = sigIdx + 'pickDispatchedRun'.length;
+    let depth = 0;
+    let closeIdx = -1;
+    for (let i = openIdx; i < scriptText.length; i++) {
+      if (scriptText[i] === '(') depth++;
+      else if (scriptText[i] === ')') {
+        depth--;
+        if (depth === 0) {
+          closeIdx = i;
+          break;
+        }
+      }
+    }
+    expect(closeIdx, 'could not balance the pickDispatchedRun(...) call').toBeGreaterThan(-1);
+    const call = scriptText.slice(sigIdx, closeIdx + 1);
+    expect(call).toContain('dispatchId');
   });
 });

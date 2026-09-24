@@ -88,8 +88,10 @@ const MUTATIONS = [
   {
     label: 'compat-shipped-pin-dispatch-and-wait.mjs: stop passing dispatchId to pickDispatchedRun',
     subject: 'dispatchScript',
-    anchor: 'pickDispatchedRun(runsBefore, listRecentRuns(repo), { headBranch: ref, dispatchId })',
-    replacement: 'pickDispatchedRun(runsBefore, listRecentRuns(repo), { headBranch: ref })',
+    anchor:
+      'run = pickDispatchedRun(runsBefore, await listRecentRuns(repo), {\n      headBranch: ref,\n      dispatchId,\n    });',
+    replacement:
+      'run = pickDispatchedRun(runsBefore, await listRecentRuns(repo), {\n      headBranch: ref,\n    });',
   },
   {
     label: 'compat-shipped-pin-early-warning.yml: stop setting DISPATCH_ID for the matrix cell',

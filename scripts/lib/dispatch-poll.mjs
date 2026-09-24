@@ -95,6 +95,46 @@ export function shippedPinRef(manifest) {
   return `v${manifest.shippedNextPin}`;
 }
 
+/**
+ * A bounded retry with exponential backoff, for a `gh` call that can fail
+ * TRANSIENTLY (rate limit, a network blip) during the 90-minute poll loop
+ * (rev-1382 review). Before this, ANY thrown error from `listRecentRuns`/
+ * `viewRun` propagated straight out of `main()` and exited 1 — a one-off
+ * blip was indistinguishable from a real credential/early-warning red.
+ *
+ * Deliberately NOT applied to the initial `gh workflow run` dispatch call —
+ * retrying a dispatch that may have actually SUCCEEDED risks a duplicate
+ * dispatch, a different failure mode than "wait longer to read a result".
+ *
+ * Gives up and RE-THROWS the last error once `attempts` is exhausted —
+ * never silently swallowed. `sleep` is injected so this is unit-testable
+ * without a real 90-minute wait.
+ *
+ * @template T
+ * @param {() => Promise<T>} fn
+ * @param {{ attempts?: number, delayMs?: number, sleep?: (ms: number) => Promise<void> }} [opts]
+ * @returns {Promise<T>}
+ */
+export async function withRetry(fn, opts = {}) {
+  const attempts = opts.attempts ?? 3;
+  const delayMs = opts.delayMs ?? 5_000;
+  const sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+
+  let lastError;
+  let currentDelay = delayMs;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (attempt === attempts) break;
+      await sleep(currentDelay);
+      currentDelay *= 2;
+    }
+  }
+  throw lastError;
+}
+
 /** The 4 real (non-turbopack-excluded) matrix cells this lane runs. Turbopack
  * is included as a REAL cell (not allowed-to-fail): #1372's Turbopack +
  * adapterPath + output:'standalone' regression is fixed upstream in

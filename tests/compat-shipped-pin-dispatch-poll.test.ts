@@ -7,10 +7,26 @@ import {
   pickDispatchedRun,
   SHIPPED_PIN_CELLS,
   shippedPinRef,
+  withRetry,
 } from '../scripts/lib/dispatch-poll.mjs';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 const MANIFEST_PATH = resolve(REPO_ROOT, '.github/compat-credentialed-next-version.json');
+
+/**
+ * The shape `pickDispatchedRun`'s `runsBefore`/`runsAfter` take (see
+ * `scripts/lib/dispatch-poll.mjs`'s JSDoc). rev-1382 review: a bare
+ * `const before = []` is implicit `any[]` (TS7034/TS7005) under this repo's
+ * root `tsconfig.typecheck.json` strict gate — annotate every such fixture
+ * explicitly rather than let the type flow from an untyped empty literal.
+ */
+type CredentialRunFixture = {
+  databaseId: number;
+  event?: string;
+  headBranch?: string;
+  createdAt?: string;
+  displayTitle?: string;
+};
 
 describe('shippedPinRef', () => {
   it('derives the v-prefixed ref from shippedNextPin', () => {
@@ -46,7 +62,7 @@ describe('pickDispatchedRun', () => {
   });
 
   it('ignores a new run on a DIFFERENT branch', () => {
-    const before = [];
+    const before: CredentialRunFixture[] = [];
     const after = [
       {
         databaseId: 5,
@@ -59,7 +75,7 @@ describe('pickDispatchedRun', () => {
   });
 
   it('ignores a new SCHEDULED run — only workflow_dispatch counts', () => {
-    const before = [];
+    const before: CredentialRunFixture[] = [];
     const after = [
       { databaseId: 5, event: 'schedule', headBranch, createdAt: '2026-01-01T00:00:00Z' },
     ];
@@ -67,7 +83,7 @@ describe('pickDispatchedRun', () => {
   });
 
   it('breaks ties on the newest createdAt', () => {
-    const before = [];
+    const before: CredentialRunFixture[] = [];
     const after = [
       { databaseId: 10, event: 'workflow_dispatch', headBranch, createdAt: '2026-01-01T00:00:00Z' },
       { databaseId: 11, event: 'workflow_dispatch', headBranch, createdAt: '2026-01-01T00:10:00Z' },
@@ -89,7 +105,7 @@ describe('pickDispatchedRun', () => {
   // candidates.
   describe('with dispatchId — exact displayTitle match, no recency heuristic', () => {
     it('picks the run whose displayTitle equals dispatchId, among 4 concurrent legs', () => {
-      const before = [];
+      const before: CredentialRunFixture[] = [];
       const after = [
         {
           databaseId: 101,
@@ -130,7 +146,7 @@ describe('pickDispatchedRun', () => {
     });
 
     it('ignores a NEWER run with a different dispatchId — no "newest wins" fallback', () => {
-      const before = [];
+      const before: CredentialRunFixture[] = [];
       const after = [
         {
           databaseId: 1,
@@ -154,7 +170,7 @@ describe('pickDispatchedRun', () => {
     });
 
     it("matching is EXACT equality, not substring — a dispatchId that is a PREFIX of another run's displayTitle must not match it", () => {
-      const before = [];
+      const before: CredentialRunFixture[] = [];
       const after = [
         {
           databaseId: 1,
@@ -170,7 +186,7 @@ describe('pickDispatchedRun', () => {
     });
 
     it('fails closed (null) when no run carries the exact dispatchId, even with other candidates present', () => {
-      const before = [];
+      const before: CredentialRunFixture[] = [];
       const after = [
         {
           databaseId: 1,
@@ -225,5 +241,105 @@ describe('isTerminalStatus / isRedConclusion', () => {
     expect(isRedConclusion('some_future_conclusion_shape')).toBe(true);
     expect(isRedConclusion(null)).toBe(true);
     expect(isRedConclusion(undefined)).toBe(true);
+  });
+});
+
+describe('withRetry — a bounded retry for transient `gh` errors during the 90-min poll', () => {
+  // rev-1382 review (optional item): one transient gh API blip during the
+  // poll loop used to crash the whole script immediately (uncaught, exit 1)
+  // — a real credential/early-warning red would be indistinguishable from a
+  // one-off network hiccup. A bounded retry with backoff absorbs the blip
+  // without absorbing a REAL, persistent failure (which must still surface).
+
+  it('returns the result on the first success, calling fn exactly once', async () => {
+    let calls = 0;
+    const result = await withRetry(async () => {
+      calls += 1;
+      return 'ok';
+    });
+    expect(result).toBe('ok');
+    expect(calls).toBe(1);
+  });
+
+  it('retries a THROWING fn up to the bound, then returns the eventual success', async () => {
+    let calls = 0;
+    const sleeps: number[] = [];
+    const result = await withRetry(
+      async () => {
+        calls += 1;
+        if (calls < 3) throw new Error('transient: rate limited');
+        return 'ok on 3rd attempt';
+      },
+      {
+        attempts: 5,
+        delayMs: 10,
+        sleep: async (ms: number) => {
+          sleeps.push(ms);
+        },
+      },
+    );
+    expect(result).toBe('ok on 3rd attempt');
+    expect(calls).toBe(3);
+    // 2 retries -> 2 sleeps, never a sleep after the final (successful) call.
+    // Exponential: the 2nd retry's delay is double the 1st's.
+    expect(sleeps).toEqual([10, 20]);
+  });
+
+  it('gives up and re-throws the LAST error once the attempt bound is exhausted — never silently swallowed', async () => {
+    let calls = 0;
+    await expect(
+      withRetry(
+        async () => {
+          calls += 1;
+          throw new Error(`persistent failure #${calls}`);
+        },
+        { attempts: 3, delayMs: 0, sleep: async () => {} },
+      ),
+    ).rejects.toThrow('persistent failure #3');
+    expect(calls).toBe(3);
+  });
+
+  it('never sleeps/retries at all with attempts=1 (self-test: the bound is honoured exactly, not off-by-one)', async () => {
+    let calls = 0;
+    let slept = false;
+    await expect(
+      withRetry(
+        async () => {
+          calls += 1;
+          throw new Error('nope');
+        },
+        {
+          attempts: 1,
+          delayMs: 999,
+          sleep: async () => {
+            slept = true;
+          },
+        },
+      ),
+    ).rejects.toThrow('nope');
+    expect(calls).toBe(1);
+    expect(slept).toBe(false);
+  });
+
+  it('applies exponential backoff by default (each retry doubles the delay), not a flat delay', async () => {
+    let calls = 0;
+    const sleeps: number[] = [];
+    await expect(
+      withRetry(
+        async () => {
+          calls += 1;
+          throw new Error('nope');
+        },
+        {
+          attempts: 4,
+          delayMs: 100,
+          sleep: async (ms: number) => {
+            sleeps.push(ms);
+          },
+        },
+      ),
+    ).rejects.toThrow();
+    expect(calls).toBe(4);
+    expect(sleeps).toEqual([100, 200, 400]);
   });
 });
