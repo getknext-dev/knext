@@ -133,8 +133,16 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+/** The SAME manifest `tests/nextjs-credential-lockstep.test.ts` guards
+ * (#1376) — read here rather than copied, so this lane's rejection check
+ * cannot silently drift from the workflow's real credentialed ref (#1376
+ * round 3 review: this constant used to be a hardcoded THIRD copy the
+ * lockstep test never saw). */
+const CREDENTIAL_MANIFEST_PATH = join(REPO_ROOT, '.github/compat-credentialed-next-version.json');
 
 export const LEDGER_FILE_CAP = 15;
 export const MAX_EXPIRY_DAYS = 30;
@@ -149,8 +157,11 @@ export const FLAKY_WINDOW = 3;
 /** The lane's workflow: its name (for `gh run list`) and its checked-out path (for `gh api`). */
 export const LANE_WORKFLOW = 'compat-vinext.yml';
 export const LANE_WORKFLOW_PATH = `.github/workflows/${LANE_WORKFLOW}`;
-/** The pinned ref this lane's credentialed runs use (`compat-vinext.yml`'s default input). */
-export const DEFAULT_NEXTJS_REF = 'v16.2.0';
+/** The pinned ref this lane's credentialed runs use (`compat-vinext.yml`'s default input),
+ * read from `.github/compat-credentialed-next-version.json` rather than hardcoded. */
+export const DEFAULT_NEXTJS_REF = JSON.parse(
+  readFileSync(CREDENTIAL_MANIFEST_PATH, 'utf8'),
+).credentialedNextRef;
 /** Every shard must be present for a run to inform the flaky window or `verify`. */
 export const EXPECTED_SHARD_TOTAL = 16;
 /** Consecutive per-run history fetch failures (auth/API errors) before `report` fails closed. */

@@ -1284,6 +1284,9 @@ describe('workflow wiring', () => {
     const paths = verify.on.pull_request.paths as string[];
     expect(paths).toContain('test/compat-vinext-ledger.json');
     expect(paths).toContain('scripts/compat-vinext-ledger.mjs');
+    // #1376 round 3: DEFAULT_NEXTJS_REF now reads this manifest directly, so
+    // a manifest-only edit must re-run this check too.
+    expect(paths).toContain('.github/compat-credentialed-next-version.json');
     expect(verify.permissions).toEqual({ contents: 'read', actions: 'read' });
     const job = Object.values(verify.jobs)[0] as Any;
     const step = job.steps.find((st: Any) => /compat-vinext-ledger\.mjs verify/.test(st.run ?? ''));

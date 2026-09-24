@@ -26,6 +26,10 @@ on:
     paths:
       - test/compat-vinext-ledger.json
       - scripts/compat-vinext-ledger.mjs
+      # #1376 round 3: verifyEvidence's DEFAULT_NEXTJS_REF now reads this
+      # manifest directly, so a manifest-only edit (e.g. a credentialedNextRef
+      # bump) must re-run this check too, not just a ledger/script edit.
+      - .github/compat-credentialed-next-version.json
 
 permissions:
   contents: read
