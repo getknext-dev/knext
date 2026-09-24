@@ -73,19 +73,26 @@ const MUTATIONS = [
     replacement: 'process.stdout.write(`${basePath}/_next/static/x.js`);',
   },
   {
-    label: 'knext: the shipped bake driver accepts a connection reset under the harness knob',
-    target: SHIPPED_BAKE,
-    spec: SPEC_WIRING,
-    anchor: '            allOk = false;',
-    replacement: '            allOk = allOk && ACCEPT_ANY_STATUS;',
-    commentPrefix: '//',
+    // #1299 moved this tolerance OUT of SHIPPED_BAKE and into the
+    // harness-owned BAKE_ACCEPT wrapper — this mutation moves with it.
+    label:
+      'e2e-bake-accept: accepts a connection reset (status=error) under KNEXT_WARM_ACCEPT_ANY_STATUS',
+    target: BAKE_ACCEPT,
+    spec: SPEC_BAKE_ACCEPT,
+    anchor: '  if (errored.length > 0) {',
+    replacement: '  if (false) {',
   },
   {
+    // #1299: the shipped driver's own strict-2xx check is what the PRODUCT
+    // default (no wrapper, no knob) relies on — this used to be defeated by
+    // an env var the driver read itself; now there is no such var in these
+    // bytes at all, so the only way to lose strict-by-default is to weaken
+    // this comparison directly.
     label: 'knext: the PRODUCT default loosens to accept non-2xx (strict-by-default lost)',
     target: SHIPPED_BAKE,
     spec: SPEC_WIRING,
-    anchor: 'process.env.KNEXT_WARM_ACCEPT_ANY_STATUS === "1"',
-    replacement: 'process.env.KNEXT_WARM_ACCEPT_ANY_STATUS !== "0"',
+    anchor: '            allOk &&= res.status >= 200 && res.status < 300;',
+    replacement: '            allOk &&= true;',
     commentPrefix: '//',
   },
   {
@@ -135,10 +142,11 @@ const MUTATIONS = [
     replacement: '',
   },
   {
-    label: "node: skip knext's shipped bake driver",
+    label: "node: skip knext's shipped bake driver (and its e2e-bake-accept.mjs wrapper, #1299)",
     target: DEPLOY,
     spec: SPEC_WIRING,
-    anchor: '          node "${KNEXT_BAKE_DRIVER}" 2>&1 | tee -a "${APP_DIR}/.knext-bake.out" >&2',
+    anchor:
+      '          node "${SCRIPT_DIR}/e2e-bake-accept.mjs" node "${KNEXT_BAKE_DRIVER}" 2>&1 | tee -a "${APP_DIR}/.knext-bake.out" >&2',
     replacement: '          true',
   },
   {
@@ -292,6 +300,7 @@ const SUBJECTS = [
   snapshot(AUDIT),
   snapshot(SHIPPED_BAKE),
   snapshot(CHILD_ENV),
+  snapshot(BAKE_ACCEPT),
 ];
 
 for (const m of MUTATIONS) prove(m);
