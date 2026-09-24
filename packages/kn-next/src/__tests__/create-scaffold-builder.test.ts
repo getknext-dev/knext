@@ -1,5 +1,5 @@
 /**
- * #1342 (ADR-0058) — `kn-next create` defaults to the STANDALONE target
+ * #1342 (ADR-0058) — `knext create` defaults to the STANDALONE target
  * (plain `next build`, `output: 'standalone'`, the official Next.js
  * Deployment Adapter) now that #1183/ADR-0058 flipped `DEFAULT_BUILDER_ID`
  * to `"turbopack"`. `--builder vinext` scaffolds the previous shape (the
@@ -51,7 +51,7 @@ function scaffold(
     return { appDir, files };
 }
 
-describe("kn-next create — default target is standalone (#1342/ADR-0058)", () => {
+describe("knext create — default target is standalone (#1342/ADR-0058)", () => {
     it("emits output:'standalone' and adapterPath in next.config.ts", () => {
         const { appDir } = scaffold("std-default");
         const src = readFileSync(join(appDir, "next.config.ts"), "utf8");
@@ -78,7 +78,7 @@ describe("kn-next create — default target is standalone (#1342/ADR-0058)", () 
         // the full trace and bisection. `--webpack` is not a workaround
         // bolted on top: node/bun × webpack is already a CREDENTIALED matrix
         // cell (ADR-0058), so this pins the scaffold to a build path knext
-        // already verifies end-to-end. `kn-next build`/`deploy` carry the
+        // already verifies end-to-end. `knext build`/`deploy` carry the
         // same protection for non-scaffolded apps too — see
         // `project-build.test.ts`'s `checkTurbopackAdapterStandaloneRegression`
         // coverage.
@@ -103,7 +103,7 @@ describe("kn-next create — default target is standalone (#1342/ADR-0058)", () 
         expect(code).not.toMatch(/build:\s*["']vinext["']/);
     });
 
-    it("emits NO Dockerfile — kn-next build/deploy stage the standalone runtime image automatically", () => {
+    it("emits NO Dockerfile — knext build/deploy stage the standalone runtime image automatically", () => {
         // The same rationale runtime-image.ts already documents for why the
         // standalone recipe stays OUT of templates/app: staging it here would
         // ship a scaffold-time copy that build-time silently overwrites
@@ -135,7 +135,7 @@ describe("kn-next create — default target is standalone (#1342/ADR-0058)", () 
     });
 });
 
-describe("kn-next create --builder vinext — unchanged shape (#1342)", () => {
+describe("knext create --builder vinext — unchanged shape (#1342)", () => {
     it("emits the vinext Dockerfile, vite.config.ts and the bun entry", () => {
         const { appDir } = scaffold("vinext-shape", "vinext");
         expect(existsSync(join(appDir, "Dockerfile"))).toBe(true);
@@ -174,7 +174,7 @@ describe("kn-next create --builder vinext — unchanged shape (#1342)", () => {
     });
 });
 
-describe("kn-next create --builder — CLI flag validation", () => {
+describe("knext create --builder — CLI flag validation", () => {
     async function capture(
         argv: string[],
     ): Promise<{ code: number; err: string }> {
@@ -269,7 +269,7 @@ describe("selectBuilderTemplates — order-independent (#1342)", () => {
     });
 });
 
-describe("kn-next create — the real shipped templates load through selectBuilderTemplates without throwing", () => {
+describe("knext create — the real shipped templates load through selectBuilderTemplates without throwing", () => {
     it("loadTemplates() + selectBuilderTemplates() resolve for both builders", () => {
         const all = loadTemplates();
         expect(selectBuilderTemplates(all, "default").size).toBeGreaterThan(0);

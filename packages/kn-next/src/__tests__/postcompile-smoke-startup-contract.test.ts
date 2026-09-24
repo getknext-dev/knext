@@ -5,7 +5,7 @@
  * against its stdout. That makes the exact text of one `console.log` in the
  * scaffolded entry a load-bearing interface — and an invisible one: rename it to
  * `READY:` in a template and nothing fails, no type breaks, no test reds. Every
- * `kn-next build` for every app scaffolded afterwards just reports a boot
+ * `knext build` for every app scaffolded afterwards just reports a boot
  * timeout, blaming the app for a change in knext's own template.
  *
  * So the two are pinned to each other here, the way this repo pins its other

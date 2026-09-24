@@ -36,7 +36,7 @@ describe("logger output parity (prod JSON)", () => {
         expect(lines.length).toBeGreaterThan(0);
         const parsed = JSON.parse(lines[0]);
         expect(parsed.level).toBe(30); // pino numeric level for info
-        expect(parsed.name).toBe("kn-next");
+        expect(parsed.name).toBe("knext");
         expect(parsed.module).toBe("parity");
         expect(parsed.imageTag).toBe("v1.0.0");
         expect(parsed.msg).toBe("hello");

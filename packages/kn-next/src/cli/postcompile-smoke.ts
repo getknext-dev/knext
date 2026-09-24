@@ -48,7 +48,7 @@ import { UsageError } from "./shared";
 export type SmokeObligation = "boot" | "health" | "metrics" | "sigterm";
 
 /**
- * A failed obligation. Extends `UsageError` so `kn-next build` exits with the
+ * A failed obligation. Extends `UsageError` so `knext build` exits with the
  * CLI's usage code and prints the message, rather than dumping a stack.
  */
 export class PostCompileSmokeError extends UsageError {
@@ -130,7 +130,7 @@ const MAX_CAPTURED_BYTES = 8192;
  * Node THROWS on an `error` event with no listener. The startup watcher installs
  * one, but removes it again the moment the child announces itself — so an
  * `EPERM` from the later `kill()` (a child that changed uid, a restrictive
- * sandbox) arrived at an unlistened emitter and took `kn-next build` down with
+ * sandbox) arrived at an unlistened emitter and took `knext build` down with
  * an uncaught exception rather than a build failure. The listener must outlive
  * every phase, so it is installed once at spawn and never removed.
  */

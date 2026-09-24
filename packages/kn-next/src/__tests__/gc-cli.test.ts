@@ -1,7 +1,7 @@
 import { describe, expect, it, mock } from "bun:test";
 
 /**
- * `kn-next gc` — the standalone entry point for the deploy-time asset
+ * `knext gc` — the standalone entry point for the deploy-time asset
  * retention GC (#93, ADR-0011), extracted from deploy.ts so the e2e_gc suite
  * (and operators after a rollback) can drive the EXACT wiring deploy runs:
  *
@@ -90,7 +90,7 @@ describe("runAssetGC", () => {
             "-n",
             "prod",
             "-o",
-            "jsonpath={.metadata.labels.apps\\.kn-next\\.dev/build-id}",
+            "jsonpath={.metadata.labels.apps\\.knext\\.dev/build-id}",
         ]);
         // v3-P4b TOCTOU re-read: immediately before the prune, the pin +
         // status.currentTraffic are RE-READ ONCE more (a second observation).
@@ -191,7 +191,7 @@ describe("runAssetGC", () => {
         expect(prune).not.toHaveBeenCalled();
     });
 
-    it("propagates a failed status read (callers decide: deploy warns, `kn-next gc` exits non-zero)", () => {
+    it("propagates a failed status read (callers decide: deploy warns, `knext gc` exits non-zero)", () => {
         const exec = (): string => {
             throw new Error("no such nextapp");
         };
@@ -297,7 +297,7 @@ describe("runAssetGC", () => {
             "-n",
             "prod",
             "-o",
-            "jsonpath={.metadata.labels.apps\\.kn-next\\.dev/build-id}",
+            "jsonpath={.metadata.labels.apps\\.knext\\.dev/build-id}",
         ]);
         expect(prune).toHaveBeenCalledWith(
             expect.anything(),

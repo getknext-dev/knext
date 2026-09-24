@@ -129,7 +129,20 @@ describe("every runnable CLI entry routes config-not-found to the guidance", () 
     // sources, so a new entry module that forgets the wiring fails here instead
     // of silently regressing to a FATAL dump.
     const entries = readdirSync(cliSrcDir)
-        .filter((f) => f.endsWith(".ts") && f !== "exec.ts") // exec.ts DEFINES isEntrypoint
+        .filter(
+            (f) =>
+                f.endsWith(".ts") &&
+                f !== "exec.ts" && // exec.ts DEFINES isEntrypoint
+                // #1369: knext.ts is a RUNTIME PROXY onto dist/cli/kn-next.js
+                // (see its header) — it has no catch block of its own by
+                // design. deploy.ts's dispatcher (which it imports) already
+                // routes every error, including config-not-found, through
+                // handleConfigNotFound in ITS OWN catch, and calls
+                // `process.exit` there directly — nothing ever unwinds back
+                // through the proxy's `await import(...)` for this guard to
+                // catch. deploy.ts itself stays scanned below.
+                f !== "knext.ts",
+        )
         .filter((f) =>
             /isEntrypoint\(import\.meta\.url\)/.test(
                 readFileSync(join(cliSrcDir, f), "utf8"),

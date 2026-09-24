@@ -510,7 +510,7 @@ describe("pruneOldBuilds", () => {
 /**
  * v6-P2 (ADR-0011): reclaimBuildPrefix — the FAILURE-PATH orphan reclaim.
  *
- * `kn-next deploy` calls this on the confirmed upload-succeeded-then-push-failed
+ * `knext deploy` calls this on the confirmed upload-succeeded-then-push-failed
  * leg to delete EXACTLY this run's own `<app>/_next/static/<buildId>/` prefix —
  * a single, idempotent, scoped delete of ONE known prefix. It must NEVER:
  *   - list / enumerate the full remote build set (no runCapture — that is the

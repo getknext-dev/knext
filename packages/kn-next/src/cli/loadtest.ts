@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * kn-next loadtest — generate + apply a k6 load-test Job against a Knative ksvc
+ * knext loadtest — generate + apply a k6 load-test Job against a Knative ksvc
  * (#30, salvaged from PR #10 and retargeted from the old vinext admin app to the
  * Knative serving URL).
  *
@@ -8,7 +8,7 @@
  *   apps/file-manager/docs/loadtest-runbook.md
  *
  * Usage:
- *   kn-next loadtest --url https://app.example.com --type scale-to-zero [--namespace default]
+ *   knext loadtest --url https://app.example.com --type scale-to-zero [--namespace default]
  *
  * ADR-0001 note: this does NOT mutate cluster app state — it applies an ephemeral
  * k6 Job (ttlSecondsAfterFinished cleans it up). It does not touch the NextApp CR.
@@ -56,7 +56,7 @@ export async function runLoadTest(
     context?: string,
     exec: LoadTestExec = defaultLoadTestExec,
 ): Promise<string> {
-    const outputDir = join(process.cwd(), ".kn-next", "loadtest", appName);
+    const outputDir = join(process.cwd(), ".knext", "loadtest", appName);
     if (!existsSync(outputDir)) {
         mkdirSync(outputDir, { recursive: true });
     }

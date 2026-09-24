@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * kn-next build — Prepares Next.js app for Knative deployment.
+ * knext build — Prepares Next.js app for Knative deployment.
  *
  * Usage:
  *   bun run packages/kn-next/src/cli/build.ts
@@ -63,7 +63,7 @@ import { assertNodePresetOutput } from "./vinext-node-build";
 const log = createLogger({ module: "build" });
 
 /**
- * The arch the IMAGE ships. `kn-next deploy` builds a linux/amd64 image whose
+ * The arch the IMAGE ships. `knext deploy` builds a linux/amd64 image whose
  * Dockerfile expects `knext-exec-linux-x64` in the build context.
  */
 const SHIP_ARCH = "linux-x64";
@@ -88,7 +88,7 @@ interface BuildOptions {
  * darwin host nor a glibc linux host can execute. The issue's two options were
  * a container run or a host-arch smoke build; this takes the host-arch build,
  * because a container run would put docker on the critical path of every
- * `kn-next build`, and because the cross-compiled musl artifact already has a
+ * `knext build`, and because the cross-compiled musl artifact already has a
  * container gate of its own (`alpine-image.docker-e2e.test.ts`). When the host
  * IS the ship target, no second compile happens.
  *
@@ -160,7 +160,7 @@ async function smokeCompiledBinary(
 }
 
 export async function build(options: BuildOptions = {}) {
-    log.info("🔨 kn-next build (Next.js official adapter + standalone)");
+    log.info("🔨 knext build (Next.js official adapter + standalone)");
 
     // 1. Load config (validates at load time)
     log.info("Loading configuration...");
@@ -218,7 +218,7 @@ export async function build(options: BuildOptions = {}) {
     //     throws — on Node it costs a few small file copies and changes nothing
     //     at runtime.
     // Which artifact should this app have produced? Asked of the contract, not
-    // assumed — see build-artifact.ts. `kn-next build` runs the app's OWN
+    // assumed — see build-artifact.ts. `knext build` runs the app's OWN
     // `npm run build`, so a vinext-configured app already builds with vinext;
     // what knext needs to know is where to look afterwards and which post-build
     // steps still mean anything.
@@ -231,7 +231,7 @@ export async function build(options: BuildOptions = {}) {
         if (standaloneStepsApply(artifact)) {
             // HARD fail-fast (#1184), next-standalone shape ONLY: a
             // `build: 'turbopack'` app whose own build script still runs
-            // something other than `next build` (e.g. a `kn-next create`
+            // something other than `next build` (e.g. a `knext create`
             // app's default `vite build`) emits no `.next/standalone` at all,
             // and used to only `log.warn` here — the first HARD failure was an
             // opaque `COPY .next/standalone` error inside `docker buildx` at
@@ -265,7 +265,7 @@ export async function build(options: BuildOptions = {}) {
         );
     }
 
-    // 2b/2b'/2c: heal + compile, via the SAME shared step `kn-next deploy`/
+    // 2b/2b'/2c: heal + compile, via the SAME shared step `knext deploy`/
     // `preview` now call (#1339 review finding #1, build-artifact.ts) — this
     // is the one place that logic lives; build.ts only adds its own logging
     // around the returned result.
@@ -318,7 +318,7 @@ export async function build(options: BuildOptions = {}) {
     //     703ms) but COST throughput (537 vs 714 req/s, the per-module CJS
     //     conversion taxing every module boundary), while the whole-bundle
     //     compile wins both axes at once (61ms, 1103 req/s). Compiles for
-    //     linux-x64 regardless of the host — `kn-next deploy` builds a
+    //     linux-x64 regardless of the host — `knext deploy` builds a
     //     linux/amd64 image whose Dockerfile expects `knext-exec-linux-x64`
     //     in the build context.
     if (artifact.shape === "nitro-output-bun") {
@@ -361,7 +361,7 @@ export async function build(options: BuildOptions = {}) {
     // 3. Upload static assets — only when a storage block is configured.
     if (hasStorage(config)) {
         log.info("Uploading static assets...");
-        // NO build id, deliberately (#892). `kn-next build` exports no
+        // NO build id, deliberately (#892). `knext build` exports no
         // NEXT_DEPLOYMENT_ID and creates no revision, so there is nothing for
         // the operator to stamp `apps.kn-next.dev/build-id` on and nothing the
         // asset GC could ever resolve as live. Passing an id here — or letting
@@ -379,18 +379,18 @@ export async function build(options: BuildOptions = {}) {
     }
 
     log.info(
-        "✨ Build complete! Run `kn-next deploy` to push the image and apply the NextApp CR.",
+        "✨ Build complete! Run `knext deploy` to push the image and apply the NextApp CR.",
     );
 }
 
-export const BUILD_HELP = `kn-next build — run the build + asset-upload steps, without deploying
+export const BUILD_HELP = `knext build — run the build + asset-upload steps, without deploying
 
 Usage:
-  kn-next build [--skip-next] [--skip-smoke]
+  knext build [--skip-next] [--skip-smoke]
 
 Runs the project's build script (\`next build\`, output:'standalone'), heals the
 standalone output, and uploads static assets to the configured bucket. It makes
-NO cluster writes — \`kn-next deploy\` is what hands the app to the operator.
+NO cluster writes — \`knext deploy\` is what hands the app to the operator.
 
 Options:
   --skip-next           Reuse an existing .next/ build instead of running it again
@@ -402,7 +402,7 @@ Options:
 `;
 
 /**
- * The flags `kn-next build` accepts. Exported so a guard can hold reference-app
+ * The flags `knext build` accepts. Exported so a guard can hold reference-app
  * and template `package.json` scripts to the real parser (`--target` was removed
  * with ADR-0048, and a script still passing it fails with `unknown flag`; the
  * two selectable targets are chosen by the `build` config key, never by a flag).
@@ -415,7 +415,7 @@ export const ACCEPTED_BUILD_FLAGS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * argv entry for `kn-next build`.
+ * argv entry for `knext build`.
  *
  * Parses its OWN argv — that is the whole point. The first version of the
  * dispatch branch called `build()` directly, so `--help` (and every other flag)
@@ -435,8 +435,8 @@ export async function buildMain(argv: readonly string[]): Promise<number> {
         if (!KNOWN.has(a)) {
             throw new UsageError(
                 a.startsWith("-")
-                    ? `unknown flag "${a}" (see kn-next build --help)`
-                    : `unexpected positional ${JSON.stringify(a)} — build takes no arguments (see kn-next build --help)`,
+                    ? `unknown flag "${a}" (see knext build --help)`
+                    : `unexpected positional ${JSON.stringify(a)} — build takes no arguments (see knext build --help)`,
             );
         }
     }

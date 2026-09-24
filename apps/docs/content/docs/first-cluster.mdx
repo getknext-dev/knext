@@ -10,7 +10,7 @@ guides for when you outgrow it.
 
 <Callout type="info">
 **No Kubernetes knowledge required.** Every step below is one command plus one sentence saying
-what it does. At the end, `npx kn-next doctor` checks everything you installed and tells you
+what it does. At the end, `npx knext doctor` checks everything you installed and tells you
 exactly where you stand.
 </Callout>
 
@@ -102,7 +102,7 @@ is on [Install](/docs/install).
 From your Next.js project (or any directory with `@getknext/core` installed), run the preflight:
 
 ```bash title="shell"
-npx kn-next doctor
+npx knext doctor
 ```
 
 `doctor` checks the pieces you just installed — the `NextApp` resource definition, the operator,
@@ -120,7 +120,7 @@ Be honest with yourself about what you just built:
 - **Network isolation is declarative-only here.** knext's default `NetworkPolicy` is enforced
   only if your cluster's network plugin (CNI) supports NetworkPolicy (Calico, Cilium); on kind's default CNI the policy is
   inert. See [Production hardening](/docs/hardening).
-- **Deploys still need a registry.** `kn-next deploy` pushes your app image to a container
+- **Deploys still need a registry.** `knext deploy` pushes your app image to a container
   registry the cluster can pull from — the [Getting started](/docs/getting-started) prerequisites
   cover that.
 

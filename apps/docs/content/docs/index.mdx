@@ -112,7 +112,7 @@ in-core-vs-recipe split, and never treat an unbuilt generator as shipping.
 - **Bring-your-own database.** knext is engine-agnostic: bind an existing Postgres by supplying a
   `DATABASE_URL` from a Kubernetes Secret — knext provisions nothing. The optional `@getknext/db`
   layer wraps drizzle-orm over that DSN with a typed schema, one-shot writer-only migrations
-  (`kn-next db migrate`), and explicit read/write clients (`getDb()` / `getDbRO()`). See
+  (`knext db migrate`), and explicit read/write clients (`getDb()` / `getDbRO()`). See
   [Databases](/docs/databases) and the [Data SDK](/docs/data-sdk).
 - **Signed, scanned supply chain.** Every published image is Trivy-gated before push, carries an
   SBOM attestation and SLSA provenance, and is cosign-signed on the pushed digest. See

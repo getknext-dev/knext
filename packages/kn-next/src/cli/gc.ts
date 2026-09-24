@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
 /**
- * kn-next gc — the skew-protection asset retention GC (#93, ADR-0011),
+ * knext gc — the skew-protection asset retention GC (#93, ADR-0011),
  * runnable standalone.
  *
- * This is the EXACT code path `kn-next deploy` runs after applying the CR
+ * This is the EXACT code path `knext deploy` runs after applying the CR
  * (extracted from deploy.ts so the e2e_gc suite — and an operator of the app
  * after a rollback — can drive it without a full build/push/deploy):
  *
@@ -126,9 +126,9 @@ export interface AssetGCResult {
 
 /**
  * Runs the retention GC once. Shared verbatim by deploy.ts (post-deploy,
- * best-effort) and `kn-next gc` (standalone). Throws only when the
+ * best-effort) and `knext gc` (standalone). Throws only when the
  * status.currentTraffic read itself fails — deploy wraps that in its
- * best-effort catch; `kn-next gc` lets it surface as a non-zero exit.
+ * best-effort catch; `knext gc` lets it surface as a non-zero exit.
  *
  * With `dryRun` (#264 part 2) the cluster reads and the plan computation are
  * IDENTICAL; only the deletes are withheld (see pruneOldBuilds).
@@ -225,7 +225,7 @@ export function runAssetGC(
     );
     // Spec-pin probe — UNCONDITIONAL (#272 sysdesign-gate residual, folded
     // into #254): status.currentTraffic is the operator's OBSERVATION and can
-    // LAG the spec — a fresh `kn-next rollback --to revA` pin may not be
+    // LAG the spec — a fresh `knext rollback --to revA` pin may not be
     // reflected in a still-populated (or wiped) status yet. The pin is
     // therefore read on EVERY run (READ-ONLY): an empty status with a pin
     // skips (#264 fail-safe below); a populated status has the pin's build-id
@@ -272,7 +272,7 @@ export function runAssetGC(
                     "-n",
                     namespace,
                     "-o",
-                    "jsonpath={.metadata.labels.apps\\.kn-next\\.dev/build-id}",
+                    "jsonpath={.metadata.labels.apps\\.knext\\.dev/build-id}",
                 ],
                 context,
             ),
@@ -305,7 +305,7 @@ export function runAssetGC(
                         "-n",
                         namespace,
                         "-o",
-                        "jsonpath={.metadata.labels.apps\\.kn-next\\.dev/build-id}",
+                        "jsonpath={.metadata.labels.apps\\.knext\\.dev/build-id}",
                     ],
                     context,
                 ),
@@ -427,7 +427,7 @@ export function parseGcArgs(argv: readonly string[]): GcArgs {
         const v = argv[i];
         if (v === undefined || v.startsWith("-")) {
             throw new UsageError(
-                `${flag} requires a value (see kn-next gc --help)`,
+                `${flag} requires a value (see knext gc --help)`,
             );
         }
         return v;
@@ -443,19 +443,19 @@ export function parseGcArgs(argv: readonly string[]): GcArgs {
         } else if (a === "--dry-run") {
             out.dryRun = true;
         } else if (a.startsWith("-")) {
-            throw new UsageError(`unknown flag "${a}" (see kn-next gc --help)`);
+            throw new UsageError(`unknown flag "${a}" (see knext gc --help)`);
         } else {
             throw new UsageError(
-                `unexpected positional ${JSON.stringify(a)} — the app comes from kn-next.config.ts (see kn-next gc --help)`,
+                `unexpected positional ${JSON.stringify(a)} — the app comes from kn-next.config.ts (see knext gc --help)`,
             );
         }
     }
     return out;
 }
 
-const GC_HELP = `kn-next gc — reap old \`_next/static/<build-id>/\` asset prefixes (skew protection)
+const GC_HELP = `knext gc — reap old \`_next/static/<build-id>/\` asset prefixes (skew protection)
 
-Runs the SAME retention GC \`kn-next deploy\` runs after shipping (ADR-0011):
+Runs the SAME retention GC \`knext deploy\` runs after shipping (ADR-0011):
 keeps the newest \`storage.assetRetention\` build-ids (default 3) PLUS every
 build-id currently serving traffic (resolved read-only from the NextApp's
 status.currentTraffic via the operator-stamped \`apps.kn-next.dev/build-id\`
@@ -469,9 +469,9 @@ cannot be resolved to a build-id, the GC is skipped entirely
 (ADR-0008) and never touched.
 
 MARKER INVERSION: only prefixes carrying the \`.knext-build\` marker object
-(written by every \`kn-next\` upload at \`_next/static/<id>/.knext-build\`) are
+(written by every \`knext\` upload at \`_next/static/<id>/.knext-build\`) are
 ever reap candidates — unknown/future dirs default to KEEP. Builds uploaded by
-a pre-marker kn-next are therefore never reaped until a marker-carrying
+a pre-marker knext are therefore never reaped until a marker-carrying
 re-upload; such kept prefixes are named in the output, and reclaiming a
 retired app's pre-marker prefixes is a manual delete (or deleting the NextApp,
 whose teardown finalizer wipes the whole \`<app>/\` namespace).
@@ -479,7 +479,7 @@ whose teardown finalizer wipes the whole \`<app>/\` namespace).
 The app + storage come from kn-next.config.ts in the current directory.
 
 Usage:
-  kn-next gc [--build-id <id>] [-n <namespace>] [--dry-run]
+  knext gc [--build-id <id>] [-n <namespace>] [--dry-run]
 
 Options:
   --build-id <id>       Build-id to treat as the newest (e.g. the tag just
@@ -599,11 +599,11 @@ export const GC_NO_STORAGE_REPORT =
     "served from the image, so there is no bucket to prune (this is the " +
     "announced no-storage mode, not a failure).\n";
 
-/** Entry for \`kn-next gc\`. Returns the process exit code. */
+/** Entry for \`knext gc\`. Returns the process exit code. */
 export async function gcMain(argv: readonly string[]): Promise<number> {
     if (argv.includes("-h") || argv.includes("--help")) {
         // Written synchronously to fd 1 (not via the async pino transport) so
-        // `kn-next gc --help | cat` is never truncated — same contract as the
+        // `knext gc --help | cat` is never truncated — same contract as the
         // rollback/status/doctor help paths.
         writeSync(1, GC_HELP);
         return 0;
@@ -650,7 +650,7 @@ export async function gcMain(argv: readonly string[]): Promise<number> {
 }
 
 // NO self-entry block here, DELIBERATELY — this module is reached ONLY via
-// the kn-next bin's subcommand dispatch (see the hazard note atop deploy.ts's
+// the knext bin's subcommand dispatch (see the hazard note atop deploy.ts's
 // dispatcher: an isEntrypoint block in a bin-dispatched module re-arms the
 // tsup-inlining hijack, #263 — observed live with THIS module in PR #262,
 // deploy.ts imports runAssetGC statically).

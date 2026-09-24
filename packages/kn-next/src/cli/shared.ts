@@ -1,5 +1,5 @@
 /**
- * Shared CLI utilities for kn-next build and deploy commands.
+ * Shared CLI utilities for knext build and deploy commands.
  * Single source of truth for config loading.
  *
  * NOTE: copyAdapters and getNitroPreset were removed as part of the
@@ -72,8 +72,8 @@ export const USAGE_ERROR_CODE = "ERR_KN_USAGE";
  * The user mis-typed the command line. That is an expected state, so it must
  * render as a message — never as `log.fatal({ err })`, which serialises the
  * Error with its stack and an absolute dist chunk path. A reviewer caught
- * exactly that on the strict-flag rejections: `kn-next celanup` (a typo) got a
- * clean one-liner while `kn-next cleanup -v` (also a typo) got a stack dump.
+ * exactly that on the strict-flag rejections: `knext celanup` (a typo) got a
+ * clean one-liner while `knext cleanup -v` (also a typo) got a stack dump.
  *
  * Every CLI module raises usage mistakes through this class; a scan in
  * cli-dispatch-contract.test.ts fails the build if one goes back to `Error`.
@@ -104,11 +104,11 @@ export function handleUsageError(
         return false;
     }
     const message = String((err as { message?: unknown }).message ?? "");
-    // Most of these messages already end in "(see kn-next <verb> --help)"; only
+    // Most of these messages already end in "(see knext <verb> --help)"; only
     // add the generic pointer when the user was given none.
     const pointer = message.includes("--help")
         ? ""
-        : "\n\nRun `kn-next --help` to see the available commands.";
+        : "\n\nRun `knext --help` to see the available commands.";
     write(`${message}${pointer}\n`);
     return true;
 }
@@ -171,7 +171,7 @@ export function handleConfigNotFound(
  *
  * Every cluster-writing verb (deploy, cleanup, gc, rollback, db bind, preview)
  * must target the cluster the user NAMED, not whatever `kubectl` happens to have
- * as its ambient current-context — otherwise `kn-next cleanup --context staging`
+ * as its ambient current-context — otherwise `knext cleanup --context staging`
  * silently deletes on production. This is the single place that shape is built,
  * so a verb honours `--context` by resolving it once (see {@link
  * resolveKubeContext}) and wrapping every kubectl argv it issues.
@@ -229,4 +229,38 @@ export async function loadConfig(): Promise<KnativeNextConfig> {
     validateConfig(config);
 
     return config;
+}
+
+/**
+ * `kn-next` → `knext` rename (#1369). `deploy.ts`'s dispatcher (the ONLY
+ * sanctioned self-entry — see its SELF-ENTRY HAZARD note) is still built as
+ * a SINGLE tsup entry, `dist/cli/kn-next.js`
+ * — a second tsup entry pointing at the same source shares a chunk with it,
+ * which breaks `isEntrypoint` for BOTH (measured live in this round: the
+ * dispatcher silently never fired for either bin). `dist/cli/knext.js` is
+ * therefore a separate, tiny RUNTIME proxy (src/cli/knext.ts) that re-execs
+ * `kn-next.js` in-process, so from `deploy.ts`'s own perspective it is
+ * ALWAYS "running as kn-next.js" — this env var is how the proxy tells it
+ * "but don't call it that": set before the proxy's dynamic import, so it is
+ * in scope before `deploy.ts`'s top level runs.
+ */
+export const KNEXT_CANONICAL_BIN_ENV = "KNEXT_CANONICAL_BIN";
+
+const DEPRECATED_KN_NEXT_NOTICE =
+    "`kn-next` is deprecated and will be removed in a future minor release — use `knext` instead (same command, same flags).\n";
+
+/**
+ * Print the one-line deprecation notice to stderr, UNLESS the canonical
+ * `knext` proxy marked this invocation via {@link KNEXT_CANONICAL_BIN_ENV}.
+ * Reads `process.env` by default; the parameter exists so this stays a pure,
+ * directly-testable function rather than one more thing a test has to mutate
+ * global `process.env` to exercise.
+ */
+export function printDeprecatedKnNextNoticeIfNeeded(
+    env: NodeJS.ProcessEnv = process.env,
+): void {
+    if (env[KNEXT_CANONICAL_BIN_ENV] === "1") {
+        return;
+    }
+    writeSync(2, DEPRECATED_KN_NEXT_NOTICE);
 }

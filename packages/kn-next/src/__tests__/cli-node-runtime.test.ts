@@ -1,7 +1,7 @@
 /**
  * cli-node-runtime.test.ts — WORKSTREAM A / E1 (#68 follow-up)
  *
- * The kn-next CLI was ported off Bun-only APIs (Bun.$ → node:child_process in
+ * The knext CLI was ported off Bun-only APIs (Bun.$ → node:child_process in
  * cli/exec.ts, `#!/usr/bin/env bun` → `#!/usr/bin/env node`, tsup bundling a
  * Node-runnable bin). This suite is the PERMANENT regression guard for that
  * port, in three layers:
@@ -10,12 +10,15 @@
  *     transitively imports from src/ must stay Bun-free — no `from "bun"`,
  *     no `bun:*` module specifiers, no `Bun.` globals, no bun shebang. A
  *     reintroduced Bun-ism would otherwise pass unit tests (vitest runs fine
- *     under Node with mocks) and only explode for `npx kn-next` users.
+ *     under Node with mocks) and only explode for `npx knext` users.
  *
- *  2. STATIC (built bin): dist/cli/kn-next.js — the published `bin` — carries
- *     the `#!/usr/bin/env node` shebang and no bun module imports. This is
- *     what npm actually installs; the bundle includes all transitive local
- *     code, so it catches Bun-isms the source walker's regexes might miss.
+ *  2. STATIC (built bin): dist/cli/knext.js — the published canonical `bin`
+ *     — carries the `#!/usr/bin/env node` shebang and no bun module imports.
+ *     This is what npm actually installs; the bundle includes all transitive
+ *     local code, so it catches Bun-isms the source walker's regexes might
+ *     miss. dist/cli/kn-next.js — the #1369 DEPRECATED alias, a thin runtime
+ *     proxy onto the file above — is covered by its own describe block below
+ *     (same behavioral contract, plus the one-line stderr notice).
  *
  *  3. BEHAVIORAL: the built bin is spawned under plain `node` (--help,
  *     --version → exit 0, usage text) and, when bun is on PATH, under `bun`
@@ -52,7 +55,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkgRoot = resolve(__dirname, "..", "..");
 const srcDir = join(pkgRoot, "src");
 const cliSrcDir = join(srcDir, "cli");
-const distBin = join(pkgRoot, "dist", "cli", "kn-next.js");
+const distBin = join(pkgRoot, "dist", "cli", "knext.js");
+/** The #1369 deprecated alias — a thin runtime proxy onto {@link distBin}'s sibling. */
+const distBinDeprecated = join(pkgRoot, "dist", "cli", "kn-next.js");
 
 /** A stack frame ("\n    at foo (/path/file.js:1:2)") or a bundler chunk path. */
 const STACK_FRAME_RE = /\n\s+at\s/;
@@ -215,6 +220,11 @@ describe("self-entry blocks exist ONLY in sanctioned entry modules (#263)", () =
     // load, hijacking every subcommand (observed live with gc.ts, PR #262).
     // The ONLY modules allowed to carry one are:
     //   - deploy.ts   — the published bin entry (the subcommand dispatcher)
+    //   - knext.ts    — #1369: the canonical `knext` bin, a thin RUNTIME
+    //     proxy onto dist/cli/kn-next.js (see its header for why it is a
+    //     proxy rather than a second tsup entry pointing at deploy.ts —
+    //     the SAME hazard this describe block guards against, hit live
+    //     while building the #1369 change).
     //   - build.ts / cleanup.ts / preview.ts / loadtest.ts — documented
     //     directly-runnable entries (docs-site cli.mdx "Directly runnable
     //     entries"; .github/workflows/preview.yml invokes dist/cli/preview.js
@@ -227,6 +237,7 @@ describe("self-entry blocks exist ONLY in sanctioned entry modules (#263)", () =
     // and must NOT self-execute.
     const SANCTIONED = new Set([
         "deploy.ts",
+        "knext.ts",
         "build.ts",
         "cleanup.ts",
         "preview.ts",
@@ -257,13 +268,15 @@ describe("self-entry blocks exist ONLY in sanctioned entry modules (#263)", () =
             const distFile =
                 name === "deploy"
                     ? join(pkgRoot, "dist", "cli", "kn-next.js")
-                    : join(pkgRoot, "dist", "cli", `${name}.js`);
+                    : name === "knext"
+                      ? join(pkgRoot, "dist", "cli", "knext.js")
+                      : join(pkgRoot, "dist", "cli", `${name}.js`);
             expect(existsSync(distFile), distFile).toBe(true);
         }
     });
 });
 
-describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
+describe("built bin (dist/cli/knext.js) is Node-runnable", () => {
     beforeAll(() => {
         if (!existsSync(distBin)) {
             throw new Error(
@@ -291,11 +304,11 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         }
     });
 
-    it("`node kn-next.js --help` exits 0 with usage text", () => {
+    it("`node knext.js --help` exits 0 with usage text", () => {
         const r = run(NODE_BIN, [distBin, "--help"]);
         expect(r.error).toBeUndefined();
         expect(r.status).toBe(0);
-        expect(r.stdout).toContain("kn-next deploy");
+        expect(r.stdout).toContain("knext deploy");
         expect(r.stdout).toContain("--dry-run");
         expect(r.stdout).toContain("-h, --help");
         // Workstream C subcommands are advertised in the bin's help.
@@ -346,14 +359,14 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         ).not.toContain(discriminator);
     });
 
-    it("`node kn-next.js cleanup --help`-less dispatch does not run a deploy", () => {
-        // The footgun this closes: before the dispatch existed, `kn-next
+    it("`node knext.js cleanup --help`-less dispatch does not run a deploy", () => {
+        // The footgun this closes: before the dispatch existed, `knext
         // cleanup` fell through to deploy(). Run it in an empty temp dir — the
         // config is absent, so both paths stop early, but ONLY the deploy path
-        // announces "kn-next deploy".
+        // announces "knext deploy".
         const dir = mkdtempSync(join(tmpdir(), "knext-cleanup-dispatch-"));
         const r = run(NODE_BIN, [distBin, "cleanup"], dir);
-        expect(`${r.stdout}${r.stderr}`).not.toContain("kn-next deploy");
+        expect(`${r.stdout}${r.stderr}`).not.toContain("knext deploy");
         expect(r.status).toBe(1); // no config here → the guidance path
         expect(`${r.stdout}${r.stderr}`).toContain("npx @getknext/core create");
     });
@@ -367,7 +380,7 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
     it.each(
         helpVerbs,
     )("`%s --help` exits 0 and performs no work (destructive verbs included)", (verb) => {
-        // A reviewer proved `kn-next cleanup --help` DELETED the app: the
+        // A reviewer proved `knext cleanup --help` DELETED the app: the
         // branch called cleanup() with no argument parsing. Run each verb's
         // help in an EMPTY dir, so anything that actually starts working
         // would announce itself (or fail on the missing config) rather than
@@ -376,13 +389,13 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         const r = run(NODE_BIN, [distBin, verb, "--help"], dir);
         expect(r.error).toBeUndefined();
         expect(r.status, `${verb} --help must exit 0`).toBe(0);
-        expect(r.stdout).toContain(`kn-next ${verb}`);
+        expect(r.stdout).toContain(`knext ${verb}`);
         const all = `${r.stdout}${r.stderr}`;
         // Work markers from the two verbs that do irreversible / expensive
         // things. Neither may appear on a help run.
         expect(all).not.toContain("Deleting NextApp CR");
         expect(all).not.toContain("Uploading static assets");
-        expect(all).not.toContain("kn-next deploy —"); // no fall-through
+        expect(all).not.toContain("knext deploy —"); // no fall-through
     });
 
     it("an unknown verb is an error with a suggestion, never a silent deploy", () => {
@@ -391,16 +404,16 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         expect(r.status).toBe(1);
         const all = `${r.stdout}${r.stderr}`;
         expect(all).toContain("unknown command: celanup");
-        expect(all).toContain("kn-next cleanup");
+        expect(all).toContain("knext cleanup");
         expect(all).toContain("--help");
         // The deploy flow's own banner must be absent — the whole point.
-        expect(all).not.toContain("kn-next deploy\n");
+        expect(all).not.toContain("knext deploy\n");
     });
 
     // --- ADR-0046, second half: a verb in a LATER slot is not swallowed ---
     //
-    // Round 1 caught the first-slot case (`kn-next celanup`). A reviewer then
-    // proved the flags-first door was still open: `kn-next -n prod cleanup`
+    // Round 1 caught the first-slot case (`knext celanup`). A reviewer then
+    // proved the flags-first door was still open: `knext -n prod cleanup`
     // deployed to prod with `cleanup` silently swallowed by
     // `allowPositionals: true` — the same "opposite action" hazard, one flag
     // further in. These three invocations are the reviewer's, verbatim.
@@ -408,18 +421,18 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         [["deploy", "cleanup"], "cleanup"],
         [["--namespace", "prod", "cleanup"], "cleanup"],
         [["--", "cleanup"], "cleanup"],
-    ])("`kn-next %s` refuses rather than deploying", (argv, swallowed) => {
+    ])("`knext %s` refuses rather than deploying", (argv, swallowed) => {
         const dir = mkdtempSync(join(tmpdir(), "knext-stray-positional-"));
         const r = run(NODE_BIN, [distBin, ...argv], dir);
         expect(r.status, `${argv.join(" ")} must exit 1`).toBe(1);
         const all = `${r.stdout}${r.stderr}`;
         expect(all).toContain(`unexpected argument: ${swallowed}`);
         // Verb-first ordering is the actionable half of the message.
-        expect(all).toContain(`kn-next ${swallowed}`);
+        expect(all).toContain(`knext ${swallowed}`);
         // It must refuse BEFORE the deploy flow starts — no config was even
         // read, so the config guidance must not appear either.
         expect(all).not.toContain("No kn-next.config.ts found");
-        expect(all).not.toContain("kn-next deploy\n");
+        expect(all).not.toContain("knext deploy\n");
         // Same presentation contract as every other expected failure.
         expect(all).not.toContain("FATAL");
         expect(all).not.toMatch(STACK_FRAME_RE);
@@ -482,7 +495,7 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         const dir = mkdtempSync(join(tmpdir(), `knext-badflag-${verb}-`));
         const all = assertPlainMessage(
             run(NODE_BIN, [distBin, ...argv], dir),
-            `kn-next ${argv.join(" ")}`,
+            `knext ${argv.join(" ")}`,
         );
         // It must actually name the offending flag, not fail for some
         // unrelated reason (e.g. reaching config loading).
@@ -499,17 +512,17 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         [["rollback", "--canary", "500"], "--canary must be an integer"],
         [["rollback", "--canary", "50"], "--canary requires --to"],
         [["db", "bind", "myapp"], "--secret <name> is required"],
-    ])("`kn-next %s` is a plain message, not a stack dump", (argv, needle) => {
+    ])("`knext %s` is a plain message, not a stack dump", (argv, needle) => {
         const dir = mkdtempSync(join(tmpdir(), "knext-usage-error-"));
         const all = assertPlainMessage(
             run(NODE_BIN, [distBin, ...argv], dir),
-            `kn-next ${argv.join(" ")}`,
+            `knext ${argv.join(" ")}`,
         );
         expect(all).toContain(needle);
     });
 
     it("a flags-only invocation still deploys (the advertised front door)", () => {
-        // `kn-next --skip-build` must NOT be read as an unknown command: a
+        // `knext --skip-build` must NOT be read as an unknown command: a
         // leading `-` is a flag. Run it where there is no config, so the deploy
         // path identifies itself by printing the config guidance and exiting 1.
         const dir = mkdtempSync(join(tmpdir(), "knext-flags-only-"));
@@ -520,7 +533,7 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         expect(all).not.toContain("unknown command");
     });
 
-    it("`node kn-next.js rollback --help` dispatches and exits 0", () => {
+    it("`node knext.js rollback --help` dispatches and exits 0", () => {
         // The bin must route `rollback` to rollbackMain — NOT fall through to the
         // deploy flow (which would try to build+deploy). The e2e_rollback suite
         // (test/e2e/rollback_e2e_test.go) exercises the real traffic patch; this
@@ -528,7 +541,7 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         const r = run(NODE_BIN, [distBin, "rollback", "--help"]);
         expect(r.error).toBeUndefined();
         expect(r.status).toBe(0);
-        expect(r.stdout).toContain("kn-next rollback");
+        expect(r.stdout).toContain("knext rollback");
         expect(r.stdout).toContain("--to");
         expect(r.stdout).toContain("--canary");
         // Rollback-ONLY discriminators: these strings exist in rollback's help
@@ -538,7 +551,7 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         expect(r.stdout).toContain("Patches ONLY the NextApp CR");
     });
 
-    it("`node kn-next.js gc --help` dispatches and exits 0", () => {
+    it("`node knext.js gc --help` dispatches and exits 0", () => {
         // The bin must route `gc` to gcMain — NOT fall through to the deploy
         // flow (which would build + push + mutate the cluster). The e2e_gc
         // suite (test/e2e/asset_gc_e2e_test.go) exercises the real prune;
@@ -546,7 +559,7 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         const r = run(NODE_BIN, [distBin, "gc", "--help"]);
         expect(r.error).toBeUndefined();
         expect(r.status).toBe(0);
-        expect(r.stdout).toContain("kn-next gc");
+        expect(r.stdout).toContain("knext gc");
         expect(r.stdout).toContain("--build-id");
         // gc-ONLY discriminators: these strings exist in gc's help and
         // nowhere in deploy's usage text (deploy's Commands list only carries
@@ -558,7 +571,7 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         expect(r.stdout).toContain("teardown-only");
     });
 
-    it("`node kn-next.js gc --unknown-flag` exits non-zero (strict parser through the real dispatch)", () => {
+    it("`node knext.js gc --unknown-flag` exits non-zero (strict parser through the real dispatch)", () => {
         // gc DELETES object-store prefixes: a typo'd flag must be a hard
         // error, never a silent fall-through with different retention
         // semantics. (Exit code only — the fatal log rides pino's async
@@ -568,40 +581,40 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         expect(r.status).toBe(1);
     });
 
-    it("`node kn-next.js status --help` dispatches and exits 0", () => {
+    it("`node knext.js status --help` dispatches and exits 0", () => {
         const r = run(NODE_BIN, [distBin, "status", "--help"]);
         expect(r.error).toBeUndefined();
         expect(r.status).toBe(0);
-        expect(r.stdout).toContain("kn-next status");
+        expect(r.stdout).toContain("knext status");
         expect(r.stdout).toContain("--json");
         expect(r.stdout).toContain("--watch");
     });
 
-    it("`node kn-next.js doctor --help` dispatches and exits 0", () => {
+    it("`node knext.js doctor --help` dispatches and exits 0", () => {
         const r = run(NODE_BIN, [distBin, "doctor", "--help"]);
         expect(r.error).toBeUndefined();
         expect(r.status).toBe(0);
-        expect(r.stdout).toContain("kn-next doctor");
+        expect(r.stdout).toContain("knext doctor");
         expect(r.stdout).toContain("--json");
     });
 
-    it("`node kn-next.js db bind --help` dispatches and exits 0", () => {
+    it("`node knext.js db bind --help` dispatches and exits 0", () => {
         const r = run(NODE_BIN, [distBin, "db", "bind", "--help"]);
         expect(r.error).toBeUndefined();
         expect(r.status).toBe(0);
-        expect(r.stdout).toContain("kn-next db bind");
+        expect(r.stdout).toContain("knext db bind");
         expect(r.stdout).toContain("--secret");
         expect(r.stdout).toContain("--ro-secret");
     });
 
-    it("`node kn-next.js create --help` dispatches and exits 0", () => {
+    it("`node knext.js create --help` dispatches and exits 0", () => {
         // #407: `create` must route to createMain, NOT fall through to the
         // deploy flow (which would try to build + push + apply a CR). The
         // discriminators below appear only in create's help.
         const r = run(NODE_BIN, [distBin, "create", "--help"]);
         expect(r.error).toBeUndefined();
         expect(r.status).toBe(0);
-        expect(r.stdout).toContain("kn-next create");
+        expect(r.stdout).toContain("knext create");
         expect(r.stdout).toContain("--dry-run");
         expect(r.stdout).toContain("guarded instrumentation");
         // #1342/ADR-0058: the DEFAULT target wires the official adapter and
@@ -613,12 +626,12 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         expect(r.stdout).toContain("--builder");
     });
 
-    it("`node kn-next.js create` scaffolds through the BUNDLED bin (templates ship with the package)", () => {
+    it("`node knext.js create` scaffolds through the BUNDLED bin (templates ship with the package)", () => {
         // The bundle resolves its templates from <package>/templates — a path
         // that only exists if `files` ships them AND the dist layout resolves
         // the same as the source layout. Running the REAL bin is the only way
         // to observe that; a unit test on renderScaffold cannot.
-        const dir = mkdtempSync(join(tmpdir(), "kn-next-create-bin-"));
+        const dir = mkdtempSync(join(tmpdir(), "knext-create-bin-"));
         try {
             const r = run(NODE_BIN, [
                 distBin,
@@ -673,13 +686,13 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         }
     });
 
-    it("`node kn-next.js create --unknown-flag` exits non-zero (strict parser through the real dispatch)", () => {
+    it("`node knext.js create --unknown-flag` exits non-zero (strict parser through the real dispatch)", () => {
         const r = run(NODE_BIN, [distBin, "create", "--unknown-flag"]);
         expect(r.error).toBeUndefined();
         expect(r.status).toBe(1);
     });
 
-    it("`node kn-next.js --version` exits 0 and prints a version", () => {
+    it("`node knext.js --version` exits 0 and prints a version", () => {
         const r = run(NODE_BIN, [distBin, "--version"]);
         expect(r.error).toBeUndefined();
         expect(r.status).toBe(0);
@@ -694,7 +707,7 @@ describe("runtime parity: the SAME built bin under bun", () => {
     const bun = hasBun();
 
     it.skipIf(!bun)(
-        "`bun kn-next.js --help` exits 0 with IDENTICAL output to node",
+        "`bun knext.js --help` exits 0 with IDENTICAL output to node",
         () => {
             const nodeRun = run(NODE_BIN, [distBin, "--help"]);
             const bunRun = run("bun", [distBin, "--help"]);
@@ -703,10 +716,81 @@ describe("runtime parity: the SAME built bin under bun", () => {
         },
     );
 
-    it.skipIf(!bun)("`bun kn-next.js --version` matches node's", () => {
+    it.skipIf(!bun)("`bun knext.js --version` matches node's", () => {
         const nodeRun = run(NODE_BIN, [distBin, "--version"]);
         const bunRun = run("bun", [distBin, "--version"]);
         expect(bunRun.status).toBe(0);
         expect(bunRun.stdout).toBe(nodeRun.stdout);
+    });
+});
+
+describe("deprecated `knext` alias (#1369) — same command, one extra stderr line", () => {
+    beforeAll(() => {
+        if (!existsSync(distBinDeprecated)) {
+            throw new Error(
+                `${distBinDeprecated} missing — build first (see above).`,
+            );
+        }
+    });
+
+    it("carries the #!/usr/bin/env node shebang", () => {
+        const firstLine = readFileSync(distBinDeprecated, "utf8").split(
+            "\n",
+            1,
+        )[0];
+        expect(firstLine).toBe("#!/usr/bin/env node");
+    });
+
+    it("`knext --help` prints the ONE-LINE deprecation notice to stderr, mentioning `knext`", () => {
+        const r = run(NODE_BIN, [distBinDeprecated, "--help"]);
+        expect(r.error).toBeUndefined();
+        expect(r.status).toBe(0);
+        // Exactly one line — not a multi-line dump.
+        expect(r.stderr.trim().split("\n").length).toBe(1);
+        expect(r.stderr).toContain("knext");
+        expect(r.stderr).toContain("deprecated");
+        expect(r.stderr).toContain("knext");
+    });
+
+    it("`knext --help` (the canonical bin) prints NO deprecation notice", () => {
+        const r = run(NODE_BIN, [distBin, "--help"]);
+        expect(r.error).toBeUndefined();
+        expect(r.status).toBe(0);
+        expect(r.stderr).toBe("");
+    });
+
+    it("`knext --help` STDOUT is byte-identical to `knext --help` — same command, same output", () => {
+        const canonical = run(NODE_BIN, [distBin, "--help"]);
+        const deprecated = run(NODE_BIN, [distBinDeprecated, "--help"]);
+        expect(deprecated.status).toBe(canonical.status);
+        expect(deprecated.stdout).toBe(canonical.stdout);
+    });
+
+    it("`knext deploy` behaves identically to `knext deploy` (same exit code, same guidance) — the alias is not cosmetic", () => {
+        const dir = mkdtempSync(join(tmpdir(), "knext-alias-deploy-parity-"));
+        try {
+            const canonical = run(NODE_BIN, [distBin, "deploy"], dir);
+            const deprecated = run(
+                NODE_BIN,
+                [distBinDeprecated, "deploy"],
+                dir,
+            );
+            expect(deprecated.status).toBe(canonical.status);
+            expect(deprecated.stdout).toBe(canonical.stdout);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("`knext --version` matches `knext --version`", () => {
+        const canonical = run(NODE_BIN, [distBin, "--version"]);
+        const deprecated = run(NODE_BIN, [distBinDeprecated, "--version"]);
+        expect(deprecated.status).toBe(0);
+        expect(deprecated.stdout).toBe(canonical.stdout);
+    });
+
+    it("bundle contains no bun module imports", () => {
+        const content = readFileSync(distBinDeprecated, "utf8");
+        expect(bunModuleImports(content)).toEqual([]);
     });
 });

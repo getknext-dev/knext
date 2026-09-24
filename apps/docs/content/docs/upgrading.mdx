@@ -12,7 +12,7 @@ They are deliberately not lockstep — but when you upgrade them, the order matt
 
 ## Why the order matters
 
-`kn-next deploy` describes your app as a `NextApp` custom resource and applies it to the cluster.
+`knext deploy` describes your app as a `NextApp` custom resource and applies it to the cluster.
 The CRD installed by the operator defines which fields that resource may contain.
 
 A **newer CLI** can emit a field a **older CRD** has never heard of. knext applies with strict
@@ -34,7 +34,7 @@ suits you, and upgrade CLIs afterwards at whatever pace your team and CI move.
 
 ## What it looks like when the order is wrong
 
-`kn-next deploy` stops **before it changes anything** and names the field:
+`knext deploy` stops **before it changes anything** and names the field:
 
 ```
 PREFLIGHT FAILED: the NextApp CRD installed on this cluster does not know field(s) this
@@ -44,7 +44,7 @@ validation, SILENTLY PRUNED):
 Upgrade order is load-bearing: upgrade the OPERATOR/CRD first, THEN the CLI.
 Nothing was built, uploaded or applied — this ran before any side effect.
   kubectl get crd nextapps.apps.kn-next.dev -o jsonpath='{.spec.versions[*].name}'
-  kn-next doctor
+  knext doctor
 ```
 
 Three things to note.
@@ -64,11 +64,11 @@ credential — and the app would still report healthy.
 
 ## Checking before you deploy
 
-`kn-next doctor` reports whether the cluster's CRD covers the fields your CLI emits, so you can
+`knext doctor` reports whether the cluster's CRD covers the fields your CLI emits, so you can
 find a version gap without running a deploy at all:
 
 ```bash
-npx kn-next doctor
+npx knext doctor
 ```
 
 If `doctor` cannot read your cluster's full schema — some restricted credentials cannot — it will
@@ -113,7 +113,7 @@ Verify an app after redeploying (from a pod or node that can reach it):
 kubectl exec deploy/<your-scraper> -- wget -qO- http://<pod-ip>:9464/metrics | head -3
 ```
 
-`kn-next doctor` (the `metrics-port` check) flags any app still pinned onto a queue-proxy-owned
+`knext doctor` (the `metrics-port` check) flags any app still pinned onto a queue-proxy-owned
 port and tells you which serving ConfigMap key governs `:9091` on your cluster.
 
 ## The scale-to-zero database: roll the failover controller before its new config
@@ -139,6 +139,6 @@ before applying the rest of the directory in the same upgrade.
 ## What this does not cover
 
 Deployment tools that apply manifests directly to your cluster — GitOps controllers, for example —
-do not go through `kn-next deploy`, so they do not get the preflight check described above. If you
+do not go through `knext deploy`, so they do not get the preflight check described above. If you
 apply `NextApp` resources through such a tool, keep the same upgrade order yourself: the cluster is
 still the thing that decides which fields it can store.

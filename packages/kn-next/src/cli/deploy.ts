@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
- * kn-next CLI — Knative Next.js Deployment Automation
+ * knext CLI — Knative Next.js Deployment Automation
  *
  * Usage:
- *   npx kn-next deploy [options]
+ *   npx knext deploy [options]
  *
  * ADR-0001: The operator is the single source of truth for cluster state.
  * This CLI's job is strictly: build → push → apply the NextApp CR.
@@ -67,6 +67,7 @@ import {
     handleConfigNotFound,
     handleUsageError,
     loadConfig,
+    printDeprecatedKnNextNoticeIfNeeded,
     resolveKubeContext,
     UsageError,
     withKubeContext,
@@ -177,10 +178,10 @@ function parseCliArgs(): DeployOptions {
         }));
     } catch (err) {
         // Node's own parse failure (`ERR_PARSE_ARGS_UNKNOWN_OPTION`) is still a
-        // user typo — `kn-next --skip-buildd` — so it gets the same message
+        // user typo — `knext --skip-buildd` — so it gets the same message
         // treatment as ours instead of a serialised Error with a stack.
         // `create.ts` already did this; the deploy path did not.
-        throw new UsageError(`${(err as Error).message} (see kn-next --help)`);
+        throw new UsageError(`${(err as Error).message} (see knext --help)`);
     }
 
     if (values.version) {
@@ -194,7 +195,7 @@ function parseCliArgs(): DeployOptions {
         // Write help synchronously to fd 1 — NOT via the async pino-pretty
         // transport (flushed after process.exit, swallowing output) and NOT via
         // process.stdout.write (async on a pipe, truncated by process.exit).
-        // fs.writeSync(1, …) is guaranteed flushed before exit, so `npx kn-next
+        // fs.writeSync(1, …) is guaranteed flushed before exit, so `npx knext
         // --help | cat` works under plain node (issue #68).
         writeStdoutSync(CLI_HELP);
         process.exit(0);
@@ -203,12 +204,12 @@ function parseCliArgs(): DeployOptions {
     // ADR-0046: reject a stray positional on the default deploy path.
     //
     // `resolveInvocation` only guards the FIRST token, so before this check
-    // `kn-next deploy cleanup`, `kn-next --namespace prod cleanup` and
-    // `kn-next -- cleanup` all ran a DEPLOY with the verb silently swallowed —
+    // `knext deploy cleanup`, `knext --namespace prod cleanup` and
+    // `knext -- cleanup` all ran a DEPLOY with the verb silently swallowed —
     // "deploy to prod" when the user typed a teardown. The leading explicit
     // `deploy` is the one positional this path legitimately sees (the bin's
     // dispatcher resolved it and fell through to here); everything after it is
-    // a mistake. Help/version are handled above, so `kn-next --help extra`
+    // a mistake. Help/version are handled above, so `knext --help extra`
     // still prints help rather than this error — deliberate: help is never an
     // error, and nothing destructive follows it.
     const stray = (
@@ -309,13 +310,13 @@ async function describeFailedCRApply(): Promise<string> {
             `kubectl apply of the NextApp CR FAILED, and your kubectl client (${oldClient}) is ` +
             "older than v1.25.\n" +
             "Before v1.25 `--validate` is a BOOLEAN flag, so the `--validate=strict` that " +
-            "kn-next passes is rejected at flag parsing and the apply never reached the " +
+            "knext passes is rejected at flag parsing and the apply never reached the " +
             "cluster — nothing was applied and nothing was changed. This is deliberate " +
             "(fail-closed): on that client knext cannot guarantee an unknown CR field is " +
             "rejected rather than silently pruned.\n" +
             "Fix: upgrade kubectl to >= v1.25 (v1.24 is long EOL), then re-run.\n" +
             "  kubectl version --client\n" +
-            "  kn-next doctor"
+            "  knext doctor"
         );
     }
     return (
@@ -323,14 +324,14 @@ async function describeFailedCRApply(): Promise<string> {
         "knext inherits its stdio and cannot read it, so it will not guess at the cause).\n" +
         'If it reads `strict decoding error: unknown field "spec…"`, the installed NextApp ' +
         "CRD is older than this CLI and does not know that field — the apply was REJECTED " +
-        "(deliberately: kn-next applies with --validate=strict) rather than the field being " +
+        "(deliberately: knext applies with --validate=strict) rather than the field being " +
         "silently pruned. Upgrade the operator bundle to match this CLI:\n" +
         "  kubectl get crd nextapps.apps.kn-next.dev -o jsonpath='{.spec.versions[*].name}'\n" +
         "  kubectl -n kn-next-operator-system get deploy -o wide   # operator image\n" +
         'Anything else — connection refused, Unauthorized, (Forbidden), `namespaces "x" not ' +
         "found`, a YAML parse error — is an ordinary apply failure with the cause kubectl " +
         "printed; it is not a field-validation problem.\n" +
-        "  kn-next doctor"
+        "  knext doctor"
     );
 }
 
@@ -407,19 +408,19 @@ async function runPrunePreflight(
  * the MODULE level (not a package `exports` subpath) so the sibling
  * deploy-orchestrator.test.ts can pin its failure/skip/skew branches
  * hermetically against mocked seams. It is invoked by the entry dispatcher
- * below when run as the `kn-next`/`kn-next deploy` bin.
+ * below when run as the `knext`/`knext deploy` bin.
  */
 export async function deploy() {
     const options = parseCliArgs();
 
     // Load config with validation FIRST, then announce. Announcing first meant
-    // a user in a directory with no kn-next.config.ts saw "kn-next deploy"
+    // a user in a directory with no kn-next.config.ts saw "knext deploy"
     // printed after the "there is no config here" guidance (pino's transport is
     // async, so the banner lands last) — a confusing tail on an otherwise clean
     // message (UX ledger 1b).
     const baseConfig = await loadConfig();
 
-    log.info({ dryRun: options.dryRun }, "kn-next deploy");
+    log.info({ dryRun: options.dryRun }, "knext deploy");
 
     // #1283 round 3: announce the opt-out at warn on every deploy that uses
     // it — same discipline as ADR-0047's NO_STORAGE_MODE_NOTICE — so skipping
@@ -609,11 +610,11 @@ export async function deploy() {
         // #1339 review finding #1 (jev 0.90, BLOCKER): the staged Dockerfile
         // for the standalone-bun target (the DEFAULT since #1183) and for
         // vinext both do an UNCONDITIONAL `COPY` of a compiled executable
-        // that only `kn-next build` used to produce — `deploy` ran the
+        // that only `knext build` used to produce — `deploy` ran the
         // project build above and stopped there, so its docker build either
         // failed the COPY (no such file) or ran a STALE binary left over
-        // from an earlier `kn-next build` in this checkout. Shares the EXACT
-        // compile step `kn-next build` uses (build-artifact.ts). Runs here,
+        // from an earlier `knext build` in this checkout. Shares the EXACT
+        // compile step `knext build` uses (build-artifact.ts). Runs here,
         // UNCONDITIONALLY, only on the fresh-build leg — never gated on
         // "does a binary already exist" — so it always recompiles from the
         // tree the project build just produced and staleness cannot occur on
@@ -753,7 +754,7 @@ export async function deploy() {
                     // #644: `buildContext` was resolved in the preflight above —
                     // Next's file-tracing root, NOT a fixed `../..`. That hardcode
                     // assumed an `apps/<name>` layout and pointed outside the
-                    // project for a flat repo, which is what `kn-next create`
+                    // project for a flat repo, which is what `knext create`
                     // produces. Nothing is inferred at this point.
                     const repoRoot = buildContext;
                     // ADR-0055: select the runtime image by (build, runtime). The
@@ -999,7 +1000,7 @@ export async function deploy() {
     // `kubectl` on PATH. Asserting the flag makes the guarantee knext's for the
     // argv knext controls — a shim appending `--validate=ignore` still wins,
     // because pflag takes the LAST occurrence of a string flag.
-    // `kn-next doctor` reports when the local client is too old for the flag to
+    // `knext doctor` reports when the local client is too old for the flag to
     // mean anything.
     try {
         runInherit(
@@ -1053,7 +1054,7 @@ export async function deploy() {
     // traffic. The whole chain (status.currentTraffic → resolve each live
     // revision's `apps.kn-next.dev/build-id` label → live set, with the
     // fail-safe over-keep skip) lives in runAssetGC — shared verbatim with the
-    // standalone `kn-next gc` subcommand so the e2e_gc suite proves THIS exact
+    // standalone `knext gc` subcommand so the e2e_gc suite proves THIS exact
     // wiring. Everything against the cluster is READ-ONLY (ADR-0001).
     // Best-effort: a GC failure never fails a deploy that has already shipped.
     if (!options.skipUpload && hasStorage(config)) {
@@ -1084,10 +1085,10 @@ export async function deploy() {
 }
 
 // Run only when invoked directly as the entry (not when imported, e.g. in tests).
-// The bin doubles as a tiny subcommand dispatcher: `kn-next doctor`,
-// `kn-next status`, `kn-next db bind` and `kn-next rollback` route to their own
-// modules; everything else (including the historical bare `kn-next` /
-// `kn-next deploy`) runs the deploy flow.
+// The bin doubles as a tiny subcommand dispatcher: `knext doctor`,
+// `knext status`, `knext db bind` and `knext rollback` route to their own
+// modules; everything else (including the historical bare `knext` /
+// `knext deploy`) runs the deploy flow.
 //
 // SELF-ENTRY HAZARD (#263, canonical note — observed live in PR #262 with gc.ts):
 // this dispatcher is the ONLY sanctioned `isEntrypoint(import.meta.url)` entry
@@ -1109,12 +1110,16 @@ export async function deploy() {
 // dist file and cannot be inlined here — pinned by cli-node-runtime.test.ts,
 // which asserts dist/cli/{build,cleanup}.js exist AND that this bin's bundle
 // does not contain their bodies. They are dispatched because README and the
-// docs site tell users to run them, and until now `kn-next cleanup` fell
+// docs site tell users to run them, and until now `knext cleanup` fell
 // through to the DEPLOY path — a teardown command that deploys (UX ledger 1d).
 if (isEntrypoint(import.meta.url)) {
-    // ADR-0046: a bare `kn-next` and a flags-only `kn-next --skip-build` still
+    // #1369: one line to stderr, unless the `knext` proxy marked this
+    // invocation canonical (see shared.ts). Runs before anything else so it
+    // is never lost behind other output on a failing invocation.
+    printDeprecatedKnNextNoticeIfNeeded();
+    // ADR-0046: a bare `knext` and a flags-only `knext --skip-build` still
     // deploy (the advertised front door), but an unrecognised FIRST TOKEN is an
-    // error rather than a silent deploy — `kn-next celanup` must not ship a
+    // error rather than a silent deploy — `knext celanup` must not ship a
     // deployment. The allowlist comes from the same COMMAND_GROUPS list that
     // renders --help, so there is exactly one verb set.
     const invocation = resolveInvocation(process.argv[2]);

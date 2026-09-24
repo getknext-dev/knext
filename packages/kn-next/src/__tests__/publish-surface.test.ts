@@ -113,7 +113,8 @@ describe("PK1: @getknext/core publish surface", () => {
         expect(pkg.files).not.toContain("src");
     });
 
-    it("keeps the CLI bin pointed at the bundled dist entry", () => {
+    it("keeps both CLI bins pointed at their bundled dist entries (#1369)", () => {
+        expect(pkg.bin.knext).toBe("./dist/cli/knext.js");
         expect(pkg.bin["kn-next"]).toBe("./dist/cli/kn-next.js");
     });
 

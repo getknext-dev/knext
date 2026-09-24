@@ -85,11 +85,11 @@ off, and the server sends Next.js's original headers. To turn off only vinext's 
 
 On vinext on Node, both layers live in the app's `knext-node-entry.mjs`. An app created before
 this behaviour shipped has an older copy of that file and still serves Next.js's original headers;
-replace it with the one from a freshly created app (`kn-next create`).
+replace it with the one from a freshly created app (`knext create`).
 
 ## Upgrading an app scaffolded before the cache wiring
 
-Apps created by earlier versions of `kn-next create` wired the cache handler **only** through
+Apps created by earlier versions of `knext create` wired the cache handler **only** through
 `next.config.ts`'s `cacheHandler` — which the vinext build ignores, so their ISR never reached
 Redis. To fix an existing app, add the `cache` block to the `vinext()` call in your
 `vite.config.ts` exactly as shown above, and make sure `@getknext/core` is in your

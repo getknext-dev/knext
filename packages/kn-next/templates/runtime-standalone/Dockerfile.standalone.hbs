@@ -2,10 +2,10 @@
 #
 # knext — node/bun STANDALONE runtime image (ADR-0055).
 #
-# NOT emitted by `kn-next create` — the scaffolder only walks `templates/app/`.
+# NOT emitted by `knext create` — the scaffolder only walks `templates/app/`.
 # This is the ADR-0055 image recipe, staged under `templates/runtime-standalone/`
-# into the build context at `kn-next deploy` / `preview` time instead
-# (`stageStandaloneBuildContext`) — `kn-next build` does NOT stage or build this
+# into the build context at `knext deploy` / `preview` time instead
+# (`stageStandaloneBuildContext`) — `knext build` does NOT stage or build this
 # recipe; only `deploy.ts`/`preview.ts` call `stageStandaloneBuildContext` and
 # `dockerBuildxArgs`. See the BUILD-CONTEXT REQUIREMENT note below for why that
 # split matters.
@@ -43,7 +43,7 @@
 # `Dockerfile.hbs`) excludes all three, which is why the staging function
 # writes its OWN per-Dockerfile `.dockerignore` (`standaloneDockerignore()`)
 # rather than reusing the app's. This template lives OUTSIDE `templates/app`
-# (`templates/runtime-standalone/`) so `kn-next create` does not emit it:
+# (`templates/runtime-standalone/`) so `knext create` does not emit it:
 # `templates/app` is walked and rendered into EVERY scaffolded app with no
 # allowlist, and this recipe is selected by build/deploy-time config
 # (`config.build`/`config.runtime`), not by scaffold-time choice.
@@ -114,7 +114,7 @@ COPY .next/standalone /app/.next/standalone
 COPY .next/static /app/.next/standalone/.next/static
 COPY public /app/.next/standalone/public
 
-# The Next server, COMPILED: `kn-next build` (build: turbopack + runtime: bun)
+# The Next server, COMPILED: `knext build` (build: turbopack + runtime: bun)
 # compiles .next/standalone/server.js into a Bun single executable WITH
 # bytecode and verifies the bytecode is really there. Bytecode caching is
 # mandatory for every runtime cell; on Bun this executable is how the cell
@@ -212,8 +212,8 @@ ENV PORT=3000 \
 ARG KNEXT_COMPILE_CACHE_MIN_BYTES=262144
 
 # The path the bake warms — MUST match `kn-next.config.ts`'s `healthCheckPath`
-# (default `/api/health`). `kn-next deploy`/`preview` pass this as a
-# `--build-arg` when the app configures a custom path (`kn-next build` does
+# (default `/api/health`). `knext deploy`/`preview` pass this as a
+# `--build-arg` when the app configures a custom path (`knext build` does
 # NOT stage or build this recipe at all — see the file header); an app with
 # no `/api/health` route and no custom `healthCheckPath` would otherwise fail
 # THIS BUILD, not just its Knative probe.

@@ -1,5 +1,5 @@
 /**
- * exec.ts — node:child_process exec helpers for the kn-next CLI.
+ * exec.ts — node:child_process exec helpers for the knext CLI.
  *
  * Replaces Bun's `$` shell-template tag. Every former `` $`a b ${c}` `` call
  * becomes an ARGV array `["a", "b", c]` passed to one of these helpers.
@@ -22,11 +22,13 @@ import { fileURLToPath } from "node:url";
  * process entry (i.e. `node <thisfile>`), false when it was imported (e.g. by a
  * test). Node-correct replacement for Bun's `import.meta.main`.
  *
- * CRITICAL: npm installs the CLI bin as a SYMLINK (node_modules/.bin/kn-next →
- * .../dist/cli/kn-next.js). When run via that symlink, `process.argv[1]` is the
- * symlink path while `import.meta.url` resolves to the REAL file. Both sides are
- * therefore passed through realpathSync so the comparison holds for symlinked
- * bins — without this, the entry guard never fires and the CLI silently no-ops.
+ * CRITICAL: npm installs the CLI bins as SYMLINKS (node_modules/.bin/knext →
+ * .../dist/cli/knext.js, and the deprecated node_modules/.bin/kn-next →
+ * .../dist/cli/kn-next.js). When run via one of those symlinks,
+ * `process.argv[1]` is the symlink path while `import.meta.url` resolves to
+ * the REAL file. Both sides are therefore passed through realpathSync so the
+ * comparison holds for symlinked bins — without this, the entry guard never
+ * fires and the CLI silently no-ops.
  */
 export function isEntrypoint(importMetaUrl: string): boolean {
     const argv1 = process.argv[1];

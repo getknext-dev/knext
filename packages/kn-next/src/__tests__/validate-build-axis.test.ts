@@ -9,7 +9,7 @@
  *
  * vinext is not a dependency of this repo. A config key that silently accepted
  * `build: "vinext"` would produce an image with no build output, discovered at
- * `docker run` on a cluster instead of at `kn-next validate` on a laptop. The
+ * `docker run` on a cluster instead of at `knext validate` on a laptop. The
  * repo has been bitten by exactly that ordering before (#857: `next build`
  * exited 0 the whole way while emitting a server nothing could find).
  */
