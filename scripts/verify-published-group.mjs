@@ -30,6 +30,22 @@
  *           probe against a package that certainly exists), mirroring
  *           publish-preflight.mjs — an unanswerable question is never a pass.
  *
+ *           #1364 finding 1: `--post` used to read each member with ONE
+ *           `npm view`, no retry. Run 36040935670 (0.4.3) measured why that is
+ *           not enough: `ensure-published-group.mjs` absorbed npm's conflict
+ *           for `core`/`kn-next` (proof they were ACCEPTED) at 18:30:46, but
+ *           `--post`'s single read at 18:32:39 still saw the OLD version —
+ *           npm's own package `time` field shows `core@0.4.3` was not
+ *           COMMITTED (durably visible) until 18:33:00, ~2.5 minutes of
+ *           registry read-after-write lag. `viewVersion` is now polled with
+ *           a generous, bounded budget (`POST_POLL_MAX_MS`, default ~5
+ *           minutes, capped backoff) BEFORE `registryGroupProblems` judges it
+ *           — this is the run's REAL confirmation; `ensure-published-group
+ *           .mjs`'s own poll is deliberately brief and non-gating (it must
+ *           not itself run for minutes on every release). Still fails closed:
+ *           a member that never resolves within the budget is still reported
+ *           missing/incoherent exactly as before.
+ *
  * The pure decision logic is exported and unit-tested without a network or a
  * real publish; main() supplies the process spawns.
  *
@@ -166,6 +182,54 @@ export function fixedGroupProblems(manifests, fixedGroup) {
   return problems;
 }
 
+/** Total poll budget for a single member's `--post` read (#1364 finding 1): ~5 minutes. */
+export const POST_POLL_MAX_MS = 5 * 60 * 1000;
+
+/** Capped exponential backoff for the `--post` poll — slower-growing than a quick retry, deliberately. */
+export function defaultPostPollBackoffMs(attempt) {
+  return Math.min(15_000, 2_000 * 2 ** attempt);
+}
+
+/**
+ * Poll `viewVersion(name)` until it returns non-null (or any value at all —
+ * the caller judges it) or the total elapsed time exceeds `maxTotalMs`. Pure —
+ * `viewVersion` and `sleep` are injected, no network here.
+ *
+ * `--post` has no retry of its own otherwise: a single racy read after
+ * `changeset publish` measured ~2.5 minutes of registry read-after-write lag
+ * in production (#1364, run 36040935670) — long enough that
+ * `ensure-published-group.mjs`'s own brief, non-gating confirmation poll
+ * cannot cover it (that poll must stay short; it runs on EVERY release, not
+ * just the rare slow one). This is the run's real, bounded confirmation.
+ *
+ * @param {{
+ *   name: string,
+ *   viewVersion: (name: string) => string | null,
+ *   sleep: (ms: number) => Promise<void>,
+ *   maxTotalMs?: number,
+ *   backoffMs?: (attempt: number) => number,
+ *   now?: () => number,
+ * }} input
+ * @returns {Promise<string | null>} the version once seen, or null if the budget ran out
+ */
+export async function pollViewVersion({
+  name,
+  viewVersion,
+  sleep,
+  maxTotalMs = POST_POLL_MAX_MS,
+  backoffMs = defaultPostPollBackoffMs,
+  now = Date.now,
+}) {
+  const start = now();
+  for (let attempt = 0; ; attempt++) {
+    const version = viewVersion(name);
+    if (version !== null) return version;
+    const elapsed = now() - start;
+    if (elapsed >= maxTotalMs) return null;
+    await sleep(Math.min(backoffMs(attempt), maxTotalMs - elapsed));
+  }
+}
+
 /**
  * Post-publish: every fixed-group member must resolve, on the registry, to the
  * target version just published. Pure — the registry read is injected.
@@ -236,8 +300,13 @@ function publishableDirs() {
   );
 }
 
-/** `npm view <name> version` → the version string, or null when npm exits non-zero. */
-function npmViewVersion(name, registry) {
+/**
+ * `npm view <name> version` → the version string, or null when npm exits
+ * non-zero. Exported so a test can drive the real spawnSync + exit-code
+ * boundary against a fake `npm` on PATH (mirrors `ensure-published-group.mjs`'s
+ * `npmResolvesAt`).
+ */
+export function npmViewVersion(name, registry) {
   const run = spawnSync(
     process.platform === 'win32' ? 'npm.cmd' : 'npm',
     ['view', name, 'version', '--registry', registry],
@@ -247,7 +316,7 @@ function npmViewVersion(name, registry) {
   return run.stdout.trim();
 }
 
-function npmProbe(registry) {
+export function npmProbe(registry) {
   const run = spawnSync(
     process.platform === 'win32' ? 'npm.cmd' : 'npm',
     ['view', REACHABILITY_PROBE, 'version', '--registry', registry],
@@ -314,7 +383,7 @@ function runPre() {
   );
 }
 
-function runPost() {
+async function runPost() {
   const registry = process.env.PUBLISH_PREFLIGHT_REGISTRY || DEFAULT_REGISTRY;
   const config = readChangesetConfig();
   const fixedGroup = config.fixed?.[0] ?? [];
@@ -327,13 +396,32 @@ function runPost() {
   if (typeof targetVersion !== 'string')
     die(`could not read a target version for ${fixedGroup[0]}`);
 
+  // #1364 finding 1: probe reachability ONCE, up front, exactly as before — an
+  // unreachable registry must fail immediately, not after minutes of polling
+  // members that could never have answered. Only when reachable do we spend
+  // the (potentially minutes-long) per-member poll budget.
+  const probeOk = npmProbe(registry);
+  const resolved = new Map();
+  if (probeOk) {
+    for (const name of fixedGroup) {
+      resolved.set(
+        name,
+        await pollViewVersion({
+          name,
+          viewVersion: (n) => npmViewVersion(n, registry),
+          sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+        }),
+      );
+    }
+  }
+
   let problems;
   try {
     problems = registryGroupProblems({
       members: fixedGroup,
       targetVersion,
-      probeOk: npmProbe(registry),
-      viewVersion: (name) => npmViewVersion(name, registry),
+      probeOk,
+      viewVersion: (name) => resolved.get(name) ?? null,
     });
   } catch (err) {
     if (!(err instanceof RegistryUnreachableError)) throw err;
@@ -349,13 +437,16 @@ function runPost() {
   );
 }
 
-function main() {
+async function main() {
   const mode = process.argv[2];
   if (mode === '--pre') return runPre();
-  if (mode === '--post') return runPost();
+  if (mode === '--post') return await runPost();
   die('usage: verify-published-group.mjs --pre | --post');
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main();
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
 }

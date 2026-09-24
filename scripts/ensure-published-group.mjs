@@ -105,27 +105,72 @@ export function defaultBackoffMs(attempt) {
 /** Thrown when the group is STILL incoherent after the bounded retries. */
 export class GroupStillIncoherentError extends Error {}
 
+/** A bare `x.y.z` with optional semver prerelease/build metadata. */
+const SEMVER_SRC = '\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?';
+
 /**
- * TRUE iff a FAILED publish was rejected because the version already exists —
- * npm's immutable-version conflict, observed as BOTH a 403 (message "cannot
- * publish over the previously published versions") and a 409 (message "Cannot
- * publish over previously staged version", #1360 — a real production run hit
- * this exact wording). Either rejection is positive proof the member IS on the
- * registry (read-after-write lag from the upstream publish step), so heal
- * absorbs it as published rather than a failure. ANY OTHER 403/409
- * (auth/forbidden/network) returns FALSE and stays a real, fail-closed error —
- * npm does not use "cannot publish over" / "previously published or staged
- * version" / `EPUBLISHCONFLICT` for those.
+ * Extract the version npm's conflict message names, from either wording:
+ *   "Cannot publish over previously staged version \"0.4.3\"."     (409)
+ *   "You cannot publish over the previously published versions: 0.5.0." (403)
+ * Matches a semver TOKEN after the anchor phrase rather than "everything up
+ * to the next delimiter" — the naive version stopped at the first `.` inside
+ * the version itself (`0.4.3` → `0`), since a version's own dots and the
+ * sentence-ending `.` after it are not otherwise distinguishable.
+ * Returns `null` when the message does not name a parseable version — a
+ * conflict this function cannot verify is never absorbed (#1364 finding 2).
  */
-export function isAlreadyPublishedConflict(result) {
-  if (!result || result.ok) return false;
-  const text = String(result.stderr ?? result.message ?? '').toLowerCase();
-  return (
-    text.includes('cannot publish over') ||
-    text.includes('previously published version') ||
-    text.includes('previously staged version') ||
-    text.includes('epublishconflict')
+export function extractConflictVersion(text) {
+  const staged = new RegExp(`previously staged version\\s*"?(${SEMVER_SRC})`, 'i').exec(text);
+  if (staged) return staged[1];
+  const published = new RegExp(`previously published versions?:?\\s*"?(${SEMVER_SRC})`, 'i').exec(
+    text,
   );
+  if (published) return published[1];
+  return null;
+}
+
+/**
+ * TRUE iff a FAILED publish was rejected because `targetVersion` SPECIFICALLY
+ * already exists — npm's immutable-version conflict, observed as BOTH a 403
+ * (message "cannot publish over the previously published versions") and a 409
+ * (message "Cannot publish over previously staged version", #1360 — a real
+ * production run hit this exact wording). Either rejection is positive proof
+ * `targetVersion` IS on the registry (read-after-write lag from the upstream
+ * publish step), so heal absorbs it as published rather than a failure.
+ *
+ * #1364 finding 2: the version NAMED IN THE MESSAGE must equal
+ * `targetVersion`, not merely "some version" — a conflict about a DIFFERENT
+ * version (e.g. an already-published 0.4.2 while this run targets 0.4.3, or a
+ * stale/racing publish of a version this run never intended) is a real
+ * problem, not proof THIS publish landed. A message this function cannot
+ * parse a version out of is fail-closed: never absorbed.
+ *
+ * "Staged" (the 409 wording) means npm ACCEPTED-not-yet-committed, not
+ * necessarily durably visible — absorption here means "pending confirmation",
+ * never "certified". `verify-published-group.mjs --post`'s own bounded poll
+ * (#1364 finding 1) is the real confirmation; this function only decides
+ * whether to keep hammering `publish()` on a version npm has already told us
+ * not to.
+ *
+ * ANY OTHER 403/409 (auth/forbidden/network, or a DIFFERENT version) returns
+ * FALSE and stays a real, fail-closed error — npm does not use "cannot
+ * publish over" / "previously published or staged version" /
+ * `EPUBLISHCONFLICT` for those.
+ */
+export function isAlreadyPublishedConflict(result, targetVersion) {
+  if (!result || result.ok) return false;
+  const text = String(result.stderr ?? result.message ?? '');
+  const lower = text.toLowerCase();
+  const looksLikeConflict =
+    lower.includes('cannot publish over') ||
+    lower.includes('previously published version') ||
+    lower.includes('previously staged version') ||
+    lower.includes('epublishconflict');
+  if (!looksLikeConflict) return false;
+  if (typeof targetVersion !== 'string' || targetVersion.length === 0) return false;
+  const named = extractConflictVersion(text);
+  if (named === null) return false;
+  return named === targetVersion;
 }
 
 /** Bounded, quick retry budget for a single registry read (not a whole round). */
@@ -280,7 +325,8 @@ export async function ensureGroupPublished({
       // never a retry. A real failure (incl. a NON-benign 403/409 like auth)
       // leaves it unpublished so a later round retries and, if it never
       // lands, the run fails closed below.
-      if (result?.ok || isAlreadyPublishedConflict(result)) publishedThisRun.add(name);
+      if (result?.ok || isAlreadyPublishedConflict(result, targetVersion))
+        publishedThisRun.add(name);
     }
     await sleep(backoffMs(attempt));
   }
@@ -308,6 +354,28 @@ export async function ensureGroupPublished({
   }
 
   return { published: [...publishedThisRun], confirmed: [...confirmed], attempts: roundsUsed };
+}
+
+/**
+ * A fixed group publishes as ONE version by construction (changesets ties
+ * every member together). `isAlreadyPublishedConflict` (#1364 finding 2) only
+ * trusts npm's conflict message when it names `targetVersion`, and that trust
+ * is worthless if the WORKSPACE manifests themselves already disagree about
+ * what that version is — this asserts they don't, before anything is
+ * published. Pure: no I/O, no process.
+ *
+ * @param {string[]} members
+ * @param {Map<string, string | undefined>} versionByName
+ * @param {string} targetVersion
+ * @returns {Array<{ name: string, version: string | undefined }>} empty means coherent
+ */
+export function fixedGroupVersionMismatches(members, versionByName, targetVersion) {
+  const mismatches = [];
+  for (const name of members) {
+    const version = versionByName.get(name);
+    if (version !== targetVersion) mismatches.push({ name, version });
+  }
+  return mismatches;
 }
 
 // ── process wiring ─────────────────────────────────────────────────────────
@@ -405,6 +473,25 @@ async function main() {
     if (!dirByName.has(name)) {
       die(`fixed-group member ${name} has no workspace directory — cannot re-publish it`);
     }
+  }
+
+  // #1364 finding 2: a fixed group is one version BY CONSTRUCTION — assert it
+  // rather than assume it. `isAlreadyPublishedConflict` now trusts npm's
+  // conflict message only when it names `targetVersion` specifically, and
+  // that trust is worthless if the on-disk manifests themselves disagree with
+  // each other. Fail loudly, before any publish, on a mismatch.
+  const mismatches = fixedGroupVersionMismatches(fixedGroup, versionByName, targetVersion);
+  if (mismatches.length > 0) {
+    die(
+      mismatches
+        .map(
+          ({ name, version }) =>
+            `fixed-group member ${name} is at ${version ?? '(unknown)'} in its package.json, ` +
+            `not the target ${targetVersion} — the fixed group is supposed to move together (one ` +
+            'version, by construction); refusing to publish a group whose manifests already disagree.',
+        )
+        .join('\n'),
+    );
   }
 
   let result;

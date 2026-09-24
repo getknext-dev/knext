@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'bun:test';
 import {
   fixedGroupProblems,
+  POST_POLL_MAX_MS,
+  pollViewVersion,
   RegistryUnreachableError,
   registryGroupProblems,
   workspaceProtocolProblems,
@@ -150,5 +152,86 @@ describe('registryGroupProblems — post-publish, the whole group must have land
         viewVersion: () => '0.4.0',
       }),
     ).toThrow(RegistryUnreachableError);
+  });
+});
+
+describe('pollViewVersion — the #1364 finding-1 bounded confirmation poll', () => {
+  it('returns the version as soon as viewVersion resolves, without waiting out the full budget', async () => {
+    let calls = 0;
+    const sleeps: number[] = [];
+    const version = await pollViewVersion({
+      name: '@getknext/core',
+      viewVersion: () => {
+        calls += 1;
+        return calls >= 3 ? '0.4.3' : null; // lags twice, then present
+      },
+      sleep: async (ms: number) => {
+        sleeps.push(ms);
+      },
+      maxTotalMs: 60_000,
+    });
+    expect(version).toBe('0.4.3');
+    expect(calls).toBe(3);
+    expect(sleeps.length).toBe(2);
+  });
+
+  it('#1364 finding 1: a real production shape — the exact ~2.5 minute lag observed in run 36040935670, using the DEFAULT backoff', async () => {
+    // core's read-after-write lag ran from 18:30:46 (absorbed via conflict) to
+    // 18:33:00 (npm's own `time` field) — about 134s. A fake CLOCK (`now`) and
+    // an instant `sleep` that advances it by exactly the requested amount:
+    // this exercises pollViewVersion's REAL elapsed-time gating (it compares
+    // `now() - start`), not a parallel bookkeeping variable the function never
+    // reads — the earlier draft of this test only advanced its OWN counter and
+    // never actually drove the function's budget check.
+    let clock = 0;
+    let calls = 0;
+    const version = await pollViewVersion({
+      name: '@getknext/core',
+      viewVersion: () => {
+        calls += 1;
+        return clock >= 134_000 ? '0.4.3' : null;
+      },
+      sleep: async (ms: number) => {
+        clock += ms;
+      },
+      now: () => clock,
+      maxTotalMs: POST_POLL_MAX_MS,
+      // DEFAULT backoff (capped exponential) — proves the real shape reaches
+      // 134s comfortably inside the ~5-minute budget, not just that SOME
+      // budget would eventually work.
+    });
+    expect(version).toBe('0.4.3');
+    expect(calls).toBeGreaterThan(1);
+    expect(clock).toBeLessThan(POST_POLL_MAX_MS);
+  });
+
+  it('#1364 finding 1: fails (returns null) when the version NEVER appears within the budget — must not hang forever either', async () => {
+    let clock = 0;
+    const version = await pollViewVersion({
+      name: '@getknext/core',
+      viewVersion: () => null, // never resolves
+      sleep: async (ms: number) => {
+        clock += ms;
+      },
+      now: () => clock,
+      maxTotalMs: 20_000,
+      backoffMs: () => 5_000,
+    });
+    expect(version).toBeNull();
+    // Never overshoots the budget by more than one backoff step.
+    expect(clock).toBeLessThanOrEqual(20_000);
+  });
+
+  it('never sleeps at all when the very first read already resolves', async () => {
+    let slept = false;
+    const version = await pollViewVersion({
+      name: '@getknext/core',
+      viewVersion: () => '0.4.3',
+      sleep: async () => {
+        slept = true;
+      },
+    });
+    expect(version).toBe('0.4.3');
+    expect(slept).toBe(false);
   });
 });

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import {
   ensureGroupPublished,
+  fixedGroupVersionMismatches,
   GroupStillIncoherentError,
   isAlreadyPublishedConflict,
   pollResolves,
@@ -231,8 +232,8 @@ describe('ensureGroupPublished — fail closed', () => {
   });
 });
 
-describe('isAlreadyPublishedConflict — the exact #1360 wording', () => {
-  it('absorbs npm E409 "Cannot publish over previously staged version" (the real production message)', () => {
+describe('isAlreadyPublishedConflict — the exact #1360 wording, version-scoped (#1364)', () => {
+  it('absorbs npm E409 "Cannot publish over previously staged version" WHEN it names the target version', () => {
     // Verbatim from release run 36040935670 (0.4.3) — the exact bug report.
     const result = {
       ok: false,
@@ -242,10 +243,10 @@ describe('isAlreadyPublishedConflict — the exact #1360 wording', () => {
         'Cannot publish over previously staged version "0.4.3".\n' +
         'npm error A complete log of this run can be found in: /home/runner/.npm/_logs/x-debug-0.log',
     };
-    expect(isAlreadyPublishedConflict(result)).toBe(true);
+    expect(isAlreadyPublishedConflict(result, '0.4.3')).toBe(true);
   });
 
-  it('still absorbs the older E403 "cannot publish over the previously published versions" wording', () => {
+  it('still absorbs the older E403 "cannot publish over the previously published versions" wording, version-scoped', () => {
     const result = {
       ok: false,
       stderr:
@@ -253,7 +254,20 @@ describe('isAlreadyPublishedConflict — the exact #1360 wording', () => {
         'npm error 403 403 Forbidden - PUT https://registry.npmjs.org/@getknext%2flib - ' +
         'You cannot publish over the previously published versions: 0.5.0.',
     };
-    expect(isAlreadyPublishedConflict(result)).toBe(true);
+    expect(isAlreadyPublishedConflict(result, '0.5.0')).toBe(true);
+  });
+
+  it('#1364 finding 2: does NOT absorb a conflict naming a DIFFERENT version than the one being published', () => {
+    // The exact hole: a conflict about 0.4.2 must never be read as proof 0.4.3
+    // landed. Absorbing this would silently treat a stale/wrong-version
+    // conflict as success.
+    const result = {
+      ok: false,
+      stderr:
+        'npm error code E409\nnpm error 409 Conflict - PUT https://registry.npmjs.org/@getknext%2fcore - ' +
+        'Cannot publish over previously staged version "0.4.2".',
+    };
+    expect(isAlreadyPublishedConflict(result, '0.4.3')).toBe(false);
   });
 
   it('does NOT absorb a real E409 that is not the version-conflict shape', () => {
@@ -266,18 +280,38 @@ describe('isAlreadyPublishedConflict — the exact #1360 wording', () => {
         'npm error code E409\nnpm error 409 Conflict - PUT https://registry.npmjs.org/@getknext%2fcore - ' +
         'a transient registry lock, try again later.',
     };
-    expect(isAlreadyPublishedConflict(result)).toBe(false);
+    expect(isAlreadyPublishedConflict(result, '0.4.3')).toBe(false);
+  });
+
+  it('fails closed on a conflict-shaped message with NO parseable version (never blindly absorbed)', () => {
+    const result = {
+      ok: false,
+      stderr: 'npm error code EPUBLISHCONFLICT\nnpm error cannot publish over an existing thing',
+    };
+    expect(isAlreadyPublishedConflict(result, '0.4.3')).toBe(false);
+  });
+
+  it('does NOT absorb without a targetVersion to check against', () => {
+    const result = {
+      ok: false,
+      stderr: 'Cannot publish over previously staged version "0.4.3".',
+    };
+    expect(isAlreadyPublishedConflict(result, undefined)).toBe(false);
+    expect(isAlreadyPublishedConflict(result, '')).toBe(false);
   });
 
   it('does NOT absorb an ok result, or one with no stderr/message at all', () => {
     expect(
-      isAlreadyPublishedConflict({
-        ok: true,
-        stderr: 'Cannot publish over previously staged version',
-      }),
+      isAlreadyPublishedConflict(
+        {
+          ok: true,
+          stderr: 'Cannot publish over previously staged version "0.4.3"',
+        },
+        '0.4.3',
+      ),
     ).toBe(false);
-    expect(isAlreadyPublishedConflict(undefined)).toBe(false);
-    expect(isAlreadyPublishedConflict({ ok: false })).toBe(false);
+    expect(isAlreadyPublishedConflict(undefined, '0.4.3')).toBe(false);
+    expect(isAlreadyPublishedConflict({ ok: false }, '0.4.3')).toBe(false);
   });
 });
 
@@ -402,5 +436,35 @@ describe('ensureGroupPublished — #1360 regression: an absorbed conflict is TER
     expect(publishCalls).toEqual([]); // never published — the lag cleared inside the poll
     expect(result.published).toEqual([]);
     expect(coreReadCount).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe('fixedGroupVersionMismatches — #1364 finding 2: a fixed group must actually BE one version', () => {
+  it('is empty (coherent) when every member manifest is at the target version', () => {
+    const versionByName = new Map(MEMBERS.map((name) => [name, TARGET]));
+    expect(fixedGroupVersionMismatches(MEMBERS, versionByName, TARGET)).toEqual([]);
+  });
+
+  it('reports a member whose on-disk manifest disagrees with the target version', () => {
+    const versionByName = new Map(MEMBERS.map((name) => [name, TARGET]));
+    versionByName.set('@getknext/db', '0.4.9'); // a stale/unbumped manifest
+    const mismatches = fixedGroupVersionMismatches(MEMBERS, versionByName, TARGET);
+    expect(mismatches).toEqual([{ name: '@getknext/db', version: '0.4.9' }]);
+  });
+
+  it('reports a member with NO manifest entry at all as a mismatch, not a crash', () => {
+    const versionByName = new Map(
+      MEMBERS.filter((n) => n !== 'kn-next').map((name) => [name, TARGET]),
+    );
+    const mismatches = fixedGroupVersionMismatches(MEMBERS, versionByName, TARGET);
+    expect(mismatches).toEqual([{ name: 'kn-next', version: undefined }]);
+  });
+
+  it('reports every disagreeing member, not just the first', () => {
+    const versionByName = new Map(MEMBERS.map((name) => [name, TARGET]));
+    versionByName.set('@getknext/lib', '0.4.9');
+    versionByName.set('@getknext/db', '0.5.1');
+    const mismatches = fixedGroupVersionMismatches(MEMBERS, versionByName, TARGET);
+    expect(mismatches.map((m) => m.name).sort()).toEqual(['@getknext/db', '@getknext/lib']);
   });
 });

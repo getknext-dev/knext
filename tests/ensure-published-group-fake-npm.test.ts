@@ -172,7 +172,7 @@ describe('npmPublish — real spawnSync stderr capture feeds isAlreadyPublishedC
       expect(result.ok).toBe(false);
       expect(result.stderr).toContain('Cannot publish over previously staged version');
       // The exact bug: this real, spawnSync-captured result must be absorbed.
-      expect(isAlreadyPublishedConflict(result)).toBe(true);
+      expect(isAlreadyPublishedConflict(result, '0.0.0')).toBe(true);
     } finally {
       delete process.env.FAKE_NPM_PUBLISH_MODE;
     }
@@ -184,7 +184,7 @@ describe('npmPublish — real spawnSync stderr capture feeds isAlreadyPublishedC
       const result = npmPublish(pkgDir, 'http://127.0.0.1:1/');
       expect(result.ok).toBe(false);
       expect(result.stderr).toContain('Are you logged in?');
-      expect(isAlreadyPublishedConflict(result)).toBe(false);
+      expect(isAlreadyPublishedConflict(result, '0.0.0')).toBe(false);
     } finally {
       delete process.env.FAKE_NPM_PUBLISH_MODE;
     }
