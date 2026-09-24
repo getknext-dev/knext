@@ -1,14 +1,23 @@
 #!/usr/bin/env node
 /**
  * Mutation proof for `tests/nextjs-credential-lockstep.test.ts` (#1376,
- * rev-1379 round 2).
+ * rev-1379 rounds 2 and 3).
  *
- * The round-1 test read only `test-e2e-deploy.yml`'s `NEXTJS_REF` env
- * fallback, so a bump to `test-e2e-deploy.yml`'s workflow_dispatch DEFAULT,
- * or to EITHER `nextjsRef` site in `compat-vinext.yml`, stayed green. This
- * proof mutates each of those four real sites plus the two docs citations
- * (and the plain-language divergence explanation) added in round 2, and
- * requires every one to turn the spec red.
+ * Round 2: the original test read only `test-e2e-deploy.yml`'s `NEXTJS_REF`
+ * env fallback, so a bump to `test-e2e-deploy.yml`'s workflow_dispatch
+ * DEFAULT, or to EITHER `nextjsRef` site in `compat-vinext.yml`, stayed
+ * green. This proof mutates each of those four real sites plus the two docs
+ * citations (and the plain-language divergence explanation) added in round
+ * 2, and requires every one to turn the spec red.
+ *
+ * Round 3: the round-2 scan only recognised the trusted env-fallback
+ * EXPRESSION, so a job/step-level `env: NEXTJS_REF: ...` override, an
+ * `export NEXTJS_REF=`, or a `$GITHUB_ENV` write all stayed green. This
+ * proof also (a) adds each of those three forms to a real workflow and
+ * requires red, (b) mutates the scaffold pin + manifest together to a
+ * version the docs' divergence paragraph does NOT cite, and requires red
+ * (the docs check must be DERIVED, not hardcoded), and (c) adds a
+ * `lockstepExceptions` entry with an empty `reason` and requires red.
  *
  * Shared harness, for the reasons this repo has already paid for:
  *   * `mutate` asserts the anchor occurs exactly once and aborts otherwise —
@@ -38,8 +47,24 @@ const PROOF = {
     docsMatrixMd: 'docs/compat-matrix.md',
     docsMatrixMdx: 'apps/docs/content/docs/compat-matrix.mdx',
     manifest: '.github/compat-credentialed-next-version.json',
+    scaffoldPkg: 'packages/kn-next/templates/app/package.json.hbs',
   },
 };
+
+/** `.mdx`/`.hbs` need an explicit comment prefix — `COMMENT_PREFIX` only maps
+ * their underlying syntax's usual extension (`.md`, `.json`), not these. */
+function mutateOptions(subject) {
+  if (subject === 'docsMatrixMdx') return { commentPrefix: '<!--' };
+  if (subject === 'scaffoldPkg') return { commentPrefix: '//' };
+  return {};
+}
+
+/** Every mutation normalises to a list of `{ subject, anchor, replacement }`
+ * edits — most are one file, but the round-3 docs-derivation proof needs
+ * the scaffold pin and the manifest bumped TOGETHER in one mutation. */
+function editsOf(m) {
+  return m.edits ?? [{ subject: m.subject, anchor: m.anchor, replacement: m.replacement }];
+}
 
 const MUTATIONS = [
   // ── Finding 1: the scan must catch every dispatch-default and env-fallback ──
@@ -96,9 +121,62 @@ const MUTATIONS = [
     replacement:
       '**New apps pin a newer Next.js release than the version measured above.** The scaffold ships\na newer Next.js line, while',
   },
+
+  // ── Round 3, finding 1: every NEXTJS_REF assignment form, not just the ──
+  // ── one trusted expression ───────────────────────────────────────────────
+  {
+    label: 'test-e2e-deploy.yml: add a job-level env: NEXTJS_REF override (bare YAML key)',
+    subject: 'testE2eDeploy',
+    anchor:
+      '  build-next:\n    name: Prepare prebuilt next + harness\n    needs: credential-ref\n    runs-on: ubuntu-latest\n',
+    replacement:
+      '  build-next:\n    name: Prepare prebuilt next + harness\n    needs: credential-ref\n    runs-on: ubuntu-latest\n    env:\n      NEXTJS_REF: v16.3.3\n',
+  },
+  {
+    label: 'test-e2e-deploy.yml: add an `export NEXTJS_REF=` in a run: step',
+    subject: 'testE2eDeploy',
+    anchor:
+      '  build-next:\n    name: Prepare prebuilt next + harness\n    needs: credential-ref\n    runs-on: ubuntu-latest\n',
+    replacement:
+      '  build-next:\n    name: Prepare prebuilt next + harness\n    needs: credential-ref\n    runs-on: ubuntu-latest\n          export NEXTJS_REF=v16.3.3\n',
+  },
+  {
+    label: 'test-e2e-deploy.yml: add a `NEXTJS_REF=` write to $GITHUB_ENV',
+    subject: 'testE2eDeploy',
+    anchor:
+      '  build-next:\n    name: Prepare prebuilt next + harness\n    needs: credential-ref\n    runs-on: ubuntu-latest\n',
+    replacement:
+      '  build-next:\n    name: Prepare prebuilt next + harness\n    needs: credential-ref\n    runs-on: ubuntu-latest\n    # mutation-prover probe: a REAL (uncommented) shell assignment line.\n          echo "NEXTJS_REF=v16.3.3" >> "$GITHUB_ENV"\n',
+  },
+
+  // ── Round 3, finding 2: the docs check must be DERIVED, and exceptions ──
+  // ── must carry a reason ──────────────────────────────────────────────────
+  {
+    label:
+      'scaffold pin + manifest bumped TOGETHER to 16.4.0: the docs still cite 16.3.x -> the DERIVED check must catch it',
+    edits: [
+      {
+        subject: 'scaffoldPkg',
+        anchor: '"next": "16.3.3",',
+        replacement: '"next": "16.4.0",',
+      },
+      {
+        subject: 'manifest',
+        anchor: '"shippedNextPin": "16.3.3",',
+        replacement: '"shippedNextPin": "16.4.0",',
+      },
+    ],
+  },
+  {
+    label: 'manifest: add a lockstepExceptions entry with an empty reason',
+    subject: 'manifest',
+    anchor: '"lockstepExceptions": []',
+    replacement:
+      '"lockstepExceptions": [{"file": "x", "kind": "export", "value": "v1", "reason": ""}]',
+  },
 ];
 
-declareMutations(7);
+declareMutations(12);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPEC);
 
@@ -111,8 +189,8 @@ function specPasses() {
   return r.status === 0;
 }
 
-if (MUTATIONS.length !== 7) {
-  console.error(`FATAL: declared 7 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 12) {
+  console.error(`FATAL: declared 12 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 
@@ -126,14 +204,14 @@ console.log('   ok baseline green\n');
 const decorative = [];
 for (const m of MUTATIONS) {
   console.log(`── mutation: ${m.label}`);
-  const snap = snapshot(resolve(REPO_ROOT, PROOF.subjects[m.subject]));
+  const edits = editsOf(m);
+  // Snapshot every file involved BEFORE mutating any of them, so a failure
+  // partway through never leaves an earlier edit un-restorable.
+  const snaps = edits.map((e) => snapshot(resolve(REPO_ROOT, PROOF.subjects[e.subject])));
   try {
-    mutate(
-      snap,
-      m.anchor,
-      m.replacement,
-      m.subject === 'docsMatrixMdx' ? { commentPrefix: '<!--' } : {},
-    );
+    edits.forEach((e, i) => {
+      mutate(snaps[i], e.anchor, e.replacement, mutateOptions(e.subject));
+    });
     if (specPasses()) {
       console.log('   x DECORATION: the spec stayed GREEN with the behaviour removed');
       decorative.push(m.label);
@@ -142,7 +220,9 @@ for (const m of MUTATIONS) {
     }
     recordMutation();
   } finally {
-    restore(snap);
+    // Restore in REVERSE order — matches the mutate order's dependency
+    // direction and is the harness's own documented restore convention.
+    for (const snap of [...snaps].reverse()) restore(snap);
   }
   if (!specPasses()) {
     console.error(`   FATAL: ${SPEC} did not go green again after restore`);
