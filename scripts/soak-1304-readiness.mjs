@@ -2,7 +2,8 @@
 /**
  * soak-1304-readiness — the ONE-COMMAND check for #1304 ([v1.0 T13] soak)
  * once the founder cuts an RC tag: are every WIRED credential cell's 3 most
- * recent nights all green FIRST ATTEMPT?
+ * recent nights all green FIRST ATTEMPT, on the CURRENT rcTag, with
+ * bytecode caching proven live?
  *
  * WHY THIS IS NOT DISPATCHED YET (deliberate — standing task, not a bug)
  * ------------------------------------------------------------------------
@@ -18,87 +19,73 @@
  *
  *     node scripts/soak-1304-readiness.mjs
  *
- * WHAT IT DOES
- * ------------
+ * WHAT IT DOES (rev-1396 review rewrote this to source from
+ * `scripts/compat-window-audit.mjs`, not raw `gh run list`)
+ * ------------------------------------------------------------------------
  * 1. Reads `.github/compat-credential-ref.json`. If `rcTag` is `null`,
  *    reports NOT READY (no RC cut) and exits 1 — never silently "ready".
- * 2. For every WIRED cell in `scripts/compat-window-audit.mjs`'s
- *    `CREDENTIAL_CELLS` (today: node, bun, node-webpack, bun-webpack —
- *    the v1.0-scoped 4-cell matrix per ADR-0058/#1295 option C; an unwired
- *    cell such as bun-vinext is skipped, not silently counted as ready),
- *    lists `test-e2e-deploy.yml` runs since the RC was cut, filters to
- *    CREDENTIAL nights for that cell's runtime/builder (never early-warning
- *    dispatches — those can never satisfy this bar by construction, see
- *    ADR-0056), and evaluates the trailing 3-night streak via
- *    `scripts/lib/soak-readiness.mjs`.
- * 3. Prints the evidence-table markdown #1304 asks be posted on the issue,
- *    and exits 0 only when EVERY wired cell is ready.
+ * 2. Fetches every scheduled `test-e2e-deploy.yml` night's ledger via
+ *    `compat-window-audit.mjs`'s `fetchLedgers` — the SAME fetch+artifact
+ *    reconciliation every other credential-window consumer in this repo
+ *    already relies on (rule 5: no run silently vanishes from the count).
+ * 3. For every WIRED cell in `CREDENTIAL_CELLS` (today: node, bun,
+ *    node-webpack, bun-webpack — the v1.0-scoped 4-cell matrix per
+ *    ADR-0058/#1295 option C; an unwired cell such as bun-vinext is
+ *    skipped, not silently counted as ready), grades its nights with
+ *    `auditWindow({ scope: 'credential' })` — which is where the actual
+ *    filtering rev-1396 found missing now lives: rule 6 requires
+ *    `credential === true`/`compatMode === 'credential'` AND a real
+ *    RC-tag-shaped `knextRef` (never an early-warning `main` dispatch),
+ *    `lane` scoping restricts to the cell's own runtime×builder, and rule 7
+ *    requires bytecode caching PROVEN LIVE on every shard for the cell's
+ *    runtime — "bytecode LIVE" is checked, not assumed.
+ * 4. `deriveCellRunsFromWindow` adds the ONE thing `auditWindow` does not
+ *    itself enforce: that every night's `knextRef` matches the CURRENT
+ *    `rcTag` specifically (`isRcRef` only checks the SHAPE, so a stale
+ *    night from a PRIOR rc.N would otherwise still count after a bump).
+ * 5. Evaluates the trailing 3-night streak via `scripts/lib/soak-readiness.mjs`
+ *    and prints the evidence-table markdown #1304 asks be posted on the
+ *    issue, exiting 0 only when EVERY wired cell is ready.
  *
  * FAIL CLOSED
  * -----------
- * An unreachable `gh`, an unparseable run list, or zero cells found are all
- * failures — a readiness checker that goes green on missing data is worse
- * than none.
+ * An unreachable `gh`, an unparseable run/ledger, or zero cells found are
+ * all failures — a readiness checker that goes green on missing data is
+ * worse than none. `fetchLedgers` itself already fails closed on a night
+ * whose ledger cannot be obtained (an `unresolvedNight`, graded ineligible).
  *
  * TESTABILITY
  * -----------
- * All comparison/streak logic lives in `scripts/lib/soak-readiness.mjs`,
- * unit-tested against fixtures in `tests/soak-1304-readiness.test.ts`. This
- * file is the thin CLI wrapper: real filesystem read, real `gh run list`,
- * real process exit code.
+ * The streak/readiness comparison and the `auditWindow` -> `CredentialRun[]`
+ * mapping both live in `scripts/lib/soak-readiness.mjs`, unit-tested against
+ * fixtures in `tests/soak-1304-readiness.test.ts`. `auditWindow`/
+ * `fetchLedgers` themselves are `scripts/compat-window-audit.mjs`'s own,
+ * already-tested exports — this file does not reimplement any of their
+ * grading logic. This file is the thin CLI wrapper: real filesystem read,
+ * real `gh` calls (via `fetchLedgers`'s own default transport), real
+ * process exit code.
  */
 
-import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { CREDENTIAL_CELLS } from './compat-window-audit.mjs';
-import { evaluateSoakReadiness, SOAK_REQUIRED_STREAK } from './lib/soak-readiness.mjs';
+import {
+  auditWindow,
+  CREDENTIAL_CELLS,
+  DEFAULT_FETCH_LIMIT,
+  fetchLedgers,
+} from './compat-window-audit.mjs';
+import {
+  deriveCellRunsFromWindow,
+  evaluateSoakReadiness,
+  SOAK_REQUIRED_STREAK,
+} from './lib/soak-readiness.mjs';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 const CREDENTIAL_REF_PIN = resolve(REPO_ROOT, '.github/compat-credential-ref.json');
-const TARGET_WORKFLOW = 'test-e2e-deploy.yml';
-const REPO = process.env.GITHUB_REPOSITORY ?? 'getknext-dev/knext';
-
-function gh(args) {
-  return execFileSync('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-}
 
 function loadRcTag() {
   const pin = JSON.parse(readFileSync(CREDENTIAL_REF_PIN, 'utf8'));
   return pin.rcTag ?? null;
-}
-
-/**
- * `gh run list --json` does not expose the run's `nextjsRef`/`runtime`/
- * `builder` inputs directly, so cell attribution goes through the run's
- * displayed name/title the same way `compat-window-audit.mjs` already
- * attributes lanes — via the job name pattern this workflow's matrix uses.
- * Kept minimal here: filters to the cell's declared `workflowFile` and lets
- * the caller pass an already-cell-scoped run list (see `main()`).
- */
-function listCredentialRuns(cell, sinceIso) {
-  const out = gh([
-    'run',
-    'list',
-    '--repo',
-    REPO,
-    '--workflow',
-    cell.workflowFile ?? TARGET_WORKFLOW,
-    '--json',
-    'databaseId,conclusion,attempt,createdAt,status,displayTitle',
-    '--limit',
-    '50',
-  ]);
-  const runs = JSON.parse(out);
-  return runs
-    .filter((r) => r.status === 'completed')
-    .filter((r) => Date.parse(r.createdAt) >= Date.parse(sinceIso))
-    .map((r) => ({
-      id: r.databaseId,
-      conclusion: r.conclusion,
-      attempt: r.attempt ?? 1,
-      createdAt: r.createdAt,
-    }));
 }
 
 async function main() {
@@ -110,6 +97,7 @@ async function main() {
     );
     process.exit(1);
   }
+  const expectedKnextRef = `refs/tags/${rcTag}`;
 
   const wiredCells = CREDENTIAL_CELLS.filter((c) => c.wired);
   if (wiredCells.length === 0) {
@@ -117,30 +105,37 @@ async function main() {
     process.exit(1);
   }
 
-  console.log(`RC tag: ${rcTag}. Checking ${wiredCells.length} wired cell(s)...`);
+  console.log(
+    `RC tag: ${rcTag}. Fetching ledgers and checking ${wiredCells.length} wired cell(s)...`,
+  );
 
-  // A run's createdAt must be AFTER the RC cut for it to be evidence for
-  // THIS RC's soak — a night from a prior (superseded) RC tag does not
-  // count. `gh` has no direct "tag push date" lookup wired here; operators
-  // running this by hand should pass SOAK_SINCE_ISO explicitly if the RC
-  // was cut some time ago and older unrelated runs would otherwise pollute
-  // the window (harmless either way, since evaluateCellReadiness only ever
-  // looks at the TRAILING 3 nights).
-  const sinceIso = process.env.SOAK_SINCE_ISO ?? '1970-01-01T00:00:00Z';
+  const limit = Number(process.env.SOAK_FETCH_LIMIT ?? DEFAULT_FETCH_LIMIT);
+  const ledgers = fetchLedgers(limit);
 
   const runsByCell = {};
   for (const cell of wiredCells) {
-    runsByCell[cell.lane] = listCredentialRuns(cell, sinceIso);
+    const windowResult = auditWindow(ledgers, {
+      lane: cell.lane,
+      scope: 'credential',
+      requiredNights: SOAK_REQUIRED_STREAK,
+    });
+    runsByCell[cell.lane] = deriveCellRunsFromWindow(windowResult, expectedKnextRef);
   }
 
   const result = evaluateSoakReadiness(runsByCell, SOAK_REQUIRED_STREAK);
   console.log(result.evidenceTableMarkdown);
+  console.log(
+    '\n(bytecode-live and credential-mode/RC-tag-shape are verified for every night above via ' +
+      'compat-window-audit.mjs rules 6/7 — a night failing either shows as red, not as READY.)',
+  );
 
   if (!result.overallReady) {
     console.error('\nNOT READY — see the table above for which cell(s) are missing their streak.');
     process.exit(1);
   }
-  console.log('\nREADY — every wired cell has 3 consecutive green first-attempt nights.');
+  console.log(
+    '\nREADY — every wired cell has 3 consecutive green first-attempt nights on the current RC tag.',
+  );
 }
 
 main().catch((error) => {

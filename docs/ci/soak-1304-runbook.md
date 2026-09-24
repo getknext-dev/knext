@@ -41,23 +41,36 @@ settled:
 node scripts/soak-1304-readiness.mjs
 ```
 
-Requires `gh` authenticated against `getknext-dev/knext` (or set
-`GITHUB_REPOSITORY` to point elsewhere). Optionally set `SOAK_SINCE_ISO` to
-bound the run list to nights after the RC was cut (harmless either way,
-since the readiness check only ever looks at the **trailing 3 nights** per
-cell — an older, unrelated run cannot make a cell falsely "ready").
+Requires `gh` authenticated against `getknext-dev/knext` (its default
+transport is `scripts/compat-window-audit.mjs`'s own `fetchLedgers`, the
+same one every other credential-window consumer in this repo uses).
+Optionally set `SOAK_FETCH_LIMIT` (default 100, matching
+`compat-window-audit.mjs`'s own `DEFAULT_FETCH_LIMIT`) to widen or narrow
+how many recent `test-e2e-deploy.yml` runs are fetched.
 
 It will:
 
 1. Refuse (exit 1) if no RC tag is cut — never silently report "ready".
-2. For every **wired** credential cell in
-   `scripts/compat-window-audit.mjs`'s `CREDENTIAL_CELLS` (today: `node`,
-   `bun`, `node-webpack`, `bun-webpack` — the v1.0-scoped 4-cell matrix per
-   ADR-0058/#1295 option C), list `test-e2e-deploy.yml` runs and evaluate
-   whether the 3 most recent completed nights are all first-attempt green.
-3. Print a markdown evidence table (run ids per cell) — **paste this
+2. Fetch every scheduled night's ledger via `compat-window-audit.mjs`'s
+   `fetchLedgers` (the same fetch+artifact-reconciliation this repo's
+   compat-matrix tracker already relies on — no night silently vanishes
+   from the count).
+3. For every **wired** credential cell in `CREDENTIAL_CELLS` (today:
+   `node`, `bun`, `node-webpack`, `bun-webpack` — the v1.0-scoped 4-cell
+   matrix per ADR-0058/#1295 option C), grade its nights with
+   `auditWindow({ scope: 'credential' })` — ADR-0056 rule 6 (credential
+   mode + a real RC-tag-shaped `knextRef`) and rule 7 (bytecode caching
+   PROVEN LIVE per shard, for the cell's runtime) are enforced THERE, plus
+   an additional check that the night's `knextRef` matches the CURRENT
+   `rcTag` specifically (not just any RC-tag-shaped ref — closes the "RC
+   tag got bumped, stale evidence still counts" gap a naive time-window
+   filter would miss).
+4. Evaluate whether the 3 most recent qualifying nights are all
+   first-attempt green (rule 6 already disqualifies a rerun, so this is
+   enforced twice, structurally).
+5. Print a markdown evidence table (run ids per cell) — **paste this
    directly into a comment on #1304** to satisfy its exit criterion.
-4. Exit 0 only when every wired cell is ready.
+6. Exit 0 only when every wired cell is ready.
 
 ## What this script does NOT do
 
@@ -67,23 +80,25 @@ It will:
   only, never `workflow_dispatch` — a manual dispatch structurally cannot
   produce credential-counting evidence, so there is no "dispatch button" for
   this runbook to press even in principle).
-- It does not distinguish bytecode-liveness grading (ADR-0056 Amendment 1
-  D4) from a plain green — that signal lives in
-  `scripts/compat-window-audit.mjs`'s ledger-based audit, not in `gh run
-  list`'s conclusion field. Cross-check `node scripts/compat-window-audit.mjs
-  --matrix` alongside this script's output before declaring the bar met; the
-  two are complementary, not redundant (this script proves the FIRST-ATTEMPT
-  property the window audit does not track, the window audit proves
-  bytecode-liveness this script does not track).
+- It does not reimplement `compat-window-audit.mjs`'s grading rules — it
+  calls that module's own `auditWindow`/`fetchLedgers` directly, so a rule
+  change there (e.g. a future rule 8) is picked up automatically, with no
+  second place to keep in sync.
 
 ## Design / testability
 
-- Pure comparison/streak logic: `scripts/lib/soak-readiness.mjs`, unit-tested
-  against fixtures in `tests/soak-1304-readiness.test.ts` (13 cases) and
-  mutation-proved (`scripts/mutation-prove-soak-readiness.mjs`, 8/8 caught,
-  0 decorative) — no live `gh` call needed to trust the logic.
+- Pure comparison/streak logic AND the `auditWindow` -> readiness mapping:
+  `scripts/lib/soak-readiness.mjs`, unit-tested against fixtures in
+  `tests/soak-1304-readiness.test.ts` (19 cases) and mutation-proved
+  (`scripts/mutation-prove-soak-readiness.mjs`, 11/11 caught, 0 decorative)
+  — no live `gh` call needed to trust the logic.
+- `auditWindow`/`fetchLedgers` themselves are `scripts/compat-window-audit.mjs`'s
+  own, separately-tested exports (rule 6 credential/RC-tag-shape enforcement,
+  rule 7 bytecode-liveness enforcement, lane/runtime/builder scoping) — this
+  script does not duplicate any of that grading.
 - CLI wrapper: `scripts/soak-1304-readiness.mjs` — real filesystem read
-  (the RC pin), real `gh run list`, real exit code. Live-tested for the
-  fail-closed "no RC cut" path (the only path exercisable without a real RC
-  tag existing); the live `gh run list` path is unverified beyond that,
-  honestly, since there is no RC tag to query against yet.
+  (the RC pin), real `gh` calls (via `fetchLedgers`'s default transport),
+  real exit code. Live-tested for the fail-closed "no RC cut" path (the
+  only path exercisable without a real RC tag existing); the live fetch
+  path is unverified beyond that, honestly, since there is no RC tag to
+  query against yet.

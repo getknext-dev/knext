@@ -66,9 +66,28 @@ const MUTATIONS = [
     anchor: 'cellNames.every((c) => perCell[c].ready)',
     replacement: 'cellNames.some((c) => perCell[c].ready)',
   },
+
+  // ── rev-1396: deriveCellRunsFromWindow — the auditWindow -> readiness glue ──
+  {
+    label: 'deriveCellRunsFromWindow: stop requiring the night to be eligible',
+    anchor: "conclusion: n.eligible && onCurrentRcTag ? 'success' : 'failure',",
+    replacement: "conclusion: onCurrentRcTag ? 'success' : 'failure',",
+  },
+  {
+    label:
+      'deriveCellRunsFromWindow: stop requiring the CURRENT rcTag match (accept any RC-shaped ref)',
+    anchor: "conclusion: n.eligible && onCurrentRcTag ? 'success' : 'failure',",
+    replacement: "conclusion: n.eligible ? 'success' : 'failure',",
+  },
+  {
+    label:
+      'deriveCellRunsFromWindow: stop propagating the real runAttempt (always report attempt 1)',
+    anchor: 'attempt: Number(n.runAttempt ?? 1),',
+    replacement: 'attempt: 1,',
+  },
 ];
 
-declareMutations(8);
+declareMutations(11);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPEC);
 
@@ -80,8 +99,8 @@ function specPasses() {
   return r.status === 0;
 }
 
-if (MUTATIONS.length !== 8) {
-  console.error(`FATAL: declared 8 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 11) {
+  console.error(`FATAL: declared 11 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 

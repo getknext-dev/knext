@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import {
+  deriveCellRunsFromWindow,
   evaluateCellReadiness,
   evaluateSoakReadiness,
   SOAK_REQUIRED_STREAK,
@@ -172,5 +173,105 @@ describe('evaluateSoakReadiness — every WIRED cell, aggregate verdict + eviden
 describe('SOAK_REQUIRED_STREAK', () => {
   it('is 3, per #1304 exit criteria', () => {
     expect(SOAK_REQUIRED_STREAK).toBe(3);
+  });
+});
+
+/**
+ * rev-1396 review: the CLI's original per-cell data source (`gh run list`
+ * filtered only by workflow file) ignored the cell entirely — no filter on
+ * runtime, builder, credential-vs-early-warning mode, or ref-vs-rcTag — and
+ * `SOAK_SINCE_ISO` defaulted to the epoch, so pre-RC-cut runs could count.
+ * "Bytecode LIVE" was never checked at all, yet the script printed READY.
+ *
+ * Fix: source cell/mode/ref/bytecode-liveness attribution from
+ * `scripts/compat-window-audit.mjs`'s EXISTING, already-tested
+ * `auditWindow` (built for exactly this — ADR-0056 rule 6 enforces
+ * credential-mode + a real RC-tag-shaped `knextRef`; rule 7 enforces
+ * bytecode-liveness per shard for the cell's runtime; `lane` scoping
+ * enforces runtime+builder) rather than re-deriving any of that from raw
+ * `gh run list` output. `deriveCellRunsFromWindow` is the small glue that
+ * turns an `auditWindow()` result into the `CredentialRun[]` shape
+ * `evaluateCellReadiness` already consumes — including the ONE thing
+ * `auditWindow` does not itself enforce: that every night's `knextRef`
+ * matches the CURRENT `rcTag` from the pin file, not just ANY RC-tag-shaped
+ * ref (closing the "RC tag got bumped, stale rc.1 evidence still counts"
+ * gap `SOAK_SINCE_ISO` was trying and failing to close).
+ */
+describe('deriveCellRunsFromWindow — sources cell readiness from the already-graded audit window', () => {
+  const expectedKnextRef = 'refs/tags/v1.0.0-rc.1';
+
+  function night(
+    overrides: Partial<{ runId: string; eligible: boolean; runAttempt: string; knextRef: string }>,
+  ) {
+    return {
+      runId: '100',
+      eligible: true,
+      runAttempt: '1',
+      knextRef: expectedKnextRef,
+      ...overrides,
+    };
+  }
+
+  it('maps eligible nights on the CURRENT rcTag to green first-attempt runs, in runId order', () => {
+    const windowResult = {
+      nights: [night({ runId: '1' }), night({ runId: '2' }), night({ runId: '3' })],
+    };
+    const runs = deriveCellRunsFromWindow(windowResult, expectedKnextRef);
+    expect(runs.map((r) => r.id)).toEqual([1, 2, 3]);
+    expect(runs.every((r) => r.conclusion === 'success' && r.attempt === 1)).toBe(true);
+  });
+
+  it('a night `auditWindow` already disqualified (red/rerun/bytecode-not-live/etc) maps to a RED run, breaking the streak', () => {
+    const windowResult = {
+      nights: [
+        night({ runId: '1' }),
+        night({ runId: '2', eligible: false }),
+        night({ runId: '3' }),
+      ],
+    };
+    const runs = deriveCellRunsFromWindow(windowResult, expectedKnextRef);
+    const result = evaluateCellReadiness(runs, SOAK_REQUIRED_STREAK);
+    expect(result.ready).toBe(false);
+  });
+
+  it('a STALE rc.1 night is treated as red once the pin has moved to rc.2 — closes the rev-1396 "RC tag bumped" gap', () => {
+    const staleRef = 'refs/tags/v1.0.0-rc.1';
+    const currentRef = 'refs/tags/v1.0.0-rc.2';
+    // auditWindow's own rule 6 only checks the SHAPE (isRcRef), so a stale
+    // rc.1 night is still `eligible: true` there — the equality check below
+    // is what this module adds on top.
+    const windowResult = {
+      nights: [
+        night({ runId: '1', knextRef: staleRef }),
+        night({ runId: '2', knextRef: staleRef }),
+        night({ runId: '3', knextRef: staleRef }),
+      ],
+    };
+    const runs = deriveCellRunsFromWindow(windowResult, currentRef);
+    expect(runs.every((r) => r.conclusion !== 'success')).toBe(true);
+    const result = evaluateCellReadiness(runs, SOAK_REQUIRED_STREAK);
+    expect(result.ready).toBe(false);
+  });
+
+  it('a rerun (runAttempt !== "1") maps to attempt > 1, not silently normalised to 1', () => {
+    const windowResult = { nights: [night({ runId: '1', runAttempt: '2' })] };
+    const runs = deriveCellRunsFromWindow(windowResult, expectedKnextRef);
+    expect(runs[0].attempt).toBe(2);
+  });
+
+  it('an empty window maps to an empty run list, never vacuously ready', () => {
+    const runs = deriveCellRunsFromWindow({ nights: [] }, expectedKnextRef);
+    expect(runs).toEqual([]);
+    expect(evaluateCellReadiness(runs, SOAK_REQUIRED_STREAK).ready).toBe(false);
+  });
+
+  it('end to end: 3 genuinely fresh, correctly-tagged, bytecode-live nights are READY', () => {
+    const windowResult = {
+      nights: [night({ runId: '10' }), night({ runId: '11' }), night({ runId: '12' })],
+    };
+    const runs = deriveCellRunsFromWindow(windowResult, expectedKnextRef);
+    const result = evaluateCellReadiness(runs, SOAK_REQUIRED_STREAK);
+    expect(result.ready).toBe(true);
+    expect(result.evidence.map((r) => r.id)).toEqual([10, 11, 12]);
   });
 });

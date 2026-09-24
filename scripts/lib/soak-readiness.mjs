@@ -18,6 +18,50 @@
 export const SOAK_REQUIRED_STREAK = 3;
 
 /**
+ * Turns an `auditWindow()` result (`scripts/compat-window-audit.mjs`) into
+ * the `CredentialRun[]` shape `evaluateCellReadiness` consumes (rev-1396
+ * review). `auditWindow`'s own per-night grading is what actually supplies
+ * the filtering the original CLI lacked — ADR-0056 rule 6 (credential mode +
+ * a real RC-tag-shaped `knextRef`) and rule 7 (bytecode caching proven LIVE
+ * per shard, for the cell's runtime) are already enforced there, and `lane`
+ * scoping already restricts to the one runtime×builder cell. This function
+ * adds exactly ONE thing `auditWindow` does not itself check: that a
+ * night's `knextRef` matches the CURRENT `rcTag` (`expectedKnextRef`,
+ * `refs/tags/<rcTag>`) — `isRcRef` only validates the SHAPE, so a stale
+ * night from a PRIOR rc.N (before a bump) would otherwise still read as
+ * valid evidence for the current one.
+ *
+ * `auditWindow`'s `nights` array is already ordered ascending by `runId`
+ * (`selectLaneNights` sorts it), so `id` alone is enough for
+ * `evaluateCellReadiness`'s ordering — `createdAt` is synthesised from the
+ * numeric run id (a monotonic sort key, NOT a real timestamp; `gradeNight`
+ * does not return one) purely so the shared sort-by-`createdAt` logic keeps
+ * working unchanged.
+ *
+ * A night `auditWindow` already disqualified (red shards, a rerun, missing
+ * bytecode-liveness, a non-credential ref, anything else rule 6/7 catch) OR
+ * whose `knextRef` does not match `expectedKnextRef` maps to a RED run —
+ * never silently dropped, so it correctly BREAKS a trailing streak rather
+ * than being invisible to it.
+ *
+ * @param {{ nights: Array<{ runId: string, eligible: boolean, runAttempt: string, knextRef: string|null }> }} auditWindowResult
+ * @param {string} expectedKnextRef
+ * @returns {import('./soak-readiness.mjs').CredentialRun[]}
+ */
+export function deriveCellRunsFromWindow(auditWindowResult, expectedKnextRef) {
+  const nights = auditWindowResult?.nights ?? [];
+  return nights.map((n) => {
+    const onCurrentRcTag = n.knextRef === expectedKnextRef;
+    return {
+      id: Number(n.runId),
+      conclusion: n.eligible && onCurrentRcTag ? 'success' : 'failure',
+      attempt: Number(n.runAttempt ?? 1),
+      createdAt: new Date(Number(n.runId)).toISOString(),
+    };
+  });
+}
+
+/**
  * @typedef {{ id: number, conclusion: string, attempt: number, createdAt: string }} CredentialRun
  */
 
