@@ -100,6 +100,10 @@ export default defineConfig([
       // Bun-only ESM, dependency-free like cache-handler; no `.d.ts`.
       'adapters/bun-serve-keepalive-guard':
         'src/adapters/bun-serve-keepalive-guard.mjs',
+      // The server-externals sidecar resolver (#1320). vinext-compile injects an
+      // `import` of this right after the guard, so it too must ship in dist
+      // beside vinext-compile (it fails closed when absent).
+      'adapters/sidecar-install': 'src/adapters/sidecar-install.mjs',
       // The vinext data-cache adapter FACTORY (#953) — the scaffold's
       // vite.config hands this subpath to `vinext({ cache: { data } })`, and
       // vinext's generated registration module imports it at the app's build

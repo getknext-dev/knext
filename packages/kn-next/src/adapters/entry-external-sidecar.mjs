@@ -1,6 +1,7 @@
 /**
- * Load the app's server externals from the traced sidecar beside the compiled
- * binary, falling back to the bundled copy only when the sidecar lacks them.
+ * Build-time half of the compiled exec's server-externals sidecar (#1320):
+ * which of the entry's externals load from `.output/server/node_modules` beside
+ * the binary, and the shim that loads them.
  *
  * ## Why
  *
@@ -16,39 +17,33 @@
  *  - `sqlite3` → `bindings` walks up from its caller looking for `package.json`
  *    → `Could not find module root given file: "/$bunfs/root/…"`.
  *
- * Next itself never bundles these packages: that is what the option means.
- *
  * ## How
  *
- * For each bare import of the ENTRY that nitro left external, `vinext-compile`
- * substitutes a small CommonJS shim (`sidecarShimSource`):
- *
- *   1. If `<dir of the binary>/.output/server/node_modules/<pkg>/package.json`
- *      exists, the package is loaded from there: `Bun.resolveSync(spec, dir)`
- *      resolves with ESM/Bun conditions (nitro traces only a package's `import`
- *      target, so a `require`-condition resolve would pick an untraced `.cjs`),
- *      then `require(<absolute path>)`. Load errors PROPAGATE: a present-but-
- *      broken sidecar (wrong-arch addon, missing file) fails loudly instead of
- *      silently running a different copy.
- *   2. Otherwise the bundled copy is used, exactly as before. The production
- *      image does not ship the sidecar today, so this keeps every app that works
- *      today working.
- *
- * The anchor is the binary's own directory (`process.execPath`), the same
- * convention as the `import.meta` rewrite: the binary and `.output/` are
- * siblings by construction. Never `process.cwd()`.
- *
- * Runtime bare-specifier resolution is OFF in a compiled Bun binary unless it
- * was compiled with `autoloadPackageJson` — even from a real on-disk anchor,
- * and even for the real package's own nested imports. `vinext-compile` turns it
- * on; without it step 1 cannot resolve anything.
+ * 1. `sidecar-install.mjs` is injected as an early import of the entry. It
+ *    installs a `Module._resolveFilename` hook that resolves bare CommonJS
+ *    `require`/`require.resolve` requests against the sidecar ONLY
+ *    (sidecar-runtime.mjs). Bundled code's runtime `require.resolve` (the
+ *    `@typescript/vfs` case) and a real sidecar package's own dependencies both
+ *    go through it. It never resolves against `process.cwd()` or anywhere
+ *    outside `<dir of the binary>/.output/server/node_modules`, and the binary is
+ *    NOT compiled with `autoloadPackageJson`, which would open exactly that path.
+ * 2. Each entry-level external whose entry is CommonJS is replaced by a shim
+ *    (`sidecarShimSource`): when the sidecar holds the package, the shim requires
+ *    the absolute entry file resolved from its `package.json`; load errors
+ *    propagate (fail closed). Otherwise the bundled copy is used, exactly as
+ *    before, so today's images, which ship no sidecar, behave identically.
+ * 3. ESM externals stay bundled: the compiled runtime resolves an ESM file's own
+ *    `import` statements without consulting the hook, so a real ESM package
+ *    could not reach its dependencies. Their runtime `require.resolve` calls
+ *    still reach the sidecar through the hook.
  *
  * sharp is excluded: its addon already has its own `process.dlopen` path
  * (`sharp-addon-dlopen.mjs`) staged in `native/` with integrity pinning.
  */
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { builtinModules } from "node:module";
-import { existsSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { REQUIRE_CONDITIONS, resolveInPackage, SIDECAR_GLOBAL, splitRequest } from "./sidecar-runtime.mjs";
 
 /** Packages that must never be redirected: sharp has its own addon path. */
 export const NEVER_SIDECAR = ["sharp"];
@@ -60,8 +55,7 @@ const BUILTINS = new Set(builtinModules);
 
 /** `@scope/name/sub` → `@scope/name`; `name/sub` → `name`. */
 export function packageNameOf(spec) {
-    const parts = spec.split("/");
-    return spec.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0];
+    return splitRequest(spec).name;
 }
 
 /** A bare, non-builtin specifier that is not sharp (or one of sharp's `@img/*` addons). */
@@ -75,22 +69,46 @@ export function isSidecarCandidate(spec) {
 }
 
 /**
+ * Whether `spec`, resolved in the sidecar the way the runtime shim will resolve
+ * it, lands on a CommonJS file (`.cjs`, `.node`, `.json`, or `.js` in a package
+ * that is not `"type": "module"`). Null when it does not resolve at all.
+ */
+export function isCommonJsEntry(sidecarNodeModules, spec) {
+    const { name, subpath } = splitRequest(spec);
+    const pkgDir = join(sidecarNodeModules, name);
+    const file = resolveInPackage(pkgDir, subpath, REQUIRE_CONDITIONS);
+    if (!file) return null;
+    if (/\.(cjs|node|json)$/.test(file)) return true;
+    if (file.endsWith(".mjs")) return false;
+    // `.js`: the nearest package.json at or above the file, within the package.
+    let dir = dirname(file);
+    while (dir.startsWith(pkgDir)) {
+        const pj = join(dir, "package.json");
+        if (existsSync(pj)) {
+            try {
+                return JSON.parse(readFileSync(pj, "utf8")).type !== "module";
+            } catch {
+                return true;
+            }
+        }
+        if (dir === pkgDir) break;
+        dir = dirname(dir);
+    }
+    return true;
+}
+
+/**
  * The CommonJS module that stands in for `spec` in the entry's import graph.
  * `require("knext-bundled:<spec>")` is a LITERAL so `Bun.build` bundles the
- * fallback; the sidecar `require` is computed so it stays a runtime load.
+ * fallback; the sidecar `require` takes a computed absolute path, so it stays a
+ * runtime load that needs no resolution.
  */
 export function sidecarShimSource(spec) {
     const name = packageNameOf(spec);
-    const P = 'require("node:path")';
-    const dir = `${P}.join(${P}.dirname(process.execPath),".output","server")`;
-    const marker = `${P}.join(__knextDir,"node_modules",${name
-        .split("/")
-        .map((s) => JSON.stringify(s))
-        .join(",")},"package.json")`;
     return [
-        `var __knextDir=${dir};`,
-        `module.exports=require("node:fs").existsSync(${marker})`,
-        `?require(Bun.resolveSync(${JSON.stringify(spec)},__knextDir))`,
+        `var __k=globalThis[Symbol.for(${JSON.stringify(SIDECAR_GLOBAL)})];`,
+        `module.exports=__k&&__k.has(${JSON.stringify(name)})`,
+        `?require(__k.entryFile(${JSON.stringify(spec)}))`,
         `:require(${JSON.stringify(BUNDLED_PREFIX + spec)});`,
     ].join("");
 }
