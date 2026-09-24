@@ -20,10 +20,16 @@ on:
     branches: ['**']
     paths:
       - '.github/workflows/**'
+      # #1352 — actionlint also lints composite action definitions directly.
+      # This repo has none today, but the glob is widened NOW (per the
+      # issue's own "once (or before) a composite action lands") so the gate
+      # does not need a second PR the day one is added.
+      - '.github/actions/**'
   push:
     branches: [main]
     paths:
       - '.github/workflows/**'
+      - '.github/actions/**'
 
 permissions:
   contents: read
@@ -52,7 +58,7 @@ jobs:
           chmod +x actionlint
           ./actionlint -version
 
-      - name: Compute the workflow files this diff actually changed
+      - name: Compute the workflow/composite-action files this diff actually changed
         id: diff
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -61,17 +67,27 @@ jobs:
           set -euo pipefail
           base="${BASE_SHA}"
           head="${HEAD_SHA}"
+          # #1352 — `.github/actions/**/action.yml`/`.yaml` (composite action
+          # definitions) are linted the same way as workflow files: actionlint
+          # supports them directly. None exist in this repo today, but the
+          # glob is widened now so the gate does not need a second PR the day
+          # one lands.
+          globs=('.github/workflows/*.yml' '.github/workflows/*.yaml' '.github/actions/**/action.yml' '.github/actions/**/action.yaml')
           # A push with no prior commit (`before` all-zeros, first push to a
           # new branch) has nothing to diff against — fall back to lint every
-          # workflow file rather than silently linting nothing.
+          # workflow/composite-action file rather than silently linting nothing.
           if [ -z "${base}" ] || [ "${base}" = "0000000000000000000000000000000000000000" ]; then
-            files="$(git -C . ls-files '.github/workflows/*.yml' '.github/workflows/*.yaml')"
+            files="$(git -C . ls-files "${globs[@]}")"
           else
             # #1300 review round 4 (finding 3) — no `|| true`: a real `git
             # diff` error (e.g. `base` unresolvable) must fail this step, not
             # silently fall through to an empty/partial file list that then
-            # reads as "nothing changed, nothing to lint".
-            files="$(git diff --name-only "${base}" "${head}" -- '.github/workflows/*.yml' '.github/workflows/*.yaml')"
+            # reads as "nothing changed, nothing to lint". #1352 review —
+            # `--diff-filter=d` excludes DELETED paths: without it, a PR that
+            # only deletes a workflow/composite-action file fails this step
+            # with a false "file not found" instead of correctly linting
+            # nothing.
+            files="$(git diff --name-only --diff-filter=d "${base}" "${head}" -- "${globs[@]}")"
           fi
           if [ -z "${files}" ]; then
             echo "no workflow files changed in this diff — nothing to lint"
