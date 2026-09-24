@@ -141,9 +141,14 @@ describe('scripts/e2e-deploy.sh — a webpack cell proves its build was webpack 
   });
 
   it('…including a monorepo standalone tree (the app nested under its workspace path)', () => {
-    const r = deploy('webpack', true, { adverseFind: true, appSubdir: 'apps/web' });
+    // `packages/web/server.js` is the SAME depth as `node_modules/react-dom/server.js`
+    // and sorts after it, so depth alone cannot pick the app — the node_modules
+    // filter has to.
+    const r = deploy('webpack', true, { adverseFind: true, appSubdir: 'packages/web' });
     expect(r.status, r.stderr).toBe(0);
-    expect(r.stderr).toMatch(/standalone server: \S*\/\.next\/standalone\/apps\/web\/server\.js\n/);
+    expect(r.stderr).toMatch(
+      /standalone server: \S*\/\.next\/standalone\/packages\/web\/server\.js\n/,
+    );
   });
 
   it('turbopack (and an unset builder) is unaffected — no webpack runtime required', () => {
