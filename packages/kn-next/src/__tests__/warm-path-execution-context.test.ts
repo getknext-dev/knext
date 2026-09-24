@@ -93,6 +93,13 @@ function writeApp(entryTemplate: string, contractPath: string): string {
             "import { currentExecutionContext } from 'vinext/shims/request-context';",
             "export const useNitroApp = () => ({",
             "  fetch: async (req) => {",
+            "    if (new URL(req.url).pathname === '/warm-forever') {",
+            "      let timer;",
+            "      return new Response(new ReadableStream({",
+            "        start(c) { timer = setInterval(() => c.enqueue(new TextEncoder().encode('.')), 50); },",
+            "        cancel() { clearInterval(timer); },",
+            "      }));",
+            "    }",
             "    let bodyClosed;",
             "    const closed = new Promise((r) => { bodyClosed = r; });",
             "    let sent = false;",
@@ -169,7 +176,7 @@ function run(
             if (
                 sigtermAfterWarm &&
                 !signalled &&
-                /WARMED:\/warm-after status=200/.test(out)
+                /WARMED:\S+ status=/.test(out)
             ) {
                 signalled = true;
                 child.kill("SIGTERM");
@@ -248,6 +255,45 @@ describe("warm-path after() work is drained", () => {
                 code: 0,
                 afterRan: true,
             });
+        }, 60_000);
+    }
+
+    // A warm route whose body never ends must not hang the process: the read
+    // is bounded by SHUTDOWN_GRACE_MS, then the body is cancelled.
+    it("node entry: a bake whose warm body never ends exits within the cap, logged", async () => {
+        const dir = writeApp(
+            "packages/kn-next/templates/app/knext-node-entry.mjs.hbs",
+            "packages/kn-next/templates/app/runtime-contract.mjs.hbs",
+        );
+        const t0 = Date.now();
+        const r = await run(
+            "node",
+            dir,
+            {
+                KNEXT_COMPILE_CACHE_BAKE: "1",
+                KNEXT_WARM_PATH: "/warm-forever",
+                SHUTDOWN_GRACE_MS: "1500",
+            },
+            false,
+        );
+        expect(Date.now() - t0).toBeLessThan(15_000);
+        expect(r.out).toContain("WARM_BODY_TIMEOUT:/warm-forever");
+        // A bake that could not finish its warm path fails loudly, never hangs.
+        expect(r.code).toBe(1);
+    }, 60_000);
+
+    for (const [entry, contract] of BUN_ENTRIES) {
+        it(`${entry}: a warm body that never ends is cancelled at the cap and the pod still drains`, async () => {
+            const t0 = Date.now();
+            const r = await run(
+                process.execPath,
+                writeApp(entry, contract),
+                { KNEXT_WARM_PATH: "/warm-forever", SHUTDOWN_GRACE_MS: "1500" },
+                true,
+            );
+            expect(Date.now() - t0).toBeLessThan(15_000);
+            expect(r.out).toContain("WARM_BODY_TIMEOUT:/warm-forever");
+            expect(r.code).toBe(0);
         }, 60_000);
     }
 });

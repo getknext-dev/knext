@@ -89,6 +89,7 @@ import {
   createGracefulShutdown,
   createMetricsState,
   drainPending,
+  drainWarmBody,
   METRICS_CONTENT_TYPE,
   METRICS_MAX_REQUEST_BYTES,
   observeRequest,
@@ -353,10 +354,10 @@ if (process.env.KNEXT_EAGER_WARM !== '0') {
         const res = await runWithExecutionContext(EXECUTION_CONTEXT, () =>
           nitro.fetch(new Request(`http://127.0.0.1:${appServer.port}${path}`)),
         );
-        // Read the body to its end, as a live response is: vinext settles a warm
-        // route's after() work only once its response body has been consumed, so an
-        // unread body leaves that work pending and the drain would wait it out.
-        await res.arrayBuffer().catch(() => {});
+        // Read the body to its end (bounded — runtime-contract.mjs): vinext settles a
+        // warm route's after() work only once its response body has been consumed, so
+        // an unread body leaves that work pending and the drain would wait it out.
+        await drainWarmBody(res, path, GRACE_MS);
         console.log(`WARMED:${path} status=${res.status} ms=${Date.now() - warmT0}`);
       } catch (err) {
         console.log(
