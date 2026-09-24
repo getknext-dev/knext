@@ -87,7 +87,9 @@ describe('markerValidity (#1302)', () => {
     const result = markerValidity(
       {
         rcTag: 'v1.0.0-rc.1',
-        rcBumpMarker: { date: '2026-09-01', expires: '2026-09-24', reason: 'x' },
+        // 14-day span, keeps this under the cap — the boundary under test
+        // here is today-vs-expires, not the span cap (that has its own tests).
+        rcBumpMarker: { date: '2026-09-10', expires: '2026-09-24', reason: 'x' },
       },
       NOW,
     );
@@ -138,6 +140,32 @@ describe('markerValidity (#1302)', () => {
     expect(markerValidity({ rcBumpMarker: 'approved' }, NOW).valid).toBe(false);
     expect(markerValidity({ rcBumpMarker: [] }, NOW).valid).toBe(false);
   });
+
+  it('a 14-day span is valid (the cap boundary, inclusive)', () => {
+    const result = markerValidity(
+      { rcBumpMarker: { date: '2026-09-24', expires: '2026-10-08', reason: 'exactly 14 days' } },
+      NOW,
+    );
+    expect(result.valid).toBe(true);
+  });
+
+  it('a 15-day span is rejected — exceeds the 14-day cap (#1370 review)', () => {
+    const result = markerValidity(
+      { rcBumpMarker: { date: '2026-09-24', expires: '2026-10-09', reason: 'one day too long' } },
+      NOW,
+    );
+    expect(result.valid).toBe(false);
+    expect(result.reason).toMatch(/exceeds the 14-day cap/);
+  });
+
+  it('an unbounded-looking multi-month span is rejected, not merely a boundary nudge', () => {
+    const result = markerValidity(
+      { rcBumpMarker: { date: '2026-09-24', expires: '2027-01-01', reason: 'far too long' } },
+      NOW,
+    );
+    expect(result.valid).toBe(false);
+    expect(result.reason).toMatch(/exceeds the 14-day cap/);
+  });
 });
 
 describe('frozenFileSet — DERIVED from CREDENTIAL_CELLS + collectHarness, never hardcoded (#1302)', () => {
@@ -158,7 +186,14 @@ describe('frozenFileSet — DERIVED from CREDENTIAL_CELLS + collectHarness, neve
         { component: 'harness', path: `${lane}/two.mjs`, line: 'y' },
       ];
     };
-    const set = frozenFileSet('/repo', { cells: fakeCells, collectHarnessFn: fakeCollectHarness });
+    const set = frozenFileSet('/repo', {
+      cells: fakeCells,
+      collectHarnessFn: fakeCollectHarness,
+      // Isolate the harness-derivation half from the guard's own
+      // self-protection union (covered separately below) — this test is
+      // about CREDENTIAL_CELLS, not GUARD_SELF_FILES.
+      guardSelfFiles: [],
+    });
     expect(calls.sort()).toEqual(['a', 'b']);
     expect(set).toEqual(new Set(['a/one.mjs', 'a/two.mjs', 'b/one.mjs', 'b/two.mjs']));
   });
@@ -180,20 +215,38 @@ describe('frozenFileSet — DERIVED from CREDENTIAL_CELLS + collectHarness, neve
     expect(set.has('test/deploy-tests-manifest.smoke.knext.json')).toBe(false);
   });
 
-  it('never includes the guard workflow/script itself (not part of the credential harness)', () => {
+  it('DOES include the guard workflow/script itself — self-protection (#1370 review)', () => {
+    // Superseded assertion (was: "never includes the guard ... itself"):
+    // #1370 review round found a PR could weaken the guard's own code with
+    // nothing stopping it, since none of GUARD_SELF_FILES were in the
+    // derived harness closure. This is now a deliberate self-protection
+    // union, not the harness derivation.
     const set = frozenFileSet(REPO_ROOT);
+    expect(set.has('scripts/compat-credential-freeze-guard.mjs')).toBe(true);
+    expect(set.has('scripts/compat-window-audit.mjs')).toBe(true);
+    expect(set.has('scripts/compat-window-fingerprint.mjs')).toBe(true);
+    expect(set.has('.github/workflows/compat-credential-freeze-guard.yml')).toBe(true);
+  });
+
+  it('the self-protection list is a DI seam too — an empty guardSelfFiles omits them', () => {
+    const set = frozenFileSet(REPO_ROOT, { guardSelfFiles: [] });
     expect(set.has('scripts/compat-credential-freeze-guard.mjs')).toBe(false);
-    expect(set.has('.github/workflows/compat-credential-freeze-guard.yml')).toBe(false);
   });
 });
 
 describe('evaluateFreezeGuard — the four required scenarios (#1302)', () => {
   const NOW = new Date('2026-09-24T12:00:00Z');
-  const FROZEN_SET = new Set(['.github/workflows/test-e2e-deploy.yml', 'scripts/e2e-deploy.sh']);
+  const FROZEN_SET = new Set([
+    '.github/workflows/test-e2e-deploy.yml',
+    'scripts/e2e-deploy.sh',
+    PIN_FILE,
+  ]);
+  const VALID_MARKER = { date: '2026-09-24', expires: '2026-10-08', reason: 'reviewed rc re-cut' };
 
   it('RED: frozen (rcTag set) + a touched frozen file + no marker', () => {
     const result = evaluateFreezeGuard({
-      pin: { rcTag: 'v1.0.0-rc.1' },
+      basePin: { rcTag: 'v1.0.0-rc.1' },
+      headPin: { rcTag: 'v1.0.0-rc.1' },
       touchedFiles: ['scripts/e2e-deploy.sh', 'README.md'],
       frozenSet: FROZEN_SET,
       now: NOW,
@@ -205,7 +258,8 @@ describe('evaluateFreezeGuard — the four required scenarios (#1302)', () => {
 
   it('GREEN: unfrozen (rcTag null) even though the touched files WOULD be frozen ones', () => {
     const result = evaluateFreezeGuard({
-      pin: { rcTag: null },
+      basePin: { rcTag: null },
+      headPin: { rcTag: null },
       touchedFiles: ['scripts/e2e-deploy.sh'],
       frozenSet: FROZEN_SET,
       now: NOW,
@@ -214,12 +268,10 @@ describe('evaluateFreezeGuard — the four required scenarios (#1302)', () => {
     expect(result.reason).toMatch(/not frozen/);
   });
 
-  it('GREEN: frozen + touched frozen file + a VALID rcBumpMarker', () => {
+  it('GREEN: frozen + touched frozen file + a VALID rcBumpMarker present at HEAD', () => {
     const result = evaluateFreezeGuard({
-      pin: {
-        rcTag: 'v1.0.0-rc.1',
-        rcBumpMarker: { date: '2026-09-24', expires: '2026-10-08', reason: 'reviewed rc re-cut' },
-      },
+      basePin: { rcTag: 'v1.0.0-rc.1' },
+      headPin: { rcTag: 'v1.0.0-rc.1', rcBumpMarker: VALID_MARKER },
       touchedFiles: ['scripts/e2e-deploy.sh'],
       frozenSet: FROZEN_SET,
       now: NOW,
@@ -228,9 +280,10 @@ describe('evaluateFreezeGuard — the four required scenarios (#1302)', () => {
     expect(result.reason).toMatch(/rcBumpMarker exempts it/);
   });
 
-  it('RED: frozen + touched frozen file + an EXPIRED rcBumpMarker', () => {
+  it('RED: frozen + touched frozen file + an EXPIRED rcBumpMarker at HEAD', () => {
     const result = evaluateFreezeGuard({
-      pin: {
+      basePin: { rcTag: 'v1.0.0-rc.1' },
+      headPin: {
         rcTag: 'v1.0.0-rc.1',
         rcBumpMarker: { date: '2026-08-01', expires: '2026-08-15', reason: 'old approval' },
       },
@@ -244,7 +297,8 @@ describe('evaluateFreezeGuard — the four required scenarios (#1302)', () => {
 
   it('GREEN: frozen, but the touched files are NOT in the frozen set at all', () => {
     const result = evaluateFreezeGuard({
-      pin: { rcTag: 'v1.0.0-rc.1' },
+      basePin: { rcTag: 'v1.0.0-rc.1' },
+      headPin: { rcTag: 'v1.0.0-rc.1' },
       touchedFiles: ['README.md', 'docs/whatever.md'],
       frozenSet: FROZEN_SET,
       now: NOW,
@@ -253,12 +307,13 @@ describe('evaluateFreezeGuard — the four required scenarios (#1302)', () => {
     expect(result.touchedFrozenFiles).toEqual([]);
   });
 
-  it('a marker present but touching NO frozen files does not even need to be valid', () => {
+  it('a marker present at head but touching NO frozen files does not even need to be valid', () => {
     // The marker is only consulted once a frozen file is actually touched —
     // an unrelated PR carrying a stray/expired marker object must not be
     // penalized for it.
     const result = evaluateFreezeGuard({
-      pin: {
+      basePin: { rcTag: 'v1.0.0-rc.1' },
+      headPin: {
         rcTag: 'v1.0.0-rc.1',
         rcBumpMarker: { date: '2020-01-01', expires: '2020-01-02', reason: 'ancient, irrelevant' },
       },
@@ -271,7 +326,8 @@ describe('evaluateFreezeGuard — the four required scenarios (#1302)', () => {
 
   it('multiple touched frozen files are all listed', () => {
     const result = evaluateFreezeGuard({
-      pin: { rcTag: 'v1.0.0-rc.1' },
+      basePin: { rcTag: 'v1.0.0-rc.1' },
+      headPin: { rcTag: 'v1.0.0-rc.1' },
       touchedFiles: ['scripts/e2e-deploy.sh', '.github/workflows/test-e2e-deploy.yml', 'README.md'],
       frozenSet: FROZEN_SET,
       now: NOW,
@@ -280,6 +336,79 @@ describe('evaluateFreezeGuard — the four required scenarios (#1302)', () => {
     expect(result.touchedFrozenFiles.sort()).toEqual(
       ['.github/workflows/test-e2e-deploy.yml', 'scripts/e2e-deploy.sh'].sort(),
     );
+  });
+
+  describe('the exemption deadlock (#1370 review): a PR that adds/bumps/clears via the pin ALONE', () => {
+    it('GREEN: pin-only diff that ADDS a marker while staying frozen (marker read from HEAD, not base)', () => {
+      // Base has no marker at all — if the marker were still read from base
+      // (the pre-#1370 behaviour), this would deadlock: the PR introducing
+      // the marker could never pass, since base never has what head adds.
+      const result = evaluateFreezeGuard({
+        basePin: { rcTag: 'v1.0.0-rc.1' },
+        headPin: { rcTag: 'v1.0.0-rc.1', rcBumpMarker: VALID_MARKER },
+        touchedFiles: [PIN_FILE],
+        frozenSet: FROZEN_SET,
+        now: NOW,
+      });
+      expect(result.ok).toBe(true);
+      expect(result.reason).toMatch(/rcBumpMarker exempts it/);
+    });
+
+    it('GREEN: pin-only diff that CLEARS rcTag (closes the window) — exempt with no marker at all', () => {
+      const result = evaluateFreezeGuard({
+        basePin: { rcTag: 'v1.0.0-rc.1' },
+        headPin: { rcTag: null },
+        touchedFiles: [PIN_FILE],
+        frozenSet: FROZEN_SET,
+        now: NOW,
+      });
+      expect(result.ok).toBe(true);
+      expect(result.reason).toMatch(/closes the credential window/);
+    });
+
+    it('RED: pin-only diff that BUMPS rcTag to a new tag while staying frozen, with NO marker — still honest', () => {
+      // "Exempt a pin-only diff, but keep it honest" (#1370 review): closing
+      // is always safe, but silently re-tagging a still-live window through
+      // the pin file alone, with nothing authorizing it, is exactly the
+      // unsafe direction a bare pin-only exemption would open up.
+      const result = evaluateFreezeGuard({
+        basePin: { rcTag: 'v1.0.0-rc.1' },
+        headPin: { rcTag: 'v1.0.0-rc.2' },
+        touchedFiles: [PIN_FILE],
+        frozenSet: FROZEN_SET,
+        now: NOW,
+      });
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/no valid rcBumpMarker/);
+    });
+
+    it('GREEN: pin-only diff that BUMPS rcTag to a new tag AND carries a valid marker at head', () => {
+      const result = evaluateFreezeGuard({
+        basePin: { rcTag: 'v1.0.0-rc.1' },
+        headPin: { rcTag: 'v1.0.0-rc.2', rcBumpMarker: VALID_MARKER },
+        touchedFiles: [PIN_FILE],
+        frozenSet: FROZEN_SET,
+        now: NOW,
+      });
+      expect(result.ok).toBe(true);
+    });
+
+    it('RED: a NON-pin-only diff (harness file also touched) is NOT exempted by head resolving unfrozen', () => {
+      // The pin-only exemption is deliberately scoped to touchedFrozenFiles
+      // === [PIN_FILE] alone — a diff that ALSO edits real harness bytes must
+      // still clear the ordinary marker check, even if the pin itself is
+      // being cleared in the same diff (base is still frozen, which is what
+      // governs a non-pin-only touch).
+      const result = evaluateFreezeGuard({
+        basePin: { rcTag: 'v1.0.0-rc.1' },
+        headPin: { rcTag: null },
+        touchedFiles: [PIN_FILE, 'scripts/e2e-deploy.sh'],
+        frozenSet: FROZEN_SET,
+        now: NOW,
+      });
+      expect(result.ok).toBe(false);
+      expect(result.touchedFrozenFiles.sort()).toEqual([PIN_FILE, 'scripts/e2e-deploy.sh'].sort());
+    });
   });
 });
 
@@ -298,17 +427,31 @@ describe('the pin file itself documents rcBumpMarker (#1302)', () => {
  * red when frozen with a touched file, green when unfrozen, green with a
  * valid marker, red with an expired marker. `--now` makes the process
  * deterministic without touching the system clock.
+ *
+ * `CLI_TEST_TIMEOUT_MS` (#1370 review): `frozenFileSet(REPO_ROOT)` runs the
+ * real `collectHarness` closure walk over every credential cell for each
+ * subprocess spawn — slower than bun:test's 5000ms default on a loaded CI
+ * runner. Each `it` below passes it explicitly rather than relying on the
+ * suite-wide default.
  */
 describe('CLI subprocess — the four required scenarios, end to end (#1302)', () => {
   const SCRIPT = resolve(REPO_ROOT, 'scripts/compat-credential-freeze-guard.mjs');
   const NOW_ARG = '2026-09-24T12:00:00Z';
+  const CLI_TEST_TIMEOUT_MS = 15_000;
+  const EXEC_TIMEOUT_MS = 10_000;
 
-  function run(pin: unknown, touchedFiles: string[]): { status: number | null; stdout: string } {
+  function run(
+    basePin: unknown,
+    touchedFiles: string[],
+    headPin: unknown = basePin,
+  ): { status: number | null; stdout: string } {
     const dir = mkdtempSync(join(tmpdir(), 'knext-freeze-guard-'));
     try {
-      const pinFile = join(dir, 'base-pin.json');
+      const basePinFile = join(dir, 'base-pin.json');
+      const headPinFile = join(dir, 'head-pin.json');
       const changedFile = join(dir, 'changed-files.txt');
-      writeFileSync(pinFile, JSON.stringify(pin));
+      writeFileSync(basePinFile, JSON.stringify(basePin));
+      writeFileSync(headPinFile, JSON.stringify(headPin));
       writeFileSync(changedFile, `${touchedFiles.join('\n')}\n`);
       try {
         const stdout = execFileSync(
@@ -318,13 +461,15 @@ describe('CLI subprocess — the four required scenarios, end to end (#1302)', (
             '--repo-root',
             REPO_ROOT,
             '--base-pin-file',
-            pinFile,
+            basePinFile,
+            '--head-pin-file',
+            headPinFile,
             '--changed-files-file',
             changedFile,
             '--now',
             NOW_ARG,
           ],
-          { encoding: 'utf8' },
+          { encoding: 'utf8', timeout: EXEC_TIMEOUT_MS },
         );
         return { status: 0, stdout };
       } catch (err) {
@@ -336,57 +481,99 @@ describe('CLI subprocess — the four required scenarios, end to end (#1302)', (
     }
   }
 
-  it('RED (exit 1): frozen + a real touched frozen file (test-e2e-deploy.yml) + no marker', () => {
-    const { status, stdout } = run({ rcTag: 'v1.0.0-rc.1' }, [
-      '.github/workflows/test-e2e-deploy.yml',
-    ]);
-    expect(status).toBe(1);
-    expect(stdout).toMatch(/no valid rcBumpMarker/);
-  });
+  it(
+    'RED (exit 1): frozen + a real touched frozen file (test-e2e-deploy.yml) + no marker',
+    () => {
+      const { status, stdout } = run({ rcTag: 'v1.0.0-rc.1' }, [
+        '.github/workflows/test-e2e-deploy.yml',
+      ]);
+      expect(status).toBe(1);
+      expect(stdout).toMatch(/no valid rcBumpMarker/);
+    },
+    CLI_TEST_TIMEOUT_MS,
+  );
 
-  it('GREEN (exit 0): unfrozen (rcTag: null), even touching a would-be-frozen file', () => {
-    const { status, stdout } = run({ rcTag: null }, ['.github/workflows/test-e2e-deploy.yml']);
-    expect(status).toBe(0);
-    expect(stdout).toMatch(/not frozen/);
-  });
+  it(
+    'GREEN (exit 0): unfrozen (rcTag: null), even touching a would-be-frozen file',
+    () => {
+      const { status, stdout } = run({ rcTag: null }, ['.github/workflows/test-e2e-deploy.yml']);
+      expect(status).toBe(0);
+      expect(stdout).toMatch(/not frozen/);
+    },
+    CLI_TEST_TIMEOUT_MS,
+  );
 
-  it('GREEN (exit 0): frozen + touched frozen file + a valid rcBumpMarker', () => {
-    const { status, stdout } = run(
-      {
-        rcTag: 'v1.0.0-rc.1',
-        rcBumpMarker: { date: '2026-09-24', expires: '2026-10-08', reason: 'e2e test' },
-      },
-      ['.github/workflows/test-e2e-deploy.yml'],
-    );
-    expect(status).toBe(0);
-    expect(stdout).toMatch(/rcBumpMarker exempts it/);
-  });
+  it(
+    'GREEN (exit 0): frozen + touched frozen file + a valid rcBumpMarker at head',
+    () => {
+      const { status, stdout } = run(
+        { rcTag: 'v1.0.0-rc.1' },
+        ['.github/workflows/test-e2e-deploy.yml'],
+        {
+          rcTag: 'v1.0.0-rc.1',
+          rcBumpMarker: { date: '2026-09-24', expires: '2026-10-08', reason: 'e2e test' },
+        },
+      );
+      expect(status).toBe(0);
+      expect(stdout).toMatch(/rcBumpMarker exempts it/);
+    },
+    CLI_TEST_TIMEOUT_MS,
+  );
 
-  it('RED (exit 1): frozen + touched frozen file + an EXPIRED rcBumpMarker', () => {
-    const { status, stdout } = run(
-      {
-        rcTag: 'v1.0.0-rc.1',
-        rcBumpMarker: { date: '2026-08-01', expires: '2026-08-15', reason: 'stale' },
-      },
-      ['.github/workflows/test-e2e-deploy.yml'],
-    );
-    expect(status).toBe(1);
-    expect(stdout).toMatch(/expired/);
-  });
+  it(
+    'RED (exit 1): frozen + touched frozen file + an EXPIRED rcBumpMarker at head',
+    () => {
+      const { status, stdout } = run(
+        { rcTag: 'v1.0.0-rc.1' },
+        ['.github/workflows/test-e2e-deploy.yml'],
+        {
+          rcTag: 'v1.0.0-rc.1',
+          rcBumpMarker: { date: '2026-08-01', expires: '2026-08-15', reason: 'stale' },
+        },
+      );
+      expect(status).toBe(1);
+      expect(stdout).toMatch(/expired/);
+    },
+    CLI_TEST_TIMEOUT_MS,
+  );
 
-  it('GREEN (exit 0): frozen, touched files are entirely unrelated to the credential harness', () => {
-    const { status } = run({ rcTag: 'v1.0.0-rc.1' }, ['README.md', 'docs/some-page.md']);
-    expect(status).toBe(0);
-  });
+  it(
+    'GREEN (exit 0): frozen, touched files are entirely unrelated to the credential harness',
+    () => {
+      const { status } = run({ rcTag: 'v1.0.0-rc.1' }, ['README.md', 'docs/some-page.md']);
+      expect(status).toBe(0);
+    },
+    CLI_TEST_TIMEOUT_MS,
+  );
 
-  it('exits 2 (usage error) when a required flag is missing, not a silent pass', () => {
-    expect(() =>
-      execFileSync(process.execPath, [SCRIPT, '--repo-root', REPO_ROOT], { encoding: 'utf8' }),
-    ).toThrow();
-    try {
-      execFileSync(process.execPath, [SCRIPT, '--repo-root', REPO_ROOT], { encoding: 'utf8' });
-    } catch (err) {
-      expect((err as { status: number }).status).toBe(2);
-    }
-  });
+  it(
+    'GREEN (exit 0): pin-only diff clearing rcTag — the deadlock scenario, end to end (#1370)',
+    () => {
+      const { status, stdout } = run({ rcTag: 'v1.0.0-rc.1' }, [PIN_FILE], { rcTag: null });
+      expect(status).toBe(0);
+      expect(stdout).toMatch(/closes the credential window/);
+    },
+    CLI_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'exits 2 (usage error) when a required flag is missing, not a silent pass',
+    () => {
+      expect(() =>
+        execFileSync(process.execPath, [SCRIPT, '--repo-root', REPO_ROOT], {
+          encoding: 'utf8',
+          timeout: EXEC_TIMEOUT_MS,
+        }),
+      ).toThrow();
+      try {
+        execFileSync(process.execPath, [SCRIPT, '--repo-root', REPO_ROOT], {
+          encoding: 'utf8',
+          timeout: EXEC_TIMEOUT_MS,
+        });
+      } catch (err) {
+        expect((err as { status: number }).status).toBe(2);
+      }
+    },
+    CLI_TEST_TIMEOUT_MS,
+  );
 });

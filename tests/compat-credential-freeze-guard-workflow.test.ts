@@ -5,7 +5,7 @@ import { parse } from 'yaml';
 
 /**
  * Wiring tests for `.github/workflows/compat-credential-freeze-guard.yml`
- * (#1302) — the shape of the workflow itself, mirroring
+ * (#1302, amended #1370 review) — the shape of the workflow itself, mirroring
  * `tests/actionlint-workflow.test.ts`'s pattern for the same injection-safety
  * and permissions concerns.
  */
@@ -22,10 +22,11 @@ interface Step {
 }
 interface Job {
   permissions?: Record<string, string>;
+  env?: Record<string, string>;
   steps: Step[];
 }
 interface Workflow {
-  on?: { pull_request?: { branches?: string[] } };
+  on?: { pull_request?: { branches?: string[] }; merge_group?: unknown };
   permissions?: Record<string, string>;
   jobs: Record<string, Job>;
 }
@@ -52,6 +53,11 @@ describe('compat-credential-freeze-guard.yml is valid and triggers on every PR (
     expect(onBlock).not.toMatch(/paths:/);
   });
 
+  it('also triggers on merge_group (#1370 review) — a future required check must not stall the queue', () => {
+    const { wf } = load();
+    expect('merge_group' in (wf.on ?? {})).toBe(true);
+  });
+
   it('both top-level and job-level permissions are read-only', () => {
     const { wf } = load();
     expect(wf.permissions?.contents).toBe('read');
@@ -62,26 +68,50 @@ describe('compat-credential-freeze-guard.yml is valid and triggers on every PR (
   });
 });
 
+describe('queue-safe base/head SHAs (#1370 review)', () => {
+  it('job-level env computes BASE_SHA/HEAD_SHA from merge_group OR pull_request, never pull_request alone', () => {
+    const { wf } = load();
+    const job = wf.jobs['freeze-guard'];
+    expect(job.env?.BASE_SHA).toContain('github.event.merge_group.base_sha');
+    expect(job.env?.BASE_SHA).toContain('github.event.pull_request.base.sha');
+    expect(job.env?.HEAD_SHA).toContain('github.event.merge_group.head_sha');
+    expect(job.env?.HEAD_SHA).toContain('github.event.pull_request.head.sha');
+  });
+
+  it('no step re-declares a pull_request-only BASE_SHA/HEAD_SHA env that would shadow the job-level one', () => {
+    const { wf } = load();
+    for (const step of wf.jobs['freeze-guard'].steps) {
+      if (!step.env) continue;
+      expect(Object.keys(step.env)).not.toContain('BASE_SHA');
+      expect(Object.keys(step.env)).not.toContain('HEAD_SHA');
+    }
+  });
+});
+
 describe('injection safety: PR-controlled values flow through env:, never inline in run: (#1302)', () => {
-  it('the diff step reads BASE_SHA/HEAD_SHA via env:, and the script reads them as shell vars', () => {
+  it('the diff step uses BASE_SHA/HEAD_SHA as shell vars, never $\\{\\{ \\}\\} inline', () => {
     const { wf } = load();
     const step = wf.jobs['freeze-guard'].steps.find((s) => /Compute the files/.test(s.name ?? ''));
     expect(step, 'diff step not found').toBeTruthy();
-    expect(step?.env?.BASE_SHA).toBe('${{ github.event.pull_request.base.sha }}');
-    expect(step?.env?.HEAD_SHA).toBe('${{ github.event.pull_request.head.sha }}');
-    expect(String(step?.run)).toContain('"${BASE_SHA}"');
-    expect(String(step?.run)).toContain('"${HEAD_SHA}"');
-    // Never a raw ${{ }} substitution inside the script body itself.
+    expect(String(step?.run)).toContain('"${BASE_SHA}');
+    expect(String(step?.run)).toContain('${HEAD_SHA}"');
     expect(String(step?.run)).not.toMatch(/\$\{\{/);
   });
 
-  it('the pin-read step reads BASE_SHA via env:, never inline', () => {
+  it('the base and head pin-read steps use BASE_SHA/HEAD_SHA as shell vars, never inline', () => {
     const { wf } = load();
-    const step = wf.jobs['freeze-guard'].steps.find((s) => /Read the pin file/.test(s.name ?? ''));
-    expect(step, 'pin-read step not found').toBeTruthy();
-    expect(step?.env?.BASE_SHA).toBe('${{ github.event.pull_request.base.sha }}');
-    expect(String(step?.run)).toContain('"${BASE_SHA}:.github/compat-credential-ref.json"');
-    expect(String(step?.run)).not.toMatch(/\$\{\{/);
+    const baseStep = wf.jobs['freeze-guard'].steps.find((s) =>
+      /Read the pin file at the PR's base commit/.test(s.name ?? ''),
+    );
+    const headStep = wf.jobs['freeze-guard'].steps.find((s) =>
+      /Read the pin file at the PR's head commit/.test(s.name ?? ''),
+    );
+    expect(baseStep, 'base pin-read step not found').toBeTruthy();
+    expect(headStep, 'head pin-read step not found').toBeTruthy();
+    expect(String(baseStep?.run)).toContain('"${BASE_SHA}:.github/compat-credential-ref.json"');
+    expect(String(headStep?.run)).toContain('"${HEAD_SHA}:.github/compat-credential-ref.json"');
+    expect(String(baseStep?.run)).not.toMatch(/\$\{\{/);
+    expect(String(headStep?.run)).not.toMatch(/\$\{\{/);
   });
 
   it('no step anywhere in the job interpolates ${{ }} directly into its run: script', () => {
@@ -95,15 +125,71 @@ describe('injection safety: PR-controlled values flow through env:, never inline
   });
 });
 
-describe('the pin is read at the BASE commit, not head (#1302)', () => {
-  it('git show targets ${BASE_SHA}, never a bare checkout-relative read of the pin path', () => {
+describe('the base-commit diff uses three-dot notation (#1370 review)', () => {
+  it('git diff --name-only uses BASE_SHA...HEAD_SHA, not a two-dot range', () => {
     const { text } = load();
-    expect(text).toMatch(/git show "\$\{BASE_SHA\}:\.github\/compat-credential-ref\.json"/);
+    expect(text).toMatch(/git diff --name-only "\$\{BASE_SHA\}\.\.\.\$\{HEAD_SHA\}"/);
+  });
+});
+
+describe('the freeze state is read at BASE, the marker at HEAD (#1302, amended #1370)', () => {
+  it('git show reads the pin at BASE_SHA into base-pin.json', () => {
+    const { text } = load();
+    expect(text).toMatch(
+      /git show "\$\{BASE_SHA\}:\.github\/compat-credential-ref\.json" > base-pin\.json/,
+    );
   });
 
-  it('a missing historical pin degrades to the unfrozen shape, not a job failure', () => {
+  it('git show ALSO reads the pin at HEAD_SHA into head-pin.json (#1370 review)', () => {
     const { text } = load();
-    expect(text).toMatch(/\{"rcTag":\s*null\}/);
+    expect(text).toMatch(
+      /git show "\$\{HEAD_SHA\}:\.github\/compat-credential-ref\.json" > head-pin\.json/,
+    );
+  });
+
+  it('both a missing historical base pin AND a missing head pin degrade to the unfrozen shape', () => {
+    const { text } = load();
+    const matches = text.match(/\{"rcTag":\s*null\}/g) ?? [];
+    expect(matches.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe('the guard runs from a base-commit checkout of its OWN code (#1370 review — "the PR can rewrite its own gate")', () => {
+  it('a worktree is added at BASE_SHA before the guard runs', () => {
+    const { text } = load();
+    expect(text).toMatch(/git worktree add --detach base-checkout "\$\{BASE_SHA\}"/);
+  });
+
+  it('the "Run the freeze guard" step invokes the script FROM base-checkout/, not the PR head copy', () => {
+    const { wf } = load();
+    const step = wf.jobs['freeze-guard'].steps.find((s) =>
+      /Run the freeze guard/.test(s.name ?? ''),
+    );
+    expect(step, 'guard-invocation step not found').toBeTruthy();
+    expect(String(step?.run)).toContain('base-checkout/scripts/compat-credential-freeze-guard.mjs');
+    expect(String(step?.run)).toContain('--repo-root base-checkout');
+    // Never invoked against the bare (PR-head) scripts/ path.
+    expect(String(step?.run)).not.toMatch(
+      /(?<!base-checkout\/)scripts\/compat-credential-freeze-guard\.mjs/,
+    );
+  });
+
+  it('the checkout-worktree step runs BEFORE the guard-invocation step', () => {
+    const { wf } = load();
+    const steps = wf.jobs['freeze-guard'].steps;
+    const worktreeIdx = steps.findIndex((s) => /Checkout the guard's own code/.test(s.name ?? ''));
+    const runIdx = steps.findIndex((s) => /Run the freeze guard/.test(s.name ?? ''));
+    expect(worktreeIdx).toBeGreaterThanOrEqual(0);
+    expect(runIdx).toBeGreaterThan(worktreeIdx);
+  });
+
+  it('the guard invocation passes both --base-pin-file and --head-pin-file', () => {
+    const { wf } = load();
+    const step = wf.jobs['freeze-guard'].steps.find((s) =>
+      /Run the freeze guard/.test(s.name ?? ''),
+    );
+    expect(String(step?.run)).toContain('--base-pin-file base-pin.json');
+    expect(String(step?.run)).toContain('--head-pin-file head-pin.json');
   });
 });
 

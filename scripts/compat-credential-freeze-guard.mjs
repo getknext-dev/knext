@@ -23,28 +23,47 @@
  * second, driftable file list (#1301 review's exact complaint about a
  * different guard, generalised).
  *
- * WHICH PIN STATE. The guard reads the pin as of the PR's BASE commit, not
- * its head/working copy: "was a credential window ALREADY live before this
- * PR" is the property being protected. This is what makes the FIRST PR that
- * ever sets `rcTag` (null -> a real tag) unrestricted at the moment of
- * cutting — its base still reads `rcTag: null` — while every subsequent PR,
- * once the tag is live on `main`, sees frozen=true at its own base.
+ * WHICH PIN STATE. Freeze/unfreeze — "was a credential window ALREADY live
+ * before this PR" — is read from the pin as of the PR's BASE commit, not its
+ * head/working copy. This is what makes the FIRST PR that ever sets `rcTag`
+ * (null -> a real tag) unrestricted at the moment of cutting — its base still
+ * reads `rcTag: null` — while every subsequent PR, once the tag is live on
+ * `main`, sees frozen=true at its own base.
  *
- * THE MARKER is `pin.rcBumpMarker: { date, expires, reason }` (all
- * YYYY-MM-DD / free text) in the SAME reviewed-PR pin file ADR-0056 already
+ * THE MARKER, by contrast, is read from the pin as of the PR's HEAD (review
+ * round on #1370: reading it from base is a deadlock — the pin file is
+ * itself in the frozen set, so a PR authorized only by a marker it ADDS in
+ * the SAME diff could never pass a base-pin check, since base never has the
+ * marker the PR is introducing). `pin.rcBumpMarker: { date, expires, reason }`
+ * (all YYYY-MM-DD / free text, `expires - date` capped at 14 days — see
+ * `markerValidity`) lives in the SAME reviewed-PR pin file ADR-0056 already
  * requires for an rcTag bump — same social-process authorization as the tag
  * itself (a founder pushes the tag, then a REVIEWED PR bumps the file; here,
  * the marker is EVIDENCE that review happened for touching frozen files
  * mid-window, not a cryptographic proof of who approved it — this repo has
- * no mechanism for the latter, and does not pretend to). Mechanically this
- * script checks ONLY structural validity and non-expiry; the founder
+ * no mechanism for the latter, and does not pretend to; there is also no
+ * CODEOWNERS file in this repo scoping who may review a pin-file change, so
+ * "reviewed" today means only "some collaborator with write access approved
+ * the PR", the same bar every other reviewed-PR gate here clears). Mechanically
+ * this script checks ONLY structural validity and non-expiry; the founder
  * approval itself is enforced by GitHub PR review, same as every other
  * reviewed-PR gate in this repo.
+ *
+ * PIN-ONLY DIFFS (this PR touches the pin file and NO other frozen file) are
+ * evaluated against their own resulting (head) freeze state, not the base
+ * one, but only in the direction that closes a window: a pin-only diff that
+ * resolves to UNFROZEN (rcTag cleared) is exempt unconditionally — closing a
+ * window cannot corrupt bytes already frozen, so there is nothing to
+ * authorize. A pin-only diff that resolves to STILL frozen (an unchanged or
+ * bumped rcTag) is NOT exempt — it falls through to the same head-marker
+ * check as any other frozen-file touch, so a PR cannot silently re-tag or
+ * extend a window through the pin file alone without carrying a marker.
  *
  * Usage:
  *   node scripts/compat-credential-freeze-guard.mjs \
  *     --repo-root . \
  *     --base-pin-file base-pin.json \
+ *     --head-pin-file head-pin.json \
  *     --changed-files-file changed-files.txt \
  *     [--now 2026-09-24T00:00:00Z]
  */
@@ -55,6 +74,27 @@ import { collectHarness } from './compat-window-fingerprint.mjs';
 
 /** The pin file, relative to the repo root — same constant as compat-credential-ref.mjs. */
 export const PIN_FILE = '.github/compat-credential-ref.json';
+
+/**
+ * The guard's OWN code and workflow (review round on #1370: "the PR can
+ * rewrite its own gate" — none of these were in the derived CREDENTIAL_CELLS
+ * closure, so a PR could weaken `evaluateFreezeGuard`/`frozenFileSet`/
+ * `collectHarness` itself, or delete the workflow's trigger, and the guard
+ * would happily run the PR's own weakened copy against itself). Necessarily
+ * hardcoded — a guard cannot derive its own protected identity from the
+ * harness cells it is not part of — but small and closed, and paired with
+ * the workflow running THIS script from a base-commit checkout
+ * (`.github/workflows/compat-credential-freeze-guard.yml`'s "base-checkout"
+ * step) so a PR editing these files locally never gets to execute its own
+ * edited copy against itself in the first place; being frozen here is
+ * defense in depth on top of that, not the only defense.
+ */
+export const GUARD_SELF_FILES = Object.freeze([
+  'scripts/compat-credential-freeze-guard.mjs',
+  'scripts/compat-window-audit.mjs',
+  'scripts/compat-window-fingerprint.mjs',
+  '.github/workflows/compat-credential-freeze-guard.yml',
+]);
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -112,6 +152,19 @@ export function markerValidity(pin, now) {
       reason: 'rcBumpMarker.expires must be strictly after rcBumpMarker.date',
     };
   }
+  // Cap the window a single marker can authorize (review round on #1370):
+  // an unbounded expires would let one reviewed PR quietly license months of
+  // future frozen-file edits. 14 days matches ADR-0056's own credential-night
+  // cadence unit.
+  const MAX_MARKER_SPAN_DAYS = 14;
+  const spanMs = Date.parse(`${expires}T00:00:00Z`) - Date.parse(`${date}T00:00:00Z`);
+  const spanDays = spanMs / (24 * 60 * 60 * 1000);
+  if (spanDays > MAX_MARKER_SPAN_DAYS) {
+    return {
+      valid: false,
+      reason: `rcBumpMarker spans ${spanDays} days (date=${date}, expires=${expires}), which exceeds the ${MAX_MARKER_SPAN_DAYS}-day cap`,
+    };
+  }
   const today = now.toISOString().slice(0, 10);
   if (today > expires) {
     return {
@@ -139,7 +192,7 @@ export function markerValidity(pin, now) {
  * answers, not "which cells currently bank a streak".
  *
  * @param {string} repoRoot
- * @param {{ cells?: readonly { lane: string, workflowFile: string | null }[], collectHarnessFn?: (repoRoot: string, lane: string) => { component: string, path: string, line: string }[] }} [deps]
+ * @param {{ cells?: readonly { lane: string, workflowFile: string | null }[], collectHarnessFn?: (repoRoot: string, lane: string) => { component: string, path: string, line: string }[], guardSelfFiles?: readonly string[] }} [deps]
  *   DI seam for tests — a STRUCTURAL shape (not `typeof CREDENTIAL_CELLS`),
  *   so a test fixture only needs `lane`/`workflowFile`, not every other
  *   CREDENTIAL_CELLS field (`runtime`, `builder`, `wired`, `extraFiles`).
@@ -149,6 +202,7 @@ export function markerValidity(pin, now) {
 export function frozenFileSet(repoRoot, deps = {}) {
   const cells = deps.cells ?? CREDENTIAL_CELLS;
   const collectHarnessFn = deps.collectHarnessFn ?? collectHarness;
+  const guardSelfFiles = deps.guardSelfFiles ?? GUARD_SELF_FILES;
   const set = new Set();
   for (const cell of cells) {
     if (!cell.workflowFile) continue;
@@ -156,6 +210,9 @@ export function frozenFileSet(repoRoot, deps = {}) {
       set.add(entry.path);
     }
   }
+  // The guard protects its own code/workflow too (#1370 review round) —
+  // never derived from a CREDENTIAL_CELLS entry, unioned in directly.
+  for (const path of guardSelfFiles) set.add(path);
   return set;
 }
 
@@ -163,11 +220,19 @@ export function frozenFileSet(repoRoot, deps = {}) {
  * The whole decision, as a pure function of its inputs — the CLI below is a
  * thin, untested-by-design wrapper around this.
  *
- * @param {{ pin: unknown, touchedFiles: string[], frozenSet: Set<string>, now: Date }} input
+ * `basePin` decides freeze/unfrozen ("was a window already live before this
+ * PR") EXCEPT for a pin-only diff resolving to unfrozen, which is read from
+ * `headPin` instead (see the file header's "PIN-ONLY DIFFS" section — this is
+ * what lets a PR close a live window through the pin file alone, with no
+ * marker, since closing cannot corrupt already-frozen bytes). `headPin` is
+ * always what `markerValidity` is evaluated against — the marker a PR adds
+ * to authorize itself necessarily exists only at head, never at base.
+ *
+ * @param {{ basePin: unknown, headPin: unknown, touchedFiles: string[], frozenSet: Set<string>, now: Date }} input
  * @returns {{ ok: boolean, reason: string, touchedFrozenFiles: string[] }}
  */
-export function evaluateFreezeGuard({ pin, touchedFiles, frozenSet, now }) {
-  if (!isFrozen(pin)) {
+export function evaluateFreezeGuard({ basePin, headPin, touchedFiles, frozenSet, now }) {
+  if (!isFrozen(basePin)) {
     return {
       ok: true,
       reason: `not frozen — ${PIN_FILE}'s rcTag is null at this PR's base (no active credential window)`,
@@ -182,7 +247,17 @@ export function evaluateFreezeGuard({ pin, touchedFiles, frozenSet, now }) {
       touchedFrozenFiles: [],
     };
   }
-  const marker = markerValidity(pin, now);
+
+  const pinOnly = touchedFrozenFiles.length === 1 && touchedFrozenFiles[0] === PIN_FILE;
+  if (pinOnly && !isFrozen(headPin)) {
+    return {
+      ok: true,
+      reason: `pin-only diff that closes the credential window — ${PIN_FILE}'s rcTag is null at this PR's head, so nothing frozen is at risk`,
+      touchedFrozenFiles: [],
+    };
+  }
+
+  const marker = markerValidity(headPin, now);
   if (marker.valid) {
     return {
       ok: true,
@@ -190,13 +265,14 @@ export function evaluateFreezeGuard({ pin, touchedFiles, frozenSet, now }) {
       touchedFrozenFiles,
     };
   }
-  const rcTag = pin && typeof pin === 'object' ? /** @type {any} */ (pin).rcTag : undefined;
+  const rcTag =
+    basePin && typeof basePin === 'object' ? /** @type {any} */ (basePin).rcTag : undefined;
   return {
     ok: false,
     reason:
       `a credential window is live (rcTag=${JSON.stringify(rcTag)}) and this PR touches frozen ` +
       `credential file(s) with no valid rcBumpMarker (${marker.reason}): ${touchedFrozenFiles.join(', ')}. ` +
-      `Add a dated, reviewed rcBumpMarker to ${PIN_FILE} to proceed, or drop the change from this PR.`,
+      `Add a dated, reviewed rcBumpMarker to ${PIN_FILE} (read from this PR's HEAD) to proceed, or drop the change from this PR.`,
     touchedFrozenFiles,
   };
 }
@@ -211,26 +287,27 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 
   const repoRoot = arg('repo-root', process.cwd());
   const basePinFile = arg('base-pin-file', null);
+  const headPinFile = arg('head-pin-file', null);
   const changedFilesFile = arg('changed-files-file', null);
   const nowArg = arg('now', null);
 
-  if (!basePinFile || !changedFilesFile) {
+  if (!basePinFile || !headPinFile || !changedFilesFile) {
     console.error(
-      'compat-credential-freeze-guard: --base-pin-file and --changed-files-file are both required',
+      'compat-credential-freeze-guard: --base-pin-file, --head-pin-file and --changed-files-file are all required',
     );
     process.exit(2);
   }
 
-  let pin;
-  try {
-    const pinText = readFileSync(basePinFile, 'utf8');
-    pin = JSON.parse(pinText);
-  } catch (err) {
-    console.error(
-      `compat-credential-freeze-guard: could not read/parse ${basePinFile}: ${err.message}`,
-    );
-    process.exit(2);
-  }
+  const readPin = (file) => {
+    try {
+      return JSON.parse(readFileSync(file, 'utf8'));
+    } catch (err) {
+      console.error(`compat-credential-freeze-guard: could not read/parse ${file}: ${err.message}`);
+      process.exit(2);
+    }
+  };
+  const basePin = readPin(basePinFile);
+  const headPin = readPin(headPinFile);
 
   const touchedFiles = readFileSync(changedFilesFile, 'utf8')
     .split('\n')
@@ -244,7 +321,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   }
 
   const frozenSet = frozenFileSet(repoRoot);
-  const result = evaluateFreezeGuard({ pin, touchedFiles, frozenSet, now });
+  const result = evaluateFreezeGuard({ basePin, headPin, touchedFiles, frozenSet, now });
 
   console.log(result.ok ? '✅' : '❌', result.reason);
   process.exit(result.ok ? 0 : 1);
