@@ -208,13 +208,13 @@ function isAffectedNextVersion(v: ParsedNextVersion): boolean {
  * (2) the app's OWN package.json `build` script already passing
  * `--webpack`; (3) (#1378) the `build` script DELEGATES to another script
  * (e.g. `"build": "run-s build:*"` with `--webpack` on `"build:next"`) — the
- * check scans EVERY script in `package.json`, not just `build`, for the
- * flag, since a delegating `build` script's own text never contains it.
- * This is best-effort, not exact: an unrelated script that happens to
- * contain `--webpack` (e.g. a `build:storybook` step) would also suppress
- * the guard. That false-negative is accepted — it trades a rare missed
- * warning for not falsely blocking the common delegation shape, which is
- * the defect #1378 reported. `--turbopack` is deliberately NOT an escape
+ * check scans EVERY script in `package.json` for the flag, since a
+ * delegating `build` script's own text never contains it. Scoped since
+ * rev-1393 to scripts that themselves invoke `next build` (`/\bnext\s+build\b/`)
+ * — the earlier, looser version counted ANY script containing `--webpack`,
+ * so a common `"dev": "next dev --webpack"` sitting next to a bare
+ * `"build": "next build"` silently disabled the guard for a build script
+ * that was never actually fixed. `--turbopack` is deliberately NOT an escape
  * hatch — it is the exact broken configuration this guard exists to catch
  * (explicitly requesting Turbopack does not un-break it), so a script that
  * names `--turbopack` still hits the check and gets the guard message
@@ -250,7 +250,9 @@ export function checkTurbopackAdapterStandaloneRegression(
         scripts !== undefined &&
         Object.values(scripts).some(
             (script) =>
-                typeof script === "string" && /--webpack\b/.test(script),
+                typeof script === "string" &&
+                /\bnext\s+build\b/.test(script) &&
+                /--webpack\b/.test(script),
         )
     ) {
         // Already opted out of the ambient Turbopack default — either the

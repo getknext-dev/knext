@@ -502,6 +502,23 @@ describe("checkTurbopackAdapterStandaloneRegression (#1372)", () => {
         }
     });
 
+    it("#1393 (rev-1393): a `dev --webpack` script next to a bare `build` script does NOT count as the escape hatch", () => {
+        const dir = tmpAppWithScripts(
+            {
+                dev: "next dev --webpack",
+                build: "next build",
+            },
+            "16.3.3",
+        );
+        try {
+            expect(() =>
+                checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),
+            ).toThrow();
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
     it("a HOISTED next (npm/bun workspace, no node_modules/next under the app dir) still resolves and throws", () => {
         const { workspaceRoot, appDir } = tmpHoistedWorkspaceApp(
             "next build",

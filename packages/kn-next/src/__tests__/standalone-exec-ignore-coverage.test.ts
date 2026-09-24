@@ -9,9 +9,14 @@
  * single-executable binary (ADR-0048). `knext-exec*` does NOT match
  * `knext-standalone-exec-linux-x64`: that string does not start with the
  * literal substring `knext-exec`, so every one of those ignore surfaces
- * silently misses the newer binary — proved below with the same simple
- * glob semantics dockerignore/gitignore use for a slash-free pattern
- * (`*` matches any run of non-slash characters, full-string match).
+ * silently misses the newer binary — proved below with
+ * `dockerignoreExcludes` (`runtime-image.ts`), the repo's own real
+ * dockerignore evaluator (comment/blank skip, `!` negation, last-match-wins,
+ * directory and glob patterns) — rev-1393 review: a hand-rolled matcher here
+ * that ignored `!` negation would go green even if a `!knext-standalone-
+ * exec-linux-*` re-include line were added right after the exclude, which is
+ * exactly the shape the real `.dockerignore.hbs`'s `knext-exec*`/
+ * `!knext-exec-linux-*` pair already uses for the OTHER binary.
  *
  * `standaloneDockerignore()` (`runtime-image.ts`, ADR-0055) is deliberately
  * NOT touched here: `Dockerfile.standalone.hbs` COPYs this exact binary out
@@ -23,7 +28,10 @@ import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { standaloneDockerignore } from "../cli/runtime-image";
+import {
+    dockerignoreExcludes,
+    standaloneDockerignore,
+} from "../cli/runtime-image";
 import { standaloneExecFileName } from "../cli/standalone-exec-build";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -33,37 +41,10 @@ const REPO_ROOT = resolve(PKG_ROOT, "../..");
 /** The real ship-binary basename this repo/scaffold actually produces. */
 const BINARY = standaloneExecFileName("linux-x64");
 
-/**
- * Minimal slash-free glob → regex, matching gitignore/dockerignore semantics
- * for a bare pattern (no `/`): `*` matches any run of non-slash characters,
- * the whole basename must match. Good enough for the single-segment
- * patterns this test reads; not a general gitignore engine.
- */
-function globMatches(pattern: string, name: string): boolean {
-    const re = new RegExp(
-        `^${pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*")}$`,
-    );
-    return re.test(name);
-}
-
-/** Every non-comment, non-negation pattern line in an ignore file's text. */
-function excludePatterns(text: string): string[] {
-    return text
-        .split("\n")
-        .map((l) => l.trim())
-        .filter(
-            (l) => l.length > 0 && !l.startsWith("#") && !l.startsWith("!"),
-        );
-}
-
-function isExcluded(text: string, name: string): boolean {
-    return excludePatterns(text).some((p) => globMatches(p, name));
-}
-
 describe("#1378: knext-standalone-exec-* ignore coverage", () => {
     it("this repo's root .gitignore excludes the standalone-exec binary", () => {
         const gitignore = readFileSync(join(REPO_ROOT, ".gitignore"), "utf8");
-        expect(isExcluded(gitignore, BINARY)).toBe(true);
+        expect(dockerignoreExcludes(gitignore, BINARY)).toBe(true);
     });
 
     it("the scaffold's .dockerignore.hbs (paired with vinext Dockerfile.hbs) excludes it", () => {
@@ -71,7 +52,7 @@ describe("#1378: knext-standalone-exec-* ignore coverage", () => {
             join(PKG_ROOT, "templates", "app", ".dockerignore.hbs"),
             "utf8",
         );
-        expect(isExcluded(dockerignore, BINARY)).toBe(true);
+        expect(dockerignoreExcludes(dockerignore, BINARY)).toBe(true);
     });
 
     it("Dockerfile.vinext-node.dockerignore.hbs excludes it", () => {
@@ -84,10 +65,22 @@ describe("#1378: knext-standalone-exec-* ignore coverage", () => {
             ),
             "utf8",
         );
-        expect(isExcluded(dockerignore, BINARY)).toBe(true);
+        expect(dockerignoreExcludes(dockerignore, BINARY)).toBe(true);
     });
 
     it("regression guard: standaloneDockerignore() (ADR-0055) does NOT exclude it — Dockerfile.standalone.hbs COPYs it", () => {
-        expect(isExcluded(standaloneDockerignore(), BINARY)).toBe(false);
+        expect(dockerignoreExcludes(standaloneDockerignore(), BINARY)).toBe(
+            false,
+        );
+    });
+
+    it("#1393: a trailing `!<binary>` re-include line would be caught (proves the evaluator honors negation, unlike the earlier hand-rolled matcher)", () => {
+        const dockerignore = readFileSync(
+            join(PKG_ROOT, "templates", "app", ".dockerignore.hbs"),
+            "utf8",
+        );
+        expect(
+            dockerignoreExcludes(`${dockerignore}\n!${BINARY}\n`, BINARY),
+        ).toBe(false);
     });
 });
