@@ -28,6 +28,7 @@ import {
     NO_STORAGE_MODE_NOTICE,
     reclaimBuildPrefix,
     uploadAssets,
+    verifyBuiltImageLockstep,
     verifyVinextStaticPrefix,
 } from "../utils/asset-upload";
 import { createLogger } from "../utils/logger";
@@ -48,6 +49,7 @@ import { assertNoPlaceholders } from "./placeholder-preflight";
 import { runProjectBuild } from "./project-build";
 import {
     dockerBuildxArgs,
+    isKnownGoodTemplateDockerfile,
     selectRuntimeImage,
     stageStandaloneBuildContext,
 } from "./runtime-image";
@@ -78,6 +80,17 @@ interface DeployOptions {
     context?: string;
     skipBuild: boolean;
     skipUpload: boolean;
+    /**
+     * #1283: opt out of the post-build image lock-step check
+     * (`verifyBuiltImageLockstep`) for an app-dockerfile recipe whose layout
+     * does not match either shipped convention (`/app/server` or
+     * `/app/.output/server/index.mjs`) — the check would otherwise fail
+     * closed on EVERY deploy with `asset-prefix-not-embedded`, for a layout
+     * reason rather than a real lock-step break. Documented risk: skipping it
+     * means the CLI can no longer catch a broken ASSET_PREFIX/
+     * NEXT_DEPLOYMENT_ID lock-step before the cluster write.
+     */
+    skipImageLockstepCheck: boolean;
     dryRun: boolean;
     /**
      * #1063: a pre-built, digest-pinned image ref to deploy AS-IS. When set the
@@ -129,6 +142,7 @@ function parseCliArgs(): DeployOptions {
         context?: string;
         "skip-build"?: boolean;
         "skip-upload"?: boolean;
+        "skip-image-lockstep-check"?: boolean;
         "dry-run"?: boolean;
         image?: string;
         help?: boolean;
@@ -145,6 +159,10 @@ function parseCliArgs(): DeployOptions {
                 context: { type: "string" },
                 "skip-build": { type: "boolean", default: false },
                 "skip-upload": { type: "boolean", default: false },
+                "skip-image-lockstep-check": {
+                    type: "boolean",
+                    default: false,
+                },
                 "dry-run": { type: "boolean", default: false },
                 image: { type: "string" },
                 help: { type: "boolean", short: "h", default: false },
@@ -205,6 +223,7 @@ function parseCliArgs(): DeployOptions {
         context: resolveKubeContext(values.context),
         skipBuild: values["skip-build"] ?? false,
         skipUpload: values["skip-upload"] ?? false,
+        skipImageLockstepCheck: values["skip-image-lockstep-check"] ?? false,
         dryRun: values["dry-run"] ?? false,
         image: values.image || process.env.KN_IMAGE,
     };
@@ -397,6 +416,19 @@ export async function deploy() {
     const baseConfig = await loadConfig();
 
     log.info({ dryRun: options.dryRun }, "kn-next deploy");
+
+    // #1283 round 3: announce the opt-out at warn on every deploy that uses
+    // it — same discipline as ADR-0047's NO_STORAGE_MODE_NOTICE — so skipping
+    // the lock-step check is never silent.
+    if (options.skipImageLockstepCheck) {
+        log.warn(
+            "--skip-image-lockstep-check: skipping the post-build ASSET_PREFIX/" +
+                "build-id lock-step check against the pushed image. If this " +
+                "deploy's Dockerfile rebuilds in-image and the lock-step is " +
+                "actually broken (ADR-0011 — skew protection, asset GC), this " +
+                "deploy will NOT catch it before the cluster write.",
+        );
+    }
 
     const config = applyOverrides(baseConfig, options);
 
@@ -721,9 +753,90 @@ export async function deploy() {
                             target: selection.target,
                             healthCheckPath: config.healthCheckPath,
                             bakesCompileCache: selection.bakesCompileCache,
+                            // #1283: app-dockerfile (in-image-build) recipes
+                            // never see the host env's NEXT_DEPLOYMENT_ID /
+                            // ASSET_PREFIX — pass them as build-args.
+                            // `dockerBuildxArgs` itself scopes both to
+                            // `!target` (app-dockerfile), so passing them
+                            // unconditionally here is a no-op for standalone.
+                            buildId,
+                            assetPrefix: hasStorage(config)
+                                ? getAssetPrefix(config)
+                                : undefined,
                         }),
                     );
                     log.info("Docker image built and pushed");
+
+                    // #1283: prove the lock-step against the ACTUAL pushed
+                    // image, not the Dockerfile's source text — a Dockerfile
+                    // can declare `ARG NEXT_DEPLOYMENT_ID`/`ARG ASSET_PREFIX`
+                    // and still never pass them into its build step. Scoped
+                    // (round 2, review): app-dockerfile + vinext + uploads —
+                    // AND NOT a byte-identical, unmodified copy of a shipped
+                    // template. The scaffolded `Dockerfile`/
+                    // `Dockerfile.vinext-node` `COPY` host-built artifacts —
+                    // the host build already had both env vars before either
+                    // compiled or was copied, so there is nothing here for
+                    // this check to catch on an unmodified template, and
+                    // paying a `docker cp` on every such deploy (this ran on
+                    // EVERY vinext+storage deploy in round 1, file-manager
+                    // included, and reds — see the guard's own doc comment in
+                    // asset-upload.ts) would be pure overhead.
+                    // `--skip-image-lockstep-check` is the documented escape
+                    // for a custom Dockerfile whose server layout does not
+                    // match either shipped convention.
+                    if (
+                        selection.kind === "app-dockerfile" &&
+                        resolvedBuild === "vinext" &&
+                        uploadsAssets &&
+                        !options.skipImageLockstepCheck &&
+                        !isKnownGoodTemplateDockerfile(selection.dockerfile)
+                    ) {
+                        const imageCheck = verifyBuiltImageLockstep({
+                            taggedRef,
+                            expectedId: buildId,
+                            assetPrefix: hasStorage(config)
+                                ? getAssetPrefix(config)
+                                : undefined,
+                        });
+                        if (!imageCheck.ok) {
+                            const detail =
+                                imageCheck.reason ===
+                                "asset-prefix-not-embedded"
+                                    ? "the pushed image's server artifact " +
+                                      "(app/server, or app/.output/server/index.mjs) " +
+                                      "does not reference the configured " +
+                                      "ASSET_PREFIX — the Dockerfile did not pass " +
+                                      "the build-arg into its build step, or this " +
+                                      "Dockerfile's server layout does not match " +
+                                      "either shipped convention (pass " +
+                                      "--skip-image-lockstep-check if the latter)"
+                                    : imageCheck.reason ===
+                                        "image-extract-failed"
+                                      ? "could not extract /app from the pushed " +
+                                        "image (docker create/cp failed) — the " +
+                                        "image may not be pushed/pullable, or " +
+                                        "docker create needs linux/amd64 support"
+                                      : `the pushed image's static namespace does ` +
+                                        `not match this deploy's tag "${buildId}" ` +
+                                        `(${imageCheck.reason}${
+                                            imageCheck.reason ===
+                                                "prefix-missing" &&
+                                            imageCheck.siblings.length
+                                                ? `; found: ${imageCheck.siblings.join(", ")}`
+                                                : ""
+                                        })`;
+                            throw new Error(
+                                `In-image build lock-step check failed: ${detail}. ` +
+                                    "The Dockerfile must declare `ARG NEXT_DEPLOYMENT_ID` " +
+                                    "/ `ARG ASSET_PREFIX` and pass both into its build " +
+                                    "step's env (see apps/file-manager/Dockerfile for a " +
+                                    "worked example) — ADR-0011's build-id lock-step " +
+                                    "(skew protection, asset GC) requires the image's " +
+                                    "baked static prefix to BE the deploy tag.",
+                            );
+                        }
+                    }
                 })(),
             );
         }

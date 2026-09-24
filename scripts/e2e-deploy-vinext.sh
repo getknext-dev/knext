@@ -80,10 +80,11 @@ fi
 # (apps/file-manager/package.json). A floating install would make a red file
 # attributable to a vinext release rather than to knext, which is the same
 # mistake the bun lane made with `bun-version: latest` and had to undo.
-VINEXT_VERSION="${KNEXT_VINEXT_VERSION:-1.0.0-beta.9}"
+VINEXT_VERSION="${KNEXT_VINEXT_VERSION:-1.0.0-beta.11}"
 VITE_VERSION="${KNEXT_VITE_VERSION:-8.2.2}"
 NITRO_VERSION="${KNEXT_NITRO_VERSION:-3.0.260610-beta}"
-# vinext@1.0.0-beta.9 declares `@vitejs/plugin-rsc@^0.5.34` as an (optional) peer.
+# vinext@1.0.0-beta.11 declares `@vitejs/plugin-rsc@^0.5.34` as an (optional) peer.
+# (Unchanged from beta.9 — confirmed via `npm view vinext@1.0.0-beta.11 peerDependencies`.)
 # Because the toolchain install pulls this package explicitly, npm enforces that
 # range even though the peer is optional — 0.5.26 does NOT satisfy `^0.5.34`, so
 # every fixture install still aborts with `npm ERESOLVE` (a SECOND conflict edge
@@ -325,35 +326,13 @@ if [ -f "${NEXT_CONFIG_JS}" ] \
   log "renamed CommonJS next.config.js → next.config.cjs (loads as CJS under the forced ESM app contract)"
 fi
 
-# ── 3b. TEMPORARY: apply the cloudflare/vinext#3197 overlay ───────────────────
-# vinext@1.0.0-beta.9 points its `ssr` vite-environment build `input` at the
-# context-bag server entry (`VIRTUAL_SERVER_ENTRY`) even when the nitro plugin is
-# present. Nitro registers that environment as its SSR service and dispatches via
-# `mod.default.fetch(...)`, but the context bag has no `.fetch`, so EVERY dynamic
-# route 500s (`n.fetch is not a function`). The confirmed one-line fix re-points
-# the input to vinext's own worker entry under nitro. Until upstream ships #3197,
-# knext overlays the installed dist so the vinext lane builds with dynamic routes
-# working (500→200). Remove this whole block when vinext releases the fix.
-#
-# FAIL-CLOSED: the patcher errors (exit non-zero) if its anchor is not found
-# exactly once — a vinext version bump that moves the anchor reds THIS lane rather
-# than silently reverting to the #3197 bug. It is idempotent and does not touch
-# the node/cloudflare targets (the re-point is gated on `hasNitroPlugin`).
-PATCH_SCRIPT="${KNEXT_REPO_ROOT:-}/scripts/patch-vinext-3197.mjs"
-if [ ! -f "${PATCH_SCRIPT}" ]; then
-  # Resolve relative to this script when KNEXT_REPO_ROOT is unset (harness runs
-  # with cwd = the fixture dir, so the script cannot assume its own location).
-  PATCH_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/patch-vinext-3197.mjs"
-fi
-if [ ! -f "${PATCH_SCRIPT}" ]; then
-  log "ERROR: cannot locate scripts/patch-vinext-3197.mjs (the #3197 overlay) — refusing to build the vinext lane with dynamic routes broken"
-  exit 1
-fi
-log "applying TEMPORARY cloudflare/vinext#3197 overlay to the installed vinext dist (fail-closed)"
-if ! node "${PATCH_SCRIPT}" "${APP_DIR}" >&2; then
-  log "ERROR: the vinext#3197 overlay could not be applied — its anchor moved (vinext version bump?). This lane will not build a #3197-fixed artifact until the overlay is re-derived."
-  exit 1
-fi
+# NOTE: the TEMPORARY cloudflare/vinext#3197 overlay (scripts/patch-vinext-3197.mjs)
+# that used to run here has been REMOVED (#1309). #3197 is knext's own fix
+# (upstream PR #3204), natively shipped in vinext@1.0.0-beta.11 — confirmed
+# against the published beta.11 dist, which no longer contains the
+# VIRTUAL_SERVER_ENTRY/VIRTUAL_WORKER_ENTRY anchor the overlay patched at all
+# (the SSR-service dispatch was refactored, not just re-pointed). Re-applying
+# a now-dead overlay would fail closed (anchor not found) for no reason.
 
 # The deployment identity the harness's skew/asset tests key on. Generated
 # BEFORE the build so the build and the runtime agree.

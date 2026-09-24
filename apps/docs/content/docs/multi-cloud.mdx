@@ -68,3 +68,53 @@ image, so they can never be cleaned up out from under it.
 Add the `storage` block when static delivery speed matters, or when your traffic holds long-lived
 sessions open across deploys — pick a provider from the table above and redeploy. `kn-next doctor`
 reports which mode your app is in.
+
+## Custom Dockerfiles that rebuild in-image
+
+The scaffolded `Dockerfile` copies your app's already-built output into the image — `next
+build`/`vite build` runs once, on the host, where `kn-next deploy` has already set `ASSET_PREFIX`
+and the deploy's build id in the environment. If you maintain your own `Dockerfile` that instead
+runs the build a second time **inside** the image (for example a monorepo image that does `bun
+install` + `vite build` in a builder stage), that in-image build never sees those two values unless
+you wire them through explicitly:
+
+```dockerfile
+# Declare the ARGs...
+ARG NEXT_DEPLOYMENT_ID
+ARG ASSET_PREFIX
+# ...and export them into the build step's env BEFORE running your build command.
+ENV NEXT_DEPLOYMENT_ID=${NEXT_DEPLOYMENT_ID}
+ENV ASSET_PREFIX=${ASSET_PREFIX}
+
+RUN ./node_modules/.bin/vite build
+```
+
+`kn-next deploy`/`kn-next preview` pass both automatically as `--build-arg`s to any Dockerfile that
+rebuilds in-image — an unused build-arg is silently ignored by Docker, so nothing breaks until you
+add the two lines above. Without them:
+
+- static assets are served from the image at relative paths instead of your configured bucket, so
+  the uploaded objects go unreferenced;
+- the image's build id diverges from the deploy tag, breaking [skew protection](/docs/skew-protection)
+  and the asset-retention cleanup that key off it.
+
+### The post-build check, its scope, and the opt-out
+
+For a Dockerfile that rebuilds in-image and uploads assets, `kn-next deploy` checks the ACTUAL
+pushed image after the build — not just your Dockerfile's `ARG` declarations, which can be present
+and unused. It briefly extracts the image's server artifact and static output (`docker create` /
+`docker cp`, no traffic ever served) and confirms the static build namespace matches the deploy
+tag, and — in storage mode — that the server artifact really does reference your configured
+`ASSET_PREFIX`. A mismatch fails the deploy with a clear message before touching the cluster.
+
+This check runs **only** for a Dockerfile that both rebuilds in-image and differs from the
+scaffolded template — the unmodified scaffolded `Dockerfile`/`Dockerfile.vinext-node` (which copy
+already-built host output, so there is nothing to catch) are skipped automatically, at no extra
+cost to every other deploy.
+
+The check assumes your custom Dockerfile follows the same layout the scaffolded templates use — the
+compiled server at `/app/server`, or the uncompiled entry at `/app/.output/server/index.mjs`. If
+your image's layout genuinely differs and the check reports a false failure, pass
+`--skip-image-lockstep-check` to `kn-next deploy` to opt out. Understand the tradeoff before you
+do: skipping it means the CLI can no longer catch a broken `ASSET_PREFIX`/build-id lock-step before
+it reaches your cluster.

@@ -7,3 +7,49 @@ dist
 *.log
 coverage
 docs
+
+# #1284: this is the file Docker ACTUALLY reads for apps/file-manager's build
+# (the CLI's `requireBuildContext` resolves the build context to the
+# workspace ROOT — where a lockfile marker is found above the app — so the
+# per-app apps/file-manager/.dockerignore is NOT the file that gates
+# `docker build`'s context here; this one is). `.vinext/fonts/<hash>/style.css`
+# caches a self-hosted next/font/google file by an ABSOLUTE FILESYSTEM PATH
+# computed at fetch time (vinext's createGoogleFontsPlugin). `kn-next deploy`/
+# `kn-next build` run the app's own `vite build` on the HOST before the Docker
+# build; without this exclusion that HOST-path cache rides `COPY . .` into the
+# image, and the in-image `RUN vite build` (apps/file-manager/Dockerfile) hits
+# a CACHE HIT on the stale style.css — vinext returns it verbatim, and its
+# rewrite-to-a-served-URL step only fires when the cached path matches the
+# CURRENT build's cacheDir, so the HOST path leaks straight into the served
+# page.
+#
+# MUST be `**/.vinext`, not a bare `.vinext`. Unlike `.gitignore`, a bare
+# `.dockerignore` pattern matches ONLY at the context root — it does NOT
+# recurse into subdirectories the way a bare gitignore pattern does. Proved
+# with a minimal reproduction (a nested `subdir/.vinext/` survived a bare
+# `.vinext` line and was excluded once the pattern became `**/.vinext`), and
+# the app's own `.vinext` lives at `apps/file-manager/.vinext` — one level
+# below this file — so a bare line here would have compiled, looked correct,
+# and silently done nothing. The same gap almost certainly affects several of
+# the bare patterns already above this comment (`node_modules`, `.next`,
+# `.turbo`, `dist`, `coverage`, `docs` all live nested under `apps/*` /
+# `packages/*` too) — out of scope for #1284, flagged rather than fixed here
+# so it isn't lost.
+#
+# Proved end-to-end with a real `docker build` of the UNMODIFIED Dockerfile:
+# WITHOUT this exclusion (even with the bare, non-recursive `.vinext` line),
+# the served HTML still referenced the host checkout's own
+# `.vinext/fonts/...` path (404s) — confirmed by exec'ing into the builder
+# stage and finding `/repo/apps/file-manager/.vinext` present with the HOST's
+# absolute path baked into its cached style.css. WITH the `**/` prefix, that
+# directory does not reach the builder stage at all, the in-image `vite
+# build` fetches the font fresh, and every font reference in the served HTML
+# resolved to `/_next/static/_vinext_fonts/...`, serving 200 `font/woff2`.
+**/.vinext
+
+# Same staleness class as `.vinext` above: `.output` is the HOST build's
+# output tree. The Dockerfile runs its own `vite build` and does not read a
+# pre-existing `.output`, so excluding it costs nothing and removes another
+# host-build artifact from the context. Also needs the `**/` prefix for the
+# same reason.
+**/.output

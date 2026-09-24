@@ -55,6 +55,7 @@ const uploadAssets = mock<AnyFn>(async () => {});
 const getAssetPrefix = mock<AnyFn>(() => "https://cdn.example.com/_next");
 const reclaimBuildPrefix = mock<AnyFn>();
 const verifyVinextStaticPrefix = mock<AnyFn>(() => ({ ok: true }));
+const verifyBuiltImageLockstep = mock<AnyFn>(() => ({ ok: true }));
 
 const __knextReal1 = { ...(await import("../utils/asset-upload")) };
 mock.module("../utils/asset-upload", () => ({
@@ -64,6 +65,8 @@ mock.module("../utils/asset-upload", () => ({
     reclaimBuildPrefix: (...a: unknown[]) => reclaimBuildPrefix(...a),
     verifyVinextStaticPrefix: (...a: unknown[]) =>
         verifyVinextStaticPrefix(...a),
+    verifyBuiltImageLockstep: (...a: unknown[]) =>
+        verifyBuiltImageLockstep(...a),
 }));
 
 const renderNextAppCR = mock<AnyFn>(() => "kind: NextApp\n");
@@ -110,6 +113,7 @@ mock.module("../cli/runtime-image", () => ({
         o.taggedRef,
         o.buildContext,
     ],
+    isKnownGoodTemplateDockerfile: () => false,
 }));
 
 const runAssetGC = mock<AnyFn>(() => ({ pruned: true }));
@@ -203,6 +207,7 @@ beforeEach(() => {
     loadConfig.mockResolvedValue(baseConfig);
     readFileSyncMock.mockImplementation(pkgOr("deploytag"));
     verifyVinextStaticPrefix.mockReturnValue({ ok: true });
+    verifyBuiltImageLockstep.mockReturnValue({ ok: true });
 });
 
 afterEach(() => {

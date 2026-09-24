@@ -65,6 +65,7 @@ mock.module("../utils/asset-upload", () => ({
     // guard's own branches are exercised in deploy-orchestrator.test.ts, and
     // its out-of-scope modes in deploy-no-storage.test.ts.
     verifyVinextStaticPrefix: () => ({ ok: true }),
+    verifyBuiltImageLockstep: () => ({ ok: true }),
 }));
 
 const renderNextAppCR = mock<AnyFn>(() => "kind: NextApp\n");

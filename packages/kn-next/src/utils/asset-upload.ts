@@ -1,5 +1,6 @@
 import {
     cpSync,
+    type Dirent,
     existsSync,
     mkdirSync,
     mkdtempSync,
@@ -789,11 +790,16 @@ export type VinextPrefixCheck =
           siblings: string[];
       };
 
-export function verifyVinextStaticPrefix(
-    cwd: string,
+/**
+ * The shared question both {@link verifyVinextStaticPrefix} (the HOST
+ * `.output`) and {@link verifyBuiltImageLockstep} (the pushed IMAGE, #1283)
+ * ask: does `<staticDir>/<expectedId>/` exist? Extracted so the two checks
+ * can never drift into asking it two different ways.
+ */
+function checkStaticPrefixDir(
+    staticDir: string,
     expectedId: string,
 ): VinextPrefixCheck {
-    const staticDir = join(cwd, ".output", "public", "_next", "static");
     if (!existsSync(staticDir)) {
         return { ok: false, reason: "no-static-root", siblings: [] };
     }
@@ -805,6 +811,217 @@ export function verifyVinextStaticPrefix(
     // `siblings.includes("")` is false anyway; this is the explicit form.
     if (expectedId && siblings.includes(expectedId)) return { ok: true };
     return { ok: false, reason: "prefix-missing", siblings };
+}
+
+export function verifyVinextStaticPrefix(
+    cwd: string,
+    expectedId: string,
+): VinextPrefixCheck {
+    const staticDir = join(cwd, ".output", "public", "_next", "static");
+    return checkStaticPrefixDir(staticDir, expectedId);
+}
+
+/**
+ * The two encodings a `bun build --compile` bundle stores its embedded module
+ * SOURCE in — the same fact `bytecode-exec-verify.mjs` documents and checks
+ * for the compile-marker literal: Bun stores a module Latin-1 when it can,
+ * and UTF-16LE for the WHOLE module the moment it contains any non-Latin-1
+ * character (a real Next/vinext bundle routinely does — emoji in generated
+ * comments, non-ASCII route segments, etc.). An ASCII literal's Latin-1 bytes
+ * are byte-identical to its UTF-8 bytes, so `"utf-8"` covers the Latin-1 case
+ * without a third encoding; `"utf16le"` is the one round 2 missed.
+ */
+const LITERAL_SEARCH_ENCODINGS = ["utf-8", "utf16le"] as const;
+
+/**
+ * True when `file`'s BYTES contain `needle` (e.g. a configured URL) as a
+ * substring, in EITHER encoding {@link LITERAL_SEARCH_ENCODINGS} lists.
+ * Buffer-based, not a UTF-8 string decode: the compiled vinext SERVER binary
+ * this now reads (see {@link verifyBuiltImageLockstep}) is a
+ * `bun build --compile` executable — mostly non-text bytes — and comparing
+ * raw bytes avoids relying on a lossy decode of the surrounding binary data.
+ * Returns `false` (never throws) on a read failure — an unreadable/missing
+ * candidate is not a match.
+ */
+function fileContainsLiteral(file: string, needle: string): boolean {
+    let buf: Buffer;
+    try {
+        buf = readFileSync(file);
+    } catch {
+        return false;
+    }
+    return LITERAL_SEARCH_ENCODINGS.some((enc) =>
+        buf.includes(Buffer.from(needle, enc)),
+    );
+}
+
+/**
+ * True when ANY file under `dir` (recursively) contains `needle` — see
+ * {@link fileContainsLiteral}. Used for the vinext×node shape's ENTIRE
+ * `.output/server` tree (#1283 round 3): `index.mjs` is a thin nitro entry
+ * that re-exports from split chunks, and `assetPrefix` lands in whichever
+ * chunk the RSC/SSR renderer compiles into (`_ssr/rsc.mjs` on a real vinext
+ * build — see the doc comment below) — NOT necessarily `index.mjs` itself.
+ * Scanning only the entry (round 2's defect) would fail closed on every real
+ * vinext×node storage deploy. Missing/unreadable `dir` is not a match, never
+ * a throw — the same fail-safe contract as `fileContainsLiteral`.
+ */
+function treeContainsLiteral(dir: string, needle: string): boolean {
+    let entries: Dirent[];
+    try {
+        entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+        return false;
+    }
+    for (const entry of entries) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) {
+            if (treeContainsLiteral(full, needle)) return true;
+        } else if (fileContainsLiteral(full, needle)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+export type ImageLockstepCheck =
+    | { ok: true }
+    | {
+          ok: false;
+          reason:
+              | "no-static-root"
+              | "prefix-missing"
+              | "image-extract-failed"
+              | "asset-prefix-not-embedded";
+          siblings: string[];
+      };
+
+/**
+ * Proves the ADR-0011 build-id/asset-prefix lock-step against the ACTUAL
+ * pushed image, not the Dockerfile's source text (#1283). A text-only check
+ * ("does the Dockerfile declare `ARG ASSET_PREFIX`?") is satisfiable while
+ * still wrong — the ARG can be declared and never passed into the build
+ * step's env, set in the wrong stage, or clobbered.
+ *
+ * **Where each value actually lands, and why the check reads two different
+ * artifacts for the two halves (round 2, #1283 review).** Round 1 grepped
+ * `.output/public` for the configured `assetPrefix` and would have FAILED
+ * EVERY real vinext deploy, storage-mode or not: reading vinext
+ * 1.0.0-beta.8's own compiled server-entry source
+ * (`vinext/dist/entries/app-rsc-entry.js`) shows `assetPrefix` baked as
+ * `export const __assetPrefix = ${JSON.stringify(assetPrefix)}` into the
+ * SERVER entry, then embedded whole into the `bun build --compile` binary —
+ * never into the client-served `.output/public` tree the round-1 check
+ * inspected. The build-id/static-prefix half is UNAFFECTED by this —
+ * `_next/static/<id>/` is real static output the build tool writes under
+ * `.output/public`, not something the server embeds, so it stays checked
+ * there, matching the HOST leg (`verifyVinextStaticPrefix`) exactly.
+ *
+ * **Round 2 fixed WHERE to look but not HOW MUCH of it (round 3, #1283
+ * review).** `.output/server/index.mjs` is a thin nitro entry that
+ * re-exports from split chunks — on a REAL vinext build (`examples/bun-exec`
+ * with `ASSET_PREFIX`/`NEXT_DEPLOYMENT_ID` set) the literal lands in
+ * `.output/server/_ssr/{ssr,rsc}.mjs`, NOT `index.mjs` itself (0 matches
+ * there). Checking only `index.mjs` — round 2's fixture happened to plant the
+ * literal there, so its own test missed this — would fail EVERY real
+ * vinext×node storage deploy. So the vinext×node leg scans the WHOLE
+ * `.output/server` tree ({@link treeContainsLiteral}), not one file. Also
+ * searched in BOTH the ASCII/UTF-8 encoding AND UTF-16LE
+ * ({@link LITERAL_SEARCH_ENCODINGS}) — the same two encodings
+ * `bytecode-exec-verify.mjs` checks for its own embedded-marker search, for
+ * the same reason: Bun stores an embedded module UTF-16LE, not Latin-1/UTF-8,
+ * the moment the module contains any non-Latin-1 character, which a real
+ * Next/vinext bundle routinely does.
+ *
+ * So: `docker create --platform linux/amd64` (OKE is amd64; without the
+ * platform flag this fails outright on an arm64 Docker host — "no matching
+ * manifest for linux/arm64/v8") + `docker cp` extracts the whole `/app` tree
+ * once, then:
+ *
+ *   1. `_next/static/<expectedId>/` must exist under `app/.output/public` —
+ *      proves `NEXT_DEPLOYMENT_ID` reached the in-image build;
+ *   2. when `assetPrefix` is configured (storage mode), a SERVER artifact
+ *      must contain it literally (either encoding) — `app/server` (the
+ *      compiled single-executable, the vinext×bun `app-dockerfile` shape) if
+ *      present, else ANY file under `app/.output/server` (the vinext×node
+ *      shape, run uncompiled by `node`) — proving `ASSET_PREFIX` was baked
+ *      in, not silently dropped. Neither present is
+ *      `asset-prefix-not-embedded`, the SAME reason a present-but-wrong
+ *      value is: an unrecognised server layout is exactly the case
+ *      `--skip-image-lockstep-check` (deploy.ts) exists for, and that flag
+ *      (not a different failure reason here) is how a user routes around it.
+ *
+ * Runs AFTER the `docker buildx build --push`, BEFORE the CR apply — a
+ * failure here aborts the deploy exactly where `verifyVinextStaticPrefix`
+ * aborts it for the host leg, never after the cluster write (ADR-0001).
+ *
+ * SCOPE (deploy.ts): only called for a Dockerfile that is NOT
+ * byte-identical to a shipped template (`isKnownGoodTemplateDockerfile`,
+ * runtime-image.ts) — the scaffolded `Dockerfile`/`Dockerfile.vinext-node`
+ * `COPY` host-built artifacts, so the host build already had both env vars
+ * before either compiled or was copied; there is nothing for this check to
+ * catch there, and paying a `docker cp` on every such deploy is pure
+ * overhead this function itself has no way to avoid — the caller must skip
+ * it.
+ */
+export function verifyBuiltImageLockstep(opts: {
+    taggedRef: string;
+    expectedId: string;
+    assetPrefix?: string;
+}): ImageLockstepCheck {
+    const workDir = mkdtempSync(join(tmpdir(), "knext-image-lockstep-"));
+    let containerId: string | undefined;
+    try {
+        try {
+            containerId = runCapture([
+                "docker",
+                "create",
+                "--platform",
+                "linux/amd64",
+                opts.taggedRef,
+            ]);
+        } catch {
+            return { ok: false, reason: "image-extract-failed", siblings: [] };
+        }
+        const appDir = join(workDir, "app");
+        try {
+            runQuiet(["docker", "cp", `${containerId}:/app`, appDir]);
+        } catch {
+            return { ok: false, reason: "image-extract-failed", siblings: [] };
+        }
+        const staticCheck = checkStaticPrefixDir(
+            join(appDir, ".output", "public", "_next", "static"),
+            opts.expectedId,
+        );
+        if (!staticCheck.ok) return staticCheck;
+        if (opts.assetPrefix) {
+            // vinext×bun: the compiled single executable (one file). vinext×
+            // node: the uncompiled `.output/server` tree — SCAN it whole
+            // (#1283 round 3), not just `index.mjs`; see the doc comment
+            // above for why a single-file check there is wrong on a real
+            // build. Try the binary first (cheap, one file); fall back to the
+            // tree scan.
+            const found =
+                fileContainsLiteral(join(appDir, "server"), opts.assetPrefix) ||
+                treeContainsLiteral(
+                    join(appDir, ".output", "server"),
+                    opts.assetPrefix,
+                );
+            if (!found) {
+                return {
+                    ok: false,
+                    reason: "asset-prefix-not-embedded",
+                    siblings: [],
+                };
+            }
+        }
+        return { ok: true };
+    } finally {
+        if (containerId) {
+            runQuietAllowFail(["docker", "rm", "-f", containerId]);
+        }
+        rmSync(workDir, { recursive: true, force: true });
+    }
 }
 
 /**

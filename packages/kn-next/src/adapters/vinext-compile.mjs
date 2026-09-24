@@ -49,6 +49,7 @@
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { staticizeEntryRequires } from "./entry-require-staticize.mjs";
 
 /** `--flag value` pairs; no positional arguments. */
 function parseArgs(argv) {
@@ -109,10 +110,37 @@ const importMetaToCjs = {
         build.onLoad({ filter: /\.m?js$/ }, async (args) => {
             if (resolve(args.path) !== ENTRY) return undefined;
             const raw = await Bun.file(args.path).text();
-            // Prepend the guard import FIRST, always — independent of whether the
+            // Prepend the guard imports FIRST, always — independent of whether the
             // entry uses import.meta. `import "<abs>";` is bundled + evaluated
             // before the rest of the entry's imports, patching Bun.serve in time.
-            const src = `import ${JSON.stringify(GUARD_FILE)};\n${raw}`;
+            //
+            // Then turn the entry's `createRequire(import.meta.url)` calls for
+            // EXTERNAL packages into static requires so Bun.build bundles them
+            // (#1309 — see entry-require-staticize.mjs). This must run BEFORE the
+            // import.meta rewrite below, which erases the anchor it matches on.
+            const entryDir = dirname(args.path);
+            const staticized = staticizeEntryRequires(raw, (spec) => {
+                try {
+                    Bun.resolveSync(spec, entryDir);
+                    return true;
+                } catch {
+                    return false;
+                }
+            });
+            if (staticized.rewritten.length > 0) {
+                console.log(
+                    `[knext compile] bundling ${staticized.rewritten.length} package(s) the entry ` +
+                        `loads via createRequire(import.meta.url): ${staticized.rewritten.join(", ")}`,
+                );
+            }
+            if (staticized.unresolved.length > 0) {
+                console.warn(
+                    "[knext compile] WARNING: the entry runtime-requires package(s) that do not " +
+                        `resolve from ${entryDir} and cannot be bundled: ` +
+                        `${staticized.unresolved.join(", ")} — the binary throws if that code path runs`,
+                );
+            }
+            const src = `import ${JSON.stringify(GUARD_FILE)};\n${staticized.contents}`;
             console.log(
                 "[knext compile] injected the Bun.serve keep-alive guard as the entry's first import",
             );

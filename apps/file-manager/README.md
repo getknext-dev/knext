@@ -187,10 +187,10 @@ against deliberately broken servers and needs no cluster, so you can run it loca
 `node scripts/platform-e2e.selftest.mjs`. The job budget is 45 minutes (about 10 measured).
 A red scheduled run files one pinned issue.
 
-One finding is quarantined rather than skipped: the build leaks the build machine's path into the
-font URL (tracked as an open issue). **While it is open, fonts are unverified** - the check tolerates
-exactly those URLs being broken, does not count them as covered (the result says `FONTS UNVERIFIED`),
-and goes red if they start being served or stop appearing, so the exemption cannot outlive the bug.
+Fonts are verified like any other asset: the `next/font/google` (Geist) URL referenced by the
+home page and its CSS must be a real, served, content-hashed `/_next/static/...` URL that 200s
+with a `font/*` content type. (Previously the build leaked the build machine's absolute
+filesystem path into that URL, so it was quarantined rather than skipped - see #1284, fixed.)
 
 ## Deployment Files
 

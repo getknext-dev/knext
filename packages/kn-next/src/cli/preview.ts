@@ -410,6 +410,15 @@ export async function defaultBuildAndPush(
             target: selection.target,
             healthCheckPath: config.healthCheckPath,
             bakesCompileCache: selection.bakesCompileCache,
+            // #1283: same in-image-build fix as `deploy` — an app-dockerfile
+            // recipe never sees the host env's NEXT_DEPLOYMENT_ID/ASSET_PREFIX.
+            // `dockerBuildxArgs` scopes both to `!target` (app-dockerfile), so
+            // this is a no-op for the standalone shape.
+            buildId: tag,
+            assetPrefix:
+                hasStorage(config) && config.storage.publicUrl
+                    ? getAssetPrefix(config)
+                    : undefined,
         }),
     );
 

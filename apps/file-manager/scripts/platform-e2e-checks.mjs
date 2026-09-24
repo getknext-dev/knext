@@ -187,26 +187,26 @@ export function assertAsset(path, res) {
  * The asset set as a whole must be real: the page references at least one
  * script and one stylesheet (a page with neither is not the app), and, because
  * the root layout uses `next/font`, at least one self-hosted `.woff2`.
+ *
+ * #1284 used to allow a "quarantined" font count here in place of a real
+ * `.woff2` hit — the vinext build leaked the build machine's absolute
+ * filesystem path into the font URL, so no font could ever actually be
+ * fetched. That defect is fixed (see `checkStaticAssets`'s docstring); every
+ * font reference is now a normal asset with no exemption.
  * @param {string[]} paths every asset path that was checked
  */
-export function assertAssetCoverage(paths, { quarantinedFonts = 0 } = {}) {
+export function assertAssetCoverage(paths) {
   const exts = new Set(paths.map(extensionOf));
   assert.ok(
     exts.has('.js') || exts.has('.mjs'),
     `no JavaScript asset referenced (saw: ${[...exts].join(', ') || 'none'})`,
   );
   assert.ok(exts.has('.css'), `no stylesheet referenced (saw: ${[...exts].join(', ') || 'none'})`);
-  const fonts = exts.has('.woff2');
   assert.ok(
-    fonts || quarantinedFonts > 0,
+    exts.has('.woff2'),
     `no .woff2 font reached from the page or its CSS — the layout uses next/font (saw: ${[...exts].join(', ')})`,
   );
-  // A quarantined font is NOT a verified one: it is only counted here as
-  // "unverified", never as coverage.
-  const fontNote = fonts
-    ? ''
-    : `; FONTS UNVERIFIED — all ${quarantinedFonts} font reference(s) are quarantined (#1284), none was verified as served`;
-  return `${paths.length} assets, types: ${[...exts].sort().join(' ')}${fontNote}`;
+  return `${paths.length} assets, types: ${[...exts].sort().join(' ')}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -587,20 +587,30 @@ export const PUBLIC_FILES = Object.freeze([
 ]);
 
 /**
- * KNOWN DEFECT #1284: the vinext build emits the font URL as an absolute path on
- * the BUILD machine (`/…/apps/file-manager/.vinext/fonts/<hash>/x.woff2`), which
- * 404s when served. This is NOT a skip. The reference must STILL be broken: the
- * check goes RED the moment it is served (fixed), forcing this exemption to be
- * deleted, and a ref that is neither broken nor fixed is still an ordinary
- * failure. Any other asset gets no exemption.
- */
-export const KNOWN_DEFECT_FONT_PATH = /^\/.+\/\.vinext\/fonts\//;
-
-/**
  * Every same-origin asset the served home page references, plus every
  * `url()` its stylesheets and inline `<style>` blocks reference (that is where
  * the next/font `.woff2` files are). Each one is checked with `assertAsset`,
  * then the set as a whole with `assertAssetCoverage`.
+ *
+ * #1284 used to quarantine the font reference here: the vinext build leaked
+ * the build machine's absolute filesystem path into the font URL, so it
+ * 404'd by construction and could never be a real asset check. Root cause:
+ * `kn-next deploy`/`kn-next build` run the app's own `vite build` on the HOST
+ * before the Docker build, which caches a self-hosted Google Font's CSS at
+ * `.vinext/fonts/<hash>/style.css` with the HOST's absolute path baked in;
+ * the repo-root `.dockerignore` (the file Docker actually reads for this
+ * app's build — see `apps/file-manager/Dockerfile` + `requireBuildContext`)
+ * excluded `.vinext` with a BARE pattern, which only matches at the context
+ * ROOT and never matched the nested `apps/file-manager/.vinext` — so that
+ * stale, host-path-tainted cache rode `COPY . .` into the image, the in-image
+ * `vite build` hit a cache HIT on it, and vinext's rewrite-to-a-served-URL
+ * step no-op'd because the image's own cache directory didn't match the path
+ * already baked into the cached CSS. Fixed by making the pattern recursive
+ * (`**\/.vinext`, `**\/.output` in the root `.dockerignore`) — proved with a
+ * real `docker build` of the unmodified Dockerfile: every font reference now
+ * resolves to a served, content-hashed `/_next/static/_vinext_fonts/…` URL,
+ * so the font reference is checked exactly like every other asset — no
+ * exemption.
  * @param {RequestFn} request
  */
 export async function checkStaticAssets(request) {
@@ -610,8 +620,6 @@ export async function checkStaticAssets(request) {
   const all = new Set(refs);
   /** @type {string[]} */
   const evidence = [];
-  /** @type {string[]} */
-  const quarantined = [];
   /** @type {string[]} */
   const pending = [...refs];
   /** @type {Map<string, string>} */
@@ -628,17 +636,6 @@ export async function checkStaticAssets(request) {
   while (pending.length) {
     const p = /** @type {string} */ (pending.shift());
     const res = await request(p);
-    if (KNOWN_DEFECT_FONT_PATH.test(p)) {
-      assert.equal(
-        res.status,
-        404,
-        `${p} now returns HTTP ${res.status}: known defect #1284 (build path leaked into the font URL) looks FIXED. Delete KNOWN_DEFECT_FONT_PATH from platform-e2e-checks.mjs so this asset is checked normally.`,
-      );
-      evidence.push(`${p}: KNOWN DEFECT #1284 still 404 (build path leaked into the font URL)`);
-      quarantined.push(p);
-      all.delete(p); // quarantined is not verified: it must not count toward coverage
-      continue;
-    }
     try {
       evidence.push(`${p}: ${assertAsset(p, res)}`);
     } catch (err) {
@@ -648,15 +645,8 @@ export async function checkStaticAssets(request) {
     }
     if (extensionOf(p) === '.css') for (const u of extractCssUrls(res.text, p)) enqueue(u, p);
   }
-  // The exemption must not outlive its trigger: if NO reference matches the
-  // leaked-path pattern any more (e.g. the URL was rewritten), the exemption is
-  // dead code and must be deleted so fonts are verified normally.
-  assert.ok(
-    quarantined.length > 0,
-    'known defect #1284 exemption is dead: no font reference matches the leaked build-path pattern any more. Delete KNOWN_DEFECT_FONT_PATH from platform-e2e-checks.mjs so fonts are verified normally.',
-  );
   return {
-    summary: assertAssetCoverage([...all], { quarantinedFonts: quarantined.length }),
+    summary: assertAssetCoverage([...all]),
     evidence,
   };
 }
