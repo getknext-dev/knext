@@ -31,6 +31,7 @@ import { fileURLToPath } from 'node:url';
 import { buildLedger, renderTable } from '../scripts/compat-run-ledger.mjs';
 import {
   applyLedger,
+  CLASSES,
   LEDGER_FILE_CAP,
   MAX_EXPIRY_DAYS,
   publishedNumber,
@@ -322,6 +323,19 @@ describe('staleEntries: a ledgered failure that stopped failing reds the run', (
     ]);
   });
 
+  it('a FLAKY entry that passed this run is not stale (a pass is expected; its expiry bounds it)', () => {
+    // NAV passes outright this run; navEntry is flaky, so that is not evidence
+    // of a fix. An unsupported entry in the same position IS stale (above).
+    const s = summary({ failed: 2 });
+    s.failures = s.failures.filter((f: Any) => f.file !== NAV);
+    const flaky = navEntry(['hash']);
+    expect(staleEntries([applyLedger(s, [flaky])], [flaky])).toEqual([]);
+    const unsupported = entry({ test: NAV, cases: ['hash'] });
+    expect(staleEntries([applyLedger(s, [unsupported])], [unsupported])).toEqual([
+      { test: NAV, cases: ['hash'] },
+    ]);
+  });
+
   it('not-run, no-case-detail and unreclassified shards never prove a pass', () => {
     const notRun = summary({ failed: 2, notRun: 1, notRunFiles: [SHELLS] });
     notRun.failures = notRun.failures.slice(1);
@@ -478,12 +492,19 @@ describe('the real ledger', () => {
   const real = JSON.parse(read(LEDGER_PATH));
   const manifest = JSON.parse(read('test/deploy-tests-manifest.knext.json'));
 
-  it('is valid today, under the cap, with every entry naming its upstream issue', () => {
+  it('is valid today, under the cap, every unsupported entry naming its upstream issue and every flaky one carrying mixed evidence', () => {
     const today = new Date().toISOString().slice(0, 10);
     expect(validateLedger(real, { today, corpusExcludes: manifest.rules.exclude })).toEqual([]);
     expect(real.entries.length).toBeLessThanOrEqual(LEDGER_FILE_CAP);
-    for (const e of real.entries)
-      expect(e.upstream).toMatch(/^https:\/\/github\.com\/cloudflare\/vinext\/issues\/\d+$/);
+    for (const e of real.entries) {
+      expect(CLASSES).toContain(e.class);
+      if (e.class === 'unsupported')
+        expect(e.upstream).toMatch(/^https:\/\/github\.com\/cloudflare\/vinext\/issues\/\d+$/);
+      else {
+        expect(e.evidence.fail.length, e.test).toBeGreaterThanOrEqual(1);
+        expect(e.evidence.pass.length, e.test).toBeGreaterThanOrEqual(1);
+      }
+    }
   });
 
   it('lives outside the harness patterns the compat-window fingerprint freezes for every cell', async () => {

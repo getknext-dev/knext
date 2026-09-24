@@ -10,7 +10,8 @@
  * failing cases move from `failures` into `quarantined`.
  *
  *   - a snapshot case that did not fail anywhere in the run → the entry is STALE
- *     and the run reds (a partial fix cannot stay hidden);
+ *     and the run reds (a partial fix cannot stay hidden). Unsupported entries
+ *     only: a flaky entry passing is expected, and its expiry bounds it;
  *   - a failing case NOT in the snapshot → stays a real failure (a new
  *     regression in a ledgered file is never absorbed);
  *   - a file that failed with no case detail (a build/unclassified failure) →
@@ -248,6 +249,10 @@ export function staleEntries(summaries, entries) {
   const out = [];
   if (skipped) return out; // an unreclassified shard cannot prove anything passed
   for (const e of entries) {
+    // A flaky entry passing is expected, not evidence of a fix: applying the
+    // stale rule to it would red every run where the flake happens to pass.
+    // Its hard expiry (at most 30 days) is what bounds it.
+    if (e.class === 'flaky') continue;
     if (notRun.has(e.test) || noDetail.has(e.test)) continue;
     const seen = new Set(q.filter((r) => r.file === e.test).flatMap((r) => r.cases));
     const missing = e.cases.filter((c) => !seen.has(c));
