@@ -1958,25 +1958,28 @@ describe('compat-suite Turbopack lane flag (test-e2e-deploy.yml, #147 A3-3 final
     return blocks.find((b) => /-\s+name:[^\n]*Run official deploy tests/.test(b)) ?? '';
   }
 
-  it('sets IS_TURBOPACK_TEST=1 on the run step (mirrors upstream test-deploy-adapter)', () => {
+  // #1245: the flag is now builder-selected (turbopack cells → IS_TURBOPACK_TEST,
+  // webpack cells → IS_WEBPACK_TEST). Both expressions are EVALUATED per builder
+  // in tests/compat-webpack-credential-lanes.test.ts (exactly one is '1', never
+  // both); here we keep the turbopack half pinned to its upstream provenance.
+  it('sets IS_TURBOPACK_TEST=1 on the run step for the turbopack builder (mirrors upstream test-deploy-adapter)', () => {
     const step = runTestsStep();
     expect(step, 'expected the Run official deploy tests step').not.toBe('');
-    const m = step.match(/IS_TURBOPACK_TEST\s*:\s*['"]?([^'"\s#]+)/);
     expect(
-      m,
-      'the run step env must set IS_TURBOPACK_TEST — without it the jest harness applies webpack-lane assertions to Turbopack builds (6 of the final 9 failures) and next build hard-exits on webpack-config fixtures (TURBOPACK=auto)',
-    ).not.toBeNull();
-    expect((m as RegExpMatchArray)[1], 'IS_TURBOPACK_TEST must be truthy').toBe('1');
+      step,
+      'the run step env must set IS_TURBOPACK_TEST on turbopack — without it the jest harness applies webpack-lane assertions to Turbopack builds (6 of the final 9 failures) and next build hard-exits on webpack-config fixtures (TURBOPACK=auto)',
+    ).toMatch(
+      /IS_TURBOPACK_TEST:\s*\$\{\{\s*env\.KNEXT_BUILDER == 'turbopack' && '1' \|\| ''\s*\}\}/,
+    );
   });
 
-  it('does not ALSO set the webpack lane (the two flags are mutually exclusive upstream)', () => {
+  it('sets IS_WEBPACK_TEST only for the webpack builder (the two flags are mutually exclusive upstream)', () => {
     const step = runTestsStep();
     // bundler.ts exits(1) on "Multiple bundler flags set"; upstream lanes set
     // exactly one of IS_TURBOPACK_TEST / IS_WEBPACK_TEST.
-    expect(
-      /IS_WEBPACK_TEST\s*:/.test(step),
-      'the run step must not set IS_WEBPACK_TEST alongside IS_TURBOPACK_TEST',
-    ).toBe(false);
+    expect(step).toMatch(
+      /IS_WEBPACK_TEST:\s*\$\{\{\s*env\.KNEXT_BUILDER == 'webpack' && '1' \|\| ''\s*\}\}/,
+    );
   });
 
   it('sets NEXT_ENABLE_ADAPTER=1 on the run step (adapter-lane expectations, not just adapter runtime)', () => {
@@ -2773,7 +2776,7 @@ describe('compat-suite Bun runtime axis (test-e2e-deploy.yml, #147 item 4)', () 
     expect(/^\s*-\s*'?bun'?\s*$/m.test(input), 'options must include bun').toBe(true);
   });
 
-  it('has EXACTLY four nightly crons — node/bun on main (17 3, 47 4) plus node/bun on the RC tag (17 1, 47 5) (#1147, #850)', () => {
+  it('has EXACTLY six nightly crons — node/bun on main (17 3, 47 4), node/bun on the RC tag (17 1, 47 5), webpack node/bun on the RC tag (17 22, 47 23) (#1147, #850, #1245)', () => {
     // #1147 stands up a SECOND nightly: the bun credentialing lane. Both halves:
     // the node credential nightly survives UNTOUCHED, and the bun lane is a
     // DISTINCT off-peak cron — not a resurrection of the retired weekly Sunday
@@ -2792,10 +2795,23 @@ describe('compat-suite Bun runtime axis (test-e2e-deploy.yml, #147 item 4)', () 
     // same runner window, and there must be no other schedule.
     expect(all, 'the node RC credential cron must exist (#850)').toContain('17 1 * * *');
     expect(all, 'the bun RC credential cron must exist (#850)').toContain('47 5 * * *');
-    expect(new Set(all).size, 'the four crons must be distinct').toBe(4);
+    // #1245: the two webpack CREDENTIAL crons.
+    expect(all, 'the webpack × node credential cron must exist (#1245)').toContain('17 22 * * *');
+    expect(all, 'the webpack × bun credential cron must exist (#1245)').toContain('47 23 * * *');
+    expect(new Set(all).size, 'the six crons must be distinct').toBe(6);
     expect(
-      all.filter((c) => !['17 3 * * *', '47 4 * * *', '17 1 * * *', '47 5 * * *'].includes(c)),
-      'exactly four schedules: node + bun on main, node + bun on the RC tag',
+      all.filter(
+        (c) =>
+          ![
+            '17 3 * * *',
+            '47 4 * * *',
+            '17 1 * * *',
+            '47 5 * * *',
+            '17 22 * * *',
+            '47 23 * * *',
+          ].includes(c),
+      ),
+      'exactly six schedules: node + bun on main, node + bun on the RC tag, webpack node + bun on the RC tag',
     ).toEqual([]);
   });
 
@@ -2903,6 +2919,11 @@ describe('compat-suite Bun runtime axis (test-e2e-deploy.yml, #147 item 4)', () 
     it('the RC credential crons keep their lanes: 47 5 → bun, 17 1 → node (#850)', () => {
       expect(resolveLane({ schedule: '47 5 * * *' })).toBe('bun');
       expect(resolveLane({ schedule: '17 1 * * *' })).toBe('node');
+    });
+
+    it('the webpack credential crons pick their runtime: 47 23 → bun, 17 22 → node (#1245)', () => {
+      expect(resolveLane({ schedule: '47 23 * * *' })).toBe('bun');
+      expect(resolveLane({ schedule: '17 22 * * *' })).toBe('node');
     });
 
     it('a dispatch runtime input WINS over any schedule', () => {

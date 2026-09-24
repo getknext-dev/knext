@@ -98,7 +98,7 @@ const FILE_TOKEN = String.raw`test\/[^\r\n]*?\.test\.`;
  * @property {string} shard
  * @property {string} runtime
  * @property {string} [runtimeVersion]
- * @property {string} [builder] #608 — 'vinext' on the compiled single-executable axis
+ * @property {string} [builder] #608 — 'vinext' on the compiled single-executable axis; #1245 — 'webpack' on the webpack cells
  * @property {number} [expectedTotal]
  * @property {boolean} [truncated]
  * @property {ShardFailure[]} [failures] #545 — present only on a RED shard
@@ -246,7 +246,11 @@ export function summarize(runnerOutput, meta) {
     // omit-by-default discipline as `runtimeVersion`: absent on the
     // next-build lanes, so those artifacts stay byte-stable for the #41
     // publisher, and only an explicit 'vinext' records the compiled axis.
-    ...(meta?.builder === 'vinext' ? { builder: 'vinext' } : {}),
+    // #1245: 'webpack' is recorded the same way — it is what lets the ledger
+    // attribute a webpack night to its own cell lane (`<runtime>-webpack`)
+    // rather than the turbopack cell sharing its runtime. 'turbopack' (the
+    // default next build) stays OMITTED, so node/bun artifacts are unchanged.
+    ...(meta?.builder === 'vinext' || meta?.builder === 'webpack' ? { builder: meta.builder } : {}),
     // #171 — truncated means "fewer results than the shard's selection count
     // were reported": a killed shard's partial green must never read as green.
     // failed AND notRun both count as reported results (a fully-reported red

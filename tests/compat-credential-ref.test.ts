@@ -25,6 +25,7 @@ import {
   unresolvedNight,
 } from '../scripts/compat-window-audit.mjs';
 import { computeFingerprint } from '../scripts/compat-window-fingerprint.mjs';
+import { evaluate, exprBody } from './helpers/gha-expr';
 
 /**
  * #850 / ADR-0056 — credential v1.0 against a FROZEN release-candidate tag, one
@@ -712,9 +713,9 @@ describe('test-e2e-deploy.yml wires the RC ref into the credential lanes', () =>
 
   const crons = wf.on.schedule.map((s) => s.cron);
 
-  it('exactly two credential crons exist, and each maps to credential; every other trigger is early-warning', () => {
+  it('exactly four credential crons exist (one per wired cell, #1245), and each maps to credential; every other trigger is early-warning', () => {
     const credentialCrons = crons.filter((c) => resolveMode({ schedule: c }) === 'credential');
-    expect(credentialCrons).toHaveLength(2);
+    expect(credentialCrons).toHaveLength(4);
     for (const c of crons.filter((x) => !credentialCrons.includes(x))) {
       expect(resolveMode({ schedule: c })).toBe('early-warning');
     }
@@ -723,16 +724,20 @@ describe('test-e2e-deploy.yml wires the RC ref into the credential lanes', () =>
     expect(resolveMode({})).toBe('early-warning');
   });
 
-  it('one credential cron per existing lane (node and bun)', () => {
-    const lane = (schedule: string) => {
-      const expr = String(wf.env.KNEXT_RUNTIME);
-      const bunCrons = [...expr.matchAll(/github\.event\.schedule == '([^']+)' && 'bun'/g)].map(
-        (x) => x[1],
+  it('one credential cron per wired lane (node, bun, node-webpack, bun-webpack — #1245)', () => {
+    const lane = (schedule: string) =>
+      String(
+        evaluate(exprBody(wf.env.KNEXT_LANE), {
+          github: { event: { schedule, inputs: null } },
+        }),
       );
-      return bunCrons.includes(schedule) ? 'bun' : 'node';
-    };
     const credentialCrons = crons.filter((c) => resolveMode({ schedule: c }) === 'credential');
-    expect(credentialCrons.map(lane).sort()).toEqual(['bun', 'node']);
+    expect(credentialCrons.map(lane).sort()).toEqual([
+      'bun',
+      'bun-webpack',
+      'node',
+      'node-webpack',
+    ]);
   });
 
   it('a credential-ref job resolves the ref, and it is the ROOT every other job waits on', () => {
@@ -908,13 +913,14 @@ describe('early-warning alerts say they are non-credentialing', () => {
   );
 
   /** Run the alert's own title/lane-note logic under bash and read the result. */
-  function noteFor(runtime: string, mode: string) {
+  function noteFor(runtime: string, mode: string, lane: string = runtime) {
     const head = alertRun.slice(0, alertRun.indexOf('body="'));
     expect(head.length).toBeGreaterThan(0);
     const r = spawnSync('bash', ['-c', `${head}\nprintf '%s\\n%s' "$title" "$lane_note"`], {
       env: {
         PATH: process.env.PATH ?? '',
         KNEXT_RUNTIME: runtime,
+        KNEXT_LANE: lane,
         KNEXT_COMPAT_MODE: mode,
         CHECKOUT_REF: 'refs/tags/v1.0.0-rc.1',
         REF_STATE: 'resolved',
@@ -924,6 +930,17 @@ describe('early-warning alerts say they are non-credentialing', () => {
     expect(r.status).toBe(0);
     const [title, ...rest] = r.stdout.split('\n');
     return { title, note: rest.join('\n') };
+  }
+
+  // #1245: a webpack credential red is titled by its CELL lane, so it can never
+  // be filed on (or comment into) the turbopack cell's issue for the same runtime.
+  for (const runtime of ['node', 'bun']) {
+    it(`${runtime}-webpack credential: titled by its own lane, distinct from the ${runtime} turbopack issue`, () => {
+      const { title, note } = noteFor(runtime, 'credential', `${runtime}-webpack`);
+      expect(title).toBe(`Compat CREDENTIAL RED (${runtime}-webpack, RC tag)`);
+      expect(title).not.toBe(noteFor(runtime, 'credential').title);
+      expect(note).toMatch(new RegExp(`${runtime}-webpack CREDENTIAL night`));
+    });
   }
 
   for (const runtime of ['node', 'bun']) {

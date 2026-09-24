@@ -38,6 +38,15 @@ name: Compat suite (official Next.js deploy harness)
 #     resolved by the `credential-ref` job. No resolvable RC tag → the run
 #     REFUSES (never falls back to `main`). Only these nights count toward the
 #     per-cell 14-night windows (scripts/compat-window-audit.mjs).
+#
+# BUILDERS (#1245): the webpack cells (webpack×node, webpack×bun) share this
+# workflow. The BUILDER is decided like the runtime — dispatch input > the
+# webpack credential crons ('17 22 * * *' node, '47 23 * * *' bun) > turbopack
+# — and the LANE (the cell's window key) is `<runtime>` for turbopack and
+# `<runtime>-webpack` for webpack. Only the two webpack CREDENTIAL crons exist:
+# no early-warning webpack crons, because the audit counts credential nights
+# only and CI concurrency is capped (#1301); dispatch `builder=webpack` for an
+# on-demand early-warning run.
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
@@ -60,6 +69,17 @@ on:
           - node
           - bun
         default: node
+      # #1245 — the BUILD axis of the v1.0 matrix (node/bun × turbopack/webpack).
+      # Selects IS_TURBOPACK_TEST vs IS_WEBPACK_TEST on the harness (exactly one,
+      # never both — bundler.ts exits on multiple bundler flags) and the lane id.
+      builder:
+        description: 'Fixture bundler (turbopack | webpack) — selects the credential cell with runtime'
+        required: false
+        type: choice
+        options:
+          - turbopack
+          - webpack
+        default: turbopack
       # #188 — the Bun-VERSION experimentation knob. The bun lane's 3 remaining
       # red files (the edge-sandbox fetch gap + the not-found invariant pair)
       # are documented Bun ≤1.3.x runtime gaps believed fixed in 1.4.0-canary
@@ -119,6 +139,15 @@ on:
     # 05:47 UTC nightly — the BUN CREDENTIAL night (#850, ADR-0056). Maps to the
     # bun lane in KNEXT_RUNTIME and to credential in KNEXT_COMPAT_MODE.
     - cron: '47 5 * * *'
+    # 22:17 UTC nightly — the WEBPACK × NODE CREDENTIAL night (#1245). Staggered
+    # ≥60 min from every other compat cron and far from the ~08:30 UTC pile-up:
+    # each run is ~19 jobs against the Free plan's 20-concurrent-job cap (#1301).
+    # Maps to builder=webpack in KNEXT_BUILDER, lane node-webpack in KNEXT_LANE,
+    # credential in KNEXT_COMPAT_MODE. Refuses while no RC is cut.
+    - cron: '17 22 * * *'
+    # 23:47 UTC nightly — the WEBPACK × BUN CREDENTIAL night (#1245). 90 min after
+    # the node-webpack night and 90 min before the 01:17 node credential night.
+    - cron: '47 23 * * *'
 
 # Pin the Next.js ref so a failure is attributable to knext, not upstream churn.
 # NEXTJS_REF is the git TAG (kept for the source checkout that supplies the
@@ -168,12 +197,25 @@ env:
   # mutation-proved (an expression evaluator, not a grep) in
   # tests/compat-suite-workflow.test.ts.
   # #850: the bun CREDENTIAL cron ('47 5 * * *') is the bun lane too.
-  KNEXT_RUNTIME: ${{ github.event.inputs.runtime || (github.event.schedule == '47 4 * * *' && 'bun') || (github.event.schedule == '47 5 * * *' && 'bun') || 'node' }}
+  # #1245: the webpack × bun CREDENTIAL cron ('47 23 * * *') is the bun lane too.
+  KNEXT_RUNTIME: ${{ github.event.inputs.runtime || (github.event.schedule == '47 4 * * *' && 'bun') || (github.event.schedule == '47 5 * * *' && 'bun') || (github.event.schedule == '47 23 * * *' && 'bun') || 'node' }}
+  # #1245 — the ONE builder decision: dispatch input > the two webpack credential
+  # crons → webpack > default turbopack (every pre-existing cron stays turbopack).
+  KNEXT_BUILDER: ${{ github.event.inputs.builder || (github.event.schedule == '17 22 * * *' && 'webpack') || (github.event.schedule == '47 23 * * *' && 'webpack') || 'turbopack' }}
+  # #1245 — the LANE, i.e. the credential cell's window key
+  # (CREDENTIAL_CELLS.lane): `<runtime>` for turbopack (the historical ids, so
+  # their history stays attributable) and `<runtime>-webpack` for webpack. A
+  # workflow-level env cannot read `env`, so this re-derives from the event;
+  # tests/compat-webpack-credential-lanes.test.ts EVALUATES it against every
+  # cron and dispatch combination and reds unless it equals the lane composed
+  # from KNEXT_RUNTIME × KNEXT_BUILDER and names a real credential cell.
+  KNEXT_LANE: ${{ (github.event.inputs.builder == 'webpack' && format('{0}-webpack', github.event.inputs.runtime)) || github.event.inputs.runtime || (github.event.schedule == '17 22 * * *' && 'node-webpack') || (github.event.schedule == '47 23 * * *' && 'bun-webpack') || (github.event.schedule == '47 4 * * *' && 'bun') || (github.event.schedule == '47 5 * * *' && 'bun') || 'node' }}
   # #850 / ADR-0056 — the ONE mode decision. Only the two credential cron
   # literals map to `credential`; every other trigger, INCLUDING any dispatch,
   # is `early-warning`, so no dispatch input can produce a credential night.
   # Evaluated (not grepped) by tests/compat-credential-ref.test.ts.
-  KNEXT_COMPAT_MODE: ${{ (github.event.schedule == '17 1 * * *' && 'credential') || (github.event.schedule == '47 5 * * *' && 'credential') || 'early-warning' }}
+  # #1245: the two webpack credential crons are credential nights too.
+  KNEXT_COMPAT_MODE: ${{ (github.event.schedule == '17 1 * * *' && 'credential') || (github.event.schedule == '47 5 * * *' && 'credential') || (github.event.schedule == '17 22 * * *' && 'credential') || (github.event.schedule == '47 23 * * *' && 'credential') || 'early-warning' }}
   # #188 path 2 — dispatch input ONLY, never a schedule branch: on schedule
   # events github.event.inputs is empty, so this is '' (off) on the nightly
   # AND the weekly bun lane. '1' is the exact value scripts/e2e-deploy.sh
@@ -215,12 +257,14 @@ jobs:
       - name: Record the lane + mode markers
         run: |
           set -euo pipefail
-          printf '%s\n' "${KNEXT_RUNTIME}" > "${RUNNER_TEMP}/compat-lane.txt"
+          printf '%s\n' "${KNEXT_LANE}" > "${RUNNER_TEMP}/compat-lane.txt"
           printf '%s\n' "${KNEXT_COMPAT_MODE}" > "${RUNNER_TEMP}/compat-mode.txt"
       - name: Publish the lane marker
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: compat-lane-${{ env.KNEXT_RUNTIME }}
+          # #1245: the LANE (cell window key), not the bare runtime — a webpack
+          # night must never be attributed to the turbopack cell sharing its runtime.
+          name: compat-lane-${{ env.KNEXT_LANE }}
           path: ${{ runner.temp }}/compat-lane.txt
           # The NAME is the evidence and the listing keeps it after expiry, so
           # retention here only needs to cover the audit's own window.
@@ -503,7 +547,7 @@ jobs:
             --next-js-dir "${GITHUB_WORKSPACE}/next.js" \
             --next-tarball "${GITHUB_WORKSPACE}/next-prebuilt/next.tgz" \
             --next-ref "${NEXTJS_REF}" \
-            --lane "${KNEXT_RUNTIME}" \
+            --lane "${KNEXT_LANE}" \
             --workflow-file "${GITHUB_WORKSPACE}/knext-executing/.github/workflows/test-e2e-deploy.yml" \
             --out "${GITHUB_WORKSPACE}/compat-window-fingerprint.json" \
             ${RUNTIME_ARGS[@]+"${RUNTIME_ARGS[@]}"} \
@@ -1470,7 +1514,16 @@ jobs:
           # flag reaches the tests AND the fixture `next build` in
           # scripts/e2e-deploy.sh. Never set IS_WEBPACK_TEST alongside it —
           # bundler.ts exits(1) on multiple bundler flags.
-          IS_TURBOPACK_TEST: '1'
+          #
+          # #1245: the BUILDER axis. Exactly one of the two flags is '1' (the
+          # other is '' — falsy both to bundler.ts and to test/lib/turbo.ts), so
+          # the webpack cells mirror upstream's webpack lane (IS_WEBPACK_TEST)
+          # and the turbopack cells are byte-for-byte what they were.
+          IS_TURBOPACK_TEST: ${{ env.KNEXT_BUILDER == 'turbopack' && '1' || '' }}
+          IS_WEBPACK_TEST: ${{ env.KNEXT_BUILDER == 'webpack' && '1' || '' }}
+          # #1245: scripts/e2e-deploy.sh refuses a KNEXT_BUILDER=webpack deploy
+          # whose build lacks webpack's server runtime (proof the env arrived).
+          KNEXT_BUILDER: ${{ env.KNEXT_BUILDER }}
           # #147 A3-3 round 5 (code-gate advisory on the first all-green run,
           # 28599745695) — the FOURTH mirror from the same upstream afterBuild
           # line (test_e2e_deploy_release.yml:209-218, test-deploy-adapter):
@@ -1609,6 +1662,7 @@ jobs:
             --excluded "${{ steps.excl.outputs.count }}" \
             --runtime "${KNEXT_RUNTIME}" \
             --runtime-version "${RUNTIME_VERSION}" \
+            --builder "${KNEXT_BUILDER}" \
             --boot-ledger "${RUNNER_TEMP:-/tmp}/knext-e2e-boot-modes.log" \
             --out "compat-suite-summary-${SAFE_SHARD}.json"
 
@@ -1985,13 +2039,14 @@ jobs:
           # main early-warning thread above (and vice versa). The early-warning
           # titles are unchanged, so their open issues keep their dedup keys.
           if [ "${KNEXT_COMPAT_MODE}" = "credential" ]; then
-            title="Compat CREDENTIAL RED (${KNEXT_RUNTIME}, RC tag)"
-            lane_note="This is the **${KNEXT_RUNTIME} CREDENTIAL night** — it ran against the frozen release-candidate tag pinned in \`.github/compat-credential-ref.json\` (ref: \`${CHECKOUT_REF:-unresolved}\`), not main. A red here RESTARTS this cell's v1.0 14-night window; the fix lands on main and ships in the next RC. If credential-ref is the failed job, the RC ref could not be resolved (resolution state: \`${REF_STATE:-unknown}\`) and nothing was tested — the lane refuses rather than fall back to main."
+            title="Compat CREDENTIAL RED (${KNEXT_LANE}, RC tag)"
+            lane_note="This is the **${KNEXT_LANE} CREDENTIAL night** — it ran against the frozen release-candidate tag pinned in \`.github/compat-credential-ref.json\` (ref: \`${CHECKOUT_REF:-unresolved}\`), not main. A red here RESTARTS this cell's v1.0 14-night window; the fix lands on main and ships in the next RC. If credential-ref is the failed job, the RC ref could not be resolved (resolution state: \`${REF_STATE:-unknown}\`) and nothing was tested — the lane refuses rather than fall back to main."
           fi
           body="The scheduled official Next.js deploy-suite run FAILED.
 
           - Run: ${RUN_URL}
           - Runtime lane: ${KNEXT_RUNTIME}
+          - Builder: ${KNEXT_BUILDER} (cell lane: ${KNEXT_LANE})
           - Mode: ${KNEXT_COMPAT_MODE}
           - credential-ref (resolve the knext ref): ${REF_RESULT} (state: ${REF_STATE:-n/a})
           - build-next (Prepare): ${BUILD_RESULT}
