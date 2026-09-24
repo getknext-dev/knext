@@ -49,6 +49,13 @@
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+    BUNDLED_PREFIX,
+    hasNativeAddon,
+    isSidecarCandidate,
+    packageNameOf,
+    sidecarShimSource,
+} from "./entry-external-sidecar.mjs";
 import { staticizeEntryRequires } from "./entry-require-staticize.mjs";
 
 /** `--flag value` pairs; no positional arguments. */
@@ -240,14 +247,51 @@ const sharpAddonDlopen = {
     },
 };
 
+/**
+ * Server externals load from the traced sidecar beside the binary when it is
+ * there, and from the bundle otherwise (#1320 — see entry-external-sidecar.mjs).
+ *
+ * Only the ENTRY's own bare imports are redirected: those are exactly the
+ * packages nitro left external (it inlines everything else). A package's
+ * internal imports resolve normally, so the bundled fallback is a normal bundle.
+ */
+const ENTRY_DIR = dirname(ENTRY);
+const SIDECAR_NODE_MODULES = join(ENTRY_DIR, "node_modules");
+const redirected = new Set();
+const externalSidecar = {
+    name: "knext-external-sidecar",
+    setup(build) {
+        // The shim's bundled fallback: resolve the real specifier from the entry.
+        build.onResolve({ filter: /^knext-bundled:/ }, (args) => ({
+            path: Bun.resolveSync(args.path.slice(BUNDLED_PREFIX.length), ENTRY_DIR),
+        }));
+        build.onResolve({ filter: /^[^./]/ }, (args) => {
+            if (!args.importer || resolve(args.importer) !== ENTRY) return undefined;
+            if (!isSidecarCandidate(args.path)) return undefined;
+            const pkg = join(SIDECAR_NODE_MODULES, packageNameOf(args.path), "package.json");
+            if (!existsSync(pkg)) return undefined;
+            redirected.add(args.path);
+            return { path: args.path, namespace: "knext-sidecar" };
+        });
+        build.onLoad({ filter: /.*/, namespace: "knext-sidecar" }, (args) => ({
+            contents: sidecarShimSource(args.path),
+            loader: "js",
+        }));
+    },
+};
+
 const result = await Bun.build({
     entrypoints: [ENTRY],
     target: "bun",
-    plugins: [importMetaToCjs, sharpAddonDlopen],
+    plugins: [importMetaToCjs, sharpAddonDlopen, externalSidecar],
     minify: true,
     bytecode: true,
     compile: {
         outfile: OUTFILE,
+        // A compiled binary refuses ALL runtime bare-specifier resolution unless
+        // this is on — even from a real anchor, even for a real package's own
+        // imports (measured, Bun 1.4.2). The sidecar load depends on it.
+        autoloadPackageJson: true,
         ...(TARGET ? { target: TARGET } : {}),
     },
 });
@@ -255,6 +299,23 @@ const result = await Bun.build({
 if (!result.success) {
     for (const log of result.logs) console.error(String(log));
     process.exit(1);
+}
+if (redirected.size > 0) {
+    const specs = [...redirected].sort();
+    console.log(
+        `[knext compile] ${specs.length} server external(s) load from ${SIDECAR_NODE_MODULES} ` +
+            `when it is beside the binary, else from the bundle: ${specs.join(", ")}`,
+    );
+    const natives = [...new Set(specs.map(packageNameOf))].filter((name) =>
+        hasNativeAddon(join(SIDECAR_NODE_MODULES, name)),
+    );
+    if (natives.length > 0) {
+        console.warn(
+            `[knext compile] WARNING: ${natives.join(", ")} ship(s) a native addon, which cannot load ` +
+                "from inside the binary. The binary loads it from .output/server/node_modules, so " +
+                "that directory must be deployed next to the binary (built for the target platform).",
+        );
+    }
 }
 console.log(
     `[knext compile] wrote ${OUTFILE} (bytecode: on${TARGET ? `, target: ${TARGET}` : ""})`,
