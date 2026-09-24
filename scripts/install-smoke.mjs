@@ -478,12 +478,30 @@ try {
     'knext-bun-entry.mjs',
     'runtime-contract.mjs',
     'instrumentation-edge-safe.test.ts',
+    // #1394: `gitignore.hbs` (no leading dot — npm strips a file literally
+    // named `.gitignore` from a published tarball) must both (a) survive the
+    // REAL pack/publish/install round trip this gate proves and (b) be
+    // renamed to the real `.gitignore` dotfile at scaffold time. Checking
+    // this against a tarball actually unpacked from `npm pack` is the whole
+    // point — a unit test reading the source tree would never see the strip.
+    '.gitignore',
   ]) {
     if (!existsSync(join(scaffoldDir, rel))) {
       finish(
         FAIL,
         `kn-next create --builder vinext did not emit ${rel} — templates missing from the tarball?`,
       );
+    }
+  }
+  {
+    const gitignore = readFileSync(join(scaffoldDir, '.gitignore'), 'utf8');
+    for (const pattern of ['node_modules', '.env', 'knext-exec*']) {
+      if (!gitignore.includes(pattern)) {
+        finish(
+          FAIL,
+          `kn-next create --builder vinext's .gitignore is missing the '${pattern}' pattern`,
+        );
+      }
     }
   }
   // Both halves: the vinext files are present AND the retired ones are gone.
@@ -674,12 +692,27 @@ try {
     'next-adapter.ts',
     'next.config.ts',
     'instrumentation-edge-safe.test.ts',
+    // #1394 — see the identical check on the vinext scaffold above for why
+    // this specifically needs the packed-tarball round trip, not just a
+    // source-tree read.
+    '.gitignore',
   ]) {
     if (!existsSync(join(defaultScaffoldDir, rel))) {
       finish(
         FAIL,
         `kn-next create (default builder) did not emit ${rel} — templates missing from the tarball?`,
       );
+    }
+  }
+  {
+    const gitignore = readFileSync(join(defaultScaffoldDir, '.gitignore'), 'utf8');
+    for (const pattern of ['node_modules', '.env', 'knext-standalone-exec*']) {
+      if (!gitignore.includes(pattern)) {
+        finish(
+          FAIL,
+          `kn-next create (default builder)'s .gitignore is missing the '${pattern}' pattern`,
+        );
+      }
     }
   }
   for (const rel of [

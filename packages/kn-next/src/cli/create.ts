@@ -251,6 +251,19 @@ const DEFAULT_ONLY_TEMPLATES: ReadonlySet<string> = new Set([
 const VINEXT_VARIANT_SUFFIX = ".vinext";
 
 /**
+ * `gitignore.hbs`'s rendered relPath (#1394). Ships under this name, NOT
+ * `.gitignore.hbs`: npm's packer strips any file literally named `.gitignore`
+ * from a published tarball no matter what `package.json`'s `files` says, so a
+ * template shipped under that exact name would silently vanish from
+ * `@getknext/core` on publish. Renamed to the real dotfile name here, at
+ * render time — after `loadTemplates()`'s `.hbs` strip, before anything else
+ * ever sees the relPath — so every consumer (dry-run listing, `writeScaffold`,
+ * tests) already sees `.gitignore`.
+ */
+const GITIGNORE_TEMPLATE_KEY = "gitignore";
+const GITIGNORE_TARGET_KEY = ".gitignore";
+
+/**
  * Select, from every loaded `.hbs` template, the ones `builder` actually
  * emits — resolving both axes: files present for one target only
  * ({@link VINEXT_ONLY_TEMPLATES}/{@link DEFAULT_ONLY_TEMPLATES}), and files
@@ -334,7 +347,9 @@ export function renderScaffold(opts: RenderOptions): Map<string, string> {
                 `unsubstituted template placeholder left in ${rel} — refusing to emit it`,
             );
         }
-        rendered.set(rel, out);
+        const targetRel =
+            rel === GITIGNORE_TEMPLATE_KEY ? GITIGNORE_TARGET_KEY : rel;
+        rendered.set(targetRel, out);
     }
     return rendered;
 }
