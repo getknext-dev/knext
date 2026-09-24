@@ -45,10 +45,19 @@ export function vinextPins(manifest: string): string[] {
 }
 
 function trackedManifests(): string[] {
-  const out = execFileSync('git', ['ls-files', '--', '*package.json', '*package.json.hbs'], {
-    cwd: repoRoot,
-    encoding: 'utf8',
-  });
+  // #1342/ADR-0058: the app scaffold's vinext pin moved from
+  // `templates/app/package.json.hbs` (now the DEFAULT/standalone target,
+  // which pins no vinext) to `templates/app/package.json.vinext.hbs` (the
+  // `--builder vinext` content override) — scan both suffixes so the pin is
+  // still covered wherever it actually lives.
+  const out = execFileSync(
+    'git',
+    ['ls-files', '--', '*package.json', '*package.json.hbs', '*package.json.vinext.hbs'],
+    {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    },
+  );
   return out
     .split('\n')
     .filter(Boolean)
@@ -84,7 +93,7 @@ describe('vinext pin lockstep', () => {
     }
     // The scan must actually find the pins, or an empty result reads as green.
     expect(pinned).toContain('packages/kn-next/package.json');
-    expect(pinned).toContain('packages/kn-next/templates/app/package.json.hbs');
+    expect(pinned).toContain('packages/kn-next/templates/app/package.json.vinext.hbs');
     expect(pinned.length).toBeGreaterThanOrEqual(6);
     expect(drift, 'vinext pins out of lockstep with the compat lane').toEqual([]);
   });

@@ -1,0 +1,60 @@
+import type { NextConfig } from "next";
+
+/**
+ * {{ name }} — Next.js options.
+ *
+ * Deliberately minimal. knext builds this app with vinext (see
+ * `vite.config.ts`), which reads your Next config for app-level options —
+ * redirects, rewrites, headers, image settings — but does NOT use the
+ * webpack/turbopack build pipeline.
+ *
+ * Three things that belong in a Next config elsewhere do NOT belong here:
+ *
+ *   - `output: 'standalone'` — there is no standalone server. The build emits
+ *     a Nitro `.output` that gets compiled into a single Bun executable.
+ *   - `adapterPath` — the official Next Deployment Adapter hooks are a
+ *     turbopack/webpack mechanism. vinext is Vite/rolldown and never calls
+ *     them, so pointing at an adapter here would silently do nothing.
+ *   - `serverExternalPackages` for `@getknext/lib` — that existed to stop
+ *     webpack layering from duplicating module state. There are no webpack
+ *     layers here.
+ *
+ * Bytecode: nothing to configure. `bun build --compile --bytecode` bakes V8
+ * bytecode into the binary itself, so there is no `NODE_COMPILE_CACHE`, no
+ * cache directory to mount, and no warm-up step. It ships inside the artifact.
+ *
+ * What DOES still belong here is `assetPrefix`. vinext reads the Next config
+ * for app-level options, and this one is knext's own wiring: when object
+ * storage is configured, `ASSET_PREFIX` points static assets at the bucket or
+ * CDN; when it is not, the empty-string fallback keeps the emitted HTML on
+ * relative `/_next/static/...` paths so the app serves its own assets. Deleting
+ * it does not fail the build — it silently breaks the no-storage mode.
+ *
+ * `generateBuildId` is the other piece of knext's own wiring (ADR-0011 skew
+ * protection). `kn-next deploy` exports NEXT_DEPLOYMENT_ID = the deploy tag
+ * BEFORE the build. vinext reads that env var by itself for `?dpl=` asset
+ * suffixing, but the STATIC NAMESPACE (`_next/static/<id>/`) comes from
+ * `generateBuildId` — and with no `generateBuildId`, vinext falls back to a
+ * random UUID. That UUID is a namespace nothing can resolve: the asset GC
+ * protects live builds by the deploy tag it reads off a revision label, so a
+ * UUID prefix can never be matched, marked, or reclaimed. Returning null
+ * outside `kn-next deploy` (a plain `vite build`) keeps vinext's UUID fallback,
+ * so local builds are unchanged. Deleting this line does not fail the build —
+ * `kn-next deploy` aborts instead, loudly, which is the point.
+ */
+const nextConfig: NextConfig = {
+    assetPrefix: process.env.ASSET_PREFIX || "",
+    generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID || null,
+    // NOT the live ISR wiring on this build target (#953). vinext never reads
+    // `cacheHandler` — it is a webpack/turbopack mechanism, like `adapterPath`
+    // above — so for a while every request was a MISS and the provisioned
+    // Redis stayed empty while this line sat here looking like wiring. The
+    // REAL registration is the vinext() plugin's `cache.data` adapter in
+    // vite.config.ts. This option is kept for Next-aware tooling and points at
+    // the same handler, so the two can never drift apart.
+    cacheHandler: new URL("./cache-handler.js", import.meta.url).pathname,
+    // Per-pod memory caches diverge across pods — Redis is the one cache.
+    cacheMaxMemorySize: 0,
+};
+
+export default nextConfig;

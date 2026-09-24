@@ -78,28 +78,35 @@ describe('instrumentation.ts edge-bundle safety (#342)', () => {
 });
 
 /**
- * #356 (ADR-0031): the second half of the #342/#344 fence — the edge-scoped
- * `IgnorePlugin` that excludes `./instrumentation-node` from the EDGE bundle —
- * is PLATFORM-OWNED: the knext adapter's `modifyConfig` injects it. These
- * assertions pin the ownership: the app must wire the package-shipped adapter
- * via `adapterPath` (that is what carries the injected fence into the build),
- * and the app's own `next.config.ts` must NOT reintroduce a hand-written
- * IgnorePlugin. The end-to-end tripwire is the production `next build
- * --webpack`, which still fails if the Node-only subtree ever reaches the edge
- * bundle.
+ * The fence used to have a second half, and it no longer does. Say so plainly
+ * rather than leaving assertions that quietly pass.
+ *
+ * The edge-scoped webpack `IgnorePlugin` that excluded `./instrumentation-node`
+ * from the EDGE bundle was PLATFORM-OWNED — injected by the knext adapter's
+ * `modifyConfig`. Since the build moved to vinext (Vite/rolldown) there is no
+ * webpack, so there is no IgnorePlugin and no `adapterPath` to carry one: the
+ * official adapter hooks are a webpack/turbopack mechanism that this build
+ * never calls.
+ *
+ * **What that costs, stated rather than hidden:** the belt is gone and only the
+ * suspenders remain. The static checks above — edge-clean top level, the
+ * NEXT_RUNTIME guard, the dynamic import — are now the WHOLE fence for this
+ * app, where they were previously backed by a bundler-level exclusion that
+ * caught a top-level import even if these assertions were deleted.
+ *
+ * The checks below are what still transfers: the app must not hand-write a
+ * bundler hook, and it must never externalize `@getknext/lib`.
  */
-describe('edge IgnorePlugin fence — platform-owned via the knext adapter (#342/#344/#356)', () => {
-  it('wires the knext adapter via adapterPath (the fence carrier)', () => {
-    expect(nextConfigSrc).toMatch(/adapterPath\s*:/);
-  });
-
-  it('the app adapter is the package-shipped @getknext/core adapter', () => {
-    const appAdapterSrc = readFileSync(join(here, 'next-adapter.ts'), 'utf8');
-    expect(appAdapterSrc).toMatch(/from\s+['"]@getknext\/core\/adapter['"]/);
-  });
-
-  it('does NOT hand-write the IgnorePlugin webpack hook (graduated to the adapter modifyConfig)', () => {
+describe('edge fence — what survives the move off webpack', () => {
+  it('does NOT hand-write an IgnorePlugin webpack hook (there is no webpack here)', () => {
     expect(nextConfigSrc).not.toMatch(/new\s+webpack\.IgnorePlugin\s*\(/);
+    expect(nextConfigSrc).not.toMatch(/^\s*webpack\s*[:(]/m);
+  });
+
+  it('does not wire adapterPath (a webpack/turbopack hook this build never calls)', () => {
+    // Not cosmetic: wiring it would read as an active fence to the next person
+    // and silently do nothing.
+    expect(nextConfigSrc).not.toMatch(/adapterPath\s*:/);
   });
 
   it('never externalizes @getknext/lib (ADR-0027: would re-split the globalThis seam state)', () => {

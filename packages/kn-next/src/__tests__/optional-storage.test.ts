@@ -281,11 +281,14 @@ afterAll(() => {
     rmSync(loaderTmpRoot, { recursive: true, force: true });
 });
 
-function scaffoldApp(name: string): { appDir: string } {
+function scaffoldApp(
+    name: string,
+    builder?: "default" | "vinext",
+): { appDir: string } {
     writeFileSync(join(root, "package-lock.json"), "{}\n");
     const appDir = join(root, "apps", name);
     mkdirSync(appDir, { recursive: true });
-    writeScaffold({ appDir, name });
+    writeScaffold({ appDir, name, builder });
     return { appDir };
 }
 
@@ -329,6 +332,12 @@ describe("kn-next create scaffolds the no-storage default (condition 6)", () => 
 });
 
 describe("the image serves its own statics (condition 4 build-time halves)", () => {
+    // #1342/ADR-0058: `kn-next create`'s DEFAULT builder emits no Dockerfile
+    // at all — `kn-next build`/`deploy` stage the standalone runtime image
+    // automatically (see create-scaffold-builder.test.ts's "emits NO
+    // Dockerfile" pin). The Dockerfile assertions below are inherently
+    // `--builder vinext`-shaped (the `.output/public` nitro artifact layout),
+    // so they scaffold that target explicitly rather than the default.
     it("the generated Dockerfile COPYs the served asset root into the runner image", () => {
         // THE mutation target: delete the `.output/public` COPY line from
         // templates/app/Dockerfile.hbs and this expectation goes red — a
@@ -339,7 +348,7 @@ describe("the image serves its own statics (condition 4 build-time halves)", () 
         // the hashed `_next` chunks and the app's own `public/` files. Two
         // COPY lines collapsed into one because the artifact merged them, not
         // because a guard was relaxed.
-        const { appDir } = scaffoldApp("static-copy");
+        const { appDir } = scaffoldApp("static-copy", "vinext");
         const dockerfile = readFileSync(join(appDir, "Dockerfile"), "utf8");
         expect(dockerfile).toMatch(
             /COPY\s+[^\n]*\.output\/public\s+\S*\.output\/public/,
@@ -351,7 +360,7 @@ describe("the image serves its own statics (condition 4 build-time halves)", () 
         // AND drags along a dead `.next/static` line would pass — which is how
         // a migration leaves rubble that reads as intentional. `.next/standalone`
         // is checked too: it is the directory this build never produces.
-        const { appDir } = scaffoldApp("public-copy");
+        const { appDir } = scaffoldApp("public-copy", "vinext");
         const dockerfile = readFileSync(join(appDir, "Dockerfile"), "utf8");
         expect(dockerfile).not.toMatch(/\.next\/static/);
         expect(dockerfile).not.toMatch(/\.next\/standalone/);

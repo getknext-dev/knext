@@ -195,12 +195,107 @@ export function loadTemplates(root = templateRoot()): Map<string, string> {
     return out;
 }
 
+/**
+ * Which build target `kn-next create` scaffolds (#1342, ADR-0058).
+ *
+ * `"default"` — the standalone shape: plain `next build`, `output:
+ * 'standalone'`, `adapterPath` wired to the official Next.js Deployment
+ * Adapter. `kn-next deploy`/`build` stage the runtime image automatically
+ * (`runtime-image.ts`'s existing `selectRuntimeImage`/
+ * `stageStandaloneBuildContext`) — the scaffold emits no Dockerfile for this
+ * target, matching how that staging has always worked.
+ *
+ * `"vinext"` — today's shape: `vite build` compiled to a single Bun
+ * executable (`bun build --compile --bytecode`), with its own scaffolded
+ * `Dockerfile`/`vite.config.ts`.
+ */
+export type BuilderChoice = "default" | "vinext";
+
+/**
+ * Template relPaths (the `loadTemplates()` key — `.hbs` already stripped)
+ * that exist ONLY for `--builder vinext`: irrelevant, and never executed, on
+ * the standalone target. Kept OUT of a default scaffold rather than shipped
+ * inert — the same false-positive-noise class #1356's doctor check had to
+ * special-case for `knext-node-entry.mjs` is avoided here by construction,
+ * for every file in this set, not just that one.
+ *
+ * `knext-bun-entry.mjs`/`runtime-contract.mjs` stay classified VERBATIM +
+ * SHAPE_FROZEN in `create-scaffold-parity.test.ts` (that guard compares the
+ * TEMPLATE TREE, not what a given `--builder` emits into an app) — gating
+ * their EMISSION here does not touch that classification.
+ */
+const VINEXT_ONLY_TEMPLATES: ReadonlySet<string> = new Set([
+    "Dockerfile",
+    ".dockerignore",
+    "Dockerfile.vinext-node",
+    "Dockerfile.vinext-node.dockerignore",
+    "vite.config.ts",
+    "knext-node-entry.mjs",
+    "knext-bun-entry.mjs",
+    "runtime-contract.mjs",
+]);
+
+/**
+ * Template relPaths that exist ONLY for the default (standalone) target —
+ * the mirror image of {@link VINEXT_ONLY_TEMPLATES}. vinext is Vite/rolldown
+ * and never calls the official Next.js Deployment Adapter hooks, so shipping
+ * `next-adapter.ts` into a vinext scaffold would be dead code pointing at a
+ * mechanism that build target never invokes (ADR-0048's own reasoning for
+ * why this file was originally deleted from both template trees).
+ */
+const DEFAULT_ONLY_TEMPLATES: ReadonlySet<string> = new Set([
+    "next-adapter.ts",
+]);
+
+/** Suffix marking a template as a `--builder vinext` override of the same target path. */
+const VINEXT_VARIANT_SUFFIX = ".vinext";
+
+/**
+ * Select, from every loaded `.hbs` template, the ones `builder` actually
+ * emits — resolving both axes: files present for one target only
+ * ({@link VINEXT_ONLY_TEMPLATES}/{@link DEFAULT_ONLY_TEMPLATES}), and files
+ * with builder-SPECIFIC CONTENT at the same target path (a `<path>.vinext`
+ * template overrides the base `<path>` template when `builder === "vinext"`
+ * — e.g. `next.config.ts.vinext.hbs` overrides `next.config.ts.hbs`).
+ *
+ * Order-independent: unlike a naive `Map.set` overwrite keyed on iteration
+ * order, this collects overrides separately and applies them ONLY for the
+ * builder that selects them, so it never depends on `readdirSync`'s
+ * unspecified ordering of `next.config.ts.hbs` vs `next.config.ts.vinext.hbs`.
+ */
+export function selectBuilderTemplates(
+    templates: Map<string, string>,
+    builder: BuilderChoice,
+): Map<string, string> {
+    const base = new Map<string, string>();
+    const overrides = new Map<string, string>();
+    for (const [rel, source] of templates) {
+        if (rel.endsWith(VINEXT_VARIANT_SUFFIX)) {
+            overrides.set(rel.slice(0, -VINEXT_VARIANT_SUFFIX.length), source);
+            continue;
+        }
+        base.set(rel, source);
+    }
+    const out = new Map<string, string>();
+    for (const [rel, source] of base) {
+        if (VINEXT_ONLY_TEMPLATES.has(rel) && builder !== "vinext") continue;
+        if (DEFAULT_ONLY_TEMPLATES.has(rel) && builder !== "default") continue;
+        out.set(rel, source);
+    }
+    if (builder === "vinext") {
+        for (const [rel, source] of overrides) out.set(rel, source);
+    }
+    return out;
+}
+
 export interface RenderOptions {
     name: string;
     version: string;
     /** Install command matching the lockfile at the tracing root. */
     installCmd?: string;
     templates?: Map<string, string>;
+    /** Which build target to scaffold (#1342). Defaults to `"default"` (standalone). */
+    builder?: BuilderChoice;
 }
 
 /**
@@ -219,7 +314,11 @@ export function renderScaffold(opts: RenderOptions): Map<string, string> {
         version: opts.version,
         installCmd: opts.installCmd ?? NO_LOCKFILE_INSTALL,
     };
-    const templates = opts.templates ?? loadTemplates();
+    const allTemplates = opts.templates ?? loadTemplates();
+    const templates = selectBuilderTemplates(
+        allTemplates,
+        opts.builder ?? "default",
+    );
     const rendered = new Map<string, string>();
     for (const [rel, source] of templates) {
         const out = source.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_m, key) => {
@@ -247,6 +346,8 @@ export interface ScaffoldOptions {
     dryRun?: boolean;
     templates?: Map<string, string>;
     version?: string;
+    /** Which build target to scaffold (#1342). Defaults to `"default"` (standalone). */
+    builder?: BuilderChoice;
 }
 
 /**
@@ -264,6 +365,7 @@ export function writeScaffold(opts: ScaffoldOptions): Map<string, string> {
         installCmd: layout.installCmd,
         version: opts.version ?? cliVersion(),
         templates: opts.templates,
+        builder: opts.builder,
     });
 
     // Checked even under --force, because --force is REQUIRED for any pre-existing app
@@ -316,15 +418,23 @@ Usage:
 Emits the SAME guarded-instrumentation shape the in-repo app template does
 (ADR-0031/#407): an edge-clean src/instrumentation.ts, the Node-only
 src/instrumentation-node.ts wiring the globalThis-anchored @getknext/lib seams,
-and the per-app instrumentation-edge-safe guard. (The old standalone-seam-alive
-guard and its test:seam script are retired — the webpack layering they caught
-cannot occur in the vinext single-graph build.)
+and the per-app instrumentation-edge-safe guard.
+
+By default scaffolds the standalone target (ADR-0058): plain \`next build\`,
+\`output: 'standalone'\`, the official Next.js Deployment Adapter wired via
+\`adapterPath\`. \`kn-next build\`/\`deploy\` stage the matching runtime image
+automatically — this command emits no Dockerfile for that target.
 
 Options:
-  --name <name>   App name (default: the directory name)
-  --force         Overwrite existing files
-  --dry-run       List the files that would be written, write nothing
-  -h, --help      Show this help
+  --name <name>            App name (default: the directory name)
+  --builder <default|vinext>
+                            Build target to scaffold (default: "default", the
+                            standalone shape). "vinext" scaffolds the compiled
+                            single-executable shape instead (its own
+                            Dockerfile, vite.config.ts, \`build: 'vinext'\`).
+  --force                  Overwrite existing files
+  --dry-run                List the files that would be written, write nothing
+  -h, --help                Show this help
 `;
 
 /**
@@ -349,6 +459,7 @@ export function partingLine(dir: string): string {
 export async function createMain(argv: string[]): Promise<number> {
     let values: {
         name?: string;
+        builder?: string;
         force?: boolean;
         "dry-run"?: boolean;
         help?: boolean;
@@ -359,6 +470,7 @@ export async function createMain(argv: string[]): Promise<number> {
             args: argv,
             options: {
                 name: { type: "string" },
+                builder: { type: "string" },
                 force: { type: "boolean", default: false },
                 "dry-run": { type: "boolean", default: false },
                 help: { type: "boolean", short: "h", default: false },
@@ -376,6 +488,20 @@ export async function createMain(argv: string[]): Promise<number> {
         return 0;
     }
 
+    // Reject rather than guess: an unrecognised --builder value silently
+    // falling back to "default" would scaffold the OPPOSITE shape from what
+    // a typo'd `--builder vinetx` asked for, with no error at all.
+    let builder: BuilderChoice = "default";
+    if (values.builder !== undefined) {
+        if (values.builder !== "default" && values.builder !== "vinext") {
+            process.stderr.write(
+                `unrecognised --builder '${values.builder}' — expected "default" or "vinext"\n\n${HELP}`,
+            );
+            return 1;
+        }
+        builder = values.builder;
+    }
+
     if (positionals.length > 1) {
         // A silently-ignored extra positional is how `create app --name x y`
         // scaffolds somewhere the user did not mean. Same discipline as the
@@ -391,6 +517,7 @@ export async function createMain(argv: string[]): Promise<number> {
         const files = writeScaffold({
             appDir,
             name: values.name,
+            builder,
             force: values.force,
             dryRun: values["dry-run"],
         });

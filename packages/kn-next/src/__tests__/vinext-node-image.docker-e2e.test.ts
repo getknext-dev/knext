@@ -278,9 +278,14 @@ beforeAll(async () => {
     workDir = mkdtempSync(join(tmpdir(), "knext-vinext-node-"));
     appDir = join(workDir, "app");
     cpSync(FIXTURE_SRC, appDir, { recursive: true });
+    // #1342/ADR-0058: `kn-next create`'s DEFAULT builder no longer renders
+    // these vinext-shaped files at all — request the `--builder vinext`
+    // override explicitly, matching what this suite actually exercises (the
+    // vinext × node runtime image).
     const rendered = renderScaffold({
         name: "vinext-node-fixture",
         version: "0.0.0",
+        builder: "vinext",
     });
     for (const rel of RENDERED_TEMPLATES) {
         const text = rendered.get(rel);

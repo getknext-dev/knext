@@ -23,6 +23,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import { runQuiet } from "./exec";
 import { UsageError } from "./shared";
@@ -90,6 +91,107 @@ export interface RunProjectBuildOptions {
      * `next: command not found` line appears right above the guidance.
      */
     readonly run?: (argv: readonly string[]) => void;
+    /**
+     * The resolved builder id (`config.build ?? DEFAULT_BUILDER_ID`) — gates
+     * {@link checkTurbopackAdapterStandaloneRegression}. Optional (not
+     * REQUIRED like `requireEsm`) because some callers, e.g. the vinext single-
+     * executable path, do not resolve a `BuilderAdapter` at all; `undefined`
+     * skips the check rather than guessing.
+     */
+    readonly builderId?: string;
+}
+
+/**
+ * #1372 pre-build guard: Next 16.3.0+ never writes
+ * `.next/next-server.js.nft.json` when `adapterPath` + `output:'standalone'`
+ * are built under Turbopack (confirmed regression — Next 16.2.0 builds the
+ * IDENTICAL config successfully; 16.3.0 already does not — not a permanent
+ * upstream incompatibility, and not a knext defect). Every app on the
+ * `turbopack` builder wires `adapterPath` by construction (it is what that
+ * target IS), so this is not scaffold-specific: ANY `kn-next build` on the
+ * default target with an affected Next version hits it, including apps this
+ * CLI did not scaffold. Fail BEFORE the (guaranteed-to-fail) build runs, with
+ * the actual fix named, rather than let the raw Next stack trace ("ENOENT
+ * .next/next-server.js.nft.json") stand as the only signal.
+ *
+ * Two escape hatches, both checked so this never blocks an app that already
+ * worked around the bug: (1) `builderId !== "turbopack"` — the `webpack`
+ * builder is unaffected by construction (same `next build`, different
+ * bundler flag), and the `vinext` target never calls adapter hooks at all;
+ * (2) the app's OWN package.json `build` script already passing
+ * `--webpack`. `--turbopack` is deliberately NOT an escape hatch — it is the
+ * exact broken configuration this guard exists to catch (explicitly
+ * requesting Turbopack does not un-break it), so a script that names
+ * `--turbopack` still hits the check and gets the guard message instead of
+ * a raw ENOENT.
+ *
+ * The Next version read resolves through Node's own module resolution
+ * (`createRequire` rooted at the app's package.json), not a hardcoded
+ * `<cwd>/node_modules/next` path — in an npm/bun workspace, Next is commonly
+ * HOISTED to a workspace root several directories above `cwd`, and a naive
+ * `join(cwd, "node_modules", "next", ...)` read silently misses it there,
+ * skipping the guard exactly where a monorepo scaffold is most likely to hit
+ * the regression. Best-effort either way: an unresolvable `next` (offline
+ * install, unusual layout, or a `next` too old to carry `adapterPath` at
+ * all) is not itself a guard failure — skip silently rather than block a
+ * build this check cannot evaluate. The affected range's upper bound is
+ * intentionally OPEN (no confirmed-fixed version yet) — update it once
+ * upstream fixes this.
+ */
+export function checkTurbopackAdapterStandaloneRegression(
+    cwd: string,
+    builderId: string,
+): void {
+    if (builderId !== "turbopack") return;
+
+    let buildScript: unknown;
+    try {
+        const appPkg = JSON.parse(
+            readFileSync(join(cwd, "package.json"), "utf8"),
+        ) as { scripts?: Record<string, unknown> };
+        buildScript = appPkg.scripts?.build;
+    } catch {
+        return;
+    }
+    if (typeof buildScript === "string" && /--webpack\b/.test(buildScript)) {
+        // Already opted out of the ambient Turbopack default — nothing to
+        // warn about. `--turbopack` is NOT checked for here: it is the
+        // broken configuration, not an opt-out of it.
+        return;
+    }
+
+    let nextVersion: string;
+    try {
+        const nextPkgPath = createRequire(join(cwd, "package.json")).resolve(
+            "next/package.json",
+        );
+        const nextPkg = JSON.parse(readFileSync(nextPkgPath, "utf8")) as {
+            version?: unknown;
+        };
+        if (typeof nextPkg.version !== "string") return;
+        nextVersion = nextPkg.version;
+    } catch {
+        return;
+    }
+    const m = nextVersion.match(/^(\d+)\.(\d+)\.(\d+)/);
+    if (!m) return;
+    const major = Number(m[1]);
+    const minor = Number(m[2]);
+    // 16.2.0 confirmed GOOD (the credentialed compat lane's pin, NEXTJS_REF in
+    // test-e2e-deploy.yml); 16.3.0 confirmed BROKEN (direct repro, #1372).
+    const affected = major > 16 || (major === 16 && minor >= 3);
+    if (!affected) return;
+
+    throw new UsageError(
+        `next@${nextVersion} does not build on the turbopack target: it never writes ` +
+            "`.next/next-server.js.nft.json` when the official Next.js Deployment Adapter " +
+            "(`adapterPath`) is combined with `output:'standalone'` under Turbopack — a " +
+            "confirmed Next.js regression between 16.2.0 and 16.3.0, not a knext defect. " +
+            "See https://github.com/getknext-dev/knext/issues/1372 for the full trace.\n\n" +
+            "Fix: add `--webpack` to this app's package.json `build` script " +
+            '(`"build": "next build --webpack"`) — node/bun x webpack is an already-verified ' +
+            "knext build target. `kn-next create`'s own scaffold does this by default.",
+    );
 }
 
 /**
@@ -111,6 +213,10 @@ export function runProjectBuild(opts: RunProjectBuildOptions): void {
 
     if (opts.requireEsm) {
         preflightEsmPackage(cwd);
+    }
+
+    if (opts.builderId !== undefined) {
+        checkTurbopackAdapterStandaloneRegression(cwd, opts.builderId);
     }
 
     try {

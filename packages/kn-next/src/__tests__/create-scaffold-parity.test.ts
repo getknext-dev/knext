@@ -48,7 +48,6 @@ const CLI_TEMPLATE = join(PKG_ROOT, "templates", "app");
 /** Files that must be byte-identical in both template trees. */
 const VERBATIM = [
     "cache-handler.js.hbs",
-    "instrumentation-edge-safe.test.ts.hbs",
     "knext-bun-entry.mjs.hbs",
     "runtime-contract.mjs.hbs",
     // The shallow readiness/liveness route (#910). It carries no layout
@@ -72,6 +71,14 @@ const NORMALIZED = [] as const;
 
 /** Files that legitimately differ, each with the reason it does. */
 const LAYOUT: Record<string, string> = {
+    "instrumentation-edge-safe.test.ts.hbs":
+        "#1342/ADR-0058 default-builder split: the zone template stays vinext-shaped " +
+        "(no adapterPath, the standalone-off-webpack fence) while the CLI default " +
+        "builder now wires adapterPath and asserts the platform-owned IgnorePlugin " +
+        "fence instead — the two are no longer the same test by construction. The " +
+        "zone template's exact content is still pinned: it is now compared against " +
+        "the CLI tree's `--builder vinext` override (`instrumentation-edge-safe.test.ts.vinext.hbs`) " +
+        "instead, in the byte-identity check below.",
     "package.json.hbs":
         "workspace:* deps + the monorepo start path cannot ship to a user's repo",
     "next.config.ts.hbs":
@@ -102,6 +109,29 @@ const CLI_ONLY: Record<string, string> = {
         "the node twin of knext-bun-entry.mjs for runtime: 'node'; the zone app builds only the bun target",
     "public/.gitkeep.hbs":
         "keeps the generated Dockerfile's `COPY … public` layer resolvable before the app has assets",
+    // #1342 (ADR-0058): `kn-next create` defaults to the standalone target —
+    // these four exist ONLY in the CLI tree. `next-adapter.ts.hbs` is the
+    // official Next.js Deployment Adapter re-export the standalone target
+    // wires through `adapterPath` (a webpack/turbopack mechanism vinext never
+    // calls, and the zone template still builds vinext, unaffected by this
+    // change — see the module docblock in create.ts). The three
+    // `*.vinext.hbs` files are `--builder vinext` CONTENT OVERRIDES of the
+    // base `next.config.ts.hbs`/`package.json.hbs`/`kn-next.config.ts.hbs`
+    // (selected by `selectBuilderTemplates` in create.ts, stripped of the
+    // `.vinext` marker before they land in a scaffolded app) — the zone
+    // template has no such override mechanism and no need for one.
+    "next-adapter.ts.hbs":
+        "the standalone target's adapterPath re-export; inert under vinext (Vite/rolldown never calls webpack/turbopack adapter hooks) and the zone template still builds vinext",
+    "next.config.ts.vinext.hbs":
+        "the --builder vinext content override of next.config.ts.hbs; the zone template has no builder flag",
+    "package.json.vinext.hbs":
+        "the --builder vinext content override of package.json.hbs; the zone template has no builder flag",
+    "kn-next.config.ts.vinext.hbs":
+        "the --builder vinext content override of kn-next.config.ts.hbs; the zone template has no builder flag",
+    "instrumentation-edge-safe.test.ts.vinext.hbs":
+        "the --builder vinext content override of instrumentation-edge-safe.test.ts.hbs — " +
+        "byte-identical to the zone template's copy (asserted below), since vinext is the " +
+        "shape the zone template still builds",
 };
 
 // `Dockerfile.standalone.hbs` and `knext-standalone-entry.mjs.hbs` (the
@@ -129,7 +159,6 @@ const CLI_ONLY: Record<string, string> = {
  * comparing a file whose whole purpose is to be compared.
  */
 const SHAPE_FROZEN = [
-    "instrumentation-edge-safe.test.ts.hbs",
     "knext-bun-entry.mjs.hbs",
     "runtime-contract.mjs.hbs",
     // #910: a scaffolded app whose readiness AND liveness probes both 404 never
@@ -165,6 +194,18 @@ const SHAPE_FROZEN = [
  * `vite.config.ts.hbs` is deliberately NOT frozen: it is in LAYOUT because the
  * zone and CLI variants legitimately differ, and its one load-bearing line
  * (`inlineDynamicImports`) is asserted directly in create-scaffold.test.ts.
+ *
+ * #1342/ADR-0058 removed `instrumentation-edge-safe.test.ts.hbs` from
+ * SHAPE_FROZEN/VERBATIM, moving it to LAYOUT — NOT deleted, and NOT left
+ * uncompared. `kn-next create`'s default builder now wires `adapterPath`
+ * (ADR-0058's standalone target), so the CLI base template's fence assertions
+ * genuinely diverge from the zone template's (which stays vinext-shaped, no
+ * adapter). The safety-critical property this bucket exists to protect —
+ * "the vinext-shaped fence test must not silently drift between the two
+ * trees" — still holds: it is enforced by the byte-identity check below
+ * between the ZONE template's `instrumentation-edge-safe.test.ts.hbs` and the
+ * CLI tree's `--builder vinext` override of the same file, which carries
+ * forward the exact pre-#1342 content.
  */
 
 /** Every `.hbs` under `dir`, as POSIX-ish relative paths, sorted. */
@@ -279,6 +320,27 @@ describe("kn-next create — no drift from the turbo zone template (#356/#407)",
             readFileSync(cli, "utf8"),
             `${rel} differs between the turbo zone template and the CLI template — ` +
                 "the guarded-instrumentation shape must be ONE shape",
+        ).toBe(readFileSync(zone, "utf8"));
+    });
+
+    it("instrumentation-edge-safe.test.ts.hbs: the zone template's copy is byte-identical to the CLI's --builder vinext override (#1342/ADR-0058)", () => {
+        const zone = join(
+            ZONE_TEMPLATE,
+            "instrumentation-edge-safe.test.ts.hbs",
+        );
+        const cliVinextOverride = join(
+            CLI_TEMPLATE,
+            "instrumentation-edge-safe.test.ts.vinext.hbs",
+        );
+        expect(
+            existsSync(cliVinextOverride),
+            `${cliVinextOverride} missing`,
+        ).toBe(true);
+        expect(
+            readFileSync(cliVinextOverride, "utf8"),
+            "the vinext-shaped fence test drifted between the zone template and " +
+                "the CLI's --builder vinext override — see the LAYOUT entry for " +
+                "instrumentation-edge-safe.test.ts.hbs",
         ).toBe(readFileSync(zone, "utf8"));
     });
 

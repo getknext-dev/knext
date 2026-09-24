@@ -565,6 +565,7 @@ export async function deploy() {
         // no longer means vinext (#1183, DEFAULT_BUILDER_ID is "turbopack").
         runProjectBuild({
             requireEsm: resolvedBuild === "vinext",
+            builderId: resolvedBuild,
         });
         log.info(
             "Next.js build complete — standalone output in .next/standalone/",
