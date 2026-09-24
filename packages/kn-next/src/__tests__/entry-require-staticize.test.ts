@@ -30,69 +30,132 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { staticizeEntryRequires } from "../adapters/entry-require-staticize.mjs";
+import {
+    analyzeServerModule,
+    wrapRequireBindings,
+} from "../adapters/entry-require-staticize.mjs";
 
 const COMPILE = resolve(import.meta.dir, "../adapters/vinext-compile.mjs");
-const all = () => true;
 
-describe("staticizeEntryRequires (unit)", () => {
-    it("rewrites nitro's createRequire(import.meta.url) call for an external package into a static require", () => {
-        const src =
-            'import{createRequire}from"node:module";var __require=createRequire(import.meta.url);' +
-            "var x=(()=>{var Bh=__require(`@opentelemetry/api`);return Bh})();";
-        const out = staticizeEntryRequires(src, all);
-        expect(out.contents).toContain('require("@opentelemetry/api")');
-        expect(out.contents).not.toContain("__require(`@opentelemetry/api`)");
-        expect(out.rewritten).toEqual(["@opentelemetry/api"]);
-        // The binding itself is untouched — builtins still go through it.
+// Verbatim rolldown 1.2.6 shapes (see vinext-compile-chunk-requires.test.ts,
+// which regenerates them with the real bundler end to end).
+const ROLLDOWN_PLAIN =
+    'import { createRequire } from "node:module";\n' +
+    "var __require = /* #__PURE__ */ (() => createRequire(import.meta.url))();\n" +
+    'var x = () => __require("@opentelemetry/api");\n';
+const ROLLDOWN_MIN =
+    'import{createRequire as e}from"node:module";var u=/* @__PURE__ */ e(import.meta.url);var x=()=>u(`@opentelemetry/api`);';
+const ROLLDOWN_RUNTIME =
+    'import{createRequire as e}from"node:module";var s=1,u=/* @__PURE__ */ e(import.meta.url);export{u as n,s as t};';
+const ROLLDOWN_CONSUMER =
+    'import{n as e,t as n}from"./rolldown-runtime.mjs";var r=()=>e(`chunk-dep`);export{r as default};';
+
+describe("analyzeServerModule (unit)", () => {
+    it("finds rolldown's IIFE require binding and its literal calls", () => {
+        const a = analyzeServerModule(ROLLDOWN_PLAIN);
+        expect(a.aliases).toEqual(["createRequire"]);
+        expect(a.requireBindings).toEqual(["__require"]);
+        expect([...(a.literalCalls.get("__require") ?? [])]).toEqual([
+            "@opentelemetry/api",
+        ]);
+        expect(a.unrecognizedBinding).toBe(false);
+    });
+
+    it("finds the minified binding through the createRequire import alias", () => {
+        const a = analyzeServerModule(ROLLDOWN_MIN);
+        expect(a.aliases).toEqual(["e"]);
+        expect(a.requireBindings).toEqual(["u"]);
+        expect([...(a.literalCalls.get("u") ?? [])]).toEqual([
+            "@opentelemetry/api",
+        ]);
+    });
+
+    it("maps a hoisted binding's export and a consumer chunk's import alias", () => {
+        const runtime = analyzeServerModule(ROLLDOWN_RUNTIME);
+        expect(runtime.requireBindings).toEqual(["u"]);
+        expect(runtime.exports.get("u")).toEqual(["n"]);
+        const consumer = analyzeServerModule(ROLLDOWN_CONSUMER);
+        expect(consumer.imports).toEqual([
+            {
+                from: "./rolldown-runtime.mjs",
+                names: new Map([
+                    ["n", "e"],
+                    ["t", "n"],
+                ]),
+            },
+        ]);
+        expect([...(consumer.literalCalls.get("e") ?? [])]).toEqual([
+            "chunk-dep",
+        ]);
+    });
+
+    it("keeps the older direct form (`X = createRequire(import.meta.url)`) and any quote style", () => {
+        const a = analyzeServerModule(
+            'import { createRequire as createRequire$1 } from "module";\n' +
+                "const req = createRequire$1(import.meta.url);\nreq('pkg-a'); req(\"@scope/pkg-b/sub\");",
+        );
+        expect(a.requireBindings).toEqual(["req"]);
+        expect([...(a.literalCalls.get("req") ?? [])].sort()).toEqual([
+            "@scope/pkg-b/sub",
+            "pkg-a",
+        ]);
+    });
+
+    it("ignores builtins, dynamic and interpolated specifiers, and member calls", () => {
+        const a = analyzeServerModule(
+            'import{createRequire}from"node:module";var r=createRequire(import.meta.url);' +
+                // biome-ignore lint/suspicious/noTemplateCurlyInString: the literal JS source under test, not a template
+                "r(`util`);r(`node:fs`);r(name);r(`a-${b}`);o.r(`pkg`);",
+        );
+        expect(a.literalCalls.size).toBe(0);
+    });
+
+    it("flags a createRequire(import.meta.url) call it cannot attribute to a binding", () => {
+        const a = analyzeServerModule(
+            'import{createRequire as e}from"node:module";use(e(import.meta.url));',
+        );
+        expect(a.unrecognizedBinding).toBe(true);
+    });
+
+    it("does not treat a createRequire anchored anywhere but import.meta.url as a require binding (sharp's own loader)", () => {
+        const a = analyzeServerModule(
+            'import{createRequire as e}from"node:module";let Rh=e(join(p,`x`));Rh(`sharp`);',
+        );
+        expect(a.requireBindings).toEqual([]);
+        expect(a.unrecognizedBinding).toBe(false);
+    });
+});
+
+describe("wrapRequireBindings (unit)", () => {
+    it("wraps only the binding expression, embedding the given specifiers as static requires", () => {
+        const out = wrapRequireBindings(
+            ROLLDOWN_MIN,
+            ["e"],
+            ["@opentelemetry/api"],
+        );
+        expect(out.count).toBe(1);
         expect(out.contents).toContain(
-            "__require=createRequire(import.meta.url)",
+            'case "@opentelemetry/api":return require("@opentelemetry/api");',
+        );
+        // the call site is untouched: callers of any name get the embedded copy
+        expect(out.contents).toContain("var x=()=>u(`@opentelemetry/api`);");
+        // the original require is the fallback for everything else
+        expect(out.contents).toContain("return __knextBase(__knextSpec)");
+        expect(out.contents).toContain("(e(import.meta.url))");
+    });
+
+    it("is a no-op with no aliases or nothing to embed", () => {
+        expect(wrapRequireBindings(ROLLDOWN_MIN, [], ["x"]).contents).toBe(
+            ROLLDOWN_MIN,
+        );
+        expect(wrapRequireBindings(ROLLDOWN_MIN, ["e"], []).contents).toBe(
+            ROLLDOWN_MIN,
         );
     });
 
-    it("handles quoted forms and any binding name (declared with const, aliased createRequire)", () => {
-        const src =
-            "const req = createRequire$1(import.meta.url);\n" +
-            "const a = req('pkg-a'); const b = req(\"@scope/pkg-b/sub\");";
-        const out = staticizeEntryRequires(src, all);
-        expect(out.contents).toContain('require("pkg-a")');
-        expect(out.contents).toContain('require("@scope/pkg-b/sub")');
-        expect(out.rewritten.sort()).toEqual(["@scope/pkg-b/sub", "pkg-a"]);
-    });
-
-    it("leaves node builtins on the runtime require", () => {
-        const src =
-            "var __require=createRequire(import.meta.url);__require(`util`);__require(`node:string_decoder`);";
-        const out = staticizeEntryRequires(src, all);
-        expect(out.contents).toBe(src);
-        expect(out.rewritten).toEqual([]);
-    });
-
-    it("leaves a specifier it cannot resolve untouched and reports it (never breaks the build on an optional dep)", () => {
-        const src =
-            "var __require=createRequire(import.meta.url);__require(`optional-missing`);";
-        const out = staticizeEntryRequires(src, () => false);
-        expect(out.contents).toBe(src);
-        expect(out.unresolved).toEqual(["optional-missing"]);
-    });
-
-    it("does not touch a createRequire anchored anywhere but import.meta.url (sharp's own loader)", () => {
-        const src = "let Rh=createRequire$1(join(p,`x`));Rh(`sharp`);";
-        const out = staticizeEntryRequires(src, all);
-        expect(out.contents).toBe(src);
-    });
-
-    it("does not touch dynamic (non-literal) or interpolated specifiers", () => {
-        const src =
-            // biome-ignore lint/suspicious/noTemplateCurlyInString: the literal JS source under test, not a template
-            "var __require=createRequire(import.meta.url);__require(name);__require(`a-${b}`);";
-        expect(staticizeEntryRequires(src, all).contents).toBe(src);
-    });
-
-    it("does not rewrite a same-named member call (obj.__require) or a longer identifier", () => {
-        const src =
-            "var __require=createRequire(import.meta.url);o.__require(`pkg`);my__require(`pkg`);";
-        expect(staticizeEntryRequires(src, all).contents).toBe(src);
+    it("does not touch a same-named member call or a longer identifier", () => {
+        const src = "o.e(import.meta.url);ee(import.meta.url);";
+        expect(wrapRequireBindings(src, ["e"], ["pkg"]).count).toBe(0);
     });
 });
 

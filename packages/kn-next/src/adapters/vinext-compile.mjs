@@ -46,7 +46,7 @@
  * because nitro externalizes sharp: `import sharp from "sharp"` survives into
  * `.output/server/index.mjs`, so sharp only enters a module graph now.
  */
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -57,7 +57,10 @@ import {
     packageNameOf,
     sidecarShimSource,
 } from "./entry-external-sidecar.mjs";
-import { staticizeEntryRequires } from "./entry-require-staticize.mjs";
+import {
+    analyzeServerModule,
+    wrapRequireBindings,
+} from "./entry-require-staticize.mjs";
 
 /** `--flag value` pairs; no positional arguments. */
 function parseArgs(argv) {
@@ -160,44 +163,91 @@ function isServerOutputModule(path) {
     );
 }
 
-/** spec -> server modules (relative to the entry dir) that referenced it. */
-const staticizedSpecs = new Map();
-const unresolvedSpecs = new Map();
-function record(map, spec, moduleName) {
-    const seen = map.get(spec) ?? new Set();
-    seen.add(moduleName);
-    map.set(spec, seen);
+/** `spec (module, module)` for a spec -> modules map. */
+function describeSpecs(map) {
+    return [...map.keys()]
+        .sort()
+        .map((spec) => `${spec} (${[...map.get(spec)].sort().join(", ")})`)
+        .join(", ");
+}
+
+/** Every server-output module (entry + chunks), by absolute path. */
+function listServerOutputModules(dir) {
+    const out = [];
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === "node_modules") continue;
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) out.push(...listServerOutputModules(path));
+        else if (/\.m?js$/.test(entry.name)) out.push(resolve(path));
+    }
+    return out;
 }
 
 /**
- * Turn a server module's `createRequire(import.meta.url)` calls for EXTERNAL
- * packages into static requires so Bun.build bundles them (#1309 for the entry,
- * #1314 for chunks — see entry-require-staticize.mjs). Each specifier is
- * resolved from the module's OWN directory, exactly as its runtime require
- * would. Under KNEXT_COMPILE_STRICT_REQUIRES=1 an unresolvable one fails the
- * build here, naming the module.
+ * The plan for nitro's runtime requires (#1309, #1314 — see
+ * entry-require-staticize.mjs), computed over the WHOLE server output before
+ * Bun.build runs, because rolldown puts the `createRequire(import.meta.url)`
+ * binding in one module and the `__require("<pkg>")` calls in others.
+ *
+ *  - `embed`: bare literals passed to calls anywhere in the output whose
+ *    package nitro traced into `.output/server/node_modules` and that resolve.
+ *    Every require binding is wrapped to load these from the bundle.
+ *  - `unresolved`: literals passed to a RECOGNISED require binding (local, or
+ *    imported from the module that defines it) that are not embedded.
+ *  - `unrecognized`: modules with a `createRequire(import.meta.url)` shape the
+ *    analysis could not see through.
+ *  `unresolved` and `unrecognized` warn, or fail the build under
+ *  KNEXT_COMPILE_STRICT_REQUIRES=1.
  */
-function staticizeServerModule(raw, path) {
-    const moduleDir = dirname(path);
-    const moduleName = relative(dirname(ENTRY), path);
-    const result = staticizeEntryRequires(raw, (spec) => {
-        try {
-            Bun.resolveSync(spec, moduleDir);
-            return true;
-        } catch {
-            return false;
-        }
-    });
-    for (const spec of result.rewritten) record(staticizedSpecs, spec, moduleName);
-    for (const spec of result.unresolved) record(unresolvedSpecs, spec, moduleName);
-    if (STRICT_REQUIRES && result.unresolved.length > 0) {
-        throw new Error(
-            `[knext compile] ${moduleName} runtime-requires package(s) that do not resolve ` +
-                `from ${moduleDir} and cannot be bundled: ${result.unresolved.join(", ")} ` +
-                "(KNEXT_COMPILE_STRICT_REQUIRES=1)",
-        );
+function planRuntimeRequires() {
+    const modules = new Map();
+    for (const path of listServerOutputModules(dirname(ENTRY))) {
+        modules.set(path, analyzeServerModule(readFileSync(path, "utf8")));
     }
-    return result;
+    const name = (path) => relative(dirname(ENTRY), path);
+
+    const embed = new Map();
+    for (const [path, analysis] of modules) {
+        for (const specs of analysis.literalCalls.values()) {
+            for (const spec of specs) {
+                if (!existsSync(join(SIDECAR_NODE_MODULES, packageNameOf(spec)))) continue;
+                try {
+                    Bun.resolveSync(spec, dirname(ENTRY));
+                } catch {
+                    continue;
+                }
+                const users = embed.get(spec) ?? new Set();
+                users.add(name(path));
+                embed.set(spec, users);
+            }
+        }
+    }
+
+    const unresolved = new Map();
+    const unrecognized = [];
+    for (const [path, analysis] of modules) {
+        if (analysis.unrecognizedBinding) unrecognized.push(name(path));
+        const requireNames = new Set(analysis.requireBindings);
+        for (const imp of analysis.imports) {
+            const from = modules.get(resolve(dirname(path), imp.from));
+            if (!from) continue;
+            for (const binding of from.requireBindings) {
+                for (const exported of from.exports.get(binding) ?? []) {
+                    const local = imp.names.get(exported);
+                    if (local) requireNames.add(local);
+                }
+            }
+        }
+        for (const callee of requireNames) {
+            for (const spec of analysis.literalCalls.get(callee) ?? []) {
+                if (embed.has(spec)) continue;
+                const users = unresolved.get(spec) ?? new Set();
+                users.add(name(path));
+                unresolved.set(spec, users);
+            }
+        }
+    }
+    return { modules, embed, unresolved, unrecognized };
 }
 
 /**
@@ -212,31 +262,35 @@ const importMetaToCjs = {
         build.onLoad({ filter: /\.m?js$/ }, async (args) => {
             const path = resolve(args.path);
             if (path !== ENTRY) {
-                // A chunk of the server output: staticize only. Bun rewrites a
-                // bundled chunk's own `import.meta` itself; the guard imports and
-                // the import.meta rewrite below belong to the entry alone.
-                if (!isServerOutputModule(path)) return undefined;
+                // A chunk of the server output: wrap its require bindings only.
+                // Bun rewrites a bundled chunk's own `import.meta` itself; the
+                // guard imports and the import.meta rewrite below belong to the
+                // entry alone.
+                const analysis = PLAN.modules.get(path);
+                if (!analysis || !isServerOutputModule(path)) return undefined;
                 const raw = await Bun.file(path).text();
-                const staticized = staticizeServerModule(raw, path);
-                return staticized.rewritten.length > 0
-                    ? { contents: staticized.contents, loader: "js" }
-                    : undefined;
+                const wrapped = wrapRequireBindings(raw, analysis.aliases, [...PLAN.embed.keys()]);
+                return wrapped.count > 0 ? { contents: wrapped.contents, loader: "js" } : undefined;
             }
             const raw = await Bun.file(args.path).text();
             // Prepend the guard imports FIRST, always — independent of whether the
             // entry uses import.meta. `import "<abs>";` is bundled + evaluated
             // before the rest of the entry's imports, patching Bun.serve in time.
             //
-            // Then turn the entry's `createRequire(import.meta.url)` calls for
-            // EXTERNAL packages into static requires so Bun.build bundles them
-            // (#1309 — see entry-require-staticize.mjs). This must run BEFORE the
-            // import.meta rewrite below, which erases the anchor it matches on.
-            const staticized = staticizeServerModule(raw, path);
+            // Then wrap the entry's `createRequire(import.meta.url)` bindings so
+            // the EXTERNAL packages nitro reaches through them are bundled
+            // (#1309, #1314 — see entry-require-staticize.mjs). This must run
+            // BEFORE the import.meta rewrite below, which erases its anchor.
+            const wrapped = wrapRequireBindings(
+                raw,
+                PLAN.modules.get(path)?.aliases ?? [],
+                [...PLAN.embed.keys()],
+            );
             const src =
                 `import ${JSON.stringify(GUARD_FILE)};\n` +
                 `import ${JSON.stringify(SIDECAR_INSTALL_FILE)};\n` +
                 `import ${JSON.stringify(CACHE_CONTROL_FILE)};\n` +
-                staticized.contents;
+                wrapped.contents;
             console.log(
                 "[knext compile] injected the Bun.serve keep-alive guard as the entry's first import",
             );
@@ -379,6 +433,24 @@ const externalSidecar = {
     },
 };
 
+const PLAN = planRuntimeRequires();
+if (STRICT_REQUIRES && (PLAN.unresolved.size > 0 || PLAN.unrecognized.length > 0)) {
+    if (PLAN.unresolved.size > 0) {
+        console.error(
+            "[knext compile] the server output runtime-requires package(s) that do not resolve " +
+                `and cannot be bundled: ${describeSpecs(PLAN.unresolved)} (KNEXT_COMPILE_STRICT_REQUIRES=1)`,
+        );
+    }
+    if (PLAN.unrecognized.length > 0) {
+        console.error(
+            "[knext compile] unrecognised createRequire(import.meta.url) binding in " +
+                `${PLAN.unrecognized.join(", ")} — cannot verify its requires are bundled ` +
+                "(KNEXT_COMPILE_STRICT_REQUIRES=1)",
+        );
+    }
+    process.exit(1);
+}
+
 const result = await Bun.build({
     entrypoints: [ENTRY],
     target: "bun",
@@ -399,24 +471,23 @@ if (!result.success) {
     for (const log of result.logs) console.error(String(log));
     process.exit(1);
 }
-/** `spec (module, module)` for a spec -> modules map. */
-function describeSpecs(map) {
-    return [...map.keys()]
-        .sort()
-        .map((spec) => `${spec} (${[...map.get(spec)].sort().join(", ")})`)
-        .join(", ");
-}
-if (staticizedSpecs.size > 0) {
+if (PLAN.embed.size > 0) {
     console.log(
-        `[knext compile] bundling ${staticizedSpecs.size} package(s) the server output loads ` +
-            `via createRequire(import.meta.url): ${describeSpecs(staticizedSpecs)}`,
+        `[knext compile] bundling ${PLAN.embed.size} package(s) the server output loads ` +
+            `via createRequire(import.meta.url): ${describeSpecs(PLAN.embed)}`,
     );
 }
-if (unresolvedSpecs.size > 0) {
+if (PLAN.unresolved.size > 0) {
     console.warn(
         "[knext compile] WARNING: the server output runtime-requires package(s) that do not " +
-            `resolve and cannot be bundled: ${describeSpecs(unresolvedSpecs)} — the binary ` +
+            `resolve and cannot be bundled: ${describeSpecs(PLAN.unresolved)} — the binary ` +
             "throws if that code path runs (set KNEXT_COMPILE_STRICT_REQUIRES=1 to fail the build instead)",
+    );
+}
+if (PLAN.unrecognized.length > 0) {
+    console.warn(
+        "[knext compile] WARNING: unrecognised createRequire(import.meta.url) binding in " +
+            `${PLAN.unrecognized.join(", ")} — its runtime requires may not be bundled`,
     );
 }
 if (redirected.size > 0) {
