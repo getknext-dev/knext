@@ -10,7 +10,8 @@
  * failing cases move from `failures` into `quarantined`.
  *
  *   - a snapshot case that did not fail anywhere in the run → the entry is STALE
- *     and the run reds (a partial fix cannot stay hidden);
+ *     and the run reds (a partial fix cannot stay hidden). Unsupported entries
+ *     only: a flaky entry passing is expected, and its expiry bounds it;
  *   - a failing case NOT in the snapshot → stays a real failure (a new
  *     regression in a ledgered file is never absorbed);
  *   - a file that failed with no case detail (a build/unclassified failure) →
@@ -30,7 +31,10 @@
  *     expiry;
  *   - an `unsupported` entry names the unsupported FEATURE and links the
  *     UPSTREAM issue;
- *   - a `flaky` entry carries mixed evidence (a failing and a passing run);
+ *   - a `flaky` entry carries mixed evidence (a failing and a passing run, at
+ *     least three runs in all), expires within 14 days, and at most 5 files may
+ *     be flaky. Its stale rule is exempted per run (a pass is expected); the
+ *     14-day expiry is what bounds it;
  *   - evidence is per run with that run's failing cases, and every snapshot case
  *     must be covered by every failing evidence run — a snapshot cannot grow
  *     past its evidence; an unsupported entry needs at least two failing runs.
@@ -57,6 +61,10 @@ export const LEDGER_FILE_CAP = 15;
 export const MAX_EXPIRY_DAYS = 30;
 export const LANES = ['bun-vinext'];
 export const CLASSES = ['unsupported', 'flaky'];
+/** Design constraints for flaky entries (#1321 design, per-class cap and window). */
+export const FLAKY_FILE_CAP = 5;
+export const FLAKY_MAX_EXPIRY_DAYS = 14;
+export const FLAKY_MIN_EVIDENCE_RUNS = 3;
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const UPSTREAM_RE = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/(issues|pull)\/\d+$/;
@@ -105,6 +113,10 @@ function validateEvidence(e, at) {
       out.push(`${at}: a flaky entry needs mixed evidence (a failing run AND a passing run)`);
     else if (e.evidence.pass.some((r) => runs.includes(String(r))))
       out.push(`${at}: an evidence run cannot have both passed and failed`);
+    else if (runs.length + e.evidence.pass.length < FLAKY_MIN_EVIDENCE_RUNS)
+      out.push(
+        `${at}: a flaky entry needs at least three evidence runs (got ${runs.length} failing + ${e.evidence.pass.length} passing)`,
+      );
   } else if (runs.length < 2) {
     out.push(`${at}: an unsupported entry needs at least two failing runs as evidence`);
   }
@@ -135,6 +147,9 @@ export function validateLedger(ledger, ctx) {
   const files = new Set(entries.map((e) => e?.test));
   if (files.size > LEDGER_FILE_CAP)
     out.push(`${files.size} files ledgered; the cap is ${LEDGER_FILE_CAP} per lane`);
+  const flakyFiles = new Set(entries.filter((e) => e?.class === 'flaky').map((e) => e.test));
+  if (flakyFiles.size > FLAKY_FILE_CAP)
+    out.push(`${flakyFiles.size} flaky files ledgered; at most ${FLAKY_FILE_CAP} may be flaky`);
   const excludes = new Set(ctx.corpusExcludes ?? []);
   const seen = new Set();
   for (const [i, e] of entries.entries()) {
@@ -173,9 +188,10 @@ export function validateLedger(ledger, ctx) {
     if (isDate(e.added) && isDate(e.expires)) {
       const span = days(e.added, e.expires);
       if (span < 0) out.push(`${at}: expires before it was added`);
-      if (span > MAX_EXPIRY_DAYS)
+      const max = e.class === 'flaky' ? FLAKY_MAX_EXPIRY_DAYS : MAX_EXPIRY_DAYS;
+      if (span > max)
         out.push(
-          `${at}: expires ${span} days after it was added; the maximum is ${MAX_EXPIRY_DAYS} days`,
+          `${at}: expires ${span} days after it was added; the maximum is ${max} days${e.class === 'flaky' ? ' for a flaky entry' : ''}`,
         );
       if (isDate(ctx.today) && days(e.expires, ctx.today) > 0)
         out.push(`${at}: expired on ${e.expires} (renew with fresh evidence or remove it)`);
@@ -248,6 +264,10 @@ export function staleEntries(summaries, entries) {
   const out = [];
   if (skipped) return out; // an unreclassified shard cannot prove anything passed
   for (const e of entries) {
+    // A flaky entry passing is expected, not evidence of a fix: applying the
+    // stale rule to it would red every run where the flake happens to pass.
+    // Its hard expiry (at most 14 days) is what bounds it.
+    if (e.class === 'flaky') continue;
     if (notRun.has(e.test) || noDetail.has(e.test)) continue;
     const seen = new Set(q.filter((r) => r.file === e.test).flatMap((r) => r.cases));
     const missing = e.cases.filter((c) => !seen.has(c));
@@ -317,10 +337,12 @@ export function refreshSnapshots(ledger, runs, today) {
       );
       return e;
     }
-    if (e.class === 'flaky' ? fail.length < 1 || pass.length < 1 : fail.length < 2) {
+    const flakyShort =
+      fail.length < 1 || pass.length < 1 || fail.length + pass.length < FLAKY_MIN_EVIDENCE_RUNS;
+    if (e.class === 'flaky' ? flakyShort : fail.length < 2) {
       errors.push(
         e.class === 'flaky'
-          ? `${e.test}: a flaky entry needs a failing and a passing run among those given`
+          ? `${e.test}: a flaky entry needs a failing and a passing run, and at least three runs in all, among those given`
           : `${e.test}: needs at least two failing runs with case detail (got ${fail.length}); it cannot be ledgered`,
       );
       return e;

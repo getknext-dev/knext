@@ -20,8 +20,9 @@
  *   - quarantined results persist in the shared per-night run ledger, and a lane
  *     without them renders exactly as before;
  *   - the real ledger file is valid today;
- *   - the workflow wires both halves, and the ledger lives OUTSIDE the file
- *     patterns the compat-window fingerprint freezes for every cell.
+ *   - the workflow applies and reconciles the ledger, and the ledger lives
+ *     OUTSIDE the file patterns the compat-window fingerprint freezes for
+ *     every cell.
  */
 
 import { describe, expect, it } from 'bun:test';
@@ -31,6 +32,9 @@ import { fileURLToPath } from 'node:url';
 import { buildLedger, renderTable } from '../scripts/compat-run-ledger.mjs';
 import {
   applyLedger,
+  CLASSES,
+  FLAKY_FILE_CAP,
+  FLAKY_MAX_EXPIRY_DAYS,
   LEDGER_FILE_CAP,
   MAX_EXPIRY_DAYS,
   publishedNumber,
@@ -131,7 +135,8 @@ describe('validateLedger: the approved constraints', () => {
       feature: undefined,
       upstream: undefined,
       cases: ['hash'],
-      evidence: { fail: [{ run: '1', cases: ['hash'] }], pass: ['2'] },
+      evidence: { fail: [{ run: '1', cases: ['hash'] }], pass: ['2', '3'] },
+      expires: '2026-10-08',
     });
     expect(errs(ledger([flaky]))).toEqual([]);
     const failOnly = { fail: [{ run: '1', cases: ['hash'] }] };
@@ -139,6 +144,26 @@ describe('validateLedger: the approved constraints', () => {
     expect(errs(ledger([{ ...flaky, evidence: { pass: ['2'] } }])).join()).toMatch(/mixed/);
     const same = { fail: [{ run: '1', cases: ['hash'] }], pass: ['1'] };
     expect(errs(ledger([{ ...flaky, evidence: same }])).join()).toMatch(/both passed and failed/);
+  });
+
+  it('a flaky entry needs at least three evidence runs, expires within 14 days, and at most 5 are ledgered', () => {
+    const flaky = navEntry(['hash']);
+    expect(errs(ledger([flaky]))).toEqual([]);
+    const two = { fail: [{ run: '1', cases: ['hash'] }], pass: ['2'] };
+    expect(errs(ledger([{ ...flaky, evidence: two }])).join()).toMatch(
+      /at least three evidence runs/,
+    );
+    expect(FLAKY_MAX_EXPIRY_DAYS).toBe(14);
+    expect(errs(ledger([{ ...flaky, expires: '2026-10-09' }])).join()).toMatch(/14 days/);
+    // an unsupported entry keeps the 30-day window
+    expect(errs(ledger([entry({ expires: '2026-10-24' })]))).toEqual([]);
+    expect(FLAKY_FILE_CAP).toBe(5);
+    const flakies = Array.from({ length: 6 }, (_, i) => ({
+      ...flaky,
+      test: `test/e2e/flaky${i}/x.test.ts`,
+    }));
+    expect(errs(ledger(flakies)).join()).toMatch(/6 flaky files .* at most 5/);
+    expect(errs(ledger(flakies.slice(0, 5)))).toEqual([]);
   });
 
   it('every entry needs failing-run evidence recorded per run, with that run’s cases', () => {
@@ -218,7 +243,8 @@ const navEntry = (cases: string[]) =>
     feature: undefined,
     upstream: undefined,
     cases,
-    evidence: { fail: [{ run: '1', cases }], pass: ['2'] },
+    evidence: { fail: [{ run: '1', cases }], pass: ['2', '3'] },
+    expires: '2026-10-08',
   });
 
 describe('applyLedger: case-level reclassification, never narrowing', () => {
@@ -319,6 +345,19 @@ describe('staleEntries: a ledgered failure that stopped failing reds the run', (
     s.failures = s.failures.slice(1);
     expect(staleEntries([applyLedger(s, [entry()])], [entry()])).toEqual([
       { test: SHELLS, cases: ['a', 'b'] },
+    ]);
+  });
+
+  it('a FLAKY entry that passed this run is not stale (a pass is expected; its expiry bounds it)', () => {
+    // NAV passes outright this run; navEntry is flaky, so that is not evidence
+    // of a fix. An unsupported entry in the same position IS stale (above).
+    const s = summary({ failed: 2 });
+    s.failures = s.failures.filter((f: Any) => f.file !== NAV);
+    const flaky = navEntry(['hash']);
+    expect(staleEntries([applyLedger(s, [flaky])], [flaky])).toEqual([]);
+    const unsupported = entry({ test: NAV, cases: ['hash'] });
+    expect(staleEntries([applyLedger(s, [unsupported])], [unsupported])).toEqual([
+      { test: NAV, cases: ['hash'] },
     ]);
   });
 
@@ -441,12 +480,15 @@ describe('refreshSnapshots: the snapshot is generated from evidence', () => {
     const { ledger: next, errors } = refresh(ledger([flaky]), [
       nav('61', ['hash']),
       nav('62', null),
+      nav('63', null),
     ]);
     expect(errors).toEqual([]);
     expect(next.entries[0].evidence).toEqual({
       fail: [{ run: '61', cases: ['hash'] }],
-      pass: ['62'],
+      pass: ['62', '63'],
     });
+    const short = refresh(ledger([flaky]), [nav('61', ['hash']), nav('62', null)]);
+    expect(short.errors.join()).toMatch(/at least three/);
   });
 });
 
@@ -478,12 +520,19 @@ describe('the real ledger', () => {
   const real = JSON.parse(read(LEDGER_PATH));
   const manifest = JSON.parse(read('test/deploy-tests-manifest.knext.json'));
 
-  it('is valid today, under the cap, with every entry naming its upstream issue', () => {
+  it('is valid today, under the cap, every unsupported entry naming its upstream issue and every flaky one carrying mixed evidence', () => {
     const today = new Date().toISOString().slice(0, 10);
     expect(validateLedger(real, { today, corpusExcludes: manifest.rules.exclude })).toEqual([]);
     expect(real.entries.length).toBeLessThanOrEqual(LEDGER_FILE_CAP);
-    for (const e of real.entries)
-      expect(e.upstream).toMatch(/^https:\/\/github\.com\/cloudflare\/vinext\/issues\/\d+$/);
+    for (const e of real.entries) {
+      expect(CLASSES).toContain(e.class);
+      if (e.class === 'unsupported')
+        expect(e.upstream).toMatch(/^https:\/\/github\.com\/cloudflare\/vinext\/issues\/\d+$/);
+      else {
+        expect(e.evidence.fail.length, e.test).toBeGreaterThanOrEqual(1);
+        expect(e.evidence.pass.length, e.test).toBeGreaterThanOrEqual(1);
+      }
+    }
   });
 
   it('lives outside the harness patterns the compat-window fingerprint freezes for every cell', async () => {
