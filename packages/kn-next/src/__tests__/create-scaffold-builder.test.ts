@@ -65,12 +65,24 @@ describe("kn-next create — default target is standalone (#1342/ADR-0058)", () 
         expect(src).toContain("@getknext/core/adapter");
     });
 
-    it("package.json builds with plain `next build`, not vite/vinext", () => {
+    it("package.json builds with `next build --webpack`, not vite/vinext", () => {
+        // #1368 round 2 — `next build` ALONE (ambient Turbopack default,
+        // ADR-0058/#1183) is broken for this exact combination: Turbopack +
+        // `adapterPath` + `output:'standalone'`. Next 16.3.3 never writes
+        // `.next/next-server.js.nft.json` on that path (its own
+        // `server/config.js` comment admits `output:'standalone'` "is
+        // currently using a non-adapter codepath" under Turbopack), so
+        // `writeStandaloneDirectory` throws ENOENT — see the next.config.ts
+        // comment and the tracked upstream note (#1372) for the full
+        // root-cause trace. `--webpack` is not a workaround bolted on top:
+        // node/bun × webpack is already a CREDENTIALED matrix cell
+        // (ADR-0058), so this pins the scaffold to a build path knext
+        // already verifies end-to-end.
         const { appDir } = scaffold("std-pkg");
         const pkg = JSON.parse(
             readFileSync(join(appDir, "package.json"), "utf8"),
         ) as { scripts?: Record<string, string> };
-        expect(pkg.scripts?.build).toBe("next build");
+        expect(pkg.scripts?.build).toBe("next build --webpack");
         expect(pkg.scripts?.build).not.toContain("vite");
         expect(pkg.scripts?.dev).toBe("next dev");
     });

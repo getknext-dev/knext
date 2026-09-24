@@ -105,6 +105,75 @@ function run(cmd, args, opts = {}) {
 }
 
 /**
+ * Find `server.js` under `.next/standalone`, at whatever depth Next actually put
+ * it. `node-server.ts` documents WHY there is no single fixed depth: a
+ * single-app repo gets `.next/standalone/server.js`, but Next's own
+ * `outputFileTracingRoot` workspace inference nests it under the app's relative
+ * path (`.next/standalone/<app>/server.js`) the moment it sees more than one
+ * lockfile above the app dir — exactly install-smoke's own scaffold-root
+ * layout (a placeholder lockfile one level up, so `create` has a real tracing
+ * root to derive its install command from). Asserting a hardcoded flat path
+ * here would fail on the harness's OWN legitimate layout, not on a knext
+ * defect — this mirrors `STANDALONE_SERVER_PATH`'s monorepo tolerance instead
+ * of hardcoding depth.
+ */
+function findStandaloneServer(standaloneDir) {
+  if (!existsSync(standaloneDir)) return undefined;
+  const stack = [standaloneDir];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === 'node_modules') continue;
+        stack.push(full);
+      } else if (entry.name === 'server.js') {
+        return full;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Redirect a scaffolded app's `@getknext/*` deps at the tarballs THIS commit packed
+ * (see the block above for why: the version `create` pins is not on the registry yet
+ * at gate time), and `overrides` the transitives so the manifest under test is the one
+ * `create` actually emitted, not one the gate silently patched back in.
+ *
+ * Shared between the `--builder vinext` and default-target scaffold smokes below —
+ * factored out (#1368 round 2) rather than duplicated, since divergence here is exactly
+ * the "fixed one of two halves" class this repo's own guards warn about.
+ */
+function redirectScaffoldDepsToPacked(scaffoldDir, packed, label) {
+  const scaffoldPkgPath = join(scaffoldDir, 'package.json');
+  const scaffoldPkg = JSON.parse(readFileSync(scaffoldPkgPath, 'utf8'));
+  const packedByName = new Map(packed.map((p) => [p.name, p.tgz]));
+  let redirected = 0;
+  for (const field of ['dependencies', 'devDependencies']) {
+    for (const dep of Object.keys(scaffoldPkg[field] ?? {})) {
+      if (packedByName.has(dep)) {
+        scaffoldPkg[field][dep] = `file:${packedByName.get(dep)}`;
+        redirected++;
+      }
+    }
+  }
+  if (redirected === 0) {
+    finish(
+      FAIL,
+      `the ${label} scaffolded app declares no @getknext/* dependency — either the ` +
+        'template stopped depending on the packages this gate builds, or `create` ' +
+        'emitted the wrong manifest',
+    );
+  }
+  const aliasName = JSON.parse(readFileSync(join(aliasPkgDir, 'package.json'), 'utf8')).name;
+  scaffoldPkg.overrides = Object.fromEntries(
+    packed.filter((p) => p.name !== aliasName).map((p) => [p.name, `file:${p.tgz}`]),
+  );
+  writeFileSync(scaffoldPkgPath, `${JSON.stringify(scaffoldPkg, null, 2)}\n`);
+}
+
+/**
  * Pack a workspace package with `pnpm pack` into `dest`. pnpm is required (not npm)
  * because @getknext/core depends on @getknext/lib via `workspace:^`; pnpm rewrites that to a
  * real version (what `changeset publish` does), while `npm pack` leaves it verbatim and
@@ -381,10 +450,19 @@ try {
     join(scaffoldRoot, 'package-lock.json'),
     `${JSON.stringify({ name: 'scaffold-root', lockfileVersion: 3, requires: true, packages: {} }, null, 2)}\n`,
   );
+  // #1342/ADR-0058: `kn-next create` (no --builder) now scaffolds the
+  // DEFAULT (standalone) target. This block explicitly requests
+  // `--builder vinext` so its long-standing `.output`/Dockerfile coverage
+  // below still exercises what it always exercised. The DEFAULT target gets
+  // its own install+build smoke below (3a-quater), the one this gate did not
+  // have until #1368 round 2 — the gap that let a Turbopack+adapterPath+
+  // standalone build break silently.
   const scaffoldDir = join(scaffoldRoot, 'scaffolded-app');
-  const create = run('node', [binPath, 'create', scaffoldDir, '--name', 'smoke-app'], {
-    cwd: workDir,
-  });
+  const create = run(
+    'node',
+    [binPath, 'create', scaffoldDir, '--name', 'smoke-app', '--builder', 'vinext'],
+    { cwd: workDir },
+  );
   const createOut = `${create.stdout || ''}${create.stderr || ''}`;
   console.log(createOut.trim());
   if (create.status !== 0) finish(FAIL, `kn-next create exited ${create.status} (expected 0)`);
@@ -402,7 +480,10 @@ try {
     'instrumentation-edge-safe.test.ts',
   ]) {
     if (!existsSync(join(scaffoldDir, rel))) {
-      finish(FAIL, `kn-next create did not emit ${rel} — templates missing from the tarball?`);
+      finish(
+        FAIL,
+        `kn-next create --builder vinext did not emit ${rel} — templates missing from the tarball?`,
+      );
     }
   }
   // Both halves: the vinext files are present AND the retired ones are gone.
@@ -410,7 +491,10 @@ try {
   // adapter file into every new app.
   for (const rel of ['next-adapter.ts', 'standalone-seam-alive.test.ts']) {
     if (existsSync(join(scaffoldDir, rel))) {
-      finish(FAIL, `kn-next create emitted ${rel}, which is retired — the template still ships it`);
+      finish(
+        FAIL,
+        `kn-next create --builder vinext emitted ${rel}, which is retired — the template still ships it`,
+      );
     }
   }
 
@@ -427,39 +511,7 @@ try {
   // honest test: it builds against the artifacts THIS commit produces, not against
   // whatever the registry happens to hold.
   console.log('[install-smoke] installing + building the scaffolded app ...');
-  const scaffoldPkgPath = join(scaffoldDir, 'package.json');
-  const scaffoldPkg = JSON.parse(readFileSync(scaffoldPkgPath, 'utf8'));
-  const packedByName = new Map(packed.map((p) => [p.name, p.tgz]));
-  let redirected = 0;
-  for (const field of ['dependencies', 'devDependencies']) {
-    for (const dep of Object.keys(scaffoldPkg[field] ?? {})) {
-      if (packedByName.has(dep)) {
-        scaffoldPkg[field][dep] = `file:${packedByName.get(dep)}`;
-        redirected++;
-      }
-    }
-  }
-  if (redirected === 0) {
-    finish(
-      FAIL,
-      'the scaffolded app declares no @getknext/* dependency — either the template stopped ' +
-        'depending on the packages this gate builds, or `create` emitted the wrong manifest',
-    );
-  }
-  // `@getknext/core` depends on `@getknext/db` and `@getknext/lib`, and pnpm rewrote those
-  // specs to versions that are not published yet, so the packed libraries have to be
-  // reachable. Review caught the first attempt doing that by force-adding every packed
-  // package to `dependencies`, which made the gate insensitive to the template DROPPING a
-  // dependency: with `@getknext/core` removed from the template the gate still passed,
-  // because the gate itself had put it back. `overrides` resolves the transitives without
-  // touching the declared set, so what is under test is the manifest `create` emitted.
-  // The alias is excluded by DERIVING its name from its own manifest. Hardcoding 'kn-next'
-  // here would be the exact decay M6 and M9 exist to stop, in the file they guard.
-  const aliasName = JSON.parse(readFileSync(join(aliasPkgDir, 'package.json'), 'utf8')).name;
-  scaffoldPkg.overrides = Object.fromEntries(
-    packed.filter((p) => p.name !== aliasName).map((p) => [p.name, `file:${p.tgz}`]),
-  );
-  writeFileSync(scaffoldPkgPath, `${JSON.stringify(scaffoldPkg, null, 2)}\n`);
+  redirectScaffoldDepsToPacked(scaffoldDir, packed, '--builder vinext');
 
   const scaffoldInstall = run('npm', ['install', '--no-audit', '--no-fund'], {
     cwd: scaffoldDir,
@@ -592,6 +644,109 @@ try {
       `the scaffolded Dockerfile COPYs the server binary to ${binaryDest} but its ` +
         `CMD/ENTRYPOINT starts ${startTarget} — the image would exec a path no COPY produced ` +
         '(the #857 shape: build and image build both exit 0, the container starts nothing)',
+    );
+  }
+
+  // --- 3a-quater. DEFAULT (standalone) target: scaffold, install, build, test (#1368) ----
+  // #1342/ADR-0058 made this the DEFAULT `kn-next create` shape — plain `next build`,
+  // `output:'standalone'`, `adapterPath` wired to the official Next.js Deployment
+  // Adapter — and nothing in this gate exercised it end-to-end until now. That gap is
+  // exactly how #1372 (Turbopack + adapterPath + output:'standalone' throws ENOENT on
+  // `.next/next-server.js.nft.json`) shipped invisibly: file-presence checks and unit
+  // tests all passed, and the only thing that would have caught it is a REAL
+  // `npm install && npm run build` against the scaffolded app — which this block now is.
+  console.log('[install-smoke] scaffolding + building the DEFAULT (standalone) target ...');
+  const defaultScaffoldDir = join(scaffoldRoot, 'scaffolded-app-default');
+  const createDefault = run(
+    'node',
+    [binPath, 'create', defaultScaffoldDir, '--name', 'smoke-app-default'],
+    { cwd: workDir },
+  );
+  const createDefaultOut = `${createDefault.stdout || ''}${createDefault.stderr || ''}`;
+  console.log(createDefaultOut.trim());
+  if (createDefault.status !== 0) {
+    finish(FAIL, `kn-next create (default builder) exited ${createDefault.status} (expected 0)`);
+  }
+  // The standalone shape: adapterPath IS wired, and none of the vinext-only files exist.
+  for (const rel of [
+    'src/instrumentation.ts',
+    'src/instrumentation-node.ts',
+    'next-adapter.ts',
+    'next.config.ts',
+    'instrumentation-edge-safe.test.ts',
+  ]) {
+    if (!existsSync(join(defaultScaffoldDir, rel))) {
+      finish(
+        FAIL,
+        `kn-next create (default builder) did not emit ${rel} — templates missing from the tarball?`,
+      );
+    }
+  }
+  for (const rel of [
+    'vite.config.ts',
+    'knext-bun-entry.mjs',
+    'runtime-contract.mjs',
+    'Dockerfile',
+  ]) {
+    if (existsSync(join(defaultScaffoldDir, rel))) {
+      finish(
+        FAIL,
+        `kn-next create (default builder) emitted ${rel}, which is --builder vinext-only`,
+      );
+    }
+  }
+
+  redirectScaffoldDepsToPacked(defaultScaffoldDir, packed, 'default builder');
+
+  const defaultInstall = run('npm', ['install', '--no-audit', '--no-fund'], {
+    cwd: defaultScaffoldDir,
+    stdio: ['ignore', 'inherit', 'inherit'],
+  });
+  if (defaultInstall.status !== 0) {
+    finish(
+      FAIL,
+      `npm install in the default-builder scaffolded app exited ${defaultInstall.status} — ` +
+        'the app `kn-next create` generates cannot be installed by the user who just ran it',
+    );
+  }
+
+  // THE regression this block exists to catch: `next build` (ambient Turbopack
+  // default) + `adapterPath` + `output:'standalone'` throws ENOENT on
+  // `.next/next-server.js.nft.json` at next@16.3.3 (getknext-dev/knext#1372, an
+  // upstream Next.js gap, not a knext defect) — the scaffold's `build` script pins
+  // `next build --webpack` to route around it. Mutation-proved: reverting that one
+  // script line to `next build` reproduces this exact failure.
+  const defaultBuild = run('npm', ['run', 'build'], {
+    cwd: defaultScaffoldDir,
+    stdio: ['ignore', 'inherit', 'inherit'],
+  });
+  if (defaultBuild.status !== 0) {
+    finish(
+      FAIL,
+      `\`npm run build\` in the default-builder scaffolded app exited ${defaultBuild.status} — ` +
+        'the app `kn-next create` generates does not build (see getknext-dev/knext#1372)',
+    );
+  }
+  const standaloneServer = findStandaloneServer(join(defaultScaffoldDir, '.next', 'standalone'));
+  if (!standaloneServer) {
+    finish(
+      FAIL,
+      'the default-builder scaffolded build produced no .next/standalone/**/server.js — the ' +
+        'runtime image has nothing to COPY (see runtime-image.ts)',
+    );
+  }
+  console.log(`[install-smoke] standalone server.js at ${standaloneServer}`);
+
+  const defaultTest = run('npm', ['test'], {
+    cwd: defaultScaffoldDir,
+    stdio: ['ignore', 'inherit', 'inherit'],
+  });
+  if (defaultTest.status !== 0) {
+    finish(
+      FAIL,
+      `\`npm test\` in the default-builder scaffolded app exited ${defaultTest.status} — ` +
+        "the app's own shipped guards (instrumentation-edge-safe.test.ts etc.) do not pass " +
+        'as scaffolded',
     );
   }
 
@@ -825,8 +980,9 @@ try {
     PASS,
     `packed ${publishable.join(' + ')} install on plain npm/Node; the CLI runs and so does the ` +
       '`npx kn-next` alias shim, ' +
-      'the app `create` scaffolds installs and builds into the standalone server its own ' +
-      'Dockerfile expects, ' +
+      'both `create` scaffolds (default standalone + --builder vinext) install and build, ' +
+      'the default target boots a real .next/standalone/server.js and passes its own ' +
+      '`npm test`, the vinext target builds into the image its own Dockerfile expects, ' +
       'every public app-import subpath resolves to real JS outside the workspace, and ' +
       '@getknext/db imports + migrates without the optional drizzle-kit peer',
   );

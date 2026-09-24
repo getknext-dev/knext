@@ -17,6 +17,19 @@ import type { NextConfig } from "next";
  * and what reports build completion back to `kn-next build`. Building with
  * `next build` and NOT wiring this adapter is a silent correctness gap, not a
  * build failure — don't delete it.
+ *
+ * Why `package.json`'s `build` script pins `next build --webpack` instead of
+ * the ambient Turbopack default (Next 16.2+): combining `adapterPath` with
+ * `output: 'standalone'` under Turbopack throws
+ * `ENOENT: .next/next-server.js.nft.json` at `next build` time — Next 16.3.3
+ * never writes that trace file on the Turbopack path when an adapter is
+ * present (its own `server/config.js` says `output:'standalone'` "is
+ * currently using a non-adapter codepath" — a real, still-open upstream gap,
+ * tracked at getknext-dev/knext#1372, not a knext defect). `--webpack` is not
+ * a stopgap hack: node/bun × webpack is an already-credentialed knext build
+ * target (ADR-0058), so this pins the scaffold to a path knext verifies
+ * end-to-end. Do not "fix" this by dropping `--webpack` without first
+ * confirming #1372 is resolved upstream.
  */
 const nextConfig: NextConfig = {
     // Asset prefix is injected by `kn-next deploy` from `kn-next.config.ts`
