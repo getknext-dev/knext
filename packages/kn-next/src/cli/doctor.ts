@@ -47,6 +47,7 @@ import { knativeCheck } from "./doctor/checks/knative";
 import { kubectlValidationCheck } from "./doctor/checks/kubectl-validation";
 import { metricsCheck } from "./doctor/checks/metrics";
 import { networkPolicyCheck } from "./doctor/checks/network-policy";
+import { nodeEntryStalenessCheck } from "./doctor/checks/node-entry-staleness";
 import { operatorCheck } from "./doctor/checks/operator";
 import { operatorImageCheck } from "./doctor/checks/operator-image";
 import { storageModeCheck } from "./doctor/checks/storage-mode";
@@ -117,6 +118,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
 
     checks.push(...kubectlValidationCheck(ctx));
     checks.push(...(await storageModeCheck(ctx)));
+    checks.push(...nodeEntryStalenessCheck(ctx));
     checks.push(...crdCheck(ctx));
     checks.push(...crdSchemaCheck(ctx));
     checks.push(...operatorCheck(ctx)); // sets ctx.operatorImage

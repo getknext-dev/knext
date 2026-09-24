@@ -4,6 +4,7 @@ exports[`doctor golden output (#1055 byte-identical pin) reachable — all check
 "PASS  Cluster reachable                           apiserver responded
 PASS  kubectl strict validation                   client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)
 PASS  Static asset mode                           object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys
+SKIP  vinext-on-node entry freshness              no knext-node-entry.mjs in this directory — run doctor from the app directory, or this app does not use build: 'vinext' + runtime: 'node'
 PASS  NextApp CRD                                 served version: v1alpha1
 PASS  NextApp CRD schema coverage                 all 71 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
 PASS  Operator deployment                         kn-next-operator-controller-manager Ready in kn-next-operator-system
@@ -36,6 +37,12 @@ exports[`doctor golden output (#1055 byte-identical pin) reachable — all check
     "id": "storage-mode",
     "status": "pass",
     "title": "Static asset mode",
+  },
+  {
+    "detail": "no knext-node-entry.mjs in this directory — run doctor from the app directory, or this app does not use build: 'vinext' + runtime: 'node'",
+    "id": "node-entry-staleness",
+    "status": "skip",
+    "title": "vinext-on-node entry freshness",
   },
   {
     "detail": "served version: v1alpha1",
@@ -106,6 +113,7 @@ exports[`doctor golden output (#1055 byte-identical pin) unreachable — reachab
 "WARN  Cluster reachable                           apiserver unreachable (The connection to the server 10.0.0.1:6443 was refused - did you specify the right host or port?) — all cluster checks skipped (hint: cluster connection flaked — check network/VPN and retry)
 WARN  kubectl strict validation                   could not determine the kubectl client version — unable to confirm that the CR apply can be strictly validated (hint: run \`kubectl version --client\` and upgrade to >= v1.25 if older)
 SKIP  Static asset mode                           no kn-next.config.ts in this directory — run doctor from the app directory to see how its static assets will be served
+SKIP  vinext-on-node entry freshness              no knext-node-entry.mjs in this directory — run doctor from the app directory, or this app does not use build: 'vinext' + runtime: 'node'
 SKIP  NextApp CRD                                 cluster unreachable — check skipped
 SKIP  NextApp CRD schema coverage                 cluster unreachable — check skipped
 SKIP  Operator deployment                         cluster unreachable — check skipped
@@ -140,6 +148,12 @@ exports[`doctor golden output (#1055 byte-identical pin) unreachable — reachab
     "id": "storage-mode",
     "status": "skip",
     "title": "Static asset mode",
+  },
+  {
+    "detail": "no knext-node-entry.mjs in this directory — run doctor from the app directory, or this app does not use build: 'vinext' + runtime: 'node'",
+    "id": "node-entry-staleness",
+    "status": "skip",
+    "title": "vinext-on-node entry freshness",
   },
   {
     "detail": "cluster unreachable — check skipped",
@@ -210,6 +224,7 @@ exports[`doctor golden output (#1055 byte-identical pin) auth-failure — the re
 "WARN  Cluster reachable                           apiserver unreachable (error: You must be logged in to the server (Unauthorized)) — all cluster checks skipped (hint: credentials failed — re-authenticate (refresh your kubeconfig token) and retry)
 WARN  kubectl strict validation                   could not determine the kubectl client version — unable to confirm that the CR apply can be strictly validated (hint: run \`kubectl version --client\` and upgrade to >= v1.25 if older)
 SKIP  Static asset mode                           no kn-next.config.ts in this directory — run doctor from the app directory to see how its static assets will be served
+SKIP  vinext-on-node entry freshness              no knext-node-entry.mjs in this directory — run doctor from the app directory, or this app does not use build: 'vinext' + runtime: 'node'
 SKIP  NextApp CRD                                 cluster unreachable — check skipped
 SKIP  NextApp CRD schema coverage                 cluster unreachable — check skipped
 SKIP  Operator deployment                         cluster unreachable — check skipped
@@ -244,6 +259,12 @@ exports[`doctor golden output (#1055 byte-identical pin) auth-failure — the re
     "id": "storage-mode",
     "status": "skip",
     "title": "Static asset mode",
+  },
+  {
+    "detail": "no knext-node-entry.mjs in this directory — run doctor from the app directory, or this app does not use build: 'vinext' + runtime: 'node'",
+    "id": "node-entry-staleness",
+    "status": "skip",
+    "title": "vinext-on-node entry freshness",
   },
   {
     "detail": "cluster unreachable — check skipped",
@@ -314,6 +335,7 @@ exports[`doctor golden output (#1055 byte-identical pin) forbidden — the reach
 "WARN  Cluster reachable                           apiserver unreachable (Error from server (Forbidden): nextapps.apps.kn-next.dev is forbidden: User "u" cannot get resource "nextapps") — all cluster checks skipped (hint: insufficient RBAC — ask a cluster admin for get/list on nextapps.apps.kn-next.dev)
 WARN  kubectl strict validation                   could not determine the kubectl client version — unable to confirm that the CR apply can be strictly validated (hint: run \`kubectl version --client\` and upgrade to >= v1.25 if older)
 SKIP  Static asset mode                           no kn-next.config.ts in this directory — run doctor from the app directory to see how its static assets will be served
+SKIP  vinext-on-node entry freshness              no knext-node-entry.mjs in this directory — run doctor from the app directory, or this app does not use build: 'vinext' + runtime: 'node'
 SKIP  NextApp CRD                                 cluster unreachable — check skipped
 SKIP  NextApp CRD schema coverage                 cluster unreachable — check skipped
 SKIP  Operator deployment                         cluster unreachable — check skipped
@@ -348,6 +370,12 @@ exports[`doctor golden output (#1055 byte-identical pin) forbidden — the reach
     "id": "storage-mode",
     "status": "skip",
     "title": "Static asset mode",
+  },
+  {
+    "detail": "no knext-node-entry.mjs in this directory — run doctor from the app directory, or this app does not use build: 'vinext' + runtime: 'node'",
+    "id": "node-entry-staleness",
+    "status": "skip",
+    "title": "vinext-on-node entry freshness",
   },
   {
     "detail": "cluster unreachable — check skipped",
@@ -418,6 +446,7 @@ exports[`doctor golden output (#1055 byte-identical pin) budget-exhausted — th
 "PASS  Cluster reachable                           apiserver responded
 PASS  kubectl strict validation                   client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)
 PASS  Static asset mode                           object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys
+SKIP  vinext-on-node entry freshness              no knext-node-entry.mjs in this directory — run doctor from the app directory, or this app does not use build: 'vinext' + runtime: 'node'
 PASS  NextApp CRD                                 served version: v1alpha1
 PASS  NextApp CRD schema coverage                 all 71 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
 PASS  Operator deployment                         kn-next-operator-controller-manager Ready in kn-next-operator-system
@@ -450,6 +479,12 @@ exports[`doctor golden output (#1055 byte-identical pin) budget-exhausted — th
     "id": "storage-mode",
     "status": "pass",
     "title": "Static asset mode",
+  },
+  {
+    "detail": "no knext-node-entry.mjs in this directory — run doctor from the app directory, or this app does not use build: 'vinext' + runtime: 'node'",
+    "id": "node-entry-staleness",
+    "status": "skip",
+    "title": "vinext-on-node entry freshness",
   },
   {
     "detail": "served version: v1alpha1",
@@ -520,6 +555,7 @@ exports[`doctor golden output (#1055 byte-identical pin) crd-schema — an insta
 "PASS  Cluster reachable                           apiserver responded
 PASS  kubectl strict validation                   client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)
 PASS  Static asset mode                           object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys
+SKIP  vinext-on-node entry freshness              no knext-node-entry.mjs in this directory — run doctor from the app directory, or this app does not use build: 'vinext' + runtime: 'node'
 PASS  NextApp CRD                                 served version: v1alpha1
 FAIL  NextApp CRD schema coverage                 the installed NextApp CRD does not define 1 field(s) this CLI emits: spec.database.roSecretRef — a deploy setting one of them is rejected (or, without strict validation, SILENTLY PRUNED). Source: read from the aggregated OpenAPI v3 discovery document (hint: upgrade the operator/CRD FIRST, then the CLI (docs/RELEASING.md))
 PASS  Operator deployment                         kn-next-operator-controller-manager Ready in kn-next-operator-system
@@ -552,6 +588,12 @@ exports[`doctor golden output (#1055 byte-identical pin) crd-schema — an insta
     "id": "storage-mode",
     "status": "pass",
     "title": "Static asset mode",
+  },
+  {
+    "detail": "no knext-node-entry.mjs in this directory — run doctor from the app directory, or this app does not use build: 'vinext' + runtime: 'node'",
+    "id": "node-entry-staleness",
+    "status": "skip",
+    "title": "vinext-on-node entry freshness",
   },
   {
     "detail": "served version: v1alpha1",

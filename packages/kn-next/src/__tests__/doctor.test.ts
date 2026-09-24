@@ -238,6 +238,7 @@ describe("runDoctor — healthy cluster", () => {
             "cluster",
             "kubectl-validation",
             "storage-mode",
+            "node-entry-staleness",
             "crd",
             "crd-schema",
             "operator",
@@ -254,6 +255,14 @@ describe("runDoctor — healthy cluster", () => {
             // the test's cwd it reports skip — an informational state, never
             // a failure, and never a reason for a healthy cluster to exit 1.
             if (c.id === "storage-mode") {
+                expect(c.status, `${c.id}: ${c.detail}`).toBe("skip");
+                continue;
+            }
+            // node-entry-staleness (#1356) is also LOCAL: with no
+            // knext-node-entry.mjs in the test's cwd it SKIPs — informational,
+            // not a failure. It only WARNs when a scaffolded file exists AND
+            // is behind the packaged template's marker.
+            if (c.id === "node-entry-staleness") {
                 expect(c.status, `${c.id}: ${c.detail}`).toBe("skip");
                 continue;
             }

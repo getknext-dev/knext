@@ -194,6 +194,22 @@ whether your cluster's CNI can **enforce** the default-on `NetworkPolicy` the op
 on flannel it cannot (the policy is declarative only), and doctor says so plainly rather than
 guessing; "cannot determine" is reported as its own outcome, never as "enforced".
 
+A few checks are **local** — they read files in the directory you run `kn-next doctor` from and
+never touch the cluster, so they still run even when nothing above is reachable:
+
+- **Static asset mode** — states whether object storage is configured for this app, or assets are
+  served from the image.
+- **vinext-on-node entry freshness** — if your app uses `build: 'vinext'` with `runtime: 'node'`,
+  its `knext-node-entry.mjs` was written once by `kn-next create` and is never re-rendered by later
+  builds or deploys. When a newer `@getknext/core` release changes that entry's runtime behavior
+  (for example, adding the deployed `Cache-Control` normalization), an app scaffolded earlier keeps
+  running its old copy silently — no error, no crash, just the old behavior. This check compares a
+  version marker in your `knext-node-entry.mjs` against the one shipped in the installed
+  `@getknext/core` package and `WARN`s with the exact fix when they differ: re-scaffold into a
+  throwaway directory with `kn-next create --force <scratch-dir>` and copy the fresh
+  `knext-node-entry.mjs` over yours (diff first if you made local edits). Apps that don't use this
+  runtime combination, or that aren't run from their own directory, report `SKIP`.
+
 ```bash
 kn-next doctor            # human-readable checklist
 kn-next doctor --json     # structured results for CI

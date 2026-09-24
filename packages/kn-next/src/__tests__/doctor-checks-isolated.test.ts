@@ -27,6 +27,10 @@ import { knativeCheck } from "../cli/doctor/checks/knative";
 import { kubectlValidationCheck } from "../cli/doctor/checks/kubectl-validation";
 import { metricsCheck } from "../cli/doctor/checks/metrics";
 import { networkPolicyCheck } from "../cli/doctor/checks/network-policy";
+import {
+    extractNodeEntryMarker,
+    nodeEntryStalenessCheck,
+} from "../cli/doctor/checks/node-entry-staleness";
 import { operatorCheck } from "../cli/doctor/checks/operator";
 import { operatorImageCheck } from "../cli/doctor/checks/operator-image";
 import { storageModeCheck } from "../cli/doctor/checks/storage-mode";
@@ -81,6 +85,8 @@ function makeCtx(
         loadAppConfig?: () => Promise<KnativeNextConfig | undefined>;
         appImageProbeBudgetMs?: number;
         operatorImage?: string;
+        readNodeEntryFile?: () => string | undefined;
+        readNodeEntryTemplate?: () => string | undefined;
     } = {},
 ): CheckContext {
     const kubectl = stubKubectl(table);
@@ -89,6 +95,8 @@ function makeCtx(
         probeImage: opts.probeImage ?? (async () => "ok"),
         loadAppConfig: opts.loadAppConfig,
         appImageProbeBudgetMs: opts.appImageProbeBudgetMs,
+        readNodeEntryFile: opts.readNodeEntryFile,
+        readNodeEntryTemplate: opts.readNodeEntryTemplate,
     };
     return {
         deps,
@@ -237,6 +245,114 @@ describe("storageModeCheck (isolated)", () => {
         );
         expect(r?.status).toBe("pass");
         expect(r?.detail).toContain("served from the image");
+    });
+});
+
+const CURRENT_MARKER =
+    "// KNEXT_NODE_ENTRY_MARKER: 2\n/* rest of the template */";
+const STALE_MARKER_1 =
+    "// KNEXT_NODE_ENTRY_MARKER: 1\n/* rest of the app copy */";
+const NO_MARKER = "/* pre-#1356 app copy, no marker line at all */";
+
+describe("extractNodeEntryMarker", () => {
+    it("reads the number out of the KNEXT_NODE_ENTRY_MARKER comment", () => {
+        expect(extractNodeEntryMarker(CURRENT_MARKER)).toBe(2);
+        expect(extractNodeEntryMarker(STALE_MARKER_1)).toBe(1);
+    });
+
+    it("returns undefined when there is no marker at all", () => {
+        expect(extractNodeEntryMarker(NO_MARKER)).toBeUndefined();
+    });
+
+    it("returns undefined on a non-numeric or malformed marker (never throws, never guesses)", () => {
+        expect(
+            extractNodeEntryMarker("// KNEXT_NODE_ENTRY_MARKER: not-a-number"),
+        ).toBeUndefined();
+    });
+});
+
+describe("nodeEntryStalenessCheck (isolated, #1356)", () => {
+    it("SKIP when the app directory has no knext-node-entry.mjs at all", () => {
+        const [r] = nodeEntryStalenessCheck(
+            makeCtx(
+                {},
+                {
+                    readNodeEntryFile: () => undefined,
+                    readNodeEntryTemplate: () => CURRENT_MARKER,
+                },
+            ),
+        );
+        expect(r?.status).toBe("skip");
+        expect(r?.id).toBe("node-entry-staleness");
+    });
+
+    it("SKIP when the packaged template itself carries no marker (defensive — never guess)", () => {
+        const [r] = nodeEntryStalenessCheck(
+            makeCtx(
+                {},
+                {
+                    readNodeEntryFile: () => CURRENT_MARKER,
+                    readNodeEntryTemplate: () => NO_MARKER,
+                },
+            ),
+        );
+        expect(r?.status).toBe("skip");
+    });
+
+    it("PASS when the app's marker matches the packaged template's", () => {
+        const [r] = nodeEntryStalenessCheck(
+            makeCtx(
+                {},
+                {
+                    readNodeEntryFile: () => CURRENT_MARKER,
+                    readNodeEntryTemplate: () => CURRENT_MARKER,
+                },
+            ),
+        );
+        expect(r?.status).toBe("pass");
+        expect(r?.detail).toContain("marker 2");
+    });
+
+    it("WARN naming the exact fix when the app's marker is OLDER than the packaged template's", () => {
+        const [r] = nodeEntryStalenessCheck(
+            makeCtx(
+                {},
+                {
+                    readNodeEntryFile: () => STALE_MARKER_1,
+                    readNodeEntryTemplate: () => CURRENT_MARKER,
+                },
+            ),
+        );
+        expect(r?.status).toBe("warn");
+        expect(r?.detail).toContain("marker 1");
+        expect(r?.detail).toContain("marker 2");
+        // The exact fix: copy the current entry.
+        expect(r?.hint).toContain("kn-next create --force");
+        expect(r?.hint).toContain("knext-node-entry.mjs");
+    });
+
+    it("WARN (never a silent pass) when the app's copy predates the marker entirely", () => {
+        const [r] = nodeEntryStalenessCheck(
+            makeCtx(
+                {},
+                {
+                    readNodeEntryFile: () => NO_MARKER,
+                    readNodeEntryTemplate: () => CURRENT_MARKER,
+                },
+            ),
+        );
+        expect(r?.status).toBe("warn");
+        expect(r?.detail).toContain("no marker at all");
+        expect(r?.hint).toBeTruthy();
+    });
+
+    it("uses the REAL cwd/template readers by default when no deps are injected (does not throw)", () => {
+        // No readNodeEntryFile/readNodeEntryTemplate override — exercises the
+        // real fs-backed defaults. The test cwd almost certainly has no
+        // knext-node-entry.mjs, so this should SKIP, not throw or crash.
+        const [r] = nodeEntryStalenessCheck(makeCtx({}));
+        expect(r?.id).toBe("node-entry-staleness");
+        expect(["skip", "pass", "warn"]).toContain(r?.status);
     });
 });
 

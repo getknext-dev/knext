@@ -30,9 +30,41 @@ import normalizer from "./cache-control-normalize.cjs";
 const { normalizeCacheControl } = normalizer;
 
 /**
- * Normalize a response's Cache-Control in place for the request that produced
- * it. Best-effort and never throws: a response with immutable headers keeps its
- * origin value rather than breaking.
+ * Rebuild `response` as a NEW, mutable Response carrying `patch`'s headers on
+ * top of its existing ones (#1356). Used when `headers.set` throws — a
+ * proxied `fetch()` Response and `Response.redirect()` both carry immutable
+ * (`guard: "immutable"`) headers under Node/undici, so a skip-on-throw would
+ * silently ship the origin `s-maxage=…` to clients on exactly the deploy
+ * shapes this module exists to normalize.
+ *
+ * `response.body` is passed through UNREAD — a ReadableStream reference, not
+ * consumed — so the caller's body reaches the client exactly as the origin
+ * sent it. `new Headers(headers)` copies every existing entry (iterating a
+ * real or duck-typed Headers-like object both work) before `patch` overrides
+ * the ones being normalized.
+ *
+ * @param {{ body?: unknown, status?: number, statusText?: string }} response
+ * @param {unknown} headers
+ * @param {Record<string, string>} patch
+ */
+function rebuildWithMutableHeaders(response, headers, patch) {
+    const cloned = new Headers(/** @type {HeadersInit} */ (headers));
+    for (const [name, value] of Object.entries(patch)) cloned.set(name, value);
+    return new Response(/** @type {BodyInit | null} */ (response.body ?? null), {
+        status: response.status,
+        statusText: response.statusText,
+        headers: cloned,
+    });
+}
+
+/**
+ * Normalize a response's Cache-Control for the request that produced it.
+ * Best-effort and never throws: a response whose Response cannot even be
+ * rebuilt (a non-Response, or a status the Fetch spec forbids a body on —
+ * e.g. 204/304 — combined with a non-null body) keeps its origin value rather
+ * than breaking. `headers.set` throwing (immutable headers) falls back to
+ * REBUILDING a new, mutable Response rather than skipping the rewrite (#1356)
+ * — see `rebuildWithMutableHeaders`.
  *
  * @param {unknown} request
  * @param {unknown} response
@@ -53,9 +85,28 @@ export function normalizeResponse(request, response) {
             url: rq?.url,
             hasNextCacheMarker: typeof marker === "string" && marker.length > 0,
         });
-        if (next !== value) headers.set("cache-control", next);
+        if (next === value) return response;
+        try {
+            headers.set("cache-control", next);
+        } catch {
+            // Immutable headers: rebuild rather than ship the origin value.
+            try {
+                return rebuildWithMutableHeaders(
+                    /** @type {{ body?: unknown, status?: number, statusText?: string }} */ (
+                        response
+                    ),
+                    headers,
+                    { "cache-control": next },
+                );
+            } catch {
+                // Reconstruction itself failed (e.g. a null-body status paired
+                // with a non-null body) — never worse than the unrewritten
+                // origin response.
+                return response;
+            }
+        }
     } catch {
-        // Immutable headers or a non-Response: leave it.
+        // A non-Response, or anything else unexpected: leave it.
     }
     return response;
 }

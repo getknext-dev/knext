@@ -184,6 +184,18 @@ server.close();
 `;
         const r = spawnSync("node", ["--input-type=module", "-e", script], {
             encoding: "utf8",
+            // Importing response-cache-control.mjs ALSO installs the
+            // node:http preload patch (module header, cache-control-
+            // normalize.cjs's side effect). Left on, that patch rewrites the
+            // SERVER's own res.writeHead() call before it ever leaves the
+            // process — the fetch() client below would then receive an
+            // ALREADY-deployed value, `normalizeResponse` would see
+            // `next === value` and never call `headers.set` at all, and this
+            // test would pass for the wrong reason (nothing to fall back
+            // from). Off, so the server ships the true origin value and this
+            // test exercises normalizeResponse's OWN fallback, not the
+            // preload's.
+            env: { ...process.env, KNEXT_CACHE_CONTROL_NORMALIZE: "0" },
         });
         expect(r.status, `stderr: ${r.stderr}`).toBe(0);
         const result = JSON.parse(r.stdout.trim());
