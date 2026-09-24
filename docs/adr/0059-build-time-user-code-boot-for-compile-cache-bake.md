@@ -10,7 +10,7 @@
   ADR-0056 Amendment 1 D4 (liveness grading).
 - **Implements:** #1303 (c). **Records:** #1264 / #1271 (standalone-node bake), #1263 / #1273
   (vinext × node bake), #1275 (the sprint-close question this answers), #1297 (validate
-  `healthCheckPath`), #1299 (move the harness-only knob out of the shipped template), #1327
+  `healthCheckPath`, done in PR #1319), #1299 (move the harness-only knob out of the shipped template), #1327
   (security: verify whether `.env` files reach built images).
 
 ## Context
@@ -114,10 +114,12 @@ tree:
    deletes `.env*` from `.next/standalone/` before `docker build`, and a test asserts that no
    `.env*` file is left under the staged context. Runtime configuration comes from Kubernetes
    Secrets, as `.claude/rules/security.md` already requires.
-6. **Keep the product bake strict.** The 2xx rule stays the default (true today). *(Proposed —
-   not yet implemented:)* the harness-only accept-any-status knob moves out of the shipped template into the harness (#1299).
-   `healthCheckPath` is validated before it reaches the build: a leading slash is required, and
-   commas and whitespace are rejected, because a comma would split `KNEXT_WARM_PATH` (#1297).
+6. **Keep the product bake strict.** Two parts are true today. The 2xx rule stays the default,
+   and `healthCheckPath` is validated before it reaches the build: it must be a string with a
+   leading slash, and commas and whitespace are rejected, because a comma would split
+   `KNEXT_WARM_PATH` (`packages/kn-next/src/cli/validate.ts:534-564`; #1297, PR #1319).
+   *(Proposed — not yet implemented:)* the harness-only accept-any-status knob moves out of the
+   shipped template into the harness (#1299).
 
 ### Threat model (the bake step only)
 
@@ -128,7 +130,7 @@ tree:
 | Secrets baked into the image | same `.env` files ship in the image layer | same fix; a guard test asserts none are staged |
 | Build-time state shipped in the image (ISR entries, counters, caches) | mostly blocked: the tree is root-owned and the bake runs as 65532 | unchanged, now documented as a guarantee to keep; the marker lets app code skip writes |
 | A harness knob relaxing the fail-closed rule in production | present in the shipped template | moved into the harness (#1299) |
-| Build-arg injection through `healthCheckPath` | unvalidated (#1297) | validated in config |
+| Build-arg injection through `healthCheckPath` | validated in config since PR #1319 (`validate.ts:534-564`) | unchanged: validated in config |
 | Supply-chain code in dependencies running at build | runs, with network | runs without network. Import-time code in dependencies cannot be stopped short of the framework-only bake, which is the opt-out |
 
 ## Options considered
@@ -184,7 +186,7 @@ liveness floors, and 0.68 that the network restriction and the marker should lan
       `.next/standalone/` in `stageStandaloneBuildContext`, and add a guard that reds if any
       `.env*` file is staged.
 - [ ] Move `KNEXT_WARM_ACCEPT_ANY_STATUS` out of the shipped template. *(#1299)*
-- [ ] Validate `healthCheckPath`. *(#1297)*
+- [x] Validate `healthCheckPath`. *(#1297, done in PR #1319, `validate.ts:534-564`)*
 - [ ] Add the `compileCache.bake: 'framework'` opt-out and the framework-only driver, and
       measure its liveness counts on the reference app before documenting it.
 - [ ] Close #1275 against this ADR.
